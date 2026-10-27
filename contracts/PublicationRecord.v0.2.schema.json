@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/ai-commerce/contracts/PublicationRecord.v0.2.schema.json",
+  "title": "PublicationRecord",
+  "description": "DRAFT / NOT CANONICAL. ID URL is an illustrative schema identifier, not a live endpoint.",
+  "type": "object",
+  "required": [
+    "publication_id",
+    "platform",
+    "account_ref",
+    "approved_package_sha256",
+    "attempt_id",
+    "idempotency_key",
+    "state",
+    "visibility",
+    "commerce_link_status",
+    "last_checked_at"
+  ],
+  "properties": {
+    "publication_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "platform": {
+      "type": "string",
+      "minLength": 1
+    },
+    "account_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "approved_package_sha256": {
+      "type": "string",
+      "minLength": 1
+    },
+    "attempt_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1
+    },
+    "state": {
+      "enum": [
+        "NOT_ATTEMPTED",
+        "MANUAL_ACTION_REQUIRED",
+        "SUBMITTED",
+        "PRIVATE_ONLY",
+        "PUBLISHED_CONFIRMED",
+        "REJECTED",
+        "UNKNOWN",
+        "REMOVED"
+      ]
+    },
+    "visibility": {
+      "enum": [
+        "PUBLIC",
+        "FRIENDS",
+        "PRIVATE",
+        "UNKNOWN"
+      ]
+    },
+    "commerce_link_status": {
+      "enum": [
+        "NOT_APPLICABLE",
+        "VERIFIED_ACTIVE",
+        "UNVERIFIED",
+        "EXPIRED",
+        "REVOKED",
+        "REMOVED"
+      ]
+    },
+    "provider_post_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "public_url": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "receipt_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "authorization_envelope_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "last_checked_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "unknown_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "provider_response_digest": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": true
+}

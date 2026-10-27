@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/ai-commerce/contracts/AuthorizationEnvelope.v0.3.schema.json",
+  "title": "AuthorizationEnvelope",
+  "description": "DRAFT: advisory encoding for delegated/internal actions. Human may override every internal field or process directly; record after decision if useful. External rights/receipts are separate.",
+  "type": "object",
+  "required": [
+    "principal",
+    "action_type"
+  ],
+  "properties": {
+    "envelope_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "principal": {
+      "type": "string",
+      "minLength": 1
+    },
+    "delegate_actor": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "action_type": {
+      "enum": [
+        "PUBLISH",
+        "PAID_GENERATE",
+        "AD_SPEND",
+        "BUY_ASSET",
+        "IMPORT_DATA",
+        "OTHER",
+        "HUMAN_DIRECTIVE",
+        "GOVERNANCE_OVERRIDE",
+        "CREATIVE_EXPERIMENT"
+      ]
+    },
+    "target_account": {
+      "type": "string",
+      "minLength": 1
+    },
+    "platform": {
+      "type": "string",
+      "minLength": 1
+    },
+    "market": {
+      "type": "string",
+      "minLength": 1
+    },
+    "surface": {
+      "type": "string",
+      "minLength": 1
+    },
+    "product_scope": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "content_hash": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "max_spend": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "currency": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "max_posts_per_period": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "valid_from": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "stop_conditions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "revocation_status": {
+      "enum": [
+        "ACTIVE",
+        "REVOKED",
+        "EXPIRED",
+        "UNKNOWN"
+      ]
+    },
+    "decision_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "approval_evidence_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "authority_basis": {
+      "enum": [
+        "STANDARD_ENVELOPE",
+        "DIRECT_HUMAN_MANDATE",
+        "HUMAN_OVERRIDE",
+        "DELEGATED_HUMAN_MANDATE"
+      ]
+    },
+    "human_directive_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "waived_internal_requirements": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "recording_timing": {
+      "enum": [
+        "BEFORE",
+        "AFTER",
+        "OPTIONAL"
+      ]
+    }
+  },
+  "additionalProperties": true
+}

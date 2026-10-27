@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/ai-commerce/contracts/WorkItem.v0.3.schema.json",
+  "title": "WorkItem",
+  "description": "DRAFT. Minimal work item; creative experiments need not carry QA gates or rigid acceptance. Human may change requirements.",
+  "type": "object",
+  "required": [
+    "work_id",
+    "objective",
+    "status"
+  ],
+  "properties": {
+    "work_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "objective": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_decision": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scope_in": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "scope_out": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "expected_artifacts": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "acceptance": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "side_effect_class": {
+      "enum": [
+        "NONE",
+        "BOUNDED",
+        "PUBLICATION",
+        "SPEND",
+        "DATA_DISCLOSURE"
+      ]
+    },
+    "status": {
+      "enum": [
+        "PROPOSED",
+        "ACCEPTED_FOR_WORK",
+        "IMPLEMENTED",
+        "BUILD_VERIFIED_FOR_SCOPE",
+        "LIVE_CONFIRMED",
+        "BLOCKED",
+        "SUPERSEDED"
+      ]
+    },
+    "owner": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "risk_notes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "human_override_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "creative_experiment": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": true
+}

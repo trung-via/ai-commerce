@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/ai-commerce/contracts/MeasurementPlan.v0.2.schema.json",
+  "title": "MeasurementPlan",
+  "description": "DRAFT / NOT CANONICAL. ID URL is an illustrative schema identifier, not a live endpoint.",
+  "type": "object",
+  "required": [
+    "plan_id",
+    "campaign_ref",
+    "primary_metric",
+    "metric_definition_version",
+    "platform",
+    "account_ref",
+    "measurement_window",
+    "timezone",
+    "source_mode",
+    "attribution_tier",
+    "missingness_rule"
+  ],
+  "properties": {
+    "plan_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "campaign_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "primary_metric": {
+      "type": "string",
+      "minLength": 1
+    },
+    "denominator": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "metric_definition_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "platform": {
+      "type": "string",
+      "minLength": 1
+    },
+    "account_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "measurement_window": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "string",
+        "format": "date-time"
+      }
+    },
+    "timezone": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_mode": {
+      "enum": [
+        "MANUAL_IMPORT",
+        "OFFICIAL_API",
+        "AUTHORIZED_EXPORT",
+        "LICENSED_FEED",
+        "NOT_AVAILABLE"
+      ]
+    },
+    "attribution_tier": {
+      "enum": [
+        "A",
+        "B",
+        "C",
+        "D",
+        "NOT_AVAILABLE"
+      ]
+    },
+    "missingness_rule": {
+      "type": "string",
+      "minLength": 1
+    },
+    "settlement_lag_days": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "cost_scope": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "review_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "additionalProperties": true
+}

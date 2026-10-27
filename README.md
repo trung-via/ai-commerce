@@ -1,0 +1,49 @@
+# AI Commerce
+
+**Independent commerce intelligence project** · Affiliate learning → audience growth → own-brand decision support.
+
+AI Commerce is an independent product and engineering repository. It is **not** Python Agent, AIOS-Renew, a submodule of either, or an inherited task/execution system.
+
+## Foundation
+
+| Document | Version | Role |
+|---|---|---|
+| [Manifesto](MANIFESTO.md) | Governance v0.3 | Vision & creative freedom |
+| [Constitution](CONSTITUTION.md) | Governance v0.3 | Internal project authority & principles |
+| [Project Contract](PROJECT_CONTRACT.md) | Governance v0.3 | Product scope, engineering interfaces and acceptance |
+| [Blueprint v1.2](docs/blueprint/BLUEPRINT_V1_2_FULL_TEXT.md) | Research v1.2 | Detailed architecture, NOT evidence of running features |
+| [Blueprint illustrated](docs/blueprint/AI_COMMERCE_BLUEPRINT_V1_2.docx) | Research v1.2 | Original illustrated study |
+| [Human Adoption Record](docs/governance/HUMAN_ADOPTION_2026-10-27.md) | Decision | Approval and scope |
+
+**Human is the supreme authority over internal project governance, including explicit exceptions.** Internal rules must not impose fixed creative formats or constrain media imagination. Human directives cannot manufacture external API permissions, licenses, platform receipts or legal exemptions.
+
+## Product model
+
+Two distinct product cycles share production and learning capabilities:
+
+- **Audience Growth:** content/retention/community, does not require a product SKU or commerce CTA.
+- **Affiliate Commerce:** product evidence, permission-appropriate CTA, conversion and settled economics.
+
+20 capabilities are a strategic **capability map**, not 20 mandatory services or work items. MVP may be delivered as six lean work packages (source/access → brief → media → QA → authorized/assisted publish → evidence/economics). These remain product-design references, not a pre-authorized deployment or expenditure.
+
+## Status and repository hygiene
+
+- Governance v0.3: explicitly approved by Human in the conversation of **2026-10-27**. Original document headers retain the earlier DRAFT label for provenance; this adoption record supersedes those labels with respect to internal governance once initial commit is made.
+- Blueprint v1.2: approved as the initial architecture reference, **not** as proof that publishing access, commissions, compliance or end-to-end code already exist.
+- No tasks, automation, expenditure, user accounts, external actions or GitHub Actions are enabled by repository initialization.
+- No copied Python Agent / AIOS secrets, code, workflows or lifecycle were imported.
+- Review the [open-evidence record](docs/research/DECISION_REGISTER_AS_RESEARCH_2026-10-27.md) before making live capability claims. Its old proposal statuses are historic research, not current repository activation status.
+
+## Layout
+
+```text
+MANIFESTO.md
+CONSTITUTION.md
+PROJECT_CONTRACT.md
+docs/blueprint/     # Blueprint v1.2 and visual reference
+docs/governance/    # Human adoption and governance changelog
+docs/research/      # Independent audit and open evidence
+contracts/          # Draft JSON contract schemas
+```
+
+Initial setup from this package: run `./BOOTSTRAP_GITHUB.ps1` in PowerShell from the extracted directory (requires authenticated `gh` and `git`).
