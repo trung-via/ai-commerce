@@ -324,3 +324,82 @@ test('scheduled terminal recovery detects timeout and leaves provider side effec
   assert.match(x.posted[0].body,/WORKFLOW_TIMED_OUT_EXECUTION_UNCERTAIN/);
   assert.match(x.posted[0].body,/side effects are UNKNOWN/);
 });
+
+
+test('running EF02 execute older than two hours reports uncertainty, never OFFLINE', async () => {
+  const active = run({status:'in_progress', conclusion:null});
+  const jobs = [{name:'validate', conclusion:'success'},
+    {name:'execute',status:'in_progress',started_at:'2026-10-28T07:00:00Z'}];
+  const x = fake({event:'schedule', workflowRuns:[active], jobs});
+  assert.equal(await observe({github:x.api,context:x.context,core:x.core},
+    {nowMs:Date.parse('2026-10-28T09:10:00Z')}),1);
+  assert.equal(x.posted.length,1);
+  assert.match(x.posted[0].body,/WINDOWS_EXECUTION_LONG_RUNNING_UNCONFIRMED/);
+  assert.match(x.posted[0].body,/runner offline is NOT established/);
+  assert.match(x.posted[0].body,/provider side effects are UNKNOWN/);
+  assert.match(x.posted[0].body,/GitHub ref reconciliation: UNAVAILABLE/);
+  assert.match(x.posted[0].body,/does not run executors, cancel jobs, mutate claims or retry models/);
+});
+
+test('execution age uses real Windows job started_at; not workflow creation time', async () => {
+  const active = run({status:'in_progress', conclusion:null,
+    created_at:'2026-10-28T02:00:00Z'});
+  for (const started_at of [undefined,'2026-10-28T08:00:00Z','nonsense',
+                              '2026-10-28T09:20:00Z']) {
+    const jobs = [{name:'validate',conclusion:'success'},
+      {name:'execute',status:'in_progress',started_at}];
+    const x = fake({event:'schedule',workflowRuns:[active],jobs});
+    assert.equal(await observe({github:x.api,context:x.context,core:x.core},
+      {nowMs:Date.parse('2026-10-28T09:10:00Z')}),0);
+    assert.equal(x.posted.length,0);
+  }
+});
+
+test('running Windows advisory needs hosted validation and active execute job', () => {
+  const active = run({status:'in_progress',conclusion:null});
+  const started_at = '2026-10-28T05:00:00Z';
+  assert.equal(observe.classifyQueued(active,[
+    {name:'validate',conclusion:'failure'},
+    {name:'execute',status:'in_progress',started_at}
+  ],Date.parse('2026-10-28T09:00:00Z')),null);
+  assert.equal(observe.classifyQueued(active,[
+    {name:'validate',conclusion:'success'},
+    {name:'execute',status:'completed',started_at}
+  ],Date.parse('2026-10-28T09:00:00Z')),null);
+});
+
+test('queue warning can upgrade to running warning, then terminal, and remains idempotent', async () => {
+  const queueMarker = 'EF02_OBSERVER run=555 code=WINDOWS_JOB_WAITING_UNCONFIRMED';
+  const activeMarker = 'EF02_OBSERVER run=555 code=WINDOWS_EXECUTION_LONG_RUNNING_UNCONFIRMED';
+  const active = run({status:'in_progress',conclusion:null});
+  const jobs = [{name:'validate',conclusion:'success'},
+    {name:'execute',status:'in_progress',started_at:'2026-10-28T06:00:00Z'}];
+  const comments = [{user:{login:'github-actions[bot]'},body:queueMarker}];
+  const x = fake({event:'schedule',workflowRuns:[active],jobs,comments});
+  assert.equal(await observe({github:x.api,context:x.context,core:x.core},
+    {nowMs:Date.parse('2026-10-28T09:10:00Z')}),1);
+  assert.match(x.posted[0].body,/WINDOWS_EXECUTION_LONG_RUNNING_UNCONFIRMED/);
+  const duplicate = fake({event:'schedule',workflowRuns:[active],jobs,
+    comments:comments.concat([{user:{login:'github-actions[bot]'},body:activeMarker}])});
+  assert.equal(await observe({github:duplicate.api,context:duplicate.context,
+    core:duplicate.core},{nowMs:Date.parse('2026-10-28T09:10:00Z')}),0);
+  const terminal = fake({event:'workflow_run',result:run({status:'completed',
+    conclusion:'cancelled'}),jobs:[
+      {name:'validate',conclusion:'success'},
+      {name:'execute',conclusion:'cancelled',status:'completed'}],
+    comments:comments.concat([{user:{login:'github-actions[bot]'},body:activeMarker}])});
+  assert.equal(await observe({github:terminal.api,context:terminal.context,
+    core:terminal.core}),1);
+  assert.match(terminal.posted[0].body,/WORKFLOW_CANCELLED_EXECUTION_UNCERTAIN/);
+});
+
+test('known terminal report prevents later advisory but not via arbitrary links', async () => {
+  const active = run({status:'in_progress',conclusion:null});
+  const x = fake({event:'schedule', workflowRuns:[active],
+    jobs:[{name:'validate',conclusion:'success'},
+      {name:'execute',status:'in_progress',started_at:'2026-10-28T06:00:00Z'}],
+    comments:[{user:{login:'github-actions[bot]'},
+      body:'EF02_OBSERVER run=555 code=WORKFLOW_CANCELLED_EXECUTION_UNCERTAIN'}]});
+  assert.equal(await observe({github:x.api,context:x.context,core:x.core},
+    {nowMs:Date.parse('2026-10-28T09:10:00Z')}),0);
+});

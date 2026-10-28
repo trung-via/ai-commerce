@@ -3,6 +3,9 @@
 // Hosted-only, read-only EF02 outcome observer; the only write is an Issue comment.
 // Never modify claims, retry an attempt, or run Codex/Antigravity.
 const AGE_MS = 45 * 60 * 1000;
+// Advisory only: long-running Windows execution is NOT evidence of runner loss.
+// Do not impose any new timeout or cancel a legitimate long EF01 task.
+const RUNNING_ADVISORY_MS = 2 * 60 * 60 * 1000;
 // After a missed workflow_run callback, scheduled polling recovers recent terminal
 // failures. A grace period lets normal event delivery and worker comments win.
 const TERMINAL_GRACE_MS = 5 * 60 * 1000;
@@ -57,12 +60,28 @@ function classifyQueued(run, jobs, nowMs) {
   const age = nowMs - Date.parse(run.created_at || '');
   if (!Number.isFinite(age) || age < AGE_MS) return null;
   const validated = jobs.some(j => j.name === 'validate' && j.conclusion === 'success');
-  const queuedExecute = jobs.some(j => j.name === 'execute' && j.status === 'queued');
-  if (!validated || !queuedExecute) return null;
-  return {code: 'WINDOWS_JOB_WAITING_UNCONFIRMED', detail:
-    'Windows execute job has remained QUEUED after hosted validation. ' +
-    'Runner offline is NOT established; possible causes include busy runner or capacity. ' +
-    'This is not a PASS and does not authorize any retry.'};
+  if (!validated) return null;
+  if (jobs.some(j => j.name === 'execute' && j.status === 'queued')) {
+    return {code: 'WINDOWS_JOB_WAITING_UNCONFIRMED', detail:
+      'Windows execute job has remained QUEUED after hosted validation. ' +
+      'Runner offline is NOT established; possible causes include busy runner or capacity. ' +
+      'This is not a PASS and does not authorize any retry.'};
+  }
+  // A workflow may remain in_progress even after its runner becomes
+  // unreachable. GitHub's job status alone cannot prove the host is online.
+  // Use the EXECUTE job start timestamp, never overall workflow creation
+  // time, so slow hosted validation does not count as Windows runtime.
+  const execute = jobs.find(j => j.name === 'execute');
+  if (run.status !== 'in_progress' || execute?.status !== 'in_progress') return null;
+  const runningAgeMs = nowMs - Date.parse(execute.started_at || '');
+  if (!Number.isFinite(runningAgeMs) || runningAgeMs < RUNNING_ADVISORY_MS) return null;
+  return {code: 'WINDOWS_EXECUTION_LONG_RUNNING_UNCONFIRMED', detail:
+    'Windows execute job still reports IN_PROGRESS after at least two hours. ' +
+    'A legitimate long EF01 job, hung provider, lost runner or stale Actions ' +
+    'status are all possible; runner offline is NOT established. ' +
+    'Execution and provider side effects are UNKNOWN until receipts and ' +
+    'immutable claim/candidate refs are reconciled. ' +
+    'Do not cancel, restart, publish or blindly replay this attempt.'};
 }
 
 async function notify({github, context, core}, run, status, issue) {
@@ -73,8 +92,11 @@ async function notify({github, context, core}, run, status, issue) {
   const comments = await github.paginate(github.rest.issues.listComments, {
     owner, repo, issue_number: issue, per_page: 100
   });
-  const queuedCode = 'WINDOWS_JOB_WAITING_UNCONFIRMED';
-  const queued = status.code === queuedCode;
+  const advisoryCodes = new Set([
+    'WINDOWS_JOB_WAITING_UNCONFIRMED',
+    'WINDOWS_EXECUTION_LONG_RUNNING_UNCONFIRMED',
+  ]);
+  const advisory = advisoryCodes.has(status.code);
   const markerPrefix = 'EF02_OBSERVER run=' + run.id + ' code=';
   const alreadyReported = comments.some(c => {
     if (c.user?.login !== 'github-actions[bot]') return false;
@@ -83,12 +105,12 @@ async function notify({github, context, core}, run, status, issue) {
     if (firstLine.startsWith(markerPrefix)) {
       const priorCode = firstLine.slice(markerPrefix.length);
       if (!/^[A-Z][A-Z0-9_]*$/.test(priorCode)) return false;
-      // A prior queue warning is NOT terminal evidence. Never let its
-      // workflow link suppress a later cancellation/failure result.
-      if (queued) return true;
-      return priorCode !== queuedCode;
+      // Each advisory is once-per-run; queue -> active and advisory -> terminal
+      // must still emit new information. A prior terminal report is final.
+      if (priorCode === status.code) return true;
+      return !advisoryCodes.has(priorCode);
     }
-    if (queued) return false;
+    if (advisory) return false;
     // Only canonical EF02 validation/worker reports may replace a terminal
     // observer comment. Unrelated links mentioning this run are not receipts.
     const runUrl = 'https://github.com/' + owner + '/' + repo +
@@ -106,7 +128,9 @@ async function notify({github, context, core}, run, status, issue) {
   const sections = [marker, 'Status: `' + status.code + '`', status.detail,
     'Workflow: ' + (run.html_url ||
       'https://github.com/' + owner + '/' + repo + '/actions/runs/' + run.id)];
-  if (run.status === 'completed' && status.code !== 'HOSTED_INGRESS_REJECTED' &&
+  if ((run.status === 'completed' ||
+       status.code === 'WINDOWS_EXECUTION_LONG_RUNNING_UNCONFIRMED') &&
+      status.code !== 'HOSTED_INGRESS_REJECTED' &&
       status.code !== 'WORKFLOW_CANCELLED_PRE_EXECUTOR_NO_WINDOWS') {
     // Read-only evidence. Missing ref never proves no model side effects.
     try {
