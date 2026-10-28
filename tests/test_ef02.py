@@ -174,3 +174,75 @@ def test_ten_simultaneous_claims_only_one_can_start_executor():
     assert results.count("DUPLICATE_CLAIM_NO_REEXECUTION") == 9
     assert github.claim(source_sha="a"*40, attempt_id="abc-001",
                         fingerprint="2"*64) == "ATTEMPT_ID_CONFLICT"
+
+
+class FakeIntegrationGitHub(GitHubTransport):
+    """API-level fake for disjoint/fan-in blob tree composition."""
+
+    def __init__(self, conflict=False):
+        super().__init__("trung-via/ai-commerce", "fake")
+        self.created = []
+        base = [{"path": "src/existing.py", "mode": "100644", "type": "blob", "sha": "1"*40}]
+        fa = [{"path": "src/existing.py", "mode": "100644", "type": "blob", "sha": "1"*40},
+              {"path": "src/alpha.py", "mode": "100644", "type": "blob", "sha": "2"*40}]
+        fb = [{"path": "src/existing.py", "mode": "100644", "type": "blob", "sha": "1"*40},
+              {"path": "src/beta.py", "mode": "100644", "type": "blob", "sha": "3"*40}]
+        if conflict:
+            fb[-1]["path"] = "src/alpha.py"
+            fb[-1]["sha"] = "4"*40
+        self.trees = {"base-tree": base, "alpha-tree": fa, "beta-tree": fb}
+        self.commits = {"a"*40: "base-tree", "b"*40: "alpha-tree",
+                        "c"*40: "beta-tree"}
+
+    def api(self, method, path, data=None):
+        if method == "GET" and path.startswith("/git/commits/"):
+            return {"tree": {"sha": self.commits[path.split("/")[-1]]}}
+        if method == "GET" and path.startswith("/git/trees/"):
+            key = path.split("/")[-1].split("?")[0]
+            return {"tree": self.trees[key], "truncated": False}
+        if method == "POST" and path == "/git/trees":
+            self.created = data["tree"]
+            return {"sha": "integrated-tree"}
+        if method == "POST" and path == "/git/commits":
+            assert data["parents"] == ["a"*40]
+            return {"sha": "d"*40}
+        if method == "POST" and path == "/git/refs":
+            assert data["ref"].startswith("refs/heads/ef02/integrated/")
+            return {"ref": data["ref"]}
+        raise AssertionError((method, path, data))
+
+
+def test_dependency_fanin_composes_distinct_candidate_file_trees():
+    github = FakeIntegrationGitHub()
+    outcome = github.integrated_source(source_sha="a"*40, attempt_id="combine-001",
+                                       dependencies=[{"candidate_sha": "b"*40},
+                                                     {"candidate_sha": "c"*40}])
+    assert outcome["effective_sha"] == "d"*40
+    assert outcome["integration_ref"].startswith("refs/heads/ef02/integrated/")
+    assert {e["path"] for e in github.created} == {"src/alpha.py", "src/beta.py"}
+
+
+def test_dependency_fanin_fails_on_file_collision_without_silent_merge():
+    github = FakeIntegrationGitHub(conflict=True)
+    with pytest.raises(RemoteTransportError, match="INTEGRATION_CONFLICT"):
+        github.integrated_source(source_sha="a"*40, attempt_id="combine-002",
+                                 dependencies=[{"candidate_sha": "b"*40},
+                                               {"candidate_sha": "c"*40}])
+
+
+def test_scheduler_passes_pinned_predecessor_results_to_worker():
+    p = batch([action("a"), action("b", ("a",))])
+    seen = {}
+    def work(a):
+        seen[a["action_id"]] = a.get("resolved_dependencies", [])
+        return {"status": "CANDIDATE_READY", "candidate_sha": a["action_id"] * 40}
+    assert run_schedule(p, work)["status"] == "COMPLETE"
+    assert seen["a"] == []
+    assert len(seen["b"]) == 1
+    assert seen["b"][0]["candidate_sha"] == "a" * 40
+
+
+def test_remote_schema_limits_parallel_request_not_fixed_slot_count():
+    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+    assert schema["properties"]["max_parallel"]["maximum"] == 128
+    assert schema["properties"]["max_parallel"]["default"] == 2
