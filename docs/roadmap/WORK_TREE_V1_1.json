@@ -233,7 +233,9 @@
           ],
           "priority": "P0",
           "owner": "Commerce Operations",
-          "status": "PROPOSED"
+          "status": "PROPOSED",
+          "upgrade_status": "V1_1_ACCEPTED_FOR_WORK",
+          "upgrade_work_item_ref": "work_items/A03-A04-UPGRADE-V1_1-001.json"
         },
         {
           "id": "O02",
@@ -246,7 +248,9 @@
           ],
           "priority": "P0",
           "owner": "Commerce Operations",
-          "status": "PROPOSED"
+          "status": "PROPOSED",
+          "upgrade_status": "V1_1_ACCEPTED_FOR_WORK",
+          "upgrade_work_item_ref": "work_items/A03-A04-UPGRADE-V1_1-001.json"
         },
         {
           "id": "O03",
@@ -259,7 +263,9 @@
           ],
           "priority": "P0",
           "owner": "Commerce Operations",
-          "status": "PROPOSED"
+          "status": "PROPOSED",
+          "upgrade_status": "V1_1_ACCEPTED_FOR_WORK",
+          "upgrade_work_item_ref": "work_items/A03-A04-UPGRADE-V1_1-001.json"
         },
         {
           "id": "O04",
@@ -271,7 +277,9 @@
           ],
           "priority": "P0",
           "owner": "Commerce Operations",
-          "status": "PROPOSED"
+          "status": "PROPOSED",
+          "upgrade_status": "V1_1_ACCEPTED_FOR_WORK",
+          "upgrade_work_item_ref": "work_items/A03-A04-UPGRADE-V1_1-001.json"
         },
         {
           "id": "O05",
@@ -518,7 +526,9 @@
           ],
           "priority": "P0",
           "owner": "Media & Creative",
-          "status": "PROPOSED"
+          "status": "PROPOSED",
+          "upgrade_status": "V1_1_ACCEPTED_FOR_WORK",
+          "upgrade_work_item_ref": "work_items/A03-A04-UPGRADE-V1_1-001.json"
         },
         {
           "id": "C02",
@@ -531,7 +541,9 @@
           ],
           "priority": "P0",
           "owner": "Media & Creative",
-          "status": "PROPOSED"
+          "status": "PROPOSED",
+          "upgrade_status": "V1_1_ACCEPTED_FOR_WORK",
+          "upgrade_work_item_ref": "work_items/A03-A04-UPGRADE-V1_1-001.json"
         },
         {
           "id": "C03",
@@ -543,7 +555,8 @@
           ],
           "priority": "P0",
           "owner": "Media & Creative",
-          "status": "PROPOSED"
+          "status": "ACCEPTED_FOR_WORK",
+          "implementation_ref": "work_items/A05-SCRIPT-SCENE-RENDER-001.json"
         },
         {
           "id": "C04",
@@ -556,7 +569,9 @@
           ],
           "priority": "P0",
           "owner": "Media & Creative",
-          "status": "PROPOSED"
+          "status": "PROPOSED",
+          "upgrade_status": "V1_1_ACCEPTED_FOR_WORK",
+          "upgrade_work_item_ref": "work_items/A03-A04-UPGRADE-V1_1-001.json"
         },
         {
           "id": "C05",
@@ -582,7 +597,8 @@
           ],
           "priority": "P0",
           "owner": "Media & Creative",
-          "status": "PROPOSED"
+          "status": "ACCEPTED_FOR_WORK",
+          "implementation_ref": "work_items/A05-SCRIPT-SCENE-RENDER-001.json"
         },
         {
           "id": "C07",
@@ -1020,5 +1036,12 @@
   },
   "implementation_note": "A01/A02 and EF01 are build-verified for scope; EF02 M0-R accepted with explicit deferred risks (real Windows service outage and rare live negative paths UNKNOWN), after observed 5/5 DAG, process overlap and scoped real provider interruption. Three Human-approved optional EF01/EF02 improvements are planned, not implemented; A03/A04 remain unblocked.",
   "human_decision_multi_action_ref": "docs/governance/HUMAN_DECISION_2026-10-28_EF02_MULTI_ACTION.md",
-  "enhancement_decision_ref": "docs/governance/HUMAN_DECISION_2026-10-28_EF_ENHANCEMENTS.md"
+  "enhancement_decision_ref": "docs/governance/HUMAN_DECISION_2026-10-28_EF_ENHANCEMENTS.md",
+  "creative_2026_10_29_approved": {
+    "decision_ref": "docs/governance/HUMAN_DECISION_2026-10-29_CREATIVE_V1_1_A05.md",
+    "a03_a04_upgrade_ref": "work_items/A03-A04-UPGRADE-V1_1-001.json",
+    "a05_ref": "work_items/A05-SCRIPT-SCENE-RENDER-001.json",
+    "a06_m1_status": "NOT_VERIFIED",
+    "work_tree_ids_unchanged": true
+  }
 }
