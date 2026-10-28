@@ -19,3 +19,7 @@ For each actual component integration record:
 Reference source snapshot for *future analysis only*: `trung-via/AIOS-renew@cbefb92612f24b55417165736c63753fc560d403`.
 
 No default downstream sync, shared worker or inherited verification is authorized.
+
+## EF01 actual selective adaptation — 2026-10-28
+
+EF01 selectively reimplements explicit model/effort profile validation, Codex/AGY CLI command construction and trusted usage observation from the Human-selected pinned AIOS reference snapshot. **No AIOS modules imported**. Per-file original blob SHAs, adaptation differences, licensing uncertainty, rollback owner and Windows CLI uncertainty are documented in [`EF01_IMPLEMENTATION_REPORT.md`](EF01_IMPLEMENTATION_REPORT.md). No imported AIOS task/Kernel/Publisher, credentials, workflow or sync.
