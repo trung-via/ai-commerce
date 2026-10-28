@@ -1,0 +1,55 @@
+{
+  "work_id": "A02-CONTRACTS-001",
+  "objective": "Implement installable product contracts and evidence-bound provider-neutral mock on A01 skeleton",
+  "status": "BUILD_VERIFIED_FOR_SCOPE",
+  "source_decision": "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.json",
+  "scope_in": [
+    "G04",
+    "G05",
+    "G07"
+  ],
+  "scope_out": [
+    "EF01",
+    "EF02",
+    "real publishing",
+    "paid AI API calls",
+    "actual image/video rendering"
+  ],
+  "expected_artifacts": [
+    "src/ai_commerce/contracts/",
+    "src/ai_commerce/core/provenance.py",
+    "src/ai_commerce/providers/",
+    "tests/test_a02_contracts.py",
+    "tests/test_a02_mock_provider.py",
+    "docs/engineering/A02_IMPLEMENTATION_REPORT.md"
+  ],
+  "acceptance": [
+    "Five packaged JSON Schemas accept valid and reject invalid records",
+    "product_ref null supported for content-only Creative",
+    "Source and text mock artifact hashes preserved, reuse not overwriting",
+    "Provider capabilities and explicit error returns",
+    "Mock content output and receipt demonstrably traceable",
+    "31 targeted tests pass locally (A01 plus A02)"
+  ],
+  "side_effect_class": "BOUNDED",
+  "owner": "Engineering Foundation",
+  "evidence_refs": [
+    "docs/engineering/A02_IMPLEMENTATION_REPORT.md"
+  ],
+  "risk_notes": [
+    "Local Linux targeted pass only; Windows A02 not independently tested",
+    "Mock is text-only and not actual media/AI provider",
+    "No EF01 or EF02 runtime dispatch"
+  ],
+  "executor_binding": null,
+  "dispatch_status": "NOT_DISPATCHED",
+  "execution_method": "DIRECT_IMPLEMENTATION_IN_AUTHORIZED_REPO",
+  "source_base_commit": "544d8c279be64fa38105a93ec6f2d59a2be4f6bd",
+  "verification": {
+    "targeted_test_count": 31,
+    "targeted_test_status": "PASS_LOCAL",
+    "wheel_schema_count": 5,
+    "windows": "NOT_RUN",
+    "real_provider": "NOT_RUN"
+  }
+}

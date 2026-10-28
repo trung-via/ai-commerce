@@ -16,7 +16,7 @@ A01 corresponds to G01/G02/G03/G06/G08: packaging, importable CLI, architecture 
 ## Implementation truth
 
 - `A01`: source implemented; **Linux 11/11 targeted tests and Windows PowerShell 11/11 tests observed in Human-supplied screenshot**; see `A01_IMPLEMENTATION_REPORT.md` for verification boundaries.
-- `A02`: NOT_STARTED; schema/provider runtime not implemented.
+- `A02`: **BUILD_VERIFIED_FOR_SCOPE (Linux local)** — 5 portable JSON Schema contracts, source/artifact SHA-256, mock provider, typed capabilities, CLI validation and example mock artifact. 31/31 project targeted tests; Windows not yet checked. Evidence: `A02_IMPLEMENTATION_REPORT.md`.
 - `EF01`: NOT_IMPLEMENTED; neither Codex nor Antigravity is wired into AI Commerce.
 - `EF02`: NOT_IMPLEMENTED; no remote wake, session or runner linked.
 - Creative, media generation, platform posting, analytics, settlement: NOT_IMPLEMENTED / NOT_VERIFIED.
@@ -27,6 +27,6 @@ A01 corresponds to G01/G02/G03/G06/G08: packaging, importable CLI, architecture 
 - Executor CLI installation, model eligibility, usage and quota on the actual Windows host: UNKNOWN.
 - Remote runner installation/permissions and return-to-Brain connection: UNKNOWN.
 - Product/media third-party accounts and publishing permissions: UNKNOWN.
-- Suggested next independent cuts: A02 product contracts and EF01 dual executor after A01.
+- Suggested next work: EF01 dual-executor engineering core; A03/A04 Creative Factory are product-oriented follow-ups that can use A02 interfaces, EF02 not required.
 
 No git push, external post, media generation, commercial account linkage or paid API call is implied by any A01 test.

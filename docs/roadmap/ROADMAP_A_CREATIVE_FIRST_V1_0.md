@@ -126,3 +126,14 @@ Milestone(s): `M6`.
 | `M0` / `M0-R` | NOT_ACHIEVED | A02 and both EF lanes outstanding |
 
 This status does not claim installed-native Codex/Antigravity, CI, Windows conformance or Creative Factory execution. WorkItem [A01-BOOTSTRAP-001](../../work_items/A01-BOOTSTRAP-001.json) records scope and evidence.
+
+## A02 delivery observation — 2026-10-28
+
+| Work package | Current status | Evidence |
+|---|---|---|
+| `A02` | `BUILD_VERIFIED_FOR_SCOPE` locally; 31 project tests PASS; Windows test not run | [Implementation report](../engineering/A02_IMPLEMENTATION_REPORT.md) |
+| `EF01` | NOT_IMPLEMENTED | No executor bridge |
+| `EF02` | NOT_IMPLEMENTED | No remote wake |
+| `M0` | NOT_ACHIEVED | EF01 pending |
+
+A02 completed G04/G05/G07 with portable product contracts and mock adapter only; no real creative media or third-party API call was performed.

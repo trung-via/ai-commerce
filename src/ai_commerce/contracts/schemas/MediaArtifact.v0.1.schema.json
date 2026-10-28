@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-commerce:MediaArtifact:v0.1",
+  "title": "MediaArtifact",
+  "type": "object",
+  "required": ["artifact_id", "kind", "mime_type", "sha256", "size_bytes", "path", "source_snapshot_ids", "rights_status", "provider"],
+  "properties": {
+    "artifact_id": {"type": "string", "minLength": 1},
+    "kind": {"type": "string", "minLength": 1},
+    "mime_type": {"type": "string", "minLength": 1},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "size_bytes": {"type": "integer", "minimum": 0},
+    "path": {"type": "string", "minLength": 1},
+    "source_snapshot_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "rights_status": {"enum": ["UNKNOWN", "GRANTED", "RESTRICTED", "NOT_APPLICABLE"]},
+    "provider": {"type": "string", "minLength": 1}
+  },
+  "additionalProperties": true
+}

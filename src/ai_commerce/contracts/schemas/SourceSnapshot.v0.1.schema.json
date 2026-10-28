@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-commerce:SourceSnapshot:v0.1",
+  "title": "SourceSnapshot",
+  "type": "object",
+  "required": ["snapshot_id", "source_ref", "source_kind", "captured_at", "sha256", "verification_status"],
+  "properties": {
+    "snapshot_id": {"type": "string", "minLength": 1},
+    "source_ref": {"type": "string", "minLength": 1},
+    "source_kind": {"type": "string", "minLength": 1},
+    "captured_at": {"type": "string", "format": "date-time"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "verification_status": {"enum": ["UNKNOWN", "SOURCE_OBSERVED", "INDEPENDENTLY_VERIFIED", "CONFLICT"]},
+    "rights_status": {"enum": ["UNKNOWN", "GRANTED", "RESTRICTED", "NOT_APPLICABLE"]}
+  },
+  "additionalProperties": true
+}

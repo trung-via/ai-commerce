@@ -47,7 +47,20 @@ python -m pip install pytest
 python -m pytest tests -q
 ```
 
-The local CLI currently exposes **foundation-only** commands. It cannot dispatch Codex/Antigravity, produce videos, access provider accounts or publish content. See [A01 implementation evidence](docs/engineering/A01_IMPLEMENTATION_REPORT.md), [project state](docs/engineering/PROJECT_STATE.md) and [WorkItem record](work_items/A01-BOOTSTRAP-001.json). A01's 11 targeted tests passed in the Linux staging environment, and a Human-provided Windows PowerShell screenshot shows a separate **11 passed in 0.29s**, successful editable install and CLI help/hello. The exact Windows checkout HEAD and full interpreter version were not shown; no GitHub CI result is claimed. A02/EF01/EF02 remain unimplemented.
+The local CLI currently exposes **foundation-only** commands. It cannot dispatch Codex/Antigravity, produce videos, access provider accounts or publish content. See [A01 implementation evidence](docs/engineering/A01_IMPLEMENTATION_REPORT.md), [project state](docs/engineering/PROJECT_STATE.md) and [WorkItem record](work_items/A01-BOOTSTRAP-001.json). A01's 11 targeted tests passed in the Linux staging environment, and a Human-provided Windows PowerShell screenshot shows a separate **11 passed in 0.29s**, successful editable install and CLI help/hello. The exact Windows checkout HEAD and full interpreter version were not shown; no GitHub CI result is claimed. A02 is implemented and locally verified; EF01/EF02 remain unimplemented.
+
+## A02 product contracts and mock provider (implemented)
+
+A02 adds packaged JSON Schema 2020-12 definitions (`ContentBrief`, `SourceSnapshot`, `EvidenceRef`, `MediaArtifact`, `JobResult`) with `jsonschema` runtime validation, a provider-neutral product interface, and a **local text-only mock** with immutable content-digest references. This is **not** a production image/video generation provider or the future EF01 Codex/Antigravity executor.
+
+```powershell
+python -m pip install -e ".[dev]"
+python -m ai_commerce validate --schema ContentBrief --file tests/fixtures/creative_only_brief.json
+python -m ai_commerce mock-generate --brief tests/fixtures/creative_only_brief.json --out-dir .local/a02-smoke
+python -m pytest tests -q
+```
+
+The mock creates a `.txt` artifact and a `.result.json` manifest under the ignored `.local/` directory. No network/spend/publishing is triggered, and unverified rights are `UNKNOWN`. Linux focused regression observed **31 passed**; Windows A02 verification and live provider checks remain unperformed. [A02 evidence](docs/engineering/A02_IMPLEMENTATION_REPORT.md) · [WorkItem](work_items/A02-CONTRACTS-001.json).
 
 ## Status and repository hygiene
 

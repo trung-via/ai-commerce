@@ -57,7 +57,11 @@
           ],
           "deliverable": "Typed contracts, evidence identity, mock product/provider adapters",
           "acceptance": "Schemas validate valid/invalid data; mock produces traceable output",
-          "status": "PLANNED"
+          "status": "BUILD_VERIFIED_FOR_SCOPE",
+          "evidence_refs": [
+            "docs/engineering/A02_IMPLEMENTATION_REPORT.md"
+          ],
+          "windows_verification": "NOT_RUN"
         }
       ],
       "engineering_flow_work_ids": [
@@ -378,10 +382,10 @@
   "dispatch_status": "NOT_DISPATCHED",
   "progress": {
     "A01": "BUILD_VERIFIED_FOR_SCOPE_LINUX_TESTED_WINDOWS_USER_SCREENSHOT_PASS",
-    "A02": "NOT_STARTED",
+    "A02": "BUILD_VERIFIED_FOR_SCOPE_LOCAL_31_PASSED",
     "EF01": "NOT_IMPLEMENTED",
     "EF02": "NOT_IMPLEMENTED",
-    "M0": "NOT_ACHIEVED",
+    "M0": "NOT_ACHIEVED_EF01_PENDING",
     "M0_R": "NOT_ACHIEVED"
   }
 }

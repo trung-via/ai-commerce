@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-commerce:EvidenceRef:v0.1",
+  "title": "EvidenceRef",
+  "type": "object",
+  "required": ["evidence_id", "source_kind", "source_ref", "observed_at", "verification_status"],
+  "properties": {
+    "evidence_id": {"type": "string", "minLength": 1},
+    "source_kind": {"type": "string", "minLength": 1},
+    "source_ref": {"type": "string", "minLength": 1},
+    "observed_at": {"type": "string", "format": "date-time"},
+    "sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "verification_status": {"enum": ["UNKNOWN", "SOURCE_OBSERVED", "INDEPENDENTLY_VERIFIED", "CONFLICT"]},
+    "rights_status": {"enum": ["UNKNOWN", "GRANTED", "RESTRICTED", "NOT_APPLICABLE"]}
+  },
+  "additionalProperties": true
+}

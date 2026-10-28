@@ -337,3 +337,9 @@ Project claims should remain distinct:
 Human requested execution of `A01-BOOTSTRAP-001`. G01/G02/G03/G06/G08 have package skeleton, targeted tests, project-state/ADR/semantic-owner records and isolation observations. Status `BUILD_VERIFIED_FOR_SCOPE` is **local Python bootstrap only**, not Windows live verification, executor invocation or product readiness.
 
 [WorkItem](../../work_items/A01-BOOTSTRAP-001.json) · [Evidence](../engineering/A01_IMPLEMENTATION_REPORT.md). A02, EF01, EF02 are not implemented; M0 is not achieved.
+
+## A02 delivery observation — 2026-10-28
+
+Human requested A02 implementation. `G04/G05/G07` are `BUILD_VERIFIED_FOR_SCOPE` **on the Linux local environment**: five installable JSON Schema 2020-12 files, provenance/content hashes, a provider-neutral Product adapter protocol and a TEST-ONLY mock textual artifact with manifest/receipt. Targeted regression: 31 passed (11 existing A01 + 20 A02). It does **not** establish a live video/image provider, Windows compatibility, EF01/EF02, publishing or paid model rights.
+
+[WorkItem](../../work_items/A02-CONTRACTS-001.json) · [Evidence](../engineering/A02_IMPLEMENTATION_REPORT.md).

@@ -69,7 +69,11 @@
           ],
           "priority": "P0",
           "owner": "Foundation",
-          "status": "PROPOSED"
+          "status": "BUILD_VERIFIED_FOR_SCOPE",
+          "implementation_record": "work_items/A02-CONTRACTS-001.json",
+          "evidence_refs": [
+            "docs/engineering/A02_IMPLEMENTATION_REPORT.md"
+          ]
         },
         {
           "id": "G05",
@@ -81,7 +85,11 @@
           ],
           "priority": "P0",
           "owner": "Foundation",
-          "status": "PROPOSED"
+          "status": "BUILD_VERIFIED_FOR_SCOPE",
+          "implementation_record": "work_items/A02-CONTRACTS-001.json",
+          "evidence_refs": [
+            "docs/engineering/A02_IMPLEMENTATION_REPORT.md"
+          ]
         },
         {
           "id": "G06",
@@ -109,7 +117,11 @@
           ],
           "priority": "P0",
           "owner": "Foundation",
-          "status": "PROPOSED"
+          "status": "BUILD_VERIFIED_FOR_SCOPE",
+          "implementation_record": "work_items/A02-CONTRACTS-001.json",
+          "evidence_refs": [
+            "docs/engineering/A02_IMPLEMENTATION_REPORT.md"
+          ]
         },
         {
           "id": "G08",
@@ -953,5 +965,5 @@
     "native_continuation": "EF02_OPTIONAL_NOT_A_GATE_FOR_CREATIVE",
     "external_component_adoption": "RECORD_PROVENANCE_LICENSE_COMPATIBILITY_AND_ROLLBACK_BEFORE_COPIED_CODE_IS_USED"
   },
-  "implementation_note": "A01 only (G01/G02/G03/G06/G08) locally verified; A02/EF01/EF02 remain NOT_IMPLEMENTED. See A01 implementation report. No dispatch."
+  "implementation_note": "A01 and A02 are implemented and locally verified; EF01/EF02 remain NOT_IMPLEMENTED; no installed-native dual-executor proof. See WorkItem records."
 }

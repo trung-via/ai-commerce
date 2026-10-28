@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-commerce:ContentBrief:v0.1",
+  "title": "ContentBrief",
+  "description": "Open-form creative brief; no product, medium, format, concept count or CTA required.",
+  "type": "object",
+  "required": ["brief_id", "objective"],
+  "properties": {
+    "brief_id": {"type": "string", "minLength": 1},
+    "objective": {"type": "string", "minLength": 1},
+    "prompt": {"type": "string"},
+    "audience": {"type": ["string", "null"]},
+    "product_ref": {"type": ["string", "null"], "minLength": 1},
+    "cta": {"type": ["string", "null"]},
+    "media_hint": {"type": ["string", "null"]},
+    "source_refs": {"type": "array", "items": {"type": "string", "minLength": 1}}
+  },
+  "additionalProperties": true
+}

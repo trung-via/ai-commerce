@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-commerce:JobResult:v0.1",
+  "title": "JobResult",
+  "type": "object",
+  "required": ["job_id", "status", "provider", "source_snapshot", "artifact", "evidence_refs", "cost_status", "error_code"],
+  "properties": {
+    "job_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["SUCCEEDED", "FAILED", "UNKNOWN"]},
+    "provider": {"type": "string", "minLength": 1},
+    "source_snapshot": {"anyOf": [{"type": "null"}, {"$ref": "urn:ai-commerce:SourceSnapshot:v0.1"}]},
+    "artifact": {"anyOf": [{"type": "null"}, {"$ref": "urn:ai-commerce:MediaArtifact:v0.1"}]},
+    "evidence_refs": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "cost_status": {"enum": ["UNKNOWN", "ESTIMATED", "CHARGED", "NOT_APPLICABLE"]},
+    "cost_amount": {"type": ["number", "null"], "minimum": 0},
+    "error_code": {"type": ["string", "null"], "minLength": 1},
+    "error_detail": {"type": ["string", "null"]}
+  },
+  "additionalProperties": true
+}
