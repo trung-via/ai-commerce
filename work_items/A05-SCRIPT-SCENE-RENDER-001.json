@@ -1,0 +1,48 @@
+{
+  "work_id": "A05-SCRIPT-SCENE-RENDER-001",
+  "objective": "Implement C03/C06 CreativeComposition and provider-neutral local FFmpeg render pipeline yielding playable MP4 with immutable manifest/diagnostics, without A06/M1 overclaims.",
+  "status": "ACCEPTED_FOR_WORK",
+  "source_decision": "docs/governance/HUMAN_DECISION_2026-10-29_CREATIVE_V1_1_A05.md",
+  "scope_in": [
+    "C03",
+    "C06",
+    "A05-C03",
+    "A05-C06",
+    "A05-INTEGRATION"
+  ],
+  "scope_out": [
+    "A06 E01 milestone acceptance",
+    "paid AI generation",
+    "publishing",
+    "mandatory storyboard/CTA/product",
+    "cloud rendering farm",
+    "Remotion/ComfyUI integration"
+  ],
+  "expected_artifacts": [
+    "src/ai_commerce/composition/",
+    "src/ai_commerce/render/",
+    "src/ai_commerce/cli.py",
+    "tests/test_a05_composition.py",
+    "tests/test_a05_render.py",
+    "tests/test_a05_integration.py",
+    "docs/engineering/A05_IMPLEMENTATION_REPORT.md"
+  ],
+  "acceptance": [
+    "Freeform intent and valid asset source can become immutable editable Composition IR, without scene/storyboard quota.",
+    "Render PNG/JPEG/WebP to playable MP4, and multi-scene ordered stills; actual output validated by ffprobe plus decode with hash on reopen.",
+    "Absent media/FFmpeg or bad codec fails with actionable diagnostics; timeout and interrupted process do not become false SUCCEEDED.",
+    "A03/A04 V1 and v1.1 records and CLI remain readable; no mandatory live provider/model/account.",
+    "Render manifest identifies composition revision, source asset hashes, encoder configuration and actual artifact bytes, not fictional video."
+  ],
+  "side_effect_class": "BOUNDED",
+  "owner": "Media & Creative / Commerce Operations",
+  "evidence_refs": [
+    "docs/engineering/A05_IMPLEMENTATION_HANDOFF_V1_0.md"
+  ],
+  "risk_notes": [
+    "A05 source implementation is not A06/E01 or M1 proof.",
+    "Real Windows FFmpeg/ffprobe availability not yet observed.",
+    "Technical video render PASS does not guarantee semantic creative realization."
+  ],
+  "creative_experiment": false
+}

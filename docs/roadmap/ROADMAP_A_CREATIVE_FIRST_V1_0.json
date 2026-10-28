@@ -8,7 +8,7 @@
   "repo": "trung-via/ai-commerce",
   "governance": "v0.3",
   "baseline_sha": "13266240558aaf1ec3c80e0dfc3fe89911908002",
-  "plan_note": "Preserves six selected stages and A01–A18 planning IDs; expanded package names/scope are canonical planning articulation, not tasks executed. Supersession 2026-10-28: EF02 multi-action concurrent implementation approved; historical status notes below remain dated snapshots. Human approved three EF01/EF02 non-gating enhancement WorkItems on 2026-10-28; WBS baseline, phase milestones and A01-A18 dependencies unchanged.",
+  "plan_note": "Preserves six selected stages and A01–A18 planning IDs; expanded package names/scope are canonical planning articulation, not tasks executed. Supersession 2026-10-28: EF02 multi-action concurrent implementation approved; historical status notes below remain dated snapshots. Human approved three EF01/EF02 non-gating enhancement WorkItems on 2026-10-28; WBS baseline, phase milestones and A01-A18 dependencies unchanged. Human 2026-10-29 approved A03/A04 v1.1 upgrade and A05 C03+C06 implementation (docs/governance/HUMAN_DECISION_2026-10-29_CREATIVE_V1_1_A05.md); A06 E01/M1 not proven.",
   "work_tree_ref": "docs/roadmap/WORK_TREE_V1_1.json",
   "engineering_flow": {
     "ef01": "Selective clone with manual Codex/Antigravity model/effort selection, optional recommendation, targeted verify, repair and honest token observations",
@@ -161,7 +161,9 @@
           ],
           "deliverable": "Editable content briefs and creative concept generation",
           "acceptance": "Concept generation without required SKU, quota or mandatory storyboard",
-          "status": "PLANNED"
+          "status": "V1_0_IMPLEMENTED_V1_1_ACCEPTED_FOR_WORK",
+          "upgrade_work_item_ref": "work_items/A03-A04-UPGRADE-V1_1-001.json",
+          "upgrade_scope": "Backwards-compatible Creative/Media readiness; optional live model adapter configured only when separately authorized"
         },
         {
           "id": "A04",
@@ -178,7 +180,9 @@
           ],
           "deliverable": "Local asset job/runner and media adapter",
           "acceptance": "One mock or selected asset run with traceable logs; unknown remains unknown",
-          "status": "PLANNED"
+          "status": "V1_0_IMPLEMENTED_V1_1_ACCEPTED_FOR_WORK",
+          "upgrade_work_item_ref": "work_items/A03-A04-UPGRADE-V1_1-001.json",
+          "upgrade_scope": "Backwards-compatible Creative/Media readiness; optional live model adapter configured only when separately authorized"
         },
         {
           "id": "A05",
@@ -193,7 +197,10 @@
           ],
           "deliverable": "Prompt/brief to reproducible video render",
           "acceptance": "Playable MP4 with manifest and diagnostics",
-          "status": "PLANNED"
+          "status": "ACCEPTED_FOR_WORK",
+          "implementation_work_item_ref": "work_items/A05-SCRIPT-SCENE-RENDER-001.json",
+          "handoff_ref": "docs/engineering/A05_IMPLEMENTATION_HANDOFF_V1_0.md",
+          "implementation_choice": "Composition IR + local FFmpeg/ffprobe, no forced storyboard/CTA"
         },
         {
           "id": "A06",
