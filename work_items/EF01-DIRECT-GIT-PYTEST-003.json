@@ -2,8 +2,8 @@
   "work_id": "EF01-DIRECT-GIT-PYTEST-003",
   "wbs_id": "EF01",
   "type": "OPTIONAL_ENGINEERING_ENHANCEMENT",
-  "title": "Configurable Direct Git executable and pytest-xdist 12-worker performance profile",
-  "status": "PLANNED_BENCHMARK_REQUIRED",
+  "title": "EF01-P: optional Direct Git, pytest-xdist 12 workers and MT-01 Minimum Test",
+  "status": "PLANNED_NOT_IMPLEMENTED",
   "priority": "P2",
   "roadmap_phase": "1_OR_2",
   "owner": "EF01 verification; EF02 host capacity integration",
@@ -19,28 +19,63 @@
     "M1",
     "M2"
   ],
-  "objective": "Tối ưu Windows Git spawn và thời gian pytest mà không làm quá tải host nhiều EF02 actions; 12 pytest workers là cấu hình thử nghiệm, không phải 12 executor.",
+  "objective": "Nâng cấp đường Git/pytest có cấu hình, thêm Minimum Test chọn/reuse/invalidated evidence theo AC và changed dependencies, tích hợp EF01-R/EF02 mà không full-suite lặp vô lý hoặc tạo kết quả PASS giả.",
   "design": {
     "current_baseline": "subprocess argv uses git directly via PATH; pytest profiles serial; no pytest-xdist declared",
     "direct_git": "Optional explicit git executable path/GIT executable resolution; no implicit shell/wrapper/hardcoded C:\\ path; fallback git on PATH",
     "pytest_parallel": "Optional registered pytest-xdist profile up to -n 12 only when available; serial profile remains valid; isolate temp/fixtures and perform deterministic parallel safety checks",
     "host_budget": "distinguish pytest worker count from EF02 max_parallel, default EF02 max_parallel=2 unchanged; avoid unconstrained 2 actions x 12 workers on limited RAM/CPU",
     "measurement": "record git invocation latency and serial vs 4/8/12 workers test wall-clock, memory, failures, reproducibility on actual Windows host before choosing defaults",
-    "fallback": "if xdist missing, insufficient RAM, flaky tests, or overhead exceeds benefit keep serial and report reason"
+    "fallback": "if xdist missing, insufficient RAM, flaky tests, or overhead exceeds benefit keep serial and report reason",
+    "minimum_test": {
+      "id": "MT-01",
+      "owner": "EF01-P; EF02 consumes per-action verification and fan-in evidence",
+      "status": "PLANNED_NOT_IMPLEMENTED",
+      "selection": "Deterministic smallest sufficient registered pytest set from changed paths, AC, direct/indirect consumers and contract dependencies; never empty only to obtain PASS.",
+      "evidence_states": [
+        "EXECUTE",
+        "REUSE",
+        "INVALIDATED",
+        "UNPROVEN"
+      ],
+      "reuse_binding": [
+        "base and candidate relevant-file hashes or tree/commit",
+        "pytest argv/test definitions and runner environment",
+        "dependency versions",
+        "AC/consumer coverage mapping",
+        "prior execution exit and immutable artifact refs"
+      ],
+      "invalidation": "Changed code, tests, imports/contracts, dependencies, environment or dependency fan-in that could alter claimed covered behavior invalidates corresponding cached PASS. Hash/source mismatch is not eligible for reuse.",
+      "ef01_repair": "Run failed and affected regression pytest after repair; reuse only evidence remaining valid; retain original selected executor/model/effort and repair budget.",
+      "ef02_integration": "Action-scoped approved verification plans, preserve claims/fingerprints; at fan-in verify merged candidate's affected consumers, not just sibling PASS results.",
+      "safe_fallback": "Unknown coverage => broader targeted/full registered profile or UNPROVEN, never fabricated PASS. pytest no-tests/internal/timeout are not success.",
+      "registered_profile_constraint": "Current EF02 only accepts registered pytest argv; future dynamic selection must remain deterministic/validated, no arbitrary command injection.",
+      "xdist_relation": "Optional 12 worker concurrency only after Windows xdist/fixture isolation checks; independent from EF02 host slots=2, serial fallback preserved.",
+      "no_mandatory_benchmark_gate": true
+    }
   },
   "acceptance": [
     "Explicit Git path produces correct argv for all current Git calls on Windows; missing/bad path fails clearly or configured safe fallback without changing source provenance.",
     "pytest-xdist optional profile (when installed) passes target/full tests at chosen 12 workers, with isolated temp/worktrees, no fixture race and no invented speedup claim.",
     "Measured Windows timings and host resource observations justify chosen setting; if 12 is slower or unstable, retain smaller count or serial.",
-    "Two concurrent EF02 actions do not each overcommit unbounded pytest workers; configuration and resource limit are observable."
+    "Two concurrent EF02 actions do not each overcommit unbounded pytest workers; configuration and resource limit are observable.",
+    "MT-01 chooses minimum sufficient tests grounded by changed files, dependency consumers and AC; audit record explains EXECUTE/REUSE/INVALIDATED/UNPROVEN.",
+    "PASS evidence reuse is permitted only when code/test/dependency/environment fingerprint and AC coverage remain valid; edits affecting prior evidence require rerun.",
+    "EF01-R repair reruns failed/affected tests and preserves valid PASS without duplicate action/provider side effects; failure and unknown are not promoted to PASS.",
+    "EF02 fan-in invalidates affected sibling evidence and runs aggregate consumer/integration coverage, otherwise returns UNPROVEN instead of claimed batch PASS."
   ],
   "non_goals": [
     "12 concurrent Codex/Antigravity models",
     "Change EF02 default max_parallel to 12",
     "Disable Windows Defender",
-    "Impose 12 workers on every CI job"
+    "Impose 12 workers on every CI job",
+    "Mandatory full-suite after every repair; a new lifecycle/gate; importing AIOS-Renew verification runtime"
   ],
   "implementation_started": false,
   "measured_windows_baseline": false,
-  "executor_dispatched": false
+  "executor_dispatched": false,
+  "decision_refs": [
+    "docs/governance/HUMAN_DECISION_2026-10-28_EF_ENHANCEMENTS.md",
+    "docs/governance/HUMAN_DECISION_2026-10-29_MINIMUM_TEST.md"
+  ]
 }
