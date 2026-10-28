@@ -47,9 +47,9 @@ def _changes(repo: Path) -> list[str]:
         result.append(entry[3:])
         index += 1
         if "R" in kind or "C" in kind:
-            # In porcelain -z, a rename/copy has TWO paths: destination,
-            # then original. Both are necessary to delete the old tree entry.
-            if index < len(entries) and entries[index]:
+            # Porcelain -z stores destination first, original second. Renames
+            # delete the old tree path; copies leave their source unchanged.
+            if "R" in kind and index < len(entries) and entries[index]:
                 result.append(entries[index].decode("utf-8", "replace"))
             index += 1
     return sorted(set(result))
