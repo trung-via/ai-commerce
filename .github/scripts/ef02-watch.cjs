@@ -3,6 +3,10 @@
 // Hosted-only, read-only EF02 outcome observer; the only write is an Issue comment.
 // Never modify claims, retry an attempt, or run Codex/Antigravity.
 const AGE_MS = 45 * 60 * 1000;
+// After a missed workflow_run callback, scheduled polling recovers recent terminal
+// failures. A grace period lets normal event delivery and worker comments win.
+const TERMINAL_GRACE_MS = 5 * 60 * 1000;
+const TERMINAL_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const TARGET_FILE = 'ef02-batch.yml';
 const reconcile = require('./ef02-reconcile.cjs');
 
@@ -140,15 +144,32 @@ async function observe({github, context, core}, {nowMs = Date.now()} = {}) {
   });
   let reported = 0;
   for (const run of data.workflow_runs || []) {
-    if (run.status !== 'queued' && run.status !== 'in_progress') continue;
     const issue = issueNumber(run, repoFullName);
     if (!issue) continue;
-    const age = nowMs - Date.parse(run.created_at || '');
-    if (!Number.isFinite(age) || age < AGE_MS) continue;
-    const {data: jobs} = await github.rest.actions.listJobsForWorkflowRun({
-      owner: context.repo.owner, repo: context.repo.repo, run_id: run.id, per_page: 100
-    });
-    const status = classifyQueued(run, jobs.jobs || [], nowMs);
+    let status;
+    if (run.status === 'completed' &&
+        ['failure', 'cancelled', 'timed_out'].includes(run.conclusion)) {
+      // The terminal timestamp, not creation time: legitimate long-running
+      // jobs can finish many hours after starting. Unknown time => no guess.
+      const age = nowMs - Date.parse(run.updated_at || '');
+      if (!Number.isFinite(age) || age < TERMINAL_GRACE_MS ||
+          age > TERMINAL_LOOKBACK_MS) continue;
+      const {data: jobs} = await github.rest.actions.listJobsForWorkflowRun({
+        owner: context.repo.owner, repo: context.repo.repo,
+        run_id: run.id, per_page: 100
+      });
+      status = classifyTerminal(run, jobs.jobs || []);
+    } else if (run.status === 'queued' || run.status === 'in_progress') {
+      const age = nowMs - Date.parse(run.created_at || '');
+      if (!Number.isFinite(age) || age < AGE_MS) continue;
+      const {data: jobs} = await github.rest.actions.listJobsForWorkflowRun({
+        owner: context.repo.owner, repo: context.repo.repo,
+        run_id: run.id, per_page: 100
+      });
+      status = classifyQueued(run, jobs.jobs || [], nowMs);
+    } else {
+      continue; // Successful/skipped workflows do not need recovery comments.
+    }
     if (status && await notify({github, context, core}, run, status, issue)) reported++;
   }
   return reported;

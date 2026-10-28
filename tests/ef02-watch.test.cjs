@@ -239,3 +239,88 @@ test('exact worker result for same run prevents redundant terminal observer repo
   assert.equal(await observe({github:x.api,context:x.context,core:x.core}),0);
   assert.equal(x.posted.length,0);
 });
+
+
+test('scheduled observer recovers missed terminal callback without a model retry', async () => {
+  const cancelled = run({status:'completed',conclusion:'cancelled',
+    updated_at:'2026-10-28T08:55:00Z'});
+  const x = fake({event:'schedule', workflowRuns:[cancelled], jobs:[
+    {name:'validate',conclusion:'success'},
+    {name:'execute',conclusion:'cancelled',status:'completed'}
+  ]});
+  assert.equal(await observe({github:x.api,context:x.context,core:x.core},
+    {nowMs:Date.parse('2026-10-28T09:10:00Z')}),1);
+  assert.equal(x.posted.length,1);
+  assert.match(x.posted[0].body,/WORKFLOW_CANCELLED_EXECUTION_UNCERTAIN/);
+  assert.match(x.posted[0].body,/side effects are UNKNOWN/);
+  assert.match(x.posted[0].body,/does not run executors, cancel jobs, mutate claims or retry models/);
+});
+
+test('scheduled backfill upgrades queued warning into a terminal failure', async () => {
+  const failed = run({status:'completed',conclusion:'failure',
+    updated_at:'2026-10-28T08:55:00Z'});
+  const x = fake({event:'schedule',workflowRuns:[failed],jobs:[
+    {name:'validate',conclusion:'success'},
+    {name:'execute',conclusion:'failure',status:'completed'}
+  ],comments:[{user:{login:'github-actions[bot]'},
+    body:'EF02_OBSERVER run=555 code=WINDOWS_JOB_WAITING_UNCONFIRMED\n\nWorkflow: https://github.com/trung-via/ai-commerce/actions/runs/555'}]});
+  assert.equal(await observe({github:x.api,context:x.context,core:x.core},
+    {nowMs:Date.parse('2026-10-28T09:10:00Z')}),1);
+  assert.match(x.posted[0].body,/WORKFLOW_NONPASS_UNRECONCILED/);
+});
+
+test('scheduled terminal backfill is idempotent when workflow_run observer already posted', async () => {
+  const failed = run({status:'completed',conclusion:'failure',
+    updated_at:'2026-10-28T08:55:00Z'});
+  const x = fake({event:'schedule',workflowRuns:[failed],jobs:[
+    {name:'validate',conclusion:'success'},
+    {name:'execute',conclusion:'failure'}
+  ],comments:[{user:{login:'github-actions[bot]'},
+    body:'EF02_OBSERVER run=555 code=WORKFLOW_NONPASS_UNRECONCILED'}]});
+  assert.equal(await observe({github:x.api,context:x.context,core:x.core},
+    {nowMs:Date.parse('2026-10-28T09:10:00Z')}),0);
+  assert.equal(x.posted.length,0);
+});
+
+test('scheduled terminal backfill honors post-completion grace and bounded lookback', async () => {
+  const recent = run({status:'completed',conclusion:'cancelled',
+    updated_at:'2026-10-28T09:08:00Z'});
+  const old = run({id:556,display_title:'EF02 Issue #20',
+    status:'completed',conclusion:'failure',updated_at:'2026-10-26T08:00:00Z'});
+  const missingTimestamp = run({id:557,display_title:'EF02 Issue #21',
+    status:'completed',conclusion:'failure'});
+  const future = run({id:558,display_title:'EF02 Issue #22',
+    status:'completed',conclusion:'cancelled',updated_at:'2026-10-28T09:20:00Z'});
+  const x = fake({event:'schedule',workflowRuns:[recent,old,missingTimestamp,future]});
+  assert.equal(await observe({github:x.api,context:x.context,core:x.core},
+    {nowMs:Date.parse('2026-10-28T09:10:00Z')}),0);
+  assert.equal(x.posted.length,0);
+});
+
+test('scheduled recovery ignores success, unrelated issue and skipped primary workflow', async () => {
+  const t = '2026-10-28T08:55:00Z';
+  const x = fake({event:'schedule',workflowRuns:[
+    run({id:10,status:'completed',conclusion:'success',updated_at:t}),
+    run({id:11,status:'completed',conclusion:'skipped',updated_at:t}),
+    run({id:12,status:'completed',conclusion:'cancelled',updated_at:t,
+      display_title:'Non-EF02 probe'}),
+    run({id:13,status:'completed',conclusion:'failure',updated_at:t,
+      head_repository:{full_name:'other/repo'}})
+  ]});
+  assert.equal(await observe({github:x.api,context:x.context,core:x.core},
+    {nowMs:Date.parse('2026-10-28T09:10:00Z')}),0);
+  assert.equal(x.posted.length,0);
+});
+
+test('scheduled terminal recovery detects timeout and leaves provider side effects UNKNOWN', async () => {
+  const timedOut = run({status:'completed',conclusion:'timed_out',
+    updated_at:'2026-10-28T08:55:00Z'});
+  const x = fake({event:'schedule',workflowRuns:[timedOut],jobs:[
+    {name:'validate',conclusion:'success'},
+    {name:'execute',conclusion:'timed_out'}
+  ]});
+  assert.equal(await observe({github:x.api,context:x.context,core:x.core},
+    {nowMs:Date.parse('2026-10-28T09:10:00Z')}),1);
+  assert.match(x.posted[0].body,/WORKFLOW_TIMED_OUT_EXECUTION_UNCERTAIN/);
+  assert.match(x.posted[0].body,/side effects are UNKNOWN/);
+});
