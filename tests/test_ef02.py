@@ -362,8 +362,8 @@ def test_remote_pre_spawn_ref_is_create_only_and_chained_to_exact_claim():
             if method == "GET" and path.startswith("/git/ref/heads/ef02/claims/"):
                 return {"object": {"sha": claim_sha}}
             if method == "GET" and path == "/git/commits/" + claim_sha:
-                return {"message": "EF02 CLAIM\\n\\nfingerprint=" + fp +
-                        "\\nattempt_id=checkpoint-001",
+                return {"message": "EF02 CLAIM\n\nfingerprint=" + fp +
+                        "\nattempt_id=checkpoint-001",
                         "tree": {"sha": tree_sha}, "parents": [{"sha": source}]}
             if method == "POST" and path == "/git/commits":
                 self.writes.append((path, data))
@@ -381,7 +381,7 @@ def test_remote_pre_spawn_ref_is_create_only_and_chained_to_exact_claim():
     commit = t.writes[0][1]
     assert commit["tree"] == tree_sha
     assert commit["parents"] == [claim_sha]
-    assert commit["message"] == "EF02 PRESPAWN\\n\\nfingerprint=" + fp + "\\nattempt_id=checkpoint-001"
+    assert commit["message"] == "EF02 PRESPAWN\n\nfingerprint=" + fp + "\nattempt_id=checkpoint-001"
     assert t.writes[1][1] == {"ref": ref, "sha": "d" * 40}
 
 
@@ -393,8 +393,8 @@ def test_remote_pre_spawn_ref_rejects_wrong_claim_parent_before_any_write():
             assert method == "GET", "must not create any commit/ref"
             if "/git/ref/" in path:
                 return {"object": {"sha": "b" * 40}}
-            return {"message": "EF02 CLAIM\\n\\nfingerprint=" + "f" * 64 +
-                    "\\nattempt_id=bad-claim",
+            return {"message": "EF02 CLAIM\n\nfingerprint=" + "f" * 64 +
+                    "\nattempt_id=bad-claim",
                     "tree": {"sha": "c" * 40},
                     "parents": [{"sha": "d" * 40}]}
     with pytest.raises(RemoteTransportError, match="PRESPAWN_CLAIM_IDENTITY_MISMATCH"):
