@@ -1,0 +1,28 @@
+name: EF02 read-only outcome observer
+on:
+  workflow_run:
+    workflows: ["EF02 Multi-Action remote engineering"]
+    types: [completed]
+  schedule:
+    - cron: "17,47 * * * *"
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+jobs:
+  observe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Reconcile terminal or long-queued workflow status
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const observe = require('./.github/scripts/ef02-watch.cjs');
+            const written = await observe({github, context, core});
+            core.info('EF02_OBSERVER_COMMENTS_CREATED=' + written);
