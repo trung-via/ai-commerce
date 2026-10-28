@@ -176,13 +176,34 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
     }
     output_dir.mkdir(parents=True, exist_ok=False)
     try:
-        report["executor_invoked"] = True
+        # Before subprocess.run, preserve a fail-closed local boundary.
+        # A CLI process may have externally visible effects even if the parent
+        # dies before a return code or provider receipt can be observed.
+        boundary = {"kind": "AI_COMMERCE_EF01_PROVIDER_BOUNDARY", "version": 1,
+                    "work_id": work_id, "attempt_id": attempt_id,
+                    "stage": "BEFORE_EXECUTOR_SUBPROCESS",
+                    "status": "EXECUTION_UNKNOWN",
+                    "executor_process_return_observed": False,
+                    "provider_invocation_proven": False,
+                    "provider_effects_reconciled": False,
+                    "replay_authorized": False}
+        _write(output_dir / "provider_boundary.json",
+               (json.dumps(boundary, sort_keys=True) + "\n").encode("utf-8"))
+        report["evidence_files"]["provider_boundary"] = "provider_boundary.json"
+        report.update(status="EXECUTION_UNKNOWN", executor_invoked=True)
         try:
             p = subprocess.run(command, cwd=repo, input=stdin, capture_output=True,
                                text=True, encoding="utf-8", errors="replace",
                                timeout=timeout_seconds, check=False)
             report["executor_exit_code"] = p.returncode
             out, err = p.stdout.encode("utf-8"), p.stderr.encode("utf-8")
+            # Process exit is observable; provider-side effects and verification
+            # are still not proven by a CLI exit code alone.
+            _write(output_dir / "provider_return_observed.json",
+                   (json.dumps({**boundary, "stage": "EXECUTOR_SUBPROCESS_RETURNED",
+                     "executor_process_return_observed": True,
+                     "executor_exit_code": p.returncode}, sort_keys=True) + "\n").encode("utf-8"))
+            report["evidence_files"]["provider_return_observed"] = "provider_return_observed.json"
         except FileNotFoundError as exc:
             out, err = b"", str(exc).encode("utf-8")
             report.update(status="EXECUTOR_UNAVAILABLE", error_code="EXECUTOR_BINARY_MISSING",
@@ -190,7 +211,13 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
         except subprocess.TimeoutExpired as exc:
             out = (exc.stdout or b"") if isinstance(exc.stdout, bytes) else (exc.stdout or "").encode("utf-8")
             err = (exc.stderr or b"") if isinstance(exc.stderr, bytes) else (exc.stderr or "").encode("utf-8")
-            report.update(status="EXECUTOR_FAILED", error_code="EXECUTOR_TIMEOUT")
+            # External provider effects cannot be reversed/inferred from timeout.
+            report.update(status="EXECUTION_UNKNOWN", error_code="EXECUTOR_TIMEOUT",
+                          replay_authorized=False)
+            _write(output_dir / "provider_timeout.json",
+                   (json.dumps({**boundary, "stage": "EXECUTOR_TIMEOUT_OBSERVED",
+                     "error_code": "EXECUTOR_TIMEOUT"}, sort_keys=True) + "\n").encode("utf-8"))
+            report["evidence_files"]["provider_timeout"] = "provider_timeout.json"
         _write(output_dir / "executor.stdout.log", out)
         _write(output_dir / "executor.stderr.log", err)
         report["evidence_files"].update(executor_stdout="executor.stdout.log", executor_stderr="executor.stderr.log")
@@ -204,7 +231,7 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
         report["candidate_file_sha256"] = _candidate_hashes(repo, changed)
         report["scope_valid"] = _safe_scope(changed, allowed_prefixes)
         report["git_head_after"] = _git(repo, "rev-parse", "HEAD").stdout.strip()
-        if report["status"] in ("EXECUTOR_UNAVAILABLE", "EXECUTOR_FAILED"):
+        if report["status"] in ("EXECUTOR_UNAVAILABLE", "EXECUTOR_FAILED", "EXECUTION_UNKNOWN"):
             return report
         if report["executor_exit_code"] != 0:
             report.update(status="EXECUTOR_FAILED", error_code="EXECUTOR_NONZERO")
