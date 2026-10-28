@@ -32,3 +32,11 @@ Implementation:
 - EF02 Windows remote worker alone passes the override only when `os.name == "nt"` AND the chosen executor is `codex`. Linux and Antigravity remain unchanged; no global config mutation, no provider fallback.
 - Engineering attempt and remote action result report the selected sandbox backend. CLI and remote unit tests assert exact flags and AGY invariance.
 - This source change and tests do not by themselves establish a successful *live* Codex model run under MXC. M0-R stays OPEN pending fresh-attempt GitHub live verification.
+
+## 2026-10-28: Headless Antigravity permission false-success diagnostic
+
+Five-action DAG Issue #4 / run 40658774567 returned 2/5, with Codex A and C candidates and correct B-dependent D/E suppression. Antigravity B returned provider status SUCCESS / process exit 0 **without changing source**, because headless auto-denied a `read_file` tool; artifact 12803297819 documents the exact stderr and `denied_actions` list. No model-or-quota error was evidenced. Cycle-negative Issue #5 / run 40658957811 rejected `DEPENDENCY_CYCLE` before executor, with Windows job skipped.
+
+A read-only Windows Service permissions probe run 40659944924 showed `settings.json` exists, `permissions.allow` already contains a `read_file` entry, no explicit `read_file` entry in ask/deny, but the failed tool's target path was not disclosed. No broad permission escalation or `--dangerously-skip-permissions` is justified by this evidence.
+
+EF01 now parses AGY `denied_actions`, marking `EXECUTOR_PERMISSION_DENIED / HEADLESS_TOOL_PERMISSION_DENIED` even if process exit is zero or some files were changed. Preserves full raw stdout/stderr evidence. No authorization for automatic retry, model/effort substitution, or global AGY settings mutation is inferred. A fresh narrowly prompted action is needed for live AGY conformance.

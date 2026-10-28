@@ -106,6 +106,25 @@ def _observe_usage(data: bytes, executor: str) -> dict[str, int] | None:
     return None
 
 
+
+def _headless_denied_actions(data: bytes, executor: str) -> list[str]:
+    """AGY may return SUCCESS/exit 0 when headless tool approval was denied."""
+    if executor != "antigravity":
+        return []
+    denied: set[str] = set()
+    for line in data.decode("utf-8", "replace").splitlines():
+        try:
+            value = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(value, dict) or not isinstance(value.get("denied_actions"), list):
+            continue
+        for item in value["denied_actions"]:
+            action = item.get("action") if isinstance(item, dict) else None
+            if isinstance(action, str) and action:
+                denied.add(action)
+    return sorted(denied)
+
 def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: str,
                     selection: ExecutorSelection, instruction: str,
                     verify_argv: Sequence[str], allowed_prefixes: Sequence[str] = (),
@@ -175,6 +194,8 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
         _write(output_dir / "executor.stdout.log", out)
         _write(output_dir / "executor.stderr.log", err)
         report["evidence_files"].update(executor_stdout="executor.stdout.log", executor_stderr="executor.stderr.log")
+        denied_actions = _headless_denied_actions(out, selection.executor)
+        report["denied_actions"] = denied_actions
         usage = _observe_usage(out, selection.executor)
         if usage is not None:
             report.update(usage=usage, usage_status="PROVIDER_REPORTED")
@@ -190,6 +211,9 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
             return report
         if report["git_head_after"] != report["source_base_sha"]:
             report.update(status="GIT_UNEXPECTED_COMMIT", error_code="GIT_HEAD_CHANGED")
+            return report
+        if denied_actions:
+            report.update(status="EXECUTOR_PERMISSION_DENIED", error_code="HEADLESS_TOOL_PERMISSION_DENIED")
             return report
         if not changed:
             report.update(status="NO_CODE_CHANGE", error_code="NO_CHANGED_FILES")

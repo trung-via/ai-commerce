@@ -197,3 +197,37 @@ def test_codex_windows_service_mxc_override_and_unchanged_antigravity(tmp_path):
         command_for(antigravity, tmp_path, "change", codex_windows_sandbox="mxc")
     with pytest.raises(ValueError, match="UNSUPPORTED_CODEX_WINDOWS_SANDBOX"):
         command_for(codex, tmp_path, "change", codex_windows_sandbox="none")
+
+def test_agy_headless_soft_denial_is_explicit_nonpass(tmp_path):
+    repo = _repo(tmp_path)
+    mock = _fake_binary(tmp_path, "agy-denied", """import json,sys
+print(json.dumps({"status":"SUCCESS","response":"","denied_actions":[{"action":"read_file","display_name":"ReadFile"}]}))
+print('jetski: headless read_file permission was auto-denied', file=sys.stderr)
+""")
+    result = execute_attempt(repo=repo, output_dir=tmp_path / "evidence",
+        work_id="EF02-AGY", attempt_id="agy-denied-01",
+        selection=ExecutorSelection("antigravity","gemini-3.8-flash","medium"),
+        instruction="create one file", verify_argv=[sys.executable,"-c","assert False"],
+        antigravity_bin=mock, allowed_prefixes=["tests/"])
+    assert result["status"] == "EXECUTOR_PERMISSION_DENIED"
+    assert result["error_code"] == "HEADLESS_TOOL_PERMISSION_DENIED"
+    assert result["denied_actions"] == ["read_file"]
+    assert result["verify_exit_code"] is None
+    assert result["changed_files"] == []
+    assert result["executor_exit_code"] == 0
+
+def test_agy_headless_denied_actions_are_not_ignored_even_after_write(tmp_path):
+    repo = _repo(tmp_path)
+    mock = _fake_binary(tmp_path, "agy-partial", """import json
+from pathlib import Path
+Path('one.txt').write_text('partial')
+print(json.dumps({"status":"SUCCESS","denied_actions":[{"action":"command"}]}))
+""")
+    result = execute_attempt(repo=repo, output_dir=tmp_path / "evidence",
+        work_id="EF02-AGY", attempt_id="agy-partial-01",
+        selection=ExecutorSelection("antigravity","gemini-3.8-flash","medium"),
+        instruction="create one file", verify_argv=[sys.executable,"-c","assert False"],
+        antigravity_bin=mock, allowed_prefixes=["one.txt"])
+    assert result["status"] == "EXECUTOR_PERMISSION_DENIED"
+    assert result["denied_actions"] == ["command"]
+    assert result["changed_files"] == ["one.txt"]
