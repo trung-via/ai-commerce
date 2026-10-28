@@ -65,9 +65,20 @@
     ],
     "windows_cli_versions": "UNKNOWN_NOT_DISPLAYED",
     "detailed_provider_usage": "UNKNOWN_LOGS_NOT_INSPECTED",
-    "whole_repo_regression": "NOT_RERUN_AFTER_EF01_WINDOWS_EVIDENCE",
+    "whole_repo_regression": "PASS_53_OF_53_WINDOWS_2026_10_28_USER_SCREENSHOT",
     "github_ci": "NOT_CLAIMED",
-    "live_evidence_basis": "Human-supplied PowerShell screenshots 2026-10-28; normalized result fields and EF01_EXIT observed; local log/diff artifacts not uploaded"
+    "live_evidence_basis": "Human-supplied PowerShell screenshots 2026-10-28; normalized result fields and EF01_EXIT observed; local log/diff artifacts not uploaded",
+    "windows_pytest": {
+      "date": "2026-10-28",
+      "command": "python -m pytest tests -q",
+      "passed": 53,
+      "failed": 0,
+      "duration_seconds": 5.89,
+      "observed_source_commit": "ac970feff4914467c9279406003f6582bd2160d5",
+      "evidence": "Human-provided PowerShell screenshot 2026-10-28, git pull fast-forward 95228f2..ac970fe followed by pytest",
+      "raw_log_committed": false,
+      "runner": "USER_WINDOWS_POWERSHELL"
+    }
   },
   "acceptance_remaining": [],
   "expected_artifacts": [
@@ -77,7 +88,8 @@
   ],
   "evidence_refs": [
     "docs/engineering/EF01_IMPLEMENTATION_REPORT.md",
-    "User-provided PowerShell screenshots of codex-002 and agy-002 on 2026-10-28 (conversation, not committed)"
+    "User-provided PowerShell screenshots of codex-002 and agy-002 on 2026-10-28 (conversation, not committed)",
+    "User-provided Windows PowerShell screenshot showing 53 passed in 5.89s after pull to ac970fe (2026-10-28; conversation only)"
   ],
   "executor_binding": null,
   "dispatch_status": "NOT_DISPATCHED",

@@ -35,3 +35,8 @@ No git push, external post, media generation, commercial account linkage or paid
 ## EF01 implementation update — 2026-10-28
 
 The EF01 standalone CLI and adapters have 12/12 local synthetic targeted tests PASS. Subsequently, Windows live conformance returned `BUILD_VERIFIED_FOR_SCOPE` for `codex-002` (Codex `gpt-6.1-sol`, `max`) and `agy-002` (Antigravity `gemini-3.8-flash`, `medium`), each with `error_code=null`, `EF01_EXIT=0`, source SHA `40558e0ea2392ef306d75af045d5844051c59ef8`, per Human PowerShell screenshots. Earlier `codex-001` (model not supported) and `agy-001` (quota exhausted) failures are retained. M0 core is evidenced for this scope; M0-R / EF02 remains OPEN. Full local attempt JSON/logs/changed-file hashes and exact CLI versions were not independently read. See `EF01_IMPLEMENTATION_REPORT.md`.
+
+
+## EF01 full Windows regression — 2026-10-28
+
+Human-provided PowerShell screenshot shows successful `git pull --ff-only origin main`, fast-forward `95228f2..ac970fe`, followed by `python -m pytest tests -q`: **53 passed in 5.89s, 0 failed**. Four earlier `WinError 193` failures from POSIX-style mock CLI shebang execution were corrected in `tests/test_ef01.py` by a Windows `.cmd` launcher (commit `ac970feff4914467c9279406003f6582bd2160d5`). Both Codex and Antigravity live attempts had already returned `BUILD_VERIFIED_FOR_SCOPE`. EF01 is complete **for the agreed local dual-executor engineering scope**; EF02 remote wake / M0-R remains NOT_IMPLEMENTED. This is screenshot-supported evidence, not an independently collected pytest log or a GitHub Actions run.
