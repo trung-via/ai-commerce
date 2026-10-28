@@ -484,3 +484,48 @@ def test_confirmed_remote_checkpoint_precedes_ef01_popen(tmp_path, monkeypatch):
     assert events == ["remote", "popen"]
     assert _journal(worker, "invocation_remote_confirmed.json")["pre_spawn_remote_ref"] == "refs/heads/ef02/pre-spawn/test-verified"
     assert _journal(worker, "invocation_spawned.json")["process_id"] == 8765
+
+
+def test_ef01_cli_timeout_receipt_remains_unknown_in_ef02_and_never_publishes(
+    tmp_path, monkeypatch,
+):
+    """A completed EF01 wrapper can still report ambiguous provider timeout."""
+    class Claimed:
+        def claim(self, **_kw):
+            return "CLAIMED"
+        def integrated_source(self, **_kw):
+            return {"effective_sha": BASE, "integration_ref": None}
+        def pre_spawn_checkpoint(self, **_kw):
+            return "refs/heads/ef02/pre-spawn/mock"
+        def candidate(self, **_kw):
+            raise AssertionError("UNKNOWN_TIMEOUT_MUST_NOT_PUBLISH")
+    class Child:
+        pid = 18888
+        returncode = 1
+        def __init__(self, argv, **_kwargs):
+            self.out = Path(argv[argv.index("--out-dir") + 1])
+        def communicate(self, timeout=None):
+            self.out.mkdir(parents=True, exist_ok=True)
+            (self.out / "engineering_result.json").write_text(json.dumps({
+                "status": "EXECUTION_UNKNOWN",
+                "error_code": "EXECUTOR_TIMEOUT",
+                "source_base_sha": BASE,
+                "changed_files": ["tests/test_ef02_m0r_fixture.py"],
+                "verify_exit_code": None,
+                "replay_authorized": False,
+            }), encoding="utf-8")
+            return ("fixture CLI returned", "")
+    monkeypatch.setattr("ai_commerce.remote.worker.subprocess.run",
+                        lambda *_a, **_k: SimpleNamespace(returncode=0, stderr=""))
+    monkeypatch.setattr("ai_commerce.remote.worker.subprocess.Popen",
+                        lambda argv, **kwargs: Child(argv, **kwargs))
+    worker = _worker(tmp_path, Claimed())
+    result = worker.execute_action(_action())
+    assert result["status"] == "EXECUTION_UNKNOWN"
+    assert result["error_code"] == "EXECUTOR_TIMEOUT"
+    assert result["ef01_status"] == "EXECUTION_UNKNOWN"
+    assert result["executor_invoked"] is True
+    assert result["verify_exit_code"] is None
+    assert result["candidate_ref"] is None
+    assert result["candidate_sha"] is None
+    assert _persisted(worker)["status"] == "EXECUTION_UNKNOWN"
