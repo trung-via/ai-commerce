@@ -147,6 +147,24 @@
         },
         "delivery": {
           "const": "CANDIDATE_BRANCH"
+        },
+        "reuse_candidate": {
+          "type": "object",
+          "required": [
+            "candidate_sha",
+            "verified_run_id"
+          ],
+          "properties": {
+            "candidate_sha": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "verified_run_id": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false

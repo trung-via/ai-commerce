@@ -277,3 +277,72 @@ def test_capacity_classifier_does_not_confuse_quota_and_unsupported(tmp_path):
     assert _classify_failed_executor(report, evidence) == "MODEL_UNSUPPORTED"
     log.write_text("command crashed for an unrelated reason", encoding="utf-8")
     assert _classify_failed_executor(report, evidence) == "EXECUTOR_FAILED"
+
+def test_approved_reuse_needs_exact_pinned_profile_and_source():
+    from ai_commerce.remote.reuse import approve_reuse
+    entry = dict(action_id="a", attempt_id="old-1", executor="codex", model="m",
+                 effort="max", depends_on=[], allowed_paths=["tests/one.py"],
+                 verification_profile="project-tests", source_sha="a"*40,
+                 candidate_sha="b"*40, parent_sha="a"*40, tree_sha="c"*40,
+                 verified_run_id=5, verification_status="BUILD_VERIFIED_FOR_SCOPE",
+                 verify_exit_code=0, scope_valid=True)
+    approved = {"version": 1, "approved_source_sha": "a"*40, "candidates": {"old-1": entry}}
+    action = {k: entry[k] for k in ("action_id","attempt_id","executor","model","effort",
+                                   "depends_on","allowed_paths","verification_profile")}
+    action["reuse_candidate"] = {"candidate_sha": "b"*40, "verified_run_id": 5}
+    assert approve_reuse({"source_sha": "a"*40}, action, approved) == entry
+    tampered = copy.deepcopy(action)
+    tampered["effort"] = "medium"
+    with pytest.raises(RemoteRequestError, match="REUSE_PROFILE_OR_SCOPE_MISMATCH"):
+        approve_reuse({"source_sha": "a"*40}, tampered, approved)
+    tampered = copy.deepcopy(action)
+    tampered["reuse_candidate"]["candidate_sha"] = "d"*40
+    with pytest.raises(RemoteRequestError, match="REUSE_CANDIDATE_NOT_APPROVED"):
+        approve_reuse({"source_sha": "a"*40}, tampered, approved)
+
+
+def test_reuse_candidate_readonly_path_no_claim_no_model(tmp_path):
+    from ai_commerce.remote.worker import LocalBatchWorker
+    class StubGithub:
+        calls = 0
+        def verify_reused_candidate(self, entry):
+            self.calls += 1
+        def claim(self, **kwargs):
+            raise AssertionError("must not claim or invoke provider")
+    worker = object.__new__(LocalBatchWorker)
+    worker.root = tmp_path
+    worker.checkout = tmp_path
+    worker.github = StubGithub()
+    entry = dict(action_id="a", attempt_id="old-1", executor="codex", model="m",
+                 effort="max", depends_on=[], allowed_paths=["tests/one.py"],
+                 verification_profile="project-tests", source_sha="a"*40,
+                 candidate_sha="b"*40, candidate_ref="refs/heads/ef02/candidate/key",
+                 parent_sha="a"*40, tree_sha="c"*40,
+                 verified_run_id=5, verification_status="BUILD_VERIFIED_FOR_SCOPE",
+                 verify_exit_code=0, scope_valid=True)
+    worker.approved_reuse = {"version": 1, "approved_source_sha": "a"*40,
+                             "candidates": {"old-1": entry}}
+    worker.batch = {"source_sha":"a"*40,"batch_id":"reuse-smoke"}
+    act = {k: entry[k] for k in ("action_id","attempt_id","executor","model","effort",
+                                "depends_on","allowed_paths","verification_profile")}
+    act.update(instruction="No provider calls", reuse_candidate={"candidate_sha":"b"*40, "verified_run_id":5})
+    result = worker.execute_action(act)
+    assert result["status"] == "CANDIDATE_READY"
+    assert result["reused_verified"] and not result["executor_invoked"]
+    assert worker.github.calls == 1
+
+
+def test_git_ref_reuse_verification_detects_mismatch():
+    class FakeReuseTransport(GitHubTransport):
+        def __init__(self):
+            super().__init__("trung-via/ai-commerce","fake")
+        def api(self, method, path, data=None):
+            if "/candidate/" in path:
+                return {"object":{"sha":"f"*40}}
+            raise AssertionError("bad ref should fail before other reads")
+    github=FakeReuseTransport()
+    attempt="old-1"
+    entry={"attempt_id":attempt,"candidate_sha":"b"*40,
+           "candidate_ref":"refs/heads/ef02/candidate/"+github.attempt_key(attempt)}
+    with pytest.raises(RemoteTransportError,match="REUSE_REF_SHA_CHANGED"):
+        github.verify_reused_candidate(entry)

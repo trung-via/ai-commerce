@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "approved_source_sha": "3c4e119cbf47bc74de288a530e2892751b0838a8",
+  "description": "Human-approved reuse of previously verified A/B/D from GitHub live run 40661368442. No provider reinvocation.",
+  "candidates": {
+    "ef02-20261028-dag3-a-01": {
+      "action_id": "ef02-dag3-a",
+      "attempt_id": "ef02-20261028-dag3-a-01",
+      "executor": "codex",
+      "model": "gpt-6.1-sol",
+      "effort": "max",
+      "depends_on": [],
+      "allowed_paths": [
+        "tests/test_ef02_dag3_a_20261028.py"
+      ],
+      "verification_profile": "project-tests",
+      "source_sha": "3c4e119cbf47bc74de288a530e2892751b0838a8",
+      "candidate_sha": "6a29d9952d36c08f8ca89449cbaf7c215a4d73b4",
+      "candidate_ref": "refs/heads/ef02/candidate/d13391e277ea2e39daacb01277fa1737",
+      "parent_sha": "3c4e119cbf47bc74de288a530e2892751b0838a8",
+      "tree_sha": "38fec001e23ea15b97d1d1c9c9591830d72aea0c",
+      "verified_run_id": 40661368442,
+      "verification_status": "BUILD_VERIFIED_FOR_SCOPE",
+      "verify_exit_code": 0,
+      "scope_valid": true
+    },
+    "ef02-20261028-dag3-b-01": {
+      "action_id": "ef02-dag3-b",
+      "attempt_id": "ef02-20261028-dag3-b-01",
+      "executor": "antigravity",
+      "model": "gemini-3.8-flash",
+      "effort": "medium",
+      "depends_on": [],
+      "allowed_paths": [
+        "tests/test_ef02_dag3_b_20261028.py"
+      ],
+      "verification_profile": "project-tests",
+      "source_sha": "3c4e119cbf47bc74de288a530e2892751b0838a8",
+      "candidate_sha": "cbbbba75082093bf387d51f312f0ddac76e95954",
+      "candidate_ref": "refs/heads/ef02/candidate/b0dd8856390a7082a2fd5212603abf46",
+      "parent_sha": "3c4e119cbf47bc74de288a530e2892751b0838a8",
+      "tree_sha": "53528f5848d2f66bfaaf46169fb775e24434ab50",
+      "verified_run_id": 40661368442,
+      "verification_status": "BUILD_VERIFIED_FOR_SCOPE",
+      "verify_exit_code": 0,
+      "scope_valid": true
+    },
+    "ef02-20261028-dag3-d-01": {
+      "action_id": "ef02-dag3-d",
+      "attempt_id": "ef02-20261028-dag3-d-01",
+      "executor": "antigravity",
+      "model": "gemini-3.8-flash",
+      "effort": "medium",
+      "depends_on": [
+        "ef02-dag3-b"
+      ],
+      "allowed_paths": [
+        "tests/test_ef02_dag3_d_20261028.py"
+      ],
+      "verification_profile": "project-tests",
+      "source_sha": "3c4e119cbf47bc74de288a530e2892751b0838a8",
+      "candidate_sha": "61194f2ba3f8fbc3e25edcd7aa1d3d4bd1a2b308",
+      "candidate_ref": "refs/heads/ef02/candidate/982f905e3e5a6e5c87e85258a066f13f",
+      "parent_sha": "f60226af69de7ef72dde5c59fce4ff2735357d70",
+      "tree_sha": "ecba30e8010a0a905eaf97a09ce6377534a847c6",
+      "verified_run_id": 40661368442,
+      "verification_status": "BUILD_VERIFIED_FOR_SCOPE",
+      "verify_exit_code": 0,
+      "scope_valid": true
+    }
+  }
+}

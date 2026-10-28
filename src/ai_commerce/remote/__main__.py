@@ -9,6 +9,7 @@ from .validation import (RemoteRequestError, validate_batch, verify_registry,
                          check_source)
 from .transport import GitHubTransport
 from .worker import LocalBatchWorker, _write_json
+from .reuse import load_approved_candidates
 from .scheduler import run_schedule
 
 
@@ -27,7 +28,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         packet = json.loads(args.request_file.read_text(encoding="utf-8-sig"))
         profiles = verify_registry(checkout / ".github" / "ef02" / "verify-profiles.json")
-        batch = validate_batch(packet, schema=checkout / "contracts" /
+        approved_reuse = load_approved_candidates(checkout / ".github" / "ef02" / "approved-candidates.v1.json")
+        batch = validate_batch(packet, approved_reuse=approved_reuse,
+                               schema=checkout / "contracts" /
                                "RemoteActionBatch.v1.schema.json",
                                registry=profiles, issuer_login=args.issuer_login,
                                owner_login=args.owner_login,

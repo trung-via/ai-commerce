@@ -49,7 +49,8 @@ def verify_registry(path: Path) -> dict[str, list[str]]:
 
 def validate_batch(data: dict, *, schema: Path, registry: dict[str, list[str]],
                    issuer_login: str, owner_login: str,
-                   brain_issuers: tuple[str, ...] = ()) -> dict:
+                   brain_issuers: tuple[str, ...] = (),
+                   approved_reuse: dict | None = None) -> dict:
     Draft202012Validator(json.loads(schema.read_text(encoding="utf-8"))).validate(data)
     owner = issuer_login.casefold() == owner_login.casefold()
     brain = issuer_login.casefold() in {v.casefold() for v in brain_issuers if v}
@@ -64,6 +65,11 @@ def validate_batch(data: dict, *, schema: Path, registry: dict[str, list[str]],
     graph: dict[str, list[str]] = {}
     for action in data["actions"]:
         ExecutorSelection(action["executor"], action["model"], action["effort"])
+        if action.get("reuse_candidate") is not None:
+            if approved_reuse is None:
+                raise RemoteRequestError("REUSE_REGISTRY_REQUIRED")
+            from .reuse import approve_reuse
+            approve_reuse(data, action, approved_reuse)
         for path in action["allowed_paths"]:
             safe_path(path)
         if action["verification_profile"] not in registry:

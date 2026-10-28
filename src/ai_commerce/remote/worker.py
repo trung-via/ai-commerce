@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .transport import GitHubTransport, RemoteTransportError
 from .validation import fingerprint, check_source
+from .reuse import load_approved_candidates, approve_reuse
 
 def _remote_codex_sandbox_args(executor: str, *, windows: bool) -> list[str]:
     """EF02 Windows runner overrides only Codex; Antigravity is untouched."""
@@ -65,6 +66,8 @@ class LocalBatchWorker:
         self.github = github
         self.root = (root or (self.checkout / ".local" / "ef02" / batch["batch_id"])).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        self.approved_reuse = load_approved_candidates(
+            self.checkout / ".github" / "ef02" / "approved-candidates.v1.json")
         check_source(self.checkout, batch["source_sha"])
 
     def execute_action(self, action: dict) -> dict:
@@ -89,6 +92,29 @@ class LocalBatchWorker:
         def finish():
             _write_json(path / "action_result.json", outcome)
             return outcome
+        if action.get("reuse_candidate") is not None:
+            try:
+                entry = approve_reuse(self.batch, action, self.approved_reuse)
+                actual = {d["action_id"]: d.get("candidate_sha")
+                          for d in action.get("resolved_dependencies", [])}
+                for predecessor in entry["depends_on"]:
+                    approved_parent = next((v for v in self.approved_reuse["candidates"].values()
+                                            if v["action_id"] == predecessor), None)
+                    if approved_parent is None or actual.get(predecessor) != approved_parent["candidate_sha"]:
+                        raise RemoteTransportError("REUSE_DEPENDENCY_SHA_MISMATCH")
+                self.github.verify_reused_candidate(entry)
+                outcome.update(status="CANDIDATE_READY", candidate_sha=entry["candidate_sha"],
+                               candidate_ref=entry["candidate_ref"], effective_source_sha=entry["parent_sha"],
+                               verify_exit_code=0, reused=True, reused_verified=True,
+                               reuse_original_run_id=entry["verified_run_id"],
+                               reuse_original_attempt_id=entry["attempt_id"],
+                               claim_status="APPROVED_REUSE_NO_NEW_CLAIM",
+                               executor_invoked=False, changed_files=entry["allowed_paths"])
+            except Exception as exc:
+                outcome.update(status="REUSE_VERIFICATION_FAILED",
+                               error_code=str(exc)[:160], executor_invoked=False,
+                               reused=True, reused_verified=False)
+            return finish()
         try:
             claim = self.github.claim(source_sha=source, attempt_id=attempt_id, fingerprint=fp)
             outcome["claim_status"] = claim

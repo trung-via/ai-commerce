@@ -64,6 +64,28 @@ class GitHubTransport:
             return "DUPLICATE_CLAIM_NO_REEXECUTION"
         return "ATTEMPT_ID_CONFLICT"
 
+    def verify_reused_candidate(self, approved: dict) -> None:
+        """Verify original immutable commit, candidate ref and prior distributed claim."""
+        attempt_id = approved["attempt_id"]
+        key = self.attempt_key(attempt_id)
+        if approved["candidate_ref"] != "refs/heads/ef02/candidate/" + key:
+            raise RemoteTransportError("REUSE_REF_NAME_MISMATCH")
+        ref = self.api("GET", "/git/ref/heads/ef02/candidate/" + key)
+        if ref.get("object", {}).get("sha") != approved["candidate_sha"]:
+            raise RemoteTransportError("REUSE_REF_SHA_CHANGED")
+        candidate = self.api("GET", "/git/commits/" + approved["candidate_sha"])
+        if (candidate.get("message") != "EF02 candidate attempt " + attempt_id
+            or candidate.get("tree", {}).get("sha") != approved["tree_sha"]
+            or [p["sha"] for p in candidate.get("parents", [])] != [approved["parent_sha"]]):
+            raise RemoteTransportError("REUSE_COMMIT_MISMATCH")
+        claim = self.api("GET", "/git/ref/heads/ef02/claims/" + key)
+        initial = self.api("GET", "/git/commits/" + claim["object"]["sha"])
+        msg = initial.get("message", "")
+        if (not msg.startswith("EF02 CLAIM\n\nfingerprint=")
+            or not msg.endswith("\nattempt_id=" + attempt_id)
+            or [p["sha"] for p in initial.get("parents", [])] != [approved["source_sha"]]):
+            raise RemoteTransportError("REUSE_CLAIM_MISMATCH")
+
     def candidate(self, *, source_sha: str, attempt_id: str,
                   workspace: Path, paths: list[str]) -> dict:
         """Create-only GitHub commit/ref using source tree and scoped local bytes."""
