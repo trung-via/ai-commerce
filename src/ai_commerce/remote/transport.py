@@ -64,6 +64,34 @@ class GitHubTransport:
             return "DUPLICATE_CLAIM_NO_REEXECUTION"
         return "ATTEMPT_ID_CONFLICT"
 
+    def pre_spawn_checkpoint(self, *, source_sha: str, attempt_id: str,
+                             fingerprint: str) -> str:
+        """Write-once remote boundary; lack of confirmation forbids EF01 spawn.
+
+        This is NOT proof that an EF01 child or provider was ever invoked.
+        A transport timeout can leave a ref behind: the old claim still
+        prevents any automatic re-execution with the same attempt_id.
+        """
+        key = self.attempt_key(attempt_id)
+        claim = self.api("GET", "/git/ref/heads/ef02/claims/" + key)
+        claim_sha = claim.get("object", {}).get("sha")
+        if not isinstance(claim_sha, str) or len(claim_sha) != 40:
+            raise RemoteTransportError("PRESPAWN_CLAIM_REF_INVALID")
+        parent = self.api("GET", "/git/commits/" + claim_sha)
+        claim_message = ("EF02 CLAIM\n\nfingerprint=" + fingerprint +
+                         "\nattempt_id=" + attempt_id)
+        if (parent.get("message") != claim_message or
+                [p.get("sha") for p in parent.get("parents", [])] != [source_sha]):
+            raise RemoteTransportError("PRESPAWN_CLAIM_IDENTITY_MISMATCH")
+        message = ("EF02 PRESPAWN\n\nfingerprint=" + fingerprint +
+                   "\nattempt_id=" + attempt_id)
+        checkpoint = self.api("POST", "/git/commits",
+                              {"message": message, "tree": parent["tree"]["sha"],
+                               "parents": [claim_sha]})
+        ref = "ef02/pre-spawn/" + key
+        self._create_ref(ref, checkpoint["sha"])
+        return "refs/heads/" + ref
+
     def verify_reused_candidate(self, approved: dict) -> None:
         """Verify original immutable commit, candidate ref and prior distributed claim."""
         attempt_id = approved["attempt_id"]

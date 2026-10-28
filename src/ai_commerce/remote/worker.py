@@ -197,6 +197,24 @@ class LocalBatchWorker:
                         "replay_authorized": False,
                         "recorded_at": started}
             _write_json(path / "invocation_boundary.json", progress)
+            # This independent create-only GitHub ref is chained to the exact
+            # distributed claim. Remote uncertainty is fail-closed: do NOT
+            # spawn EF01 if confirmation was not received, even if the ref
+            # may have been created before an API transport timeout.
+            try:
+                remote_stage = self.github.pre_spawn_checkpoint(
+                    source_sha=source, attempt_id=attempt_id, fingerprint=fp)
+            except Exception as exc:
+                outcome.update(status="PRESPAWN_CHECKPOINT_UNCONFIRMED",
+                               error_code="PRESPAWN_CHECKPOINT_UNCONFIRMED",
+                               diagnostic=type(exc).__name__,
+                               replay_authorized=False)
+                return finish()
+            outcome["pre_spawn_remote_ref"] = remote_stage
+            _write_json(path / "invocation_remote_confirmed.json",
+                        {**progress, "stage": "PRESPAWN_REMOTE_REF_CONFIRMED",
+                         "pre_spawn_remote_ref": remote_stage,
+                         "remote_confirmation_observed_at": time.time()})
             # Never pass GitHub credentials into untrusted model/verification process.
             child = subprocess.Popen(argv, cwd=self.checkout, env=_safe_child_env(self.checkout),
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

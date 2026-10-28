@@ -35,17 +35,20 @@ async function inspectAction(github, repoFullName, sourceSha, action) {
   const [owner, repo] = repoFullName.split('/');
   const key = attemptKey(repoFullName, action.attempt_id);
   const entry = {action_id:action.action_id, attempt_id:action.attempt_id,
-    claim:'READ_UNKNOWN', candidate:'READ_UNKNOWN'};
+    claim:'READ_UNKNOWN', pre_spawn:'READ_UNKNOWN', candidate:'READ_UNKNOWN'};
   if (action.reuse_candidate != null) {
     entry.claim = 'REUSE_NOT_A_NEW_CLAIM';
+    entry.pre_spawn = 'REUSE_NO_NEW_PRESPAWN';
     entry.candidate = 'REUSE_REQUIRES_APPROVAL_REGISTRY_CHECK';
     return entry;
   }
   const claim = await readRef(github, owner, repo, 'heads/ef02/claims/' + key);
+  let claimCommit = null;
   if (claim.state === 'ABSENT') entry.claim = 'NO_CLAIM_REF_OBSERVED';
   else if (claim.state === 'READ_UNKNOWN') entry.claim = 'CLAIM_READ_UNKNOWN';
   else {
     const commit = await readCommit(github, owner, repo, claim.sha);
+    claimCommit = commit;
     const expectedSuffix = '\nattempt_id=' + action.attempt_id;
     const message = commit?.message || '';
     const parents = commit?.parents?.map(x => x.sha) || [];
@@ -53,6 +56,22 @@ async function inspectAction(github, repoFullName, sourceSha, action) {
       /^EF02 CLAIM\n\nfingerprint=[a-f0-9]{64}\nattempt_id=/.test(message) &&
       message.endsWith(expectedSuffix))
       ? 'CLAIM_REF_VERIFIED' : 'CLAIM_REF_UNVERIFIED';
+  }
+  const preSpawn = await readRef(github, owner, repo, 'heads/ef02/pre-spawn/' + key);
+  if (preSpawn.state === 'ABSENT') entry.pre_spawn = 'NO_PRESPAWN_REF_OBSERVED';
+  else if (preSpawn.state === 'READ_UNKNOWN') entry.pre_spawn = 'PRESPAWN_READ_UNKNOWN';
+  else {
+    const checkpoint = await readCommit(github, owner, repo, preSpawn.sha);
+    const claimMessage = claimCommit?.message || '';
+    const fingerprint = /^EF02 CLAIM\n\nfingerprint=([a-f0-9]{64})\nattempt_id=/.exec(claimMessage)?.[1];
+    const expected = fingerprint && ('EF02 PRESPAWN\n\nfingerprint=' + fingerprint +
+      '\nattempt_id=' + action.attempt_id);
+    const stageParents = checkpoint?.parents?.map(x => x.sha) || [];
+    entry.pre_spawn = (entry.claim === 'CLAIM_REF_VERIFIED' &&
+      expected && checkpoint?.message === expected &&
+      stageParents.length === 1 && stageParents[0] === claim.sha &&
+      checkpoint?.tree?.sha && checkpoint.tree.sha === claimCommit?.tree?.sha)
+      ? 'PRESPAWN_REF_VERIFIED_NOT_PROVIDER_PROOF' : 'PRESPAWN_REF_UNVERIFIED';
   }
   const candidate = await readRef(github, owner, repo, 'heads/ef02/candidate/' + key);
   if (candidate.state === 'ABSENT') entry.candidate = 'NO_CANDIDATE_REF_OBSERVED';
@@ -114,7 +133,7 @@ function summary(report) {
     'Inputs: current Issue JSON, not the immutable run request artifact.'];
   for (const action of report.actions) {
     lines.push('- ' + action.action_id + ': claim=' + action.claim +
-      ', candidate=' + action.candidate);
+      ', pre_spawn=' + action.pre_spawn + ', candidate=' + action.candidate);
   }
   lines.push('A missing claim/candidate ref does NOT prove the provider was never invoked. ' +
     'A candidate ref does NOT prove tests passed. Inspect pinned artifacts and ' +
