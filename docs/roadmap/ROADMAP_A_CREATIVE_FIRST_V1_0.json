@@ -8,7 +8,7 @@
   "repo": "trung-via/ai-commerce",
   "governance": "v0.3",
   "baseline_sha": "13266240558aaf1ec3c80e0dfc3fe89911908002",
-  "plan_note": "Preserves six selected stages and A01–A18 planning IDs; expanded package names/scope are canonical planning articulation, not tasks executed. Supersession 2026-10-28: EF02 multi-action concurrent implementation approved; historical status notes below remain dated snapshots.",
+  "plan_note": "Preserves six selected stages and A01–A18 planning IDs; expanded package names/scope are canonical planning articulation, not tasks executed. Supersession 2026-10-28: EF02 multi-action concurrent implementation approved; historical status notes below remain dated snapshots. Human approved three EF01/EF02 non-gating enhancement WorkItems on 2026-10-28; WBS baseline, phase milestones and A01-A18 dependencies unchanged.",
   "work_tree_ref": "docs/roadmap/WORK_TREE_V1_1.json",
   "engineering_flow": {
     "ef01": "Selective clone with manual Codex/Antigravity model/effort selection, optional recommendation, targeted verify, repair and honest token observations",
@@ -24,7 +24,63 @@
       "cross_batch_parallel_claim": "NOT_YET_A_V1_SINGLE_RUNNER_PROOF",
       "source_decision": "docs/governance/HUMAN_DECISION_2026-10-28_EF02_MULTI_ACTION.md",
       "plan": "docs/engineering/EF02_MULTI_ACTION_IMPLEMENTATION_PLAN_V1_0_2026-10-28.md"
-    }
+    },
+    "optional_enhancements": {
+      "decision_ref": "docs/governance/HUMAN_DECISION_2026-10-28_EF_ENHANCEMENTS.md",
+      "baseline_wbs_ids_unchanged": true,
+      "m0_r_accepted_without_reopening": true,
+      "priority_order": [
+        "EF01-VERIFY-REPAIR-002",
+        "EF02-EXACT-CHAT-WAKE-002",
+        "EF01-DIRECT-GIT-PYTEST-003"
+      ],
+      "work_items": [
+        {
+          "id": "EF01-R",
+          "work_id": "EF01-VERIFY-REPAIR-002",
+          "wbs_id": "EF01",
+          "title": "Same-action bounded Verify → Repair loop",
+          "priority": "P1",
+          "status": "PLANNED_NOT_IMPLEMENTED",
+          "phase": "PHASE_1_PARALLEL_CREATIVE",
+          "depends_on": [
+            "EF01"
+          ],
+          "work_item_ref": "work_items/EF01-VERIFY-REPAIR-002.json",
+          "non_blocking": true
+        },
+        {
+          "id": "EF02-D",
+          "work_id": "EF02-EXACT-CHAT-WAKE-002",
+          "wbs_id": "EF02",
+          "title": "Exact-chat Brain Wake bridge",
+          "priority": "P1",
+          "status": "PLANNED_PLATFORM_CAPABILITY_UNKNOWN",
+          "phase": "PHASE_1_PARALLEL_CREATIVE",
+          "depends_on": [
+            "EF02"
+          ],
+          "work_item_ref": "work_items/EF02-EXACT-CHAT-WAKE-002.json",
+          "non_blocking": true
+        },
+        {
+          "id": "EF01-P",
+          "work_id": "EF01-DIRECT-GIT-PYTEST-003",
+          "wbs_id": "EF01",
+          "title": "Optional Direct Git + measured pytest-xdist 12-worker profile",
+          "priority": "P2",
+          "status": "PLANNED_BENCHMARK_REQUIRED",
+          "phase": "PHASE_1_OR_2_WHEN_REAL_WINDOWS_BASELINE",
+          "depends_on": [
+            "EF01",
+            "G06"
+          ],
+          "work_item_ref": "work_items/EF01-DIRECT-GIT-PYTEST-003.json",
+          "non_blocking": true
+        }
+      ]
+    },
+    "m0_r_disposition": "ACCEPTED_WITH_DEFERRED_RISKS_2026_10_28"
   },
   "stages": [
     {
@@ -78,6 +134,12 @@
       "engineering_flow_work_ids": [
         "EF01",
         "EF02"
+      ],
+      "m0_r_disposition": "ACCEPTED_WITH_DEFERRED_RISKS; NO NEW CORE GATE",
+      "post_m0_r_nonblocking_engineering_backlog": [
+        "EF01-VERIFY-REPAIR-002",
+        "EF02-EXACT-CHAT-WAKE-002",
+        "EF01-DIRECT-GIT-PYTEST-003"
       ]
     },
     {
@@ -146,6 +208,13 @@
           "acceptance": "Usable video with traceable generation; no publish/account proof required",
           "status": "PLANNED"
         }
+      ],
+      "parallel_nonblocking_engineering_enhancements": [
+        "work_items/EF01-VERIFY-REPAIR-002.json",
+        "work_items/EF02-EXACT-CHAT-WAKE-002.json"
+      ],
+      "optional_performance_later_if_windows_measurements": [
+        "work_items/EF01-DIRECT-GIT-PYTEST-003.json"
       ]
     },
     {
@@ -395,9 +464,10 @@
     "A01": "BUILD_VERIFIED_FOR_SCOPE_LINUX_TESTED_WINDOWS_USER_SCREENSHOT_PASS",
     "A02": "BUILD_VERIFIED_FOR_SCOPE_LOCAL_41_PASS_WINDOWS_USER_SCREENSHOT_41_PASS",
     "EF01": "BUILD_VERIFIED_FOR_SCOPE_WINDOWS_LIVE_CODEX_ANTIGRAVITY_53_TESTS_PASS",
-    "EF02": "ACCEPTED_FOR_WORK_MULTI_ACTION_V1_NOT_IMPLEMENTED",
+    "EF02": "M0_R_ACCEPTED_WITH_DEFERRED_RISKS_LIVE_DAG_AND_SCOPED_E2E",
     "M0": "CORE_SCOPE_MET_WITH_SCREENSHOT_EVIDENCE_EF01",
-    "M0_R": "NOT_ACHIEVED_EF02_REMOTE_PENDING",
-    "EF02_implementation_ref": "work_items/EF02-MULTI-ACTION-001.json"
+    "M0_R": "ACCEPTED_WITH_DEFERRED_RISKS_2026_10_28",
+    "EF02_implementation_ref": "work_items/EF02-MULTI-ACTION-001.json",
+    "optional_ef_enhancements": "PLANNED_NOT_IMPLEMENTED_ALL_THREE"
   }
 }

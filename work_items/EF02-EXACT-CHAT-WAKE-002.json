@@ -1,0 +1,47 @@
+{
+  "work_id": "EF02-EXACT-CHAT-WAKE-002",
+  "wbs_id": "EF02",
+  "type": "OPTIONAL_ENGINEERING_ENHANCEMENT",
+  "title": "EF02-D exact-conversation Brain Wake",
+  "status": "PLANNED_WITH_PLATFORM_CAPABILITY_UNKNOWN",
+  "priority": "P1",
+  "roadmap_phase": 1,
+  "owner": "EF02-D completion event and conversation bridge",
+  "decision_ref": "docs/governance/HUMAN_DECISION_2026-10-28_EF_ENHANCEMENTS.md",
+  "depends_on": [
+    "EF02"
+  ],
+  "not_dependent_on": [
+    "EF01-VERIFY-REPAIR-002"
+  ],
+  "non_blocking_for": [
+    "A03",
+    "A04",
+    "A05",
+    "M1"
+  ],
+  "objective": "Khi một action/batch kết thúc, đưa thông báo có chứng cứ vào đúng ChatGPT chat đã tạo yêu cầu, Brain có thể đọc kết quả mà không phải Human tự chuyển artifact.",
+  "design": {
+    "producer": "EF02 final result only; immutable event_id, action/batch/run IDs, source and artifact refs, delivery state",
+    "transport": "project-owned bounded bridge only through an explicitly supported/authenticated channel; no invented ChatGPT conversation write API",
+    "binding": "consented exact originating chat binding, checked against completion event, no token/cookie exposure in GitHub logs",
+    "receipt": "Do not mark wake delivered until exact chat ack or observed supported chat delivery; issuer comment alone is not proof",
+    "idempotency": "same event and chat binding cannot deliver duplicate wake",
+    "fallback": "GitHub Issue/Action artifact remains the reliable read-only handoff when exact-chat channel is unavailable",
+    "optional_native_continuation": "separate from wake delivery; Brain autonomy/dispatch never inferred"
+  },
+  "acceptance": [
+    "With a real supported conversation endpoint and explicit binding, one completed EF02 action delivers one verifiable message into the originally bound chat; wrong/stale chat and duplicate event rejected.",
+    "If platform channel cannot post to exactly that chat, status remains UNSUPPORTED/UNKNOWN, GitHub feedback persists and no fake wake success.",
+    "No new executor invocation, candidate mutation, permissions bypass or automatic Brain dispatch is introduced by a wake event."
+  ],
+  "non_goals": [
+    "Proactive ChatGPT wake claimed from GitHub comments alone",
+    "Use AIOS-Renew local wake implementation or credentials by default",
+    "Automatically start a fresh chat",
+    "Provider/creative media publication"
+  ],
+  "implementation_started": false,
+  "chat_binding_verified": false,
+  "executor_dispatched": false
+}

@@ -1,0 +1,71 @@
+{
+  "work_id": "EF01-VERIFY-REPAIR-002",
+  "wbs_id": "EF01",
+  "type": "OPTIONAL_ENGINEERING_ENHANCEMENT",
+  "title": "Same-action bounded Verify → Repair loop",
+  "status": "PLANNED_NOT_IMPLEMENTED",
+  "priority": "P1",
+  "roadmap_phase": 1,
+  "owner": "EF01 Engineering Execution; EF02 result integration",
+  "decision_ref": "docs/governance/HUMAN_DECISION_2026-10-28_EF_ENHANCEMENTS.md",
+  "depends_on": [
+    "EF01"
+  ],
+  "non_blocking_for": [
+    "A03",
+    "A04",
+    "A05",
+    "M1"
+  ],
+  "objective": "Trong một EF02 action/claim, trả kết quả verify thất bại có chẩn đoán cho chính executor đã chọn, sửa trên worktree cũ, verify lại và trả một aggregate result.",
+  "design": {
+    "flow": [
+      "EXECUTOR_RUN",
+      "SCOPED_VERIFY",
+      "ON_DETERMINATE_VERIFY_FAIL_CAPTURE_FAILURE_EVIDENCE",
+      "SAME_SELECTED_EXECUTOR_FIX",
+      "SCOPED_REVERIFY",
+      "AGGREGATE_FINAL_STATUS"
+    ],
+    "bounded_repair_rounds_default_proposed": 2,
+    "configurable": true,
+    "invocation_evidence": "distinct local invocation_id, exit code, usage observation, verify logs, diff and SHA per call; immutable EF02 action/claim identity preserved",
+    "feedback_payload": [
+      "verify exit code",
+      "full available stdout/stderr logs by artifact reference",
+      "failing tests/traceback",
+      "changed paths/diff/hash",
+      "source SHA",
+      "scope",
+      "previous round results"
+    ],
+    "selection": "Keep exact Human selected executor/model/effort, no cross-provider fallback",
+    "allowed_trigger": "Ordinary completed provider invocation with determinate scoped code verification failure and safe scoped workspace",
+    "forbidden_trigger": [
+      "EXECUTION_UNKNOWN",
+      "timeout with ambiguous side effects",
+      "runner offline",
+      "GitHub claim uncertain",
+      "provider quota/model unavailable",
+      "permission denial",
+      "scope violation",
+      "source drift",
+      "result publication error"
+    ],
+    "result": "No candidate until current worktree final scope+source+hash+verify success; log each round with truthful usage and stop reason"
+  },
+  "acceptance": [
+    "With fake executors, verify fails first and succeeds after one scoped repair: one EF02 claim, two distinct invocation records, one final candidate, exact selected model/effort unchanged.",
+    "With repeated determinate verify failure, bounded rounds stop, preserve all diagnostics and never publish a success candidate.",
+    "UNKNOWN/timeout/permission/quota/out-of-scope/source drift never triggers another provider call or silently elevates status.",
+    "Concurrent EF02 sibling actions retain independent worktrees, per-action results and DAG correctness."
+  ],
+  "non_goals": [
+    "Claim that re-invoking a CLI preserves an identical vendor chat session",
+    "AIOS CAA/R2.1 native continuation",
+    "Automatic main merge",
+    "Modify external user/account state"
+  ],
+  "implementation_started": false,
+  "executor_dispatched": false
+}

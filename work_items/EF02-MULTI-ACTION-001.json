@@ -464,5 +464,14 @@
     ],
     "next_phase": "Roadmap A A03/A04, independently of optional EF01/EF02 performance, repair-loop, or Brain Wake enhancements",
     "provider_invocation_for_this_decision": false
-  }
+  },
+  "planned_extensions": [
+    {
+      "work_id": "EF02-EXACT-CHAT-WAKE-002",
+      "priority": "P1",
+      "status": "PLANNED_PLATFORM_CAPABILITY_UNKNOWN",
+      "ref": "work_items/EF02-EXACT-CHAT-WAKE-002.json"
+    }
+  ],
+  "extension_m0_r_boundary": "M0-R acceptance status unchanged; EF02-D remains separate and optional, does not imply ChatGPT chat delivery"
 }

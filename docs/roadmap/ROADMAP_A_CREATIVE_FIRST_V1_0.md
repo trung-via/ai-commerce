@@ -25,6 +25,18 @@ Milestone(s): `M0`, `M0-R`.
 | `EF02` (P0) | **Multi-Action v1**: Human/Brain concurrent batch ingress, DAG + two overlapping Windows EF01 processes initially (configurable), per-attempt claim/worktrees/candidate and per-action/aggregate GitHub feedback; CLI repair attempt new; optional Chat Wake/native independently proven. | 5-action batch with at least 2 truly concurrent independent executor processes, no duplicate invocation, correct dependency and failure evidence, Brain-readable aggregate; EF02 not gate for Creative Factory. |
 
 
+### Optional EF enhancements after accepted M0-R (parallel lane, no phase gate)
+
+Human accepted EF01/EF02 extension planning on 2026-10-28; `M0-R = ACCEPTED_WITH_DEFERRED_RISKS`, actual Windows runner-service outage remains deferred and UNKNOWN. The six phases, A01–A18 mapping and Creative Factory dependencies **do not change**.
+
+| Order | EF work item | Phase placement | Non-blocking delivery |
+|---|---|---|---|
+| 1 / P1 | [EF01-R Verify–Repair](../../work_items/EF01-VERIFY-REPAIR-002.json) | Phase 1, parallel with A03/A04 | Same EF02 action; bounded in-action repair only after determinate verification failure; original executor/model/effort and no-blind-replay preserved. |
+| 2 / P1 | [EF02-D Exact-chat Brain Wake](../../work_items/EF02-EXACT-CHAT-WAKE-002.json) | Phase 1, independent of EF01-R | Wake only with verified same-conversation delivery; otherwise GitHub feedback is fallback. |
+| 3 / P2 | [EF01-P Direct Git & 12 pytest workers](../../work_items/EF01-DIRECT-GIT-PYTEST-003.json) | Phase 1 or 2 after real Windows measurement | Optional git executable and xdist profile; 12 pytest workers != 12 model executors and two concurrent EF02 actions must honor host capacity. |
+
+Source decision: [Human EF enhancement roadmap](../governance/HUMAN_DECISION_2026-10-28_EF_ENHANCEMENTS.md). Each is **PLANNED/NOT IMPLEMENTED**, requires separate verified code delivery when prioritized; not new M0-R criteria.
+
 ### Phase 1 — Creative Factory
 
 Milestone(s): `M1`.

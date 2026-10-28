@@ -1,0 +1,46 @@
+{
+  "work_id": "EF01-DIRECT-GIT-PYTEST-003",
+  "wbs_id": "EF01",
+  "type": "OPTIONAL_ENGINEERING_ENHANCEMENT",
+  "title": "Configurable Direct Git executable and pytest-xdist 12-worker performance profile",
+  "status": "PLANNED_BENCHMARK_REQUIRED",
+  "priority": "P2",
+  "roadmap_phase": "1_OR_2",
+  "owner": "EF01 verification; EF02 host capacity integration",
+  "decision_ref": "docs/governance/HUMAN_DECISION_2026-10-28_EF_ENHANCEMENTS.md",
+  "depends_on": [
+    "EF01",
+    "G06"
+  ],
+  "non_blocking_for": [
+    "A03",
+    "A04",
+    "A05",
+    "M1",
+    "M2"
+  ],
+  "objective": "Tối ưu Windows Git spawn và thời gian pytest mà không làm quá tải host nhiều EF02 actions; 12 pytest workers là cấu hình thử nghiệm, không phải 12 executor.",
+  "design": {
+    "current_baseline": "subprocess argv uses git directly via PATH; pytest profiles serial; no pytest-xdist declared",
+    "direct_git": "Optional explicit git executable path/GIT executable resolution; no implicit shell/wrapper/hardcoded C:\\ path; fallback git on PATH",
+    "pytest_parallel": "Optional registered pytest-xdist profile up to -n 12 only when available; serial profile remains valid; isolate temp/fixtures and perform deterministic parallel safety checks",
+    "host_budget": "distinguish pytest worker count from EF02 max_parallel, default EF02 max_parallel=2 unchanged; avoid unconstrained 2 actions x 12 workers on limited RAM/CPU",
+    "measurement": "record git invocation latency and serial vs 4/8/12 workers test wall-clock, memory, failures, reproducibility on actual Windows host before choosing defaults",
+    "fallback": "if xdist missing, insufficient RAM, flaky tests, or overhead exceeds benefit keep serial and report reason"
+  },
+  "acceptance": [
+    "Explicit Git path produces correct argv for all current Git calls on Windows; missing/bad path fails clearly or configured safe fallback without changing source provenance.",
+    "pytest-xdist optional profile (when installed) passes target/full tests at chosen 12 workers, with isolated temp/worktrees, no fixture race and no invented speedup claim.",
+    "Measured Windows timings and host resource observations justify chosen setting; if 12 is slower or unstable, retain smaller count or serial.",
+    "Two concurrent EF02 actions do not each overcommit unbounded pytest workers; configuration and resource limit are observable."
+  ],
+  "non_goals": [
+    "12 concurrent Codex/Antigravity models",
+    "Change EF02 default max_parallel to 12",
+    "Disable Windows Defender",
+    "Impose 12 workers on every CI job"
+  ],
+  "implementation_started": false,
+  "measured_windows_baseline": false,
+  "executor_dispatched": false
+}
