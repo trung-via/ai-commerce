@@ -78,7 +78,7 @@ test('claim/candidate exact refs and matching commit identities are observed, no
   assert.deepEqual(r.actions[0],{
     action_id:'success',attempt_id:'attempt-success',
     claim:'CLAIM_REF_VERIFIED',pre_spawn:'NO_PRESPAWN_REF_OBSERVED',
-    candidate:'CANDIDATE_REF_VERIFIED_NOT_RUN_PASS'
+    spawned:'NO_SPAWNED_REF_OBSERVED',candidate:'CANDIDATE_REF_VERIFIED_NOT_RUN_PASS'
   });
   assert.match(reconcile.summary(r),/does NOT prove tests passed/);
   assert.equal(x.posted.length,0);
@@ -257,4 +257,63 @@ test('reuse never reads or manufactures a new remote pre-spawn marker', async ()
     {owner,repo:repoName,issue_number:8});
   assert.equal(report.actions[0].pre_spawn,'REUSE_NO_NEW_PRESPAWN');
   assert.equal(x.accesses.length,0);
+});
+
+
+test('post-spawn remote PID checkpoint is chained to verified pre-spawn, never provider proof', async () => {
+  const a=action('pid-boundary'), entries={};
+  bind(entries,a,{candidate:false});
+  const key=reconcile.attemptKey(repo,a.attempt_id);
+  const claimSha='b'.repeat(40), preSha='d'.repeat(40), spawnedSha='e'.repeat(40);
+  const treeSha='a'.repeat(40);
+  entries['commit:'+claimSha].tree={sha:treeSha};
+  entries['heads/ef02/pre-spawn/'+key]=preSha;
+  entries['commit:'+preSha]={
+    message:'EF02 PRESPAWN\n\nfingerprint='+fingerprint+'\nattempt_id='+a.attempt_id,
+    tree:{sha:treeSha},parents:[{sha:claimSha}]};
+  entries['heads/ef02/spawned/'+key]=spawnedSha;
+  entries['commit:'+spawnedSha]={
+    message:'EF02 SPAWNED\n\nfingerprint='+fingerprint+'\nattempt_id='+a.attempt_id+
+      '\nchild_pid=4312',
+    tree:{sha:treeSha},parents:[{sha:preSha}]};
+  const x=fake([a],entries);
+  const report=await reconcile.reconcileIssue(x.api,{owner,repo:repoName,issue_number:8});
+  assert.equal(report.actions[0].spawned,'SPAWNED_PID_REF_VERIFIED_NOT_PROVIDER_PROOF');
+  assert.equal(report.actions[0].candidate,'NO_CANDIDATE_REF_OBSERVED');
+  assert.match(reconcile.summary(report),/SPAWNED_PID_REF_VERIFIED_NOT_PROVIDER_PROOF/);
+  assert.equal(x.accesses.every(([op])=>op==='getRef'||op==='getCommit'),true);
+});
+
+test('forged spawned checkpoints cannot prove even a child PID', async () => {
+  for (const invalid of ['parent','fingerprint','tree','pid']) {
+    const a=action('bad-pid-'+invalid), entries={};
+    bind(entries,a,{candidate:false});
+    const key=reconcile.attemptKey(repo,a.attempt_id);
+    const claim='b'.repeat(40), pre='d'.repeat(40), spawned='e'.repeat(40);
+    const tree='a'.repeat(40);
+    entries['commit:'+claim].tree={sha:tree};
+    entries['heads/ef02/pre-spawn/'+key]=pre;
+    entries['commit:'+pre]={
+      message:'EF02 PRESPAWN\n\nfingerprint='+fingerprint+'\nattempt_id='+a.attempt_id,
+      tree:{sha:tree},parents:[{sha:claim}]};
+    entries['heads/ef02/spawned/'+key]=spawned;
+    entries['commit:'+spawned]={
+      message:'EF02 SPAWNED\n\nfingerprint='+
+        (invalid==='fingerprint'?'0'.repeat(64):fingerprint)+
+        '\nattempt_id='+a.attempt_id+'\nchild_pid='+(invalid==='pid'?'0':'4312'),
+      tree:{sha:invalid==='tree'?'f'.repeat(40):tree},
+      parents:[{sha:invalid==='parent'?'f'.repeat(40):pre}]};
+    const report=await reconcile.reconcileIssue(fake([a],entries).api,
+      {owner,repo:repoName,issue_number:8});
+    assert.equal(report.actions[0].spawned,'SPAWNED_REF_UNVERIFIED',invalid);
+  }
+});
+
+test('unreadable spawned checkpoint is UNKNOWN, not permission to retry', async () => {
+  const a=action('unreadable-spawned'), entries={};
+  bind(entries,a,{candidate:false});
+  const x=fake([a],entries,{transportError:true});
+  const report=await reconcile.reconcileIssue(x.api,{owner,repo:repoName,issue_number:8});
+  assert.equal(report.actions[0].spawned,'SPAWNED_READ_UNKNOWN');
+  assert.match(reconcile.summary(report),/never blindly replay/);
 });

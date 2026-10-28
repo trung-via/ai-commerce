@@ -88,6 +88,11 @@ def run_probe(env, event, checkout):
         before = record("invocation_boundary.json")
         remote = record("invocation_remote_confirmed.json")
         spawned = record("invocation_spawned.json")
+        remote_spawned = record("invocation_spawned_remote_confirmed.json")
+        if (remote_spawned.get("stage") != "SPAWNED_REMOTE_REF_CONFIRMED"
+            or remote_spawned.get("process_id") != spawned.get("process_id")
+            or remote_spawned.get("provider_invocation_proven") is not False):
+            raise RuntimeError("REMOTE_SPAWN_JOURNAL_UNVERIFIED")
         if ((evidence / "action_result.json").exists() or child is None
             or spawned.get("process_id") != child.pid or starts != 1
             or before.get("status") != "EXECUTION_UNKNOWN"
@@ -103,12 +108,23 @@ def run_probe(env, event, checkout):
         pre_ref = transport.api("GET", "/git/ref/heads/ef02/pre-spawn/" + key)
         pre_commit = transport.api("GET", "/git/commits/" + pre_ref["object"]["sha"])
         fp = before["fingerprint"]
+        spawned_ref = transport.api("GET", "/git/ref/heads/ef02/spawned/" + key)
+        spawned_commit = transport.api(
+            "GET", "/git/commits/" + spawned_ref["object"]["sha"])
         if (claim_commit["message"] != "EF02 CLAIM\n\nfingerprint=" + fp + "\nattempt_id=" + attempt
             or [x["sha"] for x in claim_commit["parents"]] != [source]
             or pre_commit["message"] != "EF02 PRESPAWN\n\nfingerprint=" + fp + "\nattempt_id=" + attempt
             or [x["sha"] for x in pre_commit["parents"]] != [claim_sha]
             or pre_commit["tree"]["sha"] != claim_commit["tree"]["sha"]
-            or remote.get("pre_spawn_remote_ref") != "refs/heads/ef02/pre-spawn/" + key):
+            or remote.get("pre_spawn_remote_ref") != "refs/heads/ef02/pre-spawn/" + key
+            or spawned_commit["message"] !=
+                "EF02 SPAWNED\n\nfingerprint=" + fp + "\nattempt_id=" + attempt +
+                "\nchild_pid=" + str(child.pid)
+            or [x["sha"] for x in spawned_commit["parents"]] !=
+                [pre_ref["object"]["sha"]]
+            or spawned_commit["tree"]["sha"] != pre_commit["tree"]["sha"]
+            or remote_spawned.get("spawned_remote_ref") !=
+                "refs/heads/ef02/spawned/" + key):
             raise RuntimeError("REMOTE_REF_LINEAGE_UNVERIFIED")
         try:
             transport.api("GET", "/git/ref/heads/ef02/candidate/" + key)
@@ -125,6 +141,7 @@ def run_probe(env, event, checkout):
                   "source_sha": source, "attempt_id": attempt,
                   "claim": "CLAIM_REF_VERIFIED",
                   "pre_spawn": "PRESPAWN_REF_VERIFIED_NOT_PROVIDER_PROOF",
+                  "spawned": "SPAWNED_PID_REF_VERIFIED_NOT_PROVIDER_PROOF",
                   "pid_observed": True, "first_receipt_absent": True,
                   "repeat": repeat["status"], "candidate_created": False,
                   "provider_invoked": False, "model_invoked": False,
