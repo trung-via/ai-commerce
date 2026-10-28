@@ -47,7 +47,7 @@ python -m pip install pytest
 python -m pytest tests -q
 ```
 
-The local CLI currently exposes **foundation-only** commands. It cannot dispatch Codex/Antigravity, produce videos, access provider accounts or publish content. See [A01 implementation evidence](docs/engineering/A01_IMPLEMENTATION_REPORT.md), [project state](docs/engineering/PROJECT_STATE.md) and [WorkItem record](work_items/A01-BOOTSTRAP-001.json). A01's 11 targeted tests passed in the Linux staging environment, and a Human-provided Windows PowerShell screenshot shows a separate **11 passed in 0.29s**, successful editable install and CLI help/hello. The exact Windows checkout HEAD and full interpreter version were not shown; no GitHub CI result is claimed. A02 is implemented and locally verified; EF01/EF02 remain unimplemented.
+The local CLI currently exposes **foundation-only** commands. It cannot dispatch Codex/Antigravity, produce videos, access provider accounts or publish content. See [A01 implementation evidence](docs/engineering/A01_IMPLEMENTATION_REPORT.md), [project state](docs/engineering/PROJECT_STATE.md) and [WorkItem record](work_items/A01-BOOTSTRAP-001.json). A01's 11 targeted tests passed in the Linux staging environment, and a Human-provided Windows PowerShell screenshot shows a separate **12 passed in 0.29s**, successful editable install and CLI help/hello. The exact Windows checkout HEAD and full interpreter version were not shown; no GitHub CI result is claimed. A02 is implemented and locally verified; EF01 local source is implemented with synthetic adapter tests, **not live executor verified**. EF02 remains unimplemented.
 
 ## A02 product contracts and mock provider (implemented)
 
@@ -87,3 +87,9 @@ work_items/         # Work item execution status records
 ```
 
 Initial setup from this package: run `./BOOTSTRAP_GITHUB.ps1` in PowerShell from the extracted directory (requires authenticated `gh` and `git`).
+
+## EF01 manual dual-executor core (implementation branch)
+
+`src/ai_commerce/engineering/` provides a manual entrypoint: `python -m ai_commerce.engineering --help`. Human explicitly chooses the executor (`codex` or `antigravity`), exact model/effort, work/attempt, instruction file, targeted verification argv and allowed paths. Both adapters produce the same `AI_COMMERCE_ENGINEERING_RESULT`. No automatic switching, commit, push or EF02 remote wake. Full diagnostics are written only to the selected local output folder; token/cost values stay UNKNOWN unless provider-observed. **12/12 local synthetic-CLI tests PASS; no live Windows Codex/AGY run verified.** See [EF01 evidence](docs/engineering/EF01_IMPLEMENTATION_REPORT.md) and [work item](work_items/EF01-DUAL-EXECUTOR-001.json).
+
+Windows live EF01 conformance (one explicit provider per invocation): [PowerShell helper](scripts/EF01-Windows-Live-Conformance.ps1). Source tests cover UTF-8 BOM inputs from Windows PowerShell; 12/12 synthetic local tests passed. Actual provider runs remain pending.

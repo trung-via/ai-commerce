@@ -343,3 +343,7 @@ Human requested execution of `A01-BOOTSTRAP-001`. G01/G02/G03/G06/G08 have packa
 Human requested A02 implementation. `G04/G05/G07` are `BUILD_VERIFIED_FOR_SCOPE` **on the Linux local environment**: five installable JSON Schema 2020-12 files, provenance/content hashes, a provider-neutral Product adapter protocol and a TEST-ONLY mock textual artifact with manifest/receipt. Targeted regression: 31 passed (11 existing A01 + 20 A02). It does **not** establish a live video/image provider, Windows compatibility, EF01/EF02, publishing or paid model rights.
 
 [WorkItem](../../work_items/A02-CONTRACTS-001.json) · [Evidence](../engineering/A02_IMPLEMENTATION_REPORT.md).
+
+## EF01 implementation evidence update — 2026-10-28
+
+Following Human's EF01 execution request, independent manual Codex/Antigravity CLI core and normalized attempt-bound results are implemented on a dedicated branch. 12/12 local fake-CLI/subprocess/Git tests passed. The WBS acceptance requiring a real code change and scoped verification with **each** provider remains OPEN; EF02 is unimplemented. The older EF01 `NOT_IMPLEMENTED` observations in this document are historical and superseded only as to source implementation, not live verification. See `work_items/EF01-DUAL-EXECUTOR-001.json`.

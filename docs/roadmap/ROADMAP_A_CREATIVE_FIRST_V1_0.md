@@ -149,3 +149,7 @@ Human Windows screenshot for previous A02 revision: 30 passed / 1 failed (timest
 Following the cross-platform date-time validator fix, Human supplied a Windows PowerShell screenshot of a successful editable install and **41 targeted tests PASS in 2.08s**, no failures shown. This replaces the historical RETEST_PENDING status for A02; the prior 30/1 failure remains recorded for provenance. No exact Windows checkout SHA was displayed. A02 remains `BUILD_VERIFIED_FOR_SCOPE`; EF01/EF02 remain NOT_IMPLEMENTED and M0 is NOT_ACHIEVED.
 
 [Windows evidence transcription](../engineering/A02_IMPLEMENTATION_REPORT.md#windows-retest-pass-2026-10-28-human-provided-screenshot).
+
+## EF01 implementation evidence update — 2026-10-28
+
+Prior EF01 `NOT_IMPLEMENTED` snapshots in this roadmap are historical. EF01 local dual-executor code was committed on `ef01-dual-executor-2026-10-28` and passed 12/12 synthetic subprocess/Git targeted tests. Real Codex + Antigravity Windows code-change acceptance remains **NOT_VERIFIED**, so the M0 live engineering milestone is not asserted complete. EF02 remote remains unimplemented. Details: `docs/engineering/EF01_IMPLEMENTATION_REPORT.md`.
