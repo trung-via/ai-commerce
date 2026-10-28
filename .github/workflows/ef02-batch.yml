@@ -1,0 +1,118 @@
+name: EF02 Multi-Action remote engineering
+on:
+  issues:
+    types: [opened, labeled]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Authorized GitHub Issue containing an EF02 batch JSON"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+  actions: read
+
+concurrency:
+  group: ef02-issue-${{ github.event.issue.number || inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issues' && contains(github.event.issue.labels.*.name, 'ef02-execute'))
+    runs-on: ubuntu-latest
+    outputs:
+      issuer: ${{ steps.source.outputs.issuer }}
+      issue_number: ${{ steps.source.outputs.issue_number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -e .
+      - name: Fetch pinned issue body and actual GitHub issuer
+        id: source
+        uses: actions/github-script@v7
+        env:
+          EF02_ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue_number }}
+        with:
+          script: |
+            const fs = require('fs');
+            const n = Number(process.env.EF02_ISSUE_NUMBER);
+            if (!Number.isSafeInteger(n) || n <= 0) {
+              core.setFailed('INVALID_ISSUE_NUMBER');
+              return;
+            }
+            const { data } = await github.rest.issues.get({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: n
+            });
+            if (data.pull_request || !(data.labels || []).some(x => x.name === 'ef02-execute')) {
+              core.setFailed('EF02_ISSUE_NOT_APPROVED');
+              return;
+            }
+            if (!data.body) {
+              core.setFailed('EF02_ISSUE_BODY_EMPTY');
+              return;
+            }
+            fs.writeFileSync('request.json', data.body, { encoding: 'utf8', flag: 'wx' });
+            core.setOutput('issuer', data.user.login);
+            core.setOutput('issue_number', String(n));
+      - name: Validate batch, authorization, DAG and registered verification
+        env:
+          EF02_ISSUER: ${{ steps.source.outputs.issuer }}
+          EF02_OWNER: ${{ github.repository_owner }}
+          EF02_BRAIN_ISSUERS: ${{ vars.EF02_BRAIN_ISSUERS }}
+        shell: bash
+        run: |
+          python -m ai_commerce.remote validate \
+            --request-file request.json --checkout . \
+            --issuer-login "$EF02_ISSUER" --owner-login "$EF02_OWNER" \
+            --brain-issuers "$EF02_BRAIN_ISSUERS"
+      - name: Upload validated request
+        uses: actions/upload-artifact@v4
+        with:
+          name: ef02-request-${{ steps.source.outputs.issue_number }}
+          path: request.json
+          retention-days: 14
+
+  execute:
+    needs: validate
+    runs-on: [self-hosted, Windows, ai-commerce-ef02]
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: ef02-request-${{ needs.validate.outputs.issue_number }}
+          path: .local/ef02-input
+      - name: Install project package
+        shell: pwsh
+        run: python -m pip install -e .
+      - name: Execute bounded concurrent EF01 jobs
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EF02_ISSUER: ${{ needs.validate.outputs.issuer }}
+          EF02_OWNER: ${{ github.repository_owner }}
+          EF02_BRAIN_ISSUERS: ${{ vars.EF02_BRAIN_ISSUERS }}
+          EF02_ISSUE_NUMBER: ${{ needs.validate.outputs.issue_number }}
+        run: |
+          python -m ai_commerce.remote run --checkout . --request-file .local/ef02-input/request.json --issuer-login "$env:EF02_ISSUER" --owner-login "$env:EF02_OWNER" --brain-issuers "$env:EF02_BRAIN_ISSUERS" --issue-number "$env:EF02_ISSUE_NUMBER"
+          exit $LASTEXITCODE
+      - name: Preserve all attempt evidence even when actions fail
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ef02-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .local/ef02/**
+          if-no-files-found: warn
+          retention-days: 14
