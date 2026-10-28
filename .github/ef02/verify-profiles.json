@@ -1,0 +1,23 @@
+{
+  "project-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests",
+    "-q"
+  ],
+  "ef02-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_ef02.py",
+    "-q"
+  ],
+  "foundation-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_foundation.py",
+    "-q"
+  ]
+}
