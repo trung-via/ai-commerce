@@ -75,7 +75,7 @@ async function notify({github, context, core}, run, status, issue) {
   const alreadyReported = comments.some(c => {
     if (c.user?.login !== 'github-actions[bot]') return false;
     const body = c.body || '';
-    const firstLine = body.split('\\n', 1)[0];
+    const firstLine = body.split('\n', 1)[0];
     if (firstLine.startsWith(markerPrefix)) {
       const priorCode = firstLine.slice(markerPrefix.length);
       if (!/^[A-Z][A-Z0-9_]*$/.test(priorCode)) return false;
@@ -90,9 +90,9 @@ async function notify({github, context, core}, run, status, issue) {
     const runUrl = 'https://github.com/' + owner + '/' + repo +
       '/actions/runs/' + run.id;
     const validationFeedback = body.startsWith('EF02 request REJECTED before Windows execution.') &&
-      body.split('\\n').includes('Workflow: ' + runUrl);
+      body.split('\n').includes('Workflow: ' + runUrl);
     const workerFeedback = body.startsWith('EF02 batch ') &&
-      body.split('\\n').includes('GitHub workflow run: ' + run.id);
+      body.split('\n').includes('GitHub workflow run: ' + run.id);
     return validationFeedback || workerFeedback;
   });
   if (alreadyReported) {
