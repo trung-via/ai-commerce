@@ -69,7 +69,7 @@ test('existing GitHub validation feedback prevents duplicate comments', async ()
     {name: 'validate', conclusion: 'failure'}, {name: 'execute', conclusion: 'skipped'}
   ], comments: [{
     user: {login: 'github-actions[bot]'},
-    body: 'EF02 request REJECTED before Windows execution.\\nReason: `TEST`\\nWorkflow: https://github.com/trung-via/ai-commerce/actions/runs/555'
+    body: 'EF02 request REJECTED before Windows execution.\nReason: `TEST`\nWorkflow: https://github.com/trung-via/ai-commerce/actions/runs/555'
   }]});
   assert.equal(await observe({github: x.api, context: x.context, core: x.core}), 0);
   assert.equal(x.posted.length, 0);
