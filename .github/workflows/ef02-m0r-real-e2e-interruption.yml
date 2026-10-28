@@ -1,0 +1,41 @@
+name: EF02 M0-R real EF01 Codex end-to-end interruption
+on:
+  issues:
+    types: [opened]
+permissions:
+  contents: read
+jobs:
+  real-ef01-codex-interruption:
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.action == 'opened' &&
+      github.event.issue.title == '[M0R] EF02 EF01 Codex 6.1 Sol max live E2E interruption' &&
+      github.event.issue.user.login == github.repository_owner
+    runs-on: [self-hosted, Windows, ai-commerce-ef02]
+    permissions:
+      contents: write
+    timeout-minutes: 9
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install local EF02 and EF01
+        shell: pwsh
+        run: python -m pip install -e .
+      - name: One unique LocalBatchWorker to EF01 to real Codex attempt
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYTHONPATH: src
+        run: |
+          python .github/scripts/ef02-m0r-real-e2e-interruption.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve original interrupted attempt evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ef02-m0r-real-e2e-${{ github.run_id }}
+          path: .local/ef02-m0r/**
+          if-no-files-found: warn
+          retention-days: 14
