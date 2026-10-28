@@ -1,7 +1,7 @@
 {
   "work_id": "EF02-MULTI-ACTION-001",
   "wbs_id": "EF02",
-  "status": "IMPLEMENTED",
+  "status": "ACCEPTED_WITH_DEFERRED_RISKS",
   "decision": "docs/governance/HUMAN_DECISION_2026-10-28_EF02_MULTI_ACTION.md",
   "objective": "Independent multi-action remote dispatch and result feedback for AI Commerce engineering; multiple Human/Brain actions submitted together with real bounded parallel EF01 execution.",
   "depends_on": [
@@ -75,7 +75,7 @@
     "ef02_runtime": "SOURCE_IMPLEMENTED_GITHUB_CI_PASS",
     "ef02_windows_parallel_live": "PASS_TWO_REAL_OVERLAPPING_EF01_PROCESSES_94_SECONDS_RUN_40654797946",
     "ef02_github_remote": "FULL_FIVE_ACTION_DAG_AND_GITHUB_FEEDBACK_CONFIRMED_RUN_40665011616",
-    "m0_r": "FIVE_ACTION_DAG_REUSE_LIVE_PASS_OTHER_NEGATIVE_PATH_ACCEPTANCE_OPEN",
+    "m0_r": "ACCEPTED_WITH_DEFERRED_RISKS_HUMAN_2026_10_28",
     "ef02_ci": "PASS_WINDOWS_UBUNTU_RUN_40662224719_SHA_b6e36043d984b8a9d2d090fdc8051e67f482b800",
     "windows_runner_registration": "VERIFIED_LIVE_JOB_40657572754",
     "ef02_windows_local_tests": "PASS_65_OF_65_2026_10_28_HUMAN_POWERSHELL_SCREENSHOT",
@@ -390,7 +390,7 @@
     "https://github.com/trung-via/ai-commerce/actions/runs/40665011616/artifacts/12806017595",
     "https://github.com/trung-via/ai-commerce/commit/fa0132f674bea391c798de986e13e503ca186cb2"
   ],
-  "dispatch_status": "LIVE_REUSE_FIVE_ACTION_DAG_PASS_REMAINING_NEGATIVE_PATHS_OPEN",
+  "dispatch_status": "M0_R_ACCEPTED_WITH_DEFERRED_RISKS_NO_NEW_DISPATCH",
   "human_override_ref": "User approved EF02 Multi-Action v1 and requested update for implementation, 2026-10-28",
   "risk_notes": [
     "Single runner may queue batches even though a batch uses parallel child processes.",
@@ -405,5 +405,64 @@
     "The previously open 5/5 DAG acceptance was satisfied on run 40665011616 through explicitly approved A/B/D reuse; preserve history of earlier failures without treating them as current blocking for this criterion.",
     "M0-R original offline/crash/cancel/source stale/publication-failure negative-path live acceptance remains unproven; candidate refs are not merged to main."
   ],
-  "plan_only_not_runtime": false
+  "plan_only_not_runtime": false,
+  "m0_r_acceptance": {
+    "decision": "Human agreed on 2026-10-28 to defer genuine runner-service outage rehearsal and other rare live negative paths until a real incident, without blocking Roadmap A.",
+    "status": "ACCEPTED_WITH_DEFERRED_RISKS",
+    "evidence": [
+      {
+        "criterion": "FIVE_ACTION_DAG_FANIN_AND_REUSE",
+        "status": "OBSERVED_PASS",
+        "run_id": 40665011616,
+        "issue_number": 10
+      },
+      {
+        "criterion": "REAL_TWO_EXECUTOR_PROCESS_OVERLAP",
+        "status": "OBSERVED_PASS",
+        "run_id": 40661368442
+      },
+      {
+        "criterion": "DUPLICATE_CLAIM_NO_REEXECUTION",
+        "status": "OBSERVED_PASS",
+        "run_id": 40662448102
+      },
+      {
+        "criterion": "CONTROLLED_EF02_EF01_CODEX_PROCESS_INTERRUPTION",
+        "status": "OBSERVED_PASS_SCOPED",
+        "run_id": 40715394122,
+        "issue_number": 47,
+        "interrupted_attempt_status": "EXECUTION_UNKNOWN",
+        "provider_effects_reconciled": false
+      },
+      {
+        "criterion": "HOSTED_OBSERVER_AND_SOURCE_CI",
+        "status": "OBSERVED_PASS",
+        "run_id": 40719927343,
+        "source_sha": "cefb5a17f953a5c7b9f6a3767a26aa60c4f4e266"
+      }
+    ],
+    "deferred": [
+      {
+        "criterion": "REAL_WINDOWS_RUNNER_SERVICE_OFFLINE_AND_RECOVERY",
+        "status": "UNKNOWN_DEFERRED_UNTIL_REAL_INCIDENT"
+      },
+      {
+        "criterion": "ALL_RARE_FAILURE_PATHS_LIVE",
+        "status": "PARTIAL_TEST_AND_UNKNOWN_DEFERRED",
+        "examples": [
+          "post-provider workflow cancel",
+          "quota/unsupported-model live breadth",
+          "publication-failure live breadth"
+        ]
+      }
+    ],
+    "safety_invariants": [
+      "Never infer exactly-once provider execution from a GitHub claim",
+      "No blind replay after an ambiguous invocation",
+      "No automatic executor/model/effort switch",
+      "No automatic main merge"
+    ],
+    "next_phase": "Roadmap A A03/A04, independently of optional EF01/EF02 performance, repair-loop, or Brain Wake enhancements",
+    "provider_invocation_for_this_decision": false
+  }
 }
