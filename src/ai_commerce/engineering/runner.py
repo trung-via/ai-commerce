@@ -110,7 +110,8 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                     selection: ExecutorSelection, instruction: str,
                     verify_argv: Sequence[str], allowed_prefixes: Sequence[str] = (),
                     timeout_seconds: int = 7200, verify_timeout_seconds: int = 1800,
-                    codex_bin: str = "codex", antigravity_bin: str = "agy") -> dict[str, Any]:
+                    codex_bin: str = "codex", antigravity_bin: str = "agy",
+                    codex_windows_sandbox: str | None = None) -> dict[str, Any]:
     """Execute exactly one selected provider and one targeted verification command.
 
     Does not create commits, push, dispatch, retry, or switch providers.
@@ -135,12 +136,15 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
         raise ValueError("WORKTREE_DIRTY: commit/stash existing changes before attempt")
 
     command, stdin = command_for(selection, repo, instruction,
-                                 codex_bin=codex_bin, antigravity_bin=antigravity_bin)
+                                 codex_bin=codex_bin, antigravity_bin=antigravity_bin,
+                                 codex_windows_sandbox=codex_windows_sandbox)
     report: dict[str, Any] = {
         "kind": "AI_COMMERCE_ENGINEERING_RESULT", "version": 1,
         "work_id": work_id, "attempt_id": attempt_id, "started_at": _now(),
         "executor": selection.executor, "model": selection.model, "reasoning_effort": selection.effort,
-        "selection_source": "HUMAN_EXPLICIT", "source_base_sha": head.stdout.strip(),
+        "selection_source": "HUMAN_EXPLICIT",
+        "sandbox_backend": codex_windows_sandbox or "executor-default",
+        "sandbox_policy": "workspace-write" if selection.executor == "codex" else "accept-edits", "source_base_sha": head.stdout.strip(),
         "instruction_sha256": _sha(instruction.encode("utf-8")),
         "repo": str(repo), "status": "NOT_STARTED", "error_code": None,
         "executor_invoked": False, "executor_exit_code": None,

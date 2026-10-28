@@ -246,3 +246,10 @@ def test_remote_schema_limits_parallel_request_not_fixed_slot_count():
     schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
     assert schema["properties"]["max_parallel"]["maximum"] == 128
     assert schema["properties"]["max_parallel"]["default"] == 2
+
+def test_ef02_mxc_only_for_windows_codex_service():
+    from ai_commerce.remote.worker import _remote_codex_sandbox_args
+    assert _remote_codex_sandbox_args("codex", windows=True) == ["--codex-windows-sandbox", "mxc"]
+    assert _remote_codex_sandbox_args("codex", windows=False) == []
+    assert _remote_codex_sandbox_args("antigravity", windows=True) == []
+    assert _remote_codex_sandbox_args("antigravity", windows=False) == []

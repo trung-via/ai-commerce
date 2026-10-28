@@ -13,6 +13,10 @@ from pathlib import Path
 from .transport import GitHubTransport, RemoteTransportError
 from .validation import fingerprint, check_source
 
+def _remote_codex_sandbox_args(executor: str, *, windows: bool) -> list[str]:
+    """EF02 Windows runner overrides only Codex; Antigravity is untouched."""
+    return ["--codex-windows-sandbox", "mxc"] if windows and executor == "codex" else []
+
 def _safe_child_env(checkout: Path) -> dict[str, str]:
     env = dict(os.environ)
     for name in tuple(env):
@@ -146,6 +150,9 @@ class LocalBatchWorker:
                     "--out-dir", str(efdir)]
             for allowed in action["allowed_paths"]:
                 argv.extend(["--allow-path", allowed])
+            sandbox_argv = _remote_codex_sandbox_args(action["executor"], windows=(os.name == "nt"))
+            argv.extend(sandbox_argv)
+            outcome["sandbox_backend"] = "mxc" if sandbox_argv else "executor-default"
             # Never pass GitHub credentials into untrusted model/verification process.
             started = time.time()
             child = subprocess.Popen(argv, cwd=self.checkout, env=_safe_child_env(self.checkout),

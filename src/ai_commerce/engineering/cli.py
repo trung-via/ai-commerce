@@ -30,6 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--verify-timeout-seconds", type=int, default=1800)
     parser.add_argument("--codex-bin", default="codex")
     parser.add_argument("--antigravity-bin", default="agy")
+    parser.add_argument("--codex-windows-sandbox", choices=["mxc"], default=None,
+                        help="Per-invocation MXC override for Codex on EF02 Windows Service only")
     return parser
 
 
@@ -47,7 +49,8 @@ def main(argv: list[str] | None = None) -> int:
                                  allowed_prefixes=args.allow_path,
                                  timeout_seconds=args.timeout_seconds,
                                  verify_timeout_seconds=args.verify_timeout_seconds,
-                                 codex_bin=args.codex_bin, antigravity_bin=args.antigravity_bin)
+                                 codex_bin=args.codex_bin, antigravity_bin=args.antigravity_bin,
+                                 codex_windows_sandbox=args.codex_windows_sandbox)
     except (SelectionError, ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"EF01 INPUT/ENV ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2

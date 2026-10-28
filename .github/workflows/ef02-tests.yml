@@ -1,10 +1,18 @@
 name: EF02 source tests
 on:
   push:
-    branches: [ef02-multi-action-implementation]
+    branches: [ef02-multi-action-implementation, main]
+    paths:
+      - "src/ai_commerce/remote/**"
+      - "src/ai_commerce/engineering/**"
+      - "tests/test_ef02.py"
+      - "tests/test_ef01.py"
+      - ".github/workflows/ef02-tests.yml"
   pull_request:
     paths:
       - "src/ai_commerce/remote/**"
+      - "src/ai_commerce/engineering/**"
+      - "tests/test_ef01.py"
       - "tests/test_ef02.py"
       - ".github/workflows/ef02-*.yml"
       - "contracts/RemoteActionBatch.v1.schema.json"

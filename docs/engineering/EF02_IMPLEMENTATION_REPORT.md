@@ -21,3 +21,14 @@ GitHub CI: https://github.com/trung-via/ai-commerce/actions/runs/40648371883 —
 Register a new Windows self-hosted runner labeled ai-commerce-ef02 and use the same Windows user session where Codex/AGY CLIs are authenticated. Submit an authorized [EF02] GitHub Issue with 2+ independent bounded actions and confirm actual live candidate refs, overlap, result comments and artifact feedback. Test quota/model errors, duplicates, crash/runner offline and uncertainty before declaring M0-R complete. Automatic ChatGPT wake/native continuation remains outside this cut.
 
 **Status:** SOURCE_IMPLEMENTED / GITHUB_CI_TESTED. **M0-R:** OPEN. No AIOS-Renew runtime imported, no automatic merge to main.
+
+## 2026-10-28: Windows Service Codex MXC scoped implementation
+
+Evidence: GitHub live run 40654797946 demonstrated two overlapping processes (Codex and Antigravity) but Codex native legacy Windows sandbox failed on Session 0 with runner pipe-in timeout; Antigravity created a verified candidate. No-model diagnostic run 40656197567 showed legacy default fails with 0xC0000142, while the explicit `-c windows.sandbox=mxc` command succeeds (exit 0).
+
+Implementation:
+- EF01 `command_for` accepts an optional *explicit* Codex-only `codex_windows_sandbox="mxc"` that prepends the one-shot Codex setting; `--sandbox workspace-write`, provider model and effort remain pinned.
+- EF01 CLI exposes `--codex-windows-sandbox mxc`; manual local EF01 defaults unchanged.
+- EF02 Windows remote worker alone passes the override only when `os.name == "nt"` AND the chosen executor is `codex`. Linux and Antigravity remain unchanged; no global config mutation, no provider fallback.
+- Engineering attempt and remote action result report the selected sandbox backend. CLI and remote unit tests assert exact flags and AGY invariance.
+- This source change and tests do not by themselves establish a successful *live* Codex model run under MXC. M0-R stays OPEN pending fresh-attempt GitHub live verification.

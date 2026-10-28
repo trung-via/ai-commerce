@@ -175,3 +175,25 @@ def test_cli_accepts_windows_utf8_bom_verify_json(tmp_path):
     p = subprocess.run(cmd, env=env, capture_output=True, text=True)
     assert p.returncode == 1
     assert json.loads(p.stdout)["status"] == "EXECUTOR_UNAVAILABLE"
+
+def test_codex_windows_service_mxc_override_and_unchanged_antigravity(tmp_path):
+    codex = ExecutorSelection("codex", "gpt-6.1-sol", "max")
+    plain, stdin = command_for(codex, tmp_path, "code change")
+    mxc, other_stdin = command_for(codex, tmp_path, "code change", codex_windows_sandbox="mxc")
+    assert plain[:2] == ["codex", "exec"]
+    assert mxc[:4] == ["codex", "-c", "windows.sandbox=mxc", "exec"]
+    assert mxc[4:] == plain[2:]
+    assert "--sandbox" in mxc and mxc[mxc.index("--sandbox") + 1] == "workspace-write"
+    assert '-c' in mxc and 'model_reasoning_effort="max"' in mxc
+    assert stdin == other_stdin == "code change"
+
+    antigravity = ExecutorSelection("antigravity", "gemini-3.8-flash", "medium")
+    before, no_stdin = command_for(antigravity, tmp_path, "change")
+    after, after_stdin = command_for(antigravity, tmp_path, "change")
+    assert before == after and before[0] == "agy" and no_stdin is after_stdin is None
+    assert "--mode" in before and before[before.index("--mode") + 1] == "accept-edits"
+    assert "windows.sandbox=mxc" not in before
+    with pytest.raises(ValueError, match="CODEX_SANDBOX_WITH_NON_CODEX_EXECUTOR"):
+        command_for(antigravity, tmp_path, "change", codex_windows_sandbox="mxc")
+    with pytest.raises(ValueError, match="UNSUPPORTED_CODEX_WINDOWS_SANDBOX"):
+        command_for(codex, tmp_path, "change", codex_windows_sandbox="none")
