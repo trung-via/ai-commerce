@@ -127,7 +127,7 @@ test('EF02 workflow run title quotes the Issue number to avoid YAML comments', (
   const fs = require('node:fs');
   const path = require('node:path');
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/ef02-batch.yml'), 'utf8');
-  const line = workflow.split('\\n').find(x => x.startsWith('run-name: '));
+  const line = workflow.split(/\r?\n/).find(x => x.startsWith('run-name: '));
   assert.ok(line, 'workflow should bind Issue number to run title');
   assert.ok(line.startsWith('run-name: "EF02 Issue #'), 'YAML # must be quoted');
   assert.ok(line.endsWith('"'), 'run-name must close its quote');
