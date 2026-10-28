@@ -22,7 +22,7 @@ jobs:
   validate:
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'issues' && contains(github.event.issue.labels.*.name, 'ef02-execute'))
+      (github.event_name == 'issues' && startsWith(github.event.issue.title, '[EF02]'))
     runs-on: ubuntu-latest
     outputs:
       issuer: ${{ steps.source.outputs.issuer }}
@@ -52,7 +52,7 @@ jobs:
             const { data } = await github.rest.issues.get({
               owner: context.repo.owner, repo: context.repo.repo, issue_number: n
             });
-            if (data.pull_request || !(data.labels || []).some(x => x.name === 'ef02-execute')) {
+            if (data.pull_request || !data.title.startsWith('[EF02]')) {
               core.setFailed('EF02_ISSUE_NOT_APPROVED');
               return;
             }
@@ -105,6 +105,7 @@ jobs:
           EF02_OWNER: ${{ github.repository_owner }}
           EF02_BRAIN_ISSUERS: ${{ vars.EF02_BRAIN_ISSUERS }}
           EF02_ISSUE_NUMBER: ${{ needs.validate.outputs.issue_number }}
+          EF02_HOST_SLOTS: ${{ vars.EF02_HOST_SLOTS || '2' }}
         run: |
           python -m ai_commerce.remote run --checkout . --request-file .local/ef02-input/request.json --issuer-login "$env:EF02_ISSUER" --owner-login "$env:EF02_OWNER" --brain-issuers "$env:EF02_BRAIN_ISSUERS" --issue-number "$env:EF02_ISSUE_NUMBER"
           exit $LASTEXITCODE

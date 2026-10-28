@@ -53,7 +53,9 @@ def run_schedule(batch: dict, work, *, max_workers: int | None = None) -> dict:
                 resources = set(action.get("resources", []))
                 if resources & held_resources:
                     continue
-                future = pool.submit(call, action)
+                dispatch_action = dict(action)
+                dispatch_action["resolved_dependencies"] = [results[p] for p in action["depends_on"]]
+                future = pool.submit(call, dispatch_action)
                 active[future] = (action["action_id"], resources)
                 held_resources.update(resources)
                 pending.remove(action["action_id"])

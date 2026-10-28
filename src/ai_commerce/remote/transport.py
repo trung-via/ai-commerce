@@ -93,6 +93,57 @@ class GitHubTransport:
         self._create_ref(name, commit["sha"])
         return {"candidate_sha": commit["sha"], "candidate_ref": "refs/heads/" + name}
 
+    def integrated_source(self, *, source_sha: str, attempt_id: str,
+                          dependencies: list[dict]) -> dict:
+        """Combine pinned dependency candidate trees (never merge to main).
+
+        Distinct edits to the same path create an explicit integration conflict.
+        Transitive changes with identical blobs merge deterministically.
+        """
+        if not dependencies:
+            return {"effective_sha": source_sha, "integration_ref": None}
+        base = self.api("GET", "/git/commits/" + source_sha)
+        def entries(tree_sha: str) -> dict:
+            payload = self.api("GET", "/git/trees/" + tree_sha + "?recursive=1")
+            if payload.get("truncated"):
+                raise RemoteTransportError("INTEGRATION_TREE_TRUNCATED")
+            return {e["path"]: (e["mode"], e["type"], e["sha"])
+                    for e in payload.get("tree", [])
+                    if e["type"] in ("blob", "commit")}
+        original = entries(base["tree"]["sha"])
+        overlay: dict[str, tuple | None] = {}
+        for dependency in dependencies:
+            candidate_sha = dependency.get("candidate_sha")
+            if not candidate_sha:
+                raise RemoteTransportError("DEPENDENCY_CANDIDATE_MISSING")
+            candidate = self.api("GET", "/git/commits/" + candidate_sha)
+            modified = entries(candidate["tree"]["sha"])
+            for path in sorted(set(original) | set(modified)):
+                old = original.get(path)
+                new = modified.get(path)
+                if old == new:
+                    continue
+                if path in overlay and overlay[path] != new:
+                    raise RemoteTransportError("INTEGRATION_CONFLICT:" + path)
+                overlay[path] = new
+        if not overlay:
+            return {"effective_sha": source_sha, "integration_ref": None}
+        changes = []
+        for path, item in sorted(overlay.items()):
+            if item is None:
+                changes.append({"path": path, "mode": "100644", "type": "blob", "sha": None})
+            else:
+                mode, kind, sha = item
+                changes.append({"path": path, "mode": mode, "type": kind, "sha": sha})
+        target = self.api("POST", "/git/trees",
+                          {"base_tree": base["tree"]["sha"], "tree": changes})
+        commit = self.api("POST", "/git/commits",
+                          {"message": "EF02 dependency integration for " + attempt_id,
+                           "tree": target["sha"], "parents": [source_sha]})
+        ref = "ef02/integrated/" + self.attempt_key(attempt_id)
+        self._create_ref(ref, commit["sha"])
+        return {"effective_sha": commit["sha"], "integration_ref": "refs/heads/" + ref}
+
     def comment(self, issue_number: int, text: str) -> None:
         if issue_number <= 0:
             return

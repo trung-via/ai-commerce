@@ -48,8 +48,15 @@ def main(argv: list[str] | None = None) -> int:
         github = GitHubTransport(repo, token)
         worker = LocalBatchWorker(checkout=checkout, batch=batch, profiles=profiles,
                                   github=github)
+        host_slots = int(os.environ.get("EF02_HOST_SLOTS", "2"))
+        if host_slots < 1 or host_slots > 128:
+            raise ValueError("EF02_HOST_SLOTS must be in 1..128")
+        requested = args.max_parallel or batch.get("max_parallel", 2)
+        if requested < 1:
+            raise ValueError("INVALID_MAX_PARALLEL")
         report = run_schedule(batch, worker.execute_action,
-                              max_workers=args.max_parallel or None)
+                              max_workers=min(host_slots, requested))
+        report["host_parallel_slots"] = host_slots
         report["github_workflow_run_id"] = os.environ.get("GITHUB_RUN_ID")
         report["github_issue_number"] = args.issue_number or None
         report["feedback_status"] = "NOT_ATTEMPTED"

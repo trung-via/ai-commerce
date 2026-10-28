@@ -1,5 +1,6 @@
 """EF02 Windows-ready worker: isolated EF01 subprocesses and durable GitHub results."""
 from __future__ import annotations
+import base64
 import hashlib
 import json
 import os
@@ -67,15 +68,16 @@ class LocalBatchWorker:
         path.mkdir(parents=True, exist_ok=True)
         source = self.batch["source_sha"]
         # Stable fingerprint covers batch/source and exact action profile and scope.
+        submitted_action = {k: v for k, v in action.items() if k != "resolved_dependencies"}
         fp = fingerprint({"batch_id": self.batch["batch_id"], "source_sha": source,
-                          "action": action})
+                          "action": submitted_action})
         outcome = {"action_id": aid, "attempt_id": attempt_id,
                    "executor": action["executor"], "model": action["model"],
                    "effort": action["effort"], "source_sha": source,
                    "fingerprint": fp, "status": "NOT_STARTED",
                    "error_code": None, "candidate_ref": None, "candidate_sha": None,
                    "depends_on": action["depends_on"],
-                   "dependency_semantics": "ORDER_ONLY_NO_AUTO_CODE_MERGE",
+                   "dependency_semantics": "PINNED_DEPENDENCY_TREE_COMPOSITION",
                    "evidence_path": str(path), "executor_invoked": False}
         def finish():
             _write_json(path / "action_result.json", outcome)
@@ -91,13 +93,40 @@ class LocalBatchWorker:
             outcome.update(status="CLAIM_UNAVAILABLE", error_code=type(exc).__name__,
                            diagnostic=str(exc))
             return finish()
+        effective = source
+        try:
+            merged = self.github.integrated_source(
+                source_sha=source, attempt_id=attempt_id,
+                dependencies=action.get("resolved_dependencies", []))
+            effective = merged["effective_sha"]
+            outcome["effective_source_sha"] = effective
+            outcome["integration_ref"] = merged["integration_ref"]
+            if effective != source:
+                # GitHub API created the pinned integration commit: fetch it
+                # with credentials scoped to this administrative subprocess.
+                token = os.environ.get("GITHUB_TOKEN", "")
+                auth = base64.b64encode(("x-access-token:" + token).encode()).decode()
+                env = dict(os.environ)
+                env["GIT_CONFIG_COUNT"] = "1"
+                env["GIT_CONFIG_KEY_0"] = "http.https://github.com/.extraheader"
+                env["GIT_CONFIG_VALUE_0"] = "AUTHORIZATION: basic " + auth
+                fetched = subprocess.run(
+                    ["git", "-C", str(self.checkout), "fetch", "--no-tags",
+                     "--no-write-fetch-head", "origin", merged["integration_ref"]],
+                    env=env, capture_output=True, text=True, check=False)
+                if fetched.returncode:
+                    raise RemoteTransportError("INTEGRATION_FETCH_FAILED")
+        except Exception as exc:
+            outcome.update(status="INTEGRATION_FAILED", error_code=type(exc).__name__,
+                           diagnostic=str(exc))
+            return finish()
         worktree = Path(tempfile.mkdtemp(prefix="ai-commerce-ef02-" + aid + "-"))
         # Use a new empty directory as parent; git worktree add requires absent target.
         worktree.rmdir()
         outcome["worktree"] = str(worktree)
         try:
             p = subprocess.run(["git", "-C", str(self.checkout), "worktree", "add",
-                                "--detach", str(worktree), source],
+                                "--detach", str(worktree), effective],
                                capture_output=True, text=True, check=False)
             if p.returncode != 0:
                 outcome.update(status="SOURCE_WORKTREE_FAILED",
@@ -150,11 +179,11 @@ class LocalBatchWorker:
                 outcome["status"] = _classify_failed_executor(report, efdir)
                 outcome["error_code"] = report.get("error_code") or "EF01_NONPASS"
                 return finish()
-            if report.get("source_base_sha") != source:
+            if report.get("source_base_sha") != effective:
                 outcome.update(status="SOURCE_MISMATCH", error_code="EF01_BASE_MISMATCH")
                 return finish()
             try:
-                candidate = self.github.candidate(source_sha=source, attempt_id=attempt_id,
+                candidate = self.github.candidate(source_sha=effective, attempt_id=attempt_id,
                                                   workspace=worktree,
                                                   paths=report["changed_files"])
             except Exception as exc:
