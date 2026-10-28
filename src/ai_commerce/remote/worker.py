@@ -188,11 +188,13 @@ class LocalBatchWorker:
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             outcome.update(executor_invoked=True, process_id=child.pid,
                            process_started_at=started)
+            timed_out = False
             try:
                 stdout, stderr = child.communicate(timeout=7500)
             except subprocess.TimeoutExpired:
                 child.kill()
                 stdout, stderr = child.communicate()
+                timed_out = True
                 outcome.update(status="EXECUTION_UNKNOWN",
                                error_code="EF01_PROCESS_TIMEOUT")
             outcome["process_finished_at"] = time.time()
@@ -200,6 +202,11 @@ class LocalBatchWorker:
             (path / "ef01-wrapper.stdout").write_text(stdout, encoding="utf-8")
             (path / "ef01-wrapper.stderr").write_text(stderr, encoding="utf-8")
             result_file = efdir / "engineering_result.json"
+            if timed_out:
+                # A receipt from a killed child can be stale or partially written.
+                # Preserve it on disk, but never classify it as verified or publish it.
+                outcome["receipt_after_timeout"] = result_file.exists()
+                return finish()
             if not result_file.exists():
                 outcome.update(status="EXECUTION_UNKNOWN",
                                error_code="EF01_RESULT_MISSING")
