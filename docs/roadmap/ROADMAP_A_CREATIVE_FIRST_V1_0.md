@@ -152,4 +152,4 @@ Following the cross-platform date-time validator fix, Human supplied a Windows P
 
 ## EF01 implementation evidence update — 2026-10-28
 
-Prior EF01 `NOT_IMPLEMENTED` snapshots in this roadmap are historical. EF01 local dual-executor code was committed on `ef01-dual-executor-2026-10-28` and passed 11/11 synthetic subprocess/Git targeted tests. Real Codex + Antigravity Windows code-change acceptance remains **NOT_VERIFIED**, so the M0 live engineering milestone is not asserted complete. EF02 remote remains unimplemented. Details: `docs/engineering/EF01_IMPLEMENTATION_REPORT.md`.
+Prior EF01 `NOT_IMPLEMENTED` snapshots in this roadmap are historical. EF01 local dual-executor code was committed on `ef01-dual-executor-2026-10-28` and passed 12/12 synthetic subprocess/Git targeted tests. Real Codex + Antigravity Windows code-change acceptance remains **NOT_VERIFIED**, so the M0 live engineering milestone is not asserted complete. EF02 remote remains unimplemented. Details: `docs/engineering/EF01_IMPLEMENTATION_REPORT.md`.
