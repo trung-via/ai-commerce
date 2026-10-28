@@ -135,3 +135,51 @@ test('EF02 workflow run title quotes the Issue number to avoid YAML comments', (
   assert.ok(line.endsWith('"'), 'run-name must close its quote');
   assert.ok(line.includes('github.event.issue.number || inputs.issue_number'));
 });
+
+test('owner-hosted cancellation with skipped validate and Windows is confirmed pre-executor', async () => {
+  const x = fake({jobs:[
+    {name:'m0r_pre_executor_cancel', status:'completed', conclusion:'cancelled'},
+    {name:'validate', status:'completed', conclusion:'skipped'},
+    {name:'execute', status:'completed', conclusion:'skipped'}
+  ]});
+  const status = observe.classifyTerminal(x.context.payload.workflow_run, [
+    {name:'m0r_pre_executor_cancel', conclusion:'cancelled'},
+    {name:'validate', conclusion:'skipped'},
+    {name:'execute', conclusion:'skipped'}
+  ]);
+  assert.equal(status.code,'WORKFLOW_CANCELLED_PRE_EXECUTOR_NO_WINDOWS');
+  assert.match(status.detail,/never invoked/);
+  assert.equal(await observe({github:x.api,context:x.context,core:x.core}),1);
+  assert.match(x.posted[0].body,/WORKFLOW_CANCELLED_PRE_EXECUTOR_NO_WINDOWS/);
+  assert.doesNotMatch(x.posted[0].body,/candidate=CLAIM_REF_VERIFIED/);
+});
+
+test('cancellation after Windows was started remains uncertain, not safe', () => {
+  const status = observe.classifyTerminal(run(),[
+    {name:'m0r_pre_executor_cancel', conclusion:'skipped'},
+    {name:'validate', conclusion:'success'},
+    {name:'execute', conclusion:'cancelled'}
+  ]);
+  assert.equal(status.code,'WORKFLOW_CANCELLED_EXECUTION_UNCERTAIN');
+  assert.match(status.detail,/side effects are UNKNOWN/);
+});
+
+test('pre-executor cancellation probe cannot enable Windows or override issue owner guard', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const text = fs.readFileSync(path.join(__dirname,'../.github/workflows/ef02-batch.yml'),'utf8');
+  const probe = text.slice(text.indexOf('  m0r_pre_executor_cancel:'),text.indexOf('  validate:'));
+  const validate = text.slice(text.indexOf('  validate:'),text.indexOf('  execute:'));
+  const execute = text.slice(text.indexOf('  execute:'));
+  const title = '[EF02] M0-R pre-executor cancellation probe';
+  assert.ok(probe.includes("github.event.issue.user.login == github.repository_owner"));
+  assert.ok(probe.includes("github.event.action == 'opened'"));
+  assert.ok(probe.includes('actions: write'));
+  assert.ok(probe.includes('runs-on: ubuntu-latest'));
+  assert.ok(probe.includes('github.rest.actions.cancelWorkflowRun'));
+  assert.ok(probe.includes('run_id: context.runId'));
+  assert.ok(validate.includes("github.event.issue.title != '" + title + "'"));
+  assert.ok(execute.includes("github.event.issue.title == '" + title + "'"));
+  assert.ok(execute.includes('needs.validate.result == \'success\''));
+  assert.ok(execute.includes('runs-on: [self-hosted, Windows, ai-commerce-ef02]'));
+});
