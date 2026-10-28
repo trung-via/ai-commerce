@@ -1,0 +1,52 @@
+name: M0-R isolated Windows runner loss rehearsal (no model)
+run-name: "M0R isolated ${{ inputs.phase }} run #${{ github.run_id }}"
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: "Preflight first. Hold only on an independently registered isolated VM."
+        required: true
+        type: choice
+        options: [preflight, hold]
+permissions:
+  contents: read
+concurrency:
+  group: m0r-isolated-runner-loss
+  cancel-in-progress: false
+jobs:
+  isolated-preflight:
+    if: github.actor == github.repository_owner && inputs.phase == 'preflight'
+    runs-on: [self-hosted, Windows, X64, ai-commerce-m0r-isolated]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check dedicated registered service without a model call
+        shell: pwsh
+        run: |
+          if ($env:RUNNER_NAME -cne 'AI-COMMERCE-M0R-ISOLATED-01') { throw 'WRONG_RUNNER_NAME' }
+          & ./scripts/EF02-M0R-IsolatedRunner-Control.ps1 -Mode Inspect
+          if (-not $?) { throw 'ISOLATED_GUARD_PRECHECK_FAILED' }
+          Write-Host 'M0R_ISOLATED_PREFLIGHT_PASS_NOT_OFFLINE_TEST'
+  isolated-hold:
+    if: github.actor == github.repository_owner && inputs.phase == 'hold'
+    runs-on: [self-hosted, Windows, X64, ai-commerce-m0r-isolated]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Confirm isolated runner before loss observation
+        shell: pwsh
+        run: |
+          if ($env:RUNNER_NAME -cne 'AI-COMMERCE-M0R-ISOLATED-01') { throw 'WRONG_RUNNER_NAME' }
+          & ./scripts/EF02-M0R-IsolatedRunner-Control.ps1 -Mode Inspect
+          if (-not $?) { throw 'ISOLATED_GUARD_PRECHECK_FAILED' }
+      - name: No-model hold for external service loss and automatic recovery
+        shell: pwsh
+        run: |
+          Write-Host "M0R_ISOLATED_HOLD_ENTERED run_id=$env:GITHUB_RUN_ID runner=$env:RUNNER_NAME"
+          Write-Host 'HOLD_HAS_NO_PROVIDER_OR_EF01_INVOCATION'
+          Start-Sleep -Seconds 1200
+          Write-Host 'M0R_HOLD_COMPLETED_NO_LOSS_OBSERVED_IF_NO_EXTERNAL_STOP'
