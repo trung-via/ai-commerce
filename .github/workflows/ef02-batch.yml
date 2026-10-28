@@ -64,16 +64,47 @@ jobs:
             core.setOutput('issuer', data.user.login);
             core.setOutput('issue_number', String(n));
       - name: Validate batch, authorization, DAG and registered verification
+        id: validation
         env:
           EF02_ISSUER: ${{ steps.source.outputs.issuer }}
           EF02_OWNER: ${{ github.repository_owner }}
           EF02_BRAIN_ISSUERS: ${{ vars.EF02_BRAIN_ISSUERS }}
         shell: bash
         run: |
+          set +e
           python -m ai_commerce.remote validate \
             --request-file request.json --checkout . \
             --issuer-login "$EF02_ISSUER" --owner-login "$EF02_OWNER" \
-            --brain-issuers "$EF02_BRAIN_ISSUERS"
+            --brain-issuers "$EF02_BRAIN_ISSUERS" 2> ef02-validation.stderr
+          validation_exit=$?
+          cat ef02-validation.stderr >&2
+          exit "$validation_exit"
+      - name: Report hosted validation rejection to Issue
+        if: ${{ failure() && steps.validation.outcome == 'failure' && steps.source.outputs.issue_number != '' }}
+        uses: actions/github-script@v7
+        env:
+          EF02_ISSUE_NUMBER: ${{ steps.source.outputs.issue_number }}
+        with:
+          script: |
+            const fs = require('fs');
+            const raw = fs.existsSync('ef02-validation.stderr')
+              ? fs.readFileSync('ef02-validation.stderr', 'utf8') : '';
+            // Never echo untrusted exception bodies or request contents into the Issue.
+            const matched = raw.match(/EF02_REQUEST_REJECTED:\s*[A-Za-z_]+:\s*([A-Z][A-Z0-9_]{2,79})/);
+            const reason = matched ? matched[1] : 'EF02_VALIDATION_FAILED';
+            const n = Number(process.env.EF02_ISSUE_NUMBER);
+            if (!Number.isSafeInteger(n) || n <= 0) {
+              core.setFailed('INVALID_ISSUE_NUMBER');
+              return;
+            }
+            const link = process.env.GITHUB_SERVER_URL + '/' + context.repo.owner + '/' + context.repo.repo + '/actions/runs/' + context.runId;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: n,
+              body: ['EF02 request REJECTED before Windows execution.',
+                     'Reason: `' + reason + '`',
+                     'Workflow: ' + link,
+                     'No model was invoked by this rejected request.'].join('\n')
+            });
       - name: Upload validated request
         uses: actions/upload-artifact@v4
         with:
