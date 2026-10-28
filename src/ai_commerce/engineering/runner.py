@@ -47,7 +47,11 @@ def _changes(repo: Path) -> list[str]:
         result.append(entry[3:])
         index += 1
         if "R" in kind or "C" in kind:
-            index += 1  # extra source path in a rename/copy record
+            # In porcelain -z, a rename/copy has TWO paths: destination,
+            # then original. Both are necessary to delete the old tree entry.
+            if index < len(entries) and entries[index]:
+                result.append(entries[index].decode("utf-8", "replace"))
+            index += 1
     return sorted(set(result))
 
 
@@ -282,6 +286,10 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
             report.update(status="GIT_UNEXPECTED_COMMIT", error_code="GIT_HEAD_CHANGED")
         elif not report["scope_valid"]:
             report.update(status="SCOPE_VIOLATION", error_code="CHANGES_OUTSIDE_ALLOWED_SCOPE_AFTER_VERIFY")
+        elif not final_changed:
+            # A verification command may undo the executor's only change.
+            # A zero exit code cannot turn an empty final diff into PASS.
+            report.update(status="NO_CODE_CHANGE", error_code="NO_CHANGED_FILES_AFTER_VERIFY")
         else:
             report.update(status="BUILD_VERIFIED_FOR_SCOPE" if report["verify_exit_code"] == 0 else "VERIFICATION_FAILED",
                           error_code=None if report["verify_exit_code"] == 0 else "TARGETED_VERIFY_NONZERO_OR_UNAVAILABLE")
