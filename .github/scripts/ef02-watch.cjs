@@ -7,8 +7,8 @@ const TARGET_WORKFLOW = 'EF02 Multi-Action remote engineering';
 const TARGET_FILE = 'ef02-batch.yml';
 
 function issueNumber(run, repoFullName) {
-  if (!run || run.name !== TARGET_WORKFLOW ||
-      run.head_repository?.full_name !== repoFullName) return null;
+  // GitHub overrides run.name with run-name; watcher workflow/event already scopes the workflow.
+  if (!run || run.head_repository?.full_name !== repoFullName) return null;
   const match = /^EF02 Issue #(\d+)$/.exec(run.display_title || '');
   if (!match) return null;
   const id = Number(match[1]);
