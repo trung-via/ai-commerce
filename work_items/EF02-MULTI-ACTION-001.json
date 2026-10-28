@@ -1,7 +1,7 @@
 {
   "work_id": "EF02-MULTI-ACTION-001",
   "wbs_id": "EF02",
-  "status": "ACCEPTED_FOR_WORK",
+  "status": "IMPLEMENTED",
   "decision": "docs/governance/HUMAN_DECISION_2026-10-28_EF02_MULTI_ACTION.md",
   "objective": "Independent multi-action remote dispatch and result feedback for AI Commerce engineering; multiple Human/Brain actions submitted together with real bounded parallel EF01 execution.",
   "depends_on": [
@@ -28,17 +28,17 @@
     {
       "id": "EF02-A",
       "title": "Batch ingress, identity, Git claim",
-      "status": "ACCEPTED_FOR_WORK"
+      "status": "SOURCE_IMPLEMENTED_CI_VERIFIED"
     },
     {
       "id": "EF02-B",
       "title": "Windows concurrent scheduler and EF01 execution",
-      "status": "ACCEPTED_FOR_WORK"
+      "status": "SOURCE_IMPLEMENTED_CI_VERIFIED"
     },
     {
       "id": "EF02-C",
       "title": "Batch feedback, diagnostics and repair",
-      "status": "ACCEPTED_FOR_WORK"
+      "status": "SOURCE_IMPLEMENTED_CI_VERIFIED"
     },
     {
       "id": "EF02-D",
@@ -72,27 +72,35 @@
   "verification": {
     "ef01_dependency": "BUILD_VERIFIED_FOR_SCOPE",
     "ef01_windows_tests": "53_PASS_2026_10_28",
-    "ef02_runtime": "NOT_IMPLEMENTED",
-    "ef02_windows_parallel_live": "NOT_RUN",
-    "ef02_github_remote": "NOT_RUN",
-    "m0_r": "OPEN"
+    "ef02_runtime": "SOURCE_IMPLEMENTED_GITHUB_CI_PASS",
+    "ef02_windows_parallel_live": "NOT_RUN_ON_USER_HOST",
+    "ef02_github_remote": "NOT_RUN_ON_USER_HOST",
+    "m0_r": "OPEN",
+    "ef02_ci": "PASS_UBUNTU_AND_WINDOWS_RUN_40648371883",
+    "windows_runner_registration": "NOT_VERIFIED"
   },
   "expected_artifacts": [
     "contracts/RemoteActionBatch.v1.schema.json",
     "src/ai_commerce/remote/",
     "tests/test_ef02_*.py",
     ".github/workflows/ef02-batch.yml",
-    "docs/engineering/EF02_MULTI_ACTION_IMPLEMENTATION_PLAN_V1_0_2026-10-28.md"
+    "docs/engineering/EF02_MULTI_ACTION_IMPLEMENTATION_PLAN_V1_0_2026-10-28.md",
+    "docs/engineering/EF02_IMPLEMENTATION_REPORT.md",
+    "docs/engineering/EF02_WINDOWS_RUNNER_SETUP.md"
   ],
   "evidence_refs": [
-    "docs/engineering/EF02_MULTI_ACTION_IMPLEMENTATION_PLAN_V1_0_2026-10-28.md"
+    "docs/engineering/EF02_MULTI_ACTION_IMPLEMENTATION_PLAN_V1_0_2026-10-28.md",
+    "docs/engineering/EF02_IMPLEMENTATION_REPORT.md",
+    "docs/engineering/EF02_WINDOWS_RUNNER_SETUP.md",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40648371883"
   ],
-  "dispatch_status": "NOT_DISPATCHED",
+  "dispatch_status": "WORKFLOW_SOURCE_AVAILABLE_NOT_LIVE_CONFIRMED",
   "human_override_ref": "User approved EF02 Multi-Action v1 and requested update for implementation, 2026-10-28",
   "risk_notes": [
-    "Initial one-runner version runs independent actions in parallel within a batch, not batches concurrently.",
-    "Actual runner registration and GitHub webhook/Issue-to-Actions path are not yet verified.",
-    "Model quota/resource limits may reduce actual overlap; local fake-worker tests must prove scheduler independently."
+    "CI uses GitHub-hosted Windows/Linux and simulated providers, not user laptop live Codex/AGY.",
+    "Separate Windows runner with label ai-commerce-ef02 remains unregistered/unverified.",
+    "Single runner may queue batches even though a batch uses parallel child processes.",
+    "Candidate refs are create-only and not merged into main; Chat Wake/native continuation not implemented."
   ],
-  "plan_only_not_runtime": true
+  "plan_only_not_runtime": false
 }

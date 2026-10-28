@@ -97,3 +97,7 @@ Windows live EF01 conformance (one explicit provider per invocation): [PowerShel
 ## EF02 Multi-Action — approved for implementation (not yet activated)
 
 Human approved EF02 Multi-Action v1 on 2026-10-28: multiple Human/Brain actions in a batch, DAG dependencies, at least two truly concurrent independent Windows EF01 executor subprocesses initially (configurable), per-attempt claim/worktree/Git candidate and per-action plus aggregate feedback. EF02-A/B/C implementation remains pending; no GitHub remote workflow or project Windows runner currently proven active. See [Human decision](docs/governance/HUMAN_DECISION_2026-10-28_EF02_MULTI_ACTION.md), [implementation handoff](docs/engineering/EF02_MULTI_ACTION_IMPLEMENTATION_PLAN_V1_0_2026-10-28.md) and [WorkItem](work_items/EF02-MULTI-ACTION-001.json). M0-R stays OPEN; proactive Chat Wake requires separate proof.
+
+## EF02 Multi-Action source implementation (remote live pending)
+
+Independent remote engineering implementation is in src/ai_commerce/remote/ with hosted ingress, separate Windows runner job, two-slot (configurable) parallel subprocess scheduling, DAG candidate composition, GitHub attempt claims, candidate refs and aggregate feedback. GitHub CI run 40648371883 passed on hosted Windows and Ubuntu. See docs/engineering/EF02_IMPLEMENTATION_REPORT.md and docs/engineering/EF02_WINDOWS_RUNNER_SETUP.md. The real self-hosted Windows runner and automatic remote feedback have not yet been tested; M0-R remains OPEN.
