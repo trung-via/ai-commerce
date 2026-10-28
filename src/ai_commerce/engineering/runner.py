@@ -195,7 +195,11 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
             p = subprocess.run(command, cwd=repo, input=stdin, capture_output=True,
                                text=True, encoding="utf-8", errors="replace",
                                timeout=timeout_seconds, check=False)
-            report["executor_exit_code"] = p.returncode
+            # The supervisor observed the CLI process return. Its exit code
+            # alone is not a verified model outcome; continue through the
+            # normal scope and verification checks before any PASS decision.
+            report.update(status="EXECUTOR_RETURNED_UNVERIFIED",
+                          executor_exit_code=p.returncode)
             out, err = p.stdout.encode("utf-8"), p.stderr.encode("utf-8")
             # Process exit is observable; provider-side effects and verification
             # are still not proven by a CLI exit code alone.
