@@ -331,3 +331,9 @@ Project claims should remain distinct:
 - Companion source: [`WORK_TREE_V1_1.json`](WORK_TREE_V1_1.json) — 63 WBS items with machine-readable dependencies.
 - Selected six-phase plan: [`ROADMAP_A_CREATIVE_FIRST_V1_0.md`](ROADMAP_A_CREATIVE_FIRST_V1_0.md) and [JSON](ROADMAP_A_CREATIVE_FIRST_V1_0.json) — A01–A18, M0–M6, with EF-01/EF-02 in Phase 0.
 - Human decision: [`HUMAN_DECISION_2026-10-28_ENGINEERING_FLOW.md`](../governance/HUMAN_DECISION_2026-10-28_ENGINEERING_FLOW.md).
+
+## A01 delivery observation — 2026-10-28
+
+Human requested execution of `A01-BOOTSTRAP-001`. G01/G02/G03/G06/G08 have package skeleton, targeted tests, project-state/ADR/semantic-owner records and isolation observations. Status `BUILD_VERIFIED_FOR_SCOPE` is **local Python bootstrap only**, not Windows live verification, executor invocation or product readiness.
+
+[WorkItem](../../work_items/A01-BOOTSTRAP-001.json) · [Evidence](../engineering/A01_IMPLEMENTATION_REPORT.md). A02, EF01, EF02 are not implemented; M0 is not achieved.

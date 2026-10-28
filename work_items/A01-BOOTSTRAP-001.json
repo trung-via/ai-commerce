@@ -1,0 +1,32 @@
+{
+  "work_id": "A01-BOOTSTRAP-001",
+  "objective": "Independent AI Commerce Python package, CLI, targeted tests, docs/engineering state and cross-project isolation",
+  "status": "BUILD_VERIFIED_FOR_SCOPE",
+  "source_decision": "docs/governance/HUMAN_DECISION_2026-10-28_ENGINEERING_FLOW.md",
+  "scope_in": ["G01", "G02", "G03", "G06", "G08"],
+  "scope_out": ["A02", "EF01", "EF02", "media production", "live external execution"],
+  "acceptance": [
+    "Editable install and import ai_commerce",
+    "python -m ai_commerce --help succeeds",
+    "Targeted tests pass with local evidence",
+    "Project status, semantic owners, ADR and cross-project isolation documented",
+    "Repository source committed with Git identity and verification report"
+  ],
+  "expected_artifacts": [
+    "src/ai_commerce",
+    "pyproject.toml",
+    "tests/",
+    "docs/engineering/A01_IMPLEMENTATION_REPORT.md"
+  ],
+  "side_effect_class": "BOUNDED",
+  "owner": "Engineering Foundation",
+  "evidence_refs": ["docs/engineering/A01_IMPLEMENTATION_REPORT.md"],
+  "risk_notes": [
+    "Verification performed on local Python environment, not Windows host",
+    "No Codex/Antigravity, GitHub Actions or AIOS-Renew runtime was invoked"
+  ],
+  "executor_binding": null,
+  "execution_method": "DIRECT_IMPLEMENTATION_IN_AUTHORIZED_REPO",
+  "dispatch_status": "NOT_DISPATCHED",
+  "base_commit": "d26b406c5c18c369c907df77d9b2f09ea7b3fc1d"
+}

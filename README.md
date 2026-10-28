@@ -34,11 +34,26 @@ Two distinct product cycles share production and learning capabilities:
 
 The plan is Human-approved and repository-canonical. It does **not** mean any implementation, executor, GitHub workflow, account, budget, media publication or commercial result has been activated. `EF01` / `EF02` are engineering-tooling planning items, not Commerce Product job runners.
 
+## Application bootstrap — A01 (implemented)
+
+The first installable Python foundation has been added without an AIOS Runtime dependency.
+
+```powershell
+python -m pip install -e .
+python -m ai_commerce --help
+python -m ai_commerce hello
+python -m ai_commerce about --json
+python -m pip install pytest
+python -m pytest tests -q
+```
+
+The local CLI currently exposes **foundation-only** commands. It cannot dispatch Codex/Antigravity, produce videos, access provider accounts or publish content. See [A01 implementation evidence](docs/engineering/A01_IMPLEMENTATION_REPORT.md), [project state](docs/engineering/PROJECT_STATE.md) and [WorkItem record](work_items/A01-BOOTSTRAP-001.json). Tests ran in a local Linux/Python environment, **not** the user's Windows host; no GitHub CI result is claimed. A02/EF01/EF02 remain unimplemented.
+
 ## Status and repository hygiene
 
 - Governance v0.3: explicitly approved by Human in the conversation of **2026-10-27**. Original document headers retain the earlier DRAFT label for provenance; this adoption record supersedes those labels with respect to internal governance once initial commit is made.
 - Blueprint v1.2: approved as the initial architecture reference, **not** as proof that publishing access, commissions, compliance or end-to-end code already exist.
-- Roadmap A and Work Tree are canonical **planning** only; no executable tasks, executor dispatch, automation, expenditure, user accounts, external actions or GitHub Actions are enabled.
+- Roadmap A and Work Tree are canonical planning; **A01 bootstrap source is now implemented and locally verified**. No executor dispatch, Engineering Flow, product automation, expenditure, user accounts, external actions or GitHub Actions are enabled.
 - No copied Python Agent / AIOS secrets, code, workflows or lifecycle were imported.
 - Review the [open-evidence record](docs/research/DECISION_REGISTER_AS_RESEARCH_2026-10-27.md) before making live capability claims. Its old proposal statuses are historic research, not current repository activation status.
 
@@ -52,6 +67,10 @@ docs/blueprint/     # Blueprint v1.2 and visual reference
 docs/governance/    # Human adoption and governance changelog
 docs/research/      # Independent audit and open evidence
 contracts/          # Draft JSON contract schemas
+src/ai_commerce/    # Implemented A01 foundation-only Python package
+tests/              # A01 targeted tests
+docs/engineering/   # A01 project state, ADR and implementation evidence
+work_items/         # Work item execution status records
 ```
 
 Initial setup from this package: run `./BOOTSTRAP_GITHUB.ps1` in PowerShell from the extracted directory (requires authenticated `gh` and `git`).

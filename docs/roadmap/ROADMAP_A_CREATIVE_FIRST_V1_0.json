@@ -38,7 +38,10 @@
           "depends_on": [],
           "deliverable": "Independent repository skeleton, conventions, targeted tests and isolation",
           "acceptance": "Clean local CLI/test foundation; compatible with separately approved selective AIOS code adoption",
-          "status": "PLANNED"
+          "status": "BUILD_VERIFIED_FOR_SCOPE",
+          "evidence_refs": [
+            "docs/engineering/A01_IMPLEMENTATION_REPORT.md"
+          ]
         },
         {
           "id": "A02",
@@ -370,6 +373,14 @@
     "M5": "Scoped costs, attribution and settled economics evidence where available.",
     "M6": "Optional scaling and own-brand decision support; Human retains final authority."
   },
-  "implementation_status": "NOT_STARTED",
-  "dispatch_status": "NOT_DISPATCHED"
+  "implementation_status": "IN_PROGRESS",
+  "dispatch_status": "NOT_DISPATCHED",
+  "progress": {
+    "A01": "BUILD_VERIFIED_FOR_SCOPE_LOCAL_TARGETED_TESTS",
+    "A02": "NOT_STARTED",
+    "EF01": "NOT_IMPLEMENTED",
+    "EF02": "NOT_IMPLEMENTED",
+    "M0": "NOT_ACHIEVED",
+    "M0_R": "NOT_ACHIEVED"
+  }
 }

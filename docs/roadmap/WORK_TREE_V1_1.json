@@ -20,7 +20,11 @@
           "depends_on": [],
           "priority": "P0",
           "owner": "Foundation",
-          "status": "PROPOSED"
+          "status": "BUILD_VERIFIED_FOR_SCOPE",
+          "implementation_record": "work_items/A01-BOOTSTRAP-001.json",
+          "evidence_refs": [
+            "docs/engineering/A01_IMPLEMENTATION_REPORT.md"
+          ]
         },
         {
           "id": "G02",
@@ -32,7 +36,11 @@
           ],
           "priority": "P0",
           "owner": "Foundation",
-          "status": "PROPOSED"
+          "status": "BUILD_VERIFIED_FOR_SCOPE",
+          "implementation_record": "work_items/A01-BOOTSTRAP-001.json",
+          "evidence_refs": [
+            "docs/engineering/A01_IMPLEMENTATION_REPORT.md"
+          ]
         },
         {
           "id": "G03",
@@ -44,7 +52,11 @@
           ],
           "priority": "P0",
           "owner": "Foundation",
-          "status": "PROPOSED"
+          "status": "BUILD_VERIFIED_FOR_SCOPE",
+          "implementation_record": "work_items/A01-BOOTSTRAP-001.json",
+          "evidence_refs": [
+            "docs/engineering/A01_IMPLEMENTATION_REPORT.md"
+          ]
         },
         {
           "id": "G04",
@@ -81,7 +93,11 @@
           ],
           "priority": "P0",
           "owner": "Foundation",
-          "status": "PROPOSED"
+          "status": "BUILD_VERIFIED_FOR_SCOPE",
+          "implementation_record": "work_items/A01-BOOTSTRAP-001.json",
+          "evidence_refs": [
+            "docs/engineering/A01_IMPLEMENTATION_REPORT.md"
+          ]
         },
         {
           "id": "G07",
@@ -105,7 +121,11 @@
           ],
           "priority": "P0",
           "owner": "Foundation",
-          "status": "PROPOSED"
+          "status": "BUILD_VERIFIED_FOR_SCOPE",
+          "implementation_record": "work_items/A01-BOOTSTRAP-001.json",
+          "evidence_refs": [
+            "docs/engineering/A01_IMPLEMENTATION_REPORT.md"
+          ]
         }
       ]
     },
@@ -907,7 +927,7 @@
     "P2": 11
   },
   "planning_status": "HUMAN_APPROVED",
-  "implementation_status": "NOT_STARTED",
+  "implementation_status": "IN_PROGRESS",
   "dispatch_status": "NOT_DISPATCHED",
   "adopted_on": "2026-10-28",
   "source_baseline_head": "13266240558aaf1ec3c80e0dfc3fe89911908002",
@@ -932,5 +952,6 @@
     "fallback": "CROSS_EXECUTOR_NEW_ATTEMPT_ONLY_WHEN_AUTHORIZED",
     "native_continuation": "EF02_OPTIONAL_NOT_A_GATE_FOR_CREATIVE",
     "external_component_adoption": "RECORD_PROVENANCE_LICENSE_COMPATIBILITY_AND_ROLLBACK_BEFORE_COPIED_CODE_IS_USED"
-  }
+  },
+  "implementation_note": "A01 only (G01/G02/G03/G06/G08) locally verified; A02/EF01/EF02 remain NOT_IMPLEMENTED. See A01 implementation report. No dispatch."
 }

@@ -114,3 +114,15 @@ Milestone(s): `M6`.
 - **First suggested execution cut:** A01 foundation minimal → EF01 dual-executor core and A02 contracts in parallel; creative A03/A04 need not wait for EF02. Human can change order/scope without mandatory gates.
 
 [Work Tree v1.1](WORK_TREE_DETAILED_V1_1.md) · [Machine-readable Roadmap A](ROADMAP_A_CREATIVE_FIRST_V1_0.json) · [Human decision](../governance/HUMAN_DECISION_2026-10-28_ENGINEERING_FLOW.md)
+
+## Implementation progress (2026-10-28)
+
+| Package | Observed status | Evidence |
+|---|---|---|
+| `A01` | **BUILD_VERIFIED_FOR_SCOPE** — Python bootstrap and 11 focused tests on local Linux runner | [A01 report](../engineering/A01_IMPLEMENTATION_REPORT.md) |
+| `A02` | NOT_STARTED | None |
+| `EF01` | NOT_IMPLEMENTED | None |
+| `EF02` | NOT_IMPLEMENTED | None |
+| `M0` / `M0-R` | NOT_ACHIEVED | A02 and both EF lanes outstanding |
+
+This status does not claim installed-native Codex/Antigravity, CI, Windows conformance or Creative Factory execution. WorkItem [A01-BOOTSTRAP-001](../../work_items/A01-BOOTSTRAP-001.json) records scope and evidence.
