@@ -1,18 +1,95 @@
 {
   "work_id": "EF01-DUAL-EXECUTOR-001",
-  "status": "IMPLEMENTED",
+  "status": "BUILD_VERIFIED_FOR_SCOPE",
   "objective": "Independent manually selected Codex/Antigravity engineering execution core, source provenance, targeted verification and Git-diff evidence",
   "source_decision": "docs/governance/HUMAN_DECISION_2026-10-28_ENGINEERING_FLOW.md",
   "source_base_commit": "9d8bdcf1922dcdc84536f88f68840f01665ada7a",
-  "scope_in": ["EF01", "Codex CLI adapter", "Antigravity CLI adapter", "explicit model/effort", "diagnostics", "usage observations"],
-  "scope_out": ["AIOS Runtime/Kernel/Publisher", "EF02 remote wake", "automatic routing", "provider spend/publishing"],
+  "scope_in": [
+    "EF01",
+    "Codex CLI adapter",
+    "Antigravity CLI adapter",
+    "explicit model/effort",
+    "diagnostics",
+    "usage observations"
+  ],
+  "scope_out": [
+    "AIOS Runtime/Kernel/Publisher",
+    "EF02 remote wake",
+    "automatic routing",
+    "provider spend/publishing"
+  ],
   "owner": "Engineering Foundation",
   "side_effect_class": "LOCAL_CODE_MUTATION_BY_EXPLICIT_EXECUTOR_ONLY",
-  "verification": {"local_targeted_tests_passed": 12, "test_type": "fake CLI subprocess plus real temporary Git repositories", "live_codex": "NOT_RUN", "live_antigravity": "NOT_RUN", "windows_live": "NOT_RUN", "whole_repo_regression": "NOT_RUN"},
-  "acceptance_remaining": ["Live Codex scoped code change + targeted verify", "Live Antigravity scoped code change + targeted verify", "Record exact installed versions, models, token and Git evidence"],
-  "expected_artifacts": ["src/ai_commerce/engineering/", "tests/test_ef01.py", "docs/engineering/EF01_IMPLEMENTATION_REPORT.md"],
-  "evidence_refs": ["docs/engineering/EF01_IMPLEMENTATION_REPORT.md"],
+  "verification": {
+    "local_targeted_tests_passed": 12,
+    "test_type": "fake CLI subprocess plus real temporary Git repositories",
+    "windows_live": "PASS_REPORTED_WITH_HUMAN_POWERSHELL_SCREENSHOTS_2026_10_28",
+    "source_sha": "40558e0ea2392ef306d75af045d5844051c59ef8",
+    "codex": {
+      "attempt_id": "codex-002",
+      "executor": "codex",
+      "model": "gpt-6.1-sol",
+      "effort": "max",
+      "status": "BUILD_VERIFIED_FOR_SCOPE",
+      "error_code": null,
+      "ef01_exit": 0,
+      "evidence_dir": ".local/ef01-results/codex-002",
+      "worktree": "%TEMP%/ai-commerce-ef01-codex-002",
+      "independently_read_full_logs": false
+    },
+    "antigravity": {
+      "attempt_id": "agy-002",
+      "executor": "antigravity",
+      "model": "gemini-3.8-flash",
+      "effort": "medium",
+      "status": "BUILD_VERIFIED_FOR_SCOPE",
+      "error_code": null,
+      "ef01_exit": 0,
+      "evidence_dir": ".local/ef01-results/agy-002",
+      "worktree": "%TEMP%/ai-commerce-ef01-agy-002",
+      "independently_read_full_logs": false
+    },
+    "prior_failed_attempts": [
+      {
+        "attempt_id": "codex-001",
+        "model": "gpt-6.1",
+        "status": "EXECUTOR_FAILED",
+        "provider_error": "400_model_not_found"
+      },
+      {
+        "attempt_id": "agy-001",
+        "model": "gemini-4-argon",
+        "status": "EXECUTOR_FAILED",
+        "provider_error": "429_RESOURCE_EXHAUSTED"
+      }
+    ],
+    "windows_cli_versions": "UNKNOWN_NOT_DISPLAYED",
+    "detailed_provider_usage": "UNKNOWN_LOGS_NOT_INSPECTED",
+    "whole_repo_regression": "NOT_RERUN_AFTER_EF01_WINDOWS_EVIDENCE",
+    "github_ci": "NOT_CLAIMED",
+    "live_evidence_basis": "Human-supplied PowerShell screenshots 2026-10-28; normalized result fields and EF01_EXIT observed; local log/diff artifacts not uploaded"
+  },
+  "acceptance_remaining": [],
+  "expected_artifacts": [
+    "src/ai_commerce/engineering/",
+    "tests/test_ef01.py",
+    "docs/engineering/EF01_IMPLEMENTATION_REPORT.md"
+  ],
+  "evidence_refs": [
+    "docs/engineering/EF01_IMPLEMENTATION_REPORT.md",
+    "User-provided PowerShell screenshots of codex-002 and agy-002 on 2026-10-28 (conversation, not committed)"
+  ],
   "executor_binding": null,
   "dispatch_status": "NOT_DISPATCHED",
-  "risk_notes": ["Local synthetic adapter tests do not establish live CLI compatibility", "No remote Windows execution connection configured", "No automatic git commit or push by EF CLI"]
+  "risk_notes": [
+    "Local synthetic adapter tests are separate from the two observed Windows live executor outcomes",
+    "Both live returns are screenshot-supported, not an independent audit of original JSON/log artifacts",
+    "No remote Windows execution/EF02 configured; no commit/push by the two local executor attempts"
+  ],
+  "evidence_limitations": [
+    "Two per-attempt local engineering_result.json files and full stdout/stderr/verify/git evidence remain on the user's Windows machine and were not independently opened by Brain",
+    "Installed CLI versions and actual provider token/cost observations were not shown",
+    "EF02 remote wake, native continuation, and product publishing were not tested"
+  ],
+  "m0_status": "CORE_SCOPE_MET_WITH_SCREENSHOT_EVIDENCE_EF02_M0_R_SEPARATE"
 }

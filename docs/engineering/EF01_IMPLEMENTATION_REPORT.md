@@ -23,7 +23,7 @@ Source reference pinned at `trung-via/AIOS-renew@cbefb92612f24b55417165736c63753
 | `src/aios_renew/antigravity_adapter.py` | `8bab9b52c383f29291989a4223cfcef4fa26b9af` | `engineering/adapters.py` | Adapted `agy --print` flag surface; no AIOS pretool guard, permission skip, transport or task serialization |
 | `src/aios_renew/run_observation.py` | `0452a7d6335de7bea285c6b13f8048efaa4db8c3` | `engineering/runner.py` | Reimplemented narrow trusted token usage observation; no Runtime RUN/soft budgets |
 
-**Rights/license:** Separate licensing statement for pinned AIOS source not verified; no entire file or proprietary third-party secrets copied. Techniques and small command constructions adapted from Human-selected first-party project. If broader copying is proposed, verify rights for those components separately. **Owner:** AI Commerce Engineering Foundation. **Rollback:** revert EF01 commit(s), remove `src/ai_commerce/engineering/` and its work item/docs; A01/A02 and AIOS source stay unchanged. **Compatibility:** Python 3.11+ intended, shell-free subprocess, Windows Codex/AGY CLI capability still needs live check.
+**Rights/license:** Separate licensing statement for pinned AIOS source not verified; no entire file or proprietary third-party secrets copied. Techniques and small command constructions adapted from Human-selected first-party project. If broader copying is proposed, verify rights for those components separately. **Owner:** AI Commerce Engineering Foundation. **Rollback:** revert EF01 commit(s), remove `src/ai_commerce/engineering/` and its work item/docs; A01/A02 and AIOS source stay unchanged. **Compatibility:** Python 3.11+ intended, shell-free subprocess; Windows live conformance subsequently observed for both CLI paths (see dated result below).
 
 ## Local verification actually observed
 
@@ -43,4 +43,18 @@ Run from a clean checkout of `trung-via/ai-commerce` after the EF01 code is avai
 
 ## Windows conformance helper
 
-After switching to the EF01 branch, use [`scripts/EF01-Windows-Live-Conformance.ps1`](../../scripts/EF01-Windows-Live-Conformance.ps1) with explicit `-Executor`, `-Model`, `-Effort`, `-AttemptId` for **one provider at a time**. The script creates a separate clean detached worktree for each attempt, writes a small real pytest change instruction and records local evidence under ignored `.local/ef01-results/`. Run twice (Codex and Antigravity); the script neither commits nor dispatches remotely. Inputs accept PowerShell 5.1 UTF-8 BOM. This script itself is not yet Windows-executed.
+After switching to the EF01 branch, use [`scripts/EF01-Windows-Live-Conformance.ps1`](../../scripts/EF01-Windows-Live-Conformance.ps1) with explicit `-Executor`, `-Model`, `-Effort`, `-AttemptId` for **one provider at a time**. The script creates a separate clean detached worktree for each attempt, writes a small real pytest change instruction and records local evidence under ignored `.local/ef01-results/`. Run twice (Codex and Antigravity); the script neither commits nor dispatches remotely. Inputs accept PowerShell 5.1 UTF-8 BOM. The script was subsequently run on Windows; observed results follow.
+
+
+## Windows live conformance results — 2026-10-28 (Human screenshots)
+
+Source checkout before both successful attempts: `40558e0ea2392ef306d75af045d5844051c59ef8` (`main`). The Human supplied PowerShell terminal screenshots; the tool-generated local `engineering_result.json`, stdout/stderr, verification logs and Git hashes remain on the Windows computer and **have not been directly inspected from this repository**.
+
+| Attempt | Executor | Model | Effort | Console status | error_code | EF01_EXIT | Local evidence |
+|---|---|---|---|---|---|---|---|
+| `codex-002` | codex | `gpt-6.1-sol` | `max` | `BUILD_VERIFIED_FOR_SCOPE` | null | 0 | `.local/ef01-results/codex-002` |
+| `agy-002` | antigravity | `gemini-3.8-flash` | `medium` | `BUILD_VERIFIED_FOR_SCOPE` | null | 0 | `.local/ef01-results/agy-002` |
+
+Two preceding attempts correctly produced non-PASS results: `codex-001` with unsupported `gpt-6.1` (HTTP 400 `model_not_found`), and `agy-001` using `gemini-4-argon` (HTTP 429 individual quota reached). Different selected models were used for new attempts, not silent auto-fallback within an attempt. The captured nonzero statuses did not masquerade as PASS.
+
+**Interpretation:** The runner's `BUILD_VERIFIED_FOR_SCOPE` is emitted only after observed code changes within allowed paths and a zero-exit targeted verify command under the checked-out source; the screenshots show this normalized terminal status and `EF01_EXIT=0` for BOTH live executors. This is therefore sufficient for a screenshot-grounded EF01 BUILD_VERIFIED_FOR_SCOPE claim. It is not independent reinspection of their underlying Windows file diffs, precise CLI versions, or provider token/cost/quotas. M0 core is evidenced for this engineering scope, while EF02 / M0-R remains **NOT_IMPLEMENTED**. There is no claim of GitHub CI success, native multi-turn continuation, product provider execution, media or posting.
