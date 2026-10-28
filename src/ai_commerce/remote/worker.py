@@ -182,12 +182,33 @@ class LocalBatchWorker:
             sandbox_argv = _remote_codex_sandbox_args(action["executor"], windows=(os.name == "nt"))
             argv.extend(sandbox_argv)
             outcome["sandbox_backend"] = "mxc" if sandbox_argv else "executor-default"
-            # Never pass GitHub credentials into untrusted model/verification process.
+            # The distributed claim has already been committed. Record an
+            # UNKNOWN write-ahead boundary before touching the EF01 child.
+            # Parent interruption before Popen and after Popen must NOT become
+            # a "model did not run" or retry-safe claim.
             started = time.time()
+            progress = {"action_id": aid, "attempt_id": attempt_id,
+                        "source_sha": source, "effective_source_sha": effective,
+                        "fingerprint": fp, "claim_status": "CLAIMED",
+                        "stage": "BEFORE_EF01_CHILD_SPAWN",
+                        "status": "EXECUTION_UNKNOWN",
+                        "ef01_child_pid_observed": False,
+                        "provider_invocation_proven": False,
+                        "replay_authorized": False,
+                        "recorded_at": started}
+            _write_json(path / "invocation_boundary.json", progress)
+            # Never pass GitHub credentials into untrusted model/verification process.
             child = subprocess.Popen(argv, cwd=self.checkout, env=_safe_child_env(self.checkout),
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             outcome.update(executor_invoked=True, process_id=child.pid,
                            process_started_at=started)
+            # This records an EF01 process PID, not proof that EF01 launched or
+            # completed a provider invocation. Keep the immutable pre-spawn
+            # boundary alongside it for reconciliation after parent termination.
+            _write_json(path / "invocation_spawned.json",
+                        {**progress, "stage": "EF01_CHILD_PID_OBSERVED",
+                         "ef01_child_pid_observed": True, "process_id": child.pid,
+                         "process_observed_at": time.time()})
             timed_out = False
             try:
                 stdout, stderr = child.communicate(timeout=7500)
