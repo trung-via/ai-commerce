@@ -198,7 +198,9 @@ test('queued warning with run URL must NOT silence subsequent cancelled terminal
   assert.equal(await observe({github:x.api,context:x.context,core:x.core}),1);
   assert.equal(x.posted.length,1);
   assert.match(x.posted[0].body,/WORKFLOW_CANCELLED_EXECUTION_UNCERTAIN/);
-  assert.match(x.posted[0].body,/never blindly replay/);
+  assert.match(x.posted[0].body,/side effects are UNKNOWN/);
+  assert.match(x.posted[0].body,/before any new attempt/);
+  assert.match(x.posted[0].body,/GitHub ref reconciliation: UNAVAILABLE/);
 });
 
 test('queued warning must NOT silence terminal failed after executed job', async () => {
