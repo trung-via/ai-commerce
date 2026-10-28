@@ -59,9 +59,10 @@
           "acceptance": "Schemas validate valid/invalid data; mock produces traceable output",
           "status": "BUILD_VERIFIED_FOR_SCOPE",
           "evidence_refs": [
-            "docs/engineering/A02_IMPLEMENTATION_REPORT.md"
+            "docs/engineering/A02_IMPLEMENTATION_REPORT.md",
+            "docs/engineering/A02_IMPLEMENTATION_REPORT.md#windows-validation-issue-and-cross-platform-fix-2026-10-28"
           ],
-          "windows_verification": "NOT_RUN"
+          "windows_verification": "RETEST_PENDING_AFTER_FAIL_1_OF_31"
         }
       ],
       "engineering_flow_work_ids": [
@@ -382,7 +383,7 @@
   "dispatch_status": "NOT_DISPATCHED",
   "progress": {
     "A01": "BUILD_VERIFIED_FOR_SCOPE_LINUX_TESTED_WINDOWS_USER_SCREENSHOT_PASS",
-    "A02": "BUILD_VERIFIED_FOR_SCOPE_LOCAL_31_PASSED",
+    "A02": "BUILD_VERIFIED_FOR_SCOPE_LOCAL_41_PASS_WINDOWS_RETEST_PENDING",
     "EF01": "NOT_IMPLEMENTED",
     "EF02": "NOT_IMPLEMENTED",
     "M0": "NOT_ACHIEVED_EF01_PENDING",

@@ -36,9 +36,21 @@ The GitHub-uploaded blobs of all implementation and test files were compared wit
 - Existing `WorkItem.v0.3`, `AuthorizationEnvelope.v0.3`, `PublicationRecord.v0.2`, `MeasurementPlan.v0.2` remain separate draft root contracts.
 - A02 status `BUILD_VERIFIED_FOR_SCOPE` for these tested functions, **not** `LIVE_CONFIRMED` for creative provider.
 
+## Windows validation issue and cross-platform fix (2026-10-28)
+
+Human supplied a Windows PowerShell screenshot after commit `92d85f09f84d35f3019b7508eadd7fe884aeea04` showing: editable installation succeeded; mock-generate produced an artifact and returned `SUCCEEDED`; pytest **30 passed, 1 failed (2.00s)**. Failing test: `tests/test_a02_contracts.py::test_digest_and_time_format_are_checked`; changing `captured_at` to `someday` did not raise `ContractValidationError`.
+
+**Root cause:** the application used default `jsonschema.FormatChecker()` for the JSON Schema `format: date-time` keyword. That optional format check can be absent in an environment without the RFC 3339 checker (dependency availability differs by Python installation). Windows screenshot alone does not prove which optional package was installed; the missing-checker behavior was reproduced in the regression test by temporarily removing the date-time checker.
+
+**Fix:** locally register a deterministic timezone-aware date-time checker in `src/ai_commerce/contracts/schema.py` using stdlib regex plus `datetime.fromisoformat`. Validation now rejects unparseable timestamps, absent timezone, impossible dates and offset errors without relying on optional third-party format checkers; embedded EvidenceRef/JobResult references use the same checker. Existing valid `Z`/offset strings continue to pass. No product contract meaning, model configuration or provider rights were widened.
+
+**Observed patch verification:** local Linux Python 3.13.5 `python -m pytest tests -q` **41 passed in 13.25s** (previous 31 + 10 date/time assertions). `python -m compileall -q src/ai_commerce` succeeded; wheel built and included all five packaged schemas and updated validator. Exact updated two source/test file SHA blobs matched the files actually tested.
+
+**Windows status after fix:** RETEST_PENDING. The initial Windows validation remains **30 PASS / 1 FAIL** for the previous revision; no post-fix Windows run has been observed yet. This correction is not an EF01/EF02 implementation or a real media production provider.
+
 ## Windows confirmation (optional targeted environment step)
 
-After `git pull --ff-only` in `C:\\TOOL\\ai-commerce` on the actual machine, run the README A02 commands. No result from that machine has been supplied for A02 at the time of this record.
+On Windows PowerShell from `C:\\TOOL\\ai-commerce`, fast-forward the Git checkout to the fixing commit, reinstall editable and rerun `python -m pytest tests -q`. The expected result is 41 passed, but **do not mark Windows PASS until the Human provides the actual output**.
 
 ## Next independent work
 

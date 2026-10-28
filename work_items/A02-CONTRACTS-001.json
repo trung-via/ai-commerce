@@ -34,10 +34,11 @@
   "side_effect_class": "BOUNDED",
   "owner": "Engineering Foundation",
   "evidence_refs": [
-    "docs/engineering/A02_IMPLEMENTATION_REPORT.md"
+    "docs/engineering/A02_IMPLEMENTATION_REPORT.md",
+    "docs/engineering/A02_IMPLEMENTATION_REPORT.md#windows-validation-issue-and-cross-platform-fix-2026-10-28"
   ],
   "risk_notes": [
-    "Local Linux targeted pass only; Windows A02 not independently tested",
+    "Windows previous revision FAILED 1 of 31; corrected patch passes 41 locally; Windows retest still pending",
     "Mock is text-only and not actual media/AI provider",
     "No EF01 or EF02 runtime dispatch"
   ],
@@ -46,10 +47,20 @@
   "execution_method": "DIRECT_IMPLEMENTATION_IN_AUTHORIZED_REPO",
   "source_base_commit": "544d8c279be64fa38105a93ec6f2d59a2be4f6bd",
   "verification": {
-    "targeted_test_count": 31,
-    "targeted_test_status": "PASS_LOCAL",
+    "targeted_test_count": 41,
+    "targeted_test_status": "PASS_LOCAL_AFTER_DATE_TIME_FIX",
     "wheel_schema_count": 5,
-    "windows": "NOT_RUN",
-    "real_provider": "NOT_RUN"
+    "windows": "RETEST_PENDING_AFTER_FAIL_1_OF_31",
+    "real_provider": "NOT_RUN",
+    "previous_windows_run": {
+      "passed": 30,
+      "failed": 1,
+      "duration_seconds": 2,
+      "failed_test": "test_digest_and_time_format_are_checked",
+      "mock_generate": "SUCCEEDED",
+      "evidence": "Human-provided screenshot 2026-10-28"
+    },
+    "fix_local_test_count": 41,
+    "fix_rationale": "date-time format checker not reliably installed; application-defined deterministic validator"
   }
 }

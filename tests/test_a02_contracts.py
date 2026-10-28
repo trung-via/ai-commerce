@@ -66,3 +66,55 @@ def test_rights_status_unknown_is_not_granted() -> None:
     snap = source_snapshot(Path("test.json"), b"{}"); snap["rights_status"] = "UNVERIFIED_GRANTED"
     with pytest.raises(ContractValidationError, match="rights_status"):
         validate_record("SourceSnapshot", snap)
+
+
+@pytest.mark.parametrize("timestamp", [
+    "someday",
+    "2026-10-28",
+    "2026-10-28T12:30:40",  # naive timestamp, timezone missing
+    "2026-02-30T12:30:40Z",  # impossible calendar date
+    "2026-10-28T25:30:40Z",  # impossible hour
+    "2026-10-28T12:30:40+25:00",  # impossible offset
+])
+def test_invalid_timestamps_fail_even_without_optional_formats(timestamp: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    from jsonschema import FormatChecker
+    from ai_commerce.core.provenance import source_snapshot
+
+    # Emulate a machine where the optional RFC3339 checker is absent.
+    monkeypatch.delitem(FormatChecker.checkers, "date-time", raising=False)
+    snap = source_snapshot(Path("sample.json"), b"{}"); snap["captured_at"] = timestamp
+    with pytest.raises(ContractValidationError, match="captured_at"):
+        validate_record("SourceSnapshot", snap)
+
+
+@pytest.mark.parametrize("timestamp", [
+    "2026-10-28T12:30:40Z",
+    "2026-10-28T12:30:40+07:00",
+    "2026-10-28t12:30:40.123z",
+])
+def test_valid_rfc3339_dates_still_pass(timestamp: str) -> None:
+    from ai_commerce.core.provenance import source_snapshot
+    snap = source_snapshot(Path("sample.json"), b"{}"); snap["captured_at"] = timestamp
+    validate_record("SourceSnapshot", snap)
+
+
+def test_evidence_ref_and_nested_job_reject_invalid_timestamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    from jsonschema import FormatChecker
+    from ai_commerce.core.provenance import source_snapshot
+
+    monkeypatch.delitem(FormatChecker.checkers, "date-time", raising=False)
+    snap = source_snapshot(Path("sample.json"), b"{}")
+    evidence = {
+        "evidence_id": "e1", "source_kind": "LOCAL_JSON_FILE", "source_ref": "sample.json",
+        "observed_at": "not-a-date", "verification_status": "UNKNOWN", "rights_status": "UNKNOWN"
+    }
+    with pytest.raises(ContractValidationError, match="observed_at"):
+        validate_record("EvidenceRef", evidence)
+    snap["captured_at"] = "not-a-date"
+    result = {
+        "job_id": "j", "status": "SUCCEEDED", "provider": "local-mock",
+        "source_snapshot": snap, "artifact": None, "evidence_refs": [],
+        "cost_status": "UNKNOWN", "error_code": None,
+    }
+    with pytest.raises(ContractValidationError, match="captured_at"):
+        validate_record("JobResult", result)
