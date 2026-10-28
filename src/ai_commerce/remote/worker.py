@@ -10,7 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from .transport import GitHubTransport, RemoteTransportError
+from .transport import GitHubTransport, RemoteTransportError, CandidateIntegrityError
 from .validation import fingerprint, check_source
 from .reuse import load_approved_candidates, approve_reuse
 
@@ -268,10 +268,22 @@ class LocalBatchWorker:
             if report.get("source_base_sha") != effective:
                 outcome.update(status="SOURCE_MISMATCH", error_code="EF01_BASE_MISMATCH")
                 return finish()
+            hashes = report.get("candidate_file_sha256")
+            changed = report.get("changed_files")
+            if (not isinstance(hashes, dict) or not isinstance(changed, list)
+                    or not changed or len(set(changed)) != len(changed)
+                    or set(hashes) != set(changed)):
+                outcome.update(status="CANDIDATE_INTEGRITY_FAILED",
+                               error_code="EF01_HASH_MANIFEST_INVALID")
+                return finish()
             try:
                 candidate = self.github.candidate(source_sha=effective, attempt_id=attempt_id,
-                                                  workspace=worktree,
-                                                  paths=report["changed_files"])
+                                                  workspace=worktree, paths=changed,
+                                                  expected_hashes=hashes)
+            except CandidateIntegrityError as exc:
+                outcome.update(status="CANDIDATE_INTEGRITY_FAILED",
+                               error_code=str(exc).split(":", 1)[0], diagnostic=str(exc))
+                return finish()
             except Exception as exc:
                 outcome.update(status="RESULT_PUBLICATION_FAILED",
                                error_code=type(exc).__name__, diagnostic=str(exc))

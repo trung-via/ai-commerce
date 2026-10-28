@@ -13,6 +13,10 @@ class RemoteTransportError(RuntimeError):
     pass
 
 
+class CandidateIntegrityError(RemoteTransportError):
+    """Workspace bytes do not match the verified EF01 manifest."""
+
+
 class GitHubTransport:
     def __init__(self, repo: str, token: str):
         if not token or "/" not in repo or repo.count("/") != 1:
@@ -115,24 +119,45 @@ class GitHubTransport:
             raise RemoteTransportError("REUSE_CLAIM_MISMATCH")
 
     def candidate(self, *, source_sha: str, attempt_id: str,
-                  workspace: Path, paths: list[str]) -> dict:
-        """Create-only GitHub commit/ref using source tree and scoped local bytes."""
+                  workspace: Path, paths: list[str],
+                  expected_hashes: dict[str, str | None]) -> dict:
+        """Publish precisely the EF01-verified bytes, including deletions.
+
+        Validate the entire manifest and snapshot every file before any GitHub
+        blob/ref write. A changed workspace must never become a candidate.
+        """
         if not paths:
             raise RemoteTransportError("EMPTY_CANDIDATE")
-        base = self.api("GET", "/git/commits/" + source_sha)
-        tree_items = []
+        if (not isinstance(expected_hashes, dict) or len(set(paths)) != len(paths)
+                or set(expected_hashes) != set(paths)):
+            raise CandidateIntegrityError("CANDIDATE_HASH_MANIFEST_MISMATCH")
+
+        prepared = []
         for relative in paths:
             path = workspace / relative
             if path.is_symlink():
                 raise RemoteTransportError("CANDIDATE_SYMLINK_UNSUPPORTED")
             if not path.exists():
-                tree_items.append({"path": relative, "mode": "100644", "type": "blob", "sha": None})
+                if expected_hashes[relative] is not None:
+                    raise CandidateIntegrityError("CANDIDATE_DELETION_HASH_MISMATCH:" + relative)
+                prepared.append((relative, None, None))
                 continue
             if not path.is_file():
                 raise RemoteTransportError("NON_FILE_CANDIDATE")
-            content = base64.b64encode(path.read_bytes()).decode("ascii")
-            blob = self.api("POST", "/git/blobs", {"content": content, "encoding": "base64"})
+            content = path.read_bytes()
+            if hashlib.sha256(content).hexdigest() != expected_hashes[relative]:
+                raise CandidateIntegrityError("CANDIDATE_BYTES_MISMATCH:" + relative)
             mode = "100755" if os.name != "nt" and path.stat().st_mode & 0o111 else "100644"
+            prepared.append((relative, content, mode))
+
+        base = self.api("GET", "/git/commits/" + source_sha)
+        tree_items = []
+        for relative, content, mode in prepared:
+            if content is None:
+                tree_items.append({"path": relative, "mode": "100644", "type": "blob", "sha": None})
+                continue
+            encoded = base64.b64encode(content).decode("ascii")
+            blob = self.api("POST", "/git/blobs", {"content": encoded, "encoding": "base64"})
             tree_items.append({"path": relative, "mode": mode, "type": "blob", "sha": blob["sha"]})
         remote_tree = self.api("POST", "/git/trees",
                                {"base_tree": base["tree"]["sha"], "tree": tree_items})

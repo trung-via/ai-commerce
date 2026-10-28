@@ -263,6 +263,7 @@ def test_candidate_publication_failure_preserves_verified_result_but_not_pass(tm
                 "status": "BUILD_VERIFIED_FOR_SCOPE",
                 "source_base_sha": BASE,
                 "changed_files": ["tests/test_ef02_m0r_fixture.py"],
+                "candidate_file_sha256": {"tests/test_ef02_m0r_fixture.py": "0" * 64},
                 "verify_exit_code": 0,
                 "error_code": None,
             }), encoding="utf-8")
