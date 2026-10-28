@@ -532,3 +532,81 @@ def test_ef01_cli_timeout_receipt_remains_unknown_in_ef02_and_never_publishes(
     assert result["candidate_ref"] is None
     assert result["candidate_sha"] is None
     assert _persisted(worker)["status"] == "EXECUTION_UNKNOWN"
+
+
+@pytest.mark.parametrize(
+    "receipt_status,process_exit,verify_exit,expected_status,expected_error",
+    [
+        ("BUILD_VERIFIED_FOR_SCOPE", 1, 0, "EXECUTION_UNKNOWN",
+         "EF01_EXIT_NONZERO_WITH_SUCCESS_RECEIPT"),
+        ("BUILD_VERIFIED_FOR_SCOPE", 0, 1, "VERIFICATION_FAILED",
+         "EF01_VERIFY_EXIT_CONTRADICTS_SUCCESS_RECEIPT"),
+        ("BUILD_VERIFIED_FOR_SCOPE", 0, None, "VERIFICATION_FAILED",
+         "EF01_VERIFY_EXIT_CONTRADICTS_SUCCESS_RECEIPT"),
+        ("CANDIDATE_READY", 0, 0, "EXECUTION_UNKNOWN",
+         "EF01_NONPASS_STATUS_INVALID"),
+    ],
+)
+def test_ef01_untrusted_success_receipt_never_promotes_batch_action_to_pass(
+    tmp_path, monkeypatch, receipt_status, process_exit, verify_exit,
+    expected_status, expected_error,
+):
+    """Adversarial EF01 receipts cannot override observed process/verify evidence.
+
+    No provider invocation or GitHub API call is performed.
+    """
+    class FakeGitHub:
+        candidate_calls = 0
+
+        def claim(self, **_kwargs):
+            return "CLAIMED"
+
+        def integrated_source(self, **_kwargs):
+            return {"effective_sha": BASE, "integration_ref": None}
+
+        def candidate(self, **_kwargs):
+            self.candidate_calls += 1
+            raise AssertionError("UNTRUSTED_RECEIPT_MUST_NOT_PUBLISH")
+
+    class ReceiptChild:
+        pid = 20401
+        returncode = process_exit
+
+        def __init__(self, argv, **_kwargs):
+            self.out = Path(argv[argv.index("--out-dir") + 1])
+
+        def communicate(self, timeout=None):
+            self.out.mkdir(parents=True, exist_ok=True)
+            (self.out / "engineering_result.json").write_text(json.dumps({
+                "status": receipt_status,
+                "source_base_sha": BASE,
+                "changed_files": ["tests/test_ef02_m0r_fixture.py"],
+                "candidate_file_sha256": {
+                    "tests/test_ef02_m0r_fixture.py": "0" * 64},
+                "verify_exit_code": verify_exit,
+                "error_code": None,
+            }), encoding="utf-8")
+            return ("fixture-only stdout", "fixture-only stderr")
+
+    starts = []
+    def fake_popen(argv, **kwargs):
+        starts.append(argv)
+        return ReceiptChild(argv, **kwargs)
+
+    monkeypatch.setattr("ai_commerce.remote.worker.subprocess.run",
+                        lambda *_a, **_kw: SimpleNamespace(returncode=0, stderr=""))
+    monkeypatch.setattr("ai_commerce.remote.worker.subprocess.Popen", fake_popen)
+    gh = FakeGitHub()
+    worker = _worker(tmp_path, gh)
+    result = worker.execute_action(_action())
+    assert len(starts) == 1
+    assert result["ef01_status"] == receipt_status
+    assert result["ef01_exit"] == process_exit
+    assert result["verify_exit_code"] == verify_exit
+    assert result["status"] == expected_status
+    assert result["error_code"] == expected_error
+    assert result["receipt_status_untrusted"] is True
+    assert result["candidate_ref"] is None
+    assert result["candidate_sha"] is None
+    assert gh.candidate_calls == 0
+    assert _persisted(worker)["status"] == expected_status
