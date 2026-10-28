@@ -4,6 +4,8 @@
 
 AI Commerce is an independent product and engineering repository. It is **not** Python Agent, AIOS-Renew, a submodule of either, or an inherited task/execution system.
 
+**A03/A04 offline MVP evidence (2026-10-29):** The EF02 dependency integration candidate passed the final EF01 registered `project-tests` run (**365 passed, exit 0**) on Windows, after an earlier intra-executor run recorded 16 Git/PowerShell process-start failures already present in its baseline. See the [integration report](docs/engineering/A03_A04_INTEGRATION_REPORT.md) and [EF02 run #40735271832](https://github.com/trung-via/ai-commerce/actions/runs/40735271832). GitHub publication is tracked by the promotion Pull Request; A05, MP4 and M1 remain incomplete.
+
 ## Foundation
 
 | Document | Version | Role |
@@ -47,7 +49,7 @@ python -m pip install pytest
 python -m pytest tests -q
 ```
 
-The top-level **product** CLI still exposes foundation-only commands. A separate `python -m ai_commerce.engineering` CLI can invoke the manually selected Codex/Antigravity for local engineering changes, but it cannot produce product videos, access publishing accounts or publish content. See [A01 implementation evidence](docs/engineering/A01_IMPLEMENTATION_REPORT.md), [project state](docs/engineering/PROJECT_STATE.md) and [WorkItem record](work_items/A01-BOOTSTRAP-001.json). A01's 11 targeted tests passed in the Linux staging environment, and a Human-provided Windows PowerShell screenshot shows a separate **12 passed in 0.29s**, successful editable install and CLI help/hello. The exact Windows checkout HEAD and full interpreter version were not shown; no GitHub CI result is claimed. A02 is implemented and locally verified; **EF01 was subsequently verified for scope via Windows live Codex and Antigravity conformance screenshots (2026-10-28)**. EF02 remains unimplemented.
+The top-level **product** CLI includes A01/A02 commands and the offline A03/A04 candidate commands below. A separate `python -m ai_commerce.engineering` CLI can invoke the manually selected Codex/Antigravity for local engineering changes, but it cannot produce product videos, access publishing accounts or publish content. See [A01 implementation evidence](docs/engineering/A01_IMPLEMENTATION_REPORT.md), [project state](docs/engineering/PROJECT_STATE.md) and [WorkItem record](work_items/A01-BOOTSTRAP-001.json). A01's 11 targeted tests passed in the Linux staging environment, and a Human-provided Windows PowerShell screenshot shows a separate **12 passed in 0.29s**, successful editable install and CLI help/hello. The exact Windows checkout HEAD and full interpreter version were not shown; no GitHub CI result is claimed. A02 is implemented and locally verified; **EF01 was subsequently verified for scope via Windows live Codex and Antigravity conformance screenshots (2026-10-28)**. EF02 status is tracked separately in the project state.
 
 ## A02 product contracts and mock provider (implemented)
 
@@ -61,6 +63,24 @@ python -m pytest tests -q
 ```
 
 The mock creates a `.txt` artifact and a `.result.json` manifest under the ignored `.local/` directory. No network/spend/publishing is triggered, and unverified rights are `UNKNOWN`. Linux focused regression after the date-time validation fix observed **41 passed**. A previous Windows revision showed **30 passed / 1 failed** (missing date-time format validation). After the fix, a Human-provided Windows PowerShell screenshot shows **41 passed in 2.08s**. The exact local checkout SHA was not shown. Live provider checks remain unperformed. [A02 evidence](docs/engineering/A02_IMPLEMENTATION_REPORT.md) · [WorkItem](work_items/A02-CONTRACTS-001.json).
+
+## A03/A04 offline dependency integration (reviewed MVP)
+
+The supplied parent implementations are preserved. The shared CLI now saves and inspects pinned concepts, applies explicit reframing edits, and associates a selected revision with a local import/mock asset job. An immutable handoff links the A03 selection to A04's validated manifest; `asset-inspect` reloads both stores and checks actual asset bytes.
+
+~~~powershell
+$created = python -m ai_commerce concept-create --text "Rain as a visual poem." --store .local/creative --mock | ConvertFrom-Json
+$selectionId = $created.concepts[0].selection.selection_id
+python -m ai_commerce concept-inspect --store .local/creative --selection-id $selectionId
+$asset = python -m ai_commerce asset-run --store .local/creative --selection-id $selectionId --out-dir .local/assets --mode mock | ConvertFrom-Json
+python -m ai_commerce asset-inspect --store .local/creative --out-dir .local/assets --handoff $asset.handoff_ref
+~~~
+
+`concept-create` also accepts `--brief FILE` containing UTF-8 prose or ContentBrief JSON. No product or CTA is required. `--mock` explicitly selects test templates; the media mock is a synthetic pixel fixture. For an existing PNG use `--mode import --source FILE --mime-type image/png`; the parent importer also supports its AVI container format. `concept-reframe --store DIR --selection-id ID --lens TEXT --changes FILE` saves caller-supplied JSON creative edits as a new pinned revision.
+
+Focused regression in the Codex sub-session: **242 passed, 2 skipped**; its full registered profile recorded **347 passed, 16 failed, 2 skipped**, exit 1 with 16 unchanged Git/PowerShell startup failures. **Later, EF01's registered verification on the same candidate ran `python -m pytest tests -q` and returned 365 passed, exit 0 (78.73s).** The earlier environment failures are preserved as incident evidence, not claimed root-cause-fixed. All 30 new integration cases passed in the focused sub-session; native link checks there were skipped.
+
+This implementation originated as a scoped candidate and is promoted through a separate Pull Request. The handoff is readable through existing contracts/loaders; it does not implement A05 or establish that a mock asset realizes the concept. No network/model credentials, external media generation or publishing are used. **A05, MP4 and M1 are not complete.** See the [exact evidence, commands and limitations](docs/engineering/A03_A04_INTEGRATION_REPORT.md).
 
 ## Status and repository hygiene
 
@@ -94,10 +114,10 @@ Initial setup from this package: run `./BOOTSTRAP_GITHUB.ps1` in PowerShell from
 
 Windows live EF01 conformance (one explicit provider per invocation): [PowerShell helper](scripts/EF01-Windows-Live-Conformance.ps1). Source tests cover UTF-8 BOM inputs from Windows PowerShell; 12/12 synthetic local tests passed. Both selected provider CLI routes ran successfully on Windows for the bounded EF01 acceptance task; underlying local logs/diff remain on that machine, and EF02 remains pending.
 
-## EF02 Multi-Action — approved for implementation (not yet activated)
+## EF02 Multi-Action — historic pre-activation planning snapshot (2026-10-28)
 
 Human approved EF02 Multi-Action v1 on 2026-10-28: multiple Human/Brain actions in a batch, DAG dependencies, at least two truly concurrent independent Windows EF01 executor subprocesses initially (configurable), per-attempt claim/worktree/Git candidate and per-action plus aggregate feedback. EF02-A/B/C implementation remains pending; no GitHub remote workflow or project Windows runner currently proven active. See [Human decision](docs/governance/HUMAN_DECISION_2026-10-28_EF02_MULTI_ACTION.md), [implementation handoff](docs/engineering/EF02_MULTI_ACTION_IMPLEMENTATION_PLAN_V1_0_2026-10-28.md) and [WorkItem](work_items/EF02-MULTI-ACTION-001.json). M0-R stays OPEN; proactive Chat Wake requires separate proof.
 
-## EF02 Multi-Action source implementation (remote live pending)
+## EF02 Multi-Action — historic source-only snapshot (2026-10-28)
 
 Independent remote engineering implementation is in src/ai_commerce/remote/ with hosted ingress, separate Windows runner job, two-slot (configurable) parallel subprocess scheduling, DAG candidate composition, GitHub attempt claims, candidate refs and aggregate feedback. GitHub CI run 40648371883 passed on hosted Windows and Ubuntu. See docs/engineering/EF02_IMPLEMENTATION_REPORT.md and docs/engineering/EF02_WINDOWS_RUNNER_SETUP.md. The real self-hosted Windows runner and automatic remote feedback have not yet been tested; M0-R remains OPEN.

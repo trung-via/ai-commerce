@@ -1,6 +1,6 @@
 # AI Commerce — Living project state
 
-Updated: 2026-10-28. Repository: `trung-via/ai-commerce`.
+Updated: 2026-10-29. Repository: `trung-via/ai-commerce`.
 
 ## Source of truth
 
@@ -19,7 +19,8 @@ A01 corresponds to G01/G02/G03/G06/G08: packaging, importable CLI, architecture 
 - `A02`: **BUILD_VERIFIED_FOR_SCOPE (Linux local)** — 5 portable JSON Schema contracts, source/artifact SHA-256, mock provider, typed capabilities, CLI validation and example mock artifact. 41/41 project targeted tests after cross-platform date-time fix; an earlier Windows run showed 30 PASS / 1 FAIL on old code; **the corrected build subsequently showed 41/41 PASS on Windows in a Human-provided screenshot**. Evidence: `A02_IMPLEMENTATION_REPORT.md`.
 - `EF01`: **BUILD_VERIFIED_FOR_SCOPE** — 12/12 local synthetic adapter tests and TWO Windows live executor attempts returned `BUILD_VERIFIED_FOR_SCOPE` with `EF01_EXIT=0` in Human-supplied screenshots: Codex `codex-002` (`gpt-6.1-sol/max`), Antigravity `agy-002` (`gemini-3.8-flash/medium`) on source `40558e0ea2392ef306d75af045d5844051c59ef8`. Full local logs and detailed diff not independently read.
 - `EF02`: **M0-R ACCEPTED_WITH_DEFERRED_RISKS** (current disposition, 2026-10-28) — 5/5 live DAG, Windows parallel subprocesses, actual EF02→EF01→Codex process interruption + immutable checkpoints; real Windows runner-service outage and rare live negative paths intentionally UNKNOWN/deferred. WorkItem `EF02-MULTI-ACTION-001.json` is authoritative for evidence.
-- Creative, media generation, platform posting, analytics, settlement: NOT_IMPLEMENTED / NOT_VERIFIED.
+- `A03/A04`: scoped offline candidate from EF02 Issue #53, run #40735271832, 3/3 CANDIDATE_READY. Original integration sub-session had 16 pre-existing Git/PowerShell startup failures; the subsequent EF01 registered `project-tests` on the candidate recorded 365 passed, exit 0. Promotion to main is tracked independently. See the latest product disposition below.
+- A05 rendering, model media generation, platform posting, analytics, settlement and M1: NOT_IMPLEMENTED / NOT_VERIFIED by this candidate.
 
 ## Unknowns and next steps
 
@@ -56,3 +57,17 @@ GitHub-hosted test run 40648371883 passed on Windows and Ubuntu, including real 
 `main` accepted [PR #50](https://github.com/trung-via/ai-commerce/pull/50) with M0-R `ACCEPTED_WITH_DEFERRED_RISKS`; [Issue #10](https://github.com/trung-via/ai-commerce/issues/10) was closed only for the accepted scope. Evidence includes DAG run 40665011616 and real scoped EF02→EF01→Codex interruption run 40715394122. Runner SERVICE loss/recovery and other live rare negatives remain `UNKNOWN_DEFERRED_UNTIL_REAL_INCIDENT`; no blind replay. Some earlier chronological sections above describe pre-implementation snapshots and must NOT supersede this latest disposition.
 
 Human approved three **planned, not implemented** optional extensions: [EF01-R](../../work_items/EF01-VERIFY-REPAIR-002.json) (P1, bounded verify→repair loop in one EF02 action); [EF02-D](../../work_items/EF02-EXACT-CHAT-WAKE-002.json) (P1, verified exact-chat wake with GitHub fallback); [EF01-P](../../work_items/EF01-DIRECT-GIT-PYTEST-003.json) (P2, optional Git executable + measured pytest-xdist up to 12 workers). Full decision: [EF enhancements](../governance/HUMAN_DECISION_2026-10-28_EF_ENHANCEMENTS.md). No provider invoked, chat wake delivered, 12 workers executed, new runner installed, or changes to original EF01/EF02 runtime by this planning record. Creative Factory A03/A04 remains the next product-facing lane and is not gated by any of these enhancements.
+
+## 2026-10-29 — A03/A04 dependency integration, EF02 review and promotion
+
+The supplied dependency-composed checkout at `c92575c951045f19edb397fe339f4686fa6784da` contains both A03/A04 implementations. All 20 parent-owned files are preserved. Shared CLI commands now save/inspect/reframe pinned concepts and run local import/mock asset jobs. An immutable handoff associates the exact selection with A04's unchanged manifest; reopening verifies saved creative identity, manifest binding and actual asset bytes.
+
+This was created as a **scoped candidate**. Codex's internal focused A01/A02/A03/A04 + integration regression: **242 passed, 2 skipped**, exit 0, 91.77 s. Its internal full registered `project-tests` (`python -m pytest tests -q`): **347 passed, 16 failed, 2 skipped**, exit 1, 114.04 s. The failing IDs match the composed pre-edit baseline (**317 passed, 16 failed, 2 skipped**): 15 Git DLL startup failures and one PowerShell `WinError 1920`. The two A04 native symlink/junction checks were skipped in that sub-session. All **30 new integration cases passed** there. **Subsequent EF01 registered verification on the candidate recorded 365 passed, exit 0, 78.73 s**, in [EF02 run #40735271832](https://github.com/trung-via/ai-commerce/actions/runs/40735271832), with no automatic inference that the prior environment startup problems were repaired. Promotion to main is separately tracked by GitHub PR.
+
+No parent modules, EF01/EF02 implementation, governance, Roadmap, schemas, packaging or sibling work items were changed. A03 concepts remain explicitly TEST_ONLY_MOCK with unverified assertions; A04 uses local imports or an explicitly synthetic PNG fixture. No network/model credentials, external media generation, publishing or creative-quality acceptance is claimed. **A05, MP4 rendering and M1 remain incomplete.** Existing EF dispositions above are not advanced by these product tests.
+
+Exact commands, environment overrides, source identities, evidence hashes and unresolved verification failures: [A03/A04 integration report](A03_A04_INTEGRATION_REPORT.md).
+
+### Post-executor EF01 evidence — 2026-10-29
+
+EF02 Issue [#53](https://github.com/trung-via/ai-commerce/issues/53), workflow run [40735271832](https://github.com/trung-via/ai-commerce/actions/runs/40735271832), resulted in 3/3 scoped candidate-ready actions (A03, A04 and fan-in Integration), all Codex `gpt-6.1-sol/max`. The integration candidate SHA `22adb25000fedb640c9525ed92ca9d6ae1d19215` passed the EF01 registered `python -m pytest tests -q` with **365 passed, 0 failed, exit 0**. Original Codex sub-session failure logs remain historic, distinct evidence. A03/A04 remain offline mock/import only, not real AI generation or A05; no account permission or expenditure is implied. Main branch status must be checked independently from this evidence record.
