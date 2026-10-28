@@ -158,8 +158,8 @@
           ],
           "priority": "P0",
           "owner": "Engineering Foundation (project tooling)",
-          "status": "PROPOSED",
-          "execution_status": "NOT_IMPLEMENTED",
+          "status": "BUILD_VERIFIED_FOR_SCOPE",
+          "execution_status": "BUILD_VERIFIED_FOR_SCOPE",
           "selection_modes": [
             "MANUAL",
             "RECOMMEND"
@@ -173,19 +173,22 @@
             "reuse AIOS runtime",
             "publish media",
             "import secrets"
+          ],
+          "evidence_refs": [
+            "work_items/EF01-DUAL-EXECUTOR-001.json"
           ]
         },
         {
           "id": "EF02",
-          "title": "Independent Remote Wake + Feedback & Optional Native Continuation",
-          "scope": "GitHub workflow/Windows runner dành riêng cho ai-commerce kích hoạt Engineering WorkItem đã được ủy quyền; bind dispatch/work_id/source SHA/profile, trả structured result và diagnostics cho Brain; deduplicate delivery. Hỗ trợ cùng-WorkItem CLI repair; native app-server multi-turn khi được chứng minh trên máy thực, không phải điều kiện để EF01 chạy. Cross-executor handoff nếu Human cho phép, attempt mới và trạng thái cũ được giữ nguyên.",
-          "acceptance": "Một công việc thực được kích hoạt từ xa và có result/diagnostic đúng attempt trong repo AI Commerce; không cần AIOS runner/runtime; failed/unknown không hiện là completed; có phân biệt CLI repair attempt mới và native multi-turn thực sự. Chưa chứng minh native thì báo UNSUPPORTED/NOT_VERIFIED, không ngăn creative offline.",
+          "title": "Multi-Action Remote Wake + Concurrent Execution & Feedback (Optional Native Continuation)",
+          "scope": "Multiple Human/Brain engineering actions accepted concurrently as batches; independent actions in same batch execute simultaneously in separate EF01 worktrees with a configurable Windows process pool (default 2). Per-action actor/authorization, executor/model/effort, source SHA, DAG dependencies, candidate refs, distributed attempt claim, queue, diagnostics, aggregate GitHub feedback, authorized repair. Optional native/Chat Wake separate; no AIOS runtime.",
+          "acceptance": "Batch of five actions with DAG: at least two independent Windows EF01 subprocesses demonstrably overlap, results/evidence distinct and aggregate readable by Brain. Concurrent batch requests are admitted or explicitly rejected; duplicate dispatch cannot rerun the same attempt; failure/UNKNOWN not misreported PASS; no automatic main merge; no unsupported native continuation claim.",
           "depends_on": [
             "EF01"
           ],
           "priority": "P0",
           "owner": "Engineering Foundation (project tooling)",
-          "status": "PROPOSED",
+          "status": "ACCEPTED_FOR_WORK",
           "execution_status": "NOT_IMPLEMENTED",
           "non_blocking_for": [
             "A03",
@@ -193,6 +196,15 @@
             "A05",
             "A06",
             "E01"
+          ],
+          "implementation_ref": "work_items/EF02-MULTI-ACTION-001.json",
+          "decisions_ref": "docs/governance/HUMAN_DECISION_2026-10-28_EF02_MULTI_ACTION.md",
+          "initial_max_parallel": 2,
+          "concurrent_scope": "TRUE_PARALLEL_INTRA_BATCH_AT_LEAST_2; CROSS_BATCH_QUEUED_IF_ONE_RUNNER",
+          "work_slices": [
+            "EF02-A",
+            "EF02-B",
+            "EF02-C"
           ]
         }
       ]
@@ -932,9 +944,9 @@
       ]
     }
   ],
-  "count": 61,
+  "count": 63,
   "priority_counts": {
-    "P0": 18,
+    "P0": 20,
     "P1": 32,
     "P2": 11
   },
@@ -963,7 +975,16 @@
     "usage_reporting": "OBSERVED_WHEN_AVAILABLE_OTHERWISE_UNKNOWN",
     "fallback": "CROSS_EXECUTOR_NEW_ATTEMPT_ONLY_WHEN_AUTHORIZED",
     "native_continuation": "EF02_OPTIONAL_NOT_A_GATE_FOR_CREATIVE",
-    "external_component_adoption": "RECORD_PROVENANCE_LICENSE_COMPATIBILITY_AND_ROLLBACK_BEFORE_COPIED_CODE_IS_USED"
+    "external_component_adoption": "RECORD_PROVENANCE_LICENSE_COMPATIBILITY_AND_ROLLBACK_BEFORE_COPIED_CODE_IS_USED",
+    "multi_action": true,
+    "default_parallel_processes": 2,
+    "parallel_limit_configurable": true,
+    "attempt_distributed_claim": "GIT_REF_CREATE_ONLY",
+    "dag_dependencies": true,
+    "aggregate_results": true,
+    "remote_result_contract": "contracts/RemoteActionBatch.v1.schema.json",
+    "true_chat_wake": "OPTIONAL_SEPARATE_PROOF"
   },
-  "implementation_note": "A01 and A02 are implemented and locally verified; EF01/EF02 remain NOT_IMPLEMENTED; no installed-native dual-executor proof. See WorkItem records."
+  "implementation_note": "A01/A02 and EF01 are build-verified for scope; EF01 live Codex/Antigravity passed and 53/53 Windows tests passed on 2026-10-28. EF02 Multi-Action v1 approved for implementation, remote and parallel runtime NOT yet implemented. Human decision: docs/governance/HUMAN_DECISION_2026-10-28_EF02_MULTI_ACTION.md.",
+  "human_decision_multi_action_ref": "docs/governance/HUMAN_DECISION_2026-10-28_EF02_MULTI_ACTION.md"
 }

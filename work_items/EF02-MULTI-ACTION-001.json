@@ -1,0 +1,98 @@
+{
+  "work_id": "EF02-MULTI-ACTION-001",
+  "wbs_id": "EF02",
+  "status": "ACCEPTED_FOR_WORK",
+  "decision": "docs/governance/HUMAN_DECISION_2026-10-28_EF02_MULTI_ACTION.md",
+  "objective": "Independent multi-action remote dispatch and result feedback for AI Commerce engineering; multiple Human/Brain actions submitted together with real bounded parallel EF01 execution.",
+  "depends_on": [
+    "EF01"
+  ],
+  "owner": "Engineering Foundation (AI Commerce)",
+  "scope_in": [
+    "Authenticated GitHub batch ingress",
+    "Multiple actions per batch and simultaneous admission",
+    "Per-action manual Codex/Antigravity model and effort",
+    "DAG dependency aware scheduler",
+    "At least two independent actions truly overlapping in Windows EF01 subprocesses",
+    "Per-attempt source SHA, distributed claim, worktree, candidate Git ref",
+    "Per-action and aggregate feedback, diagnostics, repair lineage and honest failure/unknown"
+  ],
+  "scope_out": [
+    "AIOS-Renew Runtime/Kernel/Publisher",
+    "Implicit cross-executor fallback",
+    "Automatic merge to main",
+    "Creative/product task engine",
+    "Automatic proactive ChatGPT wake or native continuation without separate live evidence"
+  ],
+  "implementation_cuts": [
+    {
+      "id": "EF02-A",
+      "title": "Batch ingress, identity, Git claim",
+      "status": "ACCEPTED_FOR_WORK"
+    },
+    {
+      "id": "EF02-B",
+      "title": "Windows concurrent scheduler and EF01 execution",
+      "status": "ACCEPTED_FOR_WORK"
+    },
+    {
+      "id": "EF02-C",
+      "title": "Batch feedback, diagnostics and repair",
+      "status": "ACCEPTED_FOR_WORK"
+    },
+    {
+      "id": "EF02-D",
+      "title": "Optional Chat Wake/native continuation extension",
+      "status": "NOT_INCLUDED_IN_M0_R"
+    }
+  ],
+  "execution_policy": {
+    "multi_action": true,
+    "initial_max_parallel": 2,
+    "configurable": true,
+    "batch_acceptance": "multiple; actual ready actions bound by machine/provider availability",
+    "per_action_manual_executor_model_effort": true,
+    "dependency_graph": "acyclic",
+    "same_attempt_invocation": "at-most-one-admitted; no exactly-once claim",
+    "candidate_delivery": "create-only ref; no auto merge",
+    "cross_batch_parallelism": "NOT_CLAIMED_FOR_ONE_RUNNER_V1",
+    "retry": "no blind retry after executor invocation; new repair attempt",
+    "separate_brain_wake_proof": true
+  },
+  "acceptance": [
+    "Human/Brain can submit multiple actions in a single batch; concurrent batch submissions are durably admitted or explicitly rejected.",
+    "A 5-action batch with at least two independent READY actions completes with two overlapping Windows executor subprocesses (not only queued) and traces worktrees and action-specific evidence.",
+    "DAG dependency failure blocks only dependents; independent siblings continue and aggregate status is truthful.",
+    "At least two distinct selected executor profiles retain exact model and effort; provider quota and unsupported model are explicit failed attempts.",
+    "Concurrent duplicate attempts result in one distributed claim winner and no second provider invocation.",
+    "Verified scoped candidate refs and full diagnostic artifacts are accessible through GitHub; Brain can read feedback without user manually collecting local logs.",
+    "Crash, offline, canceled, source stale and publication failure are not reported as PASS and never blind-invoke provider twice.",
+    "No AIOS inherited runtime, no automatic main merge, and no false claim of native Chat Wake."
+  ],
+  "verification": {
+    "ef01_dependency": "BUILD_VERIFIED_FOR_SCOPE",
+    "ef01_windows_tests": "53_PASS_2026_10_28",
+    "ef02_runtime": "NOT_IMPLEMENTED",
+    "ef02_windows_parallel_live": "NOT_RUN",
+    "ef02_github_remote": "NOT_RUN",
+    "m0_r": "OPEN"
+  },
+  "expected_artifacts": [
+    "contracts/RemoteActionBatch.v1.schema.json",
+    "src/ai_commerce/remote/",
+    "tests/test_ef02_*.py",
+    ".github/workflows/ef02-batch.yml",
+    "docs/engineering/EF02_MULTI_ACTION_IMPLEMENTATION_PLAN_V1_0_2026-10-28.md"
+  ],
+  "evidence_refs": [
+    "docs/engineering/EF02_MULTI_ACTION_IMPLEMENTATION_PLAN_V1_0_2026-10-28.md"
+  ],
+  "dispatch_status": "NOT_DISPATCHED",
+  "human_override_ref": "User approved EF02 Multi-Action v1 and requested update for implementation, 2026-10-28",
+  "risk_notes": [
+    "Initial one-runner version runs independent actions in parallel within a batch, not batches concurrently.",
+    "Actual runner registration and GitHub webhook/Issue-to-Actions path are not yet verified.",
+    "Model quota/resource limits may reduce actual overlap; local fake-worker tests must prove scheduler independently."
+  ],
+  "plan_only_not_runtime": true
+}

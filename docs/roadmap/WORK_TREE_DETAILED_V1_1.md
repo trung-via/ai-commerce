@@ -26,7 +26,7 @@ AI-COMMERCE / INDEPENDENT PROJECT
 │   └── G05–G08 Provenance, tests, provider abstractions, isolation
 ├── EF / Engineering Flow (independent project tooling)
 │   ├── EF01 Selective Extraction + Dual Executor Working Core
-│   └── EF02 Independent Remote Wake + Feedback/Optional Native Continuation
+│   └── EF02 Multi-Action Remote Wake + Concurrent Execution & Feedback
 ├── O / Commerce Operations
 │   ├── O01–O04 Job, runner, assets, bounded diagnostics
 │   └── O05–O07 Cost, retry/idempotency, reports
@@ -79,7 +79,7 @@ AI-COMMERCE / INDEPENDENT PROJECT
 | WBS | Work item & concrete output | Observable acceptance | Dep | Prio |
 |---|---|---|---|---|
 | `EF01` | **Selective Extraction + Dual Executor Working Core** — Project-owned WorkItem binding, executor profile, Codex/Antigravity CLI adapters, scoped verify, diagnostics, Git result, usage observations; no AIOS Task/Run/Kernel. | A real scoped code change with **each** selected executor is observed/verified in an independent AI Commerce workspace; profile/model/effort exact; failures and unknown remain honest; no implicit AIOS imports/credentials. | `G03,G06,G08` | P0 |
-| `EF02` | **Independent Remote Wake + Feedback & Optional Native Continuation** — GitHub/Windows trigger, dispatch identity, results, failure feedback, authorized repair; app-server multi-turn when genuinely proven. | Remote work and its attempt-bound result can be traced without AIOS Runtime; CLI repair attempt is not mislabeled native continuation; remote UNKNOWN is not success. | `EF01` | P0 |
+| `EF02` | **Multi-Action Concurrent Remote Wake & Feedback** — Human/Brain can submit many actions, EF02 validates batch DAG, schedules independent Windows EF01 processes concurrently (initial 2, adjustable), protects attempt identity/worktrees/candidates, and returns individual + aggregate diagnostics; optional native continuation separate. | A 5-action batch proves ≥2 truly overlapping executor processes, correct deps/dedup/unknown and Brain-readable results; no imported AIOS Runtime. | `EF01` | P0 |
 
 **EF-01 boundaries:** The source-snapshot reference for selective extraction is `trung-via/AIOS-renew@cbefb92612f24b55417165736c63753fc560d403`; this is provenance, not dependency or proof of compatibility. Candidate sources: `execution_profile.py`, `codex_adapter.py`, `antigravity_adapter.py`, `native_execution_policy.py`, selected `run_observation.py` primitives. **ADAPT**, do not copy entire `dispatcher.py`/Runtime or its historical hard defaults. Project-local external-component adoption records are required if code is actually transplanted, recording license/rights uncertainty and rollback.
 
@@ -347,3 +347,7 @@ Human requested A02 implementation. `G04/G05/G07` are `BUILD_VERIFIED_FOR_SCOPE`
 ## EF01 implementation evidence update — 2026-10-28
 
 Following Human's EF01 execution request, independent manual Codex/Antigravity CLI core and normalized attempt-bound results are implemented on a dedicated branch. 12/12 local fake-CLI/subprocess/Git tests passed. The WBS acceptance requiring a real code change and scoped verification with **each** provider remains OPEN; EF02 is unimplemented. The older EF01 `NOT_IMPLEMENTED` observations in this document are historical and superseded only as to source implementation, not live verification. See `work_items/EF01-DUAL-EXECUTOR-001.json`.
+
+## EF02 Multi-Action v1 accepted for implementation — 2026-10-28
+
+EF02 is **one existing WBS ID**, not several new product jobs or a new WBS count. Actual Work Tree remains 63 IDs (20 P0, 32 P1, 11 P2), correcting stale JSON metadata that previously stated 61/18. Human approved multi-action batches and real concurrent executor processes, not only concurrent requests waiting in a queue. Initial configurable pool=2; DAG fan-out/fan-in, per-action profile and worktree, distributed attempt claim, candidate ref and aggregate feedback required. EF02-A/B/C are **implementation slices of EF02**, not added WBS IDs. Current execution status: NOT_IMPLEMENTED; WorkItem: [EF02-MULTI-ACTION-001](../../work_items/EF02-MULTI-ACTION-001.json). See [Human decision](../governance/HUMAN_DECISION_2026-10-28_EF02_MULTI_ACTION.md) and [implementation plan](../engineering/EF02_MULTI_ACTION_IMPLEMENTATION_PLAN_V1_0_2026-10-28.md). Earlier dated NOT_IMPLEMENTED notes for EF01 are historical; EF01 live dual-executor conformance and Windows 53/53 PASS are recorded separately.

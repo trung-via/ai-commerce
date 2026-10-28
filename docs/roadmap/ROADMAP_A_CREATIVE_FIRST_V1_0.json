@@ -8,13 +8,23 @@
   "repo": "trung-via/ai-commerce",
   "governance": "v0.3",
   "baseline_sha": "13266240558aaf1ec3c80e0dfc3fe89911908002",
-  "plan_note": "Preserves six selected stages and A01–A18 planning IDs; expanded package names/scope are canonical planning articulation, not tasks executed.",
+  "plan_note": "Preserves six selected stages and A01–A18 planning IDs; expanded package names/scope are canonical planning articulation, not tasks executed. Supersession 2026-10-28: EF02 multi-action concurrent implementation approved; historical status notes below remain dated snapshots.",
   "work_tree_ref": "docs/roadmap/WORK_TREE_V1_1.json",
   "engineering_flow": {
     "ef01": "Selective clone with manual Codex/Antigravity model/effort selection, optional recommendation, targeted verify, repair and honest token observations",
-    "ef02": "Independent GitHub/Windows wake and remote feedback; native continuation evidence separately required",
+    "ef02": "EF02 Multi-Action v1 (Human approved): concurrent ingress, batched DAG scheduling, at least 2 truly overlapping EF01 processes on Windows in independent worktrees; identity/claim, per-action+aggregate results, authorized repair; optional native/Chat Wake proof separate.",
     "dual_executor_in_phase_0": true,
-    "parallel_creative_allowed_while_ef02_pending": true
+    "parallel_creative_allowed_while_ef02_pending": true,
+    "multi_action": {
+      "approved": true,
+      "initial_max_parallel": 2,
+      "configurable": true,
+      "real_parallel_within_batch": true,
+      "concurrent_batch_ingress": true,
+      "cross_batch_parallel_claim": "NOT_YET_A_V1_SINGLE_RUNNER_PROOF",
+      "source_decision": "docs/governance/HUMAN_DECISION_2026-10-28_EF02_MULTI_ACTION.md",
+      "plan": "docs/engineering/EF02_MULTI_ACTION_IMPLEMENTATION_PLAN_V1_0_2026-10-28.md"
+    }
   },
   "stages": [
     {
@@ -371,7 +381,7 @@
   ],
   "milestones": {
     "M0": "A01 and A02 planning scope plus EF01 core implemented with independent dual-executor capability; EF02 remote is tracked separately as M0-R rather than a gate for Creative Factory.",
-    "M0-R": "EF02 remote execution and feedback independently verified when built; optional native multi-turn proof reported separately.",
+    "M0-R": "EF02 multi-action remote ingress and GitHub feedback demonstrated on Windows: at least two overlapping independent EF01 executor processes in one batch, DAG results, dedup claims, and readable aggregate evidence. True proactive Chat Wake/native continuation optional and separately evidenced.",
     "M1": "E01 playable offline video and artifact provenance.",
     "M2": "Assisted distribution package and truthful status receipts.",
     "M3": "Audience measurement/insight prototypes, not fabricated live outcomes.",
@@ -384,9 +394,10 @@
   "progress": {
     "A01": "BUILD_VERIFIED_FOR_SCOPE_LINUX_TESTED_WINDOWS_USER_SCREENSHOT_PASS",
     "A02": "BUILD_VERIFIED_FOR_SCOPE_LOCAL_41_PASS_WINDOWS_USER_SCREENSHOT_41_PASS",
-    "EF01": "NOT_IMPLEMENTED",
-    "EF02": "NOT_IMPLEMENTED",
-    "M0": "NOT_ACHIEVED_EF01_PENDING",
-    "M0_R": "NOT_ACHIEVED"
+    "EF01": "BUILD_VERIFIED_FOR_SCOPE_WINDOWS_LIVE_CODEX_ANTIGRAVITY_53_TESTS_PASS",
+    "EF02": "ACCEPTED_FOR_WORK_MULTI_ACTION_V1_NOT_IMPLEMENTED",
+    "M0": "CORE_SCOPE_MET_WITH_SCREENSHOT_EVIDENCE_EF01",
+    "M0_R": "NOT_ACHIEVED_EF02_REMOTE_PENDING",
+    "EF02_implementation_ref": "work_items/EF02-MULTI-ACTION-001.json"
   }
 }

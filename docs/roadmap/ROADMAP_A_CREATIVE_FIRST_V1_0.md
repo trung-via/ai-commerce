@@ -22,7 +22,7 @@ Milestone(s): `M0`, `M0-R`.
 | EF ID | Scope | Targeted acceptance |
 |---|---|---|
 | `EF01` (P0) | Selective AIOS code extraction to **independent** AI Commerce; per-WorkItem **Codex or Antigravity**, manual model/effort choice, optional advisory recommendation, adapter + focused tests + diagnostic + Git candidate + usage observation. | One bounded real code change **per executor**, result normalized and verified; exact source and model attributed; no imported runtime or inherited hard default. |
-| `EF02` (P0) | GitHub/Windows remote wake, attempt-bound feedback, authorized CLI repair, optional true native multi-turn after live conformance. | One remote invocation returns verifiable result; missing session/status is UNKNOWN/FAILED, never treated as pass. |
+| `EF02` (P0) | **Multi-Action v1**: Human/Brain concurrent batch ingress, DAG + two overlapping Windows EF01 processes initially (configurable), per-attempt claim/worktrees/candidate and per-action/aggregate GitHub feedback; CLI repair attempt new; optional Chat Wake/native independently proven. | 5-action batch with at least 2 truly concurrent independent executor processes, no duplicate invocation, correct dependency and failure evidence, Brain-readable aggregate; EF02 not gate for Creative Factory. |
 
 
 ### Phase 1 — Creative Factory
@@ -81,7 +81,7 @@ Milestone(s): `M6`.
 | Milestone | Meaning |
 |---|---|
 | `M0` | A01 and A02 planning scope plus EF01 core implemented with independent dual-executor capability; EF02 remote is tracked separately as M0-R rather than a gate for Creative Factory. |
-| `M0-R` | EF02 remote execution and feedback independently verified when built; optional native multi-turn proof reported separately. |
+| `M0-R` | EF02 batch remote dispatch proven: at least two real overlapping Windows EF01 actions, DAG-aware results and GitHub feedback. Proactive Chat Wake/native multi-turn proof is separate. |
 | `M1` | E01 playable offline video and artifact provenance. |
 | `M2` | Assisted distribution package and truthful status receipts. |
 | `M3` | Audience measurement/insight prototypes, not fabricated live outcomes. |
@@ -153,3 +153,7 @@ Following the cross-platform date-time validator fix, Human supplied a Windows P
 ## EF01 implementation evidence update — 2026-10-28
 
 Prior EF01 `NOT_IMPLEMENTED` snapshots in this roadmap are historical. EF01 local dual-executor code was committed on `ef01-dual-executor-2026-10-28` and passed 12/12 synthetic subprocess/Git targeted tests. Real Codex + Antigravity Windows code-change acceptance remains **NOT_VERIFIED**, so the M0 live engineering milestone is not asserted complete. EF02 remote remains unimplemented. Details: `docs/engineering/EF01_IMPLEMENTATION_REPORT.md`.
+
+## EF02 Multi-Action approval supersession — 2026-10-28
+
+Human approved **EF02 Multi-Action v1** for implementation. The older EF02 single-remote-invocation acceptance sentence and historical EF01 NOT_IMPLEMENTED notes above no longer describe current acceptance truth. M0 Core is verified for scope (EF01 two live executors; 53/53 Windows tests), while **M0-R remains OPEN** until remote execution proves **at least two simultaneous independent EF01 processes** inside one batch. Default process concurrency 2 is adjustable; many actions, dependencies and concurrent inbound batches are admitted with explicit status (single-runner cross-batch processing may queue). Per-action results, distributed claims, Git candidate refs and aggregated feedback are part of EF02 core. Native proactive Chat Wake is optional, not an implied feature. See [Human decision](../governance/HUMAN_DECISION_2026-10-28_EF02_MULTI_ACTION.md), [implementation handoff](../engineering/EF02_MULTI_ACTION_IMPLEMENTATION_PLAN_V1_0_2026-10-28.md), [WorkItem](../../work_items/EF02-MULTI-ACTION-001.json).

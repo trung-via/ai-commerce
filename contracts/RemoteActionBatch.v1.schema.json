@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/ai-commerce/contracts/RemoteActionBatch.v1.schema.json",
+  "title": "AI Commerce EF02 RemoteActionBatch v1",
+  "description": "Transport shape only. Semantic validators must check actor authorization, unique IDs, DAG cycles, allowed paths, source SHA, and attempt fingerprint.",
+  "type": "object",
+  "required": [
+    "kind",
+    "version",
+    "batch_id",
+    "source_sha",
+    "actor",
+    "authorization_ref",
+    "actions"
+  ],
+  "properties": {
+    "kind": {
+      "const": "AI_COMMERCE_REMOTE_ACTION_BATCH"
+    },
+    "version": {
+      "const": 1
+    },
+    "batch_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+    },
+    "source_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "actor": {
+      "enum": [
+        "HUMAN",
+        "BRAIN"
+      ]
+    },
+    "authorization_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "max_parallel": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 2
+    },
+    "actions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/action"
+      }
+    }
+  },
+  "$defs": {
+    "action": {
+      "type": "object",
+      "required": [
+        "action_id",
+        "attempt_id",
+        "executor",
+        "model",
+        "effort",
+        "instruction",
+        "allowed_paths",
+        "verification_profile",
+        "depends_on"
+      ],
+      "properties": {
+        "action_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+        },
+        "attempt_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+        },
+        "executor": {
+          "enum": [
+            "codex",
+            "antigravity"
+          ]
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+        },
+        "effort": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+        },
+        "instruction": {
+          "type": "string",
+          "minLength": 1
+        },
+        "allowed_paths": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "verification_profile": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+        },
+        "depends_on": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "priority": {
+          "type": "integer",
+          "default": 50
+        },
+        "resources": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "repair_of": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "delivery": {
+          "const": "CANDIDATE_BRANCH"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
