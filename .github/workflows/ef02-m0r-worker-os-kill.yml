@@ -1,0 +1,41 @@
+name: EF02 M0-R real worker termination (no model)
+on:
+  issues:
+    types: [opened]
+permissions:
+  contents: read
+jobs:
+  killed-worker-reconcile:
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.action == 'opened' &&
+      github.event.issue.title == '[M0R] Windows EF02 actual worker termination probe' &&
+      github.event.issue.user.login == github.repository_owner
+    runs-on: [self-hosted, Windows, ai-commerce-ef02]
+    permissions:
+      contents: write
+    timeout-minutes: 9
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install EF02, without running models
+        shell: pwsh
+        run: python -m pip install -e .
+      - name: OS terminate ONLY probe-owned EF02 worker and reconcile remote markers
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYTHONPATH: src
+        run: |
+          python .github/scripts/ef02-m0r-worker-os-kill.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve actual process-kill evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ef02-m0r-worker-os-kill-${{ github.run_id }}
+          path: .local/ef02-m0r/**
+          if-no-files-found: warn
+          retention-days: 14
