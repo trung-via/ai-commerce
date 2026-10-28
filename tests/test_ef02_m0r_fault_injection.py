@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -316,3 +318,102 @@ def test_issue_feedback_publication_failure_marks_batch_nonpass(tmp_path, monkey
     assert record["status"] == "COMPLETE"  # actions finished, delivery failed
     assert record["feedback_status"] == "FEEDBACK_PUBLICATION_FAILED"
     assert record["feedback_error_code"] == "RemoteTransportError"
+
+
+
+def _journal(worker, name):
+    p = worker.root / "fault-probe-m0r-fault-probe-001" / name
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+def test_parent_interrupted_at_popen_preserves_pre_spawn_unknown_without_replay(
+    tmp_path, monkeypatch,
+):
+    """A BaseException from the process boundary mimics abrupt parent loss.
+
+    This is deterministic fault injection, not a live runner-service crash.
+    """
+    class Claimed:
+        claim_calls = 0
+        def claim(self, **_kwargs):
+            self.claim_calls += 1
+            return "CLAIMED" if self.claim_calls == 1 else "DUPLICATE_CLAIM_NO_REEXECUTION"
+        def integrated_source(self, **_kwargs):
+            return {"effective_sha": BASE, "integration_ref": None}
+        def candidate(self, **_kwargs):
+            raise AssertionError("NO_PROVIDER_RESULT_NO_CANDIDATE")
+
+    def interrupted_popen(*_a, **_kw):
+        raise SystemExit("SIMULATED_PARENT_EXIT_AT_SPAWN_BOUNDARY")
+
+    monkeypatch.setattr("ai_commerce.remote.worker.subprocess.run",
+                        lambda *_a, **_k: SimpleNamespace(returncode=0, stderr=""))
+    monkeypatch.setattr("ai_commerce.remote.worker.subprocess.Popen", interrupted_popen)
+    github = Claimed()
+    worker = _worker(tmp_path, github)
+    with pytest.raises(SystemExit, match="SIMULATED_PARENT_EXIT_AT_SPAWN_BOUNDARY"):
+        worker.execute_action(_action())
+
+    boundary = _journal(worker, "invocation_boundary.json")
+    assert boundary["stage"] == "BEFORE_EF01_CHILD_SPAWN"
+    assert boundary["status"] == "EXECUTION_UNKNOWN"
+    assert boundary["claim_status"] == "CLAIMED"
+    assert boundary["ef01_child_pid_observed"] is False
+    assert boundary["provider_invocation_proven"] is False
+    assert boundary["replay_authorized"] is False
+    evidence = worker.root / "fault-probe-m0r-fault-probe-001"
+    assert not (evidence / "invocation_spawned.json").exists()
+    assert not (evidence / "action_result.json").exists()
+    assert worker.execute_action(_action())["status"] == "DUPLICATE_CLAIM_NO_REEXECUTION"
+    assert github.claim_calls == 2
+
+
+def test_parent_interrupted_after_ef01_child_spawn_preserves_observed_pid_unknown(
+    tmp_path, monkeypatch,
+):
+    """EF01 PID observed does not establish provider invocation or its result."""
+    class Claimed:
+        claim_calls = 0
+        def claim(self, **_kwargs):
+            self.claim_calls += 1
+            return "CLAIMED" if self.claim_calls == 1 else "DUPLICATE_CLAIM_NO_REEXECUTION"
+        def integrated_source(self, **_kwargs):
+            return {"effective_sha": BASE, "integration_ref": None}
+        def candidate(self, **_kwargs):
+            raise AssertionError("INTERRUPTED_CHILD_CANNOT_PUBLISH")
+
+    class InterruptedChild:
+        pid = 11223
+        returncode = None
+        def __init__(self, _argv, **_kwargs):
+            pass
+        def communicate(self, timeout=None):
+            raise SystemExit("SIMULATED_PARENT_EXIT_AFTER_SPAWN")
+
+    spawn_count = 0
+    def fake_spawn(argv, **kwargs):
+        nonlocal spawn_count
+        spawn_count += 1
+        return InterruptedChild(argv, **kwargs)
+
+    monkeypatch.setattr("ai_commerce.remote.worker.subprocess.run",
+                        lambda *_a, **_k: SimpleNamespace(returncode=0, stderr=""))
+    monkeypatch.setattr("ai_commerce.remote.worker.subprocess.Popen", fake_spawn)
+    github = Claimed()
+    worker = _worker(tmp_path, github)
+    with pytest.raises(SystemExit, match="SIMULATED_PARENT_EXIT_AFTER_SPAWN"):
+        worker.execute_action(_action())
+
+    boundary = _journal(worker, "invocation_boundary.json")
+    observed = _journal(worker, "invocation_spawned.json")
+    assert boundary["status"] == observed["status"] == "EXECUTION_UNKNOWN"
+    assert boundary["ef01_child_pid_observed"] is False
+    assert observed["stage"] == "EF01_CHILD_PID_OBSERVED"
+    assert observed["ef01_child_pid_observed"] is True
+    assert observed["process_id"] == 11223
+    assert observed["provider_invocation_proven"] is False
+    assert observed["replay_authorized"] is False
+    assert not (worker.root / "fault-probe-m0r-fault-probe-001" / "action_result.json").exists()
+    assert worker.execute_action(_action())["status"] == "DUPLICATE_CLAIM_NO_REEXECUTION"
+    assert spawn_count == 1
+    assert github.claim_calls == 2
