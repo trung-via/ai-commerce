@@ -346,3 +346,57 @@ def test_git_ref_reuse_verification_detects_mismatch():
            "candidate_ref":"refs/heads/ef02/candidate/"+github.attempt_key(attempt)}
     with pytest.raises(RemoteTransportError,match="REUSE_REF_SHA_CHANGED"):
         github.verify_reused_candidate(entry)
+
+
+def test_remote_pre_spawn_ref_is_create_only_and_chained_to_exact_claim():
+    fp = "f" * 64
+    source = "a" * 40
+    claim_sha = "b" * 40
+    tree_sha = "c" * 40
+
+    class CheckpointTransport(GitHubTransport):
+        def __init__(self):
+            super().__init__("trung-via/ai-commerce", "fixture-token")
+            self.writes = []
+        def api(self, method, path, data=None):
+            if method == "GET" and path.startswith("/git/ref/heads/ef02/claims/"):
+                return {"object": {"sha": claim_sha}}
+            if method == "GET" and path == "/git/commits/" + claim_sha:
+                return {"message": "EF02 CLAIM\\n\\nfingerprint=" + fp +
+                        "\\nattempt_id=checkpoint-001",
+                        "tree": {"sha": tree_sha}, "parents": [{"sha": source}]}
+            if method == "POST" and path == "/git/commits":
+                self.writes.append((path, data))
+                return {"sha": "d" * 40}
+            if method == "POST" and path == "/git/refs":
+                self.writes.append((path, data))
+                return {}
+            raise AssertionError("unexpected operation: " + method + " " + path)
+
+    t = CheckpointTransport()
+    ref = t.pre_spawn_checkpoint(source_sha=source,
+                                 attempt_id="checkpoint-001", fingerprint=fp)
+    assert ref == "refs/heads/ef02/pre-spawn/" + t.attempt_key("checkpoint-001")
+    assert len(t.writes) == 2
+    commit = t.writes[0][1]
+    assert commit["tree"] == tree_sha
+    assert commit["parents"] == [claim_sha]
+    assert commit["message"] == "EF02 PRESPAWN\\n\\nfingerprint=" + fp + "\\nattempt_id=checkpoint-001"
+    assert t.writes[1][1] == {"ref": ref, "sha": "d" * 40}
+
+
+def test_remote_pre_spawn_ref_rejects_wrong_claim_parent_before_any_write():
+    class BadClaim(GitHubTransport):
+        def __init__(self):
+            super().__init__("trung-via/ai-commerce", "fixture-token")
+        def api(self, method, path, data=None):
+            assert method == "GET", "must not create any commit/ref"
+            if "/git/ref/" in path:
+                return {"object": {"sha": "b" * 40}}
+            return {"message": "EF02 CLAIM\\n\\nfingerprint=" + "f" * 64 +
+                    "\\nattempt_id=bad-claim",
+                    "tree": {"sha": "c" * 40},
+                    "parents": [{"sha": "d" * 40}]}
+    with pytest.raises(RemoteTransportError, match="PRESPAWN_CLAIM_IDENTITY_MISMATCH"):
+        BadClaim().pre_spawn_checkpoint(source_sha="a" * 40,
+                                        attempt_id="bad-claim", fingerprint="f" * 64)
