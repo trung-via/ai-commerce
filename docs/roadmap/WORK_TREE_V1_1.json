@@ -180,7 +180,14 @@
           "planned_extensions": [
             "EF01-VERIFY-REPAIR-002",
             "EF01-DIRECT-GIT-PYTEST-003"
-          ]
+          ],
+          "minimum_test_extension": {
+            "id": "MT-01",
+            "status": "PLANNED_NOT_IMPLEMENTED",
+            "work_item_ref": "work_items/EF01-DIRECT-GIT-PYTEST-003.json",
+            "decision_ref": "docs/governance/HUMAN_DECISION_2026-10-29_MINIMUM_TEST.md",
+            "scope": "AC-driven minimum sufficient pytest, PASS evidence reuse/invalidation, EF01-R affected re-verification; optional xdist up to 12 workers, serial fallback."
+          }
         },
         {
           "id": "EF02",
@@ -213,7 +220,13 @@
           "planned_extensions": [
             "EF02-EXACT-CHAT-WAKE-002"
           ],
-          "accepted_m0_r_work_item_ref": "work_items/EF02-MULTI-ACTION-001.json"
+          "accepted_m0_r_work_item_ref": "work_items/EF02-MULTI-ACTION-001.json",
+          "minimum_test_integration": {
+            "id": "MT-01",
+            "status": "PLANNED_NOT_IMPLEMENTED",
+            "owner_work_item_ref": "work_items/EF01-DIRECT-GIT-PYTEST-003.json",
+            "scope": "Registered per-action plans, evidence binding, safe fan-in invalidation and aggregate consumer verification; no reopening M0-R."
+          }
         }
       ]
     },
@@ -1043,5 +1056,6 @@
     "a05_ref": "work_items/A05-SCRIPT-SCENE-RENDER-001.json",
     "a06_m1_status": "NOT_VERIFIED",
     "work_tree_ids_unchanged": true
-  }
+  },
+  "minimum_test_human_decision_ref": "docs/governance/HUMAN_DECISION_2026-10-29_MINIMUM_TEST.md"
 }

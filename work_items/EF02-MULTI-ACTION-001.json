@@ -473,5 +473,20 @@
       "ref": "work_items/EF02-EXACT-CHAT-WAKE-002.json"
     }
   ],
-  "extension_m0_r_boundary": "M0-R acceptance status unchanged; EF02-D remains separate and optional, does not imply ChatGPT chat delivery"
+  "extension_m0_r_boundary": "M0-R acceptance status unchanged; EF02-D remains separate and optional, does not imply ChatGPT chat delivery",
+  "planned_verification_enhancement": {
+    "id": "MT-01",
+    "decision_ref": "docs/governance/HUMAN_DECISION_2026-10-29_MINIMUM_TEST.md",
+    "owner_work_item_ref": "work_items/EF01-DIRECT-GIT-PYTEST-003.json",
+    "status": "PLANNED_NOT_IMPLEMENTED",
+    "scope": "Per-action registered minimum-sufficient pytest/evidence reuse and invalidation; on DAG fan-in verify combined consumer contracts and aggregate evidence. Does not change accepted M0-R status.",
+    "non_blocking_for": [
+      "A03",
+      "A04",
+      "A05",
+      "A06",
+      "M1"
+    ],
+    "no_dispatch": true
+  }
 }

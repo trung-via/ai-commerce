@@ -8,7 +8,7 @@
   "repo": "trung-via/ai-commerce",
   "governance": "v0.3",
   "baseline_sha": "13266240558aaf1ec3c80e0dfc3fe89911908002",
-  "plan_note": "Preserves six selected stages and A01–A18 planning IDs; expanded package names/scope are canonical planning articulation, not tasks executed. Supersession 2026-10-28: EF02 multi-action concurrent implementation approved; historical status notes below remain dated snapshots. Human approved three EF01/EF02 non-gating enhancement WorkItems on 2026-10-28; WBS baseline, phase milestones and A01-A18 dependencies unchanged. Human 2026-10-29 approved A03/A04 v1.1 upgrade and A05 C03+C06 implementation (docs/governance/HUMAN_DECISION_2026-10-29_CREATIVE_V1_1_A05.md); A06 E01/M1 not proven.",
+  "plan_note": "Preserves six selected stages and A01–A18 planning IDs; expanded package names/scope are canonical planning articulation, not tasks executed. Supersession 2026-10-28: EF02 multi-action concurrent implementation approved; historical status notes below remain dated snapshots. Human approved three EF01/EF02 non-gating enhancement WorkItems on 2026-10-28; WBS baseline, phase milestones and A01-A18 dependencies unchanged. Human 2026-10-29 approved A03/A04 v1.1 upgrade and A05 C03+C06 implementation (docs/governance/HUMAN_DECISION_2026-10-29_CREATIVE_V1_1_A05.md); A06 E01/M1 not proven. Human 2026-10-29 adopted MT-01 Minimum Test as scope of existing EF01-P, with EF02 integration; no new WBS or M0-R gate. Planning only, not implemented.",
   "work_tree_ref": "docs/roadmap/WORK_TREE_V1_1.json",
   "engineering_flow": {
     "ef01": "Selective clone with manual Codex/Antigravity model/effort selection, optional recommendation, targeted verify, repair and honest token observations",
@@ -67,18 +67,29 @@
           "id": "EF01-P",
           "work_id": "EF01-DIRECT-GIT-PYTEST-003",
           "wbs_id": "EF01",
-          "title": "Optional Direct Git + measured pytest-xdist 12-worker profile",
+          "title": "Optional Direct Git + pytest-xdist (up to 12) + Minimum Test MT-01",
           "priority": "P2",
-          "status": "PLANNED_BENCHMARK_REQUIRED",
+          "status": "PLANNED_NOT_IMPLEMENTED",
           "phase": "PHASE_1_OR_2_WHEN_REAL_WINDOWS_BASELINE",
           "depends_on": [
             "EF01",
             "G06"
           ],
           "work_item_ref": "work_items/EF01-DIRECT-GIT-PYTEST-003.json",
-          "non_blocking": true
+          "non_blocking": true,
+          "minimum_test": "MT-01 evidence reuse/invalidation; deterministic scoped verification and EF02 fan-in"
         }
-      ]
+      ],
+      "minimum_test": {
+        "id": "MT-01",
+        "title": "Minimum sufficient test selection, evidence reuse/invalidation and EF01-R/EF02 fan-in verification",
+        "decision_ref": "docs/governance/HUMAN_DECISION_2026-10-29_MINIMUM_TEST.md",
+        "owner_work_item_ref": "work_items/EF01-DIRECT-GIT-PYTEST-003.json",
+        "ef02_integration_ref": "work_items/EF02-MULTI-ACTION-001.json",
+        "status": "PLANNED_NOT_IMPLEMENTED",
+        "no_new_wbs": true,
+        "non_blocking_creative": true
+      }
     },
     "m0_r_disposition": "ACCEPTED_WITH_DEFERRED_RISKS_2026_10_28"
   },
@@ -475,6 +486,6 @@
     "M0": "CORE_SCOPE_MET_WITH_SCREENSHOT_EVIDENCE_EF01",
     "M0_R": "ACCEPTED_WITH_DEFERRED_RISKS_2026_10_28",
     "EF02_implementation_ref": "work_items/EF02-MULTI-ACTION-001.json",
-    "optional_ef_enhancements": "PLANNED_NOT_IMPLEMENTED_ALL_THREE"
+    "optional_ef_enhancements": "EF01-R_IMPLEMENTED_2026_10_28; EF01-P_MT01_PLANNED; EF02_CHAT_WAKE_PLANNED"
   }
 }
