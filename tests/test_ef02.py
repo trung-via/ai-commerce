@@ -253,3 +253,27 @@ def test_ef02_mxc_only_for_windows_codex_service():
     assert _remote_codex_sandbox_args("codex", windows=False) == []
     assert _remote_codex_sandbox_args("antigravity", windows=True) == []
     assert _remote_codex_sandbox_args("antigravity", windows=False) == []
+
+def test_codex_capacity_failure_reports_distinct_code(tmp_path):
+    from ai_commerce.remote.worker import _classify_failed_executor
+    evidence = tmp_path / "ef01"
+    evidence.mkdir()
+    (evidence / "executor.stdout.log").write_text(
+        '{"type":"turn.failed","error":{"message":"Selected model is at capacity. Please try a different model."}}',
+        encoding="utf-8")
+    report = {"status": "EXECUTOR_FAILED", "error_code": "EXECUTOR_NONZERO"}
+    assert _classify_failed_executor(report, evidence) == "MODEL_AT_CAPACITY"
+
+
+def test_capacity_classifier_does_not_confuse_quota_and_unsupported(tmp_path):
+    from ai_commerce.remote.worker import _classify_failed_executor
+    evidence = tmp_path / "ef01"
+    evidence.mkdir()
+    log = evidence / "executor.stderr.log"
+    report = {"status": "EXECUTOR_FAILED"}
+    log.write_text("429 too many requests", encoding="utf-8")
+    assert _classify_failed_executor(report, evidence) == "QUOTA_EXHAUSTED"
+    log.write_text("model is not supported", encoding="utf-8")
+    assert _classify_failed_executor(report, evidence) == "MODEL_UNSUPPORTED"
+    log.write_text("command crashed for an unrelated reason", encoding="utf-8")
+    assert _classify_failed_executor(report, evidence) == "EXECUTOR_FAILED"

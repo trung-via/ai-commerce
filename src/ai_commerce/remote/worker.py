@@ -45,6 +45,9 @@ def _classify_failed_executor(report: dict, evidence: Path) -> str:
             # Preserve full file on disk; classification only needs bounded prefix.
             with path.open("rb") as f:
                 messages += f.read(1024 * 1024).decode("utf-8", "replace").lower()
+    if any(x in messages for x in ("selected model is at capacity",
+                                    "model is at capacity", "no capacity available")):
+        return "MODEL_AT_CAPACITY"
     if any(x in messages for x in ("resource_exhausted", "quota exceeded",
                                     "quota reached", "429 too many requests")):
         return "QUOTA_EXHAUSTED"
@@ -184,7 +187,11 @@ class LocalBatchWorker:
             outcome["verify_exit_code"] = report.get("verify_exit_code")
             if report.get("status") != "BUILD_VERIFIED_FOR_SCOPE" or child.returncode:
                 outcome["status"] = _classify_failed_executor(report, efdir)
-                outcome["error_code"] = report.get("error_code") or "EF01_NONPASS"
+                # Surface exact provider reason instead of generic EXECUTOR_NONZERO.
+                outcome["error_code"] = (
+                    outcome["status"] if outcome["status"] in (
+                        "MODEL_AT_CAPACITY", "QUOTA_EXHAUSTED", "MODEL_UNSUPPORTED")
+                    else report.get("error_code") or "EF01_NONPASS")
                 return finish()
             if report.get("source_base_sha") != effective:
                 outcome.update(status="SOURCE_MISMATCH", error_code="EF01_BASE_MISMATCH")

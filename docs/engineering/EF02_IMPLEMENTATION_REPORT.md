@@ -40,3 +40,9 @@ Five-action DAG Issue #4 / run 40658774567 returned 2/5, with Codex A and C cand
 A read-only Windows Service permissions probe run 40659944924 showed `settings.json` exists, `permissions.allow` already contains a `read_file` entry, no explicit `read_file` entry in ask/deny, but the failed tool's target path was not disclosed. No broad permission escalation or `--dangerously-skip-permissions` is justified by this evidence.
 
 EF01 now parses AGY `denied_actions`, marking `EXECUTOR_PERMISSION_DENIED / HEADLESS_TOOL_PERMISSION_DENIED` even if process exit is zero or some files were changed. Preserves full raw stdout/stderr evidence. No authorization for automatic retry, model/effort substitution, or global AGY settings mutation is inferred. A fresh narrowly prompted action is needed for live AGY conformance.
+
+## 2026-10-28: Third five-action DAG live conformance (capacity-limited)
+
+Issue #8, run 40661368442, source 3c4e119c...: scheduler=2; A, B and D produced scoped candidate refs and D consumed B's dependency. C was dispatched after A and returned `EXECUTOR_FAILED / EXECUTOR_NONZERO`; the preserved provider `turn.failed` output specifically reports: `Selected model is at capacity. Please try a different model.` No files were written by C, so E was properly `BLOCKED_DEPENDENCY`. Artifact 12803712243. This is **model capacity**, not a demonstrated MXC/permission failure. Aggregate 3/5 is truthful, and M0-R five-action acceptance remains OPEN.
+
+The remote worker now classifies this exact provider output as `MODEL_AT_CAPACITY` for action status/error_code, distinct from quota and unsupported-model statuses. This is diagnostic only: no automatic provider substitution, blind attempt retry or Git main merge. Do not confuse historical run#8's old generic code with the improved classification in subsequent runs.

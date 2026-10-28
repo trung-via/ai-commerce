@@ -75,7 +75,7 @@
     "ef02_runtime": "SOURCE_IMPLEMENTED_GITHUB_CI_PASS",
     "ef02_windows_parallel_live": "PASS_TWO_REAL_OVERLAPPING_EF01_PROCESSES_94_SECONDS_RUN_40654797946",
     "ef02_github_remote": "LIVE_CONFIRMED_ISSUES_2_AND_3_AGY_FIRST_BATCH_CODEX_MXC_FOLLOWUP",
-    "m0_r": "OPEN_5_ACTION_BATCH_AND_NEGATIVE_PATH_LIVE_ACCEPTANCE_NOT_PROVEN",
+    "m0_r": "OPEN_FIVE_OF_FIVE_LIVE_DAG_NOT_YET_PROVEN",
     "ef02_ci": "PASS_WINDOWS_UBUNTU_RUN_40657420066_SHA_71b48d7e3fce8496afb40f9fc77fe53dc143c73a",
     "windows_runner_registration": "VERIFIED_LIVE_JOB_40657572754",
     "ef02_windows_local_tests": "PASS_65_OF_65_2026_10_28_HUMAN_POWERSHELL_SCREENSHOT",
@@ -182,7 +182,88 @@
       "candidate_merged_to_main": false,
       "provider_cost": "UNKNOWN",
       "evidence_url": "https://github.com/trung-via/ai-commerce/actions/runs/40657572754"
-    }
+    },
+    "multi_action_live_m0r": {
+      "first_five_action_batch": {
+        "issue": 4,
+        "run": 40658774567,
+        "status": "PARTIAL_OR_FAILED",
+        "succeeded": 2,
+        "total": 5,
+        "scheduler_max_active": 2,
+        "a": "CANDIDATE_READY",
+        "b": "NO_CODE_CHANGE_AGY_HEADLESS_READFILE_DENIED",
+        "c": "CANDIDATE_READY",
+        "d": "BLOCKED_DEPENDENCY",
+        "e": "BLOCKED_DEPENDENCY",
+        "artifact_id": 12803297819
+      },
+      "negative_cycle": {
+        "issue": 5,
+        "run": 40658957811,
+        "status": "EXPECTED_REJECTED",
+        "reason": "DEPENDENCY_CYCLE",
+        "execute_job": "SKIPPED",
+        "model_calls": 0
+      },
+      "agy_permission_probe": {
+        "run": 40659944924,
+        "status": "PASS_NO_MODEL",
+        "conclusion": "Existing AGY read_file allow rule does not guarantee all headless targets allowed"
+      },
+      "agy_directwrite_smoke": {
+        "issue": 6,
+        "run": 40660389111,
+        "status": "COMPLETE_1_OF_1",
+        "candidate_sha": "e4d92f4dc9a6b6a5e28b7cacfa9dd0aee33f7cba"
+      },
+      "second_five_action_batch": {
+        "issue": 7,
+        "run": 40660733630,
+        "status": "PARTIAL_OR_FAILED",
+        "succeeded": 2,
+        "total": 5,
+        "scheduler_max_active": 2,
+        "a": "NO_CODE_CHANGE_CODEX_FILE_CHANGE_FAILED_NO_COMMAND_FALLBACK_ALLOWED",
+        "b": "CANDIDATE_READY",
+        "c": "BLOCKED_DEPENDENCY",
+        "d": "CANDIDATE_READY",
+        "e": "BLOCKED_DEPENDENCY",
+        "artifact_id": 12803961182
+      },
+      "third_five_action_batch": {
+        "issue": 8,
+        "run": 40661368442,
+        "status": "PARTIAL_OR_FAILED",
+        "succeeded": 3,
+        "total": 5,
+        "scheduler_max_active": 2,
+        "a": {
+          "status": "CANDIDATE_READY",
+          "sha": "6a29d9952d36c08f8ca89449cbaf7c215a4d73b4"
+        },
+        "b": {
+          "status": "CANDIDATE_READY",
+          "sha": "cbbbba75082093bf387d51f312f0ddac76e95954"
+        },
+        "c": {
+          "status": "EXECUTOR_FAILED",
+          "reported_code": "EXECUTOR_NONZERO",
+          "diagnosis": "MODEL_AT_CAPACITY",
+          "provider_message": "Selected model is at capacity. Please try a different model.",
+          "provider_exit_code": 1
+        },
+        "d": {
+          "status": "CANDIDATE_READY",
+          "sha": "61194f2ba3f8fbc3e25edcd7aa1d3d4bd1a2b308"
+        },
+        "e": "BLOCKED_DEPENDENCY",
+        "artifact_id": 12803712243
+      },
+      "pending": "Need a full 5/5 DAG with fan-in and additional non-model negative cases; no model fallback, no blind re-dispatch of claimed IDs",
+      "false_positive_prevention": "EF02 reports PARTIAL_OR_FAILED and preserves artifacts; no candidate is merged to main"
+    },
+    "model_capacity_classifier": "SOURCE_PATCHED_CI_PENDING"
   },
   "expected_artifacts": [
     "contracts/RemoteActionBatch.v1.schema.json",
@@ -209,16 +290,25 @@
     "https://github.com/trung-via/ai-commerce/actions/runs/40657420066",
     "https://github.com/trung-via/ai-commerce/actions/runs/40657572754",
     "https://github.com/trung-via/ai-commerce/actions/runs/40657572754/artifacts/12802004580",
-    "https://github.com/trung-via/ai-commerce/commit/efae5acb6e6a48ed1c4264970be03443d52700b8"
+    "https://github.com/trung-via/ai-commerce/commit/efae5acb6e6a48ed1c4264970be03443d52700b8",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40658774567",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40658957811",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40659944924",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40660389111",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40660733630",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40661368442",
+    "https://github.com/trung-via/ai-commerce/issues/8"
   ],
-  "dispatch_status": "LIVE_GITHUB_ISSUE_REMOTE_EXECUTION_VERIFIED_M0_R_STILL_OPEN",
+  "dispatch_status": "LIVE_REMOTE_FEEDBACK_CONFIRMED_FULL_M0_R_OPEN",
   "human_override_ref": "User approved EF02 Multi-Action v1 and requested update for implementation, 2026-10-28",
   "risk_notes": [
     "Single runner may queue batches even though a batch uses parallel child processes.",
     "Candidate refs are create-only and not merged into main; Chat Wake/native continuation not implemented.",
     "First 2-action live batch produced 1 candidate and 1 NO_CODE_CHANGE; M0-R stays open despite proven process overlap and GitHub feedback.",
     "Legacy Windows Codex sandbox remains unusable in Session 0 on this host; EF02 Windows Codex uses scoped MXC override, successfully live verified. AGY behavior unchanged.",
-    "M0-R remains open: complete five-action multi-DAG and failure/unknown/quota/offline acceptance have not been demonstrated live."
+    "M0-R remains open: complete five-action multi-DAG and failure/unknown/quota/offline acceptance have not been demonstrated live.",
+    "Codex selected model gpt-6.1-sol/max returned transient at-capacity before writing in DAG3 C, 2026-10-28; no automatic model switch/retry is authorized.",
+    "Two of three five-action live batches were blocked by provider tool permissions or model sandbox file_change behavior; the third by model capacity. DAG blocked dependents correctly, but complete 5/5 is NOT established."
   ],
   "plan_only_not_runtime": false
 }
