@@ -25,6 +25,22 @@ def _repo(tmp_path):
 
 
 def _fake_binary(tmp_path, name, code):
+    """Create a test-only CLI runnable through subprocess on Windows and POSIX.
+
+    Windows CreateProcess cannot execute a shebang-only script (WinError 193).
+    A .cmd shim launches the exact test Python interpreter; POSIX uses the
+    original executable shebang script. This never affects production adapters.
+    """
+    if os.name == "nt":
+        script = tmp_path / (name + ".py")
+        script.write_text(code, encoding="utf-8")
+        launcher = tmp_path / (name + ".cmd")
+        launcher.write_bytes(
+            ("@echo off\r\n"
+             + f'"{sys.executable}" "{script}"\r\n'
+             + "exit /b %errorlevel%\r\n").encode("utf-8")
+        )
+        return str(launcher)
     p = tmp_path / name
     p.write_text("#!" + sys.executable + "\n" + code, encoding="utf-8")
     p.chmod(0o755)
