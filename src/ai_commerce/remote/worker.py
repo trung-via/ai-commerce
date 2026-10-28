@@ -276,8 +276,31 @@ class LocalBatchWorker:
             outcome["ef01_finished_at"] = report.get("finished_at")
             outcome["changed_files"] = report.get("changed_files", [])
             outcome["verify_exit_code"] = report.get("verify_exit_code")
+            # Trust neither a success-shaped receipt after a nonzero process
+            # exit nor an EF01 PASS receipt contradicted by verification.
+            # Both cases can arise when the EF01 process dies after writing
+            # its result. Never promote either to a schedulable PASS.
+            if child.returncode != 0 and report.get("status") == "BUILD_VERIFIED_FOR_SCOPE":
+                outcome.update(status="EXECUTION_UNKNOWN",
+                               error_code="EF01_EXIT_NONZERO_WITH_SUCCESS_RECEIPT",
+                               receipt_status_untrusted=True, replay_authorized=False)
+                return finish()
+            if (report.get("status") == "BUILD_VERIFIED_FOR_SCOPE"
+                    and report.get("verify_exit_code") != 0):
+                outcome.update(status="VERIFICATION_FAILED",
+                               error_code="EF01_VERIFY_EXIT_CONTRADICTS_SUCCESS_RECEIPT",
+                               receipt_status_untrusted=True)
+                return finish()
             if report.get("status") != "BUILD_VERIFIED_FOR_SCOPE" or child.returncode:
-                outcome["status"] = _classify_failed_executor(report, efdir)
+                classified = _classify_failed_executor(report, efdir)
+                if classified in ("CANDIDATE_READY", "BUILD_VERIFIED_FOR_SCOPE"):
+                    # These are not legitimate EF01 failure statuses and
+                    # would otherwise be mistaken for a successful action.
+                    outcome.update(status="EXECUTION_UNKNOWN",
+                                   error_code="EF01_NONPASS_STATUS_INVALID",
+                                   receipt_status_untrusted=True, replay_authorized=False)
+                    return finish()
+                outcome["status"] = classified
                 # Surface exact provider reason instead of generic EXECUTOR_NONZERO.
                 outcome["error_code"] = (
                     outcome["status"] if outcome["status"] in (
