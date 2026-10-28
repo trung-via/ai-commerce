@@ -86,6 +86,16 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'cached_inp
     assert out["git_delivery"] == "LOCAL_DIFF_ONLY_NO_COMMIT_NO_PUSH"
     assert (tmp_path / "evidence" / "engineering_result.json").is_file()
     assert set(out) == set(json.loads((tmp_path / "evidence" / "engineering_result.json").read_text()))
+    boundary = json.loads((tmp_path / "evidence" / "provider_boundary.json").read_text())
+    returned = json.loads((tmp_path / "evidence" / "provider_return_observed.json").read_text())
+    assert boundary["stage"] == "BEFORE_EXECUTOR_SUBPROCESS"
+    assert boundary["status"] == "EXECUTION_UNKNOWN"
+    assert boundary["provider_invocation_proven"] is False
+    assert boundary["replay_authorized"] is False
+    assert returned["stage"] == "EXECUTOR_SUBPROCESS_RETURNED"
+    assert returned["executor_process_return_observed"] is True
+    assert returned["executor_exit_code"] == 0
+    assert returned["provider_effects_reconciled"] is False
 
 
 def test_missing_binary_returns_non_pass_and_no_verification(tmp_path):
@@ -231,3 +241,62 @@ print(json.dumps({"status":"SUCCESS","denied_actions":[{"action":"command"}]}))
     assert result["status"] == "EXECUTOR_PERMISSION_DENIED"
     assert result["denied_actions"] == ["command"]
     assert result["changed_files"] == ["one.txt"]
+
+
+def test_real_mock_executor_timeout_is_unknown_and_no_verification(tmp_path):
+    """A real OS child timeout is not proof that provider side effects failed."""
+    repo = _repo(tmp_path)
+    binary = _fake_binary(tmp_path, "mock-sleeping-cli",
+                          "import time\ntime.sleep(3)\n")
+    outdir = tmp_path / "timeout-evidence"
+    result = execute_attempt(
+        repo=repo, output_dir=outdir, work_id="M0R-timeout",
+        attempt_id="timeout-001",
+        selection=ExecutorSelection("codex", "mock-model-no-network", "high"),
+        instruction="fixture only", verify_argv=[sys.executable, "-c", "assert False"],
+        timeout_seconds=1, codex_bin=binary)
+    assert result["status"] == "EXECUTION_UNKNOWN"
+    assert result["error_code"] == "EXECUTOR_TIMEOUT"
+    assert result["replay_authorized"] is False
+    assert result["executor_invoked"] is True
+    assert result["verify_exit_code"] is None
+    assert result["usage_status"] == "UNKNOWN"
+    assert result["cost_status"] == "UNKNOWN"
+    assert not (outdir / "provider_return_observed.json").exists()
+    assert not (outdir / "verify.stdout.log").exists()
+    boundary = json.loads((outdir / "provider_boundary.json").read_text())
+    timeout = json.loads((outdir / "provider_timeout.json").read_text())
+    assert boundary["stage"] == "BEFORE_EXECUTOR_SUBPROCESS"
+    assert boundary["replay_authorized"] is False
+    assert timeout["stage"] == "EXECUTOR_TIMEOUT_OBSERVED"
+    assert timeout["provider_effects_reconciled"] is False
+    assert json.loads((outdir / "engineering_result.json").read_text())["status"] == "EXECUTION_UNKNOWN"
+
+
+def test_parent_lost_around_provider_boundary_remains_unknown(tmp_path, monkeypatch):
+    """Simulate abrupt parent loss; no actual provider or runner crash."""
+    from ai_commerce.engineering import runner as ef01_runner
+
+    repo = _repo(tmp_path)
+    actual_run = subprocess.run
+    def interrupted_run(argv, **kwargs):
+        if isinstance(argv, list) and argv and argv[0] == "never-run-codex":
+            raise SystemExit("SIMULATED_PARENT_DISAPPEARED_AFTER_BOUNDARY")
+        return actual_run(argv, **kwargs)
+    monkeypatch.setattr(ef01_runner.subprocess, "run", interrupted_run)
+    outdir = tmp_path / "interrupted"
+    with pytest.raises(SystemExit, match="SIMULATED_PARENT_DISAPPEARED_AFTER_BOUNDARY"):
+        execute_attempt(
+            repo=repo, output_dir=outdir, work_id="M0R-interruption",
+            attempt_id="interruption-001",
+            selection=ExecutorSelection("codex", "fixture-no-model", "max"),
+            instruction="do not run", verify_argv=[sys.executable, "-c", "assert False"],
+            codex_bin="never-run-codex")
+    boundary = json.loads((outdir / "provider_boundary.json").read_text())
+    report = json.loads((outdir / "engineering_result.json").read_text())
+    assert boundary["status"] == "EXECUTION_UNKNOWN"
+    assert boundary["provider_invocation_proven"] is False
+    assert boundary["replay_authorized"] is False
+    assert report["status"] == "EXECUTION_UNKNOWN"
+    assert report["verify_exit_code"] is None
+    assert not (outdir / "provider_return_observed.json").exists()
