@@ -29,7 +29,7 @@ The GitHub-uploaded blobs of all implementation and test files were compared wit
 
 ## Truth boundaries
 
-- **Not performed:** Windows A02 verification, real API/provider/model calls, image/video render, commercial product access, sending/receiving external messages, posting, spend, Codex/Antigravity coding executor, EF01/EF02 or wake.
+- **Not performed in original local build:** Windows A02 verification (later separately observed in Human screenshot), real API/provider/model calls, image/video render, commercial product access, sending/receiving external messages, posting, spend, Codex/Antigravity coding executor, EF01/EF02 or wake.
 - Cost/rights: source and generated mock artifact rights stay `UNKNOWN`; `NOT_APPLICABLE` cost specifically describes a no-charge local mock execution and is not a price estimate for a real provider.
 - Mock `SUCCEEDED` means *local mock text produced*, not product/media/publishing success.
 - Local content-hash/receipt paths are preparation for A04/O03, not a complete durable job queue or enterprise artifact store.
@@ -55,3 +55,15 @@ On Windows PowerShell from `C:\\TOOL\\ai-commerce`, fast-forward the Git checkou
 ## Next independent work
 
 `EF01` code executor integration or `A03/A04` creative provider/media capabilities; `EF02` remote wake is optional and does not block offline creative.
+
+
+## Windows retest PASS — 2026-10-28 (Human-provided screenshot)
+
+Human provided a **new** Windows PowerShell screenshot showing the A02 date-time fix retest. Observations visible:
+- Working directory: `C:\TOOL\ai-commerce`.
+- Editable package installation: `Successfully installed ai-commerce-0.1.0`.
+- `python -m pytest tests -q`: **41 passed in 2.08s**, no failures shown.
+- Python site-packages paths reference `pythoncore-3.14-64` / `Python314`, but the output does not include a direct `python --version` invocation.
+- The same screenshot does not show `git rev-parse HEAD`; **exact local checkout SHA is not attested**.
+
+**A02 Windows verification verdict: PASS (Human-supplied screenshot)** for package installation and targeted tests. This supersedes the earlier failed run and the historical RETEST_PENDING notice above; it does not erase that earlier failure from the record. No Windows native executor, EF01, EF02, media generation, provider charge or publish evidence is implied. WorkItem remains `BUILD_VERIFIED_FOR_SCOPE`.

@@ -143,3 +143,9 @@ A02 completed G04/G05/G07 with portable product contracts and mock adapter only;
 Human Windows screenshot for previous A02 revision: 30 passed / 1 failed (timestamp format did not raise); mock generate succeeded. The package now registers its own strict date-time checker, removing reliance on optional JSON Schema format checker availability. After patch: **41 local tests passed**, 5 schemas still packaged. **Windows post-fix result is pending**. A02 remains `BUILD_VERIFIED_FOR_SCOPE` for its locally verified implementation; it has **not** achieved a Windows PASS on the new revision. EF01/EF02 remain NOT_IMPLEMENTED and M0 remains NOT_ACHIEVED.
 
 [Regression evidence](../engineering/A02_IMPLEMENTATION_REPORT.md#windows-validation-issue-and-cross-platform-fix-2026-10-28).
+
+## A02 Windows verified — 2026-10-28
+
+Following the cross-platform date-time validator fix, Human supplied a Windows PowerShell screenshot of a successful editable install and **41 targeted tests PASS in 2.08s**, no failures shown. This replaces the historical RETEST_PENDING status for A02; the prior 30/1 failure remains recorded for provenance. No exact Windows checkout SHA was displayed. A02 remains `BUILD_VERIFIED_FOR_SCOPE`; EF01/EF02 remain NOT_IMPLEMENTED and M0 is NOT_ACHIEVED.
+
+[Windows evidence transcription](../engineering/A02_IMPLEMENTATION_REPORT.md#windows-retest-pass-2026-10-28-human-provided-screenshot).

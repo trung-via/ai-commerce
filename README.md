@@ -60,7 +60,7 @@ python -m ai_commerce mock-generate --brief tests/fixtures/creative_only_brief.j
 python -m pytest tests -q
 ```
 
-The mock creates a `.txt` artifact and a `.result.json` manifest under the ignored `.local/` directory. No network/spend/publishing is triggered, and unverified rights are `UNKNOWN`. Linux focused regression after the date-time validation fix observed **41 passed**. A previous Windows revision showed **30 passed / 1 failed** (missing date-time format validation); the corrected Windows revision still requires re-test. Live provider checks remain unperformed. [A02 evidence](docs/engineering/A02_IMPLEMENTATION_REPORT.md) · [WorkItem](work_items/A02-CONTRACTS-001.json).
+The mock creates a `.txt` artifact and a `.result.json` manifest under the ignored `.local/` directory. No network/spend/publishing is triggered, and unverified rights are `UNKNOWN`. Linux focused regression after the date-time validation fix observed **41 passed**. A previous Windows revision showed **30 passed / 1 failed** (missing date-time format validation). After the fix, a Human-provided Windows PowerShell screenshot shows **41 passed in 2.08s**. The exact local checkout SHA was not shown. Live provider checks remain unperformed. [A02 evidence](docs/engineering/A02_IMPLEMENTATION_REPORT.md) · [WorkItem](work_items/A02-CONTRACTS-001.json).
 
 ## Status and repository hygiene
 

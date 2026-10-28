@@ -35,12 +35,13 @@
   "owner": "Engineering Foundation",
   "evidence_refs": [
     "docs/engineering/A02_IMPLEMENTATION_REPORT.md",
-    "docs/engineering/A02_IMPLEMENTATION_REPORT.md#windows-validation-issue-and-cross-platform-fix-2026-10-28"
+    "docs/engineering/A02_IMPLEMENTATION_REPORT.md#windows-validation-issue-and-cross-platform-fix-2026-10-28",
+    "docs/engineering/A02_IMPLEMENTATION_REPORT.md#windows-retest-pass-2026-10-28-human-provided-screenshot"
   ],
   "risk_notes": [
-    "Windows previous revision FAILED 1 of 31; corrected patch passes 41 locally; Windows retest still pending",
     "Mock is text-only and not actual media/AI provider",
-    "No EF01 or EF02 runtime dispatch"
+    "No EF01 or EF02 runtime dispatch",
+    "Prior Windows revision had 1 failed test; fixed version now shows 41 passed in a Human-supplied Windows screenshot. Exact local checkout SHA not shown."
   ],
   "executor_binding": null,
   "dispatch_status": "NOT_DISPATCHED",
@@ -50,7 +51,7 @@
     "targeted_test_count": 41,
     "targeted_test_status": "PASS_LOCAL_AFTER_DATE_TIME_FIX",
     "wheel_schema_count": 5,
-    "windows": "RETEST_PENDING_AFTER_FAIL_1_OF_31",
+    "windows": "PASS_USER_SCREENSHOT_AFTER_FIX",
     "real_provider": "NOT_RUN",
     "previous_windows_run": {
       "passed": 30,
@@ -61,6 +62,19 @@
       "evidence": "Human-provided screenshot 2026-10-28"
     },
     "fix_local_test_count": 41,
-    "fix_rationale": "date-time format checker not reliably installed; application-defined deterministic validator"
+    "fix_rationale": "date-time format checker not reliably installed; application-defined deterministic validator",
+    "windows_retest": {
+      "date": "2026-10-28",
+      "source": "User-provided PowerShell screenshot in AI Commerce conversation",
+      "checkout_directory": "C:\\TOOL\\ai-commerce",
+      "editable_install": "SUCCESS_ai-commerce-0.1.0",
+      "command": "python -m pytest tests -q",
+      "passed": 41,
+      "failed": 0,
+      "duration_seconds": 2.08,
+      "screenshot_committed": false,
+      "exact_checkout_sha": "NOT_SHOWN",
+      "provider_or_media_execution": "NOT_TESTED"
+    }
   }
 }
