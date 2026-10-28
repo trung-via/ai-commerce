@@ -87,7 +87,7 @@ async function notify({github, context, core}, run, status, issue) {
   }
   sections.push('This observer does not run executors, cancel jobs, mutate claims or retry models.');
   await github.rest.issues.createComment({
-    owner, repo, issue_number: issue, body: sections.join('\\n\\n')
+    owner, repo, issue_number: issue, body: sections.join('\n\n')
   });
   return true;
 }
