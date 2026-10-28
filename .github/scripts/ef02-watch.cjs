@@ -3,7 +3,6 @@
 // Hosted-only, read-only EF02 outcome observer; the only write is an Issue comment.
 // Never modify claims, retry an attempt, or run Codex/Antigravity.
 const AGE_MS = 45 * 60 * 1000;
-const TARGET_WORKFLOW = 'EF02 Multi-Action remote engineering';
 const TARGET_FILE = 'ef02-batch.yml';
 
 function issueNumber(run, repoFullName) {
