@@ -20,7 +20,7 @@ from pathlib import Path
 from ai_commerce.remote.transport import GitHubTransport, RemoteTransportError
 from ai_commerce.remote.worker import LocalBatchWorker
 
-TITLE = "[M0R] EF02 EF01 Codex 6.1 Sol max live E2E interruption"
+TITLE = "[M0R] EF02 EF01 Codex 6.1 Sol max streamed E2E interruption"
 MODEL = "gpt-6.1-sol"
 EFFORT = "max"
 MAX_OBSERVE_SECONDS = 200
@@ -62,8 +62,10 @@ def action_for(run: str) -> tuple[dict, str, str]:
         "current worktree, not by editing files directly:\n\n" +
         command + "\n\n"
         "Do not commit, push, browse, install, contact external services, "
-        "start other agents, or change any other file. Do not finish early. "
-        "The supervising test will terminate only its own process tree."
+        "start other agents, or change any other file. If the terminal command "
+        "fails, do NOT retry or switch tools; keep this turn open for 150 seconds "
+        "without further commands. The supervising test will terminate only "
+        "its own process tree after observing the model-emitted command event."
     )
     return ({
         "action_id": aid, "attempt_id": attempt,
@@ -95,6 +97,32 @@ def marker_worktree(aid: str, relative: str, marker: str) -> Path | None:
         raise RuntimeError("M0R_E2E_MULTIPLE_MATCHING_WORKTREES")
     return found[0] if found else None
 
+
+
+
+def streamed_codex_command_event(log_path: Path, marker: str) -> dict | None:
+    """Model-emitted command_execution event; NOT proof the shell ran successfully."""
+    if not log_path.is_file():
+        return None
+    if log_path.stat().st_size > 4 * 1024 * 1024:
+        raise RuntimeError("M0R_E2E_STREAM_TOO_LARGE")
+    with log_path.open("r", encoding="utf-8", errors="replace") as stream:
+        for raw in stream:
+            try:
+                record = json.loads(raw)
+            except (ValueError, TypeError):
+                continue
+            item = record.get("item") if isinstance(record, dict) else None
+            if (record.get("type") == "item.started"
+                    and isinstance(item, dict)
+                    and item.get("type") == "command_execution"
+                    and isinstance(item.get("command"), str)
+                    and marker in item["command"]):
+                return {"item_id": item.get("id"),
+                        "command_sha256": hashlib.sha256(
+                            item["command"].encode("utf-8")).hexdigest(),
+                        "event": "MODEL_EMITTED_COMMAND_STARTED_NOT_SHELL_SUCCESS"}
+    return None
 
 def inspect_remote(github: GitHubTransport, source: str, attempt: str,
                    fingerprint: str, ef01_pid: int) -> dict:
@@ -148,6 +176,9 @@ def worker_mode(env: dict, event: dict, checkout: Path) -> int:
     repo, source, run = validate_context(env, event)
     action, _, _ = action_for(run)
     root = root_for(checkout, run)
+    # Explicitly scoped to this owner-only probe. Real EF01 and selected
+    # Codex still run; only their JSONL stdout becomes immediately observable.
+    os.environ["AI_COMMERCE_EF01_CODEX_STREAM_EVENTS"] = "1"
     worker = LocalBatchWorker(
         checkout=checkout,
         batch={"batch_id": "m0r-real-e2e-" + run, "source_sha": source},
@@ -178,6 +209,7 @@ def supervisor_mode(env: dict, event: dict, checkout: Path) -> dict:
         "replay_authorized": False, "candidate_created": False,
         "runner_service_interrupted": False, "scope": "FULL_LOCALBATCHWORKER_EF01_CODEX",
         "worktree_side_effect_not_published": True,
+        "event_stream_only_no_shell_success_claim": True,
     }
     owned_worktree = None
     proc = subprocess.Popen(
@@ -187,17 +219,22 @@ def supervisor_mode(env: dict, event: dict, checkout: Path) -> dict:
     result["worker_pid"] = proc.pid
     try:
         deadline = time.monotonic() + MAX_OBSERVE_SECONDS
-        confirmed = False
+        command_event = None
+        log_path = evidence / "ef01" / "executor.stdout.live.jsonl"
         while time.monotonic() < deadline:
-            if proc.poll() is not None:
-                raise RuntimeError("M0R_E2E_WORKER_EXITED_BEFORE_MODEL_SIDE_EFFECT")
-            owned_worktree = marker_worktree(aid, relative, marker)
-            if owned_worktree is not None:
-                confirmed = True
+            command_event = streamed_codex_command_event(log_path, marker)
+            if command_event is not None:
                 break
-            time.sleep(0.2)
-        if not confirmed:
-            raise RuntimeError("M0R_E2E_MODEL_SIDE_EFFECT_NOT_OBSERVED")
+            if proc.poll() is not None:
+                raise RuntimeError("M0R_E2E_WORKER_EXITED_BEFORE_STREAMED_EVENT")
+            time.sleep(0.08)
+        if command_event is None:
+            raise RuntimeError("M0R_E2E_MODEL_COMMAND_EVENT_NOT_OBSERVED")
+        matches = list(Path(tempfile.gettempdir()).glob(
+            "ai-commerce-ef02-" + aid + "-*"))
+        if len(matches) != 1 or not matches[0].is_dir():
+            raise RuntimeError("M0R_E2E_UNIQUE_WORKTREE_NOT_OBSERVED")
+        owned_worktree = matches[0]
 
         # The normal EF02 worker must have written real GitHub checkpoint
         # confirmation before the provider marker is accepted.
@@ -226,11 +263,13 @@ def supervisor_mode(env: dict, event: dict, checkout: Path) -> dict:
         result.update(
             ef01_pid=ef01_pid, remote=observed,
             ef01_provider_boundary_seen=True,
-            codex_command_side_effect_observed=True,
-            worktree_marker_sha256=hashlib.sha256(marker.encode()).hexdigest(),
+            codex_command_event_observed=True,
+            shell_command_success_proven=False,
+            command_event=command_event,
         )
-        (root / "provider_marker_observed.txt").write_text(
-            marker, encoding="utf-8")
+        (root / "provider_tool_event.json").write_text(
+            json.dumps(command_event, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8")
         kill = terminate_owned_worker(proc)
         result["owned_process_tree_termination"] = kill
         if not kill["confirmed"]:

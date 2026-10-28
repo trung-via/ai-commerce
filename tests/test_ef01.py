@@ -300,3 +300,45 @@ def test_parent_lost_around_provider_boundary_remains_unknown(tmp_path, monkeypa
     assert report["status"] == "EXECUTION_UNKNOWN"
     assert report["verify_exit_code"] is None
     assert not (outdir / "provider_return_observed.json").exists()
+
+
+
+def test_codex_live_event_mirror_streams_before_process_exit(tmp_path):
+    """Real Python child, no provider: JSONL is visible while subprocess lives."""
+    import threading
+    import time
+    from ai_commerce.engineering.runner import _run_codex_with_live_event_mirror
+    logfile = tmp_path / "codex.events.live.jsonl"
+    fake = ("import json,time; print(json.dumps("
+            "{'type':'item.started','item':{'type':'command_execution',"
+            "'command':'python -V'}}), flush=True); time.sleep(0.8)")
+    done = {}
+    def execute():
+        done["result"] = _run_codex_with_live_event_mirror(
+            [sys.executable, "-c", fake], repo=tmp_path, stdin_text=None,
+            timeout_seconds=5, live_path=logfile)
+    t = threading.Thread(target=execute)
+    t.start()
+    try:
+        deadline = time.monotonic() + 3
+        while not logfile.is_file() or "item.started" not in logfile.read_text():
+            assert time.monotonic() < deadline, "LIVE_EVENT_NOT_VISIBLE_BEFORE_EXIT"
+            time.sleep(0.03)
+        assert t.is_alive(), "EVENT_ONLY_VISIBLE_AFTER_EXIT"
+    finally:
+        t.join(timeout=4)
+    assert done["result"].returncode == 0
+    assert "command_execution" in done["result"].stdout
+    assert logfile.read_text() == done["result"].stdout
+
+
+def test_codex_live_event_mirror_timeout_cannot_become_pass(tmp_path):
+    from ai_commerce.engineering.runner import _run_codex_with_live_event_mirror
+    live = tmp_path / "partial.jsonl"
+    with pytest.raises(subprocess.TimeoutExpired):
+        _run_codex_with_live_event_mirror(
+            [sys.executable, "-c",
+             "import time; print('{\"type\":\"turn.started\"}', flush=True); time.sleep(4)"],
+            repo=tmp_path, stdin_text=None, timeout_seconds=1,
+            live_path=live)
+    assert "turn.started" in live.read_text()
