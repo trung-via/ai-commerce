@@ -86,7 +86,12 @@
       "duration_seconds": 6.93,
       "evidence": "Human Windows PowerShell screenshot showing successful git pull and 65 tests passed",
       "exact_windows_checkout_sha": "NOT_DISPLAYED"
-    }
+    },
+    "windows_service_install": "RUNNING_AUTO_2026_10_28_HUMAN_POWERSHELL_SCREENSHOT",
+    "windows_service_account": ".\\trung",
+    "windows_service_name": "actions.runner.trung-via-ai-commerce.AI-COMMERCE-EF02-01",
+    "windows_runner_online": "NOT_INDEPENDENTLY_VERIFIED",
+    "windows_service_executors": "NOT_YET_TESTED_FROM_SERVICE"
   },
   "expected_artifacts": [
     "contracts/RemoteActionBatch.v1.schema.json",
@@ -102,7 +107,8 @@
     "docs/engineering/EF02_IMPLEMENTATION_REPORT.md",
     "docs/engineering/EF02_WINDOWS_RUNNER_SETUP.md",
     "https://github.com/trung-via/ai-commerce/actions/runs/40648371883",
-    "Human Windows PowerShell screenshot: 65 tests passed in 6.93s on 2026-10-28 (conversation only)"
+    "Human Windows PowerShell screenshot: 65 tests passed in 6.93s on 2026-10-28 (conversation only)",
+    "Human PowerShell screenshot 2026-10-28: runner successfully added, Windows Service Running/Auto with .\\trung identity"
   ],
   "dispatch_status": "WORKFLOW_SOURCE_AVAILABLE_NOT_LIVE_CONFIRMED",
   "human_override_ref": "User approved EF02 Multi-Action v1 and requested update for implementation, 2026-10-28",

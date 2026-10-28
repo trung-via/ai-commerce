@@ -9,3 +9,11 @@
 7. Inspect issue feedback and the workflow artifact ef02-results-<run_id>-<attempt>. Missing runner, no result, claim without receipt or upload errors are not PASS. Do not retry the same claimed attempt; reconcile first.
 
 Initial one-runner setup accepts multiple actions in one batch and runs independent actions in overlapping child processes, default two. Independent batches may queue. No automatic main merge, external media publishing, provider fallback or proactive ChatGPT wake.
+
+## 2026-10-28 — Service installed on user's Windows machine
+
+Observed from Human PowerShell screenshot: runner name `AI-COMMERCE-EF02-01` registered with label `ai-commerce-ef02`; service `actions.runner.trung-via-ai-commerce.AI-COMMERCE-EF02-01` installed, `State=Running`, `StartMode=Auto`, `StartName=.\\trung`. This does not independently establish GitHub Online, executor authentication or live remote batch execution.
+
+### Zero-provider-cost runner preflight
+
+Use Actions → **EF02 Windows Service preflight** → **Run workflow** on branch `main`. The job targets `[self-hosted, Windows, X64, ai-commerce-ef02]` and inspects the running service account's PATH and versions of Python, Git, PowerShell 7, Codex and presence of AGY. It does **not** invoke Codex/Antigravity models, register a batch or consume provider quota. Success shows `EF02_SERVICE_PREFLIGHT_PASS_NO_MODEL_CALL`; queued jobs mean the runner still needs connectivity or correct labels. Provider authentication and permissions remain separate live checks.

@@ -1,0 +1,41 @@
+name: EF02 Windows Service preflight
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-runner-service:
+    runs-on: [self-hosted, Windows, X64, ai-commerce-ef02]
+    timeout-minutes: 10
+    steps:
+      - name: Verify CLI availability in the Windows service account
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "EF02_SERVICE_ACCOUNT=$(whoami)"
+          Write-Host "EF02_USER_PROFILE=$env:USERPROFILE"
+          $missing = @()
+          foreach ($name in @('python', 'git', 'pwsh', 'codex', 'agy')) {
+            $c = Get-Command $name -ErrorAction SilentlyContinue
+            if ($null -eq $c) {
+              $missing += $name
+              Write-Host "MISSING: $name"
+            } else {
+              Write-Host "FOUND: $name"
+            }
+          }
+          if ($missing.Count -gt 0) {
+            throw ("SERVICE_PATH_MISSING: " + ($missing -join ','))
+          }
+          python --version
+          if ($LASTEXITCODE -ne 0) { throw 'PYTHON_FAILED' }
+          git --version
+          if ($LASTEXITCODE -ne 0) { throw 'GIT_FAILED' }
+          pwsh --version
+          if ($LASTEXITCODE -ne 0) { throw 'PWSH_FAILED' }
+          codex --version
+          if ($LASTEXITCODE -ne 0) { throw 'CODEX_BINARY_FAILED' }
+          Write-Host 'AGY_BINARY_FOUND_AUTH_NOT_CHECKED'
+          Write-Host 'EF02_SERVICE_PREFLIGHT_PASS_NO_MODEL_CALL'
