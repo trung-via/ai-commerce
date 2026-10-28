@@ -74,8 +74,8 @@
     "ef01_windows_tests": "53_PASS_2026_10_28",
     "ef02_runtime": "SOURCE_IMPLEMENTED_GITHUB_CI_PASS",
     "ef02_windows_parallel_live": "PASS_TWO_REAL_OVERLAPPING_EF01_PROCESSES_94_SECONDS_RUN_40654797946",
-    "ef02_github_remote": "LIVE_CONFIRMED_ISSUES_2_AND_3_AGY_FIRST_BATCH_CODEX_MXC_FOLLOWUP",
-    "m0_r": "OPEN_FULL_FIVE_OF_FIVE_DAG_NOT_YET_PROVEN",
+    "ef02_github_remote": "FULL_FIVE_ACTION_DAG_AND_GITHUB_FEEDBACK_CONFIRMED_RUN_40665011616",
+    "m0_r": "FIVE_ACTION_DAG_REUSE_LIVE_PASS_OTHER_NEGATIVE_PATH_ACCEPTANCE_OPEN",
     "ef02_ci": "PASS_WINDOWS_UBUNTU_RUN_40662224719_SHA_b6e36043d984b8a9d2d090fdc8051e67f482b800",
     "windows_runner_registration": "VERIFIED_LIVE_JOB_40657572754",
     "ef02_windows_local_tests": "PASS_65_OF_65_2026_10_28_HUMAN_POWERSHELL_SCREENSHOT",
@@ -260,7 +260,7 @@
         "e": "BLOCKED_DEPENDENCY",
         "artifact_id": 12803712243
       },
-      "pending": "Still need five-of-five live DAG with fan-in and crash/offline/uncertainty tests; no automatic model substitution or blind retry.",
+      "pending": "5/5 live DAG acceptance is PASS using approved A/B/D reused candidates and new C/E. Remaining original M0-R negative-path live proof (offline, crash, cancellation, source-stale and publication-failure behavior, quota/unsupported model) is not yet fully established.",
       "false_positive_prevention": "EF02 reports PARTIAL_OR_FAILED and preserves artifacts; no candidate is merged to main",
       "negative_duplicate_claim": {
         "issue": 9,
@@ -285,6 +285,63 @@
         ],
         "process_overlap_seconds_approx": 56.74,
         "source": "verified batch_result.json process_started_at/process_finished_at"
+      },
+      "approved_candidate_reuse_five_action_fanin": {
+        "issue_number": 10,
+        "run_id": 40665011616,
+        "source_sha": "3c4e119cbf47bc74de288a530e2892751b0838a8",
+        "implementation_sha": "f52f267dcad980c3b0394bcaf1923f85dc69971d",
+        "run_status": "COMPLETE",
+        "workflow_conclusion": "success",
+        "succeeded": 5,
+        "total": 5,
+        "failed": 0,
+        "artifact_id": 12806017595,
+        "artifact_verified": true,
+        "github_feedback": "GITHUB_ISSUE_COMMENT_PUBLISHED",
+        "scheduler_max_active": 2,
+        "reused_actions": {
+          "ef02-dag3-a": {
+            "candidate_sha": "6a29d9952d36c08f8ca89449cbaf7c215a4d73b4",
+            "reused_verified": true,
+            "executor_invoked": false,
+            "claim_status": "APPROVED_REUSE_NO_NEW_CLAIM"
+          },
+          "ef02-dag3-b": {
+            "candidate_sha": "cbbbba75082093bf387d51f312f0ddac76e95954",
+            "reused_verified": true,
+            "executor_invoked": false,
+            "claim_status": "APPROVED_REUSE_NO_NEW_CLAIM"
+          },
+          "ef02-dag3-d": {
+            "candidate_sha": "61194f2ba3f8fbc3e25edcd7aa1d3d4bd1a2b308",
+            "reused_verified": true,
+            "executor_invoked": false,
+            "claim_status": "APPROVED_REUSE_NO_NEW_CLAIM"
+          }
+        },
+        "new_actions": {
+          "ef02-dag4-c": {
+            "candidate_sha": "8c079d9ed2875b252b5349e15fc9c4aa3dfddc0b",
+            "executor_invoked": true,
+            "ef01_status": "BUILD_VERIFIED_FOR_SCOPE",
+            "sandbox": "mxc",
+            "pytest": "71 passed in 8.22s",
+            "verified_scope": true
+          },
+          "ef02-dag4-e": {
+            "candidate_sha": "fa0132f674bea391c798de986e13e503ca186cb2",
+            "executor_invoked": true,
+            "ef01_status": "BUILD_VERIFIED_FOR_SCOPE",
+            "sandbox": "mxc",
+            "pytest": "74 passed in 8.26s",
+            "verified_scope": true,
+            "fanin": "A+B+C+D source paths present in dependency-composed worktree"
+          }
+        },
+        "merged_to_main": false,
+        "automatic_provider_fallback": false,
+        "provider_cost": "UNKNOWN"
       }
     },
     "model_capacity_classifier": "CI_PASS_WINDOWS_UBUNTU_RUN_40662224719"
@@ -325,9 +382,15 @@
     "https://github.com/trung-via/ai-commerce/actions/runs/40662224719",
     "https://github.com/trung-via/ai-commerce/actions/runs/40662448102",
     "https://github.com/trung-via/ai-commerce/actions/runs/40662448102/artifacts/12804741975",
-    "https://github.com/trung-via/ai-commerce/issues/9"
+    "https://github.com/trung-via/ai-commerce/issues/9",
+    "https://github.com/trung-via/ai-commerce/commit/f52f267dcad980c3b0394bcaf1923f85dc69971d",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40664741725",
+    "https://github.com/trung-via/ai-commerce/issues/10",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40665011616",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40665011616/artifacts/12806017595",
+    "https://github.com/trung-via/ai-commerce/commit/fa0132f674bea391c798de986e13e503ca186cb2"
   ],
-  "dispatch_status": "LIVE_REMOTE_FEEDBACK_CONFIRMED_FULL_M0_R_OPEN",
+  "dispatch_status": "LIVE_REUSE_FIVE_ACTION_DAG_PASS_REMAINING_NEGATIVE_PATHS_OPEN",
   "human_override_ref": "User approved EF02 Multi-Action v1 and requested update for implementation, 2026-10-28",
   "risk_notes": [
     "Single runner may queue batches even though a batch uses parallel child processes.",
@@ -338,7 +401,9 @@
     "Codex selected model gpt-6.1-sol/max returned transient at-capacity before writing in DAG3 C, 2026-10-28; no automatic model switch/retry is authorized.",
     "Two of three five-action live batches were blocked by provider tool permissions or model sandbox file_change behavior; the third by model capacity. DAG blocked dependents correctly, but complete 5/5 is NOT established.",
     "Live negative duplicate attempt test confirmed ATTEMPT_ID_CONFLICT and executor_invoked=false; workflow failing is expected rejection.",
-    "Existing candidate refs for A/B/D cannot be passed as successful DAG prerequisites in a new batch through the current schema; full DAG reexecution would incur redundant model calls. Consider explicit candidate reuse across batches instead of blind 5-action retries."
+    "Existing candidate refs for A/B/D cannot be passed as successful DAG prerequisites in a new batch through the current schema; full DAG reexecution would incur redundant model calls. Consider explicit candidate reuse across batches instead of blind 5-action retries.",
+    "The previously open 5/5 DAG acceptance was satisfied on run 40665011616 through explicitly approved A/B/D reuse; preserve history of earlier failures without treating them as current blocking for this criterion.",
+    "M0-R original offline/crash/cancel/source stale/publication-failure negative-path live acceptance remains unproven; candidate refs are not merged to main."
   ],
   "plan_only_not_runtime": false
 }
