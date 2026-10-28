@@ -15,3 +15,7 @@ __all__ = [
     "ManifestValidationError", "MediaOperationError", "RegistryIOError",
     "RetryUnsafeError", "RunnerBusyError", "UnsafePathError",
 ]
+
+from .generation import GenerationJobRunner, GenerationJobStatus
+
+__all__ += ["GenerationJobRunner", "GenerationJobStatus"]
