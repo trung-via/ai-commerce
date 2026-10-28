@@ -27,7 +27,7 @@ Source reference pinned at `trung-via/AIOS-renew@cbefb92612f24b55417165736c63753
 
 ## Local verification actually observed
 
-Isolated local EF01 tests using fake CLI subprocesses and temporary real Git repos: `10 passed` (Linux Python environment). This establishes deterministic command building/result plumbing and negative states, **not live Codex or AGY execution**, Windows host compatibility or installed model entitlement. Existing A01/A02 41-test project suite was not re-run in the actual GitHub repository from this environment. Previous 41-pass Windows A02 evidence is independent.
+Isolated local EF01 tests using fake CLI subprocesses and temporary real Git repos: `11 passed` (Linux Python environment). This establishes deterministic command building/result plumbing and negative states, **not live Codex or AGY execution**, Windows host compatibility or installed model entitlement. Existing A01/A02 41-test project suite was not re-run in the actual GitHub repository from this environment. Previous 41-pass Windows A02 evidence is independent.
 
 ## Windows live acceptance (run separately for each executor)
 

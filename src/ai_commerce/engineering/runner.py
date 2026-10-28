@@ -62,6 +62,20 @@ def _safe_scope(paths: Sequence[str], prefixes: Sequence[str]) -> bool:
     return True
 
 
+def _candidate_hashes(repo: Path, paths: Sequence[str]) -> dict[str, str | None]:
+    """Snapshot changed file bytes without reading through symlinks outside the repo."""
+    hashes: dict[str, str | None] = {}
+    for relative in paths:
+        candidate = repo / relative
+        if candidate.is_symlink():
+            hashes[relative] = "SYMLINK:" + os.readlink(candidate)
+        elif candidate.is_file():
+            hashes[relative] = _sha(candidate.read_bytes())
+        else:
+            hashes[relative] = None  # deletion or non-regular path
+    return hashes
+
+
 def _write(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # One attempt identity per folder; never silently overwrite prior evidence.
@@ -131,7 +145,8 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
         "repo": str(repo), "status": "NOT_STARTED", "error_code": None,
         "executor_invoked": False, "executor_exit_code": None,
         "verify_argv": list(verify_argv), "verify_exit_code": None,
-        "changed_files": [], "scope_valid": None, "git_head_after": None,
+        "changed_files": [], "candidate_file_sha256": {}, "tracked_diff_sha256": None,
+        "scope_valid": None, "git_head_after": None,
         "usage": None, "usage_status": "UNKNOWN", "cost": None, "cost_status": "UNKNOWN",
         "evidence_files": {}, "git_delivery": "LOCAL_DIFF_ONLY_NO_COMMIT_NO_PUSH",
         "live_provider_confirmed": False,
@@ -161,6 +176,7 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
             report.update(usage=usage, usage_status="PROVIDER_REPORTED")
         changed = _changes(repo)
         report["changed_files"] = changed
+        report["candidate_file_sha256"] = _candidate_hashes(repo, changed)
         report["scope_valid"] = _safe_scope(changed, allowed_prefixes)
         report["git_head_after"] = _git(repo, "rev-parse", "HEAD").stdout.strip()
         if report["status"] in ("EXECUTOR_UNAVAILABLE", "EXECUTOR_FAILED"):
@@ -191,8 +207,25 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
         _write(output_dir / "verify.stdout.log", vout)
         _write(output_dir / "verify.stderr.log", verr)
         report["evidence_files"].update(verify_stdout="verify.stdout.log", verify_stderr="verify.stderr.log")
-        report.update(status="BUILD_VERIFIED_FOR_SCOPE" if report["verify_exit_code"] == 0 else "VERIFICATION_FAILED",
-                      error_code=None if report["verify_exit_code"] == 0 else "TARGETED_VERIFY_NONZERO_OR_UNAVAILABLE")
+        # Verification can itself mutate files: reconcile the final tree before PASS.
+        final_changed = _changes(repo)
+        report["changed_files"] = final_changed
+        report["candidate_file_sha256"] = _candidate_hashes(repo, final_changed)
+        report["scope_valid"] = _safe_scope(final_changed, allowed_prefixes)
+        report["git_head_after"] = _git(repo, "rev-parse", "HEAD").stdout.strip()
+        tracked_diff = subprocess.run(["git", "-C", str(repo), "diff", "--binary", "HEAD"],
+                                      capture_output=True, check=False)
+        if tracked_diff.returncode == 0:
+            _write(output_dir / "git.tracked.diff.patch", tracked_diff.stdout)
+            report["evidence_files"]["tracked_diff"] = "git.tracked.diff.patch"
+            report["tracked_diff_sha256"] = _sha(tracked_diff.stdout)
+        if report["git_head_after"] != report["source_base_sha"]:
+            report.update(status="GIT_UNEXPECTED_COMMIT", error_code="GIT_HEAD_CHANGED")
+        elif not report["scope_valid"]:
+            report.update(status="SCOPE_VIOLATION", error_code="CHANGES_OUTSIDE_ALLOWED_SCOPE_AFTER_VERIFY")
+        else:
+            report.update(status="BUILD_VERIFIED_FOR_SCOPE" if report["verify_exit_code"] == 0 else "VERIFICATION_FAILED",
+                          error_code=None if report["verify_exit_code"] == 0 else "TARGETED_VERIFY_NONZERO_OR_UNAVAILABLE")
         return report
     finally:
         report["finished_at"] = _now()

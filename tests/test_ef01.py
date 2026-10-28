@@ -65,6 +65,8 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'cached_inp
     assert out["status"] == "BUILD_VERIFIED_FOR_SCOPE"
     assert out["changed_files"] == ["changed.txt"]
     assert out["source_base_sha"] == out["git_head_after"]
+    assert out["candidate_file_sha256"]["changed.txt"]
+    assert out["tracked_diff_sha256"] is not None
     assert out["git_delivery"] == "LOCAL_DIFF_ONLY_NO_COMMIT_NO_PUSH"
     assert (tmp_path / "evidence" / "engineering_result.json").is_file()
     assert set(out) == set(json.loads((tmp_path / "evidence" / "engineering_result.json").read_text()))
@@ -128,3 +130,14 @@ def test_cli_full_path_negative_missing_binary(tmp_path):
     p = subprocess.run(cmd, env=env, capture_output=True, text=True)
     assert p.returncode == 1
     assert json.loads(p.stdout)["status"] == "EXECUTOR_UNAVAILABLE"
+
+
+def test_verify_out_of_scope_mutation_is_failure(tmp_path):
+    repo = _repo(tmp_path)
+    binary = _fake_binary(tmp_path, "write-good", "from pathlib import Path\nPath('src.txt').write_text('content')\n")
+    o = execute_attempt(repo=repo, output_dir=tmp_path / "evidence", work_id="w", attempt_id="a",
+                        selection=ExecutorSelection("codex", "m", "max"), instruction="x",
+                        verify_argv=[sys.executable, "-c", "from pathlib import Path; Path('bad.txt').write_text('oops')"],
+                        allowed_prefixes=["src.txt"], codex_bin=binary)
+    assert o["status"] == "SCOPE_VIOLATION"
+    assert "bad.txt" in o["changed_files"]
