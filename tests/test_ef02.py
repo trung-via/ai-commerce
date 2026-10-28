@@ -400,3 +400,73 @@ def test_remote_pre_spawn_ref_rejects_wrong_claim_parent_before_any_write():
     with pytest.raises(RemoteTransportError, match="PRESPAWN_CLAIM_IDENTITY_MISMATCH"):
         BadClaim().pre_spawn_checkpoint(source_sha="a" * 40,
                                         attempt_id="bad-claim", fingerprint="f" * 64)
+
+
+def test_spawned_remote_checkpoint_links_pre_spawn_and_pid():
+    source = "a" * 40
+    fp = "f" * 64
+    attempt = "spawned-pid-001"
+    claim_sha = "b" * 40
+    pre_sha = "c" * 40
+    tree_sha = "d" * 40
+
+    class StageTransport(GitHubTransport):
+        def __init__(self):
+            super().__init__("trung-via/ai-commerce", "fixture")
+            self.writes = []
+        def api(self, method, path, data=None):
+            if method == "GET" and "/git/ref/heads/ef02/claims/" in path:
+                return {"object": {"sha": claim_sha}}
+            if method == "GET" and "/git/ref/heads/ef02/pre-spawn/" in path:
+                return {"object": {"sha": pre_sha}}
+            if method == "GET" and path == "/git/commits/" + claim_sha:
+                return {"message": "EF02 CLAIM\n\nfingerprint=" + fp +
+                        "\nattempt_id=" + attempt, "tree": {"sha": tree_sha},
+                        "parents": [{"sha": source}]}
+            if method == "GET" and path == "/git/commits/" + pre_sha:
+                return {"message": "EF02 PRESPAWN\n\nfingerprint=" + fp +
+                        "\nattempt_id=" + attempt, "tree": {"sha": tree_sha},
+                        "parents": [{"sha": claim_sha}]}
+            self.writes.append((method, path, data))
+            if method == "POST" and path == "/git/commits":
+                return {"sha": "e" * 40}
+            if method == "POST" and path == "/git/refs":
+                return {"ref": data["ref"]}
+            raise AssertionError((method, path, data))
+
+    github = StageTransport()
+    ref = github.spawned_checkpoint(source_sha=source, attempt_id=attempt,
+                                    fingerprint=fp, child_pid=4312)
+    assert ref == "refs/heads/ef02/spawned/" + github.attempt_key(attempt)
+    assert len(github.writes) == 2
+    assert github.writes[0][2] == {
+        "message": "EF02 SPAWNED\n\nfingerprint=" + fp +
+                   "\nattempt_id=" + attempt + "\nchild_pid=4312",
+        "tree": tree_sha, "parents": [pre_sha]}
+    assert github.writes[1][2] == {"ref": ref, "sha": "e" * 40}
+
+
+def test_spawned_checkpoint_rejects_untrusted_parent_without_writes():
+    class Fake(GitHubTransport):
+        def __init__(self):
+            super().__init__("trung-via/ai-commerce", "fixture")
+            self.writes = 0
+        def api(self, method, path, data=None):
+            if method == "POST":
+                self.writes += 1
+                raise AssertionError("unexpected write")
+            if "/git/ref/heads/ef02/claims/" in path:
+                return {"object": {"sha": "b" * 40}}
+            if path == "/git/commits/" + "b" * 40:
+                return {"message": "EF02 CLAIM\n\nfingerprint=" + "f" * 64 +
+                        "\nattempt_id=incorrect",
+                        "parents": [{"sha": "a" * 40}], "tree": {"sha": "c" * 40}}
+            raise AssertionError(path)
+    fake = Fake()
+    with pytest.raises(RemoteTransportError, match="SPAWNED_CLAIM_IDENTITY_MISMATCH"):
+        fake.spawned_checkpoint(source_sha="a" * 40, attempt_id="expected",
+                                fingerprint="f" * 64, child_pid=2345)
+    assert fake.writes == 0
+    with pytest.raises(RemoteTransportError, match="SPAWNED_PID_INVALID"):
+        fake.spawned_checkpoint(source_sha="a" * 40, attempt_id="expected",
+                                fingerprint="f" * 64, child_pid=0)

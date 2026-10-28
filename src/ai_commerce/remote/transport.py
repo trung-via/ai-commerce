@@ -96,6 +96,43 @@ class GitHubTransport:
         self._create_ref(ref, checkpoint["sha"])
         return "refs/heads/" + ref
 
+
+    def spawned_checkpoint(self, *, source_sha: str, attempt_id: str,
+                           fingerprint: str, child_pid: int) -> str:
+        """One-time remote observation of EF01 child PID, not provider proof.
+
+        Bind this checkpoint to the existing immutable pre-spawn and claim
+        ancestry. Failure to confirm does not imply that the child never ran.
+        """
+        if type(child_pid) is not int or child_pid <= 0:
+            raise RemoteTransportError("SPAWNED_PID_INVALID")
+        key = self.attempt_key(attempt_id)
+        claim = self.api("GET", "/git/ref/heads/ef02/claims/" + key)
+        claim_sha = claim.get("object", {}).get("sha")
+        initial = self.api("GET", "/git/commits/" + claim_sha)
+        expected_claim = ("EF02 CLAIM\n\nfingerprint=" + fingerprint +
+                          "\nattempt_id=" + attempt_id)
+        if (initial.get("message") != expected_claim or
+                [p.get("sha") for p in initial.get("parents", [])] != [source_sha]):
+            raise RemoteTransportError("SPAWNED_CLAIM_IDENTITY_MISMATCH")
+        pre = self.api("GET", "/git/ref/heads/ef02/pre-spawn/" + key)
+        pre_sha = pre.get("object", {}).get("sha")
+        stage = self.api("GET", "/git/commits/" + pre_sha)
+        expected_pre = ("EF02 PRESPAWN\n\nfingerprint=" + fingerprint +
+                        "\nattempt_id=" + attempt_id)
+        if (stage.get("message") != expected_pre or
+                [p.get("sha") for p in stage.get("parents", [])] != [claim_sha] or
+                stage.get("tree", {}).get("sha") != initial.get("tree", {}).get("sha")):
+            raise RemoteTransportError("SPAWNED_PRESPAWN_IDENTITY_MISMATCH")
+        message = ("EF02 SPAWNED\n\nfingerprint=" + fingerprint +
+                   "\nattempt_id=" + attempt_id + "\nchild_pid=" + str(child_pid))
+        marked = self.api("POST", "/git/commits",
+                          {"message": message, "tree": stage["tree"]["sha"],
+                           "parents": [pre_sha]})
+        ref = "ef02/spawned/" + key
+        self._create_ref(ref, marked["sha"])
+        return "refs/heads/" + ref
+
     def verify_reused_candidate(self, approved: dict) -> None:
         """Verify original immutable commit, candidate ref and prior distributed claim."""
         attempt_id = approved["attempt_id"]

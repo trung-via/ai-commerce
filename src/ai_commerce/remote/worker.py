@@ -227,6 +227,25 @@ class LocalBatchWorker:
                         {**progress, "stage": "EF01_CHILD_PID_OBSERVED",
                          "ef01_child_pid_observed": True, "process_id": child.pid,
                          "process_observed_at": time.time()})
+            # A remotely readable PID observation survives loss of the
+            # Windows workspace. This is NOT evidence of provider invocation.
+            # If GitHub confirmation fails, keep running/collecting the child
+            # result; never interpret absence as permission to replay.
+            try:
+                spawned_ref = self.github.spawned_checkpoint(
+                    source_sha=source, attempt_id=attempt_id,
+                    fingerprint=fp, child_pid=child.pid)
+                outcome["spawned_remote_ref"] = spawned_ref
+                outcome["spawned_remote_checkpoint"] = "CONFIRMED_NOT_PROVIDER_PROOF"
+                _write_json(path / "invocation_spawned_remote_confirmed.json",
+                            {**progress, "stage": "SPAWNED_REMOTE_REF_CONFIRMED",
+                             "ef01_child_pid_observed": True, "process_id": child.pid,
+                             "spawned_remote_ref": spawned_ref,
+                             "provider_invocation_proven": False,
+                             "remote_confirmation_observed_at": time.time()})
+            except Exception as exc:
+                outcome["spawned_remote_checkpoint"] = "READ_UNKNOWN"
+                outcome["spawned_remote_error_type"] = type(exc).__name__
             timed_out = False
             try:
                 stdout, stderr = child.communicate(timeout=7500)

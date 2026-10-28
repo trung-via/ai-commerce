@@ -45,6 +45,8 @@ def _worker(tmp_path: Path, github):
         # This fixture exercises unrelated faults; provide the fake positive
         # remote checkpoint explicitly rather than touching GitHub.
         github.pre_spawn_checkpoint = lambda **_kw: "refs/heads/ef02/pre-spawn/mock"
+    if not hasattr(github, "spawned_checkpoint"):
+        github.spawned_checkpoint = lambda **_kw: "refs/heads/ef02/spawned/mock"
     worker.approved_reuse = {"version": 1, "candidates": {}}
     return worker
 
