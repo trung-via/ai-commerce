@@ -78,13 +78,13 @@ class GitHubTransport:
         if not isinstance(claim_sha, str) or len(claim_sha) != 40:
             raise RemoteTransportError("PRESPAWN_CLAIM_REF_INVALID")
         parent = self.api("GET", "/git/commits/" + claim_sha)
-        claim_message = ("EF02 CLAIM\\n\\nfingerprint=" + fingerprint +
-                         "\\nattempt_id=" + attempt_id)
+        claim_message = ("EF02 CLAIM\n\nfingerprint=" + fingerprint +
+                         "\nattempt_id=" + attempt_id)
         if (parent.get("message") != claim_message or
                 [p.get("sha") for p in parent.get("parents", [])] != [source_sha]):
             raise RemoteTransportError("PRESPAWN_CLAIM_IDENTITY_MISMATCH")
-        message = ("EF02 PRESPAWN\\n\\nfingerprint=" + fingerprint +
-                   "\\nattempt_id=" + attempt_id)
+        message = ("EF02 PRESPAWN\n\nfingerprint=" + fingerprint +
+                   "\nattempt_id=" + attempt_id)
         checkpoint = self.api("POST", "/git/commits",
                               {"message": message, "tree": parent["tree"]["sha"],
                                "parents": [claim_sha]})
