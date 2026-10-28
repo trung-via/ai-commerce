@@ -85,6 +85,17 @@ AI-COMMERCE / INDEPENDENT PROJECT
 
 **Token and fallback:** Record observed input/output/cached usage when a provider actually exposes it, otherwise `UNKNOWN`. Token totals from different providers do not by themselves prove equal costs or remaining quota. Switching executor is a **new attempt** and requires explicit policy/authorization; no blind retry of unresolved side-effects.
 
+
+**Cập nhật EF không chặn roadmap (28/10/2026):** M0-R của EF02 đã được chấp nhận ở trạng thái `ACCEPTED_WITH_DEFERRED_RISKS`; các tình huống runner-service offline thật vẫn UNKNOWN/deferred. Ba work package mở rộng sau **nằm bên trong EF01/EF02**, không tăng 63 WBS ID, không thay A01–A18, không mở lại M0-R:
+
+| Extension | WBS | WorkItem | Prio / giai đoạn | Ranh giới nghiệm thu |
+|---|---|---|---|---|
+| `EF01-R` | EF01 | [`EF01-VERIFY-REPAIR-002`](../../work_items/EF01-VERIFY-REPAIR-002.json) | P1 / Phase 1 song song A03/A04 | Executor đã return + Verify FAIL rõ → cùng executor/model/effort sửa có giới hạn, verify lại, một action/claim duy nhất; UNKNOWN không replay. |
+| `EF02-D` | EF02 | [`EF02-EXACT-CHAT-WAKE-002`](../../work_items/EF02-EXACT-CHAT-WAKE-002.json) | P1 / Phase 1 độc lập EF01-R | Completion event có binding chat chính xác và receipt được hỗ trợ; comment GitHub không phải wake thành công. |
+| `EF01-P` | EF01 | [`EF01-DIRECT-GIT-PYTEST-003`](../../work_items/EF01-DIRECT-GIT-PYTEST-003.json) | P2 / Phase 1–2 sau benchmark | Cấu hình Git executable riêng; thử pytest-xdist tối đa 12 workers theo phép đo; không đổi EF02 max_parallel=2 mặc định. |
+
+Quyết định: [Human EF enhancements](../governance/HUMAN_DECISION_2026-10-28_EF_ENHANCEMENTS.md). Các item đều `PLANNED`; không phải chứng cứ đã implement, không yêu cầu thêm model probes, không chặn Creative Factory.
+
 **Critical sequencing:** `A01` establishes `G03/G06/G08`; `EF01` and `A02` can proceed in parallel. `EF02` follows `EF01` but **does not gate** `A03–A06`, `C02` or `E01`. `M0` marks core foundation; optional remote milestone `M0-R` tracks EF02 separately. Engineering EF executes software changes; `O01–O07` orchestrate Commerce Product jobs and media production.
 
 ### 10 · Commerce Operations & execution core

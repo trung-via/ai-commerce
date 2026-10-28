@@ -176,6 +176,10 @@
           ],
           "evidence_refs": [
             "work_items/EF01-DUAL-EXECUTOR-001.json"
+          ],
+          "planned_extensions": [
+            "EF01-VERIFY-REPAIR-002",
+            "EF01-DIRECT-GIT-PYTEST-003"
           ]
         },
         {
@@ -188,8 +192,8 @@
           ],
           "priority": "P0",
           "owner": "Engineering Foundation (project tooling)",
-          "status": "ACCEPTED_FOR_WORK",
-          "execution_status": "NOT_IMPLEMENTED",
+          "status": "ACCEPTED_WITH_DEFERRED_RISKS",
+          "execution_status": "M0_R_ACCEPTED_WITH_DEFERRED_RISKS",
           "non_blocking_for": [
             "A03",
             "A04",
@@ -205,7 +209,11 @@
             "EF02-A",
             "EF02-B",
             "EF02-C"
-          ]
+          ],
+          "planned_extensions": [
+            "EF02-EXACT-CHAT-WAKE-002"
+          ],
+          "accepted_m0_r_work_item_ref": "work_items/EF02-MULTI-ACTION-001.json"
         }
       ]
     },
@@ -983,8 +991,34 @@
     "dag_dependencies": true,
     "aggregate_results": true,
     "remote_result_contract": "contracts/RemoteActionBatch.v1.schema.json",
-    "true_chat_wake": "OPTIONAL_SEPARATE_PROOF"
+    "true_chat_wake": "OPTIONAL_SEPARATE_PROOF",
+    "optional_enhancement_decision": "docs/governance/HUMAN_DECISION_2026-10-28_EF_ENHANCEMENTS.md",
+    "optional_enhancements": [
+      {
+        "id": "EF01-R",
+        "wbs_id": "EF01",
+        "work_item_ref": "work_items/EF01-VERIFY-REPAIR-002.json",
+        "priority": "P1",
+        "status": "PLANNED_NOT_IMPLEMENTED"
+      },
+      {
+        "id": "EF02-D",
+        "wbs_id": "EF02",
+        "work_item_ref": "work_items/EF02-EXACT-CHAT-WAKE-002.json",
+        "priority": "P1",
+        "status": "PLANNED_PLATFORM_CAPABILITY_UNKNOWN"
+      },
+      {
+        "id": "EF01-P",
+        "wbs_id": "EF01",
+        "work_item_ref": "work_items/EF01-DIRECT-GIT-PYTEST-003.json",
+        "priority": "P2",
+        "status": "PLANNED_BENCHMARK_REQUIRED"
+      }
+    ],
+    "m0_r_disposition": "ACCEPTED_WITH_DEFERRED_RISKS_2026_10_28"
   },
-  "implementation_note": "A01/A02 and EF01 are build-verified for scope; EF01 live Codex/Antigravity passed and 53/53 Windows tests passed on 2026-10-28. EF02 Multi-Action v1 approved for implementation, remote and parallel runtime NOT yet implemented. Human decision: docs/governance/HUMAN_DECISION_2026-10-28_EF02_MULTI_ACTION.md.",
-  "human_decision_multi_action_ref": "docs/governance/HUMAN_DECISION_2026-10-28_EF02_MULTI_ACTION.md"
+  "implementation_note": "A01/A02 and EF01 are build-verified for scope; EF02 M0-R accepted with explicit deferred risks (real Windows service outage and rare live negative paths UNKNOWN), after observed 5/5 DAG, process overlap and scoped real provider interruption. Three Human-approved optional EF01/EF02 improvements are planned, not implemented; A03/A04 remain unblocked.",
+  "human_decision_multi_action_ref": "docs/governance/HUMAN_DECISION_2026-10-28_EF02_MULTI_ACTION.md",
+  "enhancement_decision_ref": "docs/governance/HUMAN_DECISION_2026-10-28_EF_ENHANCEMENTS.md"
 }

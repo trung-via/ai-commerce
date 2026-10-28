@@ -103,5 +103,25 @@
     "Installed CLI versions and actual provider token/cost observations were not shown",
     "EF02 remote wake, native continuation, and product publishing were not tested"
   ],
-  "m0_status": "CORE_SCOPE_MET_WITH_SCREENSHOT_EVIDENCE_EF02_M0_R_SEPARATE"
+  "m0_status": "CORE_SCOPE_MET_WITH_SCREENSHOT_EVIDENCE_EF02_M0_R_SEPARATE",
+  "planned_extensions": [
+    {
+      "work_id": "EF01-VERIFY-REPAIR-002",
+      "priority": "P1",
+      "status": "PLANNED_NOT_IMPLEMENTED",
+      "ref": "work_items/EF01-VERIFY-REPAIR-002.json"
+    },
+    {
+      "work_id": "EF01-DIRECT-GIT-PYTEST-003",
+      "priority": "P2",
+      "status": "PLANNED_BENCHMARK_REQUIRED",
+      "ref": "work_items/EF01-DIRECT-GIT-PYTEST-003.json"
+    }
+  ],
+  "planned_extensions_non_blocking_for": [
+    "A03",
+    "A04",
+    "A05",
+    "M1"
+  ]
 }

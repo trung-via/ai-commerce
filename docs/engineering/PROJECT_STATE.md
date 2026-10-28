@@ -18,7 +18,7 @@ A01 corresponds to G01/G02/G03/G06/G08: packaging, importable CLI, architecture 
 - `A01`: source implemented; **Linux 12/12 targeted tests and Windows PowerShell 12/12 tests observed in Human-supplied screenshot**; see `A01_IMPLEMENTATION_REPORT.md` for verification boundaries.
 - `A02`: **BUILD_VERIFIED_FOR_SCOPE (Linux local)** — 5 portable JSON Schema contracts, source/artifact SHA-256, mock provider, typed capabilities, CLI validation and example mock artifact. 41/41 project targeted tests after cross-platform date-time fix; an earlier Windows run showed 30 PASS / 1 FAIL on old code; **the corrected build subsequently showed 41/41 PASS on Windows in a Human-provided screenshot**. Evidence: `A02_IMPLEMENTATION_REPORT.md`.
 - `EF01`: **BUILD_VERIFIED_FOR_SCOPE** — 12/12 local synthetic adapter tests and TWO Windows live executor attempts returned `BUILD_VERIFIED_FOR_SCOPE` with `EF01_EXIT=0` in Human-supplied screenshots: Codex `codex-002` (`gpt-6.1-sol/max`), Antigravity `agy-002` (`gemini-3.8-flash/medium`) on source `40558e0ea2392ef306d75af045d5844051c59ef8`. Full local logs and detailed diff not independently read.
-- §EF02§: ACCEPTED_FOR_WORK — Multi-Action v1 Human-approved; remote wake, dedicated runner and actual Windows parallel subprocess tests **NOT IMPLEMENTED/NOT RUN**.
+- `EF02`: **M0-R ACCEPTED_WITH_DEFERRED_RISKS** (current disposition, 2026-10-28) — 5/5 live DAG, Windows parallel subprocesses, actual EF02→EF01→Codex process interruption + immutable checkpoints; real Windows runner-service outage and rare live negative paths intentionally UNKNOWN/deferred. WorkItem `EF02-MULTI-ACTION-001.json` is authoritative for evidence.
 - Creative, media generation, platform posting, analytics, settlement: NOT_IMPLEMENTED / NOT_VERIFIED.
 
 ## Unknowns and next steps
@@ -28,7 +28,7 @@ A01 corresponds to G01/G02/G03/G06/G08: packaging, importable CLI, architecture 
 - Remote runner installation/permissions and return-to-Brain connection: UNKNOWN.
 - Product/media third-party accounts and publishing permissions: UNKNOWN.
 - A02 Windows report (2026-10-28): prior revision 30 PASS, 1 FAIL in `test_digest_and_time_format_are_checked`, mock generation succeeded; date-time validator corrected and 41/41 local tests PASS; Windows post-fix retest now PASS per Human-provided screenshot: 41 passed in 2.08s. Exact Windows checkout commit SHA was not shown.
-- Next engineering item: EF02 independent remote wake and return feedback (M0-R). A03/A04 Creative Factory may proceed independently; EF02 is not their gate.
+- Next product milestone: **A03/A04 Creative Factory**; optional EF01 Verify–Repair, EF02-D exact-chat wake and Direct Git/pytest performance backlog may proceed in parallel but are NOT gates. M0-R accepted with explicit deferred risks.
 
 No git push, external post, media generation, commercial account linkage or paid API call is implied by any A01 test.
 
@@ -50,3 +50,9 @@ Human approved update-for-implementation: Human/Brain may submit multiple concur
 ## EF02 source implementation — 2026-10-28
 
 GitHub-hosted test run 40648371883 passed on Windows and Ubuntu, including real overlapping Python test subprocesses and fake GitHub API claim races. This proves only source-level plumbing, NOT a remote Codex or Antigravity execution on the user Windows laptop. Remote Windows runner and M0-R remain OPEN. See docs/engineering/EF02_IMPLEMENTATION_REPORT.md.
+
+## 2026-10-28 — M0-R accepted and optional EF enhancements planned (latest disposition)
+
+`main` accepted [PR #50](https://github.com/trung-via/ai-commerce/pull/50) with M0-R `ACCEPTED_WITH_DEFERRED_RISKS`; [Issue #10](https://github.com/trung-via/ai-commerce/issues/10) was closed only for the accepted scope. Evidence includes DAG run 40665011616 and real scoped EF02→EF01→Codex interruption run 40715394122. Runner SERVICE loss/recovery and other live rare negatives remain `UNKNOWN_DEFERRED_UNTIL_REAL_INCIDENT`; no blind replay. Some earlier chronological sections above describe pre-implementation snapshots and must NOT supersede this latest disposition.
+
+Human approved three **planned, not implemented** optional extensions: [EF01-R](../../work_items/EF01-VERIFY-REPAIR-002.json) (P1, bounded verify→repair loop in one EF02 action); [EF02-D](../../work_items/EF02-EXACT-CHAT-WAKE-002.json) (P1, verified exact-chat wake with GitHub fallback); [EF01-P](../../work_items/EF01-DIRECT-GIT-PYTEST-003.json) (P2, optional Git executable + measured pytest-xdist up to 12 workers). Full decision: [EF enhancements](../governance/HUMAN_DECISION_2026-10-28_EF_ENHANCEMENTS.md). No provider invoked, chat wake delivered, 12 workers executed, new runner installed, or changes to original EF01/EF02 runtime by this planning record. Creative Factory A03/A04 remains the next product-facing lane and is not gated by any of these enhancements.
