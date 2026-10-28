@@ -155,7 +155,8 @@ def test_killed_child_with_missing_receipt_is_unknown_and_not_replayed(tmp_path,
     worker = _worker(tmp_path, github)
     result = worker.execute_action(_action())
     assert result["status"] == "EXECUTION_UNKNOWN"
-    assert result["error_code"] == "EF01_RESULT_MISSING"
+    assert result["error_code"] == "EF01_PROCESS_TIMEOUT"
+    assert result["receipt_after_timeout"] is False
     assert result["executor_invoked"] is True
     assert result["candidate_sha"] is None
     assert len(children) == 1 and children[0].killed
@@ -163,6 +164,75 @@ def test_killed_child_with_missing_receipt_is_unknown_and_not_replayed(tmp_path,
     repeated = worker.execute_action(_action())
     assert repeated["status"] == "DUPLICATE_CLAIM_NO_REEXECUTION"
     assert len(children) == 1
+
+
+def test_timed_out_child_with_leftover_verified_receipt_cannot_publish(tmp_path, monkeypatch):
+    """Even a success-shaped receipt cannot override observed child timeout."""
+    class FakeGithub:
+        claim_calls = 0
+        candidate_calls = 0
+        def claim(self, **_kwargs):
+            self.claim_calls += 1
+            return ("CLAIMED" if self.claim_calls == 1
+                    else "DUPLICATE_CLAIM_NO_REEXECUTION")
+        def integrated_source(self, **_kwargs):
+            return {"effective_sha": BASE, "integration_ref": None}
+        def candidate(self, **_kwargs):
+            self.candidate_calls += 1
+            raise AssertionError("stale success-shaped receipt must never publish")
+
+    class TimedOutWithReceipt:
+        pid = 10555
+        # Adversarial status: some test/transport wrappers may report zero even
+        # though communicate() timed out. The timeout must take precedence.
+        returncode = 0
+        def __init__(self, argv, **_kwargs):
+            self.calls = 0
+            self.out = Path(argv[argv.index("--out-dir") + 1])
+            self.killed = False
+        def communicate(self, timeout=None):
+            self.calls += 1
+            if self.calls == 1:
+                self.out.mkdir(parents=True, exist_ok=True)
+                (self.out / "engineering_result.json").write_text(json.dumps({
+                    "status": "BUILD_VERIFIED_FOR_SCOPE",
+                    "source_base_sha": BASE,
+                    "changed_files": ["tests/test_ef02_m0r_fixture.py"],
+                    "verify_exit_code": 0,
+                    "error_code": None,
+                }), encoding="utf-8")
+                raise subprocess.TimeoutExpired(cmd="fixture", timeout=timeout)
+            return ("timeout stdout", "timeout stderr")
+        def kill(self):
+            self.killed = True
+
+    children = []
+    def fake_popen(argv, **kwargs):
+        child = TimedOutWithReceipt(argv, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr("ai_commerce.remote.worker.subprocess.run",
+                        lambda *_a, **_k: SimpleNamespace(returncode=0, stderr=""))
+    monkeypatch.setattr("ai_commerce.remote.worker.subprocess.Popen", fake_popen)
+    github = FakeGithub()
+    worker = _worker(tmp_path, github)
+    result = worker.execute_action(_action())
+    assert len(children) == 1 and children[0].killed is True
+    assert result["status"] == "EXECUTION_UNKNOWN"
+    assert result["error_code"] == "EF01_PROCESS_TIMEOUT"
+    assert result["receipt_after_timeout"] is True
+    assert result["executor_invoked"] is True
+    assert result["candidate_sha"] is None
+    assert github.candidate_calls == 0
+    assert _persisted(worker)["status"] == "EXECUTION_UNKNOWN"
+
+    # Existing immutable claim blocks a new provider invocation even though
+    # a success-shaped stale receipt exists from the first attempt.
+    repeated = worker.execute_action(_action())
+    assert repeated["status"] == "DUPLICATE_CLAIM_NO_REEXECUTION"
+    assert len(children) == 1
+    assert github.candidate_calls == 0
 
 
 def test_candidate_publication_failure_preserves_verified_result_but_not_pass(tmp_path, monkeypatch):
