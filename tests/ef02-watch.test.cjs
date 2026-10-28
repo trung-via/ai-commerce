@@ -69,7 +69,7 @@ test('existing GitHub validation feedback prevents duplicate comments', async ()
     {name: 'validate', conclusion: 'failure'}, {name: 'execute', conclusion: 'skipped'}
   ], comments: [{
     user: {login: 'github-actions[bot]'},
-    body: 'EF02 request REJECTED. Workflow: https://github.com/trung-via/ai-commerce/actions/runs/555'
+    body: 'EF02 request REJECTED before Windows execution.\nReason: `TEST`\nWorkflow: https://github.com/trung-via/ai-commerce/actions/runs/555'
   }]});
   assert.equal(await observe({github: x.api, context: x.context, core: x.core}), 0);
   assert.equal(x.posted.length, 0);
@@ -182,4 +182,60 @@ test('pre-executor cancellation probe cannot enable Windows or override issue ow
   assert.ok(execute.includes("github.event.issue.title == '" + title + "'"));
   assert.ok(execute.includes('needs.validate.result == \'success\''));
   assert.ok(execute.includes('runs-on: [self-hosted, Windows, ai-commerce-ef02]'));
+});
+
+
+test('queued warning with run URL must NOT silence subsequent cancelled terminal outcome', async () => {
+  const oldWarning = [
+    'EF02_OBSERVER run=555 code=WINDOWS_JOB_WAITING_UNCONFIRMED',
+    'Status: \`WINDOWS_JOB_WAITING_UNCONFIRMED\`',
+    'Workflow: https://github.com/trung-via/ai-commerce/actions/runs/555'
+  ].join('\n\n');
+  const x = fake({jobs:[
+    {name:'validate',conclusion:'success'},
+    {name:'execute',status:'completed',conclusion:'cancelled'}
+  ],comments:[{user:{login:'github-actions[bot]'},body:oldWarning}]});
+  assert.equal(await observe({github:x.api,context:x.context,core:x.core}),1);
+  assert.equal(x.posted.length,1);
+  assert.match(x.posted[0].body,/WORKFLOW_CANCELLED_EXECUTION_UNCERTAIN/);
+  assert.match(x.posted[0].body,/side effects are UNKNOWN/);
+  assert.match(x.posted[0].body,/before any new attempt/);
+  assert.match(x.posted[0].body,/GitHub ref reconciliation: UNAVAILABLE/);
+});
+
+test('queued warning must NOT silence terminal failed after executed job', async () => {
+  const x = fake({result:run({conclusion:'failure'}),jobs:[
+    {name:'validate',conclusion:'success'},
+    {name:'execute',status:'completed',conclusion:'failure'}
+  ],comments:[{user:{login:'github-actions[bot]'},
+    body:'EF02_OBSERVER run=555 code=WINDOWS_JOB_WAITING_UNCONFIRMED\n\nWorkflow: https://github.com/trung-via/ai-commerce/actions/runs/555'}]});
+  assert.equal(await observe({github:x.api,context:x.context,core:x.core}),1);
+  assert.match(x.posted[0].body,/WORKFLOW_NONPASS_UNRECONCILED/);
+});
+
+test('terminal outcome observer marker is idempotent after queue to terminal transition', async () => {
+  const x = fake({comments:[
+    {user:{login:'github-actions[bot]'},
+      body:'EF02_OBSERVER run=555 code=WINDOWS_JOB_WAITING_UNCONFIRMED'},
+    {user:{login:'github-actions[bot]'},
+      body:'EF02_OBSERVER run=555 code=WORKFLOW_CANCELLED_EXECUTION_UNCERTAIN'}
+  ]});
+  assert.equal(await observe({github:x.api,context:x.context,core:x.core}),0);
+  assert.equal(x.posted.length,0);
+});
+
+test('unrelated bot comment linking the workflow is not a terminal receipt', async () => {
+  const x = fake({comments:[{user:{login:'github-actions[bot]'},
+    body:'Administrative note: https://github.com/trung-via/ai-commerce/actions/runs/555'}]});
+  assert.equal(await observe({github:x.api,context:x.context,core:x.core}),1);
+  assert.match(x.posted[0].body,/WORKFLOW_CANCELLED_EXECUTION_UNCERTAIN/);
+});
+
+test('exact worker result for same run prevents redundant terminal observer report', async () => {
+  const x = fake({result:run({conclusion:'failure'}),comments:[
+    {user:{login:'github-actions[bot]'},
+      body:'EF02 batch batch-123: PARTIAL_OR_FAILED\nGitHub workflow run: 555\nResults: 0/1'}
+  ]});
+  assert.equal(await observe({github:x.api,context:x.context,core:x.core}),0);
+  assert.equal(x.posted.length,0);
 });

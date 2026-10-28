@@ -69,14 +69,31 @@ async function notify({github, context, core}, run, status, issue) {
   const comments = await github.paginate(github.rest.issues.listComments, {
     owner, repo, issue_number: issue, per_page: 100
   });
+  const queuedCode = 'WINDOWS_JOB_WAITING_UNCONFIRMED';
+  const queued = status.code === queuedCode;
+  const markerPrefix = 'EF02_OBSERVER run=' + run.id + ' code=';
   const alreadyReported = comments.some(c => {
     if (c.user?.login !== 'github-actions[bot]') return false;
     const body = c.body || '';
-    if (body.includes(marker)) return true;
-    // Existing EF02 worker/validation feedback takes precedence for terminal runs.
-    return status.code !== 'WINDOWS_JOB_WAITING_UNCONFIRMED' &&
-      (body.includes('/actions/runs/' + run.id) ||
-       body.includes('GitHub workflow run: ' + run.id));
+    const firstLine = body.split('\n', 1)[0];
+    if (firstLine.startsWith(markerPrefix)) {
+      const priorCode = firstLine.slice(markerPrefix.length);
+      if (!/^[A-Z][A-Z0-9_]*$/.test(priorCode)) return false;
+      // A prior queue warning is NOT terminal evidence. Never let its
+      // workflow link suppress a later cancellation/failure result.
+      if (queued) return true;
+      return priorCode !== queuedCode;
+    }
+    if (queued) return false;
+    // Only canonical EF02 validation/worker reports may replace a terminal
+    // observer comment. Unrelated links mentioning this run are not receipts.
+    const runUrl = 'https://github.com/' + owner + '/' + repo +
+      '/actions/runs/' + run.id;
+    const validationFeedback = body.startsWith('EF02 request REJECTED before Windows execution.') &&
+      body.split('\n').includes('Workflow: ' + runUrl);
+    const workerFeedback = body.startsWith('EF02 batch ') &&
+      body.split('\n').includes('GitHub workflow run: ' + run.id);
+    return validationFeedback || workerFeedback;
   });
   if (alreadyReported) {
     core.info('EF02 outcome already reported: ' + run.id);
