@@ -41,6 +41,10 @@ def _worker(tmp_path: Path, github):
     worker.batch = {"batch_id": "m0r-negative-fi", "source_sha": BASE}
     worker.profiles = {"ef02-tests": ["python", "-m", "pytest", "tests/test_ef02.py", "-q"]}
     worker.github = github
+    if not hasattr(github, "pre_spawn_checkpoint"):
+        # This fixture exercises unrelated faults; provide the fake positive
+        # remote checkpoint explicitly rather than touching GitHub.
+        github.pre_spawn_checkpoint = lambda **_kw: "refs/heads/ef02/pre-spawn/mock"
     worker.approved_reuse = {"version": 1, "candidates": {}}
     return worker
 
@@ -417,3 +421,66 @@ def test_parent_interrupted_after_ef01_child_spawn_preserves_observed_pid_unknow
     assert worker.execute_action(_action())["status"] == "DUPLICATE_CLAIM_NO_REEXECUTION"
     assert spawn_count == 1
     assert github.claim_calls == 2
+
+
+def test_remote_checkpoint_transport_failure_stops_before_model(tmp_path, monkeypatch):
+    class CheckpointUnavailable:
+        calls = 0
+        def claim(self, **_kw):
+            self.calls += 1
+            return "CLAIMED" if self.calls == 1 else "DUPLICATE_CLAIM_NO_REEXECUTION"
+        def integrated_source(self, **_kw):
+            return {"effective_sha": BASE, "integration_ref": None}
+        def pre_spawn_checkpoint(self, **_kw):
+            raise RemoteTransportError("GITHUB_TRANSPORT_UNKNOWN")
+        def candidate(self, **_kw):
+            raise AssertionError("model never ran")
+    monkeypatch.setattr("ai_commerce.remote.worker.subprocess.run",
+                        lambda *_a, **_k: SimpleNamespace(returncode=0, stderr=""))
+    _forbid_model(monkeypatch)
+    github = CheckpointUnavailable()
+    worker = _worker(tmp_path, github)
+    first = worker.execute_action(_action())
+    assert first["status"] == "PRESPAWN_CHECKPOINT_UNCONFIRMED"
+    assert first["error_code"] == "PRESPAWN_CHECKPOINT_UNCONFIRMED"
+    assert first["executor_invoked"] is False
+    assert first["replay_authorized"] is False
+    assert first["candidate_ref"] is None
+    assert _journal(worker, "invocation_boundary.json")["status"] == "EXECUTION_UNKNOWN"
+    assert not (worker.root / "fault-probe-m0r-fault-probe-001" /
+                "invocation_spawned.json").exists()
+    repeat = worker.execute_action(_action())
+    assert repeat["status"] == "DUPLICATE_CLAIM_NO_REEXECUTION"
+    assert github.calls == 2
+
+
+def test_confirmed_remote_checkpoint_precedes_ef01_popen(tmp_path, monkeypatch):
+    class ConfirmedCheckpoint:
+        def claim(self, **_kw):
+            return "CLAIMED"
+        def integrated_source(self, **_kw):
+            return {"effective_sha": BASE, "integration_ref": None}
+        def pre_spawn_checkpoint(self, **_kw):
+            assert _journal(worker, "invocation_boundary.json")["status"] == "EXECUTION_UNKNOWN"
+            events.append("remote")
+            return "refs/heads/ef02/pre-spawn/test-verified"
+        def candidate(self, **_kw):
+            raise AssertionError("interrupted before publication")
+    class Child:
+        pid = 8765
+        def communicate(self, timeout=None):
+            raise SystemExit("SIMULATED_PARENT_INTERRUPTED")
+    events = []
+    monkeypatch.setattr("ai_commerce.remote.worker.subprocess.run",
+                        lambda *_a, **_k: SimpleNamespace(returncode=0, stderr=""))
+    def popen(*_a, **_kw):
+        events.append("popen")
+        assert _journal(worker, "invocation_remote_confirmed.json")["stage"] == "PRESPAWN_REMOTE_REF_CONFIRMED"
+        return Child()
+    monkeypatch.setattr("ai_commerce.remote.worker.subprocess.Popen", popen)
+    worker = _worker(tmp_path, ConfirmedCheckpoint())
+    with pytest.raises(SystemExit, match="SIMULATED_PARENT_INTERRUPTED"):
+        worker.execute_action(_action())
+    assert events == ["remote", "popen"]
+    assert _journal(worker, "invocation_remote_confirmed.json")["pre_spawn_remote_ref"] == "refs/heads/ef02/pre-spawn/test-verified"
+    assert _journal(worker, "invocation_spawned.json")["process_id"] == 8765
