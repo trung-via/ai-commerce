@@ -13,6 +13,10 @@ from pathlib import Path
 from .transport import GitHubTransport, RemoteTransportError, CandidateIntegrityError
 from .validation import fingerprint, check_source
 from .reuse import load_approved_candidates, approve_reuse
+from ai_commerce.engineering.runner import (
+    DEFAULT_MAX_REPAIR_ROUNDS, DEFAULT_ACTION_TIMEOUT_SECONDS,
+    validate_max_repair_rounds, _snapshot,
+)
 
 def _remote_codex_sandbox_args(executor: str, *, windows: bool) -> list[str]:
     """EF02 Windows runner overrides only Codex; Antigravity is untouched."""
@@ -40,8 +44,11 @@ def _classify_failed_executor(report: dict, evidence: Path) -> str:
     if report.get("status") != "EXECUTOR_FAILED":
         return report.get("status", "EXECUTION_UNKNOWN")
     messages = ""
-    for name in ("executor.stderr.log", "executor.stdout.log"):
-        path = evidence / name
+    for key, name in (("executor_stderr", "executor.stderr.log"),
+                      ("executor_stdout", "executor.stdout.log")):
+        path = (evidence / report.get("evidence_files", {}).get(key, name)).resolve()
+        if evidence.resolve() not in path.parents:
+            continue
         if path.exists():
             # Preserve full file on disk; classification only needs bounded prefix.
             with path.open("rb") as f:
@@ -92,6 +99,14 @@ class LocalBatchWorker:
         def finish():
             _write_json(path / "action_result.json", outcome)
             return outcome
+        try:
+            repair_limit = validate_max_repair_rounds(
+                action.get("max_repair_rounds", DEFAULT_MAX_REPAIR_ROUNDS))
+        except ValueError as exc:
+            outcome.update(status="INVALID_ACTION", error_code="INVALID_MAX_REPAIR_ROUNDS",
+                           diagnostic=str(exc))
+            return finish()
+        outcome["max_repair_rounds"] = repair_limit
         if action.get("reuse_candidate") is not None:
             try:
                 entry = approve_reuse(self.batch, action, self.approved_reuse)
@@ -176,7 +191,8 @@ class LocalBatchWorker:
                     "--attempt-id", attempt_id, "--executor", action["executor"],
                     "--model", action["model"], "--effort", action["effort"],
                     "--instruction-file", str(instruction_file), "--verify-json", str(verify_file),
-                    "--out-dir", str(efdir)]
+                    "--out-dir", str(efdir), "--max-repair-rounds", str(repair_limit),
+                    "--action-timeout-seconds", str(DEFAULT_ACTION_TIMEOUT_SECONDS)]
             for allowed in action["allowed_paths"]:
                 argv.extend(["--allow-path", allowed])
             sandbox_argv = _remote_codex_sandbox_args(action["executor"], windows=(os.name == "nt"))
@@ -276,6 +292,12 @@ class LocalBatchWorker:
             outcome["ef01_finished_at"] = report.get("finished_at")
             outcome["changed_files"] = report.get("changed_files", [])
             outcome["verify_exit_code"] = report.get("verify_exit_code")
+            outcome["ef01_invocations"] = report.get("invocations", [])
+            outcome["invocation_count"] = report.get("invocation_count")
+            outcome["repair_rounds_used"] = report.get("repair_rounds_used", 0)
+            outcome["repair_stop_reason"] = report.get("stop_reason")
+            outcome["ef01_usage"] = report.get("usage")
+            outcome["ef01_usage_status"] = report.get("usage_status", "UNKNOWN")
             # Trust neither a success-shaped receipt after a nonzero process
             # exit nor an EF01 PASS receipt contradicted by verification.
             # Both cases can arise when the EF01 process dies after writing
@@ -317,6 +339,21 @@ class LocalBatchWorker:
                     or set(hashes) != set(changed)):
                 outcome.update(status="CANDIDATE_INTEGRITY_FAILED",
                                error_code="EF01_HASH_MANIFEST_INVALID")
+                return finish()
+            if (report.get("git_head_after") != effective or report.get("scope_valid") is not True
+                    or report.get("executor_exit_code") != 0 or report.get("denied_actions")):
+                outcome.update(status="CANDIDATE_INTEGRITY_FAILED",
+                               error_code="EF01_SOURCE_SCOPE_OR_PERMISSION_UNCONFIRMED")
+                return finish()
+            # Reconcile the exact final source/tree again after the EF01 process
+            # exits. Candidate transport separately checks bytes before any write.
+            snapshot, _ = _snapshot(worktree, action["allowed_paths"], time.monotonic() + 30)
+            if (not snapshot["scope_valid"] or any(
+                    snapshot[key] != report.get(key) for key in (
+                        "git_head_after", "changed_files", "candidate_file_sha256",
+                        "tracked_diff_sha256"))):
+                outcome.update(status="CANDIDATE_INTEGRITY_FAILED",
+                               error_code="EF01_VERIFIED_TREE_CHANGED")
                 return finish()
             try:
                 candidate = self.github.candidate(source_sha=effective, attempt_id=attempt_id,

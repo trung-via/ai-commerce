@@ -1,4 +1,4 @@
-"""Manual EF01 work-item CLI; no scheduling, automatic executor or retry."""
+"""Manual EF01 work-item CLI with bounded same-profile scoped pytest repairs."""
 from __future__ import annotations
 
 import argparse
@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from .profile import ExecutorSelection, SelectionError
-from .runner import execute_attempt
+from .runner import execute_attempt, DEFAULT_MAX_REPAIR_ROUNDS, MAX_REPAIR_ROUNDS, DEFAULT_ACTION_TIMEOUT_SECONDS
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,6 +28,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Allow this file or directory path (repeatable; repository-relative)")
     parser.add_argument("--timeout-seconds", type=int, default=7200)
     parser.add_argument("--verify-timeout-seconds", type=int, default=1800)
+    parser.add_argument("--max-repair-rounds", type=int, choices=range(MAX_REPAIR_ROUNDS + 1),
+                        default=DEFAULT_MAX_REPAIR_ROUNDS,
+                        help="Same-profile repairs after determinate pytest failure (0 disables; default: 2)")
+    parser.add_argument("--action-timeout-seconds", type=int, default=DEFAULT_ACTION_TIMEOUT_SECONDS,
+                        help="Total EF01 budget shared by all invocations and verifies (default: 7200)")
     parser.add_argument("--codex-bin", default="codex")
     parser.add_argument("--antigravity-bin", default="agy")
     parser.add_argument("--codex-windows-sandbox", choices=["mxc"], default=None,
@@ -49,6 +54,8 @@ def main(argv: list[str] | None = None) -> int:
                                  allowed_prefixes=args.allow_path,
                                  timeout_seconds=args.timeout_seconds,
                                  verify_timeout_seconds=args.verify_timeout_seconds,
+                                 max_repair_rounds=args.max_repair_rounds,
+                                 action_timeout_seconds=args.action_timeout_seconds,
                                  codex_bin=args.codex_bin, antigravity_bin=args.antigravity_bin,
                                  codex_windows_sandbox=args.codex_windows_sandbox)
     except (SelectionError, ValueError, OSError, json.JSONDecodeError) as exc:

@@ -264,6 +264,8 @@ def test_candidate_publication_failure_preserves_verified_result_but_not_pass(tm
             (out / "engineering_result.json").write_text(json.dumps({
                 "status": "BUILD_VERIFIED_FOR_SCOPE",
                 "source_base_sha": BASE,
+                "git_head_after": BASE, "scope_valid": True, "executor_exit_code": 0,
+                "tracked_diff_sha256": "d" * 64,
                 "changed_files": ["tests/test_ef02_m0r_fixture.py"],
                 "candidate_file_sha256": {"tests/test_ef02_m0r_fixture.py": "0" * 64},
                 "verify_exit_code": 0,
@@ -274,6 +276,12 @@ def test_candidate_publication_failure_preserves_verified_result_but_not_pass(tm
                         lambda *_a, **_k: SimpleNamespace(returncode=0, stderr=""))
     monkeypatch.setattr("ai_commerce.remote.worker.subprocess.Popen",
                         lambda argv, **kwargs: VerifiedChild(argv, **kwargs))
+    monkeypatch.setattr("ai_commerce.remote.worker._snapshot", lambda *_a: ({
+        "git_head_after": BASE, "scope_valid": True,
+        "changed_files": ["tests/test_ef02_m0r_fixture.py"],
+        "candidate_file_sha256": {"tests/test_ef02_m0r_fixture.py": "0" * 64},
+        "tracked_diff_sha256": "d" * 64,
+    }, b"mock diff"))
     github = FakeGithub()
     worker = _worker(tmp_path, github)
     result = worker.execute_action(_action())
