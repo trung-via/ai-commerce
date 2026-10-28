@@ -17,7 +17,7 @@ A01 corresponds to G01/G02/G03/G06/G08: packaging, importable CLI, architecture 
 
 - `A01`: source implemented; **Linux 11/11 targeted tests and Windows PowerShell 11/11 tests observed in Human-supplied screenshot**; see `A01_IMPLEMENTATION_REPORT.md` for verification boundaries.
 - `A02`: **BUILD_VERIFIED_FOR_SCOPE (Linux local)** — 5 portable JSON Schema contracts, source/artifact SHA-256, mock provider, typed capabilities, CLI validation and example mock artifact. 41/41 project targeted tests after cross-platform date-time fix; an earlier Windows run showed 30 PASS / 1 FAIL on old code; **the corrected build subsequently showed 41/41 PASS on Windows in a Human-provided screenshot**. Evidence: `A02_IMPLEMENTATION_REPORT.md`.
-- `EF01`: SOURCE_IMPLEMENTED / LOCAL_SYNTHETIC_TESTS_PASS (10/10); independent Codex and Antigravity CLI adapters available on implementation branch. Neither provider has been run live on Windows; acceptance remains OPEN.
+- `EF01`: SOURCE_IMPLEMENTED / LOCAL_SYNTHETIC_TESTS_PASS (11/11); independent Codex and Antigravity CLI adapters available on implementation branch. Neither provider has been run live on Windows; acceptance remains OPEN.
 - `EF02`: NOT_IMPLEMENTED; no remote wake, session or runner linked.
 - Creative, media generation, platform posting, analytics, settlement: NOT_IMPLEMENTED / NOT_VERIFIED.
 
@@ -34,4 +34,4 @@ No git push, external post, media generation, commercial account linkage or paid
 
 ## EF01 implementation update — 2026-10-28
 
-The EF01 standalone CLI and adapters have 10/10 local synthetic targeted tests PASS using mocked provider subprocesses and temporary real Git repos. Windows Codex/Antigravity live runs, installed CLI versions/model entitlement and remote EF02 remain unverified. M0 live acceptance is not yet claimed. See `EF01_IMPLEMENTATION_REPORT.md`.
+The EF01 standalone CLI and adapters have 11/11 local synthetic targeted tests PASS using mocked provider subprocesses and temporary real Git repos. Windows Codex/Antigravity live runs, installed CLI versions/model entitlement and remote EF02 remain unverified. M0 live acceptance is not yet claimed. See `EF01_IMPLEMENTATION_REPORT.md`.
