@@ -25,7 +25,7 @@ A01 corresponds to G01/G02/G03/G06/G08: packaging, importable CLI, architecture 
 
 - A01 Python foundation installation and targeted tests on Windows: **PASS reported with screenshot evidence (2026-10-28)**. Exact `git rev-parse HEAD` of this workstation and interpreter `python --version` were not shown.
 - Executor CLI invocation and selected model eligibility for **Codex gpt-6.1-sol/max** and **Antigravity gemini-3.8-flash/medium**: observed SUCCESS on Windows. The earlier `gpt-6.1` and `gemini-4-argon` attempts failed due to unsupported model and per-model quota respectively; installed CLI versions, billing and quota balances remain UNKNOWN.
-- Remote runner installation/permissions and return-to-Brain connection: UNKNOWN.
+- Windows runner registration and live EF02 execution observed (run 40657572754 and subsequent 5/5 DAG); **delivery to the original ChatGPT conversation remains UNKNOWN/not implemented**. Real Windows runner-service outage/recovery remains UNKNOWN/deferred.
 - Product/media third-party accounts and publishing permissions: UNKNOWN.
 - A02 Windows report (2026-10-28): prior revision 30 PASS, 1 FAIL in `test_digest_and_time_format_are_checked`, mock generation succeeded; date-time validator corrected and 41/41 local tests PASS; Windows post-fix retest now PASS per Human-provided screenshot: 41 passed in 2.08s. Exact Windows checkout commit SHA was not shown.
 - Next product milestone: **A03/A04 Creative Factory**; optional EF01 Verify–Repair, EF02-D exact-chat wake and Direct Git/pytest performance backlog may proceed in parallel but are NOT gates. M0-R accepted with explicit deferred risks.
@@ -47,7 +47,7 @@ Human-provided PowerShell screenshot shows successful `git pull --ff-only origin
 Human approved update-for-implementation: Human/Brain may submit multiple concurrent engineering actions; EF02 must genuinely run ≥2 independent EF01 subprocesses simultaneously on Windows (initial configurable pool=2), with DAG scheduling, claim/dedup, per-action worktrees and Git candidate refs, plus aggregate GitHub feedback. Submission concurrency and process parallelism are separate claims; single-runner cross-batch jobs may queue. WorkItem `EF02-MULTI-ACTION-001` is ACCEPTED_FOR_WORK; **no EF02 runtime, GitHub Actions workflow or Windows runner has been activated by this planning commit**, and M0-R remains OPEN. Canonical source: `docs/governance/HUMAN_DECISION_2026-10-28_EF02_MULTI_ACTION.md`, `docs/engineering/EF02_MULTI_ACTION_IMPLEMENTATION_PLAN_V1_0_2026-10-28.md`, `contracts/RemoteActionBatch.v1.schema.json`.
 
 
-## EF02 source implementation — 2026-10-28
+## EF02 source implementation — 2026-10-28 (historic early snapshot)
 
 GitHub-hosted test run 40648371883 passed on Windows and Ubuntu, including real overlapping Python test subprocesses and fake GitHub API claim races. This proves only source-level plumbing, NOT a remote Codex or Antigravity execution on the user Windows laptop. Remote Windows runner and M0-R remain OPEN. See docs/engineering/EF02_IMPLEMENTATION_REPORT.md.
 
