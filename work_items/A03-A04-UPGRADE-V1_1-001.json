@@ -1,0 +1,55 @@
+{
+  "work_id": "A03-A04-UPGRADE-V1_1-001",
+  "objective": "Upgrade implemented A03/A04 offline MVP to backwards-compatible Creative Understanding & Real Media Readiness v1.1 and bridge provenance for A05.",
+  "status": "ACCEPTED_FOR_WORK",
+  "source_decision": "docs/governance/HUMAN_DECISION_2026-10-29_CREATIVE_V1_1_A05.md",
+  "scope_in": [
+    "C01",
+    "C02",
+    "C04",
+    "O01",
+    "O02",
+    "O03",
+    "O04",
+    "A03-U1",
+    "A03-U2",
+    "A04-U1",
+    "A04-U2",
+    "BRIDGE-U1"
+  ],
+  "scope_out": [
+    "automatic paid model invocation",
+    "publishing",
+    "new cloud queue/server",
+    "AIOS kernel/runtime",
+    "forced creative QA"
+  ],
+  "expected_artifacts": [
+    "src/ai_commerce/creative/",
+    "src/ai_commerce/media/",
+    "src/ai_commerce/operations/",
+    "src/ai_commerce/bridge/",
+    "tests/test_a03_upgrade_v11.py",
+    "tests/test_a04_upgrade_v11.py",
+    "tests/test_creative_asset_link_v11.py",
+    "docs/engineering/A03_A04_V1_1_IMPLEMENTATION_REPORT.md"
+  ],
+  "acceptance": [
+    "Existing A03/A04 v1 identity/hash, persisted content and CLI remain compatible.",
+    "Controlled variants may share family while divergence maintains intended differences; Human selection not inferred from auto-pinning.",
+    "Model adapter has opt-in explicit configuration, honest provider/usage facts and mocked verification; no live paid calls until authorized.",
+    "JPEG/WebP/MP4 read and verify bytes/decode where available; streaming path for large media; no media masquerading.",
+    "Future async job contract has request ID, terminal/nonterminal separation and safe no-blind-replay semantics.",
+    "Versioned CreativeAssetLink preserves truthful prompt/concept/asset provenance with legacy handoff read."
+  ],
+  "side_effect_class": "BOUNDED",
+  "owner": "Media & Creative / Commerce Operations",
+  "evidence_refs": [
+    "docs/engineering/A03_A04_V1_1_ENGINEERING_HANDOFF.md"
+  ],
+  "risk_notes": [
+    "No product creative provider/account has been selected; real model invocation and paid generation remain unverified.",
+    "MP4 decode may require FFmpeg availability; missing executable must be diagnosed rather than falsely passing."
+  ],
+  "creative_experiment": false
+}
