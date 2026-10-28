@@ -1,0 +1,98 @@
+{
+  "work_id": "A04-MEDIA-OPERATIONS-001",
+  "objective": "Implement canonical Roadmap A O01-O04+C04 as independent offline AI Commerce asset jobs and local image/video import, reusing A02 contracts and provenance.",
+  "status": "IMPLEMENTED",
+  "source_decision": "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.json",
+  "source_work_tree": "docs/roadmap/WORK_TREE_V1_1.json",
+  "source_base_commit": "21e134752f1cb3e5ff7cc202e0dea309f2d0ead6",
+  "scope_in": [
+    "O01",
+    "O02",
+    "O03",
+    "O04",
+    "C04"
+  ],
+  "scope_out": [
+    "Shared CLI, schemas and pyproject changes",
+    "A02 text mock changes",
+    "A03 implementation",
+    "A05 scene/render work",
+    "MP4 rendering",
+    "Network/model/production API calls",
+    "External spend or publishing",
+    "Other projects' runtime or engineering-executor lifecycle adoption"
+  ],
+  "allowed_paths": [
+    "src/ai_commerce/operations/",
+    "src/ai_commerce/media/",
+    "tests/test_a04_media_operations.py",
+    "work_items/A04-MEDIA-OPERATIONS-001.json",
+    "docs/engineering/A04_IMPLEMENTATION_REPORT.md"
+  ],
+  "expected_artifacts": [
+    "src/ai_commerce/operations/",
+    "src/ai_commerce/media/",
+    "tests/test_a04_media_operations.py",
+    "docs/engineering/A04_IMPLEMENTATION_REPORT.md"
+  ],
+  "acceptance": [
+    "Frozen manifest binds job, attempt and canonical request digest to stage/state, refs, cost, diagnostics, trace and retry safety.",
+    "Single-worker import/mock/dry-run produces validated A02 JobResult and actual-byte MediaArtifact records where appropriate.",
+    "Exclusive SHA256-addressed output custody rejects overwrite/collision, traversal, links/reparse points and replaced roots; replay detects missing/corrupt output.",
+    "Local import preserves true source bytes and reference; source generation and rights remain unknown by default. Explicit grants require a rights reference.",
+    "Timeout, interruption and unknown provider effects remain UNKNOWN with reconciliation required; no automatic retry or unknown-cost-to-zero substitution.",
+    "A01/A02 regression tests pass; actual-host link-test skips are reported without claiming native boundary verification."
+  ],
+  "side_effect_class": "BOUNDED",
+  "owner": "Commerce Operations / Media & Creative",
+  "evidence_refs": [
+    "docs/engineering/A04_IMPLEMENTATION_REPORT.md",
+    "tests/test_a04_media_operations.py"
+  ],
+  "executor_binding": null,
+  "execution_method": "DIRECT_EDITS_IN_PROVIDED_ISOLATED_WORKTREE",
+  "verification": {
+    "environment": "Windows; Python 3.14.7; 2026-10-29",
+    "environment_overrides": {
+      "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+      "PYTHONDONTWRITEBYTECODE": "1"
+    },
+    "baseline": {
+      "passed": 41,
+      "failed": 0,
+      "exit_code": 0,
+      "duration_seconds": 2.78
+    },
+    "combined": {
+      "command": "python -m pytest tests/test_a04_media_operations.py tests/test_a02_contracts.py tests/test_a02_mock_provider.py tests/test_cli.py tests/test_foundation.py tests/test_isolation.py -q -p no:cacheprovider --basetemp=.pytest-a04-verified --tb=short",
+      "passed": 112,
+      "skipped": 2,
+      "failed": 0,
+      "exit_code": 0,
+      "duration_seconds": 22.11
+    },
+    "a04_cohort": {
+      "passed": 71,
+      "skipped": 2,
+      "source": "Combined run; other 41 passing cases are unchanged A01/A02 tests"
+    },
+    "native_link_checks": "NOT_VERIFIED: two actual symlink/junction tests skipped. Symlink privilege unavailable; direct junction probe denied.",
+    "deterministic_link_rejection": "PASS: simulated symlink and Windows reparse rejection branches; actual root-replacement test also passed",
+    "source_scope_check": "PASS: 137 pre-existing file SHA256 values unchanged; 11 additions confined to allowed paths",
+    "syntax_and_whitespace": "PASS: Python AST parsing, final newlines, no trailing whitespace",
+    "work_item_schema": "PASS: contracts/WorkItem.v0.3.schema.json",
+    "git_diff_check": "UNAVAILABLE: Git exits 3221225794 (0xC0000142 DLL initialization failure)",
+    "whole_repository_ef_suite": "NOT_RUN",
+    "real_model_media_generation": "NOT_RUN",
+    "mp4_rendering": "NOT_IMPLEMENTED_NOT_RUN"
+  },
+  "risk_notes": [
+    "Selected importer supports non-interlaced PNG (128 MiB decoded scanline limit) and RIFF AVI container checks. Other MIME types are rejected.",
+    "AVI container validation is not a general codec playback proof. No rendering or transcoding is included.",
+    "Local import does not classify original AI generation or establish rights. Supplied rights references are recorded, not independently verified.",
+    "Registry assumes a dedicated directory protected from hostile concurrent ancestor replacement. It is not an OS sandbox or signed manifest system.",
+    "A real process crash may leave worker.lock; it is never automatically cleared. Interrupted provider invocations are never blindly repeated.",
+    "Actual native link boundary behavior remains unverified in this sandbox; deterministic rejection tests are separately identified.",
+    "Shared CLI/schema/packaging fan-in and A05 integration remain deferred as requested."
+  ]
+}
