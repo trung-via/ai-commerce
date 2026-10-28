@@ -1,4 +1,4 @@
-name: EF02 M0-R real EF01 Codex end-to-end interruption
+name: EF02 M0-R real EF01 Codex streamed event interruption
 on:
   issues:
     types: [opened]
@@ -9,7 +9,7 @@ jobs:
     if: >-
       github.event_name == 'issues' &&
       github.event.action == 'opened' &&
-      github.event.issue.title == '[M0R] EF02 EF01 Codex 6.1 Sol max live E2E interruption' &&
+      github.event.issue.title == '[M0R] EF02 EF01 Codex 6.1 Sol max streamed E2E interruption' &&
       github.event.issue.user.login == github.repository_owner
     runs-on: [self-hosted, Windows, ai-commerce-ef02]
     permissions:

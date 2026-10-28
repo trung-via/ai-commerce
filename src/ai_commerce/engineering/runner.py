@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import subprocess
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
@@ -129,6 +130,78 @@ def _headless_denied_actions(data: bytes, executor: str) -> list[str]:
                 denied.add(action)
     return sorted(denied)
 
+
+
+def _run_codex_with_live_event_mirror(command: list[str], *,
+                                      repo: Path, stdin_text: str | None,
+                                      timeout_seconds: int,
+                                      live_path: Path) -> subprocess.CompletedProcess[str]:
+    """Opt-in Codex JSONL mirror, observable BEFORE process completion.
+
+    The default EF01 provider route is unchanged. This opt-in path records the
+    original JSONL bytes in a write-through local evidence file; it does not
+    interpret them, authorize retries, alter model selection, or publish.
+    """
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    capture_errors: list[str] = []
+
+    def drain(stream, parts: list[str], destination: Path | None):
+        try:
+            if destination is None:
+                for line in stream:
+                    parts.append(line)
+            else:
+                with destination.open("w", encoding="utf-8") as handle:
+                    for line in stream:
+                        parts.append(line)
+                        handle.write(line)
+                        handle.flush()
+        except Exception as exc:
+            capture_errors.append(type(exc).__name__)
+
+    proc = subprocess.Popen(
+        command, cwd=repo, stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace", bufsize=1,
+    )
+    out_reader = threading.Thread(
+        target=drain, args=(proc.stdout, stdout_parts, live_path), daemon=True)
+    err_reader = threading.Thread(
+        target=drain, args=(proc.stderr, stderr_parts, None), daemon=True)
+    out_reader.start()
+    err_reader.start()
+    try:
+        try:
+            if stdin_text is not None:
+                proc.stdin.write(stdin_text)
+                proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            # The original Codex process might reject the input and exit.
+            # Its exit/stream still require observation, not a retry.
+            pass
+        finally:
+            try:
+                proc.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
+        try:
+            proc.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=15)
+            raise subprocess.TimeoutExpired(
+                cmd=command, timeout=timeout_seconds,
+                output="".join(stdout_parts), stderr="".join(stderr_parts))
+    finally:
+        out_reader.join(timeout=5)
+        err_reader.join(timeout=5)
+    if capture_errors or out_reader.is_alive() or err_reader.is_alive():
+        raise RuntimeError("CODEX_LIVE_EVENT_MIRROR_UNCONFIRMED")
+    return subprocess.CompletedProcess(
+        args=command, returncode=proc.returncode,
+        stdout="".join(stdout_parts), stderr="".join(stderr_parts))
+
 def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: str,
                     selection: ExecutorSelection, instruction: str,
                     verify_argv: Sequence[str], allowed_prefixes: Sequence[str] = (),
@@ -196,9 +269,17 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
         report["evidence_files"]["provider_boundary"] = "provider_boundary.json"
         report.update(status="EXECUTION_UNKNOWN", executor_invoked=True)
         try:
-            p = subprocess.run(command, cwd=repo, input=stdin, capture_output=True,
-                               text=True, encoding="utf-8", errors="replace",
-                               timeout=timeout_seconds, check=False)
+            if (selection.executor == "codex" and
+                    os.environ.get("AI_COMMERCE_EF01_CODEX_STREAM_EVENTS") == "1"):
+                live = output_dir / "executor.stdout.live.jsonl"
+                p = _run_codex_with_live_event_mirror(
+                    command, repo=repo, stdin_text=stdin,
+                    timeout_seconds=timeout_seconds, live_path=live)
+                report["evidence_files"]["executor_stdout_live"] = live.name
+            else:
+                p = subprocess.run(command, cwd=repo, input=stdin, capture_output=True,
+                                   text=True, encoding="utf-8", errors="replace",
+                                   timeout=timeout_seconds, check=False)
             # The supervisor observed the CLI process return. Its exit code
             # alone is not a verified model outcome; continue through the
             # normal scope and verification checks before any PASS decision.

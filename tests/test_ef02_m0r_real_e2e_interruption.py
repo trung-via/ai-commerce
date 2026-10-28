@@ -130,3 +130,20 @@ def test_marker_requires_exact_bytes_in_unique_action_worktree(tmp_path, monkeyp
     target.write_text("expected", encoding="utf-8")
     assert m.marker_worktree("m0r-e2e-12345",
                              "tests/m0r_codex_e2e_12345.txt", "expected") == repo
+
+
+
+def test_live_codex_stream_only_recognizes_exact_model_command(tmp_path):
+    m = _probe()
+    events = tmp_path / "events.jsonl"
+    events.write_text("\n".join([
+        '{"type":"turn.started"}',
+        '{"type":"item.started","item":{"id":"item_bad","type":"command_execution","command":"python -V"}}',
+        '{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"python -c \\"print(M0R_E2E_REAL_CODEX_COMMAND_12345)\\""}}',
+    ])+"\n", encoding="utf-8")
+    assert m.streamed_codex_command_event(
+        events, "M0R_E2E_REAL_CODEX_COMMAND_UNRELATED") is None
+    event = m.streamed_codex_command_event(
+        events, "M0R_E2E_REAL_CODEX_COMMAND_12345")
+    assert event["item_id"] == "item_1"
+    assert event["event"] == "MODEL_EMITTED_COMMAND_STARTED_NOT_SHELL_SUCCESS"
