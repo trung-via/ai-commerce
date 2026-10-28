@@ -1,0 +1,44 @@
+name: EF02 AGY headless permissions diagnostic (No Model)
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/ef02-agy-headless-diagnostic.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-agy-service:
+    runs-on: [self-hosted, Windows, X64, ai-commerce-ef02]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check CLI options and redacted permission metadata
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          Write-Host "AGY_DIAG_NO_MODEL_START"
+          Write-Host "ACCOUNT=$(whoami)"
+          Write-Host "SESSION=$((Get-Process -Id $PID).SessionId)"
+          $h = (& agy --help 2>&1 | Out-String)
+          foreach($term in @('permissions','tool-permission','settings','project','mode','sandbox','print','trust')) {
+            Write-Host ("SUPPORTS_{0}={1}" -f ($term.ToUpper().Replace('-','_')),($h -match [regex]::Escape($term)))
+          }
+          $settings=Join-Path $env:USERPROFILE ".gemini\antigravity-cli\settings.json"
+          Write-Host "SETTINGS_EXISTS=$(Test-Path $settings)"
+          if(Test-Path $settings) {
+            $obj = Get-Content $settings -Raw | ConvertFrom-Json
+            Write-Host "SETTINGS_HAS_PERMISSIONS=$($null -ne $obj.permissions)"
+            if($null -ne $obj.permissions) {
+              foreach($type in @('allow','ask','deny')) {
+                $rules=@($obj.permissions.$type)
+                Write-Host ("RULE_{0}_COUNT={1}" -f $type.ToUpper(),$rules.Count)
+                Write-Host ("RULE_{0}_HAS_READFILE={1}" -f $type.ToUpper(),[bool](@($rules | Where-Object { $_ -match '^read_file\(' }).Count))
+                Write-Host ("RULE_{0}_HAS_COMMAND={1}" -f $type.ToUpper(),[bool](@($rules | Where-Object { $_ -match '^command\(' }).Count))
+              }
+            }
+          }
+          Write-Host "AGY_DIAG_NO_MODEL_DONE"
