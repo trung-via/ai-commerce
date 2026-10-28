@@ -45,7 +45,7 @@ def test_about_json_truthful_and_parseable(tmp_path: Path) -> None:
     data = json.loads(result.stdout)
     assert data == ProjectIdentity().to_dict()
     assert data["version"] == __version__
-    assert data["engineering_flow"] == "NOT_IMPLEMENTED"
+    assert data["engineering_flow"] == "LOCAL_CORE_IMPLEMENTED_LIVE_UNVERIFIED"
     assert data["product_runtime"] == "NOT_IMPLEMENTED"
 
 

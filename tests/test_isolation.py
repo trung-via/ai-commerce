@@ -39,4 +39,4 @@ def test_no_foreign_implicit_runtime_paths() -> None:
 def test_independent_identity() -> None:
     info = ProjectIdentity()
     assert info.independent is True
-    assert info.engineering_flow == "NOT_IMPLEMENTED"
+    assert info.engineering_flow == "LOCAL_CORE_IMPLEMENTED_LIVE_UNVERIFIED"

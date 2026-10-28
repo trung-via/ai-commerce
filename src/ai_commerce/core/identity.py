@@ -12,7 +12,7 @@ class ProjectIdentity:
     version: str = __version__
     independent: bool = True
     foundation: str = "A01_BOOTSTRAP"
-    engineering_flow: str = "NOT_IMPLEMENTED"
+    engineering_flow: str = "LOCAL_CORE_IMPLEMENTED_LIVE_UNVERIFIED"
     product_runtime: str = "NOT_IMPLEMENTED"
 
     def to_dict(self) -> dict[str, str | bool]:
