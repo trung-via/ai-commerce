@@ -47,7 +47,7 @@ python -m pip install pytest
 python -m pytest tests -q
 ```
 
-The local CLI currently exposes **foundation-only** commands. It cannot dispatch Codex/Antigravity, produce videos, access provider accounts or publish content. See [A01 implementation evidence](docs/engineering/A01_IMPLEMENTATION_REPORT.md), [project state](docs/engineering/PROJECT_STATE.md) and [WorkItem record](work_items/A01-BOOTSTRAP-001.json). Tests ran in a local Linux/Python environment, **not** the user's Windows host; no GitHub CI result is claimed. A02/EF01/EF02 remain unimplemented.
+The local CLI currently exposes **foundation-only** commands. It cannot dispatch Codex/Antigravity, produce videos, access provider accounts or publish content. See [A01 implementation evidence](docs/engineering/A01_IMPLEMENTATION_REPORT.md), [project state](docs/engineering/PROJECT_STATE.md) and [WorkItem record](work_items/A01-BOOTSTRAP-001.json). A01's 11 targeted tests passed in the Linux staging environment, and a Human-provided Windows PowerShell screenshot shows a separate **11 passed in 0.29s**, successful editable install and CLI help/hello. The exact Windows checkout HEAD and full interpreter version were not shown; no GitHub CI result is claimed. A02/EF01/EF02 remain unimplemented.
 
 ## Status and repository hygiene
 

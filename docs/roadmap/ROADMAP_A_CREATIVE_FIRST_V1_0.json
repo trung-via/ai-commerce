@@ -41,7 +41,8 @@
           "status": "BUILD_VERIFIED_FOR_SCOPE",
           "evidence_refs": [
             "docs/engineering/A01_IMPLEMENTATION_REPORT.md"
-          ]
+          ],
+          "windows_verification": "PASS_USER_SCREENSHOT_2026-10-28"
         },
         {
           "id": "A02",
@@ -376,7 +377,7 @@
   "implementation_status": "IN_PROGRESS",
   "dispatch_status": "NOT_DISPATCHED",
   "progress": {
-    "A01": "BUILD_VERIFIED_FOR_SCOPE_LOCAL_TARGETED_TESTS",
+    "A01": "BUILD_VERIFIED_FOR_SCOPE_LINUX_TESTED_WINDOWS_USER_SCREENSHOT_PASS",
     "A02": "NOT_STARTED",
     "EF01": "NOT_IMPLEMENTED",
     "EF02": "NOT_IMPLEMENTED",

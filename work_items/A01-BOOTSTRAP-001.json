@@ -3,8 +3,20 @@
   "objective": "Independent AI Commerce Python package, CLI, targeted tests, docs/engineering state and cross-project isolation",
   "status": "BUILD_VERIFIED_FOR_SCOPE",
   "source_decision": "docs/governance/HUMAN_DECISION_2026-10-28_ENGINEERING_FLOW.md",
-  "scope_in": ["G01", "G02", "G03", "G06", "G08"],
-  "scope_out": ["A02", "EF01", "EF02", "media production", "live external execution"],
+  "scope_in": [
+    "G01",
+    "G02",
+    "G03",
+    "G06",
+    "G08"
+  ],
+  "scope_out": [
+    "A02",
+    "EF01",
+    "EF02",
+    "media production",
+    "live external execution"
+  ],
   "acceptance": [
     "Editable install and import ai_commerce",
     "python -m ai_commerce --help succeeds",
@@ -20,13 +32,35 @@
   ],
   "side_effect_class": "BOUNDED",
   "owner": "Engineering Foundation",
-  "evidence_refs": ["docs/engineering/A01_IMPLEMENTATION_REPORT.md"],
+  "evidence_refs": [
+    "docs/engineering/A01_IMPLEMENTATION_REPORT.md",
+    "docs/engineering/A01_IMPLEMENTATION_REPORT.md#windows-powershell-verification--2026-10-28-human-provided-screenshot"
+  ],
   "risk_notes": [
-    "Verification performed on local Python environment, not Windows host",
+    "Linux tests independently performed; Windows PASS observed from Human-provided PowerShell screenshot; not machine-attested in this session",
     "No Codex/Antigravity, GitHub Actions or AIOS-Renew runtime was invoked"
   ],
   "executor_binding": null,
   "execution_method": "DIRECT_IMPLEMENTATION_IN_AUTHORIZED_REPO",
   "dispatch_status": "NOT_DISPATCHED",
-  "base_commit": "d26b406c5c18c369c907df77d9b2f09ea7b3fc1d"
+  "base_commit": "d26b406c5c18c369c907df77d9b2f09ea7b3fc1d",
+  "windows_verification": {
+    "status": "PASS_USER_SCREENSHOT",
+    "observed_date": "2026-10-28",
+    "platform": "Windows PowerShell",
+    "work_directory": "C:\\TOOL\\ai-commerce",
+    "install": "SUCCESS_ai-commerce-0.1.0",
+    "cli_help": "PASS",
+    "cli_hello": "PASS",
+    "targeted_tests": {
+      "passed": 11,
+      "failed": 0,
+      "duration_seconds": 0.29
+    },
+    "evidence_type": "HUMAN_PROVIDED_SCREENSHOT_IN_CONVERSATION",
+    "screenshot_committed": false,
+    "local_head_sha": "UNKNOWN_NOT_SHOWN",
+    "python_version": "UNKNOWN_FULL_VERSION_NOT_SHOWN",
+    "independent_windows_runner_verification": "NOT_RUN"
+  }
 }

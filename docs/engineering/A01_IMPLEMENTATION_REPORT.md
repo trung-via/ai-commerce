@@ -28,4 +28,19 @@ Local test workspace contained *placeholder copies* of existing governance docum
 
 A01 is `BUILD_VERIFIED_FOR_SCOPE` for the Python bootstrap slice only, not `LIVE_CONFIRMED` for executor workflows. EF01/A02/EF02 remain unimplemented, so M0/M0-R cannot be declared achieved.
 
-Windows install/CLI confirmation and optional CI execution remain unverified. Future implementers should run `python -m pip install -e .` then `python -m pytest tests -q` against a clean AI Commerce clone. Do not copy this A01 PASS to any future executor, provider or media-generation feature.
+Windows installation, CLI and 11/11 targeted tests were later **reported and shown by Human screenshot from Windows PowerShell on 2026-10-28**; see separate Windows observation below. This is user-supplied visual evidence, not an automated machine-attested test receipt or a separately verified Git checkout SHA. Optional CI execution remains unverified. Future implementers should run `python -m pip install -e .` then `python -m pytest tests -q` against a clean AI Commerce clone. Do not copy this A01 PASS to any future executor, provider or media-generation feature.
+
+## Windows PowerShell verification — 2026-10-28 (Human-provided screenshot)
+
+Source: screenshot supplied by Human in the AI Commerce conversation on 2026-10-28. The image is not committed to GitHub; this report transcribes only the observable result.
+
+| Evidence visible in screenshot | Observation |
+|---|---|
+| PowerShell working directory | `C:\\TOOL\\ai-commerce` |
+| Editable install | `Successfully installed ai-commerce-0.1.0` |
+| `python -m ai_commerce --help` | Help screen with `hello` and `about` |
+| `python -m ai_commerce hello` | `AI Commerce foundation ready (A01).` |
+| `python -m pytest tests -q` | **11 passed in 0.29s** |
+| Python environment | Path contains `Python314`, but `python --version` was not shown; full interpreter version remains not independently confirmed |
+
+**Verdict:** A01 Windows bootstrap checks `PASS` **as visually evidenced by the user-supplied screenshot**. This supports local Windows compatibility for the tested slice; it does **not** prove exact Git HEAD/commit of the user's checkout, unattended Codex/Antigravity execution, Windows GitHub runner, provider entitlement or any product/creative capability. Retain `BUILD_VERIFIED_FOR_SCOPE` rather than inflating to `LIVE_CONFIRMED` for engineering automation.

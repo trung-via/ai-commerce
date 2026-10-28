@@ -15,7 +15,7 @@ A01 corresponds to G01/G02/G03/G06/G08: packaging, importable CLI, architecture 
 
 ## Implementation truth
 
-- `A01`: source implemented, locally targeted-verified; see `A01_IMPLEMENTATION_REPORT.md` for environment and evidence.
+- `A01`: source implemented; **Linux 11/11 targeted tests and Windows PowerShell 11/11 tests observed in Human-supplied screenshot**; see `A01_IMPLEMENTATION_REPORT.md` for verification boundaries.
 - `A02`: NOT_STARTED; schema/provider runtime not implemented.
 - `EF01`: NOT_IMPLEMENTED; neither Codex nor Antigravity is wired into AI Commerce.
 - `EF02`: NOT_IMPLEMENTED; no remote wake, session or runner linked.
@@ -23,6 +23,7 @@ A01 corresponds to G01/G02/G03/G06/G08: packaging, importable CLI, architecture 
 
 ## Unknowns and next steps
 
+- A01 Python foundation installation and targeted tests on Windows: **PASS reported with screenshot evidence (2026-10-28)**. Exact `git rev-parse HEAD` of this workstation and interpreter `python --version` were not shown.
 - Executor CLI installation, model eligibility, usage and quota on the actual Windows host: UNKNOWN.
 - Remote runner installation/permissions and return-to-Brain connection: UNKNOWN.
 - Product/media third-party accounts and publishing permissions: UNKNOWN.
