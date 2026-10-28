@@ -126,6 +126,33 @@
       "artifact_id": 12801092240,
       "archive_verified": "GitHub artifact ZIP downloaded and action/batch JSON plus Codex stderr/stdout inspected",
       "provider_cost": "UNKNOWN"
+    },
+    "codex_service_sandbox_diagnostic": {
+      "run_id": 40656197567,
+      "timestamp_utc": "2026-10-28T08:21:42Z",
+      "status": "DIAG_COMPLETE_NO_MODEL_CALL",
+      "session_id": 0,
+      "account": "trump-laptop\\trung",
+      "direct_cmd": "PASS",
+      "direct_pwsh": "PASS",
+      "codex_sandbox_default": {
+        "status": "FAIL",
+        "error": "runner pipe-in timeout after 15000ms",
+        "exit_code": 1
+      },
+      "codex_sandbox_mxc": {
+        "status": "PASS",
+        "output_marker": "EF02_MXC_SANDBOX_OK",
+        "exit_code": 0
+      },
+      "event_log_error_code": "0xC0000142",
+      "evidence_url": "https://github.com/trung-via/ai-commerce/actions/runs/40656197567",
+      "diagnostic_artifact_id": 12800879622,
+      "conclusion": "Windows Service Session 0 fails native default Codex sandbox startup; one-shot MXC local command passes. Does not prove Codex model live with MXC.",
+      "recommended_next_change": "Explicit per-invocation windows.sandbox=mxc only for EF02 Windows Codex attempts, preserve workspace-write and manual executor/model/effort, then verify on new attempt.",
+      "codex_mxc_model_live": "NOT_RUN",
+      "sandbox_changed_persistently": false,
+      "model_invocations": 0
     }
   },
   "expected_artifacts": [
@@ -146,7 +173,9 @@
     "Human PowerShell screenshot 2026-10-28: runner successfully added, Windows Service Running/Auto with .\\trung identity",
     "https://github.com/trung-via/ai-commerce/actions/runs/40654797946",
     "https://github.com/trung-via/ai-commerce/issues/2",
-    "https://github.com/trung-via/ai-commerce/actions/runs/40654797946/artifacts/12801092240"
+    "https://github.com/trung-via/ai-commerce/actions/runs/40654797946/artifacts/12801092240",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40656197567",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40656197567/artifacts/12800879622"
   ],
   "dispatch_status": "WORKFLOW_SOURCE_AVAILABLE_NOT_LIVE_CONFIRMED",
   "human_override_ref": "User approved EF02 Multi-Action v1 and requested update for implementation, 2026-10-28",
@@ -156,7 +185,8 @@
     "Single runner may queue batches even though a batch uses parallel child processes.",
     "Candidate refs are create-only and not merged into main; Chat Wake/native continuation not implemented.",
     "Windows Service Codex subprocess has sandbox tool connection timeout; do not blindly rerun the same claimed attempt or switch sandbox permissions without diagnosis.",
-    "First 2-action live batch produced 1 candidate and 1 NO_CODE_CHANGE; M0-R stays open despite proven process overlap and GitHub feedback."
+    "First 2-action live batch produced 1 candidate and 1 NO_CODE_CHANGE; M0-R stays open despite proven process overlap and GitHub feedback.",
+    "Confirmed Windows Service Session 0 default Codex sandbox fails with 15s runner pipe timeout and 0xC0000142 while an MXC no-model probe succeeds; real EF01 Codex under MXC remains untested."
   ],
   "plan_only_not_runtime": false
 }
