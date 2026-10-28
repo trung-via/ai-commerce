@@ -21,9 +21,8 @@ if (-not (Test-Path -LiteralPath (Join-Path $repoPath 'src/ai_commerce/engineeri
     throw 'EF01_CODE_NOT_CHECKED_OUT: select the EF01 implementation branch first.'
 }
 $binary = if ($Executor -eq 'codex') { 'codex' } else { 'agy' }
-if (-not (Get-Command $binary -ErrorAction SilentlyContinue)) {
-    throw "EXECUTOR_BINARY_MISSING: $binary was not found; no provider was invoked."
-}
+# Deliberately leave binary availability to EF01 runner so missing CLI yields
+# a normalized EXECUTOR_UNAVAILABLE attempt receipt with diagnostic logs.
 $head = (& git -C $repoPath rev-parse HEAD)
 if ($LASTEXITCODE -ne 0) { throw 'GIT_HEAD_UNAVAILABLE' }
 $head = $head.Trim()
