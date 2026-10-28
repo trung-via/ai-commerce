@@ -1,0 +1,172 @@
+{
+  "work_id": "A03-FREEFORM-CREATIVE-001",
+  "objective": "Implement Roadmap A C01+C02 as local product creative logic on the existing A02 contracts",
+  "status": "IMPLEMENTED",
+  "source_decision": "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.json",
+  "source_base_commit": "21e134752f1cb3e5ff7cc202e0dea309f2d0ead6",
+  "source_observation": "Detached checkout HEAD read from its worktree metadata; no GitHub/main freshness claim",
+  "governance": "v0.3",
+  "scope_in": [
+    "C01",
+    "C02"
+  ],
+  "depends_on": [
+    "A02"
+  ],
+  "scope_out": [
+    "EF01/EF02 engineering logic changes",
+    "A05 rendering",
+    "MCP/LangGraph",
+    "live model calls",
+    "paid model calls",
+    "credentials",
+    "publication",
+    "global quality or approval gate"
+  ],
+  "allowed_paths": [
+    "src/ai_commerce/creative/",
+    "tests/test_a03_creative.py",
+    "work_items/A03-FREEFORM-CREATIVE-001.json",
+    "docs/engineering/A03_IMPLEMENTATION_REPORT.md"
+  ],
+  "expected_artifacts": [
+    "src/ai_commerce/creative/",
+    "tests/test_a03_creative.py",
+    "docs/engineering/A03_IMPLEMENTATION_REPORT.md"
+  ],
+  "acceptance": [
+    "Lossless Vietnamese/Unicode freeform intake and existing JSON ContentBrief validation using the unchanged A02 schema",
+    "No required SKU, product, CTA, storyboard, KPI or concept count",
+    "Explicit provider-neutral reasoner injection with a TEST_ONLY_MOCK deterministic fixture and no default fallback",
+    "One concept by default; optional distinct idea families; mock capacity is not a product quota",
+    "Validated immutable concept identity, brief digest, revision, source references and observed-or-UNKNOWN model metadata",
+    "Separate optional reframe operation with parent revision/digest, lens and exact text changes",
+    "Immutable brief snapshots, concept revisions and selections; conflicting versions refuse overwrite",
+    "A05 consumer input reconstructs from stored selection without chat history",
+    "No concept record may promote factual_status to VERIFIED or rights_status to GRANTED"
+  ],
+  "acceptance_results": {
+    "C01": "PASS_LOCAL_TESTS",
+    "C02_offline_mock_and_adapter_contract": "PASS_LOCAL_TESTS",
+    "reframe_and_lineage": "PASS_LOCAL_TESTS",
+    "persistence_roundtrip_selection_and_concurrency": "PASS_LOCAL_TESTS",
+    "A02_compatibility": "PASS_LOCAL_TESTS",
+    "wheel_build_and_install": "UNVERIFIED_MISSING_DECLARED_BUILD_DEPENDENCY",
+    "registered_project_tests": "FAILED_ENVIRONMENT_16_EXISTING_ENGINEERING_TESTS"
+  },
+  "side_effect_class": "BOUNDED",
+  "owner": "Media & Creative",
+  "creative_experiment": false,
+  "evidence_refs": [
+    "docs/engineering/A03_IMPLEMENTATION_REPORT.md",
+    "tests/test_a03_creative.py"
+  ],
+  "implementation": {
+    "intake": "Lossless mapping to A02 objective/prompt; no semantic extraction claim; additional JSON fields preserved",
+    "mock": "Four deterministic test families: sensory poem, object-perspective comedy, reverse-time mystery, impossible field guide",
+    "model": "UNKNOWN; no model inference performed",
+    "reframe": "Explicit local lens plus caller-supplied creative text changes; no model response is invented",
+    "brief_versions": "Content-addressed full canonical A02 JSON snapshots",
+    "concept_versions": "Stable initial concept_id; sequential immutable revisions linked to parent digest",
+    "selection": "Content-addressed record pinned to exact concept revision/digest; does not authorize rendering or publication",
+    "consumer_api": "CreativeStore.load_selected(selection_id) returns detached brief, concept and selection JSON"
+  },
+  "verification": {
+    "date": "2026-10-29",
+    "environment": {
+      "platform": "win32",
+      "python": "3.14.7",
+      "pytest": "8.4.2",
+      "jsonschema": "4.26.0",
+      "setuptools": "NOT_INSTALLED"
+    },
+    "invocation": "Python runpy executed pytest.__main__ with the listed module arguments, after applying the recorded environment; no test skipping or changed verification profile",
+    "environment_overrides": {
+      "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+      "TEMP": "<checkout>/.local/a03-test-temp",
+      "TMP": "<checkout>/.local/a03-test-temp"
+    },
+    "focused": {
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "tests/test_a03_creative.py",
+        "-q"
+      ],
+      "passed": 100,
+      "failed": 0,
+      "exit_code": 0,
+      "duration_seconds": 13.67
+    },
+    "affected_contracts": {
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "tests/test_a03_creative.py",
+        "tests/test_a02_contracts.py",
+        "tests/test_a02_mock_provider.py",
+        "-q"
+      ],
+      "passed": 130,
+      "failed": 0,
+      "exit_code": 0,
+      "duration_seconds": 22.21
+    },
+    "project_tests": {
+      "profile": "project-tests",
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "tests",
+        "-q"
+      ],
+      "passed": 246,
+      "failed": 16,
+      "exit_code": 1,
+      "duration_seconds": 26.84,
+      "failures": {
+        "git_init_before_engineering_test_body": 15,
+        "powershell_process_start": 1
+      },
+      "git_process_exit_code": 3221225794,
+      "powershell_error": "WinError 1920: The file cannot be accessed by the system",
+      "local_log": ".local/a03-project-tests.log"
+    },
+    "isolated_source_copy_smoke": {
+      "exit_code": 0,
+      "result": "ISOLATED_COPY_IMPORT_SCHEMA_CONSUMER_PASS",
+      "installed_wheel": false
+    },
+    "package_build": {
+      "status": "UNVERIFIED",
+      "attempt": "setuptools.build_meta.build_wheel in a disposable source copy",
+      "observed_error": "ModuleNotFoundError: No module named 'setuptools'",
+      "network_or_dependency_install_attempted": false
+    },
+    "syntax": "PASS_AST_PARSE",
+    "trailing_whitespace": "PASS_PYTHON_CHECK",
+    "git_diff_check": "UNAVAILABLE_GIT_PROCESS_FAILED_TO_START",
+    "scope": "All 136 preexisting index entries compared read-only: no tracked modifications or deletions; new authored files restricted to allowed paths",
+    "source_sha256": {
+      "src/ai_commerce/creative/__init__.py": "30aa8384fa0816597229a361b4f817184c05471d2c119a95c0c531d4bd5ec1c2",
+      "src/ai_commerce/creative/_validation.py": "49375a5fd786f33a152e50da38377db5884ffaee70a07030aac9890924d15724",
+      "src/ai_commerce/creative/briefs.py": "6e4ba06ec1342cfe981488ce0d9b73c15949ff95e8ae438326a54d740079edde",
+      "src/ai_commerce/creative/models.py": "0013b6a1c5248798299c9b45a0242cd9b3e06501baff171f1fcfa6132af716a2",
+      "src/ai_commerce/creative/reasoner.py": "d270abac197a4a6b4c202f23d7c641b6d08b64e645704738c62d2906374397c5",
+      "src/ai_commerce/creative/store.py": "484788c803e17f0a8c56ea7d9379c2a1e970ce41ead951f7332ca6dc6ae18656",
+      "tests/test_a03_creative.py": "2a64229cbf0053f780ba2801329d26ba75d09793193ae94cf9a0953e38f33d6f"
+    }
+  },
+  "risk_notes": [
+    "Implementation status is scoped local code, not full project verification, wheel installation, live model capability, creative quality or external acceptance",
+    "Freeform intake preserves text; the mock uses templates and does not understand natural language like a real model",
+    "References and incoming assertions remain unverified; A03 does not verify external facts, licenses, rights or commercial outcomes",
+    "Store is local append-only storage, not a transactional database; a crash can leave a partial new file that is rejected rather than overwritten",
+    "Git/PowerShell environment failures and the missing setuptools dependency remain unresolved; no out-of-scope environment or engineering fixes were made"
+  ],
+  "publication_status": "NOT_ATTEMPTED",
+  "candidate_commit": "NOT_CREATED"
+}
