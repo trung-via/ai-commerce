@@ -4,6 +4,7 @@
 // Never modify claims, retry an attempt, or run Codex/Antigravity.
 const AGE_MS = 45 * 60 * 1000;
 const TARGET_FILE = 'ef02-batch.yml';
+const reconcile = require('./ef02-reconcile.cjs');
 
 function issueNumber(run, repoFullName) {
   // GitHub overrides run.name with run-name; watcher workflow/event already scopes the workflow.
@@ -72,14 +73,21 @@ async function notify({github, context, core}, run, status, issue) {
     core.info('EF02 outcome already reported: ' + run.id);
     return false;
   }
+  const sections = [marker, 'Status: `' + status.code + '`', status.detail,
+    'Workflow: ' + (run.html_url ||
+      'https://github.com/' + owner + '/' + repo + '/actions/runs/' + run.id)];
+  if (run.status === 'completed' && status.code !== 'HOSTED_INGRESS_REJECTED') {
+    // Read-only evidence. Missing ref never proves no model side effects.
+    try {
+      const report = await reconcile.reconcileIssue(github, {owner, repo, issue_number: issue});
+      sections.push(reconcile.summary(report));
+    } catch (_) {
+      sections.push('GitHub ref reconciliation: READ_UNKNOWN (observer read failed).');
+    }
+  }
+  sections.push('This observer does not run executors, cancel jobs, mutate claims or retry models.');
   await github.rest.issues.createComment({
-    owner, repo, issue_number: issue,
-    body: [marker, 'Status: `' + status.code + '`',
-      status.detail,
-      'Workflow: ' + (run.html_url ||
-        'https://github.com/' + owner + '/' + repo + '/actions/runs/' + run.id),
-      'This observer does not run executors, cancel jobs, mutate claims or retry models.']
-      .join('\n\n')
+    owner, repo, issue_number: issue, body: sections.join('\\n\\n')
   });
   return true;
 }
