@@ -5,7 +5,7 @@ on:
     paths:
       - "src/ai_commerce/remote/**"
       - "src/ai_commerce/engineering/**"
-      - "tests/test_ef02.py"
+      - "tests/test_ef02*.py"
       - "tests/test_ef01.py"
       - ".github/workflows/ef02-tests.yml"
   pull_request:
@@ -13,7 +13,7 @@ on:
       - "src/ai_commerce/remote/**"
       - "src/ai_commerce/engineering/**"
       - "tests/test_ef01.py"
-      - "tests/test_ef02.py"
+      - "tests/test_ef02*.py"
       - ".github/workflows/ef02-*.yml"
       - "contracts/RemoteActionBatch.v1.schema.json"
 jobs:
