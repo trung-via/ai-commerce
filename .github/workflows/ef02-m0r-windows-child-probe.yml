@@ -1,0 +1,34 @@
+name: EF02 M0-R isolated Windows child interruption (no model)
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-child-probe:
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.action == 'opened' &&
+      github.event.issue.title == '[M0R] Windows isolated child interruption probe' &&
+      github.event.issue.user.login == github.repository_owner
+    runs-on: [self-hosted, Windows, ai-commerce-ef02]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Interrupt ONLY a Python child created by this job
+        shell: pwsh
+        run: |
+          python .github/scripts/ef02-m0r-child-probe.py --out .local/ef02-m0r/child-probe.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload evidence of interrupted child
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ef02-m0r-child-probe-${{ github.run_id }}
+          path: .local/ef02-m0r/child-probe.json
+          if-no-files-found: warn
+          retention-days: 14
