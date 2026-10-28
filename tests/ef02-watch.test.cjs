@@ -5,7 +5,7 @@ const observe = require('../.github/scripts/ef02-watch.cjs');
 
 const owner = 'trung-via', repo = 'ai-commerce';
 function run(overrides = {}) {
-  return {id: 555, name: 'EF02 Multi-Action remote engineering',
+  return {id: 555, name: 'EF02 Issue #19',
     head_repository: {full_name: 'trung-via/ai-commerce'},
     display_title: 'EF02 Issue #19', status: 'completed',
     conclusion: 'cancelled', created_at: '2026-10-28T08:00:00Z',
@@ -36,6 +36,8 @@ function fake({event = 'workflow_run', result = run(), jobs = [],
 
 test('bind only a numbered EF02 run in the expected repository', () => {
   assert.equal(observe.issueNumber(run(), 'trung-via/ai-commerce'), 19);
+  // Actual GitHub workflow_run uses custom run-name as run.name.
+  assert.equal(observe.issueNumber(run({name: 'EF02 Issue #19'}), 'trung-via/ai-commerce'), 19);
   assert.equal(observe.issueNumber(run({display_title: 'Unrelated #19'}), 'trung-via/ai-commerce'), null);
   assert.equal(observe.issueNumber(run({head_repository: {full_name: 'other/fork'}}), 'trung-via/ai-commerce'), null);
   assert.equal(observe.issueNumber(run({display_title: 'EF02 Issue #0'}), 'trung-via/ai-commerce'), null);
@@ -76,7 +78,7 @@ test('existing GitHub validation feedback prevents duplicate comments', async ()
 test('successful workflow and unrelated workflows do not produce comments', async () => {
   const x = fake({result: run({conclusion: 'success'})});
   assert.equal(await observe({github: x.api, context: x.context, core: x.core}), 0);
-  const y = fake({result: run({name: 'unrelated', conclusion: 'cancelled'})});
+  const y = fake({result: run({display_title: 'unrelated run', conclusion: 'cancelled'})});
   assert.equal(await observe({github: y.api, context: y.context, core: y.core}), 0);
 });
 
