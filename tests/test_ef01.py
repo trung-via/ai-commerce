@@ -141,3 +141,21 @@ def test_verify_out_of_scope_mutation_is_failure(tmp_path):
                         allowed_prefixes=["src.txt"], codex_bin=binary)
     assert o["status"] == "SCOPE_VIOLATION"
     assert "bad.txt" in o["changed_files"]
+
+
+def test_cli_accepts_windows_utf8_bom_verify_json(tmp_path):
+    repo = _repo(tmp_path)
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_bytes(b"\xef\xbb\xbfDo a code change")
+    verify = tmp_path / "verify.json"
+    verify.write_bytes(b"\xef\xbb\xbf" + json.dumps([sys.executable, "-c", "pass"]).encode())
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    cmd = [sys.executable, "-m", "ai_commerce.engineering", "--repo", str(repo),
+           "--work-id", "EF01-s", "--attempt-id", "s-1", "--executor", "codex",
+           "--model", "gpt-6", "--effort", "max", "--instruction-file", str(prompt),
+           "--verify-json", str(verify), "--out-dir", str(tmp_path / "out"),
+           "--codex-bin", "definitely-missing-binary-EF"]
+    p = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    assert p.returncode == 1
+    assert json.loads(p.stdout)["status"] == "EXECUTOR_UNAVAILABLE"

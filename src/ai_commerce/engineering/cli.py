@@ -37,8 +37,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         selection = ExecutorSelection(args.executor, args.model, args.effort)
-        prompt = args.instruction_file.read_text(encoding="utf-8")
-        verify = json.loads(args.verify_json.read_text(encoding="utf-8"))
+        prompt = args.instruction_file.read_text(encoding="utf-8-sig")
+        verify = json.loads(args.verify_json.read_text(encoding="utf-8-sig"))
         if not isinstance(verify, list) or not all(isinstance(x, str) and x for x in verify):
             raise ValueError("verify-json must contain an argv array of non-empty strings")
         result = execute_attempt(repo=args.repo, output_dir=args.out_dir,
