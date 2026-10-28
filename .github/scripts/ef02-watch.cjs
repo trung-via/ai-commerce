@@ -24,6 +24,15 @@ function classifyTerminal(run, jobs) {
       'Hosted validation/ingress failed and Windows execution was skipped. ' +
       'This workflow did not invoke the Windows executor.'};
   }
+  if (run.conclusion === 'cancelled' &&
+      validate?.conclusion === 'skipped' && execute?.conclusion === 'skipped' &&
+      jobs.some(j => j.name === 'm0r_pre_executor_cancel')) {
+    return {code: 'WORKFLOW_CANCELLED_PRE_EXECUTOR_NO_WINDOWS', detail:
+      'Owner-authorized hosted cancellation probe. GitHub jobs confirm that both ' +
+      'validation and Windows execute were SKIPPED. This workflow never invoked ' +
+      'a Windows executor or a model. This does not establish safety after an ' +
+      'already-started provider process in any other run.'};
+  }
   if (run.conclusion === 'cancelled') {
     return {code: 'WORKFLOW_CANCELLED_EXECUTION_UNCERTAIN', detail:
       'GitHub workflow was cancelled. Executor invocation/side effects are UNKNOWN. ' +
@@ -76,7 +85,8 @@ async function notify({github, context, core}, run, status, issue) {
   const sections = [marker, 'Status: `' + status.code + '`', status.detail,
     'Workflow: ' + (run.html_url ||
       'https://github.com/' + owner + '/' + repo + '/actions/runs/' + run.id)];
-  if (run.status === 'completed' && status.code !== 'HOSTED_INGRESS_REJECTED') {
+  if (run.status === 'completed' && status.code !== 'HOSTED_INGRESS_REJECTED' &&
+      status.code !== 'WORKFLOW_CANCELLED_PRE_EXECUTOR_NO_WINDOWS') {
     // Read-only evidence. Missing ref never proves no model side effects.
     try {
       const report = await reconcile.reconcileIssue(github, {owner, repo, issue_number: issue});
