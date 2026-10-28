@@ -8,7 +8,7 @@
   "scope_out": ["AIOS Runtime/Kernel/Publisher", "EF02 remote wake", "automatic routing", "provider spend/publishing"],
   "owner": "Engineering Foundation",
   "side_effect_class": "LOCAL_CODE_MUTATION_BY_EXPLICIT_EXECUTOR_ONLY",
-  "verification": {"local_targeted_tests_passed": 11, "test_type": "fake CLI subprocess plus real temporary Git repositories", "live_codex": "NOT_RUN", "live_antigravity": "NOT_RUN", "windows_live": "NOT_RUN", "whole_repo_regression": "NOT_RUN"},
+  "verification": {"local_targeted_tests_passed": 12, "test_type": "fake CLI subprocess plus real temporary Git repositories", "live_codex": "NOT_RUN", "live_antigravity": "NOT_RUN", "windows_live": "NOT_RUN", "whole_repo_regression": "NOT_RUN"},
   "acceptance_remaining": ["Live Codex scoped code change + targeted verify", "Live Antigravity scoped code change + targeted verify", "Record exact installed versions, models, token and Git evidence"],
   "expected_artifacts": ["src/ai_commerce/engineering/", "tests/test_ef01.py", "docs/engineering/EF01_IMPLEMENTATION_REPORT.md"],
   "evidence_refs": ["docs/engineering/EF01_IMPLEMENTATION_REPORT.md"],

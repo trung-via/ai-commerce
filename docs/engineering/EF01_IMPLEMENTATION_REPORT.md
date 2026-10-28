@@ -27,7 +27,7 @@ Source reference pinned at `trung-via/AIOS-renew@cbefb92612f24b55417165736c63753
 
 ## Local verification actually observed
 
-Isolated local EF01 tests using fake CLI subprocesses and temporary real Git repos: `11 passed` (Linux Python environment). This establishes deterministic command building/result plumbing and negative states, **not live Codex or AGY execution**, Windows host compatibility or installed model entitlement. Existing A01/A02 41-test project suite was not re-run in the actual GitHub repository from this environment. Previous 41-pass Windows A02 evidence is independent.
+Isolated local EF01 tests using fake CLI subprocesses and temporary real Git repos: `12 passed` (Linux Python environment). This establishes deterministic command building/result plumbing and negative states, **not live Codex or AGY execution**, Windows host compatibility or installed model entitlement. Existing A01/A02 41-test project suite was not re-run in the actual GitHub repository from this environment. Previous 41-pass Windows A02 evidence is independent.
 
 ## Windows live acceptance (run separately for each executor)
 
@@ -40,3 +40,7 @@ Run from a clean checkout of `trung-via/ai-commerce` after the EF01 code is avai
 5. Preserve both local `engineering_result.json` files, full error diagnostics, `git rev-parse HEAD`, `git diff --stat`, Git candidate SHAs, and actual targeted test results. `BUILD_VERIFIED_FOR_SCOPE` for a live attempt requires a changed file and verification return code 0. Two real executor attempts are required to claim full EF01 live acceptance.
 
 **Not included:** EF02 GitHub/Windows remote wake, native app-server continuation, automatic rerouting, project-runner registration, cross-project credentials, provider billing, creative media generation, posting, or publication.
+
+## Windows conformance helper
+
+After switching to the EF01 branch, use [`scripts/EF01-Windows-Live-Conformance.ps1`](../../scripts/EF01-Windows-Live-Conformance.ps1) with explicit `-Executor`, `-Model`, `-Effort`, `-AttemptId` for **one provider at a time**. The script creates a separate clean detached worktree for each attempt, writes a small real pytest change instruction and records local evidence under ignored `.local/ef01-results/`. Run twice (Codex and Antigravity); the script neither commits nor dispatches remotely. Inputs accept PowerShell 5.1 UTF-8 BOM. This script itself is not yet Windows-executed.
