@@ -74,10 +74,10 @@
     "ef01_windows_tests": "53_PASS_2026_10_28",
     "ef02_runtime": "SOURCE_IMPLEMENTED_GITHUB_CI_PASS",
     "ef02_windows_parallel_live": "PASS_TWO_REAL_OVERLAPPING_EF01_PROCESSES_94_SECONDS_RUN_40654797946",
-    "ef02_github_remote": "LIVE_PARTIAL_1_OF_2_CANDIDATE_READY_WITH_ISSUE_FEEDBACK_AND_ARTIFACT",
-    "m0_r": "OPEN_FULL_LIVE_BATCH_NOT_YET_PASS",
-    "ef02_ci": "PASS_UBUNTU_AND_WINDOWS_RUN_40648371883",
-    "windows_runner_registration": "NOT_VERIFIED",
+    "ef02_github_remote": "LIVE_CONFIRMED_ISSUES_2_AND_3_AGY_FIRST_BATCH_CODEX_MXC_FOLLOWUP",
+    "m0_r": "OPEN_5_ACTION_BATCH_AND_NEGATIVE_PATH_LIVE_ACCEPTANCE_NOT_PROVEN",
+    "ef02_ci": "PASS_WINDOWS_UBUNTU_RUN_40657420066_SHA_71b48d7e3fce8496afb40f9fc77fe53dc143c73a",
+    "windows_runner_registration": "VERIFIED_LIVE_JOB_40657572754",
     "ef02_windows_local_tests": "PASS_65_OF_65_2026_10_28_HUMAN_POWERSHELL_SCREENSHOT",
     "ef02_windows_local_tests_details": {
       "test_command": "python -m pytest tests -q",
@@ -91,7 +91,7 @@
     "windows_service_account": ".\\trung",
     "windows_service_name": "actions.runner.trung-via-ai-commerce.AI-COMMERCE-EF02-01",
     "windows_runner_online": "CONFIRMED_EXECUTED_GITHUB_WORKFLOW_RUN_40654797946",
-    "windows_service_executors": "BOTH_INVOKED_AGY_BUILD_VERIFIED_CODEX_WINDOWS_SANDBOX_PIPE_TIMEOUT",
+    "windows_service_executors": "CODEX_MXC_CANDIDATE_READY_AGY_LEGACY_PATH_PREVIOUSLY_CANDIDATE_READY",
     "first_live_batch": {
       "run_id": 40654797946,
       "issue_number": 2,
@@ -153,6 +153,35 @@
       "codex_mxc_model_live": "NOT_RUN",
       "sandbox_changed_persistently": false,
       "model_invocations": 0
+    },
+    "codex_mxc_live": {
+      "run_id": 40657572754,
+      "issue_number": 3,
+      "batch_id": "ef02-codex-mxc-live-20261028-02",
+      "attempt_id": "ef02-20261028-codex-mxc-02",
+      "source_sha": "71b48d7e3fce8496afb40f9fc77fe53dc143c73a",
+      "executor": "codex",
+      "model": "gpt-6.1-sol",
+      "effort": "max",
+      "windows_service": true,
+      "sandbox_backend": "mxc",
+      "sandbox_policy": "workspace-write",
+      "status": "CANDIDATE_READY",
+      "ef01_status": "BUILD_VERIFIED_FOR_SCOPE",
+      "candidate_ref": "refs/heads/ef02/candidate/85b6040820bb76f96d8e5f8f54facb07",
+      "candidate_sha": "efae5acb6e6a48ed1c4264970be03443d52700b8",
+      "changed_files": [
+        "tests/test_ef02_live_codex_mxc_20261028.py"
+      ],
+      "scoped_test_result": "68 passed in 7.22s",
+      "verify_exit_code": 0,
+      "executor_exit_code": 0,
+      "feedback": "GITHUB_ISSUE_COMMENT_PUBLISHED",
+      "artifact_id": 12802004580,
+      "artifact_verified": true,
+      "candidate_merged_to_main": false,
+      "provider_cost": "UNKNOWN",
+      "evidence_url": "https://github.com/trung-via/ai-commerce/actions/runs/40657572754"
     }
   },
   "expected_artifacts": [
@@ -175,18 +204,21 @@
     "https://github.com/trung-via/ai-commerce/issues/2",
     "https://github.com/trung-via/ai-commerce/actions/runs/40654797946/artifacts/12801092240",
     "https://github.com/trung-via/ai-commerce/actions/runs/40656197567",
-    "https://github.com/trung-via/ai-commerce/actions/runs/40656197567/artifacts/12800879622"
+    "https://github.com/trung-via/ai-commerce/actions/runs/40656197567/artifacts/12800879622",
+    "https://github.com/trung-via/ai-commerce/commit/71b48d7e3fce8496afb40f9fc77fe53dc143c73a",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40657420066",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40657572754",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40657572754/artifacts/12802004580",
+    "https://github.com/trung-via/ai-commerce/commit/efae5acb6e6a48ed1c4264970be03443d52700b8"
   ],
-  "dispatch_status": "WORKFLOW_SOURCE_AVAILABLE_NOT_LIVE_CONFIRMED",
+  "dispatch_status": "LIVE_GITHUB_ISSUE_REMOTE_EXECUTION_VERIFIED_M0_R_STILL_OPEN",
   "human_override_ref": "User approved EF02 Multi-Action v1 and requested update for implementation, 2026-10-28",
   "risk_notes": [
-    "CI uses GitHub-hosted Windows/Linux and simulated providers, not user laptop live Codex/AGY.",
-    "Separate Windows runner with label ai-commerce-ef02 remains unregistered/unverified.",
     "Single runner may queue batches even though a batch uses parallel child processes.",
     "Candidate refs are create-only and not merged into main; Chat Wake/native continuation not implemented.",
-    "Windows Service Codex subprocess has sandbox tool connection timeout; do not blindly rerun the same claimed attempt or switch sandbox permissions without diagnosis.",
     "First 2-action live batch produced 1 candidate and 1 NO_CODE_CHANGE; M0-R stays open despite proven process overlap and GitHub feedback.",
-    "Confirmed Windows Service Session 0 default Codex sandbox fails with 15s runner pipe timeout and 0xC0000142 while an MXC no-model probe succeeds; real EF01 Codex under MXC remains untested."
+    "Legacy Windows Codex sandbox remains unusable in Session 0 on this host; EF02 Windows Codex uses scoped MXC override, successfully live verified. AGY behavior unchanged.",
+    "M0-R remains open: complete five-action multi-DAG and failure/unknown/quota/offline acceptance have not been demonstrated live."
   ],
   "plan_only_not_runtime": false
 }
