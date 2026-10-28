@@ -1,0 +1,56 @@
+name: EF02 Codex Windows Sandbox Probe (No Model)
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/ef02-codex-sandbox-probe.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-sandbox-from-service:
+    runs-on: [self-hosted, Windows, X64, ai-commerce-ef02]
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Read-only Windows process and Codex sandbox diagnostics
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force -Path ".local/ef02-sandbox-diagnostics" | Out-Null
+          Start-Transcript -Path ".local/ef02-sandbox-diagnostics/report.txt" -Force
+          Write-Host "EF02_DIAG_BEGIN_NO_MODEL_CALL"
+          Write-Host "SESSION_ID=$((Get-Process -Id $PID).SessionId)"
+          Write-Host "SERVICE_ACCOUNT=$(whoami)"
+          Write-Host "PWSH_VERSION=$($PSVersionTable.PSVersion)"
+          Write-Host "CODEX_VERSION:"
+          codex --version
+          Write-Host "DIRECT_CMD_BASELINE:"
+          & "$env:SystemRoot\System32\cmd.exe" /d /c echo EF02_DIRECT_CMD_OK
+          Write-Host "DIRECT_PWSH_BASELINE:"
+          pwsh -NoProfile -Command "Write-Output EF02_DIRECT_PWSH_OK"
+          Write-Host "CODEX_SANDBOX_HELP:"
+          codex sandbox --help
+          Write-Host "SANDBOX_DEFAULT_PROBE_BEGIN"
+          codex sandbox --include-managed-config --permission-profile :workspace -- "$env:SystemRoot\System32\cmd.exe" /d /c echo EF02_DEFAULT_SANDBOX_OK
+          Write-Host "SANDBOX_DEFAULT_EXIT=$LASTEXITCODE"
+          Write-Host "SANDBOX_MXC_PROBE_BEGIN"
+          codex -c windows.sandbox=mxc sandbox --include-managed-config --permission-profile :workspace -- "$env:SystemRoot\System32\cmd.exe" /d /c echo EF02_MXC_SANDBOX_OK
+          Write-Host "SANDBOX_MXC_EXIT=$LASTEXITCODE"
+          Write-Host "RECENT_CODEX_RUNNER_APPLICATION_POPUP_CODES:"
+          $start = (Get-Date).AddMinutes(-20)
+          Get-WinEvent -FilterHashtable @{LogName='System'; Id=26; StartTime=$start} -ErrorAction SilentlyContinue | Where-Object { $_.Message -like '*codex-command-runner*' } | Select-Object -First 10 | ForEach-Object { ($_.Message | Select-String -AllMatches '0x[0-9a-fA-F]{8}').Matches.Value -join ',' }
+          Write-Host "EF02_DIAG_DONE_NO_MODEL_CALL"
+          Stop-Transcript
+      - name: Retain diagnostic transcript
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ef02-codex-sandbox-probe-${{ github.run_id }}
+          path: .local/ef02-sandbox-diagnostics/report.txt
+          retention-days: 7
+          if-no-files-found: warn
