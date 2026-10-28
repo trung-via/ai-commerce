@@ -139,6 +139,13 @@
             "minLength": 1
           }
         },
+        "max_repair_rounds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5,
+          "default": 2,
+          "description": "Bounded same-profile EF01 repair rounds within this action/claim; 0 disables."
+        },
         "repair_of": {
           "type": [
             "string",

@@ -7,8 +7,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import threading
+import time
+from subprocess import list2cmdline
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
@@ -25,20 +28,18 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _git(repo: Path, *args: str, timeout_seconds: float = 30) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
-                          text=True, encoding="utf-8", errors="replace", check=False)
+                          text=True, encoding="utf-8", errors="replace", check=False, timeout=timeout_seconds)
 
 
-def _changes(repo: Path) -> list[str]:
-    status = _git(repo, "status", "--porcelain=v1", "--untracked-files=all")
-    if status.returncode:
-        raise RuntimeError("GIT_STATUS_FAILED: " + status.stderr.strip())
+def _changes(repo: Path, *, timeout_seconds: float = 30) -> list[str]:
     # porcelain -z gives unambiguous paths including spaces / quoted filenames.
     raw = subprocess.run(["git", "-C", str(repo), "status", "--porcelain=v1", "-z",
-                          "--untracked-files=all"], capture_output=True, check=False)
+                          "--untracked-files=all"], capture_output=True, check=False,
+                         timeout=timeout_seconds)
     if raw.returncode:
-        raise RuntimeError("GIT_STATUS_FAILED")
+        raise RuntimeError("GIT_STATUS_FAILED: " + raw.stderr.decode("utf-8", "replace").strip())
     entries = raw.stdout.split(b"\x00")
     result: list[str] = []
     index = 0
@@ -91,11 +92,7 @@ def _write(path: Path, data: bytes) -> None:
 def _observe_usage(data: bytes, executor: str) -> dict[str, int] | None:
     """Only provider-reported exact, nonnegative counters; unknown stays unknown."""
     candidates: list[dict[str, Any]] = []
-    for line in data.decode("utf-8", errors="replace").splitlines():
-        try:
-            obj = json.loads(line)
-        except (ValueError, TypeError):
-            continue
+    for obj in _provider_events(data) or []:
         if isinstance(obj, dict):
             if executor == "codex" and obj.get("type") == "turn.completed":
                 candidates.append(obj.get("usage", {}))
@@ -117,12 +114,8 @@ def _headless_denied_actions(data: bytes, executor: str) -> list[str]:
     if executor != "antigravity":
         return []
     denied: set[str] = set()
-    for line in data.decode("utf-8", "replace").splitlines():
-        try:
-            value = json.loads(line)
-        except (ValueError, TypeError):
-            continue
-        if not isinstance(value, dict) or not isinstance(value.get("denied_actions"), list):
+    for value in _provider_events(data) or []:
+        if not isinstance(value.get("denied_actions"), list):
             continue
         for item in value["denied_actions"]:
             action = item.get("action") if isinstance(item, dict) else None
@@ -171,7 +164,7 @@ def _run_codex_with_live_event_mirror(command: list[str], *,
         target=drain, args=(proc.stderr, stderr_parts, None), daemon=True)
     out_reader.start()
     err_reader.start()
-    try:
+    def feed_input():
         try:
             if stdin_text is not None:
                 proc.stdin.write(stdin_text)
@@ -185,6 +178,11 @@ def _run_codex_with_live_event_mirror(command: list[str], *,
                 proc.stdin.close()
             except (BrokenPipeError, OSError):
                 pass
+    # Repair feedback can exceed a pipe buffer. Writing it on the supervisor
+    # thread would postpone the timeout indefinitely if the CLI stops reading.
+    input_writer = threading.Thread(target=feed_input, daemon=True)
+    input_writer.start()
+    try:
         try:
             proc.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
@@ -194,189 +192,518 @@ def _run_codex_with_live_event_mirror(command: list[str], *,
                 cmd=command, timeout=timeout_seconds,
                 output="".join(stdout_parts), stderr="".join(stderr_parts))
     finally:
+        input_writer.join(timeout=5)
         out_reader.join(timeout=5)
         err_reader.join(timeout=5)
-    if capture_errors or out_reader.is_alive() or err_reader.is_alive():
+    if capture_errors or input_writer.is_alive() or out_reader.is_alive() or err_reader.is_alive():
         raise RuntimeError("CODEX_LIVE_EVENT_MIRROR_UNCONFIRMED")
     return subprocess.CompletedProcess(
         args=command, returncode=proc.returncode,
         stdout="".join(stdout_parts), stderr="".join(stderr_parts))
 
+DEFAULT_MAX_REPAIR_ROUNDS = 2
+MAX_REPAIR_ROUNDS = 5
+DEFAULT_ACTION_TIMEOUT_SECONDS = 7200
+MAX_TIMEOUT_SECONDS = 86400
+# Stay below cmd.exe's limit too: AGY may be installed as a Windows .cmd shim.
+AGY_COMMANDLINE_MAX_UNITS = 8000
+
+
+def validate_max_repair_rounds(value: int) -> int:
+    if type(value) is not int or not 0 <= value <= MAX_REPAIR_ROUNDS:
+        raise ValueError(f"max_repair_rounds must be an integer from 0 to {MAX_REPAIR_ROUNDS}")
+    return value
+
+
+def _json_bytes(value: Any) -> bytes:
+    return (json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _remaining(deadline: float, limit: float = 30) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("ACTION_TIME_BUDGET_EXHAUSTED")
+    return min(limit, remaining)
+
+
+def _snapshot(repo: Path, prefixes: Sequence[str], deadline: float) -> tuple[dict, bytes]:
+    head = _git(repo, "rev-parse", "HEAD", timeout_seconds=_remaining(deadline))
+    identity = _git(repo, "rev-parse", "--absolute-git-dir", timeout_seconds=_remaining(deadline))
+    if head.returncode or identity.returncode:
+        raise RuntimeError("GIT_SOURCE_UNAVAILABLE")
+    changed = _changes(repo, timeout_seconds=_remaining(deadline))
+    diff = subprocess.run(["git", "-C", str(repo), "diff", "--binary", head.stdout.strip()],
+                          capture_output=True, check=False, timeout=_remaining(deadline))
+    if diff.returncode:
+        raise RuntimeError("GIT_DIFF_FAILED")
+    confirmed = _git(repo, "rev-parse", "HEAD", timeout_seconds=_remaining(deadline))
+    if confirmed.returncode or confirmed.stdout != head.stdout:
+        raise RuntimeError("GIT_SOURCE_CHANGED_DURING_SNAPSHOT")
+    return {
+        "git_head_after": head.stdout.strip(), "git_dir": identity.stdout.strip(),
+        "changed_files": changed, "candidate_file_sha256": _candidate_hashes(repo, changed),
+        "tracked_diff_sha256": _sha(diff.stdout), "scope_valid": _safe_scope(changed, prefixes),
+    }, diff.stdout
+
+
+def _source_problem(snapshot: dict, initial: dict) -> tuple[str, str] | None:
+    if snapshot["git_head_after"] != initial["git_head_after"]:
+        return "GIT_UNEXPECTED_COMMIT", "GIT_HEAD_CHANGED"
+    if snapshot["git_dir"] != initial["git_dir"]:
+        return "SOURCE_DRIFT", "GIT_WORKTREE_IDENTITY_CHANGED"
+    if not snapshot["scope_valid"]:
+        return "SCOPE_VIOLATION", "CHANGES_OUTSIDE_ALLOWED_SCOPE"
+    return None
+
+
+def _provider_problem(data: bytes) -> tuple[str, str] | None:
+    """Fail closed on explicit CLI errors even when a wrapper exits zero."""
+    message = data.decode("utf-8", "replace").lower()
+    for phrases, status in (
+        (("model is at capacity", "no capacity available"), "MODEL_AT_CAPACITY"),
+        (("resource_exhausted", "quota exceeded", "quota reached", "429 too many requests"), "QUOTA_EXHAUSTED"),
+        (("model_not_found", "model is not supported", "unknown model"), "MODEL_UNSUPPORTED"),
+        (("model unavailable", "service unavailable"), "EXECUTOR_UNAVAILABLE"),
+        (("permission denied", "permissionerror", "approval denied", "approval required", "requires approval", "auto-denied", "operation not permitted"), "EXECUTOR_PERMISSION_DENIED"),
+    ):
+        if any(phrase in message for phrase in phrases):
+            return status, status
+    for event in _provider_events(data) or []:
+        if (event.get("type") in ("turn.failed", "error") or
+                str(event.get("status", "")).lower() in ("error", "failed", "failure") or event.get("error")):
+            return "EXECUTION_UNKNOWN", "EXECUTOR_OUTCOME_UNCONFIRMED"
+    return None
+
+
+
+def _provider_events(data: bytes, *, require_complete: bool = False) -> list[dict] | None:
+    """Read JSON/JSONL evidence; completion requires an entirely valid stream."""
+    message = data.decode("utf-8", "replace").strip()
+    if not message:
+        return None
+    try:
+        event = json.loads(message)
+    except ValueError:
+        events = []
+        for line in message.splitlines():
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                if require_complete:
+                    return None
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+            elif require_complete:
+                return None
+    else:
+        events = [event]
+    return events if events and all(isinstance(event, dict) for event in events) else None
+
+
+def _provider_completed(data: bytes, executor: str) -> bool:
+    events = _provider_events(data, require_complete=True)
+    if not events:
+        return False
+    turns = [event for event in events if event.get("type") in (
+        "turn.started", "turn.completed", "turn.failed", "error")]
+    if turns and turns[-1].get("type") == "turn.completed":
+        return True
+    return executor == "antigravity" and events[-1].get("status") == "SUCCESS"
+
+
+def _verify_infrastructure_failure(stdout: bytes, stderr: bytes) -> bool:
+    messages = (stdout + b"\n" + stderr).decode("utf-8", "replace").lower()
+    return bool(_provider_problem(stdout + b"\n" + stderr) or any(
+        text in messages for text in (
+            "no module named pytest", "0xc0000142", "3221225794", "-1073741502",
+            "[winerror 1920]", "subprocess.timeoutexpired")))
+
+
+def _windows_command_units(command: Sequence[str]) -> int:
+    # Count quoted argv in Windows UTF-16 code units, including the terminating NUL.
+    return len(list2cmdline(command).encode("utf-16-le")) // 2 + 1
+
+
+def _pytest_failure(argv: Sequence[str], code: int | None, stdout: bytes, stderr: bytes) -> bool:
+    # Pytest: 1 = test failure; 2/3/4/5 = interruption/internal/usage/no tests.
+    # Arbitrary CLI nonzero exits never authorize another provider invocation.
+    diagnostics = (stdout + b"\n" + stderr).decode("utf-8", "replace")
+    return bool(_is_pytest(argv) and code == 1 and
+                re.search(r"(?m)^FAILED\s|^=+ FAILURES =+|\b[1-9][0-9]* failed\b", diagnostics))
+
+
+def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
+                    initial: dict, expected: dict, selection: ExecutorSelection,
+                    prompt: str, feedback: dict | None, verify_argv: Sequence[str],
+                    allowed_prefixes: Sequence[str], deadline: float,
+                    timeout_seconds: int, verify_timeout_seconds: int,
+                    codex_bin: str, antigravity_bin: str,
+                    codex_windows_sandbox: str | None) -> None:
+    inv = invocation
+    directory = output_dir / inv["evidence_dir"]
+    directory.mkdir(parents=True, exist_ok=False)
+
+    def save(key: str, name: str, data: bytes) -> None:
+        _write(directory / name, data)
+        inv["evidence_files"][key] = (directory / name).relative_to(output_dir).as_posix()
+        inv["evidence_sha256"][key] = _sha(data)
+        # Preserve the pre-loop EF01 boundary/log locations for M0-R consumers.
+        # These are immutable copies of the FIRST invocation, never last-round overwrites.
+        if inv["repair_round"] == 0:
+            _write(output_dir / name, data)
+
+    save("instruction", "instruction.txt", prompt.encode("utf-8"))
+    if feedback is not None:
+        save("repair_feedback", "repair_feedback.json", _json_bytes(feedback))
+    before, _ = _snapshot(repo, allowed_prefixes, deadline)
+    inv["input_snapshot"] = before
+    save("source_before", "source.before.json", _json_bytes(before))
+    problem = _source_problem(before, initial)
+    if problem or before != expected:
+        status, error = problem or ("SOURCE_DRIFT", "WORKTREE_CHANGED_BETWEEN_INVOCATIONS")
+        inv.update(status=status, error_code=error)
+        return
+    command, stdin = command_for(selection, repo, prompt, codex_bin=codex_bin,
+                                 antigravity_bin=antigravity_bin,
+                                 codex_windows_sandbox=codex_windows_sandbox)
+    if selection.executor == "antigravity" and _windows_command_units(command) > AGY_COMMANDLINE_MAX_UNITS:
+        # Preserve the complete original instruction/feedback on disk. Shorten only
+        # the transported --print argument; never truncate recorded diagnostics.
+        compact = (
+            "Read and follow the complete authorized instruction file "
+            + str(directory / "instruction.txt") + " (UTF-8; SHA256 "
+            + _sha(prompt.encode("utf-8")) + "). "
+            "Keep the same worktree, source HEAD, executor/model/effort and allowed scope. "
+            "This file contains the full original request and any repair evidence references."
+        )
+        command = list(command)
+        if "--print" not in command:
+            raise ValueError("AGY_COMMANDLINE_UNSUPPORTED")
+        command[command.index("--print") + 1] = compact
+        if _windows_command_units(command) > AGY_COMMANDLINE_MAX_UNITS:
+            raise ValueError("AGY_COMMANDLINE_LIMIT_EXCEEDED")
+        save("transport_instruction", "transport_instruction.txt", compact.encode("utf-8"))
+    budget = _remaining(deadline, timeout_seconds)
+    boundary = {
+        "kind": "AI_COMMERCE_EF01_PROVIDER_BOUNDARY", "version": 1,
+        "work_id": inv["work_id"], "attempt_id": inv["attempt_id"],
+        "invocation_id": inv["invocation_id"], "recorded_at": _now(),
+        "stage": "BEFORE_EXECUTOR_SUBPROCESS", "status": "EXECUTION_UNKNOWN",
+        "executor_process_return_observed": False, "provider_invocation_proven": False,
+        "provider_effects_reconciled": False, "replay_authorized": False,
+    }
+    save("provider_boundary", "provider_boundary.json", _json_bytes(boundary))
+    inv.update(status="EXECUTION_UNKNOWN", executor_invoked=True, executor_started_at=_now(),
+               executor_timeout_seconds=budget)
+    out, err = b"", b""
+    live = None
+    try:
+        if selection.executor == "codex" and os.environ.get("AI_COMMERCE_EF01_CODEX_STREAM_EVENTS") == "1":
+            live = (output_dir if inv["repair_round"] == 0 else directory) / "executor.stdout.live.jsonl"
+            process = _run_codex_with_live_event_mirror(
+                command, repo=repo, stdin_text=stdin, timeout_seconds=budget, live_path=live)
+        else:
+            process = subprocess.run(command, cwd=repo, input=stdin, capture_output=True,
+                                     text=True, encoding="utf-8", errors="replace",
+                                     timeout=budget, check=False)
+        inv.update(status="EXECUTOR_RETURNED_UNVERIFIED", executor_exit_code=process.returncode)
+        out, err = process.stdout.encode("utf-8"), process.stderr.encode("utf-8")
+        save("provider_return_observed", "provider_return_observed.json", _json_bytes({
+            **boundary, "stage": "EXECUTOR_SUBPROCESS_RETURNED", "recorded_at": _now(),
+            "executor_process_return_observed": True, "executor_exit_code": process.returncode,
+        }))
+        if process.returncode:
+            inv.update(status="EXECUTOR_FAILED", error_code="EXECUTOR_NONZERO")
+            if process.returncode < 0 or process.returncode >= 128:
+                inv.update(status="EXECUTION_UNKNOWN", error_code="EXECUTOR_INTERRUPTED")
+    except FileNotFoundError as exc:
+        err = str(exc).encode("utf-8")
+        inv.update(status="EXECUTOR_UNAVAILABLE", error_code="EXECUTOR_BINARY_MISSING",
+                   executor_invoked=False)
+    except subprocess.TimeoutExpired as exc:
+        out, err = _stream_bytes(exc.stdout), _stream_bytes(exc.stderr)
+        inv.update(status="EXECUTION_UNKNOWN", error_code="EXECUTOR_TIMEOUT")
+        save("provider_timeout", "provider_timeout.json", _json_bytes({
+            **boundary, "stage": "EXECUTOR_TIMEOUT_OBSERVED", "recorded_at": _now(),
+            "error_code": "EXECUTOR_TIMEOUT",
+        }))
+    except PermissionError as exc:
+        err = str(exc).encode("utf-8")
+        inv.update(status="EXECUTOR_PERMISSION_DENIED", error_code="EXECUTOR_PERMISSION_DENIED")
+    finally:
+        inv["executor_finished_at"] = _now()
+        save("executor_stdout", "executor.stdout.log", out)
+        save("executor_stderr", "executor.stderr.log", err)
+        if live is not None and live.exists():
+            data = live.read_bytes()
+            if live.parent != directory:
+                _write(directory / live.name, data)
+            inv["evidence_files"]["executor_stdout_live"] = (directory / live.name).relative_to(output_dir).as_posix()
+            inv["evidence_sha256"]["executor_stdout_live"] = _sha(data)
+    inv["denied_actions"] = _headless_denied_actions(out, selection.executor)
+    inv["provider_return_determinate"] = _provider_completed(out, selection.executor)
+    usage = _observe_usage(out, selection.executor)
+    if usage is not None:
+        inv.update(usage=usage, usage_status="PROVIDER_REPORTED")
+    after, diff = _snapshot(repo, allowed_prefixes, deadline)
+    inv.update(after)
+    inv["final_snapshot"] = after
+    save("source_after_executor", "source.after_executor.json", _json_bytes(after))
+    save("executor_diff", "git.after_executor.diff.patch", diff)
+    # Even a provider failure gets a scoped snapshot and cumulative diff.
+    save("tracked_diff", "git.tracked.diff.patch", diff)
+    if inv["status"] != "EXECUTOR_RETURNED_UNVERIFIED":
+        return
+    problem = _source_problem(after, initial)
+    if problem is None and inv["denied_actions"]:
+        problem = ("EXECUTOR_PERMISSION_DENIED", "HEADLESS_TOOL_PERMISSION_DENIED")
+    if problem is None:
+        problem = _provider_problem(out + b"\n" + err)
+    if problem:
+        inv.update(status=problem[0], error_code=problem[1])
+        return
+    if not after["changed_files"] or after == before:
+        inv.update(status="NO_CODE_CHANGE",
+                   error_code="REPAIR_NO_CODE_CHANGE" if inv["repair_round"] else "NO_CHANGED_FILES")
+        return
+
+    inv.update(status="EXECUTION_UNKNOWN", verify_started_at=_now())
+    vout, verr = b"", b""
+    try:
+        inv["verify_timeout_seconds"] = _remaining(deadline, verify_timeout_seconds)
+        check = subprocess.run(list(verify_argv), cwd=repo, capture_output=True,
+                               text=True, encoding="utf-8", errors="replace",
+                               timeout=inv["verify_timeout_seconds"], check=False)
+        inv.update(verify_exit_code=check.returncode, verify_completed=True)
+        vout, verr = check.stdout.encode("utf-8"), check.stderr.encode("utf-8")
+        inv.update(status="VERIFICATION_FAILED", error_code="TARGETED_VERIFY_NONZERO_OR_UNAVAILABLE")
+        if check.returncode < 0 or check.returncode >= 128 or (
+                _is_pytest(verify_argv) and check.returncode in (2, 3)):
+            inv.update(status="EXECUTION_UNKNOWN", error_code="VERIFY_INTERRUPTED_OR_INTERNAL_ERROR")
+    except FileNotFoundError as exc:
+        inv.update(status="VERIFICATION_FAILED", error_code="VERIFICATION_TOOL_MISSING",
+                   verify_diagnostic=str(exc))
+    except subprocess.TimeoutExpired as exc:
+        vout, verr = _stream_bytes(exc.stdout), _stream_bytes(exc.stderr)
+        inv.update(status="EXECUTION_UNKNOWN", error_code="VERIFY_TIMEOUT",
+                   verify_diagnostic=str(exc))
+    except PermissionError as exc:
+        inv.update(status="VERIFICATION_FAILED", error_code="VERIFY_PERMISSION_DENIED",
+                   verify_diagnostic=str(exc))
+    finally:
+        inv["verify_finished_at"] = _now()
+        save("verify_stdout", "verify.stdout.log", vout)
+        save("verify_stderr", "verify.stderr.log", verr)
+    # Available traceback/summary excerpts are inline; full logs and hashes remain referenced.
+    inv["verify_failure_details"] = (vout + b"\n" + verr).decode("utf-8", "replace")[-24000:]
+    final, diff = _snapshot(repo, allowed_prefixes, deadline)
+    inv.update(final)
+    inv["final_snapshot"] = final
+    save("source_after_verify", "source.after_verify.json", _json_bytes(final))
+    save("verify_diff", "git.after_verify.diff.patch", diff)
+    inv["evidence_files"]["tracked_diff"] = inv["evidence_files"]["verify_diff"]
+    inv["evidence_sha256"]["tracked_diff"] = inv["evidence_sha256"]["verify_diff"]
+    problem = _source_problem(final, initial)
+    if problem:
+        inv.update(status=problem[0], error_code=problem[1] + "_AFTER_VERIFY")
+    elif not final["changed_files"]:
+        inv.update(status="NO_CODE_CHANGE", error_code="NO_CHANGED_FILES_AFTER_VERIFY")
+    elif final != after:
+        inv.update(status="SOURCE_DRIFT", error_code="VERIFY_CHANGED_SOURCE")
+    elif inv["verify_completed"] and inv["status"] != "EXECUTION_UNKNOWN":
+        messages = (vout + b"\n" + verr).decode("utf-8", "replace").lower()
+        infrastructure = _verify_infrastructure_failure(vout, verr)
+        if "no module named pytest" in messages:
+            inv.update(status="VERIFICATION_FAILED", error_code="VERIFICATION_TOOL_MISSING")
+        elif infrastructure:
+            inv.update(status="VERIFICATION_FAILED", error_code="VERIFY_INFRASTRUCTURE_ERROR")
+        elif not inv["provider_return_determinate"]:
+            # A verifier success cannot reconcile an incomplete provider return.
+            inv.update(status="EXECUTION_UNKNOWN", error_code="EXECUTOR_OUTCOME_UNCONFIRMED")
+        elif inv["verify_exit_code"] == 0:
+            inv.update(status="BUILD_VERIFIED_FOR_SCOPE", error_code=None)
+        else:
+            inv["repair_eligible"] = _pytest_failure(
+                list(verify_argv), inv["verify_exit_code"], vout, verr)
+
+
+def _stream_bytes(value: bytes | str | None) -> bytes:
+    return value if isinstance(value, bytes) else (value or "").encode("utf-8")
+
+
+def _is_pytest(argv: Sequence[str]) -> bool:
+    executable = Path(argv[0]).name.lower()
+    return (list(argv[1:3]) == ["-m", "pytest"] and
+            (executable.startswith("python") or executable in ("py", "py.exe"))) or (
+                executable in ("pytest", "pytest.exe"))
+
+
+
+def _repair_prompt(instruction: str, feedback: dict, feedback_file: str) -> str:
+    """Keep AGY's Windows --print argument small; full diagnostics stay on disk."""
+    previous = feedback["previous_invocations"]
+    latest = previous[-1]
+    keys = ("verify_stdout", "verify_stderr", "tracked_diff", "source_after_verify")
+    inline = {key: feedback[key] for key in (
+        "source_base_sha", "repo", "work_id", "attempt_id", "repair_round",
+        "max_repair_rounds", "allowed_prefixes", "verify_argv", "evidence_root")}
+    inline.update(
+        repair_feedback_file=feedback_file,
+        repair_feedback_sha256=_sha(_json_bytes(feedback)),
+        verify_exit_code=latest["verify_exit_code"],
+        failure_excerpt=latest.get("verify_failure_details", "")[-4000:],
+        latest_artifacts={key: latest["evidence_files"][key] for key in keys},
+        latest_artifact_sha256={key: latest["evidence_sha256"][key] for key in keys},
+        previous_rounds=[{
+            "invocation_id": item["invocation_id"], "status": item["status"],
+            "error_code": item["error_code"], "verify_exit_code": item["verify_exit_code"],
+            "result_file": item["result_file"], "result_sha256": _sha(_json_bytes(item)),
+        } for item in previous],
+    )
+    return instruction + (
+        "\n\nRepair the determinate scoped pytest failure on this SAME worktree. "
+        "Preserve cumulative changes and the original HEAD; stay within the allowed scope. "
+        "This is a fresh CLI invocation; no vendor session continuity is assumed. "
+        "Read the full feedback, source snapshot (changed paths/hashes), logs and diffs "
+        "referenced relative to evidence_root. Earlier round diagnostics remain in those artifacts.\n"
+        + json.dumps(inline, ensure_ascii=False, sort_keys=True))
+
+
 def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: str,
                     selection: ExecutorSelection, instruction: str,
                     verify_argv: Sequence[str], allowed_prefixes: Sequence[str] = (),
                     timeout_seconds: int = 7200, verify_timeout_seconds: int = 1800,
+                    max_repair_rounds: int = DEFAULT_MAX_REPAIR_ROUNDS,
+                    action_timeout_seconds: int = DEFAULT_ACTION_TIMEOUT_SECONDS,
                     codex_bin: str = "codex", antigravity_bin: str = "agy",
                     codex_windows_sandbox: str | None = None) -> dict[str, Any]:
-    """Execute exactly one selected provider and one targeted verification command.
+    """One attempt on an initially clean tree, with bounded same-profile repairs.
 
-    Does not create commits, push, dispatch, retry, or switch providers.
-    The output directory must be ignored/outside the repo to preserve Git attribution.
+    Only a completed scoped pytest code failure permits repair. Each CLI call is
+    independent; no vendor session continuation is assumed. No commits or push.
     """
-    repo = repo.resolve()
-    output_dir = output_dir.resolve()
+    validate_max_repair_rounds(max_repair_rounds)
+    for value in (timeout_seconds, verify_timeout_seconds, action_timeout_seconds):
+        if type(value) is not int or not 1 <= value <= MAX_TIMEOUT_SECONDS:
+            raise ValueError(f"Timeouts must be integers from 1 to {MAX_TIMEOUT_SECONDS}")
+    deadline = time.monotonic() + action_timeout_seconds
+    repo, output_dir = repo.resolve(), output_dir.resolve()
     if not work_id.strip() or not attempt_id.strip():
         raise ValueError("work_id and attempt_id must be nonempty")
     if not instruction.strip() or not verify_argv or not all(isinstance(x, str) and x for x in verify_argv):
         raise ValueError("Nonempty instruction and argv-array verification are required")
-    if timeout_seconds < 1 or verify_timeout_seconds < 1:
-        raise ValueError("Timeouts must be positive")
     if output_dir == repo or repo in output_dir.parents and ".local" not in output_dir.relative_to(repo).parts:
         raise ValueError("Output dir within repo must be under ignored .local/")
     if output_dir.exists():
         raise FileExistsError("EVIDENCE_EXISTS: choose a new attempt/output folder")
-    head = _git(repo, "rev-parse", "HEAD")
-    if head.returncode:
-        raise ValueError("Not a Git repository with HEAD: " + head.stderr.strip())
-    if _changes(repo):
+    initial, _ = _snapshot(repo, allowed_prefixes, deadline)
+    if initial["changed_files"]:
         raise ValueError("WORKTREE_DIRTY: commit/stash existing changes before attempt")
-
-    command, stdin = command_for(selection, repo, instruction,
-                                 codex_bin=codex_bin, antigravity_bin=antigravity_bin,
-                                 codex_windows_sandbox=codex_windows_sandbox)
+    command_for(selection, repo, instruction, codex_bin=codex_bin,
+                antigravity_bin=antigravity_bin, codex_windows_sandbox=codex_windows_sandbox)
     report: dict[str, Any] = {
         "kind": "AI_COMMERCE_ENGINEERING_RESULT", "version": 1,
         "work_id": work_id, "attempt_id": attempt_id, "started_at": _now(),
         "executor": selection.executor, "model": selection.model, "reasoning_effort": selection.effort,
         "selection_source": "HUMAN_EXPLICIT",
         "sandbox_backend": codex_windows_sandbox or "executor-default",
-        "sandbox_policy": "workspace-write" if selection.executor == "codex" else "accept-edits", "source_base_sha": head.stdout.strip(),
+        "sandbox_policy": "workspace-write" if selection.executor == "codex" else "accept-edits",
+        "source_base_sha": initial["git_head_after"], "repo": str(repo),
         "instruction_sha256": _sha(instruction.encode("utf-8")),
-        "repo": str(repo), "status": "NOT_STARTED", "error_code": None,
-        "executor_invoked": False, "executor_exit_code": None,
-        "verify_argv": list(verify_argv), "verify_exit_code": None,
+        "status": "NOT_STARTED", "error_code": None, "executor_invoked": False,
+        "executor_exit_code": None, "verify_argv": list(verify_argv), "verify_exit_code": None,
         "changed_files": [], "candidate_file_sha256": {}, "tracked_diff_sha256": None,
-        "scope_valid": None, "git_head_after": None,
+        "scope_valid": None, "git_head_after": None, "denied_actions": [],
         "usage": None, "usage_status": "UNKNOWN", "cost": None, "cost_status": "UNKNOWN",
         "evidence_files": {}, "git_delivery": "LOCAL_DIFF_ONLY_NO_COMMIT_NO_PUSH",
-        "live_provider_confirmed": False,
+        "live_provider_confirmed": False, "replay_authorized": False,
+        "max_repair_rounds": max_repair_rounds, "action_timeout_seconds": action_timeout_seconds,
+        "timeout_seconds": timeout_seconds, "verify_timeout_seconds": verify_timeout_seconds,
+        "allowed_prefixes": list(allowed_prefixes),
+        "invocations": [], "repair_rounds_used": 0, "stop_reason": None,
     }
     output_dir.mkdir(parents=True, exist_ok=False)
+    expected = initial
     try:
-        # Before subprocess.run, preserve a fail-closed local boundary.
-        # A CLI process may have externally visible effects even if the parent
-        # dies before a return code or provider receipt can be observed.
-        boundary = {"kind": "AI_COMMERCE_EF01_PROVIDER_BOUNDARY", "version": 1,
-                    "work_id": work_id, "attempt_id": attempt_id,
-                    "stage": "BEFORE_EXECUTOR_SUBPROCESS",
-                    "status": "EXECUTION_UNKNOWN",
-                    "executor_process_return_observed": False,
-                    "provider_invocation_proven": False,
-                    "provider_effects_reconciled": False,
-                    "replay_authorized": False}
-        _write(output_dir / "provider_boundary.json",
-               (json.dumps(boundary, sort_keys=True) + "\n").encode("utf-8"))
-        report["evidence_files"]["provider_boundary"] = "provider_boundary.json"
-        report.update(status="EXECUTION_UNKNOWN", executor_invoked=True)
-        try:
-            if (selection.executor == "codex" and
-                    os.environ.get("AI_COMMERCE_EF01_CODEX_STREAM_EVENTS") == "1"):
-                live = output_dir / "executor.stdout.live.jsonl"
-                p = _run_codex_with_live_event_mirror(
-                    command, repo=repo, stdin_text=stdin,
-                    timeout_seconds=timeout_seconds, live_path=live)
-                report["evidence_files"]["executor_stdout_live"] = live.name
-            else:
-                p = subprocess.run(command, cwd=repo, input=stdin, capture_output=True,
-                                   text=True, encoding="utf-8", errors="replace",
-                                   timeout=timeout_seconds, check=False)
-            # The supervisor observed the CLI process return. Its exit code
-            # alone is not a verified model outcome; continue through the
-            # normal scope and verification checks before any PASS decision.
-            report.update(status="EXECUTOR_RETURNED_UNVERIFIED",
-                          executor_exit_code=p.returncode)
-            out, err = p.stdout.encode("utf-8"), p.stderr.encode("utf-8")
-            # Process exit is observable; provider-side effects and verification
-            # are still not proven by a CLI exit code alone.
-            _write(output_dir / "provider_return_observed.json",
-                   (json.dumps({**boundary, "stage": "EXECUTOR_SUBPROCESS_RETURNED",
-                     "executor_process_return_observed": True,
-                     "executor_exit_code": p.returncode}, sort_keys=True) + "\n").encode("utf-8"))
-            report["evidence_files"]["provider_return_observed"] = "provider_return_observed.json"
-        except FileNotFoundError as exc:
-            out, err = b"", str(exc).encode("utf-8")
-            report.update(status="EXECUTOR_UNAVAILABLE", error_code="EXECUTOR_BINARY_MISSING",
-                          executor_invoked=False)
-        except subprocess.TimeoutExpired as exc:
-            out = (exc.stdout or b"") if isinstance(exc.stdout, bytes) else (exc.stdout or "").encode("utf-8")
-            err = (exc.stderr or b"") if isinstance(exc.stderr, bytes) else (exc.stderr or "").encode("utf-8")
-            # External provider effects cannot be reversed/inferred from timeout.
-            report.update(status="EXECUTION_UNKNOWN", error_code="EXECUTOR_TIMEOUT",
-                          replay_authorized=False)
-            _write(output_dir / "provider_timeout.json",
-                   (json.dumps({**boundary, "stage": "EXECUTOR_TIMEOUT_OBSERVED",
-                     "error_code": "EXECUTOR_TIMEOUT"}, sort_keys=True) + "\n").encode("utf-8"))
-            report["evidence_files"]["provider_timeout"] = "provider_timeout.json"
-        _write(output_dir / "executor.stdout.log", out)
-        _write(output_dir / "executor.stderr.log", err)
-        report["evidence_files"].update(executor_stdout="executor.stdout.log", executor_stderr="executor.stderr.log")
-        denied_actions = _headless_denied_actions(out, selection.executor)
-        report["denied_actions"] = denied_actions
-        usage = _observe_usage(out, selection.executor)
-        if usage is not None:
-            report.update(usage=usage, usage_status="PROVIDER_REPORTED")
-        changed = _changes(repo)
-        report["changed_files"] = changed
-        report["candidate_file_sha256"] = _candidate_hashes(repo, changed)
-        report["scope_valid"] = _safe_scope(changed, allowed_prefixes)
-        report["git_head_after"] = _git(repo, "rev-parse", "HEAD").stdout.strip()
-        if report["status"] in ("EXECUTOR_UNAVAILABLE", "EXECUTOR_FAILED", "EXECUTION_UNKNOWN"):
-            return report
-        if report["executor_exit_code"] != 0:
-            report.update(status="EXECUTOR_FAILED", error_code="EXECUTOR_NONZERO")
-            return report
-        if report["git_head_after"] != report["source_base_sha"]:
-            report.update(status="GIT_UNEXPECTED_COMMIT", error_code="GIT_HEAD_CHANGED")
-            return report
-        if denied_actions:
-            report.update(status="EXECUTOR_PERMISSION_DENIED", error_code="HEADLESS_TOOL_PERMISSION_DENIED")
-            return report
-        if not changed:
-            report.update(status="NO_CODE_CHANGE", error_code="NO_CHANGED_FILES")
-            return report
-        if not report["scope_valid"]:
-            report.update(status="SCOPE_VIOLATION", error_code="CHANGES_OUTSIDE_ALLOWED_SCOPE")
-            return report
-        try:
-            check = subprocess.run(list(verify_argv), cwd=repo, capture_output=True,
-                                   text=True, encoding="utf-8", errors="replace",
-                                   timeout=verify_timeout_seconds, check=False)
-            report["verify_exit_code"] = check.returncode
-            vout, verr = check.stdout.encode("utf-8"), check.stderr.encode("utf-8")
-        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-            vout = (getattr(exc, "stdout", b"") or b"")
-            verr = str(exc).encode("utf-8")
-            if isinstance(vout, str):
-                vout = vout.encode("utf-8")
-        _write(output_dir / "verify.stdout.log", vout)
-        _write(output_dir / "verify.stderr.log", verr)
-        report["evidence_files"].update(verify_stdout="verify.stdout.log", verify_stderr="verify.stderr.log")
-        # Verification can itself mutate files: reconcile the final tree before PASS.
-        final_changed = _changes(repo)
-        report["changed_files"] = final_changed
-        report["candidate_file_sha256"] = _candidate_hashes(repo, final_changed)
-        report["scope_valid"] = _safe_scope(final_changed, allowed_prefixes)
-        report["git_head_after"] = _git(repo, "rev-parse", "HEAD").stdout.strip()
-        tracked_diff = subprocess.run(["git", "-C", str(repo), "diff", "--binary", "HEAD"],
-                                      capture_output=True, check=False)
-        if tracked_diff.returncode == 0:
-            _write(output_dir / "git.tracked.diff.patch", tracked_diff.stdout)
-            report["evidence_files"]["tracked_diff"] = "git.tracked.diff.patch"
-            report["tracked_diff_sha256"] = _sha(tracked_diff.stdout)
-        if report["git_head_after"] != report["source_base_sha"]:
-            report.update(status="GIT_UNEXPECTED_COMMIT", error_code="GIT_HEAD_CHANGED")
-        elif not report["scope_valid"]:
-            report.update(status="SCOPE_VIOLATION", error_code="CHANGES_OUTSIDE_ALLOWED_SCOPE_AFTER_VERIFY")
-        elif not final_changed:
-            # A verification command may undo the executor's only change.
-            # A zero exit code cannot turn an empty final diff into PASS.
-            report.update(status="NO_CODE_CHANGE", error_code="NO_CHANGED_FILES_AFTER_VERIFY")
-        else:
-            report.update(status="BUILD_VERIFIED_FOR_SCOPE" if report["verify_exit_code"] == 0 else "VERIFICATION_FAILED",
-                          error_code=None if report["verify_exit_code"] == 0 else "TARGETED_VERIFY_NONZERO_OR_UNAVAILABLE")
-        return report
+        for round_index in range(max_repair_rounds + 1):
+            inv = {
+                "work_id": work_id, "attempt_id": attempt_id,
+                "invocation_id": f"{attempt_id}:invocation-{round_index:03d}",
+                "repair_round": round_index, "evidence_dir": f"invocations/{round_index:03d}",
+                "executor": selection.executor, "model": selection.model,
+                "reasoning_effort": selection.effort, "source_base_sha": report["source_base_sha"],
+                "started_at": _now(), "status": "NOT_STARTED", "error_code": None,
+                "executor_invoked": False, "executor_exit_code": None,
+                "verify_argv": list(verify_argv), "verify_exit_code": None, "verify_completed": False,
+                "changed_files": [], "candidate_file_sha256": {}, "tracked_diff_sha256": None,
+                "scope_valid": None, "git_head_after": None, "denied_actions": [],
+                "usage": None, "usage_status": "UNKNOWN", "cost": None, "cost_status": "UNKNOWN",
+                "evidence_files": {}, "evidence_sha256": {}, "repair_eligible": False,
+                "replay_authorized": False, "provider_return_determinate": False,
+            }
+            feedback = None
+            prompt = instruction
+            if round_index:
+                feedback = {
+                    "source_base_sha": report["source_base_sha"], "repo": str(repo),
+                    "work_id": work_id, "attempt_id": attempt_id, "repair_round": round_index,
+                    "max_repair_rounds": max_repair_rounds, "allowed_prefixes": list(allowed_prefixes),
+                    "verify_argv": list(verify_argv), "evidence_root": str(output_dir),
+                    "previous_invocations": report["invocations"],
+                }
+                # Freeze prior rounds before appending the current mutable record.
+                feedback = json.loads(json.dumps(feedback))
+                prompt = _repair_prompt(instruction, feedback, inv["evidence_dir"] + "/repair_feedback.json")
+            inv["instruction_sha256"] = _sha(prompt.encode("utf-8"))
+            report["invocations"].append(inv)
+            try:
+                _run_invocation(
+                    repo=repo, output_dir=output_dir, invocation=inv, initial=initial, expected=expected,
+                    selection=selection, prompt=prompt, feedback=feedback, verify_argv=verify_argv,
+                    allowed_prefixes=allowed_prefixes, deadline=deadline, timeout_seconds=timeout_seconds,
+                    verify_timeout_seconds=verify_timeout_seconds, codex_bin=codex_bin,
+                    antigravity_bin=antigravity_bin, codex_windows_sandbox=codex_windows_sandbox)
+            except Exception as exc:
+                inv.update(status="EXECUTION_UNKNOWN",
+                           error_code="ACTION_TIMEOUT" if isinstance(exc, TimeoutError) else "RUNNER_ERROR",
+                           diagnostic=f"{type(exc).__name__}: {exc}", repair_eligible=False)
+            except BaseException:
+                inv.update(status="EXECUTION_UNKNOWN", error_code="RUNNER_INTERRUPTED", repair_eligible=False)
+                raise
+            finally:
+                inv["finished_at"] = _now()
+                inv["result_file"] = inv["evidence_dir"] + "/invocation_result.json"
+                for key in ("status", "error_code", "executor_exit_code", "verify_exit_code",
+                            "changed_files", "candidate_file_sha256", "tracked_diff_sha256",
+                            "scope_valid", "git_head_after", "denied_actions", "evidence_files"):
+                    report[key] = inv[key]
+                _write(output_dir / inv["result_file"], _json_bytes(inv))
+            if deadline <= time.monotonic():
+                report.update(status="EXECUTION_UNKNOWN", error_code="ACTION_TIMEOUT")
+                break
+            if not inv["repair_eligible"]:
+                report["stop_reason"] = inv["error_code"] or inv["status"]
+                break
+            if round_index == max_repair_rounds:
+                report["stop_reason"] = "REPAIR_ROUNDS_EXHAUSTED" if max_repair_rounds else "REPAIRS_DISABLED"
+                break
+            expected = inv["final_snapshot"]
+    except Exception as exc:
+        # Missing/failed evidence publication never authorizes the next round.
+        report.update(status="EXECUTION_UNKNOWN", error_code="EVIDENCE_WRITE_FAILED",
+                      diagnostic=f"{type(exc).__name__}: {exc}")
     finally:
+        invoked = [i for i in report["invocations"] if i["executor_invoked"]]
+        report["executor_invoked"] = bool(invoked)
+        report["invocation_count"] = len(invoked)
+        report["repair_rounds_used"] = sum(i["repair_round"] > 0 for i in invoked)
+        if invoked and all(i["usage"] is not None for i in invoked):
+            report.update(usage={key: sum(i["usage"][key] for i in invoked) for key in invoked[0]["usage"]},
+                          usage_status="PROVIDER_REPORTED")
+        report["stop_reason"] = report["stop_reason"] or report["error_code"] or report["status"]
         report["finished_at"] = _now()
-        # Snapshot at end of attempt, no publishing or remote side effects.
-        _write(output_dir / "engineering_result.json", json.dumps(report, indent=2, ensure_ascii=False,
-                                                                   sort_keys=True).encode("utf-8") + b"\n")
+        _write(output_dir / "engineering_result.json", _json_bytes(report))
+    return report

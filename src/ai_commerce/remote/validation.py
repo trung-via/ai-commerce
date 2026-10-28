@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path, PurePosixPath
 from jsonschema import Draft202012Validator
 from ai_commerce.engineering.profile import ExecutorSelection
+from ai_commerce.engineering.runner import validate_max_repair_rounds, DEFAULT_MAX_REPAIR_ROUNDS
 
 IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 HEX_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -65,6 +66,10 @@ def validate_batch(data: dict, *, schema: Path, registry: dict[str, list[str]],
     graph: dict[str, list[str]] = {}
     for action in data["actions"]:
         ExecutorSelection(action["executor"], action["model"], action["effort"])
+        try:
+            validate_max_repair_rounds(action.get("max_repair_rounds", DEFAULT_MAX_REPAIR_ROUNDS))
+        except ValueError as exc:
+            raise RemoteRequestError("INVALID_MAX_REPAIR_ROUNDS") from exc
         if action.get("reuse_candidate") is not None:
             if approved_reuse is None:
                 raise RemoteRequestError("REUSE_REGISTRY_REQUIRED")
