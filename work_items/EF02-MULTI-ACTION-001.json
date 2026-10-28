@@ -75,8 +75,8 @@
     "ef02_runtime": "SOURCE_IMPLEMENTED_GITHUB_CI_PASS",
     "ef02_windows_parallel_live": "PASS_TWO_REAL_OVERLAPPING_EF01_PROCESSES_94_SECONDS_RUN_40654797946",
     "ef02_github_remote": "LIVE_CONFIRMED_ISSUES_2_AND_3_AGY_FIRST_BATCH_CODEX_MXC_FOLLOWUP",
-    "m0_r": "OPEN_FIVE_OF_FIVE_LIVE_DAG_NOT_YET_PROVEN",
-    "ef02_ci": "PASS_WINDOWS_UBUNTU_RUN_40657420066_SHA_71b48d7e3fce8496afb40f9fc77fe53dc143c73a",
+    "m0_r": "OPEN_FULL_FIVE_OF_FIVE_DAG_NOT_YET_PROVEN",
+    "ef02_ci": "PASS_WINDOWS_UBUNTU_RUN_40662224719_SHA_b6e36043d984b8a9d2d090fdc8051e67f482b800",
     "windows_runner_registration": "VERIFIED_LIVE_JOB_40657572754",
     "ef02_windows_local_tests": "PASS_65_OF_65_2026_10_28_HUMAN_POWERSHELL_SCREENSHOT",
     "ef02_windows_local_tests_details": {
@@ -260,10 +260,34 @@
         "e": "BLOCKED_DEPENDENCY",
         "artifact_id": 12803712243
       },
-      "pending": "Need a full 5/5 DAG with fan-in and additional non-model negative cases; no model fallback, no blind re-dispatch of claimed IDs",
-      "false_positive_prevention": "EF02 reports PARTIAL_OR_FAILED and preserves artifacts; no candidate is merged to main"
+      "pending": "Still need five-of-five live DAG with fan-in and crash/offline/uncertainty tests; no automatic model substitution or blind retry.",
+      "false_positive_prevention": "EF02 reports PARTIAL_OR_FAILED and preserves artifacts; no candidate is merged to main",
+      "negative_duplicate_claim": {
+        "issue": 9,
+        "run": 40662448102,
+        "batch_id": "ef02-negative-duplicate-claim-20261028-01",
+        "attempt_id": "ef02-20261028-dag3-b-01",
+        "result": "EXPECTED_REJECTED",
+        "status": "ATTEMPT_ID_CONFLICT",
+        "executor_invoked": false,
+        "candidate_sha": null,
+        "model_calls": 0,
+        "artifact_id": 12804741975,
+        "feedback": "GITHUB_ISSUE_COMMENT_PUBLISHED",
+        "evidence_url": "https://github.com/trung-via/ai-commerce/actions/runs/40662448102",
+        "artifact_verified": true
+      },
+      "verified_process_overlap_dag3": {
+        "run": 40661368442,
+        "concurrent_early_actions": [
+          "ef02-dag3-a",
+          "ef02-dag3-b"
+        ],
+        "process_overlap_seconds_approx": 56.74,
+        "source": "verified batch_result.json process_started_at/process_finished_at"
+      }
     },
-    "model_capacity_classifier": "SOURCE_PATCHED_CI_PENDING"
+    "model_capacity_classifier": "CI_PASS_WINDOWS_UBUNTU_RUN_40662224719"
   },
   "expected_artifacts": [
     "contracts/RemoteActionBatch.v1.schema.json",
@@ -297,7 +321,11 @@
     "https://github.com/trung-via/ai-commerce/actions/runs/40660389111",
     "https://github.com/trung-via/ai-commerce/actions/runs/40660733630",
     "https://github.com/trung-via/ai-commerce/actions/runs/40661368442",
-    "https://github.com/trung-via/ai-commerce/issues/8"
+    "https://github.com/trung-via/ai-commerce/issues/8",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40662224719",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40662448102",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40662448102/artifacts/12804741975",
+    "https://github.com/trung-via/ai-commerce/issues/9"
   ],
   "dispatch_status": "LIVE_REMOTE_FEEDBACK_CONFIRMED_FULL_M0_R_OPEN",
   "human_override_ref": "User approved EF02 Multi-Action v1 and requested update for implementation, 2026-10-28",
@@ -308,7 +336,9 @@
     "Legacy Windows Codex sandbox remains unusable in Session 0 on this host; EF02 Windows Codex uses scoped MXC override, successfully live verified. AGY behavior unchanged.",
     "M0-R remains open: complete five-action multi-DAG and failure/unknown/quota/offline acceptance have not been demonstrated live.",
     "Codex selected model gpt-6.1-sol/max returned transient at-capacity before writing in DAG3 C, 2026-10-28; no automatic model switch/retry is authorized.",
-    "Two of three five-action live batches were blocked by provider tool permissions or model sandbox file_change behavior; the third by model capacity. DAG blocked dependents correctly, but complete 5/5 is NOT established."
+    "Two of three five-action live batches were blocked by provider tool permissions or model sandbox file_change behavior; the third by model capacity. DAG blocked dependents correctly, but complete 5/5 is NOT established.",
+    "Live negative duplicate attempt test confirmed ATTEMPT_ID_CONFLICT and executor_invoked=false; workflow failing is expected rejection.",
+    "Existing candidate refs for A/B/D cannot be passed as successful DAG prerequisites in a new batch through the current schema; full DAG reexecution would incur redundant model calls. Consider explicit candidate reuse across batches instead of blind 5-action retries."
   ],
   "plan_only_not_runtime": false
 }
