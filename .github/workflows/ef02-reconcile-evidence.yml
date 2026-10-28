@@ -1,0 +1,47 @@
+name: EF02 read-only reconciliation evidence
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/scripts/ef02-reconcile.cjs"
+      - ".github/workflows/ef02-reconcile-evidence.yml"
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  historical-refs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Read immutable GitHub claim and candidate refs from prior runs
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const reconcile = require('./.github/scripts/ef02-reconcile.cjs');
+            const inputs = {owner: context.repo.owner, repo: context.repo.repo};
+            const pass = await reconcile.reconcileIssue(github, {...inputs, issue_number: 3});
+            const original = pass.actions.find(x => x.attempt_id === 'ef02-20261028-codex-mxc-02');
+            if (pass.status !== 'READ_COMPLETE' || !original ||
+                original.claim !== 'CLAIM_REF_VERIFIED' ||
+                original.candidate !== 'CANDIDATE_REF_VERIFIED_NOT_RUN_PASS') {
+              core.setFailed('EF02_HISTORICAL_SUCCESS_REF_MISMATCH');
+              return;
+            }
+            const failed = await reconcile.reconcileIssue(github, {...inputs, issue_number: 8});
+            const claimed = failed.actions.find(x => x.attempt_id === 'ef02-20261028-dag3-c-01');
+            const blocked = failed.actions.find(x => x.attempt_id === 'ef02-20261028-dag3-e-01');
+            if (failed.status !== 'READ_COMPLETE' || !claimed || !blocked ||
+                claimed.claim !== 'CLAIM_REF_VERIFIED' ||
+                claimed.candidate !== 'NO_CANDIDATE_REF_OBSERVED' ||
+                blocked.claim !== 'NO_CLAIM_REF_OBSERVED' ||
+                blocked.candidate !== 'NO_CANDIDATE_REF_OBSERVED') {
+              core.setFailed('EF02_HISTORICAL_NEGATIVE_REF_MISMATCH');
+              return;
+            }
+            core.info('EF02_READ_ONLY_REAL_REFS_PASS: successful=1, claimed_failed=1, blocked=1');
+            core.info('No provider invocation, self-hosted runner, claim mutation or candidate publication.');

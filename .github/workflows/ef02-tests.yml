@@ -7,7 +7,9 @@ on:
       - "src/ai_commerce/engineering/**"
       - "tests/test_ef02*.py"
       - "tests/ef02-watch.test.cjs"
+      - "tests/ef02-reconcile.test.cjs"
       - ".github/scripts/ef02-watch.cjs"
+      - ".github/scripts/ef02-reconcile.cjs"
       - "tests/test_ef01.py"
       - ".github/workflows/ef02-tests.yml"
   pull_request:
@@ -17,7 +19,9 @@ on:
       - "tests/test_ef01.py"
       - "tests/test_ef02*.py"
       - "tests/ef02-watch.test.cjs"
+      - "tests/ef02-reconcile.test.cjs"
       - ".github/scripts/ef02-watch.cjs"
+      - ".github/scripts/ef02-reconcile.cjs"
       - ".github/workflows/ef02-*.yml"
       - "contracts/RemoteActionBatch.v1.schema.json"
 jobs:
@@ -37,4 +41,4 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: node --test tests/ef02-watch.test.cjs
+      - run: node --test tests/ef02-watch.test.cjs tests/ef02-reconcile.test.cjs
