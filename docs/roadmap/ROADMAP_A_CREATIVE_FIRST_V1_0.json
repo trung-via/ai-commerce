@@ -1,0 +1,375 @@
+{
+  "project": "AI Commerce",
+  "name": "Roadmap A — Creative-First",
+  "version": "1.0",
+  "status": "CANONICAL_PLAN",
+  "adopted_on": "2026-10-28",
+  "source": "Human-selected Roadmap A 2026-10-28; Work Tree v1.0 Library baseline; EF-01 dual-executor update 2026-10-28",
+  "repo": "trung-via/ai-commerce",
+  "governance": "v0.3",
+  "baseline_sha": "13266240558aaf1ec3c80e0dfc3fe89911908002",
+  "plan_note": "Preserves six selected stages and A01–A18 planning IDs; expanded package names/scope are canonical planning articulation, not tasks executed.",
+  "work_tree_ref": "docs/roadmap/WORK_TREE_V1_1.json",
+  "engineering_flow": {
+    "ef01": "Selective clone with manual Codex/Antigravity model/effort selection, optional recommendation, targeted verify, repair and honest token observations",
+    "ef02": "Independent GitHub/Windows wake and remote feedback; native continuation evidence separately required",
+    "dual_executor_in_phase_0": true,
+    "parallel_creative_allowed_while_ef02_pending": true
+  },
+  "stages": [
+    {
+      "phase": 0,
+      "title": "Engineering Foundation",
+      "milestones": [
+        "M0",
+        "M0-R"
+      ],
+      "packages": [
+        {
+          "id": "A01",
+          "title": "Project Bootstrap",
+          "work_ids": [
+            "G01",
+            "G02",
+            "G03",
+            "G06",
+            "G08"
+          ],
+          "depends_on": [],
+          "deliverable": "Independent repository skeleton, conventions, targeted tests and isolation",
+          "acceptance": "Clean local CLI/test foundation; compatible with separately approved selective AIOS code adoption",
+          "status": "PLANNED"
+        },
+        {
+          "id": "A02",
+          "title": "Contracts & Product Adapters",
+          "work_ids": [
+            "G04",
+            "G05",
+            "G07"
+          ],
+          "depends_on": [
+            "A01"
+          ],
+          "deliverable": "Typed contracts, evidence identity, mock product/provider adapters",
+          "acceptance": "Schemas validate valid/invalid data; mock produces traceable output",
+          "status": "PLANNED"
+        }
+      ],
+      "engineering_flow_work_ids": [
+        "EF01",
+        "EF02"
+      ]
+    },
+    {
+      "phase": 1,
+      "title": "Creative Factory",
+      "milestones": [
+        "M1"
+      ],
+      "packages": [
+        {
+          "id": "A03",
+          "title": "Freeform Brief & Creative Reasoner",
+          "work_ids": [
+            "C01",
+            "C02"
+          ],
+          "depends_on": [
+            "A02"
+          ],
+          "deliverable": "Editable content briefs and creative concept generation",
+          "acceptance": "Concept generation without required SKU, quota or mandatory storyboard",
+          "status": "PLANNED"
+        },
+        {
+          "id": "A04",
+          "title": "Media Sources & Local Operations",
+          "work_ids": [
+            "O01",
+            "O02",
+            "O03",
+            "O04",
+            "C04"
+          ],
+          "depends_on": [
+            "A02"
+          ],
+          "deliverable": "Local asset job/runner and media adapter",
+          "acceptance": "One mock or selected asset run with traceable logs; unknown remains unknown",
+          "status": "PLANNED"
+        },
+        {
+          "id": "A05",
+          "title": "Script, Scene & Video Render",
+          "work_ids": [
+            "C03",
+            "C06"
+          ],
+          "depends_on": [
+            "A03",
+            "A04"
+          ],
+          "deliverable": "Prompt/brief to reproducible video render",
+          "acceptance": "Playable MP4 with manifest and diagnostics",
+          "status": "PLANNED"
+        },
+        {
+          "id": "A06",
+          "title": "Offline Creative E2E",
+          "work_ids": [
+            "E01"
+          ],
+          "depends_on": [
+            "A05"
+          ],
+          "deliverable": "First end-to-end creative artifact",
+          "acceptance": "Usable video with traceable generation; no publish/account proof required",
+          "status": "PLANNED"
+        }
+      ]
+    },
+    {
+      "phase": 2,
+      "title": "Distribution, Audience & Opportunity",
+      "milestones": [
+        "M2",
+        "M3"
+      ],
+      "packages": [
+        {
+          "id": "A07",
+          "title": "Channel Capability Foundation",
+          "work_ids": [
+            "D01"
+          ],
+          "depends_on": [
+            "A02"
+          ],
+          "deliverable": "Account×surface capability truth registry",
+          "acceptance": "Permission UNKNOWN separate from allowed; no shared AIOS accounts",
+          "status": "PLANNED"
+        },
+        {
+          "id": "A08",
+          "title": "Assisted Distribution & Receipts",
+          "work_ids": [
+            "D02",
+            "D03",
+            "D04"
+          ],
+          "depends_on": [
+            "A06",
+            "A07"
+          ],
+          "deliverable": "Export package, assisted posting path, publication record",
+          "acceptance": "SUBMITTED, confirmed and PUBLIC states distinct; no fictional provider receipt",
+          "status": "PLANNED"
+        },
+        {
+          "id": "A09",
+          "title": "Audience Growth Observation",
+          "work_ids": [
+            "L01",
+            "L02",
+            "E02"
+          ],
+          "depends_on": [
+            "A08"
+          ],
+          "deliverable": "Audience loop with export/import path",
+          "acceptance": "Account-specific metrics imported when real; offline PARTIAL is honest",
+          "status": "PLANNED"
+        },
+        {
+          "id": "A10",
+          "title": "Opportunity & Audience Intelligence",
+          "work_ids": [
+            "M01",
+            "M02",
+            "M03",
+            "M04",
+            "M05"
+          ],
+          "depends_on": [
+            "A03"
+          ],
+          "deliverable": "Trend, audience and opportunity hypotheses into Creative",
+          "acceptance": "Snapshot distinguished from trend; content-only ideas possible",
+          "status": "PLANNED"
+        }
+      ]
+    },
+    {
+      "phase": 3,
+      "title": "Learning & Affiliate Commerce",
+      "milestones": [
+        "M4"
+      ],
+      "packages": [
+        {
+          "id": "A11",
+          "title": "Audience Learning Registry",
+          "work_ids": [
+            "L03",
+            "L06"
+          ],
+          "depends_on": [
+            "A09"
+          ],
+          "deliverable": "Observations and hypothesis learning",
+          "acceptance": "Metric window/source/version retained; correlation not asserted as causation",
+          "status": "PLANNED"
+        },
+        {
+          "id": "A12",
+          "title": "Product Evidence Foundation",
+          "work_ids": [
+            "P01",
+            "P03",
+            "P04",
+            "P05",
+            "P06"
+          ],
+          "depends_on": [
+            "A02"
+          ],
+          "deliverable": "Product facts/variants/asset-rights pack",
+          "acceptance": "Seller claims, verified facts and UNKNOWN rights separate",
+          "status": "PLANNED"
+        },
+        {
+          "id": "A13",
+          "title": "Affiliate Release Evidence",
+          "work_ids": [
+            "C08",
+            "C09",
+            "D06",
+            "E03"
+          ],
+          "depends_on": [
+            "A12",
+            "A07",
+            "A08"
+          ],
+          "deliverable": "Claim/rights and account×link eligibility release pack",
+          "acceptance": "Unknown eligibility blocks only actual commercial placement, not creative production",
+          "status": "PLANNED"
+        },
+        {
+          "id": "A14",
+          "title": "Affiliate Commerce E2E",
+          "work_ids": [
+            "L04",
+            "E04"
+          ],
+          "depends_on": [
+            "A13",
+            "A06"
+          ],
+          "deliverable": "Affiliate content loop with attribution status",
+          "acceptance": "Publish/link/order/settlement distinct; no fabricated revenue",
+          "status": "PLANNED"
+        }
+      ]
+    },
+    {
+      "phase": 4,
+      "title": "Commerce Operations & Economics",
+      "milestones": [
+        "M5"
+      ],
+      "packages": [
+        {
+          "id": "A15",
+          "title": "Operational Cost & Idempotency",
+          "work_ids": [
+            "O05",
+            "O06",
+            "O07"
+          ],
+          "depends_on": [
+            "A02"
+          ],
+          "deliverable": "Cost ledger, dedupe/reconciliation and operational status",
+          "acceptance": "Estimated vs charged separate; retry does not blindly duplicate side effects",
+          "status": "PLANNED"
+        },
+        {
+          "id": "A16",
+          "title": "Settlement & Commercial Evidence",
+          "work_ids": [
+            "L05",
+            "E05"
+          ],
+          "depends_on": [
+            "A14",
+            "A15"
+          ],
+          "deliverable": "Settlement-aware cost and commercial review",
+          "acceptance": "Order created/refunded/settled separated; attribution scope explicit",
+          "status": "PLANNED"
+        }
+      ]
+    },
+    {
+      "phase": 5,
+      "title": "Scaling & Own Brand",
+      "milestones": [
+        "M6"
+      ],
+      "packages": [
+        {
+          "id": "A17",
+          "title": "Creative & Channel Scaling Extensions",
+          "work_ids": [
+            "C07",
+            "C10",
+            "D05",
+            "D07",
+            "D08",
+            "L07",
+            "E06"
+          ],
+          "depends_on": [
+            "A11",
+            "A15"
+          ],
+          "deliverable": "Variants, feedback, expanded distribution and dashboards",
+          "acceptance": "No mandatory scale; external posting only with actual access and authorization",
+          "status": "PLANNED"
+        },
+        {
+          "id": "A18",
+          "title": "Portfolio & Own Brand Decision",
+          "work_ids": [
+            "M06",
+            "M07",
+            "E07"
+          ],
+          "depends_on": [
+            "A10",
+            "A11",
+            "A15",
+            "A16"
+          ],
+          "deliverable": "Decision support for scale and own-brand option",
+          "acceptance": "Human controls inventory, capital and authorization; no automatic commitment",
+          "status": "PLANNED"
+        }
+      ]
+    }
+  ],
+  "milestones": {
+    "M0": "A01 and A02 planning scope plus EF01 core implemented with independent dual-executor capability; EF02 remote is tracked separately as M0-R rather than a gate for Creative Factory.",
+    "M0-R": "EF02 remote execution and feedback independently verified when built; optional native multi-turn proof reported separately.",
+    "M1": "E01 playable offline video and artifact provenance.",
+    "M2": "Assisted distribution package and truthful status receipts.",
+    "M3": "Audience measurement/insight prototypes, not fabricated live outcomes.",
+    "M4": "Audience learning and affiliate release/E2E evidence recorded at actual entitlement level.",
+    "M5": "Scoped costs, attribution and settled economics evidence where available.",
+    "M6": "Optional scaling and own-brand decision support; Human retains final authority."
+  },
+  "implementation_status": "NOT_STARTED",
+  "dispatch_status": "NOT_DISPATCHED"
+}

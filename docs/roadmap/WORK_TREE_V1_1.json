@@ -1,0 +1,936 @@
+{
+  "project": "AI Commerce",
+  "kind": "Canonical planning Work Breakdown Structure (not runtime task)",
+  "version": "1.1",
+  "canonical_repo": "trung-via/ai-commerce",
+  "governance": "v0.3 adopted",
+  "blueprint": "v1.2 reference",
+  "publication_status": "CANONICAL_PLAN",
+  "workstreams": [
+    {
+      "id": "G",
+      "title": "00 · Chủ quyền dự án & kiến trúc nền",
+      "semantic_owner": "Foundation",
+      "work_items": [
+        {
+          "id": "G01",
+          "title": "Đăng ký trạng thái dự án",
+          "scope": "Tạo living project-state, decision log và danh sách điều chưa chứng minh; liên kết Governance/Blueprint.",
+          "acceptance": "Đối chiếu chính xác repo main; không nâng research thành deployed.",
+          "depends_on": [],
+          "priority": "P0",
+          "owner": "Foundation",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "G02",
+          "title": "ADR & semantic owner",
+          "scope": "Tạo ADR template ngắn, owner registry dựa K-06, conventions/version.",
+          "acceptance": "Mỗi miền có một owner truth và biết ai được cập nhật.",
+          "depends_on": [
+            "G01"
+          ],
+          "priority": "P0",
+          "owner": "Foundation",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "G03",
+          "title": "Repository application skeleton",
+          "scope": "Thiết lập src, tests, docs/engineering, examples, entrypoint CLI, pyproject; công nghệ là đề xuất.",
+          "acceptance": "Clean install và hello-world CLI chạy trong repo độc lập.",
+          "depends_on": [
+            "G01"
+          ],
+          "priority": "P0",
+          "owner": "Foundation",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "G04",
+          "title": "Schema package",
+          "scope": "Nạp schema repo và bổ sung các bản ghi cần dùng: Brief, MediaArtifact, SourceSnapshot, JobResult, EvidenceRef.",
+          "acceptance": "Parse/validate được valid và invalid fixtures; thiếu field phải phân loại rõ.",
+          "depends_on": [
+            "G02",
+            "G03"
+          ],
+          "priority": "P0",
+          "owner": "Foundation",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "G05",
+          "title": "Provenance & artifact identity",
+          "scope": "Chuẩn hóa record ID, raw source ref, digest, generated media hash, timestamp, version.",
+          "acceptance": "Có thể truy media về input/manifest; thay input không silently reuse output.",
+          "depends_on": [
+            "G04"
+          ],
+          "priority": "P0",
+          "owner": "Foundation",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "G06",
+          "title": "Targeted verification workflow",
+          "scope": "Thiết lập test subset nhanh và CI tùy chọn cho từng module, lint/format.",
+          "acceptance": "Một command chạy unit/negative targeted tests, không cần full suite bắt buộc.",
+          "depends_on": [
+            "G03"
+          ],
+          "priority": "P0",
+          "owner": "Foundation",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "G07",
+          "title": "Provider-neutral adapter contract",
+          "scope": "Định nghĩa model/media/source adapters, capability, cost estimate, failures và fallback thủ công.",
+          "acceptance": "Mock provider pass; provider lỗi được phân loại chứ không bịa kết quả.",
+          "depends_on": [
+            "G04"
+          ],
+          "priority": "P0",
+          "owner": "Foundation",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "G08",
+          "title": "Cross-project isolation check",
+          "scope": "Kiểm soát project isolation: cấm kế thừa ngầm code/runtime/account/cookie/secrets/workflow/TASK từ AIOS/Python Agent; cho phép selective component extraction chỉ theo quyết định Human riêng, nguồn gốc pin SHA, quyền sử dụng, kiểm tra dependency, rollback.",
+          "acceptance": "Không có runtime import, shared credentials, .ai lifecycle hay dispatch AIOS; mọi phần code chủ ý tái sử dụng phải có component adoption trace và chạy độc lập trong ai-commerce.",
+          "depends_on": [
+            "G03"
+          ],
+          "priority": "P0",
+          "owner": "Foundation",
+          "status": "PROPOSED"
+        }
+      ]
+    },
+    {
+      "id": "EF",
+      "title": "05 · Engineering Flow (project engineering, not commerce product jobs)",
+      "semantic_owner": "Engineering Foundation",
+      "work_items": [
+        {
+          "id": "EF01",
+          "title": "Selective Extraction + Dual Executor Working Core",
+          "scope": "Trong AI Commerce, xây lớp Engineering Flow độc lập bằng cách trích chọn có ghi nguồn gốc từ AIOS-Renew: WorkItem adapter, execution profiles theo từng WorkItem, Codex CLI adapter, Antigravity CLI adapter, executor selector MANUAL/RECOMMEND, targeted verification, failure diagnostic, Git candidate/receipt và token observation khi provider có dữ liệu. Không dùng AIOS Task/Run/Kernel/Publisher hoặc runtime; model/effort không hard default từ AIOS. Phân biệt attempt và work item; xử lý thất bại/UNKNOWN trung thực.",
+          "acceptance": "Chọn thủ công Codex hoặc Antigravity với model/effort phù hợp; mỗi adapter có một thực thi thật được kiểm chứng trong repo độc lập và trả result schema thống nhất; failure có log/debug đủ sửa, không giả PASS; không import aios_renew, không phụ thuộc .ai lifecycle/shared secrets; source ref và phạm vi copy/adapt/rewrite được ghi lại. Không yêu cầu mọi adapter luôn available khi chưa cấu hình; không gộp unavailable với test PASS.",
+          "depends_on": [
+            "G03",
+            "G06",
+            "G08"
+          ],
+          "priority": "P0",
+          "owner": "Engineering Foundation (project tooling)",
+          "status": "PROPOSED",
+          "execution_status": "NOT_IMPLEMENTED",
+          "selection_modes": [
+            "MANUAL",
+            "RECOMMEND"
+          ],
+          "executors": [
+            "codex",
+            "antigravity"
+          ],
+          "non_goals": [
+            "auto cross-executor switching by default",
+            "reuse AIOS runtime",
+            "publish media",
+            "import secrets"
+          ]
+        },
+        {
+          "id": "EF02",
+          "title": "Independent Remote Wake + Feedback & Optional Native Continuation",
+          "scope": "GitHub workflow/Windows runner dành riêng cho ai-commerce kích hoạt Engineering WorkItem đã được ủy quyền; bind dispatch/work_id/source SHA/profile, trả structured result và diagnostics cho Brain; deduplicate delivery. Hỗ trợ cùng-WorkItem CLI repair; native app-server multi-turn khi được chứng minh trên máy thực, không phải điều kiện để EF01 chạy. Cross-executor handoff nếu Human cho phép, attempt mới và trạng thái cũ được giữ nguyên.",
+          "acceptance": "Một công việc thực được kích hoạt từ xa và có result/diagnostic đúng attempt trong repo AI Commerce; không cần AIOS runner/runtime; failed/unknown không hiện là completed; có phân biệt CLI repair attempt mới và native multi-turn thực sự. Chưa chứng minh native thì báo UNSUPPORTED/NOT_VERIFIED, không ngăn creative offline.",
+          "depends_on": [
+            "EF01"
+          ],
+          "priority": "P0",
+          "owner": "Engineering Foundation (project tooling)",
+          "status": "PROPOSED",
+          "execution_status": "NOT_IMPLEMENTED",
+          "non_blocking_for": [
+            "A03",
+            "A04",
+            "A05",
+            "A06",
+            "E01"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "O",
+      "title": "10 · Commerce Operations & execution core",
+      "semantic_owner": "Commerce Operations",
+      "work_items": [
+        {
+          "id": "O01",
+          "title": "Job manifest & run state",
+          "scope": "Thiết kế job id, stage, input hash, output artifacts, cost, attempts, evidence refs.",
+          "acceptance": "Resume cùng job không mất trạng thái và không trộn kết quả job khác.",
+          "depends_on": [
+            "G04",
+            "G05"
+          ],
+          "priority": "P0",
+          "owner": "Commerce Operations",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "O02",
+          "title": "Single-worker local runner",
+          "scope": "CLI trigger source/creative/render/export jobs; hỗ trợ dry-run.",
+          "acceptance": "Chạy một job mock E2E cục bộ với log và kết quả deterministic theo input cố định.",
+          "depends_on": [
+            "O01",
+            "G07"
+          ],
+          "priority": "P0",
+          "owner": "Commerce Operations",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "O03",
+          "title": "Artifact registry & custody",
+          "scope": "Quản lý binary ảnh/video/âm thanh, thumbnails, script; version và storage root.",
+          "acceptance": "Phát hiện mất asset, không overwrite output đã được chốt mà không đổi version.",
+          "depends_on": [
+            "G05",
+            "O01"
+          ],
+          "priority": "P0",
+          "owner": "Commerce Operations",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "O04",
+          "title": "Bounded failure diagnostics",
+          "scope": "Chuẩn error_code, stage, trace/log refs, retry_safety, last_state.",
+          "acceptance": "Failure trả ngữ cảnh đủ sửa; timeout không tự được xem là success.",
+          "depends_on": [
+            "O02"
+          ],
+          "priority": "P0",
+          "owner": "Commerce Operations",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "O05",
+          "title": "CostLedger for generation",
+          "scope": "Log charged/estimated/pending cost, model, provider, token/duration, usable asset.",
+          "acceptance": "Tách estimated với charged; không tự retry lệnh mất kết nối có thể tính phí.",
+          "depends_on": [
+            "O01",
+            "G07"
+          ],
+          "priority": "P1",
+          "owner": "Commerce Operations",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "O06",
+          "title": "Retry/idempotency utility",
+          "scope": "Khóa intent/attempt, de-dup và reconcile trước side effect nguy hiểm.",
+          "acceptance": "Một key không tạo hai publication/charge; unknown vẫn unknown.",
+          "depends_on": [
+            "O04",
+            "O05"
+          ],
+          "priority": "P1",
+          "owner": "Commerce Operations",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "O07",
+          "title": "Operational status report",
+          "scope": "CLI summary job, artifact, stage, error và next-action theo dependency.",
+          "acceptance": "Report không gộp render, publish, click, order, settlement thành PASS chung.",
+          "depends_on": [
+            "O04"
+          ],
+          "priority": "P1",
+          "owner": "Commerce Operations",
+          "status": "PROPOSED"
+        }
+      ]
+    },
+    {
+      "id": "M",
+      "title": "20 · Commerce Opportunity Intelligence",
+      "semantic_owner": "Commerce Opportunity",
+      "work_items": [
+        {
+          "id": "M01",
+          "title": "Trend intake",
+          "scope": "Import signal thủ công/hợp lệ kèm nguồn, locale, timestamp, metadata.",
+          "acceptance": "Một quan sát được giữ là snapshot, chưa gọi là growth trend.",
+          "depends_on": [
+            "G04"
+          ],
+          "priority": "P1",
+          "owner": "Commerce Opportunity",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "M02",
+          "title": "Trend tracking & hypotheses",
+          "scope": "Gom nhiều mốc, distinguish format trend vs topic, freshness, counterexamples.",
+          "acceptance": "Thiếu lịch sử báo INSUFFICIENT_HISTORY; không phán viral chắc chắn.",
+          "depends_on": [
+            "M01"
+          ],
+          "priority": "P1",
+          "owner": "Commerce Opportunity",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "M03",
+          "title": "Audience insight registry",
+          "scope": "Lưu persona/jobs-to-be-done, friction, content context, quan sát vs suy luận.",
+          "acceptance": "Insight truy được nguồn, phản ví dụ; không thu thập PII quá phạm vi.",
+          "depends_on": [
+            "M01"
+          ],
+          "priority": "P1",
+          "owner": "Commerce Opportunity",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "M04",
+          "title": "Niche & opportunity proposals",
+          "scope": "Kết hợp trend, audience, alternatives, offer evidence, economics chưa chắc.",
+          "acceptance": "Trả danh sách giả thuyết có uncertainty, không tự chọn chi tiền.",
+          "depends_on": [
+            "M02",
+            "M03"
+          ],
+          "priority": "P1",
+          "owner": "Commerce Opportunity",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "M05",
+          "title": "Opportunity-to-campaign bridge",
+          "scope": "Đưa rationale và bối cảnh sang ContentBrief; cho phép Human đi thẳng creative.",
+          "acceptance": "Brief có hoặc không có product_ref; không khóa sáng tác khi thiếu M04.",
+          "depends_on": [
+            "M03",
+            "C01"
+          ],
+          "priority": "P1",
+          "owner": "Commerce Opportunity",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "M06",
+          "title": "Portfolio recommendation (L04)",
+          "scope": "Tổng hợp performance và chi phí để đề xuất keep/change/stop.",
+          "acceptance": "Khuyến nghị có provenance; không tự thay ngân sách hoặc chiến dịch.",
+          "depends_on": [
+            "L06",
+            "M04"
+          ],
+          "priority": "P2",
+          "owner": "Commerce Opportunity",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "M07",
+          "title": "Own-brand brief (B01)",
+          "scope": "Demand signal, differentiated offer, COGS/MOQ, logistics, capital/downside.",
+          "acceptance": "Tạo brief go/no-go; không tự đặt hàng hoặc tuyên bố demand đã chứng minh.",
+          "depends_on": [
+            "M06",
+            "L05"
+          ],
+          "priority": "P2",
+          "owner": "Commerce Opportunity",
+          "status": "PROPOSED"
+        }
+      ]
+    },
+    {
+      "id": "P",
+      "title": "30 · Product Intelligence",
+      "semantic_owner": "Product Intelligence",
+      "work_items": [
+        {
+          "id": "P01",
+          "title": "Listing snapshot manual ingest",
+          "scope": "Import sản phẩm/offer từ một URL hoặc tệp do Human cung cấp.",
+          "acceptance": "Lưu listing identity, variant, price observed_at, raw evidence; không auto auth.",
+          "depends_on": [
+            "G04"
+          ],
+          "priority": "P1",
+          "owner": "Product Intelligence",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "P02",
+          "title": "Authorized product source adapters",
+          "scope": "Mở rộng feed/API/approved extraction theo provider-specific rights.",
+          "acceptance": "Nguồn không có quyền trả NOT_AUTHORIZED/UNKNOWN; không lách TOS.",
+          "depends_on": [
+            "P01",
+            "G07"
+          ],
+          "priority": "P2",
+          "owner": "Product Intelligence",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "P03",
+          "title": "Canonical identity & variants",
+          "scope": "Tách product_id, listing_id, seller_id, variants, source revisions.",
+          "acceptance": "Hai variants không bị nhập nhầm; conflict có record rõ.",
+          "depends_on": [
+            "P01"
+          ],
+          "priority": "P1",
+          "owner": "Product Intelligence",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "P04",
+          "title": "Facts, claims and offer profile (M05)",
+          "scope": "Phân loại verified, seller-asserted, assumption, illustrative; giá/hoa hồng có expiry.",
+          "acceptance": "Không nâng seller assertion thành verified; stale offer có cảnh báo.",
+          "depends_on": [
+            "P03",
+            "G05"
+          ],
+          "priority": "P1",
+          "owner": "Product Intelligence",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "P05",
+          "title": "Asset rights manifest",
+          "scope": "Record source/license/rightsholder, phạm vi commercial, AI/synthetic origin.",
+          "acceptance": "Không mô tả license UNKNOWN như GRANTED khi phát hành.",
+          "depends_on": [
+            "P01",
+            "G05"
+          ],
+          "priority": "P1",
+          "owner": "Product Intelligence",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "P06",
+          "title": "Product fit handoff",
+          "scope": "Trình bày facts, alternatives, uncertainties cho Commerce Opportunity/Creative.",
+          "acceptance": "Không tự phê duyệt kênh, budget hoặc quyết định product cuối.",
+          "depends_on": [
+            "P04"
+          ],
+          "priority": "P1",
+          "owner": "Product Intelligence",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "P07",
+          "title": "Source freshness and revocation",
+          "scope": "Kiểm stale facts, expired offers, asset/reuse restrictions.",
+          "acceptance": "Thay đổi quyền tạo affected-assets list, không âm thầm publish lại.",
+          "depends_on": [
+            "P04",
+            "P05"
+          ],
+          "priority": "P2",
+          "owner": "Product Intelligence",
+          "status": "PROPOSED"
+        }
+      ]
+    },
+    {
+      "id": "C",
+      "title": "40 · Media & Creative Intelligence",
+      "semantic_owner": "Media & Creative",
+      "work_items": [
+        {
+          "id": "C01",
+          "title": "Freeform ContentBrief (C01)",
+          "scope": "Brief linh hoạt nhận goal, aesthetic, audience, optional product/trend/CTA.",
+          "acceptance": "Không yêu cầu SKU, script, storyboard, KPI hay creative quota để tạo thử.",
+          "depends_on": [
+            "G04"
+          ],
+          "priority": "P0",
+          "owner": "Media & Creative",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "C02",
+          "title": "Creative Reasoner v1 (C02)",
+          "scope": "Prompt workflows: ideation, unusual concepts, humor, ads, mixed modes; optional rationale/test.",
+          "acceptance": "Sinh một hoặc nhiều concept tùy request; không bịa fact thành verified.",
+          "depends_on": [
+            "C01",
+            "G07"
+          ],
+          "priority": "P0",
+          "owner": "Media & Creative",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "C03",
+          "title": "Script / prompt / scene representation (C03)",
+          "scope": "Output freeform hoặc structured script/scene plan với editable versions.",
+          "acceptance": "Có thể đi thẳng từ prompt -> media; storyboard không mandatory.",
+          "depends_on": [
+            "C02"
+          ],
+          "priority": "P0",
+          "owner": "Media & Creative",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "C04",
+          "title": "Image/video provider adapter (C04)",
+          "scope": "Adapter generate/import AI, animation, real footage, stock đúng quyền; lưu receipts.",
+          "acceptance": "Dummy + một provider selected chạy; cost/status/asset metadata hiện rõ.",
+          "depends_on": [
+            "G07",
+            "O03"
+          ],
+          "priority": "P0",
+          "owner": "Media & Creative",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "C05",
+          "title": "Voice/music/subtitle tools",
+          "scope": "TTS, existing audio, silence, transcript/subtitle optional.",
+          "acceptance": "Video không lời chạy được; tiếng Việt không mất dấu/đồng bộ sai.",
+          "depends_on": [
+            "C04"
+          ],
+          "priority": "P1",
+          "owner": "Media & Creative",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "C06",
+          "title": "Render & compose video (C05)",
+          "scope": "Assemble optional scenes/audio/captions, crop, encode MP4, thumbnail, preview.",
+          "acceptance": "Render output playable; metadata ratio/resolution/duration/cost/log/hash.",
+          "depends_on": [
+            "C03",
+            "C04",
+            "O02"
+          ],
+          "priority": "P0",
+          "owner": "Media & Creative",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "C07",
+          "title": "Variants & batch factory",
+          "scope": "Tạo biến thể tự do hoặc controlled tiny changes; version assets/script.",
+          "acceptance": "Không overwrite master; đo được chi phí/usable output.",
+          "depends_on": [
+            "C06",
+            "O03"
+          ],
+          "priority": "P1",
+          "owner": "Media & Creative",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "C08",
+          "title": "Technical media inspection (C06)",
+          "scope": "Kiểm lỗi codec, black frames, timing, audio, artifact integrity; optional review.",
+          "acceptance": "Lỗi kỹ thuật trả code/preview; không phán xét gu thẩm mỹ mặc định.",
+          "depends_on": [
+            "C06"
+          ],
+          "priority": "P1",
+          "owner": "Media & Creative",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "C09",
+          "title": "Claim/rights release review",
+          "scope": "Xem factual claims/rights/disclosure khi chuẩn bị commercial/public release.",
+          "acceptance": "Đánh dấu UNKNOWN/NEEDS_REVIEW cụ thể; fiction không bị coi factual by default.",
+          "depends_on": [
+            "C08",
+            "P04",
+            "P05"
+          ],
+          "priority": "P1",
+          "owner": "Media & Creative",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "C10",
+          "title": "Creative learn-back integration",
+          "scope": "Cho Reasoner truy lessons có uncertainty, version, counterexample.",
+          "acceptance": "Chỉ dùng signal có provenance; không tự hứa viral hoặc lift.",
+          "depends_on": [
+            "C02",
+            "L06"
+          ],
+          "priority": "P2",
+          "owner": "Media & Creative",
+          "status": "PROPOSED"
+        }
+      ]
+    },
+    {
+      "id": "D",
+      "title": "50 · Distribution Intelligence",
+      "semantic_owner": "Distribution",
+      "work_items": [
+        {
+          "id": "D01",
+          "title": "Platform/account capability registry",
+          "scope": "Surface/account/market/app/scopes/policy checked_at, status/expiry.",
+          "acceptance": "UNKNOWN khác ALLOWED; không thừa kế account Python Agent.",
+          "depends_on": [
+            "G04"
+          ],
+          "priority": "P1",
+          "owner": "Distribution",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "D02",
+          "title": "Platform output adapter (D01)",
+          "scope": "Tạo video file, title, hashtags, caption, thumbnail, optional disclosure/package.",
+          "acceptance": "Định dạng đủ để Human upload trên một kênh mục tiêu; không tự gắn link sai.",
+          "depends_on": [
+            "C06",
+            "D01"
+          ],
+          "priority": "P1",
+          "owner": "Distribution",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "D03",
+          "title": "Assisted/manual publishing handoff (D02)",
+          "scope": "Export package + checklist per actual account, nơi điền post receipt.",
+          "acceptance": "Không có quyền API vẫn có đường thao tác thủ công; chưa receipt là not confirmed.",
+          "depends_on": [
+            "D02"
+          ],
+          "priority": "P1",
+          "owner": "Distribution",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "D04",
+          "title": "Publication receipt & status",
+          "scope": "Store intent, content digest, URL/post ID, submitted vs confirmed/public/visibility.",
+          "acceptance": "SUBMITTED ≠ PUBLISHED_CONFIRMED ≠ PUBLIC; state có evidence.",
+          "depends_on": [
+            "D03",
+            "O01"
+          ],
+          "priority": "P1",
+          "owner": "Distribution",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "D05",
+          "title": "Unknown/reconciliation and no-dupe",
+          "scope": "Đối chiếu timeout, revoked permission, duplicate callback, manual ambiguity.",
+          "acceptance": "Không retry publish mù khi outcome unknown, không tạo duplicate post.",
+          "depends_on": [
+            "D04",
+            "O06"
+          ],
+          "priority": "P1",
+          "owner": "Distribution",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "D06",
+          "title": "Affiliate link and placement (D03)",
+          "scope": "Verify account×surface×product×link availability/disclosure; link lifecycle.",
+          "acceptance": "Product link không được ngầm xem active khi thiếu proof.",
+          "depends_on": [
+            "D01",
+            "P04"
+          ],
+          "priority": "P1",
+          "owner": "Distribution",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "D07",
+          "title": "Official direct post adapter",
+          "scope": "Tích hợp API theo app/account entitlement và phạm vi Human ủy quyền.",
+          "acceptance": "Chỉ thực hiện ở account/surface có quyền; lưu provider receipt, idempotency.",
+          "depends_on": [
+            "D04",
+            "D05"
+          ],
+          "priority": "P2",
+          "owner": "Distribution",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "D08",
+          "title": "Multi-platform extension",
+          "scope": "Version adapter theo mỗi channel và so sánh visibility/metric definitions.",
+          "acceptance": "Không sao chép khả năng/kết quả PASS giữa các platform.",
+          "depends_on": [
+            "D02",
+            "D07"
+          ],
+          "priority": "P2",
+          "owner": "Distribution",
+          "status": "PROPOSED"
+        }
+      ]
+    },
+    {
+      "id": "L",
+      "title": "60 · Measurement, Economics & Learning",
+      "semantic_owner": "Distribution/Operations/Creative split",
+      "work_items": [
+        {
+          "id": "L01",
+          "title": "MeasurementPlan & metric dictionary",
+          "scope": "Metric name/version/window/denominator/timezone/account/cohort/status.",
+          "acceptance": "Không nhầm NOT_AVAILABLE=0; có provenance và metric version.",
+          "depends_on": [
+            "G04"
+          ],
+          "priority": "P1",
+          "owner": "Distribution/Operations/Creative split",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "L02",
+          "title": "Analytics importer (L01)",
+          "scope": "Manual CSV/export trước; API nếu account cho phép; lưu raw + normalized.",
+          "acceptance": "Input thiếu column báo lỗi bounded; raw bytes không bị sửa.",
+          "depends_on": [
+            "L01",
+            "D04"
+          ],
+          "priority": "P1",
+          "owner": "Distribution/Operations/Creative split",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "L03",
+          "title": "Audience performance report",
+          "scope": "Reach/watch/relevance/returning viewers theo dataset thực; trend comparison.",
+          "acceptance": "KPI đúng denominator và window; không tuyên bố lift nếu không có data.",
+          "depends_on": [
+            "L02"
+          ],
+          "priority": "P1",
+          "owner": "Distribution/Operations/Creative split",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "L04",
+          "title": "Affiliate attribution tiers",
+          "scope": "Thiết lập A/B/C/D, click/order ID mapping theo capability thật.",
+          "acceptance": "C/D không trở thành per-video profit đã xác minh.",
+          "depends_on": [
+            "L02",
+            "D06"
+          ],
+          "priority": "P1",
+          "owner": "Distribution/Operations/Creative split",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "L05",
+          "title": "Settlement & contribution reconciliation (L02)",
+          "scope": "Order created, refunded, adjusted, settled, ledger costs và attribution scope.",
+          "acceptance": "Pending không phải 0/settled; contribution có scope và tiền tệ.",
+          "depends_on": [
+            "L04",
+            "O05"
+          ],
+          "priority": "P1",
+          "owner": "Distribution/Operations/Creative split",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "L06",
+          "title": "Learning registry (L03)",
+          "scope": "Hypothesis, context, creative version, outcome, confounder, inconclusive cases.",
+          "acceptance": "Không suy nguyên nhân từ correlation; lưu negative evidence.",
+          "depends_on": [
+            "C01",
+            "L03"
+          ],
+          "priority": "P1",
+          "owner": "Distribution/Operations/Creative split",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "L07",
+          "title": "Decision dashboard",
+          "scope": "Hiển thị media yield, publication state, audience outcomes, commerce evidence riêng.",
+          "acceptance": "Không gộp tất cả thành SUCCESS; nguồn và trạng thái hiển thị.",
+          "depends_on": [
+            "O07",
+            "L06"
+          ],
+          "priority": "P2",
+          "owner": "Distribution/Operations/Creative split",
+          "status": "PROPOSED"
+        }
+      ]
+    },
+    {
+      "id": "E",
+      "title": "70 · End-to-end product slices",
+      "semantic_owner": "Cross-domain",
+      "work_items": [
+        {
+          "id": "E01",
+          "title": "Offline creative E2E",
+          "scope": "Brief hoặc prompt -> AI/real asset -> rendered MP4 -> manifest/log.",
+          "acceptance": "Một video thực dùng được, replayable; không cần SKU/publish proof.",
+          "depends_on": [
+            "C01",
+            "C02",
+            "C04",
+            "C06",
+            "O02"
+          ],
+          "priority": "P0",
+          "owner": "Cross-domain",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "E02",
+          "title": "Audience Growth vertical slice",
+          "scope": "Creative E2E -> platform export -> assisted publish -> receipt -> audience import.",
+          "acceptance": "Nếu user đăng thật có receipt đúng account và observation; nếu chưa thì ghi PARTIAL, không ngăn offline.",
+          "depends_on": [
+            "E01",
+            "D03",
+            "D04",
+            "L02"
+          ],
+          "priority": "P1",
+          "owner": "Cross-domain",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "E03",
+          "title": "Affiliate release evidence pack",
+          "scope": "Một product snapshot/claim/rights + verified account×surface/link; package for publication.",
+          "acceptance": "Missing entitlement dẫn tới manual/hold đúng action, vẫn render creative được.",
+          "depends_on": [
+            "P04",
+            "P05",
+            "D01",
+            "D06",
+            "C09"
+          ],
+          "priority": "P1",
+          "owner": "Cross-domain",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "E04",
+          "title": "Affiliate Commerce vertical slice",
+          "scope": "Product evidence -> creative -> media -> assisted/allowed publish -> link observation.",
+          "acceptance": "Public/link/order statuses độc lập; không tuyên bố revenue khi thiếu.",
+          "depends_on": [
+            "E01",
+            "E03",
+            "D04",
+            "L04"
+          ],
+          "priority": "P1",
+          "owner": "Cross-domain",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "E05",
+          "title": "Commercial evidence review",
+          "scope": "CostLedger + actual orders/refunds/settled export + attribution tier.",
+          "acceptance": "Verdict VALIDATED_FOR_SCOPE/PROMISING/INCONCLUSIVE/NEGATIVE theo scope, không suy ROI.",
+          "depends_on": [
+            "E04",
+            "L05"
+          ],
+          "priority": "P2",
+          "owner": "Cross-domain",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "E06",
+          "title": "Feedback-to-next-creative loop",
+          "scope": "L06 lessons trở thành next campaign prompts/variants, optional tests.",
+          "acceptance": "Có before/after với cùng metric definitions; lessons có uncertainty.",
+          "depends_on": [
+            "L06",
+            "C10"
+          ],
+          "priority": "P2",
+          "owner": "Cross-domain",
+          "status": "PROPOSED"
+        },
+        {
+          "id": "E07",
+          "title": "Scale and own-brand option",
+          "scope": "Human decision memo for provider cost scaling, channel growth, inventory/brand.",
+          "acceptance": "Không tự tăng ngân sách, mua hàng hay mở account.",
+          "depends_on": [
+            "E05",
+            "M07"
+          ],
+          "priority": "P2",
+          "owner": "Cross-domain",
+          "status": "PROPOSED"
+        }
+      ]
+    }
+  ],
+  "count": 61,
+  "priority_counts": {
+    "P0": 18,
+    "P1": 32,
+    "P2": 11
+  },
+  "planning_status": "HUMAN_APPROVED",
+  "implementation_status": "NOT_STARTED",
+  "dispatch_status": "NOT_DISPATCHED",
+  "adopted_on": "2026-10-28",
+  "source_baseline_head": "13266240558aaf1ec3c80e0dfc3fe89911908002",
+  "roadmap_ref": "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.json",
+  "human_decision_ref": "docs/governance/HUMAN_DECISION_2026-10-28_ENGINEERING_FLOW.md",
+  "engineering_flow_policy": {
+    "version": "0.1",
+    "project_independent": true,
+    "not_aios_downstream": true,
+    "aios_source_sha": "cbefb92612f24b55417165736c63753fc560d403",
+    "executor_selection": [
+      "MANUAL",
+      "RECOMMEND"
+    ],
+    "executor_options": [
+      "codex",
+      "antigravity"
+    ],
+    "auto_selection_status": "NOT_AUTHORIZED_BY_PLAN",
+    "model_effort": "PER_WORK_ITEM_NOT_INHERITED",
+    "usage_reporting": "OBSERVED_WHEN_AVAILABLE_OTHERWISE_UNKNOWN",
+    "fallback": "CROSS_EXECUTOR_NEW_ATTEMPT_ONLY_WHEN_AUTHORIZED",
+    "native_continuation": "EF02_OPTIONAL_NOT_A_GATE_FOR_CREATIVE",
+    "external_component_adoption": "RECORD_PROVENANCE_LICENSE_COMPATIBILITY_AND_ROLLBACK_BEFORE_COPIED_CODE_IS_USED"
+  }
+}

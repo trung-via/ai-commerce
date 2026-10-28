@@ -26,11 +26,19 @@ Two distinct product cycles share production and learning capabilities:
 
 20 capabilities are a strategic **capability map**, not 20 mandatory services or work items. MVP may be delivered as six lean work packages (source/access → brief → media → QA → authorized/assisted publish → evidence/economics). These remain product-design references, not a pre-authorized deployment or expenditure.
 
+## Canonical implementation planning
+
+- [Roadmap A — Creative-First v1.0](docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.md) (six phases, A01–A18; Phase 0 includes EF01/EF02)
+- [Work Tree v1.1 — Detailed](docs/roadmap/WORK_TREE_DETAILED_V1_1.md) / [JSON](docs/roadmap/WORK_TREE_V1_1.json) (63 planning IDs)
+- [Human Decision — Engineering Flow](docs/governance/HUMAN_DECISION_2026-10-28_ENGINEERING_FLOW.md) (selective AIOS component reuse; dual Codex/Antigravity; no downstream Runtime)
+
+The plan is Human-approved and repository-canonical. It does **not** mean any implementation, executor, GitHub workflow, account, budget, media publication or commercial result has been activated. `EF01` / `EF02` are engineering-tooling planning items, not Commerce Product job runners.
+
 ## Status and repository hygiene
 
 - Governance v0.3: explicitly approved by Human in the conversation of **2026-10-27**. Original document headers retain the earlier DRAFT label for provenance; this adoption record supersedes those labels with respect to internal governance once initial commit is made.
 - Blueprint v1.2: approved as the initial architecture reference, **not** as proof that publishing access, commissions, compliance or end-to-end code already exist.
-- No tasks, automation, expenditure, user accounts, external actions or GitHub Actions are enabled by repository initialization.
+- Roadmap A and Work Tree are canonical **planning** only; no executable tasks, executor dispatch, automation, expenditure, user accounts, external actions or GitHub Actions are enabled.
 - No copied Python Agent / AIOS secrets, code, workflows or lifecycle were imported.
 - Review the [open-evidence record](docs/research/DECISION_REGISTER_AS_RESEARCH_2026-10-27.md) before making live capability claims. Its old proposal statuses are historic research, not current repository activation status.
 
