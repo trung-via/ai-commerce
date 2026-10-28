@@ -73,9 +73,9 @@
     "ef01_dependency": "BUILD_VERIFIED_FOR_SCOPE",
     "ef01_windows_tests": "53_PASS_2026_10_28",
     "ef02_runtime": "SOURCE_IMPLEMENTED_GITHUB_CI_PASS",
-    "ef02_windows_parallel_live": "NOT_RUN_ON_USER_HOST",
-    "ef02_github_remote": "NOT_RUN_ON_USER_HOST",
-    "m0_r": "OPEN",
+    "ef02_windows_parallel_live": "PASS_TWO_REAL_OVERLAPPING_EF01_PROCESSES_94_SECONDS_RUN_40654797946",
+    "ef02_github_remote": "LIVE_PARTIAL_1_OF_2_CANDIDATE_READY_WITH_ISSUE_FEEDBACK_AND_ARTIFACT",
+    "m0_r": "OPEN_FULL_LIVE_BATCH_NOT_YET_PASS",
     "ef02_ci": "PASS_UBUNTU_AND_WINDOWS_RUN_40648371883",
     "windows_runner_registration": "NOT_VERIFIED",
     "ef02_windows_local_tests": "PASS_65_OF_65_2026_10_28_HUMAN_POWERSHELL_SCREENSHOT",
@@ -90,8 +90,43 @@
     "windows_service_install": "RUNNING_AUTO_2026_10_28_HUMAN_POWERSHELL_SCREENSHOT",
     "windows_service_account": ".\\trung",
     "windows_service_name": "actions.runner.trung-via-ai-commerce.AI-COMMERCE-EF02-01",
-    "windows_runner_online": "NOT_INDEPENDENTLY_VERIFIED",
-    "windows_service_executors": "NOT_YET_TESTED_FROM_SERVICE"
+    "windows_runner_online": "CONFIRMED_EXECUTED_GITHUB_WORKFLOW_RUN_40654797946",
+    "windows_service_executors": "BOTH_INVOKED_AGY_BUILD_VERIFIED_CODEX_WINDOWS_SANDBOX_PIPE_TIMEOUT",
+    "first_live_batch": {
+      "run_id": 40654797946,
+      "issue_number": 2,
+      "batch_id": "ef02-live-20261028-01",
+      "source_sha": "592424edde56adf78fefd15084534cab424b804a",
+      "result": "PARTIAL_OR_FAILED",
+      "scheduler_max_active": 2,
+      "process_overlap_seconds_approx": 93.89,
+      "codex": {
+        "attempt_id": "ef02-20261028-codex-01",
+        "model": "gpt-6.1-sol",
+        "effort": "max",
+        "process_id": 29372,
+        "status": "NO_CODE_CHANGE",
+        "error_code": "NO_CHANGED_FILES",
+        "root_observed": "Windows sandbox unified exec timeout 15000ms connecting runner pipe-in; file_change and node_repl also failed",
+        "model_exit": 0,
+        "files_changed": 0
+      },
+      "antigravity": {
+        "attempt_id": "ef02-20261028-agy-01",
+        "model": "gemini-3.8-flash",
+        "effort": "medium",
+        "process_id": 15112,
+        "status": "CANDIDATE_READY",
+        "candidate_sha": "8f5edade59d8ade60b5aa23b8edca0933e277332",
+        "verify_exit": 0,
+        "tests_passed": 66,
+        "test_duration_seconds": 7.8
+      },
+      "feedback": "GITHUB_ISSUE_COMMENT_PUBLISHED",
+      "artifact_id": 12801092240,
+      "archive_verified": "GitHub artifact ZIP downloaded and action/batch JSON plus Codex stderr/stdout inspected",
+      "provider_cost": "UNKNOWN"
+    }
   },
   "expected_artifacts": [
     "contracts/RemoteActionBatch.v1.schema.json",
@@ -108,7 +143,10 @@
     "docs/engineering/EF02_WINDOWS_RUNNER_SETUP.md",
     "https://github.com/trung-via/ai-commerce/actions/runs/40648371883",
     "Human Windows PowerShell screenshot: 65 tests passed in 6.93s on 2026-10-28 (conversation only)",
-    "Human PowerShell screenshot 2026-10-28: runner successfully added, Windows Service Running/Auto with .\\trung identity"
+    "Human PowerShell screenshot 2026-10-28: runner successfully added, Windows Service Running/Auto with .\\trung identity",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40654797946",
+    "https://github.com/trung-via/ai-commerce/issues/2",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40654797946/artifacts/12801092240"
   ],
   "dispatch_status": "WORKFLOW_SOURCE_AVAILABLE_NOT_LIVE_CONFIRMED",
   "human_override_ref": "User approved EF02 Multi-Action v1 and requested update for implementation, 2026-10-28",
@@ -116,7 +154,9 @@
     "CI uses GitHub-hosted Windows/Linux and simulated providers, not user laptop live Codex/AGY.",
     "Separate Windows runner with label ai-commerce-ef02 remains unregistered/unverified.",
     "Single runner may queue batches even though a batch uses parallel child processes.",
-    "Candidate refs are create-only and not merged into main; Chat Wake/native continuation not implemented."
+    "Candidate refs are create-only and not merged into main; Chat Wake/native continuation not implemented.",
+    "Windows Service Codex subprocess has sandbox tool connection timeout; do not blindly rerun the same claimed attempt or switch sandbox permissions without diagnosis.",
+    "First 2-action live batch produced 1 candidate and 1 NO_CODE_CHANGE; M0-R stays open despite proven process overlap and GitHub feedback."
   ],
   "plan_only_not_runtime": false
 }
