@@ -54,3 +54,29 @@ def test_documentation_is_explicitly_nonexecuting_and_fail_closed():
     assert "watchdog_installed" in text
     assert "no EF01 or model invocation" in text
     assert "UNKNOWN" in text
+
+
+
+def test_powershell_control_script_parses_on_windows_without_execution():
+    import os
+    import shutil
+    import subprocess
+    import pytest
+
+    if os.name != "nt":
+        pytest.skip("PowerShell parser verified on Windows CI only")
+    powershell = shutil.which("pwsh") or shutil.which("powershell")
+    assert powershell, "WINDOWS_POWERSHELL_PARSER_MISSING"
+    quoted_path = str(PS).replace("'", "''")
+    command = (
+        "$tokens=$null; $parseErrors=$null; "
+        "[System.Management.Automation.Language.Parser]::ParseFile("
+        f"'{quoted_path}',[ref]$tokens,[ref]$parseErrors) | Out-Null; "
+        "if ($parseErrors.Count -gt 0) { "
+        "$parseErrors | ForEach-Object { Write-Error $_.ToString() }; exit 1 }"
+    )
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True, text=True, timeout=20, check=False,
+    )
+    assert result.returncode == 0, result.stdout + "\n" + result.stderr
