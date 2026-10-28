@@ -1,6 +1,6 @@
 # A03/A04 dependency integration candidate
 
-Date: 2026-10-29. **Scoped offline candidate; not merged to main.** The A03/A04 product regression passes. Registered `project-tests` remains **FAILED**: **347 passed, 16 failed, 2 skipped**, exit 1. The 16 failing test IDs exactly match the pre-edit baseline. This completes the local A03/A04 integration work only; it does not complete A05, MP4 rendering or M1.
+Date: 2026-10-29. This is the historical integration sub-session report for an offline candidate. Its scoped A03/A04 regression passed; during that Codex sub-session, registered `project-tests` returned **347 passed, 16 failed, 2 skipped**, exit 1; the 16 failing IDs matched the pre-edit baseline. **Subsequently, the EF01 wrapper executed the same registered `project-tests` on the candidate worktree and recorded 365 passed, exit 0 (78.73 s).** See the post-executor verification section below. No A05, MP4 renderer or M1 outcome is implied.
 
 ## Inspected source and preservation
 
@@ -108,7 +108,7 @@ Final failure IDs equal the baseline failure IDs exactly (`UNCHANGED_BASELINE_FA
 
 The two skips are the unchanged A04 actual symlink/junction tests at `tests/test_a04_media_operations.py:257`: this host permits neither directory symlinks nor junctions. Native link boundary verification remains unproven here. These skips are reported, not replaced with success.
 
-Targeted unresolved failure: rerun the unchanged registered profile on a host with working Git and PowerShell process startup. No out-of-scope engineering/environment repair was attempted. A full green project profile, merge to main, A05, MP4 and M1 acceptance are not claimed.
+The 16 sub-session failures identify an environment startup issue. The later EF01 wrapper verification is green, but that alone does **not** prove the underlying Git/PowerShell startup incident has been repaired. A05, MP4 and M1 remain outside the scope; GitHub main publication is a separate promotion step.
 
 ### Local evidence hashes
 
@@ -123,3 +123,14 @@ Logs are retained locally under ignored `.local/`; they are not committed source
 | `tests/test_a03_a04_integration.py` | `fc56975aee55ee4c64455eb55618aa929f80441c1fe7f56e1f7f1615777b3b8f` |
 
 Python AST parsing, final-newline and trailing-whitespace checks pass for both changed Python files. Final scope checks preserve every parent file and all other pre-existing project paths. No commit, push, publication or merge was performed by this integration turn.
+
+## Subsequent EF01 registered verification (observed from GitHub artifact)
+
+This section was added during the Human-approved promotion review; it does not replace the sub-session results documented above. EF02 [workflow run 40735271832](https://github.com/trung-via/ai-commerce/actions/runs/40735271832) completed with **3/3 CANDIDATE_READY**. In artifact `ef02-results-40735271832-1` (artifact ID `12842317100`), the Integration action's `ef01/engineering_result.json` records `status=BUILD_VERIFIED_FOR_SCOPE`, `verify_exit_code=0`, `source_base_sha=c92575c951045f19edb397fe339f4686fa6784da`, and `changed_files` limited to README, CLI, state/report and integration tests. Its independent `ef01/verify.stdout.log` records:
+
+~~~text
+python -m pytest tests -q
+365 passed in 78.73s (0:01:18)
+~~~
+
+This is the subsequent EF01 registered test run on the candidate, not a retrospective change to the earlier Codex sub-session's `347 passed / 16 failed / 2 skipped` result. The reported Git/PowerShell startup incident remains without a root-cause repair proof. A03/A04 capability is an offline mock/import MVP; there is no actual LLM creative inference, AI media generation, A05 video render, publication, or M1 acceptance. Candidate integration commit: `22adb25000fedb640c9525ed92ca9d6ae1d19215`.
