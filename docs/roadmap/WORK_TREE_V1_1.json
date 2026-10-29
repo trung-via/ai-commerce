@@ -697,7 +697,10 @@
           ],
           "priority": "P1",
           "owner": "Distribution",
-          "status": "PROPOSED"
+          "status": "VERIFIED_FOR_OFFLINE_SCOPE",
+          "implementation_work_item_ref": "work_items/A08-ASSISTED-DISTRIBUTION-001.json",
+          "verification_ref": "https://github.com/trung-via/ai-commerce/actions/runs/40831199268",
+          "acceptance_scope": "Offline/manual workflow and USER_SUPPLIED_NOT_LIVE_VERIFIED evidence only"
         },
         {
           "id": "D03",
@@ -709,7 +712,10 @@
           ],
           "priority": "P1",
           "owner": "Distribution",
-          "status": "PROPOSED"
+          "status": "VERIFIED_FOR_OFFLINE_SCOPE",
+          "implementation_work_item_ref": "work_items/A08-ASSISTED-DISTRIBUTION-001.json",
+          "verification_ref": "https://github.com/trung-via/ai-commerce/actions/runs/40831199268",
+          "acceptance_scope": "Offline/manual workflow and USER_SUPPLIED_NOT_LIVE_VERIFIED evidence only"
         },
         {
           "id": "D04",
@@ -722,7 +728,10 @@
           ],
           "priority": "P1",
           "owner": "Distribution",
-          "status": "PROPOSED"
+          "status": "VERIFIED_FOR_OFFLINE_SCOPE",
+          "implementation_work_item_ref": "work_items/A08-ASSISTED-DISTRIBUTION-001.json",
+          "verification_ref": "https://github.com/trung-via/ai-commerce/actions/runs/40831199268",
+          "acceptance_scope": "Offline/manual workflow and USER_SUPPLIED_NOT_LIVE_VERIFIED evidence only"
         },
         {
           "id": "D05",
