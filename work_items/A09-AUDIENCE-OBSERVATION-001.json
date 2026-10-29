@@ -16,7 +16,7 @@
     "E01",
     "D03"
   ],
-  "status": "ACCEPTED_FOR_WORK",
+  "status": "BUILD_VERIFIED_FOR_SCOPE",
   "scope_in": [
     "L01: versioned MetricDefinition/MeasurementPlan (do not overwrite draft MeasurementPlan.v0.2), explicit period/timezone/denominator/cohort/source_status and NOT_AVAILABLE distinct from zero",
     "L02: offline CSV and optional user-authored canonical JSON importer, explicit provider adapter/mapping profiles for TikTok/YouTube/Facebook/Instagram with no unverified native export-column assumptions",
@@ -61,7 +61,11 @@
     "work_items/A08-ASSISTED-DISTRIBUTION-001.json",
     "contracts/MeasurementPlan.v0.2.schema.json",
     "docs/engineering/A08_IMPLEMENTATION_REPORT.md",
-    "Deep Research A09 v1 report in ChatGPT conversation 2026-10-29 (proposal, not independent code proof)"
+    "Deep Research A09 v1 report in ChatGPT conversation 2026-10-29 (proposal, not independent code proof)",
+    "https://github.com/trung-via/ai-commerce/pull/86",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40859018408",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40859018499",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40859018468"
   ],
   "risk_notes": [
     "Research report's illustrative flat account names and lowercase platform strings conflict with A08 canonical object/uppercase enums; code must preserve actual A08 semantics",
@@ -83,5 +87,33 @@
     "max_parallel": 1,
     "max_repair_rounds": 2,
     "authorization_ref": "Human direct execution request 2026-10-29; executor/model inherited from explicit prior selection in AI Commerce Engineering sessions"
+  },
+  "verification_result": {
+    "state": "PASSED_HOSTED_CI_AND_MERGED_MAIN",
+    "reviewed_at": "2026-10-29",
+    "scope": "A09_v1_OFFLINE_FIRST_MANUAL_ANALYTICS_PROVIDER_NEUTRAL_ONLY",
+    "source_issues": [
+      "https://github.com/trung-via/ai-commerce/issues/80",
+      "https://github.com/trung-via/ai-commerce/issues/83"
+    ],
+    "candidate_sha": "d3792eb77b9b885fb4c042a91b9ed68e5aec214f",
+    "merged_main_sha": "92973edc52825a1cd69990decfe8ee2b680471eb",
+    "pull_request": "https://github.com/trung-via/ai-commerce/pull/86",
+    "ci": {
+      "full_suite": "https://github.com/trung-via/ai-commerce/actions/runs/40859018408",
+      "windows": "1089 passed, 0 failed",
+      "ubuntu": "1088 passed, 1 skipped, 0 failed",
+      "a07": "https://github.com/trung-via/ai-commerce/actions/runs/40859018499",
+      "a08": "https://github.com/trung-via/ai-commerce/actions/runs/40859018468",
+      "a07_windows_ubuntu": "PASS / PASS",
+      "a08_windows_ubuntu": "PASS / PASS",
+      "e01_demo_windows_ubuntu": "PASS / PASS"
+    },
+    "acceptance_scope": "Manual CSV/canonical JSON offline analytics + provenance + A08 receipt matching; synthetic demo only. No verified native provider exports, live account access, real audience data, OAuth, auto-posting or PUBLIC provider confirmation.",
+    "remaining_unknowns": [
+      "Real provider/account-specific export examples and rights",
+      "Live provider analytics validation",
+      "More operational outcomes beyond deterministic offline imports"
+    ]
   }
 }
