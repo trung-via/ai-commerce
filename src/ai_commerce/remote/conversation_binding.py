@@ -73,7 +73,10 @@ def resolve_binding(event: dict, *, route_id: str, registry_path: Path,
     try:
         validate_completion_event(event)
     except CompletionEventError as exc:
-        raise BindingError("EVENT_IDENTITY_INVALID") from exc
+        # Eligibility is not the same as a malformed or forged event.
+        # Preserve the caller's actionable rejection without exposing data.
+        code = "EVENT_NOT_ELIGIBLE" if str(exc) == "EVENT_NOT_ELIGIBLE" else "EVENT_IDENTITY_INVALID"
+        raise BindingError(code) from exc
     path = Path(registry_path)
     if not path.is_absolute() or not _outside_repo(path, Path(repository_root)):
         raise BindingError("REGISTRY_LOCATION_INVALID")
