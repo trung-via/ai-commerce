@@ -81,6 +81,34 @@ def test_reject_duplicate_cycle_unknown_dependency_and_bad_path():
         validate(p)
 
 
+def test_component_directory_scope_is_valid_but_does_not_authorize_sibling_or_protected_paths():
+    from ai_commerce.engineering.runner import _safe_scope
+
+    action_data = action("a")
+    action_data["allowed_paths"] = [
+        "src/ai_commerce/engineering",
+        "src/ai_commerce/remote",
+        "tests/test_ef01.py",
+    ]
+    packet = batch([action_data])
+    assert validate(packet) == packet
+    assert _safe_scope([
+        "src/ai_commerce/engineering/new_helper.py",
+        "src/ai_commerce/remote/worker.py",
+        "tests/test_ef01.py",
+    ], action_data["allowed_paths"])
+    for path in (
+        "src/ai_commerce/engineering_extra/misplaced.py",
+        "tests/test_ef02.py",
+        ".github/workflows/ef02-batch.yml",
+        "src/ai_commerce/other/unrelated.py",
+    ):
+        assert not _safe_scope([path], action_data["allowed_paths"])
+    for path in (".git/config", ".local/evidence", ".github/workflows/ef02-batch.yml", "../other"):
+        with pytest.raises(RemoteRequestError):
+            safe_path(path)
+
+
 def test_fingerprint_deterministic_and_model_change_is_distinct():
     p = batch([action("a")])
     assert fingerprint(p) == fingerprint(copy.deepcopy(p))
