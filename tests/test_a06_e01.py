@@ -35,7 +35,7 @@ def test_local_two_scene_mp4_and_reopen_with_truthful_provenance(tmp_path):
     images = assets(tmp_path)
     out = tmp_path / "e01"
     result = run("A fictional robot cat story; no product, no CTA", images, out,
-                 width=64, height=96, fps=24, frames=4, silence=False)
+                 width=64, height=96, fps=24, frames=12, silence=False)
     assert result["state"] == "DELIVERED"
     assert result["ffprobe_full_decode"] is True
     assert result["assets"] == 2
