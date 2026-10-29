@@ -1,0 +1,125 @@
+{
+  "work_id": "A11-AUDIENCE-LEARNING-001",
+  "title": "A11 v1 — Audience Learning Registry (L03 + L06)",
+  "status": "ACCEPTED_FOR_WORK",
+  "roadmap_id": "A11",
+  "phase": 3,
+  "milestone": "M4",
+  "work_ids": [
+    "L03",
+    "L06"
+  ],
+  "owner": "Audience Analytics / Learning; Creative advisory consumer",
+  "source_decision": "Human ChatGPT 2026-10-29: @AI Commerce Engineering Workflow đồng ý triển khai A11 theo Deep Research tiếng Việt.",
+  "source_sha": "8e1d6dbef0728b9b89f21fb2e96fd2ba3dfe723a",
+  "research_ref": "AI_COMMERCE_A11_DEEP_RESEARCH_TIENG_VIET_2026-10-29.md (ChatGPT supplied; research guides design but does not replace live repo contracts)",
+  "depends_on": [
+    "A09"
+  ],
+  "related_implemented_sources": [
+    "work_items/A09-AUDIENCE-OBSERVATION-001.json",
+    "contracts/PerformanceObservation.v1.schema.json",
+    "contracts/MeasurementPlan.v1.schema.json",
+    "src/ai_commerce/analytics/ledger.py",
+    "src/ai_commerce/analytics/model.py",
+    "src/ai_commerce/analytics/matching.py",
+    "src/ai_commerce/creative/briefs.py",
+    "work_items/A10-OPPORTUNITY-AUDIENCE-001.json"
+  ],
+  "objective": "Implement a deterministic offline-first, evidence-grounded A11 that reads the actual A09 analytics ledger without modification, produces correctly bounded L03 descriptive performance reports/comparisons, and stores versioned, counterevidence-aware L06 learning hypotheses and append-only revisions for Human/Brain/Creative consultation. Never turn observation into causal certainty or creative gate.",
+  "scope_in": [
+    "A11-01: versioned minimal coherent ObservationSnapshot/PerformanceReport/ComparisonResult/LearningHypothesis/LearningEvidence/LearningRecord/LearningRevision contracts (consolidate where justified) and read-only A09 import/observation snapshot adapter; freeze import IDs, observation IDs, metric definitions, source hash, mapping/adapter version, timezone, measurement window, cohort, source verification limits; deterministic snapshot ID and integrity/replay checks.",
+    "A11-02/L03: descriptive performance reports with source identity/version/window/denominator; only compute meaningful compatible comparisons; explicit ZERO versus NOT_AVAILABLE/null versus INSUFFICIENT_DATA versus NOT_COMPARABLE; identify sparse/stale/overlap/cohort mismatch/confounders; no causal lift or unsupported cross-provider equivalence; deterministic golden fixture calculations.",
+    "A11-03/L06: local independent SQLite learning event/revision ledger and query/read models; hypothesis, creative version, context, observed outcome, supporting and negative/counter-evidence, confounders, status and uncertainty; bound all payloads, preserve exact evidence refs, idempotency and corrections without mutating prior events, integrity verification and robust concurrency/failure handling.",
+    "A11-04: offline CLI/Python read/export surfaces for Human/Brain/Creative consultation, stable JSON contracts, deterministic synthetic example/E2E, Windows/Ubuntu tests and evidence report. No automatic A03/A08/A09 writes or creative decisions.",
+    "Scope by component and verify-first: respect current EF01-P + MT-01 + EF01-R + EF02 decisions, source pinning, protected-path stop, ordinary out-of-scope verification with scope reconciliation rather than false candidate publication, targeted affected tests plus registered verification on exact candidate."
+  ],
+  "scope_out": [
+    "OAuth, direct platform API, scraping, live account entitlement, real metrics verification, public posts/receipts, revenue or conversion attribution.",
+    "A10 opportunity ingestion rewrites; A03 content/schema mutations; A08 publishing; creative scoring as mandatory rules; auto-generation, auto-posting, autonomous optimization.",
+    "C10/A17 deep Creative Reasoner learn-back integration: future work; A11 merely makes lessons queryable with caveats.",
+    "Raw personal data duplication, cross-provider metric equivalence inferred by name, unspecified confidence percentages, causal lift conclusions without experimental design.",
+    "Online service, REST dashboard, paid model dependencies, broad refactor of EF01/EF02/AIOS-Renew, automatic merge to main."
+  ],
+  "design_decisions": {
+    "evidence_truth": "All A09 data sourced via existing contract and USER_SUPPLIED_NOT_LIVE_VERIFIED; synthetic examples are explicitly synthetic. A11 never upgrades provider trust.",
+    "reader_boundary": "Read existing A09 ledger through public inspect()/raw methods or stable read-only API; never modify A09 schema/ledger; read consistent context-pinned snapshot. Reject hash mismatch, duplicate/invalid/ambiguous references.",
+    "metric_comparability": "Require explicit compatible platform, metric definition version, unit, denominator, cohort, measurement window/timezone, source and matching policy. A09 NO_CROSS_PROVIDER_EQUIVALENCE remains authoritative.",
+    "report_inference": "Compute descriptive changes only where inputs permit; meaningful sample/coverage labels and caveats; no statistical significance, causal lift, or viral certainty from observational records.",
+    "ledger": "A11-owned append-only SQLite with transaction, UPDATE/DELETE protections or equivalent, stable content digests and revisions, deterministic replay; integrity detection is NOT external cryptographic attestation.",
+    "consumer": "Versioned query/export advisory artifact only; human override and freeform creative preserved.",
+    "dependency_DAG": "A11-01 -> [A11-02, A11-03] -> A11-04. A11-03 may only reference stable report IDs/contracts from A11-01; no runtime dependence on unfinished A11-02 until fan-in.",
+    "security": "No provider tokens in test child processes; validate file bounds, JSON duplicate/nonfinite values, malformed IDs/timezones, path traversal/symlinks, no network side effects."
+  },
+  "expected_artifacts": [
+    "contracts/ObservationSnapshot.v1.schema.json",
+    "contracts/PerformanceReport.v1.schema.json",
+    "contracts/ComparisonResult.v1.schema.json",
+    "contracts/LearningHypothesis.v1.schema.json",
+    "contracts/LearningEvidence.v1.schema.json",
+    "contracts/LearningRecord.v1.schema.json",
+    "contracts/LearningRevision.v1.schema.json",
+    "src/ai_commerce/learning/{core,reader,reporting,registry,export}/ (implementation may consolidate)",
+    "src/ai_commerce/cli.py (A11-only commands, backwards-compatible)",
+    "tests/test_a11_reader.py",
+    "tests/test_a11_reporting.py",
+    "tests/test_a11_registry.py",
+    "tests/test_a11_integration.py",
+    "examples/a11/ synthetic inputs/outputs or script",
+    "docs/engineering/A11_IMPLEMENTATION_REPORT.md"
+  ],
+  "acceptance": [
+    "AC01 — Reader uses a consistent pinned A09 snapshot; validates schema/hash/provenance and does not write/alter A09 ledger, contracts or A08 linkage.",
+    "AC02 — L03 arithmetic and metric meaning are correct for explicit numerator/denominator, unit, timezone, exact [start,end) window and cohort; golden fixtures and non-comparable cases tested.",
+    "AC03 — AVAILABLE(0), NOT_AVAILABLE(null), INSUFFICIENT_DATA and NOT_COMPARABLE have separate semantics; missing values never silently coerced to zero.",
+    "AC04 — Observational comparisons remain descriptive; no unsupported cross-provider equivalence, causal attribution, guaranteed growth or real provider endorsement.",
+    "AC05 — L06 stores hypothesis/creative version/context/source refs/outcome, counterevidence and confounders; contradiction and inconclusive are first-class.",
+    "AC06 — Learning ledger is append-only with versioned revisions, idempotent exact replay, integrity/digest checks, correction lineage and rollback after failed transaction.",
+    "AC07 — Read/JSON export and CLI preserve stable provenance/uncertainty; never change A03/A08/A09 data or trigger publish/generative actions.",
+    "AC08 — Deterministic synthetic offline end-to-end, malformed/corrupt and negative cases; meaningful targeted MT-01 and fan-in Windows/Ubuntu regression results, with actual logs, SHA, diffs and candidate refs. Main merge remains separate."
+  ],
+  "engineering_execution": {
+    "transport": "EF02",
+    "executor": "codex",
+    "model": "gpt-6.1-sol",
+    "effort": "max",
+    "model_basis": "Human's existing Codex 6.1 Sol Max choice used for A09/A10 and preferred default; actual provider availability determined by live execution.",
+    "source_ref_strategy": "Dispatch source_sha must be set to HEAD after this WorkItem commit, not this planning baseline SHA.",
+    "delivery": "CANDIDATE_BRANCH",
+    "max_parallel": 2,
+    "verification_profile": "project-tests",
+    "max_repair_rounds": 2,
+    "sequence": [
+      {
+        "action": "A11-01",
+        "depends_on": []
+      },
+      {
+        "action": "A11-02",
+        "depends_on": [
+          "A11-01"
+        ]
+      },
+      {
+        "action": "A11-03",
+        "depends_on": [
+          "A11-01"
+        ]
+      },
+      {
+        "action": "A11-04",
+        "depends_on": [
+          "A11-02",
+          "A11-03"
+        ]
+      }
+    ],
+    "authorization_ref": "human-chat-2026-10-29-ai-commerce-engineering-workflow-implement-a11-deep-research"
+  },
+  "verification_result": {
+    "state": "NOT_YET_VERIFIED",
+    "candidate_ref": null,
+    "ci_runs": [],
+    "evidence_boundary": "Accepted for implementation; WorkItem creation/EF02 dispatch is not implementation PASS, candidate integration, merge or live commercial outcome."
+  }
+}
