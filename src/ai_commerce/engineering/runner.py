@@ -264,8 +264,8 @@ def _protected_change(paths: Sequence[str]) -> bool:
         parts = normalized.split("/")
         if (not normalized or normalized.startswith("/") or
                 any(part in ("", ".", "..") for part in parts) or
-                parts[0] in (".git", ".github", ".local", "secrets", "credentials") or
-                any(part == ".env" or part.startswith(".env.") for part in parts)):
+                any(part in (".git", ".github", ".local", "secrets", "credentials") or
+                    part == ".env" or part.startswith(".env.") for part in parts)):
             return True
     return False
 
