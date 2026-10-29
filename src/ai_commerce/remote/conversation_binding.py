@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import ipaddress
-import hashlib
 import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
+from .completion_event import CompletionEventError, validate_completion_event
 
 _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _CHAT = re.compile(r"https://chatgpt\.com/(?:c|g/g-[A-Za-z0-9_-]+/c)/(" + _UUID + r")\Z")
@@ -70,22 +70,9 @@ def resolve_binding(event: dict, *, route_id: str, registry_path: Path,
     """
     if not isinstance(route_id, str) or not _ROUTE.fullmatch(route_id):
         raise BindingError("ROUTE_INVALID")
-    if (event.get("kind") != "AI_COMMERCE_EF02_COMPLETION_EVENT" or event.get("version") != 1 or
-            event.get("origin_binding_status") != "UNBOUND" or event.get("delivery_status") != "NOT_ATTEMPTED"):
-        raise BindingError("EVENT_NOT_ELIGIBLE")
-    if (not _REPOSITORY.fullmatch(str(event.get("repository", ""))) or
-            not _SHA.fullmatch(str(event.get("source_sha", "")))):
-        raise BindingError("EVENT_IDENTITY_INVALID")
-    immutable_keys = ("repository", "run_id", "run_attempt", "issue_number",
-                      "batch_id", "source_sha", "batch_status", "actions")
     try:
-        immutable = {key: event[key] for key in immutable_keys}
-        expected = "ef02-completion-v1:" + hashlib.sha256(json.dumps(
-            immutable, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
-            allow_nan=False).encode("utf-8")).hexdigest()
-        if event.get("event_id") != expected or event.get("chat_delivery_proven") is not False:
-            raise BindingError("EVENT_IDENTITY_INVALID")
-    except (KeyError, TypeError, ValueError) as exc:
+        validate_completion_event(event)
+    except CompletionEventError as exc:
         raise BindingError("EVENT_IDENTITY_INVALID") from exc
     path = Path(registry_path)
     if not path.is_absolute() or not _outside_repo(path, Path(repository_root)):
@@ -127,7 +114,8 @@ def resolve_binding(event: dict, *, route_id: str, registry_path: Path,
         if (not isinstance(claim, dict) or set(claim) != claim_keys or
                 not isinstance(claim["route_id"], str) or claim["route_id"] not in route_lookup or
                 type(claim["generation"]) is not int or
-                claim["generation"] != route_lookup[claim["route_id"]]["generation"] or
+                claim["generation"] < 1 or
+                claim["generation"] > route_lookup[claim["route_id"]]["generation"] or
                 not isinstance(claim["repository"], str) or not _REPOSITORY.fullmatch(claim["repository"]) or
                 not isinstance(claim["batch_id"], str) or not _ROUTE.fullmatch(claim["batch_id"]) or
                 not isinstance(claim["source_sha"], str) or not _SHA.fullmatch(claim["source_sha"]) or
@@ -137,7 +125,8 @@ def resolve_binding(event: dict, *, route_id: str, registry_path: Path,
         if batch_key in seen_batches:
             raise BindingError("CLAIM_CONFLICT")
         seen_batches.add(batch_key)
-        if all(event.get(k) == claim[k] for k in ("repository", "batch_id", "source_sha", "issue_number")):
+        if (claim["generation"] == route_lookup[claim["route_id"]]["generation"] and
+                all(event.get(k) == claim[k] for k in ("repository", "batch_id", "source_sha", "issue_number"))):
             claim_matches.append(claim)
     if len(claim_matches) != 1 or claim_matches[0]["route_id"] != route_id:
         raise BindingError("ROUTE_EVENT_MISMATCH")
