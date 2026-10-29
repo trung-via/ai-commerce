@@ -191,3 +191,22 @@ Xem [quyết định MT-01](../governance/HUMAN_DECISION_2026-10-29_MINIMUM_TEST
 ## 2026-10-29 — A08 D02/D03/D04 verified and merged (offline assisted M2 scope)
 
 [PR #78](https://github.com/trung-via/ai-commerce/pull/78) merged A08 into `main@8d02bd15613220c06bcfb67225622674d70b3ffc`. It verifies an A06 MP4/provenance delivery before exporting immutable distribution package video/text/hash, supports manual posting handoff, and records append-only user-supplied publication evidence with explicit SUBMITTED vs PUBLISHED_CONFIRMED vs PUBLIC distinction. [A08 CI #40831199268](https://github.com/trung-via/ai-commerce/actions/runs/40831199268): **60 passed Windows; 60 passed Ubuntu**. [A07 CI #40831199192](https://github.com/trung-via/ai-commerce/actions/runs/40831199192): **65 passed Windows; 65 passed Ubuntu**. [A06 full regression #40831199309](https://github.com/trung-via/ai-commerce/actions/runs/40831199309): **907 passed Windows; 906 passed, 1 skipped Ubuntu**. **A08/D02-D04 and M2 are accepted strictly for OFFLINE_ASSISTED_SCOPE.** The system has not logged into any social provider, submitted any real media, or live-verified any receipt or public visibility. All user-provided receipts remain `USER_SUPPLIED_NOT_LIVE_VERIFIED`. A09 and D05-D08 remain planned; no live distribution or audience results are implied. See [A08 WorkItem](../../work_items/A08-ASSISTED-DISTRIBUTION-001.json) and [implementation report](../engineering/A08_IMPLEMENTATION_REPORT.md).
+
+## 2026-10-29 — Brain Sync after PR #93: A09/A10 offline implementation verified
+
+These current observations **supersede** historical PLANNED/NOT_IMPLEMENTED snapshots above. Roadmap A v1.0 and Work Tree v1.1 package IDs and dependency order remain unchanged.
+
+| Package | Latest observed engineering status | Grounded evidence and limits |
+|---|---|---|
+| **A09 (L01/L02/E02)** | `BUILD_VERIFIED_FOR_SCOPE`, merged | [PR #86](https://github.com/trung-via/ai-commerce/pull/86), [hosted CI #40859018408](https://github.com/trung-via/ai-commerce/actions/runs/40859018408), recorded in [A09 WorkItem](../../work_items/A09-AUDIENCE-OBSERVATION-001.json). Offline manual analytics and A08 source matching, no live account observation. |
+| **A10 (M01–M05)** | `BUILD_VERIFIED_FOR_SCOPE`, merged | [PR #93](https://github.com/trung-via/ai-commerce/pull/93), merged commit `2b4fb682a3015df483b1115ca66f897dfd8c3c01`, [A10 CI #40902555891](https://github.com/trung-via/ai-commerce/actions/runs/40902555891): Ubuntu 1,475 PASS / 1 Windows-only SKIP and Windows 1,476 PASS; M02 component 77 PASS each OS; offline demo and replay PASS each OS. A06/A07/A08 regression jobs 6/6 PASS. [A10 WorkItem](../../work_items/A10-OPPORTUNITY-AUDIENCE-001.json). |
+
+**Milestone M3:** audience measurement and opportunity-insight *offline prototype* scope is verified with A09 and A10. This is not verified real audience growth, provider analytics access or earned commerce outcomes. External accounts, permissions, real metrics, posting, affiliate links and settlement remain unproven.
+
+### Next Work Package options — advisory, not dispatched
+
+- **Primary recommendation A11 (L03, L06) — Audience Learning Registry.** A09 is available; implement immutable hypothesis/evidence records, source/metric/window/version linkage, counterevidence, learning and Human-editable decisions. Support synthetic/user-supplied offline inputs without claiming causal effects. A11 is still `PLANNED`; no A11 implementation or executor dispatch is implied here.
+- **Parallel A12 (P01, P03, P04, P05, P06) — Product Evidence Foundation.** A02 prerequisite is available; implement seller claims vs verified facts, variants, assets/rights provenance for future A13 affiliate release evidence, without forcing product selection or media restrictions.
+- **Optional independent EF02-D — Exact-chat Brain Wake.** The [EF02-D WorkItem](../../work_items/EF02-EXACT-CHAT-WAKE-002.json) retains platform delivery capability `UNKNOWN`; GitHub Issue and artifact feedback alone cannot prove a wake into this specific ChatGPT conversation. Engineering enhancement does not gate A11/A12.
+
+**Evidence boundary:** merging and CI demonstrate source code and synthetic offline functionality, not real public media posting, market traction, live authorization, completed sales or settled revenue. All future implementations require Human intent and real execution evidence.
