@@ -77,12 +77,18 @@ def evaluate(
     if not eligible:
         return result("NEEDS_RECHECK", "ACCOUNT_SPECIFIC_EVIDENCE_MISSING", snapshot)
 
+    if req["platform"] == "TIKTOK" and req["action"] == "API_DIRECT_POST" and not snapshot["constraints"].get("visibility"):
+        return result("NEEDS_RECHECK", "VISIBILITY_CONSTRAINT_UNPROVEN", snapshot)
     required = action.get("required_scopes", [])
     if "login_modes" in action:
         mode = snapshot["constraints"].get("login_mode")
         if not isinstance(mode, str) or mode not in action["login_modes"]:
             return result("NEEDS_RECHECK", "LOGIN_MODE_UNPROVEN", snapshot)
         required = action["login_modes"][mode]
+        if snapshot["constraints"].get("account_class") != "PROFESSIONAL":
+            return result("NEEDS_RECHECK", "PROFESSIONAL_ACCOUNT_NOT_PROVEN", snapshot)
+        if mode == "FACEBOOK_LOGIN" and snapshot["constraints"].get("linked_page_verified") != "TRUE":
+            return result("NEEDS_RECHECK", "LINKED_PAGE_NOT_PROVEN", snapshot)
     scope_claims = {s["name"]: s["status"] for s in snapshot["scope_claims"]}
     for name in required:
         if scope_claims.get(name) in ("REVOKED", "NOT_GRANTED"):

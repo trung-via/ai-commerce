@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,8 @@ class CapabilityRegistry:
     def __init__(self, path: str | Path):
         self.path = Path(path)
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         db = sqlite3.connect(self.path, timeout=15)
         db.execute("""
@@ -27,7 +29,14 @@ class CapabilityRegistry:
         """)
         db.execute("CREATE INDEX IF NOT EXISTS lookup_snapshot ON snapshots(stream_key, seq)")
         db.commit()
-        return db
+        try:
+            yield db
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
 
     @staticmethod
     def _decode(row: tuple[str, str] | None) -> dict[str, Any] | None:

@@ -146,6 +146,20 @@ def build_parser() -> argparse.ArgumentParser:
             sub.add_argument("--full-decode", action="store_true",
                              help="Explicit flag; A05 verifier always full-decodes")
 
+    channel = commands.add_parser("channel-capability", help="A07 offline capability registry; never publishes")
+    channel_ops = channel.add_subparsers(dest="channel_operation", required=True)
+    ch_validate = channel_ops.add_parser("validate", help="Validate a snapshot without importing")
+    ch_validate.add_argument("--file", type=Path, required=True)
+    ch_import = channel_ops.add_parser("import", help="Append immutable snapshot to SQLite registry")
+    ch_import.add_argument("--file", type=Path, required=True)
+    ch_import.add_argument("--db", type=Path, required=True)
+    ch_evaluate = channel_ops.add_parser("evaluate", help="Evaluate exact account/surface/action offline")
+    ch_evaluate.add_argument("--request", type=Path, required=True)
+    ch_evaluate.add_argument("--db", type=Path, required=True)
+    ch_evaluate.add_argument("--at", help="RFC3339 aware time; optional deterministic evaluation")
+    ch_history = channel_ops.add_parser("history", help="Show immutable history for one exact capability")
+    ch_history.add_argument("--request", type=Path, required=True)
+    ch_history.add_argument("--db", type=Path, required=True)
     return parser
 
 
@@ -340,6 +354,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Product Runtime: {info.product_runtime}")
         return 0
     try:
+        if args.command == "channel-capability":
+            from ai_commerce.distribution.cli import run as channel_run
+            return channel_run(args)
         if args.command == "creative-e2e":
             from ai_commerce.e2e import inspect as e01_inspect, run as e01_run, verify as e01_verify
             if args.e01_command == "run":

@@ -18,8 +18,8 @@ class CapabilityError(ValueError):
 
 
 _REJECT = re.compile(
-    r"(?i)(access[_-]?token|refresh[_-]?token|client[_-]?secret|authorization"
-    r"|set-cookie|session[_-]?cookie|upload[_-]?token|bearer\s+[a-z0-9])"
+    r'(?i)(?:"(?:access_token|refresh_token|client_secret|authorization|cookie|set-cookie|upload_token)"\s*:'
+    r'|bearer\s+[a-z0-9._-]{8,}|[?&](?:access_token|refresh_token|client_secret|auth)=)'
 )
 
 
