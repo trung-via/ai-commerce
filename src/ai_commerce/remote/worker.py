@@ -11,12 +11,43 @@ import time
 from pathlib import Path
 
 from .transport import GitHubTransport, RemoteTransportError, CandidateIntegrityError
-from .validation import fingerprint, check_source
+from .validation import fingerprint, check_source, approved_verification_plan
 from .reuse import load_approved_candidates, approve_reuse
 from ai_commerce.engineering.runner import (
     DEFAULT_MAX_REPAIR_ROUNDS, DEFAULT_ACTION_TIMEOUT_SECONDS,
     validate_max_repair_rounds, _snapshot, _provider_problem,
 )
+from ai_commerce.engineering.git import git_argv, resolve_git_executable
+from ai_commerce.engineering.minimum_test import Evidence, file_hashes
+
+
+def _fresh_aggregate_evidence(report: dict, *, root: Path, workspace: Path,
+                              source_sha: str, sources: list[str], argv: list[str]) -> bool:
+    """Validate immutable executed proof against the actual combined worktree."""
+    plan = report.get("minimum_test", {})
+    if (not report.get("minimum_test_enabled") or report.get("verify_argv") != argv or
+            plan.get("aggregate_sources") != sources or not plan.get("groups")):
+        return False
+    try:
+        current = file_hashes(workspace)
+        for index, group in enumerate(plan["groups"]):
+            binding = group["binding"]
+            if (group.get("actual_exit_code") != 0 or group.get("state") not in ("EXECUTE", "INVALIDATED") or
+                    binding["base_sha"] != source_sha or binding["aggregate_sources"] != sources or
+                    binding["argv"] != argv or binding["workspace"] != str(workspace.resolve()) or
+                    set(current) - set(binding["candidate_files"]) or
+                    binding["candidate_files"] != {p: current.get(p) for p in binding["candidate_files"]}):
+                return False
+            relative = report["evidence_files"][f"mt01_{index}_evidence"]
+            path = (root / relative).resolve()
+            if root.resolve() not in path.parents:
+                return False
+            proof = Evidence(path.read_text(encoding="utf-8"), group["evidence_sha256"])
+            if not proof.valid_for(binding, root):
+                return False
+        return True
+    except (ValueError, KeyError, TypeError, OSError):
+        return False
 
 def _remote_codex_sandbox_args(executor: str, *, windows: bool) -> list[str]:
     """EF02 Windows runner overrides only Codex; Antigravity is untouched."""
@@ -59,16 +90,19 @@ def _classify_failed_executor(report: dict, evidence: Path) -> str:
 
 class LocalBatchWorker:
     def __init__(self, *, checkout: Path, batch: dict, profiles: dict[str, list[str]],
-                 github: GitHubTransport, root: Path | None = None):
+                 github: GitHubTransport, root: Path | None = None, git_executable: str | None = None):
         self.checkout = checkout.resolve()
         self.batch = batch
         self.profiles = profiles
         self.github = github
+        configured_git = git_executable if git_executable is not None else os.environ.get("AI_COMMERCE_GIT_EXECUTABLE")
+        self.git_executable = resolve_git_executable(configured_git) if configured_git is not None else None
         self.root = (root or (self.checkout / ".local" / "ef02" / batch["batch_id"])).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.approved_reuse = load_approved_candidates(
             self.checkout / ".github" / "ef02" / "approved-candidates.v1.json")
-        check_source(self.checkout, batch["source_sha"])
+        check_source(self.checkout, batch["source_sha"],
+                     **({"git_executable": self.git_executable} if self.git_executable is not None else {}))
 
     def execute_action(self, action: dict) -> dict:
         """One independent action; claim precedes any executor invocation."""
@@ -101,6 +135,10 @@ class LocalBatchWorker:
             return finish()
         outcome["max_repair_rounds"] = repair_limit
         if action.get("reuse_candidate") is not None:
+            if action["depends_on"]:
+                outcome.update(status="UNPROVEN", error_code="AGGREGATE_REQUIRES_FRESH_VERIFICATION",
+                               aggregate_verification={"state": "UNPROVEN", "sibling_pass_reusable": False})
+                return finish()
             try:
                 entry = approve_reuse(self.batch, action, self.approved_reuse)
                 actual = {d["action_id"]: d.get("candidate_sha")
@@ -111,9 +149,13 @@ class LocalBatchWorker:
                     if approved_parent is None or actual.get(predecessor) != approved_parent["candidate_sha"]:
                         raise RemoteTransportError("REUSE_DEPENDENCY_SHA_MISMATCH")
                 self.github.verify_reused_candidate(entry)
-                outcome.update(status="CANDIDATE_READY", candidate_sha=entry["candidate_sha"],
+                # v1 approvals bind tree/profile/run, but do not bind the current
+                # test definitions, dependency environment or MT-01 artifacts.
+                # Keep the request readable; conservatively withhold a new PASS.
+                outcome.update(status="UNPROVEN", error_code="LEGACY_REUSE_MT01_EVIDENCE_REQUIRED",
+                               candidate_sha=entry["candidate_sha"],
                                candidate_ref=entry["candidate_ref"], effective_source_sha=entry["parent_sha"],
-                               verify_exit_code=0, reused=True, reused_verified=True,
+                               verify_exit_code=None, reused=True, reused_verified=False,
                                reuse_original_run_id=entry["verified_run_id"],
                                reuse_original_attempt_id=entry["attempt_id"],
                                claim_status="APPROVED_REUSE_NO_NEW_CLAIM",
@@ -152,8 +194,8 @@ class LocalBatchWorker:
                 env["GIT_CONFIG_KEY_0"] = "http.https://github.com/.extraheader"
                 env["GIT_CONFIG_VALUE_0"] = "AUTHORIZATION: basic " + auth
                 fetched = subprocess.run(
-                    ["git", "-C", str(self.checkout), "fetch", "--no-tags",
-                     "--no-write-fetch-head", "origin", merged["integration_ref"]],
+                    git_argv(self.checkout, "fetch", "--no-tags", "--no-write-fetch-head", "origin",
+                             merged["integration_ref"], executable=getattr(self, "git_executable", None)),
                     env=env, capture_output=True, text=True, check=False)
                 if fetched.returncode:
                     raise RemoteTransportError("INTEGRATION_FETCH_FAILED")
@@ -166,18 +208,31 @@ class LocalBatchWorker:
         worktree.rmdir()
         outcome["worktree"] = str(worktree)
         try:
-            p = subprocess.run(["git", "-C", str(self.checkout), "worktree", "add",
-                                "--detach", str(worktree), effective],
+            p = subprocess.run(git_argv(self.checkout, "worktree", "add", "--detach", str(worktree), effective,
+                                        executable=getattr(self, "git_executable", None)),
                                capture_output=True, text=True, check=False)
             if p.returncode != 0:
                 outcome.update(status="SOURCE_WORKTREE_FAILED",
                                error_code="GIT_WORKTREE_ADD_NONZERO", diagnostic=p.stderr)
                 return finish()
+            plan = approved_verification_plan(action, self.profiles)
+            outcome["verification_plan"] = plan
+            dependencies = action.get("resolved_dependencies", [])
+            outcome["aggregate_verification"] = {
+                "state": "UNPROVEN" if dependencies else "NOT_AGGREGATE",
+                "sibling_pass_reusable": False, "effective_source_sha": effective,
+                "dependency_candidates": [d.get("candidate_sha") for d in dependencies]}
+            _write_json(path / "verification_plan.json", plan)
+            if plan["state"] == "UNPROVEN":
+                outcome.update(status="UNPROVEN", error_code="APPROVED_BROAD_VERIFICATION_UNAVAILABLE")
+                return finish()
             instruction_file = path / "instruction.txt"
             instruction_file.write_text(action["instruction"], encoding="utf-8")
             verify_file = path / "verify.json"
-            verify_file.write_text(json.dumps(self.profiles[action["verification_profile"]]),
+            verify_file.write_text(json.dumps(plan["argv"]),
                                    encoding="utf-8")
+            registry_file = path / "verification_registry.json"
+            _write_json(registry_file, self.profiles)
             efdir = path / "ef01"
             argv = [sys.executable, "-m", "ai_commerce.engineering",
                     "--repo", str(worktree), "--work-id", self.batch["batch_id"] + ":" + aid,
@@ -186,6 +241,17 @@ class LocalBatchWorker:
                     "--instruction-file", str(instruction_file), "--verify-json", str(verify_file),
                     "--out-dir", str(efdir), "--max-repair-rounds", str(repair_limit),
                     "--action-timeout-seconds", str(DEFAULT_ACTION_TIMEOUT_SECONDS)]
+            argv.extend(["--minimum-test", "--registered-only", "--host-slots",
+                         str(max(int(os.environ.get("EF02_HOST_SLOTS", "2")), self.batch.get("max_parallel", 2)))])
+            argv.extend(["--registered-profiles-json", str(registry_file)])
+            for dependency in dependencies:
+                candidate_sha = dependency.get("candidate_sha")
+                if not candidate_sha:
+                    outcome.update(status="UNPROVEN", error_code="DEPENDENCY_CANDIDATE_EVIDENCE_MISSING")
+                    return finish()
+                argv.extend(["--aggregate-source", candidate_sha])
+            if getattr(self, "git_executable", None) is not None:
+                argv.extend(["--git-bin", self.git_executable])
             for allowed in action["allowed_paths"]:
                 argv.extend(["--allow-path", allowed])
             sandbox_argv = _remote_codex_sandbox_args(action["executor"], windows=(os.name == "nt"))
@@ -291,6 +357,9 @@ class LocalBatchWorker:
             outcome["repair_stop_reason"] = report.get("stop_reason")
             outcome["ef01_usage"] = report.get("usage")
             outcome["ef01_usage_status"] = report.get("usage_status", "UNKNOWN")
+            outcome["pytest_profile"] = report.get("pytest_profile")
+            outcome["pytest_profiles"] = report.get("pytest_profiles")
+            outcome["observed_pytest_workers"] = report.get("observed_pytest_workers")
             # Trust neither a success-shaped receipt after a nonzero process
             # exit nor an EF01 PASS receipt contradicted by verification.
             # Both cases can arise when the EF01 process dies after writing
@@ -325,6 +394,14 @@ class LocalBatchWorker:
             if report.get("source_base_sha") != effective:
                 outcome.update(status="SOURCE_MISMATCH", error_code="EF01_BASE_MISMATCH")
                 return finish()
+            if dependencies:
+                if not _fresh_aggregate_evidence(
+                        report, root=efdir, workspace=worktree, source_sha=effective,
+                        sources=[d["candidate_sha"] for d in dependencies], argv=plan["argv"]):
+                    outcome.update(status="UNPROVEN", error_code="AGGREGATE_FRESH_COVERAGE_UNCONFIRMED")
+                    return finish()
+                outcome["aggregate_verification"].update(state="VERIFIED_COMBINED_SCOPE",
+                                                         profile=plan["profile"], verify_exit_code=0)
             hashes = report.get("candidate_file_sha256")
             changed = report.get("changed_files")
             if (not isinstance(hashes, dict) or not isinstance(changed, list)
@@ -340,7 +417,8 @@ class LocalBatchWorker:
                 return finish()
             # Reconcile the exact final source/tree again after the EF01 process
             # exits. Candidate transport separately checks bytes before any write.
-            snapshot, _ = _snapshot(worktree, action["allowed_paths"], time.monotonic() + 30)
+            snapshot, _ = _snapshot(worktree, action["allowed_paths"], time.monotonic() + 30,
+                                   **({"git_executable": self.git_executable} if getattr(self, "git_executable", None) is not None else {}))
             if (not snapshot["scope_valid"] or any(
                     snapshot[key] != report.get(key) for key in (
                         "git_head_after", "changed_files", "candidate_file_sha256",

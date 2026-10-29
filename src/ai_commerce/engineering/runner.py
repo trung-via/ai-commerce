@@ -18,6 +18,10 @@ from typing import Any, Sequence
 
 from .adapters import command_for
 from .profile import ExecutorSelection
+from .git import git_argv, resolve_git_executable
+from .minimum_test import file_hashes
+from .verification import execute_plan
+from .pytest_profile import host_capacity, profile_command, worker_decision, xdist_available, require_managed_parallelism
 
 
 def _now() -> str:
@@ -28,15 +32,16 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _git(repo: Path, *args: str, timeout_seconds: float = 30) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
+def _git(repo: Path, *args: str, timeout_seconds: float = 30,
+         git_executable: str | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(git_argv(repo, *args, executable=git_executable), capture_output=True,
                           text=True, encoding="utf-8", errors="replace", check=False, timeout=timeout_seconds)
 
 
-def _changes(repo: Path, *, timeout_seconds: float = 30) -> list[str]:
+def _changes(repo: Path, *, timeout_seconds: float = 30, git_executable: str | None = None) -> list[str]:
     # porcelain -z gives unambiguous paths including spaces / quoted filenames.
-    raw = subprocess.run(["git", "-C", str(repo), "status", "--porcelain=v1", "-z",
-                          "--untracked-files=all"], capture_output=True, check=False,
+    raw = subprocess.run(git_argv(repo, "status", "--porcelain=v1", "-z",
+                                 "--untracked-files=all", executable=git_executable), capture_output=True, check=False,
                          timeout=timeout_seconds)
     if raw.returncode:
         raise RuntimeError("GIT_STATUS_FAILED: " + raw.stderr.decode("utf-8", "replace").strip())
@@ -226,17 +231,18 @@ def _remaining(deadline: float, limit: float = 30) -> float:
     return min(limit, remaining)
 
 
-def _snapshot(repo: Path, prefixes: Sequence[str], deadline: float) -> tuple[dict, bytes]:
-    head = _git(repo, "rev-parse", "HEAD", timeout_seconds=_remaining(deadline))
-    identity = _git(repo, "rev-parse", "--absolute-git-dir", timeout_seconds=_remaining(deadline))
+def _snapshot(repo: Path, prefixes: Sequence[str], deadline: float,
+              git_executable: str | None = None) -> tuple[dict, bytes]:
+    head = _git(repo, "rev-parse", "HEAD", timeout_seconds=_remaining(deadline), git_executable=git_executable)
+    identity = _git(repo, "rev-parse", "--absolute-git-dir", timeout_seconds=_remaining(deadline), git_executable=git_executable)
     if head.returncode or identity.returncode:
         raise RuntimeError("GIT_SOURCE_UNAVAILABLE")
-    changed = _changes(repo, timeout_seconds=_remaining(deadline))
-    diff = subprocess.run(["git", "-C", str(repo), "diff", "--binary", head.stdout.strip()],
+    changed = _changes(repo, timeout_seconds=_remaining(deadline), git_executable=git_executable)
+    diff = subprocess.run(git_argv(repo, "diff", "--binary", head.stdout.strip(), executable=git_executable),
                           capture_output=True, check=False, timeout=_remaining(deadline))
     if diff.returncode:
         raise RuntimeError("GIT_DIFF_FAILED")
-    confirmed = _git(repo, "rev-parse", "HEAD", timeout_seconds=_remaining(deadline))
+    confirmed = _git(repo, "rev-parse", "HEAD", timeout_seconds=_remaining(deadline), git_executable=git_executable)
     if confirmed.returncode or confirmed.stdout != head.stdout:
         raise RuntimeError("GIT_SOURCE_CHANGED_DURING_SNAPSHOT")
     return {
@@ -342,7 +348,9 @@ def _verify_infrastructure_failure(stdout: bytes, stderr: bytes) -> bool:
     return bool(_provider_problem(stdout + b"\n" + stderr) or any(
         text in messages for text in (
             "no module named pytest", "0xc0000142", "3221225794", "-1073741502",
-            "[winerror 1920]", "subprocess.timeoutexpired")))
+            "[winerror 1920]", "subprocess.timeoutexpired", "worker crashed", "workers crashed",
+            "memoryerror", "cannot allocate memory", "can't start new thread",
+            "failed to start worker", "could not start worker", "error while receiving from worker")))
 
 
 def _windows_command_units(command: Sequence[str]) -> int:
@@ -364,10 +372,16 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
                     allowed_prefixes: Sequence[str], deadline: float,
                     timeout_seconds: int, verify_timeout_seconds: int,
                     codex_bin: str, antigravity_bin: str,
-                    codex_windows_sandbox: str | None) -> None:
+                    codex_windows_sandbox: str | None,
+                    git_executable: str | None = None, mt_context: dict | None = None,
+                    pytest_profile: str = "windows-12", pytest_isolation_approved: bool = False,
+                    pytest_known_flaky: bool = False, host_slots: int = 1) -> None:
     inv = invocation
     directory = output_dir / inv["evidence_dir"]
     directory.mkdir(parents=True, exist_ok=False)
+    def snapshot():
+        options = {"git_executable": git_executable} if git_executable is not None else {}
+        return _snapshot(repo, allowed_prefixes, deadline, **options)
 
     def save(key: str, name: str, data: bytes) -> None:
         _write(directory / name, data)
@@ -381,7 +395,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     save("instruction", "instruction.txt", prompt.encode("utf-8"))
     if feedback is not None:
         save("repair_feedback", "repair_feedback.json", _json_bytes(feedback))
-    before, _ = _snapshot(repo, allowed_prefixes, deadline)
+    before, _ = snapshot()
     inv["input_snapshot"] = before
     save("source_before", "source.before.json", _json_bytes(before))
     problem = _source_problem(before, initial)
@@ -471,7 +485,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     usage = _observe_usage(out, selection.executor)
     if usage is not None:
         inv.update(usage=usage, usage_status="PROVIDER_REPORTED")
-    after, diff = _snapshot(repo, allowed_prefixes, deadline)
+    after, diff = snapshot()
     inv.update(after)
     inv["final_snapshot"] = after
     save("source_after_executor", "source.after_executor.json", _json_bytes(after))
@@ -497,12 +511,59 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     vout, verr = b"", b""
     try:
         inv["verify_timeout_seconds"] = _remaining(deadline, verify_timeout_seconds)
-        check = subprocess.run(list(verify_argv), cwd=repo, capture_output=True,
-                               text=True, encoding="utf-8", errors="replace",
-                               timeout=inv["verify_timeout_seconds"], check=False)
+        registered = bool(mt_context and mt_context["registered_only"])
+        if _is_pytest(verify_argv):
+            require_managed_parallelism(repo, list(verify_argv), registered_only=registered)
+        decision = worker_decision(
+            profile=pytest_profile, capacity=host_capacity(), host_slots=host_slots,
+            xdist_available=xdist_available(), isolation_approved=pytest_isolation_approved,
+            flaky=pytest_known_flaky, windows=(os.name == "nt"),
+            registered_only=registered, registered_argv=list(verify_argv))
+        inv["pytest_profile"] = decision
+        def transform(argv, group):
+            nonlocal decision
+            if not _is_pytest(argv):
+                return list(argv), decision
+            if registered:
+                decision = worker_decision(
+                    profile=pytest_profile, capacity=host_capacity(), host_slots=host_slots,
+                    xdist_available=xdist_available(), windows=(os.name == "nt"),
+                    registered_only=True, registered_argv=argv)
+                inv["pytest_profile"] = decision
+            return profile_command(argv, decision=decision, temp_dir=output_dir / "pytest-temp" / group), decision
+        if mt_context is not None:
+            check, plan = execute_plan(
+                repo=repo, output_dir=output_dir, base_sha=initial["git_head_after"],
+                base_files=mt_context["base_files"], changed_paths=after["changed_files"],
+                required_acs=mt_context["required_acs"], fallback_argv=list(verify_argv),
+                prior=mt_context["prior"], save=save, evidence_files=inv["evidence_files"],
+                deadline=deadline, timeout_seconds=inv["verify_timeout_seconds"],
+                registered_only=mt_context["registered_only"], aggregate_sources=mt_context["aggregate_sources"],
+                groups=mt_context.get("groups"), command_transform=transform,
+                registered_profiles=mt_context.get("registered_profiles"))
+            inv["minimum_test"] = plan
+        else:
+            actual_argv, _ = transform(list(verify_argv), "scope")
+            inv["verify_argv"] = actual_argv
+            inv["actual_verify_argv"] = actual_argv
+            check = subprocess.run(actual_argv, cwd=repo, capture_output=True,
+                                   text=True, encoding="utf-8", errors="replace",
+                                   timeout=inv["verify_timeout_seconds"], check=False)
         inv.update(verify_exit_code=check.returncode, verify_completed=True)
         vout, verr = check.stdout.encode("utf-8"), check.stderr.encode("utf-8")
+        observed = re.search(rb"\b([0-9]+) workers \[|created:\s*([0-9]+)/[0-9]+ workers", vout)
+        inv["observed_pytest_workers"] = int(observed[1] or observed[2]) if observed else None
+        if mt_context is None:
+            decision.update(workers_actual=inv["observed_pytest_workers"],
+                            observed_workers=inv["observed_pytest_workers"],
+                            execution_status="12_WORKERS_EXECUTED" if inv["observed_pytest_workers"] == 12
+                            else "12_WORKERS_NOT_EXECUTED" if decision["workers"] == 0
+                            else "WORKER_COUNT_UNPROVEN")
+        else:
+            inv["pytest_profiles"] = {entry["group"]: entry.get("pytest_profile") for entry in plan["groups"]}
         inv.update(status="VERIFICATION_FAILED", error_code="TARGETED_VERIFY_NONZERO_OR_UNAVAILABLE")
+        if mt_context is not None and check.returncode == 5:
+            inv.update(status="UNPROVEN", error_code="MT01_COVERAGE_UNPROVEN")
         if check.returncode < 0 or check.returncode >= 128 or (
                 _is_pytest(verify_argv) and check.returncode in (2, 3)):
             inv.update(status="EXECUTION_UNKNOWN", error_code="VERIFY_INTERRUPTED_OR_INTERNAL_ERROR")
@@ -522,7 +583,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         save("verify_stderr", "verify.stderr.log", verr)
     # Available traceback/summary excerpts are inline; full logs and hashes remain referenced.
     inv["verify_failure_details"] = (vout + b"\n" + verr).decode("utf-8", "replace")[-24000:]
-    final, diff = _snapshot(repo, allowed_prefixes, deadline)
+    final, diff = snapshot()
     inv.update(final)
     inv["final_snapshot"] = final
     save("source_after_verify", "source.after_verify.json", _json_bytes(final))
@@ -602,13 +663,28 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                     max_repair_rounds: int = DEFAULT_MAX_REPAIR_ROUNDS,
                     action_timeout_seconds: int = DEFAULT_ACTION_TIMEOUT_SECONDS,
                     codex_bin: str = "codex", antigravity_bin: str = "agy",
-                    codex_windows_sandbox: str | None = None) -> dict[str, Any]:
+                    codex_windows_sandbox: str | None = None, git_executable: str | None = None,
+                    minimum_test: bool = False, acceptance_ids: Sequence[str] = (),
+                    registered_only: bool = False, aggregate_sources: Sequence[str] = (),
+                    pytest_profile: str = "windows-12", pytest_isolation_approved: bool = False,
+                    pytest_known_flaky: bool = False, host_slots: int = 1,
+                    registered_profiles: dict[str, list[str]] | None = None) -> dict[str, Any]:
     """One attempt on an initially clean tree, with bounded same-profile repairs.
 
     Only a completed scoped pytest code failure permits repair. Each CLI call is
     independent; no vendor session continuation is assumed. No commits or push.
     """
     validate_max_repair_rounds(max_repair_rounds)
+    # Validate bad explicit Git/profile configuration before any provider call.
+    configured_git = git_executable if git_executable is not None else os.environ.get("AI_COMMERCE_GIT_EXECUTABLE")
+    git_executable = resolve_git_executable(configured_git) if configured_git is not None else None
+    worker_decision(profile=pytest_profile, capacity=host_capacity(), host_slots=host_slots)
+    if registered_profiles is not None and (not isinstance(registered_profiles, dict) or any(
+            not isinstance(name, str) or not name or not isinstance(argv, list) or not argv or
+            not all(isinstance(arg, str) and arg and "\x00" not in arg for arg in argv) or
+            not _is_pytest(argv)
+            for name, argv in registered_profiles.items())):
+        raise ValueError("MT01_INVALID_REGISTERED_PROFILES")
     for value in (timeout_seconds, verify_timeout_seconds, action_timeout_seconds):
         if type(value) is not int or not 1 <= value <= MAX_TIMEOUT_SECONDS:
             raise ValueError(f"Timeouts must be integers from 1 to {MAX_TIMEOUT_SECONDS}")
@@ -622,9 +698,16 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
         raise ValueError("Output dir within repo must be under ignored .local/")
     if output_dir.exists():
         raise FileExistsError("EVIDENCE_EXISTS: choose a new attempt/output folder")
-    initial, _ = _snapshot(repo, allowed_prefixes, deadline)
+    initial, _ = _snapshot(repo, allowed_prefixes, deadline,
+                           **({"git_executable": git_executable} if git_executable is not None else {}))
     if initial["changed_files"]:
         raise ValueError("WORKTREE_DIRTY: commit/stash existing changes before attempt")
+    if minimum_test and not _is_pytest(verify_argv):
+        raise ValueError("MT01_REQUIRES_APPROVED_PYTEST_FALLBACK")
+    mt_context = ({"base_files": file_hashes(repo), "required_acs": tuple(acceptance_ids),
+                   "prior": {}, "registered_only": registered_only,
+                   "aggregate_sources": tuple(aggregate_sources),
+                   "registered_profiles": registered_profiles} if minimum_test else None)
     command_for(selection, repo, instruction, codex_bin=codex_bin,
                 antigravity_bin=antigravity_bin, codex_windows_sandbox=codex_windows_sandbox)
     report: dict[str, Any] = {
@@ -635,6 +718,7 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
         "sandbox_backend": codex_windows_sandbox or "executor-default",
         "sandbox_policy": "workspace-write" if selection.executor == "codex" else "accept-edits",
         "source_base_sha": initial["git_head_after"], "repo": str(repo),
+        "git_executable": git_executable or "git", "minimum_test_enabled": minimum_test,
         "instruction_sha256": _sha(instruction.encode("utf-8")),
         "status": "NOT_STARTED", "error_code": None, "executor_invoked": False,
         "executor_exit_code": None, "verify_argv": list(verify_argv), "verify_exit_code": None,
@@ -688,7 +772,10 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                     selection=selection, prompt=prompt, feedback=feedback, verify_argv=verify_argv,
                     allowed_prefixes=allowed_prefixes, deadline=deadline, timeout_seconds=timeout_seconds,
                     verify_timeout_seconds=verify_timeout_seconds, codex_bin=codex_bin,
-                    antigravity_bin=antigravity_bin, codex_windows_sandbox=codex_windows_sandbox)
+                    antigravity_bin=antigravity_bin, codex_windows_sandbox=codex_windows_sandbox,
+                    git_executable=git_executable, mt_context=mt_context,
+                    pytest_profile=pytest_profile, pytest_isolation_approved=pytest_isolation_approved,
+                    pytest_known_flaky=pytest_known_flaky, host_slots=host_slots)
             except Exception as exc:
                 inv.update(status="EXECUTION_UNKNOWN",
                            error_code="ACTION_TIMEOUT" if isinstance(exc, TimeoutError) else "RUNNER_ERROR",
@@ -703,6 +790,9 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                             "changed_files", "candidate_file_sha256", "tracked_diff_sha256",
                             "scope_valid", "git_head_after", "denied_actions", "evidence_files"):
                     report[key] = inv[key]
+                for key in ("minimum_test", "pytest_profile", "pytest_profiles", "observed_pytest_workers"):
+                    if key in inv:
+                        report[key] = inv[key]
                 _write(output_dir / inv["result_file"], _json_bytes(inv))
             if deadline <= time.monotonic():
                 report.update(status="EXECUTION_UNKNOWN", error_code="ACTION_TIMEOUT")

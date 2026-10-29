@@ -327,8 +327,9 @@ def test_reuse_candidate_readonly_path_no_claim_no_model(tmp_path):
                                 "depends_on","allowed_paths","verification_profile")}
     act.update(instruction="No provider calls", reuse_candidate={"candidate_sha":"b"*40, "verified_run_id":5})
     result = worker.execute_action(act)
-    assert result["status"] == "CANDIDATE_READY"
-    assert result["reused_verified"] and not result["executor_invoked"]
+    assert result["status"] == "UNPROVEN"
+    assert result["error_code"] == "LEGACY_REUSE_MT01_EVIDENCE_REQUIRED"
+    assert not result["reused_verified"] and not result["executor_invoked"]
     assert worker.github.calls == 1
 
 

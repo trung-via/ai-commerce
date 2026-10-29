@@ -8,6 +8,8 @@ from pathlib import Path, PurePosixPath
 from jsonschema import Draft202012Validator
 from ai_commerce.engineering.profile import ExecutorSelection
 from ai_commerce.engineering.runner import validate_max_repair_rounds, DEFAULT_MAX_REPAIR_ROUNDS
+from ai_commerce.engineering.git import git_argv
+from ai_commerce.engineering.pytest_profile import registered_workers
 
 IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 HEX_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -46,6 +48,10 @@ def verify_registry(path: Path) -> dict[str, list[str]]:
             raise RemoteRequestError("ONLY_REGISTERED_PYTEST_PROFILES_SUPPORTED")
         if any(".." in arg or arg.startswith("-c") for arg in argv[3:]):
             raise RemoteRequestError("INVALID_VERIFICATION_ARGUMENTS")
+        try:
+            registered_workers(argv)
+        except ValueError as exc:
+            raise RemoteRequestError("INVALID_VERIFICATION_WORKERS") from exc
     return data
 
 def validate_batch(data: dict, *, schema: Path, registry: dict[str, list[str]],
@@ -98,10 +104,32 @@ def validate_batch(data: dict, *, schema: Path, registry: dict[str, list[str]],
         dfs(node)
     return data
 
-def check_source(repo: Path, source_sha: str) -> None:
+def approved_verification_plan(action: dict, registry: dict[str, list[str]]) -> dict:
+    """Until a companion registration lands, unknown MT-01 scope uses full pytest.
+
+    Select an existing registry entry verbatim; no action controls generated argv.
+    RemoteActionBatch v1 and its fingerprints remain unchanged.
+    """
+    requested = action["verification_profile"]
+    if requested not in registry:
+        raise RemoteRequestError("VERIFICATION_PROFILE_UNREGISTERED")
+    full = registry.get("project-tests", [])
+    full_scope = (full[:3] in (["python", "-m", "pytest"], ["py", "-m", "pytest"]) and
+                  full[3:] in (["tests", "-q"], ["tests", "-q", "-n", "12"]))
+    return {"state": "EXECUTE" if full_scope else "UNPROVEN", "requested_profile": requested,
+            "profile": "project-tests" if full_scope else requested,
+            "argv": list(full if full_scope else registry[requested]),
+            "minimum_test": full_scope, "registered_only": True,
+            "coverage": "FULL_REGISTERED_SUITE" if full_scope else "BROAD_PROFILE_UNAVAILABLE",
+            "workers_requested": 12, "registered_workers": registered_workers(full) if full_scope else None,
+            "reason": "MT01_SELECTOR_REGISTRATION_REQUIRES_COMPANION_PR",
+            "aggregate_requires_fresh_execution": bool(action.get("depends_on"))}
+
+
+def check_source(repo: Path, source_sha: str, *, git_executable: str | None = None) -> None:
     if not HEX_SHA.fullmatch(source_sha):
         raise RemoteRequestError("INVALID_SOURCE_SHA")
-    proc = subprocess.run(["git", "-C", str(repo), "cat-file", "-t", source_sha],
+    proc = subprocess.run(git_argv(repo, "cat-file", "-t", source_sha, executable=git_executable),
                           capture_output=True, text=True, check=False)
     if proc.returncode or proc.stdout.strip() != "commit":
         raise RemoteRequestError("SOURCE_COMMIT_UNAVAILABLE")

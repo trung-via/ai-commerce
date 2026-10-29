@@ -35,6 +35,17 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Total EF01 budget shared by all invocations and verifies (default: 7200)")
     parser.add_argument("--codex-bin", default="codex")
     parser.add_argument("--antigravity-bin", default="agy")
+    parser.add_argument("--git-bin", default=None, help="Direct Git executable; default: git on PATH")
+    parser.add_argument("--minimum-test", action="store_true", help="Use the deterministic MT-01 AC/dependency map")
+    parser.add_argument("--acceptance", action="append", default=[], help="Applicable AC ID in the trusted MT-01 map")
+    parser.add_argument("--registered-only", action="store_true", help="EF02: preserve exact registered verification argv")
+    parser.add_argument("--registered-profiles-json", type=Path, default=None,
+                        help="EF02 trusted registry snapshot for exact registered test groups")
+    parser.add_argument("--aggregate-source", action="append", default=[], help="EF02: invalidate sibling proof at fan-in")
+    parser.add_argument("--pytest-profile", choices=["windows-12"], default="windows-12",
+                        help="Twelve workers per eligible action (Human default)")
+    parser.add_argument("--host-slots", type=int, default=1,
+                        help="Observable concurrent action slots; never divides pytest workers")
     parser.add_argument("--codex-windows-sandbox", choices=["mxc"], default=None,
                         help="Per-invocation MXC override for Codex on EF02 Windows Service only")
     return parser
@@ -57,7 +68,13 @@ def main(argv: list[str] | None = None) -> int:
                                  max_repair_rounds=args.max_repair_rounds,
                                  action_timeout_seconds=args.action_timeout_seconds,
                                  codex_bin=args.codex_bin, antigravity_bin=args.antigravity_bin,
-                                 codex_windows_sandbox=args.codex_windows_sandbox)
+                                 codex_windows_sandbox=args.codex_windows_sandbox,
+                                 git_executable=args.git_bin, minimum_test=args.minimum_test,
+                                 acceptance_ids=args.acceptance, registered_only=args.registered_only,
+                                 aggregate_sources=args.aggregate_source, pytest_profile=args.pytest_profile,
+                                 host_slots=args.host_slots,
+                                 registered_profiles=json.loads(args.registered_profiles_json.read_text(encoding="utf-8-sig"))
+                                 if args.registered_profiles_json else None)
     except (SelectionError, ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"EF01 INPUT/ENV ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2

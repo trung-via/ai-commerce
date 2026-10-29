@@ -2,8 +2,8 @@
   "work_id": "EF01-DIRECT-GIT-PYTEST-003",
   "wbs_id": "EF01",
   "type": "OPTIONAL_ENGINEERING_ENHANCEMENT",
-  "title": "EF01-P: optional Direct Git, pytest-xdist 12 workers and MT-01 Minimum Test",
-  "status": "PLANNED_NOT_IMPLEMENTED",
+  "title": "EF01-P / MT-01: Direct Git, strict test evidence, 12 pytest workers per eligible action",
+  "status": "IMPLEMENTED_LOCAL_VERIFIED_EF02_ACTIVATION_PENDING",
   "priority": "P2",
   "roadmap_phase": "1_OR_2",
   "owner": "EF01 verification; EF02 host capacity integration",
@@ -23,14 +23,14 @@
   "design": {
     "current_baseline": "subprocess argv uses git directly via PATH; pytest profiles serial; no pytest-xdist declared",
     "direct_git": "Optional explicit git executable path/GIT executable resolution; no implicit shell/wrapper/hardcoded C:\\ path; fallback git on PATH",
-    "pytest_parallel": "Optional registered pytest-xdist profile up to -n 12 only when available; serial profile remains valid; isolate temp/fixtures and perform deterministic parallel safety checks",
-    "host_budget": "distinguish pytest worker count from EF02 max_parallel, default EF02 max_parallel=2 unchanged; avoid unconstrained 2 actions x 12 workers on limited RAM/CPU",
-    "measurement": "record git invocation latency and serial vs 4/8/12 workers test wall-clock, memory, failures, reproducibility on actual Windows host before choosing defaults",
-    "fallback": "if xdist missing, insufficient RAM, flaky tests, or overhead exceeds benefit keep serial and report reason",
+    "pytest_parallel": "HUMAN DEFAULT: -n 12 for EACH eligible local EF01, EF02, repair and fan-in pytest action. Two simultaneous actions each request 12 (24 total). Registered argv stays exact.",
+    "host_budget": "EF02 max_parallel default remains 2. No primary/secondary allocator, host lease, CPU/RAM division or automatic 2/4/8 reduction due to concurrent actions.",
+    "measurement": "HUMAN_REPORTED prior 2/4/8/12/16 trial selected 12 fastest and host capable of 24; no repeat benchmark or capacity gate. Record actual argv/workers/exit/overlap.",
+    "fallback": "Only observed xdist absence, worker launch, severe resource or fixture isolation failure permits logged serial fallback or STOP. A serial registered profile is a disclosed registration gap, not 12-worker proof.",
     "minimum_test": {
       "id": "MT-01",
       "owner": "EF01-P; EF02 consumes per-action verification and fan-in evidence",
-      "status": "PLANNED_NOT_IMPLEMENTED",
+      "status": "IMPLEMENTED_LOCAL_VERIFIED_REGISTERED_NARROW_ACTIVATION_PENDING",
       "selection": "Deterministic smallest sufficient registered pytest set from changed paths, AC, direct/indirect consumers and contract dependencies; never empty only to obtain PASS.",
       "evidence_states": [
         "EXECUTE",
@@ -50,19 +50,35 @@
       "ef02_integration": "Action-scoped approved verification plans, preserve claims/fingerprints; at fan-in verify merged candidate's affected consumers, not just sibling PASS results.",
       "safe_fallback": "Unknown coverage => broader targeted/full registered profile or UNPROVEN, never fabricated PASS. pytest no-tests/internal/timeout are not success.",
       "registered_profile_constraint": "Current EF02 only accepts registered pytest argv; future dynamic selection must remain deterministic/validated, no arbitrary command injection.",
-      "xdist_relation": "Optional 12 worker concurrency only after Windows xdist/fixture isolation checks; independent from EF02 host slots=2, serial fallback preserved.",
+      "xdist_relation": "MT-01 chooses sufficient tests independently; every eligible verification action uses twelve workers, including both concurrent actions. Existing protected serial registrations are preserved pending companion change.",
       "no_mandatory_benchmark_gate": true
+    },
+    "xdist_workers_per_action_20261029": {
+      "decision_ref": "https://github.com/trung-via/ai-commerce/pull/82",
+      "authority": "HUMAN_DECIDED",
+      "default_workers_each_action": 12,
+      "max_parallel_default_unchanged": 2,
+      "target_workers_at_max_parallel": 24,
+      "primary_secondary_allocation": false,
+      "host_wide_primary_lease": false,
+      "repeated_benchmark_required": false,
+      "prior_benchmark": "HUMAN_REPORTED_12_FASTEST_AMONG_2_4_8_12_16",
+      "human_host_capacity": "HUMAN_REPORTED_24_PYTEST_WORKERS_SUPPORTED",
+      "actual_live_12_workers_verified": true,
+      "actual_live_24_workers_verified": true,
+      "live_evidence_scope": "SUPPLEMENTAL_LOCAL_WINDOWS_PYTEST; NOT_REGISTERED_EF02_ACTIVATION"
     }
   },
   "acceptance": [
-    "Explicit Git path produces correct argv for all current Git calls on Windows; missing/bad path fails clearly or configured safe fallback without changing source provenance.",
-    "pytest-xdist optional profile (when installed) passes target/full tests at chosen 12 workers, with isolated temp/worktrees, no fixture race and no invented speedup claim.",
-    "Measured Windows timings and host resource observations justify chosen setting; if 12 is slower or unstable, retain smaller count or serial.",
-    "Two concurrent EF02 actions do not each overcommit unbounded pytest workers; configuration and resource limit are observable.",
-    "MT-01 chooses minimum sufficient tests grounded by changed files, dependency consumers and AC; audit record explains EXECUTE/REUSE/INVALIDATED/UNPROVEN.",
-    "PASS evidence reuse is permitted only when code/test/dependency/environment fingerprint and AC coverage remain valid; edits affecting prior evidence require rerun.",
-    "EF01-R repair reruns failed/affected tests and preserves valid PASS without duplicate action/provider side effects; failure and unknown are not promoted to PASS.",
-    "EF02 fan-in invalidates affected sibling evidence and runs aggregate consumer/integration coverage, otherwise returns UNPROVEN instead of claimed batch PASS."
+    "Explicit Git executable produces safe argv; bad paths/wrappers fail clearly while source provenance and credential behavior remain intact.",
+    "Each eligible local EF01, EF02, repair and fan-in pytest verification uses -n 12; default EF02 max_parallel=2 permits two actions requesting 12 each.",
+    "Accept Human-reported prior 2/4/8/12/16 comparison and host capacity without a new benchmark gate; log actual argv, launched workers, counts, exits and concurrent spans.",
+    "No primary/secondary, host-wide twelve-seat lease or automatic 2/4/8 reduction due to a second action; only observed xdist/launch/resource/fixture failure permits logged serial fallback or STOP.",
+    "MT-01 deterministically selects minimal sufficient AC/path/import/test/consumer/contract groups and explains EXECUTE, REUSE, INVALIDATED or UNPROVEN.",
+    "Reuse binds relevant base/candidate hashes, definitions/argv, dependencies/environment, AC coverage and immutable successful artifacts; affected changes invalidate proof.",
+    "EF01-R retains selected executor/model/effort and bounded action budget, preserves valid PASS and reruns failed/affected tests without duplicate action/provider effects.",
+    "EF02 fan-in requires fresh combined consumer/integration proof with validated aggregate/source/file/argv/artifact bindings; sibling PASS alone is UNPROVEN.",
+    "Registered pytest argv only; protected registry and RemoteActionBatch v1 remain unchanged here. Existing serial registration is explicitly disclosed; a companion host/PR change is required for authoritative parallel or narrow EF02 profiles."
   ],
   "non_goals": [
     "12 concurrent Codex/Antigravity models",
@@ -71,11 +87,29 @@
     "Impose 12 workers on every CI job",
     "Mandatory full-suite after every repair; a new lifecycle/gate; importing AIOS-Renew verification runtime"
   ],
-  "implementation_started": false,
+  "implementation_started": true,
   "measured_windows_baseline": false,
-  "executor_dispatched": false,
+  "executor_dispatched": true,
   "decision_refs": [
     "docs/governance/HUMAN_DECISION_2026-10-28_EF_ENHANCEMENTS.md",
-    "docs/governance/HUMAN_DECISION_2026-10-29_MINIMUM_TEST.md"
-  ]
+    "docs/governance/HUMAN_DECISION_2026-10-29_MINIMUM_TEST.md",
+    "https://github.com/trung-via/ai-commerce/pull/82"
+  ],
+  "recovery": {
+    "parent_run_id": 40840406005,
+    "parent_artifact_id": 12887486123,
+    "parent_attempt": "ef01p-mt01-codex61sol-max-20261029-01",
+    "parent_status": "SCOPE_VIOLATION",
+    "parent_verify_exit_code": null,
+    "parent_candidate_ref": null,
+    "source_base_sha": "13c24705e32820e80fe0b9b7c91713b61bee6c77",
+    "authoritative_ef02_verification": "PENDING_ENCLOSING_EF02_VERIFIER",
+    "registry_activation": "SEPARATE_PROTECTED_HOST_OR_PR_CHANGE_REQUIRED",
+    "report": "docs/engineering/EF01_P_MT01_IMPLEMENTATION_REPORT.md",
+    "current_attempt": "ef01p-mt01-recover-12each-codex61solmax-20261029-02",
+    "local_project_tests_exit_code": 0,
+    "local_project_tests_summary": "999 passed, 3 skipped in 767.97s (0:12:47)",
+    "local_project_tests_receipt_sha256": "fe669acd527362c66b397cead61ee384dcf97e7a148eddc590b5b0f6b6e8b840",
+    "live_24_receipt_sha256": "76798ec2bc93ce9600dc8059eeea94451c15a2692cdcea235573fca606e53c8e"
+  }
 }
