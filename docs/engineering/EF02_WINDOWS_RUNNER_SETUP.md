@@ -36,3 +36,34 @@ Commands from the local folder containing the downloaded script:
 Do not run Task Scheduler and Windows Service with the same runner registration simultaneously. The other three runners are untouched. The scheduled task starts only after user login, stops on logout and does not prevent laptop sleep.
 
 **Acceptance (after Human locally installs):** scheduled task state Running; AI Commerce Windows service Stopped and Disabled; GitHub runner Online; new EF02 Codex MSI Shell Probe (No Model) workflow run shows SESSION_ID > 0, direct_msi, mxc_cmd, mxc_msi and mxc_pwsh_alias all exit 0 with expected markers. Only afterward create a new unique Codex gpt-6.1-sol/max live conformance to check Verify FAIL -> Repair -> Verify PASS. Never reuse earlier claims or merge a probe candidate.
+
+
+## 2026-10-29 — Hidden Session 1 runner (optional operational upgrade)
+
+**Scope:** Stop accidental closure of the visible \`cmd.exe\` runner window. The **same single AI Commerce GitHub runner** handles both Codex and Antigravity; Task Scheduler does not select the executor. Windows Service stays Disabled. Does not modify AIOS, Python Agent or Torrent TV runners, Windows sandbox \`mxc\`, model settings or GitHub job contracts.
+
+**Implementation:** \`scripts/EF02-Hidden-Runner-Upgrade.ps1\` stages a change to the existing \`AI-Commerce-EF02-Interactive\` Scheduled Task's action, from visible \`cmd.exe /d /c run.cmd\` to interactive-session \`wscript.exe //B //Nologo EF02-Hidden-Runner.vbs\`. The generated VBScript calls \`%ComSpec% /d /c run.cmd\` with WSH WindowStyle 0 (hidden) and synchronous wait (True). If the runner exits, it returns exit code 1 to activate the **existing** Task Scheduler RestartOnFailure policy (original 3 retries / 1 minute). This is **bounded restart**, not a 24/7 supervisor, and it cannot restart jobs after sign-out/Sleep or recover in-flight GitHub jobs with unknown side effects.
+
+**Safe, non-disruptive stage:** Run in Windows Administrator PowerShell while logged in as the original runner user:
+
+\`\`\`powershell
+$file = "$env:USERPROFILE\Downloads\EF02-Hidden-Runner-Upgrade.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $file -Mode Install
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $file -Mode Status
+\`\`\`
+
+\`Install\` refuses unexpected task/service identity, non-interactive task logon, missing \`run.cmd\` or \`wscript.exe\`, duplicate backup/launcher, missing restart policy, or unexpected existing action. It saves only the original action in \`C:\TOOL\ai-commerce-runner\.ef02-hidden-runner-action-backup.json\` before updating it. **It does not stop or restart any currently running task or worker**, so the hidden launcher will first take effect at the next task start/logon. The current visible CMD may remain until then. Do not close the current window during active jobs.
+
+**Activation:** After verifying there are **no active GitHub Actions jobs**, the user may stop/start only \`AI-Commerce-EF02-Interactive\` in Task Scheduler, or simply sign out and sign in at a convenient time. Do **not** restart the task in the middle of a GitHub job. Then check \`-Mode Status\` for \`HIDDEN_ACTION_CONFIGURED=True\`, \`HIDDEN_LAUNCHER_PROCESS=True\`, \`TASK_STATE=Running\`, and \`SERVICE_STATUS=Stopped\`, \`SERVICE_START_MODE=Disabled\`, plus GitHub runner Online.
+
+**Required acceptance:** Repeat the **no-model** \`EF02 Codex MSI Shell Probe\` on the activated hidden task; confirm \`SESSION_ID > 0\` and \`direct_msi\`, \`mxc_cmd\`, \`mxc_msi\`, \`mxc_pwsh_alias\` exit 0. The hidden launcher is **not production-confirmed before this Windows A/B check**. No full paid-model conformance rerun required unless no-model probe or a real job fails. Antigravity uses the same task; it is not subject to Codex-only MXC flags.
+
+**Rollback hidden mode (retains interactive runner):**
+
+\`\`\`powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $file -Mode Rollback
+\`\`\`
+
+This restores the original **visible** task action without killing the running instance. It does **not** re-enable the Windows Service. To restore the service instead, first rollback hidden mode, then follow \`EF02-Interactive-Runner-Task.ps1 -Mode Rollback\` in a separate maintenance window. The full rollback may recreate the original Session 0 Codex issue. Keep a copy of the installer file locally because the repository is currently private.
+
+**Limitations:** Windows Script Host must be enabled. GUI visibility and process survival cannot be established from the repository or GitHub file write alone; evidence must come from laptop and no-model CI. A crash can still interrupt a running job and may exhaust 3 restarts; never blindly replay an EF02 claimed attempt.
