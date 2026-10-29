@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from ai_commerce.cli import main
+from ai_commerce.composition import Canvas, CompositionStore, FrameRate, compose_images
+from ai_commerce.core.provenance import canonical_bytes, sha256_bytes
 from ai_commerce.e2e import E01Error, inspect, run, verify
 
 
@@ -108,3 +110,41 @@ def test_cli_additive_commands_create_inspect_verify(tmp_path, capsys):
     assert main(["creative-e2e", "verify", "--run", str(out),
                  "--full-decode"]) == 0
     assert json.loads(capsys.readouterr().out)["ffprobe_full_decode"] is True
+
+
+def test_e01_rejects_resigned_manifest_pointing_to_unrelated_valid_composition(tmp_path):
+    """Individually valid digests cannot substitute a different scene order."""
+    images = assets(tmp_path)
+    out = tmp_path / "e01"
+    run("Two original scenes", images, out, width=64, height=96, fps=24, frames=12)
+
+    manifest_path = out / "e01-manifest.json"
+    record = json.loads(manifest_path.read_bytes())
+    store = CompositionStore(out / "custody")
+    original = store.load(record["composition"]["id"], record["composition"]["revision"])
+    swapped = store.save(compose_images(
+        "Two original scenes",
+        [(original.media[1], 12), (original.media[0], 12)],
+        canvas=Canvas(64, 96, FrameRate(24)),
+    ))
+    record["composition"] = {
+        "id": swapped.composition_id,
+        "revision": swapped.revision,
+        "digest": swapped.digest,
+        "ref": store.revision_ref(swapped.composition_id, swapped.revision),
+    }
+    record["record_sha256"] = sha256_bytes(canonical_bytes({
+        key: value for key, value in record.items() if key != "record_sha256"
+    }))
+    raw = canonical_bytes(record)
+    manifest_path.write_bytes(raw)
+    (out / "custody" / "e01" / "manifest.json").write_bytes(raw)
+    delivery_path = out / "delivery.json"
+    delivery = json.loads(delivery_path.read_bytes())
+    delivery["manifest_sha256"] = sha256_bytes(raw)
+    delivery_path.write_bytes(canonical_bytes(delivery))
+
+    # The alternate composition and render receipt are each legitimate, but
+    # they do not belong to the same request/asset/render lineage.
+    with pytest.raises(E01Error, match="E01_COMPOSITION_SOURCE_MISMATCH"):
+        verify(out)

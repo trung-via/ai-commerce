@@ -235,11 +235,24 @@ def verify(output: str | Path) -> dict:
              "E01_MANIFEST_VIEW_MISMATCH")
     req_raw = registry.read(record["request_ref"])
     _require(sha256_bytes(req_raw) == record["request_sha256"], "E01_REQUEST_TAMPERED")
+    _require(record["run_id"] == "e01-" + record["request_sha256"][:32],
+             "E01_RUN_ID_MISMATCH")
     request = strict_json(req_raw)
     _require(request.get("source_mode") == "LOCAL_IMPORT", "E01_SOURCE_MODE_INVALID")
+    _require(
+        isinstance(request.get("canvas"), dict)
+        and set(request["canvas"]) == {"width", "height", "fps"}
+        and all(type(request["canvas"][field]) is int for field in ("width", "height", "fps"))
+        and type(request.get("frames_per_asset")) is int
+        and request["frames_per_asset"] > 0
+        and type(request.get("silence")) is bool
+        and isinstance(request.get("asset_sha256s"), list)
+        and len(request["asset_sha256s"]) == len(record["assets"]),
+        "E01_REQUEST_LAYOUT_INVALID")
     runner = LocalMediaRunner(registry)
     bridge = BridgeStore(registry)
     verified = []
+    sources = []
     for index, asset in enumerate(record["assets"]):
         _require(set(asset) == {"manifest_ref", "manifest_sha256", "link_ref", "link_id",
                                "artifact_sha256", "origin", "realization_claim"},
@@ -259,9 +272,13 @@ def verify(output: str | Path) -> dict:
         _require(link.link_id == asset["link_id"] and link.job_id == job_id and
                  link.attempt == attempt and link.artifact_sha256 == artifact["sha256"] and
                  link.prompt == request["prompt"] and link.provenance_class == "LOCAL_IMPORT" and
+                 link.asset_role == f"scene-{index + 1}" and
+                 link.manifest_ref == asset["manifest_ref"] and
+                 link.manifest_record_sha256 == asset["manifest_sha256"] and
                  not link.realization_claim and asset["artifact_sha256"] == artifact["sha256"],
                  "E01_ASSET_PROVENANCE_MISMATCH")
         verified.append(artifact["sha256"])
+        sources.append(MediaReference.from_manifest(saved))
     _require(verified == request["asset_sha256s"], "E01_ASSET_SEQUENCE_MISMATCH")
     composition = record["composition"]
     store = CompositionStore(registry.root)
@@ -270,6 +287,16 @@ def verify(output: str | Path) -> dict:
              store.revision_ref(saved_comp.composition_id, saved_comp.revision) == composition["ref"] and
              saved_comp.original_intent == request["prompt"],
              "E01_COMPOSITION_IDENTITY_MISMATCH")
+    # A valid composition can still be the wrong composition for this E01 run.
+    # Rebuild only its deterministic source binding (never re-render a video).
+    expected_comp = compose_images(
+        request["prompt"],
+        [(source, request["frames_per_asset"]) for source in sources],
+        canvas=Canvas(request["canvas"]["width"], request["canvas"]["height"],
+                      FrameRate(request["canvas"]["fps"])),
+    )
+    _require(saved_comp.to_dict() == expected_comp.to_dict(),
+             "E01_COMPOSITION_SOURCE_MISMATCH")
     renderer = FFmpegRenderer(registry)
     render = renderer.load(record["render"]["job_id"])
     _require(render.state == "SUCCEEDED" and render.output is not None and
@@ -277,6 +304,10 @@ def verify(output: str | Path) -> dict:
              renderer.manifest_ref(render.job_id) == record["render"]["manifest_ref"] and
              render.output["sha256"] == record["output_sha256"],
              "E01_RENDER_EVIDENCE_MISMATCH")
+    expected_plan = composition_to_render_plan(
+        saved_comp, silence=request["silence"], composition_ref=composition["ref"])
+    _require(render.plan.to_dict() == expected_plan.to_dict(),
+             "E01_RENDER_COMPOSITION_MISMATCH")
     movie = root / "video.mp4"
     _require(movie.is_file() and hash_file(movie) == (
         render.output["sha256"], render.output["size_bytes"]), "E01_VIDEO_BYTES_MISMATCH")
