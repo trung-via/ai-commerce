@@ -177,8 +177,8 @@ def test_edits_cannot_change_evidence_or_invent_a_contract(proposal, edits):
         opportunity_to_brief(proposal, edits=edits)
 
 
-@pytest.mark.parametrize("contact", ["person@example.invalid", "@synthetic_handle", "+84 912 345 678", "mailto:person", "https://example.invalid/contact"],
-                         ids=["email", "handle", "phone", "mailto", "link"])
+@pytest.mark.parametrize("contact", ["person@example.invalid", "+84 912 345 678", "mailto:person", "tel:+84912345678"],
+                         ids=["email", "phone", "mailto", "tel"])
 def test_contact_input_is_not_retained_or_echoed(contact, tmp_path, capsys):
     with pytest.raises(CreativeBridgeError) as failure:
         freeform_brief(contact)
@@ -186,6 +186,29 @@ def test_contact_input_is_not_retained_or_echoed(contact, tmp_path, capsys):
     result = cli(capsys, "bridge", "--text", contact, "--store", tmp_path / "creative", expected=2)
     assert result["error"] == "BRIDGE_CONTACT_OR_IDENTIFIER_NOT_ALLOWED"
     assert not (tmp_path / "creative").exists()
+
+
+@pytest.mark.parametrize("text", [
+    "Khám phá https://shop.example.invalid/item/1731381331718341815",
+    "Theo dõi @synthetic_handle để xem thêm",
+    "Kể chuyện về một đường dẫn https://example.invalid/truyen/2026",
+])
+def test_human_freeform_urls_and_handles_remain_optional_and_unverified(text):
+    brief = freeform_brief(text)
+    assert brief["objective"] == brief["prompt"] == text
+    assert brief["opportunity_bridge"]["mode"] == "FREEFORM"
+    assert brief["opportunity_bridge"]["factual_status"] == "UNVERIFIED"
+    assert brief["product_ref"] is None and brief["cta"] is None
+
+
+def test_explicit_human_affiliate_style_url_cta_is_preserved(proposal):
+    url = "https://shop.example.invalid/item/1731381331718341815"
+    edits = {"cta": "Xem sản phẩm: " + url, "product_ref": url, "media_hint": "@creator"}
+    brief = opportunity_to_brief(proposal, edits=edits)
+    assert all(brief[k] == v for k, v in edits.items())
+    assert brief["opportunity_bridge"]["human_edits"] == edits
+    assert brief["opportunity_bridge"]["rights_status"] == "UNKNOWN"
+    assert brief["opportunity_bridge"]["publication_status"] == "NOT_ATTEMPTED"
 
 
 @pytest.mark.parametrize("change", ["missing-objective", "id", "rights", "source-status", "duplicate-refs", "manual-hash"])
