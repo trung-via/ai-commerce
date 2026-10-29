@@ -125,6 +125,27 @@ def build_parser() -> argparse.ArgumentParser:
     r_inspect.add_argument("--out-dir", type=Path, required=True, help="Artifact / render registry root")
     r_inspect.add_argument("--job-id", required=True, help="Render job ID")
 
+
+    # A06: one consumer-facing offline creative run; no implicit AI provider.
+    e01 = commands.add_parser("creative-e2e", help="Offline creative video and evidence")
+    e01_commands = e01.add_subparsers(dest="e01_command", required=True)
+    e01_run = e01_commands.add_parser("run", help="Create an MP4 from prompt + local still image(s)")
+    e01_run.add_argument("--prompt", required=True)
+    e01_run.add_argument("--asset", type=Path, action="append", required=True)
+    e01_run.add_argument("--output", type=Path, required=True)
+    e01_run.add_argument("--width", type=int, default=64)
+    e01_run.add_argument("--height", type=int, default=96)
+    e01_run.add_argument("--fps", type=int, default=24)
+    e01_run.add_argument("--frames", type=int, default=24, help="Frames per still image")
+    e01_run.add_argument("--silence", action="store_true", help="Include AAC silent audio")
+    for name in ("inspect", "verify"):
+        sub = e01_commands.add_parser(name, help="Read saved E01 package" if name == "inspect" else
+                                      "Reopen and verify E01 provenance and decoded MP4")
+        sub.add_argument("--run", type=Path, required=True)
+        if name == "verify":
+            sub.add_argument("--full-decode", action="store_true",
+                             help="Explicit flag; A05 verifier always full-decodes")
+
     return parser
 
 
@@ -319,6 +340,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Product Runtime: {info.product_runtime}")
         return 0
     try:
+        if args.command == "creative-e2e":
+            from ai_commerce.e2e import inspect as e01_inspect, run as e01_run, verify as e01_verify
+            if args.e01_command == "run":
+                result = e01_run(args.prompt, args.asset, args.output,
+                                 width=args.width, height=args.height, fps=args.fps,
+                                 frames=args.frames, silence=args.silence)
+            elif args.e01_command == "inspect":
+                result = e01_inspect(args.run)
+            else:
+                result = e01_verify(args.run)
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+            return 0 if result["state"] == "DELIVERED" else 1
         if args.command in {"concept-create", "concept-inspect", "concept-reframe"}:
             print(json.dumps(_creative_command(args), sort_keys=True))
             return 0

@@ -1,0 +1,43 @@
+{
+  "work_id": "A06-OFFLINE-CREATIVE-E2E-001",
+  "objective": "Product-completion E01: freeform prompt + explicit local stills -> A04 import/CreativeAssetLink/A05 composition/render -> playable MP4 with reopenable provenance.",
+  "source_decision": "Human 2026-10-29: implement A06 following Deep Research",
+  "source_sha": "858c5bd54fa348c6c46f2fae82cd35be4ef886f2",
+  "owner": "Cross-domain E01 / Media & Creative and Commerce Operations",
+  "status": "IMPLEMENTED_PENDING_VERIFICATION",
+  "scope_in": [
+    "offline E01 orchestrator",
+    "creative-e2e run/inspect/verify CLI",
+    "digest-bound manifest and package",
+    "real MP4 verify",
+    "CI + demo"
+  ],
+  "scope_out": [
+    "model-generated media assertion for import",
+    "paid AI",
+    "publishing",
+    "distribution",
+    "M1 acceptance without verified real artifact"
+  ],
+  "expected_artifacts": [
+    "src/ai_commerce/e2e/",
+    "src/ai_commerce/cli.py",
+    "tests/test_a06_e01.py",
+    "scripts/a06_demo.py",
+    ".github/workflows/a06-e01.yml"
+  ],
+  "acceptance": [
+    "prompt without SKU/CTA",
+    "local image(s) produce real H264/yuv420p MP4",
+    "CreativeAssetLink realization_claim remains false and source stays LOCAL_IMPORT",
+    "full decode and integrity on reopen",
+    "missing/corrupt/tampered package rejects success",
+    "no regression of prior CLI",
+    "real product demo downloadable after CI"
+  ],
+  "verification_result": {
+    "state": "PENDING_HOSTED_CI",
+    "tests": "UNKNOWN",
+    "video": "NOT_YET_VERIFIED"
+  }
+}
