@@ -1,0 +1,140 @@
+{
+  "work_id": "A10-OPPORTUNITY-AUDIENCE-001",
+  "objective": "Implement A10 v1 Opportunity & Audience Intelligence M01-M05: offline-first, provider-neutral human-provided signal intake, comparable trend hypotheses, evidence-aware audience insight, transparent creative opportunities, and non-breaking A03 ContentBrief bridge.",
+  "source_decision": "Human ChatGPT 2026-10-29: @AI Commerce Engineering Workflow thực hiện theo deep research A10 v1 — Cơ hội & Thông minh Khán giả (Offline-First, Provider-Neutral).",
+  "research_ref": "ChatGPT Deep Research A10 v1 report 2026-10-29: TrendSignal, TrendSeries, AudienceProfile, OpportunityProposal, ContentBrief. Research is design input, not evidence of implemented provider access or permission.",
+  "source_sha": "91e208dae2d8822eed7defb5a704501e3815c486",
+  "owner": "Opportunity Intelligence / Creative Bridge",
+  "work_ids": [
+    "M01",
+    "M02",
+    "M03",
+    "M04",
+    "M05"
+  ],
+  "depends_on": [
+    "A03"
+  ],
+  "related_implemented_sources": [
+    "src/ai_commerce/creative/briefs.py",
+    "src/ai_commerce/contracts/schemas/ContentBrief.v0.1.schema.json",
+    "src/ai_commerce/analytics/ledger.py",
+    "src/ai_commerce/analytics/matching.py",
+    "work_items/A09-AUDIENCE-OBSERVATION-001.json"
+  ],
+  "status": "ACCEPTED_FOR_WORK",
+  "scope_in": [
+    "M01 Trend Intake: explicit human-supplied CSV/UTF-8-BOM and canonical JSON profiles for signal snapshots (topic, source type, locale, event/window/collected_at, unit/denominator/query-context, access/rights, raw evidence hash). Immutable raw bytes and append-only SQLite journal; no fabricated native provider CSV templates.",
+    "M02 Trend Tracking: compare only identical metric/units/baselines/query-normalization/geo/locale/window; distinguish single snapshot vs trend, sparse and stale history, topic vs creative-format trends and counterevidence. Transparent, configurable deterministic heuristic; never assert viral certainty or causal lift.",
+    "M03 Audience Insights: evidence-linked qualitative audience jobs-to-be-done, friction, content context, contradictions and inferred hypotheses, caller-observed provenance; avoid storing individual PII or deriving demographic claims without evidence.",
+    "M04 Opportunities: source-linked niche/content-only hypotheses, alternatives, uncertainty and explicit reasons/counterevidence, optional prioritization as advisory ranking not calibrated probability; no purchase/post decisions.",
+    "M05 Opportunity-to-Creative: map immutable source refs to existing A03 ContentBrief.v0.1 using intake_brief()/validate_record() and CreativeStore optional consumer; preserve nullable product_ref/CTA/format and Human freeform/override; deterministic offline CLI and synthetic demo.",
+    "Minimal deterministic unit/integration tests, cross-platform CI and A03/A06/A08/A09 regressions on exact integrated candidate; candidate-only, no automatic main merge."
+  ],
+  "scope_out": [
+    "Any live provider API, OAuth, credentials, access entitlement claims, headless scraping or automatic social publishing; no account or campaign spend.",
+    "Assuming Google Trends index is absolute demand, averaging incomparable provider metrics, inventing audience demographics from sparse notes, or ranking-as-probability/viral predictions.",
+    "Changing A03 ContentBrief.v0.1, existing A09 ledger semantics/contracts, A07/A08 evidence, or external accounts without separate authorization.",
+    "A11 learning dashboard/performance evaluation, affiliate placements/revenue/settlement, warehouse/multi-user service, mandatory LLM, UI app, model API spend.",
+    "Mandatory gating of freeform creative on A10 signal availability; mandatory format/product/CTA/storyboard, creative review, or Human approval for mere idea generation.",
+    "EF01/EF02 infrastructure changes, AIOS-Renew runtime or legacy task conventions."
+  ],
+  "design_decisions": {
+    "canonical_a03_contract": "src/ai_commerce/contracts/schemas/ContentBrief.v0.1.schema.json: required brief_id/objective, optional prompt/audience/product_ref nullable/cta nullable/media_hint nullable/source_refs; additionalProperties=true. Reuse src/ai_commerce/creative/briefs.py intake_brief; never replace schema.",
+    "canonical_a09_boundary": "A09 is an audience performance analytics importer, not trend-intelligence storage. A10 uses independent SQLite evidence and may read A09 by explicit provenance only if identity/window/metric match; never infer provider verification.",
+    "signal_state": "User-supplied observation != externally verified fact. Separate OBSERVED_USER_SUPPLIED / INFERRED / UNKNOWN; source right ACCESS_UNKNOWN is not permission, zero distinct from NOT_AVAILABLE.",
+    "metric_scope": "Keep absolute count, index/relative normalized unit, rate, denominator and query scale separate. Never blend normalized Google Trends snapshots from different query contexts by arithmetic.",
+    "identity": "Content-addressed SHA256 for raw, context and record, stable import IDs bound to locale/source/metric/window/mapping, immutable correction/reprocess lineage.",
+    "trend_default": "At least three comparable observed points across distinct timestamps for a direction hypothesis; otherwise INSUFFICIENT_HISTORY, configurable and explicit; no automatic conclusion from one snapshot.",
+    "scope_concurrency": "M01 first; M02 and M03 after M01 independently in non-overlapping component paths; M04 after M02 and M03; M05 after M04. max_parallel=2 only when two READY actions."
+  },
+  "expected_artifacts": [
+    "contracts/SignalSourceSnapshot.v1.schema.json",
+    "contracts/TrendSignal.v1.schema.json",
+    "contracts/SignalImport.v1.schema.json",
+    "contracts/TrendSeries.v1.schema.json",
+    "contracts/TrendHypothesis.v1.schema.json",
+    "contracts/AudienceInsight.v1.schema.json",
+    "contracts/OpportunityProposal.v1.schema.json",
+    "contracts/OpportunityCreativeBridge.v1.schema.json",
+    "src/ai_commerce/opportunity/{core,signals,trends,audience,proposals,bridge}/",
+    "src/ai_commerce/cli.py",
+    "tests/test_a10_m01.py",
+    "tests/test_a10_m02.py",
+    "tests/test_a10_m03.py",
+    "tests/test_a10_m04.py",
+    "tests/test_a10_m05.py",
+    "scripts/a10_demo.py",
+    "docs/engineering/A10_IMPLEMENTATION_REPORT.md"
+  ],
+  "acceptance": [
+    "AC01 exact source raw bytes and hashes round-trip; immutable append-only import ledger, idempotent same context and separate corrections, no silent cross-account/locale merging.",
+    "AC02 manual CSV BOM/JSON with explicit column mapping and bounded validation of malformed encoding, timezones, numeric values, missing fields, duplicates and file/path limits; fully atomic import; no false native export claims.",
+    "AC03 rate/count/index/denominator/window/locale/geo/query context cannot be compared if incompatible; zero not NULL and single snapshot not GROWING TREND.",
+    "AC04 transparent M02 trend/hypothesis output: INSUFFICIENT_HISTORY, stale and contradictory evidence distinct from actual direction; no false confidence or unsupported causal claims.",
+    "AC05 M03 audience insight stores observed vs inferred and counterevidence with evidence refs, does not accidentally store PII, remains optional for freeform creative.",
+    "AC06 M04 proposals trace to observed inputs and limitations; cannot claim validated demand, virality, provider rights or spend authority; empty/missing inputs handled honestly.",
+    "AC07 M05 produces a ContentBrief that passes the actual A03 schema/intake, keeps product_ref and CTA nullable, no required media format or concept quota; original Human text preserved and editable.",
+    "AC08 deterministic source→trend/insight→proposal→brief end-to-end synthetic offline demo with provenance, realistic negative cases and no external effects.",
+    "AC09 targeted and full applicable project tests with actual Windows and Ubuntu CI results; not only wrapper green. Check candidate fan-in conflict and worktree changes.",
+    "AC10 A10 remains suggestion-only and does not bypass A07/A08/A09 evidence; no network/OAuth/scraping/real publish and no implicit main merge."
+  ],
+  "side_effect_class": "BOUNDED",
+  "evidence_refs": [
+    "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.json",
+    "docs/roadmap/WORK_TREE_DETAILED_V1_1.md",
+    "src/ai_commerce/contracts/schemas/ContentBrief.v0.1.schema.json",
+    "src/ai_commerce/creative/briefs.py",
+    "work_items/A09-AUDIENCE-OBSERVATION-001.json",
+    "https://github.com/trung-via/ai-commerce/pull/86"
+  ],
+  "risk_notes": [
+    "Research illustrative ContentBrief fields do NOT equal the canonical A03 ContentBrief.v0.1; implementation must use real schema not invent a replacement.",
+    "Research illustrative AnalyticsImport record is A09's different meaning; A10 must use its own SignalImport ledger and source/status semantics.",
+    "Deep Research's platform-trend sources do not prove provider export schemas, rights, or live API access; explicit manual source only for v1.",
+    "Concurrent M02/M03 candidate trees must not edit same files and must integrate through actual EF02 dependency composition; verify complete fan-in and tests.",
+    "EF01-P/MT-01/EF01-R component-scope updates remain under open PR #85/#82 on current main and are not silently assumed installed."
+  ],
+  "engineering_execution": {
+    "executor": "codex",
+    "model": "gpt-6.1-sol",
+    "effort": "max",
+    "transport": "EF02",
+    "delivery": "CANDIDATE_BRANCH",
+    "batch_sequence": [
+      {
+        "action": "A10-M01",
+        "depends_on": []
+      },
+      {
+        "action": "A10-M02",
+        "depends_on": [
+          "A10-M01"
+        ]
+      },
+      {
+        "action": "A10-M03",
+        "depends_on": [
+          "A10-M01"
+        ]
+      },
+      {
+        "action": "A10-M04",
+        "depends_on": [
+          "A10-M02",
+          "A10-M03"
+        ]
+      },
+      {
+        "action": "A10-M05",
+        "depends_on": [
+          "A10-M04"
+        ]
+      }
+    ],
+    "max_parallel": 2,
+    "verification_profile": "project-tests",
+    "max_repair_rounds": 2,
+    "authorization_ref": "human-chat-2026-10-29-ai-commerce-engineering-workflow-implement-a10-deep-research"
+  }
+}
