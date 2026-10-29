@@ -328,6 +328,8 @@ def test_a08_decision_is_schema_validated(tmp_path):
 
 def test_duplicate_evidence_id_rejected():
     evidence=proof()
-    record=snap(evidence_refs=[evidence,evidence])
+    conflicting=copy.deepcopy(evidence)
+    conflicting["sha256"]="b"*64
+    record=snap(evidence_refs=[evidence,conflicting])
     with pytest.raises(CapabilityError,match="DUPLICATE_EVIDENCE_ID"):
         validate_snapshot(record)
