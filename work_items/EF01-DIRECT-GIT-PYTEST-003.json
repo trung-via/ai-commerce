@@ -23,10 +23,10 @@
   "design": {
     "current_baseline": "subprocess argv uses git directly via PATH; pytest profiles serial; no pytest-xdist declared",
     "direct_git": "Optional explicit git executable path/GIT executable resolution; no implicit shell/wrapper/hardcoded C:\\ path; fallback git on PATH",
-    "pytest_parallel": "Human-selected EF01 pytest default 12 xdist workers for the first/primary active action on each Windows host, including local EF01 and EF02→EF01; following concurrent actions receive 2 workers each. Not an adaptive 4/8/12 benchmark choice. Serial is a truthful exceptional fallback only.",
-    "host_budget": "Host-wide single 12-worker primary lease across all EF02 batches/processes; other active actions use 2 workers each. Concurrency N: desired total 12+2*(N-1) pytest workers (N=1:12, N=2:14, N=3:16); EF02 max_parallel default remains 2, not raised by this policy. Deterministic first-active-action order and cross-process atomic lease; safe handoff at next verification boundary when primary finishes, never restart in-progress pytest solely to promote.",
-    "measurement": "Human reports earlier Windows head-to-head 2/4/8/12/16 xdist runs selected 12 as fastest. HUMAN_REPORTED_PRIOR_BENCHMARK; no independent numeric data attached and no repeat benchmark required. Collect per-run worker count, exit/status and host health, not mandatory performance trials.",
-    "fallback": "Only minimal xdist availability/process-start/serious-host-resource/fixture-race checks; do not silently downgrade primary from 12 to 4 or 8 because other actions are active. When actual xdist or host prevents safely starting 12, record explicit degraded/serial fallback or stop, without claiming 12-worker conformance. Secondary defaults 2 when supported.",
+    "pytest_parallel": "HUMAN-APPROVED DEFAULT: EACH eligible EF01 action runs pytest-xdist -n 12, including two simultaneous EF02 actions (-n 12 each, 24 workers total). No primary/secondary or 12+2 allocation. Serial fallback only for observed genuine xdist/launch/fixture/resource failure, disclosed as degraded.",
+    "host_budget": "Keep EF02 max_parallel=2 as default concurrent actions per batch. Each EF01 verification process independently requests 12 workers; for two concurrent action verifications target 12+12=24. No primary/secondary lease or per-action worker reduction; do not infer batch max_parallel is host-global when multiple independent batches run.",
+    "measurement": "Human reports prior Windows trial comparing 2/4/8/12/16 found 12 fastest and host has sufficient resources for 24 total; HUMAN_REPORTED evidence, no repeat benchmarking or new capacity gate. Log requested and actual workers plus failures.",
+    "fallback": "Only actual missing xdist, process launch/fixture isolation or severe resource errors justify explicit serial-safe fallback or stop with code/reason; no silent default to -n 2/4/8 merely because multiple actions run.",
     "minimum_test": {
       "id": "MT-01",
       "owner": "EF01-P; EF02 consumes per-action verification and fan-in evidence",
@@ -50,34 +50,35 @@
       "ef02_integration": "Action-scoped approved verification plans, preserve claims/fingerprints; at fan-in verify merged candidate's affected consumers, not just sibling PASS results.",
       "safe_fallback": "Unknown coverage => broader targeted/full registered profile or UNPROVEN, never fabricated PASS. pytest no-tests/internal/timeout are not success.",
       "registered_profile_constraint": "Current EF02 only accepts registered pytest argv; future dynamic selection must remain deterministic/validated, no arbitrary command injection.",
-      "xdist_relation": "12 workers default for primary action and 2 for later simultaneous actions on same Windows host, one host-global 12 seat; not 12 model executors. Scope selection and worker concurrency are independent; preserve EF02 max_parallel default=2.",
+      "xdist_relation": "MT-01 independently selects sufficient tests; each EF01 action uses 12 xdist workers for its selected tests, both parallel EF02 actions run 12 each by default. max_parallel remains 2. No primary-secondary lease.",
       "no_mandatory_benchmark_gate": true
     },
-    "xdist_host_allocation_20261029": {
-      "decision_ref": "docs/governance/HUMAN_DECISION_2026-10-29_EF01P_12_2_WORKERS.md",
+    "xdist_workers_per_action_20261029": {
+      "decision_ref": "docs/governance/HUMAN_DECISION_2026-10-29_EF01P_12_WORKERS_EACH.md",
       "authority": "HUMAN_DECIDED",
-      "primary_workers": 12,
-      "secondary_workers": 2,
-      "allocation_scope": "WINDOWS_HOST_GLOBAL_CROSS_BATCH",
-      "primary_selection": "EARLIEST_ACTIVE_EF01_ACTION_WITH_DETERMINISTIC_ORDER",
-      "lease": "ONE_HOST_WIDE_12_WORKER_LEASE",
-      "handoff": "NEXT_SAFE_VERIFY_BOUNDARY_NO_RESTART_RUNNING_PYTEST",
-      "host_slots_default_unchanged": 2,
+      "default_workers_each_action": 12,
+      "max_parallel_default_unchanged": 2,
+      "target_workers_at_max_parallel": 24,
+      "primary_secondary_allocation": false,
+      "host_wide_primary_lease": false,
+      "scope": "EF01_LOCAL_AND_EF02_EF01_VERIFY_WINDOWS",
       "repeated_benchmark_required": false,
-      "evidence_of_prior_benchmark": "HUMAN_REPORTED_12_FASTEST_AMONG_2_4_8_12_16",
-      "actual_live_12_2_implementation_verified": false
+      "prior_benchmark": "HUMAN_REPORTED_12_FASTEST_AMONG_2_4_8_12_16",
+      "human_host_capacity": "HUMAN_REPORTED_24_PYTEST_WORKERS_SUPPORTED",
+      "actual_live_12_workers_verified": false,
+      "actual_live_24_workers_verified": false
     }
   },
   "acceptance": [
     "Explicit Git path produces correct argv for all current Git calls on Windows; missing/bad path fails clearly or configured safe fallback without changing source provenance.",
-    "Human-selected default 12 xdist pytest workers for primary EF01 Windows action; subsequent simultaneous actions run 2, including across EF02 batches; serial fallback is observable, 12 is not claimed when not actually run.",
+    "Each eligible EF01 verify action (local, EF02, repair, fan-in) defaults to pytest-xdist -n 12; with two independent actions verifying concurrently, BOTH use -n 12, target 24 workers total, not 12+2.",
     "Record Human-reported prior comparison where 12 was fastest among 2/4/8/12/16; no redundant benchmark gate. Verify actual workers, host errors and CI/runner evidence for the new implementation.",
-    "Host-wide atomic allocation enforces 12+2 for two concurrent actions and 12+2+2 for three when allowed, without two 12-worker primaries, across batches; transfer priority at safe verify boundary.",
+    "EF02 max_parallel=2 remains; worker configuration is independent 12 per concurrent action, no primary/secondary or cross-process lease; observe actual two simultaneous 12-worker invocations before claiming host 24 live VERIFIED.",
     "MT-01 chooses minimum sufficient tests grounded by changed files, dependency consumers and AC; audit record explains EXECUTE/REUSE/INVALIDATED/UNPROVEN.",
     "PASS evidence reuse is permitted only when code/test/dependency/environment fingerprint and AC coverage remain valid; edits affecting prior evidence require rerun.",
     "EF01-R repair reruns failed/affected tests and preserves valid PASS without duplicate action/provider side effects; failure and unknown are not promoted to PASS.",
     "EF02 fan-in invalidates affected sibling evidence and runs aggregate consumer/integration coverage, otherwise returns UNPROVEN instead of claimed batch PASS.",
-    "Race/crash/stale host-wide primary lease cannot cause duplicate 12-worker groups; report allocation/degrade reason and do not interrupt an ongoing 2-worker pytest to promote."
+    "Explicitly log requested/actual pytest workers per action; lack of xdist or real resource/fixture failure yields truthful documented serial fallback or STOP, not silent reduction to 2/4/8 because of normal concurrent load."
   ],
   "non_goals": [
     "12 concurrent Codex/Antigravity models",
@@ -92,6 +93,6 @@
   "decision_refs": [
     "docs/governance/HUMAN_DECISION_2026-10-28_EF_ENHANCEMENTS.md",
     "docs/governance/HUMAN_DECISION_2026-10-29_MINIMUM_TEST.md",
-    "docs/governance/HUMAN_DECISION_2026-10-29_EF01P_12_2_WORKERS.md"
+    "docs/governance/HUMAN_DECISION_2026-10-29_EF01P_12_WORKERS_EACH.md"
   ]
 }
