@@ -10,7 +10,7 @@ from typing import Any
 from ai_commerce.contracts.schema import validate_record
 from ai_commerce.core.provenance import canonical_bytes, sha256_bytes
 from ai_commerce.media.base import Cost
-from ai_commerce.media.local import MIME_KINDS
+from ai_commerce.media.files import SUPPORTED_MIME_KINDS as MIME_KINDS
 from .errors import ManifestValidationError
 
 JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,95}")

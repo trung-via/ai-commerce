@@ -257,23 +257,46 @@ def _source_problem(snapshot: dict, initial: dict) -> tuple[str, str] | None:
 
 
 def _provider_problem(data: bytes) -> tuple[str, str] | None:
-    """Fail closed on explicit CLI errors even when a wrapper exits zero."""
-    message = data.decode("utf-8", "replace").lower()
+    """Classify provider-level errors, not arbitrary GitHub/tool results in JSONL.
+
+    Plain CLI text remains supported. A historical error phrase inside a
+    successful tool result must never impersonate a provider failure.
+    """
+    events = _provider_events(data)
+    messages: list[str] = []
+    failed_events: list[dict] = []
+    if events is None:
+        messages.append(data.decode("utf-8", "replace").lower())
+    else:
+        for event in events:
+            failed = (event.get("type") in ("turn.failed", "error") or
+                      str(event.get("status", "")).lower() in ("error", "failed", "failure") or
+                      bool(event.get("error")))
+            if not failed:
+                continue
+            failed_events.append(event)
+            error = event.get("error")
+            if isinstance(error, str):
+                messages.append(error.lower())
+            elif isinstance(error, dict):
+                messages.extend(error[key].lower() for key in ("message", "code", "type")
+                                if isinstance(error.get(key), str))
+            for key in ("message", "detail"):
+                if isinstance(event.get(key), str):
+                    messages.append(event[key].lower())
     for phrases, status in (
         (("model is at capacity", "no capacity available"), "MODEL_AT_CAPACITY"),
         (("resource_exhausted", "quota exceeded", "quota reached", "429 too many requests"), "QUOTA_EXHAUSTED"),
         (("model_not_found", "model is not supported", "unknown model"), "MODEL_UNSUPPORTED"),
         (("model unavailable", "service unavailable"), "EXECUTOR_UNAVAILABLE"),
-        (("permission denied", "permissionerror", "approval denied", "approval required", "requires approval", "auto-denied", "operation not permitted"), "EXECUTOR_PERMISSION_DENIED"),
+        (("permission denied", "permissionerror", "approval denied", "approval required",
+          "requires approval", "auto-denied", "operation not permitted"), "EXECUTOR_PERMISSION_DENIED"),
     ):
-        if any(phrase in message for phrase in phrases):
+        if any(phrase in message for message in messages for phrase in phrases):
             return status, status
-    for event in _provider_events(data) or []:
-        if (event.get("type") in ("turn.failed", "error") or
-                str(event.get("status", "")).lower() in ("error", "failed", "failure") or event.get("error")):
-            return "EXECUTION_UNKNOWN", "EXECUTOR_OUTCOME_UNCONFIRMED"
+    if failed_events:
+        return "EXECUTION_UNKNOWN", "EXECUTOR_OUTCOME_UNCONFIRMED"
     return None
-
 
 
 def _provider_events(data: bytes, *, require_complete: bool = False) -> list[dict] | None:
