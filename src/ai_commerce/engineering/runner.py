@@ -430,7 +430,8 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         return
     command, stdin = command_for(selection, repo, prompt, codex_bin=codex_bin,
                                  antigravity_bin=antigravity_bin,
-                                 codex_windows_sandbox=codex_windows_sandbox)
+                                 codex_windows_sandbox=codex_windows_sandbox,
+                                 antigravity_evidence_dir=(directory if selection.executor == "antigravity" else None))
     if selection.executor == "antigravity" and _windows_command_units(command) > AGY_COMMANDLINE_MAX_UNITS:
         # Preserve the complete original instruction/feedback on disk. Shorten only
         # the transported --print argument; never truncate recorded diagnostics.
