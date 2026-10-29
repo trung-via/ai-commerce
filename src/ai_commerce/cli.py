@@ -193,6 +193,8 @@ def build_parser() -> argparse.ArgumentParser:
     d_status = d_ops.add_parser("status", help="Replay and verify publication event ledger")
     d_status.add_argument("--db", type=Path, required=True)
     d_status.add_argument("--publication-id", required=True)
+    from ai_commerce.analytics.cli import add_parser as add_analytics_parser
+    add_analytics_parser(commands)
     return parser
 
 
@@ -387,6 +389,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Product Runtime: {info.product_runtime}")
         return 0
     try:
+        if args.command == "analytics":
+            from ai_commerce.analytics.cli import run as analytics_run
+            return analytics_run(args)
         if args.command == "distribution":
             from ai_commerce.distribution.assisted_cli import run as distribution_run
             return distribution_run(args)

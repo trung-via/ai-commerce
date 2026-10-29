@@ -1,0 +1,389 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-commerce.local/schema/MeasurementPlan.v1",
+  "title": "MeasurementPlan.v1",
+  "description": "A09 offline manual analytics. User-supplied; never live-provider verification.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "MeasurementPlan.v1"
+    },
+    "plan_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "campaign_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "primary_metric": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "denominator": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "metric_definition_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "platform": {
+      "enum": [
+        "TIKTOK",
+        "YOUTUBE",
+        "FACEBOOK",
+        "INSTAGRAM"
+      ]
+    },
+    "surface": {
+      "enum": [
+        "VIDEO",
+        "PROFILE_VIDEO",
+        "SHORT",
+        "PAGE_REEL",
+        "REEL"
+      ]
+    },
+    "account_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {
+          "enum": [
+            "internal_alias",
+            "tiktok_open_id",
+            "youtube_channel_id",
+            "facebook_page_id",
+            "instagram_user_id"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "namespace",
+        "id"
+      ]
+    },
+    "measurement_window": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "string",
+        "format": "date-time",
+        "maxLength": 64
+      },
+      "description": "Explicit instants: start inclusive, end exclusive; never a default period."
+    },
+    "timezone": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "cohort": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "source_mode": {
+      "enum": [
+        "MANUAL_IMPORT",
+        "OFFICIAL_API",
+        "AUTHORIZED_EXPORT",
+        "LICENSED_FEED",
+        "NOT_AVAILABLE"
+      ]
+    },
+    "attribution_tier": {
+      "enum": [
+        "A",
+        "B",
+        "C",
+        "D",
+        "NOT_AVAILABLE"
+      ]
+    },
+    "missingness_rule": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "settlement_lag_days": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 1000000.0
+    },
+    "cost_scope": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "review_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time",
+      "maxLength": 64
+    },
+    "evidence_refs": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024
+      }
+    },
+    "source_status": {
+      "const": "USER_SUPPLIED_NOT_LIVE_VERIFIED"
+    },
+    "metric_definitions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "$ref": "#/$defs/MetricDefinition"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "plan_id",
+    "campaign_ref",
+    "primary_metric",
+    "denominator",
+    "metric_definition_version",
+    "platform",
+    "surface",
+    "account_ref",
+    "measurement_window",
+    "timezone",
+    "cohort",
+    "source_mode",
+    "attribution_tier",
+    "missingness_rule",
+    "source_status",
+    "metric_definitions"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "const": "TIKTOK"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "account_ref": {
+            "properties": {
+              "namespace": {
+                "enum": [
+                  "tiktok_open_id",
+                  "internal_alias"
+                ]
+              }
+            }
+          },
+          "surface": {
+            "enum": [
+              "VIDEO",
+              "PROFILE_VIDEO"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "const": "YOUTUBE"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "account_ref": {
+            "properties": {
+              "namespace": {
+                "enum": [
+                  "youtube_channel_id",
+                  "internal_alias"
+                ]
+              }
+            }
+          },
+          "surface": {
+            "enum": [
+              "VIDEO",
+              "SHORT"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "const": "FACEBOOK"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "account_ref": {
+            "properties": {
+              "namespace": {
+                "enum": [
+                  "facebook_page_id",
+                  "internal_alias"
+                ]
+              }
+            }
+          },
+          "surface": {
+            "enum": [
+              "PAGE_REEL"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "const": "INSTAGRAM"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "account_ref": {
+            "properties": {
+              "namespace": {
+                "enum": [
+                  "instagram_user_id",
+                  "internal_alias"
+                ]
+              }
+            }
+          },
+          "surface": {
+            "enum": [
+              "REEL"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "MetricDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "MetricDefinition.v1"
+        },
+        "metric_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "provider_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "definition_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "platform": {
+          "enum": [
+            "TIKTOK",
+            "YOUTUBE",
+            "FACEBOOK",
+            "INSTAGRAM"
+          ]
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "definition": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "denominator": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "cohort": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "comparison_policy": {
+          "const": "NO_CROSS_PROVIDER_EQUIVALENCE"
+        },
+        "source_status": {
+          "const": "USER_SUPPLIED_NOT_LIVE_VERIFIED"
+        }
+      },
+      "required": [
+        "schema_version",
+        "metric_key",
+        "provider_name",
+        "definition_version",
+        "platform",
+        "unit",
+        "definition",
+        "denominator",
+        "cohort",
+        "comparison_policy",
+        "source_status"
+      ]
+    }
+  }
+}
