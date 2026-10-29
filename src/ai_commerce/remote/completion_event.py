@@ -122,9 +122,12 @@ def validate_completion_event(event: Mapping) -> dict:
         raise CompletionEventError("EVENT_SHAPE_INVALID")
     if (event["kind"] != "AI_COMMERCE_EF02_COMPLETION_EVENT" or
             type(event["version"]) is not int or event["version"] != 1 or
-            event["origin_binding_status"] != "UNBOUND" or
-            event["delivery_status"] != "NOT_ATTEMPTED" or
             event["chat_delivery_proven"] is not False):
+        # The producer's unproven-delivery assertion is immutable identity.
+        # Do not treat a forged delivery proof as a merely ineligible event.
+        raise CompletionEventError("EVENT_IDENTITY_INVALID")
+    if (event["origin_binding_status"] != "UNBOUND" or
+            event["delivery_status"] != "NOT_ATTEMPTED"):
         raise CompletionEventError("EVENT_NOT_ELIGIBLE")
     actions = event["actions"]
     if not isinstance(actions, list) or not 1 <= len(actions) <= 128:
