@@ -22,7 +22,7 @@
     "src/ai_commerce/analytics/matching.py",
     "work_items/A09-AUDIENCE-OBSERVATION-001.json"
   ],
-  "status": "ACCEPTED_FOR_WORK",
+  "status": "BUILD_VERIFIED_FOR_SCOPE",
   "scope_in": [
     "M01 Trend Intake: explicit human-supplied CSV/UTF-8-BOM and canonical JSON profiles for signal snapshots (topic, source type, locale, event/window/collected_at, unit/denominator/query-context, access/rights, raw evidence hash). Immutable raw bytes and append-only SQLite journal; no fabricated native provider CSV templates.",
     "M02 Trend Tracking: compare only identical metric/units/baselines/query-normalization/geo/locale/window; distinguish single snapshot vs trend, sparse and stale history, topic vs creative-format trends and counterevidence. Transparent, configurable deterministic heuristic; never assert viral certainty or causal lift.",
@@ -86,14 +86,21 @@
     "src/ai_commerce/contracts/schemas/ContentBrief.v0.1.schema.json",
     "src/ai_commerce/creative/briefs.py",
     "work_items/A09-AUDIENCE-OBSERVATION-001.json",
-    "https://github.com/trung-via/ai-commerce/pull/86"
+    "https://github.com/trung-via/ai-commerce/pull/86",
+    "https://github.com/trung-via/ai-commerce/issues/92",
+    "https://github.com/trung-via/ai-commerce/pull/93",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40902555891",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40902555835",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40902555455",
+    "https://github.com/trung-via/ai-commerce/actions/runs/40902555781"
   ],
   "risk_notes": [
     "Research illustrative ContentBrief fields do NOT equal the canonical A03 ContentBrief.v0.1; implementation must use real schema not invent a replacement.",
     "Research illustrative AnalyticsImport record is A09's different meaning; A10 must use its own SignalImport ledger and source/status semantics.",
     "Deep Research's platform-trend sources do not prove provider export schemas, rights, or live API access; explicit manual source only for v1.",
     "Concurrent M02/M03 candidate trees must not edit same files and must integrate through actual EF02 dependency composition; verify complete fan-in and tests.",
-    "EF01-P/MT-01/EF01-R component-scope updates remain under open PR #85/#82 on current main and are not silently assumed installed."
+    "EF01-P/MT-01/EF01-R component-scope updates remain under open PR #85/#82 on current main and are not silently assumed installed.",
+    "2026-10-29 completion supersession: PR #93 code-only/offline scope was merged to main. Historical candidate- and implementation-time PR/status statements above are not current publication status. Real provider entitlement, external publishing, audience demand and commercial outcomes remain UNKNOWN."
   ],
   "engineering_execution": {
     "executor": "codex",
@@ -136,5 +143,46 @@
     "verification_profile": "project-tests",
     "max_repair_rounds": 2,
     "authorization_ref": "human-chat-2026-10-29-ai-commerce-engineering-workflow-implement-a10-deep-research"
+  },
+  "verification_result": {
+    "state": "PASSED_HOSTED_CI_AND_MERGED_MAIN",
+    "reviewed_at": "2026-10-29",
+    "scope": "A10_V1_M01_M05_OFFLINE_FIRST_PROVIDER_NEUTRAL_OPPORTUNITY_TO_A03_CREATIVE",
+    "source_issues": [
+      "https://github.com/trung-via/ai-commerce/issues/87",
+      "https://github.com/trung-via/ai-commerce/issues/89",
+      "https://github.com/trung-via/ai-commerce/issues/90",
+      "https://github.com/trung-via/ai-commerce/issues/92"
+    ],
+    "final_pr": "https://github.com/trung-via/ai-commerce/pull/93",
+    "candidate_head_sha": "ee48781191f8f8710e5297ab041692f089a40a4c",
+    "merge_commit_sha": "2b4fb682a3015df483b1115ca66f897dfd8c3c01",
+    "final_implementation": {
+      "M01": "SOURCE_INGESTION_PRESENT",
+      "M02": "TREND_TRACKING_PRESENT",
+      "M03": "AUDIENCE_INSIGHTS_PRESENT",
+      "M04": "OPPORTUNITY_PROPOSALS_PRESENT",
+      "M05": "A03_CREATIVE_BRIDGE_PRESENT",
+      "evidence_boundary": "Code implemented and merged; synthetic offline and deterministic test evidence only, not provider access, real demand, external posting or commerce effects."
+    },
+    "ci": {
+      "a10": "https://github.com/trung-via/ai-commerce/actions/runs/40902555891",
+      "ubuntu_full": "1475 passed, 1 skipped",
+      "windows_full": "1476 passed",
+      "ubuntu_m02": "77 passed",
+      "windows_m02": "77 passed",
+      "offline_demo_and_replay": "PASS on both Ubuntu and Windows",
+      "a06": "https://github.com/trung-via/ai-commerce/actions/runs/40902555835",
+      "a07": "https://github.com/trung-via/ai-commerce/actions/runs/40902555455",
+      "a08": "https://github.com/trung-via/ai-commerce/actions/runs/40902555781",
+      "all_eight_jobs": "PASS"
+    },
+    "creative_freedom": "Human-authored public URLs, product references, CTAs and @handles accepted as creative input without treating them as verified evidence; direct-contact checks remain bounded, not comprehensive PII detection.",
+    "remaining_unknowns": [
+      "Real provider/account export access and permission",
+      "Actual audience metrics and demand",
+      "Live platform submission, public publishing and verified affiliate links",
+      "Sales, attribution, settlement and commercial impact"
+    ]
   }
 }
