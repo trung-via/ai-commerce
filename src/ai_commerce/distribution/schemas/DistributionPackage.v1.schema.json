@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-commerce.local/schema/DistributionPackage.v1",
+  "title": "DistributionPackage.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "package_id",
+    "source_run_id",
+    "source_manifest_sha256",
+    "video_sha256",
+    "platform",
+    "surface",
+    "account_ref",
+    "market",
+    "app_ref",
+    "title",
+    "caption",
+    "hashtags",
+    "product_ref",
+    "disclosure",
+    "capability",
+    "files",
+    "state",
+    "publication_status",
+    "package_sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "DistributionPackage.v1"
+    },
+    "package_id": {
+      "type": "string",
+      "pattern": "^a08-[0-9a-f]{24}$"
+    },
+    "source_run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_manifest_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "video_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "platform": {
+      "enum": [
+        "TIKTOK",
+        "FACEBOOK",
+        "INSTAGRAM",
+        "YOUTUBE"
+      ]
+    },
+    "surface": {
+      "enum": [
+        "VIDEO",
+        "PROFILE_VIDEO",
+        "PAGE_REEL",
+        "REEL",
+        "SHORT"
+      ]
+    },
+    "account_ref": {
+      "type": "object"
+    },
+    "market": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "app_ref": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "title": {
+      "type": "string"
+    },
+    "caption": {
+      "type": "string"
+    },
+    "hashtags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "product_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "disclosure": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "capability": {
+      "type": "object",
+      "required": [
+        "decision",
+        "verification",
+        "reason_codes"
+      ]
+    },
+    "files": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    },
+    "state": {
+      "const": "EXPORTED_FOR_MANUAL_HANDOFF"
+    },
+    "publication_status": {
+      "const": "NOT_ATTEMPTED"
+    },
+    "package_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

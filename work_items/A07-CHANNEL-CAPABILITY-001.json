@@ -1,0 +1,61 @@
+{
+  "work_id": "A07-CHANNEL-CAPABILITY-001",
+  "objective": "A07 v1 offline provider-neutral evidence-aware channel capability registry and A08 advisory decision boundary",
+  "source_decision": "Human 2026-10-29: implement A07 following Deep Research",
+  "source_sha": "d269fb44c7771de2b9bdbf117f7028c0d16db366",
+  "owner": "Distribution",
+  "status": "VERIFIED_FOR_OFFLINE_SCOPE",
+  "scope_in": [
+    "snapshot/request JSON Schemas",
+    "SQLite append-only registry",
+    "deterministic offline evaluator",
+    "provider metadata profiles (four platforms)",
+    "CLI validate/import/evaluate/history",
+    "cross-platform CI and adversarial negative tests",
+    "A08 decision contract"
+  ],
+  "scope_out": [
+    "live OAuth",
+    "credential storage",
+    "live social API calls or posting",
+    "public status or platform receipts",
+    "AIOS/Python Agent accounts/runtime"
+  ],
+  "expected_artifacts": [
+    "src/ai_commerce/distribution/",
+    "src/ai_commerce/cli.py",
+    "tests/test_a07_capability.py",
+    ".github/workflows/a07-capability.yml",
+    "docs/engineering/A07_IMPLEMENTATION_REPORT.md"
+  ],
+  "acceptance": [
+    "AC01 exact tuple and immutable history",
+    "AC02 missing evidence never grants API",
+    "AC03 account/app/market/surface/action isolation",
+    "AC04 expiry/revocation override allow",
+    "AC05 upload/manual/direct-post and visibility distinct",
+    "AC06 evidence integrity/profile version",
+    "AC07 A02/A06 regression testing",
+    "AC08 stable offline A08 decision interface"
+  ],
+  "side_effect_class": "REPOSITORY_CODE_ONLY",
+  "evidence_required": [
+    "hosted CI on Windows/Ubuntu",
+    "test counts and SHA"
+  ],
+  "verification_result": {
+    "state": "PASSED_HOSTED_CI_AND_MERGED_MAIN",
+    "verified_candidate_sha": "d991f747752b05bbf30769ece5924a3acb46bc4c",
+    "published_main_sha": "0e57caf9d23b0aae01627490a42f3de2068f95c8",
+    "pull_request_url": "https://github.com/trung-via/ai-commerce/pull/75",
+    "a07_ci_run_url": "https://github.com/trung-via/ai-commerce/actions/runs/40824806875",
+    "a06_regression_run_url": "https://github.com/trung-via/ai-commerce/actions/runs/40824806922",
+    "tests": {
+      "a07_windows": "65 passed",
+      "a07_ubuntu": "65 passed",
+      "a06_windows": "897 passed",
+      "a06_ubuntu": "896 passed, 1 skipped"
+    },
+    "acceptance_scope": "Provider-neutral A07 v1 OFFLINE capability registry. No live OAuth, permission, account proof, provider publishing or publication status."
+  }
+}

@@ -21,6 +21,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "ai_commerce.contracts" = ["schemas/*.schema.json"]
+"ai_commerce.distribution" = ["schemas/*.schema.json", "profiles.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,0 +1,55 @@
+{
+  "work_id": "A06-OFFLINE-CREATIVE-E2E-001",
+  "objective": "Product-completion E01: freeform prompt + explicit local stills -> A04 import/CreativeAssetLink/A05 composition/render -> playable MP4 with reopenable provenance.",
+  "source_decision": "Human 2026-10-29: implement A06 following Deep Research",
+  "source_sha": "858c5bd54fa348c6c46f2fae82cd35be4ef886f2",
+  "owner": "Cross-domain E01 / Media & Creative and Commerce Operations",
+  "status": "VERIFIED_FOR_OFFLINE_E01",
+  "scope_in": [
+    "offline E01 orchestrator",
+    "creative-e2e run/inspect/verify CLI",
+    "digest-bound manifest and package",
+    "real MP4 verify",
+    "CI + demo"
+  ],
+  "scope_out": [
+    "model-generated media assertion for import",
+    "paid AI",
+    "publishing",
+    "distribution",
+    "M1 acceptance without verified real artifact"
+  ],
+  "expected_artifacts": [
+    "src/ai_commerce/e2e/",
+    "src/ai_commerce/cli.py",
+    "tests/test_a06_e01.py",
+    "scripts/a06_demo.py",
+    ".github/workflows/a06-e01.yml"
+  ],
+  "acceptance": [
+    "prompt without SKU/CTA",
+    "local image(s) produce real H264/yuv420p MP4",
+    "CreativeAssetLink realization_claim remains false and source stays LOCAL_IMPORT",
+    "full decode and integrity on reopen",
+    "missing/corrupt/tampered package rejects success",
+    "no regression of prior CLI",
+    "real product demo downloadable after CI"
+  ],
+  "verification_result": {
+    "state": "PASSED_HOSTED_CI_AND_MERGED_MAIN",
+    "verified_candidate_sha": "b56839b6bad5d3f2b8404334dd7a9a6db5f3fe13",
+    "published_main_sha": "377d3357d6d2a14b8b58a63d2a09081eac20e10d",
+    "workflow_run_url": "https://github.com/trung-via/ai-commerce/actions/runs/40819125799",
+    "tests": {
+      "windows": "859 passed",
+      "ubuntu": "858 passed, 1 skipped"
+    },
+    "e01_demo": {
+      "windows_artifact_id": 12874515452,
+      "ubuntu_artifact_id": 12873857360,
+      "full_decode_passed": true,
+      "provenance_closure_passed": true
+    },
+    "acceptance_scope": "Local stills -> playable H264 MP4 with truthful provenance, no external publishing"
+  }
+}

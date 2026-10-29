@@ -125,6 +125,74 @@ def build_parser() -> argparse.ArgumentParser:
     r_inspect.add_argument("--out-dir", type=Path, required=True, help="Artifact / render registry root")
     r_inspect.add_argument("--job-id", required=True, help="Render job ID")
 
+
+    # A06: one consumer-facing offline creative run; no implicit AI provider.
+    e01 = commands.add_parser("creative-e2e", help="Offline creative video and evidence")
+    e01_commands = e01.add_subparsers(dest="e01_command", required=True)
+    e01_run = e01_commands.add_parser("run", help="Create an MP4 from prompt + local still image(s)")
+    e01_run.add_argument("--prompt", required=True)
+    e01_run.add_argument("--asset", type=Path, action="append", required=True)
+    e01_run.add_argument("--output", type=Path, required=True)
+    e01_run.add_argument("--width", type=int, default=64)
+    e01_run.add_argument("--height", type=int, default=96)
+    e01_run.add_argument("--fps", type=int, default=24)
+    e01_run.add_argument("--frames", type=int, default=24, help="Frames per still image")
+    e01_run.add_argument("--silence", action="store_true", help="Include AAC silent audio")
+    for name in ("inspect", "verify"):
+        sub = e01_commands.add_parser(name, help="Read saved E01 package" if name == "inspect" else
+                                      "Reopen and verify E01 provenance and decoded MP4")
+        sub.add_argument("--run", type=Path, required=True)
+        if name == "verify":
+            sub.add_argument("--full-decode", action="store_true",
+                             help="Explicit flag; A05 verifier always full-decodes")
+
+    channel = commands.add_parser("channel-capability", help="A07 offline capability registry; never publishes")
+    channel_ops = channel.add_subparsers(dest="channel_operation", required=True)
+    ch_validate = channel_ops.add_parser("validate", help="Validate a snapshot without importing")
+    ch_validate.add_argument("--file", type=Path, required=True)
+    ch_import = channel_ops.add_parser("import", help="Append immutable snapshot to SQLite registry")
+    ch_import.add_argument("--file", type=Path, required=True)
+    ch_import.add_argument("--db", type=Path, required=True)
+    ch_evaluate = channel_ops.add_parser("evaluate", help="Evaluate exact account/surface/action offline")
+    ch_evaluate.add_argument("--request", type=Path, required=True)
+    ch_evaluate.add_argument("--db", type=Path, required=True)
+    ch_evaluate.add_argument("--at", help="RFC3339 aware time; optional deterministic evaluation")
+    ch_history = channel_ops.add_parser("history", help="Show immutable history for one exact capability")
+    ch_history.add_argument("--request", type=Path, required=True)
+    ch_history.add_argument("--db", type=Path, required=True)
+
+    # A08: offline distribution export and human-evidenced publication journal.
+    distribution = commands.add_parser("distribution", help="A08 offline export and receipt journal")
+    d_ops = distribution.add_subparsers(dest="distribution_operation", required=True)
+    d_export = d_ops.add_parser("export", help="Export a verified E01 video for manual posting")
+    d_export.add_argument("--source", type=Path, required=True)
+    d_export.add_argument("--output", type=Path, required=True)
+    d_export.add_argument("--platform", choices=("TIKTOK", "FACEBOOK", "INSTAGRAM", "YOUTUBE"), required=True)
+    d_export.add_argument("--surface", required=True)
+    d_export.add_argument("--account", required=True, help="namespace:account-id")
+    d_export.add_argument("--market")
+    d_export.add_argument("--caption", default="")
+    d_export.add_argument("--title", default="")
+    d_export.add_argument("--hashtag", action="append", default=[])
+    d_export.add_argument("--capability-db", type=Path)
+    d_inspect = d_ops.add_parser("inspect", help="Verify an exported package including all hashes")
+    d_inspect.add_argument("--package", type=Path, required=True)
+    d_handoff = d_ops.add_parser("handoff", help="Create a manual publication intent")
+    d_handoff.add_argument("--package", type=Path, required=True)
+    d_handoff.add_argument("--db", type=Path, required=True)
+    d_handoff.add_argument("--idempotency-key", required=True)
+    d_event = d_ops.add_parser("event", help="Record an externally unverified user-supplied event")
+    d_event.add_argument("--db", type=Path, required=True)
+    d_event.add_argument("--publication-id", required=True)
+    d_event.add_argument("--type", required=True, choices=(
+        "SUBMISSION_REPORTED", "OUTCOME_UNKNOWN", "REJECTION_REPORTED",
+        "PUBLICATION_RECEIPT", "VISIBILITY_EVIDENCE", "REMOVAL_REPORTED"))
+    d_event.add_argument("--evidence", type=Path)
+    d_event.add_argument("--post-id")
+    d_event.add_argument("--url")
+    d_status = d_ops.add_parser("status", help="Replay and verify publication event ledger")
+    d_status.add_argument("--db", type=Path, required=True)
+    d_status.add_argument("--publication-id", required=True)
     return parser
 
 
@@ -319,6 +387,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Product Runtime: {info.product_runtime}")
         return 0
     try:
+        if args.command == "distribution":
+            from ai_commerce.distribution.assisted_cli import run as distribution_run
+            return distribution_run(args)
+        if args.command == "channel-capability":
+            from ai_commerce.distribution.cli import run as channel_run
+            return channel_run(args)
+        if args.command == "creative-e2e":
+            from ai_commerce.e2e import inspect as e01_inspect, run as e01_run, verify as e01_verify
+            if args.e01_command == "run":
+                result = e01_run(args.prompt, args.asset, args.output,
+                                 width=args.width, height=args.height, fps=args.fps,
+                                 frames=args.frames, silence=args.silence)
+            elif args.e01_command == "inspect":
+                result = e01_inspect(args.run)
+            else:
+                result = e01_verify(args.run)
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+            return 0 if result["state"] == "DELIVERED" else 1
         if args.command in {"concept-create", "concept-inspect", "concept-reframe"}:
             print(json.dumps(_creative_command(args), sort_keys=True))
             return 0

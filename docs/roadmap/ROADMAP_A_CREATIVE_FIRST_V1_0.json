@@ -223,8 +223,10 @@
             "A05"
           ],
           "deliverable": "First end-to-end creative artifact",
-          "acceptance": "Usable video with traceable generation; no publish/account proof required",
-          "status": "PLANNED"
+          "acceptance": "Playable offline H264 MP4 with verified local asset/composition/render provenance; no AI generation or social publishing claim",
+          "status": "VERIFIED_FOR_OFFLINE_E01",
+          "implementation_work_item_ref": "work_items/A06-OFFLINE-CREATIVE-E2E-001.json",
+          "verification_ref": "https://github.com/trung-via/ai-commerce/actions/runs/40819125799"
         }
       ],
       "parallel_nonblocking_engineering_enhancements": [
@@ -254,7 +256,10 @@
           ],
           "deliverable": "Account×surface capability truth registry",
           "acceptance": "Permission UNKNOWN separate from allowed; no shared AIOS accounts",
-          "status": "PLANNED"
+          "status": "VERIFIED_FOR_OFFLINE_A07_V1",
+          "implementation_work_item_ref": "work_items/A07-CHANNEL-CAPABILITY-001.json",
+          "verification_ref": "https://github.com/trung-via/ai-commerce/actions/runs/40824806875",
+          "published_main_sha": "0e57caf9d23b0aae01627490a42f3de2068f95c8"
         },
         {
           "id": "A08",
@@ -270,7 +275,11 @@
           ],
           "deliverable": "Export package, assisted posting path, publication record",
           "acceptance": "SUBMITTED, confirmed and PUBLIC states distinct; no fictional provider receipt",
-          "status": "PLANNED"
+          "status": "VERIFIED_FOR_OFFLINE_ASSISTED_V1",
+          "implementation_work_item_ref": "work_items/A08-ASSISTED-DISTRIBUTION-001.json",
+          "verification_ref": "https://github.com/trung-via/ai-commerce/actions/runs/40831199268",
+          "published_main_sha": "8d02bd15613220c06bcfb67225622674d70b3ffc",
+          "acceptance_scope": "A06-bound offline package export, manual handoff and user-supplied evidence receipt journal; no verified live social account, published post, public visibility or link."
         },
         {
           "id": "A09",
@@ -486,6 +495,13 @@
     "M0": "CORE_SCOPE_MET_WITH_SCREENSHOT_EVIDENCE_EF01",
     "M0_R": "ACCEPTED_WITH_DEFERRED_RISKS_2026_10_28",
     "EF02_implementation_ref": "work_items/EF02-MULTI-ACTION-001.json",
-    "optional_ef_enhancements": "EF01-R_IMPLEMENTED_2026_10_28; EF01-P_MT01_PLANNED; EF02_CHAT_WAKE_PLANNED"
+    "optional_ef_enhancements": "EF01-R_IMPLEMENTED_2026_10_28; EF01-P_MT01_PLANNED; EF02_CHAT_WAKE_PLANNED",
+    "A06": "VERIFIED_FOR_OFFLINE_E01_CI_40819125799",
+    "M1": "OFFLINE_E01_ACCEPTED_2026_10_29",
+    "A07": "VERIFIED_FOR_OFFLINE_D01_CI_40824806875_MAIN_0e57caf9",
+    "A07_implementation_ref": "work_items/A07-CHANNEL-CAPABILITY-001.json",
+    "A08": "VERIFIED_FOR_OFFLINE_ASSISTED_CI_40831199268_MAIN_8d02bd15",
+    "M2": "OFFLINE_ASSISTED_SCOPE_ACCEPTED_2026_10_29_NO_LIVE_PUBLICATION",
+    "A08_implementation_ref": "work_items/A08-ASSISTED-DISTRIBUTION-001.json"
   }
 }
