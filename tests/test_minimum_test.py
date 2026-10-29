@@ -275,7 +275,8 @@ def test_serial_profile_survives_mt01_selection_and_actual_pytest_dispatch(mappe
         calls.append(list(argv))
         return subprocess.CompletedProcess(argv, 0, "1 passed in 0.01s", "")
     monkeypatch.setattr(verification, "subprocess", SimpleNamespace(
-        run=run, TimeoutExpired=subprocess.TimeoutExpired))
+        run=run, CompletedProcess=subprocess.CompletedProcess,
+        TimeoutExpired=subprocess.TimeoutExpired))
 
     mapped.evidence.mkdir(exist_ok=True)
     evidence_files = {}
