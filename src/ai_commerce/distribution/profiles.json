@@ -1,0 +1,75 @@
+{
+  "version": "v1.0",
+  "checked_at": "2026-10-29",
+  "platforms": {
+    "TIKTOK": {
+      "docs": [
+        "https://developers.tiktok.com/docs/en/content-posting-api-reference-upload-video",
+        "https://developers.tiktok.com/docs/en/content-posting-api-reference-direct-post"
+      ],
+      "actions": {
+        "API_UPLOAD": {
+          "required_scopes": [
+            "video.upload"
+          ]
+        },
+        "API_DIRECT_POST": {
+          "required_scopes": [
+            "video.publish"
+          ]
+        },
+        "MANUAL_POST": {},
+        "EXPORT_PACKAGE": {}
+      }
+    },
+    "FACEBOOK": {
+      "docs": [
+        "https://www.postman.com/meta/facebook/documentation/r56bjfd/facebook-api"
+      ],
+      "actions": {
+        "API_UPLOAD": {},
+        "API_DIRECT_POST": {},
+        "MANUAL_POST": {},
+        "EXPORT_PACKAGE": {}
+      }
+    },
+    "INSTAGRAM": {
+      "docs": [
+        "https://www.postman.com/meta/instagram/documentation/6yqw8pt/instagram-api"
+      ],
+      "actions": {
+        "API_DIRECT_POST": {
+          "login_modes": {
+            "FACEBOOK_LOGIN": [
+              "instagram_basic",
+              "instagram_content_publish",
+              "pages_read_engagement",
+              "pages_show_list"
+            ],
+            "INSTAGRAM_LOGIN": [
+              "instagram_business_basic",
+              "instagram_business_content_publish"
+            ]
+          }
+        },
+        "MANUAL_POST": {},
+        "EXPORT_PACKAGE": {}
+      }
+    },
+    "YOUTUBE": {
+      "docs": [
+        "https://developers.google.com/youtube/data/reference/rest/v3/videos/insert"
+      ],
+      "actions": {
+        "API_UPLOAD": {
+          "required_scopes": [
+            "https://www.googleapis.com/auth/youtube.upload"
+          ]
+        },
+        "PUBLIC_VISIBILITY": {},
+        "MANUAL_POST": {},
+        "EXPORT_PACKAGE": {}
+      }
+    }
+  }
+}
