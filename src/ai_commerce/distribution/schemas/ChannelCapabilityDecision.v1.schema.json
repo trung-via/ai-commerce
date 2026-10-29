@@ -1,0 +1,182 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-commerce.local/schema/ChannelCapabilityDecision.v1",
+  "title": "ChannelCapabilityDecision.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "request",
+    "decision",
+    "reason_codes",
+    "snapshot_ids",
+    "evidence_ids",
+    "simulation",
+    "verification",
+    "evaluated_at",
+    "evaluator_version"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "ChannelCapabilityDecision.v1"
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "platform",
+        "account_ref",
+        "app_ref",
+        "market",
+        "surface",
+        "action"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "ChannelCapabilityRequest.v1"
+        },
+        "platform": {
+          "enum": [
+            "TIKTOK",
+            "FACEBOOK",
+            "INSTAGRAM",
+            "YOUTUBE"
+          ]
+        },
+        "account_ref": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "id"
+          ],
+          "properties": {
+            "namespace": {
+              "enum": [
+                "tiktok_open_id",
+                "facebook_page_id",
+                "instagram_user_id",
+                "youtube_channel_id",
+                "internal_alias"
+              ]
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        },
+        "app_ref": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "namespace",
+                "id"
+              ],
+              "properties": {
+                "namespace": {
+                  "enum": [
+                    "tiktok_client_key",
+                    "meta_app_id",
+                    "google_cloud_project_id",
+                    "internal_alias"
+                  ]
+                },
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "market": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Z]{2}$"
+        },
+        "surface": {
+          "enum": [
+            "VIDEO",
+            "REEL",
+            "SHORT",
+            "PAGE_REEL",
+            "PROFILE_VIDEO"
+          ]
+        },
+        "action": {
+          "enum": [
+            "EXPORT_PACKAGE",
+            "MANUAL_POST",
+            "API_UPLOAD",
+            "API_DIRECT_POST",
+            "PUBLIC_VISIBILITY",
+            "PRODUCT_ANCHOR",
+            "METRICS_READ",
+            "SCHEDULE_POST"
+          ]
+        },
+        "required_constraints": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "simulation": {
+          "type": "boolean"
+        }
+      }
+    },
+    "decision": {
+      "enum": [
+        "ALLOW",
+        "DENY",
+        "UNKNOWN",
+        "NEEDS_RECHECK"
+      ]
+    },
+    "reason_codes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    },
+    "snapshot_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "simulation": {
+      "type": "boolean"
+    },
+    "verification": {
+      "const": "OFFLINE_RECORDED_NOT_LIVE_VERIFIED"
+    },
+    "evaluated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "evaluator_version": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

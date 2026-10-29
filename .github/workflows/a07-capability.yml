@@ -1,0 +1,27 @@
+name: A07 offline channel capability verification
+on:
+  pull_request:
+    paths:
+      - "src/ai_commerce/distribution/**"
+      - "src/ai_commerce/cli.py"
+      - "pyproject.toml"
+      - "tests/test_a07_capability.py"
+      - ".github/workflows/a07-capability.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline-registry:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -e ".[dev]"
+      - name: A07 and A02 portable contract regression
+        run: python -m pytest tests/test_a07_capability.py tests/test_a02_contracts.py tests/test_cli.py -q
