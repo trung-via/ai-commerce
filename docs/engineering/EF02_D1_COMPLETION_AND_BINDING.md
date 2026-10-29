@@ -1,0 +1,19 @@
+# EF02-D / D1 — Completion Event & Local Conversation Binding
+
+**Scope:** independent AI Commerce repo. **Status:** source candidate; no real ChatGPT wake or origin capture claimed.
+
+## Boundary and lifecycle
+
+- D0 established a viable AIOS-Renew local-CDP pattern, not a supported ChatGPT conversation-write API or a live AI Commerce proof. D1 implements only a passive **Completion Event** projector and read-only **Conversation Binding** matcher.
+- Existing EF02 workflow is still authoritative for batch execution, attempt claims, candidate refs, GitHub Issue feedback, and final `batch_result.json`.
+- After scheduling and feedback, the worker **attempts** to write `.local/ef02/<batch_id>/completion_event.json` before writing `batch_result.json`. Both are covered by existing artifact upload. A missing/invalid event is a separate diagnostic and does not trigger a new model call, repair, retry, or change of batch result. The consumer must require matching final `batch_result.json` before D2 delivery.
+- Event schema v1: `kind`, `version`, deterministic `event_id`, `repository`, `run_id`, `run_attempt`, `issue_number`, `batch_id`, `source_sha`, `batch_status`, and minimal action `{action_id,attempt_id,status,candidate_sha?}`. Defaults are `origin_binding_status=UNBOUND`, `delivery_status=NOT_ATTEMPTED`, `chat_delivery_proven=false`.
+- Event IDs are SHA-256 over canonicalized allowlisted completion fields, including run attempt; **not** a proof of GitHub publication or ChatGPT receipt.
+- The local registry has separate conversation `routes` and per-batch `claims`, so one chat may own multiple batches without a cross-chat default. The local registry is **not a GitHub artifact**, CLI argument, Issue body, or repo file. A future independently trusted origin issuer must supply `route_id`. A local `resolve_binding()` call demands exact repository, batch, source SHA, Issue, distinct conversation UUID, consent, positive generation, loopback CDP and an outside-repository registry location. No auto-discovery of newest tab, URL, chat, or identity.
+- D1 provides no registry writer, origin attestation, browser connection, delivery retry, assistant output inspection, autonomous Brain review, or GitHub-side chat URL.
+
+## Next stages and acceptance
+
+- D2 must establish an independently verified origin capture/attestation and bind route generation, implement the explicitly Human-enabled adapter on an isolated browser identity, and independently verify same-chat delivery receipt. Never treat a GitHub Issue comment or workflow `success` as a ChatGPT receipt.
+- D3 live checks: two simultaneous chats A/B route to their own conversations; stale/duplicate/ambiguous events never cross-deliver or blindly resend; session and authentication boundaries stay local; real Brain resume is a **separate** claim.
+- The focused D1 unit tests are synthetic, not live Wake evidence. No AIOS-Renew Python/runtime, secrets, default account, or session identity is imported.
