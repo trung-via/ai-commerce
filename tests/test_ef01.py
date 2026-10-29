@@ -400,5 +400,7 @@ print(json.dumps({'status': 'SUCCESS', 'denied_actions': []}))
     )
     assert result["status"] == "BUILD_VERIFIED_FOR_SCOPE"
     assert (outdir / "invocations" / "000" / "instruction.txt").is_file()
-    assert seen[-1] == ("antigravity", outdir / "invocations" / "000")
+    assert seen[-1] == ("antigravity", outdir / "invocations" / "000" / "agy_input")
+    assert (outdir / "invocations" / "000" / "agy_input" / "instruction.txt").is_file()
+    assert not (outdir / "invocations" / "000" / "agy_input" / "provider_boundary.json").exists()
     assert result["denied_actions"] == []
