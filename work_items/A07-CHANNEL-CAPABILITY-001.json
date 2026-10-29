@@ -1,0 +1,46 @@
+{
+  "work_id": "A07-CHANNEL-CAPABILITY-001",
+  "objective": "A07 v1 offline provider-neutral evidence-aware channel capability registry and A08 advisory decision boundary",
+  "source_decision": "Human 2026-10-29: implement A07 following Deep Research",
+  "source_sha": "d269fb44c7771de2b9bdbf117f7028c0d16db366",
+  "owner": "Distribution",
+  "status": "IMPLEMENTED_PENDING_VERIFICATION",
+  "scope_in": [
+    "snapshot/request JSON Schemas",
+    "SQLite append-only registry",
+    "deterministic offline evaluator",
+    "provider metadata profiles (four platforms)",
+    "CLI validate/import/evaluate/history",
+    "cross-platform CI and adversarial negative tests",
+    "A08 decision contract"
+  ],
+  "scope_out": [
+    "live OAuth",
+    "credential storage",
+    "live social API calls or posting",
+    "public status or platform receipts",
+    "AIOS/Python Agent accounts/runtime"
+  ],
+  "expected_artifacts": [
+    "src/ai_commerce/distribution/",
+    "src/ai_commerce/cli.py",
+    "tests/test_a07_capability.py",
+    ".github/workflows/a07-capability.yml",
+    "docs/engineering/A07_IMPLEMENTATION_REPORT.md"
+  ],
+  "acceptance": [
+    "AC01 exact tuple and immutable history",
+    "AC02 missing evidence never grants API",
+    "AC03 account/app/market/surface/action isolation",
+    "AC04 expiry/revocation override allow",
+    "AC05 upload/manual/direct-post and visibility distinct",
+    "AC06 evidence integrity/profile version",
+    "AC07 A02/A06 regression testing",
+    "AC08 stable offline A08 decision interface"
+  ],
+  "side_effect_class": "REPOSITORY_CODE_ONLY",
+  "evidence_required": [
+    "hosted CI on Windows/Ubuntu",
+    "test counts and SHA"
+  ]
+}
