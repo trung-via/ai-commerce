@@ -4,7 +4,20 @@
 
 AI Commerce is an independent product and engineering repository. It is **not** Python Agent, AIOS-Renew, a submodule of either, or an inherited task/execution system.
 
-**A03/A04 offline MVP evidence (2026-10-29):** The EF02 dependency integration candidate passed the final EF01 registered `project-tests` run (**365 passed, exit 0**) on Windows, after an earlier intra-executor run recorded 16 Git/PowerShell process-start failures already present in its baseline. See the [integration report](docs/engineering/A03_A04_INTEGRATION_REPORT.md) and [EF02 run #40735271832](https://github.com/trung-via/ai-commerce/actions/runs/40735271832). GitHub publication is tracked by the promotion Pull Request; A05, MP4 and M1 remain incomplete.
+## Current Creative Factory status — 2026-10-29
+
+**A06/E01 and milestone M1: VERIFIED FOR OFFLINE SCOPE.** [PR #71](https://github.com/trung-via/ai-commerce/pull/71) was merged into `main` at `377d3357`. [CI #40819125799](https://github.com/trung-via/ai-commerce/actions/runs/40819125799) verified the final code candidate: **Windows 859 passed; Ubuntu 858 passed, 1 skipped**. Both systems produced a playable H.264/yuv420p MP4 and uploaded complete E01 packages, including verified asset/order/scene/composition/render provenance and FFmpeg full decode.
+
+```powershell
+python -m ai_commerce creative-e2e run --prompt "A local original story" --asset .\scene.png --output .\.local\e01
+python -m ai_commerce creative-e2e inspect --run .\.local\e01
+python -m ai_commerce creative-e2e verify --run .\.local\e01 --full-decode
+```
+
+The accepted E01 path renders supplied local PNG/JPEG/WebP **still images**, not generated text-to-video; `generation_performed=false` and `publication_status=NOT_ATTEMPTED`. No social publishing, paid model, platform account or commercial outcome is implied. [A06 engineering evidence](docs/engineering/A06_E01_IMPLEMENTATION_REPORT.md).
+
+
+**A03/A04 offline MVP evidence (2026-10-29):** The EF02 dependency integration candidate passed the final EF01 registered `project-tests` run (**365 passed, exit 0**) on Windows, after an earlier intra-executor run recorded 16 Git/PowerShell process-start failures already present in its baseline. See the [integration report](docs/engineering/A03_A04_INTEGRATION_REPORT.md) and [EF02 run #40735271832](https://github.com/trung-via/ai-commerce/actions/runs/40735271832). This paragraph is a historical A03/A04-only snapshot; current A06/M1 verification is recorded above.
 
 ## Foundation
 
@@ -80,7 +93,7 @@ python -m ai_commerce asset-inspect --store .local/creative --out-dir .local/ass
 
 Focused regression in the Codex sub-session: **242 passed, 2 skipped**; its full registered profile recorded **347 passed, 16 failed, 2 skipped**, exit 1 with 16 unchanged Git/PowerShell startup failures. **Later, EF01's registered verification on the same candidate ran `python -m pytest tests -q` and returned 365 passed, exit 0 (78.73s).** The earlier environment failures are preserved as incident evidence, not claimed root-cause-fixed. All 30 new integration cases passed in the focused sub-session; native link checks there were skipped.
 
-This implementation originated as a scoped candidate and is promoted through a separate Pull Request. The handoff is readable through existing contracts/loaders; it does not implement A05 or establish that a mock asset realizes the concept. No network/model credentials, external media generation or publishing are used. **A05, MP4 and M1 are not complete.** See the [exact evidence, commands and limitations](docs/engineering/A03_A04_INTEGRATION_REPORT.md).
+This implementation originated as a scoped candidate and is promoted through a separate Pull Request. The handoff is readable through existing contracts/loaders; it does not implement A05 or establish that a mock asset realizes the concept. No network/model credentials, external media generation or publishing are used. **This is a historical A03/A04-only snapshot; see the current A06/M1 evidence above.** See the [exact evidence, commands and limitations](docs/engineering/A03_A04_INTEGRATION_REPORT.md).
 
 ## Status and repository hygiene
 

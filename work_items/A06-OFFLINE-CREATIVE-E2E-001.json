@@ -4,7 +4,7 @@
   "source_decision": "Human 2026-10-29: implement A06 following Deep Research",
   "source_sha": "858c5bd54fa348c6c46f2fae82cd35be4ef886f2",
   "owner": "Cross-domain E01 / Media & Creative and Commerce Operations",
-  "status": "IMPLEMENTED_PENDING_VERIFICATION",
+  "status": "VERIFIED_FOR_OFFLINE_E01",
   "scope_in": [
     "offline E01 orchestrator",
     "creative-e2e run/inspect/verify CLI",
@@ -36,8 +36,20 @@
     "real product demo downloadable after CI"
   ],
   "verification_result": {
-    "state": "PENDING_HOSTED_CI",
-    "tests": "UNKNOWN",
-    "video": "NOT_YET_VERIFIED"
+    "state": "PASSED_HOSTED_CI_AND_MERGED_MAIN",
+    "verified_candidate_sha": "b56839b6bad5d3f2b8404334dd7a9a6db5f3fe13",
+    "published_main_sha": "377d3357d6d2a14b8b58a63d2a09081eac20e10d",
+    "workflow_run_url": "https://github.com/trung-via/ai-commerce/actions/runs/40819125799",
+    "tests": {
+      "windows": "859 passed",
+      "ubuntu": "858 passed, 1 skipped"
+    },
+    "e01_demo": {
+      "windows_artifact_id": 12874515452,
+      "ubuntu_artifact_id": 12873857360,
+      "full_decode_passed": true,
+      "provenance_closure_passed": true
+    },
+    "acceptance_scope": "Local stills -> playable H264 MP4 with truthful provenance, no external publishing"
   }
 }

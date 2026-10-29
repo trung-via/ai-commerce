@@ -891,7 +891,7 @@
           ],
           "priority": "P0",
           "owner": "Cross-domain",
-          "status": "PROPOSED"
+          "status": "VERIFIED_OFFLINE_E01"
         },
         {
           "id": "E02",
@@ -1054,7 +1054,7 @@
     "decision_ref": "docs/governance/HUMAN_DECISION_2026-10-29_CREATIVE_V1_1_A05.md",
     "a03_a04_upgrade_ref": "work_items/A03-A04-UPGRADE-V1_1-001.json",
     "a05_ref": "work_items/A05-SCRIPT-SCENE-RENDER-001.json",
-    "a06_m1_status": "NOT_VERIFIED",
+    "a06_m1_status": "OFFLINE_E01_ACCEPTED_2026_10_29",
     "work_tree_ids_unchanged": true
   },
   "minimum_test_human_decision_ref": "docs/governance/HUMAN_DECISION_2026-10-29_MINIMUM_TEST.md"

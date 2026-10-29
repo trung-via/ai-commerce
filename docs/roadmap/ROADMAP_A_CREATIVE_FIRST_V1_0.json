@@ -223,8 +223,10 @@
             "A05"
           ],
           "deliverable": "First end-to-end creative artifact",
-          "acceptance": "Usable video with traceable generation; no publish/account proof required",
-          "status": "PLANNED"
+          "acceptance": "Playable offline H264 MP4 with verified local asset/composition/render provenance; no AI generation or social publishing claim",
+          "status": "VERIFIED_FOR_OFFLINE_E01",
+          "implementation_work_item_ref": "work_items/A06-OFFLINE-CREATIVE-E2E-001.json",
+          "verification_ref": "https://github.com/trung-via/ai-commerce/actions/runs/40819125799"
         }
       ],
       "parallel_nonblocking_engineering_enhancements": [
@@ -486,6 +488,8 @@
     "M0": "CORE_SCOPE_MET_WITH_SCREENSHOT_EVIDENCE_EF01",
     "M0_R": "ACCEPTED_WITH_DEFERRED_RISKS_2026_10_28",
     "EF02_implementation_ref": "work_items/EF02-MULTI-ACTION-001.json",
-    "optional_ef_enhancements": "EF01-R_IMPLEMENTED_2026_10_28; EF01-P_MT01_PLANNED; EF02_CHAT_WAKE_PLANNED"
+    "optional_ef_enhancements": "EF01-R_IMPLEMENTED_2026_10_28; EF01-P_MT01_PLANNED; EF02_CHAT_WAKE_PLANNED",
+    "A06": "VERIFIED_FOR_OFFLINE_E01_CI_40819125799",
+    "M1": "OFFLINE_E01_ACCEPTED_2026_10_29"
   }
 }
