@@ -1,6 +1,6 @@
 # A08 v1 — Assisted Distribution & Receipts
 Date: 2026-10-29. WorkItem: A08-ASSISTED-DISTRIBUTION-001.
-Status: IMPLEMENTED_PENDING_HOSTED_CI.
+Status: VERIFIED_FOR_OFFLINE_SCOPE; merged to main in PR #78.
 
 ## Scope
 A08 D02/D03 exports a standalone MP4/caption/hashtags/title/manual-instructions package
@@ -31,4 +31,10 @@ effects. The journal intentionally does not implement D05 distributed publisher
 reconciliation. The draft PublicationRecord.v0.2 remains the semantic baseline.
 
 ## Verification
-Pending GitHub Actions on Windows and Ubuntu; do not claim acceptance before CI.
+Observed GitHub evidence on A08 candidate `8fa97aae0c9a2e6584e4672790628d6d4681c5f6`:
+- [A08 CI #40831199268](https://github.com/trung-via/ai-commerce/actions/runs/40831199268): **60 passed Windows; 60 passed Ubuntu** (affected tests including A06/A07 and CLI).
+- [A07 CI #40831199192](https://github.com/trung-via/ai-commerce/actions/runs/40831199192): **65 passed Windows; 65 passed Ubuntu**.
+- [A06 full regression #40831199309](https://github.com/trung-via/ai-commerce/actions/runs/40831199309): **907 passed Windows; 906 passed, 1 skipped Ubuntu**, including real MP4 demo and full decode workflow.
+- [PR #78](https://github.com/trung-via/ai-commerce/pull/78) merged into `main@8d02bd15613220c06bcfb67225622674d70b3ffc`.
+
+**Acceptance:** D02/D03/D04 technical OFFLINE scope SATISFIED; M2 OFFLINE_ASSISTED_SCOPE accepted. This verifies only locally prepared packages, manual handoff and a journal able to record USER_SUPPLIED_NOT_LIVE_VERIFIED evidence. It does **not** verify actual platform account entitlements, a successful real posting, public visibility or real commerce metrics. D05–D08 and A09 remain separate and unaccepted.

@@ -13,7 +13,7 @@
     "A06",
     "A07"
   ],
-  "status": "IMPLEMENTED_PENDING_HOSTED_CI",
+  "status": "VERIFIED_FOR_OFFLINE_SCOPE",
   "scope_in": [
     "verified E01 MP4 and source digest to immutable package",
     "platform surface metadata and copy-ready caption/hashtags/title",
@@ -43,5 +43,23 @@
     "AC09 A06/A07 regression on Windows and Ubuntu"
   ],
   "side_effect_class": "REPOSITORY_CODE_ONLY",
-  "verification_evidence": "Pending hosted CI; no external post or public URL verified"
+  "verification_evidence": "Hosted GitHub CI passed on A08 candidate, A06/A07 regression completed. Main merged PR #78. No provider action was executed.",
+  "verification_result": {
+    "state": "PASSED_HOSTED_CI_AND_MERGED_MAIN",
+    "candidate_sha": "8fa97aae0c9a2e6584e4672790628d6d4681c5f6",
+    "published_main_sha": "8d02bd15613220c06bcfb67225622674d70b3ffc",
+    "pull_request": "https://github.com/trung-via/ai-commerce/pull/78",
+    "a08_ci": "https://github.com/trung-via/ai-commerce/actions/runs/40831199268",
+    "a07_regression": "https://github.com/trung-via/ai-commerce/actions/runs/40831199192",
+    "a06_regression": "https://github.com/trung-via/ai-commerce/actions/runs/40831199309",
+    "tests": {
+      "a08_windows": "60 passed",
+      "a08_ubuntu": "60 passed",
+      "a07_windows": "65 passed",
+      "a07_ubuntu": "65 passed",
+      "a06_windows": "907 passed",
+      "a06_ubuntu": "906 passed, 1 skipped"
+    },
+    "acceptance_scope": "OFFLINE_ASSISTED_ONLY; receipts are user supplied and NOT live provider verified; A09 remains planned"
+  }
 }
