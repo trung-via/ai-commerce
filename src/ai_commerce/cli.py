@@ -195,6 +195,8 @@ def build_parser() -> argparse.ArgumentParser:
     d_status.add_argument("--publication-id", required=True)
     from ai_commerce.analytics.cli import add_parser as add_analytics_parser
     add_analytics_parser(commands)
+    from ai_commerce.opportunity.bridge.cli import add_parser as add_opportunity_parser
+    add_opportunity_parser(commands)
     return parser
 
 
@@ -389,6 +391,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Product Runtime: {info.product_runtime}")
         return 0
     try:
+        if args.command == "opportunity":
+            from ai_commerce.opportunity.bridge.cli import run as opportunity_run
+            return opportunity_run(args)
         if args.command == "analytics":
             from ai_commerce.analytics.cli import run as analytics_run
             return analytics_run(args)

@@ -1,0 +1,321 @@
+{
+  "work_id": "A10-OPPORTUNITY-AUDIENCE-001",
+  "action": "M02",
+  "status": "LOCALLY_VERIFIED",
+  "delivery": "CANDIDATE_BRANCH_VIA_EXISTING_EF01_EF02",
+  "source_sha": "1d839bbbe8f49c5e7ad0ef2a89f7f89578a0a1fe",
+  "source_tree_sha": "d738d889aa45f5478fda3983a7e0ecfcee9aa185",
+  "source_parent_sha": "3d97a33792223c97649df7b71041e6083a340192",
+  "source_head_unchanged": true,
+  "human_selected_executor": {
+    "executor": "codex",
+    "model": "gpt-6.1-sol",
+    "effort": "max"
+  },
+  "m01_preservation": {
+    "candidate_sha": "8e27597b7a73bfbd42d9ec45a39fd34576bd8a2d",
+    "integration_blob_count": 14,
+    "exact_match": true,
+    "blob_sha1": {
+      "contracts/SignalImport.v1.schema.json": "5631e9cb8490412269920f8fdfbed7f4da7db667",
+      "contracts/SignalSourceSnapshot.v1.schema.json": "66022b49ca1a3d68c1ba2614ccae0046817648db",
+      "contracts/TrendSignal.v1.schema.json": "ced3ee6dc4caea0b565f9814ca664704e81ddb31",
+      "docs/engineering/A10_IMPLEMENTATION_REPORT.md": "f1b97f039b2cf0d8ac51626b2829512f1c4a17b6",
+      "src/ai_commerce/opportunity/__init__.py": "1ab9ccf8ab8790710ffe98d229194a0a133b8b0b",
+      "src/ai_commerce/opportunity/core/__init__.py": "49e2b5d368dc3d5adcda10598645f6eb3622491d",
+      "src/ai_commerce/opportunity/core/models.py": "f9e970a7dea0c43813b99ab815d9f8cefcabbe86",
+      "src/ai_commerce/opportunity/core/schemas.py": "6e990c0cd649bafd7bcce4bcb9e67935799a484c",
+      "src/ai_commerce/opportunity/signals/__init__.py": "1ea2cff9184237785cd6d68dc6af090e4f053662",
+      "src/ai_commerce/opportunity/signals/files.py": "e1ef226ce36a713aa493f3f34e5a8864cd7f6226",
+      "src/ai_commerce/opportunity/signals/importer.py": "f92802acf7b33732f4626f655369a2a44cf3186d",
+      "src/ai_commerce/opportunity/signals/ledger.py": "5f0a2474c03dcc8b7c73a3dded1f52b38357a8b8",
+      "src/ai_commerce/opportunity/signals/profiles.py": "d724cf612b29d335694f3fefa2e8465b079402e3",
+      "tests/test_a10_m01.py": "1434304e3f438b539fd78ef2c048db38882e1a27"
+    },
+    "m01_action_reexecuted": false
+  },
+  "historical_failures": {
+    "provenance": "Human recovery request; prior actions were not invoked again",
+    "issue_87": "Codex quota",
+    "issue_89_m02_m03": "HEADLESS_TOOL_PERMISSION_DENIED; determinate no candidate/modified source",
+    "issue_89_m04_m05": "BLOCKED_DEPENDENCY; not invoked"
+  },
+  "scope": {
+    "allowed_component": "src/ai_commerce/opportunity/trends/",
+    "result": "PASS",
+    "existing_tracked_files_changed": [],
+    "changed_paths": [
+      "src/ai_commerce/opportunity/trends/README.md",
+      "src/ai_commerce/opportunity/trends/TrendComparisonContext.v1.schema.json",
+      "src/ai_commerce/opportunity/trends/TrendHypothesis.v1.schema.json",
+      "src/ai_commerce/opportunity/trends/TrendSeries.v1.schema.json",
+      "src/ai_commerce/opportunity/trends/__init__.py",
+      "src/ai_commerce/opportunity/trends/schemas.py",
+      "src/ai_commerce/opportunity/trends/tests/test_m02.py",
+      "src/ai_commerce/opportunity/trends/tracking.py",
+      "src/ai_commerce/opportunity/trends/verification.json"
+    ],
+    "new_text_lf": true,
+    "trailing_whitespace": false,
+    "git_diff_check_exit": 0,
+    "schemas_component_local": true,
+    "tests_component_local": true,
+    "cli_integration": "DEFERRED_TO_M05",
+    "registered_profile_unchanged": true
+  },
+  "verified_input_sha256": {
+    "src/ai_commerce/opportunity/trends/README.md": "cf917615ffdb24226a9e38d5c68169075c42f1d20ce6cbcbea4af2b7a46fb74f",
+    "src/ai_commerce/opportunity/trends/TrendComparisonContext.v1.schema.json": "2c56e781ac437bddd071c431b99cabe7a9e9beb4eadd53c679f1845e0cd6c764",
+    "src/ai_commerce/opportunity/trends/TrendHypothesis.v1.schema.json": "f2db53639f137a2f7536be2aa5451a8ab416d158d48e08d6751dbf8a6002b953",
+    "src/ai_commerce/opportunity/trends/TrendSeries.v1.schema.json": "a9d72e922693524958a52da879fc909a104cb94b1502097d3520cdb02cc6f89e",
+    "src/ai_commerce/opportunity/trends/__init__.py": "0ee5b7de26408ca70183b0b189727e802d18e9d31f46061b95f6ac64a6a90f79",
+    "src/ai_commerce/opportunity/trends/schemas.py": "45065279c16836f6d31ad23c0ae5477f1a29e341847c20b7411a190685b1c42c",
+    "src/ai_commerce/opportunity/trends/tests/test_m02.py": "4607bc3cc19455e0660df3bf92dae3ed5fde92cfcca0e3e64f9277aeb4895fd4",
+    "src/ai_commerce/opportunity/trends/tracking.py": "b8b66dbe46260e53e0684c6b1cbd5747b199791fc989994efe96c91a1a090bd1"
+  },
+  "prior_combined_input_sha256": {
+    "src/ai_commerce/opportunity/trends/README.md": "d764527b155d91f092f9371dd54dd27f5792587dcc1de1ec94710d38cc07d58f",
+    "src/ai_commerce/opportunity/trends/TrendComparisonContext.v1.schema.json": "2c56e781ac437bddd071c431b99cabe7a9e9beb4eadd53c679f1845e0cd6c764",
+    "src/ai_commerce/opportunity/trends/TrendHypothesis.v1.schema.json": "f2db53639f137a2f7536be2aa5451a8ab416d158d48e08d6751dbf8a6002b953",
+    "src/ai_commerce/opportunity/trends/TrendSeries.v1.schema.json": "a9d72e922693524958a52da879fc909a104cb94b1502097d3520cdb02cc6f89e",
+    "src/ai_commerce/opportunity/trends/__init__.py": "0ee5b7de26408ca70183b0b189727e802d18e9d31f46061b95f6ac64a6a90f79",
+    "src/ai_commerce/opportunity/trends/schemas.py": "45065279c16836f6d31ad23c0ae5477f1a29e341847c20b7411a190685b1c42c",
+    "src/ai_commerce/opportunity/trends/tests/test_m02.py": "d8f5fa81db38270abced1cc0e227ae7d3f9463290c24857ef841928030e8b86f",
+    "src/ai_commerce/opportunity/trends/tracking.py": "e030a5027a88e56c2611884dbd675db717511e02ebde9468f3176c743d2adb2f"
+  },
+  "runs": {
+    "integration_baseline_registered": {
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "tests",
+        "-q",
+        "-n",
+        "12"
+      ],
+      "exit_code": 0,
+      "passed": 1249,
+      "skipped": 5,
+      "seconds": 361.65,
+      "workers_requested": 12,
+      "workers_observed": null,
+      "worker_evidence": [],
+      "log_path": "src/ai_commerce/opportunity/trends/baseline-project-tests.log",
+      "log_sha256": "2912a3910801f40b6b16189b9b94f91953b628d93df7017b76d3fbb10969ecaa",
+      "log_storage": "LOCAL_IGNORED_FILE",
+      "skip_details": [
+        "SKIPPED [2] tests\\test_a04_media_operations.py:257: Host permits neither directory symlinks nor junctions",
+        "SKIPPED [1] tests\\test_a04_upgrade_v11.py:359: Host cannot create hardlinks: [WinError 5] Access is denied: 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{2cdaf0c5-ddb3-4542-9eff-bc6243e85991}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw10\\\\test_source_hardlink_is_reject0\\\\fixture.png' -> 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{2cdaf0c5-ddb3-4542-9eff-bc6243e85991}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw10\\\\test_source_hardlink_is_reject0\\\\hardlink.png'",
+        "SKIPPED [2] tests\\test_a09_analytics.py:468: Host does not permit creating this symlink; no native symlink proof"
+      ]
+    },
+    "targeted_initial": {
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "src/ai_commerce/opportunity/trends/tests",
+        "-n",
+        "12"
+      ],
+      "exit_code": 0,
+      "passed": 66,
+      "skipped": 0,
+      "seconds": 4.43,
+      "workers_requested": 12,
+      "workers_observed": 12,
+      "worker_evidence": [
+        "created: 12/12 workers",
+        "12 workers [66 items]"
+      ],
+      "log_path": "src/ai_commerce/opportunity/trends/targeted-first.log",
+      "log_sha256": "800914ca72ca91167ad4e16942b442b2976051d5ecfec20c4f239cb4a16baa8f",
+      "log_storage": "LOCAL_IGNORED_FILE",
+      "skip_details": []
+    },
+    "targeted_review_one": {
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "src/ai_commerce/opportunity/trends/tests",
+        "-n",
+        "12"
+      ],
+      "exit_code": 0,
+      "passed": 76,
+      "skipped": 0,
+      "seconds": 6.91,
+      "workers_requested": 12,
+      "workers_observed": 12,
+      "worker_evidence": [
+        "created: 12/12 workers",
+        "12 workers [76 items]"
+      ],
+      "log_path": "src/ai_commerce/opportunity/trends/targeted-review.log",
+      "log_sha256": "d0cc9a15c99028c3268c5e1e7c51917e5728e03cbc84bfe897c08e2142dfde69",
+      "log_storage": "LOCAL_IGNORED_FILE",
+      "skip_details": []
+    },
+    "combined_review_one": {
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "tests",
+        "src/ai_commerce/opportunity/trends/tests",
+        "-n",
+        "12"
+      ],
+      "exit_code": 0,
+      "passed": 1325,
+      "skipped": 5,
+      "seconds": 196.87,
+      "workers_requested": 12,
+      "workers_observed": 12,
+      "worker_evidence": [
+        "created: 12/12 workers",
+        "12 workers [1330 items]"
+      ],
+      "log_path": "src/ai_commerce/opportunity/trends/integrated-project-tests.log",
+      "log_sha256": "f3792ce2df8d791e43455f9e432ade64525ad14eaf997c7c1cda00385fc48668",
+      "log_storage": "LOCAL_IGNORED_FILE",
+      "skip_details": [
+        "SKIPPED [2] tests\\test_a04_media_operations.py:257: Host permits neither directory symlinks nor junctions",
+        "SKIPPED [1] tests\\test_a04_upgrade_v11.py:359: Host cannot create hardlinks: [WinError 5] Access is denied: 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{a98449dd-2400-4c18-ab08-9945dd6ae31f}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw4\\\\test_source_hardlink_is_reject0\\\\fixture.png' -> 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{a98449dd-2400-4c18-ab08-9945dd6ae31f}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw4\\\\test_source_hardlink_is_reject0\\\\hardlink.png'",
+        "SKIPPED [2] tests\\test_a09_analytics.py:468: Host does not permit creating this symlink; no native symlink proof"
+      ]
+    },
+    "targeted_final": {
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "src/ai_commerce/opportunity/trends/tests",
+        "-n",
+        "12"
+      ],
+      "exit_code": 0,
+      "passed": 77,
+      "skipped": 0,
+      "seconds": 3.53,
+      "workers_requested": 12,
+      "workers_observed": 12,
+      "worker_evidence": [
+        "created: 12/12 workers",
+        "12 workers [77 items]"
+      ],
+      "log_path": "src/ai_commerce/opportunity/trends/targeted-final.log",
+      "log_sha256": "a3b5fa3f34f2feb8aaa26971fd61167f801f82c34e7897e576b3f68ea6e74e61",
+      "log_storage": "LOCAL_IGNORED_FILE",
+      "skip_details": []
+    },
+    "combined_final": {
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "tests",
+        "src/ai_commerce/opportunity/trends/tests",
+        "-n",
+        "12"
+      ],
+      "exit_code": 0,
+      "passed": 1326,
+      "skipped": 5,
+      "seconds": 169.37,
+      "workers_requested": 12,
+      "workers_observed": 12,
+      "worker_evidence": [
+        "created: 12/12 workers",
+        "12 workers [1331 items]"
+      ],
+      "log_path": "src/ai_commerce/opportunity/trends/integrated-final.log",
+      "log_sha256": "bbd3cb59c5570f9be3710438f6b200c5c7cf8cb86b13e6abdde6657409a48800",
+      "log_storage": "LOCAL_IGNORED_FILE",
+      "skip_details": [
+        "SKIPPED [2] tests\\test_a04_media_operations.py:257: Host permits neither directory symlinks nor junctions",
+        "SKIPPED [1] tests\\test_a04_upgrade_v11.py:359: Host cannot create hardlinks: [WinError 5] Access is denied: 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{5fd0ee77-d45b-49a9-b5e6-149c427a7f8a}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw4\\\\test_source_hardlink_is_reject0\\\\fixture.png' -> 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{5fd0ee77-d45b-49a9-b5e6-149c427a7f8a}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw4\\\\test_source_hardlink_is_reject0\\\\hardlink.png'",
+        "SKIPPED [2] tests\\test_a09_analytics.py:468: Host does not permit creating this symlink; no native symlink proof"
+      ]
+    }
+  },
+  "baseline_worker_count_note": "Quiet registered output records requested argv but no complete worker count; final combined and focused logs explicitly show 12/12.",
+  "environment": {
+    "platform": "Windows-11-10.0.26300-SP0",
+    "python": "3.14.7 (tags/v3.14.7:823f032, Aug  5 2026, 10:51:32) [MSC v.1944 64 bit (AMD64)]",
+    "pytest": "8.4.2",
+    "pytest_xdist": "3.8.0",
+    "windows_local": "VERIFIED",
+    "windows_github_ci": "UNKNOWN",
+    "ubuntu_execution_and_ci": "UNKNOWN"
+  },
+  "review": {
+    "method": "Separate read-only criterion/source pass, followed by two bounded refinements",
+    "bounded_refinements_used": 2,
+    "maximum_internal_rounds": 2,
+    "failed_implementation_test_runs": 0,
+    "executor_reinvocations": 0,
+    "refinements": [
+      "Window-end freshness, relative unit consistency and blocker/direction schema consistency.",
+      "Freshness considers overlapping measurements excluded only from independent history."
+    ]
+  },
+  "acceptance_evidence": [
+    {
+      "criterion": "M02 scope and M01 provenance preservation",
+      "verdict": "SATISFIED",
+      "evidence": [
+        "scope",
+        "m01_preservation",
+        "tests/test_m02.py::test_offline_read_only_and_no_unverified_query_shortcuts"
+      ]
+    },
+    {
+      "criterion": "AC03 metric/unit/denominator/query/baseline/locale/window comparability and zero/null",
+      "verdict": "SATISFIED",
+      "evidence": [
+        "tests/test_m02.py",
+        "runs.targeted_final"
+      ]
+    },
+    {
+      "criterion": "AC04 independent history, stale/unknown/contradictory status, explicit clock/rule and evidence IDs",
+      "verdict": "SATISFIED",
+      "evidence": [
+        "tracking.py",
+        "TrendHypothesis.v1.schema.json",
+        "runs.targeted_final"
+      ]
+    },
+    {
+      "criterion": "AC09 exact combined Windows local regression",
+      "verdict": "SATISFIED",
+      "evidence": [
+        "verified_input_sha256",
+        "runs.combined_final"
+      ]
+    },
+    {
+      "criterion": "AC09 actual Windows and Ubuntu CI",
+      "verdict": "UNKNOWN",
+      "missing": "Local Windows evidence only; no CI dispatch or Ubuntu environment in this action."
+    },
+    {
+      "criterion": "AC10 offline suggestion-only component",
+      "verdict": "SATISFIED",
+      "evidence": [
+        "tracking.py",
+        "tests/test_m02.py::test_offline_read_only_and_no_unverified_query_shortcuts"
+      ]
+    }
+  ],
+  "publication": {
+    "candidate_branch": null,
+    "candidate_commit": null,
+    "main_write": false,
+    "status": "WORKTREE_READY_FOR_OUTER_RUNNER",
+    "note": "EF01/EF02 owns registered verification, scope reconciliation and candidate publication after executor return. No manual push or sibling dispatch was performed."
+  }
+}
