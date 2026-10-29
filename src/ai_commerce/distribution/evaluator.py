@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from .model import CapabilityError, identity, provider_profiles, timestamp, validate_request
+from .model import CapabilityError, provider_profiles, timestamp, validate, validate_request
 from .registry import CapabilityRegistry
 
 _API_ACTIONS = {"API_UPLOAD", "API_DIRECT_POST", "PUBLIC_VISIBILITY", "PRODUCT_ANCHOR", "METRICS_READ", "SCHEDULE_POST"}
@@ -24,7 +24,7 @@ def evaluate(
     simulation = req.get("simulation", False)
 
     def result(decision: str, reason: str, snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
-        return {
+        return validate("ChannelCapabilityDecision", {
             "schema_version": "ChannelCapabilityDecision.v1",
             "request": req,
             "decision": decision,
@@ -35,7 +35,7 @@ def evaluate(
             "verification": "OFFLINE_RECORDED_NOT_LIVE_VERIFIED",
             "evaluated_at": now.isoformat(),
             "evaluator_version": "a07/1.0",
-        }
+        })
 
     snapshot = registry.latest(req)
     if snapshot is None:
@@ -64,8 +64,12 @@ def evaluate(
     action = platform.get("actions", {}).get(req["action"])
     if action is None:
         return result("UNKNOWN", "ACTION_NOT_PROFILED", snapshot)
-    if req["action"] in _API_ACTIONS and req["app_ref"] is None:
-        return result("NEEDS_RECHECK", "APP_IDENTITY_MISSING", snapshot)
+    if req["surface"] not in platform.get("surfaces", []):
+        return result("UNKNOWN", "SURFACE_NOT_PROFILED", snapshot)
+    if req["action"] in _API_ACTIONS and (req["app_ref"] is None or req["app_ref"]["namespace"] == "internal_alias"):
+        return result("NEEDS_RECHECK", "APP_IDENTITY_MISSING_OR_ALIAS", snapshot)
+    if req["action"] in _API_ACTIONS and req["market"] is None:
+        return result("NEEDS_RECHECK", "MARKET_UNPROVEN", snapshot)
     if req["action"] in _API_ACTIONS and req["account_ref"]["namespace"] == "internal_alias" and not simulation:
         return result("NEEDS_RECHECK", "ACCOUNT_IDENTITY_UNVERIFIED", snapshot)
 
@@ -99,6 +103,8 @@ def evaluate(
             return result("NEEDS_RECHECK", "APP_AUDIT_EVIDENCE_MISSING", snapshot)
 
     if snapshot["state"] == "LIMITED":
+        if not snapshot["constraints"]:
+            return result("NEEDS_RECHECK", "LIMITED_WITHOUT_CONSTRAINTS", snapshot)
         for constraint in snapshot["constraints"]:
             if constraint not in req.get("required_constraints", {}):
                 return result("NEEDS_RECHECK", "LIMITED_CONSTRAINT_NOT_REQUESTED:" + constraint, snapshot)

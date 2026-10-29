@@ -8,7 +8,7 @@ import pytest
 
 from ai_commerce.cli import main
 from ai_commerce.distribution import CapabilityError, CapabilityRegistry, evaluate, validate_snapshot
-from ai_commerce.distribution.model import provider_profiles, digest
+from ai_commerce.distribution.model import provider_profiles, digest, validate
 
 AT = datetime(2026, 10, 29, 10, tzinfo=timezone.utc)
 ACCOUNT = {"namespace": "tiktok_open_id", "id": "account-A"}
@@ -300,3 +300,34 @@ def test_limited_does_not_expand_beyond_request_constraints(tmp_path):
 def test_platform_namespace_mismatch_is_rejected():
     with pytest.raises(CapabilityError,match="ACCOUNT_NAMESPACE_PLATFORM_MISMATCH"):
         validate_snapshot(snap(platform="INSTAGRAM"))
+
+def test_unknown_market_and_app_alias_not_offline_allowed(tmp_path):
+    missing_market=snap(market=None)
+    assert check(tmp_path,missing_market,request(market=None))["decision"]=="NEEDS_RECHECK"
+    alias={"namespace":"internal_alias","id":"alias-app"}
+    unsupported=snap(app_ref=alias,evidence_refs=[
+        proof(app=alias),proof(app=alias,kind="SCOPE_OBSERVATION"),
+        proof(app=alias,kind="APP_CONFIGURATION")])
+    assert check(tmp_path,unsupported,request(app_ref=alias))["decision"]=="NEEDS_RECHECK"
+
+
+def test_provider_surface_is_versioned_not_assumed(tmp_path):
+    record=snap(surface="REEL")
+    assert check(tmp_path,record,request(surface="REEL"))["decision"]=="UNKNOWN"
+
+
+def test_limited_requires_explicit_boundaries(tmp_path):
+    record=snap(state="LIMITED",constraints={})
+    assert check(tmp_path,record)["decision"]=="NEEDS_RECHECK"
+
+
+def test_a08_decision_is_schema_validated(tmp_path):
+    decision=check(tmp_path,snap())
+    assert validate("ChannelCapabilityDecision",decision)==decision
+
+
+def test_duplicate_evidence_id_rejected():
+    evidence=proof()
+    record=snap(evidence_refs=[evidence,evidence])
+    with pytest.raises(CapabilityError,match="DUPLICATE_EVIDENCE_ID"):
+        validate_snapshot(record)

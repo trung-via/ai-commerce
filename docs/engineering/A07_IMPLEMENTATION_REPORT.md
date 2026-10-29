@@ -30,3 +30,6 @@ CI pending for source branch. Hosted test results and cross-platform evidence mu
 
 ## A08 boundary
 Do not treat A07 recorded ALLOW as permission to run actual external publishing without independent current rights and account/API revalidation. Keep SUBMITTED, PUBLISHED_CONFIRMED, PUBLIC and product-link evidence distinct.
+
+## Offline evidence confidence limitation
+A07 stores supplied hash/metadata for redacted evidence, and protects SQLite snapshot payload integrity. It does not read, cryptographically verify, or live-confirm third-party account evidence; a user-entered SHA is metadata rather than proof of platform entitlement. A08 must revalidate external rights before any real action. Provider supported surfaces and action scopes are metadata, not entitlements. A08 decision JSON is validated against a versioned Schema 2020-12 contract.

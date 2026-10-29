@@ -39,7 +39,7 @@ def timestamp(value: str) -> datetime:
 
 
 def validate(name: str, record: Any) -> dict[str, Any]:
-    if name not in ("ChannelCapabilitySnapshot", "ChannelCapabilityRequest"):
+    if name not in ("ChannelCapabilitySnapshot", "ChannelCapabilityRequest", "ChannelCapabilityDecision"):
         raise CapabilityError("UNKNOWN_A07_CONTRACT")
     if not isinstance(record, dict):
         raise CapabilityError("INVALID_A07_RECORD_TYPE")
@@ -81,6 +81,9 @@ def validate_snapshot(record: Any) -> dict[str, Any]:
     observed_names = [claim["name"] for claim in obj["scope_claims"]]
     if len(observed_names) != len(set(observed_names)):
         raise CapabilityError("DUPLICATE_SCOPE_CLAIM")
+    evidence_ids = [ev["evidence_id"] for ev in obj["evidence_refs"]]
+    if len(evidence_ids) != len(set(evidence_ids)):
+        raise CapabilityError("DUPLICATE_EVIDENCE_ID")
     for ev in obj["evidence_refs"]:
         if ev["scope"] == "TARGET":
             if ev["subject"] != {"account_ref": obj["account_ref"], "app_ref": obj["app_ref"]}:

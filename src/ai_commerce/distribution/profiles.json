@@ -20,7 +20,11 @@
         },
         "MANUAL_POST": {},
         "EXPORT_PACKAGE": {}
-      }
+      },
+      "surfaces": [
+        "VIDEO",
+        "PROFILE_VIDEO"
+      ]
     },
     "FACEBOOK": {
       "docs": [
@@ -31,7 +35,10 @@
         "API_DIRECT_POST": {},
         "MANUAL_POST": {},
         "EXPORT_PACKAGE": {}
-      }
+      },
+      "surfaces": [
+        "PAGE_REEL"
+      ]
     },
     "INSTAGRAM": {
       "docs": [
@@ -54,7 +61,10 @@
         },
         "MANUAL_POST": {},
         "EXPORT_PACKAGE": {}
-      }
+      },
+      "surfaces": [
+        "REEL"
+      ]
     },
     "YOUTUBE": {
       "docs": [
@@ -69,7 +79,11 @@
         "PUBLIC_VISIBILITY": {},
         "MANUAL_POST": {},
         "EXPORT_PACKAGE": {}
-      }
+      },
+      "surfaces": [
+        "VIDEO",
+        "SHORT"
+      ]
     }
   }
 }
