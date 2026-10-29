@@ -53,7 +53,10 @@ def test_executor_hooks_block_ref_writes_without_changing_head(tmp_path, args):
     assert result.returncode != 0
     assert "AI_COMMERCE_GIT_WRITE_BLOCKED" in (result.stderr + result.stdout)
     assert _git(repo, "rev-parse", "HEAD").stdout.strip() == base
+    # reset --hard may clean the tree; give parent Git its own new edit.
     # Parent/publisher Git is not subject to executor-only hooks.
+    (repo / "parent-only.txt").write_text("publisher change\n", encoding="utf-8")
+    assert _git(repo, "add", "parent-only.txt").returncode == 0
     assert _git(repo, "commit", "-qm", "allowed-parent").returncode == 0
     assert _git(repo, "rev-parse", "HEAD").stdout.strip() != base
 
@@ -129,6 +132,6 @@ def test_both_executors_get_guard_and_can_still_edit_code(tmp_path, executor):
     assert result["git_write_guard"] == "EXECUTOR_SCOPED_HOOKS_PLUS_POST_HEAD_CHECK"
     assert result["git_head_after"] == base
     assert result["changed_files"] == ["changed.txt"]
-    assert GIT_GUARD_INSTRUCTION in (
+    assert (
         tmp_path / "evidence" / "invocations" / "000" / "instruction.txt"
-    ).read_text(encoding="utf-8")
+    ).read_text(encoding="utf-8") == "Write changed.txt without changing HEAD."
