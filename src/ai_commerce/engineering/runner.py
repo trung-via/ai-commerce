@@ -430,13 +430,16 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         status, error = problem or ("SOURCE_DRIFT", "WORKTREE_CHANGED_BETWEEN_INVOCATIONS")
         inv.update(status=status, error_code=error)
         return
-    command, stdin = command_for(selection, repo, prompt, codex_bin=codex_bin,
+    # Preserve the original instruction evidence; guard only the provider wire prompt.
+    guarded_prompt = GIT_GUARD_INSTRUCTION + "\n\n" + prompt
+    command, stdin = command_for(selection, repo, guarded_prompt, codex_bin=codex_bin,
                                  antigravity_bin=antigravity_bin,
                                  codex_windows_sandbox=codex_windows_sandbox)
     if selection.executor == "antigravity" and _windows_command_units(command) > AGY_COMMANDLINE_MAX_UNITS:
         # Preserve the complete original instruction/feedback on disk. Shorten only
         # the transported --print argument; never truncate recorded diagnostics.
         compact = (
+            GIT_GUARD_INSTRUCTION + " "
             "Read and follow the complete authorized instruction file "
             + str(directory / "instruction.txt") + " (UTF-8; SHA256 "
             + _sha(prompt.encode("utf-8")) + "). "
@@ -807,7 +810,6 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                 # Freeze prior rounds before appending the current mutable record.
                 feedback = json.loads(json.dumps(feedback))
                 prompt = _repair_prompt(instruction, feedback, inv["evidence_dir"] + "/repair_feedback.json")
-            prompt = GIT_GUARD_INSTRUCTION + "\n\n" + prompt
             inv["instruction_sha256"] = _sha(prompt.encode("utf-8"))
             report["invocations"].append(inv)
             try:
