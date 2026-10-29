@@ -113,16 +113,29 @@ def approved_verification_plan(action: dict, registry: dict[str, list[str]]) -> 
     requested = action["verification_profile"]
     if requested not in registry:
         raise RemoteRequestError("VERIFICATION_PROFILE_UNREGISTERED")
-    full = registry.get("project-tests", [])
-    full_scope = (full[:3] in (["python", "-m", "pytest"], ["py", "-m", "pytest"]) and
-                  full[3:] in (["tests", "-q"], ["tests", "-q", "-n", "12"]))
-    return {"state": "EXECUTE" if full_scope else "UNPROVEN", "requested_profile": requested,
-            "profile": "project-tests" if full_scope else requested,
-            "argv": list(full if full_scope else registry[requested]),
-            "minimum_test": full_scope, "registered_only": True,
-            "coverage": "FULL_REGISTERED_SUITE" if full_scope else "BROAD_PROFILE_UNAVAILABLE",
-            "workers_requested": 12, "registered_workers": registered_workers(full) if full_scope else None,
-            "reason": "MT01_SELECTOR_REGISTRATION_REQUIRES_COMPANION_PR",
+    # Honor an explicitly requested full-suite profile, including the
+    # registered serial variant. A narrow profile alone cannot prove all
+    # affected ACs until MT-01 sees the executor's changed-path closure.
+    # Narrow registered groups can still be selected by MT-01 when proven.
+    def is_full_suite(argv: list[str]) -> bool:
+        return (argv[:3] in (["python", "-m", "pytest"], ["py", "-m", "pytest"]) and
+                argv[3:] in (["tests", "-q"], ["tests", "-q", "-n", "12"]))
+
+    explicit = registry[requested]
+    explicit_full = is_full_suite(explicit)
+    broad = registry.get("project-tests", [])
+    broad_valid = is_full_suite(broad)
+    selected = explicit if explicit_full else broad if broad_valid else explicit
+    proven = explicit_full or broad_valid
+    effective_profile = requested if explicit_full or not broad_valid else "project-tests"
+    return {"state": "EXECUTE" if proven else "UNPROVEN", "requested_profile": requested,
+            "profile": effective_profile, "argv": list(selected),
+            "minimum_test": proven, "registered_only": True,
+            "coverage": "FULL_REGISTERED_SUITE" if proven else "BROAD_PROFILE_UNAVAILABLE",
+            "workers_requested": registered_workers(selected) if proven else 12,
+            "registered_workers": registered_workers(selected) if proven else None,
+            "reason": ("EXPLICIT_REGISTERED_FULL_SUITE" if explicit_full
+                       else "MT01_SELECTOR_REGISTRATION_REQUIRES_COMPANION_PR"),
             "aggregate_requires_fresh_execution": bool(action.get("depends_on"))}
 
 
