@@ -23,6 +23,10 @@ FINAL_ACTION_STATUSES = frozenset({
     "QUOTA_EXHAUSTED", "MODEL_UNSUPPORTED", "SOURCE_MISMATCH",
     "CANDIDATE_INTEGRITY_FAILED", "RESULT_PUBLICATION_FAILED",
     "BLOCKED_DEPENDENCY",
+    # EF01 can finish without a publishable candidate. The EF02 worker forwards
+    # these exact final statuses; they remain unsuccessful batch outcomes.
+    "VERIFIED_SCOPE_REVIEW_REQUIRED", "NO_CODE_CHANGE", "SOURCE_DRIFT",
+    "EXECUTOR_UNAVAILABLE", "EXECUTOR_PERMISSION_DENIED",
 })
 
 class CompletionEventError(ValueError):
