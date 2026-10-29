@@ -233,18 +233,83 @@ def test_targeted_requested_profile_falls_back_only_when_required_for_ac_coverag
 
 def test_registered_known_group_selects_exact_minimal_command_and_invalidates_registry_edit(mapped):
     command = ["python", "-m", "pytest", "tests/test_a.py", "-q", "-n", "12"]
-    registry = {"project-tests": FULL, "component-a": command}
-    selected = plan(mapped, registered_only=True, registered_profiles=registry)
+    parallel_full = [*FULL, "-n", "12"]
+    registry = {"project-tests": parallel_full, "component-a": command}
+    selected = plan(mapped, registered_only=True, registered_profiles=registry,
+                    fallback_argv=parallel_full)
     assert not selected["fallback"] and [g["group"] for g in selected["groups"]] == ["a"]
     assert selected["groups"][0]["binding"]["argv"] == command
     assert selected["groups"][0]["binding"]["registered_profile"] == "component-a"
     previous = evidence(mapped, selected["groups"][0])
-    current = plan(mapped, registered_only=True, registered_profiles=registry)
+    current = plan(mapped, registered_only=True, registered_profiles=registry,
+                   fallback_argv=parallel_full)
     mt.apply_evidence(current, {"a": previous}, mapped.evidence)
     assert current["groups"][0]["state"] == "REUSE"
-    renamed = plan(mapped, registered_only=True, registered_profiles={"other-approved-name": command})
+    renamed = plan(mapped, registered_only=True,
+                   registered_profiles={"other-approved-name": command},
+                   fallback_argv=parallel_full)
     mt.apply_evidence(renamed, {"a": previous}, mapped.evidence)
     assert renamed["groups"][0]["state"] == "INVALIDATED"
+
+
+@pytest.mark.parametrize("has_serial_group", [False, True])
+def test_serial_profile_survives_mt01_selection_and_actual_pytest_dispatch(mapped, monkeypatch, has_serial_group):
+    # Regression for a registered parallel component group silently overriding
+    # the explicitly selected project-tests-serial EF02 action.
+    serial_group = ["python", "-m", "pytest", "tests/test_a.py", "-q"]
+    parallel_group = [*serial_group, "-n", "12"]
+    registry = {
+        "project-tests": [*FULL, "-n", "12"],
+        "project-tests-serial": FULL,
+        "component-a-parallel": parallel_group,
+    }
+    if has_serial_group:
+        registry["component-a-serial"] = serial_group
+    action_plan = approved_verification_plan(
+        {"verification_profile": "project-tests-serial", "depends_on": []}, registry)
+    assert action_plan["profile"] == "project-tests-serial"
+    assert action_plan["argv"] == FULL
+
+    calls = []
+    def run(argv, **_kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, "1 passed in 0.01s", "")
+    monkeypatch.setattr(verification, "subprocess", SimpleNamespace(
+        run=run, TimeoutExpired=subprocess.TimeoutExpired))
+
+    mapped.evidence.mkdir(exist_ok=True)
+    evidence_files = {}
+    def save(key, filename, payload):
+        relative = "registered-serial/" + filename
+        destination = mapped.evidence / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+        evidence_files[key] = relative
+
+    result, actual_plan = verification.execute_plan(
+        repo=mapped.repo, output_dir=mapped.evidence, base_sha="a" * 40,
+        base_files=mapped.base, changed_paths=["feature_a.py"],
+        required_acs=("AC-A",), fallback_argv=action_plan["argv"],
+        prior={}, save=save, evidence_files=evidence_files,
+        deadline=time.monotonic() + 60, timeout_seconds=30,
+        registered_only=True, registered_profiles=registry,
+        groups=mapped.groups)
+    expected = serial_group if has_serial_group else FULL
+    assert result.returncode == 0
+    assert calls == [expected]  # Actual subprocess.run argv, not merely planned JSON.
+    assert actual_plan["groups"][0]["binding"]["argv"] == expected
+    assert actual_plan["groups"][0]["actual_argv"] == expected
+    assert actual_plan["fallback"] is not has_serial_group
+
+
+def test_parallel_action_does_not_pick_only_registered_serial_group(mapped):
+    parallel_full = [*FULL, "-n", "12"]
+    registry = {"project-tests": parallel_full,
+                "component-a-serial": ["python", "-m", "pytest", "tests/test_a.py", "-q"]}
+    selected = plan(mapped, registered_only=True, registered_profiles=registry,
+                    fallback_argv=parallel_full)
+    assert selected["fallback"]
+    assert selected["groups"][0]["binding"]["argv"] == parallel_full
 
 
 @pytest.mark.parametrize("suffix", [["-k", "only_one"], [";", "shell"], ["-n", "2"]])
