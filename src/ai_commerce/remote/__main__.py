@@ -84,17 +84,24 @@ def main(argv: list[str] | None = None) -> int:
                 report["feedback_error_code"] = type(exc).__name__
         # D1 is passive only: event emission is not a ChatGPT wake/ack.
         # Keep EF02's executor/feedback outcome independent from wake evidence.
+        completion_path = worker.root / "completion_event.json"
         try:
             completion = build_completion_event(
                 report, repository=repo, run_id=int(os.environ.get("GITHUB_RUN_ID", "0")),
                 run_attempt=int(os.environ.get("GITHUB_RUN_ATTEMPT", "1")),
                 issue_number=args.issue_number or None)
-            _write_json(worker.root / "completion_event.json", completion)
+            _write_json(completion_path, completion)
             report["wake_event_status"] = "RECORDED_UNBOUND"
             report["wake_event_id"] = completion["event_id"]
         except Exception as exc:
             report["wake_event_status"] = "NOT_RECORDED"
             report["wake_event_error_code"] = type(exc).__name__
+            # Never leave an older completion event looking like this run's output.
+            # Do not conceal cleanup uncertainty or affect EF02's batch result.
+            try:
+                completion_path.unlink(missing_ok=True)
+            except OSError:
+                report["wake_event_residual"] = "STALE_EVENT_FILE_UNCERTAIN"
         _write_json(result_path, report)
         print(json.dumps({"batch_id": report["batch_id"], "status": report["status"],
                           "succeeded": report["succeeded"], "total": report["total"],
