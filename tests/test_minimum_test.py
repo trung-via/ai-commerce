@@ -194,6 +194,43 @@ def test_ef02_only_uses_registered_full_argv_and_missing_registration_is_unprove
     assert out["status"] == "COMPLETE" and out["aggregate_verification"]["state"] == "UNPROVEN"
 
 
+@pytest.mark.parametrize("requested,argv,worker_count", [
+    ("project-tests", ["python", "-m", "pytest", "tests", "-q", "-n", "12"], 12),
+    ("project-tests-serial", ["python", "-m", "pytest", "tests", "-q"], 0),
+])
+def test_explicit_full_suite_keeps_requested_profile(requested, argv, worker_count):
+    registry = {
+        "project-tests": ["python", "-m", "pytest", "tests", "-q", "-n", "12"],
+        "project-tests-serial": ["python", "-m", "pytest", "tests", "-q"],
+        "ef02-tests": ["python", "-m", "pytest", "tests/test_ef02.py", "-q", "-n", "12"],
+    }
+    result = approved_verification_plan(
+        {"verification_profile": requested, "depends_on": []}, registry)
+    assert result["state"] == "EXECUTE"
+    assert result["profile"] == requested
+    assert result["requested_profile"] == requested
+    assert result["argv"] == argv
+    assert result["registered_workers"] == worker_count
+    assert result["reason"] == "EXPLICIT_REGISTERED_FULL_SUITE"
+
+
+def test_targeted_requested_profile_falls_back_only_when_required_for_ac_coverage():
+    registry = {
+        "project-tests": ["python", "-m", "pytest", "tests", "-q", "-n", "12"],
+        "ef02-tests": ["python", "-m", "pytest", "tests/test_ef02.py", "-q", "-n", "12"],
+    }
+    result = approved_verification_plan(
+        {"verification_profile": "ef02-tests", "depends_on": []}, registry)
+    assert result["state"] == "EXECUTE"
+    assert result["requested_profile"] == "ef02-tests"
+    assert result["profile"] == "project-tests"
+    assert result["argv"] == registry["project-tests"]
+    assert result["reason"] == "MT01_SELECTOR_REGISTRATION_REQUIRES_COMPANION_PR"
+    assert approved_verification_plan(
+        {"verification_profile": "ef02-tests", "depends_on": []},
+        {"ef02-tests": registry["ef02-tests"]})["state"] == "UNPROVEN"
+
+
 def test_registered_known_group_selects_exact_minimal_command_and_invalidates_registry_edit(mapped):
     command = ["python", "-m", "pytest", "tests/test_a.py", "-q", "-n", "12"]
     registry = {"project-tests": FULL, "component-a": command}
