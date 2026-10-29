@@ -31,6 +31,24 @@ function Assert-InteractiveAdmin {
     }
 }
 
+function Resolve-TaskUserSid {
+    param([Parameter(Mandatory=$true)][string]$UserId)
+    # Task Scheduler may collapse COMPUTER\TRUNG into TRUNG. Normalize *only*
+    # an unqualified name to the local computer; never accept name-only equality.
+    $name = $UserId.Trim()
+    if ($name.StartsWith('.\')) {
+        $name = $env:COMPUTERNAME + '\' + $name.Substring(2)
+    } elseif ($name -notmatch '[\\@]') {
+        $name = $env:COMPUTERNAME + '\' + $name
+    }
+    try {
+        $account = [Security.Principal.NTAccount]::new($name)
+        return $account.Translate([Security.Principal.SecurityIdentifier]).Value
+    } catch {
+        throw "TASK_ACCOUNT_UNRESOLVED: $UserId -> $name; $($_.Exception.Message)"
+    }
+}
+
 function Get-TaskAndGuard {
     $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
     if ($task.Principal.LogonType -ne 'Interactive') {
@@ -39,9 +57,10 @@ function Get-TaskAndGuard {
     if ($task.Actions.Count -ne 1) {
         throw "UNEXPECTED_ACTION_COUNT: $($task.Actions.Count)"
     }
-    $identityName = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-    if ($task.Principal.UserId -ine $identityName) {
-        throw "ACCOUNT_MISMATCH: task $($task.Principal.UserId); caller $identityName"
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $taskSid = Resolve-TaskUserSid -UserId $task.Principal.UserId
+    if ($taskSid -ne $identity.User.Value) {
+        throw "ACCOUNT_MISMATCH: task $($task.Principal.UserId) SID $taskSid; caller $($identity.Name) SID $($identity.User.Value)"
     }
     return $task
 }
@@ -122,6 +141,7 @@ if ($Mode -eq 'Install') {
     $backup = [ordered]@{
         task_name = $taskName
         account = $task.Principal.UserId
+        account_sid = Resolve-TaskUserSid -UserId $task.Principal.UserId
         execute = $action.Execute
         arguments = $action.Arguments
         working_directory = $action.WorkingDirectory
@@ -175,7 +195,7 @@ if ($Mode -eq 'Rollback') {
         throw 'BACKUP_NOT_FOUND: cannot restore original action safely'
     }
     $saved = Get-Content -LiteralPath $backupFile -Raw | ConvertFrom-Json
-    if ($saved.task_name -ne $taskName -or $saved.account -ine $task.Principal.UserId) {
+    if ($saved.task_name -ne $taskName -or $saved.account_sid -ne (Resolve-TaskUserSid -UserId $task.Principal.UserId)) {
         throw 'BACKUP_IDENTITY_MISMATCH'
     }
     if (-not $isHidden) {
