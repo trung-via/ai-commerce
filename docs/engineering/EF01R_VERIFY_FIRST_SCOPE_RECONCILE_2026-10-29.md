@@ -5,6 +5,8 @@
 **Project:** AI Commerce độc lập AIOS-Renew.  
 **Trạng thái:** Candidate code + regression tests được đề xuất qua PR riêng; chưa tuyên bố Windows/EF02 PASS hoặc merge main.
 
+**Human approval bổ sung (2026-10-29):** Component-Level Scope + Verify-First là chiến lược authoring mặc định theo component/AC/consumer. Xem [Human Decision — Component Scope + Verify-First](../governance/HUMAN_DECISION_2026-10-29_COMPONENT_SCOPE_VERIFY_FIRST.md). Brain tiếp tục chủ động chọn `max_parallel` phù hợp từng batch, không ép cố định 2 cho mọi request; MT-01 và EF01-P giữ nguyên quyết định riêng.
+
 ## Vấn đề được quan sát
 
 - Issue #81 / workflow 40840406005 chạy executor nhưng kết thúc `SCOPE_VIOLATION`, không chạy verification; 5/19 file ngoài allowlist.
