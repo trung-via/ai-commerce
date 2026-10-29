@@ -73,11 +73,13 @@ with calls.open('a', encoding='utf-8') as f:
                         'cwd':str(Path.cwd()),'prompt':prompt}) + '\\n')
 mode = sys.argv[2]
 if mode != 'no-change':
-    Path('impl.py').write_text('good' if index and mode == 'pass-after-repair' else 'bad-' + str(index))
+    Path('impl.py').write_text('good' if ((index and mode in ('pass-after-repair', 'scope-fix')) or mode == 'scope-pass') else 'bad-' + str(index))
     if index == 0:
         Path('kept.txt').write_text('initial cumulative change')
-if mode == 'scope':
+if mode in ('scope', 'scope-pass') or (mode == 'scope-fix' and index == 0):
     Path('forbidden.txt').write_text('out of scope')
+elif mode == 'scope-fix' and Path('forbidden.txt').exists():
+    Path('forbidden.txt').unlink()
 if mode == 'nonzero':
     print('provider error',file=sys.stderr)
     sys.exit(7)
@@ -181,7 +183,7 @@ def test_exhaustion_and_disable_preserve_all_failures(fixture, rounds, expected_
     ("nonzero", "EXECUTOR_FAILED"), ("permission", "EXECUTOR_PERMISSION_DENIED"),
     ("capacity", "MODEL_AT_CAPACITY"), ("quota", "QUOTA_EXHAUSTED"),
     ("unavailable", "EXECUTOR_UNAVAILABLE"), ("unknown", "EXECUTION_UNKNOWN"),
-    ("scope", "SCOPE_VIOLATION"), ("no-change", "NO_CODE_CHANGE"),
+    ("no-change", "NO_CODE_CHANGE"),
 ])
 def test_provider_prohibitions_never_verify_or_reinvoke(fixture, mode, status):
     result, calls, _ = _run(fixture, mode=mode, executor="antigravity")
@@ -227,7 +229,7 @@ def test_verify_prohibitions_never_invoke_second_provider(fixture, kind, status)
 
 @pytest.mark.parametrize("kind,status", [
     ("head", "GIT_UNEXPECTED_COMMIT"), ("identity", "SOURCE_DRIFT"),
-    ("scope", "SCOPE_VIOLATION"), ("scoped-source", "SOURCE_DRIFT"), ("undo", "NO_CODE_CHANGE"),
+    ("scope", "SOURCE_DRIFT"), ("scoped-source", "SOURCE_DRIFT"), ("undo", "NO_CODE_CHANGE"),
 ])
 def test_verifier_mutation_or_source_drift_never_repairs_or_passes(fixture, kind, status):
     actual_run = subprocess.run
@@ -252,6 +254,83 @@ def test_verifier_mutation_or_source_drift_never_repairs_or_passes(fixture, kind
         run=verify, TimeoutExpired=subprocess.TimeoutExpired))
     result, calls, _ = _run(fixture)
     assert result["status"] == status and len(calls) == 1
+
+
+def test_scope_verify_first_pass_keeps_evidence_without_candidate_permission(fixture):
+    result, calls, _ = _run(fixture, mode="scope-pass", max_repair_rounds=1)
+    assert len(calls) == 1
+    assert result["status"] == "VERIFIED_SCOPE_REVIEW_REQUIRED"
+    assert result["error_code"] == "OUT_OF_SCOPE_FILES_REQUIRE_RECONCILIATION"
+    assert result["verify_exit_code"] == 0
+    assert result["scope_valid"] is False
+    assert result["scope_review_required"] is True
+    assert result["out_of_scope_files"] == ["forbidden.txt"]
+    assert result["repair_rounds_used"] == 0
+
+
+def test_scope_verify_first_fail_then_repair_to_scoped_pass(fixture):
+    result, calls, _ = _run(fixture, mode="scope-fix", max_repair_rounds=2)
+    assert len(calls) == 2
+    assert [x["verify_exit_code"] for x in result["invocations"]] == [1, 0]
+    assert result["status"] == "BUILD_VERIFIED_FOR_SCOPE"
+    assert result["scope_valid"] is True
+    assert result["out_of_scope_files"] == []
+    assert result["repair_rounds_used"] == 1
+
+
+def test_scope_verify_first_failed_tests_never_pass(fixture):
+    result, calls, _ = _run(fixture, mode="scope", max_repair_rounds=1)
+    assert len(calls) == 2
+    assert result["status"] == "VERIFICATION_FAILED"
+    assert result["scope_valid"] is False
+
+
+def test_scope_strict_mode_still_rejects_before_pytest(fixture):
+    result, calls, _ = _run(fixture, mode="scope-pass", verify_first_scope=False)
+    assert len(calls) == 1
+    assert result["status"] == "SCOPE_VIOLATION"
+    assert result["verify_exit_code"] is None
+
+
+@pytest.mark.parametrize("protected", [
+    ".github/workflows/ef02-batch.yml",
+    "src/ai_commerce/engineering/.env",
+    "src/ai_commerce/engineering/.env.production",
+    "src/ai_commerce/engineering/secrets/key.json",
+    "src/ai_commerce/remote/credentials/auth.json",
+    "src/ai_commerce/remote/.github/config.yml",
+    "src/ai_commerce/remote/.local/runner.json",
+    "src/ai_commerce/remote/.git/config",
+])
+def test_protected_changed_path_stops_before_verification(fixture, protected):
+    # Simulate the path as permitted by a component-level allowlist, proving
+    # the protected-path check has precedence over scope and pytest.
+    original = runner._snapshot
+
+    def blocked(repo, prefixes, deadline):
+        snapshot, diff = original(repo, prefixes, deadline)
+        if snapshot["changed_files"]:
+            snapshot = dict(snapshot, changed_files=[*snapshot["changed_files"],
+                            protected], scope_valid=True)
+        return snapshot, diff
+
+    fixture.monkeypatch.setattr(runner, "_snapshot", blocked)
+    result, calls, _ = _run(fixture, mode="scope-pass")
+    assert len(calls) == 1
+    assert result["status"] == "SCOPE_VIOLATION"
+    assert result["error_code"] == "PROTECTED_CHANGED_PATH"
+    assert result["verify_exit_code"] is None
+
+
+def test_protected_path_matching_does_not_block_ordinary_component_files():
+    assert not runner._protected_change([
+        "src/ai_commerce/engineering/feature.py",
+        "tests/test_environment.py",
+        "src/ai_commerce/remote/secrets_provider.py",
+    ])
+    for path in ("src/a/.env", "src/a/secrets/token", "src/a/credentials/key",
+                 "src/a/.github/job.yml", "src/a/.local/data", "src/a/.git/config"):
+        assert runner._protected_change([path])
 
 
 def test_non_pytest_nonzero_is_not_repairable(fixture):
@@ -397,10 +476,15 @@ def test_optional_contract_bounds_fingerprint_and_cli_compatibility():
 def _git_repo(tmp_path, real_git=True):
     repo = tmp_path / "source"
     repo.mkdir()
-    (repo / "test_scope.py").write_text(
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_scope.py").write_text(
         "from pathlib import Path\ndef test_value():\n"
         "    assert Path('impl.py').read_text() == 'good'\n", encoding="utf-8")
     (repo / ".gitignore").write_text("__pycache__/\n.pytest_cache/\n.local/\n")
+    # This fixture must be independent of pytest configuration above tmp_path.
+    # The observation-only Git model deliberately sees every fixture file;
+    # disable pytest's writable cache rather than hide a real source mutation.
+    (repo / "pytest.ini").write_text("[pytest]\naddopts = -p no:cacheprovider\n")
     if not real_git:
         return repo, BASE
     for args in (["init", "-q"], ["config", "user.email", "local@example.invalid"],
@@ -498,7 +582,11 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
                 attempt_id=args.attempt_id, selection=ExecutorSelection(args.executor, args.model, args.effort),
                 instruction=args.instruction_file.read_text(), verify_argv=json.loads(args.verify_json.read_text()),
                 allowed_prefixes=args.allow_path, max_repair_rounds=args.max_repair_rounds,
-                action_timeout_seconds=args.action_timeout_seconds, codex_windows_sandbox=args.codex_windows_sandbox)
+                action_timeout_seconds=args.action_timeout_seconds, codex_windows_sandbox=args.codex_windows_sandbox,
+                minimum_test=args.minimum_test, registered_only=args.registered_only,
+                aggregate_sources=args.aggregate_source, host_slots=args.host_slots,
+                registered_profiles=json.loads(args.registered_profiles_json.read_text())
+                if args.registered_profiles_json else None)
             self.returncode = 0 if result["status"] == "BUILD_VERIFIED_FOR_SCOPE" else 1
             return "", ""
 
@@ -508,7 +596,8 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
     monkeypatch.setattr(remote, "tempfile", SimpleNamespace(
         mkdtemp=lambda prefix: tempfile.mkdtemp(prefix=prefix, dir=tmp_path)))
     batch = dict(batch_id="repair-integration", source_sha=head, max_parallel=2, actions=[])
-    worker = remote.LocalBatchWorker(checkout=repo, batch=batch, profiles={"scope": VERIFY},
+    worker = remote.LocalBatchWorker(checkout=repo, batch=batch,
+                                    profiles={"scope": VERIFY, "project-tests": ["python", "-m", "pytest", "tests", "-q"]},
                                     github=Github(), root=tmp_path / "action-evidence")
     return SimpleNamespace(worker=worker, batch=batch, calls=calls, children=children,
                            claims=claims, candidates=candidates, resolved=resolved, head=head)
@@ -571,7 +660,9 @@ def test_independent_siblings_repair_in_distinct_worktrees_and_block_only_failed
     result = run_schedule(context.batch, context.worker.execute_action)
     actions = {a["action_id"]: a for a in result["actions"]}
     assert result["status"] == "PARTIAL_OR_FAILED" and result["scheduler_max_active"] == 2
-    assert actions["a"]["status"] == "VERIFICATION_FAILED"
+    assert actions["a"]["status"] == "VERIFICATION_FAILED", {
+        "status": actions["a"]["status"], "error_code": actions["a"].get("error_code"),
+        "diagnostic": actions["a"].get("diagnostic")}
     assert actions["b"]["status"] == "CANDIDATE_READY"
     assert actions["c"]["status"] == "BLOCKED_DEPENDENCY"
     assert actions["a"]["worktree"] != actions["b"]["worktree"]
@@ -588,6 +679,12 @@ def test_repaired_sibling_candidates_unblock_dag_with_pinned_dependency_results(
     pinned = context.resolved["c-001"]
     assert {p["candidate_sha"] for p in pinned} == {
         a["candidate_sha"] for a in result["actions"] if a["action_id"] in ("a", "b")}
+    combined = next(a for a in result["actions"] if a["action_id"] == "c")
+    assert combined["aggregate_verification"]["state"] == "VERIFIED_COMBINED_SCOPE"
+    assert combined["aggregate_verification"]["sibling_pass_reusable"] is False
+    assert all(g["actual_exit_code"] == 0 and g["state"] != "REUSE"
+               for g in combined["ef01_invocations"][-1]["minimum_test"]["groups"])
+    assert result["aggregate_verification"]["state"] == "UNPROVEN"
 
 def test_live_event_mirror_timeout_includes_blocked_stdin(tmp_path):
     # Large repair feedback must not postpone starting the invocation timeout.

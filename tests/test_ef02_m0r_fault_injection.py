@@ -40,6 +40,7 @@ def _worker(tmp_path: Path, github):
     worker.root.mkdir()
     worker.batch = {"batch_id": "m0r-negative-fi", "source_sha": BASE}
     worker.profiles = {"ef02-tests": ["python", "-m", "pytest", "tests/test_ef02.py", "-q"]}
+    worker.profiles["project-tests"] = ["python", "-m", "pytest", "tests", "-q"]
     worker.github = github
     if not hasattr(github, "pre_spawn_checkpoint"):
         # This fixture exercises unrelated faults; provide the fake positive

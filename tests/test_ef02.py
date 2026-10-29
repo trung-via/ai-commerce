@@ -81,6 +81,24 @@ def test_reject_duplicate_cycle_unknown_dependency_and_bad_path():
         validate(p)
 
 
+def test_component_scope_accepts_nested_paths_not_unrelated_siblings():
+    from ai_commerce.engineering.runner import _safe_scope
+    a = action("a")
+    a["allowed_paths"] = ["src/ai_commerce/engineering", "src/ai_commerce/remote",
+                          "tests/test_ef01.py"]
+    packet = batch([a])
+    assert validate(packet) == packet
+    assert _safe_scope(["src/ai_commerce/engineering/new_helper.py",
+                        "src/ai_commerce/remote/scheduler.py",
+                        "tests/test_ef01.py"], a["allowed_paths"])
+    for name in ("src/ai_commerce/engineering_extra/z.py", "tests/test_ef02.py",
+                 ".github/workflows/ef02-batch.yml", "src/ai_commerce/unrelated.py"):
+        assert not _safe_scope([name], a["allowed_paths"])
+    for name in ("../bad", ".git/config", ".local/cache", ".github/workflows/main.yml"):
+        with pytest.raises(RemoteRequestError):
+            safe_path(name)
+
+
 def test_fingerprint_deterministic_and_model_change_is_distinct():
     p = batch([action("a")])
     assert fingerprint(p) == fingerprint(copy.deepcopy(p))
@@ -327,8 +345,9 @@ def test_reuse_candidate_readonly_path_no_claim_no_model(tmp_path):
                                 "depends_on","allowed_paths","verification_profile")}
     act.update(instruction="No provider calls", reuse_candidate={"candidate_sha":"b"*40, "verified_run_id":5})
     result = worker.execute_action(act)
-    assert result["status"] == "CANDIDATE_READY"
-    assert result["reused_verified"] and not result["executor_invoked"]
+    assert result["status"] == "UNPROVEN"
+    assert result["error_code"] == "LEGACY_REUSE_MT01_EVIDENCE_REQUIRED"
+    assert not result["reused_verified"] and not result["executor_invoked"]
     assert worker.github.calls == 1
 
 

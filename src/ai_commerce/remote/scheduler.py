@@ -77,4 +77,6 @@ def run_schedule(batch: dict, work, *, max_workers: int | None = None) -> dict:
             "status": "COMPLETE" if failed == 0 else "PARTIAL_OR_FAILED",
             "total": len(ordered), "succeeded": len(ordered) - failed,
             "unsuccessful": failed, "scheduler_max_active": max_active,
+            # COMPLETE is dispatch completion, never a combined-source PASS.
+            "aggregate_verification": {"state": "UNPROVEN", "reason": "ACTION_RESULTS_ARE_NOT_COMBINED_SOURCE_EVIDENCE"},
             "actions": ordered}

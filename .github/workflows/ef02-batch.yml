@@ -160,9 +160,9 @@ jobs:
         with:
           name: ef02-request-${{ needs.validate.outputs.issue_number }}
           path: .local/ef02-input
-      - name: Install project package
+      - name: Install project package with pytest-xdist
         shell: pwsh
-        run: python -m pip install -e .
+        run: python -m pip install -e ".[parallel-tests]"
       - name: Execute bounded concurrent EF01 jobs
         shell: pwsh
         env:

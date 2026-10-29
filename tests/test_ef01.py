@@ -113,7 +113,10 @@ def test_scope_violation_cannot_pass(tmp_path):
                         selection=ExecutorSelection("antigravity", "gemini-x", "medium"), instruction="x",
                         verify_argv=[sys.executable, "-c", "print('success')"],
                         allowed_prefixes=["src"], antigravity_bin=binary)
-    assert o["status"] == "SCOPE_VIOLATION" and o["verify_exit_code"] is None
+    # Scope drift does not block pytest; an unconfirmed provider still cannot PASS.
+    assert o["status"] == "EXECUTION_UNKNOWN" and o["verify_exit_code"] == 0
+    assert o["scope_valid"] is False and o["out_of_scope_files"] == ["wrong.txt"]
+    assert o["scope_review_required"] is False
 
 
 def test_dirty_worktree_rejected(tmp_path):
@@ -165,7 +168,8 @@ def test_verify_out_of_scope_mutation_is_failure(tmp_path):
                         selection=ExecutorSelection("codex", "m", "max"), instruction="x",
                         verify_argv=[sys.executable, "-c", "from pathlib import Path; Path('bad.txt').write_text('oops')"],
                         allowed_prefixes=["src.txt"], codex_bin=binary)
-    assert o["status"] == "SCOPE_VIOLATION"
+    assert o["status"] == "SOURCE_DRIFT"
+    assert o["verify_exit_code"] == 0
     assert "bad.txt" in o["changed_files"]
 
 
