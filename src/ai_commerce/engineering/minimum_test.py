@@ -224,10 +224,18 @@ def select_plan(*, repo: Path, base_sha: str, base_files: Mapping[str, str],
     covered_tests = {t for g in selected for t in g.tests}
     unknown_tests = {p for p in affected if Path(p).name.startswith("test_")} - covered_tests
     registered = {}
+    # Registered MT-01 groups must preserve the *selected action profile*.
+    # In particular, an explicit project-tests-serial action must not silently
+    # execute a registered "-n 12" group just because its test paths match.
+    parallel_requested = list(fallback_argv[-2:]) == ["-n", "12"]
     for group in selected:
+        serial_args = list(group.tests) + ["-q"]
+        parallel_args = serial_args + ["-n", "12"]
+        eligible_args = ((parallel_args,) if parallel_requested else (serial_args,)) if registered_only else (
+            serial_args, parallel_args)
         for name, argv in sorted((registered_profiles or {}).items()):
             if (list(argv[:3]) in (["python", "-m", "pytest"], ["py", "-m", "pytest"]) and
-                    list(argv[3:]) in (list(group.tests) + ["-q"], list(group.tests) + ["-q", "-n", "12"])):
+                    list(argv[3:]) in eligible_args):
                 registered[group.name] = (name, list(argv))
                 break
     reasons = []
