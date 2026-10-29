@@ -1,0 +1,634 @@
+{
+  "acceptance_review": [
+    {
+      "criterion": "AC07: actual A03 schema, intake/store, nullable inputs and Human edits/reframe",
+      "tests": [
+        "test_real_a03_intake_and_consumers_preserve_exact_manual_source",
+        "test_human_edit_and_later_a03_revision_do_not_rewrite_evidence",
+        "test_explicit_product_cta_media_are_optional_human_inputs"
+      ],
+      "verdict": "SATISFIED_LOCALLY"
+    },
+    {
+      "criterion": "Freeform bypass without A10 evidence availability",
+      "tests": [
+        "test_freeform_bypasses_a10_sources_and_preserves_unicode",
+        "test_real_module_cli_prints_portable_json_and_bom_text_provenance"
+      ],
+      "verdict": "SATISFIED_LOCALLY"
+    },
+    {
+      "criterion": "AC08: real offline M01-M05 pipeline, synthetic labeling, exact retained-evidence reproduction",
+      "tests": [
+        "test_integrated_csv_json_notes_proposals_to_brief_keep_provenance",
+        "test_demo_is_reproducible_and_preserves_raw_files"
+      ],
+      "verdict": "SATISFIED_LOCALLY"
+    },
+    {
+      "criterion": "Missing/sparse/duplicate/negative/provenance cases",
+      "tests": [
+        "test_sparse_missing_data_remains_explicit_in_bridge",
+        "test_cli_missing_sources_fail_without_creating_ledger",
+        "test_cli_all_audience_read_and_validation_operations",
+        "test_cli_strict_json_rejects_bad_bridge_documents",
+        "test_cli_m04_replays_saved_series_and_rejects_rehashed_omission",
+        "test_receipt_hash_and_reference_tampering_is_detected"
+      ],
+      "verdict": "SATISFIED_LOCALLY"
+    },
+    {
+      "criterion": "Deidentified fixtures/common contact rejection without source rewriting",
+      "limit": "Conservative contact scanning is not universal recognition of names/indirect identifiers; caller deidentification is required.",
+      "tests": [
+        "test_contact_input_is_not_retained_or_echoed",
+        "test_cli_invalid_audience_notes_are_atomic_and_no_pii_echoed"
+      ],
+      "verdict": "SATISFIED_WITH_DOCUMENTED_SCANNER_LIMIT"
+    },
+    {
+      "criterion": "AC09 Windows registered full project and affected integrated sources",
+      "evidence": "1460 passed / 5 explicit permission skips; 339 affected passed; both 12 workers, stable source bytes.",
+      "verdict": "SATISFIED_LOCALLY"
+    },
+    {
+      "criterion": "AC09 actual Ubuntu CI",
+      "evidence": "No Ubuntu environment or CI invocation in this action.",
+      "verdict": "UNPROVEN"
+    },
+    {
+      "criterion": "AC10: suggestion-only, no A03/A06/A07/A08/A09 or provider/authority changes",
+      "evidence": "Unchanged consumers and contracts, full registered regressions, socket-guarded M05 API/demo tests and source/scope review.",
+      "verdict": "SATISFIED_FOR_OFFLINE_SCOPE"
+    }
+  ],
+  "action": "A10-M05",
+  "attempt_id": "a10-m05-codex61solmax-20261029-v1-04",
+  "delivery": {
+    "candidate_ref": null,
+    "candidate_sha": null,
+    "local_commit": "NOT_PERFORMED",
+    "main_merge": "NOT_PERFORMED",
+    "mode": "CANDIDATE_BRANCH",
+    "product_publication": "NOT_ATTEMPTED",
+    "publication_status": "PENDING_OUTER_EF01_EF02_VERIFICATION_AND_PUBLISHER",
+    "push": "NOT_PERFORMED"
+  },
+  "demo": {
+    "all_content_artifacts_and_sqlite_bytes_match": "Verified by test_demo_is_reproducible_and_preserves_raw_files",
+    "clock_policy": "Fresh imports retain actual M01 recorded_at; exact replay retains/copies checked original journals. No clocks patched.",
+    "fresh": {
+      "argv": [
+        "python",
+        "scripts/a10_demo.py",
+        "--output",
+        ".local/a10-m05/demo-fresh"
+      ],
+      "elapsed_seconds": 1.4213626384735107,
+      "exit_code": 0,
+      "head": "e8e482ef041be7d66650b438123c27143665bb73",
+      "name": "demo-fresh",
+      "source_bytes_stable": true,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "f1ac1014031f81e6145aef3d2094aab6d7d215eeefbd1ffca62477842491ada4",
+      "summary": [
+        "{\"a03_intake_and_store_replayed\": true, \"as_of\": \"2026-10-29T12:00:00Z\", \"brief_digest\": \"1860e2425251481e1672c8f5d491315d49c701f9651bcc8629187260c128b48c\", \"brief_id\": \"brief:a10:dec24b7eb90373392ec51e536f531fef2f56a00babe1d40f7347cbd1ec567ee8\", \"concept_generation_performed\": false, \"data_kind\": \"SYNTHETIC_FIXTURE\", \"duplicate_imports_checked\": true, \"external_provider_calls\": 0, \"freeform_brief_digest\": \"d61db1d1f50e75d1519af5a435ce67697108e1ace5f797f93dc52e945c7a175a\", \"import_ids\": [\"a10-f086ce397d93b5d46a8d4d4aa804efff72821ea8bdf16177896cb523a24d1349\", \"a10-70eb759ba3ed0880cd850452e9b622aa8000871e8a902c380095ccd6a9082033\"], \"insight_id\": \"aud-4577fe29d7fd466231b347db003e99ac61c1461a0cad1a55516e1351f69a0b94\", \"journal_sha256\": {\"audience.sqlite\": \"54d25de7a8dd889ab9780b5079a00a4ac6698a2816298b1aa07fe608ab7801fb\", \"signals.sqlite\": \"8278ef921de5c01ca3c847ba32b07842b2dda00229f2ae123ec4ed5057ffa236\"}, \"locale\": \"vi-VN\", \"notice\": \"Toy data only, not market metrics, provider exports, audience research or validated demand.\", \"proposal_ids\": [\"opp-94d8590d2a4f58b96e26d2f50e02f96c502dbad48bf75bca2e75d79cbc213555\", \"opp-9693d8d2dce1a333721d0577e7c15fb3ab07f63e19635681c1ae0ff74f3f2386\"], \"publication_status\": \"NOT_ATTEMPTED\", \"raw_bytes_replayed\": true, \"raw_sha256\": {\"audience\": \"e791d48bd010c8f39176b4afc1bbb55a46bf50e28866c268afaf07d476eee544\", \"csv\": \"bbb52fecc6af4292f4e6f8d5dd70f65a72746b837ad64a61355e599801a58dbf\", \"json\": \"c2d7de9fe9ed10711e6cf43eb12b7de72f1ef2b2f2d99dd28ad1bbbcb0d0a006\"}, \"rights_status\": \"UNKNOWN\", \"schema_version\": \"A10SyntheticDemo.v1\", \"sparse_conditions\": [\"INSUFFICIENT_HISTORY\"], \"trend_statuses\": [\"GROWING\", \"INSUFFICIENT_HISTORY\"]}"
+      ],
+      "workers_created": []
+    },
+    "invocation_record": "execution.json retains actual fresh versus replay duplicate flags.",
+    "manifest": {
+      "a03_intake_and_store_replayed": true,
+      "as_of": "2026-10-29T12:00:00Z",
+      "brief_digest": "1860e2425251481e1672c8f5d491315d49c701f9651bcc8629187260c128b48c",
+      "brief_id": "brief:a10:dec24b7eb90373392ec51e536f531fef2f56a00babe1d40f7347cbd1ec567ee8",
+      "concept_generation_performed": false,
+      "data_kind": "SYNTHETIC_FIXTURE",
+      "duplicate_imports_checked": true,
+      "external_provider_calls": 0,
+      "freeform_brief_digest": "d61db1d1f50e75d1519af5a435ce67697108e1ace5f797f93dc52e945c7a175a",
+      "import_ids": [
+        "a10-f086ce397d93b5d46a8d4d4aa804efff72821ea8bdf16177896cb523a24d1349",
+        "a10-70eb759ba3ed0880cd850452e9b622aa8000871e8a902c380095ccd6a9082033"
+      ],
+      "insight_id": "aud-4577fe29d7fd466231b347db003e99ac61c1461a0cad1a55516e1351f69a0b94",
+      "journal_sha256": {
+        "audience.sqlite": "54d25de7a8dd889ab9780b5079a00a4ac6698a2816298b1aa07fe608ab7801fb",
+        "signals.sqlite": "8278ef921de5c01ca3c847ba32b07842b2dda00229f2ae123ec4ed5057ffa236"
+      },
+      "locale": "vi-VN",
+      "notice": "Toy data only, not market metrics, provider exports, audience research or validated demand.",
+      "proposal_ids": [
+        "opp-94d8590d2a4f58b96e26d2f50e02f96c502dbad48bf75bca2e75d79cbc213555",
+        "opp-9693d8d2dce1a333721d0577e7c15fb3ab07f63e19635681c1ae0ff74f3f2386"
+      ],
+      "publication_status": "NOT_ATTEMPTED",
+      "raw_bytes_replayed": true,
+      "raw_sha256": {
+        "audience": "e791d48bd010c8f39176b4afc1bbb55a46bf50e28866c268afaf07d476eee544",
+        "csv": "bbb52fecc6af4292f4e6f8d5dd70f65a72746b837ad64a61355e599801a58dbf",
+        "json": "c2d7de9fe9ed10711e6cf43eb12b7de72f1ef2b2f2d99dd28ad1bbbcb0d0a006"
+      },
+      "rights_status": "UNKNOWN",
+      "schema_version": "A10SyntheticDemo.v1",
+      "sparse_conditions": [
+        "INSUFFICIENT_HISTORY"
+      ],
+      "trend_statuses": [
+        "GROWING",
+        "INSUFFICIENT_HISTORY"
+      ]
+    },
+    "replay": {
+      "argv": [
+        "python",
+        "scripts/a10_demo.py",
+        "--replay-from",
+        ".local/a10-m05/demo-fresh",
+        "--output",
+        ".local/a10-m05/demo-replay"
+      ],
+      "elapsed_seconds": 1.3566584587097168,
+      "exit_code": 0,
+      "head": "e8e482ef041be7d66650b438123c27143665bb73",
+      "name": "demo-replay",
+      "source_bytes_stable": true,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "f1ac1014031f81e6145aef3d2094aab6d7d215eeefbd1ffca62477842491ada4",
+      "summary": [
+        "{\"a03_intake_and_store_replayed\": true, \"as_of\": \"2026-10-29T12:00:00Z\", \"brief_digest\": \"1860e2425251481e1672c8f5d491315d49c701f9651bcc8629187260c128b48c\", \"brief_id\": \"brief:a10:dec24b7eb90373392ec51e536f531fef2f56a00babe1d40f7347cbd1ec567ee8\", \"concept_generation_performed\": false, \"data_kind\": \"SYNTHETIC_FIXTURE\", \"duplicate_imports_checked\": true, \"external_provider_calls\": 0, \"freeform_brief_digest\": \"d61db1d1f50e75d1519af5a435ce67697108e1ace5f797f93dc52e945c7a175a\", \"import_ids\": [\"a10-f086ce397d93b5d46a8d4d4aa804efff72821ea8bdf16177896cb523a24d1349\", \"a10-70eb759ba3ed0880cd850452e9b622aa8000871e8a902c380095ccd6a9082033\"], \"insight_id\": \"aud-4577fe29d7fd466231b347db003e99ac61c1461a0cad1a55516e1351f69a0b94\", \"journal_sha256\": {\"audience.sqlite\": \"54d25de7a8dd889ab9780b5079a00a4ac6698a2816298b1aa07fe608ab7801fb\", \"signals.sqlite\": \"8278ef921de5c01ca3c847ba32b07842b2dda00229f2ae123ec4ed5057ffa236\"}, \"locale\": \"vi-VN\", \"notice\": \"Toy data only, not market metrics, provider exports, audience research or validated demand.\", \"proposal_ids\": [\"opp-94d8590d2a4f58b96e26d2f50e02f96c502dbad48bf75bca2e75d79cbc213555\", \"opp-9693d8d2dce1a333721d0577e7c15fb3ab07f63e19635681c1ae0ff74f3f2386\"], \"publication_status\": \"NOT_ATTEMPTED\", \"raw_bytes_replayed\": true, \"raw_sha256\": {\"audience\": \"e791d48bd010c8f39176b4afc1bbb55a46bf50e28866c268afaf07d476eee544\", \"csv\": \"bbb52fecc6af4292f4e6f8d5dd70f65a72746b837ad64a61355e599801a58dbf\", \"json\": \"c2d7de9fe9ed10711e6cf43eb12b7de72f1ef2b2f2d99dd28ad1bbbcb0d0a006\"}, \"rights_status\": \"UNKNOWN\", \"schema_version\": \"A10SyntheticDemo.v1\", \"sparse_conditions\": [\"INSUFFICIENT_HISTORY\"], \"trend_statuses\": [\"GROWING\", \"INSUFFICIENT_HISTORY\"]}"
+      ],
+      "workers_created": []
+    },
+    "stdout_hashes_equal": true
+  },
+  "environment": {
+    "platform": "Windows-11-10.0.26300-SP0",
+    "pytest": "8.4.2",
+    "python": "3.14.7 (tags/v3.14.7:823f032, Aug  5 2026, 10:51:32) [MSC v.1944 64 bit (AMD64)]",
+    "test_child_tokens_and_secrets_removed": true,
+    "ubuntu_execution": "NOT_RUN",
+    "xdist": "3.8.0"
+  },
+  "failure_preservation": {
+    "failing_pytest_runs": 2,
+    "internal_repair_rounds": 2,
+    "preflight_diagnostics": [
+      {
+        "cause": "Existing Windows CRLF checkout conversion",
+        "error": "Raw-hash assertion failed before implementation",
+        "evidence": ".local/a10-m05/source-precheck-diagnostic.json",
+        "resolution": "Compare exact M04 Git blobs; independently retain starting raw checkout hashes"
+      },
+      {
+        "error": "ModuleNotFoundError: No module named 'ai_commerce.opportunity'",
+        "phase": "Local schema-generation helper",
+        "resolution": "Use the explicit checkout src import path; no dependency or provider change"
+      }
+    ],
+    "remaining_repairs": 0,
+    "repair_1": {
+      "cause": "Demo selected one M01 import while supplying both comparison contexts; M02 requires all contexts to bind selected imports.",
+      "changes": [
+        "Pass a separate matching context file per demo trend call.",
+        "Add an explicit rejection test for unbound context.",
+        "Read-only review also applied M01 local path validation before optional A03 store writes."
+      ],
+      "failure": {
+        "code": "UNBOUND_COMPARISON_CONTEXT",
+        "errors": 5,
+        "failed": 1,
+        "passed": 331,
+        "skipped": 0
+      },
+      "limit": 2,
+      "prior_log": "affected-initial.stdout.log",
+      "round": 1,
+      "upstream_changes": []
+    },
+    "repair_2": {
+      "cause": "Actual M01 recorded_at uses timestamp_utc(), entering M02 series and M04 import hashes. Separate fresh journals retain different real import times.",
+      "changes": [
+        "Add explicit --replay-from retaining exact source journals, hashes and recorded_at.",
+        "Replay runs all real CLI APIs against copied local evidence and compares the final manifest.",
+        "Record actual fresh/replay duplicate flags separately from immutable content artifacts.",
+        "Compare all content files and SQLite bytes while retaining per-invocation execution records."
+      ],
+      "clocks_patched": false,
+      "failure": {
+        "errors": 0,
+        "failed": 1,
+        "passed": 338,
+        "skipped": 0
+      },
+      "limit": 2,
+      "prior_log": "affected-repair-1.stdout.log",
+      "remaining_repair_rounds": 0,
+      "round": 2,
+      "upstream_changes": []
+    },
+    "repair_limit": 2,
+    "uncertain_side_effect_retries": 0
+  },
+  "human_selected_executor": {
+    "effort": "max",
+    "executor": "codex",
+    "model": "gpt-6.1-sol"
+  },
+  "registered_verification": {
+    "m02_component_tests_require_separate_selection": true,
+    "observation_only_added_argv": [
+      "-v"
+    ],
+    "profile": "project-tests",
+    "registered_argv": [
+      "python",
+      "-m",
+      "pytest",
+      "tests",
+      "-q",
+      "-n",
+      "12"
+    ],
+    "registry_sha256": "b75c054ab065a52f42030517af27ba57d4ab434ff33120e59aacde14bbe0f683",
+    "workers_created_observed": 12,
+    "workers_requested": 12
+  },
+  "runs": [
+    {
+      "argv": [
+        "python",
+        "-m",
+        "pytest",
+        "tests",
+        "-q",
+        "-n",
+        "12",
+        "-v"
+      ],
+      "counts": {
+        "errors": 0,
+        "failed": 0,
+        "passed": 1406,
+        "skipped": 5
+      },
+      "elapsed_seconds": 184.81775832176208,
+      "evidence_state": "INVALIDATED",
+      "exit_code": 0,
+      "head": "e8e482ef041be7d66650b438123c27143665bb73",
+      "name": "baseline-project-tests",
+      "reason": "Implementation files were edited during this observational run; it is not reused as a stable baseline or final candidate verification.",
+      "stderr_log": ".local/a10-m05/baseline-project-tests.stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_log": ".local/a10-m05/baseline-project-tests.stdout.log",
+      "stdout_sha256": "c1f7117716393b438a44c4253202778dc6eec03d2c8c15d572afb4f97b3de6b5",
+      "summary": [
+        "........................................................................ [ 81%]",
+        "........................................................................ [ 86%]",
+        "........................................................................ [ 91%]",
+        "........................................................................ [ 96%]",
+        "...........................................                              [100%]",
+        "=========================== short test summary info ===========================",
+        "SKIPPED [2] tests\\test_a04_media_operations.py:257: Host permits neither directory symlinks nor junctions",
+        "SKIPPED [1] tests\\test_a04_upgrade_v11.py:359: Host cannot create hardlinks: [WinError 5] Access is denied: 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{7bc971f0-8e45-4b57-a0e2-53490d4dbb90}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw0\\\\test_source_hardlink_is_reject0\\\\fixture.png' -> 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{7bc971f0-8e45-4b57-a0e2-53490d4dbb90}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw0\\\\test_source_hardlink_is_reject0\\\\hardlink.png'",
+        "SKIPPED [2] tests\\test_a09_analytics.py:468: Host does not permit creating this symlink; no native symlink proof",
+        "================= 1406 passed, 5 skipped in 184.01s (0:03:04) ================="
+      ],
+      "workers_created": [
+        12
+      ]
+    },
+    {
+      "argv": [
+        "python",
+        "-m",
+        "pytest",
+        "tests/test_a10_m05.py",
+        "tests/test_a10_m04.py",
+        "tests/test_a10_m03.py",
+        "tests/test_a10_m01.py",
+        "src/ai_commerce/opportunity/trends/tests/test_m02.py",
+        "-q",
+        "-n",
+        "12",
+        "-v"
+      ],
+      "counts": {
+        "errors": 5,
+        "failed": 1,
+        "passed": 331,
+        "skipped": 0
+      },
+      "elapsed_seconds": 6.743437767028809,
+      "evidence_state": "EXECUTE",
+      "exit_code": 1,
+      "head": "e8e482ef041be7d66650b438123c27143665bb73",
+      "name": "affected-initial",
+      "source_bytes_stable": true,
+      "stderr_log": ".local/a10-m05/affected-initial.stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_log": ".local/a10-m05/affected-initial.stdout.log",
+      "stdout_sha256": "ab704574fd9d50d68b38b099ca3b1713d35bac719a095de95a37795290b6aa3a",
+      "summary": [
+        "",
+        "scripts\\a10_demo.py:43: ValueError",
+        "=========================== short test summary info ===========================",
+        "ERROR tests/test_a10_m05.py::test_cli_proposals_require_unambiguous_selection - ValueError: SYNTHETIC_DEMO_CLI_FAILED: {\"error\": \"UNBOUND_COMPARISON_CONTEXT\", \"row\": null}",
+        "ERROR tests/test_a10_m05.py::test_integrated_csv_json_notes_proposals_to_brief_keep_provenance - ValueError: SYNTHETIC_DEMO_CLI_FAILED: {\"error\": \"UNBOUND_COMPARISON_CONTEXT\", \"row\": null}",
+        "ERROR tests/test_a10_m05.py::test_sparse_missing_data_remains_explicit_in_bridge - ValueError: SYNTHETIC_DEMO_CLI_FAILED: {\"error\": \"UNBOUND_COMPARISON_CONTEXT\", \"row\": null}",
+        "ERROR tests/test_a10_m05.py::test_cli_m04_replays_saved_series_and_rejects_rehashed_omission - ValueError: SYNTHETIC_DEMO_CLI_FAILED: {\"error\": \"UNBOUND_COMPARISON_CONTEXT\", \"row\": null}",
+        "ERROR tests/test_a10_m05.py::test_cli_all_audience_read_and_validation_operations - ValueError: SYNTHETIC_DEMO_CLI_FAILED: {\"error\": \"UNBOUND_COMPARISON_CONTEXT\", \"row\": null}",
+        "FAILED tests/test_a10_m05.py::test_demo_is_reproducible_and_preserves_raw_files - ValueError: SYNTHETIC_DEMO_CLI_FAILED: {\"error\": \"UNBOUND_COMPARISON_CONTEXT\", \"row\": null}",
+        "=================== 1 failed, 331 passed, 5 errors in 5.60s ==================="
+      ],
+      "workers_created": [
+        12
+      ]
+    },
+    {
+      "argv": [
+        "python",
+        "-m",
+        "pytest",
+        "tests/test_a10_m05.py",
+        "tests/test_a10_m04.py",
+        "tests/test_a10_m03.py",
+        "tests/test_a10_m01.py",
+        "src/ai_commerce/opportunity/trends/tests/test_m02.py",
+        "-q",
+        "-n",
+        "12",
+        "-v"
+      ],
+      "counts": {
+        "errors": 0,
+        "failed": 1,
+        "passed": 338,
+        "skipped": 0
+      },
+      "elapsed_seconds": 12.466459274291992,
+      "evidence_state": "EXECUTE",
+      "exit_code": 1,
+      "head": "e8e482ef041be7d66650b438123c27143665bb73",
+      "name": "affected-repair-1",
+      "source_bytes_stable": true,
+      "stderr_log": ".local/a10-m05/affected-repair-1.stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_log": ".local/a10-m05/affected-repair-1.stdout.log",
+      "stdout_sha256": "fd842f55bba123e542afe79867ec7c38a540126785b788c54a25c2b5915a5991",
+      "summary": [
+        "        'schema_version': 'A10SyntheticDemo.v1',",
+        "        'sparse_conditions': [",
+        "            'INSUFFICIENT_HISTORY',",
+        "        ],",
+        "        'trend_statuses': [",
+        "            'GROWING',",
+        "            'INSUFFICIENT_HISTORY',",
+        "        ],",
+        "    }",
+        "======================= 1 failed, 338 passed in 11.34s ========================"
+      ],
+      "workers_created": [
+        12
+      ]
+    },
+    {
+      "argv": [
+        "python",
+        "-m",
+        "pytest",
+        "tests/test_a10_m05.py",
+        "tests/test_a10_m04.py",
+        "tests/test_a10_m03.py",
+        "tests/test_a10_m01.py",
+        "src/ai_commerce/opportunity/trends/tests/test_m02.py",
+        "-q",
+        "-n",
+        "12",
+        "-v"
+      ],
+      "counts": {
+        "errors": 0,
+        "failed": 0,
+        "passed": 339,
+        "skipped": 0
+      },
+      "elapsed_seconds": 12.271032094955444,
+      "evidence_state": "EXECUTE",
+      "exit_code": 0,
+      "head": "e8e482ef041be7d66650b438123c27143665bb73",
+      "name": "affected-repair-2",
+      "source_bytes_stable": true,
+      "stderr_log": ".local/a10-m05/affected-repair-2.stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_log": ".local/a10-m05/affected-repair-2.stdout.log",
+      "stdout_sha256": "d824cd541ef6b890278304bc2aee842b4330466bc0b7873410946f7feab7fa70",
+      "summary": [
+        "asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function",
+        "created: 12/12 workers",
+        "12 workers [339 items]",
+        "",
+        "........................................................................ [ 21%]",
+        "........................................................................ [ 42%]",
+        "........................................................................ [ 63%]",
+        "........................................................................ [ 84%]",
+        "...................................................                      [100%]",
+        "============================ 339 passed in 11.28s ============================="
+      ],
+      "workers_created": [
+        12
+      ]
+    },
+    {
+      "argv": [
+        "python",
+        "-m",
+        "pytest",
+        "tests",
+        "-q",
+        "-n",
+        "12",
+        "-v"
+      ],
+      "counts": {
+        "errors": 0,
+        "failed": 0,
+        "passed": 1460,
+        "skipped": 5
+      },
+      "elapsed_seconds": 172.78522109985352,
+      "evidence_state": "EXECUTE",
+      "exit_code": 0,
+      "head": "e8e482ef041be7d66650b438123c27143665bb73",
+      "name": "final-project-tests",
+      "source_bytes_stable": true,
+      "stderr_log": ".local/a10-m05/final-project-tests.stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_log": ".local/a10-m05/final-project-tests.stdout.log",
+      "stdout_sha256": "62051b022dd5b6385fbb426e8acec42b608f89c6a41035205dd2d9421a6f2d54",
+      "summary": [
+        "........................................................................ [ 83%]",
+        "........................................................................ [ 88%]",
+        "........................................................................ [ 93%]",
+        "........................................................................ [ 98%]",
+        ".........................                                                [100%]",
+        "=========================== short test summary info ===========================",
+        "SKIPPED [2] tests\\test_a04_media_operations.py:257: Host permits neither directory symlinks nor junctions",
+        "SKIPPED [1] tests\\test_a04_upgrade_v11.py:359: Host cannot create hardlinks: [WinError 5] Access is denied: 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{7955aca2-cfbb-4f47-93da-4ba4e6e4ee9f}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw0\\\\test_source_hardlink_is_reject0\\\\fixture.png' -> 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{7955aca2-cfbb-4f47-93da-4ba4e6e4ee9f}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw0\\\\test_source_hardlink_is_reject0\\\\hardlink.png'",
+        "SKIPPED [2] tests\\test_a09_analytics.py:468: Host does not permit creating this symlink; no native symlink proof",
+        "================= 1460 passed, 5 skipped in 170.68s (0:02:50) ================="
+      ],
+      "workers_created": [
+        12
+      ]
+    }
+  ],
+  "scope": {
+    "allowed_paths": [
+      "contracts/OpportunityCreativeBridge.v1.schema.json",
+      "src/ai_commerce/opportunity/bridge",
+      "src/ai_commerce/opportunity/__init__.py",
+      "src/ai_commerce/cli.py",
+      "tests/test_a10_m05.py",
+      "scripts/a10_demo.py",
+      "docs/engineering/A10_IMPLEMENTATION_REPORT.md"
+    ],
+    "candidate_payload_sha256": {
+      "contracts/OpportunityCreativeBridge.v1.schema.json": "65033ef10dca1924ea429588398b017822f8a97f8a662b3348d26301aca3a0d6",
+      "docs/engineering/A10_IMPLEMENTATION_REPORT.md": "76a33cd7d2fcd308f2cd8e6b2d465b8154950cfdc48c121d9474749dbbe806c3",
+      "scripts/a10_demo.py": "8a76efe5dd8aeb7a499fb2a98646e03e7b3951b243ac63225f4632b0b02bdb2a",
+      "src/ai_commerce/cli.py": "a570785f2e7a189c7505888625e4375bb8c6c2626b2f908f2128d43f7b96a48b",
+      "src/ai_commerce/opportunity/__init__.py": "801bada331b9c5943b453cc80051ca73b4244ce9a898bcda58e948fa32d2f2f2",
+      "src/ai_commerce/opportunity/bridge/README.md": "bdcfacbe92849ff9969ba71437554aecdbcba77304497ad42bd6c1b64ea155f1",
+      "src/ai_commerce/opportunity/bridge/__init__.py": "af5283c70c67b1414e7011c88aece16e18f2144ea7c51301f6deabc140c5aa58",
+      "src/ai_commerce/opportunity/bridge/briefs.py": "6a167147c54e04c804147f666ea4ca1d01be161ada10eff463e5b80c3c42ca4a",
+      "src/ai_commerce/opportunity/bridge/cli.py": "bf4b885c96f026a4b176e24b69f628349ba94724df3b165265698e5152dad3d0",
+      "src/ai_commerce/opportunity/bridge/schemas.py": "d1a7731a9bf724478ebcf68535321d229779b711d292affb1c758dfe3f68803a",
+      "tests/test_a10_m05.py": "8a4ee504952ba99f0dd00c4aa11dbf5465f5b5b2fce753c03e7de58dc9272c18"
+    },
+    "changed_paths": [
+      "contracts/OpportunityCreativeBridge.v1.schema.json",
+      "docs/engineering/A10_IMPLEMENTATION_REPORT.md",
+      "scripts/a10_demo.py",
+      "src/ai_commerce/cli.py",
+      "src/ai_commerce/opportunity/__init__.py",
+      "src/ai_commerce/opportunity/bridge/README.md",
+      "src/ai_commerce/opportunity/bridge/__init__.py",
+      "src/ai_commerce/opportunity/bridge/briefs.py",
+      "src/ai_commerce/opportunity/bridge/cli.py",
+      "src/ai_commerce/opportunity/bridge/schemas.py",
+      "src/ai_commerce/opportunity/bridge/verification.json",
+      "tests/test_a10_m05.py"
+    ],
+    "diff_check_exit": 0,
+    "lf_only_changed_text": true,
+    "out_of_scope_files": [],
+    "post_test_changes": [
+      "Report actual test outputs and generated verification metadata only"
+    ],
+    "self_hash_note": "This generated receipt excludes its own hash; EF01/EF02 captures the complete returned payload.",
+    "tested_implementation_sha256": {
+      "contracts/OpportunityCreativeBridge.v1.schema.json": "65033ef10dca1924ea429588398b017822f8a97f8a662b3348d26301aca3a0d6",
+      "scripts/a10_demo.py": "8a76efe5dd8aeb7a499fb2a98646e03e7b3951b243ac63225f4632b0b02bdb2a",
+      "src/ai_commerce/cli.py": "a570785f2e7a189c7505888625e4375bb8c6c2626b2f908f2128d43f7b96a48b",
+      "src/ai_commerce/opportunity/__init__.py": "801bada331b9c5943b453cc80051ca73b4244ce9a898bcda58e948fa32d2f2f2",
+      "src/ai_commerce/opportunity/bridge/README.md": "bdcfacbe92849ff9969ba71437554aecdbcba77304497ad42bd6c1b64ea155f1",
+      "src/ai_commerce/opportunity/bridge/__init__.py": "af5283c70c67b1414e7011c88aece16e18f2144ea7c51301f6deabc140c5aa58",
+      "src/ai_commerce/opportunity/bridge/briefs.py": "6a167147c54e04c804147f666ea4ca1d01be161ada10eff463e5b80c3c42ca4a",
+      "src/ai_commerce/opportunity/bridge/cli.py": "bf4b885c96f026a4b176e24b69f628349ba94724df3b165265698e5152dad3d0",
+      "src/ai_commerce/opportunity/bridge/schemas.py": "d1a7731a9bf724478ebcf68535321d229779b711d292affb1c758dfe3f68803a",
+      "tests/test_a10_m05.py": "8a4ee504952ba99f0dd00c4aa11dbf5465f5b5b2fce753c03e7de58dc9272c18"
+    }
+  },
+  "skip_reasons": [
+    {
+      "count": 2,
+      "path": "tests/test_a04_media_operations.py:257",
+      "reason": "Host permits neither directory symlinks nor junctions"
+    },
+    {
+      "count": 1,
+      "path": "tests/test_a04_upgrade_v11.py:359",
+      "reason": "Windows sandbox denies hardlink creation"
+    },
+    {
+      "count": 2,
+      "path": "tests/test_a09_analytics.py:468",
+      "reason": "Host does not permit symlink creation; native proof unavailable"
+    }
+  ],
+  "source": {
+    "effective_head": "e8e482ef041be7d66650b438123c27143665bb73",
+    "effective_tree": "e66323dc6b8bea4cf733eef47ed782ec9d8872c1",
+    "initial_manifest": ".local/a10-m05/source-before.json",
+    "initial_manifest_sha256": "32b5d75b7586f9c79ae185338a2306a1383e0dc1027961059ec842af2233e730",
+    "m04_candidate_git_blobs_match": true,
+    "m04_candidate_ref": "refs/heads/ef02/candidate/d83306f97716712e8b836048c52794df",
+    "m04_candidate_sha": "4f1f40f38711401fdb90195c898a5e90386051e3",
+    "m04_checkout": {
+      "contracts/OpportunityProposal.v1.schema.json": {
+        "crlf_count": 0,
+        "git_blob_sha256": "f4d0f1bc1f78bf4bc4a69b642f525e1cc52be8a65384a725701134e8d5006d2f",
+        "worktree_sha256": "f4d0f1bc1f78bf4bc4a69b642f525e1cc52be8a65384a725701134e8d5006d2f"
+      },
+      "src/ai_commerce/opportunity/proposals/README.md": {
+        "crlf_count": 0,
+        "git_blob_sha256": "2f101d0259caf4f8cbb96df93b139a0594110e94bae0bcd6503173543c6a8ab5",
+        "worktree_sha256": "2f101d0259caf4f8cbb96df93b139a0594110e94bae0bcd6503173543c6a8ab5"
+      },
+      "src/ai_commerce/opportunity/proposals/__init__.py": {
+        "crlf_count": 6,
+        "git_blob_sha256": "27a58e60347cf3e8c20ffc141870316e17a8064e5593349c3664a44535c5c4ec",
+        "worktree_sha256": "c5409f0b6c43c5385e6c9e184411bd18cfb9f964979c42b439bb474da002ff2a"
+      },
+      "src/ai_commerce/opportunity/proposals/planning.py": {
+        "crlf_count": 402,
+        "git_blob_sha256": "0cfdbca1f354d7ee5f63640fc5c0243253e0aa78c6e947d0f9c618c22e066fec",
+        "worktree_sha256": "9172f8376a807716026ca6b415eea7c18ebb63992db2bfdfb9abf2718211baf4"
+      },
+      "src/ai_commerce/opportunity/proposals/schemas.py": {
+        "crlf_count": 135,
+        "git_blob_sha256": "04a5c82766b669c1fd443e5aa84123953d72bf384f0fc6d9b7cac3fefb1b1f43",
+        "worktree_sha256": "aecde1340fcd6985efb61f2909575828104cca93e55f63bcfb8a02d793a3fcea"
+      },
+      "src/ai_commerce/opportunity/proposals/verification.json": {
+        "crlf_count": 0,
+        "git_blob_sha256": "f0dc2c2d2cbab35960507b512f47673034061d83fce29a6dc0fb89a1a73e822e",
+        "worktree_sha256": "f0dc2c2d2cbab35960507b512f47673034061d83fce29a6dc0fb89a1a73e822e"
+      },
+      "tests/test_a10_m04.py": {
+        "crlf_count": 504,
+        "git_blob_sha256": "a0b4b8f068aa5c0ce63f8eeee8aff0f3e2526d152ddf4be3da2177d06505fa8d",
+        "worktree_sha256": "8cf85fc090e2c6d4f4aeea3cc1ec5a6bb7e6d7ce5287ddcfb0c62f7451eeadcc"
+      }
+    },
+    "m04_result_sha256": "8ee334f80d81acc638cbbb65a9d69d56f5a2b4ace034c22891f059ad3fc1907b",
+    "m04_status": "CANDIDATE_READY",
+    "modified_existing_paths": [
+      "docs/engineering/A10_IMPLEMENTATION_REPORT.md",
+      "src/ai_commerce/cli.py",
+      "src/ai_commerce/opportunity/__init__.py"
+    ],
+    "opportunity_init_exception": "Only explicitly permitted M05 description/export additions; original M01 callables are unchanged.",
+    "original_file_count": 304,
+    "original_files_byte_identical": 301,
+    "original_m01_report_prefix_preserved": true,
+    "parent_sha": "7e1f5f22274ea8ae1e238d0126f16ef4fc7f7e5d",
+    "preserved_components": [
+      "opportunity/core",
+      "opportunity/signals",
+      "opportunity/trends",
+      "opportunity/audience",
+      "opportunity/proposals",
+      "creative",
+      "analytics",
+      "distribution",
+      "engineering",
+      "remote"
+    ],
+    "requested_sha": "7e1f5f22274ea8ae1e238d0126f16ef4fc7f7e5d",
+    "starting_worktree_clean": true
+  },
+  "status": "LOCALLY_VERIFIED_FOR_M05_SCOPE",
+  "work_item": "work_items/A10-OPPORTUNITY-AUDIENCE-001.json"
+}

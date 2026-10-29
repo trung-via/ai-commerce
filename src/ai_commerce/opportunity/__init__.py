@@ -1,4 +1,4 @@
-"""A10 Opportunity & Audience Intelligence (M01 Signal Intake Foundation)."""
+"""A10 offline Opportunity & Audience Intelligence; optional A03 creative bridge."""
 
 from .core.models import (
     OpportunityError,
@@ -13,6 +13,7 @@ from .signals.importer import (
 )
 from .signals.ledger import SignalLedger
 from .signals.profiles import mapping_profile
+from .bridge import CreativeBridgeError, freeform_brief, opportunity_to_brief, validate_bridge
 
 __all__ = [
     "OpportunityError",
@@ -24,4 +25,8 @@ __all__ = [
     "prepare_bytes",
     "SignalLedger",
     "mapping_profile",
+    "CreativeBridgeError",
+    "freeform_brief",
+    "opportunity_to_brief",
+    "validate_bridge",
 ]
