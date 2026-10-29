@@ -23,6 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--brain-issuers", default="")
     parser.add_argument("--issue-number", type=int, default=0)
     parser.add_argument("--max-parallel", type=int, default=0)
+    parser.add_argument("--git-bin", default=None)
     args = parser.parse_args(argv)
     checkout = args.checkout.resolve()
     try:
@@ -36,7 +37,8 @@ def main(argv: list[str] | None = None) -> int:
                                owner_login=args.owner_login,
                                brain_issuers=tuple(v.strip() for v in
                                                    args.brain_issuers.split(",") if v.strip()))
-        check_source(checkout, batch["source_sha"])
+        check_source(checkout, batch["source_sha"],
+                     **({"git_executable": args.git_bin} if args.git_bin is not None else {}))
     except Exception as exc:
         print("EF02_REQUEST_REJECTED: " + type(exc).__name__ + ": " + str(exc),
               file=sys.stderr)
@@ -50,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
         repo = os.environ.get("GITHUB_REPOSITORY", "")
         github = GitHubTransport(repo, token)
         worker = LocalBatchWorker(checkout=checkout, batch=batch, profiles=profiles,
-                                  github=github)
+                                  github=github, **({"git_executable": args.git_bin} if args.git_bin is not None else {}))
         host_slots = int(os.environ.get("EF02_HOST_SLOTS", "2"))
         if host_slots < 1 or host_slots > 128:
             raise ValueError("EF02_HOST_SLOTS must be in 1..128")

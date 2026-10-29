@@ -397,10 +397,15 @@ def test_optional_contract_bounds_fingerprint_and_cli_compatibility():
 def _git_repo(tmp_path, real_git=True):
     repo = tmp_path / "source"
     repo.mkdir()
-    (repo / "test_scope.py").write_text(
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_scope.py").write_text(
         "from pathlib import Path\ndef test_value():\n"
         "    assert Path('impl.py').read_text() == 'good'\n", encoding="utf-8")
     (repo / ".gitignore").write_text("__pycache__/\n.pytest_cache/\n.local/\n")
+    # This fixture must be independent of pytest configuration above tmp_path.
+    # The observation-only Git model deliberately sees every fixture file;
+    # disable pytest's writable cache rather than hide a real source mutation.
+    (repo / "pytest.ini").write_text("[pytest]\naddopts = -p no:cacheprovider\n")
     if not real_git:
         return repo, BASE
     for args in (["init", "-q"], ["config", "user.email", "local@example.invalid"],
@@ -498,7 +503,11 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
                 attempt_id=args.attempt_id, selection=ExecutorSelection(args.executor, args.model, args.effort),
                 instruction=args.instruction_file.read_text(), verify_argv=json.loads(args.verify_json.read_text()),
                 allowed_prefixes=args.allow_path, max_repair_rounds=args.max_repair_rounds,
-                action_timeout_seconds=args.action_timeout_seconds, codex_windows_sandbox=args.codex_windows_sandbox)
+                action_timeout_seconds=args.action_timeout_seconds, codex_windows_sandbox=args.codex_windows_sandbox,
+                minimum_test=args.minimum_test, registered_only=args.registered_only,
+                aggregate_sources=args.aggregate_source, host_slots=args.host_slots,
+                registered_profiles=json.loads(args.registered_profiles_json.read_text())
+                if args.registered_profiles_json else None)
             self.returncode = 0 if result["status"] == "BUILD_VERIFIED_FOR_SCOPE" else 1
             return "", ""
 
@@ -508,7 +517,8 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
     monkeypatch.setattr(remote, "tempfile", SimpleNamespace(
         mkdtemp=lambda prefix: tempfile.mkdtemp(prefix=prefix, dir=tmp_path)))
     batch = dict(batch_id="repair-integration", source_sha=head, max_parallel=2, actions=[])
-    worker = remote.LocalBatchWorker(checkout=repo, batch=batch, profiles={"scope": VERIFY},
+    worker = remote.LocalBatchWorker(checkout=repo, batch=batch,
+                                    profiles={"scope": VERIFY, "project-tests": ["python", "-m", "pytest", "tests", "-q"]},
                                     github=Github(), root=tmp_path / "action-evidence")
     return SimpleNamespace(worker=worker, batch=batch, calls=calls, children=children,
                            claims=claims, candidates=candidates, resolved=resolved, head=head)
@@ -588,6 +598,12 @@ def test_repaired_sibling_candidates_unblock_dag_with_pinned_dependency_results(
     pinned = context.resolved["c-001"]
     assert {p["candidate_sha"] for p in pinned} == {
         a["candidate_sha"] for a in result["actions"] if a["action_id"] in ("a", "b")}
+    combined = next(a for a in result["actions"] if a["action_id"] == "c")
+    assert combined["aggregate_verification"]["state"] == "VERIFIED_COMBINED_SCOPE"
+    assert combined["aggregate_verification"]["sibling_pass_reusable"] is False
+    assert all(g["actual_exit_code"] == 0 and g["state"] != "REUSE"
+               for g in combined["ef01_invocations"][-1]["minimum_test"]["groups"])
+    assert result["aggregate_verification"]["state"] == "UNPROVEN"
 
 def test_live_event_mirror_timeout_includes_blocked_stdin(tmp_path):
     # Large repair feedback must not postpone starting the invocation timeout.
