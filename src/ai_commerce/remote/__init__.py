@@ -13,9 +13,11 @@ from .conversation_binding import (
 from .trusted_origin import (
     LocalCallerAttestation,
     LocalOriginRegistrar,
+    OriginAuthority,
     OriginError,
 )
 from .wake_adapter import (
+    ArtifactAuthority,
     DurableIdempotencyStore,
     GitHubArtifactProvenance,
     LocalCdpWakeAdapter,
@@ -27,6 +29,7 @@ from .wake_adapter import (
 )
 
 __all__ = [
+    "ArtifactAuthority",
     "BindingError",
     "CompletionEventError",
     "DurableIdempotencyStore",
@@ -36,6 +39,7 @@ __all__ = [
     "LocalCdpWakeAdapter",
     "LocalOriginRegistrar",
     "OriginError",
+    "OriginAuthority",
     "ProvenanceError",
     "ResolvedBinding",
     "WakeDeliveryError",
