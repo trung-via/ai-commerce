@@ -97,9 +97,10 @@ def test_hosted_probe_is_not_ef02_batch_or_windows_executor():
             "ef02-m0r-hosted-checkpoint.yml").read_text(encoding="utf-8")
     main = (ROOT / ".github" / "workflows" /
             "ef02-batch.yml").read_text(encoding="utf-8")
-    assert "github.event.issue.user.login == github.repository_owner" in text
-    assert "github.event.action == 'opened'" in text
-    assert "github.event.issue.title == '[M0R] Hosted remote pre-spawn checkpoint probe'" in text
+    assert "on:\n  workflow_dispatch:" in text
+    assert "  issues:" not in text
+    assert "github.actor == github.repository_owner" in text
+    assert "github.ref == 'refs/heads/main'" in text
     assert text.count("runs-on: ubuntu-latest") == 2
     assert "runs-on: [self-hosted" not in text
     assert "contents: write" in text and "contents: read" in text
