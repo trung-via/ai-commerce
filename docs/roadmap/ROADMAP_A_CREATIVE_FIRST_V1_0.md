@@ -203,10 +203,24 @@ These current observations **supersede** historical PLANNED/NOT_IMPLEMENTED snap
 
 **Milestone M3:** audience measurement and opportunity-insight *offline prototype* scope is verified with A09 and A10. This is not verified real audience growth, provider analytics access or earned commerce outcomes. External accounts, permissions, real metrics, posting, affiliate links and settlement remain unproven.
 
+## 2026-10-30 — A11 L03/L06 verified and published to main; M4 partial
+
+The **A11 Audience Learning Registry** offline implementation completed EF02 [Issue #99](https://github.com/trung-via/ai-commerce/issues/99): A11-03 and A11-04 both `CANDIDATE_READY`. The verified final source candidate was `0f04671a633b1914f9eb510c68585b6ab9d57af9`. Human approved integration, and [PR #103](https://github.com/trung-via/ai-commerce/pull/103) merged into `main@39a5f10ee366cb286afd675c49ae1a34767af049`, retaining all **68 exact source blob identities** and the later EF01/EF02 changes.
+
+| Evidence on the combined PR #103 tree | Ubuntu | Windows |
+|---|---|---|
+| [Full `pytest tests -q -n 12` / A10 CI](https://github.com/trung-via/ai-commerce/actions/runs/40971422045) | **1,749 passed, 1 skipped** | **1,750 passed** |
+| M02 component tests in the same workflow | 77 passed | 77 passed |
+| [A06 E01](https://github.com/trung-via/ai-commerce/actions/runs/40971422017), [A07](https://github.com/trung-via/ai-commerce/actions/runs/40971422037), [A08](https://github.com/trung-via/ai-commerce/actions/runs/40971422085) | PASS | PASS |
+
+**8/8 PR checks PASS.** [WorkItem A11](../../work_items/A11-AUDIENCE-LEARNING-001.json) now records source, CI and publication evidence. L03 reports and L06 append-only learning hypotheses/counterevidence are supported for offline, deterministic or user-supplied data, retaining missing/insufficient/non-comparable states and advisory-only uncertainty. No native provider analytics, verified public posting, affiliate entitlement, causal impact, sales or settlement is proven.
+
+**Milestone M4 is PARTIAL, not complete:** A11 is done in offline scope, but A12/A13/A14 remain PLANNED. Prior `A11 PLANNED` and `A11 next` statements above are historical observations, superseded by this update.
+
 ### Next Work Package options — advisory, not dispatched
 
-- **Primary recommendation A11 (L03, L06) — Audience Learning Registry.** A09 is available; implement immutable hypothesis/evidence records, source/metric/window/version linkage, counterevidence, learning and Human-editable decisions. Support synthetic/user-supplied offline inputs without claiming causal effects. A11 is still `PLANNED`; no A11 implementation or executor dispatch is implied here.
-- **Parallel A12 (P01, P03, P04, P05, P06) — Product Evidence Foundation.** A02 prerequisite is available; implement seller claims vs verified facts, variants, assets/rights provenance for future A13 affiliate release evidence, without forcing product selection or media restrictions.
-- **Optional independent EF02-D — Exact-chat Brain Wake.** The [EF02-D WorkItem](../../work_items/EF02-EXACT-CHAT-WAKE-002.json) retains platform delivery capability `UNKNOWN`; GitHub Issue and artifact feedback alone cannot prove a wake into this specific ChatGPT conversation. Engineering enhancement does not gate A11/A12.
+- **Primary A12 — Product Evidence Foundation (P01/P03/P04/P05/P06).** A02 is already available and no A12 implementation WorkItem is present on `main` as of 2026-10-30. Build manual listing snapshots, stable product/listing/seller/variant identities, fact versus seller-asserted/unknown claims, time-bounded price/offer observations, asset origin/rights, and a source-backed handoff for Creative and future A13. Use offline/provider-neutral sources initially; do not claim rights, commission rates or API access without evidence.
+- **Then A13 → A14.** A13 (claim/asset rights plus account×surface×affiliate link eligibility) depends on A12, A07 and A08. A14 (affiliate E2E) depends on A13 and A06, with publishing, link, attribution and actual commercial outcomes recorded as separate states.
+- **Optional independent lane:** A15 (operational costs/idempotency) may be planned in parallel because it depends on A02, not on A12. EF02-D exact-chat wake is a separate optional engineering task; GitHub feedback does not establish ChatGPT exact-conversation wake permission or capability.
 
-**Evidence boundary:** merging and CI demonstrate source code and synthetic offline functionality, not real public media posting, market traction, live authorization, completed sales or settled revenue. All future implementations require Human intent and real execution evidence.
+**Evidence boundary:** these are repository planning recommendations only, not Human approval or EF02 dispatch of A12/A13/A14. All 2026-10-28 historical `dispatch_status=NOT_DISPATCHED` snapshot notes are superseded where actual later Issue/PR/CI evidence exists. Creative production is never gated on a product/SKU or account entitlement; third-party eligibility is assessed for the specific external action.
