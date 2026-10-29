@@ -360,7 +360,7 @@ def test_registered_minimal_group_uses_its_own_twelve_worker_command(tmp_path, m
     monkeypatch.setattr(verification, "subprocess", SimpleNamespace(
         run=run, CompletedProcess=subprocess.CompletedProcess, TimeoutExpired=subprocess.TimeoutExpired))
     selection, provider_calls, _ = _provider(context)
-    full = ["python", "-m", "pytest", "tests", "-q"]
+    full = ["python", "-m", "pytest", "tests", "-q", "-n", "12"]
     result = runner.execute_attempt(repo=repo, output_dir=tmp_path / "evidence", work_id="registry", attempt_id="one",
         selection=selection, instruction="fixture", verify_argv=full, allowed_prefixes=context.state["scope"],
         minimum_test=True, registered_only=True, registered_profiles={"project-tests": full, "scoped": scoped})
