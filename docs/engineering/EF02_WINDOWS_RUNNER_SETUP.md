@@ -136,3 +136,21 @@ registration concurrently. User sign-out/Sleep stops unattended processing.
 the PR branch. They do not imply a merge to `main`, installation on
 other laptops, or crash recovery certification. Do not merge disposable
 EF01-R probes from #74/#76.
+
+
+## 2026-10-30 — Antigravity headless read_file permission preparation (Issue #97)
+
+**Observed failure:** A11-03 in [EF02 Issue #97](https://github.com/trung-via/ai-commerce/issues/97), run [40920530455](https://github.com/trung-via/ai-commerce/actions/runs/40920530455), returned `EXECUTOR_PERMISSION_DENIED / HEADLESS_TOOL_PERMISSION_DENIED`. Provider stderr said `read_file` required an approval which `--print` headless could not prompt for, and the JSON response contained `denied_actions=[read_file]` even with process exit 0. There were **no code changes, candidate, or pytest results** for this attempt. The original denied target path is **not present** in the published JSON evidence; do not assert that any specific location caused it.
+
+**Scoped source change:** EF01 already invokes `agy --print ... --add-dir <isolated worktree> --mode accept-edits`. The revised adapter also passes a second **repeatable** `--add-dir <this invocation's evidence directory>` containing `instruction.txt`, feedback and diagnostic logs. This is a per-invocation workspace read permission, not `read_file(*)`, not `--dangerously-skip-permissions`, and not an automatic write/command/network permission grant. The actual denied path is unknown; this change mitigates a known cross-workspace evidence-read hazard but **does not prove #97's precise cause or fix**.
+
+**No-model operator preflight, after this PR is merged to main:**
+
+1. In repository GitHub Actions, run **EF02 Antigravity headless access preflight (no model)** on the trusted `main` branch. It uses the same self-hosted runner label and checks the actual process account, `agy --help` support for `--print` and `--add-dir`, and whether user settings contain explicit `read_file` `ask` or `deny` rules. It deliberately never calls a model or prints settings secrets. Expected marker: `AGY_PREFLIGHT_PASS_NO_MODEL`.
+2. Review the logged `RUNNER_ACCOUNT`, settings-present and Ask/Deny booleans. Config path for that same account: `~/.gemini/antigravity-cli/settings.json`. Do not edit another Windows user's profile or enable the old AI Commerce service.
+3. Antigravity evaluates **Deny > Ask > Allow**. If an explicit ask/deny rule covers a requested file, an added allow cannot override it. First identify the exact denied path and resolve the narrow conflicting rule. Only if a needed file is genuinely outside the worktree/evidence directory and its path is independently verified, the logged-in runner owner may consider an exact `read_file(<verified directory>)` entry in `permissions.allow`, preserving existing settings and making a local backup. Never use blanket `read_file(*)`, `command(*)`, `write_file(*)`, `--dangerously-skip-permissions`, or mutate other runners.
+4. Any real `agy -p` proof invocation may consume model quota. It requires a separately authorized, uniquely identified test attempt, inspected output, **no denied_actions**, and actual expected read evidence; a no-model preflight alone cannot prove tool authorization. Do not replay #97's claimed attempt. EF01 still returns `HEADLESS_TOOL_PERMISSION_DENIED` if permission is refused, regardless of AGY process exit 0.
+
+**Testing and publication:** `tests/test_ef01.py` now asserts the two scoped workspace roots, disallows unprepared evidence paths, and exercises the same-action adapter handoff without a real model. Preserve source/test evidence and keep the existing candidate publication, provider quota and no-main-merge rules. A PR merge is distinct from a Windows preflight success and from a live headless read_file proof.
+
+Reference: [Antigravity headless documentation](https://antigravity.google/docs/cli/headless/) and [CLI permissions](https://antigravity.google/docs/cli/permissions/).
