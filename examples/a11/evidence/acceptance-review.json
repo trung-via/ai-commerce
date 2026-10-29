@@ -1,0 +1,69 @@
+{
+  "boundaries": [
+    "OFFLINE_ONLY",
+    "NO_MAIN_MERGE",
+    "NO_A03_A08_A09_MODIFICATIONS",
+    "NO_AUTOMATIC_CREATIVE_DECISIONS",
+    "NO_LIVE_PROVIDER_OR_COMMERCE_CLAIM"
+  ],
+  "criteria": {
+    "AC01": {
+      "evidence": [
+        "tests/test_a11_reader.py",
+        "tests/test_a11_integration.py::test_cli_snapshot_report_revisions_inspect_export_reload_and_upstream_unchanged",
+        "examples/a11/evidence/fan-in.json"
+      ],
+      "state": "SATISFIED_OFFLINE_SCOPE"
+    },
+    "AC02_AC03": {
+      "evidence": [
+        "tests/test_a11_reporting.py",
+        "tests/test_a11_integration.py::test_deterministic_synthetic_demo_and_golden_states",
+        "tests/test_a11_integration.py::test_declared_denominator_without_quantity_stays_insufficient",
+        "tests/test_a11_integration.py::test_source_denominator_uses_one_exact_definition_version",
+        "tests/test_a11_integration.py::test_registry_rejects_resealed_forged_report_arithmetic_before_writing"
+      ],
+      "state": "SATISFIED_OFFLINE_SCOPE"
+    },
+    "AC04": {
+      "evidence": [
+        "src/ai_commerce/learning/schemas.py",
+        "tests/test_a11_reporting.py",
+        "examples/a11/synthetic/incompatible-comparison.json"
+      ],
+      "state": "SATISFIED_OFFLINE_SCOPE"
+    },
+    "AC05_AC06": {
+      "evidence": [
+        "tests/test_a11_registry.py",
+        "tests/test_a11_integration.py::test_cli_snapshot_report_revisions_inspect_export_reload_and_upstream_unchanged",
+        "examples/a11/synthetic/advisory.json"
+      ],
+      "state": "SATISFIED_OFFLINE_SCOPE"
+    },
+    "AC07": {
+      "evidence": [
+        "tests/test_a11_integration.py::test_export_contracts_privacy_uncertainty_and_detached_reads",
+        "tests/test_a11_integration.py::test_retained_export_pin_detects_valid_prefix_truncation",
+        "tests/test_a11_integration.py::test_read_commands_never_create_or_overwrite_upstream"
+      ],
+      "state": "SATISFIED_OFFLINE_SCOPE"
+    },
+    "AC08_UBUNTU": {
+      "reason": "No Ubuntu execution in this Windows attempt",
+      "state": "UNPROVEN"
+    },
+    "AC08_WINDOWS": {
+      "evidence": [
+        "examples/a11/evidence/project-tests-result.json",
+        "examples/a11/evidence/project-tests.txt",
+        "examples/a11/evidence/verification-before.json"
+      ],
+      "result": "1691 passed, 8 skipped in 257.73s; exit 0; 12 workers",
+      "state": "SATISFIED_OFFLINE_SCOPE"
+    }
+  },
+  "method": "Explicit read-only second pass against actual sources, tests and artifacts; no additional approval gate",
+  "publication": "NOT_CLAIMED_BY_EXECUTOR; existing EF02 publisher runs after executor returns",
+  "source": "71b24c25ad80d3900c333d6ed1312be629161c23"
+}

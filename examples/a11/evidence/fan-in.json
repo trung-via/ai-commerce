@@ -1,0 +1,31 @@
+{
+  "action_id": "A11-03",
+  "attempt_id": "a11-03-codex61solmax-20261030-v1-04",
+  "candidate_is_integration_ancestor": false,
+  "candidate_parent_sha": "43e5084a093d3c17dd5fca007bdbfe1f6a0f3598",
+  "candidate_ref": "refs/heads/ef02/candidate/5523f794b929819130f1cbf2aa7d3d00",
+  "candidate_sha": "a3b0b281db430e9370388e66ac63549facc7f83c",
+  "candidate_tree_sha": "4782adb3cd4f6a6022261ce9931ce034ff9c0acf",
+  "changed_files": [
+    "src/ai_commerce/learning/registry.py",
+    "tests/test_a11_registry.py"
+  ],
+  "effective_integration_sha": "71b24c25ad80d3900c333d6ed1312be629161c23",
+  "effective_source_sha": "43e5084a093d3c17dd5fca007bdbfe1f6a0f3598",
+  "effort": "max",
+  "evidence_basis": [
+    "Actual runner action_result.json and verify.stdout.log",
+    "GitHub git/commits/a3b0b281db430e9370388e66ac63549facc7f83c",
+    "Clean local HEAD, parent and tree before changes"
+  ],
+  "exact_dependency_tree_equal": true,
+  "executor": "codex",
+  "integration_parent_sha": "43e5084a093d3c17dd5fca007bdbfe1f6a0f3598",
+  "integration_tree_sha": "4782adb3cd4f6a6022261ce9931ce034ff9c0acf",
+  "model": "gpt-6.1-sol",
+  "original_test_log_sha256": "acb046c928c8a496bbc58e6e1f5fa4c059cd3b70e7d1e7235bab27e7fd0acb45",
+  "source_sha": "43e5084a093d3c17dd5fca007bdbfe1f6a0f3598",
+  "status": "CANDIDATE_READY",
+  "tests_summary": "1664 passed, 4 skipped in 134.04s (0:02:14)",
+  "verify_exit_code": 0
+}
