@@ -73,11 +73,13 @@ with calls.open('a', encoding='utf-8') as f:
                         'cwd':str(Path.cwd()),'prompt':prompt}) + '\\n')
 mode = sys.argv[2]
 if mode != 'no-change':
-    Path('impl.py').write_text('good' if index and mode == 'pass-after-repair' else 'bad-' + str(index))
+    Path('impl.py').write_text('good' if ((index and mode in ('pass-after-repair', 'scope-fix')) or mode == 'scope-pass') else 'bad-' + str(index))
     if index == 0:
         Path('kept.txt').write_text('initial cumulative change')
-if mode == 'scope':
+if mode in ('scope', 'scope-pass') or (mode == 'scope-fix' and index == 0):
     Path('forbidden.txt').write_text('out of scope')
+elif mode == 'scope-fix' and Path('forbidden.txt').exists():
+    Path('forbidden.txt').unlink()
 if mode == 'nonzero':
     print('provider error',file=sys.stderr)
     sys.exit(7)
@@ -181,7 +183,7 @@ def test_exhaustion_and_disable_preserve_all_failures(fixture, rounds, expected_
     ("nonzero", "EXECUTOR_FAILED"), ("permission", "EXECUTOR_PERMISSION_DENIED"),
     ("capacity", "MODEL_AT_CAPACITY"), ("quota", "QUOTA_EXHAUSTED"),
     ("unavailable", "EXECUTOR_UNAVAILABLE"), ("unknown", "EXECUTION_UNKNOWN"),
-    ("scope", "SCOPE_VIOLATION"), ("no-change", "NO_CODE_CHANGE"),
+    ("no-change", "NO_CODE_CHANGE"),
 ])
 def test_provider_prohibitions_never_verify_or_reinvoke(fixture, mode, status):
     result, calls, _ = _run(fixture, mode=mode, executor="antigravity")
@@ -227,7 +229,7 @@ def test_verify_prohibitions_never_invoke_second_provider(fixture, kind, status)
 
 @pytest.mark.parametrize("kind,status", [
     ("head", "GIT_UNEXPECTED_COMMIT"), ("identity", "SOURCE_DRIFT"),
-    ("scope", "SCOPE_VIOLATION"), ("scoped-source", "SOURCE_DRIFT"), ("undo", "NO_CODE_CHANGE"),
+    ("scope", "SOURCE_DRIFT"), ("scoped-source", "SOURCE_DRIFT"), ("undo", "NO_CODE_CHANGE"),
 ])
 def test_verifier_mutation_or_source_drift_never_repairs_or_passes(fixture, kind, status):
     actual_run = subprocess.run
@@ -252,6 +254,71 @@ def test_verifier_mutation_or_source_drift_never_repairs_or_passes(fixture, kind
         run=verify, TimeoutExpired=subprocess.TimeoutExpired))
     result, calls, _ = _run(fixture)
     assert result["status"] == status and len(calls) == 1
+
+
+
+def test_scope_drift_verify_pass_is_evidence_not_candidate_permission(fixture):
+    result, calls, _ = _run(fixture, mode="scope-pass", max_repair_rounds=1)
+    assert len(calls) == 1
+    assert result["verify_first_scope"] is True
+    assert result["status"] == "VERIFIED_SCOPE_REVIEW_REQUIRED"
+    assert result["error_code"] == "OUT_OF_SCOPE_FILES_REQUIRE_RECONCILIATION"
+    assert result["verify_exit_code"] == 0
+    assert result["scope_valid"] is False
+    assert result["scope_review_required"] is True
+    assert result["out_of_scope_files"] == ["forbidden.txt"]
+    assert result["repair_rounds_used"] == 0
+    assert result["invocations"][0]["repair_eligible"] is False
+
+
+def test_scope_drift_failed_verify_still_runs_bounded_ef01_repair(fixture):
+    result, calls, _ = _run(fixture, mode="scope-fix", max_repair_rounds=2)
+    assert len(calls) == 2  # One original call and one real pytest repair.
+    assert [x["verify_exit_code"] for x in result["invocations"]] == [1, 0]
+    assert result["status"] == "BUILD_VERIFIED_FOR_SCOPE"
+    assert result["scope_valid"] is True
+    assert result["out_of_scope_files"] == []
+    assert result["repair_rounds_used"] == 1
+    assert not (fixture.repo / "forbidden.txt").exists()
+
+
+def test_scope_drift_without_causal_repair_never_becomes_pass(fixture):
+    result, calls, _ = _run(fixture, mode="scope", max_repair_rounds=1)
+    assert len(calls) == 2
+    assert result["status"] == "VERIFICATION_FAILED"
+    assert result["scope_valid"] is False
+    assert result["verify_exit_code"] == 1
+
+
+def test_protected_changed_path_is_blocked_before_pytest(fixture):
+    selection, calls, _ = _provider(fixture, mode="scope-pass")
+    # Simulate a reserved config/credential edit in the post-provider snapshot.
+    original_snapshot = runner._snapshot
+
+    def reserved_snapshot(repo, prefixes, deadline):
+        value, diff = original_snapshot(repo, prefixes, deadline)
+        if value["changed_files"]:
+            value = dict(value, changed_files=[*value["changed_files"], ".github/workflows/ef02-batch.yml"])
+            value["scope_valid"] = False
+        return value, diff
+
+    fixture.monkeypatch.setattr(runner, "_snapshot", reserved_snapshot)
+    result = runner.execute_attempt(
+        repo=fixture.repo, output_dir=fixture.root / "evidence",
+        work_id="approved-work", attempt_id="immutable-attempt",
+        selection=selection, instruction="Modify source",
+        verify_argv=VERIFY, allowed_prefixes=fixture.state["scope"])
+    assert len(calls.read_text().splitlines()) == 1
+    assert result["status"] == "SCOPE_VIOLATION"
+    assert result["error_code"] == "PROTECTED_CHANGED_PATH"
+    assert result["verify_exit_code"] is None
+
+
+def test_explicit_strict_scope_preserves_old_stop_behavior(fixture):
+    result, calls, _ = _run(fixture, mode="scope-pass", verify_first_scope=False)
+    assert len(calls) == 1
+    assert result["status"] == "SCOPE_VIOLATION"
+    assert result["verify_exit_code"] is None
 
 
 def test_non_pytest_nonzero_is_not_repairable(fixture):
