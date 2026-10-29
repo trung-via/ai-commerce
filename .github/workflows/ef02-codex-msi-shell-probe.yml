@@ -1,0 +1,97 @@
+name: EF02 Codex MSI Shell Probe (No Model)
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/ef02-codex-msi-shell-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe-session0-mxc:
+    runs-on: [self-hosted, Windows, X64, ai-commerce-ef02]
+    timeout-minutes: 6
+    steps:
+      - name: Probe MSI shell and Codex MXC without model or host mutations
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $outDir = Join-Path $env:RUNNER_TEMP 'ef02-codex-msi-shell-probe'
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+          $report = Join-Path $outDir 'report.json'
+          $script:results = [ordered]@{}
+          $msi = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
+          Write-Host "PROBE_BEGIN_NO_MODEL"
+          Write-Host "SERVICE_ACCOUNT=$(whoami)"
+          Write-Host "SESSION_ID=$((Get-Process -Id $PID).SessionId)"
+          Write-Host "GITHUB_JOB_SHELL=$((Get-Process -Id $PID).Path)"
+          Write-Host "MSI_EXISTS=$(Test-Path $msi)"
+          Write-Host "PWSH_RESOLVED=$((Get-Command pwsh -ErrorAction SilentlyContinue).Source)"
+          function Invoke-Probe {
+            param([string]$Name, [string]$Executable, [string[]]$Arguments, [string]$Expected)
+            Write-Host "PROBE_START=$Name"
+            $code = $null
+            $output = ''
+            try {
+              $global:LASTEXITCODE = 999999
+              $lines = @(& $Executable @Arguments 2>&1 | ForEach-Object { $_.ToString() })
+              $output = ($lines -join "`n")
+              $code = $LASTEXITCODE
+            } catch {
+              $output = "SPAWN_EXCEPTION: $($_.Exception.GetType().Name): $($_.Exception.Message)"
+            }
+            $markerFound = $output.Contains($Expected)
+            $ok = ($code -eq 0) -and $markerFound
+            $script:results[$Name] = [ordered]@{
+              exit_code = $code
+              expected_marker_observed = $markerFound
+              pass = $ok
+              output_excerpt = $output.Substring(0, [Math]::Min(2000, $output.Length))
+            }
+            Write-Host "PROBE_RESULT=$Name EXIT=$code MARKER=$markerFound PASS=$ok"
+            Write-Host "PROBE_OUTPUT_BEGIN=$Name"
+            Write-Host $script:results[$Name].output_excerpt
+            Write-Host "PROBE_OUTPUT_END=$Name"
+          }
+          try {
+            Invoke-Probe -Name direct_msi -Executable $msi -Arguments @('-NoProfile', '-NonInteractive', '-Command', 'Write-Output DIRECT_MSI_OK') -Expected 'DIRECT_MSI_OK'
+            $mxc = @('-c','windows.sandbox=mxc','sandbox','--include-managed-config','--permission-profile',':workspace','--')
+            Invoke-Probe -Name mxc_cmd -Executable 'codex' -Arguments ($mxc + @("$env:SystemRoot\System32\cmd.exe",'/d','/c','echo MXC_CMD_OK')) -Expected 'MXC_CMD_OK'
+            Invoke-Probe -Name mxc_msi -Executable 'codex' -Arguments ($mxc + @($msi,'-NoProfile','-NonInteractive','-Command','Write-Output MXC_MSI_OK')) -Expected 'MXC_MSI_OK'
+            Invoke-Probe -Name mxc_pwsh_alias -Executable 'codex' -Arguments ($mxc + @('pwsh','-NoProfile','-NonInteractive','-Command','Write-Output MXC_ALIAS_OK')) -Expected 'MXC_ALIAS_OK'
+            $eventCodes = @(Get-WinEvent -FilterHashtable @{LogName='System'; Id=26; StartTime=(Get-Date).AddMinutes(-15)} -ErrorAction SilentlyContinue | Where-Object { $_.Message -like '*codex-command-runner*' } | Select-Object -First 12 | ForEach-Object {
+              @([regex]::Matches($_.Message, '0x[0-9a-fA-F]{8}') | ForEach-Object { $_.Value })
+            })
+            Write-Host ("RECENT_CODEX_POPUP_CODES=" + ($eventCodes -join ','))
+            [ordered]@{
+              kind = 'EF02_CODEX_MSI_SESSION0_NO_MODEL_PROBE'
+              timestamp_utc = (Get-Date).ToUniversalTime().ToString('o')
+              account = (whoami)
+              session_id = (Get-Process -Id $PID).SessionId
+              msi_exists = (Test-Path $msi)
+              pwsh_resolved = (Get-Command pwsh -ErrorAction SilentlyContinue).Source
+              recent_popup_codes = $eventCodes
+              checks = $script:results
+              note = 'Codex sandbox subprocess probe ONLY. This does NOT establish that Codex exec nested tool calls succeed.'
+            } | ConvertTo-Json -Depth 8 | Set-Content -Path $report -Encoding utf8
+            Write-Host "PROBE_DONE_NO_MODEL"
+            if (-not $script:results['mxc_msi'].pass) {
+              throw 'MXC_MSI_NESTED_PROCESS_FAIL'
+            }
+          } finally {
+            if (-not (Test-Path $report)) {
+              [ordered]@{kind='EF02_CODEX_MSI_SESSION0_NO_MODEL_PROBE'; checks=$script:results; status='INCOMPLETE'} |
+                ConvertTo-Json -Depth 8 | Set-Content -Path $report -Encoding utf8
+            }
+          }
+      - name: Upload preflight JSON even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ef02-msi-mxc-shell-probe-${{ github.run_id }}
+          path: ${{ runner.temp }}/ef02-codex-msi-shell-probe/report.json
+          retention-days: 7
+          if-no-files-found: warn
