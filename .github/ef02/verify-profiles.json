@@ -4,20 +4,33 @@
     "-m",
     "pytest",
     "tests",
-    "-q"
+    "-q",
+    "-n",
+    "12"
   ],
   "ef02-tests": [
     "python",
     "-m",
     "pytest",
     "tests/test_ef02.py",
-    "-q"
+    "-q",
+    "-n",
+    "12"
   ],
   "foundation-tests": [
     "python",
     "-m",
     "pytest",
     "tests/test_foundation.py",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "project-tests-serial": [
+    "python",
+    "-m",
+    "pytest",
+    "tests",
     "-q"
   ]
 }
