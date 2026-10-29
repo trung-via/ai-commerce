@@ -284,6 +284,10 @@ class LocalBatchWorker:
             outcome["ef01_started_at"] = report.get("started_at")
             outcome["ef01_finished_at"] = report.get("finished_at")
             outcome["changed_files"] = report.get("changed_files", [])
+            # Surface EF01 verify-first scope evidence for Brain/EF02 consumers.
+            # This does NOT widen the submitted action scope or authorize publication.
+            outcome["out_of_scope_files"] = report.get("out_of_scope_files", [])
+            outcome["scope_review_required"] = report.get("scope_review_required", False)
             outcome["verify_exit_code"] = report.get("verify_exit_code")
             outcome["ef01_invocations"] = report.get("invocations", [])
             outcome["invocation_count"] = report.get("invocation_count")
