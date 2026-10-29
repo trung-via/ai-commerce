@@ -1255,13 +1255,16 @@ def test_opened_hardlink_is_rejected_even_after_initial_path_check(tmp_path, mon
     from ai_commerce.remote import _private_state
     _, path, root = setup_env(tmp_path)
     store = DurableIdempotencyStore(path, root)
-    original = _private_state.os.fstat
+    original_regular = _private_state._regular
 
-    def opened_hardlink(fd):
-        info = original(fd)
-        return SimpleNamespace(st_mode=info.st_mode, st_nlink=2, st_file_attributes=0)
+    def opened_hardlink(info):
+        # Keep real os.fstat() intact: patching the shared os module also
+        # affects Python's own descriptor handling on GitHub Python 3.11.
+        return original_regular(SimpleNamespace(
+            st_mode=info.st_mode, st_nlink=2, st_file_attributes=0,
+        ))
 
-    monkeypatch.setattr(_private_state.os, "fstat", opened_hardlink)
+    monkeypatch.setattr(_private_state, "_regular", opened_hardlink)
     event, _ = make_event()
     with pytest.raises(OriginError, match="PATH_UNSAFE"):
         store.record_intent(event["event_id"], "routeA", 1)
