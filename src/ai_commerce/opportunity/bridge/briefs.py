@@ -36,7 +36,7 @@ def _bounded(value) -> None:
         raise CreativeBridgeError("BRIDGE_INVALID_JSON_VALUE") from None
 
 
-def _text(value: str, *, empty: bool = False) -> None:
+def _text(value: str, *, empty: bool = False, creative: bool = False) -> None:
     _check(isinstance(value, str), "BRIDGE_TEXT_REQUIRED")
     _check(empty or bool(value.strip()), "BRIDGE_TEXT_EMPTY")
     try:
@@ -45,11 +45,15 @@ def _text(value: str, *, empty: bool = False) -> None:
         raise CreativeBridgeError("BRIDGE_INVALID_UNICODE") from None
     scanned = unicodedata.normalize("NFKC", value)
     scanned = "".join(c for c in scanned if unicodedata.category(c) != "Cf")
+    # URLs, numeric product URLs and @handles are legitimate Human-authored
+    # content/CTAs. They are still unverified and are never fetched by A10.
+    # Direct contact identifiers remain blocked; evidence has stricter rules.
+    pii_scan = re.sub(r"https?://[^\s]+", "", scanned) if creative else scanned
     contact = (
-        re.search(r"[^\s@]+@[^\s@]+\.[^\s@]+", scanned)
-        or re.search(r"(?<!\w)@[\w.]{2,}", scanned)
-        or re.search(r"(?<!\w)(?:\+?\d[\s().-]*){7,}(?!\w)", scanned)
-        or re.search(r"(?i)\b(?:mailto|tel):|https?://", scanned)
+        re.search(r"[^\s@]+@[^\s@]+\.[^\s@]+", pii_scan)
+        or re.search(r"(?<!\w)(?:\+?\d[\s().-]*){7,}(?!\w)", pii_scan)
+        or re.search(r"(?i)\b(?:mailto|tel):", pii_scan)
+        or (not creative and re.search(r"(?<!\w)@[\w.]{2,}|https?://", scanned))
     )
     _check(not contact, "BRIDGE_CONTACT_OR_IDENTIFIER_NOT_ALLOWED")
     _check(not any(ord(c) < 32 and c not in "\n\r\t" for c in value), "BRIDGE_CONTROL_CHARACTER")
@@ -62,7 +66,7 @@ def _edits(value: Mapping | None) -> dict:
     _check(Draft202012Validator(EDITS).is_valid(result), "BRIDGE_INVALID_EDITS")
     for key, item in result.items():
         if item is not None:
-            _text(item, empty=key != "objective" and key != "product_ref")
+            _text(item, empty=key != "objective" and key != "product_ref", creative=True)
     return result
 
 
@@ -86,7 +90,7 @@ def validate_bridge(receipt: dict) -> dict:
         refs = [proposal["proposal_id"], *proposal["source_refs"]]
     else:
         source = receipt["human_input"]
-        _text(source["text"])
+        _text(source["text"], creative=True)
         _check(source["text_sha256"] == sha256_bytes(source["text"].encode("utf-8")), "BRIDGE_TEXT_HASH_MISMATCH")
         _check((source["raw_sha256"] is None) == (source["raw_size_bytes"] is None), "BRIDGE_RAW_RECEIPT_MISMATCH")
         refs = ["sha256:" + source["text_sha256"]]
@@ -161,7 +165,7 @@ def freeform_brief(text: str, *, edits: Mapping | None = None, brief_id: str | N
     Optional original UTF-8 bytes bind a file's BOM/newlines separately from the
     text digest. The source file is never rewritten or claimed provider verified.
     """
-    _text(text)
+    _text(text, creative=True)
     if raw_bytes is not None:
         _check(isinstance(raw_bytes, bytes) and 0 < len(raw_bytes) <= MAX_TEXT_BYTES, "BRIDGE_RAW_BYTES_INVALID")
         try:
