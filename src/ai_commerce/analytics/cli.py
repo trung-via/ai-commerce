@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .importer import DELIMITERS, load_mapping, load_plan, validate_file
 from .ledger import AnalyticsLedger
+from .matching import match_import
 from .model import AnalyticsError, LedgerError, require
 from .profiles import PROFILE_IDS
 from .schemas import SOURCE
@@ -44,6 +45,13 @@ def add_parser(commands) -> None:
     history.add_argument("--plan", type=Path, required=True)
     history.add_argument("--limit", type=int, default=20, help="1..100 records")
     history.add_argument("--offset", type=int, default=0)
+    match_help = "Reopen A08 receipts read-only; exact post/account/platform/surface only"
+    match = operations.add_parser("match", help=match_help, description=match_help)
+    match.add_argument("--db", type=Path, required=True, help="Existing A09 analytics ledger")
+    match.add_argument("--import-id", required=True)
+    match.add_argument("--publication-db", type=Path, required=True, help="Existing A08 receipt journal; never written")
+    match.add_argument("--publication-id", action="append", required=True,
+                       help="Explicit candidate ID; repeat for all possible candidates (maximum 100)")
 
 
 def run(args: Namespace) -> int:
@@ -51,6 +59,9 @@ def run(args: Namespace) -> int:
         operation = args.analytics_operation
         if operation == "inspect":
             result = AnalyticsLedger(args.db).inspect(args.import_id)
+        elif operation == "match":
+            result = match_import(AnalyticsLedger(args.db), args.import_id,
+                                  publication_db=args.publication_db, publication_ids=args.publication_id)
         elif operation == "history":
             result = AnalyticsLedger(args.db).history(plan=load_plan(args.plan), limit=args.limit, offset=args.offset)
         else:

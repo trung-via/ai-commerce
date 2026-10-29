@@ -1,11 +1,43 @@
-# A09 L01/L02 offline analytics
+# A09 offline analytics and E02 receipt matching
 
 The CLI validates user-authored inputs, preserves original evidence bytes and
 stores observations in an append-only SQLite ledger. It performs no provider
 requests. Every record remains `USER_SUPPLIED_NOT_LIVE_VERIFIED`, including an
 input declared `USER_PROVIDED_PLATFORM_EXPORT`. Native provider export layouts,
 real account access, metric meanings and published/public state are unverified.
-Publication receipt matching belongs to the subsequent A09-E02 action.
+E02 adds an unpersisted match view over the original A09 and A08 evidence.
+
+## E02 matching
+
+`python -m ai_commerce analytics match --db analytics.sqlite --import-id <a09-id>
+--publication-db publications.sqlite --publication-id <pub-id>` replays the A09
+raw source and opens the existing A08 journal read-only through
+`PublicationJournal.get()`. Repeat `--publication-id` for every possible candidate
+(maximum 100). IDs are deduplicated and sorted. This explicit set defines the
+search scope; the matcher does not discover other publications.
+
+Only a unique exact `provider_post_id` with the same platform, surface, and
+`account_identity` (`namespace` plus `id`) can bind automatically. Missing receipts,
+ambiguous exact IDs, contradictory identifiers, URL-only candidates and unresolved
+requested IDs stay `PARTIAL`/`UNMATCHED`, with no bound publication. URLs compare
+exactly and never override a post ID. Caption/time similarity is not used.
+
+Each result includes unchanged observations, A08 receipt snapshots and hashes,
+bounded reason codes, and a deterministic `result_sha256`. `MATCHED` describes
+identity only: metric `NOT_AVAILABLE` remains null, and A08 state, visibility and
+`USER_SUPPLIED_NOT_LIVE_VERIFIED` remain as recorded. No analytics input promotes
+publication/visibility or writes to either ledger. Integrity errors return no
+successful match result. CLI exit 0 means the view was computed; inspect `status`
+and per-observation `match_status`. Invalid input exits 40; integrity/storage
+errors exit 50. Existing `inspect`/`history` commands provide analytics status.
+Journals must be quiescent and use SQLite rollback mode, as A08 creates by
+default. WAL headers and existing journal/WAL/SHM sidecars are rejected before
+SQLite opens the file: even a read-only WAL connection can create sidecars.
+E02 never checkpoints, converts or recovers the A08 journal.
+
+See [A09 implementation report](../../../docs/engineering/A09_IMPLEMENTATION_REPORT.md)
+for repair verification and limitations. `scripts/a09_demo.py --output <new-dir>`
+uses actual A06 rendering and A08 journal events with explicitly synthetic inputs.
 
 ## Contracts and context
 
@@ -170,10 +202,10 @@ are rejected, and inspect/history open an existing ledger read-only.
 SQLite triggers/hashes detect ordinary local modification; they are not an
 external trust anchor against an administrator rewriting the database. Concurrent
 hostile replacement of an entire directory is outside this local offline threat
-model. This action adds no A08 receipt writes, E02 match result, dashboard,
+model. This implementation adds no A08 receipt writes, dashboard,
 cross-platform aggregation, attribution or live analytics assertion.
 
-## Verification observed on 2026-10-29
+## Historical L01/L02 verification observed on 2026-10-29
 
 Canonical source: `d3239e671c205a2940d411ef7488b2b48c0854c2`.
 Local environment: Windows 11, Python 3.14.7.
