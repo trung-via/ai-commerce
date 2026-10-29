@@ -8,7 +8,7 @@
   "repo": "trung-via/ai-commerce",
   "governance": "v0.3",
   "baseline_sha": "13266240558aaf1ec3c80e0dfc3fe89911908002",
-  "plan_note": "Preserves six selected stages and A01–A18 planning IDs; expanded package names/scope are canonical planning articulation, not tasks executed. Supersession 2026-10-28: EF02 multi-action concurrent implementation approved; historical status notes below remain dated snapshots. Human approved three EF01/EF02 non-gating enhancement WorkItems on 2026-10-28; WBS baseline, phase milestones and A01-A18 dependencies unchanged. Human 2026-10-29 approved A03/A04 v1.1 upgrade and A05 C03+C06 implementation (docs/governance/HUMAN_DECISION_2026-10-29_CREATIVE_V1_1_A05.md); A06 E01/M1 not proven. Human 2026-10-29 adopted MT-01 Minimum Test as scope of existing EF01-P, with EF02 integration; no new WBS or M0-R gate. Planning only, not implemented.",
+  "plan_note": "Preserves six selected stages and A01–A18 planning IDs; expanded package names/scope are canonical planning articulation, not tasks executed. Supersession 2026-10-28: EF02 multi-action concurrent implementation approved; historical status notes below remain dated snapshots. Human approved three EF01/EF02 non-gating enhancement WorkItems on 2026-10-28; WBS baseline, phase milestones and A01-A18 dependencies unchanged. Human 2026-10-29 approved A03/A04 v1.1 upgrade and A05 C03+C06 implementation (docs/governance/HUMAN_DECISION_2026-10-29_CREATIVE_V1_1_A05.md); A06 E01/M1 not proven. Human 2026-10-29 adopted MT-01 Minimum Test as scope of existing EF01-P, with EF02 integration; no new WBS or M0-R gate. Planning only, not implemented. Supersession 2026-10-29: A09 offline scope PR #86 and A10 M01-M05 offline scope PR #93 merged/verified on main; earlier PLANNED status and historical NOT_DISPATCHED narrative do not describe those implementations. No real audience metrics, public posting or commerce outcome is asserted.",
   "work_tree_ref": "docs/roadmap/WORK_TREE_V1_1.json",
   "engineering_flow": {
     "ef01": "Selective clone with manual Codex/Antigravity model/effort selection, optional recommendation, targeted verify, repair and honest token observations",
@@ -294,7 +294,11 @@
           ],
           "deliverable": "Audience loop with export/import path",
           "acceptance": "Account-specific metrics imported when real; offline PARTIAL is honest",
-          "status": "PLANNED"
+          "status": "BUILD_VERIFIED_FOR_SCOPE",
+          "implementation_work_item_ref": "work_items/A09-AUDIENCE-OBSERVATION-001.json",
+          "verification_ref": "https://github.com/trung-via/ai-commerce/actions/runs/40859018408",
+          "published_main_sha": "92973edc52825a1cd69990decfe8ee2b680471eb",
+          "acceptance_scope": "Manual provider-neutral offline CSV/JSON analytics, provenance and A08 matching; no live account/metrics or externally verified publication."
         },
         {
           "id": "A10",
@@ -311,7 +315,11 @@
           ],
           "deliverable": "Trend, audience and opportunity hypotheses into Creative",
           "acceptance": "Snapshot distinguished from trend; content-only ideas possible",
-          "status": "PLANNED"
+          "status": "BUILD_VERIFIED_FOR_SCOPE",
+          "implementation_work_item_ref": "work_items/A10-OPPORTUNITY-AUDIENCE-001.json",
+          "verification_ref": "https://github.com/trung-via/ai-commerce/actions/runs/40902555891",
+          "published_main_sha": "2b4fb682a3015df483b1115ca66f897dfd8c3c01",
+          "acceptance_scope": "M01-M05 signal→trend→audience→opportunity→A03 creative in offline source-backed scope; no real provider rights, public post, validated demand or earnings."
         }
       ]
     },
@@ -502,6 +510,55 @@
     "A07_implementation_ref": "work_items/A07-CHANNEL-CAPABILITY-001.json",
     "A08": "VERIFIED_FOR_OFFLINE_ASSISTED_CI_40831199268_MAIN_8d02bd15",
     "M2": "OFFLINE_ASSISTED_SCOPE_ACCEPTED_2026_10_29_NO_LIVE_PUBLICATION",
-    "A08_implementation_ref": "work_items/A08-ASSISTED-DISTRIBUTION-001.json"
+    "A08_implementation_ref": "work_items/A08-ASSISTED-DISTRIBUTION-001.json",
+    "A09": "OFFLINE_V1_CI_PASS_MAIN_92973edc5_PR86",
+    "A09_implementation_ref": "work_items/A09-AUDIENCE-OBSERVATION-001.json",
+    "A10": "OFFLINE_M01_M05_CI_8_OF_8_PASS_MAIN_2b4fb682_PR93",
+    "A10_implementation_ref": "work_items/A10-OPPORTUNITY-AUDIENCE-001.json",
+    "M3": "OFFLINE_A09_A10_AUDIENCE_AND_OPPORTUNITY_PROTOTYPES_BUILD_VERIFIED_NO_LIVE_METRICS"
+  },
+  "current_evidence_snapshot": {
+    "observed_on": "2026-10-29",
+    "canonical_code_head_at_review": "2b4fb682a3015df483b1115ca66f897dfd8c3c01",
+    "source": "PR #86 A09 and PR #93 A10; CI on exact PR head; WorkItem documents may be subsequently updated without application changes.",
+    "no_live_provider_access_or_revenue_proof": true
+  },
+  "next_options_advisory": {
+    "as_of": "2026-10-29",
+    "not_dispatched": true,
+    "not_human_selected": true,
+    "primary": {
+      "id": "A11",
+      "title": "Audience Learning Registry",
+      "work_ids": [
+        "L03",
+        "L06"
+      ],
+      "depends_on": [
+        "A09"
+      ],
+      "reason": "A09 offline ledger is verified; A11 closes observation→hypothesis→learning loop without requiring live analytics."
+    },
+    "parallel": {
+      "id": "A12",
+      "title": "Product Evidence Foundation",
+      "work_ids": [
+        "P01",
+        "P03",
+        "P04",
+        "P05",
+        "P06"
+      ],
+      "depends_on": [
+        "A02"
+      ],
+      "reason": "Build affiliate claim/variant/asset-rights evidence, preparing A13/A14 without delaying creative."
+    },
+    "independent_engineering": {
+      "id": "EF02-D",
+      "work_item_ref": "work_items/EF02-EXACT-CHAT-WAKE-002.json",
+      "status": "CAPABILITY_UNKNOWN",
+      "non_blocking": true
+    }
   }
 }
