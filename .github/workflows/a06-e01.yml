@@ -1,0 +1,52 @@
+name: A06 E01 offline product acceptance
+on:
+  pull_request:
+    paths:
+      - "src/ai_commerce/e2e/**"
+      - "src/ai_commerce/cli.py"
+      - "tests/test_a06_e01.py"
+      - "scripts/a06_demo.py"
+      - ".github/workflows/a06-e01.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  e01:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install FFmpeg on Ubuntu
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg
+      - name: Install FFmpeg on Windows
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          choco install ffmpeg --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "FFMPEG_INSTALL_FAILED" }
+      - name: Verify FFmpeg and H264
+        run: python -c "import shutil,subprocess; assert shutil.which('ffmpeg') and shutil.which('ffprobe'); assert b'libx264' in subprocess.check_output(['ffmpeg','-hide_banner','-encoders']); subprocess.check_call(['ffprobe','-version'],stdout=subprocess.DEVNULL)"
+      - run: python -m pip install -e ".[dev]" Pillow
+      - name: E01 and regression tests
+        run: python -m pytest tests -q
+      - name: Create real E01 demo MP4
+        run: python scripts/a06_demo.py --output .local/e01-demo
+      - name: Reopen and verify E01 demo MP4
+        run: python -m ai_commerce creative-e2e verify --run .local/e01-demo --full-decode
+      - name: Upload verified demo package
+        uses: actions/upload-artifact@v4
+        with:
+          name: e01-demo-${{ matrix.os }}
+          path: .local/e01-demo/
+          if-no-files-found: error
+          retention-days: 14
