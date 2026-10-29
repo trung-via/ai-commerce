@@ -25,7 +25,7 @@ GIT_GUARD_INSTRUCTION = (
 # Git for Windows invokes shell hooks through its bundled Git Bash environment.
 # reference-transaction protects normal Git ref updates including --no-verify
 # commits; pre-commit gives an earlier, explicit diagnostic.
-_HOOK_NAMES = ("reference-transaction", "pre-commit", "pre-merge-commit", "pre-rebase")
+_HOOK_NAMES = ("reference-transaction", "pre-commit", "pre-merge-commit", "pre-rebase", "pre-push")
 _HOOK_BODY = (
     "#!/bin/sh\n"
     "printf 'AI_COMMERCE_GIT_WRITE_BLOCKED\\n' >&2\n"
