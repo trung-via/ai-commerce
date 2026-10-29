@@ -827,7 +827,15 @@
           ],
           "priority": "P1",
           "owner": "Distribution/Operations/Creative split",
-          "status": "PROPOSED"
+          "status": "BUILD_VERIFIED_FOR_SCOPE",
+          "implementation_record": "work_items/A11-AUDIENCE-LEARNING-001.json",
+          "evidence_refs": [
+            "https://github.com/trung-via/ai-commerce/issues/99",
+            "https://github.com/trung-via/ai-commerce/pull/103",
+            "https://github.com/trung-via/ai-commerce/actions/runs/40971422045",
+            "docs/engineering/A11_IMPLEMENTATION_REPORT.md"
+          ],
+          "acceptance_scope": "Verified offline evidence-based prototype; no actual provider metrics, causal inference or live affiliate outcomes"
         },
         {
           "id": "L04",
@@ -866,7 +874,15 @@
           ],
           "priority": "P1",
           "owner": "Distribution/Operations/Creative split",
-          "status": "PROPOSED"
+          "status": "BUILD_VERIFIED_FOR_SCOPE",
+          "implementation_record": "work_items/A11-AUDIENCE-LEARNING-001.json",
+          "evidence_refs": [
+            "https://github.com/trung-via/ai-commerce/issues/99",
+            "https://github.com/trung-via/ai-commerce/pull/103",
+            "https://github.com/trung-via/ai-commerce/actions/runs/40971422045",
+            "docs/engineering/A11_IMPLEMENTATION_REPORT.md"
+          ],
+          "acceptance_scope": "Verified offline evidence-based prototype; no actual provider metrics, causal inference or live affiliate outcomes"
         },
         {
           "id": "L07",
@@ -1058,7 +1074,7 @@
     ],
     "m0_r_disposition": "ACCEPTED_WITH_DEFERRED_RISKS_2026_10_28"
   },
-  "implementation_note": "A01/A02 and EF01 are build-verified for scope; EF02 M0-R accepted with explicit deferred risks (real Windows service outage and rare live negative paths UNKNOWN), after observed 5/5 DAG, process overlap and scoped real provider interruption. Three Human-approved optional EF01/EF02 improvements are planned, not implemented; A03/A04 remain unblocked.",
+  "implementation_note": "A01/A02 and EF01 are build-verified for scope; EF02 M0-R accepted with explicit deferred risks (real Windows service outage and rare live negative paths UNKNOWN), after observed 5/5 DAG, process overlap and scoped real provider interruption. Three Human-approved optional EF01/EF02 improvements are planned, not implemented; A03/A04 remain unblocked. 2026-10-30 evidence supersession: L03 and L06 implemented offline, verified by combined PR #103 Windows/Ubuntu CI (8/8 checks) and published on main@39a5f10ee366cb286afd675c49ae1a34767af049. A12 (P01/P03/P04/P05/P06) remains the next unimplemented Roadmap A package; Phase 3 M4 is partial until A12/A13/A14 are implemented. Historical PLANNED assertions elsewhere are date-bound.",
   "human_decision_multi_action_ref": "docs/governance/HUMAN_DECISION_2026-10-28_EF02_MULTI_ACTION.md",
   "enhancement_decision_ref": "docs/governance/HUMAN_DECISION_2026-10-28_EF_ENHANCEMENTS.md",
   "creative_2026_10_29_approved": {
@@ -1068,5 +1084,15 @@
     "a06_m1_status": "OFFLINE_E01_ACCEPTED_2026_10_29",
     "work_tree_ids_unchanged": true
   },
-  "minimum_test_human_decision_ref": "docs/governance/HUMAN_DECISION_2026-10-29_MINIMUM_TEST.md"
+  "minimum_test_human_decision_ref": "docs/governance/HUMAN_DECISION_2026-10-29_MINIMUM_TEST.md",
+  "roadmap_sync_2026_10_30": {
+    "verified_ids": [
+      "L03",
+      "L06"
+    ],
+    "work_item_ref": "work_items/A11-AUDIENCE-LEARNING-001.json",
+    "merged_main_sha": "39a5f10ee366cb286afd675c49ae1a34767af049",
+    "next_advisory": "A12",
+    "m4": "PARTIAL"
+  }
 }
