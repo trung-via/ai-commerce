@@ -36,7 +36,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python -m pip install -e ".[dev]"
+      - name: Install FFmpeg on Ubuntu hosted runner
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg
+      - name: Install FFmpeg on Windows hosted runner
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          choco install ffmpeg --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "FFMPEG_CHOCO_INSTALL_FAILED" }
+      - name: Verify ffmpeg, ffprobe and libx264 are executable
+        run: python -c "import shutil,subprocess; assert shutil.which('ffmpeg') and shutil.which('ffprobe'), 'FFMPEG_OR_FFPROBE_MISSING'; assert b'libx264' in subprocess.check_output(['ffmpeg','-hide_banner','-encoders']), 'LIBX264_MISSING'; subprocess.check_call(['ffprobe','-version'],stdout=subprocess.DEVNULL)"
+      - run: python -m pip install -e ".[dev]" Pillow
       - run: python -m pytest tests -q
       - uses: actions/setup-node@v4
         with:

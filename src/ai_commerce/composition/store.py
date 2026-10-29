@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from ai_commerce.core.provenance import canonical_bytes
@@ -28,6 +29,10 @@ class CompositionStore:
     def __init__(self, root: str | Path) -> None:
         self.registry = ArtifactRegistry(Path(root))
         self.root = self.registry.root
+        # Keep concurrent revisions on this store instance from inspecting the
+        # transient POSIX link+unlink publication window as an unsafe hardlink.
+        # Filesystem-level safety checks remain unchanged.
+        self._save_lock = RLock()
 
     @staticmethod
     def revision_ref(composition_id: str, revision: int) -> str:
@@ -63,12 +68,16 @@ class CompositionStore:
         if not isinstance(composition, CreativeComposition):
             raise CompositionValidationError("expected CreativeComposition")
         valid = CreativeComposition.from_dict(composition.to_dict())
-        self._check_lineage(valid)
-        payload = canonical_bytes({"composition": valid.to_dict(), "digest": valid.digest})
-        try:
-            self.registry.put_immutable(self.revision_ref(valid.composition_id, valid.revision), payload)
-        except ArtifactCollisionError as exc:
-            raise CompositionVersionConflict("VERSION_CONFLICT: composition revision cannot be overwritten") from exc
+        # A single writer at a time per instance prevents another writer from
+        # observing our transient 2-link POSIX commit window. Do not relax the
+        # registry's hardlink protection or collision rules.
+        with self._save_lock:
+            self._check_lineage(valid)
+            payload = canonical_bytes({"composition": valid.to_dict(), "digest": valid.digest})
+            try:
+                self.registry.put_immutable(self.revision_ref(valid.composition_id, valid.revision), payload)
+            except ArtifactCollisionError as exc:
+                raise CompositionVersionConflict("VERSION_CONFLICT: composition revision cannot be overwritten") from exc
         return valid
 
     def load(self, composition_id: str, revision: int) -> CreativeComposition:
