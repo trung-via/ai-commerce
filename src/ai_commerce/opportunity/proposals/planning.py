@@ -58,15 +58,20 @@ def _bounded_record(value: dict) -> None:
         raise ProposalError("INVALID_PROPOSAL_VALUE") from None
 
 
-def _text(value: str) -> None:
+def _text(value: str, *, creative: bool = False) -> None:
     _check(isinstance(value, str) and bool(value.strip()), "PROPOSAL_TEXT_EMPTY")
     scanned = unicodedata.normalize("NFKC", value)
     scanned = "".join(c for c in scanned if unicodedata.category(c) != "Cf")
+    # Human-authored creative can contain a public URL or @handle. A URL may
+    # include numeric product IDs; neither is provider evidence or permission.
+    # Keep direct contact details out of both creative and evidence, and apply
+    # the stricter URL/handle rule to user-supplied audience/source context.
+    pii_scan = re.sub(r"https?://[^\s]+", "", scanned) if creative else scanned
     contact = (
-        re.search(r"[^\s@]+@[^\s@]+\.[^\s@]+", scanned)
-        or re.search(r"(?<!\w)@[\w.]{2,}", scanned)
-        or re.search(r"(?<!\w)(?:\+?\d[\s().-]*){7,}(?!\w)", scanned)
-        or re.search(r"(?i)\b(?:mailto|tel):|https?://", scanned)
+        re.search(r"[^\s@]+@[^\s@]+\.[^\s@]+", pii_scan)
+        or re.search(r"(?<!\w)(?:\+?\d[\s().-]*){7,}(?!\w)", pii_scan)
+        or re.search(r"(?i)\b(?:mailto|tel):", pii_scan)
+        or (not creative and re.search(r"(?<!\w)@[\w.]{2,}|https?://", scanned))
     )
     _check(not contact, "PROPOSAL_CONTACT_OR_IDENTIFIER_NOT_ALLOWED")
     _check(not any(ord(c) < 32 and c not in "\n\r\t" for c in value), "PROPOSAL_CONTROL_CHARACTER")
@@ -138,7 +143,7 @@ def validate_proposal(record: dict) -> dict:
             _check(set(trend[field]) <= signals, "PROPOSAL_TREND_REFERENCE_MISMATCH")
     if record["manual_input"] is not None:
         manual = record["manual_input"]
-        _text(manual["text"])
+        _text(manual["text"], creative=True)
         _check(manual["text_sha256"] == sha256_bytes(manual["text"].encode("utf-8")), "PROPOSAL_MANUAL_HASH_MISMATCH")
         allowed.add("sha256:" + manual["text_sha256"])
     _check(record["source_refs"] == sorted(allowed), "PROPOSAL_SOURCE_REFERENCES_MISMATCH")
@@ -146,7 +151,7 @@ def validate_proposal(record: dict) -> dict:
         _check(set(reason["source_refs"]) <= allowed, "PROPOSAL_REASON_REFERENCE_MISMATCH")
     for field, value in record["creative"].items():
         if value is not None:
-            _text(value)
+            _text(value, creative=True)
         if field in record["creative_overrides"]:
             _check(value == record["creative_overrides"][field], "PROPOSAL_OVERRIDE_MISMATCH")
     if record["topic"] is not None:
@@ -360,10 +365,10 @@ def propose_opportunities(*, trend_series: Iterable[dict] = (), audience_insight
     _check(Draft202012Validator(OVERRIDES).is_valid(overrides), "INVALID_PROPOSAL_OVERRIDES")
     for value in overrides.values():
         if value is not None:
-            _text(value)
+            _text(value, creative=True)
     if manual_idea is not None:
         _check(isinstance(manual_idea, str) and len(manual_idea) <= 8192, "INVALID_MANUAL_CREATIVE_IDEA")
-        _text(manual_idea)
+        _text(manual_idea, creative=True)
         _bounded_record({"text": manual_idea})
     signals = _ReadSignals(signal_ledger)
     selected = _selection(trend_series, MAX_SERIES)
