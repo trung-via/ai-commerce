@@ -13,17 +13,17 @@ def _probe():
 def _fixture():
     mod = _probe()
     env = {"GITHUB_REPOSITORY":"trung-via/ai-commerce", "GITHUB_REPOSITORY_OWNER":"trung-via",
-           "GITHUB_EVENT_NAME":"issues", "RUNNER_OS":"Windows",
+           "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_ACTOR": "trung-via", "GITHUB_REF": "refs/heads/main", "RUNNER_OS":"Windows",
            "GITHUB_SHA":"a"*40, "GITHUB_RUN_ID":"12345"}
-    event = {"action":"opened", "issue":{"title":mod.TITLE,"user":{"login":"trung-via"}},
-             "repository":{"full_name":"trung-via/ai-commerce"}}
+    event = {"ref": "refs/heads/main", "sender": {"login": "trung-via"},
+             "repository": {"full_name": "trung-via/ai-commerce"}}
     return mod, env, event
 
 def test_owner_windows_immutable_sha_accepted():
     mod, env, event = _fixture()
     assert mod.validate_context(env, event) == ("trung-via/ai-commerce", "a"*40, "12345")
 
-@pytest.mark.parametrize("key,bad", [("GITHUB_EVENT_NAME","workflow_dispatch"),
+@pytest.mark.parametrize("key,bad", [("GITHUB_EVENT_NAME","issues"),
     ("RUNNER_OS","Linux"), ("GITHUB_SHA","BAD"), ("GITHUB_RUN_ID","x"),
     ("GITHUB_REPOSITORY_OWNER","other")])
 def test_unauthorized_context_rejected(key,bad):
@@ -34,10 +34,10 @@ def test_unauthorized_context_rejected(key,bad):
 
 def test_wrong_issue_or_actor_rejected():
     mod, env, event = _fixture()
-    event["issue"]["user"]["login"]="not-owner"
+    event["sender"]["login"]="not-owner"
     with pytest.raises(ValueError,match="M0R_WINDOWS_PROBE_GUARD_REJECTED"):
         mod.validate_context(env,event)
-    event["issue"]["user"]["login"]="trung-via"
-    event["issue"]["title"]="[EF02] other"
+    event["sender"]["login"]="trung-via"
+    event["ref"]="[EF02] other"
     with pytest.raises(ValueError,match="M0R_WINDOWS_PROBE_GUARD_REJECTED"):
         mod.validate_context(env,event)

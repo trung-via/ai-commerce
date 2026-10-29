@@ -1,7 +1,6 @@
 name: EF02 M0-R isolated Windows child interruption (no model)
 on:
-  issues:
-    types: [opened]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -9,10 +8,9 @@ permissions:
 jobs:
   isolated-child-probe:
     if: >-
-      github.event_name == 'issues' &&
-      github.event.action == 'opened' &&
-      github.event.issue.title == '[M0R] Windows isolated child interruption probe' &&
-      github.event.issue.user.login == github.repository_owner
+      github.event_name == 'workflow_dispatch' &&
+      github.actor == github.repository_owner &&
+      github.ref == 'refs/heads/main'
     runs-on: [self-hosted, Windows, ai-commerce-ef02]
     timeout-minutes: 5
     steps:

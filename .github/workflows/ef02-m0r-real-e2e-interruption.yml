@@ -1,16 +1,14 @@
 name: EF02 M0-R real EF01 Codex streamed event interruption
 on:
-  issues:
-    types: [opened]
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
   real-ef01-codex-interruption:
     if: >-
-      github.event_name == 'issues' &&
-      github.event.action == 'opened' &&
-      github.event.issue.title == '[M0R] EF02 EF01 Codex 6.1 Sol max streamed E2E interruption' &&
-      github.event.issue.user.login == github.repository_owner
+      github.event_name == 'workflow_dispatch' &&
+      github.actor == github.repository_owner &&
+      github.ref == 'refs/heads/main'
     runs-on: [self-hosted, Windows, ai-commerce-ef02]
     permissions:
       contents: write

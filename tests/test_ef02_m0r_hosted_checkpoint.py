@@ -24,9 +24,8 @@ def inputs():
     env = {"GITHUB_REPOSITORY": "trung-via/ai-commerce",
            "GITHUB_REPOSITORY_OWNER": "trung-via",
            "GITHUB_SHA": SOURCE, "GITHUB_RUN_ID": "123456",
-           "GITHUB_EVENT_NAME": "issues", "GITHUB_TOKEN": "fixture-no-network"}
-    event = {"action": "opened", "issue": {"title": TITLE,
-             "user": {"login": "trung-via"}},
+           "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_ACTOR": "trung-via", "GITHUB_REF": "refs/heads/main", "GITHUB_TOKEN": "fixture-no-network"}
+    event = {"ref": "refs/heads/main", "sender": {"login": "trung-via"},
              "repository": {"full_name": "trung-via/ai-commerce"}}
     return env, event
 
@@ -61,7 +60,7 @@ def test_hosted_probe_uses_real_transport_contract_without_running_ef01():
 
 
 @pytest.mark.parametrize("field,value", [
-    ("GITHUB_EVENT_NAME", "workflow_dispatch"),
+    ("GITHUB_EVENT_NAME", "issues"),
     ("GITHUB_SHA", "bad"),
     ("GITHUB_REPOSITORY_OWNER", "someone-else"),
     ("GITHUB_RUN_ID", "not-a-number"),
@@ -75,7 +74,7 @@ def test_invalid_event_environment_never_creates_ref(field, value):
 
 def test_issue_not_created_by_owner_never_creates_ref():
     env, event = inputs()
-    event["issue"]["user"]["login"] = "unknown"
+    event["sender"]["login"] = "unknown"
     with pytest.raises(ValueError, match="M0R_HOSTED_PROBE_GUARD_REJECTED"):
         module().run_probe(env, event, lambda *_a: pytest.fail("no Git transport"))
 
@@ -98,9 +97,10 @@ def test_hosted_probe_is_not_ef02_batch_or_windows_executor():
             "ef02-m0r-hosted-checkpoint.yml").read_text(encoding="utf-8")
     main = (ROOT / ".github" / "workflows" /
             "ef02-batch.yml").read_text(encoding="utf-8")
-    assert "github.event.issue.user.login == github.repository_owner" in text
-    assert "github.event.action == 'opened'" in text
-    assert "github.event.issue.title == '[M0R] Hosted remote pre-spawn checkpoint probe'" in text
+    assert "on:\n  workflow_dispatch:" in text
+    assert "  issues:" not in text
+    assert "github.actor == github.repository_owner" in text
+    assert "github.ref == 'refs/heads/main'" in text
     assert text.count("runs-on: ubuntu-latest") == 2
     assert "runs-on: [self-hosted" not in text
     assert "contents: write" in text and "contents: read" in text

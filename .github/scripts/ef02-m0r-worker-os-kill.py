@@ -28,11 +28,12 @@ def validate_context(env: dict, event: dict) -> tuple[str, str, str]:
     owner = env.get("GITHUB_REPOSITORY_OWNER", "")
     sha = env.get("GITHUB_SHA", "")
     run_id = env.get("GITHUB_RUN_ID", "")
-    if (env.get("GITHUB_EVENT_NAME") != "issues" or env.get("RUNNER_OS") != "Windows"
-            or event.get("action") != "opened"
-            or event.get("issue", {}).get("title") != TITLE
-            or event.get("issue", {}).get("user", {}).get("login") != owner
+    if (env.get("GITHUB_EVENT_NAME") != "workflow_dispatch" or env.get("RUNNER_OS") != "Windows"
             or event.get("repository", {}).get("full_name") != repo
+            or env.get("GITHUB_ACTOR") != owner
+            or event.get("sender", {}).get("login") != owner
+            or env.get("GITHUB_REF") != "refs/heads/main"
+            or event.get("ref") != "refs/heads/main"
             or not owner or not repo.startswith(owner + "/")
             or re.fullmatch(r"[0-9a-f]{40}", sha) is None
             or not run_id.isdecimal() or int(run_id) <= 0):

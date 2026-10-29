@@ -23,11 +23,12 @@ def run_probe(environ: dict, event: dict, transport_factory=GitHubTransport) -> 
     owner = environ.get("GITHUB_REPOSITORY_OWNER", "")
     source = environ.get("GITHUB_SHA", "")
     run_id = environ.get("GITHUB_RUN_ID", "")
-    if (environ.get("GITHUB_EVENT_NAME") != "issues"
-            or event.get("action") != "opened"
-            or event.get("issue", {}).get("title") != TITLE
-            or event.get("issue", {}).get("user", {}).get("login") != owner
+    if (environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
             or event.get("repository", {}).get("full_name") != repo
+            or environ.get("GITHUB_ACTOR") != owner
+            or event.get("sender", {}).get("login") != owner
+            or environ.get("GITHUB_REF") != "refs/heads/main"
+            or event.get("ref") != "refs/heads/main"
             or not owner or not repo.startswith(owner + "/")
             or not SHA.fullmatch(source) or not run_id.isdecimal()
             or int(run_id) < 1):

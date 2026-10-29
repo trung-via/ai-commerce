@@ -1,16 +1,14 @@
 name: EF02 M0-R Windows after-spawn boundary (no model)
 on:
-  issues:
-    types: [opened]
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
   windows-afterspawn:
     if: >-
-      github.event_name == 'issues' &&
-      github.event.action == 'opened' &&
-      github.event.issue.title == '[M0R] Windows EF02 after-spawn UNKNOWN probe' &&
-      github.event.issue.user.login == github.repository_owner
+      github.event_name == 'workflow_dispatch' &&
+      github.actor == github.repository_owner &&
+      github.ref == 'refs/heads/main'
     runs-on: [self-hosted, Windows, ai-commerce-ef02]
     permissions:
       contents: write
