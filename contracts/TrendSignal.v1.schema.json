@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-commerce.local/schema/TrendSignal.v1",
+  "title": "TrendSignal.v1",
+  "description": "A10 offline TrendSignal contract. User-supplied; never live-provider verification.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "TrendSignal.v1"
+    },
+    "signal_id": {
+      "type": "string",
+      "pattern": "^sig-[a-f0-9]{64}$"
+    },
+    "import_id": {
+      "type": "string",
+      "pattern": "^a10-[a-f0-9]{64}$"
+    },
+    "ordinal": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000
+    },
+    "topic": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "signal_type": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "source_type": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "locale": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "geo": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "query_context": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 64
+    },
+    "observation_window": {
+      "oneOf": [
+        {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "string",
+            "format": "date-time",
+            "maxLength": 64
+          },
+          "description": "Explicit instants: start inclusive, end exclusive; never a default period."
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "collected_at": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 64
+    },
+    "timezone": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "unit": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "denominator": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "status": {
+      "enum": [
+        "AVAILABLE",
+        "NOT_AVAILABLE"
+      ]
+    },
+    "value": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "source_status": {
+      "const": "USER_SUPPLIED_NOT_LIVE_VERIFIED"
+    },
+    "rights_status": {
+      "enum": [
+        "UNKNOWN",
+        "USER_DECLARED_PERMITTED",
+        "USER_DECLARED_RESTRICTED",
+        "NOT_APPLICABLE"
+      ]
+    },
+    "evidence_refs": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "signal_id",
+    "import_id",
+    "ordinal",
+    "topic",
+    "signal_type",
+    "source_type",
+    "locale",
+    "geo",
+    "query_context",
+    "observed_at",
+    "collected_at",
+    "timezone",
+    "unit",
+    "status",
+    "value",
+    "source_status",
+    "rights_status"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "NOT_AVAILABLE"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "value": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "value": {
+            "type": "number"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {}
+}
