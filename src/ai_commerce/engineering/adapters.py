@@ -34,7 +34,7 @@ def command_for(selection: ExecutorSelection, repo: Path, instruction: str,
         ], instruction
     # The EF02 evidence directory is outside the temporary worktree. In headless
     # AGY, reading such an unregistered directory can require an interactive
-    # read_file approval (impossible in --print mode). Add ONLY this attempt\x27s
+    # read_file approval (impossible in --print mode). Add ONLY this attempt's
     # evidence directory as a workspace root; never allow every file or command.
     evidence_args: list[str] = []
     if antigravity_evidence_dir is not None:
