@@ -20,14 +20,11 @@ def _context():
     env = {
         "GITHUB_REPOSITORY": "trung-via/ai-commerce",
         "GITHUB_REPOSITORY_OWNER": "trung-via",
-        "GITHUB_EVENT_NAME": "issues", "RUNNER_OS": "Windows",
+        "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_ACTOR": "trung-via", "GITHUB_REF": "refs/heads/main", "RUNNER_OS": "Windows",
         "GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "12345",
     }
-    event = {
-        "action": "opened",
-        "issue": {"title": mod.TITLE, "user": {"login": "trung-via"}},
-        "repository": {"full_name": "trung-via/ai-commerce"},
-    }
+    event = {"ref": "refs/heads/main", "sender": {"login": "trung-via"},
+             "repository": {"full_name": "trung-via/ai-commerce"}}
     return mod, env, event
 
 
@@ -47,7 +44,7 @@ def test_explicit_owner_windows_and_selected_model():
 
 
 @pytest.mark.parametrize("field,bad", [
-    ("GITHUB_EVENT_NAME", "workflow_dispatch"),
+    ("GITHUB_EVENT_NAME", "issues"),
     ("RUNNER_OS", "Linux"),
     ("GITHUB_SHA", "bad"),
     ("GITHUB_RUN_ID", "not-number"),
@@ -62,14 +59,14 @@ def test_wrong_context_rejected(field, bad):
 
 def test_non_owner_issue_is_rejected():
     mod, env, event = _context()
-    event["issue"]["user"]["login"] = "not-owner"
+    event["sender"]["login"] = "not-owner"
     with pytest.raises(ValueError, match="M0R_E2E_OWNER_WINDOWS_GUARD_REJECTED"):
         mod.validate_context(env, event)
 
 
 def test_wrong_issue_title_is_rejected():
     mod, env, event = _context()
-    event["issue"]["title"] = "[EF02] untrusted batch"
+    event["ref"] = "[EF02] untrusted batch"
     with pytest.raises(ValueError, match="M0R_E2E_OWNER_WINDOWS_GUARD_REJECTED"):
         mod.validate_context(env, event)
 

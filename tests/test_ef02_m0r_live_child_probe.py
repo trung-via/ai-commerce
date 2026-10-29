@@ -39,15 +39,16 @@ def test_probe_workflow_is_owner_only_and_never_runs_ef02_executor():
                 "ef02-m0r-windows-child-probe.yml").read_text(encoding="utf-8")
     primary = (ROOT / ".github" / "workflows" /
                "ef02-batch.yml").read_text(encoding="utf-8")
-    assert "github.event.issue.user.login == github.repository_owner" in workflow
-    assert "github.event.action == 'opened'" in workflow
+    assert "github.actor == github.repository_owner" in workflow
+    assert "github.ref == 'refs/heads/main'" in workflow
     assert "runs-on: [self-hosted, Windows, ai-commerce-ef02]" in workflow
     assert "permissions:\n  contents: read" in workflow
     assert "python .github/scripts/ef02-m0r-child-probe.py" in workflow
     assert "python -m ai_commerce.remote run" not in workflow
     assert "codex " not in workflow.lower()
     assert "antigravity " not in workflow.lower()
-    assert "github.event.issue.title == '[M0R] Windows isolated child interruption probe'" in workflow
+    assert "on:\n  workflow_dispatch:" in workflow
+    assert "  issues:" not in workflow
     # Primary EF02 validate is gated by [EF02] Issue prefix, not [M0R].
     assert "startsWith(github.event.issue.title, '[EF02]')" in primary
     assert "github.event_name == 'workflow_dispatch'" in primary

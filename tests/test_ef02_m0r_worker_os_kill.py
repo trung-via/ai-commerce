@@ -20,11 +20,10 @@ def _context():
     m = _module()
     env = {"GITHUB_REPOSITORY":"trung-via/ai-commerce",
            "GITHUB_REPOSITORY_OWNER":"trung-via", "GITHUB_SHA":"a"*40,
-           "GITHUB_RUN_ID":"98765", "GITHUB_EVENT_NAME":"issues",
+           "GITHUB_RUN_ID":"98765", "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_ACTOR": "trung-via", "GITHUB_REF": "refs/heads/main",
            "RUNNER_OS":"Windows"}
-    event = {"action":"opened",
-             "issue":{"title":m.TITLE,"user":{"login":"trung-via"}},
-             "repository":{"full_name":"trung-via/ai-commerce"}}
+    event = {"ref": "refs/heads/main", "sender": {"login": "trung-via"},
+             "repository": {"full_name": "trung-via/ai-commerce"}}
     return m, env, event
 
 
@@ -39,7 +38,7 @@ def test_owned_windows_issue_guard_accepts_only_exact_event():
 
 
 @pytest.mark.parametrize("key,bad", [
-    ("GITHUB_EVENT_NAME","workflow_dispatch"), ("RUNNER_OS","Linux"),
+    ("GITHUB_EVENT_NAME","issues"), ("RUNNER_OS","Linux"),
     ("GITHUB_RUN_ID","bad"), ("GITHUB_SHA","not-a-commit"),
     ("GITHUB_REPOSITORY_OWNER","someone-else")])
 def test_guard_rejects_non_owner_non_windows_or_unpinned(key,bad):
@@ -51,11 +50,11 @@ def test_guard_rejects_non_owner_non_windows_or_unpinned(key,bad):
 
 def test_guard_rejects_other_issue_and_issuer():
     m, env, event = _context()
-    event["issue"]["title"]="[EF02] unrelated"
+    event["ref"]="[EF02] unrelated"
     with pytest.raises(ValueError,match="M0R_WORKER_KILL_GUARD_REJECTED"):
         m.validate_context(env,event)
-    event["issue"]["title"]=m.TITLE
-    event["issue"]["user"]["login"]="other"
+    event["ref"] = "refs/heads/main"
+    event["sender"]["login"]="other"
     with pytest.raises(ValueError,match="M0R_WORKER_KILL_GUARD_REJECTED"):
         m.validate_context(env,event)
 

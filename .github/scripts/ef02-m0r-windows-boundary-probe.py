@@ -19,11 +19,12 @@ TITLE = "[M0R] Windows EF02 after-spawn UNKNOWN probe"
 def validate_context(env, event):
     repo, owner = env.get("GITHUB_REPOSITORY", ""), env.get("GITHUB_REPOSITORY_OWNER", "")
     sha, run = env.get("GITHUB_SHA", ""), env.get("GITHUB_RUN_ID", "")
-    if (env.get("GITHUB_EVENT_NAME") != "issues" or env.get("RUNNER_OS") != "Windows"
-        or event.get("action") != "opened"
-        or event.get("issue", {}).get("title") != TITLE
-        or event.get("issue", {}).get("user", {}).get("login") != owner
+    if (env.get("GITHUB_EVENT_NAME") != "workflow_dispatch" or env.get("RUNNER_OS") != "Windows"
         or event.get("repository", {}).get("full_name") != repo
+        or env.get("GITHUB_ACTOR") != owner
+        or event.get("sender", {}).get("login") != owner
+        or env.get("GITHUB_REF") != "refs/heads/main"
+        or event.get("ref") != "refs/heads/main"
         or not owner or not repo.startswith(owner + "/")
         or re.fullmatch("[0-9a-f]{40}", sha) is None
         or not run.isdecimal() or int(run) < 1):

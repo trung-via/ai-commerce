@@ -19,10 +19,9 @@ def _context():
     mod = _probe()
     env = {"GITHUB_REPOSITORY": "trung-via/ai-commerce",
            "GITHUB_REPOSITORY_OWNER": "trung-via",
-           "GITHUB_EVENT_NAME": "issues", "RUNNER_OS": "Windows",
+           "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_ACTOR": "trung-via", "GITHUB_REF": "refs/heads/main", "RUNNER_OS": "Windows",
            "GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "98765"}
-    event = {"action": "opened",
-             "issue": {"title": mod.TITLE, "user": {"login": "trung-via"}},
+    event = {"ref": "refs/heads/main", "sender": {"login": "trung-via"},
              "repository": {"full_name": "trung-via/ai-commerce"}}
     return mod, env, event
 
@@ -34,7 +33,7 @@ def test_exact_owner_and_model_is_required():
 
 
 @pytest.mark.parametrize("field,value", [
-    ("GITHUB_EVENT_NAME", "workflow_dispatch"),
+    ("GITHUB_EVENT_NAME", "issues"),
     ("RUNNER_OS", "Linux"),
     ("GITHUB_SHA", "notsha"),
     ("GITHUB_RUN_ID", "-1"),
@@ -48,11 +47,11 @@ def test_reject_untrusted_event_context(field, value):
 
 def test_reject_wrong_issue_title_or_author():
     mod, env, event = _context()
-    event["issue"]["title"] = "[EF02] other"
+    event["ref"] = "[EF02] other"
     with pytest.raises(ValueError, match="M0R_PROVIDER_PROBE_GUARD_REJECTED"):
         mod.validate_context(env, event)
-    event["issue"]["title"] = mod.TITLE
-    event["issue"]["user"]["login"] = "attacker"
+    event["ref"] = "refs/heads/main"
+    event["sender"]["login"] = "attacker"
     with pytest.raises(ValueError, match="M0R_PROVIDER_PROBE_GUARD_REJECTED"):
         mod.validate_context(env, event)
 
