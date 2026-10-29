@@ -272,6 +272,9 @@ def _source_problem(snapshot: dict, initial: dict, *,
         return "SOURCE_DRIFT", "GIT_WORKTREE_IDENTITY_CHANGED"
     if _protected_change(snapshot["changed_files"]):
         return "SCOPE_VIOLATION", "PROTECTED_CHANGED_PATH"
+    if any(isinstance(value, str) and value.startswith("SYMLINK:")
+           for value in snapshot.get("candidate_file_sha256", {}).values()):
+        return "SCOPE_VIOLATION", "CHANGED_SYMLINK_REQUIRES_REVIEW"
     if not verify_first_scope and not snapshot["scope_valid"]:
         return "SCOPE_VIOLATION", "CHANGES_OUTSIDE_ALLOWED_SCOPE"
     return None
@@ -495,6 +498,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         inv.update(usage=usage, usage_status="PROVIDER_REPORTED")
     after, diff = _snapshot(repo, allowed_prefixes, deadline)
     inv.update(after)
+    inv["out_of_scope_files"] = _outside_scope(after["changed_files"], allowed_prefixes)
     inv["final_snapshot"] = after
     save("source_after_executor", "source.after_executor.json", _json_bytes(after))
     save("executor_diff", "git.after_executor.diff.patch", diff)
