@@ -284,4 +284,5 @@ def test_cli_records_event_without_changing_ef02_result(monkeypatch, tmp_path):
     assert r2["wake_event_status"] == "NOT_RECORDED"
     assert r2["wake_event_error_code"] == "ValueError"
     assert r2["status"] == "COMPLETE" and r2["succeeded"] == 1
+    assert not (root / "completion_event.json").exists()
     assert called == [2, 2]  # two explicitly distinct simulated CLI runs; no wake retry
