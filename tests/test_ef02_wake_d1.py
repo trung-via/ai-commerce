@@ -237,7 +237,7 @@ def test_cli_records_event_without_changing_ef02_result(monkeypatch, tmp_path):
         invokes = 0
         def __init__(self, **kwargs):
             self.root = tmp_path / "evidence"
-            self.root.mkdir()
+            self.root.mkdir(exist_ok=True)
         def execute_action(self, action):
             self.invokes += 1
             return {"status": "CANDIDATE_READY"}
