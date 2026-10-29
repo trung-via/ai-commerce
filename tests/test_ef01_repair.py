@@ -660,7 +660,9 @@ def test_independent_siblings_repair_in_distinct_worktrees_and_block_only_failed
     result = run_schedule(context.batch, context.worker.execute_action)
     actions = {a["action_id"]: a for a in result["actions"]}
     assert result["status"] == "PARTIAL_OR_FAILED" and result["scheduler_max_active"] == 2
-    assert actions["a"]["status"] == "VERIFICATION_FAILED"
+    assert actions["a"]["status"] == "VERIFICATION_FAILED", {
+        "status": actions["a"]["status"], "error_code": actions["a"].get("error_code"),
+        "diagnostic": actions["a"].get("diagnostic")}
     assert actions["b"]["status"] == "CANDIDATE_READY"
     assert actions["c"]["status"] == "BLOCKED_DEPENDENCY"
     assert actions["a"]["worktree"] != actions["b"]["worktree"]
