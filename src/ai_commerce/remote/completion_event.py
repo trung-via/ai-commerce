@@ -12,6 +12,19 @@ _SHA = re.compile(r"[0-9a-f]{40}\Z")
 _SAFE_STATUS = re.compile(r"[A-Z][A-Z0-9_]{0,95}\Z")
 
 
+# Explicit final EF02 outcomes. A new unknown status requires review before
+# it becomes eligible for a wake. The event remains optional if unsupported.
+FINAL_ACTION_STATUSES = frozenset({
+    "CANDIDATE_READY", "INVALID_ACTION", "UNPROVEN", "REUSE_VERIFICATION_FAILED",
+    "DUPLICATE_CLAIM_NO_REEXECUTION", "ATTEMPT_ID_CONFLICT",
+    "CLAIM_UNAVAILABLE", "INTEGRATION_FAILED", "SOURCE_WORKTREE_FAILED",
+    "PRESPAWN_CHECKPOINT_UNCONFIRMED", "EXECUTION_UNKNOWN",
+    "VERIFICATION_FAILED", "EXECUTOR_FAILED", "MODEL_AT_CAPACITY",
+    "QUOTA_EXHAUSTED", "MODEL_UNSUPPORTED", "SOURCE_MISMATCH",
+    "CANDIDATE_INTEGRITY_FAILED", "RESULT_PUBLICATION_FAILED",
+    "BLOCKED_DEPENDENCY",
+})
+
 class CompletionEventError(ValueError):
     """Untrusted, unfinished, or unidentifiable EF02 result."""
 
@@ -40,7 +53,7 @@ def build_completion_event(report: Mapping, *, repository: str,
     run_attempt = _positive(run_attempt, "RUN_ATTEMPT")
     if issue_number is not None:
         issue_number = _positive(issue_number, "ISSUE_NUMBER")
-    if report.get("kind") != "AI_COMMERCE_REMOTE_BATCH_RESULT" or report.get("version") != 1:
+    if report.get("kind") != "AI_COMMERCE_REMOTE_BATCH_RESULT" or type(report.get("version")) is not int or report.get("version") != 1:
         raise CompletionEventError("INVALID_REPORT_KIND")
     batch_id = _require(report.get("batch_id"), _ID, "BATCH_ID")
     source_sha = _require(report.get("source_sha"), _SHA, "SOURCE_SHA")
@@ -58,7 +71,7 @@ def build_completion_event(report: Mapping, *, repository: str,
             "attempt_id": _require(action.get("attempt_id"), _ID, "ATTEMPT_ID"),
             "status": _require(action.get("status"), _SAFE_STATUS, "ACTION_STATUS"),
         }
-        if entry["status"] == "NOT_STARTED":
+        if entry["status"] not in FINAL_ACTION_STATUSES:
             raise CompletionEventError("ACTION_NOT_FINAL")
         candidate_sha = action.get("candidate_sha")
         if entry["status"] == "CANDIDATE_READY" and candidate_sha is None:
@@ -94,3 +107,46 @@ def build_completion_event(report: Mapping, *, repository: str,
         "delivery_status": "NOT_ATTEMPTED",
         "chat_delivery_proven": False,
     }
+
+def validate_completion_event(event: Mapping) -> dict:
+    """Verify event finality and exact shape, NOT trusted provenance.
+
+    The public SHA-256 event ID is not a MAC. D2 must independently authenticate
+    originating GitHub evidence and a consented route before any delivery.
+    """
+    if not isinstance(event, Mapping) or set(event) != {
+        "kind", "version", "event_id", "repository", "run_id", "run_attempt",
+        "issue_number", "batch_id", "source_sha", "batch_status", "actions",
+        "origin_binding_status", "delivery_status", "chat_delivery_proven",
+    }:
+        raise CompletionEventError("EVENT_SHAPE_INVALID")
+    if (event["kind"] != "AI_COMMERCE_EF02_COMPLETION_EVENT" or
+            type(event["version"]) is not int or event["version"] != 1 or
+            event["origin_binding_status"] != "UNBOUND" or
+            event["delivery_status"] != "NOT_ATTEMPTED" or
+            event["chat_delivery_proven"] is not False):
+        raise CompletionEventError("EVENT_NOT_ELIGIBLE")
+    actions = event["actions"]
+    if not isinstance(actions, list) or not 1 <= len(actions) <= 128:
+        raise CompletionEventError("INVALID_ACTIONS")
+    for action in actions:
+        if (not isinstance(action, Mapping) or
+                set(action) not in ({"action_id", "attempt_id", "status"},
+                                    {"action_id", "attempt_id", "status", "candidate_sha"})):
+            raise CompletionEventError("EVENT_ACTION_SHAPE_INVALID")
+    report = {
+        "kind": "AI_COMMERCE_REMOTE_BATCH_RESULT", "version": 1,
+        "batch_id": event["batch_id"], "source_sha": event["source_sha"],
+        "status": event["batch_status"], "actions": actions,
+        "total": len(actions),
+        "succeeded": sum(action.get("status") == "CANDIDATE_READY" for action in actions),
+    }
+    try:
+        expected = build_completion_event(
+            report, repository=event["repository"], run_id=event["run_id"],
+            run_attempt=event["run_attempt"], issue_number=event["issue_number"])
+    except (TypeError, ValueError, KeyError) as exc:
+        raise CompletionEventError("EVENT_IDENTITY_INVALID") from exc
+    if dict(event) != expected:
+        raise CompletionEventError("EVENT_IDENTITY_INVALID")
+    return expected
