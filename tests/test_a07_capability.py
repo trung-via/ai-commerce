@@ -7,7 +7,7 @@ import pytest
 
 from ai_commerce.cli import main
 from ai_commerce.distribution import CapabilityError, CapabilityRegistry, evaluate, validate_snapshot
-from ai_commerce.distribution.model import provider_profiles
+from ai_commerce.distribution.model import provider_profiles, digest
 
 AT = datetime(2026, 10, 29, 10, tzinfo=timezone.utc)
 ACCOUNT = {"namespace": "tiktok_open_id", "id": "account-A"}
@@ -51,7 +51,8 @@ def request(**changes):
 
 
 def check(tmp_path, snapshot=None, req=None, now=AT):
-    db = CapabilityRegistry(tmp_path / "a07.db")
+    fixture_key = digest(snapshot)[:16] if snapshot is not None else "empty"
+    db = CapabilityRegistry(tmp_path / (fixture_key + ".db"))
     if snapshot is not None:
         db.import_snapshot(snapshot)
     return evaluate(req or request(), db, at=now)
