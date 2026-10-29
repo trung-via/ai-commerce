@@ -1,0 +1,20 @@
+name: EF02 Antigravity headless access preflight (no model)
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: [self-hosted, Windows, ai-commerce-ef02]
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Inspect same-session AGY and read policy without invoking model
+        shell: pwsh
+        run: |
+          ./scripts/EF02-Antigravity-Headless-Preflight.ps1 -Workspace "$env:GITHUB_WORKSPACE"
