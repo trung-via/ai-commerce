@@ -76,6 +76,59 @@ def test_invalid_or_nonterminal_result_rejected(mutate):
                                run_attempt=1, issue_number=12)
 
 
+@pytest.mark.parametrize("status", [
+    "VERIFIED_SCOPE_REVIEW_REQUIRED", "NO_CODE_CHANGE", "SOURCE_DRIFT",
+    "EXECUTOR_UNAVAILABLE", "EXECUTOR_PERMISSION_DENIED",
+])
+def test_terminal_ef01_nonpublishable_result_is_recorded_and_bound(tmp_path, status):
+    # Real EF01 final statuses are forwarded by EF02's failed-action path.
+    # Recording completion must not imply a verified/published candidate.
+    p, root = registry(tmp_path, [route("routeA", CHAT_A)])
+    e = build_completion_event(result(status=status),
+                               repository="trung-via/ai-commerce",
+                               run_id=42, run_attempt=1, issue_number=12)
+    assert e["batch_status"] == "PARTIAL_OR_FAILED"
+    assert e["actions"] == [{"action_id": "a", "attempt_id": "first", "status": status}]
+    assert e["delivery_status"] == "NOT_ATTEMPTED"
+    assert e["chat_delivery_proven"] is False
+    assert "SECRET_OR_PRIVATE_LOG" not in json.dumps(e)
+    assert validate_completion_event(e) == e
+    assert resolve_binding(e, route_id="routeA", registry_path=p,
+                           repository_root=root).chat_url == CHAT_A
+
+
+def test_mixed_batch_with_scope_review_is_partial_not_complete():
+    r = result()
+    r["status"] = "PARTIAL_OR_FAILED"
+    r["total"] = 2
+    r["actions"].append({
+        "action_id": "b", "attempt_id": "second",
+        "status": "VERIFIED_SCOPE_REVIEW_REQUIRED",
+        "candidate_sha": None, "diagnostic": "PRIVATE_SCOPE_LOG",
+    })
+    e = build_completion_event(r, repository="trung-via/ai-commerce",
+                               run_id=44, run_attempt=2, issue_number=14)
+    assert e["batch_status"] == "PARTIAL_OR_FAILED"
+    assert e["actions"][0]["status"] == "CANDIDATE_READY"
+    assert e["actions"][1] == {
+        "action_id": "b", "attempt_id": "second",
+        "status": "VERIFIED_SCOPE_REVIEW_REQUIRED",
+    }
+    assert "PRIVATE_SCOPE_LOG" not in json.dumps(e)
+    assert validate_completion_event(e) == e
+
+
+@pytest.mark.parametrize("status", [
+    "NOT_STARTED", "EXECUTOR_RETURNED_UNVERIFIED",
+    "BUILD_VERIFIED_FOR_SCOPE", "CLAIMED", "RUNNING",
+])
+def test_transient_ef01_status_is_still_rejected(status):
+    with pytest.raises(CompletionEventError, match="ACTION_NOT_FINAL"):
+        build_completion_event(result(status=status),
+                               repository="trung-via/ai-commerce",
+                               run_id=42, run_attempt=1, issue_number=12)
+
+
 def test_two_conversations_match_only_their_exact_origin(tmp_path):
     e_a = event()
     e_b = event("batchB", 43, 13)
