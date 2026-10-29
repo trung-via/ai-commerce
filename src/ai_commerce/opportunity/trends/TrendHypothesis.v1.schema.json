@@ -1,0 +1,581 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-commerce.local/schema/TrendHypothesis.v1",
+  "title": "TrendHypothesis.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "TrendHypothesis.v1"
+    },
+    "hypothesis_id": {
+      "type": "string",
+      "pattern": "^hyp-[a-f0-9]{64}$"
+    },
+    "series_id": {
+      "type": "string",
+      "pattern": "^series-[a-f0-9]{64}$"
+    },
+    "as_of": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 64
+    },
+    "status": {
+      "enum": [
+        "INCOMPARABLE",
+        "CONTRADICTORY",
+        "UNKNOWN",
+        "STALE",
+        "INSUFFICIENT_HISTORY",
+        "GROWING",
+        "DROPPING",
+        "STABLE"
+      ]
+    },
+    "conditions": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "enum": [
+          "INCOMPARABLE",
+          "CONTRADICTORY",
+          "UNKNOWN",
+          "STALE",
+          "INSUFFICIENT_HISTORY"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "direction": {
+      "enum": [
+        "GROWING",
+        "DROPPING",
+        "STABLE",
+        null
+      ]
+    },
+    "epistemic_status": {
+      "const": "INFERRED"
+    },
+    "source_status": {
+      "const": "USER_SUPPLIED_NOT_LIVE_VERIFIED"
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": "median-baseline-delta.v1"
+        },
+        "min_observations": {
+          "type": "integer",
+          "minimum": 3,
+          "maximum": 10000
+        },
+        "baseline_points": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 2,
+          "maximum": 9999
+        },
+        "relative_delta": {
+          "type": "number",
+          "minimum": 0
+        },
+        "absolute_delta": {
+          "type": "number",
+          "minimum": 0
+        },
+        "max_age_seconds": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "version",
+        "min_observations",
+        "baseline_points",
+        "relative_delta",
+        "absolute_delta",
+        "max_age_seconds"
+      ]
+    },
+    "observation_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000
+    },
+    "independent_timestamp_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000
+    },
+    "supporting_signal_ids": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "string",
+        "pattern": "^sig-[a-f0-9]{64}$"
+      }
+    },
+    "counterevidence_signal_ids": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "string",
+        "pattern": "^sig-[a-f0-9]{64}$"
+      }
+    },
+    "unavailable_signal_ids": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "string",
+        "pattern": "^sig-[a-f0-9]{64}$"
+      }
+    },
+    "unused_signal_ids": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "string",
+        "pattern": "^sig-[a-f0-9]{64}$"
+      }
+    },
+    "reason_codes": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      }
+    },
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "baseline_median": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "latest_value": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "delta": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "relative_change": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "threshold": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "baseline_median",
+        "latest_value",
+        "delta",
+        "relative_change",
+        "threshold"
+      ]
+    },
+    "limitations": {
+      "type": "array",
+      "maxItems": 30,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "hypothesis_id",
+    "series_id",
+    "as_of",
+    "status",
+    "conditions",
+    "direction",
+    "epistemic_status",
+    "source_status",
+    "rule",
+    "observation_count",
+    "independent_timestamp_count",
+    "supporting_signal_ids",
+    "counterevidence_signal_ids",
+    "unavailable_signal_ids",
+    "unused_signal_ids",
+    "reason_codes",
+    "comparison",
+    "limitations"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "conditions": {
+            "minItems": 1
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "direction": {
+            "type": "null"
+          },
+          "status": {
+            "enum": [
+              "INCOMPARABLE",
+              "CONTRADICTORY",
+              "UNKNOWN",
+              "STALE",
+              "INSUFFICIENT_HISTORY"
+            ]
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "direction": {
+            "enum": [
+              "GROWING",
+              "DROPPING",
+              "STABLE"
+            ]
+          },
+          "status": {
+            "enum": [
+              "GROWING",
+              "DROPPING",
+              "STABLE"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "GROWING"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "direction": {
+            "const": "GROWING"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "DROPPING"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "direction": {
+            "const": "DROPPING"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "STABLE"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "direction": {
+            "const": "STABLE"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "INCOMPARABLE"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "conditions": {
+            "contains": {
+              "const": "INCOMPARABLE"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "CONTRADICTORY"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "conditions": {
+            "contains": {
+              "const": "CONTRADICTORY"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "UNKNOWN"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "conditions": {
+            "contains": {
+              "const": "UNKNOWN"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "STALE"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "conditions": {
+            "contains": {
+              "const": "STALE"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "INSUFFICIENT_HISTORY"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "conditions": {
+            "contains": {
+              "const": "INSUFFICIENT_HISTORY"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "SignalSourceSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "SignalSourceSnapshot.v1"
+        },
+        "source_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "source_kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "source_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "captured_at": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 64
+        },
+        "collected_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "maxLength": 64
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "rights_status": {
+          "enum": [
+            "UNKNOWN",
+            "USER_DECLARED_PERMITTED",
+            "USER_DECLARED_RESTRICTED",
+            "NOT_APPLICABLE"
+          ]
+        },
+        "verification_status": {
+          "const": "USER_SUPPLIED_NOT_LIVE_VERIFIED"
+        },
+        "jurisdiction": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "geo": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "locale": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "purpose": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "terms_url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "schema_version",
+        "source_id",
+        "source_kind",
+        "source_ref",
+        "captured_at",
+        "sha256",
+        "rights_status",
+        "verification_status"
+      ]
+    },
+    "SignalLineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "relationship": {
+          "enum": [
+            "ORIGINAL",
+            "CORRECTION",
+            "REPROCESS"
+          ]
+        },
+        "parent_import_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^a10-[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "relationship",
+        "parent_import_id"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "relationship": {
+                "const": "ORIGINAL"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "parent_import_id": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "parent_import_id": {
+                "type": "string",
+                "pattern": "^a10-[a-f0-9]{64}$"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
