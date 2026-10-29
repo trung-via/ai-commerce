@@ -9,6 +9,8 @@ import hashlib
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from importlib.resources import files
+from jsonschema import Draft202012Validator
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -149,6 +151,9 @@ class PublicationJournal:
                 "public_url": public_url, "evidence_sha256": digest,
                 "source": "USER_SUPPLIED_NOT_LIVE_VERIFIED", "recorded_at": _now(),
             }
+            schema = strict_json(files("ai_commerce.distribution").joinpath(
+                "schemas", "PublicationEvent.v1.schema.json").read_bytes())
+            _require(Draft202012Validator(schema).is_valid(event), "PUBLICATION_EVENT_SCHEMA_INVALID")
             event_bytes = canonical_bytes(event)
             event_digest = sha256_bytes(event_bytes)
             db.execute(
@@ -187,6 +192,9 @@ class PublicationJournal:
         for event_digest, raw, evidence_blob, evidence_sha in rows:
             _require(sha256_bytes(raw) == event_digest, "CORRUPT_PUBLICATION_EVENT")
             item = strict_json(raw)
+            schema = strict_json(files("ai_commerce.distribution").joinpath(
+                "schemas", "PublicationEvent.v1.schema.json").read_bytes())
+            _require(Draft202012Validator(schema).is_valid(item), "CORRUPT_EVENT_SCHEMA")
             _require(item.get("publication_id") == publication_id and
                      item.get("schema_version") == "PublicationEvent.v1" and
                      item.get("event_type") in _ALLOWED_EVENTS, "CORRUPT_EVENT_PAYLOAD")
@@ -223,7 +231,8 @@ class PublicationJournal:
         return {
             "publication_id": identifier, "idempotency_key": key,
             "approved_package_sha256": digest, "platform": platform, "surface": surface,
-            "account_ref": account, "state": state, "visibility": visibility,
+            "account_ref": account["namespace"] + ":" + account["id"],
+            "account_identity": account, "state": state, "visibility": visibility,
             "commerce_link_status": "NOT_APPLICABLE", "provider_post_id": provider_post_id,
             "public_url": public_url, "receipt_refs": receipt_refs,
             "receipt_sha256": receipt_sha,

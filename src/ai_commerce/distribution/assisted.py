@@ -12,6 +12,8 @@ import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from importlib.resources import files
+from jsonschema import Draft202012Validator
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -86,6 +88,9 @@ def _instructions(platform: str, surface: str, account: dict[str, str]) -> str:
 
 def _check_fields(record: dict[str, Any]) -> None:
     _require(isinstance(record, dict) and set(record) == _ALLOWED_KEYS, "PACKAGE_FIELDS_INVALID")
+    schema = strict_json(files("ai_commerce.distribution").joinpath(
+        "schemas", "DistributionPackage.v1.schema.json").read_bytes())
+    _require(Draft202012Validator(schema).is_valid(record), "PACKAGE_SCHEMA_INVALID")
     _require(record["schema_version"] == "DistributionPackage.v1" and
              record["state"] == "EXPORTED_FOR_MANUAL_HANDOFF" and
              record["publication_status"] == "NOT_ATTEMPTED", "PACKAGE_FALSE_PUBLICATION")

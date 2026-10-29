@@ -81,6 +81,16 @@ def test_source_digest_and_missing_source_refused(tmp_path, monkeypatch):
                        account="internal_alias:test")
 
 
+def test_draft_publication_contract_shape(tmp_path, monkeypatch):
+    from jsonschema import Draft202012Validator
+    out, _ = _pkg(tmp_path, monkeypatch)
+    record = PublicationJournal(tmp_path / "journal.sqlite").create(out, idempotency_key="contract")
+    path = __import__("pathlib").Path(__file__).resolve().parents[1] / "contracts" / "PublicationRecord.v0.2.schema.json"
+    schema = json.loads(path.read_text(encoding="utf-8"))
+    Draft202012Validator(schema).validate(record)
+    assert record["account_ref"] == "internal_alias:demo"
+
+
 def test_create_handoff_idempotency_and_collision(tmp_path, monkeypatch):
     out, _ = _pkg(tmp_path, monkeypatch)
     db = tmp_path / "journal.sqlite"
