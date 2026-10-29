@@ -1,0 +1,427 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-commerce.local/schema/AudienceInsight.v1",
+  "title": "AudienceInsight.v1",
+  "description": "Offline qualitative notes and hypotheses. Local integrity is not provider verification.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "AudienceInsight.v1"
+    },
+    "insight_id": {
+      "type": "string",
+      "pattern": "^aud-[a-f0-9]{64}$"
+    },
+    "source_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "source_ref": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "source_status": {
+      "const": "USER_SUPPLIED_NOT_LIVE_VERIFIED"
+    },
+    "rights_status": {
+      "const": "UNKNOWN"
+    },
+    "data_kind": {
+      "enum": [
+        "USER_SUPPLIED_QUALITATIVE",
+        "SYNTHETIC_FIXTURE"
+      ]
+    },
+    "source_note": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "noted_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time",
+      "maxLength": 64
+    },
+    "audience_segment": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "statements": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "JOB_TO_BE_DONE",
+              "FRICTION",
+              "CONTENT_CONTEXT",
+              "ALTERNATIVE",
+              "COUNTEREXAMPLE"
+            ]
+          },
+          "status": {
+            "enum": [
+              "OBSERVED_USER_SUPPLIED",
+              "INFERRED",
+              "UNKNOWN"
+            ]
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "uncertainty": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "evidence_refs": {
+            "type": "array",
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "import_id": {
+                  "type": "string",
+                  "pattern": "^a10-[a-f0-9]{64}$"
+                },
+                "signal_id": {
+                  "type": "string",
+                  "pattern": "^sig-[a-f0-9]{64}$"
+                },
+                "raw_sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "evidence_ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1024
+                }
+              },
+              "required": [
+                "import_id",
+                "signal_id",
+                "raw_sha256",
+                "evidence_ref"
+              ]
+            }
+          },
+          "note_ref": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "evidence_status": {
+            "enum": [
+              "NOTE_ONLY",
+              "LOCAL_INTEGRITY_CHECKED"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "status",
+          "text",
+          "uncertainty",
+          "evidence_refs",
+          "note_ref",
+          "evidence_status"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "evidence_status": {
+                  "const": "NOTE_ONLY"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "evidence_refs": {
+                  "maxItems": 0
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "evidence_refs": {
+                  "minItems": 1
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "signal_evidence": {
+      "type": "array",
+      "maxItems": 3200,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "reference": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "import_id": {
+                "type": "string",
+                "pattern": "^a10-[a-f0-9]{64}$"
+              },
+              "signal_id": {
+                "type": "string",
+                "pattern": "^sig-[a-f0-9]{64}$"
+              },
+              "raw_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "evidence_ref": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              }
+            },
+            "required": [
+              "import_id",
+              "signal_id",
+              "raw_sha256",
+              "evidence_ref"
+            ]
+          },
+          "context_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "scope_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "lineage": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "relationship": {
+                "enum": [
+                  "ORIGINAL",
+                  "CORRECTION",
+                  "REPROCESS"
+                ]
+              },
+              "parent_import_id": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^a10-[a-f0-9]{64}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "relationship",
+              "parent_import_id"
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "relationship": {
+                      "const": "ORIGINAL"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "parent_import_id": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "else": {
+                  "properties": {
+                    "parent_import_id": {
+                      "type": "string",
+                      "pattern": "^a10-[a-f0-9]{64}$"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "source_status": {
+            "const": "USER_SUPPLIED_NOT_LIVE_VERIFIED"
+          },
+          "source_rights_status": {
+            "enum": [
+              "UNKNOWN",
+              "USER_DECLARED_PERMITTED",
+              "USER_DECLARED_RESTRICTED",
+              "NOT_APPLICABLE"
+            ]
+          },
+          "signal_rights_status": {
+            "enum": [
+              "UNKNOWN",
+              "USER_DECLARED_PERMITTED",
+              "USER_DECLARED_RESTRICTED",
+              "NOT_APPLICABLE"
+            ]
+          },
+          "signal_status": {
+            "enum": [
+              "AVAILABLE",
+              "NOT_AVAILABLE"
+            ]
+          },
+          "value": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time",
+            "maxLength": 64
+          }
+        },
+        "required": [
+          "reference",
+          "context_sha256",
+          "scope_sha256",
+          "lineage",
+          "source_status",
+          "source_rights_status",
+          "signal_rights_status",
+          "signal_status",
+          "value",
+          "observed_at"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "signal_status": {
+                  "const": "NOT_AVAILABLE"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "value": {
+                  "type": "null"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "value": {
+                  "type": "number"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "lineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "relationship": {
+          "enum": [
+            "ORIGINAL",
+            "REVISION"
+          ]
+        },
+        "parent_insight_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^aud-[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128
+        }
+      },
+      "required": [
+        "relationship",
+        "parent_insight_id",
+        "number"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "relationship": {
+                "const": "ORIGINAL"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "parent_insight_id": {
+                "type": "null"
+              },
+              "number": {
+                "const": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "parent_insight_id": {
+                "type": "string",
+                "pattern": "^aud-[a-f0-9]{64}$"
+              },
+              "number": {
+                "minimum": 2
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "insight_id",
+    "source_sha256",
+    "source_ref",
+    "source_status",
+    "rights_status",
+    "data_kind",
+    "source_note",
+    "noted_at",
+    "audience_segment",
+    "statements",
+    "signal_evidence",
+    "lineage"
+  ]
+}
