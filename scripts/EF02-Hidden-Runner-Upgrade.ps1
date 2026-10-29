@@ -146,7 +146,8 @@ result = sh.Run(cmdLine, 0, True)
 If Err.Number <> 0 Then WScript.Quit 2
 ' Force Task Scheduler's configured RestartOnFailure if the runner exits.
 WScript.Quit 1
-'@.Replace('__RUNNER_ROOT__', $RunnerRoot)
+'@
+    $vbs = $vbs.Replace('__RUNNER_ROOT__', $RunnerRoot)
     try {
         $vbs | Set-Content -LiteralPath $launcher -Encoding ASCII
         $backup | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $backupFile -Encoding UTF8
