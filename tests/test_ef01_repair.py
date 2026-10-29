@@ -865,7 +865,11 @@ def test_antigravity_argv_budget_records_complete_original_prompt(fixture):
     assert original.read_text(encoding="utf-8") == original_prompt
     transport = evidence / inv["evidence_files"]["transport_instruction"]
     assert transport.read_text(encoding="utf-8") == commands[0][commands[0].index("--print") + 1]
-    assert str(original) in transport.read_text(encoding="utf-8")
+    # AGY receives only the disposable input mirror, not the authoritative log root.
+    mirror = evidence / "invocations" / "000" / "agy_input" / "instruction.txt"
+    assert mirror.read_bytes() == original.read_bytes()
+    assert str(mirror) in transport.read_text(encoding="utf-8")
+    assert str(original) not in transport.read_text(encoding="utf-8")
     assert inv["evidence_sha256"]["instruction"] == hashlib.sha256(original_prompt.encode()).hexdigest()
 
 

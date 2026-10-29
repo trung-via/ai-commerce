@@ -346,3 +346,61 @@ def test_codex_live_event_mirror_timeout_cannot_become_pass(tmp_path):
             repo=tmp_path, stdin_text=None, timeout_seconds=1,
             live_path=live)
     assert "turn.started" in live.read_text()
+
+
+def test_agy_headless_evidence_scope_registers_only_prepared_directory(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    evidence = tmp_path / "attempt-evidence" / "invocations" / "000"
+    evidence.mkdir(parents=True)
+    (evidence / "instruction.txt").write_text("trusted task", encoding="utf-8")
+    selection = ExecutorSelection("antigravity", "gemini-3.8-flash", "high")
+
+    argv, stdin = command_for(selection, repo, "do scoped task",
+                              antigravity_evidence_dir=evidence)
+    roots = [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "--add-dir"]
+    assert stdin is None
+    assert roots == [str(repo), str(evidence.resolve())]
+    assert "--mode" in argv and argv[argv.index("--mode") + 1] == "accept-edits"
+    assert "--dangerously-skip-permissions" not in argv
+    assert "--yolo" not in argv
+
+    with pytest.raises(ValueError, match="AGY_EVIDENCE_DIR_NOT_PREPARED"):
+        command_for(selection, repo, "task", antigravity_evidence_dir=tmp_path)
+    with pytest.raises(FileNotFoundError):
+        command_for(selection, repo, "task", antigravity_evidence_dir=tmp_path / "missing")
+    with pytest.raises(ValueError, match="AGY_EVIDENCE_WITH_NON_AGY_EXECUTOR"):
+        command_for(ExecutorSelection("codex", "gpt-6", "max"), repo, "task",
+                    antigravity_evidence_dir=evidence)
+
+
+def test_agy_ef01_passes_attempt_evidence_scope_to_adapter(tmp_path, monkeypatch):
+    import ai_commerce.engineering.runner as runner_module
+
+    repo = _repo(tmp_path)
+    binary = _fake_binary(tmp_path, "agy-scope-fake", """import json
+from pathlib import Path
+Path('changed.txt').write_text('scoped\\n', encoding='utf-8')
+print(json.dumps({'status': 'SUCCESS', 'denied_actions': []}))
+""")
+    real = runner_module.command_for
+    seen = []
+
+    def capture(selection, path, instruction, **kwargs):
+        seen.append((selection.executor, kwargs.get("antigravity_evidence_dir")))
+        return real(selection, path, instruction, **kwargs)
+
+    monkeypatch.setattr(runner_module, "command_for", capture)
+    outdir = tmp_path / "evidence"
+    result = execute_attempt(
+        repo=repo, output_dir=outdir, work_id="agy-scope-smoke",
+        attempt_id="new-attempt", selection=ExecutorSelection("antigravity", "gemini-test", "high"),
+        instruction="create changed.txt", verify_argv=[sys.executable, "-c", "assert True"],
+        allowed_prefixes=["changed.txt"], antigravity_bin=binary,
+    )
+    assert result["status"] == "BUILD_VERIFIED_FOR_SCOPE"
+    assert (outdir / "invocations" / "000" / "instruction.txt").is_file()
+    assert seen[-1] == ("antigravity", outdir / "invocations" / "000" / "agy_input")
+    assert (outdir / "invocations" / "000" / "agy_input" / "instruction.txt").is_file()
+    assert not (outdir / "invocations" / "000" / "agy_input" / "provider_boundary.json").exists()
+    assert result["denied_actions"] == []
