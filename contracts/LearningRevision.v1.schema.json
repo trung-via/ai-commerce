@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-commerce.local/schema/LearningRevision.v1",
+  "title": "LearningRevision.v1",
+  "description": "A11 offline advisory evidence. Hashes detect local modification, not external attestation. All fields required except those omitted from required; nullable fields retain explicit unknowns. Content identity is the prefixed SHA256 of canonical JSON without its own ID field.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "LearningRevision.v1"
+    },
+    "revision_id": {
+      "type": "string",
+      "pattern": "^a11-revision-[a-f0-9]{64}$"
+    },
+    "source_status": {
+      "const": "USER_SUPPLIED_NOT_LIVE_VERIFIED"
+    },
+    "learning_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000
+    },
+    "previous_revision_ref": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RevisionReference"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "record_ref": {
+      "$ref": "#/$defs/RecordReference"
+    },
+    "operation": {
+      "enum": [
+        "CREATE",
+        "UPDATE",
+        "CORRECTION",
+        "RETRACT"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "actor_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "recorded_at": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 64
+    }
+  },
+  "required": [
+    "schema_version",
+    "revision_id",
+    "source_status",
+    "learning_key",
+    "revision",
+    "previous_revision_ref",
+    "record_ref",
+    "operation",
+    "reason",
+    "actor_ref",
+    "recorded_at"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "revision": {
+            "const": 1
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "previous_revision_ref": {
+            "type": "null"
+          },
+          "operation": {
+            "const": "CREATE"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "previous_revision_ref": {
+            "$ref": "#/$defs/RevisionReference"
+          },
+          "operation": {
+            "enum": [
+              "UPDATE",
+              "CORRECTION",
+              "RETRACT"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "RecordReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "record_id": {
+          "type": "string",
+          "pattern": "^a11-learning-[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "record_id"
+      ]
+    },
+    "RevisionReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "revision_id": {
+          "type": "string",
+          "pattern": "^a11-revision-[a-f0-9]{64}$"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        }
+      },
+      "required": [
+        "revision_id",
+        "revision"
+      ]
+    }
+  }
+}

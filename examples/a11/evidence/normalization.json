@@ -1,0 +1,35 @@
+{
+  "changes": {
+    "src/ai_commerce/cli.py": {
+      "after_sha256": "1b4affb8634231097409f2d67af9fddb28e4b496f3bd8a7bc6cd5b943101bdbf",
+      "before_sha256": "a783e9c80f3c03b6ab249ffeffa665cafca46e38deb85c913f2050822b86a7fe",
+      "crlf_removed": 454,
+      "only_crlf_to_lf": true
+    },
+    "src/ai_commerce/learning/README.md": {
+      "after_sha256": "b2d8b2072db1ecad61af31ae807b6b88da13966531ec99cb805917161b522125",
+      "before_sha256": "b2d8b2072db1ecad61af31ae807b6b88da13966531ec99cb805917161b522125",
+      "crlf_removed": 0,
+      "only_crlf_to_lf": true
+    },
+    "src/ai_commerce/learning/__init__.py": {
+      "after_sha256": "e441a364e20d1b5f1b2d9c7d261cfeb7f2f9acc6edb393635801705258af7b19",
+      "before_sha256": "47e4bb6e187ec5bb7036d1e39186fce5ef8ede2c16bcf6f561be9cdef223fb5d",
+      "crlf_removed": 18,
+      "only_crlf_to_lf": true
+    },
+    "src/ai_commerce/learning/registry.py": {
+      "after_sha256": "a37ed46a33d121677a6daf6ec1a7484c6e5bfc55a22d0a810d53d5c39f61b453",
+      "before_sha256": "6540164c0448c077c279d655dc34c4260f0e207e1f39a0313c5f95f6928273d9",
+      "crlf_removed": 608,
+      "only_crlf_to_lf": true
+    },
+    "src/ai_commerce/learning/reporting.py": {
+      "after_sha256": "55d347f799e548f97836468d3459da79111db211aa5b91fbaa414200af63e8ab",
+      "before_sha256": "1579fe71a0889aec2039cf154d00df688165d92c5064ef613a5b4cdb2d1d0f5b",
+      "crlf_removed": 849,
+      "only_crlf_to_lf": true
+    }
+  },
+  "first_full_code_hashes_unchanged": true
+}

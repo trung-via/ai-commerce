@@ -1,0 +1,563 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-commerce.local/schema/PerformanceReport.v1",
+  "title": "PerformanceReport.v1",
+  "description": "A11 offline advisory evidence. Hashes detect local modification, not external attestation. All fields required except those omitted from required; nullable fields retain explicit unknowns. Content identity is the prefixed SHA256 of canonical JSON without its own ID field.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "PerformanceReport.v1"
+    },
+    "report_id": {
+      "type": "string",
+      "pattern": "^a11-report-[a-f0-9]{64}$"
+    },
+    "source_status": {
+      "const": "USER_SUPPLIED_NOT_LIVE_VERIFIED"
+    },
+    "snapshot_refs": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "$ref": "#/$defs/SnapshotReference"
+      },
+      "uniqueItems": true
+    },
+    "platform": {
+      "enum": [
+        "TIKTOK",
+        "YOUTUBE",
+        "FACEBOOK",
+        "INSTAGRAM"
+      ]
+    },
+    "surface": {
+      "enum": [
+        "VIDEO",
+        "PROFILE_VIDEO",
+        "SHORT",
+        "PAGE_REEL",
+        "REEL"
+      ]
+    },
+    "account_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {
+          "enum": [
+            "internal_alias",
+            "tiktok_open_id",
+            "youtube_channel_id",
+            "facebook_page_id",
+            "instagram_user_id"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "namespace",
+        "id"
+      ]
+    },
+    "measurement_window": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "string",
+        "format": "date-time",
+        "maxLength": 64
+      },
+      "description": "Explicit instants: start inclusive, end exclusive; never a default period."
+    },
+    "timezone": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "cohort": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "metric": {
+      "$ref": "#/$defs/MetricDefinition"
+    },
+    "evidence_refs": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10000,
+      "items": {
+        "$ref": "#/$defs/ObservationReference"
+      },
+      "uniqueItems": true
+    },
+    "measurement": {
+      "$ref": "#/$defs/Measurement"
+    },
+    "available_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000
+    },
+    "not_available_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000
+    },
+    "confounders": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 100,
+      "items": {
+        "$ref": "#/$defs/Confounder"
+      }
+    },
+    "caveats": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 100,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048
+      }
+    },
+    "inference": {
+      "const": "DESCRIPTIVE_ONLY"
+    },
+    "as_of": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time",
+      "maxLength": 64
+    }
+  },
+  "required": [
+    "schema_version",
+    "report_id",
+    "source_status",
+    "snapshot_refs",
+    "platform",
+    "surface",
+    "account_ref",
+    "measurement_window",
+    "timezone",
+    "cohort",
+    "metric",
+    "evidence_refs",
+    "measurement",
+    "available_count",
+    "not_available_count",
+    "confounders",
+    "caveats",
+    "inference"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "const": "TIKTOK"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "account_ref": {
+            "properties": {
+              "namespace": {
+                "enum": [
+                  "tiktok_open_id",
+                  "internal_alias"
+                ]
+              }
+            }
+          },
+          "surface": {
+            "enum": [
+              "VIDEO",
+              "PROFILE_VIDEO"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "const": "YOUTUBE"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "account_ref": {
+            "properties": {
+              "namespace": {
+                "enum": [
+                  "youtube_channel_id",
+                  "internal_alias"
+                ]
+              }
+            }
+          },
+          "surface": {
+            "enum": [
+              "VIDEO",
+              "SHORT"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "const": "FACEBOOK"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "account_ref": {
+            "properties": {
+              "namespace": {
+                "enum": [
+                  "facebook_page_id",
+                  "internal_alias"
+                ]
+              }
+            }
+          },
+          "surface": {
+            "enum": [
+              "PAGE_REEL"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "const": "INSTAGRAM"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "account_ref": {
+            "properties": {
+              "namespace": {
+                "enum": [
+                  "instagram_user_id",
+                  "internal_alias"
+                ]
+              }
+            }
+          },
+          "surface": {
+            "enum": [
+              "REEL"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "Confounder": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "status": {
+          "enum": [
+            "DECLARED",
+            "OBSERVED",
+            "UNKNOWN"
+          ]
+        },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/ObservationReference"
+          }
+        }
+      },
+      "required": [
+        "code",
+        "description",
+        "status",
+        "evidence_refs"
+      ]
+    },
+    "Measurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "enum": [
+            "AVAILABLE",
+            "NOT_AVAILABLE",
+            "INSUFFICIENT_DATA",
+            "NOT_COMPARABLE"
+          ]
+        },
+        "value": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": -1e+100,
+          "maximum": 1e+100
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "numerator": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": -1e+100,
+          "maximum": 1e+100
+        },
+        "denominator": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": -1e+100,
+          "maximum": 1e+100
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "status",
+        "value",
+        "unit",
+        "numerator",
+        "denominator",
+        "reason"
+      ],
+      "description": "AVAILABLE includes numeric zero. Other states require null, never imputed zero. Numerator/denominator are explicit quantities, null when absent or inapplicable.",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "AVAILABLE"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "number"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "value": {
+                "type": "null"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              }
+            }
+          }
+        }
+      ]
+    },
+    "MetricDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "MetricDefinition.v1"
+        },
+        "metric_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "provider_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "definition_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "platform": {
+          "enum": [
+            "TIKTOK",
+            "YOUTUBE",
+            "FACEBOOK",
+            "INSTAGRAM"
+          ]
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "definition": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "denominator": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "cohort": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "comparison_policy": {
+          "const": "NO_CROSS_PROVIDER_EQUIVALENCE"
+        },
+        "source_status": {
+          "const": "USER_SUPPLIED_NOT_LIVE_VERIFIED"
+        }
+      },
+      "required": [
+        "schema_version",
+        "metric_key",
+        "provider_name",
+        "definition_version",
+        "platform",
+        "unit",
+        "definition",
+        "denominator",
+        "cohort",
+        "comparison_policy",
+        "source_status"
+      ]
+    },
+    "ObservationReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^a11-snapshot-[a-f0-9]{64}$"
+        },
+        "import_id": {
+          "type": "string",
+          "pattern": "^a09-[a-f0-9]{64}$"
+        },
+        "context_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "raw_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "observation_id": {
+          "type": "string",
+          "pattern": "^obs-[a-f0-9]{64}$"
+        },
+        "observation_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "metric_definition_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "import_id",
+        "context_sha256",
+        "raw_sha256",
+        "observation_id",
+        "observation_sha256",
+        "metric_definition_sha256"
+      ]
+    },
+    "SnapshotReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^a11-snapshot-[a-f0-9]{64}$"
+        },
+        "import_id": {
+          "type": "string",
+          "pattern": "^a09-[a-f0-9]{64}$"
+        },
+        "context_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "raw_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "import_id",
+        "context_sha256",
+        "raw_sha256"
+      ]
+    }
+  }
+}

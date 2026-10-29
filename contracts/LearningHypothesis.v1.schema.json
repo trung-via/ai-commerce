@@ -1,0 +1,359 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-commerce.local/schema/LearningHypothesis.v1",
+  "title": "LearningHypothesis.v1",
+  "description": "A11 offline advisory evidence. Hashes detect local modification, not external attestation. All fields required except those omitted from required; nullable fields retain explicit unknowns. Content identity is the prefixed SHA256 of canonical JSON without its own ID field.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "LearningHypothesis.v1"
+    },
+    "hypothesis_id": {
+      "type": "string",
+      "pattern": "^a11-hypothesis-[a-f0-9]{64}$"
+    },
+    "source_status": {
+      "const": "USER_SUPPLIED_NOT_LIVE_VERIFIED"
+    },
+    "statement": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "platform": {
+      "enum": [
+        "TIKTOK",
+        "YOUTUBE",
+        "FACEBOOK",
+        "INSTAGRAM"
+      ]
+    },
+    "surface": {
+      "enum": [
+        "VIDEO",
+        "PROFILE_VIDEO",
+        "SHORT",
+        "PAGE_REEL",
+        "REEL"
+      ]
+    },
+    "account_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {
+          "enum": [
+            "internal_alias",
+            "tiktok_open_id",
+            "youtube_channel_id",
+            "facebook_page_id",
+            "instagram_user_id"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "namespace",
+        "id"
+      ]
+    },
+    "measurement_window": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "string",
+        "format": "date-time",
+        "maxLength": 64
+      },
+      "description": "Explicit instants: start inclusive, end exclusive; never a default period."
+    },
+    "timezone": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "cohort": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "creative_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "creative_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "content_sha256": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "creative_id",
+        "version",
+        "content_sha256"
+      ]
+    },
+    "expected_outcome": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "uncertainty": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "confounders": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 100,
+      "items": {
+        "$ref": "#/$defs/Confounder"
+      }
+    },
+    "inference": {
+      "const": "HYPOTHESIS_ONLY"
+    }
+  },
+  "required": [
+    "schema_version",
+    "hypothesis_id",
+    "source_status",
+    "statement",
+    "platform",
+    "surface",
+    "account_ref",
+    "measurement_window",
+    "timezone",
+    "cohort",
+    "creative_ref",
+    "expected_outcome",
+    "uncertainty",
+    "confounders",
+    "inference"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "const": "TIKTOK"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "account_ref": {
+            "properties": {
+              "namespace": {
+                "enum": [
+                  "tiktok_open_id",
+                  "internal_alias"
+                ]
+              }
+            }
+          },
+          "surface": {
+            "enum": [
+              "VIDEO",
+              "PROFILE_VIDEO"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "const": "YOUTUBE"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "account_ref": {
+            "properties": {
+              "namespace": {
+                "enum": [
+                  "youtube_channel_id",
+                  "internal_alias"
+                ]
+              }
+            }
+          },
+          "surface": {
+            "enum": [
+              "VIDEO",
+              "SHORT"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "const": "FACEBOOK"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "account_ref": {
+            "properties": {
+              "namespace": {
+                "enum": [
+                  "facebook_page_id",
+                  "internal_alias"
+                ]
+              }
+            }
+          },
+          "surface": {
+            "enum": [
+              "PAGE_REEL"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "const": "INSTAGRAM"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "account_ref": {
+            "properties": {
+              "namespace": {
+                "enum": [
+                  "instagram_user_id",
+                  "internal_alias"
+                ]
+              }
+            }
+          },
+          "surface": {
+            "enum": [
+              "REEL"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "Confounder": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "status": {
+          "enum": [
+            "DECLARED",
+            "OBSERVED",
+            "UNKNOWN"
+          ]
+        },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/ObservationReference"
+          }
+        }
+      },
+      "required": [
+        "code",
+        "description",
+        "status",
+        "evidence_refs"
+      ]
+    },
+    "ObservationReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^a11-snapshot-[a-f0-9]{64}$"
+        },
+        "import_id": {
+          "type": "string",
+          "pattern": "^a09-[a-f0-9]{64}$"
+        },
+        "context_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "raw_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "observation_id": {
+          "type": "string",
+          "pattern": "^obs-[a-f0-9]{64}$"
+        },
+        "observation_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "metric_definition_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "import_id",
+        "context_sha256",
+        "raw_sha256",
+        "observation_id",
+        "observation_sha256",
+        "metric_definition_sha256"
+      ]
+    }
+  }
+}

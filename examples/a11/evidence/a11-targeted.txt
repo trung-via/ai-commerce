@@ -1,0 +1,12 @@
+bringing up nodes...
+bringing up nodes...
+
+........................................................................ [ 32%]
+..s..................................................................... [ 65%]
+..........................s...................s......................... [ 97%]
+.....                                                                    [100%]
+=========================== short test summary info ===========================
+SKIPPED [1] tests\test_a11_reader.py:403: OS did not permit creating a symlink fixture
+SKIPPED [1] tests\test_a11_registry.py:495: OS did not permit creating a symlink fixture
+SKIPPED [1] tests\test_a11_registry.py:511: OS did not permit creating a hardlink fixture
+218 passed, 3 skipped in 15.84s

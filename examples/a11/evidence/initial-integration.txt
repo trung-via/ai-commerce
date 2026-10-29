@@ -1,0 +1,44 @@
+bringing up nodes...
+bringing up nodes...
+
+.............F.....F.........                                            [100%]
+================================== FAILURES ===================================
+___ test_registry_rejects_resealed_forged_report_arithmetic_before_writing ____
+[gw11] win32 -- Python 3.14.7 C:\Users\TRUNG\AppData\Local\Python\pythoncore-3.14-64\python.exe
+
+tmp_path = WindowsPath('C:/Users/TRUNG/AppData/Local/Packages/sandbox.{16e31785-a560-43b7-9b61-ec453137da5e}/AC/Temp/pytest-of-TRUNG/pytest-0/popen-gw11/test_registry_rejects_resealed0')
+
+    def test_registry_rejects_resealed_forged_report_arithmetic_before_writing(tmp_path):
+        snapshot, _ = _source(tmp_path, "input", [12, 0, None])
+        report = build_performance_report(snapshot)
+        forged = reseal("PerformanceReport", report.to_dict(), measurement={**report.measurement, "value": 999})
+        forged_report = PerformanceReport(forged)
+        packet = _packet(snapshot, forged_report)
+        destination = tmp_path / "forged.sqlite"
+>       with pytest.raises(LearningError, match="REPORT_ARITHMETIC_MISMATCH"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'ai_commerce.learning.core.LearningError'>
+
+tests\test_a11_integration.py:246: Failed
+________ test_declared_denominator_without_quantity_stays_insufficient ________
+[gw9] win32 -- Python 3.14.7 C:\Users\TRUNG\AppData\Local\Python\pythoncore-3.14-64\python.exe
+
+tmp_path = WindowsPath('C:/Users/TRUNG/AppData/Local/Packages/sandbox.{16e31785-a560-43b7-9b61-ec453137da5e}/AC/Temp/pytest-of-TRUNG/pytest-0/popen-gw9/test_declared_denominator_with0')
+
+    def test_declared_denominator_without_quantity_stays_insufficient(tmp_path):
+        snapshot, _ = _source(tmp_path, "rate", [12], denominator="impressions")
+        measurement = build_performance_report(snapshot).measurement
+>       assert measurement["status"] == "INSUFFICIENT_DATA"
+E       AssertionError: assert 'AVAILABLE' == 'INSUFFICIENT_DATA'
+E         
+E         - INSUFFICIENT_DATA
+E         + AVAILABLE
+
+tests\test_a11_integration.py:235: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_a11_integration.py::test_registry_rejects_resealed_forged_report_arithmetic_before_writing - Failed: DID NOT RAISE <class 'ai_commerce.learning.core.LearningError'>
+FAILED tests/test_a11_integration.py::test_declared_denominator_without_quantity_stays_insufficient - AssertionError: assert 'AVAILABLE' == 'INSUFFICIENT_DATA'
+  
+  - INSUFFICIENT_DATA
+  + AVAILABLE
+2 failed, 27 passed in 10.03s
