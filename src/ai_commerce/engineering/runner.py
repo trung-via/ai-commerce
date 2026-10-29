@@ -420,6 +420,15 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     save("instruction", "instruction.txt", prompt.encode("utf-8"))
     if feedback is not None:
         save("repair_feedback", "repair_feedback.json", _json_bytes(feedback))
+    # Grant AGY only a disposable input mirror, never the authoritative logs,
+    # hashes, provider boundary, or feedback evidence owned by the runner.
+    agy_input_dir = None
+    if selection.executor == "antigravity":
+        agy_input_dir = directory / "agy_input"
+        agy_input_dir.mkdir(parents=True, exist_ok=False)
+        _write(agy_input_dir / "instruction.txt", prompt.encode("utf-8"))
+        if feedback is not None:
+            _write(agy_input_dir / "repair_feedback.json", _json_bytes(feedback))
     before, _ = snapshot()
     inv["input_snapshot"] = before
     save("source_before", "source.before.json", _json_bytes(before))
@@ -431,13 +440,13 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     command, stdin = command_for(selection, repo, prompt, codex_bin=codex_bin,
                                  antigravity_bin=antigravity_bin,
                                  codex_windows_sandbox=codex_windows_sandbox,
-                                 antigravity_evidence_dir=(directory if selection.executor == "antigravity" else None))
+                                 antigravity_evidence_dir=agy_input_dir)
     if selection.executor == "antigravity" and _windows_command_units(command) > AGY_COMMANDLINE_MAX_UNITS:
         # Preserve the complete original instruction/feedback on disk. Shorten only
         # the transported --print argument; never truncate recorded diagnostics.
         compact = (
             "Read and follow the complete authorized instruction file "
-            + str(directory / "instruction.txt") + " (UTF-8; SHA256 "
+            + str((agy_input_dir or directory) / "instruction.txt") + " (UTF-8; SHA256 "
             + _sha(prompt.encode("utf-8")) + "). "
             "Keep the same worktree, source HEAD, executor/model/effort and allowed scope. "
             "This file contains the full original request and any repair evidence references."
