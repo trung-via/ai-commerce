@@ -682,7 +682,9 @@
           ],
           "priority": "P1",
           "owner": "Distribution",
-          "status": "PROPOSED"
+          "status": "VERIFIED_FOR_OFFLINE_SCOPE",
+          "implementation_work_item_ref": "work_items/A07-CHANNEL-CAPABILITY-001.json",
+          "verification_ref": "https://github.com/trung-via/ai-commerce/actions/runs/40824806875"
         },
         {
           "id": "D02",

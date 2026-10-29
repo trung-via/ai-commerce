@@ -134,3 +134,7 @@ Human approved EF02 Multi-Action v1 on 2026-10-28: multiple Human/Brain actions 
 ## EF02 Multi-Action — historic source-only snapshot (2026-10-28)
 
 Independent remote engineering implementation is in src/ai_commerce/remote/ with hosted ingress, separate Windows runner job, two-slot (configurable) parallel subprocess scheduling, DAG candidate composition, GitHub attempt claims, candidate refs and aggregate feedback. GitHub CI run 40648371883 passed on hosted Windows and Ubuntu. See docs/engineering/EF02_IMPLEMENTATION_REPORT.md and docs/engineering/EF02_WINDOWS_RUNNER_SETUP.md. The real self-hosted Windows runner and automatic remote feedback have not yet been tested; M0-R remains OPEN.
+
+## A07 Channel Capability Foundation — verified offline scope (2026-10-29)
+
+[PR #75](https://github.com/trung-via/ai-commerce/pull/75) merged an offline account×app×market×surface×action evidence-aware registry into `main@0e57caf9d23b0aae01627490a42f3de2068f95c8`. Use `python -m ai_commerce channel-capability --help` for local `validate/import/evaluate/history`. [A07 cross-platform CI](https://github.com/trung-via/ai-commerce/actions/runs/40824806875) passed 65 tests on Windows and Ubuntu; [A06 regression](https://github.com/trung-via/ai-commerce/actions/runs/40824806922) passed 897 Windows and 896 Ubuntu tests (1 skipped). No connected social accounts or real posting rights are implied. A08 assisted distribution and M2 remain unverified.

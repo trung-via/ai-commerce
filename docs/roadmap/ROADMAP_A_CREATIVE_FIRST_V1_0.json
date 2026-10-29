@@ -256,7 +256,10 @@
           ],
           "deliverable": "Account×surface capability truth registry",
           "acceptance": "Permission UNKNOWN separate from allowed; no shared AIOS accounts",
-          "status": "PLANNED"
+          "status": "VERIFIED_FOR_OFFLINE_A07_V1",
+          "implementation_work_item_ref": "work_items/A07-CHANNEL-CAPABILITY-001.json",
+          "verification_ref": "https://github.com/trung-via/ai-commerce/actions/runs/40824806875",
+          "published_main_sha": "0e57caf9d23b0aae01627490a42f3de2068f95c8"
         },
         {
           "id": "A08",
@@ -490,6 +493,8 @@
     "EF02_implementation_ref": "work_items/EF02-MULTI-ACTION-001.json",
     "optional_ef_enhancements": "EF01-R_IMPLEMENTED_2026_10_28; EF01-P_MT01_PLANNED; EF02_CHAT_WAKE_PLANNED",
     "A06": "VERIFIED_FOR_OFFLINE_E01_CI_40819125799",
-    "M1": "OFFLINE_E01_ACCEPTED_2026_10_29"
+    "M1": "OFFLINE_E01_ACCEPTED_2026_10_29",
+    "A07": "VERIFIED_FOR_OFFLINE_D01_CI_40824806875_MAIN_0e57caf9",
+    "A07_implementation_ref": "work_items/A07-CHANNEL-CAPABILITY-001.json"
   }
 }
