@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .adapters import command_for
+from .git_write_guard import GIT_GUARD_INSTRUCTION, git_write_guard_env
 from .profile import ExecutorSelection
 from .git import git_argv, resolve_git_executable
 from .minimum_test import file_hashes
@@ -133,7 +134,8 @@ def _headless_denied_actions(data: bytes, executor: str) -> list[str]:
 def _run_codex_with_live_event_mirror(command: list[str], *,
                                       repo: Path, stdin_text: str | None,
                                       timeout_seconds: int,
-                                      live_path: Path) -> subprocess.CompletedProcess[str]:
+                                      live_path: Path,
+                                       env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     """Opt-in Codex JSONL mirror, observable BEFORE process completion.
 
     The default EF01 provider route is unchanged. This opt-in path records the
@@ -161,7 +163,7 @@ def _run_codex_with_live_event_mirror(command: list[str], *,
     proc = subprocess.Popen(
         command, cwd=repo, stdin=subprocess.PIPE,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, encoding="utf-8", errors="replace", bufsize=1,
+        text=True, encoding="utf-8", errors="replace", bufsize=1, env=env,
     )
     out_reader = threading.Thread(
         target=drain, args=(proc.stdout, stdout_parts, live_path), daemon=True)
@@ -428,13 +430,16 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         status, error = problem or ("SOURCE_DRIFT", "WORKTREE_CHANGED_BETWEEN_INVOCATIONS")
         inv.update(status=status, error_code=error)
         return
-    command, stdin = command_for(selection, repo, prompt, codex_bin=codex_bin,
+    # Preserve the original instruction evidence; guard only the provider wire prompt.
+    guarded_prompt = GIT_GUARD_INSTRUCTION + "\n\n" + prompt
+    command, stdin = command_for(selection, repo, guarded_prompt, codex_bin=codex_bin,
                                  antigravity_bin=antigravity_bin,
                                  codex_windows_sandbox=codex_windows_sandbox)
     if selection.executor == "antigravity" and _windows_command_units(command) > AGY_COMMANDLINE_MAX_UNITS:
         # Preserve the complete original instruction/feedback on disk. Shorten only
         # the transported --print argument; never truncate recorded diagnostics.
         compact = (
+            GIT_GUARD_INSTRUCTION + " "
             "Read and follow the complete authorized instruction file "
             + str(directory / "instruction.txt") + " (UTF-8; SHA256 "
             + _sha(prompt.encode("utf-8")) + "). "
@@ -448,6 +453,8 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         if _windows_command_units(command) > AGY_COMMANDLINE_MAX_UNITS:
             raise ValueError("AGY_COMMANDLINE_LIMIT_EXCEEDED")
         save("transport_instruction", "transport_instruction.txt", compact.encode("utf-8"))
+    # Hook configuration applies only to the executor; EF02 owns publication.
+    child_env = git_write_guard_env(directory)
     budget = _remaining(deadline, timeout_seconds)
     boundary = {
         "kind": "AI_COMMERCE_EF01_PROVIDER_BOUNDARY", "version": 1,
@@ -466,11 +473,12 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         if selection.executor == "codex" and os.environ.get("AI_COMMERCE_EF01_CODEX_STREAM_EVENTS") == "1":
             live = (output_dir if inv["repair_round"] == 0 else directory) / "executor.stdout.live.jsonl"
             process = _run_codex_with_live_event_mirror(
-                command, repo=repo, stdin_text=stdin, timeout_seconds=budget, live_path=live)
+                command, repo=repo, stdin_text=stdin, timeout_seconds=budget,
+                live_path=live, env=child_env)
         else:
             process = subprocess.run(command, cwd=repo, input=stdin, capture_output=True,
                                      text=True, encoding="utf-8", errors="replace",
-                                     timeout=budget, check=False)
+                                     timeout=budget, check=False, env=child_env)
         inv.update(status="EXECUTOR_RETURNED_UNVERIFIED", executor_exit_code=process.returncode)
         out, err = process.stdout.encode("utf-8"), process.stderr.encode("utf-8")
         save("provider_return_observed", "provider_return_observed.json", _json_bytes({
@@ -753,6 +761,7 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
         "sandbox_policy": "workspace-write" if selection.executor == "codex" else "accept-edits",
         "source_base_sha": initial["git_head_after"], "repo": str(repo),
         "git_executable": git_executable or "git", "minimum_test_enabled": minimum_test,
+        "git_write_guard": "EXECUTOR_SCOPED_HOOKS_PLUS_POST_HEAD_CHECK",
         "instruction_sha256": _sha(instruction.encode("utf-8")),
         "status": "NOT_STARTED", "error_code": None, "executor_invoked": False,
         "executor_exit_code": None, "verify_argv": list(verify_argv), "verify_exit_code": None,
