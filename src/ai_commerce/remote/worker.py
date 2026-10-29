@@ -15,7 +15,7 @@ from .validation import fingerprint, check_source
 from .reuse import load_approved_candidates, approve_reuse
 from ai_commerce.engineering.runner import (
     DEFAULT_MAX_REPAIR_ROUNDS, DEFAULT_ACTION_TIMEOUT_SECONDS,
-    validate_max_repair_rounds, _snapshot,
+    validate_max_repair_rounds, _snapshot, _provider_problem,
 )
 
 def _remote_codex_sandbox_args(executor: str, *, windows: bool) -> list[str]:
@@ -43,25 +43,18 @@ def _write_json(path: Path, obj: dict) -> None:
 def _classify_failed_executor(report: dict, evidence: Path) -> str:
     if report.get("status") != "EXECUTOR_FAILED":
         return report.get("status", "EXECUTION_UNKNOWN")
-    messages = ""
+    chunks: list[bytes] = []
     for key, name in (("executor_stderr", "executor.stderr.log"),
                       ("executor_stdout", "executor.stdout.log")):
         path = (evidence / report.get("evidence_files", {}).get(key, name)).resolve()
         if evidence.resolve() not in path.parents:
             continue
         if path.exists():
-            # Preserve full file on disk; classification only needs bounded prefix.
-            with path.open("rb") as f:
-                messages += f.read(1024 * 1024).decode("utf-8", "replace").lower()
-    if any(x in messages for x in ("selected model is at capacity",
-                                    "model is at capacity", "no capacity available")):
-        return "MODEL_AT_CAPACITY"
-    if any(x in messages for x in ("resource_exhausted", "quota exceeded",
-                                    "quota reached", "429 too many requests")):
-        return "QUOTA_EXHAUSTED"
-    if any(x in messages for x in ("model_not_found", "model is not supported",
-                                    "unknown model")):
-        return "MODEL_UNSUPPORTED"
+            with path.open("rb") as stream:
+                chunks.append(stream.read(1024 * 1024))
+    problem = _provider_problem(b"\n".join(chunks))
+    if problem and problem[0] in ("MODEL_AT_CAPACITY", "QUOTA_EXHAUSTED", "MODEL_UNSUPPORTED"):
+        return problem[0]
     return "EXECUTOR_FAILED"
 
 class LocalBatchWorker:

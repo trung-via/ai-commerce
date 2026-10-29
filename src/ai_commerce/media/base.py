@@ -82,6 +82,14 @@ class MediaValidationError(MediaProviderError):
                          cost=Cost("NOT_APPLICABLE"))
 
 
+class MediaDependencyError(MediaProviderError):
+    """A local format decoder was unavailable, so validity is unverified."""
+
+    def __init__(self, detail: str):
+        super().__init__("MEDIA_DEPENDENCY_UNAVAILABLE", detail, side_effects="NONE",
+                         cost=Cost("NOT_APPLICABLE"))
+
+
 class MediaProviderTimeout(MediaProviderError, TimeoutError):
     def __init__(self, detail: str = "Provider outcome requires reconciliation"):
         super().__init__("PROVIDER_TIMEOUT", detail)

@@ -14,6 +14,7 @@ from ai_commerce.media import (
     MediaProviderError, MediaRequest, MediaValidationError, MockMediaProvider,
 )
 from ai_commerce.media.local import validate_media
+from ai_commerce.media.files import FileCapture, SUPPORTED_MIME_KINDS, validate_media_file
 from .errors import (
     JobCollisionError, ManifestValidationError, MediaOperationError, RetryUnsafeError,
 )
@@ -46,12 +47,49 @@ class LocalMediaRunner:
             raise ManifestValidationError("A final manifest cannot be RUNNING")
         artifact = manifest.result["artifact"]
         if artifact is not None:
-            self.registry.verify(artifact)
+            if artifact["mime_type"] in {"image/jpeg", "image/webp", "video/mp4"}:
+                self.registry.verify_file(artifact)
+            else:
+                self.registry.verify(artifact)
         return manifest
 
     def run(self, request: MediaRequest, *, job_id: str | None = None, attempt: int = 1,
             provider: MediaProvider | None = None) -> AssetJobManifest:
         record, media_input, snapshot, service = self._prepare(request, provider)
+        return self._run_prepared(request, record, media_input, snapshot, service,
+                                  job_id=job_id, attempt=attempt)
+
+    def import_file(self, request: MediaRequest, *, job_id: str | None = None,
+                    attempt: int = 1) -> AssetJobManifest:
+        """Explicit opt-in streaming import; original run()/providers stay V1."""
+        if not isinstance(request, MediaRequest) or request.mode != "import" or request.source_path is None:
+            raise MediaValidationError("File import requires import mode and a local source")
+        with self.registry.capture_file(request.source_path) as captured:
+            validate_media_file(captured.path, request.mime_type)
+            caps = MediaCapabilities("local-validated-file-import", "LOCAL_IMPORT",
+                                     ("import",), tuple(SUPPORTED_MIME_KINDS))
+            record = strict_json(canonical_bytes({
+                "mode": "import", "mime_type": request.mime_type,
+                "input": {"source_ref": captured.source_ref, "requested_ref": captured.requested_ref,
+                          "sha256": captured.sha256, "size_bytes": captured.size_bytes},
+                "rights_status": request.rights_status, "rights_ref": request.rights_ref,
+                "provider": asdict(caps),
+            }))
+            try:
+                validate_request(record)
+            except (ValueError, TypeError) as exc:
+                raise MediaValidationError(str(exc)) from exc
+            snapshot = {
+                "snapshot_id": "snapshot:" + captured.sha256, "source_ref": captured.source_ref,
+                "source_kind": "LOCAL_MEDIA_FILE", "captured_at": timestamp_utc(),
+                "sha256": captured.sha256, "verification_status": "SOURCE_OBSERVED",
+                "rights_status": request.rights_status,
+            }
+            return self._run_prepared(request, record, None, snapshot, None,
+                                      job_id=job_id, attempt=attempt, captured=captured)
+
+    def _run_prepared(self, request, record, media_input, snapshot, service, *,
+                      job_id, attempt, captured: FileCapture | None = None) -> AssetJobManifest:
         digest = sha256_bytes(canonical_bytes(record))
         job_id = job_id if job_id is not None else "media-" + digest
         final_ref = self.manifest_ref(job_id, attempt)
@@ -94,20 +132,28 @@ class LocalMediaRunner:
             self._save(started_ref, started)
             stage, cost, artifact = "PROVIDER", Cost(), None
             try:
-                output = service.produce(media_input)
-                stage = "REGISTER"
-                if not isinstance(output, MediaOutput) or not isinstance(output.cost, Cost):
-                    raise MediaValidationError("Expected typed media output and cost")
-                cost = output.cost
-                if output.mime_type != record["mime_type"]:
-                    raise MediaValidationError("Provider returned an unrequested MIME")
-                if request.mode == "import" and output.content != media_input.content:
-                    raise MediaValidationError("Local import changed the true source bytes")
-                artifact = self.registry.register(
-                    output.content, output.mime_type, provider=record["provider"]["name"],
-                    snapshot=snapshot, mode=request.mode, origin=record["provider"]["origin"],
-                    rights_ref=request.rights_ref,
-                )
+                if captured is not None:
+                    stage, cost = "REGISTER", Cost("NOT_APPLICABLE")
+                    artifact = self.registry.register_file(
+                        captured.path, request.mime_type, provider=record["provider"]["name"],
+                        snapshot=snapshot, mode="import", origin="LOCAL_IMPORT",
+                        rights_ref=request.rights_ref,
+                    )
+                else:
+                    output = service.produce(media_input)
+                    stage = "REGISTER"
+                    if not isinstance(output, MediaOutput) or not isinstance(output.cost, Cost):
+                        raise MediaValidationError("Expected typed media output and cost")
+                    cost = output.cost
+                    if output.mime_type != record["mime_type"]:
+                        raise MediaValidationError("Provider returned an unrequested MIME")
+                    if request.mode == "import" and output.content != media_input.content:
+                        raise MediaValidationError("Local import changed the true source bytes")
+                    artifact = self.registry.register(
+                        output.content, output.mime_type, provider=record["provider"]["name"],
+                        snapshot=snapshot, mode=request.mode, origin=record["provider"]["origin"],
+                        rights_ref=request.rights_ref,
+                    )
                 final = self._manifest(job_id, attempt, record, snapshot, "SUCCEEDED",
                                        "COMPLETE", cost, artifact)
             except MediaProviderError as exc:
@@ -152,6 +198,8 @@ class LocalMediaRunner:
         if request.source_path is not None:
             if request.mode == "mock":
                 raise MediaValidationError("Mock does not import a real source")
+            if mime not in {"image/png", "video/x-msvideo"}:
+                raise MediaValidationError("V1 bytes import supports PNG/AVI; explicitly use import_file() for JPEG/WebP/MP4")
             path = Path(request.source_path)
             try:
                 resolved = path.resolve(strict=True)
