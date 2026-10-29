@@ -1,7 +1,7 @@
 {
   "work_id": "A11-AUDIENCE-LEARNING-001",
   "title": "A11 v1 — Audience Learning Registry (L03 + L06)",
-  "status": "ACCEPTED_FOR_WORK",
+  "status": "BUILD_VERIFIED_FOR_SCOPE",
   "roadmap_id": "A11",
   "phase": 3,
   "milestone": "M4",
@@ -117,9 +117,42 @@
     "authorization_ref": "human-chat-2026-10-29-ai-commerce-engineering-workflow-implement-a11-deep-research"
   },
   "verification_result": {
-    "state": "NOT_YET_VERIFIED",
-    "candidate_ref": null,
-    "ci_runs": [],
-    "evidence_boundary": "Accepted for implementation; WorkItem creation/EF02 dispatch is not implementation PASS, candidate integration, merge or live commercial outcome."
+    "state": "PASSED_HOSTED_CI_AND_MERGED_MAIN",
+    "reviewed_at": "2026-10-30",
+    "scope": "A11_V1_L03_L06_OFFLINE_FIRST_PROVENANCE_BOUNDED_LEARNING_AND_ADVISORY_EXPORT",
+    "source_issues": [
+      "https://github.com/trung-via/ai-commerce/issues/95",
+      "https://github.com/trung-via/ai-commerce/issues/96",
+      "https://github.com/trung-via/ai-commerce/issues/97",
+      "https://github.com/trung-via/ai-commerce/issues/99"
+    ],
+    "final_candidate_sha": "0f04671a633b1914f9eb510c68585b6ab9d57af9",
+    "candidate_ref": "refs/heads/ef02/candidate/bb7615ae6478e168153c3ed3cdccbebf",
+    "published_main_pr": "https://github.com/trung-via/ai-commerce/pull/103",
+    "published_main_sha": "39a5f10ee366cb286afd675c49ae1a34767af049",
+    "integrated_branch_head": "2fd59dfa5dd1ed1e41386bfbdd3e2bf37cde3a35",
+    "ci_runs": [
+      "https://github.com/trung-via/ai-commerce/actions/runs/40964066640",
+      "https://github.com/trung-via/ai-commerce/actions/runs/40971422045",
+      "https://github.com/trung-via/ai-commerce/actions/runs/40971422017",
+      "https://github.com/trung-via/ai-commerce/actions/runs/40971422037",
+      "https://github.com/trung-via/ai-commerce/actions/runs/40971422085"
+    ],
+    "ci": {
+      "combined_ubuntu_full": "1749 passed, 1 skipped; pytest -n 12",
+      "combined_windows_full": "1750 passed; pytest -n 12",
+      "combined_ubuntu_m02": "77 passed",
+      "combined_windows_m02": "77 passed",
+      "a06_a07_a08_check_matrix": "6/6 PASS",
+      "total_pr103_checks": "8/8 PASS"
+    },
+    "criterion_scope": "AC01-AC08 implemented and regression-verified within offline synthetic/user-supplied scope. A11-03/04 candidates from EF02 #99; exact 68 A11 Git blobs reused on PR #103, no overwrites of post-baseline EF01/EF02 code.",
+    "limitations": [
+      "Offline-first; user-supplied source status is USER_SUPPLIED_NOT_LIVE_VERIFIED",
+      "No native provider analytics access, OAuth, public social post, affiliate link entitlement, orders or settled earnings",
+      "No demonstrated causal lift; comparability and uncertainty remain explicit",
+      "No mandatory Creative Reasoner decision gate or autonomous publishing; A11 is advisory",
+      "M4 is not complete: A12, A13 and A14 remain planned"
+    ]
   }
 }
