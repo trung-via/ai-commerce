@@ -1,0 +1,217 @@
+{
+  "action": "A10-M04",
+  "work_item": "work_items/A10-OPPORTUNITY-AUDIENCE-001.json",
+  "status": "LOCALLY_VERIFIED_FOR_M04_SCOPE",
+  "requested_executor": {
+    "executor": "codex",
+    "model": "gpt-6.1-sol",
+    "effort": "max"
+  },
+  "source": {
+    "effective_head": "7e1f5f22274ea8ae1e238d0126f16ef4fc7f7e5d",
+    "tree": "739cb053e15b166a52cdca9e19a5eacdaab6fd11",
+    "parent_recovery_integration": "1d839bbbe8f49c5e7ad0ef2a89f7f89578a0a1fe",
+    "starting_worktree_clean": true,
+    "original_file_count": 297,
+    "original_file_bytes_unchanged": true,
+    "all_14_m01_recovery_blobs_preserved": true,
+    "m01_blob_evidence": ".local/a10-m04/m01-blob-preservation.json"
+  },
+  "environment": {
+    "platform": "win32",
+    "python_version": "3.14.7",
+    "pytest": "8.4.2",
+    "xdist": "3.8.0"
+  },
+  "runs": [
+    {
+      "name": "untouched_integrated_baseline",
+      "argv": [
+        "python",
+        "-m",
+        "pytest",
+        "tests",
+        "-q",
+        "-n",
+        "12"
+      ],
+      "head": "7e1f5f22274ea8ae1e238d0126f16ef4fc7f7e5d",
+      "tree": "739cb053e15b166a52cdca9e19a5eacdaab6fd11",
+      "exit_code": 0,
+      "summary": "1317 passed, 5 skipped in 147.04s (0:02:27)",
+      "stdout_sha256": "9cdbf32dc052da3e68bd5f5d8a64db838ff2b259a13033d297cf99aefc05f8ad",
+      "local_log": ".local/a10-m04/baseline-project-tests.log",
+      "observed_workers": null
+    },
+    {
+      "name": "initial_affected_verification",
+      "argv": [
+        "python",
+        "-m",
+        "pytest",
+        "tests/test_a10_m04.py",
+        "src/ai_commerce/opportunity/trends/tests/test_m02.py",
+        "tests/test_a10_m01.py",
+        "tests/test_a10_m03.py",
+        "-q"
+      ],
+      "exit_code": 0,
+      "summary": "283 passed in 18.52s",
+      "stdout_sha256": "bbf9b0c2935b4d36626dd0465f355076cd30eacc796ca8039c44577d565d080c",
+      "local_log": ".local/a10-m04/targeted-initial.log",
+      "observed_workers": null
+    },
+    {
+      "name": "final_affected_verification",
+      "argv": [
+        "python",
+        "-m",
+        "pytest",
+        "tests/test_a10_m04.py",
+        "src/ai_commerce/opportunity/trends/tests/test_m02.py",
+        "tests/test_a10_m01.py",
+        "tests/test_a10_m03.py",
+        "-q"
+      ],
+      "exit_code": 0,
+      "summary": "285 passed in 14.85s",
+      "stdout_sha256": "839604054c445d4d25fc0882df4b459b710b1ccd52399a229184f041c93d4689",
+      "local_log": ".local/a10-m04/targeted-final.log",
+      "observed_workers": null
+    },
+    {
+      "name": "final_full_project_verification",
+      "argv": [
+        "python",
+        "-m",
+        "pytest",
+        "tests",
+        "-q",
+        "-n",
+        "12",
+        "-v"
+      ],
+      "registered_profile": "project-tests",
+      "added_observation_option": "-v",
+      "exit_code": 0,
+      "summary": "1406 passed, 5 skipped in 173.56s (0:02:53)",
+      "stdout_sha256": "f1f05a9fc3f07561dceadd36b947e67c29f8f2a6c03559bb85897640c037dec6",
+      "local_log": ".local/a10-m04/final-project-tests.log",
+      "observed_workers": 12
+    }
+  ],
+  "skips": {
+    "count": 5,
+    "reason": "Existing Windows host symlink/junction/hardlink permission limitations"
+  },
+  "failure_preservation": {
+    "failing_test_runs": 0,
+    "internal_repair_rounds": 0,
+    "review_refinements": 1,
+    "review_refinement": "Use an eligible linked caller note in the creative objective, with discriminating tests; retain original successful verification evidence."
+  },
+  "scope": {
+    "allowed_directory": "src/ai_commerce/opportunity/proposals/",
+    "allowed_flat_files": [
+      "contracts/OpportunityProposal.v1.schema.json",
+      "tests/test_a10_m04.py"
+    ],
+    "out_of_scope_files": [],
+    "protected_or_existing_file_changes": [],
+    "changed_paths": [
+      "contracts/OpportunityProposal.v1.schema.json",
+      "src/ai_commerce/opportunity/proposals/README.md",
+      "src/ai_commerce/opportunity/proposals/__init__.py",
+      "src/ai_commerce/opportunity/proposals/planning.py",
+      "src/ai_commerce/opportunity/proposals/schemas.py",
+      "src/ai_commerce/opportunity/proposals/verification.json",
+      "tests/test_a10_m04.py"
+    ],
+    "verified_payload_sha256": {
+      "contracts/OpportunityProposal.v1.schema.json": "f4d0f1bc1f78bf4bc4a69b642f525e1cc52be8a65384a725701134e8d5006d2f",
+      "src/ai_commerce/opportunity/proposals/README.md": "2f101d0259caf4f8cbb96df93b139a0594110e94bae0bcd6503173543c6a8ab5",
+      "src/ai_commerce/opportunity/proposals/__init__.py": "27a58e60347cf3e8c20ffc141870316e17a8064e5593349c3664a44535c5c4ec",
+      "src/ai_commerce/opportunity/proposals/planning.py": "0cfdbca1f354d7ee5f63640fc5c0243253e0aa78c6e947d0f9c618c22e066fec",
+      "src/ai_commerce/opportunity/proposals/schemas.py": "04a5c82766b669c1fd443e5aa84123953d72bf384f0fc6d9b7cac3fefb1b1f43",
+      "tests/test_a10_m04.py": "a0b4b8f068aa5c0ce63f8eeee8aff0f3e2526d152ddf4be3da2177d06505fa8d"
+    },
+    "evidence_note": "This verification metadata is generated after successful tests; the six payload files retain their tested bytes. EF01/EF02 must reconcile the complete returned tree before publication."
+  },
+  "acceptance_review": [
+    {
+      "criterion": "AC06 / deterministic evidence-linked content hypotheses",
+      "verdict": "SATISFIED_FOR_LOCAL_M04_SCOPE",
+      "tests": [
+        "test_genuine_fan_in_replays_sources_and_preserves_negative_evidence",
+        "test_linked_note_changes_the_creative_hypothesis_without_claiming_demand"
+      ]
+    },
+    {
+      "criterion": "Empty, sparse, contradictory, stale and future evidence",
+      "verdict": "SATISFIED_FOR_LOCAL_M04_SCOPE",
+      "tests": [
+        "test_empty_inputs_and_empty_components_do_not_create_evidence",
+        "test_sparse_or_missing_history_is_never_a_positive_trend",
+        "test_contradictory_and_negative_history_retains_counterevidence",
+        "test_stale_sources_are_explicit_and_note_age_is_not_refreshed",
+        "test_future_evidence_cannot_supply_positive_direction"
+      ]
+    },
+    {
+      "criterion": "No source laundering or identity mismatch",
+      "verdict": "SATISFIED_FOR_LOCAL_M04_SCOPE",
+      "tests": [
+        "test_valid_content_hash_cannot_launder_omitted_signal",
+        "test_valid_content_hash_cannot_launder_forged_raw_provenance",
+        "test_unrelated_identities_never_join_by_topic_or_source_label",
+        "test_corrupted_m01_evidence_is_rejected",
+        "test_missing_and_corrupted_audience_evidence_is_rejected"
+      ]
+    },
+    {
+      "criterion": "Stable ordering, content-only/manual override, nullable creative inputs",
+      "verdict": "SATISFIED_FOR_LOCAL_M04_SCOPE",
+      "tests": [
+        "test_stable_order_deduplication_and_caller_inputs_do_not_mutate",
+        "test_manual_idea_is_exact_optional_and_content_only",
+        "test_creative_override_cannot_change_evidence_or_authority",
+        "test_creative_format_is_an_optional_exploration_without_mandatory_media"
+      ]
+    },
+    {
+      "criterion": "No introduced PII fields; common contacts rejected, source metadata omitted",
+      "verdict": "SATISFIED_WITH_DOCUMENTED_SCANNER_LIMIT",
+      "tests": [
+        "test_personal_contacts_are_rejected_with_bounded_errors",
+        "test_private_source_metadata_is_not_copied_or_laundered"
+      ],
+      "limit": "Callers must deidentify inputs; prose names and indirect identifiers are not universally recognizable."
+    },
+    {
+      "criterion": "AC10 / offline, suggestion-only, no action authority",
+      "verdict": "SATISFIED_FOR_LOCAL_M04_SCOPE",
+      "evidence": "Autouse network socket guard covers all M04 tests; schemas pin hypothesis, rights UNKNOWN, suggestion-only and NOT_ATTEMPTED. Product code uses only local ledger reads and has no write/provider/paid-model path."
+    },
+    {
+      "criterion": "AC09 / exact integrated Windows regression",
+      "verdict": "SATISFIED_LOCALLY",
+      "evidence": "Final 1406 passed, 5 host permission skips; 12/12 workers created. M02 component-local tests explicitly included in the separate affected run."
+    },
+    {
+      "criterion": "AC09 / actual Ubuntu CI",
+      "verdict": "UNPROVEN_IN_THIS_ACTION"
+    },
+    {
+      "criterion": "AC07/AC08 complete A03 bridge and source-to-brief demo",
+      "verdict": "OUTSIDE_M04_ACTION_REQUIRES_M05"
+    }
+  ],
+  "delivery": {
+    "mode": "CANDIDATE_BRANCH",
+    "candidate_sha": null,
+    "candidate_ref": null,
+    "publication_status": "PENDING_EF01_EF02_VERIFICATION_AND_PUBLISHER",
+    "main_merge": "NOT_PERFORMED",
+    "ubuntu_ci": "NOT_RUN"
+  }
+}
