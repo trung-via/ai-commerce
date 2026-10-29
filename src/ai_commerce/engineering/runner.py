@@ -252,12 +252,36 @@ def _snapshot(repo: Path, prefixes: Sequence[str], deadline: float,
     }, diff.stdout
 
 
-def _source_problem(snapshot: dict, initial: dict) -> tuple[str, str] | None:
+def _outside_scope(paths: Sequence[str], prefixes: Sequence[str]) -> list[str]:
+    """Describe ordinary paths requiring scope reconciliation."""
+    return sorted(path for path in paths if not _safe_scope([path], prefixes))
+
+
+def _protected_change(paths: Sequence[str]) -> bool:
+    """Do not execute changed candidate tests after control/credential edits."""
+    for path in paths:
+        normalized = path.replace("\\", "/").lower()
+        parts = normalized.split("/")
+        if (not normalized or normalized.startswith("/") or
+                any(part in ("", ".", "..") for part in parts) or
+                parts[0] in (".git", ".github", ".local", "secrets", "credentials") or
+                any(part == ".env" or part.startswith(".env.") for part in parts)):
+            return True
+    return False
+
+
+def _source_problem(snapshot: dict, initial: dict, *,
+                    verify_first_scope: bool = False) -> tuple[str, str] | None:
     if snapshot["git_head_after"] != initial["git_head_after"]:
         return "GIT_UNEXPECTED_COMMIT", "GIT_HEAD_CHANGED"
     if snapshot["git_dir"] != initial["git_dir"]:
         return "SOURCE_DRIFT", "GIT_WORKTREE_IDENTITY_CHANGED"
-    if not snapshot["scope_valid"]:
+    if _protected_change(snapshot["changed_files"]):
+        return "SCOPE_VIOLATION", "PROTECTED_CHANGED_PATH"
+    if any(str(value).startswith("SYMLINK:") for value in
+           snapshot.get("candidate_file_sha256", {}).values()):
+        return "SCOPE_VIOLATION", "CHANGED_SYMLINK_REQUIRES_REVIEW"
+    if not verify_first_scope and not snapshot["scope_valid"]:
         return "SCOPE_VIOLATION", "CHANGES_OUTSIDE_ALLOWED_SCOPE"
     return None
 
@@ -375,7 +399,8 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
                     codex_windows_sandbox: str | None,
                     git_executable: str | None = None, mt_context: dict | None = None,
                     pytest_profile: str = "windows-12", pytest_isolation_approved: bool = False,
-                    pytest_known_flaky: bool = False, host_slots: int = 1) -> None:
+                    pytest_known_flaky: bool = False, host_slots: int = 1,
+                    verify_first_scope: bool = True) -> None:
     inv = invocation
     directory = output_dir / inv["evidence_dir"]
     directory.mkdir(parents=True, exist_ok=False)
@@ -398,7 +423,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     before, _ = snapshot()
     inv["input_snapshot"] = before
     save("source_before", "source.before.json", _json_bytes(before))
-    problem = _source_problem(before, initial)
+    problem = _source_problem(before, initial, verify_first_scope=verify_first_scope)
     if problem or before != expected:
         status, error = problem or ("SOURCE_DRIFT", "WORKTREE_CHANGED_BETWEEN_INVOCATIONS")
         inv.update(status=status, error_code=error)
@@ -487,6 +512,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         inv.update(usage=usage, usage_status="PROVIDER_REPORTED")
     after, diff = snapshot()
     inv.update(after)
+    inv["out_of_scope_files"] = _outside_scope(after["changed_files"], allowed_prefixes)
     inv["final_snapshot"] = after
     save("source_after_executor", "source.after_executor.json", _json_bytes(after))
     save("executor_diff", "git.after_executor.diff.patch", diff)
@@ -494,7 +520,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     save("tracked_diff", "git.tracked.diff.patch", diff)
     if inv["status"] != "EXECUTOR_RETURNED_UNVERIFIED":
         return
-    problem = _source_problem(after, initial)
+    problem = _source_problem(after, initial, verify_first_scope=verify_first_scope)
     if problem is None and inv["denied_actions"]:
         problem = ("EXECUTOR_PERMISSION_DENIED", "HEADLESS_TOOL_PERMISSION_DENIED")
     if problem is None:
@@ -590,7 +616,8 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     save("verify_diff", "git.after_verify.diff.patch", diff)
     inv["evidence_files"]["tracked_diff"] = inv["evidence_files"]["verify_diff"]
     inv["evidence_sha256"]["tracked_diff"] = inv["evidence_sha256"]["verify_diff"]
-    problem = _source_problem(final, initial)
+    inv["out_of_scope_files"] = _outside_scope(final["changed_files"], allowed_prefixes)
+    problem = _source_problem(final, initial, verify_first_scope=verify_first_scope)
     if problem:
         inv.update(status=problem[0], error_code=problem[1] + "_AFTER_VERIFY")
     elif not final["changed_files"]:
@@ -608,7 +635,12 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
             # A verifier success cannot reconcile an incomplete provider return.
             inv.update(status="EXECUTION_UNKNOWN", error_code="EXECUTOR_OUTCOME_UNCONFIRMED")
         elif inv["verify_exit_code"] == 0:
-            inv.update(status="BUILD_VERIFIED_FOR_SCOPE", error_code=None)
+            if final["scope_valid"]:
+                inv.update(status="BUILD_VERIFIED_FOR_SCOPE", error_code=None)
+            else:
+                inv.update(status="VERIFIED_SCOPE_REVIEW_REQUIRED",
+                           error_code="OUT_OF_SCOPE_FILES_REQUIRE_RECONCILIATION",
+                           scope_review_required=True)
         else:
             inv["repair_eligible"] = _pytest_failure(
                 list(verify_argv), inv["verify_exit_code"], vout, verr)
@@ -649,7 +681,8 @@ def _repair_prompt(instruction: str, feedback: dict, feedback_file: str) -> str:
     )
     return instruction + (
         "\n\nRepair the determinate scoped pytest failure on this SAME worktree. "
-        "Preserve cumulative changes and the original HEAD; stay within the allowed scope. "
+        "Preserve cumulative changes and the original HEAD. "
+        "Unexpected ordinary paths remain scope-review evidence, not publication permission. "
         "This is a fresh CLI invocation; no vendor session continuity is assumed. "
         "Read the full feedback, source snapshot (changed paths/hashes), logs and diffs "
         "referenced relative to evidence_root. Earlier round diagnostics remain in those artifacts.\n"
@@ -668,7 +701,8 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                     registered_only: bool = False, aggregate_sources: Sequence[str] = (),
                     pytest_profile: str = "windows-12", pytest_isolation_approved: bool = False,
                     pytest_known_flaky: bool = False, host_slots: int = 1,
-                    registered_profiles: dict[str, list[str]] | None = None) -> dict[str, Any]:
+                    registered_profiles: dict[str, list[str]] | None = None,
+                    verify_first_scope: bool = True) -> dict[str, Any]:
     """One attempt on an initially clean tree, with bounded same-profile repairs.
 
     Only a completed scoped pytest code failure permits repair. Each CLI call is
@@ -730,6 +764,8 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
         "max_repair_rounds": max_repair_rounds, "action_timeout_seconds": action_timeout_seconds,
         "timeout_seconds": timeout_seconds, "verify_timeout_seconds": verify_timeout_seconds,
         "allowed_prefixes": list(allowed_prefixes),
+        "verify_first_scope": verify_first_scope,
+        "out_of_scope_files": [], "scope_review_required": False,
         "invocations": [], "repair_rounds_used": 0, "stop_reason": None,
     }
     output_dir.mkdir(parents=True, exist_ok=False)
@@ -747,6 +783,7 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                 "verify_argv": list(verify_argv), "verify_exit_code": None, "verify_completed": False,
                 "changed_files": [], "candidate_file_sha256": {}, "tracked_diff_sha256": None,
                 "scope_valid": None, "git_head_after": None, "denied_actions": [],
+                "out_of_scope_files": [], "scope_review_required": False,
                 "usage": None, "usage_status": "UNKNOWN", "cost": None, "cost_status": "UNKNOWN",
                 "evidence_files": {}, "evidence_sha256": {}, "repair_eligible": False,
                 "replay_authorized": False, "provider_return_determinate": False,
@@ -775,7 +812,8 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                     antigravity_bin=antigravity_bin, codex_windows_sandbox=codex_windows_sandbox,
                     git_executable=git_executable, mt_context=mt_context,
                     pytest_profile=pytest_profile, pytest_isolation_approved=pytest_isolation_approved,
-                    pytest_known_flaky=pytest_known_flaky, host_slots=host_slots)
+                    pytest_known_flaky=pytest_known_flaky, host_slots=host_slots,
+                    verify_first_scope=verify_first_scope)
             except Exception as exc:
                 inv.update(status="EXECUTION_UNKNOWN",
                            error_code="ACTION_TIMEOUT" if isinstance(exc, TimeoutError) else "RUNNER_ERROR",
@@ -788,7 +826,8 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                 inv["result_file"] = inv["evidence_dir"] + "/invocation_result.json"
                 for key in ("status", "error_code", "executor_exit_code", "verify_exit_code",
                             "changed_files", "candidate_file_sha256", "tracked_diff_sha256",
-                            "scope_valid", "git_head_after", "denied_actions", "evidence_files"):
+                            "scope_valid", "git_head_after", "denied_actions", "evidence_files",
+                            "out_of_scope_files", "scope_review_required"):
                     report[key] = inv[key]
                 for key in ("minimum_test", "pytest_profile", "pytest_profiles", "observed_pytest_workers"):
                     if key in inv:
