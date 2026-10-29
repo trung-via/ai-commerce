@@ -226,6 +226,33 @@ def _sources(snapshots, reports) -> tuple[dict, list[dict]]:
     return facts, sorted(report_sources, key=lambda item: item["report_ref"]["report_id"])
 
 
+def _report_arithmetic(body: dict, facts: list[dict]) -> None:
+    """Check the existing report API's SUM/MEAN/COUNT against archived facts.
+
+    v1 has no aggregation field; accept its three supported calculations, never
+    an arbitrary resealed numerator. A supplied denominator is a declaration,
+    not independently verified exposure. Source-derived denominators are retained
+    by the report; reopening cannot claim a new raw-source calculation.
+    """
+    measurement = body["measurement"]
+    values = [fact["value"] for fact in facts if fact["status"] == "AVAILABLE"]
+    if not values:
+        require(measurement["status"] == "NOT_AVAILABLE"
+                and all(measurement[key] is None for key in ("value", "numerator", "denominator")),
+                "REPORT_ARITHMETIC_MISMATCH")
+        return
+    numerator, denominator = measurement["numerator"], measurement["denominator"]
+    require(numerator in (sum(values), sum(values) / len(values), float(len(values))),
+            "REPORT_ARITHMETIC_MISMATCH")
+    if denominator == 0 or (denominator is None and body["metric"]["denominator"] is not None):
+        require(measurement["status"] == "INSUFFICIENT_DATA" and measurement["value"] is None,
+                "REPORT_ARITHMETIC_MISMATCH")
+    else:
+        expected = numerator if denominator is None else numerator / denominator
+        require(measurement["status"] == "AVAILABLE" and measurement["value"] == expected
+                and measurement["reason"] is None, "REPORT_ARITHMETIC_MISMATCH")
+
+
 def _validate_bundle(bundle: dict) -> None:
     require(set(bundle) == {"schema_version", "registry_version", "verification_scope", "hypothesis",
                            "evidence", "record", "revision", "observation_sources", "report_sources"},
@@ -295,6 +322,7 @@ def _validate_bundle(bundle: dict) -> None:
         require(body["measurement"]["unit"] == body["metric"]["unit"], "REPORT_UNIT_MISMATCH")
         if not body["available_count"]:
             require(body["measurement"]["status"] == "NOT_AVAILABLE", "REPORT_MISSINGNESS_MISMATCH")
+        _report_arithmetic(body, report_facts)
     used_reports, seen_observations = set(), set()
     primary = {ref["evidence_id"] for ref in record["evidence_refs"]}
     counters = {ref["evidence_id"] for ref in record["counterevidence_refs"]}
@@ -401,6 +429,35 @@ class LearningEntry:
     @property
     def revision_id(self) -> str:
         return self.to_dict()["revision"]["revision_id"]
+
+
+def validate_history(entries) -> tuple[LearningEntry, ...]:
+    """Validate a complete archived chain, without reopening A09 or a database.
+
+    A caller-held export ID is needed to detect replacement or suffix truncation.
+    Local hashes alone are not an external attestation of the observations.
+    """
+    require(type(entries) in (list, tuple) and len(entries) <= MAX_EVENTS, "REGISTRY_CAPACITY_EXCEEDED")
+    previous_hash, latest, total = _ZERO, {}, 0
+    for sequence, entry in enumerate(entries, 1):
+        require(type(entry) is LearningEntry and type(entry.sequence) is int
+                and entry.sequence == sequence, "REGISTRY_CHAIN_MISMATCH")
+        raw = entry.to_bytes()
+        require(type(raw) is bytes and 0 < len(raw) <= MAX_ENTRY_BYTES, "REGISTRY_ENTRY_TOO_LARGE")
+        total += len(raw)
+        require(total <= MAX_DATABASE_BYTES, "REGISTRY_CAPACITY_EXCEEDED")
+        bundle = parse_json(raw)
+        require(bounded_bytes(bundle) == raw, "REGISTRY_NONCANONICAL_PAYLOAD")
+        _validate_bundle(bundle)
+        revision = bundle["revision"]
+        previous = latest.get(revision["learning_key"])
+        _lineage(bundle, previous)
+        previous_id = None if previous is None else previous["revision"]["revision_id"]
+        require(entry.event_hash == _event_hash(sequence, revision["revision_id"], revision["learning_key"],
+                revision["revision"], previous_id, sha256_bytes(raw), previous_hash), "REGISTRY_CHAIN_MISMATCH")
+        previous_hash = entry.event_hash
+        latest[revision["learning_key"]] = bundle
+    return tuple(entries)
 
 
 class LearningRegistry:

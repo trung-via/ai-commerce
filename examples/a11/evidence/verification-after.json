@@ -1,0 +1,28 @@
+{
+  "code_files": 169,
+  "code_hashes_unchanged": true,
+  "code_manifest": "verification-before.json",
+  "effective_source_sha": "71b24c25ad80d3900c333d6ed1312be629161c23",
+  "observed_at": "2026-10-29T22:53:41.184492+00:00",
+  "publication": "PENDING_EXISTING_EF02_PUBLISHER",
+  "result": {
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "tests",
+      "-q",
+      "-n",
+      "12"
+    ],
+    "elapsed_seconds": 258.7049764,
+    "exit_code": 0,
+    "finished_at": "2026-10-29T22:52:49.5416909+00:00",
+    "started_at": "2026-10-29T22:48:30.7737496+00:00"
+  },
+  "stdout_sha256": "44937d58db2150dd9b55f65c83adb5c78ecdff443c6b1e9010c8fd96e8e87d9a",
+  "summary": "1691 passed, 8 skipped in 257.73s (0:04:17)",
+  "ubuntu": "UNPROVEN",
+  "verification_profile": "project-tests",
+  "verified_code_map_sha256": "6e314248744243eb6e533c889d329d734e49847527e92403f3dcc4173b5dd67a"
+}

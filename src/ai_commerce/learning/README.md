@@ -1,8 +1,10 @@
 # A11-01 foundation API
 
-This package provides offline contracts and read-only A09 snapshots for L03/L06.
-It implements no calculations, learning database, CLI, publication operation or
-creative decision. A11-02 and A11-03 can depend independently on this API.
+The foundation provides offline contracts and read-only A09 snapshots for L03/L06.
+A11-02 reporting, A11-03 learning persistence and A11-04 CLI/advisory export now
+use this stable API. See [the integrated offline example](../../../examples/a11/README.md)
+for those consumer surfaces. The foundation itself performs no calculation,
+learning write, publication operation or creative decision.
 
 ```python
 from ai_commerce.learning import SnapshotPin, read_snapshot

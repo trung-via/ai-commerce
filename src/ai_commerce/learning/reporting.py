@@ -436,10 +436,14 @@ def build_performance_report(
             else:
                 denom_key = target_metric["denominator"]
                 denom_values = []
+                denom_definitions = set()
                 for snap in snapshot_objects:
                     for obs in snap.to_dict()["observations"]:
-                        if obs["metric"]["metric_key"] == denom_key and obs["status"] == "AVAILABLE":
-                            denom_values.append(obs["value"])
+                        if obs["metric"]["metric_key"] == denom_key:
+                            denom_definitions.add(digest(obs["metric"]))
+                            if obs["status"] == "AVAILABLE":
+                                denom_values.append(obs["value"])
+                require(len(denom_definitions) <= 1, "AMBIGUOUS_DENOMINATOR_DEFINITION")
                 denom = sum(denom_values) if denom_values else None
 
             if denom is not None:
@@ -466,12 +470,12 @@ def build_performance_report(
                     }
             else:
                 measurement = {
-                    "status": "AVAILABLE",
-                    "value": computed_num,
+                    "status": "INSUFFICIENT_DATA",
+                    "value": None,
                     "unit": target_metric["unit"],
                     "numerator": computed_num,
                     "denominator": None,
-                    "reason": None,
+                    "reason": "Declared denominator quantity is not available",
                 }
         else:
             if denominator_value is not None:
