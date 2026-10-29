@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-commerce.local/schema/MetricDefinition.v1",
+  "title": "MetricDefinition.v1",
+  "description": "A09 offline manual analytics. User-supplied; never live-provider verification.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "MetricDefinition.v1"
+    },
+    "metric_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "provider_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "definition_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "platform": {
+      "enum": [
+        "TIKTOK",
+        "YOUTUBE",
+        "FACEBOOK",
+        "INSTAGRAM"
+      ]
+    },
+    "unit": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "definition": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "denominator": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "cohort": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "comparison_policy": {
+      "const": "NO_CROSS_PROVIDER_EQUIVALENCE"
+    },
+    "source_status": {
+      "const": "USER_SUPPLIED_NOT_LIVE_VERIFIED"
+    }
+  },
+  "required": [
+    "schema_version",
+    "metric_key",
+    "provider_name",
+    "definition_version",
+    "platform",
+    "unit",
+    "definition",
+    "denominator",
+    "cohort",
+    "comparison_policy",
+    "source_status"
+  ],
+  "$defs": {}
+}
