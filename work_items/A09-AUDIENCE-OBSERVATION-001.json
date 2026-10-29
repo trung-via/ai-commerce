@@ -1,0 +1,87 @@
+{
+  "work_id": "A09-AUDIENCE-OBSERVATION-001",
+  "objective": "Implement A09 v1 Audience Growth Observation (L01+L02+E02): deterministic offline-first manual CSV/JSON analytics import with provider-neutral metric/provenance contracts, immutable raw evidence, and truthful A08 publication matching.",
+  "source_decision": "Human ChatGPT AI Commerce 2026-10-29: @AI Commerce Engineering Workflow thực hiện theo Deep Research A09 v1 Offline-First, Manual Analytics Import, Provider-Neutral.",
+  "source_sha": "98ce6f13e689ac1b1c57806c008544bdc5392168",
+  "owner": "Analytics / Distribution E02",
+  "work_ids": [
+    "L01",
+    "L02",
+    "E02"
+  ],
+  "depends_on": [
+    "A08",
+    "G04",
+    "D04",
+    "E01",
+    "D03"
+  ],
+  "status": "ACCEPTED_FOR_WORK",
+  "scope_in": [
+    "L01: versioned MetricDefinition/MeasurementPlan (do not overwrite draft MeasurementPlan.v0.2), explicit period/timezone/denominator/cohort/source_status and NOT_AVAILABLE distinct from zero",
+    "L02: offline CSV and optional user-authored canonical JSON importer, explicit provider adapter/mapping profiles for TikTok/YouTube/Facebook/Instagram with no unverified native export-column assumptions",
+    "L02: immutable raw file bytes, SHA-256, per-source lineage, import ledger SQLite, retry/idempotency within account+mapping+window context, corrections and versioned replay",
+    "L02: safe bounded errors for malformed CSV/encoding/schema/window/timezone/account; protection against path traversal/symlinks/formula injection when exporting any spreadsheet",
+    "E02: re-open actual A08 PublicationJournal receipt, strict (platform,surface,namespace:id) account identity, deterministic exact post ID/URL matching; heuristic candidates never auto-bound; honest MATCHED/PARTIAL/UNMATCHED",
+    "E02: command-line entrypoints; synthetic offline demo with negative cases; Windows/Ubuntu tests; focused MT-01 tests and preserved A06/A07/A08 regressions"
+  ],
+  "scope_out": [
+    "OAuth, official platform API access, scraping, live account entitlement or live analytics verification",
+    "auto-posting, PUBLIC visibility claims from analytics/URL alone, paid external services",
+    "provider-native export format claim without a real sample, fabricated engagement or attribution",
+    "A11 L03/L06 dashboard/trend/causal learning, cross-platform metric equivalence by name, revenue/ROI or autonomous growth optimization",
+    "AIOS-Renew modules, shared credentials or external runner runtime changes",
+    "any automatic merge to main"
+  ],
+  "expected_artifacts": [
+    "contracts/MeasurementPlan.v1.schema.json or narrowly compatible schema evolution",
+    "contracts/AnalyticsImport.v1.schema.json and contracts/PerformanceObservation.v1.schema.json",
+    "src/ai_commerce/analytics/ (provider-neutral importer, mapping, evidence, SQLite ledger, receipt matching)",
+    "src/ai_commerce/cli.py (analytics import/status/match surface)",
+    "tests/test_a09_analytics.py",
+    "tests/test_a09_e02.py",
+    "docs/engineering/A09_IMPLEMENTATION_REPORT.md and optional synthetic offline demo"
+  ],
+  "acceptance": [
+    "AC01: existing MeasurementPlan.v0.2 remains DRAFT and unbroken; new versioned schemas validate required identity, source, window, metric definitions",
+    "AC02: user-provided CSV/JSON read offline, raw bytes immutable/hash-checked; normalized observations trace to import source hash, row, adapter/mapping version",
+    "AC03: AVAILABLE value 0 is distinct from NOT_AVAILABLE/null; malformed/ambiguous input returns bounded reason, never partial success masquerading as PASS",
+    "AC04: import exact replay idempotent in same context; same file with different account/mapping contexts is not silently conflated; corrected reports remain versioned",
+    "AC05: platform-specific metric semantics are preserved; cross-provider comparison disabled unless definition equivalence was explicitly approved",
+    "AC06: A08 account_ref has namespace:id and provider platform/surface; strict account and identifier match; heuristic ambiguities stay PARTIAL/UNMATCHED",
+    "AC07: no inference of PUBLISHED_CONFIRMED/PUBLIC or provider-verified observation from user-supplied receipts/files; no network calls",
+    "AC08: synthetic happy, missing, zero, duplicate, tamper, wrong account, ambiguous and timezone fixtures with A08 integration",
+    "AC09: available targeted and affected regression tests pass, documented actual Windows/Ubuntu CI evidence where observed; scope limitations stated explicitly",
+    "AC10: candidate delivered on branch only; main merge and any real provider account/export remain separate"
+  ],
+  "side_effect_class": "BOUNDED",
+  "evidence_refs": [
+    "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.json",
+    "docs/roadmap/WORK_TREE_DETAILED_V1_1.md",
+    "work_items/A08-ASSISTED-DISTRIBUTION-001.json",
+    "contracts/MeasurementPlan.v0.2.schema.json",
+    "docs/engineering/A08_IMPLEMENTATION_REPORT.md",
+    "Deep Research A09 v1 report in ChatGPT conversation 2026-10-29 (proposal, not independent code proof)"
+  ],
+  "risk_notes": [
+    "Research report's illustrative flat account names and lowercase platform strings conflict with A08 canonical object/uppercase enums; code must preserve actual A08 semantics",
+    "Research proposal's implicit seven-day window must not silently overwrite explicit provider/source dates; missing window/timezone must be explicit and marked",
+    "Research's arbitrary match-confidence scores are not calibrated provider probabilities; exact identifiers only for auto-match in v1",
+    "EF02 Windows self-hosted success and Ubuntu CI remain separate claims; non-live fixtures cannot prove real provider exports"
+  ],
+  "engineering_execution": {
+    "executor": "codex",
+    "model": "gpt-6.1-sol",
+    "effort": "max",
+    "delivery": "CANDIDATE_BRANCH",
+    "transport": "EF02",
+    "sequence": [
+      "A09-L01-L02",
+      "A09-E02"
+    ],
+    "verify_profile": "project-tests",
+    "max_parallel": 1,
+    "max_repair_rounds": 2,
+    "authorization_ref": "Human direct execution request 2026-10-29; executor/model inherited from explicit prior selection in AI Commerce Engineering sessions"
+  }
+}
