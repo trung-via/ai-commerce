@@ -417,8 +417,8 @@ def test_creative_override_cannot_change_evidence_or_authority(field):
 
 
 @pytest.mark.parametrize("contact", ["person@example.test", "Call +84 912 345 678", "Call ０９１２３４５６７８",
-    "Reply to @someone", "See https://example.test/person", "p\u200berson@example.test"],
-    ids=["email", "phone", "fullwidth", "handle", "link", "obfuscated"])
+    "p\u200berson@example.test", "mailto:someone", "tel:+84912345678"],
+    ids=["email", "phone", "fullwidth", "obfuscated", "mailto", "tel"])
 @pytest.mark.parametrize("field", ["manual", "objective", "audience", "product_ref", "cta", "media_hint"])
 def test_personal_contacts_are_rejected_with_bounded_errors(field, contact):
     kwargs = {"manual_idea": contact} if field == "manual" else {"manual_idea": "A fictional story", "creative_overrides": {field: contact}}
@@ -426,6 +426,20 @@ def test_personal_contacts_are_rejected_with_bounded_errors(field, contact):
         propose_opportunities(as_of=AS_OF, **kwargs)
     assert str(error.value) == "PROPOSAL_CONTACT_OR_IDENTIFIER_NOT_ALLOWED"
     assert contact not in str(error.value)
+
+
+@pytest.mark.parametrize("field", ["manual", "objective", "audience", "product_ref", "cta", "media_hint"])
+def test_human_creative_url_handle_and_numeric_product_url_are_permitted(field):
+    public = "See https://shop.example.invalid/item/1731381331718341815 and @creator"
+    kwargs = {"manual_idea": public} if field == "manual" else {
+        "manual_idea": "A fictional story", "creative_overrides": {field: public},
+    }
+    proposal, = propose_opportunities(as_of=AS_OF, **kwargs)
+    assert proposal["status"] == "HYPOTHESIS"
+    assert proposal["rights_status"] == "UNKNOWN" and proposal["publication_status"] == "NOT_ATTEMPTED"
+    assert (proposal["manual_input"]["text"] if field == "manual"
+            else proposal["creative"][field]) == public
+    assert validate_proposal(proposal) is proposal
 
 
 def test_private_source_metadata_is_not_copied_or_laundered(signals):
