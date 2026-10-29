@@ -1,0 +1,47 @@
+{
+  "work_id": "A08-ASSISTED-DISTRIBUTION-001",
+  "objective": "A08 offline assisted distribution package, manual posting handoff, evidence-bound publication receipts",
+  "source_decision": "Human 2026-10-29: implement A08-ASSISTED-DISTRIBUTION-001",
+  "source_sha": "0e7606217b8318ec9c1b3d979d648c9e1498c675",
+  "owner": "Distribution",
+  "work_ids": [
+    "D02",
+    "D03",
+    "D04"
+  ],
+  "depends_on": [
+    "A06",
+    "A07"
+  ],
+  "status": "IMPLEMENTED_PENDING_HOSTED_CI",
+  "scope_in": [
+    "verified E01 MP4 and source digest to immutable package",
+    "platform surface metadata and copy-ready caption/hashtags/title",
+    "manual account handoff with offline A07 advisory capability",
+    "SQLite append-only user-supplied publication receipts and state replay",
+    "separate evidence for publication and PUBLIC visibility",
+    "CLI commands and cross-platform CI"
+  ],
+  "scope_out": [
+    "live OAuth or provider API",
+    "automatic publishing",
+    "live provider verification",
+    "metrics and revenue",
+    "D05 complex provider reconciliation",
+    "D06 affiliate link proof",
+    "D07 direct post adapter"
+  ],
+  "acceptance": [
+    "AC01 source E01 full verification",
+    "AC02 package video/text SHA256 and target identity",
+    "AC03 offline package allowed even if account capability UNKNOWN",
+    "AC04 handoff not SUBMITTED",
+    "AC05 PUBLISHED_CONFIRMED requires user-supplied provider receipt with post ID",
+    "AC06 PUBLIC requires separate visibility evidence",
+    "AC07 append-only event and evidence integrity",
+    "AC08 idempotent handoff key",
+    "AC09 A06/A07 regression on Windows and Ubuntu"
+  ],
+  "side_effect_class": "REPOSITORY_CODE_ONLY",
+  "verification_evidence": "Pending hosted CI; no external post or public URL verified"
+}
