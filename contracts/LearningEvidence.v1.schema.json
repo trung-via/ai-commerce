@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-commerce.local/schema/LearningEvidence.v1",
+  "title": "LearningEvidence.v1",
+  "description": "A11 offline advisory evidence. Hashes detect local modification, not external attestation. All fields required except those omitted from required; nullable fields retain explicit unknowns. Content identity is the prefixed SHA256 of canonical JSON without its own ID field.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "LearningEvidence.v1"
+    },
+    "evidence_id": {
+      "type": "string",
+      "pattern": "^a11-evidence-[a-f0-9]{64}$"
+    },
+    "source_status": {
+      "const": "USER_SUPPLIED_NOT_LIVE_VERIFIED"
+    },
+    "hypothesis_ref": {
+      "$ref": "#/$defs/HypothesisReference"
+    },
+    "observation_ref": {
+      "$ref": "#/$defs/ObservationReference"
+    },
+    "report_ref": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ReportReference"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "role": {
+      "enum": [
+        "SUPPORTING",
+        "COUNTEREVIDENCE",
+        "INCONCLUSIVE"
+      ]
+    },
+    "evidence_state": {
+      "enum": [
+        "AVAILABLE",
+        "NOT_AVAILABLE",
+        "INSUFFICIENT_DATA",
+        "NOT_COMPARABLE"
+      ]
+    },
+    "observed_outcome": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "confounders": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 100,
+      "items": {
+        "$ref": "#/$defs/Confounder"
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 100,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048
+      }
+    },
+    "inference": {
+      "const": "DESCRIPTIVE_ONLY"
+    }
+  },
+  "required": [
+    "schema_version",
+    "evidence_id",
+    "source_status",
+    "hypothesis_ref",
+    "observation_ref",
+    "role",
+    "evidence_state",
+    "observed_outcome",
+    "confounders",
+    "limitations",
+    "inference"
+  ],
+  "$defs": {
+    "Confounder": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "status": {
+          "enum": [
+            "DECLARED",
+            "OBSERVED",
+            "UNKNOWN"
+          ]
+        },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/ObservationReference"
+          }
+        }
+      },
+      "required": [
+        "code",
+        "description",
+        "status",
+        "evidence_refs"
+      ]
+    },
+    "HypothesisReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hypothesis_id": {
+          "type": "string",
+          "pattern": "^a11-hypothesis-[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "hypothesis_id"
+      ]
+    },
+    "ObservationReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^a11-snapshot-[a-f0-9]{64}$"
+        },
+        "import_id": {
+          "type": "string",
+          "pattern": "^a09-[a-f0-9]{64}$"
+        },
+        "context_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "raw_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "observation_id": {
+          "type": "string",
+          "pattern": "^obs-[a-f0-9]{64}$"
+        },
+        "observation_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "metric_definition_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "import_id",
+        "context_sha256",
+        "raw_sha256",
+        "observation_id",
+        "observation_sha256",
+        "metric_definition_sha256"
+      ]
+    },
+    "ReportReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "report_id": {
+          "type": "string",
+          "pattern": "^a11-report-[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "report_id"
+      ]
+    }
+  }
+}
