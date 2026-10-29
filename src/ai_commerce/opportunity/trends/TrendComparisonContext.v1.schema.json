@@ -1,0 +1,263 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-commerce.local/schema/TrendComparisonContext.v1",
+  "title": "TrendComparisonContext.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "TrendComparisonContext.v1"
+    },
+    "metric": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "metric_kind": {
+      "enum": [
+        "COUNT",
+        "RATE",
+        "RELATIVE_INDEX",
+        "UNKNOWN"
+      ]
+    },
+    "baseline_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "normalization_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "query_batch": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "relative_scale": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "number"
+          }
+        }
+      ]
+    },
+    "window_kind": {
+      "enum": [
+        "POINT",
+        "INTERVAL",
+        "UNKNOWN"
+      ]
+    },
+    "evidence_refs": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024
+      },
+      "minItems": 1
+    },
+    "source_status": {
+      "const": "USER_SUPPLIED_NOT_LIVE_VERIFIED"
+    }
+  },
+  "required": [
+    "schema_version",
+    "metric",
+    "metric_kind",
+    "baseline_id",
+    "normalization_id",
+    "query_batch",
+    "relative_scale",
+    "window_kind",
+    "evidence_refs",
+    "source_status"
+  ],
+  "$defs": {
+    "SignalSourceSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "SignalSourceSnapshot.v1"
+        },
+        "source_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "source_kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "source_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "captured_at": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 64
+        },
+        "collected_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "maxLength": 64
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "rights_status": {
+          "enum": [
+            "UNKNOWN",
+            "USER_DECLARED_PERMITTED",
+            "USER_DECLARED_RESTRICTED",
+            "NOT_APPLICABLE"
+          ]
+        },
+        "verification_status": {
+          "const": "USER_SUPPLIED_NOT_LIVE_VERIFIED"
+        },
+        "jurisdiction": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "geo": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "locale": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "purpose": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "terms_url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "schema_version",
+        "source_id",
+        "source_kind",
+        "source_ref",
+        "captured_at",
+        "sha256",
+        "rights_status",
+        "verification_status"
+      ]
+    },
+    "SignalLineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "relationship": {
+          "enum": [
+            "ORIGINAL",
+            "CORRECTION",
+            "REPROCESS"
+          ]
+        },
+        "parent_import_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^a10-[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "relationship",
+        "parent_import_id"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "relationship": {
+                "const": "ORIGINAL"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "parent_import_id": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "parent_import_id": {
+                "type": "string",
+                "pattern": "^a10-[a-f0-9]{64}$"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
