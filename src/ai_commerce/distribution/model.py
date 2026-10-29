@@ -61,6 +61,14 @@ def identity(record: dict[str, Any]) -> str:
 
 def validate_snapshot(record: Any) -> dict[str, Any]:
     obj = validate("ChannelCapabilitySnapshot", record)
+    account_ns = {"TIKTOK": "tiktok_open_id", "FACEBOOK": "facebook_page_id",
+                  "INSTAGRAM": "instagram_user_id", "YOUTUBE": "youtube_channel_id"}
+    app_ns = {"TIKTOK": "tiktok_client_key", "FACEBOOK": "meta_app_id",
+              "INSTAGRAM": "meta_app_id", "YOUTUBE": "google_cloud_project_id"}
+    if obj["account_ref"]["namespace"] not in (account_ns[obj["platform"]], "internal_alias"):
+        raise CapabilityError("ACCOUNT_NAMESPACE_PLATFORM_MISMATCH")
+    if obj["app_ref"] is not None and obj["app_ref"]["namespace"] not in (app_ns[obj["platform"]], "internal_alias"):
+        raise CapabilityError("APP_NAMESPACE_PLATFORM_MISMATCH")
     observed, recorded = timestamp(obj["observed_at"]), timestamp(obj["recorded_at"])
     if recorded < observed:
         raise CapabilityError("RECORDED_BEFORE_OBSERVED")

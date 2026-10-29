@@ -1,4 +1,5 @@
 """A07 contract and offline registry security/regression tests."""
+import copy
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -16,9 +17,9 @@ APP = {"namespace": "tiktok_client_key", "id": "app-A"}
 
 def proof(account=ACCOUNT, app=APP, kind="ACCOUNT_AUTHORIZATION"):
     return {
-        "evidence_id": "ev_scope_A_00001", "kind": kind,
+        "evidence_id": "ev_" + kind.lower() + "_a_001", "kind": kind,
         "integrity": "HASHED", "sha256": "a" * 64,
-        "scope": "TARGET", "subject": {"account_ref": account, "app_ref": app},
+        "scope": "TARGET", "subject": {"account_ref": copy.deepcopy(account), "app_ref": copy.deepcopy(app)},
         "captured_at": "2026-10-29T08:00:00Z",
     }
 
@@ -31,7 +32,8 @@ def snap(**changes):
         "market": "VN", "surface": "VIDEO", "action": "API_UPLOAD",
         "state": "ALLOWED", "constraints": {"visibility": ["PUBLIC", "SELF_ONLY"]},
         "scope_claims": [{"name": "video.upload", "status": "GRANTED"}],
-        "evidence_refs": [proof()], "observed_at": "2026-10-29T09:00:00Z",
+        "evidence_refs": [proof(), proof(kind="SCOPE_OBSERVATION"), proof(kind="APP_CONFIGURATION")],
+        "observed_at": "2026-10-29T09:00:00Z",
         "recorded_at": "2026-10-29T09:10:00Z",
         "expires_at": "2026-10-30T09:00:00Z",
         "source_mode": "OBSERVED", "profile_version": "v1.0",
@@ -202,7 +204,7 @@ def test_instagram_modes_account_and_scopes(tmp_path, mode, names):
     record = snap(platform="INSTAGRAM", account_ref=account, app_ref=app,
         surface="REEL", action="API_DIRECT_POST", constraints=conditions,
         scope_claims=[{"name": name, "status": "GRANTED"} for name in names],
-        evidence_refs=[proof(account, app)])
+        evidence_refs=[proof(account, app), proof(account, app, kind="SCOPE_OBSERVATION")])
     req = request(platform="INSTAGRAM", account_ref=account, app_ref=app,
         surface="REEL", action="API_DIRECT_POST")
     assert check(tmp_path, record, req)["decision"] == "ALLOW"
@@ -220,7 +222,7 @@ def test_youtube_upload_not_equivalent_to_public_visibility(tmp_path):
     record = snap(platform="YOUTUBE", account_ref=account, app_ref=app,
         surface="SHORT",
         scope_claims=[{"name": "https://www.googleapis.com/auth/youtube.upload", "status": "GRANTED"}],
-        evidence_refs=[proof(account, app)])
+        evidence_refs=[proof(account, app), proof(account, app, kind="SCOPE_OBSERVATION")])
     req = request(platform="YOUTUBE", account_ref=account, app_ref=app, surface="SHORT")
     assert check(tmp_path, record, req)["decision"] == "ALLOW"
     assert check(tmp_path, record, {**req, "action": "PUBLIC_VISIBILITY"})["decision"] == "UNKNOWN"
@@ -274,3 +276,27 @@ def test_cli_full_roundtrip(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out.splitlines()[-1])["decision"] == "ALLOW"
     assert main(["channel-capability", "history", "--request", str(req), "--db", str(db)]) == 0
     assert json.loads(capsys.readouterr().out)["count"] == 1
+
+def test_scope_observation_and_app_review_evidence_are_distinct(tmp_path):
+    missing_scope = snap(evidence_refs=[proof()])
+    assert check(tmp_path, missing_scope)["decision"] == "NEEDS_RECHECK"
+    missing_app = snap(action="API_DIRECT_POST",
+        constraints={"visibility": ["SELF_ONLY"]},
+        scope_claims=[{"name":"video.publish","status":"GRANTED"}],
+        evidence_refs=[proof(),proof(kind="SCOPE_OBSERVATION")])
+    assert check(tmp_path, missing_app, request(action="API_DIRECT_POST",
+            required_constraints={"visibility":"SELF_ONLY"}))["decision"] == "NEEDS_RECHECK"
+
+
+def test_limited_does_not_expand_beyond_request_constraints(tmp_path):
+    restricted = snap(state="LIMITED", action="API_DIRECT_POST",
+        constraints={"visibility": ["SELF_ONLY"]},
+        scope_claims=[{"name":"video.publish","status":"GRANTED"}])
+    req = request(action="API_DIRECT_POST")
+    assert check(tmp_path, restricted, req)["decision"] == "NEEDS_RECHECK"
+    assert check(tmp_path, restricted, {**req, "required_constraints":{"visibility":"SELF_ONLY"}})["decision"] == "ALLOW"
+
+
+def test_platform_namespace_mismatch_is_rejected():
+    with pytest.raises(CapabilityError,match="ACCOUNT_NAMESPACE_PLATFORM_MISMATCH"):
+        validate_snapshot(snap(platform="INSTAGRAM"))

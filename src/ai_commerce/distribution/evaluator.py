@@ -8,7 +8,7 @@ from .model import CapabilityError, identity, provider_profiles, timestamp, vali
 from .registry import CapabilityRegistry
 
 _API_ACTIONS = {"API_UPLOAD", "API_DIRECT_POST", "PUBLIC_VISIBILITY", "PRODUCT_ANCHOR", "METRICS_READ", "SCHEDULE_POST"}
-_ACCOUNT_KINDS = {"ACCOUNT_AUTHORIZATION", "SCOPE_OBSERVATION", "ACCOUNT_STATE_OBSERVATION", "APP_CONFIGURATION"}
+_ACCOUNT_KINDS = {"ACCOUNT_AUTHORIZATION", "SCOPE_OBSERVATION", "ACCOUNT_STATE_OBSERVATION"}
 _MANUAL_KINDS = {"MANUAL_ATTESTATION", "ACCOUNT_AUTHORIZATION", "ACCOUNT_STATE_OBSERVATION"}
 
 
@@ -89,6 +89,20 @@ def evaluate(
             return result("NEEDS_RECHECK", "PROFESSIONAL_ACCOUNT_NOT_PROVEN", snapshot)
         if mode == "FACEBOOK_LOGIN" and snapshot["constraints"].get("linked_page_verified") != "TRUE":
             return result("NEEDS_RECHECK", "LINKED_PAGE_NOT_PROVEN", snapshot)
+    if snapshot["source_mode"] == "OBSERVED" and req["action"] in _API_ACTIONS:
+        kinds = {e["kind"] for e in snapshot["evidence_refs"] if e["scope"] == "TARGET"}
+        if "ACCOUNT_AUTHORIZATION" not in kinds:
+            return result("NEEDS_RECHECK", "ACCOUNT_AUTHORIZATION_NOT_OBSERVED", snapshot)
+        if required and "SCOPE_OBSERVATION" not in kinds:
+            return result("NEEDS_RECHECK", "SCOPE_EVIDENCE_MISSING", snapshot)
+        if req["platform"] == "TIKTOK" and req["action"] == "API_DIRECT_POST" and "APP_CONFIGURATION" not in kinds:
+            return result("NEEDS_RECHECK", "APP_AUDIT_EVIDENCE_MISSING", snapshot)
+
+    if snapshot["state"] == "LIMITED":
+        for constraint in snapshot["constraints"]:
+            if constraint not in req.get("required_constraints", {}):
+                return result("NEEDS_RECHECK", "LIMITED_CONSTRAINT_NOT_REQUESTED:" + constraint, snapshot)
+
     scope_claims = {s["name"]: s["status"] for s in snapshot["scope_claims"]}
     for name in required:
         if scope_claims.get(name) in ("REVOKED", "NOT_GRANTED"):
