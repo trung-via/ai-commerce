@@ -52,6 +52,10 @@ def _account(platform: str, account: str) -> dict[str, str]:
     _require(isinstance(account, str) and ":" in account, "ACCOUNT_EXPECTED_NAMESPACE_COLON_ID")
     namespace, name = account.split(":", 1)
     obj = {"namespace": namespace, "id": name}
+    expected_namespaces = {"TIKTOK": "tiktok_open_id", "FACEBOOK": "facebook_page_id",
+                           "INSTAGRAM": "instagram_user_id", "YOUTUBE": "youtube_channel_id"}
+    _require(namespace in {expected_namespaces[platform], "internal_alias"} and bool(name.strip()),
+             "ACCOUNT_NAMESPACE_PLATFORM_MISMATCH")
     validate_request({"schema_version": "ChannelCapabilityRequest.v1",
                       "platform": platform, "account_ref": obj, "app_ref": None,
                       "market": None, "surface": _first_surface(platform),

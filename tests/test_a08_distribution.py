@@ -137,7 +137,7 @@ def test_unknown_does_not_retry_or_fabricate_publish(tmp_path, monkeypatch):
     ident = ledger.create(out, idempotency_key="try")["publication_id"]
     assert ledger.record(ident, "OUTCOME_UNKNOWN")["state"] == "UNKNOWN"
     assert ledger.get(ident)["provider_post_id"] is None
-    with pytest.raises(DistributionError, match="CONFIRMATION_TRANSITION_INVALID"):
+    with pytest.raises(DistributionError, match="PUBLICATION_RECEIPT_REQUIRED"):
         ledger.record(ident, "PUBLICATION_RECEIPT")
     assert ledger.get(ident)["state"] == "UNKNOWN"
 
