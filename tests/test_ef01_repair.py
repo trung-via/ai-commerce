@@ -292,20 +292,45 @@ def test_scope_strict_mode_still_rejects_before_pytest(fixture):
     assert result["verify_exit_code"] is None
 
 
-def test_protected_changed_path_stops_before_verification(fixture):
+@pytest.mark.parametrize("protected", [
+    ".github/workflows/ef02-batch.yml",
+    "src/ai_commerce/engineering/.env",
+    "src/ai_commerce/engineering/.env.production",
+    "src/ai_commerce/engineering/secrets/key.json",
+    "src/ai_commerce/remote/credentials/auth.json",
+    "src/ai_commerce/remote/.github/config.yml",
+    "src/ai_commerce/remote/.local/runner.json",
+    "src/ai_commerce/remote/.git/config",
+])
+def test_protected_changed_path_stops_before_verification(fixture, protected):
+    # Simulate the path as permitted by a component-level allowlist, proving
+    # the protected-path check has precedence over scope and pytest.
     original = runner._snapshot
+
     def blocked(repo, prefixes, deadline):
         snapshot, diff = original(repo, prefixes, deadline)
         if snapshot["changed_files"]:
             snapshot = dict(snapshot, changed_files=[*snapshot["changed_files"],
-                            ".github/workflows/ef02-batch.yml"], scope_valid=False)
+                            protected], scope_valid=True)
         return snapshot, diff
+
     fixture.monkeypatch.setattr(runner, "_snapshot", blocked)
     result, calls, _ = _run(fixture, mode="scope-pass")
     assert len(calls) == 1
     assert result["status"] == "SCOPE_VIOLATION"
     assert result["error_code"] == "PROTECTED_CHANGED_PATH"
     assert result["verify_exit_code"] is None
+
+
+def test_protected_path_matching_does_not_block_ordinary_component_files():
+    assert not runner._protected_change([
+        "src/ai_commerce/engineering/feature.py",
+        "tests/test_environment.py",
+        "src/ai_commerce/remote/secrets_provider.py",
+    ])
+    for path in ("src/a/.env", "src/a/secrets/token", "src/a/credentials/key",
+                 "src/a/.github/job.yml", "src/a/.local/data", "src/a/.git/config"):
+        assert runner._protected_change([path])
 
 
 def test_non_pytest_nonzero_is_not_repairable(fixture):
