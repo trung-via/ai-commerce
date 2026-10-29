@@ -1,0 +1,139 @@
+{
+  "work_id": "A12-PRODUCT-EVIDENCE-001",
+  "title": "A12 v1 — Product Evidence Foundation (P01/P03/P04/P05/P06)",
+  "status": "ACCEPTED_FOR_WORK",
+  "roadmap_id": "A12",
+  "phase": 3,
+  "milestone": "M4",
+  "work_ids": [
+    "P01",
+    "P03",
+    "P04",
+    "P05",
+    "P06"
+  ],
+  "owner": "Product Intelligence / Product Evidence; advisory Creative and A13 consumers",
+  "source_decision": "Human ChatGPT 2026-10-30: @AI Commerce Engineering Workflow thực thi theo deep research A12 — Product Evidence Foundation",
+  "research_ref": "ChatGPT Deep Research A12 — Product Evidence Foundation, 2026-10-30. Architecture guidance only; study assumptions about ready marketplace API, crawler/webhook entitlements, REST services and M5 milestone are not repository facts. Roadmap A owns A12 under phase 3/M4, not M5.",
+  "planning_source_sha": "a1429c49a5ac129f1c8001e748bc31b49d5cb7ca",
+  "depends_on": [
+    "A02"
+  ],
+  "related_implemented_sources": [
+    "work_items/A02-CONTRACTS-001.json",
+    "src/ai_commerce/contracts/schema.py",
+    "src/ai_commerce/core/provenance.py",
+    "src/ai_commerce/creative/briefs.py",
+    "src/ai_commerce/opportunity",
+    "work_items/A11-AUDIENCE-LEARNING-001.json",
+    "work_items/A07-CHANNEL-CAPABILITY-001.json",
+    "work_items/A08-ASSISTED-DISTRIBUTION-001.json"
+  ],
+  "objective": "Build a single-operator offline-first, provider-neutral Product Evidence Foundation that imports Human-supplied product/listing snapshots with preserved raw hashes; resolves seller/listing/product/variant identities without unsafe automatic merges; differentiates source-observed assertions from verified evidence, price/commission time-bounded observations and UNKNOWN media rights; exports immutable provenance-bounded advisory Product Evidence Packs for Creative/Opportunity and later A13. Never claim real market authorization, commercial rights, live prices or affiliate entitlement from unverified source data.",
+  "scope_in": [
+    "A12-01 P01/contracts: strict versioned JSON Schema for ProductListingSnapshot, ProductIdentity and ProductVariant; bounded local JSON/CSV import with literal source URL as metadata, file bytes/hash, capture and observed timestamps, declared source verification, stable identity; fixture-based manual and pre-exported API-JSON input; no automatic remote fetch.",
+    "A12-02 P03/P04: normalize seller/listing/product/variant with source-aware namespaced IDs and conflict records; versioned ProductClaimEvidence and ProductOfferObservation contracts, statement subject+evidence+verification provenance, offer price/currency/availability/commission observed_at and explicit stale/unknown; do not treat GTIN/SKU as implicitly verified or listing title as authoritative product identity.",
+    "A12-03 P05: versioned ProductAssetRights manifest with asset content hash/ref, origin, copyright holder/claimant, license evidence, territory/media/channel/purpose/term, commercial/ad/derivatives status UNKNOWN until evidenced; immutable append-only revisions and conflict/negative evidence via A12-owned local SQLite registry, idempotent replay/integrity checks.",
+    "A12-04 P06/consumer: versioned source-backed ProductEvidencePack JSON/Python/CLI advisory export with explicit caveats, variant-specific facts, rights and offer freshness; synthetic offline deterministic E2E demo, malformed/negative, Windows/Ubuntu tests and readable implementation report. No automatic A03/A07/A08/A09/A10/A11 writes or publication.",
+    "EF01-P + MT-01 + EF01-R + EF02 component-level scope and Verify-First: prove exact changed paths, registered project-tests -n 12, preserve failing/passing logs, fan-in verify on combined candidate before any Human-controlled main integration."
+  ],
+  "scope_out": [
+    "Marketplace OAuth, privileged platform APIs, scraping/crawling live websites, webhook servers, scheduled online fetches, external REST daemon/Postgres/S3 infrastructure and broad role-service architecture: future separately authorized adapters; v1 only local files and references.",
+    "Unverified commission entitlement, live affiliate linking, checkout, orders, settled economics, public provider post, rights licensing, or real/current price certainty.",
+    "Automatic promotional claim certification, implied verified seller assertion, arbitrary GTIN cross-merchant dedup, automatic rights grant; no fabricated legal permissions.",
+    "Mandatory product SKU/CTA in freeform creative, Creative Reasoner ranking gates or automatic ad/publish; no A13/A14 implementation or mandatory pilot.",
+    "Credentials, PII collection, cross-project imports, modifying EF02 platform workflow/security, broad retroactive refactor or main auto-merge."
+  ],
+  "design_decisions": {
+    "source_truth": "Raw source exists/hash verified is not the same as product claim verified. Use USER_SUPPLIED_NOT_LIVE_VERIFIED unless stronger independent evidence is actually supplied.",
+    "identity": "IDs distinguish marketplace+seller+listing+variant and canonical product; GTIN/SKU are asserted attributes until verified; conflicts retained without silent merges.",
+    "offer": "Observed price/commission at timestamp is not live price or valid entitlement. null UNKNOWN differs from 0. Currency required when numeric amount exists. No fiat conversion inferred.",
+    "rights": "Media location/creator/license labels are provenance facts, not a grant. UNKNOWN commercial use if no directly applicable rights evidence. Restrict external reuse decisions to later A13.",
+    "storage": "Local JSON raw SHA-256 archive and append-only A12-owned SQLite/event log, bounded metadata and transactional integrity; replay must not alter revisions.",
+    "consumer": "ProductEvidencePack is advisory and optional. Existing creative briefs may omit product entirely, including null product_ref.",
+    "dependency_DAG": "A12-01 -> A12-02 -> A12-03 -> A12-04. All actions serialize shared new product component; max_parallel=1 prevents ownership collision and complements -n12 test workers.",
+    "versioning": "Preserve A02 public APIs/contracts and A11 learning ledger. New top-level contracts alongside product package; versioned exports; no mandatory REST service."
+  },
+  "expected_artifacts": [
+    "contracts/ProductListingSnapshot.v1.schema.json",
+    "contracts/ProductIdentity.v1.schema.json",
+    "contracts/ProductVariant.v1.schema.json",
+    "contracts/ProductClaimEvidence.v1.schema.json",
+    "contracts/ProductOfferObservation.v1.schema.json",
+    "contracts/ProductAssetRights.v1.schema.json",
+    "contracts/ProductEvidencePack.v1.schema.json",
+    "src/ai_commerce/product/",
+    "tests/test_a12_snapshot.py",
+    "tests/test_a12_identity.py",
+    "tests/test_a12_claims.py",
+    "tests/test_a12_offer.py",
+    "tests/test_a12_rights.py",
+    "tests/test_a12_registry.py",
+    "tests/test_a12_integration.py",
+    "tests/test_a12_cli.py",
+    "src/ai_commerce/cli.py",
+    "examples/a12/",
+    "scripts/a12_demo.py",
+    "docs/engineering/A12_IMPLEMENTATION_REPORT.md"
+  ],
+  "acceptance": [
+    "AC01 — Reproducibly import bounded, Human-supplied CSV/JSON listing with exact raw bytes SHA-256, source kind/ref, capture/observed timezone-aware timestamp, synthetic marking; invalid/duplicate/conflicting/oversized input rejected or reported. No network required.",
+    "AC02 — Product/listing/seller/variant namespaces and IDs are not conflated across marketplaces/sellers/variants; missing/claimed GTIN is not treated as verified unique identity; corrections and conflicts preserved.",
+    "AC03 — Source-observed claim vs independently verified evidence vs assumption/illustration vs UNKNOWN are separate, every factual statement has an evidence ref/status; misleading seller assertions and negative/conflicting evidence are not upgraded to truth.",
+    "AC04 — Offer price/stock/commission carry currency, variant, timestamp, source, expiry/freshness and uncertainty; NULL unknown distinct from numeric 0, stale rates/offers never read as current or affiliate-eligible.",
+    "AC05 — Media asset manifest preserves path/hash/origin/rights claim and scope; grant only for directly evidenced use with temporal/territory terms; UNKNOWN/RESTRICTED not flattened into GRANTED.",
+    "AC06 — Local evidence changes are append-only with versioned corrections, deterministic identity and idempotent import/replay; integrity checks, transaction rollback, invalid record and concurrency cases have passing tests.",
+    "AC07 — Versioned ProductEvidencePack and optional CLI advisory export preserve exact listing variant, claim and rights references; no automatic content generation, A03/A10 mutations, publish or action-state promotion.",
+    "AC08 — Synthetic end-to-end demonstration and negative cases, 12-worker Windows EF02 verification plus hosted Windows/Ubuntu integration when PR is prepared; exact source SHA and evidence, no candidate/main auto-merge. Preserve failures, quotas and permission faults honestly."
+  ],
+  "side_effect_class": "BOUNDED",
+  "risk_notes": [
+    "Research overstates automatic crawlers/webhooks/marketplace access and incorrectly says A12 starts M5. Actual canonical plan places A12 in M4, and no marketplace token or rights evidence is available; keep real connectors out of v1.",
+    "CLI adapter may only read local human-supplied files; URLs are metadata, never a default fetch; sanitize errors, reject path traversal, malformed/oversized file bytes and untrusted prompt instructions.",
+    "SQLite hash chain is local integrity evidence not external attestation; no claim of legal license from a source string.",
+    "Product datasets do not authorize access to real accounts, ad posts or commercial affiliate links."
+  ],
+  "engineering_execution": {
+    "transport": "EF02",
+    "executor": "codex",
+    "model": "gpt-6.1-sol",
+    "effort": "max",
+    "model_basis": "User approved execution according to A12 Deep Research, which specifies Codex GPT-6.1 Sol Max; provider availability and quota remain empirical.",
+    "delivery": "CANDIDATE_BRANCH",
+    "max_parallel": 1,
+    "verification_profile": "project-tests",
+    "max_repair_rounds": 2,
+    "source_ref_strategy": "Bind the EF02 request source_sha to live main HEAD after this WorkItem creation; immutable issue JSON required.",
+    "sequence": [
+      {
+        "action": "A12-01",
+        "depends_on": []
+      },
+      {
+        "action": "A12-02",
+        "depends_on": [
+          "A12-01"
+        ]
+      },
+      {
+        "action": "A12-03",
+        "depends_on": [
+          "A12-02"
+        ]
+      },
+      {
+        "action": "A12-04",
+        "depends_on": [
+          "A12-03"
+        ]
+      }
+    ],
+    "authorization_ref": "human-chat-2026-10-30-ai-commerce-engineering-workflow-execute-a12-deep-research"
+  },
+  "verification_result": {
+    "state": "NOT_YET_VERIFIED",
+    "candidate_ref": null,
+    "ci_runs": [],
+    "evidence_boundary": "WorkItem authoring and EF02 request do not prove an executor was started, implementation passed, source merged or actual commercial outcome."
+  }
+}
