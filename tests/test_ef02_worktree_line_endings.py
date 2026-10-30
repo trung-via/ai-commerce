@@ -70,8 +70,11 @@ def test_repair_evidence_json_is_raw_and_unfiltered() -> None:
 
     # Non-evidence JSON is deliberately still LF-normalized by policy.
     normal = _attributes("contracts/ProductIdentity.v1.schema.json")
-    assert normal[("contracts/ProductIdentity.v1.schema.json", "text")] == "set"
-    assert normal[("contracts/ProductIdentity.v1.schema.json", "eol")] == "lf"
+    assert normal[("contracts/ProductIdentity.v1.schema.json", "text")] == "unset"
+    assert normal[("contracts/ProductIdentity.v1.schema.json", "eol")] == "unset"
+    generic = _attributes("contracts/SignalImport.v1.schema.json")
+    assert generic[("contracts/SignalImport.v1.schema.json", "text")] == "set"
+    assert generic[("contracts/SignalImport.v1.schema.json", "eol")] == "lf"
 
 
 def test_action_specific_evidence_is_raw_and_unfiltered() -> None:
@@ -90,6 +93,25 @@ def test_action_specific_evidence_is_raw_and_unfiltered() -> None:
         "src/ai_commerce/product/a12_02_evidence/static.json",
         "src/ai_commerce/product/a12_03_evidence/project-tests.json",
         "src/ai_commerce/learning/learning_evidence/future-result.json",
+    )
+    attrs = _attributes(*paths)
+    for path in paths:
+        assert attrs[(path, "text")] == "unset"
+        assert attrs[(path, "eol")] == "unset"
+
+
+def test_product_v1_contract_blobs_preserve_bytes_without_being_changed_by_checkout() -> None:
+    """A12-02 published two CRLF Product v1 schemas with immutable Git blobs.
+
+    These contracts are semantically schema validated, but must not appear as
+    modified merely because a dependent action checks out an A12 candidate.
+    """
+    paths = (
+        "contracts/ProductClaimEvidence.v1.schema.json",
+        "contracts/ProductOfferObservation.v1.schema.json",
+        "contracts/ProductIdentity.v1.schema.json",
+        "contracts/ProductAssetRights.v1.schema.json",
+        "contracts/ProductEvidencePack.v1.schema.json",
     )
     attrs = _attributes(*paths)
     for path in paths:
