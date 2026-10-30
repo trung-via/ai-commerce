@@ -709,7 +709,8 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
                 deadline=deadline, timeout_seconds=inv["verify_timeout_seconds"],
                 registered_only=mt_context["registered_only"], aggregate_sources=mt_context["aggregate_sources"],
                 groups=mt_context.get("groups"), command_transform=transform,
-                registered_profiles=mt_context.get("registered_profiles"))
+                registered_profiles=mt_context.get("registered_profiles"),
+                on_plan=lambda current: inv.update(minimum_test=current))
             inv["minimum_test"] = plan
         else:
             actual_argv, _ = transform(list(verify_argv), "scope")

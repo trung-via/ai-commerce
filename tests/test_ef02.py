@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from ai_commerce.remote.validation import (
-    RemoteRequestError, validate_batch, verify_registry, safe_path, fingerprint
+    RemoteRequestError, validate_batch, verify_registry, safe_path, fingerprint, approved_acceptance_plan
 )
 from ai_commerce.remote.scheduler import run_schedule
 from ai_commerce.remote.transport import GitHubTransport, RemoteTransportError
@@ -105,6 +105,47 @@ def test_fingerprint_deterministic_and_model_change_is_distinct():
     alt = copy.deepcopy(p)
     alt["actions"][0]["model"] = "other-model"
     assert fingerprint(p) != fingerprint(alt)
+
+
+def test_acceptance_declaration_is_v1_compatible_authorized_and_fingerprinted():
+    a = action("a")
+    a["instruction"] += '\nMT01_ACCEPTANCE_JSON: ["A12.product-evidence", "EF01.repair"]'
+    packet = batch([a])
+    assert validate(packet) == packet
+    acceptance = approved_acceptance_plan(a)
+    assert acceptance["ids"] == ["A12.product-evidence", "EF01.repair"]
+    assert not acceptance["broad_required"]
+    assert "tests/test_a12_claims.py" in acceptance["consumer_map"]["A12.product-evidence"]["tests"]
+    changed = copy.deepcopy(packet)
+    changed["actions"][0]["instruction"] += ' '
+    assert fingerprint(packet) != fingerprint(changed)
+    with pytest.raises(RemoteRequestError, match="ISSUER_NOT_AUTHORIZED"):
+        validate(packet, issuer="untrusted-executor")
+
+
+@pytest.mark.parametrize("declaration", [
+    "", "MT01_ACCEPTANCE_JSON: []", "MT01_ACCEPTANCE_JSON: not-json",
+    'MT01_ACCEPTANCE_JSON: ["A12.product-evidence"]\nMT01_ACCEPTANCE_JSON: ["EF01.repair"]',
+    'MT01_ACCEPTANCE_JSON: ["A12.product-evidence", "A12.product-evidence"]',
+    'MT01_ACCEPTANCE_JSON: ["--verify-json", "arbitrary-command"]',
+    'MT01_ACCEPTANCE_JSON: {"argv": ["python", "-c", "arbitrary"]}',
+    'MT01_ACCEPTANCE_JSON: ["AC-UNKNOWN"]',
+])
+def test_missing_ambiguous_or_unknown_acceptance_requires_broad_verification(declaration):
+    a = action("a")
+    a["instruction"] += "\n" + declaration
+    acceptance = approved_acceptance_plan(a)
+    assert acceptance["broad_required"] and acceptance["unknown_ids"]
+
+
+@pytest.mark.parametrize("key,value", [("acceptance_ids", ["A12.product-evidence"]),
+                                     ("verify_argv", ["python", "-c", "arbitrary"])])
+def test_mt01_does_not_relax_v1_additional_properties(key, value):
+    from jsonschema import ValidationError
+    a = action("a")
+    a[key] = value
+    with pytest.raises(ValidationError):
+        validate(batch([a]))
 
 
 def test_two_real_child_processes_overlap_in_one_batch():
