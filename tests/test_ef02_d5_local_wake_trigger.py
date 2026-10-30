@@ -45,6 +45,7 @@ class FakeSource:
         self.event, self.report, self.archive = evidence()
         self.status = status
         self.tamper = tamper
+        self.expected_archive_digest = hashlib.sha256(self.archive).hexdigest()
         self.duplicate = duplicate
         self.calls = []
 
@@ -59,7 +60,7 @@ class FakeSource:
             } | (self.tamper or {})
         item = {
             "name": "ef02-results-120-1", "id": 4242, "expired": False,
-            "digest": "sha256:" + hashlib.sha256(self.archive).hexdigest(),
+            "digest": "sha256:" + self.expected_archive_digest,
             "workflow_run": {"id": 120},
         }
         return {"total_count": 1, "artifacts": [item, item] if self.duplicate else [item]}
