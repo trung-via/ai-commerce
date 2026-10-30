@@ -32,5 +32,179 @@
     "pytest",
     "tests",
     "-q"
+  ],
+  "ef01-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_ef01.py",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "ef01-repair-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_ef01_repair.py",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "integrity-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_ef01_ef02_integrity.py",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "provider-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_ef01_provider_error_payload.py",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "mt01-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_minimum_test.py",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "ef01p-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_ef01_performance.py",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "a02-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_a02_contracts.py",
+    "tests/test_a02_mock_provider.py",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "a03-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_a03_creative.py",
+    "tests/test_a03_upgrade_v11.py",
+    "tests/test_a03_a04_integration.py",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "a04-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_a04_media_operations.py",
+    "tests/test_a04_upgrade_v11.py",
+    "tests/test_a03_a04_integration.py",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "a05-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_a05_composition.py",
+    "tests/test_a05_integration.py",
+    "tests/test_a05_render.py",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "a06-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_a06_e01.py",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "a07-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_a07_capability.py",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "a08-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_a08_distribution.py",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "a09-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_a09_analytics.py",
+    "tests/test_a09_e02.py",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "a10-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_a10_m01.py",
+    "tests/test_a10_m03.py",
+    "tests/test_a10_m04.py",
+    "tests/test_a10_m05.py",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "a11-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_a11_integration.py",
+    "tests/test_a11_reader.py",
+    "tests/test_a11_registry.py",
+    "tests/test_a11_reporting.py",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "a12-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_a12_claims.py",
+    "tests/test_a12_cli.py",
+    "tests/test_a12_identity.py",
+    "tests/test_a12_integration.py",
+    "tests/test_a12_offer.py",
+    "tests/test_a12_registry.py",
+    "tests/test_a12_rights.py",
+    "tests/test_a12_snapshot.py",
+    "-q",
+    "-n",
+    "12"
   ]
 }
