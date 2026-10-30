@@ -183,4 +183,4 @@ class GitHubRestArtifactAuthority:
 
     @staticmethod
     def _read_bytes(url: str, token: str, *, timeout=15) -> bytes:
-        return _fetch(url, token, max_bytes=_MAX_ZIP, accept="application/zip", timeout=timeout)
+        return _fetch(url, token, max_bytes=_MAX_ZIP, accept=_HEADERS["Accept"], timeout=timeout)
