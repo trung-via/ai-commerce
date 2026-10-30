@@ -199,6 +199,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_learning_parser(commands)
     from ai_commerce.opportunity.bridge.cli import add_parser as add_opportunity_parser
     add_opportunity_parser(commands)
+    from ai_commerce.product.cli import add_parser as add_product_parser
+    add_product_parser(commands)
     return parser
 
 
@@ -393,6 +395,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Product Runtime: {info.product_runtime}")
         return 0
     try:
+        if args.command == "product":
+            from ai_commerce.product.cli import run as product_run
+            return product_run(args)
         if args.command == "learning":
             from ai_commerce.learning.cli import run as learning_run
             return learning_run(args)

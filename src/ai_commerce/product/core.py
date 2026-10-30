@@ -184,6 +184,9 @@ def validate_contract(name: str, value: dict, *, raw: bytes | None = None,
     elif name == "ProductAssetRights":
         from .rights import _verify_rights
         _verify_rights(value, raw=raw, snapshot=snapshot, license_raw=license_raw)
+    elif name == "ProductEvidencePack":
+        from .pack import _verify_pack
+        _verify_pack(value, raw=raw, snapshot=snapshot)
     else:
         from .identity import _verify_identity, _verify_variant
         (_verify_identity if name == "ProductIdentity" else _verify_variant)(value)
