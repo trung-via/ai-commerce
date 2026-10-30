@@ -1,0 +1,10 @@
+{
+  "source_sha": "5e17381b5cc1d0ef05a56de0138a3972bc524169",
+  "scenario": "journal disappears after presence check before lstat",
+  "registry_sha256": "dcc7b6c8626d40b44c6784289c4153cef3ef509f3c5ce7ec7b5c0339a6c9fe0b",
+  "reproduced": true,
+  "public_code": "REGISTRY_IO_ERROR",
+  "cause_type": "FileNotFoundError",
+  "cause_errno": 2,
+  "unchanged_event_count": 0
+}

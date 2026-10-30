@@ -159,7 +159,8 @@ def content_id(name: str, value: dict) -> str:
 
 
 def validate_contract(name: str, value: dict, *, raw: bytes | None = None,
-                      snapshot=None, proof_raw: bytes | None = None) -> dict:
+                      snapshot=None, proof_raw: bytes | None = None,
+                      license_raw: dict[str, bytes] | None = None) -> dict:
     """Validate content IDs and semantics, returning a detached JSON value.
 
     A snapshot requires raw evidence; a valid hash of forged normalized content
@@ -180,6 +181,9 @@ def validate_contract(name: str, value: dict, *, raw: bytes | None = None,
     elif name == "ProductOfferObservation":
         from .offers import _verify_offer
         _verify_offer(value, raw=raw, snapshot=snapshot)
+    elif name == "ProductAssetRights":
+        from .rights import _verify_rights
+        _verify_rights(value, raw=raw, snapshot=snapshot, license_raw=license_raw)
     else:
         from .identity import _verify_identity, _verify_variant
         (_verify_identity if name == "ProductIdentity" else _verify_variant)(value)
@@ -187,14 +191,16 @@ def validate_contract(name: str, value: dict, *, raw: bytes | None = None,
 
 
 def seal_contract(name: str, body: dict, *, raw: bytes | None = None,
-                  snapshot=None, proof_raw: bytes | None = None) -> dict:
+                  snapshot=None, proof_raw: bytes | None = None,
+                  license_raw: dict[str, bytes] | None = None) -> dict:
     require(type(name) is str and name in CONTRACT_IDS, "UNKNOWN_PRODUCT_CONTRACT")
     require(type(body) is dict and CONTRACT_IDS[name][0] not in body, "INVALID_CONTRACT_BODY")
     return validate_contract(name, {**body, CONTRACT_IDS[name][0]: content_id(name, body)},
-                             raw=raw, snapshot=snapshot, proof_raw=proof_raw)
+                             raw=raw, snapshot=snapshot, proof_raw=proof_raw, license_raw=license_raw)
 
 
 def parse_contract(name: str, encoded: bytes, *, raw: bytes | None = None,
-                   snapshot=None, proof_raw: bytes | None = None) -> dict:
+                   snapshot=None, proof_raw: bytes | None = None,
+                   license_raw: dict[str, bytes] | None = None) -> dict:
     return validate_contract(name, parse_json(encoded), raw=raw, snapshot=snapshot,
-                             proof_raw=proof_raw)
+                             proof_raw=proof_raw, license_raw=license_raw)

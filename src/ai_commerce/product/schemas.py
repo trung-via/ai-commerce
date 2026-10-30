@@ -22,6 +22,7 @@ CONTRACT_IDS = {
     "ProductVariant": ("variant_record_id", "a12-variant-record-"),
     "ProductClaimEvidence": ("claim_id", "a12-claim-"),
     "ProductOfferObservation": ("offer_id", "a12-offer-"),
+    "ProductAssetRights": ("rights_id", "a12-rights-"),
 }
 
 
@@ -140,6 +141,9 @@ def schema(name: str) -> dict:
     """Return a detached portable schema; unknown names have a bounded error."""
     from .core import require
     require(type(name) is str and name in CONTRACT_IDS, "UNKNOWN_PRODUCT_CONTRACT")
+    if name == "ProductAssetRights":
+        from .rights_schemas import rights_schema
+        return rights_schema()
     if name in ("ProductClaimEvidence", "ProductOfferObservation"):
         from .evidence_schemas import evidence_schema
         return evidence_schema(name)

@@ -1,0 +1,104 @@
+{
+  "source_sha": "5e17381b5cc1d0ef05a56de0138a3972bc524169",
+  "upstream_a12_02_candidate": "6161906f7bf5bb17f1332e2d8c4a2d6865c2a5e0",
+  "candidate_to_source_changed_paths": [
+    ".gitattributes"
+  ],
+  "python_311_syntax_files": [
+    "src/ai_commerce/product/__init__.py",
+    "src/ai_commerce/product/claims.py",
+    "src/ai_commerce/product/core.py",
+    "src/ai_commerce/product/evidence.py",
+    "src/ai_commerce/product/evidence_schemas.py",
+    "src/ai_commerce/product/files.py",
+    "src/ai_commerce/product/history.py",
+    "src/ai_commerce/product/identity.py",
+    "src/ai_commerce/product/offers.py",
+    "src/ai_commerce/product/reader.py",
+    "src/ai_commerce/product/registry.py",
+    "src/ai_commerce/product/rights.py",
+    "src/ai_commerce/product/rights_schemas.py",
+    "src/ai_commerce/product/schemas.py",
+    "src/ai_commerce/product/storage_privacy.py",
+    "tests/test_a12_rights.py",
+    "tests/test_a12_registry.py"
+  ],
+  "scope_violations": [],
+  "worktree_status": " M src/ai_commerce/product/core.py\n M src/ai_commerce/product/schemas.py\n?? contracts/ProductAssetRights.v1.schema.json\n?? src/ai_commerce/product/a12_03_evidence/initial.targeted.json\n?? src/ai_commerce/product/a12_03_evidence/round1.targeted.json\n?? src/ai_commerce/product/a12_03_evidence/verify.py\n?? src/ai_commerce/product/registry.py\n?? src/ai_commerce/product/rights.py\n?? src/ai_commerce/product/rights_schemas.py\n?? src/ai_commerce/product/storage_privacy.py\n?? tests/test_a12_registry.py\n?? tests/test_a12_rights.py\n",
+  "git_diff_check_exit": 0,
+  "git_diff_check_output": "",
+  "preserved_dependencies": {
+    "src/ai_commerce/product/__init__.py": {
+      "worktree_sha256": "47eb151e5db1b8a99702b6769432a186baa95f2679de486cdbea0588a907cd7f",
+      "tracked_diff_empty": true
+    },
+    "src/ai_commerce/product/claims.py": {
+      "worktree_sha256": "d00257cdd0eeb0296df4ec9cf587585fdb4dbea076ea2c7b5ba1c5f3685c31b3",
+      "tracked_diff_empty": true
+    },
+    "src/ai_commerce/product/offers.py": {
+      "worktree_sha256": "988e97629706e71fbae594ed4e391886da327d95310c8e34ab0358f104dc462f",
+      "tracked_diff_empty": true
+    },
+    "src/ai_commerce/product/history.py": {
+      "worktree_sha256": "61fb146d26d2f456e8986732a32b22fa6a1f67d3d7c2b5322eb94748b6c5d230",
+      "tracked_diff_empty": true
+    },
+    "src/ai_commerce/product/identity.py": {
+      "worktree_sha256": "b7ff30f2167b22e92c96ef57301e6cad9da655ca93f8bfd77ea2aae89e72bf15",
+      "tracked_diff_empty": true
+    },
+    "src/ai_commerce/product/reader.py": {
+      "worktree_sha256": "be3850209edf99a031ae5cf11c1b59a5d0aa05c5fda45694edd8b69f166c5a6c",
+      "tracked_diff_empty": true
+    },
+    "src/ai_commerce/product/files.py": {
+      "worktree_sha256": "7c096dff9f1408346573cc2198b48539115f7f77673e4f388f3516dfab176585",
+      "tracked_diff_empty": true
+    },
+    "src/ai_commerce/product/evidence.py": {
+      "worktree_sha256": "8f4d322370834c958c6177522b7e1b0bc43063b6bc9620509d05ec3387186b5d",
+      "tracked_diff_empty": true
+    },
+    "src/ai_commerce/product/evidence_schemas.py": {
+      "worktree_sha256": "fd9a8a4573e99b19acd5d2c43cb84297d382cc56f1cde438467a90f938d5934b",
+      "tracked_diff_empty": true
+    },
+    "tests/test_a12_snapshot.py": {
+      "worktree_sha256": "ce1c07363448b7edd90f51badabc6849b3bb9681241d528ab591907490b4a2a1",
+      "tracked_diff_empty": true
+    },
+    "tests/test_a12_identity.py": {
+      "worktree_sha256": "7f09f85cab16ff8b6ab3a55310d28baaed96dea54351efc287e8b342917f0aa6",
+      "tracked_diff_empty": true
+    },
+    "tests/test_a12_claims.py": {
+      "worktree_sha256": "99b46e096a0a2351505472a187a5ab884210490a94be3df2c6a2e7806ebd4705",
+      "tracked_diff_empty": true
+    },
+    "tests/test_a12_offer.py": {
+      "worktree_sha256": "ef961ba6e16a209b1b5d5346b1520e2324f2f3a3c9b9ccc5aedfcaeeba5fdfe6",
+      "tracked_diff_empty": true
+    },
+    "contracts/ProductListingSnapshot.v1.schema.json": {
+      "worktree_sha256": "21bef02160cc6b9d2fff02e8d039a45e664996fec14d0dc8790a1c5fdb96f7cb",
+      "tracked_diff_empty": true
+    },
+    "contracts/ProductIdentity.v1.schema.json": {
+      "worktree_sha256": "f93fa3e22c2546cd377c413453f8907d81723215b0777dcdd10bcb4ff604ecd5",
+      "tracked_diff_empty": true
+    },
+    "contracts/ProductVariant.v1.schema.json": {
+      "worktree_sha256": "592ffed9447ce168536abac4da6a047e7931db85b2a623c6ebae98ed05ccab07",
+      "tracked_diff_empty": true
+    },
+    "contracts/ProductClaimEvidence.v1.schema.json": {
+      "worktree_sha256": "1f34230e62cf84f1c92570b94505f2557bcc1efec1967ee10aefc1452b7c7780",
+      "tracked_diff_empty": true
+    },
+    "contracts/ProductOfferObservation.v1.schema.json": {
+      "worktree_sha256": "57071d55142cc7d706fbde1f00ab63c665eb0beaf57d0dc69a0f0e11ac83dda6",
+      "tracked_diff_empty": true
+    }
+  }
+}

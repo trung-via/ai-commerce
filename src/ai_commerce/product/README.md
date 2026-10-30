@@ -3,8 +3,10 @@
 The A12-01 layer implements AC01 and the identity primitives of AC02. A12-02
 adds the identity history, claim evidence and offer observations described
 below (AC02–AC04). Both retain original bytes and check normalized content by
-replay. Persistent registry, rights manifests and evidence packs remain for
-later actions. No operation changes a Creative brief or acquires rights.
+replay. A12-03 adds purpose-scoped rights evidence and the independent local
+append-only registry described in [RIGHTS_REGISTRY.md](RIGHTS_REGISTRY.md).
+Evidence packs remain for A12-04. No operation changes a Creative brief or
+authenticates legal permission.
 
 ```python
 from ai_commerce.product import ProductListingSnapshot, read_snapshot
@@ -179,6 +181,8 @@ Different asserted product keys within a listing, or conflicting SKU/GTIN/
 attribute values for an exact variant, produce conflict records with every
 source pin. Null/absent assertions do not contradict known values. Corrections
 remain visible as historical conflicts; no canonical winner is selected.
+The A12-03 registry can separately persist explicit snapshot revisions while
+this existing history API remains in memory.
 
 ## A12-02 claim evidence
 
