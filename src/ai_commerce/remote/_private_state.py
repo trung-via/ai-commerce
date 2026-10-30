@@ -28,7 +28,8 @@ def _regular(info) -> bool:
     return stat.S_ISREG(info.st_mode) and not _linked(info) and info.st_nlink == 1
 
 
-def _windows_handle(path: Path, flags: int, *, directory: bool = False):
+def _windows_handle(path: Path, flags: int, *, directory: bool = False,
+                    new_file_owner_sid: str | None = None):
     """Open the reparse point itself; deny rename/delete while the handle lives."""
     import ctypes
     from ctypes import wintypes
@@ -44,9 +45,15 @@ def _windows_handle(path: Path, flags: int, *, directory: bool = False):
     access = 0x80 if directory else 0x80000000
     if not directory and flags & (os.O_WRONLY | os.O_RDWR):
         access |= 0x40000000
+    if new_file_owner_sid is not None and flags & os.O_CREAT:
+        # SetSecurityInfo needs WRITE_OWNER on a just-created handle.
+        # No extra permission or ownership change is requested for existing files.
+        access |= 0x00080000
     creation = 1 if flags & os.O_EXCL else 4 if flags & os.O_CREAT else 3
     handle = create(str(path), access, 3, None, creation,
                     0x00200000 | (0x02000000 if directory else 0), None)
+    created_new = bool(flags & os.O_CREAT) and (
+        bool(flags & os.O_EXCL) or ctypes.get_last_error() != 183)
     if handle == wintypes.HANDLE(-1).value:
         code = ctypes.get_last_error()
         if code in (2, 3):
@@ -63,18 +70,49 @@ def _windows_handle(path: Path, flags: int, *, directory: bool = False):
     if not query(handle, 9, ctypes.byref(info), ctypes.sizeof(info)) or info.attributes & 0x400:
         close(handle)
         raise PrivateStateError("PATH_UNSAFE")
+    if created_new and new_file_owner_sid is not None:
+        # Elevated Windows tokens may default to BUILTIN\\Administrators as
+        # owner even in a correctly restricted per-operator directory.
+        # Assign the independently authenticated operator SID to NEW files
+        # only. An existing unexpected owner must fail HandoffStore._permissions.
+        # This runs before returning a usable handle, inside the private parent.
+        advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+        advapi.ConvertStringSidToSidW.argtypes = (
+            wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p))
+        advapi.ConvertStringSidToSidW.restype = wintypes.BOOL
+        advapi.SetSecurityInfo.argtypes = (
+            wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+        advapi.SetSecurityInfo.restype = wintypes.DWORD
+        kernel.LocalFree.argtypes = (ctypes.c_void_p,)
+        kernel.LocalFree.restype = ctypes.c_void_p
+        owner_sid = ctypes.c_void_p()
+        try:
+            if not advapi.ConvertStringSidToSidW(new_file_owner_sid, ctypes.byref(owner_sid)):
+                raise PrivateStateError("OWNER_PROVISION_FAILED")
+            if advapi.SetSecurityInfo(handle, 1, 1, owner_sid, None, None, None):
+                raise PrivateStateError("OWNER_PROVISION_FAILED")
+        except BaseException:
+            close(handle)
+            raise
+        finally:
+            if owner_sid:
+                kernel.LocalFree(owner_sid)
     return handle, close
 
 
 class _Transaction:
-    def __init__(self, state, directory_fd=None):
+    def __init__(self, state, directory_fd=None, *, new_file_owner_sid=None):
         self.state = state
         self.directory_fd = directory_fd
+        self.new_file_owner_sid = new_file_owner_sid
 
     def open(self, name: str, flags: int) -> int:
         if os.name == "nt":
             import msvcrt
-            handle, close = _windows_handle(self.state.path.parent / name, flags)
+            handle, close = _windows_handle(
+                self.state.path.parent / name, flags,
+                new_file_owner_sid=self.new_file_owner_sid)
             try:
                 fd = msvcrt.open_osfhandle(handle, os.O_BINARY | (os.O_RDWR if flags &
                                            (os.O_WRONLY | os.O_RDWR) else os.O_RDONLY))
@@ -167,17 +205,21 @@ class PrivateJsonState:
             raise PrivateStateError(self.label + "_LOCATION_INVALID") from None
 
     @contextmanager
-    def locked(self, *, wait_seconds: float = 5):
+    def locked(self, *, wait_seconds: float = 5, new_file_owner_sid: str | None = None):
         """One OS lock covers the entire read/validate/modify/replace operation."""
         if type(wait_seconds) not in (int, float) or not 0 <= wait_seconds <= 5:
             raise PrivateStateError(self.label + "_LOCK_BUDGET_INVALID")
+        if new_file_owner_sid is not None and (
+                os.name != "nt" or not isinstance(new_file_owner_sid, str) or
+                not new_file_owner_sid.startswith("S-1-")):
+            raise PrivateStateError(self.label + "_OWNER_PROVISION_INVALID")
         directories, lock_fd, unlock = [], None, None
         try:
             self._check_location()
             if os.name == "nt":
                 for part in reversed(self.path.parents):
                     directories.append(_windows_handle(part, 0, directory=True))
-                transaction = _Transaction(self)
+                transaction = _Transaction(self, new_file_owner_sid=new_file_owner_sid)
             elif os.name == "posix" and hasattr(os, "O_NOFOLLOW"):
                 directory_fd = os.open(self.path.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
                 directories.append(directory_fd)
