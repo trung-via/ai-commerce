@@ -151,3 +151,48 @@ def test_send_command_requires_creds_and_no_untrusted_process_flags(tmp_path, mo
             "--workflow-id", "399104102", "--caller-id", "operator"]
     assert d5.main(args) == 2
     assert "EF02_WAKE_BLOCKED" in capsys.readouterr().err
+
+
+
+def test_ui_observation_is_not_reported_as_success(tmp_path, monkeypatch, capsys):
+    ep, rp, ev, _ = files(tmp_path)
+    private = tmp_path / "private"
+    private.mkdir()
+    fake_env = {
+        "AI_COMMERCE_LOCAL_WAKE_SEND_ENABLED": "true",
+        "AI_COMMERCE_GITHUB_READ_TOKEN": "test-read-token",
+        "AI_COMMERCE_WAKE_HMAC_KEY_HEX": "11" * 32,
+    }
+    monkeypatch.setattr(d5, "os", SimpleNamespace(name="nt", environ=fake_env))
+    monkeypatch.setattr(d5, "_windows_process_sid", lambda: "S-1-5-21-123")
+    calls = []
+    def fake_send(**kwargs):
+        calls.append(kwargs)
+        return WakeReceipt(event_id=ev["event_id"], route_id="route-a",
+                           generation=1, delivery_status="UNKNOWN",
+                           error_code="UI_USER_TURN_OBSERVED")
+    monkeypatch.setattr(d5, "send_one", fake_send)
+    code = d5.main([
+        "send", "--event-file", str(ep), "--result-file", str(rp),
+        "--checkout", str(tmp_path), "--registry", str(private / "routes.json"),
+        "--idempotency", str(private / "idem.json"),
+        "--grants", str(private / "grants.json"),
+        "--workflow-id", "399104102", "--caller-id", "operator",
+    ])
+    assert code == 3
+    assert len(calls) == 1
+    assert calls[0]["principal_provider"]() == "S-1-5-21-123"
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "UNKNOWN"
+    assert output["chat_delivery_proven"] is False
+    assert output["brain_continuation_proven"] is False
+
+
+def test_windows_process_identity_is_read_from_actual_process_token():
+    import os
+    import re
+    if os.name != "nt":
+        pytest.skip("Windows process token is unavailable on POSIX")
+    identity = d5._windows_process_sid()
+    assert isinstance(identity, str)
+    assert re.fullmatch(r"S-1-(?:\\d+-){1,14}\\d+", identity)
