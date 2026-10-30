@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from .transport import GitHubTransport, RemoteTransportError, CandidateIntegrityError
-from .validation import fingerprint, check_source, approved_verification_plan
+from .validation import fingerprint, check_source, approved_verification_plan, approved_acceptance_plan
 from .reuse import load_approved_candidates, approve_reuse
 from .candidate_policy import (
     REVIEW_STATUS, VERIFIED_STATUSES, candidate_accepted, evidence_digest, validate_candidate_evidence,
@@ -287,6 +287,9 @@ class LocalBatchWorker:
                     provider_invocation_proven=False)
                 return finish()
             plan = approved_verification_plan(action, self.profiles)
+            acceptance = approved_acceptance_plan(submitted_action)
+            plan["acceptance"] = acceptance
+            outcome["mt01_acceptance"] = acceptance
             outcome["verification_plan"] = plan
             dependencies = action.get("resolved_dependencies", [])
             outcome["aggregate_verification"] = {
@@ -315,6 +318,8 @@ class LocalBatchWorker:
             argv.extend(["--minimum-test", "--registered-only", "--host-slots",
                          str(max(int(os.environ.get("EF02_HOST_SLOTS", "2")), self.batch.get("max_parallel", 2)))])
             argv.extend(["--registered-profiles-json", str(registry_file)])
+            for acceptance_id in acceptance["ids"]:
+                argv.extend(["--acceptance", acceptance_id])
             for dependency in dependencies:
                 candidate_sha = dependency.get("candidate_sha")
                 if not candidate_sha:
@@ -436,6 +441,7 @@ class LocalBatchWorker:
             outcome["pytest_profile"] = report.get("pytest_profile")
             outcome["pytest_profiles"] = report.get("pytest_profiles")
             outcome["observed_pytest_workers"] = report.get("observed_pytest_workers")
+            outcome["minimum_test"] = report.get("minimum_test")
             # Trust neither a success-shaped receipt after a nonzero process
             # exit nor an EF01 PASS receipt contradicted by verification.
             # Both cases can arise when the EF01 process dies after writing
