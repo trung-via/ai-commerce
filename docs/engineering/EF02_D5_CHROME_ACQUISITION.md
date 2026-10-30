@@ -20,13 +20,13 @@ Launch (only with explicit opt-in and locally configured allow_launch=true):
 python -m ai_commerce.remote.chrome_acquisition launch --opt-in --config <PRIVATE-ABSOLUTE-JSON> --checkout <ABSOLUTE-AI-COMMERCE-CHECKOUT>
 ~~~
 
-The probe validates local paths and Windows TCP/process identity without connecting to Chrome or reading pages. The launch command may start **one** dedicated Chrome process when the endpoint is absent, no Chrome process claims the profile, and no singleton markers are present. It then waits a finite period for exactly one loopback listener, validating process executable, user-data directory, profile name, port, address, and interactive Windows Session ID. A verified existing browser is reported without launching again. Uncertain ownership, multiple listeners, stale locks, or uncertain startup results cause a stop; no automatic retries, forced Chrome termination, cookie access or profile migration.
+The probe validates operator-owned private paths, Google Authenticode signature, a non-elevated interactive Windows session and TCP process identity. If an owned listener exists, it requests `/json/version` over loopback with a strict 2-second timeout, rejects redirects and oversized, malformed, or non-CDP responses. No ChatGPT page or conversation is read. The launch command may start **one** dedicated Chrome process when the endpoint is absent, no Chrome process claims the profile, and no singleton markers are present. It then waits a finite period for exactly one loopback listener, validating process executable, user-data directory, profile name, port, address, and interactive Windows Session ID. A verified existing browser is reported without launching again. Uncertain ownership, multiple listeners, stale locks, or uncertain startup results cause a stop; no automatic retries, forced Chrome termination, cookie access or profile migration.
 
-This is a standalone operator action. It is **not** automatically invoked by EF02 GitHub jobs, D5 listener or D4 Send. It does not open ChatGPT, select conversations, auto-login, click Send, make a watcher/daemon, or change runner configuration. The child browser process does not inherit GITHUB_TOKEN, GH_TOKEN, AIOS_* or AI Commerce Wake signing/GitHub read secrets.
+This is a standalone operator action. It is **not** automatically invoked by EF02 GitHub jobs, D5 listener or D4 Send. It does not open ChatGPT, select conversations, auto-login, click Send, make a watcher/daemon, or change runner configuration. The child Chrome and Windows probe subprocess inherit only a limited allowlist of ordinary Windows environment variables, excluding AIOS, GitHub and AI Commerce Wake secrets.
 
 ## External configuration (dedicated AI Commerce profile)
 
-Operator prepares a dedicated private directory under LOCALAPPDATA/AI-Commerce, outside the repository and outside the default Google Chrome User Data and all AIOS-Renew browser directories. The profile directory must exist, e.g. Default. Config JSON stays outside any Git checkout and must never be committed.
+Operator prepares a dedicated private directory under LOCALAPPDATA/AI-Commerce, outside the repository and outside the default Google Chrome User Data and all AIOS-Renew browser directories. The profile directory must exist, e.g. Default. Config JSON must be inside the private LOCALAPPDATA/AI-Commerce root, but outside the Chrome profile and Git checkout. It must never be committed. Before launching, the operator must provision restricted Windows ACLs on the JSON, profile root and selected profile directory with exact owner user SID, SYSTEM/Administrators and OWNER RIGHTS only. The tool does not create or loosen these permissions.
 
 ~~~json
 {
@@ -44,9 +44,13 @@ Replace the illustration with the operator's actual approved paths locally. Do n
 
 ## Proof and rollback
 
-- Probe output: NOT_RUNNING, READY_ATTACH or a fixed non-sensitive blocking reason; no browser UI access.
-- Launch output: READY_ATTACH with launched true only when the new Chrome process owns the exact expected 127.0.0.1 listener. If launch reports uncertainty, inspect local processes before repeating.
+- Probe output: NOT_RUNNING, READY_ATTACH with validated CDP metadata, or a fixed blocking reason. A successful probe may read the loopback `/json/version` endpoint but does not open browser tabs or read chat.
+- Launch output: READY_ATTACH with launched true only when the new process owns the expected 127.0.0.1 port, its Google-signed executable matches and its CDP protocol responds. Elevated Administrator Chrome and unavailable interactive desktops are blocked. If launch reports uncertainty, inspect local processes before repeating.
 - D4 still requires an already-open exact ChatGPT conversation with separate valid D2/D3 route, signed grants and idempotency authority. This CLI neither enables Wake send nor claims chat_delivery_proven or brain_continuation_proven.
-- Tests use synthetic config and process inventories; hosted CI PASS does not prove actual Windows Chrome login or end-to-end Wake.
+- Tests cover synthetic config, mocked CDP HTTP responses, mocked Windows single-spawn behavior, invalid ownership, environment secret filtering and Windows argv parsing. Hosted CI PASS does not prove live Google login, Playwright attach or end-to-end Wake.
 - Source rollback removes only this module/tests/document. No Windows service, runner, live browser or operator secrets are modified by the code review.
 
+
+## Remaining live acceptance
+
+A valid signed Chrome executable and `/json/version` response do not establish that Google will accept a login or that Playwright can attach to the original regular ChatGPT conversation. Windows operator login and D4 exact-chat conformance remain separate steps with Human authorization. Do not copy Chrome credentials from AIOS-Renew or bypass Google security. `LIVE_WAKE_NOT_PROVEN` remains the only supported status.
