@@ -753,7 +753,17 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
     initial, _ = _snapshot(repo, allowed_prefixes, deadline,
                            **({"git_executable": git_executable} if git_executable is not None else {}))
     if initial["changed_files"]:
-        raise ValueError("WORKTREE_DIRTY: commit/stash existing changes before attempt")
+        # A false dirty worktree is commonly produced by non-round-trippable
+        # raw GitHub candidate blobs on Windows. Surface the paths rather than
+        # forcing another blind EF02 repair. Never hide real modifications.
+        from .git_byte_consistency import checkout_diagnostics, GitByteConsistencyError
+        try:
+            details = checkout_diagnostics(repo, git_executable=git_executable)
+            paths = details["dirty_entries"]
+        except GitByteConsistencyError:
+            paths = initial["changed_files"][:40]
+        raise ValueError("WORKTREE_DIRTY: commit/stash existing changes before attempt; paths=" +
+                         repr(paths[:40]))
     if minimum_test and not _is_pytest(verify_argv):
         raise ValueError("MT01_REQUIRES_APPROVED_PYTEST_FALLBACK")
     mt_context = ({"base_files": file_hashes(repo), "required_acs": tuple(acceptance_ids),
