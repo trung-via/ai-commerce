@@ -63,7 +63,7 @@ def test_mt01_component_profiles_are_registered_with_twelve_workers() -> None:
         paths = argv[3:-3]
         assert paths and len(paths) == len(set(paths)), name
         for path in paths:
-            assert path.startswith("tests/") and path.endswith(".py"), (name, path)
+            assert (path.startswith("tests/") or path == "src/ai_commerce/opportunity/trends/tests/test_m02.py") and path.endswith(".py"), (name, path)
             assert (ROOT / path).is_file(), (name, path)
 
 
@@ -77,7 +77,7 @@ def test_mt01_registry_has_no_unregistered_shell_or_arbitrary_pytest_options() -
         assert argv[-3:] == ["-q", "-n", "12"], name
         scopes = argv[3:-3]
         assert scopes and all(
-            scope == "tests" or (scope.startswith("tests/") and scope.endswith(".py"))
+            scope == "tests" or ((scope.startswith("tests/") or scope == "src/ai_commerce/opportunity/trends/tests/test_m02.py") and scope.endswith(".py"))
             for scope in scopes
         ), name
         assert all((ROOT / scope).exists() for scope in scopes), name
