@@ -88,6 +88,19 @@ def test_git_filter_mismatch_fails_before_remote_publish(tmp_path: Path) -> None
     ])
 
 
+def test_crlf_autotext_candidate_rejected_even_for_renamed_txt(tmp_path: Path) -> None:
+    """Auto-text must still reject CRLF raw blobs; JSON exception is not global."""
+    repo = _repo(tmp_path)
+    original = b"original\r\n"
+    with pytest.raises(GitByteConsistencyError, match=r"CANDIDATE_GIT_FILTER_MISMATCH:renamed\\.txt"):
+        assert_candidate_git_filter_consistency(repo, [
+            ("renamed.txt", original, "100644"),
+        ])
+    assert_candidate_git_filter_consistency(repo, [
+        ("renamed.txt", b"original\n", "100644"),
+    ])
+
+
 def test_real_dirty_worktree_stays_blocked_after_metadata_refresh(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     (repo / "keep.json").write_bytes(b'{"keep":true}\r\n')
