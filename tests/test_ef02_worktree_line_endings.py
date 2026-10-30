@@ -46,3 +46,29 @@ def test_evidence_blob_attributes_preserve_raw_bytes() -> None:
         tracked = _git("ls-files", "--stage", "--", path).decode().split()[1]
         actual = _git("hash-object", "--no-filters", "--", path).decode().strip()
         assert actual == tracked
+
+
+def test_repair_evidence_json_is_raw_and_unfiltered() -> None:
+    """A12-01 emits literal CRLF JSON under repair_evidence during EF01-R.
+
+    Its verified candidate is later checked out by EF02 for A12-02;
+    the Git blob must not become falsely dirty after Windows checkout.
+    """
+    paths = (
+        "src/ai_commerce/product/repair_evidence/round1.failures.json",
+        "src/ai_commerce/product/repair_evidence/round1.final-source.json",
+        "src/ai_commerce/product/repair_evidence/round1.project-tests.json",
+        "src/ai_commerce/product/repair_evidence/round1.repro.json",
+        "src/ai_commerce/product/repair_evidence/round1.static.json",
+        "src/ai_commerce/product/repair_evidence/round1.targeted.json",
+        "src/ai_commerce/learning/repair_evidence/round2.project-tests.json",
+    )
+    attrs = _attributes(*paths)
+    for path in paths:
+        assert attrs[(path, "text")] == "unset"
+        assert attrs[(path, "eol")] == "unset"
+
+    # Non-evidence JSON is deliberately still LF-normalized by policy.
+    normal = _attributes("contracts/ProductIdentity.v1.schema.json")
+    assert normal[("contracts/ProductIdentity.v1.schema.json", "text")] == "set"
+    assert normal[("contracts/ProductIdentity.v1.schema.json", "eol")] == "lf"
