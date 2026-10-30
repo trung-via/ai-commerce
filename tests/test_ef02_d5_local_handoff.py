@@ -44,6 +44,20 @@ def provision(path):
         result = subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r",
                                  "*" + sid + ":(OI)(CI)F"], capture_output=True)
         assert result.returncode == 0, "test directory ACL provisioning failed"
+        # Elevated hosted Windows tokens can create a directory owned by the
+        # Administrators group even when the running user's SID has full ACL
+        # access. The D5.4 guard intentionally requires that user's exact SID
+        # to own the directory; the test must provision ownership as well.
+        owner_result = subprocess.run(
+            ["icacls", str(path), "/setowner", "*" + sid],
+            capture_output=True, text=True,
+        )
+        assert owner_result.returncode == 0, (
+            "test directory owner provisioning failed: " + owner_result.stderr
+        )
+        actual_owner, aces = handoff._windows_acl(path)
+        assert actual_owner == sid, "test directory owner differs from runner SID"
+        handoff._check_windows_acl(actual_owner, aces, sid)
     return path
 
 
