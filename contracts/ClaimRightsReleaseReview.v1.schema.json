@@ -1,0 +1,912 @@
+{
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "ClaimRightsReleaseReview.v1"
+    },
+    "reviewer_version": {
+      "const": "a13-c09/1.0"
+    },
+    "scope": {
+      "const": "COMMERCIAL_PLACEMENT_CLAIMS_AND_RIGHTS_ONLY"
+    },
+    "verification_scope": {
+      "const": "LOCAL_EVIDENCE_REPLAY_ONLY_NOT_EXTERNAL_OR_LEGAL_APPROVAL"
+    },
+    "source_authenticity": {
+      "const": "NOT_ATTESTED"
+    },
+    "claim_coverage": {
+      "const": "CALLER_DECLARED_NOT_EXHAUSTIVE"
+    },
+    "request": {
+      "type": "object",
+      "properties": {
+        "product_id": {
+          "type": "string",
+          "pattern": "^a12-product-[0-9a-f]{64}$",
+          "minLength": 76,
+          "maxLength": 76
+        },
+        "listing_id": {
+          "type": "string",
+          "pattern": "^a12-listing-[0-9a-f]{64}$",
+          "minLength": 76,
+          "maxLength": 76
+        },
+        "variant_id": {
+          "type": "string",
+          "pattern": "^a12-variant-[0-9a-f]{64}$",
+          "minLength": 76,
+          "maxLength": 76
+        },
+        "release_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "territory": {
+          "type": "string",
+          "pattern": "^[A-Z]{2}$",
+          "minLength": 2,
+          "maxLength": 2
+        },
+        "channel": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$",
+          "maxLength": 128,
+          "not": {
+            "pattern": "[^A-Za-z0-9._:-]"
+          }
+        },
+        "as_of": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "format": "date-time"
+        },
+        "use_from": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "format": "date-time"
+        },
+        "use_until": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "product_id",
+        "listing_id",
+        "variant_id",
+        "release_sha256",
+        "territory",
+        "channel",
+        "as_of",
+        "use_from",
+        "use_until"
+      ],
+      "additionalProperties": false
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^a12-snapshot-[a-f0-9]{64}$"
+        },
+        "source_snapshot_id": {
+          "type": "string",
+          "pattern": "^a12-source-[a-f0-9]{64}$"
+        },
+        "snapshot_raw_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2000
+        },
+        "source_namespace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^(?![\\s\\S]*[\\x00-\\x1f\\x7f])\\S(?:.*\\S)?$"
+        },
+        "identity_id": {
+          "type": "string",
+          "pattern": "^a12-identity-[a-f0-9]{64}$"
+        },
+        "variant_record_id": {
+          "type": "string",
+          "pattern": "^a12-variant-record-[a-f0-9]{64}$"
+        },
+        "seller_id": {
+          "type": "string",
+          "pattern": "^a12-seller-[a-f0-9]{64}$"
+        },
+        "listing_id": {
+          "type": "string",
+          "pattern": "^a12-listing-[a-f0-9]{64}$"
+        },
+        "product_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^a12-product-[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "variant_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^a12-variant-[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "variant_key": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^(?![\\s\\S]*[\\x00-\\x1f\\x7f])\\S(?:.*\\S)?$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "synthetic": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "source_snapshot_id",
+        "snapshot_raw_sha256",
+        "ordinal",
+        "source_namespace",
+        "identity_id",
+        "variant_record_id",
+        "seller_id",
+        "listing_id",
+        "product_id",
+        "variant_id",
+        "variant_key",
+        "synthetic"
+      ]
+    },
+    "pack_id": {
+      "type": "string",
+      "pattern": "^a12-pack-[0-9a-f]{64}$",
+      "minLength": 73,
+      "maxLength": 73
+    },
+    "pack_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "snapshot_sha256": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "media_inspection_sha256": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "render_manifest_sha256": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "usage_verification": {
+      "enum": [
+        "DIRECT_ASSET_BYTES",
+        "RENDER_SOURCE_HASHES",
+        "UNPROVEN"
+      ]
+    },
+    "claim_evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "claim_id": {
+            "type": "string",
+            "pattern": "^a12-claim-[0-9a-f]{64}$",
+            "minLength": 74,
+            "maxLength": 74
+          },
+          "record_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "source_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "proof_sha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "minLength": 64,
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "claim_id",
+          "record_sha256",
+          "source_sha256",
+          "proof_sha256"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 0,
+      "maxItems": 2000,
+      "uniqueItems": true
+    },
+    "rights_evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "rights_id": {
+            "type": "string",
+            "pattern": "^a12-rights-[0-9a-f]{64}$",
+            "minLength": 75,
+            "maxLength": 75
+          },
+          "record_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "source_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "license_sha256s": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "purpose": {
+                  "enum": [
+                    "COMMERCIAL_USE",
+                    "ADVERTISEMENT",
+                    "CREATIVE_DERIVATIVE"
+                  ]
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$",
+                  "minLength": 64,
+                  "maxLength": 64
+                }
+              },
+              "required": [
+                "purpose",
+                "sha256"
+              ],
+              "additionalProperties": false
+            },
+            "minItems": 0,
+            "maxItems": 3,
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "rights_id",
+          "record_sha256",
+          "source_sha256",
+          "license_sha256s"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 0,
+      "maxItems": 100,
+      "uniqueItems": true
+    },
+    "rights_status_evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": "ReleaseRightsStatusEvidence.v1"
+          },
+          "rights_id": {
+            "type": "string",
+            "pattern": "^a12-rights-[0-9a-f]{64}$",
+            "minLength": 75,
+            "maxLength": 75
+          },
+          "asset_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "license_ref": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$",
+            "maxLength": 128,
+            "not": {
+              "pattern": "[^A-Za-z0-9._:-]"
+            }
+          },
+          "purpose": {
+            "enum": [
+              "COMMERCIAL_USE",
+              "ADVERTISEMENT",
+              "CREATIVE_DERIVATIVE"
+            ]
+          },
+          "state": {
+            "enum": [
+              "NOT_REVOKED",
+              "REVOKED",
+              "RESTRICTED",
+              "UNKNOWN"
+            ]
+          },
+          "issuer_ref": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$",
+            "maxLength": 128,
+            "not": {
+              "pattern": "[^A-Za-z0-9._:-]"
+            }
+          },
+          "source_ref": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$",
+            "maxLength": 128,
+            "not": {
+              "pattern": "[^A-Za-z0-9._:-]"
+            }
+          },
+          "observed_at": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40,
+            "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+            "format": "date-time"
+          },
+          "effective_at": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40,
+            "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+            "format": "date-time"
+          },
+          "valid_until": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 40,
+                "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "synthetic": {
+            "type": "boolean"
+          },
+          "evidence_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "minLength": 64,
+            "maxLength": 64
+          }
+        },
+        "required": [
+          "schema_version",
+          "rights_id",
+          "asset_sha256",
+          "license_ref",
+          "purpose",
+          "state",
+          "issuer_ref",
+          "source_ref",
+          "observed_at",
+          "effective_at",
+          "valid_until",
+          "synthetic",
+          "evidence_sha256"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 0,
+      "maxItems": 64,
+      "uniqueItems": true
+    },
+    "claim_reviews": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "placement_ref": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$",
+            "maxLength": 128,
+            "not": {
+              "pattern": "[^A-Za-z0-9._:-]"
+            }
+          },
+          "statement": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "interpretation": {
+            "enum": [
+              "FACTUAL",
+              "NONFACTUAL"
+            ]
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^a12-claim-[0-9a-f]{64}$",
+              "minLength": 74,
+              "maxLength": 74
+            },
+            "minItems": 0,
+            "maxItems": 32,
+            "uniqueItems": true
+          },
+          "status": {
+            "enum": [
+              "VERIFIED_EVIDENCE",
+              "UNKNOWN",
+              "NEEDS_REVIEW",
+              "RESTRICTED"
+            ]
+          },
+          "reason_codes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+              "maxLength": 96
+            },
+            "minItems": 1,
+            "maxItems": 128,
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "placement_ref",
+          "statement",
+          "interpretation",
+          "evidence_refs",
+          "status",
+          "reason_codes"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 0,
+      "maxItems": 128,
+      "uniqueItems": true
+    },
+    "asset_reviews": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "asset_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "content_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "media_type": {
+            "enum": [
+              "IMAGE",
+              "VIDEO",
+              "AUDIO",
+              "TEXT",
+              "MODEL_3D"
+            ]
+          },
+          "purposes": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "COMMERCIAL_USE",
+                "ADVERTISEMENT",
+                "CREATIVE_DERIVATIVE"
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 3,
+            "uniqueItems": true
+          },
+          "observed_sha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "minLength": 64,
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "size_bytes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 268435456
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rights_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^a12-rights-[0-9a-f]{64}$",
+              "minLength": 75,
+              "maxLength": 75
+            },
+            "minItems": 0,
+            "maxItems": 100,
+            "uniqueItems": true
+          },
+          "purpose_reviews": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "purpose": {
+                  "enum": [
+                    "COMMERCIAL_USE",
+                    "ADVERTISEMENT",
+                    "CREATIVE_DERIVATIVE"
+                  ]
+                },
+                "status": {
+                  "enum": [
+                    "VERIFIED_EVIDENCE",
+                    "UNKNOWN",
+                    "NEEDS_REVIEW",
+                    "RESTRICTED"
+                  ]
+                },
+                "reason_codes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+                    "maxLength": 96
+                  },
+                  "minItems": 1,
+                  "maxItems": 128,
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "purpose",
+                "status",
+                "reason_codes"
+              ],
+              "additionalProperties": false
+            },
+            "minItems": 1,
+            "maxItems": 3,
+            "uniqueItems": true
+          },
+          "status": {
+            "enum": [
+              "VERIFIED_EVIDENCE",
+              "UNKNOWN",
+              "NEEDS_REVIEW",
+              "RESTRICTED"
+            ]
+          },
+          "reason_codes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+              "maxLength": 96
+            },
+            "minItems": 1,
+            "maxItems": 128,
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "asset_ref",
+          "content_sha256",
+          "media_type",
+          "purposes",
+          "observed_sha256",
+          "size_bytes",
+          "rights_refs",
+          "purpose_reviews",
+          "status",
+          "reason_codes"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 0,
+      "maxItems": 64,
+      "uniqueItems": true
+    },
+    "claim_status": {
+      "enum": [
+        "VERIFIED_EVIDENCE",
+        "UNKNOWN",
+        "NEEDS_REVIEW",
+        "RESTRICTED"
+      ]
+    },
+    "rights_status": {
+      "enum": [
+        "VERIFIED_EVIDENCE",
+        "UNKNOWN",
+        "NEEDS_REVIEW",
+        "RESTRICTED"
+      ]
+    },
+    "status": {
+      "enum": [
+        "VERIFIED_EVIDENCE",
+        "UNKNOWN",
+        "NEEDS_REVIEW",
+        "RESTRICTED"
+      ]
+    },
+    "reason_codes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+        "maxLength": 96
+      },
+      "minItems": 1,
+      "maxItems": 128,
+      "uniqueItems": true
+    },
+    "legal_rights_status": {
+      "const": "UNKNOWN"
+    },
+    "platform_approval": {
+      "const": "UNKNOWN"
+    },
+    "account_eligibility": {
+      "const": "UNKNOWN"
+    },
+    "link_activation": {
+      "const": "UNKNOWN"
+    },
+    "publication_status": {
+      "const": "NOT_ATTEMPTED"
+    },
+    "record_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    }
+  },
+  "required": [
+    "schema_version",
+    "reviewer_version",
+    "scope",
+    "verification_scope",
+    "source_authenticity",
+    "claim_coverage",
+    "request",
+    "subject",
+    "pack_id",
+    "pack_sha256",
+    "snapshot_sha256",
+    "media_inspection_sha256",
+    "render_manifest_sha256",
+    "usage_verification",
+    "claim_evidence_refs",
+    "rights_evidence_refs",
+    "rights_status_evidence",
+    "claim_reviews",
+    "asset_reviews",
+    "claim_status",
+    "rights_status",
+    "status",
+    "reason_codes",
+    "legal_rights_status",
+    "platform_approval",
+    "account_eligibility",
+    "link_activation",
+    "publication_status",
+    "record_sha256"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-commerce:ClaimRightsReleaseReview:v1",
+  "title": "ClaimRightsReleaseReview.v1",
+  "description": "Deterministic, offline commercial placement review of declared claims and actual asset bytes. VERIFIED_EVIDENCE describes exact local evidence replay, never external truth, legal permission, platform approval, account eligibility or publication. Nonfactual declarations are outside factual claim review. Status evidence is a supplied, dated holder observation, not issuer authentication. Reading requires original inputs and full recomputation; a resealed digest alone is insufficient.",
+  "$defs": {
+    "ReleaseRightsStatusEvidence": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": "ReleaseRightsStatusEvidence.v1"
+        },
+        "rights_id": {
+          "type": "string",
+          "pattern": "^a12-rights-[0-9a-f]{64}$",
+          "minLength": 75,
+          "maxLength": 75
+        },
+        "asset_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "license_ref": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$",
+          "maxLength": 128,
+          "not": {
+            "pattern": "[^A-Za-z0-9._:-]"
+          }
+        },
+        "purpose": {
+          "enum": [
+            "COMMERCIAL_USE",
+            "ADVERTISEMENT",
+            "CREATIVE_DERIVATIVE"
+          ]
+        },
+        "state": {
+          "enum": [
+            "NOT_REVOKED",
+            "REVOKED",
+            "RESTRICTED",
+            "UNKNOWN"
+          ]
+        },
+        "issuer_ref": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$",
+          "maxLength": 128,
+          "not": {
+            "pattern": "[^A-Za-z0-9._:-]"
+          }
+        },
+        "source_ref": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$",
+          "maxLength": 128,
+          "not": {
+            "pattern": "[^A-Za-z0-9._:-]"
+          }
+        },
+        "observed_at": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "format": "date-time"
+        },
+        "effective_at": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "format": "date-time"
+        },
+        "valid_until": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 40,
+              "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "synthetic": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "rights_id",
+        "asset_sha256",
+        "license_ref",
+        "purpose",
+        "state",
+        "issuer_ref",
+        "source_ref",
+        "observed_at",
+        "effective_at",
+        "valid_until",
+        "synthetic"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
