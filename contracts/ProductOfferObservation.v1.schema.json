@@ -1,0 +1,447 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-commerce:ProductOfferObservation:v1",
+  "title": "ProductOfferObservation.v1",
+  "description": "A12 offline evidence; source and report authenticity are not externally attested. Content ID hashes canonical JSON excluding its own ID. Validation requires the exact raw evidence and pinned A12-01 snapshot; independent claim status also requires separate evidence bytes and explicit scoped reviewer proof. Amounts are strict nonnegative decimal strings, never binary floats. No live price, affiliate eligibility, rights grant or publication is implied.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "ProductOfferObservation.v1"
+    },
+    "offer_id": {
+      "type": "string",
+      "pattern": "^a12-offer-[a-f0-9]{64}$"
+    },
+    "source_status": {
+      "const": "USER_SUPPLIED_NOT_LIVE_VERIFIED"
+    },
+    "verification_scope": {
+      "const": "LOCAL_BYTES_HASH_AND_REPLAY_ONLY"
+    },
+    "rights_status": {
+      "const": "UNKNOWN"
+    },
+    "publication_status": {
+      "const": "NOT_ATTEMPTED"
+    },
+    "subject": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/ProductSubject"
+        },
+        {
+          "properties": {
+            "variant_id": {
+              "type": "string",
+              "pattern": "^a12-variant-[a-f0-9]{64}$"
+            },
+            "variant_key": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^(?![\\s\\S]*[\\x00-\\x1f\\x7f])\\S(?:.*\\S)?$"
+            }
+          }
+        }
+      ]
+    },
+    "source": {
+      "$ref": "#/$defs/ProductEvidenceSource"
+    },
+    "observed_at": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 40,
+      "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "format": "date-time"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "provided_fields": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 9,
+      "items": {
+        "enum": [
+          "schema_version",
+          "observed_at",
+          "expires_at",
+          "price_amount",
+          "currency",
+          "stock_available",
+          "commission_rate",
+          "commission_amount",
+          "commission_currency"
+        ]
+      }
+    },
+    "price": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "amount": {
+          "oneOf": [
+            {
+              "type": "string",
+              "maxLength": 25,
+              "pattern": "^(?:0|[1-9][0-9]{0,15})(?:\\.[0-9]{1,8})?$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "currency": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 3,
+              "maxLength": 3,
+              "pattern": "^[A-Z]{3}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "amount_presence": {
+          "enum": [
+            "MISSING",
+            "NULL",
+            "VALUE"
+          ]
+        },
+        "status": {
+          "enum": [
+            "UNKNOWN",
+            "SOURCE_ASSERTED_NOT_LIVE"
+          ]
+        }
+      },
+      "required": [
+        "amount",
+        "currency",
+        "amount_presence",
+        "status"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "amount_presence": {
+                "const": "VALUE"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "amount": {
+                "type": "string",
+                "maxLength": 25,
+                "pattern": "^(?:0|[1-9][0-9]{0,15})(?:\\.[0-9]{1,8})?$"
+              },
+              "currency": {
+                "type": "string",
+                "minLength": 3,
+                "maxLength": 3,
+                "pattern": "^[A-Z]{3}$"
+              },
+              "status": {
+                "const": "SOURCE_ASSERTED_NOT_LIVE"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "amount": {
+                "type": "null"
+              },
+              "status": {
+                "const": "UNKNOWN"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "stock": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "available": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "presence": {
+          "enum": [
+            "MISSING",
+            "NULL",
+            "VALUE"
+          ]
+        }
+      },
+      "required": [
+        "available",
+        "presence"
+      ]
+    },
+    "commission": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rate": {
+          "oneOf": [
+            {
+              "type": "string",
+              "maxLength": 25,
+              "pattern": "^(?:0|[1-9][0-9]{0,15})(?:\\.[0-9]{1,8})?$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rate_presence": {
+          "enum": [
+            "MISSING",
+            "NULL",
+            "VALUE"
+          ]
+        },
+        "amount": {
+          "oneOf": [
+            {
+              "type": "string",
+              "maxLength": 25,
+              "pattern": "^(?:0|[1-9][0-9]{0,15})(?:\\.[0-9]{1,8})?$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "amount_presence": {
+          "enum": [
+            "MISSING",
+            "NULL",
+            "VALUE"
+          ]
+        },
+        "currency": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 3,
+              "maxLength": 3,
+              "pattern": "^[A-Z]{3}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "const": "NOT_ELIGIBILITY_VERIFIED"
+        }
+      },
+      "required": [
+        "rate",
+        "rate_presence",
+        "amount",
+        "amount_presence",
+        "currency",
+        "status"
+      ]
+    },
+    "live_price_status": {
+      "const": "NOT_LIVE_VERIFIED"
+    }
+  },
+  "required": [
+    "schema_version",
+    "offer_id",
+    "source_status",
+    "verification_scope",
+    "rights_status",
+    "publication_status",
+    "subject",
+    "source",
+    "observed_at",
+    "expires_at",
+    "provided_fields",
+    "price",
+    "stock",
+    "commission",
+    "live_price_status"
+  ],
+  "$defs": {
+    "ProductSubject": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^a12-snapshot-[a-f0-9]{64}$"
+        },
+        "source_snapshot_id": {
+          "type": "string",
+          "pattern": "^a12-source-[a-f0-9]{64}$"
+        },
+        "snapshot_raw_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2000
+        },
+        "source_namespace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^(?![\\s\\S]*[\\x00-\\x1f\\x7f])\\S(?:.*\\S)?$"
+        },
+        "identity_id": {
+          "type": "string",
+          "pattern": "^a12-identity-[a-f0-9]{64}$"
+        },
+        "variant_record_id": {
+          "type": "string",
+          "pattern": "^a12-variant-record-[a-f0-9]{64}$"
+        },
+        "seller_id": {
+          "type": "string",
+          "pattern": "^a12-seller-[a-f0-9]{64}$"
+        },
+        "listing_id": {
+          "type": "string",
+          "pattern": "^a12-listing-[a-f0-9]{64}$"
+        },
+        "product_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^a12-product-[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "variant_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^a12-variant-[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "variant_key": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^(?![\\s\\S]*[\\x00-\\x1f\\x7f])\\S(?:.*\\S)?$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "synthetic": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "source_snapshot_id",
+        "snapshot_raw_sha256",
+        "ordinal",
+        "source_namespace",
+        "identity_id",
+        "variant_record_id",
+        "seller_id",
+        "listing_id",
+        "product_id",
+        "variant_id",
+        "variant_key",
+        "synthetic"
+      ]
+    },
+    "ProductEvidenceSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "\\S"
+        },
+        "source_kind": {
+          "enum": [
+            "HUMAN_SUPPLIED",
+            "PREEXPORTED_API"
+          ]
+        },
+        "source_status": {
+          "const": "USER_SUPPLIED_NOT_LIVE_VERIFIED"
+        },
+        "captured_at": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "format": "date-time"
+        },
+        "raw_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "raw_ref": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "raw_size_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4194304
+        },
+        "pointer": {
+          "type": "string",
+          "maxLength": 1024
+        }
+      },
+      "required": [
+        "source_ref",
+        "source_kind",
+        "source_status",
+        "captured_at",
+        "raw_sha256",
+        "raw_ref",
+        "raw_size_bytes",
+        "pointer"
+      ]
+    }
+  }
+}

@@ -1,0 +1,261 @@
+{
+  "source_sha": "5190a01301186c8fc9361c1aa21b55caafd63dc4",
+  "command": "python -m pytest tests -q -n 12",
+  "summary": "30 failed, 2117 passed, 15 skipped in 229.42s (0:03:49)",
+  "failed_node_ids": [
+    "tests/test_ef01_git_write_guard.py::test_both_executors_get_guard_and_can_still_edit_code[codex]",
+    "tests/test_ef01_performance.py::test_ef02_direct_git_admin_fetch_credentials_do_not_enter_child",
+    "tests/test_ef01_git_write_guard.py::test_both_executors_get_guard_and_can_still_edit_code[antigravity]",
+    "tests/test_ef01.py::test_agy_ef01_passes_attempt_evidence_scope_to_adapter",
+    "tests/test_ef01_ef02_integrity.py::test_staged_git_rename_reports_old_and_new_paths",
+    "tests/test_ef01.py::test_both_executor_subprocesses_and_normalized_result[codex]",
+    "tests/test_ef01_ef02_integrity.py::test_verify_undoes_change_cannot_be_ef01_pass",
+    "tests/test_ef01.py::test_both_executor_subprocesses_and_normalized_result[antigravity]",
+    "tests/test_ef01_ef02_integrity.py::test_candidate_rename_deletes_original_and_adds_destination",
+    "tests/test_ef01.py::test_missing_binary_returns_non_pass_and_no_verification",
+    "tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args0]",
+    "tests/test_ef01.py::test_scope_violation_cannot_pass",
+    "tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args1]",
+    "tests/test_ef01.py::test_dirty_worktree_rejected",
+    "tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args2]",
+    "tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args3]",
+    "tests/test_ef01_repair.py::test_ef02_single_claim_two_invocations_one_candidate_and_mapping[git]",
+    "tests/test_ef01_repair.py::test_independent_siblings_repair_in_distinct_worktrees_and_block_only_failed_dag[git]",
+    "tests/test_ef01_repair.py::test_ef02_exhaustion_never_publishes_candidate[git-0]",
+    "tests/test_ef01.py::test_cli_full_path_negative_missing_binary",
+    "tests/test_ef01_repair.py::test_ef02_exhaustion_never_publishes_candidate[git-1]",
+    "tests/test_ef01.py::test_verify_out_of_scope_mutation_is_failure",
+    "tests/test_ef01.py::test_cli_accepts_windows_utf8_bom_verify_json",
+    "tests/test_ef01.py::test_agy_headless_soft_denial_is_explicit_nonpass",
+    "tests/test_ef01_repair.py::test_repaired_sibling_candidates_unblock_dag_with_pinned_dependency_results[git]",
+    "tests/test_ef01.py::test_agy_headless_denied_actions_are_not_ignored_even_after_write",
+    "tests/test_ef01_repair.py::test_ef02_remote_uncertainty_or_publication_failure_never_replays[git-checkpoint]",
+    "tests/test_ef01.py::test_real_mock_executor_timeout_is_unknown_and_no_verification",
+    "tests/test_ef01_repair.py::test_ef02_remote_uncertainty_or_publication_failure_never_replays[git-publication]",
+    "tests/test_ef01.py::test_parent_lost_around_provider_boundary_remains_unknown"
+  ],
+  "failure_file_counts": {
+    "tests/test_ef01_git_write_guard.py": 6,
+    "tests/test_ef01_performance.py": 1,
+    "tests/test_ef01.py": 13,
+    "tests/test_ef01_ef02_integrity.py": 3,
+    "tests/test_ef01_repair.py": 7
+  },
+  "a12_failure_ids": [],
+  "failure_block_evidence": [
+    {
+      "heading": "test_both_executors_get_guard_and_can_still_edit_code[codex]",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": true,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_ef02_direct_git_admin_fetch_credentials_do_not_enter_child",
+      "reference_transaction_hook": false,
+      "git_exit_128": false,
+      "nt_status_access_denied": false,
+      "git_config_count_assertion": true
+    },
+    {
+      "heading": "test_both_executors_get_guard_and_can_still_edit_code[antigravity]",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": false,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_agy_ef01_passes_attempt_evidence_scope_to_adapter",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": true,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_staged_git_rename_reports_old_and_new_paths",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": true,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_both_executor_subprocesses_and_normalized_result[codex]",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": true,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_verify_undoes_change_cannot_be_ef01_pass",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": true,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_both_executor_subprocesses_and_normalized_result[antigravity]",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": false,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_candidate_rename_deletes_original_and_adds_destination",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": true,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_missing_binary_returns_non_pass_and_no_verification",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": false,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_executor_hooks_block_ref_writes_without_changing_head[args0]",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": true,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_scope_violation_cannot_pass",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": false,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_executor_hooks_block_ref_writes_without_changing_head[args1]",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": true,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_dirty_worktree_rejected",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": false,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_executor_hooks_block_ref_writes_without_changing_head[args2]",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": true,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_executor_hooks_block_ref_writes_without_changing_head[args3]",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": true,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_ef02_single_claim_two_invocations_one_candidate_and_mapping[git]",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": true,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_independent_siblings_repair_in_distinct_worktrees_and_block_only_failed_dag[git]",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": true,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_ef02_exhaustion_never_publishes_candidate[git-0]",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": true,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_cli_full_path_negative_missing_binary",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": true,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_ef02_exhaustion_never_publishes_candidate[git-1]",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": true,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_verify_out_of_scope_mutation_is_failure",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": true,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_cli_accepts_windows_utf8_bom_verify_json",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": true,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_agy_headless_soft_denial_is_explicit_nonpass",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": true,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_repaired_sibling_candidates_unblock_dag_with_pinned_dependency_results[git]",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": false,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_agy_headless_denied_actions_are_not_ignored_even_after_write",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": true,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_ef02_remote_uncertainty_or_publication_failure_never_replays[git-checkpoint]",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": true,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_real_mock_executor_timeout_is_unknown_and_no_verification",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": true,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_ef02_remote_uncertainty_or_publication_failure_never_replays[git-publication]",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": false,
+      "git_config_count_assertion": false
+    },
+    {
+      "heading": "test_parent_lost_around_provider_boundary_remains_unknown",
+      "reference_transaction_hook": true,
+      "git_exit_128": true,
+      "nt_status_access_denied": false,
+      "git_config_count_assertion": false
+    }
+  ],
+  "scope_decision": "No product failure observed; do not change EF01/EF02 infrastructure, hooks, Git options or inherited environment. Full profile is NOT PASS; external EF01/EF02 verification remains required.",
+  "baseline_comparison": "NOT_RUN; no pristine baseline or A12-01 action rerun",
+  "stdout_sha256": "51e2b136db5bc79d597e694a021dffe13fb6ad812564b37b19feeea51abd9f9c",
+  "extraction_note": "Diagnostic parser repaired to match only test-name headings, supporting both single and multiple underscore delimiters. All 30 blocks accounted for; original test logs unchanged."
+}
