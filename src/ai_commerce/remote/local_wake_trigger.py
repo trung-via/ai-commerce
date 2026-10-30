@@ -146,12 +146,8 @@ def wait_for_exact_evidence(reader, target: PinnedRun, *,
 def _secret_inputs():
     token = os.environ.get("AI_COMMERCE_GITHUB_READ_TOKEN", "")
     key_hex = os.environ.get("AI_COMMERCE_WAKE_HMAC_KEY_HEX", "")
-    if (not token or len(token) > 4096 or any(x in token for x in "\r\n\0") or
-            not 64 <= len(key_hex) <= 8192 or not _HEX.fullmatch(key_hex)
-            and (len(key_hex) != 64)):
-        # General hex keys can be longer than 32 bytes; inspect below.
-        if not token or len(token) > 4096 or any(x in token for x in "\r\n\0"):
-            raise TriggerBlocked("GITHUB_CREDENTIAL_INVALID")
+    if not token or len(token) > 4096 or any(x in token for x in "\r\n\0"):
+        raise TriggerBlocked("GITHUB_CREDENTIAL_INVALID")
     if not key_hex or len(key_hex) % 2 or len(key_hex) < 64 or len(key_hex) > 8192:
         raise TriggerBlocked("WAKE_CREDENTIAL_INVALID")
     try:
