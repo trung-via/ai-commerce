@@ -514,6 +514,13 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
             return subprocess.CompletedProcess(argv, 0, "", "")
 
         monkeypatch.setattr(remote, "check_source", lambda *_a: None)
+        # Observation-only fixtures copy files instead of creating Git repos.
+        # Model a clean checkout explicitly; real_git=True keeps the actual
+        # production Git status probe, and dedicated tests cover dirty paths.
+        monkeypatch.setattr(remote, "inspect_fresh_checkout",
+                            lambda _p, sha, **_kw: {"clean": True, "expected_sha": sha,
+                                                     "actual_sha": sha, "error_code": None,
+                                                     "porcelain_entries": [], "porcelain_entry_count": 0})
         monkeypatch.setattr(remote, "_snapshot", observed_snapshot)
         monkeypatch.setattr(runner, "_snapshot", observed_snapshot)
     lock = threading.Lock()
