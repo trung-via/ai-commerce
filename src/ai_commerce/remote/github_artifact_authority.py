@@ -108,8 +108,8 @@ class GitHubRestArtifactAuthority:
                     f"ef02-results-{provenance.run_id}-{provenance.run_attempt}"):
                 return False
             token = self._token_provider()
-            if not isinstance(token, str) or not token or len(token) > 4096 or
-                    any(ch in token for ch in "\r\n\0"):
+            if (not isinstance(token, str) or not token or len(token) > 4096 or
+                    any(ch in token for ch in "\r\n\0")):
                 return False
 
             root = _API + "/repos/" + "/".join(quote(x, safe="") for x in self._repository.split("/"))
