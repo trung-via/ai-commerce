@@ -1,0 +1,41 @@
+{
+  "failure_ids": [
+    "tests/test_ef01.py::test_dirty_worktree_rejected",
+    "tests/test_ef01.py::test_cli_full_path_negative_missing_binary",
+    "tests/test_ef01.py::test_verify_out_of_scope_mutation_is_failure",
+    "tests/test_ef01.py::test_cli_accepts_windows_utf8_bom_verify_json",
+    "tests/test_ef01.py::test_agy_headless_soft_denial_is_explicit_nonpass",
+    "tests/test_ef01.py::test_agy_ef01_passes_attempt_evidence_scope_to_adapter",
+    "tests/test_ef01.py::test_agy_headless_denied_actions_are_not_ignored_even_after_write",
+    "tests/test_ef01_ef02_integrity.py::test_staged_git_rename_reports_old_and_new_paths",
+    "tests/test_ef01.py::test_real_mock_executor_timeout_is_unknown_and_no_verification",
+    "tests/test_ef01_ef02_integrity.py::test_verify_undoes_change_cannot_be_ef01_pass",
+    "tests/test_ef01.py::test_parent_lost_around_provider_boundary_remains_unknown",
+    "tests/test_ef01_ef02_integrity.py::test_candidate_rename_deletes_original_and_adds_destination",
+    "tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args0]",
+    "tests/test_ef01_performance.py::test_ef02_direct_git_admin_fetch_credentials_do_not_enter_child",
+    "tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args1]",
+    "tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args2]",
+    "tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args3]",
+    "tests/test_ef01.py::test_both_executor_subprocesses_and_normalized_result[codex]",
+    "tests/test_ef01_git_write_guard.py::test_both_executors_get_guard_and_can_still_edit_code[codex]",
+    "tests/test_ef01.py::test_both_executor_subprocesses_and_normalized_result[antigravity]",
+    "tests/test_ef01_git_write_guard.py::test_both_executors_get_guard_and_can_still_edit_code[antigravity]",
+    "tests/test_ef01.py::test_missing_binary_returns_non_pass_and_no_verification",
+    "tests/test_ef01.py::test_scope_violation_cannot_pass",
+    "tests/test_ef01_repair.py::test_ef02_remote_uncertainty_or_publication_failure_never_replays[git-checkpoint]",
+    "tests/test_ef01_repair.py::test_ef02_single_claim_two_invocations_one_candidate_and_mapping[git]",
+    "tests/test_ef01_repair.py::test_ef02_remote_uncertainty_or_publication_failure_never_replays[git-publication]",
+    "tests/test_ef01_repair.py::test_independent_siblings_repair_in_distinct_worktrees_and_block_only_failed_dag[git]",
+    "tests/test_ef01_repair.py::test_ef02_exhaustion_never_publishes_candidate[git-0]",
+    "tests/test_ef01_repair.py::test_ef02_exhaustion_never_publishes_candidate[git-1]",
+    "tests/test_ef01_repair.py::test_repaired_sibling_candidates_unblock_dag_with_pinned_dependency_results[git]"
+  ],
+  "all_failed_tests_outside_a12": true,
+  "counts": {
+    "failed": 30,
+    "passed": 1966,
+    "skipped": 15
+  },
+  "stdout_sha256": "48f1dbc7542b02c160fad2b867cfcf4ff92541f75e2b0801cf8f0584d39d6327"
+}

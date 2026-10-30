@@ -1,0 +1,33 @@
+{
+  "argv": [
+    "python",
+    "-m",
+    "pytest",
+    "tests",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "exit_code": 1,
+  "wall_seconds": 214.592,
+  "python": "3.14.7 (tags/v3.14.7:823f032, Aug  5 2026, 10:51:32) [MSC v.1944 64 bit (AMD64)]",
+  "platform": "Windows-11-10.0.26300-SP0",
+  "source_base_sha": "36d1290e068342747bf0953010581d0e9cb934ab",
+  "tested_file_sha256": {
+    "contracts/ProductListingSnapshot.v1.schema.json": "21bef02160cc6b9d2fff02e8d039a45e664996fec14d0dc8790a1c5fdb96f7cb",
+    "contracts/ProductIdentity.v1.schema.json": "f93fa3e22c2546cd377c413453f8907d81723215b0777dcdd10bcb4ff604ecd5",
+    "contracts/ProductVariant.v1.schema.json": "592ffed9447ce168536abac4da6a047e7931db85b2a623c6ebae98ed05ccab07",
+    "src/ai_commerce/product/__init__.py": "40e9af7fcd0dc1ebca10e3fe41326ae0e421ea61a91e5ce163d302206895f13e",
+    "src/ai_commerce/product/core.py": "51770fdf90cfb47aeb0b56e3b30640789919599f43cbf4e03b206df743d82976",
+    "src/ai_commerce/product/files.py": "21076a5ab2221c7eb7825570f759b9cf53c3a14572a56f4811d9d0dfdebeb45e",
+    "src/ai_commerce/product/identity.py": "487cd3a143fc949b15c38cb96a7f9cab1b2a9e77c61d8f4c79ed2cab166cb211",
+    "src/ai_commerce/product/reader.py": "f4eebc4d6a03268afd774d3790ab0430bb4b7cf24649c4a85e8e4f4cf2f62ff3",
+    "src/ai_commerce/product/schemas.py": "f637bd9a70788b800ecf7fda62f8ceeeb286ab08941675003dc7ed0a198502a2",
+    "tests/test_a12_snapshot.py": "935f98b3409ac1308ff15151b78746002eab34dd454b42079ebcc7894aabaf85"
+  },
+  "payload_unchanged_after_tests": true,
+  "logs": {
+    "stdout": "48f1dbc7542b02c160fad2b867cfcf4ff92541f75e2b0801cf8f0584d39d6327",
+    "stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}
