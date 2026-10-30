@@ -1023,3 +1023,89 @@ def test_derived_pack_integrity_stale_conflict_unknown_restricted_granted(tmp_pa
     tampered["pack_id"] = content_id("ProductEvidencePack", tampered)
     with pytest.raises(ProductError, match="INVALID_PACK_RIGHTS_STATUS"):
         ProductEvidencePack(tampered)
+
+
+def test_offers_chronological_ordering_utc_and_tiebreak_tamper(tmp_path: Path):
+    """Prove latest observation is chosen by instant (UTC chronology), tie-breaks
+
+    across equivalent offset instants are deterministic, no conflict occurs on
+    identical values, and tampering/resealing active_offer is rejected.
+    """
+    snapshot = _sample_snapshot(tmp_path)
+
+    # Offer A: 02:00+02:00 = 00:00:00 UTC (lexically larger string, earlier instant)
+    offer_a_raw = canonical_bytes({
+        "schema_version": "ProductOfferSource.v1",
+        "observed_at": "2026-10-30T02:00:00+02:00",
+        "expires_at": "2026-11-30T00:00:00Z",
+        "price_amount": "29.99",
+        "currency": "USD",
+        "stock_available": True,
+        "commission_rate": "0.10",
+        "commission_amount": "3.00",
+        "commission_currency": "USD",
+    })
+    # Offer B: 00:30:00Z = 00:30:00 UTC (lexically smaller string, later instant)
+    offer_b_raw = canonical_bytes({
+        "schema_version": "ProductOfferSource.v1",
+        "observed_at": "2026-10-30T00:30:00Z",
+        "expires_at": "2026-11-30T00:00:00Z",
+        "price_amount": "29.99",
+        "currency": "USD",
+        "stock_available": True,
+        "commission_rate": "0.10",
+        "commission_amount": "3.00",
+        "commission_currency": "USD",
+    })
+    offer_a = build_offer(snapshot, ordinal=1, raw=offer_a_raw, source_ref="oa.json", captured_at=CAPTURE)
+    offer_b = build_offer(snapshot, ordinal=1, raw=offer_b_raw, source_ref="ob.json", captured_at=CAPTURE)
+
+    # 1. Latest observation chosen by instant despite lexical ordering
+    pack = build_evidence_pack(snapshot, ordinal=1, offers=[offer_a, offer_b], as_of="2026-10-30T01:00:00Z")
+    assert pack.offers["conflict_fields"] == []
+    assert pack.offers["assessment_status"] == "VALID_OBSERVATION"
+    assert pack.offers["active_offer"] is not None
+    assert pack.offers["active_offer"]["offer_id"] == offer_b.offer_id
+    assert pack.offers["active_offer"]["price_amount"] == "29.99"
+
+    # Order independence in input Sequence
+    pack_rev = build_evidence_pack(snapshot, ordinal=1, offers=[offer_b, offer_a], as_of="2026-10-30T01:00:00Z")
+    assert pack_rev.offers["active_offer"]["offer_id"] == offer_b.offer_id
+
+    # 2. Tie-break across equivalent offset instants is deterministic
+    # Offer T1: 02:00+02:00 = 00:00:00 UTC
+    # Offer T2: 00:00:00Z = 00:00:00 UTC
+    offer_t2_raw = canonical_bytes({
+        "schema_version": "ProductOfferSource.v1",
+        "observed_at": "2026-10-30T00:00:00Z",
+        "expires_at": "2026-11-30T00:00:00Z",
+        "price_amount": "29.99",
+        "currency": "USD",
+        "stock_available": True,
+        "commission_rate": "0.10",
+        "commission_amount": "3.00",
+        "commission_currency": "USD",
+    })
+    offer_t2 = build_offer(snapshot, ordinal=1, raw=offer_t2_raw, source_ref="ot2.json", captured_at=CAPTURE)
+    expected_tie_winner = max(offer_a.offer_id, offer_t2.offer_id)
+
+    pack_tie1 = build_evidence_pack(snapshot, ordinal=1, offers=[offer_a, offer_t2], as_of="2026-10-30T01:00:00Z")
+    pack_tie2 = build_evidence_pack(snapshot, ordinal=1, offers=[offer_t2, offer_a], as_of="2026-10-30T01:00:00Z")
+    assert pack_tie1.offers["conflict_fields"] == []
+    assert pack_tie1.offers["assessment_status"] == "VALID_OBSERVATION"
+    assert pack_tie1.offers["active_offer"]["offer_id"] == expected_tie_winner
+    assert pack_tie2.offers["active_offer"]["offer_id"] == expected_tie_winner
+
+    # 3. Tampering/resealing active_offer is still rejected
+    tampered_id = pack.to_dict()
+    tampered_id["offers"]["active_offer"]["offer_id"] = offer_a.offer_id
+    tampered_id["pack_id"] = content_id("ProductEvidencePack", tampered_id)
+    with pytest.raises(ProductError, match="ACTIVE_OFFER_MISMATCH"):
+        ProductEvidencePack(tampered_id)
+
+    tampered_price = pack.to_dict()
+    tampered_price["offers"]["active_offer"]["price_amount"] = "99.99"
+    tampered_price["pack_id"] = content_id("ProductEvidencePack", tampered_price)
+    with pytest.raises(ProductError, match="ACTIVE_OFFER_PRICE_MISMATCH"):
+        ProductEvidencePack(tampered_price)
+

@@ -1,23 +1,23 @@
 # A12 Product Evidence Foundation implementation report
 
 Date: 2026-10-30. WorkItem `A12-PRODUCT-EVIDENCE-001`, Roadmap A Phase 3 / Milestone `M4` (P01..P06).
-Action `A12-04`, recovery attempt of failed GitHub Issue #124, by Human authorization 2026-10-30.
-Pinned exact source commit: `144c193e4de522d6222b9fa5a360ff197ca86785`.
+Action `A12-04`, Human-approved tiny review repair of Issue #126, 2026-10-30.
+Pinned exact source commit: `96ee04b75878139039e06dfe7817b3339cb76b12` (= `refs/heads/ef02/candidate/546b58853b8f061056c9ae83e66ca165`, produced by run 41006579806).
 Human authorized provider precondition: `antigravity / gemini-3.8-flash / high`, candidate branch delivery only.
 
 ## Source and actual fan-in
 
-The immutable source worktree pins commit `144c193e4de522d6222b9fa5a360ff197ca86785`, which inherits the verified A12-01..04 work plus `.gitattributes` setting `*.json -text -eol` and `*.py -text -eol` to eliminate text filter mismatches. This source includes:
+The immutable source worktree pins commit `96ee04b75878139039e06dfe7817b3339cb76b12`, which inherits the verified A12-01..04 work plus `.gitattributes` setting `*.json -text -eol` and `*.py -text -eol` to eliminate text filter mismatches. This source includes:
 - A12-01 (P01): strict versioned contracts for `ProductListingSnapshot.v1`, `ProductIdentity.v1`, `ProductVariant.v1`, safe regular-file reader, and raw SHA-256 preservation.
 - A12-02 (P03/P04): source-namespaced identity history, `ProductClaimEvidence.v1` (differentiating seller assertion vs reviewer proof), and `ProductOfferObservation.v1` (decimal-safe price/commission freshness and conflict tracking).
 - A12-03 (P05): `ProductAssetRights.v1` purpose-scoped rights manifests with UNKNOWN/RESTRICTED protections and the independent append-only SQLite evidence journal `ProductEvidenceRegistry`.
 - A12-04 (P06): `ProductEvidencePack.v1` contract, CLI operations, synthetic demo, and fan-in integration tests.
 
-Prior A12-01..03 work was not reimplemented. Before coding, the worktree was verified clean with `git status -s` and pinned to `144c193e4de522d6222b9fa5a360ff197ca86785`.
+Prior A12-01..04 product functionality, variant isolation, evidence-pack tamper rejection, rights, and offers semantics were preserved and not reimplemented. Before coding, the worktree was verified clean with `git status -s` and pinned to `96ee04b75878139039e06dfe7817b3339cb76b12`.
 
-## Action A12-04 Scope & Semantic Corrections (Human Review of #119)
+## Action A12-04 Scope & Semantic Corrections
 
-Action A12-04 delivers P06 and AC07-AC08, implementing the semantic corrections required by Human review of #119:
+Action A12-04 delivers P06 and AC07-AC08, implementing the semantic corrections required by Human review of #119 and the tiny review repair of #126:
 
 1. **Registry Pack Export Disambiguation & Semantic Filtering** (`src/ai_commerce/product/pack.py`):
    - When a listing has multiple distinct variants and `variant_id` is omitted in `export_pack_from_registry`, rejects with deterministic explicit ambiguity (`ProductError("VARIANT_ID_REQUIRED")`), eliminating arbitrary first candidate selection (`matching[0]`).
@@ -44,16 +44,21 @@ Action A12-04 delivers P06 and AC07-AC08, implementing the semantic corrections 
 5. **Integration & CLI Regression Test Suites** (`tests/test_a12_integration.py`, `tests/test_a12_cli.py`):
    - Added focused regression tests for variant ambiguity rejection, single-variant preservation, strict variant matching, cross-variant mixing rejection, conflicting multiple snapshot rejection, active offer field mutations, and status mutations across stale/conflict/unknown/restricted/granted states.
 
+6. **UTC Chronological Ordering of Offers (Root 1 Review Repair)** (`src/ai_commerce/product/pack.py`, `tests/test_a12_integration.py`):
+   - Updated `derive_offers_assessment` sorting key to `(parse_timestamp(o["observed_at"]), o["offer_id"])` with `reverse=True`.
+   - Compares observations by true UTC-aware chronological instant rather than lexical string comparison.
+   - Properly orders observations with non-UTC timezone offsets (e.g., `'2026-10-30T02:00:00+02:00'` [00:00 UTC] is chronologically earlier than `'2026-10-30T00:30:00Z'` [00:30 UTC], so the latter correctly wins despite lexical string ordering).
+   - Preserves deterministic `offer_id` tie-breaking when two observations share identical UTC instants across different offset notations.
+   - Preserves all conflict detection, staleness checks, and active offer integrity guarantees.
+
 ## Changed paths summary
 
-All edits are strictly confined to the authorized allowed paths:
+Edits for this review repair are strictly confined to the permitted paths:
 - `src/ai_commerce/product/pack.py`
-- `src/ai_commerce/product/__init__.py`
 - `tests/test_a12_integration.py`
-- `tests/test_a12_cli.py`
 - `docs/engineering/A12_IMPLEMENTATION_REPORT.md`
 
-No changes were made to `.gitattributes`, `.github`, EF02 infrastructure, production configurations, or unrelated repository roots.
+No changes were made to `.gitattributes`, `.github`, GitHub workflows, EF01/EF02 infrastructure, production configurations, or unrelated repository roots.
 
 ## Provenance-Separated Test Evidence
 
@@ -66,18 +71,24 @@ Environment observed: Windows 11 build 26300, CPython 3.14.7 AMD64, pytest 8.4.2
 | **#119** | Official Windows registered project-tests | **2340 passed, 7 skipped** | Baseline before Human review semantic feedback |
 | **#122** | Official registered tests | **2355 passed, 7 skipped, exit 0** | Tests passed completely, but candidate publisher blocked due to CRLF Git filter mismatch |
 | **#124** | Attempted execution | **No tests run, no candidate** | Blocked early due to headless `read_file` permission denial; no files created or modified |
+| **#126 (Official EF01)** | Official registered verification (run 41006579806 / `ef02-results-41006579806-1` / attempt `a12-04-agy38flashhigh-20261030-v1-08-worktree-only`) | **2349 passed, 7 skipped, exit 0** (179.16 s) | Verified clean on candidate `96ee04b75878139039e06dfe7817b3339cb76b12`; status `BUILD_VERIFIED_FOR_SCOPE`, no `denied_actions`, no `out_of_scope_files`, `CANDIDATE_READY` |
+| **#126 (Agent-Internal)** | Antigravity executor pre-verification test run (attempt `a12-04-agy38flashhigh-20261030-v1-08-worktree-only`) | **2319 passed, 30 failed, 7 skipped** (168.49 s) | Mislabeled in prior draft as registered project-tests. All 30 failures were transient EF01 Git fixture errors where tests attempted Git write operations (`git init`, checkout) blocked by inherited Git Write Guard hooks |
 
-### Current Actual Test Evidence (Issue #124 Scoped Fix)
+> [!NOTE]
+> Future separate issue **#127** will address the inherited Git Write Guard isolation for temporary test fixture repositories. It is not part of this A12 repair.
 
-Pinned source commit: `144c193e4de522d6222b9fa5a360ff197ca86785`.
+### Current Actual Test Evidence (Issue #126 Tiny Review Repair, Attempt v1-09)
+
+Pinned source commit: `96ee04b75878139039e06dfe7817b3339cb76b12`.
 
 | Test Run | Command | Result | Duration | Notes |
 |---|---|---|---|---|
-| A12 Unit & Integration Suite | `python -m pytest tests/test_a12_*.py -q` | **480 passed, 1 skipped** | 54.99 s | Zero failures across all 8 A12 test files; 1 skip is host's restricted native symlink |
+| Targeted A12 Integration Suite | `python -m pytest tests/test_a12_integration.py -q` | **19 passed** | 6.34 s | Includes regression test `test_offers_chronological_ordering_utc_and_tiebreak_tamper` |
+| Full A12 Suite | `python -m pytest tests/test_a12_*.py -q` | **481 passed, 1 skipped** | 36.74 s | Zero failures across all 8 A12 test files; 1 skip is host's restricted native symlink |
 | Synthetic Demo Script | `python scripts/a12_demo.py --output <dir>` | **Exit 0** | ~1.5 s | Deterministic E2E flow with tamper rejection and replay verification |
-| Registered `project-tests` | `python -m pytest tests -q -n 12` | **2319 passed, 30 failed, 7 skipped** | 168.49 s | All 30 failures are out-of-scope EF01 git-write-guard fixture blocks |
+| Agent-Internal `project-tests` | `python -m pytest tests -q -n 12` | **2320 passed, 30 failed, 7 skipped** | 175.46 s | +1 passed regression test; all 30 failures remain the known inherited Git Write Guard hook fixture blocks in `tests/test_ef01*.py` |
 
-All 30 registered-profile failures are confined to `tests/test_ef01*.py` where tests attempt Git write operations (`git init`, checkout, commit) blocked by the active EF01 reference-transaction hook guard. Zero failures occurred in any application or A12 product code.
+Zero failures occurred in any application or A12 product code. Independent EF01 post-executor verification will run on the clean published candidate tree.
 
 ## Demonstration Invocation
 

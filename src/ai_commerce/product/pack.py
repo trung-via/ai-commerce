@@ -85,7 +85,7 @@ def derive_offers_assessment(observations: Sequence[dict]) -> tuple[list[str], s
         active_offer = None
     elif active_obs:
         assessment_status = "VALID_OBSERVATION"
-        latest = sorted(active_obs, key=lambda o: (o["observed_at"], o["offer_id"]), reverse=True)[0]
+        latest = sorted(active_obs, key=lambda o: (parse_timestamp(o["observed_at"]), o["offer_id"]), reverse=True)[0]
         active_offer = {
             "offer_id": latest["offer_id"],
             "price_amount": latest["price"]["amount"],
@@ -358,7 +358,7 @@ def build_evidence_pack(
                 "freshness": freshness,
                 "reason_codes": sorted(reasons),
             })
-        pack_observations.sort(key=lambda item: (item["observed_at"], item["offer_id"]), reverse=True)
+        pack_observations.sort(key=lambda item: (parse_timestamp(item["observed_at"]), item["offer_id"]), reverse=True)
 
     conflict_fields, assessment_status, active_offer = derive_offers_assessment(pack_observations)
     pack_offers = {
