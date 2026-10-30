@@ -92,7 +92,7 @@ def test_crlf_autotext_candidate_rejected_even_for_renamed_txt(tmp_path: Path) -
     """Auto-text must still reject CRLF raw blobs; JSON exception is not global."""
     repo = _repo(tmp_path)
     original = b"original\r\n"
-    with pytest.raises(GitByteConsistencyError, match=r"CANDIDATE_GIT_FILTER_MISMATCH:renamed\\.txt"):
+    with pytest.raises(GitByteConsistencyError, match=r"CANDIDATE_GIT_FILTER_MISMATCH:renamed\.txt"):
         assert_candidate_git_filter_consistency(repo, [
             ("renamed.txt", original, "100644"),
         ])
