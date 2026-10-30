@@ -302,7 +302,8 @@ def test_scope_strict_mode_still_rejects_before_pytest(fixture):
     "src/ai_commerce/remote/.local/runner.json",
     "src/ai_commerce/remote/.git/config",
 ])
-def test_protected_changed_path_stops_before_verification(fixture, protected):
+@pytest.mark.parametrize("minimum_test", [False, True])
+def test_protected_changed_path_stops_before_verification(fixture, protected, minimum_test):
     # Simulate the path as permitted by a component-level allowlist, proving
     # the protected-path check has precedence over scope and pytest.
     original = runner._snapshot
@@ -315,7 +316,7 @@ def test_protected_changed_path_stops_before_verification(fixture, protected):
         return snapshot, diff
 
     fixture.monkeypatch.setattr(runner, "_snapshot", blocked)
-    result, calls, _ = _run(fixture, mode="scope-pass")
+    result, calls, _ = _run(fixture, mode="scope-pass", minimum_test=minimum_test)
     assert len(calls) == 1
     assert result["status"] == "SCOPE_VIOLATION"
     assert result["error_code"] == "PROTECTED_CHANGED_PATH"
@@ -593,6 +594,7 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
                 allowed_prefixes=args.allow_path, max_repair_rounds=args.max_repair_rounds,
                 action_timeout_seconds=args.action_timeout_seconds, codex_windows_sandbox=args.codex_windows_sandbox,
                 minimum_test=args.minimum_test, registered_only=args.registered_only,
+                acceptance_ids=args.acceptance,
                 aggregate_sources=args.aggregate_source, host_slots=args.host_slots,
                 registered_profiles=json.loads(args.registered_profiles_json.read_text())
                 if args.registered_profiles_json else None)
@@ -635,6 +637,34 @@ def test_ef02_single_claim_two_invocations_one_candidate_and_mapping(tmp_path, m
     assert len(list(context.worker.root.rglob("engineering_result.json"))) == 1
     assert context.worker.execute_action(action)["status"] == "DUPLICATE_CLAIM_NO_REEXECUTION"
     assert len(context.calls) == 2 and len(context.candidates) == 1
+
+
+@pytest.mark.parametrize("declared", [True, False])
+def test_ef02_acceptance_reaches_selector_through_actual_child_cli(tmp_path, monkeypatch, declared):
+    from ai_commerce.engineering import minimum_test as mt
+    from ai_commerce.remote import validation
+    context = _worker_fixture(tmp_path, monkeypatch, real_git=False)
+    groups = (mt.TestGroup("scope", ("tests/test_scope.py",), ("FIXTURE.acceptance",), ("impl.py", "kept.txt")),)
+    monkeypatch.setattr(mt, "approved_groups", lambda: groups)
+    monkeypatch.setattr(validation, "approved_groups", lambda: groups)
+    context.worker.profiles["component-scope"] = ["python", "-m", "pytest", "tests/test_scope.py", "-q"]
+    a = _action("a")
+    if declared:
+        a["instruction"] += '\nMT01_ACCEPTANCE_JSON: ["FIXTURE.acceptance"]'
+    result = context.worker.execute_action(a)
+    assert result["status"] == "CANDIDATE_READY"
+    args = build_parser().parse_args(context.children[0].argv[3:])
+    expected = ["FIXTURE.acceptance"] if declared else ["MT01.ACCEPTANCE_UNDECLARED"]
+    assert args.acceptance == result["mt01_acceptance"]["ids"] == expected
+    assert set(expected) <= set(result["minimum_test"]["required_acs"])
+    assert result["minimum_test"]["fallback"] is not declared
+    entry = result["minimum_test"]["groups"][0]
+    profile = "component-scope" if declared else "project-tests"
+    assert entry["actual_argv"] == context.worker.profiles[profile]
+    assert entry["selected_profile"] == profile
+    saved = json.loads(next(context.worker.root.rglob("action_result.json")).read_text())
+    assert saved["minimum_test"] == result["minimum_test"]
+    assert len(context.claims) == len(context.children) == 1 and len(context.calls) == 2
 
 
 @pytest.mark.parametrize("rounds", [0, 1])
