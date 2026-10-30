@@ -1,4 +1,4 @@
-"""Regression: raw A11/A12 EF02 evidence JSON remains byte-identical across Git checkouts.
+"""Regression: any JSON (including new EF02 contracts/evidence) remains byte-stable.
 
 #106 failed before Codex because Git for Windows normalized two CRLF JSON blobs
 using '*.json text eol=lf'; original Git blobs are immutable evidence.
@@ -68,13 +68,16 @@ def test_repair_evidence_json_is_raw_and_unfiltered() -> None:
         assert attrs[(path, "text")] == "unset"
         assert attrs[(path, "eol")] == "unset"
 
-    # Non-evidence JSON is deliberately still LF-normalized by policy.
+    # All JSON, regardless of directory, is byte-stable under Git checkout.
     normal = _attributes("contracts/ProductIdentity.v1.schema.json")
     assert normal[("contracts/ProductIdentity.v1.schema.json", "text")] == "unset"
     assert normal[("contracts/ProductIdentity.v1.schema.json", "eol")] == "unset"
     generic = _attributes("contracts/SignalImport.v1.schema.json")
-    assert generic[("contracts/SignalImport.v1.schema.json", "text")] == "set"
-    assert generic[("contracts/SignalImport.v1.schema.json", "eol")] == "lf"
+    assert generic[("contracts/SignalImport.v1.schema.json", "text")] == "unset"
+    assert generic[("contracts/SignalImport.v1.schema.json", "eol")] == "unset"
+    markdown = _attributes("README.md")
+    assert markdown[("README.md", "text")] == "set"
+    assert markdown[("README.md", "eol")] == "lf"
 
 
 def test_action_specific_evidence_is_raw_and_unfiltered() -> None:
