@@ -12,9 +12,29 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY = ROOT / ".github" / "ef02" / "verify-profiles.json"
 REQUIRED_COMPONENTS = {
-    "ef01-tests", "ef01-repair-tests", "integrity-tests", "provider-tests",
-    "mt01-tests", "ef01p-tests",
-    *(f"a{i:02d}-tests" for i in range(2, 13)),
+    "mt01-a02-tests",
+    "mt01-a03-tests",
+    "mt01-a04-tests",
+    "mt01-a05-tests",
+    "mt01-a06-tests",
+    "mt01-a07-tests",
+    "mt01-a08-tests",
+    "mt01-a09-tests",
+    "mt01-a10-tests",
+    "mt01-a10-m02-tests",
+    "mt01-a11-tests",
+    "mt01-a12-tests",
+    "mt01-cli-tests",
+    "mt01-ef01-tests",
+    "mt01-repair-tests",
+    "mt01-integrity-tests",
+    "mt01-provider-tests",
+    "mt01-mt01-tests",
+    "mt01-ef01p-tests",
+    "mt01-diagnostics-tests",
+    "mt01-git-integrity-tests",
+    "mt01-ef02-recovery-tests",
+    "mt01-ef02-wake-tests",
 }
 
 
