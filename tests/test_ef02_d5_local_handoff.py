@@ -232,6 +232,27 @@ def test_native_private_directory_is_owned_and_restrictive(setup):
                    for kind, sid in aces)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Native Windows owner-SID regression")
+def test_native_new_lock_and_atomic_state_owner_are_exact_process_sid(setup):
+    s = setup
+    sid = handoff._windows_process_sid()
+    # The directory fixture has the correct owner; elevated Windows tokens
+    # can still make newly created lock/state files owned by Administrators.
+    enroll(s)
+    for path in (s.store.state.path.with_name(s.store.state.path.name + ".lock"),
+                 s.store.state.path):
+        owner, aces = handoff._windows_acl(path)
+        assert owner == sid, "D5.4 new private file has wrong Windows owner"
+        handoff._check_windows_acl(owner, aces, sid)
+    # Atomic replacement must preserve exact ownership, not just the first
+    # successful write; existing lock must retain its verified owner.
+    emit(s)
+    for path in (s.store.state.path, s.store.state.path.with_name(s.store.state.path.name + ".lock")):
+        owner, aces = handoff._windows_acl(path)
+        assert owner == sid
+        handoff._check_windows_acl(owner, aces, sid)
+
+
 def test_permission_or_identity_changes_fail_before_network(setup, monkeypatch):
     s = setup
     enroll(s)
