@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-commerce:ProductVariant:v1",
+  "title": "ProductVariant.v1",
+  "description": "A12 offline source assertions, never independent verification, live offers or rights. Content ID is the prefixed SHA256 of canonical UTF-8 JSON excluding its own ID. Snapshot validation additionally requires exact raw bytes and deterministic replay.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "ProductVariant.v1"
+    },
+    "variant_record_id": {
+      "type": "string",
+      "pattern": "^a12-variant-record-[a-f0-9]{64}$"
+    },
+    "source_status": {
+      "const": "USER_SUPPLIED_NOT_LIVE_VERIFIED"
+    },
+    "identity_status": {
+      "const": "SOURCE_SCOPED_ASSERTION"
+    },
+    "listing_id": {
+      "type": "string",
+      "pattern": "^a12-listing-[a-f0-9]{64}$"
+    },
+    "product_id": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^a12-product-[a-f0-9]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "variant_id": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^a12-variant-[a-f0-9]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "asserted_variant_key": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^(?![\\s\\S]*[\\x00-\\x1f\\x7f])\\S(?:.*\\S)?$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "asserted_sku": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^(?![\\s\\S]*[\\x00-\\x1f\\x7f])\\S(?:.*\\S)?$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "asserted_gtin": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^(?![\\s\\S]*[\\x00-\\x1f\\x7f])\\S(?:.*\\S)?$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "attributes": {
+      "type": "object",
+      "maxProperties": 32,
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "\\S"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "pattern": "\\S"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "variant_record_id",
+    "source_status",
+    "identity_status",
+    "listing_id",
+    "product_id",
+    "variant_id",
+    "asserted_variant_key",
+    "asserted_sku",
+    "asserted_gtin",
+    "attributes"
+  ]
+}

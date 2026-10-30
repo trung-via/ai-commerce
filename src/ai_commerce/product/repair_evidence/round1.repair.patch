@@ -1,0 +1,93 @@
+--- before/src/ai_commerce/product/files.py
++++ after/src/ai_commerce/product/files.py
+@@ -43,7 +43,9 @@
+ 
+ 
+ def _signature(info):
+-    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
++    # Windows lstat/fstat may give ctime different meanings (creation/change).
++    # Compare these common fields across APIs; check ctime within each API below.
++    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+ 
+ 
+ def read_local(path, *, root) -> bytes:
+@@ -72,7 +74,10 @@
+             raw = stream.read(MAX_RAW_BYTES + 1)
+             after = os.fstat(stream.fileno())
+         require(0 < len(raw) <= MAX_RAW_BYTES, "SOURCE_EMPTY_OR_TOO_LARGE")
+-        require(_signature(opened) == _signature(after) == _signature(_inspect(file_path))
++        final = _inspect(file_path)
++        require(_signature(opened) == _signature(after) == _signature(final)
++                and before.st_ctime_ns == final.st_ctime_ns
++                and opened.st_ctime_ns == after.st_ctime_ns
+                 and len(raw) == opened.st_size, "SOURCE_CHANGED_DURING_READ")
+         return raw
+     except ProductError:
+--- before/tests/test_a12_snapshot.py
++++ after/tests/test_a12_snapshot.py
+@@ -556,6 +556,65 @@
+     monkeypatch.setattr(files.os, "open", changed_open)
+     with pytest.raises(ProductError, match="SOURCE_CHANGED_DURING_READ"):
+         read_snapshot(source, root=tmp_path, source_ref="fixture", captured_at=CAPTURE)
++
++
++def _stat_values(info, **changes):
++    values = {key: getattr(info, key) for key in (
++        "st_mode", "st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")}
++    values["st_file_attributes"] = getattr(info, "st_file_attributes", 0)
++    return SimpleNamespace(**{**values, **changes})
++
++
++@pytest.mark.parametrize("file_format", ["json", "csv"])
++def test_stat_api_ctime_difference_keeps_local_read_reproducible(tmp_path, monkeypatch, file_format):
++    raw = b"\xef\xbb\xbf" + (json_raw() if file_format == "json" else csv_raw([listing()]))
++    source = tmp_path / ("source." + file_format)
++    source.write_bytes(raw)
++    original_lstat, original_fstat = Path.lstat, os.fstat
++
++    def lstat(path, *args, **kwargs):
++        info = original_lstat(path, *args, **kwargs)
++        return _stat_values(info, st_ctime_ns=100) if path == source else info
++
++    def fstat(fd):
++        # Windows path and descriptor APIs can report different ctime semantics.
++        return _stat_values(original_fstat(fd), st_ctime_ns=200)
++
++    monkeypatch.setattr(Path, "lstat", lstat)
++    monkeypatch.setattr(files.os, "fstat", fstat)
++    snapshot = read_snapshot(source, root=tmp_path, source_ref="synthetic-human-export",
++                             captured_at=CAPTURE, synthetic=True)
++    assert snapshot.raw_bytes() == raw
++    assert snapshot.to_bytes() == prepare(raw, file_format=file_format).to_bytes()
++
++
++@pytest.mark.parametrize("api", ["lstat", "fstat"])
++@pytest.mark.parametrize("changed_field", ["st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns"])
++def test_file_change_within_stat_api_is_detected(tmp_path, monkeypatch, api, changed_field):
++    source = tmp_path / "source.json"
++    source.write_bytes(json_raw())
++    original_lstat, original_fstat = Path.lstat, os.fstat
++    calls = {"lstat": 0, "fstat": 0}
++
++    def observed(info, current_api):
++        calls[current_api] += 1
++        result = _stat_values(info, st_ctime_ns=100)
++        if current_api == api and calls[current_api] > 1:
++            setattr(result, changed_field, getattr(result, changed_field) + 1)
++        return result
++
++    def lstat(path, *args, **kwargs):
++        info = original_lstat(path, *args, **kwargs)
++        return observed(info, "lstat") if path == source else info
++
++    def fstat(fd):
++        return observed(original_fstat(fd), "fstat")
++
++    monkeypatch.setattr(Path, "lstat", lstat)
++    monkeypatch.setattr(files.os, "fstat", fstat)
++    with pytest.raises(ProductError, match="SOURCE_CHANGED_DURING_READ"):
++        read_snapshot(source, root=tmp_path, source_ref="fixture", captured_at=CAPTURE)
++    assert calls[api] == 2
+ 
+ 
+ def test_public_schemas_match_portable_mirrors_without_modifying_a02():

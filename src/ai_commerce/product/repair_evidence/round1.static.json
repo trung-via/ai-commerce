@@ -1,0 +1,15 @@
+{
+  "python_3_11_syntax": true,
+  "python_files": [
+    "src/ai_commerce/product/__init__.py",
+    "src/ai_commerce/product/core.py",
+    "src/ai_commerce/product/files.py",
+    "src/ai_commerce/product/identity.py",
+    "src/ai_commerce/product/reader.py",
+    "src/ai_commerce/product/schemas.py",
+    "tests/test_a12_snapshot.py"
+  ],
+  "trailing_whitespace": false,
+  "reconstructed_repair_bases_match_feedback_hashes": true,
+  "repair_diff_sha256": "8b13d1d0e480450aa0f3438d6ef3fa225be55b3528d04ce275e1f3e8fc6e0ae0"
+}
