@@ -15,10 +15,12 @@ import subprocess
 import sys
 import time
 from urllib.parse import urlsplit
+from urllib.request import Request, ProxyHandler, HTTPRedirectHandler, build_opener
 
 _PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _-]{0,63}\Z")
 _MARKERS = ("SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile")
 _PROBE_SCRIPT = r"""
+[Console]::OutputEncoding=[Text.UTF8Encoding]::new()
 $ErrorActionPreference = 'Stop'
 $portNumber = [int]$env:AI_COMMERCE_ACQ_PROBE_PORT
 $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction Stop |
@@ -42,6 +44,7 @@ class ChromeEnvironment:
     endpoint: str
     port: int
     allow_launch: bool
+    config_path: Path
 
     def command(self) -> list[str]:
         return [str(self.executable),
@@ -74,6 +77,9 @@ def load_environment(config_path: Path, checkout: Path, *, local_app_data: Path)
         checkout = checkout.resolve(strict=True)
         if _inside(config_path.resolve(strict=True), checkout):
             raise AcquisitionBlocked("CONFIG_IN_REPOSITORY")
+        owned_config_root = (local_app_data.resolve(strict=True) / "AI-Commerce").resolve()
+        if not _inside(config_path.resolve(strict=True), owned_config_root):
+            raise AcquisitionBlocked("CONFIG_NOT_OPERATOR_OWNED")
         if config_path.stat().st_size > 8192:
             raise AcquisitionBlocked("CONFIG_INVALID")
         raw = config_path.read_text(encoding="utf-8-sig")
@@ -98,7 +104,7 @@ def load_environment(config_path: Path, checkout: Path, *, local_app_data: Path)
             raise AcquisitionBlocked("CONFIG_INVALID")
         executable, directory = Path(value["executable"]), Path(value["user_data_dir"])
         if (not executable.is_absolute() or not executable.is_file()
-                or executable.suffix.lower() != ".exe" or not _no_links(executable)
+                or executable.name.lower() != "chrome.exe" or not _no_links(executable)
                 or not directory.is_absolute() or not directory.is_dir()
                 or not _no_links(directory)):
             raise AcquisitionBlocked("CHROME_PATH_INVALID")
@@ -119,8 +125,10 @@ def load_environment(config_path: Path, checkout: Path, *, local_app_data: Path)
                 or parsed.port is None or parsed.port < 1024
                 or parsed.path not in ("", "/") or parsed.query or parsed.fragment):
             raise AcquisitionBlocked("CDP_ENDPOINT_INVALID")
+        if _inside(config_path.resolve(), directory):
+            raise AcquisitionBlocked("CONFIG_IN_CHROME_PROFILE")
         return ChromeEnvironment(executable, directory, value["profile_directory"],
-                                 endpoint, parsed.port, value["allow_launch"])
+                                 endpoint, parsed.port, value["allow_launch"], config_path.resolve())
     except AcquisitionBlocked:
         raise
     except (OSError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
@@ -167,16 +175,110 @@ def _identity_matches(env: ChromeEnvironment, exe: str, argv: list[str]) -> bool
         return False
 
 
+# Never inherit provider tokens into a browser or diagnostic subprocess.
+_CHILD_ENV_KEYS = frozenset({
+    "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "PATH",
+    "LOCALAPPDATA", "APPDATA", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+    "PROGRAMFILES", "PROGRAMFILES(X86)", "COMMONPROGRAMFILES",
+    "PROCESSOR_ARCHITECTURE",
+})
+
+
+def _child_environment() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items()
+            if key.upper() in _CHILD_ENV_KEYS}
+
+
+def _powershell() -> Path:
+    root = os.environ.get("SystemRoot", r"C:\Windows")
+    exe = Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    if not exe.is_file():
+        raise AcquisitionBlocked("POWERSHELL_UNAVAILABLE")
+    return exe
+
+
+def _verify_google_chrome(env: ChromeEnvironment) -> None:
+    """Verify an authenticode-signed Google Chrome executable, not any .exe."""
+    if env.executable.name.lower() != "chrome.exe":
+        raise AcquisitionBlocked("CHROME_EXECUTABLE_UNTRUSTED")
+    child_env = _child_environment()
+    child_env["AI_COMMERCE_ACQ_EXE"] = str(env.executable)
+    script = (
+        "[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); "
+        "$s=Get-AuthenticodeSignature -LiteralPath $env:AI_COMMERCE_ACQ_EXE; "
+        "if($s.Status -ne 'Valid' -or !$s.SignerCertificate -or "
+        "$s.SignerCertificate.Subject -notmatch '(^|, )CN=Google (LLC|Inc)(,|$)') "
+        "{exit 1}; Write-Output 'SIGNED_GOOGLE_CHROME'"
+    )
+    try:
+        result = subprocess.run(
+            [str(_powershell()), "-NoProfile", "-NonInteractive", "-Command", script],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=8, check=False, env=child_env)
+        if result.returncode or result.stdout.strip() != b"SIGNED_GOOGLE_CHROME":
+            raise AcquisitionBlocked("CHROME_EXECUTABLE_UNTRUSTED")
+    except AcquisitionBlocked:
+        raise
+    except (OSError, subprocess.TimeoutExpired):
+        raise AcquisitionBlocked("CHROME_EXECUTABLE_UNTRUSTED") from None
+
+
+def _require_operator_control(env: ChromeEnvironment) -> None:
+    """Apply the existing exact-SID, owner and ACL guard to private inputs."""
+    from .local_completion_handoff import HandoffBlocked, _private_identity
+    try:
+        for path in (env.config_path, env.user_data_dir, env.user_data_dir / env.profile_directory):
+            _private_identity(path)
+    except (HandoffBlocked, OSError, ValueError):
+        raise AcquisitionBlocked("OPERATOR_OWNERSHIP_UNPROVEN") from None
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
+def _probe_cdp(env: ChromeEnvironment) -> None:
+    """Bounded read-only HTTP protocol test, never a tab/CDP websocket attach."""
+    try:
+        opener = build_opener(ProxyHandler({}), _NoRedirect())
+        request = Request(env.endpoint.rstrip("/") + "/json/version",
+                          headers={"Accept": "application/json"})
+        with opener.open(request, timeout=2) as reply:
+            if reply.status != 200:
+                raise AcquisitionBlocked("CDP_PROTOCOL_UNAVAILABLE")
+            body = reply.read(8193)
+        if len(body) > 8192:
+            raise AcquisitionBlocked("CDP_PROTOCOL_UNAVAILABLE")
+        payload = json.loads(body.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise AcquisitionBlocked("CDP_PROTOCOL_UNAVAILABLE")
+        browser = payload.get("Browser")
+        protocol = payload.get("Protocol-Version")
+        ws = payload.get("webSocketDebuggerUrl")
+        if (not isinstance(browser, str) or
+                not (browser.startswith("Chrome/") or browser.startswith("HeadlessChrome/"))
+                or not isinstance(protocol, str) or
+                re.fullmatch(r"\\d+\\.\\d+", protocol) is None
+                or not isinstance(ws, str)):
+            raise AcquisitionBlocked("CDP_PROTOCOL_UNAVAILABLE")
+        ws_url = urlsplit(ws)
+        if (ws_url.scheme != "ws" or ws_url.hostname not in {"localhost", "127.0.0.1"}
+                or ws_url.port != env.port or ws_url.username or ws_url.password
+                or not ws_url.path.startswith("/devtools/browser/")
+                or not ws_url.path[len("/devtools/browser/"):]
+                or ws_url.query or ws_url.fragment):
+            raise AcquisitionBlocked("CDP_PROTOCOL_UNAVAILABLE")
+    except AcquisitionBlocked:
+        raise
+    except Exception:
+        raise AcquisitionBlocked("CDP_PROTOCOL_UNAVAILABLE") from None
+
+
 def _query_windows(port: int) -> dict:
     """Bounded, read-only Windows process and TCP inventory; never logs raw data."""
-    root = os.environ.get("SystemRoot", r"C:\Windows")
-    powershell = Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-    if not powershell.is_file():
-        raise AcquisitionBlocked("POWERSHELL_UNAVAILABLE")
-    child_env = {key: value for key, value in os.environ.items()
-                 if key.upper() not in {"GITHUB_TOKEN", "GH_TOKEN", "AI_COMMERCE_GITHUB_READ_TOKEN",
-                                        "AI_COMMERCE_WAKE_HMAC_KEY_HEX"}
-                 and not key.upper().startswith("AIOS_")}
+    powershell = _powershell()
+    child_env = _child_environment()
     child_env["AI_COMMERCE_ACQ_PROBE_PORT"] = str(port)
     try:
         result = subprocess.run([str(powershell), "-NoProfile", "-NonInteractive", "-Command",
@@ -260,6 +362,38 @@ def _interactive_session() -> int:
     session = wintypes.DWORD()
     if not kernel.ProcessIdToSessionId(kernel.GetCurrentProcessId(), ctypes.byref(session)) or not session.value:
         raise AcquisitionBlocked("WINDOWS_INTERACTIVE_REQUIRED")
+    # A session ID alone does not imply a usable interactive input desktop.
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    user32.OpenInputDesktop.restype = wintypes.HANDLE
+    user32.CloseDesktop.argtypes = [wintypes.HANDLE]
+    user32.CloseDesktop.restype = wintypes.BOOL
+    desktop = user32.OpenInputDesktop(0, False, 0x0001)
+    if not desktop:
+        raise AcquisitionBlocked("WINDOWS_INTERACTIVE_REQUIRED")
+    user32.CloseDesktop(desktop)
+    # TokenElevation=20; do not launch a browser with an elevated admin token.
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    adv.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    adv.OpenProcessToken.restype = wintypes.BOOL
+    adv.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                        wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    adv.GetTokenInformation.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    token = wintypes.HANDLE()
+    if not adv.OpenProcessToken(kernel.GetCurrentProcess(), 0x0008, ctypes.byref(token)):
+        raise AcquisitionBlocked("WINDOWS_TOKEN_UNAVAILABLE")
+    try:
+        elevated = wintypes.DWORD()
+        returned = wintypes.DWORD()
+        if not adv.GetTokenInformation(token, 20, ctypes.byref(elevated),
+                                        ctypes.sizeof(elevated), ctypes.byref(returned)):
+            raise AcquisitionBlocked("WINDOWS_TOKEN_UNAVAILABLE")
+        if elevated.value != 0:
+            raise AcquisitionBlocked("ELEVATED_CHROME_DISALLOWED")
+    finally:
+        kernel.CloseHandle(token)
     return session.value
 
 
@@ -267,21 +401,22 @@ def run(env: ChromeEnvironment, *, launch: bool, opt_in: bool) -> dict:
     if os.name != "nt":
         raise AcquisitionBlocked("WINDOWS_INTERACTIVE_REQUIRED")
     session = _interactive_session()
+    _require_operator_control(env)
+    _verify_google_chrome(env)
     state, pid = evaluate(env, _query_windows(env.port), session_id=session)
+    if state == "OWNED":
+        _probe_cdp(env)
+        return {"status": "READY_ATTACH", "cdp_verified": True,
+                "browser_accessed": True, "launched": False}
     if not launch:
-        return {"status": "READY_ATTACH" if state == "OWNED" else "NOT_RUNNING",
+        return {"status": "NOT_RUNNING", "cdp_verified": False,
                 "browser_accessed": False, "launched": False}
     if not opt_in or not env.allow_launch:
         raise AcquisitionBlocked("LAUNCH_NOT_AUTHORIZED")
-    if state == "OWNED":
-        return {"status": "READY_ATTACH", "browser_accessed": False, "launched": False}
     if any((env.user_data_dir / name).exists() or (env.user_data_dir / name).is_symlink()
            for name in _MARKERS):
         raise AcquisitionBlocked("PROFILE_LOCKED")
-    child_env = {key: value for key, value in os.environ.items()
-                 if key.upper() not in {"GITHUB_TOKEN", "GH_TOKEN", "AI_COMMERCE_GITHUB_READ_TOKEN",
-                                        "AI_COMMERCE_WAKE_HMAC_KEY_HEX"}
-                 and not key.upper().startswith("AIOS_")}
+    child_env = _child_environment()
     try:
         child = subprocess.Popen(env.command(), stdin=subprocess.DEVNULL,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -300,7 +435,9 @@ def run(env: ChromeEnvironment, *, launch: bool, opt_in: bool) -> dict:
         if state == "OWNED":
             if owner_pid != child.pid:
                 raise AcquisitionBlocked("LAUNCH_OWNER_MISMATCH")
-            return {"status": "READY_ATTACH", "browser_accessed": False, "launched": True}
+            _probe_cdp(env)
+            return {"status": "READY_ATTACH", "cdp_verified": True,
+                    "browser_accessed": True, "launched": True}
         if child.poll() is not None:
             break
     raise AcquisitionBlocked("LAUNCH_UNPROVEN")
