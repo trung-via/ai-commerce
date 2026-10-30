@@ -1,0 +1,33 @@
+{
+  "command": "python -m pytest tests/test_a12_rights.py tests/test_a12_registry.py -q -n 12",
+  "source_sha": "5e17381b5cc1d0ef05a56de0138a3972bc524169",
+  "exit_code": 0,
+  "duration_seconds": 8.485,
+  "python": "3.14.7 (tags/v3.14.7:823f032, Aug  5 2026, 10:51:32) [MSC v.1944 64 bit (AMD64)]",
+  "source_hashes": {
+    "src/ai_commerce/product/__init__.py": "47eb151e5db1b8a99702b6769432a186baa95f2679de486cdbea0588a907cd7f",
+    "src/ai_commerce/product/claims.py": "d00257cdd0eeb0296df4ec9cf587585fdb4dbea076ea2c7b5ba1c5f3685c31b3",
+    "src/ai_commerce/product/core.py": "b0c5b50da168e97d8fbcdfde1af12d8262521ee294f71b8ab83dd7ff57a5a25b",
+    "src/ai_commerce/product/evidence.py": "8f4d322370834c958c6177522b7e1b0bc43063b6bc9620509d05ec3387186b5d",
+    "src/ai_commerce/product/evidence_schemas.py": "fd9a8a4573e99b19acd5d2c43cb84297d382cc56f1cde438467a90f938d5934b",
+    "src/ai_commerce/product/files.py": "7c096dff9f1408346573cc2198b48539115f7f77673e4f388f3516dfab176585",
+    "src/ai_commerce/product/history.py": "61fb146d26d2f456e8986732a32b22fa6a1f67d3d7c2b5322eb94748b6c5d230",
+    "src/ai_commerce/product/identity.py": "b7ff30f2167b22e92c96ef57301e6cad9da655ca93f8bfd77ea2aae89e72bf15",
+    "src/ai_commerce/product/offers.py": "988e97629706e71fbae594ed4e391886da327d95310c8e34ab0358f104dc462f",
+    "src/ai_commerce/product/reader.py": "be3850209edf99a031ae5cf11c1b59a5d0aa05c5fda45694edd8b69f166c5a6c",
+    "src/ai_commerce/product/registry.py": "66501c810ca3e72248889de2543fce3e52ebd40dddda8093cf77c63d97f8bdf2",
+    "src/ai_commerce/product/rights.py": "69436136b4104953511ef0cec1dc2b1634f10ea74c440f74f77d94f81e1628d7",
+    "src/ai_commerce/product/rights_schemas.py": "2873319b7082d574fb0940bd1679b14cb7618d108a78186efa7aa41b43092c1e",
+    "src/ai_commerce/product/schemas.py": "63e67138cc8123bfcef05a59683f7fdd574fdf0c036601a9399f12616bd893bb",
+    "src/ai_commerce/product/storage_privacy.py": "78cac7d647dc496d82296c44cc90e602dec731840800acead3881910fd13f92d",
+    "tests/test_a12_rights.py": "453f27ecc019d46bd96898b3b13f7c3634fe7669985b4f2a7fafb2c01a510932",
+    "tests/test_a12_registry.py": "e701e16bb76dfff4801169b687dafa63ae4b5e199fb5b0df4036d6d5ee5b9dba",
+    "contracts/ProductAssetRights.v1.schema.json": "86fe16eb874d28bff9d7afa85542d3b2393a8a1037c6fb693866d9ac9dff1c80"
+  },
+  "source_hashes_unchanged": true,
+  "stdout_sha256": "34193ec24aac0ca9ff492f5f7bf402fcb012723fba1a2728f0d638fc196809d4",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "summary_lines": [
+    "167 passed, 2 skipped in 7.87s"
+  ]
+}

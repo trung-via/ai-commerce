@@ -1,0 +1,319 @@
+{
+  "source_sha": "5e17381b5cc1d0ef05a56de0138a3972bc524169",
+  "profile": "project-tests",
+  "label": "round2",
+  "failure_count": 30,
+  "counts_by_file": {
+    "tests/test_ef01_git_write_guard.py": 6,
+    "tests/test_ef01_performance.py": 1,
+    "tests/test_ef01.py": 13,
+    "tests/test_ef01_ef02_integrity.py": 3,
+    "tests/test_ef01_repair.py": 7
+  },
+  "failures": [
+    {
+      "nodeid": "tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args2]",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": true,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "c82ba257645f253c0701dda307e73dccbc68b9d0d78104187baeaed2a4791a5d",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01_performance.py::test_ef02_direct_git_admin_fetch_credentials_do_not_enter_child",
+      "a12_owned": false,
+      "reference_transaction_hook": false,
+      "msys_access_denied": false,
+      "git_config_count": true,
+      "origin_registry_unavailable": false,
+      "block_sha256": "4755de27b755e23f7ca0108e7ae2cf3a216aa0ef4ab08db1a016e79703ac4bc3",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args3]",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": true,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "5874f6c770125dca4ac3d3c0ef1880bdb63a9a6ac06cfbabd22201029463185b",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01.py::test_agy_ef01_passes_attempt_evidence_scope_to_adapter",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": true,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "cb391af7287078dc6a4a51a2098cd496b46febcea1970652c82349b6ba212936",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01_git_write_guard.py::test_both_executors_get_guard_and_can_still_edit_code[codex]",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": false,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "bc44edf7849b28d8f51b15e89c083294414c2998504d5b81e3dac17e9bfb9c14",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01.py::test_both_executor_subprocesses_and_normalized_result[codex]",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": true,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "202578faa944271c1dd0ef4eaf9d9b433ddffd092327ba12db528aca00242692",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01_ef02_integrity.py::test_staged_git_rename_reports_old_and_new_paths",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": false,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "06100e1a9afcd07e6dd62d89c883e4a8c3884a3b6fdf445a056d43c7b7080a9e",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01.py::test_both_executor_subprocesses_and_normalized_result[antigravity]",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": false,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "7adedd2dd2b7372ba92e05ff09f47e00af254518763864de4b3542fff6f6e54a",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01_git_write_guard.py::test_both_executors_get_guard_and_can_still_edit_code[antigravity]",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": true,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "3095d5efe02b1bb94525a091fc58f7b30811c8c6bbf1eb5bf97e72a3478161fa",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01_ef02_integrity.py::test_verify_undoes_change_cannot_be_ef01_pass",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": false,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "75d909a70ecb56dd56a9086e107d0c395ac85d963d41aaa97abfdc77f67e25cf",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01.py::test_missing_binary_returns_non_pass_and_no_verification",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": true,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "196932ad1d0430ad15dfa574070a1df08e9c227fe2694f0023de5cde3799f689",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01_ef02_integrity.py::test_candidate_rename_deletes_original_and_adds_destination",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": true,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "ca71606df2fb55aab5df17e901c6f82c308d30b2046c5d07b26a02cdfcbd82fc",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01.py::test_scope_violation_cannot_pass",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": true,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "fcd75509513f9dc6780736258e5ee8259353cf677a5db310166a7c39ce7988d6",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args0]",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": false,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "1022dccbf5cb357c19c0b3b27d2c17dbc276432d13cad51e01e7fcee28a6dbe9",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args1]",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": false,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "5c70a3187c199a63e2cd66225744d683707e54a9f7fd2f77f79a73e1f08e17e5",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01.py::test_dirty_worktree_rejected",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": true,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "8a99feaa15b1bcd47c18997cc5131adce8425027089da0b55efcef0332006a13",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01_repair.py::test_repaired_sibling_candidates_unblock_dag_with_pinned_dependency_results[git]",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": true,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "71db74d487f8ac9b49bf60407d3a61816da9bce92eef7b7fe38b622cbdd1647c",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01.py::test_cli_full_path_negative_missing_binary",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": true,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "991f250fc556662d34c16a94741b0743e75eae0fa6cf273bcfc5daa9844008dc",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01.py::test_verify_out_of_scope_mutation_is_failure",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": true,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "41efbbeb2ff0dbc95603f8a907d2f09fcc777e253cde5ac7c5670d7dcfdcbc82",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01_repair.py::test_ef02_single_claim_two_invocations_one_candidate_and_mapping[git]",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": true,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "efbbae1300062a29bb0f9673d01522e29c6e68677cbcbe89422fdfc5d5e93cf2",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01.py::test_cli_accepts_windows_utf8_bom_verify_json",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": true,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "4bd0e6f8a2bed523833146bf641ab34da610cb96750f972906a758996ac70ede",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01.py::test_agy_headless_soft_denial_is_explicit_nonpass",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": true,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "fff3bd14b4b5d873d14e3c3edf01fd2f6afe514a72827f303f7f8b3116c024a9",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01.py::test_agy_headless_denied_actions_are_not_ignored_even_after_write",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": true,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "166d56e735072d13b928c842705fa430abf2198050e5b21578ae1b947da62307",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01.py::test_real_mock_executor_timeout_is_unknown_and_no_verification",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": true,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "b2ddcd2c4acc22ad1a0518c6a444d35ce8a8d4cae95b6b41cfe7d4aabe7fd4f4",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01.py::test_parent_lost_around_provider_boundary_remains_unknown",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": true,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "a5a5c804c74ff3c85faa7316a839a210120b916f8cb3ce276e557fa83ddf8067",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01_repair.py::test_ef02_exhaustion_never_publishes_candidate[git-0]",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": true,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "ddc49c57e3fb0df1e5e900b0b155f7f3e5c768978c6cf709fab30c6b89288295",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01_repair.py::test_ef02_exhaustion_never_publishes_candidate[git-1]",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": true,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "5584377592e22752734933e84eea32bd23c6cc842bc82d572344b4b579602837",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01_repair.py::test_ef02_remote_uncertainty_or_publication_failure_never_replays[git-checkpoint]",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": true,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "eeb5ab50b06184ff8aae22f9181eef12eb22dc4211355e5637551a076969c572",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01_repair.py::test_ef02_remote_uncertainty_or_publication_failure_never_replays[git-publication]",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": true,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "149fd125753dfd97591e72351c6c6f9dbca48cd8364a108815e15b9ca6e5a89e",
+      "block_matched": true
+    },
+    {
+      "nodeid": "tests/test_ef01_repair.py::test_independent_siblings_repair_in_distinct_worktrees_and_block_only_failed_dag[git]",
+      "a12_owned": false,
+      "reference_transaction_hook": true,
+      "msys_access_denied": true,
+      "git_config_count": false,
+      "origin_registry_unavailable": false,
+      "block_sha256": "62830c030e183c51fd95c969b162c321907488755338e06c82b1e1001608a0ba",
+      "block_matched": true
+    }
+  ],
+  "raw_stdout_sha256": "c867fb874ccbe3b51db400f33eb98f695556896d4f1bab51ee6669c4f9fb123b",
+  "baseline_comparison": "NOT_RUN",
+  "out_of_scope_changes": "NONE",
+  "final_profile_status": "NOT_PASS"
+}

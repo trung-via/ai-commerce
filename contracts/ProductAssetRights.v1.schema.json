@@ -1,0 +1,674 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-commerce:ProductAssetRights:v1",
+  "title": "ProductAssetRights.v1",
+  "description": "Offline purpose-scoped rights evidence, not authenticated legal permission. The content ID hashes canonical JSON excluding rights_id. Semantic validation requires exact source bytes, the pinned listing snapshot, and separate license bytes for every reviewed grant. Labels, URLs and UNKNOWN/RESTRICTED declarations cannot grant use. Scope term is [valid_from, valid_until); missing purposes are UNKNOWN. Asset bytes are not retrieved or stored; a use assessment also requires matching local asset bytes. Blanket rights, affiliate and publication stay UNKNOWN.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "ProductAssetRights.v1"
+    },
+    "rights_id": {
+      "type": "string",
+      "pattern": "^a12-rights-[a-f0-9]{64}$"
+    },
+    "source_status": {
+      "const": "USER_SUPPLIED_NOT_LIVE_VERIFIED"
+    },
+    "verification_scope": {
+      "const": "LOCAL_BYTES_HASH_AND_REPLAY_ONLY"
+    },
+    "rights_status": {
+      "const": "UNKNOWN"
+    },
+    "affiliate_status": {
+      "const": "UNKNOWN"
+    },
+    "publication_status": {
+      "const": "NOT_ATTEMPTED"
+    },
+    "subject": {
+      "$ref": "#/$defs/ProductSubject"
+    },
+    "source": {
+      "$ref": "#/$defs/ProductEvidenceSource"
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "asset_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "\\S"
+        },
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "media_type": {
+          "enum": [
+            "IMAGE",
+            "VIDEO",
+            "AUDIO",
+            "TEXT",
+            "MODEL_3D"
+          ]
+        },
+        "origin": {
+          "enum": [
+            "UNKNOWN",
+            "SELLER_SUPPLIED",
+            "CREATOR_SUPPLIED",
+            "LICENSED_LIBRARY",
+            "PUBLIC_DOMAIN_CLAIM",
+            "HUMAN_SUPPLIED"
+          ]
+        },
+        "origin_ref": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "pattern": "\\S"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "copyright_holder_ref": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "claimant_ref": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "license_label": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "\\S"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "content_ref": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "origin_source_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "content_verification": {
+          "const": "SOURCE_ASSERTED_NOT_RETRIEVED"
+        }
+      },
+      "required": [
+        "asset_ref",
+        "content_sha256",
+        "media_type",
+        "origin",
+        "origin_ref",
+        "copyright_holder_ref",
+        "claimant_ref",
+        "license_label",
+        "content_ref",
+        "origin_source_sha256",
+        "content_verification"
+      ]
+    },
+    "permissions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "purpose": {
+            "enum": [
+              "COMMERCIAL_USE",
+              "ADVERTISEMENT",
+              "CREATIVE_DERIVATIVE"
+            ]
+          },
+          "declared_status": {
+            "enum": [
+              "UNKNOWN",
+              "RESTRICTED",
+              "GRANTED"
+            ]
+          },
+          "license_ref": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scope": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "territories": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 64,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^(?:[A-Z]{2}|WORLDWIDE)$"
+                    }
+                  },
+                  "media_types": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 5,
+                    "uniqueItems": true,
+                    "items": {
+                      "enum": [
+                        "IMAGE",
+                        "VIDEO",
+                        "AUDIO",
+                        "TEXT",
+                        "MODEL_3D"
+                      ]
+                    }
+                  },
+                  "channels": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 32,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$"
+                    }
+                  },
+                  "valid_from": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 40,
+                    "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+                    "format": "date-time"
+                  },
+                  "valid_until": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 40,
+                    "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+                    "format": "date-time"
+                  }
+                },
+                "required": [
+                  "territories",
+                  "media_types",
+                  "channels",
+                  "valid_from",
+                  "valid_until"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "enum": [
+              "UNKNOWN",
+              "RESTRICTED",
+              "GRANTED"
+            ]
+          },
+          "review": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "reviewer_ref": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$"
+                  },
+                  "reviewed_at": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 40,
+                    "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+                    "format": "date-time"
+                  },
+                  "method": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048,
+                    "pattern": "\\S"
+                  },
+                  "evidence_ref": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048,
+                    "pattern": "\\S"
+                  },
+                  "evidence_sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "evidence_size_bytes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 262144
+                  },
+                  "permission_sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "verification_scope": {
+                    "const": "EXPLICIT_LOCAL_LICENSE_REVIEW_ONLY"
+                  }
+                },
+                "required": [
+                  "reviewer_ref",
+                  "reviewed_at",
+                  "method",
+                  "evidence_ref",
+                  "evidence_sha256",
+                  "evidence_size_bytes",
+                  "permission_sha256",
+                  "verification_scope"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "purpose",
+          "declared_status",
+          "license_ref",
+          "scope",
+          "status",
+          "review"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "GRANTED"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "declared_status": {
+                  "const": "GRANTED"
+                },
+                "review": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "reviewer_ref": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$"
+                    },
+                    "reviewed_at": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 40,
+                      "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+                      "format": "date-time"
+                    },
+                    "method": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2048,
+                      "pattern": "\\S"
+                    },
+                    "evidence_ref": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2048,
+                      "pattern": "\\S"
+                    },
+                    "evidence_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "evidence_size_bytes": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 262144
+                    },
+                    "permission_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "verification_scope": {
+                      "const": "EXPLICIT_LOCAL_LICENSE_REVIEW_ONLY"
+                    }
+                  },
+                  "required": [
+                    "reviewer_ref",
+                    "reviewed_at",
+                    "method",
+                    "evidence_ref",
+                    "evidence_sha256",
+                    "evidence_size_bytes",
+                    "permission_sha256",
+                    "verification_scope"
+                  ]
+                },
+                "scope": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "territories": {
+                      "type": "array",
+                      "minItems": 1,
+                      "maxItems": 64,
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "string",
+                        "pattern": "^(?:[A-Z]{2}|WORLDWIDE)$"
+                      }
+                    },
+                    "media_types": {
+                      "type": "array",
+                      "minItems": 1,
+                      "maxItems": 5,
+                      "uniqueItems": true,
+                      "items": {
+                        "enum": [
+                          "IMAGE",
+                          "VIDEO",
+                          "AUDIO",
+                          "TEXT",
+                          "MODEL_3D"
+                        ]
+                      }
+                    },
+                    "channels": {
+                      "type": "array",
+                      "minItems": 1,
+                      "maxItems": 32,
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$"
+                      }
+                    },
+                    "valid_from": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 40,
+                      "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+                      "format": "date-time"
+                    },
+                    "valid_until": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 40,
+                      "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+                      "format": "date-time"
+                    }
+                  },
+                  "required": [
+                    "territories",
+                    "media_types",
+                    "channels",
+                    "valid_from",
+                    "valid_until"
+                  ]
+                },
+                "license_ref": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "review": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "declared_status": {
+                  "const": "RESTRICTED"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "status": {
+                  "const": "RESTRICTED"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "declared_status": {
+                  "const": "UNKNOWN"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "status": {
+                  "const": "UNKNOWN"
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "rights_id",
+    "source_status",
+    "verification_scope",
+    "rights_status",
+    "affiliate_status",
+    "publication_status",
+    "subject",
+    "source",
+    "asset",
+    "permissions"
+  ],
+  "$defs": {
+    "ProductSubject": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^a12-snapshot-[a-f0-9]{64}$"
+        },
+        "source_snapshot_id": {
+          "type": "string",
+          "pattern": "^a12-source-[a-f0-9]{64}$"
+        },
+        "snapshot_raw_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2000
+        },
+        "source_namespace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^(?![\\s\\S]*[\\x00-\\x1f\\x7f])\\S(?:.*\\S)?$"
+        },
+        "identity_id": {
+          "type": "string",
+          "pattern": "^a12-identity-[a-f0-9]{64}$"
+        },
+        "variant_record_id": {
+          "type": "string",
+          "pattern": "^a12-variant-record-[a-f0-9]{64}$"
+        },
+        "seller_id": {
+          "type": "string",
+          "pattern": "^a12-seller-[a-f0-9]{64}$"
+        },
+        "listing_id": {
+          "type": "string",
+          "pattern": "^a12-listing-[a-f0-9]{64}$"
+        },
+        "product_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^a12-product-[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "variant_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^a12-variant-[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "variant_key": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^(?![\\s\\S]*[\\x00-\\x1f\\x7f])\\S(?:.*\\S)?$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "synthetic": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "source_snapshot_id",
+        "snapshot_raw_sha256",
+        "ordinal",
+        "source_namespace",
+        "identity_id",
+        "variant_record_id",
+        "seller_id",
+        "listing_id",
+        "product_id",
+        "variant_id",
+        "variant_key",
+        "synthetic"
+      ]
+    },
+    "ProductEvidenceSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "\\S"
+        },
+        "source_kind": {
+          "enum": [
+            "HUMAN_SUPPLIED",
+            "PREEXPORTED_API"
+          ]
+        },
+        "source_status": {
+          "const": "USER_SUPPLIED_NOT_LIVE_VERIFIED"
+        },
+        "captured_at": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "format": "date-time"
+        },
+        "raw_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "raw_ref": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "raw_size_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4194304
+        },
+        "pointer": {
+          "type": "string",
+          "maxLength": 1024
+        }
+      },
+      "required": [
+        "source_ref",
+        "source_kind",
+        "source_status",
+        "captured_at",
+        "raw_sha256",
+        "raw_ref",
+        "raw_size_bytes",
+        "pointer"
+      ]
+    }
+  }
+}
