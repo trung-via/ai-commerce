@@ -1,4 +1,4 @@
-name: EF02 #106 clean worktree preflight (no model)
+name: "EF02 #106 clean worktree preflight (no model)"
 on:
   push:
     branches:
@@ -6,6 +6,8 @@ on:
     paths:
       - scripts/EF02-A12-Worktree-Preflight.ps1
       - .github/workflows/ef02-a12-worktree-preflight.yml
+      - .gitattributes
+      - tests/test_ef02_worktree_line_endings.py
   workflow_dispatch:
 permissions:
   contents: read
