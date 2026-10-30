@@ -152,7 +152,7 @@ def send_one(*, event: dict, report: dict, workflow_id: int,
              caller_id: str, grants_path: Path, registry_path: Path,
              idempotency_path: Path, repository_root: Path,
              token_provider, secret_provider, principal_provider,
-             adapter=None):
+             adapter=None, read_budget=None):
     """Wire D3.1/D3.2 into D2/D4 without granting new authority.
 
     Caller must be a trusted local entrypoint. Event and batch bytes are
@@ -166,9 +166,10 @@ def send_one(*, event: dict, report: dict, workflow_id: int,
         origin = SignedOriginConsentAuthority(
             grants=grants, secret_provider=secret_provider,
             principal_provider=principal_provider)
+        artifact_options = {} if read_budget is None else {"read_budget": read_budget}
         artifact = GitHubRestArtifactAuthority(
             repository=_REPOSITORY, workflow_id=workflow_id,
-            token_provider=token_provider)
+            token_provider=token_provider, **artifact_options)
         provenance = GitHubArtifactProvenance(
             repository=_REPOSITORY, run_id=event["run_id"],
             run_attempt=event["run_attempt"],

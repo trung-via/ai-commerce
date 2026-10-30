@@ -19,6 +19,7 @@ from urllib.parse import quote, urlsplit
 
 from .completion_event import CompletionEventError, validate_completion_event
 from .conversation_binding import BindingError, _decode_unique
+from .github_read_retry import GitHubReadBudget
 from .wake_adapter import GitHubArtifactProvenance
 
 _API = "https://api.github.com"
@@ -44,7 +45,7 @@ class _NoCredentialRedirect(urllib.request.HTTPRedirectHandler):
         })
 
 
-def _fetch(url: str, token: str, *, max_bytes: int, accept: str) -> bytes:
+def _fetch(url: str, token: str, *, max_bytes: int, accept: str, timeout=15) -> bytes:
     if not url.startswith(_API + "/"):
         raise ValueError("GITHUB_API_URL_INVALID")
     headers = dict(_HEADERS)
@@ -52,7 +53,7 @@ def _fetch(url: str, token: str, *, max_bytes: int, accept: str) -> bytes:
     headers["Accept"] = accept
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({}), _NoCredentialRedirect())
-    with opener.open(urllib.request.Request(url, headers=headers, method="GET"), timeout=15) as response:
+    with opener.open(urllib.request.Request(url, headers=headers, method="GET"), timeout=timeout) as response:
         data = response.read(max_bytes + 1)
     if len(data) > max_bytes:
         raise ValueError("GITHUB_RESPONSE_TOO_LARGE")
@@ -82,7 +83,7 @@ class GitHubRestArtifactAuthority:
     """
 
     def __init__(self, *, repository: str, workflow_id: int,
-                 token_provider: Callable[[], str]):
+                 token_provider: Callable[[], str], read_budget=None):
         if (not isinstance(repository, str) or not _REPO.fullmatch(repository) or
                 type(workflow_id) is not int or workflow_id <= 0 or
                 not callable(token_provider)):
@@ -90,6 +91,15 @@ class GitHubRestArtifactAuthority:
         self._repository = repository
         self._workflow_id = workflow_id
         self._token_provider = token_provider
+        self._read_budget = read_budget or GitHubReadBudget()
+
+    def _get(self, operation, url, token):
+        # Parsing and identity validation happen outside the retry boundary.
+        if operation in (GitHubRestArtifactAuthority._read_json,
+                         GitHubRestArtifactAuthority._read_bytes):
+            raw = operation
+            operation = lambda u, t: raw(u, t, timeout=self._read_budget.timeout())
+        return self._read_budget.read(operation, url, token)
 
     def verify_artifact(self, provenance: GitHubArtifactProvenance, *,
                         event: Mapping, batch_result: Mapping) -> bool:
@@ -113,7 +123,7 @@ class GitHubRestArtifactAuthority:
                 return False
 
             root = _API + "/repos/" + "/".join(quote(x, safe="") for x in self._repository.split("/"))
-            run = self._read_json(root + f"/actions/runs/{provenance.run_id}", token)
+            run = self._get(self._read_json, root + f"/actions/runs/{provenance.run_id}", token)
             if (type(run.get("id")) is not int or run["id"] != provenance.run_id or
                     type(run.get("run_attempt")) is not int or
                     run["run_attempt"] != provenance.run_attempt or
@@ -124,10 +134,11 @@ class GitHubRestArtifactAuthority:
                     run["repository"].get("full_name") != self._repository):
                 return False
 
-            listing = self._read_json(
+            listing = self._get(self._read_json,
                 root + f"/actions/runs/{provenance.run_id}/artifacts?per_page=100", token)
             arts = listing.get("artifacts")
-            if not isinstance(arts, list) or listing.get("total_count", 0) > 100:
+            if (not isinstance(arts, list) or type(listing.get("total_count")) is not int or
+                    not 0 <= listing["total_count"] <= 100 or len(arts) != listing["total_count"]):
                 # Do not silently pick one matching entry from a paginated list.
                 return False
             matches = [a for a in arts if isinstance(a, dict) and
@@ -139,7 +150,7 @@ class GitHubRestArtifactAuthority:
             if (isinstance(item.get("workflow_run"), dict) and
                     item["workflow_run"].get("id") != provenance.run_id):
                 return False
-            archive_bytes = self._read_bytes(
+            archive_bytes = self._get(self._read_bytes,
                 root + f"/actions/artifacts/{item['id']}/zip", token)
             published_digest = item.get("digest")
             actual_digest = "sha256:" + hashlib.sha256(archive_bytes).hexdigest()
@@ -163,13 +174,13 @@ class GitHubRestArtifactAuthority:
             return False
 
     @staticmethod
-    def _read_json(url: str, token: str) -> dict:
+    def _read_json(url: str, token: str, *, timeout=15) -> dict:
         result = _decode_unique(_fetch(url, token, max_bytes=_MAX_JSON,
-                                       accept=_HEADERS["Accept"]).decode("utf-8"))
+                                       accept=_HEADERS["Accept"], timeout=timeout).decode("utf-8"))
         if not isinstance(result, dict):
             raise ValueError("GITHUB_RESPONSE_INVALID")
         return result
 
     @staticmethod
-    def _read_bytes(url: str, token: str) -> bytes:
-        return _fetch(url, token, max_bytes=_MAX_ZIP, accept="application/zip")
+    def _read_bytes(url: str, token: str, *, timeout=15) -> bytes:
+        return _fetch(url, token, max_bytes=_MAX_ZIP, accept="application/zip", timeout=timeout)
