@@ -72,3 +72,26 @@ def test_repair_evidence_json_is_raw_and_unfiltered() -> None:
     normal = _attributes("contracts/ProductIdentity.v1.schema.json")
     assert normal[("contracts/ProductIdentity.v1.schema.json", "text")] == "set"
     assert normal[("contracts/ProductIdentity.v1.schema.json", "eol")] == "lf"
+
+
+def test_action_specific_evidence_is_raw_and_unfiltered() -> None:
+    """Avoid repeating #106/#111 when an action creates its own *_evidence dir.
+
+    The verified A12-02 candidate publishes CRLF JSON files in this folder;
+    the dependent A12-03 must start from a clean Git for Windows checkout.
+    """
+    paths = (
+        "src/ai_commerce/product/a12_02_evidence/final-source.json",
+        "src/ai_commerce/product/a12_02_evidence/initial.targeted.json",
+        "src/ai_commerce/product/a12_02_evidence/project-tests.failures.json",
+        "src/ai_commerce/product/a12_02_evidence/project-tests.json",
+        "src/ai_commerce/product/a12_02_evidence/review1.targeted.json",
+        "src/ai_commerce/product/a12_02_evidence/schema-review.json",
+        "src/ai_commerce/product/a12_02_evidence/static.json",
+        "src/ai_commerce/product/a12_03_evidence/project-tests.json",
+        "src/ai_commerce/learning/learning_evidence/future-result.json",
+    )
+    attrs = _attributes(*paths)
+    for path in paths:
+        assert attrs[(path, "text")] == "unset"
+        assert attrs[(path, "eol")] == "unset"
