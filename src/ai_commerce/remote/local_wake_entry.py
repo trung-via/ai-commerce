@@ -244,7 +244,8 @@ def main(argv: list[str] | None = None) -> int:
             "chat_delivery_proven": False, "brain_continuation_proven": False,
         }))
         # UNKNOWN may have clicked Send and MUST NOT be blindly retried.
-        return 0 if result.error_code == "UI_USER_TURN_OBSERVED" else 3
+        # UI observation is not a server receipt. Do not signal job SUCCESS.
+        return 3
     except (LocalWakeConfigError, OSError, ValueError, TypeError):
         print("EF02_WAKE_BLOCKED", file=sys.stderr)
         return 2
