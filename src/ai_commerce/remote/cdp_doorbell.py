@@ -31,6 +31,27 @@ _GUARD = """
 const visible = sel => [...document.querySelectorAll(sel)].filter(
  e => e.getClientRects().length > 0 && getComputedStyle(e).visibility === 'visible');
 const composerSel = args.composer, sendSel = args.send;
+const equivalent = box => {
+ if (box.innerText === args.text && box.textContent === args.text) return true;
+ const lines=args.text.split('\\n'), nodes=[...box.childNodes];
+ const block=node => node.nodeType===1 && ['P','DIV'].includes(node.tagName);
+ if(nodes.length !== lines.length || !nodes.some(block)) return false;
+ if(!nodes.every((node,i) => node.textContent === lines[i] &&
+      (node.nodeType === 3 || (block(node) &&
+       [...node.childNodes].every(child => child.nodeType === 3) &&
+       node.getClientRects().length && getComputedStyle(node).visibility === 'visible'))))
+   return false;
+ let offset=0;
+ for(let i=0;i<lines.length;i++){
+   if(box.innerText.slice(offset,offset+lines[i].length)!==lines[i]) return false;
+   offset+=lines[i].length;
+   if(i+1<lines.length){
+     if(!block(nodes[i]) && !block(nodes[i+1])) return false;
+     for(let n=0;n<2 && box.innerText[offset]==='\\n';n++)offset++;
+   }
+ }
+ return offset===box.innerText.length;
+};
 const matches = () => {
  const roles = visible('[data-message-author-role="user"]');
  const candidates = roles.length ? roles : visible('[data-user-message-bubble]');
@@ -46,7 +67,7 @@ const inspect = (expectText = false) => {
  if (visible(args.stop).length) return 'GENERATION_ACTIVE';
  const box = boxes[0];
  const original = box.textContent || '';
- if (expectText ? original !== args.text : original !== '') return 'DRAFT_PRESENT';
+ if (expectText ? !equivalent(box) : original !== '') return 'DRAFT_PRESENT';
  const forms = [];
  for(let p=box.parentElement;p;p=p.parentElement) if(p.tagName==='FORM') forms.push(p);
  if(forms.length !== 1) return 'SURFACE_UNPROVEN';
@@ -78,11 +99,11 @@ _INSERT = "(args) => { " + _GUARD + """
  range.selectNodeContents(box); range.collapse(true);
  select.removeAllRanges(); select.addRange(range);
  if(!document.execCommand('insertText',false,args.text)) return false;
- if(box.textContent !== args.text) return false;
+ if(!equivalent(box)) return false;
  box.dispatchEvent(new InputEvent('input', {
    bubbles:true, composed:true, inputType:'insertText', data:args.text
  }));
- return box.textContent === args.text;
+ return equivalent(box);
 }"""
 _READY = "(args) => { " + _GUARD + """
  const result=inspect(true);
