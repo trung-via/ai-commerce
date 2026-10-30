@@ -8,6 +8,8 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from ai_commerce.engineering.git_byte_consistency import (GitByteConsistencyError, assert_candidate_blob_portable)
+
 
 class RemoteTransportError(RuntimeError):
     pass
@@ -185,6 +187,10 @@ class GitHubTransport:
             if hashlib.sha256(content).hexdigest() != expected_hashes[relative]:
                 raise CandidateIntegrityError("CANDIDATE_BYTES_MISMATCH:" + relative)
             mode = "100755" if os.name != "nt" and path.stat().st_mode & 0o111 else "100644"
+            try:
+                assert_candidate_blob_portable(workspace, relative, content)
+            except GitByteConsistencyError as exc:
+                raise CandidateIntegrityError(str(exc)) from exc
             prepared.append((relative, content, mode))
 
         base = self.api("GET", "/git/commits/" + source_sha)
