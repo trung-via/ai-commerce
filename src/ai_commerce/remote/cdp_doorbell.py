@@ -156,6 +156,7 @@ class LocalChromeDoorbellAdapter:
                     + "fresh_brain_sync_required: true")
         args = {**_ARGS, "url": binding.chat_url, "text": doorbell}
         clicked = False
+        staging_started = False
         try:
             with self.inventory.pages(binding.cdp_endpoint) as pages:
                 matching = [page for page in pages
@@ -175,6 +176,7 @@ class LocalChromeDoorbellAdapter:
                     return receipt("UNSUPPORTED", code)
                 if page.url.rstrip("/") != binding.chat_url:
                     return receipt("UNSUPPORTED", "TARGET_PAGE_CHANGED")
+                staging_started = True
                 if page.evaluate(_INSERT, args) is not True:
                     return receipt("UNKNOWN", "INSERT_BLOCKED")
                 try:
@@ -201,5 +203,6 @@ class LocalChromeDoorbellAdapter:
         except Exception:
             # Treat a partially staged/clicked or transport-lost attempt as
             # uncertain: never auto-retry or assert ChatGPT confirmed delivery.
-            return receipt("UNKNOWN" if clicked else "UNSUPPORTED",
-                           "SUBMISSION_UNPROVEN" if clicked else "CDP_UNAVAILABLE")
+            return receipt("UNKNOWN" if staging_started or clicked else "UNSUPPORTED",
+                           "SUBMISSION_UNPROVEN" if clicked else (
+                               "INSERT_BLOCKED" if staging_started else "CDP_UNAVAILABLE"))
