@@ -1,0 +1,23 @@
+name: "A12-03 composed candidate clean Windows preflight (no model)"
+on:
+  push:
+    branches:
+      - probe/a12-03-source-clean-windows-20261030
+    paths:
+      - .github/workflows/ef02-a12-03-composed-preflight.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  preflight:
+    runs-on: [self-hosted, Windows, ai-commerce-ef02]
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Git status before Codex (exact candidate and phase evidence)
+        shell: pwsh
+        run: |
+          ./scripts/EF02-A12-Worktree-Preflight.ps1 -SourceSha ${{ github.sha }}
