@@ -168,3 +168,118 @@ def test_cli_preserves_existing_commands():
     """Verify A01..A11 existing commands remain intact and functional."""
     assert main(["hello"]) == 0
     assert main(["about", "--json"]) == 0
+
+
+def test_cli_export_ambiguous_variant_rejected(tmp_path: Path):
+    db_path = tmp_path / "ambig.sqlite"
+    invoke("product", "init-db", "--db", str(db_path))
+
+    multi_listing = {
+        "schema_version": "ManualProductListings.v1",
+        "rows": [
+            {
+                "marketplace": "test-market",
+                "seller_key": "seller-1",
+                "listing_key": "item-multi",
+                "variant_key": "v-red",
+                "price_amount": 19.99,
+                "currency": "USD",
+            },
+            {
+                "marketplace": "test-market",
+                "seller_key": "seller-1",
+                "listing_key": "item-multi",
+                "variant_key": "v-blue",
+                "price_amount": 19.99,
+                "currency": "USD",
+            },
+        ],
+    }
+    raw_path = tmp_path / "raw_multi.json"
+    raw_path.write_bytes(canonical_bytes(multi_listing))
+    snap_path = tmp_path / "snap_multi.json"
+    snap_data = invoke(
+        "product", "snapshot",
+        "--file", str(raw_path),
+        "--format", "json",
+        "--source-ref", "test-ref",
+        "--captured-at", CAPTURE,
+        "--output", str(snap_path),
+    )
+    invoke(
+        "product", "append",
+        "--db", str(db_path),
+        "--file", str(snap_path),
+        "--raw", str(raw_path),
+        "--stream-key", "snap-stream",
+        "--recorded-at", "2026-10-30T02:00:00Z",
+    )
+
+    lid = snap_data["listings"][0]["identity"]["listing_id"]
+    err = invoke(
+        "product", "export",
+        "--db", str(db_path),
+        "--listing-id", lid,
+        code=70,
+    )
+    assert err["error"] == "VARIANT_ID_REQUIRED"
+
+
+def test_cli_export_with_explicit_variant_id(tmp_path: Path):
+    db_path = tmp_path / "variant_ok.sqlite"
+    invoke("product", "init-db", "--db", str(db_path))
+
+    multi_listing = {
+        "schema_version": "ManualProductListings.v1",
+        "rows": [
+            {
+                "marketplace": "test-market",
+                "seller_key": "seller-1",
+                "listing_key": "item-multi",
+                "variant_key": "v-red",
+                "price_amount": 19.99,
+                "currency": "USD",
+            },
+            {
+                "marketplace": "test-market",
+                "seller_key": "seller-1",
+                "listing_key": "item-multi",
+                "variant_key": "v-blue",
+                "price_amount": 19.99,
+                "currency": "USD",
+            },
+        ],
+    }
+    raw_path = tmp_path / "raw_multi.json"
+    raw_path.write_bytes(canonical_bytes(multi_listing))
+    snap_path = tmp_path / "snap_multi.json"
+    snap_data = invoke(
+        "product", "snapshot",
+        "--file", str(raw_path),
+        "--format", "json",
+        "--source-ref", "test-ref",
+        "--captured-at", CAPTURE,
+        "--output", str(snap_path),
+    )
+    invoke(
+        "product", "append",
+        "--db", str(db_path),
+        "--file", str(snap_path),
+        "--raw", str(raw_path),
+        "--stream-key", "snap-stream",
+        "--recorded-at", "2026-10-30T02:00:00Z",
+    )
+
+    lid = snap_data["listings"][0]["identity"]["listing_id"]
+    vid = snap_data["listings"][0]["variant"]["variant_id"]
+    pack_path = tmp_path / "exported_variant.json"
+    res = invoke(
+        "product", "export",
+        "--db", str(db_path),
+        "--listing-id", lid,
+        "--variant-id", vid,
+        "--output", str(pack_path),
+    )
+    assert res["schema_version"] == "ProductEvidencePack.v1"
+    assert res["subject"]["variant_id"] == vid
+    assert pack_path.is_file()

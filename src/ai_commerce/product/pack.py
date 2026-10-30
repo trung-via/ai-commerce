@@ -32,6 +32,78 @@ from .rights import ProductAssetRights
 from .schemas import MAX_DOCUMENT_BYTES, SOURCE_STATUS
 
 
+def derive_rights_effective_status(permissions: Sequence[dict]) -> str:
+    """Derive effective_status from permission statuses."""
+    statuses = {p["status"] for p in permissions}
+    if statuses == {"GRANTED"}:
+        return "GRANTED"
+    if "RESTRICTED" in statuses:
+        return "RESTRICTED"
+    if "GRANTED" in statuses:
+        return "MIXED"
+    return "UNKNOWN"
+
+
+def derive_pack_rights_status(rights: Sequence[dict]) -> str:
+    """Derive top-level pack rights_status from list of rights objects."""
+    if not rights:
+        return "UNKNOWN"
+    if any(r["effective_status"] == "RESTRICTED" for r in rights):
+        return "RESTRICTED"
+    if all(r["effective_status"] == "GRANTED" for r in rights):
+        return "GRANTED"
+    if any(r["effective_status"] == "GRANTED" for r in rights):
+        return "MIXED"
+    return "UNKNOWN"
+
+
+def derive_offers_assessment(observations: Sequence[dict]) -> tuple[list[str], str, dict | None]:
+    """Derive conflict_fields, assessment_status and active_offer deterministically from observations."""
+    if not observations:
+        return [], "NO_OFFERS", None
+
+    active_obs = [obs for obs in observations if obs["freshness"] == "RECENT_OBSERVATION"]
+
+    prices = {(obs["price"]["amount"], obs["price"]["currency"])
+              for obs in active_obs if obs.get("price") and obs["price"].get("amount") is not None}
+    stocks = {obs["stock"]["available"]
+              for obs in active_obs if obs.get("stock") and obs["stock"].get("available") is not None}
+    rates = {obs["commission"]["rate"]
+             for obs in active_obs if obs.get("commission") and obs["commission"].get("rate") is not None}
+    amounts = {(obs["commission"]["amount"], obs["commission"]["currency"])
+               for obs in active_obs if obs.get("commission") and obs["commission"].get("amount") is not None}
+
+    conflicts = []
+    for field_name, known in (("PRICE", prices), ("STOCK", stocks),
+                              ("COMMISSION_RATE", rates), ("COMMISSION_AMOUNT", amounts)):
+        if len(known) > 1:
+            conflicts.append(field_name)
+    conflict_fields = sorted(conflicts)
+
+    if conflict_fields:
+        assessment_status = "CONFLICT"
+        active_offer = None
+    elif active_obs:
+        assessment_status = "VALID_OBSERVATION"
+        latest = sorted(active_obs, key=lambda o: (o["observed_at"], o["offer_id"]), reverse=True)[0]
+        active_offer = {
+            "offer_id": latest["offer_id"],
+            "price_amount": latest["price"]["amount"],
+            "currency": latest["price"]["currency"],
+            "stock_available": latest["stock"]["available"],
+            "commission_rate": latest["commission"]["rate"],
+            "commission_currency": latest["commission"]["currency"],
+        }
+    elif any(obs["freshness"] == "STALE" for obs in observations):
+        assessment_status = "STALE"
+        active_offer = None
+    else:
+        assessment_status = "NOT_YET_OBSERVED"
+        active_offer = None
+
+    return conflict_fields, assessment_status, active_offer
+
+
 def _verify_pack(value: dict, *, raw: bytes | None = None, snapshot=None) -> None:
     """Semantic validation of ProductEvidencePack."""
     # Timestamp checks
@@ -78,7 +150,7 @@ def _verify_pack(value: dict, *, raw: bytes | None = None, snapshot=None) -> Non
             require(claim["value"] is None and claim["role"] == "INCONCLUSIVE",
                     "INVALID_UNKNOWN_CLAIM")
 
-    # Offers checks: freshness, expiration, conflict assessment
+    # Offers checks: freshness, expiration, conflict assessment, active offer integrity
     max_age = value["offers"]["freshness_limit_seconds"]
     require(0 <= max_age <= MAX_FRESHNESS_SECONDS, "INVALID_FRESHNESS_LIMIT")
     observations = value["offers"]["observations"]
@@ -87,22 +159,23 @@ def _verify_pack(value: dict, *, raw: bytes | None = None, snapshot=None) -> Non
         require(obs["freshness"] == exp_freshness, "OFFER_FRESHNESS_MISMATCH")
         require(sorted(obs["reason_codes"]) == sorted(exp_reasons), "OFFER_REASONS_MISMATCH")
 
-    conflict_fields = value["offers"]["conflict_fields"]
-    assessment_status = value["offers"]["assessment_status"]
+    exp_conflicts, exp_status, exp_active_offer = derive_offers_assessment(observations)
+    require(value["offers"]["conflict_fields"] == exp_conflicts, "OFFER_CONFLICTS_MISMATCH")
+    require(value["offers"]["assessment_status"] == exp_status, "INVALID_OFFER_ASSESSMENT")
+
     active_offer = value["offers"]["active_offer"]
-
-    if not observations:
-        require(assessment_status == "NO_OFFERS" and active_offer is None, "INVALID_OFFER_ASSESSMENT")
-    elif conflict_fields:
-        require(assessment_status == "CONFLICT" and active_offer is None, "INVALID_OFFER_ASSESSMENT")
-    elif active_offer is not None:
-        require(assessment_status == "VALID_OBSERVATION", "INVALID_OFFER_ASSESSMENT")
-        require(any(obs["offer_id"] == active_offer["offer_id"] and obs["freshness"] == "RECENT_OBSERVATION"
-                    for obs in observations), "ACTIVE_OFFER_NOT_RECENT")
+    if exp_active_offer is None:
+        require(active_offer is None, "ACTIVE_OFFER_MISMATCH")
     else:
-        require(assessment_status in ("STALE", "NOT_YET_OBSERVED"), "INVALID_OFFER_ASSESSMENT")
+        require(active_offer is not None, "ACTIVE_OFFER_MISMATCH")
+        require(active_offer["offer_id"] == exp_active_offer["offer_id"], "ACTIVE_OFFER_MISMATCH")
+        require(active_offer["price_amount"] == exp_active_offer["price_amount"]
+                and active_offer["currency"] == exp_active_offer["currency"], "ACTIVE_OFFER_PRICE_MISMATCH")
+        require(active_offer["stock_available"] == exp_active_offer["stock_available"], "ACTIVE_OFFER_STOCK_MISMATCH")
+        require(active_offer["commission_rate"] == exp_active_offer["commission_rate"]
+                and active_offer["commission_currency"] == exp_active_offer["commission_currency"], "ACTIVE_OFFER_COMMISSION_MISMATCH")
 
-    # Rights checks: UNKNOWN/RESTRICTED protection
+    # Rights checks: UNKNOWN/RESTRICTED protection and deterministic recomputation
     for r_item in value["rights"]:
         for perm in r_item["permissions"]:
             if perm["status"] == "GRANTED":
@@ -113,12 +186,11 @@ def _verify_pack(value: dict, *, raw: bytes | None = None, snapshot=None) -> Non
                 require(perm["status"] == perm["declared_status"], "RIGHTS_STATUS_UPGRADE")
                 require(perm["reviewed"] is False, "UNEXPECTED_RIGHTS_REVIEW")
 
-    if any(r["effective_status"] == "RESTRICTED" for r in value["rights"]):
-        require(value["rights_status"] in ("RESTRICTED", "MIXED", "UNKNOWN"),
-                "INVALID_PACK_RIGHTS_STATUS")
-    if value["rights_status"] == "GRANTED":
-        require(value["rights"] and all(r["effective_status"] == "GRANTED" for r in value["rights"]),
-                "INVALID_PACK_RIGHTS_STATUS")
+        exp_eff = derive_rights_effective_status(r_item["permissions"])
+        require(r_item["effective_status"] == exp_eff, "RIGHTS_EFFECTIVE_STATUS_MISMATCH")
+
+    exp_rights_status = derive_pack_rights_status(value["rights"])
+    require(value["rights_status"] == exp_rights_status, "INVALID_PACK_RIGHTS_STATUS")
 
     # Human advisory caveats check
     require(all(caveat in value["advisory_caveats"] for caveat in ADVISORY_CAVEATS),
@@ -245,8 +317,9 @@ def build_evidence_pack(
         require(isinstance(claim, ProductClaimEvidence), "INVALID_EVIDENCE_RECORD")
         c_dict = claim.to_dict()
         require(c_dict["subject"]["listing_id"] == subject["listing_id"], "CLAIM_SUBJECT_MISMATCH")
-        if subject["variant_id"] is not None and c_dict["subject"]["variant_id"] is not None:
-            require(c_dict["subject"]["variant_id"] == subject["variant_id"], "CLAIM_VARIANT_MISMATCH")
+        if c_dict["subject"]["variant_id"] is not None:
+            require(subject["variant_id"] is not None and c_dict["subject"]["variant_id"] == subject["variant_id"],
+                    "CLAIM_VARIANT_MISMATCH")
         validated_claims.append({
             "claim_id": c_dict["claim_id"],
             "claim_key": c_dict["claim"]["claim_key"],
@@ -266,80 +339,36 @@ def build_evidence_pack(
 
     # Process offers
     eval_as_of = as_of or snap_dict["source"]["captured_at"]
+    pack_observations = []
     if offers:
         for offer in offers:
             require(isinstance(offer, ProductOfferObservation), "INVALID_EVIDENCE_RECORD")
             o_dict = offer.to_dict()
             require(o_dict["subject"]["listing_id"] == subject["listing_id"], "OFFER_SUBJECT_MISMATCH")
-            if subject["variant_id"] is not None:
-                require(o_dict["subject"]["variant_id"] == subject["variant_id"], "OFFER_VARIANT_MISMATCH")
-        assessment = assess_offers(offers, as_of=eval_as_of, max_age_seconds=max_age_seconds)
-        matching_group = next((g for g in assessment["groups"]
-                               if g["listing_id"] == subject["listing_id"]
-                               and g["variant_id"] == subject["variant_id"]), None)
-        if matching_group:
-            pack_observations = []
-            for obs_item in matching_group["observations"]:
-                o = obs_item["observation"]
-                pack_observations.append({
-                    "offer_id": o["offer_id"],
-                    "observed_at": o["observed_at"],
-                    "expires_at": o["expires_at"],
-                    "price": o["price"],
-                    "stock": o["stock"],
-                    "commission": o["commission"],
-                    "freshness": obs_item["freshness"],
-                    "reason_codes": sorted(obs_item["reason_codes"]),
-                })
-            pack_observations.sort(key=lambda item: item["observed_at"], reverse=True)
-            conflict_fields = sorted(matching_group["conflicting_fields"])
-            active_obs = [obs for obs in pack_observations if obs["freshness"] == "RECENT_OBSERVATION"]
-            if conflict_fields:
-                assessment_status = "CONFLICT"
-                active_offer = None
-            elif active_obs:
-                assessment_status = "VALID_OBSERVATION"
-                latest = active_obs[0]
-                active_offer = {
-                    "offer_id": latest["offer_id"],
-                    "price_amount": latest["price"]["amount"],
-                    "currency": latest["price"]["currency"],
-                    "stock_available": latest["stock"]["available"],
-                    "commission_rate": latest["commission"]["rate"],
-                    "commission_currency": latest["commission"]["currency"],
-                }
-            elif any(obs["freshness"] == "STALE" for obs in pack_observations):
-                assessment_status = "STALE"
-                active_offer = None
-            else:
-                assessment_status = "NOT_YET_OBSERVED"
-                active_offer = None
-            pack_offers = {
-                "as_of": eval_as_of,
-                "freshness_limit_seconds": max_age_seconds,
-                "assessment_status": assessment_status,
-                "active_offer": active_offer,
-                "conflict_fields": conflict_fields,
-                "observations": pack_observations,
-            }
-        else:
-            pack_offers = {
-                "as_of": eval_as_of,
-                "freshness_limit_seconds": max_age_seconds,
-                "assessment_status": "NO_OFFERS",
-                "active_offer": None,
-                "conflict_fields": [],
-                "observations": [],
-            }
-    else:
-        pack_offers = {
-            "as_of": eval_as_of,
-            "freshness_limit_seconds": max_age_seconds,
-            "assessment_status": "NO_OFFERS",
-            "active_offer": None,
-            "conflict_fields": [],
-            "observations": [],
-        }
+            require(subject["variant_id"] is not None and o_dict["subject"]["variant_id"] == subject["variant_id"],
+                    "OFFER_VARIANT_MISMATCH")
+            freshness, reasons = _freshness(o_dict, parse_timestamp(eval_as_of), max_age_seconds)
+            pack_observations.append({
+                "offer_id": o_dict["offer_id"],
+                "observed_at": o_dict["observed_at"],
+                "expires_at": o_dict["expires_at"],
+                "price": o_dict["price"],
+                "stock": o_dict["stock"],
+                "commission": o_dict["commission"],
+                "freshness": freshness,
+                "reason_codes": sorted(reasons),
+            })
+        pack_observations.sort(key=lambda item: (item["observed_at"], item["offer_id"]), reverse=True)
+
+    conflict_fields, assessment_status, active_offer = derive_offers_assessment(pack_observations)
+    pack_offers = {
+        "as_of": eval_as_of,
+        "freshness_limit_seconds": max_age_seconds,
+        "assessment_status": assessment_status,
+        "active_offer": active_offer,
+        "conflict_fields": conflict_fields,
+        "observations": pack_observations,
+    }
 
     # Process rights
     pack_rights = []
@@ -347,8 +376,9 @@ def build_evidence_pack(
         require(isinstance(r, ProductAssetRights), "INVALID_EVIDENCE_RECORD")
         r_dict = r.to_dict()
         require(r_dict["subject"]["listing_id"] == subject["listing_id"], "RIGHTS_SUBJECT_MISMATCH")
-        if subject["variant_id"] is not None and r_dict["subject"]["variant_id"] is not None:
-            require(r_dict["subject"]["variant_id"] == subject["variant_id"], "RIGHTS_VARIANT_MISMATCH")
+        if r_dict["subject"]["variant_id"] is not None:
+            require(subject["variant_id"] is not None and r_dict["subject"]["variant_id"] == subject["variant_id"],
+                    "RIGHTS_VARIANT_MISMATCH")
         perms = []
         for p in r_dict["permissions"]:
             perms.append({
@@ -360,15 +390,7 @@ def build_evidence_pack(
                 "reviewed": p.get("review") is not None,
             })
         perms.sort(key=lambda item: item["purpose"])
-        statuses = {p["status"] for p in perms}
-        if statuses == {"GRANTED"}:
-            eff_status = "GRANTED"
-        elif "RESTRICTED" in statuses:
-            eff_status = "RESTRICTED"
-        elif "GRANTED" in statuses:
-            eff_status = "MIXED"
-        else:
-            eff_status = "UNKNOWN"
+        eff_status = derive_rights_effective_status(perms)
         pack_rights.append({
             "rights_id": r_dict["rights_id"],
             "asset_ref": r_dict["asset"]["asset_ref"],
@@ -383,16 +405,7 @@ def build_evidence_pack(
         })
     pack_rights.sort(key=lambda item: item["rights_id"])
 
-    if not pack_rights:
-        pack_rights_status = "UNKNOWN"
-    elif any(r["effective_status"] == "RESTRICTED" for r in pack_rights):
-        pack_rights_status = "RESTRICTED"
-    elif all(r["effective_status"] == "GRANTED" for r in pack_rights):
-        pack_rights_status = "GRANTED"
-    elif any(r["effective_status"] == "GRANTED" for r in pack_rights):
-        pack_rights_status = "MIXED"
-    else:
-        pack_rights_status = "UNKNOWN"
+    pack_rights_status = derive_pack_rights_status(pack_rights)
 
     gen_time = generated_at or eval_as_of
 
@@ -452,13 +465,33 @@ def export_pack_from_registry(
         require(len(distinct_ids) == 1, "LISTING_ID_REQUIRED")
         listing_id = distinct_ids[0]
 
+    matching_listings = [item for item in all_listings if item[2] == listing_id]
+    require(len(matching_listings) > 0, "LISTING_NOT_FOUND_IN_REGISTRY")
+
+    distinct_variants = sorted({item[3] for item in matching_listings if item[3] is not None})
+    if variant_id is None:
+        if len(distinct_variants) > 1:
+            raise ProductError("VARIANT_ID_REQUIRED")
+        if len(distinct_variants) == 1:
+            variant_id = distinct_variants[0]
+
     matching = [
         (snap, ord_idx, lid, vid, ev_id)
-        for snap, ord_idx, lid, vid, ev_id in all_listings
-        if lid == listing_id and (variant_id is None or vid == variant_id)
+        for snap, ord_idx, lid, vid, ev_id in matching_listings
+        if variant_id is None or vid == variant_id
     ]
     require(len(matching) > 0, "LISTING_NOT_FOUND_IN_REGISTRY")
-    target_snap, target_ord, _, _, snap_ev_id = matching[0]
+
+    # Reject conflicting multiple snapshots for the selected listing and variant
+    first_snap, first_ord, _, _, snap_ev_id = matching[0]
+    first_row = first_snap.to_dict()["listings"][first_ord - 1]
+    for other_snap, other_ord, _, _, _ in matching[1:]:
+        other_row = other_snap.to_dict()["listings"][other_ord - 1]
+        if (first_snap.snapshot_id != other_snap.snapshot_id
+                or first_row != other_row):
+            raise ProductError("CONFLICTING_SNAPSHOTS")
+
+    target_snap, target_ord = first_snap, first_ord
 
     event_refs = [snap_ev_id]
     claims = []
@@ -471,21 +504,21 @@ def export_pack_from_registry(
             claim = ev.evidence()
             c_subj = claim.to_dict()["subject"]
             if c_subj["listing_id"] == listing_id:
-                if variant_id is None or c_subj["variant_id"] in (None, variant_id):
+                if c_subj["variant_id"] == variant_id or c_subj["variant_id"] is None:
                     claims.append(claim)
                     event_refs.append(ev.event_id)
         elif kind == "ProductOfferObservation":
             offer = ev.evidence()
             o_subj = offer.to_dict()["subject"]
             if o_subj["listing_id"] == listing_id:
-                if variant_id is None or o_subj["variant_id"] == variant_id:
+                if variant_id is not None and o_subj["variant_id"] == variant_id:
                     offers.append(offer)
                     event_refs.append(ev.event_id)
         elif kind == "ProductAssetRights":
             r_obj = ev.evidence()
             r_subj = r_obj.to_dict()["subject"]
             if r_subj["listing_id"] == listing_id:
-                if variant_id is None or r_subj["variant_id"] in (None, variant_id):
+                if r_subj["variant_id"] == variant_id or r_subj["variant_id"] is None:
                     rights.append(r_obj)
                     event_refs.append(ev.event_id)
 

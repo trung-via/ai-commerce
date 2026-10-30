@@ -7,8 +7,9 @@ from .core import (
 from .identity import build_identity, build_variant
 from .offers import ProductOfferObservation, assess_offers, build_offer
 from .pack import (
-    ProductEvidencePack, build_evidence_pack, export_pack_from_registry,
-    read_evidence_pack, write_evidence_pack,
+    ProductEvidencePack, build_evidence_pack, derive_offers_assessment,
+    derive_pack_rights_status, derive_rights_effective_status,
+    export_pack_from_registry, read_evidence_pack, write_evidence_pack,
 )
 from .pack_schemas import PACK_VERSION, pack_schema
 from .reader import ProductListingSnapshot, prepare_bytes, read_snapshot
@@ -22,7 +23,8 @@ __all__ = [
     "ProductListingSnapshot", "ProductOfferObservation", "READER_VERSION",
     "SOURCE_STATUS", "assess_offers", "assess_rights", "build_claim",
     "build_evidence_pack", "build_identity", "build_offer", "build_rights",
-    "build_variant", "canonical_bytes", "content_id", "digest",
+    "build_variant", "canonical_bytes", "content_id", "derive_offers_assessment",
+    "derive_pack_rights_status", "derive_rights_effective_status", "digest",
     "export_pack_from_registry", "pack_schema", "parse_contract",
     "parse_json", "parse_timestamp", "prepare_bytes", "read_evidence_pack",
     "read_snapshot", "review_claim", "review_rights", "schema", "seal_contract",

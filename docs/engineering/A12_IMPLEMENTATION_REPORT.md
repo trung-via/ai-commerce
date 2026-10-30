@@ -1,75 +1,81 @@
 # A12 Product Evidence Foundation implementation report
 
 Date: 2026-10-30. WorkItem `A12-PRODUCT-EVIDENCE-001`, Roadmap A Phase 3 / Milestone `M4` (P01..P06).
-Action `A12-04`, recovery attempt `a12-04-antigravity38flashhigh-20261030-v1-05` (Issue #116, replacing prior Codex quota timeout).
+Action `A12-04`, recovery attempt of failed GitHub Issue #124, by Human authorization 2026-10-30.
+Pinned exact source commit: `144c193e4de522d6222b9fa5a360ff197ca86785`.
 Human authorized provider precondition: `antigravity / gemini-3.8-flash / high`, candidate branch delivery only.
 
 ## Source and actual fan-in
 
-The immutable packet pins the verified A12-03 candidate `09f46135f68c748a0074a8ef4a6a5a2f90afa8a7` published on candidate branch `refs/heads/ef02/candidate/8d72a34a55f1c22d840f7c87cf005c4a`, inheriting from source commit `5e17381b5cc1d0ef05a56de0138a3972bc524169`. This immutable source includes verified work from:
+The immutable source worktree pins commit `144c193e4de522d6222b9fa5a360ff197ca86785`, which inherits the verified A12-01..04 work plus `.gitattributes` setting `*.json -text -eol` and `*.py -text -eol` to eliminate text filter mismatches. This source includes:
 - A12-01 (P01): strict versioned contracts for `ProductListingSnapshot.v1`, `ProductIdentity.v1`, `ProductVariant.v1`, safe regular-file reader, and raw SHA-256 preservation.
 - A12-02 (P03/P04): source-namespaced identity history, `ProductClaimEvidence.v1` (differentiating seller assertion vs reviewer proof), and `ProductOfferObservation.v1` (decimal-safe price/commission freshness and conflict tracking).
 - A12-03 (P05): `ProductAssetRights.v1` purpose-scoped rights manifests with UNKNOWN/RESTRICTED protections and the independent append-only SQLite evidence journal `ProductEvidenceRegistry`.
+- A12-04 (P06): `ProductEvidencePack.v1` contract, CLI operations, synthetic demo, and fan-in integration tests.
 
-Prior A12-01..03 work was not reimplemented. Before coding, the candidate worktree was verified clean with `git status -s`. Initial baseline tests on inherited A12 test suites passed: **455 passed, 1 skipped** (native symlink skip).
+Prior A12-01..03 work was not reimplemented. Before coding, the worktree was verified clean with `git status -s` and pinned to `144c193e4de522d6222b9fa5a360ff197ca86785`.
 
-## Action A12-04 Scope & Implementation
+## Action A12-04 Scope & Semantic Corrections (Human Review of #119)
 
-Action A12-04 delivers P06 and AC07-AC08, providing fan-in integration across all A12 candidate work:
+Action A12-04 delivers P06 and AC07-AC08, implementing the semantic corrections required by Human review of #119:
 
-1. **ProductEvidencePack.v1 Contract & Python Read Model** (`contracts/ProductEvidencePack.v1.schema.json`, `src/ai_commerce/product/pack_schemas.py`, `src/ai_commerce/product/pack.py`):
-   - Strict versioned JSON schema mirrored 100% byte-for-byte by `schema("ProductEvidencePack")`.
-   - Content ID addressed as `a12-pack-[a-f0-9]{64}`, hashing canonical UTF-8 JSON excluding `pack_id`.
-   - Synthesizes exact listing snapshot source evidence, variant identity, claims, offers with freshness evaluation, asset rights manifests, and human advisory caveats.
-   - Preserves source-observed claims and seller assertions; strictly forbids upgrading seller claims to `INDEPENDENTLY_VERIFIED_ONLY_WITH_REAL_EVIDENCE` without separate reviewer proof.
-   - Evaluates offer prices, stock, commission, staleness (`STALE` / `EXPIRED` / `MAX_AGE_EXCEEDED`), and detects concurrent pricing conflicts (`assessment_status="CONFLICT"`).
-   - Preserves media asset rights with `UNKNOWN` and `RESTRICTED` protections; only permits `GRANTED` for purposes with verified local license instruments.
-   - Embeds six core human advisory explanations in `advisory_caveats`.
+1. **Registry Pack Export Disambiguation & Semantic Filtering** (`src/ai_commerce/product/pack.py`):
+   - When a listing has multiple distinct variants and `variant_id` is omitted in `export_pack_from_registry`, rejects with deterministic explicit ambiguity (`ProductError("VARIANT_ID_REQUIRED")`), eliminating arbitrary first candidate selection (`matching[0]`).
+   - Preserves single-variant behavior: when a listing has exactly one variant, omitting `variant_id` automatically resolves to that single variant.
+   - When a variant is chosen, strictly matches offers to the selected variant (`o_subj["variant_id"] == variant_id`).
+   - Allows semantically valid variant-neutral claims and rights (`variant_id is None`) while strictly scoping variant-specific claims and rights to the chosen variant (`variant_id`), rejecting cross-variant mixing (`CLAIM_VARIANT_MISMATCH`, `RIGHTS_VARIANT_MISMATCH`, `OFFER_VARIANT_MISMATCH`).
+   - Rejects conflicting multiple snapshots for the selected listing and variant (`ProductError("CONFLICTING_SNAPSHOTS")`).
 
-2. **Opt-in Product CLI & Top-Level Hook** (`src/ai_commerce/product/cli.py`, `src/ai_commerce/cli.py`):
-   - Additive `ai-commerce product` command supporting `snapshot`, `init-db`, `append`, `inspect`, `integrity`, `export`, and `verify`.
-   - Preserves existing CLI commands (`hello`, `about`, `validate`, `concept-*`, `asset-*`, `composition-*`, `render-*`, `creative-e2e`, `channel-capability`, `distribution`, `analytics`, `learning`, `opportunity`).
-   - Strict error convention: valid commands exit 0 and output JSON to stdout; invalid inputs or `ProductError` exceptions output JSON on stderr and exit 70.
+2. **Derived Pack Integrity & Symmetric Verification** (`src/ai_commerce/product/pack.py`):
+   - In `_verify_pack`, requires `active_offer` `offer_id`, price and currency (`ACTIVE_OFFER_PRICE_MISMATCH`), stock availability (`ACTIVE_OFFER_STOCK_MISMATCH`), and commission rate/currency (`ACTIVE_OFFER_COMMISSION_MISMATCH`) to match the exact selected recent observation.
+   - Shared deterministic helper `derive_offers_assessment` computes `conflict_fields`, `assessment_status`, and `active_offer` from observations identically during build and verification.
+   - Shared deterministic helper `derive_rights_effective_status` recomputes each rights entry's `effective_status` from its permission statuses (`RIGHTS_EFFECTIVE_STATUS_MISMATCH`).
+   - Shared deterministic helper `derive_pack_rights_status` recomputes the top-level `rights_status` from the rights list (`INVALID_PACK_RIGHTS_STATUS`).
+   - Negative tamper tests mutate derived fields and recompute valid `content_id` to verify that `ProductEvidencePack` strictly rejects tampering across `stale`, `conflict`, `unknown`, `restricted`, and `granted` states.
 
-3. **Deterministic Synthetic Demonstration & Fixtures** (`src/ai_commerce/product/demo.py`, `scripts/a12_demo.py`, `examples/a12/`):
-   - Standalone script `scripts/a12_demo.py --output <dir>` runs end-to-end import -> identity -> claims/offers -> rights -> append-only registry -> pack export -> replay and tamper verification.
-   - Produces stable deterministic output JSON across independent directories.
-   - Replays registry events into a secondary database and verifies exact hash chain identity.
-   - Verifies Creative intake: brief referencing `product_ref = pack.pack_id` passes, while freeform creative briefs (`product_ref=None`) remain completely supported.
+3. **Opt-in Product CLI & Top-Level Hook** (`src/ai_commerce/product/cli.py`, `src/ai_commerce/cli.py`):
+   - Preserved additive `ai-commerce product` commands (`snapshot`, `init-db`, `append`, `inspect`, `integrity`, `export`, and `verify`).
+   - Added CLI tests verifying `product export` fails with code 70 and `"error": "VARIANT_ID_REQUIRED"` on multi-variant listings when `--variant-id` is omitted, and succeeds when `--variant-id` is supplied.
 
-4. **Integration & CLI Verification Test Suites** (`tests/test_a12_integration.py`, `tests/test_a12_cli.py`):
-   - `test_a12_integration.py`: 11 comprehensive tests covering schema parity, contract sealing, full pipeline replay, demo determinism, Creative intake, negative tamper rejection, stale offer freshness, pricing conflicts, variant isolation, and advisory caveats.
-   - `test_a12_cli.py`: 5 tests covering CLI help, snapshot import, database initialization, record append, inspection, integrity check, pack export, verification, negative error codes, and existing CLI command preservation.
+4. **Deterministic Synthetic Demonstration & Fixtures** (`src/ai_commerce/product/demo.py`, `scripts/a12_demo.py`):
+   - Deterministic offline demo producing bit-exact golden output JSON across independent directories.
+   - Replays registry events into a secondary database and verifies hash chain identity.
+
+5. **Integration & CLI Regression Test Suites** (`tests/test_a12_integration.py`, `tests/test_a12_cli.py`):
+   - Added focused regression tests for variant ambiguity rejection, single-variant preservation, strict variant matching, cross-variant mixing rejection, conflicting multiple snapshot rejection, active offer field mutations, and status mutations across stale/conflict/unknown/restricted/granted states.
 
 ## Changed paths summary
 
 All edits are strictly confined to the authorized allowed paths:
-- `contracts/ProductEvidencePack.v1.schema.json`
-- `src/ai_commerce/product/pack_schemas.py`
 - `src/ai_commerce/product/pack.py`
-- `src/ai_commerce/product/cli.py`
-- `src/ai_commerce/product/demo.py`
-- `src/ai_commerce/product/schemas.py`
-- `src/ai_commerce/product/core.py`
 - `src/ai_commerce/product/__init__.py`
-- `src/ai_commerce/cli.py`
-- `examples/a12/`
-- `scripts/a12_demo.py`
 - `tests/test_a12_integration.py`
 - `tests/test_a12_cli.py`
 - `docs/engineering/A12_IMPLEMENTATION_REPORT.md`
 
-No changes were made to `.github`, EF02 infrastructure, production configurations, or unrelated repository roots.
+No changes were made to `.gitattributes`, `.github`, EF02 infrastructure, production configurations, or unrelated repository roots.
 
-## Observed Verification Results
+## Provenance-Separated Test Evidence
 
 Environment observed: Windows 11 build 26300, CPython 3.14.7 AMD64, pytest 8.4.2, pytest-xdist 3.8.0, SQLite 3.50.4.
 
+### Historical Test Evidence
+
+| Run / Issue | Context | Result | Notes |
+|---|---|---|---|
+| **#119** | Official Windows registered project-tests | **2340 passed, 7 skipped** | Baseline before Human review semantic feedback |
+| **#122** | Official registered tests | **2355 passed, 7 skipped, exit 0** | Tests passed completely, but candidate publisher blocked due to CRLF Git filter mismatch |
+| **#124** | Attempted execution | **No tests run, no candidate** | Blocked early due to headless `read_file` permission denial; no files created or modified |
+
+### Current Actual Test Evidence (Issue #124 Scoped Fix)
+
+Pinned source commit: `144c193e4de522d6222b9fa5a360ff197ca86785`.
+
 | Test Run | Command | Result | Duration | Notes |
 |---|---|---|---|---|
-| A12 Unit & Integration Suite | `python -m pytest tests/test_a12_*.py -q -n 12` | **471 passed, 1 skipped** | 17.91 s | Zero failures across all 8 A12 test files; 1 skip is host's restricted native symlink |
-| Synthetic Demo Script | `python scripts/a12_demo.py --output examples/a12/synthetic` | **Exit 0** | ~1.5 s | Full deterministic E2E flow with tamper rejection and replay verification |
-| Registered `project-tests` | `python -m pytest tests -q -n 12` | **2310 passed, 30 failed, 7 skipped** | 137.46 s | All 30 failures are out-of-scope EF01 git-write-guard fixture blocks |
+| A12 Unit & Integration Suite | `python -m pytest tests/test_a12_*.py -q` | **480 passed, 1 skipped** | 54.99 s | Zero failures across all 8 A12 test files; 1 skip is host's restricted native symlink |
+| Synthetic Demo Script | `python scripts/a12_demo.py --output <dir>` | **Exit 0** | ~1.5 s | Deterministic E2E flow with tamper rejection and replay verification |
+| Registered `project-tests` | `python -m pytest tests -q -n 12` | **2319 passed, 30 failed, 7 skipped** | 168.49 s | All 30 failures are out-of-scope EF01 git-write-guard fixture blocks |
 
 All 30 registered-profile failures are confined to `tests/test_ef01*.py` where tests attempt Git write operations (`git init`, checkout, commit) blocked by the active EF01 reference-transaction hook guard. Zero failures occurred in any application or A12 product code.
 
