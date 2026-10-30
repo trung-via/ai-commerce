@@ -1,4 +1,4 @@
-"""Independent AI Commerce commercial release evidence (C08, C09, and D06)."""
+"""Independent AI Commerce commercial release evidence (C08, C09, D06, and E03)."""
 
 from .inspection import (
     DiagnosticOptions, InspectionLimits, MediaInspectionError, MediaReleaseInspection,
@@ -16,6 +16,14 @@ from .placement import (
     evaluate_affiliate_placement, review_affiliate_placement,
 )
 from .placement_schemas import affiliate_placement_schema
+from .evidence_pack import (
+    AffiliateReleaseError, AffiliateReleaseEvidencePack, AffiliateReleaseRequest,
+    build_affiliate_release_pack, evaluate_affiliate_release_pack,
+    read_affiliate_release_pack, review_affiliate_release_pack,
+    write_affiliate_release_pack,
+)
+from .evidence_pack_schemas import affiliate_release_pack_schema, evidence_pack_schema
+from .demo import run_demo
 
 __all__ = [
     "DiagnosticOptions", "InspectionLimits", "MediaInspectionError", "MediaReleaseInspection",
@@ -25,4 +33,9 @@ __all__ = [
     "AffiliatePlacementError", "AffiliatePlacementEvidence", "EvidenceRef",
     "PlacementDisclosure", "PlacementRequest", "PlacementTemporal",
     "evaluate_affiliate_placement", "review_affiliate_placement", "affiliate_placement_schema",
+    "AffiliateReleaseError", "AffiliateReleaseEvidencePack", "AffiliateReleaseRequest",
+    "build_affiliate_release_pack", "evaluate_affiliate_release_pack",
+    "read_affiliate_release_pack", "review_affiliate_release_pack",
+    "write_affiliate_release_pack", "affiliate_release_pack_schema", "evidence_pack_schema",
+    "run_demo",
 ]

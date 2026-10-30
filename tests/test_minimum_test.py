@@ -41,8 +41,8 @@ def test_reviewed_map_contains_exact_real_paths_and_all_current_python_test_fami
     assert set(declared) <= real_tree.files.keys()
     mapped_tests = [p for g in real_tree.groups for p in g.tests]
     assert len(mapped_tests) == len(set(mapped_tests))
-    # Registry-only control test is intentionally broad-verified until protected PR #160 activates.
-    assert {p for p in real_tree.files if p.startswith("tests/test_") and p.endswith(".py")} - {"tests/test_ef02_mt01_registry.py"} <= set(mapped_tests)
+    # Registry-only control test and A13 suite are intentionally broad-verified until companion registration activates.
+    assert {p for p in real_tree.files if p.startswith("tests/test_") and not p.startswith("tests/test_a13_") and p.endswith(".py")} - {"tests/test_ef02_mt01_registry.py"} <= set(mapped_tests)
     assert "src/ai_commerce/opportunity/trends/tests/test_m02.py" in mapped_tests
     assert {f"a{n:02}" for n in range(2, 13)} <= {g.name for g in real_tree.groups}
 
