@@ -19,6 +19,21 @@ from ai_commerce.remote.worker import LocalBatchWorker
 BASE = "a" * 40
 
 
+@pytest.fixture(autouse=True)
+def clean_checkout_for_fault_injection_fixtures(monkeypatch):
+    """These fake transport tests simulate checkout without a real Git worktree.
+
+    Keep their fault assertions intact. Real checkout failures are covered by
+    test_git_byte_consistency against an actual Git repository.
+    """
+    monkeypatch.setattr("ai_commerce.remote.worker.inspect_fresh_checkout",
+                        lambda _repo, sha, **_kw: {
+                            "clean": True, "expected_sha": sha, "actual_sha": sha,
+                            "error_code": None, "porcelain_entries": [],
+                            "porcelain_entry_count": 0,
+                        })
+
+
 def _action():
     return {
         "action_id": "fault-probe",
