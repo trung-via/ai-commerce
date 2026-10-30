@@ -1,0 +1,21 @@
+{
+  "argv": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_a12_snapshot.py",
+    "-q"
+  ],
+  "exit_code": 0,
+  "python": "3.14.7 (tags/v3.14.7:823f032, Aug  5 2026, 10:51:32) [MSC v.1944 64 bit (AMD64)]",
+  "platform": "Windows-11-10.0.26300-SP0",
+  "source_base_sha": "36d1290e068342747bf0953010581d0e9cb934ab",
+  "tested_file_sha256": {
+    "src/ai_commerce/product/files.py": "21076a5ab2221c7eb7825570f759b9cf53c3a14572a56f4811d9d0dfdebeb45e",
+    "tests/test_a12_snapshot.py": "935f98b3409ac1308ff15151b78746002eab34dd454b42079ebcc7894aabaf85"
+  },
+  "logs": {
+    "stdout": "b526a6fb2a8e9f90373f1e484a0b901a80d5370748be2c88de6f172733df9172",
+    "stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

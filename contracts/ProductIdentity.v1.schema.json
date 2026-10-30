@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-commerce:ProductIdentity:v1",
+  "title": "ProductIdentity.v1",
+  "description": "A12 offline source assertions, never independent verification, live offers or rights. Content ID is the prefixed SHA256 of canonical UTF-8 JSON excluding its own ID. Snapshot validation additionally requires exact raw bytes and deterministic replay.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "ProductIdentity.v1"
+    },
+    "identity_id": {
+      "type": "string",
+      "pattern": "^a12-identity-[a-f0-9]{64}$"
+    },
+    "source_status": {
+      "const": "USER_SUPPLIED_NOT_LIVE_VERIFIED"
+    },
+    "identity_status": {
+      "const": "SOURCE_SCOPED_ASSERTION"
+    },
+    "marketplace": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^(?![\\s\\S]*[\\x00-\\x1f\\x7f])\\S(?:.*\\S)?$"
+    },
+    "asserted_keys": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "seller": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^(?![\\s\\S]*[\\x00-\\x1f\\x7f])\\S(?:.*\\S)?$"
+        },
+        "listing": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^(?![\\s\\S]*[\\x00-\\x1f\\x7f])\\S(?:.*\\S)?$"
+        },
+        "product": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^(?![\\s\\S]*[\\x00-\\x1f\\x7f])\\S(?:.*\\S)?$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "seller",
+        "listing",
+        "product"
+      ]
+    },
+    "seller_id": {
+      "type": "string",
+      "pattern": "^a12-seller-[a-f0-9]{64}$"
+    },
+    "listing_id": {
+      "type": "string",
+      "pattern": "^a12-listing-[a-f0-9]{64}$"
+    },
+    "product_id": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^a12-product-[a-f0-9]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "canonical_product_id": {
+      "type": "null"
+    }
+  },
+  "required": [
+    "schema_version",
+    "identity_id",
+    "source_status",
+    "identity_status",
+    "marketplace",
+    "asserted_keys",
+    "seller_id",
+    "listing_id",
+    "product_id",
+    "canonical_product_id"
+  ]
+}
