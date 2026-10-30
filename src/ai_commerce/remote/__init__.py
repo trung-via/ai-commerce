@@ -16,6 +16,7 @@ from .trusted_origin import (
     OriginAuthority,
     OriginError,
 )
+from .github_artifact_authority import GitHubRestArtifactAuthority
 from .wake_adapter import (
     ArtifactAuthority,
     DurableIdempotencyStore,
@@ -35,6 +36,7 @@ __all__ = [
     "DurableIdempotencyStore",
     "FINAL_ACTION_STATUSES",
     "GitHubArtifactProvenance",
+    "GitHubRestArtifactAuthority",
     "LocalCallerAttestation",
     "LocalCdpWakeAdapter",
     "LocalOriginRegistrar",
