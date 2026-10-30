@@ -1,0 +1,23 @@
+name: "A12-03 composed candidate CRLF v2 preflight (no model)"
+on:
+  push:
+    branches:
+      - probe/a12-03-source-clean-windows-v2-20261030
+    paths:
+      - .github/workflows/ef02-a12-03-v2-preflight.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  preflight:
+    runs-on: [self-hosted, Windows, ai-commerce-ef02]
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify clean candidate after attrs-only repair
+        shell: pwsh
+        run: |
+          ./scripts/EF02-A12-Worktree-Preflight.ps1 -SourceSha ${{ github.sha }}
