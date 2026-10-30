@@ -241,7 +241,11 @@ class HandoffStore:
     @contextmanager
     def locked(self, *, wait_seconds=5):
         principal = self._permissions()
-        with self.state.locked(wait_seconds=wait_seconds) as transaction:
+        # The private directory's owner was independently authenticated above.
+        # New lock/state files must use that exact SID even with elevated Windows
+        # tokens, without ever repairing or trusting an existing wrong owner.
+        with self.state.locked(wait_seconds=wait_seconds,
+                new_file_owner_sid=principal if os.name == "nt" else None) as transaction:
             if self._permissions() != principal:
                 raise HandoffBlocked("HANDOFF_OWNER_MISMATCH")
             record = transaction.read({})
