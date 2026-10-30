@@ -164,7 +164,12 @@ def verify_provenance(
         elif ra.get("candidate_sha") is not None:
             raise ProvenanceError("ACTIONS_MISMATCH")
 
-    expected_succeeded = sum(a.get("status") == "CANDIDATE_READY" for a in event_actions)
+    from .candidate_policy import candidate_accepted, has_scope_review
+    for ra, ea in zip(result_actions, event_actions):
+        if (candidate_accepted(ra) != candidate_accepted(ea) or has_scope_review(ra) != has_scope_review(ea) or
+                any(ra.get(key) != ea.get(key) for key in ("review_required", "candidate_evidence_sha256"))):
+            raise ProvenanceError("ACTIONS_REVIEW_METADATA_MISMATCH")
+    expected_succeeded = sum(candidate_accepted(a) for a in event_actions)
     if (type(batch_result.get("total")) is not int or type(batch_result.get("succeeded")) is not int or
             batch_result["total"] != len(event_actions) or batch_result["succeeded"] != expected_succeeded):
         raise ProvenanceError("BATCH_RESULT_AGGREGATE_MISMATCH")

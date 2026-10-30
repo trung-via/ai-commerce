@@ -1,0 +1,454 @@
+{
+  "source_sha": "6601881e7b498ae139fbe8a8f04c195905b15ed3",
+  "old_candidate": {
+    "sha": "fd947bf6740279b68ce5f1212322eb3e18c351e9",
+    "ref": "refs/heads/ef02/candidate/05fa5a560714076a0d78dc7ef07ee47b",
+    "source_sha": "182d7471332c781e4dacdcbff3d6bcdff50b4e36",
+    "run_id": 41083207739,
+    "reported_status": "CANDIDATE_READY",
+    "diff_file_count": 21
+  },
+  "status": "LOCAL_FULL_SUITE_FAILED_DISPOSABLE_GIT_INIT_EF01_PARENT_REQUIRED",
+  "registered_verification": "PENDING_EF01_PARENT_ON_FINAL_BYTES",
+  "candidate_sha": null,
+  "candidate_ref": null,
+  "publication_authority": "EF02_WORKER_ONLY_CREATE_ONLY_IMMUTABLE_CANDIDATE",
+  "merge_authority": "HUMAN_ONLY_AFTER_HOSTED_PR_CI_ON_INTEGRATED_BRANCH",
+  "no_git_ref_head_config_or_protected_file_writes": true,
+  "historical_verification_record_transplanted": false,
+  "reconciliation": {
+    "manual_conflicts": [
+      "src/ai_commerce/engineering/runner.py: invocation defaults",
+      "src/ai_commerce/engineering/runner.py: final report field propagation"
+    ],
+    "preserved_main_features": [
+      "PR #148 Chrome CDP acquisition ownership/handshake gates",
+      "PR #155 Antigravity diagnostics, disposable input/repair context, interrupted-outcome classification, preflight"
+    ],
+    "new_regressions": "tests/test_ef02_scope_main_integration.py"
+  },
+  "local_runs": [
+    {
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "tests/test_ef02_scope_main_integration.py",
+        "tests/test_ef02_candidate_integrity.py",
+        "tests/test_ef02_d5_chrome_acquisition.py",
+        "tests/test_ef02_cdp_doorbell.py",
+        "tests/test_ef02_wake_d1.py",
+        "tests/test_ef01_agy_diagnostics.py",
+        "tests/test_ef02_authoring_preflight.py",
+        "tests/test_ef01_repair.py",
+        "tests/test_ef01_ef02_integrity.py",
+        "tests/test_ef02.py",
+        "tests/test_ef02_m0r_fault_injection.py",
+        "tests/test_minimum_test.py",
+        "tests/test_ef01_git_write_guard.py",
+        "tests/test_git_byte_consistency.py",
+        "-q",
+        "-n",
+        "12"
+      ],
+      "exit_code": 1,
+      "seconds": 35.9,
+      "log": "docs\\engineering\\EF02_SCOPE_INTEGRATION_VERIFY_2026-10-31.round1-targeted.log",
+      "log_sha256": "df26aba4dd519de268abeb68954c942e11a037b609ee539cbb3ed1a6c859504e",
+      "summary": "25 failed, 403 passed in 35.14s",
+      "failure_ids": [
+        "tests/test_ef01_repair.py::test_ef02_remote_uncertainty_or_publication_failure_never_replays[git-checkpoint]",
+        "tests/test_ef01_repair.py::test_ef02_remote_uncertainty_or_publication_failure_never_replays[git-publication]",
+        "tests/test_ef02_scope_main_integration.py::test_agy_denial_with_ordinary_drift_still_stops_before_verify[stdout]",
+        "tests/test_ef02_scope_main_integration.py::test_agy_denial_with_ordinary_drift_still_stops_before_verify[stderr]",
+        "tests/test_ef01_ef02_integrity.py::test_staged_git_rename_reports_old_and_new_paths",
+        "tests/test_ef01_repair.py::test_independent_siblings_repair_in_distinct_worktrees_and_block_only_failed_dag[git]",
+        "tests/test_ef01_repair.py::test_ef02_exhaustion_never_publishes_candidate[git-0]",
+        "tests/test_ef01_ef02_integrity.py::test_verify_undoes_change_cannot_be_ef01_pass",
+        "tests/test_ef01_repair.py::test_ef02_single_claim_two_invocations_one_candidate_and_mapping[git]",
+        "tests/test_ef01_repair.py::test_ef02_exhaustion_never_publishes_candidate[git-1]",
+        "tests/test_ef01_ef02_integrity.py::test_candidate_rename_deletes_original_and_adds_destination",
+        "tests/test_ef01_git_write_guard.py::test_scoped_hooks_allow_independent_fixture_but_protect_linked_worktree",
+        "tests/test_ef01_repair.py::test_repaired_sibling_candidates_unblock_dag_with_pinned_dependency_results[git]",
+        "tests/test_ef01_git_write_guard.py::test_both_executors_get_guard_and_can_still_edit_code[codex]",
+        "tests/test_git_byte_consistency.py::test_crlf_autotext_candidate_rejected_even_for_renamed_txt",
+        "tests/test_git_byte_consistency.py::test_candidate_filters_skip_deletions_and_reject_unsafe_paths",
+        "tests/test_git_byte_consistency.py::test_git_filter_mismatch_fails_before_remote_publish",
+        "tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args3]",
+        "tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args1]",
+        "tests/test_git_byte_consistency.py::test_transport_rejects_filter_mismatch_before_any_remote_api_write",
+        "tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args0]",
+        "tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args2]",
+        "tests/test_git_byte_consistency.py::test_crlf_json_published_as_raw_blob_checks_out_clean",
+        "tests/test_git_byte_consistency.py::test_real_dirty_worktree_stays_blocked_after_metadata_refresh",
+        "tests/test_ef01_git_write_guard.py::test_both_executors_get_guard_and_can_still_edit_code[antigravity]"
+      ],
+      "failure_details": [
+        "FAILED tests/test_ef01_repair.py::test_ef02_remote_uncertainty_or_publication_failure_never_replays[git-checkpoint] - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{a6f06ed5-ab25-45a9-9ef8-fa9a23b8e912}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw4\\\\test_ef02_remote_uncertainty_o0\\\\source', 'init', '-q']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_repair.py::test_ef02_remote_uncertainty_or_publication_failure_never_replays[git-publication] - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{a6f06ed5-ab25-45a9-9ef8-fa9a23b8e912}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw4\\\\test_ef02_remote_uncertainty_o1\\\\source', 'init', '-q']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef02_scope_main_integration.py::test_agy_denial_with_ordinary_drift_still_stops_before_verify[stdout] - AssertionError: assert ('EXECUTOR_FAILED' == 'EXECUTOR_PERMISSION_DENIED'",
+        "FAILED tests/test_ef02_scope_main_integration.py::test_agy_denial_with_ordinary_drift_still_stops_before_verify[stderr] - AssertionError: assert ('EXECUTOR_FAILED' == 'EXECUTOR_PERMISSION_DENIED'",
+        "FAILED tests/test_ef01_ef02_integrity.py::test_staged_git_rename_reports_old_and_new_paths - subprocess.CalledProcessError: Command '['git', 'init', '-q', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{a6f06ed5-ab25-45a9-9ef8-fa9a23b8e912}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw7\\\\test_staged_git_rename_reports0\\\\repo']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_repair.py::test_independent_siblings_repair_in_distinct_worktrees_and_block_only_failed_dag[git] - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{a6f06ed5-ab25-45a9-9ef8-fa9a23b8e912}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw4\\\\test_independent_siblings_repa1\\\\source', 'init', '-q']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_repair.py::test_ef02_exhaustion_never_publishes_candidate[git-0] - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{a6f06ed5-ab25-45a9-9ef8-fa9a23b8e912}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw11\\\\test_ef02_exhaustion_never_pub2\\\\source', 'init', '-q']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_ef02_integrity.py::test_verify_undoes_change_cannot_be_ef01_pass - subprocess.CalledProcessError: Command '['git', 'init', '-q', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{a6f06ed5-ab25-45a9-9ef8-fa9a23b8e912}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw7\\\\test_verify_undoes_change_cann0\\\\repo']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_repair.py::test_ef02_single_claim_two_invocations_one_candidate_and_mapping[git] - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{a6f06ed5-ab25-45a9-9ef8-fa9a23b8e912}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw9\\\\test_ef02_single_claim_two_inv1\\\\source', 'init', '-q']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_repair.py::test_ef02_exhaustion_never_publishes_candidate[git-1] - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{a6f06ed5-ab25-45a9-9ef8-fa9a23b8e912}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw11\\\\test_ef02_exhaustion_never_pub3\\\\source', 'init', '-q']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_ef02_integrity.py::test_candidate_rename_deletes_original_and_adds_destination - subprocess.CalledProcessError: Command '['git', 'init', '-q', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{a6f06ed5-ab25-45a9-9ef8-fa9a23b8e912}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw5\\\\test_candidate_rename_deletes_0\\\\repo']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_git_write_guard.py::test_scoped_hooks_allow_independent_fixture_but_protect_linked_worktree - assert 128 == 0",
+        "FAILED tests/test_ef01_repair.py::test_repaired_sibling_candidates_unblock_dag_with_pinned_dependency_results[git] - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{a6f06ed5-ab25-45a9-9ef8-fa9a23b8e912}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw4\\\\test_repaired_sibling_candidat1\\\\source', 'init', '-q']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_git_write_guard.py::test_both_executors_get_guard_and_can_still_edit_code[codex] - assert 128 == 0",
+        "FAILED tests/test_git_byte_consistency.py::test_crlf_autotext_candidate_rejected_even_for_renamed_txt - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{a6f06ed5-ab25-45a9-9ef8-fa9a23b8e912}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw4\\\\test_crlf_autotext_candidate_r0\\\\source', 'init']' returned non-zero exit status 128.",
+        "FAILED tests/test_git_byte_consistency.py::test_candidate_filters_skip_deletions_and_reject_unsafe_paths - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{a6f06ed5-ab25-45a9-9ef8-fa9a23b8e912}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw1\\\\test_candidate_filters_skip_de0\\\\source', 'init']' returned non-zero exit status 128.",
+        "FAILED tests/test_git_byte_consistency.py::test_git_filter_mismatch_fails_before_remote_publish - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{a6f06ed5-ab25-45a9-9ef8-fa9a23b8e912}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw7\\\\test_git_filter_mismatch_fails0\\\\source', 'init']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args3] - assert 128 == 0",
+        "FAILED tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args1] - assert 128 == 0",
+        "FAILED tests/test_git_byte_consistency.py::test_transport_rejects_filter_mismatch_before_any_remote_api_write - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{a6f06ed5-ab25-45a9-9ef8-fa9a23b8e912}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw1\\\\test_transport_rejects_filter_0\\\\source', 'init']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args0] - assert 128 == 0",
+        "FAILED tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args2] - assert 128 == 0",
+        "FAILED tests/test_git_byte_consistency.py::test_crlf_json_published_as_raw_blob_checks_out_clean - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{a6f06ed5-ab25-45a9-9ef8-fa9a23b8e912}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw9\\\\test_crlf_json_published_as_ra0\\\\source', 'init']' returned non-zero exit status 128.",
+        "FAILED tests/test_git_byte_consistency.py::test_real_dirty_worktree_stays_blocked_after_metadata_refresh - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{a6f06ed5-ab25-45a9-9ef8-fa9a23b8e912}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw11\\\\test_real_dirty_worktree_stays0\\\\source', 'init']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_git_write_guard.py::test_both_executors_get_guard_and_can_still_edit_code[antigravity] - assert 128 == 0"
+      ],
+      "observed_counts": {
+        "passed": 403,
+        "failed": 25,
+        "skipped": 0
+      },
+      "seconds_pytest": 35.14
+    },
+    {
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "tests/test_ef02_scope_main_integration.py",
+        "tests/test_ef02_candidate_integrity.py",
+        "tests/test_ef02_d5_chrome_acquisition.py",
+        "tests/test_ef02_cdp_doorbell.py",
+        "tests/test_ef02_wake_d1.py",
+        "tests/test_ef01_agy_diagnostics.py",
+        "tests/test_ef02_authoring_preflight.py",
+        "-q",
+        "-n",
+        "12"
+      ],
+      "exit_code": 0,
+      "seconds": 15.84,
+      "log": "docs\\engineering\\EF02_SCOPE_INTEGRATION_VERIFY_2026-10-31.round2-targeted.log",
+      "log_sha256": "8bcc9d9a7dfe7b5205b3c07ca956027ad7159cd512f79fde700ebda8fa5551ef",
+      "summary": "187 passed in 15.05s",
+      "failure_ids": [],
+      "failure_details": [],
+      "observed_counts": {
+        "passed": 187,
+        "failed": 0,
+        "skipped": 0
+      },
+      "seconds_pytest": 15.05
+    },
+    {
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "tests",
+        "-q",
+        "-n",
+        "12"
+      ],
+      "exit_code": 1,
+      "seconds": 247.7,
+      "log": "docs\\engineering\\EF02_SCOPE_INTEGRATION_VERIFY_2026-10-31.full.log",
+      "log_sha256": "320591bd95029071568463d9b5d47c3ac7c17c4f1ecf3e397b5bdcd1e882271b",
+      "summary": "36 failed, 2811 passed, 21 skipped in 246.75s (0:04:06)",
+      "source_bytes_unchanged_during_full_run": true,
+      "failure_ids": [
+        "tests/test_ef01_git_write_guard.py::test_scoped_hooks_allow_independent_fixture_but_protect_linked_worktree",
+        "tests/test_ef01.py::test_both_executor_subprocesses_and_normalized_result[codex]",
+        "tests/test_ef01_git_write_guard.py::test_both_executors_get_guard_and_can_still_edit_code[codex]",
+        "tests/test_ef01.py::test_both_executor_subprocesses_and_normalized_result[antigravity]",
+        "tests/test_ef01_git_write_guard.py::test_both_executors_get_guard_and_can_still_edit_code[antigravity]",
+        "tests/test_ef01_ef02_integrity.py::test_staged_git_rename_reports_old_and_new_paths",
+        "tests/test_ef01.py::test_missing_binary_returns_non_pass_and_no_verification",
+        "tests/test_ef01_ef02_integrity.py::test_verify_undoes_change_cannot_be_ef01_pass",
+        "tests/test_ef01.py::test_scope_violation_cannot_pass",
+        "tests/test_ef01_ef02_integrity.py::test_candidate_rename_deletes_original_and_adds_destination",
+        "tests/test_ef01.py::test_dirty_worktree_rejected",
+        "tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args0]",
+        "tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args1]",
+        "tests/test_ef01.py::test_cli_full_path_negative_missing_binary",
+        "tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args2]",
+        "tests/test_ef01.py::test_verify_out_of_scope_mutation_is_failure",
+        "tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args3]",
+        "tests/test_ef01.py::test_cli_accepts_windows_utf8_bom_verify_json",
+        "tests/test_ef01.py::test_agy_headless_soft_denial_is_explicit_nonpass",
+        "tests/test_ef01.py::test_agy_headless_denied_actions_are_not_ignored_even_after_write",
+        "tests/test_ef01.py::test_real_mock_executor_timeout_is_unknown_and_no_verification",
+        "tests/test_ef01.py::test_parent_lost_around_provider_boundary_remains_unknown",
+        "tests/test_ef01_repair.py::test_ef02_single_claim_two_invocations_one_candidate_and_mapping[git]",
+        "tests/test_ef01_repair.py::test_ef02_exhaustion_never_publishes_candidate[git-0]",
+        "tests/test_ef01_repair.py::test_ef02_exhaustion_never_publishes_candidate[git-1]",
+        "tests/test_ef01.py::test_agy_ef01_passes_attempt_evidence_scope_to_adapter",
+        "tests/test_ef01_repair.py::test_ef02_remote_uncertainty_or_publication_failure_never_replays[git-checkpoint]",
+        "tests/test_ef01_repair.py::test_ef02_remote_uncertainty_or_publication_failure_never_replays[git-publication]",
+        "tests/test_ef01_repair.py::test_independent_siblings_repair_in_distinct_worktrees_and_block_only_failed_dag[git]",
+        "tests/test_ef01_repair.py::test_repaired_sibling_candidates_unblock_dag_with_pinned_dependency_results[git]",
+        "tests/test_git_byte_consistency.py::test_crlf_json_published_as_raw_blob_checks_out_clean",
+        "tests/test_git_byte_consistency.py::test_git_filter_mismatch_fails_before_remote_publish",
+        "tests/test_git_byte_consistency.py::test_crlf_autotext_candidate_rejected_even_for_renamed_txt",
+        "tests/test_git_byte_consistency.py::test_real_dirty_worktree_stays_blocked_after_metadata_refresh",
+        "tests/test_git_byte_consistency.py::test_candidate_filters_skip_deletions_and_reject_unsafe_paths",
+        "tests/test_git_byte_consistency.py::test_transport_rejects_filter_mismatch_before_any_remote_api_write"
+      ],
+      "failure_details": [
+        "FAILED tests/test_ef01_git_write_guard.py::test_scoped_hooks_allow_independent_fixture_but_protect_linked_worktree - assert 128 == 0",
+        "FAILED tests/test_ef01.py::test_both_executor_subprocesses_and_normalized_result[codex] - subprocess.CalledProcessError: Command '['git', 'init', '-q', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw8\\\\test_both_executor_subprocesse0\\\\repo']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_git_write_guard.py::test_both_executors_get_guard_and_can_still_edit_code[codex] - assert 128 == 0",
+        "FAILED tests/test_ef01.py::test_both_executor_subprocesses_and_normalized_result[antigravity] - subprocess.CalledProcessError: Command '['git', 'init', '-q', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw8\\\\test_both_executor_subprocesse1\\\\repo']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_git_write_guard.py::test_both_executors_get_guard_and_can_still_edit_code[antigravity] - assert 128 == 0",
+        "FAILED tests/test_ef01_ef02_integrity.py::test_staged_git_rename_reports_old_and_new_paths - subprocess.CalledProcessError: Command '['git', 'init', '-q', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw5\\\\test_staged_git_rename_reports0\\\\repo']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01.py::test_missing_binary_returns_non_pass_and_no_verification - subprocess.CalledProcessError: Command '['git', 'init', '-q', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw8\\\\test_missing_binary_returns_no0\\\\repo']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_ef02_integrity.py::test_verify_undoes_change_cannot_be_ef01_pass - subprocess.CalledProcessError: Command '['git', 'init', '-q', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw5\\\\test_verify_undoes_change_cann0\\\\repo']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01.py::test_scope_violation_cannot_pass - subprocess.CalledProcessError: Command '['git', 'init', '-q', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw8\\\\test_scope_violation_cannot_pa0\\\\repo']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_ef02_integrity.py::test_candidate_rename_deletes_original_and_adds_destination - subprocess.CalledProcessError: Command '['git', 'init', '-q', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw5\\\\test_candidate_rename_deletes_0\\\\repo']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01.py::test_dirty_worktree_rejected - subprocess.CalledProcessError: Command '['git', 'init', '-q', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw8\\\\test_dirty_worktree_rejected0\\\\repo']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args0] - assert 128 == 0",
+        "FAILED tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args1] - assert 128 == 0",
+        "FAILED tests/test_ef01.py::test_cli_full_path_negative_missing_binary - subprocess.CalledProcessError: Command '['git', 'init', '-q', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw8\\\\test_cli_full_path_negative_mi0\\\\repo']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args2] - assert 128 == 0",
+        "FAILED tests/test_ef01.py::test_verify_out_of_scope_mutation_is_failure - subprocess.CalledProcessError: Command '['git', 'init', '-q', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw8\\\\test_verify_out_of_scope_mutat0\\\\repo']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_git_write_guard.py::test_executor_hooks_block_ref_writes_without_changing_head[args3] - assert 128 == 0",
+        "FAILED tests/test_ef01.py::test_cli_accepts_windows_utf8_bom_verify_json - subprocess.CalledProcessError: Command '['git', 'init', '-q', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw8\\\\test_cli_accepts_windows_utf8_0\\\\repo']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01.py::test_agy_headless_soft_denial_is_explicit_nonpass - subprocess.CalledProcessError: Command '['git', 'init', '-q', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw8\\\\test_agy_headless_soft_denial_0\\\\repo']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01.py::test_agy_headless_denied_actions_are_not_ignored_even_after_write - subprocess.CalledProcessError: Command '['git', 'init', '-q', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw8\\\\test_agy_headless_denied_actio0\\\\repo']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01.py::test_real_mock_executor_timeout_is_unknown_and_no_verification - subprocess.CalledProcessError: Command '['git', 'init', '-q', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw8\\\\test_real_mock_executor_timeou0\\\\repo']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01.py::test_parent_lost_around_provider_boundary_remains_unknown - subprocess.CalledProcessError: Command '['git', 'init', '-q', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw8\\\\test_parent_lost_around_provid0\\\\repo']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_repair.py::test_ef02_single_claim_two_invocations_one_candidate_and_mapping[git] - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw6\\\\test_ef02_single_claim_two_inv1\\\\source', 'init', '-q']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_repair.py::test_ef02_exhaustion_never_publishes_candidate[git-0] - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw6\\\\test_ef02_exhaustion_never_pub2\\\\source', 'init', '-q']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_repair.py::test_ef02_exhaustion_never_publishes_candidate[git-1] - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw6\\\\test_ef02_exhaustion_never_pub3\\\\source', 'init', '-q']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01.py::test_agy_ef01_passes_attempt_evidence_scope_to_adapter - subprocess.CalledProcessError: Command '['git', 'init', '-q', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw11\\\\test_agy_ef01_passes_attempt_e0\\\\repo']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_repair.py::test_ef02_remote_uncertainty_or_publication_failure_never_replays[git-checkpoint] - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw6\\\\test_ef02_remote_uncertainty_o2\\\\source', 'init', '-q']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_repair.py::test_ef02_remote_uncertainty_or_publication_failure_never_replays[git-publication] - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw6\\\\test_ef02_remote_uncertainty_o3\\\\source', 'init', '-q']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_repair.py::test_independent_siblings_repair_in_distinct_worktrees_and_block_only_failed_dag[git] - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw6\\\\test_independent_siblings_repa1\\\\source', 'init', '-q']' returned non-zero exit status 128.",
+        "FAILED tests/test_ef01_repair.py::test_repaired_sibling_candidates_unblock_dag_with_pinned_dependency_results[git] - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw6\\\\test_repaired_sibling_candidat1\\\\source', 'init', '-q']' returned non-zero exit status 128.",
+        "FAILED tests/test_git_byte_consistency.py::test_crlf_json_published_as_raw_blob_checks_out_clean - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw11\\\\test_crlf_json_published_as_ra0\\\\source', 'init']' returned non-zero exit status 128.",
+        "FAILED tests/test_git_byte_consistency.py::test_git_filter_mismatch_fails_before_remote_publish - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw5\\\\test_git_filter_mismatch_fails0\\\\source', 'init']' returned non-zero exit status 128.",
+        "FAILED tests/test_git_byte_consistency.py::test_crlf_autotext_candidate_rejected_even_for_renamed_txt - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw11\\\\test_crlf_autotext_candidate_r0\\\\source', 'init']' returned non-zero exit status 128.",
+        "FAILED tests/test_git_byte_consistency.py::test_real_dirty_worktree_stays_blocked_after_metadata_refresh - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw1\\\\test_real_dirty_worktree_stays0\\\\source', 'init']' returned non-zero exit status 128.",
+        "FAILED tests/test_git_byte_consistency.py::test_candidate_filters_skip_deletions_and_reject_unsafe_paths - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw1\\\\test_candidate_filters_skip_de0\\\\source', 'init']' returned non-zero exit status 128.",
+        "FAILED tests/test_git_byte_consistency.py::test_transport_rejects_filter_mismatch_before_any_remote_api_write - subprocess.CalledProcessError: Command '['git', '-C', 'C:\\\\Users\\\\TRUNG\\\\AppData\\\\Local\\\\Packages\\\\sandbox.{ea02a228-a7ad-4e2e-9800-784fc2befaa8}\\\\AC\\\\Temp\\\\pytest-of-TRUNG\\\\pytest-0\\\\popen-gw0\\\\test_transport_rejects_filter_0\\\\source', 'init']' returned non-zero exit status 128."
+      ],
+      "observed_counts": {
+        "passed": 2811,
+        "failed": 36,
+        "skipped": 21
+      },
+      "seconds_pytest": 246.75
+    }
+  ],
+  "verification_rounds_used": 2,
+  "test_fixture_repairs_used": 1,
+  "full_runs_used": 1,
+  "repeat_disposition": "No identical full retry: disposable git-init precondition unchanged; no guard/environment bypass",
+  "failure_diagnosis": {
+    "phase": "DISPOSABLE_GIT_FIXTURE_INIT",
+    "full_failure_count": 36,
+    "direct_subprocess_errors": 29,
+    "setup_assertions": 7,
+    "git_exit_code": 128,
+    "diagnostic": "Git Bash NtCreateDirectoryObject(\\BaseNamedObjects\\msys-2.0S5-1888ae32e00d56aa): 0xC0000022; reference-transaction hook preparing phase aborted",
+    "not_a_production_code_fix": "EF01 parent verification is required in a supported environment"
+  },
+  "test_fixture_fix": {
+    "path": "tests/test_ef02_scope_main_integration.py",
+    "change": "Insert missing statement separator before appended synthetic denial event",
+    "production_changes_after_first_test_run": false
+  },
+  "preservation": {
+    "original_feature_hunks": {
+      "contracts/RemoteCandidateEvidence.v1.schema.json": "EXACT_ORIGINAL_FEATURE_HUNKS",
+      "src/ai_commerce/engineering/cli.py": "EXACT_ORIGINAL_FEATURE_HUNKS",
+      "src/ai_commerce/engineering/source_safety.py": "EXACT_ORIGINAL_FEATURE_HUNKS",
+      "src/ai_commerce/remote/candidate_policy.py": "EXACT_ORIGINAL_FEATURE_HUNKS",
+      "src/ai_commerce/remote/completion_event.py": "EXACT_ORIGINAL_FEATURE_HUNKS",
+      "src/ai_commerce/remote/reuse.py": "EXACT_ORIGINAL_FEATURE_HUNKS",
+      "src/ai_commerce/remote/scheduler.py": "EXACT_ORIGINAL_FEATURE_HUNKS",
+      "src/ai_commerce/remote/transport.py": "EXACT_ORIGINAL_FEATURE_HUNKS",
+      "src/ai_commerce/remote/wake_adapter.py": "EXACT_ORIGINAL_FEATURE_HUNKS",
+      "src/ai_commerce/remote/worker.py": "EXACT_ORIGINAL_FEATURE_HUNKS",
+      "tests/test_ef01_ef02_integrity.py": "EXACT_ORIGINAL_FEATURE_HUNKS",
+      "tests/test_ef01_repair.py": "EXACT_ORIGINAL_FEATURE_HUNKS",
+      "tests/test_ef02.py": "EXACT_ORIGINAL_FEATURE_HUNKS",
+      "tests/test_ef02_candidate_integrity.py": "EXACT_ORIGINAL_FEATURE_HUNKS",
+      "tests/test_ef02_m0r_fault_injection.py": "EXACT_ORIGINAL_FEATURE_HUNKS"
+    },
+    "main_diagnostic_and_repair_functions_ast_unchanged": {
+      "_headless_denied_actions": true,
+      "_headless_denial_diagnostics": true,
+      "_provider_test_observations": true,
+      "_failure_provenance": true,
+      "_repair_prompt": true
+    },
+    "other_main_PR148_PR155_paths_unchanged": {
+      "docs/engineering/EF02_ANTIGRAVITY_REMAINING_ROOT_CAUSES.md": true,
+      "docs/engineering/EF02_D5_CHROME_ACQUISITION.md": true,
+      "scripts/EF02-Authoring-Preflight.py": true,
+      "src/ai_commerce/remote/authoring_preflight.py": true,
+      "src/ai_commerce/remote/chrome_acquisition.py": true,
+      "src/ai_commerce/remote/validation.py": true,
+      "tests/test_ef01_agy_diagnostics.py": true,
+      "tests/test_ef02_authoring_preflight.py": true,
+      "tests/test_ef02_d5_chrome_acquisition.py": true
+    }
+  },
+  "post_test_changes": {
+    "paths": [
+      "docs/engineering/EF02_SCOPE_PUBLISH_IMPLEMENTATION_2026-10-30.md",
+      "docs/engineering/EF02_SCOPE_INTEGRATION_VERIFY_2026-10-31.json"
+    ],
+    "reason": "Finalize observed evidence and documentation",
+    "source_and_tests_unchanged": true,
+    "registered_verification_required_on_final_bytes": true
+  },
+  "raw_log_retention": "Ignored ordinary worktree .log files retained locally; not part of candidate source manifest. Embedded summaries, failure IDs/details and log digests survive in this record. EF01 must retain its own registered raw logs.",
+  "final_integrity": {
+    "source_head": "6601881e7b498ae139fbe8a8f04c195905b15ed3",
+    "changed_files": [
+      "contracts/RemoteCandidateEvidence.v1.schema.json",
+      "docs/engineering/EF01R_VERIFY_FIRST_SCOPE_RECONCILE_2026-10-29.md",
+      "docs/engineering/EF02_D1_COMPLETION_AND_BINDING.md",
+      "docs/engineering/EF02_SCOPE_INTEGRATION_VERIFY_2026-10-31.json",
+      "docs/engineering/EF02_SCOPE_PUBLISH_IMPLEMENTATION_2026-10-30.md",
+      "docs/governance/HUMAN_DECISION_2026-10-30_CANDIDATE_SCOPE_REVIEW.md",
+      "src/ai_commerce/engineering/cli.py",
+      "src/ai_commerce/engineering/runner.py",
+      "src/ai_commerce/engineering/source_safety.py",
+      "src/ai_commerce/remote/candidate_policy.py",
+      "src/ai_commerce/remote/completion_event.py",
+      "src/ai_commerce/remote/reuse.py",
+      "src/ai_commerce/remote/scheduler.py",
+      "src/ai_commerce/remote/transport.py",
+      "src/ai_commerce/remote/wake_adapter.py",
+      "src/ai_commerce/remote/worker.py",
+      "tests/test_ef01_ef02_integrity.py",
+      "tests/test_ef01_repair.py",
+      "tests/test_ef02.py",
+      "tests/test_ef02_candidate_integrity.py",
+      "tests/test_ef02_m0r_fault_injection.py",
+      "tests/test_ef02_scope_main_integration.py"
+    ],
+    "changed_file_count": 22,
+    "protected_changed_paths": false,
+    "diff_check_exit_code": 0,
+    "tracked_diff_sha256": "38dd4c8f64e4a088ced9935a8b236635ef0fb8ed3114eff4c939e4d20413da32",
+    "byte_checks_excluding_self_referential_record": {
+      "contracts/RemoteCandidateEvidence.v1.schema.json": {
+        "sha256": "76fb3f235c2ff431c9e931a653c208c452a09f5d21f9bf4ea1d1619a0ef29d4f",
+        "raw_git_blob": "78ec3d81494298820a94d65153a36eb5881f3745",
+        "clean_git_blob": "78ec3d81494298820a94d65153a36eb5881f3745"
+      },
+      "docs/engineering/EF01R_VERIFY_FIRST_SCOPE_RECONCILE_2026-10-29.md": {
+        "sha256": "43b4c288f661c3c6e6f86e3bc50b07f672b6a1233bfc6687b05e35c33d53ec90",
+        "raw_git_blob": "e5ace9458a15f953fb17ff1fb5ef8d2d2ced31f6",
+        "clean_git_blob": "e5ace9458a15f953fb17ff1fb5ef8d2d2ced31f6"
+      },
+      "docs/engineering/EF02_D1_COMPLETION_AND_BINDING.md": {
+        "sha256": "5e1bf6740b248bfab81f213be8c9f0dc2c1e05fec8910ca2925a79b55fa3f1d2",
+        "raw_git_blob": "d5a9a05be0c5e792b02945a2a65de8d54ad97f95",
+        "clean_git_blob": "d5a9a05be0c5e792b02945a2a65de8d54ad97f95"
+      },
+      "docs/engineering/EF02_SCOPE_PUBLISH_IMPLEMENTATION_2026-10-30.md": {
+        "sha256": "bf2c36ac4c0e402534e7819df643b49b72a4fd8b4b295fb7f99b7b0d17a02540",
+        "raw_git_blob": "1308bc7379d51f798bd9eed173bef47d78f3656f",
+        "clean_git_blob": "1308bc7379d51f798bd9eed173bef47d78f3656f"
+      },
+      "docs/governance/HUMAN_DECISION_2026-10-30_CANDIDATE_SCOPE_REVIEW.md": {
+        "sha256": "0fd63db0392a563387f3610051dbab83e8b9d6ffbdcaaa134cc065f819606f5d",
+        "raw_git_blob": "f6b950d997eb8ab50658eed54bebaab8701a7cbe",
+        "clean_git_blob": "f6b950d997eb8ab50658eed54bebaab8701a7cbe"
+      },
+      "src/ai_commerce/engineering/cli.py": {
+        "sha256": "74a03cb497cf1084c88166861183f4312640cb1cda03772b08e87628e8cc266a",
+        "raw_git_blob": "fe23c48f84d281fa817534c32f29e263cc0ae5b1",
+        "clean_git_blob": "fe23c48f84d281fa817534c32f29e263cc0ae5b1"
+      },
+      "src/ai_commerce/engineering/runner.py": {
+        "sha256": "14635be5370245adbffcbc63c01049b7ee933ddef2778bacbf342947febecaad",
+        "raw_git_blob": "b185aa2c8f2a8c33e1607f110c395eea8bd974cb",
+        "clean_git_blob": "b185aa2c8f2a8c33e1607f110c395eea8bd974cb"
+      },
+      "src/ai_commerce/engineering/source_safety.py": {
+        "sha256": "653649f7184e89f29d115ba2cf77b970346d3d33d1c953c6dbd713a426c8143f",
+        "raw_git_blob": "1be2611fbed7b2f63b821f0faff51a2e97584ba4",
+        "clean_git_blob": "1be2611fbed7b2f63b821f0faff51a2e97584ba4"
+      },
+      "src/ai_commerce/remote/candidate_policy.py": {
+        "sha256": "82d16428eb2153d9b543903629546ad7c926dec8b9f46468ad6222a9fe029c50",
+        "raw_git_blob": "fec941ec4b9d0543b1f55c44e10c85c8971d14b7",
+        "clean_git_blob": "fec941ec4b9d0543b1f55c44e10c85c8971d14b7"
+      },
+      "src/ai_commerce/remote/completion_event.py": {
+        "sha256": "27f438e336ac9ecfd03e19a79641647ad7a40e481a528777c5a7f1fd458ac142",
+        "raw_git_blob": "eef2d812cfcbf66b154bd35bdc1bbaca788f5e5f",
+        "clean_git_blob": "eef2d812cfcbf66b154bd35bdc1bbaca788f5e5f"
+      },
+      "src/ai_commerce/remote/reuse.py": {
+        "sha256": "07170eb180b25759f24f162fa972ab778ddfcb07bdc9fda903b762944b8a6095",
+        "raw_git_blob": "e70d173e3f1ffa7e4f2f86893d75bfff828e7bd8",
+        "clean_git_blob": "e70d173e3f1ffa7e4f2f86893d75bfff828e7bd8"
+      },
+      "src/ai_commerce/remote/scheduler.py": {
+        "sha256": "6c3006f7d3b35eb703fbe1f7721e2083ee6580fe32e95acaa9f05188dc4d3863",
+        "raw_git_blob": "5f92a24f70e9796d1dc74dcba59655dca3c60e15",
+        "clean_git_blob": "5f92a24f70e9796d1dc74dcba59655dca3c60e15"
+      },
+      "src/ai_commerce/remote/transport.py": {
+        "sha256": "a02bb92f46b7342c6b857e631b4a081368355584d163bce133f4985c04d75029",
+        "raw_git_blob": "8255e84fc5af13aad453b53f0ea8772894dc82aa",
+        "clean_git_blob": "8255e84fc5af13aad453b53f0ea8772894dc82aa"
+      },
+      "src/ai_commerce/remote/wake_adapter.py": {
+        "sha256": "da7b135888e5089506c7c349575165f3bca9828e9a5b333b7a662202fda92aae",
+        "raw_git_blob": "00bf798e9088218c40f973891e725d4deb61f671",
+        "clean_git_blob": "00bf798e9088218c40f973891e725d4deb61f671"
+      },
+      "src/ai_commerce/remote/worker.py": {
+        "sha256": "a9446be280f7104fc10e3110e695cce87b150ac0178852228bd8bb756a4de4e7",
+        "raw_git_blob": "bf4804a544cd94e6cfb3ae7abc5dce10571581f1",
+        "clean_git_blob": "bf4804a544cd94e6cfb3ae7abc5dce10571581f1"
+      },
+      "tests/test_ef01_ef02_integrity.py": {
+        "sha256": "ffb3885387bfffacc3a10b2d005f12838300c964cffaab88c5e9a873c4f28c02",
+        "raw_git_blob": "28e0f4fb2ce0fe8652f03536724c2b580c1d3308",
+        "clean_git_blob": "28e0f4fb2ce0fe8652f03536724c2b580c1d3308"
+      },
+      "tests/test_ef01_repair.py": {
+        "sha256": "14dbd393b5daf4f99dfac9fdf9b42ff7187b017ccfda1bb41c67601cc7e408a0",
+        "raw_git_blob": "b8f1abd11417043bc68ee1f35bbd4315ddfa9504",
+        "clean_git_blob": "b8f1abd11417043bc68ee1f35bbd4315ddfa9504"
+      },
+      "tests/test_ef02.py": {
+        "sha256": "3a6ff4fc28f6702c36e16455731fd69fbaf98afbe5251253f90ca77e50b8a351",
+        "raw_git_blob": "c8c6f364e72f9686ac7ec8ea3957a2660aed904c",
+        "clean_git_blob": "c8c6f364e72f9686ac7ec8ea3957a2660aed904c"
+      },
+      "tests/test_ef02_candidate_integrity.py": {
+        "sha256": "abe0e84ef6ec90b7523c5bdcf35f1f80bf80ca17855229e015eb88e7339abdff",
+        "raw_git_blob": "33a4fa5603095a86bee4caaae11e32d9da5a50ed",
+        "clean_git_blob": "33a4fa5603095a86bee4caaae11e32d9da5a50ed"
+      },
+      "tests/test_ef02_m0r_fault_injection.py": {
+        "sha256": "93247cbab79053a301e0e6e5658125743dca3069dd11d931f949726951925f47",
+        "raw_git_blob": "edcd2b099bbe381911d10651d2c92d8648e36241",
+        "clean_git_blob": "edcd2b099bbe381911d10651d2c92d8648e36241"
+      },
+      "tests/test_ef02_scope_main_integration.py": {
+        "sha256": "9b440cdfc14f9ad591df9fd4567fb867f11923bcb22f2549a0dfbda540a75865",
+        "raw_git_blob": "18513761ef87433c5c2b4da4d41c19ce344b9c03",
+        "clean_git_blob": "18513761ef87433c5c2b4da4d41c19ce344b9c03"
+      }
+    },
+    "self_record_hash": "Excluded from embedded manifest to avoid self-reference; final external local manifest and EF01 independently hash all 22 final files"
+  }
+}

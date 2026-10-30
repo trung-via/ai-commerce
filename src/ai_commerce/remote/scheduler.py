@@ -2,6 +2,7 @@
 from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from .candidate_policy import candidate_accepted
 
 def run_schedule(batch: dict, work, *, max_workers: int | None = None) -> dict:
     actions = {a["action_id"]: a for a in batch["actions"]}
@@ -34,7 +35,7 @@ def run_schedule(batch: dict, work, *, max_workers: int | None = None) -> dict:
             progress = False
             for aid in sorted(tuple(pending)):
                 deps = actions[aid]["depends_on"]
-                if any(parent in results and results[parent]["status"] != "CANDIDATE_READY"
+                if any(parent in results and not candidate_accepted(results[parent])
                        for parent in deps):
                     pending.remove(aid)
                     results[aid] = {"action_id": aid, "attempt_id": actions[aid]["attempt_id"],
@@ -43,7 +44,7 @@ def run_schedule(batch: dict, work, *, max_workers: int | None = None) -> dict:
                     progress = True
             ready = sorted(
                 (actions[aid] for aid in pending if all(
-                    p in results and results[p]["status"] == "CANDIDATE_READY"
+                    p in results and candidate_accepted(results[p])
                     for p in actions[aid]["depends_on"])),
                 key=lambda a: (-a.get("priority", 50), a["action_id"])
             )
@@ -71,7 +72,7 @@ def run_schedule(batch: dict, work, *, max_workers: int | None = None) -> dict:
             if not active and pending and not progress:
                 raise RuntimeError("NO_RUNNABLE_ACTIONS")
     ordered = [results[action["action_id"]] for action in batch["actions"]]
-    failed = sum(item["status"] != "CANDIDATE_READY" for item in ordered)
+    failed = sum(not candidate_accepted(item) for item in ordered)
     return {"kind": "AI_COMMERCE_REMOTE_BATCH_RESULT", "version": 1,
             "batch_id": batch["batch_id"], "source_sha": batch["source_sha"],
             "status": "COMPLETE" if failed == 0 else "PARTIAL_OR_FAILED",

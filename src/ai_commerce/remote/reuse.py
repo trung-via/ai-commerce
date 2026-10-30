@@ -4,6 +4,7 @@ import json
 import re
 from pathlib import Path
 from .validation import RemoteRequestError
+from .candidate_policy import has_scope_review
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
 
@@ -18,6 +19,8 @@ def approve_reuse(batch: dict, action: dict, approved: dict) -> dict:
     entry = approved.get("candidates", {}).get(action["attempt_id"])
     if not isinstance(entry, dict):
         raise RemoteRequestError("REUSE_ATTEMPT_NOT_APPROVED")
+    if has_scope_review(entry):
+        raise RemoteRequestError("REUSE_BRAIN_SCOPE_REVIEW_REQUIRED")
     for field in ("action_id", "attempt_id", "executor", "model", "effort",
                   "allowed_paths", "verification_profile", "depends_on"):
         if action.get(field) != entry.get(field):
