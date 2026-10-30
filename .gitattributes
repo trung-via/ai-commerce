@@ -8,3 +8,7 @@
 # GitHub-published EF02 evidence JSON may contain literal CRLF bytes.
 # Preserve raw evidence bytes/hashes; never silently normalize in Git for Windows.
 examples/*/evidence/*.json -text -eol
+
+# EF01-R/Codex verification artifacts are immutable, sometimes native Windows CRLF.
+# Do not re-filter their original Git blob bytes when EF02 checks out a candidate.
+**/repair_evidence/*.json -text -eol
