@@ -283,5 +283,15 @@
     "-q",
     "-n",
     "12"
+  ],
+  "mt01-ef02-scope-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_ef02_candidate_integrity.py",
+    "tests/test_ef02_scope_main_integration.py",
+    "-q",
+    "-n",
+    "12"
   ]
 }
