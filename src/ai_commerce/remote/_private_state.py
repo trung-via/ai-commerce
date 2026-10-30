@@ -167,8 +167,10 @@ class PrivateJsonState:
             raise PrivateStateError(self.label + "_LOCATION_INVALID") from None
 
     @contextmanager
-    def locked(self):
+    def locked(self, *, wait_seconds: float = 5):
         """One OS lock covers the entire read/validate/modify/replace operation."""
+        if type(wait_seconds) not in (int, float) or not 0 <= wait_seconds <= 5:
+            raise PrivateStateError(self.label + "_LOCK_BUDGET_INVALID")
         directories, lock_fd, unlock = [], None, None
         try:
             self._check_location()
@@ -187,7 +189,7 @@ class PrivateJsonState:
             else:
                 raise PrivateStateError("LOCKING_UNSUPPORTED")
             lock_fd = transaction.open(self.path.name + ".lock", os.O_RDWR | os.O_CREAT)
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + wait_seconds
             while True:
                 try:
                     if os.name == "nt":

@@ -1,5 +1,10 @@
 # EF02-D5.3 — Enrolled Issue registration and exact-run local trigger
 
+D5.4 adds an optional pre-enrolled exact-run finite local completion handoff:
+[operator steps, limits and rollback](EF02_D5_4_LOCAL_HANDOFF.md).
+The worker hint is optional and non-authoritative; this D5.3 CLI remains the
+manual fallback. No workflow, scheduler, send gate or browser is activated.
+
 Date: 2026-10-30. D5.3 baseline: merged D5.2 PR #121, source `9ff35b2936c45aeb43811bd4dabd9290ac6a7577`.
 
 ## Authority and operation

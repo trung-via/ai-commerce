@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from .validation import (RemoteRequestError, validate_batch, verify_registry,
                          check_source)
@@ -12,6 +13,7 @@ from .worker import LocalBatchWorker, _write_json
 from .reuse import load_approved_candidates
 from .scheduler import run_schedule
 from .completion_event import build_completion_event
+from .local_completion_handoff import start_worker_signal
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -85,6 +87,7 @@ def main(argv: list[str] | None = None) -> int:
         # D1 is passive only: event emission is not a ChatGPT wake/ack.
         # Keep EF02's executor/feedback outcome independent from wake evidence.
         completion_path = worker.root / "completion_event.json"
+        completed_at = time.time()
         try:
             completion = build_completion_event(
                 report, repository=repo, run_id=int(os.environ.get("GITHUB_RUN_ID", "0")),
@@ -103,6 +106,15 @@ def main(argv: list[str] | None = None) -> int:
             except OSError:
                 report["wake_event_residual"] = "STALE_EVENT_FILE_UNCERTAIN"
         _write_json(result_path, report)
+        # D5.4: optional local hint only AFTER both final files exist. A dropped
+        # hint must not change EF02 feedback, report, exit, or wait for upload.
+        if report["wake_event_status"] == "RECORDED_UNBOUND":
+            try:
+                start_worker_signal(batch=batch, event=completion, report=report,
+                    repository_root=checkout, issuer_login=args.issuer_login,
+                    completed_at=completed_at)
+            except Exception:
+                pass
         print(json.dumps({"batch_id": report["batch_id"], "status": report["status"],
                           "succeeded": report["succeeded"], "total": report["total"],
                           "feedback_status": report["feedback_status"],
