@@ -478,7 +478,7 @@ def test_ef02_fanin_receipt_without_fresh_group_proof_cannot_publish(tmp_path, m
     assert not context.candidates and len(context.calls) == 2 and len(context.claims) == len(context.children) == 1
 
 
-@pytest.mark.parametrize("kind", ["source", "files", "argv", "artifact", "digest"])
+@pytest.mark.parametrize("kind", ["source", "files", "argv", "artifact", "digest", "plan-type", "group-type", "binding-type"])
 def test_ef02_fanin_rejects_tampered_aggregate_fingerprint_before_publish(tmp_path, monkeypatch, kind):
     from test_ef01_repair import _worker_fixture, _action, build_parser, remote
     context = _worker_fixture(tmp_path, monkeypatch, real_git=False)
@@ -498,6 +498,12 @@ def test_ef02_fanin_rejects_tampered_aggregate_fingerprint_before_publish(tmp_pa
                 group["binding"]["argv"] = ["python", "-m", "pytest", "no_tests.py"]
             elif kind == "digest":
                 group["evidence_sha256"] = "0" * 64
+            elif kind == "plan-type":
+                value["minimum_test"] = []
+            elif kind == "group-type":
+                value["minimum_test"]["groups"] = [None]
+            elif kind == "binding-type":
+                group["binding"] = []
             else:
                 artifact = args.out_dir / value["evidence_files"]["mt01_0_evidence"]
                 artifact.write_text("{}")

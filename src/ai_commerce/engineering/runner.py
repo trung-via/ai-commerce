@@ -464,7 +464,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
             raise ValueError("AGY_COMMANDLINE_LIMIT_EXCEEDED")
         save("transport_instruction", "transport_instruction.txt", compact.encode("utf-8"))
     # Hook configuration applies only to the executor; EF02 owns publication.
-    child_env = git_write_guard_env(directory)
+    child_env = git_write_guard_env(directory, repo=repo, git_executable=git_executable or "git")
     budget = _remaining(deadline, timeout_seconds)
     boundary = {
         "kind": "AI_COMMERCE_EF01_PROVIDER_BOUNDARY", "version": 1,
