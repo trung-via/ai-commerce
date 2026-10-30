@@ -659,7 +659,11 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     problem = _source_problem(after, initial, verify_first_scope=verify_first_scope)
     if problem is None and inv["denied_actions"]:
         problem = ("EXECUTOR_PERMISSION_DENIED", "HEADLESS_TOOL_PERMISSION_DENIED")
-    if problem is None and inv["executor_exit_code"] is not None:
+    # Interrupted/abnormal exits are UNKNOWN effects even if a partial provider
+    # event or stderr mentions a determinate-looking quota/capacity error.
+    # Never overwrite EXECUTOR_INTERRUPTED with a recoverable provider status.
+    if (problem is None and inv["executor_exit_code"] is not None
+            and inv["status"] != "EXECUTION_UNKNOWN"):
         problem = _provider_problem(out) or _provider_problem(err)
     if problem:
         inv.update(status=problem[0], error_code=problem[1])
