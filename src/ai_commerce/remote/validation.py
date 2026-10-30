@@ -64,6 +64,21 @@ def validate_batch(data: dict, *, schema: Path, registry: dict[str, list[str]],
     if not ((data["actor"] == "HUMAN" and owner) or
             (data["actor"] == "BRAIN" and brain)):
         raise RemoteRequestError("ISSUER_NOT_AUTHORIZED_FOR_ACTOR")
+    return _validate_actions(data, registry=registry, approved_reuse=approved_reuse)
+
+
+def validate_batch_content(data: dict, *, schema: Path, registry: dict[str, list[str]],
+                           approved_reuse: dict | None = None) -> dict:
+    """Offline content checks only; never establishes issuer authorization.
+
+    Dispatch consumers must continue to use validate_batch with a trusted issuer.
+    """
+    Draft202012Validator(json.loads(schema.read_text(encoding="utf-8"))).validate(data)
+    return _validate_actions(data, registry=registry, approved_reuse=approved_reuse)
+
+
+def _validate_actions(data: dict, *, registry: dict[str, list[str]],
+                      approved_reuse: dict | None) -> dict:
     ids = [a["action_id"] for a in data["actions"]]
     attempts = [a["attempt_id"] for a in data["actions"]]
     if len(set(ids)) != len(ids) or len(set(attempts)) != len(attempts):
