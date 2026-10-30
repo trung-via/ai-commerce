@@ -1,9 +1,10 @@
-# A12-01 — offline listing snapshots v1
+# A12 — offline product evidence foundation v1
 
-This component implements AC01 and the identity primitives of AC02 only. It
-reads Human-supplied local files, retains the original bytes, and verifies
-normalized content by replay. It does not certify claims, acquire rights,
-register corrections, export evidence packs, or change any Creative brief.
+The A12-01 layer implements AC01 and the identity primitives of AC02. A12-02
+adds the identity history, claim evidence and offer observations described
+below (AC02–AC04). Both retain original bytes and check normalized content by
+replay. Persistent registry, rights manifests and evidence packs remain for
+later actions. No operation changes a Creative brief or acquires rights.
 
 ```python
 from ai_commerce.product import ProductListingSnapshot, read_snapshot
@@ -108,7 +109,8 @@ listing ID + asserted variant key. Unknown product/variant IDs remain null.
 deduplication. Product/variant record IDs cover all their own contract fields.
 Duplicate listing/variant pairs and conflicting product keys within a listing
 are rejected with a logical source row, preserving the caller's original input
-for later correction. No automatic merge or correction ledger is implemented.
+for later correction. IdentityHistory below retains corrections across valid
+snapshots; no automatic merge or persistent correction ledger is implemented.
 
 Raw SHA-256 covers the exact file bytes. `source_snapshot_id` covers raw
 hash/size/format plus source metadata (including capture time). It is independent
@@ -138,3 +140,174 @@ source row, 65,536 characters per raw scalar, JSON depth 32, 200,000 JSON nodes,
 `ProductError.code` and optional `.row` identify bounded failures without
 echoing source bytes. CSV rows count logical records including the header;
 JSON rows are one-based positions with the exact JSON Pointer also retained.
+
+## A12-02 identity history and corrections
+
+Import `IdentityHistory` from `ai_commerce.product.history`. Marketplace is
+the literal source namespace, including case. Existing seller/listing/product/
+variant ID algorithms and all three A12-01 schemas remain unchanged. An asserted
+product key never identifies a product across sellers. GTIN and SKU remain
+attributes; changing either changes the variant record ID, not the stable
+variant ID. Unknown product/variant keys remain null.
+
+```python
+from ai_commerce.product.history import IdentityHistory
+
+history = IdentityHistory().append(snapshot)
+assert history.append(snapshot) is history
+# corrected_snapshot is another validated A12-01 snapshot with its own raw bytes.
+history = history.append(
+    corrected_snapshot, correction_of=snapshot.snapshot_id,
+    reason="Correct seller export", actor_ref="operator-1",
+)
+assert history.snapshots()[0].raw_bytes() == snapshot.raw_bytes()
+report = history.to_dict()
+```
+
+History is an immutable in-memory value, capped at 64 snapshots, 2,000 combined
+rows and 16 MiB of combined raw/normalized input, plus the existing JSON output
+complexity/size limits. Rejection is atomic. Exact replay requires the same
+revision metadata; different metadata is `REPLAY_METADATA_CONFLICT`. Corrections
+require a known, uncorrected parent, the same source ref/kind/synthetic marking
+and the same set of source-scoped listings. A correction cannot reassign a
+merchant. `recorded_at` defaults to explicit capture time, never wall-clock time.
+Both parent and corrected snapshots remain accessible with exact original raw.
+
+`ProductIdentityHistory.v1` and `ProductIdentityRevision.v1` are versioned Python
+read models for the later registry, not new persistence or A02 contracts.
+Different asserted product keys within a listing, or conflicting SKU/GTIN/
+attribute values for an exact variant, produce conflict records with every
+source pin. Null/absent assertions do not contradict known values. Corrections
+remain visible as historical conflicts; no canonical winner is selected.
+
+## A12-02 claim evidence
+
+Import `build_claim`, `ProductClaimEvidence`, `review_claim`, and `assess_claims`
+from `ai_commerce.product.claims`. A local raw JSON `ProductClaimSource.v1`
+object has these fields:
+
+```json
+{
+  "schema_version": "ProductClaimSource.v1",
+  "claim_key": "material",
+  "category": "COMPOSITION",
+  "statement": "Seller asserts steel",
+  "value": "steel",
+  "unit": null,
+  "origin": "SELLER",
+  "role": "SUPPORTING",
+  "observed_at": "2026-10-30T04:00:00Z"
+}
+```
+
+```python
+from ai_commerce.product.claims import build_claim
+
+claim = build_claim(
+    snapshot, ordinal=1, raw=claim_source_bytes,
+    source_ref="seller-export-1", captured_at="2026-10-30T05:00:00Z",
+)
+assert claim.to_dict()["status"] == "SELLER_ASSERTED"
+```
+
+Categories are ATTRIBUTE, PERFORMANCE, SAFETY, COMPOSITION, ORIGIN,
+COMPATIBILITY, WARRANTY and OTHER. Scalar value/unit and the original statement
+are preserved. Source origin maps to SELLER_ASSERTED, SOURCE_OBSERVED,
+ILLUSTRATIVE, UNKNOWN or CONFLICT. UNKNOWN requires a null value and INCONCLUSIVE
+role; other ordinary claims require a value (including false or numeric zero).
+SUPPORTING, COUNTEREVIDENCE and INCONCLUSIVE roles stay explicit. Optional
+`conflict_refs` (2–32 distinct claim IDs) on a CONFLICT origin faithfully retain
+a source-declared conflict; these references do not prove that evidence exists.
+`assess_claims()` separately detects incompatible factual values/units and
+supporting/counterevidence, retaining all complete records. Illustrations and
+unknowns do not manufacture factual contradictions or corroboration.
+
+The status INDEPENDENTLY_VERIFIED_ONLY_WITH_REAL_EVIDENCE is available only
+through an explicit scoped review. `review_claim()` requires separate report
+bytes (up to 4 MiB), reviewer/producer refs, review time, method, report ref and
+one of INDEPENDENT_TEST_REPORT, INDEPENDENT_CERTIFICATE or
+INDEPENDENT_MEASUREMENT. Hash/size and a digest of this exact subject, source
+and claim bind the review. The report cannot be the seller statement/listing
+bytes, and the seller cannot be the declared reviewer/producer. Synthetic,
+illustrative and unknown claims cannot acquire that status. The review cannot
+precede evidence capture. Restoring the record also requires the report bytes.
+
+This records a Human's review of actual local evidence; it cannot authenticate
+the report, reviewer identity or quality of their review. Source status always
+remains USER_SUPPLIED_NOT_LIVE_VERIFIED. A scrape/API response, source's
+"verified" label or a digest alone never creates independent verification.
+The reviewed record has a new content ID; the original claim/raw stays intact.
+
+## A12-02 time-bound offer observations
+
+Import `build_offer`, `ProductOfferObservation`, `decimal_amount`, and
+`assess_offers` from `ai_commerce.product.offers`. The local raw payload is:
+
+```json
+{
+  "schema_version": "ProductOfferSource.v1",
+  "observed_at": "2026-10-30T04:00:00Z",
+  "expires_at": "2026-10-30T06:00:00Z",
+  "price_amount": "0.00",
+  "currency": "VND",
+  "stock_available": false,
+  "commission_rate": "0.10"
+}
+```
+
+Only schema_version and observed_at are required. Optional expires_at must
+follow observation time; observation cannot follow capture. An offer requires
+an explicit variant key in the pinned A12-01 snapshot, even if SKU/GTIN exists.
+Other optional fields are commission_amount and commission_currency. Stock is
+boolean or null. Commission rate is a decimal fraction from 0 through 1.
+Amounts are nonnegative decimal strings up to 1e15 and eight fractional digits;
+numeric JSON prices, floats, exponent strings, negative zero, whitespace,
+nonfinite values and rounding are rejected. `decimal_amount()` also accepts a
+bounded Decimal and normalizes without relying on process Decimal precision.
+Currency is exactly three uppercase ASCII letters and required for any known
+monetary amount, including zero. No currency registry lookup/conversion occurs.
+
+Normalized amount strings remove trailing fractional zeros, while raw retains
+the exact lexical source. MISSING, NULL and VALUE presence are separate;
+`"0"`, false stock and zero commission are known values. Commission always
+remains NOT_ELIGIBILITY_VERIFIED. A12-01's original numeric price API is
+unchanged; it is not silently reused as precise offer evidence.
+
+```python
+from ai_commerce.product.offers import build_offer, assess_offers
+
+offer = build_offer(
+    snapshot, ordinal=1, raw=offer_source_bytes,
+    source_ref="offer-export-1", captured_at="2026-10-30T05:00:00Z",
+)
+report = assess_offers(
+    [offer], as_of="2026-10-30T05:00:00Z", max_age_seconds=3600,
+)
+```
+
+Assessment takes an explicit timezone-aware as_of and integer freshness limit
+(0–366 days). Expiry is exclusive; age equal to the limit is still recent.
+Future observations are NOT_YET_OBSERVED; expired/too-old offers are STALE and
+retained. RECENT_OBSERVATION never means live/current/eligible. Overlapping
+recent observations with different known prices/currencies, stock or commission
+values are CONFLICT. No latest-wins selection, imputed zero or fiat conversion
+is used. Exact replay does not create extra supporting evidence. Assessment
+order is deterministic and bounded to 2,000 input records/16 MiB serialized.
+
+## New contracts and local adapter seam
+
+ProductClaimEvidence.v1 and ProductOfferObservation.v1 are self-contained
+2020-12 contracts, with runtime definitions mirroring the two top-level JSON
+schemas. Generic product schema/content-ID/parse/validate helpers support them
+without changing A02 registration or top-level `product.__init__` exports.
+New contract validation additionally requires `raw=` and `snapshot=`; reviewed
+claims require `proof_raw=`. Rehashing a forged value cannot bypass raw replay.
+Each immutable object retains normalized bytes, exact raw and the pinned
+snapshot; `to_dict()` returns a detached copy. Archive the snapshot and its raw
+alongside the new record/raw/report bytes for restoration.
+
+Both builders accept a local RFC6901 pointer (at most 16 steps) into a larger
+pre-exported JSON file and `source_kind="PREEXPORTED_API"`. Unmapped bytes stay
+in raw evidence. Source refs/URLs are literal metadata. No file, URL, provider,
+model or account is opened by these functions. A future authorized connector
+can supply bytes at this boundary without changing evidence semantics.

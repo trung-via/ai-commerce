@@ -20,6 +20,8 @@ CONTRACT_IDS = {
     "ProductListingSnapshot": ("snapshot_id", "a12-snapshot-"),
     "ProductIdentity": ("identity_id", "a12-identity-"),
     "ProductVariant": ("variant_record_id", "a12-variant-record-"),
+    "ProductClaimEvidence": ("claim_id", "a12-claim-"),
+    "ProductOfferObservation": ("offer_id", "a12-offer-"),
 }
 
 
@@ -138,6 +140,9 @@ def schema(name: str) -> dict:
     """Return a detached portable schema; unknown names have a bounded error."""
     from .core import require
     require(type(name) is str and name in CONTRACT_IDS, "UNKNOWN_PRODUCT_CONTRACT")
+    if name in ("ProductClaimEvidence", "ProductOfferObservation"):
+        from .evidence_schemas import evidence_schema
+        return evidence_schema(name)
     definition = {"ProductListingSnapshot": SNAPSHOT, "ProductIdentity": IDENTITY,
                   "ProductVariant": VARIANT}[name]
     result = {"$schema": "https://json-schema.org/draft/2020-12/schema",
