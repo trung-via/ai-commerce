@@ -1,0 +1,26 @@
+name: "EF02 #106 clean worktree preflight (no model)"
+on:
+  push:
+    branches:
+      - repair/ef02-worktree-dirty-preflight-a12-20261030
+    paths:
+      - scripts/EF02-A12-Worktree-Preflight.ps1
+      - .github/workflows/ef02-a12-worktree-preflight.yml
+      - .gitattributes
+      - tests/test_ef02_worktree_line_endings.py
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  preflight:
+    runs-on: [self-hosted, Windows, ai-commerce-ef02]
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Compare original worktree cleanliness and safe index refresh
+        shell: pwsh
+        run: |
+          ./scripts/EF02-A12-Worktree-Preflight.ps1 -SourceSha ${{ github.sha }}
