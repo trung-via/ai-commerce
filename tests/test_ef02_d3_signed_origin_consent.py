@@ -111,6 +111,12 @@ def test_auth_token_and_untrusted_attestation_flags_are_not_authority():
         ATT, operation="register_route", context=REGISTER)
 
 
+@pytest.mark.parametrize("invalid_time", [float("nan"), float("inf"), float("-inf"), -1, True])
+def test_invalid_trusted_clock_must_fail_closed(invalid_time):
+    assert not authority([signed_grant()], now=invalid_time).authorize_origin(
+        ATT, operation="register_route", context=REGISTER)
+
+
 def test_wrong_key_fails_despite_all_caller_hints():
     a = authority([signed_grant()], key=b"x" * 32)
     assert a.authorize_origin(ATT, operation="register_route", context=REGISTER) is False
