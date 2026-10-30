@@ -139,8 +139,10 @@ class LocalChromeDoorbellAdapter:
         # The D2-provided status summary is not semantic authority. Submit only
         # an independently constructed, minimal selector-only doorbell.
         def receipt(status: str, code: str) -> WakeReceipt:
-            return WakeReceipt(event_id=event_id, route_id=binding.route_id,
-                               generation=binding.generation,
+            safe_route = binding.route_id if type(binding) is ResolvedBinding else "UNKNOWN"
+            safe_generation = binding.generation if type(binding) is ResolvedBinding else 0
+            return WakeReceipt(event_id=event_id, route_id=safe_route,
+                               generation=safe_generation,
                                delivery_status=status, error_code=code)
 
         if (type(binding) is not ResolvedBinding or
