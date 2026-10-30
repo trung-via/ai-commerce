@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,7 @@ class RecordingTransport(GitHubTransport):
         super().__init__("trung-via/ai-commerce", "fixture-token")
         self.calls = []
         self.tree_items = None
+        self.commit_data = None
 
     def api(self, method, path, data=None):
         self.calls.append((method, path))
@@ -64,10 +66,32 @@ class RecordingTransport(GitHubTransport):
             self.tree_items = data["tree"]
             return {"sha": "c" * 40}
         if method == "POST" and path == "/git/commits":
+            self.commit_data = data
             return {"sha": "d" * 40}
         if method == "POST" and path == "/git/refs":
             return {}
         raise AssertionError("unexpected GitHub API " + path)
+
+
+def candidate_evidence(repo, attempt, allowed):
+    """Synthetic verified receipt for API boundary tests; no live test claim."""
+    snapshot, _ = runner._snapshot(repo, allowed, time.monotonic() + 30)
+    outside = runner._outside_scope(snapshot["changed_files"], allowed)
+    review = bool(outside)
+    return {"version": 1, "status": "CANDIDATE_READY_SCOPE_REVIEW" if review else "CANDIDATE_READY",
+            "scope_valid": not review, "review_required": review, "out_of_scope_files": outside,
+            "changed_files": snapshot["changed_files"], "allowed_paths": allowed,
+            "candidate_file_sha256": snapshot["candidate_file_sha256"],
+            "tracked_diff_sha256": snapshot["tracked_diff_sha256"],
+            "source_sha": snapshot["git_head_after"], "effective_source_sha": snapshot["git_head_after"],
+            "action_id": "a", "attempt_id": attempt, "fingerprint": "f" * 64,
+            "verification": {"status": "VERIFIED_SCOPE_REVIEW_REQUIRED" if review else "BUILD_VERIFIED_FOR_SCOPE",
+                             "exit_code": 0, "profile": "project-tests",
+                             "argv": ["python", "-m", "pytest", "tests", "-q", "-n", "12"],
+                             "evidence_sha256": {"tracked_diff": snapshot["tracked_diff_sha256"]},
+                             "report_sha256": "e" * 64},
+            "provenance": {"executor": "codex", "model": "fixture", "effort": "high",
+                           "dependency_candidates": [], "run_id": None, "run_attempt": None}}
 
 
 def test_candidate_bytes_changed_after_verify_rejected_without_github_writes(tmp_path):
@@ -90,9 +114,10 @@ def test_candidate_rename_deletes_original_and_adds_destination(tmp_path):
     subprocess.run(["git", "-C", str(repo), "mv", "old.txt", "new.txt"], check=True)
     paths = runner._changes(repo)
     hashes = runner._candidate_hashes(repo, paths)
+    evidence = candidate_evidence(repo, "rename-001", paths)
     t = RecordingTransport()
-    result = t.candidate(source_sha="a" * 40, attempt_id="rename-001",
-                         workspace=repo, paths=paths, expected_hashes=hashes)
+    result = t.candidate(source_sha=evidence["effective_source_sha"], attempt_id="rename-001",
+                         workspace=repo, paths=paths, expected_hashes=hashes, evidence=evidence)
     assert result["candidate_sha"] == "d" * 40
     tree = {item["path"]: item for item in t.tree_items}
     assert set(tree) == {"old.txt", "new.txt"}

@@ -82,4 +82,6 @@ def main(argv: list[str] | None = None) -> int:
                       "executor": result["executor"], "model": result["model"],
                       "effort": result["reasoning_effort"], "status": result["status"],
                       "error_code": result["error_code"]}, sort_keys=True))
-    return 0 if result["status"] == "BUILD_VERIFIED_FOR_SCOPE" else 1
+    # Zero means verification completed; the typed receipt still requires Brain
+    # review for scope drift and is never a fully accepted build.
+    return 0 if result["status"] in ("BUILD_VERIFIED_FOR_SCOPE", "VERIFIED_SCOPE_REVIEW_REQUIRED") else 1

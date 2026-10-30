@@ -4,9 +4,16 @@ import base64
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 
 from ai_commerce.engineering.git_byte_consistency import assert_candidate_git_filter_consistency
+from ai_commerce.engineering.runner import _snapshot
+from ai_commerce.engineering.source_safety import checked_path
+from .candidate_policy import (
+    EVIDENCE_MARKER, canonical, commit_evidence, evidence_digest,
+    validate_candidate_evidence, candidate_accepted, has_scope_review,
+)
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -137,6 +144,8 @@ class GitHubTransport:
 
     def verify_reused_candidate(self, approved: dict) -> None:
         """Verify original immutable commit, candidate ref and prior distributed claim."""
+        if has_scope_review(approved):
+            raise RemoteTransportError("REUSE_BRAIN_SCOPE_REVIEW_REQUIRED")
         attempt_id = approved["attempt_id"]
         key = self.attempt_key(attempt_id)
         if approved["candidate_ref"] != "refs/heads/ef02/candidate/" + key:
@@ -145,7 +154,16 @@ class GitHubTransport:
         if ref.get("object", {}).get("sha") != approved["candidate_sha"]:
             raise RemoteTransportError("REUSE_REF_SHA_CHANGED")
         candidate = self.api("GET", "/git/commits/" + approved["candidate_sha"])
-        if (candidate.get("message") != "EF02 candidate attempt " + attempt_id
+        try:
+            proof = commit_evidence(candidate.get("message", ""))
+        except ValueError as exc:
+            raise RemoteTransportError("REUSE_COMMIT_MISMATCH") from exc
+        if proof is not None and not candidate_accepted(proof):
+            raise RemoteTransportError("REUSE_BRAIN_SCOPE_REVIEW_REQUIRED")
+        if ((proof is None and candidate.get("message") != "EF02 candidate attempt " + attempt_id)
+            or (proof is not None and (proof["attempt_id"] != attempt_id or
+                proof["effective_source_sha"] != approved["parent_sha"] or
+                evidence_digest(proof) != approved.get("candidate_evidence_sha256")))
             or candidate.get("tree", {}).get("sha") != approved["tree_sha"]
             or [p["sha"] for p in candidate.get("parents", [])] != [approved["parent_sha"]]):
             raise RemoteTransportError("REUSE_COMMIT_MISMATCH")
@@ -159,7 +177,7 @@ class GitHubTransport:
 
     def candidate(self, *, source_sha: str, attempt_id: str,
                   workspace: Path, paths: list[str],
-                  expected_hashes: dict[str, str | None]) -> dict:
+                  expected_hashes: dict[str, str | None], evidence: dict | None = None) -> dict:
         """Publish precisely the EF01-verified bytes, including deletions.
 
         Validate the entire manifest and snapshot every file before any GitHub
@@ -173,9 +191,10 @@ class GitHubTransport:
 
         prepared = []
         for relative in paths:
-            path = workspace / relative
-            if path.is_symlink():
-                raise RemoteTransportError("CANDIDATE_SYMLINK_UNSUPPORTED")
+            try:
+                path = checked_path(workspace, relative)
+            except ValueError as exc:
+                raise CandidateIntegrityError("CANDIDATE_UNSAFE_PATH:" + relative) from exc
             if not path.exists():
                 if expected_hashes[relative] is not None:
                     raise CandidateIntegrityError("CANDIDATE_DELETION_HASH_MISMATCH:" + relative)
@@ -193,6 +212,18 @@ class GitHubTransport:
         # GitHub raw blobs bypass Git clean filters; reject an incompatible blob
         # rather than publishing a candidate that later checks out as dirty.
         assert_candidate_git_filter_consistency(workspace, prepared)
+        try:
+            proof = validate_candidate_evidence(evidence)
+        except ValueError as exc:
+            raise CandidateIntegrityError("CANDIDATE_VERIFICATION_PROOF_REQUIRED") from exc
+        if (proof["effective_source_sha"] != source_sha or proof["attempt_id"] != attempt_id or
+                proof["changed_files"] != paths or proof["candidate_file_sha256"] != expected_hashes):
+            raise CandidateIntegrityError("CANDIDATE_EVIDENCE_BINDING_MISMATCH")
+        snapshot, _ = _snapshot(workspace, proof["allowed_paths"], time.monotonic() + 30)
+        if (snapshot["git_head_after"] != source_sha or any(
+                snapshot[key] != proof[key] for key in (
+                    "changed_files", "candidate_file_sha256", "tracked_diff_sha256", "scope_valid"))):
+            raise CandidateIntegrityError("CANDIDATE_VERIFIED_TREE_CHANGED")
         base = self.api("GET", "/git/commits/" + source_sha)
         tree_items = []
         for relative, content, mode in prepared:
@@ -205,11 +236,13 @@ class GitHubTransport:
         remote_tree = self.api("POST", "/git/trees",
                                {"base_tree": base["tree"]["sha"], "tree": tree_items})
         commit = self.api("POST", "/git/commits",
-                          {"message": "EF02 candidate attempt " + attempt_id,
+                          {"message": "EF02 candidate attempt " + attempt_id + EVIDENCE_MARKER + canonical(proof),
                            "tree": remote_tree["sha"], "parents": [source_sha]})
         name = "ef02/candidate/" + self.attempt_key(attempt_id)
         self._create_ref(name, commit["sha"])
-        return {"candidate_sha": commit["sha"], "candidate_ref": "refs/heads/" + name}
+        return {"candidate_sha": commit["sha"], "candidate_ref": "refs/heads/" + name,
+                "status": proof["status"], "review_required": proof["review_required"],
+                "candidate_evidence": proof, "candidate_evidence_sha256": evidence_digest(proof)}
 
     def integrated_source(self, *, source_sha: str, attempt_id: str,
                           dependencies: list[dict]) -> dict:
@@ -220,6 +253,8 @@ class GitHubTransport:
         """
         if not dependencies:
             return {"effective_sha": source_sha, "integration_ref": None}
+        if any(not candidate_accepted(d) for d in dependencies):
+            raise RemoteTransportError("DEPENDENCY_BRAIN_SCOPE_REVIEW_REQUIRED")
         base = self.api("GET", "/git/commits/" + source_sha)
         def entries(tree_sha: str) -> dict:
             payload = self.api("GET", "/git/trees/" + tree_sha + "?recursive=1")
@@ -235,6 +270,16 @@ class GitHubTransport:
             if not candidate_sha:
                 raise RemoteTransportError("DEPENDENCY_CANDIDATE_MISSING")
             candidate = self.api("GET", "/git/commits/" + candidate_sha)
+            try:
+                proof = commit_evidence(candidate.get("message", ""))
+            except ValueError as exc:
+                raise RemoteTransportError("DEPENDENCY_CANDIDATE_UNPROVEN") from exc
+            if proof is not None and (not candidate_accepted(proof) or
+                    evidence_digest(proof) != dependency.get("candidate_evidence_sha256")):
+                raise RemoteTransportError("DEPENDENCY_BRAIN_SCOPE_REVIEW_REQUIRED")
+            if proof is not None and (proof["source_sha"] != source_sha or
+                    [p["sha"] for p in candidate.get("parents", [])] != [proof["effective_source_sha"]]):
+                raise RemoteTransportError("DEPENDENCY_CANDIDATE_SOURCE_MISMATCH")
             modified = entries(candidate["tree"]["sha"])
             for path in sorted(set(original) | set(modified)):
                 old = original.get(path)

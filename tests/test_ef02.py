@@ -214,7 +214,8 @@ class FakeIntegrationGitHub(GitHubTransport):
 
     def api(self, method, path, data=None):
         if method == "GET" and path.startswith("/git/commits/"):
-            return {"tree": {"sha": self.commits[path.split("/")[-1]]}}
+            return {"tree": {"sha": self.commits[path.split("/")[-1]]},
+                    "message": "EF02 candidate attempt fixture"}
         if method == "GET" and path.startswith("/git/trees/"):
             key = path.split("/")[-1].split("?")[0]
             return {"tree": self.trees[key], "truncated": False}
@@ -233,8 +234,8 @@ class FakeIntegrationGitHub(GitHubTransport):
 def test_dependency_fanin_composes_distinct_candidate_file_trees():
     github = FakeIntegrationGitHub()
     outcome = github.integrated_source(source_sha="a"*40, attempt_id="combine-001",
-                                       dependencies=[{"candidate_sha": "b"*40},
-                                                     {"candidate_sha": "c"*40}])
+                                       dependencies=[{"candidate_sha": "b"*40, "status": "CANDIDATE_READY"},
+                                                     {"candidate_sha": "c"*40, "status": "CANDIDATE_READY"}])
     assert outcome["effective_sha"] == "d"*40
     assert outcome["integration_ref"].startswith("refs/heads/ef02/integrated/")
     assert {e["path"] for e in github.created} == {"src/alpha.py", "src/beta.py"}
@@ -244,8 +245,8 @@ def test_dependency_fanin_fails_on_file_collision_without_silent_merge():
     github = FakeIntegrationGitHub(conflict=True)
     with pytest.raises(RemoteTransportError, match="INTEGRATION_CONFLICT"):
         github.integrated_source(source_sha="a"*40, attempt_id="combine-002",
-                                 dependencies=[{"candidate_sha": "b"*40},
-                                               {"candidate_sha": "c"*40}])
+                                 dependencies=[{"candidate_sha": "b"*40, "status": "CANDIDATE_READY"},
+                                               {"candidate_sha": "c"*40, "status": "CANDIDATE_READY"}])
 
 
 def test_scheduler_passes_pinned_predecessor_results_to_worker():

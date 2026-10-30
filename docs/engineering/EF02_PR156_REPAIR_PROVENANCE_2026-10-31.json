@@ -1,0 +1,167 @@
+{
+  "kind": "EF02_EXECUTOR_RECONSTRUCTION_PROVENANCE",
+  "version": 1,
+  "action_id": "EF02-PR156-INTEGRATION-REPAIR-02",
+  "attempt_id": "ef02-pr156-reconcile-codex61solxhigh-20261031-v2",
+  "repair_of": "ef02-pr156-reconcile-codex61solxhigh-20261030-v1",
+  "source_sha": "6601881e7b498ae139fbe8a8f04c195905b15ed3",
+  "main_comparison": "GitHub compare pinned source to main returned identical, ahead_by=0, behind_by=0",
+  "original_candidate": {
+    "sha": "fd947bf6740279b68ce5f1212322eb3e18c351e9",
+    "source_sha": "182d7471332c781e4dacdcbff3d6bcdff50b4e36",
+    "ref": "refs/heads/ef02/candidate/05fa5a560714076a0d78dc7ef07ee47b"
+  },
+  "prior_attempt": {
+    "issue": 158,
+    "run_id": 41091172676,
+    "artifact_id": 12997483665,
+    "artifact_advertised_sha256": "7d6df02b9ea636a2bd496de886c40322b97c512c8c5c2adf14748c4c7339f790",
+    "reported_status": "VERIFIED_SCOPE_REVIEW_REQUIRED",
+    "human_reported_registered_tests": {
+      "passed": 2857,
+      "skipped": 11,
+      "exit_code": 0
+    },
+    "candidate_sha": null,
+    "candidate_ref": null
+  },
+  "archive_inspection": {
+    "status": "UNAVAILABLE_LOCAL_DOWNLOAD_DNS_FAILURE",
+    "diagnostic": "urllib.request URLError: [Errno 11001] getaddrinfo failed",
+    "full_action_result_inspected": false,
+    "source_after_verify_inspected": false,
+    "registered_patch_inspected": false,
+    "archive_digest_verified": false,
+    "final_regression_archive_inspected": false,
+    "no_prior_test_proof_reused": true
+  },
+  "reconstruction": {
+    "basis": "Retained source files checked against local final manifest, original Git candidate feature hunks, pinned main semantic integration; not authenticated archive recovery or Git candidate reuse",
+    "retained_worktree": "ai-commerce-ef02-EF02-PR156-INTEGRATION-01-w34rj6_i",
+    "retained_head": "6601881e7b498ae139fbe8a8f04c195905b15ed3",
+    "local_manifest_matches": 21,
+    "local_manifest_self_record_exclusion": "docs/engineering/EF02_SCOPE_INTEGRATION_VERIFY_2026-10-31.json",
+    "retained_record_sha256": "5113b2079e6e20f2a07c605ad603e90fac80de34ddbd5ad06b10657a7bb1541c",
+    "source_contract_test_hunks": {
+      "exact_original_feature_hunks": 15,
+      "semantic_reconciliation": [
+        "src/ai_commerce/engineering/runner.py"
+      ]
+    },
+    "unchanged_main_diagnostic_function_asts": [
+      "_headless_denied_actions",
+      "_headless_denial_diagnostics",
+      "_provider_test_observations",
+      "_failure_provenance",
+      "_repair_prompt"
+    ],
+    "historical_local_verification_record": "docs/engineering/EF02_SCOPE_INTEGRATION_VERIFY_2026-10-31.json"
+  },
+  "scope": {
+    "allowed_paths": [
+      "src/ai_commerce/engineering",
+      "src/ai_commerce/remote",
+      "tests/test_ef01.py",
+      "tests/test_ef01_repair.py",
+      "tests/test_ef01_git_write_guard.py",
+      "tests/test_ef01_ef02_integrity.py",
+      "tests/test_ef02.py",
+      "tests/test_minimum_test.py",
+      "tests/test_ef02_headless_permissions.py",
+      "tests/test_ef02_candidate_integrity.py",
+      "tests/test_ef02_m0r_fault_injection.py",
+      "docs/engineering",
+      "docs/governance/HUMAN_DECISION_2026-10-30_CANDIDATE_SCOPE_REVIEW.md",
+      "contracts/RemoteActionBatch.v1.schema.json",
+      "contracts/RemoteCandidateEvidence.v1.schema.json",
+      "tests/test_ef02_scope_main_integration.py"
+    ],
+    "changed_files": [
+      "contracts/RemoteCandidateEvidence.v1.schema.json",
+      "docs/engineering/EF01R_VERIFY_FIRST_SCOPE_RECONCILE_2026-10-29.md",
+      "docs/engineering/EF02_D1_COMPLETION_AND_BINDING.md",
+      "docs/engineering/EF02_PR156_REPAIR_PROVENANCE_2026-10-31.json",
+      "docs/engineering/EF02_SCOPE_INTEGRATION_VERIFY_2026-10-31.json",
+      "docs/engineering/EF02_SCOPE_PUBLISH_IMPLEMENTATION_2026-10-30.md",
+      "docs/governance/HUMAN_DECISION_2026-10-30_CANDIDATE_SCOPE_REVIEW.md",
+      "src/ai_commerce/engineering/cli.py",
+      "src/ai_commerce/engineering/runner.py",
+      "src/ai_commerce/engineering/source_safety.py",
+      "src/ai_commerce/remote/candidate_policy.py",
+      "src/ai_commerce/remote/completion_event.py",
+      "src/ai_commerce/remote/reuse.py",
+      "src/ai_commerce/remote/scheduler.py",
+      "src/ai_commerce/remote/transport.py",
+      "src/ai_commerce/remote/wake_adapter.py",
+      "src/ai_commerce/remote/worker.py",
+      "tests/test_ef01_ef02_integrity.py",
+      "tests/test_ef01_repair.py",
+      "tests/test_ef02.py",
+      "tests/test_ef02_candidate_integrity.py",
+      "tests/test_ef02_m0r_fault_injection.py",
+      "tests/test_ef02_scope_main_integration.py"
+    ],
+    "out_of_scope_files": [],
+    "scope_valid": true,
+    "human_reconciled_path": "tests/test_ef02_scope_main_integration.py"
+  },
+  "verification_requirement": {
+    "profile": "project-tests",
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "tests",
+      "-q",
+      "-n",
+      "12"
+    ],
+    "max_verify_fix_rounds": 2,
+    "fresh_final_byte_verification_required": true,
+    "current_test_results": "Recorded separately in ignored EF02_PR156_REPAIR_2026-10-31.*.log files and independently by EF01; historical counts do not verify this attempt"
+  },
+  "reconstructed_file_sha256": {
+    "contracts/RemoteCandidateEvidence.v1.schema.json": "76fb3f235c2ff431c9e931a653c208c452a09f5d21f9bf4ea1d1619a0ef29d4f",
+    "docs/engineering/EF01R_VERIFY_FIRST_SCOPE_RECONCILE_2026-10-29.md": "43b4c288f661c3c6e6f86e3bc50b07f672b6a1233bfc6687b05e35c33d53ec90",
+    "docs/engineering/EF02_D1_COMPLETION_AND_BINDING.md": "5e1bf6740b248bfab81f213be8c9f0dc2c1e05fec8910ca2925a79b55fa3f1d2",
+    "docs/engineering/EF02_SCOPE_INTEGRATION_VERIFY_2026-10-31.json": "5113b2079e6e20f2a07c605ad603e90fac80de34ddbd5ad06b10657a7bb1541c",
+    "docs/engineering/EF02_SCOPE_PUBLISH_IMPLEMENTATION_2026-10-30.md": "bf2c36ac4c0e402534e7819df643b49b72a4fd8b4b295fb7f99b7b0d17a02540",
+    "docs/governance/HUMAN_DECISION_2026-10-30_CANDIDATE_SCOPE_REVIEW.md": "0fd63db0392a563387f3610051dbab83e8b9d6ffbdcaaa134cc065f819606f5d",
+    "src/ai_commerce/engineering/cli.py": "74a03cb497cf1084c88166861183f4312640cb1cda03772b08e87628e8cc266a",
+    "src/ai_commerce/engineering/runner.py": "14635be5370245adbffcbc63c01049b7ee933ddef2778bacbf342947febecaad",
+    "src/ai_commerce/engineering/source_safety.py": "653649f7184e89f29d115ba2cf77b970346d3d33d1c953c6dbd713a426c8143f",
+    "src/ai_commerce/remote/candidate_policy.py": "82d16428eb2153d9b543903629546ad7c926dec8b9f46468ad6222a9fe029c50",
+    "src/ai_commerce/remote/completion_event.py": "27f438e336ac9ecfd03e19a79641647ad7a40e481a528777c5a7f1fd458ac142",
+    "src/ai_commerce/remote/reuse.py": "07170eb180b25759f24f162fa972ab778ddfcb07bdc9fda903b762944b8a6095",
+    "src/ai_commerce/remote/scheduler.py": "6c3006f7d3b35eb703fbe1f7721e2083ee6580fe32e95acaa9f05188dc4d3863",
+    "src/ai_commerce/remote/transport.py": "a02bb92f46b7342c6b857e631b4a081368355584d163bce133f4985c04d75029",
+    "src/ai_commerce/remote/wake_adapter.py": "da7b135888e5089506c7c349575165f3bca9828e9a5b333b7a662202fda92aae",
+    "src/ai_commerce/remote/worker.py": "a9446be280f7104fc10e3110e695cce87b150ac0178852228bd8bb756a4de4e7",
+    "tests/test_ef01_ef02_integrity.py": "ffb3885387bfffacc3a10b2d005f12838300c964cffaab88c5e9a873c4f28c02",
+    "tests/test_ef01_repair.py": "14dbd393b5daf4f99dfac9fdf9b42ff7187b017ccfda1bb41c67601cc7e408a0",
+    "tests/test_ef02.py": "3a6ff4fc28f6702c36e16455731fd69fbaf98afbe5251253f90ca77e50b8a351",
+    "tests/test_ef02_candidate_integrity.py": "abe0e84ef6ec90b7523c5bdcf35f1f80bf80ca17855229e015eb88e7339abdff",
+    "tests/test_ef02_m0r_fault_injection.py": "93247cbab79053a301e0e6e5658125743dca3069dd11d931f949726951925f47",
+    "tests/test_ef02_scope_main_integration.py": "9b440cdfc14f9ad591df9fd4567fb867f11923bcb22f2549a0dfbda540a75865"
+  },
+  "isolation": {
+    "issue_159_files_used": false,
+    "cross_attempt_writes": false,
+    "git_head_refs_config_writes": false,
+    "protected_file_writes": false
+  },
+  "publication": {
+    "authority": "EF02_WORKER_ONLY",
+    "candidate_sha": null,
+    "candidate_ref": null,
+    "executor_claims_publication": false,
+    "reuse_candidate": false,
+    "required_followup": [
+      "Fresh immutable candidate after independent EF01 verification and scope/integrity checks",
+      "PR review on fresh integrated branch",
+      "Hosted Windows and Ubuntu CI",
+      "Separate Human merge approval"
+    ]
+  },
+  "self_hash": "Excluded from embedded manifest; external final manifest and independent EF01 must hash this record too"
+}

@@ -262,6 +262,8 @@ def test_timed_out_child_with_leftover_verified_receipt_cannot_publish(tmp_path,
 
 
 def test_candidate_publication_failure_preserves_verified_result_but_not_pass(tmp_path, monkeypatch):
+    # Isolate the publication boundary; proof validation has its own tamper tests.
+    monkeypatch.setattr("ai_commerce.remote.worker._verified_receipt_evidence", lambda *a, **k: True)
     class FakeGithub:
         candidate_calls = 0
         def claim(self, **_kwargs):
@@ -284,6 +286,7 @@ def test_candidate_publication_failure_preserves_verified_result_but_not_pass(tm
                 "source_base_sha": BASE,
                 "git_head_after": BASE, "scope_valid": True, "executor_exit_code": 0,
                 "tracked_diff_sha256": "d" * 64,
+                "evidence_sha256": {"tracked_diff": "d" * 64},
                 "changed_files": ["tests/test_ef02_m0r_fixture.py"],
                 "candidate_file_sha256": {"tests/test_ef02_m0r_fixture.py": "0" * 64},
                 "verify_exit_code": 0,

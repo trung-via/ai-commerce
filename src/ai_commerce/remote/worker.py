@@ -13,13 +13,54 @@ from pathlib import Path
 from .transport import GitHubTransport, RemoteTransportError, CandidateIntegrityError
 from .validation import fingerprint, check_source, approved_verification_plan
 from .reuse import load_approved_candidates, approve_reuse
+from .candidate_policy import (
+    REVIEW_STATUS, VERIFIED_STATUSES, candidate_accepted, evidence_digest, validate_candidate_evidence,
+)
 from ai_commerce.engineering.runner import (
     DEFAULT_MAX_REPAIR_ROUNDS, DEFAULT_ACTION_TIMEOUT_SECONDS,
-    validate_max_repair_rounds, _snapshot, _provider_problem,
+    validate_max_repair_rounds, _snapshot, _provider_problem, _outside_scope,
 )
 from ai_commerce.engineering.git import git_argv, resolve_git_executable
 from ai_commerce.engineering.git_byte_consistency import (GitByteConsistencyError, checkout_diagnostics)
 from ai_commerce.engineering.minimum_test import Evidence, file_hashes
+from ai_commerce.engineering.source_safety import checked_path, protected_change, ordinary_scope_drift
+
+
+def _verified_receipt_evidence(report: dict, *, root: Path, workspace: Path,
+                               source_sha: str, sources: list[str], profiles: dict) -> bool:
+    """Check actual artifacts and registered PASS bindings, not receipt assertions."""
+    try:
+        refs, hashes = report["evidence_files"], report["evidence_sha256"]
+        if (report.get("verify_completed") is not True or
+                report.get("provider_return_determinate") is not True or
+                set(refs) != set(hashes) or
+                not {"tracked_diff", "source_after_verify", "verify_stdout", "provider_return_observed"} <= set(refs)):
+            return False
+        for key, relative in refs.items():
+            if hashlib.sha256(checked_path(root, relative).read_bytes()).hexdigest() != hashes[key]:
+                return False
+        if hashes["tracked_diff"] != report["tracked_diff_sha256"]:
+            return False
+        current = file_hashes(workspace)
+        covered = set()
+        groups = report["minimum_test"]["groups"]
+        if not report.get("minimum_test_enabled") or not groups:
+            return False
+        for index, group in enumerate(groups):
+            binding = group["binding"]
+            if (binding["base_sha"] != source_sha or binding["aggregate_sources"] != sources or
+                    binding["workspace"] != str(workspace.resolve()) or
+                    binding["argv"] not in profiles.values() or
+                    binding["candidate_files"] != {p: current.get(p) for p in binding["candidate_files"]}):
+                return False
+            proof = Evidence(checked_path(root, refs[f"mt01_{index}_evidence"]).read_text(encoding="utf-8"),
+                             group["evidence_sha256"])
+            if not proof.valid_for(binding, root):
+                return False
+            covered.update(binding["candidate_files"])
+        return set(report["changed_files"]) <= covered
+    except (ValueError, KeyError, TypeError, OSError):
+        return False
 
 
 def _fresh_aggregate_evidence(report: dict, *, root: Path, workspace: Path,
@@ -124,6 +165,7 @@ class LocalBatchWorker:
                    "effort": action["effort"], "source_sha": source,
                    "fingerprint": fp, "status": "NOT_STARTED",
                    "error_code": None, "candidate_ref": None, "candidate_sha": None,
+                   "review_required": False, "scope_review_required": False,
                    "depends_on": action["depends_on"],
                    "dependency_semantics": "PINNED_DEPENDENCY_TREE_COMPOSITION",
                    "evidence_path": str(path), "executor_invoked": False}
@@ -182,6 +224,8 @@ class LocalBatchWorker:
             return finish()
         effective = source
         try:
+            if any(not candidate_accepted(d) for d in action.get("resolved_dependencies", [])):
+                raise RemoteTransportError("DEPENDENCY_BRAIN_SCOPE_REVIEW_REQUIRED")
             merged = self.github.integrated_source(
                 source_sha=source, attempt_id=attempt_id,
                 dependencies=action.get("resolved_dependencies", []))
@@ -379,6 +423,9 @@ class LocalBatchWorker:
             outcome["changed_files"] = report.get("changed_files", [])
             outcome["out_of_scope_files"] = report.get("out_of_scope_files", [])
             outcome["scope_review_required"] = report.get("scope_review_required", False)
+            outcome["review_required"] = report.get("review_required", False)
+            for key in ("scope_valid", "tracked_diff_sha256", "candidate_file_sha256"):
+                outcome[key] = report.get(key)
             outcome["verify_exit_code"] = report.get("verify_exit_code")
             outcome["ef01_invocations"] = report.get("invocations", [])
             outcome["invocation_count"] = report.get("invocation_count")
@@ -393,20 +440,20 @@ class LocalBatchWorker:
             # exit nor an EF01 PASS receipt contradicted by verification.
             # Both cases can arise when the EF01 process dies after writing
             # its result. Never promote either to a schedulable PASS.
-            if child.returncode != 0 and report.get("status") == "BUILD_VERIFIED_FOR_SCOPE":
+            if child.returncode != 0 and report.get("status") in VERIFIED_STATUSES:
                 outcome.update(status="EXECUTION_UNKNOWN",
                                error_code="EF01_EXIT_NONZERO_WITH_SUCCESS_RECEIPT",
                                receipt_status_untrusted=True, replay_authorized=False)
                 return finish()
-            if (report.get("status") == "BUILD_VERIFIED_FOR_SCOPE"
+            if (report.get("status") in VERIFIED_STATUSES
                     and report.get("verify_exit_code") != 0):
                 outcome.update(status="VERIFICATION_FAILED",
                                error_code="EF01_VERIFY_EXIT_CONTRADICTS_SUCCESS_RECEIPT",
                                receipt_status_untrusted=True)
                 return finish()
-            if report.get("status") != "BUILD_VERIFIED_FOR_SCOPE" or child.returncode:
+            if report.get("status") not in VERIFIED_STATUSES or child.returncode:
                 classified = _classify_failed_executor(report, efdir)
-                if classified in ("CANDIDATE_READY", "BUILD_VERIFIED_FOR_SCOPE"):
+                if classified in ("CANDIDATE_READY", REVIEW_STATUS, *VERIFIED_STATUSES):
                     # These are not legitimate EF01 failure statuses and
                     # would otherwise be mistaken for a successful action.
                     outcome.update(status="EXECUTION_UNKNOWN",
@@ -439,7 +486,15 @@ class LocalBatchWorker:
                 outcome.update(status="CANDIDATE_INTEGRITY_FAILED",
                                error_code="EF01_HASH_MANIFEST_INVALID")
                 return finish()
-            if (report.get("git_head_after") != effective or report.get("scope_valid") is not True
+            outside = _outside_scope(changed, action["allowed_paths"])
+            review = bool(outside)
+            if (report.get("git_head_after") != effective or
+                    report.get("scope_valid") is not (not review) or
+                    report.get("status") != VERIFIED_STATUSES[int(review)] or
+                    report.get("out_of_scope_files", []) != outside or
+                    report.get("scope_review_required", False) is not review or
+                    report.get("review_required", False) is not review or protected_change(changed) or
+                    not ordinary_scope_drift(outside)
                     or report.get("executor_exit_code") != 0 or report.get("denied_actions")):
                 outcome.update(status="CANDIDATE_INTEGRITY_FAILED",
                                error_code="EF01_SOURCE_SCOPE_OR_PERMISSION_UNCONFIRMED")
@@ -448,17 +503,47 @@ class LocalBatchWorker:
             # exits. Candidate transport separately checks bytes before any write.
             snapshot, _ = _snapshot(worktree, action["allowed_paths"], time.monotonic() + 30,
                                    **({"git_executable": self.git_executable} if getattr(self, "git_executable", None) is not None else {}))
-            if (not snapshot["scope_valid"] or any(
+            if (snapshot.get("git_dir") != report.get("git_dir") or
+                    snapshot["scope_valid"] is not (not review) or any(
                     snapshot[key] != report.get(key) for key in (
                         "git_head_after", "changed_files", "candidate_file_sha256",
                         "tracked_diff_sha256"))):
                 outcome.update(status="CANDIDATE_INTEGRITY_FAILED",
                                error_code="EF01_VERIFIED_TREE_CHANGED")
                 return finish()
+            # Scope drift requires a fresh registered broad PASS on these bytes.
+            # Never convert an old/partial success assertion into publication proof.
+            if (not _verified_receipt_evidence(
+                    report, root=efdir, workspace=worktree, source_sha=effective,
+                    sources=[d["candidate_sha"] for d in dependencies], profiles=self.profiles) or
+                    (review and not _fresh_aggregate_evidence(
+                        report, root=efdir, workspace=worktree, source_sha=effective,
+                        sources=[d["candidate_sha"] for d in dependencies], argv=plan["argv"]))):
+                outcome.update(status="UNPROVEN", error_code="EF01_VERIFICATION_PROOF_UNCONFIRMED")
+                return finish()
+            evidence = validate_candidate_evidence({
+                "version": 1, "status": REVIEW_STATUS if review else "CANDIDATE_READY",
+                "review_required": review, "scope_valid": not review,
+                "out_of_scope_files": outside, "changed_files": changed,
+                "allowed_paths": action["allowed_paths"], "candidate_file_sha256": hashes,
+                "tracked_diff_sha256": report["tracked_diff_sha256"],
+                "source_sha": source, "effective_source_sha": effective,
+                "action_id": aid, "attempt_id": attempt_id, "fingerprint": fp,
+                "verification": {"status": report["status"], "exit_code": 0,
+                                 "profile": plan["profile"], "argv": plan["argv"],
+                                 "evidence_sha256": report["evidence_sha256"],
+                                 "report_sha256": hashlib.sha256(result_file.read_bytes()).hexdigest()},
+                "provenance": {"executor": action["executor"], "model": action["model"],
+                               "effort": action["effort"],
+                               "dependency_candidates": [d["candidate_sha"] for d in dependencies],
+                               "run_id": os.environ.get("GITHUB_RUN_ID"),
+                               "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT")},
+            })
+            outcome.update(candidate_evidence=evidence, candidate_evidence_sha256=evidence_digest(evidence))
             try:
                 candidate = self.github.candidate(source_sha=effective, attempt_id=attempt_id,
                                                   workspace=worktree, paths=changed,
-                                                  expected_hashes=hashes)
+                                                  expected_hashes=hashes, evidence=evidence)
             except GitByteConsistencyError as exc:
                 outcome.update(status="CANDIDATE_INTEGRITY_FAILED",
                                error_code=str(exc).split(":", 1)[0], diagnostic=str(exc))
@@ -471,7 +556,7 @@ class LocalBatchWorker:
                 outcome.update(status="RESULT_PUBLICATION_FAILED",
                                error_code=type(exc).__name__, diagnostic=str(exc))
                 return finish()
-            outcome.update(status="CANDIDATE_READY", candidate_sha=candidate["candidate_sha"],
+            outcome.update(status=evidence["status"], candidate_sha=candidate["candidate_sha"],
                            candidate_ref=candidate["candidate_ref"])
             return finish()
         except Exception as exc:

@@ -1,5 +1,7 @@
 # EF01-R — Verify-First, Scope-Reconcile
 
+**Publication policy superseded 2026-10-30:** the historical no-candidate rule for ordinary verified drift below is replaced by [Verify First, Publish Candidate, Brain Scope Review](../governance/HUMAN_DECISION_2026-10-30_CANDIDATE_SCOPE_REVIEW.md). EF01 keeps its distinct verification receipt; EF02 publishes only with intact proof and explicit pending Brain review.
+
 **Ngày:** 2026-10-29  
 **Human source:** Yêu cầu trực tiếp trong hội thoại AI Commerce: tận dụng năng lực executor và EF01-R, không hard-stop trước pytest chỉ vì thay đổi file nằm ngoài allowlist.  
 **Project:** AI Commerce độc lập AIOS-Renew.  
