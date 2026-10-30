@@ -72,6 +72,8 @@ def test_send_is_disabled_by_default_and_requires_windows(tmp_path, monkeypatch,
 
 def test_send_one_wires_exact_event_provenance_and_two_grant_authorities(tmp_path, monkeypatch):
     ep, rp, event, report = files(tmp_path)
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
     grants_path = tmp_path / "private" / "grants.json"
     grants_path.parent.mkdir()
     grants_path.write_text(json.dumps({
@@ -106,7 +108,7 @@ def test_send_one_wires_exact_event_provenance_and_two_grant_authorities(tmp_pat
         event=event, report=report, workflow_id=399104102, caller_id="operator",
         grants_path=grants_path, registry_path=tmp_path / "private" / "registry.json",
         idempotency_path=tmp_path / "private" / "idem.json",
-        repository_root=tmp_path, token_provider=lambda: "read-token",
+        repository_root=checkout, token_provider=lambda: "read-token",
         secret_provider=lambda: b"test-key" * 5,
         principal_provider=lambda: "S-1-5-21-999",
         adapter=sentinel,
