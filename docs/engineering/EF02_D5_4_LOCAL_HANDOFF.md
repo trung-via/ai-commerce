@@ -49,8 +49,25 @@ New-Item -ItemType Directory -Path $privateDir | Out-Null
 $operatorSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 icacls $privateDir /inheritance:r /grant:r ("*" + $operatorSid + ":(OI)(CI)F")
 if ($LASTEXITCODE -ne 0) { throw "Private ACL provisioning failed" }
+# ACL permission does not imply ownership: elevated Windows sessions may create
+# directories owned by BUILTIN\\Administrators instead of this user SID.
+icacls $privateDir /setowner ("*" + $operatorSid)
+if ($LASTEXITCODE -ne 0) { throw "Private directory owner provisioning failed" }
+$actualOwner = (Get-Acl -LiteralPath $privateDir).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+if ($actualOwner -ne $operatorSid) { throw "Private directory owner SID mismatch" }
 Get-Acl -LiteralPath $privateDir | Format-List Owner,Access
 ```
+
+Do not rely on `/grant:r` or membership in Administrators as proof of
+ownership. On an elevated runner, the effective owner can be
+`BUILTIN\\Administrators` while the process SID is the user. The D5.4 guard
+requires exact user-SID ownership of the directory **and** of subsequently
+created state/lock files, and checks their allow ACEs. If later files are
+created under the Administrators owner, run the operator process with a
+non-elevated same-user token or use an explicitly reviewed same-SID ownership
+provisioning path; do not weaken `_check_windows_acl()`, add Users/Everyone
+ACEs, or make this a system-wide ACL change. If a supported local ownership
+setup is unavailable, retain the manual D5.3 fallback and fail closed.
 
 Compute the fingerprint from the operator's retained full original request:
 
