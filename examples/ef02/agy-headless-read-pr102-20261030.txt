@@ -1,0 +1,12 @@
+EF02 Antigravity Headless read_file PR #102 Diagnostic
+Date: 2026-10-30
+
+Observation 1:
+Target: src/ai_commerce/engineering/adapters.py
+Token: antigravity_evidence_dir
+Status: VERIFIED
+
+Observation 2:
+Target: instruction.txt (disposable agy_input root)
+Token: EF02-AGY102-READ
+Status: VERIFIED
