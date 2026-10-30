@@ -33,6 +33,23 @@ def _action():
     }
 
 
+@pytest.fixture(autouse=True)
+def _fake_worktree_checkout_is_clean(monkeypatch):
+    """Fault-injection tests mock 'git worktree add' without creating .git.
+
+    Keep checkout-preflight positive in these tests so each test can reach
+    its unrelated claim, pre-spawn or untrusted-receipt failure boundary.
+    The real worktree and truly dirty source cases are covered separately.
+    """
+    monkeypatch.setattr(
+        "ai_commerce.remote.worker.checkout_diagnostics",
+        lambda *_a, **_kw: {
+            "clean": True, "dirty_entries": [], "dirty_entry_count": 0,
+            "index_refresh_exit": None, "metadata_only_reconciled": False,
+        },
+    )
+
+
 def _worker(tmp_path: Path, github):
     worker = object.__new__(LocalBatchWorker)
     worker.checkout = tmp_path

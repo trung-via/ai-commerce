@@ -5,6 +5,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+
+from ai_commerce.engineering.git_byte_consistency import assert_candidate_git_filter_consistency
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -187,6 +189,10 @@ class GitHubTransport:
             mode = "100755" if os.name != "nt" and path.stat().st_mode & 0o111 else "100644"
             prepared.append((relative, content, mode))
 
+        # Check the exact EF01-verified bytes BEFORE issuing any GitHub Git API write.
+        # GitHub raw blobs bypass Git clean filters; reject an incompatible blob
+        # rather than publishing a candidate that later checks out as dirty.
+        assert_candidate_git_filter_consistency(workspace, prepared)
         base = self.api("GET", "/git/commits/" + source_sha)
         tree_items = []
         for relative, content, mode in prepared:

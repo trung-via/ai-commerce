@@ -1,10 +1,10 @@
 * text=auto
 *.md text eol=lf
-*.json text eol=lf
+*.json -text -eol
 *.ps1 text eol=crlf
 *.docx binary
 *.png binary
 
-# GitHub-published EF02 evidence JSON may contain literal CRLF bytes.
-# Preserve raw evidence bytes/hashes; never silently normalize in Git for Windows.
-examples/*/evidence/*.json -text -eol
+# Git Byte Consistency v1: EF02 GitHub API publishes exact verified JSON bytes.
+# Disable JSON clean/smudge conversions globally, regardless of directory name.
+# JSON shape, encoding and LF style for authored schemas remain test responsibilities.

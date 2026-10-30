@@ -18,6 +18,7 @@ from ai_commerce.engineering.runner import (
     validate_max_repair_rounds, _snapshot, _provider_problem,
 )
 from ai_commerce.engineering.git import git_argv, resolve_git_executable
+from ai_commerce.engineering.git_byte_consistency import (GitByteConsistencyError, checkout_diagnostics)
 from ai_commerce.engineering.minimum_test import Evidence, file_hashes
 
 
@@ -214,6 +215,29 @@ class LocalBatchWorker:
             if p.returncode != 0:
                 outcome.update(status="SOURCE_WORKTREE_FAILED",
                                error_code="GIT_WORKTREE_ADD_NONZERO", diagnostic=p.stderr)
+                return finish()
+            # Check immediately after checkout and BEFORE any provider checkpoint.
+            # Only refresh Git's stat cache; never modify source files or ignore
+            # a genuinely dirty worktree. Preserve exact actionable paths.
+            try:
+                checkout = checkout_diagnostics(
+                    worktree, refresh_index=True,
+                    git_executable=getattr(self, "git_executable", None))
+            except GitByteConsistencyError as exc:
+                outcome.update(status="SOURCE_WORKTREE_FAILED",
+                               error_code="GIT_STATUS_FAILED", diagnostic=str(exc),
+                               provider_invocation_proven=False)
+                return finish()
+            outcome["source_checkout"] = checkout
+            if not checkout["clean"]:
+                outcome.update(
+                    status="SOURCE_WORKTREE_FAILED",
+                    error_code="SOURCE_CHECKOUT_INCONSISTENT",
+                    diagnostic={"reason": "DIRTY_IMMEDIATELY_AFTER_GIT_WORKTREE_ADD",
+                                "entries": checkout["dirty_entries"],
+                                "entry_count": checkout["dirty_entry_count"],
+                                "index_refresh_exit": checkout["index_refresh_exit"]},
+                    provider_invocation_proven=False)
                 return finish()
             plan = approved_verification_plan(action, self.profiles)
             outcome["verification_plan"] = plan
@@ -432,6 +456,10 @@ class LocalBatchWorker:
                 candidate = self.github.candidate(source_sha=effective, attempt_id=attempt_id,
                                                   workspace=worktree, paths=changed,
                                                   expected_hashes=hashes)
+            except GitByteConsistencyError as exc:
+                outcome.update(status="CANDIDATE_INTEGRITY_FAILED",
+                               error_code=str(exc).split(":", 1)[0], diagnostic=str(exc))
+                return finish()
             except CandidateIntegrityError as exc:
                 outcome.update(status="CANDIDATE_INTEGRITY_FAILED",
                                error_code=str(exc).split(":", 1)[0], diagnostic=str(exc))

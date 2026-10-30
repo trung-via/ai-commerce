@@ -19,7 +19,7 @@ def _repo(tmp_path: Path) -> Path:
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     subprocess.run(["git", "-C", str(repo), "config", "user.name", "EF fixture"], check=True)
     subprocess.run(["git", "-C", str(repo), "config", "user.email", "ef@example.invalid"], check=True)
-    (repo / "old.txt").write_text("original\n", encoding="utf-8")
+    (repo / "old.txt").write_bytes(b"original\n")
     subprocess.run(["git", "-C", str(repo), "add", "old.txt"], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "initial"], check=True)
     return repo
