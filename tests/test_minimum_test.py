@@ -15,6 +15,110 @@ from ai_commerce.remote.validation import approved_verification_plan
 from ai_commerce.remote.scheduler import run_schedule
 
 FULL = ["python", "-m", "pytest", "tests", "-q"]
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(scope="module")
+def real_tree():
+    files = mt.file_hashes(ROOT)
+    groups = mt.approved_groups()
+    registry = {"mt01-" + g.name + "-tests": ["python", "-m", "pytest", *g.tests, "-q", "-n", "12"]
+                for g in groups}
+    registry["project-tests"] = [*FULL, "-n", "12"]
+    return SimpleNamespace(files=files, groups=groups, registry=registry, graph=mt.import_graph(ROOT, files))
+
+
+def real_plan(real_tree, monkeypatch, path, *, registry=None, acs=(), aggregate=()):
+    monkeypatch.setattr(mt, "import_graph", lambda *_: real_tree.graph)
+    return mt.select_plan(repo=ROOT, base_sha="6601881e7b498ae139fbe8a8f04c195905b15ed3",
+        base_files=real_tree.files, candidate_files=real_tree.files, changed_paths=[path], required_acs=acs,
+        fallback_argv=real_tree.registry["project-tests"], registered_only=True,
+        registered_profiles=real_tree.registry if registry is None else registry, aggregate_sources=aggregate, env={})
+
+
+def test_reviewed_map_contains_exact_real_paths_and_all_current_python_test_families(real_tree):
+    declared = [p for g in real_tree.groups for p in (*g.paths, *g.tests, *g.consumers, *g.contracts)]
+    assert set(declared) <= real_tree.files.keys()
+    mapped_tests = [p for g in real_tree.groups for p in g.tests]
+    assert len(mapped_tests) == len(set(mapped_tests))
+    assert {p for p in real_tree.files if p.startswith("tests/test_") and p.endswith(".py")} <= set(mapped_tests)
+    assert "src/ai_commerce/opportunity/trends/tests/test_m02.py" in mapped_tests
+    assert {f"a{n:02}" for n in range(2, 13)} <= {g.name for g in real_tree.groups}
+
+
+@pytest.mark.parametrize("path,expected", [
+    ("tests/test_a12_claims.py", "a12"),
+    ("src/ai_commerce/remote/chrome_acquisition.py", "ef02-wake"),
+])
+def test_real_known_component_uses_exact_registered_companion(real_tree, monkeypatch, path, expected):
+    selected = real_plan(real_tree, monkeypatch, path)
+    assert not selected["fallback"] and selected["selected_groups"] == [expected]
+    entry = selected["groups"][0]
+    assert entry["binding"]["argv"] == real_tree.registry["mt01-" + expected + "-tests"]
+    assert entry["selected_profile"] == "mt01-" + expected + "-tests"
+    assert entry["binding"]["argv"][-2:] == ["-n", "12"]
+    assert not selected["narrow_execution_observed"]  # Planning is not an execution saving.
+
+
+def test_real_source_and_schema_preserve_cli_and_import_consumers(real_tree, monkeypatch):
+    selected = real_plan(real_tree, monkeypatch, "contracts/ProductClaimEvidence.v1.schema.json")
+    assert not selected["fallback"]
+    assert {"a12", "a11", "a04", "cli"} <= set(selected["selected_groups"])
+    assert "tests/test_a12_registry.py" in selected["consumer_map"]["a12"]["tests"]
+    assert "contracts/ProductClaimEvidence.v1.schema.json" in selected["consumer_map"]["cli"]["closure"]
+
+
+@pytest.mark.parametrize("path,acs,aggregate,reason", [
+    ("pyproject.toml", (), (), "SHARED_TEST_CONFIGURATION_REQUIRES_FULL_SUITE"),
+    ("unknown/path.py", (), (), "PATH_OR_AC_MAP_INCOMPLETE"),
+    ("tests/test_a12_claims.py", ("AC-UNKNOWN",), (), "PATH_OR_AC_MAP_INCOMPLETE"),
+    ("tests/test_a12_claims.py", (), ("b" * 40,), "AGGREGATE_REQUIRES_FRESH_COMBINED_CONSUMER_COVERAGE"),
+])
+def test_real_uncertainty_config_and_fanin_use_exact_broad_registry(real_tree, monkeypatch, path, acs, aggregate, reason):
+    selected = real_plan(real_tree, monkeypatch, path, acs=acs, aggregate=aggregate)
+    assert selected["fallback"] and reason in selected["reason_codes"]
+    assert selected["changed_paths"] == [path]
+    assert selected["groups"][0]["binding"]["argv"] == real_tree.registry["project-tests"]
+    assert selected["groups"][0]["state"] == ("UNPROVEN" if path == "pyproject.toml" else "EXECUTE")
+    if path == "pyproject.toml":
+        assert "A10.trends" in selected["required_acs"] and "a10-m02" in selected["consumer_map"]
+    assert selected["fallback_profile"] == "project-tests"
+
+
+def test_current_registry_does_not_activate_unregistered_groups(real_tree, monkeypatch):
+    current = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_text())
+    selected = real_plan(real_tree, monkeypatch, "tests/test_a12_claims.py", registry=current)
+    assert selected["fallback"]
+    assert selected["groups"][0]["binding"]["argv"] == current["project-tests"]
+    assert "REGISTERED_ARGV_ONLY_COMPANION_REGISTRATION_REQUIRED" in selected["reason_codes"]
+
+
+def test_companion_report_has_exact_reviewed_parallel_commands(real_tree):
+    report = (ROOT / "docs/engineering/MT01_COMPONENT_AWARE_IMPLEMENTATION_REPORT.md").read_text()
+    proposed = json.loads(report.split("```json\n", 1)[1].split("\n```", 1)[0])
+    current = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_text())
+    assert not proposed.keys() & current.keys()  # Existing entries need no duplicate registration.
+    combined = {**current, **proposed}
+    for g in real_tree.groups:
+        expected = ["python", "-m", "pytest", *g.tests, "-q", "-n", "12"]
+        assert expected in combined.values()
+
+
+def test_component_local_m02_requires_profile_that_actually_collects_it(real_tree, monkeypatch):
+    current = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_text())
+    path = "src/ai_commerce/opportunity/trends/tracking.py"
+    selected = real_plan(real_tree, monkeypatch, path, registry=current)
+    assert selected["fallback"] and selected["groups"][0]["state"] == "UNPROVEN"
+    assert selected["groups"][0]["binding"]["argv"] == current["project-tests"]
+    activated = real_plan(real_tree, monkeypatch, path)
+    assert not activated["fallback"] and "a10-m02" in activated["selected_groups"]
+
+
+@pytest.mark.parametrize("path", ["tests/ef02-watch.test.cjs", "tests/ef02-reconcile.test.cjs"])
+def test_python_registry_cannot_claim_javascript_suite_coverage(real_tree, monkeypatch, path):
+    selected = real_plan(real_tree, monkeypatch, path)
+    assert selected["groups"][0]["state"] == "UNPROVEN" and selected["unsupported_paths"] == [path]
+    assert "NON_PYTHON_VERIFICATION_SCOPE_UNPROVEN" in selected["reason_codes"]
 
 
 @pytest.fixture
@@ -74,7 +178,8 @@ def test_transitive_imports_consumers_and_contract_changes_select_affected_group
     selected = plan(mapped, changed=("interface.py",))
     assert {g["group"] for g in selected["groups"]} == {"a", "b"}
     assert not selected["fallback"]
-    assert [g["group"] for g in plan(mapped, changed=("contract.json",))["groups"]] == ["a"]
+    # Non-Python contract changes propagate through the producer to its consumers.
+    assert [g["group"] for g in plan(mapped, changed=("contract.json",))["groups"]] == ["a", "b"]
 
 
 @pytest.mark.parametrize("kind", ["unknown-path", "unknown-ac", "new-consumer", "missing-test", "dynamic-import"])
@@ -93,7 +198,7 @@ def test_incomplete_mapping_uses_exact_approved_broad_profile(mapped, kind):
     selected = plan(mapped, changed=changes, acs=acs)
     assert selected["fallback"] and len(selected["groups"]) == 1
     assert selected["groups"][0]["binding"]["argv"] == FULL
-    assert selected["groups"][0]["state"] == "EXECUTE"
+    assert selected["groups"][0]["state"] == ("UNPROVEN" if kind == "missing-test" else "EXECUTE")
 
 
 def test_no_broad_profile_is_unproven_and_empty_never_becomes_pass(mapped):
@@ -101,6 +206,14 @@ def test_no_broad_profile_is_unproven_and_empty_never_becomes_pass(mapped):
         selected = plan(mapped, changed=("unknown.py",), fallback_argv=fallback)
         assert selected["groups"][0]["state"] == "UNPROVEN"
         assert not selected["groups"][0]["execute"]
+
+
+def test_shared_config_uses_broad_execution_when_all_required_tests_are_collected(mapped):
+    (mapped.repo / "pytest.ini").write_text("[pytest]\n")
+    selected = plan(mapped, changed=("pytest.ini",))
+    assert selected["fallback"] and selected["groups"][0]["state"] == "EXECUTE"
+    assert selected["required_acs"] == ["AC-A", "AC-B"]
+    assert selected["groups"][0]["binding"]["argv"] == FULL
 
 
 def test_unchanged_closure_reuses_immutable_success_and_unrelated_edit_is_safe(mapped):
@@ -327,9 +440,10 @@ def test_group_failures_no_tests_and_internal_errors_never_pass(mapped, monkeypa
         CompletedProcess=subprocess.CompletedProcess, TimeoutExpired=subprocess.TimeoutExpired))
     result, selected, prior = _execute(mapped)
     assert result.returncode != 0 and not prior
+    assert selected["groups"][0]["state"] == selected["groups"][0]["result"] == "UNPROVEN"
 
 
-def _execute(mapped, *, prior=None, acs=("AC-A",), changed=("feature_a.py",), name="round-0"):
+def _execute(mapped, *, prior=None, acs=("AC-A",), changed=("feature_a.py",), name="round-0", **options):
     mapped.evidence.mkdir(exist_ok=True)
     files = {}
     def save(key, filename, data):
@@ -342,23 +456,136 @@ def _execute(mapped, *, prior=None, acs=("AC-A",), changed=("feature_a.py",), na
     prior = {} if prior is None else prior
     result, selected = verification.execute_plan(
         repo=mapped.repo, output_dir=mapped.evidence, base_sha="a" * 40, base_files=mapped.base,
-        changed_paths=list(changed), required_acs=acs, fallback_argv=FULL, prior=prior,
+        changed_paths=list(changed), required_acs=acs, fallback_argv=options.pop("fallback_argv", FULL), prior=prior,
         # Real nested pytest startup on two twelve-worker actions is not the
         # behavior under test. Timeout tests inject their exception separately.
         save=save, evidence_files=files, deadline=time.monotonic() + 90, timeout_seconds=60,
-        groups=mapped.groups)
+        groups=mapped.groups, **options)
     return result, selected, prior
 
 
 def test_group_timeout_preserves_partial_logs_and_cannot_repair(mapped, monkeypatch):
     def timeout(argv, **kwargs):
-        raise subprocess.TimeoutExpired(argv, kwargs["timeout"], b"partial", b"timeout")
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"], b"created: 12/12 workers\npartial", b"timeout")
     monkeypatch.setattr(verification, "subprocess", SimpleNamespace(
         run=timeout, TimeoutExpired=subprocess.TimeoutExpired))
     with pytest.raises(subprocess.TimeoutExpired):
         _execute(mapped)
-    assert (mapped.evidence / "round-0/mt01.0.stdout.log").read_bytes() == b"partial"
+    assert (mapped.evidence / "round-0/mt01.0.stdout.log").read_bytes() == b"created: 12/12 workers\npartial"
+    receipt = json.loads((mapped.evidence / "round-0/mt01.results.json").read_text())
+    assert receipt["groups"][0]["state"] == "UNPROVEN" and receipt["groups"][0]["workers_actual"] == 12
     assert not list(mapped.evidence.rglob("*.evidence.json"))
+
+
+@pytest.mark.parametrize("expression", ["__import__(name)", "builtins.__import__(name)",
+    "importlib.import_module(name)", "load(name)"])
+def test_dynamic_import_aliases_never_establish_narrow_coverage(mapped, expression):
+    (mapped.repo / "feature_a.py").write_text("from importlib import import_module as load\n" + expression)
+    assert plan(mapped)["fallback"]
+
+
+def test_builtin_import_alias_is_unknown_when_target_is_dynamic(mapped):
+    (mapped.repo / "feature_a.py").write_text("from builtins import __import__ as load\nload(name)\n")
+    assert plan(mapped)["fallback"]
+
+
+def test_unregistered_fallback_cannot_establish_registered_only_pass(mapped):
+    selected = plan(mapped, changed=("unknown.py",), registered_only=True,
+                    registered_profiles={"component-a": ["python", "-m", "pytest", "tests/test_a.py", "-q"]})
+    assert selected["groups"][0]["state"] == "UNPROVEN"
+
+
+def test_new_reverse_consumer_test_outside_broad_collection_root_is_unproven(mapped):
+    (mapped.repo / "new_test.py").write_text("import feature_a\n")
+    selected = plan(mapped)
+    assert selected["fallback"] and selected["unknown_tests"] == ["new_test.py"]
+    assert selected["groups"][0]["state"] == "UNPROVEN"
+
+
+def test_unmapped_python_consumer_outside_src_still_requires_broad_verification(mapped):
+    (mapped.repo / "consumer.py").write_text("import feature_a\n")
+    selected = plan(mapped)
+    assert selected["fallback"] and selected["unknown_consumers"] == ["consumer.py"]
+
+
+@pytest.mark.parametrize("workers", [8, 12])
+def test_parallel_execution_receipt_has_observed_counts_argv_and_timing(mapped, monkeypatch, workers):
+    calls = []
+    def run(argv, **_):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, f"{workers} workers [3 items]\n2 passed, 1 skipped in 0.02s", "")
+    monkeypatch.setattr(verification, "subprocess", SimpleNamespace(run=run, TimeoutExpired=subprocess.TimeoutExpired,
+                                                                 CompletedProcess=subprocess.CompletedProcess))
+    argv = ["python", "-m", "pytest", "tests/test_a.py", "-q", "-n", "12"]
+    result, selected, prior = _execute(mapped, registered_only=True, fallback_argv=[*FULL, "-n", "12"],
+        registered_profiles={"project-tests": [*FULL, "-n", "12"], "component-a": argv})
+    entry = selected["groups"][0]
+    assert calls == [argv] and entry["workers_requested"] == 12 and entry["workers_actual"] == workers
+    if workers == 12:
+        assert result.returncode == 0 and set(prior) == {"a"} and selected["narrow_execution_observed"]
+    else:
+        assert result.returncode != 0 and not prior and not selected["narrow_execution_observed"]
+        assert entry["state"] == "UNPROVEN" and entry["reason"] == "PYTEST_WORKER_COUNT_MISMATCH"
+    assert entry["actual_argv"] == argv
+    assert entry["tests_executed"]["passed"] == 2 and entry["tests_executed"]["skipped"] == 1
+    assert entry["started_at"] <= entry["finished_at"] and entry["wall_seconds"] >= 0
+    assert json.loads((mapped.evidence / "round-0/mt01.results.json").read_text()) == selected
+
+
+def test_affected_proof_executes_fresh_and_preserves_immutable_original(mapped, monkeypatch):
+    previous = evidence(mapped, plan(mapped)["groups"][0])
+    original = previous.payload
+    (mapped.repo / "feature_a.py").write_text("VALUE = 2\n")
+    calls = []
+    def run(argv, **_):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "1 passed in 0.02s", "")
+    monkeypatch.setattr(verification, "subprocess", SimpleNamespace(run=run, TimeoutExpired=subprocess.TimeoutExpired,
+                                                                 CompletedProcess=subprocess.CompletedProcess))
+    _, selected, prior = _execute(mapped, prior={"a": previous})
+    assert selected["groups"][0]["state"] == "INVALIDATED" and len(calls) == 1
+    assert prior["a"].sha256 != previous.sha256 and previous.payload == original
+
+
+def test_fanin_performs_fresh_broad_execution_even_with_valid_prior(mapped, monkeypatch):
+    first = plan(mapped, aggregate_sources=("b" * 40,))
+    previous = evidence(mapped, first["groups"][0])
+    calls = []
+    def run(argv, **_):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "1 passed", "")
+    monkeypatch.setattr(verification, "subprocess", SimpleNamespace(run=run, TimeoutExpired=subprocess.TimeoutExpired,
+                                                                 CompletedProcess=subprocess.CompletedProcess))
+    _, selected, _ = _execute(mapped, prior={"registered-fallback": previous}, aggregate_sources=("b" * 40,))
+    assert selected["groups"][0]["state"] == "INVALIDATED" and calls == [FULL]
+    assert not selected["narrow_execution_observed"]
+
+
+def test_groups_share_remaining_budget_and_preserve_completed_success_on_timeout(mapped, monkeypatch):
+    tick = [10.0]
+    budgets = []
+    def run(argv, **kwargs):
+        budgets.append(kwargs["timeout"])
+        tick[0] += 4
+        if len(budgets) == 2:
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"], b"partial", b"")
+        return subprocess.CompletedProcess(argv, 0, "1 passed", "")
+    monkeypatch.setattr(verification, "time", SimpleNamespace(monotonic=lambda: tick[0]))
+    monkeypatch.setattr(verification, "subprocess", SimpleNamespace(run=run, TimeoutExpired=subprocess.TimeoutExpired))
+    mapped.evidence.mkdir()
+    files, prior = {}, {}
+    def save(key, name, data):
+        (mapped.evidence / name).write_bytes(data)
+        files[key] = name
+    with pytest.raises(subprocess.TimeoutExpired):
+        verification.execute_plan(repo=mapped.repo, output_dir=mapped.evidence, base_sha="a" * 40,
+            base_files=mapped.base, changed_paths=["feature_a.py"], required_acs=("AC-A", "AC-B"),
+            fallback_argv=FULL, prior=prior, save=save, evidence_files=files,
+            deadline=100, timeout_seconds=6, groups=mapped.groups)
+    assert budgets == [6, 2] and set(prior) == {"a"}
+    result = json.loads((mapped.evidence / "mt01.results.json").read_text())
+    assert result["groups"][0]["result"] == "PASS" and result["groups"][1]["state"] == "UNPROVEN"
+    assert result["groups"][1]["reason"] == "VERIFY_TIMEOUT"
 
 
 def test_group_source_drift_discards_pass_and_stops(mapped, monkeypatch):
@@ -446,6 +673,9 @@ def test_mt01_unknown_or_infrastructure_never_replays_provider(tmp_path, monkeyp
                                     allowed_prefixes=fixture.state["scope"], minimum_test=True, acceptance_ids=("AC",))
     assert result["status"] != "BUILD_VERIFIED_FOR_SCOPE" and result["invocation_count"] == 1
     assert len(calls.read_text().splitlines()) == 1 and not result["replay_authorized"]
+    assert result["minimum_test"]["groups"][0]["state"] == "UNPROVEN"
+    receipt = json.loads((tmp_path / "evidence" / result["evidence_files"]["mt01_results"]).read_text())
+    assert receipt == result["minimum_test"]
 
 
 def test_ef02_missing_broad_registration_stops_without_provider(tmp_path, monkeypatch):
