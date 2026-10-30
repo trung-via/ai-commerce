@@ -155,3 +155,167 @@ def test_no_real_process_or_network_in_synthetic_tests(monkeypatch, tmp_path):
     if os.name != "nt":
         with pytest.raises(ca.AcquisitionBlocked, match="WINDOWS_INTERACTIVE_REQUIRED"):
             ca.run(env, launch=True, opt_in=True)
+
+
+# These tests exercise the production command and CDP decision gates without
+# attaching to a browser, contacting Google, or starting Windows processes.
+
+def _cdp_payload(env, **overrides):
+    return {
+        "Browser": "Chrome/156.0.0.0",
+        "Protocol-Version": "1.3",
+        "webSocketDebuggerUrl": f"ws://127.0.0.1:{env.port}/devtools/browser/fixture"
+    } | overrides
+
+
+class FakeResponse:
+    status = 200
+    def __init__(self, payload):
+        self.body = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        return False
+    def read(self, _limit):
+        return self.body
+
+
+@pytest.mark.parametrize("payload,allowed", [
+    (None, True),
+    ({"Browser": "NotChrome/1.0"}, False),
+    ({"Protocol-Version": "unexpected"}, False),
+    ({"webSocketDebuggerUrl": "ws://127.0.0.1:9555/devtools/browser/fixture"}, False),
+    ({"webSocketDebuggerUrl": "ws://attacker.invalid:9222/devtools/browser/fixture"}, False),
+    ({"webSocketDebuggerUrl": "ws://127.0.0.1:9222/other"}, False),
+])
+def test_cdp_handshake_requires_real_browser_protocol(monkeypatch, tmp_path, payload, allowed):
+    env = read(*fixture(tmp_path)[:3])
+    captures = []
+    class FakeOpener:
+        def open(self, request, timeout):
+            captures.append((request.full_url, timeout))
+            body = _cdp_payload(env, **(payload or {}))
+            return FakeResponse(body)
+    monkeypatch.setattr(ca, "build_opener", lambda *args: FakeOpener())
+    if allowed:
+        ca._probe_cdp(env)
+    else:
+        with pytest.raises(ca.AcquisitionBlocked, match="CDP_PROTOCOL_UNAVAILABLE"):
+            ca._probe_cdp(env)
+    assert captures == [("http://127.0.0.1:9222/json/version", 2)]
+
+
+def test_cdp_rejects_timeout_invalid_json_and_oversized_response(monkeypatch, tmp_path):
+    env = read(*fixture(tmp_path)[:3])
+    class FakeOpener:
+        def __init__(self, payload=None, fail=False):
+            self.payload, self.fail = payload, fail
+        def open(self, request, timeout):
+            if self.fail:
+                raise TimeoutError("simulated")
+            return FakeResponse(self.payload)
+    for payload, fail in [(b"not json", False), (b"x" * 8193, False), (None, True)]:
+        monkeypatch.setattr(ca, "build_opener", lambda *a, _p=payload, _f=fail: FakeOpener(_p, _f))
+        with pytest.raises(ca.AcquisitionBlocked, match="CDP_PROTOCOL_UNAVAILABLE"):
+            ca._probe_cdp(env)
+
+
+def _fake_windows_run(monkeypatch, *, states, outcome=None):
+    import types
+    monkeypatch.setattr(ca, "os", types.SimpleNamespace(name="nt", environ=dict(os.environ)))
+    monkeypatch.setattr(ca, "_interactive_session", lambda: 5)
+    monkeypatch.setattr(ca, "_require_operator_control", lambda env: None)
+    monkeypatch.setattr(ca, "_verify_google_chrome", lambda env: None)
+    monkeypatch.setattr(ca, "_query_windows", lambda port: {})
+    monkeypatch.setattr(ca.time, "sleep", lambda seconds: None)
+    handshake = []
+    monkeypatch.setattr(ca, "_probe_cdp", lambda env: handshake.append(env.port))
+    states = iter(states)
+    monkeypatch.setattr(ca, "evaluate", lambda env, data, session_id: next(states))
+    spawns = []
+    class Child:
+        pid = 500
+        def poll(self): return outcome
+    def fake_spawn(command, **kwargs):
+        spawns.append((command, kwargs))
+        return Child()
+    monkeypatch.setattr(ca.subprocess, "Popen", fake_spawn)
+    return spawns, handshake
+
+
+def test_launch_one_process_and_real_cdp_verification_gate(monkeypatch, tmp_path):
+    env = read(*fixture(tmp_path)[:3])
+    spawns, handshake = _fake_windows_run(monkeypatch, states=[
+        ("ABSENT", None), ("OWNED", 500)])
+    result = ca.run(env, launch=True, opt_in=True)
+    assert result["status"] == "READY_ATTACH" and result["cdp_verified"]
+    assert result["launched"] is True
+    assert handshake == [9222] and len(spawns) == 1
+    command, options = spawns[0]
+    assert command == env.command()
+    assert options["env"] == ca._child_environment()
+    assert "GITHUB_TOKEN" not in options["env"]
+
+
+def test_launch_unknown_owner_does_not_retry(monkeypatch, tmp_path):
+    env = read(*fixture(tmp_path)[:3])
+    spawns, _ = _fake_windows_run(monkeypatch, states=[
+        ("ABSENT", None), ("OWNED", 501)])
+    with pytest.raises(ca.AcquisitionBlocked, match="LAUNCH_OWNER_MISMATCH"):
+        ca.run(env, launch=True, opt_in=True)
+    assert len(spawns) == 1
+
+
+def test_probe_owned_requires_handshake(monkeypatch, tmp_path):
+    env = read(*fixture(tmp_path)[:3])
+    spawns, handshake = _fake_windows_run(monkeypatch, states=[("OWNED", 123)])
+    assert ca.run(env, launch=False, opt_in=False)["cdp_verified"] is True
+    assert handshake == [9222] and not spawns
+
+
+def test_launch_not_authorized_has_no_spawn(monkeypatch, tmp_path):
+    env = read(*fixture(tmp_path)[:3])
+    spawns, _ = _fake_windows_run(monkeypatch, states=[("ABSENT", None)])
+    with pytest.raises(ca.AcquisitionBlocked, match="LAUNCH_NOT_AUTHORIZED"):
+        ca.run(env, launch=True, opt_in=False)
+    assert not spawns
+
+
+def test_child_environment_is_allowlist_not_blacklist(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "private")
+    monkeypatch.setenv("AI_COMMERCE_OTHER_SECRET", "private")
+    monkeypatch.setenv("AIOS_TOKEN", "private")
+    child = ca._child_environment()
+    assert "GITHUB_TOKEN" not in child
+    assert "AI_COMMERCE_OTHER_SECRET" not in child
+    assert "AIOS_TOKEN" not in child
+
+
+def test_google_signature_fails_closed(monkeypatch, tmp_path):
+    import types
+    env = read(*fixture(tmp_path)[:3])
+    monkeypatch.setattr(ca, "_powershell", lambda: tmp_path / "powershell.exe")
+    monkeypatch.setattr(ca.subprocess, "run",
+                        lambda *a, **k: types.SimpleNamespace(returncode=1, stdout=b""))
+    with pytest.raises(ca.AcquisitionBlocked, match="CHROME_EXECUTABLE_UNTRUSTED"):
+        ca._verify_google_chrome(env)
+
+
+def test_private_control_checks_config_and_profile(monkeypatch, tmp_path):
+    from ai_commerce.remote import local_completion_handoff
+    env = read(*fixture(tmp_path)[:3])
+    seen = []
+    monkeypatch.setattr(local_completion_handoff, "_private_identity", seen.append)
+    ca._require_operator_control(env)
+    assert seen == [env.config_path, env.user_data_dir,
+                    env.user_data_dir / env.profile_directory]
+
+
+def test_actual_windows_command_line_quoting_when_available():
+    if os.name != "nt":
+        pytest.skip("Win32 parsing only available on Windows")
+    command = '"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" "--user-data-dir=C:\\Users\\My User\\Chrome" --profile-directory=Default'
+    argv = ca._commandline_argv(command)
+    assert argv[0].endswith("chrome.exe")
+    assert argv[1] == r"--user-data-dir=C:\Users\My User\Chrome"
+    assert argv[2] == "--profile-directory=Default"
