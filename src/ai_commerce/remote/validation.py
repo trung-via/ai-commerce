@@ -10,6 +10,7 @@ from ai_commerce.engineering.profile import ExecutorSelection
 from ai_commerce.engineering.runner import validate_max_repair_rounds, DEFAULT_MAX_REPAIR_ROUNDS
 from ai_commerce.engineering.git import git_argv
 from ai_commerce.engineering.pytest_profile import registered_workers
+from ai_commerce.engineering.minimum_test import approved_groups
 
 IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 HEX_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -118,6 +119,35 @@ def _validate_actions(data: dict, *, registry: dict[str, list[str]],
     for node in graph:
         dfs(node)
     return data
+
+def approved_acceptance_plan(action: dict) -> dict:
+    """Read a bounded declaration from the issuer's fingerprinted v1 instruction.
+
+    No prose inference, new schema fields, executor file, or test argv is trusted.
+    Absence/ambiguity is an unknown AC, forcing broad verification. Named IDs
+    describe the reviewed test families; arbitrary issue ACs remain unknown.
+    """
+    prefix = "MT01_ACCEPTANCE_JSON:"
+    lines = [line.strip() for line in action["instruction"].splitlines() if prefix in line]
+    reason = "EXPLICIT_FINGERPRINTED_INSTRUCTION_ACCEPTANCE"
+    try:
+        if len(lines) != 1 or not lines[0].startswith(prefix):
+            raise ValueError("missing or ambiguous declaration")
+        ids = json.loads(lines[0][len(prefix):])
+        if (not isinstance(ids, list) or not 1 <= len(ids) <= 128 or
+                any(not isinstance(ac, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", ac) for ac in ids)
+                or len(set(ids)) != len(ids)):
+            raise ValueError("invalid acceptance IDs")
+    except (ValueError, TypeError):
+        ids = ["MT01.ACCEPTANCE_UNDECLARED"]
+        reason = "AC_DECLARATION_MISSING_OR_INVALID_REQUIRES_BROAD_SCOPE"
+    mapping = {ac: {"group": g.name, "tests": list(g.tests)} for g in approved_groups() for ac in g.acs}
+    unknown = sorted(set(ids) - mapping.keys())
+    return {"ids": sorted(ids), "unknown_ids": unknown,
+            "consumer_map": {ac: mapping[ac] for ac in sorted(ids) if ac in mapping},
+            "source": "ISSUER_FINGERPRINTED_V1_INSTRUCTION", "reason": reason,
+            "broad_required": bool(unknown)}
+
 
 def approved_verification_plan(action: dict, registry: dict[str, list[str]]) -> dict:
     """Until a companion registration lands, unknown MT-01 scope uses full pytest.
