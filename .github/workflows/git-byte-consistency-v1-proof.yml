@@ -1,0 +1,23 @@
+name: "Git Byte Consistency v1: exact A12-02 Windows candidate checkout"
+on:
+  push:
+    branches:
+      - probe/git-byte-v1-a12-02-candidate-20261030
+    paths:
+      - .github/workflows/git-byte-consistency-v1-proof.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  preflight:
+    runs-on: [self-hosted, Windows, ai-commerce-ef02]
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Ensure source candidate worktree is pristine
+        shell: pwsh
+        run: |
+          ./scripts/EF02-A12-Worktree-Preflight.ps1 -SourceSha ${{ github.sha }}
