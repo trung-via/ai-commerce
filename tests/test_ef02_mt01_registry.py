@@ -35,6 +35,7 @@ REQUIRED_COMPONENTS = {
     "mt01-git-integrity-tests",
     "mt01-ef02-recovery-tests",
     "mt01-ef02-wake-tests",
+    "mt01-ef02-scope-tests",
 }
 
 
