@@ -19,6 +19,7 @@ from ai_commerce.engineering.runner import (
 )
 from ai_commerce.engineering.git import git_argv, resolve_git_executable
 from ai_commerce.engineering.minimum_test import Evidence, file_hashes
+from ai_commerce.engineering.git_byte_consistency import GitByteConsistencyError, inspect_fresh_checkout
 
 
 def _fresh_aggregate_evidence(report: dict, *, root: Path, workspace: Path,
@@ -214,6 +215,23 @@ class LocalBatchWorker:
             if p.returncode != 0:
                 outcome.update(status="SOURCE_WORKTREE_FAILED",
                                error_code="GIT_WORKTREE_ADD_NONZERO", diagnostic=p.stderr)
+                return finish()
+            # Fail before EF01 spawn (or any model invocation) with an exact
+            # read-only checkout diagnostic, rather than hiding a Git conversion
+            # fault under EF01_RESULT_MISSING / EXECUTION_UNKNOWN.
+            try:
+                checkout_probe = inspect_fresh_checkout(
+                    worktree, effective, git_executable=getattr(self, "git_executable", None))
+            except GitByteConsistencyError as exc:
+                outcome.update(status="SOURCE_CHECKOUT_INCONSISTENT",
+                               error_code=str(exc), executor_invoked=False)
+                return finish()
+            _write_json(path / "checkout_preflight.json", checkout_probe)
+            if not checkout_probe["clean"]:
+                outcome.update(status="SOURCE_CHECKOUT_INCONSISTENT",
+                               error_code=checkout_probe["error_code"],
+                               checkout_preflight=checkout_probe,
+                               executor_invoked=False)
                 return finish()
             plan = approved_verification_plan(action, self.profiles)
             outcome["verification_plan"] = plan
