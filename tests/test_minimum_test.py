@@ -88,16 +88,19 @@ def test_real_uncertainty_config_and_fanin_use_exact_broad_registry(real_tree, m
 def test_current_registry_does_not_activate_unregistered_groups(real_tree, monkeypatch):
     current = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_text())
     selected = real_plan(real_tree, monkeypatch, "tests/test_a12_claims.py", registry=current)
-    assert selected["fallback"]
-    assert selected["groups"][0]["binding"]["argv"] == current["project-tests"]
-    assert "REGISTERED_ARGV_ONLY_COMPANION_REGISTRATION_REQUIRED" in selected["reason_codes"]
+    if "mt01-a12-tests" in current:
+        assert not selected["fallback"] and selected["groups"][0]["selected_profile"] == "mt01-a12-tests"
+    else:
+        assert selected["fallback"]
+        assert selected["groups"][0]["binding"]["argv"] == current["project-tests"]
+        assert "REGISTERED_ARGV_ONLY_COMPANION_REGISTRATION_REQUIRED" in selected["reason_codes"]
 
 
 def test_companion_report_has_exact_reviewed_parallel_commands(real_tree):
     report = (ROOT / "docs/engineering/MT01_COMPONENT_AWARE_IMPLEMENTATION_REPORT.md").read_text()
     proposed = json.loads(report.split("```json\n", 1)[1].split("\n```", 1)[0])
     current = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_text())
-    assert not proposed.keys() & current.keys()  # Existing entries need no duplicate registration.
+    assert all(current[key] == argv for key, argv in proposed.items() if key in current)  # Companions may already be active.
     combined = {**current, **proposed}
     for g in real_tree.groups:
         expected = ["python", "-m", "pytest", *g.tests, "-q", "-n", "12"]
@@ -108,8 +111,11 @@ def test_component_local_m02_requires_profile_that_actually_collects_it(real_tre
     current = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_text())
     path = "src/ai_commerce/opportunity/trends/tracking.py"
     selected = real_plan(real_tree, monkeypatch, path, registry=current)
-    assert selected["fallback"] and selected["groups"][0]["state"] == "UNPROVEN"
-    assert selected["groups"][0]["binding"]["argv"] == current["project-tests"]
+    if "mt01-a10-m02-tests" in current:
+        assert not selected["fallback"] and "a10-m02" in selected["selected_groups"]
+    else:
+        assert selected["fallback"] and selected["groups"][0]["state"] == "UNPROVEN"
+        assert selected["groups"][0]["binding"]["argv"] == current["project-tests"]
     activated = real_plan(real_tree, monkeypatch, path)
     assert not activated["fallback"] and "a10-m02" in activated["selected_groups"]
 
