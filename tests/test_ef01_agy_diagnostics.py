@@ -225,3 +225,15 @@ def test_unchanged_failure_precondition_blocks_next_model_call(tmp_path, monkeyp
     assert calls == [0, 1]
     assert result["stop_reason"] == "UNCHANGED_FAILURE_PRECONDITION"
     assert result["failure_provenance"]["phase"] == "EF01_REGISTERED_VERIFY"
+
+@pytest.mark.parametrize("exit_code", [128, 130, -9])
+def test_interrupted_provider_exit_preserves_unknown_effects_despite_quota(tmp_path, monkeypatch, exit_code):
+    result, calls = run_fixture(tmp_path, monkeypatch,
+        [{"type": "turn.failed", "error": {"message": "quota exceeded"}}],
+        exit_code=exit_code)
+    assert result["status"] == "EXECUTION_UNKNOWN"
+    assert result["error_code"] == "EXECUTOR_INTERRUPTED"
+    assert result["failure_provenance"]["phase"] == "UNKNOWN_EFFECTS"
+    assert result["verify_exit_code"] is None
+    assert result["replay_authorized"] is False
+    assert calls == ["provider"]
