@@ -62,9 +62,25 @@ def provision(path):
 
 
 def write_private(path, data):
+    """Provision synthetic operator-owned files; never alter product ACL guards."""
     path.write_text(json.dumps(data) if isinstance(data, dict) else data, encoding="utf-8")
     if os.name == "posix":
         path.chmod(0o600)
+    elif os.name == "nt":
+        # GitHub-hosted Windows elevated tokens can create these test-only
+        # registry/grants files owned by BUILTIN\\Administrators. Access ACLs
+        # alone are insufficient: D5.4 requires the exact operator owner SID.
+        sid = handoff._windows_process_sid()
+        result = subprocess.run(
+            ["icacls", str(path), "/setowner", "*" + sid],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, (
+            "test private file owner provisioning failed: " + result.stderr
+        )
+        owner, aces = handoff._windows_acl(path)
+        assert owner == sid, "test private file owner differs from runner SID"
+        handoff._check_windows_acl(owner, aces, sid)
 
 
 class Clock:
