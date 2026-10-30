@@ -1,6 +1,6 @@
 * text=auto
 *.md text eol=lf
-*.json text eol=lf
+*.json -text -eol
 *.ps1 text eol=crlf
 *.docx binary
 *.png binary
@@ -10,4 +10,3 @@
 examples/*/evidence/*.json -text -eol
 
 # Raw EF01-R evidence may contain CRLF; preserve immutable verified bytes across OS.
-**/repair_evidence/*.json -text -eol
