@@ -167,3 +167,44 @@ def test_caller_flag_without_authority_still_fails():
     event, report, provenance = evidence()
     with pytest.raises(ProvenanceError, match="PROVENANCE_UNVERIFIED"):
         verify_provenance(event, report, provenance)
+
+
+def test_artifact_zip_get_uses_github_rest_api_accept_header(monkeypatch):
+    """The zip endpoint returns a redirect only for the GitHub REST media type."""
+    from ai_commerce.remote import github_artifact_authority as ga
+
+    captured = []
+    def fake_fetch(url, token, *, max_bytes, accept, timeout):
+        captured.append((url, token, max_bytes, accept, timeout))
+        return b"test-archive-bytes"
+
+    monkeypatch.setattr(ga, "_fetch", fake_fetch)
+    url = "https://api.github.com/repos/trung-via/ai-commerce/actions/artifacts/301/zip"
+    assert ga.GitHubRestArtifactAuthority._read_bytes(
+        url, "test-token-ONLY", timeout=7) == b"test-archive-bytes"
+    assert captured == [
+        (url, "test-token-ONLY", ga._MAX_ZIP, ga._HEADERS["Accept"], 7)
+    ]
+    assert captured[0][3] == "application/vnd.github+json"
+
+
+def test_artifact_zip_get_uses_same_accept_as_json_endpoint(monkeypatch):
+    """The artifact ZIP REST request and metadata REST request share API Accept."""
+    from ai_commerce.remote import github_artifact_authority as ga
+
+    values = []
+    def fake_fetch(url, token, *, max_bytes, accept, timeout):
+        values.append((max_bytes, accept))
+        return b"{}"
+
+    monkeypatch.setattr(ga, "_fetch", fake_fetch)
+    ga.GitHubRestArtifactAuthority._read_json(
+        "https://api.github.com/repos/trung-via/ai-commerce/actions/runs/42",
+        "test-token-ONLY", timeout=3)
+    ga.GitHubRestArtifactAuthority._read_bytes(
+        "https://api.github.com/repos/trung-via/ai-commerce/actions/artifacts/301/zip",
+        "test-token-ONLY", timeout=3)
+    assert values == [
+        (ga._MAX_JSON, ga._HEADERS["Accept"]),
+        (ga._MAX_ZIP, ga._HEADERS["Accept"]),
+    ]
