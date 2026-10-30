@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
+from .candidate_policy import REVIEW_STATUS, candidate_accepted, evidence_digest
 
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
@@ -15,7 +16,7 @@ _SAFE_STATUS = re.compile(r"[A-Z][A-Z0-9_]{0,95}\Z")
 # Explicit final EF02 outcomes. A new unknown status requires review before
 # it becomes eligible for a wake. The event remains optional if unsupported.
 FINAL_ACTION_STATUSES = frozenset({
-    "CANDIDATE_READY", "INVALID_ACTION", "UNPROVEN", "REUSE_VERIFICATION_FAILED",
+    "CANDIDATE_READY", REVIEW_STATUS, "INVALID_ACTION", "UNPROVEN", "REUSE_VERIFICATION_FAILED",
     "DUPLICATE_CLAIM_NO_REEXECUTION", "ATTEMPT_ID_CONFLICT",
     "CLAIM_UNAVAILABLE", "INTEGRATION_FAILED", "SOURCE_WORKTREE_FAILED",
     "PRESPAWN_CHECKPOINT_UNCONFIRMED", "EXECUTION_UNKNOWN",
@@ -77,8 +78,24 @@ def build_completion_event(report: Mapping, *, repository: str,
         }
         if entry["status"] not in FINAL_ACTION_STATUSES:
             raise CompletionEventError("ACTION_NOT_FINAL")
+        if entry["status"] == "CANDIDATE_READY" and not candidate_accepted(action):
+            raise CompletionEventError("CANDIDATE_SCOPE_REVIEW_LAUNDERED")
+        if "review_required" in action:
+            if type(action["review_required"]) is not bool:
+                raise CompletionEventError("INVALID_REVIEW_REQUIRED")
+            entry["review_required"] = action["review_required"]
+        if "candidate_evidence_sha256" in action:
+            digest = action["candidate_evidence_sha256"]
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise CompletionEventError("INVALID_CANDIDATE_EVIDENCE_SHA256")
+            if action.get("candidate_evidence") is not None and evidence_digest(action["candidate_evidence"]) != digest:
+                raise CompletionEventError("CANDIDATE_EVIDENCE_MISMATCH")
+            entry["candidate_evidence_sha256"] = digest
+        if entry["status"] == REVIEW_STATUS and (
+                entry.get("review_required") is not True or "candidate_evidence_sha256" not in entry):
+            raise CompletionEventError("CANDIDATE_REVIEW_METADATA_REQUIRED")
         candidate_sha = action.get("candidate_sha")
-        if entry["status"] == "CANDIDATE_READY" and candidate_sha is None:
+        if entry["status"] in ("CANDIDATE_READY", REVIEW_STATUS) and candidate_sha is None:
             raise CompletionEventError("CANDIDATE_UNPROVEN")
         if candidate_sha is not None:
             entry["candidate_sha"] = _require(candidate_sha, _SHA, "CANDIDATE_SHA")
@@ -87,7 +104,7 @@ def build_completion_event(report: Mapping, *, repository: str,
         raise CompletionEventError("DUPLICATE_ACTION_OR_ATTEMPT")
     if type(report.get("total")) is not int or report["total"] != len(projected):
         raise CompletionEventError("TOTAL_MISMATCH")
-    succeeded = sum(a["status"] == "CANDIDATE_READY" for a in projected)
+    succeeded = sum(candidate_accepted(a) for a in projected)
     if (type(report.get("succeeded")) is not int or report["succeeded"] != succeeded or
             report["status"] != ("COMPLETE" if succeeded == len(projected) else "PARTIAL_OR_FAILED")):
         raise CompletionEventError("AGGREGATE_MISMATCH")
@@ -138,15 +155,16 @@ def validate_completion_event(event: Mapping) -> dict:
         raise CompletionEventError("INVALID_ACTIONS")
     for action in actions:
         if (not isinstance(action, Mapping) or
-                set(action) not in ({"action_id", "attempt_id", "status"},
-                                    {"action_id", "attempt_id", "status", "candidate_sha"})):
+                not {"action_id", "attempt_id", "status"} <= set(action) or
+                not set(action) <= {"action_id", "attempt_id", "status", "candidate_sha",
+                                    "review_required", "candidate_evidence_sha256"}):
             raise CompletionEventError("EVENT_ACTION_SHAPE_INVALID")
     report = {
         "kind": "AI_COMMERCE_REMOTE_BATCH_RESULT", "version": 1,
         "batch_id": event["batch_id"], "source_sha": event["source_sha"],
         "status": event["batch_status"], "actions": actions,
         "total": len(actions),
-        "succeeded": sum(action.get("status") == "CANDIDATE_READY" for action in actions),
+        "succeeded": sum(candidate_accepted(action) for action in actions),
     }
     try:
         expected = build_completion_event(

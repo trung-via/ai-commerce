@@ -495,7 +495,8 @@ def _git_repo(tmp_path, real_git=True):
     return repo, head
 
 
-def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, checkpoint_error=False, real_git=True):
+def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, checkpoint_error=False, real_git=True,
+                    drift=None):
     monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
     repo, head = _git_repo(tmp_path, real_git)
@@ -568,6 +569,8 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
         code = "from pathlib import Path; Path('impl.py').write_text(" + repr(content) + ");"
         if index == 0:
             code += "Path('kept.txt').write_text('preserve');"
+        if drift:
+            code += "p=Path(" + repr(drift) + ");p.parent.mkdir(parents=True,exist_ok=True);p.write_text('ordinary');"
         code += "print('{\\\"type\\\":\\\"turn.completed\\\"}')"
         return [sys.executable, "-c", code], None
 
@@ -593,7 +596,7 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
                 aggregate_sources=args.aggregate_source, host_slots=args.host_slots,
                 registered_profiles=json.loads(args.registered_profiles_json.read_text())
                 if args.registered_profiles_json else None)
-            self.returncode = 0 if result["status"] == "BUILD_VERIFIED_FOR_SCOPE" else 1
+            self.returncode = 0 if result["status"] in remote.VERIFIED_STATUSES else 1
             return "", ""
 
     monkeypatch.setattr(remote, "subprocess", SimpleNamespace(
