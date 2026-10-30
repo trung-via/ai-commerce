@@ -213,6 +213,8 @@ def test_ef02_direct_git_admin_fetch_credentials_do_not_enter_child(tmp_path, mo
         calls.append((argv, kwargs))
         return subprocess.CompletedProcess(argv, 0 if "fetch" in argv else 1, "", "fixture worktree failure")
     monkeypatch.setenv("GITHUB_TOKEN", "fake-credential-not-a-real-secret")
+    inherited_git = {key: value for key, value in _safe_child_env(tmp_path).items()
+                     if key.startswith("GIT_CONFIG_")}
     monkeypatch.setattr("ai_commerce.remote.worker.subprocess.run", run)
     worker = _worker(tmp_path, Github())
     worker.git_executable = direct_git
@@ -220,8 +222,12 @@ def test_ef02_direct_git_admin_fetch_credentials_do_not_enter_child(tmp_path, mo
     assert outcome["status"] == "SOURCE_WORKTREE_FAILED"
     assert [argv[0] for argv, _ in calls] == [direct_git, direct_git]
     assert calls[0][1]["env"]["GIT_CONFIG_KEY_0"] == "http.https://github.com/.extraheader"
-    assert "GIT_CONFIG_COUNT" not in _safe_child_env(tmp_path)
-    assert "GITHUB_TOKEN" not in _safe_child_env(tmp_path)
+    child_env = _safe_child_env(tmp_path)
+    # Fetch-only credentials must not leak, but inherited protection must survive.
+    assert {key: value for key, value in child_env.items()
+            if key.startswith("GIT_CONFIG_")} == inherited_git
+    assert calls[0][1]["env"]["GIT_CONFIG_VALUE_0"] not in child_env.values()
+    assert "GITHUB_TOKEN" not in child_env
 
 
 def test_two_registered_actions_each_launch_twelve_with_default_max_parallel(tmp_path, monkeypatch):
