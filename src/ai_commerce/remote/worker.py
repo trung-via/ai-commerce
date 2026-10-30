@@ -25,13 +25,16 @@ from ai_commerce.engineering.minimum_test import Evidence, file_hashes
 def _fresh_aggregate_evidence(report: dict, *, root: Path, workspace: Path,
                               source_sha: str, sources: list[str], argv: list[str]) -> bool:
     """Validate immutable executed proof against the actual combined worktree."""
-    plan = report.get("minimum_test", {})
-    if (not report.get("minimum_test_enabled") or report.get("verify_argv") != argv or
-            plan.get("aggregate_sources") != sources or not plan.get("groups")):
-        return False
     try:
+        plan = report.get("minimum_test")
+        if (not report.get("minimum_test_enabled") or report.get("verify_argv") != argv or
+                not isinstance(plan, dict) or plan.get("aggregate_sources") != sources or
+                not isinstance(plan.get("groups"), list) or not plan["groups"]):
+            return False
         current = file_hashes(workspace)
         for index, group in enumerate(plan["groups"]):
+            if not isinstance(group, dict) or not isinstance(group.get("binding"), dict):
+                return False
             binding = group["binding"]
             if (group.get("actual_exit_code") != 0 or group.get("state") not in ("EXECUTE", "INVALIDATED") or
                     binding["base_sha"] != source_sha or binding["aggregate_sources"] != sources or
@@ -47,7 +50,7 @@ def _fresh_aggregate_evidence(report: dict, *, root: Path, workspace: Path,
             if not proof.valid_for(binding, root):
                 return False
         return True
-    except (ValueError, KeyError, TypeError, OSError):
+    except (ValueError, KeyError, TypeError, OSError, AttributeError):
         return False
 
 def _remote_codex_sandbox_args(executor: str, *, windows: bool) -> list[str]:
