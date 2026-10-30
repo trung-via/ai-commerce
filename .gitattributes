@@ -1,6 +1,7 @@
 * text=auto
 *.md text eol=lf
-*.json text eol=lf
+*.json -text -eol
+*.py -text -eol
 *.ps1 text eol=crlf
 *.docx binary
 *.png binary
