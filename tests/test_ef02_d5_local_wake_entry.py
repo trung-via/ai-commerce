@@ -195,4 +195,4 @@ def test_windows_process_identity_is_read_from_actual_process_token():
         pytest.skip("Windows process token is unavailable on POSIX")
     identity = d5._windows_process_sid()
     assert isinstance(identity, str)
-    assert re.fullmatch(r"S-1-(?:\\d+-){1,14}\\d+", identity)
+    assert re.fullmatch(r"S-1-(?:\d+-){1,14}\d+", identity)
