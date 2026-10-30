@@ -40,6 +40,7 @@ __all__ = [
     "GitHubRestArtifactAuthority",
     "LocalCallerAttestation",
     "LocalCdpWakeAdapter",
+    "LocalChromeDoorbellAdapter",
     "LocalOriginRegistrar",
     "OriginError",
     "OriginAuthority",
@@ -55,3 +56,5 @@ __all__ = [
     "validate_completion_event",
     "verify_provenance",
 ]
+
+from .cdp_doorbell import LocalChromeDoorbellAdapter
