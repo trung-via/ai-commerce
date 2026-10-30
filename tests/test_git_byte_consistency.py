@@ -105,3 +105,33 @@ def test_candidate_filters_skip_deletions_and_reject_unsafe_paths(tmp_path: Path
     assert_candidate_git_filter_consistency(repo, [("gone.json", None, None)])
     with pytest.raises(GitByteConsistencyError, match="CANDIDATE_PATH_INVALID"):
         assert_candidate_git_filter_consistency(repo, [("../escape.json", b"{}", "100644")])
+
+
+def test_transport_rejects_filter_mismatch_before_any_remote_api_write(tmp_path: Path) -> None:
+    from hashlib import sha256
+    from ai_commerce.remote.transport import GitHubTransport
+
+    repo = _repo(tmp_path)
+    (repo / "README.md").write_bytes(bytes([35, 32, 67, 82, 76, 70, 13, 10]))
+    original = (repo / "README.md").read_bytes()
+
+    class NoRemoteWrites(GitHubTransport):
+        def __init__(self) -> None:
+            super().__init__("trung-via/ai-commerce", "fake-token")
+            self.calls = 0
+
+        def api(self, method: str, path: str, data: dict | None = None) -> dict:
+            self.calls += 1
+            raise AssertionError("Remote Git API must not be called")
+
+    remote = NoRemoteWrites()
+    with pytest.raises(GitByteConsistencyError, match="CANDIDATE_GIT_FILTER_MISMATCH"):
+        remote.candidate(
+            source_sha="a" * 40,
+            attempt_id="byte-v1-0001",
+            workspace=repo,
+            paths=["README.md"],
+            expected_hashes={"README.md": sha256(original).hexdigest()},
+        )
+    assert remote.calls == 0
+    assert (repo / "README.md").read_bytes() == original
