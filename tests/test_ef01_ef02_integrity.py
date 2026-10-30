@@ -88,6 +88,10 @@ def test_candidate_bytes_changed_after_verify_rejected_without_github_writes(tmp
 def test_candidate_rename_deletes_original_and_adds_destination(tmp_path):
     repo = _repo(tmp_path)
     subprocess.run(["git", "-C", str(repo), "mv", "old.txt", "new.txt"], check=True)
+    # Publisher now checks whether raw bytes are compatible with Git's clean
+    # filter. Keep this successful rename fixture byte-portable on Windows.
+    target = repo / "new.txt"
+    target.write_bytes(target.read_bytes().replace(b"\r\n", b"\n"))
     paths = runner._changes(repo)
     hashes = runner._candidate_hashes(repo, paths)
     t = RecordingTransport()
