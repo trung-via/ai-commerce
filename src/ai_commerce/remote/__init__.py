@@ -10,6 +10,7 @@ from .conversation_binding import (
     ResolvedBinding,
     resolve_binding,
 )
+from .signed_origin_consent import SignedOriginConsentAuthority, registry_sha256
 from .trusted_origin import (
     LocalCallerAttestation,
     LocalOriginRegistrar,
@@ -42,6 +43,8 @@ __all__ = [
     "LocalOriginRegistrar",
     "OriginError",
     "OriginAuthority",
+    "SignedOriginConsentAuthority",
+    "registry_sha256",
     "ProvenanceError",
     "ResolvedBinding",
     "WakeDeliveryError",
