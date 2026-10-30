@@ -62,12 +62,17 @@ Do not rely on `/grant:r` or membership in Administrators as proof of
 ownership. On an elevated runner, the effective owner can be
 `BUILTIN\\Administrators` while the process SID is the user. The D5.4 guard
 requires exact user-SID ownership of the directory **and** of subsequently
-created state/lock files, and checks their allow ACEs. If later files are
-created under the Administrators owner, run the operator process with a
-non-elevated same-user token or use an explicitly reviewed same-SID ownership
-provisioning path; do not weaken `_check_windows_acl()`, add Users/Everyone
-ACEs, or make this a system-wide ACL change. If a supported local ownership
-setup is unavailable, retain the manual D5.3 fallback and fail closed.
+created state/lock files, and checks their allow ACEs. D5.4 passes its
+independently authenticated operator SID into the private-state transaction.
+For **newly created** handoff lock and atomic replacement files, the Windows
+file handle assigns that same SID as owner before the state is usable; this
+covers elevated tokens whose default owner would be Administrators. This
+changes neither the Windows ACL allowlist nor existing files' ownership.
+Any existing state/lock owned by Administrators or another SID still fails
+closed and must be reconciled by the operator; the code never silently
+takes ownership or retries an ambiguous handoff. Do not weaken
+`_check_windows_acl()`, add Users/Everyone ACEs, or make system-wide ACL changes.
+If a supported same-user setup is unavailable, use the manual D5.3 fallback.
 
 Compute the fingerprint from the operator's retained full original request:
 
