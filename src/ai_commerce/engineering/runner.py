@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
 import os
+import posixpath
 import re
 import subprocess
 import threading
@@ -117,17 +119,123 @@ def _observe_usage(data: bytes, executor: str) -> dict[str, int] | None:
 
 def _headless_denied_actions(data: bytes, executor: str) -> list[str]:
     """AGY may return SUCCESS/exit 0 when headless tool approval was denied."""
+    return sorted({item["tool"] for item in _headless_denial_diagnostics(data, executor)})
+
+
+def _headless_denial_diagnostics(data: bytes, executor: str, *, repo: Path | None = None,
+                                  agy_input_dir: Path | None = None) -> list[dict]:
+    """Only structured top-level denials; never infer a target from prose.
+
+    Targets are reduced to a lexical root classification, never copied or opened.
+    An unknown/malformed action is still a denial. Raw provider logs stay separate.
+    """
     if executor != "antigravity":
         return []
-    denied: set[str] = set()
+    result: list[dict] = []
     for value in _provider_events(data) or []:
-        if not isinstance(value.get("denied_actions"), list):
+        actions = value.get("denied_actions")
+        if not actions:
             continue
-        for item in value["denied_actions"]:
-            action = item.get("action") if isinstance(item, dict) else None
-            if isinstance(action, str) and action:
-                denied.add(action)
-    return sorted(denied)
+        for item in actions if isinstance(actions, list) else [{}]:
+            item = item if isinstance(item, dict) else {}
+            action = item.get("action")
+            tool = action if isinstance(action, str) and action in (
+                "read_file", "write_file", "edit_file", "command", "run_command",
+                "list_directory", "search") else "UNKNOWN_TOOL"
+            target = None
+            # These fields may be absent in AGY versions that report only action.
+            # Do not parse serialized commands, messages, URLs or prior artifacts.
+            for container in (item, item.get("arguments"), item.get("parameters"), item.get("args")):
+                if isinstance(container, dict):
+                    target = next((container[k] for k in ("path", "file_path", "absolute_path")
+                        if isinstance(container.get(k), str) and container[k].strip()), None)
+                    if target is not None:
+                        break
+            scope = "UNKNOWN"
+            if target is not None:
+                scope = "UNCLASSIFIED"
+                if len(target) <= 4096 and not any(ord(c) < 32 for c in target):
+                    private_check_path = target
+                    windows = bool(re.match(r"^[A-Za-z]:[/\\]|^\\\\", target))
+                    paths = ntpath if windows else posixpath
+                    if paths.isabs(target):
+                        normalized = paths.normcase(paths.normpath(target)).replace("\\", "/")
+                        scope = "EXTERNAL"
+                        for root, label in ((agy_input_dir, "AGY_INPUT"), (repo, "WORKTREE")):
+                            if root is not None:
+                                prefix = paths.normcase(paths.normpath(str(root))).replace("\\", "/").rstrip("/")
+                                if normalized == prefix or normalized.startswith(prefix + "/"):
+                                    scope = label
+                                    private_check_path = normalized[len(prefix):]
+                                    break
+                    else:
+                        scope = "RELATIVE"  # no assumption about provider-relative base
+                    parts = private_check_path.replace("\\", "/").lower().split("/")
+                    if any(p in (".local", ".git", ".aws", ".ssh", ".codex", ".gemini", "credentials", "secrets")
+                           or p == ".env" or p.startswith(".env.") for p in parts):
+                        scope = "PRIVATE_PATH"
+            result.append({"tool": tool, "target_status": (
+                "DENIED_TARGET_KNOWN" if target is not None else "DENIED_TARGET_UNKNOWN"),
+                "target_scope": scope})
+            if len(result) == 32:
+                return result
+    return result
+
+
+def _provider_test_observations(data: bytes) -> list[dict]:
+    """Bounded provider-reported command results, never official EF01 verification."""
+    result = []
+    for event in _provider_events(data) or []:
+        item = event.get("item")
+        if event.get("type") != "item.completed" or not isinstance(item, dict):
+            continue
+        command, code = item.get("command"), item.get("exit_code")
+        if (item.get("type") == "command_execution" and isinstance(command, str)
+                and re.match(r"^(?:(?:python(?:[0-9.]+)?|py)(?:\.exe)?\s+-m\s+pytest\b|pytest(?:\.exe)?\b)", command)
+                and type(code) is int and -255 <= code <= 255):
+            result.append({"phase": "AGENT_INTERNAL_PYTEST", "tool": "pytest",
+                "status": "PASSED" if code == 0 else "FAILED", "exit_code": code,
+                "authority": "PROVIDER_REPORTED_NOT_EF01_VERIFY"})
+            if len(result) == 16:
+                break
+    return result
+
+
+def _failure_provenance(inv: dict, *, precondition_instruction_sha256: str,
+                         sandbox_backend: str = "executor-default") -> dict | None:
+    """Safe classification and stable signature, independent of attempt identity.
+
+    Hash preconditions instead of exposing prompts, argv, file names or log text.
+    Registered verify, provider tools and Git publication remain separate origins.
+    """
+    if inv.get("error_code") is None:
+        return None
+    phase, tool = "UNKNOWN_EFFECTS", inv["executor"]
+    if inv.get("error_code") == "HEADLESS_TOOL_PERMISSION_DENIED":
+        phase = "HEADLESS_TOOL_DENIED"
+        tools = inv.get("denied_actions", [])
+        tool = tools[0] if len(tools) == 1 else "MULTIPLE_OR_UNKNOWN"
+    elif inv.get("status") in ("MODEL_AT_CAPACITY", "QUOTA_EXHAUSTED"):
+        phase = "PROVIDER_CAPACITY" if inv["status"] == "MODEL_AT_CAPACITY" else "PROVIDER_QUOTA"
+    elif inv.get("verify_started_at") or inv.get("verify_completed"):
+        phase = "EF01_REGISTERED_VERIFY" if inv.get("verification_origin") == "REGISTERED_EF01" else "EF01_VERIFY"
+        tool = "pytest" if _is_pytest(inv.get("verify_argv", [])) else "local-verifier"
+        if inv.get("status") in ("EXECUTION_UNKNOWN", "SOURCE_DRIFT", "GIT_UNEXPECTED_COMMIT", "SCOPE_VIOLATION"):
+            phase = "UNKNOWN_EFFECTS"
+    precondition = {key: inv.get(key) for key in (
+        "source_base_sha", "executor", "model", "reasoning_effort", "candidate_file_sha256", "verify_argv")}
+    precondition["verify_argv"] = inv.get("requested_verify_argv", inv.get("verify_argv"))
+    precondition.update(instruction_sha256=precondition_instruction_sha256,
+                        environment={"platform": os.name, "sandbox_backend": sandbox_backend})
+    classification = {"phase": phase, "tool": tool, "status": inv["status"],
+        "error_code": inv["error_code"], "source_sha": inv["source_base_sha"],
+        "executor": inv["executor"], "environment": precondition["environment"],
+        "precondition_sha256": _sha(_json_bytes(precondition)),
+        "denied_targets": inv.get("denied_action_diagnostics", [])}
+    attempt = inv["attempt_id"]
+    attempt = attempt if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", attempt) else "UNPROVEN"
+    return {**classification, "fingerprint": _sha(_json_bytes(classification)),
+            "attempt_id": attempt, "replay_authorized": False}
 
 
 
@@ -214,6 +322,13 @@ DEFAULT_ACTION_TIMEOUT_SECONDS = 7200
 MAX_TIMEOUT_SECONDS = 86400
 # Stay below cmd.exe's limit too: AGY may be installed as a Windows .cmd shim.
 AGY_COMMANDLINE_MAX_UNITS = 8000
+AGY_INPUT_CONTEXT = (
+    "Use the current isolated source worktree and this invocation's prepared agy_input only. "
+    "External archived artifacts are OPTIONAL, including prior GitHub artifacts, sibling worktrees "
+    "and runner-owned .local records. Do not read user profiles, credentials or authoritative runner logs. "
+    "Use current source and the disposable instruction/repair_feedback.json copies. "
+    "If these inputs are insufficient, report UNPROVEN; if a tool is denied, stop without a bypass. "
+)
 
 
 def validate_max_repair_rounds(value: int) -> int:
@@ -440,7 +555,8 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         inv.update(status=status, error_code=error)
         return
     # Preserve the original instruction evidence; guard only the provider wire prompt.
-    guarded_prompt = GIT_GUARD_INSTRUCTION + "\n\n" + prompt
+    context = AGY_INPUT_CONTEXT if selection.executor == "antigravity" else ""
+    guarded_prompt = GIT_GUARD_INSTRUCTION + "\n\n" + context + prompt
     command, stdin = command_for(selection, repo, guarded_prompt, codex_bin=codex_bin,
                                  antigravity_bin=antigravity_bin,
                                  codex_windows_sandbox=codex_windows_sandbox,
@@ -449,7 +565,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         # Preserve the complete original instruction/feedback on disk. Shorten only
         # the transported --print argument; never truncate recorded diagnostics.
         compact = (
-            GIT_GUARD_INSTRUCTION + " "
+            GIT_GUARD_INSTRUCTION + " " + AGY_INPUT_CONTEXT +
             "Read and follow the complete authorized instruction file "
             + str((agy_input_dir or directory) / "instruction.txt") + " (UTF-8; SHA256 "
             + _sha(prompt.encode("utf-8")) + "). "
@@ -523,7 +639,11 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
                 _write(directory / live.name, data)
             inv["evidence_files"]["executor_stdout_live"] = (directory / live.name).relative_to(output_dir).as_posix()
             inv["evidence_sha256"]["executor_stdout_live"] = _sha(data)
-    inv["denied_actions"] = _headless_denied_actions(out, selection.executor)
+    inv["denied_action_diagnostics"] = (
+        _headless_denial_diagnostics(out, selection.executor, repo=repo, agy_input_dir=agy_input_dir)
+        + _headless_denial_diagnostics(err, selection.executor, repo=repo, agy_input_dir=agy_input_dir))[:32]
+    inv["denied_actions"] = sorted({d["tool"] for d in inv["denied_action_diagnostics"]})
+    inv["provider_test_observations"] = _provider_test_observations(out)
     inv["provider_return_determinate"] = _provider_completed(out, selection.executor)
     usage = _observe_usage(out, selection.executor)
     if usage is not None:
@@ -536,15 +656,19 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     save("executor_diff", "git.after_executor.diff.patch", diff)
     # Even a provider failure gets a scoped snapshot and cumulative diff.
     save("tracked_diff", "git.tracked.diff.patch", diff)
-    if inv["status"] != "EXECUTOR_RETURNED_UNVERIFIED":
-        return
     problem = _source_problem(after, initial, verify_first_scope=verify_first_scope)
     if problem is None and inv["denied_actions"]:
         problem = ("EXECUTOR_PERMISSION_DENIED", "HEADLESS_TOOL_PERMISSION_DENIED")
-    if problem is None:
-        problem = _provider_problem(out + b"\n" + err)
+    # Interrupted/abnormal exits are UNKNOWN effects even if a partial provider
+    # event or stderr mentions a determinate-looking quota/capacity error.
+    # Never overwrite EXECUTOR_INTERRUPTED with a recoverable provider status.
+    if (problem is None and inv["executor_exit_code"] is not None
+            and inv["status"] != "EXECUTION_UNKNOWN"):
+        problem = _provider_problem(out) or _provider_problem(err)
     if problem:
         inv.update(status=problem[0], error_code=problem[1])
+        return
+    if inv["status"] != "EXECUTOR_RETURNED_UNVERIFIED":
         return
     if not after["changed_files"] or after == before:
         inv.update(status="NO_CODE_CHANGE",
@@ -556,6 +680,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     try:
         inv["verify_timeout_seconds"] = _remaining(deadline, verify_timeout_seconds)
         registered = bool(mt_context and mt_context["registered_only"])
+        inv["verification_origin"] = "REGISTERED_EF01" if registered else "LOCAL_EF01"
         if _is_pytest(verify_argv):
             require_managed_parallelism(repo, list(verify_argv), registered_only=registered)
         decision = worker_decision(
@@ -676,7 +801,8 @@ def _is_pytest(argv: Sequence[str]) -> bool:
 
 
 
-def _repair_prompt(instruction: str, feedback: dict, feedback_file: str) -> str:
+def _repair_prompt(instruction: str, feedback: dict, feedback_file: str, *,
+                    executor: str = "codex") -> str:
     """Keep AGY's Windows --print argument small; full diagnostics stay on disk."""
     previous = feedback["previous_invocations"]
     latest = previous[-1]
@@ -697,14 +823,21 @@ def _repair_prompt(instruction: str, feedback: dict, feedback_file: str) -> str:
             "result_file": item["result_file"], "result_sha256": _sha(_json_bytes(item)),
         } for item in previous],
     )
+    inputs = (
+        "Read the disposable agy_input/repair_feedback.json copy and its inline "
+        "previous_invocations verify_failure_details and source snapshots. "
+        "External archived artifacts are OPTIONAL. Runner-root artifact paths/hashes "
+        "are provenance references, not required read targets; do not follow them outside "
+        "the worktree or agy_input. If the mirrored inputs cannot establish the fix, stop UNPROVEN.\n"
+        if executor == "antigravity" else
+        "Read the full feedback, source snapshot (changed paths/hashes), logs and diffs "
+        "referenced relative to evidence_root. Earlier round diagnostics remain in those artifacts.\n")
     return instruction + (
         "\n\nRepair the determinate scoped pytest failure on this SAME worktree. "
         "Preserve cumulative changes and the original HEAD. "
         "Unexpected ordinary paths remain scope-review evidence, not publication permission. "
         "This is a fresh CLI invocation; no vendor session continuity is assumed. "
-        "Read the full feedback, source snapshot (changed paths/hashes), logs and diffs "
-        "referenced relative to evidence_root. Earlier round diagnostics remain in those artifacts.\n"
-        + json.dumps(inline, ensure_ascii=False, sort_keys=True))
+        + inputs + json.dumps(inline, ensure_ascii=False, sort_keys=True))
 
 
 def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: str,
@@ -799,6 +932,7 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
     }
     output_dir.mkdir(parents=True, exist_ok=False)
     expected = initial
+    seen_failure_fingerprints: set[str] = set()
     try:
         for round_index in range(max_repair_rounds + 1):
             inv = {
@@ -809,9 +943,11 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                 "reasoning_effort": selection.effort, "source_base_sha": report["source_base_sha"],
                 "started_at": _now(), "status": "NOT_STARTED", "error_code": None,
                 "executor_invoked": False, "executor_exit_code": None,
-                "verify_argv": list(verify_argv), "verify_exit_code": None, "verify_completed": False,
+                "verify_argv": list(verify_argv), "requested_verify_argv": list(verify_argv),
+                "verify_exit_code": None, "verify_completed": False,
                 "changed_files": [], "candidate_file_sha256": {}, "tracked_diff_sha256": None,
                 "scope_valid": None, "git_head_after": None, "denied_actions": [],
+                "denied_action_diagnostics": [], "provider_test_observations": [],
                 "out_of_scope_files": [], "scope_review_required": False,
                 "usage": None, "usage_status": "UNKNOWN", "cost": None, "cost_status": "UNKNOWN",
                 "evidence_files": {}, "evidence_sha256": {}, "repair_eligible": False,
@@ -829,7 +965,8 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                 }
                 # Freeze prior rounds before appending the current mutable record.
                 feedback = json.loads(json.dumps(feedback))
-                prompt = _repair_prompt(instruction, feedback, inv["evidence_dir"] + "/repair_feedback.json")
+                prompt = _repair_prompt(instruction, feedback, inv["evidence_dir"] + "/repair_feedback.json",
+                                        executor=selection.executor)
             inv["instruction_sha256"] = _sha(prompt.encode("utf-8"))
             report["invocations"].append(inv)
             try:
@@ -853,10 +990,20 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
             finally:
                 inv["finished_at"] = _now()
                 inv["result_file"] = inv["evidence_dir"] + "/invocation_result.json"
+                provenance = _failure_provenance(inv,
+                    precondition_instruction_sha256=report["instruction_sha256"],
+                    sandbox_backend=report["sandbox_backend"])
+                inv["failure_provenance"] = provenance
+                if provenance:
+                    signature = provenance["fingerprint"]
+                    if inv["repair_eligible"] and signature in seen_failure_fingerprints:
+                        inv.update(repair_eligible=False, repair_stop_reason="UNCHANGED_FAILURE_PRECONDITION")
+                    seen_failure_fingerprints.add(signature)
                 for key in ("status", "error_code", "executor_exit_code", "verify_exit_code",
                             "changed_files", "candidate_file_sha256", "tracked_diff_sha256",
                             "scope_valid", "git_head_after", "denied_actions", "evidence_files",
-                            "out_of_scope_files", "scope_review_required"):
+                            "out_of_scope_files", "scope_review_required", "denied_action_diagnostics",
+                            "provider_test_observations", "failure_provenance"):
                     report[key] = inv[key]
                 for key in ("minimum_test", "pytest_profile", "pytest_profiles", "observed_pytest_workers"):
                     if key in inv:
@@ -866,7 +1013,7 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                 report.update(status="EXECUTION_UNKNOWN", error_code="ACTION_TIMEOUT")
                 break
             if not inv["repair_eligible"]:
-                report["stop_reason"] = inv["error_code"] or inv["status"]
+                report["stop_reason"] = inv.get("repair_stop_reason") or inv["error_code"] or inv["status"]
                 break
             if round_index == max_repair_rounds:
                 report["stop_reason"] = "REPAIR_ROUNDS_EXHAUSTED" if max_repair_rounds else "REPAIRS_DISABLED"
