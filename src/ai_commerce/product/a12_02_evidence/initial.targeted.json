@@ -1,0 +1,8 @@
+{
+  "command": "python -m pytest tests/test_a12_identity.py tests/test_a12_claims.py tests/test_a12_offer.py tests/test_a12_snapshot.py -q",
+  "exit_code": 0,
+  "duration_seconds": 16.433,
+  "python": "3.14.7 (tags/v3.14.7:823f032, Aug  5 2026, 10:51:32) [MSC v.1944 64 bit (AMD64)]",
+  "stdout_sha256": "963713fa239f059c901c71324f2fc90e96c8d78934f351487975cfc5f81a2498",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}

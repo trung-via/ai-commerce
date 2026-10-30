@@ -1,0 +1,30 @@
+{
+  "command": "python -m pytest tests -q -n 12",
+  "source_sha": "5190a01301186c8fc9361c1aa21b55caafd63dc4",
+  "head_after": "5190a01301186c8fc9361c1aa21b55caafd63dc4",
+  "exit_code": 1,
+  "duration_seconds": 230.289,
+  "python": "3.14.7 (tags/v3.14.7:823f032, Aug  5 2026, 10:51:32) [MSC v.1944 64 bit (AMD64)]",
+  "source_hashes": {
+    "src/ai_commerce/product/__init__.py": "47eb151e5db1b8a99702b6769432a186baa95f2679de486cdbea0588a907cd7f",
+    "src/ai_commerce/product/claims.py": "1a9743b41508687e20d5ee4816141a4a37935188948d977ccc3741e5beff59ce",
+    "src/ai_commerce/product/core.py": "c0318b0719cd4c96e7640ebb6dba6cb7418f9f4495e3214147e86a198db31c91",
+    "src/ai_commerce/product/evidence.py": "2cdd3e2b69a70c376da3809c0c564e539d0fa1429d232f7479218bc47a29e764",
+    "src/ai_commerce/product/evidence_schemas.py": "38ed9edb6813e594385a9eb76fdf7fb181b39bc066c0809abce0990668bf8d4c",
+    "src/ai_commerce/product/files.py": "7c096dff9f1408346573cc2198b48539115f7f77673e4f388f3516dfab176585",
+    "src/ai_commerce/product/history.py": "8fdcb765cab2f6540010d698ec2abe7dea3747a0819a8138985e3ce51517d768",
+    "src/ai_commerce/product/identity.py": "b7ff30f2167b22e92c96ef57301e6cad9da655ca93f8bfd77ea2aae89e72bf15",
+    "src/ai_commerce/product/offers.py": "48548b45c6aab80b864c9f6a1b6024681f7786c57415266b4248765eca178f8c",
+    "src/ai_commerce/product/reader.py": "be3850209edf99a031ae5cf11c1b59a5d0aa05c5fda45694edd8b69f166c5a6c",
+    "src/ai_commerce/product/schemas.py": "1a59c94d47c470be6687b84223381f53a5c1248d17f237fe1bf0cce7426013ab",
+    "tests/test_a12_identity.py": "1f5d12e68d9f47642979e531db6c31f5618925c3a3037dccffd0122d24609cc6",
+    "tests/test_a12_claims.py": "da681231850b32b3a48460be4f24aa37558f11706c32fb129f1d6689a3101186",
+    "tests/test_a12_offer.py": "d8c2423372192bc50eea8ac6f8c8bac8051b75ed0a0d74118e3b5a247e8302db",
+    "tests/test_a12_snapshot.py": "ce1c07363448b7edd90f51badabc6849b3bb9681241d528ab591907490b4a2a1",
+    "contracts/ProductClaimEvidence.v1.schema.json": "1f34230e62cf84f1c92570b94505f2557bcc1efec1967ee10aefc1452b7c7780",
+    "contracts/ProductOfferObservation.v1.schema.json": "57071d55142cc7d706fbde1f00ab63c665eb0beaf57d0dc69a0f0e11ac83dda6"
+  },
+  "source_hashes_unchanged": true,
+  "stdout_sha256": "51e2b136db5bc79d597e694a021dffe13fb6ad812564b37b19feeea51abd9f9c",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}

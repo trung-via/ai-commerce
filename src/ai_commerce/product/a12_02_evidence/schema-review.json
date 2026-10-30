@@ -1,0 +1,18 @@
+{
+  "ProductClaimEvidence": {
+    "mirror_equal": true,
+    "local_references_only": true,
+    "references": [
+      "#/$defs/ProductEvidenceSource",
+      "#/$defs/ProductSubject"
+    ]
+  },
+  "ProductOfferObservation": {
+    "mirror_equal": true,
+    "local_references_only": true,
+    "references": [
+      "#/$defs/ProductEvidenceSource",
+      "#/$defs/ProductSubject"
+    ]
+  }
+}

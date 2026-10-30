@@ -141,7 +141,7 @@ def _valid_timestamp(value):
         return False
 
 
-@lru_cache(maxsize=4)
+@lru_cache(maxsize=8)
 def validator(name: str) -> Draft202012Validator:
     definition = schema(name)
     Draft202012Validator.check_schema(definition)
@@ -158,7 +158,8 @@ def content_id(name: str, value: dict) -> str:
     return prefix + digest({key: item for key, item in value.items() if key != field})
 
 
-def validate_contract(name: str, value: dict, *, raw: bytes | None = None) -> dict:
+def validate_contract(name: str, value: dict, *, raw: bytes | None = None,
+                      snapshot=None, proof_raw: bytes | None = None) -> dict:
     """Validate content IDs and semantics, returning a detached JSON value.
 
     A snapshot requires raw evidence; a valid hash of forged normalized content
@@ -173,17 +174,27 @@ def validate_contract(name: str, value: dict, *, raw: bytes | None = None) -> di
     if name == "ProductListingSnapshot":
         from .reader import _verify_snapshot
         _verify_snapshot(value, raw)
+    elif name == "ProductClaimEvidence":
+        from .claims import _verify_claim
+        _verify_claim(value, raw=raw, snapshot=snapshot, proof_raw=proof_raw)
+    elif name == "ProductOfferObservation":
+        from .offers import _verify_offer
+        _verify_offer(value, raw=raw, snapshot=snapshot)
     else:
         from .identity import _verify_identity, _verify_variant
         (_verify_identity if name == "ProductIdentity" else _verify_variant)(value)
     return parse_json(encoded)
 
 
-def seal_contract(name: str, body: dict, *, raw: bytes | None = None) -> dict:
+def seal_contract(name: str, body: dict, *, raw: bytes | None = None,
+                  snapshot=None, proof_raw: bytes | None = None) -> dict:
     require(type(name) is str and name in CONTRACT_IDS, "UNKNOWN_PRODUCT_CONTRACT")
     require(type(body) is dict and CONTRACT_IDS[name][0] not in body, "INVALID_CONTRACT_BODY")
-    return validate_contract(name, {**body, CONTRACT_IDS[name][0]: content_id(name, body)}, raw=raw)
+    return validate_contract(name, {**body, CONTRACT_IDS[name][0]: content_id(name, body)},
+                             raw=raw, snapshot=snapshot, proof_raw=proof_raw)
 
 
-def parse_contract(name: str, encoded: bytes, *, raw: bytes | None = None) -> dict:
-    return validate_contract(name, parse_json(encoded), raw=raw)
+def parse_contract(name: str, encoded: bytes, *, raw: bytes | None = None,
+                   snapshot=None, proof_raw: bytes | None = None) -> dict:
+    return validate_contract(name, parse_json(encoded), raw=raw, snapshot=snapshot,
+                             proof_raw=proof_raw)

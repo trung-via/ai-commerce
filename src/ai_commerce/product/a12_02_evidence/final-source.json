@@ -1,0 +1,84 @@
+{
+  "source_sha": "5190a01301186c8fc9361c1aa21b55caafd63dc4",
+  "head_unchanged": true,
+  "tested_sources_unchanged": true,
+  "targeted_and_profile_source_hashes_equal": true,
+  "git_diff_check_exit": 0,
+  "python_311_syntax_file_count": 14,
+  "whitespace_issues": [],
+  "scope_violations": [],
+  "raw_git_status": " M src/ai_commerce/product/README.md\n M src/ai_commerce/product/core.py\n M src/ai_commerce/product/schemas.py\n?? contracts/ProductClaimEvidence.v1.schema.json\n?? contracts/ProductOfferObservation.v1.schema.json\n?? src/ai_commerce/product/A12_02_VERIFICATION.md\n?? src/ai_commerce/product/a12_02_evidence/initial.targeted.json\n?? src/ai_commerce/product/a12_02_evidence/project-tests.failures.json\n?? src/ai_commerce/product/a12_02_evidence/project-tests.json\n?? src/ai_commerce/product/a12_02_evidence/review1.targeted.json\n?? src/ai_commerce/product/a12_02_evidence/schema-review.json\n?? src/ai_commerce/product/a12_02_evidence/static.json\n?? src/ai_commerce/product/claims.py\n?? src/ai_commerce/product/evidence.py\n?? src/ai_commerce/product/evidence_schemas.py\n?? src/ai_commerce/product/history.py\n?? src/ai_commerce/product/offers.py\n?? tests/test_a12_claims.py\n?? tests/test_a12_identity.py\n?? tests/test_a12_offer.py\n",
+  "changed_path_hashes_excluding_this_manifest": {
+    "src/ai_commerce/product/README.md": "b0246f966dd02aaab31547c75ccda97e774acd47f927770ddca3a8538a11a0fa",
+    "src/ai_commerce/product/core.py": "c0318b0719cd4c96e7640ebb6dba6cb7418f9f4495e3214147e86a198db31c91",
+    "src/ai_commerce/product/schemas.py": "1a59c94d47c470be6687b84223381f53a5c1248d17f237fe1bf0cce7426013ab",
+    "contracts/ProductClaimEvidence.v1.schema.json": "1f34230e62cf84f1c92570b94505f2557bcc1efec1967ee10aefc1452b7c7780",
+    "contracts/ProductOfferObservation.v1.schema.json": "57071d55142cc7d706fbde1f00ab63c665eb0beaf57d0dc69a0f0e11ac83dda6",
+    "src/ai_commerce/product/A12_02_VERIFICATION.md": "6665be7668f957c8344b868f3754ef8c13ba4f3295a75939a3bfdfceaa957d20",
+    "src/ai_commerce/product/a12_02_evidence/initial.targeted.json": "36d18006f7bffeb98dd007cb4f801b012ab2b7407708d154e09f2824e9d3c7b4",
+    "src/ai_commerce/product/a12_02_evidence/project-tests.failures.json": "1c3f9cb11a0e7a71657f77875e315e6699a43476e7e19c411704e21b98dfae40",
+    "src/ai_commerce/product/a12_02_evidence/project-tests.json": "0c2077be996d9091240bcf7ab78f7102815318b91e3a8b04b95753fc3492b1a9",
+    "src/ai_commerce/product/a12_02_evidence/review1.targeted.json": "859326b5de3553e500f23882c00ee806b372ae8e075c47719a64ccb8b03b1039",
+    "src/ai_commerce/product/a12_02_evidence/schema-review.json": "e7be8c7f8765471368a56f9bc5cad4e0903e0ecfef13c536e019400f59ddd7f4",
+    "src/ai_commerce/product/a12_02_evidence/static.json": "fe52b460cee8c4688db070de157e4fc8069bb951355b9de22245bd93123b8aea",
+    "src/ai_commerce/product/claims.py": "1a9743b41508687e20d5ee4816141a4a37935188948d977ccc3741e5beff59ce",
+    "src/ai_commerce/product/evidence.py": "2cdd3e2b69a70c376da3809c0c564e539d0fa1429d232f7479218bc47a29e764",
+    "src/ai_commerce/product/evidence_schemas.py": "38ed9edb6813e594385a9eb76fdf7fb181b39bc066c0809abce0990668bf8d4c",
+    "src/ai_commerce/product/history.py": "8fdcb765cab2f6540010d698ec2abe7dea3747a0819a8138985e3ce51517d768",
+    "src/ai_commerce/product/offers.py": "48548b45c6aab80b864c9f6a1b6024681f7786c57415266b4248765eca178f8c",
+    "tests/test_a12_claims.py": "da681231850b32b3a48460be4f24aa37558f11706c32fb129f1d6689a3101186",
+    "tests/test_a12_identity.py": "1f5d12e68d9f47642979e531db6c31f5618925c3a3037dccffd0122d24609cc6",
+    "tests/test_a12_offer.py": "d8c2423372192bc50eea8ac6f8c8bac8051b75ed0a0d74118e3b5a247e8302db"
+  },
+  "a12_01_repair_evidence": {
+    "src/ai_commerce/product/repair_evidence/round1.failures.json": {
+      "sha256": "e454ba8f9dc6072d3645cc0a7e62104bb7fe429988cd3530645f00c5791e6066",
+      "crlf_count": 41
+    },
+    "src/ai_commerce/product/repair_evidence/round1.final-source.json": {
+      "sha256": "a4a4505e8b14b5a4a4662096cacc5b50ecfa7362380c94f5614d1d089038cb2d",
+      "crlf_count": 64
+    },
+    "src/ai_commerce/product/repair_evidence/round1.project-tests.json": {
+      "sha256": "8422e876418afbd69aec7e949961c9bd53f20271ad9347d0d35b4501ff34fc5d",
+      "crlf_count": 33
+    },
+    "src/ai_commerce/product/repair_evidence/round1.repro.json": {
+      "sha256": "78dd8452c4f7c6f9fb7a935bd00367096067e9ef3f7048864ec9259116334e59",
+      "crlf_count": 23
+    },
+    "src/ai_commerce/product/repair_evidence/round1.static.json": {
+      "sha256": "e7cf330e1e3ba5cad92d8db2fbc2a21e4a5e5f61d707208409ab272ee069c274",
+      "crlf_count": 15
+    },
+    "src/ai_commerce/product/repair_evidence/round1.targeted.json": {
+      "sha256": "831581be8de2e01ac5c0c8451718fa75452035120efe08643cc2ca96115fa705",
+      "crlf_count": 21
+    }
+  },
+  "a12_01_repair_evidence_diff_empty": true,
+  "acceptance_review": {
+    "method": "Single executor read-only goal check; no independent agent or external authenticity claim",
+    "AC02": {
+      "status": "SATISFIED_IN_LOCAL_OFFLINE_TEST_SCOPE",
+      "evidence": [
+        "tests/test_a12_identity.py",
+        "tests/test_a12_offer.py::test_a12_01_fan_in_correction_claim_offer_and_freeform_consumer"
+      ]
+    },
+    "AC03": {
+      "status": "SATISFIED_IN_LOCAL_OFFLINE_TEST_SCOPE",
+      "evidence": [
+        "tests/test_a12_claims.py"
+      ]
+    },
+    "AC04": {
+      "status": "SATISFIED_IN_LOCAL_OFFLINE_TEST_SCOPE",
+      "evidence": [
+        "tests/test_a12_offer.py"
+      ]
+    },
+    "registered_profile": "NOT_PASS: 30 failed, 2117 passed, 15 skipped",
+    "candidate_publication": "NOT_PERFORMED; EF02 worker owns publication"
+  }
+}
