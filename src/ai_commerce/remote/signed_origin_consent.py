@@ -11,6 +11,7 @@ import copy
 import hashlib
 import hmac
 import json
+import math
 import re
 import time
 from collections.abc import Callable, Iterable, Mapping
@@ -118,7 +119,8 @@ class SignedOriginConsentAuthority:
             if type(key) is not bytes or len(key) < 32 or len(key) > 4096:
                 return False
             now = self._clock()
-            if isinstance(now, bool) or not isinstance(now, (int, float)):
+            if (isinstance(now, bool) or not isinstance(now, (int, float)) or
+                    not math.isfinite(now) or now < 0):
                 return False
 
             for grant in self._grants:
