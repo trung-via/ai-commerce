@@ -516,6 +516,12 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
         monkeypatch.setattr(remote, "check_source", lambda *_a: None)
         monkeypatch.setattr(remote, "_snapshot", observed_snapshot)
         monkeypatch.setattr(runner, "_snapshot", observed_snapshot)
+        # Fake worktree add copies fixture files without creating a .git worktree.
+        # Stub only the new checkout preflight here, not in real_git tests.
+        monkeypatch.setattr(remote, "checkout_diagnostics", lambda *_a, **_kw: {
+            "clean": True, "dirty_entries": [], "dirty_entry_count": 0,
+            "index_refresh_exit": None, "metadata_only_reconciled": False,
+        })
     lock = threading.Lock()
     calls, children, claims, candidates, resolved = [], [], [], [], {}
 
