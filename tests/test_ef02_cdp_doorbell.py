@@ -154,3 +154,13 @@ def test_invalid_event_rejected_without_attaching():
     assert result.delivery_status == "UNSUPPORTED"
     assert result.chat_delivery_proven is False
     assert inv.calls == []
+
+
+def test_malformed_direct_binding_fails_closed_without_browser_access():
+    inv = FakeInventory(FakePage())
+    outcome = LocalChromeDoorbellAdapter(allow_submit=True, inventory=inv).send_wake(
+        binding=None, message="untrusted", event_id=EVENT,
+    )
+    assert outcome.delivery_status == "UNSUPPORTED"
+    assert outcome.error_code == "CHAT_URL_INVALID"
+    assert inv.calls == []
