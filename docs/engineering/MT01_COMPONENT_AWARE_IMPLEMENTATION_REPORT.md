@@ -49,6 +49,7 @@ The current protected `.github/ef02/verify-profiles.json` still contains only pr
 | integrity | `EF01.source-integrity` | `mt01-integrity-tests` (proposed) |
 | provider | `EF01.provider-boundary` | `mt01-provider-tests` (proposed) |
 | ef02 | `EF02.action-and-fanin` | `ef02-tests` (existing) |
+| ef02-scope | `EF02.scope-review` | `mt01-ef02-scope-tests` (proposed on merged main) |
 | mt01 | `MT01.selection-and-evidence` | `mt01-mt01-tests` (proposed) |
 | ef01p | `EF01P.git-and-host-budget` | `mt01-ef01p-tests` (proposed) |
 | diagnostics | `EF01.provider-diagnostics` | `mt01-diagnostics-tests` (proposed) |
@@ -77,6 +78,7 @@ The following JSON object contains the exact additional names/argv; every listed
   "mt01-repair-tests": ["python", "-m", "pytest", "tests/test_ef01_repair.py", "-q", "-n", "12"],
   "mt01-integrity-tests": ["python", "-m", "pytest", "tests/test_ef01_ef02_integrity.py", "-q", "-n", "12"],
   "mt01-provider-tests": ["python", "-m", "pytest", "tests/test_ef01_provider_error_payload.py", "-q", "-n", "12"],
+  "mt01-ef02-scope-tests": ["python", "-m", "pytest", "tests/test_ef02_candidate_integrity.py", "tests/test_ef02_scope_main_integration.py", "-q", "-n", "12"],
   "mt01-mt01-tests": ["python", "-m", "pytest", "tests/test_minimum_test.py", "-q", "-n", "12"],
   "mt01-ef01p-tests": ["python", "-m", "pytest", "tests/test_ef01_performance.py", "-q", "-n", "12"],
   "mt01-diagnostics-tests": ["python", "-m", "pytest", "tests/test_ef01_agy_diagnostics.py", "tests/test_ef02_authoring_preflight.py", "-q", "-n", "12"],
@@ -121,3 +123,7 @@ The final local artifacts are retained under `.local/mt01-component-aware/verifi
 | `source.after.json` | `2e2022b1859c7b312a4fa8a70d3d11cb4eced42ab35006dc55a08f5d3cf16044` |
 
 Final worktree scope: five engineering/remote implementation files, three test files and this ordinary report. `git diff --check` passed; HEAD remains the pinned baseline. The protected registry and v1 schema have no diff. Final acceptance of the candidate, registered project-tests verification and publication belong to the enclosing EF01/EF02 workers.
+
+## Integration note (main after PR #162)
+
+The reviewed integration adds `EF02.scope-review` and its real integration/contract tests introduced by merged PR #162. The companion registry PR #160 must register the exact additional `mt01-ef02-scope-tests` argv. Existing regression tests handle either pre-activation fallback or the registered narrow profile without confusing a plan with observed savings. CI must pass on the integrated main ancestry before merge.
