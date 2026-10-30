@@ -259,7 +259,7 @@ def _probe_cdp(env: ChromeEnvironment) -> None:
         if (not isinstance(browser, str) or
                 not (browser.startswith("Chrome/") or browser.startswith("HeadlessChrome/"))
                 or not isinstance(protocol, str) or
-                re.fullmatch(r"\\d+\\.\\d+", protocol) is None
+                re.fullmatch("[0-9]+[.][0-9]+", protocol) is None
                 or not isinstance(ws, str)):
             raise AcquisitionBlocked("CDP_PROTOCOL_UNAVAILABLE")
         ws_url = urlsplit(ws)
