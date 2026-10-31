@@ -216,6 +216,133 @@ if(check(args,hidden,{},getComputedStyle)!==false) process.exit(24);
     result = subprocess.run(
         [node, "-e", program],
         input=json.dumps({"guard": _GUARD, "text": _doorbell_text(EVENT, "trung-via/ai-commerce")}),
-        text=True, capture_output=True, timeout=12,
+        # Windows hosted full-suite CI occasionally starts Node slowly under
+        # load. Keep a bounded timeout; this guard test is not a latency test.
+        text=True, capture_output=True, timeout=45 if __import__("sys").platform == "win32" else 12,
     )
-    assert result.returncode == 0, f"DOM guard JS regression failed (code {result.returncode})"
+    assert result.returncode == 0, (f"DOM guard JS regression failed (code {result.returncode}); "
+                                    f"stderr={result.stderr[:1000]}")
+
+
+
+
+def test_vietnamese_send_button_requires_primary_action_svg_and_form_scope():
+    """#177 live DOM: Vietnamese 'Gửi…' button and SVG primary-action icon.
+
+    A translated aria-label alone can describe unrelated controls, so both
+    an explicit send-prefix AND the SVG primary-action marker are required.
+    """
+    from ai_commerce.remote.cdp_doorbell import _SEND, _GUARD, _READY, _CLICK
+
+    assert 'button[aria-label^="Gửi"]:has(svg.icon-primary-action)' in _SEND
+    assert 'button[aria-label^="Gửi"]' not in _SEND.split(', ')
+    assert 'button[type="submit"][aria-label="Send"]' in _SEND
+    assert '[data-testid="send-button"]' in _SEND
+    # The CSS selector is used only within the exact composer ancestor form,
+    # not against all buttons across the ChatGPT page.
+    assert 'forms[0].querySelectorAll(sendSel)' in _GUARD
+    assert 'buttons.length > 1' in _GUARD
+    assert 'result.buttons.length === 1' in _READY
+    assert 'result.buttons.length !== 1' in _CLICK
+    assert "button.click()" in _CLICK
+
+
+
+def test_real_guard_localized_send_dom_requires_unique_eligible_primary_button():
+    """Run the real D4 readiness guard on a bounded, DOM-like Node fixture.
+
+    The fixture models four P rows from the observed Vietnamese ChatGPT editor
+    and evaluates the actual production _READY function. Candidate selection
+    uses a limited CSS matcher for the explicitly supported _SEND patterns.
+    No Chrome instance, real page or click is involved.
+    """
+    import json
+    import shutil
+    import subprocess
+    import sys
+    from ai_commerce.remote.cdp_doorbell import _READY, _ARGS, _doorbell_text
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js not installed")
+    program = r"""
+const fs=require('node:fs');
+const obj=JSON.parse(fs.readFileSync(0,'utf8'));
+const input=obj.text;
+const rows=input.split('\n');
+const element=(name)=>({
+  nodeType:1, tagName:name, getClientRects:()=>[1],
+  getAttribute:()=>null, textContent:'', childNodes:[]
+});
+const style=()=>({visibility:'visible'});
+globalThis.getComputedStyle=style;
+globalThis.location={href:obj.args.url};
+const live=eval(obj.ready);
+function sendMatches(sel,b) {
+  // Purpose-built matcher for supported selectors, not a generic CSS parser.
+  // Ensures the production selector itself is routed through the form query.
+  return sel.split(',').some(raw=>{
+    const s=raw.trim();
+    if(s==='[data-testid="send-button"]') return b.testid==='send-button';
+    if(s==='button[type="submit"][aria-label="Send"]')
+      return b.tagName==='BUTTON' && b.type==='submit' && b.label==='Send';
+    if(s==='button[aria-label^="Gửi"]:has(svg.icon-primary-action)')
+      return b.tagName==='BUTTON' && b.label.startsWith('Gửi') && b.primary;
+    throw Error('UNTESTED_SEND_SELECTOR:'+s);
+  });
+}
+function check(o) {
+  const f=element('FORM');
+  f.querySelectorAll=sel => o.outside ? [] :
+    o.buttons.filter(b=>sendMatches(sel,b));
+  const editor=element('DIV');
+  editor.parentElement=f;
+  editor.getAttribute=key=>key==='aria-disabled'?'false':null;
+  editor.childNodes=rows.map(row=>{
+    const p=element('P');
+    p.childNodes=[{nodeType:3,textContent:row}];
+    return p;
+  });
+  editor.textContent=rows.join('');
+  editor.innerText=rows.join('\n\n');
+  if(o.wrongText) editor.childNodes[0].childNodes[0].textContent+='EXTRA';
+  const main=element('MAIN');
+  globalThis.document={querySelectorAll:(sel)=>{
+    if(sel==='main') return [main];
+    if(sel===obj.args.composer) return [editor];
+    if(sel===obj.args.stop) return o.generation ? [element('BUTTON')] : [];
+    return [];
+  }};
+  return live(obj.args);
+}
+function button(label,opts={}) {
+ return {tagName:'BUTTON',label,type:opts.type||'button',
+         testid:opts.testid||null,primary:opts.primary!==false,
+         disabled:opts.disabled||false,
+         getClientRects:()=>[1],getAttribute:k=>
+           k==='aria-disabled'?(opts.ariaDisabled?'true':null):null};
+}
+const b=()=>button('Gửi tin nhắn');
+if(check({buttons:[b()]})!==true) process.exit(21);
+if(check({buttons:[button('Gửi tệp',{primary:false})]})!==false) process.exit(22);
+if(check({buttons:[button('Send', {primary:true})]})!==false) process.exit(23);
+if(check({buttons:[button('Gửi tin nhắn',{disabled:true})]})!==false) process.exit(24);
+if(check({buttons:[button('Gửi tin nhắn',{ariaDisabled:true})]})!==false) process.exit(25);
+if(check({buttons:[b(),b()]})!==false) process.exit(26);
+if(check({buttons:[b()],outside:true})!==false) process.exit(27);
+if(check({buttons:[b()],generation:true})!==false) process.exit(28);
+if(check({buttons:[b()],wrongText:true})!==false) process.exit(29);
+"""
+    result = subprocess.run(
+        [node, "-e", program],
+        input=json.dumps({
+            "ready": _READY,
+            "args": {**_ARGS, "url": URL, "text": _doorbell_text(EVENT, "trung-via/ai-commerce")},
+            "text": _doorbell_text(EVENT, "trung-via/ai-commerce"),
+        }),
+        text=True, capture_output=True, timeout=45 if sys.platform == "win32" else 12,
+    )
+    assert result.returncode == 0, (
+        f"Localized D4 DOM readiness failed (exit={result.returncode}); "
+        f"stderr={result.stderr[:1000]}"
+    )
