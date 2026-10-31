@@ -34,7 +34,7 @@ const composerSel = args.composer, sendSel = args.send;
 const plain = node => {
  if(node.nodeType === 3) return node.textContent;
  if(node.nodeType !== 1) return null;
- if(node.tagName === 'BR') return '\n';
+ if(node.tagName === 'BR') return '\\n';
  if(!['SPAN','EM','STRONG','B','I'].includes(node.tagName) ||
     !node.getClientRects().length ||
     getComputedStyle(node).visibility !== 'visible') return null;
@@ -48,7 +48,7 @@ const plain = node => {
 };
 const equivalent = box => {
  const same = text => typeof text === 'string' &&
-    text.replace(/\r\n/g,'\n') === args.text;
+    text.replace(/\\r\\n/g,'\\n') === args.text;
  if(same(box.innerText) && same(box.textContent)) return true;
  const nodes=[...box.childNodes];
  if(!nodes.length) return false;
@@ -70,7 +70,7 @@ const equivalent = box => {
    }
    lines.push(line);
  }
- return same(lines.join('\n'));
+ return same(lines.join('\\n'));
 };
 const matches = () => {
  const roles = visible('[data-message-author-role="user"]');
