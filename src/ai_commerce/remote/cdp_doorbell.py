@@ -31,26 +31,46 @@ _GUARD = """
 const visible = sel => [...document.querySelectorAll(sel)].filter(
  e => e.getClientRects().length > 0 && getComputedStyle(e).visibility === 'visible');
 const composerSel = args.composer, sendSel = args.send;
-const equivalent = box => {
- if (box.innerText === args.text && box.textContent === args.text) return true;
- const lines=args.text.split('\\n'), nodes=[...box.childNodes];
- const block=node => node.nodeType===1 && ['P','DIV'].includes(node.tagName);
- if(nodes.length !== lines.length || !nodes.some(block)) return false;
- if(!nodes.every((node,i) => node.textContent === lines[i] &&
-      (node.nodeType === 3 || (block(node) &&
-       [...node.childNodes].every(child => child.nodeType === 3) &&
-       node.getClientRects().length && getComputedStyle(node).visibility === 'visible'))))
-   return false;
- let offset=0;
- for(let i=0;i<lines.length;i++){
-   if(box.innerText.slice(offset,offset+lines[i].length)!==lines[i]) return false;
-   offset+=lines[i].length;
-   if(i+1<lines.length){
-     if(!block(nodes[i]) && !block(nodes[i+1])) return false;
-     for(let n=0;n<2 && box.innerText[offset]==='\\n';n++)offset++;
-   }
+const plain = node => {
+ if(node.nodeType === 3) return node.textContent;
+ if(node.nodeType !== 1) return null;
+ if(node.tagName === 'BR') return '\\n';
+ if(!['SPAN','EM','STRONG','B','I'].includes(node.tagName) ||
+    !node.getClientRects().length ||
+    getComputedStyle(node).visibility !== 'visible') return null;
+ let combined='';
+ for(const child of node.childNodes){
+   const text=plain(child);
+   if(text===null) return null;
+   combined+=text;
  }
- return offset===box.innerText.length;
+ return combined;
+};
+const equivalent = box => {
+ const same = text => typeof text === 'string' &&
+    text.replace(/\\r\\n/g,'\\n') === args.text;
+ if(same(box.innerText) && same(box.textContent)) return true;
+ const nodes=[...box.childNodes];
+ if(!nodes.length) return false;
+ if(nodes.length === 1 && nodes[0].nodeType === 3)
+   return same(nodes[0].textContent);
+ // ChatGPT's contenteditable can wrap each line in a P/DIV and can insert
+ // inline SPAN elements. Reconstruct only visible, allowlisted DOM nodes
+ // and compare the WHOLE exact string; never accept substrings or prefixes.
+ if(!nodes.every(n => n.nodeType === 1 && ['P','DIV'].includes(n.tagName) &&
+      n.getClientRects().length && getComputedStyle(n).visibility === 'visible'))
+   return false;
+ const lines=[];
+ for(const p of nodes){
+   let line='';
+   for(const child of p.childNodes){
+     const text=plain(child);
+     if(text===null) return false;
+     line+=text;
+   }
+   lines.push(line);
+ }
+ return same(lines.join('\\n'));
 };
 const matches = () => {
  const roles = visible('[data-message-author-role="user"]');
@@ -128,6 +148,17 @@ _PROVE = "(args) => { " + _GUARD + """
 }"""
 
 
+
+def _doorbell_text(event_id: str, repository: str) -> str:
+    """Full expected content with real line breaks, never literal backslash-n."""
+    return "\n".join((
+        "[AI COMMERCE LOCAL CHAT WAKE]",
+        "event_id: " + event_id,
+        "repository: " + repository,
+        "fresh_brain_sync_required: true",
+    ))
+
+
 class BrowserInventory(Protocol):
     def pages(self, endpoint: str): ...
 
@@ -173,10 +204,7 @@ class LocalChromeDoorbellAdapter:
             return receipt("UNSUPPORTED", "CHAT_URL_INVALID")
         if not self.allow_submit:
             return receipt("UNSUPPORTED", "CDP_PROBE_DISABLED")
-        doorbell = ("[AI COMMERCE LOCAL CHAT WAKE]\\n"
-                    + "event_id: " + event_id + "\\n"
-                    + "repository: " + self.repository + "\\n"
-                    + "fresh_brain_sync_required: true")
+        doorbell = _doorbell_text(event_id, self.repository)
         args = {**_ARGS, "url": binding.chat_url, "text": doorbell}
         clicked = False
         staging_started = False

@@ -164,3 +164,58 @@ def test_malformed_direct_binding_fails_closed_without_browser_access():
     assert outcome.delivery_status == "UNSUPPORTED"
     assert outcome.error_code == "CHAT_URL_INVALID"
     assert inv.calls == []
+
+
+def test_doorbell_payload_uses_real_newlines_not_literal_backslash_n():
+    from ai_commerce.remote.cdp_doorbell import _doorbell_text
+    payload = _doorbell_text(EVENT, "trung-via/ai-commerce")
+    assert payload.splitlines() == [
+        "[AI COMMERCE LOCAL CHAT WAKE]",
+        "event_id: " + EVENT,
+        "repository: trung-via/ai-commerce",
+        "fresh_brain_sync_required: true",
+    ]
+    assert payload.count("\n") == 3
+    assert r"\n" not in payload
+
+
+def test_real_guard_accepts_nested_editor_span_but_rejects_unexpected_text():
+    """Exercise the actual production JS guard with DOM-like nodes in Node.js."""
+    import json
+    import shutil
+    import subprocess
+    from ai_commerce.remote.cdp_doorbell import _GUARD, _doorbell_text
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js not installed in this Python environment")
+    program = r"""
+const fs = require('node:fs');
+const input=JSON.parse(fs.readFileSync(0,'utf8'));
+const args={text:input.text, composer:'unused', send:'unused'};
+const getComputedStyle=n=>({visibility:n.hidden?'hidden':'visible'});
+const from=code=>new Function('args','box','document','getComputedStyle',
+                             input.guard+'; return equivalent(box);');
+const check=from(input.guard);
+const txt=s=>({nodeType:3,textContent:s});
+const span=(s,hidden=false)=>({nodeType:1,tagName:'SPAN',
+  childNodes:[txt(s)],hidden,getClientRects:()=>[1]});
+const p=s=>({nodeType:1,tagName:'P',childNodes:[span(s)],
+  getClientRects:()=>[1]});
+const rows=input.text.split('\n');
+const box=xs=>({innerText:xs.join('\n'),textContent:xs.join(''),childNodes:xs.map(p)});
+const good=box(rows);
+if(check(args,good,{},getComputedStyle)!==true) process.exit(21);
+const extra=box([...rows,'UNEXPECTED']);
+if(check(args,extra,{},getComputedStyle)!==false) process.exit(22);
+const missing=box(rows.slice(0,-1));
+if(check(args,missing,{},getComputedStyle)!==false) process.exit(23);
+const hidden=box(rows); hidden.childNodes[0].childNodes[0].hidden=true;
+if(check(args,hidden,{},getComputedStyle)!==false) process.exit(24);
+""";
+    result = subprocess.run(
+        [node, "-e", program],
+        input=json.dumps({"guard": _GUARD, "text": _doorbell_text(EVENT, "trung-via/ai-commerce")}),
+        text=True, capture_output=True, timeout=12,
+    )
+    assert result.returncode == 0, f"DOM guard JS regression failed (code {result.returncode})"
