@@ -91,7 +91,7 @@ def reviewed_test_registration(repo: Path, files: Mapping[str, str],
     if proc.returncode:
         raise ValueError("MT01_COMMITTED_TREE_UNAVAILABLE")
     try:
-        committed = {p.decode("utf-8") for p in proc.stdout.split(b"\\0") if p}
+        committed = {p.decode("utf-8") for p in proc.stdout.split(b"\0") if p}
     except UnicodeDecodeError as exc:
         raise ValueError("MT01_COMMITTED_TREE_INVALID_ENCODING") from exc
     mapped = {p for group in groups for p in group.tests}
