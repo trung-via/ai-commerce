@@ -339,7 +339,7 @@ if(check({buttons:[b()],wrongText:true})!==false) process.exit(29);
             "ready": _READY,
             "args": {**_ARGS, "url": URL, "text": _doorbell_text(EVENT, "trung-via/ai-commerce")},
             "text": _doorbell_text(EVENT, "trung-via/ai-commerce"),
-        }, ensure_ascii=False),
+        }),
         text=True, capture_output=True, timeout=45 if sys.platform == "win32" else 12,
     )
     assert result.returncode == 0, (
