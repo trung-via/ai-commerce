@@ -222,19 +222,21 @@ if(check(args,hidden,{},getComputedStyle)!==false) process.exit(24);
 
 
 
-def test_send_selector_supports_exact_vietnamese_primary_action():
-    """Live D5.1 #177 shows a localized 'Gửi…' primary action, not 'Send'.
 
-    Recognize the exact 'Gửi' label while preserving scoped, unique,
-    enabled-button requirements and the English/standard test-ID fallbacks.
+def test_vietnamese_send_button_requires_primary_action_svg_and_form_scope():
+    """#177 live DOM: Vietnamese 'Gửi…' button and SVG primary-action icon.
+
+    A translated aria-label alone can describe unrelated controls, so both
+    an explicit send-prefix AND the SVG primary-action marker are required.
     """
     from ai_commerce.remote.cdp_doorbell import _SEND, _GUARD, _READY, _CLICK
 
-    assert 'button[aria-label="Gửi"]' in _SEND
-    assert 'button[aria-label^="Gửi"]' not in _SEND
-    assert 'button[aria-label^="Gửi "]' not in _SEND
+    assert 'button[aria-label^="Gửi"]:has(svg.icon-primary-action)' in _SEND
+    assert 'button[aria-label^="Gửi"]' not in _SEND.split(', ')
     assert 'button[type="submit"][aria-label="Send"]' in _SEND
     assert '[data-testid="send-button"]' in _SEND
+    # The CSS selector is used only within the exact composer ancestor form,
+    # not against all buttons across the ChatGPT page.
     assert 'forms[0].querySelectorAll(sendSel)' in _GUARD
     assert 'buttons.length > 1' in _GUARD
     assert 'result.buttons.length === 1' in _READY
