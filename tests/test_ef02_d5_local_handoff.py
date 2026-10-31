@@ -892,3 +892,142 @@ def test_real_d31_d32_d2_d4_composition_uses_two_grants_and_holds_unknown(setup,
     before = len(s.source.calls)
     assert listen(s, deliver=True, delivery=options)["error_code"] == "HANDOFF_ALREADY_CONSUMED"
     assert len(s.source.calls) == before
+
+
+# Issue #182 — the MCP Engineering read-only review lives alongside D5 tests
+# to retain the existing MT-01 registered test-family mapping.
+from datetime import datetime as _w182_datetime, timezone as _w182_timezone
+from ai_commerce.remote.engineering_review_tool import (
+    GitHubReadError as _W182GitHubReadError,
+    engineering_review_readonly as _w182_call,
+    github_get as _w182_get,
+)
+
+_W182_REPO = "trung-via/ai-commerce"
+_W182_SHA = "b" * 40
+
+
+def _w182_source(*, merged=True, main=_W182_SHA, merge=_W182_SHA,
+                 ubuntu="success", windows="success", observe="success",
+                 count=None, checks=None):
+    checks = checks if checks is not None else [
+        {"name": "tests (ubuntu-latest)", "status": "completed",
+         "conclusion": ubuntu, "head_sha": main},
+        {"name": "tests (windows-latest)", "status": "completed",
+         "conclusion": windows, "head_sha": main},
+        {"name": "observe", "status": "completed",
+         "conclusion": observe, "head_sha": main},
+    ]
+    docs = {
+        f"/repos/{_W182_REPO}/branches/main": {"commit": {"sha": main}},
+        f"/repos/{_W182_REPO}/pulls/180": {
+            "number": 180, "merged": merged, "merge_commit_sha": merge,
+            "base": {"ref": "main"},
+            "html_url": f"https://github.com/{_W182_REPO}/pull/180",
+        },
+        f"/repos/{_W182_REPO}/commits/{main}/check-runs?per_page=100": {
+            "total_count": len(checks) if count is None else count,
+            "check_runs": checks,
+        },
+    }
+    calls = []
+
+    def get(path, token):
+        assert token == "read-only-test-token"
+        assert path in docs
+        assert not any(part in path for part in
+                       ("/dispatches", "/issues", "/merges"))
+        calls.append(path)
+        return docs[path]
+
+    return get, calls
+
+
+def _w182_review(get, **kwargs):
+    return _w182_call(
+        _W182_REPO, 180, "issue182-test-001", get=get,
+        token_provider=lambda: "read-only-test-token",
+        now=lambda: _w182_datetime(2026, 11, 1, tzinfo=_w182_timezone.utc),
+        trace_factory=lambda: "a" * 32, **kwargs)
+
+
+def test_w182_mcp_review_success_and_no_fabricated_receipt():
+    get, calls = _w182_source()
+    result = _w182_review(get, expected_main_sha=_W182_SHA)
+    assert result["verdict"] == "MERGED_MAIN_POSTMERGE_CI_PASS"
+    assert result["main_sha"] == result["merge_commit_sha"] == _W182_SHA
+    assert result["chat_delivery_proven"] is False
+    assert result["native_plugin_handoff_proven"] is False
+    assert result["trace_id"] == "a" * 32
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize("bad", [
+    {"repository": "other/repo"}, {"pr_number": 0},
+    {"pr_number": True}, {"correlation_id": "http://bad"},
+    {"expected_main_sha": "bad"},
+])
+def test_w182_inputs_fail_before_network(bad):
+    get, calls = _w182_source()
+    args = {"repository": _W182_REPO, "pr_number": 180,
+            "correlation_id": "issue182-test-001",
+            "expected_main_sha": _W182_SHA}
+    args.update(bad)
+    with pytest.raises(ValueError):
+        _w182_call(**args, get=get,
+                   token_provider=lambda: "read-only-test-token")
+    assert not calls
+
+
+def test_w182_stale_sha_no_check_lookup():
+    get, calls = _w182_source()
+    assert _w182_review(get, expected_main_sha="c" * 40)["verdict"] == "BLOCKED_STALE_MAIN"
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("params, verdict", [
+    ({"merged": False}, "BLOCKED_PR_NOT_MERGED"),
+    ({"merge": "c" * 40}, "BLOCKED_MERGE_NOT_MAIN_HEAD"),
+    ({"windows": "failure"}, "BLOCKED_CHECKS_FAILED"),
+    ({"observe": None}, "BLOCKED_CHECKS_FAILED"),
+    ({"count": 101}, "BLOCKED_CHECKS_INCOMPLETE"),
+    ({"checks": [{"name": "observe", "status": "completed",
+                  "conclusion": "success", "head_sha": _W182_SHA}]},
+     "BLOCKED_CHECKS_MISSING_REQUIRED"),
+    ({"checks": [{"name": "tests (ubuntu-latest)", "status": "in_progress",
+                  "conclusion": None, "head_sha": _W182_SHA},
+                 {"name": "tests (windows-latest)", "status": "completed",
+                  "conclusion": "success", "head_sha": _W182_SHA}]},
+     "BLOCKED_CHECKS_PENDING"),
+])
+def test_w182_negative_merge_and_checks(params, verdict):
+    get, _ = _w182_source(**params)
+    assert _w182_review(get)["verdict"] == verdict
+
+
+def test_w182_duplicate_correlation_is_repeatable_read_only():
+    get, calls = _w182_source()
+    assert _w182_review(get) == _w182_review(get)
+    assert len(calls) == 6
+
+
+@pytest.mark.parametrize("failure", ["GITHUB_READ_DENIED", "GITHUB_TRANSPORT_FAILURE"])
+def test_w182_read_auth_and_timeout_fail_closed(failure):
+    def get(path, token):
+        raise _W182GitHubReadError(failure)
+    assert _w182_review(get)["verdict"] == "BLOCKED_" + failure
+
+
+def test_w182_missing_auth_and_invalid_github_data():
+    get, calls = _w182_source()
+    result = _w182_call(_W182_REPO, 180, "abc", get=get,
+                       token_provider=lambda: "",
+                       trace_factory=lambda: "a" * 32)
+    assert result["verdict"] == "BLOCKED_GITHUB_READ_AUTH_UNAVAILABLE"
+    assert not calls
+    assert _w182_review(lambda path, token: {})["verdict"] == "BLOCKED_GITHUB_IDENTITY_INVALID"
+
+
+def test_w182_reject_non_allowlisted_github_path():
+    with pytest.raises(_W182GitHubReadError, match="GITHUB_PATH_REJECTED"):
+        _w182_get("/repos/other/repo/branches/main", "dummy-token")
