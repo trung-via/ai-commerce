@@ -182,11 +182,8 @@ def approved_groups() -> tuple[TestGroup, ...]:
         TestGroup("git-integrity", ("tests/test_git_byte_consistency.py", "tests/test_ef02_worktree_line_endings.py",
                                     "tests/test_ef01_git_write_guard.py"), ("EF01.git-integrity",),
                   (eng + "git_byte_consistency.py", eng + "git_write_guard.py")),
-        TestGroup("ef02-recovery", tuple("tests/" + name + ".py" for name in (
-            "test_ef02_m0r_codex_provider_interruption", "test_ef02_m0r_dispatch_only", "test_ef02_m0r_fault_injection",
-            "test_ef02_m0r_hosted_checkpoint", "test_ef02_m0r_isolated_runner_kit", "test_ef02_m0r_live_child_probe",
-            "test_ef02_m0r_real_e2e_interruption", "test_ef02_m0r_windows_boundary_probe", "test_ef02_m0r_worker_os_kill",
-            "test_ef02_github_read_retry")), ("EF02.recovery",),
+        TestGroup("ef02-recovery", ("tests/test_ef02_m0r_fault_injection.py",
+                                       "tests/test_ef02_github_read_retry.py"), ("EF02.recovery",),
                   (rem + "worker.py", rem + "transport.py", rem + "github_read_retry.py")),
         TestGroup("ef02-wake", tuple("tests/" + name + ".py" for name in (
             "test_ef02_wake_d1", "test_ef02_wake_d2", "test_ef02_cdp_doorbell", "test_ef02_d3_github_artifact_authority",

@@ -531,3 +531,14 @@ def test_spawned_checkpoint_rejects_untrusted_parent_without_writes():
     with pytest.raises(RemoteTransportError, match="SPAWNED_PID_INVALID"):
         fake.spawned_checkpoint(source_sha="a" * 40, attempt_id="expected",
                                 fingerprint="f" * 64, child_pid=0)
+
+
+def test_ef02_batch_ingress_is_not_a_legacy_m0r_probe():
+    """Retiring manual M0-R probes must preserve regular issue and dispatch ingress."""
+    workflow = (ROOT / ".github" / "workflows" / "ef02-batch.yml").read_text(encoding="utf-8")
+    assert "types: [opened, labeled]" in workflow
+    assert "startsWith(github.event.issue.title, '[EF02]')" in workflow
+    assert "github.event_name == 'workflow_dispatch'" in workflow
+    assert "needs.validate.result == 'success'" in workflow
+    assert "m0r_pre_executor_cancel" not in workflow
+    assert "M0-R pre-executor cancellation probe" not in workflow
