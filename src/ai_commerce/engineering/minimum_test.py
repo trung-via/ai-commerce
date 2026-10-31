@@ -138,6 +138,15 @@ def approved_groups() -> tuple[TestGroup, ...]:
                   ("A12.product-evidence",), sources("product", "__init__ claims cli core demo evidence evidence_schemas files history identity offers pack pack_schemas reader registry rights rights_schemas schemas storage_privacy"),
                   consumers=("scripts/a12_demo.py",),
                   contracts=contracts("ProductListingSnapshot.v1 ProductIdentity.v1 ProductVariant.v1 ProductClaimEvidence.v1 ProductOfferObservation.v1 ProductAssetRights.v1 ProductEvidencePack.v1")),
+        # A13 C08/C09/D06/E03: explicit reviewed paths and exact existing test families.
+        # Future A13 tests must be registered, not silently excluded from coverage.
+        TestGroup("a13", (
+            "tests/test_a13_media_inspection.py", "tests/test_a13_claim_rights.py",
+            "tests/test_a13_link.py", "tests/test_a13_evidence_pack.py",
+        ), ("A13.media-inspection", "A13.claim-rights",
+            "A13.affiliate-placement", "A13.affiliate-release"),
+                  sources("affiliate_release", "__init__ inspection process schemas claim_rights claim_rights_schemas placement placement_schemas __main__ cli demo evidence_pack evidence_pack_schemas"),
+                  contracts=contracts("ClaimRightsReleaseReview.v1 AffiliatePlacementEvidence.v1 AffiliateReleaseEvidencePack.v1")),
         TestGroup("foundation", ("tests/test_foundation.py",), ("A01.foundation",), (),
                   contracts=contracts("WorkItem.v0.3 AuthorizationEnvelope.v0.3") + (
                       "docs/engineering/SEMANTIC_OWNERS.md", "docs/engineering/SELECTIVE_COMPONENT_ADOPTION.md",

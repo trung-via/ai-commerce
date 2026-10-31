@@ -1,0 +1,2556 @@
+{
+  "$defs": {
+    "AccountRef": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "namespace": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "namespace",
+        "id"
+      ],
+      "type": "object"
+    },
+    "AppRef": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "namespace": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "namespace",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "CapabilityComponent": {
+      "additionalProperties": false,
+      "properties": {
+        "decision": {
+          "enum": [
+            "ALLOW",
+            "DENY",
+            "NEEDS_RECHECK",
+            "UNKNOWN",
+            "MISSING",
+            "TAMPERED"
+          ]
+        },
+        "present": {
+          "type": "boolean"
+        },
+        "reason_codes": {
+          "items": {
+            "maxLength": 96,
+            "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+            "type": "string"
+          },
+          "maxItems": 128,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "record_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope_matched": {
+          "type": "boolean"
+        },
+        "snapshot_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tamper_checked": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "present",
+        "snapshot_id",
+        "record_sha256",
+        "decision",
+        "scope_matched",
+        "tamper_checked",
+        "reason_codes"
+      ],
+      "type": "object"
+    },
+    "ClaimRightsComponent": {
+      "additionalProperties": false,
+      "properties": {
+        "claim_status": {
+          "enum": [
+            "VERIFIED_EVIDENCE",
+            "UNKNOWN",
+            "NEEDS_REVIEW",
+            "RESTRICTED",
+            "MISSING",
+            "TAMPERED"
+          ]
+        },
+        "pack_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pack_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "present": {
+          "type": "boolean"
+        },
+        "reason_codes": {
+          "items": {
+            "maxLength": 96,
+            "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+            "type": "string"
+          },
+          "maxItems": 128,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "record_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rights_status": {
+          "enum": [
+            "VERIFIED_EVIDENCE",
+            "UNKNOWN",
+            "NEEDS_REVIEW",
+            "RESTRICTED",
+            "MISSING",
+            "TAMPERED"
+          ]
+        },
+        "scope_matched": {
+          "type": "boolean"
+        },
+        "snapshot_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "VERIFIED_EVIDENCE",
+            "UNKNOWN",
+            "NEEDS_REVIEW",
+            "RESTRICTED",
+            "MISSING",
+            "TAMPERED"
+          ]
+        },
+        "tamper_checked": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "present",
+        "record_sha256",
+        "pack_id",
+        "pack_sha256",
+        "snapshot_sha256",
+        "claim_status",
+        "rights_status",
+        "status",
+        "scope_matched",
+        "tamper_checked",
+        "reason_codes"
+      ],
+      "type": "object"
+    },
+    "Components": {
+      "additionalProperties": false,
+      "properties": {
+        "capability_evidence": {
+          "additionalProperties": false,
+          "properties": {
+            "decision": {
+              "enum": [
+                "ALLOW",
+                "DENY",
+                "NEEDS_RECHECK",
+                "UNKNOWN",
+                "MISSING",
+                "TAMPERED"
+              ]
+            },
+            "present": {
+              "type": "boolean"
+            },
+            "reason_codes": {
+              "items": {
+                "maxLength": 96,
+                "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+                "type": "string"
+              },
+              "maxItems": 128,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "record_sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "scope_matched": {
+              "type": "boolean"
+            },
+            "snapshot_id": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tamper_checked": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "present",
+            "snapshot_id",
+            "record_sha256",
+            "decision",
+            "scope_matched",
+            "tamper_checked",
+            "reason_codes"
+          ],
+          "type": "object"
+        },
+        "claim_rights_review": {
+          "additionalProperties": false,
+          "properties": {
+            "claim_status": {
+              "enum": [
+                "VERIFIED_EVIDENCE",
+                "UNKNOWN",
+                "NEEDS_REVIEW",
+                "RESTRICTED",
+                "MISSING",
+                "TAMPERED"
+              ]
+            },
+            "pack_id": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "pack_sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "present": {
+              "type": "boolean"
+            },
+            "reason_codes": {
+              "items": {
+                "maxLength": 96,
+                "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+                "type": "string"
+              },
+              "maxItems": 128,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "record_sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "rights_status": {
+              "enum": [
+                "VERIFIED_EVIDENCE",
+                "UNKNOWN",
+                "NEEDS_REVIEW",
+                "RESTRICTED",
+                "MISSING",
+                "TAMPERED"
+              ]
+            },
+            "scope_matched": {
+              "type": "boolean"
+            },
+            "snapshot_sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "enum": [
+                "VERIFIED_EVIDENCE",
+                "UNKNOWN",
+                "NEEDS_REVIEW",
+                "RESTRICTED",
+                "MISSING",
+                "TAMPERED"
+              ]
+            },
+            "tamper_checked": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "present",
+            "record_sha256",
+            "pack_id",
+            "pack_sha256",
+            "snapshot_sha256",
+            "claim_status",
+            "rights_status",
+            "status",
+            "scope_matched",
+            "tamper_checked",
+            "reason_codes"
+          ],
+          "type": "object"
+        },
+        "distribution_handoff": {
+          "additionalProperties": false,
+          "properties": {
+            "package_id": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "package_sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "present": {
+              "type": "boolean"
+            },
+            "reason_codes": {
+              "items": {
+                "maxLength": 96,
+                "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+                "type": "string"
+              },
+              "maxItems": 128,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "scope_matched": {
+              "type": "boolean"
+            },
+            "state": {
+              "enum": [
+                "EXPORTED_FOR_MANUAL_HANDOFF",
+                "NOT_PROVIDED",
+                "INVALID",
+                "TAMPERED"
+              ]
+            },
+            "tamper_checked": {
+              "type": "boolean"
+            },
+            "video_sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "present",
+            "package_id",
+            "package_sha256",
+            "video_sha256",
+            "state",
+            "scope_matched",
+            "tamper_checked",
+            "reason_codes"
+          ],
+          "type": "object"
+        },
+        "media_inspection": {
+          "additionalProperties": false,
+          "properties": {
+            "full_decode": {
+              "type": "boolean"
+            },
+            "present": {
+              "type": "boolean"
+            },
+            "reason_codes": {
+              "items": {
+                "maxLength": 96,
+                "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+                "type": "string"
+              },
+              "maxItems": 128,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "record_sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "release_asset_matched": {
+              "type": "boolean"
+            },
+            "status": {
+              "enum": [
+                "PASS",
+                "FAIL",
+                "UNKNOWN",
+                "MISSING",
+                "TAMPERED"
+              ]
+            },
+            "tamper_checked": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "present",
+            "record_sha256",
+            "status",
+            "release_asset_matched",
+            "full_decode",
+            "tamper_checked",
+            "reason_codes"
+          ],
+          "type": "object"
+        },
+        "placement_evidence": {
+          "additionalProperties": false,
+          "properties": {
+            "decision": {
+              "enum": [
+                "REVIEW",
+                "HOLD",
+                "UNKNOWN",
+                "MISSING",
+                "TAMPERED"
+              ]
+            },
+            "present": {
+              "type": "boolean"
+            },
+            "provenance_status": {
+              "enum": [
+                "PROVEN",
+                "UNPROVEN",
+                "TAMPERED",
+                "MISSING"
+              ]
+            },
+            "reason_codes": {
+              "items": {
+                "maxLength": 96,
+                "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+                "type": "string"
+              },
+              "maxItems": 128,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "record_sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "scope_matched": {
+              "type": "boolean"
+            },
+            "tamper_checked": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "present",
+            "record_sha256",
+            "decision",
+            "provenance_status",
+            "scope_matched",
+            "tamper_checked",
+            "reason_codes"
+          ],
+          "type": "object"
+        },
+        "product_evidence": {
+          "additionalProperties": false,
+          "properties": {
+            "active_offer_id": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "offer_assessment_status": {
+              "enum": [
+                "VALID_OBSERVATION",
+                "STALE",
+                "EXPIRED",
+                "CONFLICT",
+                "NO_OFFERS",
+                "UNKNOWN",
+                "MISSING",
+                "TAMPERED"
+              ]
+            },
+            "pack_id": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "pack_sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "present": {
+              "type": "boolean"
+            },
+            "reason_codes": {
+              "items": {
+                "maxLength": 96,
+                "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+                "type": "string"
+              },
+              "maxItems": 128,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "rights_status": {
+              "enum": [
+                "GRANTED",
+                "UNKNOWN",
+                "RESTRICTED",
+                "MISSING",
+                "TAMPERED"
+              ]
+            },
+            "scope_matched": {
+              "type": "boolean"
+            },
+            "snapshot_id": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "snapshot_sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "enum": [
+                "VERIFIED",
+                "HOLD",
+                "UNKNOWN",
+                "MISSING",
+                "TAMPERED"
+              ]
+            },
+            "stock_available": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "synthetic": {
+              "type": "boolean"
+            },
+            "tamper_checked": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "present",
+            "pack_id",
+            "pack_sha256",
+            "snapshot_id",
+            "snapshot_sha256",
+            "offer_assessment_status",
+            "active_offer_id",
+            "stock_available",
+            "rights_status",
+            "synthetic",
+            "scope_matched",
+            "tamper_checked",
+            "status",
+            "reason_codes"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "media_inspection",
+        "claim_rights_review",
+        "placement_evidence",
+        "product_evidence",
+        "capability_evidence",
+        "distribution_handoff"
+      ],
+      "type": "object"
+    },
+    "EvidenceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "kind": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "record_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "source_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tamper_checked": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "evidence_id",
+        "kind",
+        "record_sha256",
+        "source_sha256",
+        "tamper_checked"
+      ],
+      "type": "object"
+    },
+    "HandoffComponent": {
+      "additionalProperties": false,
+      "properties": {
+        "package_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "package_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "present": {
+          "type": "boolean"
+        },
+        "reason_codes": {
+          "items": {
+            "maxLength": 96,
+            "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+            "type": "string"
+          },
+          "maxItems": 128,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "scope_matched": {
+          "type": "boolean"
+        },
+        "state": {
+          "enum": [
+            "EXPORTED_FOR_MANUAL_HANDOFF",
+            "NOT_PROVIDED",
+            "INVALID",
+            "TAMPERED"
+          ]
+        },
+        "tamper_checked": {
+          "type": "boolean"
+        },
+        "video_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "present",
+        "package_id",
+        "package_sha256",
+        "video_sha256",
+        "state",
+        "scope_matched",
+        "tamper_checked",
+        "reason_codes"
+      ],
+      "type": "object"
+    },
+    "MediaComponent": {
+      "additionalProperties": false,
+      "properties": {
+        "full_decode": {
+          "type": "boolean"
+        },
+        "present": {
+          "type": "boolean"
+        },
+        "reason_codes": {
+          "items": {
+            "maxLength": 96,
+            "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+            "type": "string"
+          },
+          "maxItems": 128,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "record_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "release_asset_matched": {
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "PASS",
+            "FAIL",
+            "UNKNOWN",
+            "MISSING",
+            "TAMPERED"
+          ]
+        },
+        "tamper_checked": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "present",
+        "record_sha256",
+        "status",
+        "release_asset_matched",
+        "full_decode",
+        "tamper_checked",
+        "reason_codes"
+      ],
+      "type": "object"
+    },
+    "PlacementComponent": {
+      "additionalProperties": false,
+      "properties": {
+        "decision": {
+          "enum": [
+            "REVIEW",
+            "HOLD",
+            "UNKNOWN",
+            "MISSING",
+            "TAMPERED"
+          ]
+        },
+        "present": {
+          "type": "boolean"
+        },
+        "provenance_status": {
+          "enum": [
+            "PROVEN",
+            "UNPROVEN",
+            "TAMPERED",
+            "MISSING"
+          ]
+        },
+        "reason_codes": {
+          "items": {
+            "maxLength": 96,
+            "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+            "type": "string"
+          },
+          "maxItems": 128,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "record_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope_matched": {
+          "type": "boolean"
+        },
+        "tamper_checked": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "present",
+        "record_sha256",
+        "decision",
+        "provenance_status",
+        "scope_matched",
+        "tamper_checked",
+        "reason_codes"
+      ],
+      "type": "object"
+    },
+    "PlacementDisclosure": {
+      "additionalProperties": false,
+      "properties": {
+        "has_affiliate_notice": {
+          "type": "boolean"
+        },
+        "mode": {
+          "enum": [
+            "CLEAR_AND_CONSPICUOUS",
+            "PROMINENT_TEXT",
+            "PLATFORM_DISCLOSURE_LABEL"
+          ]
+        },
+        "statement": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "COMPLIANT",
+            "NON_COMPLIANT"
+          ]
+        },
+        "tags": {
+          "items": {
+            "maxLength": 64,
+            "pattern": "^#[A-Za-z0-9_]+$",
+            "type": "string"
+          },
+          "maxItems": 16,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "statement",
+        "mode",
+        "has_affiliate_notice",
+        "tags",
+        "status"
+      ],
+      "type": "object"
+    },
+    "ProductComponent": {
+      "additionalProperties": false,
+      "properties": {
+        "active_offer_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "offer_assessment_status": {
+          "enum": [
+            "VALID_OBSERVATION",
+            "STALE",
+            "EXPIRED",
+            "CONFLICT",
+            "NO_OFFERS",
+            "UNKNOWN",
+            "MISSING",
+            "TAMPERED"
+          ]
+        },
+        "pack_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pack_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "present": {
+          "type": "boolean"
+        },
+        "reason_codes": {
+          "items": {
+            "maxLength": 96,
+            "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+            "type": "string"
+          },
+          "maxItems": 128,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "rights_status": {
+          "enum": [
+            "GRANTED",
+            "UNKNOWN",
+            "RESTRICTED",
+            "MISSING",
+            "TAMPERED"
+          ]
+        },
+        "scope_matched": {
+          "type": "boolean"
+        },
+        "snapshot_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "snapshot_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "VERIFIED",
+            "HOLD",
+            "UNKNOWN",
+            "MISSING",
+            "TAMPERED"
+          ]
+        },
+        "stock_available": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "synthetic": {
+          "type": "boolean"
+        },
+        "tamper_checked": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "present",
+        "pack_id",
+        "pack_sha256",
+        "snapshot_id",
+        "snapshot_sha256",
+        "offer_assessment_status",
+        "active_offer_id",
+        "stock_available",
+        "rights_status",
+        "synthetic",
+        "scope_matched",
+        "tamper_checked",
+        "status",
+        "reason_codes"
+      ],
+      "type": "object"
+    },
+    "ReleaseScope": {
+      "additionalProperties": false,
+      "properties": {
+        "account_ref": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "namespace": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "namespace",
+            "id"
+          ],
+          "type": "object"
+        },
+        "app_ref": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "namespace": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "namespace",
+                "id"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "channel": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "link_url": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "listing_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "market": {
+          "maxLength": 2,
+          "minLength": 2,
+          "pattern": "^[A-Z]{2}$",
+          "type": "string"
+        },
+        "platform": {
+          "enum": [
+            "TIKTOK",
+            "FACEBOOK",
+            "INSTAGRAM",
+            "YOUTUBE"
+          ]
+        },
+        "product_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "release_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "surface": {
+          "enum": [
+            "PRODUCT_ANCHOR",
+            "VIDEO_STICKER",
+            "BIO",
+            "POST",
+            "STORY",
+            "COMMENT",
+            "VIDEO",
+            "REEL",
+            "SHORT",
+            "PAGE_REEL",
+            "PROFILE_VIDEO"
+          ]
+        },
+        "territory": {
+          "maxLength": 2,
+          "minLength": 2,
+          "pattern": "^[A-Z]{2}$",
+          "type": "string"
+        },
+        "variant_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "platform",
+        "account_ref",
+        "app_ref",
+        "market",
+        "territory",
+        "surface",
+        "channel",
+        "product_id",
+        "listing_id",
+        "variant_id",
+        "release_sha256",
+        "link_url"
+      ],
+      "type": "object"
+    },
+    "ReleaseTemporal": {
+      "additionalProperties": false,
+      "properties": {
+        "as_of": {
+          "format": "date-time",
+          "maxLength": 40,
+          "minLength": 1,
+          "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "type": "string"
+        },
+        "revoked_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "maxLength": 40,
+              "minLength": 1,
+              "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "ACTIVE",
+            "EXPIRED",
+            "REVOKED",
+            "NOT_YET_EFFECTIVE",
+            "INVALID_WINDOW"
+          ]
+        },
+        "use_from": {
+          "format": "date-time",
+          "maxLength": 40,
+          "minLength": 1,
+          "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "type": "string"
+        },
+        "use_until": {
+          "format": "date-time",
+          "maxLength": 40,
+          "minLength": 1,
+          "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "type": "string"
+        },
+        "valid_from": {
+          "format": "date-time",
+          "maxLength": 40,
+          "minLength": 1,
+          "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "type": "string"
+        },
+        "valid_until": {
+          "format": "date-time",
+          "maxLength": 40,
+          "minLength": 1,
+          "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "as_of",
+        "valid_from",
+        "use_from",
+        "use_until",
+        "valid_until",
+        "revoked_at",
+        "status"
+      ],
+      "type": "object"
+    },
+    "Revalidation": {
+      "additionalProperties": false,
+      "properties": {
+        "conflicts_detected": {
+          "type": "boolean"
+        },
+        "disclosure_compliant": {
+          "type": "boolean"
+        },
+        "evidence_complete": {
+          "type": "boolean"
+        },
+        "hashes_intact": {
+          "type": "boolean"
+        },
+        "scope_consistent": {
+          "type": "boolean"
+        },
+        "temporal_active": {
+          "type": "boolean"
+        },
+        "url_safe": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "scope_consistent",
+        "disclosure_compliant",
+        "temporal_active",
+        "url_safe",
+        "hashes_intact",
+        "evidence_complete",
+        "conflicts_detected"
+      ],
+      "type": "object"
+    },
+    "UrlEvaluation": {
+      "additionalProperties": false,
+      "properties": {
+        "host": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "is_hostile": {
+          "type": "boolean"
+        },
+        "parsed_url": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "reason_codes": {
+          "items": {
+            "maxLength": 96,
+            "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+            "type": "string"
+          },
+          "maxItems": 128,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "scheme": {
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "parsed_url",
+        "scheme",
+        "host",
+        "is_hostile",
+        "reason_codes"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "urn:ai-commerce:AffiliateReleaseEvidencePack:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Offline-only advisory manual-review AffiliateReleaseEvidencePack.v1 integrating C08 media technical inspection, C09 claim and asset rights release review, D06 affiliate placement evidence, A12 product/variant snapshot/identity/claim/offer/rights evidence, A07 channel capability, and optional A08 manual distribution handoff. Outputs strictly READY_FOR_MANUAL_REVIEW, HOLD, or UNKNOWN. Never claims live provider approval, active affiliate link, POSTED/PUBLIC, sales, OAuth, network/API calls, revenue, or auto-publishing.",
+  "properties": {
+    "account_eligibility": {
+      "const": "UNKNOWN"
+    },
+    "advisory_only": {
+      "const": true
+    },
+    "affiliate_link_status": {
+      "const": "UNKNOWN_OFFLINE_ONLY"
+    },
+    "auto_publishing": {
+      "const": "NEVER_PERFORMED"
+    },
+    "components": {
+      "additionalProperties": false,
+      "properties": {
+        "capability_evidence": {
+          "additionalProperties": false,
+          "properties": {
+            "decision": {
+              "enum": [
+                "ALLOW",
+                "DENY",
+                "NEEDS_RECHECK",
+                "UNKNOWN",
+                "MISSING",
+                "TAMPERED"
+              ]
+            },
+            "present": {
+              "type": "boolean"
+            },
+            "reason_codes": {
+              "items": {
+                "maxLength": 96,
+                "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+                "type": "string"
+              },
+              "maxItems": 128,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "record_sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "scope_matched": {
+              "type": "boolean"
+            },
+            "snapshot_id": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tamper_checked": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "present",
+            "snapshot_id",
+            "record_sha256",
+            "decision",
+            "scope_matched",
+            "tamper_checked",
+            "reason_codes"
+          ],
+          "type": "object"
+        },
+        "claim_rights_review": {
+          "additionalProperties": false,
+          "properties": {
+            "claim_status": {
+              "enum": [
+                "VERIFIED_EVIDENCE",
+                "UNKNOWN",
+                "NEEDS_REVIEW",
+                "RESTRICTED",
+                "MISSING",
+                "TAMPERED"
+              ]
+            },
+            "pack_id": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "pack_sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "present": {
+              "type": "boolean"
+            },
+            "reason_codes": {
+              "items": {
+                "maxLength": 96,
+                "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+                "type": "string"
+              },
+              "maxItems": 128,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "record_sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "rights_status": {
+              "enum": [
+                "VERIFIED_EVIDENCE",
+                "UNKNOWN",
+                "NEEDS_REVIEW",
+                "RESTRICTED",
+                "MISSING",
+                "TAMPERED"
+              ]
+            },
+            "scope_matched": {
+              "type": "boolean"
+            },
+            "snapshot_sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "enum": [
+                "VERIFIED_EVIDENCE",
+                "UNKNOWN",
+                "NEEDS_REVIEW",
+                "RESTRICTED",
+                "MISSING",
+                "TAMPERED"
+              ]
+            },
+            "tamper_checked": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "present",
+            "record_sha256",
+            "pack_id",
+            "pack_sha256",
+            "snapshot_sha256",
+            "claim_status",
+            "rights_status",
+            "status",
+            "scope_matched",
+            "tamper_checked",
+            "reason_codes"
+          ],
+          "type": "object"
+        },
+        "distribution_handoff": {
+          "additionalProperties": false,
+          "properties": {
+            "package_id": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "package_sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "present": {
+              "type": "boolean"
+            },
+            "reason_codes": {
+              "items": {
+                "maxLength": 96,
+                "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+                "type": "string"
+              },
+              "maxItems": 128,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "scope_matched": {
+              "type": "boolean"
+            },
+            "state": {
+              "enum": [
+                "EXPORTED_FOR_MANUAL_HANDOFF",
+                "NOT_PROVIDED",
+                "INVALID",
+                "TAMPERED"
+              ]
+            },
+            "tamper_checked": {
+              "type": "boolean"
+            },
+            "video_sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "present",
+            "package_id",
+            "package_sha256",
+            "video_sha256",
+            "state",
+            "scope_matched",
+            "tamper_checked",
+            "reason_codes"
+          ],
+          "type": "object"
+        },
+        "media_inspection": {
+          "additionalProperties": false,
+          "properties": {
+            "full_decode": {
+              "type": "boolean"
+            },
+            "present": {
+              "type": "boolean"
+            },
+            "reason_codes": {
+              "items": {
+                "maxLength": 96,
+                "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+                "type": "string"
+              },
+              "maxItems": 128,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "record_sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "release_asset_matched": {
+              "type": "boolean"
+            },
+            "status": {
+              "enum": [
+                "PASS",
+                "FAIL",
+                "UNKNOWN",
+                "MISSING",
+                "TAMPERED"
+              ]
+            },
+            "tamper_checked": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "present",
+            "record_sha256",
+            "status",
+            "release_asset_matched",
+            "full_decode",
+            "tamper_checked",
+            "reason_codes"
+          ],
+          "type": "object"
+        },
+        "placement_evidence": {
+          "additionalProperties": false,
+          "properties": {
+            "decision": {
+              "enum": [
+                "REVIEW",
+                "HOLD",
+                "UNKNOWN",
+                "MISSING",
+                "TAMPERED"
+              ]
+            },
+            "present": {
+              "type": "boolean"
+            },
+            "provenance_status": {
+              "enum": [
+                "PROVEN",
+                "UNPROVEN",
+                "TAMPERED",
+                "MISSING"
+              ]
+            },
+            "reason_codes": {
+              "items": {
+                "maxLength": 96,
+                "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+                "type": "string"
+              },
+              "maxItems": 128,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "record_sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "scope_matched": {
+              "type": "boolean"
+            },
+            "tamper_checked": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "present",
+            "record_sha256",
+            "decision",
+            "provenance_status",
+            "scope_matched",
+            "tamper_checked",
+            "reason_codes"
+          ],
+          "type": "object"
+        },
+        "product_evidence": {
+          "additionalProperties": false,
+          "properties": {
+            "active_offer_id": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "offer_assessment_status": {
+              "enum": [
+                "VALID_OBSERVATION",
+                "STALE",
+                "EXPIRED",
+                "CONFLICT",
+                "NO_OFFERS",
+                "UNKNOWN",
+                "MISSING",
+                "TAMPERED"
+              ]
+            },
+            "pack_id": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "pack_sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "present": {
+              "type": "boolean"
+            },
+            "reason_codes": {
+              "items": {
+                "maxLength": 96,
+                "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+                "type": "string"
+              },
+              "maxItems": 128,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "rights_status": {
+              "enum": [
+                "GRANTED",
+                "UNKNOWN",
+                "RESTRICTED",
+                "MISSING",
+                "TAMPERED"
+              ]
+            },
+            "scope_matched": {
+              "type": "boolean"
+            },
+            "snapshot_id": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "snapshot_sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "enum": [
+                "VERIFIED",
+                "HOLD",
+                "UNKNOWN",
+                "MISSING",
+                "TAMPERED"
+              ]
+            },
+            "stock_available": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "synthetic": {
+              "type": "boolean"
+            },
+            "tamper_checked": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "present",
+            "pack_id",
+            "pack_sha256",
+            "snapshot_id",
+            "snapshot_sha256",
+            "offer_assessment_status",
+            "active_offer_id",
+            "stock_available",
+            "rights_status",
+            "synthetic",
+            "scope_matched",
+            "tamper_checked",
+            "status",
+            "reason_codes"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "media_inspection",
+        "claim_rights_review",
+        "placement_evidence",
+        "product_evidence",
+        "capability_evidence",
+        "distribution_handoff"
+      ],
+      "type": "object"
+    },
+    "decision": {
+      "enum": [
+        "READY_FOR_MANUAL_REVIEW",
+        "HOLD",
+        "UNKNOWN"
+      ]
+    },
+    "disclosure": {
+      "additionalProperties": false,
+      "properties": {
+        "has_affiliate_notice": {
+          "type": "boolean"
+        },
+        "mode": {
+          "enum": [
+            "CLEAR_AND_CONSPICUOUS",
+            "PROMINENT_TEXT",
+            "PLATFORM_DISCLOSURE_LABEL"
+          ]
+        },
+        "statement": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "COMPLIANT",
+            "NON_COMPLIANT"
+          ]
+        },
+        "tags": {
+          "items": {
+            "maxLength": 64,
+            "pattern": "^#[A-Za-z0-9_]+$",
+            "type": "string"
+          },
+          "maxItems": 16,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "statement",
+        "mode",
+        "has_affiliate_notice",
+        "tags",
+        "status"
+      ],
+      "type": "object"
+    },
+    "earnings_claims_allowed": {
+      "const": false
+    },
+    "evidence_refs": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "kind": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "record_sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "type": "string"
+          },
+          "source_sha256": {
+            "anyOf": [
+              {
+                "pattern": "^[a-f0-9]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tamper_checked": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "evidence_id",
+          "kind",
+          "record_sha256",
+          "source_sha256",
+          "tamper_checked"
+        ],
+        "type": "object"
+      },
+      "maxItems": 128,
+      "minItems": 0,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "legal_rights_status": {
+      "const": "UNKNOWN"
+    },
+    "link_activation": {
+      "const": "UNKNOWN"
+    },
+    "live_link_verified": {
+      "const": false
+    },
+    "live_provider_approval": {
+      "const": "UNKNOWN"
+    },
+    "manual_review_required": {
+      "const": true
+    },
+    "network_calls_performed": {
+      "const": false
+    },
+    "oauth_performed": {
+      "const": false
+    },
+    "pack_id": {
+      "maxLength": 73,
+      "minLength": 73,
+      "pattern": "^a13-pack-[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "packager_version": {
+      "const": "a13-e03/1.0"
+    },
+    "platform_approval": {
+      "const": "UNKNOWN"
+    },
+    "publication_status": {
+      "const": "NOT_ATTEMPTED"
+    },
+    "reason_codes": {
+      "items": {
+        "maxLength": 96,
+        "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+        "type": "string"
+      },
+      "maxItems": 128,
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "record_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "release_scope": {
+      "additionalProperties": false,
+      "properties": {
+        "account_ref": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "namespace": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "namespace",
+            "id"
+          ],
+          "type": "object"
+        },
+        "app_ref": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "namespace": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "namespace",
+                "id"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "channel": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "link_url": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "listing_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "market": {
+          "maxLength": 2,
+          "minLength": 2,
+          "pattern": "^[A-Z]{2}$",
+          "type": "string"
+        },
+        "platform": {
+          "enum": [
+            "TIKTOK",
+            "FACEBOOK",
+            "INSTAGRAM",
+            "YOUTUBE"
+          ]
+        },
+        "product_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "release_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "surface": {
+          "enum": [
+            "PRODUCT_ANCHOR",
+            "VIDEO_STICKER",
+            "BIO",
+            "POST",
+            "STORY",
+            "COMMENT",
+            "VIDEO",
+            "REEL",
+            "SHORT",
+            "PAGE_REEL",
+            "PROFILE_VIDEO"
+          ]
+        },
+        "territory": {
+          "maxLength": 2,
+          "minLength": 2,
+          "pattern": "^[A-Z]{2}$",
+          "type": "string"
+        },
+        "variant_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "platform",
+        "account_ref",
+        "app_ref",
+        "market",
+        "territory",
+        "surface",
+        "channel",
+        "product_id",
+        "listing_id",
+        "variant_id",
+        "release_sha256",
+        "link_url"
+      ],
+      "type": "object"
+    },
+    "revalidation": {
+      "additionalProperties": false,
+      "properties": {
+        "conflicts_detected": {
+          "type": "boolean"
+        },
+        "disclosure_compliant": {
+          "type": "boolean"
+        },
+        "evidence_complete": {
+          "type": "boolean"
+        },
+        "hashes_intact": {
+          "type": "boolean"
+        },
+        "scope_consistent": {
+          "type": "boolean"
+        },
+        "temporal_active": {
+          "type": "boolean"
+        },
+        "url_safe": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "scope_consistent",
+        "disclosure_compliant",
+        "temporal_active",
+        "url_safe",
+        "hashes_intact",
+        "evidence_complete",
+        "conflicts_detected"
+      ],
+      "type": "object"
+    },
+    "revenue_status": {
+      "const": "NOT_CLAIMED"
+    },
+    "sales_claims_allowed": {
+      "const": false
+    },
+    "sales_earnings_claims": {
+      "const": "NOT_PERMITTED"
+    },
+    "schema_version": {
+      "const": "AffiliateReleaseEvidencePack.v1"
+    },
+    "scope": {
+      "const": "ADVISORY_MANUAL_REVIEW_AFFILIATE_RELEASE_EVIDENCE_PACK_ONLY"
+    },
+    "state": {
+      "enum": [
+        "READY_FOR_MANUAL_REVIEW",
+        "HOLD",
+        "UNKNOWN"
+      ]
+    },
+    "status": {
+      "enum": [
+        "READY_FOR_MANUAL_REVIEW",
+        "HOLD",
+        "UNKNOWN"
+      ]
+    },
+    "temporal": {
+      "additionalProperties": false,
+      "properties": {
+        "as_of": {
+          "format": "date-time",
+          "maxLength": 40,
+          "minLength": 1,
+          "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "type": "string"
+        },
+        "revoked_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "maxLength": 40,
+              "minLength": 1,
+              "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "ACTIVE",
+            "EXPIRED",
+            "REVOKED",
+            "NOT_YET_EFFECTIVE",
+            "INVALID_WINDOW"
+          ]
+        },
+        "use_from": {
+          "format": "date-time",
+          "maxLength": 40,
+          "minLength": 1,
+          "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "type": "string"
+        },
+        "use_until": {
+          "format": "date-time",
+          "maxLength": 40,
+          "minLength": 1,
+          "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "type": "string"
+        },
+        "valid_from": {
+          "format": "date-time",
+          "maxLength": 40,
+          "minLength": 1,
+          "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "type": "string"
+        },
+        "valid_until": {
+          "format": "date-time",
+          "maxLength": 40,
+          "minLength": 1,
+          "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "as_of",
+        "valid_from",
+        "use_from",
+        "use_until",
+        "valid_until",
+        "revoked_at",
+        "status"
+      ],
+      "type": "object"
+    },
+    "url_evaluation": {
+      "additionalProperties": false,
+      "properties": {
+        "host": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "is_hostile": {
+          "type": "boolean"
+        },
+        "parsed_url": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "reason_codes": {
+          "items": {
+            "maxLength": 96,
+            "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+            "type": "string"
+          },
+          "maxItems": 128,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "scheme": {
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "parsed_url",
+        "scheme",
+        "host",
+        "is_hostile",
+        "reason_codes"
+      ],
+      "type": "object"
+    },
+    "verification_scope": {
+      "const": "LOCAL_OFFLINE_EVIDENCE_REPLAY_ONLY_NOT_LIVE_PROVIDER_OR_LEGAL_APPROVAL"
+    }
+  },
+  "required": [
+    "schema_version",
+    "packager_version",
+    "pack_id",
+    "scope",
+    "verification_scope",
+    "release_scope",
+    "temporal",
+    "disclosure",
+    "url_evaluation",
+    "components",
+    "evidence_refs",
+    "revalidation",
+    "state",
+    "decision",
+    "status",
+    "reason_codes",
+    "advisory_only",
+    "manual_review_required",
+    "live_provider_approval",
+    "live_link_verified",
+    "affiliate_link_status",
+    "account_eligibility",
+    "link_activation",
+    "platform_approval",
+    "legal_rights_status",
+    "publication_status",
+    "auto_publishing",
+    "oauth_performed",
+    "network_calls_performed",
+    "sales_claims_allowed",
+    "earnings_claims_allowed",
+    "sales_earnings_claims",
+    "revenue_status",
+    "record_sha256"
+  ],
+  "title": "AffiliateReleaseEvidencePack.v1",
+  "type": "object"
+}

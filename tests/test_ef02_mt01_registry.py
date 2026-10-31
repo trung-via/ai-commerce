@@ -24,6 +24,7 @@ REQUIRED_COMPONENTS = {
     "mt01-a10-m02-tests",
     "mt01-a11-tests",
     "mt01-a12-tests",
+    "mt01-a13-tests",
     "mt01-cli-tests",
     "mt01-ef01-tests",
     "mt01-repair-tests",

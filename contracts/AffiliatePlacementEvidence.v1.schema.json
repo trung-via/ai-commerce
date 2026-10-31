@@ -1,0 +1,812 @@
+{
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "AffiliatePlacementEvidence.v1"
+    },
+    "reviewer_version": {
+      "const": "a13-d06/1.0"
+    },
+    "scope": {
+      "const": "COMMERCIAL_AFFILIATE_PLACEMENT_OFFLINE_EVIDENCE_ONLY"
+    },
+    "verification_scope": {
+      "const": "LOCAL_OFFLINE_EVIDENCE_ONLY_NOT_EXTERNAL_OR_PROVIDER_APPROVAL"
+    },
+    "placement": {
+      "type": "object",
+      "properties": {
+        "account_ref": {
+          "type": "object",
+          "properties": {
+            "namespace": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          },
+          "required": [
+            "namespace",
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        "app_ref": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                }
+              },
+              "required": [
+                "namespace",
+                "id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "market": {
+          "type": "string",
+          "pattern": "^[A-Z]{2}$",
+          "minLength": 2,
+          "maxLength": 2
+        },
+        "surface": {
+          "enum": [
+            "PRODUCT_ANCHOR",
+            "VIDEO_STICKER",
+            "BIO",
+            "POST",
+            "STORY",
+            "COMMENT",
+            "VIDEO",
+            "REEL",
+            "SHORT",
+            "PAGE_REEL",
+            "PROFILE_VIDEO"
+          ]
+        },
+        "product_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "variant_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "link_url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      },
+      "required": [
+        "account_ref",
+        "app_ref",
+        "market",
+        "surface",
+        "product_id",
+        "variant_id",
+        "link_url"
+      ],
+      "additionalProperties": false
+    },
+    "temporal": {
+      "type": "object",
+      "properties": {
+        "as_of": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "format": "date-time"
+        },
+        "valid_from": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "format": "date-time"
+        },
+        "valid_until": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "format": "date-time"
+        },
+        "revoked_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 40,
+              "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "ACTIVE",
+            "EXPIRED",
+            "REVOKED",
+            "NOT_YET_EFFECTIVE",
+            "INVALID_WINDOW"
+          ]
+        }
+      },
+      "required": [
+        "as_of",
+        "valid_from",
+        "valid_until",
+        "revoked_at",
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "disclosure": {
+      "type": "object",
+      "properties": {
+        "statement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "mode": {
+          "enum": [
+            "CLEAR_AND_CONSPICUOUS",
+            "PROMINENT_TEXT",
+            "PLATFORM_DISCLOSURE_LABEL"
+          ]
+        },
+        "has_affiliate_notice": {
+          "type": "boolean"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^#[A-Za-z0-9_]+$",
+            "maxLength": 64
+          },
+          "minItems": 0,
+          "maxItems": 16,
+          "uniqueItems": true
+        },
+        "status": {
+          "enum": [
+            "COMPLIANT",
+            "NON_COMPLIANT"
+          ]
+        }
+      },
+      "required": [
+        "statement",
+        "mode",
+        "has_affiliate_notice",
+        "tags",
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "url_evaluation": {
+      "type": "object",
+      "properties": {
+        "parsed_url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "scheme": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "is_hostile": {
+          "type": "boolean"
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+            "maxLength": 96
+          },
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "parsed_url",
+        "scheme",
+        "host",
+        "is_hostile",
+        "reason_codes"
+      ],
+      "additionalProperties": false
+    },
+    "evidence_provenance": {
+      "type": "object",
+      "properties": {
+        "source_kind": {
+          "enum": [
+            "A12_OFFER_OBSERVATION",
+            "A12_PRODUCT_PACK_BOUND",
+            "A07_CAPABILITY_BOUND",
+            "OFFLINE_EVIDENCE_REPLAY",
+            "TEST_FIXTURE"
+          ]
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "evidence_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "kind": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "record_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "source_sha256": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "tamper_checked": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "evidence_id",
+              "kind",
+              "record_sha256",
+              "source_sha256",
+              "tamper_checked"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0,
+          "maxItems": 64,
+          "uniqueItems": true
+        },
+        "provenance_status": {
+          "enum": [
+            "PROVEN",
+            "UNPROVEN",
+            "TAMPERED"
+          ]
+        }
+      },
+      "required": [
+        "source_kind",
+        "evidence_refs",
+        "provenance_status"
+      ],
+      "additionalProperties": false
+    },
+    "decision": {
+      "enum": [
+        "HOLD",
+        "UNKNOWN",
+        "REVIEW"
+      ]
+    },
+    "reason_codes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+        "maxLength": 96
+      },
+      "minItems": 1,
+      "maxItems": 128,
+      "uniqueItems": true
+    },
+    "live_link_verified": {
+      "const": false
+    },
+    "account_eligibility": {
+      "const": "UNKNOWN"
+    },
+    "link_activation": {
+      "const": "UNKNOWN"
+    },
+    "platform_approval": {
+      "const": "UNKNOWN"
+    },
+    "publication_status": {
+      "const": "NOT_ATTEMPTED"
+    },
+    "sales_claims_allowed": {
+      "const": false
+    },
+    "earnings_claims_allowed": {
+      "const": false
+    },
+    "sales_earnings_claims": {
+      "const": "NOT_PERMITTED"
+    },
+    "record_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  },
+  "required": [
+    "schema_version",
+    "reviewer_version",
+    "scope",
+    "verification_scope",
+    "placement",
+    "temporal",
+    "disclosure",
+    "url_evaluation",
+    "evidence_provenance",
+    "decision",
+    "reason_codes",
+    "live_link_verified",
+    "account_eligibility",
+    "link_activation",
+    "platform_approval",
+    "publication_status",
+    "sales_claims_allowed",
+    "earnings_claims_allowed",
+    "sales_earnings_claims",
+    "record_sha256"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-commerce:AffiliatePlacementEvidence:v1",
+  "title": "AffiliatePlacementEvidence.v1",
+  "description": "Deterministic, offline commercial affiliate placement evidence review. Evaluates account x app x market x surface x product x variant x link, evidence provenance, required disclosure, expiry/revocation, hostile URLs, cross-account mismatches, and tampered hashes. Parsed URL alone never implies an active eligible link; decisions are strictly HOLD, UNKNOWN, or REVIEW. No OAuth, live provider calls, posting, real approvals, sales or earnings claims.",
+  "$defs": {
+    "AccountRef": {
+      "type": "object",
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "namespace",
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "AppRef": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "namespace": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          },
+          "required": [
+            "namespace",
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "PlacementSubject": {
+      "type": "object",
+      "properties": {
+        "account_ref": {
+          "type": "object",
+          "properties": {
+            "namespace": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          },
+          "required": [
+            "namespace",
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        "app_ref": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                }
+              },
+              "required": [
+                "namespace",
+                "id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "market": {
+          "type": "string",
+          "pattern": "^[A-Z]{2}$",
+          "minLength": 2,
+          "maxLength": 2
+        },
+        "surface": {
+          "enum": [
+            "PRODUCT_ANCHOR",
+            "VIDEO_STICKER",
+            "BIO",
+            "POST",
+            "STORY",
+            "COMMENT",
+            "VIDEO",
+            "REEL",
+            "SHORT",
+            "PAGE_REEL",
+            "PROFILE_VIDEO"
+          ]
+        },
+        "product_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "variant_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "link_url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      },
+      "required": [
+        "account_ref",
+        "app_ref",
+        "market",
+        "surface",
+        "product_id",
+        "variant_id",
+        "link_url"
+      ],
+      "additionalProperties": false
+    },
+    "PlacementTemporal": {
+      "type": "object",
+      "properties": {
+        "as_of": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "format": "date-time"
+        },
+        "valid_from": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "format": "date-time"
+        },
+        "valid_until": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "format": "date-time"
+        },
+        "revoked_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 40,
+              "pattern": "^(?!.*-00:00$)[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "ACTIVE",
+            "EXPIRED",
+            "REVOKED",
+            "NOT_YET_EFFECTIVE",
+            "INVALID_WINDOW"
+          ]
+        }
+      },
+      "required": [
+        "as_of",
+        "valid_from",
+        "valid_until",
+        "revoked_at",
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "PlacementDisclosure": {
+      "type": "object",
+      "properties": {
+        "statement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "mode": {
+          "enum": [
+            "CLEAR_AND_CONSPICUOUS",
+            "PROMINENT_TEXT",
+            "PLATFORM_DISCLOSURE_LABEL"
+          ]
+        },
+        "has_affiliate_notice": {
+          "type": "boolean"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^#[A-Za-z0-9_]+$",
+            "maxLength": 64
+          },
+          "minItems": 0,
+          "maxItems": 16,
+          "uniqueItems": true
+        },
+        "status": {
+          "enum": [
+            "COMPLIANT",
+            "NON_COMPLIANT"
+          ]
+        }
+      },
+      "required": [
+        "statement",
+        "mode",
+        "has_affiliate_notice",
+        "tags",
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "UrlEvaluation": {
+      "type": "object",
+      "properties": {
+        "parsed_url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "scheme": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "is_hostile": {
+          "type": "boolean"
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9_]{0,95}$",
+            "maxLength": 96
+          },
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "parsed_url",
+        "scheme",
+        "host",
+        "is_hostile",
+        "reason_codes"
+      ],
+      "additionalProperties": false
+    },
+    "EvidenceRef": {
+      "type": "object",
+      "properties": {
+        "evidence_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "record_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "source_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tamper_checked": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "evidence_id",
+        "kind",
+        "record_sha256",
+        "source_sha256",
+        "tamper_checked"
+      ],
+      "additionalProperties": false
+    },
+    "EvidenceProvenance": {
+      "type": "object",
+      "properties": {
+        "source_kind": {
+          "enum": [
+            "A12_OFFER_OBSERVATION",
+            "A12_PRODUCT_PACK_BOUND",
+            "A07_CAPABILITY_BOUND",
+            "OFFLINE_EVIDENCE_REPLAY",
+            "TEST_FIXTURE"
+          ]
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "evidence_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "kind": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "record_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "source_sha256": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "tamper_checked": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "evidence_id",
+              "kind",
+              "record_sha256",
+              "source_sha256",
+              "tamper_checked"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0,
+          "maxItems": 64,
+          "uniqueItems": true
+        },
+        "provenance_status": {
+          "enum": [
+            "PROVEN",
+            "UNPROVEN",
+            "TAMPERED"
+          ]
+        }
+      },
+      "required": [
+        "source_kind",
+        "evidence_refs",
+        "provenance_status"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

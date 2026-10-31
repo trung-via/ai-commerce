@@ -293,5 +293,17 @@
     "-q",
     "-n",
     "12"
+  ],
+  "mt01-a13-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_a13_media_inspection.py",
+    "tests/test_a13_claim_rights.py",
+    "tests/test_a13_link.py",
+    "tests/test_a13_evidence_pack.py",
+    "-q",
+    "-n",
+    "12"
   ]
 }
