@@ -248,7 +248,7 @@ def test_vietnamese_send_button_requires_primary_action_svg_and_form_scope():
 
 
 
-def test_real_guard_localized_send_dom_requires_unique_eligible_primary_button():
+def test_real_guard_localized_send_dom_requires_exact_fresh_event_and_unique_button(monkeypatch):
     """Run the real D4 readiness guard on a bounded, DOM-like Node fixture.
 
     The fixture models four P rows from the observed Vietnamese ChatGPT editor
@@ -260,8 +260,14 @@ def test_real_guard_localized_send_dom_requires_unique_eligible_primary_button()
     import shutil
     import subprocess
     import sys
+    from unittest.mock import Mock
     from ai_commerce.remote.cdp_doorbell import _READY, _ARGS, _doorbell_text
 
+    # Synthetic IDs only: this regression does not reuse any historical event.
+    fresh_event = "ef02-completion-v1:" + "f" * 64
+    stale_event = "ef02-completion-v1:" + "e" * 64
+    send_wake = Mock(side_effect=AssertionError("production send forbidden"))
+    monkeypatch.setattr(LocalChromeDoorbellAdapter, "send_wake", send_wake)
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js not installed")
@@ -269,7 +275,7 @@ def test_real_guard_localized_send_dom_requires_unique_eligible_primary_button()
 const fs=require('node:fs');
 const obj=JSON.parse(fs.readFileSync(0,'utf8'));
 const input=obj.text;
-const rows=input.split('\n');
+let clicks=0;
 const element=(name)=>({
   nodeType:1, tagName:name, getClientRects:()=>[1],
   getAttribute:()=>null, textContent:'', childNodes:[]
@@ -292,6 +298,7 @@ function sendMatches(sel,b) {
   });
 }
 function check(o) {
+  const rows=(o.text ?? input).split('\n');
   const f=element('FORM');
   f.querySelectorAll=sel => o.outside ? [] :
     o.buttons.filter(b=>sendMatches(sel,b));
@@ -317,12 +324,15 @@ function check(o) {
 }
 function button(label,opts={}) {
  return {tagName:'BUTTON',label,type:opts.type||'button',
+         click:()=>{clicks++; throw Error('click forbidden in readiness regression');},
          testid:opts.testid||null,primary:opts.primary!==false,
          disabled:opts.disabled||false,
          getClientRects:()=>[1],getAttribute:k=>
            k==='aria-disabled'?(opts.ariaDisabled?'true':null):null};
 }
 const b=()=>button('Gửi tin nhắn');
+// A fully formed draft for another event must not satisfy fresh-event readiness.
+if(check({buttons:[b()],text:obj.staleText})!==false) process.exit(30);
 if(check({buttons:[b()]})!==true) process.exit(21);
 if(check({buttons:[button('Gửi tệp',{primary:false})]})!==false) process.exit(22);
 if(check({buttons:[button('Send', {primary:true})]})!==false) process.exit(23);
@@ -332,13 +342,15 @@ if(check({buttons:[b(),b()]})!==false) process.exit(26);
 if(check({buttons:[b()],outside:true})!==false) process.exit(27);
 if(check({buttons:[b()],generation:true})!==false) process.exit(28);
 if(check({buttons:[b()],wrongText:true})!==false) process.exit(29);
+if(clicks!==0) process.exit(31);
 """
     result = subprocess.run(
         [node, "-e", program],
         input=json.dumps({
             "ready": _READY,
-            "args": {**_ARGS, "url": URL, "text": _doorbell_text(EVENT, "trung-via/ai-commerce")},
-            "text": _doorbell_text(EVENT, "trung-via/ai-commerce"),
+            "args": {**_ARGS, "url": URL, "text": _doorbell_text(fresh_event, "trung-via/ai-commerce")},
+            "text": _doorbell_text(fresh_event, "trung-via/ai-commerce"),
+            "staleText": _doorbell_text(stale_event, "trung-via/ai-commerce"),
         }),
         text=True, capture_output=True, timeout=45 if sys.platform == "win32" else 12,
     )
@@ -346,3 +358,4 @@ if(check({buttons:[b()],wrongText:true})!==false) process.exit(29);
         f"Localized D4 DOM readiness failed (exit={result.returncode}); "
         f"stderr={result.stderr[:1000]}"
     )
+    send_wake.assert_not_called()
