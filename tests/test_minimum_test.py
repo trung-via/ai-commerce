@@ -41,8 +41,12 @@ def test_reviewed_map_contains_exact_real_paths_and_all_current_python_test_fami
     assert set(declared) <= real_tree.files.keys()
     mapped_tests = [p for g in real_tree.groups for p in g.tests]
     assert len(mapped_tests) == len(set(mapped_tests))
-    # Registry-only control test is intentionally broad-verified until protected PR #160 activates.
-    assert {p for p in real_tree.files if p.startswith("tests/test_") and p.endswith(".py")} - {"tests/test_ef02_mt01_registry.py"} <= set(mapped_tests)
+    # MT-01 bootstrap: new uncommitted tests may be broad-verified by EF01.
+    # Once committed (including PR CI's merge HEAD), missing reviewed mapping
+    # is still a failure; an unknown test never earns selective coverage.
+    registration = mt.reviewed_test_registration(ROOT, real_tree.files, real_tree.groups)
+    assert registration["unregistered_committed"] == []
+    assert registration["unsafe_new_tests"] == []
     assert "src/ai_commerce/opportunity/trends/tests/test_m02.py" in mapped_tests
     assert {f"a{n:02}" for n in range(2, 13)} <= {g.name for g in real_tree.groups}
     assert "a13" in {g.name for g in real_tree.groups}
@@ -898,3 +902,78 @@ def test_pr_ci_empty_diff_requires_full(tmp_path, pr_ci_module):
         selection_fn=lambda **_: _pr_ci_plan(),
     )
     assert result[2] == ("EMPTY_DIFF",)
+
+
+def test_mt01_new_component_test_is_pending_not_a_full_suite_failure(monkeypatch, tmp_path):
+    """Reproduce A14: EF01 creates tests/test_a14_attribution.py after HEAD."""
+    original = "tests/test_known.py"
+    new = "tests/test_a14_attribution.py"
+    calls = []
+
+    def git_ls_tree(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, (original + "\0").encode(), b"")
+
+    monkeypatch.setattr(mt.subprocess, "run", git_ls_tree)
+    groups = (mt.TestGroup("known", (original,), ("KNOWN.ac",), ("known.py",)),)
+    files = {original: "old", new: "new", "known.py": "old"}
+    report = mt.reviewed_test_registration(tmp_path, files, groups)
+    assert report == {
+        "unregistered_committed": [], "pending_new_tests": [new],
+        "unsafe_new_tests": [],
+    }
+    assert calls[0][0] == ["git", "ls-tree", "-r", "--name-only", "-z", "HEAD"]
+    assert calls[0][1]["cwd"] == tmp_path
+    assert calls[0][1]["capture_output"] is True
+
+
+def test_mt01_newly_committed_unmapped_test_still_requires_registration(monkeypatch, tmp_path):
+    """PR checkout must not silently accept source-committed test families."""
+    old = "tests/test_known.py"
+    unregistered = "tests/test_a14_attribution.py"
+
+    def git_ls_tree(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            argv, 0, (old + "\0" + unregistered + "\0").encode(), b""
+        )
+
+    monkeypatch.setattr(mt.subprocess, "run", git_ls_tree)
+    report = mt.reviewed_test_registration(
+        tmp_path, {old: "1", unregistered: "2"},
+        (mt.TestGroup("known", (old,), ("KNOWN.ac",), ("known.py",)),),
+    )
+    assert report["unregistered_committed"] == [unregistered]
+    assert report["pending_new_tests"] == []
+
+
+def test_mt01_new_symlinked_test_is_never_accepted_as_pending(monkeypatch, tmp_path):
+    def git_ls_tree(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(mt.subprocess, "run", git_ls_tree)
+    report = mt.reviewed_test_registration(
+        tmp_path, {"tests/test_escape.py": "SYMLINK:../../secrets"}, (),
+    )
+    assert report["unsafe_new_tests"] == ["tests/test_escape.py"]
+
+
+def test_mt01_baseline_git_failure_fails_closed(monkeypatch, tmp_path):
+    def git_ls_tree(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 128, b"", b"fatal: not a git repository")
+
+    monkeypatch.setattr(mt.subprocess, "run", git_ls_tree)
+    with pytest.raises(ValueError, match="MT01_COMMITTED_TREE_UNAVAILABLE"):
+        mt.reviewed_test_registration(tmp_path, {}, ())
+
+
+def test_mt01_new_a14_file_retains_registered_full_fallback(mapped):
+    """Bootstrap permission does not confer a narrow test-selection shortcut."""
+    candidate = mapped.repo / "tests/test_a14_attribution.py"
+    candidate.write_text("def test_new_a14():\n    assert True\n")
+    selected = plan(mapped, changed=("tests/test_a14_attribution.py",),
+                    registered_only=True,
+                    registered_profiles={"project-tests": [*FULL, "-n", "12"]},
+                    fallback_argv=[*FULL, "-n", "12"])
+    assert selected["fallback"]
+    assert "tests/test_a14_attribution.py" in selected["unknown_tests"]
+    assert selected["groups"][0]["binding"]["argv"] == [*FULL, "-n", "12"]
