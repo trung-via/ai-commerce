@@ -20,13 +20,12 @@ from .wake_adapter import WakeReceipt
 _EVENT = re.compile(r"ef02-completion-v1:[0-9a-f]{64}\Z")
 _COMPOSER = ('#prompt-textarea[contenteditable="true"], '
              'main form [contenteditable="true"][role="textbox"][aria-multiline="true"]')
-# Localized ChatGPT UI uses aria-label="Gửi…" (Vietnamese), sometimes
-# without a type="submit" attribute. The JS guard still limits candidates to
-# the sole exact-chat composer form, requires uniqueness and enabled state.
+# Vietnamese ChatGPT may label the primary action "Gửi" without a
+# type="submit". Keep the exact label (not a broad "Gửi ..." prefix):
+# candidates are still limited to the unique exact-chat composer form.
 _SEND = ('[data-testid="send-button"], '
          'button[type="submit"][aria-label="Send"], '
-         'button[aria-label="Gửi"], '
-         'button[aria-label^="Gửi "]')
+         'button[aria-label="Gửi"]')
 _STOP = '[data-testid="stop-button"]'
 _LOGIN = '[data-testid="login-button"], a[href^="/auth/login"]'
 _WORK = '[data-workspace-type="team"], [data-workspace-type="enterprise"], [data-workspace-type="business"], [data-testid="work-composer"]'
