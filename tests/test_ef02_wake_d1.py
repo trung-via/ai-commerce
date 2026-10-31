@@ -118,6 +118,41 @@ def test_mixed_batch_with_scope_review_is_partial_not_complete():
     assert validate_completion_event(e) == e
 
 
+def test_all_failed_batch_preserves_final_statuses_and_exact_route(tmp_path):
+    r = result(status="VERIFICATION_FAILED")
+    r["total"] = 2
+    r["actions"].append({
+        "action_id": "b", "attempt_id": "second",
+        "status": "BLOCKED_DEPENDENCY", "candidate_sha": None,
+        "diagnostic": "PRIVATE_DEPENDENCY_LOG",
+    })
+    assert r["succeeded"] == 0 and r["status"] == "PARTIAL_OR_FAILED"
+    e = build_completion_event(r, repository="trung-via/ai-commerce",
+                               run_id=42, run_attempt=1, issue_number=12)
+    assert e == build_completion_event(r, repository="trung-via/ai-commerce",
+                                       run_id=42, run_attempt=1, issue_number=12)
+    assert e["batch_status"] == "PARTIAL_OR_FAILED"
+    assert e["actions"] == [
+        {"action_id": "a", "attempt_id": "first", "status": "VERIFICATION_FAILED"},
+        {"action_id": "b", "attempt_id": "second", "status": "BLOCKED_DEPENDENCY"},
+    ]
+    assert validate_completion_event(e) == e
+    serialized = json.dumps(e)
+    assert "candidate_sha" not in serialized
+    assert "diagnostic" not in serialized
+    assert "SECRET_OR_PRIVATE_LOG" not in serialized
+    assert "PRIVATE_DEPENDENCY_LOG" not in serialized
+    assert e["origin_binding_status"] == "UNBOUND"
+    assert e["delivery_status"] == "NOT_ATTEMPTED"
+    assert e["chat_delivery_proven"] is False
+    p, root = registry(tmp_path, [route("routeB", CHAT_B), route("routeA", CHAT_A)],
+                       [claim("routeA", "batchA", 12)])
+    bound = resolve_binding(e, route_id="routeA", registry_path=p, repository_root=root)
+    assert bound.route_id == "routeA" and bound.chat_url == CHAT_A
+    with pytest.raises(BindingError, match="ROUTE_EVENT_MISMATCH"):
+        resolve_binding(e, route_id="routeB", registry_path=p, repository_root=root)
+
+
 @pytest.mark.parametrize("status", [
     "NOT_STARTED", "EXECUTOR_RETURNED_UNVERIFIED",
     "BUILD_VERIFIED_FOR_SCOPE", "CLAIMED", "RUNNING",
