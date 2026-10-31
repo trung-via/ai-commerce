@@ -221,17 +221,18 @@ if(check(args,hidden,{},getComputedStyle)!==false) process.exit(24);
     assert result.returncode == 0, f"DOM guard JS regression failed (code {result.returncode})"
 
 
-def test_send_selector_supports_vietnamese_primary_action_without_broadening_to_other_buttons():
-    """Regression for live D5.1 #177: exact UI had a 'Gửi…' labelled button.
 
-    D4 previously only matched the English 'Send' label, so it staged the
-    draft but the send-button guard saw zero candidates and stopped. The
-    fix remains scoped to the *same form* with one visible, enabled button.
+def test_send_selector_supports_exact_vietnamese_primary_action():
+    """Live D5.1 #177 shows a localized 'Gửi…' primary action, not 'Send'.
+
+    Recognize the exact 'Gửi' label while preserving scoped, unique,
+    enabled-button requirements and the English/standard test-ID fallbacks.
     """
     from ai_commerce.remote.cdp_doorbell import _SEND, _GUARD, _READY, _CLICK
 
     assert 'button[aria-label="Gửi"]' in _SEND
-    assert 'button[aria-label^="Gửi "]' in _SEND
+    assert 'button[aria-label^="Gửi"]' not in _SEND
+    assert 'button[aria-label^="Gửi "]' not in _SEND
     assert 'button[type="submit"][aria-label="Send"]' in _SEND
     assert '[data-testid="send-button"]' in _SEND
     assert 'forms[0].querySelectorAll(sendSel)' in _GUARD
@@ -239,17 +240,3 @@ def test_send_selector_supports_vietnamese_primary_action_without_broadening_to_
     assert 'result.buttons.length === 1' in _READY
     assert 'result.buttons.length !== 1' in _CLICK
     assert "button.click()" in _CLICK
-
-
-def test_localized_selector_matches_only_vietnamese_send_labels_in_actual_css():
-    """Validate CSS selector text with a browser-like CSS selector engine.
-
-    Requires beautifulsoup4 + soupsieve only if present; optional test stays
-    deterministic on minimal hosts with no extra dependency.
-    """
-    from ai_commerce.remote.cdp_doorbell import _SEND
-
-    assert 'button[aria-label^="Gửi"]' not in _SEND
-    assert 'button[aria-label^="Gửi "]' in _SEND
-    assert 'button[aria-label="Gửi"]' in _SEND
-    assert 'button[aria-label="Gửi tệp"]' not in _SEND
