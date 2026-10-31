@@ -912,7 +912,7 @@ def test_mt01_new_component_test_is_pending_not_a_full_suite_failure(monkeypatch
 
     def git_ls_tree(argv, **kwargs):
         calls.append((argv, kwargs))
-        return subprocess.CompletedProcess(argv, 0, (original + "\\0").encode(), b"")
+        return subprocess.CompletedProcess(argv, 0, (original + "\0").encode(), b"")
 
     monkeypatch.setattr(mt.subprocess, "run", git_ls_tree)
     groups = (mt.TestGroup("known", (original,), ("KNOWN.ac",), ("known.py",)),)
@@ -934,7 +934,7 @@ def test_mt01_newly_committed_unmapped_test_still_requires_registration(monkeypa
 
     def git_ls_tree(argv, **kwargs):
         return subprocess.CompletedProcess(
-            argv, 0, (old + "\\0" + unregistered + "\\0").encode(), b""
+            argv, 0, (old + "\0" + unregistered + "\0").encode(), b""
         )
 
     monkeypatch.setattr(mt.subprocess, "run", git_ls_tree)
@@ -969,7 +969,7 @@ def test_mt01_baseline_git_failure_fails_closed(monkeypatch, tmp_path):
 def test_mt01_new_a14_file_retains_registered_full_fallback(mapped):
     """Bootstrap permission does not confer a narrow test-selection shortcut."""
     candidate = mapped.repo / "tests/test_a14_attribution.py"
-    candidate.write_text("def test_new_a14():\\n    assert True\\n")
+    candidate.write_text("def test_new_a14():\n    assert True\n")
     selected = plan(mapped, changed=("tests/test_a14_attribution.py",),
                     registered_only=True,
                     registered_profiles={"project-tests": [*FULL, "-n", "12"]},
