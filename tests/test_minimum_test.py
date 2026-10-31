@@ -103,11 +103,27 @@ def test_companion_report_has_exact_reviewed_parallel_commands(real_tree):
     report = (ROOT / "docs/engineering/MT01_COMPONENT_AWARE_IMPLEMENTATION_REPORT.md").read_text()
     proposed = json.loads(report.split("```json\n", 1)[1].split("\n```", 1)[0])
     current = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_text())
-    assert all(current[key] == argv for key, argv in proposed.items() if key in current)  # Companions may already be active.
-    combined = {**current, **proposed}
+    for key, historical_argv in proposed.items():
+        if key not in current:
+            continue
+        if key == "mt01-ef02-recovery-tests":
+            # Preserve the dated MT-01 report; only deleted M0-R probe-only
+            # tests may disappear from its historical recovery selection.
+            historical_tests = historical_argv[3:-3]
+            kept = [path for path in historical_tests if (ROOT / path).is_file()]
+            retired = [path for path in historical_tests if not (ROOT / path).exists()]
+            assert len(retired) == 8
+            assert all(path.startswith("tests/test_ef02_m0r_") for path in retired)
+            assert current[key] == [*historical_argv[:3], *kept, *historical_argv[-3:]]
+        else:
+            assert current[key] == historical_argv
+
+    # The live registry, not an obsolete report overlay, must match the
+    # exact current test groups including retained fault-injection coverage.
     for g in real_tree.groups:
         expected = ["python", "-m", "pytest", *g.tests, "-q", "-n", "12"]
-        assert expected in combined.values()
+        key = f"mt01-{g.name}-tests"
+        assert current.get(key, proposed.get(key)) == expected
 
 
 def test_component_local_m02_requires_profile_that_actually_collects_it(real_tree, monkeypatch):
