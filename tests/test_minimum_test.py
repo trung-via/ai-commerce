@@ -775,3 +775,126 @@ def test_a13_mapping_and_registry_are_exact_and_do_not_waive_future_coverage(rea
                         registry=current, acs=("A13.affiliate-release",))
     assert unknown["fallback"]
     assert "PATH_OR_AC_MAP_INCOMPLETE" in unknown["reason_codes"]
+
+
+# MT-01 PR CI integration: do not silently narrow CI when coverage is uncertain.
+@pytest.fixture(scope="module")
+def pr_ci_module():
+    import importlib.util
+    script = ROOT / ".github" / "scripts" / "ef02-pr-ci-tests.py"
+    spec = importlib.util.spec_from_file_location("ef02_pr_ci_tests", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _pr_ci_plan(tests=("tests/test_ef02_d3_github_artifact_authority.py",),
+                *, fallback=False, reasons=(), executable=True):
+    return {
+        "fallback": fallback, "reason_codes": list(reasons),
+        "groups": [{"group": "ef02-wake",
+                    "state": "EXECUTE" if executable else "UNPROVEN",
+                    "execute": executable,
+                    "binding": {"mapping": {"tests": list(tests)}}}],
+    }
+
+
+def test_pr_ci_push_stays_full(tmp_path, pr_ci_module):
+    result = pr_ci_module.choose(tmp_path, event="push", base="a" * 40)
+    assert result[0] == ("tests",)
+    assert result[1] == "FULL_PROJECT_REQUIRED"
+    assert result[2] == ("PUSH_OR_NON_PR_EVENT",)
+
+
+def test_pr_ci_missing_base_stays_full(tmp_path, pr_ci_module):
+    result = pr_ci_module.choose(tmp_path, event="pull_request", base="invalid")
+    assert result[1] == "FULL_PROJECT_REQUIRED"
+
+
+def test_pr_ci_d3_changes_select_approved_consumer_tests(tmp_path, pr_ci_module):
+    test = "tests/test_ef02_d3_github_artifact_authority.py"
+    (tmp_path / "tests").mkdir()
+    (tmp_path / test).touch()
+    result = pr_ci_module.choose(
+        tmp_path, event="pull_request", base="a" * 40,
+        paths={"src/ai_commerce/remote/github_artifact_authority.py", test},
+        selection_fn=lambda **_: _pr_ci_plan(),
+    )
+    assert result == ((test,), "SELECTED_AFFECTED_INTEGRATION",
+                      ("MT01_PROVEN_CONSUMER_CLOSURE",), ("ef02-wake",))
+
+
+@pytest.mark.parametrize("path", [
+    ".github/workflows/ef02-tests.yml", ".github/scripts/ef02-pr-ci-tests.py",
+    "pyproject.toml",
+])
+def test_pr_ci_workflow_or_config_changes_require_full(tmp_path, pr_ci_module, path):
+    result = pr_ci_module.choose(
+        tmp_path, event="pull_request", base="a" * 40, paths={path},
+        selection_fn=lambda **_: _pr_ci_plan(),
+    )
+    assert result[0] == ("tests",)
+    assert result[2] == ("CI_OR_SHARED_CONFIG_CHANGED",)
+
+
+@pytest.mark.parametrize("plan", [
+    _pr_ci_plan(fallback=True, reasons=("IMPORT_OR_CONSUMER_MAP_INCOMPLETE",)),
+    {"fallback": False, "reason_codes": [], "groups": []},
+    _pr_ci_plan(executable=False),
+])
+def test_pr_ci_unproven_mapping_requires_full(tmp_path, pr_ci_module, plan):
+    result = pr_ci_module.choose(
+        tmp_path, event="pull_request", base="a" * 40, paths={"x.py"},
+        selection_fn=lambda **_: plan,
+    )
+    assert result[1] == "FULL_PROJECT_REQUIRED"
+
+
+def test_pr_ci_modified_test_must_be_selected(tmp_path, pr_ci_module):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_ef02_d3_github_artifact_authority.py").touch()
+    result = pr_ci_module.choose(
+        tmp_path, event="pull_request", base="a" * 40,
+        paths={"tests/test_ef02_d5_local_wake_entry.py"},
+        selection_fn=lambda **_: _pr_ci_plan(),
+    )
+    assert result[0] == ("tests",)
+    assert result[2] == ("MODIFIED_TEST_NOT_SELECTED",)
+
+
+def test_pr_ci_selection_exception_requires_full(tmp_path, pr_ci_module):
+    def broken(**kwargs):
+        raise OSError("synthetic selector failure")
+    result = pr_ci_module.choose(
+        tmp_path, event="pull_request", base="a" * 40, paths={"x.py"},
+        selection_fn=broken,
+    )
+    assert result[0] == ("tests",)
+    assert result[2] == ("SELECTOR_ERROR_FAILS_TO_FULL",)
+
+
+def test_pr_ci_git_rename_requires_full(tmp_path, pr_ci_module):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "CI Test"], check=True)
+    (repo / "old.py").write_text("x = 1\n")
+    subprocess.run(["git", "-C", str(repo), "add", "old.py"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"], check=True)
+    base = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    (repo / "old.py").rename(repo / "new.py")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "rename"], check=True)
+    paths, renamed = pr_ci_module.changed_paths(repo, base)
+    assert paths == {"old.py", "new.py"} and renamed
+    result = pr_ci_module.choose(repo, event="pull_request", base=base)
+    assert result[2] == ("RENAMED_PATH_REQUIRES_FULL",)
+
+
+def test_pr_ci_empty_diff_requires_full(tmp_path, pr_ci_module):
+    result = pr_ci_module.choose(
+        tmp_path, event="pull_request", base="a" * 40, paths=set(),
+        selection_fn=lambda **_: _pr_ci_plan(),
+    )
+    assert result[2] == ("EMPTY_DIFF",)

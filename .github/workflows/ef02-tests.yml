@@ -12,6 +12,8 @@ on:
       - ".github/scripts/ef02-reconcile.cjs"
       - "tests/test_ef01.py"
       - ".github/workflows/ef02-tests.yml"
+      - ".github/scripts/ef02-pr-ci-tests.py"
+      - "tests/test_minimum_test.py"
   pull_request:
     paths:
       - "src/ai_commerce/remote/**"
@@ -23,6 +25,8 @@ on:
       - ".github/scripts/ef02-watch.cjs"
       - ".github/scripts/ef02-reconcile.cjs"
       - ".github/workflows/ef02-*.yml"
+      - ".github/scripts/ef02-pr-ci-tests.py"
+      - "tests/test_minimum_test.py"
       - "contracts/RemoteActionBatch.v1.schema.json"
 jobs:
   tests:
@@ -33,6 +37,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -51,7 +57,11 @@ jobs:
       - name: Verify ffmpeg, ffprobe and libx264 are executable
         run: python -c "import shutil,subprocess; assert shutil.which('ffmpeg') and shutil.which('ffprobe'), 'FFMPEG_OR_FFPROBE_MISSING'; assert b'libx264' in subprocess.check_output(['ffmpeg','-hide_banner','-encoders']), 'LIBX264_MISSING'; subprocess.check_call(['ffprobe','-version'],stdout=subprocess.DEVNULL)"
       - run: python -m pip install -e ".[dev]" Pillow
-      - run: python -m pytest tests -q
+      - name: MT-01 PR CI selective tests (full fallback)
+        run: python .github/scripts/ef02-pr-ci-tests.py
+        env:
+          MT01_CI_EVENT: ${{ github.event_name }}
+          MT01_CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
