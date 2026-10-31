@@ -45,9 +45,11 @@ def test_reviewed_map_contains_exact_real_paths_and_all_current_python_test_fami
     assert {p for p in real_tree.files if p.startswith("tests/test_") and p.endswith(".py")} - {"tests/test_ef02_mt01_registry.py"} <= set(mapped_tests)
     assert "src/ai_commerce/opportunity/trends/tests/test_m02.py" in mapped_tests
     assert {f"a{n:02}" for n in range(2, 13)} <= {g.name for g in real_tree.groups}
+    assert "a13" in {g.name for g in real_tree.groups}
 
 
 @pytest.mark.parametrize("path,expected", [
+    ("tests/test_a13_evidence_pack.py", "a13"),
     ("tests/test_a12_claims.py", "a12"),
     ("src/ai_commerce/remote/chrome_acquisition.py", "ef02-wake"),
 ])
@@ -753,6 +755,26 @@ def test_ef02_fanin_rejects_tampered_aggregate_fingerprint_before_publish(tmp_pa
     result = context.worker.execute_action(action)
     assert result["status"] == "UNPROVEN" and result["error_code"] == "AGGREGATE_FRESH_COVERAGE_UNCONFIRMED"
     assert not context.candidates
+
+
+def test_a13_mapping_and_registry_are_exact_and_do_not_waive_future_coverage(real_tree, monkeypatch):
+    current = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_text())
+    a13 = next(g for g in real_tree.groups if g.name == "a13")
+    assert set(a13.tests) == {
+        "tests/test_a13_media_inspection.py", "tests/test_a13_claim_rights.py",
+        "tests/test_a13_link.py", "tests/test_a13_evidence_pack.py",
+    }
+    assert current["mt01-a13-tests"] == ["python", "-m", "pytest", *a13.tests, "-q", "-n", "12"]
+    assert "A13.affiliate-release" in a13.acs
+    selected = real_plan(real_tree, monkeypatch, "tests/test_a13_evidence_pack.py",
+                         registry=current, acs=("A13.affiliate-release",))
+    assert not selected["fallback"]
+    assert selected["selected_groups"] == ["a13"]
+    assert selected["groups"][0]["selected_profile"] == "mt01-a13-tests"
+    unknown = real_plan(real_tree, monkeypatch, "tests/test_a13_future_unmapped.py",
+                        registry=current, acs=("A13.affiliate-release",))
+    assert unknown["fallback"]
+    assert "PATH_OR_AC_MAP_INCOMPLETE" in unknown["reason_codes"]
 
 
 # MT-01 PR CI integration: do not silently narrow CI when coverage is uncertain.

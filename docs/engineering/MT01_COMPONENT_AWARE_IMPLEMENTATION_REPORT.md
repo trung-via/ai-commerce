@@ -127,3 +127,8 @@ Final worktree scope: five engineering/remote implementation files, three test f
 ## Integration note (main after PR #162)
 
 The reviewed integration adds `EF02.scope-review` and its real integration/contract tests introduced by merged PR #162. The companion registry PR #160 must register the exact additional `mt01-ef02-scope-tests` argv. Existing regression tests handle either pre-activation fallback or the registered narrow profile without confusing a plan with observed savings. CI must pass on the integrated main ancestry before merge.
+
+
+## Follow-up: A13 component registration during #165 scope reconciliation
+
+The original reviewed companion list above remains unchanged for traceability. A13 C08 media inspection, C09 claim rights, D06 placement and E03 affiliate release are now explicitly mapped as **one** trusted `a13` group with four existing `tests/test_a13_*.py` files. Registered `mt01-a13-tests` invokes their exact paths with `python -m pytest ... -q -n 12`. All A13 source file names and three contract schemas are explicit; unmapped new A13 tests/unknown consumers remain broad or UNPROVEN, never silently exempted. The #165-generated blanket test-name exclusion is deliberately **not** carried into the reconciled branch. This source integration does not reuse the previous full-suite PASS as verification of the modified tree.
