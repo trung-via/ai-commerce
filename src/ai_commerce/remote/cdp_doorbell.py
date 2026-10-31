@@ -148,6 +148,17 @@ _PROVE = "(args) => { " + _GUARD + """
 }"""
 
 
+
+def _doorbell_text(event_id: str, repository: str) -> str:
+    """Full expected content with real line breaks, never literal backslash-n."""
+    return "\n".join((
+        "[AI COMMERCE LOCAL CHAT WAKE]",
+        "event_id: " + event_id,
+        "repository: " + repository,
+        "fresh_brain_sync_required: true",
+    ))
+
+
 class BrowserInventory(Protocol):
     def pages(self, endpoint: str): ...
 
@@ -193,10 +204,7 @@ class LocalChromeDoorbellAdapter:
             return receipt("UNSUPPORTED", "CHAT_URL_INVALID")
         if not self.allow_submit:
             return receipt("UNSUPPORTED", "CDP_PROBE_DISABLED")
-        doorbell = ("[AI COMMERCE LOCAL CHAT WAKE]\n"
-                    + "event_id: " + event_id + "\n"
-                    + "repository: " + self.repository + "\n"
-                    + "fresh_brain_sync_required: true")
+        doorbell = _doorbell_text(event_id, self.repository)
         args = {**_ARGS, "url": binding.chat_url, "text": doorbell}
         clicked = False
         staging_started = False
