@@ -57,7 +57,16 @@ composer/Send gate.
    private route URLs, CDP endpoints, screenshots, DOM dumps, browser
    profiles or tokens. A project/local Windows adapter entrypoint that
    provides the already-authorized binding may be added after review.
-   **There is no new public CLI for the probe in this change.**
+   **A read-only local CLI is now available** and accepts an operator-held private enrolled registry, explicit route ID, repo root, and `--read-only` opt-in. It is not a Wake sender and does not require an EF02 completion event.
+
+   On the operator's own Windows PowerShell, from the reviewed repository checkout:
+
+   ```powershell
+   python -m ai_commerce.remote.plugin_selection_probe_cli --registry "<PRIVATE_D5_REGISTRY_ABSOLUTE_PATH>" --checkout "." --route-id "<EXISTING_REGISTERED_ROUTE_ID>" --read-only
+   ```
+
+   Read only the returned safe JSON fields `code`, `brain`, `engineering` and `host_selection_proven`. That last flag is **always false**. Do not log or post the private registry, route URL, CDP endpoint, browser profile or authorization material. No Send is possible through this CLI.
+
 4. If any result is absent, ambiguous, plain-text only, or unexpectedly
    different on the real host, stop; do not guess selectors. Separate
    review/authorization is required before developing host-aware plugin
