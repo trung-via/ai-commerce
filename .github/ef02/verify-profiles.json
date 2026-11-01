@@ -272,6 +272,7 @@
     "tests/test_ef02_wake_d1.py",
     "tests/test_ef02_wake_d2.py",
     "tests/test_ef02_cdp_doorbell.py",
+    "tests/test_ef02_plugin_selection_probe.py",
     "tests/test_ef02_d3_github_artifact_authority.py",
     "tests/test_ef02_d3_signed_origin_consent.py",
     "tests/test_ef02_d3_two_grant_delivery.py",
