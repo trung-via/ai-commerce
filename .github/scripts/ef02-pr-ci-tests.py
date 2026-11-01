@@ -21,6 +21,7 @@ SHA = re.compile(r"[0-9a-f]{40}\Z")
 # groups. Changes to it must trigger full verification.
 KNOWN_UNMAPPED = frozenset({"tests/test_ef02_mt01_registry.py"})
 REGISTRY = ".github/ef02/verify-profiles.json"
+MT01_ENGINE = "src/ai_commerce/engineering/minimum_test.py"
 MAPPED_GITHUB_CONTROLS = frozenset()  # Candidate/approval controls always require broad CI.
 MT01_REPORT = "docs/engineering/MT01_COMPONENT_AWARE_IMPLEMENTATION_REPORT.md"
 REVIEWED_REGISTRY_REGRESSIONS = ("tests/test_ef02_mt01_registry.py", "tests/test_minimum_test.py")
@@ -28,30 +29,62 @@ HOSTED_WORKERS = (0, 2, 4)
 
 
 def additive_registry_tests(before: object, after: object, groups: tuple) -> tuple[str, ...] | None:
-    """Only newly added, exact approved xdist-12 group commands are narrow-safe."""
+    """Prove additive reviewed profile entries OR test-only extensions.
+
+    For existing profiles, the old tests must retain order and the candidate
+    command must exactly match the CURRENT reviewed MT-01 group. Any altered
+    required argv, deletions, unknown names or unreviewed tests fail closed.
+    This does not authorize narrowing a PR that edits the MT-01 selector.
+    """
     if not isinstance(before, dict) or not before or not isinstance(after, dict):
         return None
-    if not set(before).issubset(after) or any(after[key] != value for key, value in before.items()):
-        return None
-    added = set(after) - set(before)
-    if not added:
+    if not set(before).issubset(after) or before == after:
         return None
     reviewed = {
         f"mt01-{group.name}-tests": (
-            ["python", "-m", "pytest", *group.tests, "-q", "-n", "12"], tuple(group.tests))
+            ["python", "-m", "pytest", *group.tests, "-q", "-n", "12"],
+            tuple(group.tests),
+        )
         for group in groups
     }
     selected = set(REVIEWED_REGISTRY_REGRESSIONS)
-    for name in sorted(added):
-        argv = after[name]
-        if (not isinstance(name, str) or not name.startswith("mt01-") or
-                not isinstance(argv, list) or not all(isinstance(v, str) for v in argv)):
+    changed = False
+    for name in sorted(after):
+        new_command = after[name]
+        if name in before and before[name] == new_command:
+            continue
+        if not isinstance(name, str) or not isinstance(new_command, list):
             return None
         approved = reviewed.get(name)
-        if approved is None or argv != approved[0]:
+        if approved is None or new_command != approved[0]:
             return None
-        selected.update(approved[1])
-    return tuple(sorted(selected))
+        reviewed_tests = approved[1]
+        if (not reviewed_tests or len(set(reviewed_tests)) != len(reviewed_tests)
+                or any(not t.startswith("tests/test_") or not t.endswith(".py")
+                       or ".." in t.split("/") for t in reviewed_tests)):
+            return None
+        if name in before:
+            old = before[name]
+            prefix = ["python", "-m", "pytest"]
+            suffix = ["-q", "-n", "12"]
+            if (not isinstance(old, list) or len(old) <= len(prefix) + len(suffix)
+                    or old[:3] != prefix or old[-3:] != suffix):
+                return None
+            old_tests = old[3:-3]
+            if (not all(isinstance(t, str) and t.startswith("tests/test_")
+                        and t.endswith(".py") for t in old_tests)
+                    or len(set(old_tests)) != len(old_tests)
+                    or len(old_tests) >= len(reviewed_tests)):
+                return None
+            # A subsequence permits insertion of new reviewed tests without
+            # moving/removing any previous test or changing its relative order.
+            cursor = iter(reviewed_tests)
+            if not all(any(candidate == t for candidate in cursor)
+                       for t in old_tests):
+                return None
+        selected.update(reviewed_tests)
+        changed = True
+    return tuple(sorted(selected)) if changed else None
 
 
 def registry_extension_tests(root: Path, base: str) -> tuple[str, ...] | None:
@@ -125,6 +158,8 @@ def choose(root: Path, *, event: str, base: str, paths: set[str] | None = None,
                 return FULL, "FULL_PROJECT_REQUIRED", ("RENAMED_PATH_REQUIRES_FULL",), ()
         if not paths:
             return FULL, "FULL_PROJECT_REQUIRED", ("EMPTY_DIFF",), ()
+        if MT01_ENGINE in paths:
+            return FULL, "FULL_PROJECT_REQUIRED", ("MT01_ENGINE_CHANGED",), ()
         if any((p.startswith(".github/") and p not in MAPPED_GITHUB_CONTROLS | {REGISTRY})
                or p in ("pyproject.toml", "setup.py") for p in paths):
             return FULL, "FULL_PROJECT_REQUIRED", ("CI_OR_SHARED_CONFIG_CHANGED",), ()
@@ -139,7 +174,11 @@ def choose(root: Path, *, event: str, base: str, paths: set[str] | None = None,
             extra_tests.update(verified)
         if MT01_REPORT in paths:
             extra_tests.add("tests/test_minimum_test.py")
-        if any(not (root / test).is_file() for test in extra_tests):
+        if (len(extra_tests) > 100 or any(
+            not test.startswith("tests/test_") or not test.endswith(".py")
+            or ".." in test.split("/") or not (root / test).is_file()
+            for test in extra_tests
+        )):
             return FULL, "FULL_PROJECT_REQUIRED", ("REVIEWED_CONTROL_TEST_MISSING",), ()
         mapped_paths = paths - {REGISTRY, MT01_REPORT}
         if not mapped_paths and extra_tests:
