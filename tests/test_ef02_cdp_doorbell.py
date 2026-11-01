@@ -359,3 +359,110 @@ if(clicks!==0) process.exit(31);
         f"stderr={result.stderr[:1000]}"
     )
     send_wake.assert_not_called()
+
+
+def test_dual_plugin_wake_preview_is_non_delivering_and_has_two_at_names():
+    from ai_commerce.remote.wake_dual_plugin_preview import build_dual_plugin_wake_preview
+
+    fresh = "ef02-completion-v1:" + "f" * 64  # synthetic; NEVER send
+    payload = build_dual_plugin_wake_preview(fresh)
+    assert payload.count("@AI Commerce Brain") == 1
+    assert payload.count("@AI Commerce Engineering Workflow") == 1
+    assert payload.count("event_id: " + fresh) == 1
+    assert "repository: trung-via/ai-commerce" in payload
+    assert "fresh_brain_sync_required: true" in payload
+    assert "NOT SENT" in payload
+    assert "separately authorized" in payload
+    assert "Brain-native research" in payload
+    assert "UNKNOWN event" in payload
+
+
+@pytest.mark.parametrize("event,repository", [
+    ("ef02-completion-v1:" + "g" * 64, "trung-via/ai-commerce"),
+    ("ef02-completion-v1:" + "a" * 63, "trung-via/ai-commerce"),
+    ("ef02-completion-v1:" + "a" * 64 + "EXTRA", "trung-via/ai-commerce"),
+    ("ef02-completion-v1:" + "a" * 64, "other/repo"),
+    (None, "trung-via/ai-commerce"),
+])
+def test_dual_plugin_wake_preview_rejects_untrusted_input(event, repository):
+    from ai_commerce.remote.wake_dual_plugin_preview import build_dual_plugin_wake_preview
+
+    with pytest.raises(ValueError, match="DUAL_PLUGIN_PREVIEW_INPUT_INVALID"):
+        build_dual_plugin_wake_preview(event, repository)
+
+
+def _make_dual_route_failure_event(action_statuses):
+    from ai_commerce.remote.completion_event import build_completion_event
+
+    actions = []
+    for idx, status in enumerate(action_statuses, 1):
+        action = {"action_id": f"test_action_{idx}", "attempt_id": f"test_attempt_{idx}", "status": status}
+        if status == "CANDIDATE_READY":
+            action["candidate_sha"] = "a" * 40
+        actions.append(action)
+    succeeded = sum(a["status"] == "CANDIDATE_READY" for a in actions)
+    report = {
+        "kind": "AI_COMMERCE_REMOTE_BATCH_RESULT",
+        "version": 1,
+        "batch_id": "synthetic_failure_test",
+        "source_sha": "f" * 40,
+        "status": "COMPLETE" if succeeded == len(actions) else "PARTIAL_OR_FAILED",
+        "actions": actions,
+        "total": len(actions),
+        "succeeded": succeeded,
+    }
+    return build_completion_event(
+        report, repository="trung-via/ai-commerce",
+        run_id=123456, run_attempt=1, issue_number=987,
+    )
+
+
+def test_failure_preview_selects_only_engineering_without_brain():
+    from ai_commerce.remote.wake_dual_plugin_preview import build_engineering_failure_wake_preview
+
+    event = _make_dual_route_failure_event(["EXECUTOR_FAILED"])
+    message = build_engineering_failure_wake_preview(event)
+    assert message.count("@AI Commerce Engineering Workflow") == 1
+    assert "@AI Commerce Brain" not in message
+    assert "failed_action: test_action_1 attempt=test_attempt_1 status=EXECUTOR_FAILED" in message
+    assert "fresh_brain_sync_required: false" in message
+    assert "run_id: 123456" in message
+    assert "issue_number: 987" in message
+    assert "PREVIEW — NOT SENT" in message
+    assert "explicit authorization" in message
+
+
+def test_failure_preview_in_mixed_batch_includes_only_nonpass_attempt():
+    from ai_commerce.remote.wake_dual_plugin_preview import build_engineering_failure_wake_preview
+
+    event = _make_dual_route_failure_event(["CANDIDATE_READY", "VERIFICATION_FAILED"])
+    message = build_engineering_failure_wake_preview(event)
+    assert "failed_action: test_action_2 attempt=test_attempt_2 status=VERIFICATION_FAILED" in message
+    assert "failed_action: test_action_1" not in message
+    assert message.count("@AI Commerce Engineering Workflow") == 1
+    assert "@AI Commerce Brain" not in message
+
+
+def test_failure_preview_rejects_success_only_event():
+    from ai_commerce.remote.wake_dual_plugin_preview import build_engineering_failure_wake_preview
+
+    event = _make_dual_route_failure_event(["CANDIDATE_READY"])
+    with pytest.raises(ValueError, match="ENGINEERING_FAILURE_PREVIEW_NOT_FAILED"):
+        build_engineering_failure_wake_preview(event)
+
+
+@pytest.mark.parametrize("tamper", ["repo", "event_id", "status", "not_event"])
+def test_failure_preview_rejects_forged_or_invalid_events(tamper):
+    from ai_commerce.remote.wake_dual_plugin_preview import build_engineering_failure_wake_preview
+
+    event = _make_dual_route_failure_event(["EXECUTION_UNKNOWN"])
+    if tamper == "repo":
+        event["repository"] = "other/repo"
+    elif tamper == "event_id":
+        event["event_id"] = "ef02-completion-v1:" + "a" * 64
+    elif tamper == "status":
+        event["actions"][0]["status"] = "CANDIDATE_READY"
+    else:
+        event = {"untrusted": True}
+    with pytest.raises(ValueError, match="ENGINEERING_FAILURE_PREVIEW_EVENT_INVALID"):
+        build_engineering_failure_wake_preview(event)
