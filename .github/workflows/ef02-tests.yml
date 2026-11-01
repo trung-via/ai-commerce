@@ -68,7 +68,7 @@ jobs:
         env:
           MT01_CI_EVENT: ${{ github.event_name }}
           MT01_CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          MT01_CI_XDIST_WORKERS: ${{ matrix.os == 'windows-latest' && '4' || '0' }}
+          MT01_CI_XDIST_WORKERS: '4'
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
