@@ -14,7 +14,7 @@ from .conversation_binding import ResolvedBinding, _CHAT, _endpoint
 BRAIN = "AI Commerce Brain"
 ENGINEERING = "AI Commerce Engineering Workflow"
 VALID_STATES = frozenset({
-    "ABSENT", "PLAIN_TEXT_ONLY", "STRUCTURED_CANDIDATE", "AMBIGUOUS",
+    "ABSENT", "PLAIN_TEXT_ONLY", "STRUCTURED_CANDIDATE", "UNVERIFIED_STRUCTURE", "AMBIGUOUS",
 })
 VALID_CODES = frozenset({
     "PROBE_DISABLED", "BINDING_INVALID", "EXACT_CHAT_TAB_NOT_FOUND",
@@ -47,28 +47,34 @@ _PLUGIN_PROBE_JS = r"""(args) => {
   const nodes = [...forms[0].querySelectorAll('*')];
   if (nodes.length > 1200) return {code:'SURFACE_UNPROVEN'};
   const normalized = e => String(e.textContent || '').trim().replace(/\s+/g, ' ');
-  const marked = e => {
-    // Recognize only indicative structural properties; these do not prove
-    // actual host selection. Never return attribute values to Python.
+  const marker = e => {
+    // A generic contenteditable=false or mention container is NOT enough
+    // to identify a plugin chip: plain text can inherit those wrappers.
+    // Never return DOM, attribute values, user content or plugin IDs.
+    let weak = false;
     for (let p=e, depth=0; p && p !== forms[0] && depth<4;
          p=p.parentElement, depth++) {
       const typ = String(p.getAttribute('data-type') || '');
       const tid = String(p.getAttribute('data-testid') || '');
       if (p.getAttribute('data-plugin-id') !== null ||
-          p.getAttribute('data-mention-id') !== null ||
-          /^(plugin|mention|plugin-mention)$/i.test(typ) ||
-          /(plugin-mention|mention-chip)/i.test(tid) ||
+          /^(plugin|plugin-mention)$/i.test(typ) ||
+          /(plugin-mention|plugin-chip)/i.test(tid))
+        return 'PLUGIN_MARKER';
+      if (p.getAttribute('data-mention-id') !== null ||
+          /^mention$/i.test(typ) || /(mention-chip)/i.test(tid) ||
           p.getAttribute('contenteditable') === 'false')
-        return true;
+        weak = true;
     }
-    return false;
+    return weak ? 'GENERIC_STRUCTURE' : 'NONE';
   };
   const state = name => {
     const found = nodes.filter(e => visible(e) && normalized(e) === name &&
       ![...e.children].some(c => normalized(c) === name));
     if (!found.length) return 'ABSENT';
     if (found.length !== 1) return 'AMBIGUOUS';
-    return marked(found[0]) ? 'STRUCTURED_CANDIDATE' : 'PLAIN_TEXT_ONLY';
+    const kind = marker(found[0]);
+    return kind === 'PLUGIN_MARKER' ? 'STRUCTURED_CANDIDATE' :
+      kind === 'GENERIC_STRUCTURE' ? 'UNVERIFIED_STRUCTURE' : 'PLAIN_TEXT_ONLY';
   };
   return {code:'PROBE_COMPLETE',
           brain:state(args.brain), engineering:state(args.engineering)};
