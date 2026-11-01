@@ -9,7 +9,7 @@ import argparse
 import re
 
 _REPOSITORY = "trung-via/ai-commerce"
-_EVENT = re.compile(r"ef02-completion-v1:[0-9a-f]{64}\\Z")
+_EVENT = re.compile(r"ef02-completion-v1:[0-9a-f]{64}\Z")
 _PLUGIN_LINE = "@AI Commerce Brain @AI Commerce Engineering Workflow"
 
 
