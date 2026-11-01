@@ -359,3 +359,33 @@ if(clicks!==0) process.exit(31);
         f"stderr={result.stderr[:1000]}"
     )
     send_wake.assert_not_called()
+
+
+def test_dual_plugin_wake_preview_is_non_delivering_and_has_two_at_names():
+    from ai_commerce.remote.wake_dual_plugin_preview import build_dual_plugin_wake_preview
+
+    fresh = "ef02-completion-v1:" + "f" * 64  # synthetic; NEVER send
+    payload = build_dual_plugin_wake_preview(fresh)
+    assert payload.count("@AI Commerce Brain") == 1
+    assert payload.count("@AI Commerce Engineering Workflow") == 1
+    assert payload.count("event_id: " + fresh) == 1
+    assert "repository: trung-via/ai-commerce" in payload
+    assert "fresh_brain_sync_required: true" in payload
+    assert "NOT SENT" in payload
+    assert "separately authorized" in payload
+    assert "Brain-native research" in payload
+    assert "UNKNOWN event" in payload
+
+
+@pytest.mark.parametrize("event,repository", [
+    ("ef02-completion-v1:" + "g" * 64, "trung-via/ai-commerce"),
+    ("ef02-completion-v1:" + "a" * 63, "trung-via/ai-commerce"),
+    ("ef02-completion-v1:" + "a" * 64 + "EXTRA", "trung-via/ai-commerce"),
+    ("ef02-completion-v1:" + "a" * 64, "other/repo"),
+    (None, "trung-via/ai-commerce"),
+])
+def test_dual_plugin_wake_preview_rejects_untrusted_input(event, repository):
+    from ai_commerce.remote.wake_dual_plugin_preview import build_dual_plugin_wake_preview
+
+    with pytest.raises(ValueError, match="DUAL_PLUGIN_PREVIEW_INPUT_INVALID"):
+        build_dual_plugin_wake_preview(event, repository)
