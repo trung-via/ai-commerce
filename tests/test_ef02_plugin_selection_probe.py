@@ -173,3 +173,87 @@ check('wrong_url',{code:'TARGET_PAGE_CHANGED'});
                                            "url": URL}),
                          capture_output=True, text=True, timeout=20)
     assert out.returncode == 0, out.stderr[:1200]
+
+
+def _write_private_route_registry(tmp_path, *, consent=True, extra_routes=None):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    private = tmp_path / "operator-private"
+    private.mkdir()
+    registry = private / "registry.json"
+    routes = [{
+        "route_id": "registered-test", "generation": 2,
+        "chat_url": URL, "cdp_endpoint": "http://127.0.0.1:9222",
+        "consent": consent,
+    }]
+    routes.extend(extra_routes or [])
+    registry.write_text(json.dumps({
+        "version": 1, "routes": routes, "claims": [],
+    }), encoding="utf-8")
+    return checkout, registry
+
+
+def test_operator_probe_loader_reuses_registered_exact_route(tmp_path):
+    from ai_commerce.remote.plugin_selection_probe_cli import load_registered_probe_route
+
+    checkout, registry = _write_private_route_registry(tmp_path)
+    binding = load_registered_probe_route(
+        registry_path=registry, checkout=checkout, route_id="registered-test")
+    assert binding == ResolvedBinding(
+        route_id="registered-test", generation=2, chat_url=URL,
+        cdp_endpoint="http://127.0.0.1:9222")
+
+
+def test_operator_probe_loader_rejects_revoked_or_unknown_route(tmp_path):
+    from ai_commerce.remote.plugin_selection_probe_cli import (
+        LocalProbeConfigError, load_registered_probe_route,
+    )
+
+    checkout, registry = _write_private_route_registry(tmp_path, consent=False)
+    with pytest.raises(LocalProbeConfigError, match="PROBE_ROUTE_NOT_CONSENTED"):
+        load_registered_probe_route(
+            registry_path=registry, checkout=checkout, route_id="registered-test")
+    with pytest.raises(LocalProbeConfigError, match="PROBE_ROUTE_INVALID"):
+        load_registered_probe_route(
+            registry_path=registry, checkout=checkout, route_id="../bad")
+
+
+def test_operator_probe_loader_rejects_ambiguous_chat_identity(tmp_path):
+    from ai_commerce.remote.plugin_selection_probe_cli import (
+        LocalProbeConfigError, load_registered_probe_route,
+    )
+
+    checkout, registry = _write_private_route_registry(tmp_path, extra_routes=[{
+        "route_id": "duplicate-chat", "generation": 1,
+        "chat_url": URL, "cdp_endpoint": "http://127.0.0.1:9222",
+        "consent": True,
+    }])
+    with pytest.raises(LocalProbeConfigError, match="PROBE_REGISTRY_AMBIGUOUS"):
+        load_registered_probe_route(
+            registry_path=registry, checkout=checkout, route_id="registered-test")
+
+
+def test_operator_probe_loader_rejects_repo_local_registry(tmp_path):
+    from ai_commerce.remote.plugin_selection_probe_cli import (
+        LocalProbeConfigError, load_registered_probe_route,
+    )
+
+    checkout, registry = _write_private_route_registry(tmp_path)
+    inside = checkout / "registry.json"
+    inside.write_bytes(registry.read_bytes())
+    with pytest.raises(LocalProbeConfigError, match="PROBE_REGISTRY_INVALID"):
+        load_registered_probe_route(
+            registry_path=inside, checkout=checkout, route_id="registered-test")
+
+
+def test_operator_probe_cli_requires_explicit_read_only_gate(tmp_path, capsys):
+    from ai_commerce.remote.plugin_selection_probe_cli import main
+
+    checkout, registry = _write_private_route_registry(tmp_path)
+    result = main([
+        "--registry", str(registry), "--checkout", str(checkout),
+        "--route-id", "registered-test",
+    ])
+    assert result == 2
+    output = json.loads(capsys.readouterr().out)
+    assert output == {"code": "PROBE_DISABLED", "host_selection_proven": False}
