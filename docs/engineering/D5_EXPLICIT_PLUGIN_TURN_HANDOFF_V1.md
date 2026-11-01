@@ -15,7 +15,7 @@ Status: **candidate design, not active**. Context: Issue #181, 2026-11-01.
 
 Each turn is an **independent** ChatGPT submission in a previously operator-enrolled, exactly bound chat. A new chat requires an independently enrolled route; neither a GitHub packet nor latest/active tab is allowed to select a private conversation. The GitHub issue is only a public coordination/evidence reference; never store browser cookies, profile, CDP endpoint, private route ID, or chat URL in GitHub.
 
-D5 v1 code in `plugin_turn_handoff.py` is a **pure non-delivering state machine**. It emits the target role/alias and a bounded preview, and enforces this ledger:
+D5 v1 `plugin_turn_handoff.py` remains a **pure non-delivering state machine**. `plugin_turn_store.py` adds operator-private, owner/ACL-checked, atomically persisted transitions using the existing `PrivateJsonState` lock and never accesses the browser. The operator must provision the private parent directory outside the repository; no production state is created or migrated automatically. The ledger enforces:
 
 | Current | Event / proof | Next | Limit |
 |---|---|---|---|
@@ -28,7 +28,7 @@ D5 v1 code in `plugin_turn_handoff.py` is a **pure non-delivering state machine*
 
 ## Integration order and missing acceptance
 
-1. Implement a durable, owner-protected, transactional *private* store for this ledger, using existing D5 private state rules. No secret or route URL in public packet. Authenticate GitHub comment reads before advancing; validate expected issue/step/result and source SHA.
+1. **Candidate implemented, inactive:** private transactional `TurnSessionStore.create/read/record_intent/observe_reply` with bounded JSON, native Windows SID+DACL/POSIX owner checks, OS lock, and atomic writes. This store does not authenticate GitHub evidence; the future caller must independently fetch the comment and validate issue/step/result and source SHA before requesting reconciliation. A GitHub comment URL by itself does not authenticate content.
 2. Separately build a candidate CDP stage-only adapter around the three already-proven chip patterns; ensure exact registered route and no preexisting draft, and inspect the selected blue chips. The UI selection does not make a server claim.
 3. **Only with an additional explicit Human authorization** for new test deliveries, add write-ahead attempt persistence, a single exact-chat Send, and post-Send reconciliation with no blind retry on `UNKNOWN`.
 4. Verify each ChatGPT role turn independently from the host's actual observable tool trace, not from a role-play response. If external ChatGPT does not expose plugin invocation identity, report `DIRECT_PLUGIN_INVOCATION_UNPROVEN` even if an @ chip is blue. A multi-turn router is not the same as native same-turn plugin-to-plugin invocation.
