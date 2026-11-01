@@ -126,11 +126,19 @@ const elem=(tag,text,attrs={})=>({
 });
 const form=elem('FORM',''), main=elem('MAIN','');
 const editor=elem('DIV',''); editor.parentElement=form;
-const brain=elem('SPAN','AI Commerce Brain',{'data-type':'mention','contenteditable':'false'});
-const engineering=elem('SPAN','AI Commerce Engineering Workflow',{'data-type':'mention','contenteditable':'false'});
+const brain=elem('SPAN','AI Commerce Brain',{'data-type':'plugin-mention','contenteditable':'false'});
+const engineering=elem('SPAN','AI Commerce Engineering Workflow',{'data-type':'plugin-mention','contenteditable':'false'});
+const generic=elem('SPAN','AI Commerce Brain',{'contenteditable':'false'});
+const mention=elem('SPAN','AI Commerce Brain',{'data-type':'mention','contenteditable':'false'});
+const wrapper=elem('DIV','AI Commerce Brain',{'contenteditable':'false'});
+const genericChild=elem('SPAN','AI Commerce Brain'); genericChild.parentElement=wrapper;
 brain.parentElement=form; engineering.parentElement=form;
+generic.parentElement=form; mention.parentElement=form; wrapper.parentElement=form;
 form.querySelectorAll=()=>v.scenario==='only_engineering'?[engineering]:
   v.scenario==='plain'?[elem('P','AI Commerce Brain')]:
+  v.scenario==='generic_noneditable'?[generic]:
+  v.scenario==='generic_parent'?[genericChild]:
+  v.scenario==='generic_mention'?[mention]:
   v.scenario==='duplicate'?[brain,brain,engineering]:[brain,engineering];
 const document={
  querySelectorAll:sel=>{
@@ -156,6 +164,12 @@ check('dual',{code:'PROBE_COMPLETE',brain:'STRUCTURED_CANDIDATE',
 check('only_engineering',{code:'PROBE_COMPLETE',brain:'ABSENT',
   engineering:'STRUCTURED_CANDIDATE'});
 check('plain',{code:'PROBE_COMPLETE',brain:'PLAIN_TEXT_ONLY',
+  engineering:'ABSENT'});
+check('generic_noneditable',{code:'PROBE_COMPLETE',brain:'UNVERIFIED_STRUCTURE',
+  engineering:'ABSENT'});
+check('generic_parent',{code:'PROBE_COMPLETE',brain:'UNVERIFIED_STRUCTURE',
+  engineering:'ABSENT'});
+check('generic_mention',{code:'PROBE_COMPLETE',brain:'UNVERIFIED_STRUCTURE',
   engineering:'ABSENT'});
 check('duplicate',{code:'PROBE_COMPLETE',brain:'AMBIGUOUS',
   engineering:'STRUCTURED_CANDIDATE'});
