@@ -56,6 +56,48 @@ def test_private_store_persists_unknown_and_no_auto_replay(ledger):
     assert ledger.state.path.read_bytes() == before
 
 
+def test_checked_intent_requires_approval_and_exact_snapshot(ledger):
+    ready = new(ledger)
+    before = ledger.state.path.read_bytes()
+    with pytest.raises(TurnHandoffError, match="APPROVAL_REQUIRED"):
+        ledger.record_intent_checked(expected_state=ready)
+    assert ledger.state.path.read_bytes() == before
+
+    stale = deepcopy(ready)
+    stale["source_sha"] = "3" * 40
+    with pytest.raises(TurnHandoffError, match="STATE_CHANGED"):
+        ledger.record_intent_checked(
+            expected_state=stale, operator_approved=True)
+    assert ledger.state.path.read_bytes() == before
+
+    unknown = ledger.record_intent_checked(
+        expected_state=ready, operator_approved=True)
+    assert unknown["phase"] == "SUBMISSION_UNKNOWN"
+    assert ledger.read() == unknown
+    written = ledger.state.path.read_bytes()
+    with pytest.raises(TurnHandoffError, match="STATE_CHANGED"):
+        ledger.record_intent_checked(
+            expected_state=ready, operator_approved=True)
+    assert ledger.state.path.read_bytes() == written
+
+
+def test_checked_intent_racing_same_snapshot_only_one_wins(ledger):
+    ready = new(ledger)
+
+    def attempt(_):
+        try:
+            ledger.record_intent_checked(
+                expected_state=ready, operator_approved=True)
+            return "OK"
+        except TurnHandoffError:
+            return "BLOCKED"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(attempt, range(2)))
+    assert sorted(outcomes) == ["BLOCKED", "OK"]
+    assert ledger.read()["phase"] == "SUBMISSION_UNKNOWN"
+
+
 def test_private_store_human_reconciles_three_distinct_turns(ledger):
     new(ledger)
     for i in range(3):

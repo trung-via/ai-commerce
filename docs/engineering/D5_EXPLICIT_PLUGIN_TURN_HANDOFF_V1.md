@@ -34,6 +34,12 @@ D5 v1 `plugin_turn_handoff.py` remains a **pure non-delivering state machine**. 
 4. Verify each ChatGPT role turn independently from the host's actual observable tool trace, not from a role-play response. If external ChatGPT does not expose plugin invocation identity, report `DIRECT_PLUGIN_INVOCATION_UNPROVEN` even if an @ chip is blue. A multi-turn router is not the same as native same-turn plugin-to-plugin invocation.
 5. Return Engineering evidence via a bounded GitHub ref, then Brain performs a separate final turn. No EF02 dispatch or merge without independent authorization.
 
+## Future Send write-ahead gate — code-only, disabled from CLI
+
+The candidate now includes `TurnSessionStore.record_intent_checked(expected_state=..., operator_approved=True)` for a **future, separately authorized** Send caller. Unlike legacy `record_intent`, it validates an exact prior `READY` snapshot and checks equality **inside the transaction lock**, then atomically and durably writes `SUBMISSION_UNKNOWN` before any external side effect. It rejects missing approval, stale snapshots, an already pending/complete turn, and concurrent attempts without advancing state or retrying. Tests cover approval refusal, stale SHA/snapshot, write-before-Send UNKNOWN persistence and concurrent single-winner CAS. This API never opens Chrome or calls Send; it does not authenticate the GitHub main SHA or exact-chat route itself.
+
+For an actual Send, the trusted caller must **separately** check live `main` SHA versus ledger source, exact private route, correct chosen plugin, empty composer and one-shot Human authorization, then perform `record_intent_checked` immediately before one authorized Send. If Send fails or receipt is ambiguous, leave `SUBMISSION_UNKNOWN` and require independent Human UI + authenticated GitHub evidence to reconcile; do not auto-retry. **Neither this module nor the existing CLI contains an active Send pathway; operator private ledger is unchanged by code publication.**
+
 ## Non-goals and controls
 
 No hook into `worker.py` or existing D2/D3/D4 Send route, no GitHub Action dispatch, no active watchdog, no browser launch, no automatic new chats, no automatic Send, no fake ChatGPT ACK, no retry of #161/#177/#179, no change to PR #186. This pure module is safe to keep unactivated while acceptance expands.

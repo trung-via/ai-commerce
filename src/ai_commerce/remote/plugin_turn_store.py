@@ -88,6 +88,30 @@ class TurnSessionStore:
             return record_send_intent(current, operator_approved=operator_approved)
         return self._operate(apply)
 
+    def record_intent_checked(self, *, expected_state: dict,
+                              operator_approved: bool = False) -> dict:
+        """Future Send caller: durably CAS the exact READY snapshot before Send.
+
+        This does NOT send or grant permission to Send. The caller must first
+        verify the live source and exact-chat binding independently. If any
+        state changed during preflight, abort without writing or retrying.
+        A successful call enters SUBMISSION_UNKNOWN, even when a future Send
+        fails or returns no receipt; never automatically replay that attempt.
+        """
+        if operator_approved is not True:
+            raise TurnHandoffError("TURN_OPERATOR_APPROVAL_REQUIRED")
+        expected = validate_session(expected_state)
+        if expected["phase"] != "READY":
+            raise TurnHandoffError("TURN_NOT_READY")
+
+        def apply(current):
+            if current is None:
+                raise TurnHandoffError("TURN_SESSION_NOT_FOUND")
+            if current != expected:
+                raise TurnHandoffError("TURN_STATE_CHANGED")
+            return record_send_intent(current, operator_approved=True)
+        return self._operate(apply)
+
     def observe_reply(self, *, issue_comment_ref: str,
                       operator_verified: bool = False) -> dict:
         """Persist Human UI observation; never claim host plugin/server ACK."""
