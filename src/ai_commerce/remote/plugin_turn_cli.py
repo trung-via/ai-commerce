@@ -65,7 +65,7 @@ def _send_consent(token: str) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="D5 explicit plugin-turn LEDGER PREVIEW or ONE CHIP STAGING; never Send.")
+        description="D5 preview, chip staging, or separately approved guarded one-shot Send.")
     parser.add_argument("--checkout", required=True, type=Path)
     parser.add_argument("--state-file", required=True, type=Path,
                         help="Operator-preprovisioned private file path OUTSIDE repository")
@@ -74,9 +74,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--enable-send-once", action="store_true",
                         help="Opt-in; also requires per-turn exact Human token")
     parser.add_argument("--registry", type=Path,
-                        help="Existing consented D5 route registry; required only for type-only")
+                        help="Consented D5 route registry; required for type-only or send-once")
     parser.add_argument("--route-id",
-                        help="Existing exact route ID; required only for type-only")
+                        help="Existing exact route ID; required for type-only or send-once")
     parser.add_argument("--issue-number", type=int,
                         help="Used only when creating a new ledger")
     parser.add_argument("--source-sha",
