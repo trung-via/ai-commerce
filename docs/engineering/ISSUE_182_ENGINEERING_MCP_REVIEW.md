@@ -91,3 +91,26 @@ The ChatGPT user may not have access to Secure MCP Tunnel; in that case
 report `BLOCKED_TUNNEL_ACCESS` and use a supported authenticated hosting
 alternative. Never bypass private plugin/host permission checks, and never
 replay historical Wake events #161/#177/#179.
+
+## Local MCP SDK smoke (without GitHub/ChatGPT side effects)
+
+After installing `mcp>=2,<3` in the operator's **own Python environment**
+and checking out this PR's current SHA, run:
+
+```powershell
+python -m ai_commerce.remote.engineering_mcp_smoke
+```
+
+The probe uses a real `mcp.Client(server)` SDK client **in-process** to
+list the tool definition, check the read-only annotation and input schema,
+and invoke one synthetic tool call. It replaces the GitHub-bound function
+during the probe, so it never reads the local GitHub token or sends HTTP,
+Wake, Chrome actions or EF02 work. Expected terminal marker:
+
+`"status": "MCP_LOCAL_SDK_SMOKE_PASS"`
+
+This is **local SDK interoperability evidence only**. If it fails, record
+the SDK version and sanitized exception without publishing credentials.
+If it passes, continue with the separately required tunnel readiness
+and **actual ChatGPT host-visible invocation**. Do not mark #181 or #109
+accepted based on this output.
