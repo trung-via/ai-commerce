@@ -1,8 +1,9 @@
-"""Operator CLI for D5 *separate-turn* plugin staging. NO ChatGPT Send.
+"""Operator CLI for explicit D5 turns, with gated one-shot Send.
 
-Default mode is a read-only ledger preview; type-only is a separately
-consented single browser input against an already-enrolled exact route.
-No route enrollment, GitHub API calls, Wake or external message delivery.
+Default PREVIEW and TYPE-ONLY remain non-delivering. SEND-ONCE is disabled
+unless an explicit CLI flag and new per-ledger Human token are supplied.
+No route enrollment, Wake, EF02 or automatic retries. Send is NEVER invoked
+on module import or during ordinary preview/staging.
 """
 from __future__ import annotations
 
@@ -10,6 +11,8 @@ import argparse
 import json
 from pathlib import Path
 import secrets
+import subprocess
+import re
 
 from .plugin_selection_probe_cli import (
     LocalProbeConfigError, load_registered_probe_route,
@@ -17,6 +20,7 @@ from .plugin_selection_probe_cli import (
 from .plugin_turn_handoff import TurnHandoffError, preview_next_turn
 from .plugin_turn_store import TurnSessionStore
 from .plugin_turn_stage_only import ExplicitTurnChipStager
+from .plugin_turn_send_once import ExplicitTurnOneShotSender
 
 
 def _emit(code: str, **fields) -> None:
@@ -34,14 +38,41 @@ def _consent(token: str) -> bool:
         return False
 
 
+def _fresh_main_sha() -> str:
+    """Freshly read main using local gh credentials without logging tokens."""
+    try:
+        run = subprocess.run(
+            ["gh", "api", "repos/trung-via/ai-commerce/branches/main",
+             "--jq", ".commit.sha"],
+            capture_output=True, text=True, timeout=15, check=False)
+        sha = run.stdout.strip()
+        if run.returncode != 0 or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+            raise ValueError
+        return sha
+    except Exception:
+        raise TurnHandoffError("LIVE_SOURCE_UNAVAILABLE") from None
+
+
+def _send_consent(token: str) -> bool:
+    print("D5 ONE-SHOT SEND: exact enrolled chat and one message, NO RETRY.")
+    print("Only proceed if structured plugin chip AND exact preview prompt are prepared.")
+    print("Private ledger will enter SUBMISSION_UNKNOWN BEFORE the Send click.")
+    try:
+        return input(f"Type exactly {token} [other=abort]: ") == token
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="D5 explicit plugin-turn LEDGER PREVIEW or ONE CHIP STAGING; never Send.")
     parser.add_argument("--checkout", required=True, type=Path)
     parser.add_argument("--state-file", required=True, type=Path,
                         help="Operator-preprovisioned private file path OUTSIDE repository")
-    parser.add_argument("--mode", choices=("preview", "create-ledger", "type-only"),
+    parser.add_argument("--mode", choices=("preview", "create-ledger", "type-only", "send-once"),
                         default="preview")
+    parser.add_argument("--enable-send-once", action="store_true",
+                        help="Opt-in; also requires per-turn exact Human token")
     parser.add_argument("--registry", type=Path,
                         help="Existing consented D5 route registry; required only for type-only")
     parser.add_argument("--route-id",
@@ -51,7 +82,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-sha",
                         help="40-char source SHA; used only when creating a new ledger")
     args = parser.parse_args(argv)
-    if (args.mode == "type-only" and
+    if args.mode == "send-once" and not args.enable_send_once:
+        _emit("SEND_DISABLED", sent=False)
+        return 2
+    if (args.mode in ("type-only", "send-once") and
             (args.registry is None or args.route_id is None)):
         _emit("ROUTE_ARGS_REQUIRED")
         return 2
@@ -83,6 +117,40 @@ def main(argv: list[str] | None = None) -> int:
         binding = load_registered_probe_route(
             registry_path=args.registry, checkout=args.checkout,
             route_id=args.route_id)
+        if args.mode == "send-once":
+            if _fresh_main_sha() != session["source_sha"]:
+                _emit("SOURCE_SHA_CHANGED", sent=False)
+                return 2
+            # A per-ledger and per-turn token, separate from creating a ledger.
+            token = (f"SEND-ONCE-D5-{preview['role']}-{preview['turn_index']}-"
+                     f"{session['handoff_id'][-8:]}")
+            if not _send_consent(token):
+                _emit("USER_DECLINED", phase="NOT_STARTED", sent=False)
+                return 2
+            if ledger.read() != session:
+                _emit("TURN_STATE_CHANGED", phase="NOT_STARTED", sent=False)
+                return 2
+            fresh_binding = load_registered_probe_route(
+                registry_path=args.registry, checkout=args.checkout,
+                route_id=args.route_id)
+            if fresh_binding != binding:
+                _emit("ROUTE_STATE_CHANGED", phase="NOT_STARTED", sent=False)
+                return 2
+            if _fresh_main_sha() != session["source_sha"]:
+                _emit("SOURCE_SHA_CHANGED", phase="NOT_STARTED", sent=False)
+                return 2
+            result = ExplicitTurnOneShotSender(enabled=True).send_once(
+                store=ledger, expected_state=session, binding=binding,
+                current_main_sha=_fresh_main_sha,
+                current_binding=lambda: load_registered_probe_route(
+                    registry_path=args.registry, checkout=args.checkout,
+                    route_id=args.route_id),
+                operator_approved=True)
+            _emit(result.code, phase=result.phase, role=preview["role"],
+                  turn_index=preview["turn_index"], sent=result.sent,
+                  host_selection_proven=False)
+            # Do not let shell auto-retry on unknown / ambiguous outcome.
+            return 2
         token = f"TYPE-ONLY-D5-{preview['role']}-{preview['turn_index']}"
         if not _consent(token):
             _emit("USER_DECLINED", phase="NOT_STARTED", sent=False)

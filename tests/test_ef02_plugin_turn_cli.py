@@ -225,3 +225,101 @@ def test_type_only_rechecks_revoked_route_consent(config, monkeypatch, capsys):
     result = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert result["code"] == "PROBE_ROUTE_NOT_CONSENTED"
     assert calls[0] == 2
+
+
+def test_send_mode_disabled_even_if_ledger_missing(config, capsys, monkeypatch):
+    monkeypatch.setattr(cli, "load_registered_probe_route",
+                        lambda **kw: pytest.fail("disabled mode must not read route"))
+    monkeypatch.setattr(cli, "_fresh_main_sha",
+                        lambda: pytest.fail("disabled mode must not read GitHub"))
+    assert cli.main(config.args + ["--mode", "send-once"]) == 2
+    result = json.loads(capsys.readouterr().out)
+    assert result == {"code": "SEND_DISABLED", "sent": False}
+    assert not config.state.exists()
+
+
+def test_send_mode_wrong_token_has_no_ledger_write_or_cdp(config, monkeypatch, capsys):
+    c = config
+    store = initial(c)
+    before = c.state.read_bytes()
+    monkeypatch.setattr(cli, "load_registered_probe_route",
+                        lambda **kw: SimpleNamespace(route_id="enrolled"))
+    monkeypatch.setattr(cli, "_fresh_main_sha", lambda: "b" * 40)
+    monkeypatch.setattr("builtins.input", lambda prompt: "WRONG")
+    monkeypatch.setattr(cli, "ExplicitTurnOneShotSender",
+                        lambda **kw: pytest.fail("no CDP after token refusal"))
+    args = c.args + ["--mode", "send-once", "--enable-send-once",
+                     "--registry", str(c.registry), "--route-id", "enrolled"]
+    assert cli.main(args) == 2
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["code"] == "USER_DECLINED"
+    assert c.state.read_bytes() == before and store.read()["phase"] == "READY"
+
+
+def test_send_mode_stale_main_does_not_prompt_or_write(config, monkeypatch, capsys):
+    c = config
+    initial(c)
+    before = c.state.read_bytes()
+    monkeypatch.setattr(cli, "load_registered_probe_route",
+                        lambda **kw: SimpleNamespace(route_id="enrolled"))
+    monkeypatch.setattr(cli, "_fresh_main_sha", lambda: "c" * 40)
+    monkeypatch.setattr("builtins.input",
+                        lambda prompt: pytest.fail("stale source must not prompt"))
+    args = c.args + ["--mode", "send-once", "--enable-send-once",
+                     "--registry", str(c.registry), "--route-id", "enrolled"]
+    assert cli.main(args) == 2
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["code"] == "SOURCE_SHA_CHANGED"
+    assert c.state.read_bytes() == before
+
+
+def test_send_mode_consent_rechecks_route_before_attaching(config, monkeypatch, capsys):
+    c = config
+    initial(c)
+    before = c.state.read_bytes()
+    routes = iter([SimpleNamespace(route_id="enrolled", generation=1),
+                   SimpleNamespace(route_id="enrolled", generation=2)])
+    monkeypatch.setattr(cli, "load_registered_probe_route",
+                        lambda **kw: next(routes))
+    monkeypatch.setattr(cli, "_fresh_main_sha", lambda: "b" * 40)
+    monkeypatch.setattr("builtins.input", lambda token: token.split("Type exactly ")[1].split(" [other")[0])
+    monkeypatch.setattr(cli, "ExplicitTurnOneShotSender",
+                        lambda **kw: pytest.fail("route changed before sender"))
+    args = c.args + ["--mode", "send-once", "--enable-send-once",
+                     "--registry", str(c.registry), "--route-id", "enrolled"]
+    assert cli.main(args) == 2
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["code"] == "ROUTE_STATE_CHANGED"
+    assert c.state.read_bytes() == before
+
+
+def test_send_mode_has_one_shot_per_ledger_token_and_unknown_result(config, monkeypatch, capsys):
+    c = config
+    store = initial(c)
+    private = []
+    monkeypatch.setattr(cli, "load_registered_probe_route",
+                        lambda **kw: SimpleNamespace(route_id="enrolled", generation=1))
+    monkeypatch.setattr(cli, "_fresh_main_sha", lambda: "b" * 40)
+    def consent(text):
+        private.append(text)
+        return text.split("Type exactly ")[1].split(" [other")[0]
+    monkeypatch.setattr("builtins.input", consent)
+
+    class Sender:
+        def __init__(self, **kwargs):
+            assert kwargs == {"enabled": True}
+
+        def send_once(self, **kwargs):
+            assert kwargs["operator_approved"] is True
+            assert kwargs["store"] is store or kwargs["store"].read() == store.read()
+            assert kwargs["expected_state"]["phase"] == "READY"
+            assert kwargs["current_main_sha"]() == "b" * 40
+            assert kwargs["current_binding"]().route_id == "enrolled"
+            return SimpleNamespace(code="SEND_OUTCOME_UNKNOWN",
+                                   phase="SUBMISSION_UNKNOWN", sent=None)
+
+    monkeypatch.setattr(cli, "ExplicitTurnOneShotSender", Sender)
+    args = c.args + ["--mode", "send-once", "--enable-send-once",
+                     "--registry", str(c.registry), "--route-id", "enrolled"]
+    assert cli.main(args) == 2  # unknown outcomes always nonzero
+    output = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert output["code"] == "SEND_OUTCOME_UNKNOWN" and output["sent"] is None
+    assert output["host_selection_proven"] is False
+    assert "SEND-ONCE-D5-BRAIN-0-aaaaaaaa" in private[0]
