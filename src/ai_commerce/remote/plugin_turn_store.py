@@ -98,3 +98,33 @@ class TurnSessionStore:
                 current, issue_comment_ref=issue_comment_ref,
                 operator_verified=operator_verified)
         return self._operate(apply)
+
+
+    def observe_verified_reply(self, *, issue_comment_ref: str,
+                               authority, operator_verified: bool = False) -> dict:
+        """Check a trusted independent GitHub read and Human UI observation.
+
+        Network read occurs OUTSIDE the private lock; the transaction then
+        re-checks the entire original snapshot as compare-and-swap. A GitHub
+        comment still cannot prove that ChatGPT invoked a specific plugin.
+        This method performs no browser Send, GitHub write or automatic retry.
+        """
+        if operator_verified is not True:
+            raise TurnHandoffError("TURN_OPERATOR_APPROVAL_REQUIRED")
+        snapshot = self.read()
+        if snapshot["phase"] != "SUBMISSION_UNKNOWN":
+            raise TurnHandoffError("TURN_RECONCILIATION_BLOCKED")
+        try:
+            verified = authority.verify(snapshot, issue_comment_ref)
+        except Exception:
+            verified = False
+        if verified is not True:
+            raise TurnHandoffError("TURN_EVIDENCE_UNVERIFIED")
+
+        def apply(current):
+            if current != snapshot:
+                raise TurnHandoffError("TURN_STATE_CHANGED")
+            return reconcile_ui_observation(
+                current, issue_comment_ref=issue_comment_ref,
+                operator_verified=True)
+        return self._operate(apply)
