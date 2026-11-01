@@ -159,3 +159,26 @@ def test_unexpected_exception_redacts_private_paths(config, monkeypatch, capsys)
     assert "D5_LOCAL_UNAVAILABLE" in out
     assert "PRIVATE_PATH" not in out
     assert "SESSION_COOKIE" not in out
+
+
+def test_type_only_rechecks_ledger_after_human_consent(config, monkeypatch, capsys):
+    c = config
+    store = initial(c)
+    monkeypatch.setattr(
+        cli, "load_registered_probe_route",
+        lambda **kwargs: SimpleNamespace(route_id="enrolled"))
+    monkeypatch.setattr(
+        cli, "ExplicitTurnChipStager",
+        lambda **kwargs: pytest.fail("CDP must not start after state drift"))
+
+    def approve_after_other_writer(token):
+        assert "TYPE-ONLY-D5-BRAIN-0" in token
+        store.record_intent(operator_approved=True)
+        return "TYPE-ONLY-D5-BRAIN-0"
+
+    monkeypatch.setattr("builtins.input", approve_after_other_writer)
+    args = c.args + ["--mode", "type-only", "--registry", str(c.registry),
+                     "--route-id", "enrolled"]
+    assert cli.main(args) == 2
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["code"] == "TURN_STATE_CHANGED"
+    assert store.read()["phase"] == "SUBMISSION_UNKNOWN"
