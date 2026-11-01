@@ -21,7 +21,7 @@ SHA = re.compile(r"[0-9a-f]{40}\Z")
 # groups. Changes to it must trigger full verification.
 KNOWN_UNMAPPED = frozenset({"tests/test_ef02_mt01_registry.py"})
 REGISTRY = ".github/ef02/verify-profiles.json"
-MAPPED_GITHUB_CONTROLS = frozenset({".github/ef02/approved-candidates.v1.json"})
+MAPPED_GITHUB_CONTROLS = frozenset()  # Candidate/approval controls always require broad CI.
 MT01_REPORT = "docs/engineering/MT01_COMPONENT_AWARE_IMPLEMENTATION_REPORT.md"
 REVIEWED_REGISTRY_REGRESSIONS = ("tests/test_ef02_mt01_registry.py", "tests/test_minimum_test.py")
 HOSTED_WORKERS = (0, 2, 4)
@@ -37,7 +37,8 @@ def additive_registry_tests(before: object, after: object, groups: tuple) -> tup
     if not added:
         return None
     reviewed = {
-        tuple(["python", "-m", "pytest", *group.tests, "-q", "-n", "12"]): tuple(group.tests)
+        f"mt01-{group.name}-tests": (
+            ["python", "-m", "pytest", *group.tests, "-q", "-n", "12"], tuple(group.tests))
         for group in groups
     }
     selected = set(REVIEWED_REGISTRY_REGRESSIONS)
@@ -46,10 +47,10 @@ def additive_registry_tests(before: object, after: object, groups: tuple) -> tup
         if (not isinstance(name, str) or not name.startswith("mt01-") or
                 not isinstance(argv, list) or not all(isinstance(v, str) for v in argv)):
             return None
-        tests = reviewed.get(tuple(argv))
-        if not tests:
+        approved = reviewed.get(name)
+        if approved is None or argv != approved[0]:
             return None
-        selected.update(tests)
+        selected.update(approved[1])
     return tuple(sorted(selected))
 
 

@@ -906,14 +906,16 @@ def test_pr_ci_additive_registry_requires_exact_reviewed_commands(pr_ci_module):
     group = next(g for g in mt.approved_groups() if g.name == "ef02-wake")
     before = {"project-tests": ["python", "-m", "pytest", "tests", "-q", "-n", "12"]}
     argv = ["python", "-m", "pytest", *group.tests, "-q", "-n", "12"]
-    added = {**before, "mt01-reviewed-wake": argv}
+    added = {**before, "mt01-ef02-wake-tests": argv}
     approved = pr_ci_module.additive_registry_tests(before, added, mt.approved_groups())
     assert set(approved) == {*group.tests, *pr_ci_module.REVIEWED_REGISTRY_REGRESSIONS}
-    assert pr_ci_module.additive_registry_tests(before, {**before, "mt01-reviewed-wake": argv[:-1] + ["4"]}, mt.approved_groups()) is None
+    assert pr_ci_module.additive_registry_tests(before, {**before, "mt01-ef02-wake-tests": argv[:-1] + ["4"]}, mt.approved_groups()) is None
     assert pr_ci_module.additive_registry_tests(before, {**before, "unsafe": argv}, mt.approved_groups()) is None
-    assert pr_ci_module.additive_registry_tests(before, {"mt01-reviewed-wake": argv}, mt.approved_groups()) is None
+    assert pr_ci_module.additive_registry_tests(before, {"mt01-ef02-wake-tests": argv}, mt.approved_groups()) is None
     assert pr_ci_module.additive_registry_tests(before, before, mt.approved_groups()) is None
     assert pr_ci_module.additive_registry_tests(before, {**added, "project-tests": ["pytest"]}, mt.approved_groups()) is None
+    assert pr_ci_module.additive_registry_tests(
+        before, {**before, "mt01-wrong-name": argv}, mt.approved_groups()) is None
 
 
 def test_pr_ci_additive_registry_only_selects_reviewed_tests(pr_ci_module):
@@ -954,10 +956,14 @@ def test_pr_ci_report_changes_run_existing_test_consumer(pr_ci_module):
     assert selected[1] == "SELECTED_AFFECTED_INTEGRATION"
 
 
-def test_pr_ci_other_github_controls_still_require_full(pr_ci_module):
+@pytest.mark.parametrize("control", [
+    ".github/scripts/ef02-watch.cjs",
+    ".github/ef02/approved-candidates.v1.json",
+])
+def test_pr_ci_other_github_controls_still_require_full(pr_ci_module, control):
     selected = pr_ci_module.choose(
         ROOT, event="pull_request", base="a" * 40,
-        paths={".github/scripts/ef02-watch.cjs"}, selection_fn=lambda **_: _pr_ci_plan(),
+        paths={control}, selection_fn=lambda **_: _pr_ci_plan(),
     )
     assert selected[1] == "FULL_PROJECT_REQUIRED"
     assert selected[2] == ("CI_OR_SHARED_CONFIG_CHANGED",)
