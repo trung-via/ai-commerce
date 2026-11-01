@@ -34,3 +34,60 @@ The final process waits for MCP requests. Do not paste tokens in a public repo, 
 4. Issue #109 independently tracks server-authenticated original-chat delivery receipt. GitHub Issue/artifact remains the fallback; Chrome UI user-turn observation does not satisfy server ACK.
 
 **Current state**: implemented candidate/PR and local isolated tests; MCP host connection and full Wake cycle **NOT PROVEN**.
+
+
+## Supported private host connection (operator runbook, not executed)
+
+The code in this PR provides an **MCP v2 stdio server only**. This is suitable
+for a local MCP host or, **if the user's OpenAI Platform organization and ChatGPT
+workspace have Secure MCP Tunnel access**, a private tunnel. It is *not* a
+public HTTPS MCP endpoint and its Python module cannot be called directly from
+this ChatGPT web chat. SDK v2 reference:
+https://py.sdk.modelcontextprotocol.io/ and
+https://github.com/modelcontextprotocol/python-sdk/blob/main/docs/migration.md.
+
+1. On the operator-owned Windows machine, check out the exact reviewed candidate
+   SHA, create a Python 3.11+ environment and install the project plus
+   `mcp>=2,<3`. Keep the GitHub read-only token in a **private environment
+   variable** `AI_COMMERCE_GITHUB_READ_TOKEN`, never in the repository or
+   a ChatGPT prompt. The tool has no GitHub write path.
+2. Verify local MCP initialization, list-tools and a read-only call with the
+   MCP Inspector or a v2 SDK client. The target module is
+   `ai_commerce.remote.engineering_mcp_server` and the stdio invocation is
+   `python -m ai_commerce.remote.engineering_mcp_server`.
+   Check the actual annotation `readOnlyHint=true`, the input schema and
+   returned `MERGED_MAIN_POSTMERGE_CI_PASS` for PR #180 with the *current*
+   main SHA. Repeated calls must have no side effects.
+3. **Only if Secure MCP Tunnel is available and authorized**: create/choose
+   a tunnel in Platform tunnel settings; on the same private machine run the
+   official `tunnel-client` with its `--mcp-command` pointing to the
+   executable + module. Run `tunnel-client doctor` and confirm tunnel
+   readiness. See:
+   https://developers.openai.com/api/docs/guides/secure-mcp-tunnels
+   for current profile syntax and eligibility. Do not fabricate a tunnel ID.
+4. In **ChatGPT Plugins**, choose Add custom MCP server, select Tunnel
+   connection and the actual available tunnel, authenticate as required and
+   test one real `engineering_review_readonly` call. A cloud-hosted
+   alternative needs a genuinely reachable, authenticated Streamable HTTP
+   endpoint; this PR intentionally does not expose the local GitHub token
+   over a public HTTP listener. The current skills-only Engineering
+   Workflow plugin does **not** gain a callable tool merely by appending
+   an instruction or writing `capabilities: ["Interactive"]`.
+5. Verify the host tool call trace independently. A separately created
+   custom MCP connection is not yet an attachment to the pre-existing
+   `AI Commerce Engineering Workflow` plugin identity; first confirm the
+   platform can associate the tested connection with that same plugin.
+   If it cannot, record this packaging/host limitation and do not claim
+   successful native plugin-to-plugin delegation under Issue #181.
+
+**Readiness evidence to record**: exact server revision, actual MCP SDK
+version, list-tools tool schema/annotations, auth/denial behavior, real
+connection/tunnel identifier (in private operator state; no secrets),
+ChatGPT host-visible tool invocation, exact GitHub PR/main/CI source, and
+Brain's post-review decision. A local model-generated trace ID is never
+a ChatGPT server ACK or proof of an independently invoked plugin.
+
+The ChatGPT user may not have access to Secure MCP Tunnel; in that case
+report `BLOCKED_TUNNEL_ACCESS` and use a supported authenticated hosting
+alternative. Never bypass private plugin/host permission checks, and never
+replay historical Wake events #161/#177/#179.
