@@ -36,6 +36,62 @@ def build_dual_plugin_wake_preview(event_id: str, repository: str = _REPOSITORY)
     ))
 
 
+
+def build_engineering_failure_wake_preview(event: dict) -> str:
+    """Preview Engineering-only triage for an EF02 partial/failed event.
+
+    Event identity is self-consistent, NOT authenticated provenance. D3 must
+    independently check real GitHub evidence and operator consent before Send.
+    No Brain role is requested for routine implementation failures.
+    """
+    from .candidate_policy import candidate_accepted
+    from .completion_event import CompletionEventError, validate_completion_event
+
+    try:
+        checked = validate_completion_event(event)
+    except (CompletionEventError, TypeError, KeyError, ValueError) as exc:
+        raise ValueError("ENGINEERING_FAILURE_PREVIEW_EVENT_INVALID") from exc
+    if checked["repository"] != _REPOSITORY or checked["batch_status"] != "PARTIAL_OR_FAILED":
+        raise ValueError("ENGINEERING_FAILURE_PREVIEW_NOT_FAILED")
+    failed = [action for action in checked["actions"] if not candidate_accepted(action)]
+    if not failed:
+        raise ValueError("ENGINEERING_FAILURE_PREVIEW_NOT_FAILED")
+    rows = [
+        "[AI COMMERCE ENGINEERING-ONLY FAILURE WAKE PREVIEW — NOT SENT]",
+        "event_id: " + checked["event_id"],
+        "repository: " + checked["repository"],
+        "run_id: " + str(checked["run_id"]),
+        "run_attempt: " + str(checked["run_attempt"]),
+        "issue_number: " + str(checked["issue_number"]),
+        "batch_id: " + checked["batch_id"],
+        "source_sha: " + checked["source_sha"],
+        "batch_status: PARTIAL_OR_FAILED",
+        "fresh_brain_sync_required: false",
+        "@AI Commerce Engineering Workflow",
+    ]
+    for action in failed:
+        rows.append(
+            "failed_action: " + action["action_id"] +
+            " attempt=" + action["attempt_id"] +
+            " status=" + action["status"]
+        )
+    rows.extend((
+        "Engineering only: verify authenticated GitHub run/artifact and these "
+        "exact action/attempt statuses; diagnose root cause, scope and tests.",
+        "Apply Verify-Fix only if existing explicit authorization and the "
+        "registered EF02 contract permit it; otherwise report a bounded "
+        "repair plan and request authorization.",
+        "Do not call AI Commerce Brain for routine engineering failure triage. "
+        "Escalate to Brain only when a new roadmap/architecture/product decision "
+        "is genuinely necessary.",
+        "No automatic EF02 retry/dispatch, no main merge, no unknown-side-effect "
+        "replay, no new Wake, no Deep Research app or plugin MCP connection.",
+        "This is plain text only; @Engineering is NOT a host-selected plugin "
+        "until the actual ChatGPT composer selection is verified.",
+    ))
+    return "\n".join(rows)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Print a dual-@ test-chat Wake PREVIEW; never send it.")
