@@ -182,3 +182,46 @@ def test_type_only_rechecks_ledger_after_human_consent(config, monkeypatch, caps
     assert cli.main(args) == 2
     assert json.loads(capsys.readouterr().out.splitlines()[-1])["code"] == "TURN_STATE_CHANGED"
     assert store.read()["phase"] == "SUBMISSION_UNKNOWN"
+
+
+def test_type_only_rechecks_route_after_operator_consent(config, monkeypatch, capsys):
+    c = config
+    initial(c)
+    routes = iter([
+        SimpleNamespace(route_id="enrolled", generation=1),
+        SimpleNamespace(route_id="enrolled", generation=2),
+    ])
+    monkeypatch.setattr(
+        cli, "load_registered_probe_route", lambda **kwargs: next(routes))
+    monkeypatch.setattr("builtins.input", lambda token: "TYPE-ONLY-D5-BRAIN-0")
+    monkeypatch.setattr(
+        cli, "ExplicitTurnChipStager",
+        lambda **kwargs: pytest.fail("CDP must not start after route drift"))
+    args = c.args + ["--mode", "type-only", "--registry", str(c.registry),
+                     "--route-id", "enrolled"]
+    assert cli.main(args) == 2
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["code"] == "ROUTE_STATE_CHANGED"
+    assert TurnSessionStore(
+        path=c.state, repository_root=c.checkout).read()["phase"] == "READY"
+
+
+def test_type_only_rechecks_revoked_route_consent(config, monkeypatch, capsys):
+    c = config
+    initial(c)
+    calls = [0]
+    def lookup(**kwargs):
+        calls[0] += 1
+        if calls[0] == 2:
+            raise cli.LocalProbeConfigError("PROBE_ROUTE_NOT_CONSENTED")
+        return SimpleNamespace(route_id="enrolled", generation=1)
+    monkeypatch.setattr(cli, "load_registered_probe_route", lookup)
+    monkeypatch.setattr("builtins.input", lambda token: "TYPE-ONLY-D5-BRAIN-0")
+    monkeypatch.setattr(
+        cli, "ExplicitTurnChipStager",
+        lambda **kwargs: pytest.fail("CDP must not start after revoked consent"))
+    args = c.args + ["--mode", "type-only", "--registry", str(c.registry),
+                     "--route-id", "enrolled"]
+    assert cli.main(args) == 2
+    result = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert result["code"] == "PROBE_ROUTE_NOT_CONSENTED"
+    assert calls[0] == 2
