@@ -275,6 +275,7 @@
     "tests/test_ef02_plugin_selection_probe.py",
     "tests/test_ef02_plugin_turn_handoff.py",
     "tests/test_ef02_plugin_turn_store.py",
+    "tests/test_ef02_plugin_turn_stage_only.py",
     "tests/test_ef02_d3_github_artifact_authority.py",
     "tests/test_ef02_d3_signed_origin_consent.py",
     "tests/test_ef02_d3_two_grant_delivery.py",
