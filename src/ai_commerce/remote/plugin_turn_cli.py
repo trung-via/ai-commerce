@@ -94,8 +94,17 @@ def main(argv: list[str] | None = None) -> int:
         if fresh != session:
             _emit("TURN_STATE_CHANGED", phase="NOT_STARTED", sent=False)
             return 2
+        # Route consent or exact-chat binding may also change during the
+        # operator prompt. Re-read the private registry and fail closed.
+        # This is a preflight recheck, not an OS-enforced routing lease.
+        fresh_binding = load_registered_probe_route(
+            registry_path=args.registry, checkout=args.checkout,
+            route_id=args.route_id)
+        if fresh_binding != binding:
+            _emit("ROUTE_STATE_CHANGED", phase="NOT_STARTED", sent=False)
+            return 2
         result = ExplicitTurnChipStager(enabled=True).stage(
-            binding, fresh, operator_approved=True)
+            fresh_binding, fresh, operator_approved=True)
         _emit(result.code, phase=result.phase, role=preview["role"],
               turn_index=preview["turn_index"], brain=result.brain,
               engineering=result.engineering,
