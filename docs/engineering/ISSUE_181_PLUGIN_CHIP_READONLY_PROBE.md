@@ -33,6 +33,7 @@ one per known plugin:
 | \`ABSENT\` | No exact plugin label element in current composer form | **NO** |
 | \`PLAIN_TEXT_ONLY\` | Label visible but without a recognizable noneditable/mention structure | **NO** |
 | \`STRUCTURED_CANDIDATE\` | Visible exact label with likely mention/chip structure | **NO** |
+| \`UNVERIFIED_STRUCTURE\` | Label in generic noneditable or mention markup; not plugin-specific | **NO** |
 | \`AMBIGUOUS\` | Multiple candidate matching labels in current composer | **NO** |
 | \`PROBE_COMPLETE\` | Read-only scan finished | **NO** |
 | \`DRAFT_PRESENT\` (legacy D4) | Existing staged content blocks the old Wake sender | **NO** |
@@ -98,3 +99,40 @@ until their actual run completes.
 
 **No D5 Send, no EF02 dispatch, no plugin MCP connection, no merge, no retry
 of historical D2 UNKNOWN #161/#177/#179.** Roadmap A remains paused.
+
+
+## Windows negative-control finding and bounded repair — 2026-11-01
+
+Human-provided live Windows Test Wake Chat probe results, from the already
+enrolled exact Chrome/CDP page, after local Playwright installation:
+
+- CASE 01 Brain only: `PROBE_COMPLETE` with Brain
+  `STRUCTURED_CANDIDATE`, Engineering `ABSENT`
+- CASE 02 Brain + Engineering: both `STRUCTURED_CANDIDATE`
+- CASE 03 Engineering only: Brain `ABSENT`, Engineering
+  `STRUCTURED_CANDIDATE`
+- CASE 04 manually typed plain text without selecting chips: **both**
+  `STRUCTURED_CANDIDATE` — **negative control UNRESOLVED/FAIL**.
+
+This is **not** proof that real plugin chips were present in CASE 04:
+the original code treated `contenteditable=false` on *any* traversed
+ancestor as sufficient plugin-like structure and classified generic
+`data-type=mention` and `data-mention-id` as strong plugin markers.
+A residual chip or automatic ChatGPT UI conversion is also possible.
+The probe never produced `host_selection_proven=true`.
+
+**Causal conservative correction in the new draft branch:** generic
+noneditable/mention markup is `UNVERIFIED_STRUCTURE`, **not**
+`STRUCTURED_CANDIDATE`. Only an explicit plugin-specific structural marker
+may produce `STRUCTURED_CANDIDATE`; neither state is authenticated host
+selection or permission to Send. Synthetic JS fixture tests now cover
+noneditable leaf, noneditable parent and generic mention separately.
+
+**Next local read-only validation, after code review and separate merge
+authorization:** repeat only CASE 04 with a genuinely blank composer and
+plain typed names; if it remains `STRUCTURED_CANDIDATE`, inspect
+non-sensitive **marker categories only** under separately authorized local
+diagnostics. Do not dump private DOM/chat contents, type selectors blindly,
+or use CASE 01–03 as automatic host selection proof. A full four-case
+repeat is not useful until the negative case discriminates.
+
