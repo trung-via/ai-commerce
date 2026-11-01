@@ -87,8 +87,15 @@ def main(argv: list[str] | None = None) -> int:
         if not _consent(token):
             _emit("USER_DECLINED", phase="NOT_STARTED", sent=False)
             return 2
+        # Consent may take minutes. Another process can advance the ledger
+        # while the operator types. Refuse a stale role or UNKNOWN handoff.
+        # This bounded re-read is NOT a cross-process CDP staging lease.
+        fresh = ledger.read()
+        if fresh != session:
+            _emit("TURN_STATE_CHANGED", phase="NOT_STARTED", sent=False)
+            return 2
         result = ExplicitTurnChipStager(enabled=True).stage(
-            binding, session, operator_approved=True)
+            binding, fresh, operator_approved=True)
         _emit(result.code, phase=result.phase, role=preview["role"],
               turn_index=preview["turn_index"], brain=result.brain,
               engineering=result.engineering,
