@@ -619,3 +619,64 @@ def test_new_component_onboarding_end_to_end_complete_both_os_junit_can_merge(ga
     verdict = gate.process(api, api.repo, _ci_event(gate))
     assert verdict[0]["status"] == "MERGED"
     assert len(api.writes) == 1
+
+
+
+def test_artifact_download_uses_signed_storage_redirect_without_token_leak(gate, monkeypatch):
+    import io
+    import urllib.error
+    import urllib.request
+
+    signer = gate.GitHubAPI("trung-via/ai-commerce", "secret-token")
+    download = "https://pipelines.actions.githubusercontent.com/download/signed?sig=abc"
+    api_requests, signed_requests = [], []
+
+    class ControlledOpener:
+        def open(self, req, timeout):
+            api_requests.append(req)
+            raise urllib.error.HTTPError(req.full_url, 302, "Found",
+                                         {"Location": download}, io.BytesIO(b""))
+
+    class ZIPResponse:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def read(self, length):
+            return b"PK-valid-offline-fixture"
+
+    def open_signed(req, timeout):
+        signed_requests.append(req)
+        return ZIPResponse()
+
+    monkeypatch.setattr(gate.urllib.request, "build_opener", lambda *args: ControlledOpener())
+    monkeypatch.setattr(gate.urllib.request, "urlopen", open_signed)
+    assert signer.read_artifact(99) == b"PK-valid-offline-fixture"
+    assert api_requests[0].headers["Authorization"] == "Bearer secret-token"
+    assert len(signed_requests) == 1
+    assert signed_requests[0].full_url == download
+    assert not any(k.lower() == "authorization" for k in signed_requests[0].headers)
+
+
+@pytest.mark.parametrize("redirect", [
+    "http://pipelines.actions.githubusercontent.com/artifact",
+    "https://evil.example.com/artifact",
+    "https://pipelines.actions.githubusercontent.com.evil.example.com/x",
+    "https://user:pass@pipelines.actions.githubusercontent.com/x",
+    "https://pipelines.actions.githubusercontent.com/x#fragment",
+])
+def test_artifact_redirect_rejects_untrusted_location(gate, monkeypatch, redirect):
+    import io
+    import urllib.error
+    client = gate.GitHubAPI("trung-via/ai-commerce", "token")
+
+    class Opener:
+        def open(self, request, timeout):
+            raise urllib.error.HTTPError(request.full_url, 302, "Found",
+                                         {"Location": redirect}, io.BytesIO(b""))
+    monkeypatch.setattr(gate.urllib.request, "build_opener", lambda *args: Opener())
+    monkeypatch.setattr(
+        gate.urllib.request, "urlopen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("NOT_ALLOWED")))
+    with pytest.raises(ValueError, match="ARTIFACT_REDIRECT_HOST_INVALID"):
+        client.read_artifact(1)

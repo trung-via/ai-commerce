@@ -503,6 +503,8 @@ def verify_one(api: Callable[[str], Any], repository: str, number: int,
                       if a["name"] == f"mt01-v21-{os_name}-{latest['id']}")
         try:
             data = api.read_artifact(record["id"])
+        except urllib.error.HTTPError as exc:
+            return Verdict("WAIT_EVIDENCE", f"V21_ARTIFACT_HTTP_{exc.code}", number, head, latest["id"])
         except (ValueError, TypeError, OSError, TimeoutError, urllib.error.URLError):
             return Verdict("WAIT_EVIDENCE", "V21_ARTIFACT_BYTES_UNAVAILABLE", number, head, latest["id"])
         if not validate_receipt_zip(data, expected_head=head, expected_base=base_sha,
@@ -521,7 +523,13 @@ class GitHubAPI:
         self.token = token
 
     def read_artifact(self, artifact_id: int) -> bytes:
-        """Download the exact GitHub-hosted ZIP through a bounded signed redirect."""
+        """Require GitHub's exact ZIP redirect; never forward the token to storage.
+
+        GitHub serves Actions artifact bytes from temporary signed storage,
+        not from api.github.com. Python's default redirect handling can carry
+        Authorization across hosts. We follow one strictly allowlisted HTTPS
+        storage redirect without any bearer token, preserving artifact bytes.
+        """
         if type(artifact_id) is not int or artifact_id < 1:
             raise ValueError("INVALID_ARTIFACT_ID")
         path = f"/repos/{self.repository}/actions/artifacts/{artifact_id}/zip"
@@ -530,10 +538,43 @@ class GitHubAPI:
             headers={"Authorization": "Bearer " + self.token,
                      "Accept": "application/vnd.github+json",
                      "X-GitHub-Api-Version": "2022-11-28"})
-        with urllib.request.urlopen(req, timeout=18) as response:
+        class NoFollow(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, request, fp, code, msg, headers, newurl):
+                return None
+
+        opener = urllib.request.build_opener(NoFollow)
+        try:
+            with opener.open(req, timeout=18) as response:
+                # An unexpected direct body is not proof of an artifact ZIP.
+                raise ValueError("ARTIFACT_SIGNED_REDIRECT_MISSING")
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (302, 303, 307):
+                raise
+            signed = exc.headers.get("Location")
+        if not isinstance(signed, str):
+            raise ValueError("ARTIFACT_REDIRECT_MISSING")
+        parts = urllib.parse.urlsplit(signed)
+        host = (parts.hostname or "").lower()
+        approved = (
+            host == "actions.githubusercontent.com" or
+            host.endswith(".actions.githubusercontent.com") or
+            host == "objects.githubusercontent.com" or
+            host.endswith(".blob.core.windows.net")
+        )
+        if (parts.scheme != "https" or not approved or not parts.path
+                or parts.username is not None or parts.password is not None
+                or parts.fragment):
+            raise ValueError("ARTIFACT_REDIRECT_HOST_INVALID")
+        # A signed download URL must never inherit an API credential.
+        signed_req = urllib.request.Request(
+            signed, headers={"Accept": "application/zip",
+                             "User-Agent": "AI-Commerce-Merge-Gate/1.0"})
+        with urllib.request.urlopen(signed_req, timeout=18) as response:
             content = response.read(24 * 1024 * 1024 + 1)
         if len(content) > 24 * 1024 * 1024:
             raise ValueError("ARTIFACT_TOO_LARGE")
+        if not content.startswith(b"PK"):
+            raise ValueError("ARTIFACT_NOT_A_ZIP")
         return content
 
     def __call__(self, path: str, method: str = "GET", body: dict | None = None) -> Any:
