@@ -164,26 +164,24 @@ test('cancellation after Windows was started remains uncertain, not safe', () =>
   assert.match(status.detail,/side effects are UNKNOWN/);
 });
 
-test('pre-executor cancellation probe cannot enable Windows or override issue owner guard', () => {
+test('retired M0-R cancellation probe cannot bypass standard EF02 hosted authorization', () => {
   const fs = require('node:fs');
   const path = require('node:path');
-  const text = fs.readFileSync(path.join(__dirname,'../.github/workflows/ef02-batch.yml'),'utf8');
-  const probe = text.slice(text.indexOf('  m0r_pre_executor_cancel:'),text.indexOf('  validate:'));
-  const validate = text.slice(text.indexOf('  validate:'),text.indexOf('  execute:'));
+  const text = fs.readFileSync(path.join(__dirname, '../.github/workflows/ef02-batch.yml'), 'utf8');
+  const validate = text.slice(text.indexOf('  validate:'), text.indexOf('  execute:'));
   const execute = text.slice(text.indexOf('  execute:'));
-  const title = '[EF02] M0-R pre-executor cancellation probe';
-  assert.ok(probe.includes("github.event.issue.user.login == github.repository_owner"));
-  assert.ok(probe.includes("github.event.action == 'opened'"));
-  assert.ok(probe.includes('actions: write'));
-  assert.ok(probe.includes('runs-on: ubuntu-latest'));
-  assert.ok(probe.includes('github.rest.actions.cancelWorkflowRun'));
-  assert.ok(probe.includes('run_id: context.runId'));
-  assert.ok(validate.includes("github.event.issue.title != '" + title + "'"));
-  assert.ok(execute.includes("github.event.issue.title == '" + title + "'"));
-  assert.ok(execute.includes('needs.validate.result == \'success\''));
+  assert.ok(!text.includes('  m0r_pre_executor_cancel:'), 'retired probe must not be runnable');
+  assert.ok(!text.includes('cancelWorkflowRun('), 'no one-shot workflow cancellation');
+  assert.ok(validate.includes("startsWith(github.event.issue.title, '[EF02]')"));
+  assert.ok(validate.includes("data.pull_request || !data.title.startsWith('[EF02]')"));
+  assert.ok(validate.includes("core.setOutput('issuer', data.user.login)"));
+  assert.ok(validate.includes('python -m ai_commerce.remote validate'));
+  assert.ok(validate.includes('--issuer-login "$EF02_ISSUER" --owner-login "$EF02_OWNER"'));
+  assert.ok(execute.includes("needs.validate.result == 'success'"));
   assert.ok(execute.includes('runs-on: [self-hosted, Windows, ai-commerce-ef02]'));
+  assert.ok(execute.includes('python -m ai_commerce.remote run'));
+  assert.ok(execute.includes('--issuer-login "$env:EF02_ISSUER" --owner-login "$env:EF02_OWNER"'));
 });
-
 
 test('queued warning with run URL must NOT silence subsequent cancelled terminal outcome', async () => {
   const oldWarning = [
