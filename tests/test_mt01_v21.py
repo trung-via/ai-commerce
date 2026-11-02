@@ -766,3 +766,12 @@ def test_v22_manifest_rejects_missing_or_linked_source(tmp_path):
     source.symlink_to(tmp_path / "tests/test_prior.py")
     with pytest.raises(ValueError, match="ONBOARD_FILE_MISSING_OR_LINK"):
         validator(values, **ctx)
+
+
+def test_v22_manifest_binding_rejects_untrusted_in_memory_owner(tmp_path):
+    import pytest
+    validator, values, ctx = _v22_manifest_fixture(tmp_path)
+    path = tmp_path / ctx["manifest_path"]
+    path.write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="ONBOARD_MANIFEST_BYTES_MISMATCH"):
+        validator(values, **ctx)
