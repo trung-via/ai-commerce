@@ -17,7 +17,8 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
                  prior: dict[str, Evidence], save: Callable, evidence_files: Mapping[str, str],
                  deadline: float, timeout_seconds: float, registered_only: bool = False,
                  aggregate_sources: tuple[str, ...] = (), groups=None, command_transform=None,
-                 registered_profiles=None, human_full_suite_authorized: bool = False, on_plan: Callable | None = None) -> tuple:
+                 registered_profiles=None, human_full_suite_authorized: bool = False, on_plan: Callable | None = None,
+                 allowed_paths: tuple[str, ...] = ()) -> tuple:
     started_plan = time.monotonic()
     started_at = datetime.now(timezone.utc).isoformat()
     verify_deadline = min(deadline, started_plan + timeout_seconds)
