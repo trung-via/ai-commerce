@@ -295,7 +295,8 @@ def reviewed_coverage_for_changed_files(files: object, *, onboarded_groups=()):
     # The merge gate's main-tree owner map is independent of candidate plans.
     # Existing components inherit full reviewed owner/consumer obligations.
     groups = approved_groups()
-    newly_owned = {path: group for group in onboarded_groups for path in group["paths"]}
+    newly_owned = {path: group for group in onboarded_groups
+                   for path in (*group["paths"], *group["tests"], *group["contracts"])}
     for path in changed:
         owning = [g for g in groups if path in
                   (set(g.paths) | set(g.tests) | set(g.consumers) | set(g.contracts))]
