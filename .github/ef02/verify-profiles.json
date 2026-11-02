@@ -281,6 +281,7 @@
     "tests/test_ef02_d5_run_registration.py",
     "tests/test_ef02_d5_wake_readiness_flow.py",
     "tests/test_ef02_d5_wake_readiness_cache.py",
+    "tests/test_ef02_d5_wake_readiness_bootstrap.py",
     "-q",
     "-n",
     "12"

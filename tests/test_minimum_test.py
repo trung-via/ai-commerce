@@ -128,6 +128,7 @@ def test_companion_report_has_exact_reviewed_parallel_commands(real_tree):
                 "tests/test_ef02_plugin_turn_evidence.py",
                 "tests/test_ef02_d5_wake_readiness_flow.py",
                 "tests/test_ef02_d5_wake_readiness_cache.py",
+                "tests/test_ef02_d5_wake_readiness_bootstrap.py",
             ]
             assert len(live_tests) == len(set(live_tests))
         elif key == "mt01-ef02-recovery-tests":
