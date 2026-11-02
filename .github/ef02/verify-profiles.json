@@ -305,6 +305,15 @@
     "-n",
     "12"
   ],
+  "mt01-a14-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_a14_attribution.py",
+    "-q",
+    "-n",
+    "12"
+  ],
   "mt01-hostops-v1-tests": [
     "python",
     "-m",
@@ -319,6 +328,16 @@
     "-m",
     "pytest",
     "tests/test_hostops_v2.py",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "mt01-hostops-v2-recovery-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_hostops_v2.py",
+    "tests/test_hostops_ef02_202_recovery.py",
     "-q",
     "-n",
     "12"

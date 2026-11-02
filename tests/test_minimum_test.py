@@ -149,6 +149,11 @@ def test_companion_report_has_exact_reviewed_parallel_commands(real_tree):
         key = f"mt01-{g.name}-tests"
         if g.name == "ef02-recovery":
             assert current.get(key) == expected
+        elif g.name == "hostops-v2":
+            # Preserve the immutable historical profile while registering the
+            # newly committed read-only recovery test under a reviewed alias.
+            assert current["mt01-hostops-v2-recovery-tests"] == expected
+            assert current[key] == ["python", "-m", "pytest", "tests/test_hostops_v2.py", "-q", "-n", "12"]
         elif key in combined:
             assert combined[key] == expected
         else:
@@ -1257,18 +1262,18 @@ def test_provisional_refuses_fanin_symlink_unregistered_profile_and_no_new_tests
 
 
 def test_provisional_failure_skips_expensive_full_suite_without_claiming_pass(mapped, monkeypatch):
-    new_source = "src/ai_commerce/affiliate_attribution/evidence.py"
-    new_test = "tests/test_a14_attribution.py"
+    new_source = "src/ai_commerce/affiliate_attribution/future_adapter.py"
+    new_test = "tests/test_a14_provisional_future.py"
     (mapped.repo / "src/ai_commerce/affiliate_attribution").mkdir(parents=True)
     (mapped.repo / new_source).write_text("ANSWER = 42\n")
     (mapped.repo / new_test).write_text(
-        "from ai_commerce.affiliate_attribution import evidence\n"
-        "def test_bad():\n    assert evidence.ANSWER == 0\n")
+        "from ai_commerce.affiliate_attribution import future_adapter\n"
+        "def test_bad():\n    assert future_adapter.ANSWER == 0\n")
     # The stdout is from a real-shaped pytest failure, not a fabricated PASS.
     calls = []
     def run(argv, **kwargs):
         calls.append(list(argv))
-        return subprocess.CompletedProcess(argv, 1, "1 failed in 0.02s\nFAILED tests/test_a14_attribution.py::test_bad", "")
+        return subprocess.CompletedProcess(argv, 1, "1 failed in 0.02s\nFAILED tests/test_a14_provisional_future.py::test_bad", "")
     monkeypatch.setattr(verification.subprocess, "run", run)
     mapped.evidence.mkdir(exist_ok=True)
     files = {}
@@ -1293,13 +1298,13 @@ def test_provisional_failure_skips_expensive_full_suite_without_claiming_pass(ma
 
 
 def test_provisional_pass_still_runs_registered_full_suite(mapped, monkeypatch):
-    new_source = "src/ai_commerce/affiliate_attribution/evidence.py"
-    new_test = "tests/test_a14_attribution.py"
+    new_source = "src/ai_commerce/affiliate_attribution/future_adapter.py"
+    new_test = "tests/test_a14_provisional_future.py"
     (mapped.repo / "src/ai_commerce/affiliate_attribution").mkdir(parents=True)
     (mapped.repo / new_source).write_text("ANSWER = 42\n")
     (mapped.repo / new_test).write_text(
-        "from ai_commerce.affiliate_attribution import evidence\n"
-        "def test_ok():\n    assert evidence.ANSWER == 42\n")
+        "from ai_commerce.affiliate_attribution import future_adapter\n"
+        "def test_ok():\n    assert future_adapter.ANSWER == 42\n")
     calls = []
     def run(argv, **kwargs):
         calls.append(list(argv))

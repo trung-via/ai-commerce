@@ -185,6 +185,20 @@ def approved_groups() -> tuple[TestGroup, ...]:
             "A13.affiliate-placement", "A13.affiliate-release"),
                   sources("affiliate_release", "__init__ inspection process schemas claim_rights claim_rights_schemas placement placement_schemas __main__ cli demo evidence_pack evidence_pack_schemas"),
                   contracts=contracts("ClaimRightsReleaseReview.v1 AffiliatePlacementEvidence.v1 AffiliateReleaseEvidencePack.v1")),
+        # A14 L04: the test is now committed on the recovered review branch.
+        # Exact component/test/contract ownership is mandatory at PR integration;
+        # no global test suppression and no permission to edit other components.
+        TestGroup("a14", ("tests/test_a14_attribution.py",),
+                  ("A14.L04.offline-attribution-evidence",),
+                  sources("affiliate_attribution", "__init__ __main__ evidence ledger schemas"),
+                  contracts=(
+                      "contracts/AffiliateAttributionEvidence.v1.schema.json",
+                      "src/ai_commerce/affiliate_attribution/README.md",
+                      "src/ai_commerce/affiliate_attribution/verification/candidate-bytes.json",
+                      "src/ai_commerce/affiliate_attribution/verification/consumer-tests.txt",
+                      "src/ai_commerce/affiliate_attribution/verification/verification.json",
+                      "docs/engineering/A14_L04_IMPLEMENTATION_REPORT.md",
+                  )),
         TestGroup("foundation", ("tests/test_foundation.py",), ("A01.foundation",), (),
                   contracts=contracts("WorkItem.v0.3 AuthorizationEnvelope.v0.3") + (
                       "docs/engineering/SEMANTIC_OWNERS.md", "docs/engineering/SELECTIVE_COMPONENT_ADOPTION.md",
@@ -227,8 +241,12 @@ def approved_groups() -> tuple[TestGroup, ...]:
                   (rem + "worker.py", rem + "transport.py", rem + "github_read_retry.py")),
         TestGroup("hostops-v1", ("tests/test_hostops_request.py",), ("HOSTOPS.v1.readonly",),
                   ("scripts/hostops_request.py",)),
-        TestGroup("hostops-v2", ("tests/test_hostops_v2.py",), ("HOSTOPS.v2.typed-operations",),
-                  ("scripts/hostops_v2.py",)),
+        # PR #213 introduced a committed fixed-scope recovery test and operation.
+        # Register both exact owned files instead of weakening the mapping guard.
+        TestGroup("hostops-v2", ("tests/test_hostops_v2.py", "tests/test_hostops_ef02_202_recovery.py"),
+                  ("HOSTOPS.v2.typed-operations",),
+                  ("scripts/hostops_v2.py", "scripts/hostops_ef02_202_recovery.py"),
+                  contracts=(".github/workflows/hostops-v2.yml",)),
         TestGroup("ef02-wake", tuple("tests/" + name + ".py" for name in (
             "test_ef02_wake_d1", "test_ef02_wake_d2", "test_ef02_cdp_doorbell", "test_ef02_plugin_selection_probe", "test_ef02_plugin_turn_handoff", "test_ef02_plugin_turn_store", "test_ef02_plugin_turn_stage_only", "test_ef02_plugin_turn_send_once", "test_ef02_plugin_turn_cli", "test_ef02_plugin_turn_evidence", "test_ef02_d3_github_artifact_authority",
             "test_ef02_d3_signed_origin_consent", "test_ef02_d3_two_grant_delivery", "test_ef02_d5_chrome_acquisition",
