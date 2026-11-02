@@ -123,4 +123,81 @@ class HostopsV2Tests(unittest.TestCase):
             with self.assertRaises(h.Denied) as ex:h.verify_human(r,signers_file=signers)
             self.assertEqual(str(ex.exception),"HUMAN_SIGNATURE_INVALID")
 
+
+class HostopsD5PidMapTests(unittest.TestCase):
+    @staticmethod
+    def sample():
+        return {
+            "operation":"d5_pid_map_read","session_id":1,"pwsh_major":7,
+            "process_known":True,"tcp_known":True,"chrome_total":2,
+            "chrome_truncated":False,"listener_truncated":False,
+            "profile_identity_verified":False,
+            "processes":[
+                {"pid":123,"session_id":1,"commandline_known":True,
+                 "debug_9333":True,"debug_9222":False,"profile_group":"p01","profile_root_exists":True},
+                {"pid":124,"session_id":1,"commandline_known":False,
+                 "debug_9333":None,"debug_9222":None,"profile_group":None,"profile_root_exists":None},
+            ],
+            "listeners":[{"port":9333,"owner_pid":123,"binding":"ipv4_loopback","chrome_owner":True}],
+        }
+
+    def test_read_operation_allowed_with_empty_parameters_only(self):
+        self.assertEqual(check(req("d5_pid_map_read"))["operation"],"d5_pid_map_read")
+        with self.assertRaises(h.Denied):
+            check(req("d5_pid_map_read",raw_command_line=True))
+
+    def test_pid_map_strict_shape(self):
+        result = h.validate_pid_map(self.sample())
+        self.assertEqual(result["processes"][0]["profile_group"],"p01")
+        self.assertIsNone(result["processes"][1]["debug_9333"])
+
+    def test_raw_paths_and_commands_cannot_escape(self):
+        for extra in ("command_line","user_data_dir","username","environment","raw_path"):
+            d = self.sample(); d["processes"][0][extra] = "sensitive"
+            with self.subTest(extra=extra),self.assertRaises(h.Denied):
+                h.validate_pid_map(d)
+        for bad in ("C:\\Users\\Secret","p999",""):
+            d = self.sample(); d["processes"][0]["profile_group"]=bad
+            with self.subTest(group=bad),self.assertRaises(h.Denied):
+                h.validate_pid_map(d)
+
+    def test_unknown_inventory_not_misreported_as_zero(self):
+        d=self.sample()
+        d["process_known"]=False
+        with self.assertRaises(h.Denied):h.validate_pid_map(d)
+        d["processes"]=[];d["chrome_total"]=0
+        self.assertFalse(h.validate_pid_map(d)["process_known"])
+        d["tcp_known"]=False
+        with self.assertRaises(h.Denied):h.validate_pid_map(d)
+        d["listeners"]=[]
+        self.assertFalse(h.validate_pid_map(d)["tcp_known"])
+
+    def test_no_profile_identity_claim(self):
+        d=self.sample();d["profile_identity_verified"]=True
+        with self.assertRaises(h.Denied):h.validate_pid_map(d)
+        d=self.sample();d["processes"][1]["debug_9333"]=False
+        with self.assertRaises(h.Denied):h.validate_pid_map(d)
+
+    def test_process_arrays_and_listener_domains_bounded(self):
+        d=self.sample();d["listeners"][0]["port"]=443
+        with self.assertRaises(h.Denied):h.validate_pid_map(d)
+        d=self.sample();d["processes"][0]["pid"]=True
+        with self.assertRaises(h.Denied):h.validate_pid_map(d)
+        d=self.sample();d["processes"][0]["profile_root_exists"]="../private"
+        with self.assertRaises(h.Denied):h.validate_pid_map(d)
+        d=self.sample();d["processes"]=[d["processes"][0]]*33
+        with self.assertRaises(h.Denied):h.validate_pid_map(d)
+
+    def test_fixed_powershell_command_no_shell(self):
+        d=self.sample()
+        p=subprocess.CompletedProcess([],0,json.dumps(d).encode(),b"")
+        with patch.object(h.subprocess,"run",return_value=p) as called:
+            result=h.run(req("d5_pid_map_read"),"f"*64,workdir=Path.cwd(),approved_root=None)
+        self.assertEqual(result["status"],"OBSERVED")
+        args=called.call_args.args[0]
+        self.assertTrue(str(args[-1]).endswith("HostOps-D5-PidMap.ps1"))
+        self.assertNotIn("-Operation",args)
+        self.assertNotIn("shell",called.call_args.kwargs)
+
 if __name__ == "__main__":unittest.main()
+
