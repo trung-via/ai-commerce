@@ -215,7 +215,9 @@ def test_a04_dry_run_status_is_not_commercial_success(registry, ledger):
     assert manifest.state == "DRY_RUN"
     assert manifest.result["publication_status"] == "NOT_ATTEMPTED"
     ledger.record(cost(entry_id="cost-dry", status="NOT_APPLICABLE",
-                       amount=None, currency=None))
+                       amount=None, currency=None,
+                       intent_digest=manifest.request_digest,
+                       provider=manifest.request["provider"]["name"]))
     report = media_job_status(manifest, ledger, ("cost-dry",))
     assert report["asset_job_state"] == "DRY_RUN"
     assert report["retry_decision"]["decision"] == "RECONCILE_REQUIRED"
