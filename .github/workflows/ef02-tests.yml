@@ -43,6 +43,7 @@ jobs:
         run: python .github/scripts/ef02-pr-ci-tests.py --reuse-preflight
         env:
           MT01_CI_EVENT: ${{ github.event_name }}
+          MT01_V21_ENABLED: '1'
           GITHUB_TOKEN: ${{ github.token }}
       - name: MT-01 V2.1 scope/dependency preflight
         id: v21

@@ -317,6 +317,20 @@ def postmerge_reuse(*, repo: Path, event: str, branch: str, current_sha: str,
 
 
 def postmerge_preflight() -> int:
+    # Until an independently trusted proof oracle is deployed on main,
+    # do not reuse a candidate-selected subset on an integrated tree.
+    # Push CI instead runs its own bounded V2 impact plan; never full fallback.
+    if (os.getenv("MT01_V21_ENABLED") == "1" and
+            os.getenv("MT01_CI_EVENT") == "push" and
+            os.getenv("GITHUB_REF") == "refs/heads/main"):
+        print("MT01_POSTMERGE_REUSE=false", flush=True)
+        print("MT01_POSTMERGE_PROOF_REASON=V21_REUSE_PENDING_INDEPENDENT_ORACLE", flush=True)
+        print("MT01_POSTMERGE_PR_RUN=", flush=True)
+        output = os.getenv("GITHUB_OUTPUT")
+        if output:
+            with open(output, "a", encoding="utf-8") as f:
+                f.write("skip_pytest=false\n")
+        return 0
     reuse, reason, run_id = postmerge_reuse(
         repo=ROOT, event=os.getenv("MT01_CI_EVENT", ""),
         branch=os.getenv("GITHUB_REF", ""), current_sha=os.getenv("GITHUB_SHA", ""),

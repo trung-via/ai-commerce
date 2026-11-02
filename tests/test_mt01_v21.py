@@ -237,3 +237,23 @@ def test_v21_unknown_acceptance_id_never_passes(tmp_path):
     assert "UNKNOWN_AC" in plan["unknown_acs"]
     assert "AC_UNMAPPED:UNKNOWN_AC" in plan["reason_codes"]
     assert any(g["state"] == "UNPROVEN" for g in plan["groups"])
+
+
+def test_v21_postmerge_disables_unproven_reuse_without_full(monkeypatch, tmp_path):
+    import importlib.util
+    import sys
+    script = Path(__file__).resolve().parents[1] / ".github/scripts/ef02-pr-ci-tests.py"
+    spec = importlib.util.spec_from_file_location("mt01_v21_postmerge_guard", script)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    monkeypatch.setenv("MT01_V21_ENABLED", "1")
+    monkeypatch.setenv("MT01_CI_EVENT", "push")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    output = tmp_path / "github-output.txt"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    def should_not_reuse(**kwargs):
+        raise AssertionError("V2 postmerge must not trust old V1 selector")
+    monkeypatch.setattr(module, "postmerge_reuse", should_not_reuse)
+    assert module.postmerge_preflight() == 0
+    assert "skip_pytest=false" in output.read_text()
