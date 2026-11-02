@@ -1,27 +1,56 @@
 """One-time D5 readiness enrollment; synthetic no Chrome/Send tests."""
 import json
+import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
 
+from ai_commerce.remote import local_completion_handoff as handoff
 from ai_commerce.remote.wake_readiness_bootstrap import (
     provision, SetupBlocked, _same_loopback_9333,
 )
 
 
+def test_private_directory(path):
+    """Use REAL owner SID/DACL on Windows, as the existing D5 tests do."""
+    path.mkdir(mode=0o700)
+    if os.name == "nt":
+        sid = handoff._windows_process_sid()
+        result = subprocess.run(
+            ["icacls", str(path), "/inheritance:r", "/grant:r",
+             "*" + sid + ":(OI)(CI)F"], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        result = subprocess.run(
+            ["icacls", str(path), "/setowner", "*" + sid],
+            capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        assert handoff._private_identity(path) == sid
+    return path
+
+
+def test_private_file(path):
+    path.write_text("{}", encoding="utf-8")
+    if os.name == "posix":
+        path.chmod(0o600)
+    elif os.name == "nt":
+        sid = handoff._windows_process_sid()
+        result = subprocess.run(["icacls", str(path), "/setowner", "*" + sid],
+                                capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        assert handoff._private_identity(path) == sid
+
+
 @pytest.fixture
 def fixture(tmp_path):
-    root = tmp_path / "AI-Commerce"
-    root.mkdir(mode=0o700)
-    root.chmod(0o700)
+    root = test_private_directory(tmp_path / "AI-Commerce")
     checkout = tmp_path / "checkout"
     checkout.mkdir(mode=0o700)
     c = root / "chrome.json"
     ledger = root / "ledger.json"
     reg = root / "registry.json"
     for path in (c, ledger, reg):
-        path.write_text("{}")
-        path.chmod(0o600)
+        test_private_file(path)
 
     class Store:
         phase = "READY"
@@ -59,7 +88,10 @@ def test_one_time_creates_private_manifest_without_browser_or_send(fixture):
     assert data["route_id"] == "d5-route"
     assert data["checkout"] == str(params["checkout"])
     assert data["version"] == 1
-    assert file.stat().st_mode & 0o077 == 0
+    if os.name == "nt":
+        assert handoff._private_identity(file) == handoff._windows_process_sid()
+    else:
+        assert file.stat().st_mode & 0o077 == 0
 
 
 def test_idempotent_identical_manifest_and_reject_changed_parameters(fixture):
@@ -120,8 +152,7 @@ def test_missing_private_root_is_not_created_implicitly(tmp_path, fixture):
 def test_reject_private_inputs_inside_checkout(fixture):
     params, root, _ = fixture
     fake = params["checkout"] / "bad-registry.json"
-    fake.write_text("{}")
-    fake.chmod(0o600)
+    test_private_file(fake)
     params["registry"] = fake
     with pytest.raises(SetupBlocked, match="PRIVATE_INPUT_INSIDE_REPO"):
         provision(**params)
