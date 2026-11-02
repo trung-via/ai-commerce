@@ -195,7 +195,7 @@ def test_native_local_ipc_mutual_hmac_and_bounds(tmp_path, record_property):
     expected = c.receipt(None, "OBSERVED", result={"count": 1})
     config = None
     if os.name == "nt":
-        identity, _ = security.windows_identity()
+        identity, elevated = security.windows_identity()
         endpoint = "\\\\.\\pipe\\LOCAL\\AICommerceHostOpsV3-test-" + os.urandom(8).hex()
         config = {"endpoint": endpoint, "broker_identity": identity, "transport_identity": identity, "trusted_owners": []}
         server = broker.windows_listener(config)
@@ -223,18 +223,33 @@ def test_native_local_ipc_mutual_hmac_and_bounds(tmp_path, record_property):
             errors.append(exc)
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
+    fallback = False
     try:
         client = broker.connect(endpoint)
     except c.Denied as exc:
-        # AppContainer policies can prohibit native IPC even to the same SID.
-        # Preserve the denial as evidence, then test framing/auth over a mocked
-        # OS byte stream. This is never reported as native/live IPC success.
+        # Some hosted AppContainer policies deny even same-SID named pipes.
         assert os.name == "nt" and str(exc) == "BROKER_UNAVAILABLE" and getattr(exc.__cause__, "winerror", None) == 5
         stop.set()
         thread.join(6)
         server.close()
         assert not thread.is_alive()
-        record_property("native_ipc", "OS_DENIED_WINERROR_5; mocked OS byte stream")
+        record_property("native_ipc", "OS_DENIED_WINERROR_5; mock HMAC only")
+        fallback = True
+    else:
+        if os.name == "nt" and elevated:
+            # GitHub Windows hosted runner may run elevated. The production
+            # peer gate MUST refuse it. Prove the actual OS denial before
+            # exercising HMAC over an isolated in-memory byte stream.
+            thread.join(6)
+            client.close()
+            assert not thread.is_alive(), "ELEVATED_PEER_DENIAL_THREAD_STUCK"
+            assert len(errors) == 1 and isinstance(errors[0], c.Denied)
+            assert str(errors[0]) == "IPC_PEER_DENIED"
+            server.close()
+            record_property("native_ipc", "OS_DENIED_ELEVATED_PEER; mock HMAC only")
+            fallback = True
+
+    if fallback:
         import queue
         class Memory(broker.Channel):
             def __init__(self, incoming, outgoing):
