@@ -336,7 +336,8 @@ def test_hostops_v3_hosted_queue_is_digest_only_without_host_execution():
     assert text.endswith(chr(10))
     assert 'name: AI Commerce HostOps v3 signed broker queue' in text
     assert 'run-name: "HostOpsV3 Issue #' in text
-    assert '  issues:' in text and '    types: [opened]' in text in text
+    assert '  issues:' in text
+    assert '    types: [opened]' in text
     assert '  contents: read' in text
     assert '    runs-on: ubuntu-latest' in text
     assert 'HOSTOPS_V3_QUEUED_UNVERIFIED' in text
