@@ -382,5 +382,15 @@
     "-q",
     "-n",
     "12"
+  ],
+  "mt01-a16-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_a16_settlement.py",
+    "tests/test_a16_commercial_review.py",
+    "-q",
+    "-n",
+    "12"
   ]
 }

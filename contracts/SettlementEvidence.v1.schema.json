@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-commerce:SettlementEvidence:v1",
+  "title": "SettlementEvidence.v1 — pre-implementation invalid contract",
+  "description": "Fail-closed placeholder; replace with real A16 typed schema using EF02 executor.",
+  "not": {}
+}

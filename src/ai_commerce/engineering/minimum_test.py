@@ -142,6 +142,17 @@ def approved_groups() -> tuple[TestGroup, ...]:
                              "src/ai_commerce/operations/registry.py"),
                   contracts=("work_items/A15-OPERATIONS-COST-001.json",
                              "docs/engineering/A15_IMPLEMENTATION_REPORT.md")),
+        # A16: pre-dispatch ownership only. The inert stubs do NOT prove commercial AC.
+        TestGroup("a16", ("tests/test_a16_settlement.py", "tests/test_a16_commercial_review.py"),
+                  ("A16.L05.E05.offline-settlement",),
+                  sources("settlement", "__init__ schemas evidence ledger review"),
+                  consumers=("src/ai_commerce/affiliate_attribution/evidence.py",
+                             "src/ai_commerce/affiliate_commerce/service.py",
+                             "src/ai_commerce/operations/cost_ledger.py"),
+                  contracts=("contracts/SettlementEvidence.v1.schema.json",
+                             "contracts/CommercialReview.v1.schema.json",
+                             "work_items/A16-SETTLEMENT-EVIDENCE-001.json",
+                             "docs/engineering/A16_IMPLEMENTATION_REPORT.md")),
         TestGroup("a05", ("tests/test_a05_composition.py", "tests/test_a05_render.py", "tests/test_a05_integration.py",
                           "tests/test_creative_asset_link_v11.py"), ("A05.composition-and-render",),
                   sources("composition", "__init__ _validation authoring compiler models sources store")
