@@ -276,6 +276,111 @@ def select_impact(
                     missing=tuple(sorted(selected_tests)), warnings=warnings, affected=affected)
 
 
+
+
+def validate_component_onboarding_manifest(
+    data: object, *, manifest_path: str, changed_paths: Sequence[str],
+    base_paths: Sequence[str], existing_groups: Sequence,
+    allowed_paths: Sequence[str], root: Path,
+) -> dict:
+    """V2.2 foundation: DATA-ONLY new-owner admission, not test execution authority.
+
+    Every newly owned source/test and its manifest must be added inside the
+    signed EF02 allowed_paths. An existing consumer can be referenced but
+    NEVER re-owned. No argv, import, glob, env or executable value is accepted.
+    CI/merge must independently replay these checks against an immutable base.
+    """
+    import hashlib
+    import json
+    import re
+
+    fields = {"schema_version", "component", "sources", "tests", "acs",
+              "consumers", "contracts"}
+    if type(data) is not dict or set(data) != fields:
+        raise ValueError("ONBOARD_MANIFEST_SHAPE")
+    if data["schema_version"] != "MT01ComponentOwner.v1":
+        raise ValueError("ONBOARD_SCHEMA_VERSION")
+    name = data["component"]
+    if type(name) is not str or not re.fullmatch(r"[a-z][a-z0-9_-]{1,63}", name):
+        raise ValueError("ONBOARD_COMPONENT_ID")
+    if manifest_path != f"work_items/mt01-components/{name}.json":
+        raise ValueError("ONBOARD_MANIFEST_LOCATION")
+    existing_names = {g.name for g in existing_groups}
+    if name in existing_names:
+        raise ValueError("ONBOARD_COMPONENT_ALREADY_OWNED")
+    changed, base, allowed = map(set, (changed_paths, base_paths, allowed_paths))
+    if manifest_path not in changed or manifest_path in base or manifest_path not in allowed:
+        raise ValueError("ONBOARD_MANIFEST_NOT_NEW_AND_AUTHORIZED")
+    if len(changed) != len(set(changed_paths)) or len(allowed) != len(allowed_paths):
+        raise ValueError("ONBOARD_DUPLICATE_PATH")
+    if not changed <= allowed:
+        raise ValueError("ONBOARD_CHANGED_OUT_OF_SCOPE")
+
+    items = {}
+    for key in ("sources", "tests", "acs", "consumers", "contracts"):
+        values = data[key]
+        minimum = 1 if key in {"sources", "tests", "acs"} else 0
+        if (type(values) is not list or not minimum <= len(values) <= 40
+                or any(type(v) is not str or not v or len(v) > 240 for v in values)
+                or len(values) != len(set(values))):
+            raise ValueError("ONBOARD_INVALID_" + key.upper())
+        items[key] = tuple(values)
+    sources, tests, acs = (items[key] for key in ("sources", "tests", "acs"))
+    consumers, contracts = items["consumers"], items["contracts"]
+    if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", ac) for ac in acs):
+        raise ValueError("ONBOARD_INVALID_AC")
+    for path in (*sources, *tests, *consumers, *contracts):
+        if not _valid(path):
+            raise ValueError("ONBOARD_UNSAFE_PATH")
+    if any(not (p.startswith("src/ai_commerce/") and p.endswith(".py")
+                and not p.startswith(("src/ai_commerce/engineering/",
+                                      "src/ai_commerce/remote/"))) for p in sources):
+        raise ValueError("ONBOARD_UNSAFE_SOURCE_FAMILY")
+    if any(not re.fullmatch(r"tests/test_[A-Za-z0-9_]+\.py", p) for p in tests):
+        raise ValueError("ONBOARD_UNSAFE_TEST_FAMILY")
+    if any(not p.startswith("contracts/") or not p.endswith(".schema.json")
+           for p in contracts):
+        raise ValueError("ONBOARD_UNSAFE_CONTRACT_FAMILY")
+    if any(not p.startswith("src/ai_commerce/") or not p.endswith(".py")
+           for p in consumers):
+        raise ValueError("ONBOARD_UNSAFE_CONSUMER_FAMILY")
+    existing_owned = set()
+    existing_tests = set()
+    for group in existing_groups:
+        existing_owned.update((*group.paths, *group.tests, *group.consumers, *group.contracts))
+        existing_tests.update(group.tests)
+    fresh = set(sources) | set(tests)
+    if fresh & (existing_owned | base) or not fresh <= (changed & allowed):
+        raise ValueError("ONBOARD_REOWN_OR_NOT_ADDED")
+    if set(tests) & existing_tests:
+        raise ValueError("ONBOARD_EXISTING_TEST")
+    if any(p not in existing_owned and p not in sources for p in consumers):
+        raise ValueError("ONBOARD_CONSUMER_UNPROVEN")
+    if any(p not in existing_owned and (p not in changed or p in base or p not in allowed)
+           for p in contracts):
+        raise ValueError("ONBOARD_CONTRACT_UNPROVEN")
+    root = root.resolve()
+    for path in (manifest_path, *fresh, *contracts):
+        target = root / path
+        if (not target.is_file() or target.is_symlink()
+                or root not in target.resolve().parents):
+            raise ValueError("ONBOARD_FILE_MISSING_OR_LINK")
+        ancestor = target.parent
+        while ancestor != root:
+            if ancestor.is_symlink():
+                raise ValueError("ONBOARD_UNSAFE_PARENT_LINK")
+            ancestor = ancestor.parent
+    payload = json.dumps(data, ensure_ascii=True, sort_keys=True,
+                         separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return {
+        "name": name, "manifest_path": manifest_path,
+        "manifest_sha256": hashlib.sha256(payload).hexdigest(),
+        "paths": sources, "tests": tests, "acs": acs,
+        "consumers": consumers, "contracts": contracts,
+        "status": "VALIDATED_DATA_ONLY_NOT_VERIFICATION_PASS",
+    }
+
+
 def registered_action_plan(
     *, repo: Path, base_sha: str, base_files, candidate_files,
     changed_paths: Sequence[str], required_acs: Sequence[str], fallback_argv,
