@@ -68,6 +68,9 @@ REVIEWED_CONTROL_TESTS = {
     ".github/scripts/pr-merge-gate.py": (
         "tests/test_pr_merge_gate.py", "tests/test_minimum_test.py"),
     ".github/workflows/brain-pass-auto-merge.yml": ("tests/test_pr_merge_gate.py",),
+    # Reviewed hosted queue ONLY: no broker token, checkout or laptop job.
+    ".github/workflows/hostops-v3.yml":
+        ("tests/test_hostops_v3_integration.py", "tests/test_pr_merge_gate.py"),
     # Retired workflow must remain recognized for this one deletion diff.
     ".github/workflows/human-merge-queue.yml": ("tests/test_pr_merge_gate.py",),
     ".github/workflows/ef02-batch.yml": (
