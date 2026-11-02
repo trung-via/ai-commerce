@@ -27,7 +27,8 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
                        changed_paths=changed_paths, required_acs=required_acs, fallback_argv=fallback_argv,
                        groups=groups, registered_only=registered_only, aggregate_sources=aggregate_sources,
                        registered_profiles=registered_profiles,
-                       human_full_suite_authorized=human_full_suite_authorized)
+                       human_full_suite_authorized=human_full_suite_authorized,
+                       allowed_paths=allowed_paths)
     if command_transform:
         for entry in plan["groups"]:
             argv, decision = command_transform(entry["binding"]["argv"], entry["group"])
