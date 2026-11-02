@@ -99,12 +99,12 @@ def preview_next_turn(session: dict) -> dict:
     aliases = {"BRAIN": "AI Commerce Brain",
                "ENGINEERING": "AI Commerce Engineering Workflow"}
     jobs = (
-        "Read current GitHub evidence; decide bounded Engineering review scope only.",
-        "Read GitHub and review the approved issue scope only. No writes/dispatch.",
-        "Read Engineering evidence; make final HOLD or READY_FOR_HUMAN decision.",
+        "Brain Sync against current GitHub evidence; decide bounded Engineering scope and handoff.",
+        "Engineering: inspect current GitHub, perform only previously Human-authorized work, Verify-Fix and report evidence.",
+        "Brain: reconcile real Engineering evidence; decide HOLD, READY_FOR_HUMAN or next approved action.",
     )
     prompt = "\n".join((
-        "[AI COMMERCE D5 EXPLICIT HANDOFF — PREVIEW / NOT SENT]",
+        "[AI COMMERCE D5 EXPLICIT ROLE HANDOFF]",
         "handoff_id: " + state["handoff_id"],
         "repository: " + state["repository"],
         "issue_number: " + str(state["issue_number"]),
@@ -113,7 +113,7 @@ def preview_next_turn(session: dict) -> dict:
         "required_role: " + role,
         jobs[index],
         "Do not infer host invocation from this text or a blue plugin chip.",
-        "Do not merge, dispatch EF02, create Wake, retry old events or Send a second turn.",
+        "Do not merge, dispatch new EF02, create Wake or retry UNKNOWN without separate Human authorization. Do not Send a second turn.",
     ))
     return {"turn_index": index, "role": role,
             "plugin_alias_for_operator_selection": aliases[role],
