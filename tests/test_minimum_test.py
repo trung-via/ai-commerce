@@ -112,7 +112,23 @@ def test_companion_report_has_exact_reviewed_parallel_commands(real_tree):
     for key, historical_argv in proposed.items():
         if key not in current:
             continue
-        if key == "mt01-ef02-recovery-tests":
+        if key == "mt01-ef02-wake-tests":
+            # Reviewed D5-only extension: all older Wake tests remain.
+            live_tests = current[key][3:-3]
+            historical_tests = historical_argv[3:-3]
+            assert current[key][:3] == historical_argv[:3]
+            assert current[key][-3:] == historical_argv[-3:]
+            assert all(path in live_tests for path in historical_tests)
+            assert [p for p in live_tests if p not in historical_tests] == [
+                "tests/test_ef02_plugin_turn_handoff.py",
+                "tests/test_ef02_plugin_turn_store.py",
+                "tests/test_ef02_plugin_turn_stage_only.py",
+                "tests/test_ef02_plugin_turn_send_once.py",
+                "tests/test_ef02_plugin_turn_cli.py",
+                "tests/test_ef02_plugin_turn_evidence.py",
+            ]
+            assert len(live_tests) == len(set(live_tests))
+        elif key == "mt01-ef02-recovery-tests":
             # Preserve the dated MT-01 report; only deleted M0-R probe-only
             # tests may disappear from its historical recovery selection.
             historical_tests = historical_argv[3:-3]

@@ -183,7 +183,8 @@ def send_one(*, event: dict, report: dict, workflow_id: int,
             origin_attestation=hint, registry_path=registry_path,
             idempotency_path=idempotency_path, repository_root=repository_root,
             origin_authority=origin, artifact_authority=artifact,
-            adapter=adapter if adapter is not None else LocalChromeDoorbellAdapter(allow_submit=True),
+            adapter=adapter if adapter is not None else LocalChromeDoorbellAdapter(
+                allow_submit=True, preload_exact_chat=True),
         )
     except LocalWakeConfigError:
         raise

@@ -1414,3 +1414,16 @@ def test_authority_must_return_explicit_true(accepted):
     event, result = make_event()
     with pytest.raises(ProvenanceError, match="PROVENANCE_UNVERIFIED"):
         verify_provenance(event, result, make_provenance(), authority=NonVerifier())
+
+
+def test_d2_preload_codes_are_explicitly_safe_failure_diagnostics():
+    from ai_commerce.remote.wake_adapter import _OUTCOME_CODES
+    expected = {
+        "PRELOAD_ROUTE_INVALID", "PRELOAD_ROUTE_CHANGED",
+        "PRELOAD_EXACT_CHAT_AMBIGUOUS", "PRELOAD_CONTEXT_AMBIGUOUS",
+        "PRELOAD_NAVIGATION_UNKNOWN", "PRELOAD_NAVIGATION_UNVERIFIED",
+        "PRELOAD_CDP_UNAVAILABLE", "PRELOAD_UNAVAILABLE",
+    }
+    assert expected <= _OUTCOME_CODES
+    assert "EXACT_CHAT_OPENED" not in _OUTCOME_CODES
+    assert "EXACT_CHAT_PRESENT" not in _OUTCOME_CODES
