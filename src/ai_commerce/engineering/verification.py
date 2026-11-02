@@ -8,7 +8,7 @@ import subprocess
 import time
 from typing import Callable, Mapping
 
-from .minimum_test import Evidence, apply_evidence, canonical, file_hashes, select_plan, pytest_counts
+from .minimum_test import Evidence, apply_evidence, canonical, file_hashes, select_plan, pytest_counts, select_provisional_tests
 from .pytest_profile import require_managed_parallelism, registered_workers
 
 
@@ -33,6 +33,14 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
             entry["binding"]["argv"] = argv
             entry["pytest_profile"] = decision
             entry["binding"]["pytest_profile"] = {k: decision[k] for k in ("profile", "workers", "host_slots")}
+    # A provisional test family is only a diagnostic preflight. An actual
+    # candidate PASS still requires the final, exact registered full profile.
+    provisional = (select_provisional_tests(
+        base_files=base_files, candidate_files=before,
+        changed_paths=changed_paths, plan=plan, fallback_argv=fallback_argv)
+        if registered_only else None)
+    if provisional is not None:
+        plan["provisional_mapping"] = provisional
     apply_evidence(plan, prior, output_dir)
     plan["started_at"] = started_at
     plan["selection_seconds"] = time.monotonic() - started_plan
@@ -72,6 +80,69 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
                 execution_status="12_WORKERS_EXECUTED" if actual == 12
                 else "12_WORKERS_NOT_EXECUTED" if entry["pytest_profile"]["workers"] == 0
                 else "WORKER_COUNT_UNPROVEN")
+    # Run provisional tests BEFORE expensive broad regression. A nonzero
+    # determinate result must lead to bounded Verify-Fix without falsely
+    # claiming a failed/successful registered verification. Unproven
+    # infrastructure or source drift stops both preflight and full suite.
+    if provisional is not None:
+        argv = provisional["argv"]
+        started = time.monotonic()
+        try:
+            remaining = verify_deadline - started
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(argv, timeout_seconds)
+            response = subprocess.run(argv, cwd=repo, capture_output=True,
+                                      text=True, encoding="utf-8", errors="replace",
+                                      timeout=remaining, check=False)
+            out, err = response.stdout.encode(), response.stderr.encode()
+        except subprocess.TimeoutExpired as exc:
+            out = exc.stdout if isinstance(exc.stdout, bytes) else (exc.stdout or "").encode()
+            err = exc.stderr if isinstance(exc.stderr, bytes) else (exc.stderr or "").encode()
+            save("mt01_provisional_stdout", "mt01.provisional.stdout.log", out)
+            save("mt01_provisional_stderr", "mt01.provisional.stderr.log", err)
+            provisional.update(result="UNPROVEN", reason="PROVISIONAL_TIMEOUT",
+                               actual_exit_code=None)
+            finish()
+            raise subprocess.TimeoutExpired(argv, timeout_seconds, out, err) from exc
+        except OSError:
+            provisional.update(result="UNPROVEN", reason="PROVISIONAL_LAUNCH_ERROR",
+                               actual_exit_code=None)
+            finish()
+            raise
+        save("mt01_provisional_stdout", "mt01.provisional.stdout.log", out)
+        save("mt01_provisional_stderr", "mt01.provisional.stderr.log", err)
+        current = file_hashes(repo)
+        observed = re.search(rb"\b([0-9]+) workers \[|created:\s*([0-9]+)/[0-9]+ workers", out)
+        workers = int(observed[1] or observed[2]) if observed else None
+        provisional.update(actual_exit_code=response.returncode,
+                           wall_seconds=time.monotonic()-started,
+                           tests_executed=pytest_counts(out), workers_requested=12,
+                           workers_actual=workers)
+        if current != before:
+            provisional.update(result="UNPROVEN", reason="PROVISIONAL_SOURCE_DRIFT")
+            finish()
+            raise RuntimeError("MT01_SOURCE_DRIFT_DURING_VERIFICATION")
+        diag = (out + b"\n" + err).decode("utf-8", "replace").lower()
+        if workers not in (None, 12) or any(s in diag for s in (
+                "internalerror", "worker crashed", "workers crashed",
+                "permission denied", "memoryerror", "can't start new thread",
+                "failed to start worker", "error while receiving from worker")):
+            provisional.update(result="UNPROVEN", reason="PROVISIONAL_INFRASTRUCTURE_ERROR")
+            finish()
+            return subprocess.CompletedProcess(fallback_argv, 3, out.decode("utf-8","replace"),
+                                               err.decode("utf-8","replace")), plan
+        if response.returncode == 1 and re.search(
+                rb"(?m)^FAILED\s|^=+ FAILURES =+|\b[1-9][0-9]* failed\b", out + b"\n" + err):
+            provisional.update(result="FAIL", reason="PROVISIONAL_TEST_FAILED")
+            finish()
+            return subprocess.CompletedProcess(fallback_argv, 1, out.decode("utf-8","replace"),
+                                               err.decode("utf-8","replace")), plan
+        if response.returncode != 0 or not re.search(rb"\b[1-9][0-9]* passed\b", out):
+            provisional.update(result="UNPROVEN", reason="PROVISIONAL_NO_VALID_PYTEST_PASS")
+            finish()
+            return subprocess.CompletedProcess(fallback_argv, 3, out.decode("utf-8","replace"),
+                                               err.decode("utf-8","replace")), plan
+        provisional["result"] = "PASS_PREFLIGHT_ONLY"
     # Shared verify budget, not a fresh timeout per test group.
     for index, entry in enumerate(plan["groups"]):
         if entry["state"] == "REUSE":

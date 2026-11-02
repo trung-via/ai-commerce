@@ -16,6 +16,7 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import subprocess
 import sys
 from typing import Iterable, Mapping, Sequence
 
@@ -68,6 +69,43 @@ class TestGroup:
 
     def mapping(self) -> dict:
         return {key: list(getattr(self, key)) for key in ("tests", "acs", "paths", "consumers", "contracts")}
+
+
+def reviewed_test_registration(repo: Path, files: Mapping[str, str],
+                               groups: Sequence[TestGroup]) -> dict[str, list[str]]:
+    """Distinguish uncommitted onboarding tests from committed mapping drift.
+
+    New tests in an EF01 working tree must be executed via MT-01's registered
+    FULL fallback, but cannot amend protected approved_groups or the profile
+    registry within an unrelated component's allowed_paths. Conversely, a test
+    already committed to the source HEAD needs a reviewed mapping: this stops
+    incomplete companion registration at PR/main integration time.
+
+    The Git tree is the immutable source-of-truth here; the mutable Git index
+    and working tree must never decide which tests are "reviewed".
+    """
+    proc = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", "-z", "HEAD"],
+        cwd=repo, capture_output=True, check=False,
+    )
+    if proc.returncode:
+        raise ValueError("MT01_COMMITTED_TREE_UNAVAILABLE")
+    try:
+        committed = {p.decode("utf-8") for p in proc.stdout.split(b"\0") if p}
+    except UnicodeDecodeError as exc:
+        raise ValueError("MT01_COMMITTED_TREE_INVALID_ENCODING") from exc
+    mapped = {p for group in groups for p in group.tests}
+    exception = {"tests/test_ef02_mt01_registry.py"}
+    present = {p for p in files if p.startswith("tests/test_") and p.endswith(".py")}
+    unregistered = present - mapped - exception
+    pending = unregistered - committed
+    return {
+        "unregistered_committed": sorted(unregistered & committed),
+        "pending_new_tests": sorted(pending),
+        "unsafe_new_tests": sorted(
+            p for p in pending if str(files[p]).startswith("SYMLINK:")
+        ),
+    }
 
 
 def approved_groups() -> tuple[TestGroup, ...]:
@@ -179,12 +217,6 @@ def approved_groups() -> tuple[TestGroup, ...]:
         TestGroup("diagnostics", ("tests/test_ef01_agy_diagnostics.py", "tests/test_ef02_authoring_preflight.py"),
                   ("EF01.provider-diagnostics",), (eng + "runner.py", rem + "authoring_preflight.py"),
                   consumers=("scripts/EF02-Authoring-Preflight.py",)),
-        TestGroup("hostops", ("tests/test_hostops_request.py",), ("HOSTOPS.readonly-diagnostics",),
-                  ("scripts/hostops_request.py", "scripts/HostOps-Diagnostics.ps1"),
-                  contracts=(".github/workflows/hostops-readonly.yml",
-                             "docs/engineering/HOSTOPS_REMOTE_POWERSHELL_V1.md")),
-        TestGroup("hostops-v2", ("tests/test_hostops_v2.py",), ("HOSTOPS.v2-contracts",),
-                  ("scripts/hostops_v2.py",)),
         TestGroup("git-integrity", ("tests/test_git_byte_consistency.py", "tests/test_ef02_worktree_line_endings.py",
                                     "tests/test_ef01_git_write_guard.py"), ("EF01.git-integrity",),
                   (eng + "git_byte_consistency.py", eng + "git_write_guard.py")),
@@ -194,6 +226,10 @@ def approved_groups() -> tuple[TestGroup, ...]:
             "test_ef02_m0r_real_e2e_interruption", "test_ef02_m0r_windows_boundary_probe", "test_ef02_m0r_worker_os_kill",
             "test_ef02_github_read_retry")), ("EF02.recovery",),
                   (rem + "worker.py", rem + "transport.py", rem + "github_read_retry.py")),
+        TestGroup("hostops-v1", ("tests/test_hostops_request.py",), ("HOSTOPS.v1.readonly",),
+                  ("scripts/hostops_request.py",)),
+        TestGroup("hostops-v2", ("tests/test_hostops_v2.py",), ("HOSTOPS.v2.typed-operations",),
+                  ("scripts/hostops_v2.py",)),
         TestGroup("ef02-wake", tuple("tests/" + name + ".py" for name in (
             "test_ef02_wake_d1", "test_ef02_wake_d2", "test_ef02_cdp_doorbell", "test_ef02_plugin_selection_probe", "test_ef02_plugin_turn_handoff", "test_ef02_plugin_turn_store", "test_ef02_plugin_turn_stage_only", "test_ef02_plugin_turn_send_once", "test_ef02_plugin_turn_cli", "test_ef02_plugin_turn_evidence", "test_ef02_d3_github_artifact_authority",
             "test_ef02_d3_signed_origin_consent", "test_ef02_d3_two_grant_delivery", "test_ef02_d5_chrome_acquisition",
@@ -438,6 +474,70 @@ def select_plan(*, repo: Path, base_sha: str, base_files: Mapping[str, str],
             "fallback_profile": fallback_profile, "fallback_argv": list(fallback_argv),
             "narrow_execution_observed": False,
             "fallback": bool(reasons), "aggregate_sources": list(aggregate_sources), "groups": entries}
+
+
+def select_provisional_tests(*, base_files: Mapping[str, str],
+                             candidate_files: Mapping[str, str],
+                             changed_paths: Sequence[str], plan: dict,
+                             fallback_argv: Sequence[str]) -> dict | None:
+    """Attempt-local, non-authoritative test preflight for a new component.
+
+    Never changes approved_groups, registered profiles or the final MT-01
+    verification binding. Run only new tests and impacted consumer tests from
+    the actual candidate import graph, in a tightly bounded pytest command.
+    Success is diagnostic only; final registered broad verification remains
+    mandatory. Missing or unsafe provenance returns None (full suite only).
+    """
+    full = list(fallback_argv)
+    if (full not in (["python", "-m", "pytest", "tests", "-q", "-n", "12"],
+                     ["py", "-m", "pytest", "tests", "-q", "-n", "12"]) or
+            not plan.get("fallback") or plan.get("aggregate_sources") or
+            plan.get("unsupported_paths")):
+        return None
+    changed = set(changed_paths)
+    if not changed or any(p not in candidate_files for p in changed):
+        return None
+    tests = sorted(p for p in changed if p.startswith("tests/test_") and p.endswith(".py"))
+    if not tests or len(tests) > 24 or any(p in base_files for p in tests):
+        return None
+    new_sources = sorted(p for p in changed if p.startswith("src/ai_commerce/") and p.endswith(".py"))
+    if not new_sources or any(p in base_files for p in new_sources):
+        return None
+    # An onboarding patch cannot also modify an existing shared module, test,
+    # workflow or configuration. Use the ordinary registered full suite then.
+    package = {p.split("/")[2] for p in new_sources}
+    if len(package) != 1 or package == {"__init__.py"}:
+        return None
+    permitted = set(new_sources) | set(tests)
+    permitted.update(p for p in changed if p.startswith("contracts/") and p.endswith(".schema.json"))
+    permitted.update(p for p in changed if p.startswith("docs/engineering/") and p.endswith(".md"))
+    if changed - permitted:
+        return None
+    if not set(tests) <= set(plan.get("unknown_tests", ())):
+        return None
+    affected = set(plan.get("affected_paths", ()))
+    consumer_tests = sorted(p for p in affected if p.startswith("tests/test_") and
+                            p.endswith(".py") and p in candidate_files)
+    selected = sorted(set(tests) | set(consumer_tests))
+    if not selected or len(selected) > 24:
+        return None
+    if any(str(candidate_files[p]).startswith("SYMLINK:") or
+           (not re.fullmatch(r"tests/test_[A-Za-z0-9_]+\.py", p))
+           for p in selected):
+        return None
+    return {
+        "kind": "MT01_PROVISIONAL_PREFLIGHT_ONLY",
+        "test_paths": selected,
+        "new_tests": tests,
+        "consumer_tests": sorted(set(selected) - set(tests)),
+        "source_package": next(iter(package)),
+        "candidate_sha256": {p: candidate_files[p] for p in selected},
+        "argv": [*full[:3], *selected, "-q", "-n", "12"],
+        "registered_final_argv": full,
+        "reason": "NEW_UNCOMMITTED_COMPONENT_TESTS_REQUIRE_EARLY_TRIAGE",
+        "result": "NOT_RUN",
+        "authoritative": False,
+    }
 
 
 def apply_evidence(plan: dict, prior: Mapping[str, Evidence], evidence_root: Path) -> None:

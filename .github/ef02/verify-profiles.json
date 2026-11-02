@@ -236,24 +236,6 @@
     "-n",
     "12"
   ],
-  "mt01-hostops-tests": [
-    "python",
-    "-m",
-    "pytest",
-    "tests/test_hostops_request.py",
-    "-q",
-    "-n",
-    "12"
-  ],
-  "mt01-hostops-v2-tests": [
-    "python",
-    "-m",
-    "pytest",
-    "tests/test_hostops_v2.py",
-    "-q",
-    "-n",
-    "12"
-  ],
   "mt01-git-integrity-tests": [
     "python",
     "-m",
@@ -327,6 +309,24 @@
     "tests/test_a13_claim_rights.py",
     "tests/test_a13_link.py",
     "tests/test_a13_evidence_pack.py",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "mt01-hostops-v1-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_hostops_request.py",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "mt01-hostops-v2-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_hostops_v2.py",
     "-q",
     "-n",
     "12"
