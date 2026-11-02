@@ -12,7 +12,7 @@ from ai_commerce.remote.wake_readiness_bootstrap import (
 )
 
 
-def test_private_directory(path):
+def _provision_private_directory(path):
     """Use REAL owner SID/DACL on Windows, as the existing D5 tests do."""
     path.mkdir(mode=0o700)
     if os.name == "nt":
@@ -29,7 +29,7 @@ def test_private_directory(path):
     return path
 
 
-def test_private_file(path):
+def _provision_private_file(path):
     path.write_text("{}", encoding="utf-8")
     if os.name == "posix":
         path.chmod(0o600)
@@ -43,14 +43,14 @@ def test_private_file(path):
 
 @pytest.fixture
 def fixture(tmp_path):
-    root = test_private_directory(tmp_path / "AI-Commerce")
+    root = _provision_private_directory(tmp_path / "AI-Commerce")
     checkout = tmp_path / "checkout"
     checkout.mkdir(mode=0o700)
     c = root / "chrome.json"
     ledger = root / "ledger.json"
     reg = root / "registry.json"
     for path in (c, ledger, reg):
-        test_private_file(path)
+        _provision_private_file(path)
 
     class Store:
         phase = "READY"
@@ -152,7 +152,7 @@ def test_missing_private_root_is_not_created_implicitly(tmp_path, fixture):
 def test_reject_private_inputs_inside_checkout(fixture):
     params, root, _ = fixture
     fake = params["checkout"] / "bad-registry.json"
-    test_private_file(fake)
+    _provision_private_file(fake)
     params["registry"] = fake
     with pytest.raises(SetupBlocked, match="PRIVATE_INPUT_INSIDE_REPO"):
         provision(**params)
