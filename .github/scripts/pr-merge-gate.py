@@ -265,8 +265,8 @@ def review_existing_owner_source_additions(main_source: str, candidate_source: s
             continue
         if (len(before.args) != len(after.args)
                 or len(before.args) < 4
-                or ast.dump(before.keywords, include_attributes=False) !=
-                   ast.dump(after.keywords, include_attributes=False)
+                or [ast.dump(x, include_attributes=False) for x in before.keywords] !=
+                   [ast.dump(x, include_attributes=False) for x in after.keywords]
                 or any(ast.dump(x, include_attributes=False) !=
                        ast.dump(y, include_attributes=False)
                        for i, (x, y) in enumerate(zip(before.args, after.args)) if i != 3)):
