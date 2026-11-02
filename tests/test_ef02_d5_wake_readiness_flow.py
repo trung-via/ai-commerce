@@ -71,6 +71,7 @@ def test_normal_ready_reuses_existing_owned_chrome_without_launch_or_send():
     assert result["chrome"] == "VERIFIED_9333"
     assert result["chat"] == "EXACT_CHAT_PRESENT"
     assert result["wake_sent"] is False
+    assert result["auto_repaired"] == []
     assert result["host_plugin_invocation_proven"] is False
     assert c.calls == [False]
     assert p.open_calls == 0
@@ -144,6 +145,7 @@ def test_exact_chat_open_is_bounded_one_operator_authorized_preload():
     r = f.execute(opt_in_launch=True, opt_in_open_chat=True)
     assert r["status"] == "READY_FOR_PREPARE"
     assert r["launched"] is True
+    assert r["auto_repaired"] == ["CHROME_LAUNCHED", "EXACT_CHAT_PRELOADED"]
     assert p.open_calls == 1
     assert p.inspections == 2
     assert c.calls == [True]
@@ -156,6 +158,7 @@ def test_ambiguous_preload_blocks_without_retries_or_send():
     f, _, c = flow(panel=p)
     r = f.execute(opt_in_launch=True, opt_in_open_chat=True)
     assert r["code"] == "EXACT_CHAT_PRELOAD_PRELOAD_NAVIGATION_UNKNOWN"
+    assert r["next_action"] == "RECONCILE_NO_RETRY"
     assert r["wake_sent"] is False
     assert p.open_calls == 1
     assert p.inspections == 1
@@ -193,3 +196,12 @@ def test_warm_wake_reads_fresh_main_only_once():
     assert r["status"] == "READY_FOR_PREPARE"
     assert r["verification"] == "FULL_ACQUISITION"
     assert len(calls) == 1
+
+
+def test_unsafe_chrome_profile_claim_is_reconciliation_only():
+    f, p, c = flow(chrome=FakeChrome(error="PROFILE_ALREADY_ACTIVE_NO_CDP"))
+    result = f.execute(opt_in_launch=True, opt_in_open_chat=True)
+    assert result["status"] == "BLOCKED"
+    assert result["next_action"] == "RECONCILE_NO_RETRY"
+    assert c.calls == [True]
+    assert p.open_calls == 0
