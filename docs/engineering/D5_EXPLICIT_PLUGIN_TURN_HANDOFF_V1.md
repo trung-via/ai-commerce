@@ -2,6 +2,40 @@
 
 Status: **ported implementation candidate for operator-controlled CDP 9333 operation; no live activation from GitHub CI**. Context: Issue #181, 2026-11-02.
 
+## Operator use — single existing enrolled chat, no Work or MCP (2026-11-02)
+
+This is the production-candidate **Windows local CDP** route, not a ChatGPT Work task. It reuses the three previously observed UI role turns (Brain, Engineering, Brain). It deliberately does **not** run unattended browser sends or silently switch plugin roles; no new chip UI acceptance experiment is requested.
+
+Prerequisites: checkout from an approved, reviewed commit; an authenticated Chrome 9333 session with a separately enrolled exact-chat route registry; a private directory **outside** the Git repository provisioned with the existing D5 owner/SID/DACL rules; GitHub CLI `gh` authenticated for read access. Never copy any private registry, chat URL, browser cookies, user message, or bearer token into a GitHub Issue/PR.
+
+The commands below are templates. Substitute only operator-owned pre-enrolled paths and a freshly verified main SHA. **Do not reuse events #161, #177 or #179** or mutate the historical private ledger.
+
+```powershell
+$common = @("--checkout", "<approved-checkout>", "--state-file", "<private-turn-ledger>")
+$route = @("--registry", "<pre-enrolled-route-registry>", "--route-id", "<existing-exact-route-id>")
+
+# One NEW, authorized session (requires Human CREATE-D5-PRIVATE-LEDGER token)
+python -m ai_commerce.remote.plugin_turn_cli @common --mode create-ledger --issue-number 181 --source-sha <fresh-40hex-main>
+
+# Repeat ONLY for a READY turn: Brain index 0, Engineering index 1, Brain index 2
+python -m ai_commerce.remote.plugin_turn_cli @common --mode preview
+python -m ai_commerce.remote.plugin_turn_cli @common @route --mode prepare-turn
+# Check staged @ chip and complete exact text, then explicitly consent one Send
+python -m ai_commerce.remote.plugin_turn_cli @common @route --mode send-once --enable-send-once
+# STOP: SUBMISSION_UNKNOWN until actual UI reply is independently observed.
+# Publish an exact-form, trusted-author observation packet to the bound GitHub Issue
+# and confirm the UI reply yourself; never infer independent plugin call from chip alone.
+python -m ai_commerce.remote.plugin_turn_cli @common --mode observe-reply --comment-ref <exact-issuecomment-url> --expected-author-id <pinned-author-numeric-id>
+```
+
+- `prepare-turn` selects the expected **one** @ plugin chip using CDP and types exactly the next prepared role prompt. It **never sends**. Any extra draft, ambiguous chip, route change, active generation, or failed exact-draft guard stops for manual cleanup.
+- `send-once` rechecks exact chat, current main SHA, private state and complete draft, then atomically records `SUBMISSION_UNKNOWN` **before** clicking Send once. Its result remains UNKNOWN even if a button click was observed. It returns nonzero intentionally; do not retry or loop it.
+- `observe-reply` is an independent Human UI + trusted GitHub evidence reconciliation only. It requires a current matching SHA, a Human token, an authentic JSON comment authored by the pinned GitHub account and an unchanged private ledger. It then advances to the next role or `COMPLETE_UI_ONLY`; this does not establish a ChatGPT host-native plugin receipt. `expected_observation_packet(session)` provides the exact schema for the authorized public observation comment; do not publish private chat contents.
+- Human authorization for new EF02 tasks, model spending, merges, writes or provider calls is **separate**. The text of a GitHub comment is never authorization to execute.
+- The existing EF02 completion artifact is a grounded input to Brain, **not** an automatic browser Send command. This patch neither sends a historical Wake nor adds a new implicit GitHub Actions watcher.
+
+**Activation condition:** This PR must first pass exact-head CI/review and receive separate Human approval to merge/deploy. Existing saved D5 UI-only 3/3 results remain accepted without rerunning Chrome tests; the code change requires ordinary unit/contract CI only.
+
 ## Evidence and decision
 
 - Human-confirmed Chrome CDP chip staging: **Brain-only**, **Engineering-only**, and **dual** all show the correct blue chips (3/3 UI PASS). This **does not** prove native host plugin invocation.
