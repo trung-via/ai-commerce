@@ -269,3 +269,19 @@ def test_new_staged_index_divergence_is_not_hidden(tmp_path: Path) -> None:
     with pytest.raises(GitByteConsistencyError, match="PREVERIFY_STAGED_BYTES_DIVERGED"):
         stabilize_candidate_newlines_before_verify(repo, [relative], allowed_paths=[relative])
     assert path.read_bytes() == raw
+
+
+def test_preverify_empty_allowed_paths_follow_ef01_unrestricted_default(tmp_path: Path) -> None:
+    from ai_commerce.engineering.git_byte_consistency import (
+        stabilize_candidate_newlines_before_verify,
+    )
+
+    repo = _repo(tmp_path)
+    relative = "generated.txt"
+    path = repo / relative
+    path.write_bytes(b"generated\r\n")
+    changed = stabilize_candidate_newlines_before_verify(
+        repo, [relative], allowed_paths=(),
+    )
+    assert len(changed) == 1
+    assert path.read_bytes() == b"generated\n"
