@@ -62,6 +62,7 @@ jobs:
             --source-sha "$GITHUB_SHA" --is-private "$HOSTOPS_PRIVATE" \
             --output hostops-v2-validated.json
       - name: Export immutable payload
+        if: always() && steps.privacy.outputs.private == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: hostops-v2-request-${{ github.run_id }}
