@@ -16,6 +16,7 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import subprocess
 import sys
 from typing import Iterable, Mapping, Sequence
 
@@ -68,6 +69,43 @@ class TestGroup:
 
     def mapping(self) -> dict:
         return {key: list(getattr(self, key)) for key in ("tests", "acs", "paths", "consumers", "contracts")}
+
+
+def reviewed_test_registration(repo: Path, files: Mapping[str, str],
+                               groups: Sequence[TestGroup]) -> dict[str, list[str]]:
+    """Distinguish uncommitted onboarding tests from committed mapping drift.
+
+    New tests in an EF01 working tree must be executed via MT-01's registered
+    FULL fallback, but cannot amend protected approved_groups or the profile
+    registry within an unrelated component's allowed_paths. Conversely, a test
+    already committed to the source HEAD needs a reviewed mapping: this stops
+    incomplete companion registration at PR/main integration time.
+
+    The Git tree is the immutable source-of-truth here; the mutable Git index
+    and working tree must never decide which tests are "reviewed".
+    """
+    proc = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", "-z", "HEAD"],
+        cwd=repo, capture_output=True, check=False,
+    )
+    if proc.returncode:
+        raise ValueError("MT01_COMMITTED_TREE_UNAVAILABLE")
+    try:
+        committed = {p.decode("utf-8") for p in proc.stdout.split(b"\0") if p}
+    except UnicodeDecodeError as exc:
+        raise ValueError("MT01_COMMITTED_TREE_INVALID_ENCODING") from exc
+    mapped = {p for group in groups for p in group.tests}
+    exception = {"tests/test_ef02_mt01_registry.py"}
+    present = {p for p in files if p.startswith("tests/test_") and p.endswith(".py")}
+    unregistered = present - mapped - exception
+    pending = unregistered - committed
+    return {
+        "unregistered_committed": sorted(unregistered & committed),
+        "pending_new_tests": sorted(pending),
+        "unsafe_new_tests": sorted(
+            p for p in pending if str(files[p]).startswith("SYMLINK:")
+        ),
+    }
 
 
 def approved_groups() -> tuple[TestGroup, ...]:
