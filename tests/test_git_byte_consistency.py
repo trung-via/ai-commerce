@@ -225,3 +225,47 @@ def test_existing_json_evidence_crlf_stays_raw(tmp_path: Path) -> None:
     assert stabilize_candidate_newlines_before_verify(
         repo, ["evidence.json"], allowed_paths=["evidence.json"]) == []
     assert path.read_bytes() == raw
+
+
+def test_new_staged_crlf_txt_stabilized_without_rejecting_index(tmp_path: Path) -> None:
+    """Regression: #204 Windows Git Write Guard stages a newly created .txt."""
+    from ai_commerce.engineering.git_byte_consistency import (
+        stabilize_candidate_newlines_before_verify,
+    )
+
+    repo = _repo(tmp_path)
+    relative = "consumer-tests.txt"
+    path = repo / relative
+    original = b"consumer\r\nstatus=PASS\r\n"
+    path.write_bytes(original)
+    _git(repo, "add", relative)
+    staged = _git(repo, "rev-parse", ":" + relative).strip()
+    assert staged == _git(repo, "hash-object", "--stdin", data=original.replace(b"\r\n", b"\n")).strip()
+    edits = stabilize_candidate_newlines_before_verify(
+        repo, [relative], allowed_paths=[relative]
+    )
+    assert len(edits) == 1 and edits[0]["path"] == relative
+    assert path.read_bytes() == b"consumer\nstatus=PASS\n"
+    assert _git(repo, "rev-parse", ":" + relative).strip() == staged
+    assert_candidate_git_filter_consistency(repo, [(relative, path.read_bytes(), "100644")])
+    _git(repo, "commit", "-m", "source from staged candidate")
+    checkout = tmp_path / "next"
+    _git(repo, "worktree", "add", "--detach", str(checkout), "HEAD")
+    assert checkout_diagnostics(checkout, refresh_index=True)["clean"]
+
+
+def test_new_staged_index_divergence_is_not_hidden(tmp_path: Path) -> None:
+    from ai_commerce.engineering.git_byte_consistency import (
+        stabilize_candidate_newlines_before_verify,
+    )
+
+    repo = _repo(tmp_path)
+    relative = "changed.txt"
+    path = repo / relative
+    path.write_bytes(b"old staged\r\n")
+    _git(repo, "add", relative)
+    raw = b"latest worktree\r\n"
+    path.write_bytes(raw)
+    with pytest.raises(GitByteConsistencyError, match="PREVERIFY_STAGED_BYTES_DIVERGED"):
+        stabilize_candidate_newlines_before_verify(repo, [relative], allowed_paths=[relative])
+    assert path.read_bytes() == raw
