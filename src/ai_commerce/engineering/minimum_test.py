@@ -457,7 +457,8 @@ def select_plan(*, repo: Path, base_sha: str, base_files: Mapping[str, str],
                 groups: Sequence[TestGroup] | None = None, registered_only: bool = False,
                 aggregate_sources: Sequence[str] = (), env: dict | None = None,
                 registered_profiles: Mapping[str, Sequence[str]] | None = None,
-                human_full_suite_authorized: bool = False) -> dict:
+                human_full_suite_authorized: bool = False,
+                allowed_paths: Sequence[str] = ()) -> dict:
     groups = tuple(approved_groups() if groups is None else groups)
     if human_full_suite_authorized:
         full_commands = (["python", "-m", "pytest", "tests", "-q"],
