@@ -15,7 +15,7 @@ import tempfile
 REPO = "trung-via/ai-commerce"
 SCHEMA = "ai-commerce-hostops-v2"
 RESULT_SCHEMA = "ai-commerce-hostops-result-v2"
-READ = frozenset({"host_inventory_read", "d5_deep_read"})
+READ = frozenset({"host_inventory_read", "d5_deep_read", "d5_pid_map_read"})
 SAFE_WRITE = frozenset({"scratch_marker_write"})
 SENSITIVE = frozenset({"workspace_file_write"})
 MAX_BYTES = 8192
@@ -162,14 +162,80 @@ def write_no_clobber(root: Path, subparts: list[str], data: bytes):
         raise Denied("WRITE_FAILED") from e
     return hashlib.sha256(data).hexdigest()
 
+def validate_pid_map(d):
+    """Strict public shape: PID, flags and ephemeral group only, never paths or command lines."""
+    fields = {"operation", "session_id", "pwsh_major", "process_known", "tcp_known",
+              "chrome_total", "chrome_truncated", "listener_truncated",
+              "profile_identity_verified", "processes", "listeners"}
+    if type(d) is not dict or set(d) != fields or d["operation"] != "d5_pid_map_read":
+        raise Denied("DIAGNOSTIC_SHAPE_INVALID")
+    for key in ("session_id", "pwsh_major", "chrome_total"):
+        if type(d[key]) is not int or not 0 <= d[key] <= 10000:
+            raise Denied("DIAGNOSTIC_VALUE_INVALID")
+    for key in ("process_known", "tcp_known", "chrome_truncated", "listener_truncated"):
+        if type(d[key]) is not bool:
+            raise Denied("DIAGNOSTIC_VALUE_INVALID")
+    if d["profile_identity_verified"] is not False:
+        raise Denied("PROFILE_IDENTITY_NOT_AUTHENTICATED")
+    procs, listeners = d["processes"], d["listeners"]
+    if type(procs) is not list or len(procs) > 32 or type(listeners) is not list or len(listeners) > 16:
+        raise Denied("DIAGNOSTIC_ARRAY_INVALID")
+    if (not d["process_known"] and (procs or d["chrome_total"])) or (
+        d["process_known"] and d["chrome_total"] < len(procs)
+    ) or (not d["tcp_known"] and listeners):
+        raise Denied("DIAGNOSTIC_INCONSISTENT")
+    if d["process_known"] and d["chrome_truncated"] != (d["chrome_total"] > 32):
+        raise Denied("DIAGNOSTIC_INCONSISTENT")
+    seen = set()
+    for p in procs:
+        if type(p) is not dict or set(p) != {
+            "pid", "session_id", "commandline_known", "debug_9333", "debug_9222",
+            "profile_group", "profile_root_exists"
+        }:
+            raise Denied("DIAGNOSTIC_PROCESS_SHAPE_INVALID")
+        if (type(p["pid"]) is not int or not 0 < p["pid"] <= 2**31 - 1 or
+            type(p["session_id"]) is not int or not 0 <= p["session_id"] <= 10000 or
+            type(p["commandline_known"]) is not bool or p["pid"] in seen):
+            raise Denied("DIAGNOSTIC_PROCESS_VALUE_INVALID")
+        seen.add(p["pid"])
+        if any(p[k] is not None and type(p[k]) is not bool for k in (
+            "debug_9333", "debug_9222", "profile_root_exists"
+        )):
+            raise Denied("DIAGNOSTIC_PROCESS_VALUE_INVALID")
+        group = p["profile_group"]
+        if group is not None and (
+            type(group) is not str or re.fullmatch(r"p[0-9]{2}", group) is None
+        ):
+            raise Denied("DIAGNOSTIC_PROCESS_VALUE_INVALID")
+        if (not p["commandline_known"] and (
+            p["debug_9333"] is not None or p["debug_9222"] is not None or
+            group is not None or p["profile_root_exists"] is not None
+        )) or (group is None and p["profile_root_exists"] is not None):
+            raise Denied("DIAGNOSTIC_INCONSISTENT")
+    for item in listeners:
+        if type(item) is not dict or set(item) != {"port", "owner_pid", "binding", "chrome_owner"}:
+            raise Denied("DIAGNOSTIC_LISTENER_SHAPE_INVALID")
+        if (type(item["port"]) is not int or item["port"] not in (9222, 9333) or
+            type(item["owner_pid"]) is not int or not 0 <= item["owner_pid"] <= 2**31 - 1 or
+            item["binding"] not in ("ipv4_loopback", "ipv6_loopback", "other") or
+            type(item["chrome_owner"]) is not bool):
+            raise Denied("DIAGNOSTIC_LISTENER_VALUE_INVALID")
+    return d
+
+
 def run(r, digest, *, workdir: Path, approved_root: str | None):
     op = r["operation"]
     if op in READ:
-        script = Path(__file__).resolve().with_name("HostOps-V2-Diagnostics.ps1")
+        script = Path(__file__).resolve().with_name(
+            "HostOps-D5-PidMap.ps1" if op == "d5_pid_map_read" else "HostOps-V2-Diagnostics.ps1"
+        )
         if not script.is_file():
             raise Denied("SCRIPT_NOT_FOUND")
         try:
-            p = subprocess.run(["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script), "-Operation", op],
+            cmd = ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script)]
+            if op != "d5_pid_map_read":
+                cmd.extend(["-Operation", op])
+            p = subprocess.run(cmd,
                                capture_output=True, timeout=55, check=False)
         except (OSError, subprocess.TimeoutExpired) as e:
             raise Denied("DIAGNOSTIC_UNAVAILABLE_OR_TIMEOUT") from e
@@ -179,14 +245,17 @@ def run(r, digest, *, workdir: Path, approved_root: str | None):
             d = json.loads(p.stdout.decode("utf-8"), object_pairs_hook=pairs_to_dict)
         except (UnicodeError, ValueError) as e:
             raise Denied("DIAGNOSTIC_OUTPUT_INVALID") from e
-        required = {"operation", "session_id", "pwsh_major", "chrome_count", "runner_count", "cdp_9333_count", "cdp_9222_count", "tcp_known", "process_flags_known", "d5_debug_flag_count", "d5_profile_flag_count", "task_state"}
-        if type(d) is not dict or set(d) != required or d["operation"] != op:
-            raise Denied("DIAGNOSTIC_SHAPE_INVALID")
-        for k in ("session_id", "pwsh_major", "chrome_count", "runner_count", "cdp_9333_count", "cdp_9222_count", "d5_debug_flag_count", "d5_profile_flag_count"):
-            if type(d[k]) is not int or not 0 <= d[k] <= 10000:
+        if op == "d5_pid_map_read":
+            validate_pid_map(d)
+        else:
+            required = {"operation", "session_id", "pwsh_major", "chrome_count", "runner_count", "cdp_9333_count", "cdp_9222_count", "tcp_known", "process_flags_known", "d5_debug_flag_count", "d5_profile_flag_count", "task_state"}
+            if type(d) is not dict or set(d) != required or d["operation"] != op:
+                raise Denied("DIAGNOSTIC_SHAPE_INVALID")
+            for k in ("session_id", "pwsh_major", "chrome_count", "runner_count", "cdp_9333_count", "cdp_9222_count", "d5_debug_flag_count", "d5_profile_flag_count"):
+                if type(d[k]) is not int or not 0 <= d[k] <= 10000:
+                    raise Denied("DIAGNOSTIC_VALUE_INVALID")
+            if type(d["tcp_known"]) is not bool or type(d["process_flags_known"]) is not bool or d["task_state"] not in ("Running", "Ready", "Disabled", "Other", "Unknown"):
                 raise Denied("DIAGNOSTIC_VALUE_INVALID")
-        if type(d["tcp_known"]) is not bool or type(d["process_flags_known"]) is not bool or d["task_state"] not in ("Running", "Ready", "Disabled", "Other", "Unknown"):
-            raise Denied("DIAGNOSTIC_VALUE_INVALID")
         result = {"status": "OBSERVED", "diagnostics": d}
     elif op in SAFE_WRITE:
         root = workdir / ".local" / "hostops-v2-scratch"
