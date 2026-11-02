@@ -15,7 +15,7 @@ import tempfile
 REPO = "trung-via/ai-commerce"
 SCHEMA = "ai-commerce-hostops-v2"
 RESULT_SCHEMA = "ai-commerce-hostops-result-v2"
-READ = frozenset({"host_inventory_read", "d5_deep_read", "d5_pid_map_read", "ef02_l04_source_recovery_read"})
+READ = frozenset({"host_inventory_read", "d5_deep_read", "d5_pid_map_read", "ef02_l04_source_recovery_read", "ef02_e04_source_recovery_read"})
 SAFE_WRITE = frozenset({"scratch_marker_write"})
 SENSITIVE = frozenset({"workspace_file_write"})
 MAX_BYTES = 8192
@@ -225,7 +225,14 @@ def validate_pid_map(d):
 
 def run(r, digest, *, workdir: Path, approved_root: str | None):
     op = r["operation"]
-    if op == "ef02_l04_source_recovery_read":
+    if op == "ef02_e04_source_recovery_read":
+        from hostops_ef02_223_recovery import RecoveryDenied, snapshot
+        try:
+            diagnostics = snapshot(workdir)
+        except RecoveryDenied as exc:
+            raise Denied(str(exc)) from exc
+        result = {"status": "OBSERVED", "diagnostics": diagnostics}
+    elif op == "ef02_l04_source_recovery_read":
         from hostops_ef02_202_recovery import RecoveryDenied, snapshot
         try:
             diagnostics = snapshot(workdir)
