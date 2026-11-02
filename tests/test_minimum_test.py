@@ -118,12 +118,19 @@ def test_companion_report_has_exact_reviewed_parallel_commands(real_tree):
         else:
             assert current[key] == historical_argv
 
-    # The live registry, not an obsolete report overlay, must match the
-    # exact current test groups including retained fault-injection coverage.
+    # Historical companion profiles may use aliases rather than a group key.
+    # Every current/declared group must still match an actual reviewed argv.
+    # The changed EF02 recovery group MUST be registered under its live key.
+    combined = {**proposed, **current}
     for g in real_tree.groups:
         expected = ["python", "-m", "pytest", *g.tests, "-q", "-n", "12"]
         key = f"mt01-{g.name}-tests"
-        assert current.get(key, proposed.get(key)) == expected
+        if g.name == "ef02-recovery":
+            assert current.get(key) == expected
+        elif key in combined:
+            assert combined[key] == expected
+        else:
+            assert expected in combined.values()
 
 
 def test_component_local_m02_requires_profile_that_actually_collects_it(real_tree, monkeypatch):
