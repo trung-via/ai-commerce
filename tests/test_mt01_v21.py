@@ -659,3 +659,29 @@ def test_postmerge_v21_workflow_runs_on_every_main_push():
     push = workflow.split("  push:\n", 1)[1].split("  pull_request:\n", 1)[0]
     assert "branches: [ef02-multi-action-implementation, main]" in push
     assert "paths:" not in push
+
+
+
+def test_hostops_v3_hosted_queue_is_reviewed_control_not_generic_ci_escape(tmp_path):
+    """Permit only the pinned queue YAML and demand exact independent test closure."""
+    groups, _, _ = fixture(tmp_path)
+    expected = (
+        "tests/test_hostops_v3_integration.py",
+        "tests/test_pr_merge_gate.py",
+        "tests/test_mt01_v21.py",
+    )
+    for path in expected:
+        mk(tmp_path, path)
+    decision = select_impact(
+        root=tmp_path, groups=groups,
+        changed_paths=[".github/workflows/hostops-v3.yml"],
+    )
+    assert decision.runnable, decision
+    assert not decision.missing_mapping
+    assert set(decision.selected_tests) == set(expected)
+    denied = select_impact(
+        root=tmp_path, groups=groups,
+        changed_paths=[".github/workflows/unknown-host-ops.yml"],
+    )
+    assert denied.mode == "HOLD_MAPPING"
+    assert ".github/workflows/unknown-host-ops.yml:UNREVIEWED_CI_CONTROL" in denied.missing_mapping

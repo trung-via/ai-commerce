@@ -29,6 +29,11 @@ CONTROL_TESTS = {
     ),
     ".github/workflows/human-merge-queue.yml": ("tests/test_pr_merge_gate.py",),
     ".github/workflows/brain-pass-auto-merge.yml": ("tests/test_pr_merge_gate.py",),
+    # HostOps v3 hosted-only signed queue; never authorize unreviewed CI paths.
+    ".github/workflows/hostops-v3.yml": (
+        "tests/test_hostops_v3_integration.py", "tests/test_pr_merge_gate.py",
+        "tests/test_mt01_v21.py",
+    ),
     ".github/ef02/verify-profiles.json": (
         "tests/test_minimum_test.py", "tests/test_ef02_mt01_registry.py",
     ),
