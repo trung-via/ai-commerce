@@ -390,11 +390,14 @@ def test_brain_pass_gate_workflow_replaces_old_queue():
     assert "issue_comment:" in text
     assert "workflow_run:" in text
     assert "ref: main" in text
-    # REST PUT /pulls/{pull_number}/merge requires Contents:write, not PR:write.
-    # Only the trusted main checkout runs, and checkout must not persist the token.
-    assert "  contents: write" in text
-    assert "  pull-requests: read" in text
+    # The merge endpoint requires repository Contents(write), not only PR(write).
+    assert "  contents: write" in text.splitlines()
+    assert "  actions: read" in text.splitlines()
+    assert "  issues: read" in text.splitlines()
+    assert "  pull-requests: write" in text.splitlines()
+    assert "  contents: read" not in text.splitlines()
     assert "persist-credentials: false" in text
+    assert "python .github/scripts/pr-merge-gate.py" in text
 
 
 def test_brain_pass_exact_identity_and_revision(gate):

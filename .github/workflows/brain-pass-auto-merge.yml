@@ -11,10 +11,13 @@ on:
     types: [completed]
 
 permissions:
+  # GitHub REST PUT /pulls/{number}/merge requires Contents: write;
+  # pull-requests: write alone makes protected merge gate return HTTP 403.
+  # This token is used only by trusted main's exact-BRAIN-PASS merge script.
   contents: write
   actions: read
   issues: read
-  pull-requests: read
+  pull-requests: write
 
 concurrency:
   group: ai-commerce-brain-pass-merge-${{ github.repository }}
