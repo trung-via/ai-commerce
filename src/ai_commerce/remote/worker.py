@@ -27,7 +27,8 @@ from ai_commerce.engineering.source_safety import checked_path, protected_change
 
 
 def _verified_receipt_evidence(report: dict, *, root: Path, workspace: Path,
-                               source_sha: str, sources: list[str], profiles: dict) -> bool:
+                               source_sha: str, sources: list[str], profiles: dict,
+                               allowed_paths: list[str] | None = None) -> bool:
     """Check actual artifacts and registered PASS bindings, not receipt assertions."""
     try:
         refs, hashes = report["evidence_files"], report["evidence_sha256"]
@@ -48,9 +49,18 @@ def _verified_receipt_evidence(report: dict, *, root: Path, workspace: Path,
             return False
         for index, group in enumerate(groups):
             binding = group["binding"]
+            approved_argv = binding["argv"] in profiles.values()
+            if not approved_argv and binding.get("registered_profile") == "mt01-component-onboarding":
+                from ai_commerce.engineering.impact_v21 import verified_onboarding_binding
+                approved_argv = verified_onboarding_binding(
+                    workspace=workspace, binding=binding,
+                    changed_paths=report.get("changed_files", []),
+                    allowed_paths=allowed_paths or [], base_sha=source_sha,
+                    registered_profiles=profiles,
+                    expected_group=group.get("group"))
             if (binding["base_sha"] != source_sha or binding["aggregate_sources"] != sources or
                     binding["workspace"] != str(workspace.resolve()) or
-                    binding["argv"] not in profiles.values() or
+                    not approved_argv or
                     binding["candidate_files"] != {p: current.get(p) for p in binding["candidate_files"]}):
                 return False
             proof = Evidence(checked_path(root, refs[f"mt01_{index}_evidence"]).read_text(encoding="utf-8"),
@@ -526,7 +536,8 @@ class LocalBatchWorker:
             # Never convert an old/partial success assertion into publication proof.
             if (not _verified_receipt_evidence(
                     report, root=efdir, workspace=worktree, source_sha=effective,
-                    sources=[d["candidate_sha"] for d in dependencies], profiles=self.profiles) or
+                    sources=[d["candidate_sha"] for d in dependencies], profiles=self.profiles,
+                    allowed_paths=action["allowed_paths"]) or
                     (review and not _fresh_aggregate_evidence(
                         report, root=efdir, workspace=worktree, source_sha=effective,
                         sources=[d["candidate_sha"] for d in dependencies], argv=plan["argv"]))):
