@@ -3,9 +3,8 @@ from ai_commerce.remote import chrome_acquisition as ca
 from ai_commerce.remote.wake_readiness_cache import ChromeAttestationCache
 
 
-def cache(*, now=1000, age=20, live=None):
+def cache(*, live=None):
     obj = object.__new__(ChromeAttestationCache)
-    obj.now = lambda: now
     obj._fingerprint = lambda: "fingerprint-v1"
     identity = live or {
         "address": "127.0.0.1", "pid": 15924,
@@ -20,7 +19,7 @@ def cache(*, now=1000, age=20, live=None):
     obj._read = lambda: {
         "v": 1, "fingerprint": "fingerprint-v1",
         "pid": 15924, "creation": "2026-11-02T12:30:00.0000000Z",
-        "session": 1, "time": now - age,
+        "session": 1,
     }
     return obj
 
@@ -34,8 +33,8 @@ def test_fast_reuse_when_same_live_identity_and_protocol():
     assert result["launched"] is False
 
 
-def test_fast_cache_rejected_if_expired():
-    assert cache(age=601).reuse() is None
+def test_unchanged_live_process_never_forces_periodic_full_rescan():
+    assert cache().reuse()["status"] == "READY_ATTACH"
 
 
 def test_fast_cache_rejected_if_pid_creation_changed():
@@ -69,7 +68,9 @@ def test_fast_reuse_does_not_invoke_full_acquisition(monkeypatch):
 
 
 def test_cache_miss_runs_full_acquisition_once(monkeypatch):
-    c = cache(age=601)
+    c = cache(live={"address": "127.0.0.2", "pid": 15924,
+                    "creation": "2026-11-02T12:30:00.0000000Z",
+                    "session": 1})
     calls = []
     def fallback(env, *, launch, opt_in):
         calls.append((launch, opt_in))
