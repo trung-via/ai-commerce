@@ -1,6 +1,6 @@
 {
   "work_id": "A16-SETTLEMENT-EVIDENCE-001",
-  "status": "PREPARED_FOR_EF02",
+  "status": "HOLD",
   "objective": "Offline settlement evidence L05 and commercial review E05 without external provider actions",
   "source_decision": "https://github.com/trung-via/ai-commerce/issues/247",
   "scope_in": [
@@ -17,7 +17,12 @@
     "contracts/SettlementEvidence.v1.schema.json",
     "contracts/CommercialReview.v1.schema.json",
     "tests/test_a16_settlement.py",
-    "tests/test_a16_commercial_review.py"
+    "tests/test_a16_commercial_review.py",
+    "src/ai_commerce/settlement/__init__.py",
+    "src/ai_commerce/settlement/schemas.py",
+    "src/ai_commerce/settlement/evidence.py",
+    "src/ai_commerce/settlement/ledger.py",
+    "src/ai_commerce/settlement/review.py"
   ],
   "acceptance": [
     "Immutable evidence identity and deduplication",
@@ -25,5 +30,57 @@
     "No mislabelled synthetic/provider verified charges",
     "Consumer-bound A14/A15 offline fixture regression, exact-head CI"
   ],
-  "side_effect_class": "BOUNDED"
+  "side_effect_class": "BOUNDED",
+  "action_id": "A16-L05-E05-OFFLINE-01",
+  "attempt_id": "a16-l05-e05-default-20261103-v1",
+  "source_sha": "55365d73cb744280c4f1f8fcfd9f04aa35997e01",
+  "verification_profile": "mt01-a16-tests",
+  "product_acceptance": "PENDING_BRAIN",
+  "publication": "EXECUTOR_DID_NOT_PUBLISH",
+  "verification": {
+    "status": "UNKNOWN",
+    "hold_code": "RERUN_RESULT_ARTIFACT_UNAVAILABLE",
+    "origin": "EXECUTOR_LOCAL_REGISTERED_PROFILES",
+    "mt01_impact": "V2.1_A16_TARGETED",
+    "registered_profile": "mt01-a16-tests",
+    "profile_registry_sha256": "226b1549da8c2c8c689c636e3d9e16ec3b5f8babab82b12a7962a1df500ff414",
+    "workers_requested": 12,
+    "workers_observed_final": null,
+    "collected_final": null,
+    "executed_final": null,
+    "repair_rounds_used": 1,
+    "max_repair_rounds": 2,
+    "initial_a16": {
+      "collected": 110,
+      "passed": 108,
+      "failed": 1,
+      "error_phase_reports": 2,
+      "workers_observed": 12
+    },
+    "mandatory_consumers": {
+      "mt01-a14-tests": 120,
+      "mt01-a14-e04-tests": 33,
+      "mt01-a15-tests": 43,
+      "mt01-a02-tests": 30
+    },
+    "mandatory_consumer_passed": 226,
+    "mandatory_workers_requested_observed": [
+      12,
+      12
+    ],
+    "final_code_contract_test_sha256": {
+      "src/ai_commerce/settlement/__init__.py": "7ef9a99a3508cbdf9d250b00365cf47d3a552a5d82ae2ef0f4a91611c4e2415e",
+      "src/ai_commerce/settlement/schemas.py": "bd22ad49bc9876469600ed5a2ff47ef8e6fda18fc084a221202513d7b07184f6",
+      "src/ai_commerce/settlement/evidence.py": "ff1175171d979268ef35af66ce4cdb94d22c500bc95c93e579708984f03ac84f",
+      "src/ai_commerce/settlement/ledger.py": "d69193aee54e8a357a2bf8b50c99f9f07ba5b867e7bd14ecc6421ea450654fd1",
+      "src/ai_commerce/settlement/review.py": "44851e8a755b07ff359a2047fe0175dfe261d89b49c75fbd8b5c6a76fa420c86",
+      "contracts/SettlementEvidence.v1.schema.json": "80f875e02028f6becf1aa9b2589bcc5ad64d63167a623c3efe82f20d9714ce5e",
+      "contracts/CommercialReview.v1.schema.json": "a76916f6cbb97b68f7e4bc78577469e96f7aad4c3977916961eb0b2d20166cbb",
+      "tests/test_a16_settlement.py": "867dc85c34daaef2e1c2b7321c19699745efc1f8fe92d0f94d6361e542d3f23e",
+      "tests/test_a16_commercial_review.py": "bbbd922e690cdad09315f10bd88684720199f815203522985c8231e9b943658b"
+    },
+    "independent_hosted_ubuntu_windows_ci": "NOT_CLAIMED",
+    "brain_acceptance": "PENDING",
+    "trusted_auto_merge": "NOT_CLAIMED"
+  }
 }

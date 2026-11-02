@@ -1,7 +1,1126 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:ai-commerce:SettlementEvidence:v1",
-  "title": "SettlementEvidence.v1 — pre-implementation invalid contract",
-  "description": "Fail-closed placeholder; replace with real A16 typed schema using EF02 executor.",
-  "not": {}
+  "title": "SettlementEvidence.v1",
+  "description": "Offline supplied assertions only. Native replay is required; checksums do not authenticate providers.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "SettlementEvidence.v1"
+    },
+    "evaluator_version": {
+      "const": "a16-l05/1.0"
+    },
+    "evidence_id": {
+      "type": "string",
+      "pattern": "^a16-settlement-[a-f0-9]{64}$",
+      "maxLength": 79
+    },
+    "record_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "correction_of": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^a16-settlement-[a-f0-9]{64}$",
+          "maxLength": 79
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "raw_utf8": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 262144
+        },
+        "raw_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "canonical_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "document": {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": "SettlementSource.v1"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "source_ref": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "source_kind": {
+              "enum": [
+                "USER_SUPPLIED",
+                "SYNTHETIC_FIXTURE"
+              ]
+            },
+            "recorded_at": {
+              "type": "string",
+              "format": "date-time",
+              "maxLength": 32,
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$"
+            },
+            "scope": {
+              "type": "object",
+              "properties": {
+                "provider_ref": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "platform": {
+                  "enum": [
+                    "TIKTOK",
+                    "YOUTUBE",
+                    "FACEBOOK",
+                    "INSTAGRAM"
+                  ]
+                },
+                "account_ref": {
+                  "type": "object",
+                  "properties": {
+                    "namespace": {
+                      "enum": [
+                        "internal_alias",
+                        "tiktok_open_id",
+                        "youtube_channel_id",
+                        "facebook_page_id",
+                        "instagram_user_id"
+                      ]
+                    },
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                      "minLength": 1,
+                      "maxLength": 128
+                    }
+                  },
+                  "required": [
+                    "namespace",
+                    "id"
+                  ],
+                  "additionalProperties": false
+                },
+                "app_ref": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "namespace": {
+                          "enum": [
+                            "internal_alias",
+                            "tiktok_client_key",
+                            "meta_app_id",
+                            "google_cloud_project_id"
+                          ]
+                        },
+                        "id": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                          "minLength": 1,
+                          "maxLength": 128
+                        }
+                      },
+                      "required": [
+                        "namespace",
+                        "id"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "market": {
+                  "type": "string",
+                  "pattern": "^[A-Z]{2}$"
+                },
+                "surface": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "channel": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "product_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                },
+                "listing_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "variant_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                },
+                "link_ref": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "link_url_sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$",
+                  "minLength": 64,
+                  "maxLength": 64
+                },
+                "creative_ref": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "creative_sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$",
+                  "minLength": 64,
+                  "maxLength": 64
+                },
+                "measurement_window": {
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "type": "string",
+                      "format": "date-time",
+                      "maxLength": 32,
+                      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$"
+                    },
+                    {
+                      "type": "string",
+                      "format": "date-time",
+                      "maxLength": 32,
+                      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$"
+                    }
+                  ],
+                  "items": false,
+                  "minItems": 2,
+                  "maxItems": 2
+                },
+                "timezone": {
+                  "const": "UTC"
+                },
+                "order_ref": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "currency": {
+                  "type": "string",
+                  "pattern": "^[A-Z]{3}$",
+                  "maxLength": 3
+                }
+              },
+              "required": [
+                "provider_ref",
+                "platform",
+                "account_ref",
+                "app_ref",
+                "market",
+                "surface",
+                "channel",
+                "product_id",
+                "listing_id",
+                "variant_id",
+                "link_ref",
+                "link_url_sha256",
+                "creative_ref",
+                "creative_sha256",
+                "measurement_window",
+                "timezone",
+                "order_ref",
+                "currency"
+              ],
+              "additionalProperties": false
+            },
+            "reported_status": {
+              "enum": [
+                "UNKNOWN",
+                "CREATED",
+                "ATTRIBUTED",
+                "APPROVED",
+                "PENDING",
+                "REFUNDED",
+                "REVOKED",
+                "PARTIALLY_SETTLED",
+                "SETTLED"
+              ]
+            },
+            "commission_basis": {
+              "enum": [
+                "UNKNOWN",
+                "MERCHANT_GROSS",
+                "MERCHANT_NET",
+                "CREATOR_SHARE"
+              ]
+            },
+            "attribution": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "evidence_id": {
+                      "type": "string",
+                      "pattern": "^a14-attribution-[a-f0-9]{64}$"
+                    },
+                    "raw_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$",
+                      "minLength": 64,
+                      "maxLength": 64
+                    },
+                    "event_ref": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "tier": {
+                      "enum": [
+                        "A",
+                        "B",
+                        "C",
+                        "D"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "evidence_id",
+                    "raw_sha256",
+                    "event_ref",
+                    "tier"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "amounts": {
+              "type": "object",
+              "properties": {
+                "order_gross": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "REPORTED",
+                        "UNKNOWN"
+                      ]
+                    },
+                    "amount": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^(0|[1-9][0-9]{0,23})(\\.[0-9]{1,6})?$",
+                          "maxLength": 31,
+                          "not": {
+                            "pattern": "\\s"
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "currency": {
+                      "type": "string",
+                      "pattern": "^[A-Z]{3}$",
+                      "maxLength": 3
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "amount",
+                    "currency"
+                  ],
+                  "additionalProperties": false,
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "status": {
+                            "const": "REPORTED"
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "amount": {
+                            "type": "string",
+                            "pattern": "^(0|[1-9][0-9]{0,23})(\\.[0-9]{1,6})?$",
+                            "maxLength": 31,
+                            "not": {
+                              "pattern": "\\s"
+                            }
+                          }
+                        }
+                      },
+                      "else": {
+                        "properties": {
+                          "amount": {
+                            "type": "null"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "credited_commission": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "REPORTED",
+                        "UNKNOWN"
+                      ]
+                    },
+                    "amount": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^(0|[1-9][0-9]{0,23})(\\.[0-9]{1,6})?$",
+                          "maxLength": 31,
+                          "not": {
+                            "pattern": "\\s"
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "currency": {
+                      "type": "string",
+                      "pattern": "^[A-Z]{3}$",
+                      "maxLength": 3
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "amount",
+                    "currency"
+                  ],
+                  "additionalProperties": false,
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "status": {
+                            "const": "REPORTED"
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "amount": {
+                            "type": "string",
+                            "pattern": "^(0|[1-9][0-9]{0,23})(\\.[0-9]{1,6})?$",
+                            "maxLength": 31,
+                            "not": {
+                              "pattern": "\\s"
+                            }
+                          }
+                        }
+                      },
+                      "else": {
+                        "properties": {
+                          "amount": {
+                            "type": "null"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "settled_commission": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "REPORTED",
+                        "UNKNOWN"
+                      ]
+                    },
+                    "amount": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^(0|[1-9][0-9]{0,23})(\\.[0-9]{1,6})?$",
+                          "maxLength": 31,
+                          "not": {
+                            "pattern": "\\s"
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "currency": {
+                      "type": "string",
+                      "pattern": "^[A-Z]{3}$",
+                      "maxLength": 3
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "amount",
+                    "currency"
+                  ],
+                  "additionalProperties": false,
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "status": {
+                            "const": "REPORTED"
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "amount": {
+                            "type": "string",
+                            "pattern": "^(0|[1-9][0-9]{0,23})(\\.[0-9]{1,6})?$",
+                            "maxLength": 31,
+                            "not": {
+                              "pattern": "\\s"
+                            }
+                          }
+                        }
+                      },
+                      "else": {
+                        "properties": {
+                          "amount": {
+                            "type": "null"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "refund_gross": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "REPORTED",
+                        "UNKNOWN"
+                      ]
+                    },
+                    "amount": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^(0|[1-9][0-9]{0,23})(\\.[0-9]{1,6})?$",
+                          "maxLength": 31,
+                          "not": {
+                            "pattern": "\\s"
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "currency": {
+                      "type": "string",
+                      "pattern": "^[A-Z]{3}$",
+                      "maxLength": 3
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "amount",
+                    "currency"
+                  ],
+                  "additionalProperties": false,
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "status": {
+                            "const": "REPORTED"
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "amount": {
+                            "type": "string",
+                            "pattern": "^(0|[1-9][0-9]{0,23})(\\.[0-9]{1,6})?$",
+                            "maxLength": 31,
+                            "not": {
+                              "pattern": "\\s"
+                            }
+                          }
+                        }
+                      },
+                      "else": {
+                        "properties": {
+                          "amount": {
+                            "type": "null"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reversed_commission": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "REPORTED",
+                        "UNKNOWN"
+                      ]
+                    },
+                    "amount": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^(0|[1-9][0-9]{0,23})(\\.[0-9]{1,6})?$",
+                          "maxLength": 31,
+                          "not": {
+                            "pattern": "\\s"
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "currency": {
+                      "type": "string",
+                      "pattern": "^[A-Z]{3}$",
+                      "maxLength": 3
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "amount",
+                    "currency"
+                  ],
+                  "additionalProperties": false,
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "status": {
+                            "const": "REPORTED"
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "amount": {
+                            "type": "string",
+                            "pattern": "^(0|[1-9][0-9]{0,23})(\\.[0-9]{1,6})?$",
+                            "maxLength": 31,
+                            "not": {
+                              "pattern": "\\s"
+                            }
+                          }
+                        }
+                      },
+                      "else": {
+                        "properties": {
+                          "amount": {
+                            "type": "null"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "fees": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "REPORTED",
+                        "UNKNOWN"
+                      ]
+                    },
+                    "amount": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^(0|[1-9][0-9]{0,23})(\\.[0-9]{1,6})?$",
+                          "maxLength": 31,
+                          "not": {
+                            "pattern": "\\s"
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "currency": {
+                      "type": "string",
+                      "pattern": "^[A-Z]{3}$",
+                      "maxLength": 3
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "amount",
+                    "currency"
+                  ],
+                  "additionalProperties": false,
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "status": {
+                            "const": "REPORTED"
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "amount": {
+                            "type": "string",
+                            "pattern": "^(0|[1-9][0-9]{0,23})(\\.[0-9]{1,6})?$",
+                            "maxLength": 31,
+                            "not": {
+                              "pattern": "\\s"
+                            }
+                          }
+                        }
+                      },
+                      "else": {
+                        "properties": {
+                          "amount": {
+                            "type": "null"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "order_gross",
+                "credited_commission",
+                "settled_commission",
+                "refund_gross",
+                "reversed_commission",
+                "fees"
+              ],
+              "additionalProperties": false
+            },
+            "receipts": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "receipt_ref": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "raw_sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$",
+                    "minLength": 64,
+                    "maxLength": 64
+                  },
+                  "correction_of": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$",
+                        "minLength": 64,
+                        "maxLength": 64
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "source_kind": {
+                    "enum": [
+                      "USER_SUPPLIED",
+                      "SYNTHETIC_FIXTURE"
+                    ]
+                  },
+                  "scope": {
+                    "type": "object",
+                    "properties": {
+                      "provider_ref": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                        "minLength": 1,
+                        "maxLength": 128
+                      },
+                      "platform": {
+                        "enum": [
+                          "TIKTOK",
+                          "YOUTUBE",
+                          "FACEBOOK",
+                          "INSTAGRAM"
+                        ]
+                      },
+                      "account_ref": {
+                        "type": "object",
+                        "properties": {
+                          "namespace": {
+                            "enum": [
+                              "internal_alias",
+                              "tiktok_open_id",
+                              "youtube_channel_id",
+                              "facebook_page_id",
+                              "instagram_user_id"
+                            ]
+                          },
+                          "id": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                            "minLength": 1,
+                            "maxLength": 128
+                          }
+                        },
+                        "required": [
+                          "namespace",
+                          "id"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "app_ref": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "namespace": {
+                                "enum": [
+                                  "internal_alias",
+                                  "tiktok_client_key",
+                                  "meta_app_id",
+                                  "google_cloud_project_id"
+                                ]
+                              },
+                              "id": {
+                                "type": "string",
+                                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                                "minLength": 1,
+                                "maxLength": 128
+                              }
+                            },
+                            "required": [
+                              "namespace",
+                              "id"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "market": {
+                        "type": "string",
+                        "pattern": "^[A-Z]{2}$"
+                      },
+                      "surface": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                        "minLength": 1,
+                        "maxLength": 128
+                      },
+                      "channel": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                        "minLength": 1,
+                        "maxLength": 128
+                      },
+                      "product_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                      },
+                      "listing_id": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256,
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "variant_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                      },
+                      "link_ref": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                        "minLength": 1,
+                        "maxLength": 128
+                      },
+                      "link_url_sha256": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$",
+                        "minLength": 64,
+                        "maxLength": 64
+                      },
+                      "creative_ref": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                        "minLength": 1,
+                        "maxLength": 128
+                      },
+                      "creative_sha256": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$",
+                        "minLength": 64,
+                        "maxLength": 64
+                      },
+                      "measurement_window": {
+                        "type": "array",
+                        "prefixItems": [
+                          {
+                            "type": "string",
+                            "format": "date-time",
+                            "maxLength": 32,
+                            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$"
+                          },
+                          {
+                            "type": "string",
+                            "format": "date-time",
+                            "maxLength": 32,
+                            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$"
+                          }
+                        ],
+                        "items": false,
+                        "minItems": 2,
+                        "maxItems": 2
+                      },
+                      "timezone": {
+                        "const": "UTC"
+                      },
+                      "order_ref": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                        "minLength": 1,
+                        "maxLength": 128
+                      },
+                      "currency": {
+                        "type": "string",
+                        "pattern": "^[A-Z]{3}$",
+                        "maxLength": 3
+                      }
+                    },
+                    "required": [
+                      "provider_ref",
+                      "platform",
+                      "account_ref",
+                      "app_ref",
+                      "market",
+                      "surface",
+                      "channel",
+                      "product_id",
+                      "listing_id",
+                      "variant_id",
+                      "link_ref",
+                      "link_url_sha256",
+                      "creative_ref",
+                      "creative_sha256",
+                      "measurement_window",
+                      "timezone",
+                      "order_ref",
+                      "currency"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "kind": {
+                    "enum": [
+                      "ORDER",
+                      "COMMISSION",
+                      "SETTLEMENT",
+                      "REFUND",
+                      "REVERSAL",
+                      "FEE"
+                    ]
+                  },
+                  "occurred_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "maxLength": 32,
+                    "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$"
+                  },
+                  "amount": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,23})(\\.[0-9]{1,6})?$",
+                    "maxLength": 31,
+                    "not": {
+                      "pattern": "\\s"
+                    }
+                  }
+                },
+                "required": [
+                  "receipt_ref",
+                  "raw_sha256",
+                  "correction_of",
+                  "source_kind",
+                  "scope",
+                  "kind",
+                  "occurred_at",
+                  "amount"
+                ],
+                "additionalProperties": false
+              },
+              "maxItems": 64
+            }
+          },
+          "required": [
+            "schema_version",
+            "idempotency_key",
+            "source_ref",
+            "source_kind",
+            "recorded_at",
+            "scope",
+            "reported_status",
+            "commission_basis",
+            "attribution",
+            "amounts",
+            "receipts"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "raw_utf8",
+        "raw_sha256",
+        "canonical_sha256",
+        "document"
+      ],
+      "additionalProperties": false
+    },
+    "attribution_snapshot": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "raw_utf8": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2097152
+            },
+            "raw_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$",
+              "minLength": 64,
+              "maxLength": 64
+            }
+          },
+          "required": [
+            "raw_utf8",
+            "raw_sha256"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "attribution_tier": {
+      "enum": [
+        "A",
+        "B",
+        "C",
+        "D",
+        "UNKNOWN"
+      ]
+    },
+    "source_status": {
+      "const": "SUPPLIED_NOT_PROVIDER_ATTESTED"
+    },
+    "actual_orders_verified": {
+      "const": false
+    },
+    "settlement_verified": {
+      "const": false
+    },
+    "realized_profit_verified": {
+      "const": false
+    },
+    "network_calls_performed": {
+      "const": false
+    }
+  },
+  "required": [
+    "schema_version",
+    "evaluator_version",
+    "evidence_id",
+    "record_sha256",
+    "correction_of",
+    "source",
+    "attribution_snapshot",
+    "attribution_tier",
+    "source_status",
+    "actual_orders_verified",
+    "settlement_verified",
+    "realized_profit_verified",
+    "network_calls_performed"
+  ],
+  "additionalProperties": false
 }
