@@ -666,13 +666,41 @@ def test_v4_signed_read_only_worker_lost_response_stays_unknown(h):
                                 "move", "rename", "quarantine", "powershell", "disclose"])
 def test_v4_signed_read_only_worker_rejects_effects_before_journal(h, op):
     from ai_commerce.hostops_v3.worker import WorkerV4
-    fixture_request = h.make()
-    # Precise operation parameters aren't important for this negative gate:
-    # strict contract and/or runtime can reject, but no local intent is made.
-    release, e = _v4_signed_fixture(h, request_mutation={"operation": op})
-    worker = WorkerV4(h.config, auth.AuthorityV4(h.config, release, clock=lambda: NOW), h.journal)
+    path = str(h.data / "new.txt")
+    destination = str(h.data / "other.txt")
+    payload = base64.b64encode(b"fixture").decode("ascii")
+    digest = c.digest(b"fixture")
+    old = c.digest(b"original")
+    params = {
+        "create": {"path": path, "data_b64": payload, "data_sha256": digest},
+        "replace": {"path": path, "data_b64": payload, "data_sha256": digest,
+                    "expected_sha256": old},
+        "patch": {"path": path, "data_b64": payload, "data_sha256": digest,
+                  "expected_sha256": old, "offset": 0, "remove_bytes": 1},
+        "append": {"path": path, "data_b64": payload, "data_sha256": digest,
+                   "expected_sha256": old},
+        "copy": {"path": path, "destination": destination, "expected_sha256": old},
+        "move": {"path": path, "destination": destination, "expected_sha256": old},
+        "rename": {"path": path, "destination": destination, "expected_sha256": old},
+        "quarantine": {"path": path, "expected_sha256": old,
+                       "preview_sha256": c.digest(b"preview")},
+        "powershell": {"script_id": "token_inventory_v1",
+                       "script_sha256": c.digest(b"script")},
+        "disclose": {"selection_id": c.digest(b"selection"),
+                     "content_sha256": digest, "offset": 0, "length": 1,
+                     "classification": "ordinary", "recipient": "github:private"},
+    }
+    release, e = _v4_signed_fixture(h,
+        request_mutation={"operation": op, "parameters": params[op]}, exact=True)
+    # Prove the request and its Human/issuer signatures are all valid first.
+    authority = auth.AuthorityV4(h.config, release, clock=lambda: NOW)
+    authenticated, lease = authority.authenticate_v4(c.canonical(e))
+    assert authenticated.value["operation"] == op and op in lease["operations"]
+    worker = WorkerV4(h.config, authority, h.journal)
     out = worker.execute(c.canonical(e))["receipt"]
-    assert out["schema"] == "hostops.receipt.v4" and out["status"] == "BLOCKED"
+    assert out["schema"] == "hostops.receipt.v4"
+    assert out["status"] == "BLOCKED"
+    assert out["error_code"] == "V4_OPERATION_NOT_ENABLED"
     assert h.journal.db.execute("SELECT count(*) FROM requests").fetchone()[0] == 0
     assert not (h.data / "new.txt").exists()
 
