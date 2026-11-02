@@ -440,3 +440,180 @@ def test_v21_mixed_node_and_python_keeps_python_consumers(tmp_path):
         groups=groups)
     assert result.runnable and a12 in result.selected_tests
     assert "REVIEWED_NODE_TEST_STEP_REQUIRED" in result.reason_codes
+
+
+# OFFLINE E2E: real local git and pytest; the executor is a deterministic file
+# writer, and GitHub candidate publication is deliberately NOT simulated as live.
+def _v21_make_git_sandbox(tmp_path):
+    import subprocess
+
+    root = tmp_path / "ef02-local-git"
+    root.mkdir()
+    alpha = "src/ai_commerce/product/alpha.py"
+    beta = "src/ai_commerce/product/beta.py"
+    mk(root, "src/ai_commerce/__init__.py", "")
+    mk(root, "src/ai_commerce/product/__init__.py", "")
+    mk(root, alpha, "def value():\n    return 0\n")
+    mk(root, beta, "def value():\n    return 0\n")
+    mk(root, "tests/test_alpha.py",
+       "from ai_commerce.product.alpha import value\n"
+       "def test_alpha():\n    assert value() == 1\n")
+    mk(root, "tests/test_beta.py",
+       "from ai_commerce.product.beta import value\n"
+       "def test_beta():\n    assert value() == 2\n")
+    mk(root, "tests/test_aggregate.py",
+       "from ai_commerce.product.alpha import value as a\n"
+       "from ai_commerce.product.beta import value as b\n"
+       "def test_aggregate():\n    assert b() in (0, 2)\n    if b() == 2:\n        assert a() == 1\n")
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(root), *args],
+                                       stderr=subprocess.STDOUT).decode().strip()
+    git("init", "-q")
+    git("add", ".")
+    git("-c", "user.name=MT01 Test", "-c", "user.email=mt01@example.invalid",
+        "commit", "-qm", "fixture baseline")
+    return root, git, git("rev-parse", "HEAD")
+
+
+def test_v21_offline_ef02_two_action_fanin_real_git_pytest_verify_fix(tmp_path, monkeypatch):
+    """Actual diff -> MT-01 -> real pytest -> bounded fix -> local candidate SHA.
+
+    This proves local integration behavior only. No LocalBatchWorker GitHub
+    checkpoint, provider API, remote Windows runner or published EF02 candidate.
+    """
+    import os
+    import subprocess
+    import sys
+    from ai_commerce.remote.scheduler import run_schedule
+    from ai_commerce.engineering.minimum_test import select_plan, file_hashes
+    from ai_commerce.engineering.runner import _outside_scope
+
+    root, git, source = _v21_make_git_sandbox(tmp_path)
+    monkeypatch.setenv("MT01_V21_ENABLED", "1")
+    alpha = "src/ai_commerce/product/alpha.py"
+    beta = "src/ai_commerce/product/beta.py"
+    groups = (
+        group("alpha", ("tests/test_alpha.py",), (alpha,)),
+        group("beta", ("tests/test_beta.py",), (beta,)),
+        group("aggregate", ("tests/test_aggregate.py",), (alpha, beta)),
+    )
+    # The existing group() fixture uses the common AC label MT01.test.
+    # Keep distinct ACs, as they would be in a reviewed registered batch.
+    from ai_commerce.engineering.minimum_test import TestGroup
+    groups = tuple(TestGroup(g.name, g.tests, ("AC." + g.name,),
+                             g.paths, g.consumers, g.contracts) for g in groups)
+    profiles = {
+        "local-" + g.name: ["python", "-m", "pytest", *g.tests, "-q"]
+        for g in groups
+    }
+    broad = ["python", "-m", "pytest", "tests", "-q"]
+    profiles["project-tests"] = broad
+    source_files = file_hashes(root)
+    trace = []
+
+    def work(action):
+        aid = action["action_id"]
+        parents = action.get("resolved_dependencies", [])
+        assert git("rev-parse", "HEAD") == (parents[-1]["candidate_sha"] if parents else source)
+        path = alpha if aid == "a" else beta
+        # The executor substitute really edits a tracked file.
+        mk(root, path, "def value():\n    return " + ("1" if aid == "a" else "99") + "\n")
+        changed = git("diff", "--name-only", source).splitlines()
+        required = ("AC.alpha",) if aid == "a" else ("AC.beta",)
+        plan = select_plan(
+            repo=root, base_sha=source, base_files=source_files,
+            candidate_files=file_hashes(root), changed_paths=changed,
+            required_acs=required, fallback_argv=broad,
+            groups=groups, registered_only=True, registered_profiles=profiles,
+            aggregate_sources=tuple(p["candidate_sha"] for p in parents),
+        )
+        assert plan["version"] == 2 and not plan["fallback"]
+        assert all(x["state"] == "EXECUTE" for x in plan["groups"])
+        assert set(plan["selected_groups"]) >= ({"alpha", "aggregate"} if aid == "a"
+                                                else {"alpha", "beta", "aggregate"})
+        assert all(x["binding"]["argv"] != broad for x in plan["groups"])
+        assert not _outside_scope([path], action["allowed_paths"])
+        selected = sorted({p for g in plan["groups"] for p in g["binding"]["mapping"]["tests"]})
+        assert selected
+        def verify():
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(root / "src")
+            return subprocess.run([sys.executable, "-m", "pytest", *selected,
+                                   "-q", "-p", "no:cacheprovider"],
+                                  cwd=root, capture_output=True, text=True,
+                                  timeout=90, check=False, env=env)
+        first = verify()
+        if aid == "a":
+            assert first.returncode == 0, first.stdout + first.stderr
+            attempts = [first.returncode]
+        else:
+            assert first.returncode != 0 and "failed" in first.stdout.lower()
+            # Deterministic Verify-Fix: change the *cause*, rerun exact selection.
+            mk(root, beta, "def value():\n    return 2\n")
+            second = verify()
+            assert second.returncode == 0, second.stdout + second.stderr
+            attempts = [first.returncode, second.returncode]
+        git("add", path)
+        git("-c", "user.name=MT01 Test", "-c", "user.email=mt01@example.invalid",
+            "commit", "-qm", "offline fake executor " + aid)
+        candidate = git("rev-parse", "HEAD")
+        trace.append({"action_id": aid, "effective_source_sha": parents[-1]["candidate_sha"]
+                      if parents else source, "candidate_sha": candidate,
+                      "attempt_exits": attempts, "selected_groups": plan["selected_groups"],
+                      "selected_tests": selected, "aggregate_sources": plan["aggregate_sources"]})
+        return {"status": "CANDIDATE_READY", "candidate_sha": candidate,
+                "scope_valid": True, "review_required": False,
+                "out_of_scope_files": []}
+
+    actions = [
+        {"action_id": "a", "attempt_id": "offline-a-001", "depends_on": [],
+         "allowed_paths": [alpha], "resources": []},
+        {"action_id": "b", "attempt_id": "offline-b-001", "depends_on": ["a"],
+         "allowed_paths": [beta], "resources": []},
+    ]
+    result = run_schedule({"batch_id": "mt01-v21-offline-fanin",
+                           "source_sha": source, "max_parallel": 1,
+                           "actions": actions}, work, max_workers=1)
+    assert result["status"] == "COMPLETE", result
+    assert result["succeeded"] == 2
+    assert len(trace) == 2
+    assert trace[0]["attempt_exits"] == [0]
+    assert trace[1]["attempt_exits"][0] != 0
+    assert trace[1]["attempt_exits"][1] == 0
+    assert trace[1]["aggregate_sources"] == [trace[0]["candidate_sha"]]
+    assert trace[0]["candidate_sha"] != trace[1]["candidate_sha"] != source
+    assert git("rev-parse", "HEAD") == trace[1]["candidate_sha"]
+
+
+def test_v21_offline_ef02_scope_review_blocks_downstream_without_provider(tmp_path):
+    """Never promote an out-of-scope file into a schedulable PASS."""
+    from ai_commerce.remote.scheduler import run_schedule
+    from ai_commerce.engineering.runner import _outside_scope
+    root, git, source = _v21_make_git_sandbox(tmp_path)
+    attempted = []
+    actions = [
+        {"action_id": "a", "attempt_id": "offline-scope-001",
+         "depends_on": [], "resources": [],
+         "allowed_paths": ["src/ai_commerce/product/alpha.py"]},
+        {"action_id": "b", "attempt_id": "offline-dependent-001",
+         "depends_on": ["a"], "resources": [],
+         "allowed_paths": ["src/ai_commerce/product/beta.py"]},
+    ]
+    def work(action):
+        attempted.append(action["action_id"])
+        assert action["action_id"] == "a"
+        bad = "src/ai_commerce/product/beta.py"
+        mk(root, bad, "def value():\n    return 9\n")
+        changed = git("diff", "--name-only", source).splitlines()
+        outside = _outside_scope(changed, action["allowed_paths"])
+        assert outside == [bad]
+        return {"status": "CANDIDATE_READY_SCOPE_REVIEW",
+                "scope_valid": False, "review_required": True,
+                "out_of_scope_files": outside, "candidate_sha": None}
+    result = run_schedule({"batch_id": "mt01-v21-offline-scope",
+                           "source_sha": source, "max_parallel": 1,
+                           "actions": actions}, work, max_workers=1)
+    assert attempted == ["a"]
+    assert result["status"] == "PARTIAL_OR_FAILED"
+    assert result["actions"][0]["status"] == "CANDIDATE_READY_SCOPE_REVIEW"
+    assert result["actions"][1]["status"] == "BLOCKED_DEPENDENCY"
