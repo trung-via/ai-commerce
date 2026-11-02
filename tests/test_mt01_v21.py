@@ -386,3 +386,20 @@ def test_independent_baseline_oracle_preserves_prior_owner_after_group_removal(t
         selected, base_groups=groups, candidate_groups=(groups[1],),
         changed_paths={src_a12}, present_paths={a12, a14})
     assert not ok and "REQUIRED_TEST_OMITTED:" + a12 in reasons
+
+
+
+def test_oracle_base_resolution_restricts_push_to_main(monkeypatch, tmp_path):
+    import importlib.util
+    import sys
+    script = Path(__file__).resolve().parents[1] / ".github/scripts/mt01_v21_oracle.py"
+    spec = importlib.util.spec_from_file_location("mt01_base_event_guard", script)
+    oracle = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = oracle
+    spec.loader.exec_module(oracle)
+    # A missing base on arbitrary events must not be inferred from HEAD^.
+    monkeypatch.delenv("MT01_CI_EVENT", raising=False)
+    monkeypatch.delenv("GITHUB_REF", raising=False)
+    monkeypatch.setattr(sys, "argv", ["oracle", "--repo", str(tmp_path),
+                                       "--plan", str(tmp_path / "plan.json")])
+    assert oracle.main() == 3

@@ -7,6 +7,7 @@ fully independent trust boundary against malicious workflow self-edit.
 from __future__ import annotations
 
 import argparse
+import os
 import json
 from pathlib import Path
 import re
@@ -98,15 +99,19 @@ def _git(root: Path, *args: str) -> bytes:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[2])
-    parser.add_argument("--base", required=True)
+    parser.add_argument("--base", default="")
     parser.add_argument("--plan", type=Path, required=True)
     opts = parser.parse_args()
-    if not SHA.fullmatch(opts.base):
-        print("MT01_ORACLE_STATUS=HOLD_PROOF_INVALID_BASE", flush=True)
-        return 3
     try:
         repo = opts.repo.resolve()
-        base_text = _git(repo, "show", f"{opts.base}:{BASE_MAP}").decode("utf-8")
+        base = opts.base
+        if (not base and os.environ.get("MT01_CI_EVENT") == "push" and
+                os.environ.get("GITHUB_REF") == "refs/heads/main"):
+            base = _git(repo, "rev-parse", "HEAD^").decode().strip()
+        if not SHA.fullmatch(base):
+            print("MT01_ORACLE_STATUS=HOLD_PROOF_INVALID_BASE", flush=True)
+            return 3
+        base_text = _git(repo, "show", f"{base}:{BASE_MAP}").decode("utf-8")
         groups_base = baseline_groups(base_text)
         # The candidate registry may add new groups; it cannot remove the
         # baseline's test obligations for a changed path.
@@ -115,14 +120,14 @@ def main() -> int:
         groups_candidate = approved_groups()
         plan = json.loads(opts.plan.read_text(encoding="utf-8"))
         head = _git(repo, "rev-parse", "HEAD").decode().strip()
-        if head != plan.get("candidate_sha") or plan.get("base_sha") != opts.base:
+        if head != plan.get("candidate_sha") or plan.get("base_sha") != base:
             print("MT01_ORACLE_STATUS=HOLD_PROOF_SHA_MISMATCH", flush=True)
             return 3
-        changed = _git(repo, "diff", "--name-only", "-z", opts.base, head)
+        changed = _git(repo, "diff", "--name-only", "-z", base, head)
         changed_paths = {n.decode("utf-8") for n in changed.split(b"\0") if n}
         # Capture rename/deletion sources from name-status to avoid silently
         # losing the base owner's obligation.
-        status = _git(repo, "diff", "--name-status", "-z", "-M", opts.base, head)
+        status = _git(repo, "diff", "--name-status", "-z", "-M", base, head)
         fields = [s.decode("utf-8") for s in status.split(b"\0") if s]
         cursor = 0
         while cursor < len(fields):
