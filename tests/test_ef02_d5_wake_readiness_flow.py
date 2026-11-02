@@ -166,7 +166,10 @@ def test_source_drift_after_chat_read_blocks_ready():
     p = FakePanel()
     seen = iter(["a" * 40, "b" * 40])
     f = ReadinessFlow(
-        panel=p, acquire=FakeChrome(), source_reader=lambda: next(seen)
+        panel=p, acquire=FakeChrome(result={
+            "status": "READY_ATTACH", "cdp_verified": True,
+            "launched": True,
+        }), source_reader=lambda: next(seen)
     )
     r = f.execute(opt_in_launch=True, opt_in_open_chat=False)
     assert r["code"] == "SOURCE_SHA_CHANGED"
@@ -175,3 +178,18 @@ def test_source_drift_after_chat_read_blocks_ready():
 def test_reject_duplicate_private_manifest_json_fields():
     with pytest.raises(ValueError, match="DUPLICATE_KEY"):
         _unique_json([("version", 1), ("version", 1)])
+
+
+
+def test_warm_wake_reads_fresh_main_only_once():
+    p = FakePanel()
+    calls = []
+    def fresh_main():
+        calls.append(1)
+        return "a" * 40
+    f = ReadinessFlow(panel=p, acquire=FakeChrome(),
+                      source_reader=fresh_main)
+    r = f.execute(opt_in_launch=False, opt_in_open_chat=False)
+    assert r["status"] == "READY_FOR_PREPARE"
+    assert r["verification"] == "FULL_ACQUISITION"
+    assert len(calls) == 1
