@@ -169,9 +169,11 @@ def stabilize_candidate_newlines_before_verify(
         if records:
             # Executable files may have mode 100755; byte and stage must
             # still be the same. Do not modify stage 1/2/3 conflict entries.
-            valid = any(record == mode + b" " + converted.stdout.strip() +
-                        b" 0\t" + relative.encode("utf-8")
-                        for mode in (b"100644", b"100755"))
+            valid = (len(records) == 1 and any(
+                records[0] == mode + b" " + converted.stdout.strip() +
+                b" 0\t" + relative.encode("utf-8")
+                for mode in (b"100644", b"100755")
+            ))
             if len(records) != 1 or not valid:
                 raise GitByteConsistencyError("PREVERIFY_STAGED_BYTES_DIVERGED:" + relative)
 
