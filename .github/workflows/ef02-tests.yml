@@ -13,6 +13,9 @@ on:
       - "tests/test_ef01.py"
       - ".github/workflows/ef02-tests.yml"
       - ".github/scripts/ef02-pr-ci-tests.py"
+      - ".github/ef02/verify-profiles.json"
+      - "docs/engineering/MT01_COMPONENT_AWARE_IMPLEMENTATION_REPORT.md"
+      - "tests/test_ef02_mt01_registry.py"
       - "tests/test_minimum_test.py"
   pull_request:
     paths:
@@ -26,6 +29,9 @@ on:
       - ".github/scripts/ef02-reconcile.cjs"
       - ".github/workflows/ef02-*.yml"
       - ".github/scripts/ef02-pr-ci-tests.py"
+      - ".github/ef02/verify-profiles.json"
+      - "docs/engineering/MT01_COMPONENT_AWARE_IMPLEMENTATION_REPORT.md"
+      - "tests/test_ef02_mt01_registry.py"
       - "tests/test_minimum_test.py"
       - "contracts/RemoteActionBatch.v1.schema.json"
 jobs:
@@ -62,6 +68,7 @@ jobs:
         env:
           MT01_CI_EVENT: ${{ github.event_name }}
           MT01_CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          MT01_CI_XDIST_WORKERS: '4'
       - uses: actions/setup-node@v4
         with:
           node-version: '22'

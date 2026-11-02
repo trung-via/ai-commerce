@@ -1,0 +1,84 @@
+name: AI Commerce HostOps v2 targeted CI
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/hostops-v2*.yml"
+      - "scripts/hostops_v2.py"
+      - "scripts/HostOps-V2-Diagnostics.ps1"
+      - "scripts/HostOps-D5-PidMap.ps1"
+      - "tests/test_hostops_v2.py"
+      - "docs/engineering/HOSTOPS_V2.md"
+      - "config/hostops/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/hostops-v2*.yml"
+      - "scripts/hostops_v2.py"
+      - "scripts/HostOps-V2-Diagnostics.ps1"
+      - "scripts/HostOps-D5-PidMap.ps1"
+      - "tests/test_hostops_v2.py"
+      - "config/hostops/**"
+
+permissions:
+  contents: read
+
+jobs:
+  hostops-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Strict request and bounded subprocess tests
+        run: python -m unittest discover -s tests -p test_hostops_v2.py -v
+      - name: Parse fixed Windows PowerShell script (Windows only)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $errorsFound = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'scripts/HostOps-V2-Diagnostics.ps1').Path,
+            [ref]$null, [ref]$errorsFound) | Out-Null
+          if ($null -ne $errorsFound -and @($errorsFound).Count -gt 0) {
+            throw ('HOSTOPS_POWERSHELL_PARSE_FAILED: ' + @($errorsFound).Count)
+          }
+          'HOSTOPS_V2_POWERSHELL_PARSE_PASS'
+      - name: Parse D5 PID map PowerShell script (Windows only)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $errs = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'scripts/HostOps-D5-PidMap.ps1').Path,
+            [ref]$null, [ref]$errs) | Out-Null
+          if ($null -ne $errs -and @($errs).Count -gt 0) { throw 'HOSTOPS_D5_PID_MAP_PARSE_FAILED' }
+          'HOSTOPS_D5_PID_MAP_PARSE_PASS'
+      - name: Windows hosted smoke for fixed runner-only read (no self-hosted)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $result = & ./scripts/HostOps-V2-Diagnostics.ps1 -Operation host_inventory_read | ConvertFrom-Json
+          if ($result.operation -ne 'host_inventory_read' -or $result.pwsh_major -lt 7) {
+            throw 'HOSTOPS_FIXED_READONLY_SMOKE_FAILED'
+          }
+          'HOSTOPS_V2_READONLY_SMOKE_PASS'
+
+      - name: D5 PID map hosted smoke (Windows only)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $result = & ./scripts/HostOps-D5-PidMap.ps1 | ConvertFrom-Json
+          if ($result.operation -ne 'd5_pid_map_read' -or
+              $null -eq $result.processes -or $null -eq $result.listeners -or
+              $result.profile_identity_verified -ne $false) {
+            throw 'HOSTOPS_D5_PID_MAP_SMOKE_FAILED'
+          }
+          'HOSTOPS_D5_PID_MAP_SMOKE_PASS'
