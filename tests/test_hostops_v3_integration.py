@@ -729,3 +729,111 @@ def test_v4_and_v3_share_journal_without_request_id_confusion(h):
     assert r["status"] == "OBSERVED"
     ids = {x[0] for x in h.journal.db.execute("SELECT id FROM requests")}
     assert ids == {old["request"]["request_id"], "v4:" + old["request"]["request_id"]}
+
+
+
+def test_v4_private_poll_posts_sanitized_receipt_only(h):
+    release, e = _v4_signed_fixture(h)
+    api = _V4API(e, e["request"]["source_sha"])
+    release["workflow_sha256"] = c.digest(api.workflow)
+    posted = []
+    api.post = lambda path, data: posted.append((path, data))
+    def send(_config, raw):
+        return {"receipt": c.receipt_v4(c.dual_repo_envelope(raw)[1],
+                "OBSERVED", result={"count": 1})}
+    r = transport.poll_once_v4(api, h.config, release, 999, 123, send=send)
+    assert r["status"] == "OBSERVED" and len(posted) == 1
+    assert posted[0][0] == "/repos/" + c.CONTROL_REPOSITORY + "/issues/999/comments"
+    assert set(posted[0][1]) == {"body"}
+    assert "HOSTOPS_V4_RECEIPT" in posted[0][1]["body"]
+    assert e["issuer_signature_b64"] not in posted[0][1]["body"]
+
+
+def test_v4_private_poll_rejects_disclosure_or_spoofed_hash(h):
+    release, e = _v4_signed_fixture(h)
+    api = _V4API(e, e["request"]["source_sha"])
+    release["workflow_sha256"] = c.digest(api.workflow)
+    api.post = lambda *_args: pytest.fail("MUST_NOT_POST")
+    def leak(_config, raw):
+        return {"receipt": c.receipt_v4(c.dual_repo_envelope(raw)[1],
+                "OBSERVED"), "disclosure_b64": "ZGF0YQ=="}
+    with pytest.raises(c.Denied, match="UNSOLICITED_DISCLOSURE"):
+        transport.poll_once_v4(api, h.config, release, 999, 123, send=leak)
+    def fake(_config, raw):
+        r = c.receipt_v4(c.dual_repo_envelope(raw)[1], "OBSERVED")
+        r["request_sha256"] = "0" * 64
+        return {"receipt": r}
+    with pytest.raises(c.Denied, match="IPC_RESPONSE_MISMATCH"):
+        transport.poll_once_v4(api, h.config, release, 999, 123, send=fake)
+
+
+def test_v4_client_rejects_write_before_connect(h, monkeypatch):
+    _, e = _v4_signed_fixture(h, request_mutation={
+        "operation": "create", "parameters": {"path": str(h.data / "no.txt"),
+        "data_b64": base64.b64encode(b"ok").decode("ascii"),
+        "data_sha256": c.digest(b"ok")}}, exact=True)
+    def bad(_endpoint):
+        pytest.fail("MUST_NOT_CONNECT")
+    monkeypatch.setattr(transport, "connect", bad)
+    with pytest.raises(c.Denied, match="OPERATION_NOT_ENABLED"):
+        transport.submit_v4(h.config, c.canonical(e))
+
+
+def test_v4_child_signed_read_and_release_denial_offline(h, monkeypatch):
+    release, e = _v4_signed_fixture(h)
+    packet = c.canonical({"schema": "hostops.ipc.v4", "mode": "execute", "envelope": e})
+    class Pipe:
+        def __init__(self): self.data = None
+        def send_bytes(self, value): self.data = value
+        def close(self): pass
+    monkeypatch.setattr(broker, "load_config", lambda _: h.config)
+    monkeypatch.setattr(broker, "admit", lambda *_: None)
+    monkeypatch.setattr(broker, "verify_release_v4",
+                        lambda _: (release, auth.AuthorityV4(h.config, release, clock=lambda: NOW)))
+    pipe = Pipe()
+    broker.child_execute_v4("offline", packet, pipe)
+    response = c.decode(pipe.data)
+    assert response["receipt"]["status"] == "OBSERVED"
+    assert response["receipt"]["schema"] == "hostops.receipt.v4"
+    monkeypatch.setattr(broker, "verify_release_v4", lambda _: c.deny("SOURCE_UNVERIFIED"))
+    pipe = Pipe()
+    broker.child_execute_v4("offline", packet, pipe)
+    response = c.decode(pipe.data)
+    assert response["receipt"]["status"] == "UNAVAILABLE"
+    assert response["receipt"]["error_code"] == "BROKER_UNAVAILABLE"
+
+
+def test_v4_hmac_receipt_gate_rejects_v3_even_if_message_mac_valid(h):
+    import queue
+    key = os.urandom(32)
+    _, e = _v4_signed_fixture(h)
+    _, req = c.dual_repo_envelope(c.canonical(e))
+    payload = c.canonical({"schema": "hostops.ipc.v4", "mode": "execute", "envelope": e})
+    class Memory(broker.Channel):
+        def __init__(self, incoming, outgoing):
+            self.incoming, self.outgoing, self.pending = incoming, outgoing, b""
+        def read(self, n):
+            if not self.pending:
+                self.pending = self.incoming.get(timeout=5)
+            value, self.pending = self.pending[:n], self.pending[n:]
+            return value
+        def write(self, value): self.outgoing.put(value)
+        def close(self): pass
+    def exchange(reply):
+        a, b = queue.Queue(), queue.Queue()
+        client, server = Memory(a, b), Memory(b, a)
+        errors = []
+        def serve():
+            try: broker.server_exchange(server, key, lambda got: reply)
+            except BaseException as exc: errors.append(exc)
+        t = threading.Thread(target=serve, daemon=True)
+        t.start()
+        try:
+            return broker.client_exchange(client, key, payload,
+                                          verify_receipt=c.public_receipt_v4)
+        finally:
+            t.join(6)
+    good = {"receipt": c.receipt_v4(req, "OBSERVED", result={"count": 1})}
+    assert exchange(good) == good
+    with pytest.raises(c.Denied):
+        exchange({"receipt": c.receipt(req, "OBSERVED")})
