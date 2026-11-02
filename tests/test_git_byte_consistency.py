@@ -148,3 +148,80 @@ def test_transport_rejects_filter_mismatch_before_any_remote_api_write(tmp_path:
         )
     assert remote.calls == 0
     assert (repo / "README.md").read_bytes() == original
+
+
+def test_new_crlf_txt_is_stabilized_before_verification(tmp_path: Path) -> None:
+    from hashlib import sha256
+    from ai_commerce.engineering.git_byte_consistency import (
+        stabilize_candidate_newlines_before_verify,
+    )
+
+    repo = _repo(tmp_path)
+    relative = "affiliate/verification/consumer-tests.txt"
+    path = repo / relative
+    path.parent.mkdir(parents=True)
+    original = b"consumer tests\r\nstatus=PASS\r\n"
+    path.write_bytes(original)
+    changed = stabilize_candidate_newlines_before_verify(
+        repo, [relative], allowed_paths=["affiliate"],
+    )
+    assert changed == [{
+        "path": relative, "transformation": "CRLF_TO_LF_PRE_VERIFY",
+        "before_sha256": sha256(original).hexdigest(),
+        "after_sha256": sha256(original.replace(b"\r\n", b"\n")).hexdigest(),
+    }]
+    assert path.read_bytes() == b"consumer tests\nstatus=PASS\n"
+    assert_candidate_git_filter_consistency(repo, [
+        (relative, path.read_bytes(), "100644")
+    ])
+    _git(repo, "add", relative)
+    _git(repo, "commit", "-m", "candidate published")
+    next_worktree = tmp_path / "next"
+    _git(repo, "worktree", "add", "--detach", str(next_worktree), "HEAD")
+    assert checkout_diagnostics(next_worktree, refresh_index=True)["clean"]
+
+
+def test_tracked_crlf_cannot_be_silently_normalized(tmp_path: Path) -> None:
+    from ai_commerce.engineering.git_byte_consistency import (
+        stabilize_candidate_newlines_before_verify,
+    )
+
+    repo = _repo(tmp_path)
+    path = repo / "consumer-tests.txt"
+    path.write_bytes(b"original\n")
+    _git(repo, "add", "consumer-tests.txt")
+    _git(repo, "commit", "-m", "tracked")
+    path.write_bytes(b"changed\r\n")
+    with pytest.raises(GitByteConsistencyError, match="PREVERIFY_TRACKED_FILTER_MISMATCH"):
+        stabilize_candidate_newlines_before_verify(
+            repo, ["consumer-tests.txt"], allowed_paths=["consumer-tests.txt"])
+    assert path.read_bytes() == b"changed\r\n"
+
+
+def test_out_of_scope_filter_is_not_auto_rewritten(tmp_path: Path) -> None:
+    from ai_commerce.engineering.git_byte_consistency import (
+        stabilize_candidate_newlines_before_verify,
+    )
+
+    repo = _repo(tmp_path)
+    path = repo / "unowned.txt"
+    raw = b"not owned\r\n"
+    path.write_bytes(raw)
+    with pytest.raises(GitByteConsistencyError, match="PREVERIFY_OUT_OF_SCOPE_FILTER"):
+        stabilize_candidate_newlines_before_verify(
+            repo, ["unowned.txt"], allowed_paths=["owned"])
+    assert path.read_bytes() == raw
+
+
+def test_existing_json_evidence_crlf_stays_raw(tmp_path: Path) -> None:
+    from ai_commerce.engineering.git_byte_consistency import (
+        stabilize_candidate_newlines_before_verify,
+    )
+
+    repo = _repo(tmp_path)
+    path = repo / "evidence.json"
+    raw = b'{"stage":"verified"}\r\n'
+    path.write_bytes(raw)
+    assert stabilize_candidate_newlines_before_verify(
+        repo, ["evidence.json"], allowed_paths=["evidence.json"]) == []
+    assert path.read_bytes() == raw
