@@ -688,3 +688,21 @@ def test_artifact_redirect_rejects_untrusted_location(gate, monkeypatch, redirec
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("NOT_ALLOWED")))
     with pytest.raises(ValueError, match="ARTIFACT_REDIRECT_HOST_INVALID"):
         client.read_artifact(1)
+
+
+
+def test_hostops_v3_queue_workflow_is_explicitly_trusted_gate_coverage(gate):
+    """New workflow changes need exact signed queue and merge-gate tests."""
+    path = ".github/workflows/hostops-v3.yml"
+    reviewed = gate.reviewed_coverage_for_changed_files([
+        {"filename": path, "status": "added"},
+    ])
+    assert reviewed is not None
+    changed, required = reviewed
+    assert changed == (path,)
+    assert set(required) == {
+        "tests/test_hostops_v3_integration.py", "tests/test_pr_merge_gate.py",
+    }
+    assert gate.reviewed_coverage_for_changed_files([
+        {"filename": ".github/workflows/unreviewed-hostops.yml", "status": "added"},
+    ]) is None
