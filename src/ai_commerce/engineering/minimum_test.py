@@ -153,6 +153,18 @@ def approved_groups() -> tuple[TestGroup, ...]:
                              "contracts/CommercialReview.v1.schema.json",
                              "work_items/A16-SETTLEMENT-EVIDENCE-001.json",
                              "docs/engineering/A16_IMPLEMENTATION_REPORT.md")),
+        # A17.1: pre-dispatch owner registration ONLY. Sentinel tests prove NOT IMPLEMENTED.
+        TestGroup("a17-1", ("tests/test_a17_variants.py", "tests/test_a17_feedback.py"),
+                  ("A17.C07.C10.E06.offline-creative-learning",),
+                  sources("creative_scaling", "__init__ variants learning_bridge feedback schemas"),
+                  consumers=("src/ai_commerce/composition/authoring.py",
+                             "src/ai_commerce/composition/models.py",
+                             "src/ai_commerce/learning/export.py",
+                             "src/ai_commerce/operations/cost_ledger.py"),
+                  contracts=("contracts/CreativeVariantBatch.v1.schema.json",
+                             "contracts/CreativeFeedbackProposal.v1.schema.json",
+                             "work_items/A17-1-CREATIVE-LEARNING-001.json",
+                             "docs/engineering/A17_1_IMPLEMENTATION_REPORT.md")),
         TestGroup("a05", ("tests/test_a05_composition.py", "tests/test_a05_render.py", "tests/test_a05_integration.py",
                           "tests/test_creative_asset_link_v11.py"), ("A05.composition-and-render",),
                   sources("composition", "__init__ _validation authoring compiler models sources store")

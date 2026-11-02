@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-commerce:CreativeVariantBatch:v1",
+  "title": "CreativeVariantBatch.v1 — invalid pre-implementation sentinel",
+  "description": "Reject all documents until A17.1 EF02 implementation replaces this placeholder.",
+  "not": {}
+}

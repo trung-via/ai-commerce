@@ -392,5 +392,15 @@
     "-q",
     "-n",
     "12"
+  ],
+  "mt01-a17-1-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_a17_variants.py",
+    "tests/test_a17_feedback.py",
+    "-q",
+    "-n",
+    "12"
   ]
 }
