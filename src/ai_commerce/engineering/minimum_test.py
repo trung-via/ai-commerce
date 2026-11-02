@@ -231,8 +231,9 @@ def approved_groups() -> tuple[TestGroup, ...]:
                   (rem + "worker.py", rem + "transport.py", rem + "github_read_retry.py")),
         TestGroup("hostops-v1", ("tests/test_hostops_request.py",), ("HOSTOPS.v1.readonly",),
                   ("scripts/hostops_request.py",)),
-        TestGroup("hostops-v2", ("tests/test_hostops_v2.py",), ("HOSTOPS.v2.typed-operations",),
-                  ("scripts/hostops_v2.py",)),
+        TestGroup("hostops-v2", ("tests/test_hostops_v2.py", "tests/test_hostops_ef02_202_recovery.py"),
+                  ("HOSTOPS.v2.typed-operations",),
+                  ("scripts/hostops_v2.py", "scripts/hostops_ef02_202_recovery.py")),
         TestGroup("ef02-wake", tuple("tests/" + name + ".py" for name in (
             "test_ef02_wake_d1", "test_ef02_wake_d2", "test_ef02_cdp_doorbell", "test_ef02_plugin_selection_probe", "test_ef02_plugin_turn_handoff", "test_ef02_plugin_turn_store", "test_ef02_plugin_turn_stage_only", "test_ef02_plugin_turn_send_once", "test_ef02_plugin_turn_cli", "test_ef02_plugin_turn_evidence", "test_ef02_d3_github_artifact_authority",
             "test_ef02_d3_signed_origin_consent", "test_ef02_d3_two_grant_delivery", "test_ef02_d5_chrome_acquisition",

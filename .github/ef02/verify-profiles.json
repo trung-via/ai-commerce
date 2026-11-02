@@ -319,6 +319,16 @@
     "-m",
     "pytest",
     "tests/test_hostops_v2.py",
+    "tests/test_hostops_ef02_202_recovery.py",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "mt01-merge-queue-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_pr_merge_gate.py",
     "-q",
     "-n",
     "12"
