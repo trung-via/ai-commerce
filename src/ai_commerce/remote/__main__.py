@@ -12,6 +12,7 @@ from .transport import GitHubTransport
 from .worker import LocalBatchWorker, _write_json
 from .reuse import load_approved_candidates
 from .scheduler import run_schedule
+from .reporting import format_batch_summary
 from .completion_event import build_completion_event
 from .local_completion_handoff import start_worker_signal
 
@@ -66,20 +67,15 @@ def main(argv: list[str] | None = None) -> int:
                               max_workers=min(host_slots, requested))
         report["host_parallel_slots"] = host_slots
         report["github_workflow_run_id"] = os.environ.get("GITHUB_RUN_ID")
+        report["github_workflow_run_attempt"] = os.environ.get("GITHUB_RUN_ATTEMPT")
         report["github_issue_number"] = args.issue_number or None
         report["feedback_status"] = "NOT_ATTEMPTED"
         result_path = worker.root / "batch_result.json"
         # This deliberately reports delivery uncertainty without rerunning model calls.
         if args.issue_number:
-            summary = ["EF02 batch " + batch["batch_id"] + ": " + report["status"],
-                       "GitHub workflow run: " + str(report["github_workflow_run_id"] or "UNKNOWN"),
-                       "Results: " + str(report["succeeded"]) + "/" + str(report["total"])]
-            for item in report["actions"]:
-                summary.append("- " + item["action_id"] + ": " + item["status"] +
-                               (" (" + item.get("candidate_ref", "") + ")" if item.get("candidate_ref") else ""))
-            summary.append("Full per-attempt diagnostics are in this workflow's artifact.")
             try:
-                github.comment(args.issue_number, "\n".join(summary))
+                summary = format_batch_summary(report, repository=repo)
+                github.comment(args.issue_number, summary)
                 report["feedback_status"] = "GITHUB_ISSUE_COMMENT_PUBLISHED"
             except Exception as exc:
                 report["feedback_status"] = "FEEDBACK_PUBLICATION_FAILED"

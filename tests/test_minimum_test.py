@@ -48,6 +48,17 @@ def test_reviewed_map_contains_exact_real_paths_and_all_current_python_test_fami
     assert "a13" in {g.name for g in real_tree.groups}
 
 
+def test_hostops_is_registered_as_separate_component_profile(real_tree):
+    group = next(g for g in real_tree.groups if g.name == "hostops")
+    assert group.tests == ("tests/test_hostops_request.py",)
+    assert "scripts/hostops_request.py" in group.paths
+    assert "scripts/HostOps-Diagnostics.ps1" in group.paths
+    current = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_text(encoding="utf-8"))
+    assert current["mt01-hostops-tests"] == [
+        "python", "-m", "pytest", "tests/test_hostops_request.py", "-q", "-n", "12"
+    ]
+
+
 @pytest.mark.parametrize("path,expected", [
     ("tests/test_a13_evidence_pack.py", "a13"),
     ("tests/test_a12_claims.py", "a12"),
