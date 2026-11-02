@@ -90,6 +90,28 @@ class WakePanel:
             "server_receipt_proven": False,
         }
 
+    def inspect_exact_chat(self):
+        """On-demand read-only CDP tab census: no navigation, no Send."""
+        binding = self._route()
+        if binding is None:
+            return {"code": "ROUTE_UNAVAILABLE"}
+        try:
+            if self.tcp_probe() is not True:
+                return {"code": "CHROME_9333_NOT_REACHABLE"}
+            with self.inventory_factory().pages(binding.cdp_endpoint) as pages:
+                matches = [page for page in pages
+                           if isinstance(page.url, str) and
+                           page.url.rstrip("/") == binding.chat_url]
+                if len(matches) > 1:
+                    code = "EXACT_CHAT_AMBIGUOUS"
+                elif len(matches) == 1:
+                    code = "EXACT_CHAT_PRESENT"
+                else:
+                    code = "EXACT_CHAT_NOT_OPEN"
+                return {"code": code}
+        except Exception:
+            return {"code": "CDP_INSPECTION_UNAVAILABLE"}
+
     def open_exact_chat(self):
         # Only entered by an independently authorized same-origin UI click.
         with self._lock:
@@ -151,7 +173,8 @@ a{color:var(--blue)}
 <p>Chrome CDP 9333 · Mở đúng cuộc trò chuyện · Không tự gửi Wake</p>
 <div class="grid">
 <section class="card"><div class="label">Chrome 9333</div><div class="value" id="tcp">Đang đọc…</div>
-<small>TCP không chứng minh danh tính Chrome.</small></section>
+<small>TCP không chứng minh danh tính Chrome.</small><br>
+<small id="chat">Chưa kiểm tra tab</small></section>
 <section class="card"><div class="label">Private Route</div><div class="value" id="route">Đang đọc…</div>
 <small>Không hiển thị URL riêng tư.</small></section>
 <section class="card"><div class="label">Ledger</div><div class="value" id="phase">Đang đọc…</div>
@@ -163,6 +186,7 @@ a{color:var(--blue)}
 <section class="card wide"><h2>Hành động được phép</h2>
 <div class="value" id="next">Đang xác minh…</div>
 <div class="controls"><button id="open" disabled>Mở chat chính xác</button>
+<button id="inspect" class="secondary">Kiểm tra tab (chỉ đọc)</button>
 <button id="refresh" class="secondary">Làm mới</button></div>
 <p id="result" role="status" aria-live="polite"></p>
 <p><small>Chỉ mở tab đã đăng ký. Prepare @ plugin, Send Once và Observe Reply vẫn
@@ -184,6 +208,11 @@ PRIVATE_LEDGER_UNAVAILABLE:"Kiểm tra ledger",
 CHECK_ENROLLED_ROUTE:"Kiểm tra route",
 CHECK_CHROME_9333:"Kiểm tra Chrome 9333",
 INSPECT_NAVIGATION_UNKNOWN:"Kiểm tra tab thủ công",
+EXACT_CHAT_PRESENT:"Đã có tab đúng URL",EXACT_CHAT_NOT_OPEN:"Chưa mở tab đúng URL",
+EXACT_CHAT_AMBIGUOUS:"Nhiều tab trùng — cần xử lý thủ công",
+CHROME_9333_NOT_REACHABLE:"Chrome 9333 chưa kết nối",
+ROUTE_UNAVAILABLE:"Chưa xác minh route",
+CDP_INSPECTION_UNAVAILABLE:"Không thể kiểm tra CDP",
 OPEN_EXACT_CHAT_THEN_PREPARE:"Mở đúng chat → Prepare @ plugin"};
 function display(x){return label[x]||"Chưa rõ"}
 async function refresh(){try{
@@ -197,6 +226,15 @@ n.classList.toggle("active",s.turn_index===i&&s.phase==="READY");
 n.classList.toggle("done",s.turn_index>i);});
 }catch(e){el("next").textContent="Không đọc được trạng thái";el("open").disabled=true;}}
 el("refresh").onclick=refresh;
+el("inspect").onclick=async()=>{
+el("inspect").disabled=true;
+try{
+const r=await fetch("/api/inspect-chat",{cache:"no-store"});
+if(!r.ok)throw Error();
+const s=await r.json();el("chat").textContent=display(s.code);
+}catch(e){el("chat").textContent="Không thể xác minh tab";}
+el("inspect").disabled=false;
+};
 el("open").onclick=async()=>{el("open").disabled=true;
 el("result").textContent="Đang mở tab đã đăng ký…";
 try{const r=await fetch("/api/open-chat",{method:"POST",
@@ -247,6 +285,8 @@ def make_handler(panel: WakePanel, *, port: int, token: str):
                 return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
             if self.path == "/api/status":
                 return self._json(200, panel.status())
+            if self.path == "/api/inspect-chat":
+                return self._json(200, panel.inspect_exact_chat())
             return self._json(404, {"code": "NOT_FOUND"})
 
         def do_POST(self):

@@ -526,3 +526,50 @@ def test_wake_panel_http_security_and_ui_has_no_send():
     assert "/api/open-chat" in ui._HTML and "Wake Control Center" in ui._HTML
     assert "/api/send" not in ui._HTML
     assert "__TOKEN__" in ui._HTML
+
+
+def test_wake_panel_readonly_exact_chat_census_without_navigation():
+    from contextlib import contextmanager
+    from ai_commerce.remote import wake_control_center as ui
+    from ai_commerce.remote.conversation_binding import ResolvedBinding
+    binding = ResolvedBinding("private", 1,
+        "https://chatgpt.com/c/00000000-0000-0000-0000-000000000001",
+        "http://127.0.0.1:9333")
+    other = "https://chatgpt.com/c/00000000-0000-0000-0000-000000000002"
+    pages = [SimpleNamespace(url=other)]
+    calls = []
+    class Inventory:
+        @contextmanager
+        def pages(self, endpoint):
+            assert endpoint == binding.cdp_endpoint
+            calls.append("inspect")
+            yield pages
+        def preload(self, *_args, **_kwargs):
+            pytest.fail("inspection may not navigate")
+    panel = ui.WakePanel(
+        store=SimpleNamespace(read=lambda: {"phase":"READY","turn_index":0}),
+        route_reader=lambda: binding, tcp_probe=lambda: True,
+        inventory_factory=Inventory)
+    assert panel.inspect_exact_chat() == {"code":"EXACT_CHAT_NOT_OPEN"}
+    pages.append(SimpleNamespace(url=binding.chat_url))
+    assert panel.inspect_exact_chat() == {"code":"EXACT_CHAT_PRESENT"}
+    pages.append(SimpleNamespace(url=binding.chat_url))
+    assert panel.inspect_exact_chat() == {"code":"EXACT_CHAT_AMBIGUOUS"}
+    assert calls == ["inspect"] * 3
+    assert binding.chat_url not in json.dumps(panel.inspect_exact_chat())
+
+
+def test_wake_panel_inspection_denied_without_route_or_tcp():
+    from ai_commerce.remote import wake_control_center as ui
+    from ai_commerce.remote.conversation_binding import ResolvedBinding
+    b = ResolvedBinding("private", 1,
+        "https://chatgpt.com/c/00000000-0000-0000-0000-000000000001",
+        "http://127.0.0.1:9333")
+    def forbidden():
+        pytest.fail("must not inspect without TCP or route")
+    p = ui.WakePanel(store=SimpleNamespace(read=lambda: {"phase":"READY","turn_index":0}),
+        route_reader=lambda: None, tcp_probe=lambda: True, inventory_factory=forbidden)
+    assert p.inspect_exact_chat() == {"code":"ROUTE_UNAVAILABLE"}
+    p.route_reader = lambda: b
+    p.tcp_probe = lambda: False
+    assert p.inspect_exact_chat() == {"code":"CHROME_9333_NOT_REACHABLE"}
