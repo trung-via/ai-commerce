@@ -18,6 +18,11 @@ from .plugin_turn_cli import _fresh_main_sha
 
 _ROLES = ("BRAIN", "ENGINEERING", "BRAIN")
 _GOOD = frozenset(("EXACT_CHAT_OPENED", "EXACT_CHAT_PRESENT"))
+_UNCERTAIN = frozenset((
+    "PRELOAD_NAVIGATION_UNKNOWN", "PRELOAD_NAVIGATION_UNVERIFIED",
+    "PRELOAD_CDP_UNAVAILABLE", "PRELOAD_EXACT_CHAT_AMBIGUOUS",
+    "PRELOAD_CONTEXT_AMBIGUOUS",
+))
 
 
 def _tcp_9333() -> bool:
@@ -135,8 +140,7 @@ class WakePanel:
             except Exception:
                 preloaded = "PRELOAD_CDP_UNAVAILABLE"
             if preloaded not in _GOOD:
-                if preloaded in ("PRELOAD_NAVIGATION_UNKNOWN",
-                                 "PRELOAD_CDP_UNAVAILABLE"):
+                if preloaded in _UNCERTAIN:
                     self._uncertain = True
                 return {"code": preloaded if preloaded.startswith("PRELOAD_")
                         else "PRELOAD_UNAVAILABLE", "sent": False}
@@ -195,7 +199,7 @@ class WakePanel:
                     binding, current_binding=self.route_reader)
             except Exception:
                 code = "PRELOAD_CDP_UNAVAILABLE"
-            if code in ("PRELOAD_NAVIGATION_UNKNOWN", "PRELOAD_CDP_UNAVAILABLE"):
+            if code in _UNCERTAIN:
                 # No automatic retry, even if the new tab partially navigated.
                 self._uncertain = True
             if code not in _GOOD and not code.startswith("PRELOAD_"):

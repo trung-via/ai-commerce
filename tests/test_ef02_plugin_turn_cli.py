@@ -642,3 +642,28 @@ def test_wake_panel_prepare_refuses_changed_source_unknown_and_stale_ledger():
     assert p.prepare_turn("PREPARE-D5-BRAIN-0")["code"] == "PREPARE_NOT_ELIGIBLE"
     state["phase"] = "SUBMISSION_UNKNOWN"
     assert p.prepare_turn("PREPARE-D5-BRAIN-0")["code"] == "PREPARE_NOT_ELIGIBLE"
+
+
+
+def test_wake_panel_redirect_or_duplicate_preload_requires_manual_reconciliation():
+    from ai_commerce.remote import wake_control_center as ui
+    from ai_commerce.remote.conversation_binding import ResolvedBinding
+    route = ResolvedBinding("private", 1,
+        "https://chatgpt.com/c/00000000-0000-0000-0000-000000000001",
+        "http://127.0.0.1:9333")
+    for outcome in ("PRELOAD_NAVIGATION_UNVERIFIED",
+                    "PRELOAD_EXACT_CHAT_AMBIGUOUS",
+                    "PRELOAD_CONTEXT_AMBIGUOUS"):
+        calls=[]
+        class Inventory:
+            def preload(self, *_args, **_kwargs):
+                calls.append(outcome)
+                return outcome
+        panel = ui.WakePanel(
+            store=SimpleNamespace(read=lambda: {"phase":"READY","turn_index":0}),
+            route_reader=lambda: route, tcp_probe=lambda: True,
+            inventory_factory=Inventory)
+        assert panel.open_exact_chat()["code"] == outcome
+        assert panel.status()["can_open"] is False
+        assert panel.open_exact_chat()["code"] == "NOT_READY"
+        assert calls == [outcome]
