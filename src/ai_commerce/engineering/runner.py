@@ -11,6 +11,7 @@ import os
 import posixpath
 import re
 import subprocess
+import tempfile
 import threading
 import time
 from subprocess import list2cmdline
@@ -616,6 +617,25 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         save("transport_instruction", "transport_instruction.txt", compact.encode("utf-8"))
     # Hook configuration applies only to the executor; EF02 owns publication.
     child_env = git_write_guard_env(directory, repo=repo, git_executable=git_executable or "git")
+    # EF01 owns provider-side pytest scratch, not the source worktree. The
+    # plugin redirects even an executor-supplied relative --basetemp, so a
+    # fixture's generated keys/logs cannot pollute Git scope observations.
+    scratch = tempfile.TemporaryDirectory(prefix="ai-commerce-ef01-pytest-",
+                                          ignore_cleanup_errors=True)
+    scratch_root = Path(scratch.name).resolve()
+    if scratch_root == repo or repo in scratch_root.parents:
+        scratch.cleanup()
+        raise RuntimeError("EF01_TEST_TEMP_INSIDE_SOURCE")
+    child_env.update({
+        "TMP": str(scratch_root), "TEMP": str(scratch_root), "TMPDIR": str(scratch_root),
+        "AI_COMMERCE_EF01_WORKTREE": str(repo),
+        "AI_COMMERCE_EF01_PYTEST_BASETEMP_ROOT": str(scratch_root),
+    })
+    temp_plugin = "ai_commerce.engineering.pytest_temp_guard"
+    existing_plugins = [p.strip() for p in child_env.get("PYTEST_PLUGINS", "").split(",") if p.strip()]
+    if temp_plugin not in existing_plugins:
+        existing_plugins.append(temp_plugin)
+    child_env["PYTEST_PLUGINS"] = ",".join(existing_plugins)
     budget = _remaining(deadline, timeout_seconds)
     boundary = {
         "kind": "AI_COMMERCE_EF01_PROVIDER_BOUNDARY", "version": 1,
@@ -665,6 +685,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         err = str(exc).encode("utf-8")
         inv.update(status="EXECUTOR_PERMISSION_DENIED", error_code="EXECUTOR_PERMISSION_DENIED")
     finally:
+        scratch.cleanup()
         inv["executor_finished_at"] = _now()
         save("executor_stdout", "executor.stdout.log", out)
         save("executor_stderr", "executor.stderr.log", err)
