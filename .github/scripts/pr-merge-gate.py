@@ -413,13 +413,13 @@ def reviewed_manifest_groups_for_pr(api: Callable, base: str, head: str,
         if any(not (p.startswith("src/ai_commerce/") and p.endswith(".py")
                      and not p.startswith(("src/ai_commerce/engineering/",
                                            "src/ai_commerce/remote/"))
-                     and re.fullmatch(r"[A-Za-z0-9_/-]+\\.py", p))
+                     and re.fullmatch(r"[A-Za-z0-9_/-]+\.py", p))
                for p in sources):
             raise ValueError("ONBOARD_MANIFEST_BAD_SOURCE")
-        if any(not re.fullmatch(r"tests/test_[A-Za-z0-9_]+\\.py", p) for p in tests):
+        if any(not re.fullmatch(r"tests/test_[A-Za-z0-9_]+\.py", p) for p in tests):
             raise ValueError("ONBOARD_MANIFEST_BAD_TEST")
         if any(not (p.startswith("src/ai_commerce/") and p.endswith(".py")
-                     and re.fullmatch(r"[A-Za-z0-9_/-]+\\.py", p))
+                     and re.fullmatch(r"[A-Za-z0-9_/-]+\.py", p))
                for p in consumers):
             raise ValueError("ONBOARD_MANIFEST_BAD_CONSUMER")
         if any(not (p.startswith("contracts/") and p.endswith(".schema.json")
