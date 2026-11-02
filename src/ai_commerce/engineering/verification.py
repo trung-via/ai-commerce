@@ -226,6 +226,11 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
             code = 1 if determinate else (result.returncode if result.returncode not in (0, 1) else 3)
             if not determinate:
                 break
+    if code == 0 and plan.get("post_test_coverage_gaps"):
+        # A passing registered pytest suite is real evidence, but it cannot
+        # silently certify unknown ACs or scripts outside Python coverage.
+        plan["final_coverage_status"] = "UNPROVEN_AFTER_REGISTERED_FULL"
+        code = 5
     finish()
     if not stdout and all(e["state"] == "REUSE" for e in plan["groups"]):
         stdout = [b"MT01: all applicable groups have strict prior successful evidence\n"]
