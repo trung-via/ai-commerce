@@ -153,7 +153,7 @@ def test_companion_report_has_exact_reviewed_parallel_commands(real_tree):
             # Preserve the immutable historical profile while registering the
             # newly committed read-only recovery test under a reviewed alias.
             assert current["mt01-hostops-v2-recovery-tests"] == expected
-            assert current[key] == proposed[key]
+            assert current[key] == ["python", "-m", "pytest", "tests/test_hostops_v2.py", "-q", "-n", "12"]
         elif key in combined:
             assert combined[key] == expected
         else:
