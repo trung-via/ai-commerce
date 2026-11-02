@@ -336,6 +336,17 @@
     "-n",
     "12"
   ],
+  "mt01-hostops-v3-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_hostops_v3.py",
+    "tests/test_hostops_v3_integration.py",
+    "tests/test_hostops_v3_repair.py",
+    "-q",
+    "-n",
+    "12"
+  ],
   "mt01-merge-queue-tests": [
     "python",
     "-m",
