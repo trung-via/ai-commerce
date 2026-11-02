@@ -536,3 +536,86 @@ def test_candidate_new_component_not_admitted_without_brain_review_or_all_requir
     no_brain = NewComponentAPI(gate, ci="completed", approval=False)
     assert gate.process(no_brain, no_brain.repo, _ci_event(gate))[0]["reason"] == "NO_ACTIVE_BRAIN_PASS"
     assert not no_brain.writes
+
+
+
+def test_new_component_onboarding_end_to_end_complete_both_os_junit_can_merge(gate, monkeypatch):
+    """Synthetic only: assert base-trusted gate admits new code after ALL proofs.
+
+    This exercises the full decision path, not just a helper-level happy path.
+    Real GitHub artifacts and owner-backed comments remain separately required.
+    """
+    import base64
+    import hashlib
+    import io
+    import json
+    import zipfile
+    from ai_commerce.engineering.minimum_test import approved_groups
+
+    base_source, candidate, changed = _onboarding_fixture()
+    monkeypatch.setattr(gate, "approved_groups", approved_groups)
+    entries = gate.review_new_component_registry(
+        base_source, candidate, changed, approved_groups())
+    checked = gate.reviewed_coverage_for_changed_files(changed, onboarded_groups=entries)
+    assert checked is not None
+    changed_paths, required = checked
+    assert "tests/test_a15_operations.py" in required
+    assert "tests/test_minimum_test.py" in required
+    raw = candidate.encode()
+    sha = hashlib.sha1(b"blob " + str(len(raw)).encode() + b"\0" + raw).hexdigest()
+
+    class CompleteNewComponentAPI(FakeGitHub):
+        def __call__(self, path, method="GET", body=None):
+            if path == (f"/repos/{self.repo}/contents/"
+                        f"src/ai_commerce/engineering/minimum_test.py?ref={self.head}"):
+                return {"type": "file", "encoding": "base64",
+                        "content": base64.b64encode(raw).decode(), "sha": sha}
+            if path == f"/repos/{self.repo}/pulls/{self.pr}/files?per_page=100":
+                return changed
+            return super().__call__(path, method, body)
+
+        def read_artifact(self, artifact_id):
+            os_name = {1000: "ubuntu-latest", 1001: "windows-latest"}[artifact_id]
+            plan = {
+                "version": 2, "base_sha": self.base,
+                "candidate_sha": "c" * 40, "mode": "TARGETED",
+                "changed_paths": list(changed_paths), "selected_tests": list(required),
+            }
+            plan_bytes = json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()
+            cases = [(path.removesuffix(".py").replace("/", ".") + "::test_new_component",
+                      path.removesuffix(".py").replace("/", "."))
+                     for path in required]
+            xml = ("<testsuites><testsuite>" + "".join(
+                f'<testcase classname="{cls}" name="test_new_component"/>'
+                for _, cls in cases) + "</testsuite></testsuites>").encode()
+            receipt = {
+                "schema": "MT01_VERIFICATION_EVIDENCE_V2",
+                "source_sha": "c" * 40, "base_sha": self.base,
+                "pr_head_sha": self.head,
+                "platform": "Linux" if os_name == "ubuntu-latest" else "Windows",
+                "selection_mode": "TARGETED", "selected_test_files": list(required),
+                "plan_sha256": hashlib.sha256(plan_bytes).hexdigest(),
+                "selector_sha256": "a" * 64, "registry_sha256": "b" * 64,
+                "chunks": [{
+                    "test_files": list(required), "exit_code": 0,
+                    "junit_sha256": hashlib.sha256(xml).hexdigest(),
+                    "testcases": len(cases),
+                    "counts": {"passed": len(cases), "skipped": 0,
+                               "failed": 0, "errors": 0},
+                    "observed_cases": [name for name, _ in cases],
+                }],
+                "collected_count": len(cases), "executed_count": len(cases),
+                "passed_count": len(cases), "skipped_count": 0,
+                "failed_count": 0, "error_count": 0,
+            }
+            data = io.BytesIO()
+            with zipfile.ZipFile(data, "w", zipfile.ZIP_DEFLATED) as output:
+                output.writestr("plan.json", json.dumps(plan))
+                output.writestr("evidence.json", json.dumps(receipt))
+                output.writestr("chunk-0.xml", xml)
+            return data.getvalue()
+
+    api = CompleteNewComponentAPI(gate, ci="completed")
+    verdict = gate.process(api, api.repo, _ci_event(gate))
+    assert verdict[0]["status"] == "MERGED"
+    assert len(api.writes) == 1
