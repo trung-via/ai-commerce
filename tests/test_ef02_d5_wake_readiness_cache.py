@@ -83,7 +83,8 @@ def test_cache_miss_runs_full_acquisition_once(monkeypatch):
 
 
 def test_failed_full_acquisition_is_never_replayed(monkeypatch):
-    c = cache(age=601)
+    c = cache(live={"address": "127.0.0.2", "pid": 15924,
+                    "creation": "2026-11-02T12:30:00.0000000Z", "session": 1})
     c.env = object()
     calls = []
     def fail(env, *, launch, opt_in):
