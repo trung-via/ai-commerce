@@ -482,6 +482,7 @@ def select_plan(*, repo: Path, base_sha: str, base_files: Mapping[str, str],
             required_acs=required_acs, fallback_argv=fallback_argv,
             groups=groups, registered_profiles=registered_profiles,
             aggregate_sources=aggregate_sources, env=env,
+            allowed_paths=allowed_paths,
         )
     graph, imports_complete = import_graph(repo, candidate_files)
     # Runtime schema/file reads have no Python import edge. Bind the declared
