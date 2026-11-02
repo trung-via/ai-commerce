@@ -70,6 +70,11 @@ class Page:
             assert args["phase"] == "FULL_NAME"
             return "FULL_NAME_PRESENT" if self.text in (
                 args["full"], args["name"]) else "FULL_NAME_UNPROVEN"
+        if script == stage._SEND_PRECHECK:
+            return ("READY" if self.chip and
+                    self.text == args["prompt"] and
+                    self.observed != "DRAFT_MISMATCH"
+                    else "DRAFT_MISMATCH")
         if self.observed is not None:
             return self.observed
         assert self.chip
@@ -213,3 +218,33 @@ def test_stage_source_has_no_send_or_wake_hooks():
     assert "subprocess" not in source
     assert "send_one(" not in source
     assert "page.goto(" not in source
+
+
+def test_prepare_turn_stages_one_chip_and_exact_prompt_without_send():
+    from ai_commerce.remote.plugin_turn_handoff import preview_next_turn
+
+    page = Page()
+    state = session(index=1)
+    result = stage.ExplicitTurnChipStager(
+        enabled=True, inventory=Inventory(page)).stage(
+            BIND, state, operator_approved=True, include_prompt=True)
+    assert result.code == "TURN_PREPARED_NO_SEND" and result.sent is False
+    assert result.host_selection_proven is False
+    assert ("type", preview_next_turn(state)["prompt"]) in page.actions
+    assert page.actions.count(("press", "Space")) == 1
+
+
+def test_prepare_turn_bad_exact_draft_stops_without_click():
+    page = Page(observed="DRAFT_MISMATCH")
+    # Fake structural chip observation and failed drafted-text validation.
+    old_eval = page.evaluate
+    def bad_after_chip(script, args):
+        if script == stage._SEND_PRECHECK:
+            return "DRAFT_MISMATCH"
+        return old_eval(script, args)
+    page.evaluate = bad_after_chip
+    result = stage.ExplicitTurnChipStager(
+        enabled=True, inventory=Inventory(page)).stage(
+            BIND, session(), operator_approved=True, include_prompt=True)
+    assert result.code == "DRAFT_UNVERIFIED_CLEAR_MANUALLY"
+    assert result.sent is False
