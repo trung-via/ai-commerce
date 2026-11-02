@@ -132,6 +132,16 @@ def approved_groups() -> tuple[TestGroup, ...]:
                   ("A04.media-and-operations",),
                   sources("media", "__init__ base fake_generation files generation local provenance")
                   + sources("operations", "__init__ errors generation manifest registry runner")),
+        # A15 Phase 4: offline cost, retry safety, truthful operations summary.
+        TestGroup("a15", ("tests/test_a15_operations.py",),
+                  ("A15.cost-and-idempotency",),
+                  sources("operations", "cost_ledger retry_guard status_report a15_cli"),
+                  consumers=("src/ai_commerce/operations/manifest.py",
+                             "src/ai_commerce/operations/generation.py",
+                             "src/ai_commerce/operations/runner.py",
+                             "src/ai_commerce/operations/registry.py"),
+                  contracts=("work_items/A15-OPERATIONS-COST-001.json",
+                             "docs/engineering/A15_IMPLEMENTATION_REPORT.md")),
         TestGroup("a05", ("tests/test_a05_composition.py", "tests/test_a05_render.py", "tests/test_a05_integration.py",
                           "tests/test_creative_asset_link_v11.py"), ("A05.composition-and-render",),
                   sources("composition", "__init__ _validation authoring compiler models sources store")

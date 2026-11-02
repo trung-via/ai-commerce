@@ -417,20 +417,20 @@ def test_brain_pass_exact_identity_and_revision(gate):
 def _onboarding_fixture():
     import pathlib
     main = (ROOT / "src/ai_commerce/engineering/minimum_test.py").read_text(encoding="utf-8")
-    insert = '''        TestGroup("a15", ("tests/test_a15_operations.py",),
-                  ("A15.offline-operations",),
-                  sources("operations", "cost_ledger"),
+    insert = '''        TestGroup("a99", ("tests/test_a99_operations.py",),
+                  ("A99.offline-operations",),
+                  sources("operations", "new_component_fixture"),
                   consumers=("src/ai_commerce/operations/runner.py",),
-                  contracts=("docs/engineering/A15_IMPLEMENTATION_REPORT.md",)),
+                  contracts=("docs/engineering/A99_SYNTHETIC.md",)),
 '''
     anchor = '        TestGroup("a05",'
     assert main.count(anchor) == 1
     candidate = main.replace(anchor, insert + anchor, 1)
     files = [
         {"filename": "src/ai_commerce/engineering/minimum_test.py", "status": "modified"},
-        {"filename": "src/ai_commerce/operations/cost_ledger.py", "status": "added"},
-        {"filename": "tests/test_a15_operations.py", "status": "added"},
-        {"filename": "docs/engineering/A15_IMPLEMENTATION_REPORT.md", "status": "added"},
+        {"filename": "src/ai_commerce/operations/new_component_fixture.py", "status": "added"},
+        {"filename": "tests/test_a99_operations.py", "status": "added"},
+        {"filename": "docs/engineering/A99_SYNTHETIC.md", "status": "added"},
     ]
     return main, candidate, files
 
@@ -440,13 +440,13 @@ def test_new_component_generic_additive_owner_accepted_without_executing_candida
     main, candidate, changed = _onboarding_fixture()
     admitted = gate.review_new_component_registry(main, candidate, changed, trusted_groups())
     assert len(admitted) == 1
-    assert admitted[0]["name"] == "a15"
-    assert admitted[0]["paths"] == ("src/ai_commerce/operations/cost_ledger.py",)
+    assert admitted[0]["name"] == "a99"
+    assert admitted[0]["paths"] == ("src/ai_commerce/operations/new_component_fixture.py",)
     monkeypatch.setattr(gate, "approved_groups", trusted_groups)
     assert gate.reviewed_coverage_for_changed_files(changed) is None  # main-only remains closed
     reviewed = gate.reviewed_coverage_for_changed_files(changed, onboarded_groups=admitted)
     assert reviewed is not None
-    assert "tests/test_a15_operations.py" in reviewed[1]
+    assert "tests/test_a99_operations.py" in reviewed[1]
     assert "tests/test_minimum_test.py" in reviewed[1]
     # Unowned second source cannot hide behind a legitimate owner declaration.
     assert gate.reviewed_coverage_for_changed_files(
@@ -481,15 +481,15 @@ def test_new_component_admission_fails_closed_negative_cases(gate, broken):
     elif broken == "not_added_source":
         files[1]["status"] = "modified"
     elif broken == "steal_base_test":
-        candidate = candidate.replace('"tests/test_a15_operations.py"',
+        candidate = candidate.replace('"tests/test_a99_operations.py"',
                                       '"tests/test_a04_media_operations.py"', 1)
         files[2]["filename"] = "tests/test_a04_media_operations.py"
     elif broken == "stolen_source":
-        candidate = candidate.replace('sources("operations", "cost_ledger")',
+        candidate = candidate.replace('sources("operations", "new_component_fixture")',
                                       'sources("operations", "runner")', 1)
         files[1]["filename"] = "src/ai_commerce/operations/runner.py"
     elif broken == "malicious_group_expr":
-        candidate = candidate.replace('sources("operations", "cost_ledger")',
+        candidate = candidate.replace('sources("operations", "new_component_fixture")',
                                       '__import__("os").system("forbidden")', 1)
     else:
         files[0]["status"] = "removed"
@@ -535,7 +535,7 @@ def test_candidate_new_component_not_admitted_without_brain_review_or_all_requir
             return super().__call__(path, method, body)
     api = NewComponentAPI(gate, ci="completed")
     # The main owner never imports candidate; onboarding is demonstrably
-    # admitted, but existing self-consistent receipt omits required A15 cases.
+    # admitted, but existing self-consistent receipt omits required A99 cases.
     assert gate.onboarded_groups_for_pr(api, f"/repos/{api.repo}", api.head, changed)
     verdict = gate.process(api, api.repo, _ci_event(gate))
     assert verdict[0]["status"] == "WAIT_EVIDENCE"
@@ -567,7 +567,7 @@ def test_new_component_onboarding_end_to_end_complete_both_os_junit_can_merge(ga
     checked = gate.reviewed_coverage_for_changed_files(changed, onboarded_groups=entries)
     assert checked is not None
     changed_paths, required = checked
-    assert "tests/test_a15_operations.py" in required
+    assert "tests/test_a99_operations.py" in required
     assert "tests/test_minimum_test.py" in required
     raw = candidate.encode()
     sha = hashlib.sha1(b"blob " + str(len(raw)).encode() + b"\0" + raw).hexdigest()
