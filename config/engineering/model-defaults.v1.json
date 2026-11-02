@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "hard_default": false,
+  "preferred": {
+    "executor": "codex",
+    "model": "gpt-6.1-sol",
+    "effort": "max"
+  },
+  "fallback": {
+    "executor": "antigravity",
+    "model": "gemini-3.8-flash",
+    "effort": "high"
+  },
+  "recovery_probe_cooldown_seconds": 3600
+}

@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from .profile import ExecutorSelection, SelectionError
+from .model_defaults import resolve_model, observe_result
 from .runner import execute_attempt, DEFAULT_MAX_REPAIR_ROUNDS, MAX_REPAIR_ROUNDS, DEFAULT_ACTION_TIMEOUT_SECONDS
 
 
@@ -16,9 +17,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo", required=True, type=Path)
     parser.add_argument("--work-id", required=True)
     parser.add_argument("--attempt-id", required=True)
-    parser.add_argument("--executor", required=True, choices=["codex", "antigravity"])
-    parser.add_argument("--model", required=True)
-    parser.add_argument("--effort", required=True)
+    parser.add_argument("--executor", choices=["codex", "antigravity"],
+                        help="Optional Human override; pass executor/model/effort together")
+    parser.add_argument("--model", help="Optional exact Human model override")
+    parser.add_argument("--effort", help="Optional exact Human effort override")
     parser.add_argument("--instruction-file", required=True, type=Path)
     parser.add_argument("--verify-json", required=True, type=Path,
                         help="JSON list of targeted command argv (no shell)")
@@ -54,7 +56,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        selection = ExecutorSelection(args.executor, args.model, args.effort)
+        parts = (args.executor, args.model, args.effort)
+        if any(part is not None for part in parts):
+            if not all(part is not None for part in parts):
+                raise SelectionError("HUMAN_MODEL_OVERRIDE_REQUIRES_EXECUTOR_MODEL_EFFORT")
+            decision = resolve_model(args.repo, override=ExecutorSelection(*parts))
+        else:
+            decision = resolve_model(args.repo)
+        selection = decision.selection
         prompt = args.instruction_file.read_text(encoding="utf-8-sig")
         verify = json.loads(args.verify_json.read_text(encoding="utf-8-sig"))
         if not isinstance(verify, list) or not all(isinstance(x, str) and x for x in verify):
@@ -62,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         result = execute_attempt(repo=args.repo, output_dir=args.out_dir,
                                  work_id=args.work_id, attempt_id=args.attempt_id,
                                  selection=selection, instruction=prompt, verify_argv=verify,
+                                 selection_source=decision.source,
                                  allowed_prefixes=args.allow_path,
                                  timeout_seconds=args.timeout_seconds,
                                  verify_timeout_seconds=args.verify_timeout_seconds,
@@ -78,9 +88,15 @@ def main(argv: list[str] | None = None) -> int:
     except (SelectionError, ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"EF01 INPUT/ENV ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
+    try:
+        model_state_event = observe_result(args.repo, result)
+    except (SelectionError, OSError) as exc:
+        model_state_event = "MODEL_STATE_WRITE_UNVERIFIED"
+        print(f"MODEL STATE WARNING: {type(exc).__name__}: {exc}", file=sys.stderr)
     print(json.dumps({"work_id": result["work_id"], "attempt_id": result["attempt_id"],
                       "executor": result["executor"], "model": result["model"],
-                      "effort": result["reasoning_effort"], "status": result["status"],
+                      "effort": result["reasoning_effort"], "selection_source": decision.source,
+                      "model_state_event": model_state_event, "status": result["status"],
                       "error_code": result["error_code"]}, sort_keys=True))
     # Zero means verification completed; the typed receipt still requires Brain
     # review for scope drift and is never a fully accepted build.
