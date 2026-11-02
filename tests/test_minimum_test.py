@@ -1546,3 +1546,47 @@ def test_full_profile_cannot_be_unregistered_or_narrow(tmp_path):
             human_full_suite_authorized=True,
         )
 
+
+
+def test_human_full_real_registered_xdist12_runs_then_preserves_unproven_ac(tmp_path, monkeypatch):
+    """The genuine registered pytest subprocess must run before AC hold (#238).
+
+    A one-test fixture replaces a project-wide 3,000+ test rerun. Actual xdist
+    startup/count is observed, not mocked or equated with CI's four workers.
+    """
+    import importlib.util
+    if importlib.util.find_spec("xdist") is None:
+        pytest.skip("pytest-xdist missing; CI/registered runner must supply it")
+    repo, changed = _hfull_source(tmp_path, script=True)
+    evidence = tmp_path / "verified"
+    evidence.mkdir()
+    # Avoid inheriting options from an enclosing CI pytest command.
+    monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
+    monkeypatch.delenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", raising=False)
+    refs = {}
+    def save(key, name, data):
+        (evidence / name).write_bytes(data)
+        refs[key] = name
+
+    result, plan = verification.execute_plan(
+        repo=repo, output_dir=evidence, base_sha="a" * 40,
+        base_files=mt.file_hashes(repo), changed_paths=changed,
+        required_acs=("NEW.AC",), fallback_argv=FULL12,
+        prior={}, save=save, evidence_files=refs,
+        deadline=time.monotonic() + 120, timeout_seconds=100,
+        registered_only=True, groups=(),
+        registered_profiles={"project-tests": FULL12},
+        human_full_suite_authorized=True,
+    )
+    entry = plan["groups"][0]
+    stdout = (evidence / refs["mt01_0_stdout"]).read_text()
+    assert entry["actual_argv"] == FULL12
+    assert entry["actual_exit_code"] == 0, stdout
+    assert entry["tests_executed"]["passed"] == 1, stdout
+    assert entry["workers_requested"] == 12
+    assert entry["workers_actual"] == 12, stdout
+    assert entry["result"] == "PASS"
+    assert result.returncode == 5
+    assert plan["final_coverage_status"] == "UNPROVEN_AFTER_REGISTERED_FULL"
+    assert "AC_UNMAPPED:NEW.AC" in plan["post_test_coverage_gaps"]
+    assert (evidence / refs["mt01_results"]).exists()
