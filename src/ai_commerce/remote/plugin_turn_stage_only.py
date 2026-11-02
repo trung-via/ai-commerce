@@ -93,7 +93,8 @@ class ExplicitTurnChipStager:
         self.inventory = inventory
 
     def stage(self, binding: ResolvedBinding, session: dict,
-              *, operator_approved: bool = False) -> StageOnlyResult:
+              *, operator_approved: bool = False,
+              include_prompt: bool = False) -> StageOnlyResult:
         if not self.enabled:
             return StageOnlyResult("STAGER_DISABLED")
         if operator_approved is not True:
@@ -162,6 +163,26 @@ class ExplicitTurnChipStager:
                 if raw[own] != "STRUCTURED_CANDIDATE" or raw[other] != "ABSENT":
                     return StageOnlyResult(
                         "CHIP_UNVERIFIED_CLEAR_MANUALLY", phase,
+                        raw["brain"], raw["engineering"])
+                if include_prompt:
+                    # Reuse the existing send-once exact-draft guard, with NO click.
+                    # Ambiguous partial text stays in composer for manual cleanup;
+                    # never auto-clear, retry, navigate, or claim host receipt.
+                    phase = "TYPE_PROMPT"
+                    editor.press_sequentially(preview["prompt"], delay=5, timeout=30000)
+                    phase = "VERIFY_DRAFT"
+                    from .plugin_turn_send_once import _PRECHECK_JS as _SEND_PRECHECK, _ARGS as _SEND_ARGS
+                    code = page.evaluate(_SEND_PRECHECK, {
+                        **_SEND_ARGS, "url": binding.chat_url, "name": name,
+                        "prompt": preview["prompt"], "brain": BRAIN,
+                        "engineering": ENGINEERING,
+                    })
+                    if code != "READY":
+                        return StageOnlyResult(
+                            "DRAFT_UNVERIFIED_CLEAR_MANUALLY", phase,
+                            raw["brain"], raw["engineering"])
+                    return StageOnlyResult(
+                        "TURN_PREPARED_NO_SEND", "COMPLETE",
                         raw["brain"], raw["engineering"])
                 return StageOnlyResult(
                     "INPUT_STAGED_NO_SEND", "COMPLETE", raw["brain"], raw["engineering"])
