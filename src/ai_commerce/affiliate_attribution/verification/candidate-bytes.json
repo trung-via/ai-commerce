@@ -1,0 +1,62 @@
+{
+  "allowed_paths": [
+    "src/ai_commerce/affiliate_attribution",
+    "contracts/AffiliateAttributionEvidence.v1.schema.json",
+    "tests/test_a14_attribution.py",
+    "docs/engineering/A14_L04_IMPLEMENTATION_REPORT.md"
+  ],
+  "excluded_self": "src/ai_commerce/affiliate_attribution/verification/candidate-bytes.json",
+  "existing_tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "files": {
+    "contracts/AffiliateAttributionEvidence.v1.schema.json": {
+      "bytes": 41042,
+      "sha256": "50b7b590c288b0734242629d0da9dd26f59767a287fcd87331ebaad6eeb49640"
+    },
+    "docs/engineering/A14_L04_IMPLEMENTATION_REPORT.md": {
+      "bytes": 7430,
+      "sha256": "50107c60cdb5b1e9f6b3f09d98cdbf7983adc12b01730693c21e48a540cfb0da"
+    },
+    "src/ai_commerce/affiliate_attribution/README.md": {
+      "bytes": 6289,
+      "sha256": "cdb684db960dece77b5f46de45c8c253de59c0015941beb17f755afa5cb86a71"
+    },
+    "src/ai_commerce/affiliate_attribution/__init__.py": {
+      "bytes": 539,
+      "sha256": "d204e8e3d0a3d507fa476b19def37483c47fe1610fc3342c47dabaf5978c16d2"
+    },
+    "src/ai_commerce/affiliate_attribution/__main__.py": {
+      "bytes": 2021,
+      "sha256": "dfcec1f52d27428fe68bc5ce124eae48159fb273a81912df8b53ac183a0ee6d8"
+    },
+    "src/ai_commerce/affiliate_attribution/evidence.py": {
+      "bytes": 14682,
+      "sha256": "5be09fe9c3645bb76d1925da0f048e2c006560d2fc78d15370b9e79127021895"
+    },
+    "src/ai_commerce/affiliate_attribution/ledger.py": {
+      "bytes": 4483,
+      "sha256": "5740d5451097cccbe0ffb017af8edbac5b6c763ab7b9fb2560727f7a136357ef"
+    },
+    "src/ai_commerce/affiliate_attribution/schemas.py": {
+      "bytes": 6844,
+      "sha256": "ba7b3c113c08f5963d28643f622c0801977805307cd223d3b7baee2c3e0b2ae1"
+    },
+    "src/ai_commerce/affiliate_attribution/verification/consumer-tests.txt": {
+      "bytes": 1800,
+      "sha256": "f5d984d47e3922cd210134d307d3e771200afa7db233531008f0066f13f5a180"
+    },
+    "src/ai_commerce/affiliate_attribution/verification/verification.json": {
+      "bytes": 2808,
+      "sha256": "3bed81f609e4cc8b8747bccfcc2b1fea1bb3ecc38f951fa1e1722a90ef656b5c"
+    },
+    "tests/test_a14_attribution.py": {
+      "bytes": 28699,
+      "sha256": "f6fcbc818161560a0a4857519a4d67f24b37cf8f6ff784acbe6e204de8302020"
+    }
+  },
+  "full_project_verification": "PENDING_PARENT_EF01",
+  "head_unchanged": true,
+  "kind": "LOCAL_L04_CANDIDATE_BYTES_NOT_PUBLICATION",
+  "protected_change": false,
+  "scope_valid": true,
+  "source_sha": "54822f494b3119fc2edaab357b63333aa4fcec48"
+}
