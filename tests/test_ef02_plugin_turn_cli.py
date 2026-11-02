@@ -459,3 +459,211 @@ def test_prepare_turn_preload_failure_blocks_staging(config, monkeypatch, capsys
     assert cli.main(args) == 2
     assert json.loads(capsys.readouterr().out.splitlines()[-1])["code"] == "PRELOAD_CONTEXT_AMBIGUOUS"
     assert store.read()["phase"] == "READY"
+
+
+# D5 Wake Control Center #200, entirely synthetic, no browser or Send.
+def test_wake_panel_status_route_privacy_and_open():
+    from ai_commerce.remote import wake_control_center as ui
+    from ai_commerce.remote.conversation_binding import ResolvedBinding
+    binding = ResolvedBinding("private_route", 1,
+        "https://chatgpt.com/c/00000000-0000-0000-0000-000000000001",
+        "http://127.0.0.1:9333")
+    calls = []
+    class Inventory:
+        def preload(self, b, *, current_binding):
+            assert b == current_binding() == binding
+            calls.append("open")
+            return "EXACT_CHAT_OPENED"
+    state = {"phase": "READY", "turn_index": 1}
+    panel = ui.WakePanel(store=SimpleNamespace(read=lambda: state),
+        route_reader=lambda: binding, tcp_probe=lambda: True,
+        inventory_factory=Inventory)
+    data = panel.status()
+    assert data["role"] == "ENGINEERING" and data["can_open"]
+    assert not data["can_send"] and not data["server_receipt_proven"]
+    assert "private_route" not in json.dumps(data)
+    assert binding.chat_url not in json.dumps(data)
+    assert panel.open_exact_chat() == {"code": "EXACT_CHAT_OPENED", "sent": False}
+    assert calls == ["open"]
+    state["phase"] = "SUBMISSION_UNKNOWN"
+    assert panel.status()["next_action"] == "RECONCILE_ONLY_NO_RETRY"
+    assert panel.open_exact_chat()["code"] == "NOT_READY"
+    assert calls == ["open"]
+
+
+def test_wake_panel_unknown_navigation_latched_no_retries():
+    from ai_commerce.remote import wake_control_center as ui
+    from ai_commerce.remote.conversation_binding import ResolvedBinding
+    b = ResolvedBinding("r", 1,
+        "https://chatgpt.com/c/00000000-0000-0000-0000-000000000001",
+        "http://127.0.0.1:9333")
+    calls = []
+    class Inventory:
+        def preload(self, *_a, **_k):
+            calls.append(1)
+            return "PRELOAD_NAVIGATION_UNKNOWN"
+    panel = ui.WakePanel(
+        store=SimpleNamespace(read=lambda: {"phase":"READY","turn_index":0}),
+        route_reader=lambda: b, tcp_probe=lambda: True, inventory_factory=Inventory)
+    assert panel.open_exact_chat()["code"] == "PRELOAD_NAVIGATION_UNKNOWN"
+    assert panel.open_exact_chat()["code"] == "NOT_READY"
+    assert len(calls) == 1
+    panel.tcp_probe = lambda: False
+    assert panel.status()["next_action"] == "CHECK_CHROME_9333"
+
+
+def test_wake_panel_http_security_and_ui_has_no_send():
+    from ai_commerce.remote import wake_control_center as ui
+    panel = ui.WakePanel(
+        store=SimpleNamespace(read=lambda: {"phase":"COMPLETE_UI_ONLY","turn_index":3}),
+        route_reader=lambda: None, tcp_probe=lambda: False)
+    h = ui.make_handler(panel, port=8765, token="fixture")
+    obj = h.__new__(h)
+    obj.headers = {"Host": "evil.example:8765"}
+    assert obj.headers.get("Host") != "127.0.0.1:8765"
+    assert panel.status()["role"] == "NONE"
+    assert not panel.status()["can_open"]
+    assert "/api/open-chat" in ui._HTML and "Wake Control Center" in ui._HTML
+    assert "/api/send" not in ui._HTML
+    assert "__TOKEN__" in ui._HTML
+
+
+def test_wake_panel_readonly_exact_chat_census_without_navigation():
+    from contextlib import contextmanager
+    from ai_commerce.remote import wake_control_center as ui
+    from ai_commerce.remote.conversation_binding import ResolvedBinding
+    binding = ResolvedBinding("private", 1,
+        "https://chatgpt.com/c/00000000-0000-0000-0000-000000000001",
+        "http://127.0.0.1:9333")
+    other = "https://chatgpt.com/c/00000000-0000-0000-0000-000000000002"
+    pages = [SimpleNamespace(url=other)]
+    calls = []
+    class Inventory:
+        @contextmanager
+        def pages(self, endpoint):
+            assert endpoint == binding.cdp_endpoint
+            calls.append("inspect")
+            yield pages
+        def preload(self, *_args, **_kwargs):
+            pytest.fail("inspection may not navigate")
+    panel = ui.WakePanel(
+        store=SimpleNamespace(read=lambda: {"phase":"READY","turn_index":0}),
+        route_reader=lambda: binding, tcp_probe=lambda: True,
+        inventory_factory=Inventory)
+    assert panel.inspect_exact_chat() == {"code":"EXACT_CHAT_NOT_OPEN"}
+    pages.append(SimpleNamespace(url=binding.chat_url))
+    assert panel.inspect_exact_chat() == {"code":"EXACT_CHAT_PRESENT"}
+    pages.append(SimpleNamespace(url=binding.chat_url))
+    assert panel.inspect_exact_chat() == {"code":"EXACT_CHAT_AMBIGUOUS"}
+    assert calls == ["inspect"] * 3
+    assert binding.chat_url not in json.dumps(panel.inspect_exact_chat())
+
+
+def test_wake_panel_inspection_denied_without_route_or_tcp():
+    from ai_commerce.remote import wake_control_center as ui
+    from ai_commerce.remote.conversation_binding import ResolvedBinding
+    b = ResolvedBinding("private", 1,
+        "https://chatgpt.com/c/00000000-0000-0000-0000-000000000001",
+        "http://127.0.0.1:9333")
+    def forbidden():
+        pytest.fail("must not inspect without TCP or route")
+    p = ui.WakePanel(store=SimpleNamespace(read=lambda: {"phase":"READY","turn_index":0}),
+        route_reader=lambda: None, tcp_probe=lambda: True, inventory_factory=forbidden)
+    assert p.inspect_exact_chat() == {"code":"ROUTE_UNAVAILABLE"}
+    p.route_reader = lambda: b
+    p.tcp_probe = lambda: False
+    assert p.inspect_exact_chat() == {"code":"CHROME_9333_NOT_REACHABLE"}
+
+
+
+def test_wake_panel_prepare_turn_requires_exact_human_consent_main_and_source():
+    from ai_commerce.remote import wake_control_center as ui
+    from ai_commerce.remote.conversation_binding import ResolvedBinding
+    from ai_commerce.remote.plugin_turn_handoff import new_session
+    binding = ResolvedBinding("private", 1,
+        "https://chatgpt.com/c/00000000-0000-0000-0000-000000000001",
+        "http://127.0.0.1:9333")
+    state = new_session(handoff_id="d5-turn-"+"b"*32, issue_number=181,
+                        source_sha="a"*40)
+    calls = []
+    class Inventory:
+        def preload(self, b, *, current_binding):
+            assert b == binding == current_binding()
+            calls.append("preload")
+            return "EXACT_CHAT_PRESENT"
+    class Stager:
+        def __init__(self, *, enabled=False):
+            assert enabled is True
+        def stage(self, b, s, *, operator_approved=False,
+                  include_prompt=False):
+            assert b == binding and s == state
+            assert operator_approved and include_prompt
+            calls.append("stage")
+            return SimpleNamespace(code="TURN_PREPARED_NO_SEND")
+    source = lambda: "a"*40
+    panel = ui.WakePanel(
+        store=SimpleNamespace(read=lambda: state),
+        route_reader=lambda: binding, tcp_probe=lambda: True,
+        inventory_factory=Inventory, source_reader=source,
+        staging_factory=Stager)
+    assert panel.prepare_turn("wrong")["code"] == "PREPARE_CONSENT_REQUIRED"
+    assert calls == []
+    yes = panel.prepare_turn("PREPARE-D5-BRAIN-0")
+    assert yes == {"code":"TURN_PREPARED_NO_SEND",
+                   "sent":False,"host_selection_proven":False}
+    assert calls == ["preload", "stage"]
+    assert not panel.status()["can_prepare"]
+    assert panel.prepare_turn("PREPARE-D5-BRAIN-0")["code"] == "PREPARE_NOT_ELIGIBLE"
+    assert calls == ["preload", "stage"]
+
+
+def test_wake_panel_prepare_refuses_changed_source_unknown_and_stale_ledger():
+    from ai_commerce.remote import wake_control_center as ui
+    from ai_commerce.remote.conversation_binding import ResolvedBinding
+    from ai_commerce.remote.plugin_turn_handoff import new_session
+    binding = ResolvedBinding("private", 1,
+        "https://chatgpt.com/c/00000000-0000-0000-0000-000000000001",
+        "http://127.0.0.1:9333")
+    state = new_session(handoff_id="d5-turn-"+"c"*32,issue_number=181,
+                        source_sha="b"*40)
+    class Inventory:
+        def preload(self, b, *, current_binding):
+            assert b == current_binding() == binding
+            return "PRELOAD_NAVIGATION_UNKNOWN"
+    p = ui.WakePanel(
+        store=SimpleNamespace(read=lambda: state),
+        route_reader=lambda: binding, tcp_probe=lambda: True,
+        inventory_factory=Inventory, source_reader=lambda: "c"*40,
+        staging_factory=lambda **_k: pytest.fail("no staging"))
+    assert p.prepare_turn("PREPARE-D5-BRAIN-0")["code"] == "PREPARE_SOURCE_CHANGED"
+    p.source_reader = lambda: "b"*40
+    assert p.prepare_turn("PREPARE-D5-BRAIN-0")["code"] == "PRELOAD_NAVIGATION_UNKNOWN"
+    assert p.status()["can_prepare"] is False
+    assert p.prepare_turn("PREPARE-D5-BRAIN-0")["code"] == "PREPARE_NOT_ELIGIBLE"
+    state["phase"] = "SUBMISSION_UNKNOWN"
+    assert p.prepare_turn("PREPARE-D5-BRAIN-0")["code"] == "PREPARE_NOT_ELIGIBLE"
+
+
+
+def test_wake_panel_redirect_or_duplicate_preload_requires_manual_reconciliation():
+    from ai_commerce.remote import wake_control_center as ui
+    from ai_commerce.remote.conversation_binding import ResolvedBinding
+    route = ResolvedBinding("private", 1,
+        "https://chatgpt.com/c/00000000-0000-0000-0000-000000000001",
+        "http://127.0.0.1:9333")
+    for outcome in ("PRELOAD_NAVIGATION_UNVERIFIED",
+                    "PRELOAD_EXACT_CHAT_AMBIGUOUS",
+                    "PRELOAD_CONTEXT_AMBIGUOUS"):
+        calls=[]
+        class Inventory:
+            def preload(self, *_args, **_kwargs):
+                calls.append(outcome)
+                return outcome
+        panel = ui.WakePanel(
+            store=SimpleNamespace(read=lambda: {"phase":"READY","turn_index":0}),
+            route_reader=lambda: route, tcp_probe=lambda: True,
+            inventory_factory=Inventory)
+        assert panel.open_exact_chat()["code"] == outcome
+        assert panel.status()["can_open"] is False
+        assert panel.open_exact_chat()["code"] == "NOT_READY"
+        assert calls == [outcome]
