@@ -323,3 +323,93 @@ def test_send_mode_has_one_shot_per_ledger_token_and_unknown_result(config, monk
     assert output["code"] == "SEND_OUTCOME_UNKNOWN" and output["sent"] is None
     assert output["host_selection_proven"] is False
     assert "SEND-ONCE-D5-BRAIN-0-aaaaaaaa" in private[0]
+
+
+def test_prepare_turn_calls_stager_with_exact_prompt_mode(config, monkeypatch, capsys):
+    c = config
+    initial(c)
+    monkeypatch.setattr(
+        cli, "load_registered_probe_route",
+        lambda **kwargs: SimpleNamespace(route_id="enrolled"))
+    monkeypatch.setattr("builtins.input", lambda _: "PREPARE-D5-BRAIN-0")
+    calls = []
+
+    class FakeStager:
+        def __init__(self, **kwargs):
+            calls.append(("init", kwargs))
+        def stage(self, binding, session, **kwargs):
+            calls.append(("stage", session["turn_index"], kwargs))
+            return SimpleNamespace(
+                code="TURN_PREPARED_NO_SEND", phase="COMPLETE",
+                brain="STRUCTURED_CANDIDATE", engineering="ABSENT")
+    monkeypatch.setattr(cli, "ExplicitTurnChipStager", FakeStager)
+    args = c.args + [
+        "--mode", "prepare-turn", "--registry", str(c.registry),
+        "--route-id", "enrolled"]
+    assert cli.main(args) == 0
+    assert calls[-1] == ("stage", 0, {
+        "operator_approved": True, "include_prompt": True,
+    })
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["sent"] is False
+
+
+def test_observe_reply_reconciles_only_with_ui_and_github_evidence(
+        config, monkeypatch, capsys):
+    c = config
+    state = initial(c)
+    state.record_intent(operator_approved=True)
+    monkeypatch.setattr(cli, "_fresh_main_sha", lambda: "b" * 40)
+    monkeypatch.setattr(
+        "builtins.input", lambda _: "OBSERVE-UI-D5-0-aaaaaaaa")
+    called = []
+
+    class FakeAuthority:
+        def __init__(self, **kwargs):
+            called.append(("authority", kwargs["expected_author_id"]))
+        def verify(self, session, comment):
+            called.append(("verify", session["phase"], comment))
+            return True
+    monkeypatch.setattr(cli, "GitHubTurnEvidenceAuthority", FakeAuthority)
+    comment = ("https://github.com/trung-via/ai-commerce/issues/181"
+               "#issuecomment-345678")
+    args = c.args + [
+        "--mode", "observe-reply", "--comment-ref", comment,
+        "--expected-author-id", "12345"]
+    assert cli.main(args) == 0
+    status = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert status["code"] == "UI_REPLY_RECONCILED_ONLY"
+    assert status["turn_index"] == 1
+    assert status["host_selection_proven"] is False
+    assert state.read()["phase"] == "READY"
+    assert called == [("authority", 12345), ("verify", "SUBMISSION_UNKNOWN", comment)]
+
+
+def test_observe_refuses_missing_evidence_and_no_pending_ui(
+        config, monkeypatch, capsys):
+    c = config
+    initial(c)
+    monkeypatch.setattr(cli, "_fresh_main_sha",
+                        lambda: pytest.fail("must not query source when args incomplete"))
+    assert cli.main(c.args + ["--mode", "observe-reply"]) == 2
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["code"] == "OBSERVATION_ARGS_REQUIRED"
+    assert cli.main(c.args + ["--mode", "observe-reply",
+                               "--comment-ref", "invalid", "--expected-author-id", "5"]) == 2
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["code"] == "TURN_RECONCILIATION_BLOCKED"
+
+
+def test_observe_denied_does_not_advance_unknown(config, monkeypatch, capsys):
+    c = config
+    state = initial(c)
+    state.record_intent(operator_approved=True)
+    monkeypatch.setattr(cli, "_fresh_main_sha", lambda: "b" * 40)
+    monkeypatch.setattr("builtins.input", lambda _: "NO")
+    monkeypatch.setattr(
+        cli, "GitHubTurnEvidenceAuthority",
+        lambda **kwargs: pytest.fail("Must not read GitHub without Human UI approval"))
+    args = c.args + [
+        "--mode", "observe-reply",
+        "--comment-ref", "https://github.com/trung-via/ai-commerce/issues/181#issuecomment-123",
+        "--expected-author-id", "12345"]
+    assert cli.main(args) == 2
+    assert state.read()["phase"] == "SUBMISSION_UNKNOWN"
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["code"] == "USER_DECLINED"
