@@ -9,6 +9,7 @@ from ai_commerce.remote.plugin_turn_handoff import (
     new_session, record_send_intent, reconcile_ui_observation,
 )
 from ai_commerce.remote import plugin_turn_stage_only as stage
+from ai_commerce.remote import plugin_turn_send_once as send_once
 
 URL = "https://chatgpt.com/c/00000000-0000-0000-0000-000000000001"
 BIND = ResolvedBinding(
@@ -70,7 +71,7 @@ class Page:
             assert args["phase"] == "FULL_NAME"
             return "FULL_NAME_PRESENT" if self.text in (
                 args["full"], args["name"]) else "FULL_NAME_UNPROVEN"
-        if script == stage._SEND_PRECHECK:
+        if script == send_once._PRECHECK_JS:
             return ("READY" if self.chip and
                     self.text == args["prompt"] and
                     self.observed != "DRAFT_MISMATCH"
@@ -235,11 +236,11 @@ def test_prepare_turn_stages_one_chip_and_exact_prompt_without_send():
 
 
 def test_prepare_turn_bad_exact_draft_stops_without_click():
-    page = Page(observed="DRAFT_MISMATCH")
+    page = Page()
     # Fake structural chip observation and failed drafted-text validation.
     old_eval = page.evaluate
     def bad_after_chip(script, args):
-        if script == stage._SEND_PRECHECK:
+        if script == send_once._PRECHECK_JS:
             return "DRAFT_MISMATCH"
         return old_eval(script, args)
     page.evaluate = bad_after_chip
