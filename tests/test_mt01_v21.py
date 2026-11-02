@@ -257,3 +257,56 @@ def test_v21_postmerge_disables_unproven_reuse_without_full(monkeypatch, tmp_pat
     monkeypatch.setattr(module, "postmerge_reuse", should_not_reuse)
     assert module.postmerge_preflight() == 0
     assert "skip_pytest=false" in output.read_text()
+
+
+def test_required_ac_on_unselected_registered_component_holds(tmp_path):
+    """Regression #229: global AC registration is not selected test coverage."""
+    groups, a12, a14 = fixture(tmp_path)
+    # The original fixture groups share a test-only generic AC; bind distinct
+    # accepted AC identities to expose cross-component leakage.
+    groups = (
+        TestGroup("a12", (a12,), ("A12.product-evidence",),
+                  ("src/ai_commerce/product/identity.py",)),
+        TestGroup("a14", (a14,), ("A14.L04.offline-attribution-evidence",),
+                  ("src/ai_commerce/affiliate_attribution/evidence.py",)),
+    )
+    files = file_hashes(tmp_path)
+    fallback = ["python", "-m", "pytest", "tests", "-q", "-n", "12"]
+    profiles = {
+        "mt01-a12-tests": ["python", "-m", "pytest", a12, "-q", "-n", "12"],
+        "mt01-a14-tests": ["python", "-m", "pytest", a14, "-q", "-n", "12"],
+    }
+    plan = registered_action_plan(
+        repo=tmp_path, base_sha="a" * 40, base_files=files,
+        candidate_files=files,
+        changed_paths=["src/ai_commerce/affiliate_attribution/evidence.py"],
+        required_acs=("A12.product-evidence",), fallback_argv=fallback,
+        groups=groups, registered_profiles=profiles, env={},
+    )
+    assert plan["selected_groups"] == ["a14"]
+    assert not plan["unknown_acs"]
+    assert "AC_REQUIRED_GROUP_NOT_SELECTED:A12.product-evidence" in plan["reason_codes"]
+    assert any(g["state"] == "UNPROVEN" for g in plan["groups"])
+
+
+def test_required_ac_covered_by_selected_component_is_proven(tmp_path):
+    """Positive: the required AC's own group is selected and registered."""
+    groups, a12, a14 = fixture(tmp_path)
+    groups = (
+        TestGroup("a12", (a12,), ("A12.product-evidence",),
+                  ("src/ai_commerce/product/identity.py",)),
+        TestGroup("a14", (a14,), ("A14.L04.offline-attribution-evidence",),
+                  ("src/ai_commerce/affiliate_attribution/evidence.py",)),
+    )
+    files = file_hashes(tmp_path)
+    narrow = ["python", "-m", "pytest", a12, "-q", "-n", "12"]
+    plan = registered_action_plan(
+        repo=tmp_path, base_sha="a" * 40, base_files=files,
+        candidate_files=files,
+        changed_paths=["src/ai_commerce/product/identity.py"],
+        required_acs=("A12.product-evidence",), fallback_argv=narrow,
+        groups=groups, registered_profiles={"mt01-a12-tests": narrow}, env={},
+    )
+    assert plan["selected_groups"] == ["a12"]
+    assert not any(code.startswith("AC_") for code in plan["reason_codes"])
+    assert plan["groups"][0]["state"] == "EXECUTE"

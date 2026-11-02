@@ -282,9 +282,17 @@ def registered_action_plan(
     entries = []
     problems = list(impact.missing_mapping)
     known_acs = {ac for group in groups for ac in group.acs}
-    unknown_acs = sorted(set(required_acs) - known_acs)
+    # A globally known AC is NOT verified unless its owning group is selected.
+    # Do not expand silently: an unrelated action requirement needs a new
+    # explicit impact plan or a precise HOLD_COVERAGE witness.
+    selected_acs = {ac for name in impact.selected_groups for ac in by_name[name].acs}
+    required = set(required_acs)
+    unknown_acs = sorted(required - known_acs)
+    unselected_acs = sorted((required & known_acs) - selected_acs)
     if unknown_acs:
         problems.extend("AC_UNMAPPED:" + ac for ac in unknown_acs)
+    if unselected_acs:
+        problems.extend("AC_REQUIRED_GROUP_NOT_SELECTED:" + ac for ac in unselected_acs)
     select_parallel = list(fallback_argv[-2:]) == ["-n", "12"]
     for name in impact.selected_groups:
         group = by_name[name]

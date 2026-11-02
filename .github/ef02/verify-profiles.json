@@ -353,5 +353,14 @@
     "-q",
     "-n",
     "12"
+  ],
+  "mt01-a14-e04-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_a14_commerce_e2e.py",
+    "-q",
+    "-n",
+    "12"
   ]
 }

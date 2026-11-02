@@ -199,6 +199,14 @@ def approved_groups() -> tuple[TestGroup, ...]:
                       "src/ai_commerce/affiliate_attribution/verification/verification.json",
                       "docs/engineering/A14_L04_IMPLEMENTATION_REPORT.md",
                   )),
+        # A14 E04: reviewed integration of SHA256-verified #223 source; independent of L04.
+        TestGroup("a14-e04", ("tests/test_a14_commerce_e2e.py",),
+                  ("A14.E04.offline-affiliate-commerce",),
+                  sources("affiliate_commerce", "__init__ __main__ schemas service"),
+                  contracts=(
+                      "contracts/AffiliateCommerceRun.v1.schema.json",
+                      "docs/engineering/A14_E04_IMPLEMENTATION_REPORT.md",
+                  )),
         TestGroup("foundation", ("tests/test_foundation.py",), ("A01.foundation",), (),
                   contracts=contracts("WorkItem.v0.3 AuthorizationEnvelope.v0.3") + (
                       "docs/engineering/SEMANTIC_OWNERS.md", "docs/engineering/SELECTIVE_COMPONENT_ADOPTION.md",
