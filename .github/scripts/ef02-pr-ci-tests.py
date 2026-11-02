@@ -194,7 +194,7 @@ def choose(root: Path, *, event: str, base: str, paths: set[str] | None = None,
             registered_tests = {t for g in groups for t in g.tests}
             all_tests = {p for p in candidate_files
                          if p.startswith("tests/test_") and p.endswith(".py")}
-            if all_tests - registered_tests - KNOWN_UNMAPPED:
+            if (all_tests - registered_tests - KNOWN_UNMAPPED) & mapped_paths:
                 return FULL, "FULL_PROJECT_REQUIRED", ("NEW_UNMAPPED_TEST_DEFINITION",), ()
             plan = mt.select_plan(
                 repo=root, base_sha=base, base_files=candidate_files,

@@ -1,6 +1,7 @@
 """MT-01 V2.1 adversarial selection contract. No model, network or host effects."""
 from pathlib import Path
-from types import SimpleNamespace
+from ai_commerce.engineering.minimum_test import TestGroup, file_hashes
+from ai_commerce.engineering.impact_v21 import registered_action_plan
 
 from ai_commerce.engineering.impact_v21 import select_impact
 
@@ -13,10 +14,8 @@ def mk(repo: Path, path: str, data: str = "# test\n"):
 
 
 def group(name, tests, paths, consumers=(), contracts=()):
-    return SimpleNamespace(
-        name=name, tests=tuple(tests), paths=tuple(paths),
-        consumers=tuple(consumers), contracts=tuple(contracts),
-    )
+    return TestGroup(name, tuple(tests), ("MT01.test",), tuple(paths),
+                     tuple(consumers), tuple(contracts))
 
 
 def fixture(tmp_path):
@@ -140,3 +139,49 @@ def test_exact_new_orphan_file_is_not_implicitly_exempt(tmp_path):
                              previous_tests=["tests/test_a14_e04.py"])
     assert decision.mode == "HOLD_MAPPING"
     assert any("TEST_REGISTRATION_REQUIRED" in p for p in decision.missing_mapping)
+
+
+def test_ef02_v21_exact_registered_profile_and_affected_group(tmp_path):
+    groups, a12, _ = fixture(tmp_path)
+    files = file_hashes(tmp_path)
+    command = ["python", "-m", "pytest", a12, "-q", "-n", "12"]
+    plan = registered_action_plan(
+        repo=tmp_path, base_sha="a" * 40, base_files=files,
+        candidate_files=files, changed_paths=["src/ai_commerce/product/identity.py"],
+        required_acs=(), fallback_argv=command, groups=groups,
+        registered_profiles={"mt01-a12-tests": command}, env={},
+    )
+    assert not plan["fallback"]
+    assert plan["selected_groups"] == ["a12"]
+    assert plan["groups"][0]["state"] == "EXECUTE"
+    assert plan["groups"][0]["binding"]["argv"] == command
+
+
+def test_ef02_v21_missing_profile_is_unproven_not_full(tmp_path):
+    groups, a12, _ = fixture(tmp_path)
+    files = file_hashes(tmp_path)
+    command = ["python", "-m", "pytest", a12, "-q", "-n", "12"]
+    plan = registered_action_plan(
+        repo=tmp_path, base_sha="a" * 40, base_files=files,
+        candidate_files=files, changed_paths=["src/ai_commerce/product/identity.py"],
+        required_acs=(), fallback_argv=command, groups=groups,
+        registered_profiles={}, env={},
+    )
+    assert plan["fallback"] is False
+    assert not any(g["execute"] for g in plan["groups"])
+    assert "a12:REGISTERED_PROFILE_REQUIRED" in plan["reason_codes"]
+
+
+def test_ef02_v21_preserves_authorized_narrow_profile(monkeypatch):
+    from ai_commerce.remote.validation import approved_verification_plan
+    monkeypatch.setenv("MT01_V21_ENABLED", "1")
+    narrow = ["python", "-m", "pytest", "tests/test_a12_identity.py", "-q", "-n", "12"]
+    registry = {
+        "mt01-a12-tests": narrow,
+        "project-tests": ["python", "-m", "pytest", "tests", "-q", "-n", "12"],
+    }
+    plan = approved_verification_plan(
+        {"verification_profile": "mt01-a12-tests", "depends_on": []}, registry)
+    assert plan["profile"] == "mt01-a12-tests"
+    assert plan["argv"] == narrow
+    assert plan["coverage"] == "V21_REQUIRES_POST_EXECUTOR_IMPACT_PROOF"

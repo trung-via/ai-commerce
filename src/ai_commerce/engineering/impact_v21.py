@@ -16,6 +16,7 @@ CONTROL_TESTS = {
     ".github/scripts/ef02-pr-ci-tests.py": (
         "tests/test_minimum_test.py", "tests/test_ef02_mt01_registry.py",
     ),
+    ".github/workflows/ef02-batch.yml": ("tests/test_ef02.py", "tests/test_minimum_test.py"),
     ".github/workflows/ef02-tests.yml": (
         "tests/test_minimum_test.py", "tests/test_pr_merge_gate.py",
     ),
@@ -252,3 +253,102 @@ def select_impact(
                         warnings=warnings, affected=affected)
     return decision("HOLD_MAPPING", reasons=("UNSUPPORTED_TEST_PATH",),
                     missing=tuple(sorted(selected_tests)), warnings=warnings, affected=affected)
+
+
+def registered_action_plan(
+    *, repo: Path, base_sha: str, base_files, candidate_files,
+    changed_paths: Sequence[str], required_acs: Sequence[str], fallback_argv,
+    groups: Sequence, registered_profiles: dict | None, aggregate_sources=(), env=None,
+) -> dict:
+    """Translate V2 selected impact to the existing immutable EF01/EF02 evidence contract.
+
+    No new Issue-controlled argv and no broad implicit fallback. Invalid mapping
+    produces an UNPROVEN group, causing the trusted runner to stop with a
+    verifiable nonzero status, not a silently successful verification.
+    """
+    import shutil
+    import sys
+    from .minimum_test import canonical, digest
+
+    impact = select_impact(
+        root=repo, changed_paths=changed_paths, groups=groups,
+        base_sha=base_sha,
+    )
+    by_name = {g.name: g for g in groups}
+    profiles = registered_profiles or {}
+    entries = []
+    problems = list(impact.missing_mapping)
+    select_parallel = list(fallback_argv[-2:]) == ["-n", "12"]
+    for name in impact.selected_groups:
+        group = by_name[name]
+        expected = ["python", "-m", "pytest", *group.tests, "-q"]
+        if select_parallel:
+            expected.extend(["-n", "12"])
+        matched = next((key for key, value in sorted(profiles.items()) if value == expected), None)
+        if matched is None:
+            problems.append(name + ":REGISTERED_PROFILE_REQUIRED")
+        # Closed, registered fallback argv only; never synthesize unknown commands.
+        argv = list(profiles[matched]) if matched is not None else list(fallback_argv)
+        executable = shutil.which(argv[0]) if argv else None
+        paths = (set(group.tests) | set(group.paths) | set(group.consumers) |
+                 set(group.contracts) | (set(changed_paths) & set(impact.affected_paths)))
+        if aggregate_sources:
+            # Current composed-source hashes are required by aggregate receipt verification.
+            paths.update(candidate_files)
+        files = sorted(paths)
+        binding = {
+            "version": 2, "base_sha": base_sha,
+            "aggregate_sources": list(aggregate_sources),
+            "workspace": str(repo.resolve()),
+            "base_files": {p: base_files.get(p) for p in files},
+            "candidate_files": {p: candidate_files.get(p) for p in files},
+            "argv": argv, "mapping": group.mapping(), "environment": env or {},
+            "executable_sha256": digest(Path(executable).read_bytes()) if executable else None,
+            "environment_proven": bool(executable and Path(executable).resolve() == Path(sys.executable).resolve()),
+            "registered_profile": matched,
+            "selected_impact_tests": list(impact.selected_tests),
+        }
+        executable_scope = bool(impact.runnable and matched)
+        entries.append({
+            "group": name, "state": "EXECUTE" if executable_scope else "UNPROVEN",
+            "execute": executable_scope, "acs": list(group.acs),
+            "binding": __import__("json").loads(canonical(binding)),
+            "selected_profile": matched,
+            "test_files_count": len(group.tests),
+            "explanation": ["MT01_V21_SCOPED_ACTUAL_CHANGED_PATHS"] if executable_scope else
+                           ["MT01_V21_HOLD_MISSING_VERIFICATION_PROOF"],
+        })
+    if not entries or problems:
+        # One explicit refusal record at the end; no all-tests substitution.
+        entries.append({
+            "group": "v21-coverage-hold", "state": "UNPROVEN", "execute": False,
+            "acs": [], "selected_profile": None, "test_files_count": 0,
+            "explanation": list(problems or ["NO_SCOPED_VERIFICATION_GROUP"]),
+            "binding": {
+                "version": 2, "base_sha": base_sha, "aggregate_sources": list(aggregate_sources),
+                "workspace": str(repo.resolve()), "base_files": {}, "candidate_files": {},
+                "argv": list(fallback_argv), "mapping": {
+                    "tests": [], "acs": [], "paths": [], "consumers": [], "contracts": []},
+                "environment": env or {}, "executable_sha256": None,
+                "environment_proven": False, "registered_profile": None,
+                "selected_impact_tests": list(impact.selected_tests),
+            },
+        })
+    return {
+        "kind": "AI_COMMERCE_MT01_PLAN", "version": 2,
+        "required_acs": sorted(set(required_acs)),
+        "changed_paths": sorted(set(changed_paths)),
+        "affected_paths": list(impact.affected_paths),
+        "unknown_acs": [],
+        "unknown_tests": [p for p in impact.missing_mapping if "TEST" in p],
+        "unknown_consumers": [p for p in impact.missing_mapping if "SOURCE" in p or "IMPORT" in p],
+        "reason_codes": list(impact.reason_codes) + list(problems),
+        "unsupported_paths": [],
+        "consumer_map": {g.name: g.mapping() for g in groups if g.name in impact.selected_groups},
+        "selected_groups": list(impact.selected_groups),
+        "selected_profiles": [e["selected_profile"] for e in entries if e["selected_profile"]],
+        "fallback_profile": None, "fallback_argv": list(fallback_argv),
+        "narrow_execution_observed": False, "fallback": False,
+        "aggregate_sources": list(aggregate_sources), "groups": entries,
+        "impact_v21": impact.as_dict(),
+    }

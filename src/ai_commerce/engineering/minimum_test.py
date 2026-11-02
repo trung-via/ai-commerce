@@ -387,6 +387,19 @@ def select_plan(*, repo: Path, base_sha: str, base_files: Mapping[str, str],
                 aggregate_sources: Sequence[str] = (), env: dict | None = None,
                 registered_profiles: Mapping[str, Sequence[str]] | None = None) -> dict:
     groups = tuple(approved_groups() if groups is None else groups)
+    # MT-01 V2.1: opt-in through trusted EF02 workflow, preserving historical
+    # immutable packets and explicit full profiles. Never synthesize argv.
+    if (os.environ.get("MT01_V21_ENABLED") == "1" and registered_only and
+            registered_profiles is not None and
+            list(fallback_argv[3:5]) != ["tests", "-q"]):
+        from .impact_v21 import registered_action_plan
+        return registered_action_plan(
+            repo=repo, base_sha=base_sha, base_files=base_files,
+            candidate_files=candidate_files, changed_paths=changed_paths,
+            required_acs=required_acs, fallback_argv=fallback_argv,
+            groups=groups, registered_profiles=registered_profiles,
+            aggregate_sources=aggregate_sources, env=env,
+        )
     graph, imports_complete = import_graph(repo, candidate_files)
     # Runtime schema/file reads have no Python import edge. Bind the declared
     # contracts to their producers so reverse consumers inherit those changes.

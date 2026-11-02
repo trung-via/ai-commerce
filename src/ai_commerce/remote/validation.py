@@ -1,6 +1,7 @@
 """EF02 validation: JSON Schema, real issuer authorization, DAG and path semantics."""
 from __future__ import annotations
 import hashlib
+import os
 import json
 import re
 import subprocess
@@ -168,6 +169,19 @@ def approved_verification_plan(action: dict, registry: dict[str, list[str]]) -> 
 
     explicit = registry[requested]
     explicit_full = is_full_suite(explicit)
+    if os.environ.get("MT01_V21_ENABLED") == "1" and not explicit_full:
+        # Preserve exactly the reviewed narrow registry command. The post-edit
+        # impact planner must independently prove component+consumer closure.
+        # A missing mapping returns UNPROVEN, never substitutes project-tests.
+        return {"state": "EXECUTE", "requested_profile": requested,
+                "profile": requested, "argv": list(explicit),
+                "minimum_test": True, "registered_only": True,
+                "coverage": "V21_REQUIRES_POST_EXECUTOR_IMPACT_PROOF",
+                "workers_requested": registered_workers(explicit),
+                "registered_workers": registered_workers(explicit),
+                "reason": "MT01_V21_PRESERVE_EXACT_REGISTERED_PROFILE",
+                "aggregate_requires_fresh_execution": bool(action.get("depends_on"))}
+
     broad = registry.get("project-tests", [])
     broad_valid = is_full_suite(broad)
     selected = explicit if explicit_full else broad if broad_valid else explicit
