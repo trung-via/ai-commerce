@@ -216,6 +216,253 @@ if(check(args,hidden,{},getComputedStyle)!==false) process.exit(24);
     result = subprocess.run(
         [node, "-e", program],
         input=json.dumps({"guard": _GUARD, "text": _doorbell_text(EVENT, "trung-via/ai-commerce")}),
-        text=True, capture_output=True, timeout=12,
+        # Windows hosted full-suite CI occasionally starts Node slowly under
+        # load. Keep a bounded timeout; this guard test is not a latency test.
+        text=True, capture_output=True, timeout=45 if __import__("sys").platform == "win32" else 12,
     )
-    assert result.returncode == 0, f"DOM guard JS regression failed (code {result.returncode})"
+    assert result.returncode == 0, (f"DOM guard JS regression failed (code {result.returncode}); "
+                                    f"stderr={result.stderr[:1000]}")
+
+
+
+
+def test_vietnamese_send_button_requires_primary_action_svg_and_form_scope():
+    """#177 live DOM: Vietnamese 'Gửi…' button and SVG primary-action icon.
+
+    A translated aria-label alone can describe unrelated controls, so both
+    an explicit send-prefix AND the SVG primary-action marker are required.
+    """
+    from ai_commerce.remote.cdp_doorbell import _SEND, _GUARD, _READY, _CLICK
+
+    assert 'button[aria-label^="Gửi"]:has(svg.icon-primary-action)' in _SEND
+    assert 'button[aria-label^="Gửi"]' not in _SEND.split(', ')
+    assert 'button[type="submit"][aria-label="Send"]' in _SEND
+    assert '[data-testid="send-button"]' in _SEND
+    # The CSS selector is used only within the exact composer ancestor form,
+    # not against all buttons across the ChatGPT page.
+    assert 'forms[0].querySelectorAll(sendSel)' in _GUARD
+    assert 'buttons.length > 1' in _GUARD
+    assert 'result.buttons.length === 1' in _READY
+    assert 'result.buttons.length !== 1' in _CLICK
+    assert "button.click()" in _CLICK
+
+
+
+def test_real_guard_localized_send_dom_requires_exact_fresh_event_and_unique_button(monkeypatch):
+    """Run the real D4 readiness guard on a bounded, DOM-like Node fixture.
+
+    The fixture models four P rows from the observed Vietnamese ChatGPT editor
+    and evaluates the actual production _READY function. Candidate selection
+    uses a limited CSS matcher for the explicitly supported _SEND patterns.
+    No Chrome instance, real page or click is involved.
+    """
+    import json
+    import shutil
+    import subprocess
+    import sys
+    from unittest.mock import Mock
+    from ai_commerce.remote.cdp_doorbell import _READY, _ARGS, _doorbell_text
+
+    # Synthetic IDs only: this regression does not reuse any historical event.
+    fresh_event = "ef02-completion-v1:" + "f" * 64
+    stale_event = "ef02-completion-v1:" + "e" * 64
+    send_wake = Mock(side_effect=AssertionError("production send forbidden"))
+    monkeypatch.setattr(LocalChromeDoorbellAdapter, "send_wake", send_wake)
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js not installed")
+    program = r"""
+const fs=require('node:fs');
+const obj=JSON.parse(fs.readFileSync(0,'utf8'));
+const input=obj.text;
+let clicks=0;
+const element=(name)=>({
+  nodeType:1, tagName:name, getClientRects:()=>[1],
+  getAttribute:()=>null, textContent:'', childNodes:[]
+});
+const style=()=>({visibility:'visible'});
+globalThis.getComputedStyle=style;
+globalThis.location={href:obj.args.url};
+const live=eval(obj.ready);
+function sendMatches(sel,b) {
+  // Purpose-built matcher for supported selectors, not a generic CSS parser.
+  // Ensures the production selector itself is routed through the form query.
+  return sel.split(',').some(raw=>{
+    const s=raw.trim();
+    if(s==='[data-testid="send-button"]') return b.testid==='send-button';
+    if(s==='button[type="submit"][aria-label="Send"]')
+      return b.tagName==='BUTTON' && b.type==='submit' && b.label==='Send';
+    if(s==='button[aria-label^="Gửi"]:has(svg.icon-primary-action)')
+      return b.tagName==='BUTTON' && b.label.startsWith('Gửi') && b.primary;
+    throw Error('UNTESTED_SEND_SELECTOR:'+s);
+  });
+}
+function check(o) {
+  const rows=(o.text ?? input).split('\n');
+  const f=element('FORM');
+  f.querySelectorAll=sel => o.outside ? [] :
+    o.buttons.filter(b=>sendMatches(sel,b));
+  const editor=element('DIV');
+  editor.parentElement=f;
+  editor.getAttribute=key=>key==='aria-disabled'?'false':null;
+  editor.childNodes=rows.map(row=>{
+    const p=element('P');
+    p.childNodes=[{nodeType:3,textContent:row}];
+    return p;
+  });
+  editor.textContent=rows.join('');
+  editor.innerText=rows.join('\n\n');
+  if(o.wrongText) editor.childNodes[0].childNodes[0].textContent+='EXTRA';
+  const main=element('MAIN');
+  globalThis.document={querySelectorAll:(sel)=>{
+    if(sel==='main') return [main];
+    if(sel===obj.args.composer) return [editor];
+    if(sel===obj.args.stop) return o.generation ? [element('BUTTON')] : [];
+    return [];
+  }};
+  return live(obj.args);
+}
+function button(label,opts={}) {
+ return {tagName:'BUTTON',label,type:opts.type||'button',
+         click:()=>{clicks++; throw Error('click forbidden in readiness regression');},
+         testid:opts.testid||null,primary:opts.primary!==false,
+         disabled:opts.disabled||false,
+         getClientRects:()=>[1],getAttribute:k=>
+           k==='aria-disabled'?(opts.ariaDisabled?'true':null):null};
+}
+const b=()=>button('Gửi tin nhắn');
+// A fully formed draft for another event must not satisfy fresh-event readiness.
+if(check({buttons:[b()],text:obj.staleText})!==false) process.exit(30);
+if(check({buttons:[b()]})!==true) process.exit(21);
+if(check({buttons:[button('Gửi tệp',{primary:false})]})!==false) process.exit(22);
+if(check({buttons:[button('Send', {primary:true})]})!==false) process.exit(23);
+if(check({buttons:[button('Gửi tin nhắn',{disabled:true})]})!==false) process.exit(24);
+if(check({buttons:[button('Gửi tin nhắn',{ariaDisabled:true})]})!==false) process.exit(25);
+if(check({buttons:[b(),b()]})!==false) process.exit(26);
+if(check({buttons:[b()],outside:true})!==false) process.exit(27);
+if(check({buttons:[b()],generation:true})!==false) process.exit(28);
+if(check({buttons:[b()],wrongText:true})!==false) process.exit(29);
+if(clicks!==0) process.exit(31);
+"""
+    result = subprocess.run(
+        [node, "-e", program],
+        input=json.dumps({
+            "ready": _READY,
+            "args": {**_ARGS, "url": URL, "text": _doorbell_text(fresh_event, "trung-via/ai-commerce")},
+            "text": _doorbell_text(fresh_event, "trung-via/ai-commerce"),
+            "staleText": _doorbell_text(stale_event, "trung-via/ai-commerce"),
+        }),
+        text=True, capture_output=True, timeout=45 if sys.platform == "win32" else 12,
+    )
+    assert result.returncode == 0, (
+        f"Localized D4 DOM readiness failed (exit={result.returncode}); "
+        f"stderr={result.stderr[:1000]}"
+    )
+    send_wake.assert_not_called()
+
+
+def test_dual_plugin_wake_preview_is_non_delivering_and_has_two_at_names():
+    from ai_commerce.remote.wake_dual_plugin_preview import build_dual_plugin_wake_preview
+
+    fresh = "ef02-completion-v1:" + "f" * 64  # synthetic; NEVER send
+    payload = build_dual_plugin_wake_preview(fresh)
+    assert payload.count("@AI Commerce Brain") == 1
+    assert payload.count("@AI Commerce Engineering Workflow") == 1
+    assert payload.count("event_id: " + fresh) == 1
+    assert "repository: trung-via/ai-commerce" in payload
+    assert "fresh_brain_sync_required: true" in payload
+    assert "NOT SENT" in payload
+    assert "separately authorized" in payload
+    assert "Brain-native research" in payload
+    assert "UNKNOWN event" in payload
+
+
+@pytest.mark.parametrize("event,repository", [
+    ("ef02-completion-v1:" + "g" * 64, "trung-via/ai-commerce"),
+    ("ef02-completion-v1:" + "a" * 63, "trung-via/ai-commerce"),
+    ("ef02-completion-v1:" + "a" * 64 + "EXTRA", "trung-via/ai-commerce"),
+    ("ef02-completion-v1:" + "a" * 64, "other/repo"),
+    (None, "trung-via/ai-commerce"),
+])
+def test_dual_plugin_wake_preview_rejects_untrusted_input(event, repository):
+    from ai_commerce.remote.wake_dual_plugin_preview import build_dual_plugin_wake_preview
+
+    with pytest.raises(ValueError, match="DUAL_PLUGIN_PREVIEW_INPUT_INVALID"):
+        build_dual_plugin_wake_preview(event, repository)
+
+
+def _make_dual_route_failure_event(action_statuses):
+    from ai_commerce.remote.completion_event import build_completion_event
+
+    actions = []
+    for idx, status in enumerate(action_statuses, 1):
+        action = {"action_id": f"test_action_{idx}", "attempt_id": f"test_attempt_{idx}", "status": status}
+        if status == "CANDIDATE_READY":
+            action["candidate_sha"] = "a" * 40
+        actions.append(action)
+    succeeded = sum(a["status"] == "CANDIDATE_READY" for a in actions)
+    report = {
+        "kind": "AI_COMMERCE_REMOTE_BATCH_RESULT",
+        "version": 1,
+        "batch_id": "synthetic_failure_test",
+        "source_sha": "f" * 40,
+        "status": "COMPLETE" if succeeded == len(actions) else "PARTIAL_OR_FAILED",
+        "actions": actions,
+        "total": len(actions),
+        "succeeded": succeeded,
+    }
+    return build_completion_event(
+        report, repository="trung-via/ai-commerce",
+        run_id=123456, run_attempt=1, issue_number=987,
+    )
+
+
+def test_failure_preview_selects_only_engineering_without_brain():
+    from ai_commerce.remote.wake_dual_plugin_preview import build_engineering_failure_wake_preview
+
+    event = _make_dual_route_failure_event(["EXECUTOR_FAILED"])
+    message = build_engineering_failure_wake_preview(event)
+    assert message.count("@AI Commerce Engineering Workflow") == 1
+    assert "@AI Commerce Brain" not in message
+    assert "failed_action: test_action_1 attempt=test_attempt_1 status=EXECUTOR_FAILED" in message
+    assert "fresh_brain_sync_required: false" in message
+    assert "run_id: 123456" in message
+    assert "issue_number: 987" in message
+    assert "PREVIEW — NOT SENT" in message
+    assert "explicit authorization" in message
+
+
+def test_failure_preview_in_mixed_batch_includes_only_nonpass_attempt():
+    from ai_commerce.remote.wake_dual_plugin_preview import build_engineering_failure_wake_preview
+
+    event = _make_dual_route_failure_event(["CANDIDATE_READY", "VERIFICATION_FAILED"])
+    message = build_engineering_failure_wake_preview(event)
+    assert "failed_action: test_action_2 attempt=test_attempt_2 status=VERIFICATION_FAILED" in message
+    assert "failed_action: test_action_1" not in message
+    assert message.count("@AI Commerce Engineering Workflow") == 1
+    assert "@AI Commerce Brain" not in message
+
+
+def test_failure_preview_rejects_success_only_event():
+    from ai_commerce.remote.wake_dual_plugin_preview import build_engineering_failure_wake_preview
+
+    event = _make_dual_route_failure_event(["CANDIDATE_READY"])
+    with pytest.raises(ValueError, match="ENGINEERING_FAILURE_PREVIEW_NOT_FAILED"):
+        build_engineering_failure_wake_preview(event)
+
+
+@pytest.mark.parametrize("tamper", ["repo", "event_id", "status", "not_event"])
+def test_failure_preview_rejects_forged_or_invalid_events(tamper):
+    from ai_commerce.remote.wake_dual_plugin_preview import build_engineering_failure_wake_preview
+
+    event = _make_dual_route_failure_event(["EXECUTION_UNKNOWN"])
+    if tamper == "repo":
+        event["repository"] = "other/repo"
+    elif tamper == "event_id":
+        event["event_id"] = "ef02-completion-v1:" + "a" * 64
+    elif tamper == "status":
+        event["actions"][0]["status"] = "CANDIDATE_READY"
+    else:
+        event = {"untrusted": True}
+    with pytest.raises(ValueError, match="ENGINEERING_FAILURE_PREVIEW_EVENT_INVALID"):
+        build_engineering_failure_wake_preview(event)

@@ -20,7 +20,14 @@ from .wake_adapter import WakeReceipt
 _EVENT = re.compile(r"ef02-completion-v1:[0-9a-f]{64}\Z")
 _COMPOSER = ('#prompt-textarea[contenteditable="true"], '
              'main form [contenteditable="true"][role="textbox"][aria-multiline="true"]')
-_SEND = '[data-testid="send-button"], button[type="submit"][aria-label="Send"]'
+# The observed Vietnamese ChatGPT send button has an aria-label beginning
+# with "Gửi" and a child SVG.icon-primary-action, but no English "Send" label.
+# Match BOTH attributes to avoid accepting unrelated localized actions. The
+# page guard additionally scopes candidates to one exact-chat composer form,
+# requires a single visible, enabled button and checks exact staged text.
+_SEND = ('[data-testid="send-button"], '
+         'button[type="submit"][aria-label="Send"], '
+         'button[aria-label^="Gửi"]:has(svg.icon-primary-action)')
 _STOP = '[data-testid="stop-button"]'
 _LOGIN = '[data-testid="login-button"], a[href^="/auth/login"]'
 _WORK = '[data-workspace-type="team"], [data-workspace-type="enterprise"], [data-workspace-type="business"], [data-testid="work-composer"]'

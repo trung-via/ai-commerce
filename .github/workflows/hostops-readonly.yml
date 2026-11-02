@@ -1,0 +1,178 @@
+name: AI Commerce HostOps read-only Windows diagnostics
+run-name: "HostOps Issue #${{ github.event.issue.number }}"
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-commerce-hostops-readonly
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: >-
+      github.event.repository.private == true &&
+      github.event.issue.user.login == github.repository_owner &&
+      startsWith(github.event.issue.title, '[HOSTOPS] ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Confirm live repository private
+        id: privacy
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {data} = await github.rest.repos.get({owner: context.repo.owner, repo: context.repo.repo});
+            if (!data.private || data.full_name.toLowerCase() !== 'trung-via/ai-commerce') {
+              core.setFailed('HOSTOPS_REPOSITORY_NOT_PRIVATE');
+              return;
+            }
+            core.setOutput('private', 'true');
+      - name: Capture immutable Issue-opened payload
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const issue = context.payload.issue;
+            if (!issue || issue.user?.login !== context.repo.owner ||
+                !issue.title.startsWith('[HOSTOPS] ') || !issue.body) {
+              core.setFailed('HOSTOPS_NOT_OWNER_AUTHORIZED');
+              return;
+            }
+            fs.writeFileSync('hostops-request.json', issue.body, {encoding:'utf8', flag:'wx'});
+      - name: Validate closed request contract
+        shell: bash
+        env:
+          HOSTOPS_ISSUER: ${{ github.event.issue.user.login }}
+          HOSTOPS_OWNER: ${{ github.repository_owner }}
+          HOSTOPS_PRIVATE: ${{ steps.privacy.outputs.private }}
+        run: |
+          python scripts/hostops_request.py validate \
+            --request-file hostops-request.json \
+            --repository "$GITHUB_REPOSITORY" \
+            --issuer "$HOSTOPS_ISSUER" --owner "$HOSTOPS_OWNER" \
+            --source-sha "$GITHUB_SHA" --is-private "$HOSTOPS_PRIVATE" \
+            --output hostops-validated.json
+      - name: Export immutable payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: hostops-request-${{ github.run_id }}
+          path: |
+            hostops-request.json
+            hostops-validated.json
+          retention-days: 7
+
+  execute:
+    needs: validate
+    if: needs.validate.result == 'success' && github.event.repository.private == true
+    runs-on: [self-hosted, Windows, ai-commerce-ef02]
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: hostops-request-${{ github.run_id }}
+          path: .local/hostops-input
+      - name: Recheck live private visibility on Windows
+        id: privacy
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {data} = await github.rest.repos.get({owner: context.repo.owner, repo: context.repo.repo});
+            if (!data.private || data.full_name.toLowerCase() !== 'trung-via/ai-commerce') {
+              core.setFailed('HOSTOPS_REPOSITORY_NOT_PRIVATE');
+              return;
+            }
+            core.setOutput('private', 'true');
+      - name: Revalidate and run fixed read-only diagnostic
+        shell: pwsh
+        env:
+          HOSTOPS_ISSUER: ${{ github.event.issue.user.login }}
+          HOSTOPS_OWNER: ${{ github.repository_owner }}
+          HOSTOPS_PRIVATE: ${{ steps.privacy.outputs.private }}
+        run: |
+          python scripts/hostops_request.py execute --request-file .local/hostops-input/hostops-request.json --repository "$env:GITHUB_REPOSITORY" --issuer "$env:HOSTOPS_ISSUER" --owner "$env:HOSTOPS_OWNER" --source-sha "$env:GITHUB_SHA" --is-private "$env:HOSTOPS_PRIVATE" --output .local/hostops-result.json
+          exit $LASTEXITCODE
+      - name: Preserve result including blocked diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hostops-result-${{ github.run_id }}
+          path: .local/hostops-result.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  report:
+    needs: [validate, execute]
+    if: always() && needs.validate.result == 'success' && github.event.repository.private == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Download bounded evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: hostops-result-${{ github.run_id }}
+          path: hostops-report
+      - name: Post sanitized result to original Issue
+        uses: actions/github-script@v7
+        env:
+          HOSTOPS_ISSUE_NUMBER: ${{ github.event.issue.number }}
+        with:
+          script: |
+            const fs = require('fs');
+            const raw = fs.readFileSync('hostops-report/hostops-result.json', 'utf8');
+            const data = JSON.parse(raw);
+            const accepted = data.schema === 'ai-commerce-hostops-result-v1' &&
+              data.status === 'OBSERVED' &&
+              /^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$/.test(data.request_id) &&
+              /^(runner_readonly|d5_readonly)$/.test(data.operation) &&
+              /^[0-9a-f]{40}$/.test(data.source_sha) &&
+              data.diagnostics?.operation === data.operation &&
+              Number.isSafeInteger(data.diagnostics.session_id) &&
+              Number.isSafeInteger(data.diagnostics.pwsh_major) &&
+              Number.isSafeInteger(data.diagnostics.runner_listener_count) &&
+              Number.isSafeInteger(data.diagnostics.chrome_process_count) &&
+              typeof data.diagnostics.cdp_9333_listening === 'boolean';
+            let summary;
+            if (accepted) {
+              const x = data.diagnostics;
+              summary = 'OBSERVED / ' + data.operation +
+                ' / session=' + x.session_id + ' / pwsh=' + x.pwsh_major +
+                ' / runner_count=' + x.runner_listener_count +
+                ' / chrome_count=' + x.chrome_process_count +
+                ' / cdp_9333_listening=' + x.cdp_9333_listening;
+            } else {
+              const codes = new Set(['REPO_NOT_PRIVATE_OR_WRONG','ISSUER_NOT_OWNER',
+                'INVALID_SOURCE_SHA','INVALID_REQUEST_LENGTH','DUPLICATE_JSON_KEY',
+                'INVALID_JSON','INVALID_REQUEST_SHAPE','INVALID_IDENTITY',
+                'SOURCE_SHA_MISMATCH','INVALID_REQUEST_ID','UNSUPPORTED_OPERATION',
+                'PARAMETERS_MUST_BE_EMPTY','REQUEST_NOT_READABLE',
+                'DIAGNOSTIC_SCRIPT_MISSING','POWERSHELL_UNAVAILABLE_OR_TIMEOUT',
+                'DIAGNOSTIC_COMMAND_FAILED','INVALID_DIAGNOSTIC_OUTPUT',
+                'INVALID_DIAGNOSTIC_SHAPE','DIAGNOSTIC_OPERATION_MISMATCH',
+                'INVALID_DIAGNOSTIC_FIELD']);
+              summary = 'BLOCKED / ' + (data.status === 'BLOCKED' && codes.has(data.error_code)
+                ? data.error_code : 'INVALID_RESULT');
+            }
+            const url = process.env.GITHUB_SERVER_URL + '/' + context.repo.owner +
+              '/' + context.repo.repo + '/actions/runs/' + context.runId;
+            await github.rest.issues.createComment({owner:context.repo.owner, repo:context.repo.repo,
+              issue_number:Number(process.env.HOSTOPS_ISSUE_NUMBER),
+              body:'HOSTOPS_RESULT_V1\n' + summary + '\nRun: ' + url + '\n' +
+                'Read-only diagnostics only. Does not prove Wake, browser Send or plugin invocation.'});

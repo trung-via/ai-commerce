@@ -1,0 +1,4 @@
+# Fail-closed: no Human public signing key has been enrolled.
+# Enroll ONE line, through a separately reviewed GitHub PR:
+# ai-commerce-human ssh-ed25519 AAAA... human@local
+# Never commit a private key; Issue author is not independent Human approval.
