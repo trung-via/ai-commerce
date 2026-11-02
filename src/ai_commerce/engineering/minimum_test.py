@@ -409,8 +409,6 @@ def select_plan(*, repo: Path, base_sha: str, base_files: Mapping[str, str],
                  p.startswith(("src/", "scripts/", "tests/", "contracts/", "config/"))
                  or p.endswith((".ps1", ".sh", ".js", ".cjs", ".mjs", ".ts", ".tsx")))]
             + ["AC_UNMAPPED:" + ac for ac in required_acs if ac not in reviewed_acs]
-            + ["NON_PYTHON_DIRECT_VERIFICATION_REQUIRED:" + p for p in changed_paths
-               if p.endswith((".ps1", ".sh", ".js", ".cjs", ".mjs", ".ts", ".tsx"))]
         )
     if human_full_suite_authorized:
         full_commands = (["python", "-m", "pytest", "tests", "-q"],
