@@ -390,6 +390,7 @@ def registered_action_plan(
     *, repo: Path, base_sha: str, base_files, candidate_files,
     changed_paths: Sequence[str], required_acs: Sequence[str], fallback_argv,
     groups: Sequence, registered_profiles: dict | None, aggregate_sources=(), env=None,
+    allowed_paths: Sequence[str] = (),
 ) -> dict:
     """Translate V2 selected impact to the existing immutable EF01/EF02 evidence contract.
 
@@ -399,16 +400,47 @@ def registered_action_plan(
     """
     import shutil
     import sys
-    from .minimum_test import canonical, digest
+    from .minimum_test import TestGroup, canonical, digest
+    import json
 
+    # A fixed ingress profile is a permission to ATTEMPT onboarding, never an
+    # authority to use candidate-supplied shell/pytest argv. Load one manifest
+    # as data AFTER Codex edits; verify it against the immutable base and the
+    # Human-approved allowed_paths. The trusted planner constructs test argv.
+    profiles = registered_profiles or {}
+    onboarding = (
+        profiles.get("mt01-component-onboarding") == list(fallback_argv)
+        and bool(allowed_paths)
+    )
+    admission, onboarding_error = None, None
+    if onboarding:
+        candidates = sorted(p for p in changed_paths
+                            if p.startswith("work_items/mt01-components/") and p.endswith(".json"))
+        if len(candidates) != 1:
+            onboarding_error = "ONBOARD_EXACTLY_ONE_NEW_MANIFEST_REQUIRED"
+        else:
+            try:
+                data = json.loads((repo / candidates[0]).read_text(encoding="utf-8"))
+                admission = validate_component_onboarding_manifest(
+                    data, manifest_path=candidates[0], changed_paths=changed_paths,
+                    base_paths=tuple(base_files), existing_groups=groups,
+                    allowed_paths=allowed_paths, root=repo)
+            except (ValueError, OSError, UnicodeError, TypeError) as exc:
+                onboarding_error = "ONBOARD_INVALID_MANIFEST:" + str(exc)[:128]
+        if admission is not None:
+            groups = (*groups, TestGroup(
+                admission["name"], admission["tests"], admission["acs"],
+                admission["paths"], admission["consumers"],
+                (*admission["contracts"], admission["manifest_path"])))
     impact = select_impact(
         root=repo, changed_paths=changed_paths, groups=groups,
         base_sha=base_sha,
     )
     by_name = {g.name: g for g in groups}
-    profiles = registered_profiles or {}
     entries = []
     problems = list(impact.missing_mapping)
+    if onboarding_error:
+        problems.append(onboarding_error)
     known_acs = {ac for group in groups for ac in group.acs}
     # A globally known AC is NOT verified unless its owning group is selected.
     # Do not expand silently: an unrelated action requirement needs a new
@@ -427,11 +459,14 @@ def registered_action_plan(
         expected = ["python", "-m", "pytest", *group.tests, "-q"]
         if select_parallel:
             expected.extend(["-n", "12"])
-        matched = next((key for key, value in sorted(profiles.items()) if value == expected), None)
+        new_owner = bool(admission is not None and name == admission["name"])
+        matched = ("mt01-component-onboarding" if new_owner else
+                   next((key for key, value in sorted(profiles.items()) if value == expected), None))
         if matched is None:
             problems.append(name + ":REGISTERED_PROFILE_REQUIRED")
-        # Closed, registered fallback argv only; never synthesize unknown commands.
-        argv = list(profiles[matched]) if matched is not None else list(fallback_argv)
+        # The only dynamic command is generated from a VALIDATED bounded
+        # manifest; all original components still use exact registry argv.
+        argv = expected if new_owner else list(profiles[matched]) if matched is not None else list(fallback_argv)
         executable = shutil.which(argv[0]) if argv else None
         paths = (set(group.tests) | set(group.paths) | set(group.consumers) |
                  set(group.contracts) | (set(changed_paths) & set(impact.affected_paths)))
@@ -450,6 +485,9 @@ def registered_action_plan(
             "environment_proven": bool(executable and Path(executable).resolve() == Path(sys.executable).resolve()),
             "registered_profile": matched,
             "selected_impact_tests": list(impact.selected_tests),
+            **({"onboarding_manifest_path": admission["manifest_path"],
+                "onboarding_manifest_sha256": admission["manifest_sha256"],
+                "onboarding_data_only": True} if new_owner else {}),
         }
         executable_scope = bool(impact.runnable and matched)
         entries.append({
