@@ -1,9 +1,10 @@
-"""Bounded private fast re-attestation for the existing verified D5 Chrome root.
+"""Change-driven private re-attestation for the existing verified D5 Chrome root.
 
 A cached record is never sufficient by itself: each reuse checks the same
 live PID *and* process creation timestamp, loopback-only TCP owner, exact
 executable and /json/version protocol. Any change requires the original
-full chrome_acquisition guard. Cache cannot authorize Send or Wake.
+full chrome_acquisition guard. Unlike a TTL, an unchanged live process does
+not cause unnecessary full rechecks. Cache cannot authorize Send or Wake.
 """
 from __future__ import annotations
 
@@ -12,13 +13,11 @@ import json
 import os
 from pathlib import Path
 import subprocess
-import time
 
 from . import chrome_acquisition as ca
 from ._private_state import PrivateJsonState
 from .local_completion_handoff import _private_identity
 
-_MAX_AGE_SECONDS = 600
 _IDENTITY_PS = r"""
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new()
 $ErrorActionPreference='Stop'
@@ -71,12 +70,11 @@ class ChromeAttestationCache:
     """Private advisory cache. Never permits a new launch on cache failure."""
 
     def __init__(self, *, path: Path, checkout: Path, env: ca.ChromeEnvironment,
-                 identity_reader=None, protocol_probe=None, now=None):
+                 identity_reader=None, protocol_probe=None):
         self.env = env
         self.identity_reader = identity_reader or (
             lambda: _live_port_identity(env.port))
         self.protocol_probe = protocol_probe or (lambda: ca._probe_cdp(env))
-        self.now = now or time.time
         self.state = PrivateJsonState(
             path, checkout, label="D5_CHROME_CACHE", max_bytes=2048)
         self._private_owner()
@@ -129,11 +127,9 @@ class ChromeAttestationCache:
         try:
             record = self._read()
             if (type(record) is not dict or set(record) !=
-                    {"v", "fingerprint", "pid", "creation", "session", "time"} or
+                    {"v", "fingerprint", "pid", "creation", "session"} or
                     record["v"] != 1 or
-                    record["fingerprint"] != self._fingerprint() or
-                    type(record["time"]) not in (int, float) or
-                    not 0 <= self.now() - record["time"] <= _MAX_AGE_SECONDS):
+                    record["fingerprint"] != self._fingerprint()):
                 return None
             identity = self.identity_reader()
             if (not self._valid_live(identity) or
@@ -158,7 +154,7 @@ class ChromeAttestationCache:
             self._write({
                 "v": 1, "fingerprint": self._fingerprint(),
                 "pid": identity["pid"], "creation": identity["creation"],
-                "session": identity["session"], "time": self.now(),
+                "session": identity["session"],
             })
         except Exception:
             # Readiness does not depend on an optional cache succeeding.
