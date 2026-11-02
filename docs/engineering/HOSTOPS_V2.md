@@ -16,6 +16,7 @@
 | --- | --- | --- | --- |
 | `host_inventory_read` | read | `{}` | Session/PowerShell/process counts; 9222/9333 TCP inventory; interactive runner task state |
 | `d5_deep_read` | read | `{}` | Above and in-memory counts of Chrome 9333 debug flags / user-data-dir flags, not their values |
+| `d5_pid_map_read` | read | `{}` | Up to 32 sanitized Chrome PID rows, up to 16 TCP listener owner-PID rows for ports 9222/9333, ephemeral per-run profile groups and directory-exists flags; no raw paths/commands |
 | `scratch_marker_write` | automatic bounded write | `{"marker":"PASS"}` | New marker in job-only scratch directory |
 | `workspace_file_write` | signed Human approval | `{"relative_path":"notes/report.md","content":"text"}` | New text/JSON/Markdown file under approved root, max 2 KiB |
 
@@ -54,3 +55,13 @@ Do not ask ChatGPT or the GitHub connector to possess the Human private signing 
 ## Verification
 
 Run `python -m unittest discover -s tests -p test_hostops_v2.py -v`. CI targets Ubuntu/Windows hosted runners with PowerShell parser and bounded hosted smoke. A CI PASS is not proof of Windows laptop deployment; one authorized new Issue is required after merge for live diagnostics. No scripts or configurations in the existing EF02 runner are modified.
+
+## D5 PID map diagnostic (new, read-only)
+
+The new `d5_pid_map_read` operation is available only after this PR is separately approved and merged. It inventories Chrome Win32_Process metadata and OS TCP listeners. Each Chrome process row contains a PID, Windows session ID, whether its command line was readable, flags for the two CDP ports, an ephemeral profile group such as `p01`, and an explicit UNKNOWN for profile-root filesystem state (no path is dereferenced). The OS TCP rows identify owner PID, port, loopback/other binding and whether the PID belongs to a Chrome process. **No profile path, process command line, cookies, keys or Chrome page is sent back.**
+
+`profile_identity_verified=false` is intentional: equal `p01` means equal observed `--user-data-dir` claims *inside the same run*; it does **not** authenticate a particular D5 canonical profile or prove live browser attachment. `profile_root_exists=null` is always returned by this operation: Chrome-supplied paths are never dereferenced because they may point to network shares or reparse points. PIDs, flags and listeners can change between reads. When CIM or TCP inventory fails, the corresponding `process_known` / `tcp_known` is false, never silently reported as an empty inventory.
+
+The updated Issue report prints only bounded PID/flags/profile-group mappings and TCP port owners; records are truncated to the verified limits, with explicit truncation flags. If no port is listening but a Chrome PID has `debug_9333=true`, classify it as a **debug-flag-without-listener observation**, not automatic proof of why Chrome CDP failed.
+
+Use a new `[HOSTOPS2] ...` Issue with an immutable JSON body and `"operation":"d5_pid_map_read"`, `"parameters":{}`, and the exact new `main` source SHA after merge. This operation never launches Chrome, attaches to a page, alters profiles, triggers Wake/EF02 or changes approval keys. The Human signer gate and scoped write behavior remain unchanged.
