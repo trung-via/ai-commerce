@@ -1456,7 +1456,7 @@ def test_v21_authenticated_full_runs_entire_registered_scope_not_affected_subset
 
 FULL12 = [*FULL, "-n", "12"]
 
-def _hfull_hfull_source(tmp_path, *, script):
+def _hfull_source(tmp_path, *, script):
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
     (repo / "tests").mkdir()
@@ -1470,7 +1470,7 @@ def _hfull_hfull_source(tmp_path, *, script):
     return repo, changed
 
 
-def _hfull_hfull_plan(repo, changed, groups, acceptance):
+def _hfull_plan(repo, changed, groups, acceptance):
     files = mt.file_hashes(repo)
     return mt.select_plan(
         repo=repo, base_sha="a"*40, base_files=files,
