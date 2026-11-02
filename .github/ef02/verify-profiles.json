@@ -326,4 +326,14 @@
     "-n",
     "12"
   ]
+,
+  "mt01-merge-queue-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_pr_merge_gate.py",
+    "-q",
+    "-n",
+    "12"
+  ]
 }

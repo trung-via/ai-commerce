@@ -1,0 +1,38 @@
+name: AI Commerce Human-approved merge queue
+
+# Trusted main-branch code only; never checkout untrusted PR code.
+# Owner approval binds exact PR + HEAD + base SHAs.
+on:
+  issue_comment:
+    types: [created]
+  workflow_run:
+    workflows: ["EF02 source tests"]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+  issues: read
+  pull-requests: write
+
+concurrency:
+  group: ai-commerce-human-merge-queue-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  resume-approved-merge:
+    if: github.event_name == 'workflow_run' || github.event.issue.pull_request != null
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Review owner authorization and exact-head two-OS CI; resume merge if verified
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/scripts/pr-merge-gate.py
