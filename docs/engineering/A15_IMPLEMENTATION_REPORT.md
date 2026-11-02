@@ -38,5 +38,5 @@
 - O06: append-only immutable reconciliation for uncertain attempts binds original attempt digest + request digest, preserves original UNKNOWN, never calls a provider, and only permits HUMAN-authorized subsequent action after a supplied no-effect observation.
 - O07: reload persisted A04 V1 manifest and bind selected cost entries to exact job/attempt/provider/request digest; read-only CLI demonstrates the operator report.
 - A04 V2: read-only synthetic generation-job journal projection using GenerationJobRunner.load, never calling submit/observe/fetch.
-- Updated required tests include A15, A04 V1 and V2, A02 contracts in the registered MT-01 A15 profile.
+- The registered MT-01 A15 profile contains only its uniquely owned test_a15_operations.py. That test module exercises real A04 V1 and V2 consumers; other A04/A02 owned test files remain with their original TestGroup/profile. A previous candidate CI run included A04/A02 tests as a diagnostic, but this is not proof for any later SHA.
 - Exact repaired-HEAD Ubuntu/Windows CI and independent Brain acceptance are PENDING; this document is not a PASS receipt.

@@ -368,9 +368,6 @@
     "-m",
     "pytest",
     "tests/test_a15_operations.py",
-    "tests/test_a04_media_operations.py",
-    "tests/test_a04_upgrade_v11.py",
-    "tests/test_a02_contracts.py",
     "-q",
     "-n",
     "12"
