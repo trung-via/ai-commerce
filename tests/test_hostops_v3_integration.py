@@ -150,6 +150,46 @@ def test_explicit_signed_github_disclosure_to_exact_issue(h):
         transport.poll_once(api, h.config, {**h.manifest, "workflow_sha256": c.digest(api.workflow)}, 999, 123)
 
 
+def test_windows_pipe_nowait_requires_real_connection(monkeypatch):
+    """A successful first nonblocking ConnectNamedPipe is NOT an attached peer."""
+    from types import SimpleNamespace
+
+    class Connect:
+        def __init__(self):
+            self.responses = [(True, 0), (False, 536), (False, 535)]
+            self.last_error = None
+            self.argtypes = None
+            self.restype = None
+
+        def __call__(self, _handle, _overlapped):
+            ready, self.last_error = self.responses.pop(0)
+            return ready
+
+    connect = Connect()
+    channel = SimpleNamespace(kernel=SimpleNamespace(ConnectNamedPipe=connect), handle=123)
+    monkeypatch.setattr(broker.ctypes, "get_last_error", lambda: connect.last_error, raising=False)
+    monkeypatch.setattr(broker.time, "sleep", lambda _: None)
+    assert broker.windows_wait_connected(channel, timeout=5) is True
+    assert not connect.responses  # Must consume both LISTENING and CONNECTED states.
+
+
+def test_windows_pipe_nowait_fail_closed_on_unexpected_error(monkeypatch):
+    """Do not interpret broken/disconnected pipes as an authorized client."""
+    from types import SimpleNamespace
+
+    class Connect:
+        argtypes = None
+        restype = None
+
+        def __call__(self, _handle, _overlapped):
+            return False
+
+    channel = SimpleNamespace(kernel=SimpleNamespace(ConnectNamedPipe=Connect()), handle=123)
+    monkeypatch.setattr(broker.ctypes, "get_last_error", lambda: 232, raising=False)
+    with pytest.raises(c.Denied, match="PIPE_UNAVAILABLE"):
+        broker.windows_wait_connected(channel, timeout=5)
+
+
 def test_native_local_ipc_mutual_hmac_and_bounds(tmp_path, record_property):
     key, errors = os.urandom(32), []
     expected = c.receipt(None, "OBSERVED", result={"count": 1})
@@ -168,16 +208,8 @@ def test_native_local_ipc_mutual_hmac_and_bounds(tmp_path, record_property):
     def serve():
         try:
             if os.name == "nt":
-                from ctypes import wintypes
-                server.kernel.ConnectNamedPipe.argtypes = (wintypes.HANDLE, ctypes.c_void_p)
-                end = time.monotonic() + 5
-                while not server.kernel.ConnectNamedPipe(server.handle, None):
-                    if stop.is_set():
-                        return
-                    if ctypes.get_last_error() == 535:
-                        break
-                    assert time.monotonic() < end
-                    time.sleep(0.01)
+                if not broker.windows_wait_connected(server, stop=stop.is_set, timeout=5):
+                    return
                 broker.windows_peer(server, config)
                 channel = server
             else:
@@ -228,7 +260,17 @@ def test_native_local_ipc_mutual_hmac_and_bounds(tmp_path, record_property):
         thread = threading.Thread(target=memory_serve, daemon=True)
         thread.start()
     try:
-        assert broker.client_exchange(client, key, b"fixture") == {"receipt": expected}
+        try:
+            assert broker.client_exchange(client, key, b"fixture") == {"receipt": expected}
+        except c.Denied:
+            # An early server-side Denied used to be masked by 45s client
+            # IPC_TIMEOUT. Report only sanitized codes, never raw payloads.
+            thread.join(0.1)
+            if errors:
+                server_error = errors[0]
+                label = str(server_error) if isinstance(server_error, c.Denied) else type(server_error).__name__
+                pytest.fail("IPC_SERVER_FAILED: " + label, pytrace=False)
+            raise
     finally:
         client.close()
     thread.join(6)

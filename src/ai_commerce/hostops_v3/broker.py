@@ -147,6 +147,34 @@ def windows_listener(config):
     return WindowsChannel(handle)
 
 
+def windows_wait_connected(channel, *, stop=None, timeout=None):
+    """Wait until a local client is *actually connected* on a PIPE_NOWAIT handle.
+
+    With PIPE_NOWAIT, an initial nonzero ConnectNamedPipe result only says that
+    the instance is ready for a client; it is NOT connection proof. Only
+    ERROR_PIPE_CONNECTED (535) proves attachment. 536 means still listening.
+    Keep the existing bounded poll/KILL behavior; never skip windows_peer().
+    """
+    from ctypes import wintypes
+    channel.kernel.ConnectNamedPipe.argtypes = (wintypes.HANDLE, ctypes.c_void_p)
+    channel.kernel.ConnectNamedPipe.restype = wintypes.BOOL
+    deadline = time.monotonic() + timeout if timeout is not None else None
+    while True:
+        if stop is not None and stop():
+            return False
+        ready = channel.kernel.ConnectNamedPipe(channel.handle, None)
+        if not ready:
+            error = ctypes.get_last_error()
+            if error == 535:  # ERROR_PIPE_CONNECTED: actual client attached.
+                return True
+            if error != 536:  # ERROR_PIPE_LISTENING: no client yet.
+                deny("PIPE_UNAVAILABLE")
+        # A nonzero PIPE_NOWAIT result may just mean first-time ready state.
+        if deadline is not None and time.monotonic() >= deadline:
+            deny("PIPE_CONNECT_TIMEOUT")
+        time.sleep(0.01)
+
+
 def windows_peer(channel, config):
     from ctypes import wintypes
     kernel = channel.kernel
@@ -309,17 +337,9 @@ def serve(config_path):
         while not (Path(config["policy_dir"]) / "KILL").exists():
             channel = windows_listener(config)
             try:
-                from ctypes import wintypes
-                channel.kernel.ConnectNamedPipe.argtypes = (wintypes.HANDLE, ctypes.c_void_p)
-                while not channel.kernel.ConnectNamedPipe(channel.handle, None):
-                    error = ctypes.get_last_error()
-                    if error == 535:  # ERROR_PIPE_CONNECTED
-                        break
-                    if error != 536:  # ERROR_PIPE_LISTENING (PIPE_NOWAIT)
-                        deny("PIPE_UNAVAILABLE")
-                    if (Path(config["policy_dir"]) / "KILL").exists():
-                        return
-                    time.sleep(0.1)
+                if not windows_wait_connected(
+                        channel, stop=lambda: (Path(config["policy_dir"]) / "KILL").exists()):
+                    return
                 windows_peer(channel, config)
                 server_exchange(channel, key, lambda raw: isolated_execute(config_path, raw))
             except (Denied, OSError):
