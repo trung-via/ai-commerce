@@ -396,6 +396,22 @@ def select_plan(*, repo: Path, base_sha: str, base_files: Mapping[str, str],
                 registered_profiles: Mapping[str, Sequence[str]] | None = None,
                 human_full_suite_authorized: bool = False) -> dict:
     groups = tuple(approved_groups() if groups is None else groups)
+    # Human approval authorizes the registered pytest command, not semantic
+    # coverage for files or ACs absent from the reviewed component registry.
+    post_test_coverage_gaps = []
+    if human_full_suite_authorized:
+        reviewed_paths = {p for group in groups for p in
+                          (*group.paths, *group.tests, *group.consumers, *group.contracts)}
+        reviewed_acs = {ac for group in groups for ac in group.acs}
+        post_test_coverage_gaps = sorted(
+            ["UNMAPPED_IMPLEMENTATION_OR_TEST:" + p for p in changed_paths
+             if p not in reviewed_paths and (
+                 p.startswith(("src/", "scripts/", "tests/", "contracts/", "config/"))
+                 or p.endswith((".ps1", ".sh", ".js", ".cjs", ".mjs", ".ts", ".tsx")))]
+            + ["AC_UNMAPPED:" + ac for ac in required_acs if ac not in reviewed_acs]
+            + ["NON_PYTHON_DIRECT_VERIFICATION_REQUIRED:" + p for p in changed_paths
+               if p.endswith((".ps1", ".sh", ".js", ".cjs", ".mjs", ".ts", ".tsx"))]
+        )
     if human_full_suite_authorized:
         full_commands = (["python", "-m", "pytest", "tests", "-q"],
                          ["python", "-m", "pytest", "tests", "-q", "-n", "12"])
@@ -489,6 +505,13 @@ def select_plan(*, repo: Path, base_sha: str, base_files: Mapping[str, str],
         all(t in candidate_files for t in required_tests) and
         (scope_args[0] == "." or all(t.startswith("tests/") for t in required_tests)))
     if human_full_suite_authorized:
+        # The owner-authenticated profile was already checked above. Execute
+        # it as requested even when mapping or non-Python proof is incomplete;
+        # such gaps remain UNPROVEN after pytest rather than blocking the run.
+        fallback_proven_scope = True
+        if post_test_coverage_gaps:
+            reasons.append("HUMAN_FULL_REQUIRES_ADDITIONAL_COMPONENT_PROOF")
+    if human_full_suite_authorized:
         reasons.append("AUTHENTICATED_HUMAN_EXPLICIT_FULL_SUITE")
     if reasons:
         # An approved full profile is a conservative proof for all applicable ACs.
@@ -530,7 +553,8 @@ def select_plan(*, repo: Path, base_sha: str, base_files: Mapping[str, str],
             "fallback_profile": fallback_profile, "fallback_argv": list(fallback_argv),
             "narrow_execution_observed": False,
             "fallback": bool(reasons), "aggregate_sources": list(aggregate_sources),
-            "human_full_suite_authorized": human_full_suite_authorized, "groups": entries}
+            "human_full_suite_authorized": human_full_suite_authorized,
+            "post_test_coverage_gaps": post_test_coverage_gaps, "groups": entries}
 
 
 def select_provisional_tests(*, base_files: Mapping[str, str],
