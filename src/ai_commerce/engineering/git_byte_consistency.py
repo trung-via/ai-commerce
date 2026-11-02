@@ -141,8 +141,10 @@ def stabilize_candidate_newlines_before_verify(
                 converted_filtered.stdout.strip() != converted.stdout.strip()):
             raise GitByteConsistencyError("PREVERIFY_GIT_FILTER_UNSUPPORTED:" + relative)
 
-        if (not allowed or not any(relative == p or relative.startswith(p + "/")
-                                   for p in allowed)):
+        # EF01's empty allowed_prefixes means unrestricted ordinary source
+        # (protected paths remain rejected), not an empty ownership grant.
+        if allowed and not any(relative == p or relative.startswith(p + "/")
+                               for p in allowed):
             raise GitByteConsistencyError("PREVERIFY_OUT_OF_SCOPE_FILTER:" + relative)
 
         # 'git ls-files' also reports NEW files staged by the executor. Such
