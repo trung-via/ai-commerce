@@ -1500,3 +1500,143 @@ def test_hostops_v3_script_and_schema_change_select_registered_group(real_tree, 
         assert selected["selected_groups"] == ["hostops-v3"]
         assert not selected["fallback"]
         assert selected["groups"][0]["selected_profile"] == "mt01-hostops-v3-tests"
+
+
+
+
+FULL12 = [*FULL, "-n", "12"]
+
+def _hfull_source(tmp_path, *, script):
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "tests").mkdir()
+    (repo / "src" / "widget.py").write_text("VALUE = 1\n")
+    (repo / "tests" / "test_widget.py").write_text("def test_widget(): assert True\n")
+    changed = ["src/widget.py"]
+    if script:
+        (repo / "scripts").mkdir()
+        (repo / "scripts" / "check.ps1").write_text("Write-Output 'ok'\n")
+        changed.append("scripts/check.ps1")
+    return repo, changed
+
+
+def _hfull_plan(repo, changed, groups, acceptance):
+    files = mt.file_hashes(repo)
+    return mt.select_plan(
+        repo=repo, base_sha="a"*40, base_files=files,
+        candidate_files=files, changed_paths=changed,
+        required_acs=acceptance, fallback_argv=FULL12,
+        groups=groups, registered_only=True,
+        registered_profiles={"project-tests": FULL12},
+        env={"test": "isolated"}, human_full_suite_authorized=True,
+    )
+
+
+def test_human_full_registered_command_executes_but_cannot_claim_unmapped_script(tmp_path, monkeypatch):
+    monkeypatch.setenv("MT01_V21_ENABLED", "1")
+    repo, changed = _hfull_source(tmp_path, script=True)
+    plan = _hfull_plan(repo, changed, groups=(), acceptance=("NEW.AC",))
+    assert plan["version"] == 1
+    assert plan["groups"][0]["state"] == "EXECUTE"
+    assert plan["groups"][0]["binding"]["argv"] == FULL12
+    assert "AC_UNMAPPED:NEW.AC" in plan["post_test_coverage_gaps"]
+    assert "UNMAPPED_IMPLEMENTATION_OR_TEST:scripts/check.ps1" in plan["post_test_coverage_gaps"]
+
+
+def test_human_full_known_python_source_has_no_extra_coverage_hold(tmp_path):
+    repo, changed = _hfull_source(tmp_path, script=False)
+    groups = (mt.TestGroup("widget", ("tests/test_widget.py",), ("WIDGET.AC",), ("src/widget.py",)),)
+    plan = _hfull_plan(repo, changed, groups, ("WIDGET.AC",))
+    assert plan["groups"][0]["execute"] is True
+    assert plan["post_test_coverage_gaps"] == []
+
+
+def test_full_pytest_executes_then_reports_unproven_without_false_pass(tmp_path, monkeypatch):
+    repo, changed = _hfull_source(tmp_path, script=True)
+    outdir = tmp_path / "evidence"
+    outdir.mkdir()
+    monkeypatch.setattr(verification, "require_managed_parallelism", lambda *args, **kwargs: None)
+    observed = []
+    def fake_run(argv, **kwargs):
+        observed.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "created: 12/12 workers\n2 passed in 0.01s\n", "")
+    monkeypatch.setattr(verification.subprocess, "run", fake_run)
+    refs = {}
+    def save(key, name, data):
+        (outdir / name).write_bytes(data)
+        refs[key] = name
+    result, plan = verification.execute_plan(
+        repo=repo, output_dir=outdir, base_sha="a"*40,
+        base_files=mt.file_hashes(repo), changed_paths=changed,
+        required_acs=("NEW.AC",), fallback_argv=FULL12, prior={},
+        save=save, evidence_files=refs,
+        deadline=time.monotonic()+60, timeout_seconds=30,
+        registered_only=True, groups=(),
+        registered_profiles={"project-tests": FULL12},
+        human_full_suite_authorized=True,
+    )
+    assert observed == [FULL12]
+    assert result.returncode == 5
+    assert plan["groups"][0]["result"] == "PASS"
+    assert plan["groups"][0]["tests_executed"]["passed"] == 2
+    assert plan["groups"][0]["workers_actual"] == 12
+    assert plan["final_coverage_status"] == "UNPROVEN_AFTER_REGISTERED_FULL"
+
+
+def test_full_profile_cannot_be_unregistered_or_narrow(tmp_path):
+    repo, changed = _hfull_source(tmp_path, script=False)
+    files = mt.file_hashes(repo)
+    with pytest.raises(ValueError, match="UNTRUSTED_OR_UNREGISTERED"):
+        mt.select_plan(
+            repo=repo, base_sha="a"*40, base_files=files,
+            candidate_files=files, changed_paths=changed, required_acs=(),
+            fallback_argv=["python", "-m", "pytest", "tests/test_widget.py", "-q", "-n", "12"],
+            groups=(), registered_only=True,
+            registered_profiles={"project-tests": FULL12},
+            human_full_suite_authorized=True,
+        )
+
+
+
+def test_human_full_real_registered_xdist12_runs_then_preserves_unproven_ac(tmp_path, monkeypatch):
+    """The genuine registered pytest subprocess must run before AC hold (#238).
+
+    A one-test fixture replaces a project-wide 3,000+ test rerun. Actual xdist
+    startup/count is observed, not mocked or equated with CI's four workers.
+    """
+    import importlib.util
+    if importlib.util.find_spec("xdist") is None:
+        pytest.skip("pytest-xdist missing; CI/registered runner must supply it")
+    repo, changed = _hfull_source(tmp_path, script=True)
+    evidence = tmp_path / "verified"
+    evidence.mkdir()
+    # Avoid inheriting options from an enclosing CI pytest command.
+    monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
+    monkeypatch.delenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", raising=False)
+    refs = {}
+    def save(key, name, data):
+        (evidence / name).write_bytes(data)
+        refs[key] = name
+
+    result, plan = verification.execute_plan(
+        repo=repo, output_dir=evidence, base_sha="a" * 40,
+        base_files=mt.file_hashes(repo), changed_paths=changed,
+        required_acs=("NEW.AC",), fallback_argv=FULL12,
+        prior={}, save=save, evidence_files=refs,
+        deadline=time.monotonic() + 120, timeout_seconds=100,
+        registered_only=True, groups=(),
+        registered_profiles={"project-tests": FULL12},
+        human_full_suite_authorized=True,
+    )
+    entry = plan["groups"][0]
+    stdout = (evidence / refs["mt01_0_stdout"]).read_text()
+    assert entry["actual_argv"] == FULL12
+    assert entry["actual_exit_code"] == 0, stdout
+    assert entry["tests_executed"]["passed"] == 1, stdout
+    assert entry["workers_requested"] == 12
+    assert entry["workers_actual"] == 12, stdout
+    assert entry["result"] == "PASS"
+    assert result.returncode == 5
+    assert plan["final_coverage_status"] == "UNPROVEN_AFTER_REGISTERED_FULL"
+    assert "AC_UNMAPPED:NEW.AC" in plan["post_test_coverage_gaps"]
+    assert (evidence / refs["mt01_results"]).exists()
