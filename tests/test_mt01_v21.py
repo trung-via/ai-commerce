@@ -775,3 +775,47 @@ def test_v22_manifest_binding_rejects_untrusted_in_memory_owner(tmp_path):
     path.write_text("{}", encoding="utf-8")
     with pytest.raises(ValueError, match="ONBOARD_MANIFEST_BYTES_MISMATCH"):
         validator(values, **ctx)
+
+
+def test_v22_registered_action_onboards_new_component_without_companion_pr(tmp_path):
+    from ai_commerce.engineering.minimum_test import file_hashes
+    from ai_commerce.engineering.impact_v21 import registered_action_plan
+    validator, values, ctx = _v22_manifest_fixture(tmp_path)
+    profile = ["python", "-m", "pytest", "tests/test_mt01_v21.py", "-q", "-n", "12"]
+    result = registered_action_plan(
+        repo=tmp_path, base_sha="a" * 40,
+        base_files={p: "baseline" for p in ctx["base_paths"]},
+        candidate_files=file_hashes(tmp_path),
+        changed_paths=ctx["changed_paths"],
+        required_acs=values["acs"], fallback_argv=profile,
+        groups=ctx["existing_groups"],
+        registered_profiles={"mt01-component-onboarding": profile},
+        allowed_paths=ctx["allowed_paths"])
+    assert result["selected_groups"] == ["fresh"]
+    assert result["unknown_acs"] == []
+    assert result["reason_codes"] == []
+    selected = [g for g in result["groups"] if g["group"] == "fresh"]
+    assert len(selected) == 1 and selected[0]["execute"]
+    binding = selected[0]["binding"]
+    assert binding["registered_profile"] == "mt01-component-onboarding"
+    assert binding["argv"] == ["python", "-m", "pytest", "tests/test_fresh_svc.py", "-q", "-n", "12"]
+    assert len(binding["onboarding_manifest_sha256"]) == 64
+
+
+def test_v22_onboarding_without_manifest_never_passes(tmp_path):
+    from ai_commerce.engineering.minimum_test import file_hashes
+    from ai_commerce.engineering.impact_v21 import registered_action_plan
+    _, values, ctx = _v22_manifest_fixture(tmp_path)
+    (tmp_path / ctx["manifest_path"]).unlink()
+    paths = tuple(x for x in ctx["changed_paths"] if x != ctx["manifest_path"])
+    profile = ["python", "-m", "pytest", "tests/test_mt01_v21.py", "-q", "-n", "12"]
+    plan = registered_action_plan(
+        repo=tmp_path, base_sha="b" * 40,
+        base_files={p: "baseline" for p in ctx["base_paths"]},
+        candidate_files=file_hashes(tmp_path), changed_paths=paths,
+        required_acs=values["acs"], fallback_argv=profile,
+        groups=ctx["existing_groups"],
+        registered_profiles={"mt01-component-onboarding": profile},
+        allowed_paths=ctx["allowed_paths"])
+    assert any("ONBOARD_EXACTLY_ONE_NEW_MANIFEST_REQUIRED" in x for x in plan["reason_codes"])
+    assert all(not entry["execute"] for entry in plan["groups"])
