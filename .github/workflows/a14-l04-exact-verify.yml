@@ -1,0 +1,72 @@
+name: Verify recovered A14 L04 exact candidate
+on:
+  push:
+    branches: [verify/a14-l04-20261102]
+permissions:
+  contents: read
+jobs:
+  l04-verification:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    steps:
+      - name: Checkout immutable recovered candidate with ancestry
+        uses: actions/checkout@v4
+        with:
+          ref: c8d17a613d59474f55c66dd198b9a941dcf6b9a4
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Assert exact commit, path scope and byte-integrity of recovered candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=8870c26954181fbef7ba26091c55c7139792fe7e
+          test "$(git rev-parse HEAD)" = "c8d17a613d59474f55c66dd198b9a941dcf6b9a4"
+          git cat-file -e "$BASE^{commit}"
+          test "$(git diff --name-only "$BASE" HEAD | wc -l)" -eq 12
+          git diff --check "$BASE" HEAD
+          test ! -e .github/workflows/a14-l04-recovery-bootstrap.yml
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib, importlib.util, subprocess
+          spec=importlib.util.spec_from_file_location("expected","scripts/hostops_ef02_202_recovery.py")
+          m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+          assert len(m.EXPECTED)==12
+          for name, original in sorted(m.EXPECTED.items()):
+              actual=Path(name).read_bytes()
+              if name.endswith("/consumer-tests.txt"):
+                  assert b"\r" not in actual
+                  original_blob=subprocess.run(["git","hash-object","--stdin","--path="+name],
+                     input=actual,capture_output=True,check=True).stdout.strip()
+                  clean_blob=subprocess.run(["git","hash-object","--stdin"],
+                     input=actual,capture_output=True,check=True).stdout.strip()
+                  assert original_blob==clean_blob
+              else:
+                  assert hashlib.sha256(actual).hexdigest()==original, "ORIGINAL_SOURCE_DRIFT:"+name
+              staged=subprocess.run(["git","show","HEAD:"+name],capture_output=True,check=True).stdout
+              assert staged==actual, "PUBLISHED_BLOB_MISMATCH:"+name
+          print("EXACT_CANDIDATE_SHA=c8d17a613d59474f55c66dd198b9a941dcf6b9a4")
+          print("SOURCE_BYTE_ATTESTATION=PASS")
+          PY
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install FFmpeg on Ubuntu
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg
+      - name: Install FFmpeg on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install ffmpeg --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "FFMPEG_WINDOWS_INSTALL_FAILED" }
+      - name: Install test dependencies
+        run: python -m pip install -e ".[dev]" Pillow
+      - name: A14 L04 focused unit and contract tests
+        run: python -m pytest tests/test_a14_attribution.py -q -n 4 --dist loadfile
+      - name: All project tests on integrated candidate
+        run: python -m pytest tests -q -n 4 --dist loadfile
