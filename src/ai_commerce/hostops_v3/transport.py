@@ -186,7 +186,7 @@ class ControlGitHub(GitHub):
         exact = (path in literal or
                  re.fullmatch(re.escape(prefix) + r"/issues/[1-9][0-9]*", path) is not None or
                  re.fullmatch(re.escape(prefix) + r"/actions/runs/[1-9][0-9]*", path) is not None or
-                 re.fullmatch(re.escape(prefix) + r"/contents/\\.github/workflows/hostops-v3\\.yml\\?ref=[0-9a-f]{40}", path) is not None)
+                 re.fullmatch(re.escape(prefix) + r"/contents/\.github/workflows/hostops-v3\.yml\?ref=[0-9a-f]{40}", path) is not None)
         post_ok = re.fullmatch(re.escape(prefix) + r"/issues/[1-9][0-9]*/comments", path) is not None
         if not ((method == "GET" and exact) or (method == "POST" and post_ok and type(data) is dict and set(data) == {"body"})):
             deny("TRANSPORT_ROUTE_DENIED")
