@@ -356,3 +356,14 @@ def test_generic_trusted_main_component_ownership_prevents_partial_receipt(gate,
     assert "tests/test_ef02.py" in gate.reviewed_coverage_for_changed_files([
         {"filename": "src/ai_commerce/remote/worker.py", "status": "modified"}
     ])[1]
+
+
+
+def test_merge_gate_trusted_registry_loads_without_importing_app_package(gate):
+    # Default merge workflow installs only setup-python, not project deps.
+    # Load the explicitly reviewed main file, not ai_commerce.__init__.
+    import importlib.util
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / ".github/scripts/pr-merge-gate.py").read_text()
+    assert 'spec_from_file_location("_mt01_main_trusted_registry"' in src
+    assert "from ai_commerce.engineering.minimum_test import approved_groups" not in src

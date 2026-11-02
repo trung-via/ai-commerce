@@ -22,9 +22,20 @@ from typing import Any, Callable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mt01_v21_proof import validate_receipt_zip
 
-# This module runs from protected main in human-merge-queue.yml, not a PR.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-from ai_commerce.engineering.minimum_test import approved_groups
+# Human merge queue checks out main. Load only its reviewed registry source:
+# no package __init__, pip dependencies or PR-controlled Python imports.
+import importlib.util
+
+def approved_groups():
+    trusted_path = (Path(__file__).resolve().parents[2] /
+                    "src/ai_commerce/engineering/minimum_test.py")
+    spec = importlib.util.spec_from_file_location("_mt01_main_trusted_registry", trusted_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("TRUSTED_MAIN_REGISTRY_UNAVAILABLE")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.approved_groups()
 
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
