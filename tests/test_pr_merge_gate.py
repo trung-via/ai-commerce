@@ -401,3 +401,138 @@ def test_brain_pass_exact_identity_and_revision(gate):
     event["comment"]["user"]["login"] = "spoofed-reviewer"
     assert gate.candidates(bad, bad.repo, event) == []
     assert bad.writes == []
+
+
+
+# New-component admission: protected main may inspect a pinned candidate's
+# strictly additive declaration as DATA, but cannot execute candidate Python.
+def _onboarding_fixture():
+    import pathlib
+    main = (ROOT / "src/ai_commerce/engineering/minimum_test.py").read_text(encoding="utf-8")
+    insert = '''        TestGroup("a15", ("tests/test_a15_operations.py",),
+                  ("A15.offline-operations",),
+                  sources("operations", "cost_ledger"),
+                  consumers=("src/ai_commerce/operations/runner.py",),
+                  contracts=("docs/engineering/A15_IMPLEMENTATION_REPORT.md",)),
+'''
+    anchor = '        TestGroup("a05",'
+    assert main.count(anchor) == 1
+    candidate = main.replace(anchor, insert + anchor, 1)
+    files = [
+        {"filename": "src/ai_commerce/engineering/minimum_test.py", "status": "modified"},
+        {"filename": "src/ai_commerce/operations/cost_ledger.py", "status": "added"},
+        {"filename": "tests/test_a15_operations.py", "status": "added"},
+        {"filename": "docs/engineering/A15_IMPLEMENTATION_REPORT.md", "status": "added"},
+    ]
+    return main, candidate, files
+
+
+def test_new_component_generic_additive_owner_accepted_without_executing_candidate(gate, monkeypatch):
+    from ai_commerce.engineering.minimum_test import approved_groups as trusted_groups
+    main, candidate, changed = _onboarding_fixture()
+    admitted = gate.review_new_component_registry(main, candidate, changed, trusted_groups())
+    assert len(admitted) == 1
+    assert admitted[0]["name"] == "a15"
+    assert admitted[0]["paths"] == ("src/ai_commerce/operations/cost_ledger.py",)
+    monkeypatch.setattr(gate, "approved_groups", trusted_groups)
+    assert gate.reviewed_coverage_for_changed_files(changed) is None  # main-only remains closed
+    reviewed = gate.reviewed_coverage_for_changed_files(changed, onboarded_groups=admitted)
+    assert reviewed is not None
+    assert "tests/test_a15_operations.py" in reviewed[1]
+    assert "tests/test_minimum_test.py" in reviewed[1]
+    # Unowned second source cannot hide behind a legitimate owner declaration.
+    assert gate.reviewed_coverage_for_changed_files(
+        changed + [{"filename": "src/ai_commerce/operations/malicious.py", "status": "added"}],
+        onboarded_groups=admitted) is None
+
+
+def test_new_component_admission_rejects_changes_to_existing_owner_or_code(gate):
+    from ai_commerce.engineering.minimum_test import approved_groups
+    main, candidate, files = _onboarding_fixture()
+    invalid = candidate.replace('TestGroup("a04"', 'TestGroup("a04-rewritten"', 1)
+    with pytest.raises(ValueError, match="EXISTING_TRUSTED_REGISTRY_MUTATED|EXISTING_OWNER_ORDER_CHANGED"):
+        gate.review_new_component_registry(main, invalid, files, approved_groups())
+    injected = candidate.replace("return (", "import os\n    os.system('do-not-run')\n    return (", 1)
+    with pytest.raises((ValueError, SyntaxError)):
+        gate.review_new_component_registry(main, injected, files, approved_groups())
+
+
+@pytest.mark.parametrize("broken", [
+    "not_added_test",
+    "not_added_source",
+    "steal_base_test",
+    "stolen_source",
+    "malicious_group_expr",
+    "no_registry_change",
+])
+def test_new_component_admission_fails_closed_negative_cases(gate, broken):
+    from ai_commerce.engineering.minimum_test import approved_groups
+    main, candidate, files = _onboarding_fixture()
+    if broken == "not_added_test":
+        files[2]["status"] = "modified"
+    elif broken == "not_added_source":
+        files[1]["status"] = "modified"
+    elif broken == "steal_base_test":
+        candidate = candidate.replace('"tests/test_a15_operations.py"',
+                                      '"tests/test_a04_media_operations.py"', 1)
+        files[2]["filename"] = "tests/test_a04_media_operations.py"
+    elif broken == "stolen_source":
+        candidate = candidate.replace('sources("operations", "cost_ledger")',
+                                      'sources("operations", "runner")', 1)
+        files[1]["filename"] = "src/ai_commerce/operations/runner.py"
+    elif broken == "malicious_group_expr":
+        candidate = candidate.replace('sources("operations", "cost_ledger")',
+                                      '__import__("os").system("forbidden")', 1)
+    else:
+        files[0]["status"] = "removed"
+    with pytest.raises(ValueError):
+        gate.review_new_component_registry(main, candidate, files, approved_groups())
+
+
+def test_candidate_registry_blob_identity_and_sha_must_match(gate):
+    import base64
+    import hashlib
+    main, candidate, files = _onboarding_fixture()
+    raw = candidate.encode()
+    good_sha = hashlib.sha1(b"blob " + str(len(raw)).encode() + b"\0" + raw).hexdigest()
+    base = "/repos/trung-via/ai-commerce"
+    suffix = base + "/contents/src/ai_commerce/engineering/minimum_test.py?ref=" + "a" * 40
+    def api(path):
+        assert path == suffix
+        return {"type": "file", "encoding": "base64",
+                "content": base64.b64encode(raw).decode(), "sha": good_sha}
+    assert gate._read_candidate_registry(api, base, "a" * 40) == candidate
+    def invalid(path):
+        return {**api(path), "sha": "0" * 40}
+    with pytest.raises(ValueError, match="BLOB_INTEGRITY"):
+        gate._read_candidate_registry(invalid, base, "a" * 40)
+
+
+def test_candidate_new_component_not_admitted_without_brain_review_or_all_required_junit(gate, monkeypatch):
+    import base64
+    import hashlib
+    from ai_commerce.engineering.minimum_test import approved_groups
+    main, candidate, changed = _onboarding_fixture()
+    monkeypatch.setattr(gate, "approved_groups", approved_groups)
+    raw = candidate.encode()
+    sha = hashlib.sha1(b"blob " + str(len(raw)).encode() + b"\0" + raw).hexdigest()
+    class NewComponentAPI(FakeGitHub):
+        def __call__(self, path, method="GET", body=None):
+            if path == (f"/repos/{self.repo}/contents/"
+                        f"src/ai_commerce/engineering/minimum_test.py?ref={self.head}"):
+                return {"type": "file", "encoding": "base64",
+                        "content": base64.b64encode(raw).decode(), "sha": sha}
+            if path == f"/repos/{self.repo}/pulls/{self.pr}/files?per_page=100":
+                return changed
+            return super().__call__(path, method, body)
+    api = NewComponentAPI(gate, ci="completed")
+    # The main owner never imports candidate; onboarding is demonstrably
+    # admitted, but existing self-consistent receipt omits required A15 cases.
+    assert gate.onboarded_groups_for_pr(api, f"/repos/{api.repo}", api.head, changed)
+    verdict = gate.process(api, api.repo, _ci_event(gate))
+    assert verdict[0]["status"] == "WAIT_EVIDENCE"
+    assert verdict[0]["reason"] == "V21_CONTENT_PROOF_INVALID"
+    assert not api.writes
+    no_brain = NewComponentAPI(gate, ci="completed", approval=False)
+    assert gate.process(no_brain, no_brain.repo, _ci_event(gate))[0]["reason"] == "NO_ACTIVE_BRAIN_PASS"
+    assert not no_brain.writes

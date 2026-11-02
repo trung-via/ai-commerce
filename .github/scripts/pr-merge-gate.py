@@ -9,6 +9,10 @@ model provenance is an explicit limitation of owner-backed review comments.
 """
 from __future__ import annotations
 
+import ast
+import base64
+import binascii
+import hashlib
 import json
 import os
 import re
@@ -87,7 +91,181 @@ REVIEWED_CONTROL_TESTS = {
 }
 
 
-def reviewed_coverage_for_changed_files(files: object):
+# A newly introduced component cannot exist in main's owner registry yet.
+# Promote ONLY a declarative, additive TestGroup from the pinned PR HEAD.
+# A candidate is never imported/executed, and cannot amend any existing owner,
+# baseline logic, or privileged .github paths.
+ONBOARDING_REGISTRY_PATH = "src/ai_commerce/engineering/minimum_test.py"
+NEW_COMPONENT_MAX_GROUPS = 8
+NEW_COMPONENT_MAX_SOURCE_BYTES = 256 * 1024
+SAFE_COMPONENT = re.compile(r"[a-z][a-z0-9_-]{1,63}\Z")
+SAFE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+SAFE_PACKAGE = re.compile(r"[a-z][a-z0-9_]*(?:/[a-z][a-z0-9_]*)*\Z")
+
+
+def _registrations(source: str):
+    tree = ast.parse(source)
+    found = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+             and node.name == "approved_groups"]
+    if len(found) != 1 or not isinstance(found[0].body[-1], ast.Return):
+        raise ValueError("REGISTRY_FUNCTION_INVALID")
+    returned = found[0].body[-1].value
+    if not isinstance(returned, ast.Tuple):
+        raise ValueError("REGISTRY_STATIC_RETURN_REQUIRED")
+    by_name = {}
+    for item in returned.elts:
+        if (not isinstance(item, ast.Call) or not isinstance(item.func, ast.Name)
+                or item.func.id != "TestGroup" or not item.args
+                or not isinstance(item.args[0], ast.Constant)
+                or not isinstance(item.args[0].value, str)):
+            raise ValueError("REGISTRY_GROUP_SHAPE_INVALID")
+        name = item.args[0].value
+        if name in by_name:
+            raise ValueError("DUPLICATE_REGISTRY_OWNER")
+        by_name[name] = item
+    return tree, returned, by_name
+
+
+def _static_strings(node: ast.AST) -> tuple[str, ...]:
+    if not isinstance(node, (ast.Tuple, ast.List)):
+        raise ValueError("NEW_GROUP_REQUIRES_LITERAL_LIST")
+    if any(not isinstance(item, ast.Constant) or type(item.value) is not str
+           for item in node.elts):
+        raise ValueError("NEW_GROUP_NONLITERAL_PATH")
+    values = tuple(item.value for item in node.elts)
+    if len(values) != len(set(values)) or len(values) > 40:
+        raise ValueError("NEW_GROUP_DUPLICATE_OR_OVERSIZED_PATHS")
+    return values
+
+
+def _declared_paths(node: ast.AST) -> tuple[str, ...]:
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return _static_strings(node)
+    if (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)):
+        return _declared_paths(node.left) + _declared_paths(node.right)
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id in {"sources", "contracts"} and not node.keywords
+            and len(node.args) == (2 if node.func.id == "sources" else 1)
+            and all(isinstance(x, ast.Constant) and type(x.value) is str for x in node.args)):
+        if node.func.id == "sources":
+            package, names = (x.value for x in node.args)
+            if not SAFE_PACKAGE.fullmatch(package):
+                raise ValueError("NEW_GROUP_BAD_PACKAGE")
+            prefix, suffix = "src/ai_commerce/" + package + "/", ".py"
+        else:
+            names = node.args[0].value
+            prefix, suffix = "contracts/", ".schema.json"
+        values = names.split()
+        if not values or len(values) > 40 or any(not SAFE_NAME.fullmatch(x) for x in values):
+            raise ValueError("NEW_GROUP_BAD_STATIC_SOURCE_NAMES")
+        return tuple(prefix + name + suffix for name in values)
+    raise ValueError("NEW_GROUP_UNSUPPORTED_DECLARATION")
+
+
+def _new_group(node: ast.Call):
+    if len(node.args) != 4:
+        raise ValueError("NEW_GROUP_INVALID_ARGUMENTS")
+    name = node.args[0].value
+    if not SAFE_COMPONENT.fullmatch(name):
+        raise ValueError("NEW_GROUP_BAD_NAME")
+    tests, acs, paths = (_declared_paths(node.args[i]) for i in (1, 2, 3))
+    kwargs = {}
+    for item in node.keywords:
+        if item.arg not in {"consumers", "contracts"} or item.arg in kwargs:
+            raise ValueError("NEW_GROUP_UNSUPPORTED_KEYWORD")
+        kwargs[item.arg] = _declared_paths(item.value)
+    if (not tests or not acs or not paths or len(paths) != len(set(paths))
+            or any(not p.startswith("tests/test_") or not p.endswith(".py") for p in tests)
+            or any(not p.startswith("src/ai_commerce/") or not p.endswith(".py") for p in paths)):
+        raise ValueError("NEW_GROUP_INVALID_TEST_OR_SOURCE")
+    for part in (tests, paths, kwargs.get("consumers", ()), kwargs.get("contracts", ())):
+        if any(not p or p.startswith("/") or "\\" in p or ".." in p.split("/") for p in part):
+            raise ValueError("NEW_GROUP_UNSAFE_PATH")
+    return {"name": name, "tests": tests, "acs": acs, "paths": paths,
+            "consumers": kwargs.get("consumers", ()),
+            "contracts": kwargs.get("contracts", ())}
+
+
+def review_new_component_registry(main_source: str, candidate_source: str,
+                                  changed_files: list, existing_groups: tuple) -> tuple[dict, ...]:
+    """Review added owner declarations as data; absolutely no candidate Python exec."""
+    if len(candidate_source.encode("utf-8")) > NEW_COMPONENT_MAX_SOURCE_BYTES:
+        raise ValueError("NEW_COMPONENT_REGISTRY_TOO_LARGE")
+    main_tree, main_return, original = _registrations(main_source)
+    candidate_tree, new_return, updated = _registrations(candidate_source)
+    old_names = list(original)
+    if [name for name in updated if name in original] != old_names:
+        raise ValueError("EXISTING_OWNER_ORDER_CHANGED")
+    additions = [name for name in updated if name not in original]
+    if not additions or len(additions) > NEW_COMPONENT_MAX_GROUPS:
+        raise ValueError("NO_BOUNDED_NEW_COMPONENT_OWNERS")
+    # Remove ONLY the new owner calls, then AST equality proves no modification
+    # to any old registration or to the rest of the protected MT-01 code.
+    new_return.elts = [item for item in new_return.elts if item.args[0].value in original]
+    if ast.dump(main_tree, include_attributes=False) != ast.dump(candidate_tree, include_attributes=False):
+        raise ValueError("EXISTING_TRUSTED_REGISTRY_MUTATED")
+    changes = {f["filename"]: f["status"] for f in changed_files}
+    if changes.get(ONBOARDING_REGISTRY_PATH) != "modified":
+        raise ValueError("CANDIDATE_OWNER_REGISTRY_NOT_CHANGED")
+    existing_tests = {path for group in existing_groups for path in group.tests}
+    existing_owned = {path for group in existing_groups
+                      for path in (*group.paths, *group.tests, *group.consumers, *group.contracts)}
+    fresh_tests, fresh_paths = set(), set()
+    entries = []
+    for name in additions:
+        entry = _new_group(updated[name])
+        if (set(entry["tests"]) & (existing_tests | fresh_tests)
+                or set(entry["paths"]) & (existing_owned | fresh_paths)):
+            raise ValueError("NEW_GROUP_STEALS_EXISTING_OWNER")
+        if any(changes.get(path) != "added" for path in (*entry["tests"], *entry["paths"])):
+            raise ValueError("NEW_GROUP_TEST_OR_SOURCE_NOT_ADDED")
+        # Existing consumers must be backed by the reviewed main registry;
+        # new consumers/contracts must be explicitly added with the candidate.
+        if any(path not in existing_owned and changes.get(path) != "added"
+               for path in (*entry["consumers"], *entry["contracts"])):
+            raise ValueError("NEW_GROUP_UNPROVEN_CONSUMER_OR_CONTRACT")
+        fresh_tests.update(entry["tests"])
+        fresh_paths.update(entry["paths"])
+        entries.append(entry)
+    return tuple(entries)
+
+
+def _read_candidate_registry(api: Callable, base: str, head: str) -> str:
+    path = f"{base}/contents/{ONBOARDING_REGISTRY_PATH}?ref={head}"
+    response = api(path)
+    if (not isinstance(response, dict) or response.get("type") != "file"
+            or response.get("encoding") != "base64"
+            or not isinstance(response.get("content"), str)
+            or not isinstance(response.get("sha"), str)):
+        raise ValueError("NEW_GROUP_GITHUB_FILE_UNPROVEN")
+    try:
+        data = base64.b64decode(response["content"], validate=False)
+        if len(data) > NEW_COMPONENT_MAX_SOURCE_BYTES:
+            raise ValueError("NEW_GROUP_SOURCE_TOO_LARGE")
+        # A real Git blob hash, not merely a self-described file label.
+        expected = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+        if expected != response["sha"]:
+            raise ValueError("NEW_GROUP_GITHUB_BLOB_INTEGRITY_FAILED")
+        return data.decode("utf-8")
+    except (binascii.Error, UnicodeError) as exc:
+        raise ValueError("NEW_GROUP_GITHUB_FILE_INVALID") from exc
+
+
+def onboarded_groups_for_pr(api: Callable, base: str, head: str, changed_files: list):
+    changes = {f.get("filename"): f.get("status") for f in changed_files
+               if isinstance(f, dict)}
+    if (changes.get(ONBOARDING_REGISTRY_PATH) != "modified"
+            or not any(status == "added" and isinstance(path, str)
+                       and path.startswith("src/ai_commerce/") and path.endswith(".py")
+                       for path, status in changes.items())):
+        return ()
+    main_source = (Path(__file__).resolve().parents[2] / ONBOARDING_REGISTRY_PATH).read_text(encoding="utf-8")
+    candidate_source = _read_candidate_registry(api, base, head)
+    return review_new_component_registry(main_source, candidate_source,
+                                         changed_files, approved_groups())
+
+
+def reviewed_coverage_for_changed_files(files: object, *, onboarded_groups=()):
     """Return authoritative changed paths + minimal reviewed control witness.
 
     This is a conservative control-file policy, not yet a global trusted
@@ -117,12 +295,18 @@ def reviewed_coverage_for_changed_files(files: object):
     # The merge gate's main-tree owner map is independent of candidate plans.
     # Existing components inherit full reviewed owner/consumer obligations.
     groups = approved_groups()
+    newly_owned = {path: group for group in onboarded_groups for path in group["paths"]}
     for path in changed:
         owning = [g for g in groups if path in
                   (set(g.paths) | set(g.tests) | set(g.consumers) | set(g.contracts))]
         for group in owning:
             required.update(group.tests)
-        if (not owning and path not in REVIEWED_CONTROL_TESTS and
+        new_group = newly_owned.get(path)
+        if new_group is not None:
+            if next((e["status"] for e in files if e["filename"] == path), None) != "added":
+                return None
+            required.update(new_group["tests"])
+        if (not owning and new_group is None and path not in REVIEWED_CONTROL_TESTS and
                 (path.startswith(("src/ai_commerce/", "contracts/", "scripts/")) or
                  path.endswith((".py", ".cjs", ".ps1", ".sh", ".ts", ".tsx", ".js")))):
             return None
@@ -300,6 +484,14 @@ def verify_one(api: Callable[[str], Any], repository: str, number: int,
     # candidate-created impact plan and its recorded changed_paths.
     changed_files = api(f"{base}/pulls/{number}/files?per_page=100")
     reviewed = reviewed_coverage_for_changed_files(changed_files)
+    if reviewed is None and isinstance(changed_files, list):
+        try:
+            onboarded = onboarded_groups_for_pr(api, base, head, changed_files)
+            if onboarded:
+                reviewed = reviewed_coverage_for_changed_files(
+                    changed_files, onboarded_groups=onboarded)
+        except (ValueError, SyntaxError, OSError, TypeError, KeyError, urllib.error.URLError):
+            reviewed = None
     if reviewed is None:
         return Verdict("WAIT_EVIDENCE", "V21_REVIEWED_CHANGED_PATH_ORACLE_MISSING", number, head, latest["id"])
     actual_changed, required_tests = reviewed
