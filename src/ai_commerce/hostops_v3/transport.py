@@ -176,8 +176,19 @@ class ControlGitHub(GitHub):
     """Closed HTTPS API client for the PRIVATE control repository only."""
 
     def request(self, method, path, data=None):
+        # Exact GitHub REST path shapes: no user-defined URL, traversal, encoded
+        # slash, query injection or requests to other endpoint families.
+        import re
         prefix = "/repos/" + CONTROL_REPOSITORY
-        if path != prefix and not path.startswith(prefix + "/"):
+        literal = {prefix,
+                   prefix + "/issues?state=open&per_page=100",
+                   prefix + "/actions/workflows/hostops-v3.yml/runs?event=issues&per_page=100"}
+        exact = (path in literal or
+                 re.fullmatch(re.escape(prefix) + r"/issues/[1-9][0-9]*", path) is not None or
+                 re.fullmatch(re.escape(prefix) + r"/actions/runs/[1-9][0-9]*", path) is not None or
+                 re.fullmatch(re.escape(prefix) + r"/contents/\\.github/workflows/hostops-v3\\.yml\\?ref=[0-9a-f]{40}", path) is not None)
+        post_ok = re.fullmatch(re.escape(prefix) + r"/issues/[1-9][0-9]*/comments", path) is not None
+        if not ((method == "GET" and exact) or (method == "POST" and post_ok and type(data) is dict and set(data) == {"body"})):
             deny("TRANSPORT_ROUTE_DENIED")
         # Base class controls HTTPS origin, redirects and bounded response.
         # It is fixed to the public v3 repository, so temporarily substitute

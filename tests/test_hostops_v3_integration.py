@@ -464,3 +464,16 @@ def test_dual_repo_v4_invalid_json_and_api_routing_fail_closed(h):
         client.get("/repos/" + c.SOURCE_REPOSITORY)
     with pytest.raises(c.Denied, match="TRANSPORT_ROUTE_DENIED"):
         client.post("/repos/attacker/not-allowed/issues/1/comments", {"body": "never"})
+    for bypass in (
+        "/repos/" + c.CONTROL_REPOSITORY + "/../ai-commerce/issues/1",
+        "/repos/" + c.CONTROL_REPOSITORY + "/%2e%2e/ai-commerce",
+        "/repos/" + c.CONTROL_REPOSITORY + "/issues/1?redirect=/other",
+        "/repos/" + c.CONTROL_REPOSITORY + "/actions/workflows/unsafe.yml/runs",
+        "https://api.github.com/repos/" + c.CONTROL_REPOSITORY,
+    ):
+        with pytest.raises(c.Denied, match="TRANSPORT_ROUTE_DENIED"):
+            client.get(bypass)
+    with pytest.raises(c.Denied, match="TRANSPORT_ROUTE_DENIED"):
+        client.post("/repos/" + c.CONTROL_REPOSITORY + "/issues/999",
+                    {"body": "never"})
+
