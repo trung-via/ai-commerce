@@ -21,6 +21,7 @@ from .plugin_turn_handoff import TurnHandoffError, preview_next_turn
 from .plugin_turn_store import TurnSessionStore
 from .plugin_turn_stage_only import ExplicitTurnChipStager
 from .plugin_turn_send_once import ExplicitTurnOneShotSender
+from .plugin_turn_evidence import GitHubTurnEvidenceAuthority
 
 
 def _emit(code: str, **fields) -> None:
@@ -63,14 +64,38 @@ def _send_consent(token: str) -> bool:
         return False
 
 
+def _consent_observation(token: str) -> bool:
+    try:
+        return input(f"Confirm real UI reply; type exactly {token} [other=abort]: ") == token
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
+def _gh_token() -> str:
+    # One bounded read-only credential lookup; no token appears in output.
+    try:
+        run = subprocess.run(
+            ["gh", "auth", "token"], capture_output=True,
+            text=True, timeout=15, check=False)
+        token = run.stdout.strip()
+        if (run.returncode != 0 or not 1 <= len(token) <= 4096 or
+                any(c in token for c in "\\r\\n\\x00")):
+            raise ValueError
+        return token
+    except Exception:
+        raise TurnHandoffError("GITHUB_AUTH_UNAVAILABLE") from None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="D5 preview, chip staging, or separately approved guarded one-shot Send.")
     parser.add_argument("--checkout", required=True, type=Path)
     parser.add_argument("--state-file", required=True, type=Path,
                         help="Operator-preprovisioned private file path OUTSIDE repository")
-    parser.add_argument("--mode", choices=("preview", "create-ledger", "type-only", "send-once"),
+    parser.add_argument("--mode", choices=("preview", "create-ledger", "type-only", "prepare-turn", "send-once", "observe-reply"),
                         default="preview")
+    parser.add_argument("--comment-ref", help="Exact GitHub Issue comment URL for a reconciled UI response")
+    parser.add_argument("--expected-author-id", type=int, help="Operator-pinned trusted GitHub account numeric ID")
     parser.add_argument("--enable-send-once", action="store_true",
                         help="Opt-in; also requires per-turn exact Human token")
     parser.add_argument("--registry", type=Path,
@@ -85,9 +110,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.mode == "send-once" and not args.enable_send_once:
         _emit("SEND_DISABLED", sent=False)
         return 2
-    if (args.mode in ("type-only", "send-once") and
+    if (args.mode in ("type-only", "prepare-turn", "send-once") and
             (args.registry is None or args.route_id is None)):
         _emit("ROUTE_ARGS_REQUIRED")
+        return 2
+    if (args.mode == "observe-reply" and
+            (not args.comment_ref or args.expected_author_id is None or args.expected_author_id < 1)):
+        _emit("OBSERVATION_ARGS_REQUIRED")
         return 2
     if (args.mode == "create-ledger" and
             (args.issue_number is None or args.source_sha is None)):
@@ -107,6 +136,31 @@ def main(argv: list[str] | None = None) -> int:
                   turn_index=created["turn_index"], sent=False)
             return 0
         session = ledger.read()
+        if args.mode == "observe-reply":
+            if session["phase"] != "SUBMISSION_UNKNOWN":
+                _emit("TURN_RECONCILIATION_BLOCKED", sent=False)
+                return 2
+            if _fresh_main_sha() != session["source_sha"]:
+                _emit("SOURCE_SHA_CHANGED", sent=False)
+                return 2
+            token = (f"OBSERVE-UI-D5-{session['turn_index']}-"
+                     f"{session['handoff_id'][-8:]}")
+            print("Verify the real ChatGPT UI reply yourself; a GitHub comment is NOT a server/plugin receipt.")
+            if not _consent_observation(token):
+                _emit("USER_DECLINED", sent=False)
+                return 2
+            if ledger.read() != session or _fresh_main_sha() != session["source_sha"]:
+                _emit("TURN_STATE_CHANGED", sent=False)
+                return 2
+            authority = GitHubTurnEvidenceAuthority(
+                token_provider=_gh_token, expected_author_id=args.expected_author_id)
+            updated = ledger.observe_verified_reply(
+                issue_comment_ref=args.comment_ref,
+                authority=authority, operator_verified=True)
+            _emit("UI_REPLY_RECONCILED_ONLY", phase=updated["phase"],
+                  turn_index=updated["turn_index"], sent=False,
+                  host_selection_proven=False)
+            return 0
         preview = preview_next_turn(session)
         if args.mode == "preview":
             _emit("PREVIEW_ONLY", role=preview["role"],
@@ -151,7 +205,9 @@ def main(argv: list[str] | None = None) -> int:
                   host_selection_proven=False)
             # Do not let shell auto-retry on unknown / ambiguous outcome.
             return 2
-        token = f"TYPE-ONLY-D5-{preview['role']}-{preview['turn_index']}"
+        token = (f"PREPARE-D5-{preview['role']}-{preview['turn_index']}"
+                 if args.mode == "prepare-turn" else
+                 f"TYPE-ONLY-D5-{preview['role']}-{preview['turn_index']}")
         if not _consent(token):
             _emit("USER_DECLINED", phase="NOT_STARTED", sent=False)
             return 2
@@ -172,12 +228,13 @@ def main(argv: list[str] | None = None) -> int:
             _emit("ROUTE_STATE_CHANGED", phase="NOT_STARTED", sent=False)
             return 2
         result = ExplicitTurnChipStager(enabled=True).stage(
-            fresh_binding, fresh, operator_approved=True)
+            fresh_binding, fresh, operator_approved=True,
+            **({"include_prompt": True} if args.mode == "prepare-turn" else {}))
         _emit(result.code, phase=result.phase, role=preview["role"],
               turn_index=preview["turn_index"], brain=result.brain,
               engineering=result.engineering,
               host_selection_proven=False, sent=False)
-        return 0 if result.code == "INPUT_STAGED_NO_SEND" else 2
+        return 0 if result.code in ("INPUT_STAGED_NO_SEND", "TURN_PREPARED_NO_SEND") else 2
     except (TurnHandoffError, LocalProbeConfigError) as exc:
         _emit(str(exc), sent=False)
         return 2
