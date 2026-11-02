@@ -570,3 +570,35 @@ def test_ef01_cli_prefers_soft_default_but_human_override_wins(tmp_path, monkeyp
     assert captured[-1] == (ExecutorSelection("antigravity", "other", "high"),
                             "HUMAN_EXPLICIT")
     assert efcli.main(args + ["--model", "partial"]) == 2
+
+
+def test_new_crlf_txt_normalized_before_actual_verify(tmp_path):
+    """#202: EF01 seals hashes only after Git-clean-stable text is produced."""
+    import hashlib
+
+    repo = _repo(tmp_path)
+    subprocess.run(["git", "-C", str(repo), "config", "core.autocrlf", "true"], check=True)
+    (repo / ".gitattributes").write_text("* text=auto\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", ".gitattributes"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "text rules"], check=True)
+    fake = _fake_binary(tmp_path, "write-crlf-202", (
+        "from pathlib import Path\n"
+        "Path('consumer-tests.txt').write_bytes(bytes.fromhex('636f6e73756d65720d0a'))\n"
+        "print('{\"type\":\"turn.completed\"}')\n"
+    ))
+    result = execute_attempt(
+        repo=repo, output_dir=tmp_path / "evidence", work_id="EF02-202-regression",
+        attempt_id="new-immutable-id", selection=ExecutorSelection("codex", "model", "high"),
+        instruction="write text", allowed_prefixes=["consumer-tests.txt"], codex_bin=fake,
+        verify_argv=[sys.executable, "-c", (
+            "from pathlib import Path; "
+            "assert Path('consumer-tests.txt').read_bytes() == bytes.fromhex('636f6e73756d65720a')"
+        )],
+    )
+    assert result["status"] == "BUILD_VERIFIED_FOR_SCOPE"
+    assert result["verify_exit_code"] == 0
+    normalized = (repo / "consumer-tests.txt").read_bytes()
+    assert normalized == b"consumer\n"
+    assert result["candidate_file_sha256"]["consumer-tests.txt"] == hashlib.sha256(normalized).hexdigest()
+    assert "git_filter_preverify" in result["evidence_files"]
+    assert (tmp_path / "evidence" / "git_filter.preverify.json").is_file()
