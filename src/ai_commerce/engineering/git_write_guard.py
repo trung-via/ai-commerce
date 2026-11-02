@@ -23,7 +23,10 @@ GIT_GUARD_INSTRUCTION = (
     "Read-only git status, diff, log and rev-parse are allowed. "
     "Do not bypass hooks, environment or the guard. The EF02 worker alone "
     "publishes the verified candidate. If Git writes are blocked, continue "
-    "editing files and let EF01 verify; do not retry with alternate Git options."
+    "editing files and let EF01 verify; do not retry with alternate Git options. "
+    "For tests, use the EF01-provided external temporary directory; never "
+    "place pytest --basetemp, fixture keys, logs, or reports under the source "
+    "worktree or .local. EF01 enforces this for pytest subprocesses."
 )
 
 # Git for Windows invokes shell hooks through its bundled Git Bash environment.

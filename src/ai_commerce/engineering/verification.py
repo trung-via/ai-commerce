@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import os
 import re
 import subprocess
 import time
@@ -72,8 +73,14 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
                      finished_at=datetime.now(timezone.utc).isoformat())
 
     def observe_workers(entry, out):
-        observed = re.search(rb"\b([0-9]+) workers \[|created:\s*([0-9]+)/[0-9]+ workers", out)
-        actual = int(observed[1] or observed[2]) if observed else None
+        observed = re.search(rb"MT01_XDIST_WORKERS_COLLECTED=([0-9]+)", out)
+        if observed:
+            actual = int(observed[1])
+            entry["worker_count_provenance"] = "XDIST_CONTROLLER_COLLECTION_HOOK"
+        else:
+            observed = re.search(rb"\b([0-9]+) workers \[|created:\s*([0-9]+)/[0-9]+ workers", out)
+            actual = int(observed[1] or observed[2]) if observed else None
+            entry["worker_count_provenance"] = "XDIST_TERMINAL_OUTPUT" if observed else "UNOBSERVED"
         entry["workers_actual"] = actual
         if "pytest_profile" in entry:
             entry["pytest_profile"].update(
@@ -153,6 +160,15 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
             code = 5
             break
         argv = entry["binding"]["argv"]
+        # Preserve the exact registered argv; instrument the xdist controller
+        # through a trusted pytest plugin rather than infer workers from -q.
+        child_env = os.environ.copy()
+        if registered_only and registered_workers(argv) == 12:
+            observer = "ai_commerce.engineering.pytest_worker_observer"
+            existing = [v.strip() for v in child_env.get("PYTEST_PLUGINS", "").split(",") if v.strip()]
+            if observer not in existing:
+                existing.append(observer)
+            child_env["PYTEST_PLUGINS"] = ",".join(existing)
         remaining = verify_deadline - time.monotonic()
         started = time.monotonic()
         entry.update(actual_argv=list(argv), started_at=datetime.now(timezone.utc).isoformat())
@@ -161,7 +177,8 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
                 entry["actual_argv"] = None
                 raise subprocess.TimeoutExpired(argv, timeout_seconds)
             result = subprocess.run(argv, cwd=repo, capture_output=True, text=True,
-                                    encoding="utf-8", errors="replace", timeout=remaining, check=False)
+                                    encoding="utf-8", errors="replace", timeout=remaining,
+                                    check=False, env=child_env)
             out, err = result.stdout.encode(), result.stderr.encode()
         except subprocess.TimeoutExpired as exc:
             out = exc.stdout if isinstance(exc.stdout, bytes) else (exc.stdout or "").encode()
@@ -200,7 +217,9 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
             finish()
             raise RuntimeError("MT01_SOURCE_DRIFT_DURING_VERIFICATION")
         diagnostics = (out + b"\n" + err).decode("utf-8", "replace").lower()
-        worker_mismatch = entry["workers_requested"] == 12 and entry["workers_actual"] not in (None, 12)
+        worker_mismatch = (entry["workers_requested"] == 12 and
+                           (entry["workers_actual"] not in (None, 12) or
+                            (human_full_suite_authorized and entry["workers_actual"] is None)))
         infrastructure = worker_mismatch or any(s in diagnostics for s in (
             "permission denied", "permissionerror", "no module named pytest", "internalerror",
             "worker crashed", "workers crashed", "winerror", "subprocess.timeoutexpired",
@@ -226,6 +245,11 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
             code = 1 if determinate else (result.returncode if result.returncode not in (0, 1) else 3)
             if not determinate:
                 break
+    if code == 0 and plan.get("post_test_coverage_gaps"):
+        # A passing registered pytest suite is real evidence, but it cannot
+        # silently certify unknown ACs or scripts outside Python coverage.
+        plan["final_coverage_status"] = "UNPROVEN_AFTER_REGISTERED_FULL"
+        code = 5
     finish()
     if not stdout and all(e["state"] == "REUSE" for e in plan["groups"]):
         stdout = [b"MT01: all applicable groups have strict prior successful evidence\n"]
