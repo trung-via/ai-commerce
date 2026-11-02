@@ -459,3 +459,70 @@ def test_prepare_turn_preload_failure_blocks_staging(config, monkeypatch, capsys
     assert cli.main(args) == 2
     assert json.loads(capsys.readouterr().out.splitlines()[-1])["code"] == "PRELOAD_CONTEXT_AMBIGUOUS"
     assert store.read()["phase"] == "READY"
+
+
+# D5 Wake Control Center #200, entirely synthetic, no browser or Send.
+def test_wake_panel_status_route_privacy_and_open():
+    from ai_commerce.remote import wake_control_center as ui
+    from ai_commerce.remote.conversation_binding import ResolvedBinding
+    binding = ResolvedBinding("private_route", 1,
+        "https://chatgpt.com/c/00000000-0000-0000-0000-000000000001",
+        "http://127.0.0.1:9333")
+    calls = []
+    class Inventory:
+        def preload(self, b, *, current_binding):
+            assert b == current_binding() == binding
+            calls.append("open")
+            return "EXACT_CHAT_OPENED"
+    state = {"phase": "READY", "turn_index": 1}
+    panel = ui.WakePanel(store=SimpleNamespace(read=lambda: state),
+        route_reader=lambda: binding, tcp_probe=lambda: True,
+        inventory_factory=Inventory)
+    data = panel.status()
+    assert data["role"] == "ENGINEERING" and data["can_open"]
+    assert not data["can_send"] and not data["server_receipt_proven"]
+    assert "private_route" not in json.dumps(data)
+    assert binding.chat_url not in json.dumps(data)
+    assert panel.open_exact_chat() == {"code": "EXACT_CHAT_OPENED", "sent": False}
+    assert calls == ["open"]
+    state["phase"] = "SUBMISSION_UNKNOWN"
+    assert panel.status()["next_action"] == "RECONCILE_ONLY_NO_RETRY"
+    assert panel.open_exact_chat()["code"] == "NOT_READY"
+    assert calls == ["open"]
+
+
+def test_wake_panel_unknown_navigation_latched_no_retries():
+    from ai_commerce.remote import wake_control_center as ui
+    from ai_commerce.remote.conversation_binding import ResolvedBinding
+    b = ResolvedBinding("r", 1,
+        "https://chatgpt.com/c/00000000-0000-0000-0000-000000000001",
+        "http://127.0.0.1:9333")
+    calls = []
+    class Inventory:
+        def preload(self, *_a, **_k):
+            calls.append(1)
+            return "PRELOAD_NAVIGATION_UNKNOWN"
+    panel = ui.WakePanel(
+        store=SimpleNamespace(read=lambda: {"phase":"READY","turn_index":0}),
+        route_reader=lambda: b, tcp_probe=lambda: True, inventory_factory=Inventory)
+    assert panel.open_exact_chat()["code"] == "PRELOAD_NAVIGATION_UNKNOWN"
+    assert panel.open_exact_chat()["code"] == "NOT_READY"
+    assert len(calls) == 1
+    panel.tcp_probe = lambda: False
+    assert panel.status()["next_action"] == "CHECK_CHROME_9333"
+
+
+def test_wake_panel_http_security_and_ui_has_no_send():
+    from ai_commerce.remote import wake_control_center as ui
+    panel = ui.WakePanel(
+        store=SimpleNamespace(read=lambda: {"phase":"COMPLETE_UI_ONLY","turn_index":3}),
+        route_reader=lambda: None, tcp_probe=lambda: False)
+    h = ui.make_handler(panel, port=8765, token="fixture")
+    obj = h.__new__(h)
+    obj.headers = {"Host": "evil.example:8765"}
+    assert obj.headers.get("Host") != "127.0.0.1:8765"
+    assert panel.status()["role"] == "NONE"
+    assert not panel.status()["can_open"]
+    assert "/api/open-chat" in ui._HTML and "Wake Control Center" in ui._HTML
+    assert "/api/send" not in ui._HTML
+    assert "__TOKEN__" in ui._HTML
