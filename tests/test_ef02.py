@@ -612,3 +612,17 @@ def test_ef02_summary_rejects_unbounded_identity_and_invalid_shape():
         format_batch_summary({"actions": {}}, repository="trung-via/ai-commerce")
     with pytest.raises(ValueError, match="INVALID_ACTION_RESULT"):
         format_batch_summary({"actions": [None]}, repository="trung-via/ai-commerce")
+
+
+def test_ef02_unknown_with_scope_review_still_stops_without_retry():
+    from ai_commerce.remote.reporting import format_batch_summary
+
+    report = {
+        "batch_id": "sample-004", "status": "PARTIAL_OR_FAILED",
+        "source_sha": "e" * 40, "succeeded": 0, "total": 1,
+        "actions": [{"action_id": "a", "attempt_id": "a-001",
+                     "status": "EXECUTION_UNKNOWN", "review_required": True}],
+    }
+    message = format_batch_summary(report, repository="trung-via/ai-commerce")
+    assert "UNKNOWN_EFFECT_STOP_NO_BLIND_RETRY" in message
+    assert "Next: `HOLD_UNKNOWN_NO_RETRY`" in message
