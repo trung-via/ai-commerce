@@ -1,9 +1,11 @@
-"""AI Commerce exact-head merge gate. No LLM, polling, or PR code execution.
+"""AI Commerce automated merge gate for a pinned, owner-backed Brain PASS.
 
-A GitHub-owner-authored PR comment authorizes one immutable PR HEAD/base pair.
-On that comment OR a subsequent source-test completion, the default-branch
-workflow checks the latest CI run and merges only after both OS jobs passed
-actual Python and Node test steps. It never self-authorizes a merge.
+This runs from protected main, not candidate-controlled PR code. A canonical
+AI Commerce Brain PASS decision must have been emitted to GitHub through the
+owner's authenticated connector after actual review; no generic CI success
+or free-form 'PASS' text authorizes the merge.
+The GitHub identity authenticates the emitter, not the underlying model:
+model provenance is an explicit limitation of owner-backed review comments.
 """
 from __future__ import annotations
 
@@ -18,11 +20,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-# This module is loaded by filename during merge-queue unit tests as well as CI.
+# This module is loaded by filename during auto-merge unit tests as well as CI.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mt01_v21_proof import validate_receipt_zip
 
-# Human merge queue checks out main. Load only its reviewed registry source:
+# Brain PASS auto-merge workflow checks out protected main. Load only its reviewed registry source:
 # no package __init__, pip dependencies or PR-controlled Python imports.
 import importlib.util
 
@@ -39,8 +41,8 @@ def approved_groups():
 
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
-APPROVAL = "AI_COMMERCE_HUMAN_MERGE_APPROVAL_V1"
-REVOKE = "AI_COMMERCE_HUMAN_MERGE_REVOKE_V1"
+APPROVAL = "AI_COMMERCE_BRAIN_REVIEW_PASS_V1"
+REVOKE = "AI_COMMERCE_BRAIN_REVIEW_HOLD_V1"
 CI_WORKFLOW = ".github/workflows/ef02-tests.yml"
 PYTEST_STEP = "MT-01 PR CI selective tests (full fallback)"
 NODE_STEP = "Run node --test tests/ef02-watch.test.cjs tests/ef02-reconcile.test.cjs"
@@ -61,6 +63,9 @@ REVIEWED_CONTROL_TESTS = {
     ".github/scripts/mt01_v21_oracle.py": ("tests/test_mt01_v21.py",),
     ".github/scripts/pr-merge-gate.py": (
         "tests/test_pr_merge_gate.py", "tests/test_minimum_test.py"),
+    ".github/workflows/brain-pass-auto-merge.yml": ("tests/test_pr_merge_gate.py",),
+    # Retired workflow must remain recognized for this one deletion diff.
+    ".github/workflows/human-merge-queue.yml": ("tests/test_pr_merge_gate.py",),
     ".github/workflows/ef02-batch.yml": (
         "tests/test_ef02.py", "tests/test_minimum_test.py"),
     ".github/workflows/ef02-tests.yml": (
@@ -164,7 +169,7 @@ def parse_approval(text: object) -> dict[str, Any] | None:
 
 
 def owner_directive(comments: list, owner: str) -> dict | None:
-    """Last authenticated owner directive wins; one old approval is never enough."""
+    """Latest owner-backed Brain decision wins. No old Human token accepted."""
     directives = []
     for item in comments:
         if (not isinstance(item, dict) or not isinstance(item.get("user"), dict) or
@@ -255,15 +260,16 @@ def verify_one(api: Callable[[str], Any], repository: str, number: int,
     if event_head and event_head != head:
         return Verdict("HOLD", "EVENT_HEAD_MISMATCH", number, head)
 
-    # Only one trusted owner binding to this exact PR, HEAD and current base.
+    # Only a canonical Brain PASS issued by authenticated owner GitHub access
+    # binds this exact PR, HEAD and current base; prose/CI alone never passes.
     comments = api(f"{base}/issues/{number}/comments?per_page=100")
     if not isinstance(comments, list) or len(comments) == 100:
-        return Verdict("HOLD", "APPROVAL_COMMENTS_UNPROVEN", number, head)
+        return Verdict("HOLD", "BRAIN_DECISION_COMMENTS_UNPROVEN", number, head)
     approval = owner_directive(comments, owner)
     if not approval or approval["revoke"]:
-        return Verdict("HOLD", "NO_ACTIVE_OWNER_APPROVAL", number, head)
+        return Verdict("HOLD", "NO_ACTIVE_BRAIN_PASS", number, head)
     if (approval["pr"], approval["head"], approval["base"]) != (number, head, base_sha):
-        return Verdict("HOLD", "APPROVAL_BOUND_TO_DIFFERENT_REVISION", number, head)
+        return Verdict("HOLD", "BRAIN_PASS_BOUND_TO_DIFFERENT_REVISION", number, head)
 
     live = api(f"{base}/branches/main")
     if live.get("commit", {}).get("sha") != base_sha:
@@ -352,7 +358,7 @@ class GitHubAPI:
 
 
 def candidates(api: Callable, repo: str, event: dict) -> list[tuple[int, str | None]]:
-    """Only a new owner approval comment or the matching PR CI completion."""
+    """Only a canonical Brain PASS/HOLD comment or matching PR CI completion."""
     if "comment" in event and "issue" in event:
         c = event["comment"]
         issue = event["issue"]
@@ -385,8 +391,8 @@ def process(api: GitHubAPI, repository: str, event: dict) -> list[dict]:
             decision = verify_one(api, repository, number, event_head=event_head)
             outcome = decision.as_dict()
             if decision.status == "READY_FOR_MERGE":
-                # Recheck source SHA and main before the write. Human approval
-                # persists through WAIT_CI -> PASS for unchanged PR HEAD/base.
+                # Recheck source SHA and main before write. The same Brain PASS
+                # persists through WAIT_CI -> PASS only for unchanged HEAD/base.
                 fresh = api(f"/repos/{repository}/pulls/{number}")
                 current_main = api(f"/repos/{repository}/branches/main")
                 if (fresh.get("head", {}).get("sha") != decision.head or
@@ -402,7 +408,7 @@ def process(api: GitHubAPI, repository: str, event: dict) -> list[dict]:
                 result = api(f"/repos/{repository}/pulls/{number}/merge", method="PUT",
                              body={"sha": decision.head, "merge_method": "merge"})
                 outcome["status"] = "MERGED" if result.get("merged") is True else "HOLD"
-                outcome["reason"] = "GITHUB_MERGED_EXACT_APPROVED_HEAD" if result.get("merged") is True else "GITHUB_MERGE_DENIED"
+                outcome["reason"] = "GITHUB_MERGED_EXACT_BRAIN_PASSED_HEAD" if result.get("merged") is True else "GITHUB_MERGE_DENIED"
                 outcome["merge_sha"] = result.get("sha") if result.get("merged") else None
             results.append(outcome)
         except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError,
