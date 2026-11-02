@@ -34,6 +34,9 @@ on:
       - "tests/test_ef02_mt01_registry.py"
       - "tests/test_minimum_test.py"
       - "contracts/RemoteActionBatch.v1.schema.json"
+permissions:
+  contents: read
+  actions: read
 jobs:
   tests:
     strategy:
@@ -48,27 +51,39 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: MT-01 prove postmerge exact-tree PR CI
+        id: reuse
+        run: python .github/scripts/ef02-pr-ci-tests.py --reuse-preflight
+        env:
+          MT01_CI_EVENT: ${{ github.event_name }}
+          GITHUB_TOKEN: ${{ github.token }}
       - name: Install FFmpeg on Ubuntu hosted runner
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' && steps.reuse.outputs.skip_pytest != 'true'
         shell: bash
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg
       - name: Install FFmpeg on Windows hosted runner
-        if: matrix.os == 'windows-latest'
+        if: matrix.os == 'windows-latest' && steps.reuse.outputs.skip_pytest != 'true'
         shell: pwsh
         run: |
           choco install ffmpeg --yes --no-progress
           if ($LASTEXITCODE -ne 0) { throw "FFMPEG_CHOCO_INSTALL_FAILED" }
       - name: Verify ffmpeg, ffprobe and libx264 are executable
+        if: steps.reuse.outputs.skip_pytest != 'true'
         run: python -c "import shutil,subprocess; assert shutil.which('ffmpeg') and shutil.which('ffprobe'), 'FFMPEG_OR_FFPROBE_MISSING'; assert b'libx264' in subprocess.check_output(['ffmpeg','-hide_banner','-encoders']), 'LIBX264_MISSING'; subprocess.check_call(['ffprobe','-version'],stdout=subprocess.DEVNULL)"
       - run: python -m pip install -e ".[dev]" Pillow
+        if: steps.reuse.outputs.skip_pytest != 'true'
       - name: MT-01 PR CI selective tests (full fallback)
+        if: steps.reuse.outputs.skip_pytest != 'true'
         run: python .github/scripts/ef02-pr-ci-tests.py
         env:
           MT01_CI_EVENT: ${{ github.event_name }}
           MT01_CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           MT01_CI_XDIST_WORKERS: '4'
+      - name: Exact-tree PR CI reused — stdlib smoke
+        if: steps.reuse.outputs.skip_pytest == 'true'
+        run: python -m compileall -q src/ai_commerce
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
