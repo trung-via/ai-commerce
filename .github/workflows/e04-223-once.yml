@@ -1,5 +1,5 @@
 name: A14 E04 #223 one-shot verified source integration
-run-name: "E04 #223 7-file SHA256 recovery to review branch"
+run-name: "E04 #223 exact verified recovery to integration review branch"
 on:
   push:
     branches: [repair/a14-e04-223-integration-20261102]
