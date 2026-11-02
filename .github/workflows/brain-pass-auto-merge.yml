@@ -11,10 +11,10 @@ on:
     types: [completed]
 
 permissions:
-  contents: read
+  contents: write
   actions: read
   issues: read
-  pull-requests: write
+  pull-requests: read
 
 concurrency:
   group: ai-commerce-brain-pass-merge-${{ github.repository }}
