@@ -42,6 +42,10 @@ CONTROL_TESTS = {
         "tests/test_minimum_test.py", "tests/test_ef02.py",
     ),
 }
+# Reviewed Node sources have mandatory GitHub-hosted `node --test` evidence.
+# No pytest test file is invented; unrelated JavaScript remains HOLD.
+REVIEWED_NODE_CONTROL_FILES = frozenset(["tests/ef02-watch.test.cjs","tests/ef02-reconcile.test.cjs",".github/scripts/ef02-watch.cjs",".github/scripts/ef02-reconcile.cjs"])
+
 COLLECTION_FILES = {
     "pyproject.toml", "pytest.ini", "tox.ini", "setup.cfg", "setup.py",
 }
@@ -210,7 +214,10 @@ def select_impact(
                 or Path(path).name.startswith(("requirements", "constraints")) \
                 or path.endswith((".lock", ".pth")):
             missing.add(path + ":SHARED_COLLECTION_OR_ENVIRONMENT")
-        if path.startswith(".github/") and path not in extra_controls:
+        if path in REVIEWED_NODE_CONTROL_FILES:
+            reasons.add("REVIEWED_NODE_TEST_STEP_REQUIRED")
+            related.add(path)
+        elif path.startswith(".github/") and path not in extra_controls:
             missing.add(path + ":UNREVIEWED_CI_CONTROL")
         if path.startswith("tests/test_") and path.endswith(".py"):
             if path not in registered:
@@ -247,8 +254,12 @@ def select_impact(
                                           for s in missing) else "HOLD_MAPPING"
         return decision(mode, selected_tests, selected_groups, reasons, missing, warnings, affected)
     if not selected_tests:
-        if all(p.startswith(("docs/", ".github/ISSUE_TEMPLATE/")) or p.endswith(".md") for p in changed):
-            return decision("NO_PYTEST_APPLICABLE", reasons=("REVIEWED_DOCUMENT_ONLY",), warnings=warnings, affected=affected)
+        if all(p in REVIEWED_NODE_CONTROL_FILES or p.startswith(("docs/", ".github/ISSUE_TEMPLATE/"))
+               or p.endswith(".md") for p in changed):
+            reason = "REVIEWED_NODE_TEST_STEP_REQUIRED" if any(
+                p in REVIEWED_NODE_CONTROL_FILES for p in changed) else "REVIEWED_DOCUMENT_ONLY"
+            return decision("NO_PYTEST_APPLICABLE", reasons=(reason,),
+                            warnings=warnings, affected=affected)
         return decision("HOLD_MAPPING", reasons=("NO_RELEVANT_TEST_PROOF",),
                         missing=tuple(p + ":UNMAPPED" for p in changed), warnings=warnings, affected=affected)
     if all(t.startswith("tests/") or t.startswith("src/ai_commerce/") for t in selected_tests):

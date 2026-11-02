@@ -59,6 +59,11 @@ REVIEWED_CONTROL_TESTS = {
         "tests/test_minimum_test.py", "tests/test_ef02.py"),
     "tests/test_mt01_v21.py": ("tests/test_mt01_v21.py",),
     "tests/test_pr_merge_gate.py": ("tests/test_pr_merge_gate.py",),
+    # The merge gate also requires the real Node step PASS on both OS.
+    "tests/ef02-watch.test.cjs": (),
+    "tests/ef02-reconcile.test.cjs": (),
+    ".github/scripts/ef02-watch.cjs": (),
+    ".github/scripts/ef02-reconcile.cjs": (),
 }
 
 

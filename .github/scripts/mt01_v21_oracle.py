@@ -29,6 +29,11 @@ CONTROL_TESTS = {
     "src/ai_commerce/engineering/minimum_test.py": {"tests/test_minimum_test.py"},
     "src/ai_commerce/remote/validation.py": {"tests/test_ef02.py"},
     ".github/ef02/verify-profiles.json": {"tests/test_ef02_mt01_registry.py"},
+    # These files require the independently mandatory Node job, not pytest.
+    "tests/ef02-watch.test.cjs": set(),
+    "tests/ef02-reconcile.test.cjs": set(),
+    ".github/scripts/ef02-watch.cjs": set(),
+    ".github/scripts/ef02-reconcile.cjs": set(),
 }
 
 

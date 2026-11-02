@@ -321,3 +321,18 @@ def test_v21_independent_control_closure_rejects_unknown_github_controls(gate):
     assert "tests/test_mt01_v21.py" in required
     assert "tests/test_pr_merge_gate.py" in required
     assert len(paths) == 2
+
+
+
+def test_v21_gate_allows_known_node_controls_but_blocks_unknown_control(gate):
+    known = [
+        {"filename": ".github/scripts/ef02-watch.cjs", "status": "modified"},
+        {"filename": "tests/ef02-watch.test.cjs", "status": "modified"},
+    ]
+    reviewed = gate.reviewed_coverage_for_changed_files(known)
+    assert reviewed is not None
+    assert reviewed[0] == tuple(sorted(e["filename"] for e in known))
+    assert reviewed[1] == ()
+    assert gate.reviewed_coverage_for_changed_files([
+        {"filename": ".github/scripts/unregistered.cjs", "status": "modified"},
+    ]) is None

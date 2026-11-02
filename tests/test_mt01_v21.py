@@ -403,3 +403,40 @@ def test_oracle_base_resolution_restricts_push_to_main(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "argv", ["oracle", "--repo", str(tmp_path),
                                        "--plan", str(tmp_path / "plan.json")])
     assert oracle.main() == 3
+
+
+
+def test_v21_only_reviewed_node_files_skip_python_with_real_node_step_obligation(tmp_path):
+    from ai_commerce.engineering.impact_v21 import select_impact
+    for p in (".github/scripts/ef02-watch.cjs", "tests/ef02-watch.test.cjs"):
+        mk(tmp_path, p, "module.exports = {};\n")
+    plan = select_impact(
+        root=tmp_path,
+        changed_paths=[".github/scripts/ef02-watch.cjs", "tests/ef02-watch.test.cjs"],
+        groups=())
+    assert plan.mode == "NO_PYTEST_APPLICABLE"
+    assert "REVIEWED_NODE_TEST_STEP_REQUIRED" in plan.reason_codes
+    assert not plan.selected_tests
+    assert not plan.missing_mapping
+
+
+def test_v21_unknown_node_control_and_powershell_hold_without_full(tmp_path):
+    from ai_commerce.engineering.impact_v21 import select_impact
+    for path in (".github/scripts/new-service.cjs", ".github/scripts/unsafe.ps1"):
+        mk(tmp_path, path, "unreviewed")
+        result = select_impact(root=tmp_path, changed_paths=[path], groups=())
+        assert result.mode == "HOLD_MAPPING"
+        assert result.selected_tests == ()
+        assert path + ":UNREVIEWED_CI_CONTROL" in result.missing_mapping
+
+
+def test_v21_mixed_node_and_python_keeps_python_consumers(tmp_path):
+    from ai_commerce.engineering.impact_v21 import select_impact
+    groups, a12, _ = fixture(tmp_path)
+    mk(tmp_path, ".github/scripts/ef02-watch.cjs", "module.exports = {};\n")
+    result = select_impact(
+        root=tmp_path,
+        changed_paths=["src/ai_commerce/product/identity.py", ".github/scripts/ef02-watch.cjs"],
+        groups=groups)
+    assert result.runnable and a12 in result.selected_tests
+    assert "REVIEWED_NODE_TEST_STEP_REQUIRED" in result.reason_codes
