@@ -16,13 +16,15 @@ $runnerCount = @(Get-Process -Name 'Runner.Listener' -ErrorAction SilentlyContin
 $chromeCount = @(Get-Process -Name 'chrome' -ErrorAction SilentlyContinue).Count
 $listener = $false
 if ($Operation -eq 'd5_readonly') {
-    # Get-NetTCPConnection reads a TCP table; it does not attach to Chrome or
-    # access ChatGPT. Query only the exact D5 port.
+    # Read the existing TCP listen table. Filtering by LocalPort at the
+    # cmdlet level can raise an error when port 9333 is simply not listening.
     try {
-        $listener = @(Get-NetTCPConnection -LocalPort 9333 -State Listen -ErrorAction Stop |
-            Where-Object { $_.LocalAddress -eq '127.0.0.1' }).Count -gt 0
+        $null = Get-Command Get-NetTCPConnection -ErrorAction Stop
+        $listener = @(Get-NetTCPConnection -State Listen -ErrorAction Stop |
+            Where-Object {
+                $_.LocalPort -eq 9333 -and $_.LocalAddress -eq '127.0.0.1'
+            }).Count -gt 0
     } catch {
-        # An unavailable/denied TCP inventory must not be reported as OFF.
         throw 'CDP_TCP_INVENTORY_UNAVAILABLE'
     }
 }
