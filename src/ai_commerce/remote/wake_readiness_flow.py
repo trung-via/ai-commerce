@@ -27,17 +27,27 @@ _GOOD_CHATS = frozenset({"EXACT_CHAT_OPENED", "EXACT_CHAT_PRESENT"})
 
 
 def _blocked(code: str, *, chrome: str = "UNVERIFIED") -> dict:
+    # Callers get ONE actionable outcome, not a checklist to rerun.
+    # Uncertain side effects are never treated as recoverable.
+    action = ("RECONCILE_NO_RETRY" if "UNKNOWN" in code or
+              "AMBIGUOUS" in code or "ALREADY_ACTIVE" in code else
+              "REVIEW_PINNED_SOURCE" if code == "SOURCE_SHA_CHANGED" else
+              "REVIEW_ENROLLMENT" if code.startswith(("LEDGER_", "ROUTE_")) else
+              "DIAGNOSE_NO_RELAUNCH")
     return {
-        "status": "BLOCKED", "code": code, "chrome": chrome,
-        "wake_sent": False, "host_plugin_invocation_proven": False,
+        "status": "BLOCKED", "code": code, "next_action": action,
+        "chrome": chrome, "wake_sent": False,
+        "host_plugin_invocation_proven": False,
     }
 
 
-def _ready(*, launched: bool, verification: str) -> dict:
+def _ready(*, launched: bool, verification: str, chat_preloaded: bool) -> dict:
     return {
         "status": "READY_FOR_PREPARE",
         "chrome": "VERIFIED_9333", "chat": "EXACT_CHAT_PRESENT",
         "ledger": "READY", "launched": launched, "verification": verification,
+        "auto_repaired": (["CHROME_LAUNCHED"] if launched else []) +
+                         (["EXACT_CHAT_PRELOADED"] if chat_preloaded else []),
         "wake_sent": False,
         "host_plugin_invocation_proven": False,
     }
@@ -116,7 +126,8 @@ class ReadinessFlow:
                             chrome="VERIFIED_9333")
         return _ready(
             launched=launched,
-            verification=acquired.get("verification", "FULL_ACQUISITION"))
+            verification=acquired.get("verification", "FULL_ACQUISITION"),
+            chat_preloaded=chat_preloaded)
 
 
 def _unique_json(pairs):
