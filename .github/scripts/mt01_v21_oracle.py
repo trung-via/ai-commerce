@@ -134,7 +134,7 @@ def independently_reviewed_manifest_groups(
                 or any(not p.startswith("src/ai_commerce/") or not p.endswith(".py")
                        or p.startswith(("src/ai_commerce/engineering/", "src/ai_commerce/remote/"))
                        for p in sources)
-                or any(not re.fullmatch(r"tests/test_[A-Za-z0-9_]+\\.py", p) for p in tests)
+                or any(not re.fullmatch(r"tests/test_[A-Za-z0-9_]+\.py", p) for p in tests)
                 or any(not p.startswith("contracts/") or not p.endswith(".schema.json") for p in contracts)):
             raise ValueError("ONBOARD_MANIFEST_INVALID_PATHS")
         additions = set(sources) | set(tests)
