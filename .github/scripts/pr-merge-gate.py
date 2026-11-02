@@ -30,6 +30,7 @@ CI_WORKFLOW = ".github/workflows/ef02-tests.yml"
 PYTEST_STEP = "MT-01 PR CI selective tests (full fallback)"
 NODE_STEP = "Run node --test tests/ef02-watch.test.cjs tests/ef02-reconcile.test.cjs"
 RECEIPT_STEP = "MT-01 V2.1 upload verification receipt"
+ORACLE_STEP = "MT-01 baseline closure oracle"
 
 
 @dataclass(frozen=True)
@@ -110,7 +111,8 @@ def verified_jobs(jobs: list) -> bool:
                          if isinstance(s, dict) and isinstance(s.get("name"), str)}
         if (steps_by_name.get(PYTEST_STEP) == "success" and
                 steps_by_name.get(NODE_STEP) == "success" and
-                steps_by_name.get(RECEIPT_STEP) == "success"):
+                steps_by_name.get(RECEIPT_STEP) == "success" and
+                steps_by_name.get(ORACLE_STEP) == "success"):
             observed.add(job["name"])
     return observed == needed
 

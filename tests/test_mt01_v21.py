@@ -339,3 +339,50 @@ def test_required_cross_component_ac_with_both_groups_selected(tmp_path):
     assert plan["selected_groups"] == ["a12", "a14"]
     assert not any(code.startswith("AC_") for code in plan["reason_codes"])
     assert all(g["state"] == "EXECUTE" for g in plan["groups"])
+
+
+
+def test_independent_baseline_oracle_rejects_self_selected_omissions(tmp_path):
+    import importlib.util
+    import sys
+    script = Path(__file__).resolve().parents[1] / ".github/scripts/mt01_v21_oracle.py"
+    spec = importlib.util.spec_from_file_location("mt01_impact_independent_oracle", script)
+    oracle = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = oracle
+    spec.loader.exec_module(oracle)
+    groups, a12, a14 = fixture(tmp_path)
+    src_a12 = "src/ai_commerce/product/identity.py"
+    selected = {"version": 2, "changed_paths": [src_a12],
+                "selected_tests": [a14], "selected_groups": ["a14"]}
+    present = {a12, a14}
+    ok, reasons = oracle.check_selection(
+        selected, base_groups=groups, candidate_groups=groups,
+        changed_paths={src_a12}, present_paths=present)
+    assert not ok
+    assert "REQUIRED_GROUP_OMITTED:a12" in reasons
+    assert "REQUIRED_TEST_OMITTED:" + a12 in reasons
+    # Even self-consistent JUnit receipts cannot authorize an omitted group.
+    selected.update(selected_tests=[a12, a14], selected_groups=["a12", "a14"])
+    ok, reasons = oracle.check_selection(
+        selected, base_groups=groups, candidate_groups=groups,
+        changed_paths={src_a12}, present_paths=present)
+    assert ok, reasons
+
+
+def test_independent_baseline_oracle_preserves_prior_owner_after_group_removal(tmp_path):
+    import importlib.util
+    import sys
+    script = Path(__file__).resolve().parents[1] / ".github/scripts/mt01_v21_oracle.py"
+    spec = importlib.util.spec_from_file_location("mt01_baseline_ownership_oracle", script)
+    oracle = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = oracle
+    spec.loader.exec_module(oracle)
+    groups, a12, a14 = fixture(tmp_path)
+    src_a12 = "src/ai_commerce/product/identity.py"
+    # Candidate removes an owner. A base-trusted registry must still demand it.
+    selected = {"version": 2, "changed_paths": [src_a12],
+                "selected_tests": [a14], "selected_groups": ["a14"]}
+    ok, reasons = oracle.check_selection(
+        selected, base_groups=groups, candidate_groups=(groups[1],),
+        changed_paths={src_a12}, present_paths={a12, a14})
+    assert not ok and "REQUIRED_TEST_OMITTED:" + a12 in reasons

@@ -53,6 +53,9 @@ jobs:
           MT01_CI_EVENT: ${{ github.event_name }}
           MT01_CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           MT01_CI_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      - name: MT-01 baseline closure oracle
+        if: steps.reuse.outputs.skip_pytest != 'true'
+        run: python .github/scripts/mt01_v21_oracle.py --base "${{ github.event.pull_request.base.sha }}" --plan .local/mt01-v21/plan.json
       - name: Install FFmpeg on Ubuntu hosted runner
         if: matrix.os == 'ubuntu-latest' && steps.v21.outputs.need_ffmpeg == 'true'
         shell: bash

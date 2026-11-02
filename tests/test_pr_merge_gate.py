@@ -131,6 +131,7 @@ class FakeGitHub:
             for os_name in ("ubuntu-latest", "windows-latest"):
                 steps = [{"name": self.g.PYTEST_STEP, "conclusion": "success"},
                          {"name": self.g.RECEIPT_STEP, "conclusion": "success"},
+                         {"name": self.g.ORACLE_STEP, "conclusion": "success"},
                          {"name": self.g.NODE_STEP,
                           "conclusion": "success" if self.jobs_ok else "skipped"}]
                 jobs.append({"name": f"tests ({os_name})", "status": "completed",

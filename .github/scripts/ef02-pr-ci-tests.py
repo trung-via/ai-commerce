@@ -428,6 +428,14 @@ def main() -> int:
     }
     need_ffmpeg = bool(set(plan.selected_groups) - no_media_groups)
     if sys.argv[1:] == ["--v21-plan-only"]:
+        # A separate baseline comparison step must inspect the exact plan
+        # *before* running the candidate-selected test subset.
+        out = ROOT / ".local" / "mt01-v21"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "plan.json").write_text(
+            json.dumps(plan.as_dict(), sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
         output = os.getenv("GITHUB_OUTPUT")
         if output:
             with open(output, "a", encoding="utf-8") as f:
