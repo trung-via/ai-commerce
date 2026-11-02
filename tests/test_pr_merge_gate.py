@@ -390,6 +390,14 @@ def test_brain_pass_gate_workflow_replaces_old_queue():
     assert "issue_comment:" in text
     assert "workflow_run:" in text
     assert "ref: main" in text
+    # The merge endpoint requires repository Contents(write), not only PR(write).
+    assert "  contents: write\\n".replace("\\\\n", "\\n") in text
+    assert "  actions: read\\n".replace("\\\\n", "\\n") in text
+    assert "  issues: read\\n".replace("\\\\n", "\\n") in text
+    assert "  pull-requests: write\\n".replace("\\\\n", "\\n") in text
+    assert "  contents: read\\n".replace("\\\\n", "\\n") not in text
+    assert "persist-credentials: false" in text
+    assert "python .github/scripts/pr-merge-gate.py" in text
 
 
 def test_brain_pass_exact_identity_and_revision(gate):
