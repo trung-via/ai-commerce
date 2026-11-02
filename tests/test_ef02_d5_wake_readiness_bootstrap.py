@@ -39,6 +39,7 @@ def fixture(tmp_path):
         "route_id": "d5-route",
         "local_app_data": tmp_path,
         "source_reader": lambda: "a" * 40,
+        "checkout_reader": lambda _: "a" * 40,
         "chrome_loader": lambda config, source, *, local_app_data:
             SimpleNamespace(port=9333, endpoint="http://127.0.0.1:9333"),
         "route_loader": lambda *, registry_path, checkout, route_id:
@@ -109,7 +110,6 @@ def test_only_exact_ipv4_loopback_route_accepted(fixture, endpoint):
 
 def test_missing_private_root_is_not_created_implicitly(tmp_path, fixture):
     params, root, _ = fixture
-    root.rmdir() if not list(root.iterdir()) else None
     alt = tmp_path / "unprovisioned-appdata"
     alt.mkdir()
     params["local_app_data"] = alt
@@ -131,3 +131,12 @@ def test_reject_private_inputs_inside_checkout(fixture):
 def test_no_protocol_wildcards():
     assert _same_loopback_9333("http://127.0.0.1:9333")
     assert not _same_loopback_9333("http://0.0.0.0:9333")
+
+
+
+def test_stale_local_checkout_blocks_before_manifest_creation(fixture):
+    params, root, _ = fixture
+    params["checkout_reader"] = lambda _: "c" * 40
+    with pytest.raises(SetupBlocked, match="CHECKOUT_SHA_NOT_CURRENT"):
+        provision(**params)
+    assert not (root / "wake-readiness.json").exists()
