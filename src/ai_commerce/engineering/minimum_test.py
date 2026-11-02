@@ -185,6 +185,20 @@ def approved_groups() -> tuple[TestGroup, ...]:
             "A13.affiliate-placement", "A13.affiliate-release"),
                   sources("affiliate_release", "__init__ inspection process schemas claim_rights claim_rights_schemas placement placement_schemas __main__ cli demo evidence_pack evidence_pack_schemas"),
                   contracts=contracts("ClaimRightsReleaseReview.v1 AffiliatePlacementEvidence.v1 AffiliateReleaseEvidencePack.v1")),
+        # A14 L04: the test is now committed on the recovered review branch.
+        # Exact component/test/contract ownership is mandatory at PR integration;
+        # no global test suppression and no permission to edit other components.
+        TestGroup("a14", ("tests/test_a14_attribution.py",),
+                  ("A14.L04.offline-attribution-evidence",),
+                  sources("affiliate_attribution", "__init__ __main__ evidence ledger schemas"),
+                  contracts=(
+                      "contracts/AffiliateAttributionEvidence.v1.schema.json",
+                      "src/ai_commerce/affiliate_attribution/README.md",
+                      "src/ai_commerce/affiliate_attribution/verification/candidate-bytes.json",
+                      "src/ai_commerce/affiliate_attribution/verification/consumer-tests.txt",
+                      "src/ai_commerce/affiliate_attribution/verification/verification.json",
+                      "docs/engineering/A14_L04_IMPLEMENTATION_REPORT.md",
+                  )),
         TestGroup("foundation", ("tests/test_foundation.py",), ("A01.foundation",), (),
                   contracts=contracts("WorkItem.v0.3 AuthorizationEnvelope.v0.3") + (
                       "docs/engineering/SEMANTIC_OWNERS.md", "docs/engineering/SELECTIVE_COMPONENT_ADOPTION.md",
