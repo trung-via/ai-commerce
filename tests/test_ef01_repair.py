@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ai_commerce.engineering import runner
+from ai_commerce.engineering import runner, pytest_temp_guard
 from ai_commerce.engineering.cli import build_parser
 from ai_commerce.engineering.profile import ExecutorSelection
 from ai_commerce.remote import worker as remote
@@ -62,7 +62,7 @@ def fixture(tmp_path, monkeypatch):
 def _provider(fixture, mode="pass-after-repair", executor="codex"):
     script = fixture.root / "fake_executor.py"
     calls = fixture.root / "calls.jsonl"
-    script.write_text("""import json,sys
+    script.write_text("""import json,sys,os
 from pathlib import Path
 calls = Path(sys.argv[1])
 previous = calls.read_text().splitlines() if calls.exists() else []
@@ -70,7 +70,11 @@ index = len(previous)
 prompt = sys.stdin.read()
 with calls.open('a', encoding='utf-8') as f:
     f.write(json.dumps({'index':index,'profile':sys.argv[3:6],
-                        'cwd':str(Path.cwd()),'prompt':prompt}) + '\\n')
+                        'cwd':str(Path.cwd()),'prompt':prompt,
+                        'temp_root':os.getenv('AI_COMMERCE_EF01_PYTEST_BASETEMP_ROOT'),
+                        'worktree':os.getenv('AI_COMMERCE_EF01_WORKTREE'),
+                        'pytest_plugins':os.getenv('PYTEST_PLUGINS'),
+                        'os_temp':os.getenv('TEMP')}) + '\\n')
 mode = sys.argv[2]
 if mode != 'no-change':
     Path('impl.py').write_text('good' if ((index and mode in ('pass-after-repair', 'scope-fix')) or mode == 'scope-pass') else 'bad-' + str(index))
@@ -113,6 +117,18 @@ def _run(fixture, mode="pass-after-repair", executor="codex", **kwargs):
         verify_argv=kwargs.pop("verify_argv", VERIFY), allowed_prefixes=fixture.state["scope"], **kwargs)
     observations = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
     return result, observations, profiles
+
+
+def test_executor_child_inherits_out_of_tree_pytest_guard(fixture):
+    result, calls, _ = _run(fixture, mode="scope-pass")
+    assert calls and result["status"] == "VERIFIED_SCOPE_REVIEW_REQUIRED"
+    child = calls[0]
+    assert child["worktree"] == str(fixture.repo)
+    assert child["pytest_plugins"].split(",").count(
+        "ai_commerce.engineering.pytest_temp_guard") == 1
+    assert child["os_temp"] == child["temp_root"]
+    assert child["temp_root"] != str(fixture.repo)
+    assert not Path(child["temp_root"]).is_relative_to(fixture.repo)
 
 
 @pytest.mark.parametrize("executor", ["codex", "antigravity"])
@@ -953,3 +969,82 @@ def test_pretty_antigravity_usage_is_observed_without_inventing_cost():
         "input_tokens": 10, "cached_input_tokens": 2, "output_tokens": 3}}, indent=2)
     assert runner._observe_usage(payload.encode(), "antigravity") == {
         "input_tokens": 10, "cached_input_tokens": 2, "output_tokens": 3}
+
+
+def test_provider_pytest_redirects_even_explicit_relative_basetemp(tmp_path, monkeypatch):
+    repo = tmp_path / "source"
+    repo.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    monkeypatch.setenv("AI_COMMERCE_EF01_WORKTREE", str(repo))
+    monkeypatch.setenv("AI_COMMERCE_EF01_PYTEST_BASETEMP_ROOT", str(external))
+    config = SimpleNamespace(option=SimpleNamespace(basetemp=".local/fixture/policy"))
+    pytest_temp_guard.pytest_configure(config)
+    target = Path(config.option.basetemp).resolve()
+    assert target.is_dir() and target.parent == external.resolve()
+    assert repo.resolve() not in target.parents
+
+
+def test_provider_pytest_refuses_temp_root_under_source(tmp_path, monkeypatch):
+    repo = tmp_path / "source"
+    scratch = repo / ".local" / "fixtures"
+    scratch.mkdir(parents=True)
+    monkeypatch.setenv("AI_COMMERCE_EF01_WORKTREE", str(repo))
+    monkeypatch.setenv("AI_COMMERCE_EF01_PYTEST_BASETEMP_ROOT", str(scratch))
+    config = SimpleNamespace(option=SimpleNamespace(basetemp=None))
+    with pytest.raises(pytest.UsageError, match="EF01_TEST_TEMP_INSIDE_SOURCE"):
+        pytest_temp_guard.pytest_configure(config)
+
+
+
+
+def test_provider_pytest_real_subprocess_keeps_ipc_key_out_of_git_scope(tmp_path, monkeypatch):
+    """Reproduce #231 with real pytest and Git status, no paid executor."""
+    repo = tmp_path / "source"
+    repo.mkdir()
+    external = tmp_path / "scratch"
+    external.mkdir()
+    report = tmp_path / "observed-ipc-path.txt"
+    (repo / ".gitignore").write_text(".local/\n__pycache__/\n.pytest_cache/\n")
+    (repo / "test_ipc.py").write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "def test_ipc_fixture(tmp_path):\n"
+        "    key = tmp_path / 'policy' / 'ipc.key'\n"
+        "    key.parent.mkdir(parents=True)\n"
+        "    key.write_text('synthetic-fixture-only')\n"
+        "    Path(os.environ['EF01_IPC_REPORT_PATH']).write_text(str(key))\n"
+    )
+    init = subprocess.run(["git", "init", "-q"], cwd=repo, capture_output=True, text=True)
+    assert init.returncode == 0, init.stderr
+    baseline = runner._changes(repo)
+
+    env = os.environ.copy()
+    env.update({
+        "AI_COMMERCE_EF01_WORKTREE": str(repo),
+        "AI_COMMERCE_EF01_PYTEST_BASETEMP_ROOT": str(external),
+        "EF01_IPC_REPORT_PATH": str(report),
+        "PYTEST_PLUGINS": "ai_commerce.engineering.pytest_temp_guard",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    })
+    pytest_run = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "--basetemp=.local/hostops-v3-repair/pytest-round1", "test_ipc.py"],
+        cwd=repo, env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert pytest_run.returncode == 0, pytest_run.stdout + pytest_run.stderr
+    key = Path(report.read_text())
+    assert key.exists() and key.name == "ipc.key"
+    assert external.resolve() in key.resolve().parents
+    assert repo.resolve() not in key.resolve().parents
+    assert not (repo / ".local").exists()
+    assert runner._changes(repo) == baseline
+
+    # The independent protection must still catch an actual in-tree key.
+    dangerous = repo / ".local" / "hostops-v3-repair" / "policy" / "ipc.key"
+    dangerous.parent.mkdir(parents=True)
+    dangerous.write_text("synthetic-negative-fixture-only")
+    changes = runner._changes(repo)
+    assert dangerous.relative_to(repo).as_posix() in changes
+    assert runner._protected_change(changes)
