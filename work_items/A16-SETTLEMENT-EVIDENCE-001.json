@@ -1,0 +1,29 @@
+{
+  "work_id": "A16-SETTLEMENT-EVIDENCE-001",
+  "status": "PREPARED_FOR_EF02",
+  "objective": "Offline settlement evidence L05 and commercial review E05 without external provider actions",
+  "source_decision": "https://github.com/trung-via/ai-commerce/issues/247",
+  "scope_in": [
+    "L05 offline order refund settlement lifecycle",
+    "E05 settlement-aware commercial review",
+    "A14 attribution and A15 cost consistency"
+  ],
+  "scope_out": [
+    "Real platform receipts or orders",
+    "Publishing, payments, settlement disbursement",
+    "Unverified profit"
+  ],
+  "expected_artifacts": [
+    "contracts/SettlementEvidence.v1.schema.json",
+    "contracts/CommercialReview.v1.schema.json",
+    "tests/test_a16_settlement.py",
+    "tests/test_a16_commercial_review.py"
+  ],
+  "acceptance": [
+    "Immutable evidence identity and deduplication",
+    "Distinguish order, refund, commission, settled and unknown outcomes",
+    "No mislabelled synthetic/provider verified charges",
+    "Consumer-bound A14/A15 offline fixture regression, exact-head CI"
+  ],
+  "side_effect_class": "BOUNDED"
+}
