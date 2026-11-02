@@ -193,8 +193,10 @@ def approved_groups() -> tuple[TestGroup, ...]:
                   ("src/ai_commerce/cli.py", "src/ai_commerce/__init__.py", "src/ai_commerce/__main__.py")
                   + sources("core", "__init__ identity provenance")),
         TestGroup("ef01", ("tests/test_ef01.py",), ("EF01.execution",),
-                  (eng + "runner.py", eng + "adapters.py", eng + "profile.py", eng + "cli.py", eng + "__main__.py", eng + "__init__.py"),
-                  (rem + "worker.py",)),
+                  (eng + "runner.py", eng + "adapters.py", eng + "profile.py", eng + "cli.py", eng + "__main__.py", eng + "__init__.py", eng + "model_defaults.py"),
+                  (rem + "worker.py",),
+                  ("config/engineering/model-defaults.v1.json",
+                   "docs/governance/HUMAN_DECISION_2026-11-02_SOFT_MODEL_DEFAULTS.md")),
         TestGroup("repair", ("tests/test_ef01_repair.py",), ("EF01.repair",),
                   (eng + "runner.py",), (rem + "worker.py", rem + "scheduler.py")),
         TestGroup("integrity", ("tests/test_ef01_ef02_integrity.py",), ("EF01.source-integrity",),

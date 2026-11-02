@@ -1325,3 +1325,98 @@ def test_provisional_pass_still_runs_registered_full_suite(mapped, monkeypatch):
     assert plan_data["provisional_mapping"]["result"] == "PASS_PREFLIGHT_ONLY"
     assert plan_data["groups"][0]["result"] == "PASS"
     assert plan_data["groups"][0]["binding"]["argv"] == [*FULL, "-n", "12"]
+
+
+# Issue #209: CI must reuse exact-tree, two-OS trustworthy PR evidence
+# without confusing a successful GitHub wrapper for tests actually executed.
+def _mt01_verified_pr_proof(pr_ci_module, *, changed_tree=False, second_os=True,
+                            steps_complete=True, exact_head=True, event="push",
+                            branch="refs/heads/main", token="test-only-token"):
+    parent = "b" * 40
+    merge = "c" * 40
+    good_step = [{"name": "MT-01 PR CI selective tests (full fallback)",
+                  "conclusion": "success"},
+                 {"name": "Run node --test tests/ef02-watch.test.cjs tests/ef02-reconcile.test.cjs",
+                  "conclusion": "success"}]
+    def git(*argv):
+        if argv == ("rev-parse", "HEAD"):
+            return merge
+        if argv == ("rev-list", "--parents", "-n", "1", merge):
+            return f"{merge} {'a' * 40} {parent}"
+        if argv == ("rev-parse", merge + "^{tree}"):
+            return "1" * 40
+        if argv == ("rev-parse", parent + "^{tree}"):
+            return ("2" if changed_tree else "1") * 40
+        raise AssertionError(f"unexpected git call {argv}")
+    def api(url):
+        if "/jobs?" in url:
+            return {"jobs": [
+                {"name": "tests (ubuntu-latest)", "status": "completed",
+                 "conclusion": "success", "steps": good_step},
+                {"name": "tests (windows-latest)", "status": "completed",
+                 "conclusion": "success" if second_os else "failure",
+                 "steps": good_step if steps_complete else good_step[:1]},
+            ]}
+        return {"workflow_runs": [{
+            "id": 111, "event": "pull_request", "head_sha": parent if exact_head else "d" * 40,
+            "status": "completed", "conclusion": "success",
+            "path": ".github/workflows/ef02-tests.yml@refs/pull/12/merge"
+        }]}
+    return pr_ci_module.postmerge_reuse(
+        repo=ROOT, event=event, branch=branch, current_sha=merge,
+        repository="trung-via/ai-commerce", token=token, git_fn=git, api_fn=api)
+
+
+def test_pr_ci_postmerge_proof_skips_only_true_identical_two_os_run(pr_ci_module):
+    allowed, reason, run = _mt01_verified_pr_proof(pr_ci_module)
+    assert allowed is True
+    assert reason == "EXACT_TREE_AND_BOTH_OS_PR_CI_VERIFIED"
+    assert run == "111"
+
+
+@pytest.mark.parametrize("kwargs,reason", [
+    ({"changed_tree": True}, "MERGE_TREE_DIFFERS_FROM_TESTED_PR"),
+    ({"second_os": False}, "NO_BOTH_OS_SUCCESSFUL_EXACT_HEAD_PR_RUN"),
+    ({"steps_complete": False}, "NO_BOTH_OS_SUCCESSFUL_EXACT_HEAD_PR_RUN"),
+    ({"exact_head": False}, "NO_BOTH_OS_SUCCESSFUL_EXACT_HEAD_PR_RUN"),
+    ({"event": "pull_request"}, "NON_MAIN_PUSH_OR_PR"),
+    ({"branch": "refs/heads/feature"}, "NON_MAIN_PUSH_OR_PR"),
+    ({"token": ""}, "MISSING_GITHUB_ACTION_TOKEN"),
+])
+def test_pr_ci_rejects_unproven_postmerge_reuse(pr_ci_module, kwargs, reason):
+    decision = _mt01_verified_pr_proof(pr_ci_module, **kwargs)
+    assert decision[0] is False
+    assert decision[1] == reason
+
+
+def test_pr_ci_postmerge_denies_untrusted_provider_error(pr_ci_module):
+    def bad_api(_):
+        raise OSError("synthetic missing GitHub evidence")
+    current = "c" * 40
+    result = pr_ci_module.postmerge_reuse(
+        repo=ROOT, event="push", branch="refs/heads/main", current_sha=current,
+        repository="trung-via/ai-commerce", token="test-only-token",
+        git_fn=lambda *argv: current if argv == ("rev-parse", "HEAD")
+                else f"{current} {'a' * 40} {'b' * 40}" if argv[0] == "rev-list"
+                else "1" * 40,
+        api_fn=bad_api)
+    assert result[0] is False
+    assert result[1] == "PROOF_UNAVAILABLE_OSError"
+
+
+def test_mt01_project_model_policy_is_reviewed_ef01_consumer():
+    from ai_commerce.engineering.minimum_test import approved_groups
+    group = next(g for g in approved_groups() if g.name == "ef01")
+    assert "src/ai_commerce/engineering/model_defaults.py" in group.paths
+    assert "config/engineering/model-defaults.v1.json" in group.contracts
+    assert "tests/test_ef01.py" in group.tests
+
+
+def test_pr_ci_real_a12_component_can_select_narrow_test_files(pr_ci_module):
+    result = pr_ci_module.choose(
+        ROOT, event="pull_request", base="a" * 40,
+        paths={"src/ai_commerce/product/identity.py"},
+    )
+    assert result[1] == "SELECTED_AFFECTED_INTEGRATION", result
+    assert "tests/test_a12_identity.py" in result[0]
+    assert "tests" not in result[0]

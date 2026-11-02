@@ -12,6 +12,8 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import urllib.parse
+import urllib.request
 from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -229,6 +231,106 @@ def choose(root: Path, *, event: str, base: str, paths: set[str] | None = None,
         return FULL, "FULL_PROJECT_REQUIRED", ("SELECTOR_ERROR_FAILS_TO_FULL",), ()
 
 
+
+# Only exact, independently successful matrix PR runs can be reused on a
+# byte-identical merge tree. Network/permission/lineage ambiguity fails to full.
+WORKFLOW_FILE = ".github/workflows/ef02-tests.yml"
+
+
+def postmerge_reuse(*, repo: Path, event: str, branch: str, current_sha: str,
+                    repository: str, token: str, git_fn=None, api_fn=None) -> tuple[bool, str, str]:
+    if event != "push" or branch != "refs/heads/main":
+        return False, "NON_MAIN_PUSH_OR_PR", ""
+    if not SHA.fullmatch(current_sha) or not re.fullmatch(r"[\w.-]+/[\w.-]+", repository):
+        return False, "INVALID_REPOSITORY_OR_SHA", ""
+    if not token:
+        return False, "MISSING_GITHUB_ACTION_TOKEN", ""
+    def git(*argv):
+        return subprocess.check_output(["git", "-C", str(repo), *argv],
+                                       stderr=subprocess.DEVNULL, timeout=15).decode().strip()
+    git = git_fn or git
+
+    def request(url):
+        req = urllib.request.Request(
+            url, headers={"Authorization": "Bearer " + token,
+                          "Accept": "application/vnd.github+json",
+                          "X-GitHub-Api-Version": "2022-11-28"})
+        with urllib.request.urlopen(req, timeout=12) as res:
+            return json.load(res)
+    request = api_fn or request
+
+    try:
+        if git("rev-parse", "HEAD") != current_sha:
+            return False, "CHECKOUT_SHA_DRIFT", ""
+        parents = git("rev-list", "--parents", "-n", "1", current_sha).split()
+        if len(parents) != 3 or parents[0] != current_sha:
+            return False, "NOT_EXACT_TWO_PARENT_MERGE", ""
+        tested_head = parents[2]
+        if not SHA.fullmatch(tested_head):
+            return False, "PR_PARENT_SHA_INVALID", ""
+        if git("rev-parse", current_sha + "^{tree}") != git("rev-parse", tested_head + "^{tree}"):
+            return False, "MERGE_TREE_DIFFERS_FROM_TESTED_PR", ""
+        origin = "https://api.github.com/repos/" + repository
+        query = urllib.parse.urlencode({"head_sha": tested_head,
+                                       "event": "pull_request", "per_page": 100})
+        runs = request(origin + "/actions/runs?" + query).get("workflow_runs")
+        if not isinstance(runs, list):
+            return False, "PR_RUN_EVIDENCE_MISSING", ""
+        for run in runs:
+            if (run.get("event") != "pull_request" or
+                run.get("head_sha") != tested_head or
+                run.get("status") != "completed" or
+                run.get("conclusion") != "success" or
+                str(run.get("path", "")).split("@")[0] != WORKFLOW_FILE):
+                continue
+            run_id = run.get("id")
+            if type(run_id) is not int or run_id < 1:
+                continue
+            jobs = request(origin + f"/actions/runs/{run_id}/jobs?per_page=100").get("jobs")
+            if not isinstance(jobs, list):
+                continue
+            matrix = {"tests (ubuntu-latest)": False, "tests (windows-latest)": False}
+            for job in jobs:
+                name = job.get("name")
+                steps = job.get("steps")
+                if not isinstance(steps, list):
+                    continue
+                # A green wrapper is not proof that Python/Node tests ran:
+                # require the two actual reviewed test steps to have passed.
+                test_steps = {s.get("name"): s.get("conclusion") for s in steps
+                              if isinstance(s, dict)}
+                pytest_pass = test_steps.get("MT-01 PR CI selective tests (full fallback)") == "success"
+                node_pass = any("node --test tests/ef02-watch.test.cjs" in name and result == "success"
+                                for name, result in test_steps.items() if isinstance(name, str))
+                if (name in matrix and job.get("status") == "completed" and
+                        job.get("conclusion") == "success" and pytest_pass and node_pass):
+                    matrix[name] = True
+            if all(matrix.values()):
+                return True, "EXACT_TREE_AND_BOTH_OS_PR_CI_VERIFIED", str(run_id)
+        return False, "NO_BOTH_OS_SUCCESSFUL_EXACT_HEAD_PR_RUN", ""
+    except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired,
+            TimeoutError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        # Never print API tokens or response bodies in CI.
+        return False, "PROOF_UNAVAILABLE_" + type(exc).__name__, ""
+
+
+def postmerge_preflight() -> int:
+    reuse, reason, run_id = postmerge_reuse(
+        repo=ROOT, event=os.getenv("MT01_CI_EVENT", ""),
+        branch=os.getenv("GITHUB_REF", ""), current_sha=os.getenv("GITHUB_SHA", ""),
+        repository=os.getenv("GITHUB_REPOSITORY", ""), token=os.getenv("GITHUB_TOKEN", ""))
+    print("MT01_POSTMERGE_REUSE=" + str(reuse).lower(), flush=True)
+    print("MT01_POSTMERGE_PROOF_REASON=" + reason, flush=True)
+    print("MT01_POSTMERGE_PR_RUN=" + run_id, flush=True)
+    output = os.getenv("GITHUB_OUTPUT")
+    if output:
+        with open(output, "a", encoding="utf-8") as f:
+            f.write("skip_pytest=" + str(reuse).lower() + "\n")
+    # Fail-closed: no proof -> ordinary full on push. The preflight itself
+    # never disables an existing required job or makes a model/provider call.
+    return 0
+
+
 def main() -> int:
     files, mode, reasons, groups = choose(
         ROOT, event=os.environ.get("MT01_CI_EVENT", ""),
@@ -238,6 +340,8 @@ def main() -> int:
     print("MT01_PR_CI_REASON=" + ",".join(reasons), flush=True)
     print("MT01_PR_CI_GROUPS=" + ",".join(groups), flush=True)
     print("MT01_PR_CI_SELECTED_FILES=" + str(len(files)), flush=True)
+    print("MT01_PR_CI_SELECTED_TARGETS=" + json.dumps(files), flush=True)
+    print("MT01_PR_CI_SELECTED_TARGET_TYPE=" + ("FULL_TEST_DIRECTORY" if files == FULL else "REVIEWED_TEST_FILES"), flush=True)
     raw_workers = os.environ.get("MT01_CI_XDIST_WORKERS", "0")
     if raw_workers not in {"0", "2", "4"}:
         raise ValueError("MT01_CI_UNAPPROVED_XDIST_WORKERS")
@@ -249,4 +353,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(postmerge_preflight() if sys.argv[1:] == ["--reuse-preflight"] else main())
