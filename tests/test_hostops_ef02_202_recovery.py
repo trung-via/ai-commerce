@@ -110,5 +110,82 @@ class RecoveryTests(unittest.TestCase):
             self.assertIn("tests/test_a14_attribution.py", recovery.EXPECTED)
 
 
+
+# E04 recovery is an independently pinned exact-#223 read, not a generic host file API.
+E04_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "hostops_ef02_223_recovery.py"
+e04_spec = importlib.util.spec_from_file_location("hostops_ef02_223_recovery_test", E04_SCRIPT)
+e04_recovery = importlib.util.module_from_spec(e04_spec)
+e04_spec.loader.exec_module(e04_recovery)
+
+
+class E04RecoveryTests(unittest.TestCase):
+    def make_fixture(self, base):
+        root = base / e04_recovery.WORKTREE_BASENAME
+        root.mkdir()
+        files = {
+            "src/ai_commerce/affiliate_commerce/service.py": b"offline E04\n",
+            "tests/test_a14_e04.py": b"def test_e04(): assert True\n",
+        }
+        for relative, content in files.items():
+            target = root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+        expected = {relative: hashlib.sha256(content).hexdigest()
+                    for relative, content in files.items()}
+        return root, files, expected
+
+    def test_missing_e04_worktree_does_not_reexecute_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            with patch.object(e04_recovery.tempfile, "gettempdir", return_value=str(base)), \
+                 patch.object(e04_recovery.subprocess, "run") as call:
+                result = e04_recovery.snapshot(base / "job")
+            self.assertFalse(result["found"])
+            self.assertIsNone(result["archive_sha256"])
+            call.assert_not_called()
+
+    def test_e04_source_hash_verified_export_and_original_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root, files, expected = self.make_fixture(base)
+            git = subprocess.CompletedProcess([], 0, e04_recovery.SOURCE_SHA.encode() + b"\n", b"")
+            with patch.object(e04_recovery.tempfile, "gettempdir", return_value=str(base)), \
+                 patch.object(e04_recovery, "EXPECTED", expected), \
+                 patch.object(e04_recovery.subprocess, "run", return_value=git):
+                result = e04_recovery.snapshot(base / "job")
+            self.assertTrue(result["source_sha_verified"] and result["found"])
+            self.assertEqual(result["file_count"], len(files))
+            archive = base / "job/.local/hostops-v2-ef02-223/verified-source.zip"
+            self.assertEqual(result["archive_sha256"], hashlib.sha256(archive.read_bytes()).hexdigest())
+            with zipfile.ZipFile(archive) as z:
+                self.assertEqual(sorted(z.namelist()), sorted(files))
+                for relative, content in files.items():
+                    self.assertEqual(z.read(relative), content)
+                    self.assertEqual((root / relative).read_bytes(), content)
+
+    def test_e04_hash_tamper_is_blocked_before_archive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root, files, expected = self.make_fixture(base)
+            next(iter((root / p for p in files))).write_bytes(b"tampered\n")
+            git = subprocess.CompletedProcess([], 0, e04_recovery.SOURCE_SHA.encode() + b"\n", b"")
+            with patch.object(e04_recovery.tempfile, "gettempdir", return_value=str(base)), \
+                 patch.object(e04_recovery, "EXPECTED", expected), \
+                 patch.object(e04_recovery.subprocess, "run", return_value=git):
+                with self.assertRaisesRegex(e04_recovery.RecoveryDenied, "E04_SOURCE_HASH_MISMATCH"):
+                    e04_recovery.snapshot(base / "job")
+            self.assertFalse((base / "job/.local/hostops-v2-ef02-223/verified-source.zip").exists())
+
+    def test_e04_wrong_git_head_blocks_export(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            _, _, expected = self.make_fixture(base)
+            wrong = subprocess.CompletedProcess([], 0, b"0"*40+b"\n", b"")
+            with patch.object(e04_recovery.tempfile, "gettempdir", return_value=str(base)), \
+                 patch.object(e04_recovery, "EXPECTED", expected), \
+                 patch.object(e04_recovery.subprocess, "run", return_value=wrong):
+                with self.assertRaisesRegex(e04_recovery.RecoveryDenied, "E04_SOURCE_SHA_MISMATCH"):
+                    e04_recovery.snapshot(base / "job")
+
 if __name__ == "__main__":
     unittest.main()
