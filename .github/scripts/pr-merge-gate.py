@@ -1,0 +1,265 @@
+"""AI Commerce exact-head merge gate. No LLM, polling, or PR code execution.
+
+A GitHub-owner-authored PR comment authorizes one immutable PR HEAD/base pair.
+On that comment OR a subsequent source-test completion, the default-branch
+workflow checks the latest CI run and merges only after both OS jobs passed
+actual Python and Node test steps. It never self-authorizes a merge.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable
+
+SHA = re.compile(r"[0-9a-f]{40}\Z")
+REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
+APPROVAL = "AI_COMMERCE_HUMAN_MERGE_APPROVAL_V1"
+REVOKE = "AI_COMMERCE_HUMAN_MERGE_REVOKE_V1"
+CI_WORKFLOW = ".github/workflows/ef02-tests.yml"
+PYTEST_STEP = "MT-01 PR CI selective tests (full fallback)"
+NODE_STEP = "Run node --test tests/ef02-watch.test.cjs tests/ef02-reconcile.test.cjs"
+
+
+@dataclass(frozen=True)
+class Verdict:
+    status: str
+    reason: str
+    pr: int | None = None
+    head: str = ""
+    ci_run: int | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"status": self.status, "reason": self.reason,
+                "pr": self.pr, "head_sha": self.head, "ci_run": self.ci_run}
+
+
+def approval_text(pr: int, head: str, base: str, *, revoke: bool = False) -> str:
+    if type(pr) is not int or pr <= 0 or not SHA.fullmatch(head) or not SHA.fullmatch(base):
+        raise ValueError("INVALID_APPROVAL_BINDING")
+    directive = REVOKE if revoke else APPROVAL
+    return f"{directive}\npr={pr}\nhead_sha={head}\nbase_sha={base}"
+
+
+def parse_approval(text: object) -> dict[str, Any] | None:
+    if not isinstance(text, str):
+        return None
+    lines = text.strip().splitlines()
+    if len(lines) != 4 or lines[0] not in (APPROVAL, REVOKE):
+        return None
+    try:
+        pr = int(lines[1].removeprefix("pr="))
+        head = lines[2].removeprefix("head_sha=")
+        base = lines[3].removeprefix("base_sha=")
+        if text.strip() != approval_text(pr, head, base, revoke=lines[0] == REVOKE):
+            return None
+    except ValueError:
+        return None
+    return {"pr": pr, "head": head, "base": base, "revoke": lines[0] == REVOKE}
+
+
+def owner_directive(comments: list, owner: str) -> dict | None:
+    """Last authenticated owner directive wins; one old approval is never enough."""
+    directives = []
+    for item in comments:
+        if (not isinstance(item, dict) or not isinstance(item.get("user"), dict) or
+                item["user"].get("login") != owner):
+            continue
+        if item.get("author_association") != "OWNER":
+            continue
+        parsed = parse_approval(item.get("body"))
+        if parsed and type(item.get("id")) is int:
+            directives.append((item["id"], parsed))
+    return max(directives, key=lambda pair: pair[0])[1] if directives else None
+
+
+def latest_exact_ci(runs: list, head: str) -> dict | None:
+    valid = [r for r in runs if isinstance(r, dict) and
+             r.get("event") == "pull_request" and r.get("head_sha") == head and
+             str(r.get("path", "")).split("@")[0] == CI_WORKFLOW and
+             type(r.get("id")) is int]
+    return max(valid, key=lambda r: (str(r.get("created_at") or ""), r["id"])) if valid else None
+
+
+def verified_jobs(jobs: list) -> bool:
+    """A successful wrapper or skipped pytest is not proof of verified code."""
+    if not isinstance(jobs, list):
+        return False
+    needed = {"tests (ubuntu-latest)", "tests (windows-latest)"}
+    observed = set()
+    for job in jobs:
+        if not isinstance(job, dict) or job.get("name") not in needed:
+            continue
+        if job.get("status") != "completed" or job.get("conclusion") != "success":
+            continue
+        steps = job.get("steps")
+        if not isinstance(steps, list):
+            continue
+        steps_by_name = {s.get("name"): s.get("conclusion") for s in steps
+                         if isinstance(s, dict) and isinstance(s.get("name"), str)}
+        if steps_by_name.get(PYTEST_STEP) == "success" and steps_by_name.get(NODE_STEP) == "success":
+            observed.add(job["name"])
+    return observed == needed
+
+
+def verify_one(api: Callable[[str], Any], repository: str, number: int,
+               *, event_head: str | None = None) -> Verdict:
+    """Read-only preflight. All missing or stale evidence holds the merge."""
+    owner = repository.partition("/")[0]
+    base = f"/repos/{repository}"
+    pr = api(f"{base}/pulls/{number}")
+    if not isinstance(pr, dict) or pr.get("state") != "open" or pr.get("merged") or pr.get("draft"):
+        return Verdict("WAIT_REVIEW", "PR_NOT_OPEN_AND_READY", number)
+    if not isinstance(pr.get("number"), int) or pr["number"] != number:
+        return Verdict("HOLD", "PR_ID_MISMATCH", number)
+    head = pr.get("head", {}).get("sha")
+    base_sha = pr.get("base", {}).get("sha")
+    if (not isinstance(head, str) or not SHA.fullmatch(head) or
+            not isinstance(base_sha, str) or not SHA.fullmatch(base_sha) or
+            pr.get("base", {}).get("ref") != "main"):
+        return Verdict("HOLD", "PR_HEAD_OR_BASE_INVALID", number)
+    if event_head and event_head != head:
+        return Verdict("HOLD", "EVENT_HEAD_MISMATCH", number, head)
+
+    # Only one trusted owner binding to this exact PR, HEAD and current base.
+    comments = api(f"{base}/issues/{number}/comments?per_page=100")
+    if not isinstance(comments, list) or len(comments) == 100:
+        return Verdict("HOLD", "APPROVAL_COMMENTS_UNPROVEN", number, head)
+    approval = owner_directive(comments, owner)
+    if not approval or approval["revoke"]:
+        return Verdict("HOLD", "NO_ACTIVE_OWNER_APPROVAL", number, head)
+    if (approval["pr"], approval["head"], approval["base"]) != (number, head, base_sha):
+        return Verdict("HOLD", "APPROVAL_BOUND_TO_DIFFERENT_REVISION", number, head)
+
+    live = api(f"{base}/branches/main")
+    if live.get("commit", {}).get("sha") != base_sha:
+        return Verdict("WAIT_REBASE", "BASE_MAIN_CHANGED", number, head)
+    if pr.get("mergeable") is not True:
+        return Verdict("WAIT_MERGEABILITY", "PR_NOT_MERGEABLE", number, head)
+
+    q = urllib.parse.urlencode({"event": "pull_request", "head_sha": head, "per_page": 100})
+    obj = api(f"{base}/actions/runs?{q}")
+    if not isinstance(obj, dict) or not isinstance(obj.get("workflow_runs"), list) or len(obj["workflow_runs"]) == 100:
+        return Verdict("HOLD", "CI_RUN_LIST_UNPROVEN", number, head)
+    latest = latest_exact_ci(obj["workflow_runs"], head)
+    if latest is None:
+        return Verdict("WAIT_CI", "NO_EXACT_HEAD_PR_CI", number, head)
+    if latest.get("status") != "completed":
+        return Verdict("WAIT_CI", "EXACT_HEAD_CI_STILL_RUNNING", number, head, latest["id"])
+    if latest.get("conclusion") != "success":
+        return Verdict("WAIT_FIX", "EXACT_HEAD_CI_NOT_SUCCESS", number, head, latest["id"])
+    jobs = api(f"{base}/actions/runs/{latest['id']}/jobs?per_page=100")
+    if not isinstance(jobs, dict) or not isinstance(jobs.get("jobs"), list) or len(jobs["jobs"]) == 100:
+        return Verdict("HOLD", "CI_JOBS_UNPROVEN", number, head, latest["id"])
+    if not verified_jobs(jobs["jobs"]):
+        return Verdict("WAIT_EVIDENCE", "BOTH_OS_PYTEST_NODE_PROOF_MISSING", number, head, latest["id"])
+    return Verdict("READY_FOR_MERGE", "EXACT_HEAD_BOTH_OS_CI_VERIFIED", number, head, latest["id"])
+
+
+class GitHubAPI:
+    def __init__(self, repository: str, token: str):
+        if not REPO.fullmatch(repository) or not token:
+            raise ValueError("MERGE_GATE_REPOSITORY_OR_TOKEN_MISSING")
+        self.repository = repository
+        self.token = token
+
+    def __call__(self, path: str, method: str = "GET", body: dict | None = None) -> Any:
+        if not path.startswith(f"/repos/{self.repository}/"):
+            raise ValueError("CROSS_REPOSITORY_API_DENIED")
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(
+            "https://api.github.com" + path, data=data, method=method,
+            headers={"Authorization": "Bearer " + self.token,
+                     "Accept": "application/vnd.github+json",
+                     "X-GitHub-Api-Version": "2022-11-28",
+                     "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=12) as response:
+            return json.load(response)
+
+
+def candidates(api: Callable, repo: str, event: dict) -> list[tuple[int, str | None]]:
+    """Only a new owner approval comment or the matching PR CI completion."""
+    if "comment" in event and "issue" in event:
+        c = event["comment"]
+        issue = event["issue"]
+        if (not issue.get("pull_request") or not isinstance(c.get("user"), dict) or
+                c["user"].get("login") != repo.split("/")[0]
+                or c.get("author_association") != "OWNER" or parse_approval(c.get("body")) is None):
+            return []
+        number = issue.get("number")
+        directive = parse_approval(c["body"])
+        return [(number, None)] if type(number) is int and directive["pr"] == number else []
+    run = event.get("workflow_run")
+    if not isinstance(run, dict) or run.get("name") != "EF02 source tests" or run.get("event") != "pull_request":
+        return []
+    if run.get("status") != "completed":
+        return []
+    head = run.get("head_sha")
+    if not isinstance(head, str) or not SHA.fullmatch(head):
+        return []
+    prs = api(f"/repos/{repo}/pulls?state=open&per_page=100")
+    if not isinstance(prs, list) or len(prs) == 100:
+        return []
+    return [(p["number"], head) for p in prs if isinstance(p, dict) and
+            type(p.get("number")) is int and p.get("head", {}).get("sha") == head]
+
+
+def process(api: GitHubAPI, repository: str, event: dict) -> list[dict]:
+    results: list[dict] = []
+    for number, event_head in candidates(api, repository, event):
+        try:
+            decision = verify_one(api, repository, number, event_head=event_head)
+            outcome = decision.as_dict()
+            if decision.status == "READY_FOR_MERGE":
+                # Recheck source SHA and main before the write. Human approval
+                # persists through WAIT_CI -> PASS for unchanged PR HEAD/base.
+                fresh = api(f"/repos/{repository}/pulls/{number}")
+                current_main = api(f"/repos/{repository}/branches/main")
+                if (fresh.get("head", {}).get("sha") != decision.head or
+                    fresh.get("base", {}).get("sha") != current_main.get("commit", {}).get("sha") or
+                    fresh.get("mergeable") is not True or fresh.get("draft") or
+                    fresh.get("state") != "open"):
+                    outcome["status"] = "WAIT_RECHECK"
+                    outcome["reason"] = "PR_CHANGED_DURING_MERGE"
+                    results.append(outcome)
+                    continue
+                # The GitHub merge endpoint's SHA compare prevents PR HEAD races.
+                # A second worker is idempotently refused after the first merge.
+                result = api(f"/repos/{repository}/pulls/{number}/merge", method="PUT",
+                             body={"sha": decision.head, "merge_method": "merge"})
+                outcome["status"] = "MERGED" if result.get("merged") is True else "HOLD"
+                outcome["reason"] = "GITHUB_MERGED_EXACT_APPROVED_HEAD" if result.get("merged") is True else "GITHUB_MERGE_DENIED"
+                outcome["merge_sha"] = result.get("sha") if result.get("merged") else None
+            results.append(outcome)
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError,
+                TypeError, KeyError, AttributeError) as exc:
+            # Fail closed; expose class only, not provider response/token.
+            results.append({"status": "HOLD", "reason": "GITHUB_PROOF_OR_MERGE_ERROR_" + type(exc).__name__,
+                            "pr": number})
+    return results
+
+
+def main() -> int:
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    token = os.environ.get("GH_TOKEN", "")
+    try:
+        api = GitHubAPI(repo, token)
+        event_path = Path(os.environ["GITHUB_EVENT_PATH"])
+        event = json.loads(event_path.read_text(encoding="utf-8"))
+        decisions = process(api, repo, event)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(json.dumps({"status": "HOLD", "reason": "MERGE_GATE_INPUT_UNPROVEN_" + type(exc).__name__}))
+        return 1
+    for decision in decisions:
+        print("AI_COMMERCE_MERGE_GATE=" + json.dumps(decision, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
