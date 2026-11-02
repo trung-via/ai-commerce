@@ -370,8 +370,13 @@ def validate_component_onboarding_manifest(
             if ancestor.is_symlink():
                 raise ValueError("ONBOARD_UNSAFE_PARENT_LINK")
             ancestor = ancestor.parent
-    payload = json.dumps(data, ensure_ascii=True, sort_keys=True,
-                         separators=(",", ":"), allow_nan=False).encode("utf-8")
+    try:
+        payload = (root / manifest_path).read_bytes()
+        observed = json.loads(payload.decode("utf-8-sig"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ValueError("ONBOARD_MANIFEST_BYTES_UNPROVEN") from exc
+    if observed != data:
+        raise ValueError("ONBOARD_MANIFEST_BYTES_MISMATCH")
     return {
         "name": name, "manifest_path": manifest_path,
         "manifest_sha256": hashlib.sha256(payload).hexdigest(),
