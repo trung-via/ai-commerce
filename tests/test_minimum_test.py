@@ -1490,7 +1490,7 @@ def test_human_full_registered_command_executes_but_cannot_claim_unmapped_script
     assert plan["groups"][0]["state"] == "EXECUTE"
     assert plan["groups"][0]["binding"]["argv"] == FULL12
     assert "AC_UNMAPPED:NEW.AC" in plan["post_test_coverage_gaps"]
-    assert "NON_PYTHON_DIRECT_VERIFICATION_REQUIRED:scripts/check.ps1" in plan["post_test_coverage_gaps"]
+    assert "UNMAPPED_IMPLEMENTATION_OR_TEST:scripts/check.ps1" in plan["post_test_coverage_gaps"]
 
 
 def test_human_full_known_python_source_has_no_extra_coverage_hold(tmp_path):
