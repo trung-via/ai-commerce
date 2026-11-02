@@ -126,6 +126,8 @@ def test_companion_report_has_exact_reviewed_parallel_commands(real_tree):
                 "tests/test_ef02_plugin_turn_send_once.py",
                 "tests/test_ef02_plugin_turn_cli.py",
                 "tests/test_ef02_plugin_turn_evidence.py",
+                "tests/test_ef02_d5_wake_readiness_flow.py",
+                "tests/test_ef02_d5_wake_readiness_cache.py",
             ]
             assert len(live_tests) == len(set(live_tests))
         elif key == "mt01-ef02-recovery-tests":
@@ -149,11 +151,6 @@ def test_companion_report_has_exact_reviewed_parallel_commands(real_tree):
         key = f"mt01-{g.name}-tests"
         if g.name == "ef02-recovery":
             assert current.get(key) == expected
-        elif g.name == "hostops-v2":
-            # Preserve the immutable historical profile while registering the
-            # newly committed read-only recovery test under a reviewed alias.
-            assert current["mt01-hostops-v2-recovery-tests"] == expected
-            assert current[key] == ["python", "-m", "pytest", "tests/test_hostops_v2.py", "-q", "-n", "12"]
         elif key in combined:
             assert combined[key] == expected
         else:

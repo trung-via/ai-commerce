@@ -279,6 +279,8 @@
     "tests/test_ef02_d5_local_wake_entry.py",
     "tests/test_ef02_d5_local_wake_trigger.py",
     "tests/test_ef02_d5_run_registration.py",
+    "tests/test_ef02_d5_wake_readiness_flow.py",
+    "tests/test_ef02_d5_wake_readiness_cache.py",
     "-q",
     "-n",
     "12"
@@ -324,15 +326,6 @@
     "12"
   ],
   "mt01-hostops-v2-tests": [
-    "python",
-    "-m",
-    "pytest",
-    "tests/test_hostops_v2.py",
-    "-q",
-    "-n",
-    "12"
-  ],
-  "mt01-hostops-v2-recovery-tests": [
     "python",
     "-m",
     "pytest",
