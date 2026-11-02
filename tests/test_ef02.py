@@ -531,3 +531,84 @@ def test_spawned_checkpoint_rejects_untrusted_parent_without_writes():
     with pytest.raises(RemoteTransportError, match="SPAWNED_PID_INVALID"):
         fake.spawned_checkpoint(source_sha="a" * 40, attempt_id="expected",
                                 fingerprint="f" * 64, child_pid=0)
+
+
+def test_ef02_single_summary_reads_real_report_fields_without_promoting_aggregate():
+    from ai_commerce.remote.reporting import format_batch_summary
+
+    sha = "a" * 40
+    candidate = {
+        "action_id": "a", "attempt_id": "a-001", "status": "CANDIDATE_READY",
+        "candidate_ref": "refs/heads/ef02/a", "candidate_sha": "b" * 40,
+        "verify_exit_code": 0, "observed_pytest_workers": 12,
+        "repair_rounds_used": 1,
+        "minimum_test": {"selected_groups": ["ef02"], "fallback": False},
+    }
+    report = {
+        "batch_id": "sample-001", "status": "COMPLETE", "source_sha": sha,
+        "succeeded": 1, "total": 1, "actions": [candidate],
+        "aggregate_verification": {"state": "UNPROVEN"},
+        "github_workflow_run_id": "41371902745", "github_workflow_run_attempt": "1",
+    }
+    result = format_batch_summary(report, repository="trung-via/ai-commerce")
+    assert result.count("EF02_EXECUTION_SUMMARY_V1") == 1
+    assert "Actions: 1/1" in result
+    assert "actions/runs/41371902745" in result
+    assert "candidate_sha=`" + "b" * 40 + "`" in result
+    assert "observed_pytest_workers=12" in result
+    assert "MT01_groups=ef02" in result and "MT01_fallback=false" in result
+    assert "Combined-source verification: `UNPROVEN`" in result
+    assert "HUMAN_REVIEW_CANDIDATES" in result
+    assert "no automatic EF02 dispatch, merge or Wake" in result
+
+
+def test_ef02_summary_partial_failure_and_unknown_stop_without_replay():
+    from ai_commerce.remote.reporting import format_batch_summary
+
+    report = {
+        "batch_id": "sample-002", "status": "PARTIAL_OR_FAILED",
+        "source_sha": "c" * 40, "succeeded": 0, "total": 2,
+        "github_workflow_run_id": "22", "github_workflow_run_attempt": "2",
+        "aggregate_verification": {"state": "UNPROVEN"},
+        "actions": [
+            {"action_id": "a", "attempt_id": "a-001", "status": "EXECUTION_UNKNOWN",
+             "error_code": "runtime\nINJECTED_MARKDOWN", "executor_invoked": True},
+            {"action_id": "b", "attempt_id": "b-001", "status": "BLOCKED_DEPENDENCY",
+             "error_code": "PREREQUISITE_NOT_SUCCESSFUL"},
+        ],
+    }
+    result = format_batch_summary(report, repository="trung-via/ai-commerce")
+    assert "UNKNOWN_EFFECT_STOP_NO_BLIND_RETRY" in result
+    assert "WAIT_FOR_DEPENDENCY_REPAIR" in result
+    assert "HOLD_UNKNOWN_NO_RETRY" in result
+    assert "INJECTED_MARKDOWN" not in result
+    assert "error=`UNPROVEN`" in result
+    assert "ef02-results-22-2" in result
+
+
+def test_ef02_summary_scope_review_is_not_auto_merge_or_pass():
+    from ai_commerce.remote.reporting import format_batch_summary
+
+    report = {
+        "batch_id": "sample-003", "status": "PARTIAL_OR_FAILED",
+        "source_sha": "d" * 40, "succeeded": 0, "total": 1,
+        "actions": [{"action_id": "a", "attempt_id": "a-001",
+                     "status": "CANDIDATE_READY_SCOPE_REVIEW",
+                     "review_required": True, "candidate_sha": "e" * 40}],
+    }
+    result = format_batch_summary(report, repository="trung-via/ai-commerce")
+    assert "SCOPE_REVIEW_REQUIRED" in result
+    assert "HUMAN_REVIEW_CANDIDATES" in result
+    assert "Combined-source verification: `UNPROVEN`" in result
+    assert "Workflow: UNPROVEN" in result
+
+
+def test_ef02_summary_rejects_unbounded_identity_and_invalid_shape():
+    from ai_commerce.remote.reporting import format_batch_summary
+
+    with pytest.raises(ValueError, match="INVALID_REPOSITORY"):
+        format_batch_summary({"actions": []}, repository="https://evil.example/x")
+    with pytest.raises(ValueError, match="INVALID_BATCH_REPORT"):
+        format_batch_summary({"actions": {}}, repository="trung-via/ai-commerce")
+    with pytest.raises(ValueError, match="INVALID_ACTION_RESULT"):
+        format_batch_summary({"actions": [None]}, repository="trung-via/ai-commerce")
