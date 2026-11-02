@@ -88,3 +88,79 @@ def assert_candidate_git_filter_consistency(
                 "Fix .gitattributes or normalize BEFORE re-verification; "
                 "do not rewrite already-verified output."
             )
+
+
+def stabilize_candidate_newlines_before_verify(
+    repo: Path, paths: Iterable[str], *, allowed_paths: Iterable[str],
+    git_executable: str | None = None,
+) -> list[dict[str, str]]:
+    """Normalize *new, owned* CRLF text before tests and manifest hashing.
+
+    Only an exact Git-clean == LF-converted-byte comparison authorizes a
+    rewrite. Tracked files, out-of-scope paths and other Git filters are
+    rejected instead. The publisher retains its independent post-verify
+    byte check; no verified bytes are ever changed.
+    """
+    from .source_safety import checked_path, ordinary_scope_drift
+
+    allowed = tuple(p.rstrip("/") for p in allowed_paths)
+    changes: list[dict[str, str]] = []
+    for relative in paths:
+        try:
+            path = checked_path(repo, relative)
+        except ValueError as exc:
+            raise GitByteConsistencyError("PREVERIFY_UNSAFE_PATH:" + relative) from exc
+        if not path.exists():
+            continue  # Deletion; validated by the verified candidate manifest.
+        if not path.is_file():
+            raise GitByteConsistencyError("PREVERIFY_NON_FILE:" + relative)
+
+        content = path.read_bytes()
+        raw = _git(repo, "hash-object", "--stdin", data=content,
+                   git_executable=git_executable)
+        filtered = _git(repo, "hash-object", "--stdin", "--path=" + relative,
+                        data=content, git_executable=git_executable)
+        if raw.returncode or filtered.returncode:
+            raise GitByteConsistencyError("PREVERIFY_GIT_FILTER_UNAVAILABLE:" + relative)
+        if raw.stdout.strip() == filtered.stdout.strip():
+            continue
+
+        # A CRLF-only transform is the one case that can be made deterministic
+        # without guessing at custom filters, encodings or file semantics.
+        normalized = content.replace(b"\r\n", b"\n")
+        converted = _git(repo, "hash-object", "--stdin", data=normalized,
+                         git_executable=git_executable)
+        converted_filtered = _git(repo, "hash-object", "--stdin",
+                                  "--path=" + relative, data=normalized,
+                                  git_executable=git_executable)
+        if (b"\r\n" not in content or b"\x00" in content or
+                not ordinary_scope_drift([relative]) or
+                not converted.stdout or converted.returncode or
+                converted_filtered.returncode or
+                filtered.stdout.strip() != converted.stdout.strip() or
+                converted_filtered.stdout.strip() != converted.stdout.strip()):
+            raise GitByteConsistencyError("PREVERIFY_GIT_FILTER_UNSUPPORTED:" + relative)
+
+        if (not allowed or not any(relative == p or relative.startswith(p + "/")
+                                   for p in allowed)):
+            raise GitByteConsistencyError("PREVERIFY_OUT_OF_SCOPE_FILTER:" + relative)
+
+        tracked = _git(repo, "ls-files", "--error-unmatch", "--", relative,
+                       git_executable=git_executable)
+        if tracked.returncode == 0:
+            # Existing tracked evidence may depend on original CRLF bytes;
+            # do not silently modify its semantics.
+            raise GitByteConsistencyError("PREVERIFY_TRACKED_FILTER_MISMATCH:" + relative)
+        if tracked.returncode != 1:
+            raise GitByteConsistencyError("PREVERIFY_GIT_INDEX_UNAVAILABLE:" + relative)
+
+        before = hashlib.sha256(content).hexdigest()
+        path.write_bytes(normalized)
+        if path.read_bytes() != normalized:
+            raise GitByteConsistencyError("PREVERIFY_NORMALIZED_BYTES_CHANGED:" + relative)
+        changes.append({
+            "path": relative, "transformation": "CRLF_TO_LF_PRE_VERIFY",
+            "before_sha256": before,
+            "after_sha256": hashlib.sha256(normalized).hexdigest(),
+        })
+    return changes
