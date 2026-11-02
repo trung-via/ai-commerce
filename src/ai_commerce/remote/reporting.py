@@ -65,10 +65,10 @@ def format_batch_summary(report: dict, *, repository: str) -> str:
     source = _candidate_sha(report.get("source_sha"))
     lines = [
         "EF02_EXECUTION_SUMMARY_V1",
-        f"Batch: \`{_token(report.get('batch_id'))}\` | "
-        f"Status: \`{_token(report.get('status'))}\` | "
+        f"Batch: `{_token(report.get('batch_id'))}` | "
+        f"Status: `{_token(report.get('status'))}` | "
         f"Actions: {_number(report.get('succeeded'))}/{_number(report.get('total'))}",
-        f"Source: \`{source}\` | Workflow: {run_url}",
+        f"Source: `{source}` | Workflow: {run_url}",
         "Action results (artifact is authoritative):",
     ]
     needs_review = False
@@ -85,16 +85,16 @@ def format_batch_summary(report: dict, *, repository: str) -> str:
         has_failure |= step in ("DIAGNOSE_FAILURE_BEFORE_NEW_ATTEMPT",
                                 "WAIT_FOR_DEPENDENCY_REPAIR")
         parts = [
-            f"- \`{_token(item.get('action_id'))}\` "
-            f"(attempt \`{_token(item.get('attempt_id'))}\`): \`{state}\`",
-            f"next=\`{step}\`",
+            f"- `{_token(item.get('action_id'))}` "
+            f"(attempt `{_token(item.get('attempt_id'))}`): `{state}`",
+            f"next=`{step}`",
         ]
         if item.get("candidate_ref"):
-            parts.append(f"candidate=\`{_token(item.get('candidate_ref'))}\`")
+            parts.append(f"candidate=`{_token(item.get('candidate_ref'))}`")
         if item.get("candidate_sha"):
-            parts.append(f"candidate_sha=\`{_candidate_sha(item.get('candidate_sha'))}\`")
+            parts.append(f"candidate_sha=`{_candidate_sha(item.get('candidate_sha'))}`")
         if item.get("error_code"):
-            parts.append(f"error=\`{_token(item.get('error_code'))}\`")
+            parts.append(f"error=`{_token(item.get('error_code'))}`")
         if type(item.get("verify_exit_code")) is int:
             parts.append(f"verify_exit={item['verify_exit_code']}")
         if type(item.get("repair_rounds_used")) is int:
@@ -111,8 +111,8 @@ def format_batch_summary(report: dict, *, repository: str) -> str:
         lines.append("; ".join(parts))
     agg = report.get("aggregate_verification")
     agg_state = _token(agg.get("state")) if type(agg) is dict else "UNPROVEN"
-    lines.append("Combined-source verification: \`" + agg_state +
-                 "\` (NOT inferred from per-action PASS).")
+    lines.append("Combined-source verification: `" + agg_state +
+                 "` (NOT inferred from per-action PASS).")
     if has_unknown:
         decision = "HOLD_UNKNOWN_NO_RETRY"
     elif has_failure:
@@ -121,10 +121,10 @@ def format_batch_summary(report: dict, *, repository: str) -> str:
         decision = "HUMAN_REVIEW_CANDIDATES"
     else:
         decision = "READ_ARTIFACT_BEFORE_DECISION"
-    lines.append("Next: \`" + decision +
-                 "\` — no automatic EF02 dispatch, merge or Wake.")
+    lines.append("Next: `" + decision +
+                 "` — no automatic EF02 dispatch, merge or Wake.")
     artifact = (f"ef02-results-{run}-{attempt}"
                 if run != "UNPROVEN" and attempt != "UNPROVEN" else "UNPROVEN")
-    lines.append(f"Evidence: Actions artifact \`{artifact}\` (14-day retention); "
+    lines.append(f"Evidence: Actions artifact `{artifact}` (14-day retention); "
                  "batch_result.json and per-action files. No ChatGPT receipt claim.")
     return "\n".join(lines)
