@@ -286,7 +286,9 @@ def test_required_ac_on_unselected_registered_component_holds(tmp_path):
     assert plan["selected_groups"] == ["a14"]
     assert not plan["unknown_acs"]
     assert "AC_REQUIRED_GROUP_NOT_SELECTED:A12.product-evidence" in plan["reason_codes"]
-    assert any(g["state"] == "UNPROVEN" for g in plan["groups"])
+    assert all(not g["execute"] and g["state"] == "UNPROVEN"
+               for g in plan["groups"])
+    assert plan["impact_v21"]["mode"] == "HOLD_COVERAGE"
 
 
 def test_required_ac_covered_by_selected_component_is_proven(tmp_path):
@@ -310,3 +312,30 @@ def test_required_ac_covered_by_selected_component_is_proven(tmp_path):
     assert plan["selected_groups"] == ["a12"]
     assert not any(code.startswith("AC_") for code in plan["reason_codes"])
     assert plan["groups"][0]["state"] == "EXECUTE"
+
+def test_required_cross_component_ac_with_both_groups_selected(tmp_path):
+    """Positive fan-in: A12 required AC is covered by an actually selected A12."""
+    groups, a12, a14 = fixture(tmp_path)
+    groups = (
+        TestGroup("a12", (a12,), ("A12.product-evidence",),
+                  ("src/ai_commerce/product/identity.py",)),
+        TestGroup("a14", (a14,), ("A14.L04.offline-attribution-evidence",),
+                  ("src/ai_commerce/affiliate_attribution/evidence.py",)),
+    )
+    files = file_hashes(tmp_path)
+    broad = ["python", "-m", "pytest", "tests", "-q", "-n", "12"]
+    profiles = {
+        "mt01-a12-tests": ["python", "-m", "pytest", a12, "-q", "-n", "12"],
+        "mt01-a14-tests": ["python", "-m", "pytest", a14, "-q", "-n", "12"],
+    }
+    plan = registered_action_plan(
+        repo=tmp_path, base_sha="a" * 40, base_files=files,
+        candidate_files=files,
+        changed_paths=["src/ai_commerce/product/identity.py",
+                       "src/ai_commerce/affiliate_attribution/evidence.py"],
+        required_acs=("A12.product-evidence",), fallback_argv=broad,
+        groups=groups, registered_profiles=profiles, env={},
+    )
+    assert plan["selected_groups"] == ["a12", "a14"]
+    assert not any(code.startswith("AC_") for code in plan["reason_codes"])
+    assert all(g["state"] == "EXECUTE" for g in plan["groups"])

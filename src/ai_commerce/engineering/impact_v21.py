@@ -333,6 +333,15 @@ def registered_action_plan(
             "explanation": ["MT01_V21_SCOPED_ACTUAL_CHANGED_PATHS"] if executable_scope else
                            ["MT01_V21_HOLD_MISSING_VERIFICATION_PROOF"],
         })
+    if problems:
+        # No partial green subset when a mandatory AC or profile is unproven.
+        # The whole action is HOLD, not a sequence of successful groups plus
+        # a late warning. Avoid running expensive incomplete pytest groups.
+        for entry in entries:
+            entry["state"] = "UNPROVEN"
+            entry["execute"] = False
+            entry["explanation"] = sorted(set(entry["explanation"]) |
+                                          {"MT01_V21_COVERAGE_HOLD"})
     if not entries or problems:
         # One explicit refusal record at the end; no all-tests substitution.
         entries.append({
@@ -349,6 +358,12 @@ def registered_action_plan(
                 "selected_impact_tests": list(impact.selected_tests),
             },
         })
+    impact_receipt = impact.as_dict()
+    if unselected_acs:
+        impact_receipt["mode"] = "HOLD_COVERAGE"
+        impact_receipt["missing_mapping"] = sorted(
+            set(impact_receipt["missing_mapping"]) |
+            {"AC_REQUIRED_GROUP_NOT_SELECTED:" + ac for ac in unselected_acs})
     return {
         "kind": "AI_COMMERCE_MT01_PLAN", "version": 2,
         "required_acs": sorted(set(required_acs)),
@@ -365,5 +380,5 @@ def registered_action_plan(
         "fallback_profile": None, "fallback_argv": list(fallback_argv),
         "narrow_execution_observed": False, "fallback": False,
         "aggregate_sources": list(aggregate_sources), "groups": entries,
-        "impact_v21": impact.as_dict(),
+        "impact_v21": impact_receipt,
     }
