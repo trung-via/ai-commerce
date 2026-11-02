@@ -362,5 +362,14 @@
     "-q",
     "-n",
     "12"
+  ],
+  "mt01-a15-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_a15_operations.py",
+    "-q",
+    "-n",
+    "12"
   ]
 }

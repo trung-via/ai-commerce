@@ -1,0 +1,46 @@
+{
+  "work_id": "A15-OPERATIONS-COST-001",
+  "objective": "Roadmap A A15 O05/O06/O07: offline immutable cost evidence, safe retry intent state and honest read-only operating status; enables A16 evidence reconciliation.",
+  "status": "ACCEPTED_FOR_WORK",
+  "source_decision": "https://github.com/trung-via/ai-commerce/issues/237",
+  "scope_in": [
+    "O05 CostLedger",
+    "O06 retry/idempotency guard",
+    "O07 read-only operational status"
+  ],
+  "scope_out": [
+    "Live paid model calls",
+    "Automated provider retries",
+    "Publishing/payments/order settlement",
+    "Crypto attestation of user-supplied provider receipts",
+    "A16 economic calculation",
+    "HostOps and Git Write Guard changes"
+  ],
+  "expected_artifacts": [
+    "src/ai_commerce/operations/cost_ledger.py",
+    "src/ai_commerce/operations/retry_guard.py",
+    "src/ai_commerce/operations/status_report.py",
+    "tests/test_a15_operations.py",
+    "docs/engineering/A15_IMPLEMENTATION_REPORT.md"
+  ],
+  "acceptance": [
+    "User-supplied and synthetic CHARGED costs are distinct from independently verified real provider cost; PENDING and UNKNOWN are not zero.",
+    "Decimal string amount, explicit uppercase currency; no FX aggregation, no floating-point money.",
+    "Immutable cost event/intent/attempt replay is idempotent; conflicting bytes fail closed.",
+    "Ambiguous provider effects require reconciliation and cannot be retried automatically; stale last-attempt view is held.",
+    "Read-only job status preserves render/publication/link/order/settlement separation and never implies business revenue.",
+    "Exact-head focused and affected CI on both hosted operating systems plus reviewed registry mapping; no unknown skipped required test."
+  ],
+  "side_effect_class": "BOUNDED",
+  "owner": "Commerce Operations / Brain -> Engineering",
+  "evidence_refs": [
+    "https://github.com/trung-via/ai-commerce/issues/237",
+    "docs/engineering/A15_IMPLEMENTATION_REPORT.md",
+    "tests/test_a15_operations.py"
+  ],
+  "risk_notes": [
+    "O01-O04 exist in A04 code and must be reused instead of reimplemented; WorkTree status PROPOSED is stale for O01-O04.",
+    "The first integrated review PR will not be called M5 accepted until exact-head hosted CI and Brain review.",
+    "Provider-supplied charge receipts cannot be certified by an offline ledger. No real settlement/revenue evidence."
+  ]
+}
