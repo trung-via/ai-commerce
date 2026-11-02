@@ -113,6 +113,11 @@
             "minLength": 1
           }
         },
+        "verification_intent": {
+          "enum": ["AUTO", "HUMAN_FULL"],
+          "default": "AUTO",
+          "description": "HUMAN_FULL requires authenticated owner-issued HUMAN batch and registered full profile; profile name alone is never consent."
+        },
         "verification_profile": {
           "type": "string",
           "minLength": 1,

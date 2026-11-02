@@ -345,6 +345,15 @@
     "-n",
     "12"
   ],
+  "mt01-mt01-v21-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_mt01_v21.py",
+    "-q",
+    "-n",
+    "12"
+  ],
   "mt01-a14-e04-tests": [
     "python",
     "-m",

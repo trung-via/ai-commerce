@@ -41,6 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--minimum-test", action="store_true", help="Use the deterministic MT-01 AC/dependency map")
     parser.add_argument("--acceptance", action="append", default=[], help="Applicable AC ID in the trusted MT-01 map")
     parser.add_argument("--registered-only", action="store_true", help="EF02: preserve exact registered verification argv")
+    parser.add_argument("--human-full-suite-authorized", action="store_true",
+                        help="Only the trusted EF02 worker may set this for an authenticated HUMAN_FULL packet")
     parser.add_argument("--registered-profiles-json", type=Path, default=None,
                         help="EF02 trusted registry snapshot for exact registered test groups")
     parser.add_argument("--aggregate-source", action="append", default=[], help="EF02: invalidate sibling proof at fan-in")
@@ -71,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
         result = execute_attempt(repo=args.repo, output_dir=args.out_dir,
                                  work_id=args.work_id, attempt_id=args.attempt_id,
                                  selection=selection, instruction=prompt, verify_argv=verify,
-                                 selection_source=decision.source,
+                                 selection_source=decision.source, human_full_suite_authorized=args.human_full_suite_authorized,
                                  allowed_prefixes=args.allow_path,
                                  timeout_seconds=args.timeout_seconds,
                                  verify_timeout_seconds=args.verify_timeout_seconds,

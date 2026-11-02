@@ -238,6 +238,8 @@ def approved_groups() -> tuple[TestGroup, ...]:
                   ("MT01.owner-approved-merge-queue",),
                   (".github/scripts/pr-merge-gate.py",),
                   contracts=(".github/workflows/human-merge-queue.yml",)),
+        TestGroup("mt01-v21", ("tests/test_mt01_v21.py",), ("MT01.v2-impact-selection",),
+                  (eng + "impact_v21.py",), consumers=(".github/scripts/ef02-pr-ci-tests.py",)),
         TestGroup("mt01", ("tests/test_minimum_test.py",), ("MT01.selection-and-evidence",),
                   (eng + "minimum_test.py", eng + "verification.py"), (eng + "runner.py", rem + "worker.py")),
         TestGroup("ef01p", ("tests/test_ef01_performance.py",), ("EF01P.git-and-host-budget",),
@@ -391,8 +393,33 @@ def select_plan(*, repo: Path, base_sha: str, base_files: Mapping[str, str],
                 required_acs: Sequence[str], fallback_argv: Sequence[str],
                 groups: Sequence[TestGroup] | None = None, registered_only: bool = False,
                 aggregate_sources: Sequence[str] = (), env: dict | None = None,
-                registered_profiles: Mapping[str, Sequence[str]] | None = None) -> dict:
+                registered_profiles: Mapping[str, Sequence[str]] | None = None,
+                human_full_suite_authorized: bool = False) -> dict:
     groups = tuple(approved_groups() if groups is None else groups)
+    if human_full_suite_authorized:
+        full_commands = (["python", "-m", "pytest", "tests", "-q"],
+                         ["python", "-m", "pytest", "tests", "-q", "-n", "12"])
+        if (not registered_only or registered_profiles is None or
+                list(fallback_argv) not in full_commands or
+                list(fallback_argv) not in [list(v) for v in registered_profiles.values()]):
+            raise ValueError("UNTRUSTED_OR_UNREGISTERED_HUMAN_FULL_PROFILE")
+        # Reuse legacy full-tree binding so every tracked candidate file
+        # is included in the verification provenance, not just selected nodes.
+        groups = ()
+    # V2.1 chooses from *actual post-executor changed paths*, not the incoming
+    # packet's profile. A broad authoring default is never itself full
+    # regression approval. Preserve explicit release/full via separately
+    # reviewed workflows, never by guessing intent from tests/-q.
+    if (os.environ.get("MT01_V21_ENABLED") == "1" and registered_only and
+            registered_profiles is not None and not human_full_suite_authorized):
+        from .impact_v21 import registered_action_plan
+        return registered_action_plan(
+            repo=repo, base_sha=base_sha, base_files=base_files,
+            candidate_files=candidate_files, changed_paths=changed_paths,
+            required_acs=required_acs, fallback_argv=fallback_argv,
+            groups=groups, registered_profiles=registered_profiles,
+            aggregate_sources=aggregate_sources, env=env,
+        )
     graph, imports_complete = import_graph(repo, candidate_files)
     # Runtime schema/file reads have no Python import edge. Bind the declared
     # contracts to their producers so reverse consumers inherit those changes.
@@ -461,6 +488,8 @@ def select_plan(*, repo: Path, base_sha: str, base_files: Mapping[str, str],
     fallback_proven_scope = (fallback_proven_scope and not unsupported_paths and
         all(t in candidate_files for t in required_tests) and
         (scope_args[0] == "." or all(t.startswith("tests/") for t in required_tests)))
+    if human_full_suite_authorized:
+        reasons.append("AUTHENTICATED_HUMAN_EXPLICIT_FULL_SUITE")
     if reasons:
         # An approved full profile is a conservative proof for all applicable ACs.
         # Caller must supply the broader approved scope; no command is synthesized.
@@ -500,7 +529,8 @@ def select_plan(*, repo: Path, base_sha: str, base_files: Mapping[str, str],
             "selected_profiles": [e["selected_profile"] for e in entries if e["selected_profile"]],
             "fallback_profile": fallback_profile, "fallback_argv": list(fallback_argv),
             "narrow_execution_observed": False,
-            "fallback": bool(reasons), "aggregate_sources": list(aggregate_sources), "groups": entries}
+            "fallback": bool(reasons), "aggregate_sources": list(aggregate_sources),
+            "human_full_suite_authorized": human_full_suite_authorized, "groups": entries}
 
 
 def select_provisional_tests(*, base_files: Mapping[str, str],

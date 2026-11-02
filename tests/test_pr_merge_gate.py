@@ -22,6 +22,11 @@ def gate():
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    # Unit mock has one synthetic owner; production loads reviewed main code.
+    from ai_commerce.engineering.minimum_test import TestGroup
+    module.approved_groups = lambda: (
+        TestGroup("fixture", ("tests/test_minimum_test.py",), ("fixture.ac",),
+                  ("src/ai_commerce/product/identity.py",)),)
     return module
 
 
@@ -33,7 +38,9 @@ class FakeGitHub:
 
     def __init__(self, g, *, ci="in_progress", changed_head=False,
                  changed_base=False, jobs_ok=True, approval=True,
-                 revoked=False, latest_failed=False):
+                 revoked=False, latest_failed=False, receipt_ok=True,
+                 tampered_artifact=False, forged_collected_case=False,
+                 extra_changed_path=None):
         self.g = g
         self.ci = ci
         self.changed_head = changed_head
@@ -42,7 +49,56 @@ class FakeGitHub:
         self.approval = approval
         self.revoked = revoked
         self.latest_failed = latest_failed
+        self.receipt_ok = receipt_ok
+        self.tampered_artifact = tampered_artifact
+        self.forged_collected_case = forged_collected_case
+        self.extra_changed_path = extra_changed_path
         self.writes = []
+
+    def read_artifact(self, artifact_id):
+        import io
+        import hashlib
+        import json
+        import zipfile
+        if artifact_id not in (1000, 1001):
+            raise ValueError("UNKNOWN_TEST_ARTIFACT")
+        os_name = "ubuntu-latest" if artifact_id == 1000 else "windows-latest"
+        plan = {
+            "version": 2, "base_sha": self.base, "candidate_sha": "c" * 40,
+            "mode": "TARGETED", "changed_paths": ["src/ai_commerce/product/identity.py"],
+            "selected_tests": ["tests/test_minimum_test.py"],
+        }
+        plan_bytes = json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()
+        xml = b'<testsuites><testsuite><testcase classname="tests.test_minimum_test" name="test_ok"/></testsuite></testsuites>'
+        if self.forged_collected_case:
+            xml = b'<testsuites><testsuite><testcase classname="tests.test_unrelated" name="test_ok"/></testsuite></testsuites>'
+        receipt = {
+            "schema": "MT01_VERIFICATION_EVIDENCE_V2", "source_sha": "c" * 40,
+            "base_sha": self.base, "pr_head_sha": self.head,
+            "platform": "Linux" if os_name == "ubuntu-latest" else "Windows",
+            "selection_mode": "TARGETED",
+            "selected_test_files": ["tests/test_minimum_test.py"],
+            "plan_sha256": hashlib.sha256(plan_bytes).hexdigest(),
+            "selector_sha256": "a" * 64, "registry_sha256": "b" * 64,
+            "chunks": [{
+                "test_files": ["tests/test_minimum_test.py"], "exit_code": 0,
+                "junit_sha256": hashlib.sha256(xml).hexdigest(),
+                "testcases": 1, "counts": {"passed": 1, "skipped": 0, "failed": 0, "errors": 0},
+                "observed_cases": [
+                    "tests.test_unrelated::test_ok" if self.forged_collected_case
+                    else "tests.test_minimum_test::test_ok"],
+            }],
+            "collected_count": 1, "executed_count": 1, "passed_count": 1,
+            "skipped_count": 0, "failed_count": 0, "error_count": 0,
+        }
+        if getattr(self, "tampered_artifact", False):
+            receipt["executed_count"] = 2
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("plan.json", json.dumps(plan))
+            archive.writestr("evidence.json", json.dumps(receipt))
+            archive.writestr("chunk-0.xml", xml)
+        return buffer.getvalue()
 
     def __call__(self, path, method="GET", body=None):
         assert path.startswith("/repos/" + self.repo + "/")
@@ -58,6 +114,13 @@ class FakeGitHub:
                 "base": {"sha": self.base if not self.changed_base else "e" * 40,
                          "ref": "main"},
             }
+        if path == f"/repos/{self.repo}/pulls/{self.pr}/files?per_page=100":
+            paths = [{"filename": "src/ai_commerce/product/identity.py",
+                      "status": "modified"}]
+            if self.extra_changed_path:
+                paths.append({"filename": self.extra_changed_path,
+                              "status": "modified"})
+            return paths
         if path == f"/repos/{self.repo}/branches/main":
             return {"commit": {"sha": self.base}}
         if path == f"/repos/{self.repo}/issues/{self.pr}/comments?per_page=100":
@@ -86,11 +149,21 @@ class FakeGitHub:
             jobs = []
             for os_name in ("ubuntu-latest", "windows-latest"):
                 steps = [{"name": self.g.PYTEST_STEP, "conclusion": "success"},
+                         {"name": self.g.RECEIPT_STEP, "conclusion": "success"},
+                         {"name": self.g.ORACLE_STEP, "conclusion": "success"},
                          {"name": self.g.NODE_STEP,
                           "conclusion": "success" if self.jobs_ok else "skipped"}]
                 jobs.append({"name": f"tests ({os_name})", "status": "completed",
                              "conclusion": "success", "steps": steps})
             return {"jobs": jobs}
+        if path == f"/repos/{self.repo}/actions/runs/200/artifacts?per_page=100":
+            artifacts = [
+                {"id": 1000 + i, "name": f"mt01-v21-{os_name}-200",
+                 "expired": False, "size_in_bytes": 1024,
+                 "workflow_run": {"id": 200, "head_sha": self.head}}
+                for i, os_name in enumerate(("ubuntu-latest", "windows-latest"))
+            ]
+            return {"artifacts": artifacts if self.receipt_ok else artifacts[:1]}
         if path == f"/repos/{self.repo}/pulls?state=open&per_page=100":
             return [{"number": self.pr, "head": {"sha": self.head}}]
         raise AssertionError(f"Unexpected {method} {path}")
@@ -184,3 +257,113 @@ def test_merge_gate_is_not_triggered_by_unrelated_workflow(gate):
         "status": "completed", "conclusion": "success",
         "head_sha": api.head}}) == []
     assert not api.writes
+
+
+def test_merge_gate_v21_missing_os_artifact_holds(gate):
+    api = FakeGitHub(gate, ci="completed", receipt_ok=False)
+    verdict = gate.process(api, api.repo, _ci_event(gate))
+    assert verdict[0]["status"] == "WAIT_EVIDENCE"
+    assert verdict[0]["reason"] == "V21_EXACT_RUN_OS_ARTIFACT_PROOF_MISSING"
+    assert not api.writes
+
+
+def test_merge_gate_v21_wrong_run_and_missing_artifact_denied(gate):
+    correct = [
+        {"id": i + 1, "name": f"mt01-v21-{system}-200",
+         "expired": False, "size_in_bytes": 1024,
+         "workflow_run": {"id": 200, "head_sha": "a" * 40}}
+        for i, system in enumerate(("ubuntu-latest", "windows-latest"))
+    ]
+    assert gate.verified_v21_artifacts({"artifacts": correct}, 200, "a" * 40)
+    assert not gate.verified_v21_artifacts({"artifacts": correct[:1]}, 200, "a" * 40)
+    bad = [dict(correct[0]), dict(correct[1])]
+    bad[1]["workflow_run"] = {"id": 199, "head_sha": "a" * 40}
+    assert not gate.verified_v21_artifacts({"artifacts": bad}, 200, "a" * 40)
+
+
+def test_merge_gate_v21_rejects_uploaded_forged_receipt_bytes(gate):
+    api = FakeGitHub(gate, ci="completed", tampered_artifact=True)
+    verdict = gate.process(api, api.repo, _ci_event(gate))
+    assert verdict[0]["status"] == "WAIT_EVIDENCE"
+    assert verdict[0]["reason"] == "V21_CONTENT_PROOF_INVALID"
+    assert not api.writes
+
+
+def test_merge_gate_v21_rejects_corrupt_zip_payload(gate):
+    api = FakeGitHub(gate, ci="completed")
+    api.read_artifact = lambda artifact_id: b"corrupt"
+    verdict = gate.process(api, api.repo, _ci_event(gate))
+    assert verdict[0]["status"] == "WAIT_EVIDENCE"
+    assert verdict[0]["reason"] == "V21_CONTENT_PROOF_INVALID"
+    assert not api.writes
+
+
+def test_v21_gate_rejects_self_consistent_fake_junit_omitting_selected_file(gate):
+    api = FakeGitHub(gate, ci="completed", forged_collected_case=True)
+    verdict = gate.process(api, api.repo, _ci_event(gate))
+    assert verdict[0]["status"] == "WAIT_EVIDENCE"
+    assert verdict[0]["reason"] == "V21_CONTENT_PROOF_INVALID"
+    assert not api.writes
+
+
+def test_v21_gate_rejects_candidate_plan_that_hides_real_github_diff(gate):
+    api = FakeGitHub(gate, ci="completed",
+                     extra_changed_path=".github/scripts/pr-merge-gate.py")
+    verdict = gate.process(api, api.repo, _ci_event(gate))
+    assert verdict[0]["status"] == "WAIT_EVIDENCE"
+    assert verdict[0]["reason"] == "V21_CONTENT_PROOF_INVALID"
+    assert not api.writes
+
+
+def test_v21_independent_control_closure_rejects_unknown_github_controls(gate):
+    assert gate.reviewed_coverage_for_changed_files([
+        {"filename": ".github/workflows/unreviewed.yml", "status": "added"}
+    ]) is None
+    paths, required = gate.reviewed_coverage_for_changed_files([
+        {"filename": ".github/scripts/mt01_v21_proof.py", "status": "modified"},
+        {"filename": "tests/test_pr_merge_gate.py", "status": "modified"},
+    ])
+    assert "tests/test_mt01_v21.py" in required
+    assert "tests/test_pr_merge_gate.py" in required
+    assert len(paths) == 2
+
+
+
+def test_v21_gate_allows_known_node_controls_but_blocks_unknown_control(gate):
+    known = [
+        {"filename": ".github/scripts/ef02-watch.cjs", "status": "modified"},
+        {"filename": "tests/ef02-watch.test.cjs", "status": "modified"},
+    ]
+    reviewed = gate.reviewed_coverage_for_changed_files(known)
+    assert reviewed is not None
+    assert reviewed[0] == tuple(sorted(e["filename"] for e in known))
+    assert reviewed[1] == ()
+    assert gate.reviewed_coverage_for_changed_files([
+        {"filename": ".github/scripts/unregistered.cjs", "status": "modified"},
+    ]) is None
+
+
+
+def test_generic_trusted_main_component_ownership_prevents_partial_receipt(gate, monkeypatch):
+    from ai_commerce.engineering.minimum_test import approved_groups as real_groups
+    monkeypatch.setattr(gate, "approved_groups", real_groups)
+    changed = [{"filename": "src/ai_commerce/product/identity.py", "status": "modified"}]
+    result = gate.reviewed_coverage_for_changed_files(changed)
+    assert result is not None
+    assert {"tests/test_a12_identity.py", "tests/test_a12_claims.py"} <= set(result[1])
+    unknown = [{"filename": "src/ai_commerce/product/new_unreviewed_agent.py", "status": "added"}]
+    assert gate.reviewed_coverage_for_changed_files(unknown) is None
+    assert "tests/test_ef02.py" in gate.reviewed_coverage_for_changed_files([
+        {"filename": "src/ai_commerce/remote/worker.py", "status": "modified"}
+    ])[1]
+
+
+
+def test_merge_gate_trusted_registry_loads_without_importing_app_package(gate):
+    # Default merge workflow installs only setup-python, not project deps.
+    # Load the explicitly reviewed main file, not ai_commerce.__init__.
+    import importlib.util
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / ".github/scripts/pr-merge-gate.py").read_text()
+    assert 'spec_from_file_location("_mt01_main_trusted_registry"' in src
+    assert "from ai_commerce.engineering.minimum_test import approved_groups" not in src
