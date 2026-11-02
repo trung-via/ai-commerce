@@ -201,7 +201,7 @@ def approved_verification_plan(action: dict, registry: dict[str, list[str]]) -> 
             "workers_requested": registered_workers(selected) if proven else 12,
             "registered_workers": registered_workers(selected) if proven else None,
             "reason": ("HUMAN_AUTHENTICATED_FULL_SUITE" if human_full
-                       else "LEGACY_REGISTERED_FULL_PROFILE" if explicit_full
+                       else "EXPLICIT_REGISTERED_FULL_SUITE" if explicit_full
                        else "MT01_SELECTOR_REGISTRATION_REQUIRES_COMPANION_PR"),
             "human_full_suite_authorized": human_full,
             "aggregate_requires_fresh_execution": bool(action.get("depends_on"))}

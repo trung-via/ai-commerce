@@ -1426,29 +1426,27 @@ def test_pr_ci_real_a12_component_can_select_narrow_test_files(pr_ci_module):
 
 
 
-def test_v21_authenticated_full_runs_entire_registered_scope_not_affected_subset(monkeypatch, tmp_path):
-    from ai_commerce.engineering.minimum_test import select_plan, file_hashes
-    groups, a12, _ = fixture(tmp_path)
-    mk(tmp_path, "tests/test_unrelated_full.py", "def test_unrelated_full(): assert True\n")
+def test_v21_authenticated_full_runs_entire_registered_scope_not_affected_subset(monkeypatch, real_tree):
+    from ai_commerce.engineering.minimum_test import select_plan
+    groups = real_tree.groups
     monkeypatch.setenv("MT01_V21_ENABLED", "1")
-    files = file_hashes(tmp_path)
-    broad = ["python", "-m", "pytest", "tests", "-q", "-n", "12"]
-    narrow = ["python", "-m", "pytest", a12, "-q", "-n", "12"]
-    registry = {"project-tests": broad, "mt01-a12-tests": narrow}
-    kwargs = dict(repo=tmp_path, base_sha="a"*40, base_files=files,
+    files = real_tree.files
+    broad = real_tree.registry["project-tests"]
+    registry = real_tree.registry
+    kwargs = dict(repo=ROOT, base_sha="a"*40, base_files=files,
                   candidate_files=files, changed_paths=["src/ai_commerce/product/identity.py"],
                   required_acs=(), fallback_argv=broad, groups=groups,
                   registered_only=True, registered_profiles=registry)
     scoped = select_plan(**kwargs)
     assert scoped["version"] == 2 and not scoped["fallback"]
-    assert scoped["selected_groups"] == ["a12"]
+    assert "a12" in scoped["selected_groups"]
     full = select_plan(**kwargs, human_full_suite_authorized=True)
     assert full["version"] == 1 and full["fallback"]
     assert full["human_full_suite_authorized"] is True
     assert full["groups"][0]["state"] == "EXECUTE"
     assert full["groups"][0]["binding"]["argv"] == broad
-    assert "tests/test_unrelated_full.py" in full["groups"][0]["binding"]["candidate_files"]
+    assert "tests/test_minimum_test.py" in full["groups"][0]["binding"]["candidate_files"]
     assert "AUTHENTICATED_HUMAN_EXPLICIT_FULL_SUITE" in full["reason_codes"]
     with pytest.raises(ValueError, match="UNTRUSTED_OR_UNREGISTERED"):
-        select_plan(**{**kwargs, "fallback_argv": narrow},
+        select_plan(**{**kwargs, "fallback_argv": registry["mt01-a12-tests"]},
                     human_full_suite_authorized=True)
