@@ -447,6 +447,38 @@ def verified_onboarding_binding(
         return False
 
 
+def candidate_onboarding_groups(
+    *, root: Path, changed_paths: Sequence[str], base_paths: Sequence[str],
+    existing_groups: Sequence, allowed_paths: Sequence[str],
+) -> tuple:
+    """Construct CI's finite new-owner map from changed manifest data, not code.
+
+    GitHub merge gate independently revalidates source blobs and obligations;
+    this helper does not approve a merge or any on-host EF02 action.
+    """
+    import json
+    from .minimum_test import TestGroup
+
+    paths = sorted(p for p in changed_paths if
+                   p.startswith("work_items/mt01-components/") and p.endswith(".json"))
+    if len(paths) > 8:
+        raise ValueError("ONBOARD_TOO_MANY_MANIFESTS")
+    results = []
+    groups = tuple(existing_groups)
+    for path in paths:
+        item = json.loads((root / path).read_text(encoding="utf-8"))
+        checked = validate_component_onboarding_manifest(
+            item, manifest_path=path, changed_paths=changed_paths,
+            base_paths=base_paths, existing_groups=groups,
+            allowed_paths=allowed_paths, root=root)
+        group = TestGroup(
+            checked["name"], checked["tests"], checked["acs"], checked["paths"],
+            checked["consumers"], (*checked["contracts"], path))
+        groups = (*groups, group)
+        results.append(group)
+    return tuple(results)
+
+
 def registered_action_plan(
     *, repo: Path, base_sha: str, base_files, candidate_files,
     changed_paths: Sequence[str], required_acs: Sequence[str], fallback_argv,
