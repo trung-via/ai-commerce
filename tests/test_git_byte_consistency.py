@@ -148,3 +148,140 @@ def test_transport_rejects_filter_mismatch_before_any_remote_api_write(tmp_path:
         )
     assert remote.calls == 0
     assert (repo / "README.md").read_bytes() == original
+
+
+def test_new_crlf_txt_is_stabilized_before_verification(tmp_path: Path) -> None:
+    from hashlib import sha256
+    from ai_commerce.engineering.git_byte_consistency import (
+        stabilize_candidate_newlines_before_verify,
+    )
+
+    repo = _repo(tmp_path)
+    relative = "affiliate/verification/consumer-tests.txt"
+    path = repo / relative
+    path.parent.mkdir(parents=True)
+    original = b"consumer tests\r\nstatus=PASS\r\n"
+    path.write_bytes(original)
+    changed = stabilize_candidate_newlines_before_verify(
+        repo, [relative], allowed_paths=["affiliate"],
+    )
+    assert changed == [{
+        "path": relative, "transformation": "CRLF_TO_LF_PRE_VERIFY",
+        "before_sha256": sha256(original).hexdigest(),
+        "after_sha256": sha256(original.replace(b"\r\n", b"\n")).hexdigest(),
+    }]
+    assert path.read_bytes() == b"consumer tests\nstatus=PASS\n"
+    assert_candidate_git_filter_consistency(repo, [
+        (relative, path.read_bytes(), "100644")
+    ])
+    _git(repo, "add", relative)
+    _git(repo, "commit", "-m", "candidate published")
+    next_worktree = tmp_path / "next"
+    _git(repo, "worktree", "add", "--detach", str(next_worktree), "HEAD")
+    assert checkout_diagnostics(next_worktree, refresh_index=True)["clean"]
+
+
+def test_tracked_crlf_cannot_be_silently_normalized(tmp_path: Path) -> None:
+    from ai_commerce.engineering.git_byte_consistency import (
+        stabilize_candidate_newlines_before_verify,
+    )
+
+    repo = _repo(tmp_path)
+    path = repo / "consumer-tests.txt"
+    path.write_bytes(b"original\n")
+    _git(repo, "add", "consumer-tests.txt")
+    _git(repo, "commit", "-m", "tracked")
+    path.write_bytes(b"changed\r\n")
+    with pytest.raises(GitByteConsistencyError, match="PREVERIFY_TRACKED_FILTER_MISMATCH"):
+        stabilize_candidate_newlines_before_verify(
+            repo, ["consumer-tests.txt"], allowed_paths=["consumer-tests.txt"])
+    assert path.read_bytes() == b"changed\r\n"
+
+
+def test_out_of_scope_filter_is_not_auto_rewritten(tmp_path: Path) -> None:
+    from ai_commerce.engineering.git_byte_consistency import (
+        stabilize_candidate_newlines_before_verify,
+    )
+
+    repo = _repo(tmp_path)
+    path = repo / "unowned.txt"
+    raw = b"not owned\r\n"
+    path.write_bytes(raw)
+    with pytest.raises(GitByteConsistencyError, match="PREVERIFY_OUT_OF_SCOPE_FILTER"):
+        stabilize_candidate_newlines_before_verify(
+            repo, ["unowned.txt"], allowed_paths=["owned"])
+    assert path.read_bytes() == raw
+
+
+def test_existing_json_evidence_crlf_stays_raw(tmp_path: Path) -> None:
+    from ai_commerce.engineering.git_byte_consistency import (
+        stabilize_candidate_newlines_before_verify,
+    )
+
+    repo = _repo(tmp_path)
+    path = repo / "evidence.json"
+    raw = b'{"stage":"verified"}\r\n'
+    path.write_bytes(raw)
+    assert stabilize_candidate_newlines_before_verify(
+        repo, ["evidence.json"], allowed_paths=["evidence.json"]) == []
+    assert path.read_bytes() == raw
+
+
+def test_new_staged_crlf_txt_stabilized_without_rejecting_index(tmp_path: Path) -> None:
+    """Regression: #204 Windows Git Write Guard stages a newly created .txt."""
+    from ai_commerce.engineering.git_byte_consistency import (
+        stabilize_candidate_newlines_before_verify,
+    )
+
+    repo = _repo(tmp_path)
+    relative = "consumer-tests.txt"
+    path = repo / relative
+    original = b"consumer\r\nstatus=PASS\r\n"
+    path.write_bytes(original)
+    _git(repo, "add", relative)
+    staged = _git(repo, "rev-parse", ":" + relative).strip()
+    assert staged == _git(repo, "hash-object", "--stdin", data=original.replace(b"\r\n", b"\n")).strip()
+    edits = stabilize_candidate_newlines_before_verify(
+        repo, [relative], allowed_paths=[relative]
+    )
+    assert len(edits) == 1 and edits[0]["path"] == relative
+    assert path.read_bytes() == b"consumer\nstatus=PASS\n"
+    assert _git(repo, "rev-parse", ":" + relative).strip() == staged
+    assert_candidate_git_filter_consistency(repo, [(relative, path.read_bytes(), "100644")])
+    _git(repo, "commit", "-m", "source from staged candidate")
+    checkout = tmp_path / "next"
+    _git(repo, "worktree", "add", "--detach", str(checkout), "HEAD")
+    assert checkout_diagnostics(checkout, refresh_index=True)["clean"]
+
+
+def test_new_staged_index_divergence_is_not_hidden(tmp_path: Path) -> None:
+    from ai_commerce.engineering.git_byte_consistency import (
+        stabilize_candidate_newlines_before_verify,
+    )
+
+    repo = _repo(tmp_path)
+    relative = "changed.txt"
+    path = repo / relative
+    path.write_bytes(b"old staged\r\n")
+    _git(repo, "add", relative)
+    raw = b"latest worktree\r\n"
+    path.write_bytes(raw)
+    with pytest.raises(GitByteConsistencyError, match="PREVERIFY_STAGED_BYTES_DIVERGED"):
+        stabilize_candidate_newlines_before_verify(repo, [relative], allowed_paths=[relative])
+    assert path.read_bytes() == raw
+
+
+def test_preverify_empty_allowed_paths_follow_ef01_unrestricted_default(tmp_path: Path) -> None:
+    from ai_commerce.engineering.git_byte_consistency import (
+        stabilize_candidate_newlines_before_verify,
+    )
+
+    repo = _repo(tmp_path)
+    relative = "generated.txt"
+    path = repo / relative
+    path.write_bytes(b"generated\r\n")
+    changed = stabilize_candidate_newlines_before_verify(
+        repo, [relative], allowed_paths=(),
+    )
+    assert len(changed) == 1
+    assert path.read_bytes() == b"generated\n"

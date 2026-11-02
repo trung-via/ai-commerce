@@ -22,6 +22,7 @@ from .adapters import command_for
 from .git_write_guard import GIT_GUARD_INSTRUCTION, git_write_guard_env
 from .profile import ExecutorSelection
 from .git import git_argv, resolve_git_executable
+from .git_byte_consistency import GitByteConsistencyError, stabilize_candidate_newlines_before_verify
 from .minimum_test import file_hashes
 from .source_safety import checked_path, protected_change, is_link
 from .verification import execute_plan
@@ -708,6 +709,34 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         inv.update(status="NO_CODE_CHANGE",
                    error_code="REPAIR_NO_CODE_CHANGE" if inv["repair_round"] else "NO_CHANGED_FILES")
         return
+
+    # EF02 publishes raw verified bytes via GitHub API. On Windows, an
+    # untracked text file can contain CRLF but Git's clean filter stores LF.
+    # Normalize only a proven CRLF-only transform, and do so BEFORE pytest
+    # and candidate-file SHA256 are sealed. Retain independent publication
+    # checks; an unknown filter never triggers an automatic rewrite.
+    if (repo / ".git").exists():
+        try:
+            canonicalized = stabilize_candidate_newlines_before_verify(
+                repo, after["changed_files"], allowed_paths=allowed_prefixes,
+                git_executable=git_executable,
+            )
+        except GitByteConsistencyError as exc:
+            inv.update(status="VERIFICATION_FAILED", error_code="PREVERIFY_GIT_FILTER_MISMATCH",
+                       diagnostic=str(exc), repair_eligible=False)
+            return
+        if canonicalized:
+            save("git_filter_preverify", "git_filter.preverify.json",
+                 _json_bytes({"normalized": canonicalized}))
+            after, diff = snapshot()
+            inv.update(after)
+            inv["out_of_scope_files"] = _outside_scope(after["changed_files"], allowed_prefixes)
+            inv["final_snapshot"] = after
+            save("source_after_git_filter", "source.after_git_filter.json", _json_bytes(after))
+            problem = _source_problem(after, initial, verify_first_scope=verify_first_scope)
+            if problem:
+                inv.update(status=problem[0], error_code=problem[1])
+                return
 
     inv.update(status="EXECUTION_UNKNOWN", verify_started_at=_now())
     vout, verr = b"", b""
