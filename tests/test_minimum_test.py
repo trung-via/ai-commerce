@@ -56,6 +56,8 @@ def test_reviewed_map_contains_exact_real_paths_and_all_current_python_test_fami
     ("tests/test_a13_evidence_pack.py", "a13"),
     ("tests/test_a12_claims.py", "a12"),
     ("src/ai_commerce/remote/chrome_acquisition.py", "ef02-wake"),
+    ("scripts/hostops_request.py", "hostops-v1"),
+    ("scripts/hostops_v2.py", "hostops-v2"),
 ])
 def test_real_known_component_uses_exact_registered_companion(real_tree, monkeypatch, path, expected):
     selected = real_plan(real_tree, monkeypatch, path)
