@@ -383,7 +383,7 @@ def reviewed_manifest_groups_for_pr(api: Callable, base: str, head: str,
         if len(raw) > 32768:
             raise ValueError("ONBOARD_MANIFEST_TOO_LARGE")
         actual_sha = hashlib.sha1(
-            b"blob " + str(len(raw)).encode() + b"\\0" + raw).hexdigest()
+            b"blob " + str(len(raw)).encode() + bytes([0]) + raw).hexdigest()
         if response["sha"] != actual_sha:
             raise ValueError("ONBOARD_MANIFEST_BLOB_MISMATCH")
         data = json.loads(raw.decode("utf-8"))
