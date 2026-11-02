@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ai_commerce.engineering import runner
+from ai_commerce.engineering import runner, pytest_temp_guard
 from ai_commerce.engineering.cli import build_parser
 from ai_commerce.engineering.profile import ExecutorSelection
 from ai_commerce.remote import worker as remote
@@ -969,3 +969,30 @@ def test_pretty_antigravity_usage_is_observed_without_inventing_cost():
         "input_tokens": 10, "cached_input_tokens": 2, "output_tokens": 3}}, indent=2)
     assert runner._observe_usage(payload.encode(), "antigravity") == {
         "input_tokens": 10, "cached_input_tokens": 2, "output_tokens": 3}
+
+
+def test_provider_pytest_redirects_even_explicit_relative_basetemp(tmp_path, monkeypatch):
+    repo = tmp_path / "source"
+    repo.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    monkeypatch.setenv("AI_COMMERCE_EF01_WORKTREE", str(repo))
+    monkeypatch.setenv("AI_COMMERCE_EF01_PYTEST_BASETEMP_ROOT", str(external))
+    config = SimpleNamespace(option=SimpleNamespace(basetemp=".local/fixture/policy"))
+    pytest_temp_guard.pytest_configure(config)
+    target = Path(config.option.basetemp).resolve()
+    assert target.is_dir() and target.parent == external.resolve()
+    assert repo.resolve() not in target.parents
+
+
+def test_provider_pytest_refuses_temp_root_under_source(tmp_path, monkeypatch):
+    repo = tmp_path / "source"
+    scratch = repo / ".local" / "fixtures"
+    scratch.mkdir(parents=True)
+    monkeypatch.setenv("AI_COMMERCE_EF01_WORKTREE", str(repo))
+    monkeypatch.setenv("AI_COMMERCE_EF01_PYTEST_BASETEMP_ROOT", str(scratch))
+    config = SimpleNamespace(option=SimpleNamespace(basetemp=None))
+    with pytest.raises(pytest.UsageError, match="EF01_TEST_TEMP_INSIDE_SOURCE"):
+        pytest_temp_guard.pytest_configure(config)
+
+
