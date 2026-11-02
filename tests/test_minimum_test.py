@@ -109,11 +109,50 @@ def test_companion_report_has_exact_reviewed_parallel_commands(real_tree):
     report = (ROOT / "docs/engineering/MT01_COMPONENT_AWARE_IMPLEMENTATION_REPORT.md").read_text()
     proposed = json.loads(report.split("```json\n", 1)[1].split("\n```", 1)[0])
     current = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_text())
-    # The live protected registry overrides older proposed companion commands.
+    for key, historical_argv in proposed.items():
+        if key not in current:
+            continue
+        if key == "mt01-ef02-wake-tests":
+            # Reviewed D5-only extension: all older Wake tests remain.
+            live_tests = current[key][3:-3]
+            historical_tests = historical_argv[3:-3]
+            assert current[key][:3] == historical_argv[:3]
+            assert current[key][-3:] == historical_argv[-3:]
+            assert all(path in live_tests for path in historical_tests)
+            assert [p for p in live_tests if p not in historical_tests] == [
+                "tests/test_ef02_plugin_turn_handoff.py",
+                "tests/test_ef02_plugin_turn_store.py",
+                "tests/test_ef02_plugin_turn_stage_only.py",
+                "tests/test_ef02_plugin_turn_send_once.py",
+                "tests/test_ef02_plugin_turn_cli.py",
+                "tests/test_ef02_plugin_turn_evidence.py",
+            ]
+            assert len(live_tests) == len(set(live_tests))
+        elif key == "mt01-ef02-recovery-tests":
+            # Preserve the dated MT-01 report; only deleted M0-R probe-only
+            # tests may disappear from its historical recovery selection.
+            historical_tests = historical_argv[3:-3]
+            kept = [path for path in historical_tests if (ROOT / path).is_file()]
+            retired = [path for path in historical_tests if not (ROOT / path).exists()]
+            assert len(retired) == 8
+            assert all(path.startswith("tests/test_ef02_m0r_") for path in retired)
+            assert current[key] == [*historical_argv[:3], *kept, *historical_argv[-3:]]
+        else:
+            assert current[key] == historical_argv
+
+    # Historical companion profiles may use aliases rather than a group key.
+    # Every current/declared group must still match an actual reviewed argv.
+    # The changed EF02 recovery group MUST be registered under its live key.
     combined = {**proposed, **current}
     for g in real_tree.groups:
         expected = ["python", "-m", "pytest", *g.tests, "-q", "-n", "12"]
-        assert expected in combined.values()
+        key = f"mt01-{g.name}-tests"
+        if g.name == "ef02-recovery":
+            assert current.get(key) == expected
+        elif key in combined:
+            assert combined[key] == expected
+        else:
+            assert expected in combined.values()
 
 
 def test_component_local_m02_requires_profile_that_actually_collects_it(real_tree, monkeypatch):
