@@ -1,6 +1,6 @@
 #Requires -Version 7.0
 <#
-Read-only D5 PID ↔ CDP listener ↔ Chrome profile grouping.
+Read-only D5 PID ↔ CDP listener ↔ Chrome profile-claim grouping.
 No raw command lines, paths, credentials, or browser profile contents leave host.
 The p01/p02 labels are per-run ephemeral and DO NOT prove the official D5 route.
 No sockets are opened, processes launched, altered or terminated.
@@ -51,11 +51,8 @@ try {
                         $profileGroups[$profilePath] = ('p{0:d2}' -f ($profileGroups.Count + 1))
                     }
                     $profileGroup = $profileGroups[$profilePath]
-                    try {
-                        $profileRootExists = [bool](Test-Path -LiteralPath $profilePath -PathType Container -ErrorAction Stop)
-                    } catch {
-                        $profileRootExists = $null
-                    }
+                    # Do not dereference Chrome-supplied profile paths. A path can
+                    # point to a UNC share, junction or mapped drive. Report UNKNOWN.
                 }
             }
         }
