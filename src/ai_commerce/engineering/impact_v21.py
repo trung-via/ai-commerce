@@ -390,6 +390,7 @@ def validate_component_onboarding_manifest(
 def verified_onboarding_binding(
     *, workspace: Path, binding: dict, changed_paths: Sequence[str],
     allowed_paths: Sequence[str], base_sha: str, registered_profiles: dict,
+    expected_group: str | None = None,
 ) -> bool:
     """Independently rebuild the one candidate-generated test argv in trusted code.
 
@@ -428,6 +429,8 @@ def verified_onboarding_binding(
         group = TestGroup(
             admission["name"], admission["tests"], admission["acs"], admission["paths"],
             admission["consumers"], (*admission["contracts"], path))
+        if expected_group is not None and expected_group != group.name:
+            return False
         plan = select_impact(
             root=workspace, changed_paths=changed_paths, groups=(*old_groups, group),
             base_sha=base_sha)
