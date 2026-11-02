@@ -348,3 +348,119 @@ def test_hostops_v3_hosted_queue_is_digest_only_without_host_execution():
                       'github.event.issue.body', 'powershell', 'pwsh', 'broker --config',
                       'hostops_v3.py', 'curl', 'wget'):
         assert forbidden not in text
+
+
+def _v4_fixture(h):
+    """Synthetic signed-field shape; NOT a valid v4 broker signature."""
+    old = h.make()
+    r = old["request"]
+    r.pop("repository")
+    r.update(schema="hostops.request.v4",
+             source_repository=c.SOURCE_REPOSITORY,
+             control_repository=c.CONTROL_REPOSITORY)
+    old["schema"] = "hostops.envelope.v4"
+    old["lease"].update(schema="hostops.lease.v4",
+                        source_repository=c.SOURCE_REPOSITORY,
+                        control_repository=c.CONTROL_REPOSITORY)
+    return old
+
+
+class _V4API:
+    def __init__(self, e, source_sha):
+        self.workflow = b"private-only-hosted-queue-pinned"
+        self.source_sha = source_sha
+        self.control_sha = "e" * 40
+        self.repo = {"private": True, "full_name": c.CONTROL_REPOSITORY}
+        self.issue = {"number": 999, "title": "[HOSTOPS3] fixture",
+                      "user": {"login": "trung-via"},
+                      "body": c.canonical(e).decode("ascii")}
+        self.run = {"event": "issues", "status": "completed", "conclusion": "success",
+                    "path": transport.WORKFLOW_PATH, "display_title": "HostOpsV3 Issue #999",
+                    "head_repository": {"full_name": c.CONTROL_REPOSITORY},
+                    "head_sha": self.control_sha}
+    def get(self, path):
+        prefix = "/repos/" + c.CONTROL_REPOSITORY
+        if path == prefix:
+            return self.repo
+        if path == prefix + "/issues/999":
+            return self.issue
+        if path == prefix + "/actions/runs/123":
+            return self.run
+        if path == prefix + "/contents/" + transport.WORKFLOW_PATH + "?ref=" + self.control_sha:
+            return {"content": base64.b64encode(self.workflow).decode("ascii")}
+        raise AssertionError(path)
+
+
+def test_dual_repo_v4_structure_is_not_v3_broker_authorization(h):
+    e = _v4_fixture(h)
+    raw = c.canonical(e)
+    frozen, request = c.dual_repo_envelope(raw)
+    assert request.value["source_repository"] == c.SOURCE_REPOSITORY
+    assert request.value["control_repository"] == c.CONTROL_REPOSITORY
+    assert request.fingerprint == c.digest(c.canonical(e["request"]))
+    assert frozen["schema"] == "hostops.envelope.v4"
+    with pytest.raises(c.Denied, match="BAD_VERSION"):
+        c.envelope(raw)  # v3 broker remains fail-closed
+    with pytest.raises(c.Denied, match="BAD_VERSION"):
+        c.dual_repo_envelope(c.canonical(h.make()))
+
+
+@pytest.mark.parametrize("mutation", [
+    "public_control", "wrong_repo", "wrong_issuer", "wrong_issue",
+    "fork", "wrong_workflow", "failed_run", "wrong_event",
+    "bad_digest", "wrong_source", "wrong_request_repo",
+    "wrong_lease_repo", "different_release",
+])
+def test_dual_repo_v4_control_provenance_fail_closed(h, mutation):
+    e = _v4_fixture(h)
+    source_sha = e["request"]["source_sha"]
+    api = _V4API(e, source_sha)
+    digest = c.digest(api.workflow)
+    expected_source = source_sha
+    if mutation == "public_control": api.repo["private"] = False
+    if mutation == "wrong_repo": api.repo["full_name"] = c.SOURCE_REPOSITORY
+    if mutation == "wrong_issuer": api.issue["user"]["login"] = "attacker"
+    if mutation == "wrong_issue": api.issue["number"] = 1234
+    if mutation == "fork": api.run["head_repository"]["full_name"] = c.SOURCE_REPOSITORY
+    if mutation == "wrong_workflow": api.run["path"] = ".github/workflows/unsafe.yml"
+    if mutation == "failed_run": api.run["conclusion"] = "failure"
+    if mutation == "wrong_event": api.run["event"] = "workflow_dispatch"
+    if mutation == "bad_digest": digest = "0" * 64
+    if mutation == "wrong_source": expected_source = "0" * 40
+    if mutation == "wrong_request_repo":
+        e["request"]["control_repository"] = c.SOURCE_REPOSITORY
+        api.issue["body"] = c.canonical(e).decode("ascii")
+    if mutation == "wrong_lease_repo":
+        e["lease"]["control_repository"] = c.SOURCE_REPOSITORY
+        api.issue["body"] = c.canonical(e).decode("ascii")
+    if mutation == "different_release":
+        e["lease"]["release_id"] = "0" * 64
+        api.issue["body"] = c.canonical(e).decode("ascii")
+    with pytest.raises(c.Denied):
+        transport.control_provenance(api, 999, 123, digest, expected_source)
+
+
+def test_dual_repo_v4_private_control_proof_offline_only(h):
+    e = _v4_fixture(h)
+    api = _V4API(e, e["request"]["source_sha"])
+    result = transport.control_provenance(
+        api, 999, 123, c.digest(api.workflow), e["request"]["source_sha"])
+    assert c.dual_repo_envelope(result)[1].value == e["request"]
+    assert api.repo["private"] is True
+    # This parser never verifies Human Ed25519 signatures or submits to broker.
+    assert not (h.data / "new.txt").exists()
+
+
+def test_dual_repo_v4_invalid_json_and_api_routing_fail_closed(h):
+    e = _v4_fixture(h)
+    raw = c.canonical(e)
+    with pytest.raises(c.Denied, match="DUPLICATE_KEY"):
+        c.dual_repo_envelope(raw.replace(b'"schema":"hostops.envelope.v4"', b'"schema":"hostops.envelope.v4","schema":"hostops.envelope.v4"'))
+    with pytest.raises(c.Denied):
+        c.dual_repo_envelope(raw.replace(b'"control_repository":"trung-via/ai-commerce-hostops-control"',
+                                         b'"control_repository":"attacker/public"'))
+    client = transport.ControlGitHub("synthetic-not-used")
+    with pytest.raises(c.Denied, match="TRANSPORT_ROUTE_DENIED"):
+        client.get("/repos/" + c.SOURCE_REPOSITORY)
+    with pytest.raises(c.Denied, match="TRANSPORT_ROUTE_DENIED"):
+        client.post("/repos/attacker/not-allowed/issues/1/comments", {"body": "never"})
