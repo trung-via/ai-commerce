@@ -134,7 +134,7 @@ class HostopsD5PidMapTests(unittest.TestCase):
             "profile_identity_verified":False,
             "processes":[
                 {"pid":123,"session_id":1,"commandline_known":True,
-                 "debug_9333":True,"debug_9222":False,"profile_group":"p01","profile_root_exists":True},
+                 "debug_9333":True,"debug_9222":False,"profile_group":"p01","profile_root_exists":None},
                 {"pid":124,"session_id":1,"commandline_known":False,
                  "debug_9333":None,"debug_9222":None,"profile_group":None,"profile_root_exists":None},
             ],
