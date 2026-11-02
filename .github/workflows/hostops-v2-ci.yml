@@ -4,9 +4,11 @@ on:
     paths:
       - ".github/workflows/hostops-v2*.yml"
       - "scripts/hostops_v2.py"
+      - "scripts/hostops_ef02_202_recovery.py"
       - "scripts/HostOps-V2-Diagnostics.ps1"
       - "scripts/HostOps-D5-PidMap.ps1"
       - "tests/test_hostops_v2.py"
+      - "tests/test_hostops_ef02_202_recovery.py"
       - "docs/engineering/HOSTOPS_V2.md"
       - "config/hostops/**"
   push:
@@ -14,9 +16,11 @@ on:
     paths:
       - ".github/workflows/hostops-v2*.yml"
       - "scripts/hostops_v2.py"
+      - "scripts/hostops_ef02_202_recovery.py"
       - "scripts/HostOps-V2-Diagnostics.ps1"
       - "scripts/HostOps-D5-PidMap.ps1"
       - "tests/test_hostops_v2.py"
+      - "tests/test_hostops_ef02_202_recovery.py"
       - "config/hostops/**"
 
 permissions:
@@ -39,6 +43,8 @@ jobs:
           python-version: '3.11'
       - name: Strict request and bounded subprocess tests
         run: python -m unittest discover -s tests -p test_hostops_v2.py -v
+      - name: Exact #202 source recovery unit tests (no live runner)
+        run: python -m unittest discover -s tests -p test_hostops_ef02_202_recovery.py -v
       - name: Parse fixed Windows PowerShell script (Windows only)
         if: runner.os == 'Windows'
         shell: pwsh
