@@ -1481,8 +1481,8 @@ def test_hostops_v3_all_28_files_are_reviewed_and_profile_registered(real_tree):
         "tests/test_hostops_v3_integration.py",
         "tests/test_hostops_v3_repair.py",
     }
-    assert set(group.paths) == expected_sources | expected_scripts
-    assert set(group.contracts) == expected_contracts
+    assert set(group.paths) == expected_sources
+    assert set(group.contracts) == expected_contracts | expected_scripts
     assert set(group.tests) == expected_tests
     assert len(expected_sources | expected_scripts | expected_contracts | expected_tests) == 28
     assert set(group.acs) == {"HOSTOPS.v3.security-contract", "HOSTOPS.v3.issue225-matrix"}

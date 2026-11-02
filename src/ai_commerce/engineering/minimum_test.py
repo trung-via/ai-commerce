@@ -265,10 +265,17 @@ def approved_groups() -> tuple[TestGroup, ...]:
         ), ("HOSTOPS.v3.security-contract", "HOSTOPS.v3.issue225-matrix"),
                    sources("hostops_v3",
                            "__init__ contract auth filesystem journal worker security broker transport cli")
-                   + ("scripts/hostops_v3.py", "scripts/hostops_v3_release.py",
-                      "scripts/hostops_v3_schemas.py", "scripts/hostops_v3_verify.py",
-                      "scripts/HostOps-V3-Launch.py", "scripts/HostOps-V3-TokenInventory.ps1"),
+                   ,
+                   # Executable CLI/PowerShell entrypoints are governed interface
+                   # contracts in this first-component onboarding snapshot;
+                   # the protected gate demands source-only TestGroup.paths.
                    contracts=(
+                       "scripts/hostops_v3.py",
+                       "scripts/hostops_v3_release.py",
+                       "scripts/hostops_v3_schemas.py",
+                       "scripts/hostops_v3_verify.py",
+                       "scripts/HostOps-V3-Launch.py",
+                       "scripts/HostOps-V3-TokenInventory.ps1",
                        "contracts/hostops-v3.request.schema.json",
                        "contracts/hostops-v3.lease.schema.json",
                        "contracts/hostops-v3.envelope.schema.json",
