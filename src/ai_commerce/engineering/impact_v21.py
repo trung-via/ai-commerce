@@ -386,6 +386,64 @@ def validate_component_onboarding_manifest(
     }
 
 
+
+def verified_onboarding_binding(
+    *, workspace: Path, binding: dict, changed_paths: Sequence[str],
+    allowed_paths: Sequence[str], base_sha: str, registered_profiles: dict,
+) -> bool:
+    """Independently rebuild the one candidate-generated test argv in trusted code.
+
+    The EF02 worker invokes this after EF01 exits, not on self-reported PASS
+    alone. All existing group commands remain byte-identical to the registry.
+    """
+    import json
+    import subprocess
+    from .minimum_test import TestGroup, approved_groups
+
+    try:
+        if (registered_profiles.get("mt01-component-onboarding") is None
+                or binding.get("registered_profile") != "mt01-component-onboarding"
+                or binding.get("onboarding_data_only") is not True
+                or binding.get("base_sha") != base_sha):
+            return False
+        path = binding["onboarding_manifest_path"]
+        if (not isinstance(path, str)
+                or not path.startswith("work_items/mt01-components/")
+                or not path.endswith(".json")):
+            return False
+        original = subprocess.run(
+            ["git", "ls-tree", "-r", "--name-only", "-z", base_sha],
+            cwd=workspace, capture_output=True, check=False, timeout=30)
+        if original.returncode:
+            return False
+        base_paths = [x.decode("utf-8") for x in original.stdout.split(b"\\0") if x]
+        candidate = json.loads((workspace / path).read_text(encoding="utf-8"))
+        old_groups = approved_groups()
+        admission = validate_component_onboarding_manifest(
+            candidate, manifest_path=path,
+            changed_paths=changed_paths, base_paths=base_paths,
+            existing_groups=old_groups, allowed_paths=allowed_paths, root=workspace)
+        if binding["onboarding_manifest_sha256"] != admission["manifest_sha256"]:
+            return False
+        group = TestGroup(
+            admission["name"], admission["tests"], admission["acs"], admission["paths"],
+            admission["consumers"], (*admission["contracts"], path))
+        plan = select_impact(
+            root=workspace, changed_paths=changed_paths, groups=(*old_groups, group),
+            base_sha=base_sha)
+        if not plan.runnable or group.name not in plan.selected_groups:
+            return False
+        if binding.get("mapping") != group.mapping():
+            return False
+        if binding.get("selected_impact_tests") != list(plan.selected_tests):
+            return False
+        return binding.get("argv") == [
+            "python", "-m", "pytest", *group.tests, "-q", "-n", "12"]
+    except (OSError, ValueError, TypeError, UnicodeError, KeyError,
+            subprocess.TimeoutExpired):
+        return False
+
+
 def registered_action_plan(
     *, repo: Path, base_sha: str, base_files, candidate_files,
     changed_paths: Sequence[str], required_acs: Sequence[str], fallback_argv,
