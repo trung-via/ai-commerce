@@ -245,6 +245,15 @@
     "-n",
     "12"
   ],
+  "mt01-hostops-v2-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_hostops_v2.py",
+    "-q",
+    "-n",
+    "12"
+  ],
   "mt01-git-integrity-tests": [
     "python",
     "-m",

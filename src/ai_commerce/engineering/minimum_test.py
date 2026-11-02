@@ -183,6 +183,8 @@ def approved_groups() -> tuple[TestGroup, ...]:
                   ("scripts/hostops_request.py", "scripts/HostOps-Diagnostics.ps1"),
                   contracts=(".github/workflows/hostops-readonly.yml",
                              "docs/engineering/HOSTOPS_REMOTE_POWERSHELL_V1.md")),
+        TestGroup("hostops-v2", ("tests/test_hostops_v2.py",), ("HOSTOPS.v2-contracts",),
+                  ("scripts/hostops_v2.py",)),
         TestGroup("git-integrity", ("tests/test_git_byte_consistency.py", "tests/test_ef02_worktree_line_endings.py",
                                     "tests/test_ef01_git_write_guard.py"), ("EF01.git-integrity",),
                   (eng + "git_byte_consistency.py", eng + "git_write_guard.py")),

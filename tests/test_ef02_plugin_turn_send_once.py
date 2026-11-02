@@ -51,7 +51,7 @@ class Page:
 
     def evaluate(self, script, args):
         assert args["url"] == URL and args["name"] == "AI Commerce Brain"
-        assert args["prompt"].startswith("[AI COMMERCE D5 EXPLICIT HANDOFF")
+        assert args["prompt"].startswith("[AI COMMERCE D5 EXPLICIT ROLE HANDOFF]")
         if script == send._PRECHECK_JS:
             self.events.append("PRECHECK")
             return self.code

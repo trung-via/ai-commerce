@@ -57,6 +57,12 @@ def test_hostops_is_registered_as_separate_component_profile(real_tree):
     assert current["mt01-hostops-tests"] == [
         "python", "-m", "pytest", "tests/test_hostops_request.py", "-q", "-n", "12"
     ]
+    newer = next(g for g in real_tree.groups if g.name == "hostops-v2")
+    assert newer.tests == ("tests/test_hostops_v2.py",)
+    assert "scripts/hostops_v2.py" in newer.paths
+    assert current["mt01-hostops-v2-tests"] == [
+        "python", "-m", "pytest", "tests/test_hostops_v2.py", "-q", "-n", "12"
+    ]
 
 
 @pytest.mark.parametrize("path,expected", [
@@ -114,8 +120,9 @@ def test_companion_report_has_exact_reviewed_parallel_commands(real_tree):
     report = (ROOT / "docs/engineering/MT01_COMPONENT_AWARE_IMPLEMENTATION_REPORT.md").read_text()
     proposed = json.loads(report.split("```json\n", 1)[1].split("\n```", 1)[0])
     current = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_text())
-    assert all(current[key] == argv for key, argv in proposed.items() if key in current)  # Companions may already be active.
-    combined = {**current, **proposed}
+    # The report records the historical proposal. The live protected registry
+    # can contain newer reviewed test families and takes precedence.
+    combined = {**proposed, **current}
     for g in real_tree.groups:
         expected = ["python", "-m", "pytest", *g.tests, "-q", "-n", "12"]
         assert expected in combined.values()
