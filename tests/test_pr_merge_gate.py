@@ -1,8 +1,8 @@
-"""Contract tests for the Human-approved asynchronous PR merge queue.
+"""Contract tests for owner-backed Brain PASS -> protected auto-merge.
 
-Mocks require no GitHub credentials or paid executor. They prove WAIT_CI does not
-consume an approval, the same approval resumes automatically on a CI completion
-event, and any changed HEAD or missing proof never merges.
+Mocks require no GitHub credentials or paid executor. Brain PASS is a pinned
+decision distinct from ordinary Human approval. CI failure, changed HEAD/base,
+HOLD and missing proof must never merge.
 """
 from __future__ import annotations
 
@@ -189,7 +189,7 @@ def test_merge_gate_canonical_approval_and_owner_authentication(gate):
     assert gate.parse_approval(text) == {
         "pr": 219, "head": "a" * 40, "base": "b" * 40, "revoke": False}
     assert gate.parse_approval(text + "\nexecute dangerous code") is None
-    assert gate.parse_approval("AI_COMMERCE_HUMAN_MERGE_APPROVAL_V1\npr=219") is None
+    assert gate.parse_approval("AI_COMMERCE_BRAIN_REVIEW_PASS_V1\npr=219") is None
     assert gate.candidates(FakeGitHub(gate), FakeGitHub.repo, _approval_event(gate, False)) == []
     assert gate.candidates(FakeGitHub(gate), FakeGitHub.repo, _approval_event(gate)) == [(219, None)]
 
@@ -213,12 +213,12 @@ def test_merge_queue_retains_same_approval_until_ci_finishes(gate):
 @pytest.mark.parametrize("kwargs,status,reason", [
     ({"jobs_ok": False, "ci": "completed"}, "WAIT_EVIDENCE",
      "BOTH_OS_PYTEST_NODE_PROOF_MISSING"),
-    ({"approval": False, "ci": "completed"}, "HOLD", "NO_ACTIVE_OWNER_APPROVAL"),
-    ({"revoked": True, "ci": "completed"}, "HOLD", "NO_ACTIVE_OWNER_APPROVAL"),
+    ({"approval": False, "ci": "completed"}, "HOLD", "NO_ACTIVE_BRAIN_PASS"),
+    ({"revoked": True, "ci": "completed"}, "HOLD", "NO_ACTIVE_BRAIN_PASS"),
     ({"changed_head": True, "ci": "completed"}, "HOLD",
-     "APPROVAL_BOUND_TO_DIFFERENT_REVISION"),
+     "BRAIN_PASS_BOUND_TO_DIFFERENT_REVISION"),
     ({"changed_base": True, "ci": "completed"}, "HOLD",
-     "APPROVAL_BOUND_TO_DIFFERENT_REVISION"),
+     "BRAIN_PASS_BOUND_TO_DIFFERENT_REVISION"),
     ({"latest_failed": True, "ci": "completed"}, "WAIT_FIX",
      "EXACT_HEAD_CI_NOT_SUCCESS"),
 ])
@@ -367,3 +367,37 @@ def test_merge_gate_trusted_registry_loads_without_importing_app_package(gate):
     src = (Path(__file__).resolve().parents[1] / ".github/scripts/pr-merge-gate.py").read_text()
     assert 'spec_from_file_location("_mt01_main_trusted_registry"' in src
     assert "from ai_commerce.engineering.minimum_test import approved_groups" not in src
+
+
+
+def test_brain_pass_protocol_rejects_old_human_approval_and_freeform_pass(gate):
+    assert gate.parse_approval(
+        "AI_COMMERCE_HUMAN_MERGE_APPROVAL_V1\npr=219\nhead_sha=" +
+        "a" * 40 + "\nbase_sha=" + "b" * 40
+    ) is None
+    assert gate.parse_approval("Brain review PASS") is None
+    assert gate.parse_approval(gate.approval_text(219, "a" * 40, "b" * 40)
+                               + "\nmerge_now=true") is None
+
+
+def test_brain_pass_gate_workflow_replaces_old_queue():
+    new = ROOT / ".github" / "workflows" / "brain-pass-auto-merge.yml"
+    old = ROOT / ".github" / "workflows" / "human-merge-queue.yml"
+    assert new.is_file()
+    assert not old.exists()
+    text = new.read_text(encoding="utf-8")
+    assert "AI Commerce Brain PASS auto-merge" in text
+    assert "issue_comment:" in text
+    assert "workflow_run:" in text
+    assert "ref: main" in text
+
+
+def test_brain_pass_exact_identity_and_revision(gate):
+    g = FakeGitHub(gate, ci="completed")
+    event = _approval_event(gate)
+    assert gate.process(g, g.repo, event)[0]["status"] == "MERGED"
+    assert len(g.writes) == 1
+    bad = FakeGitHub(gate, ci="completed")
+    event["comment"]["user"]["login"] = "spoofed-reviewer"
+    assert gate.candidates(bad, bad.repo, event) == []
+    assert bad.writes == []

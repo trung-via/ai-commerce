@@ -28,6 +28,7 @@ CONTROL_TESTS = {
         "tests/test_pr_merge_gate.py", "tests/test_minimum_test.py",
     ),
     ".github/workflows/human-merge-queue.yml": ("tests/test_pr_merge_gate.py",),
+    ".github/workflows/brain-pass-auto-merge.yml": ("tests/test_pr_merge_gate.py",),
     ".github/ef02/verify-profiles.json": (
         "tests/test_minimum_test.py", "tests/test_ef02_mt01_registry.py",
     ),
