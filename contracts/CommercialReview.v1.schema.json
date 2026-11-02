@@ -1,7 +1,1999 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:ai-commerce:CommercialReview:v1",
-  "title": "CommercialReview.v1 — pre-implementation invalid contract",
-  "description": "Fail-closed placeholder; replace with real A16 typed schema using EF02 executor.",
-  "not": {}
+  "title": "CommercialReview.v1",
+  "description": "Offline supplied assertions only. Native replay is required; checksums do not authenticate providers.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "CommercialReview.v1"
+    },
+    "evaluator_version": {
+      "const": "a16-e05/1.0"
+    },
+    "review_id": {
+      "type": "string",
+      "pattern": "^a16-review-[a-f0-9]{64}$"
+    },
+    "record_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "scope": {
+      "type": "object",
+      "properties": {
+        "provider_ref": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "platform": {
+          "enum": [
+            "TIKTOK",
+            "YOUTUBE",
+            "FACEBOOK",
+            "INSTAGRAM"
+          ]
+        },
+        "account_ref": {
+          "type": "object",
+          "properties": {
+            "namespace": {
+              "enum": [
+                "internal_alias",
+                "tiktok_open_id",
+                "youtube_channel_id",
+                "facebook_page_id",
+                "instagram_user_id"
+              ]
+            },
+            "id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "required": [
+            "namespace",
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        "app_ref": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "namespace": {
+                  "enum": [
+                    "internal_alias",
+                    "tiktok_client_key",
+                    "meta_app_id",
+                    "google_cloud_project_id"
+                  ]
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              },
+              "required": [
+                "namespace",
+                "id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "market": {
+          "type": "string",
+          "pattern": "^[A-Z]{2}$"
+        },
+        "surface": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "channel": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "product_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "listing_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "variant_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "link_ref": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "link_url_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "creative_ref": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "creative_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "measurement_window": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "string",
+              "format": "date-time",
+              "maxLength": 32,
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$"
+            },
+            {
+              "type": "string",
+              "format": "date-time",
+              "maxLength": 32,
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$"
+            }
+          ],
+          "items": false,
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "timezone": {
+          "const": "UTC"
+        }
+      },
+      "required": [
+        "provider_ref",
+        "platform",
+        "account_ref",
+        "app_ref",
+        "market",
+        "surface",
+        "channel",
+        "product_id",
+        "listing_id",
+        "variant_id",
+        "link_ref",
+        "link_url_sha256",
+        "creative_ref",
+        "creative_sha256",
+        "measurement_window",
+        "timezone"
+      ],
+      "additionalProperties": false
+    },
+    "sources": {
+      "type": "object",
+      "properties": {
+        "commerce_run": {
+          "type": "object",
+          "properties": {
+            "raw_utf8": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 20971520
+            },
+            "raw_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$",
+              "minLength": 64,
+              "maxLength": 64
+            }
+          },
+          "required": [
+            "raw_utf8",
+            "raw_sha256"
+          ],
+          "additionalProperties": false
+        },
+        "settlement_history": {
+          "type": "object",
+          "properties": {
+            "raw_utf8": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 41943040
+            },
+            "raw_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$",
+              "minLength": 64,
+              "maxLength": 64
+            }
+          },
+          "required": [
+            "raw_utf8",
+            "raw_sha256"
+          ],
+          "additionalProperties": false
+        },
+        "cost_records": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": 1
+              },
+              "record_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+                "minLength": 64,
+                "maxLength": 64
+              },
+              "entry_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "job_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "attempt": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "intent_digest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+                "minLength": 64,
+                "maxLength": 64
+              },
+              "provider": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "model": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "status": {
+                "enum": [
+                  "ESTIMATED",
+                  "CHARGED",
+                  "PENDING",
+                  "UNKNOWN",
+                  "NOT_APPLICABLE"
+                ]
+              },
+              "amount": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,23})(\\.[0-9]{1,6})?$",
+                    "maxLength": 31,
+                    "not": {
+                      "pattern": "\\s"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "currency": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[A-Z]{3}$",
+                    "maxLength": 3
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "evidence_ref": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_:/.-]{0,511}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "evidence_sha256": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$",
+                    "minLength": 64,
+                    "maxLength": 64
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "evidence_origin": {
+                "enum": [
+                  "USER_SUPPLIED",
+                  "SYNTHETIC_FIXTURE",
+                  "UNVERIFIED"
+                ]
+              },
+              "observed_at": {
+                "type": "string",
+                "format": "date-time",
+                "maxLength": 32,
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$"
+              }
+            },
+            "required": [
+              "version",
+              "record_sha256",
+              "entry_id",
+              "job_id",
+              "attempt",
+              "intent_digest",
+              "provider",
+              "model",
+              "status",
+              "amount",
+              "currency",
+              "evidence_ref",
+              "evidence_sha256",
+              "evidence_origin",
+              "observed_at"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 128
+        },
+        "cost_selections": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "entry_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "job_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "attempt": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "intent_digest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+                "minLength": 64,
+                "maxLength": 64
+              },
+              "provider": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            },
+            "required": [
+              "entry_id",
+              "job_id",
+              "attempt",
+              "intent_digest",
+              "provider"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 128
+        }
+      },
+      "required": [
+        "commerce_run",
+        "settlement_history",
+        "cost_records",
+        "cost_selections"
+      ],
+      "additionalProperties": false
+    },
+    "cost_allocation_basis": {
+      "const": "USER_SUPPLIED_CREATIVE_ALLOCATION_NOT_PROVIDER_VERIFIED"
+    },
+    "status": {
+      "enum": [
+        "PARTIAL",
+        "HOLD"
+      ]
+    },
+    "reason_codes": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "OFFLINE_UNATTESTED",
+          "SETTLEMENT_EVIDENCE_MISSING",
+          "COST_EVIDENCE_MISSING",
+          "COMMERCIAL_EVIDENCE_INCOMPLETE",
+          "SYNTHETIC_EVIDENCE_PRESENT",
+          "UPSTREAM_HOLD",
+          "ATTRIBUTION_AMBIGUOUS",
+          "REFUND_AFTER_SETTLEMENT",
+          "REVOCATION_AFTER_SETTLEMENT",
+          "UNKNOWN_COST_CURRENCY"
+        ]
+      },
+      "maxItems": 10,
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "orders": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "order_ref": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "evidence_id": {
+            "type": "string",
+            "pattern": "^a16-settlement-[a-f0-9]{64}$",
+            "maxLength": 79
+          },
+          "reported_status": {
+            "enum": [
+              "UNKNOWN",
+              "CREATED",
+              "ATTRIBUTED",
+              "APPROVED",
+              "PENDING",
+              "REFUNDED",
+              "REVOKED",
+              "PARTIALLY_SETTLED",
+              "SETTLED"
+            ]
+          },
+          "currency": {
+            "type": "string",
+            "pattern": "^[A-Z]{3}$",
+            "maxLength": 3
+          },
+          "source_kind": {
+            "enum": [
+              "USER_SUPPLIED",
+              "SYNTHETIC_FIXTURE"
+            ]
+          },
+          "attribution_tier": {
+            "enum": [
+              "A",
+              "B",
+              "C",
+              "D",
+              "UNKNOWN"
+            ]
+          }
+        },
+        "required": [
+          "order_ref",
+          "evidence_id",
+          "reported_status",
+          "currency",
+          "source_kind",
+          "attribution_tier"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 128
+    },
+    "supplied_order_count": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "enum": [
+            "REPORTED",
+            "UNKNOWN"
+          ]
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "by_currency": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "currency": {
+            "type": "string",
+            "pattern": "^[A-Z]{3}$",
+            "maxLength": 3
+          },
+          "order_gross": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "REPORTED",
+                  "PARTIAL",
+                  "UNKNOWN"
+                ]
+              },
+              "amount": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                    "maxLength": 34,
+                    "not": {
+                      "pattern": "\\s"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reported_subtotal": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                    "maxLength": 34,
+                    "not": {
+                      "pattern": "\\s"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "known_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 128
+              },
+              "unknown_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 128
+              }
+            },
+            "required": [
+              "status",
+              "amount",
+              "reported_subtotal",
+              "known_count",
+              "unknown_count"
+            ],
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "REPORTED"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "reported_subtotal": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "known_count": {
+                      "minimum": 1
+                    },
+                    "unknown_count": {
+                      "const": 0
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "PARTIAL"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "null"
+                    },
+                    "reported_subtotal": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "known_count": {
+                      "minimum": 1
+                    },
+                    "unknown_count": {
+                      "minimum": 1
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "UNKNOWN"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "null"
+                    },
+                    "reported_subtotal": {
+                      "type": "null"
+                    },
+                    "known_count": {
+                      "const": 0
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "credited_commission": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "REPORTED",
+                  "PARTIAL",
+                  "UNKNOWN"
+                ]
+              },
+              "amount": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                    "maxLength": 34,
+                    "not": {
+                      "pattern": "\\s"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reported_subtotal": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                    "maxLength": 34,
+                    "not": {
+                      "pattern": "\\s"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "known_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 128
+              },
+              "unknown_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 128
+              }
+            },
+            "required": [
+              "status",
+              "amount",
+              "reported_subtotal",
+              "known_count",
+              "unknown_count"
+            ],
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "REPORTED"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "reported_subtotal": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "known_count": {
+                      "minimum": 1
+                    },
+                    "unknown_count": {
+                      "const": 0
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "PARTIAL"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "null"
+                    },
+                    "reported_subtotal": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "known_count": {
+                      "minimum": 1
+                    },
+                    "unknown_count": {
+                      "minimum": 1
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "UNKNOWN"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "null"
+                    },
+                    "reported_subtotal": {
+                      "type": "null"
+                    },
+                    "known_count": {
+                      "const": 0
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "settled_commission": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "REPORTED",
+                  "PARTIAL",
+                  "UNKNOWN"
+                ]
+              },
+              "amount": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                    "maxLength": 34,
+                    "not": {
+                      "pattern": "\\s"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reported_subtotal": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                    "maxLength": 34,
+                    "not": {
+                      "pattern": "\\s"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "known_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 128
+              },
+              "unknown_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 128
+              }
+            },
+            "required": [
+              "status",
+              "amount",
+              "reported_subtotal",
+              "known_count",
+              "unknown_count"
+            ],
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "REPORTED"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "reported_subtotal": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "known_count": {
+                      "minimum": 1
+                    },
+                    "unknown_count": {
+                      "const": 0
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "PARTIAL"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "null"
+                    },
+                    "reported_subtotal": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "known_count": {
+                      "minimum": 1
+                    },
+                    "unknown_count": {
+                      "minimum": 1
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "UNKNOWN"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "null"
+                    },
+                    "reported_subtotal": {
+                      "type": "null"
+                    },
+                    "known_count": {
+                      "const": 0
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "refund_gross": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "REPORTED",
+                  "PARTIAL",
+                  "UNKNOWN"
+                ]
+              },
+              "amount": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                    "maxLength": 34,
+                    "not": {
+                      "pattern": "\\s"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reported_subtotal": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                    "maxLength": 34,
+                    "not": {
+                      "pattern": "\\s"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "known_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 128
+              },
+              "unknown_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 128
+              }
+            },
+            "required": [
+              "status",
+              "amount",
+              "reported_subtotal",
+              "known_count",
+              "unknown_count"
+            ],
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "REPORTED"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "reported_subtotal": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "known_count": {
+                      "minimum": 1
+                    },
+                    "unknown_count": {
+                      "const": 0
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "PARTIAL"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "null"
+                    },
+                    "reported_subtotal": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "known_count": {
+                      "minimum": 1
+                    },
+                    "unknown_count": {
+                      "minimum": 1
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "UNKNOWN"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "null"
+                    },
+                    "reported_subtotal": {
+                      "type": "null"
+                    },
+                    "known_count": {
+                      "const": 0
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "reversed_commission": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "REPORTED",
+                  "PARTIAL",
+                  "UNKNOWN"
+                ]
+              },
+              "amount": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                    "maxLength": 34,
+                    "not": {
+                      "pattern": "\\s"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reported_subtotal": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                    "maxLength": 34,
+                    "not": {
+                      "pattern": "\\s"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "known_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 128
+              },
+              "unknown_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 128
+              }
+            },
+            "required": [
+              "status",
+              "amount",
+              "reported_subtotal",
+              "known_count",
+              "unknown_count"
+            ],
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "REPORTED"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "reported_subtotal": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "known_count": {
+                      "minimum": 1
+                    },
+                    "unknown_count": {
+                      "const": 0
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "PARTIAL"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "null"
+                    },
+                    "reported_subtotal": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "known_count": {
+                      "minimum": 1
+                    },
+                    "unknown_count": {
+                      "minimum": 1
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "UNKNOWN"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "null"
+                    },
+                    "reported_subtotal": {
+                      "type": "null"
+                    },
+                    "known_count": {
+                      "const": 0
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "fees": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "REPORTED",
+                  "PARTIAL",
+                  "UNKNOWN"
+                ]
+              },
+              "amount": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                    "maxLength": 34,
+                    "not": {
+                      "pattern": "\\s"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reported_subtotal": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                    "maxLength": 34,
+                    "not": {
+                      "pattern": "\\s"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "known_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 128
+              },
+              "unknown_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 128
+              }
+            },
+            "required": [
+              "status",
+              "amount",
+              "reported_subtotal",
+              "known_count",
+              "unknown_count"
+            ],
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "REPORTED"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "reported_subtotal": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "known_count": {
+                      "minimum": 1
+                    },
+                    "unknown_count": {
+                      "const": 0
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "PARTIAL"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "null"
+                    },
+                    "reported_subtotal": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "known_count": {
+                      "minimum": 1
+                    },
+                    "unknown_count": {
+                      "minimum": 1
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "UNKNOWN"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "null"
+                    },
+                    "reported_subtotal": {
+                      "type": "null"
+                    },
+                    "known_count": {
+                      "const": 0
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "estimated_cost": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "REPORTED",
+                  "PARTIAL",
+                  "UNKNOWN"
+                ]
+              },
+              "amount": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                    "maxLength": 34,
+                    "not": {
+                      "pattern": "\\s"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reported_subtotal": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                    "maxLength": 34,
+                    "not": {
+                      "pattern": "\\s"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "known_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 128
+              },
+              "unknown_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 128
+              }
+            },
+            "required": [
+              "status",
+              "amount",
+              "reported_subtotal",
+              "known_count",
+              "unknown_count"
+            ],
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "REPORTED"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "reported_subtotal": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "known_count": {
+                      "minimum": 1
+                    },
+                    "unknown_count": {
+                      "const": 0
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "PARTIAL"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "null"
+                    },
+                    "reported_subtotal": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "known_count": {
+                      "minimum": 1
+                    },
+                    "unknown_count": {
+                      "minimum": 1
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "UNKNOWN"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "null"
+                    },
+                    "reported_subtotal": {
+                      "type": "null"
+                    },
+                    "known_count": {
+                      "const": 0
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "supplied_charged_cost": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "REPORTED",
+                  "PARTIAL",
+                  "UNKNOWN"
+                ]
+              },
+              "amount": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                    "maxLength": 34,
+                    "not": {
+                      "pattern": "\\s"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reported_subtotal": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                    "maxLength": 34,
+                    "not": {
+                      "pattern": "\\s"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "known_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 128
+              },
+              "unknown_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 128
+              }
+            },
+            "required": [
+              "status",
+              "amount",
+              "reported_subtotal",
+              "known_count",
+              "unknown_count"
+            ],
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "REPORTED"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "reported_subtotal": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "known_count": {
+                      "minimum": 1
+                    },
+                    "unknown_count": {
+                      "const": 0
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "PARTIAL"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "null"
+                    },
+                    "reported_subtotal": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "known_count": {
+                      "minimum": 1
+                    },
+                    "unknown_count": {
+                      "minimum": 1
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "UNKNOWN"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "null"
+                    },
+                    "reported_subtotal": {
+                      "type": "null"
+                    },
+                    "known_count": {
+                      "const": 0
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "synthetic_charged_cost": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "REPORTED",
+                  "PARTIAL",
+                  "UNKNOWN"
+                ]
+              },
+              "amount": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                    "maxLength": 34,
+                    "not": {
+                      "pattern": "\\s"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reported_subtotal": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                    "maxLength": 34,
+                    "not": {
+                      "pattern": "\\s"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "known_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 128
+              },
+              "unknown_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 128
+              }
+            },
+            "required": [
+              "status",
+              "amount",
+              "reported_subtotal",
+              "known_count",
+              "unknown_count"
+            ],
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "REPORTED"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "reported_subtotal": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "known_count": {
+                      "minimum": 1
+                    },
+                    "unknown_count": {
+                      "const": 0
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "PARTIAL"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "null"
+                    },
+                    "reported_subtotal": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,26})(\\.[0-9]{1,6})?$",
+                      "maxLength": 34,
+                      "not": {
+                        "pattern": "\\s"
+                      }
+                    },
+                    "known_count": {
+                      "minimum": 1
+                    },
+                    "unknown_count": {
+                      "minimum": 1
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "UNKNOWN"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "amount": {
+                      "type": "null"
+                    },
+                    "reported_subtotal": {
+                      "type": "null"
+                    },
+                    "known_count": {
+                      "const": 0
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "required": [
+          "currency",
+          "order_gross",
+          "credited_commission",
+          "settled_commission",
+          "refund_gross",
+          "reversed_commission",
+          "fees",
+          "estimated_cost",
+          "supplied_charged_cost",
+          "synthetic_charged_cost"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 128
+    },
+    "actual_orders_verified": {
+      "const": false
+    },
+    "actual_settlement_status": {
+      "const": "UNKNOWN"
+    },
+    "external_provider_charge_verified": {
+      "const": false
+    },
+    "realized_profit": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "const": "UNKNOWN"
+        },
+        "amount": {
+          "type": "null"
+        },
+        "verified": {
+          "const": false
+        }
+      },
+      "required": [
+        "status",
+        "amount",
+        "verified"
+      ],
+      "additionalProperties": false
+    },
+    "network_calls_performed": {
+      "const": false
+    },
+    "advisory_only": {
+      "const": true
+    }
+  },
+  "required": [
+    "schema_version",
+    "evaluator_version",
+    "review_id",
+    "record_sha256",
+    "scope",
+    "sources",
+    "cost_allocation_basis",
+    "status",
+    "reason_codes",
+    "orders",
+    "supplied_order_count",
+    "by_currency",
+    "actual_orders_verified",
+    "actual_settlement_status",
+    "external_provider_charge_verified",
+    "realized_profit",
+    "network_calls_performed",
+    "advisory_only"
+  ],
+  "additionalProperties": false
 }
