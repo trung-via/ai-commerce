@@ -891,7 +891,8 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                     pytest_profile: str = "windows-12", pytest_isolation_approved: bool = False,
                     pytest_known_flaky: bool = False, host_slots: int = 1,
                     registered_profiles: dict[str, list[str]] | None = None,
-                    verify_first_scope: bool = True) -> dict[str, Any]:
+                    verify_first_scope: bool = True,
+                    selection_source: str = "HUMAN_EXPLICIT") -> dict[str, Any]:
     """One attempt on an initially clean tree, with bounded same-profile repairs.
 
     Only a completed scoped pytest code failure permits repair. Each CLI call is
@@ -947,7 +948,7 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
         "kind": "AI_COMMERCE_ENGINEERING_RESULT", "version": 1,
         "work_id": work_id, "attempt_id": attempt_id, "started_at": _now(),
         "executor": selection.executor, "model": selection.model, "reasoning_effort": selection.effort,
-        "selection_source": "HUMAN_EXPLICIT",
+        "selection_source": selection_source,
         "sandbox_backend": codex_windows_sandbox or "executor-default",
         "sandbox_policy": "workspace-write" if selection.executor == "codex" else "accept-edits",
         "source_base_sha": initial["git_head_after"], "repo": str(repo),

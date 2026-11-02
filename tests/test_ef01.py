@@ -404,3 +404,169 @@ print(json.dumps({'status': 'SUCCESS', 'denied_actions': []}))
     assert (outdir / "invocations" / "000" / "agy_input" / "instruction.txt").is_file()
     assert not (outdir / "invocations" / "000" / "agy_input" / "provider_boundary.json").exists()
     assert result["denied_actions"] == []
+
+
+# Human-selected project soft default: no unapproved within-attempt switch.
+from datetime import datetime, timedelta, timezone
+
+from ai_commerce.engineering.model_defaults import resolve_model, observe_result, STATE_PATH
+
+
+def _soft_default_repo(tmp_path):
+    p = tmp_path / "config" / "engineering" / "model-defaults.v1.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({
+        "version": 1, "hard_default": False,
+        "preferred": {"executor": "codex", "model": "gpt-6.1-sol", "effort": "max"},
+        "fallback": {"executor": "antigravity", "model": "gemini-3.8-flash", "effort": "high"},
+        "recovery_probe_cooldown_seconds": 3600,
+    }), encoding="utf-8")
+    return tmp_path
+
+
+def _soft_default_report(when, *, status, completed=False, attempt="a"):
+    return {
+        "executor": "codex", "model": "gpt-6.1-sol", "reasoning_effort": "max",
+        "started_at": when.isoformat(), "attempt_id": attempt, "status": status,
+        "invocations": [{"executor_invoked": True, "executor_exit_code": 1 if not completed else 0,
+                         "status": status, "provider_return_determinate": completed}],
+    }
+
+
+def test_project_soft_default_and_manual_override(tmp_path):
+    repo = _soft_default_repo(tmp_path)
+    now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+    decision = resolve_model(repo, now=now)
+    assert decision.as_dict() == {
+        "executor": "codex", "model": "gpt-6.1-sol", "effort": "max",
+        "selection_source": "PROJECT_SOFT_DEFAULT", "quota_mode": "PREFERRED",
+        "retry_after": None,
+    }
+    other = ExecutorSelection("antigravity", "human-other-model", "medium")
+    human = resolve_model(repo, override=other, now=now)
+    assert human.selection == other and human.source == "HUMAN_EXPLICIT"
+    assert not (repo / STATE_PATH).exists()
+
+
+def test_quota_fallback_then_recovery_check_then_verified_restoration(tmp_path):
+    repo = _soft_default_repo(tmp_path)
+    now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+    assert observe_result(repo, _soft_default_report(now, status="QUOTA_EXHAUSTED"),
+                          now=now) == "QUOTA_FALLBACK_RECORDED"
+    fallback = resolve_model(repo, now=now + timedelta(minutes=2))
+    assert (fallback.selection.executor, fallback.selection.model, fallback.selection.effort) == (
+        "antigravity", "gemini-3.8-flash", "high")
+    assert fallback.source == "PROJECT_QUOTA_FALLBACK"
+    due = resolve_model(repo, now=now + timedelta(hours=1, minutes=1))
+    assert due.source == "PROJECT_CODEX_RECOVERY_CHECK"
+    assert due.selection == ExecutorSelection("codex", "gpt-6.1-sol", "max")
+    # A test failure *after* a confirmed Codex completion still proves quota is available.
+    later = now + timedelta(hours=1, minutes=2)
+    assert observe_result(repo, _soft_default_report(
+        later, status="VERIFICATION_FAILED", completed=True, attempt="recovered"),
+        now=later) == "CODEX_PREFERENCE_RESTORED"
+    assert resolve_model(repo, now=later).source == "PROJECT_SOFT_DEFAULT"
+
+
+def test_recovery_probe_still_quota_switches_future_action_only(tmp_path):
+    repo = _soft_default_repo(tmp_path)
+    now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+    observe_result(repo, _soft_default_report(now, status="QUOTA_EXHAUSTED"), now=now)
+    later = now + timedelta(hours=2)
+    assert resolve_model(repo, now=later).source == "PROJECT_CODEX_RECOVERY_CHECK"
+    observe_result(repo, _soft_default_report(
+        later, status="QUOTA_EXHAUSTED", attempt="again"), now=later)
+    assert resolve_model(repo, now=later + timedelta(minutes=1)).selection.executor == "antigravity"
+
+
+@pytest.mark.parametrize("problem", [
+    "EXECUTION_UNKNOWN", "MODEL_AT_CAPACITY", "EXECUTOR_PERMISSION_DENIED",
+    "MODEL_UNSUPPORTED", "EXECUTOR_FAILED",
+])
+def test_unverified_or_unrelated_errors_do_not_infer_quota(tmp_path, problem):
+    repo = _soft_default_repo(tmp_path)
+    now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+    assert observe_result(repo, _soft_default_report(now, status=problem),
+                          now=now) == "IGNORED_UNPROVEN"
+    assert resolve_model(repo, now=now).source == "PROJECT_SOFT_DEFAULT"
+
+
+def test_missing_provider_process_evidence_does_not_flip(tmp_path):
+    repo = _soft_default_repo(tmp_path)
+    now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+    report = _soft_default_report(now, status="QUOTA_EXHAUSTED")
+    report["invocations"][0]["executor_exit_code"] = None
+    assert observe_result(repo, report, now=now) == "IGNORED_UNPROVEN"
+    assert resolve_model(repo, now=now).selection.executor == "codex"
+
+
+def test_stale_older_success_does_not_cancel_newer_quota(tmp_path):
+    repo = _soft_default_repo(tmp_path)
+    now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+    observe_result(repo, _soft_default_report(
+        now + timedelta(minutes=10), status="QUOTA_EXHAUSTED"), now=now + timedelta(minutes=10))
+    result = observe_result(repo, _soft_default_report(
+        now, status="BUILD_VERIFIED_FOR_SCOPE", completed=True), now=now + timedelta(minutes=11))
+    assert result == "IGNORED_STALE_ATTEMPT"
+    assert resolve_model(repo, now=now + timedelta(minutes=11)).selection.executor == "antigravity"
+
+
+def test_explicit_nonpreferred_human_model_does_not_change_quota_state(tmp_path):
+    repo = _soft_default_repo(tmp_path)
+    now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+    result = _soft_default_report(now, status="QUOTA_EXHAUSTED")
+    result["model"] = "human-chosen-codex-model"
+    assert observe_result(repo, result, now=now) == "IGNORED_OTHER_SELECTION"
+    assert resolve_model(repo, now=now).selection.executor == "codex"
+
+
+def test_corrupted_policy_state_fails_closed(tmp_path):
+    repo = _soft_default_repo(tmp_path)
+    state = repo / STATE_PATH
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text('{"mode":"BAD","version":1}', encoding="utf-8")
+    with pytest.raises(SelectionError, match="MODEL_DEFAULTS_STATE_INVALID"):
+        resolve_model(repo)
+    explicit = ExecutorSelection("antigravity", "human", "high")
+    assert resolve_model(repo, override=explicit).selection == explicit
+
+
+def test_project_default_resolver_cli_does_not_call_executor(tmp_path):
+    repo = _soft_default_repo(tmp_path)
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    p = subprocess.run([sys.executable, "-m", "ai_commerce.engineering.model_defaults",
+                        "--repo", str(repo)], env=env, capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr
+    obj = json.loads(p.stdout)
+    assert obj["executor"] == "codex" and obj["effort"] == "max"
+
+
+def test_ef01_cli_prefers_soft_default_but_human_override_wins(tmp_path, monkeypatch):
+    from ai_commerce.engineering import cli as efcli
+    repo = _soft_default_repo(tmp_path)
+    instruction = tmp_path / "instruction.txt"
+    verify = tmp_path / "verify.json"
+    instruction.write_text("Safe bounded test", encoding="utf-8")
+    verify.write_text(json.dumps(["python", "-m", "pytest", "tests/test_ef01.py", "-q"]))
+    captured = []
+
+    def fake_execute(**kw):
+        captured.append((kw["selection"], kw["selection_source"]))
+        return {"work_id": "x", "attempt_id": "a", "executor": kw["selection"].executor,
+                "model": kw["selection"].model, "reasoning_effort": kw["selection"].effort,
+                "status": "VERIFICATION_FAILED", "error_code": "TEST", "invocations": []}
+
+    monkeypatch.setattr(efcli, "execute_attempt", fake_execute)
+    monkeypatch.setattr(efcli, "observe_result", lambda *_: "IGNORED_UNPROVEN")
+    args = ["--repo", str(repo), "--work-id", "x", "--attempt-id", "a",
+            "--instruction-file", str(instruction), "--verify-json", str(verify),
+            "--out-dir", str(tmp_path / "out")]
+    assert efcli.main(args) == 1
+    assert captured[-1] == (ExecutorSelection("codex", "gpt-6.1-sol", "max"),
+                            "PROJECT_SOFT_DEFAULT")
+    assert efcli.main(args + ["--executor", "antigravity", "--model", "other",
+                              "--effort", "high"]) == 1
+    assert captured[-1] == (ExecutorSelection("antigravity", "other", "high"),
+                            "HUMAN_EXPLICIT")
+    assert efcli.main(args + ["--model", "partial"]) == 2
