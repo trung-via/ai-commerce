@@ -12,6 +12,9 @@ from .cdp_doorbell import _PlaywrightInventory
 from .conversation_binding import ResolvedBinding
 from .plugin_selection_probe_cli import load_registered_probe_route
 from .plugin_turn_store import TurnSessionStore
+from .plugin_turn_handoff import preview_next_turn, TurnHandoffError
+from .plugin_turn_stage_only import ExplicitTurnChipStager
+from .plugin_turn_cli import _fresh_main_sha
 
 _ROLES = ("BRAIN", "ENGINEERING", "BRAIN")
 _GOOD = frozenset(("EXACT_CHAT_OPENED", "EXACT_CHAT_PRESENT"))
@@ -28,11 +31,15 @@ def _tcp_9333() -> bool:
 
 class WakePanel:
     def __init__(self, *, store, route_reader, tcp_probe=_tcp_9333,
-                 inventory_factory=_PlaywrightInventory):
+                 inventory_factory=_PlaywrightInventory,
+                 source_reader=_fresh_main_sha,
+                 staging_factory=ExplicitTurnChipStager):
         self.store, self.route_reader = store, route_reader
         self.tcp_probe, self.inventory_factory = tcp_probe, inventory_factory
+        self.source_reader, self.staging_factory = source_reader, staging_factory
         self._lock = threading.Lock()
         self._uncertain = False
+        self._prepare_attempted = False
 
     def _state(self):
         try:
@@ -65,7 +72,8 @@ class WakePanel:
             tcp = self.tcp_probe() is True
         except Exception:
             tcp = False
-        enabled = phase == "READY" and route and tcp and not self._uncertain
+        enabled = (phase == "READY" and route and tcp
+                   and not self._uncertain and not self._prepare_attempted)
         if phase == "SUBMISSION_UNKNOWN":
             next_action = "RECONCILE_ONLY_NO_RETRY"
         elif phase == "COMPLETE_UI_ONLY":
@@ -78,6 +86,8 @@ class WakePanel:
             next_action = "CHECK_CHROME_9333"
         elif self._uncertain:
             next_action = "INSPECT_NAVIGATION_UNKNOWN"
+        elif self._prepare_attempted:
+            next_action = "INSPECT_PREPARED_DRAFT_MANUALLY"
         else:
             next_action = "OPEN_EXACT_CHAT_THEN_PREPARE"
         return {
@@ -86,9 +96,69 @@ class WakePanel:
             "route": "ENROLLED" if route else "UNAVAILABLE",
             "tcp": "REACHABLE_UNVERIFIED" if tcp else "NOT_REACHABLE",
             "next_action": next_action, "can_open": enabled,
-            "can_send": False, "host_selection_proven": False,
+            "can_prepare": enabled, "can_send": False,
+            "host_selection_proven": False,
             "server_receipt_proven": False,
         }
+
+    def prepare_turn(self, consent: str) -> dict:
+        """One explicitly consented @chip+prompt staging; never Send/retry.
+
+        Serialized against the local Open Chat button. Caller must still use
+        independent CLI consent for Send Once after visual inspection.
+        """
+        with self._lock:
+            if not self.status()["can_prepare"]:
+                return {"code": "PREPARE_NOT_ELIGIBLE", "sent": False}
+            snapshot, binding = self._state(), self._route()
+            if snapshot is None or binding is None:
+                return {"code": "PREPARE_STATE_CHANGED", "sent": False}
+            try:
+                preview = preview_next_turn(snapshot)
+            except (TurnHandoffError, KeyError, TypeError):
+                return {"code": "PREPARE_SESSION_INVALID", "sent": False}
+            required = f"PREPARE-D5-{preview['role']}-{preview['turn_index']}"
+            if (type(consent) is not str or len(consent) > 80 or
+                    not secrets.compare_digest(consent, required)):
+                return {"code": "PREPARE_CONSENT_REQUIRED", "sent": False}
+            # Source check is a live authenticated local gh read, not a cache.
+            try:
+                if self.source_reader() != snapshot["source_sha"]:
+                    return {"code": "PREPARE_SOURCE_CHANGED", "sent": False}
+                if self._state() != snapshot or self._route() != binding:
+                    return {"code": "PREPARE_STATE_CHANGED", "sent": False}
+            except Exception:
+                return {"code": "PREPARE_SOURCE_UNAVAILABLE", "sent": False}
+            try:
+                preloaded = self.inventory_factory().preload(
+                    binding, current_binding=self.route_reader)
+            except Exception:
+                preloaded = "PRELOAD_CDP_UNAVAILABLE"
+            if preloaded not in _GOOD:
+                if preloaded in ("PRELOAD_NAVIGATION_UNKNOWN",
+                                 "PRELOAD_CDP_UNAVAILABLE"):
+                    self._uncertain = True
+                return {"code": preloaded if preloaded.startswith("PRELOAD_")
+                        else "PRELOAD_UNAVAILABLE", "sent": False}
+            try:
+                if (self._state() != snapshot or self._route() != binding or
+                        self.source_reader() != snapshot["source_sha"]):
+                    return {"code": "PREPARE_STATE_OR_SOURCE_CHANGED", "sent": False}
+            except Exception:
+                return {"code": "PREPARE_SOURCE_UNAVAILABLE", "sent": False}
+            # Once staging might touch the composer, never attempt again in
+            # this process. Failed or ambiguous staging needs Human cleanup.
+            self._prepare_attempted = True
+            try:
+                result = self.staging_factory(enabled=True).stage(
+                    binding, snapshot, operator_approved=True,
+                    include_prompt=True)
+                code = result.code
+            except Exception:
+                code = "PREPARE_UNKNOWN_CLEAR_MANUALLY"
+            return {"code": code if type(code) is str and
+                    len(code) <= 64 else "PREPARE_UNKNOWN_CLEAR_MANUALLY",
+                    "sent": False, "host_selection_proven": False}
 
     def inspect_exact_chat(self):
         """On-demand read-only CDP tab census: no navigation, no Send."""
@@ -162,7 +232,10 @@ button{padding:12px 16px;border-radius:12px;background:var(--blue);color:#101b31
 border:none;font-weight:750;font:inherit;cursor:pointer}
 button.secondary{background:#26354f;color:var(--ink);border:1px solid var(--line)}
 button:disabled{cursor:not-allowed;opacity:.45}
-button:focus-visible{outline:3px solid #ffd080;outline-offset:3px}
+button:focus-visible,input:focus-visible{outline:3px solid #ffd080;outline-offset:3px}
+input{padding:11px;border-radius:12px;border:1px solid var(--line);
+background:#0e1830;color:var(--ink);min-width:min(100%,300px);font:inherit}
+label{color:var(--muted);font-size:13px}
 #result{color:var(--mint);min-height:22px}
 small{color:var(--muted)}footer{font-size:12px;color:var(--muted);margin-top:20px}
 a{color:var(--blue)}
@@ -188,6 +261,13 @@ a{color:var(--blue)}
 <div class="controls"><button id="open" disabled>Mở chat chính xác</button>
 <button id="inspect" class="secondary">Kiểm tra tab (chỉ đọc)</button>
 <button id="refresh" class="secondary">Làm mới</button></div>
+<div class="controls">
+<label for="consent">Mã xác nhận riêng cho lượt Prepare (không Send):</label>
+<input id="consent" maxlength="80" autocomplete="off" spellcheck="false"
+aria-describedby="prepare-hint" placeholder="PREPARE-D5-ROLE-INDEX">
+<button id="prepare" disabled>Prepare @ plugin + prompt (chưa Send)</button></div>
+<p id="prepare-hint"><small>Mã yêu cầu: <code id="expected-consent">Chưa sẵn sàng</code>.
+Nhập thủ công; chỉ thực hiện một lần mỗi phiên giao diện.</small></p>
 <p id="result" role="status" aria-live="polite"></p>
 <p><small>Chỉ mở tab đã đăng ký. Prepare @ plugin, Send Once và Observe Reply vẫn
 thực hiện qua CLI với Human consent riêng. Nút này không gửi tin nhắn.</small></p>
@@ -208,6 +288,14 @@ PRIVATE_LEDGER_UNAVAILABLE:"Kiểm tra ledger",
 CHECK_ENROLLED_ROUTE:"Kiểm tra route",
 CHECK_CHROME_9333:"Kiểm tra Chrome 9333",
 INSPECT_NAVIGATION_UNKNOWN:"Kiểm tra tab thủ công",
+INSPECT_PREPARED_DRAFT_MANUALLY:"Đã Prepare/thử Prepare — kiểm tra bản nháp",
+TURN_PREPARED_NO_SEND:"Đã chuẩn bị chip + prompt; chưa Send",
+PREPARE_CONSENT_REQUIRED:"Nhập đúng mã xác nhận",
+PREPARE_SOURCE_CHANGED:"Main SHA không còn khớp ledger",
+PREPARE_SOURCE_UNAVAILABLE:"Không xác minh được SHA main qua GitHub",
+PREPARE_STATE_OR_SOURCE_CHANGED:"Ledger, route hoặc source đã đổi",
+PREPARE_NOT_ELIGIBLE:"Không đủ điều kiện Prepare",
+PREPARE_UNKNOWN_CLEAR_MANUALLY:"Kết quả chưa rõ; kiểm tra bản nháp",
 EXACT_CHAT_PRESENT:"Đã có tab đúng URL",EXACT_CHAT_NOT_OPEN:"Chưa mở tab đúng URL",
 EXACT_CHAT_AMBIGUOUS:"Nhiều tab trùng — cần xử lý thủ công",
 CHROME_9333_NOT_REACHABLE:"Chrome 9333 chưa kết nối",
@@ -221,11 +309,30 @@ const s=await r.json();
 el("tcp").textContent=display(s.tcp);el("route").textContent=display(s.route);
 el("phase").textContent=display(s.phase);el("next").textContent=display(s.next_action);
 el("open").disabled=!s.can_open;
+el("prepare").disabled=!s.can_prepare;
+el("expected-consent").textContent=s.can_prepare?
+"PREPARE-D5-"+s.role+"-"+s.turn_index:"Chưa sẵn sàng";
 [...el("steps").children].forEach((n,i)=>{
 n.classList.toggle("active",s.turn_index===i&&s.phase==="READY");
 n.classList.toggle("done",s.turn_index>i);});
 }catch(e){el("next").textContent="Không đọc được trạng thái";el("open").disabled=true;}}
 el("refresh").onclick=refresh;
+el("prepare").onclick=async()=>{
+const required=el("expected-consent").textContent;
+const consent=el("consent").value;
+if(consent!==required){el("result").textContent="Mã xác nhận không đúng";return;}
+el("prepare").disabled=true;el("consent").value="";
+el("result").textContent="Đang kiểm tra SHA main, route và bản nháp…";
+try{
+const r=await fetch("/api/prepare-turn",{method:"POST",
+headers:{"X-Wake-Token":token,"Content-Type":"application/json"},
+body:JSON.stringify({consent})});
+const s=await r.json();
+el("result").textContent=display(s.code)==="Chưa rõ"?
+"Prepare: "+s.code:display(s.code);
+}catch(e){el("result").textContent="Không rõ kết quả Prepare; kiểm tra bản nháp thủ công";}
+await refresh();
+};
 el("inspect").onclick=async()=>{
 el("inspect").disabled=true;
 try{
@@ -294,9 +401,26 @@ def make_handler(panel: WakePanel, *, port: int, token: str):
                 return self._json(403, {"code": "ORIGIN_REJECTED"})
             if not secrets.compare_digest(self.headers.get("X-Wake-Token", ""), token):
                 return self._json(403, {"code": "TOKEN_REJECTED"})
-            if self.path != "/api/open-chat" or self.headers.get("Content-Length") not in ("0", None):
+            if self.path == "/api/open-chat":
+                if self.headers.get("Content-Length") not in ("0", None):
+                    return self._json(400, {"code": "OPERATION_NOT_ALLOWED"})
+                return self._json(200, panel.open_exact_chat())
+            if self.path != "/api/prepare-turn":
                 return self._json(400, {"code": "OPERATION_NOT_ALLOWED"})
-            return self._json(200, panel.open_exact_chat())
+            if self.headers.get("Content-Type") != "application/json":
+                return self._json(400, {"code": "INVALID_CONTENT_TYPE"})
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+                if not 1 <= size <= 160:
+                    raise ValueError
+                request = json.loads(self.rfile.read(size))
+                if (type(request) is not dict or
+                        set(request) != {"consent"} or
+                        type(request["consent"]) is not str):
+                    raise ValueError
+            except (ValueError, TypeError, UnicodeError, OSError):
+                return self._json(400, {"code": "PREPARE_REQUEST_INVALID"})
+            return self._json(200, panel.prepare_turn(request["consent"]))
     return Handler
 
 

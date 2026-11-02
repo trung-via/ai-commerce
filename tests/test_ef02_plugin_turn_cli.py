@@ -573,3 +573,72 @@ def test_wake_panel_inspection_denied_without_route_or_tcp():
     p.route_reader = lambda: b
     p.tcp_probe = lambda: False
     assert p.inspect_exact_chat() == {"code":"CHROME_9333_NOT_REACHABLE"}
+
+
+
+def test_wake_panel_prepare_turn_requires_exact_human_consent_main_and_source():
+    from ai_commerce.remote import wake_control_center as ui
+    from ai_commerce.remote.conversation_binding import ResolvedBinding
+    from ai_commerce.remote.plugin_turn_handoff import new_session
+    binding = ResolvedBinding("private", 1,
+        "https://chatgpt.com/c/00000000-0000-0000-0000-000000000001",
+        "http://127.0.0.1:9333")
+    state = new_session(handoff_id="d5-turn-"+"b"*32, issue_number=181,
+                        source_sha="a"*40)
+    calls = []
+    class Inventory:
+        def preload(self, b, *, current_binding):
+            assert b == binding == current_binding()
+            calls.append("preload")
+            return "EXACT_CHAT_PRESENT"
+    class Stager:
+        def __init__(self, *, enabled=False):
+            assert enabled is True
+        def stage(self, b, s, *, operator_approved=False,
+                  include_prompt=False):
+            assert b == binding and s == state
+            assert operator_approved and include_prompt
+            calls.append("stage")
+            return SimpleNamespace(code="TURN_PREPARED_NO_SEND")
+    source = lambda: "a"*40
+    panel = ui.WakePanel(
+        store=SimpleNamespace(read=lambda: state),
+        route_reader=lambda: binding, tcp_probe=lambda: True,
+        inventory_factory=Inventory, source_reader=source,
+        staging_factory=Stager)
+    assert panel.prepare_turn("wrong")["code"] == "PREPARE_CONSENT_REQUIRED"
+    assert calls == []
+    yes = panel.prepare_turn("PREPARE-D5-BRAIN-0")
+    assert yes == {"code":"TURN_PREPARED_NO_SEND",
+                   "sent":False,"host_selection_proven":False}
+    assert calls == ["preload", "stage"]
+    assert not panel.status()["can_prepare"]
+    assert panel.prepare_turn("PREPARE-D5-BRAIN-0")["code"] == "PREPARE_NOT_ELIGIBLE"
+    assert calls == ["preload", "stage"]
+
+
+def test_wake_panel_prepare_refuses_changed_source_unknown_and_stale_ledger():
+    from ai_commerce.remote import wake_control_center as ui
+    from ai_commerce.remote.conversation_binding import ResolvedBinding
+    from ai_commerce.remote.plugin_turn_handoff import new_session
+    binding = ResolvedBinding("private", 1,
+        "https://chatgpt.com/c/00000000-0000-0000-0000-000000000001",
+        "http://127.0.0.1:9333")
+    state = new_session(handoff_id="d5-turn-"+"c"*32,issue_number=181,
+                        source_sha="b"*40)
+    class Inventory:
+        def preload(self, b, *, current_binding):
+            assert b == current_binding() == binding
+            return "PRELOAD_NAVIGATION_UNKNOWN"
+    p = ui.WakePanel(
+        store=SimpleNamespace(read=lambda: state),
+        route_reader=lambda: binding, tcp_probe=lambda: True,
+        inventory_factory=Inventory, source_reader=lambda: "c"*40,
+        staging_factory=lambda **_k: pytest.fail("no staging"))
+    assert p.prepare_turn("PREPARE-D5-BRAIN-0")["code"] == "PREPARE_SOURCE_CHANGED"
+    p.source_reader = lambda: "b"*40
+    assert p.prepare_turn("PREPARE-D5-BRAIN-0")["code"] == "PRELOAD_NAVIGATION_UNKNOWN"
+    assert p.status()["can_prepare"] is False
+    assert p.prepare_turn("PREPARE-D5-BRAIN-0")["code"] == "PREPARE_NOT_ELIGIBLE"
+    state["phase"] = "SUBMISSION_UNKNOWN"
+    assert p.prepare_turn("PREPARE-D5-BRAIN-0")["code"] == "PREPARE_NOT_ELIGIBLE"
