@@ -221,5 +221,5 @@ class WorkerV4(Worker):
     def _authenticate(self, raw, *, reconcile=False):
         request, lease = self.authority.authenticate_v4(raw, reconcile=reconcile)
         if request.value["operation"] not in self.READ_ONLY:
-            deny("V4_OPERATION_NOT_ENABLED")
+            deny("OPERATION_NOT_ENABLED")
         return request, lease

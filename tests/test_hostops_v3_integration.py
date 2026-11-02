@@ -700,7 +700,7 @@ def test_v4_signed_read_only_worker_rejects_effects_before_journal(h, op):
     out = worker.execute(c.canonical(e))["receipt"]
     assert out["schema"] == "hostops.receipt.v4"
     assert out["status"] == "BLOCKED"
-    assert out["error_code"] == "V4_OPERATION_NOT_ENABLED"
+    assert out["error_code"] == "OPERATION_NOT_ENABLED"
     assert h.journal.db.execute("SELECT count(*) FROM requests").fetchone()[0] == 0
     assert not (h.data / "new.txt").exists()
 
