@@ -996,3 +996,55 @@ def test_provider_pytest_refuses_temp_root_under_source(tmp_path, monkeypatch):
         pytest_temp_guard.pytest_configure(config)
 
 
+
+
+def test_provider_pytest_real_subprocess_keeps_ipc_key_out_of_git_scope(tmp_path, monkeypatch):
+    """Reproduce #231 with real pytest and Git status, no paid executor."""
+    repo = tmp_path / "source"
+    repo.mkdir()
+    external = tmp_path / "scratch"
+    external.mkdir()
+    report = tmp_path / "observed-ipc-path.txt"
+    (repo / ".gitignore").write_text(".local/\n__pycache__/\n.pytest_cache/\n")
+    (repo / "test_ipc.py").write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "def test_ipc_fixture(tmp_path):\n"
+        "    key = tmp_path / 'policy' / 'ipc.key'\n"
+        "    key.parent.mkdir(parents=True)\n"
+        "    key.write_text('synthetic-fixture-only')\n"
+        "    Path(os.environ['EF01_IPC_REPORT_PATH']).write_text(str(key))\n"
+    )
+    init = subprocess.run(["git", "init", "-q"], cwd=repo, capture_output=True, text=True)
+    assert init.returncode == 0, init.stderr
+    baseline = runner._changes(repo)
+
+    env = os.environ.copy()
+    env.update({
+        "AI_COMMERCE_EF01_WORKTREE": str(repo),
+        "AI_COMMERCE_EF01_PYTEST_BASETEMP_ROOT": str(external),
+        "EF01_IPC_REPORT_PATH": str(report),
+        "PYTEST_PLUGINS": "ai_commerce.engineering.pytest_temp_guard",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    })
+    pytest_run = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "--basetemp=.local/hostops-v3-repair/pytest-round1", "test_ipc.py"],
+        cwd=repo, env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert pytest_run.returncode == 0, pytest_run.stdout + pytest_run.stderr
+    key = Path(report.read_text())
+    assert key.exists() and key.name == "ipc.key"
+    assert external.resolve() in key.resolve().parents
+    assert repo.resolve() not in key.resolve().parents
+    assert not (repo / ".local").exists()
+    assert runner._changes(repo) == baseline
+
+    # The independent protection must still catch an actual in-tree key.
+    dangerous = repo / ".local" / "hostops-v3-repair" / "policy" / "ipc.key"
+    dangerous.parent.mkdir(parents=True)
+    dangerous.write_text("synthetic-negative-fixture-only")
+    changes = runner._changes(repo)
+    assert dangerous.relative_to(repo).as_posix() in changes
+    assert runner._protected_change(changes)
