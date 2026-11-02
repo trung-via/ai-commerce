@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-commerce.invalid/contracts/hostops-v3.receipt.schema.json",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "hostops.receipt.v3"
+    },
+    "request_ref": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "request_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "release_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "source_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "operation": {
+      "enum": [
+        "append",
+        "copy",
+        "create",
+        "disclose",
+        "find",
+        "hash",
+        "list",
+        "move",
+        "none",
+        "patch",
+        "powershell",
+        "quarantine",
+        "read",
+        "rename",
+        "replace",
+        "stat",
+        "volumes"
+      ]
+    },
+    "status": {
+      "enum": [
+        "APPLIED",
+        "BLOCKED",
+        "BUSY",
+        "DISCLOSED",
+        "OBSERVED",
+        "PARTIAL",
+        "PREVIEW",
+        "UNAVAILABLE",
+        "UNKNOWN"
+      ]
+    },
+    "error_code": {
+      "type": "string",
+      "pattern": "^[A-Z_]{2,64}$"
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 67108864
+        },
+        "chunk_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 67108864
+        },
+        "cross_volume": {
+          "type": "boolean"
+        },
+        "exists": {
+          "type": "boolean"
+        },
+        "is_directory": {
+          "type": "boolean"
+        },
+        "local_only": {
+          "type": "boolean"
+        },
+        "non_elevated": {
+          "type": "boolean"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 67108864
+        },
+        "preview_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "pwsh_major": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 67108864
+        },
+        "reconciled": {
+          "type": "boolean"
+        },
+        "selection_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "total_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 67108864
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "volume_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 67108864
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema",
+    "request_ref",
+    "request_sha256",
+    "release_id",
+    "source_sha",
+    "operation",
+    "status",
+    "error_code",
+    "result"
+  ],
+  "additionalProperties": false
+}

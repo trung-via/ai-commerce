@@ -1,0 +1,1491 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-commerce.invalid/contracts/hostops-v3.request.schema.json",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "hostops.request.v3"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "repository": {
+          "const": "trung-via/ai-commerce"
+        },
+        "issuer": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "host_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "preview": {
+          "type": "boolean"
+        },
+        "operation": {
+          "const": "append"
+        },
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "data_b64": {
+              "type": "string",
+              "maxLength": 87384,
+              "contentEncoding": "base64"
+            },
+            "data_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "expected_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "path",
+            "data_b64",
+            "data_sha256",
+            "expected_sha256"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "request_id",
+        "repository",
+        "issuer",
+        "host_id",
+        "release_id",
+        "source_sha",
+        "created_at",
+        "expires_at",
+        "timeout_seconds",
+        "preview",
+        "operation",
+        "parameters"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "hostops.request.v3"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "repository": {
+          "const": "trung-via/ai-commerce"
+        },
+        "issuer": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "host_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "preview": {
+          "type": "boolean"
+        },
+        "operation": {
+          "const": "copy"
+        },
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "destination": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "expected_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "path",
+            "destination",
+            "expected_sha256"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "request_id",
+        "repository",
+        "issuer",
+        "host_id",
+        "release_id",
+        "source_sha",
+        "created_at",
+        "expires_at",
+        "timeout_seconds",
+        "preview",
+        "operation",
+        "parameters"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "hostops.request.v3"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "repository": {
+          "const": "trung-via/ai-commerce"
+        },
+        "issuer": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "host_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "preview": {
+          "type": "boolean"
+        },
+        "operation": {
+          "const": "create"
+        },
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "data_b64": {
+              "type": "string",
+              "maxLength": 87384,
+              "contentEncoding": "base64"
+            },
+            "data_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "path",
+            "data_b64",
+            "data_sha256"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "request_id",
+        "repository",
+        "issuer",
+        "host_id",
+        "release_id",
+        "source_sha",
+        "created_at",
+        "expires_at",
+        "timeout_seconds",
+        "preview",
+        "operation",
+        "parameters"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "hostops.request.v3"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "repository": {
+          "const": "trung-via/ai-commerce"
+        },
+        "issuer": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "host_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "preview": {
+          "type": "boolean"
+        },
+        "operation": {
+          "const": "disclose"
+        },
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "selection_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "content_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 67108864
+            },
+            "length": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65536
+            },
+            "classification": {
+              "enum": [
+                "ordinary",
+                "sensitive"
+              ]
+            },
+            "recipient": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          },
+          "required": [
+            "selection_id",
+            "content_sha256",
+            "offset",
+            "length",
+            "classification",
+            "recipient"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "request_id",
+        "repository",
+        "issuer",
+        "host_id",
+        "release_id",
+        "source_sha",
+        "created_at",
+        "expires_at",
+        "timeout_seconds",
+        "preview",
+        "operation",
+        "parameters"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "hostops.request.v3"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "repository": {
+          "const": "trung-via/ai-commerce"
+        },
+        "issuer": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "host_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "preview": {
+          "type": "boolean"
+        },
+        "operation": {
+          "const": "find"
+        },
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "needle": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 256
+            }
+          },
+          "required": [
+            "path",
+            "needle",
+            "limit"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "request_id",
+        "repository",
+        "issuer",
+        "host_id",
+        "release_id",
+        "source_sha",
+        "created_at",
+        "expires_at",
+        "timeout_seconds",
+        "preview",
+        "operation",
+        "parameters"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "hostops.request.v3"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "repository": {
+          "const": "trung-via/ai-commerce"
+        },
+        "issuer": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "host_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "preview": {
+          "type": "boolean"
+        },
+        "operation": {
+          "const": "hash"
+        },
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "request_id",
+        "repository",
+        "issuer",
+        "host_id",
+        "release_id",
+        "source_sha",
+        "created_at",
+        "expires_at",
+        "timeout_seconds",
+        "preview",
+        "operation",
+        "parameters"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "hostops.request.v3"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "repository": {
+          "const": "trung-via/ai-commerce"
+        },
+        "issuer": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "host_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "preview": {
+          "type": "boolean"
+        },
+        "operation": {
+          "const": "list"
+        },
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 256
+            }
+          },
+          "required": [
+            "path",
+            "limit"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "request_id",
+        "repository",
+        "issuer",
+        "host_id",
+        "release_id",
+        "source_sha",
+        "created_at",
+        "expires_at",
+        "timeout_seconds",
+        "preview",
+        "operation",
+        "parameters"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "hostops.request.v3"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "repository": {
+          "const": "trung-via/ai-commerce"
+        },
+        "issuer": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "host_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "preview": {
+          "type": "boolean"
+        },
+        "operation": {
+          "const": "move"
+        },
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "destination": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "expected_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "path",
+            "destination",
+            "expected_sha256"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "request_id",
+        "repository",
+        "issuer",
+        "host_id",
+        "release_id",
+        "source_sha",
+        "created_at",
+        "expires_at",
+        "timeout_seconds",
+        "preview",
+        "operation",
+        "parameters"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "hostops.request.v3"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "repository": {
+          "const": "trung-via/ai-commerce"
+        },
+        "issuer": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "host_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "preview": {
+          "type": "boolean"
+        },
+        "operation": {
+          "const": "patch"
+        },
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "data_b64": {
+              "type": "string",
+              "maxLength": 87384,
+              "contentEncoding": "base64"
+            },
+            "data_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "expected_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 67108864
+            },
+            "remove_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 67108864
+            }
+          },
+          "required": [
+            "path",
+            "data_b64",
+            "data_sha256",
+            "expected_sha256",
+            "offset",
+            "remove_bytes"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "request_id",
+        "repository",
+        "issuer",
+        "host_id",
+        "release_id",
+        "source_sha",
+        "created_at",
+        "expires_at",
+        "timeout_seconds",
+        "preview",
+        "operation",
+        "parameters"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "hostops.request.v3"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "repository": {
+          "const": "trung-via/ai-commerce"
+        },
+        "issuer": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "host_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "preview": {
+          "type": "boolean"
+        },
+        "operation": {
+          "const": "powershell"
+        },
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "script_id": {
+              "const": "token_inventory_v1"
+            },
+            "script_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "script_id",
+            "script_sha256"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "request_id",
+        "repository",
+        "issuer",
+        "host_id",
+        "release_id",
+        "source_sha",
+        "created_at",
+        "expires_at",
+        "timeout_seconds",
+        "preview",
+        "operation",
+        "parameters"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "hostops.request.v3"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "repository": {
+          "const": "trung-via/ai-commerce"
+        },
+        "issuer": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "host_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "preview": {
+          "type": "boolean"
+        },
+        "operation": {
+          "const": "quarantine"
+        },
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "expected_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "preview_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "path",
+            "expected_sha256",
+            "preview_sha256"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "request_id",
+        "repository",
+        "issuer",
+        "host_id",
+        "release_id",
+        "source_sha",
+        "created_at",
+        "expires_at",
+        "timeout_seconds",
+        "preview",
+        "operation",
+        "parameters"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "hostops.request.v3"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "repository": {
+          "const": "trung-via/ai-commerce"
+        },
+        "issuer": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "host_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "preview": {
+          "type": "boolean"
+        },
+        "operation": {
+          "const": "read"
+        },
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 67108864
+            },
+            "length": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65536
+            },
+            "expected_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "path",
+            "offset",
+            "length",
+            "expected_sha256"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "request_id",
+        "repository",
+        "issuer",
+        "host_id",
+        "release_id",
+        "source_sha",
+        "created_at",
+        "expires_at",
+        "timeout_seconds",
+        "preview",
+        "operation",
+        "parameters"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "hostops.request.v3"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "repository": {
+          "const": "trung-via/ai-commerce"
+        },
+        "issuer": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "host_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "preview": {
+          "type": "boolean"
+        },
+        "operation": {
+          "const": "rename"
+        },
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "destination": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "expected_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "path",
+            "destination",
+            "expected_sha256"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "request_id",
+        "repository",
+        "issuer",
+        "host_id",
+        "release_id",
+        "source_sha",
+        "created_at",
+        "expires_at",
+        "timeout_seconds",
+        "preview",
+        "operation",
+        "parameters"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "hostops.request.v3"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "repository": {
+          "const": "trung-via/ai-commerce"
+        },
+        "issuer": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "host_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "preview": {
+          "type": "boolean"
+        },
+        "operation": {
+          "const": "replace"
+        },
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "data_b64": {
+              "type": "string",
+              "maxLength": 87384,
+              "contentEncoding": "base64"
+            },
+            "data_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "expected_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "path",
+            "data_b64",
+            "data_sha256",
+            "expected_sha256"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "request_id",
+        "repository",
+        "issuer",
+        "host_id",
+        "release_id",
+        "source_sha",
+        "created_at",
+        "expires_at",
+        "timeout_seconds",
+        "preview",
+        "operation",
+        "parameters"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "hostops.request.v3"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "repository": {
+          "const": "trung-via/ai-commerce"
+        },
+        "issuer": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "host_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "preview": {
+          "type": "boolean"
+        },
+        "operation": {
+          "const": "stat"
+        },
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "request_id",
+        "repository",
+        "issuer",
+        "host_id",
+        "release_id",
+        "source_sha",
+        "created_at",
+        "expires_at",
+        "timeout_seconds",
+        "preview",
+        "operation",
+        "parameters"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "hostops.request.v3"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "repository": {
+          "const": "trung-via/ai-commerce"
+        },
+        "issuer": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "host_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "preview": {
+          "type": "boolean"
+        },
+        "operation": {
+          "const": "volumes"
+        },
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "request_id",
+        "repository",
+        "issuer",
+        "host_id",
+        "release_id",
+        "source_sha",
+        "created_at",
+        "expires_at",
+        "timeout_seconds",
+        "preview",
+        "operation",
+        "parameters"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "schema": "hostops.config.v3",
+  "enabled": false,
+  "host_id": "laptop-001",
+  "policy_dir": "C:\\ProgramData\\AICommerceHostOpsV3\\policy",
+  "state_dir": "C:\\ProgramData\\AICommerceHostOpsV3\\broker-state",
+  "transport_state_dir": "C:\\ProgramData\\AICommerceHostOpsV3\\transport-state",
+  "release_dir": "C:\\Program Files\\AICommerceHostOpsV3\\3.0.0",
+  "broker_identity": "REPLACE_WITH_NON_ADMIN_BROKER_SID",
+  "transport_identity": "REPLACE_WITH_DISTINCT_TRANSPORT_SID",
+  "untrusted_identities": ["REPLACE_WITH_EVERY_CI_EF02_SID"],
+  "trusted_owners": ["S-1-5-18", "S-1-5-32-544"],
+  "endpoint": "\\\\.\\pipe\\AICommerceHostOpsV3-laptop-001",
+  "ssh_keygen": "C:\\Windows\\System32\\OpenSSH\\ssh-keygen.exe",
+  "ssh_keygen_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "pwsh": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+  "pwsh_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+}

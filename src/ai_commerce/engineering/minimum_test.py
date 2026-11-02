@@ -255,6 +255,36 @@ def approved_groups() -> tuple[TestGroup, ...]:
                   (rem + "worker.py", rem + "transport.py", rem + "github_read_retry.py")),
         TestGroup("hostops-v1", ("tests/test_hostops_request.py",), ("HOSTOPS.v1.readonly",),
                   ("scripts/hostops_request.py",)),
+        # HostOps v3: reviewed offline contract, consumer, fixed PowerShell and 48-ID
+        # scenario-manifest ownership. This registers test closure only; NOT a
+        # production broker, live Windows two-account or laptop access grant.
+        TestGroup("hostops-v3", (
+            "tests/test_hostops_v3.py",
+            "tests/test_hostops_v3_integration.py",
+            "tests/test_hostops_v3_repair.py",
+        ), ("HOSTOPS.v3.security-contract", "HOSTOPS.v3.issue225-matrix"),
+                   sources("hostops_v3",
+                           "__init__ contract auth filesystem journal worker security broker transport cli")
+                   ,
+                   # Executable CLI/PowerShell entrypoints are governed interface
+                   # contracts in this first-component onboarding snapshot;
+                   # the protected gate demands source-only TestGroup.paths.
+                   contracts=(
+                       "scripts/hostops_v3.py",
+                       "scripts/hostops_v3_release.py",
+                       "scripts/hostops_v3_schemas.py",
+                       "scripts/hostops_v3_verify.py",
+                       "scripts/HostOps-V3-Launch.py",
+                       "scripts/HostOps-V3-TokenInventory.ps1",
+                       "contracts/hostops-v3.request.schema.json",
+                       "contracts/hostops-v3.lease.schema.json",
+                       "contracts/hostops-v3.envelope.schema.json",
+                       "contracts/hostops-v3.receipt.schema.json",
+                       "config/hostops-v3/config.example.json",
+                       "config/hostops-v3/revocations.example.json",
+                       "docs/engineering/HOSTOPS_V3_DESIGN.md",
+                       "docs/engineering/HOSTOPS_V3_ENGINEERING_REPORT.md",
+                       "docs/engineering/hostops_v3_evidence/scenarios.json")),
         TestGroup("hostops-v2", ("tests/test_hostops_v2.py", "tests/test_hostops_ef02_202_recovery.py"),
                   ("HOSTOPS.v2.typed-operations", "HOSTOPS.ef02-202-recovery"),
                   ("scripts/hostops_v2.py", "scripts/hostops_ef02_202_recovery.py")),
