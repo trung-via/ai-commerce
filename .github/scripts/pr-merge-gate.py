@@ -233,6 +233,82 @@ def review_new_component_registry(main_source: str, candidate_source: str,
     return tuple(entries)
 
 
+def review_existing_owner_source_additions(main_source: str, candidate_source: str,
+                                           changed_files: list,
+                                           existing_groups: tuple) -> tuple[dict, ...]:
+    """Admit ONLY appended, newly added engineering Python source in an old owner.
+
+    The candidate is AST-parsed but never imported. All old owner tests, ACs,
+    consumers and contracts must remain byte-for-AST unchanged. This is a
+    generic owner extension, not a one-off exception for an Issue or path.
+    """
+    if len(candidate_source.encode("utf-8")) > NEW_COMPONENT_MAX_SOURCE_BYTES:
+        raise ValueError("EXISTING_OWNER_REGISTRY_TOO_LARGE")
+    original_tree, _, originals = _registrations(main_source)
+    candidate_tree, _, updated = _registrations(candidate_source)
+    if list(originals) != list(updated):
+        raise ValueError("EXISTING_OWNER_IDENTITY_OR_ORDER_CHANGED")
+    changes = {f.get("filename"): f.get("status") for f in changed_files
+               if isinstance(f, dict)}
+    if changes.get(ONBOARDING_REGISTRY_PATH) != "modified":
+        raise ValueError("EXISTING_OWNER_REGISTRY_NOT_CHANGED")
+    trusted = {g.name: g for g in existing_groups}
+    owned = {p for g in existing_groups
+             for p in (*g.paths, *g.tests, *g.consumers, *g.contracts)}
+    if set(trusted) != set(originals):
+        raise ValueError("TRUSTED_OWNER_MAP_MISMATCH")
+    entries = []
+    additions = set()
+    for name, before in originals.items():
+        after = updated[name]
+        if ast.dump(before, include_attributes=False) == ast.dump(after, include_attributes=False):
+            continue
+        if (len(before.args) != len(after.args)
+                or len(before.args) < 4
+                or [ast.dump(x, include_attributes=False) for x in before.keywords] !=
+                   [ast.dump(x, include_attributes=False) for x in after.keywords]
+                or any(ast.dump(x, include_attributes=False) !=
+                       ast.dump(y, include_attributes=False)
+                       for i, (x, y) in enumerate(zip(before.args, after.args)) if i != 3)):
+            raise ValueError("EXISTING_OWNER_TEST_AC_OR_CONSUMER_CHANGED")
+        old_paths, new_paths = before.args[3], after.args[3]
+        if (not isinstance(old_paths, ast.Tuple) or not isinstance(new_paths, ast.Tuple)
+                or len(new_paths.elts) <= len(old_paths.elts)
+                or any(ast.dump(x, include_attributes=False) != ast.dump(y, include_attributes=False)
+                       for x, y in zip(old_paths.elts, new_paths.elts))):
+            raise ValueError("EXISTING_OWNER_PATHS_NOT_APPEND_ONLY")
+        fresh = []
+        for node in new_paths.elts[len(old_paths.elts):]:
+            if (not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Add)
+                    or not isinstance(node.left, ast.Name) or node.left.id != "eng"
+                    or not isinstance(node.right, ast.Constant)
+                    or type(node.right.value) is not str
+                    or not SAFE_NAME.fullmatch(node.right.value.removesuffix(".py"))
+                    or not node.right.value.endswith(".py")):
+                raise ValueError("EXISTING_OWNER_NEW_SOURCE_NOT_STATIC_ENGINEERING_PYTHON")
+            path = "src/ai_commerce/engineering/" + node.right.value
+            if path in owned or changes.get(path) != "added":
+                raise ValueError("EXISTING_OWNER_SOURCE_NOT_NEWLY_ADDED")
+            fresh.append(path)
+            additions.add(path)
+        if len(fresh) != len(set(fresh)) or not fresh:
+            raise ValueError("EXISTING_OWNER_DUPLICATE_NEW_SOURCE")
+        entries.append({"name": name, "paths": tuple(fresh),
+                        "tests": tuple(trusted[name].tests), "contracts": ()})
+        # Undo only trusted additive owner-path edits; every other statement
+        # in approved_groups must remain exactly the same AST.
+        after.args[3] = old_paths
+    if not entries or len(entries) > NEW_COMPONENT_MAX_GROUPS or len(additions) > 16:
+        raise ValueError("NO_BOUNDED_EXISTING_OWNER_ADDITIONS")
+    main_fn = next(n for n in original_tree.body if isinstance(n, ast.FunctionDef)
+                   and n.name == "approved_groups")
+    candidate_fn = next(n for n in candidate_tree.body if isinstance(n, ast.FunctionDef)
+                        and n.name == "approved_groups")
+    if ast.dump(main_fn, include_attributes=False) != ast.dump(candidate_fn, include_attributes=False):
+        raise ValueError("EXISTING_OWNER_UNRELATED_REGISTRY_MUTATION")
+    return tuple(entries)
+
+
 def _read_candidate_registry(api: Callable, base: str, head: str) -> str:
     path = f"{base}/contents/{ONBOARDING_REGISTRY_PATH}?ref={head}"
     response = api(path)
@@ -264,8 +340,12 @@ def onboarded_groups_for_pr(api: Callable, base: str, head: str, changed_files: 
         return ()
     main_source = (Path(__file__).resolve().parents[2] / ONBOARDING_REGISTRY_PATH).read_text(encoding="utf-8")
     candidate_source = _read_candidate_registry(api, base, head)
-    return review_new_component_registry(main_source, candidate_source,
-                                         changed_files, approved_groups())
+    try:
+        return review_new_component_registry(main_source, candidate_source,
+                                             changed_files, approved_groups())
+    except ValueError:
+        return review_existing_owner_source_additions(
+            main_source, candidate_source, changed_files, approved_groups())
 
 
 def reviewed_coverage_for_changed_files(files: object, *, onboarded_groups=()):
@@ -298,19 +378,21 @@ def reviewed_coverage_for_changed_files(files: object, *, onboarded_groups=()):
     # The merge gate's main-tree owner map is independent of candidate plans.
     # Existing components inherit full reviewed owner/consumer obligations.
     groups = approved_groups()
-    newly_owned = {path: group for group in onboarded_groups
-                   for path in (*group["paths"], *group["tests"], *group["contracts"])}
+    newly_owned = {}
+    for group in onboarded_groups:
+        for path in (*group["paths"], *group["tests"], *group["contracts"]):
+            newly_owned.setdefault(path, set()).update(group["tests"])
     for path in changed:
         owning = [g for g in groups if path in
                   (set(g.paths) | set(g.tests) | set(g.consumers) | set(g.contracts))]
         for group in owning:
             required.update(group.tests)
-        new_group = newly_owned.get(path)
-        if new_group is not None:
+        new_group_tests = newly_owned.get(path)
+        if new_group_tests is not None:
             if next((e["status"] for e in files if e["filename"] == path), None) != "added":
                 return None
-            required.update(new_group["tests"])
-        if (not owning and new_group is None and path not in REVIEWED_CONTROL_TESTS and
+            required.update(new_group_tests)
+        if (not owning and new_group_tests is None and path not in REVIEWED_CONTROL_TESTS and
                 (path.startswith(("src/ai_commerce/", "contracts/", "scripts/")) or
                  path.endswith((".py", ".cjs", ".ps1", ".sh", ".ts", ".tsx", ".js")))):
             return None

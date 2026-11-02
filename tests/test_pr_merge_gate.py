@@ -705,3 +705,80 @@ def test_hostops_v3_queue_workflow_is_explicitly_trusted_gate_coverage(gate):
     assert gate.reviewed_coverage_for_changed_files([
         {"filename": ".github/workflows/unreviewed-hostops.yml", "status": "added"},
     ]) is None
+
+
+def _existing_owner_addition_fixture():
+    """Two real shared-owner files; no candidate module is executed."""
+    from ai_commerce.engineering.minimum_test import approved_groups
+    main = (ROOT / "src/ai_commerce/engineering/minimum_test.py").read_text(encoding="utf-8")
+    old_ef01 = 'eng + "model_defaults.py"),'
+    new_ef01 = 'eng + "model_defaults.py", eng + "gate_fixture.py"),'
+    old_repair = '(eng + "runner.py",), (rem + "worker.py", rem + "scheduler.py")),'
+    new_repair = '(eng + "runner.py", eng + "gate_fixture.py"), (rem + "worker.py", rem + "scheduler.py")),'
+    old_mt01 = '(eng + "minimum_test.py", eng + "verification.py"), (eng + "runner.py", rem + "worker.py"))'
+    new_mt01 = '(eng + "minimum_test.py", eng + "verification.py", eng + "gate_mt01_probe.py"), (eng + "runner.py", rem + "worker.py"))'
+    candidate = main
+    for old, new in ((old_ef01, new_ef01), (old_repair, new_repair), (old_mt01, new_mt01)):
+        assert candidate.count(old) == 1
+        candidate = candidate.replace(old, new, 1)
+    files = [
+        {"filename": "src/ai_commerce/engineering/minimum_test.py", "status": "modified"},
+        {"filename": "src/ai_commerce/engineering/gate_fixture.py", "status": "added"},
+        {"filename": "src/ai_commerce/engineering/gate_mt01_probe.py", "status": "added"},
+        {"filename": "tests/test_pr_merge_gate.py", "status": "modified"},
+    ]
+    return main, candidate, files, approved_groups()
+
+
+def test_existing_owner_additive_source_is_admitted_without_candidate_import(gate):
+    main, candidate, files, groups = _existing_owner_addition_fixture()
+    entries = gate.review_existing_owner_source_additions(main, candidate, files, groups)
+    assert {e["name"] for e in entries} == {"ef01", "repair", "mt01"}
+    assert gate.reviewed_coverage_for_changed_files(files) is None
+    paths, required = gate.reviewed_coverage_for_changed_files(files, onboarded_groups=entries)
+    assert set(paths) == {e["filename"] for e in files}
+    # One new source owned by two groups must retain BOTH independent tests.
+    assert {"tests/test_ef01.py", "tests/test_ef01_repair.py",
+            "tests/test_minimum_test.py", "tests/test_pr_merge_gate.py"} <= set(required)
+    assert "tests/test_hostops_v3.py" not in required
+
+
+@pytest.mark.parametrize("corruption", [
+    "removed_source", "modified_source", "replaced_old_owner_test",
+    "modified_old_ac", "renamed_old_owner", "new_keyword",
+    "unsafe_source_expr", "unknown_source", "unrelated_approved_groups_logic",
+])
+def test_existing_owner_extension_rejects_nonadditive_or_unreviewed(gate, corruption):
+    main, candidate, files, groups = _existing_owner_addition_fixture()
+    if corruption == "removed_source":
+        files[1]["status"] = "removed"
+    elif corruption == "modified_source":
+        files[1]["status"] = "modified"
+    elif corruption == "replaced_old_owner_test":
+        candidate = candidate.replace('TestGroup("repair", ("tests/test_ef01_repair.py",)',
+                                      'TestGroup("repair", ("tests/test_ef01.py",)', 1)
+    elif corruption == "modified_old_ac":
+        candidate = candidate.replace('("EF01.repair",)', '("EF01.repair_modified",)', 1)
+    elif corruption == "renamed_old_owner":
+        candidate = candidate.replace('TestGroup("repair"', 'TestGroup("repair2"', 1)
+    elif corruption == "new_keyword":
+        candidate = candidate.replace('eng + "gate_fixture.py"', 'eng + "gate_fixture.py", contracts=("secrets/test.key",)', 1)
+    elif corruption == "unsafe_source_expr":
+        candidate = candidate.replace('eng + "gate_fixture.py"', '__import__("os").system("unsafe")', 1)
+    elif corruption == "unknown_source":
+        candidate = candidate.replace('eng + "gate_fixture.py"', 'eng + "unregistered_extra.py"', 1)
+    else:
+        candidate = candidate.replace('    return (\n', '    print("candidate may not alter registry")\n    return (\n', 1)
+    with pytest.raises((ValueError, SyntaxError)):
+        gate.review_existing_owner_source_additions(main, candidate, files, groups)
+
+
+def test_existing_owner_extension_does_not_approve_unrelated_unknown_changes(gate):
+    main, candidate, files, groups = _existing_owner_addition_fixture()
+    entries = gate.review_existing_owner_source_additions(main, candidate, files, groups)
+    extra = {"filename": "src/ai_commerce/engineering/unknown.py", "status": "added"}
+    assert gate.reviewed_coverage_for_changed_files(
+        files + [extra], onboarded_groups=entries) is None
+    assert gate.reviewed_coverage_for_changed_files(
+        files + [{"filename": ".github/workflows/bypass.yml", "status": "added"}],
+        onboarded_groups=entries) is None
