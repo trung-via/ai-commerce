@@ -776,6 +776,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
                 registered_only=mt_context["registered_only"], aggregate_sources=mt_context["aggregate_sources"],
                 groups=() if scope_review else mt_context.get("groups"), command_transform=transform,
                 registered_profiles=mt_context.get("registered_profiles"),
+                human_full_suite_authorized=mt_context.get("human_full_suite_authorized", False),
                 on_plan=lambda current: inv.update(minimum_test=current))
             inv["minimum_test"] = plan
         else:
@@ -920,6 +921,7 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                     pytest_profile: str = "windows-12", pytest_isolation_approved: bool = False,
                     pytest_known_flaky: bool = False, host_slots: int = 1,
                     registered_profiles: dict[str, list[str]] | None = None,
+                    human_full_suite_authorized: bool = False,
                     verify_first_scope: bool = True,
                     selection_source: str = "HUMAN_EXPLICIT") -> dict[str, Any]:
     """One attempt on an initially clean tree, with bounded same-profile repairs.
@@ -965,12 +967,17 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
             paths = initial["changed_files"][:40]
         raise ValueError("WORKTREE_DIRTY: commit/stash existing changes before attempt; paths=" +
                          repr(paths[:40]))
+    if human_full_suite_authorized and (not minimum_test or not registered_only or
+            registered_profiles is None or list(verify_argv) not in
+            (registered_profiles.get("project-tests"), registered_profiles.get("project-tests-serial"))):
+        raise ValueError("UNTRUSTED_OR_UNREGISTERED_HUMAN_FULL_PROFILE")
     if minimum_test and not _is_pytest(verify_argv):
         raise ValueError("MT01_REQUIRES_APPROVED_PYTEST_FALLBACK")
     mt_context = ({"base_files": file_hashes(repo), "required_acs": tuple(acceptance_ids),
                    "prior": {}, "registered_only": registered_only,
                    "aggregate_sources": tuple(aggregate_sources),
-                   "registered_profiles": registered_profiles} if minimum_test else None)
+                   "registered_profiles": registered_profiles,
+                   "human_full_suite_authorized": human_full_suite_authorized} if minimum_test else None)
     command_for(selection, repo, instruction, codex_bin=codex_bin,
                 antigravity_bin=antigravity_bin, codex_windows_sandbox=codex_windows_sandbox)
     report: dict[str, Any] = {

@@ -22,6 +22,10 @@ from typing import Any, Callable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mt01_v21_proof import validate_receipt_zip
 
+# This module runs from protected main in human-merge-queue.yml, not a PR.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+from ai_commerce.engineering.minimum_test import approved_groups
+
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 APPROVAL = "AI_COMMERCE_HUMAN_MERGE_APPROVAL_V1"
@@ -94,6 +98,18 @@ def reviewed_coverage_for_changed_files(files: object):
             required.add(name)
     if len(changed) != len(files):
         return None
+    # The merge gate's main-tree owner map is independent of candidate plans.
+    # Existing components inherit full reviewed owner/consumer obligations.
+    groups = approved_groups()
+    for path in changed:
+        owning = [g for g in groups if path in
+                  (set(g.paths) | set(g.tests) | set(g.consumers) | set(g.contracts))]
+        for group in owning:
+            required.update(group.tests)
+        if (not owning and path not in REVIEWED_CONTROL_TESTS and
+                (path.startswith(("src/ai_commerce/", "contracts/", "scripts/")) or
+                 path.endswith((".py", ".cjs", ".ps1", ".sh", ".ts", ".tsx", ".js")))):
+            return None
     return tuple(sorted(changed)), tuple(sorted(required))
 
 

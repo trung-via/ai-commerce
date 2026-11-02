@@ -542,3 +542,34 @@ def test_ef02_batch_ingress_is_not_a_legacy_m0r_probe():
     assert "needs.validate.result == 'success'" in workflow
     assert "m0r_pre_executor_cancel" not in workflow
     assert "M0-R pre-executor cancellation probe" not in workflow
+
+
+
+def test_authenticated_human_full_is_distinct_from_default_profile(monkeypatch):
+    from ai_commerce.remote.validation import approved_verification_plan
+    registry = verify_registry(REGISTRY)
+    packet = batch([action("a")])
+    packet["actions"][0]["verification_intent"] = "HUMAN_FULL"
+    assert validate(packet) == packet
+    assert fingerprint(packet) != fingerprint(batch([action("a")]))
+    monkeypatch.setenv("MT01_V21_ENABLED", "1")
+    human = approved_verification_plan(packet["actions"][0], registry)
+    assert human["human_full_suite_authorized"] is True
+    assert human["argv"] == registry["project-tests"]
+    assert human["reason"] == "HUMAN_AUTHENTICATED_FULL_SUITE"
+    with pytest.raises(RemoteRequestError, match="ISSUER_NOT_AUTHORIZED"):
+        validate(packet, issuer="untrusted")
+    brain = copy.deepcopy(packet)
+    brain["actor"] = "BRAIN"
+    with pytest.raises(RemoteRequestError, match="HUMAN_FULL_REQUIRES_OWNER"):
+        validate(brain, issuer="brain-bot", brain=("brain-bot",))
+    narrow = copy.deepcopy(packet)
+    narrow["actions"][0]["verification_profile"] = "ef02-tests"
+    with pytest.raises(RemoteRequestError, match="HUMAN_FULL_REQUIRES_OWNER"):
+        validate(narrow)
+    default_plan = approved_verification_plan(action("a"), registry)
+    assert default_plan["human_full_suite_authorized"] is False
+    assert default_plan["coverage"] == "V21_REQUIRES_POST_EXECUTOR_IMPACT_PROOF"
+    serial = action("a")
+    serial["verification_profile"] = "project-tests-serial"
+    assert approved_verification_plan(serial, registry)["human_full_suite_authorized"] is False

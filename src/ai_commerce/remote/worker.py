@@ -286,6 +286,9 @@ class LocalBatchWorker:
                                 "index_refresh_exit": checkout["index_refresh_exit"]},
                     provider_invocation_proven=False)
                 return finish()
+            if action.get("verification_intent") == "HUMAN_FULL" and self.batch.get("actor") != "HUMAN":
+                outcome.update(status="INVALID_ACTION", error_code="UNAUTHORIZED_HUMAN_FULL")
+                return finish()
             plan = approved_verification_plan(action, self.profiles)
             acceptance = approved_acceptance_plan(submitted_action)
             plan["acceptance"] = acceptance
@@ -318,6 +321,8 @@ class LocalBatchWorker:
             argv.extend(["--minimum-test", "--registered-only", "--host-slots",
                          str(max(int(os.environ.get("EF02_HOST_SLOTS", "2")), self.batch.get("max_parallel", 2)))])
             argv.extend(["--registered-profiles-json", str(registry_file)])
+            if plan.get("human_full_suite_authorized"):
+                argv.append("--human-full-suite-authorized")
             for acceptance_id in acceptance["ids"]:
                 argv.extend(["--acceptance", acceptance_id])
             for dependency in dependencies:

@@ -102,6 +102,9 @@ def _validate_actions(data: dict, *, registry: dict[str, list[str]],
             safe_path(path)
         if action["verification_profile"] not in registry:
             raise RemoteRequestError("VERIFICATION_PROFILE_UNREGISTERED")
+        if action.get("verification_intent", "AUTO") == "HUMAN_FULL":
+            if data["actor"] != "HUMAN" or action["verification_profile"] not in ("project-tests", "project-tests-serial"):
+                raise RemoteRequestError("HUMAN_FULL_REQUIRES_OWNER_AND_REGISTERED_FULL_PROFILE")
         deps = action["depends_on"]
         if action["action_id"] in deps or any(d not in known for d in deps):
             raise RemoteRequestError("DEPENDENCY_UNKNOWN_OR_SELF")
@@ -169,7 +172,10 @@ def approved_verification_plan(action: dict, registry: dict[str, list[str]]) -> 
 
     explicit = registry[requested]
     explicit_full = is_full_suite(explicit)
-    if os.environ.get("MT01_V21_ENABLED") == "1" and not explicit_full:
+    human_full = action.get("verification_intent", "AUTO") == "HUMAN_FULL"
+    if human_full and not explicit_full:
+        raise RemoteRequestError("HUMAN_FULL_REQUIRES_REGISTERED_FULL_PROFILE")
+    if os.environ.get("MT01_V21_ENABLED") == "1" and not human_full:
         # Preserve exactly the reviewed narrow registry command. The post-edit
         # impact planner must independently prove component+consumer closure.
         # A missing mapping returns UNPROVEN, never substitutes project-tests.
@@ -180,6 +186,7 @@ def approved_verification_plan(action: dict, registry: dict[str, list[str]]) -> 
                 "workers_requested": registered_workers(explicit),
                 "registered_workers": registered_workers(explicit),
                 "reason": "MT01_V21_PRESERVE_EXACT_REGISTERED_PROFILE",
+                "human_full_suite_authorized": False,
                 "aggregate_requires_fresh_execution": bool(action.get("depends_on"))}
 
     broad = registry.get("project-tests", [])
@@ -193,8 +200,10 @@ def approved_verification_plan(action: dict, registry: dict[str, list[str]]) -> 
             "coverage": "FULL_REGISTERED_SUITE" if proven else "BROAD_PROFILE_UNAVAILABLE",
             "workers_requested": registered_workers(selected) if proven else 12,
             "registered_workers": registered_workers(selected) if proven else None,
-            "reason": ("EXPLICIT_REGISTERED_FULL_SUITE" if explicit_full
+            "reason": ("HUMAN_AUTHENTICATED_FULL_SUITE" if human_full
+                       else "LEGACY_REGISTERED_FULL_PROFILE" if explicit_full
                        else "MT01_SELECTOR_REGISTRATION_REQUIRES_COMPANION_PR"),
+            "human_full_suite_authorized": human_full,
             "aggregate_requires_fresh_execution": bool(action.get("depends_on"))}
 
 

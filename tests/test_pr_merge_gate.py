@@ -22,6 +22,11 @@ def gate():
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    # Unit mock has one synthetic owner; production loads reviewed main code.
+    from ai_commerce.engineering.minimum_test import TestGroup
+    module.approved_groups = lambda: (
+        TestGroup("fixture", ("tests/test_minimum_test.py",), ("fixture.ac",),
+                  ("src/ai_commerce/product/identity.py",)),)
     return module
 
 
@@ -336,3 +341,18 @@ def test_v21_gate_allows_known_node_controls_but_blocks_unknown_control(gate):
     assert gate.reviewed_coverage_for_changed_files([
         {"filename": ".github/scripts/unregistered.cjs", "status": "modified"},
     ]) is None
+
+
+
+def test_generic_trusted_main_component_ownership_prevents_partial_receipt(gate, monkeypatch):
+    from ai_commerce.engineering.minimum_test import approved_groups as real_groups
+    monkeypatch.setattr(gate, "approved_groups", real_groups)
+    changed = [{"filename": "src/ai_commerce/product/identity.py", "status": "modified"}]
+    result = gate.reviewed_coverage_for_changed_files(changed)
+    assert result is not None
+    assert {"tests/test_a12_identity.py", "tests/test_a12_claims.py"} <= set(result[1])
+    unknown = [{"filename": "src/ai_commerce/product/new_unreviewed_agent.py", "status": "added"}]
+    assert gate.reviewed_coverage_for_changed_files(unknown) is None
+    assert "tests/test_ef02.py" in gate.reviewed_coverage_for_changed_files([
+        {"filename": "src/ai_commerce/remote/worker.py", "status": "modified"}
+    ])[1]

@@ -17,7 +17,7 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
                  prior: dict[str, Evidence], save: Callable, evidence_files: Mapping[str, str],
                  deadline: float, timeout_seconds: float, registered_only: bool = False,
                  aggregate_sources: tuple[str, ...] = (), groups=None, command_transform=None,
-                 registered_profiles=None, on_plan: Callable | None = None) -> tuple:
+                 registered_profiles=None, human_full_suite_authorized: bool = False, on_plan: Callable | None = None) -> tuple:
     started_plan = time.monotonic()
     started_at = datetime.now(timezone.utc).isoformat()
     verify_deadline = min(deadline, started_plan + timeout_seconds)
@@ -26,7 +26,8 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
     plan = select_plan(repo=repo, base_sha=base_sha, base_files=base_files, candidate_files=before,
                        changed_paths=changed_paths, required_acs=required_acs, fallback_argv=fallback_argv,
                        groups=groups, registered_only=registered_only, aggregate_sources=aggregate_sources,
-                       registered_profiles=registered_profiles)
+                       registered_profiles=registered_profiles,
+                       human_full_suite_authorized=human_full_suite_authorized)
     if command_transform:
         for entry in plan["groups"]:
             argv, decision = command_transform(entry["binding"]["argv"], entry["group"])
@@ -38,7 +39,7 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
     provisional = (select_provisional_tests(
         base_files=base_files, candidate_files=before,
         changed_paths=changed_paths, plan=plan, fallback_argv=fallback_argv)
-        if registered_only else None)
+        if registered_only and not human_full_suite_authorized else None)
     if provisional is not None:
         plan["provisional_mapping"] = provisional
     apply_evidence(plan, prior, output_dir)
