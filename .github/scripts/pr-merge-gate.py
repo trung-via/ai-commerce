@@ -25,6 +25,7 @@ REVOKE = "AI_COMMERCE_HUMAN_MERGE_REVOKE_V1"
 CI_WORKFLOW = ".github/workflows/ef02-tests.yml"
 PYTEST_STEP = "MT-01 PR CI selective tests (full fallback)"
 NODE_STEP = "Run node --test tests/ef02-watch.test.cjs tests/ef02-reconcile.test.cjs"
+RECEIPT_STEP = "MT-01 V2.1 upload verification receipt"
 
 
 @dataclass(frozen=True)
@@ -103,9 +104,37 @@ def verified_jobs(jobs: list) -> bool:
             continue
         steps_by_name = {s.get("name"): s.get("conclusion") for s in steps
                          if isinstance(s, dict) and isinstance(s.get("name"), str)}
-        if steps_by_name.get(PYTEST_STEP) == "success" and steps_by_name.get(NODE_STEP) == "success":
+        if (steps_by_name.get(PYTEST_STEP) == "success" and
+                steps_by_name.get(NODE_STEP) == "success" and
+                steps_by_name.get(RECEIPT_STEP) == "success"):
             observed.add(job["name"])
     return observed == needed
+
+
+def verified_v21_artifacts(value: object, run_id: int, expected_head: str) -> bool:
+    """Ensure both operating systems uploaded authentic GitHub run metadata.
+
+    The GitHub metadata is externally attestable; candidate-supplied receipt
+    bytes require a separate independent coverage oracle before final rollout.
+    """
+    if not isinstance(value, dict) or not isinstance(value.get("artifacts"), list):
+        return False
+    artifacts = value["artifacts"]
+    if len(artifacts) >= 100 or any(not isinstance(a, dict) for a in artifacts):
+        return False
+    for os_name in ("ubuntu-latest", "windows-latest"):
+        matches = [a for a in artifacts if a.get("name") == f"mt01-v21-{os_name}-{run_id}"]
+        if len(matches) != 1:
+            return False
+        record = matches[0]
+        provenance = record.get("workflow_run")
+        if (type(record.get("id")) is not int or record["id"] < 1 or
+                record.get("expired") is not False or
+                type(record.get("size_in_bytes")) is not int or
+                record["size_in_bytes"] <= 100 or not isinstance(provenance, dict) or
+                provenance.get("id") != run_id or provenance.get("head_sha") != expected_head):
+            return False
+    return True
 
 
 def verify_one(api: Callable[[str], Any], repository: str, number: int,
@@ -159,6 +188,9 @@ def verify_one(api: Callable[[str], Any], repository: str, number: int,
         return Verdict("HOLD", "CI_JOBS_UNPROVEN", number, head, latest["id"])
     if not verified_jobs(jobs["jobs"]):
         return Verdict("WAIT_EVIDENCE", "BOTH_OS_PYTEST_NODE_PROOF_MISSING", number, head, latest["id"])
+    artifact_proof = api(f"{base}/actions/runs/{latest['id']}/artifacts?per_page=100")
+    if not verified_v21_artifacts(artifact_proof, latest["id"], head):
+        return Verdict("WAIT_EVIDENCE", "V21_EXACT_RUN_OS_ARTIFACT_PROOF_MISSING", number, head, latest["id"])
     return Verdict("READY_FOR_MERGE", "EXACT_HEAD_BOTH_OS_CI_VERIFIED", number, head, latest["id"])
 
 

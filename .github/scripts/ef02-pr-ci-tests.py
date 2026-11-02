@@ -7,6 +7,8 @@ No cache, user-supplied shell commands, tokens or pytest worker overrides.
 from __future__ import annotations
 
 import json
+import hashlib
+import xml.etree.ElementTree as ET
 import os
 from pathlib import Path
 import re
@@ -355,6 +357,7 @@ def main_v1() -> int:
 
 def main() -> int:
     """MT-01 V2.1 CI entrypoint: affected tests or explicit HOLD, never auto full."""
+    sys.path.insert(0, str(ROOT / "src"))
     from ai_commerce.engineering.impact_v21 import select_impact
     from ai_commerce.engineering.minimum_test import approved_groups
     event = os.getenv("MT01_CI_EVENT", "")
@@ -394,28 +397,109 @@ def main() -> int:
     print("MT01_V21_MISSING_MAPPING=" + json.dumps(plan.missing_mapping), flush=True)
     print("MT01_V21_INVENTORY_WARNINGS=" + json.dumps(plan.inventory_warnings), flush=True)
     print("MT01_V21_PLAN=" + json.dumps(plan.as_dict(), sort_keys=True), flush=True)
+    no_media_groups = {
+        "diagnostics", "ef01", "ef01p", "ef02", "ef02-recovery",
+        "ef02-scope", "ef02-wake", "git-integrity", "integrity",
+        "mt01", "mt01-v21", "provider", "repair", "merge-queue",
+        "hostops-v1", "hostops-v2",
+        "a02", "a03", "a07", "a08", "a09", "a10", "a10-m02",
+        "a11", "a12", "a14", "foundation", "cli",
+    }
+    need_ffmpeg = bool(set(plan.selected_groups) - no_media_groups)
+    if sys.argv[1:] == ["--v21-plan-only"]:
+        output = os.getenv("GITHUB_OUTPUT")
+        if output:
+            with open(output, "a", encoding="utf-8") as f:
+                f.write("need_ffmpeg=" + str(need_ffmpeg).lower() + "\n")
+                f.write("scope_mode=" + plan.mode + "\n")
+        print("MT01_V21_NEED_FFMPEG=" + str(need_ffmpeg).lower(), flush=True)
+        return 0 if plan.runnable else 3
     raw_workers = os.getenv("MT01_CI_XDIST_WORKERS", "0")
     if raw_workers not in {"0", "2", "4"}:
         print("MT01_V21_REASON=UNAPPROVED_HOSTED_XDIST_WORKERS", flush=True)
         return 3
     if not plan.runnable:
         return 3
+    directory = ROOT / ".local" / "mt01-v21"
+    directory.mkdir(parents=True, exist_ok=True)
+    plan_bytes = json.dumps(plan.as_dict(), sort_keys=True, separators=(",", ":")).encode()
+    (directory / "plan.json").write_bytes(plan_bytes + b"\n")
+    receipt = {
+        "schema": "MT01_VERIFICATION_EVIDENCE_V2",
+        "source_sha": plan.candidate_sha, "base_sha": plan.base_sha,
+        "pr_head_sha": os.getenv("MT01_CI_PR_HEAD_SHA", ""),
+        "platform": os.getenv("RUNNER_OS", ""),
+        "selection_mode": plan.mode,
+        "selected_test_files": list(plan.selected_tests),
+        "plan_sha256": hashlib.sha256(plan_bytes).hexdigest(),
+        "selector_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "registry_sha256": hashlib.sha256(
+            (ROOT / ".github/ef02/verify-profiles.json").read_bytes()).hexdigest(),
+        "chunks": [], "collected_count": 0, "executed_count": 0,
+        "passed_count": 0, "skipped_count": 0,
+        "failed_count": 0, "error_count": 0,
+    }
+    def save_receipt():
+        data = json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
+        (directory / "evidence.json").write_bytes(data + b"\n")
+        print("MT01_V21_EVIDENCE_SHA256=" + hashlib.sha256(data).hexdigest(), flush=True)
+        print("MT01_V21_EXECUTED_COUNT=" + str(receipt["executed_count"]), flush=True)
+        print("MT01_V21_COLLECTED_COUNT=" + str(receipt["collected_count"]), flush=True)
     if plan.mode == "NO_PYTEST_APPLICABLE":
-        # The workflow still runs its trusted Node/static steps.
+        save_receipt()
         return 0
     files = list(plan.selected_tests)
     if not files:
         return 3
     workers = int(raw_workers)
-    # No arbitrary shell supplied by an Issue, and no 100-file full fallback.
-    # Small commands keep Windows command-line lengths bounded.
     for start in range(0, len(files), 40):
         targets = tuple(files[start:start + 40])
-        argv = pytest_command(targets, workers)
+        junit = directory / f"chunk-{start // 40}.xml"
+        argv = (*pytest_command(targets, workers), "--junitxml=" + str(junit))
         print("MT01_V21_PYTEST_COMMAND=python -m pytest " + " ".join(argv[3:]), flush=True)
         code = subprocess.call(argv, cwd=ROOT)
-        if code != 0:
-            return code
+        if not junit.is_file():
+            print("MT01_V21_STATUS=HOLD_PROOF_NO_JUNIT", flush=True)
+            return 3
+        try:
+            cases = list(ET.parse(junit).getroot().iter("testcase"))
+        except (ET.ParseError, OSError):
+            print("MT01_V21_STATUS=HOLD_PROOF_INVALID_JUNIT", flush=True)
+            return 3
+        if not cases:
+            print("MT01_V21_STATUS=HOLD_PROOF_EMPTY_COLLECTION", flush=True)
+            return 3
+        summaries = {
+            "passed": 0, "skipped": 0, "failed": 0, "errors": 0,
+        }
+        for case in cases:
+            if case.find("failure") is not None:
+                summaries["failed"] += 1
+            elif case.find("error") is not None:
+                summaries["errors"] += 1
+            elif case.find("skipped") is not None:
+                summaries["skipped"] += 1
+            else:
+                summaries["passed"] += 1
+        receipt["chunks"].append({
+            "test_files": list(targets),
+            "exit_code": code, "junit_sha256": hashlib.sha256(junit.read_bytes()).hexdigest(),
+            "testcases": len(cases), "counts": summaries,
+            "observed_cases": sorted(
+                str(t.get("classname", "")) + "::" + str(t.get("name", ""))
+                for t in cases
+            ),
+        })
+        receipt["collected_count"] += len(cases)
+        receipt["executed_count"] += len(cases) - summaries["skipped"]
+        for key in ("passed", "skipped", "failed", "errors"):
+            receipt[key + "_count"] += summaries[key]
+        save_receipt()
+        if code != 0 or summaries["failed"] or summaries["errors"]:
+            return code or 3
+    if receipt["executed_count"] == 0:
+        print("MT01_V21_STATUS=HOLD_PROOF_NO_EXECUTED_TESTS", flush=True)
+        return 3
     return 0
 
 if __name__ == "__main__":

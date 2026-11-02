@@ -33,7 +33,7 @@ class FakeGitHub:
 
     def __init__(self, g, *, ci="in_progress", changed_head=False,
                  changed_base=False, jobs_ok=True, approval=True,
-                 revoked=False, latest_failed=False):
+                 revoked=False, latest_failed=False, receipt_ok=True):
         self.g = g
         self.ci = ci
         self.changed_head = changed_head
@@ -42,6 +42,7 @@ class FakeGitHub:
         self.approval = approval
         self.revoked = revoked
         self.latest_failed = latest_failed
+        self.receipt_ok = receipt_ok
         self.writes = []
 
     def __call__(self, path, method="GET", body=None):
@@ -86,11 +87,20 @@ class FakeGitHub:
             jobs = []
             for os_name in ("ubuntu-latest", "windows-latest"):
                 steps = [{"name": self.g.PYTEST_STEP, "conclusion": "success"},
+                         {"name": self.g.RECEIPT_STEP, "conclusion": "success"},
                          {"name": self.g.NODE_STEP,
                           "conclusion": "success" if self.jobs_ok else "skipped"}]
                 jobs.append({"name": f"tests ({os_name})", "status": "completed",
                              "conclusion": "success", "steps": steps})
             return {"jobs": jobs}
+        if path == f"/repos/{self.repo}/actions/runs/200/artifacts?per_page=100":
+            artifacts = [
+                {"id": 1000 + i, "name": f"mt01-v21-{os_name}-200",
+                 "expired": False, "size_in_bytes": 1024,
+                 "workflow_run": {"id": 200, "head_sha": self.head}}
+                for i, os_name in enumerate(("ubuntu-latest", "windows-latest"))
+            ]
+            return {"artifacts": artifacts if self.receipt_ok else artifacts[:1]}
         if path == f"/repos/{self.repo}/pulls?state=open&per_page=100":
             return [{"number": self.pr, "head": {"sha": self.head}}]
         raise AssertionError(f"Unexpected {method} {path}")
@@ -184,3 +194,25 @@ def test_merge_gate_is_not_triggered_by_unrelated_workflow(gate):
         "status": "completed", "conclusion": "success",
         "head_sha": api.head}}) == []
     assert not api.writes
+
+
+def test_merge_gate_v21_missing_os_artifact_holds(gate):
+    api = FakeGitHub(gate, ci="completed", receipt_ok=False)
+    verdict = gate.process(api, api.repo, _ci_event(gate))
+    assert verdict[0]["status"] == "WAIT_EVIDENCE"
+    assert verdict[0]["reason"] == "V21_EXACT_RUN_OS_ARTIFACT_PROOF_MISSING"
+    assert not api.writes
+
+
+def test_merge_gate_v21_wrong_run_and_missing_artifact_denied(gate):
+    correct = [
+        {"id": i + 1, "name": f"mt01-v21-{system}-200",
+         "expired": False, "size_in_bytes": 1024,
+         "workflow_run": {"id": 200, "head_sha": "a" * 40}}
+        for i, system in enumerate(("ubuntu-latest", "windows-latest"))
+    ]
+    assert gate.verified_v21_artifacts({"artifacts": correct}, 200, "a" * 40)
+    assert not gate.verified_v21_artifacts({"artifacts": correct[:1]}, 200, "a" * 40)
+    bad = [dict(correct[0]), dict(correct[1])]
+    bad[1]["workflow_run"] = {"id": 199, "head_sha": "a" * 40}
+    assert not gate.verified_v21_artifacts({"artifacts": bad}, 200, "a" * 40)
