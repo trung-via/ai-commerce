@@ -711,8 +711,8 @@ def _existing_owner_addition_fixture():
     """Two real shared-owner files; no candidate module is executed."""
     from ai_commerce.engineering.minimum_test import approved_groups
     main = (ROOT / "src/ai_commerce/engineering/minimum_test.py").read_text(encoding="utf-8")
-    old_ef01 = '(eng + "model_defaults.py"),'
-    new_ef01 = '(eng + "model_defaults.py", eng + "gate_fixture.py"),'
+    old_ef01 = 'eng + "model_defaults.py"),'
+    new_ef01 = 'eng + "model_defaults.py", eng + "gate_fixture.py"),'
     old_repair = '(eng + "runner.py",), (rem + "worker.py", rem + "scheduler.py")),'
     new_repair = '(eng + "runner.py", eng + "gate_fixture.py"), (rem + "worker.py", rem + "scheduler.py")),'
     old_mt01 = '(eng + "minimum_test.py", eng + "verification.py"), (eng + "runner.py", rem + "worker.py"))'
