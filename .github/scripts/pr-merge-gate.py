@@ -32,6 +32,66 @@ NODE_STEP = "Run node --test tests/ef02-watch.test.cjs tests/ef02-reconcile.test
 RECEIPT_STEP = "MT-01 V2.1 upload verification receipt"
 ORACLE_STEP = "MT-01 baseline closure oracle"
 
+# Conservative independently authored reviewed control closure. This table is
+# separate from impact_v21.select_impact and from the candidate receipt. The
+# default-branch merge-queue script uses GitHub's PR changed-file endpoint.
+# Any unreviewed control or rename fails closed instead of accepting a claim.
+REVIEWED_CONTROL_TESTS = {
+    ".github/ef02/verify-profiles.json": (
+        "tests/test_minimum_test.py", "tests/test_ef02_mt01_registry.py"),
+    ".github/scripts/ef02-pr-ci-tests.py": (
+        "tests/test_minimum_test.py", "tests/test_ef02_mt01_registry.py"),
+    ".github/scripts/mt01_v21_proof.py": (
+        "tests/test_pr_merge_gate.py", "tests/test_mt01_v21.py"),
+    ".github/scripts/pr-merge-gate.py": (
+        "tests/test_pr_merge_gate.py", "tests/test_minimum_test.py"),
+    ".github/workflows/ef02-batch.yml": (
+        "tests/test_ef02.py", "tests/test_minimum_test.py"),
+    ".github/workflows/ef02-tests.yml": (
+        "tests/test_minimum_test.py", "tests/test_pr_merge_gate.py"),
+    "src/ai_commerce/engineering/impact_v21.py": (
+        "tests/test_mt01_v21.py", "tests/test_minimum_test.py"),
+    "src/ai_commerce/engineering/minimum_test.py": (
+        "tests/test_minimum_test.py", "tests/test_ef02.py",
+        "tests/test_ef02_mt01_registry.py"),
+    "src/ai_commerce/remote/validation.py": (
+        "tests/test_minimum_test.py", "tests/test_ef02.py"),
+    "tests/test_mt01_v21.py": ("tests/test_mt01_v21.py",),
+    "tests/test_pr_merge_gate.py": ("tests/test_pr_merge_gate.py",),
+}
+
+
+def reviewed_coverage_for_changed_files(files: object):
+    """Return authoritative changed paths + minimal reviewed control witness.
+
+    This is a conservative control-file policy, not yet a global trusted
+    consumer-graph oracle for arbitrary new product components.
+    """
+    if not isinstance(files, list) or not files or len(files) >= 100:
+        return None
+    changed = set()
+    required = set()
+    for entry in files:
+        if not isinstance(entry, dict):
+            return None
+        name, status = entry.get("filename"), entry.get("status")
+        if (not isinstance(name, str) or not name or name.startswith("/") or
+            "\\" in name or ".." in name.split("/") or
+            status not in ("added", "modified", "removed", "changed")):
+            return None
+        changed.add(name)
+        if name in REVIEWED_CONTROL_TESTS:
+            required.update(REVIEWED_CONTROL_TESTS[name])
+        elif name.startswith(".github/"):
+            return None
+        elif name.startswith("tests/test_") and name.endswith(".py"):
+            required.add(name)
+    if len(changed) != len(files):
+        return None
+    return tuple(sorted(changed)), tuple(sorted(required))
+
+
+
 
 @dataclass(frozen=True)
 class Verdict:
@@ -197,6 +257,13 @@ def verify_one(api: Callable[[str], Any], repository: str, number: int,
     artifact_proof = api(f"{base}/actions/runs/{latest['id']}/artifacts?per_page=100")
     if not verified_v21_artifacts(artifact_proof, latest["id"], head):
         return Verdict("WAIT_EVIDENCE", "V21_EXACT_RUN_OS_ARTIFACT_PROOF_MISSING", number, head, latest["id"])
+    # The GitHub diff is an external, exact-PR source independent of the
+    # candidate-created impact plan and its recorded changed_paths.
+    changed_files = api(f"{base}/pulls/{number}/files?per_page=100")
+    reviewed = reviewed_coverage_for_changed_files(changed_files)
+    if reviewed is None:
+        return Verdict("WAIT_EVIDENCE", "V21_REVIEWED_CHANGED_PATH_ORACLE_MISSING", number, head, latest["id"])
+    actual_changed, required_tests = reviewed
     if not callable(getattr(api, "read_artifact", None)):
         return Verdict("WAIT_EVIDENCE", "V21_ARTIFACT_CONTENT_READER_MISSING", number, head, latest["id"])
     for os_name in ("ubuntu-latest", "windows-latest"):
@@ -207,7 +274,9 @@ def verify_one(api: Callable[[str], Any], repository: str, number: int,
         except (ValueError, TypeError, OSError, TimeoutError, urllib.error.URLError):
             return Verdict("WAIT_EVIDENCE", "V21_ARTIFACT_BYTES_UNAVAILABLE", number, head, latest["id"])
         if not validate_receipt_zip(data, expected_head=head, expected_base=base_sha,
-                                    os_name=os_name):
+                                    os_name=os_name,
+                                    expected_changed_paths=actual_changed,
+                                    required_test_files=required_tests):
             return Verdict("WAIT_EVIDENCE", "V21_CONTENT_PROOF_INVALID", number, head, latest["id"])
     return Verdict("READY_FOR_MERGE", "EXACT_HEAD_BOTH_OS_CI_VERIFIED", number, head, latest["id"])
 

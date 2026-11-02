@@ -23,6 +23,8 @@ def _sha(value: bytes) -> str:
 
 def validate_receipt_zip(
     payload: bytes, *, expected_head: str, expected_base: str, os_name: str,
+    expected_changed_paths: tuple[str, ...] | None = None,
+    required_test_files: tuple[str, ...] = (),
 ) -> bool:
     """Reject malformed, missing, inconsistent or unverifiable receipts."""
     try:
@@ -72,7 +74,18 @@ def validate_receipt_zip(
             any(not isinstance(t, str) or not t.startswith("tests/test_") or
                 not t.endswith(".py") for t in tests)):
             return False
-        if not isinstance(plan.get("changed_paths"), list) or not plan["changed_paths"]:
+        changed = plan.get("changed_paths")
+        if (not isinstance(changed, list) or not changed or
+            len(changed) != len(set(changed)) or
+            any(not isinstance(p, str) or not p or p.startswith("/") or
+                ".." in p.split("/") for p in changed)):
+            return False
+        if expected_changed_paths is not None and set(changed) != set(expected_changed_paths):
+            # Candidate-supplied plan is not authoritative over the GitHub PR diff.
+            return False
+        if not set(required_test_files) <= set(tests):
+            # Independently reviewed control-test closure; a self-consistent
+            # receipt that drops a required test file cannot satisfy the gate.
             return False
         if not all(isinstance(receipt.get(k), str) and len(receipt[k]) == 64
                    for k in ("selector_sha256", "registry_sha256")):
@@ -107,6 +120,12 @@ def validate_receipt_zip(
                               str(case.get("name", "")) for case in cases)
             if chunk.get("observed_cases") != observed:
                 return False
+            for target in targets:
+                source_module = target.removesuffix(".py").replace("/", ".")
+                if not any(case.startswith(source_module + "::") for case in observed):
+                    # JUnit must show a real collected case FROM each named file,
+                    # not merely an internally consistent list of test filenames.
+                    return False
             observed_counts = dict(passed=0, skipped=0, failed=0, errors=0)
             for case in cases:
                 if case.find("failure") is not None:

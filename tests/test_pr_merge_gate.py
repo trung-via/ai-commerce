@@ -34,7 +34,8 @@ class FakeGitHub:
     def __init__(self, g, *, ci="in_progress", changed_head=False,
                  changed_base=False, jobs_ok=True, approval=True,
                  revoked=False, latest_failed=False, receipt_ok=True,
-                 tampered_artifact=False):
+                 tampered_artifact=False, forged_collected_case=False,
+                 extra_changed_path=None):
         self.g = g
         self.ci = ci
         self.changed_head = changed_head
@@ -45,6 +46,8 @@ class FakeGitHub:
         self.latest_failed = latest_failed
         self.receipt_ok = receipt_ok
         self.tampered_artifact = tampered_artifact
+        self.forged_collected_case = forged_collected_case
+        self.extra_changed_path = extra_changed_path
         self.writes = []
 
     def read_artifact(self, artifact_id):
@@ -62,6 +65,8 @@ class FakeGitHub:
         }
         plan_bytes = json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()
         xml = b'<testsuites><testsuite><testcase classname="tests.test_minimum_test" name="test_ok"/></testsuite></testsuites>'
+        if self.forged_collected_case:
+            xml = b'<testsuites><testsuite><testcase classname="tests.test_unrelated" name="test_ok"/></testsuite></testsuites>'
         receipt = {
             "schema": "MT01_VERIFICATION_EVIDENCE_V2", "source_sha": "c" * 40,
             "base_sha": self.base, "pr_head_sha": self.head,
@@ -74,7 +79,9 @@ class FakeGitHub:
                 "test_files": ["tests/test_minimum_test.py"], "exit_code": 0,
                 "junit_sha256": hashlib.sha256(xml).hexdigest(),
                 "testcases": 1, "counts": {"passed": 1, "skipped": 0, "failed": 0, "errors": 0},
-                "observed_cases": ["tests.test_minimum_test::test_ok"],
+                "observed_cases": [
+                    "tests.test_unrelated::test_ok" if self.forged_collected_case
+                    else "tests.test_minimum_test::test_ok"],
             }],
             "collected_count": 1, "executed_count": 1, "passed_count": 1,
             "skipped_count": 0, "failed_count": 0, "error_count": 0,
@@ -102,6 +109,13 @@ class FakeGitHub:
                 "base": {"sha": self.base if not self.changed_base else "e" * 40,
                          "ref": "main"},
             }
+        if path == f"/repos/{self.repo}/pulls/{self.pr}/files?per_page=100":
+            paths = [{"filename": "src/ai_commerce/product/identity.py",
+                      "status": "modified"}]
+            if self.extra_changed_path:
+                paths.append({"filename": self.extra_changed_path,
+                              "status": "modified"})
+            return paths
         if path == f"/repos/{self.repo}/branches/main":
             return {"commit": {"sha": self.base}}
         if path == f"/repos/{self.repo}/issues/{self.pr}/comments?per_page=100":
@@ -277,3 +291,33 @@ def test_merge_gate_v21_rejects_corrupt_zip_payload(gate):
     assert verdict[0]["status"] == "WAIT_EVIDENCE"
     assert verdict[0]["reason"] == "V21_CONTENT_PROOF_INVALID"
     assert not api.writes
+
+
+def test_v21_gate_rejects_self_consistent_fake_junit_omitting_selected_file(gate):
+    api = FakeGitHub(gate, ci="completed", forged_collected_case=True)
+    verdict = gate.process(api, api.repo, _ci_event(gate))
+    assert verdict[0]["status"] == "WAIT_EVIDENCE"
+    assert verdict[0]["reason"] == "V21_CONTENT_PROOF_INVALID"
+    assert not api.writes
+
+
+def test_v21_gate_rejects_candidate_plan_that_hides_real_github_diff(gate):
+    api = FakeGitHub(gate, ci="completed",
+                     extra_changed_path=".github/scripts/pr-merge-gate.py")
+    verdict = gate.process(api, api.repo, _ci_event(gate))
+    assert verdict[0]["status"] == "WAIT_EVIDENCE"
+    assert verdict[0]["reason"] == "V21_CONTENT_PROOF_INVALID"
+    assert not api.writes
+
+
+def test_v21_independent_control_closure_rejects_unknown_github_controls(gate):
+    assert gate.reviewed_coverage_for_changed_files([
+        {"filename": ".github/workflows/unreviewed.yml", "status": "added"}
+    ]) is None
+    paths, required = gate.reviewed_coverage_for_changed_files([
+        {"filename": ".github/scripts/mt01_v21_proof.py", "status": "modified"},
+        {"filename": "tests/test_pr_merge_gate.py", "status": "modified"},
+    ])
+    assert "tests/test_mt01_v21.py" in required
+    assert "tests/test_pr_merge_gate.py" in required
+    assert len(paths) == 2
