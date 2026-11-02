@@ -278,6 +278,10 @@ def registered_action_plan(
     profiles = registered_profiles or {}
     entries = []
     problems = list(impact.missing_mapping)
+    known_acs = {ac for group in groups for ac in group.acs}
+    unknown_acs = sorted(set(required_acs) - known_acs)
+    if unknown_acs:
+        problems.extend("AC_UNMAPPED:" + ac for ac in unknown_acs)
     select_parallel = list(fallback_argv[-2:]) == ["-n", "12"]
     for name in impact.selected_groups:
         group = by_name[name]
@@ -339,7 +343,7 @@ def registered_action_plan(
         "required_acs": sorted(set(required_acs)),
         "changed_paths": sorted(set(changed_paths)),
         "affected_paths": list(impact.affected_paths),
-        "unknown_acs": [],
+        "unknown_acs": unknown_acs,
         "unknown_tests": [p for p in impact.missing_mapping if "TEST" in p],
         "unknown_consumers": [p for p in impact.missing_mapping if "SOURCE" in p or "IMPORT" in p],
         "reason_codes": list(impact.reason_codes) + list(problems),

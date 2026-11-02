@@ -387,11 +387,12 @@ def select_plan(*, repo: Path, base_sha: str, base_files: Mapping[str, str],
                 aggregate_sources: Sequence[str] = (), env: dict | None = None,
                 registered_profiles: Mapping[str, Sequence[str]] | None = None) -> dict:
     groups = tuple(approved_groups() if groups is None else groups)
-    # MT-01 V2.1: opt-in through trusted EF02 workflow, preserving historical
-    # immutable packets and explicit full profiles. Never synthesize argv.
+    # V2.1 chooses from *actual post-executor changed paths*, not the incoming
+    # packet's profile. A broad authoring default is never itself full
+    # regression approval. Preserve explicit release/full via separately
+    # reviewed workflows, never by guessing intent from tests/-q.
     if (os.environ.get("MT01_V21_ENABLED") == "1" and registered_only and
-            registered_profiles is not None and
-            list(fallback_argv[3:5]) != ["tests", "-q"]):
+            registered_profiles is not None):
         from .impact_v21 import registered_action_plan
         return registered_action_plan(
             repo=repo, base_sha=base_sha, base_files=base_files,

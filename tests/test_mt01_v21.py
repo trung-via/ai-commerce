@@ -201,3 +201,39 @@ def test_v21_junit_errors_use_singular_receipt_counter():
         "passed": 11, "skipped": 2, "failed": 3, "errors": 4})
     assert receipt == {"passed_count": 11, "skipped_count": 2,
                        "failed_count": 3, "error_count": 4}
+
+
+def test_v21_registered_full_packet_does_not_disarm_impact_planner(tmp_path, monkeypatch):
+    from ai_commerce.engineering.minimum_test import select_plan
+    groups, a12, _ = fixture(tmp_path)
+    files = file_hashes(tmp_path)
+    monkeypatch.setenv("MT01_V21_ENABLED", "1")
+    broad = ["python", "-m", "pytest", "tests", "-q", "-n", "12"]
+    narrow = ["python", "-m", "pytest", a12, "-q", "-n", "12"]
+    plan = select_plan(
+        repo=tmp_path, base_sha="a" * 40, base_files=files,
+        candidate_files=files, changed_paths=["src/ai_commerce/product/identity.py"],
+        required_acs=(), fallback_argv=broad, groups=groups,
+        registered_only=True,
+        registered_profiles={"project-tests": broad, "mt01-a12-tests": narrow},
+    )
+    assert plan["version"] == 2
+    assert not plan["fallback"]
+    assert plan["selected_groups"] == ["a12"]
+    assert plan["groups"][0]["binding"]["argv"] == narrow
+    assert all("tests" not in e["binding"]["argv"][3:5] for e in plan["groups"])
+
+
+def test_v21_unknown_acceptance_id_never_passes(tmp_path):
+    groups, a12, _ = fixture(tmp_path)
+    files = file_hashes(tmp_path)
+    narrow = ["python", "-m", "pytest", a12, "-q", "-n", "12"]
+    plan = registered_action_plan(
+        repo=tmp_path, base_sha="a" * 40, base_files=files,
+        candidate_files=files, changed_paths=["src/ai_commerce/product/identity.py"],
+        required_acs=("UNKNOWN_AC",), fallback_argv=narrow, groups=groups,
+        registered_profiles={"mt01-a12-tests": narrow}, env={},
+    )
+    assert "UNKNOWN_AC" in plan["unknown_acs"]
+    assert "AC_UNMAPPED:UNKNOWN_AC" in plan["reason_codes"]
+    assert any(g["state"] == "UNPROVEN" for g in plan["groups"])
