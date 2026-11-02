@@ -18,6 +18,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+# This module is loaded by filename during merge-queue unit tests as well as CI.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from mt01_v21_proof import validate_receipt_zip
+
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 APPROVAL = "AI_COMMERCE_HUMAN_MERGE_APPROVAL_V1"
@@ -191,6 +195,18 @@ def verify_one(api: Callable[[str], Any], repository: str, number: int,
     artifact_proof = api(f"{base}/actions/runs/{latest['id']}/artifacts?per_page=100")
     if not verified_v21_artifacts(artifact_proof, latest["id"], head):
         return Verdict("WAIT_EVIDENCE", "V21_EXACT_RUN_OS_ARTIFACT_PROOF_MISSING", number, head, latest["id"])
+    if not callable(getattr(api, "read_artifact", None)):
+        return Verdict("WAIT_EVIDENCE", "V21_ARTIFACT_CONTENT_READER_MISSING", number, head, latest["id"])
+    for os_name in ("ubuntu-latest", "windows-latest"):
+        record = next(a for a in artifact_proof["artifacts"]
+                      if a["name"] == f"mt01-v21-{os_name}-{latest['id']}")
+        try:
+            data = api.read_artifact(record["id"])
+        except (ValueError, TypeError, OSError, TimeoutError, urllib.error.URLError):
+            return Verdict("WAIT_EVIDENCE", "V21_ARTIFACT_BYTES_UNAVAILABLE", number, head, latest["id"])
+        if not validate_receipt_zip(data, expected_head=head, expected_base=base_sha,
+                                    os_name=os_name):
+            return Verdict("WAIT_EVIDENCE", "V21_CONTENT_PROOF_INVALID", number, head, latest["id"])
     return Verdict("READY_FOR_MERGE", "EXACT_HEAD_BOTH_OS_CI_VERIFIED", number, head, latest["id"])
 
 
@@ -200,6 +216,22 @@ class GitHubAPI:
             raise ValueError("MERGE_GATE_REPOSITORY_OR_TOKEN_MISSING")
         self.repository = repository
         self.token = token
+
+    def read_artifact(self, artifact_id: int) -> bytes:
+        """Download the exact GitHub-hosted ZIP through a bounded signed redirect."""
+        if type(artifact_id) is not int or artifact_id < 1:
+            raise ValueError("INVALID_ARTIFACT_ID")
+        path = f"/repos/{self.repository}/actions/artifacts/{artifact_id}/zip"
+        req = urllib.request.Request(
+            "https://api.github.com" + path,
+            headers={"Authorization": "Bearer " + self.token,
+                     "Accept": "application/vnd.github+json",
+                     "X-GitHub-Api-Version": "2022-11-28"})
+        with urllib.request.urlopen(req, timeout=18) as response:
+            content = response.read(24 * 1024 * 1024 + 1)
+        if len(content) > 24 * 1024 * 1024:
+            raise ValueError("ARTIFACT_TOO_LARGE")
+        return content
 
     def __call__(self, path: str, method: str = "GET", body: dict | None = None) -> Any:
         if not path.startswith(f"/repos/{self.repository}/"):

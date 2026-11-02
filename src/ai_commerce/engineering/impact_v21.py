@@ -20,6 +20,9 @@ CONTROL_TESTS = {
     ".github/workflows/ef02-tests.yml": (
         "tests/test_minimum_test.py", "tests/test_pr_merge_gate.py",
     ),
+    ".github/scripts/mt01_v21_proof.py": (
+        "tests/test_pr_merge_gate.py", "tests/test_mt01_v21.py",
+    ),
     ".github/scripts/pr-merge-gate.py": (
         "tests/test_pr_merge_gate.py", "tests/test_minimum_test.py",
     ),

@@ -33,7 +33,8 @@ class FakeGitHub:
 
     def __init__(self, g, *, ci="in_progress", changed_head=False,
                  changed_base=False, jobs_ok=True, approval=True,
-                 revoked=False, latest_failed=False, receipt_ok=True):
+                 revoked=False, latest_failed=False, receipt_ok=True,
+                 tampered_artifact=False):
         self.g = g
         self.ci = ci
         self.changed_head = changed_head
@@ -43,7 +44,49 @@ class FakeGitHub:
         self.revoked = revoked
         self.latest_failed = latest_failed
         self.receipt_ok = receipt_ok
+        self.tampered_artifact = tampered_artifact
         self.writes = []
+
+    def read_artifact(self, artifact_id):
+        import io
+        import hashlib
+        import json
+        import zipfile
+        if artifact_id not in (1000, 1001):
+            raise ValueError("UNKNOWN_TEST_ARTIFACT")
+        os_name = "ubuntu-latest" if artifact_id == 1000 else "windows-latest"
+        plan = {
+            "version": 2, "base_sha": self.base, "candidate_sha": "c" * 40,
+            "mode": "TARGETED", "changed_paths": ["src/ai_commerce/product/identity.py"],
+            "selected_tests": ["tests/test_minimum_test.py"],
+        }
+        plan_bytes = json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()
+        xml = b'<testsuites><testsuite><testcase classname="tests.test_minimum_test" name="test_ok"/></testsuite></testsuites>'
+        receipt = {
+            "schema": "MT01_VERIFICATION_EVIDENCE_V2", "source_sha": "c" * 40,
+            "base_sha": self.base, "pr_head_sha": self.head,
+            "platform": "Linux" if os_name == "ubuntu-latest" else "Windows",
+            "selection_mode": "TARGETED",
+            "selected_test_files": ["tests/test_minimum_test.py"],
+            "plan_sha256": hashlib.sha256(plan_bytes).hexdigest(),
+            "selector_sha256": "a" * 64, "registry_sha256": "b" * 64,
+            "chunks": [{
+                "test_files": ["tests/test_minimum_test.py"], "exit_code": 0,
+                "junit_sha256": hashlib.sha256(xml).hexdigest(),
+                "testcases": 1, "counts": {"passed": 1, "skipped": 0, "failed": 0, "errors": 0},
+                "observed_cases": ["tests.test_minimum_test::test_ok"],
+            }],
+            "collected_count": 1, "executed_count": 1, "passed_count": 1,
+            "skipped_count": 0, "failed_count": 0, "error_count": 0,
+        }
+        if getattr(self, "tampered_artifact", False):
+            receipt["executed_count"] = 2
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("plan.json", json.dumps(plan))
+            archive.writestr("evidence.json", json.dumps(receipt))
+            archive.writestr("chunk-0.xml", xml)
+        return buffer.getvalue()
 
     def __call__(self, path, method="GET", body=None):
         assert path.startswith("/repos/" + self.repo + "/")
@@ -216,3 +259,20 @@ def test_merge_gate_v21_wrong_run_and_missing_artifact_denied(gate):
     bad = [dict(correct[0]), dict(correct[1])]
     bad[1]["workflow_run"] = {"id": 199, "head_sha": "a" * 40}
     assert not gate.verified_v21_artifacts({"artifacts": bad}, 200, "a" * 40)
+
+
+def test_merge_gate_v21_rejects_uploaded_forged_receipt_bytes(gate):
+    api = FakeGitHub(gate, ci="completed", tampered_artifact=True)
+    verdict = gate.process(api, api.repo, _ci_event(gate))
+    assert verdict[0]["status"] == "WAIT_EVIDENCE"
+    assert verdict[0]["reason"] == "V21_CONTENT_PROOF_INVALID"
+    assert not api.writes
+
+
+def test_merge_gate_v21_rejects_corrupt_zip_payload(gate):
+    api = FakeGitHub(gate, ci="completed")
+    api.read_artifact = lambda artifact_id: b"corrupt"
+    verdict = gate.process(api, api.repo, _ci_event(gate))
+    assert verdict[0]["status"] == "WAIT_EVIDENCE"
+    assert verdict[0]["reason"] == "V21_CONTENT_PROOF_INVALID"
+    assert not api.writes
