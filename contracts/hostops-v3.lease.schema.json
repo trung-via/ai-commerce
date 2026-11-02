@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-commerce.invalid/contracts/hostops-v3.lease.schema.json",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "hostops.lease.v3"
+    },
+    "lease_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{8,64}$"
+    },
+    "issuer": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{8,64}$"
+    },
+    "host_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{8,64}$"
+    },
+    "release_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "roots": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096
+      },
+      "minItems": 1,
+      "maxItems": 32
+    },
+    "operations": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "append",
+          "copy",
+          "create",
+          "disclose",
+          "find",
+          "hash",
+          "list",
+          "move",
+          "patch",
+          "powershell",
+          "quarantine",
+          "read",
+          "rename",
+          "replace",
+          "stat",
+          "volumes"
+        ]
+      },
+      "minItems": 1,
+      "maxItems": 16,
+      "uniqueItems": true
+    },
+    "not_before": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "expires_at": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "max_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 67108864
+    },
+    "max_entries": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4096
+    },
+    "allow_unc": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema",
+    "lease_id",
+    "issuer",
+    "host_id",
+    "release_id",
+    "roots",
+    "operations",
+    "not_before",
+    "expires_at",
+    "max_bytes",
+    "max_entries",
+    "allow_unc"
+  ],
+  "additionalProperties": false
+}
