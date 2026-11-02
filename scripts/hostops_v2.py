@@ -199,8 +199,8 @@ def validate_pid_map(d):
             raise Denied("DIAGNOSTIC_PROCESS_VALUE_INVALID")
         seen.add(p["pid"])
         if any(p[k] is not None and type(p[k]) is not bool for k in (
-            "debug_9333", "debug_9222", "profile_root_exists"
-        )):
+            "debug_9333", "debug_9222"
+        )) or p["profile_root_exists"] is not None:
             raise Denied("DIAGNOSTIC_PROCESS_VALUE_INVALID")
         group = p["profile_group"]
         if group is not None and (
