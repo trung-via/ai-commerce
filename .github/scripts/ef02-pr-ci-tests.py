@@ -331,7 +331,7 @@ def postmerge_preflight() -> int:
     return 0
 
 
-def main() -> int:
+def main_v1() -> int:
     files, mode, reasons, groups = choose(
         ROOT, event=os.environ.get("MT01_CI_EVENT", ""),
         base=os.environ.get("MT01_CI_BASE_SHA", ""),
@@ -351,6 +351,72 @@ def main() -> int:
     print("MT01_PR_CI_PYTEST_COMMAND=python -m pytest " + " ".join(argv[3:]), flush=True)
     return subprocess.call(argv, cwd=ROOT)
 
+
+
+def main() -> int:
+    """MT-01 V2.1 CI entrypoint: affected tests or explicit HOLD, never auto full."""
+    from ai_commerce.engineering.impact_v21 import select_impact
+    from ai_commerce.engineering.minimum_test import approved_groups
+    event = os.getenv("MT01_CI_EVENT", "")
+    base = os.getenv("MT01_CI_BASE_SHA", "")
+    if event == "push" and not base:
+        try:
+            base = subprocess.check_output(
+                ["git", "-C", str(ROOT), "rev-parse", "HEAD^"],
+                stderr=subprocess.DEVNULL, timeout=20).decode().strip()
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            base = ""
+    if event not in ("push", "pull_request") or not SHA.fullmatch(base):
+        print("MT01_V21_STATUS=HOLD_PROOF", flush=True)
+        print("MT01_V21_REASON=BASE_OR_EVENT_UNVERIFIED", flush=True)
+        return 3
+    try:
+        changed, _ = changed_paths(ROOT, base)
+        base_tests = subprocess.check_output(
+            ["git", "-C", str(ROOT), "ls-tree", "-r", "--name-only", "-z", base],
+            stderr=subprocess.DEVNULL, timeout=20).decode("utf-8").split("\0")
+        candidate = subprocess.check_output(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"], timeout=20).decode().strip()
+        plan = select_impact(
+            root=ROOT, changed_paths=sorted(changed), groups=approved_groups(),
+            base_sha=base, candidate_sha=candidate,
+            previous_tests=[p for p in base_tests if p.startswith("tests/test_") and p.endswith(".py")],
+        )
+    except (OSError, UnicodeError, ValueError, subprocess.CalledProcessError,
+            subprocess.TimeoutExpired) as exc:
+        print("MT01_V21_STATUS=HOLD_PROOF", flush=True)
+        print("MT01_V21_REASON=PLANNER_EVIDENCE_" + type(exc).__name__, flush=True)
+        return 3
+    print("MT01_V21_STATUS=" + plan.mode, flush=True)
+    print("MT01_V21_REASON=" + ",".join(plan.reason_codes), flush=True)
+    print("MT01_V21_GROUPS=" + ",".join(plan.selected_groups), flush=True)
+    print("MT01_V21_TEST_PATHS=" + json.dumps(plan.selected_tests), flush=True)
+    print("MT01_V21_MISSING_MAPPING=" + json.dumps(plan.missing_mapping), flush=True)
+    print("MT01_V21_INVENTORY_WARNINGS=" + json.dumps(plan.inventory_warnings), flush=True)
+    print("MT01_V21_PLAN=" + json.dumps(plan.as_dict(), sort_keys=True), flush=True)
+    raw_workers = os.getenv("MT01_CI_XDIST_WORKERS", "0")
+    if raw_workers not in {"0", "2", "4"}:
+        print("MT01_V21_REASON=UNAPPROVED_HOSTED_XDIST_WORKERS", flush=True)
+        return 3
+    if not plan.runnable:
+        return 3
+    if plan.mode == "NO_PYTEST_APPLICABLE":
+        # The workflow still runs its trusted Node/static steps.
+        return 0
+    files = list(plan.selected_tests)
+    if not files:
+        return 3
+    workers = int(raw_workers)
+    # No arbitrary shell supplied by an Issue, and no 100-file full fallback.
+    # Small commands keep Windows command-line lengths bounded.
+    for start in range(0, len(files), 40):
+        targets = tuple(files[start:start + 40])
+        argv = pytest_command(targets, workers)
+        print("MT01_V21_PYTEST_COMMAND=python -m pytest " + " ".join(argv[3:]), flush=True)
+        code = subprocess.call(argv, cwd=ROOT)
+        if code != 0:
+            return code
+    return 0
 
 if __name__ == "__main__":
     raise SystemExit(postmerge_preflight() if sys.argv[1:] == ["--reuse-preflight"] else main())

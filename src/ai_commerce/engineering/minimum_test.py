@@ -230,6 +230,8 @@ def approved_groups() -> tuple[TestGroup, ...]:
                   ("MT01.owner-approved-merge-queue",),
                   (".github/scripts/pr-merge-gate.py",),
                   contracts=(".github/workflows/human-merge-queue.yml",)),
+        TestGroup("mt01-v21", ("tests/test_mt01_v21.py",), ("MT01.v2-impact-selection",),
+                  (eng + "impact_v21.py",), consumers=(".github/scripts/ef02-pr-ci-tests.py",)),
         TestGroup("mt01", ("tests/test_minimum_test.py",), ("MT01.selection-and-evidence",),
                   (eng + "minimum_test.py", eng + "verification.py"), (eng + "runner.py", rem + "worker.py")),
         TestGroup("ef01p", ("tests/test_ef01_performance.py",), ("EF01P.git-and-host-budget",),

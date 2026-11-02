@@ -21,25 +21,6 @@ on:
       - "tests/test_ef02_mt01_registry.py"
       - "tests/test_minimum_test.py"
   pull_request:
-    paths:
-      - "src/ai_commerce/remote/**"
-      - "src/ai_commerce/engineering/**"
-      - "tests/test_ef01.py"
-      - "tests/test_ef02*.py"
-      - "tests/ef02-watch.test.cjs"
-      - "tests/ef02-reconcile.test.cjs"
-      - ".github/scripts/ef02-watch.cjs"
-      - ".github/scripts/ef02-reconcile.cjs"
-      - ".github/workflows/ef02-*.yml"
-      - ".github/scripts/ef02-pr-ci-tests.py"
-      - ".github/scripts/pr-merge-gate.py"
-      - ".github/workflows/human-merge-queue.yml"
-      - "tests/test_pr_merge_gate.py"
-      - ".github/ef02/verify-profiles.json"
-      - "docs/engineering/MT01_COMPONENT_AWARE_IMPLEMENTATION_REPORT.md"
-      - "tests/test_ef02_mt01_registry.py"
-      - "tests/test_minimum_test.py"
-      - "contracts/RemoteActionBatch.v1.schema.json"
 permissions:
   contents: read
   actions: read
