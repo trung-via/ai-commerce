@@ -493,7 +493,8 @@ def test_preload_before_wake_uses_enrolled_route_only(monkeypatch):
     inv = d4._PlaywrightInventory()
     @contextmanager
     def fake_browser(endpoint):
-        assert endpoint == BIND.cdp_endpoint
+        # The legacy D4 send fixture uses 9222; D5 auto-preload is 9333.
+        assert endpoint == "http://127.0.0.1:9333"
         yield SimpleNamespace(contexts=[ctx])
     monkeypatch.setattr(inv, "_browser", fake_browser)
     # D4 fixture normally uses port 9222; preload is deliberately 9333 only.
