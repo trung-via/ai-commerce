@@ -264,6 +264,7 @@
     "tests/test_ef02_wake_d1.py",
     "tests/test_ef02_wake_d2.py",
     "tests/test_ef02_cdp_doorbell.py",
+    "tests/test_ef02_plugin_selection_probe.py",
     "tests/test_ef02_d3_github_artifact_authority.py",
     "tests/test_ef02_d3_signed_origin_consent.py",
     "tests/test_ef02_d3_two_grant_delivery.py",
@@ -294,6 +295,24 @@
     "tests/test_a13_claim_rights.py",
     "tests/test_a13_link.py",
     "tests/test_a13_evidence_pack.py",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "mt01-hostops-v1-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_hostops_request.py",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "mt01-hostops-v2-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_hostops_v2.py",
     "-q",
     "-n",
     "12"

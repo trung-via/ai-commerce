@@ -52,6 +52,8 @@ def test_reviewed_map_contains_exact_real_paths_and_all_current_python_test_fami
     ("tests/test_a13_evidence_pack.py", "a13"),
     ("tests/test_a12_claims.py", "a12"),
     ("src/ai_commerce/remote/chrome_acquisition.py", "ef02-wake"),
+    ("scripts/hostops_request.py", "hostops-v1"),
+    ("scripts/hostops_v2.py", "hostops-v2"),
 ])
 def test_real_known_component_uses_exact_registered_companion(real_tree, monkeypatch, path, expected):
     selected = real_plan(real_tree, monkeypatch, path)
@@ -921,3 +923,178 @@ def test_pr_ci_empty_diff_requires_full(tmp_path, pr_ci_module):
         selection_fn=lambda **_: _pr_ci_plan(),
     )
     assert result[2] == ("EMPTY_DIFF",)
+
+
+# Hosted PR CI improvements: bounded parallel workers and reviewed control edits.
+def test_pr_ci_additive_registry_requires_exact_reviewed_commands(pr_ci_module):
+    from ai_commerce.engineering import minimum_test as mt
+    group = next(g for g in mt.approved_groups() if g.name == "ef02-wake")
+    before = {"project-tests": ["python", "-m", "pytest", "tests", "-q", "-n", "12"]}
+    argv = ["python", "-m", "pytest", *group.tests, "-q", "-n", "12"]
+    added = {**before, "mt01-ef02-wake-tests": argv}
+    approved = pr_ci_module.additive_registry_tests(before, added, mt.approved_groups())
+    assert set(approved) == {*group.tests, *pr_ci_module.REVIEWED_REGISTRY_REGRESSIONS}
+    assert pr_ci_module.additive_registry_tests(before, {**before, "mt01-ef02-wake-tests": argv[:-1] + ["4"]}, mt.approved_groups()) is None
+    assert pr_ci_module.additive_registry_tests(before, {**before, "unsafe": argv}, mt.approved_groups()) is None
+    assert pr_ci_module.additive_registry_tests(before, {"mt01-ef02-wake-tests": argv}, mt.approved_groups()) is None
+    assert pr_ci_module.additive_registry_tests(before, before, mt.approved_groups()) is None
+    assert pr_ci_module.additive_registry_tests(before, {**added, "project-tests": ["pytest"]}, mt.approved_groups()) is None
+    assert pr_ci_module.additive_registry_tests(
+        before, {**before, "mt01-wrong-name": argv}, mt.approved_groups()) is None
+
+
+def test_pr_ci_additive_registry_only_selects_reviewed_tests(pr_ci_module):
+    selected = pr_ci_module.choose(
+        ROOT, event="pull_request", base="a" * 40,
+        paths={pr_ci_module.REGISTRY},
+        registry_tests_fn=lambda root, base: ("tests/test_minimum_test.py", "tests/test_ef02_mt01_registry.py"),
+    )
+    assert selected[0] == ("tests/test_ef02_mt01_registry.py", "tests/test_minimum_test.py")
+    assert selected[1] == "SELECTED_AFFECTED_INTEGRATION"
+    held = pr_ci_module.choose(
+        ROOT, event="pull_request", base="a" * 40,
+        paths={pr_ci_module.REGISTRY},
+        registry_tests_fn=lambda root, base: None,
+    )
+    assert held[1] == "FULL_PROJECT_REQUIRED"
+    assert held[2] == ("REGISTRY_CHANGE_NOT_PROVEN_ADDITIVE",)
+
+
+def test_pr_ci_registry_plus_source_includes_all_consumers(pr_ci_module):
+    selected = pr_ci_module.choose(
+        ROOT, event="pull_request", base="a" * 40,
+        paths={pr_ci_module.REGISTRY, "src/ai_commerce/remote/github_artifact_authority.py"},
+        selection_fn=lambda **_: _pr_ci_plan(),
+        registry_tests_fn=lambda root, base: ("tests/test_minimum_test.py", "tests/test_ef02_mt01_registry.py"),
+    )
+    assert selected[1] == "SELECTED_AFFECTED_INTEGRATION"
+    assert set(selected[0]) == {"tests/test_ef02_d3_github_artifact_authority.py",
+                                "tests/test_minimum_test.py", "tests/test_ef02_mt01_registry.py"}
+
+
+def test_pr_ci_report_changes_run_existing_test_consumer(pr_ci_module):
+    selected = pr_ci_module.choose(
+        ROOT, event="pull_request", base="a" * 40,
+        paths={pr_ci_module.MT01_REPORT},
+    )
+    assert selected[0] == ("tests/test_minimum_test.py",)
+    assert selected[1] == "SELECTED_AFFECTED_INTEGRATION"
+
+
+@pytest.mark.parametrize("control", [
+    ".github/scripts/ef02-watch.cjs",
+    ".github/ef02/approved-candidates.v1.json",
+])
+def test_pr_ci_other_github_controls_still_require_full(pr_ci_module, control):
+    selected = pr_ci_module.choose(
+        ROOT, event="pull_request", base="a" * 40,
+        paths={control}, selection_fn=lambda **_: _pr_ci_plan(),
+    )
+    assert selected[1] == "FULL_PROJECT_REQUIRED"
+    assert selected[2] == ("CI_OR_SHARED_CONFIG_CHANGED",)
+
+
+@pytest.mark.parametrize("workers", [0, 2, 4])
+def test_pr_ci_hosted_worker_command_is_bounded(pr_ci_module, workers):
+    argv = pr_ci_module.pytest_command(("tests/test_minimum_test.py",), workers)
+    assert argv[:3] == (sys.executable, "-m", "pytest")
+    assert argv[3:5] == ("tests/test_minimum_test.py", "-q")
+    assert argv[5:] == (("-n", str(workers), "--dist", "loadfile") if workers else ())
+
+
+@pytest.mark.parametrize("workers", [-1, 1, 12, "auto", True])
+def test_pr_ci_unapproved_hosted_worker_count_rejected(pr_ci_module, workers):
+    with pytest.raises(ValueError, match="UNAPPROVED_HOSTED_WORKER_COUNT"):
+        pr_ci_module.pytest_command(("tests",), workers)
+
+
+# MT-01 protected profile-extension regression matrix (post #188).
+def test_pr_ci_additive_existing_profile_preserves_full_reviewed_group(pr_ci_module):
+    from ai_commerce.engineering import minimum_test as mt
+    group = next(g for g in mt.approved_groups() if g.name == "ef02-wake")
+    assert len(group.tests) > 4
+    name = "mt01-ef02-wake-tests"
+    # Allow an earlier profile to omit known group tests, but never omit them
+    # from the resulting CI selection.
+    before = {
+        "project-tests": ["python", "-m", "pytest", "tests", "-q", "-n", "12"],
+        name: ["python", "-m", "pytest", *group.tests[:3],
+               *group.tests[5:], "-q", "-n", "12"],
+    }
+    after = {
+        **before,
+        name: ["python", "-m", "pytest", *group.tests, "-q", "-n", "12"],
+    }
+    selected = pr_ci_module.additive_registry_tests(before, after, mt.approved_groups())
+    assert set(selected) == {*group.tests, *pr_ci_module.REVIEWED_REGISTRY_REGRESSIONS}
+    assert len(selected) == len(set(selected))
+
+
+@pytest.mark.parametrize("mutation", [
+    "remove-profile", "remove-test", "reorder", "replace", "unknown-test",
+    "worker", "pytest-flags", "duplicate-old-test", "unknown-profile",
+    "existing-profile-no-delta",
+])
+def test_pr_ci_existing_profile_refuses_unsafe_change(pr_ci_module, mutation):
+    from ai_commerce.engineering import minimum_test as mt
+    group = next(g for g in mt.approved_groups() if g.name == "ef02-wake")
+    name = "mt01-ef02-wake-tests"
+    before_tests = list(group.tests[:-1])
+    before_cmd = ["python", "-m", "pytest", *before_tests, "-q", "-n", "12"]
+    after_cmd = ["python", "-m", "pytest", *group.tests, "-q", "-n", "12"]
+    before = {"project-tests": ["python", "-m", "pytest", "tests", "-q", "-n", "12"],
+              name: before_cmd}
+    after = {**before, name: after_cmd}
+    if mutation == "remove-profile":
+        after.pop(name)
+    elif mutation == "remove-test":
+        after[name] = before_cmd[:-4] + before_cmd[-3:]  # trim an old test
+    elif mutation == "reorder":
+        after[name] = ["python", "-m", "pytest", *group.tests[1:2],
+                       *group.tests[:1], *group.tests[2:], "-q", "-n", "12"]
+    elif mutation == "replace":
+        after[name] = ["python", "-m", "pytest", "tests/test_unreviewed.py",
+                       *group.tests[1:], "-q", "-n", "12"]
+    elif mutation == "unknown-test":
+        after[name] = ["python", "-m", "pytest", *group.tests,
+                       "tests/test_ef02_future_unapproved.py", "-q", "-n", "12"]
+    elif mutation == "worker":
+        after[name] = after_cmd[:-1] + ["4"]
+    elif mutation == "pytest-flags":
+        after[name] = after_cmd[:-3] + ["-x", "-n", "12"]
+    elif mutation == "duplicate-old-test":
+        before[name] = before_cmd[:4] + [before_tests[0]] + before_cmd[4:]
+    elif mutation == "unknown-profile":
+        after["unreviewed-profile"] = ["python", "-m", "pytest", "tests", "-q"]
+    elif mutation == "existing-profile-no-delta":
+        after = before.copy()
+    assert pr_ci_module.additive_registry_tests(before, after, mt.approved_groups()) is None
+
+
+def test_pr_ci_existing_profile_only_selects_proven_consumer_set(pr_ci_module):
+    from ai_commerce.engineering import minimum_test as mt
+    group = next(g for g in mt.approved_groups() if g.name == "ef02-wake")
+    selected = pr_ci_module.choose(
+        ROOT, event="pull_request", base="a" * 40,
+        paths={pr_ci_module.REGISTRY, pr_ci_module.MT01_REPORT},
+        registry_tests_fn=lambda *_: tuple(group.tests) + pr_ci_module.REVIEWED_REGISTRY_REGRESSIONS,
+    )
+    assert selected[1] == "SELECTED_AFFECTED_INTEGRATION"
+    assert set(selected[0]) == {*group.tests, *pr_ci_module.REVIEWED_REGISTRY_REGRESSIONS}
+
+
+@pytest.mark.parametrize("paths", [
+    {"src/ai_commerce/engineering/minimum_test.py"},
+    {"src/ai_commerce/engineering/minimum_test.py", ".github/ef02/verify-profiles.json"},
+    {"src/ai_commerce/engineering/minimum_test.py", "tests/test_ef02_wake_d1.py"},
+])
+def test_pr_ci_mt01_engine_changes_require_full_even_with_registry_extension(
+        pr_ci_module, paths):
+    result = pr_ci_module.choose(
+        ROOT, event="pull_request", base="a" * 40, paths=paths,
+        registry_tests_fn=lambda *_: ("tests/test_minimum_test.py",),
+        selection_fn=lambda **_: _pr_ci_plan(),
+    )
+    assert result[0] == ("tests",)
+    assert result[1] == "FULL_PROJECT_REQUIRED"
+    assert result[2] == ("MT01_ENGINE_CHANGED",)
