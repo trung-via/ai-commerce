@@ -29,10 +29,14 @@ def _emit(code: str, **fields) -> None:
     print(json.dumps({"code": code, **fields}, sort_keys=True))
 
 
-def _consent(token: str) -> bool:
+def _consent(token: str, *, preserve_draft: bool = False) -> bool:
     print("One local exact-chat D5 staging attempt. NO Send, NO Wake.")
     print("The existing ChatGPT composer must be EMPTY.")
-    print("After typing, visually inspect and MANUALLY clear all unsent chips/draft.")
+    if preserve_draft:
+        print("After preparing the exact chip/prompt, inspect before a separately approved Send.")
+        print("Do not clear the draft unless aborting; no Send occurs in prepare-turn.")
+    else:
+        print("After typing, visually inspect and MANUALLY clear all unsent chips/draft.")
     try:
         return input(f"Type exactly {token} [other=abort]: ") == token
     except (EOFError, KeyboardInterrupt):
@@ -79,7 +83,7 @@ def _gh_token() -> str:
             text=True, timeout=15, check=False)
         token = run.stdout.strip()
         if (run.returncode != 0 or not 1 <= len(token) <= 4096 or
-                any(c in token for c in "\\r\\n\\x00")):
+                any(c in token for c in "\r\n\x00")):
             raise ValueError
         return token
     except Exception:
@@ -208,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
         token = (f"PREPARE-D5-{preview['role']}-{preview['turn_index']}"
                  if args.mode == "prepare-turn" else
                  f"TYPE-ONLY-D5-{preview['role']}-{preview['turn_index']}")
-        if not _consent(token):
+        if not _consent(token, preserve_draft=args.mode == "prepare-turn"):
             _emit("USER_DECLINED", phase="NOT_STARTED", sent=False)
             return 2
         # Consent may take minutes. Another process can advance the ledger
