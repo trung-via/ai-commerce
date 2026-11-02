@@ -37,17 +37,19 @@ jobs:
           assert len(m.EXPECTED)==12
           for name, original in sorted(m.EXPECTED.items()):
               actual=Path(name).read_bytes()
-              if name.endswith("/consumer-tests.txt"):
-                  assert b"\r" not in actual
-                  original_blob=subprocess.run(["git","hash-object","--stdin","--path="+name],
-                     input=actual,capture_output=True,check=True).stdout.strip()
-                  clean_blob=subprocess.run(["git","hash-object","--stdin"],
-                     input=actual,capture_output=True,check=True).stdout.strip()
-                  assert original_blob==clean_blob
-              else:
-                  assert hashlib.sha256(actual).hexdigest()==original, "ORIGINAL_SOURCE_DRIFT:"+name
               staged=subprocess.run(["git","show","HEAD:"+name],capture_output=True,check=True).stdout
-              assert staged==actual, "PUBLISHED_BLOB_MISMATCH:"+name
+              if name.endswith("/consumer-tests.txt"):
+                  assert b"\r" not in staged, "COMMITTED_EOL_NOT_LF"
+                  assert hashlib.sha256(staged).hexdigest()=="3c9c17e6837d59f2f6f77ccc1008086516530691776774c790cb72d3ec2aeade"
+                  # Windows may check out CRLF while Git stores LF; test Git clean equivalence.
+                  filtered=subprocess.run(["git","hash-object","--stdin","--path="+name],
+                     input=actual,capture_output=True,check=True).stdout.strip()
+                  expected_blob=subprocess.run(["git","hash-object","--stdin"],
+                     input=staged,capture_output=True,check=True).stdout.strip()
+                  assert filtered==expected_blob, "CHECKOUT_GIT_FILTER_MISMATCH:"+name
+              else:
+                  assert hashlib.sha256(staged).hexdigest()==original, "ORIGINAL_SOURCE_DRIFT:"+name
+                  assert staged==actual, "CHECKOUT_BYTE_DRIFT:"+name
           print("EXACT_CANDIDATE_SHA=c8d17a613d59474f55c66dd198b9a941dcf6b9a4")
           print("SOURCE_BYTE_ATTESTATION=PASS")
           PY
