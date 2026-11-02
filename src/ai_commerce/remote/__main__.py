@@ -73,8 +73,8 @@ def main(argv: list[str] | None = None) -> int:
         result_path = worker.root / "batch_result.json"
         # This deliberately reports delivery uncertainty without rerunning model calls.
         if args.issue_number:
-            summary = format_batch_summary(report, repository=repo)
             try:
+                summary = format_batch_summary(report, repository=repo)
                 github.comment(args.issue_number, summary)
                 report["feedback_status"] = "GITHUB_ISSUE_COMMENT_PUBLISHED"
             except Exception as exc:
