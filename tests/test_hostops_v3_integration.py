@@ -326,3 +326,25 @@ def test_manifest_has_exact_48_unique_existing_test_names():
     for row in manifest["scenarios"]:
         assert callable(getattr(matrix, row["testcase"].split("::")[-1]))
     assert manifest["original_row_text_available"] is False
+
+
+
+def test_hostops_v3_hosted_queue_is_digest_only_without_host_execution():
+    """Enforce hosted-only issue queue, no laptop executor or payload echo."""
+    p = ROOT / ".github" / "workflows" / "hostops-v3.yml"
+    text = p.read_text(encoding="utf-8")
+    assert text.endswith(chr(10))
+    assert 'name: AI Commerce HostOps v3 signed broker queue' in text
+    assert 'run-name: "HostOpsV3 Issue #' in text
+    assert '  issues:' in text
+    assert '    types: [opened]' in text
+    assert '  contents: read' in text
+    assert '    runs-on: ubuntu-latest' in text
+    assert 'HOSTOPS_V3_QUEUED_UNVERIFIED' in text
+    assert 'envelope_sha256=' in text
+    assert 'github.event.repository.private == true' in text
+    assert 'github.event.issue.user.login == github.repository_owner' in text
+    for forbidden in ('self-hosted', 'actions/checkout', 'secrets.', 'ssh-keygen -Y',
+                      'github.event.issue.body', 'powershell', 'pwsh', 'broker --config',
+                      'hostops_v3.py', 'curl', 'wget'):
+        assert forbidden not in text
