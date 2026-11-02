@@ -16,6 +16,7 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import subprocess
 import sys
 from typing import Iterable, Mapping, Sequence
 
@@ -68,6 +69,43 @@ class TestGroup:
 
     def mapping(self) -> dict:
         return {key: list(getattr(self, key)) for key in ("tests", "acs", "paths", "consumers", "contracts")}
+
+
+def reviewed_test_registration(repo: Path, files: Mapping[str, str],
+                               groups: Sequence[TestGroup]) -> dict[str, list[str]]:
+    """Distinguish uncommitted onboarding tests from committed mapping drift.
+
+    New tests in an EF01 working tree must be executed via MT-01's registered
+    FULL fallback, but cannot amend protected approved_groups or the profile
+    registry within an unrelated component's allowed_paths. Conversely, a test
+    already committed to the source HEAD needs a reviewed mapping: this stops
+    incomplete companion registration at PR/main integration time.
+
+    The Git tree is the immutable source-of-truth here; the mutable Git index
+    and working tree must never decide which tests are "reviewed".
+    """
+    proc = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", "-z", "HEAD"],
+        cwd=repo, capture_output=True, check=False,
+    )
+    if proc.returncode:
+        raise ValueError("MT01_COMMITTED_TREE_UNAVAILABLE")
+    try:
+        committed = {p.decode("utf-8") for p in proc.stdout.split(b"\0") if p}
+    except UnicodeDecodeError as exc:
+        raise ValueError("MT01_COMMITTED_TREE_INVALID_ENCODING") from exc
+    mapped = {p for group in groups for p in group.tests}
+    exception = {"tests/test_ef02_mt01_registry.py"}
+    present = {p for p in files if p.startswith("tests/test_") and p.endswith(".py")}
+    unregistered = present - mapped - exception
+    pending = unregistered - committed
+    return {
+        "unregistered_committed": sorted(unregistered & committed),
+        "pending_new_tests": sorted(pending),
+        "unsafe_new_tests": sorted(
+            p for p in pending if str(files[p]).startswith("SYMLINK:")
+        ),
+    }
 
 
 def approved_groups() -> tuple[TestGroup, ...]:
@@ -433,6 +471,70 @@ def select_plan(*, repo: Path, base_sha: str, base_files: Mapping[str, str],
             "fallback_profile": fallback_profile, "fallback_argv": list(fallback_argv),
             "narrow_execution_observed": False,
             "fallback": bool(reasons), "aggregate_sources": list(aggregate_sources), "groups": entries}
+
+
+def select_provisional_tests(*, base_files: Mapping[str, str],
+                             candidate_files: Mapping[str, str],
+                             changed_paths: Sequence[str], plan: dict,
+                             fallback_argv: Sequence[str]) -> dict | None:
+    """Attempt-local, non-authoritative test preflight for a new component.
+
+    Never changes approved_groups, registered profiles or the final MT-01
+    verification binding. Run only new tests and impacted consumer tests from
+    the actual candidate import graph, in a tightly bounded pytest command.
+    Success is diagnostic only; final registered broad verification remains
+    mandatory. Missing or unsafe provenance returns None (full suite only).
+    """
+    full = list(fallback_argv)
+    if (full not in (["python", "-m", "pytest", "tests", "-q", "-n", "12"],
+                     ["py", "-m", "pytest", "tests", "-q", "-n", "12"]) or
+            not plan.get("fallback") or plan.get("aggregate_sources") or
+            plan.get("unsupported_paths")):
+        return None
+    changed = set(changed_paths)
+    if not changed or any(p not in candidate_files for p in changed):
+        return None
+    tests = sorted(p for p in changed if p.startswith("tests/test_") and p.endswith(".py"))
+    if not tests or len(tests) > 24 or any(p in base_files for p in tests):
+        return None
+    new_sources = sorted(p for p in changed if p.startswith("src/ai_commerce/") and p.endswith(".py"))
+    if not new_sources or any(p in base_files for p in new_sources):
+        return None
+    # An onboarding patch cannot also modify an existing shared module, test,
+    # workflow or configuration. Use the ordinary registered full suite then.
+    package = {p.split("/")[2] for p in new_sources}
+    if len(package) != 1 or package == {"__init__.py"}:
+        return None
+    permitted = set(new_sources) | set(tests)
+    permitted.update(p for p in changed if p.startswith("contracts/") and p.endswith(".schema.json"))
+    permitted.update(p for p in changed if p.startswith("docs/engineering/") and p.endswith(".md"))
+    if changed - permitted:
+        return None
+    if not set(tests) <= set(plan.get("unknown_tests", ())):
+        return None
+    affected = set(plan.get("affected_paths", ()))
+    consumer_tests = sorted(p for p in affected if p.startswith("tests/test_") and
+                            p.endswith(".py") and p in candidate_files)
+    selected = sorted(set(tests) | set(consumer_tests))
+    if not selected or len(selected) > 24:
+        return None
+    if any(str(candidate_files[p]).startswith("SYMLINK:") or
+           (not re.fullmatch(r"tests/test_[A-Za-z0-9_]+\.py", p))
+           for p in selected):
+        return None
+    return {
+        "kind": "MT01_PROVISIONAL_PREFLIGHT_ONLY",
+        "test_paths": selected,
+        "new_tests": tests,
+        "consumer_tests": sorted(set(selected) - set(tests)),
+        "source_package": next(iter(package)),
+        "candidate_sha256": {p: candidate_files[p] for p in selected},
+        "argv": [*full[:3], *selected, "-q", "-n", "12"],
+        "registered_final_argv": full,
+        "reason": "NEW_UNCOMMITTED_COMPONENT_TESTS_REQUIRE_EARLY_TRIAGE",
+        "result": "NOT_RUN",
+        "authoritative": False,
+    }
 
 
 def apply_evidence(plan: dict, prior: Mapping[str, Evidence], evidence_root: Path) -> None:

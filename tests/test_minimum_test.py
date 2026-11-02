@@ -41,8 +41,12 @@ def test_reviewed_map_contains_exact_real_paths_and_all_current_python_test_fami
     assert set(declared) <= real_tree.files.keys()
     mapped_tests = [p for g in real_tree.groups for p in g.tests]
     assert len(mapped_tests) == len(set(mapped_tests))
-    # Registry-only control test is intentionally broad-verified until protected PR #160 activates.
-    assert {p for p in real_tree.files if p.startswith("tests/test_") and p.endswith(".py")} - {"tests/test_ef02_mt01_registry.py"} <= set(mapped_tests)
+    # MT-01 bootstrap: new uncommitted tests may be broad-verified by EF01.
+    # Once committed (including PR CI's merge HEAD), missing reviewed mapping
+    # is still a failure; an unknown test never earns selective coverage.
+    registration = mt.reviewed_test_registration(ROOT, real_tree.files, real_tree.groups)
+    assert registration["unregistered_committed"] == []
+    assert registration["unsafe_new_tests"] == []
     assert "src/ai_commerce/opportunity/trends/tests/test_m02.py" in mapped_tests
     assert {f"a{n:02}" for n in range(2, 13)} <= {g.name for g in real_tree.groups}
     assert "a13" in {g.name for g in real_tree.groups}
@@ -1098,3 +1102,210 @@ def test_pr_ci_mt01_engine_changes_require_full_even_with_registry_extension(
     assert result[0] == ("tests",)
     assert result[1] == "FULL_PROJECT_REQUIRED"
     assert result[2] == ("MT01_ENGINE_CHANGED",)
+
+
+def test_mt01_new_component_test_is_pending_not_a_full_suite_failure(monkeypatch, tmp_path):
+    """Reproduce A14: EF01 creates tests/test_a14_attribution.py after HEAD."""
+    original = "tests/test_known.py"
+    new = "tests/test_a14_attribution.py"
+    calls = []
+
+    def git_ls_tree(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, (original + "\0").encode(), b"")
+
+    monkeypatch.setattr(mt.subprocess, "run", git_ls_tree)
+    groups = (mt.TestGroup("known", (original,), ("KNOWN.ac",), ("known.py",)),)
+    files = {original: "old", new: "new", "known.py": "old"}
+    report = mt.reviewed_test_registration(tmp_path, files, groups)
+    assert report == {
+        "unregistered_committed": [], "pending_new_tests": [new],
+        "unsafe_new_tests": [],
+    }
+    assert calls[0][0] == ["git", "ls-tree", "-r", "--name-only", "-z", "HEAD"]
+    assert calls[0][1]["cwd"] == tmp_path
+    assert calls[0][1]["capture_output"] is True
+
+
+def test_mt01_newly_committed_unmapped_test_still_requires_registration(monkeypatch, tmp_path):
+    """PR checkout must not silently accept source-committed test families."""
+    old = "tests/test_known.py"
+    unregistered = "tests/test_a14_attribution.py"
+
+    def git_ls_tree(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            argv, 0, (old + "\0" + unregistered + "\0").encode(), b""
+        )
+
+    monkeypatch.setattr(mt.subprocess, "run", git_ls_tree)
+    report = mt.reviewed_test_registration(
+        tmp_path, {old: "1", unregistered: "2"},
+        (mt.TestGroup("known", (old,), ("KNOWN.ac",), ("known.py",)),),
+    )
+    assert report["unregistered_committed"] == [unregistered]
+    assert report["pending_new_tests"] == []
+
+
+def test_mt01_new_symlinked_test_is_never_accepted_as_pending(monkeypatch, tmp_path):
+    def git_ls_tree(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(mt.subprocess, "run", git_ls_tree)
+    report = mt.reviewed_test_registration(
+        tmp_path, {"tests/test_escape.py": "SYMLINK:../../secrets"}, (),
+    )
+    assert report["unsafe_new_tests"] == ["tests/test_escape.py"]
+
+
+def test_mt01_baseline_git_failure_fails_closed(monkeypatch, tmp_path):
+    def git_ls_tree(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 128, b"", b"fatal: not a git repository")
+
+    monkeypatch.setattr(mt.subprocess, "run", git_ls_tree)
+    with pytest.raises(ValueError, match="MT01_COMMITTED_TREE_UNAVAILABLE"):
+        mt.reviewed_test_registration(tmp_path, {}, ())
+
+
+def test_mt01_new_a14_file_retains_registered_full_fallback(mapped):
+    """Bootstrap permission does not confer a narrow test-selection shortcut."""
+    candidate = mapped.repo / "tests/test_a14_attribution.py"
+    candidate.write_text("def test_new_a14():\n    assert True\n")
+    selected = plan(mapped, changed=("tests/test_a14_attribution.py",),
+                    registered_only=True,
+                    registered_profiles={"project-tests": [*FULL, "-n", "12"]},
+                    fallback_argv=[*FULL, "-n", "12"])
+    assert selected["fallback"]
+    assert "tests/test_a14_attribution.py" in selected["unknown_tests"]
+    assert selected["groups"][0]["binding"]["argv"] == [*FULL, "-n", "12"]
+
+
+def test_provisional_new_component_selects_new_test_and_real_reverse_consumer(mapped):
+    """L04 onboarding can triage uncommitted A14 tests before registered full."""
+    new_source = "src/ai_commerce/affiliate_attribution/evidence.py"
+    new_test = "tests/test_a14_attribution.py"
+    (mapped.repo / "src/ai_commerce/affiliate_attribution").mkdir(parents=True)
+    (mapped.repo / new_source).write_text("ANSWER = 42\n")
+    (mapped.repo / new_test).write_text(
+        "from ai_commerce.affiliate_attribution import evidence\n"
+        "def test_a14():\n    assert evidence.ANSWER == 42\n")
+    changed = [new_source, new_test]
+    selection = plan(mapped, changed=changed, registered_only=True,
+                     registered_profiles={"project-tests": [*FULL, "-n", "12"]},
+                     fallback_argv=[*FULL, "-n", "12"])
+    result = mt.select_provisional_tests(
+        base_files=mapped.base, candidate_files=mt.file_hashes(mapped.repo),
+        changed_paths=changed, plan=selection, fallback_argv=[*FULL, "-n", "12"])
+    assert selection["fallback"] is True and result is not None
+    assert result["new_tests"] == [new_test]
+    assert result["argv"] == ["python", "-m", "pytest", new_test, "-q", "-n", "12"]
+    assert result["authoritative"] is False
+    assert result["registered_final_argv"] == [*FULL, "-n", "12"]
+
+
+@pytest.mark.parametrize("changed,why", [
+    (["src/ai_commerce/affiliate_attribution/evidence.py", "pyproject.toml"], "shared config"),
+    (["src/ai_commerce/affiliate_attribution/evidence.py", "tests/test_a.py"], "old registered test"),
+    (["src/ai_commerce/affiliate_attribution/evidence.py", "tests/test_a14_attribution.py",
+      "src/ai_commerce/shared.py"], "other changed package"),
+])
+def test_provisional_refuses_unsafe_or_shared_scope(mapped, changed, why):
+    new_source = "src/ai_commerce/affiliate_attribution/evidence.py"
+    test_path = "tests/test_a14_attribution.py"
+    (mapped.repo / "src/ai_commerce/affiliate_attribution").mkdir(parents=True)
+    (mapped.repo / new_source).write_text("ANSWER = 42\n")
+    (mapped.repo / test_path).write_text("def test_new():\n    assert True\n")
+    files = mt.file_hashes(mapped.repo)
+    selected = {"fallback": True, "aggregate_sources": [], "unknown_tests": [test_path],
+                "affected_paths": [test_path], "unsupported_paths": []}
+    assert mt.select_provisional_tests(
+        base_files=mapped.base, candidate_files=files, changed_paths=changed,
+        plan=selected, fallback_argv=[*FULL, "-n", "12"]) is None, why
+
+
+def test_provisional_refuses_fanin_symlink_unregistered_profile_and_no_new_tests(mapped):
+    files = mt.file_hashes(mapped.repo)
+    files["tests/test_a14_attribution.py"] = "SYMLINK:../../outside"
+    files["src/ai_commerce/affiliate_attribution/evidence.py"] = "sha"
+    change = ["tests/test_a14_attribution.py", "src/ai_commerce/affiliate_attribution/evidence.py"]
+    basic = {"fallback": True, "aggregate_sources": [], "unknown_tests": [change[0]],
+             "affected_paths": [change[0]], "unsupported_paths": []}
+    def selected(plan=basic, argv=None):
+        return mt.select_provisional_tests(
+            base_files=mapped.base, candidate_files=files, changed_paths=change,
+            plan=plan, fallback_argv=argv or [*FULL, "-n", "12"])
+    assert selected() is None
+    files[change[0]] = "sha"
+    assert selected({**basic, "aggregate_sources": ["b" * 40]}) is None
+    assert selected(argv=["python", "-m", "pytest", "tests/test_a.py", "-q", "-n", "12"]) is None
+    assert selected({**basic, "unknown_tests": []}) is None
+
+
+def test_provisional_failure_skips_expensive_full_suite_without_claiming_pass(mapped, monkeypatch):
+    new_source = "src/ai_commerce/affiliate_attribution/evidence.py"
+    new_test = "tests/test_a14_attribution.py"
+    (mapped.repo / "src/ai_commerce/affiliate_attribution").mkdir(parents=True)
+    (mapped.repo / new_source).write_text("ANSWER = 42\n")
+    (mapped.repo / new_test).write_text(
+        "from ai_commerce.affiliate_attribution import evidence\n"
+        "def test_bad():\n    assert evidence.ANSWER == 0\n")
+    # The stdout is from a real-shaped pytest failure, not a fabricated PASS.
+    calls = []
+    def run(argv, **kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 1, "1 failed in 0.02s\nFAILED tests/test_a14_attribution.py::test_bad", "")
+    monkeypatch.setattr(verification.subprocess, "run", run)
+    mapped.evidence.mkdir(exist_ok=True)
+    files = {}
+    def save(key, filename, data):
+        relative = "preflight/" + filename
+        path = mapped.evidence / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        files[key] = relative
+    outcome, plan_data = verification.execute_plan(
+        repo=mapped.repo, output_dir=mapped.evidence, base_sha="a"*40,
+        base_files=mapped.base, changed_paths=[new_source, new_test],
+        required_acs=(), fallback_argv=[*FULL, "-n", "12"], prior={},
+        save=save, evidence_files=files, deadline=time.monotonic()+60,
+        timeout_seconds=45, registered_only=True,
+        registered_profiles={"project-tests": [*FULL, "-n", "12"]})
+    assert outcome.returncode == 1
+    assert len(calls) == 1 and calls[0][3] == new_test
+    assert plan_data["provisional_mapping"]["result"] == "FAIL"
+    assert plan_data["groups"][0]["result"] == "UNPROVEN"
+    assert "mt01_provisional_stdout" in files
+
+
+def test_provisional_pass_still_runs_registered_full_suite(mapped, monkeypatch):
+    new_source = "src/ai_commerce/affiliate_attribution/evidence.py"
+    new_test = "tests/test_a14_attribution.py"
+    (mapped.repo / "src/ai_commerce/affiliate_attribution").mkdir(parents=True)
+    (mapped.repo / new_source).write_text("ANSWER = 42\n")
+    (mapped.repo / new_test).write_text(
+        "from ai_commerce.affiliate_attribution import evidence\n"
+        "def test_ok():\n    assert evidence.ANSWER == 42\n")
+    calls = []
+    def run(argv, **kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, "created: 12/12 workers\n1 passed in 0.02s", "")
+    monkeypatch.setattr(verification.subprocess, "run", run)
+    mapped.evidence.mkdir(exist_ok=True)
+    files = {}
+    def save(key, filename, data):
+        relative = "preflight/" + filename
+        path = mapped.evidence / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        files[key] = relative
+    outcome, plan_data = verification.execute_plan(
+        repo=mapped.repo, output_dir=mapped.evidence, base_sha="a"*40,
+        base_files=mapped.base, changed_paths=[new_source, new_test],
+        required_acs=(), fallback_argv=[*FULL, "-n", "12"], prior={},
+        save=save, evidence_files=files, deadline=time.monotonic()+60,
+        timeout_seconds=45, registered_only=True,
+        registered_profiles={"project-tests": [*FULL, "-n", "12"]})
+    assert outcome.returncode == 0 and len(calls) == 2
+    assert calls[0][3] == new_test and calls[1] == [*FULL, "-n", "12"]
+    assert plan_data["provisional_mapping"]["result"] == "PASS_PREFLIGHT_ONLY"
+    assert plan_data["groups"][0]["result"] == "PASS"
+    assert plan_data["groups"][0]["binding"]["argv"] == [*FULL, "-n", "12"]
