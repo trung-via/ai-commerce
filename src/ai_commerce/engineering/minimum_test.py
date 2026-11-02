@@ -228,10 +228,10 @@ def approved_groups() -> tuple[TestGroup, ...]:
         TestGroup("hostops-v2", ("tests/test_hostops_v2.py",), ("HOSTOPS.v2.typed-operations",),
                   ("scripts/hostops_v2.py",)),
         TestGroup("ef02-wake", tuple("tests/" + name + ".py" for name in (
-            "test_ef02_wake_d1", "test_ef02_wake_d2", "test_ef02_cdp_doorbell", "test_ef02_plugin_selection_probe", "test_ef02_d3_github_artifact_authority",
+            "test_ef02_wake_d1", "test_ef02_wake_d2", "test_ef02_cdp_doorbell", "test_ef02_plugin_selection_probe", "test_ef02_plugin_turn_handoff", "test_ef02_plugin_turn_store", "test_ef02_plugin_turn_stage_only", "test_ef02_plugin_turn_send_once", "test_ef02_plugin_turn_cli", "test_ef02_plugin_turn_evidence", "test_ef02_d3_github_artifact_authority",
             "test_ef02_d3_signed_origin_consent", "test_ef02_d3_two_grant_delivery", "test_ef02_d5_chrome_acquisition",
             "test_ef02_d5_local_handoff", "test_ef02_d5_local_wake_entry", "test_ef02_d5_local_wake_trigger", "test_ef02_d5_run_registration")),
-                  ("EF02.wake-boundaries",), sources("remote", "_private_state cdp_doorbell chrome_acquisition completion_event conversation_binding github_artifact_authority local_completion_handoff local_run_registration local_wake_entry local_wake_trigger plugin_selection_probe plugin_selection_probe_cli signed_origin_consent trusted_origin wake_adapter wake_dual_plugin_preview")),
+                  ("EF02.wake-boundaries",), sources("remote", "_private_state cdp_doorbell chrome_acquisition completion_event conversation_binding github_artifact_authority local_completion_handoff local_run_registration local_wake_entry local_wake_trigger plugin_selection_probe plugin_selection_probe_cli plugin_turn_handoff plugin_turn_store plugin_turn_stage_only plugin_turn_send_once plugin_turn_cli plugin_turn_evidence wake_control_center signed_origin_consent trusted_origin wake_adapter wake_dual_plugin_preview")),
     )
 
 

@@ -10,8 +10,10 @@ continues to return UNKNOWN and holds the event against blind replay.
 """
 from __future__ import annotations
 
+import os
 import re
 from contextlib import contextmanager
+from urllib.parse import urlsplit
 from typing import Protocol
 
 from .conversation_binding import ResolvedBinding, _CHAT, _REPOSITORY, _endpoint
@@ -166,19 +168,74 @@ def _doorbell_text(event_id: str, repository: str) -> str:
     ))
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
 class BrowserInventory(Protocol):
     def pages(self, endpoint: str): ...
 
 
 class _PlaywrightInventory:
     @contextmanager
-    def pages(self, endpoint: str):
-        # Deliberately attach-only. Exiting Playwright disconnects the CDP
-        # client, not the Human's Chrome tab. No navigate, launch or new_page.
+    def _browser(self, endpoint: str):
         from playwright.sync_api import sync_playwright
         with sync_playwright() as playwright:
             browser = playwright.chromium.connect_over_cdp(endpoint, timeout=10000)
+            yield browser  # Disconnect the CDP client only, never close Chrome.
+
+    @contextmanager
+    def pages(self, endpoint: str):
+        # Existing probes and Send remain attach-only.
+        with self._browser(endpoint) as browser:
             yield [page for context in browser.contexts for page in context.pages]
+
+    def preload(self, binding: ResolvedBinding, *, current_binding=None) -> str:
+        """Auto-load exactly the private, enrolled chat; no Send or tab hijack.
+
+        Only used after the existing operator/D2 authorization. A unique Chrome
+        context is needed to create a new tab, and redirects fail closed.
+        """
+        if (not _is_windows() or type(binding) is not ResolvedBinding or
+                type(binding.chat_url) is not str or
+                _CHAT.fullmatch(binding.chat_url) is None or
+                not _endpoint(binding.cdp_endpoint) or
+                urlsplit(binding.cdp_endpoint).port != 9333):
+            return "PRELOAD_ROUTE_INVALID"
+        if current_binding is not None and not callable(current_binding):
+            return "PRELOAD_ROUTE_INVALID"
+        try:
+            if current_binding is not None and current_binding() != binding:
+                return "PRELOAD_ROUTE_CHANGED"
+            with self._browser(binding.cdp_endpoint) as browser:
+                contexts = list(browser.contexts)
+                pages = [page for ctx in contexts for page in ctx.pages]
+                matches = [page for page in pages
+                           if isinstance(page.url, str) and
+                           page.url.rstrip("/") == binding.chat_url]
+                if len(matches) > 1:
+                    return "PRELOAD_EXACT_CHAT_AMBIGUOUS"
+                if current_binding is not None and current_binding() != binding:
+                    return "PRELOAD_ROUTE_CHANGED"
+                if matches:
+                    return "EXACT_CHAT_PRESENT"
+                if len(contexts) != 1:
+                    return "PRELOAD_CONTEXT_AMBIGUOUS"
+                # Never navigate the currently active, latest, or other tab.
+                new_page = contexts[0].new_page()
+                try:
+                    new_page.goto(binding.chat_url,
+                                  wait_until="domcontentloaded", timeout=15000)
+                except Exception:
+                    # It may have navigated despite timeout: no automatic retry.
+                    return "PRELOAD_NAVIGATION_UNKNOWN"
+                if new_page.url.rstrip("/") != binding.chat_url:
+                    return "PRELOAD_NAVIGATION_UNVERIFIED"
+                if current_binding is not None and current_binding() != binding:
+                    return "PRELOAD_ROUTE_CHANGED"
+                return "EXACT_CHAT_OPENED"
+        except Exception:
+            return "PRELOAD_CDP_UNAVAILABLE"
 
 
 class LocalChromeDoorbellAdapter:
@@ -186,12 +243,14 @@ class LocalChromeDoorbellAdapter:
 
     def __init__(self, *, repository: str = "trung-via/ai-commerce",
                  allow_submit: bool = False,
-                 inventory: BrowserInventory | None = None):
+                 inventory: BrowserInventory | None = None,
+                 preload_exact_chat: bool = False):
         if not isinstance(repository, str) or not _REPOSITORY.fullmatch(repository):
             raise ValueError("DOORBELL_REPOSITORY_INVALID")
         self.repository = repository
         self.allow_submit = allow_submit is True
         self.inventory = inventory or _PlaywrightInventory()
+        self.preload_exact_chat = preload_exact_chat is True
 
     def send_wake(self, *, binding: ResolvedBinding,
                   message: str, event_id: str) -> WakeReceipt:
@@ -211,6 +270,14 @@ class LocalChromeDoorbellAdapter:
             return receipt("UNSUPPORTED", "CHAT_URL_INVALID")
         if not self.allow_submit:
             return receipt("UNSUPPORTED", "CDP_PROBE_DISABLED")
+        # D2's verified origin/consent and durable UNKNOWN precede this adapter.
+        # The new pre-Wake navigation never acts as a Send authorization.
+        if self.preload_exact_chat:
+            code = (self.inventory.preload(binding) if
+                    callable(getattr(self.inventory, "preload", None))
+                    else "PRELOAD_UNAVAILABLE")
+            if code not in ("EXACT_CHAT_PRESENT", "EXACT_CHAT_OPENED"):
+                return receipt("UNSUPPORTED", code)
         doorbell = _doorbell_text(event_id, self.repository)
         args = {**_ARGS, "url": binding.chat_url, "text": doorbell}
         clicked = False
