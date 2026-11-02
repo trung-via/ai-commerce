@@ -35,12 +35,16 @@ class Journal:
             deny("REVOCATION_ROLLBACK")
         self.db.execute("INSERT OR REPLACE INTO settings VALUES ('revocation', ?)", (epoch,))
 
+    @staticmethod
+    def request_key(request):
+        return ("v4:" if request.value["schema"] == "hostops.request.v4" else "") + request.value["request_id"]
+
     def reserve(self, request, epoch):
         self.begin()
         try:
             self.epoch(epoch)
             row = self.db.execute("SELECT fingerprint,state,receipt FROM requests WHERE id=?",
-                                  (request.value["request_id"],)).fetchone()
+                                  (self.request_key(request),)).fetchone()
             if row:
                 if row[0] != request.fingerprint:
                     deny("REQUEST_ID_CONFLICT")
@@ -48,7 +52,7 @@ class Journal:
             if self.db.execute("SELECT count(*) FROM requests").fetchone()[0] >= 100000:
                 deny("JOURNAL_LIMIT")
             self.db.execute("INSERT INTO requests VALUES (?,?,'INTENT',NULL)",
-                            (request.value["request_id"], request.fingerprint))
+                            (self.request_key(request), request.fingerprint))
             return None
         finally:
             # A semantic conflict must not erase the previous intent.
@@ -64,7 +68,7 @@ class Journal:
 
     def finish(self, request, receipt):
         self.db.execute("UPDATE requests SET state=?,receipt=? WHERE id=? AND fingerprint=?",
-                        (receipt["status"], canonical(receipt), request.value["request_id"], request.fingerprint))
+                        (receipt["status"], canonical(receipt), self.request_key(request), request.fingerprint))
 
     def preview(self, fingerprint):
         self.db.execute("INSERT OR IGNORE INTO previews VALUES (?)", (fingerprint,))
