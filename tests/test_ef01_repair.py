@@ -62,7 +62,7 @@ def fixture(tmp_path, monkeypatch):
 def _provider(fixture, mode="pass-after-repair", executor="codex"):
     script = fixture.root / "fake_executor.py"
     calls = fixture.root / "calls.jsonl"
-    script.write_text("""import json,sys
+    script.write_text("""import json,sys,os
 from pathlib import Path
 calls = Path(sys.argv[1])
 previous = calls.read_text().splitlines() if calls.exists() else []
@@ -70,7 +70,11 @@ index = len(previous)
 prompt = sys.stdin.read()
 with calls.open('a', encoding='utf-8') as f:
     f.write(json.dumps({'index':index,'profile':sys.argv[3:6],
-                        'cwd':str(Path.cwd()),'prompt':prompt}) + '\\n')
+                        'cwd':str(Path.cwd()),'prompt':prompt,
+                        'temp_root':os.getenv('AI_COMMERCE_EF01_PYTEST_BASETEMP_ROOT'),
+                        'worktree':os.getenv('AI_COMMERCE_EF01_WORKTREE'),
+                        'pytest_plugins':os.getenv('PYTEST_PLUGINS'),
+                        'os_temp':os.getenv('TEMP')}) + '\\n')
 mode = sys.argv[2]
 if mode != 'no-change':
     Path('impl.py').write_text('good' if ((index and mode in ('pass-after-repair', 'scope-fix')) or mode == 'scope-pass') else 'bad-' + str(index))
@@ -113,6 +117,18 @@ def _run(fixture, mode="pass-after-repair", executor="codex", **kwargs):
         verify_argv=kwargs.pop("verify_argv", VERIFY), allowed_prefixes=fixture.state["scope"], **kwargs)
     observations = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
     return result, observations, profiles
+
+
+def test_executor_child_inherits_out_of_tree_pytest_guard(fixture):
+    result, calls, _ = _run(fixture, mode="scope-pass")
+    assert calls and result["status"] == "VERIFIED_SCOPE_REVIEW_REQUIRED"
+    child = calls[0]
+    assert child["worktree"] == str(fixture.repo)
+    assert child["pytest_plugins"].split(",").count(
+        "ai_commerce.engineering.pytest_temp_guard") == 1
+    assert child["os_temp"] == child["temp_root"]
+    assert child["temp_root"] != str(fixture.repo)
+    assert not Path(child["temp_root"]).is_relative_to(fixture.repo)
 
 
 @pytest.mark.parametrize("executor", ["codex", "antigravity"])
