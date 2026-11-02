@@ -1,4 +1,4 @@
-# Fail-closed: no Human public signing key has been enrolled.
-# Enroll ONE line, through a separately reviewed GitHub PR:
-# ai-commerce-human ssh-ed25519 AAAA... human@local
-# Never commit a private key; Issue author is not independent Human approval.
+# HostOps v2 Human Ed25519 SSH public signer.
+# PUBLIC key only. Never store the Human private key or passphrase in GitHub.
+# Each sensitive workspace_file_write still requires a separate signature over the exact request.
+ai-commerce-human ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKT4ERYytsbCdTY04Xb3Bwr4q5xdLp8ioemmhKb7lhID ai-commerce-hostops-v2-human
