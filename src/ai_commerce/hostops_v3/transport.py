@@ -165,3 +165,82 @@ def poll_inbox(api, config, release):
                 count += 1
                 break
     return count
+
+
+# V4 control-plane migration is non-executing until a separately installed and
+# Human-signed v4 broker is proved. Do not feed v4 bytes to v3 submit()/poll().
+from .contract import CONTROL_REPOSITORY, SOURCE_REPOSITORY, dual_repo_envelope
+
+
+class ControlGitHub(GitHub):
+    """Closed HTTPS API client for the PRIVATE control repository only."""
+
+    def request(self, method, path, data=None):
+        # Exact GitHub REST path shapes: no user-defined URL, traversal, encoded
+        # slash, query injection or requests to other endpoint families.
+        import re
+        prefix = "/repos/" + CONTROL_REPOSITORY
+        literal = {prefix,
+                   prefix + "/issues?state=open&per_page=100",
+                   prefix + "/actions/workflows/hostops-v3.yml/runs?event=issues&per_page=100"}
+        exact = (path in literal or
+                 re.fullmatch(re.escape(prefix) + r"/issues/[1-9][0-9]*", path) is not None or
+                 re.fullmatch(re.escape(prefix) + r"/actions/runs/[1-9][0-9]*", path) is not None or
+                 re.fullmatch(re.escape(prefix) + r"/contents/\.github/workflows/hostops-v3\.yml\?ref=[0-9a-f]{40}", path) is not None)
+        post_ok = re.fullmatch(re.escape(prefix) + r"/issues/[1-9][0-9]*/comments", path) is not None
+        if not ((method == "GET" and exact) or (method == "POST" and post_ok and type(data) is dict and set(data) == {"body"})):
+            deny("TRANSPORT_ROUTE_DENIED")
+        # Base class controls HTTPS origin, redirects and bounded response.
+        # It is fixed to the public v3 repository, so temporarily substitute
+        # only the literal fixed control route in the path check by using a
+        # dedicated (private) method rather than weakening v3 route checks.
+        req = urllib.request.Request("https://api.github.com" + path,
+            data=canonical(data) if data is not None else None, method=method,
+            headers={"Authorization": "Bearer " + self.token, "Accept": "application/vnd.github+json",
+                     "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "ai-commerce-hostops-v4-control"})
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *_args, **_kwargs):
+                return None
+        try:
+            with urllib.request.build_opener(NoRedirect).open(req, timeout=10) as response:
+                raw = response.read(2 * 1024 * 1024 + 1)
+                return decode(raw, 2 * 1024 * 1024)
+        except (OSError, urllib.error.URLError):
+            deny("GITHUB_UNAVAILABLE")
+
+
+def control_provenance(api, issue_number, run_id, workflow_sha256, expected_source_sha):
+    """Private GitHub source proof. Returns v4 bytes, NEVER invokes the broker."""
+    if type(issue_number) is not int or issue_number <= 0 or type(run_id) is not int or run_id <= 0:
+        deny("BAD_GITHUB_ID")
+    sha(workflow_sha256)
+    sha(expected_source_sha, 40)
+    prefix = "/repos/" + CONTROL_REPOSITORY
+    repo = api.get(prefix)
+    issue = api.get(prefix + "/issues/" + str(issue_number))
+    run = api.get(prefix + "/actions/runs/" + str(run_id))
+    if (repo.get("private") is not True or repo.get("full_name") != CONTROL_REPOSITORY or
+            issue.get("number") != issue_number or issue.get("pull_request") is not None or
+            issue.get("user", {}).get("login") != "trung-via" or
+            not str(issue.get("title", "")).startswith("[HOSTOPS3] ")):
+        deny("CONTROL_REPOSITORY_DENIED")
+    if (run.get("event") != "issues" or run.get("status") != "completed" or
+            run.get("conclusion") != "success" or run.get("path") != WORKFLOW_PATH or
+            run.get("display_title") != "HostOpsV3 Issue #" + str(issue_number) or
+            run.get("head_repository", {}).get("full_name") != CONTROL_REPOSITORY):
+        deny("WORKFLOW_UNVERIFIED")
+    control_sha = sha(run.get("head_sha"), 40)
+    f = api.get(prefix + "/contents/" + WORKFLOW_PATH + "?ref=" + control_sha)
+    try:
+        content = base64.b64decode(f["content"], validate=True)
+    except (ValueError, KeyError, TypeError):
+        deny("WORKFLOW_UNVERIFIED")
+    if digest(content) != workflow_sha256:
+        deny("WORKFLOW_DIGEST_MISMATCH")
+    if type(issue.get("body")) is not str:
+        deny("BAD_JSON")
+    raw = issue["body"].encode("utf-8")
+    _, request = dual_repo_envelope(raw)
+    if request.value["source_sha"] != expected_source_sha:
+        deny("SOURCE_SHA_MISMATCH")
+    return raw

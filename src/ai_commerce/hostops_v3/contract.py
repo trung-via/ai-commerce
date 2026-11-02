@@ -228,3 +228,56 @@ def public_receipt(value):
         else:
             integer(v, 0, MAX_FILE)
     return value
+
+
+# v4 dual-repository bootstrap: structural/provenance validation ONLY.
+# The v3 broker intentionally continues to reject these envelopes. A future
+# explicitly reviewed signed release must bind v4 authentication and IPC.
+SOURCE_REPOSITORY = "trung-via/ai-commerce"
+CONTROL_REPOSITORY = "trung-via/ai-commerce-hostops-control"
+
+
+def dual_repo_envelope(raw):
+    """Strict v4 two-repository shape. NOT authorization/signature verification."""
+    e = decode(raw)
+    shape(e, "schema request issuer_signature_b64 lease lease_signature_b64 action_signature_b64")
+    if e["schema"] != "hostops.envelope.v4":
+        deny("BAD_VERSION")
+    for name in ("issuer_signature_b64", "lease_signature_b64", "action_signature_b64"):
+        v = e[name]
+        if type(v) is not str or len(v) > 16384:
+            deny("BAD_SIGNATURE")
+        # Blank action signature is valid only for previews. Actual signatures
+        # are verified by a future v4 Authority, not this structural parser.
+    r = e["request"]
+    shape(r, "schema request_id source_repository control_repository issuer host_id release_id source_sha created_at expires_at timeout_seconds operation parameters preview")
+    if (r["schema"] != "hostops.request.v4" or
+            r["source_repository"] != SOURCE_REPOSITORY or
+            r["control_repository"] != CONTROL_REPOSITORY):
+        deny("REPOSITORY_MISMATCH")
+    # Reuse existing strict operation/parameter/expiry contract without ever
+    # changing the signed canonical v4 request bytes.
+    old = {k: v for k, v in r.items() if k not in ("source_repository", "control_repository")}
+    old["schema"] = "hostops.request.v3"
+    old["repository"] = REPOSITORY
+    Request.parse(old)
+    lease = e["lease"]
+    shape(lease, "schema lease_id issuer host_id release_id source_repository control_repository roots operations not_before expires_at max_bytes max_entries allow_unc")
+    if (lease["schema"] != "hostops.lease.v4" or
+            lease["source_repository"] != SOURCE_REPOSITORY or
+            lease["control_repository"] != CONTROL_REPOSITORY or
+            any(lease[key] != r[key] for key in ("issuer", "host_id", "release_id"))):
+        deny("LEASE_IDENTITY_MISMATCH")
+    if type(lease["lease_id"]) is not str or not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", lease["lease_id"]):
+        deny("BAD_ID")
+    if (type(lease["not_before"]) is not int or type(lease["expires_at"]) is not int or
+            lease["not_before"] >= lease["expires_at"] or
+            lease["not_before"] > r["expires_at"] or
+            lease["expires_at"] < r["created_at"]):
+        deny("BAD_LEASE_TIME")
+    if type(lease["roots"]) is not list or type(lease["operations"]) is not list:
+        deny("BAD_LEASE_SHAPE")
+    if type(lease["allow_unc"]) is not bool or type(lease["max_bytes"]) is not int or type(lease["max_entries"]) is not int:
+        deny("BAD_LEASE_SHAPE")
+    frozen = decode(canonical(e))
+    return frozen, Request(frozen["request"], digest(canonical(frozen["request"])))
