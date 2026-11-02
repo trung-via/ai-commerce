@@ -145,14 +145,33 @@ def stabilize_candidate_newlines_before_verify(
                                    for p in allowed)):
             raise GitByteConsistencyError("PREVERIFY_OUT_OF_SCOPE_FILTER:" + relative)
 
-        tracked = _git(repo, "ls-files", "--error-unmatch", "--", relative,
-                       git_executable=git_executable)
-        if tracked.returncode == 0:
-            # Existing tracked evidence may depend on original CRLF bytes;
-            # do not silently modify its semantics.
+        # 'git ls-files' also reports NEW files staged by the executor. Such
+        # files did not exist in the immutable source HEAD and are eligible
+        # for safe pre-verify normalization. Never treat an index entry alone
+        # as proof that a file was tracked in the source commit.
+        head = _git(repo, "ls-tree", "-r", "-z", "--name-only", "HEAD", "--",
+                    relative, git_executable=git_executable)
+        if head.returncode:
+            raise GitByteConsistencyError("PREVERIFY_GIT_HEAD_UNAVAILABLE:" + relative)
+        if relative.encode("utf-8") in head.stdout.split(b"\x00"):
             raise GitByteConsistencyError("PREVERIFY_TRACKED_FILTER_MISMATCH:" + relative)
-        if tracked.returncode != 1:
+
+        # If a new file was staged, Git may already have normalized it.
+        # Ensure that staged content agrees with the intended normalized
+        # bytes; never mask a staged conflict or partial-index difference.
+        index = _git(repo, "ls-files", "--stage", "-z", "--", relative,
+                     git_executable=git_executable)
+        if index.returncode:
             raise GitByteConsistencyError("PREVERIFY_GIT_INDEX_UNAVAILABLE:" + relative)
+        records = [record for record in index.stdout.split(b"\x00") if record]
+        if records:
+            # Executable files may have mode 100755; byte and stage must
+            # still be the same. Do not modify stage 1/2/3 conflict entries.
+            valid = any(record == mode + b" " + converted.stdout.strip() +
+                        b" 0\t" + relative.encode("utf-8")
+                        for mode in (b"100644", b"100755"))
+            if len(records) != 1 or not valid:
+                raise GitByteConsistencyError("PREVERIFY_STAGED_BYTES_DIVERGED:" + relative)
 
         before = hashlib.sha256(content).hexdigest()
         path.write_bytes(normalized)
