@@ -472,7 +472,7 @@ def test_preload_before_wake_uses_enrolled_route_only(monkeypatch):
     # Synthetic Windows browser: never connects to a real Chrome session.
     from types import SimpleNamespace
     from ai_commerce.remote import cdp_doorbell as d4
-    monkeypatch.setattr(d4.os, "name", "nt")
+    monkeypatch.setattr(d4, "_is_windows", lambda: True)
     existing = FakePage(OTHER)
     created = []
     class NewPage:
@@ -487,6 +487,7 @@ def test_preload_before_wake_uses_enrolled_route_only(monkeypatch):
         def new_page(self):
             page = NewPage()
             created.append(page)
+            self.pages.append(page)
             return page
     ctx = Ctx()
     inv = d4._PlaywrightInventory()
@@ -501,14 +502,14 @@ def test_preload_before_wake_uses_enrolled_route_only(monkeypatch):
     assert inv.preload(binding, current_binding=lambda: binding) == "EXACT_CHAT_OPENED"
     assert len(created) == 1 and created[0].url == URL
     assert existing.url == OTHER
-    assert inv.preload(binding) == "EXACT_CHAT_OPENED"  # fake context does not expose new tab
+    assert inv.preload(binding) == "EXACT_CHAT_PRESENT"  # idempotent reuse
     assert inv.preload(BIND) == "PRELOAD_ROUTE_INVALID"
 
 
 def test_preload_rejects_ambiguous_targets_and_contexts(monkeypatch):
     from types import SimpleNamespace
     from ai_commerce.remote import cdp_doorbell as d4
-    monkeypatch.setattr(d4.os, "name", "nt")
+    monkeypatch.setattr(d4, "_is_windows", lambda: True)
     inv = d4._PlaywrightInventory()
     @contextmanager
     def two_targets(_endpoint):

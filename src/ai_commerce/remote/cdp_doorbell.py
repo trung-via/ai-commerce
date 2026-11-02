@@ -168,6 +168,10 @@ def _doorbell_text(event_id: str, repository: str) -> str:
     ))
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
 class BrowserInventory(Protocol):
     def pages(self, endpoint: str): ...
 
@@ -192,7 +196,7 @@ class _PlaywrightInventory:
         Only used after the existing operator/D2 authorization. A unique Chrome
         context is needed to create a new tab, and redirects fail closed.
         """
-        if (os.name != "nt" or type(binding) is not ResolvedBinding or
+        if (not _is_windows() or type(binding) is not ResolvedBinding or
                 type(binding.chat_url) is not str or
                 _CHAT.fullmatch(binding.chat_url) is None or
                 not _endpoint(binding.cdp_endpoint) or
