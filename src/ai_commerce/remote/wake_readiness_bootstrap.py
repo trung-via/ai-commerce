@@ -9,6 +9,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import subprocess
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -50,9 +52,32 @@ def _same_loopback_9333(url: str) -> bool:
         return False
 
 
+def _checkout_sha(checkout: Path) -> str:
+    """Direct read-only Git identity, without network or checkout mutation."""
+    try:
+        def git(*args):
+            result = subprocess.run(["git", "-C", str(checkout), *args],
+                                    capture_output=True, text=True, timeout=8,
+                                    check=False)
+            if result.returncode:
+                raise SetupBlocked("CHECKOUT_GIT_UNAVAILABLE")
+            return result.stdout.strip()
+        if Path(git("rev-parse", "--show-toplevel")).resolve(strict=True) != checkout:
+            raise SetupBlocked("CHECKOUT_ROOT_MISMATCH")
+        sha = git("rev-parse", "--verify", "HEAD")
+        if re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+            raise SetupBlocked("CHECKOUT_GIT_UNAVAILABLE")
+        return sha
+    except SetupBlocked:
+        raise
+    except Exception:
+        raise SetupBlocked("CHECKOUT_GIT_UNAVAILABLE") from None
+
+
 def provision(*, checkout: Path, chrome_config: Path, state_file: Path,
               registry: Path, route_id: str, local_app_data: Path,
-              source_reader=_fresh_main_sha, owner_reader=_private_identity,
+              source_reader=_fresh_main_sha, checkout_reader=_checkout_sha,
+              owner_reader=_private_identity,
               chrome_loader=chrome_acquisition.load_environment,
               route_loader=load_registered_probe_route,
               store_cls=TurnSessionStore) -> dict:
@@ -83,6 +108,8 @@ def provision(*, checkout: Path, chrome_config: Path, state_file: Path,
             raise SetupBlocked("FRESH_READY_LEDGER_REQUIRED")
         if session["source_sha"] != source_reader():
             raise SetupBlocked("SOURCE_SHA_CHANGED")
+        if checkout_reader(checkout) != session["source_sha"]:
+            raise SetupBlocked("CHECKOUT_SHA_NOT_CURRENT")
         # Do not accept relative paths, symlinks, or source files inside repo.
         paths = {
             "checkout": checkout,
