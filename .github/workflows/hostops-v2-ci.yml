@@ -44,7 +44,7 @@ jobs:
       - name: Strict request and bounded subprocess tests
         run: python -m unittest discover -s tests -p test_hostops_v2.py -v
       - name: Exact #202 source recovery unit tests (no live runner)
-        run: python -m pytest tests/test_hostops_ef02_202_recovery.py -q
+        run: python -m unittest discover -s tests -p test_hostops_ef02_202_recovery.py -v
       - name: Parse fixed Windows PowerShell script (Windows only)
         if: runner.os == 'Windows'
         shell: pwsh
