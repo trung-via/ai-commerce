@@ -1,6 +1,6 @@
 # D5 Wake — conditional readiness with incremental evidence reuse
 
-**Implementation status: review candidate; NOT deployed or live-Wake accepted.**
+**Implementation status: PR #215 merged to main and post-merge Windows/Ubuntu source CI PASS. No operator laptop deployment, CDP 9333 activation, or live Wake acceptance has been proven.**
 
 This upgrades D5 from repeated Human-run checklists to one **explicit, bounded
 local Windows operation**. It is not a GitHub runner command that launches
@@ -47,6 +47,31 @@ cache never authorizes Send or an unknown-event retry. No full UI 3/3
 revalidation or full suite CI is part of ordinary Wake preparation.
 
 ## One-time operator-private manifest
+
+The manifest can be provisioned **once**, using the audited
+`ai_commerce.remote.wake_readiness_bootstrap` command (separate reviewed change).
+It verifies the existing owned Chrome config, the *already-enrolled* exact
+9333 route, the current `READY` D5 ledger and its fresh main source SHA,
+then creates the manifest atomically under the operator's private appdata.
+It does **not** mint a ledger, invent a route, update consent, launch Chrome or
+send a Wake. Existing different manifests are not overwritten. All returned
+errors are sanitized reason codes.
+
+Under the Human's Windows interactive session (not an Actions service):
+
+~~~powershell
+python -m ai_commerce.remote.wake_readiness_bootstrap `
+    --checkout 'C:\TOOL\ai-commerce-d5' `
+    --chrome-config '<existing real private chrome configuration file>' `
+    --state-file '<existing authorized READY ledger file>' `
+    --registry '<existing consented route registry file>' `
+    --route-id '<existing enrolled route ID>'
+~~~
+
+The paths/route ID above are **intentional placeholders**, not guessed
+laptop paths. Supply only previously established local private values; do
+not paste them into GitHub Issues. A legacy ledger bound to a pre-merge SHA
+requires a separately authorized *new episode*, never an implicit rewrite.
 
 Before first use, provision an ACL-restricted manifest OUTSIDE the repository,
 at `%LOCALAPPDATA%\AI-Commerce\wake-readiness.json`. Contents are
@@ -113,7 +138,8 @@ idempotency guards are never bypassed. No new legacy Wake #161/#177/#179.
 ## Integration and operations
 
 The local D5 operator/Control Center can invoke the same state machine once
-per requested preparation. Reusing a verified browser avoids full process
+per requested preparation. Once enrolled, future Wake preparations reuse the
+private manifest, so there is no per-Wake setup or checklist. Reusing a verified browser avoids full process
 enumeration + Authenticode on each Wake; a fresh exact-chat census still checks
 the route and one live main SHA lookup checks the ledger. A UI can present one
 result code rather than expose each low-level command to Human.
