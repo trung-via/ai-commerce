@@ -466,3 +466,74 @@ def test_failure_preview_rejects_forged_or_invalid_events(tamper):
         event = {"untrusted": True}
     with pytest.raises(ValueError, match="ENGINEERING_FAILURE_PREVIEW_EVENT_INVALID"):
         build_engineering_failure_wake_preview(event)
+
+
+def test_preload_before_wake_uses_enrolled_route_only(monkeypatch):
+    # Synthetic Windows browser: never connects to a real Chrome session.
+    from types import SimpleNamespace
+    from ai_commerce.remote import cdp_doorbell as d4
+    monkeypatch.setattr(d4.os, "name", "nt")
+    existing = FakePage(OTHER)
+    created = []
+    class NewPage:
+        def __init__(self):
+            self.url = "about:blank"
+        def goto(self, url, **kwargs):
+            assert url == URL and kwargs == {
+                "wait_until": "domcontentloaded", "timeout": 15000}
+            self.url = url
+    class Ctx:
+        pages = [existing]
+        def new_page(self):
+            page = NewPage()
+            created.append(page)
+            return page
+    ctx = Ctx()
+    inv = d4._PlaywrightInventory()
+    @contextmanager
+    def fake_browser(endpoint):
+        assert endpoint == BIND.cdp_endpoint
+        yield SimpleNamespace(contexts=[ctx])
+    monkeypatch.setattr(inv, "_browser", fake_browser)
+    # D4 fixture normally uses port 9222; preload is deliberately 9333 only.
+    binding = ResolvedBinding(route_id=BIND.route_id, generation=1,
+                              chat_url=URL, cdp_endpoint="http://127.0.0.1:9333")
+    assert inv.preload(binding, current_binding=lambda: binding) == "EXACT_CHAT_OPENED"
+    assert len(created) == 1 and created[0].url == URL
+    assert existing.url == OTHER
+    assert inv.preload(binding) == "EXACT_CHAT_OPENED"  # fake context does not expose new tab
+    assert inv.preload(BIND) == "PRELOAD_ROUTE_INVALID"
+
+
+def test_preload_rejects_ambiguous_targets_and_contexts(monkeypatch):
+    from types import SimpleNamespace
+    from ai_commerce.remote import cdp_doorbell as d4
+    monkeypatch.setattr(d4.os, "name", "nt")
+    inv = d4._PlaywrightInventory()
+    @contextmanager
+    def two_targets(_endpoint):
+        yield SimpleNamespace(contexts=[
+            SimpleNamespace(pages=[FakePage(URL), FakePage(URL)])])
+    monkeypatch.setattr(inv, "_browser", two_targets)
+    binding = ResolvedBinding(route_id="enrolled", generation=1, chat_url=URL,
+                              cdp_endpoint="http://127.0.0.1:9333")
+    assert inv.preload(binding) == "PRELOAD_EXACT_CHAT_AMBIGUOUS"
+    @contextmanager
+    def two_contexts(_endpoint):
+        yield SimpleNamespace(contexts=[
+            SimpleNamespace(pages=[FakePage(OTHER)]),
+            SimpleNamespace(pages=[])])
+    monkeypatch.setattr(inv, "_browser", two_contexts)
+    assert inv.preload(binding) == "PRELOAD_CONTEXT_AMBIGUOUS"
+    assert inv.preload(binding, current_binding=lambda: BIND) == "PRELOAD_ROUTE_CHANGED"
+
+
+def test_wake_preload_failure_never_stages_or_sends():
+    inv = FakeInventory(FakePage())
+    inv.preload = lambda binding: "PRELOAD_CDP_UNAVAILABLE"
+    result = LocalChromeDoorbellAdapter(
+        allow_submit=True, inventory=inv, preload_exact_chat=True).send_wake(
+            binding=BIND, message="ignored", event_id=EVENT)
+    assert result.error_code == "PRELOAD_CDP_UNAVAILABLE"
+    assert result.delivery_status == "UNSUPPORTED"
+    assert inv.calls == []

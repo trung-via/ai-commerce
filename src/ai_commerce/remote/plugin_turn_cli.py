@@ -21,6 +21,7 @@ from .plugin_turn_handoff import TurnHandoffError, preview_next_turn
 from .plugin_turn_store import TurnSessionStore
 from .plugin_turn_stage_only import ExplicitTurnChipStager
 from .plugin_turn_send_once import ExplicitTurnOneShotSender
+from .cdp_doorbell import _PlaywrightInventory
 from .plugin_turn_evidence import GitHubTurnEvidenceAuthority
 
 
@@ -96,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--checkout", required=True, type=Path)
     parser.add_argument("--state-file", required=True, type=Path,
                         help="Operator-preprovisioned private file path OUTSIDE repository")
-    parser.add_argument("--mode", choices=("preview", "create-ledger", "type-only", "prepare-turn", "send-once", "observe-reply"),
+    parser.add_argument("--mode", choices=("preview", "create-ledger", "type-only", "prepare-turn", "open-chat", "send-once", "observe-reply"),
                         default="preview")
     parser.add_argument("--comment-ref", help="Exact GitHub Issue comment URL for a reconciled UI response")
     parser.add_argument("--expected-author-id", type=int, help="Operator-pinned trusted GitHub account numeric ID")
@@ -114,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.mode == "send-once" and not args.enable_send_once:
         _emit("SEND_DISABLED", sent=False)
         return 2
-    if (args.mode in ("type-only", "prepare-turn", "send-once") and
+    if (args.mode in ("type-only", "prepare-turn", "open-chat", "send-once") and
             (args.registry is None or args.route_id is None)):
         _emit("ROUTE_ARGS_REQUIRED")
         return 2
@@ -211,6 +212,8 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         token = (f"PREPARE-D5-{preview['role']}-{preview['turn_index']}"
                  if args.mode == "prepare-turn" else
+                 f"OPEN-EXACT-CHAT-D5-{preview['role']}-{preview['turn_index']}"
+                 if args.mode == "open-chat" else
                  f"TYPE-ONLY-D5-{preview['role']}-{preview['turn_index']}")
         if not _consent(token, preserve_draft=args.mode == "prepare-turn"):
             _emit("USER_DECLINED", phase="NOT_STARTED", sent=False)
@@ -231,6 +234,24 @@ def main(argv: list[str] | None = None) -> int:
         if fresh_binding != binding:
             _emit("ROUTE_STATE_CHANGED", phase="NOT_STARTED", sent=False)
             return 2
+        if args.mode in ("open-chat", "prepare-turn"):
+            # Resolve only the bound private registry route. Do not pick a tab.
+            opened = _PlaywrightInventory().preload(
+                fresh_binding,
+                current_binding=lambda: load_registered_probe_route(
+                    registry_path=args.registry, checkout=args.checkout,
+                    route_id=args.route_id))
+            if opened not in ("EXACT_CHAT_PRESENT", "EXACT_CHAT_OPENED"):
+                _emit(opened, phase="PRELOAD", sent=False,
+                      host_selection_proven=False)
+                return 2
+            if args.mode == "open-chat":
+                _emit(opened, phase="CHAT_READY", sent=False,
+                      host_selection_proven=False)
+                return 0
+            if ledger.read() != session:
+                _emit("TURN_STATE_CHANGED", phase="PRELOAD", sent=False)
+                return 2
         result = ExplicitTurnChipStager(enabled=True).stage(
             fresh_binding, fresh, operator_approved=True,
             **({"include_prompt": True} if args.mode == "prepare-turn" else {}))

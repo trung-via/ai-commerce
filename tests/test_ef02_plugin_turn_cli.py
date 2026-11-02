@@ -343,6 +343,11 @@ def test_prepare_turn_calls_stager_with_exact_prompt_mode(config, monkeypatch, c
                 code="TURN_PREPARED_NO_SEND", phase="COMPLETE",
                 brain="STRUCTURED_CANDIDATE", engineering="ABSENT")
     monkeypatch.setattr(cli, "ExplicitTurnChipStager", FakeStager)
+    class PreloadInventory:
+        def preload(self, *args, **kwargs):
+            assert kwargs["current_binding"]().route_id == "enrolled"
+            return "EXACT_CHAT_OPENED"
+    monkeypatch.setattr(cli, "_PlaywrightInventory", PreloadInventory)
     args = c.args + [
         "--mode", "prepare-turn", "--registry", str(c.registry),
         "--route-id", "enrolled"]
@@ -413,3 +418,44 @@ def test_observe_denied_does_not_advance_unknown(config, monkeypatch, capsys):
     assert cli.main(args) == 2
     assert state.read()["phase"] == "SUBMISSION_UNKNOWN"
     assert json.loads(capsys.readouterr().out.splitlines()[-1])["code"] == "USER_DECLINED"
+
+
+def test_open_chat_only_loads_url_no_stage_or_send(config, monkeypatch, capsys):
+    c = config
+    store = initial(c)
+    monkeypatch.setattr(cli, "load_registered_probe_route",
+                        lambda **kw: SimpleNamespace(route_id="enrolled"))
+    monkeypatch.setattr("builtins.input", lambda _: "OPEN-EXACT-CHAT-D5-BRAIN-0")
+    class PreloadInventory:
+        def preload(self, binding, **kw):
+            assert kw["current_binding"]() == binding
+            return "EXACT_CHAT_OPENED"
+    monkeypatch.setattr(cli, "_PlaywrightInventory", PreloadInventory)
+    monkeypatch.setattr(cli, "ExplicitTurnChipStager",
+                        lambda **kw: pytest.fail("open-chat cannot stage or send"))
+    args = c.args + ["--mode", "open-chat", "--registry", str(c.registry),
+                     "--route-id", "enrolled"]
+    assert cli.main(args) == 0
+    output = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert output["code"] == "EXACT_CHAT_OPENED"
+    assert output["sent"] is False
+    assert store.read()["phase"] == "READY"
+
+
+def test_prepare_turn_preload_failure_blocks_staging(config, monkeypatch, capsys):
+    c = config
+    store = initial(c)
+    monkeypatch.setattr(cli, "load_registered_probe_route",
+                        lambda **kw: SimpleNamespace(route_id="enrolled"))
+    monkeypatch.setattr("builtins.input", lambda _: "PREPARE-D5-BRAIN-0")
+    class PreloadInventory:
+        def preload(self, *args, **kwargs):
+            return "PRELOAD_CONTEXT_AMBIGUOUS"
+    monkeypatch.setattr(cli, "_PlaywrightInventory", PreloadInventory)
+    monkeypatch.setattr(cli, "ExplicitTurnChipStager",
+                        lambda **kw: pytest.fail("no staging if preload fails"))
+    args = c.args + ["--mode", "prepare-turn", "--registry", str(c.registry),
+                     "--route-id", "enrolled"]
+    assert cli.main(args) == 2
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["code"] == "PRELOAD_CONTEXT_AMBIGUOUS"
+    assert store.read()["phase"] == "READY"

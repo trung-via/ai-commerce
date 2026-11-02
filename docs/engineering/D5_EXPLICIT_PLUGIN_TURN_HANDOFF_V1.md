@@ -1,5 +1,30 @@
 # D5 explicit per-plugin turn handoff v1 — operator-controlled implementation
 
+## Automatic exact-chat URL loading (candidate, no live deployment)
+
+The enrolled private route registry remains the only source of the exact chat
+URL. On Windows with Chrome CDP **9333 already listening**, the new pre-Wake
+preflight finds exactly one matching enrolled chat, or opens a new Chrome tab to
+the bound URL if none exists. No active/latest tab selection or unrelated-tab
+navigation; multiple matching tabs or ambiguous Chrome contexts fail closed.
+No private URLs, cookies or messages are published to GitHub.
+
+Local D2/D4 Wake preloading occurs only **after** existing signed origin,
+artifact provenance, consent and write-ahead UNKNOWN. It never replays old
+events, auto-retries an UNKNOWN, opens Chrome without a listener, or claims
+ChatGPT server ACK. New D5 operator CLI `--mode open-chat` loads only the chat.
+Existing `prepare-turn` now auto-loads before staging the @ chip and exact
+prompt; neither mode presses Send. Send remains separately Human-authorized.
+
+The operator-facing status sequence is `EXACT_CHAT_PRESENT` or
+`EXACT_CHAT_OPENED` → `TURN_PREPARED_NO_SEND` →
+`SUBMISSION_UNKNOWN` → `UI_REPLY_RECONCILED_ONLY`.
+A graphical dashboard may represent these stages later; this change improves
+navigation and explicit status codes, not a new browser-based dashboard.
+This candidate needs exact-head CI, review and separate live Windows activation.
+
+
+
 Status: **ported implementation candidate for operator-controlled CDP 9333 operation; no live activation from GitHub CI**. Context: Issue #181, 2026-11-02.
 
 ## Operator use — single existing enrolled chat, no Work or MCP (2026-11-02)
