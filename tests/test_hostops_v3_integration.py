@@ -477,3 +477,148 @@ def test_dual_repo_v4_invalid_json_and_api_routing_fail_closed(h):
         client.post("/repos/" + c.CONTROL_REPOSITORY + "/issues/999",
                     {"body": "never"})
 
+
+
+
+def _v4_signed_fixture(h, *, request_mutation=None, lease_mutation=None,
+                       signature_namespaces=None, exact=False):
+    """Independent OpenSSH fixture keys never leave pytest tmp_path."""
+    rel = load_script("hostops_v3_release")
+    for name in rel.FILES:
+        target = h.release / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / name, target)
+    release = rel.build_v4(h.release, h.manifest["source_sha"], "b" * 64)
+    (h.release / "release.json").write_bytes(c.canonical(release))
+    unsigned = {k: v for k, v in release.items() if k != "release_id"}
+    (h.release / "release.sig.b64").write_text(
+        h.sign(unsigned, "human", "hostops-v4-release"), encoding="ascii")
+    e = _v4_fixture(h)
+    e["request"]["release_id"] = release["release_id"]
+    e["lease"]["release_id"] = release["release_id"]
+    if request_mutation:
+        e["request"].update(request_mutation)
+    if lease_mutation:
+        e["lease"].update(lease_mutation)
+    namespaces = signature_namespaces or {}
+    e["issuer_signature_b64"] = h.sign(
+        e["request"], "issuer", namespaces.get("request", "hostops-v4-request"))
+    e["lease_signature_b64"] = h.sign(
+        e["lease"], "human", namespaces.get("lease", "hostops-v4-lease"))
+    e["action_signature_b64"] = (
+        h.sign({"request": e["request"], "lease_sha256": c.digest(c.canonical(e["lease"]))},
+               "human", namespaces.get("action", "hostops-v4-exact-action"))
+        if exact else "")
+    return release, e
+
+
+def test_v4_cryptographic_signed_release_request_and_lease_offline(h):
+    release, e = _v4_signed_fixture(h)
+    authority = auth.AuthorityV4(h.config, release, clock=lambda: NOW)
+    request, lease = authority.authenticate_v4(c.canonical(e))
+    assert request.value == e["request"]
+    assert lease == e["lease"]
+    assert release["source_repository"] == c.SOURCE_REPOSITORY
+    assert release["control_repository"] == c.CONTROL_REPOSITORY
+    with pytest.raises(c.Denied):
+        c.envelope(c.canonical(e))  # v3 broker rejects v4 without downgrade
+    assert not (h.data / "new.txt").exists()
+
+
+@pytest.mark.parametrize("mutation", [
+    "v3_request_signature", "v3_lease_signature", "tampered_request",
+    "wrong_source", "wrong_release", "wrong_lease_repo", "wrong_lease_operation",
+    "expired_lease", "revoked_lease", "kill_switch", "disabled_config",
+    "missing_exact_write", "v3_exact_signature", "valid_exact_write",
+])
+def test_v4_cryptographic_fail_closed_and_exact_human_write(h, mutation):
+    request = {"operation": "create",
+               "parameters": {"path": str(h.data / "new.txt"),
+                              "data_b64": base64.b64encode(b"fixture").decode(),
+                              "data_sha256": c.digest(b"fixture")}}
+    exact = mutation in {"v3_exact_signature", "valid_exact_write"}
+    ns = {"request": "hostops-v3-request"} if mutation == "v3_request_signature" else (
+        {"lease": "hostops-v3-lease"} if mutation == "v3_lease_signature" else (
+        {"action": "hostops-v3-exact-action"} if mutation == "v3_exact_signature" else {}))
+    release, e = _v4_signed_fixture(h, request_mutation=request,
+                                     signature_namespaces=ns, exact=exact)
+    if mutation == "tampered_request":
+        e["request"]["timeout_seconds"] = 6
+    if mutation == "wrong_source":
+        e["request"]["source_sha"] = "0" * 40
+        e["issuer_signature_b64"] = h.sign(e["request"], "issuer", "hostops-v4-request")
+    if mutation == "wrong_release":
+        e["request"]["release_id"] = "0" * 64
+        e["issuer_signature_b64"] = h.sign(e["request"], "issuer", "hostops-v4-request")
+    if mutation == "wrong_lease_repo":
+        e["lease"]["control_repository"] = c.SOURCE_REPOSITORY
+        e["lease_signature_b64"] = h.sign(e["lease"], "human", "hostops-v4-lease")
+    if mutation == "wrong_lease_operation":
+        e["lease"]["operations"] = ["read"]
+        e["lease_signature_b64"] = h.sign(e["lease"], "human", "hostops-v4-lease")
+    if mutation == "expired_lease":
+        e["lease"]["expires_at"] = NOW - 1
+        e["lease_signature_b64"] = h.sign(e["lease"], "human", "hostops-v4-lease")
+    if mutation == "revoked_lease":
+        h.revoke(leases=[e["lease"]["lease_id"]])
+    if mutation == "kill_switch":
+        (h.policy / "KILL").touch()
+    if mutation == "disabled_config":
+        h.config["enabled"] = False
+    authority = auth.AuthorityV4(h.config, release, clock=lambda: NOW)
+    if mutation == "valid_exact_write":
+        r, l = authority.authenticate_v4(c.canonical(e))
+        assert r.value["operation"] == "create"
+        assert l == e["lease"]
+    else:
+        with pytest.raises(c.Denied):
+            authority.authenticate_v4(c.canonical(e))
+    assert not (h.data / "new.txt").exists()  # auth only, no write effects
+
+
+@pytest.mark.parametrize("mutation", [
+    "public_repo", "wrong_control", "wrong_source", "wrong_workflow",
+    "bad_signature", "modified_release_file", "unexpected_file_path",
+])
+def test_v4_cryptographic_release_mutation_rejected(h, mutation):
+    release, _ = _v4_signed_fixture(h)
+    if mutation == "public_repo":
+        release["control_repository"] = c.SOURCE_REPOSITORY
+    if mutation == "wrong_control":
+        release["control_repository"] = "attacker/elsewhere"
+    if mutation == "wrong_source":
+        release["source_sha"] = "0" * 40
+    if mutation == "wrong_workflow":
+        release["workflow_sha256"] = "0" * 64
+    if mutation == "bad_signature":
+        (h.release / "release.sig.b64").write_text("not-base64")
+    if mutation == "modified_release_file":
+        p = h.release / "src/ai_commerce/hostops_v3/worker.py"
+        p.write_text("raise RuntimeError('tampered')")
+    if mutation == "unexpected_file_path":
+        release["files"]["../escape"] = "0" * 64
+    # Even re-hashing a modified manifest cannot manufacture Human approval.
+    if mutation not in {"bad_signature", "modified_release_file"}:
+        unsigned = {k: v for k, v in release.items() if k != "release_id"}
+        release["release_id"] = c.digest(c.canonical(unsigned))
+    with pytest.raises(c.Denied):
+        auth.AuthorityV4(h.config, release, clock=lambda: NOW)
+
+
+def test_v4_cryptographic_release_loaded_only_from_pinned_install_process(h):
+    release, _ = _v4_signed_fixture(h)
+    config = h.root / "config-v4.json"
+    config.write_bytes(c.canonical(h.config))
+    code = ("import sys,json;sys.path.insert(0,sys.argv[1]);"
+            "from ai_commerce.hostops_v3.auth import verify_release_v4;"
+            "verify_release_v4(json.load(open(sys.argv[2])));print('PIN_V4_VERIFIED')")
+    argv = [sys.executable, "-I", "-B", "-c", code,
+            str(h.release / "src"), str(config)]
+    good = subprocess.run(argv, capture_output=True, timeout=15)
+    assert good.returncode == 0, good.stderr.decode(errors="replace")
+    assert b"PIN_V4_VERIFIED" in good.stdout
+    p = h.release / "src/ai_commerce/hostops_v3/worker.py"
+    p.write_text("raise RuntimeError('tampered')")
+    bad = subprocess.run(argv, capture_output=True, timeout=15)
+    assert bad.returncode != 0
+    assert b"SOURCE_UNVERIFIED" in bad.stderr

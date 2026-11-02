@@ -38,3 +38,20 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+def build_v4(root, source_sha, workflow_digest):
+    """Unsigned v4 release; Human signs separate hostops-v4-release bytes."""
+    from ai_commerce.hostops_v3.contract import SOURCE_REPOSITORY, CONTROL_REPOSITORY
+    sha(source_sha, 40)
+    sha(workflow_digest)
+    body = {
+        "schema": "hostops.release.v4",
+        "source_repository": SOURCE_REPOSITORY,
+        "control_repository": CONTROL_REPOSITORY,
+        "source_sha": source_sha,
+        "workflow_sha256": workflow_digest,
+        "files": {name: digest((root / name).read_bytes()) for name in FILES},
+    }
+    return {**body, "release_id": digest(canonical(body))}
