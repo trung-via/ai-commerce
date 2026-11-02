@@ -648,3 +648,14 @@ def test_oracle_postmerge_resolves_real_github_push_context_only(monkeypatch, tm
     monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
     assert oracle.resolve_base(tmp_path, "") == ""
     assert len(calls) == 1
+
+
+
+def test_postmerge_v21_workflow_runs_on_every_main_push():
+    # A changed-only path filter can silently suppress the postmerge baseline
+    # oracle after a PR changes an unlisted control or introduces a new owner.
+    workflow = (Path(__file__).resolve().parents[1] /
+                ".github/workflows/ef02-tests.yml").read_text(encoding="utf-8")
+    push = workflow.split("  push:\n", 1)[1].split("  pull_request:\n", 1)[0]
+    assert "branches: [ef02-multi-action-implementation, main]" in push
+    assert "paths:" not in push
