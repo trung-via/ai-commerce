@@ -416,7 +416,7 @@ def verified_onboarding_binding(
             cwd=workspace, capture_output=True, check=False, timeout=30)
         if original.returncode:
             return False
-        base_paths = [x.decode("utf-8") for x in original.stdout.split(b"\\0") if x]
+        base_paths = [x.decode("utf-8") for x in original.stdout.split(bytes([0])) if x]
         candidate = json.loads((workspace / path).read_text(encoding="utf-8"))
         old_groups = approved_groups()
         admission = validate_component_onboarding_manifest(
