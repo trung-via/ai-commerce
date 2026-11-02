@@ -1450,3 +1450,53 @@ def test_v21_authenticated_full_runs_entire_registered_scope_not_affected_subset
     with pytest.raises(ValueError, match="UNTRUSTED_OR_UNREGISTERED"):
         select_plan(**{**kwargs, "fallback_argv": registry["mt01-a12-tests"]},
                     human_full_suite_authorized=True)
+
+
+def test_hostops_v3_all_28_files_are_reviewed_and_profile_registered(real_tree):
+    """HostOps v3 bootstrap is reviewed, not an unknown-component full-suite bypass."""
+    group = next(g for g in real_tree.groups if g.name == "hostops-v3")
+    expected_sources = {
+        "src/ai_commerce/hostops_v3/" + name + ".py"
+        for name in ("__init__", "contract", "auth", "filesystem", "journal",
+                     "worker", "security", "broker", "transport", "cli")
+    }
+    expected_scripts = {
+        "scripts/hostops_v3.py", "scripts/hostops_v3_release.py",
+        "scripts/hostops_v3_schemas.py", "scripts/hostops_v3_verify.py",
+        "scripts/HostOps-V3-Launch.py", "scripts/HostOps-V3-TokenInventory.ps1",
+    }
+    expected_contracts = {
+        "contracts/hostops-v3.request.schema.json",
+        "contracts/hostops-v3.lease.schema.json",
+        "contracts/hostops-v3.envelope.schema.json",
+        "contracts/hostops-v3.receipt.schema.json",
+        "config/hostops-v3/config.example.json",
+        "config/hostops-v3/revocations.example.json",
+        "docs/engineering/HOSTOPS_V3_DESIGN.md",
+        "docs/engineering/HOSTOPS_V3_ENGINEERING_REPORT.md",
+        "docs/engineering/hostops_v3_evidence/scenarios.json",
+    }
+    expected_tests = {
+        "tests/test_hostops_v3.py",
+        "tests/test_hostops_v3_integration.py",
+        "tests/test_hostops_v3_repair.py",
+    }
+    assert set(group.paths) == expected_sources
+    assert set(group.contracts) == expected_contracts | expected_scripts
+    assert set(group.tests) == expected_tests
+    assert len(expected_sources | expected_scripts | expected_contracts | expected_tests) == 28
+    assert set(group.acs) == {"HOSTOPS.v3.security-contract", "HOSTOPS.v3.issue225-matrix"}
+    registry = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_text())
+    assert registry["mt01-hostops-v3-tests"] == [
+        "python", "-m", "pytest", *group.tests, "-q", "-n", "12",
+    ]
+
+
+def test_hostops_v3_script_and_schema_change_select_registered_group(real_tree, monkeypatch):
+    """Python import scanning cannot silently ignore the fixed PS1 and schema."""
+    for path in ("scripts/HostOps-V3-TokenInventory.ps1",
+                 "contracts/hostops-v3.request.schema.json"):
+        selected = real_plan(real_tree, monkeypatch, path)
+        assert selected["selected_groups"] == ["hostops-v3"]
+        assert not selected["fallback"]
+        assert selected["groups"][0]["selected_profile"] == "mt01-hostops-v3-tests"

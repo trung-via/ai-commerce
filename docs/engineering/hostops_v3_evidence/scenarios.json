@@ -1,0 +1,404 @@
+{
+  "schema": "hostops.scenarios.v3",
+  "issue": "https://github.com/trung-via/ai-commerce/issues/225",
+  "source_sha": "e267e0f2438fdb2ed8d0ec13b9357d547c2100e6",
+  "original_row_text_available": false,
+  "description_provenance": "Derived engineering rows from Issue #225 category ranges; the referenced original document is absent from the issue and repository.",
+  "original_plan_parity": "BLOCKED_ORIGINAL_ROW_TEXT_UNAVAILABLE",
+  "exact_original_scenarios_validated": 0,
+  "results_location": ".local/hostops-v3-repair/targeted-round*.xml; registered results owned by parent EF01",
+  "scenarios": [
+    {
+      "id": "H225-01",
+      "category": "01-08 request/read",
+      "description": "strict canonical request",
+      "testcase": "tests/test_hostops_v3.py::test_h225_01_strict_canonical_request",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-02",
+      "category": "01-08 request/read",
+      "description": "eligible volume enumeration",
+      "testcase": "tests/test_hostops_v3.py::test_h225_02_eligible_volume_enumeration",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-03",
+      "category": "01-08 request/read",
+      "description": "metadata and local directory selection",
+      "testcase": "tests/test_hostops_v3.py::test_h225_03_metadata_and_local_directory_selection",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-04",
+      "category": "01-08 request/read",
+      "description": "unicode scoped find and limits",
+      "testcase": "tests/test_hostops_v3.py::test_h225_04_unicode_scoped_find_and_limits",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-05",
+      "category": "01-08 request/read",
+      "description": "large binary chunks and full digest",
+      "testcase": "tests/test_hostops_v3.py::test_h225_05_large_binary_chunks_and_full_digest",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-06",
+      "category": "01-08 request/read",
+      "description": "encoding preserved as bytes",
+      "testcase": "tests/test_hostops_v3.py::test_h225_06_encoding_preserved_as_bytes",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-07",
+      "category": "01-08 request/read",
+      "description": "binary read requires separate exact disclosure",
+      "testcase": "tests/test_hostops_v3.py::test_h225_07_binary_read_requires_separate_exact_disclosure",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-08",
+      "category": "01-08 request/read",
+      "description": "sensitive stores and read export boundary",
+      "testcase": "tests/test_hostops_v3.py::test_h225_08_sensitive_stores_and_read_export_boundary",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-09",
+      "category": "09-16 writes/path/ACL",
+      "description": "create outside old root with hash",
+      "testcase": "tests/test_hostops_v3.py::test_h225_09_create_outside_old_root_with_hash",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-10",
+      "category": "09-16 writes/path/ACL",
+      "description": "atomic replace hash precondition",
+      "testcase": "tests/test_hostops_v3.py::test_h225_10_atomic_replace_hash_precondition",
+      "os_faults_mocked": false,
+      "acceptance": "BLOCKED_ATOMICITY",
+      "coverage_note": "Broker denial plus direct fixture prototype; no conditional-write acceptance."
+    },
+    {
+      "id": "H225-11",
+      "category": "09-16 writes/path/ACL",
+      "description": "append hash precondition",
+      "testcase": "tests/test_hostops_v3.py::test_h225_11_append_hash_precondition",
+      "os_faults_mocked": false,
+      "acceptance": "BLOCKED_ATOMICITY",
+      "coverage_note": "Broker denial plus direct fixture prototype; no conditional-write acceptance."
+    },
+    {
+      "id": "H225-12",
+      "category": "09-16 writes/path/ACL",
+      "description": "typed patch and preview",
+      "testcase": "tests/test_hostops_v3.py::test_h225_12_typed_patch_and_preview",
+      "os_faults_mocked": false,
+      "acceptance": "BLOCKED_ATOMICITY",
+      "coverage_note": "Broker denial plus direct fixture prototype; no conditional-write acceptance."
+    },
+    {
+      "id": "H225-13",
+      "category": "09-16 writes/path/ACL",
+      "description": "traversal ads device normalization",
+      "testcase": "tests/test_hostops_v3.py::test_h225_13_traversal_ads_device_normalization",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-14",
+      "category": "09-16 writes/path/ACL",
+      "description": "actual acl denial is not bypassed",
+      "testcase": "tests/test_hostops_v3.py::test_h225_14_actual_acl_denial_is_not_bypassed",
+      "os_faults_mocked": true,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-15",
+      "category": "09-16 writes/path/ACL",
+      "description": "missing parent is unavailable not created",
+      "testcase": "tests/test_hostops_v3.py::test_h225_15_missing_parent_is_unavailable_not_created",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-16",
+      "category": "09-16 writes/path/ACL",
+      "description": "unc is explicit and offline is unavailable",
+      "testcase": "tests/test_hostops_v3.py::test_h225_16_unc_is_explicit_and_offline_is_unavailable",
+      "os_faults_mocked": true,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-17",
+      "category": "17-25 races/moves/delete",
+      "description": "reparse and hardlink escape",
+      "testcase": "tests/test_hostops_v3.py::test_h225_17_reparse_and_hardlink_escape",
+      "os_faults_mocked": true,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-18",
+      "category": "17-25 races/moves/delete",
+      "description": "toctou target change keeps external data",
+      "testcase": "tests/test_hostops_v3.py::test_h225_18_toctou_target_change_keeps_external_data",
+      "os_faults_mocked": true,
+      "acceptance": "BLOCKED_ATOMICITY",
+      "coverage_note": "Broker denial plus direct fixture prototype; no conditional-write acceptance."
+    },
+    {
+      "id": "H225-19",
+      "category": "17-25 races/moves/delete",
+      "description": "copy no clobber and hash",
+      "testcase": "tests/test_hostops_v3.py::test_h225_19_copy_no_clobber_and_hash",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-20",
+      "category": "17-25 races/moves/delete",
+      "description": "same volume move and rename",
+      "testcase": "tests/test_hostops_v3.py::test_h225_20_same_volume_move_and_rename",
+      "os_faults_mocked": false,
+      "acceptance": "BLOCKED_ATOMICITY",
+      "coverage_note": "Broker denial plus direct fixture prototype; no conditional-write acceptance."
+    },
+    {
+      "id": "H225-21",
+      "category": "17-25 races/moves/delete",
+      "description": "cross volume move is explicit",
+      "testcase": "tests/test_hostops_v3.py::test_h225_21_cross_volume_move_is_explicit",
+      "os_faults_mocked": true,
+      "acceptance": "BLOCKED_ATOMICITY",
+      "coverage_note": "Broker denial plus direct fixture prototype; no conditional-write acceptance."
+    },
+    {
+      "id": "H225-22",
+      "category": "17-25 races/moves/delete",
+      "description": "cross volume failure requires reconciliation",
+      "testcase": "tests/test_hostops_v3.py::test_h225_22_cross_volume_failure_requires_reconciliation",
+      "os_faults_mocked": true,
+      "acceptance": "BLOCKED_ATOMICITY",
+      "coverage_note": "Broker denial plus direct fixture prototype; no conditional-write acceptance."
+    },
+    {
+      "id": "H225-23",
+      "category": "17-25 races/moves/delete",
+      "description": "quarantine exact approval preview and no fake rollback",
+      "testcase": "tests/test_hostops_v3.py::test_h225_23_quarantine_exact_approval_preview_and_no_fake_rollback",
+      "os_faults_mocked": false,
+      "acceptance": "BLOCKED_ATOMICITY",
+      "coverage_note": "Broker denial plus direct fixture prototype; no conditional-write acceptance."
+    },
+    {
+      "id": "H225-24",
+      "category": "17-25 races/moves/delete",
+      "description": "recursive delete acl registry custom shell denied",
+      "testcase": "tests/test_hostops_v3.py::test_h225_24_recursive_delete_acl_registry_custom_shell_denied",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-25",
+      "category": "17-25 races/moves/delete",
+      "description": "protected paths include installed control plane",
+      "testcase": "tests/test_hostops_v3.py::test_h225_25_protected_paths_include_installed_control_plane",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-26",
+      "category": "26-33 fault/replay/concurrency",
+      "description": "disk full during write is unknown",
+      "testcase": "tests/test_hostops_v3.py::test_h225_26_disk_full_during_write_is_unknown",
+      "os_faults_mocked": true,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-27",
+      "category": "26-33 fault/replay/concurrency",
+      "description": "crash after durable intent never reexecutes",
+      "testcase": "tests/test_hostops_v3.py::test_h225_27_crash_after_durable_intent_never_reexecutes",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-28",
+      "category": "26-33 fault/replay/concurrency",
+      "description": "crash after effect reconciles observation only",
+      "testcase": "tests/test_hostops_v3.py::test_h225_28_crash_after_effect_reconciles_observation_only",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-29",
+      "category": "26-33 fault/replay/concurrency",
+      "description": "cancel kill switch mid operation",
+      "testcase": "tests/test_hostops_v3.py::test_h225_29_cancel_kill_switch_mid_operation",
+      "os_faults_mocked": true,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-30",
+      "category": "26-33 fault/replay/concurrency",
+      "description": "report failure does not repeat write",
+      "testcase": "tests/test_hostops_v3.py::test_h225_30_report_failure_does_not_repeat_write",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-31",
+      "category": "26-33 fault/replay/concurrency",
+      "description": "semantic replay and id conflict",
+      "testcase": "tests/test_hostops_v3.py::test_h225_31_semantic_replay_and_id_conflict",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-32",
+      "category": "26-33 fault/replay/concurrency",
+      "description": "concurrent writes are serialized",
+      "testcase": "tests/test_hostops_v3.py::test_h225_32_concurrent_writes_are_serialized",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-33",
+      "category": "26-33 fault/replay/concurrency",
+      "description": "signed payload tamper has no effect",
+      "testcase": "tests/test_hostops_v3.py::test_h225_33_signed_payload_tamper_has_no_effect",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-34",
+      "category": "34-42 trust/availability",
+      "description": "release pin independent of main sha",
+      "testcase": "tests/test_hostops_v3.py::test_h225_34_release_pin_independent_of_main_sha",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-35",
+      "category": "34-42 trust/availability",
+      "description": "authenticated issuer not github owner claim",
+      "testcase": "tests/test_hostops_v3.py::test_h225_35_authenticated_issuer_not_github_owner_claim",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-36",
+      "category": "34-42 trust/availability",
+      "description": "human signature independence and invalid lease",
+      "testcase": "tests/test_hostops_v3.py::test_h225_36_human_signature_independence_and_invalid_lease",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-37",
+      "category": "34-42 trust/availability",
+      "description": "ipc token wrong missing rotated",
+      "testcase": "tests/test_hostops_v3.py::test_h225_37_ipc_token_wrong_missing_rotated",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-38",
+      "category": "34-42 trust/availability",
+      "description": "offline reboot is unavailable",
+      "testcase": "tests/test_hostops_v3.py::test_h225_38_offline_reboot_is_unavailable",
+      "os_faults_mocked": true,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-39",
+      "category": "34-42 trust/availability",
+      "description": "busy journal has no side effect",
+      "testcase": "tests/test_hostops_v3.py::test_h225_39_busy_journal_has_no_side_effect",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-40",
+      "category": "34-42 trust/availability",
+      "description": "github outage never reaches broker",
+      "testcase": "tests/test_hostops_v3.py::test_h225_40_github_outage_never_reaches_broker",
+      "os_faults_mocked": true,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-41",
+      "category": "34-42 trust/availability",
+      "description": "unverified release is rejected",
+      "testcase": "tests/test_hostops_v3.py::test_h225_41_unverified_release_is_rejected",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-42",
+      "category": "34-42 trust/availability",
+      "description": "noninteractive fixed digest powershell",
+      "testcase": "tests/test_hostops_v3.py::test_h225_42_noninteractive_fixed_digest_powershell",
+      "os_faults_mocked": true,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-43",
+      "category": "43-48 identity/disclosure/revoke/hash",
+      "description": "multiple users and ci identity are denied",
+      "testcase": "tests/test_hostops_v3.py::test_h225_43_multiple_users_and_ci_identity_are_denied",
+      "os_faults_mocked": true,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-44",
+      "category": "43-48 identity/disclosure/revoke/hash",
+      "description": "admin uac is never requested",
+      "testcase": "tests/test_hostops_v3.py::test_h225_44_admin_uac_is_never_requested",
+      "os_faults_mocked": true,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-45",
+      "category": "43-48 identity/disclosure/revoke/hash",
+      "description": "command injection is data or rejected",
+      "testcase": "tests/test_hostops_v3.py::test_h225_45_command_injection_is_data_or_rejected",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-46",
+      "category": "43-48 identity/disclosure/revoke/hash",
+      "description": "private content never enters receipts or journal",
+      "testcase": "tests/test_hostops_v3.py::test_h225_46_private_content_never_enters_receipts_or_journal",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-47",
+      "category": "43-48 identity/disclosure/revoke/hash",
+      "description": "revoke expiry kill and revocation rollback",
+      "testcase": "tests/test_hostops_v3.py::test_h225_47_revoke_expiry_kill_and_revocation_rollback",
+      "os_faults_mocked": false,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    },
+    {
+      "id": "H225-48",
+      "category": "43-48 identity/disclosure/revoke/hash",
+      "description": "hash mismatch before and after effect",
+      "testcase": "tests/test_hostops_v3.py::test_h225_48_hash_mismatch_before_and_after_effect",
+      "os_faults_mocked": true,
+      "acceptance": "FIXTURE_ONLY_LIVE_UNVERIFIED"
+    }
+  ]
+}
