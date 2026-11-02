@@ -185,3 +185,19 @@ def test_ef02_v21_preserves_authorized_narrow_profile(monkeypatch):
     assert plan["profile"] == "mt01-a12-tests"
     assert plan["argv"] == narrow
     assert plan["coverage"] == "V21_REQUIRES_POST_EXECUTOR_IMPACT_PROOF"
+
+
+def test_v21_junit_errors_use_singular_receipt_counter():
+    import importlib.util
+    import sys
+    script = Path(__file__).resolve().parents[1] / ".github/scripts/ef02-pr-ci-tests.py"
+    spec = importlib.util.spec_from_file_location("mt01_ci_v21_audit", script)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    receipt = {"passed_count": 0, "skipped_count": 0,
+               "failed_count": 0, "error_count": 0}
+    module._add_junit_counts(receipt, {
+        "passed": 11, "skipped": 2, "failed": 3, "errors": 4})
+    assert receipt == {"passed_count": 11, "skipped_count": 2,
+                       "failed_count": 3, "error_count": 4}

@@ -355,6 +355,13 @@ def main_v1() -> int:
 
 
 
+def _add_junit_counts(receipt: dict, summaries: dict) -> None:
+    """Map pytest JUnit plural error category to singular typed receipt field."""
+    for key in ("passed", "skipped", "failed", "errors"):
+        field = "error_count" if key == "errors" else key + "_count"
+        receipt[field] += summaries[key]
+
+
 def main() -> int:
     """MT-01 V2.1 CI entrypoint: affected tests or explicit HOLD, never auto full."""
     sys.path.insert(0, str(ROOT / "src"))
@@ -492,8 +499,7 @@ def main() -> int:
         })
         receipt["collected_count"] += len(cases)
         receipt["executed_count"] += len(cases) - summaries["skipped"]
-        for key in ("passed", "skipped", "failed", "errors"):
-            receipt[key + "_count"] += summaries[key]
+        _add_junit_counts(receipt, summaries)
         save_receipt()
         if code != 0 or summaries["failed"] or summaries["errors"]:
             return code or 3
