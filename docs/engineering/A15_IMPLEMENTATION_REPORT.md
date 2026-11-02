@@ -1,7 +1,7 @@
 # A15 Operations — Engineering implementation report
 
 ## Status
-**INITIAL REVIEW CANDIDATE / NOT ACCEPTED / NOT MERGED**. The actual result and test counts must be read from GitHub Actions at the exact candidate HEAD; there is no claim of local or hosted PASS in this source document.
+**REPAIR CANDIDATE / NOT YET BRAIN ACCEPTED / NOT MERGED**. The actual result and test counts must be read from GitHub Actions at the exact candidate HEAD; the original candidate passed Ubuntu/Windows, but the repaired HEAD requires its own CI; never reuse old CI as new-HEAD proof.
 
 - Handoff: https://github.com/trung-via/ai-commerce/issues/237
 - Parent main observed when authoring: `41cb7835090bd96cf03648ea12606766e715e8ae`
@@ -29,5 +29,14 @@
 
 ## Remaining A15 acceptance before Brain PASS
 - Validate stable interface/consumer tests, exact-head CI, mapping and oracle-selected coverage.
-- Explicit read-only operational status CLI is not yet delivered; may be added to the *same review PR* after examining CLI compatibility, not via a new symptom PR.
+- Read-only CLI implemented: python -m ai_commerce.operations.a15_cli --registry EXISTING_ROOT --job-id JOB. It reads stored A04 V1 receipts only, does not call media providers and rejects missing storage.
 - Full A15 M5 product acceptance requires the read-only operator workflow demonstrated with trusted source/failure and required regressions; M5 also includes A16, so A15 merge alone cannot imply M5.
+
+## Verify-Fix: review-driven repair (2026-11-02)
+
+- O05: double-counted charges in selected views with the same provider/evidence ref/digest are now rejected rather than summed; multiple line items require distinct evidence references.
+- O06: append-only immutable reconciliation for uncertain attempts binds original attempt digest + request digest, preserves original UNKNOWN, never calls a provider, and only permits HUMAN-authorized subsequent action after a supplied no-effect observation.
+- O07: reload persisted A04 V1 manifest and bind selected cost entries to exact job/attempt/provider/request digest; read-only CLI demonstrates the operator report.
+- A04 V2: read-only synthetic generation-job journal projection using GenerationJobRunner.load, never calling submit/observe/fetch.
+- Updated required tests include A15, A04 V1 and V2, A02 contracts in the registered MT-01 A15 profile.
+- Exact repaired-HEAD Ubuntu/Windows CI and independent Brain acceptance are PENDING; this document is not a PASS receipt.

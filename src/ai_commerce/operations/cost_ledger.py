@@ -144,11 +144,20 @@ class CostLedger:
         seen: set[str] = set()
         totals: dict[str, dict[str, Decimal]] = {}
         counts = {state: 0 for state in sorted(STATES)}
+        # Same charge evidence in multiple entry IDs is not independent spend.
+        # A multi-line provider receipt must identify separate line items in
+        # evidence_ref; ambiguous duplicates fail closed rather than sum twice.
+        seen_charge_sources: set[tuple[str, str, str]] = set()
         for entry_id in entry_ids:
             if entry_id in seen:
                 raise CostEvidenceError("DUPLICATE_PROJECTION_ENTRY")
             seen.add(entry_id)
             entry = self.get(entry_id)
+            if entry.status == "CHARGED":
+                identity = (entry.provider, entry.evidence_ref, entry.evidence_sha256)
+                if identity in seen_charge_sources:
+                    raise CostEvidenceError("DUPLICATE_CHARGE_EVIDENCE")
+                seen_charge_sources.add(identity)
             counts[entry.status] += 1
             if entry.status not in {"CHARGED", "ESTIMATED"}:
                 continue
