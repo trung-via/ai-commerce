@@ -17,11 +17,11 @@ import socket
 import struct
 import time
 
-from .auth import verify_release
-from .contract import MAX_WIRE, Denied, canonical, decode, deny, envelope, dual_repo_envelope, public_receipt, receipt, shape
+from .auth import verify_release, verify_release_v4
+from .contract import MAX_WIRE, Denied, canonical, decode, deny, envelope, dual_repo_envelope, public_receipt, public_receipt_v4, receipt, receipt_v4, shape
 from .journal import Journal
 from .security import admit, load_config, windows_identity
-from .worker import Worker
+from .worker import Worker, WorkerV4
 
 IPC_LIMIT = 262144
 IPC_TIMEOUT = 45  # Greater than the 30s operation + 8s startup watchdog budget.
@@ -216,7 +216,7 @@ def server_exchange(channel, key, execute):
         deny("IPC_AUTH_FAILED")
 
 
-def client_exchange(channel, key, raw):
+def client_exchange(channel, key, raw, *, verify_receipt=public_receipt):
     greeting = decode(channel.receive())
     shape(greeting, "nonce mac")
     try:
@@ -237,7 +237,7 @@ def client_exchange(channel, key, raw):
     value = decode(body)
     if type(value) is not dict or not {"receipt"} <= value.keys() or not value.keys() <= {"receipt", "disclosure_b64"}:
         deny("BAD_RECEIPT")
-    public_receipt(value["receipt"])
+    verify_receipt(value["receipt"])
     channel.send(canonical({"ack": mac(key, b"ack", nonce, body)}))
     return value
 
@@ -386,3 +386,71 @@ def ipc_request_v4(payload):
     raw = canonical(message["envelope"])
     dual_repo_envelope(raw)
     return message["mode"], raw
+
+
+
+def child_execute_v4(config_path, payload, pipe):
+    """Isolated V4 signed read-only worker. Not routed by v3 serve()."""
+    try:
+        mode, raw = ipc_request_v4(payload)
+        _, request = dual_repo_envelope(raw)
+        if request.value["operation"] not in WorkerV4.READ_ONLY:
+            deny("OPERATION_NOT_ENABLED")
+        config = load_config(config_path)
+        admit(config, config_path)
+        _, authority = verify_release_v4(config)
+        journal = Journal(Path(config["state_dir"]) / "journal.sqlite")
+        try:
+            response = WorkerV4(config, authority, journal).execute(
+                raw, reconcile=mode == "reconcile")
+            pipe.send_bytes(canonical(response))
+        finally:
+            journal.close()
+    except (Denied, OSError):
+        try:
+            _, raw = ipc_request_v4(payload)
+            _, request = dual_repo_envelope(raw)
+        except Denied:
+            request = None
+        pipe.send_bytes(canonical({"receipt": receipt_v4(
+            request, "UNAVAILABLE", "BROKER_UNAVAILABLE")}))
+    finally:
+        pipe.close()
+
+
+def isolated_execute_v4(config_path, payload):
+    """Versioned child process, KILL watchdog, no v3 server/CLI routing."""
+    mode, raw = ipc_request_v4(payload)
+    _, request = dual_repo_envelope(raw)
+    if request.value["operation"] not in WorkerV4.READ_ONLY:
+        deny("OPERATION_NOT_ENABLED")
+    config = load_config(config_path)
+    if not config["enabled"] or (Path(config["policy_dir"]) / "KILL").exists():
+        deny("KILL_SWITCH")
+    ctx = multiprocessing.get_context("spawn")
+    incoming, outgoing = ctx.Pipe(duplex=False)
+    process = ctx.Process(target=child_execute_v4, args=(str(config_path), payload, outgoing))
+    try:
+        process.start()
+        outgoing.close()
+        end = time.monotonic() + request.value["timeout_seconds"] + 8
+        while time.monotonic() < end:
+            if incoming.poll(0.1):
+                response = decode(incoming.recv_bytes(IPC_LIMIT), IPC_LIMIT)
+                shape(response, "receipt")
+                public_receipt_v4(response["receipt"])
+                if (response["receipt"]["request_sha256"] != request.fingerprint or
+                        response["receipt"]["release_id"] != request.value["release_id"]):
+                    deny("IPC_RESPONSE_MISMATCH")
+                return response
+            current = load_config(config_path)
+            if not current["enabled"] or (Path(current["policy_dir"]) / "KILL").exists():
+                break
+        return {"receipt": receipt_v4(request, "UNKNOWN", "RECONCILIATION_REQUIRED")}
+    except (EOFError, OSError, Denied):
+        return {"receipt": receipt_v4(request, "UNKNOWN", "RECONCILIATION_REQUIRED")}
+    finally:
+        if process.is_alive():
+            process.terminate()
+        process.join(2)
+        incoming.close()

@@ -13,7 +13,8 @@ import urllib.request
 
 from .broker import client_exchange, connect
 from .contract import (MAX_WIRE, REPOSITORY, Denied, blob, canonical, decode, deny,
-                       digest, envelope, public_receipt, receipt, sha)
+                       digest, envelope, public_receipt, receipt, sha,
+                       dual_repo_envelope, public_receipt_v4, receipt_v4)
 
 WORKFLOW_PATH = ".github/workflows/hostops-v3.yml"
 
@@ -244,3 +245,66 @@ def control_provenance(api, issue_number, run_id, workflow_sha256, expected_sour
     if request.value["source_sha"] != expected_source_sha:
         deny("SOURCE_SHA_MISMATCH")
     return raw
+
+
+
+READ_ONLY_V4 = frozenset({"volumes", "stat", "list", "find", "hash", "read"})
+
+
+def submit_v4(config, raw, *, reconcile=False):
+    """V4 HMAC client; v3 CLI cannot invoke this function."""
+    envelope_data, request = dual_repo_envelope(raw)
+    if request.value["operation"] not in READ_ONLY_V4:
+        deny("OPERATION_NOT_ENABLED")
+    if not config["enabled"] or (Path(config["policy_dir"]) / "KILL").exists():
+        deny("KILL_SWITCH")
+    payload = canonical({"schema": "hostops.ipc.v4",
+                         "mode": "reconcile" if reconcile else "execute",
+                         "envelope": envelope_data})
+    key = (Path(config["policy_dir"]) / "ipc.key").read_bytes()
+    if len(key) != 32:
+        deny("IPC_KEY_INVALID")
+    channel = connect(config["endpoint"])
+    try:
+        response = client_exchange(channel, key, payload,
+                                   verify_receipt=public_receipt_v4)
+        if (set(response) != {"receipt"} or
+                response["receipt"]["request_sha256"] != request.fingerprint or
+                response["receipt"]["release_id"] != request.value["release_id"] or
+                response["receipt"]["source_sha"] != request.value["source_sha"]):
+            deny("IPC_RESPONSE_MISMATCH")
+        return response
+    except (Denied, OSError):
+        return {"receipt": receipt_v4(request, "UNKNOWN", "RECONCILIATION_REQUIRED")}
+    finally:
+        channel.close()
+
+
+def report_v4(response):
+    """Closed sanitized projection, never includes file data or raw errors."""
+    if type(response) is not dict or set(response) != {"receipt"}:
+        deny("UNSOLICITED_DISCLOSURE")
+    observed = public_receipt_v4(response["receipt"])
+    return "HOSTOPS_V4_RECEIPT\n" + canonical(observed).decode("ascii")
+
+
+def poll_once_v4(api, config, release, issue_number, run_id, *, send=submit_v4):
+    """Single Private Issue, no daemon/CLI activation in this stage."""
+    raw = control_provenance(api, issue_number, run_id,
+                             release["workflow_sha256"], release["source_sha"])
+    _, request = dual_repo_envelope(raw)
+    if request.value["operation"] not in READ_ONLY_V4:
+        deny("OPERATION_NOT_ENABLED")
+    if request.value["release_id"] != release["release_id"]:
+        deny("SOURCE_UNVERIFIED")
+    response = send(config, raw)
+    if type(response) is not dict or set(response) != {"receipt"}:
+        deny("UNSOLICITED_DISCLOSURE")
+    observed = public_receipt_v4(response["receipt"])
+    if (observed["request_sha256"] != request.fingerprint or
+            observed["release_id"] != request.value["release_id"] or
+            observed["source_sha"] != request.value["source_sha"]):
+        deny("IPC_RESPONSE_MISMATCH")
+    api.post("/repos/" + CONTROL_REPOSITORY + "/issues/" + str(issue_number) +
+             "/comments", {"body": report_v4(response)})
+    return observed
