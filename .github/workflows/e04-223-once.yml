@@ -30,7 +30,7 @@ jobs:
           repository: trung-via/ai-commerce
           name: hostops-v2-ef02-223-source-41426161990
           path: .local/e04
-          github-token: \${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Configure Python
         uses: actions/setup-python@v5
         with:
