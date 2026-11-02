@@ -711,12 +711,21 @@ def _existing_owner_addition_fixture():
     """Two real shared-owner files; no candidate module is executed."""
     from ai_commerce.engineering.minimum_test import approved_groups
     main = (ROOT / "src/ai_commerce/engineering/minimum_test.py").read_text(encoding="utf-8")
-    old_ef01 = 'eng + "model_defaults.py"),'
-    new_ef01 = 'eng + "model_defaults.py", eng + "gate_fixture.py"),'
-    old_repair = '(eng + "runner.py",), (rem + "worker.py", rem + "scheduler.py")),'
-    new_repair = '(eng + "runner.py", eng + "gate_fixture.py"), (rem + "worker.py", rem + "scheduler.py")),'
-    old_mt01 = '(eng + "minimum_test.py", eng + "verification.py"), (eng + "runner.py", rem + "worker.py"))'
-    new_mt01 = '(eng + "minimum_test.py", eng + "verification.py", eng + "gate_mt01_probe.py"), (eng + "runner.py", rem + "worker.py"))'
+    # Derive fixture append-points from the currently reviewed owner tuples.
+    # The test must remain valid after the exact extension it is testing merges.
+    lines = main.splitlines()
+    old_ef01 = next(line for line in lines if 'eng + "model_defaults.py"' in line)
+    new_ef01 = old_ef01[:-2] + ', eng + "gate_fixture.py"),'
+    old_repair = next(line for line in lines if
+                      '(rem + "worker.py", rem + "scheduler.py")),' in line
+                      and '(eng + "runner.py"' in line)
+    new_repair = old_repair.replace(
+        '), (rem + "worker.py"', ', eng + "gate_fixture.py"), (rem + "worker.py"')
+    old_mt01 = next(line for line in lines if
+                    'eng + "minimum_test.py"' in line and
+                    'eng + "verification.py"' in line)
+    new_mt01 = old_mt01.replace(
+        '), (eng + "runner.py"', ', eng + "gate_mt01_probe.py"), (eng + "runner.py"')
     candidate = main
     for old, new in ((old_ef01, new_ef01), (old_repair, new_repair), (old_mt01, new_mt01)):
         assert candidate.count(old) == 1
