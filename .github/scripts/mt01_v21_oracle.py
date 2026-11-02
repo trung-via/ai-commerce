@@ -101,6 +101,16 @@ def _git(root: Path, *args: str) -> bytes:
     ).stdout
 
 
+def resolve_base(repo: Path, requested: str) -> str:
+    """Use trusted GitHub push context for postmerge, never candidate testimony."""
+    if requested:
+        return requested
+    if (os.environ.get("GITHUB_EVENT_NAME") == "push" and
+            os.environ.get("GITHUB_REF") == "refs/heads/main"):
+        return _git(repo, "rev-parse", "HEAD^").decode().strip()
+    return ""
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[2])
@@ -109,10 +119,7 @@ def main() -> int:
     opts = parser.parse_args()
     try:
         repo = opts.repo.resolve()
-        base = opts.base
-        if (not base and os.environ.get("MT01_CI_EVENT") == "push" and
-                os.environ.get("GITHUB_REF") == "refs/heads/main"):
-            base = _git(repo, "rev-parse", "HEAD^").decode().strip()
+        base = resolve_base(repo, opts.base)
         if not SHA.fullmatch(base):
             print("MT01_ORACLE_STATUS=HOLD_PROOF_INVALID_BASE", flush=True)
             return 3

@@ -617,3 +617,45 @@ def test_v21_offline_ef02_scope_review_blocks_downstream_without_provider(tmp_pa
     assert result["status"] == "PARTIAL_OR_FAILED"
     assert result["actions"][0]["status"] == "CANDIDATE_READY_SCOPE_REVIEW"
     assert result["actions"][1]["status"] == "BLOCKED_DEPENDENCY"
+
+
+
+def test_oracle_postmerge_resolves_real_github_push_context_only(monkeypatch, tmp_path):
+    import importlib.util
+    import sys
+    path = Path(__file__).resolve().parents[1] / ".github/scripts/mt01_v21_oracle.py"
+    spec = importlib.util.spec_from_file_location("mt01_oracle_github_push_regression", path)
+    oracle = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = oracle
+    spec.loader.exec_module(oracle)
+    calls = []
+
+    def git(root, *argv):
+        calls.append(tuple(argv))
+        assert tuple(argv) == ("rev-parse", "HEAD^")
+        return (b"a" * 40) + b"\n"
+
+    monkeypatch.setattr(oracle, "_git", git)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    assert oracle.resolve_base(tmp_path, "") == "a" * 40
+    assert calls == [("rev-parse", "HEAD^")]
+    assert oracle.resolve_base(tmp_path, "b" * 40) == "b" * 40
+    assert len(calls) == 1
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/other")
+    assert oracle.resolve_base(tmp_path, "") == ""
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+    assert oracle.resolve_base(tmp_path, "") == ""
+    assert len(calls) == 1
+
+
+
+def test_postmerge_v21_workflow_runs_on_every_main_push():
+    # A changed-only path filter can silently suppress the postmerge baseline
+    # oracle after a PR changes an unlisted control or introduces a new owner.
+    workflow = (Path(__file__).resolve().parents[1] /
+                ".github/workflows/ef02-tests.yml").read_text(encoding="utf-8")
+    push = workflow.split("  push:\n", 1)[1].split("  pull_request:\n", 1)[0]
+    assert "branches: [ef02-multi-action-implementation, main]" in push
+    assert "paths:" not in push
