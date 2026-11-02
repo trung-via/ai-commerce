@@ -18,7 +18,7 @@ import struct
 import time
 
 from .auth import verify_release
-from .contract import MAX_WIRE, Denied, canonical, decode, deny, envelope, public_receipt, receipt, shape
+from .contract import MAX_WIRE, Denied, canonical, decode, deny, envelope, dual_repo_envelope, public_receipt, receipt, shape
 from .journal import Journal
 from .security import admit, load_config, windows_identity
 from .worker import Worker
@@ -374,3 +374,15 @@ def serve(config_path):
     finally:
         listener.close()
         endpoint.unlink()
+
+
+
+def ipc_request_v4(payload):
+    """Strict V4 IPC framing, separate from v3 broker/CLI dispatch."""
+    message = decode(payload)
+    shape(message, "schema mode envelope")
+    if message["schema"] != "hostops.ipc.v4" or message["mode"] not in ("execute", "reconcile"):
+        deny("BAD_IPC_MODE")
+    raw = canonical(message["envelope"])
+    dual_repo_envelope(raw)
+    return message["mode"], raw

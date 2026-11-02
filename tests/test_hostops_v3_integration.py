@@ -622,3 +622,82 @@ def test_v4_cryptographic_release_loaded_only_from_pinned_install_process(h):
     bad = subprocess.run(argv, capture_output=True, timeout=15)
     assert bad.returncode != 0
     assert b"SOURCE_UNVERIFIED" in bad.stderr
+
+
+
+def test_v4_signed_read_only_worker_replay_and_versioned_receipt(h):
+    from ai_commerce.hostops_v3.worker import WorkerV4
+    release, e = _v4_signed_fixture(h)
+    worker = WorkerV4(h.config, auth.AuthorityV4(h.config, release, clock=lambda: NOW), h.journal)
+    a = worker.execute(c.canonical(e))["receipt"]
+    assert a["schema"] == "hostops.receipt.v4"
+    assert a["status"] == "OBSERVED"
+    assert a["source_repository"] == c.SOURCE_REPOSITORY
+    assert a["control_repository"] == c.CONTROL_REPOSITORY
+    assert c.public_receipt_v4(a) == a
+    with pytest.raises(c.Denied, match="BAD_SHAPE"):
+        c.public_receipt(a)
+    assert worker.execute(c.canonical(e))["receipt"] == a
+    ids = {row[0] for row in h.journal.db.execute("SELECT id FROM requests")}
+    assert ids == {"v4:" + e["request"]["request_id"]}
+    assert not (h.data / "new.txt").exists()
+
+
+def test_v4_signed_read_only_worker_lost_response_stays_unknown(h):
+    from ai_commerce.hostops_v3.worker import WorkerV4
+    release, e = _v4_signed_fixture(h)
+    class Crash(BaseException):
+        pass
+    def fault(point):
+        if point == "after_effect":
+            raise Crash()
+    worker = WorkerV4(h.config, auth.AuthorityV4(h.config, release, clock=lambda: NOW),
+                      h.journal, fault=fault)
+    with pytest.raises(Crash):
+        worker.execute(c.canonical(e))
+    recovered = WorkerV4(h.config, auth.AuthorityV4(h.config, release, clock=lambda: NOW), h.journal)
+    r = recovered.execute(c.canonical(e))["receipt"]
+    assert r["status"] == "UNKNOWN"
+    assert r["error_code"] == "RECONCILIATION_REQUIRED"
+    assert r["schema"] == "hostops.receipt.v4"
+
+
+@pytest.mark.parametrize("op", ["create", "replace", "patch", "append", "copy",
+                                "move", "rename", "quarantine", "powershell", "disclose"])
+def test_v4_signed_read_only_worker_rejects_effects_before_journal(h, op):
+    from ai_commerce.hostops_v3.worker import WorkerV4
+    fixture_request = h.make()
+    # Precise operation parameters aren't important for this negative gate:
+    # strict contract and/or runtime can reject, but no local intent is made.
+    release, e = _v4_signed_fixture(h, request_mutation={"operation": op})
+    worker = WorkerV4(h.config, auth.AuthorityV4(h.config, release, clock=lambda: NOW), h.journal)
+    out = worker.execute(c.canonical(e))["receipt"]
+    assert out["schema"] == "hostops.receipt.v4" and out["status"] == "BLOCKED"
+    assert h.journal.db.execute("SELECT count(*) FROM requests").fetchone()[0] == 0
+    assert not (h.data / "new.txt").exists()
+
+
+def test_v4_ipc_version_separation_and_no_v3_dispatch(h):
+    _, e = _v4_signed_fixture(h)
+    payload = c.canonical({"schema": "hostops.ipc.v4", "mode": "execute", "envelope": e})
+    mode, raw = broker.ipc_request_v4(payload)
+    assert mode == "execute" and raw == c.canonical(e)
+    with pytest.raises(c.Denied, match="BAD_IPC_MODE"):
+        broker.ipc_request(payload)
+    with pytest.raises(c.Denied, match="BAD_IPC_MODE"):
+        broker.ipc_request_v4(c.canonical({"schema": "hostops.ipc.v3", "mode": "execute",
+                                          "envelope": e}))
+
+
+def test_v4_and_v3_share_journal_without_request_id_confusion(h):
+    from ai_commerce.hostops_v3.worker import WorkerV4
+    old = h.make()
+    assert h.execute(old)["receipt"]["status"] == "OBSERVED"
+    release, e = _v4_signed_fixture(h)
+    e["request"]["request_id"] = old["request"]["request_id"]
+    e["issuer_signature_b64"] = h.sign(e["request"], "issuer", "hostops-v4-request")
+    r = WorkerV4(h.config, auth.AuthorityV4(h.config, release, clock=lambda: NOW),
+                 h.journal).execute(c.canonical(e))["receipt"]
+    assert r["status"] == "OBSERVED"
+    ids = {x[0] for x in h.journal.db.execute("SELECT id FROM requests")}
+    assert ids == {old["request"]["request_id"], "v4:" + old["request"]["request_id"]}

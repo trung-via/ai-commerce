@@ -10,13 +10,21 @@ import subprocess
 import time
 
 from .contract import (BLOCKED_CONDITIONAL_WRITES, MAX_CHUNK, MUTATIONS, Denied, canonical, decode, deny, digest,
-                       envelope, public_receipt, receipt)
+                       envelope, public_receipt, receipt, receipt_v4, public_receipt_v4)
 from .filesystem import Filesystem, PinnedPath
 from .journal import Journal
 from .auth import child_environment
 
 
 class Worker:
+    _receipt = staticmethod(receipt)
+    _public_receipt = staticmethod(public_receipt)
+
+    def _authenticate(self, raw, *, reconcile=False):
+        e, request = envelope(raw)
+        lease = self.authority.authenticate(e, request, reconcile=reconcile)
+        return request, lease
+
     def __init__(self, config, authority, journal, *, clock=time.monotonic, fault=lambda _: None):
         self.config, self.authority, self.journal = config, authority, journal
         self.clock, self.fault = clock, fault
@@ -24,8 +32,7 @@ class Worker:
     def execute(self, raw, *, reconcile=False):
         request, fs, reserved = None, None, False
         try:
-            e, request = envelope(raw)
-            lease = self.authority.authenticate(e, request, reconcile=reconcile)
+            request, lease = self._authenticate(raw, reconcile=reconcile)
             r, p, op = request.value, request.value["parameters"], request.value["operation"]
             deadline = self.clock() + r["timeout_seconds"]
             def checkpoint():
@@ -42,28 +49,28 @@ class Worker:
             if previous:
                 saved = Journal.previous(previous)
                 if saved and saved["status"] not in ("UNKNOWN", "PARTIAL"):
-                    return {"receipt": public_receipt(saved)}
+                    return {"receipt": self._public_receipt(saved)}
                 # NEVER repeat an effect. Reconciliation only observes hash/postcondition.
                 if reconcile:
                     with self.journal.execution():
                         result = self.reconcile(request, fs)
                         self.journal.finish(request, result)
-                        return {"receipt": public_receipt(result)}
-                return {"receipt": receipt(request, "UNKNOWN", "RECONCILIATION_REQUIRED")}
+                        return {"receipt": self._public_receipt(result)}
+                return {"receipt": self._receipt(request, "UNKNOWN", "RECONCILIATION_REQUIRED")}
             if reconcile:
                 # Reconciliation never turns an unexecuted request into execution.
-                return {"receipt": receipt(request, "UNKNOWN", "NO_PRIOR_EFFECT_PROOF")}
+                return {"receipt": self._receipt(request, "UNKNOWN", "NO_PRIOR_EFFECT_PROOF")}
             self.fault("after_intent")
             with self.journal.execution():
                 # Another request may have changed revocations while waiting for the lock.
                 self.journal.epoch(checkpoint())
                 result, disclosed = self.perform(request, lease, fs)
                 self.fault("after_effect")
-                out = receipt(request, result.pop("_status", "APPLIED" if op in MUTATIONS else "OBSERVED"), result=result)
+                out = self._receipt(request, result.pop("_status", "APPLIED" if op in MUTATIONS else "OBSERVED"), result=result)
                 self.journal.finish(request, out)
             # Simulates a committed operation whose IPC/GitHub report was lost.
             self.fault("after_receipt")
-            response = {"receipt": public_receipt(out)}
+            response = {"receipt": self._public_receipt(out)}
             if disclosed is not None:
                 checkpoint()
                 response["disclosure_b64"] = base64.b64encode(disclosed).decode("ascii")
@@ -72,9 +79,9 @@ class Worker:
             status = "PARTIAL" if fs and fs.started else "BLOCKED"
             if str(exc) == "HOST_BUSY":
                 status = "BUSY"
-            out = receipt(request, status, str(exc))
+            out = self._receipt(request, status, str(exc))
         except (OSError, sqlite3.Error, subprocess.TimeoutExpired):
-            out = receipt(request, "UNKNOWN" if fs and fs.started else "UNAVAILABLE", "IO_UNAVAILABLE")
+            out = self._receipt(request, "UNKNOWN" if fs and fs.started else "UNAVAILABLE", "IO_UNAVAILABLE")
         # BaseException is deliberately NOT caught: a killed process leaves durable INTENT.
         if reserved:
             try:
@@ -82,7 +89,7 @@ class Worker:
                     self.journal.finish(request, out)
             except (Denied, sqlite3.Error):
                 pass  # Previously persisted INTENT remains UNKNOWN, never retryable.
-        return {"receipt": public_receipt(out)}
+        return {"receipt": self._public_receipt(out)}
 
     def select(self, request, lease, value):
         content = value if type(value) is bytes else canonical(value)
@@ -201,4 +208,18 @@ class Worker:
         elif op in ("copy", "move", "rename"):
             value, count = fs.hash(p["destination"])
             observed = {"sha256": value, "bytes": count}
-        return receipt(request, "UNKNOWN", "RECONCILED_OBSERVATION_ONLY", {**observed, "reconciled": True})
+        return self._receipt(request, "UNKNOWN", "RECONCILED_OBSERVATION_ONLY", {**observed, "reconciled": True})
+
+
+
+class WorkerV4(Worker):
+    """Read-only signed V4 runtime, not reachable from the current v3 CLI."""
+    _receipt = staticmethod(receipt_v4)
+    _public_receipt = staticmethod(public_receipt_v4)
+    READ_ONLY = frozenset({"volumes", "stat", "list", "find", "hash", "read"})
+
+    def _authenticate(self, raw, *, reconcile=False):
+        request, lease = self.authority.authenticate_v4(raw, reconcile=reconcile)
+        if request.value["operation"] not in self.READ_ONLY:
+            deny("V4_OPERATION_NOT_ENABLED")
+        return request, lease

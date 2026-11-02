@@ -281,3 +281,26 @@ def dual_repo_envelope(raw):
         deny("BAD_LEASE_SHAPE")
     frozen = decode(canonical(e))
     return frozen, Request(frozen["request"], digest(canonical(frozen["request"])))
+
+
+V4_RECEIPT_KEYS = RECEIPT_KEYS + " source_repository control_repository"
+
+
+def receipt_v4(request, status, code="NONE", result=None):
+    old = receipt(request, status, code, result)
+    return {**old, "schema": "hostops.receipt.v4",
+            "source_repository": SOURCE_REPOSITORY,
+            "control_repository": CONTROL_REPOSITORY}
+
+
+def public_receipt_v4(value):
+    shape(value, V4_RECEIPT_KEYS)
+    if (value["schema"] != "hostops.receipt.v4" or
+            value["source_repository"] != SOURCE_REPOSITORY or
+            value["control_repository"] != CONTROL_REPOSITORY):
+        deny("BAD_RECEIPT")
+    old = {k: v for k, v in value.items()
+           if k not in ("source_repository", "control_repository")}
+    old["schema"] = "hostops.receipt.v3"
+    public_receipt(old)
+    return value
