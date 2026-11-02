@@ -28,12 +28,13 @@ def _candidate_sha(value: object) -> str:
 
 
 def _next_step(action: dict) -> str:
+    # Unknown effects outrank even a scope-review flag: never invite retry.
+    if action.get("status") in _UNKNOWN:
+        return "UNKNOWN_EFFECT_STOP_NO_BLIND_RETRY"
     if candidate_accepted(action):
         return "REVIEW_CANDIDATE_HUMAN_MERGE_REQUIRED"
     if has_scope_review(action):
         return "SCOPE_REVIEW_REQUIRED"
-    if action.get("status") in _UNKNOWN:
-        return "UNKNOWN_EFFECT_STOP_NO_BLIND_RETRY"
     if action.get("status") == "BLOCKED_DEPENDENCY":
         return "WAIT_FOR_DEPENDENCY_REPAIR"
     return "DIAGNOSE_FAILURE_BEFORE_NEW_ATTEMPT"
@@ -53,12 +54,12 @@ def format_batch_summary(report: dict, *, repository: str) -> str:
     # GitHub environment variables are strings, unlike typed JSON counts.
     if run == "UNPROVEN":
         raw_run = report.get("github_workflow_run_id")
-        if type(raw_run) is str and raw_run.isascii() and raw_run.isdecimal():
+        if type(raw_run) is str and 1 <= len(raw_run) <= 20 and raw_run.isascii() and raw_run.isdecimal():
             run = str(int(raw_run))
     attempt = _number(report.get("github_workflow_run_attempt"))
     if attempt == "UNPROVEN":
         raw_attempt = report.get("github_workflow_run_attempt")
-        if type(raw_attempt) is str and raw_attempt.isascii() and raw_attempt.isdecimal():
+        if type(raw_attempt) is str and 1 <= len(raw_attempt) <= 10 and raw_attempt.isascii() and raw_attempt.isdecimal():
             attempt = str(int(raw_attempt))
     run_url = (f"https://github.com/{repository}/actions/runs/{run}"
                if run != "UNPROVEN" else "UNPROVEN")
