@@ -663,16 +663,27 @@ def verify_one(api: Callable[[str], Any], repository: str, number: int,
     # candidate-created impact plan and its recorded changed_paths.
     changed_files = api(f"{base}/pulls/{number}/files?per_page=100")
     reviewed = reviewed_coverage_for_changed_files(changed_files)
-    if reviewed is None and isinstance(changed_files, list):
-        try:
-            onboarded = onboarded_groups_for_pr(api, base, head, changed_files)
-            if not onboarded:
-                onboarded = reviewed_manifest_groups_for_pr(api, base, head, changed_files)
-            if onboarded:
-                reviewed = reviewed_coverage_for_changed_files(
-                    changed_files, onboarded_groups=onboarded)
-        except (ValueError, SyntaxError, OSError, TypeError, KeyError, urllib.error.URLError):
-            reviewed = None
+    if isinstance(changed_files, list):
+        # A changed manifest MUST be authenticated even if all changed paths
+        # appear non-code or the old owner map would otherwise have returned a
+        # non-None coverage witness. Never allow a new owner to self-approve.
+        has_manifest = any(isinstance(item, dict) and
+                           isinstance(item.get("filename"), str) and
+                           item["filename"].startswith("work_items/mt01-components/")
+                           for item in changed_files)
+        if reviewed is None or has_manifest:
+            try:
+                onboarded = (reviewed_manifest_groups_for_pr(api, base, head, changed_files)
+                             if has_manifest else
+                             onboarded_groups_for_pr(api, base, head, changed_files))
+                if onboarded:
+                    reviewed = reviewed_coverage_for_changed_files(
+                        changed_files, onboarded_groups=onboarded)
+                elif has_manifest:
+                    reviewed = None
+            except (ValueError, SyntaxError, OSError, TypeError, KeyError,
+                    UnicodeError, binascii.Error, urllib.error.URLError):
+                reviewed = None
     if reviewed is None:
         return Verdict("WAIT_EVIDENCE", "V21_REVIEWED_CHANGED_PATH_ORACLE_MISSING", number, head, latest["id"])
     actual_changed, required_tests = reviewed
