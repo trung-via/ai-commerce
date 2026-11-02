@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 
 from . import chrome_acquisition
+from .wake_readiness_cache import ChromeAttestationCache
 from .local_completion_handoff import _private_identity
 from .plugin_selection_probe_cli import load_registered_probe_route
 from .plugin_turn_cli import _fresh_main_sha
@@ -32,11 +33,12 @@ def _blocked(code: str, *, chrome: str = "UNVERIFIED") -> dict:
     }
 
 
-def _ready(*, launched: bool) -> dict:
+def _ready(*, launched: bool, verification: str) -> dict:
     return {
         "status": "READY_FOR_PREPARE",
         "chrome": "VERIFIED_9333", "chat": "EXACT_CHAT_PRESENT",
-        "ledger": "READY", "launched": launched, "wake_sent": False,
+        "ledger": "READY", "launched": launched, "verification": verification,
+        "wake_sent": False,
         "host_plugin_invocation_proven": False,
     }
 
@@ -82,6 +84,7 @@ class ReadinessFlow:
                 acquired.get("cdp_verified") is not True):
             return _blocked("CHROME_NOT_VERIFIED")
         launched = acquired.get("launched") is True
+        chat_preloaded = False
         try:
             state = self.panel.status()
             if (state["phase"] != "READY" or
@@ -96,6 +99,7 @@ class ReadinessFlow:
                 if opened not in _GOOD_CHATS:
                     return _blocked("EXACT_CHAT_PRELOAD_" + str(opened),
                                     chrome="VERIFIED_9333")
+                chat_preloaded = True
                 chat = self.panel.inspect_exact_chat().get("code")
             if chat != "EXACT_CHAT_PRESENT":
                 return _blocked("EXACT_CHAT_" + str(chat),
@@ -103,12 +107,16 @@ class ReadinessFlow:
             if (self.panel._state() != before or self.panel._route() != binding):
                 return _blocked("STATE_OR_ROUTE_CHANGED",
                                 chrome="VERIFIED_9333")
-            if self.source_reader() != before["source_sha"]:
+            # A second network SHA read is warranted only after a browser
+            # mutation (launch/preload); ordinary warm Wake gets one read.
+            if (launched or chat_preloaded) and self.source_reader() != before["source_sha"]:
                 return _blocked("SOURCE_SHA_CHANGED", chrome="VERIFIED_9333")
         except Exception:
             return _blocked("READINESS_CHECK_UNKNOWN",
                             chrome="VERIFIED_9333")
-        return _ready(launched=launched)
+        return _ready(
+            launched=launched,
+            verification=acquired.get("verification", "FULL_ACQUISITION"))
 
 
 def _unique_json(pairs):
@@ -174,9 +182,14 @@ def main(argv: list[str] | None = None) -> int:
                 registry_path=Path(raw["registry"]), checkout=checkout,
                 route_id=raw["route_id"]),
         )
+        # An out-of-repository owner-checked proof cache survives separate
+        # one-shot invocations. It NEVER lets a dead/replaced PID inherit
+        # a Chrome proof and never stores private URL/credentials.
+        cache = ChromeAttestationCache(
+            path=args.flow_config.with_name("wake-readiness-cache.json"),
+            checkout=checkout, env=env)
         flow = ReadinessFlow(
-            acquire=lambda opt_in: chrome_acquisition.run(
-                env, launch=opt_in, opt_in=opt_in),
+            acquire=lambda opt_in: cache.acquire(opt_in_launch=opt_in),
             panel=panel, source_reader=_fresh_main_sha)
         result = flow.execute(
             opt_in_launch=args.opt_in_launch,
