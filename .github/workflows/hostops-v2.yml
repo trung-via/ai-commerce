@@ -116,6 +116,14 @@ jobs:
           path: .local/hostops-v2-ef02-202/verified-source.zip
           if-no-files-found: ignore
           retention-days: 7
+      - name: Preserve exact verified #223 E04 source (private, only when present)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hostops-v2-ef02-223-source-${{ github.run_id }}
+          path: .local/hostops-v2-ef02-223/verified-source.zip
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Preserve result including blocked diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -163,7 +171,7 @@ jobs:
             if (path) {
               try {
                 const d=JSON.parse(fs.readFileSync(path,'utf8'));
-                const allowed=new Set(['host_inventory_read','d5_deep_read','d5_pid_map_read','ef02_l04_source_recovery_read','scratch_marker_write','workspace_file_write']);
+                const allowed=new Set(['host_inventory_read','d5_deep_read','d5_pid_map_read','ef02_l04_source_recovery_read','ef02_e04_source_recovery_read','scratch_marker_write','workspace_file_write']);
                 const codes=new Set(['HUMAN_KEY_NOT_ENROLLED','HUMAN_SIGNATURE_INVALID',
                   'APPROVED_ROOT_NOT_CONFIGURED','PRIVATE_REPO_REQUIRED','OWNER_REQUIRED',
                   'BAD_SHAPE','BAD_PARAMETERS','WRITE_FAILED','ALREADY_EXISTS_NO_OVERWRITE',
@@ -176,7 +184,10 @@ jobs:
                   'SIGNATURE_VERIFIER_UNAVAILABLE','DIAGNOSTIC_FAILED','DIAGNOSTIC_OUTPUT_INVALID',
                   'L04_WORKTREE_SYMLINK_DENIED','L04_SOURCE_GIT_UNAVAILABLE','L04_SOURCE_SHA_MISMATCH',
                   'L04_SOURCE_SYMLINK_DENIED','L04_SOURCE_INCOMPLETE','L04_SOURCE_NOT_REGULAR',
-                  'L04_SOURCE_TOO_LARGE','L04_SOURCE_HASH_MISMATCH','L04_SNAPSHOT_EXPORT_FAILED']);
+                  'L04_SOURCE_TOO_LARGE','L04_SOURCE_HASH_MISMATCH','L04_SNAPSHOT_EXPORT_FAILED',
+                  'E04_WORKTREE_SYMLINK_DENIED','E04_SOURCE_GIT_UNAVAILABLE','E04_SOURCE_SHA_MISMATCH',
+                  'E04_SOURCE_SYMLINK_DENIED','E04_SOURCE_INCOMPLETE','E04_SOURCE_NOT_REGULAR',
+                  'E04_SOURCE_TOO_LARGE','E04_SOURCE_HASH_MISMATCH','E04_SNAPSHOT_EXPORT_FAILED']);
                 if(d.schema==='ai-commerce-hostops-result-v2') {
                   if(d.status==='BLOCKED' && codes.has(d.error_code)) {
                     summary='BLOCKED / '+d.error_code;
@@ -184,7 +195,22 @@ jobs:
                     /^[0-9a-f]{64}$/.test(d.sha256) &&
                     ['job_scratch_only','human_approved_workspace'].includes(d.scope)) {
                     summary='WRITTEN / '+d.operation+' / sha256='+d.sha256+' / scope='+d.scope;
-                   } else if (d.operation === 'ef02_l04_source_recovery_read' &&
+                   } else if (d.operation === 'ef02_e04_source_recovery_read' &&
+                    d.status === 'OBSERVED' && d.diagnostics) {
+                    const x=d.diagnostics;
+                    if(x.operation === d.operation &&
+                      typeof x.found === 'boolean' &&
+                      Number.isSafeInteger(x.file_count) && x.file_count>=0 && x.file_count<=7 &&
+                      typeof x.source_sha_verified === 'boolean' &&
+                      (x.archive_sha256===null || /^[0-9a-f]{64}$/.test(x.archive_sha256)) &&
+                      (x.found ? (x.file_count===7 && x.source_sha_verified && x.archive_sha256!==null) :
+                        (x.file_count===0 && !x.source_sha_verified && x.archive_sha256===null))) {
+                      summary = x.found
+                        ? 'OBSERVED / ef02_e04_source_recovery_read / 7 SHA256 VERIFIED / archive='+
+                          x.archive_sha256+' / private workflow artifact only'
+                        : 'OBSERVED / ef02_e04_source_recovery_read / exact old worktree NOT FOUND / no model invoked';
+                    }
+                  } else if (d.operation === 'ef02_l04_source_recovery_read' &&
                     d.status === 'OBSERVED' && d.diagnostics) {
                     const x=d.diagnostics;
                     if(x.operation === d.operation &&
