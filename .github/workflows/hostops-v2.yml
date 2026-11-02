@@ -118,7 +118,10 @@ jobs:
 
   report:
     needs: [validate, execute]
-    if: always() && needs.validate.result == 'success' && github.event.repository.private == true
+    if: >-
+      always() && github.event.repository.private == true &&
+      github.event.issue.user.login == github.repository_owner &&
+      startsWith(github.event.issue.title, '[HOSTOPS2] ')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -126,10 +129,18 @@ jobs:
       issues: write
     steps:
       - name: Download bounded evidence
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: hostops-v2-result-${{ github.run_id }}
           path: hostops-report
+      - name: Download validation evidence on preflight failure
+        if: needs.validate.result != 'success'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: hostops-v2-request-${{ github.run_id }}
+          path: hostops-validation
       - name: Post sanitized result to original Issue
         uses: actions/github-script@v7
         env:
@@ -138,14 +149,21 @@ jobs:
           script: |
             const fs = require('fs');
             let summary = 'BLOCKED / NO_VERIFIABLE_RESULT';
-            const path = 'hostops-report/hostops-v2-result.json';
-            if (fs.existsSync(path)) {
+            const candidates = ['hostops-report/hostops-v2-result.json', 'hostops-validation/hostops-v2-validated.json'];
+            const path = candidates.find(p => fs.existsSync(p));
+            if (path) {
               try {
                 const d=JSON.parse(fs.readFileSync(path,'utf8'));
                 const allowed=new Set(['host_inventory_read','d5_deep_read','scratch_marker_write','workspace_file_write']);
                 const codes=new Set(['HUMAN_KEY_NOT_ENROLLED','HUMAN_SIGNATURE_INVALID',
                   'APPROVED_ROOT_NOT_CONFIGURED','PRIVATE_REPO_REQUIRED','OWNER_REQUIRED',
                   'BAD_SHAPE','BAD_PARAMETERS','WRITE_FAILED','ALREADY_EXISTS_NO_OVERWRITE',
+                  'BAD_JSON','BAD_SHA','BAD_INPUT_LENGTH','DUPLICATE_KEY','IDENTITY_MISMATCH',
+                  'BAD_REQUEST_ID','OPERATION_NOT_ALLOWED','READ_PARAMETERS_NOT_ALLOWED',
+                  'BAD_MARKER','BAD_WRITE_SHAPE','BAD_RELATIVE_PATH',
+                  'UNSUPPORTED_FILE_EXTENSION','BAD_WRITE_CONTENT','HUMAN_SIGNATURE_REQUIRED',
+                  'BAD_SIGNATURE_ENCODING','BAD_SIGNATURE_FORMAT','APPROVED_ROOT_INVALID',
+                  'SYMLINK_DENIED','NON_DIRECTORY_PATH','ROOT_NOT_SAFE',
                   'SIGNATURE_VERIFIER_UNAVAILABLE','DIAGNOSTIC_FAILED','DIAGNOSTIC_OUTPUT_INVALID']);
                 if(d.schema==='ai-commerce-hostops-result-v2') {
                   if(d.status==='BLOCKED' && codes.has(d.error_code)) {
