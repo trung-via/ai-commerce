@@ -685,3 +685,84 @@ def test_hostops_v3_hosted_queue_is_reviewed_control_not_generic_ci_escape(tmp_p
     )
     assert denied.mode == "HOLD_MAPPING"
     assert ".github/workflows/unknown-host-ops.yml:UNREVIEWED_CI_CONTROL" in denied.missing_mapping
+
+
+def _v22_manifest_fixture(tmp_path):
+    import json
+    from ai_commerce.engineering.impact_v21 import validate_component_onboarding_manifest
+    old_source = "src/ai_commerce/learning/export.py"
+    old_test = "tests/test_prior.py"
+    new_source = "src/ai_commerce/fresh/svc.py"
+    new_test = "tests/test_fresh_svc.py"
+    contract = "contracts/FreshRun.v1.schema.json"
+    manifest = "work_items/mt01-components/fresh.json"
+    for path in (old_source, old_test, new_source, new_test, contract):
+        mk(tmp_path, path)
+    values = {
+        "schema_version": "MT01ComponentOwner.v1",
+        "component": "fresh",
+        "sources": [new_source],
+        "tests": [new_test],
+        "acs": ["FRESH.offline"],
+        "consumers": [old_source],
+        "contracts": [contract],
+    }
+    mk(tmp_path, manifest, json.dumps(values))
+    change = (new_source, new_test, contract, manifest)
+    original = (group("prior", [old_test], [old_source]),)
+    context = {
+        "manifest_path": manifest,
+        "changed_paths": change,
+        "base_paths": (old_source, old_test),
+        "existing_groups": original,
+        "allowed_paths": change,
+        "root": tmp_path,
+    }
+    return validate_component_onboarding_manifest, values, context
+
+
+def test_v22_manifest_data_only_admission(tmp_path):
+    validator, values, context = _v22_manifest_fixture(tmp_path)
+    admission = validator(values, **context)
+    assert admission["name"] == "fresh"
+    assert admission["tests"] == ("tests/test_fresh_svc.py",)
+    assert admission["acs"] == ("FRESH.offline",)
+    assert len(admission["manifest_sha256"]) == 64
+    assert admission["status"] == "VALIDATED_DATA_ONLY_NOT_VERIFICATION_PASS"
+
+
+def test_v22_manifest_rejects_owner_theft_and_unsafe_changes(tmp_path):
+    import copy
+    import pytest
+    validator, original, ctx = _v22_manifest_fixture(tmp_path)
+    for mutate, keyword, code in (
+        (lambda p: p.update(component="prior"), {}, "ONBOARD_MANIFEST_LOCATION"),
+        (lambda p: p.update(tests=["tests/test_prior.py"]), {}, "ONBOARD_REOWN_OR_NOT_ADDED"),
+        (lambda p: p.update(sources=["src/ai_commerce/engineering/worker.py"]), {}, "ONBOARD_UNSAFE_SOURCE_FAMILY"),
+        (lambda p: p.update(tests=["tests/../../secrets.py"]), {}, "ONBOARD_UNSAFE_PATH"),
+        (lambda p: p.update(acs=["FRESH.offline", "FRESH.offline"]), {}, "ONBOARD_INVALID_ACS"),
+        (lambda p: p.update(consumers=["src/ai_commerce/other/hidden.py"]), {}, "ONBOARD_CONSUMER_UNPROVEN"),
+        (lambda p: p.update(sources=["src/ai_commerce/fresh/svc.py"]*2), {}, "ONBOARD_INVALID_SOURCES"),
+        (lambda p: p.update(argv=["python", "-m", "pytest"]), {}, "ONBOARD_MANIFEST_SHAPE"),
+        (lambda p: p.update(schema_version="v999"), {}, "ONBOARD_SCHEMA_VERSION"),
+        (lambda p: None, {"allowed_paths": ["src/ai_commerce/fresh/svc.py"]}, "ONBOARD_MANIFEST_NOT_NEW_AND_AUTHORIZED"),
+        (lambda p: None, {"base_paths": list(ctx["base_paths"]) + ["tests/test_fresh_svc.py"]}, "ONBOARD_REOWN_OR_NOT_ADDED"),
+    ):
+        candidate = copy.deepcopy(original)
+        mutate(candidate)
+        args = dict(ctx)
+        args.update(keyword)
+        with pytest.raises(ValueError, match=code):
+            validator(candidate, **args)
+
+
+def test_v22_manifest_rejects_missing_or_linked_source(tmp_path):
+    import pytest
+    validator, values, ctx = _v22_manifest_fixture(tmp_path)
+    source = tmp_path / values["sources"][0]
+    source.unlink()
+    with pytest.raises(ValueError, match="ONBOARD_FILE_MISSING_OR_LINK"):
+        validator(values, **ctx)
+    source.symlink_to(tmp_path / "tests/test_prior.py")
+    with pytest.raises(ValueError, match="ONBOARD_FILE_MISSING_OR_LINK"):
+        validator(values, **ctx)
