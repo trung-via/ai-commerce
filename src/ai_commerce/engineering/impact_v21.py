@@ -309,11 +309,16 @@ def validate_component_onboarding_manifest(
     if name in existing_names:
         raise ValueError("ONBOARD_COMPONENT_ALREADY_OWNED")
     changed, base, allowed = map(set, (changed_paths, base_paths, allowed_paths))
-    if manifest_path not in changed or manifest_path in base or manifest_path not in allowed:
+    def in_scope(path: str) -> bool:
+        # Match the already-authorized EF01 directory-prefix semantics, not
+        # an Issue-supplied glob. Every path must also pass its family guard.
+        return any(path == prefix or path.startswith(prefix.rstrip("/") + "/")
+                   for prefix in allowed)
+    if manifest_path not in changed or manifest_path in base or not in_scope(manifest_path):
         raise ValueError("ONBOARD_MANIFEST_NOT_NEW_AND_AUTHORIZED")
     if len(changed) != len(set(changed_paths)) or len(allowed) != len(allowed_paths):
         raise ValueError("ONBOARD_DUPLICATE_PATH")
-    if not changed <= allowed:
+    if not all(in_scope(path) for path in changed):
         raise ValueError("ONBOARD_CHANGED_OUT_OF_SCOPE")
 
     items = {}
@@ -350,13 +355,13 @@ def validate_component_onboarding_manifest(
         existing_owned.update((*group.paths, *group.tests, *group.consumers, *group.contracts))
         existing_tests.update(group.tests)
     fresh = set(sources) | set(tests)
-    if fresh & (existing_owned | base) or not fresh <= (changed & allowed):
+    if fresh & (existing_owned | base) or not fresh <= changed or not all(in_scope(p) for p in fresh):
         raise ValueError("ONBOARD_REOWN_OR_NOT_ADDED")
     if set(tests) & existing_tests:
         raise ValueError("ONBOARD_EXISTING_TEST")
     if any(p not in existing_owned and p not in sources for p in consumers):
         raise ValueError("ONBOARD_CONSUMER_UNPROVEN")
-    if any(p not in existing_owned and (p not in changed or p in base or p not in allowed)
+    if any(p not in existing_owned and (p not in changed or p in base or not in_scope(p))
            for p in contracts):
         raise ValueError("ONBOARD_CONTRACT_UNPROVEN")
     root = root.resolve()
@@ -571,7 +576,9 @@ def registered_action_plan(
             # Nonexecutable review documents and work-item records are still
             # changed candidate bytes: include them in immutable evidence so
             # EF02's all-changed-files coverage check cannot be bypassed.
-            reviewed_auxiliary = {p for p in changed_paths if p in set(allowed_paths)
+            reviewed_auxiliary = {p for p in changed_paths
+                if any(p == prefix or p.startswith(prefix.rstrip("/") + "/")
+                       for prefix in allowed_paths)
                 and ((p.startswith("docs/engineering/") and p.endswith(".md"))
                      or (p.startswith("work_items/") and p.endswith(".json")))}
             paths.update(reviewed_auxiliary)
