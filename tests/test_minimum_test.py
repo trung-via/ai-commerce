@@ -33,7 +33,9 @@ def real_tree():
     registry = {"mt01-" + g.name + "-tests": ["python", "-m", "pytest", *g.tests, "-q", "-n", "12"]
                 for g in groups}
     registry["project-tests"] = [*FULL, "-n", "12"]
-    return SimpleNamespace(files=files, groups=groups, registry=registry, graph=mt.import_graph(ROOT, files))
+    return SimpleNamespace(files=files, groups=groups, registry=registry,
+                           persisted_names=frozenset(r["group"].name for r in records),
+                           graph=mt.import_graph(ROOT, files))
 
 
 def real_plan(real_tree, monkeypatch, path, *, registry=None, acs=(), aggregate=()):
@@ -162,6 +164,11 @@ def test_companion_report_has_exact_reviewed_parallel_commands(real_tree):
             assert current.get(key) == expected
         elif key in combined:
             assert combined[key] == expected
+        elif g.name in real_tree.persisted_names:
+            # V2.2 trusted base-commit manifest owners are validated above.
+            # They do not require a second static registry registration.
+            assert (ROOT / "work_items" / "mt01-components" /
+                    f"{g.name}.json").is_file()
         else:
             assert expected in combined.values()
 
