@@ -836,10 +836,10 @@ def _existing_owner_addition_fixture():
     new_repair = '(eng + "runner.py", eng + "gate_fixture.py"), (rem + "worker.py", rem + "scheduler.py")),'
     # Match the current independently reviewed MT-01 consumer closure, not
     # the historical single-line tuple. Only the new fixture source may change.
-    consumers = ('(eng + "runner.py", rem + "worker.py", "scripts/HostOps-V4-InstallPlan.ps1",\\n'
+    consumers = ('(eng + "runner.py", rem + "worker.py", "scripts/HostOps-V4-InstallPlan.ps1",\n'
                  '                   "config/hostops-v3/config-v4.example.json"))')
-    old_mt01 = '(eng + "minimum_test.py", eng + "verification.py"),\\n                  ' + consumers
-    new_mt01 = '(eng + "minimum_test.py", eng + "verification.py", eng + "gate_mt01_probe.py"),\\n                  ' + consumers
+    old_mt01 = '(eng + "minimum_test.py", eng + "verification.py"),\n                  ' + consumers
+    new_mt01 = '(eng + "minimum_test.py", eng + "verification.py", eng + "gate_mt01_probe.py"),\n                  ' + consumers
     candidate = main
     for old, new in ((old_ef01, new_ef01), (old_repair, new_repair), (old_mt01, new_mt01)):
         assert candidate.count(old) == 1
