@@ -793,7 +793,7 @@ def test_v22_registered_action_onboards_new_component_without_companion_pr(tmp_p
         allowed_paths=ctx["allowed_paths"])
     assert result["selected_groups"] == ["fresh"]
     assert result["unknown_acs"] == []
-    assert result["reason_codes"] == []
+    assert result["reason_codes"] == ["SCOPED_CONSUMER_CLOSURE"]
     selected = [g for g in result["groups"] if g["group"] == "fresh"]
     assert len(selected) == 1 and selected[0]["execute"]
     binding = selected[0]["binding"]
