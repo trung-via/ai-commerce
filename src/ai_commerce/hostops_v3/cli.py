@@ -376,6 +376,12 @@ def _w1_attended_context(args):
     source = Path(args.source_root)
     if not source.is_absolute() or source.is_symlink():
         deny("LOCAL_SOURCE_UNVERIFIED")
+    try:
+        if not Path(__file__).resolve().samefile(
+                (source / "src/ai_commerce/hostops_v3/cli.py").resolve(strict=True)):
+            deny("W1_EXECUTED_SOURCE_MISMATCH")
+    except OSError:
+        deny("W1_EXECUTED_SOURCE_MISMATCH")
     sha = _clean_source_sha(source)
     identity = fs.w1_windows_root_identity(W1_PROOF_ROOT)
     return sha, identity
