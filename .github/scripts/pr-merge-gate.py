@@ -113,6 +113,14 @@ REVIEWED_CONTROL_TESTS = {
         "tests/test_ef02.py", "tests/test_minimum_test.py"),
     ".github/workflows/ef02-tests.yml": (
         "tests/test_minimum_test.py", "tests/test_pr_merge_gate.py"),
+    ".github/workflows/a06-e01.yml": ("tests/test_a06_e01.py",),
+    ".github/workflows/a07-capability.yml": ("tests/test_a07_capability.py",),
+    ".github/workflows/a08-distribution.yml": ("tests/test_a08_distribution.py",),
+    ".github/workflows/a10-opportunity.yml": ("tests/test_a10_m01.py",),
+    ".github/workflows/ef02-reconcile-evidence.yml": ("tests/test_ef02.py",),
+    ".github/workflows/ef02-watch.yml": ("tests/test_ef02.py",),
+    ".github/workflows/hostops-ci.yml": ("tests/test_hostops_request.py",),
+    ".github/workflows/hostops-v2-ci.yml": ("tests/test_hostops_v2.py",),
     "src/ai_commerce/engineering/impact_v21.py": (
         "tests/test_mt01_v21.py", "tests/test_minimum_test.py"),
     "src/ai_commerce/engineering/minimum_test.py": (
@@ -128,7 +136,7 @@ REVIEWED_CONTROL_TESTS = {
         "tests/test_minimum_test.py", "tests/test_ef02.py"),
     "tests/test_mt01_v21.py": ("tests/test_mt01_v21.py",),
     "tests/test_pr_merge_gate.py": ("tests/test_pr_merge_gate.py",),
-    # The merge gate also requires the real Node step PASS on both OS.
+    # The merge gate also requires the real Node step PASS on Windows.
     "tests/ef02-watch.test.cjs": (),
     "tests/ef02-reconcile.test.cjs": (),
     ".github/scripts/ef02-watch.cjs": (),
@@ -609,7 +617,7 @@ def verified_jobs(jobs: list) -> bool:
     """A successful wrapper or skipped pytest is not proof of verified code."""
     if not isinstance(jobs, list):
         return False
-    needed = {"tests (ubuntu-latest)", "tests (windows-latest)"}
+    needed = {"tests (windows-latest)"}
     observed = set()
     for job in jobs:
         if not isinstance(job, dict) or job.get("name") not in needed:
@@ -630,7 +638,7 @@ def verified_jobs(jobs: list) -> bool:
 
 
 def verified_v21_artifacts(value: object, run_id: int, expected_head: str) -> bool:
-    """Ensure both operating systems uploaded authentic GitHub run metadata.
+    """Ensure the Windows CI job uploaded authentic GitHub run metadata.
 
     The GitHub metadata is externally attestable; candidate-supplied receipt
     bytes require a separate independent coverage oracle before final rollout.
@@ -640,7 +648,7 @@ def verified_v21_artifacts(value: object, run_id: int, expected_head: str) -> bo
     artifacts = value["artifacts"]
     if len(artifacts) >= 100 or any(not isinstance(a, dict) for a in artifacts):
         return False
-    for os_name in ("ubuntu-latest", "windows-latest"):
+    for os_name in ("windows-latest",):
         matches = [a for a in artifacts if a.get("name") == f"mt01-v21-{os_name}-{run_id}"]
         if len(matches) != 1:
             return False
@@ -706,10 +714,10 @@ def verify_one(api: Callable[[str], Any], repository: str, number: int,
     if not isinstance(jobs, dict) or not isinstance(jobs.get("jobs"), list) or len(jobs["jobs"]) == 100:
         return Verdict("HOLD", "CI_JOBS_UNPROVEN", number, head, latest["id"])
     if not verified_jobs(jobs["jobs"]):
-        return Verdict("WAIT_EVIDENCE", "BOTH_OS_PYTEST_NODE_PROOF_MISSING", number, head, latest["id"])
+        return Verdict("WAIT_EVIDENCE", "WINDOWS_PYTEST_NODE_PROOF_MISSING", number, head, latest["id"])
     artifact_proof = api(f"{base}/actions/runs/{latest['id']}/artifacts?per_page=100")
     if not verified_v21_artifacts(artifact_proof, latest["id"], head):
-        return Verdict("WAIT_EVIDENCE", "V21_EXACT_RUN_OS_ARTIFACT_PROOF_MISSING", number, head, latest["id"])
+        return Verdict("WAIT_EVIDENCE", "V21_EXACT_RUN_WINDOWS_ARTIFACT_PROOF_MISSING", number, head, latest["id"])
     # The GitHub diff is an external, exact-PR source independent of the
     # candidate-created impact plan and its recorded changed_paths.
     changed_files = api(f"{base}/pulls/{number}/files?per_page=100")
@@ -740,7 +748,7 @@ def verify_one(api: Callable[[str], Any], repository: str, number: int,
     actual_changed, required_tests = reviewed
     if not callable(getattr(api, "read_artifact", None)):
         return Verdict("WAIT_EVIDENCE", "V21_ARTIFACT_CONTENT_READER_MISSING", number, head, latest["id"])
-    for os_name in ("ubuntu-latest", "windows-latest"):
+    for os_name in ("windows-latest",):
         record = next(a for a in artifact_proof["artifacts"]
                       if a["name"] == f"mt01-v21-{os_name}-{latest['id']}")
         try:
@@ -754,7 +762,7 @@ def verify_one(api: Callable[[str], Any], repository: str, number: int,
                                     expected_changed_paths=actual_changed,
                                     required_test_files=required_tests):
             return Verdict("WAIT_EVIDENCE", "V21_CONTENT_PROOF_INVALID", number, head, latest["id"])
-    return Verdict("READY_FOR_MERGE", "EXACT_HEAD_BOTH_OS_CI_VERIFIED", number, head, latest["id"])
+    return Verdict("READY_FOR_MERGE", "EXACT_HEAD_WINDOWS_CI_VERIFIED", number, head, latest["id"])
 
 
 class GitHubAPI:

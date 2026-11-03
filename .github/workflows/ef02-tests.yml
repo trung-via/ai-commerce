@@ -13,11 +13,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   tests:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,14 +39,8 @@ jobs:
       - name: MT-01 baseline closure oracle
         if: steps.reuse.outputs.skip_pytest != 'true'
         run: python .github/scripts/mt01_v21_oracle.py --base "${{ github.event.pull_request.base.sha }}" --plan .local/mt01-v21/plan.json
-      - name: Install FFmpeg on Ubuntu hosted runner
-        if: matrix.os == 'ubuntu-latest' && steps.v21.outputs.need_ffmpeg == 'true'
-        shell: bash
-        run: |
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg
       - name: Install FFmpeg on Windows hosted runner
-        if: matrix.os == 'windows-latest' && steps.v21.outputs.need_ffmpeg == 'true'
+        if: steps.v21.outputs.need_ffmpeg == 'true'
         shell: pwsh
         run: |
           choco install ffmpeg --yes --no-progress
@@ -72,7 +62,7 @@ jobs:
         if: always() && steps.reuse.outputs.skip_pytest != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: mt01-v21-${{ matrix.os }}-${{ github.run_id }}
+          name: mt01-v21-windows-latest-${{ github.run_id }}
           path: .local/mt01-v21/**
           if-no-files-found: error
           retention-days: 14

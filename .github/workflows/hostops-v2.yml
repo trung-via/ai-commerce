@@ -17,7 +17,7 @@ jobs:
       github.event.repository.private == true &&
       github.event.issue.user.login == github.repository_owner &&
       startsWith(github.event.issue.title, '[HOSTOPS2] ')
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -48,18 +48,14 @@ jobs:
             }
             fs.writeFileSync('hostops-v2-request.json', issue.body, {encoding:'utf8', flag:'wx'});
       - name: Validate closed request contract
-        shell: bash
+        shell: pwsh
         env:
           HOSTOPS_ISSUER: ${{ github.event.issue.user.login }}
           HOSTOPS_OWNER: ${{ github.repository_owner }}
           HOSTOPS_PRIVATE: ${{ steps.privacy.outputs.private }}
         run: |
-          python scripts/hostops_v2.py validate \
-            --request-file hostops-v2-request.json \
-            --repository "$GITHUB_REPOSITORY" \
-            --issuer "$HOSTOPS_ISSUER" --owner "$HOSTOPS_OWNER" \
-            --source-sha "$GITHUB_SHA" --is-private "$HOSTOPS_PRIVATE" \
-            --output hostops-v2-validated.json
+          python scripts/hostops_v2.py validate --request-file hostops-v2-request.json --repository "$env:GITHUB_REPOSITORY" --issuer "$env:HOSTOPS_ISSUER" --owner "$env:HOSTOPS_OWNER" --source-sha "$env:GITHUB_SHA" --is-private "$env:HOSTOPS_PRIVATE" --output hostops-v2-validated.json
+          exit $LASTEXITCODE
       - name: Export immutable payload
         if: always() && steps.privacy.outputs.private == 'true'
         uses: actions/upload-artifact@v4
@@ -138,7 +134,7 @@ jobs:
       always() && github.event.repository.private == true &&
       github.event.issue.user.login == github.repository_owner &&
       startsWith(github.event.issue.title, '[HOSTOPS2] ')
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 5
     permissions:
       contents: read

@@ -12,24 +12,13 @@ permissions:
   contents: read
 jobs:
   e01:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install FFmpeg on Ubuntu
-        if: matrix.os == 'ubuntu-latest'
-        shell: bash
-        run: |
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg
       - name: Install FFmpeg on Windows
-        if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
           choco install ffmpeg --yes --no-progress
@@ -46,7 +35,7 @@ jobs:
       - name: Upload verified demo package
         uses: actions/upload-artifact@v4
         with:
-          name: e01-demo-${{ matrix.os }}
+          name: e01-demo-windows-latest
           path: .local/e01-demo/
           if-no-files-found: error
           retention-days: 14

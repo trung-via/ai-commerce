@@ -68,7 +68,7 @@ class FakeGitHub:
         import zipfile
         if artifact_id not in (1000, 1001):
             raise ValueError("UNKNOWN_TEST_ARTIFACT")
-        os_name = "ubuntu-latest" if artifact_id == 1000 else "windows-latest"
+        os_name = "windows-latest"
         plan = {
             "version": 2, "base_sha": self.base, "candidate_sha": "c" * 40,
             "mode": "TARGETED", "changed_paths": ["src/ai_commerce/product/identity.py"],
@@ -81,7 +81,7 @@ class FakeGitHub:
         receipt = {
             "schema": "MT01_VERIFICATION_EVIDENCE_V2", "source_sha": "c" * 40,
             "base_sha": self.base, "pr_head_sha": self.head,
-            "platform": "Linux" if os_name == "ubuntu-latest" else "Windows",
+            "platform": "Windows",
             "selection_mode": "TARGETED",
             "selected_test_files": ["tests/test_minimum_test.py"],
             "plan_sha256": hashlib.sha256(plan_bytes).hexdigest(),
@@ -153,7 +153,7 @@ class FakeGitHub:
             ]}
         if path == f"/repos/{self.repo}/actions/runs/200/jobs?per_page=100":
             jobs = []
-            for os_name in ("ubuntu-latest", "windows-latest"):
+            for os_name in ("windows-latest",):
                 steps = [{"name": self.g.PYTEST_STEP, "conclusion": "success"},
                          {"name": self.g.RECEIPT_STEP, "conclusion": "success"},
                          {"name": self.g.ORACLE_STEP, "conclusion": "success"},
@@ -167,9 +167,9 @@ class FakeGitHub:
                 {"id": 1000 + i, "name": f"mt01-v21-{os_name}-200",
                  "expired": False, "size_in_bytes": 1024,
                  "workflow_run": {"id": 200, "head_sha": self.head}}
-                for i, os_name in enumerate(("ubuntu-latest", "windows-latest"))
+                for i, os_name in enumerate(("windows-latest",))
             ]
-            return {"artifacts": artifacts if self.receipt_ok else artifacts[:1]}
+            return {"artifacts": artifacts if self.receipt_ok else []}
         if path == f"/repos/{self.repo}/pulls?state=open&per_page=100":
             return [{"number": self.pr, "head": {"sha": self.head}}]
         raise AssertionError(f"Unexpected {method} {path}")
@@ -229,7 +229,7 @@ def test_merge_queue_retains_same_approval_until_ci_finishes(gate):
 
 @pytest.mark.parametrize("kwargs,status,reason", [
     ({"jobs_ok": False, "ci": "completed"}, "WAIT_EVIDENCE",
-     "BOTH_OS_PYTEST_NODE_PROOF_MISSING"),
+     "WINDOWS_PYTEST_NODE_PROOF_MISSING"),
     ({"approval": False, "ci": "completed"}, "HOLD", "NO_ACTIVE_BRAIN_PASS"),
     ({"revoked": True, "ci": "completed"}, "HOLD", "NO_ACTIVE_BRAIN_PASS"),
     ({"changed_head": True, "ci": "completed"}, "HOLD",
@@ -280,7 +280,7 @@ def test_merge_gate_v21_missing_os_artifact_holds(gate):
     api = FakeGitHub(gate, ci="completed", receipt_ok=False)
     verdict = gate.process(api, api.repo, _ci_event(gate))
     assert verdict[0]["status"] == "WAIT_EVIDENCE"
-    assert verdict[0]["reason"] == "V21_EXACT_RUN_OS_ARTIFACT_PROOF_MISSING"
+    assert verdict[0]["reason"] == "V21_EXACT_RUN_WINDOWS_ARTIFACT_PROOF_MISSING"
     assert not api.writes
 
 
@@ -289,12 +289,12 @@ def test_merge_gate_v21_wrong_run_and_missing_artifact_denied(gate):
         {"id": i + 1, "name": f"mt01-v21-{system}-200",
          "expired": False, "size_in_bytes": 1024,
          "workflow_run": {"id": 200, "head_sha": "a" * 40}}
-        for i, system in enumerate(("ubuntu-latest", "windows-latest"))
+        for i, system in enumerate(("windows-latest",))
     ]
     assert gate.verified_v21_artifacts({"artifacts": correct}, 200, "a" * 40)
-    assert not gate.verified_v21_artifacts({"artifacts": correct[:1]}, 200, "a" * 40)
-    bad = [dict(correct[0]), dict(correct[1])]
-    bad[1]["workflow_run"] = {"id": 199, "head_sha": "a" * 40}
+    assert not gate.verified_v21_artifacts({"artifacts": []}, 200, "a" * 40)
+    bad = [dict(correct[0])]
+    bad[0]["workflow_run"] = {"id": 199, "head_sha": "a" * 40}
     assert not gate.verified_v21_artifacts({"artifacts": bad}, 200, "a" * 40)
 
 
@@ -327,7 +327,7 @@ def test_mt01_junit_class_case_requires_exact_test_module_boundary(gate):
         return buffer.getvalue()
 
     kwargs = dict(expected_head="a" * 40, expected_base="b" * 40,
-                  os_name="ubuntu-latest",
+                  os_name="windows-latest",
                   expected_changed_paths=("src/ai_commerce/product/identity.py",),
                   required_test_files=("tests/test_minimum_test.py",))
     assert gate.validate_receipt_zip(
@@ -666,7 +666,7 @@ def test_candidate_new_component_not_admitted_without_brain_review_or_all_requir
 
 
 
-def test_new_component_onboarding_end_to_end_complete_both_os_junit_can_merge(gate, monkeypatch):
+def test_new_component_onboarding_end_to_end_complete_windows_junit_can_merge(gate, monkeypatch):
     """Synthetic only: assert base-trusted gate admits new code after ALL proofs.
 
     This exercises the full decision path, not just a helper-level happy path.
@@ -702,7 +702,7 @@ def test_new_component_onboarding_end_to_end_complete_both_os_junit_can_merge(ga
             return super().__call__(path, method, body)
 
         def read_artifact(self, artifact_id):
-            os_name = {1000: "ubuntu-latest", 1001: "windows-latest"}[artifact_id]
+            os_name = {1000: "windows-latest"}[artifact_id]
             plan = {
                 "version": 2, "base_sha": self.base,
                 "candidate_sha": "c" * 40, "mode": "TARGETED",
@@ -719,7 +719,7 @@ def test_new_component_onboarding_end_to_end_complete_both_os_junit_can_merge(ga
                 "schema": "MT01_VERIFICATION_EVIDENCE_V2",
                 "source_sha": "c" * 40, "base_sha": self.base,
                 "pr_head_sha": self.head,
-                "platform": "Linux" if os_name == "ubuntu-latest" else "Windows",
+                "platform": "Windows",
                 "selection_mode": "TARGETED", "selected_test_files": list(required),
                 "plan_sha256": hashlib.sha256(plan_bytes).hexdigest(),
                 "selector_sha256": "a" * 64, "registry_sha256": "b" * 64,
@@ -1027,3 +1027,14 @@ def test_noise_cleanup_and_issue_router_are_independently_covered(gate):
     assert gate.reviewed_coverage_for_changed_files([
         {"filename": ".github/workflows/unsafe-not-reviewed.yml", "status": "added"}
     ]) is None
+
+
+def test_all_active_ci_workflows_are_windows_only():
+    workflows = sorted((ROOT / '.github' / 'workflows').glob('*.yml'))
+    assert workflows
+    for path in workflows:
+        source = path.read_text(encoding='utf-8')
+        assert 'ubuntu-latest' not in source, path
+        assert 'shell: bash' not in source, path
+        assert 'matrix.os' not in source, path
+

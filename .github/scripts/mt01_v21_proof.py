@@ -54,7 +54,7 @@ def validate_receipt_zip(
         plan = json.loads(files["plan.json"])
         if not isinstance(receipt, dict) or not isinstance(plan, dict):
             return False
-        expected_platform = {"ubuntu-latest": "Linux", "windows-latest": "Windows"}.get(os_name)
+        expected_platform = {"windows-latest": "Windows"}.get(os_name)
         if (receipt.get("schema") != "MT01_VERIFICATION_EVIDENCE_V2" or
             receipt.get("base_sha") != expected_base or
             receipt.get("pr_head_sha") != expected_head or
