@@ -939,6 +939,106 @@ def test_v22_ef02_replays_dynamic_argv_against_immutable_git_baseline(tmp_path, 
            "allowed_paths": ("tests/test_prior.py",)})
 
 
+def test_v22_existing_owner_binding_replays_with_new_owner_on_same_candidate(tmp_path, monkeypatch):
+    """Regression #276: persisted A17.2 and new A17.3 share one proof graph.
+
+    EF01 executed both groups. EF02 must replay selected_impact_tests with
+    the newly validated candidate owner even for the persisted owner, without
+    trusting candidate-supplied test commands or weakening SHA/ACL gates.
+    """
+    import copy
+    import json
+    import subprocess
+    from ai_commerce.engineering import minimum_test as mt
+    from ai_commerce.engineering.impact_v21 import (
+        registered_action_plan, verified_onboarding_binding)
+
+    _, old_manifest, ctx = _v22_manifest_fixture(tmp_path)
+    def git(*args):
+        return subprocess.check_output(
+            ["git", *args], cwd=tmp_path, stderr=subprocess.DEVNULL).decode().strip()
+    git("init", "-q")
+    git("config", "core.autocrlf", "false")
+    git("add", ".")
+    git("-c", "user.name=MT01", "-c", "user.email=mt01@example.invalid",
+        "commit", "-qm", "main with persisted first owner")
+    base_sha = git("rev-parse", "HEAD")
+    base_files = mt.file_hashes(tmp_path)
+    monkeypatch.setattr(mt, "approved_groups", lambda: ctx["existing_groups"])
+
+    new_source = "src/ai_commerce/newer/service.py"
+    new_test = "tests/test_newer.py"
+    new_contract = "contracts/Newer.v1.schema.json"
+    new_path = "work_items/mt01-components/newer.json"
+    new_manifest = {
+        "schema_version": "MT01ComponentOwner.v1", "component": "newer",
+        "sources": [new_source], "tests": [new_test],
+        "acs": ["NEWER.offline"], "consumers": old_manifest["sources"],
+        "contracts": [new_contract],
+    }
+    for path in (new_source, new_test, new_contract):
+        mk(tmp_path, path)
+    mk(tmp_path, new_path, json.dumps(new_manifest))
+    changed = [new_source, new_test, new_contract, new_path]
+    ingress = ["python", "-m", "pytest", "tests/test_mt01_v21.py", "-q", "-n", "12"]
+    profiles = {"mt01-component-onboarding": ingress,
+                "mt01-prior-tests": ["python", "-m", "pytest",
+                                   "tests/test_prior.py", "-q", "-n", "12"]}
+    plan = registered_action_plan(
+        repo=tmp_path, base_sha=base_sha, base_files=base_files,
+        candidate_files=mt.file_hashes(tmp_path), changed_paths=changed,
+        required_acs=new_manifest["acs"], fallback_argv=ingress,
+        groups=ctx["existing_groups"], registered_profiles=profiles,
+        allowed_paths=changed)
+    assert plan["impact_v21"]["mode"] in ("TARGETED", "AFFECTED")
+    assert set(plan["selected_groups"]) == {"fresh", "newer"}
+    assert all(entry["state"] == "EXECUTE" for entry in plan["groups"])
+    persisted = next(entry["binding"] for entry in plan["groups"]
+                     if entry["group"] == "fresh")
+    novel = next(entry["binding"] for entry in plan["groups"]
+                 if entry["group"] == "newer")
+    kw = dict(workspace=tmp_path, changed_paths=changed,
+              allowed_paths=changed, base_sha=base_sha,
+              registered_profiles=profiles)
+    assert verified_onboarding_binding(
+        **kw, binding=persisted, expected_group="fresh")
+    assert verified_onboarding_binding(
+        **kw, binding=novel, expected_group="newer")
+
+    # No accidental test omission, wrong owner or wrong source hash may pass.
+    modified = copy.deepcopy(persisted)
+    modified["selected_impact_tests"] = [new_test]
+    assert not verified_onboarding_binding(
+        **kw, binding=modified, expected_group="fresh")
+    assert not verified_onboarding_binding(
+        **kw, binding=persisted, expected_group="newer")
+    assert not verified_onboarding_binding(
+        **{**kw, "allowed_paths": [new_source]}, binding=persisted,
+        expected_group="fresh")
+    # An altered new-owner declaration invalidates the persisted owner's
+    # original receipt, even though its committed manifest itself is intact.
+    (tmp_path / new_path).write_text('{"untrusted":true}', encoding="utf-8")
+    assert not verified_onboarding_binding(
+        **kw, binding=persisted, expected_group="fresh")
+
+
+def test_v22_ef02_receipt_diagnostics_fail_closed_without_private_details(tmp_path):
+    """Missing/falsified evidence emits only reviewed condition codes."""
+    from ai_commerce.remote.worker import _verified_receipt_evidence
+
+    args = dict(root=tmp_path, workspace=tmp_path,
+                source_sha="a" * 40, sources=[], profiles={})
+    reasons = []
+    assert not _verified_receipt_evidence({}, **args, diagnostics=reasons)
+    assert reasons == ["RECEIPT_EVIDENCE_UNAVAILABLE"]
+    reasons = []
+    assert not _verified_receipt_evidence(
+        {"evidence_files": {}, "evidence_sha256": {},
+         "verify_completed": True, "provider_return_determinate": True},
+        **args, diagnostics=reasons)
+    assert reasons == ["RECEIPT_PROVENANCE_INCOMPLETE"]
+
+
 def test_v22_manifest_respects_authorized_directory_prefixes(tmp_path):
     validator, data, context = _v22_manifest_fixture(tmp_path)
     allowed = ("src/ai_commerce/fresh", "tests", "contracts",
