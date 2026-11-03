@@ -13,7 +13,7 @@ from .minimum_test import Evidence, apply_evidence, canonical, file_hashes, sele
 from .pytest_profile import require_managed_parallelism, registered_workers
 
 
-_OBSERVER_PLUGIN = "ai_commerce.engineering.pytest_worker_observer"
+_OBSERVER_PLUGIN = "ai_commerce.engineering.pytest_profile"
 
 
 def pytest_observation_env() -> dict[str, str]:
