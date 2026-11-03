@@ -46,6 +46,12 @@ def _personal_local_inspect(args):
     if (not path.is_absolute() or str(path).startswith("\\\\") or path.is_symlink()
             or not path.is_file() or path.stat().st_size > 131072):
         deny("BAD_CONFIG")
+    if os.name == "nt":
+        # Reject NTFS junctions/reparse points in ANY ancestor of the supplied
+        # config, not only a symlink at the final path.
+        for component in (path, *path.parents):
+            if getattr(component.lstat(), "st_file_attributes", 0) & 0x400:
+                deny("BAD_CONFIG")
     config = load_config_v4(path)
     if (config["schema"] != PERSONAL_V4_SCHEMA or
             config["account_mode"] != PERSONAL_V4_MODE or
@@ -58,7 +64,7 @@ def _personal_local_inspect(args):
         deny("PERSONAL_IDENTITY_MISMATCH")
     if (Path(config["policy_dir"]) / "KILL").exists():
         deny("KILL_SWITCH")
-    print("LOCAL_ONLY: fixed OS inventory; no GitHub, files, broker or service access.")
+    print("LOCAL_ONLY: fixed OS metadata; no GitHub API, user file reads, broker or services.")
     print("Type LOCAL READ ONLY to inspect this Windows process:", flush=True)
     try:
         confirm = input()
@@ -86,7 +92,7 @@ def _personal_local_inspect(args):
         "github_contacted": False,
         "broker_started": False,
         "private_keys_used": False,
-        "filesystem_written": False,
+        "operation_file_write_requested": False,
         "ready_to_enable": False,
     }).decode("ascii"))
     return 0
