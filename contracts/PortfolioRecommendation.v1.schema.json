@@ -1217,7 +1217,9 @@
           "request": {
             "properties": {
               "human_policy": {
-                "type": "object",
+                "not": {
+                  "type": "null"
+                },
                 "properties": {
                   "requirement": {
                     "const": "PROVISIONAL_LOCAL_DESCRIPTIVE"

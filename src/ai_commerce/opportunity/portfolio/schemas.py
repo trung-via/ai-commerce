@@ -178,7 +178,7 @@ def schema() -> dict:
              "then": {"properties": {
                  "confidence": {"const": "PROVISIONAL_USER_SUPPLIED_UNATTESTED"},
                  "human_action": {"properties": {"kind": {"const": "REVIEW_PROVISIONAL_RECOMMENDATION"}}},
-                 "request": {"properties": {"human_policy": {"type": "object", "properties": {
+                 "request": {"properties": {"human_policy": {"not": {"type": "null"}, "properties": {
                      "requirement": {"const": "PROVISIONAL_LOCAL_DESCRIPTIVE"}}}}}}}},
             {"if": {"properties": {"decision": {"const": "INCONCLUSIVE"}}},
              "then": {"properties": {"confidence": {"const": "INSUFFICIENT_FOR_DECISIVE_RECOMMENDATION"}}}}
