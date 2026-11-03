@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import base64
 import os
+import platform
 from pathlib import Path
 import sys
 import time
@@ -12,17 +13,88 @@ from .auth import verify_release, verify_release_v4
 from .broker import serve, serve_v4
 from .contract import (MAX_WIRE, Denied, canonical, decode, deny, digest,
                        dual_repo_envelope, envelope, public_receipt_v4, receipt, receipt_v4)
-from .security import (NON_BROKER_SIDS, PERSONAL_V4_SCHEMA, load_config,
+from .security import (NON_BROKER_SIDS, PERSONAL_V4_MODE, PERSONAL_V4_SCHEMA, load_config,
                        load_config_v4, windows_identity)
 from .transport import (READ_ONLY_V4, ControlGitHub, GitHub, poll_inbox, poll_once,
                         poll_once_v4, report, report_v4, submit, submit_v4,
                         validation, validation_v4)
 
 V3_COMMANDS = ("validate", "submit", "reconcile", "report", "broker", "poll-once", "poll")
-V4_COMMANDS = ("validate-v4", "submit-v4", "reconcile-v4", "report-v4", "broker-v4", "poll-once-v4")
+V4_COMMANDS = ("validate-v4", "submit-v4", "reconcile-v4", "report-v4", "broker-v4", "poll-once-v4",
+               "personal-local-inspect")
+
+
+def _personal_local_inspect(args):
+    """Operator-attended, fixed local metadata read. NOT a remote HostOps broker.
+
+    No token, network API, arbitrary command, file write, or unattended
+    activation is available through this command. Console consent is not a
+    security boundary against a malicious *same-user* process.
+    """
+    if (args.request_file or args.receipt_file or args.token_file or args.output or
+            args.disclosure_output or args.issue is not None or args.run_id is not None):
+        deny("PERSONAL_LOCAL_OPTIONS_DENIED")
+    if os.name != "nt":
+        deny("WINDOWS_REQUIRED")
+    if not args.config:
+        deny("BAD_CONFIG")
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        deny("INTERACTIVE_CONSENT_REQUIRED")
+    path = Path(args.config)
+    # Local absolute file only. Disallow UNC, symlink, oversized files and
+    # device/relative paths; never let local inspection read a network config.
+    if (not path.is_absolute() or str(path).startswith("\\\\") or path.is_symlink()
+            or not path.is_file() or path.stat().st_size > 131072):
+        deny("BAD_CONFIG")
+    config = load_config_v4(path)
+    if (config["schema"] != PERSONAL_V4_SCHEMA or
+            config["account_mode"] != PERSONAL_V4_MODE or
+            config["enabled"] is not False):
+        deny("PERSONAL_MODE_NOT_ENROLLED")
+    sid, elevated = windows_identity()
+    if (elevated or sid in NON_BROKER_SIDS or
+            config["broker_identity"] != sid or
+            config["transport_identity"] != sid):
+        deny("PERSONAL_IDENTITY_MISMATCH")
+    if (Path(config["policy_dir"]) / "KILL").exists():
+        deny("KILL_SWITCH")
+    print("LOCAL_ONLY: fixed OS inventory; no GitHub, files, broker or service access.")
+    print("Type LOCAL READ ONLY to inspect this Windows process:", flush=True)
+    try:
+        confirm = input()
+    except EOFError:
+        deny("INTERACTIVE_CONSENT_REQUIRED")
+    if confirm != "LOCAL READ ONLY":
+        deny("INTERACTIVE_CONSENT_REQUIRED")
+    arch = platform.machine().casefold()
+    architecture = "X64" if arch in ("amd64", "x86_64") else "OTHER"
+    cpu = os.cpu_count()
+    cpu_count = cpu if type(cpu) is int and 0 < cpu <= 512 else 0
+    # Fixed fields only: no host name, user name, SID, process lists, paths,
+    # secret status, token values, environment, device identifiers or logs.
+    print("HOSTOPS_PERSONAL_LOCAL_READ")
+    print(canonical({
+        "schema": "hostops.personal.local_inventory.v1",
+        "account_mode": PERSONAL_V4_MODE,
+        "operation": "local_os_inventory",
+        "windows": True,
+        "current_sid_matched": True,
+        "non_elevated": True,
+        "console_confirmation_received": True,
+        "architecture": architecture,
+        "logical_cpu_count": cpu_count,
+        "github_contacted": False,
+        "broker_started": False,
+        "private_keys_used": False,
+        "filesystem_written": False,
+        "ready_to_enable": False,
+    }).decode("ascii"))
+    return 0
 
 
 def _run_v4_cli(args):
+    if args.command == "personal-local-inspect":
+        return _personal_local_inspect(args)
     if args.command == "report-v4":
         output = report_v4({"receipt": decode(Path(args.receipt_file).read_bytes())}).encode("ascii")
     elif args.command == "validate-v4":
@@ -136,7 +208,7 @@ def main(argv=None):
         return 0
     except (Denied, OSError, ValueError, TypeError) as exc:
         # Static diagnostic only. Never echo paths, request contents or exception text.
-        if args.output:
+        if args.output and args.command != "personal-local-inspect":
             unavailable = isinstance(exc, OSError) or str(exc) in ("BROKER_UNAVAILABLE", "GITHUB_UNAVAILABLE")
             maker = receipt_v4 if is_v4 else receipt
             Path(args.output).write_bytes(canonical(maker(None, "UNAVAILABLE" if unavailable else "BLOCKED", "CLI_BLOCKED")))
