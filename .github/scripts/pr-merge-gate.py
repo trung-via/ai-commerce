@@ -82,6 +82,12 @@ REVIEWED_CONTROL_TESTS = {
     "src/ai_commerce/engineering/minimum_test.py": (
         "tests/test_minimum_test.py", "tests/test_ef02.py",
         "tests/test_ef02_mt01_registry.py"),
+    # Explicit offline-only HostOps v4 Windows PLAN bootstrap. No service,
+    # broker token, signed write, ACL mutation or installer execution path.
+    "scripts/HostOps-V4-InstallPlan.ps1": (
+        "tests/test_hostops_v3_integration.py", "tests/test_minimum_test.py"),
+    "config/hostops-v3/config-v4.example.json": (
+        "tests/test_hostops_v3_integration.py", "tests/test_minimum_test.py"),
     "src/ai_commerce/remote/validation.py": (
         "tests/test_minimum_test.py", "tests/test_ef02.py"),
     "tests/test_mt01_v21.py": ("tests/test_mt01_v21.py",),
