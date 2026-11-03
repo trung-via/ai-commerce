@@ -1,0 +1,618 @@
+{
+  "work_id": "A18-3-SCALE-BRAND-001",
+  "action_id": "A18-3-E07-SCALE-BRAND-OFFLINE-01",
+  "source_sha": "62a29f0e9938de0f23540458d9c04522c43fc8e9",
+  "human_instruction": "2026-11-03 Human @AI Commerce kiểm tra, tiếp tục; fresh offline E07 action on exact frozen main after M06 PR #305 and M07 PR #310",
+  "owner": "Commerce Opportunity",
+  "wbs": "E07",
+  "wbs_dependencies": [
+    "E05",
+    "M07"
+  ],
+  "a18_dependencies": [
+    "A10",
+    "A11",
+    "A15",
+    "A16"
+  ],
+  "acceptance": [
+    "A18.E07.offline-scale-brand-decision-memo"
+  ],
+  "owner_manifest": "work_items/mt01-components/a18-3.json",
+  "verification_profile": "mt01-component-onboarding",
+  "status": "OFFLINE_IMPLEMENTED_INDEPENDENT_VERIFICATION_REQUIRED",
+  "max_repair_rounds": 2,
+  "executor_git_writes": false,
+  "delivery_authority": "EF02_WORKER_ONLY_AFTER_INDEPENDENT_VERIFIED_PASS",
+  "allowed_paths": [
+    "src/ai_commerce/opportunity/scale_option/__init__.py",
+    "src/ai_commerce/opportunity/scale_option/schemas.py",
+    "src/ai_commerce/opportunity/scale_option/sources.py",
+    "src/ai_commerce/opportunity/scale_option/memo.py",
+    "contracts/ScaleBrandDecisionMemo.v1.schema.json",
+    "tests/test_a18_scale_option.py",
+    "tests/test_a18_scale_option_integration.py",
+    "work_items/mt01-components/a18-3.json",
+    "work_items/A18-3-SCALE-BRAND-001.json",
+    "docs/engineering/A18_3_IMPLEMENTATION_REPORT.md"
+  ],
+  "verification": {
+    "source_sha_verified_at_start": true,
+    "clean_worktree_verified_at_start": true,
+    "target_paths_absent_at_start": 10,
+    "windows_self_host_workers_per_group_required": 12,
+    "windows_hosted_pr_workers_later": 4,
+    "candidate_sha": null,
+    "independent_ef01_ef02": "PENDING",
+    "pr_head_ci": "PENDING_LATER_INDEPENDENT_WINDOWS_HOSTED_EXACT_HEAD_CI",
+    "brain_acceptance_auto_merge": "PENDING_LATER_INDEPENDENT_REVIEW",
+    "initial_owner_preflight": {
+      "stage": "INITIAL_OWNER_PREFLIGHT",
+      "group": "a18-3",
+      "selected_profile": "mt01-component-onboarding",
+      "platform": "win32",
+      "argv": [
+        "python",
+        "-m",
+        "pytest",
+        "tests/test_a18_scale_option.py",
+        "tests/test_a18_scale_option_integration.py",
+        "-q",
+        "-n",
+        "12"
+      ],
+      "pytest_addopts": "-p no:cacheprovider --tb=short --basetemp=\"C:/Users/TRUNG/AppData/Local/Packages/sandbox.{ecf1b058-b4ba-46f6-9d15-674e03fc595a}/AC/Temp/a18-3-initial-fzjpim5e/pytest\" --junitxml=\"C:/Users/TRUNG/AppData/Local/Packages/sandbox.{ecf1b058-b4ba-46f6-9d15-674e03fc595a}/AC/Temp/a18-3-initial-fzjpim5e/a18-3.xml\"",
+      "started_at": "2026-11-03T16:21:35.315266+00:00",
+      "duration_seconds": 20.327,
+      "exit_code": 1,
+      "workers_actual": 12,
+      "counts": {
+        "collected": 214,
+        "passed": 213,
+        "failed": 0,
+        "errors": 1,
+        "skipped": 0
+      },
+      "junit_bytes": 308838,
+      "junit_sha256": "99809ffaebc00ea17851a4bbf88da1703674a2985b38c18458214f3c6725865c",
+      "stdout_sha256": "6118f28acbb3da6f6922b802aaf1b860fe2513fd089bae25eb2f9e811eea67b5",
+      "stderr": "",
+      "all_tree_hashes_unchanged": true,
+      "controller_stdout_excerpt": "bringing up nodes...\nbringing up nodes...\n\n........................................................................ [ 33%]\n........................................................................ [ 67%]\n.....EE................................................................  [100%]\n=================================== ERRORS ====================================\n_ ERROR at setup of test_raw_malformed_duplicate_nonfinite_oversized_and_recursive_json[                                                                                             ... OVERSIZED_PARAMETER_LABEL_OMITTED ...                                                                                                                                                                                  ] _\n[gw11] win32 -- Python 3.14.7 C:\\Users\\TRUNG\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe\n..\\..\\Python\\pythoncore-3.14-64\\Lib\\site-packages\\_pytest\\runner.py:344: in from_call\n    result: TResult | None = func()\n                             ^^^^^^\n..\\..\\Python\\pythoncore-3.14-64\\Lib\\site-packages\\_pytest\\runner.py:246: in <lambda>\n    lambda: runtest_hook(item=item, **kwds), when=when, reraise=reraise\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n..\\..\\..\\Roaming\\Python\\Python314\\site-packages\\pluggy\\_hooks.py:512: in __call__\n    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n..\\..\\..\\Roaming\\Python\\Python314\\site-packages\\pluggy\\_manager.py:120: in _hookexec\n    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n..\\..\\Python\\pythoncore-3.14-64\\Lib\\site-packages\\_pytest\\logging.py:843: in pytest_runtest_setup\n    yield\n..\\..\\Python\\pythoncore-3.14-64\\Lib\\site-packages\\_pytest\\capture.py:895: in pytest_runtest_setup\n    return (yield)\n            ^^^^^\n..\\..\\Python\\pythoncore-3.14-64\\Lib\\site-packages\\_pytest\\runner.py:163: in pytest_runtest_setup\n    _update_current_test_var(item, \"setup\")\n..\\..\\Python\\pythoncore-3.14-64\\Lib\\site-packages\\_pytest\\runner.py:209: in _update_current_test_var\n    os.environ[var_name] = value\n    ^^^^^^^^^^^^^^^^^^^^\n<frozen os>:715: in __setitem__\n    ???\nE   ValueError: the environment variable is longer than 32767 characters\n_ ERROR at teardown of test_raw_malformed_duplicate_nonfinite_oversized_and_recursive_json[                                                                                          ... OVERSIZED_PARAMETER_LABEL_OMITTED ...                                                                                                                                                                                  ] _\n[gw11] win32 -- Python 3.14.7 C:\\Users\\TRUNG\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe\n..\\..\\Python\\pythoncore-3.14-64\\Lib\\site-packages\\_pytest\\runner.py:344: in from_call\n    result: TResult | None = func()\n                             ^^^^^^\n..\\..\\Python\\pythoncore-3.14-64\\Lib\\site-packages\\_pytest\\runner.py:246: in <lambda>\n    lambda: runtest_hook(item=item, **kwds), when=when, reraise=reraise\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n..\\..\\..\\Roaming\\Python\\Python314\\site-packages\\pluggy\\_hooks.py:512: in __call__\n    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n..\\..\\..\\Roaming\\Python\\Python314\\site-packages\\pluggy\\_manager.py:120: in _hookexec\n    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n..\\..\\Python\\pythoncore-3.14-64\\Lib\\site-packages\\_pytest\\logging.py:858: in pytest_runtest_teardown\n    yield\n..\\..\\Python\\pythoncore-3.14-64\\Lib\\site-packages\\_pytest\\capture.py:905: in pytest_runtest_teardown\n    return (yield)\n            ^^^^^\n..\\..\\Python\\pythoncore-3.14-64\\Lib\\site-packages\\_pytest\\runner.py:192: in pytest_runtest_teardown\n    _update_current_test_var(item, \"teardown\")\n..\\..\\Python\\pythoncore-3.14-64\\Lib\\site-packages\\_pytest\\runner.py:209: in _update_current_test_var\n    os.environ[var_name] = value\n    ^^^^^^^^^^^^^^^^^^^^\n<frozen os>:715: in __setitem__\n    ???\nE   ValueError: the environment variable is longer than 32767 characters\n- generated xml file: C:\\Users\\TRUNG\\AppData\\Local\\Packages\\sandbox.{ecf1b058-b4ba-46f6-9d15-674e03fc595a}\\AC\\Temp\\a18-3-initial-fzjpim5e\\a18-3.xml -\nMT01_XDIST_WORKERS_COLLECTED=12\n=========================== short test summary info ===========================\nERROR tests/test_a18_scale_option.py::test_raw_malformed_duplicate_nonfinite_oversized_and_recursive_json[                                                                           ... OVERSIZED_PARAMETER_LABEL_OMITTED ...                                                                                                             ] - ValueError: the environment variable is longer than 32767 characters\nERROR tests/test_a18_scale_option.py::test_raw_malformed_duplicate_nonfinite_oversized_and_recursive_json[                                                                           ... OVERSIZED_PARAMETER_LABEL_OMITTED ...                                                                                                             ] - ValueError: the environment variable is longer than 32767 characters\n213 passed, 2 errors in 19.67s",
+      "stdout_bytes": 1053036,
+      "stdout_excerpt_is_complete": false,
+      "not_admitted_as_final": true,
+      "diagnosis": "213 passed; console reported 2 setup or teardown errors caused by oversized pytest parameter labels exceeding Windows environment-variable length. Full raw controller stdout hash retained; labels shortened in repair 1.",
+      "counts_semantics": "JUnit testcase counts: 213 passing cases and 1 errored case; console reported 2 setup or teardown errors for the oversized parameter label. Initial preflight is not a final proof."
+    },
+    "local_repair_rounds_used": 1,
+    "independent_ef01_repair_rounds_observed": 0,
+    "existing_tree_fingerprint": "d129cf2826514ee8880a7e6a0238496f7fbc0dbf6ce0cb2737d765c63a30fec6",
+    "baseline_files": 726,
+    "self_host_service_identity": "NOT_INDEPENDENTLY_ATTESTED_BY_LOCAL_EXECUTOR",
+    "publication_authority": "EF02_WORKER_ONLY_AFTER_INDEPENDENT_VERIFICATION",
+    "onboarding_plan": {
+      "selected_groups": [
+        "a15",
+        "a16",
+        "a18-1",
+        "a18-2",
+        "a18-3"
+      ],
+      "missing_mapping": [],
+      "unknown_acs": [],
+      "fallback": false,
+      "owner_admission": "VALIDATED_DATA_ONLY_NOT_VERIFICATION_PASS"
+    },
+    "frozen_source_pins": {
+      "src/ai_commerce/opportunity/portfolio/recommend.py": "69fa454fa32e22d9be5310bf7bb7bc036cad55e1fa3f40116b9cf4ef151c7b98",
+      "src/ai_commerce/opportunity/portfolio/schemas.py": "fd4bab5387de8c90d3df8962d04c89b55910794d4bf55b9e3ce831c5f322cf58",
+      "src/ai_commerce/opportunity/own_brand/brief.py": "da946e0cd570664cadbd9fcde15cf74767221c1017d9ca9e389c1ba182771f3a",
+      "src/ai_commerce/opportunity/own_brand/sources.py": "7d9d468ec753da4fb9a3885f63d0d4e941247b0cabf03a39091aa5fd40fb7972",
+      "src/ai_commerce/opportunity/own_brand/schemas.py": "c73a0672ee8e337546d8dac7369dd7126d029f4760e94341b384320e0d68aea3",
+      "src/ai_commerce/settlement/review.py": "44851e8a755b07ff359a2047fe0175dfe261d89b49c75fbd8b5c6a76fa420c86",
+      "src/ai_commerce/settlement/ledger.py": "d69193aee54e8a357a2bf8b50c99f9f07ba5b867e7bd14ecc6421ea450654fd1",
+      "src/ai_commerce/operations/cost_ledger.py": "2afb7d0c05b6e90d75020c8b04df5c218c3f7bc609b84f16bb3c721dc66dc969",
+      "contracts/PortfolioRecommendation.v1.schema.json": "62e3b3a023f58b77e8fa86c87b4d51aeda24d6af5787fe0492fbe3a9ef52b8cd",
+      "contracts/OwnBrandDecisionBrief.v1.schema.json": "35206d6787bd775e39b2e912f5739308958bde1c4879c556f4eb579417ed3ddf",
+      "contracts/CommercialReview.v1.schema.json": "a76916f6cbb97b68f7e4bc78577469e96f7aad4c3977916961eb0b2d20166cbb",
+      "src/ai_commerce/engineering/minimum_test.py": "20ecbcefa133d40e753d2d9f699801b5c5145ec85a2ad93d40babb84dd407a74",
+      "src/ai_commerce/engineering/impact_v21.py": "7f4601c20861c509571f7962df343c585358f3c8708f2350e0b6e771f4e131e6",
+      "src/ai_commerce/engineering/pytest_profile.py": "4749d87eee3983274f457af06ae3b7db9dc207508b3934f0fa178325c194e197",
+      "src/ai_commerce/engineering/verification.py": "10dd19ac0b050a24c26b71191a5331a4faa605afa119a61ff7ca405aee39f565",
+      ".github/ef02/verify-profiles.json": "7135eca52af7bf296a2f2753319ef8e878086d5ff6727ab138673d15fded20d0",
+      "work_items/mt01-components/a18-1.json": "7770b4333da699025d3126ed2dae4755b9b174ea462ccf528eb41d659fe27d49",
+      "work_items/mt01-components/a18-2.json": "f5408245bddf76d264402d7925214cd0757658306ec4edfa6c6a49b439339a26",
+      "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.md": "4f7d9afc0225231852ed6d3f8d857940cb4885bd94f0f514cd2d8832ce46619f",
+      "docs/roadmap/WORK_TREE_DETAILED_V1_1.md": "803cc2bc55dbb212cea299ec91ab89103b8cbb0c034d4b4cb15999f76e9de6d4"
+    },
+    "local_results": [
+      {
+        "group": "a18-3",
+        "selected_profile": "mt01-component-onboarding",
+        "platform": "win32",
+        "argv": [
+          "python",
+          "-m",
+          "pytest",
+          "tests/test_a18_scale_option.py",
+          "tests/test_a18_scale_option_integration.py",
+          "-q",
+          "-n",
+          "12"
+        ],
+        "pytest_addopts": "-p no:cacheprovider --tb=short --basetemp=\"C:/Users/TRUNG/AppData/Local/Packages/sandbox.{a7fdea4d-0feb-4011-beca-acfbec7a3cb1}/AC/Temp/a18-3-repair1-ec4v5i5k/a18-3-temp\" --junitxml=\"C:/Users/TRUNG/AppData/Local/Packages/sandbox.{a7fdea4d-0feb-4011-beca-acfbec7a3cb1}/AC/Temp/a18-3-repair1-ec4v5i5k/a18-3.xml\"",
+        "started_at": "2026-11-03T16:27:35.600983+00:00",
+        "duration_seconds": 23.26,
+        "exit_code": 0,
+        "selected_files": 2,
+        "workers_actual": 12,
+        "worker_proof": "MT01_XDIST_WORKERS_COLLECTED=12",
+        "counts": {
+          "collected": 216,
+          "passed": 216,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "junit_bytes": 33643,
+        "junit_sha256": "a83767ed531f95833369f8608035d8cb24398604255b58e999ea70efff972e69",
+        "stdout_sha256": "8776be3e6d30f7758fc46f6689a3b45a1f01cadb2663c620fc6f276f85f87fca",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "actual_controller_stdout": "bringing up nodes...\r\nbringing up nodes...\r\n\r\n........................................................................ [ 33%]\r\n........................................................................ [ 66%]\r\n........................................................................ [100%]\r\n- generated xml file: C:\\Users\\TRUNG\\AppData\\Local\\Packages\\sandbox.{a7fdea4d-0feb-4011-beca-acfbec7a3cb1}\\AC\\Temp\\a18-3-repair1-ec4v5i5k\\a18-3.xml -\r\nMT01_XDIST_WORKERS_COLLECTED=12\r\n216 passed in 22.64s\r\n",
+        "stderr": "",
+        "all_tree_hashes_unchanged": true
+      },
+      {
+        "group": "a15",
+        "selected_profile": "mt01-a15-tests",
+        "platform": "win32",
+        "argv": [
+          "python",
+          "-m",
+          "pytest",
+          "tests/test_a15_operations.py",
+          "-q",
+          "-n",
+          "12"
+        ],
+        "pytest_addopts": "-p no:cacheprovider --tb=short --basetemp=\"C:/Users/TRUNG/AppData/Local/Packages/sandbox.{a7fdea4d-0feb-4011-beca-acfbec7a3cb1}/AC/Temp/a18-3-repair1-ec4v5i5k/a15-temp\" --junitxml=\"C:/Users/TRUNG/AppData/Local/Packages/sandbox.{a7fdea4d-0feb-4011-beca-acfbec7a3cb1}/AC/Temp/a18-3-repair1-ec4v5i5k/a15.xml\"",
+        "started_at": "2026-11-03T16:27:59.892445+00:00",
+        "duration_seconds": 4.183,
+        "exit_code": 0,
+        "selected_files": 1,
+        "workers_actual": 12,
+        "worker_proof": "MT01_XDIST_WORKERS_COLLECTED=12",
+        "counts": {
+          "collected": 43,
+          "passed": 43,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "junit_bytes": 5713,
+        "junit_sha256": "4fe00f4e677640683bf3483ef70605253fac850a7c92de903d1bceb6cd645dc4",
+        "stdout_sha256": "75355b04744e7ac60cdb45ba30aca7ebd3489b464a4cc7d79cdce33096894931",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "actual_controller_stdout": "bringing up nodes...\r\nbringing up nodes...\r\n\r\n...........................................                              [100%]\r\n- generated xml file: C:\\Users\\TRUNG\\AppData\\Local\\Packages\\sandbox.{a7fdea4d-0feb-4011-beca-acfbec7a3cb1}\\AC\\Temp\\a18-3-repair1-ec4v5i5k\\a15.xml -\r\nMT01_XDIST_WORKERS_COLLECTED=12\r\n43 passed in 3.57s\r\n",
+        "stderr": "",
+        "all_tree_hashes_unchanged": true
+      },
+      {
+        "group": "a16",
+        "selected_profile": "mt01-a16-tests",
+        "platform": "win32",
+        "argv": [
+          "python",
+          "-m",
+          "pytest",
+          "tests/test_a16_settlement.py",
+          "tests/test_a16_commercial_review.py",
+          "-q",
+          "-n",
+          "12"
+        ],
+        "pytest_addopts": "-p no:cacheprovider --tb=short --basetemp=\"C:/Users/TRUNG/AppData/Local/Packages/sandbox.{a7fdea4d-0feb-4011-beca-acfbec7a3cb1}/AC/Temp/a18-3-repair1-ec4v5i5k/a16-temp\" --junitxml=\"C:/Users/TRUNG/AppData/Local/Packages/sandbox.{a7fdea4d-0feb-4011-beca-acfbec7a3cb1}/AC/Temp/a18-3-repair1-ec4v5i5k/a16.xml\"",
+        "started_at": "2026-11-03T16:28:05.190306+00:00",
+        "duration_seconds": 18.322,
+        "exit_code": 0,
+        "selected_files": 2,
+        "workers_actual": 12,
+        "worker_proof": "MT01_XDIST_WORKERS_COLLECTED=12",
+        "counts": {
+          "collected": 110,
+          "passed": 110,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "junit_bytes": 14608,
+        "junit_sha256": "4f107729fd3a07f8590aad1bef519dbf84b6f5252ff5b3387637d6fea8517814",
+        "stdout_sha256": "2291b5090d47eaaf870654276051d480b99b6094930e1d2944d27472a6dadd50",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "actual_controller_stdout": "bringing up nodes...\r\nbringing up nodes...\r\n\r\n........................................................................ [ 65%]\r\n......................................                                   [100%]\r\n- generated xml file: C:\\Users\\TRUNG\\AppData\\Local\\Packages\\sandbox.{a7fdea4d-0feb-4011-beca-acfbec7a3cb1}\\AC\\Temp\\a18-3-repair1-ec4v5i5k\\a16.xml -\r\nMT01_XDIST_WORKERS_COLLECTED=12\r\n110 passed in 17.72s\r\n",
+        "stderr": "",
+        "all_tree_hashes_unchanged": true
+      },
+      {
+        "group": "a18-1",
+        "selected_profile": "mt01-component-onboarding",
+        "platform": "win32",
+        "argv": [
+          "python",
+          "-m",
+          "pytest",
+          "tests/test_a18_portfolio.py",
+          "tests/test_a18_portfolio_integration.py",
+          "-q",
+          "-n",
+          "12"
+        ],
+        "pytest_addopts": "-p no:cacheprovider --tb=short --basetemp=\"C:/Users/TRUNG/AppData/Local/Packages/sandbox.{a7fdea4d-0feb-4011-beca-acfbec7a3cb1}/AC/Temp/a18-3-repair1-ec4v5i5k/a18-1-temp\" --junitxml=\"C:/Users/TRUNG/AppData/Local/Packages/sandbox.{a7fdea4d-0feb-4011-beca-acfbec7a3cb1}/AC/Temp/a18-3-repair1-ec4v5i5k/a18-1.xml\"",
+        "started_at": "2026-11-03T16:28:24.370507+00:00",
+        "duration_seconds": 17.179,
+        "exit_code": 0,
+        "selected_files": 2,
+        "workers_actual": 12,
+        "worker_proof": "MT01_XDIST_WORKERS_COLLECTED=12",
+        "counts": {
+          "collected": 135,
+          "passed": 135,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "junit_bytes": 20167,
+        "junit_sha256": "a331c3eb81119a6ae538971c55f743035b2b1cd45e8454ae3e6eb8aadb4f9f4f",
+        "stdout_sha256": "5ed220def75acdd94ce76a42e3fa5f48b4a729c8cc956e8914e4de8b48d5da48",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "actual_controller_stdout": "bringing up nodes...\r\nbringing up nodes...\r\n\r\n........................................................................ [ 53%]\r\n...............................................................          [100%]\r\n- generated xml file: C:\\Users\\TRUNG\\AppData\\Local\\Packages\\sandbox.{a7fdea4d-0feb-4011-beca-acfbec7a3cb1}\\AC\\Temp\\a18-3-repair1-ec4v5i5k\\a18-1.xml -\r\nMT01_XDIST_WORKERS_COLLECTED=12\r\n135 passed in 16.57s\r\n",
+        "stderr": "",
+        "all_tree_hashes_unchanged": true
+      },
+      {
+        "group": "a18-2",
+        "selected_profile": "mt01-component-onboarding",
+        "platform": "win32",
+        "argv": [
+          "python",
+          "-m",
+          "pytest",
+          "tests/test_a18_own_brand.py",
+          "tests/test_a18_own_brand_integration.py",
+          "-q",
+          "-n",
+          "12"
+        ],
+        "pytest_addopts": "-p no:cacheprovider --tb=short --basetemp=\"C:/Users/TRUNG/AppData/Local/Packages/sandbox.{a7fdea4d-0feb-4011-beca-acfbec7a3cb1}/AC/Temp/a18-3-repair1-ec4v5i5k/a18-2-temp\" --junitxml=\"C:/Users/TRUNG/AppData/Local/Packages/sandbox.{a7fdea4d-0feb-4011-beca-acfbec7a3cb1}/AC/Temp/a18-3-repair1-ec4v5i5k/a18-2.xml\"",
+        "started_at": "2026-11-03T16:28:42.505444+00:00",
+        "duration_seconds": 23.152,
+        "exit_code": 0,
+        "selected_files": 2,
+        "workers_actual": 12,
+        "worker_proof": "MT01_XDIST_WORKERS_COLLECTED=12",
+        "counts": {
+          "collected": 198,
+          "passed": 198,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "junit_bytes": 30358,
+        "junit_sha256": "bdbabfab6292c45ab9c7fba5ac11a0dbac7f2b0e70b0f6a57c11ebfff69924a4",
+        "stdout_sha256": "dc2684985c051fb0a1c0ff5b4b0b83e313f7878fa30890df179bc1656e074a66",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "actual_controller_stdout": "bringing up nodes...\r\nbringing up nodes...\r\n\r\n........................................................................ [ 36%]\r\n........................................................................ [ 72%]\r\n......................................................                   [100%]\r\n- generated xml file: C:\\Users\\TRUNG\\AppData\\Local\\Packages\\sandbox.{a7fdea4d-0feb-4011-beca-acfbec7a3cb1}\\AC\\Temp\\a18-3-repair1-ec4v5i5k\\a18-2.xml -\r\nMT01_XDIST_WORKERS_COLLECTED=12\r\n198 passed in 22.52s\r\n",
+        "stderr": "",
+        "all_tree_hashes_unchanged": true
+      }
+    ],
+    "final_local_run_stage": "LOCAL_REPAIR_ROUND_1",
+    "source_head_before_final_tests": "62a29f0e9938de0f23540458d9c04522c43fc8e9",
+    "source_head_after_final_tests": "62a29f0e9938de0f23540458d9c04522c43fc8e9",
+    "frozen_tree_unchanged_during_final_verification": true,
+    "pre_test_all_ten_hashes": {
+      "src/ai_commerce/opportunity/scale_option/__init__.py": "00c7eb871434317d27a940165b3984c78d9ad6876efaa655acb28a5d7a3090bb",
+      "src/ai_commerce/opportunity/scale_option/schemas.py": "604eb7a480c6f326e06631916a84be85117430b64642d5974e66a3a6c9563986",
+      "src/ai_commerce/opportunity/scale_option/sources.py": "56c3901c243360a3cd42e32beab48acac650e3c5943f94068b0b3c2833c297c0",
+      "src/ai_commerce/opportunity/scale_option/memo.py": "a366051c27b60b94fead1a1b1176298e3acb29b4ede930ab58ce6ffb5f1297cf",
+      "contracts/ScaleBrandDecisionMemo.v1.schema.json": "82932cd08a6f52965e0e697731a6f6e276ee9900d736bf3b143c4d151d1d5143",
+      "tests/test_a18_scale_option.py": "02c6928276748afde0062a857f09e59c1175ab233b1984aed0bdc0ced909163d",
+      "tests/test_a18_scale_option_integration.py": "4f3566dab2e4fd8a44264ca0dfb5196b4378d99834f5925f63f39297c8df6735",
+      "work_items/mt01-components/a18-3.json": "1624431cbdd207ef601056d4d078e6983a7446e27d0db79b6097376bc98156ac",
+      "work_items/A18-3-SCALE-BRAND-001.json": "1a49640dcff729e1b221d8e5007e7394d60b8bd16a47516c5cca9770fe0eae5b",
+      "docs/engineering/A18_3_IMPLEMENTATION_REPORT.md": "783be07d4ae25938eb6d792c76b806ff5b8688b9371c2f0abae0a6b9540a79a5"
+    },
+    "tested_candidate_hashes": {
+      "src/ai_commerce/opportunity/scale_option/__init__.py": "00c7eb871434317d27a940165b3984c78d9ad6876efaa655acb28a5d7a3090bb",
+      "src/ai_commerce/opportunity/scale_option/schemas.py": "604eb7a480c6f326e06631916a84be85117430b64642d5974e66a3a6c9563986",
+      "src/ai_commerce/opportunity/scale_option/sources.py": "56c3901c243360a3cd42e32beab48acac650e3c5943f94068b0b3c2833c297c0",
+      "src/ai_commerce/opportunity/scale_option/memo.py": "a366051c27b60b94fead1a1b1176298e3acb29b4ede930ab58ce6ffb5f1297cf",
+      "contracts/ScaleBrandDecisionMemo.v1.schema.json": "82932cd08a6f52965e0e697731a6f6e276ee9900d736bf3b143c4d151d1d5143",
+      "tests/test_a18_scale_option.py": "02c6928276748afde0062a857f09e59c1175ab233b1984aed0bdc0ced909163d",
+      "tests/test_a18_scale_option_integration.py": "4f3566dab2e4fd8a44264ca0dfb5196b4378d99834f5925f63f39297c8df6735",
+      "work_items/mt01-components/a18-3.json": "1624431cbdd207ef601056d4d078e6983a7446e27d0db79b6097376bc98156ac"
+    },
+    "post_test_metadata_only_updates": [
+      "work_items/A18-3-SCALE-BRAND-001.json",
+      "docs/engineering/A18_3_IMPLEMENTATION_REPORT.md"
+    ],
+    "local_totals": {
+      "collected": 702,
+      "passed": 702,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "selected_files": 9
+    },
+    "selected_mt01_group_bindings": [
+      {
+        "group": "a15",
+        "selected_profile": "mt01-a15-tests",
+        "test_files_count": 1,
+        "mapping": {
+          "acs": [
+            "A15.cost-and-idempotency"
+          ],
+          "consumers": [
+            "src/ai_commerce/operations/manifest.py",
+            "src/ai_commerce/operations/generation.py",
+            "src/ai_commerce/operations/runner.py",
+            "src/ai_commerce/operations/registry.py"
+          ],
+          "contracts": [
+            "work_items/A15-OPERATIONS-COST-001.json",
+            "docs/engineering/A15_IMPLEMENTATION_REPORT.md"
+          ],
+          "paths": [
+            "src/ai_commerce/operations/cost_ledger.py",
+            "src/ai_commerce/operations/retry_guard.py",
+            "src/ai_commerce/operations/status_report.py",
+            "src/ai_commerce/operations/a15_cli.py"
+          ],
+          "tests": [
+            "tests/test_a15_operations.py"
+          ]
+        },
+        "argv": [
+          "python",
+          "-m",
+          "pytest",
+          "tests/test_a15_operations.py",
+          "-q",
+          "-n",
+          "12"
+        ],
+        "onboarding_data_only": false
+      },
+      {
+        "group": "a16",
+        "selected_profile": "mt01-a16-tests",
+        "test_files_count": 2,
+        "mapping": {
+          "acs": [
+            "A16.L05.E05.offline-settlement"
+          ],
+          "consumers": [
+            "src/ai_commerce/affiliate_attribution/evidence.py",
+            "src/ai_commerce/affiliate_commerce/service.py",
+            "src/ai_commerce/operations/cost_ledger.py"
+          ],
+          "contracts": [
+            "contracts/SettlementEvidence.v1.schema.json",
+            "contracts/CommercialReview.v1.schema.json",
+            "work_items/A16-SETTLEMENT-EVIDENCE-001.json",
+            "docs/engineering/A16_IMPLEMENTATION_REPORT.md"
+          ],
+          "paths": [
+            "src/ai_commerce/settlement/__init__.py",
+            "src/ai_commerce/settlement/schemas.py",
+            "src/ai_commerce/settlement/evidence.py",
+            "src/ai_commerce/settlement/ledger.py",
+            "src/ai_commerce/settlement/review.py"
+          ],
+          "tests": [
+            "tests/test_a16_settlement.py",
+            "tests/test_a16_commercial_review.py"
+          ]
+        },
+        "argv": [
+          "python",
+          "-m",
+          "pytest",
+          "tests/test_a16_settlement.py",
+          "tests/test_a16_commercial_review.py",
+          "-q",
+          "-n",
+          "12"
+        ],
+        "onboarding_data_only": false
+      },
+      {
+        "group": "a18-1",
+        "selected_profile": "mt01-component-onboarding",
+        "test_files_count": 2,
+        "mapping": {
+          "acs": [
+            "A18.M06.offline-evidence-bound-portfolio-recommendation"
+          ],
+          "consumers": [
+            "src/ai_commerce/opportunity/proposals/planning.py",
+            "src/ai_commerce/learning/export.py",
+            "src/ai_commerce/learning/reporting.py",
+            "src/ai_commerce/operations/cost_ledger.py",
+            "src/ai_commerce/settlement/review.py"
+          ],
+          "contracts": [
+            "contracts/PortfolioRecommendation.v1.schema.json",
+            "work_items/mt01-components/a18-1.json"
+          ],
+          "paths": [
+            "src/ai_commerce/opportunity/portfolio/__init__.py",
+            "src/ai_commerce/opportunity/portfolio/schemas.py",
+            "src/ai_commerce/opportunity/portfolio/sources.py",
+            "src/ai_commerce/opportunity/portfolio/recommend.py"
+          ],
+          "tests": [
+            "tests/test_a18_portfolio.py",
+            "tests/test_a18_portfolio_integration.py"
+          ]
+        },
+        "argv": [
+          "python",
+          "-m",
+          "pytest",
+          "tests/test_a18_portfolio.py",
+          "tests/test_a18_portfolio_integration.py",
+          "-q",
+          "-n",
+          "12"
+        ],
+        "onboarding_data_only": true
+      },
+      {
+        "group": "a18-2",
+        "selected_profile": "mt01-component-onboarding",
+        "test_files_count": 2,
+        "mapping": {
+          "acs": [
+            "A18.M07.own-brand-offline-evidence-bound-go-no-go-brief"
+          ],
+          "consumers": [
+            "src/ai_commerce/opportunity/portfolio/recommend.py",
+            "src/ai_commerce/opportunity/portfolio/schemas.py",
+            "src/ai_commerce/settlement/review.py",
+            "src/ai_commerce/settlement/ledger.py",
+            "src/ai_commerce/operations/cost_ledger.py"
+          ],
+          "contracts": [
+            "contracts/OwnBrandDecisionBrief.v1.schema.json",
+            "work_items/mt01-components/a18-2.json"
+          ],
+          "paths": [
+            "src/ai_commerce/opportunity/own_brand/__init__.py",
+            "src/ai_commerce/opportunity/own_brand/schemas.py",
+            "src/ai_commerce/opportunity/own_brand/sources.py",
+            "src/ai_commerce/opportunity/own_brand/brief.py"
+          ],
+          "tests": [
+            "tests/test_a18_own_brand.py",
+            "tests/test_a18_own_brand_integration.py"
+          ]
+        },
+        "argv": [
+          "python",
+          "-m",
+          "pytest",
+          "tests/test_a18_own_brand.py",
+          "tests/test_a18_own_brand_integration.py",
+          "-q",
+          "-n",
+          "12"
+        ],
+        "onboarding_data_only": true
+      },
+      {
+        "group": "a18-3",
+        "selected_profile": "mt01-component-onboarding",
+        "test_files_count": 2,
+        "mapping": {
+          "acs": [
+            "A18.E07.offline-scale-brand-decision-memo"
+          ],
+          "consumers": [
+            "src/ai_commerce/opportunity/portfolio/recommend.py",
+            "src/ai_commerce/opportunity/own_brand/brief.py",
+            "src/ai_commerce/opportunity/own_brand/sources.py",
+            "src/ai_commerce/settlement/review.py",
+            "src/ai_commerce/operations/cost_ledger.py"
+          ],
+          "contracts": [
+            "contracts/ScaleBrandDecisionMemo.v1.schema.json",
+            "work_items/mt01-components/a18-3.json"
+          ],
+          "paths": [
+            "src/ai_commerce/opportunity/scale_option/__init__.py",
+            "src/ai_commerce/opportunity/scale_option/schemas.py",
+            "src/ai_commerce/opportunity/scale_option/sources.py",
+            "src/ai_commerce/opportunity/scale_option/memo.py"
+          ],
+          "tests": [
+            "tests/test_a18_scale_option.py",
+            "tests/test_a18_scale_option_integration.py"
+          ]
+        },
+        "argv": [
+          "python",
+          "-m",
+          "pytest",
+          "tests/test_a18_scale_option.py",
+          "tests/test_a18_scale_option_integration.py",
+          "-q",
+          "-n",
+          "12"
+        ],
+        "onboarding_data_only": true
+      }
+    ],
+    "plan_sha256": "a271866ee8b95c9fb04a3e38ec70256859ce3db6b11c604ac00dfd191d48d96d",
+    "self_host_worker_observation": {
+      "platform": "win32",
+      "profile": "mt01-component-onboarding",
+      "execution": "LOCAL_WINDOWS_SUBPROCESS_USING_REGISTERED_PLAN",
+      "max_parallel_groups": 1,
+      "workers_actual_per_group": {
+        "a18-3": 12,
+        "a15": 12,
+        "a16": 12,
+        "a18-1": 12,
+        "a18-2": 12
+      },
+      "service_identity": "NOT_INDEPENDENTLY_ATTESTED_BY_LOCAL_EXECUTOR",
+      "pytest_observer": "ai_commerce.engineering.pytest_profile.pytest_xdist_node_collection_finished",
+      "independent_candidate_attestation": false
+    },
+    "local_checks": "WINDOWS_REGISTERED_CLOSURE_PASSED",
+    "local_repair_history": [
+      {
+        "round": 1,
+        "initial_result": "213 passed; one oversized-parameter testcase generated two Windows setup or teardown errors; not admitted as final verification",
+        "changes": [
+          "Short explicit pytest parameter IDs for oversized and recursive payloads",
+          "Require original inner native custody before E07 CURRENT grade; retain M07 native grades separately",
+          "Require exact native types before native method calls",
+          "Enforce canonical archive code lists, M07 unknown measure reasons and A15 amount/status consistency",
+          "Use integer microseconds for source ages"
+        ],
+        "final_result": "702 passed across the full registered five-group closure, 12 actual collected workers per group",
+        "blind_retry": false
+      }
+    ],
+    "further_same_attempt_repairs_performed": false,
+    "final_verified_scope": "LOCAL_WINDOWS_REGISTERED_TEST_SCOPE_ONLY_NOT_INDEPENDENT_EF01_EF02_CANDIDATE_ATTESTATION",
+    "no_full_suite_fallback": true,
+    "test_artifact_storage": "JUnit files were generated in isolated Windows temporary storage; their exact SHA256 hashes, byte lengths, parsed counts and controller stdout receipts are preserved here. Temporary paths are not delivery artifacts."
+  },
+  "fresh_implementation": true,
+  "consumer_owners": [
+    "a15",
+    "a16",
+    "a18-1",
+    "a18-2"
+  ],
+  "scope_limits": [
+    "Pure offline Human advisory memo only",
+    "M07 calculations reused unchanged; no M06 action authority",
+    "All paid demand revenue profitability provider availability rights and actual commercial outcomes remain unverified",
+    "No network account supplier purchasing publishing payment capital cloud HostOps Wake or GitHub request at runtime",
+    "A15/A16 costs remain reference only; no duplicate automatic attribution",
+    "No executor Git writes candidate branch PR or merge",
+    "Independent EF01/EF02 exact source audit and later Windows-hosted 4-worker exact-head CI and Brain acceptance remain pending"
+  ],
+  "next_gates": [
+    "Independent EF01/EF02 verification of final worktree and source provenance",
+    "EF02 worker alone publishes a candidate after verified test and provenance freeze",
+    "Independent Windows-hosted exact-candidate-head CI with four workers",
+    "Independent Brain acceptance and auto-merge only on later review"
+  ]
+}

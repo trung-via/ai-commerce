@@ -1,0 +1,23 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "a18-3",
+  "sources": [
+    "src/ai_commerce/opportunity/scale_option/__init__.py",
+    "src/ai_commerce/opportunity/scale_option/schemas.py",
+    "src/ai_commerce/opportunity/scale_option/sources.py",
+    "src/ai_commerce/opportunity/scale_option/memo.py"
+  ],
+  "tests": [
+    "tests/test_a18_scale_option.py",
+    "tests/test_a18_scale_option_integration.py"
+  ],
+  "acs": ["A18.E07.offline-scale-brand-decision-memo"],
+  "consumers": [
+    "src/ai_commerce/opportunity/portfolio/recommend.py",
+    "src/ai_commerce/opportunity/own_brand/brief.py",
+    "src/ai_commerce/opportunity/own_brand/sources.py",
+    "src/ai_commerce/settlement/review.py",
+    "src/ai_commerce/operations/cost_ledger.py"
+  ],
+  "contracts": ["contracts/ScaleBrandDecisionMemo.v1.schema.json"]
+}
