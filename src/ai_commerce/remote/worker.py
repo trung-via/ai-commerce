@@ -28,25 +28,35 @@ from ai_commerce.engineering.source_safety import checked_path, protected_change
 
 def _verified_receipt_evidence(report: dict, *, root: Path, workspace: Path,
                                source_sha: str, sources: list[str], profiles: dict,
-                               allowed_paths: list[str] | None = None) -> bool:
-    """Check actual artifacts and registered PASS bindings, not receipt assertions."""
+                               allowed_paths: list[str] | None = None,
+                               diagnostics: list[str] | None = None) -> bool:
+    """Check actual artifacts and registered PASS bindings, not receipt assertions.
+
+    Emit bounded condition codes, never on-host paths, raw test output, tokens
+    or the exception message. A failure is still a hard publication HOLD.
+    """
+    def rejected(code: str) -> bool:
+        if diagnostics is not None:
+            diagnostics.append(code)
+        return False
+
     try:
         refs, hashes = report["evidence_files"], report["evidence_sha256"]
         if (report.get("verify_completed") is not True or
                 report.get("provider_return_determinate") is not True or
                 set(refs) != set(hashes) or
                 not {"tracked_diff", "source_after_verify", "verify_stdout", "provider_return_observed"} <= set(refs)):
-            return False
+            return rejected("RECEIPT_PROVENANCE_INCOMPLETE")
         for key, relative in refs.items():
             if hashlib.sha256(checked_path(root, relative).read_bytes()).hexdigest() != hashes[key]:
-                return False
+                return rejected("RECEIPT_ARTIFACT_HASH_MISMATCH")
         if hashes["tracked_diff"] != report["tracked_diff_sha256"]:
-            return False
+            return rejected("RECEIPT_TRACKED_DIFF_HASH_MISMATCH")
         current = file_hashes(workspace)
         covered = set()
         groups = report["minimum_test"]["groups"]
         if not report.get("minimum_test_enabled") or not groups:
-            return False
+            return rejected("MT01_GROUP_EVIDENCE_MISSING")
         for index, group in enumerate(groups):
             binding = group["binding"]
             onboarding_claim = binding.get("registered_profile") == "mt01-component-onboarding"
@@ -59,19 +69,22 @@ def _verified_receipt_evidence(report: dict, *, root: Path, workspace: Path,
                     allowed_paths=allowed_paths or [], base_sha=source_sha,
                     registered_profiles=profiles,
                     expected_group=group.get("group"))
+            if not approved_argv:
+                return rejected(f"MT01_GROUP_{index}_REGISTERED_BINDING_REJECTED")
             if (binding["base_sha"] != source_sha or binding["aggregate_sources"] != sources or
                     binding["workspace"] != str(workspace.resolve()) or
-                    not approved_argv or
                     binding["candidate_files"] != {p: current.get(p) for p in binding["candidate_files"]}):
-                return False
+                return rejected(f"MT01_GROUP_{index}_SOURCE_OR_HASH_MISMATCH")
             proof = Evidence(checked_path(root, refs[f"mt01_{index}_evidence"]).read_text(encoding="utf-8"),
                              group["evidence_sha256"])
             if not proof.valid_for(binding, root):
-                return False
+                return rejected(f"MT01_GROUP_{index}_EVIDENCE_INVALID")
             covered.update(binding["candidate_files"])
-        return set(report["changed_files"]) <= covered
+        if not set(report["changed_files"]) <= covered:
+            return rejected("MT01_CHANGED_FILES_UNCOVERED")
+        return True
     except (ValueError, KeyError, TypeError, OSError):
-        return False
+        return rejected("RECEIPT_EVIDENCE_UNAVAILABLE")
 
 
 def _fresh_aggregate_evidence(report: dict, *, root: Path, workspace: Path,
@@ -535,14 +548,20 @@ class LocalBatchWorker:
                 return finish()
             # Scope drift requires a fresh registered broad PASS on these bytes.
             # Never convert an old/partial success assertion into publication proof.
-            if (not _verified_receipt_evidence(
+            proof_diagnostics: list[str] = []
+            proof_confirmed = _verified_receipt_evidence(
+                report, root=efdir, workspace=worktree, source_sha=effective,
+                sources=[d["candidate_sha"] for d in dependencies], profiles=self.profiles,
+                allowed_paths=action["allowed_paths"], diagnostics=proof_diagnostics)
+            aggregate_confirmed = (
+                not review or (proof_confirmed and _fresh_aggregate_evidence(
                     report, root=efdir, workspace=worktree, source_sha=effective,
-                    sources=[d["candidate_sha"] for d in dependencies], profiles=self.profiles,
-                    allowed_paths=action["allowed_paths"]) or
-                    (review and not _fresh_aggregate_evidence(
-                        report, root=efdir, workspace=worktree, source_sha=effective,
-                        sources=[d["candidate_sha"] for d in dependencies], argv=plan["argv"]))):
-                outcome.update(status="UNPROVEN", error_code="EF01_VERIFICATION_PROOF_UNCONFIRMED")
+                    sources=[d["candidate_sha"] for d in dependencies], argv=plan["argv"])))
+            if not proof_confirmed or not aggregate_confirmed:
+                outcome.update(
+                    status="UNPROVEN", error_code="EF01_VERIFICATION_PROOF_UNCONFIRMED",
+                    verification_proof_diagnostics=proof_diagnostics or
+                    ["AGGREGATE_FRESH_EVIDENCE_UNCONFIRMED"])
                 return finish()
             evidence = validate_candidate_evidence({
                 "version": 1, "status": REVIEW_STATUS if review else "CANDIDATE_READY",
