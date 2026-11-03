@@ -4,6 +4,14 @@
 
 AI Commerce is an independent product and engineering repository. It is **not** Python Agent, AIOS-Renew, a submodule of either, or an inherited task/execution system.
 
+
+## Current engineering/CI policy — 2026-11-03
+
+**Windows-only (effective in `main` after [PR #300](https://github.com/trung-via/ai-commerce/pull/300)).** GitHub-hosted Windows is used for Python/Node/MT-01 source tests and lightweight coordination. The Windows self-hosted runner remains the authoritative environment for EF02 executor, HostOps, Chrome CDP/Wake and live 12-worker verification. The trusted Brain PASS merge gate checks current Windows CI and exact-HEAD evidence; Ubuntu CI is no longer a required gate.
+
+**Historical evidence notice:** Earlier reports below may mention Ubuntu/Linux runs, old two-OS test counts, or incomplete milestones. Those statements are dated receipts, **not current CI requirements or live status**. Refer to current GitHub PRs, Actions and `docs/engineering/PROJECT_STATE.md` for latest evidence.
+
+
 ## Current Creative Factory status — 2026-10-29
 
 **A06/E01 and milestone M1: VERIFIED FOR OFFLINE SCOPE.** [PR #71](https://github.com/trung-via/ai-commerce/pull/71) was merged into `main` at `377d3357`. [CI #40819125799](https://github.com/trung-via/ai-commerce/actions/runs/40819125799) verified the final code candidate: **Windows 859 passed; Ubuntu 858 passed, 1 skipped**. Both systems produced a playable H.264/yuv420p MP4 and uploaded complete E01 packages, including verified asset/order/scene/composition/render provenance and FFmpeg full decode.
