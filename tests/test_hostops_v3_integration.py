@@ -1363,6 +1363,37 @@ def test_personal_r1_cli_requires_single_user_nonadmin_console_and_exact_consent
     assert "HOSTOPS_R1_UNKNOWN" in capsys.readouterr().err
 
 
+def test_personal_r1_control_github_routes_are_exact_and_redirect_free(monkeypatch):
+    """Only fixed private Issue comments can be fetched; no user-selected URL."""
+    from ai_commerce.hostops_v3 import transport as t
+    import urllib.request
+    created = []
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self, n): return b"[]"
+    class FakeOpener:
+        def open(self, request, timeout):
+            created.append((request.full_url, request.get_method(), timeout))
+            return Response()
+    monkeypatch.setattr(urllib.request, "build_opener",
+                        lambda *_handlers: FakeOpener())
+    api = t.ControlGitHub("fake-token")
+    prefix = "/repos/trung-via/ai-commerce-hostops-control"
+    assert api.get(prefix + "/issues/420/comments?per_page=100") == []
+    assert created == [("https://api.github.com" + prefix +
+                        "/issues/420/comments?per_page=100", "GET", 10)]
+    for wrong in (prefix+"/issues/420/comments?per_page=999",
+                  prefix+"/issues/420/comments?per_page=100&token=x",
+                  "/repos/trung-via/ai-commerce/issues/420/comments?per_page=100",
+                  prefix+"/issues/420/../../contents/.env"):
+        with pytest.raises(c.Denied, match="TRANSPORT_ROUTE_DENIED"):
+            api.get(wrong)
+    with pytest.raises(c.Denied, match="TRANSPORT_ROUTE_DENIED"):
+        api.post(prefix + "/issues/420", {"body":"unapproved"})
+    assert len(created) == 1
+
+
 def test_v4_legacy_two_account_contract_rejects_equal_sid(h):
     cfg = _v4_config(h)
     assert cfg["schema"] == "hostops.config.v4"
