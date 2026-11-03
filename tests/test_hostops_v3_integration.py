@@ -871,11 +871,13 @@ def test_hostops_v4_windows_install_plan_is_never_an_installer():
                    "Invoke-Expression", "Invoke-WebRequest", "Set-Content", "Bypass"):
         assert banned.casefold() not in content.casefold()
     example = c.decode((ROOT / "config/hostops-v3/config-v4.example.json").read_bytes())
-    assert example["schema"] == "hostops.config.v4"
+    assert example["schema"] == "hostops.config.v4.personal"
+    assert example["account_mode"] == "PERSONAL_SINGLE_USER"
     assert example["enabled"] is False
     assert example["source_repository"] == c.SOURCE_REPOSITORY
     assert example["control_repository"] == c.CONTROL_REPOSITORY
-    assert example["broker_identity"] != example["transport_identity"]
+    assert example["broker_identity"] == example["transport_identity"]
+    assert example["broker_identity"] == security.PERSONAL_SID_PLACEHOLDER
     assert all(v == "0" * 64 for v in
                (example["ssh_keygen_sha256"], example["pwsh_sha256"]))
 
@@ -952,8 +954,13 @@ def test_hostops_v4_native_readonly_opt_in_fails_closed_without_installed_accoun
     assert payload["human_release_signature_verified"] is False
     assert payload["private_control_github_verified"] is False
     assert payload["ready_to_enable"] is False
-    assert "NATIVE_READONLY_PREREQUISITES_MISSING" in payload["block_reasons"]
-    assert "NATIVE_READONLY_PROOF_INCOMPLETE" in payload["block_reasons"]
+    assert payload["account_mode"] == "PERSONAL_SINGLE_USER"
+    assert payload["single_user_mode_configured"] is True
+    assert payload["single_user_sid_observed"] is True
+    assert payload["single_user_current_sid_match"] is False
+    assert payload["single_user_runtime_enrolled"] is False
+    assert "SINGLE_USER_CURRENT_SID_UNPROVEN" in payload["block_reasons"]
+    assert "PERSONAL_RUNTIME_NOT_ENROLLED" in payload["block_reasons"]
     # The probe only emits bounded aggregate booleans, never real identifiers.
     assert all(secret not in outcome.stdout for secret in
                ("broker_identity", "transport_identity", "S-1-", "C:\\\\", "TRUNG", "token"))
@@ -972,6 +979,7 @@ def test_hostops_v4_native_readonly_scope_never_claims_live_or_install():
     assert "-OperationTimeoutSec 3" in script
     assert "native_acl_verified = $false" in script
     assert "native_two_account_ipc_verified = $false" in script
+    assert "single_user_runtime_enrolled = $false" in script
     assert "ready_to_enable = $false" in script
     assert "NATIVE_READONLY_PROOF_INCOMPLETE" in script
     assert "NativeReadOnly" in script
@@ -1053,8 +1061,64 @@ def test_v4_disabled_windows_template_offline_cross_platform_parse():
     assert cfg["enabled"] is False
     if os.name != "nt":
         # Non-native paths must still be rejected for active broker configs.
-        with pytest.raises(c.Denied, match="BAD_CONFIG"):
+        with pytest.raises(c.Denied, match="PERSONAL_MODE_NOT_ENROLLED"):
             security._validate_v4_config_dict({**cfg, "enabled": True})
+
+
+def test_v4_personal_single_user_contract_is_explicit_disabled_and_non_downgradable(tmp_path):
+    """#293: one account is a distinct PLAN-only contract, never a broker grant."""
+    template = ROOT / "config/hostops-v3/config-v4.example.json"
+    config = security.load_config_v4(template)
+    assert config["schema"] == security.PERSONAL_V4_SCHEMA
+    assert config["account_mode"] == security.PERSONAL_V4_MODE
+    assert config["broker_identity"] == config["transport_identity"]
+    assert config["enabled"] is False
+    assert config["broker_identity"] == security.PERSONAL_SID_PLACEHOLDER
+    with pytest.raises(c.Denied):
+        security.load_config(template)  # legacy v3 loader must reject personal
+    for mutation in (
+        {"enabled": True},
+        {"account_mode": "ISOLATED_ACCOUNTS"},
+        {"broker_identity": "S-1-5-18", "transport_identity": "S-1-5-18"},
+        {"broker_identity": "S-1-5-21-100", "transport_identity": "S-1-5-21-200"},
+        {"broker_identity": "ci-identity", "transport_identity": "ci-identity"},
+        {"trusted_owners": [security.PERSONAL_SID_PLACEHOLDER]},
+        {"untrusted_identities": [security.PERSONAL_SID_PLACEHOLDER]},
+        {"schema": "hostops.config.v4"},  # account_mode is forbidden in legacy
+        {"source_repository": c.CONTROL_REPOSITORY},
+        {"control_repository": c.SOURCE_REPOSITORY},
+        {"policy_dir": "//other-host/secrets"},
+        {"endpoint": "\\\\remote-host\\pipe\\unsafe"},
+        {"unexpected_key": True},
+    ):
+        with pytest.raises(c.Denied):
+            security._validate_v4_config_dict({**config, **mutation})
+    # A real current-looking SID can be used in a *disabled* personal PLAN;
+    # configuring the correct SID alone cannot enable a broker.
+    valid_sid = "S-1-5-21-12345-67890-13579-1001"
+    local = {**config, "broker_identity": valid_sid, "transport_identity": valid_sid}
+    assert security._validate_v4_config_dict(local) == local
+    with pytest.raises(c.Denied, match="PERSONAL_MODE_NOT_ENROLLED"):
+        security._validate_v4_config_dict({**local, "enabled": True})
+    with pytest.raises(c.Denied, match="PERSONAL_MODE_NOT_ENROLLED"):
+        security.admit_v4(local, template)
+    with pytest.raises(c.Denied, match="PERSONAL_MODE_NOT_ENROLLED"):
+        broker.serve_v4(template, once=True)
+    with pytest.raises(c.Denied, match="PERSONAL_MODE_NOT_ENROLLED"):
+        transport.submit_v4(local, b"not-a-valid-envelope")
+    with pytest.raises(c.Denied, match="PERSONAL_MODE_NOT_ENROLLED"):
+        transport.poll_once_v4(None, local, {}, 1, 1)
+    with pytest.raises(c.Denied, match="PERSONAL_MODE_NOT_ENROLLED"):
+        transport.poll_inbox_v4(None, local, {})
+
+
+def test_v4_legacy_two_account_contract_rejects_equal_sid(h):
+    cfg = _v4_config(h)
+    assert cfg["schema"] == "hostops.config.v4"
+    assert "account_mode" not in cfg
+    with pytest.raises(c.Denied, match="IDENTITIES_NOT_ISOLATED"):
+        security._validate_v4_config_dict(
+            {**cfg, "transport_identity": cfg["broker_identity"]})
 
 
 def test_v4_load_config_and_admit_v4_isolation_and_fail_closed(h, monkeypatch):
@@ -1083,7 +1147,7 @@ def test_v4_load_config_and_admit_v4_isolation_and_fail_closed(h, monkeypatch):
             security.load_config_v4(p)
     example_cfg = security.load_config_v4(ROOT / "config/hostops-v3/config-v4.example.json")
     assert example_cfg["enabled"] is False
-    with pytest.raises(c.Denied, match="KILL_SWITCH"):
+    with pytest.raises(c.Denied, match="PERSONAL_MODE_NOT_ENROLLED"):
         security.admit_v4(example_cfg, v4_path)
     with pytest.raises(c.Denied, match="VERIFIER_UNVERIFIED"):
         security.admit_v4({**cfg, "ssh_keygen_sha256": "0" * 64}, v4_path)
