@@ -142,7 +142,7 @@ def _personal_remote_once(args):
         head = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
                               capture_output=True, text=True, timeout=8, check=False)
         dirty = subprocess.run(["git", "-C", str(root), "status", "--porcelain",
-                                "--untracked-files=no"], capture_output=True,
+                                "--untracked-files=all"], capture_output=True,
                                text=True, timeout=8, check=False)
     except (OSError, subprocess.TimeoutExpired):
         deny("LOCAL_SOURCE_UNVERIFIED")
@@ -153,7 +153,10 @@ def _personal_remote_once(args):
         deny("LOCAL_SOURCE_UNVERIFIED")
     from .transport import ControlGitHub
     # Do not pass the token in argv or environment and do not save to a file.
-    credential = getpass.getpass("Private GitHub Issues token (not shown): ")
+    try:
+        credential = getpass.getpass("Private GitHub Issues token (not shown): ")
+    except (EOFError, KeyboardInterrupt):
+        deny("TOKEN_UNAVAILABLE")
     if not credential or len(credential) > 512 or any(ord(c) < 33 or ord(c) > 126 for c in credential):
         deny("TOKEN_UNAVAILABLE")
     api = ControlGitHub(credential)
