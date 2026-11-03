@@ -1954,3 +1954,67 @@ def test_w1_custody_never_self_attests_unattended_access():
                   {**base, "unexpected": True}):
         with pytest.raises(c.Denied):
             classify_custody_claim(wrong)
+
+
+# W1.3 Windows-only native fixture tests, never real machine-control enrollment.
+@pytest.mark.skipif(os.name != "nt", reason="Windows native NtCreateFile required")
+def test_w1_native_fixture_real_ed25519_intent_and_one_create(h, tmp_path):
+    from ai_commerce.hostops_v3 import filesystem as fs
+    from ai_commerce.hostops_v3.journal import OfflineW1IntentLedger
+    proposal, verify_kwargs = _personal_w1_signed_fixture(h)
+    leaf = proposal["parameters"]["filename"]
+    content = proposal["parameters"]["content_utf8"]
+    assert not (h.data / leaf).exists()
+    root_id = fs.w1_windows_root_identity(h.data)
+    assert sorted(root_id) == ["file_index_hex", "volume_serial_hex"]
+    with OfflineW1IntentLedger(tmp_path / "native-intent.sqlite3") as ledger:
+        intent = ledger.record_verified_proposal(proposal, **verify_kwargs)
+        assert intent["status"] == "INTENT_STAGED_NO_EFFECT"
+        receipt = fs.w1_windows_native_create_fixture(h.data, root_id, leaf, content)
+        assert receipt["status"] == "NATIVE_FIXTURE_CREATE_VERIFIED"
+        assert receipt["content_sha256"] == c.digest(content.encode("utf-8"))
+        assert receipt["real_host_attested"] is False
+        assert receipt["remote_write_enabled"] is False
+        assert (h.data / leaf).read_text(encoding="utf-8") == content
+        assert ledger.record_verified_proposal(proposal, **verify_kwargs)["status"] == "HOLD_REPLAY_UNKNOWN"
+        with pytest.raises(c.Denied, match="W1_NATIVE_ALREADY_EXISTS"):
+            fs.w1_windows_native_create_fixture(h.data, root_id, leaf, content)
+        assert (h.data / leaf).read_text(encoding="utf-8") == content
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native NtCreateFile required")
+def test_w1_native_fixture_mismatched_root_pins_and_bad_leaves_fail_closed(h):
+    from ai_commerce.hostops_v3 import filesystem as fs
+    root_id = fs.w1_windows_root_identity(h.data)
+    invalid_root = {**root_id, "file_index_hex": "0" * 16}
+    with pytest.raises(c.Denied, match="W1_NATIVE_ROOT_MISMATCH"):
+        fs.w1_windows_native_create_fixture(h.data, invalid_root, "safe.txt", "safe")
+    with pytest.raises(c.Denied, match="W1_NATIVE_ROOT_UNPINNED"):
+        fs.w1_windows_native_create_fixture(h.data, {}, "safe.txt", "safe")
+    for leaf in ("..\\escape.txt", "CON.txt", "x.txt:ads", "outside.exe", "foo/bar.txt", "bad name.txt"):
+        with pytest.raises(c.Denied, match="W1_NATIVE_FILENAME_DENIED"):
+            fs.w1_windows_native_create_fixture(h.data, root_id, leaf, "test")
+    assert not (h.data / "safe.txt").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native NtCreateFile required")
+def test_w1_native_fixture_content_bounds_and_non_root_path(h):
+    from ai_commerce.hostops_v3 import filesystem as fs
+    root_id = fs.w1_windows_root_identity(h.data)
+    for data in ("", "a" * 2049, "\x00", "\ud800"):
+        with pytest.raises(c.Denied, match="W1_NATIVE_CONTENT_DENIED"):
+            fs.w1_windows_native_create_fixture(h.data, root_id, "bad.txt", data)
+    with pytest.raises(c.Denied):
+        fs.w1_windows_native_create_fixture(
+            h.data / ".." / "unapproved", root_id, "bad.txt", "test")
+    assert not (h.data / "bad.txt").exists()
+
+
+def test_w1_native_fixture_has_no_remote_cli_or_runner_registration(h):
+    from ai_commerce.hostops_v3 import cli, worker, transport
+    from ai_commerce.hostops_v3 import filesystem as fs
+    assert not hasattr(cli, "w1_windows_native_create_fixture")
+    assert not hasattr(worker.Worker, "w1_windows_native_create_fixture")
+    assert not hasattr(transport, "w1_windows_native_create_fixture")
+    # No script execution or Windows effects from importing the primitive.
+    assert callable(fs.w1_windows_native_create_fixture)
