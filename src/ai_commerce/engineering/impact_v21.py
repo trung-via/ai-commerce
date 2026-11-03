@@ -438,21 +438,37 @@ def verified_onboarding_binding(
         if original.returncode:
             return False
         base_paths = [x.decode("utf-8") for x in original.stdout.split(bytes([0])) if x]
-        candidate = json.loads((workspace / path).read_text(encoding="utf-8"))
         old_groups = approved_groups()
-        admission = validate_component_onboarding_manifest(
-            candidate, manifest_path=path,
-            changed_paths=changed_paths, base_paths=base_paths,
-            existing_groups=old_groups, allowed_paths=allowed_paths, root=workspace)
-        if binding["onboarding_manifest_sha256"] != admission["manifest_sha256"]:
+        baseline_records = load_baseline_component_owner_records(
+            root=workspace, base_sha=base_sha, existing_groups=old_groups)
+        baseline_by_path = {item["manifest_path"]: item for item in baseline_records}
+        if path in baseline_by_path:
+            if path in changed_paths:
+                return False
+            record = baseline_by_path[path]
+            group = record["group"]
+            digest = record["manifest_sha256"]
+        else:
+            candidate = json.loads((workspace / path).read_text(encoding="utf-8"))
+            admission = validate_component_onboarding_manifest(
+                candidate, manifest_path=path,
+                changed_paths=changed_paths, base_paths=base_paths,
+                existing_groups=(*old_groups, *(item["group"] for item in baseline_records)),
+                allowed_paths=allowed_paths, root=workspace)
+            digest = admission["manifest_sha256"]
+            group = TestGroup(
+                admission["name"], admission["tests"], admission["acs"], admission["paths"],
+                admission["consumers"], (*admission["contracts"], path))
+        if binding["onboarding_manifest_sha256"] != digest:
             return False
-        group = TestGroup(
-            admission["name"], admission["tests"], admission["acs"], admission["paths"],
-            admission["consumers"], (*admission["contracts"], path))
         if expected_group is not None and expected_group != group.name:
             return False
+        baseline_groups = tuple(item["group"] for item in baseline_records)
+        groups = (*old_groups, *baseline_groups)
+        if path not in baseline_by_path:
+            groups = (*groups, group)
         plan = select_impact(
-            root=workspace, changed_paths=changed_paths, groups=(*old_groups, group),
+            root=workspace, changed_paths=changed_paths, groups=groups,
             base_sha=base_sha)
         if not plan.runnable or group.name not in plan.selected_groups:
             return False
