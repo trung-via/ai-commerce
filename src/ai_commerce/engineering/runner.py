@@ -817,7 +817,11 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         inv.update(status="VERIFICATION_FAILED", error_code="TARGETED_VERIFY_NONZERO_OR_UNAVAILABLE")
         if mt_context is not None and check.returncode == 5:
             inv.update(status="UNPROVEN", error_code="MT01_COVERAGE_UNPROVEN")
-        if check.returncode < 0 or check.returncode >= 128 or (
+        worker_receipt_unproven = (mt_context is not None and check.returncode == 3 and
+            any(group.get("reason") == "PYTEST_WORKER_COUNT_MISMATCH" for group in plan["groups"]))
+        if worker_receipt_unproven:
+            inv.update(status="UNPROVEN", error_code="PYTEST_WORKER_COUNT_UNPROVEN")
+        elif check.returncode < 0 or check.returncode >= 128 or (
                 _is_pytest(verify_argv) and check.returncode in (2, 3)):
             inv.update(status="EXECUTION_UNKNOWN", error_code="VERIFY_INTERRUPTED_OR_INTERNAL_ERROR")
     except FileNotFoundError as exc:
