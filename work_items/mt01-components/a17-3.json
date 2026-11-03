@@ -1,0 +1,29 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "a17-3",
+  "sources": [
+    "src/ai_commerce/channel_adapters/__init__.py",
+    "src/ai_commerce/channel_adapters/capability.py",
+    "src/ai_commerce/channel_adapters/direct_post.py",
+    "src/ai_commerce/channel_adapters/multichannel.py",
+    "src/ai_commerce/channel_adapters/schemas.py"
+  ],
+  "tests": [
+    "tests/test_a17_direct_post_adapter.py",
+    "tests/test_a17_multichannel.py"
+  ],
+  "acs": [
+    "A17.D07.D08.offline-capability-gated-adapters"
+  ],
+  "consumers": [
+    "src/ai_commerce/distribution/evaluator.py",
+    "src/ai_commerce/distribution/model.py",
+    "src/ai_commerce/distribution/receipt.py",
+    "src/ai_commerce/distribution_intelligence/reconciliation.py",
+    "src/ai_commerce/distribution_intelligence/dashboard.py"
+  ],
+  "contracts": [
+    "contracts/DirectPostAdapter.v1.schema.json",
+    "contracts/ChannelAdapterCatalog.v1.schema.json"
+  ]
+}

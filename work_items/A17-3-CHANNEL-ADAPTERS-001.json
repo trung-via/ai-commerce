@@ -1,0 +1,55 @@
+{
+  "work_id": "A17-3-CHANNEL-ADAPTERS-001",
+  "action_id": "A17-3-D07-D08-FRESH-IMPLEMENTATION-01",
+  "source_sha": "f818b187bdc6287a6d0ef93f053f625dab63ec73",
+  "status": "OFFLINE_IMPLEMENTED_VERIFICATION_RECEIPT_REQUIRED",
+  "objective": "Provider-neutral offline capability gates, synthetic receipts and isolated multichannel projections",
+  "source_decision": [
+    "https://github.com/trung-via/ai-commerce/issues/272",
+    "https://github.com/trung-via/ai-commerce/issues/270"
+  ],
+  "product_acceptance_reference": "https://github.com/trung-via/ai-commerce/issues/276",
+  "fresh_implementation": true,
+  "owner_manifest": "work_items/mt01-components/a17-3.json",
+  "verification_profile": "mt01-component-onboarding",
+  "acceptance": [
+    "A17.D07.D08.offline-capability-gated-adapters"
+  ],
+  "allowed_paths": [
+    "src/ai_commerce/channel_adapters/__init__.py",
+    "src/ai_commerce/channel_adapters/capability.py",
+    "src/ai_commerce/channel_adapters/direct_post.py",
+    "src/ai_commerce/channel_adapters/multichannel.py",
+    "src/ai_commerce/channel_adapters/schemas.py",
+    "contracts/DirectPostAdapter.v1.schema.json",
+    "contracts/ChannelAdapterCatalog.v1.schema.json",
+    "tests/test_a17_direct_post_adapter.py",
+    "tests/test_a17_multichannel.py",
+    "work_items/mt01-components/a17-3.json",
+    "work_items/A17-3-CHANNEL-ADAPTERS-001.json",
+    "docs/engineering/A17_3_IMPLEMENTATION_REPORT.md"
+  ],
+  "consumer_owners": [
+    "a07",
+    "a08",
+    "a17-2"
+  ],
+  "repair_round_limit": 2,
+  "delivery_authority": "EF02_WORKER_ONLY_AFTER_INDEPENDENT_VERIFIED_PASS",
+  "executor_git_writes": false,
+  "live_integration": "DEFERRED_ENTITLEMENT_AND_SEPARATE_HUMAN_AUTHORIZATION",
+  "verification": {
+    "receipt_authority": "Registered controller results, independent EF01/EF02 replay, exact-file hashes, JUnit and MT01_XDIST_WORKERS_COLLECTED; no historical verification is reused.",
+    "source_status": "Read the new frozen-tree receipt; this data record does not predeclare PASS.",
+    "candidate_sha": null,
+    "hosted_ubuntu_windows_ci": "PENDING_SEPARATE_EXACT_PR_HEAD",
+    "brain_review": "PENDING_INDEPENDENT_REVIEW"
+  },
+  "scope_limits": [
+    "No live transport or provider clients",
+    "No A07/A08/A15/D05 native writes",
+    "Process-local synthetic replay custody only; not a durable publication journal",
+    "Synthetic metrics are supplied fixtures, not measured audience or financial outcomes",
+    "Human marker is an unverified proposal, not authenticated authorization"
+  ]
+}
