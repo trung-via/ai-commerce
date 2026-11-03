@@ -20,6 +20,14 @@ CONTROL_TESTS = {
     ".github/workflows/ef02-tests.yml": (
         "tests/test_minimum_test.py", "tests/test_pr_merge_gate.py",
     ),
+    ".github/workflows/a06-e01.yml": ("tests/test_a06_e01.py",),
+    ".github/workflows/a07-capability.yml": ("tests/test_a07_capability.py",),
+    ".github/workflows/a08-distribution.yml": ("tests/test_a08_distribution.py",),
+    ".github/workflows/a10-opportunity.yml": ("tests/test_a10_m01.py",),
+    ".github/workflows/ef02-reconcile-evidence.yml": ("tests/test_ef02.py",),
+    ".github/workflows/ef02-watch.yml": ("tests/test_ef02.py",),
+    ".github/workflows/hostops-ci.yml": ("tests/test_hostops_request.py",),
+    ".github/workflows/hostops-v2-ci.yml": ("tests/test_hostops_v2.py",),
     ".github/scripts/mt01_v21_proof.py": (
         "tests/test_pr_merge_gate.py", "tests/test_mt01_v21.py",
     ),
