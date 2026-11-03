@@ -49,8 +49,9 @@ def _verified_receipt_evidence(report: dict, *, root: Path, workspace: Path,
             return False
         for index, group in enumerate(groups):
             binding = group["binding"]
-            approved_argv = binding["argv"] in profiles.values()
-            if not approved_argv and binding.get("registered_profile") == "mt01-component-onboarding":
+            onboarding_claim = binding.get("registered_profile") == "mt01-component-onboarding"
+            approved_argv = binding["argv"] in profiles.values() and not onboarding_claim
+            if onboarding_claim:
                 from ai_commerce.engineering.impact_v21 import verified_onboarding_binding
                 approved_argv = verified_onboarding_binding(
                     workspace=workspace, binding=binding,
