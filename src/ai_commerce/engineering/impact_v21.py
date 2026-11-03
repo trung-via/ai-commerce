@@ -669,8 +669,12 @@ def registered_action_plan(
     required = set(required_acs)
     unknown_acs = sorted(required - known_acs)
     unselected_acs = sorted((required & known_acs) - selected_acs)
-    if unknown_acs:
-        problems.extend("AC_UNMAPPED:" + ac for ac in unknown_acs)
+    # A previously unregistered AC is a product-review question, not a
+    # reason to skip independently selected and registered source tests.
+    # Retain its exact identity in the immutable verification receipt; Brain
+    # may adopt it at review without replaying a determinate executor result.
+    # An already-known AC owned by an unselected group remains a hard HOLD.
+    pending_brain_acs = list(unknown_acs)
     if unselected_acs:
         problems.extend("AC_REQUIRED_GROUP_NOT_SELECTED:" + ac for ac in unselected_acs)
     select_parallel = list(fallback_argv[-2:]) == ["-n", "12"]
@@ -769,9 +773,12 @@ def registered_action_plan(
         "changed_paths": sorted(set(changed_paths)),
         "affected_paths": list(impact.affected_paths),
         "unknown_acs": unknown_acs,
+        "pending_brain_acs": pending_brain_acs,
+        "ac_adoption_state": "PENDING_BRAIN_REVIEW" if pending_brain_acs else "REGISTERED",
         "unknown_tests": [p for p in impact.missing_mapping if "TEST" in p],
         "unknown_consumers": [p for p in impact.missing_mapping if "SOURCE" in p or "IMPORT" in p],
-        "reason_codes": list(impact.reason_codes) + list(problems),
+        "reason_codes": list(impact.reason_codes) + list(problems) +
+                        ["AC_PENDING_BRAIN_REVIEW:" + ac for ac in pending_brain_acs],
         "unsupported_paths": [],
         "consumer_map": {g.name: g.mapping() for g in groups if g.name in impact.selected_groups},
         "selected_groups": list(impact.selected_groups),
