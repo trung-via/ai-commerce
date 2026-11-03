@@ -1441,7 +1441,7 @@ def test_personal_r2_supervised_session_requires_presence_per_issue_and_has_no_w
     """Human-entered ephemeral token + exact consent for each fixed inventory."""
     import builtins
     import sys as sysmod
-    from ai_commerce.hostops_v3 import personal_session as session
+    from ai_commerce.hostops_v3 import cli as session
     sid = "S-1-5-21-12345-67890-13579-1001"
     cfg = security.load_config_v4(ROOT / "config/hostops-v3/config-v4.example.json")
     cfg["broker_identity"] = cfg["transport_identity"] = sid
@@ -1516,7 +1516,7 @@ def test_personal_r2_session_fails_closed_for_invalid_context_and_consent(
         tmp_path, monkeypatch):
     import builtins
     import sys as sysmod
-    from ai_commerce.hostops_v3 import personal_session as session
+    from ai_commerce.hostops_v3 import cli as session
     sid = "S-1-5-21-12345-67890-13579-1001"
     cfg = security.load_config_v4(ROOT / "config/hostops-v3/config-v4.example.json")
     cfg["broker_identity"] = cfg["transport_identity"] = sid
