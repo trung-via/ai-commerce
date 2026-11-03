@@ -499,6 +499,82 @@ def candidate_onboarding_groups(
     return tuple(results)
 
 
+def load_baseline_component_owner_records(
+    *, root: Path, base_sha: str, existing_groups: Sequence,
+) -> tuple[dict, ...]:
+    """Load persisted reviewed owners ONLY from immutable Git base, never
+    newly supplied candidate manifest declarations.
+
+    A component's first PR must pass protected manifest admission. In later
+    PRs its committed owner remains available for scoped tests without a
+    second preregistration PR or mutable Python registry modification.
+    """
+    import json
+    import re
+    import subprocess
+    from .minimum_test import TestGroup
+
+    root = root.resolve()
+    if not (root / ".git").exists():
+        return ()
+    if type(base_sha) is not str or not re.fullmatch(r"[0-9a-f]{40}", base_sha):
+        raise ValueError("ONBOARD_BASE_SHA_UNPROVEN")
+    def git(*argv: str) -> bytes:
+        try:
+            process = subprocess.run(["git", *argv], cwd=root, timeout=30,
+                                     check=False, capture_output=True)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ValueError("ONBOARD_BASE_TREE_UNAVAILABLE") from exc
+        if process.returncode:
+            raise ValueError("ONBOARD_BASE_TREE_UNAVAILABLE")
+        return process.stdout
+    base_paths = {p.decode("utf-8") for p in
+                  git("ls-tree", "-r", "--name-only", "-z", base_sha).split(bytes([0])) if p}
+    manifests = sorted(p for p in base_paths
+                       if p.startswith("work_items/mt01-components/"))
+    if len(manifests) > 8:
+        raise ValueError("ONBOARD_BASELINE_OWNER_LIMIT")
+    accepted = []
+    groups = tuple(existing_groups)
+    for path in manifests:
+        if not path.endswith(".json"):
+            raise ValueError("ONBOARD_BASELINE_UNKNOWN_OWNER_FILE")
+        raw = git("show", f"{base_sha}:{path}")
+        if len(raw) > 32768:
+            raise ValueError("ONBOARD_BASELINE_MANIFEST_TOO_LARGE")
+        target = root / path
+        if not target.is_file() or target.is_symlink():
+            raise ValueError("ONBOARD_BASELINE_MANIFEST_MISSING")
+        actual = target.read_bytes()
+        if raw != actual and actual.replace(bytes([13, 10]), bytes([10])) != raw:
+            raise ValueError("ONBOARD_BASELINE_MANIFEST_DRIFT")
+        try:
+            data = json.loads(raw.decode("utf-8-sig"))
+        except (ValueError, UnicodeError) as exc:
+            raise ValueError("ONBOARD_BASELINE_MANIFEST_INVALID") from exc
+        if type(data) is not dict:
+            raise ValueError("ONBOARD_BASELINE_MANIFEST_SHAPE")
+        owned = (path, *data.get("sources", ()), *data.get("tests", ()),
+                 *data.get("contracts", ()))
+        if not set(owned) <= base_paths:
+            raise ValueError("ONBOARD_BASELINE_OWNER_FILES_NOT_COMMITTED")
+        # Reuse the same strict data parser on a synthetic *baseline*
+        # registration review. No candidate-changed path is introduced.
+        checked = validate_component_onboarding_manifest(
+            data, manifest_path=path, changed_paths=owned,
+            base_paths=tuple(p for g in groups for p in
+                             (*g.paths, *g.tests, *g.consumers, *g.contracts)),
+            existing_groups=groups, allowed_paths=owned, root=root)
+        group = TestGroup(
+            checked["name"], checked["tests"], checked["acs"],
+            checked["paths"], checked["consumers"],
+            (*checked["contracts"], path))
+        accepted.append({"group": group, "manifest_path": path,
+                         "manifest_sha256": checked["manifest_sha256"]})
+        groups = (*groups, group)
+    return tuple(accepted)
+
+
 def registered_action_plan(
     *, repo: Path, base_sha: str, base_files, candidate_files,
     changed_paths: Sequence[str], required_acs: Sequence[str], fallback_argv,
