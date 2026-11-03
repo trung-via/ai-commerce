@@ -41,7 +41,7 @@ $state = [ordered]@{
     account_mode = 'ISOLATED_ACCOUNTS'
     single_user_mode_configured = $false
     single_user_sid_observed = $false
-    native_single_user_token_inspected = $false
+    native_single_user_identity_inspected = $false
     single_user_current_sid_match = $false
     single_user_runtime_enrolled = $false
     distinct_non_admin_sid_configured = $false
@@ -207,7 +207,7 @@ if ($NativeReadOnly) {
         if (-not $state.single_user_current_sid_match) {
             $reasons.Add('SINGLE_USER_CURRENT_SID_UNPROVEN')
         }
-        $state.native_single_user_token_inspected = $state.single_user_sid_observed
+        $state.native_single_user_identity_inspected = $state.single_user_sid_observed
         $reasons.Add('PERSONAL_RUNTIME_NOT_ENROLLED')
     } elseif (-not ($state.windows -and $state.caller_non_elevated -and
               $state.config_schema_valid -and $state.distinct_non_admin_sid_configured -and
