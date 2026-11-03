@@ -25,7 +25,7 @@ from .git import git_argv, resolve_git_executable
 from .git_byte_consistency import GitByteConsistencyError, stabilize_candidate_newlines_before_verify
 from .minimum_test import file_hashes
 from .source_safety import checked_path, protected_change, is_link
-from .verification import execute_plan
+from .verification import execute_plan, pytest_observation_env, observed_xdist_workers
 from .pytest_profile import host_capacity, profile_command, worker_decision, xdist_available, require_managed_parallelism
 
 
@@ -786,19 +786,34 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
             inv["actual_verify_argv"] = actual_argv
             check = subprocess.run(actual_argv, cwd=repo, capture_output=True,
                                    text=True, encoding="utf-8", errors="replace",
-                                   timeout=inv["verify_timeout_seconds"], check=False)
+                                   timeout=inv["verify_timeout_seconds"], check=False,
+                                   env=pytest_observation_env() if _is_pytest(actual_argv) else None)
         inv.update(verify_exit_code=check.returncode, verify_completed=True)
         vout, verr = check.stdout.encode("utf-8"), check.stderr.encode("utf-8")
-        observed = re.search(rb"\b([0-9]+) workers \[|created:\s*([0-9]+)/[0-9]+ workers", vout)
-        inv["observed_pytest_workers"] = int(observed[1] or observed[2]) if observed else None
         if mt_context is None:
-            decision.update(workers_actual=inv["observed_pytest_workers"],
-                            observed_workers=inv["observed_pytest_workers"],
-                            execution_status="12_WORKERS_EXECUTED" if inv["observed_pytest_workers"] == 12
-                            else "12_WORKERS_NOT_EXECUTED" if decision["workers"] == 0
+            observed = observed_xdist_workers(vout)
+            inv["observed_pytest_workers"] = observed
+            inv["workers_actual"] = observed
+            inv["worker_count_provenance"] = (
+                "XDIST_CONTROLLER_COLLECTION_HOOK" if observed is not None else "UNOBSERVED")
+            decision.update(workers_actual=observed, observed_workers=observed,
+                            worker_count_provenance=inv["worker_count_provenance"],
+                            execution_status="12_WORKERS_EXECUTED" if observed == 12 and decision["workers"] == 12
+                            else "SERIAL_PYTEST_EXECUTED" if observed == 0 and decision["workers"] == 0
                             else "WORKER_COUNT_UNPROVEN")
         else:
             inv["pytest_profiles"] = {entry["group"]: entry.get("pytest_profile") for entry in plan["groups"]}
+            executed = [entry for entry in plan["groups"] if entry.get("actual_exit_code") is not None]
+            inv["workers_actual_by_group"] = {
+                entry["group"]: entry.get("workers_actual") for entry in executed}
+            # Multiple sequential verification groups do not represent a
+            # single concurrent worker count; keep each group's own receipt.
+            inv["observed_pytest_workers"] = (
+                executed[0].get("workers_actual") if len(executed) == 1 else None)
+            inv["workers_actual"] = inv["observed_pytest_workers"]
+            inv["worker_count_provenance"] = (
+                executed[0].get("worker_count_provenance") if len(executed) == 1
+                else "PER_GROUP_ONLY" if executed else "NOT_EXECUTED")
         inv.update(status="VERIFICATION_FAILED", error_code="TARGETED_VERIFY_NONZERO_OR_UNAVAILABLE")
         if mt_context is not None and check.returncode == 5:
             inv.update(status="UNPROVEN", error_code="MT01_COVERAGE_UNPROVEN")
@@ -846,6 +861,10 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         elif not inv["provider_return_determinate"]:
             # A verifier success cannot reconcile an incomplete provider return.
             inv.update(status="EXECUTION_UNKNOWN", error_code="EXECUTOR_OUTCOME_UNCONFIRMED")
+        elif (inv["verify_exit_code"] == 0 and mt_context is None and
+              _is_pytest(verify_argv) and decision["workers"] == 12 and
+              inv.get("workers_actual") != 12):
+            inv.update(status="UNPROVEN", error_code="PYTEST_WORKER_COUNT_UNPROVEN")
         elif inv["verify_exit_code"] == 0:
             if final["scope_valid"]:
                 inv.update(status="BUILD_VERIFIED_FOR_SCOPE", error_code=None)
