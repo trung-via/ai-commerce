@@ -241,7 +241,7 @@ def choose(root: Path, *, event: str, base: str, paths: set[str] | None = None,
 
 
 
-# Only exact, independently successful matrix PR runs can be reused on a
+# Only exact, independently successful Windows PR runs can be reused on a
 # byte-identical merge tree. Network/permission/lineage ambiguity fails to full.
 WORKFLOW_FILE = ".github/workflows/ef02-tests.yml"
 
@@ -298,7 +298,7 @@ def postmerge_reuse(*, repo: Path, event: str, branch: str, current_sha: str,
             jobs = request(origin + f"/actions/runs/{run_id}/jobs?per_page=100").get("jobs")
             if not isinstance(jobs, list):
                 continue
-            matrix = {"tests (ubuntu-latest)": False, "tests (windows-latest)": False}
+            matrix = {"tests (windows-latest)": False}
             for job in jobs:
                 name = job.get("name")
                 steps = job.get("steps")
@@ -315,8 +315,8 @@ def postmerge_reuse(*, repo: Path, event: str, branch: str, current_sha: str,
                         job.get("conclusion") == "success" and pytest_pass and node_pass):
                     matrix[name] = True
             if all(matrix.values()):
-                return True, "EXACT_TREE_AND_BOTH_OS_PR_CI_VERIFIED", str(run_id)
-        return False, "NO_BOTH_OS_SUCCESSFUL_EXACT_HEAD_PR_RUN", ""
+                return True, "EXACT_TREE_AND_WINDOWS_PR_CI_VERIFIED", str(run_id)
+        return False, "NO_WINDOWS_SUCCESSFUL_EXACT_HEAD_PR_RUN", ""
     except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired,
             TimeoutError, KeyError, TypeError, json.JSONDecodeError) as exc:
         # Never print API tokens or response bodies in CI.

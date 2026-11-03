@@ -1349,9 +1349,9 @@ def test_provisional_pass_still_runs_registered_full_suite(mapped, monkeypatch):
     assert plan_data["groups"][0]["binding"]["argv"] == [*FULL, "-n", "12"]
 
 
-# Issue #209: CI must reuse exact-tree, two-OS trustworthy PR evidence
+# Issue #209: CI must reuse exact-tree, Windows trustworthy PR evidence
 # without confusing a successful GitHub wrapper for tests actually executed.
-def _mt01_verified_pr_proof(pr_ci_module, *, changed_tree=False, second_os=True,
+def _mt01_verified_pr_proof(pr_ci_module, *, changed_tree=False, windows_job_ok=True,
                             steps_complete=True, exact_head=True, event="push",
                             branch="refs/heads/main", token="test-only-token"):
     parent = "b" * 40
@@ -1373,10 +1373,8 @@ def _mt01_verified_pr_proof(pr_ci_module, *, changed_tree=False, second_os=True,
     def api(url):
         if "/jobs?" in url:
             return {"jobs": [
-                {"name": "tests (ubuntu-latest)", "status": "completed",
-                 "conclusion": "success", "steps": good_step},
                 {"name": "tests (windows-latest)", "status": "completed",
-                 "conclusion": "success" if second_os else "failure",
+                 "conclusion": "success" if windows_job_ok else "failure",
                  "steps": good_step if steps_complete else good_step[:1]},
             ]}
         return {"workflow_runs": [{
@@ -1389,18 +1387,18 @@ def _mt01_verified_pr_proof(pr_ci_module, *, changed_tree=False, second_os=True,
         repository="trung-via/ai-commerce", token=token, git_fn=git, api_fn=api)
 
 
-def test_pr_ci_postmerge_proof_skips_only_true_identical_two_os_run(pr_ci_module):
+def test_pr_ci_postmerge_proof_skips_only_true_identical_windows_run(pr_ci_module):
     allowed, reason, run = _mt01_verified_pr_proof(pr_ci_module)
     assert allowed is True
-    assert reason == "EXACT_TREE_AND_BOTH_OS_PR_CI_VERIFIED"
+    assert reason == "EXACT_TREE_AND_WINDOWS_PR_CI_VERIFIED"
     assert run == "111"
 
 
 @pytest.mark.parametrize("kwargs,reason", [
     ({"changed_tree": True}, "MERGE_TREE_DIFFERS_FROM_TESTED_PR"),
-    ({"second_os": False}, "NO_BOTH_OS_SUCCESSFUL_EXACT_HEAD_PR_RUN"),
-    ({"steps_complete": False}, "NO_BOTH_OS_SUCCESSFUL_EXACT_HEAD_PR_RUN"),
-    ({"exact_head": False}, "NO_BOTH_OS_SUCCESSFUL_EXACT_HEAD_PR_RUN"),
+    ({"windows_job_ok": False}, "NO_WINDOWS_SUCCESSFUL_EXACT_HEAD_PR_RUN"),
+    ({"steps_complete": False}, "NO_WINDOWS_SUCCESSFUL_EXACT_HEAD_PR_RUN"),
+    ({"exact_head": False}, "NO_WINDOWS_SUCCESSFUL_EXACT_HEAD_PR_RUN"),
     ({"event": "pull_request"}, "NON_MAIN_PUSH_OR_PR"),
     ({"branch": "refs/heads/feature"}, "NON_MAIN_PUSH_OR_PR"),
     ({"token": ""}, "MISSING_GITHUB_ACTION_TOKEN"),

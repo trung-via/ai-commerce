@@ -176,7 +176,9 @@ test('retired M0-R cancellation probe cannot bypass standard EF02 hosted authori
   assert.ok(validate.includes("data.pull_request || !data.title.startsWith('[EF02]')"));
   assert.ok(validate.includes("core.setOutput('issuer', data.user.login)"));
   assert.ok(validate.includes('python -m ai_commerce.remote validate'));
-  assert.ok(validate.includes('--issuer-login "$EF02_ISSUER" --owner-login "$EF02_OWNER"'));
+  assert.ok(validate.includes('--issuer-login "$env:EF02_ISSUER" --owner-login "$env:EF02_OWNER"'));
+  assert.ok(validate.includes("shell: pwsh"));
+  assert.ok(validate.includes("$validationExit = $LASTEXITCODE"));
   assert.ok(execute.includes("needs.validate.result == 'success'"));
   assert.ok(execute.includes('runs-on: [self-hosted, Windows, ai-commerce-ef02]'));
   assert.ok(execute.includes('python -m ai_commerce.remote run'));

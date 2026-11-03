@@ -13,18 +13,21 @@ jobs:
       github.event.repository.private == true &&
       github.event.issue.user.login == github.repository_owner &&
       startsWith(github.event.issue.title, '[HOSTOPS3] ')
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 3
     outputs:
       issue_number: ${{ steps.envelope.outputs.issue_number }}
       envelope_sha256: ${{ steps.envelope.outputs.envelope_sha256 }}
       status: QUEUED_UNVERIFIED
     steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
       - name: Capture bounded signed-envelope digest only
         id: envelope
-        shell: bash
+        shell: pwsh
         run: |
-          python3 - <<'PY'
+          $script = @'
           import hashlib, json, os
           def reject(*args):
               raise ValueError('HOSTOPS_V3_INVALID_ENVELOPE')
@@ -58,4 +61,7 @@ jobs:
               f.write('issue_number=' + str(number) + '\n')
               f.write('envelope_sha256=' + hashlib.sha256(canonical).hexdigest() + '\n')
           print('HOSTOPS_V3_QUEUED_UNVERIFIED')
-          PY
+          '@
+          Set-Content -Path hostops-v3-envelope.py -Value $script -Encoding utf8
+          python hostops-v3-envelope.py
+          exit $LASTEXITCODE

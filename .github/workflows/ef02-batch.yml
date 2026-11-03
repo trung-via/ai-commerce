@@ -29,7 +29,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'issues' && startsWith(github.event.issue.title, '[EF02]'))
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     outputs:
       issuer: ${{ steps.source.outputs.issuer }}
       issue_number: ${{ steps.source.outputs.issue_number }}
@@ -75,16 +75,12 @@ jobs:
           EF02_ISSUER: ${{ steps.source.outputs.issuer }}
           EF02_OWNER: ${{ github.repository_owner }}
           EF02_BRAIN_ISSUERS: ${{ vars.EF02_BRAIN_ISSUERS }}
-        shell: bash
+        shell: pwsh
         run: |
-          set +e
-          python -m ai_commerce.remote validate \
-            --request-file request.json --checkout . \
-            --issuer-login "$EF02_ISSUER" --owner-login "$EF02_OWNER" \
-            --brain-issuers "$EF02_BRAIN_ISSUERS" 2> ef02-validation.stderr
-          validation_exit=$?
-          cat ef02-validation.stderr >&2
-          exit "$validation_exit"
+          python -m ai_commerce.remote validate --request-file request.json --checkout . --issuer-login "$env:EF02_ISSUER" --owner-login "$env:EF02_OWNER" --brain-issuers "$env:EF02_BRAIN_ISSUERS" 2> ef02-validation.stderr
+          $validationExit = $LASTEXITCODE
+          if (Test-Path ef02-validation.stderr) { Get-Content ef02-validation.stderr | Out-Host }
+          exit $validationExit
       - name: Report hosted validation rejection to Issue
         if: ${{ failure() && steps.validation.outcome == 'failure' && steps.source.outputs.issue_number != '' }}
         uses: actions/github-script@v7
