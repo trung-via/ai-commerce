@@ -420,6 +420,12 @@ def _w1_attended_command(args):
     if (not W1_PROOF_STATE.is_dir() or W1_PROOF_STATE.is_symlink() or
             (W1_PROOF_STATE / "KILL").exists()):
         deny("W1_ATTENDED_STATE_OR_KILL")
+    # Reject Windows junction/reparse ancestors and pin the state directory
+    # identity across the human confirmation window.
+    state_identity = fs.w1_windows_root_identity(W1_PROOF_STATE)
+    ledger_path = W1_PROOF_STATE / "w1-intent.sqlite3"
+    if ledger_path.is_symlink():
+        deny("W1_ATTENDED_STATE_OR_KILL")
     request_path = Path(args.request_file)
     if (not request_path.is_absolute() or request_path.is_symlink() or
             not request_path.is_file() or request_path.stat().st_size > 16384):
@@ -460,10 +466,12 @@ def _w1_attended_command(args):
     # Recheck after human interaction: TTL, source, KILL and root identity.
     if ((W1_PROOF_STATE / "KILL").exists() or
             _clean_source_sha(Path(args.source_root)) != source_sha or
-            fs.w1_windows_root_identity(W1_PROOF_ROOT) != expected_identity):
+            fs.w1_windows_root_identity(W1_PROOF_ROOT) != expected_identity or
+            fs.w1_windows_root_identity(W1_PROOF_STATE) != state_identity or
+            ledger_path.is_symlink()):
         deny("W1_ATTENDED_STATE_CHANGED")
     auth.personal_w1_verify_offline(proposal, **verify)
-    with OfflineW1IntentLedger(W1_PROOF_STATE / "w1-intent.sqlite3") as ledger:
+    with OfflineW1IntentLedger(ledger_path) as ledger:
         staged = ledger.record_verified_proposal(proposal, **verify)
         if staged["status"] != "INTENT_STAGED_NO_EFFECT":
             deny("W1_ATTENDED_REPLAY_UNKNOWN")
