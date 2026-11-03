@@ -789,11 +789,15 @@ def test_v22_registered_action_onboards_new_component_without_companion_pr(tmp_p
         changed_paths=ctx["changed_paths"],
         required_acs=values["acs"], fallback_argv=profile,
         groups=ctx["existing_groups"],
-        registered_profiles={"mt01-component-onboarding": profile},
+        registered_profiles={
+            "mt01-component-onboarding": profile,
+            "mt01-prior-tests": ["python", "-m", "pytest",
+                                "tests/test_prior.py", "-q", "-n", "12"]},
         allowed_paths=ctx["allowed_paths"])
-    assert result["selected_groups"] == ["fresh"]
+    assert result["selected_groups"] == ["fresh", "prior"]
     assert result["unknown_acs"] == []
-    assert result["reason_codes"] == ["SCOPED_CONSUMER_CLOSURE"]
+    assert "ONBOARD_CONSUMER_OWNER_CLOSURE" in result["reason_codes"]
+    assert all(g["execute"] for g in result["groups"])
     selected = [g for g in result["groups"] if g["group"] == "fresh"]
     assert len(selected) == 1 and selected[0]["execute"]
     binding = selected[0]["binding"]
@@ -834,21 +838,21 @@ def test_v22_independent_baseline_oracle_requires_new_owner_tests(tmp_path):
     present = set(ctx["changed_paths"]) | set(ctx["base_paths"])
     plan = {
         "version": 2, "changed_paths": sorted(ctx["changed_paths"]),
-        "selected_groups": ["fresh"],
-        "selected_tests": ["tests/test_fresh_svc.py"],
+        "selected_groups": ["fresh", "prior"],
+        "selected_tests": ["tests/test_fresh_svc.py", "tests/test_prior.py"],
     }
     good, reasons = oracle["check_selection"](
         plan, base_groups=ctx["existing_groups"],
         candidate_groups=new_groups, changed_paths=set(ctx["changed_paths"]),
         present_paths=present)
     assert good, reasons
-    plan["selected_tests"] = []
+    plan["selected_tests"] = ["tests/test_fresh_svc.py"]
     good, reasons = oracle["check_selection"](
         plan, base_groups=ctx["existing_groups"],
         candidate_groups=new_groups, changed_paths=set(ctx["changed_paths"]),
         present_paths=present)
     assert not good
-    assert "REQUIRED_TEST_OMITTED:tests/test_fresh_svc.py" in reasons
+    assert "REQUIRED_TEST_OMITTED:tests/test_prior.py" in reasons
 
 
 def test_v22_independent_baseline_oracle_rejects_manifest_argv(tmp_path):
@@ -889,7 +893,10 @@ def test_v22_ef02_replays_dynamic_argv_against_immutable_git_baseline(tmp_path, 
     _, data, ctx = _v22_manifest_fixture(tmp_path)
     monkeypatch.setattr(mt, "approved_groups", lambda: ctx["existing_groups"])
     ingress = ["python", "-m", "pytest", "tests/test_mt01_v21.py", "-q", "-n", "12"]
-    profiles = {"mt01-component-onboarding": ingress}
+    profiles = {
+        "mt01-component-onboarding": ingress,
+        "mt01-prior-tests": ["python", "-m", "pytest",
+                            "tests/test_prior.py", "-q", "-n", "12"]}
     plan = registered_action_plan(
         repo=tmp_path, base_sha=base, base_files=baseline_files,
         candidate_files=mt.file_hashes(tmp_path),
