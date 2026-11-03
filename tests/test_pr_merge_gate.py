@@ -287,6 +287,46 @@ def test_merge_gate_v21_wrong_run_and_missing_artifact_denied(gate):
     assert not gate.verified_v21_artifacts({"artifacts": bad}, 200, "a" * 40)
 
 
+def test_mt01_junit_class_case_requires_exact_test_module_boundary(gate):
+    """Real unittest/pytest classnames must count; prefix-collision forgery must not."""
+    import io
+    import json
+    import hashlib
+    import zipfile
+
+    original = FakeGitHub(gate).read_artifact(1000)
+    with zipfile.ZipFile(io.BytesIO(original)) as z:
+        source = {n: z.read(n) for n in z.namelist()}
+
+    def rewritten(class_name):
+        payload = dict(source)
+        receipt = json.loads(payload["evidence.json"])
+        xml = payload["chunk-0.xml"].replace(
+            b'classname="tests.test_minimum_test"',
+            ('classname="' + class_name + '"').encode("ascii"))
+        assert xml != source["chunk-0.xml"]
+        receipt["chunks"][0]["junit_sha256"] = hashlib.sha256(xml).hexdigest()
+        receipt["chunks"][0]["observed_cases"] = [class_name + "::test_ok"]
+        payload["chunk-0.xml"] = xml
+        payload["evidence.json"] = json.dumps(receipt).encode()
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as z:
+            for path, content in payload.items():
+                z.writestr(path, content)
+        return buffer.getvalue()
+
+    kwargs = dict(expected_head="a" * 40, expected_base="b" * 40,
+                  os_name="ubuntu-latest",
+                  expected_changed_paths=("src/ai_commerce/product/identity.py",),
+                  required_test_files=("tests/test_minimum_test.py",))
+    assert gate.validate_receipt_zip(
+        rewritten("tests.test_minimum_test.TestRealClass"), **kwargs)
+    assert not gate.validate_receipt_zip(
+        rewritten("tests.test_minimum_test_evil.TestRealClass"), **kwargs)
+    assert not gate.validate_receipt_zip(
+        rewritten("tests.test_unrelated.TestRealClass"), **kwargs)
+
+
 def test_merge_gate_v21_rejects_uploaded_forged_receipt_bytes(gate):
     api = FakeGitHub(gate, ci="completed", tampered_artifact=True)
     verdict = gate.process(api, api.repo, _ci_event(gate))
