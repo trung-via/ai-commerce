@@ -94,6 +94,69 @@ def check_selection(plan: dict, *, base_groups: tuple, candidate_groups: tuple,
     return not reasons, tuple(reasons)
 
 
+def independently_reviewed_manifest_groups(
+    *, repo: Path, changed_paths: set[str], base_paths: set[str],
+    base_groups: tuple,
+) -> tuple:
+    """An independent stdlib baseline check, not candidate planner testimony."""
+    reviewed = []
+    old_names = {g.name for g in base_groups}
+    old_owned = {p for g in base_groups for p in _owned(g)}
+    requested = [p for p in changed_paths if p.startswith("work_items/mt01-components/")]
+    if len(requested) > 8:
+        raise ValueError("ONBOARD_TOO_MANY_MANIFESTS")
+    for path in sorted(requested):
+        if not path.endswith(".json") or path in base_paths:
+            raise ValueError("ONBOARD_MANIFEST_NOT_NEW")
+        data = json.loads((repo / path).read_text(encoding="utf-8"))
+        required = {"schema_version", "component", "sources", "tests",
+                    "acs", "consumers", "contracts"}
+        if type(data) is not dict or set(data) != required:
+            raise ValueError("ONBOARD_MANIFEST_UNTRUSTED_FIELDS")
+        name = data["component"]
+        if (type(name) is not str or not re.fullmatch(r"[a-z][a-z0-9_-]{1,63}", name)
+                or path != f"work_items/mt01-components/{name}.json"
+                or name in old_names
+                or data["schema_version"] != "MT01ComponentOwner.v1"):
+            raise ValueError("ONBOARD_MANIFEST_ID_OR_VERSION")
+        names = {}
+        for key in ("sources", "tests", "acs", "consumers", "contracts"):
+            values = data[key]
+            if (type(values) is not list or len(values) > 40
+                    or (key in {"sources", "tests", "acs"} and not values)
+                    or any(type(v) is not str or not v or len(v) > 240 for v in values)
+                    or len(values) != len(set(values))):
+                raise ValueError("ONBOARD_MANIFEST_INVALID_" + key)
+            names[key] = tuple(values)
+        sources, tests, acs = (names[k] for k in ("sources", "tests", "acs"))
+        consumers, contracts = names["consumers"], names["contracts"]
+        if (any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", a) for a in acs)
+                or any(not p.startswith("src/ai_commerce/") or not p.endswith(".py")
+                       or p.startswith(("src/ai_commerce/engineering/", "src/ai_commerce/remote/"))
+                       for p in sources)
+                or any(not re.fullmatch(r"tests/test_[A-Za-z0-9_]+\.py", p) for p in tests)
+                or any(not p.startswith("contracts/") or not p.endswith(".schema.json") for p in contracts)):
+            raise ValueError("ONBOARD_MANIFEST_INVALID_PATHS")
+        additions = set(sources) | set(tests)
+        if (additions & (base_paths | old_owned)
+                or not additions <= changed_paths
+                or any(p not in old_owned and p not in sources for p in consumers)
+                or any(p not in old_owned and p not in changed_paths for p in contracts)):
+            raise ValueError("ONBOARD_MANIFEST_OWNER_OR_CONSUMER_UNPROVEN")
+        for source in (*sources, *tests, *contracts):
+            file = repo / source
+            if not file.is_file() or file.is_symlink() or repo.resolve() not in file.resolve().parents:
+                raise ValueError("ONBOARD_MANIFEST_FILE_MISSING_OR_LINKED")
+        if not (repo / path).is_file() or (repo / path).is_symlink():
+            raise ValueError("ONBOARD_MANIFEST_LINKED")
+        reviewed.append(types.SimpleNamespace(
+            name=name, tests=tests, paths=sources, acs=acs, consumers=consumers,
+            contracts=(*contracts, path)))
+        old_names.add(name)
+        old_owned.update((*sources, *tests, *contracts, path))
+    return tuple(reviewed)
+
+
 def _git(root: Path, *args: str) -> bytes:
     return subprocess.run(
         ["git", "-C", str(root), *args], check=True,
@@ -163,8 +226,13 @@ def main() -> int:
             for p in (repo / branch).rglob("*.py") if p.is_file()
         }
         # Plan's path list must reflect all rename source+dest paths.
+        base_paths = set(_git(repo, "ls-tree", "-r", "--name-only", base).decode("utf-8").splitlines())
+        groups_from_manifest = independently_reviewed_manifest_groups(
+            repo=repo, changed_paths=changed_paths,
+            base_paths=base_paths, base_groups=groups_base)
         good, reasons = check_selection(
-            plan, base_groups=groups_base, candidate_groups=groups_candidate,
+            plan, base_groups=groups_base,
+            candidate_groups=(*groups_candidate, *groups_from_manifest),
             changed_paths=changed_paths, present_paths=paths)
         print("MT01_ORACLE_STATUS=" + ("PASS_BASELINE_CLOSURE" if good else "HOLD_COVERAGE"), flush=True)
         for reason in reasons:
