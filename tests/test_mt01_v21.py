@@ -1162,7 +1162,7 @@ def test_issue_ingress_and_skipped_cleanup_reviewed_safety_contract():
                 "hostops-v2.yml", "hostops-v3.yml"):
         called = (root / ".github/workflows" / old).read_text(encoding="utf-8")
         assert "  workflow_call:" in called
-        assert "  issues:\\n" not in called
+        assert "  issues:\n" not in called
 
     cleanup = (root / expected[1]).read_text(encoding="utf-8")
     for required in (
@@ -1171,7 +1171,7 @@ def test_issue_ingress_and_skipped_cleanup_reviewed_safety_contract():
         "allowed.get(run.path) !== run.event",
         "Date.parse(run.updated_at) > cutoff",
         "jobs.jobs.every(job =>", "job.conclusion === 'skipped'",
-        "artifacts.total_count !== 0", "const maxDeletes = 150",
+        "artifacts.total_count !== 0", "const maxDeletes = 500",
         "const dryRun = process.env.DRY_RUN === 'true'",
         "actions: write", "skipped-cleanup-receipt.json",
     ):
