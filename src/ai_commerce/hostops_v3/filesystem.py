@@ -430,6 +430,8 @@ def _w1_open_root(root):
     from ctypes import wintypes
     data = (wintypes.DWORD * 13)()
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel.CloseHandle.restype = wintypes.BOOL
     kernel.GetFileInformationByHandle.argtypes = (wintypes.HANDLE, ctypes.c_void_p)
     kernel.GetFileInformationByHandle.restype = wintypes.BOOL
     if not kernel.GetFileInformationByHandle(handle, ctypes.byref(data)):
@@ -452,7 +454,10 @@ def w1_windows_root_identity(root):
     calling this function from the untrusted public runner is not attestation.
     """
     handle, identity = _w1_open_root(root)
-    ctypes.WinDLL("kernel32").CloseHandle(handle)
+    kernel = ctypes.WinDLL("kernel32")
+    from ctypes import wintypes
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel.CloseHandle(handle)
     return identity
 
 
@@ -483,6 +488,8 @@ def w1_windows_native_create_fixture(root, expected_root_identity, filename, con
     root_handle, actual_identity = _w1_open_root(root)
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     from ctypes import wintypes
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel.CloseHandle.restype = wintypes.BOOL
     try:
         if actual_identity != expected_root_identity:
             deny("W1_NATIVE_ROOT_MISMATCH")
