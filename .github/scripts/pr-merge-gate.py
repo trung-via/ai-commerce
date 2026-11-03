@@ -478,6 +478,15 @@ def reviewed_coverage_for_changed_files(files: object, *, onboarded_groups=()):
     # Existing components inherit full reviewed owner/consumer obligations.
     groups = approved_groups()
     newly_owned = {}
+    for admission in onboarded_groups:
+        for consumer in admission.get("consumers", ()):
+            if consumer in admission["paths"]:
+                continue
+            owners = [g for g in groups if consumer in g.paths]
+            if not owners:
+                return None
+            for owner in owners:
+                required.update(owner.tests)
     for group in onboarded_groups:
         for path in (*group["paths"], *group["tests"], *group["contracts"]):
             newly_owned.setdefault(path, set()).update(group["tests"])
