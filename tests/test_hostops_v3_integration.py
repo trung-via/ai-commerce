@@ -1115,6 +1115,118 @@ def test_v4_personal_single_user_contract_is_explicit_disabled_and_non_downgrada
         transport.poll_inbox_v4(None, local, {})
 
 
+def test_personal_local_inspect_needs_local_console_matching_sid_and_consent(
+        tmp_path, monkeypatch, capsys):
+    """#293: real one-shot fixed local inventory, no remote transport/privilege."""
+    import builtins
+    import platform
+    import sys as system_sys
+
+    sid = "S-1-5-21-12345-67890-13579-1001"
+    config = security.load_config_v4(ROOT / "config/hostops-v3/config-v4.example.json")
+    config["broker_identity"] = sid
+    config["transport_identity"] = sid
+    config["policy_dir"] = str(tmp_path / "policy")
+    config_file = tmp_path / "personal.json"
+    config_file.write_bytes(c.canonical(config))
+    assert security.load_config_v4(config_file) == config
+    options = ["personal-local-inspect", "--config", str(config_file)]
+    original_os = cli.os
+    monkeypatch.setattr(cli, "os",
+                        SimpleNamespace(name="nt", cpu_count=lambda: 8))
+    monkeypatch.setattr(cli, "sys", SimpleNamespace(
+        stdin=SimpleNamespace(isatty=lambda: True),
+        stdout=SimpleNamespace(isatty=lambda: True),
+        stderr=system_sys.stderr))
+    monkeypatch.setattr(cli, "windows_identity", lambda: (sid, False))
+    monkeypatch.setattr(platform, "machine", lambda: "AMD64")
+    monkeypatch.setattr(builtins, "input", lambda: "LOCAL READ ONLY")
+    called = []
+    monkeypatch.setattr(cli, "serve_v4", lambda *_, **__: called.append("broker"))
+    monkeypatch.setattr(cli, "submit_v4", lambda *_, **__: called.append("transport"))
+    before = config_file.read_bytes()
+    assert cli.main_v4(options) == 0
+    output = capsys.readouterr()
+    assert "HOSTOPS_PERSONAL_LOCAL_READ" in output.out
+    receipt = c.decode(output.out.strip().splitlines()[-1].encode("ascii"), limit=4096)
+    assert receipt == {
+        "schema": "hostops.personal.local_inventory.v1",
+        "account_mode": security.PERSONAL_V4_MODE,
+        "operation": "local_os_inventory", "windows": True,
+        "current_sid_matched": True, "non_elevated": True,
+        "console_confirmation_received": True,
+        "architecture": "X64", "logical_cpu_count": 8,
+        "github_contacted": False, "broker_started": False,
+        "private_keys_used": False, "operation_file_write_requested": False,
+        "ready_to_enable": False}
+    assert sid not in output.out + output.err
+    assert not called and config_file.read_bytes() == before
+
+    # Decline consent, wrong SID, elevated/System SID, missing terminal,
+    # KILL marker, unsafe output path and forbidden network/credential args
+    # must never cause a broker launch or create an output file.
+    cases = [
+        ("declined", {"confirm": "no"}),
+        ("wrong-sid", {"sid": "S-1-5-21-7-8-9-10"}),
+        ("elevated", {"elevated": True}),
+        ("system", {"sid": "S-1-5-18"}),
+        ("no-tty", {"tty": False}),
+        ("no-windows", {"osname": "posix"}),
+        ("output", {"flags": ["--output", str(tmp_path / "must-not-exist")]}),
+        ("token", {"flags": ["--token-file", str(tmp_path / "token.txt")]}),
+        ("request", {"flags": ["--request-file", str(tmp_path / "request.json")]}),
+    ]
+    for _, mutation in cases:
+        monkeypatch.setattr(cli, "os", SimpleNamespace(
+            name=mutation.get("osname", "nt"), cpu_count=lambda: 8))
+        tty = mutation.get("tty", True)
+        monkeypatch.setattr(cli, "sys", SimpleNamespace(
+            stdin=SimpleNamespace(isatty=lambda: tty),
+            stdout=SimpleNamespace(isatty=lambda: tty),
+            stderr=system_sys.stderr))
+        monkeypatch.setattr(cli, "windows_identity", lambda m=mutation: (
+            m.get("sid", sid), m.get("elevated", False)))
+        monkeypatch.setattr(builtins, "input", lambda m=mutation: m.get("confirm", "LOCAL READ ONLY"))
+        assert cli.main_v4([*options, *mutation.get("flags", [])]) == 2
+        assert not (tmp_path / "must-not-exist").exists()
+        assert not called
+    capsys.readouterr()
+    config["enabled"] = True
+    config_file.write_bytes(c.canonical(config))
+    assert cli.main_v4(options) == 2
+    config["enabled"] = False
+    config["schema"] = "hostops.config.v4"
+    config.pop("account_mode")
+    config_file.write_bytes(c.canonical(config))
+    assert cli.main_v4(options) == 2
+    config["schema"] = security.PERSONAL_V4_SCHEMA
+    config["account_mode"] = security.PERSONAL_V4_MODE
+    config_file.write_bytes(c.canonical(config))
+    policy = tmp_path / "policy"
+    policy.mkdir()
+    (policy / "KILL").touch()
+    assert cli.main_v4(options) == 2
+    assert not called
+
+
+def test_personal_local_inspect_rejects_nonlocal_config(tmp_path, monkeypatch, capsys):
+    """A CLI-exposed local inventory never reads a symlinked config."""
+    import sys as system_sys
+    source = ROOT / "config/hostops-v3/config-v4.example.json"
+    linked = tmp_path / "linked.json"
+    try:
+        linked.symlink_to(source)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlinks unavailable")
+    monkeypatch.setattr(cli, "os", SimpleNamespace(name="nt", cpu_count=lambda: 4))
+    monkeypatch.setattr(cli, "sys", SimpleNamespace(
+        stdin=SimpleNamespace(isatty=lambda: True),
+        stdout=SimpleNamespace(isatty=lambda: True),
+        stderr=system_sys.stderr))
+    assert cli.main_v4(["personal-local-inspect", "--config", str(linked)]) == 2
+    assert "HOSTOPS_V4_BLOCKED" in capsys.readouterr().err
+
+
 def test_v4_legacy_two_account_contract_rejects_equal_sid(h):
     cfg = _v4_config(h)
     assert cfg["schema"] == "hostops.config.v4"
