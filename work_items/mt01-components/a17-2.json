@@ -1,0 +1,23 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "a17-2",
+  "sources": [
+    "src/ai_commerce/distribution_intelligence/__init__.py",
+    "src/ai_commerce/distribution_intelligence/reconciliation.py",
+    "src/ai_commerce/distribution_intelligence/dashboard.py",
+    "src/ai_commerce/distribution_intelligence/schemas.py"
+  ],
+  "tests": ["tests/test_a17_reconciliation.py", "tests/test_a17_dashboard.py"],
+  "acs": ["A17.D05.L07.offline-reconciliation-dashboard"],
+  "consumers": [
+    "src/ai_commerce/distribution/receipt.py",
+    "src/ai_commerce/operations/retry_guard.py",
+    "src/ai_commerce/operations/cost_ledger.py",
+    "src/ai_commerce/analytics/ledger.py",
+    "src/ai_commerce/learning/export.py",
+    "src/ai_commerce/affiliate_attribution/evidence.py",
+    "src/ai_commerce/settlement/ledger.py",
+    "src/ai_commerce/creative_scaling/variants.py"
+  ],
+  "contracts": ["contracts/DistributionReconciliation.v1.schema.json", "contracts/DecisionDashboardSnapshot.v1.schema.json"]
+}
