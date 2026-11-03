@@ -450,6 +450,40 @@ def personal_remote_prepare(api, issue_number, expected_source_sha, *, now=None)
     return request
 
 
+def personal_supervised_scan(api):
+    """Bounded private Issues discovery only; never execute an Issue body.
+
+    A fixed-capability session still re-fetches and authenticates every
+    candidate through personal_remote_prepare before requiring local consent.
+    """
+    prefix = "/repos/" + CONTROL_REPOSITORY
+    repo = api.get(prefix)
+    if (type(repo) is not dict or repo.get("private") is not True or
+            repo.get("full_name") != CONTROL_REPOSITORY):
+        deny("PRIVATE_CONTROL_UNVERIFIED")
+    issues = api.get(prefix + "/issues?state=open&per_page=100")
+    if type(issues) is not list or len(issues) >= 100:
+        deny("REMOTE_QUEUE_UNBOUNDED")
+    matches = []
+    for issue in issues:
+        if type(issue) is not dict:
+            deny("REMOTE_QUEUE_UNVERIFIED")
+        if issue.get("title") != PERSONAL_R1_TITLE:
+            continue
+        number = issue.get("number")
+        if (type(number) is not int or not 1 <= number <= 2147483647 or
+                issue.get("state") != "open" or issue.get("pull_request") is not None or
+                type(issue.get("user")) is not dict or
+                issue["user"].get("login") != "trung-via"):
+            deny("REMOTE_QUEUE_UNVERIFIED")
+        if number in matches:
+            deny("REMOTE_QUEUE_UNVERIFIED")
+        matches.append(number)
+    if len(matches) > 10:
+        deny("REMOTE_QUEUE_UNBOUNDED")
+    return sorted(matches)
+
+
 def personal_remote_publish(api, issue_number, request, inventory):
     """Post one fixed sanitized receipt, never a user-selected content blob."""
     shape(request, "schema request_id source_repository control_repository source_sha operation parameters issued_at expires_at")

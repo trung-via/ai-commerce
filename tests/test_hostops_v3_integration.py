@@ -1394,6 +1394,175 @@ def test_personal_r1_control_github_routes_are_exact_and_redirect_free(monkeypat
     assert len(created) == 1
 
 
+def test_personal_r2_scan_private_issue_list_is_bounded_and_narrow():
+    """A list result cannot bypass per-Issue authentication or grant writes."""
+    from ai_commerce.hostops_v3 import transport as t
+    prefix = "/repos/trung-via/ai-commerce-hostops-control"
+    class API:
+        repo = {"private": True, "full_name": "trung-via/ai-commerce-hostops-control"}
+        issues = []
+        def get(self, path):
+            if path == prefix:
+                return self.repo
+            if path == prefix + "/issues?state=open&per_page=100":
+                return self.issues
+            raise AssertionError("unapproved API path")
+    api = API()
+    assert t.personal_supervised_scan(api) == []
+    assert t.personal_supervised_scan(api) == []
+    entry = {"number": 42, "state": "open", "title": "[HOSTOPS-R1] local_os_inventory",
+             "user": {"login": "trung-via"}}
+    api.issues = [{"number": 1, "title": "unrelated"},
+                  {**entry, "number": 9}, dict(entry)]
+    assert t.personal_supervised_scan(api) == [9, 42]
+    api.issues = [dict(entry), dict(entry)]
+    with pytest.raises(c.Denied, match="REMOTE_QUEUE_UNVERIFIED"):
+        t.personal_supervised_scan(api)
+    for mutation in ({"user": {"login": "attacker"}}, {"state": "closed"},
+                     {"pull_request": {"url": "unknown"}}, {"number": "42"},
+                     {"number": 0}):
+        api.issues = [{**entry, **mutation}]
+        with pytest.raises(c.Denied, match="REMOTE_QUEUE_UNVERIFIED"):
+            t.personal_supervised_scan(api)
+    api.issues = [dict(entry)] * 100
+    with pytest.raises(c.Denied, match="REMOTE_QUEUE_UNBOUNDED"):
+        t.personal_supervised_scan(api)
+    api.issues = [{**entry, "number": k} for k in range(1, 12)]
+    with pytest.raises(c.Denied, match="REMOTE_QUEUE_UNBOUNDED"):
+        t.personal_supervised_scan(api)
+    api.issues = [dict(entry)]
+    api.repo = {**api.repo, "private": False}
+    with pytest.raises(c.Denied, match="PRIVATE_CONTROL_UNVERIFIED"):
+        t.personal_supervised_scan(api)
+
+
+def test_personal_r2_supervised_session_requires_presence_per_issue_and_has_no_writes(
+        tmp_path, monkeypatch, capsys):
+    """Human-entered ephemeral token + exact consent for each fixed inventory."""
+    import builtins
+    import sys as sysmod
+    from ai_commerce.hostops_v3 import cli as session
+    sid = "S-1-5-21-12345-67890-13579-1001"
+    cfg = security.load_config_v4(ROOT / "config/hostops-v3/config-v4.example.json")
+    cfg["broker_identity"] = cfg["transport_identity"] = sid
+    cfg["policy_dir"] = str(tmp_path / "policy")
+    config_file = tmp_path / "personal.json"
+    config_file.write_bytes(c.canonical(cfg))
+    before = config_file.read_bytes()
+    args = SimpleNamespace(command="personal-supervised-session",
+        config=str(config_file), output=None, token_file=None,
+        request_file=None, receipt_file=None, disclosure_output=None,
+        run_id=None, issue=None, session_seconds=30)
+    monkeypatch.setattr(session, "os", SimpleNamespace(name="nt", cpu_count=lambda: 22))
+    monkeypatch.setattr(session, "sys", SimpleNamespace(
+        stdin=SimpleNamespace(isatty=lambda: True),
+        stdout=SimpleNamespace(isatty=lambda: True), stderr=sysmod.stderr))
+    monkeypatch.setattr(session, "windows_identity", lambda: (sid, False))
+    monkeypatch.setattr(session, "_clean_source_sha", lambda _root: "a"*40)
+    monkeypatch.setattr(session.platform, "machine", lambda: "AMD64")
+    monkeypatch.setattr(session.getpass, "getpass", lambda _: "private-temp-token")
+    request = {"request_id": "r1-" + "b"*24, "source_sha": "a"*40}
+    accessed, posted, time_value = [], [], [0.]
+    monkeypatch.setattr(session, "personal_supervised_scan",
+                        lambda api: accessed.append("scan") or [42])
+    monkeypatch.setattr(session, "personal_remote_prepare",
+                        lambda api, issue, source: request)
+    monkeypatch.setattr(session, "personal_remote_publish",
+                        lambda api, issue, req, inventory:
+                        posted.append((issue, req, inventory)) or
+                        {"request_id": req["request_id"]})
+    monkeypatch.setattr(session, "time", SimpleNamespace(
+        monotonic=lambda: time_value[0],
+        sleep=lambda t: time_value.__setitem__(0, time_value[0] + t)))
+    replies = iter(["START R2 READ ONLY",
+                    "ALLOW READ 42 " + request["request_id"]])
+    monkeypatch.setattr(builtins, "input", lambda: next(replies))
+    assert cli.main_v4(["personal-supervised-session", "--config",
+                        str(config_file), "--session-seconds", "30"]) == 0
+    out = capsys.readouterr()
+    assert "HOSTOPS_R2_RESULT_POSTED issue=42" in out.out
+    assert "HOSTOPS_R2_SESSION_ENDED completed=1" in out.out
+    assert "private-temp-token" not in out.out + out.err
+    assert sid not in out.out + out.err
+    assert posted == [(42, request, {"architecture": "X64", "logical_cpu_count": 22})]
+    assert len(accessed) == 2  # after receipt, session scans but never repeats
+    assert config_file.read_bytes() == before
+    assert (tmp_path / "policy").exists() is False
+
+    # One expired/duplicate item is skipped, not reposted.
+    posted.clear()
+    accessed.clear()
+    time_value[0] = 0.
+    monkeypatch.setattr(session, "personal_remote_prepare",
+                        lambda *_a: (_ for _ in ()).throw(c.Denied("REMOTE_REQUEST_EXPIRED")))
+    monkeypatch.setattr(builtins, "input", lambda: "START R2 READ ONLY")
+    assert session.run_session(args) == 0
+    assert not posted
+
+    # Unknown outcome stops the *entire* session, never posts a second item.
+    time_value[0] = 0.
+    replies = iter(["START R2 READ ONLY",
+                    "ALLOW READ 42 " + request["request_id"]])
+    monkeypatch.setattr(builtins, "input", lambda: next(replies))
+    monkeypatch.setattr(session, "personal_remote_prepare",
+                        lambda api, issue, source: request)
+    monkeypatch.setattr(session, "personal_remote_publish",
+                        lambda *_a: (_ for _ in ()).throw(c.Denied("REMOTE_POST_UNKNOWN")))
+    assert session.run_session(args) == 3
+    assert "HOSTOPS_R2_UNKNOWN" in capsys.readouterr().err
+
+
+def test_personal_r2_session_fails_closed_for_invalid_context_and_consent(
+        tmp_path, monkeypatch):
+    import builtins
+    import sys as sysmod
+    from ai_commerce.hostops_v3 import cli as session
+    sid = "S-1-5-21-12345-67890-13579-1001"
+    cfg = security.load_config_v4(ROOT / "config/hostops-v3/config-v4.example.json")
+    cfg["broker_identity"] = cfg["transport_identity"] = sid
+    cfg["policy_dir"] = str(tmp_path / "policy")
+    path = tmp_path / "plan.json"
+    path.write_bytes(c.canonical(cfg))
+    params = dict(config=str(path), output=None, token_file=None,
+                  request_file=None, receipt_file=None, disclosure_output=None,
+                  run_id=None, issue=None, session_seconds=60)
+    monkeypatch.setattr(session, "os", SimpleNamespace(name="nt", cpu_count=lambda: 22))
+    monkeypatch.setattr(session, "sys", SimpleNamespace(
+        stdin=SimpleNamespace(isatty=lambda: True),
+        stdout=SimpleNamespace(isatty=lambda: True), stderr=sysmod.stderr))
+    monkeypatch.setattr(session, "windows_identity", lambda: (sid, False))
+    monkeypatch.setattr(session, "_clean_source_sha", lambda _: "a"*40)
+    monkeypatch.setattr(builtins, "input", lambda: "NO")
+    monkeypatch.setattr(session.getpass, "getpass",
+                        lambda *_: (_ for _ in ()).throw(AssertionError("token accessed")))
+    assert cli.main_v4(["personal-supervised-session", "--config", str(path),
+                        "--session-seconds", "1801"]) == 2
+    for mutation in ({"issue": 42}, {"output": str(tmp_path / "leak")},
+                     {"token_file": str(tmp_path / "secret")},
+                     {"session_seconds": 29}):
+        with pytest.raises(c.Denied):
+            session.run_session(SimpleNamespace(**{**params, **mutation}))
+    with pytest.raises(c.Denied, match="INTERACTIVE_CONSENT_REQUIRED"):
+        session.run_session(SimpleNamespace(**params))
+    monkeypatch.setattr(session, "windows_identity", lambda: (sid, True))
+    with pytest.raises(c.Denied, match="PERSONAL_IDENTITY_MISMATCH"):
+        session.run_session(SimpleNamespace(**params))
+    monkeypatch.setattr(session, "windows_identity", lambda: ("S-1-5-18", False))
+    with pytest.raises(c.Denied, match="PERSONAL_IDENTITY_MISMATCH"):
+        session.run_session(SimpleNamespace(**params))
+    monkeypatch.setattr(session, "windows_identity", lambda: (sid, False))
+    policy = tmp_path / "policy"
+    policy.mkdir()
+    (policy / "KILL").touch()
+    with pytest.raises(c.Denied, match="KILL_SWITCH"):
+        session.run_session(SimpleNamespace(**params))
+    (policy / "KILL").unlink()
+    monkeypatch.setattr(session, "_clean_source_sha",
+                        lambda _: (_ for _ in ()).throw(c.Denied("LOCAL_SOURCE_UNVERIFIED")))
+    with pytest.raises(c.Denied, match="LOCAL_SOURCE_UNVERIFIED"):
+        session.run_session(SimpleNamespace(**params))
+
+
 def test_v4_legacy_two_account_contract_rejects_equal_sid(h):
     cfg = _v4_config(h)
     assert cfg["schema"] == "hostops.config.v4"
