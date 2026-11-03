@@ -6,6 +6,11 @@ on:
 permissions:
   contents: read
   actions: read
+# Keep only the newest candidate CI run per PR; never cancel a main push.
+# Exact-head gate requires new proof, not stale/cancelled workflow receipts.
+concurrency:
+  group: ef02-source-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   tests:
     strategy:

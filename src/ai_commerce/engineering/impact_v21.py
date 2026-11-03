@@ -211,6 +211,21 @@ def select_impact(
             selected_groups.add(group.name)
             selected_tests.update(group.tests)
             related.update(coverage)
+    # A new component's declared legacy consumers need their owner tests
+    # even when the consumer source itself is unchanged in this PR. Do not
+    # confuse "not edited" with "not affected by a new interface".
+    for group in groups:
+        if not any(p.startswith("work_items/mt01-components/") for p in group.contracts):
+            continue
+        if not set(changed) & (set(group.paths) | set(group.tests) | set(group.contracts)):
+            continue
+        for old in groups:
+            if old is group or not (set(group.consumers) & set(old.paths)):
+                continue
+            selected_groups.add(old.name)
+            selected_tests.update(old.tests)
+            related.update((*old.paths, *old.tests, *old.consumers, *old.contracts))
+            reasons.add("ONBOARD_CONSUMER_OWNER_CLOSURE")
     for path in changed:
         if path in extra_controls:
             selected_tests.update(extra_controls[path])
@@ -276,10 +291,314 @@ def select_impact(
                     missing=tuple(sorted(selected_tests)), warnings=warnings, affected=affected)
 
 
+
+
+def validate_component_onboarding_manifest(
+    data: object, *, manifest_path: str, changed_paths: Sequence[str],
+    base_paths: Sequence[str], existing_groups: Sequence,
+    allowed_paths: Sequence[str], root: Path,
+) -> dict:
+    """V2.2 foundation: DATA-ONLY new-owner admission, not test execution authority.
+
+    Every newly owned source/test and its manifest must be added inside the
+    signed EF02 allowed_paths. An existing consumer can be referenced but
+    NEVER re-owned. No argv, import, glob, env or executable value is accepted.
+    CI/merge must independently replay these checks against an immutable base.
+    """
+    import hashlib
+    import json
+    import re
+
+    fields = {"schema_version", "component", "sources", "tests", "acs",
+              "consumers", "contracts"}
+    if type(data) is not dict or set(data) != fields:
+        raise ValueError("ONBOARD_MANIFEST_SHAPE")
+    if data["schema_version"] != "MT01ComponentOwner.v1":
+        raise ValueError("ONBOARD_SCHEMA_VERSION")
+    name = data["component"]
+    if type(name) is not str or not re.fullmatch(r"[a-z][a-z0-9_-]{1,63}", name):
+        raise ValueError("ONBOARD_COMPONENT_ID")
+    if manifest_path != f"work_items/mt01-components/{name}.json":
+        raise ValueError("ONBOARD_MANIFEST_LOCATION")
+    existing_names = {g.name for g in existing_groups}
+    if name in existing_names:
+        raise ValueError("ONBOARD_COMPONENT_ALREADY_OWNED")
+    changed, base, allowed = map(set, (changed_paths, base_paths, allowed_paths))
+    def in_scope(path: str) -> bool:
+        # Match the already-authorized EF01 directory-prefix semantics, not
+        # an Issue-supplied glob. Every path must also pass its family guard.
+        return any(path == prefix or path.startswith(prefix.rstrip("/") + "/")
+                   for prefix in allowed)
+    if manifest_path not in changed or manifest_path in base or not in_scope(manifest_path):
+        raise ValueError("ONBOARD_MANIFEST_NOT_NEW_AND_AUTHORIZED")
+    if len(changed) != len(set(changed_paths)) or len(allowed) != len(allowed_paths):
+        raise ValueError("ONBOARD_DUPLICATE_PATH")
+    if not all(in_scope(path) for path in changed):
+        raise ValueError("ONBOARD_CHANGED_OUT_OF_SCOPE")
+
+    items = {}
+    for key in ("sources", "tests", "acs", "consumers", "contracts"):
+        values = data[key]
+        minimum = 1 if key in {"sources", "tests", "acs"} else 0
+        if (type(values) is not list or not minimum <= len(values) <= 40
+                or any(type(v) is not str or not v or len(v) > 240 for v in values)
+                or len(values) != len(set(values))):
+            raise ValueError("ONBOARD_INVALID_" + key.upper())
+        items[key] = tuple(values)
+    sources, tests, acs = (items[key] for key in ("sources", "tests", "acs"))
+    consumers, contracts = items["consumers"], items["contracts"]
+    if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", ac) for ac in acs):
+        raise ValueError("ONBOARD_INVALID_AC")
+    for path in (*sources, *tests, *consumers, *contracts):
+        if not _valid(path):
+            raise ValueError("ONBOARD_UNSAFE_PATH")
+    if any(not (p.startswith("src/ai_commerce/") and p.endswith(".py")
+                and not p.startswith(("src/ai_commerce/engineering/",
+                                      "src/ai_commerce/remote/"))) for p in sources):
+        raise ValueError("ONBOARD_UNSAFE_SOURCE_FAMILY")
+    if any(not re.fullmatch(r"tests/test_[A-Za-z0-9_]+\.py", p) for p in tests):
+        raise ValueError("ONBOARD_UNSAFE_TEST_FAMILY")
+    if any(not p.startswith("contracts/") or not p.endswith(".schema.json")
+           for p in contracts):
+        raise ValueError("ONBOARD_UNSAFE_CONTRACT_FAMILY")
+    if any(not p.startswith("src/ai_commerce/") or not p.endswith(".py")
+           for p in consumers):
+        raise ValueError("ONBOARD_UNSAFE_CONSUMER_FAMILY")
+    existing_owned = set()
+    existing_tests = set()
+    for group in existing_groups:
+        existing_owned.update((*group.paths, *group.tests, *group.consumers, *group.contracts))
+        existing_tests.update(group.tests)
+    fresh = set(sources) | set(tests)
+    if fresh & (existing_owned | base) or not fresh <= changed or not all(in_scope(p) for p in fresh):
+        raise ValueError("ONBOARD_REOWN_OR_NOT_ADDED")
+    if set(tests) & existing_tests:
+        raise ValueError("ONBOARD_EXISTING_TEST")
+    if any(p not in existing_owned and p not in sources for p in consumers):
+        raise ValueError("ONBOARD_CONSUMER_UNPROVEN")
+    if any(p not in existing_owned and (p not in changed or p in base or not in_scope(p))
+           for p in contracts):
+        raise ValueError("ONBOARD_CONTRACT_UNPROVEN")
+    root = root.resolve()
+    for path in (manifest_path, *fresh, *contracts):
+        target = root / path
+        if (not target.is_file() or target.is_symlink()
+                or root not in target.resolve().parents):
+            raise ValueError("ONBOARD_FILE_MISSING_OR_LINK")
+        ancestor = target.parent
+        while ancestor != root:
+            if ancestor.is_symlink():
+                raise ValueError("ONBOARD_UNSAFE_PARENT_LINK")
+            ancestor = ancestor.parent
+    try:
+        payload = (root / manifest_path).read_bytes()
+        observed = json.loads(payload.decode("utf-8-sig"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ValueError("ONBOARD_MANIFEST_BYTES_UNPROVEN") from exc
+    if observed != data:
+        raise ValueError("ONBOARD_MANIFEST_BYTES_MISMATCH")
+    return {
+        "name": name, "manifest_path": manifest_path,
+        "manifest_sha256": hashlib.sha256(payload).hexdigest(),
+        "paths": sources, "tests": tests, "acs": acs,
+        "consumers": consumers, "contracts": contracts,
+        "status": "VALIDATED_DATA_ONLY_NOT_VERIFICATION_PASS",
+    }
+
+
+
+def verified_onboarding_binding(
+    *, workspace: Path, binding: dict, changed_paths: Sequence[str],
+    allowed_paths: Sequence[str], base_sha: str, registered_profiles: dict,
+    expected_group: str | None = None,
+) -> bool:
+    """Independently rebuild the one candidate-generated test argv in trusted code.
+
+    The EF02 worker invokes this after EF01 exits, not on self-reported PASS
+    alone. All existing group commands remain byte-identical to the registry.
+    """
+    import json
+    import subprocess
+    from .minimum_test import TestGroup, approved_groups
+
+    try:
+        if (registered_profiles.get("mt01-component-onboarding") is None
+                or binding.get("registered_profile") != "mt01-component-onboarding"
+                or binding.get("onboarding_data_only") is not True
+                or binding.get("base_sha") != base_sha):
+            return False
+        path = binding["onboarding_manifest_path"]
+        if (not isinstance(path, str)
+                or not path.startswith("work_items/mt01-components/")
+                or not path.endswith(".json")):
+            return False
+        original = subprocess.run(
+            ["git", "ls-tree", "-r", "--name-only", "-z", base_sha],
+            cwd=workspace, capture_output=True, check=False, timeout=30)
+        if original.returncode:
+            return False
+        base_paths = [x.decode("utf-8") for x in original.stdout.split(bytes([0])) if x]
+        old_groups = approved_groups()
+        baseline_records = load_baseline_component_owner_records(
+            root=workspace, base_sha=base_sha, existing_groups=old_groups)
+        baseline_by_path = {item["manifest_path"]: item for item in baseline_records}
+        if path in baseline_by_path:
+            if path in changed_paths:
+                return False
+            record = baseline_by_path[path]
+            group = record["group"]
+            digest = record["manifest_sha256"]
+        else:
+            candidate = json.loads((workspace / path).read_text(encoding="utf-8"))
+            admission = validate_component_onboarding_manifest(
+                candidate, manifest_path=path,
+                changed_paths=changed_paths, base_paths=base_paths,
+                existing_groups=(*old_groups, *(item["group"] for item in baseline_records)),
+                allowed_paths=allowed_paths, root=workspace)
+            digest = admission["manifest_sha256"]
+            group = TestGroup(
+                admission["name"], admission["tests"], admission["acs"], admission["paths"],
+                admission["consumers"], (*admission["contracts"], path))
+        if binding["onboarding_manifest_sha256"] != digest:
+            return False
+        if expected_group is not None and expected_group != group.name:
+            return False
+        baseline_groups = tuple(item["group"] for item in baseline_records)
+        groups = (*old_groups, *baseline_groups)
+        if path not in baseline_by_path:
+            groups = (*groups, group)
+        plan = select_impact(
+            root=workspace, changed_paths=changed_paths, groups=groups,
+            base_sha=base_sha)
+        if not plan.runnable or group.name not in plan.selected_groups:
+            return False
+        if binding.get("mapping") != group.mapping():
+            return False
+        if binding.get("selected_impact_tests") != list(plan.selected_tests):
+            return False
+        return binding.get("argv") == [
+            "python", "-m", "pytest", *group.tests, "-q", "-n", "12"]
+    except (OSError, ValueError, TypeError, UnicodeError, KeyError,
+            subprocess.TimeoutExpired):
+        return False
+
+
+def candidate_onboarding_groups(
+    *, root: Path, changed_paths: Sequence[str], base_paths: Sequence[str],
+    existing_groups: Sequence, allowed_paths: Sequence[str],
+) -> tuple:
+    """Construct CI's finite new-owner map from changed manifest data, not code.
+
+    GitHub merge gate independently revalidates source blobs and obligations;
+    this helper does not approve a merge or any on-host EF02 action.
+    """
+    import json
+    from .minimum_test import TestGroup
+
+    paths = sorted(p for p in changed_paths if
+                   p.startswith("work_items/mt01-components/") and p.endswith(".json"))
+    if len(paths) > 8:
+        raise ValueError("ONBOARD_TOO_MANY_MANIFESTS")
+    results = []
+    groups = tuple(existing_groups)
+    for path in paths:
+        item = json.loads((root / path).read_text(encoding="utf-8"))
+        checked = validate_component_onboarding_manifest(
+            item, manifest_path=path, changed_paths=changed_paths,
+            base_paths=base_paths, existing_groups=groups,
+            allowed_paths=allowed_paths, root=root)
+        group = TestGroup(
+            checked["name"], checked["tests"], checked["acs"], checked["paths"],
+            checked["consumers"], (*checked["contracts"], path))
+        groups = (*groups, group)
+        results.append(group)
+    return tuple(results)
+
+
+def load_baseline_component_owner_records(
+    *, root: Path, base_sha: str, existing_groups: Sequence,
+) -> tuple[dict, ...]:
+    """Load persisted reviewed owners ONLY from immutable Git base, never
+    newly supplied candidate manifest declarations.
+
+    A component's first PR must pass protected manifest admission. In later
+    PRs its committed owner remains available for scoped tests without a
+    second preregistration PR or mutable Python registry modification.
+    """
+    import json
+    import re
+    import subprocess
+    from .minimum_test import TestGroup
+
+    root = root.resolve()
+    if not (root / ".git").exists():
+        return ()
+    if type(base_sha) is not str or not re.fullmatch(r"[0-9a-f]{40}", base_sha):
+        raise ValueError("ONBOARD_BASE_SHA_UNPROVEN")
+    def git(*argv: str) -> bytes:
+        try:
+            process = subprocess.run(["git", *argv], cwd=root, timeout=30,
+                                     check=False, capture_output=True)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ValueError("ONBOARD_BASE_TREE_UNAVAILABLE") from exc
+        if process.returncode:
+            raise ValueError("ONBOARD_BASE_TREE_UNAVAILABLE")
+        return process.stdout
+    base_paths = {p.decode("utf-8") for p in
+                  git("ls-tree", "-r", "--name-only", "-z", base_sha).split(bytes([0])) if p}
+    manifests = sorted(p for p in base_paths
+                       if p.startswith("work_items/mt01-components/"))
+    if len(manifests) > 256:
+        raise ValueError("ONBOARD_BASELINE_OWNER_LIMIT")
+    accepted = []
+    groups = tuple(existing_groups)
+    for path in manifests:
+        if not path.endswith(".json"):
+            raise ValueError("ONBOARD_BASELINE_UNKNOWN_OWNER_FILE")
+        raw = git("show", f"{base_sha}:{path}")
+        if len(raw) > 32768:
+            raise ValueError("ONBOARD_BASELINE_MANIFEST_TOO_LARGE")
+        target = root / path
+        if not target.is_file() or target.is_symlink():
+            raise ValueError("ONBOARD_BASELINE_MANIFEST_MISSING")
+        actual = target.read_bytes()
+        if raw != actual and actual.replace(bytes([13, 10]), bytes([10])) != raw:
+            raise ValueError("ONBOARD_BASELINE_MANIFEST_DRIFT")
+        try:
+            data = json.loads(raw.decode("utf-8-sig"))
+        except (ValueError, UnicodeError) as exc:
+            raise ValueError("ONBOARD_BASELINE_MANIFEST_INVALID") from exc
+        expected_keys = {"schema_version", "component", "sources", "tests",
+                         "acs", "consumers", "contracts"}
+        if (type(data) is not dict or set(data) != expected_keys
+                or any(type(data[k]) is not list
+                       for k in ("sources", "tests", "acs", "consumers", "contracts"))):
+            raise ValueError("ONBOARD_BASELINE_MANIFEST_SHAPE")
+        owned = (path, *data["sources"], *data["tests"], *data["contracts"])
+        if not set(owned) <= base_paths:
+            raise ValueError("ONBOARD_BASELINE_OWNER_FILES_NOT_COMMITTED")
+        # Reuse the same strict data parser on a synthetic *baseline*
+        # registration review. No candidate-changed path is introduced.
+        checked = validate_component_onboarding_manifest(
+            data, manifest_path=path, changed_paths=owned,
+            base_paths=tuple(p for g in groups for p in
+                             (*g.paths, *g.tests, *g.consumers, *g.contracts)),
+            existing_groups=groups, allowed_paths=owned, root=root)
+        group = TestGroup(
+            checked["name"], checked["tests"], checked["acs"],
+            checked["paths"], checked["consumers"],
+            (*checked["contracts"], path))
+        accepted.append({"group": group, "manifest_path": path,
+                         "manifest_sha256": checked["manifest_sha256"]})
+        groups = (*groups, group)
+    return tuple(accepted)
+
+
 def registered_action_plan(
     *, repo: Path, base_sha: str, base_files, candidate_files,
     changed_paths: Sequence[str], required_acs: Sequence[str], fallback_argv,
     groups: Sequence, registered_profiles: dict | None, aggregate_sources=(), env=None,
+    allowed_paths: Sequence[str] = (),
 ) -> dict:
     """Translate V2 selected impact to the existing immutable EF01/EF02 evidence contract.
 
@@ -289,16 +608,59 @@ def registered_action_plan(
     """
     import shutil
     import sys
-    from .minimum_test import canonical, digest
+    from .minimum_test import TestGroup, canonical, digest
+    import json
 
+    # A fixed ingress profile is a permission to ATTEMPT onboarding, never an
+    # authority to use candidate-supplied shell/pytest argv. Load one manifest
+    # as data AFTER Codex edits; verify it against the immutable base and the
+    # Human-approved allowed_paths. The trusted planner constructs test argv.
+    profiles = registered_profiles or {}
+    onboarding = (
+        profiles.get("mt01-component-onboarding") == list(fallback_argv)
+        and bool(allowed_paths)
+    )
+    admission, onboarding_error = None, None
+    persisted_records = (
+        load_baseline_component_owner_records(
+            root=repo, base_sha=base_sha, existing_groups=groups)
+        if onboarding and (repo / ".git").exists() else ())
+    persisted_by_name = {item["group"].name: item for item in persisted_records}
+    if persisted_records:
+        groups = (*groups, *(item["group"] for item in persisted_records))
+    if onboarding:
+        candidates = sorted(p for p in changed_paths
+                            if p.startswith("work_items/mt01-components/") and p.endswith(".json"))
+        if len(candidates) != 1:
+            if candidates or not persisted_records:
+                onboarding_error = "ONBOARD_EXACTLY_ONE_NEW_MANIFEST_REQUIRED"
+        else:
+            try:
+                data = json.loads((repo / candidates[0]).read_text(encoding="utf-8"))
+                admission = validate_component_onboarding_manifest(
+                    data, manifest_path=candidates[0], changed_paths=changed_paths,
+                    base_paths=tuple(base_files), existing_groups=groups,
+                    allowed_paths=allowed_paths, root=repo)
+            except (ValueError, OSError, UnicodeError, TypeError) as exc:
+                onboarding_error = "ONBOARD_INVALID_MANIFEST:" + str(exc)[:128]
+        if admission is not None:
+            groups = (*groups, TestGroup(
+                admission["name"], admission["tests"], admission["acs"],
+                admission["paths"], admission["consumers"],
+                (*admission["contracts"], admission["manifest_path"])))
     impact = select_impact(
         root=repo, changed_paths=changed_paths, groups=groups,
         base_sha=base_sha,
     )
     by_name = {g.name: g for g in groups}
-    profiles = registered_profiles or {}
     entries = []
     problems = list(impact.missing_mapping)
+    if onboarding_error:
+        problems.append(onboarding_error)
+    if admission is not None and aggregate_sources:
+        # A candidate manifest can prove one new owner, but it cannot
+        # silently inherit sibling verification from a different tree.
+        problems.append("ONBOARD_AGGREGATE_NEEDS_INDEPENDENT_FANIN_PROOF")
     known_acs = {ac for group in groups for ac in group.acs}
     # A globally known AC is NOT verified unless its owning group is selected.
     # Do not expand silently: an unrelated action requirement needs a new
@@ -317,14 +679,30 @@ def registered_action_plan(
         expected = ["python", "-m", "pytest", *group.tests, "-q"]
         if select_parallel:
             expected.extend(["-n", "12"])
-        matched = next((key for key, value in sorted(profiles.items()) if value == expected), None)
+        new_owner = bool((admission is not None and name == admission["name"])
+                         or (onboarding and name in persisted_by_name))
+        verified_owner = (admission if admission is not None and name == admission["name"]
+                          else persisted_by_name.get(name))
+        matched = ("mt01-component-onboarding" if new_owner else
+                   next((key for key, value in sorted(profiles.items()) if value == expected), None))
         if matched is None:
             problems.append(name + ":REGISTERED_PROFILE_REQUIRED")
-        # Closed, registered fallback argv only; never synthesize unknown commands.
-        argv = list(profiles[matched]) if matched is not None else list(fallback_argv)
+        # The only dynamic command is generated from a VALIDATED bounded
+        # manifest; all original components still use exact registry argv.
+        argv = expected if new_owner else list(profiles[matched]) if matched is not None else list(fallback_argv)
         executable = shutil.which(argv[0]) if argv else None
         paths = (set(group.tests) | set(group.paths) | set(group.consumers) |
                  set(group.contracts) | (set(changed_paths) & set(impact.affected_paths)))
+        if new_owner:
+            # Nonexecutable review documents and work-item records are still
+            # changed candidate bytes: include them in immutable evidence so
+            # EF02's all-changed-files coverage check cannot be bypassed.
+            reviewed_auxiliary = {p for p in changed_paths
+                if any(p == prefix or p.startswith(prefix.rstrip("/") + "/")
+                       for prefix in allowed_paths)
+                and ((p.startswith("docs/engineering/") and p.endswith(".md"))
+                     or (p.startswith("work_items/") and p.endswith(".json")))}
+            paths.update(reviewed_auxiliary)
         if aggregate_sources:
             # Current composed-source hashes are required by aggregate receipt verification.
             paths.update(candidate_files)
@@ -340,6 +718,9 @@ def registered_action_plan(
             "environment_proven": bool(executable and Path(executable).resolve() == Path(sys.executable).resolve()),
             "registered_profile": matched,
             "selected_impact_tests": list(impact.selected_tests),
+            **({"onboarding_manifest_path": verified_owner["manifest_path"],
+                "onboarding_manifest_sha256": verified_owner["manifest_sha256"],
+                "onboarding_data_only": True} if new_owner else {}),
         }
         executable_scope = bool(impact.runnable and matched)
         entries.append({

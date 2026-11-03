@@ -776,6 +776,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
                 registered_only=mt_context["registered_only"], aggregate_sources=mt_context["aggregate_sources"],
                 groups=() if scope_review else mt_context.get("groups"), command_transform=transform,
                 registered_profiles=mt_context.get("registered_profiles"),
+                allowed_paths=tuple(allowed_prefixes),
                 human_full_suite_authorized=mt_context.get("human_full_suite_authorized", False),
                 on_plan=lambda current: inv.update(minimum_test=current))
             inv["minimum_test"] = plan
