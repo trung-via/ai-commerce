@@ -1040,3 +1040,77 @@ def test_v22_cold_component_one_pr_offline_canary(tmp_path, monkeypatch):
         cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60)
     assert execution.returncode == 0, (execution.stdout, execution.stderr)
     assert "2 passed" in execution.stdout
+
+
+def test_v22_committed_component_owner_persists_in_followup_pr(tmp_path, monkeypatch):
+    """After a one-PR new owner is merged, next source-only PR stays targeted."""
+    import subprocess
+    import runpy
+    import pytest
+    from ai_commerce.engineering import minimum_test as mt
+    from ai_commerce.engineering.impact_v21 import (
+        load_baseline_component_owner_records, registered_action_plan,
+        verified_onboarding_binding, select_impact)
+
+    _, data, ctx = _v22_manifest_fixture(tmp_path)
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=tmp_path,
+                                       stderr=subprocess.DEVNULL).decode().strip()
+    git("init", "-q")
+    git("config", "core.autocrlf", "false")
+    git("add", ".")
+    git("-c", "user.name=MT01", "-c", "user.email=mt01@example.invalid",
+        "commit", "-qm", "baseline with already reviewed manifest owner")
+    base = git("rev-parse", "HEAD")
+    base_files = mt.file_hashes(tmp_path)
+    old_groups = ctx["existing_groups"]
+    monkeypatch.setattr(mt, "approved_groups", lambda: old_groups)
+    records = load_baseline_component_owner_records(
+        root=tmp_path, base_sha=base, existing_groups=old_groups)
+    assert len(records) == 1 and records[0]["group"].name == "fresh"
+
+    changed = data["sources"][0]
+    mk(tmp_path, changed, "def improved():\n    return 'after-onboarding'\n")
+    ingress = ["python", "-m", "pytest", "tests/test_mt01_v21.py", "-q", "-n", "12"]
+    profiles = {"mt01-component-onboarding": ingress,
+                "mt01-prior-tests": ["python", "-m", "pytest",
+                                    "tests/test_prior.py", "-q", "-n", "12"]}
+    plan = registered_action_plan(
+        repo=tmp_path, base_sha=base, base_files=base_files,
+        candidate_files=mt.file_hashes(tmp_path),
+        changed_paths=[changed], required_acs=data["acs"],
+        fallback_argv=ingress, groups=old_groups,
+        registered_profiles=profiles, allowed_paths=[changed])
+    assert set(plan["selected_groups"]) == {"fresh", "prior"}
+    assert plan["unknown_acs"] == []
+    assert not plan["fallback"]
+    assert all(g["execute"] for g in plan["groups"])
+    binding = next(g["binding"] for g in plan["groups"] if g["group"] == "fresh")
+    assert verified_onboarding_binding(
+        workspace=tmp_path, binding=binding, changed_paths=[changed],
+        allowed_paths=[changed], base_sha=base,
+        registered_profiles=profiles, expected_group="fresh")
+    independent = runpy.run_path(str(Path(__file__).resolve().parents[1] /
+                                    ".github/scripts/mt01_v21_oracle.py"))
+    reviewed = independent["trusted_baseline_manifest_groups"](
+        repo=tmp_path, base_sha=base, base_groups=old_groups)
+    assert len(reviewed) == 1 and reviewed[0].name == "fresh"
+    selected = select_impact(
+        root=tmp_path, changed_paths=[changed],
+        groups=(*old_groups, *reviewed), base_sha=base)
+    assert set(selected.selected_tests) == {
+        "tests/test_prior.py", "tests/test_fresh_svc.py"}
+    good, reasons = independent["check_selection"](
+        {"version": 2, "changed_paths": [changed],
+         "selected_tests": list(selected.selected_tests),
+         "selected_groups": list(selected.selected_groups)},
+        base_groups=(*old_groups, *reviewed), candidate_groups=(),
+        changed_paths={changed}, present_paths=set(mt.file_hashes(tmp_path)))
+    assert good, reasons
+
+    # Replacing an immutable baseline manifest is not a new registration.
+    manifest = tmp_path / ctx["manifest_path"]
+    manifest.write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="ONBOARD_BASELINE_MANIFEST_DRIFT"):
+        load_baseline_component_owner_records(
+            root=tmp_path, base_sha=base, existing_groups=old_groups)
