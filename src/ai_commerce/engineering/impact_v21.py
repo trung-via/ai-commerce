@@ -568,10 +568,13 @@ def load_baseline_component_owner_records(
             data = json.loads(raw.decode("utf-8-sig"))
         except (ValueError, UnicodeError) as exc:
             raise ValueError("ONBOARD_BASELINE_MANIFEST_INVALID") from exc
-        if type(data) is not dict:
+        expected_keys = {"schema_version", "component", "sources", "tests",
+                         "acs", "consumers", "contracts"}
+        if (type(data) is not dict or set(data) != expected_keys
+                or any(type(data[k]) is not list
+                       for k in ("sources", "tests", "acs", "consumers", "contracts"))):
             raise ValueError("ONBOARD_BASELINE_MANIFEST_SHAPE")
-        owned = (path, *data.get("sources", ()), *data.get("tests", ()),
-                 *data.get("contracts", ()))
+        owned = (path, *data["sources"], *data["tests"], *data["contracts"])
         if not set(owned) <= base_paths:
             raise ValueError("ONBOARD_BASELINE_OWNER_FILES_NOT_COMMITTED")
         # Reuse the same strict data parser on a synthetic *baseline*
