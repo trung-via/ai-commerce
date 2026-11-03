@@ -94,7 +94,7 @@ def _personal_local_inspect(args):
         "private_keys_used": False,
         "operation_file_write_requested": False,
         "ready_to_enable": False,
-    }).decode("ascii"))
+    }).decode("ascii"), end="")
     return 0
 
 
