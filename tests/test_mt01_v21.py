@@ -819,3 +819,49 @@ def test_v22_onboarding_without_manifest_never_passes(tmp_path):
         allowed_paths=ctx["allowed_paths"])
     assert any("ONBOARD_EXACTLY_ONE_NEW_MANIFEST_REQUIRED" in x for x in plan["reason_codes"])
     assert all(not entry["execute"] for entry in plan["groups"])
+
+
+def test_v22_independent_baseline_oracle_requires_new_owner_tests(tmp_path):
+    import runpy
+    oracle = runpy.run_path(str(Path(__file__).resolve().parents[1] /
+                        ".github/scripts/mt01_v21_oracle.py"))
+    _, values, ctx = _v22_manifest_fixture(tmp_path)
+    new_groups = oracle["independently_reviewed_manifest_groups"](
+        repo=tmp_path, changed_paths=set(ctx["changed_paths"]),
+        base_paths=set(ctx["base_paths"]),
+        base_groups=ctx["existing_groups"])
+    assert len(new_groups) == 1 and new_groups[0].name == "fresh"
+    present = set(ctx["changed_paths"]) | set(ctx["base_paths"])
+    plan = {
+        "version": 2, "changed_paths": sorted(ctx["changed_paths"]),
+        "selected_groups": ["fresh"],
+        "selected_tests": ["tests/test_fresh_svc.py"],
+    }
+    good, reasons = oracle["check_selection"](
+        plan, base_groups=ctx["existing_groups"],
+        candidate_groups=new_groups, changed_paths=set(ctx["changed_paths"]),
+        present_paths=present)
+    assert good, reasons
+    plan["selected_tests"] = []
+    good, reasons = oracle["check_selection"](
+        plan, base_groups=ctx["existing_groups"],
+        candidate_groups=new_groups, changed_paths=set(ctx["changed_paths"]),
+        present_paths=present)
+    assert not good
+    assert "REQUIRED_TEST_OMITTED:tests/test_fresh_svc.py" in reasons
+
+
+def test_v22_independent_baseline_oracle_rejects_manifest_argv(tmp_path):
+    import json
+    import runpy
+    import pytest
+    oracle = runpy.run_path(str(Path(__file__).resolve().parents[1] /
+                        ".github/scripts/mt01_v21_oracle.py"))
+    _, values, ctx = _v22_manifest_fixture(tmp_path)
+    values["argv"] = ["sh", "-c", "true"]
+    (tmp_path / ctx["manifest_path"]).write_text(json.dumps(values), encoding="utf-8")
+    with pytest.raises(ValueError, match="ONBOARD_MANIFEST_UNTRUSTED_FIELDS"):
+        oracle["independently_reviewed_manifest_groups"](
+            repo=tmp_path, changed_paths=set(ctx["changed_paths"]),
+            base_paths=set(ctx["base_paths"]),
+            base_groups=ctx["existing_groups"])
