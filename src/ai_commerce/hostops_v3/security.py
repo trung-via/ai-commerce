@@ -6,45 +6,32 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import time
 
 from .contract import CONTROL_REPOSITORY, SOURCE_REPOSITORY, decode, deny, digest, ident, sha, shape, text
 
 
 def prefer_readable_pwsh_path():
-    """Prefer a byte-readable pwsh binary over an unreadable WindowsApps AppExecLink stub."""
+    """Resolve pwsh only when explicitly called; never modify process PATH.
+
+    A WindowsApps alias may execute PLAN-only tests even when it cannot be
+    byte-read. V4 broker admission separately requires a pinned readable binary.
+    """
+    fallback = shutil.which("pwsh.exe") or shutil.which("pwsh")
     if os.name != "nt":
-        return shutil.which("pwsh")
-    current = shutil.which("pwsh")
-    if current:
+        return fallback
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        candidate = Path(entry) / "pwsh.exe"
         try:
-            with Path(current).open("rb") as handle:
-                handle.read(4)
-            return current
+            if candidate.is_file():
+                with candidate.open("rb") as handle:
+                    if handle.read(4):
+                        return str(candidate)
         except OSError:
-            pass
-    entries = os.environ.get("PATH", "").split(os.pathsep)
-    readable_dirs = []
-    other_dirs = []
-    for entry in entries:
-        candidate = Path(entry) / "pwsh.exe" if entry else None
-        is_readable = False
-        if candidate is not None:
-            try:
-                if candidate.is_file():
-                    with candidate.open("rb") as handle:
-                        is_readable = bool(handle.read(4))
-            except OSError:
-                is_readable = False
-        if is_readable:
-            readable_dirs.append(entry)
-        else:
-            other_dirs.append(entry)
-    if readable_dirs:
-        os.environ["PATH"] = os.pathsep.join([*readable_dirs, *other_dirs])
-    return shutil.which("pwsh")
-
-
-prefer_readable_pwsh_path()
+            continue
+    return fallback
 
 
 def windows_identity(process=None):
@@ -168,6 +155,43 @@ def load_config(path):
     return config
 
 
+def _bounded_install_paths(root, *, max_entries=1024, max_depth=12,
+                           max_seconds=2.0):
+    """Enumerate approved tree with hard node/depth/time bounds; never follow links.
+
+    Results include the root. Unknown permissions, reparse points, and limit
+    overruns fail closed rather than trusting partial installed-state evidence.
+    """
+    deadline = time.monotonic() + max_seconds
+    pending = [(Path(root), 0)]
+    scheduled = 1
+    result = []
+    while pending:
+        if time.monotonic() >= deadline:
+            deny("INSTALL_SCAN_LIMIT")
+        path, depth = pending.pop()
+        try:
+            info = path.lstat()
+        except OSError:
+            deny("INSTALL_SCAN_UNAVAILABLE")
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            deny("INSTALL_REPARSE_DENIED")
+        result.append(path)
+        if not stat.S_ISDIR(info.st_mode):
+            continue
+        try:
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    if (time.monotonic() >= deadline or depth >= max_depth
+                            or scheduled >= max_entries):
+                        deny("INSTALL_SCAN_LIMIT")
+                    pending.append((Path(entry.path), depth + 1))
+                    scheduled += 1
+        except OSError:
+            deny("INSTALL_SCAN_UNAVAILABLE")
+    return result
+
+
 def admit(config, config_path):
     if not config["enabled"]:
         deny("KILL_SWITCH")
@@ -186,7 +210,8 @@ def admit(config, config_path):
     targets = [Path(config_path), Path(config["policy_dir"]), Path(config["release_dir"]), Path(config["state_dir"])]
     # Entire installed code/policy tree, not just a label or marker file.
     for root in (Path(config["policy_dir"]), Path(config["release_dir"]), Path(config["state_dir"])):
-        targets.extend(root.rglob("*"))
+        # Includes each root; fixed traversal budget prevents unbounded preflight.
+        targets.extend(_bounded_install_paths(root))
     for p in targets:
         s = p.lstat()
         if stat.S_ISLNK(s.st_mode) or getattr(s, "st_file_attributes", 0) & 0x400:
@@ -268,9 +293,7 @@ def admit_v4(config, config_path):
         deny("IDENTITIES_NOT_ISOLATED")
     admit(config, config_path)
     transport_root = Path(config["transport_state_dir"])
-    if transport_root.exists():
-        for p in (transport_root, *transport_root.rglob("*")):
-            s = p.lstat()
-            if stat.S_ISLNK(s.st_mode) or getattr(s, "st_file_attributes", 0) & 0x400:
-                deny("INSTALL_REPARSE_DENIED")
+    if transport_root.exists() or transport_root.is_symlink():
+        _bounded_install_paths(transport_root, max_entries=256, max_depth=6,
+                               max_seconds=1.0)
 
