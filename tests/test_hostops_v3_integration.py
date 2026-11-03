@@ -1563,6 +1563,159 @@ def test_personal_r2_session_fails_closed_for_invalid_context_and_consent(
         session.run_session(SimpleNamespace(**params))
 
 
+def _personal_w1_signed_fixture(h, *, now=1800000000):
+    """Actual OpenSSH offline signer fixture: never a real user credential."""
+    content = "W1 signed source contract, no file effects.\n"
+    params = {
+        "root_id": "human-scratch-v1",
+        "filename": "signed-proof.txt",
+        "content_utf8": content,
+        "content_sha256": c.digest(content.encode("utf-8")),
+        "content_bytes": len(content.encode("utf-8")),
+    }
+    unsigned = {
+        "schema": auth.PERSONAL_W1_SCHEMA,
+        "request_id": "w1-" + "a" * 32,
+        "issue_number": 123,
+        "source_repository": c.SOURCE_REPOSITORY,
+        "control_repository": c.CONTROL_REPOSITORY,
+        "source_sha": "b" * 40,
+        "operation": "create_new_utf8",
+        "parameters": params,
+        "issued_at": now,
+        "expires_at": now + 300,
+    }
+    signed = {
+        **unsigned,
+        "approval_signature_b64": h.sign(unsigned, "human", auth.PERSONAL_W1_NAMESPACE),
+    }
+    signers = h.policy / "human-signers"
+    return signed, {
+        "issue_number": 123,
+        "expected_source_sha": "b" * 40,
+        "allowed_signers": signers,
+        "expected_signers_sha256": c.digest(signers.read_bytes()),
+        "ssh_keygen": Path(h.config["ssh_keygen"]),
+        "expected_verifier_sha256": h.config["ssh_keygen_sha256"],
+        "now": now + 30,
+    }
+
+
+def test_personal_w1_real_ed25519_signature_verified_but_never_enables_write(h):
+    proposal, kwargs = _personal_w1_signed_fixture(h)
+    root_snapshot = {p.name for p in h.data.iterdir()}
+    signed = auth.personal_w1_signing_payload(
+        proposal, issue_number=kwargs["issue_number"],
+        expected_source_sha=kwargs["expected_source_sha"], now=kwargs["now"])
+    assert c.digest(c.canonical(signed)) != c.digest(c.canonical(proposal))
+    receipt = auth.personal_w1_verify_offline(proposal, **kwargs)
+    assert receipt == {
+        "schema": "hostops.personal.w1_source_gate.v1",
+        "status": "SIGNED_PROPOSAL_VERIFIED_NO_EFFECT",
+        "issue_number": 123,
+        "request_id": "w1-" + "a" * 32,
+        "source_sha": "b" * 40,
+        "proposal_sha256": c.digest(c.canonical(signed)),
+        "signature_valid": True,
+        "execution_allowed": False,
+        "replay_ledger_proven": False,
+        "credential_custody_proven": False,
+    }
+    # Re-validating is deliberately NOT mistaken for a replay-safe write: no
+    # effect method exists, and ledger/custody must be implemented separately.
+    assert auth.personal_w1_verify_offline(proposal, **kwargs) == receipt
+    assert {p.name for p in h.data.iterdir()} == root_snapshot
+    assert not (h.data / proposal["parameters"]["filename"]).exists()
+
+
+def test_personal_w1_rejects_unscoped_paths_payloads_issue_and_expiry(h):
+    proposal, kw = _personal_w1_signed_fixture(h)
+    p = proposal["parameters"]
+    changed = [
+        {**proposal, "schema": "hostops.personal.remote_read.v1"},
+        {**proposal, "operation": "powershell"},
+        {**proposal, "source_repository": c.CONTROL_REPOSITORY},
+        {**proposal, "control_repository": c.SOURCE_REPOSITORY},
+        {**proposal, "source_sha": "c"*40},
+        {**proposal, "issue_number": 124},
+        {**proposal, "request_id": "w1-invalid"},
+        {**proposal, "issued_at": True},
+        {**proposal, "expires_at": proposal["issued_at"] + 601},
+        {**proposal, "extra": "unsafe"},
+        {**proposal, "approval_signature_b64": ""},
+        {**proposal, "parameters": {**p, "root_id": r"C:\Users\me"}},
+        {**proposal, "parameters": {**p, "filename": "../danger.txt"}},
+        {**proposal, "parameters": {**p, "filename": r"nested\danger.txt"}},
+        {**proposal, "parameters": {**p, "filename": "C:danger.txt"}},
+        {**proposal, "parameters": {**p, "filename": "danger.txt:ads"}},
+        {**proposal, "parameters": {**p, "filename": r"\\server\share.txt"}},
+        {**proposal, "parameters": {**p, "filename": "CON.txt"}},
+        {**proposal, "parameters": {**p, "filename": "LPT9.md"}},
+        {**proposal, "parameters": {**p, "filename": "bad.exe"}},
+        {**proposal, "parameters": {**p, "filename": "trailing .txt"}},
+        {**proposal, "parameters": {**p, "filename": "é.txt"}},
+        {**proposal, "parameters": {**p, "content_utf8": ""}},
+        {**proposal, "parameters": {**p, "content_utf8": "\x00evil"}},
+        {**proposal, "parameters": {**p, "content_utf8": "\ud800"}},
+        {**proposal, "parameters": {**p, "content_utf8": "a" * 2049}},
+        {**proposal, "parameters": {**p, "content_bytes": True}},
+        {**proposal, "parameters": {**p, "content_bytes": p["content_bytes"] + 1}},
+        {**proposal, "parameters": {**p, "content_sha256": "0" * 64}},
+        {**proposal, "parameters": {**p, "hidden": "command"}},
+    ]
+    for bad in changed:
+        with pytest.raises(c.Denied):
+            auth.personal_w1_signing_payload(
+                bad, issue_number=123, expected_source_sha="b" * 40,
+                now=1800000030)
+    with pytest.raises(c.Denied, match="W1_ISSUE_MISMATCH"):
+        auth.personal_w1_signing_payload(
+            proposal, issue_number=124, expected_source_sha="b" * 40,
+            now=1800000030)
+    for t in (1799999999, 1800000301):
+        with pytest.raises(c.Denied, match="W1_REQUEST_EXPIRED"):
+            auth.personal_w1_signing_payload(
+                proposal, issue_number=123, expected_source_sha="b"*40, now=t)
+    assert not (h.data / "danger.txt").exists()
+
+
+def test_personal_w1_bad_signer_namespace_signature_and_pinning_fail_closed(h, tmp_path):
+    proposal, kw = _personal_w1_signed_fixture(h)
+    unsigned = {k: v for k, v in proposal.items()
+                if k != "approval_signature_b64"}
+    valid = auth.personal_w1_verify_offline(proposal, **kw)
+    assert valid["execution_allowed"] is False
+    for alternative in [
+        {**proposal, "parameters": {**proposal["parameters"], "filename": "other.txt"}},
+        {**proposal, "approval_signature_b64": h.sign(
+            unsigned, "issuer", auth.PERSONAL_W1_NAMESPACE)},
+        {**proposal, "approval_signature_b64": h.sign(
+            unsigned, "human", "hostops-v3-exact-action")},
+        {**proposal, "approval_signature_b64": "not-valid-base64"},
+    ]:
+        with pytest.raises(c.Denied):
+            auth.personal_w1_verify_offline(alternative, **kw)
+    signers = h.policy / "human-signers"
+    original = signers.read_bytes()
+    try:
+        signers.write_text("hostops-human ssh-ed25519 AAAA\n", encoding="ascii")
+        with pytest.raises(c.Denied, match="W1_SIGNER_POLICY_UNTRUSTED"):
+            auth.personal_w1_verify_offline(proposal, **kw)
+    finally:
+        signers.write_bytes(original)
+    with pytest.raises(c.Denied, match="W1_SIGNER_POLICY_UNTRUSTED"):
+        auth.personal_w1_verify_offline(
+            proposal, **{**kw, "expected_signers_sha256": "0" * 64})
+    with pytest.raises(c.Denied, match="W1_SIGNER_POLICY_UNTRUSTED"):
+        auth.personal_w1_verify_offline(
+            proposal, **{**kw, "expected_verifier_sha256": "0" * 64})
+    with pytest.raises(c.Denied, match="W1_SIGNER_POLICY_UNTRUSTED"):
+        auth.personal_w1_verify_offline(
+            proposal, **{**kw, "allowed_signers": tmp_path / "missing-signers"})
+    with pytest.raises(c.Denied, match="W1_SIGNER_POLICY_UNTRUSTED"):
+        auth.personal_w1_verify_offline(
+            proposal, **{**kw, "ssh_keygen": tmp_path / "no-verifier"})
+
 def test_v4_legacy_two_account_contract_rejects_equal_sid(h):
     cfg = _v4_config(h)
     assert cfg["schema"] == "hostops.config.v4"
