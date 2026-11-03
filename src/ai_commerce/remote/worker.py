@@ -470,6 +470,9 @@ class LocalBatchWorker:
             outcome["pytest_profile"] = report.get("pytest_profile")
             outcome["pytest_profiles"] = report.get("pytest_profiles")
             outcome["observed_pytest_workers"] = report.get("observed_pytest_workers")
+            outcome["workers_actual"] = report.get("workers_actual")
+            outcome["workers_actual_by_group"] = report.get("workers_actual_by_group")
+            outcome["worker_count_provenance"] = report.get("worker_count_provenance")
             outcome["minimum_test"] = report.get("minimum_test")
             # Trust neither a success-shaped receipt after a nonzero process
             # exit nor an EF01 PASS receipt contradicted by verification.
