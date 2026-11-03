@@ -3,10 +3,35 @@ from __future__ import annotations
 
 import ctypes
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+import shutil
 import stat
+import time
 
-from .contract import decode, deny, shape
+from .contract import CONTROL_REPOSITORY, SOURCE_REPOSITORY, decode, deny, digest, ident, sha, shape, text
+
+
+def prefer_readable_pwsh_path():
+    """Resolve pwsh only when explicitly called; never modify process PATH.
+
+    A WindowsApps alias may execute PLAN-only tests even when it cannot be
+    byte-read. V4 broker admission separately requires a pinned readable binary.
+    """
+    fallback = shutil.which("pwsh.exe") or shutil.which("pwsh")
+    if os.name != "nt":
+        return fallback
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        candidate = Path(entry) / "pwsh.exe"
+        try:
+            if candidate.is_file():
+                with candidate.open("rb") as handle:
+                    if handle.read(4):
+                        return str(candidate)
+        except OSError:
+            continue
+    return fallback
 
 
 def windows_identity(process=None):
@@ -130,6 +155,43 @@ def load_config(path):
     return config
 
 
+def _bounded_install_paths(root, *, max_entries=1024, max_depth=12,
+                           max_seconds=2.0):
+    """Enumerate approved tree with hard node/depth/time bounds; never follow links.
+
+    Results include the root. Unknown permissions, reparse points, and limit
+    overruns fail closed rather than trusting partial installed-state evidence.
+    """
+    deadline = time.monotonic() + max_seconds
+    pending = [(Path(root), 0)]
+    scheduled = 1
+    result = []
+    while pending:
+        if time.monotonic() >= deadline:
+            deny("INSTALL_SCAN_LIMIT")
+        path, depth = pending.pop()
+        try:
+            info = path.lstat()
+        except OSError:
+            deny("INSTALL_SCAN_UNAVAILABLE")
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            deny("INSTALL_REPARSE_DENIED")
+        result.append(path)
+        if not stat.S_ISDIR(info.st_mode):
+            continue
+        try:
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    if (time.monotonic() >= deadline or depth >= max_depth
+                            or scheduled >= max_entries):
+                        deny("INSTALL_SCAN_LIMIT")
+                    pending.append((Path(entry.path), depth + 1))
+                    scheduled += 1
+        except OSError:
+            deny("INSTALL_SCAN_UNAVAILABLE")
+    return result
+
+
 def admit(config, config_path):
     if not config["enabled"]:
         deny("KILL_SWITCH")
@@ -148,7 +210,8 @@ def admit(config, config_path):
     targets = [Path(config_path), Path(config["policy_dir"]), Path(config["release_dir"]), Path(config["state_dir"])]
     # Entire installed code/policy tree, not just a label or marker file.
     for root in (Path(config["policy_dir"]), Path(config["release_dir"]), Path(config["state_dir"])):
-        targets.extend(root.rglob("*"))
+        # Includes each root; fixed traversal budget prevents unbounded preflight.
+        targets.extend(_bounded_install_paths(root))
     for p in targets:
         s = p.lstat()
         if stat.S_ISLNK(s.st_mode) or getattr(s, "st_file_attributes", 0) & 0x400:
@@ -165,3 +228,78 @@ def admit(config, config_path):
         windows_acl(key, trusted, private_readers=trusted | {transport})
     elif key.stat().st_mode & 0o007:
         deny("ACL_SECRET_EXPOSED")
+
+
+CONFIG_KEYS_V4 = CONFIG_KEYS + " source_repository control_repository"
+NON_BROKER_SIDS = frozenset({"S-1-5-18", "S-1-5-19", "S-1-5-20", "S-1-5-32-544", "0"})
+
+
+def _validate_v4_config_dict(config):
+    shape(config, CONFIG_KEYS_V4)
+    if config["schema"] != "hostops.config.v4" or type(config["enabled"]) is not bool:
+        deny("BAD_CONFIG")
+    if (config["source_repository"] != SOURCE_REPOSITORY or
+            config["control_repository"] != CONTROL_REPOSITORY):
+        deny("REPOSITORY_MISMATCH")
+    ident(config["host_id"])
+    text(config["broker_identity"], 256)
+    text(config["transport_identity"], 256)
+    for key in ("policy_dir", "state_dir", "transport_state_dir", "release_dir", "ssh_keygen", "pwsh"):
+        text(config[key])
+        value = config[key]
+        # Offline disabled Windows template must parse on POSIX source CI.
+        # An enabled V4 broker still requires a native absolute local path.
+        native_absolute = Path(value).is_absolute()
+        offline_windows_absolute = (config["enabled"] is False and
+                                    PureWindowsPath(value).is_absolute())
+        if value.startswith(("\\\\", "//")) or not (native_absolute or offline_windows_absolute):
+            deny("BAD_CONFIG")
+    text(config["endpoint"])
+    for key in ("ssh_keygen_sha256", "pwsh_sha256"):
+        sha(config[key])
+    for key in ("untrusted_identities", "trusted_owners"):
+        if type(config[key]) is not list or not config[key] or len(config[key]) > 32:
+            deny("BAD_CONFIG")
+        for item in config[key]:
+            text(item, 256)
+    if (config["broker_identity"] == config["transport_identity"] or
+            config["broker_identity"] in config["untrusted_identities"] or
+            config["transport_identity"] in config["untrusted_identities"] or
+            config["broker_identity"] in config["trusted_owners"] or
+            config["transport_identity"] in config["trusted_owners"] or
+            set(config["trusted_owners"]) & set(config["untrusted_identities"])):
+        deny("IDENTITIES_NOT_ISOLATED")
+    return config
+
+
+def load_config_v4(path):
+    """Strict V4 configuration loader; rejects v3 schemas and mismatched repos."""
+    return _validate_v4_config_dict(decode(Path(path).read_bytes()))
+
+
+def admit_v4(config, config_path):
+    """Strict V4 admission; enforces disabled/KILL gates, non-admin SIDs, and ACLs."""
+    _validate_v4_config_dict(config)
+    if not config["enabled"] or (Path(config["policy_dir"]) / "KILL").exists():
+        deny("KILL_SWITCH")
+    if "0" * 64 in (config["ssh_keygen_sha256"], config["pwsh_sha256"]):
+        deny("VERIFIER_UNVERIFIED")
+    for exe_key, sha_key, err_code in (
+        ("ssh_keygen", "ssh_keygen_sha256", "VERIFIER_UNVERIFIED"),
+        ("pwsh", "pwsh_sha256", "POWERSHELL_UNVERIFIED"),
+    ):
+        exe = Path(config[exe_key])
+        if not exe.is_absolute() or not exe.is_file() or digest(exe.read_bytes()) != config[sha_key]:
+            deny(err_code)
+    broker, transport = config["broker_identity"], config["transport_identity"]
+    if broker in NON_BROKER_SIDS or transport in NON_BROKER_SIDS:
+        deny("ELEVATION_DENIED")
+    if (broker.startswith("REPLACE_WITH_") or transport.startswith("REPLACE_WITH_") or
+            any(str(item).startswith("REPLACE_WITH_") for item in config["untrusted_identities"])):
+        deny("IDENTITIES_NOT_ISOLATED")
+    admit(config, config_path)
+    transport_root = Path(config["transport_state_dir"])
+    if transport_root.exists() or transport_root.is_symlink():
+        _bounded_install_paths(transport_root, max_entries=256, max_depth=6,
+                               max_seconds=1.0)
+

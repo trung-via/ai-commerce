@@ -122,9 +122,16 @@ def validate_receipt_zip(
                 return False
             for target in targets:
                 source_module = target.removesuffix(".py").replace("/", ".")
-                if not any(case.startswith(source_module + "::") for case in observed):
-                    # JUnit must show a real collected case FROM each named file,
-                    # not merely an internally consistent list of test filenames.
+                # pytest module functions: classname=tests.test_file
+                # unittest/pytest class methods: classname=tests.test_file.TestClass
+                # Match the module boundary exactly; test_file_evil is NOT test_file.
+                if not any(
+                    case.partition("::")[0] == source_module or
+                    case.partition("::")[0].startswith(source_module + ".")
+                    for case in observed
+                ):
+                    # Every selected file must contribute real collected JUnit
+                    # cases; a similarly named unrelated module cannot count.
                     return False
             observed_counts = dict(passed=0, skipped=0, failed=0, errors=0)
             for case in cases:

@@ -176,11 +176,22 @@ class FakeGitHub:
 
 
 def _approval_event(g, owner=True):
-    return {"issue": {"number": FakeGitHub.pr, "pull_request": {"url": "repo"}},
-            "comment": {"body": g.approval_text(FakeGitHub.pr, FakeGitHub.head,
-                                                 FakeGitHub.base),
-                        "user": {"login": "trung-via" if owner else "attacker"},
-                        "author_association": "OWNER" if owner else "NONE"}}
+    """Only a pinned COMMENT review wakes gate; PR Conversation is authority."""
+    return {
+        "action": "submitted",
+        "pull_request": {
+            "number": FakeGitHub.pr, "state": "open",
+            "head": {"sha": FakeGitHub.head},
+            "base": {"sha": FakeGitHub.base},
+        },
+        "review": {
+            "body": g.approval_text(FakeGitHub.pr, FakeGitHub.head, FakeGitHub.base),
+            "commit_id": FakeGitHub.head,
+            "state": "commented",
+            "user": {"login": "trung-via" if owner else "attacker"},
+            "author_association": "OWNER" if owner else "NONE",
+        },
+    }
 
 
 def _ci_event(g, conclusion="success", head=None):
@@ -197,7 +208,7 @@ def test_merge_gate_canonical_approval_and_owner_authentication(gate):
     assert gate.parse_approval(text + "\nexecute dangerous code") is None
     assert gate.parse_approval("AI_COMMERCE_BRAIN_REVIEW_PASS_V1\npr=219") is None
     assert gate.candidates(FakeGitHub(gate), FakeGitHub.repo, _approval_event(gate, False)) == []
-    assert gate.candidates(FakeGitHub(gate), FakeGitHub.repo, _approval_event(gate)) == [(219, None)]
+    assert gate.candidates(FakeGitHub(gate), FakeGitHub.repo, _approval_event(gate)) == [(219, FakeGitHub.head)]
 
 
 def test_merge_queue_retains_same_approval_until_ci_finishes(gate):
@@ -285,6 +296,46 @@ def test_merge_gate_v21_wrong_run_and_missing_artifact_denied(gate):
     bad = [dict(correct[0]), dict(correct[1])]
     bad[1]["workflow_run"] = {"id": 199, "head_sha": "a" * 40}
     assert not gate.verified_v21_artifacts({"artifacts": bad}, 200, "a" * 40)
+
+
+def test_mt01_junit_class_case_requires_exact_test_module_boundary(gate):
+    """Real unittest/pytest classnames must count; prefix-collision forgery must not."""
+    import io
+    import json
+    import hashlib
+    import zipfile
+
+    original = FakeGitHub(gate).read_artifact(1000)
+    with zipfile.ZipFile(io.BytesIO(original)) as z:
+        source = {n: z.read(n) for n in z.namelist()}
+
+    def rewritten(class_name):
+        payload = dict(source)
+        receipt = json.loads(payload["evidence.json"])
+        xml = payload["chunk-0.xml"].replace(
+            b'classname="tests.test_minimum_test"',
+            ('classname="' + class_name + '"').encode("ascii"))
+        assert xml != source["chunk-0.xml"]
+        receipt["chunks"][0]["junit_sha256"] = hashlib.sha256(xml).hexdigest()
+        receipt["chunks"][0]["observed_cases"] = [class_name + "::test_ok"]
+        payload["chunk-0.xml"] = xml
+        payload["evidence.json"] = json.dumps(receipt).encode()
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as z:
+            for path, content in payload.items():
+                z.writestr(path, content)
+        return buffer.getvalue()
+
+    kwargs = dict(expected_head="a" * 40, expected_base="b" * 40,
+                  os_name="ubuntu-latest",
+                  expected_changed_paths=("src/ai_commerce/product/identity.py",),
+                  required_test_files=("tests/test_minimum_test.py",))
+    assert gate.validate_receipt_zip(
+        rewritten("tests.test_minimum_test.TestRealClass"), **kwargs)
+    assert not gate.validate_receipt_zip(
+        rewritten("tests.test_minimum_test_evil.TestRealClass"), **kwargs)
+    assert not gate.validate_receipt_zip(
+        rewritten("tests.test_unrelated.TestRealClass"), **kwargs)
 
 
 def test_merge_gate_v21_rejects_uploaded_forged_receipt_bytes(gate):
@@ -393,7 +444,11 @@ def test_brain_pass_gate_workflow_replaces_old_queue():
     assert not old.exists()
     text = new.read_text(encoding="utf-8")
     assert "AI Commerce Brain PASS auto-merge" in text
-    assert "issue_comment:" in text
+    assert "  issue_comment:" not in text
+    assert "  pull_request_review:" in text
+    assert "    types: [submitted]" in text
+    assert "github.event.review.state == 'commented'" in text
+    assert "github.event.review.user.login == github.repository_owner" in text
     assert "workflow_run:" in text
     assert "ref: main" in text
     # The merge endpoint requires repository Contents(write), not only PR(write).
@@ -412,11 +467,69 @@ def test_brain_pass_exact_identity_and_revision(gate):
     assert gate.process(g, g.repo, event)[0]["status"] == "MERGED"
     assert len(g.writes) == 1
     bad = FakeGitHub(gate, ci="completed")
-    event["comment"]["user"]["login"] = "spoofed-reviewer"
+    event["review"]["user"]["login"] = "spoofed-reviewer"
     assert gate.candidates(bad, bad.repo, event) == []
     assert bad.writes == []
 
 
+
+
+@pytest.mark.parametrize("tamper", (
+    "issue_comment", "non_pr_comment", "missing_comment_body",
+    "extra_comment_line", "reviewer_spoof", "wrong_commit", "wrong_head",
+    "wrong_base", "stale_pr", "wrong_pr", "revoked", "review_approved",
+    "edited_review", "missing_review_commit", "wrong_review_state",
+))
+def test_brain_wake_requires_exact_owner_comment_review(gate, tamper):
+    from copy import deepcopy
+    event = deepcopy(_approval_event(gate))
+    if tamper == "issue_comment":
+        event = {
+            "action": "created", "issue": {"number": 219, "pull_request": {}},
+            "comment": {"body": gate.approval_text(219, "a"*40, "b"*40),
+                        "user": {"login": "trung-via"}, "author_association": "OWNER"}
+        }
+    elif tamper == "non_pr_comment":
+        event = {"action": "created", "issue": {"number": 281},
+                 "comment": {"body": "EF02_EXECUTION_SUMMARY_V1"}}
+    elif tamper == "missing_comment_body":
+        event["review"]["body"] = ""
+    elif tamper == "extra_comment_line":
+        event["review"]["body"] += "\\nnot-canonical"
+    elif tamper == "reviewer_spoof":
+        event["review"]["user"]["login"] = "attacker"
+    elif tamper == "wrong_commit":
+        event["review"]["commit_id"] = "d"*40
+    elif tamper == "wrong_head":
+        event["pull_request"]["head"]["sha"] = "d"*40
+    elif tamper == "wrong_base":
+        event["pull_request"]["base"]["sha"] = "d"*40
+    elif tamper == "stale_pr":
+        event["pull_request"]["state"] = "closed"
+    elif tamper == "wrong_pr":
+        event["pull_request"]["number"] = 220
+    elif tamper == "revoked":
+        event["review"]["body"] = gate.approval_text(219, "a"*40, "b"*40, revoke=True)
+    elif tamper == "review_approved":
+        event["review"]["state"] = "approved"
+    elif tamper == "edited_review":
+        event["action"] = "edited"
+    elif tamper == "missing_review_commit":
+        event["review"].pop("commit_id")
+    elif tamper == "wrong_review_state":
+        event["review"]["state"] = "dismissed"
+    fake = FakeGitHub(gate, ci="completed")
+    assert gate.candidates(fake, fake.repo, event) == []
+    assert gate.process(fake, fake.repo, event) == []
+    assert not fake.writes
+
+
+def test_review_wake_without_prior_conversation_pass_cannot_merge(gate):
+    fake = FakeGitHub(gate, ci="completed", approval=False)
+    outcome = gate.process(fake, fake.repo, _approval_event(gate))
+    assert outcome[0]["status"] == "HOLD"
+    assert outcome[0]["reason"] == "NO_ACTIVE_BRAIN_PASS"
+    assert not fake.writes
 
 # New-component admission: protected main may inspect a pinned candidate's
 # strictly additive declaration as DATA, but cannot execute candidate Python.
