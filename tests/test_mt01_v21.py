@@ -1135,3 +1135,44 @@ def test_v22_committed_component_owner_persists_in_followup_pr(tmp_path, monkeyp
     with pytest.raises(ValueError, match="ONBOARD_BASELINE_MANIFEST_DRIFT"):
         load_baseline_component_owner_records(
             root=tmp_path, base_sha=base, existing_groups=old_groups)
+
+
+def test_issue_ingress_and_skipped_cleanup_reviewed_safety_contract():
+    """Live workflow files must remain scoped and covered by reviewed MT01 regressions."""
+    from ai_commerce.engineering.impact_v21 import CONTROL_TESTS
+
+    root = Path(__file__).resolve().parents[1]
+    expected = (
+        ".github/workflows/issue-ingress.yml",
+        ".github/workflows/actions-skipped-cleanup.yml",
+        ".github/workflows/hostops-readonly.yml",
+        ".github/workflows/hostops-v2.yml",
+    )
+    for path in expected:
+        assert path in CONTROL_TESTS
+        assert (root / path).is_file()
+        assert "tests/test_mt01_v21.py" in CONTROL_TESTS[path]
+
+    ingress = (root / expected[0]).read_text(encoding="utf-8")
+    assert "types: [opened, labeled]" in ingress
+    assert "uses: ./.github/workflows/ef02-batch.yml" in ingress
+    for old in ("hostops-readonly.yml", "hostops-v2.yml", "hostops-v3.yml"):
+        assert "uses: ./.github/workflows/" + old in ingress
+    for old in ("ef02-batch.yml", "hostops-readonly.yml",
+                "hostops-v2.yml", "hostops-v3.yml"):
+        called = (root / ".github/workflows" / old).read_text(encoding="utf-8")
+        assert "  workflow_call:" in called
+        assert "  issues:\\n" not in called
+
+    cleanup = (root / expected[1]).read_text(encoding="utf-8")
+    for required in (
+        "status: 'skipped'", "run.status !== 'completed'",
+        "run.conclusion !== 'skipped'", "run.run_attempt !== 1",
+        "allowed.get(run.path) !== run.event",
+        "Date.parse(run.updated_at) > cutoff",
+        "jobs.jobs.every(job =>", "job.conclusion === 'skipped'",
+        "artifacts.total_count !== 0", "const maxDeletes = 150",
+        "const dryRun = process.env.DRY_RUN === 'true'",
+        "actions: write", "skipped-cleanup-receipt.json",
+    ):
+        assert required in cleanup, required
