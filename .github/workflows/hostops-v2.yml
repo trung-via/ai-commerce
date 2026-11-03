@@ -2,8 +2,7 @@ name: AI Commerce HostOps v2 signed and scoped host operations
 run-name: "HostOpsV2 Issue #${{ github.event.issue.number }}"
 
 on:
-  issues:
-    types: [opened]
+  workflow_call:
 
 permissions:
   contents: read
