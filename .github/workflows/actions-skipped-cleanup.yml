@@ -7,7 +7,7 @@ on:
     branches: [main]
     paths: ['.github/workflows/actions-skipped-cleanup.yml']
   schedule:
-    - cron: '17,47 * * * *'
+    - cron: '42 1 * * *'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -27,7 +27,7 @@ concurrency:
 jobs:
   cleanup:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - name: Prune only safely classified skipped runs
         uses: actions/github-script@v7
@@ -45,7 +45,7 @@ jobs:
 
             const dryRun = process.env.DRY_RUN === 'true';
             const maxPages = 10;
-            const maxDeletes = 150;
+            const maxDeletes = 500;
             const cutoff = Date.now() - 5 * 60 * 1000;
             const allowed = new Map([
               ['.github/workflows/brain-pass-auto-merge.yml', 'issue_comment'],
