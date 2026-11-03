@@ -1148,7 +1148,7 @@ def test_personal_local_inspect_needs_local_console_matching_sid_and_consent(
     assert cli.main_v4(options) == 0
     output = capsys.readouterr()
     assert "HOSTOPS_PERSONAL_LOCAL_READ" in output.out
-    receipt = c.decode(output.out.rsplit("HOSTOPS_PERSONAL_LOCAL_READ\\n", 1)[-1].strip().encode())
+    receipt = c.decode(output.out.splitlines()[-1].encode("ascii"))
     assert receipt == {
         "schema": "hostops.personal.local_inventory.v1",
         "account_mode": security.PERSONAL_V4_MODE,
