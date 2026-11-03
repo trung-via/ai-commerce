@@ -1,0 +1,68 @@
+{
+  "work_id": "A18-1-PORTFOLIO-001",
+  "action_id": "A18-1-M06-PORTFOLIO-OFFLINE-01",
+  "source_sha": "b08d33f3195c48559d4964cf36c8b03612e41dd9",
+  "human_instruction": "Human ChatGPT 2026-11-03 @AI Commerce: TRIỂN KHAI a18.1",
+  "objective": "First M06 implementation: deterministic evidence-bound portfolio advice for Human review",
+  "status": "OFFLINE_IMPLEMENTED_INDEPENDENT_VERIFICATION_REQUIRED",
+  "fresh_implementation": true,
+  "owner": "Commerce Opportunity",
+  "owner_manifest": "work_items/mt01-components/a18-1.json",
+  "verification_profile": "mt01-component-onboarding",
+  "acceptance": ["A18.M06.offline-evidence-bound-portfolio-recommendation"],
+  "allowed_paths": [
+    "src/ai_commerce/opportunity/portfolio/__init__.py",
+    "src/ai_commerce/opportunity/portfolio/schemas.py",
+    "src/ai_commerce/opportunity/portfolio/sources.py",
+    "src/ai_commerce/opportunity/portfolio/recommend.py",
+    "contracts/PortfolioRecommendation.v1.schema.json",
+    "tests/test_a18_portfolio.py",
+    "tests/test_a18_portfolio_integration.py",
+    "work_items/mt01-components/a18-1.json",
+    "work_items/A18-1-PORTFOLIO-001.json",
+    "docs/engineering/A18_1_IMPLEMENTATION_REPORT.md"
+  ],
+  "consumer_owners": ["a10", "a11", "a15", "a16"],
+  "executor_selection_requested": {"provider": "codex", "model": "gpt-6.1-sol", "effort": "max"},
+  "max_repair_rounds": 2,
+  "executor_git_writes": false,
+  "delivery_authority": "EF02_WORKER_ONLY_AFTER_INDEPENDENT_VERIFIED_PASS",
+  "boundary": "OFFLINE_ONLY",
+  "verification": {
+    "receipt_authority": "Fresh independent EF01/EF02 frozen-tree audit, accepted owner/consumer closure, JUnit and MT01_XDIST_WORKERS_COLLECTED per group",
+    "source_sha_verified_at_start": true,
+    "target_paths_absent_at_start": 10,
+    "candidate_sha": null,
+    "build_verified_for_scope": null,
+    "local_checks": "WINDOWS_TARGETED_CHECKS_PASSED_INDEPENDENT_EF02_AUDIT_PENDING",
+    "onboarding_plan": {
+      "selected_groups": ["a10", "a11", "a15", "a16", "a18-1"],
+      "missing_mapping": [],
+      "unknown_acs": [],
+      "fallback": false,
+      "owner_admission": "VALIDATED_DATA_ONLY_NOT_VERIFICATION_PASS"
+    },
+    "local_results": [
+      {"group": "a18-1", "selected_files": 2, "selected_tests": 125, "collected": 125, "passed": 125, "failed": 0, "errors": 0, "skipped": 0, "workers_actual": 12, "worker_proof": "MT01_XDIST_WORKERS_COLLECTED=12"},
+      {"group": "a10", "selected_files": 4, "selected_tests": 271, "collected": 271, "passed": 271, "failed": 0, "errors": 0, "skipped": 0, "workers_actual": 12, "worker_proof": "MT01_XDIST_WORKERS_COLLECTED=12"},
+      {"group": "a11", "selected_files": 4, "selected_tests": 223, "collected": 223, "passed": 220, "failed": 0, "errors": 0, "skipped": 3, "workers_actual": 12, "worker_proof": "MT01_XDIST_WORKERS_COLLECTED=12"},
+      {"group": "a15", "selected_files": 1, "selected_tests": 43, "collected": 43, "passed": 43, "failed": 0, "errors": 0, "skipped": 0, "workers_actual": 12, "worker_proof": "MT01_XDIST_WORKERS_COLLECTED=12"},
+      {"group": "a16", "selected_files": 2, "selected_tests": 110, "collected": 110, "passed": 110, "failed": 0, "errors": 0, "skipped": 0, "workers_actual": 12, "worker_proof": "MT01_XDIST_WORKERS_COLLECTED=12"}
+    ],
+    "local_totals": {"selected_files": 13, "selected_tests": 772, "collected": 772, "passed": 769, "failed": 0, "errors": 0, "skipped": 3},
+    "repair_rounds_used": 2,
+    "windows_self_host_workers_per_group_required": 12,
+    "windows_hosted_pr_workers": 4,
+    "pr_head_ci": "PENDING_SEPARATE_PR",
+    "brain_review": "PENDING_INDEPENDENT_REVIEW"
+  },
+  "scope_limits": [
+    "No source-of-truth writes, new ledgers, network, provider clients, authentication or spending",
+    "Native local/supplied/synthetic grades cannot justify decisive KEEP/CHANGE/STOP; return INCONCLUSIVE",
+    "No live conversions, orders, commissions, settlement, ROI, profit, market feasibility or causal uplift proof",
+    "No A18.2 own-brand implementation or A18.3 scale strategy",
+    "M07 bridge is a versioned data reference with no execution authority or financial commitment",
+    "No source SHA or source version is inferred from historical CI",
+    "No Git writes, publication, workflow dispatch or merge by this executor"
+  ]
+}
