@@ -1038,3 +1038,105 @@ def test_all_active_ci_workflows_are_windows_only():
         assert 'shell: bash' not in source, path
         assert 'matrix.os' not in source, path
 
+
+
+def test_repository_wide_windows_only_audit():
+    """Audit ALL tracked text files, not just the CI workflow directory.
+
+    Historical audit records remain intact. Only live Windows CI/merge
+    contracts may gate the PR; archived Ubuntu evidence is informational.
+    """
+    import json
+    import re
+    import subprocess
+
+    output = subprocess.check_output(["git", "ls-files", "-z"], cwd=ROOT)
+    tracked = [p.decode("utf-8") for p in output.split(b"\x00") if p]
+    assert len(tracked) >= 200, "INCOMPLETE_TRACKED_TREE"
+
+    active_workflows = 0
+    scanned_text = 0
+    skipped_binary = 0
+    blocking = []
+    code_references = []
+    historical_references = []
+    marker = re.compile(
+        r"ubuntu(?:[-_ ]latest)?|\blinux\b|both[_ -]?os|dual[_ -]?os|"
+        r"\bapt-get\b|shell\s*:\s*bash|two[-_ ]os", re.IGNORECASE
+    )
+    forbidden_workflow = re.compile(
+        r"ubuntu-latest|macos-latest|linux-latest|two[-_ ]os|"
+        r"shell\s*:\s*bash|\bapt-get\b|runs-on:\s*(?:ubuntu|linux|macos)|"
+        r"\$\{\{\s*matrix\.os\s*\}\}", re.IGNORECASE
+    )
+    forbidden_control = re.compile(
+        r"tests\s*\(\s*ubuntu-latest\s*\)|"
+        r"EXACT_HEAD_BOTH_OS|NO_BOTH_OS|BOTH_OS|two[-_ ]os",
+        re.IGNORECASE
+    )
+    binary_extensions = {
+        ".png", ".jpg", ".jpeg", ".webp", ".gif", ".ico", ".svgz",
+        ".docx", ".pdf", ".zip", ".7z", ".gz", ".mp4", ".mp3",
+        ".woff", ".woff2", ".ttf", ".otf", ".exe", ".dll",
+    }
+
+    for name in tracked:
+        file = ROOT / name
+        if not file.is_file():
+            continue
+        if file.suffix.lower() in binary_extensions:
+            skipped_binary += 1
+            continue
+        data = file.read_bytes()
+        if b"\x00" in data[:4096]:
+            skipped_binary += 1
+            continue
+        try:
+            contents = data.decode("utf-8")
+        except UnicodeDecodeError:
+            skipped_binary += 1
+            continue
+        scanned_text += 1
+        workflow = name.startswith(".github/workflows/") and name.endswith((".yml", ".yaml"))
+        operational = (
+            name.startswith((".github/scripts/", "src/", "scripts/", "config/"))
+            or name in {"BOOTSTRAP_GITHUB.ps1", "pyproject.toml"}
+        )
+        if workflow:
+            active_workflows += 1
+        runner = ""
+        for i, line in enumerate(contents.splitlines(), 1):
+            text = line.strip()
+            if workflow and "runs-on:" in line:
+                runner = text
+            if workflow and forbidden_workflow.search(line):
+                blocking.append(f"{name}:{i}:{text[:160]}")
+            elif operational and forbidden_control.search(line):
+                blocking.append(f"{name}:{i}:{text[:160]}")
+            if workflow and runner == "runs-on: windows-latest" and re.search(
+                r"(?:^|\s)-n\s+12(?:\s|$)", line
+            ):
+                blocking.append(f"{name}:{i}:HOSTED_12_WORKERS")
+            if marker.search(line):
+                label = f"{name}:{i}:{text[:160]}"
+                if name.startswith(("docs/", "work_items/", "examples/", "contracts/")) or name == "README.md":
+                    historical_references.append(label)
+                elif not workflow:
+                    code_references.append(label)
+
+    report = {
+        "schema": "AI_COMMERCE_WINDOWS_ONLY_REPO_AUDIT_V1",
+        "tracked_files": len(tracked),
+        "scanned_text_files": scanned_text,
+        "skipped_binary_files": skipped_binary,
+        "active_workflow_files": active_workflows,
+        "blocking_count": len(blocking),
+        "blocking": blocking[:50],
+        "code_reference_count": len(code_references),
+        "code_reference_samples": code_references[:40],
+        "historical_reference_count": len(historical_references),
+        "historical_reference_samples": historical_references[:30],
+    }
+    print("WINDOWS_ONLY_REPO_AUDIT_V1=" + json.dumps(report, ensure_ascii=False))
+    assert active_workflows >= 20, "ACTIVE_WORKFLOW_INVENTORY_INCOMPLETE"
+    assert not blocking, "WINDOWS_ONLY_ACTIVE_DEPENDENCY_REMAINS: " + repr(blocking[:20])

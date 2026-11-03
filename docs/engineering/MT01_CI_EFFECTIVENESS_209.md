@@ -1,5 +1,9 @@
 # MT-01 CI efficiency repair — Issue #209
 
+
+> **Historical design snapshot (superseded 2026-11-03 by [PR #300](https://github.com/trung-via/ai-commerce/pull/300)).** The live post-merge reuse/Brain PASS gate now checks **one exact-head Windows CI job**, its successful pytest/Node/oracle steps and authentic Windows MT-01 artifact. **Ubuntu is no longer required.** Earlier two-OS examples below are retained only as evidence of the original Issue #209 implementation; they are not operational instructions.
+
+
 Status: implementation on PR branch; exact CI and post-merge proof required.
 
 ## Observed failure
