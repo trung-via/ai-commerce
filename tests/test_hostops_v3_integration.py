@@ -1038,8 +1038,11 @@ def test_v4_load_config_and_admit_v4_isolation_and_fail_closed(h, monkeypatch):
         monkeypatch.setattr(security, "windows_identity", lambda *_: ("broker-identity", False))
         monkeypatch.setattr(security, "windows_acl", lambda *_, **__: None)
     else:
-        monkeypatch.setattr(os, "geteuid", lambda: 1000)
-        cfg = {**cfg, "broker_identity": "1000", "trusted_owners": ["1000"]}
+        # Match the actual fixture owner; a broker SID/UID must never also be
+        # listed as a separate trusted owner in V4's stricter identity contract.
+        fixture_owner = h.policy.stat().st_uid
+        monkeypatch.setattr(os, "geteuid", lambda: fixture_owner)
+        cfg = {**cfg, "broker_identity": str(fixture_owner)}
         v4_path.write_bytes(c.canonical(cfg))
         for item in (v4_path, h.policy, h.release, h.state, *(h.policy.rglob("*")), *(h.state.rglob("*"))):
             os.chmod(item, 0o700 if item.is_dir() else 0o600)
