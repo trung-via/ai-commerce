@@ -1,0 +1,3790 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-commerce:OwnBrandDecisionBrief:v1",
+  "title": "OwnBrandDecisionBrief.v1",
+  "description": "M07 offline research decision support owned by Commerce Opportunity.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "OwnBrandDecisionBrief.v1"
+    },
+    "brief_id": {
+      "type": "string",
+      "pattern": "^a18-own-brand-[a-f0-9]{64}$",
+      "maxLength": 78
+    },
+    "evaluator_version": {
+      "const": "a18-m07/1.0"
+    },
+    "source_sha": {
+      "const": "3ef41b54caa67f1f8bd90a7122868285f42a08a3"
+    },
+    "request_sha256": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "campaign_ref": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 96,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+            },
+            "concept_ref": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 96,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+            },
+            "product_ref": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 96,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "market": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 96,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "account_ref": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "namespace": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 96,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+                    },
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 96,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+                    }
+                  },
+                  "required": [
+                    "namespace",
+                    "id"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "measurement_window": {
+              "oneOf": [
+                {
+                  "type": "array",
+                  "maxItems": 2,
+                  "items": {
+                    "type": "string",
+                    "format": "date-time",
+                    "maxLength": 64
+                  },
+                  "minItems": 2
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "campaign_ref",
+            "concept_ref",
+            "product_ref",
+            "market",
+            "account_ref",
+            "measurement_window"
+          ]
+        },
+        "currency": {
+          "type": "string",
+          "maxLength": 3,
+          "pattern": "^[A-Z]{3}$"
+        },
+        "as_of": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 64
+        },
+        "human": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "authored_by": {
+              "const": "HUMAN_DECLARED_NOT_AUTHENTICATED"
+            },
+            "declared_at": {
+              "type": "string",
+              "format": "date-time",
+              "maxLength": 64
+            },
+            "data_kind": {
+              "enum": [
+                "USER_SUPPLIED",
+                "SYNTHETIC_FIXTURE"
+              ]
+            },
+            "differentiated_offer": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "status": {
+                  "enum": [
+                    "UNKNOWN",
+                    "ESTIMATED_USER_SUPPLIED",
+                    "USER_SUPPLIED"
+                  ]
+                },
+                "sha256": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 64,
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "status",
+                "sha256"
+              ],
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "status": {
+                        "const": "UNKNOWN"
+                      }
+                    }
+                  },
+                  "then": {
+                    "properties": {
+                      "sha256": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "else": {
+                    "properties": {
+                      "sha256": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "pattern": "^[a-f0-9]{64}$"
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "demand_rationale": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "status": {
+                  "enum": [
+                    "UNKNOWN",
+                    "ESTIMATED_USER_SUPPLIED",
+                    "USER_SUPPLIED"
+                  ]
+                },
+                "sha256": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 64,
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "status",
+                "sha256"
+              ],
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "status": {
+                        "const": "UNKNOWN"
+                      }
+                    }
+                  },
+                  "then": {
+                    "properties": {
+                      "sha256": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "else": {
+                    "properties": {
+                      "sha256": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "pattern": "^[a-f0-9]{64}$"
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "supplier_quote": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "status": {
+                  "enum": [
+                    "UNKNOWN",
+                    "ESTIMATED_USER_SUPPLIED",
+                    "USER_SUPPLIED"
+                  ]
+                },
+                "sha256": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 64,
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "status",
+                "sha256"
+              ],
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "status": {
+                        "const": "UNKNOWN"
+                      }
+                    }
+                  },
+                  "then": {
+                    "properties": {
+                      "sha256": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "else": {
+                    "properties": {
+                      "sha256": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "pattern": "^[a-f0-9]{64}$"
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "counterevidence": {
+              "type": "array",
+              "maxItems": 16,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "UNKNOWN",
+                      "ESTIMATED_USER_SUPPLIED",
+                      "USER_SUPPLIED"
+                    ]
+                  },
+                  "sha256": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 64,
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "status",
+                  "sha256"
+                ],
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "status": {
+                          "const": "UNKNOWN"
+                        }
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "sha256": {
+                          "type": "null"
+                        }
+                      }
+                    },
+                    "else": {
+                      "properties": {
+                        "sha256": {
+                          "type": "string",
+                          "maxLength": 64,
+                          "pattern": "^[a-f0-9]{64}$"
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            "market_unknowns": {
+              "type": "array",
+              "maxItems": 16,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "UNKNOWN",
+                      "ESTIMATED_USER_SUPPLIED",
+                      "USER_SUPPLIED"
+                    ]
+                  },
+                  "sha256": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 64,
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "status",
+                  "sha256"
+                ],
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "status": {
+                          "const": "UNKNOWN"
+                        }
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "sha256": {
+                          "type": "null"
+                        }
+                      }
+                    },
+                    "else": {
+                      "properties": {
+                        "sha256": {
+                          "type": "string",
+                          "maxLength": 64,
+                          "pattern": "^[a-f0-9]{64}$"
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            "supplier_unknowns": {
+              "type": "array",
+              "maxItems": 16,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "UNKNOWN",
+                      "ESTIMATED_USER_SUPPLIED",
+                      "USER_SUPPLIED"
+                    ]
+                  },
+                  "sha256": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 64,
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "status",
+                  "sha256"
+                ],
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "status": {
+                          "const": "UNKNOWN"
+                        }
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "sha256": {
+                          "type": "null"
+                        }
+                      }
+                    },
+                    "else": {
+                      "properties": {
+                        "sha256": {
+                          "type": "string",
+                          "maxLength": 64,
+                          "pattern": "^[a-f0-9]{64}$"
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            "moq": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "status": {
+                  "enum": [
+                    "UNKNOWN",
+                    "ESTIMATED_USER_SUPPLIED",
+                    "USER_SUPPLIED"
+                  ]
+                },
+                "value": {
+                  "oneOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 1000000000
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "status",
+                "value"
+              ],
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "status": {
+                        "const": "UNKNOWN"
+                      }
+                    }
+                  },
+                  "then": {
+                    "properties": {
+                      "value": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "else": {
+                    "properties": {
+                      "value": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1000000000
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "units_per_order": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "status": {
+                  "enum": [
+                    "UNKNOWN",
+                    "ESTIMATED_USER_SUPPLIED",
+                    "USER_SUPPLIED"
+                  ]
+                },
+                "value": {
+                  "oneOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 1000000
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "status",
+                "value"
+              ],
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "status": {
+                        "const": "UNKNOWN"
+                      }
+                    }
+                  },
+                  "then": {
+                    "properties": {
+                      "value": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "else": {
+                    "properties": {
+                      "value": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1000000
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "logistics_lead_time_days": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "status": {
+                  "enum": [
+                    "UNKNOWN",
+                    "ESTIMATED_USER_SUPPLIED",
+                    "USER_SUPPLIED"
+                  ]
+                },
+                "value": {
+                  "oneOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 3650
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "status",
+                "value"
+              ],
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "status": {
+                        "const": "UNKNOWN"
+                      }
+                    }
+                  },
+                  "then": {
+                    "properties": {
+                      "value": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "else": {
+                    "properties": {
+                      "value": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 3650
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "costs": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "cogs": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "UNKNOWN",
+                        "ESTIMATED_USER_SUPPLIED",
+                        "USER_SUPPLIED"
+                      ]
+                    },
+                    "amount": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 25,
+                          "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "currency": {
+                      "type": "string",
+                      "maxLength": 3,
+                      "pattern": "^[A-Z]{3}$"
+                    },
+                    "basis": {
+                      "enum": [
+                        "PER_UNIT"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "amount",
+                    "currency",
+                    "basis"
+                  ],
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "status": {
+                            "const": "UNKNOWN"
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "amount": {
+                            "type": "null"
+                          }
+                        }
+                      },
+                      "else": {
+                        "properties": {
+                          "amount": {
+                            "type": "string",
+                            "maxLength": 25,
+                            "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "sale_price": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "UNKNOWN",
+                        "ESTIMATED_USER_SUPPLIED",
+                        "USER_SUPPLIED"
+                      ]
+                    },
+                    "amount": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 25,
+                          "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "currency": {
+                      "type": "string",
+                      "maxLength": 3,
+                      "pattern": "^[A-Z]{3}$"
+                    },
+                    "basis": {
+                      "enum": [
+                        "PER_UNIT"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "amount",
+                    "currency",
+                    "basis"
+                  ],
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "status": {
+                            "const": "UNKNOWN"
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "amount": {
+                            "type": "null"
+                          }
+                        }
+                      },
+                      "else": {
+                        "properties": {
+                          "amount": {
+                            "type": "string",
+                            "maxLength": 25,
+                            "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "inbound_freight": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "UNKNOWN",
+                        "ESTIMATED_USER_SUPPLIED",
+                        "USER_SUPPLIED"
+                      ]
+                    },
+                    "amount": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 25,
+                          "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "currency": {
+                      "type": "string",
+                      "maxLength": 3,
+                      "pattern": "^[A-Z]{3}$"
+                    },
+                    "basis": {
+                      "enum": [
+                        "PER_UNIT",
+                        "FIXED"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "amount",
+                    "currency",
+                    "basis"
+                  ],
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "status": {
+                            "const": "UNKNOWN"
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "amount": {
+                            "type": "null"
+                          }
+                        }
+                      },
+                      "else": {
+                        "properties": {
+                          "amount": {
+                            "type": "string",
+                            "maxLength": 25,
+                            "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "outbound_shipping": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "UNKNOWN",
+                        "ESTIMATED_USER_SUPPLIED",
+                        "USER_SUPPLIED"
+                      ]
+                    },
+                    "amount": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 25,
+                          "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "currency": {
+                      "type": "string",
+                      "maxLength": 3,
+                      "pattern": "^[A-Z]{3}$"
+                    },
+                    "basis": {
+                      "enum": [
+                        "PER_UNIT",
+                        "PER_ORDER"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "amount",
+                    "currency",
+                    "basis"
+                  ],
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "status": {
+                            "const": "UNKNOWN"
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "amount": {
+                            "type": "null"
+                          }
+                        }
+                      },
+                      "else": {
+                        "properties": {
+                          "amount": {
+                            "type": "string",
+                            "maxLength": 25,
+                            "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "fulfillment": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "UNKNOWN",
+                        "ESTIMATED_USER_SUPPLIED",
+                        "USER_SUPPLIED"
+                      ]
+                    },
+                    "amount": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 25,
+                          "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "currency": {
+                      "type": "string",
+                      "maxLength": 3,
+                      "pattern": "^[A-Z]{3}$"
+                    },
+                    "basis": {
+                      "enum": [
+                        "PER_UNIT",
+                        "PER_ORDER"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "amount",
+                    "currency",
+                    "basis"
+                  ],
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "status": {
+                            "const": "UNKNOWN"
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "amount": {
+                            "type": "null"
+                          }
+                        }
+                      },
+                      "else": {
+                        "properties": {
+                          "amount": {
+                            "type": "string",
+                            "maxLength": 25,
+                            "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "storage": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "UNKNOWN",
+                        "ESTIMATED_USER_SUPPLIED",
+                        "USER_SUPPLIED"
+                      ]
+                    },
+                    "amount": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 25,
+                          "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "currency": {
+                      "type": "string",
+                      "maxLength": 3,
+                      "pattern": "^[A-Z]{3}$"
+                    },
+                    "basis": {
+                      "enum": [
+                        "PER_UNIT",
+                        "FIXED"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "amount",
+                    "currency",
+                    "basis"
+                  ],
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "status": {
+                            "const": "UNKNOWN"
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "amount": {
+                            "type": "null"
+                          }
+                        }
+                      },
+                      "else": {
+                        "properties": {
+                          "amount": {
+                            "type": "string",
+                            "maxLength": 25,
+                            "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "returns_warranty": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "UNKNOWN",
+                        "ESTIMATED_USER_SUPPLIED",
+                        "USER_SUPPLIED"
+                      ]
+                    },
+                    "amount": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 25,
+                          "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "currency": {
+                      "type": "string",
+                      "maxLength": 3,
+                      "pattern": "^[A-Z]{3}$"
+                    },
+                    "basis": {
+                      "enum": [
+                        "PER_UNIT",
+                        "PER_ORDER"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "amount",
+                    "currency",
+                    "basis"
+                  ],
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "status": {
+                            "const": "UNKNOWN"
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "amount": {
+                            "type": "null"
+                          }
+                        }
+                      },
+                      "else": {
+                        "properties": {
+                          "amount": {
+                            "type": "string",
+                            "maxLength": 25,
+                            "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "setup": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "UNKNOWN",
+                        "ESTIMATED_USER_SUPPLIED",
+                        "USER_SUPPLIED"
+                      ]
+                    },
+                    "amount": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 25,
+                          "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "currency": {
+                      "type": "string",
+                      "maxLength": 3,
+                      "pattern": "^[A-Z]{3}$"
+                    },
+                    "basis": {
+                      "enum": [
+                        "FIXED"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "amount",
+                    "currency",
+                    "basis"
+                  ],
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "status": {
+                            "const": "UNKNOWN"
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "amount": {
+                            "type": "null"
+                          }
+                        }
+                      },
+                      "else": {
+                        "properties": {
+                          "amount": {
+                            "type": "string",
+                            "maxLength": 25,
+                            "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "certification": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "UNKNOWN",
+                        "ESTIMATED_USER_SUPPLIED",
+                        "USER_SUPPLIED"
+                      ]
+                    },
+                    "amount": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 25,
+                          "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "currency": {
+                      "type": "string",
+                      "maxLength": 3,
+                      "pattern": "^[A-Z]{3}$"
+                    },
+                    "basis": {
+                      "enum": [
+                        "FIXED"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "amount",
+                    "currency",
+                    "basis"
+                  ],
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "status": {
+                            "const": "UNKNOWN"
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "amount": {
+                            "type": "null"
+                          }
+                        }
+                      },
+                      "else": {
+                        "properties": {
+                          "amount": {
+                            "type": "string",
+                            "maxLength": 25,
+                            "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "marketing": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "UNKNOWN",
+                        "ESTIMATED_USER_SUPPLIED",
+                        "USER_SUPPLIED"
+                      ]
+                    },
+                    "amount": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 25,
+                          "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "currency": {
+                      "type": "string",
+                      "maxLength": 3,
+                      "pattern": "^[A-Z]{3}$"
+                    },
+                    "basis": {
+                      "enum": [
+                        "PER_UNIT",
+                        "PER_ORDER",
+                        "FIXED"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "amount",
+                    "currency",
+                    "basis"
+                  ],
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "status": {
+                            "const": "UNKNOWN"
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "amount": {
+                            "type": "null"
+                          }
+                        }
+                      },
+                      "else": {
+                        "properties": {
+                          "amount": {
+                            "type": "string",
+                            "maxLength": 25,
+                            "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "fees": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "UNKNOWN",
+                        "ESTIMATED_USER_SUPPLIED",
+                        "USER_SUPPLIED"
+                      ]
+                    },
+                    "amount": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 25,
+                          "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "currency": {
+                      "type": "string",
+                      "maxLength": 3,
+                      "pattern": "^[A-Z]{3}$"
+                    },
+                    "basis": {
+                      "enum": [
+                        "PER_UNIT",
+                        "PER_ORDER",
+                        "FIXED"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "amount",
+                    "currency",
+                    "basis"
+                  ],
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "status": {
+                            "const": "UNKNOWN"
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "amount": {
+                            "type": "null"
+                          }
+                        }
+                      },
+                      "else": {
+                        "properties": {
+                          "amount": {
+                            "type": "string",
+                            "maxLength": 25,
+                            "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "buffer": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "UNKNOWN",
+                        "ESTIMATED_USER_SUPPLIED",
+                        "USER_SUPPLIED"
+                      ]
+                    },
+                    "amount": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 25,
+                          "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "currency": {
+                      "type": "string",
+                      "maxLength": 3,
+                      "pattern": "^[A-Z]{3}$"
+                    },
+                    "basis": {
+                      "enum": [
+                        "FIXED"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "amount",
+                    "currency",
+                    "basis"
+                  ],
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "status": {
+                            "const": "UNKNOWN"
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "amount": {
+                            "type": "null"
+                          }
+                        }
+                      },
+                      "else": {
+                        "properties": {
+                          "amount": {
+                            "type": "string",
+                            "maxLength": 25,
+                            "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "available_capital": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "UNKNOWN",
+                        "ESTIMATED_USER_SUPPLIED",
+                        "USER_SUPPLIED"
+                      ]
+                    },
+                    "amount": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 25,
+                          "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "currency": {
+                      "type": "string",
+                      "maxLength": 3,
+                      "pattern": "^[A-Z]{3}$"
+                    },
+                    "basis": {
+                      "enum": [
+                        "FIXED"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "amount",
+                    "currency",
+                    "basis"
+                  ],
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "status": {
+                            "const": "UNKNOWN"
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "amount": {
+                            "type": "null"
+                          }
+                        }
+                      },
+                      "else": {
+                        "properties": {
+                          "amount": {
+                            "type": "string",
+                            "maxLength": 25,
+                            "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "cogs",
+                "sale_price",
+                "inbound_freight",
+                "outbound_shipping",
+                "fulfillment",
+                "storage",
+                "returns_warranty",
+                "setup",
+                "certification",
+                "marketing",
+                "fees",
+                "buffer",
+                "available_capital"
+              ]
+            },
+            "scenarios": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "bear": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "unit_sales": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            "UNKNOWN",
+                            "ESTIMATED_USER_SUPPLIED",
+                            "USER_SUPPLIED"
+                          ]
+                        },
+                        "value": {
+                          "oneOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 1000000000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "value"
+                      ],
+                      "allOf": [
+                        {
+                          "if": {
+                            "properties": {
+                              "status": {
+                                "const": "UNKNOWN"
+                              }
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "value": {
+                                "type": "null"
+                              }
+                            }
+                          },
+                          "else": {
+                            "properties": {
+                              "value": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 1000000000
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "shipping_multiplier": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            "UNKNOWN",
+                            "ESTIMATED_USER_SUPPLIED",
+                            "USER_SUPPLIED"
+                          ]
+                        },
+                        "value": {
+                          "oneOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 11,
+                              "pattern": "^(?:0|[1-9][0-9]{0,3})(?:\\.[0-9]{1,6})?$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "value"
+                      ],
+                      "allOf": [
+                        {
+                          "if": {
+                            "properties": {
+                              "status": {
+                                "const": "UNKNOWN"
+                              }
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "value": {
+                                "type": "null"
+                              }
+                            }
+                          },
+                          "else": {
+                            "properties": {
+                              "value": {
+                                "type": "string",
+                                "maxLength": 11,
+                                "pattern": "^(?:0|[1-9][0-9]{0,3})(?:\\.[0-9]{1,6})?$"
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "returns_multiplier": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            "UNKNOWN",
+                            "ESTIMATED_USER_SUPPLIED",
+                            "USER_SUPPLIED"
+                          ]
+                        },
+                        "value": {
+                          "oneOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 11,
+                              "pattern": "^(?:0|[1-9][0-9]{0,3})(?:\\.[0-9]{1,6})?$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "value"
+                      ],
+                      "allOf": [
+                        {
+                          "if": {
+                            "properties": {
+                              "status": {
+                                "const": "UNKNOWN"
+                              }
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "value": {
+                                "type": "null"
+                              }
+                            }
+                          },
+                          "else": {
+                            "properties": {
+                              "value": {
+                                "type": "string",
+                                "maxLength": 11,
+                                "pattern": "^(?:0|[1-9][0-9]{0,3})(?:\\.[0-9]{1,6})?$"
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "unit_sales",
+                    "shipping_multiplier",
+                    "returns_multiplier"
+                  ]
+                },
+                "base": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "unit_sales": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            "UNKNOWN",
+                            "ESTIMATED_USER_SUPPLIED",
+                            "USER_SUPPLIED"
+                          ]
+                        },
+                        "value": {
+                          "oneOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 1000000000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "value"
+                      ],
+                      "allOf": [
+                        {
+                          "if": {
+                            "properties": {
+                              "status": {
+                                "const": "UNKNOWN"
+                              }
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "value": {
+                                "type": "null"
+                              }
+                            }
+                          },
+                          "else": {
+                            "properties": {
+                              "value": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 1000000000
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "shipping_multiplier": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            "UNKNOWN",
+                            "ESTIMATED_USER_SUPPLIED",
+                            "USER_SUPPLIED"
+                          ]
+                        },
+                        "value": {
+                          "oneOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 11,
+                              "pattern": "^(?:0|[1-9][0-9]{0,3})(?:\\.[0-9]{1,6})?$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "value"
+                      ],
+                      "allOf": [
+                        {
+                          "if": {
+                            "properties": {
+                              "status": {
+                                "const": "UNKNOWN"
+                              }
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "value": {
+                                "type": "null"
+                              }
+                            }
+                          },
+                          "else": {
+                            "properties": {
+                              "value": {
+                                "type": "string",
+                                "maxLength": 11,
+                                "pattern": "^(?:0|[1-9][0-9]{0,3})(?:\\.[0-9]{1,6})?$"
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "returns_multiplier": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            "UNKNOWN",
+                            "ESTIMATED_USER_SUPPLIED",
+                            "USER_SUPPLIED"
+                          ]
+                        },
+                        "value": {
+                          "oneOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 11,
+                              "pattern": "^(?:0|[1-9][0-9]{0,3})(?:\\.[0-9]{1,6})?$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "value"
+                      ],
+                      "allOf": [
+                        {
+                          "if": {
+                            "properties": {
+                              "status": {
+                                "const": "UNKNOWN"
+                              }
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "value": {
+                                "type": "null"
+                              }
+                            }
+                          },
+                          "else": {
+                            "properties": {
+                              "value": {
+                                "type": "string",
+                                "maxLength": 11,
+                                "pattern": "^(?:0|[1-9][0-9]{0,3})(?:\\.[0-9]{1,6})?$"
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "unit_sales",
+                    "shipping_multiplier",
+                    "returns_multiplier"
+                  ]
+                },
+                "bull": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "unit_sales": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            "UNKNOWN",
+                            "ESTIMATED_USER_SUPPLIED",
+                            "USER_SUPPLIED"
+                          ]
+                        },
+                        "value": {
+                          "oneOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 1000000000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "value"
+                      ],
+                      "allOf": [
+                        {
+                          "if": {
+                            "properties": {
+                              "status": {
+                                "const": "UNKNOWN"
+                              }
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "value": {
+                                "type": "null"
+                              }
+                            }
+                          },
+                          "else": {
+                            "properties": {
+                              "value": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 1000000000
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "shipping_multiplier": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            "UNKNOWN",
+                            "ESTIMATED_USER_SUPPLIED",
+                            "USER_SUPPLIED"
+                          ]
+                        },
+                        "value": {
+                          "oneOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 11,
+                              "pattern": "^(?:0|[1-9][0-9]{0,3})(?:\\.[0-9]{1,6})?$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "value"
+                      ],
+                      "allOf": [
+                        {
+                          "if": {
+                            "properties": {
+                              "status": {
+                                "const": "UNKNOWN"
+                              }
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "value": {
+                                "type": "null"
+                              }
+                            }
+                          },
+                          "else": {
+                            "properties": {
+                              "value": {
+                                "type": "string",
+                                "maxLength": 11,
+                                "pattern": "^(?:0|[1-9][0-9]{0,3})(?:\\.[0-9]{1,6})?$"
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "returns_multiplier": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            "UNKNOWN",
+                            "ESTIMATED_USER_SUPPLIED",
+                            "USER_SUPPLIED"
+                          ]
+                        },
+                        "value": {
+                          "oneOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 11,
+                              "pattern": "^(?:0|[1-9][0-9]{0,3})(?:\\.[0-9]{1,6})?$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "value"
+                      ],
+                      "allOf": [
+                        {
+                          "if": {
+                            "properties": {
+                              "status": {
+                                "const": "UNKNOWN"
+                              }
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "value": {
+                                "type": "null"
+                              }
+                            }
+                          },
+                          "else": {
+                            "properties": {
+                              "value": {
+                                "type": "string",
+                                "maxLength": 11,
+                                "pattern": "^(?:0|[1-9][0-9]{0,3})(?:\\.[0-9]{1,6})?$"
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "unit_sales",
+                    "shipping_multiplier",
+                    "returns_multiplier"
+                  ]
+                }
+              },
+              "required": [
+                "bear",
+                "base",
+                "bull"
+              ]
+            }
+          },
+          "required": [
+            "authored_by",
+            "declared_at",
+            "data_kind",
+            "differentiated_offer",
+            "demand_rationale",
+            "supplier_quote",
+            "counterevidence",
+            "market_unknowns",
+            "supplier_unknowns",
+            "moq",
+            "units_per_order",
+            "logistics_lead_time_days",
+            "costs",
+            "scenarios"
+          ]
+        },
+        "human_policy": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "schema_version": {
+                  "const": "OwnBrandHumanPolicy.v1"
+                },
+                "policy_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 96,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+                },
+                "authored_by": {
+                  "const": "HUMAN_DECLARED_NOT_AUTHENTICATED"
+                },
+                "valid_from": {
+                  "type": "string",
+                  "format": "date-time",
+                  "maxLength": 64
+                },
+                "valid_until": {
+                  "type": "string",
+                  "format": "date-time",
+                  "maxLength": 64
+                },
+                "currency": {
+                  "type": "string",
+                  "maxLength": 3,
+                  "pattern": "^[A-Z]{3}$"
+                },
+                "max_evidence_age_seconds": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 31536000
+                },
+                "allow_hypothesis_only_research": {
+                  "type": "boolean"
+                },
+                "allow_synthetic_research": {
+                  "type": "boolean"
+                },
+                "max_downside": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 25,
+                      "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "research_budget": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 25,
+                      "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "max_research_units": {
+                  "oneOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 1000000
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "proposed_action": {
+                  "enum": [
+                    "RESEARCH",
+                    "PROTOTYPE",
+                    "SAMPLE_VALIDATION"
+                  ]
+                }
+              },
+              "required": [
+                "schema_version",
+                "policy_id",
+                "authored_by",
+                "valid_from",
+                "valid_until",
+                "currency",
+                "max_evidence_age_seconds",
+                "allow_hypothesis_only_research",
+                "allow_synthetic_research",
+                "max_downside",
+                "research_budget",
+                "max_research_units",
+                "proposed_action"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "scope",
+        "currency",
+        "as_of",
+        "human",
+        "human_policy"
+      ]
+    },
+    "sources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "portfolio": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "reference": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "schema_version": {
+                      "const": "PortfolioRecommendationRef.v1"
+                    },
+                    "recommendation_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "maxLength": 64,
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "source_sha": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{40}$",
+                      "maxLength": 40
+                    },
+                    "candidate_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                    },
+                    "scope_sha256": {
+                      "type": "string",
+                      "maxLength": 64,
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "as_of": {
+                      "type": "string",
+                      "format": "date-time",
+                      "maxLength": 64
+                    },
+                    "decision": {
+                      "enum": [
+                        "KEEP",
+                        "CHANGE",
+                        "STOP",
+                        "INCONCLUSIVE"
+                      ]
+                    },
+                    "use": {
+                      "const": "A18_2_M07_HUMAN_REVIEW_DATA_ONLY"
+                    },
+                    "financial_commitment": {
+                      "const": "NONE"
+                    },
+                    "execution_authority": {
+                      "const": "NONE"
+                    }
+                  },
+                  "required": [
+                    "schema_version",
+                    "recommendation_id",
+                    "sha256",
+                    "source_sha",
+                    "candidate_id",
+                    "scope_sha256",
+                    "as_of",
+                    "decision",
+                    "use",
+                    "financial_commitment",
+                    "execution_authority"
+                  ]
+                },
+                "reference_sha256": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "custody": {
+                  "enum": [
+                    "CURRENT_REPLAY",
+                    "ARCHIVED_ONLY"
+                  ]
+                },
+                "scope": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "campaign_ref": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256,
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "concept_ref": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256,
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "product_ref": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256,
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "market": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256,
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "account_ref": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "properties": {
+                            "namespace": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 256,
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                            },
+                            "id": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 256,
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                            }
+                          },
+                          "required": [
+                            "namespace",
+                            "id"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "measurement_window": {
+                      "type": "array",
+                      "maxItems": 2,
+                      "items": {
+                        "type": "string",
+                        "format": "date-time",
+                        "maxLength": 64
+                      },
+                      "minItems": 2
+                    }
+                  },
+                  "required": [
+                    "campaign_ref",
+                    "concept_ref",
+                    "product_ref",
+                    "market",
+                    "account_ref",
+                    "measurement_window"
+                  ]
+                },
+                "currency": {
+                  "type": "string",
+                  "maxLength": 3,
+                  "pattern": "^[A-Z]{3}$"
+                },
+                "native_max_evidence_age_seconds": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 31536000
+                },
+                "evidence_quality": {
+                  "enum": [
+                    "MISSING",
+                    "UNVERIFIED",
+                    "LOCAL_REPLAY_ONLY",
+                    "CONFLICTED"
+                  ]
+                },
+                "source_codes": {
+                  "type": "array",
+                  "maxItems": 96,
+                  "items": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "pattern": "^[A-Z][A-Z0-9_]*$"
+                  }
+                },
+                "counterevidence": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "source_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                      },
+                      "code": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "pattern": "^[A-Z][A-Z0-9_]*$"
+                      }
+                    },
+                    "required": [
+                      "source_id",
+                      "code"
+                    ]
+                  }
+                },
+                "native_sources": {
+                  "type": "array",
+                  "maxItems": 32,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": {
+                        "enum": [
+                          "PROPOSAL",
+                          "ADVISORY",
+                          "REPORT",
+                          "COMPARISON",
+                          "COST",
+                          "REVIEW"
+                        ]
+                      },
+                      "source_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                      },
+                      "sha256": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      "native_version": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                      },
+                      "custody": {
+                        "enum": [
+                          "NATIVE_REPLAY",
+                          "ARCHIVE_VALIDATED",
+                          "UNVERIFIED"
+                        ]
+                      },
+                      "epistemic_status": {
+                        "enum": [
+                          "HYPOTHESIS",
+                          "DESCRIPTIVE_OBSERVATION",
+                          "DESCRIPTIVE_COMPARISON",
+                          "COST_ASSERTION",
+                          "COMMERCIAL_ASSERTION",
+                          "ADVISORY"
+                        ]
+                      },
+                      "attestation": {
+                        "const": "NOT_PROVIDER_ATTESTED"
+                      },
+                      "data_kind": {
+                        "enum": [
+                          "SYNTHETIC_FIXTURE",
+                          "USER_SUPPLIED",
+                          "UNVERIFIED",
+                          "MIXED"
+                        ]
+                      },
+                      "scope_link": {
+                        "enum": [
+                          "MATCHED",
+                          "PARTIAL",
+                          "UNLINKED",
+                          "MISMATCH"
+                        ]
+                      },
+                      "native_refs": {
+                        "type": "array",
+                        "maxItems": 128,
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "properties": {
+                            "ref": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 256,
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                            },
+                            "sha256": {
+                              "type": "string",
+                              "maxLength": 64,
+                              "pattern": "^[a-f0-9]{64}$"
+                            }
+                          },
+                          "required": [
+                            "ref",
+                            "sha256"
+                          ]
+                        }
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "source_id",
+                      "sha256",
+                      "native_version",
+                      "custody",
+                      "epistemic_status",
+                      "attestation",
+                      "data_kind",
+                      "scope_link",
+                      "native_refs"
+                    ]
+                  }
+                },
+                "observed_timestamps": {
+                  "type": "array",
+                  "maxItems": 256,
+                  "items": {
+                    "type": "string",
+                    "format": "date-time",
+                    "maxLength": 64
+                  }
+                },
+                "current_observation_count": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 32
+                },
+                "interpretation": {
+                  "const": "HUMAN_SUPPLIED_DESCRIPTIVE_ONLY"
+                },
+                "renewed_execution_authority": {
+                  "const": "NONE"
+                }
+              },
+              "required": [
+                "reference",
+                "reference_sha256",
+                "custody",
+                "scope",
+                "currency",
+                "native_max_evidence_age_seconds",
+                "evidence_quality",
+                "source_codes",
+                "counterevidence",
+                "native_sources",
+                "observed_timestamps",
+                "current_observation_count",
+                "interpretation",
+                "renewed_execution_authority"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "commercial_review": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "review_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                },
+                "sha256": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "native_version": {
+                  "const": "CommercialReview.v1"
+                },
+                "custody": {
+                  "enum": [
+                    "CURRENT_REPLAY",
+                    "ARCHIVED_ONLY"
+                  ]
+                },
+                "native_refs": {
+                  "type": "array",
+                  "maxItems": 130,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "ref": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                      },
+                      "sha256": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "pattern": "^[a-f0-9]{64}$"
+                      }
+                    },
+                    "required": [
+                      "ref",
+                      "sha256"
+                    ]
+                  }
+                },
+                "scope": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "campaign_ref": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256,
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "concept_ref": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256,
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "product_ref": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256,
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "market": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256,
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "account_ref": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "properties": {
+                            "namespace": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 256,
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                            },
+                            "id": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 256,
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                            }
+                          },
+                          "required": [
+                            "namespace",
+                            "id"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "measurement_window": {
+                      "type": "array",
+                      "maxItems": 2,
+                      "items": {
+                        "type": "string",
+                        "format": "date-time",
+                        "maxLength": 64
+                      },
+                      "minItems": 2
+                    }
+                  },
+                  "required": [
+                    "campaign_ref",
+                    "concept_ref",
+                    "product_ref",
+                    "market",
+                    "account_ref",
+                    "measurement_window"
+                  ]
+                },
+                "currencies": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "items": {
+                    "type": "string",
+                    "maxLength": 3,
+                    "pattern": "^[A-Z]{3}$"
+                  }
+                },
+                "source_as_of": {
+                  "type": "string",
+                  "format": "date-time",
+                  "maxLength": 64
+                },
+                "observed_timestamps": {
+                  "type": "array",
+                  "maxItems": 512,
+                  "items": {
+                    "type": "string",
+                    "format": "date-time",
+                    "maxLength": 64
+                  }
+                },
+                "status": {
+                  "enum": [
+                    "PARTIAL",
+                    "HOLD"
+                  ]
+                },
+                "source_codes": {
+                  "type": "array",
+                  "maxItems": 32,
+                  "items": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "pattern": "^[A-Z][A-Z0-9_]*$"
+                  }
+                },
+                "reported_statuses": {
+                  "type": "array",
+                  "maxItems": 8,
+                  "items": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "pattern": "^[A-Z][A-Z0-9_]*$"
+                  }
+                },
+                "data_kind": {
+                  "enum": [
+                    "USER_SUPPLIED",
+                    "SYNTHETIC_FIXTURE",
+                    "MIXED",
+                    "UNVERIFIED"
+                  ]
+                },
+                "pending_financial_evidence": {
+                  "type": "boolean"
+                },
+                "refund_return_present": {
+                  "type": "boolean"
+                },
+                "actual_paid_orders": {
+                  "const": "UNKNOWN"
+                },
+                "actual_settlement": {
+                  "const": "UNKNOWN"
+                },
+                "realized_profit": {
+                  "const": "UNKNOWN"
+                },
+                "costs_added_to_scenario": {
+                  "const": false
+                },
+                "attestation": {
+                  "const": "NOT_PROVIDER_ATTESTED"
+                }
+              },
+              "required": [
+                "review_id",
+                "sha256",
+                "native_version",
+                "custody",
+                "native_refs",
+                "scope",
+                "currencies",
+                "source_as_of",
+                "observed_timestamps",
+                "status",
+                "source_codes",
+                "reported_statuses",
+                "data_kind",
+                "pending_financial_evidence",
+                "refund_return_present",
+                "actual_paid_orders",
+                "actual_settlement",
+                "realized_profit",
+                "costs_added_to_scenario",
+                "attestation"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "portfolio",
+        "commercial_review"
+      ]
+    },
+    "calculations": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rounding": {
+          "const": "DECIMAL_80_DIGITS_HALF_UP_6_PLACES_AT_UNIT_COST_AND_RESULT"
+        },
+        "inventory_policy": {
+          "const": "ONE_MOQ_BATCH_NO_SALVAGE_UNSOLD_WRITTEN_OFF_NO_REORDER"
+        },
+        "buffer_policy": {
+          "const": "RESERVE_IN_CASH_REQUIREMENT_EXCLUDED_FROM_PROFIT_OR_LOSS"
+        },
+        "a15_a16_allocation": {
+          "const": "REFERENCE_ONLY_NO_COSTS_OR_PROFIT_IMPORTED"
+        },
+        "gross_contribution_per_unit": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "value": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "maxLength": 55,
+                  "pattern": "^-?(?:0|[1-9][0-9]{0,47})\\.[0-9]{6}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reason_codes": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^[A-Z][A-Z0-9_]*$"
+              }
+            }
+          },
+          "required": [
+            "value",
+            "reason_codes"
+          ]
+        },
+        "moq_cash_requirement": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "value": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "maxLength": 55,
+                  "pattern": "^-?(?:0|[1-9][0-9]{0,47})\\.[0-9]{6}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reason_codes": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^[A-Z][A-Z0-9_]*$"
+              }
+            }
+          },
+          "required": [
+            "value",
+            "reason_codes"
+          ]
+        },
+        "break_even_units": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "value": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000000000000000000000000000000000000000000000000
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reason_codes": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^[A-Z][A-Z0-9_]*$"
+              }
+            }
+          },
+          "required": [
+            "value",
+            "reason_codes"
+          ]
+        },
+        "batch_break_even_units": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "value": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000000000000000000000000000000000000000000000000
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reason_codes": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^[A-Z][A-Z0-9_]*$"
+              }
+            }
+          },
+          "required": [
+            "value",
+            "reason_codes"
+          ]
+        },
+        "worst_case_inventory_exposure": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "value": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "maxLength": 55,
+                  "pattern": "^-?(?:0|[1-9][0-9]{0,47})\\.[0-9]{6}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reason_codes": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^[A-Z][A-Z0-9_]*$"
+              }
+            }
+          },
+          "required": [
+            "value",
+            "reason_codes"
+          ]
+        },
+        "worst_case_loss": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "value": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "maxLength": 55,
+                  "pattern": "^-?(?:0|[1-9][0-9]{0,47})\\.[0-9]{6}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reason_codes": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^[A-Z][A-Z0-9_]*$"
+              }
+            }
+          },
+          "required": [
+            "value",
+            "reason_codes"
+          ]
+        },
+        "worst_case_cash_exposure": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "value": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "maxLength": 55,
+                  "pattern": "^-?(?:0|[1-9][0-9]{0,47})\\.[0-9]{6}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reason_codes": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^[A-Z][A-Z0-9_]*$"
+              }
+            }
+          },
+          "required": [
+            "value",
+            "reason_codes"
+          ]
+        },
+        "capital_gap": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "value": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "maxLength": 55,
+                  "pattern": "^-?(?:0|[1-9][0-9]{0,47})\\.[0-9]{6}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reason_codes": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^[A-Z][A-Z0-9_]*$"
+              }
+            }
+          },
+          "required": [
+            "value",
+            "reason_codes"
+          ]
+        },
+        "scenarios": {
+          "type": "array",
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "enum": [
+                  "bear",
+                  "base",
+                  "bull"
+                ]
+              },
+              "unit_sales": {
+                "oneOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000000
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "gross_contribution_per_unit": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "value": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 55,
+                        "pattern": "^-?(?:0|[1-9][0-9]{0,47})\\.[0-9]{6}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "reason_codes": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "items": {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^[A-Z][A-Z0-9_]*$"
+                    }
+                  }
+                },
+                "required": [
+                  "value",
+                  "reason_codes"
+                ]
+              },
+              "revenue": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "value": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 55,
+                        "pattern": "^-?(?:0|[1-9][0-9]{0,47})\\.[0-9]{6}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "reason_codes": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "items": {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^[A-Z][A-Z0-9_]*$"
+                    }
+                  }
+                },
+                "required": [
+                  "value",
+                  "reason_codes"
+                ]
+              },
+              "cash_cost": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "value": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 55,
+                        "pattern": "^-?(?:0|[1-9][0-9]{0,47})\\.[0-9]{6}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "reason_codes": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "items": {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^[A-Z][A-Z0-9_]*$"
+                    }
+                  }
+                },
+                "required": [
+                  "value",
+                  "reason_codes"
+                ]
+              },
+              "profit_or_loss": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "value": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 55,
+                        "pattern": "^-?(?:0|[1-9][0-9]{0,47})\\.[0-9]{6}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "reason_codes": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "items": {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^[A-Z][A-Z0-9_]*$"
+                    }
+                  }
+                },
+                "required": [
+                  "value",
+                  "reason_codes"
+                ]
+              },
+              "loss": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "value": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 55,
+                        "pattern": "^-?(?:0|[1-9][0-9]{0,47})\\.[0-9]{6}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "reason_codes": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "items": {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^[A-Z][A-Z0-9_]*$"
+                    }
+                  }
+                },
+                "required": [
+                  "value",
+                  "reason_codes"
+                ]
+              },
+              "unsold_units": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "value": {
+                    "oneOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1000000000000000000000000000000000000000000000000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "reason_codes": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "items": {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^[A-Z][A-Z0-9_]*$"
+                    }
+                  }
+                },
+                "required": [
+                  "value",
+                  "reason_codes"
+                ]
+              },
+              "cash_requirement": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "value": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 55,
+                        "pattern": "^-?(?:0|[1-9][0-9]{0,47})\\.[0-9]{6}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "reason_codes": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "items": {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^[A-Z][A-Z0-9_]*$"
+                    }
+                  }
+                },
+                "required": [
+                  "value",
+                  "reason_codes"
+                ]
+              }
+            },
+            "required": [
+              "name",
+              "unit_sales",
+              "gross_contribution_per_unit",
+              "revenue",
+              "cash_cost",
+              "profit_or_loss",
+              "loss",
+              "unsold_units",
+              "cash_requirement"
+            ]
+          },
+          "minItems": 3
+        }
+      },
+      "required": [
+        "rounding",
+        "inventory_policy",
+        "buffer_policy",
+        "a15_a16_allocation",
+        "gross_contribution_per_unit",
+        "moq_cash_requirement",
+        "break_even_units",
+        "batch_break_even_units",
+        "worst_case_inventory_exposure",
+        "worst_case_loss",
+        "worst_case_cash_exposure",
+        "capital_gap",
+        "scenarios"
+      ]
+    },
+    "decision": {
+      "enum": [
+        "DEFER",
+        "NO_GO",
+        "CONDITIONAL_GO"
+      ]
+    },
+    "decision_meaning": {
+      "const": "HUMAN_REVIEW_OF_BOUNDED_VALIDATION_ONLY"
+    },
+    "reason_codes": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "string",
+        "maxLength": 128,
+        "pattern": "^[A-Z][A-Z0-9_]*$"
+      }
+    },
+    "blocking_reasons": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "string",
+        "maxLength": 128,
+        "pattern": "^[A-Z][A-Z0-9_]*$"
+      }
+    },
+    "evidence_grade": {
+      "enum": [
+        "HYPOTHESIS_ONLY_UNATTESTED",
+        "SYNTHETIC_NON_ATTESTED",
+        "USER_SUPPLIED_DESCRIPTIVE_UNATTESTED",
+        "ARCHIVED_UNATTESTED",
+        "CONFLICTED_UNATTESTED"
+      ]
+    },
+    "confidence_meaning": {
+      "const": "EVIDENCE_RATING_NOT_PROBABILITY"
+    },
+    "demand": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rationale": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "enum": [
+                "UNKNOWN",
+                "ESTIMATED_USER_SUPPLIED",
+                "USER_SUPPLIED"
+              ]
+            },
+            "sha256": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "maxLength": 64,
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "sha256"
+          ],
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "status": {
+                    "const": "UNKNOWN"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "sha256": {
+                    "type": "null"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "sha256": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "status": {
+          "const": "HYPOTHESIS_NOT_PROVEN"
+        },
+        "descriptive_observation_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "observed_market_demand": {
+          "const": "UNKNOWN"
+        },
+        "proven_demand": {
+          "const": false
+        }
+      },
+      "required": [
+        "rationale",
+        "status",
+        "descriptive_observation_count",
+        "observed_market_demand",
+        "proven_demand"
+      ]
+    },
+    "unknowns": {
+      "const": [
+        "MARKET_SIZE",
+        "SUPPLIER_AUTHENTICITY",
+        "QUOTE_VALIDITY",
+        "RIGHTS",
+        "CERTIFICATION",
+        "LOGISTICS_RELIABILITY",
+        "RETURN_RATE",
+        "LIVE_PRICE",
+        "PAID_DEMAND"
+      ]
+    },
+    "counterevidence": {
+      "type": "array",
+      "maxItems": 160,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+          },
+          "code": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Z][A-Z0-9_]*$"
+          }
+        },
+        "required": [
+          "source_id",
+          "code"
+        ]
+      }
+    },
+    "human_validation_checklist": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "string",
+        "maxLength": 128,
+        "pattern": "^[A-Z][A-Z0-9_]*$"
+      }
+    },
+    "human_action": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "COMPLETE_OR_RECONCILE_BRIEF",
+            "REVIEW_NO_GO",
+            "CONSIDER_BOUNDED_RESEARCH",
+            "CONSIDER_BOUNDED_PROTOTYPE",
+            "CONSIDER_BOUNDED_SAMPLE_VALIDATION"
+          ]
+        },
+        "proposed_only": {
+          "const": true
+        },
+        "budget_ceiling": {
+          "oneOf": [
+            {
+              "type": "string",
+              "maxLength": 25,
+              "pattern": "^(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,6})?$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "currency": {
+          "type": "string",
+          "maxLength": 3,
+          "pattern": "^[A-Z]{3}$"
+        },
+        "unit_ceiling": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "human_decision_required": {
+          "const": true
+        },
+        "execution_authority": {
+          "const": "NONE"
+        }
+      },
+      "required": [
+        "kind",
+        "proposed_only",
+        "budget_ceiling",
+        "currency",
+        "unit_ceiling",
+        "human_decision_required",
+        "execution_authority"
+      ]
+    },
+    "limitations": {
+      "const": [
+        "All assumptions, quotes, costs, policy and scenarios are Human supplied and unauthenticated.",
+        "A10 proposals and the demand rationale are hypotheses, never observed or proven market demand.",
+        "A11 local observations are descriptive; no causal uplift or provider performance is attested.",
+        "A12 seller listings, offers and claims do not verify a supplier, rights, current price or demand.",
+        "A15 costs have no automatic allocation; A16 paid orders, settlement and realized profit remain UNKNOWN.",
+        "Synthetic fixtures test arithmetic and research decisions only; they are not live business evidence.",
+        "Hashes identify local content; archived validation does not renew custody, freshness, rights or authority.",
+        "No FX, supplier or market guesses, cross-source financial joins or automatic double counting occur.",
+        "Confidence is an evidence rating, never a probability of success.",
+        "Human alone controls capital, inventory, vendor outreach and any separately authorized next action."
+      ]
+    },
+    "execution_authority": {
+      "const": "NONE"
+    },
+    "financial_commitment": {
+      "const": "NONE"
+    },
+    "external_live_verified": {
+      "const": false
+    }
+  },
+  "required": [
+    "schema_version",
+    "brief_id",
+    "evaluator_version",
+    "source_sha",
+    "request_sha256",
+    "inputs",
+    "sources",
+    "calculations",
+    "decision",
+    "decision_meaning",
+    "reason_codes",
+    "blocking_reasons",
+    "evidence_grade",
+    "confidence_meaning",
+    "demand",
+    "unknowns",
+    "counterevidence",
+    "human_validation_checklist",
+    "human_action",
+    "limitations",
+    "execution_authority",
+    "financial_commitment",
+    "external_live_verified"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "const": "CONDITIONAL_GO"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "blocking_reasons": {
+            "maxItems": 0
+          },
+          "human_action": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "CONSIDER_BOUNDED_RESEARCH",
+                  "CONSIDER_BOUNDED_PROTOTYPE",
+                  "CONSIDER_BOUNDED_SAMPLE_VALIDATION"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

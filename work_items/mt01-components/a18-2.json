@@ -1,0 +1,23 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "a18-2",
+  "sources": [
+    "src/ai_commerce/opportunity/own_brand/__init__.py",
+    "src/ai_commerce/opportunity/own_brand/schemas.py",
+    "src/ai_commerce/opportunity/own_brand/sources.py",
+    "src/ai_commerce/opportunity/own_brand/brief.py"
+  ],
+  "tests": [
+    "tests/test_a18_own_brand.py",
+    "tests/test_a18_own_brand_integration.py"
+  ],
+  "acs": ["A18.M07.own-brand-offline-evidence-bound-go-no-go-brief"],
+  "consumers": [
+    "src/ai_commerce/opportunity/portfolio/recommend.py",
+    "src/ai_commerce/opportunity/portfolio/schemas.py",
+    "src/ai_commerce/settlement/review.py",
+    "src/ai_commerce/settlement/ledger.py",
+    "src/ai_commerce/operations/cost_ledger.py"
+  ],
+  "contracts": ["contracts/OwnBrandDecisionBrief.v1.schema.json"]
+}
