@@ -596,7 +596,7 @@ def test_parallel_execution_receipt_has_observed_counts_argv_and_timing(mapped, 
     entry = selected["groups"][0]
     assert calls == [argv] and entry["workers_requested"] == 12 and entry["workers_actual"] == workers
     assert entry["worker_count_provenance"] == "XDIST_CONTROLLER_COLLECTION_HOOK"
-    assert "ai_commerce.engineering.pytest_worker_observer" in verification.pytest_observation_env()["PYTEST_PLUGINS"]
+    assert "ai_commerce.engineering.pytest_profile" in verification.pytest_observation_env()["PYTEST_PLUGINS"]
     if workers == 12:
         assert result.returncode == 0 and set(prior) == {"a"} and selected["narrow_execution_observed"]
     else:
@@ -1538,7 +1538,7 @@ def test_xdist_receipt_must_be_unique_and_controller_grounded():
 
 
 def test_worker_observation_env_preserves_other_plugins_without_duplicates(monkeypatch):
-    plugin = "ai_commerce.engineering.pytest_worker_observer"
+    plugin = "ai_commerce.engineering.pytest_profile"
     monkeypatch.setenv("PYTEST_PLUGINS", "existing.module," + plugin)
     observed = verification.pytest_observation_env()
     assert observed["PYTEST_PLUGINS"].split(",") == ["existing.module", plugin]
@@ -1563,7 +1563,7 @@ def test_registered_parallel_success_without_receipt_is_unproven(mapped, monkeyp
 
 def test_xdist_controller_observer_counts_distinct_gateway_collections():
     from types import SimpleNamespace as NS
-    from ai_commerce.engineering import pytest_worker_observer as observer
+    from ai_commerce.engineering import pytest_profile as observer
     observed = []
     try:
         observer._COLLECTED_GATEWAYS.clear()
