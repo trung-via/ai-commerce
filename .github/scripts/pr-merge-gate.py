@@ -354,6 +354,99 @@ def onboarded_groups_for_pr(api: Callable, base: str, head: str, changed_files: 
             main_source, candidate_source, changed_files, approved_groups())
 
 
+def reviewed_manifest_groups_for_pr(api: Callable, base: str, head: str,
+                                    changed_files: list) -> tuple[dict, ...]:
+    """Trusted, GitHub-blob-backed owner admission for V2.2 one-PR components.
+
+    Runs from protected main. Candidate Python, manifests as instructions,
+    unregistered shell commands and existing owner overrides are never run.
+    """
+    changes = {f.get("filename"): f.get("status") for f in changed_files
+               if isinstance(f, dict)}
+    paths = sorted(p for p, status in changes.items() if
+                   isinstance(p, str) and
+                   p.startswith("work_items/mt01-components/") and p.endswith(".json"))
+    if not paths:
+        return ()
+    if (len(paths) > NEW_COMPONENT_MAX_GROUPS
+            or ONBOARDING_REGISTRY_PATH in changes
+            or any(changes[p] != "added" for p in paths)):
+        raise ValueError("MANIFEST_ONBOARDING_CHANGE_UNREVIEWED")
+    current = approved_groups()
+    existing_names = {g.name for g in current}
+    owned = {p for g in current for p in
+             (*g.paths, *g.tests, *g.consumers, *g.contracts)}
+    accepted = []
+    new_owned = set()
+    for path in paths:
+        response = api(f"{base}/contents/{path}?ref={head}")
+        if (not isinstance(response, dict) or response.get("type") != "file"
+                or response.get("encoding") != "base64"
+                or not isinstance(response.get("sha"), str)
+                or not isinstance(response.get("content"), str)):
+            raise ValueError("ONBOARD_GITHUB_BLOB_UNPROVEN")
+        raw = base64.b64decode(response["content"])
+        if len(raw) > 32768:
+            raise ValueError("ONBOARD_MANIFEST_TOO_LARGE")
+        actual_sha = hashlib.sha1(
+            b"blob " + str(len(raw)).encode() + bytes([0]) + raw).hexdigest()
+        if response["sha"] != actual_sha:
+            raise ValueError("ONBOARD_MANIFEST_BLOB_MISMATCH")
+        data = json.loads(raw.decode("utf-8"))
+        fields = {"schema_version", "component", "sources", "tests",
+                  "acs", "consumers", "contracts"}
+        if not isinstance(data, dict) or set(data) != fields:
+            raise ValueError("ONBOARD_MANIFEST_UNTRUSTED_FIELDS")
+        name = data["component"]
+        if (data["schema_version"] != "MT01ComponentOwner.v1"
+                or not isinstance(name, str) or not SAFE_COMPONENT.fullmatch(name)
+                or path != f"work_items/mt01-components/{name}.json"
+                or name in existing_names):
+            raise ValueError("ONBOARD_MANIFEST_OWNER_ID_INVALID")
+        records = {}
+        for key in ("sources", "tests", "acs", "consumers", "contracts"):
+            values = data[key]
+            if (not isinstance(values, list) or len(values) > 40
+                    or (key in ("sources", "tests", "acs") and not values)
+                    or any(type(v) is not str or not v or len(v) > 240 for v in values)
+                    or len(values) != len(set(values))):
+                raise ValueError("ONBOARD_MANIFEST_INVALID_" + key)
+            records[key] = tuple(values)
+        sources, tests, acs = (records[k] for k in ("sources", "tests", "acs"))
+        consumers, contracts = records["consumers"], records["contracts"]
+        if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", ac) for ac in acs):
+            raise ValueError("ONBOARD_MANIFEST_INVALID_AC")
+        if any(not (p.startswith("src/ai_commerce/") and p.endswith(".py")
+                     and not p.startswith(("src/ai_commerce/engineering/",
+                                           "src/ai_commerce/remote/"))
+                     and re.fullmatch(r"[A-Za-z0-9_/-]+\.py", p))
+               for p in sources):
+            raise ValueError("ONBOARD_MANIFEST_BAD_SOURCE")
+        if any(not re.fullmatch(r"tests/test_[A-Za-z0-9_]+\.py", p) for p in tests):
+            raise ValueError("ONBOARD_MANIFEST_BAD_TEST")
+        if any(not (p.startswith("src/ai_commerce/") and p.endswith(".py")
+                     and re.fullmatch(r"[A-Za-z0-9_/-]+\.py", p))
+               for p in consumers):
+            raise ValueError("ONBOARD_MANIFEST_BAD_CONSUMER")
+        if any(not (p.startswith("contracts/") and p.endswith(".schema.json")
+                     and re.fullmatch(r"[A-Za-z0-9_./-]+", p)
+                     and ".." not in p.split("/"))
+               for p in contracts):
+            raise ValueError("ONBOARD_MANIFEST_BAD_CONTRACT")
+        fresh = set(sources) | set(tests)
+        if (fresh & (owned | new_owned)
+                or any(changes.get(p) != "added" for p in fresh)
+                or any(p not in owned and p not in sources for p in consumers)
+                or any(p not in owned and changes.get(p) != "added" for p in contracts)):
+            raise ValueError("ONBOARD_MANIFEST_COVERAGE_INCOMPLETE")
+        new_owned.update(fresh)
+        existing_names.add(name)
+        accepted.append({"name": name, "paths": sources, "tests": tests,
+                         "consumers": consumers, "acs": acs,
+                         "contracts": (*contracts, path)})
+    return tuple(accepted)
+
+
 def reviewed_coverage_for_changed_files(files: object, *, onboarded_groups=()):
     """Return authoritative changed paths + minimal reviewed control witness.
 
@@ -576,14 +669,27 @@ def verify_one(api: Callable[[str], Any], repository: str, number: int,
     # candidate-created impact plan and its recorded changed_paths.
     changed_files = api(f"{base}/pulls/{number}/files?per_page=100")
     reviewed = reviewed_coverage_for_changed_files(changed_files)
-    if reviewed is None and isinstance(changed_files, list):
-        try:
-            onboarded = onboarded_groups_for_pr(api, base, head, changed_files)
-            if onboarded:
-                reviewed = reviewed_coverage_for_changed_files(
-                    changed_files, onboarded_groups=onboarded)
-        except (ValueError, SyntaxError, OSError, TypeError, KeyError, urllib.error.URLError):
-            reviewed = None
+    if isinstance(changed_files, list):
+        # A changed manifest MUST be authenticated even if all changed paths
+        # appear non-code or the old owner map would otherwise have returned a
+        # non-None coverage witness. Never allow a new owner to self-approve.
+        has_manifest = any(isinstance(item, dict) and
+                           isinstance(item.get("filename"), str) and
+                           item["filename"].startswith("work_items/mt01-components/")
+                           for item in changed_files)
+        if reviewed is None or has_manifest:
+            try:
+                onboarded = (reviewed_manifest_groups_for_pr(api, base, head, changed_files)
+                             if has_manifest else
+                             onboarded_groups_for_pr(api, base, head, changed_files))
+                if onboarded:
+                    reviewed = reviewed_coverage_for_changed_files(
+                        changed_files, onboarded_groups=onboarded)
+                elif has_manifest:
+                    reviewed = None
+            except (ValueError, SyntaxError, OSError, TypeError, KeyError,
+                    UnicodeError, binascii.Error, urllib.error.URLError):
+                reviewed = None
     if reviewed is None:
         return Verdict("WAIT_EVIDENCE", "V21_REVIEWED_CHANGED_PATH_ORACLE_MISSING", number, head, latest["id"])
     actual_changed, required_tests = reviewed
