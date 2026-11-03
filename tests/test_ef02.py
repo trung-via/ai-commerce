@@ -534,9 +534,14 @@ def test_spawned_checkpoint_rejects_untrusted_parent_without_writes():
 
 
 def test_ef02_batch_ingress_is_not_a_legacy_m0r_probe():
-    """Retiring manual M0-R probes must preserve regular issue and dispatch ingress."""
+    """Keep Issue ingress via trusted router and manual dispatch, without M0-R probe."""
     workflow = (ROOT / ".github" / "workflows" / "ef02-batch.yml").read_text(encoding="utf-8")
-    assert "types: [opened, labeled]" in workflow
+    router = (ROOT / ".github" / "workflows" / "issue-ingress.yml").read_text(encoding="utf-8")
+    assert "types: [opened, labeled]" in router
+    assert "startsWith(github.event.issue.title, '[EF02]')" in router
+    assert "uses: ./.github/workflows/ef02-batch.yml" in router
+    assert "workflow_call:" in workflow
+    assert "workflow_dispatch:" in workflow
     assert "startsWith(github.event.issue.title, '[EF02]')" in workflow
     assert "github.event_name == 'workflow_dispatch'" in workflow
     assert "needs.validate.result == 'success'" in workflow
