@@ -273,8 +273,15 @@ def approved_groups() -> tuple[TestGroup, ...]:
                   contracts=(".github/workflows/brain-pass-auto-merge.yml",)),
         TestGroup("mt01-v21", ("tests/test_mt01_v21.py",), ("MT01.v2-impact-selection",),
                   (eng + "impact_v21.py",), consumers=(".github/scripts/ef02-pr-ci-tests.py",)),
+        # HostOps V4 Windows PLAN is an independently reviewed CI control.
+        # A change to it must exercise both HostOps runtime invariants and
+        # MT-01 coverage/selection itself; the protected merge gate already
+        # requires tests/test_minimum_test.py for this exact script path.
+        # This is a CONSUMER-only addition: keep registered test argv unchanged.
         TestGroup("mt01", ("tests/test_minimum_test.py",), ("MT01.selection-and-evidence",),
-                  (eng + "minimum_test.py", eng + "verification.py"), (eng + "runner.py", rem + "worker.py")),
+                  (eng + "minimum_test.py", eng + "verification.py"),
+                  (eng + "runner.py", rem + "worker.py", "scripts/HostOps-V4-InstallPlan.ps1",
+                   "config/hostops-v3/config-v4.example.json")),
         TestGroup("ef01p", ("tests/test_ef01_performance.py",), ("EF01P.git-and-host-budget",),
                   (eng + "git.py", eng + "pytest_profile.py"), (eng + "runner.py", rem + "worker.py")),
         TestGroup("diagnostics", ("tests/test_ef01_agy_diagnostics.py", "tests/test_ef02_authoring_preflight.py"),

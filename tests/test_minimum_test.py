@@ -1516,15 +1516,33 @@ def test_hostops_v3_existing_28_and_v4_plan_files_are_registered(real_tree):
 
 
 def test_hostops_v3_script_and_schema_change_select_registered_group(real_tree, monkeypatch):
-    """Python import scanning cannot silently ignore the fixed PS1 and schema."""
+    """Unrelated HostOps V3/contract changes retain their existing narrow tests."""
     for path in ("scripts/HostOps-V3-TokenInventory.ps1",
-                 "scripts/HostOps-V4-InstallPlan.ps1",
-                 "config/hostops-v3/config-v4.example.json",
                  "contracts/hostops-v3.request.schema.json"):
         selected = real_plan(real_tree, monkeypatch, path)
         assert selected["selected_groups"] == ["hostops-v3"]
         assert not selected["fallback"]
         assert selected["groups"][0]["selected_profile"] == "mt01-hostops-v3-tests"
+
+
+@pytest.mark.parametrize("changed", [
+    "scripts/HostOps-V4-InstallPlan.ps1",
+    "config/hostops-v3/config-v4.example.json",
+])
+def test_hostops_v4_plan_requires_both_hostops_and_mt01_owner_tests(real_tree, monkeypatch, changed):
+    """#288: protected-main merge-gate control closure for both PLAN-only inputs."""
+    selected = real_plan(real_tree, monkeypatch, changed)
+    assert not selected["fallback"]
+    assert set(selected["selected_groups"]) == {"hostops-v3", "mt01"}
+    bindings = {entry["group"]: entry for entry in selected["groups"]}
+    for group in ("hostops-v3", "mt01"):
+        expected = real_tree.registry["mt01-" + group + "-tests"]
+        assert bindings[group]["selected_profile"] == "mt01-" + group + "-tests"
+        assert bindings[group]["binding"]["argv"] == expected
+    selected_tests = {test for entry in bindings.values()
+                      for test in entry["binding"]["mapping"]["tests"]}
+    assert {"tests/test_hostops_v3_integration.py", "tests/test_minimum_test.py"} <= selected_tests
+    assert changed in next(g for g in real_tree.groups if g.name == "mt01").consumers
 
 
 def test_xdist_receipt_must_be_unique_and_controller_grounded():
