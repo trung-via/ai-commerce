@@ -3,6 +3,7 @@
 [CmdletBinding(PositionalBinding = $false)]
 param(
     [switch]$Plan,
+    [switch]$NativeReadOnly,
     [string]$ConfigPath = '',
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$UnsupportedArgs = @()
@@ -51,6 +52,15 @@ $state = [ordered]@{
     kill_marker_present = $false
     broker_state_dir_present = $false
     transport_state_dir_present = $false
+    # These fields describe bounded ROOT-ONLY observations, never installed
+    # broker admission or independent two-account IPC identity proof.
+    native_readonly_requested = [bool]$NativeReadOnly
+    native_local_sid_query_complete = $false
+    native_broker_local_account_found = $false
+    native_transport_local_account_found = $false
+    native_acl_root_query_complete = $false
+    native_acl_root_policy_satisfied = $false
+    native_acl_roots_inspected = 0
     native_acl_verified = $false
     native_two_account_ipc_verified = $false
     human_release_signature_verified = $false
@@ -150,6 +160,109 @@ if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
         $reasons.Add('CONFIG_INVALID_OR_UNREADABLE')
     }
 }
+# Human opt-in: REAL Windows read-only inventory, not a broker/transport launch.
+# Bounded two exact local SID lookups and four explicit root-only ACL reads.
+# No names, SIDs, paths, ACE lists, exception text or user data leave this process.
+if ($NativeReadOnly) {
+    if (-not ($state.windows -and $state.caller_non_elevated -and
+              $state.config_schema_valid -and $state.distinct_non_admin_sid_configured -and
+              $state.untrusted_identities_isolated)) {
+        $reasons.Add('NATIVE_READONLY_PREREQUISITES_MISSING')
+    } else {
+        try {
+            # Both values have already passed the closed SID-only regex above.
+            $brokerAccounts = @(Get-CimInstance -ClassName Win32_UserAccount -Filter (
+                "LocalAccount = TRUE AND SID = '" + $a + "'") -OperationTimeoutSec 3 -ErrorAction Stop)
+            $transportAccounts = @(Get-CimInstance -ClassName Win32_UserAccount -Filter (
+                "LocalAccount = TRUE AND SID = '" + $b + "'") -OperationTimeoutSec 3 -ErrorAction Stop)
+            $state.native_local_sid_query_complete = $true
+            $state.native_broker_local_account_found = (
+                $brokerAccounts.Count -eq 1 -and $brokerAccounts[0].LocalAccount -eq $true -and
+                $brokerAccounts[0].Disabled -eq $false)
+            $state.native_transport_local_account_found = (
+                $transportAccounts.Count -eq 1 -and $transportAccounts[0].LocalAccount -eq $true -and
+                $transportAccounts[0].Disabled -eq $false)
+        } catch {
+            $reasons.Add('NATIVE_LOCAL_SID_QUERY_UNAVAILABLE')
+        }
+
+        if ($state.native_broker_local_account_found -and
+            $state.native_transport_local_account_found) {
+            # Do not enumerate trees, dereference unrelated paths, or print ACLs.
+            # Owners must be trusted; untrusted / unapproved writers are denied.
+            $trustedSids = @($trusted | ForEach-Object { [string]$_ })
+            $dangerous = [int64]([Security.AccessControl.FileSystemRights]::Write -bor
+                [Security.AccessControl.FileSystemRights]::Modify -bor
+                [Security.AccessControl.FileSystemRights]::FullControl -bor
+                [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+                [Security.AccessControl.FileSystemRights]::TakeOwnership -bor
+                [Security.AccessControl.FileSystemRights]::Delete)
+            $roots = @(
+                @{ Path = [string]$config.policy_dir; Writers = @($a) },
+                @{ Path = [string]$config.state_dir; Writers = @($a) },
+                @{ Path = [string]$config.transport_state_dir; Writers = @($b) },
+                @{ Path = [string]$config.release_dir; Writers = @() }
+            )
+            $allSecure = $true
+            try {
+                foreach ($root in $roots) {
+                    if (-not (HasLocalItem $root.Path 'Container')) {
+                        $allSecure = $false
+                        break
+                    }
+                    $info = Get-Item -LiteralPath $root.Path -Force -ErrorAction Stop
+                    if (($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                        $allSecure = $false
+                        break
+                    }
+                    $acl = Get-Acl -LiteralPath $root.Path -ErrorAction Stop
+                    $state.native_acl_roots_inspected++
+                    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+                    if (-not $acl.AreAccessRulesProtected -or
+                        $trustedSids -cnotcontains $owner) {
+                        $allSecure = $false
+                        break
+                    }
+                    $allowedWriters = @($trustedSids) + @($root.Writers)
+                    $rules = @($acl.GetAccessRules($true, $true,
+                        [Security.Principal.SecurityIdentifier]))
+                    if ($rules.Count -gt 256) {
+                        $allSecure = $false
+                        break
+                    }
+                    foreach ($rule in $rules) {
+                        if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) {
+                            continue
+                        }
+                        $mask = [int64]$rule.FileSystemRights
+                        $sid = [string]$rule.IdentityReference.Value
+                        if (($mask -band $dangerous) -ne 0 -and
+                            $allowedWriters -cnotcontains $sid) {
+                            $allSecure = $false
+                            break
+                        }
+                    }
+                    if (-not $allSecure) { break }
+                }
+                $state.native_acl_root_query_complete = (
+                    $state.native_acl_roots_inspected -eq $roots.Count)
+                $state.native_acl_root_policy_satisfied = (
+                    $allSecure -and $state.native_acl_root_query_complete)
+            } catch {
+                $reasons.Add('NATIVE_ACL_ROOT_QUERY_UNAVAILABLE')
+            }
+        }
+    }
+    if (-not ($state.native_local_sid_query_complete -and
+              $state.native_broker_local_account_found -and
+              $state.native_transport_local_account_found -and
+              $state.native_acl_root_policy_satisfied)) {
+        $reasons.Add('NATIVE_READONLY_PROOF_INCOMPLETE')
+    }
+}
+# This limited inventory does NOT verify child ACLs, private credential access,
+# signed release authenticity, IPC HMAC/peer identity, or private GitHub control.
+# Keep all activation gates hard-false until separately observed native evidence.
 if (-not $state.config_disabled) { $reasons.Add('CONFIG_NOT_PROVEN_DISABLED') }
 if (-not $state.source_public_control_private_declared) { $reasons.Add('REPOSITORY_BINDING_UNPROVEN') }
 if (-not $state.distinct_non_admin_sid_configured) { $reasons.Add('DISTINCT_SID_UNPROVEN') }

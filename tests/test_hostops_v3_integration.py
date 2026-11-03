@@ -923,6 +923,64 @@ def test_hostops_v4_windows_install_plan_actual_no_writes(tmp_path):
     assert hashlib.sha256(config.read_bytes()).hexdigest() == before
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows-only native SID and DACL inventory")
+def test_hostops_v4_native_readonly_opt_in_fails_closed_without_installed_accounts():
+    """Real Windows cmdlet invocation cannot turn sample PLAN into live proof."""
+    import hashlib
+    powershell = security.prefer_readable_pwsh_path() or shutil.which("powershell.exe")
+    assert powershell
+    script = ROOT / "scripts/HostOps-V4-InstallPlan.ps1"
+    config = ROOT / "config/hostops-v3/config-v4.example.json"
+    before = hashlib.sha256(config.read_bytes()).hexdigest()
+    opts = [powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script)]
+    outcome = subprocess.run([*opts, "-Plan", "-NativeReadOnly",
+                              "-ConfigPath", str(config)],
+                             capture_output=True, text=True, timeout=30)
+    assert outcome.returncode == 0, outcome.stderr
+    payload = json.loads(outcome.stdout)
+    assert payload["schema"] == "hostops.v4.windows_install_plan.v1"
+    assert payload["stage"] == "READ_ONLY_PLAN_NO_CHANGES"
+    assert payload["native_readonly_requested"] is True
+    assert payload["native_local_sid_query_complete"] is False
+    assert payload["native_broker_local_account_found"] is False
+    assert payload["native_transport_local_account_found"] is False
+    assert payload["native_acl_root_query_complete"] is False
+    assert payload["native_acl_root_policy_satisfied"] is False
+    assert payload["native_acl_roots_inspected"] == 0
+    assert payload["native_acl_verified"] is False
+    assert payload["native_two_account_ipc_verified"] is False
+    assert payload["human_release_signature_verified"] is False
+    assert payload["private_control_github_verified"] is False
+    assert payload["ready_to_enable"] is False
+    assert "NATIVE_READONLY_PREREQUISITES_MISSING" in payload["block_reasons"]
+    assert "NATIVE_READONLY_PROOF_INCOMPLETE" in payload["block_reasons"]
+    # The probe only emits bounded aggregate booleans, never real identifiers.
+    assert all(secret not in outcome.stdout for secret in
+               ("broker_identity", "transport_identity", "S-1-", "C:\\\\", "TRUNG", "token"))
+    missing_plan = subprocess.run([*opts, "-NativeReadOnly",
+                                   "-ConfigPath", str(config)],
+                                  capture_output=True, text=True, timeout=30)
+    assert missing_plan.returncode != 0
+    assert hashlib.sha256(config.read_bytes()).hexdigest() == before
+
+
+def test_hostops_v4_native_readonly_scope_never_claims_live_or_install():
+    script = (ROOT / "scripts/HostOps-V4-InstallPlan.ps1").read_text(encoding="utf-8")
+    assert "[switch]$NativeReadOnly" in script
+    assert "Get-CimInstance -ClassName Win32_UserAccount" in script
+    assert "Get-Acl -LiteralPath" in script
+    assert "-OperationTimeoutSec 3" in script
+    assert "native_acl_verified = $false" in script
+    assert "native_two_account_ipc_verified = $false" in script
+    assert "ready_to_enable = $false" in script
+    assert "NATIVE_READONLY_PROOF_INCOMPLETE" in script
+    assert "NativeReadOnly" in script
+    forbidden = ("New-LocalUser", "Set-Acl", "Start-Service",
+                 "Register-ScheduledTask", "Invoke-Expression",
+                 "Start-Process -Verb RunAs", "Set-Content", "WriteAllBytes")
+    assert all(term.casefold() not in script.casefold() for term in forbidden)
+
+
 def test_v4_security_import_preserves_path_in_fresh_process():
     """V3 importing shared security.py must never alter process command lookup."""
     code = ("import os;"
