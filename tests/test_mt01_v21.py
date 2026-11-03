@@ -918,3 +918,12 @@ def test_v22_manifest_respects_authorized_directory_prefixes(tmp_path):
     admitted = validator(data, **{**context, "allowed_paths": allowed})
     assert admitted["name"] == "fresh"
     assert admitted["status"] == "VALIDATED_DATA_ONLY_NOT_VERIFICATION_PASS"
+
+
+def test_v22_pr_ci_cancels_only_superseded_pull_requests():
+    workflow = (Path(__file__).resolve().parents[1] /
+                ".github/workflows/ef02-tests.yml").read_text(encoding="utf-8")
+    assert "concurrency:" in workflow
+    assert "github.event.pull_request.number || github.ref" in workflow
+    assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in workflow
+    assert "branches: [ef02-multi-action-implementation, main]" in workflow
