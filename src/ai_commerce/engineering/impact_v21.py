@@ -548,7 +548,7 @@ def load_baseline_component_owner_records(
                   git("ls-tree", "-r", "--name-only", "-z", base_sha).split(bytes([0])) if p}
     manifests = sorted(p for p in base_paths
                        if p.startswith("work_items/mt01-components/"))
-    if len(manifests) > 8:
+    if len(manifests) > 256:
         raise ValueError("ONBOARD_BASELINE_OWNER_LIMIT")
     accepted = []
     groups = tuple(existing_groups)
