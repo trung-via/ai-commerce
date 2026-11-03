@@ -1,6 +1,7 @@
 """MT-01 deterministic selection/evidence and real local verification; no vendors."""
 from dataclasses import FrozenInstanceError
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -545,7 +546,8 @@ def test_group_timeout_preserves_partial_logs_and_cannot_repair(mapped, monkeypa
         _execute(mapped)
     assert (mapped.evidence / "round-0/mt01.0.stdout.log").read_bytes() == b"created: 12/12 workers\npartial"
     receipt = json.loads((mapped.evidence / "round-0/mt01.results.json").read_text())
-    assert receipt["groups"][0]["state"] == "UNPROVEN" and receipt["groups"][0]["workers_actual"] == 12
+    assert receipt["groups"][0]["state"] == "UNPROVEN" and receipt["groups"][0]["workers_actual"] is None
+    assert receipt["groups"][0]["workers_console_reported"] == 12
     assert not list(mapped.evidence.rglob("*.evidence.json"))
 
 
@@ -585,7 +587,7 @@ def test_parallel_execution_receipt_has_observed_counts_argv_and_timing(mapped, 
     calls = []
     def run(argv, **_):
         calls.append(argv)
-        return subprocess.CompletedProcess(argv, 0, f"{workers} workers [3 items]\n2 passed, 1 skipped in 0.02s", "")
+        return subprocess.CompletedProcess(argv, 0, f"MT01_XDIST_WORKERS_COLLECTED={workers}\n2 passed, 1 skipped in 0.02s", "")
     monkeypatch.setattr(verification, "subprocess", SimpleNamespace(run=run, TimeoutExpired=subprocess.TimeoutExpired,
                                                                  CompletedProcess=subprocess.CompletedProcess))
     argv = ["python", "-m", "pytest", "tests/test_a.py", "-q", "-n", "12"]
@@ -593,6 +595,8 @@ def test_parallel_execution_receipt_has_observed_counts_argv_and_timing(mapped, 
         registered_profiles={"project-tests": [*FULL, "-n", "12"], "component-a": argv})
     entry = selected["groups"][0]
     assert calls == [argv] and entry["workers_requested"] == 12 and entry["workers_actual"] == workers
+    assert entry["worker_count_provenance"] == "XDIST_CONTROLLER_COLLECTION_HOOK"
+    assert "ai_commerce.engineering.pytest_profile" in verification.pytest_observation_env()["PYTEST_PLUGINS"]
     if workers == 12:
         assert result.returncode == 0 and set(prior) == {"a"} and selected["narrow_execution_observed"]
     else:
@@ -1321,7 +1325,7 @@ def test_provisional_pass_still_runs_registered_full_suite(mapped, monkeypatch):
     calls = []
     def run(argv, **kwargs):
         calls.append(list(argv))
-        return subprocess.CompletedProcess(argv, 0, "created: 12/12 workers\n1 passed in 0.02s", "")
+        return subprocess.CompletedProcess(argv, 0, "created: 12/12 workers\nMT01_XDIST_WORKERS_COLLECTED=12\n1 passed in 0.02s", "")
     monkeypatch.setattr(verification.subprocess, "run", run)
     mapped.evidence.mkdir(exist_ok=True)
     files = {}
@@ -1521,3 +1525,71 @@ def test_hostops_v3_script_and_schema_change_select_registered_group(real_tree, 
         assert selected["selected_groups"] == ["hostops-v3"]
         assert not selected["fallback"]
         assert selected["groups"][0]["selected_profile"] == "mt01-hostops-v3-tests"
+
+
+def test_xdist_receipt_must_be_unique_and_controller_grounded():
+    parse = verification.observed_xdist_workers
+    assert parse(b"12 workers [100 items]\ncreated: 12/12 workers") is None
+    assert parse(b"MT01_XDIST_WORKERS_COLLECTED=12\n") == 12
+    assert parse(b"MT01_XDIST_WORKERS_COLLECTED=0\r\n") == 0
+    assert parse(b"MT01_XDIST_WORKERS_COLLECTED=12\nMT01_XDIST_WORKERS_COLLECTED=8\n") is None
+    assert parse(b"prefix MT01_XDIST_WORKERS_COLLECTED=12") is None
+    assert parse(b"MT01_XDIST_WORKERS_COLLECTED=invalid") is None
+
+
+def test_worker_observation_env_preserves_other_plugins_without_duplicates(monkeypatch):
+    plugin = "ai_commerce.engineering.pytest_profile"
+    monkeypatch.setenv("PYTEST_PLUGINS", "existing.module," + plugin)
+    observed = verification.pytest_observation_env()
+    assert observed["PYTEST_PLUGINS"].split(",") == ["existing.module", plugin]
+
+
+def test_registered_parallel_success_without_receipt_is_unproven(mapped, monkeypatch):
+    argv = ["python", "-m", "pytest", "tests/test_a.py", "-q", "-n", "12"]
+    def run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, "12 workers [3 items]\n2 passed in 0.01s", "")
+    monkeypatch.setattr(verification.subprocess, "run", run)
+    outcome, selected, prior = _execute(
+        mapped, registered_only=True, fallback_argv=[*FULL, "-n", "12"],
+        registered_profiles={"project-tests": [*FULL, "-n", "12"], "component-a": argv})
+    entry = selected["groups"][0]
+    assert outcome.returncode != 0 and not prior
+    assert entry["workers_actual"] is None
+    assert entry["workers_console_reported"] == 12
+    assert entry["worker_count_provenance"] == "UNOBSERVED"
+    assert entry["result"] == "UNPROVEN"
+    assert entry["reason"] == "PYTEST_WORKER_COUNT_MISMATCH"
+
+
+def test_xdist_controller_observer_counts_distinct_gateway_collections():
+    from types import SimpleNamespace as NS
+    from ai_commerce.engineering import pytest_profile as observer
+    observed = []
+    try:
+        observer._COLLECTED_GATEWAYS.clear()
+        for worker_id in ("gw0", "gw1", "gw0"):
+            observer.pytest_xdist_node_collection_finished(
+                NS(gateway=NS(id=worker_id)), ["test_one.py::test_ok"])
+        observer.pytest_terminal_summary(NS(write_line=observed.append), 0)
+        assert observed == ["MT01_XDIST_WORKERS_COLLECTED=2"]
+    finally:
+        observer._COLLECTED_GATEWAYS.clear()
+
+
+def test_live_twelve_workers_self_host_only(tmp_path):
+    """Explicit Windows self-host opt-in; never benchmark hosted CI as the host."""
+    import importlib.util
+    if os.name != "nt" or os.getenv("AI_COMMERCE_SELF_HOST_WORKER_PROOF") != "1":
+        pytest.skip("requires explicit Windows self-host worker evidence opt-in")
+    assert importlib.util.find_spec("xdist") is not None, "xdist must be installed on self-host"
+    fixture = tmp_path / "test_worker_fixture.py"
+    fixture.write_text("def test_one():\n    assert True\n")
+    env = verification.pytest_observation_env()
+    env.pop("PYTEST_ADDOPTS", None)
+    env.pop("PYTEST_DISABLE_PLUGIN_AUTOLOAD", None)
+    run = subprocess.run(
+        [sys.executable, "-m", "pytest", str(fixture), "-q", "-n", "12"],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
+    stdout = run.stdout.encode()
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert verification.observed_xdist_workers(stdout) == 12, run.stdout

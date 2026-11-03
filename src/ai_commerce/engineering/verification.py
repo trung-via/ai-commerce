@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import os
 import re
 import subprocess
 import time
@@ -10,6 +11,31 @@ from typing import Callable, Mapping
 
 from .minimum_test import Evidence, apply_evidence, canonical, file_hashes, select_plan, pytest_counts, select_provisional_tests
 from .pytest_profile import require_managed_parallelism, registered_workers
+
+
+_OBSERVER_PLUGIN = "ai_commerce.engineering.pytest_profile"
+
+
+def pytest_observation_env() -> dict[str, str]:
+    """Instrument the pytest controller without modifying registered argv."""
+    env = os.environ.copy()
+    plugins = [item.strip() for item in env.get("PYTEST_PLUGINS", "").split(",") if item.strip()]
+    if _OBSERVER_PLUGIN not in plugins:
+        plugins.append(_OBSERVER_PLUGIN)
+    env["PYTEST_PLUGINS"] = ",".join(plugins)
+    return env
+
+
+def observed_xdist_workers(out: bytes) -> int | None:
+    """Accept exactly one complete controller hook receipt, never console guesses."""
+    matches = re.findall(rb"(?m)^MT01_XDIST_WORKERS_COLLECTED=([0-9]+)\r?$", out)
+    return int(matches[0]) if len(matches) == 1 else None
+
+
+def observed_console_workers(out: bytes) -> int | None:
+    """Diagnostic only; startup/progress text cannot establish workers_actual."""
+    match = re.search(rb"\b([0-9]+) workers \[|created:\s*([0-9]+)/[0-9]+ workers", out)
+    return int(match[1] or match[2]) if match else None
 
 
 def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dict,
@@ -49,8 +75,8 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
     plan["selection_seconds"] = time.monotonic() - started_plan
     for entry in plan["groups"]:
         entry.update(actual_argv=None, tests_executed=pytest_counts(b""),
-                     workers_requested=entry.get("pytest_profile", {}).get("workers_requested",
-                         registered_workers(entry["binding"]["argv"]) if registered_only else 0),
+                     workers_requested=(registered_workers(entry["binding"]["argv"]) if registered_only
+                                        else entry.get("pytest_profile", {}).get("workers", 0)),
                      workers_actual=None, wall_seconds=0.0)
     if on_plan:
         on_plan(plan)  # Keep failure diagnostics visible in EF01 and the action result.
@@ -74,14 +100,19 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
                      finished_at=datetime.now(timezone.utc).isoformat())
 
     def observe_workers(entry, out):
-        observed = re.search(rb"\b([0-9]+) workers \[|created:\s*([0-9]+)/[0-9]+ workers", out)
-        actual = int(observed[1] or observed[2]) if observed else None
+        actual = observed_xdist_workers(out)
         entry["workers_actual"] = actual
+        entry["workers_console_reported"] = observed_console_workers(out)
+        entry["worker_count_provenance"] = (
+            "XDIST_CONTROLLER_COLLECTION_HOOK" if actual is not None else "UNOBSERVED"
+        )
         if "pytest_profile" in entry:
             entry["pytest_profile"].update(
+                workers_requested=entry["workers_requested"],
                 workers_actual=actual, observed_workers=actual,
-                execution_status="12_WORKERS_EXECUTED" if actual == 12
-                else "12_WORKERS_NOT_EXECUTED" if entry["pytest_profile"]["workers"] == 0
+                worker_count_provenance=entry["worker_count_provenance"],
+                execution_status="12_WORKERS_EXECUTED" if actual == 12 and entry["workers_requested"] == 12
+                else "SERIAL_PYTEST_EXECUTED" if actual == 0 and entry["workers_requested"] == 0
                 else "WORKER_COUNT_UNPROVEN")
     # Run provisional tests BEFORE expensive broad regression. A nonzero
     # determinate result must lead to bounded Verify-Fix without falsely
@@ -96,7 +127,8 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
                 raise subprocess.TimeoutExpired(argv, timeout_seconds)
             response = subprocess.run(argv, cwd=repo, capture_output=True,
                                       text=True, encoding="utf-8", errors="replace",
-                                      timeout=remaining, check=False)
+                                      timeout=remaining, check=False,
+                                      env=pytest_observation_env())
             out, err = response.stdout.encode(), response.stderr.encode()
         except subprocess.TimeoutExpired as exc:
             out = exc.stdout if isinstance(exc.stdout, bytes) else (exc.stdout or "").encode()
@@ -115,9 +147,11 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
         save("mt01_provisional_stdout", "mt01.provisional.stdout.log", out)
         save("mt01_provisional_stderr", "mt01.provisional.stderr.log", err)
         current = file_hashes(repo)
-        observed = re.search(rb"\b([0-9]+) workers \[|created:\s*([0-9]+)/[0-9]+ workers", out)
-        workers = int(observed[1] or observed[2]) if observed else None
-        provisional.update(actual_exit_code=response.returncode,
+        workers = observed_xdist_workers(out)
+        provisional.update(worker_count_provenance=(
+                               "XDIST_CONTROLLER_COLLECTION_HOOK" if workers is not None else "UNOBSERVED"),
+                           workers_console_reported=observed_console_workers(out),
+                           actual_exit_code=response.returncode,
                            wall_seconds=time.monotonic()-started,
                            tests_executed=pytest_counts(out), workers_requested=12,
                            workers_actual=workers)
@@ -140,7 +174,7 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
             finish()
             return subprocess.CompletedProcess(fallback_argv, 1, out.decode("utf-8","replace"),
                                                err.decode("utf-8","replace")), plan
-        if response.returncode != 0 or not re.search(rb"\b[1-9][0-9]* passed\b", out):
+        if response.returncode != 0 or workers != 12 or not re.search(rb"\b[1-9][0-9]* passed\b", out):
             provisional.update(result="UNPROVEN", reason="PROVISIONAL_NO_VALID_PYTEST_PASS")
             finish()
             return subprocess.CompletedProcess(fallback_argv, 3, out.decode("utf-8","replace"),
@@ -163,7 +197,8 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
                 entry["actual_argv"] = None
                 raise subprocess.TimeoutExpired(argv, timeout_seconds)
             result = subprocess.run(argv, cwd=repo, capture_output=True, text=True,
-                                    encoding="utf-8", errors="replace", timeout=remaining, check=False)
+                                    encoding="utf-8", errors="replace", timeout=remaining,
+                                    check=False, env=pytest_observation_env())
             out, err = result.stdout.encode(), result.stderr.encode()
         except subprocess.TimeoutExpired as exc:
             out = exc.stdout if isinstance(exc.stdout, bytes) else (exc.stdout or "").encode()
@@ -202,7 +237,13 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
             finish()
             raise RuntimeError("MT01_SOURCE_DRIFT_DURING_VERIFICATION")
         diagnostics = (out + b"\n" + err).decode("utf-8", "replace").lower()
-        worker_mismatch = entry["workers_requested"] == 12 and entry["workers_actual"] not in (None, 12)
+        # A successful -n12 command without a controller receipt is UNPROVEN,
+        # even when the quiet console or command line claims twelve workers.
+        # A determinate test failure may still enter Verify-Fix when worker
+        # startup could not complete, but it cannot become a candidate PASS.
+        worker_mismatch = (entry["workers_requested"] == 12 and (
+            entry["workers_actual"] not in (None, 12) or
+            (result.returncode == 0 and entry["workers_actual"] is None)))
         infrastructure = worker_mismatch or any(s in diagnostics for s in (
             "permission denied", "permissionerror", "no module named pytest", "internalerror",
             "worker crashed", "workers crashed", "winerror", "subprocess.timeoutexpired",

@@ -139,3 +139,28 @@ def require_managed_parallelism(repo: Path, argv: list[str], *, coverage_require
 
 def xdist_available() -> bool:
     return importlib.util.find_spec("xdist") is not None and os.environ.get("PYTEST_DISABLE_PLUGIN_AUTOLOAD") != "1"
+
+
+# This already registered EF01P module is also the controller-side pytest
+# plugin. Load via PYTEST_PLUGINS without changing reviewed pytest argv.
+# Keep EF01 CLI importable when the optional test dependency is unavailable.
+try:
+    import pytest
+except ImportError:
+    pytest = None
+
+_COLLECTED_GATEWAYS: set[str] = set()
+
+if pytest is not None:
+    @pytest.hookimpl(optionalhook=True)
+    def pytest_xdist_node_collection_finished(node, ids) -> None:
+        gateway = getattr(node, "gateway", None)
+        worker_id = getattr(gateway, "id", None)
+        if isinstance(worker_id, str) and worker_id:
+            _COLLECTED_GATEWAYS.add(worker_id)
+
+    def pytest_terminal_summary(terminalreporter, exitstatus) -> None:
+        # Console startup text does not prove completed worker collection.
+        terminalreporter.write_line(
+            "MT01_XDIST_WORKERS_COLLECTED=" + str(len(_COLLECTED_GATEWAYS))
+        )
