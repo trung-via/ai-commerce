@@ -402,5 +402,14 @@
     "-q",
     "-n",
     "12"
+  ],
+  "mt01-component-onboarding": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_mt01_v21.py",
+    "-q",
+    "-n",
+    "12"
   ]
 }
