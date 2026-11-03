@@ -251,13 +251,30 @@ def control_provenance(api, issue_number, run_id, workflow_sha256, expected_sour
 READ_ONLY_V4 = frozenset({"volumes", "stat", "list", "find", "hash", "read"})
 
 
+def validation_v4(raw):
+    """Structure-only V4 envelope validation; never authenticates or executes."""
+    e, r = dual_repo_envelope(raw)
+    if r.value["operation"] not in READ_ONLY_V4:
+        deny("OPERATION_NOT_ENABLED")
+    return {"schema": "hostops.transport.v4", "status": "STRUCTURE_ONLY",
+            "request_sha256": r.fingerprint, "envelope_sha256": digest(canonical(e)),
+            "source_repository": r.value["source_repository"],
+            "control_repository": r.value["control_repository"],
+            "release_id": r.value["release_id"], "source_sha": r.value["source_sha"],
+            "operation": r.value["operation"]}
+
+
 def submit_v4(config, raw, *, reconcile=False):
     """V4 HMAC client; v3 CLI cannot invoke this function."""
     envelope_data, request = dual_repo_envelope(raw)
     if request.value["operation"] not in READ_ONLY_V4:
         deny("OPERATION_NOT_ENABLED")
-    if not config["enabled"] or (Path(config["policy_dir"]) / "KILL").exists():
+    if not config.get("enabled") or (Path(config["policy_dir"]) / "KILL").exists():
         deny("KILL_SWITCH")
+    if (config.get("schema") != "hostops.config.v4" or
+            config.get("source_repository") != SOURCE_REPOSITORY or
+            config.get("control_repository") != CONTROL_REPOSITORY):
+        deny("BAD_CONFIG")
     payload = canonical({"schema": "hostops.ipc.v4",
                          "mode": "reconcile" if reconcile else "execute",
                          "envelope": envelope_data})
@@ -290,12 +307,19 @@ def report_v4(response):
 
 def poll_once_v4(api, config, release, issue_number, run_id, *, send=submit_v4):
     """Single Private Issue, no daemon/CLI activation in this stage."""
+    if not config.get("enabled") or (Path(config["policy_dir"]) / "KILL").exists():
+        deny("KILL_SWITCH")
+    if (release.get("schema") != "hostops.release.v4" or
+            release.get("source_repository") != SOURCE_REPOSITORY or
+            release.get("control_repository") != CONTROL_REPOSITORY):
+        deny("RELEASE_REPOSITORY_DENIED")
     raw = control_provenance(api, issue_number, run_id,
                              release["workflow_sha256"], release["source_sha"])
     _, request = dual_repo_envelope(raw)
     if request.value["operation"] not in READ_ONLY_V4:
         deny("OPERATION_NOT_ENABLED")
-    if request.value["release_id"] != release["release_id"]:
+    if (request.value["release_id"] != release["release_id"] or
+            request.value["host_id"] != config.get("host_id")):
         deny("SOURCE_UNVERIFIED")
     response = send(config, raw)
     if type(response) is not dict or set(response) != {"receipt"}:
@@ -305,6 +329,43 @@ def poll_once_v4(api, config, release, issue_number, run_id, *, send=submit_v4):
             observed["release_id"] != request.value["release_id"] or
             observed["source_sha"] != request.value["source_sha"]):
         deny("IPC_RESPONSE_MISMATCH")
+    outbox = Path(config["transport_state_dir"]) / ("receipt-v4-" + request.fingerprint + ".json")
+    with outbox.open("wb") as f:
+        f.write(canonical(observed))
+        f.flush()
+        import os
+        os.fsync(f.fileno())
     api.post("/repos/" + CONTROL_REPOSITORY + "/issues/" + str(issue_number) +
              "/comments", {"body": report_v4(response)})
     return observed
+
+
+def poll_inbox_v4(api, config, release, *, send=submit_v4):
+    """One bounded V4 private control scan; never repeats reported runs."""
+    if not config.get("enabled") or (Path(config["policy_dir"]) / "KILL").exists():
+        deny("KILL_SWITCH")
+    if (release.get("schema") != "hostops.release.v4" or
+            release.get("source_repository") != SOURCE_REPOSITORY or
+            release.get("control_repository") != CONTROL_REPOSITORY):
+        deny("RELEASE_REPOSITORY_DENIED")
+    prefix = "/repos/" + CONTROL_REPOSITORY
+    issues = api.get(prefix + "/issues?state=open&per_page=100")
+    runs = api.get(prefix + "/actions/workflows/hostops-v3.yml/runs?event=issues&per_page=100")
+    if type(issues) is not list or type(runs.get("workflow_runs")) is not list:
+        deny("GITHUB_UNAVAILABLE")
+    count = 0
+    for issue in issues[:100]:
+        if not str(issue.get("title", "")).startswith("[HOSTOPS3] "):
+            continue
+        number = issue.get("number")
+        for run in runs["workflow_runs"][:100]:
+            if run.get("display_title") == "HostOpsV3 Issue #" + str(number) and run.get("conclusion") == "success":
+                marker = Path(config["transport_state_dir"]) / ("reported-v4-" + str(run["id"]) + ".json")
+                if marker.exists():
+                    break
+                value = poll_once_v4(api, config, release, number, run["id"], send=send)
+                marker.write_bytes(canonical(value))
+                count += 1
+                break
+    return count
+

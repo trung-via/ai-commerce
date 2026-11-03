@@ -784,17 +784,28 @@ def test_v4_client_rejects_write_before_connect(h, monkeypatch):
         transport.submit_v4(h.config, c.canonical(e))
 
 
+def _v4_config(h, **overrides):
+    return {
+        **h.config,
+        "schema": "hostops.config.v4",
+        "source_repository": c.SOURCE_REPOSITORY,
+        "control_repository": c.CONTROL_REPOSITORY,
+        **overrides,
+    }
+
+
 def test_v4_child_signed_read_and_release_denial_offline(h, monkeypatch):
     release, e = _v4_signed_fixture(h)
+    cfg = _v4_config(h)
     packet = c.canonical({"schema": "hostops.ipc.v4", "mode": "execute", "envelope": e})
     class Pipe:
         def __init__(self): self.data = None
         def send_bytes(self, value): self.data = value
         def close(self): pass
-    monkeypatch.setattr(broker, "load_config", lambda _: h.config)
-    monkeypatch.setattr(broker, "admit", lambda *_: None)
+    monkeypatch.setattr(broker, "load_config_v4", lambda _: cfg)
+    monkeypatch.setattr(broker, "admit_v4", lambda *_: None)
     monkeypatch.setattr(broker, "verify_release_v4",
-                        lambda _: (release, auth.AuthorityV4(h.config, release, clock=lambda: NOW)))
+                        lambda _: (release, auth.AuthorityV4(cfg, release, clock=lambda: NOW)))
     pipe = Pipe()
     broker.child_execute_v4("offline", packet, pipe)
     response = c.decode(pipe.data)
@@ -857,7 +868,7 @@ def test_hostops_v4_windows_install_plan_is_never_an_installer():
     assert "INSTALL_DISABLED_USE_EXPLICIT_PLAN" in content
     for banned in ("New-LocalUser", "Set-Acl", "icacls /grant", "Register-ScheduledTask",
                    "New-ScheduledTask", "ssh-keygen -Y sign", "Start-Process -Verb RunAs",
-                   "Invoke-Expression", "Invoke-WebRequest", "Set-Content"):
+                   "Invoke-Expression", "Invoke-WebRequest", "Set-Content", "Bypass"):
         assert banned.casefold() not in content.casefold()
     example = c.decode((ROOT / "config/hostops-v3/config-v4.example.json").read_bytes())
     assert example["schema"] == "hostops.config.v4"
@@ -871,16 +882,15 @@ def test_hostops_v4_windows_install_plan_is_never_an_installer():
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell local PLAN")
 def test_hostops_v4_windows_install_plan_actual_no_writes(tmp_path):
-    """Execute PLAN on Windows CI; file bytes stay unchanged."""
+    """Execute PLAN on Windows via safe pwsh 7 without -ExecutionPolicy Bypass."""
     import hashlib
-    powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+    powershell = security.prefer_readable_pwsh_path() or shutil.which("powershell.exe")
     assert powershell, "Windows runner missing PowerShell"
     script = ROOT / "scripts/HostOps-V4-InstallPlan.ps1"
     config = ROOT / "config/hostops-v3/config-v4.example.json"
     before = hashlib.sha256(config.read_bytes()).hexdigest()
-    args = [powershell, "-NoProfile", "-NonInteractive"]
-    if Path(powershell).name.lower() == "powershell.exe":
-        args += ["-ExecutionPolicy", "Bypass"]
+    args = [powershell, "-NoLogo", "-NoProfile", "-NonInteractive"]
+    assert "Bypass" not in args
     a = subprocess.run([*args, "-File", str(script), "-Plan",
                         "-ConfigPath", str(config)], capture_output=True, text=True, timeout=30)
     assert a.returncode == 0, a.stderr
@@ -890,15 +900,238 @@ def test_hostops_v4_windows_install_plan_actual_no_writes(tmp_path):
     assert result["config_present"] and result["config_schema_valid"]
     assert result["config_disabled"] and result["source_public_control_private_declared"]
     assert not result["distinct_non_admin_sid_configured"]
+    assert not result["untrusted_identities_isolated"]
+    assert not result["pinned_binary_hashes_configured"]
     assert not result["native_acl_verified"]
     assert not result["native_two_account_ipc_verified"]
     assert not result["human_release_signature_verified"]
     assert not result["private_control_github_verified"]
     assert not result["ready_to_enable"]
+    if Path(powershell).stem.lower() == "pwsh":
+        assert result["powershell_major"] >= 7
+        assert result["powershell_edition"] == "Core"
+        assert result["pwsh_7_preferred_runtime"] is True
     assert hashlib.sha256(config.read_bytes()).hexdigest() == before
     forbidden = ("broker_identity", "transport_identity", "C:\\", "S-1-", "TRUNG")
     assert all(value not in a.stdout for value in forbidden)
     no_plan = subprocess.run([*args, "-File", str(script),
                               "-ConfigPath", str(config)], capture_output=True, text=True, timeout=30)
     assert no_plan.returncode != 0
+    extra_arg = subprocess.run([*args, "-File", str(script), "-Plan", "-Apply",
+                                "-ConfigPath", str(config)], capture_output=True, text=True, timeout=30)
+    assert extra_arg.returncode != 0
     assert hashlib.sha256(config.read_bytes()).hexdigest() == before
+
+
+def test_v4_security_import_preserves_path_in_fresh_process():
+    """V3 importing shared security.py must never alter process command lookup."""
+    code = ("import os;"
+            "before=os.environ.get('PATH');"
+            "from ai_commerce.hostops_v3 import security;"
+            "assert os.environ.get('PATH')==before")
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                            text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows pwsh alias resolution")
+def test_v4_pwsh_resolver_does_not_reorder_path(tmp_path, monkeypatch):
+    """Unreadable WindowsApps-style stub must not trigger global PATH mutation."""
+    alias_dir = tmp_path / "alias"
+    real_dir = tmp_path / "readable"
+    alias_dir.mkdir()
+    real_dir.mkdir()
+    stub = alias_dir / "pwsh.exe"
+    binary = real_dir / "pwsh.exe"
+    stub.write_bytes(b"alias")
+    binary.write_bytes(b"real")
+    path_value = str(alias_dir) + os.pathsep + str(real_dir)
+    monkeypatch.setenv("PATH", path_value)
+    monkeypatch.setattr(security.shutil, "which", lambda _: str(stub))
+    original_open = Path.open
+
+    def reject_stub(self, *args, **kwargs):
+        if self == stub:
+            raise PermissionError("simulated inaccessible AppExecLink")
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", reject_stub)
+    assert security.prefer_readable_pwsh_path() == str(binary)
+    assert os.environ["PATH"] == path_value
+
+
+def test_v4_admission_scan_has_hard_size_depth_and_time_bounds(tmp_path):
+    root = tmp_path / "transport"
+    root.mkdir()
+    assert security._bounded_install_paths(root) == [root]
+    for index in range(8):
+        (root / f"entry-{index}").write_text("fixture", encoding="utf-8")
+    with pytest.raises(c.Denied, match="INSTALL_SCAN_LIMIT"):
+        security._bounded_install_paths(root, max_entries=4)
+    with pytest.raises(c.Denied, match="INSTALL_SCAN_LIMIT"):
+        security._bounded_install_paths(root, max_seconds=0)
+
+    deep = tmp_path / "deep"
+    deep.mkdir()
+    child = deep
+    for _ in range(4):
+        child = child / "child"
+        child.mkdir()
+    with pytest.raises(c.Denied, match="INSTALL_SCAN_LIMIT"):
+        security._bounded_install_paths(deep, max_depth=2)
+    try:
+        (root / "linked").symlink_to(deep, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pass  # Windows without symlink entitlement; size/depth still tested.
+    else:
+        with pytest.raises(c.Denied, match="INSTALL_REPARSE_DENIED"):
+            security._bounded_install_paths(root)
+
+
+def test_v4_disabled_windows_template_offline_cross_platform_parse():
+    """Hosted POSIX CI may inspect a Windows PLAN template, never activate it."""
+    template = ROOT / "config/hostops-v3/config-v4.example.json"
+    cfg = security.load_config_v4(template)
+    assert cfg["enabled"] is False
+    if os.name != "nt":
+        # Non-native paths must still be rejected for active broker configs.
+        with pytest.raises(c.Denied, match="BAD_CONFIG"):
+            security._validate_v4_config_dict({**cfg, "enabled": True})
+
+
+def test_v4_load_config_and_admit_v4_isolation_and_fail_closed(h, monkeypatch):
+    v3_path = h.root / "config-v3.json"
+    v3_path.write_bytes(c.canonical(h.config))
+    with pytest.raises(c.Denied):
+        security.load_config_v4(v3_path)
+    cfg = _v4_config(h)
+    v4_path = h.root / "config-v4.json"
+    v4_path.write_bytes(c.canonical(cfg))
+    assert security.load_config_v4(v4_path) == cfg
+    with pytest.raises(c.Denied):
+        security.load_config(v4_path)  # v3 loader rejects v4 config
+    for bad in (
+        {"source_repository": c.CONTROL_REPOSITORY},
+        {"control_repository": c.SOURCE_REPOSITORY},
+        {"broker_identity": cfg["transport_identity"]},
+        {"broker_identity": "ci-identity"},
+        {"transport_identity": "installer-identity"},
+        {"policy_dir": "\\\\remote\\share\\policy"},
+        {"policy_dir": "//remote/share/policy"},
+    ):
+        p = h.root / "bad-v4.json"
+        p.write_bytes(c.canonical({**cfg, **bad}))
+        with pytest.raises(c.Denied):
+            security.load_config_v4(p)
+    example_cfg = security.load_config_v4(ROOT / "config/hostops-v3/config-v4.example.json")
+    assert example_cfg["enabled"] is False
+    with pytest.raises(c.Denied, match="KILL_SWITCH"):
+        security.admit_v4(example_cfg, v4_path)
+    with pytest.raises(c.Denied, match="VERIFIER_UNVERIFIED"):
+        security.admit_v4({**cfg, "ssh_keygen_sha256": "0" * 64}, v4_path)
+    with pytest.raises(c.Denied, match="ELEVATION_DENIED"):
+        security.admit_v4({**cfg, "broker_identity": "S-1-5-18"}, v4_path)
+    with pytest.raises(c.Denied, match="IDENTITIES_NOT_ISOLATED"):
+        security.admit_v4({**cfg, "broker_identity": "REPLACE_WITH_BROKER"}, v4_path)
+    (h.policy / "ipc.key").write_bytes(b"k" * 32)
+    if os.name == "nt":
+        monkeypatch.setattr(security, "windows_identity", lambda *_: ("broker-identity", False))
+        monkeypatch.setattr(security, "windows_acl", lambda *_, **__: None)
+    else:
+        # Match the actual fixture owner; a broker SID/UID must never also be
+        # listed as a separate trusted owner in V4's stricter identity contract.
+        fixture_owner = h.policy.stat().st_uid
+        monkeypatch.setattr(os, "geteuid", lambda: fixture_owner)
+        cfg = {**cfg, "broker_identity": str(fixture_owner)}
+        v4_path.write_bytes(c.canonical(cfg))
+        for item in (v4_path, h.policy, h.release, h.state, *(h.policy.rglob("*")), *(h.state.rglob("*"))):
+            os.chmod(item, 0o700 if item.is_dir() else 0o600)
+    security.admit_v4(cfg, v4_path)
+    (h.policy / "KILL").touch()
+    with pytest.raises(c.Denied, match="KILL_SWITCH"):
+        security.admit_v4(cfg, v4_path)
+
+
+def test_v4_serve_v4_handler_and_transport_inbox_staging(h, monkeypatch):
+    release, e = _v4_signed_fixture(h)
+    cfg = _v4_config(h)
+    v4_path = h.root / "config-v4.json"
+    v4_path.write_bytes(c.canonical(cfg))
+    _, req = c.dual_repo_envelope(c.canonical(e))
+    good_reply = {"receipt": c.receipt_v4(req, "OBSERVED", result={"count": 1})}
+    handler = broker._verified_v4_exchange_handler(v4_path, execute=lambda _: good_reply)
+    packet = c.canonical({"schema": "hostops.ipc.v4", "mode": "execute", "envelope": e})
+    assert handler(packet) == good_reply
+    with pytest.raises(c.Denied, match="BAD_IPC_MODE"):
+        handler(c.canonical({"schema": "hostops.ipc.v3", "mode": "execute", "envelope": h.make()}))
+    _, write_e = _v4_signed_fixture(h, request_mutation={
+        "operation": "create", "parameters": {"path": str(h.data / "no.txt"),
+        "data_b64": base64.b64encode(b"ok").decode("ascii"),
+        "data_sha256": c.digest(b"ok")}}, exact=True)
+    with pytest.raises(c.Denied, match="OPERATION_NOT_ENABLED"):
+        handler(c.canonical({"schema": "hostops.ipc.v4", "mode": "execute", "envelope": write_e}))
+    bad_leak = broker._verified_v4_exchange_handler(
+        v4_path, execute=lambda _: {**good_reply, "disclosure_b64": "ZGF0YQ=="})
+    with pytest.raises(c.Denied, match="UNSOLICITED_DISCLOSURE"):
+        bad_leak(packet)
+    api = _V4API(e, e["request"]["source_sha"])
+    release["workflow_sha256"] = c.digest(api.workflow)
+    posted = []
+    api.post = lambda path, data: posted.append((path, data))
+    orig_get = api.get
+    def inbox_get(path):
+        prefix = "/repos/" + c.CONTROL_REPOSITORY
+        if path == prefix + "/issues?state=open&per_page=100":
+            return [api.issue]
+        if path == prefix + "/actions/workflows/hostops-v3.yml/runs?event=issues&per_page=100":
+            return {"workflow_runs": [{**api.run, "id": 123}]}
+        return orig_get(path)
+    api.get = inbox_get
+    assert transport.poll_inbox_v4(api, cfg, release, send=lambda _, __: good_reply) == 1
+    assert transport.poll_inbox_v4(api, cfg, release, send=lambda _, __: pytest.fail("duplicate")) == 0
+    assert (h.state / f"receipt-v4-{req.fingerprint}.json").is_file()
+
+
+def test_v4_cli_commands_isolated_from_v3_and_sanitized(h, monkeypatch, capsys):
+    release, e = _v4_signed_fixture(h)
+    cfg = _v4_config(h)
+    cfg_path = h.root / "config-v4.json"
+    cfg_path.write_bytes(c.canonical(cfg))
+    req_path = h.root / "request-v4.json"
+    req_path.write_bytes(c.canonical(e))
+    out_path = h.root / "out.json"
+    assert cli.main(["validate", "--request-file", str(req_path), "--output", str(out_path)]) == 2
+    assert c.decode(out_path.read_bytes())["schema"] == "hostops.receipt.v3"
+    assert cli.main_v4(["validate-v4", "--request-file", str(req_path), "--output", str(out_path)]) == 0
+    validated = c.decode(out_path.read_bytes())
+    assert validated["schema"] == "hostops.transport.v4" and validated["status"] == "STRUCTURE_ONLY"
+    v3_req_path = h.root / "request-v3.json"
+    v3_req_path.write_bytes(c.canonical(h.make()))
+    assert cli.main_v4(["validate-v4", "--request-file", str(v3_req_path), "--output", str(out_path)]) == 2
+    assert c.decode(out_path.read_bytes())["schema"] == "hostops.receipt.v4"
+    _, req = c.dual_repo_envelope(c.canonical(e))
+    rec_path = h.root / "receipt-v4.json"
+    rec_path.write_bytes(c.canonical(c.receipt_v4(req, "OBSERVED", result={"count": 1})))
+    assert cli.main_v4(["report-v4", "--receipt-file", str(rec_path), "--output", str(out_path)]) == 0
+    assert b"HOSTOPS_V4_RECEIPT" in out_path.read_bytes()
+    monkeypatch.setattr(cli, "verify_release_v4", lambda _: (release, None))
+    if os.name == "nt":
+        monkeypatch.setattr(cli, "windows_identity", lambda *_: ("transport-identity", False))
+    else:
+        monkeypatch.setattr(os, "geteuid", lambda: 2000)
+        cfg["transport_identity"] = "2000"
+        cfg_path.write_bytes(c.canonical(cfg))
+    monkeypatch.setattr(cli, "submit_v4",
+                        lambda *_, **__: {"receipt": c.receipt_v4(req, "OBSERVED", result={"count": 1})})
+    assert cli.main_v4(["submit-v4", "--config", str(cfg_path), "--request-file", str(req_path),
+                        "--output", str(out_path)]) == 0
+    assert c.decode(out_path.read_bytes())["schema"] == "hostops.receipt.v4"
+    assert cli.main_v4(["submit-v4", "--config", str(cfg_path), "--request-file", str(req_path),
+                        "--disclosure-output", str(h.root / "disclose.bin"), "--output", str(out_path)]) == 2
+    served = []
+    monkeypatch.setattr(cli, "serve_v4", lambda path, once=False: served.append((path, once)))
+    assert cli.main_v4(["broker-v4", "--config", str(cfg_path)]) == 0
+    assert served == [(str(cfg_path), True)]
+    captured = capsys.readouterr()
+    assert "transport-identity" not in captured.out + captured.err
+

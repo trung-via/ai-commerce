@@ -20,7 +20,7 @@ import time
 from .auth import verify_release, verify_release_v4
 from .contract import MAX_WIRE, Denied, canonical, decode, deny, envelope, dual_repo_envelope, public_receipt, public_receipt_v4, receipt, receipt_v4, shape
 from .journal import Journal
-from .security import admit, load_config, windows_identity
+from .security import admit, admit_v4, load_config, load_config_v4, windows_identity
 from .worker import Worker, WorkerV4
 
 IPC_LIMIT = 262144
@@ -110,7 +110,7 @@ class WindowsChannel(Channel):
 
 def validate_pipe_name(endpoint):
     import re
-    if not re.fullmatch(r"\\\\\.\\pipe\\(?:LOCAL\\)?AICommerceHostOpsV3-[A-Za-z0-9_-]{8,64}", endpoint):
+    if not re.fullmatch(r"\\\\\.\\pipe\\(?:LOCAL\\)?AICommerceHostOpsV[34]-[A-Za-z0-9_-]{8,64}", endpoint):
         deny("NONLOCAL_ENDPOINT")
 
 
@@ -396,8 +396,8 @@ def child_execute_v4(config_path, payload, pipe):
         _, request = dual_repo_envelope(raw)
         if request.value["operation"] not in WorkerV4.READ_ONLY:
             deny("OPERATION_NOT_ENABLED")
-        config = load_config(config_path)
-        admit(config, config_path)
+        config = load_config_v4(config_path)
+        admit_v4(config, config_path)
         _, authority = verify_release_v4(config)
         journal = Journal(Path(config["state_dir"]) / "journal.sqlite")
         try:
@@ -424,7 +424,7 @@ def isolated_execute_v4(config_path, payload):
     _, request = dual_repo_envelope(raw)
     if request.value["operation"] not in WorkerV4.READ_ONLY:
         deny("OPERATION_NOT_ENABLED")
-    config = load_config(config_path)
+    config = load_config_v4(config_path)
     if not config["enabled"] or (Path(config["policy_dir"]) / "KILL").exists():
         deny("KILL_SWITCH")
     ctx = multiprocessing.get_context("spawn")
@@ -440,10 +440,11 @@ def isolated_execute_v4(config_path, payload):
                 shape(response, "receipt")
                 public_receipt_v4(response["receipt"])
                 if (response["receipt"]["request_sha256"] != request.fingerprint or
-                        response["receipt"]["release_id"] != request.value["release_id"]):
+                        response["receipt"]["release_id"] != request.value["release_id"] or
+                        response["receipt"]["source_sha"] != request.value["source_sha"]):
                     deny("IPC_RESPONSE_MISMATCH")
                 return response
-            current = load_config(config_path)
+            current = load_config_v4(config_path)
             if not current["enabled"] or (Path(current["policy_dir"]) / "KILL").exists():
                 break
         return {"receipt": receipt_v4(request, "UNKNOWN", "RECONCILIATION_REQUIRED")}
@@ -454,3 +455,86 @@ def isolated_execute_v4(config_path, payload):
             process.terminate()
         process.join(2)
         incoming.close()
+
+
+def _verified_v4_exchange_handler(config_path, execute=None):
+    runner = (lambda raw: isolated_execute_v4(config_path, raw)) if execute is None else execute
+    def handle(payload):
+        _, raw = ipc_request_v4(payload)
+        _, request = dual_repo_envelope(raw)
+        if request.value["operation"] not in WorkerV4.READ_ONLY:
+            deny("OPERATION_NOT_ENABLED")
+        current = load_config_v4(config_path)
+        if not current["enabled"] or (Path(current["policy_dir"]) / "KILL").exists():
+            deny("KILL_SWITCH")
+        response = runner(payload)
+        if type(response) is not dict or set(response) != {"receipt"}:
+            deny("UNSOLICITED_DISCLOSURE")
+        public_receipt_v4(response["receipt"])
+        if (response["receipt"]["request_sha256"] != request.fingerprint or
+                response["receipt"]["release_id"] != request.value["release_id"] or
+                response["receipt"]["source_sha"] != request.value["source_sha"]):
+            deny("IPC_RESPONSE_MISMATCH")
+        return response
+    return handle
+
+
+def serve_v4(config_path, *, once=False, execute=None):
+    """Constrained V4 read-only broker server; never routes through or accepts v3."""
+    config = load_config_v4(config_path)
+    admit_v4(config, config_path)
+    verify_release_v4(config)
+    if (Path(config["policy_dir"]) / "KILL").exists():
+        deny("KILL_SWITCH")
+    key = (Path(config["policy_dir"]) / "ipc.key").read_bytes()
+    if len(key) != 32:
+        deny("IPC_KEY_INVALID")
+    handler = _verified_v4_exchange_handler(config_path, execute=execute)
+    if os.name == "nt":
+        while not (Path(config["policy_dir"]) / "KILL").exists():
+            channel = windows_listener(config)
+            try:
+                if not windows_wait_connected(
+                        channel, stop=lambda: (Path(config["policy_dir"]) / "KILL").exists()):
+                    return
+                windows_peer(channel, config)
+                server_exchange(channel, key, handler)
+            except (Denied, OSError):
+                pass
+            finally:
+                channel.close()
+            if once:
+                return
+        return
+    endpoint = Path(config["endpoint"])
+    if not endpoint.is_absolute() or endpoint.parent != Path(config["state_dir"]):
+        deny("NONLOCAL_ENDPOINT")
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(endpoint))
+    os.chmod(endpoint, 0o660)
+    listener.listen(1)
+    listener.settimeout(1)
+    try:
+        while not (Path(config["policy_dir"]) / "KILL").exists():
+            try:
+                connection, _ = listener.accept()
+            except TimeoutError:
+                if once:
+                    break
+                continue
+            channel = UnixChannel(connection)
+            try:
+                _, uid, _ = struct.unpack("3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+                if str(uid) != config["transport_identity"]:
+                    deny("IPC_PEER_DENIED")
+                server_exchange(channel, key, handler)
+            except (Denied, OSError):
+                pass
+            finally:
+                channel.close()
+            if once:
+                break
+    finally:
+        listener.close()
+        endpoint.unlink()
+
