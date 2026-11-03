@@ -685,3 +685,245 @@ def test_hostops_v3_hosted_queue_is_reviewed_control_not_generic_ci_escape(tmp_p
     )
     assert denied.mode == "HOLD_MAPPING"
     assert ".github/workflows/unknown-host-ops.yml:UNREVIEWED_CI_CONTROL" in denied.missing_mapping
+
+
+def _v22_manifest_fixture(tmp_path):
+    import json
+    from ai_commerce.engineering.impact_v21 import validate_component_onboarding_manifest
+    old_source = "src/ai_commerce/learning/export.py"
+    old_test = "tests/test_prior.py"
+    new_source = "src/ai_commerce/fresh/svc.py"
+    new_test = "tests/test_fresh_svc.py"
+    contract = "contracts/FreshRun.v1.schema.json"
+    manifest = "work_items/mt01-components/fresh.json"
+    for path in (old_source, old_test, new_source, new_test, contract):
+        mk(tmp_path, path)
+    values = {
+        "schema_version": "MT01ComponentOwner.v1",
+        "component": "fresh",
+        "sources": [new_source],
+        "tests": [new_test],
+        "acs": ["FRESH.offline"],
+        "consumers": [old_source],
+        "contracts": [contract],
+    }
+    mk(tmp_path, manifest, json.dumps(values))
+    change = (new_source, new_test, contract, manifest)
+    original = (group("prior", [old_test], [old_source]),)
+    context = {
+        "manifest_path": manifest,
+        "changed_paths": change,
+        "base_paths": (old_source, old_test),
+        "existing_groups": original,
+        "allowed_paths": change,
+        "root": tmp_path,
+    }
+    return validate_component_onboarding_manifest, values, context
+
+
+def test_v22_manifest_data_only_admission(tmp_path):
+    validator, values, context = _v22_manifest_fixture(tmp_path)
+    admission = validator(values, **context)
+    assert admission["name"] == "fresh"
+    assert admission["tests"] == ("tests/test_fresh_svc.py",)
+    assert admission["acs"] == ("FRESH.offline",)
+    assert len(admission["manifest_sha256"]) == 64
+    assert admission["status"] == "VALIDATED_DATA_ONLY_NOT_VERIFICATION_PASS"
+
+
+def test_v22_manifest_rejects_owner_theft_and_unsafe_changes(tmp_path):
+    import copy
+    import pytest
+    validator, original, ctx = _v22_manifest_fixture(tmp_path)
+    for mutate, keyword, code in (
+        (lambda p: p.update(component="prior"), {}, "ONBOARD_MANIFEST_LOCATION"),
+        (lambda p: p.update(tests=["tests/test_prior.py"]), {}, "ONBOARD_REOWN_OR_NOT_ADDED"),
+        (lambda p: p.update(sources=["src/ai_commerce/engineering/worker.py"]), {}, "ONBOARD_UNSAFE_SOURCE_FAMILY"),
+        (lambda p: p.update(tests=["tests/../../secrets.py"]), {}, "ONBOARD_UNSAFE_PATH"),
+        (lambda p: p.update(acs=["FRESH.offline", "FRESH.offline"]), {}, "ONBOARD_INVALID_ACS"),
+        (lambda p: p.update(consumers=["src/ai_commerce/other/hidden.py"]), {}, "ONBOARD_CONSUMER_UNPROVEN"),
+        (lambda p: p.update(sources=["src/ai_commerce/fresh/svc.py"]*2), {}, "ONBOARD_INVALID_SOURCES"),
+        (lambda p: p.update(argv=["python", "-m", "pytest"]), {}, "ONBOARD_MANIFEST_SHAPE"),
+        (lambda p: p.update(schema_version="v999"), {}, "ONBOARD_SCHEMA_VERSION"),
+        (lambda p: None, {"allowed_paths": ["src/ai_commerce/fresh/svc.py"]}, "ONBOARD_MANIFEST_NOT_NEW_AND_AUTHORIZED"),
+        (lambda p: None, {"base_paths": list(ctx["base_paths"]) + ["tests/test_fresh_svc.py"]}, "ONBOARD_REOWN_OR_NOT_ADDED"),
+    ):
+        candidate = copy.deepcopy(original)
+        mutate(candidate)
+        args = dict(ctx)
+        args.update(keyword)
+        with pytest.raises(ValueError, match=code):
+            validator(candidate, **args)
+
+
+def test_v22_manifest_rejects_missing_or_linked_source(tmp_path):
+    import pytest
+    validator, values, ctx = _v22_manifest_fixture(tmp_path)
+    source = tmp_path / values["sources"][0]
+    source.unlink()
+    with pytest.raises(ValueError, match="ONBOARD_FILE_MISSING_OR_LINK"):
+        validator(values, **ctx)
+    source.symlink_to(tmp_path / "tests/test_prior.py")
+    with pytest.raises(ValueError, match="ONBOARD_FILE_MISSING_OR_LINK"):
+        validator(values, **ctx)
+
+
+def test_v22_manifest_binding_rejects_untrusted_in_memory_owner(tmp_path):
+    import pytest
+    validator, values, ctx = _v22_manifest_fixture(tmp_path)
+    path = tmp_path / ctx["manifest_path"]
+    path.write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="ONBOARD_MANIFEST_BYTES_MISMATCH"):
+        validator(values, **ctx)
+
+
+def test_v22_registered_action_onboards_new_component_without_companion_pr(tmp_path):
+    from ai_commerce.engineering.minimum_test import file_hashes
+    from ai_commerce.engineering.impact_v21 import registered_action_plan
+    validator, values, ctx = _v22_manifest_fixture(tmp_path)
+    profile = ["python", "-m", "pytest", "tests/test_mt01_v21.py", "-q", "-n", "12"]
+    result = registered_action_plan(
+        repo=tmp_path, base_sha="a" * 40,
+        base_files={p: "baseline" for p in ctx["base_paths"]},
+        candidate_files=file_hashes(tmp_path),
+        changed_paths=ctx["changed_paths"],
+        required_acs=values["acs"], fallback_argv=profile,
+        groups=ctx["existing_groups"],
+        registered_profiles={"mt01-component-onboarding": profile},
+        allowed_paths=ctx["allowed_paths"])
+    assert result["selected_groups"] == ["fresh"]
+    assert result["unknown_acs"] == []
+    assert result["reason_codes"] == ["SCOPED_CONSUMER_CLOSURE"]
+    selected = [g for g in result["groups"] if g["group"] == "fresh"]
+    assert len(selected) == 1 and selected[0]["execute"]
+    binding = selected[0]["binding"]
+    assert binding["registered_profile"] == "mt01-component-onboarding"
+    assert binding["argv"] == ["python", "-m", "pytest", "tests/test_fresh_svc.py", "-q", "-n", "12"]
+    assert len(binding["onboarding_manifest_sha256"]) == 64
+
+
+def test_v22_onboarding_without_manifest_never_passes(tmp_path):
+    from ai_commerce.engineering.minimum_test import file_hashes
+    from ai_commerce.engineering.impact_v21 import registered_action_plan
+    _, values, ctx = _v22_manifest_fixture(tmp_path)
+    (tmp_path / ctx["manifest_path"]).unlink()
+    paths = tuple(x for x in ctx["changed_paths"] if x != ctx["manifest_path"])
+    profile = ["python", "-m", "pytest", "tests/test_mt01_v21.py", "-q", "-n", "12"]
+    plan = registered_action_plan(
+        repo=tmp_path, base_sha="b" * 40,
+        base_files={p: "baseline" for p in ctx["base_paths"]},
+        candidate_files=file_hashes(tmp_path), changed_paths=paths,
+        required_acs=values["acs"], fallback_argv=profile,
+        groups=ctx["existing_groups"],
+        registered_profiles={"mt01-component-onboarding": profile},
+        allowed_paths=ctx["allowed_paths"])
+    assert any("ONBOARD_EXACTLY_ONE_NEW_MANIFEST_REQUIRED" in x for x in plan["reason_codes"])
+    assert all(not entry["execute"] for entry in plan["groups"])
+
+
+def test_v22_independent_baseline_oracle_requires_new_owner_tests(tmp_path):
+    import runpy
+    oracle = runpy.run_path(str(Path(__file__).resolve().parents[1] /
+                        ".github/scripts/mt01_v21_oracle.py"))
+    _, values, ctx = _v22_manifest_fixture(tmp_path)
+    new_groups = oracle["independently_reviewed_manifest_groups"](
+        repo=tmp_path, changed_paths=set(ctx["changed_paths"]),
+        base_paths=set(ctx["base_paths"]),
+        base_groups=ctx["existing_groups"])
+    assert len(new_groups) == 1 and new_groups[0].name == "fresh"
+    present = set(ctx["changed_paths"]) | set(ctx["base_paths"])
+    plan = {
+        "version": 2, "changed_paths": sorted(ctx["changed_paths"]),
+        "selected_groups": ["fresh"],
+        "selected_tests": ["tests/test_fresh_svc.py"],
+    }
+    good, reasons = oracle["check_selection"](
+        plan, base_groups=ctx["existing_groups"],
+        candidate_groups=new_groups, changed_paths=set(ctx["changed_paths"]),
+        present_paths=present)
+    assert good, reasons
+    plan["selected_tests"] = []
+    good, reasons = oracle["check_selection"](
+        plan, base_groups=ctx["existing_groups"],
+        candidate_groups=new_groups, changed_paths=set(ctx["changed_paths"]),
+        present_paths=present)
+    assert not good
+    assert "REQUIRED_TEST_OMITTED:tests/test_fresh_svc.py" in reasons
+
+
+def test_v22_independent_baseline_oracle_rejects_manifest_argv(tmp_path):
+    import json
+    import runpy
+    import pytest
+    oracle = runpy.run_path(str(Path(__file__).resolve().parents[1] /
+                        ".github/scripts/mt01_v21_oracle.py"))
+    _, values, ctx = _v22_manifest_fixture(tmp_path)
+    values["argv"] = ["sh", "-c", "true"]
+    (tmp_path / ctx["manifest_path"]).write_text(json.dumps(values), encoding="utf-8")
+    with pytest.raises(ValueError, match="ONBOARD_MANIFEST_UNTRUSTED_FIELDS"):
+        oracle["independently_reviewed_manifest_groups"](
+            repo=tmp_path, changed_paths=set(ctx["changed_paths"]),
+            base_paths=set(ctx["base_paths"]),
+            base_groups=ctx["existing_groups"])
+
+
+def test_v22_ef02_replays_dynamic_argv_against_immutable_git_baseline(tmp_path, monkeypatch):
+    """No provider invocation: actual Git baseline + receipt binding replay."""
+    import subprocess
+    import copy
+    from ai_commerce.engineering import minimum_test as mt
+    from ai_commerce.engineering.impact_v21 import (
+        registered_action_plan, verified_onboarding_binding)
+    old_src = "src/ai_commerce/learning/export.py"
+    old_test = "tests/test_prior.py"
+    mk(tmp_path, old_src)
+    mk(tmp_path, old_test)
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=tmp_path, stderr=subprocess.DEVNULL).decode().strip()
+    git("init", "-q")
+    git("config", "core.autocrlf", "false")
+    git("add", ".")
+    git("-c", "user.name=MT01", "-c", "user.email=mt01@example.invalid", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD")
+    baseline_files = mt.file_hashes(tmp_path)
+    _, data, ctx = _v22_manifest_fixture(tmp_path)
+    monkeypatch.setattr(mt, "approved_groups", lambda: ctx["existing_groups"])
+    ingress = ["python", "-m", "pytest", "tests/test_mt01_v21.py", "-q", "-n", "12"]
+    profiles = {"mt01-component-onboarding": ingress}
+    plan = registered_action_plan(
+        repo=tmp_path, base_sha=base, base_files=baseline_files,
+        candidate_files=mt.file_hashes(tmp_path),
+        changed_paths=ctx["changed_paths"],
+        required_acs=data["acs"], fallback_argv=ingress,
+        groups=ctx["existing_groups"], registered_profiles=profiles,
+        allowed_paths=ctx["allowed_paths"])
+    binding = next(g["binding"] for g in plan["groups"] if g["group"] == "fresh")
+    kwargs = dict(workspace=tmp_path, binding=binding,
+                  changed_paths=ctx["changed_paths"],
+                  allowed_paths=ctx["allowed_paths"], base_sha=base,
+                  registered_profiles=profiles, expected_group="fresh")
+    assert verified_onboarding_binding(**kwargs)
+    assert not verified_onboarding_binding(**{**kwargs, "expected_group": "prior"})
+    copied = copy.deepcopy(binding)
+    copied["argv"] = ["python", "-m", "pytest", "tests", "-q", "-n", "12"]
+    assert not verified_onboarding_binding(**{**kwargs, "binding": copied})
+    assert not verified_onboarding_binding(**{**kwargs,
+           "allowed_paths": ("tests/test_prior.py",)})
+
+
+def test_v22_manifest_respects_authorized_directory_prefixes(tmp_path):
+    validator, data, context = _v22_manifest_fixture(tmp_path)
+    allowed = ("src/ai_commerce/fresh", "tests", "contracts",
+               "work_items/mt01-components")
+    admitted = validator(data, **{**context, "allowed_paths": allowed})
+    assert admitted["name"] == "fresh"
+    assert admitted["status"] == "VALIDATED_DATA_ONLY_NOT_VERIFICATION_PASS"
+
+
+def test_v22_pr_ci_cancels_only_superseded_pull_requests():
+    workflow = (Path(__file__).resolve().parents[1] /
+                ".github/workflows/ef02-tests.yml").read_text(encoding="utf-8")
+    assert "concurrency:" in workflow
+    assert "github.event.pull_request.number || github.ref" in workflow
+    assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in workflow
+    assert "branches: [ef02-multi-action-implementation, main]" in workflow
