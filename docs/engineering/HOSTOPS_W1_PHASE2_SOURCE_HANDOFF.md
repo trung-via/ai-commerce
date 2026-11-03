@@ -19,7 +19,7 @@ Review two modes:
 
 ## W1.2 — offline signed intent, not a write executor
 
-`src/ai_commerce/hostops_v3/w1_offline_journal.py` exposes `OfflineW1IntentLedger`. It calls the already-reviewed `personal_w1_verify_offline` **before** reserving the request. It stores request ID, unsigned signed-payload SHA256, private Issue number and pinned source SHA in an SQLite database supplied by the test/reviewer; never raw file content, PAT, key or signature. It sets SQLite `synchronous=FULL` and records an `UNKNOWN_UNRECONCILED` intent in a transaction.
+`src/ai_commerce/hostops_v3/journal.py` exposes `OfflineW1IntentLedger`. It calls the already-reviewed `personal_w1_verify_offline` **before** reserving the request. It stores request ID, unsigned signed-payload SHA256, private Issue number and pinned source SHA in an SQLite database supplied by the test/reviewer; never raw file content, PAT, key or signature. It sets SQLite `synchronous=FULL` and records an `UNKNOWN_UNRECONCILED` intent in a transaction.
 
 - A duplicate request ID with the same exact bytes returns `HOLD_REPLAY_UNKNOWN`, not permission to execute.
 - A request ID reused with different content/target/Issue/source returns `W1_REQUEST_ID_CONFLICT`.
