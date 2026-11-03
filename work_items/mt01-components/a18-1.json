@@ -1,0 +1,23 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "a18-1",
+  "sources": [
+    "src/ai_commerce/opportunity/portfolio/__init__.py",
+    "src/ai_commerce/opportunity/portfolio/schemas.py",
+    "src/ai_commerce/opportunity/portfolio/sources.py",
+    "src/ai_commerce/opportunity/portfolio/recommend.py"
+  ],
+  "tests": [
+    "tests/test_a18_portfolio.py",
+    "tests/test_a18_portfolio_integration.py"
+  ],
+  "acs": ["A18.M06.offline-evidence-bound-portfolio-recommendation"],
+  "consumers": [
+    "src/ai_commerce/opportunity/proposals/planning.py",
+    "src/ai_commerce/learning/export.py",
+    "src/ai_commerce/learning/reporting.py",
+    "src/ai_commerce/operations/cost_ledger.py",
+    "src/ai_commerce/settlement/review.py"
+  ],
+  "contracts": ["contracts/PortfolioRecommendation.v1.schema.json"]
+}
