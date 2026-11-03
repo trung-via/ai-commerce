@@ -956,7 +956,10 @@ def test_hostops_v4_native_readonly_opt_in_fails_closed_without_installed_accoun
     assert payload["ready_to_enable"] is False
     assert payload["account_mode"] == "PERSONAL_SINGLE_USER"
     assert payload["single_user_mode_configured"] is True
-    assert payload["single_user_sid_observed"] is True
+    # Hosted Windows can run elevated: fail closed instead of claiming a
+    # non-admin current-user SID. The personal mode never bypasses elevation.
+    assert payload["single_user_sid_observed"] is payload["caller_non_elevated"]
+    assert payload["native_single_user_token_inspected"] is payload["single_user_sid_observed"]
     assert payload["single_user_current_sid_match"] is False
     assert payload["single_user_runtime_enrolled"] is False
     assert "SINGLE_USER_CURRENT_SID_UNPROVEN" in payload["block_reasons"]
