@@ -29,6 +29,23 @@ CONTROL_TESTS = {
     ),
     ".github/workflows/human-merge-queue.yml": ("tests/test_pr_merge_gate.py",),
     ".github/workflows/brain-pass-auto-merge.yml": ("tests/test_pr_merge_gate.py",),
+    # Reviewed workflow ingress/cleanup controls: select affected authorization,
+    # CI/Merge and MT01 oracle regression tests, not a blanket full-suite.
+    ".github/workflows/issue-ingress.yml": (
+        "tests/test_ef02.py", "tests/test_hostops_request.py",
+        "tests/test_hostops_v2.py", "tests/test_hostops_v3_integration.py",
+        "tests/test_mt01_v21.py",
+    ),
+    ".github/workflows/actions-skipped-cleanup.yml": (
+        "tests/test_mt01_v21.py", "tests/test_pr_merge_gate.py",
+    ),
+    ".github/workflows/hostops-readonly.yml": (
+        "tests/test_hostops_request.py", "tests/test_mt01_v21.py",
+    ),
+    ".github/workflows/hostops-v2.yml": (
+        "tests/test_hostops_v2.py", "tests/test_hostops_ef02_202_recovery.py",
+        "tests/test_mt01_v21.py",
+    ),
     # HostOps v3 hosted-only signed queue; never authorize unreviewed CI paths.
     ".github/workflows/hostops-v3.yml": (
         "tests/test_hostops_v3_integration.py", "tests/test_pr_merge_gate.py",
