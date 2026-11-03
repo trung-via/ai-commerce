@@ -77,6 +77,17 @@ def check_selection(plan: dict, *, base_groups: tuple, candidate_groups: tuple,
             groups[g.name] = (set(g.tests), _owned(g))
     required = set()
     required_group_names = set()
+    # A candidate cannot omit baseline consumer-owner tests merely because
+    # the legacy consumer was referenced but not modified in this diff.
+    for candidate in candidate_groups:
+        if not any(p.startswith("work_items/mt01-components/")
+                   for p in candidate.contracts):
+            continue
+        for consumer in candidate.consumers:
+            for old in base_groups:
+                if consumer in old.paths:
+                    required.update(old.tests)
+                    required_group_names.add(old.name)
     for name, (test_paths, coverage) in groups.items():
         if changed_paths & coverage:
             required.update(test_paths)
