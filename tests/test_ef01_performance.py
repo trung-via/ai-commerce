@@ -246,7 +246,7 @@ def test_two_registered_actions_each_launch_twelve_with_default_max_parallel(tmp
         started = time.monotonic()
         barrier.wait(timeout=10)
         calls.append((list(argv), started, time.monotonic()))
-        return subprocess.CompletedProcess(argv, 0, "created: 12/12 workers\n12 workers [1 item]\n1 passed\n", "")
+        return subprocess.CompletedProcess(argv, 0, "created: 12/12 workers\nMT01_XDIST_WORKERS_COLLECTED=12\n12 workers [1 item]\n1 passed\n", "")
     monkeypatch.setattr(verification, "subprocess", SimpleNamespace(
         run=run, CompletedProcess=subprocess.CompletedProcess, TimeoutExpired=subprocess.TimeoutExpired))
     def work(action):
@@ -319,7 +319,7 @@ def test_ef01_repair_every_verify_argv_keeps_twelve(tmp_path, monkeypatch):
         calls.append(list(argv))
         assert argv[argv.index("-n") + 1] == "12"
         return subprocess.CompletedProcess(argv, 1 if len(calls) == 1 else 0,
-            "created: 12/12 workers\n12 workers [1 item]\n" + (
+            "created: 12/12 workers\nMT01_XDIST_WORKERS_COLLECTED=12\n12 workers [1 item]\n" + (
                 "FAILED test_scope.py::test_value\n1 failed\n" if len(calls) == 1 else "1 passed\n"), "")
     monkeypatch.setattr(runner, "subprocess", SimpleNamespace(run=run, TimeoutExpired=subprocess.TimeoutExpired))
     selection, provider_calls, _ = _provider(context)
@@ -362,7 +362,7 @@ def test_registered_minimal_group_uses_its_own_twelve_worker_command(tmp_path, m
     calls = []
     def run(argv, **kwargs):
         calls.append(list(argv))
-        return subprocess.CompletedProcess(argv, 0, "created: 12/12 workers\n12 workers [1 item]\n1 passed\n", "")
+        return subprocess.CompletedProcess(argv, 0, "created: 12/12 workers\nMT01_XDIST_WORKERS_COLLECTED=12\n12 workers [1 item]\n1 passed\n", "")
     monkeypatch.setattr(verification, "subprocess", SimpleNamespace(
         run=run, CompletedProcess=subprocess.CompletedProcess, TimeoutExpired=subprocess.TimeoutExpired))
     selection, provider_calls, _ = _provider(context)
