@@ -51,6 +51,9 @@ jobs:
         run: python -c "import shutil,subprocess; assert shutil.which('ffmpeg') and shutil.which('ffprobe'), 'FFMPEG_OR_FFPROBE_MISSING'; assert b'libx264' in subprocess.check_output(['ffmpeg','-hide_banner','-encoders']), 'LIBX264_MISSING'; subprocess.check_call(['ffprobe','-version'],stdout=subprocess.DEVNULL)"
       - run: python -m pip install -e ".[dev]" Pillow
         if: steps.reuse.outputs.skip_pytest != 'true'
+      - name: Whole-repository Windows-only policy audit
+        if: steps.reuse.outputs.skip_pytest != 'true'
+        run: python -m pytest tests/test_pr_merge_gate.py::test_repository_wide_windows_only_audit -q -s
       - name: MT-01 PR CI selective tests (full fallback)
         if: steps.reuse.outputs.skip_pytest != 'true'
         run: python .github/scripts/ef02-pr-ci-tests.py
