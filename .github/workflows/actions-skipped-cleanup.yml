@@ -53,7 +53,15 @@ jobs:
               ['.github/workflows/hostops-readonly.yml', 'issues'],
               ['.github/workflows/hostops-v2.yml', 'issues'],
               ['.github/workflows/hostops-v3.yml', 'issues'],
-              ['.github/workflows/issue-ingress.yml', 'issues']
+              ['.github/workflows/issue-ingress.yml', 'issues'],
+              // Retired historical M0-R / Human queue flows; never run these again.
+              ['.github/workflows/human-merge-queue.yml', 'issue_comment'],
+              ['.github/workflows/ef02-m0r-worker-os-kill.yml', 'issues'],
+              ['.github/workflows/ef02-m0r-windows-boundary.yml', 'issues'],
+              ['.github/workflows/ef02-m0r-hosted-checkpoint.yml', 'issues'],
+              ['.github/workflows/ef02-m0r-codex-provider-interruption.yml', 'issues'],
+              ['.github/workflows/ef02-m0r-real-e2e-interruption.yml', 'issues'],
+              ['.github/workflows/ef02-m0r-windows-child-probe.yml', 'issues']
             ]);
             const audit = {
               schema: 'ai-commerce-actions-skipped-cleanup-v1',
