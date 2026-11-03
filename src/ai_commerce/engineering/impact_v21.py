@@ -211,6 +211,21 @@ def select_impact(
             selected_groups.add(group.name)
             selected_tests.update(group.tests)
             related.update(coverage)
+    # A new component's declared legacy consumers need their owner tests
+    # even when the consumer source itself is unchanged in this PR. Do not
+    # confuse "not edited" with "not affected by a new interface".
+    for group in groups:
+        if not any(p.startswith("work_items/mt01-components/") for p in group.contracts):
+            continue
+        if not set(changed) & (set(group.paths) | set(group.tests) | set(group.contracts)):
+            continue
+        for old in groups:
+            if old is group or not (set(group.consumers) & set(old.paths)):
+                continue
+            selected_groups.add(old.name)
+            selected_tests.update(old.tests)
+            related.update((*old.paths, *old.tests, *old.consumers, *old.contracts))
+            reasons.add("ONBOARD_CONSUMER_OWNER_CLOSURE")
     for path in changed:
         if path in extra_controls:
             selected_tests.update(extra_controls[path])
