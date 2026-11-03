@@ -30,7 +30,7 @@ def _repo(tmp_path: Path) -> Path:
     _git(repo, "config", "user.email", "ef02-test@example.invalid")
     _git(repo, "config", "core.autocrlf", "true")
     (repo / ".gitattributes").write_text(
-        "* text=auto\n*.json -text -eol\n*.md text eol=lf\n",
+        "* text=auto\n*.json -text -eol\n*.md text eol=lf\n*.ps1 text eol=crlf\n",
         encoding="utf-8",
     )
     _git(repo, "add", ".gitattributes")
@@ -181,21 +181,50 @@ def test_new_crlf_txt_is_stabilized_before_verification(tmp_path: Path) -> None:
     assert checkout_diagnostics(next_worktree, refresh_index=True)["clean"]
 
 
-def test_tracked_crlf_cannot_be_silently_normalized(tmp_path: Path) -> None:
+def test_tracked_powershell_crlf_is_normalized_before_verification(tmp_path: Path) -> None:
+    """Regression #269: a tracked .ps1 with eol=crlf must not block EF01."""
     from ai_commerce.engineering.git_byte_consistency import (
         stabilize_candidate_newlines_before_verify,
     )
+    repo = _repo(tmp_path)
+    path = repo / "scripts" / "InstallPlan.ps1"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"Write-Output 'base'\r\n")
+    _git(repo, "add", "scripts/InstallPlan.ps1")
+    _git(repo, "commit", "-m", "tracked PowerShell source")
+    raw = b"Write-Output 'changed'\r\n"
+    path.write_bytes(raw)
+    changes = stabilize_candidate_newlines_before_verify(
+        repo, ["scripts/InstallPlan.ps1"], allowed_paths=["scripts/InstallPlan.ps1"])
+    assert len(changes) == 1
+    assert changes[0]["transformation"] == "CRLF_TO_LF_PRE_VERIFY"
+    assert path.read_bytes() == raw.replace(b"\r\n", b"\n")
+    assert_candidate_git_filter_consistency(
+        repo, [("scripts/InstallPlan.ps1", path.read_bytes(), "100644")])
+    _git(repo, "add", "scripts/InstallPlan.ps1")
+    _git(repo, "commit", "-m", "verified PowerShell source")
+    checkout = tmp_path / "checkout"
+    _git(repo, "worktree", "add", "--detach", str(checkout), "HEAD")
+    assert checkout_diagnostics(checkout, refresh_index=True)["clean"]
 
+
+def test_tracked_staged_divergence_is_never_normalized(tmp_path: Path) -> None:
+    from ai_commerce.engineering.git_byte_consistency import (
+        stabilize_candidate_newlines_before_verify,
+    )
     repo = _repo(tmp_path)
     path = repo / "consumer-tests.txt"
     path.write_bytes(b"original\n")
     _git(repo, "add", "consumer-tests.txt")
     _git(repo, "commit", "-m", "tracked")
-    path.write_bytes(b"changed\r\n")
-    with pytest.raises(GitByteConsistencyError, match="PREVERIFY_TRACKED_FILTER_MISMATCH"):
+    path.write_bytes(b"different staged bytes\r\n")
+    _git(repo, "add", "consumer-tests.txt")
+    latest = b"latest worktree bytes\r\n"
+    path.write_bytes(latest)
+    with pytest.raises(GitByteConsistencyError, match="PREVERIFY_STAGED_BYTES_DIVERGED"):
         stabilize_candidate_newlines_before_verify(
             repo, ["consumer-tests.txt"], allowed_paths=["consumer-tests.txt"])
-    assert path.read_bytes() == b"changed\r\n"
+    assert path.read_bytes() == latest
 
 
 def test_out_of_scope_filter_is_not_auto_rewritten(tmp_path: Path) -> None:

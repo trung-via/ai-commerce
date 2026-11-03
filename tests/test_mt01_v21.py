@@ -224,7 +224,8 @@ def test_v21_registered_full_packet_does_not_disarm_impact_planner(tmp_path, mon
     assert all("tests" not in e["binding"]["argv"][3:5] for e in plan["groups"])
 
 
-def test_v21_unknown_acceptance_id_never_passes(tmp_path):
+def test_v21_unknown_acceptance_runs_tests_but_requires_brain_review(tmp_path):
+    """Unregistered AC cannot claim coverage, but must not suppress mapped tests."""
     groups, a12, _ = fixture(tmp_path)
     files = file_hashes(tmp_path)
     narrow = ["python", "-m", "pytest", a12, "-q", "-n", "12"]
@@ -234,9 +235,29 @@ def test_v21_unknown_acceptance_id_never_passes(tmp_path):
         required_acs=("UNKNOWN_AC",), fallback_argv=narrow, groups=groups,
         registered_profiles={"mt01-a12-tests": narrow}, env={},
     )
-    assert "UNKNOWN_AC" in plan["unknown_acs"]
-    assert "AC_UNMAPPED:UNKNOWN_AC" in plan["reason_codes"]
-    assert any(g["state"] == "UNPROVEN" for g in plan["groups"])
+    assert plan["unknown_acs"] == plan["pending_brain_acs"] == ["UNKNOWN_AC"]
+    assert plan["ac_adoption_state"] == "PENDING_BRAIN_REVIEW"
+    assert "AC_PENDING_BRAIN_REVIEW:UNKNOWN_AC" in plan["reason_codes"]
+    assert plan["groups"][0]["state"] == "EXECUTE"
+    assert plan["groups"][0]["execute"] is True
+    assert "UNKNOWN_AC" not in plan["groups"][0]["acs"]
+
+
+def test_v21_unknown_acceptance_does_not_waive_unmapped_source(tmp_path):
+    groups, a12, _ = fixture(tmp_path)
+    unknown_source = "src/ai_commerce/other/new_component.py"
+    mk(tmp_path, unknown_source)
+    files = file_hashes(tmp_path)
+    narrow = ["python", "-m", "pytest", a12, "-q", "-n", "12"]
+    plan = registered_action_plan(
+        repo=tmp_path, base_sha="a" * 40, base_files=files,
+        candidate_files=files, changed_paths=[unknown_source],
+        required_acs=("UNKNOWN_AC",), fallback_argv=narrow, groups=groups,
+        registered_profiles={"mt01-a12-tests": narrow}, env={},
+    )
+    assert plan["pending_brain_acs"] == ["UNKNOWN_AC"]
+    assert all(not g["execute"] for g in plan["groups"])
+    assert plan["impact_v21"]["mode"] == "HOLD_MAPPING"
 
 
 def test_v21_postmerge_disables_unproven_reuse_without_full(monkeypatch, tmp_path):
