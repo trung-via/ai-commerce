@@ -837,3 +837,63 @@ def test_v4_hmac_receipt_gate_rejects_v3_even_if_message_mac_valid(h):
     assert exchange(good) == good
     with pytest.raises(c.Denied):
         exchange({"receipt": c.receipt(req, "OBSERVED")})
+
+
+
+def test_hostops_v4_windows_install_plan_is_never_an_installer():
+    """No program mode may create users, ACLs, tasks, keys or a live broker."""
+    script = ROOT / "scripts" / "HostOps-V4-InstallPlan.ps1"
+    content = script.read_text(encoding="utf-8")
+    assert "READ_ONLY_PLAN_NO_CHANGES" in content
+    assert "ready_to_enable = $false" in content
+    assert "native_two_account_ipc_verified = $false" in content
+    assert "human_release_signature_verified = $false" in content
+    assert "private_control_github_verified = $false" in content
+    assert "INSTALL_DISABLED_USE_EXPLICIT_PLAN" in content
+    for banned in ("New-LocalUser", "Set-Acl", "icacls /grant", "Register-ScheduledTask",
+                   "New-ScheduledTask", "ssh-keygen -Y sign", "Start-Process -Verb RunAs",
+                   "Invoke-Expression", "Invoke-WebRequest", "Set-Content"):
+        assert banned.casefold() not in content.casefold()
+    example = c.decode((ROOT / "config/hostops-v3/config-v4.example.json").read_bytes())
+    assert example["schema"] == "hostops.config.v4"
+    assert example["enabled"] is False
+    assert example["source_repository"] == c.SOURCE_REPOSITORY
+    assert example["control_repository"] == c.CONTROL_REPOSITORY
+    assert example["broker_identity"] != example["transport_identity"]
+    assert all(v == "0" * 64 for v in
+               (example["ssh_keygen_sha256"], example["pwsh_sha256"]))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell local PLAN")
+def test_hostops_v4_windows_install_plan_actual_no_writes(tmp_path):
+    """Execute PLAN on Windows CI; file bytes stay unchanged."""
+    import hashlib
+    powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+    assert powershell, "Windows runner missing PowerShell"
+    script = ROOT / "scripts/HostOps-V4-InstallPlan.ps1"
+    config = ROOT / "config/hostops-v3/config-v4.example.json"
+    before = hashlib.sha256(config.read_bytes()).hexdigest()
+    args = [powershell, "-NoProfile", "-NonInteractive"]
+    if Path(powershell).name.lower() == "powershell.exe":
+        args += ["-ExecutionPolicy", "Bypass"]
+    a = subprocess.run([*args, "-File", str(script), "-Plan",
+                        "-ConfigPath", str(config)], capture_output=True, text=True, timeout=30)
+    assert a.returncode == 0, a.stderr
+    result = json.loads(a.stdout)
+    assert result["schema"] == "hostops.v4.windows_install_plan.v1"
+    assert result["stage"] == "READ_ONLY_PLAN_NO_CHANGES"
+    assert result["config_present"] and result["config_schema_valid"]
+    assert result["config_disabled"] and result["source_public_control_private_declared"]
+    assert not result["distinct_non_admin_sid_configured"]
+    assert not result["native_acl_verified"]
+    assert not result["native_two_account_ipc_verified"]
+    assert not result["human_release_signature_verified"]
+    assert not result["private_control_github_verified"]
+    assert not result["ready_to_enable"]
+    assert hashlib.sha256(config.read_bytes()).hexdigest() == before
+    forbidden = ("broker_identity", "transport_identity", "C:\\", "S-1-", "TRUNG")
+    assert all(value not in a.stdout for value in forbidden)
+    no_plan = subprocess.run([*args, "-File", str(script),
+                              "-ConfigPath", str(config)], capture_output=True, text=True, timeout=30)
+    assert no_plan.returncode != 0
+    assert hashlib.sha256(config.read_bytes()).hexdigest() == before
