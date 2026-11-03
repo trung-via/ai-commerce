@@ -7,13 +7,15 @@ from __future__ import annotations
 
 import base64
 import json
+import re
+import time
 from pathlib import Path
 import urllib.error
 import urllib.request
 
 from .broker import client_exchange, connect
 from .contract import (MAX_WIRE, REPOSITORY, Denied, blob, canonical, decode, deny,
-                       digest, envelope, public_receipt, receipt, sha,
+                       digest, envelope, public_receipt, receipt, sha, shape,
                        dual_repo_envelope, public_receipt_v4, receipt_v4)
 
 WORKFLOW_PATH = ".github/workflows/hostops-v3.yml"
@@ -186,6 +188,7 @@ class ControlGitHub(GitHub):
                    prefix + "/actions/workflows/hostops-v3.yml/runs?event=issues&per_page=100"}
         exact = (path in literal or
                  re.fullmatch(re.escape(prefix) + r"/issues/[1-9][0-9]*", path) is not None or
+                 re.fullmatch(re.escape(prefix) + r"/issues/[1-9][0-9]*/comments\?per_page=100", path) is not None or
                  re.fullmatch(re.escape(prefix) + r"/actions/runs/[1-9][0-9]*", path) is not None or
                  re.fullmatch(re.escape(prefix) + r"/contents/\.github/workflows/hostops-v3\.yml\?ref=[0-9a-f]{40}", path) is not None)
         post_ok = re.fullmatch(re.escape(prefix) + r"/issues/[1-9][0-9]*/comments", path) is not None
@@ -375,3 +378,113 @@ def poll_inbox_v4(api, config, release, *, send=submit_v4):
                 break
     return count
 
+
+
+# Human-attended remote read: ChatGPT may create a private Issue, but no Issue
+# can execute on this machine without a local interactive approval. No daemon.
+PERSONAL_R1_SCHEMA = "hostops.personal.remote_read.v1"
+PERSONAL_R1_RESULT_SCHEMA = "hostops.personal.remote_read_receipt.v1"
+PERSONAL_R1_TITLE = "[HOSTOPS-R1] local_os_inventory"
+PERSONAL_R1_MARKER = "HOSTOPS_R1_RESULT\n"
+
+
+def personal_remote_prepare(api, issue_number, expected_source_sha, *, now=None):
+    """Retrieve one owner-authored, short-lived private Issue, without effects.
+
+    A GitHub Issue, even if owner-authored, is NOT independent Human approval.
+    Live presence and exact-request approval are checked separately in CLI.
+    """
+    if type(issue_number) is not int or not 1 <= issue_number <= 2147483647:
+        deny("BAD_GITHUB_ID")
+    sha(expected_source_sha, 40)
+    if now is None:
+        now = int(time.time())
+    if type(now) is not int or now < 1600000000:
+        deny("BAD_TIME")
+    prefix = "/repos/" + CONTROL_REPOSITORY
+    repository = api.get(prefix)
+    if (type(repository) is not dict or repository.get("private") is not True or
+            repository.get("full_name") != CONTROL_REPOSITORY):
+        deny("PRIVATE_CONTROL_UNVERIFIED")
+    issue = api.get(prefix + "/issues/" + str(issue_number))
+    if (type(issue) is not dict or issue.get("number") != issue_number or
+            issue.get("state") != "open" or issue.get("pull_request") is not None or
+            issue.get("title") != PERSONAL_R1_TITLE or
+            type(issue.get("user")) is not dict or
+            issue["user"].get("login") != "trung-via"):
+        deny("OWNER_ISSUE_UNVERIFIED")
+    raw_body = issue.get("body")
+    if type(raw_body) is not str:
+        deny("BAD_REMOTE_REQUEST")
+    try:
+        raw = raw_body.encode("utf-8")
+    except UnicodeError:
+        deny("BAD_REMOTE_REQUEST")
+    request = decode(raw, limit=4096)
+    shape(request, "schema request_id source_repository control_repository source_sha operation parameters issued_at expires_at")
+    if (request["schema"] != PERSONAL_R1_SCHEMA or
+            request["source_repository"] != SOURCE_REPOSITORY or
+            request["control_repository"] != CONTROL_REPOSITORY or
+            request["operation"] != "local_os_inventory" or
+            type(request["parameters"]) is not dict or request["parameters"] or
+            request["source_sha"] != expected_source_sha or
+            type(request["request_id"]) is not str or
+            re.fullmatch(r"r1-[a-f0-9]{24,40}", request["request_id"]) is None):
+        deny("REMOTE_REQUEST_DENIED")
+    issued = request["issued_at"]
+    expires = request["expires_at"]
+    if (type(issued) is not int or type(expires) is not int or
+            not 1 <= expires - issued <= 600 or not issued <= now <= expires or
+            now - issued > 600):
+        deny("REMOTE_REQUEST_EXPIRED")
+    # An Issue can have unrelated comments (e.g. the hosted-only queue
+    # receipt), but any prior R1 outcome requires Human reconciliation.
+    comments = api.get(prefix + "/issues/" + str(issue_number) + "/comments?per_page=100")
+    if type(comments) is not list or len(comments) >= 100:
+        deny("REMOTE_REPLAY_UNVERIFIED")
+    for comment in comments:
+        if type(comment) is not dict or type(comment.get("body")) is not str:
+            deny("REMOTE_REPLAY_UNVERIFIED")
+        if comment["body"].startswith((PERSONAL_R1_MARKER, "HOSTOPS_R1_UNKNOWN\n")):
+            deny("REMOTE_RESULT_ALREADY_PRESENT")
+    return request
+
+
+def personal_remote_publish(api, issue_number, request, inventory):
+    """Post one fixed sanitized receipt, never a user-selected content blob."""
+    shape(request, "schema request_id source_repository control_repository source_sha operation parameters issued_at expires_at")
+    shape(inventory, "architecture logical_cpu_count")
+    if (inventory["architecture"] not in ("X64", "OTHER") or
+            type(inventory["logical_cpu_count"]) is not int or
+            not 0 <= inventory["logical_cpu_count"] <= 512):
+        deny("REMOTE_INVENTORY_INVALID")
+    receipt = {
+        "schema": PERSONAL_R1_RESULT_SCHEMA,
+        "request_id": request["request_id"],
+        "issue_number": issue_number,
+        "source_sha": request["source_sha"],
+        "operation": "local_os_inventory",
+        "status": "OBSERVED_HUMAN_ATTENDED",
+        "account_mode": "PERSONAL_SINGLE_USER",
+        "result": {
+            "architecture": inventory["architecture"],
+            "logical_cpu_count": inventory["logical_cpu_count"],
+            "current_sid_matched": True,
+            "non_elevated": True,
+            "console_confirmation_received": True,
+            "broker_started": False,
+            "hostops_file_write_requested": False,
+            "ready_to_enable": False
+        }
+    }
+    message = PERSONAL_R1_MARKER + canonical(receipt).decode("ascii")
+    prefix = "/repos/" + CONTROL_REPOSITORY + "/issues/" + str(issue_number)
+    try:
+        response = api.post(prefix + "/comments", {"body": message})
+    except Denied:
+        # Posting may have reached GitHub. NEVER resend on an ambiguous result.
+        deny("REMOTE_POST_UNKNOWN")
+    if (type(response) is not dict or type(response.get("id")) is not int or
+            response["id"] <= 0 or response.get("body") != message):
+        deny("REMOTE_POST_UNKNOWN")
+    return receipt
