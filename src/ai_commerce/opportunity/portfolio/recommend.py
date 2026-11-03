@@ -97,11 +97,58 @@ def _review_link(body, request):
     return "PARTIAL"  # A16 has no native campaign_ref; no implicit campaign join.
 
 
+def _provisional_decision(request, receipts, measurements, reasons, counterevidence):
+    """A Human threshold band on one complete replayed local user-supplied fact.
+
+    No causal, provider-attested or commercial outcome is implied. The same pure
+    rule is applied to live evaluation and retained decision validation.
+    """
+    policy = request["human_policy"]
+    if policy is None or policy["requirement"] != "PROVISIONAL_LOCAL_DESCRIPTIVE":
+        return None
+    clock = instant(request["as_of"])
+    if not (instant(policy["valid_from"]) <= clock < instant(policy["valid_until"])):
+        return None
+    if (policy["metric_definition_sha256"] != digest(request["metric"])
+            or policy["currency"] != request["currency"]
+            or request["metric"]["source_status"] != "USER_SUPPLIED_NOT_LIVE_VERIFIED"
+            or instant(request["measurement_window"][1]) > clock
+            or request["baseline_window"] is not None):
+        return None
+    if counterevidence or not set(reasons) <= {
+        "OFFLINE_UNATTESTED", "NO_CAUSAL_OR_FINANCIAL_CLAIM",
+        "AUTHORITATIVE_EVIDENCE_REQUIRED_FOR_KEEP_CHANGE_STOP",
+        "PROVISIONAL_LOCAL_PERFORMANCE_ONLY"}:
+        return None
+    if len(receipts) != 1 or len(measurements) != 1:
+        return None  # No unsupported cross-source financial attribution.
+    receipt, fact = receipts[0], measurements[0]
+    if not (receipt["kind"] == "REPORT" and receipt["custody"] == "NATIVE_REPLAY"
+            and receipt["data_kind"] == "USER_SUPPLIED"
+            and receipt["attestation"] == "NOT_PROVIDER_ATTESTED"
+            and receipt["scope_link"] == "MATCHED" and bool(receipt["native_refs"])
+            and fact["source_id"] == receipt["source_id"]
+            and fact["role"] == "CURRENT" and fact["status"] == "AVAILABLE"
+            and fact["measurement_window"] == request["measurement_window"]
+            and fact["metric_definition_sha256"] == digest(request["metric"])
+            and fact["unit"] == request["metric"]["unit"]
+            and fact["denominator"] == request["metric"]["denominator"]
+            and fact["available_count"] > 0 and fact["not_available_count"] == 0
+            and fact["value"] is not None):
+        return None
+    number = Decimal(fact["value"])
+    if number >= Decimal(policy["keep_at_or_above"]):
+        return "KEEP"
+    if number <= Decimal(policy["stop_at_or_below"]):
+        return "STOP"
+    return "CHANGE"
+
+
 def recommend_portfolio(request: dict | bytes, evidence: EvidenceBundle = EvidenceBundle()) -> PortfolioRecommendation:
     """Evaluate one candidate; fresh native reads are mandatory on every call.
 
-    Current native grades are local/supplied, so v1 cannot issue a decisive
-    KEEP/CHANGE/STOP. Explicit thresholds cannot upgrade evidence authority.
+    One complete user-supplied replayed report supports a Human-only provisional
+    KEEP/CHANGE/STOP threshold band, never a provider-attested outcome.
     Hash/custody corruption raises a bounded error instead of reusing old advice.
     """
     request = _request(request)
@@ -274,10 +321,15 @@ def recommend_portfolio(request: dict | bytes, evidence: EvidenceBundle = Eviden
         "STALE_EVIDENCE", "FUTURE_EVIDENCE", "POLICY_OUTSIDE_VALIDITY", "EVALUATION_WINDOW_FUTURE"} for code in reasons)
     quality = ("MISSING" if not rows else "CONFLICTED" if conflicted else
                "UNVERIFIED" if any(row.custody != "NATIVE_REPLAY" for row in rows) else "LOCAL_REPLAY_ONLY")
+    provisional = _provisional_decision(request, receipts, measurements, reasons, negative)
+    if provisional is not None:
+        reasons.add("PROVISIONAL_LOCAL_PERFORMANCE_ONLY")
+    confidence = ("PROVISIONAL_USER_SUPPLIED_UNATTESTED" if provisional is not None
+                  else "INSUFFICIENT_FOR_DECISIVE_RECOMMENDATION")
     body = {"schema_version": "PortfolioRecommendation.v1", "evaluator_version": EVALUATOR_VERSION,
         "source_sha": SOURCE_SHA, "request": request, "request_sha256": digest(request),
-        "policy_sha256": digest(policy) if policy else None, "decision": "INCONCLUSIVE",
-        "evidence_quality": quality, "confidence": "INSUFFICIENT_FOR_DECISIVE_RECOMMENDATION",
+        "policy_sha256": digest(policy) if policy else None, "decision": provisional or "INCONCLUSIVE",
+        "evidence_quality": quality, "confidence": confidence,
         "confidence_meaning": "EVIDENCE_RATING_NOT_PROBABILITY", "sources": receipts,
         "measurements": measurements, "comparisons": comparisons, "costs": costs,
         "cost_totals": _cost_totals(costs, by_receipt),
@@ -286,7 +338,8 @@ def recommend_portfolio(request: dict | bytes, evidence: EvidenceBundle = Eviden
         "reason_codes": sorted(reasons), "missingness": sorted(missing),
         "counterevidence": [{"source_id": ref, "code": code} for ref, code in sorted(negative)],
         "assumptions": list(LIMITATIONS), "human_action": {
-            "kind": "REVIEW_CONFLICTS" if conflicted else "GATHER_COMPARABLE_EVIDENCE",
+            "kind": ("REVIEW_PROVISIONAL_RECOMMENDATION" if provisional is not None else
+                     "REVIEW_CONFLICTS" if conflicted else "GATHER_COMPARABLE_EVIDENCE"),
             "proposed_only": True, "execution_authority": "NONE"},
         "downstream_use": "HUMAN_OR_A18_2_VERSIONED_REFERENCE_ONLY",
         "financial_commitment": "NONE", "live_outcome_verified": False}
@@ -355,6 +408,18 @@ def validate_recommendation(value: dict) -> dict:
     for row in value["attribution"]["reviews"]:
         source = receipts.get(row["source_id"])
         require(source is not None and source["kind"] == "REVIEW" and source["scope_link"] == row["scope_link"], "ATTRIBUTION_SCOPE_MISMATCH")
+    if value["decision"] != "INCONCLUSIVE":
+        expected = _provisional_decision(value["request"], value["sources"], value["measurements"],
+                                         value["reason_codes"], value["counterevidence"])
+        require(expected == value["decision"]
+                and "PROVISIONAL_LOCAL_PERFORMANCE_ONLY" in value["reason_codes"]
+                and value["confidence"] == "PROVISIONAL_USER_SUPPLIED_UNATTESTED"
+                and value["human_action"]["kind"] == "REVIEW_PROVISIONAL_RECOMMENDATION",
+                "FORGED_PROVISIONAL_DECISION")
+    else:
+        require(value["confidence"] == "INSUFFICIENT_FOR_DECISIVE_RECOMMENDATION"
+                and value["human_action"]["kind"] != "REVIEW_PROVISIONAL_RECOMMENDATION",
+                "INCONCLUSIVE_CONFIDENCE_MISMATCH")
     return value
 
 

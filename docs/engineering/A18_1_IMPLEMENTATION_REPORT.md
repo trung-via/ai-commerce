@@ -25,9 +25,12 @@ Call `recommend_portfolio` again to revalidate retained native source pins.
 The current native contracts cannot supply provider-authoritative observations:
 A10 is a creative hypothesis, A11 is descriptive and user supplied, A15 charges
 are supplied assertions, and A16 explicitly sets verified orders/profit/settlement
-to false/unknown. Therefore this version returns INCONCLUSIVE even when a Human
-threshold would otherwise suggest KEEP, CHANGE or STOP. Its portable contract
-also prevents resealing a decisive result. Synthetic tests exercise these safe
+to false/unknown. The original candidate always returned INCONCLUSIVE. PR #305 adds one explicit
+Human-only provisional policy mode: a single locally replayed user-authored A11
+performance report without missing, stale, contradictory or synthetic evidence
+can be labeled KEEP, CHANGE or STOP by Human-defined thresholds. These labels
+are provisional descriptive suggestions only, not verified ROI or publication.
+The native-source check and portable schema/validator constrain the decision. Synthetic tests exercise these safe
 outcomes; they are not product live outcome evidence. Confidence is an evidence
 rating, never an invented probability. A future decisive route requires a
 separately reviewed authoritative native contract and evaluator version.
@@ -165,3 +168,14 @@ The following source hashes were read before any implementation edits:
 Source paths in this table are relative to `src/ai_commerce/` except `.github/`.
 No Git mutation, candidate branch, workflow dispatch, PR or merge is performed by
 this executor. Publication authority remains with the independent EF02 worker.
+
+## PR #305 targeted correction (Human authorized)
+
+The new `PROVISIONAL_LOCAL_DESCRIPTIVE` policy is opt-in and produces
+`PROVISIONAL_USER_SUPPLIED_UNATTESTED` confidence with
+`REVIEW_PROVISIONAL_RECOMMENDATION` action, `execution_authority=NONE`.
+The strict authoritative mode, synthetic data, missing values, conflicting
+sources, mismatched windows, absent/corrupt custody and invalid policies
+remain INCONCLUSIVE. Data is offline only, no external rights or business
+results were validated. Fresh Windows CI and independent Brain acceptance
+must replace the old candidate-specific evidence.

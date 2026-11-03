@@ -15,7 +15,7 @@
       "maxLength": 78
     },
     "evaluator_version": {
-      "const": "a18-m06/1.0"
+      "const": "a18-m06/1.1"
     },
     "source_sha": {
       "const": "b08d33f3195c48559d4964cf36c8b03612e41dd9"
@@ -368,7 +368,10 @@
                   "maxLength": 3
                 },
                 "requirement": {
-                  "const": "COMPARABLE_AUTHORITATIVE_OBSERVATIONS"
+                  "enum": [
+                    "COMPARABLE_AUTHORITATIVE_OBSERVATIONS",
+                    "PROVISIONAL_LOCAL_DESCRIPTIVE"
+                  ]
                 }
               },
               "required": [
@@ -438,7 +441,10 @@
       ]
     },
     "confidence": {
-      "const": "INSUFFICIENT_FOR_DECISIVE_RECOMMENDATION"
+      "enum": [
+        "INSUFFICIENT_FOR_DECISIVE_RECOMMENDATION",
+        "PROVISIONAL_USER_SUPPLIED_UNATTESTED"
+      ]
     },
     "confidence_meaning": {
       "const": "EVIDENCE_RATING_NOT_PROBABILITY"
@@ -1118,7 +1124,7 @@
         "Local custody and hashes do not authenticate providers, receipts, rights or Human identity.",
         "No causal uplift, ranked ROI, realized profit or verified settlement is inferred.",
         "Cost job identity does not establish campaign allocation; currencies are never converted.",
-        "KEEP, CHANGE and STOP require comparable authoritative observations; current native grades cannot supply them.",
+        "KEEP/CHANGE/STOP can be provisional Human advice on complete replayed user-supplied performance under an explicit provisional policy; never provider-verified outcomes.",
         "Human policy is editable data; all actions require a separate Human decision."
       ]
     },
@@ -1129,7 +1135,8 @@
         "kind": {
           "enum": [
             "GATHER_COMPARABLE_EVIDENCE",
-            "REVIEW_CONFLICTS"
+            "REVIEW_CONFLICTS",
+            "REVIEW_PROVISIONAL_RECOMMENDATION"
           ]
         },
         "proposed_only": {
@@ -1184,9 +1191,57 @@
   ],
   "allOf": [
     {
-      "properties": {
-        "decision": {
-          "const": "INCONCLUSIVE"
+      "if": {
+        "properties": {
+          "decision": {
+            "enum": [
+              "KEEP",
+              "CHANGE",
+              "STOP"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "confidence": {
+            "const": "PROVISIONAL_USER_SUPPLIED_UNATTESTED"
+          },
+          "human_action": {
+            "properties": {
+              "kind": {
+                "const": "REVIEW_PROVISIONAL_RECOMMENDATION"
+              }
+            }
+          },
+          "request": {
+            "properties": {
+              "human_policy": {
+                "type": "object",
+                "properties": {
+                  "requirement": {
+                    "const": "PROVISIONAL_LOCAL_DESCRIPTIVE"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "const": "INCONCLUSIVE"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "confidence": {
+            "const": "INSUFFICIENT_FOR_DECISIVE_RECOMMENDATION"
+          }
         }
       }
     }

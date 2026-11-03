@@ -20,7 +20,7 @@ import pytest
 
 from ai_commerce.analytics import AnalyticsLedger
 from ai_commerce.core.provenance import canonical_bytes
-from ai_commerce.learning import LearningAdvisory, LearningRegistry, SnapshotPin, export_advisory
+from ai_commerce.learning import LearningAdvisory, LearningRegistry, SnapshotPin, export_advisory, read_snapshot
 from ai_commerce.learning.demo import _packet, _source
 from ai_commerce.learning.reporting import PerformanceReport, build_performance_report, compare_reports
 from ai_commerce.operations import ArtifactRegistry
@@ -610,3 +610,69 @@ def test_actual_registered_onboarding_planner_selects_new_owner_and_consumer_clo
             assert group["binding"]["onboarding_data_only"] is True
             assert group["test_files_count"] == 2
             assert all(path in group["binding"]["candidate_files"] for path in allowed)
+
+
+def manual_provisional_case(tmp_path, value):
+    """Local user-authored *test* rows, never provider-attested live observations."""
+    name = "seed-" + str(value)
+    seed, _, _, _ = analytics(tmp_path, name=name, values=(value,))
+    plan = deepcopy(seed.to_dict()["import"]["plan"])
+    plan["plan_id"] = "manual-" + str(value)
+    ledger = AnalyticsLedger(tmp_path / ("manual-" + str(value) + ".sqlite"))
+    imported = ledger.import_file(tmp_path / (name + "-rows.json"), plan=plan,
+                                  profile="tiktok.manual.v1", file_format="json",
+                                  source_kind="USER_AUTHORED_MANUAL")
+    row = imported["import"]
+    pin = SnapshotPin(row["import_id"], row["context_sha256"], row["raw_sha256"],
+                      tuple(v["observation_id"] for v in imported["observations"]))
+    snapshot = read_snapshot(ledger.path, pin=pin)
+    report = build_performance_report(snapshot)
+    return snapshot, ReportSource(report, sha256(report.to_bytes()).hexdigest(),
+                                  (SnapshotSource(ledger, pin),))
+
+
+@pytest.mark.parametrize("value,band", [(120, "KEEP"), (55, "CHANGE"), (0, "STOP")])
+def test_manual_native_reporting_only_provisional_keep_change_stop(tmp_path, value, band):
+    snapshot, source = manual_provisional_case(tmp_path, value)
+    req = evaluation(snapshot)
+    req["human_policy"]["requirement"] = "PROVISIONAL_LOCAL_DESCRIPTIVE"
+    result = recommend_portfolio(req, EvidenceBundle(reports=(source,))).to_dict()
+    assert result["decision"] == band
+    assert result["confidence"] == "PROVISIONAL_USER_SUPPLIED_UNATTESTED"
+    assert result["human_action"] == {"kind": "REVIEW_PROVISIONAL_RECOMMENDATION",
+                                      "proposed_only": True, "execution_authority": "NONE"}
+    assert result["sources"][0]["custody"] == "NATIVE_REPLAY"
+    assert result["sources"][0]["data_kind"] == "USER_SUPPLIED"
+    assert result["sources"][0]["attestation"] == "NOT_PROVIDER_ATTESTED"
+    assert "PROVISIONAL_LOCAL_PERFORMANCE_ONLY" in result["reason_codes"]
+    assert "AUTHORITATIVE_OBSERVATIONS" in result["missingness"]
+    assert not result["live_outcome_verified"] and result["financial_commitment"] == "NONE"
+    assert validate_recommendation(result) == result
+    assert recommend_portfolio(req, EvidenceBundle(reports=(source,))).to_dict() == result
+
+
+@pytest.mark.parametrize("failure", ["authoritative", "expired", "wrong_metric", "baseline", "missing"])
+def test_provisional_mode_rejects_unsupported_local_evidence(tmp_path, failure):
+    snapshot, source = manual_provisional_case(tmp_path, None if failure == "missing" else 120)
+    req = evaluation(snapshot)
+    req["human_policy"]["requirement"] = "PROVISIONAL_LOCAL_DESCRIPTIVE"
+    if failure == "authoritative":
+        req["human_policy"]["requirement"] = "COMPARABLE_AUTHORITATIVE_OBSERVATIONS"
+    elif failure == "expired":
+        req["human_policy"]["valid_until"] = "2026-11-02T00:00:00Z"
+    elif failure == "wrong_metric":
+        req["human_policy"]["metric_definition_sha256"] = "0" * 64
+    elif failure == "baseline":
+        req["baseline_window"] = BASELINE
+    result = recommend_portfolio(req, EvidenceBundle(reports=(source,))).to_dict()
+    assert result["decision"] == "INCONCLUSIVE"
+    assert result["confidence"] == "INSUFFICIENT_FOR_DECISIVE_RECOMMENDATION"
+
+
+def test_synthetic_source_never_gets_provisional_decision(tmp_path):
+    snapshot, _, _, source = analytics(tmp_path, name="syn-provisional", values=(120,))
+    req = evaluation(snapshot)
+    req["human_policy"]["requirement"] = "PROVISIONAL_LOCAL_DESCRIPTIVE"
+    result = recommend_portfolio(req, EvidenceBundle(reports=(source,))).to_dict()
+    assert result["sources"][0]["data_kind"] == "SYNTHETIC_FIXTURE"
+    assert result["decision"] == "INCONCLUSIVE"

@@ -17,7 +17,7 @@ from ai_commerce.contracts.schema import _format_checker
 from ai_commerce.core.provenance import canonical_bytes, sha256_bytes
 
 SOURCE_SHA = "b08d33f3195c48559d4964cf36c8b03612e41dd9"
-EVALUATOR_VERSION = "a18-m06/1.0"
+EVALUATOR_VERSION = "a18-m06/1.1"
 MAX_BYTES = 2 * 1024 * 1024
 MAX_SOURCES = 32
 
@@ -69,7 +69,7 @@ POLICY = obj({
     "metric_definition_sha256": SHA,
     "keep_at_or_above": DECIMAL, "stop_at_or_below": DECIMAL,
     "between": {"const": "CHANGE"}, "currency": CURRENCY,
-    "requirement": {"const": "COMPARABLE_AUTHORITATIVE_OBSERVATIONS"},
+    "requirement": {"enum": ["COMPARABLE_AUTHORITATIVE_OBSERVATIONS", "PROVISIONAL_LOCAL_DESCRIPTIVE"]},
 })
 REQUEST = obj({
     "schema_version": {"const": "PortfolioEvaluation.v1"}, "candidate_id": TOKEN,
@@ -136,7 +136,7 @@ LIMITATIONS = [
     "Local custody and hashes do not authenticate providers, receipts, rights or Human identity.",
     "No causal uplift, ranked ROI, realized profit or verified settlement is inferred.",
     "Cost job identity does not establish campaign allocation; currencies are never converted.",
-    "KEEP, CHANGE and STOP require comparable authoritative observations; current native grades cannot supply them.",
+    "KEEP/CHANGE/STOP can be provisional Human advice on complete replayed user-supplied performance under an explicit provisional policy; never provider-verified outcomes.",
     "Human policy is editable data; all actions require a separate Human decision.",
 ]
 
@@ -154,7 +154,7 @@ def schema() -> dict:
             "request": REQUEST, "request_sha256": SHA, "policy_sha256": optional(SHA),
             "decision": {"enum": ["KEEP", "CHANGE", "STOP", "INCONCLUSIVE"]},
             "evidence_quality": {"enum": ["MISSING", "UNVERIFIED", "LOCAL_REPLAY_ONLY", "CONFLICTED"]},
-            "confidence": {"const": "INSUFFICIENT_FOR_DECISIVE_RECOMMENDATION"},
+            "confidence": {"enum": ["INSUFFICIENT_FOR_DECISIVE_RECOMMENDATION", "PROVISIONAL_USER_SUPPLIED_UNATTESTED"]},
             "confidence_meaning": {"const": "EVIDENCE_RATING_NOT_PROBABILITY"},
             "sources": array(RECEIPT), "measurements": array(MEASUREMENT),
             "comparisons": array(COMPARISON), "costs": array(COST),
@@ -167,14 +167,22 @@ def schema() -> dict:
             "reason_codes": array(TOKEN, 96), "missingness": array(TOKEN, 64),
             "counterevidence": array(obj({"source_id": TOKEN, "code": TOKEN}), 128),
             "assumptions": {"const": list(LIMITATIONS)},
-            "human_action": obj({"kind": {"enum": ["GATHER_COMPARABLE_EVIDENCE", "REVIEW_CONFLICTS"]},
+            "human_action": obj({"kind": {"enum": ["GATHER_COMPARABLE_EVIDENCE", "REVIEW_CONFLICTS", "REVIEW_PROVISIONAL_RECOMMENDATION"]},
                 "proposed_only": {"const": True}, "execution_authority": {"const": "NONE"}}),
             "downstream_use": {"const": "HUMAN_OR_A18_2_VERSIONED_REFERENCE_ONLY"},
             "financial_commitment": {"const": "NONE"}, "live_outcome_verified": {"const": False},
         }),
-        # This version has no provider-attested native input. Prevent a resealed
-        # record from asserting a decisive classification even in JSON Schema.
-        "allOf": [{"properties": {"decision": {"const": "INCONCLUSIVE"}}}],
+        # A decisive result is strictly provisional; no provider-effect claim is possible.
+        "allOf": [
+            {"if": {"properties": {"decision": {"enum": ["KEEP", "CHANGE", "STOP"]}}},
+             "then": {"properties": {
+                 "confidence": {"const": "PROVISIONAL_USER_SUPPLIED_UNATTESTED"},
+                 "human_action": {"properties": {"kind": {"const": "REVIEW_PROVISIONAL_RECOMMENDATION"}}},
+                 "request": {"properties": {"human_policy": {"type": "object", "properties": {
+                     "requirement": {"const": "PROVISIONAL_LOCAL_DESCRIPTIVE"}}}}}}}},
+            {"if": {"properties": {"decision": {"const": "INCONCLUSIVE"}}},
+             "then": {"properties": {"confidence": {"const": "INSUFFICIENT_FOR_DECISIVE_RECOMMENDATION"}}}}
+        ],
     })
 
 

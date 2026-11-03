@@ -353,3 +353,12 @@ def test_existing_native_and_protected_files_remain_frozen():
         "src/ai_commerce/engineering/minimum_test.py": "20ecbcefa133d40e753d2d9f699801b5c5145ec85a2ad93d40babb84dd407a74",
     }
     assert all(sha256((ROOT / path).read_bytes()).hexdigest() == expected for path, expected in frozen.items())
+
+
+def test_opt_in_provisional_without_native_data_still_inconclusive():
+    req = request(policy=True)
+    req["human_policy"]["requirement"] = "PROVISIONAL_LOCAL_DESCRIPTIVE"
+    record = recommend_portfolio(req).to_dict()
+    assert record["decision"] == "INCONCLUSIVE"
+    assert record["confidence"] == "INSUFFICIENT_FOR_DECISIVE_RECOMMENDATION"
+    assert record["human_action"]["execution_authority"] == "NONE"
