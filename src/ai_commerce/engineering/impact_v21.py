@@ -481,9 +481,43 @@ def verified_onboarding_binding(
         if expected_group is not None and expected_group != group.name:
             return False
         baseline_groups = tuple(item["group"] for item in baseline_records)
-        groups = (*old_groups, *baseline_groups)
-        if path not in baseline_by_path:
-            groups = (*groups, group)
+        # Replay the SAME post-executor owner graph used by the trusted MT-01
+        # planner, even when verifying a previously committed owner. Otherwise
+        # an A17.2 binding produced alongside a newly onboarded A17.3 owner
+        # fails its selected_impact_tests comparison on the same tested bytes.
+        # The candidate manifest remains data-only, independently validated
+        # against the immutable base and Human-authorized changed paths.
+        new_manifests = sorted(p for p in changed_paths if
+                               p.startswith("work_items/mt01-components/")
+                               and p.endswith(".json"))
+        if len(new_manifests) > 1:
+            return False
+        new_groups = candidate_onboarding_groups(
+            root=workspace, changed_paths=changed_paths,
+            base_paths=base_paths, existing_groups=(*old_groups, *baseline_groups),
+            allowed_paths=allowed_paths)
+        if path in baseline_by_path:
+            if path in changed_paths:
+                return False
+            record = baseline_by_path[path]
+            group = record["group"]
+            digest = record["manifest_sha256"]
+        else:
+            if new_manifests != [path] or len(new_groups) != 1:
+                return False
+            group = new_groups[0]
+            candidate = json.loads((workspace / path).read_text(encoding="utf-8"))
+            admission = validate_component_onboarding_manifest(
+                candidate, manifest_path=path,
+                changed_paths=changed_paths, base_paths=base_paths,
+                existing_groups=(*old_groups, *baseline_groups),
+                allowed_paths=allowed_paths, root=workspace)
+            digest = admission["manifest_sha256"]
+        if binding["onboarding_manifest_sha256"] != digest:
+            return False
+        if expected_group is not None and expected_group != group.name:
+            return False
+        groups = (*old_groups, *baseline_groups, *new_groups)
         plan = select_impact(
             root=workspace, changed_paths=changed_paths, groups=groups,
             base_sha=base_sha)
