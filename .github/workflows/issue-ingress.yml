@@ -1,5 +1,5 @@
 name: AI Commerce Issue ingress (EF02 / HostOps)
-run-name: "Issue #${{ github.event.issue.number } (${{ github.event.action })"
+run-name: "Issue #${{ github.event.issue.number }} (${{ github.event.action }})"
 # One top-level run per Issue event, rather than four unrelated runs.
 # Keep the original EF02 and HostOps validation/authorization unchanged in called workflows.
 on:
