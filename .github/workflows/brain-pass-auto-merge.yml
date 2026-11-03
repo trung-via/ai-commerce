@@ -1,7 +1,7 @@
 name: AI Commerce Brain PASS auto-merge
 
 # Runs trusted main source; GitHub validates an exact, authenticated Brain PASS
-# receipt on the PR, exact HEAD/base, independent two-OS CI and artifacts.
+# receipt on the PR, exact HEAD/base, independent Windows CI and artifacts.
 # An ordinary CI PASS without Brain review does not authorize merging.
 # PR review comments act only as an event-level wake after a genuine Brain
 # PASS receipt has been published in the PR Conversation. Listening to

@@ -1062,16 +1062,16 @@ def test_repository_wide_windows_only_audit():
     historical_references = []
     marker = re.compile(
         r"ubuntu(?:[-_ ]latest)?|\blinux\b|both[_ -]?os|dual[_ -]?os|"
-        r"\bapt-get\b|shell\s*:\s*bash", re.IGNORECASE
+        r"\bapt-get\b|shell\s*:\s*bash|two[-_ ]os", re.IGNORECASE
     )
     forbidden_workflow = re.compile(
-        r"ubuntu-latest|macos-latest|linux-latest|"
+        r"ubuntu-latest|macos-latest|linux-latest|two[-_ ]os|"
         r"shell\s*:\s*bash|\bapt-get\b|runs-on:\s*(?:ubuntu|linux|macos)|"
         r"\$\{\{\s*matrix\.os\s*\}\}", re.IGNORECASE
     )
     forbidden_control = re.compile(
         r"tests\s*\(\s*ubuntu-latest\s*\)|"
-        r"EXACT_HEAD_BOTH_OS|NO_BOTH_OS|BOTH_OS",
+        r"EXACT_HEAD_BOTH_OS|NO_BOTH_OS|BOTH_OS|two[-_ ]os",
         re.IGNORECASE
     )
     binary_extensions = {

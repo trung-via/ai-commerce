@@ -35,6 +35,7 @@ The test `tests/test_pr_merge_gate.py::test_repository_wide_windows_only_audit` 
 - Published the current Windows-only CI/self-host policy at the start of `README.md`; prior Ubuntu counts remain correctly attributed to old runs.
 - Annotated dated `docs/engineering/PROJECT_STATE.md` and `docs/engineering/MT01_CI_EFFECTIVENESS_209.md` as historical where necessary.
 - Added a continuing full-repository audit test to the existing Windows EF02 source CI; no dedicated Ubuntu matrix or extra job.
+- Cleaned the last trusted Brain auto-merge workflow comment that still described obsolete two-OS CI; enforce that deprecated wording in active workflows as a regression failure.
 - Kept signed HostOps authorization, immutable EF02 evidence, Brain PASS and exact-head merge prerequisites unchanged.
 - Did **not** delete old Actions receipts, historical reports, worktrees, GitHub branches or other projects, and did **not** invoke HostOps/Wake/EF02 live operations.
 
