@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+import getpass
 import os
 import platform
 from pathlib import Path
+import subprocess
 import sys
 import time
 
@@ -16,12 +18,13 @@ from .contract import (MAX_WIRE, Denied, canonical, decode, deny, digest,
 from .security import (NON_BROKER_SIDS, PERSONAL_V4_MODE, PERSONAL_V4_SCHEMA, load_config,
                        load_config_v4, windows_identity)
 from .transport import (READ_ONLY_V4, ControlGitHub, GitHub, poll_inbox, poll_once,
-                        poll_once_v4, report, report_v4, submit, submit_v4,
+                        poll_once_v4, personal_remote_prepare, personal_remote_publish,
+                        report, report_v4, submit, submit_v4,
                         validation, validation_v4)
 
 V3_COMMANDS = ("validate", "submit", "reconcile", "report", "broker", "poll-once", "poll")
 V4_COMMANDS = ("validate-v4", "submit-v4", "reconcile-v4", "report-v4", "broker-v4", "poll-once-v4",
-               "personal-local-inspect")
+               "personal-local-inspect", "personal-remote-once")
 
 
 def _personal_local_inspect(args):
@@ -98,7 +101,96 @@ def _personal_local_inspect(args):
     return 0
 
 
+def _personal_remote_once(args):
+    """One interactive owner-scoped private Issue read; NOT an unattended agent.
+
+    Token is entered interactively, never in argv, environment, config or disk.
+    It is still potentially readable by an already compromised same-user
+    process: this mode must not run alongside untrusted public-runner jobs.
+    """
+    if (args.output or args.token_file or args.request_file or args.receipt_file or
+            args.disclosure_output or args.run_id is not None):
+        deny("PERSONAL_REMOTE_OPTIONS_DENIED")
+    if (os.name != "nt" or not args.config or
+            type(args.issue) is not int or not 1 <= args.issue <= 2147483647):
+        deny("PERSONAL_REMOTE_CONTEXT_DENIED")
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        deny("INTERACTIVE_CONSENT_REQUIRED")
+    config_path = Path(args.config)
+    if (not config_path.is_absolute() or str(config_path).startswith("\\\\") or
+            config_path.is_symlink() or not config_path.is_file() or
+            config_path.stat().st_size > 131072):
+        deny("BAD_CONFIG")
+    for component in (config_path, *config_path.parents):
+        if getattr(component.lstat(), "st_file_attributes", 0) & 0x400:
+            deny("BAD_CONFIG")
+    config = load_config_v4(config_path)
+    if (config["schema"] != PERSONAL_V4_SCHEMA or
+            config["account_mode"] != PERSONAL_V4_MODE or
+            config["enabled"] is not False):
+        deny("PERSONAL_MODE_NOT_ENROLLED")
+    sid, elevated = windows_identity()
+    if (elevated or sid in NON_BROKER_SIDS or
+            config["broker_identity"] != sid or config["transport_identity"] != sid):
+        deny("PERSONAL_IDENTITY_MISMATCH")
+    if (Path(config["policy_dir"]) / "KILL").exists():
+        deny("KILL_SWITCH")
+    root = Path(__file__).resolve().parents[3]
+    # Pin to the locally checked-out, unmodified exact public source.
+    # Git arguments are fixed, with no remote, fetch, checkout or write.
+    try:
+        head = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
+                              capture_output=True, text=True, timeout=8, check=False)
+        dirty = subprocess.run(["git", "-C", str(root), "status", "--porcelain",
+                                "--untracked-files=no"], capture_output=True,
+                               text=True, timeout=8, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        deny("LOCAL_SOURCE_UNVERIFIED")
+    source_sha = head.stdout.strip()
+    if (head.returncode != 0 or dirty.returncode != 0 or dirty.stdout.strip() or
+            len(source_sha) != 40 or
+            any(c not in "0123456789abcdef" for c in source_sha)):
+        deny("LOCAL_SOURCE_UNVERIFIED")
+    from .transport import ControlGitHub
+    # Do not pass the token in argv or environment and do not save to a file.
+    credential = getpass.getpass("Private GitHub Issues token (not shown): ")
+    if not credential or len(credential) > 512 or any(ord(c) < 33 or ord(c) > 126 for c in credential):
+        deny("TOKEN_UNAVAILABLE")
+    api = ControlGitHub(credential)
+    del credential
+    request = personal_remote_prepare(api, args.issue, source_sha)
+    text = "ALLOW READ " + str(args.issue) + " " + request["request_id"]
+    print("Local presence required. Request operation: local_os_inventory")
+    print("Issue #" + str(args.issue) + " / request " + request["request_id"])
+    print("Type " + text + " to approve EXACTLY this one read:", flush=True)
+    try:
+        confirm = input()
+    except EOFError:
+        deny("INTERACTIVE_CONSENT_REQUIRED")
+    if confirm != text:
+        deny("INTERACTIVE_CONSENT_REQUIRED")
+    architecture = "X64" if platform.machine().casefold() in ("amd64", "x86_64") else "OTHER"
+    cpu = os.cpu_count()
+    inventory = {
+        "architecture": architecture,
+        "logical_cpu_count": cpu if type(cpu) is int and 0 < cpu <= 512 else 0,
+    }
+    try:
+        receipt = personal_remote_publish(api, args.issue, request, inventory)
+    except Denied as exc:
+        if str(exc) == "REMOTE_POST_UNKNOWN":
+            print("HOSTOPS_R1_UNKNOWN / CHECK PRIVATE ISSUE; DO NOT RETRY AUTOMATICALLY",
+                  file=sys.stderr)
+            return 3
+        raise
+    print("HOSTOPS_R1_RESULT_POSTED")
+    print(canonical(receipt).decode("ascii"), end="")
+    return 0
+
+
 def _run_v4_cli(args):
+    if args.command == "personal-remote-once":
+        return _personal_remote_once(args)
     if args.command == "personal-local-inspect":
         return _personal_local_inspect(args)
     if args.command == "report-v4":
@@ -214,7 +306,7 @@ def main(argv=None):
         return 0
     except (Denied, OSError, ValueError, TypeError) as exc:
         # Static diagnostic only. Never echo paths, request contents or exception text.
-        if args.output and args.command != "personal-local-inspect":
+        if args.output and args.command not in ("personal-local-inspect", "personal-remote-once"):
             unavailable = isinstance(exc, OSError) or str(exc) in ("BROKER_UNAVAILABLE", "GITHUB_UNAVAILABLE")
             maker = receipt_v4 if is_v4 else receipt
             Path(args.output).write_bytes(canonical(maker(None, "UNAVAILABLE" if unavailable else "BLOCKED", "CLI_BLOCKED")))
