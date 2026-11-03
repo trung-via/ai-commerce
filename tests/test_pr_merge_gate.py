@@ -782,3 +782,27 @@ def test_existing_owner_extension_does_not_approve_unrelated_unknown_changes(gat
     assert gate.reviewed_coverage_for_changed_files(
         files + [{"filename": ".github/workflows/bypass.yml", "status": "added"}],
         onboarded_groups=entries) is None
+
+
+
+def test_hostops_v4_install_plan_paths_have_independent_trusted_gate(gate):
+    """One exact PLAN script/config is reviewed; arbitrary installers stay blocked."""
+    reviewed = gate.reviewed_coverage_for_changed_files([
+        {"filename": "scripts/HostOps-V4-InstallPlan.ps1", "status": "added"},
+        {"filename": "config/hostops-v3/config-v4.example.json", "status": "added"},
+    ])
+    assert reviewed is not None
+    changed, needed = reviewed
+    assert set(changed) == {
+        "scripts/HostOps-V4-InstallPlan.ps1",
+        "config/hostops-v3/config-v4.example.json",
+    }
+    assert set(needed) == {
+        "tests/test_hostops_v3_integration.py", "tests/test_minimum_test.py",
+    }
+    assert gate.reviewed_coverage_for_changed_files([
+        {"filename": "scripts/HostOps-V4-Install-Apply.ps1", "status": "added"},
+    ]) is None
+    assert gate.reviewed_coverage_for_changed_files([
+        {"filename": ".github/workflows/unreviewed-hostops-installer.yml", "status": "added"},
+    ]) is None
