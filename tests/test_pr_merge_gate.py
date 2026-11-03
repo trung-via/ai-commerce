@@ -784,7 +784,6 @@ def test_existing_owner_extension_does_not_approve_unrelated_unknown_changes(gat
         onboarded_groups=entries) is None
 
 
-
 def test_hostops_v4_install_plan_paths_have_independent_trusted_gate(gate):
     """One exact PLAN script/config is reviewed; arbitrary installers stay blocked."""
     reviewed = gate.reviewed_coverage_for_changed_files([
@@ -806,3 +805,72 @@ def test_hostops_v4_install_plan_paths_have_independent_trusted_gate(gate):
     assert gate.reviewed_coverage_for_changed_files([
         {"filename": ".github/workflows/unreviewed-hostops-installer.yml", "status": "added"},
     ]) is None
+
+
+def test_v22_manifest_owner_admitted_from_exact_github_blob(gate):
+    import base64
+    import hashlib
+    import json
+
+    payload = {
+        "schema_version": "MT01ComponentOwner.v1",
+        "component": "fresh",
+        "sources": ["src/ai_commerce/fresh/service.py"],
+        "tests": ["tests/test_fresh_service.py"],
+        "acs": ["FRESH.offline"],
+        "consumers": ["src/ai_commerce/product/identity.py"],
+        "contracts": ["contracts/Fresh.v1.schema.json"],
+    }
+    manifest_path = "work_items/mt01-components/fresh.json"
+    changed = [
+        {"filename": path, "status": "added"} for path in (
+            manifest_path, *payload["sources"], *payload["tests"], *payload["contracts"])]
+    def read(path, method="GET", body=None):
+        assert path.endswith(manifest_path + "?ref=" + "a" * 40)
+        raw = json.dumps(payload).encode("utf-8")
+        sha = hashlib.sha1(b"blob " + str(len(raw)).encode() + bytes([0]) + raw).hexdigest()
+        return {"type": "file", "encoding": "base64",
+                "content": base64.b64encode(raw).decode("ascii"), "sha": sha}
+    reviewed = gate.reviewed_manifest_groups_for_pr(
+        read, "/repos/trung-via/ai-commerce", "a" * 40, changed)
+    assert reviewed[0]["tests"] == ("tests/test_fresh_service.py",)
+    closure = gate.reviewed_coverage_for_changed_files(
+        changed, onboarded_groups=reviewed)
+    assert closure is not None
+    assert closure[1] == ("tests/test_fresh_service.py",)
+
+
+def test_v22_merge_gate_rejects_manifest_shell_and_owner_theft(gate):
+    import base64
+    import hashlib
+    import json
+    manifest_path = "work_items/mt01-components/fresh.json"
+    payload = {
+        "schema_version": "MT01ComponentOwner.v1",
+        "component": "fresh",
+        "sources": ["src/ai_commerce/fresh/service.py"],
+        "tests": ["tests/test_fresh_service.py"],
+        "acs": ["FRESH.offline"],
+        "consumers": [],
+        "contracts": [],
+    }
+    changed = [{"filename": manifest_path, "status": "added"},
+               {"filename": "src/ai_commerce/fresh/service.py", "status": "added"},
+               {"filename": "tests/test_fresh_service.py", "status": "added"}]
+    def call(data, records=changed):
+        def read(path, method="GET", body=None):
+            raw = json.dumps(data).encode("utf-8")
+            sha = hashlib.sha1(b"blob " + str(len(raw)).encode() + bytes([0]) + raw).hexdigest()
+            return {"type": "file", "encoding": "base64",
+                    "content": base64.b64encode(raw).decode(), "sha": sha}
+        return gate.reviewed_manifest_groups_for_pr(
+            read, "/repos/trung-via/ai-commerce", "a" * 40, records)
+    assert call(payload)[0]["name"] == "fresh"
+    with pytest.raises(ValueError, match="UNTRUSTED_FIELDS"):
+        call({**payload, "argv": ["python", "-m", "pytest", "tests"]})
+    with pytest.raises(ValueError, match="COVERAGE_INCOMPLETE"):
+        call({**payload, "sources": ["src/ai_commerce/product/identity.py"]})
+    with pytest.raises(ValueError, match="MANIFEST_ONBOARDING_CHANGE_UNREVIEWED"):
+        call(payload, [dict(changed[0], status="modified"), *changed[1:]])
+    with pytest.raises(ValueError, match="BAD_TEST"):
+        call({**payload, "tests": ["tests/../test_fresh_service.py"]})
