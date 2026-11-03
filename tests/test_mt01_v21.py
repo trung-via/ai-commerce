@@ -909,3 +909,12 @@ def test_v22_ef02_replays_dynamic_argv_against_immutable_git_baseline(tmp_path, 
     assert not verified_onboarding_binding(**{**kwargs, "binding": copied})
     assert not verified_onboarding_binding(**{**kwargs,
            "allowed_paths": ("tests/test_prior.py",)})
+
+
+def test_v22_manifest_respects_authorized_directory_prefixes(tmp_path):
+    validator, data, context = _v22_manifest_fixture(tmp_path)
+    allowed = ("src/ai_commerce/fresh", "tests", "contracts",
+               "work_items/mt01-components")
+    admitted = validator(data, **{**context, "allowed_paths": allowed})
+    assert admitted["name"] == "fresh"
+    assert admitted["status"] == "VALIDATED_DATA_ONLY_NOT_VERIFICATION_PASS"
