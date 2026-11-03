@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import ctypes
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import shutil
 import stat
 import time
@@ -246,7 +246,13 @@ def _validate_v4_config_dict(config):
     text(config["transport_identity"], 256)
     for key in ("policy_dir", "state_dir", "transport_state_dir", "release_dir", "ssh_keygen", "pwsh"):
         text(config[key])
-        if not Path(config[key]).is_absolute() or str(config[key]).startswith("\\\\"):
+        value = config[key]
+        # Offline disabled Windows template must parse on POSIX source CI.
+        # An enabled V4 broker still requires a native absolute local path.
+        native_absolute = Path(value).is_absolute()
+        offline_windows_absolute = (config["enabled"] is False and
+                                    PureWindowsPath(value).is_absolute())
+        if value.startswith("\\\\") or not (native_absolute or offline_windows_absolute):
             deny("BAD_CONFIG")
     text(config["endpoint"])
     for key in ("ssh_keygen_sha256", "pwsh_sha256"):
