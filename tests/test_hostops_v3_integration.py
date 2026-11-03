@@ -336,8 +336,13 @@ def test_hostops_v3_hosted_queue_is_digest_only_without_host_execution():
     assert text.endswith(chr(10))
     assert 'name: AI Commerce HostOps v3 signed broker queue' in text
     assert 'run-name: "HostOpsV3 Issue #' in text
-    assert '  issues:' in text
-    assert '    types: [opened]' in text
+    # Issue events are now routed by one shared top-level workflow.
+    ingress = (ROOT / ".github" / "workflows" / "issue-ingress.yml").read_text(encoding="utf-8")
+    assert '  workflow_call:' in text
+    assert '  issues:' not in text
+    assert '    types: [opened, labeled]' in ingress
+    assert 'uses: ./.github/workflows/hostops-v3.yml' in ingress
+    assert "github.event.action == 'opened'" in ingress
     assert '  contents: read' in text
     assert '    runs-on: ubuntu-latest' in text
     assert 'HOSTOPS_V3_QUEUED_UNVERIFIED' in text
