@@ -96,6 +96,19 @@ REVIEWED_CONTROL_TESTS = {
         ("tests/test_hostops_v3_integration.py", "tests/test_pr_merge_gate.py"),
     # Retired workflow must remain recognized for this one deletion diff.
     ".github/workflows/human-merge-queue.yml": ("tests/test_pr_merge_gate.py",),
+    # Reviewed single-ingress and artifact-free cleanup controls. These
+    # require independent owner/consumer tests; unknown .github files HOLD.
+    ".github/workflows/issue-ingress.yml": (
+        "tests/test_ef02.py", "tests/test_hostops_request.py",
+        "tests/test_hostops_v2.py", "tests/test_hostops_v3_integration.py",
+        "tests/test_mt01_v21.py"),
+    ".github/workflows/actions-skipped-cleanup.yml": (
+        "tests/test_mt01_v21.py", "tests/test_pr_merge_gate.py"),
+    ".github/workflows/hostops-readonly.yml": (
+        "tests/test_hostops_request.py", "tests/test_mt01_v21.py"),
+    ".github/workflows/hostops-v2.yml": (
+        "tests/test_hostops_v2.py", "tests/test_hostops_ef02_202_recovery.py",
+        "tests/test_mt01_v21.py"),
     ".github/workflows/ef02-batch.yml": (
         "tests/test_ef02.py", "tests/test_minimum_test.py"),
     ".github/workflows/ef02-tests.yml": (
