@@ -15,6 +15,7 @@ from .auth import verify_release, verify_release_v4
 from .broker import serve, serve_v4
 from .contract import (MAX_WIRE, Denied, canonical, decode, deny, digest,
                        dual_repo_envelope, envelope, public_receipt_v4, receipt, receipt_v4)
+from .personal_session import run_session
 from .security import (NON_BROKER_SIDS, PERSONAL_V4_MODE, PERSONAL_V4_SCHEMA, load_config,
                        load_config_v4, windows_identity)
 from .transport import (READ_ONLY_V4, ControlGitHub, GitHub, poll_inbox, poll_once,
@@ -24,7 +25,8 @@ from .transport import (READ_ONLY_V4, ControlGitHub, GitHub, poll_inbox, poll_on
 
 V3_COMMANDS = ("validate", "submit", "reconcile", "report", "broker", "poll-once", "poll")
 V4_COMMANDS = ("validate-v4", "submit-v4", "reconcile-v4", "report-v4", "broker-v4", "poll-once-v4",
-               "personal-local-inspect", "personal-remote-once")
+               "personal-local-inspect", "personal-remote-once",
+               "personal-supervised-session")
 
 
 def _personal_local_inspect(args):
@@ -109,7 +111,8 @@ def _personal_remote_once(args):
     process: this mode must not run alongside untrusted public-runner jobs.
     """
     if (args.output or args.token_file or args.request_file or args.receipt_file or
-            args.disclosure_output or args.run_id is not None):
+            args.disclosure_output or args.run_id is not None or
+            args.session_seconds != 600):
         deny("PERSONAL_REMOTE_OPTIONS_DENIED")
     if (os.name != "nt" or not args.config or
             type(args.issue) is not int or not 1 <= args.issue <= 2147483647):
@@ -194,6 +197,8 @@ def _personal_remote_once(args):
 def _run_v4_cli(args):
     if args.command == "personal-remote-once":
         return _personal_remote_once(args)
+    if args.command == "personal-supervised-session":
+        return run_session(args)
     if args.command == "personal-local-inspect":
         return _personal_local_inspect(args)
     if args.command == "report-v4":
@@ -254,6 +259,7 @@ def main(argv=None):
     parser.add_argument("--token-file")
     parser.add_argument("--issue", type=int)
     parser.add_argument("--run-id", type=int)
+    parser.add_argument("--session-seconds", type=int, default=600)
     args = parser.parse_args(argv)
     is_v4 = args.command in V4_COMMANDS
     try:
@@ -309,7 +315,7 @@ def main(argv=None):
         return 0
     except (Denied, OSError, ValueError, TypeError) as exc:
         # Static diagnostic only. Never echo paths, request contents or exception text.
-        if args.output and args.command not in ("personal-local-inspect", "personal-remote-once"):
+        if args.output and args.command not in ("personal-local-inspect", "personal-remote-once", "personal-supervised-session"):
             unavailable = isinstance(exc, OSError) or str(exc) in ("BROKER_UNAVAILABLE", "GITHUB_UNAVAILABLE")
             maker = receipt_v4 if is_v4 else receipt
             Path(args.output).write_bytes(canonical(maker(None, "UNAVAILABLE" if unavailable else "BLOCKED", "CLI_BLOCKED")))
