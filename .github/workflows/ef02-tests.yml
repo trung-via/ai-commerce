@@ -13,6 +13,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   tests:
+    name: tests (windows-latest)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
