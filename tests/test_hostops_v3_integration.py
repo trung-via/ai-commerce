@@ -2018,3 +2018,108 @@ def test_w1_native_fixture_has_no_remote_cli_or_runner_registration(h):
     assert not hasattr(transport, "w1_windows_native_create_fixture")
     # No script execution or Windows effects from importing the primitive.
     assert callable(fs.w1_windows_native_create_fixture)
+
+
+# W1 attended-CLI bridge: no private GitHub token, service or remote polling.
+@pytest.mark.skipif(os.name != "nt", reason="requires real Windows native NT create")
+def test_w1_attended_cli_one_signed_file_and_ledger_replay_hold(h, tmp_path, monkeypatch):
+    from ai_commerce.hostops_v3 import filesystem as fs
+    from ai_commerce.hostops_v3.journal import OfflineW1IntentLedger
+
+    src_sha = "b" * 40
+    root_id = fs.w1_windows_root_identity(h.data)
+    state = tmp_path / "w1-attended-journal"
+    state.mkdir()
+    monkeypatch.setattr(cli, "W1_PROOF_ROOT", h.data)
+    monkeypatch.setattr(cli, "W1_PROOF_STATE", state)
+    monkeypatch.setattr(cli, "_w1_attended_context", lambda args: (src_sha, root_id))
+    monkeypatch.setattr(cli, "_clean_source_sha", lambda root: src_sha)
+
+    now = int(time.time())
+    payload = cli.W1_PROOF_TEXT
+    unsigned = {
+        "schema": auth.PERSONAL_W1_SCHEMA,
+        "request_id": "w1-" + "c" * 32,
+        "issue_number": 123,
+        "source_repository": c.SOURCE_REPOSITORY,
+        "control_repository": c.CONTROL_REPOSITORY,
+        "source_sha": src_sha,
+        "operation": "create_new_utf8",
+        "parameters": {
+            "root_id": "human-scratch-v1",
+            "filename": cli.W1_PROOF_NAME,
+            "content_utf8": payload,
+            "content_sha256": c.digest(payload.encode("ascii")),
+            "content_bytes": len(payload),
+        },
+        "issued_at": now - 10,
+        "expires_at": now + 300,
+    }
+    signed = {**unsigned, "approval_signature_b64": h.sign(
+        unsigned, "human", auth.PERSONAL_W1_NAMESPACE)}
+    req = tmp_path / "signed.json"
+    req.write_bytes(c.canonical(signed))
+    signers = h.policy / "human-signers"
+    args = SimpleNamespace(
+        command="personal-w1-attended-once", source_root=str(tmp_path),
+        request_file=str(req), issue=123, allowed_signers=str(signers),
+        signers_sha256=c.digest(signers.read_bytes()),
+        ssh_keygen=h.config["ssh_keygen"],
+        verifier_sha256=h.config["ssh_keygen_sha256"],
+        root_volume_serial=root_id["volume_serial_hex"],
+        root_file_index=root_id["file_index_hex"],
+    )
+    phrase = "CREATE W1 123 " + signed["request_id"]
+    monkeypatch.setattr("builtins.input", lambda: phrase)
+    assert cli._w1_attended_command(args) == 0
+    dest = h.data / cli.W1_PROOF_NAME
+    assert dest.read_bytes() == payload.encode("ascii")
+    with OfflineW1IntentLedger(state / "w1-intent.sqlite3") as ledger:
+        assert ledger.record_verified_proposal(
+            signed, issue_number=123, expected_source_sha=src_sha,
+            allowed_signers=signers,
+            expected_signers_sha256=c.digest(signers.read_bytes()),
+            ssh_keygen=Path(h.config["ssh_keygen"]),
+            expected_verifier_sha256=h.config["ssh_keygen_sha256"],
+        )["status"] == "HOLD_REPLAY_UNKNOWN"
+    with pytest.raises(c.Denied, match="W1_NATIVE_ALREADY_EXISTS"):
+        cli._w1_attended_command(args)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires real Windows root metadata")
+def test_w1_attended_cli_unsigned_cannot_create_and_kill_denies(h, tmp_path, monkeypatch):
+    from ai_commerce.hostops_v3 import filesystem as fs
+    root_id = fs.w1_windows_root_identity(h.data)
+    state = tmp_path / "w1-attended-journal"
+    state.mkdir()
+    monkeypatch.setattr(cli, "W1_PROOF_ROOT", h.data)
+    monkeypatch.setattr(cli, "W1_PROOF_STATE", state)
+    monkeypatch.setattr(cli, "_w1_attended_context", lambda args: ("b" * 40, root_id))
+    signers = h.policy / "human-signers"
+    proposal, _ = _personal_w1_signed_fixture(h)
+    req = tmp_path / "invalid.json"
+    req.write_bytes(c.canonical(proposal))
+    args = SimpleNamespace(
+        command="personal-w1-attended-once", source_root=str(tmp_path),
+        request_file=str(req), issue=123, allowed_signers=str(signers),
+        signers_sha256=c.digest(signers.read_bytes()),
+        ssh_keygen=h.config["ssh_keygen"],
+        verifier_sha256=h.config["ssh_keygen_sha256"],
+        root_volume_serial=root_id["volume_serial_hex"],
+        root_file_index=root_id["file_index_hex"],
+    )
+    with pytest.raises(c.Denied, match="W1_ATTENDED_EXACT_PROOF_ONLY"):
+        cli._w1_attended_command(args)
+    (state / "KILL").touch()
+    with pytest.raises(c.Denied, match="W1_ATTENDED_STATE_OR_KILL"):
+        cli._w1_attended_command(args)
+    assert not (h.data / cli.W1_PROOF_NAME).exists()
+
+
+def test_w1_attended_cli_not_dispatchable_by_normal_hostops_worker():
+    assert "personal-w1-attended-once" in cli.V4_COMMANDS
+    from ai_commerce.hostops_v3 import transport
+    from ai_commerce.hostops_v3.worker import Worker
+    assert not hasattr(Worker, "personal_w1_attended_once")
+    assert not hasattr(transport, "personal_w1_attended_once")
+    assert not hasattr(cli, "w1_windows_native_create_fixture")

@@ -26,7 +26,8 @@ from .transport import (READ_ONLY_V4, ControlGitHub, GitHub, poll_inbox, poll_on
 V3_COMMANDS = ("validate", "submit", "reconcile", "report", "broker", "poll-once", "poll")
 V4_COMMANDS = ("validate-v4", "submit-v4", "reconcile-v4", "report-v4", "broker-v4", "poll-once-v4",
                "personal-local-inspect", "personal-remote-once",
-               "personal-supervised-session")
+               "personal-supervised-session", "personal-w1-root-check",
+               "personal-w1-attended-once")
 
 
 def _personal_local_inspect(args):
@@ -351,7 +352,156 @@ def run_session(args):
     return 0
 
 
+
+# W1 supervised bootstrap; fixed test path/content, no remote polling or token.
+# This command is deliberately NOT a credential-isolated unattended service.
+W1_PROOF_ROOT = Path(r"C:\TOOL\AI-Commerce-HostOps-Approved")
+W1_PROOF_STATE = Path(r"C:\TOOL\AI-Commerce-HostOps-State")
+W1_PROOF_NAME = "w1-native-proof.txt"
+W1_PROOF_TEXT = "AI_COMMERCE_W1_NATIVE_PROOF_V1"
+
+
+def _w1_attended_context(args):
+    """Operator-only check, with no host modifications."""
+    from . import filesystem as fs
+
+    if (os.name != "nt" or not sys.stdin.isatty() or not sys.stdout.isatty() or
+            args.output or args.token_file or args.config or args.receipt_file or
+            args.disclosure_output or args.run_id is not None or
+            not args.source_root):
+        deny("W1_ATTENDED_CONSOLE_REQUIRED")
+    current_sid, elevated = windows_identity()
+    if not current_sid or elevated or current_sid in NON_BROKER_SIDS:
+        deny("W1_ATTENDED_IDENTITY_DENIED")
+    source = Path(args.source_root)
+    if not source.is_absolute() or source.is_symlink():
+        deny("LOCAL_SOURCE_UNVERIFIED")
+    try:
+        if not Path(__file__).resolve().samefile(
+                (source / "src/ai_commerce/hostops_v3/cli.py").resolve(strict=True)):
+            deny("W1_EXECUTED_SOURCE_MISMATCH")
+    except OSError:
+        deny("W1_EXECUTED_SOURCE_MISMATCH")
+    sha = _clean_source_sha(source)
+    identity = fs.w1_windows_root_identity(W1_PROOF_ROOT)
+    return sha, identity
+
+
+def _w1_attended_command(args):
+    """Strict local one-shot only; no persistent credentials or GitHub dispatch.
+
+    W1 approval must be signed by an independently controlled Human signer.
+    Console consent and same-SID hash pins DO NOT prove unattended isolation.
+    """
+    from . import filesystem as fs
+    from .contract import decode, canonical
+    from .journal import OfflineW1IntentLedger
+
+    source_sha, root_identity = _w1_attended_context(args)
+    if args.command == "personal-w1-root-check":
+        if args.request_file or args.issue is not None:
+            deny("W1_ATTENDED_OPTIONS_DENIED")
+        print("HOSTOPS_W1_ROOT_CANDIDATE_NOT_ATTESTED")
+        print(canonical({
+            "schema": "hostops.personal.w1_local_preflight.v1",
+            "source_sha": source_sha,
+            "root_id": "human-scratch-v1",
+            "root_identity": root_identity,
+            "source_only": True,
+            "remote_write_enabled": False,
+            "independent_custody_proven": False,
+        }).decode("ascii").strip(), flush=True)
+        return 0
+
+    if (args.command != "personal-w1-attended-once" or args.issue is None or
+            not all((args.request_file, args.allowed_signers, args.signers_sha256,
+                     args.ssh_keygen, args.verifier_sha256, args.root_volume_serial,
+                     args.root_file_index))):
+        deny("W1_ATTENDED_OPTIONS_DENIED")
+    from . import auth
+    expected_identity = {"volume_serial_hex": args.root_volume_serial,
+                         "file_index_hex": args.root_file_index}
+    if root_identity != expected_identity:
+        deny("W1_NATIVE_ROOT_MISMATCH")
+    if (not W1_PROOF_STATE.is_dir() or W1_PROOF_STATE.is_symlink() or
+            (W1_PROOF_STATE / "KILL").exists()):
+        deny("W1_ATTENDED_STATE_OR_KILL")
+    # Reject Windows junction/reparse ancestors and pin the state directory
+    # identity across the human confirmation window.
+    state_identity = fs.w1_windows_root_identity(W1_PROOF_STATE)
+    ledger_path = W1_PROOF_STATE / "w1-intent.sqlite3"
+    if ledger_path.is_symlink():
+        deny("W1_ATTENDED_STATE_OR_KILL")
+    request_path = Path(args.request_file)
+    if (not request_path.is_absolute() or request_path.is_symlink() or
+            not request_path.is_file() or request_path.stat().st_size > 16384):
+        deny("W1_ATTENDED_REQUEST_DENIED")
+    proposal = decode(request_path.read_bytes(), limit=16384)
+    params = proposal.get("parameters")
+    if (type(params) is not dict or params.get("root_id") != "human-scratch-v1" or
+            params.get("filename") != W1_PROOF_NAME or
+            params.get("content_utf8") != W1_PROOF_TEXT or
+            params.get("content_sha256") != digest(W1_PROOF_TEXT.encode("ascii")) or
+            params.get("content_bytes") != len(W1_PROOF_TEXT)):
+        deny("W1_ATTENDED_EXACT_PROOF_ONLY")
+    verify = {
+        "issue_number": args.issue,
+        "expected_source_sha": source_sha,
+        "allowed_signers": Path(args.allowed_signers),
+        "expected_signers_sha256": args.signers_sha256,
+        "ssh_keygen": Path(args.ssh_keygen),
+        "expected_verifier_sha256": args.verifier_sha256,
+    }
+    # Verify BEFORE any irreversible intent. A signed Issue number is not
+    # an independently authenticated private GitHub Issue origin.
+    auth.personal_w1_verify_offline(proposal, **verify)
+    if os.path.lexists(W1_PROOF_ROOT / W1_PROOF_NAME):
+        deny("W1_NATIVE_ALREADY_EXISTS")
+    expected_phrase = "CREATE W1 " + str(args.issue) + " " + proposal["request_id"]
+    print("W1 ATTENDED TEST: " + W1_PROOF_NAME)
+    print("SHA256 " + params["content_sha256"])
+    print("Source " + source_sha)
+    print("Issue #" + str(args.issue) + " — externally verify the private Issue first.")
+    print("Type exactly " + expected_phrase + " to approve one file create:", flush=True)
+    try:
+        consent = input()
+    except (EOFError, KeyboardInterrupt):
+        deny("W1_ATTENDED_CONSENT_DENIED")
+    if consent != expected_phrase:
+        deny("W1_ATTENDED_CONSENT_DENIED")
+    # Recheck after human interaction: TTL, source, KILL and root identity.
+    if ((W1_PROOF_STATE / "KILL").exists() or
+            _clean_source_sha(Path(args.source_root)) != source_sha or
+            fs.w1_windows_root_identity(W1_PROOF_ROOT) != expected_identity or
+            fs.w1_windows_root_identity(W1_PROOF_STATE) != state_identity or
+            ledger_path.is_symlink()):
+        deny("W1_ATTENDED_STATE_CHANGED")
+    auth.personal_w1_verify_offline(proposal, **verify)
+    with OfflineW1IntentLedger(ledger_path) as ledger:
+        staged = ledger.record_verified_proposal(proposal, **verify)
+        if staged["status"] != "INTENT_STAGED_NO_EFFECT":
+            deny("W1_ATTENDED_REPLAY_UNKNOWN")
+        result = fs.w1_windows_native_create_fixture(
+            W1_PROOF_ROOT, expected_identity, W1_PROOF_NAME, W1_PROOF_TEXT)
+    print("HOSTOPS_W1_LOCAL_ATTENDED_RESULT", flush=True)
+    print(canonical({
+        "schema": "hostops.personal.w1_local_attended_result.v1",
+        "status": "LOCAL_NATIVE_FIXTURE_VERIFIED_NOT_REMOTE",
+        "request_id": staged["request_id"],
+        "issue_number": args.issue,
+        "source_sha": source_sha,
+        "sha256": result["content_sha256"],
+        "bytes": result["content_bytes"],
+        "human_signature_verified": True,
+        "independent_host_receipt": False,
+        "remote_write_enabled": False,
+        "unattended_credentials_proven": False,
+    }).decode("ascii").strip(), flush=True)
+    return 0
+
 def _run_v4_cli(args):
+    if args.command in ("personal-w1-root-check", "personal-w1-attended-once"):
+        return _w1_attended_command(args)
     if args.command == "personal-remote-once":
         return _personal_remote_once(args)
     if args.command == "personal-supervised-session":
@@ -417,6 +567,13 @@ def main(argv=None):
     parser.add_argument("--issue", type=int)
     parser.add_argument("--run-id", type=int)
     parser.add_argument("--session-seconds", type=int, default=600)
+    parser.add_argument("--source-root")
+    parser.add_argument("--allowed-signers")
+    parser.add_argument("--signers-sha256")
+    parser.add_argument("--ssh-keygen")
+    parser.add_argument("--verifier-sha256")
+    parser.add_argument("--root-volume-serial")
+    parser.add_argument("--root-file-index")
     args = parser.parse_args(argv)
     is_v4 = args.command in V4_COMMANDS
     try:
@@ -472,7 +629,8 @@ def main(argv=None):
         return 0
     except (Denied, OSError, ValueError, TypeError) as exc:
         # Static diagnostic only. Never echo paths, request contents or exception text.
-        if args.output and args.command not in ("personal-local-inspect", "personal-remote-once", "personal-supervised-session"):
+        if args.output and args.command not in ("personal-local-inspect", "personal-remote-once", "personal-supervised-session",
+                                                "personal-w1-root-check", "personal-w1-attended-once"):
             unavailable = isinstance(exc, OSError) or str(exc) in ("BROKER_UNAVAILABLE", "GITHUB_UNAVAILABLE")
             maker = receipt_v4 if is_v4 else receipt
             Path(args.output).write_bytes(canonical(maker(None, "UNAVAILABLE" if unavailable else "BLOCKED", "CLI_BLOCKED")))
