@@ -190,7 +190,7 @@ def trusted_baseline_manifest_groups(*, repo: Path, base_sha: str,
         _git(repo, "ls-tree", "-r", "--name-only", "-z", base_sha).split(bytes([0])) if p
     }
     paths = sorted(p for p in base_paths if p.startswith("work_items/mt01-components/"))
-    if len(paths) > 8:
+    if len(paths) > 256:
         raise ValueError("BASELINE_OWNER_LIMIT")
     accepted = []
     names = {g.name for g in base_groups}
