@@ -1102,7 +1102,9 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                             "evidence_sha256", "verify_completed", "provider_return_determinate"):
                     report[key] = inv[key]
                 report["git_dir"] = inv.get("git_dir", initial["git_dir"])
-                for key in ("minimum_test", "pytest_profile", "pytest_profiles", "observed_pytest_workers"):
+                for key in ("minimum_test", "pytest_profile", "pytest_profiles",
+                            "observed_pytest_workers", "workers_actual",
+                            "workers_actual_by_group", "worker_count_provenance"):
                     if key in inv:
                         report[key] = inv[key]
                 _write(output_dir / inv["result_file"], _json_bytes(inv))
