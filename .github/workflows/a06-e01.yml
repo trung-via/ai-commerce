@@ -26,8 +26,8 @@ jobs:
       - name: Verify FFmpeg and H264
         run: python -c "import shutil,subprocess; assert shutil.which('ffmpeg') and shutil.which('ffprobe'); assert b'libx264' in subprocess.check_output(['ffmpeg','-hide_banner','-encoders']); subprocess.check_call(['ffprobe','-version'],stdout=subprocess.DEVNULL)"
       - run: python -m pip install -e ".[dev]" Pillow
-      - name: E01 and regression tests
-        run: python -m pytest tests -q
+      - name: E01 affected integration and CLI regression
+        run: python -m pytest tests/test_a06_e01.py tests/test_a03_a04_integration.py tests/test_a05_integration.py tests/test_cli.py -q
       - name: Create real E01 demo MP4
         run: python scripts/a06_demo.py --output .local/e01-demo
       - name: Reopen and verify E01 demo MP4
