@@ -22,6 +22,14 @@ ROOT = Path(__file__).resolve().parents[1]
 def real_tree():
     files = mt.file_hashes(ROOT)
     groups = mt.approved_groups()
+    # Persisted V2.2 component owners on trusted HEAD are reviewed data too.
+    # Do not silently label their committed tests UNMAPPED just because the
+    # pre-registration Python registry was deliberately left unchanged.
+    import subprocess
+    from ai_commerce.engineering.impact_v21 import load_baseline_component_owner_records
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    records = load_baseline_component_owner_records(root=ROOT, base_sha=sha, existing_groups=groups)
+    groups = (*groups, *(r["group"] for r in records))
     registry = {"mt01-" + g.name + "-tests": ["python", "-m", "pytest", *g.tests, "-q", "-n", "12"]
                 for g in groups}
     registry["project-tests"] = [*FULL, "-n", "12"]
