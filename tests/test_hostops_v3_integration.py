@@ -1017,6 +1017,7 @@ def test_v4_load_config_and_admit_v4_isolation_and_fail_closed(h, monkeypatch):
         {"broker_identity": "ci-identity"},
         {"transport_identity": "installer-identity"},
         {"policy_dir": "\\\\remote\\share\\policy"},
+        {"policy_dir": "//remote/share/policy"},
     ):
         p = h.root / "bad-v4.json"
         p.write_bytes(c.canonical({**cfg, **bad}))
