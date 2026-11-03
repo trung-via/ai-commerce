@@ -1022,6 +1022,23 @@ def test_v22_existing_owner_binding_replays_with_new_owner_on_same_candidate(tmp
         **kw, binding=persisted, expected_group="fresh")
 
 
+def test_v22_ef02_receipt_diagnostics_fail_closed_without_private_details(tmp_path):
+    """Missing/falsified evidence emits only reviewed condition codes."""
+    from ai_commerce.remote.worker import _verified_receipt_evidence
+
+    args = dict(root=tmp_path, workspace=tmp_path,
+                source_sha="a" * 40, sources=[], profiles={})
+    reasons = []
+    assert not _verified_receipt_evidence({}, **args, diagnostics=reasons)
+    assert reasons == ["RECEIPT_EVIDENCE_UNAVAILABLE"]
+    reasons = []
+    assert not _verified_receipt_evidence(
+        {"evidence_files": {}, "evidence_sha256": {},
+         "verify_completed": True, "provider_return_determinate": True},
+        **args, diagnostics=reasons)
+    assert reasons == ["RECEIPT_PROVENANCE_INCOMPLETE"]
+
+
 def test_v22_manifest_respects_authorized_directory_prefixes(tmp_path):
     validator, data, context = _v22_manifest_fixture(tmp_path)
     allowed = ("src/ai_commerce/fresh", "tests", "contracts",
