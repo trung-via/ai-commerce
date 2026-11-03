@@ -344,13 +344,14 @@ def test_hostops_v3_hosted_queue_is_digest_only_without_host_execution():
     assert 'uses: ./.github/workflows/hostops-v3.yml' in ingress
     assert "github.event.action == 'opened'" in ingress
     assert '  contents: read' in text
-    assert '    runs-on: ubuntu-latest' in text
+    assert '    runs-on: windows-latest' in text
+    assert '        shell: pwsh' in text
     assert 'HOSTOPS_V3_QUEUED_UNVERIFIED' in text
     assert 'envelope_sha256=' in text
     assert 'github.event.repository.private == true' in text
     assert 'github.event.issue.user.login == github.repository_owner' in text
     for forbidden in ('self-hosted', 'actions/checkout', 'secrets.', 'ssh-keygen -Y',
-                      'github.event.issue.body', 'powershell', 'pwsh', 'broker --config',
+                      'github.event.issue.body', 'broker --config',
                       'hostops_v3.py', 'curl', 'wget'):
         assert forbidden not in text
 
