@@ -1,0 +1,110 @@
+{
+  "work_id": "A17-2-D05-L07-OFFLINE-01",
+  "attempt_id": "a17-2-d05-l07-v22-20261103-v1",
+  "source_sha": "cb6564fa1f3a99945b35fd36baf1398beb874f33",
+  "status": "OFFLINE_IMPLEMENTED_PARTIAL_HOLD_EF01_HOSTED_CI_BRAIN",
+  "objective": "D05 immutable unknown/duplicate publication reconciliation and L07 truthful read-only offline dashboard",
+  "source_decision": "https://github.com/trung-via/ai-commerce/issues/270",
+  "historical_contract": "https://github.com/trung-via/ai-commerce/issues/255",
+  "owner_manifest": "work_items/mt01-components/a17-2.json",
+  "verification_profile": "mt01-component-onboarding",
+  "acceptance": [
+    "A17.D05.L07.offline-reconciliation-dashboard"
+  ],
+  "scope_in": [
+    "Native A08/A15 source and independent scoped observation validation",
+    "Immutable local correction lineage",
+    "Typed A17.1/A09/A11/A14/A15/A16 read-only projections"
+  ],
+  "scope_out": [
+    "Posting or provider APIs",
+    "Payment or model calls",
+    "Wake",
+    "Automatic retry",
+    "A17.3 D07/D08"
+  ],
+  "publication": "EXECUTOR_EDITS_ONLY_EF02_PUBLISHER_REQUIRED",
+  "hosted_ubuntu_windows_source_ci": "PENDING",
+  "independent_brain_acceptance": "PENDING",
+  "git_writes_performed": false,
+  "repair_round_limit": 2,
+  "verification": {
+    "status": "OBSERVED_COMPONENT_PROBE_PASS_FROZEN_TREE_RESULT_IN_REFERENCED_RECEIPT",
+    "owner_admission": "VALIDATED_DATA_ONLY_NOT_VERIFICATION_PASS",
+    "manifest_sha256": "a93b9c07c013ff8bdb0bc46a9a33210916d5686971f024cb538ad033ae3a056b",
+    "onboarding_mode": "AFFECTED",
+    "unknown_acs": [],
+    "consumer_owner_groups": [
+      "a08",
+      "a09",
+      "a11",
+      "a14",
+      "a15",
+      "a16",
+      "a17-1"
+    ],
+    "new_owner_argv": [
+      "python",
+      "-m",
+      "pytest",
+      "tests/test_a17_reconciliation.py",
+      "tests/test_a17_dashboard.py",
+      "-q",
+      "-n",
+      "12"
+    ],
+    "observed_component_probe": {
+      "selected": 106,
+      "collected": 106,
+      "executed": 106,
+      "passed": 106,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "workers_requested": 12,
+      "workers_observed": 12,
+      "exit_code": 0,
+      "scope": "TRUSTED_SYNTHESIZED_NEW_OWNER_ARGV_DIAGNOSTIC_NOT_FULL_CONSUMER_CLOSURE",
+      "artifact": ".local/a17-2/round-2-component/junit.xml"
+    },
+    "observed_prior_registered_consumers": {
+      "passed": 819,
+      "skipped": 5,
+      "workers_requested_per_group": 12,
+      "workers_observed_per_group": 12,
+      "artifact": ".local/a17-2/round-1-complete/receipt.json"
+    },
+    "observed_a02": {
+      "selected": 30,
+      "collected": 30,
+      "executed": 30,
+      "passed": 30,
+      "workers_requested": 12,
+      "workers_observed": 12,
+      "artifact": ".local/a17-2/a02/receipt.json"
+    },
+    "frozen_tree_receipt": ".local/a17-2/final/receipt.json",
+    "frozen_tree_raw_mt01_results": ".local/a17-2/final/mt01.results.json",
+    "candidate_evidence_bundle": ".local/a17-2/candidate-evidence.zip",
+    "final_status_rule": "Read actual frozen-tree receipt and independent replay audit; no future PASS is predeclared by this work item.",
+    "repair_history": [
+      "Invalid no-model-call mock target corrected to native LiveCreativeReasoner.reason",
+      "Commerce fixture capture moved after completed measurement window; exact-version, sequence and history guards strengthened"
+    ],
+    "diagnostic_harness_interruptions": [
+      "Windows backslashes in pytest JUnit option created a misplaced file; MT01 correctly stopped for source drift; artifact moved to .local",
+      "Local save adapter supplied metadata objects where unchanged MT01 API expected relative filename strings; corrected before component execution"
+    ],
+    "remaining_gates": [
+      "EF01/EF02 source/candidate/allowed-path proof and publisher",
+      "Hosted Ubuntu and Windows exact-HEAD PR source CI with independent oracle and ZIP/JUnit closure",
+      "Independent Brain product acceptance and guarded auto-merge"
+    ]
+  },
+  "component_repair_rounds_used": 2,
+  "preferred_executor": {
+    "model": "gpt-6.1-sol",
+    "effort": "max",
+    "basis": "USER_PREFERENCE_NOT_RUNTIME_ATTESTATION"
+  }
+}
