@@ -884,7 +884,7 @@ def test_hostops_v4_windows_install_plan_is_never_an_installer():
 def test_hostops_v4_windows_install_plan_actual_no_writes(tmp_path):
     """Execute PLAN on Windows via safe pwsh 7 without -ExecutionPolicy Bypass."""
     import hashlib
-    powershell = shutil.which("pwsh.exe") or shutil.which("pwsh") or shutil.which("powershell.exe")
+    powershell = security.prefer_readable_pwsh_path() or shutil.which("powershell.exe")
     assert powershell, "Windows runner missing PowerShell"
     script = ROOT / "scripts/HostOps-V4-InstallPlan.ps1"
     config = ROOT / "config/hostops-v3/config-v4.example.json"
@@ -921,6 +921,71 @@ def test_hostops_v4_windows_install_plan_actual_no_writes(tmp_path):
                                 "-ConfigPath", str(config)], capture_output=True, text=True, timeout=30)
     assert extra_arg.returncode != 0
     assert hashlib.sha256(config.read_bytes()).hexdigest() == before
+
+
+def test_v4_security_import_preserves_path_in_fresh_process():
+    """V3 importing shared security.py must never alter process command lookup."""
+    code = ("import os;"
+            "before=os.environ.get('PATH');"
+            "from ai_commerce.hostops_v3 import security;"
+            "assert os.environ.get('PATH')==before")
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                            text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows pwsh alias resolution")
+def test_v4_pwsh_resolver_does_not_reorder_path(tmp_path, monkeypatch):
+    """Unreadable WindowsApps-style stub must not trigger global PATH mutation."""
+    alias_dir = tmp_path / "alias"
+    real_dir = tmp_path / "readable"
+    alias_dir.mkdir()
+    real_dir.mkdir()
+    stub = alias_dir / "pwsh.exe"
+    binary = real_dir / "pwsh.exe"
+    stub.write_bytes(b"alias")
+    binary.write_bytes(b"real")
+    path_value = str(alias_dir) + os.pathsep + str(real_dir)
+    monkeypatch.setenv("PATH", path_value)
+    monkeypatch.setattr(security.shutil, "which", lambda _: str(stub))
+    original_open = Path.open
+
+    def reject_stub(self, *args, **kwargs):
+        if self == stub:
+            raise PermissionError("simulated inaccessible AppExecLink")
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", reject_stub)
+    assert security.prefer_readable_pwsh_path() == str(binary)
+    assert os.environ["PATH"] == path_value
+
+
+def test_v4_admission_scan_has_hard_size_depth_and_time_bounds(tmp_path):
+    root = tmp_path / "transport"
+    root.mkdir()
+    assert security._bounded_install_paths(root) == [root]
+    for index in range(8):
+        (root / f"entry-{index}").write_text("fixture", encoding="utf-8")
+    with pytest.raises(c.Denied, match="INSTALL_SCAN_LIMIT"):
+        security._bounded_install_paths(root, max_entries=4)
+    with pytest.raises(c.Denied, match="INSTALL_SCAN_LIMIT"):
+        security._bounded_install_paths(root, max_seconds=0)
+
+    deep = tmp_path / "deep"
+    deep.mkdir()
+    child = deep
+    for _ in range(4):
+        child = child / "child"
+        child.mkdir()
+    with pytest.raises(c.Denied, match="INSTALL_SCAN_LIMIT"):
+        security._bounded_install_paths(deep, max_depth=2)
+    try:
+        (root / "linked").symlink_to(deep, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pass  # Windows without symlink entitlement; size/depth still tested.
+    else:
+        with pytest.raises(c.Denied, match="INSTALL_REPARSE_DENIED"):
+            security._bounded_install_paths(root)
 
 
 def test_v4_load_config_and_admit_v4_isolation_and_fail_closed(h, monkeypatch):
