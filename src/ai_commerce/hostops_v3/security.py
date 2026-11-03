@@ -271,6 +271,14 @@ def _validate_v4_config_dict(config):
         if value.startswith(("\\\\", "//")) or not (native_absolute or offline_windows_absolute):
             deny("BAD_CONFIG")
     text(config["endpoint"])
+    if personal:
+        # Personal PLAN may only name a Windows-local V4 pipe namespace.
+        prefix = r"\\.\pipe\AICommerceHostOpsV4-Personal-"
+        endpoint = config["endpoint"]
+        suffix = endpoint[len(prefix):] if endpoint.startswith(prefix) else ""
+        if not (1 <= len(suffix) <= 64 and all(
+                ch.isascii() and (ch.isalnum() or ch in "-_") for ch in suffix)):
+            deny("NONLOCAL_ENDPOINT")
     for key in ("ssh_keygen_sha256", "pwsh_sha256"):
         sha(config[key])
     for key in ("untrusted_identities", "trusted_owners"):
