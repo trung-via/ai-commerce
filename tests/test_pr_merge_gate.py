@@ -27,6 +27,12 @@ def gate():
     module.approved_groups = lambda: (
         TestGroup("fixture", ("tests/test_minimum_test.py",), ("fixture.ac",),
                   ("src/ai_commerce/product/identity.py",)),)
+    # The fixture intentionally tests a synthetic owner graph. Once main adds
+    # committed MT01 component manifests, the production loader correctly
+    # expects their real owners; they must not contaminate this synthetic fake.
+    # Production protected_owner_groups() remains unchanged and is tested
+    # independently with a real owner registry.
+    module.protected_owner_groups = lambda: tuple(module.approved_groups())
     return module
 
 
