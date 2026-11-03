@@ -390,3 +390,169 @@ class Filesystem:
             deny("POSTCONDITION_FAILED")
         # Quarantined names and original paths stay local; no raw names in receipt.
         return {"sha256": p["expected_sha256"], "bytes": size, "cross_volume": False}
+
+
+# W1.3: bounded Windows native create-new fixture. No CLI, Issue poller,
+# self-hosted job, key enrollment or credential store invokes these functions.
+# The external signer/root identity trust boundary is NOT provided by this code.
+def _w1_valid_leaf(name):
+    if type(name) is not str or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_-]{0,55}\.(?:txt|md|json)", name):
+        deny("W1_NATIVE_FILENAME_DENIED")
+    stem = name.rsplit(".", 1)[0].upper()
+    if stem in {"CON", "PRN", "AUX", "NUL"} | {
+            "COM" + str(i) for i in range(1, 10)} | {
+            "LPT" + str(i) for i in range(1, 10)}:
+        deny("W1_NATIVE_FILENAME_DENIED")
+
+
+def _w1_open_root(root):
+    """Open an absolute local directory, never a junction or UNC path."""
+    if os.name != "nt":
+        deny("W1_NATIVE_WINDOWS_ONLY")
+    p = Path(root)
+    raw = str(root)
+    if (not p.is_absolute() or raw.startswith(("\\\\", "//", "\\\\.\\", "\\\\?\\")) or
+            ".." in p.parts or "." in p.parts):
+        deny("W1_NATIVE_ROOT_DENIED")
+    # Existing path policy forbids credential/browser/system directories.
+    canonical_path(str(p / "w1-native-check.txt"), [p], False)
+    try:
+        for ancestor in (p, *p.parents):
+            item = ancestor.lstat()
+            if stat.S_ISLNK(item.st_mode) or getattr(item, "st_file_attributes", 0) & 0x400:
+                deny("W1_NATIVE_ROOT_REPARSE")
+        if not p.is_dir():
+            deny("W1_NATIVE_ROOT_DENIED")
+        handle = _win_handle(p, directory=True)
+    except OSError:
+        deny("W1_NATIVE_ROOT_DENIED")
+    from ctypes import wintypes
+    data = (wintypes.DWORD * 13)()
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetFileInformationByHandle.argtypes = (wintypes.HANDLE, ctypes.c_void_p)
+    kernel.GetFileInformationByHandle.restype = wintypes.BOOL
+    if not kernel.GetFileInformationByHandle(handle, ctypes.byref(data)):
+        kernel.CloseHandle(handle)
+        deny("W1_NATIVE_ROOT_DENIED")
+    if data[0] & 0x400 or not data[0] & 0x10:
+        kernel.CloseHandle(handle)
+        deny("W1_NATIVE_ROOT_REPARSE")
+    identity = {
+        "volume_serial_hex": f"{data[7]:08x}",
+        "file_index_hex": f"{((data[11] << 32) | data[12]):016x}",
+    }
+    return handle, identity
+
+
+def w1_windows_root_identity(root):
+    """Read-only candidate root identity; not independently trusted enrollment.
+
+    A Human or isolated authority must pin this identity out-of-band. Simply
+    calling this function from the untrusted public runner is not attestation.
+    """
+    handle, identity = _w1_open_root(root)
+    ctypes.WinDLL("kernel32").CloseHandle(handle)
+    return identity
+
+
+def w1_windows_native_create_fixture(root, expected_root_identity, filename, content):
+    """Native root-HANDLE-relative create-new, fixture/operator-only primitive.
+
+    The caller MUST separately authenticate an exact Human-signed operation,
+    bind the private Issue/source, reserve an independent anti-replay intent
+    and verify the approved root identity before use. There is deliberately
+    no CLI/worker route or claim of remote signed-write capability.
+    """
+    _w1_valid_leaf(filename)
+    if type(content) is not str or "\x00" in content:
+        deny("W1_NATIVE_CONTENT_DENIED")
+    try:
+        payload = content.encode("utf-8", "strict")
+    except UnicodeError:
+        deny("W1_NATIVE_CONTENT_DENIED")
+    if not 1 <= len(payload) <= 2048:
+        deny("W1_NATIVE_CONTENT_DENIED")
+    if (type(expected_root_identity) is not dict or
+            set(expected_root_identity) != {"volume_serial_hex", "file_index_hex"} or
+            any(type(v) is not str for v in expected_root_identity.values()) or
+            not re.fullmatch(r"[0-9a-f]{8}", expected_root_identity["volume_serial_hex"]) or
+            not re.fullmatch(r"[0-9a-f]{16}", expected_root_identity["file_index_hex"])):
+        deny("W1_NATIVE_ROOT_UNPINNED")
+
+    root_handle, actual_identity = _w1_open_root(root)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    from ctypes import wintypes
+    try:
+        if actual_identity != expected_root_identity:
+            deny("W1_NATIVE_ROOT_MISMATCH")
+
+        class UnicodeString(ctypes.Structure):
+            _fields_ = [("Length", wintypes.WORD),
+                        ("MaximumLength", wintypes.WORD),
+                        ("Buffer", wintypes.LPWSTR)]
+
+        class ObjectAttributes(ctypes.Structure):
+            _fields_ = [("Length", wintypes.DWORD),
+                        ("RootDirectory", wintypes.HANDLE),
+                        ("ObjectName", ctypes.POINTER(UnicodeString)),
+                        ("Attributes", wintypes.DWORD),
+                        ("SecurityDescriptor", ctypes.c_void_p),
+                        ("SecurityQualityOfService", ctypes.c_void_p)]
+
+        class IOStatusBlock(ctypes.Structure):
+            _fields_ = [("StatusOrPointer", ctypes.c_void_p),
+                        ("Information", ctypes.c_size_t)]
+
+        text_buffer = ctypes.create_unicode_buffer(filename)
+        name_length = len(filename.encode("utf-16-le"))
+        nt_name = UnicodeString(name_length, name_length, ctypes.cast(text_buffer, wintypes.LPWSTR))
+        attrs = ObjectAttributes(ctypes.sizeof(ObjectAttributes), root_handle,
+                                 ctypes.pointer(nt_name), 0x40, None, None)
+        status = IOStatusBlock()
+        file_handle = wintypes.HANDLE()
+        nt_create = ctypes.WinDLL("ntdll").NtCreateFile
+        nt_create.restype = ctypes.c_long
+        nt_create.argtypes = (
+            ctypes.POINTER(wintypes.HANDLE), wintypes.DWORD,
+            ctypes.POINTER(ObjectAttributes), ctypes.POINTER(IOStatusBlock),
+            ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+            wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+        )
+        # FILE_CREATE, FILE_OPEN_REPARSE_POINT, synchronous non-directory.
+        # RootDirectory references the pinned root handle, not an absolute path.
+        rc = nt_create(ctypes.byref(file_handle), 0xC0100003, ctypes.byref(attrs),
+                       ctypes.byref(status), None, 0x80, 0, 2,
+                       0x00200060, None, 0)
+        if rc != 0:
+            if rc & 0xFFFFFFFF == 0xC0000035:
+                deny("W1_NATIVE_ALREADY_EXISTS")
+            deny("W1_NATIVE_CREATE_DENIED")
+        import msvcrt
+        try:
+            fd = msvcrt.open_osfhandle(file_handle.value, os.O_BINARY | os.O_RDWR)
+        except OSError:
+            kernel.CloseHandle(file_handle)
+            deny("W1_NATIVE_CREATE_DENIED")
+        try:
+            with os.fdopen(fd, "w+b") as created:
+                created.write(payload)
+                created.flush()
+                os.fsync(created.fileno())
+                created.seek(0)
+                observed = created.read(2049)
+        except OSError:
+            deny("W1_NATIVE_EFFECT_UNKNOWN")
+        if observed != payload:
+            deny("W1_NATIVE_EFFECT_UNKNOWN")
+        return {
+            "schema": "hostops.personal.w1_native_fixture.v1",
+            "status": "NATIVE_FIXTURE_CREATE_VERIFIED",
+            "content_sha256": digest(payload),
+            "content_bytes": len(payload),
+            "real_host_attested": False,
+            "remote_write_enabled": False,
+            "credential_custody_proven": False,
+        }
+    finally:
+        kernel.CloseHandle(root_handle)
