@@ -534,6 +534,10 @@ def registered_action_plan(
     problems = list(impact.missing_mapping)
     if onboarding_error:
         problems.append(onboarding_error)
+    if admission is not None and aggregate_sources:
+        # A candidate manifest can prove one new owner, but it cannot
+        # silently inherit sibling verification from a different tree.
+        problems.append("ONBOARD_AGGREGATE_NEEDS_INDEPENDENT_FANIN_PROOF")
     known_acs = {ac for group in groups for ac in group.acs}
     # A globally known AC is NOT verified unless its owning group is selected.
     # Do not expand silently: an unrelated action requirement needs a new
