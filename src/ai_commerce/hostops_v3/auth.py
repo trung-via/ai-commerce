@@ -143,7 +143,7 @@ def personal_w1_verify_offline(proposal, *, issue_number, expected_source_sha,
                  if line.strip() and not line.lstrip().startswith("#")]
     except (OSError, UnicodeError):
         deny("W1_SIGNER_POLICY_UNTRUSTED")
-    if (len(lines) != 1 or len(lines[0]) != 3 or
+    if (len(lines) != 1 or len(lines[0]) not in (3, 4) or
             lines[0][0] != "hostops-human" or
             lines[0][1] != "ssh-ed25519"):
         deny("W1_SIGNER_POLICY_UNTRUSTED")
