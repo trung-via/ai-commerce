@@ -934,3 +934,109 @@ def test_v22_pr_ci_cancels_only_superseded_pull_requests():
     assert "github.event.pull_request.number || github.ref" in workflow
     assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in workflow
     assert "branches: [ef02-multi-action-implementation, main]" in workflow
+
+
+def test_v22_cold_component_one_pr_offline_canary(tmp_path, monkeypatch):
+    """A17-before-prereg analogue: Git base lacks owner; one candidate adds code,
+    test, contract and data-only manifest; EF02, CI oracle and pytest agree.
+    No provider invocation, network, GH PR or write to the real repo.
+    """
+    import base64
+    import hashlib
+    import json
+    import os
+    import runpy
+    import subprocess
+    import sys
+    from ai_commerce.engineering import minimum_test as mt
+    from ai_commerce.engineering.impact_v21 import (
+        registered_action_plan, verified_onboarding_binding, candidate_onboarding_groups)
+    from ai_commerce.engineering.impact_v21 import select_impact
+    from ai_commerce.engineering.minimum_test import file_hashes
+
+    old_src = "src/ai_commerce/learning/export.py"
+    old_test = "tests/test_prior.py"
+    new_src = "src/ai_commerce/fresh/svc.py"
+    new_test = "tests/test_fresh_svc.py"
+    contract = "contracts/FreshRun.v1.schema.json"
+    manifest = "work_items/mt01-components/fresh.json"
+    mk(tmp_path, old_src, "def handle(value):\n    return value + 1\n")
+    mk(tmp_path, old_test,
+       'import runpy\ndef test_prior():\n'
+       '    assert runpy.run_path("src/ai_commerce/learning/export.py")["handle"](7) == 8\n')
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=tmp_path,
+                                       stderr=subprocess.DEVNULL).decode().strip()
+    git("init", "-q")
+    git("config", "core.autocrlf", "false")
+    git("add", ".")
+    git("-c", "user.name=MT01", "-c", "user.email=mt01@example.invalid",
+        "commit", "-qm", "base without new owner")
+    base_sha = git("rev-parse", "HEAD")
+    baseline_files = file_hashes(tmp_path)
+
+    mk(tmp_path, new_src, "def deliver():\n    return 7\n")
+    mk(tmp_path, new_test,
+       'import runpy\ndef test_new_and_consumer():\n'
+       '    value = runpy.run_path("src/ai_commerce/fresh/svc.py")["deliver"]()\n'
+       '    assert runpy.run_path("src/ai_commerce/learning/export.py")["handle"](value) == 8\n')
+    mk(tmp_path, contract, '{"type":"object"}\n')
+    manifest_data = {
+        "schema_version": "MT01ComponentOwner.v1",
+        "component": "fresh", "sources": [new_src],
+        "tests": [new_test], "acs": ["FRESH.offline"],
+        "consumers": [old_src], "contracts": [contract],
+    }
+    raw = json.dumps(manifest_data, sort_keys=True).encode()
+    mk(tmp_path, manifest, raw.decode())
+    changed = [new_src, new_test, contract, manifest]
+    old_groups = (group("prior", [old_test], [old_src]),)
+    monkeypatch.setattr(mt, "approved_groups", lambda: old_groups)
+    ingress = ["python", "-m", "pytest", "tests/test_mt01_v21.py", "-q", "-n", "12"]
+    profiles = {"mt01-component-onboarding": ingress,
+                "mt01-prior-tests": ["python", "-m", "pytest", old_test, "-q", "-n", "12"]}
+    plan = registered_action_plan(
+        repo=tmp_path, base_sha=base_sha, base_files=baseline_files,
+        candidate_files=file_hashes(tmp_path), changed_paths=changed,
+        required_acs=manifest_data["acs"], fallback_argv=ingress,
+        groups=old_groups, registered_profiles=profiles, allowed_paths=changed)
+    assert plan["selected_groups"] == ["fresh", "prior"]
+    assert not plan["fallback"]
+    assert not plan["unknown_acs"]
+    assert all(item["execute"] for item in plan["groups"])
+    new_binding = next(item["binding"] for item in plan["groups"]
+                       if item["group"] == "fresh")
+    assert verified_onboarding_binding(
+        workspace=tmp_path, binding=new_binding, changed_paths=changed,
+        allowed_paths=changed, base_sha=base_sha, registered_profiles=profiles,
+        expected_group="fresh")
+
+    selected = select_impact(
+        root=tmp_path, changed_paths=changed,
+        groups=(*old_groups, *candidate_onboarding_groups(
+            root=tmp_path, changed_paths=changed,
+            base_paths=list(baseline_files), existing_groups=old_groups,
+            allowed_paths=changed)), base_sha=base_sha)
+    assert selected.runnable
+    assert set(selected.selected_tests) == {new_test, old_test}
+    oracle = runpy.run_path(str(Path(__file__).resolve().parents[1] /
+                                ".github/scripts/mt01_v21_oracle.py"))
+    independent_groups = oracle["independently_reviewed_manifest_groups"](
+        repo=tmp_path, changed_paths=set(changed),
+        base_paths=set(baseline_files), base_groups=old_groups)
+    valid, reasons = oracle["check_selection"](
+        {"version": 2, "changed_paths": changed,
+         "selected_groups": list(selected.selected_groups),
+         "selected_tests": list(selected.selected_tests)},
+        base_groups=old_groups, candidate_groups=independent_groups,
+        changed_paths=set(changed), present_paths=set(file_hashes(tmp_path)))
+    assert valid, reasons
+
+    # Real collection and execution of both product and legacy consumer
+    # tests, separate from the registry binding's fixed 12-worker request.
+    env = dict(os.environ, PYTEST_DISABLE_PLUGIN_AUTOLOAD="1")
+    execution = subprocess.run(
+        [sys.executable, "-m", "pytest", new_test, old_test, "-q"],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60)
+    assert execution.returncode == 0, (execution.stdout, execution.stderr)
+    assert "2 passed" in execution.stdout
