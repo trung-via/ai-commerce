@@ -1,0 +1,53 @@
+name: AI Commerce Issue ingress (EF02 / HostOps)
+run-name: "Issue #${{ github.event.issue.number }} (${{ github.event.action }})"
+# One top-level run per Issue event, rather than four unrelated runs.
+# Keep the original EF02 and HostOps validation/authorization unchanged in called workflows.
+on:
+  issues:
+    types: [opened, labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  ef02:
+    if: >-
+      startsWith(github.event.issue.title, '[EF02]') &&
+      (github.event.action == 'opened' || github.event.action == 'labeled')
+    permissions:
+      contents: write
+      issues: write
+      actions: read
+    uses: ./.github/workflows/ef02-batch.yml
+
+  hostops-readonly:
+    if: >-
+      github.event.action == 'opened' &&
+      github.event.repository.private == true &&
+      github.event.issue.user.login == github.repository_owner &&
+      startsWith(github.event.issue.title, '[HOSTOPS] ')
+    permissions:
+      contents: read
+      issues: write
+    uses: ./.github/workflows/hostops-readonly.yml
+
+  hostops-v2:
+    if: >-
+      github.event.action == 'opened' &&
+      github.event.repository.private == true &&
+      github.event.issue.user.login == github.repository_owner &&
+      startsWith(github.event.issue.title, '[HOSTOPS2] ')
+    permissions:
+      contents: read
+      issues: write
+    uses: ./.github/workflows/hostops-v2.yml
+
+  hostops-v3:
+    if: >-
+      github.event.action == 'opened' &&
+      github.event.repository.private == true &&
+      github.event.issue.user.login == github.repository_owner &&
+      startsWith(github.event.issue.title, '[HOSTOPS3] ')
+    permissions:
+      contents: read
+    uses: ./.github/workflows/hostops-v3.yml

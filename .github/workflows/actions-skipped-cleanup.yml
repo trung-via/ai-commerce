@@ -1,0 +1,145 @@
+name: AI Commerce Actions skipped-run cleanup
+run-name: "Clean only skipped-only runs"
+# Prunes finished, all-jobs-skipped and artifact-free noise. Never touches active,
+# success, failure or cancelled runs, nor unrecognized workflow/event combinations.
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/actions-skipped-cleanup.yml']
+  schedule:
+    - cron: '42 1 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Preview matches without deleting'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: ai-commerce-actions-noise-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Prune only safely classified skipped runs
+        uses: actions/github-script@v7
+        env:
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        with:
+          script: |
+            const fs = require('fs');
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            if (owner !== 'trung-via' || repo !== 'ai-commerce') {
+              core.setFailed('WRONG_REPOSITORY');
+              return;
+            }
+
+            const dryRun = process.env.DRY_RUN === 'true';
+            const maxPages = 10;
+            const maxDeletes = 500;
+            const cutoff = Date.now() - 5 * 60 * 1000;
+            const allowed = new Map([
+              ['.github/workflows/brain-pass-auto-merge.yml', 'issue_comment'],
+              ['.github/workflows/ef02-batch.yml', 'issues'],
+              ['.github/workflows/hostops-readonly.yml', 'issues'],
+              ['.github/workflows/hostops-v2.yml', 'issues'],
+              ['.github/workflows/hostops-v3.yml', 'issues'],
+              ['.github/workflows/issue-ingress.yml', 'issues'],
+              // Retired historical M0-R / Human queue flows; never run these again.
+              ['.github/workflows/human-merge-queue.yml', 'issue_comment'],
+              ['.github/workflows/ef02-m0r-worker-os-kill.yml', 'issues'],
+              ['.github/workflows/ef02-m0r-windows-boundary.yml', 'issues'],
+              ['.github/workflows/ef02-m0r-hosted-checkpoint.yml', 'issues'],
+              ['.github/workflows/ef02-m0r-codex-provider-interruption.yml', 'issues'],
+              ['.github/workflows/ef02-m0r-real-e2e-interruption.yml', 'issues'],
+              ['.github/workflows/ef02-m0r-windows-child-probe.yml', 'issues']
+            ]);
+            const audit = {
+              schema: 'ai-commerce-actions-skipped-cleanup-v1',
+              dry_run: dryRun, repo: owner + '/' + repo,
+              run_id: context.runId, scanned: 0, candidates: 0,
+              checked: [], deleted: [], would_delete: [], preserved: []
+            };
+            const save = () => fs.writeFileSync(
+              'skipped-cleanup-receipt.json', JSON.stringify(audit, null, 2) + '\n'
+            );
+            save();
+            const candidates = [];
+            for (let page = 1; page <= maxPages; page++) {
+              const result = await github.rest.actions.listWorkflowRunsForRepo({
+                owner, repo, status: 'skipped', per_page: 100, page
+              });
+              const runs = result.data.workflow_runs;
+              audit.scanned += runs.length;
+              for (const run of runs) {
+                if (run.status !== 'completed' || run.conclusion !== 'skipped' ||
+                    run.run_attempt !== 1 ||
+                    allowed.get(run.path) !== run.event ||
+                    !Number.isFinite(Date.parse(run.updated_at)) ||
+                    Date.parse(run.updated_at) > cutoff ||
+                    run.id === context.runId) continue;
+                candidates.push({id: run.id, path: run.path, event: run.event,
+                                 updated_at: run.updated_at});
+              }
+              if (runs.length < 100) break;
+            }
+            audit.candidates = candidates.length;
+            save();
+            for (const candidate of candidates) {
+              if (audit.deleted.length + audit.would_delete.length >= maxDeletes) break;
+              const id = candidate.id;
+              const jobs = (await github.rest.actions.listJobsForWorkflowRun({
+                owner, repo, run_id: id, per_page: 100
+              })).data;
+              const artifacts = (await github.rest.actions.listWorkflowRunArtifacts({
+                owner, repo, run_id: id, per_page: 1
+              })).data;
+              const allJobsSkipped = jobs.total_count > 0 &&
+                  jobs.total_count <= 100 &&
+                  jobs.jobs.length === jobs.total_count &&
+                  jobs.jobs.every(job =>
+                    job.status === 'completed' && job.conclusion === 'skipped');
+              if (!allJobsSkipped || artifacts.total_count !== 0) {
+                audit.preserved.push({id, reason: 'jobs_or_artifacts_not_empty'});
+                save();
+                continue;
+              }
+              audit.checked.push(id);
+              if (dryRun) {
+                audit.would_delete.push(id);
+              } else {
+                await github.rest.actions.deleteWorkflowRun({owner, repo, run_id: id});
+                audit.deleted.push(id);
+                // Stay below GitHub secondary rate limits.
+                await new Promise(resolve => setTimeout(resolve, 650));
+              }
+              save();
+            }
+            const heading = dryRun ? 'Skipped-run cleanup: DRY RUN' : 'Skipped-run cleanup';
+            await core.summary.addHeading(heading)
+              .addRaw('Scanned ' + audit.scanned + ' skipped runs; ' +
+                      audit.candidates + ' matched safe workflow/event criteria; ' +
+                      audit.deleted.length + ' deleted; ' +
+                      audit.would_delete.length + ' dry-run matches; ' +
+                      audit.preserved.length + ' preserved due to job/artifact evidence.')
+              .write();
+            core.info('SKIPPED_CLEANUP deleted=' + audit.deleted.length +
+                      ' would_delete=' + audit.would_delete.length +
+                      ' preserved=' + audit.preserved.length);
+      - name: Retain cleanup receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: skipped-cleanup-receipt-${{ github.run_id }}
+          path: skipped-cleanup-receipt.json
+          if-no-files-found: warn
+          retention-days: 14

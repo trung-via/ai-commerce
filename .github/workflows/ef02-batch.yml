@@ -1,8 +1,13 @@
 name: EF02 Multi-Action remote engineering
 run-name: "EF02 Issue #${{ github.event.issue.number || inputs.issue_number }}"
 on:
-  issues:
-    types: [opened, labeled]
+  # Called by the single issue ingress router to avoid four top-level runs per Issue.
+  workflow_call:
+    inputs:
+      issue_number:
+        type: string
+        required: false
+        default: ''
   workflow_dispatch:
     inputs:
       issue_number:

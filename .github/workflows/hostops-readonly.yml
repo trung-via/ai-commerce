@@ -2,8 +2,7 @@ name: AI Commerce HostOps read-only Windows diagnostics
 run-name: "HostOps Issue #${{ github.event.issue.number }}"
 
 on:
-  issues:
-    types: [opened]
+  workflow_call:
 
 permissions:
   contents: read

@@ -193,6 +193,13 @@ def choose(root: Path, *, event: str, base: str, paths: set[str] | None = None,
             from ai_commerce.engineering import minimum_test as mt
             candidate_files = mt.file_hashes(root)
             groups = mt.approved_groups()
+            # Trusted baseline V2.2 manifests are committed source ownership,
+            # not executor-provided new mappings. Reuse the exact base SHA;
+            # invalid/different candidate bytes fail closed to full tests.
+            from ai_commerce.engineering.impact_v21 import load_baseline_component_owner_records
+            persisted = load_baseline_component_owner_records(
+                root=root, base_sha=base, existing_groups=groups)
+            groups = (*groups, *(item["group"] for item in persisted))
             registered_tests = {t for g in groups for t in g.tests}
             all_tests = {p for p in candidate_files
                          if p.startswith("tests/test_") and p.endswith(".py")}

@@ -22,10 +22,20 @@ ROOT = Path(__file__).resolve().parents[1]
 def real_tree():
     files = mt.file_hashes(ROOT)
     groups = mt.approved_groups()
+    # Persisted V2.2 component owners on trusted HEAD are reviewed data too.
+    # Do not silently label their committed tests UNMAPPED just because the
+    # pre-registration Python registry was deliberately left unchanged.
+    import subprocess
+    from ai_commerce.engineering.impact_v21 import load_baseline_component_owner_records
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    records = load_baseline_component_owner_records(root=ROOT, base_sha=sha, existing_groups=groups)
+    groups = (*groups, *(r["group"] for r in records))
     registry = {"mt01-" + g.name + "-tests": ["python", "-m", "pytest", *g.tests, "-q", "-n", "12"]
                 for g in groups}
     registry["project-tests"] = [*FULL, "-n", "12"]
-    return SimpleNamespace(files=files, groups=groups, registry=registry, graph=mt.import_graph(ROOT, files))
+    return SimpleNamespace(files=files, groups=groups, registry=registry,
+                           persisted_names=frozenset(r["group"].name for r in records),
+                           graph=mt.import_graph(ROOT, files))
 
 
 def real_plan(real_tree, monkeypatch, path, *, registry=None, acs=(), aggregate=()):
@@ -154,6 +164,11 @@ def test_companion_report_has_exact_reviewed_parallel_commands(real_tree):
             assert current.get(key) == expected
         elif key in combined:
             assert combined[key] == expected
+        elif g.name in real_tree.persisted_names:
+            # V2.2 trusted base-commit manifest owners are validated above.
+            # They do not require a second static registry registration.
+            assert (ROOT / "work_items" / "mt01-components" /
+                    f"{g.name}.json").is_file()
         else:
             assert expected in combined.values()
 
@@ -1416,8 +1431,10 @@ def test_mt01_project_model_policy_is_reviewed_ef01_consumer():
 
 
 def test_pr_ci_real_a12_component_can_select_narrow_test_files(pr_ci_module):
+    import subprocess
+    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     result = pr_ci_module.choose(
-        ROOT, event="pull_request", base="a" * 40,
+        ROOT, event="pull_request", base=base,
         paths={"src/ai_commerce/product/identity.py"},
     )
     assert result[1] == "SELECTED_AFFECTED_INTEGRATION", result

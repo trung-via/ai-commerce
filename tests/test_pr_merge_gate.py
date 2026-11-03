@@ -27,6 +27,12 @@ def gate():
     module.approved_groups = lambda: (
         TestGroup("fixture", ("tests/test_minimum_test.py",), ("fixture.ac",),
                   ("src/ai_commerce/product/identity.py",)),)
+    # The fixture intentionally tests a synthetic owner graph. Once main adds
+    # committed MT01 component manifests, the production loader correctly
+    # expects their real owners; they must not contaminate this synthetic fake.
+    # Production protected_owner_groups() remains unchanged and is tested
+    # independently with a real owner registry.
+    module.protected_owner_groups = lambda: tuple(module.approved_groups())
     return module
 
 
@@ -874,3 +880,33 @@ def test_v22_merge_gate_rejects_manifest_shell_and_owner_theft(gate):
         call(payload, [dict(changed[0], status="modified"), *changed[1:]])
     with pytest.raises(ValueError, match="BAD_TEST"):
         call({**payload, "tests": ["tests/../test_fresh_service.py"]})
+
+def test_noise_cleanup_and_issue_router_are_independently_covered(gate):
+    """Keep trusted merge-gate witnesses independent of candidate MT01 map."""
+    expected = {
+        ".github/workflows/issue-ingress.yml": {
+            "tests/test_ef02.py", "tests/test_hostops_request.py",
+            "tests/test_hostops_v2.py", "tests/test_hostops_v3_integration.py",
+            "tests/test_mt01_v21.py",
+        },
+        ".github/workflows/actions-skipped-cleanup.yml": {
+            "tests/test_pr_merge_gate.py", "tests/test_mt01_v21.py",
+        },
+        ".github/workflows/hostops-readonly.yml": {
+            "tests/test_hostops_request.py", "tests/test_mt01_v21.py",
+        },
+        ".github/workflows/hostops-v2.yml": {
+            "tests/test_hostops_v2.py", "tests/test_hostops_ef02_202_recovery.py",
+            "tests/test_mt01_v21.py",
+        },
+    }
+    for path, required_tests in expected.items():
+        assert set(gate.REVIEWED_CONTROL_TESTS[path]) == required_tests
+        paths, witness = gate.reviewed_coverage_for_changed_files([
+            {"filename": path, "status": "modified"}
+        ])
+        assert paths == (path,)
+        assert required_tests <= set(witness)
+    assert gate.reviewed_coverage_for_changed_files([
+        {"filename": ".github/workflows/unsafe-not-reviewed.yml", "status": "added"}
+    ]) is None
