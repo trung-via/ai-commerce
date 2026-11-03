@@ -280,7 +280,8 @@ def approved_groups() -> tuple[TestGroup, ...]:
         # This is a CONSUMER-only addition: keep registered test argv unchanged.
         TestGroup("mt01", ("tests/test_minimum_test.py",), ("MT01.selection-and-evidence",),
                   (eng + "minimum_test.py", eng + "verification.py"),
-                  (eng + "runner.py", rem + "worker.py", "scripts/HostOps-V4-InstallPlan.ps1")),
+                  (eng + "runner.py", rem + "worker.py", "scripts/HostOps-V4-InstallPlan.ps1",
+                   "config/hostops-v3/config-v4.example.json")),
         TestGroup("ef01p", ("tests/test_ef01_performance.py",), ("EF01P.git-and-host-budget",),
                   (eng + "git.py", eng + "pytest_profile.py"), (eng + "runner.py", rem + "worker.py")),
         TestGroup("diagnostics", ("tests/test_ef01_agy_diagnostics.py", "tests/test_ef02_authoring_preflight.py"),
