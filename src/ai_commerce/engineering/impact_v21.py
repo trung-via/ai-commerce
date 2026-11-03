@@ -602,11 +602,19 @@ def registered_action_plan(
         and bool(allowed_paths)
     )
     admission, onboarding_error = None, None
+    persisted_records = (
+        load_baseline_component_owner_records(
+            root=repo, base_sha=base_sha, existing_groups=groups)
+        if onboarding and (repo / ".git").exists() else ())
+    persisted_by_name = {item["group"].name: item for item in persisted_records}
+    if persisted_records:
+        groups = (*groups, *(item["group"] for item in persisted_records))
     if onboarding:
         candidates = sorted(p for p in changed_paths
                             if p.startswith("work_items/mt01-components/") and p.endswith(".json"))
         if len(candidates) != 1:
-            onboarding_error = "ONBOARD_EXACTLY_ONE_NEW_MANIFEST_REQUIRED"
+            if candidates or not persisted_records:
+                onboarding_error = "ONBOARD_EXACTLY_ONE_NEW_MANIFEST_REQUIRED"
         else:
             try:
                 data = json.loads((repo / candidates[0]).read_text(encoding="utf-8"))
@@ -652,7 +660,10 @@ def registered_action_plan(
         expected = ["python", "-m", "pytest", *group.tests, "-q"]
         if select_parallel:
             expected.extend(["-n", "12"])
-        new_owner = bool(admission is not None and name == admission["name"])
+        new_owner = bool((admission is not None and name == admission["name"])
+                         or (onboarding and name in persisted_by_name))
+        verified_owner = (admission if admission is not None and name == admission["name"]
+                          else persisted_by_name.get(name))
         matched = ("mt01-component-onboarding" if new_owner else
                    next((key for key, value in sorted(profiles.items()) if value == expected), None))
         if matched is None:
@@ -688,8 +699,8 @@ def registered_action_plan(
             "environment_proven": bool(executable and Path(executable).resolve() == Path(sys.executable).resolve()),
             "registered_profile": matched,
             "selected_impact_tests": list(impact.selected_tests),
-            **({"onboarding_manifest_path": admission["manifest_path"],
-                "onboarding_manifest_sha256": admission["manifest_sha256"],
+            **({"onboarding_manifest_path": verified_owner["manifest_path"],
+                "onboarding_manifest_sha256": verified_owner["manifest_sha256"],
                 "onboarding_data_only": True} if new_owner else {}),
         }
         executable_scope = bool(impact.runnable and matched)
