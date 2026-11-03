@@ -2028,7 +2028,7 @@ def test_w1_attended_cli_one_signed_file_and_ledger_replay_hold(h, tmp_path, mon
 
     src_sha = "b" * 40
     root_id = fs.w1_windows_root_identity(h.data)
-    state = tmp_path / "state"
+    state = tmp_path / "w1-attended-journal"
     state.mkdir()
     monkeypatch.setattr(cli, "W1_PROOF_ROOT", h.data)
     monkeypatch.setattr(cli, "W1_PROOF_STATE", state)
@@ -2090,7 +2090,7 @@ def test_w1_attended_cli_one_signed_file_and_ledger_replay_hold(h, tmp_path, mon
 def test_w1_attended_cli_unsigned_cannot_create_and_kill_denies(h, tmp_path, monkeypatch):
     from ai_commerce.hostops_v3 import filesystem as fs
     root_id = fs.w1_windows_root_identity(h.data)
-    state = tmp_path / "state"
+    state = tmp_path / "w1-attended-journal"
     state.mkdir()
     monkeypatch.setattr(cli, "W1_PROOF_ROOT", h.data)
     monkeypatch.setattr(cli, "W1_PROOF_STATE", state)
