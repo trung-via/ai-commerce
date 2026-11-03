@@ -1,0 +1,785 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-commerce:DirectPostAdapter.v1",
+  "title": "DirectPostAdapter.v1",
+  "$defs": {
+    "Request": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "DirectPostRequest.v1"
+        },
+        "adapter_version": {
+          "const": "a17-3/1.0"
+        },
+        "mode": {
+          "const": "OFFLINE"
+        },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "platform": {
+              "enum": [
+                "TIKTOK",
+                "INSTAGRAM",
+                "YOUTUBE"
+              ]
+            },
+            "surface": {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+              "minLength": 1,
+              "maxLength": 96
+            },
+            "account_ref": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                  "minLength": 1,
+                  "maxLength": 96
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                  "minLength": 1,
+                  "maxLength": 96
+                }
+              },
+              "required": [
+                "namespace",
+                "id"
+              ]
+            },
+            "app_ref": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                  "minLength": 1,
+                  "maxLength": 96
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                  "minLength": 1,
+                  "maxLength": 96
+                }
+              },
+              "required": [
+                "namespace",
+                "id"
+              ]
+            },
+            "market": {
+              "type": "string",
+              "pattern": "^[A-Z]{2}$",
+              "maxLength": 2
+            },
+            "package_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+              "minLength": 1,
+              "maxLength": 96
+            },
+            "package_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$",
+              "minLength": 64,
+              "maxLength": 64
+            },
+            "content_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$",
+              "minLength": 64,
+              "maxLength": 64
+            },
+            "media_type": {
+              "const": "video/mp4"
+            }
+          },
+          "required": [
+            "platform",
+            "surface",
+            "account_ref",
+            "app_ref",
+            "market",
+            "package_id",
+            "package_sha256",
+            "content_sha256",
+            "media_type"
+          ]
+        },
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "idempotency_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+          "minLength": 1,
+          "maxLength": 96
+        },
+        "requested_at": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 40,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?(Z|[+-]\\d{2}:\\d{2})$"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 40,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?(Z|[+-]\\d{2}:\\d{2})$"
+        }
+      },
+      "required": [
+        "schema_version",
+        "adapter_version",
+        "mode",
+        "target",
+        "source_sha256",
+        "idempotency_key",
+        "requested_at",
+        "expires_at"
+      ]
+    },
+    "Consent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "HumanDecisionProposal.v1"
+        },
+        "request_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "target_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "actor_alias": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+          "minLength": 1,
+          "maxLength": 96
+        },
+        "decision": {
+          "enum": [
+            "OPT_IN",
+            "DECLINE"
+          ]
+        },
+        "decided_at": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 40,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?(Z|[+-]\\d{2}:\\d{2})$"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 40,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?(Z|[+-]\\d{2}:\\d{2})$"
+        },
+        "provenance": {
+          "const": "UNVERIFIED_HUMAN_PROPOSAL"
+        },
+        "authorization_verified": {
+          "const": false
+        },
+        "live_authorized": {
+          "const": false
+        }
+      },
+      "required": [
+        "schema_version",
+        "request_sha256",
+        "target_sha256",
+        "actor_alias",
+        "decision",
+        "decided_at",
+        "expires_at",
+        "provenance",
+        "authorization_verified",
+        "live_authorized"
+      ]
+    },
+    "Capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "AdapterCapability.v1"
+        },
+        "adapter_version": {
+          "const": "a17-3/1.0"
+        },
+        "platform": {
+          "enum": [
+            "TIKTOK",
+            "INSTAGRAM",
+            "YOUTUBE"
+          ]
+        },
+        "target_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "a07_decision_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "a07_decision": {
+          "enum": [
+            "ALLOW",
+            "DENY",
+            "UNKNOWN",
+            "NEEDS_RECHECK"
+          ]
+        },
+        "verification": {
+          "const": "OFFLINE_RECORDED_NOT_LIVE_VERIFIED"
+        },
+        "live_eligible": {
+          "const": false
+        },
+        "entitlement": {
+          "const": "ENTITLEMENT_UNPROVEN"
+        }
+      },
+      "required": [
+        "schema_version",
+        "adapter_version",
+        "platform",
+        "target_sha256",
+        "a07_decision_sha256",
+        "a07_decision",
+        "verification",
+        "live_eligible",
+        "entitlement"
+      ]
+    },
+    "Intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "DirectPostIntent.v1"
+        },
+        "request_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "consent_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "capability_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "reconciliation_sha256": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$",
+              "minLength": 64,
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dashboard_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "native_decision": {
+          "enum": [
+            "RECONCILE_REQUIRED",
+            "NO_RETRY",
+            "REQUIRES_SEPARATE_AUTHORIZATION"
+          ]
+        },
+        "mode": {
+          "const": "OFFLINE"
+        },
+        "effect_authorized": {
+          "const": false
+        }
+      },
+      "required": [
+        "schema_version",
+        "request_sha256",
+        "consent_sha256",
+        "capability_sha256",
+        "source_sha256",
+        "reconciliation_sha256",
+        "dashboard_sha256",
+        "native_decision",
+        "mode",
+        "effect_authorized"
+      ]
+    },
+    "Receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "DirectPostReceipt.v1"
+        },
+        "adapter_version": {
+          "const": "a17-3/1.0"
+        },
+        "adapter_namespace": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+          "minLength": 1,
+          "maxLength": 96
+        },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "platform": {
+              "enum": [
+                "TIKTOK",
+                "INSTAGRAM",
+                "YOUTUBE"
+              ]
+            },
+            "surface": {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+              "minLength": 1,
+              "maxLength": 96
+            },
+            "account_ref": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                  "minLength": 1,
+                  "maxLength": 96
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                  "minLength": 1,
+                  "maxLength": 96
+                }
+              },
+              "required": [
+                "namespace",
+                "id"
+              ]
+            },
+            "app_ref": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                  "minLength": 1,
+                  "maxLength": 96
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                  "minLength": 1,
+                  "maxLength": 96
+                }
+              },
+              "required": [
+                "namespace",
+                "id"
+              ]
+            },
+            "market": {
+              "type": "string",
+              "pattern": "^[A-Z]{2}$",
+              "maxLength": 2
+            },
+            "package_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+              "minLength": 1,
+              "maxLength": 96
+            },
+            "package_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$",
+              "minLength": 64,
+              "maxLength": 64
+            },
+            "content_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$",
+              "minLength": 64,
+              "maxLength": 64
+            },
+            "media_type": {
+              "const": "video/mp4"
+            }
+          },
+          "required": [
+            "platform",
+            "surface",
+            "account_ref",
+            "app_ref",
+            "market",
+            "package_id",
+            "package_sha256",
+            "content_sha256",
+            "media_type"
+          ]
+        },
+        "request_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "intent_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "native_decision": {
+          "enum": [
+            "RECONCILE_REQUIRED",
+            "NO_RETRY",
+            "REQUIRES_SEPARATE_AUTHORIZATION"
+          ]
+        },
+        "fixture_state": {
+          "enum": [
+            "SUBMITTED",
+            "UNKNOWN",
+            "REJECTED",
+            "CONFIRMED"
+          ]
+        },
+        "provenance": {
+          "const": "SYNTHETIC_FIXTURE"
+        },
+        "publication_status": {
+          "const": "UNKNOWN"
+        },
+        "mode": {
+          "const": "OFFLINE"
+        },
+        "provider_attested": {
+          "const": false
+        },
+        "public_visibility": {
+          "const": "UNKNOWN"
+        },
+        "real_post_created": {
+          "const": false
+        },
+        "retry_dispatched": {
+          "const": false
+        },
+        "receipt_id": {
+          "type": "string",
+          "pattern": "^synthetic-(tiktok|instagram|youtube)-[a-f0-9]{64}$",
+          "maxLength": 84
+        },
+        "record_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "schema_version",
+        "adapter_version",
+        "adapter_namespace",
+        "target",
+        "request_sha256",
+        "intent_sha256",
+        "source_sha256",
+        "native_decision",
+        "fixture_state",
+        "provenance",
+        "publication_status",
+        "mode",
+        "provider_attested",
+        "public_visibility",
+        "real_post_created",
+        "retry_dispatched",
+        "receipt_id",
+        "record_sha256"
+      ]
+    },
+    "Callback": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "SyntheticAdapterCallback.v1"
+        },
+        "event_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+          "minLength": 1,
+          "maxLength": 96
+        },
+        "receipt_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "platform": {
+              "enum": [
+                "TIKTOK",
+                "INSTAGRAM",
+                "YOUTUBE"
+              ]
+            },
+            "surface": {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+              "minLength": 1,
+              "maxLength": 96
+            },
+            "account_ref": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                  "minLength": 1,
+                  "maxLength": 96
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                  "minLength": 1,
+                  "maxLength": 96
+                }
+              },
+              "required": [
+                "namespace",
+                "id"
+              ]
+            },
+            "app_ref": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                  "minLength": 1,
+                  "maxLength": 96
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                  "minLength": 1,
+                  "maxLength": 96
+                }
+              },
+              "required": [
+                "namespace",
+                "id"
+              ]
+            },
+            "market": {
+              "type": "string",
+              "pattern": "^[A-Z]{2}$",
+              "maxLength": 2
+            },
+            "package_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+              "minLength": 1,
+              "maxLength": 96
+            },
+            "package_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$",
+              "minLength": 64,
+              "maxLength": 64
+            },
+            "content_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$",
+              "minLength": 64,
+              "maxLength": 64
+            },
+            "media_type": {
+              "const": "video/mp4"
+            }
+          },
+          "required": [
+            "platform",
+            "surface",
+            "account_ref",
+            "app_ref",
+            "market",
+            "package_id",
+            "package_sha256",
+            "content_sha256",
+            "media_type"
+          ]
+        },
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "outcome": {
+          "enum": [
+            "UNKNOWN",
+            "CONFIRMED",
+            "NO_EFFECT",
+            "AMBIGUOUS"
+          ]
+        },
+        "provenance": {
+          "const": "SYNTHETIC_FIXTURE"
+        },
+        "provider_attested": {
+          "const": false
+        }
+      },
+      "required": [
+        "schema_version",
+        "event_id",
+        "receipt_sha256",
+        "target",
+        "source_sha256",
+        "outcome",
+        "provenance",
+        "provider_attested"
+      ]
+    },
+    "Denial": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "DirectPostDenial.v1"
+        },
+        "request_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "reason": {
+          "enum": [
+            "ENTITLEMENT_UNPROVEN",
+            "LIVE_NOT_AUTHORIZED"
+          ]
+        },
+        "provider_called": {
+          "const": false
+        },
+        "live_authorized": {
+          "const": false
+        },
+        "provider_attested": {
+          "const": false
+        },
+        "public_visibility": {
+          "const": "UNKNOWN"
+        },
+        "real_post_created": {
+          "const": false
+        },
+        "retry_dispatched": {
+          "const": false
+        }
+      },
+      "required": [
+        "schema_version",
+        "request_sha256",
+        "reason",
+        "provider_called",
+        "live_authorized",
+        "provider_attested",
+        "public_visibility",
+        "real_post_created",
+        "retry_dispatched"
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/Request"
+    },
+    {
+      "$ref": "#/$defs/Consent"
+    },
+    {
+      "$ref": "#/$defs/Capability"
+    },
+    {
+      "$ref": "#/$defs/Intent"
+    },
+    {
+      "$ref": "#/$defs/Receipt"
+    },
+    {
+      "$ref": "#/$defs/Callback"
+    },
+    {
+      "$ref": "#/$defs/Denial"
+    }
+  ]
+}

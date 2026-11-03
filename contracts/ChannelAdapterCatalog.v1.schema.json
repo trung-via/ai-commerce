@@ -1,0 +1,1562 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-commerce:ChannelAdapterCatalog.v1",
+  "title": "ChannelAdapterCatalog.v1",
+  "$defs": {
+    "Catalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "ChannelAdapterCatalog.v1"
+        },
+        "version": {
+          "const": "a17-3/1.0"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "platform": {
+                "enum": [
+                  "TIKTOK",
+                  "INSTAGRAM",
+                  "YOUTUBE"
+                ]
+              },
+              "adapter_namespace": {
+                "type": "string",
+                "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                "minLength": 1,
+                "maxLength": 96
+              },
+              "adapter_version": {
+                "const": "a17-3/1.0"
+              },
+              "surface": {
+                "type": "string",
+                "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                "minLength": 1,
+                "maxLength": 96
+              },
+              "account_namespace": {
+                "type": "string",
+                "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                "minLength": 1,
+                "maxLength": 96
+              },
+              "app_namespace": {
+                "type": "string",
+                "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                "minLength": 1,
+                "maxLength": 96
+              },
+              "a07_action": {
+                "enum": [
+                  "API_DIRECT_POST",
+                  "API_UPLOAD"
+                ]
+              },
+              "provenance": {
+                "const": "SYNTHETIC_FIXTURE"
+              },
+              "live_available": {
+                "const": false
+              },
+              "receipt_semantics": {
+                "const": "SYNTHETIC_CONFIRMATION_IS_NOT_PUBLICATION"
+              },
+              "metrics": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                      "minLength": 1,
+                      "maxLength": 96
+                    },
+                    "definition": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                      "minLength": 1,
+                      "maxLength": 96
+                    },
+                    "denominator": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                      "minLength": 1,
+                      "maxLength": 96
+                    },
+                    "unit": {
+                      "const": "COUNT"
+                    },
+                    "visibility_meaning": {
+                      "const": "UNKNOWN"
+                    },
+                    "namespace": {
+                      "enum": [
+                        "TIKTOK",
+                        "INSTAGRAM",
+                        "YOUTUBE"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "definition",
+                    "denominator",
+                    "unit",
+                    "visibility_meaning",
+                    "namespace"
+                  ]
+                },
+                "minItems": 2,
+                "maxItems": 2
+              }
+            },
+            "required": [
+              "platform",
+              "adapter_namespace",
+              "adapter_version",
+              "surface",
+              "account_namespace",
+              "app_namespace",
+              "a07_action",
+              "provenance",
+              "live_available",
+              "receipt_semantics",
+              "metrics"
+            ]
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "read_only": {
+          "const": true
+        }
+      },
+      "required": [
+        "schema_version",
+        "version",
+        "entries",
+        "read_only"
+      ]
+    },
+    "Metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "ChannelMetricFixture.v1"
+        },
+        "request_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "definition": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+              "minLength": 1,
+              "maxLength": 96
+            },
+            "definition": {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+              "minLength": 1,
+              "maxLength": 96
+            },
+            "denominator": {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+              "minLength": 1,
+              "maxLength": 96
+            },
+            "unit": {
+              "const": "COUNT"
+            },
+            "visibility_meaning": {
+              "const": "UNKNOWN"
+            },
+            "namespace": {
+              "enum": [
+                "TIKTOK",
+                "INSTAGRAM",
+                "YOUTUBE"
+              ]
+            }
+          },
+          "required": [
+            "name",
+            "definition",
+            "denominator",
+            "unit",
+            "visibility_meaning",
+            "namespace"
+          ]
+        },
+        "definition_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "measurement_window": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "date-time",
+            "maxLength": 40,
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?(Z|[+-]\\d{2}:\\d{2})$"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "timezone": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z][A-Za-z0-9_+./-]*$"
+        },
+        "value": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "UNKNOWN",
+            "RECORDED_SYNTHETIC"
+          ]
+        },
+        "attribution_tier": {
+          "enum": [
+            "NONE",
+            "UNVERIFIED"
+          ]
+        },
+        "currency": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Z]{3}$",
+              "maxLength": 3
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provenance": {
+          "const": "SYNTHETIC_FIXTURE"
+        },
+        "provider_attested": {
+          "const": false
+        }
+      },
+      "required": [
+        "schema_version",
+        "request_sha256",
+        "definition",
+        "definition_sha256",
+        "measurement_window",
+        "timezone",
+        "value",
+        "status",
+        "attribution_tier",
+        "currency",
+        "provenance",
+        "provider_attested"
+      ]
+    },
+    "View": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "ChannelAdapterView.v1"
+        },
+        "request_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "platform": {
+              "enum": [
+                "TIKTOK",
+                "INSTAGRAM",
+                "YOUTUBE"
+              ]
+            },
+            "surface": {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+              "minLength": 1,
+              "maxLength": 96
+            },
+            "account_ref": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                  "minLength": 1,
+                  "maxLength": 96
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                  "minLength": 1,
+                  "maxLength": 96
+                }
+              },
+              "required": [
+                "namespace",
+                "id"
+              ]
+            },
+            "app_ref": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                  "minLength": 1,
+                  "maxLength": 96
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                  "minLength": 1,
+                  "maxLength": 96
+                }
+              },
+              "required": [
+                "namespace",
+                "id"
+              ]
+            },
+            "market": {
+              "type": "string",
+              "pattern": "^[A-Z]{2}$",
+              "maxLength": 2
+            },
+            "package_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+              "minLength": 1,
+              "maxLength": 96
+            },
+            "package_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$",
+              "minLength": 64,
+              "maxLength": 64
+            },
+            "content_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$",
+              "minLength": 64,
+              "maxLength": 64
+            },
+            "media_type": {
+              "const": "video/mp4"
+            }
+          },
+          "required": [
+            "platform",
+            "surface",
+            "account_ref",
+            "app_ref",
+            "market",
+            "package_id",
+            "package_sha256",
+            "content_sha256",
+            "media_type"
+          ]
+        },
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "dashboard_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "reconciliation_sha256": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$",
+              "minLength": 64,
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "native_decision": {
+          "enum": [
+            "RECONCILE_REQUIRED",
+            "NO_RETRY",
+            "REQUIRES_SEPARATE_AUTHORIZATION"
+          ]
+        },
+        "native_reported_state": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+              "minLength": 1,
+              "maxLength": 96
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "measurement_window": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "date-time",
+            "maxLength": 40,
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?(Z|[+-]\\d{2}:\\d{2})$"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "timezone": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z][A-Za-z0-9_+./-]*$"
+        },
+        "product_ref": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+              "minLength": 1,
+              "maxLength": 96
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fixture_receipt": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "schema_version": {
+                  "const": "DirectPostReceipt.v1"
+                },
+                "adapter_version": {
+                  "const": "a17-3/1.0"
+                },
+                "adapter_namespace": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                  "minLength": 1,
+                  "maxLength": 96
+                },
+                "target": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "platform": {
+                      "enum": [
+                        "TIKTOK",
+                        "INSTAGRAM",
+                        "YOUTUBE"
+                      ]
+                    },
+                    "surface": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                      "minLength": 1,
+                      "maxLength": 96
+                    },
+                    "account_ref": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "namespace": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                          "minLength": 1,
+                          "maxLength": 96
+                        },
+                        "id": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                          "minLength": 1,
+                          "maxLength": 96
+                        }
+                      },
+                      "required": [
+                        "namespace",
+                        "id"
+                      ]
+                    },
+                    "app_ref": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "namespace": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                          "minLength": 1,
+                          "maxLength": 96
+                        },
+                        "id": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                          "minLength": 1,
+                          "maxLength": 96
+                        }
+                      },
+                      "required": [
+                        "namespace",
+                        "id"
+                      ]
+                    },
+                    "market": {
+                      "type": "string",
+                      "pattern": "^[A-Z]{2}$",
+                      "maxLength": 2
+                    },
+                    "package_id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                      "minLength": 1,
+                      "maxLength": 96
+                    },
+                    "package_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$",
+                      "minLength": 64,
+                      "maxLength": 64
+                    },
+                    "content_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$",
+                      "minLength": 64,
+                      "maxLength": 64
+                    },
+                    "media_type": {
+                      "const": "video/mp4"
+                    }
+                  },
+                  "required": [
+                    "platform",
+                    "surface",
+                    "account_ref",
+                    "app_ref",
+                    "market",
+                    "package_id",
+                    "package_sha256",
+                    "content_sha256",
+                    "media_type"
+                  ]
+                },
+                "request_sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$",
+                  "minLength": 64,
+                  "maxLength": 64
+                },
+                "intent_sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$",
+                  "minLength": 64,
+                  "maxLength": 64
+                },
+                "source_sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$",
+                  "minLength": 64,
+                  "maxLength": 64
+                },
+                "native_decision": {
+                  "enum": [
+                    "RECONCILE_REQUIRED",
+                    "NO_RETRY",
+                    "REQUIRES_SEPARATE_AUTHORIZATION"
+                  ]
+                },
+                "fixture_state": {
+                  "enum": [
+                    "SUBMITTED",
+                    "UNKNOWN",
+                    "REJECTED",
+                    "CONFIRMED"
+                  ]
+                },
+                "provenance": {
+                  "const": "SYNTHETIC_FIXTURE"
+                },
+                "publication_status": {
+                  "const": "UNKNOWN"
+                },
+                "mode": {
+                  "const": "OFFLINE"
+                },
+                "provider_attested": {
+                  "const": false
+                },
+                "public_visibility": {
+                  "const": "UNKNOWN"
+                },
+                "real_post_created": {
+                  "const": false
+                },
+                "retry_dispatched": {
+                  "const": false
+                },
+                "receipt_id": {
+                  "type": "string",
+                  "pattern": "^synthetic-(tiktok|instagram|youtube)-[a-f0-9]{64}$",
+                  "maxLength": 84
+                },
+                "record_sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$",
+                  "minLength": 64,
+                  "maxLength": 64
+                }
+              },
+              "required": [
+                "schema_version",
+                "adapter_version",
+                "adapter_namespace",
+                "target",
+                "request_sha256",
+                "intent_sha256",
+                "source_sha256",
+                "native_decision",
+                "fixture_state",
+                "provenance",
+                "publication_status",
+                "mode",
+                "provider_attested",
+                "public_visibility",
+                "real_post_created",
+                "retry_dispatched",
+                "receipt_id",
+                "record_sha256"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "metrics": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "schema_version": {
+                "const": "ChannelMetricFixture.v1"
+              },
+              "request_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+                "minLength": 64,
+                "maxLength": 64
+              },
+              "definition": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                    "minLength": 1,
+                    "maxLength": 96
+                  },
+                  "definition": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                    "minLength": 1,
+                    "maxLength": 96
+                  },
+                  "denominator": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                    "minLength": 1,
+                    "maxLength": 96
+                  },
+                  "unit": {
+                    "const": "COUNT"
+                  },
+                  "visibility_meaning": {
+                    "const": "UNKNOWN"
+                  },
+                  "namespace": {
+                    "enum": [
+                      "TIKTOK",
+                      "INSTAGRAM",
+                      "YOUTUBE"
+                    ]
+                  }
+                },
+                "required": [
+                  "name",
+                  "definition",
+                  "denominator",
+                  "unit",
+                  "visibility_meaning",
+                  "namespace"
+                ]
+              },
+              "definition_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+                "minLength": 64,
+                "maxLength": 64
+              },
+              "measurement_window": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "date-time",
+                  "maxLength": 40,
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?(Z|[+-]\\d{2}:\\d{2})$"
+                },
+                "minItems": 2,
+                "maxItems": 2
+              },
+              "timezone": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z][A-Za-z0-9_+./-]*$"
+              },
+              "value": {
+                "oneOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000000000
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "status": {
+                "enum": [
+                  "UNKNOWN",
+                  "RECORDED_SYNTHETIC"
+                ]
+              },
+              "attribution_tier": {
+                "enum": [
+                  "NONE",
+                  "UNVERIFIED"
+                ]
+              },
+              "currency": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[A-Z]{3}$",
+                    "maxLength": 3
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provenance": {
+                "const": "SYNTHETIC_FIXTURE"
+              },
+              "provider_attested": {
+                "const": false
+              }
+            },
+            "required": [
+              "schema_version",
+              "request_sha256",
+              "definition",
+              "definition_sha256",
+              "measurement_window",
+              "timezone",
+              "value",
+              "status",
+              "attribution_tier",
+              "currency",
+              "provenance",
+              "provider_attested"
+            ]
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "opt_in": {
+          "enum": [
+            "NO_PROPOSAL",
+            "PROPOSAL_ONLY"
+          ]
+        },
+        "execution_dispatched": {
+          "const": false
+        },
+        "public_visibility": {
+          "const": "UNKNOWN"
+        },
+        "publication_status": {
+          "const": "UNKNOWN"
+        },
+        "read_only": {
+          "const": true
+        }
+      },
+      "required": [
+        "schema_version",
+        "request_sha256",
+        "target",
+        "source_sha256",
+        "dashboard_sha256",
+        "reconciliation_sha256",
+        "native_decision",
+        "native_reported_state",
+        "measurement_window",
+        "timezone",
+        "product_ref",
+        "fixture_receipt",
+        "metrics",
+        "opt_in",
+        "execution_dispatched",
+        "public_visibility",
+        "publication_status",
+        "read_only"
+      ]
+    },
+    "Aggregate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "MultichannelOfflineSnapshot.v1"
+        },
+        "channels": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "schema_version": {
+                "const": "ChannelAdapterView.v1"
+              },
+              "request_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+                "minLength": 64,
+                "maxLength": 64
+              },
+              "target": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "platform": {
+                    "enum": [
+                      "TIKTOK",
+                      "INSTAGRAM",
+                      "YOUTUBE"
+                    ]
+                  },
+                  "surface": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                    "minLength": 1,
+                    "maxLength": 96
+                  },
+                  "account_ref": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "namespace": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                        "minLength": 1,
+                        "maxLength": 96
+                      },
+                      "id": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                        "minLength": 1,
+                        "maxLength": 96
+                      }
+                    },
+                    "required": [
+                      "namespace",
+                      "id"
+                    ]
+                  },
+                  "app_ref": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "namespace": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                        "minLength": 1,
+                        "maxLength": 96
+                      },
+                      "id": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                        "minLength": 1,
+                        "maxLength": 96
+                      }
+                    },
+                    "required": [
+                      "namespace",
+                      "id"
+                    ]
+                  },
+                  "market": {
+                    "type": "string",
+                    "pattern": "^[A-Z]{2}$",
+                    "maxLength": 2
+                  },
+                  "package_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                    "minLength": 1,
+                    "maxLength": 96
+                  },
+                  "package_sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$",
+                    "minLength": 64,
+                    "maxLength": 64
+                  },
+                  "content_sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$",
+                    "minLength": 64,
+                    "maxLength": 64
+                  },
+                  "media_type": {
+                    "const": "video/mp4"
+                  }
+                },
+                "required": [
+                  "platform",
+                  "surface",
+                  "account_ref",
+                  "app_ref",
+                  "market",
+                  "package_id",
+                  "package_sha256",
+                  "content_sha256",
+                  "media_type"
+                ]
+              },
+              "source_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+                "minLength": 64,
+                "maxLength": 64
+              },
+              "dashboard_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+                "minLength": 64,
+                "maxLength": 64
+              },
+              "reconciliation_sha256": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$",
+                    "minLength": 64,
+                    "maxLength": 64
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "native_decision": {
+                "enum": [
+                  "RECONCILE_REQUIRED",
+                  "NO_RETRY",
+                  "REQUIRES_SEPARATE_AUTHORIZATION"
+                ]
+              },
+              "native_reported_state": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                    "minLength": 1,
+                    "maxLength": 96
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "measurement_window": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "date-time",
+                  "maxLength": 40,
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?(Z|[+-]\\d{2}:\\d{2})$"
+                },
+                "minItems": 2,
+                "maxItems": 2
+              },
+              "timezone": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z][A-Za-z0-9_+./-]*$"
+              },
+              "product_ref": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                    "minLength": 1,
+                    "maxLength": 96
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "fixture_receipt": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "schema_version": {
+                        "const": "DirectPostReceipt.v1"
+                      },
+                      "adapter_version": {
+                        "const": "a17-3/1.0"
+                      },
+                      "adapter_namespace": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                        "minLength": 1,
+                        "maxLength": 96
+                      },
+                      "target": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "platform": {
+                            "enum": [
+                              "TIKTOK",
+                              "INSTAGRAM",
+                              "YOUTUBE"
+                            ]
+                          },
+                          "surface": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                            "minLength": 1,
+                            "maxLength": 96
+                          },
+                          "account_ref": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                              "namespace": {
+                                "type": "string",
+                                "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                                "minLength": 1,
+                                "maxLength": 96
+                              },
+                              "id": {
+                                "type": "string",
+                                "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                                "minLength": 1,
+                                "maxLength": 96
+                              }
+                            },
+                            "required": [
+                              "namespace",
+                              "id"
+                            ]
+                          },
+                          "app_ref": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                              "namespace": {
+                                "type": "string",
+                                "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                                "minLength": 1,
+                                "maxLength": 96
+                              },
+                              "id": {
+                                "type": "string",
+                                "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                                "minLength": 1,
+                                "maxLength": 96
+                              }
+                            },
+                            "required": [
+                              "namespace",
+                              "id"
+                            ]
+                          },
+                          "market": {
+                            "type": "string",
+                            "pattern": "^[A-Z]{2}$",
+                            "maxLength": 2
+                          },
+                          "package_id": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                            "minLength": 1,
+                            "maxLength": 96
+                          },
+                          "package_sha256": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$",
+                            "minLength": 64,
+                            "maxLength": 64
+                          },
+                          "content_sha256": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$",
+                            "minLength": 64,
+                            "maxLength": 64
+                          },
+                          "media_type": {
+                            "const": "video/mp4"
+                          }
+                        },
+                        "required": [
+                          "platform",
+                          "surface",
+                          "account_ref",
+                          "app_ref",
+                          "market",
+                          "package_id",
+                          "package_sha256",
+                          "content_sha256",
+                          "media_type"
+                        ]
+                      },
+                      "request_sha256": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$",
+                        "minLength": 64,
+                        "maxLength": 64
+                      },
+                      "intent_sha256": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$",
+                        "minLength": 64,
+                        "maxLength": 64
+                      },
+                      "source_sha256": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$",
+                        "minLength": 64,
+                        "maxLength": 64
+                      },
+                      "native_decision": {
+                        "enum": [
+                          "RECONCILE_REQUIRED",
+                          "NO_RETRY",
+                          "REQUIRES_SEPARATE_AUTHORIZATION"
+                        ]
+                      },
+                      "fixture_state": {
+                        "enum": [
+                          "SUBMITTED",
+                          "UNKNOWN",
+                          "REJECTED",
+                          "CONFIRMED"
+                        ]
+                      },
+                      "provenance": {
+                        "const": "SYNTHETIC_FIXTURE"
+                      },
+                      "publication_status": {
+                        "const": "UNKNOWN"
+                      },
+                      "mode": {
+                        "const": "OFFLINE"
+                      },
+                      "provider_attested": {
+                        "const": false
+                      },
+                      "public_visibility": {
+                        "const": "UNKNOWN"
+                      },
+                      "real_post_created": {
+                        "const": false
+                      },
+                      "retry_dispatched": {
+                        "const": false
+                      },
+                      "receipt_id": {
+                        "type": "string",
+                        "pattern": "^synthetic-(tiktok|instagram|youtube)-[a-f0-9]{64}$",
+                        "maxLength": 84
+                      },
+                      "record_sha256": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$",
+                        "minLength": 64,
+                        "maxLength": 64
+                      }
+                    },
+                    "required": [
+                      "schema_version",
+                      "adapter_version",
+                      "adapter_namespace",
+                      "target",
+                      "request_sha256",
+                      "intent_sha256",
+                      "source_sha256",
+                      "native_decision",
+                      "fixture_state",
+                      "provenance",
+                      "publication_status",
+                      "mode",
+                      "provider_attested",
+                      "public_visibility",
+                      "real_post_created",
+                      "retry_dispatched",
+                      "receipt_id",
+                      "record_sha256"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "metrics": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "schema_version": {
+                      "const": "ChannelMetricFixture.v1"
+                    },
+                    "request_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$",
+                      "minLength": 64,
+                      "maxLength": 64
+                    },
+                    "definition": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "name": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                          "minLength": 1,
+                          "maxLength": 96
+                        },
+                        "definition": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                          "minLength": 1,
+                          "maxLength": 96
+                        },
+                        "denominator": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                          "minLength": 1,
+                          "maxLength": 96
+                        },
+                        "unit": {
+                          "const": "COUNT"
+                        },
+                        "visibility_meaning": {
+                          "const": "UNKNOWN"
+                        },
+                        "namespace": {
+                          "enum": [
+                            "TIKTOK",
+                            "INSTAGRAM",
+                            "YOUTUBE"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "definition",
+                        "denominator",
+                        "unit",
+                        "visibility_meaning",
+                        "namespace"
+                      ]
+                    },
+                    "definition_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$",
+                      "minLength": 64,
+                      "maxLength": 64
+                    },
+                    "measurement_window": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "format": "date-time",
+                        "maxLength": 40,
+                        "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?(Z|[+-]\\d{2}:\\d{2})$"
+                      },
+                      "minItems": 2,
+                      "maxItems": 2
+                    },
+                    "timezone": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64,
+                      "pattern": "^[A-Za-z][A-Za-z0-9_+./-]*$"
+                    },
+                    "value": {
+                      "oneOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 1000000000000
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "status": {
+                      "enum": [
+                        "UNKNOWN",
+                        "RECORDED_SYNTHETIC"
+                      ]
+                    },
+                    "attribution_tier": {
+                      "enum": [
+                        "NONE",
+                        "UNVERIFIED"
+                      ]
+                    },
+                    "currency": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[A-Z]{3}$",
+                          "maxLength": 3
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "provenance": {
+                      "const": "SYNTHETIC_FIXTURE"
+                    },
+                    "provider_attested": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "schema_version",
+                    "request_sha256",
+                    "definition",
+                    "definition_sha256",
+                    "measurement_window",
+                    "timezone",
+                    "value",
+                    "status",
+                    "attribution_tier",
+                    "currency",
+                    "provenance",
+                    "provider_attested"
+                  ]
+                },
+                "minItems": 2,
+                "maxItems": 2
+              },
+              "opt_in": {
+                "enum": [
+                  "NO_PROPOSAL",
+                  "PROPOSAL_ONLY"
+                ]
+              },
+              "execution_dispatched": {
+                "const": false
+              },
+              "public_visibility": {
+                "const": "UNKNOWN"
+              },
+              "publication_status": {
+                "const": "UNKNOWN"
+              },
+              "read_only": {
+                "const": true
+              }
+            },
+            "required": [
+              "schema_version",
+              "request_sha256",
+              "target",
+              "source_sha256",
+              "dashboard_sha256",
+              "reconciliation_sha256",
+              "native_decision",
+              "native_reported_state",
+              "measurement_window",
+              "timezone",
+              "product_ref",
+              "fixture_receipt",
+              "metrics",
+              "opt_in",
+              "execution_dispatched",
+              "public_visibility",
+              "publication_status",
+              "read_only"
+            ]
+          },
+          "minItems": 0,
+          "maxItems": 16
+        },
+        "comparisons": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "left": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+                "minLength": 64,
+                "maxLength": 64
+              },
+              "right": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+                "minLength": 64,
+                "maxLength": 64
+              },
+              "metric": {
+                "type": "string",
+                "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$",
+                "minLength": 1,
+                "maxLength": 96
+              },
+              "comparable": {
+                "type": "boolean"
+              },
+              "reason": {
+                "enum": [
+                  "COMPATIBLE_SYNTHETIC_CONTEXT",
+                  "INCOMPATIBLE_CONTEXT",
+                  "MISSING_VALUE"
+                ]
+              },
+              "delta": {
+                "oneOf": [
+                  {
+                    "type": "integer",
+                    "minimum": -1000000000000,
+                    "maximum": 1000000000000
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "left",
+              "right",
+              "metric",
+              "comparable",
+              "reason",
+              "delta"
+            ]
+          },
+          "minItems": 0,
+          "maxItems": 240
+        },
+        "read_only": {
+          "const": true
+        },
+        "execution_dispatched": {
+          "const": false
+        },
+        "revenue": {
+          "const": null
+        },
+        "settlement": {
+          "const": null
+        }
+      },
+      "required": [
+        "schema_version",
+        "channels",
+        "comparisons",
+        "read_only",
+        "execution_dispatched",
+        "revenue",
+        "settlement"
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/Catalog"
+    },
+    {
+      "$ref": "#/$defs/Metric"
+    },
+    {
+      "$ref": "#/$defs/View"
+    },
+    {
+      "$ref": "#/$defs/Aggregate"
+    }
+  ]
+}
