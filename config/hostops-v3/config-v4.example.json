@@ -1,25 +1,26 @@
 {
-  "schema": "hostops.config.v4",
+  "schema": "hostops.config.v4.personal",
   "enabled": false,
-  "host_id": "laptop-001",
+  "host_id": "personal-laptop-001",
   "source_repository": "trung-via/ai-commerce",
   "control_repository": "trung-via/ai-commerce-hostops-control",
   "policy_dir": "C:\\ProgramData\\AICommerceHostOpsV4\\policy",
   "state_dir": "C:\\ProgramData\\AICommerceHostOpsV4\\broker-state",
   "transport_state_dir": "C:\\ProgramData\\AICommerceHostOpsV4\\transport-state",
   "release_dir": "C:\\Program Files\\AICommerceHostOpsV4\\4.0.0",
-  "broker_identity": "REPLACE_WITH_NON_ADMIN_BROKER_SID",
-  "transport_identity": "REPLACE_WITH_DISTINCT_NON_ADMIN_TRANSPORT_SID",
+  "broker_identity": "REPLACE_WITH_CURRENT_WINDOWS_SID",
+  "transport_identity": "REPLACE_WITH_CURRENT_WINDOWS_SID",
   "untrusted_identities": [
-    "REPLACE_WITH_PUBLIC_EF02_AND_CI_SIDS"
+    "REPLACE_WITH_UNTRUSTED_PUBLIC_RUNNER_IF_SEPARATE"
   ],
   "trusted_owners": [
     "S-1-5-18",
     "S-1-5-32-544"
   ],
-  "endpoint": "\\\\.\\pipe\\AICommerceHostOpsV3-laptop-001",
+  "endpoint": "\\\\.\\pipe\\AICommerceHostOpsV4-Personal-personal-laptop-001",
   "ssh_keygen": "C:\\Windows\\System32\\OpenSSH\\ssh-keygen.exe",
   "ssh_keygen_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
   "pwsh": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
-  "pwsh_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  "pwsh_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "account_mode": "PERSONAL_SINGLE_USER"
 }

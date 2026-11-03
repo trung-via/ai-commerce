@@ -12,7 +12,8 @@ from .auth import verify_release, verify_release_v4
 from .broker import serve, serve_v4
 from .contract import (MAX_WIRE, Denied, canonical, decode, deny, digest,
                        dual_repo_envelope, envelope, public_receipt_v4, receipt, receipt_v4)
-from .security import NON_BROKER_SIDS, load_config, load_config_v4, windows_identity
+from .security import (NON_BROKER_SIDS, PERSONAL_V4_SCHEMA, load_config,
+                       load_config_v4, windows_identity)
 from .transport import (READ_ONLY_V4, ControlGitHub, GitHub, poll_inbox, poll_once,
                         poll_once_v4, report, report_v4, submit, submit_v4,
                         validation, validation_v4)
@@ -29,6 +30,8 @@ def _run_v4_cli(args):
             output = canonical(validation_v4(f.read(MAX_WIRE + 1)))
     else:
         config = load_config_v4(args.config)
+        if config["schema"] == PERSONAL_V4_SCHEMA:
+            deny("PERSONAL_MODE_NOT_ENROLLED")
         if not config["enabled"] or (Path(config["policy_dir"]) / "KILL").exists():
             deny("KILL_SWITCH")
         if args.command == "broker-v4":

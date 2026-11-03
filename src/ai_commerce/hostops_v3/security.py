@@ -231,13 +231,29 @@ def admit(config, config_path):
 
 
 CONFIG_KEYS_V4 = CONFIG_KEYS + " source_repository control_repository"
+# A distinct, disabled-only personal-use contract. Do NOT reinterpret legacy V4
+# identity isolation or let an OS-user-only contract enable an unattended broker.
+CONFIG_KEYS_V4_PERSONAL = CONFIG_KEYS_V4 + " account_mode"
+PERSONAL_V4_SCHEMA = "hostops.config.v4.personal"
+PERSONAL_V4_MODE = "PERSONAL_SINGLE_USER"
+PERSONAL_SID_PLACEHOLDER = "REPLACE_WITH_CURRENT_WINDOWS_SID"
 NON_BROKER_SIDS = frozenset({"S-1-5-18", "S-1-5-19", "S-1-5-20", "S-1-5-32-544", "0"})
 
 
 def _validate_v4_config_dict(config):
-    shape(config, CONFIG_KEYS_V4)
-    if config["schema"] != "hostops.config.v4" or type(config["enabled"]) is not bool:
+    personal = isinstance(config, dict) and config.get("schema") == PERSONAL_V4_SCHEMA
+    shape(config, CONFIG_KEYS_V4_PERSONAL if personal else CONFIG_KEYS_V4)
+    if (config["schema"] not in ("hostops.config.v4", PERSONAL_V4_SCHEMA)
+            or type(config["enabled"]) is not bool):
         deny("BAD_CONFIG")
+    if personal:
+        if config["account_mode"] != PERSONAL_V4_MODE:
+            deny("BAD_CONFIG")
+        # One Windows token cannot isolate transport credentials from a broker
+        # (or from an untrusted public-repo self-host runner under that token).
+        # Explicit local signed enrollment is NOT yet implemented: no runtime.
+        if config["enabled"]:
+            deny("PERSONAL_MODE_NOT_ENROLLED")
     if (config["source_repository"] != SOURCE_REPOSITORY or
             config["control_repository"] != CONTROL_REPOSITORY):
         deny("REPOSITORY_MISMATCH")
@@ -255,6 +271,14 @@ def _validate_v4_config_dict(config):
         if value.startswith(("\\\\", "//")) or not (native_absolute or offline_windows_absolute):
             deny("BAD_CONFIG")
     text(config["endpoint"])
+    if personal:
+        # Personal PLAN may only name a Windows-local V4 pipe namespace.
+        prefix = r"\\.\pipe\AICommerceHostOpsV4-Personal-"
+        endpoint = config["endpoint"]
+        suffix = endpoint[len(prefix):] if endpoint.startswith(prefix) else ""
+        if not (1 <= len(suffix) <= 64 and all(
+                ch.isascii() and (ch.isalnum() or ch in "-_") for ch in suffix)):
+            deny("NONLOCAL_ENDPOINT")
     for key in ("ssh_keygen_sha256", "pwsh_sha256"):
         sha(config[key])
     for key in ("untrusted_identities", "trusted_owners"):
@@ -262,12 +286,21 @@ def _validate_v4_config_dict(config):
             deny("BAD_CONFIG")
         for item in config[key]:
             text(item, 256)
-    if (config["broker_identity"] == config["transport_identity"] or
-            config["broker_identity"] in config["untrusted_identities"] or
+    if (config["broker_identity"] in config["untrusted_identities"] or
             config["transport_identity"] in config["untrusted_identities"] or
             config["broker_identity"] in config["trusted_owners"] or
             config["transport_identity"] in config["trusted_owners"] or
             set(config["trusted_owners"]) & set(config["untrusted_identities"])):
+        deny("IDENTITIES_NOT_ISOLATED")
+    if personal:
+        same = config["broker_identity"] == config["transport_identity"]
+        sid = config["broker_identity"]
+        import re
+        sid_valid = (sid == PERSONAL_SID_PLACEHOLDER or
+                     re.fullmatch(r"S-1-[0-9]+(?:-[0-9]+){2,}", sid) is not None)
+        if not same or not sid_valid or sid in NON_BROKER_SIDS:
+            deny("PERSONAL_IDENTITY_INVALID")
+    elif config["broker_identity"] == config["transport_identity"]:
         deny("IDENTITIES_NOT_ISOLATED")
     return config
 
@@ -280,6 +313,8 @@ def load_config_v4(path):
 def admit_v4(config, config_path):
     """Strict V4 admission; enforces disabled/KILL gates, non-admin SIDs, and ACLs."""
     _validate_v4_config_dict(config)
+    if config["schema"] == PERSONAL_V4_SCHEMA:
+        deny("PERSONAL_MODE_NOT_ENROLLED")
     if not config["enabled"] or (Path(config["policy_dir"]) / "KILL").exists():
         deny("KILL_SWITCH")
     if "0" * 64 in (config["ssh_keygen_sha256"], config["pwsh_sha256"]):
