@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
 import time
 
-from .contract import (OPS, MAX_FILE, canonical, decode, deny, digest, ident,
-                       integer, sha, shape, text)
+from .contract import (OPS, MAX_FILE, SOURCE_REPOSITORY, CONTROL_REPOSITORY,
+                       canonical, decode, deny, digest, ident, integer, sha, shape, text)
 
 
 def verify_signature(body, signature, signers: Path, identity: str, namespace: str, executable: Path):
@@ -29,6 +30,137 @@ def verify_signature(body, signature, signers: Path, identity: str, namespace: s
             deny("SIGNATURE_INVALID")
     except (ValueError, OSError, subprocess.TimeoutExpired):
         deny("SIGNATURE_UNAVAILABLE")
+
+
+# W1 is a source-only, signed, closed contract. It cannot execute a host write,
+# retrieve files, persist a token, or start any background service. In
+# particular, a same-Windows-SID public runner is NOT a credential boundary.
+PERSONAL_W1_SCHEMA = "hostops.personal.signed_create_proposal.v1"
+PERSONAL_W1_NAMESPACE = "hostops-w1-create@ai-commerce"
+PERSONAL_W1_ROOT = "human-scratch-v1"
+_PERSONAL_W1_ID = re.compile(r"w1-[0-9a-f]{32}\Z")
+_PERSONAL_W1_FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,55}\.(?:txt|md|json)\Z")
+_PERSONAL_W1_RESERVED = frozenset({"CON", "PRN", "AUX", "NUL"} |
+                                   {"COM" + str(i) for i in range(1, 10)} |
+                                   {"LPT" + str(i) for i in range(1, 10)})
+
+
+def personal_w1_signing_payload(proposal, *, issue_number, expected_source_sha,
+                                now=None):
+    """Validate a canonical, exact-effect proposal before crypto or OS effects.
+
+    All fields, including the GitHub Issue number, target basename, content
+    bytes and content SHA, are covered by the independent Human signature.
+    The root is an allowlisted *identifier*, never an Issue-selected host path.
+    """
+    shape(proposal, "schema request_id issue_number source_repository control_repository source_sha operation parameters issued_at expires_at approval_signature_b64")
+    if (proposal["schema"] != PERSONAL_W1_SCHEMA or
+            proposal["source_repository"] != SOURCE_REPOSITORY or
+            proposal["control_repository"] != CONTROL_REPOSITORY or
+            proposal["operation"] != "create_new_utf8"):
+        deny("W1_CONTRACT_DENIED")
+    if (type(issue_number) is not int or not 1 <= issue_number <= 2147483647 or
+            type(proposal["issue_number"]) is not int or
+            proposal["issue_number"] != issue_number):
+        deny("W1_ISSUE_MISMATCH")
+    if (type(proposal["request_id"]) is not str or
+            _PERSONAL_W1_ID.fullmatch(proposal["request_id"]) is None):
+        deny("W1_REQUEST_ID_DENIED")
+    sha(expected_source_sha, 40)
+    if proposal["source_sha"] != expected_source_sha:
+        deny("W1_SOURCE_MISMATCH")
+    issued, expires = proposal["issued_at"], proposal["expires_at"]
+    if now is None:
+        now = int(time.time())
+    if (type(issued) is not int or type(expires) is not int or
+            type(now) is not int or not 1 <= expires - issued <= 600 or
+            now < issued or now > expires or now - issued > 600):
+        deny("W1_REQUEST_EXPIRED")
+    p = proposal["parameters"]
+    shape(p, "root_id filename content_utf8 content_sha256 content_bytes")
+    if p["root_id"] != PERSONAL_W1_ROOT:
+        deny("W1_ROOT_DENIED")
+    name = p["filename"]
+    if (type(name) is not str or _PERSONAL_W1_FILENAME.fullmatch(name) is None or
+            name.rsplit(".", 1)[0].upper() in _PERSONAL_W1_RESERVED):
+        # The ASCII-only flat basename rejects traversal, junction paths, ADS,
+        # UNC, drive letters, Win32 device aliases, slashes and wildcards.
+        deny("W1_TARGET_DENIED")
+    content = p["content_utf8"]
+    if type(content) is not str:
+        deny("W1_CONTENT_DENIED")
+    try:
+        payload_bytes = content.encode("utf-8", "strict")
+    except UnicodeError:
+        deny("W1_CONTENT_DENIED")
+    if (not 1 <= len(payload_bytes) <= 2048 or "\x00" in content or
+            type(p["content_bytes"]) is not int or
+            p["content_bytes"] != len(payload_bytes)):
+        deny("W1_CONTENT_DENIED")
+    sha(p["content_sha256"], 64)
+    if digest(payload_bytes) != p["content_sha256"]:
+        deny("W1_CONTENT_HASH_MISMATCH")
+    sig = proposal["approval_signature_b64"]
+    if type(sig) is not str or not 40 <= len(sig) <= 16384:
+        deny("W1_HUMAN_SIGNATURE_REQUIRED")
+    # The signature itself is excluded, all other exact request fields included.
+    signed = {k: v for k, v in proposal.items() if k != "approval_signature_b64"}
+    return decode(canonical(signed))
+
+
+def personal_w1_verify_offline(proposal, *, issue_number, expected_source_sha,
+                                allowed_signers, expected_signers_sha256,
+                                ssh_keygen, expected_verifier_sha256, now=None):
+    """Cryptographic source gate only. NEVER authorizes a real file write.
+
+    Public signer policy and verifier binary MUST be pinned by an authority
+    outside the untrusted local Windows user / public self-hosted runner.
+    A correct signature alone cannot supply durable replay prevention, root
+    integrity or credential custody, so the returned execution flag is false.
+    """
+    signed = personal_w1_signing_payload(
+        proposal, issue_number=issue_number,
+        expected_source_sha=expected_source_sha, now=now)
+    sha(expected_signers_sha256, 64)
+    sha(expected_verifier_sha256, 64)
+    allowed, exe = Path(allowed_signers), Path(ssh_keygen)
+    if (not allowed.is_absolute() or not exe.is_absolute() or
+            allowed.is_symlink() or exe.is_symlink() or
+            not allowed.is_file() or not exe.is_file()):
+        deny("W1_SIGNER_POLICY_UNTRUSTED")
+    try:
+        # Reparse path components are rejected on Windows before reading.
+        for part in (allowed, *allowed.parents, exe, *exe.parents):
+            if getattr(part.lstat(), "st_file_attributes", 0) & 0x400:
+                deny("W1_SIGNER_POLICY_UNTRUSTED")
+        signer_bytes = allowed.read_bytes()
+        binary_bytes = exe.read_bytes()
+        if (len(signer_bytes) > 8192 or
+                digest(signer_bytes) != expected_signers_sha256 or
+                digest(binary_bytes) != expected_verifier_sha256):
+            deny("W1_SIGNER_POLICY_UNTRUSTED")
+        lines = [line.split() for line in signer_bytes.decode("ascii").splitlines()
+                 if line.strip() and not line.lstrip().startswith("#")]
+    except (OSError, UnicodeError):
+        deny("W1_SIGNER_POLICY_UNTRUSTED")
+    if (len(lines) != 1 or len(lines[0]) != 3 or
+            lines[0][0] != "hostops-human" or
+            lines[0][1] != "ssh-ed25519"):
+        deny("W1_SIGNER_POLICY_UNTRUSTED")
+    verify_signature(signed, proposal["approval_signature_b64"], allowed,
+                     "hostops-human", PERSONAL_W1_NAMESPACE, exe)
+    return {
+        "schema": "hostops.personal.w1_source_gate.v1",
+        "status": "SIGNED_PROPOSAL_VERIFIED_NO_EFFECT",
+        "issue_number": issue_number,
+        "request_id": signed["request_id"],
+        "source_sha": signed["source_sha"],
+        "proposal_sha256": digest(canonical(signed)),
+        "signature_valid": True,
+        "execution_allowed": False,
+        "replay_ledger_proven": False,
+        "credential_custody_proven": False,
+    }
 
 
 def child_environment():
