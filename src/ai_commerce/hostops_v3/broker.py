@@ -20,7 +20,8 @@ import time
 from .auth import verify_release, verify_release_v4
 from .contract import MAX_WIRE, Denied, canonical, decode, deny, envelope, dual_repo_envelope, public_receipt, public_receipt_v4, receipt, receipt_v4, shape
 from .journal import Journal
-from .security import admit, admit_v4, load_config, load_config_v4, windows_identity
+from .security import (PERSONAL_V4_SCHEMA, admit, admit_v4, load_config,
+                       load_config_v4, windows_identity)
 from .worker import Worker, WorkerV4
 
 IPC_LIMIT = 262144
@@ -482,6 +483,8 @@ def _verified_v4_exchange_handler(config_path, execute=None):
 def serve_v4(config_path, *, once=False, execute=None):
     """Constrained V4 read-only broker server; never routes through or accepts v3."""
     config = load_config_v4(config_path)
+    if config["schema"] == PERSONAL_V4_SCHEMA:
+        deny("PERSONAL_MODE_NOT_ENROLLED")
     admit_v4(config, config_path)
     verify_release_v4(config)
     if (Path(config["policy_dir"]) / "KILL").exists():
