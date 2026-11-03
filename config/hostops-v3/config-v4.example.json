@@ -17,7 +17,7 @@
     "S-1-5-18",
     "S-1-5-32-544"
   ],
-  "endpoint": "\\\\.\\pipe\\AICommerceHostOpsV3-laptop-001",
+  "endpoint": "\\\\.\\pipe\\AICommerceHostOpsV4-Personal-personal-laptop-001",
   "ssh_keygen": "C:\\Windows\\System32\\OpenSSH\\ssh-keygen.exe",
   "ssh_keygen_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
   "pwsh": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
