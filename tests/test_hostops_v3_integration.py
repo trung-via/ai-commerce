@@ -988,6 +988,17 @@ def test_v4_admission_scan_has_hard_size_depth_and_time_bounds(tmp_path):
             security._bounded_install_paths(root)
 
 
+def test_v4_disabled_windows_template_offline_cross_platform_parse():
+    """Hosted POSIX CI may inspect a Windows PLAN template, never activate it."""
+    template = ROOT / "config/hostops-v3/config-v4.example.json"
+    cfg = security.load_config_v4(template)
+    assert cfg["enabled"] is False
+    if os.name != "nt":
+        # Non-native paths must still be rejected for active broker configs.
+        with pytest.raises(c.Denied, match="BAD_CONFIG"):
+            security._validate_v4_config_dict({**cfg, "enabled": True})
+
+
 def test_v4_load_config_and_admit_v4_isolation_and_fail_closed(h, monkeypatch):
     v3_path = h.root / "config-v3.json"
     v3_path.write_bytes(c.canonical(h.config))
