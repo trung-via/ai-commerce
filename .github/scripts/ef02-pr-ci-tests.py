@@ -379,7 +379,7 @@ def _add_junit_counts(receipt: dict, summaries: dict) -> None:
 def main() -> int:
     """MT-01 V2.1 CI entrypoint: affected tests or explicit HOLD, never auto full."""
     sys.path.insert(0, str(ROOT / "src"))
-    from ai_commerce.engineering.impact_v21 import select_impact
+    from ai_commerce.engineering.impact_v21 import select_impact, candidate_onboarding_groups
     from ai_commerce.engineering.minimum_test import approved_groups
     event = os.getenv("MT01_CI_EVENT", "")
     base = os.getenv("MT01_CI_BASE_SHA", "")
@@ -401,8 +401,14 @@ def main() -> int:
             stderr=subprocess.DEVNULL, timeout=20).decode("utf-8").split("\0")
         candidate = subprocess.check_output(
             ["git", "-C", str(ROOT), "rev-parse", "HEAD"], timeout=20).decode().strip()
+        baseline_groups = approved_groups()
+        manifest_groups = candidate_onboarding_groups(
+            root=ROOT, changed_paths=sorted(changed),
+            base_paths=base_tests, existing_groups=baseline_groups,
+            allowed_paths=sorted(changed))
         plan = select_impact(
-            root=ROOT, changed_paths=sorted(changed), groups=approved_groups(),
+            root=ROOT, changed_paths=sorted(changed),
+            groups=(*baseline_groups, *manifest_groups),
             base_sha=base, candidate_sha=candidate,
             previous_tests=[p for p in base_tests if p.startswith("tests/test_") and p.endswith(".py")],
         )
