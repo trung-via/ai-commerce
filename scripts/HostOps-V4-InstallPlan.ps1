@@ -38,6 +38,11 @@ $state = [ordered]@{
     config_schema_valid = $false
     config_disabled = $false
     source_public_control_private_declared = $false
+    account_mode = 'ISOLATED_ACCOUNTS'
+    single_user_mode_configured = $false
+    single_user_sid_observed = $false
+    single_user_current_sid_match = $false
+    single_user_runtime_enrolled = $false
     distinct_non_admin_sid_configured = $false
     untrusted_identities_isolated = $false
     pinned_binary_hashes_configured = $false
@@ -69,6 +74,7 @@ $state = [ordered]@{
     block_reasons = @()
 }
 $reasons = [System.Collections.Generic.List[string]]::new()
+$identity = $null
 if (-not $state.windows) {
     $reasons.Add('WINDOWS_REQUIRED')
 } else {
@@ -98,6 +104,10 @@ if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
             'release_dir', 'broker_identity', 'transport_identity',
             'untrusted_identities', 'trusted_owners', 'endpoint',
             'ssh_keygen', 'ssh_keygen_sha256', 'pwsh', 'pwsh_sha256')
+        # Explicit personal schema is separate from legacy two-account V4.
+        # Never silently interpret an equal-SID legacy config as personal.
+        $personal = ($config.schema -ceq 'hostops.config.v4.personal')
+        if ($personal) { $required += 'account_mode' }
         $actual = @($config.PSObject.Properties.Name)
         $missing = @($required | Where-Object { $actual -cnotcontains $_ })
         $extras = @($actual | Where-Object { $required -cnotcontains $_ })
@@ -107,11 +117,14 @@ if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
         $untrusted = @($config.untrusted_identities)
         $trusted = @($config.trusted_owners)
         if ($missing.Count -ne 0 -or $extras.Count -ne 0 -or
-            $config.schema -cne 'hostops.config.v4' -or
+            ($config.schema -cne 'hostops.config.v4' -and -not $personal) -or
+            ($personal -and ($config.account_mode -cne 'PERSONAL_SINGLE_USER' -or
+                             $config.enabled -isnot [bool] -or $config.enabled -ne $false)) -or
             $sshSha -notmatch $shaPattern -or $pwshSha -notmatch $shaPattern -or
             $untrusted.Count -lt 1 -or $untrusted.Count -gt 32 -or
             $trusted.Count -lt 1 -or $trusted.Count -gt 32) { throw 'CONFIG_SCHEMA_INVALID' }
         $state.config_schema_valid = $true
+        $state.account_mode = if ($personal) { 'PERSONAL_SINGLE_USER' } else { 'ISOLATED_ACCOUNTS' }
         $state.config_disabled = ($config.enabled -is [bool] -and $config.enabled -eq $false)
         $state.source_public_control_private_declared = (
             $config.source_repository -ceq 'trung-via/ai-commerce' -and
@@ -119,6 +132,20 @@ if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
         $sidPattern = '^S-1-[0-9]+(-[0-9]+){2,}$'
         $a = [string]$config.broker_identity
         $b = [string]$config.transport_identity
+        $forbiddenSids = @('S-1-5-18','S-1-5-19','S-1-5-20','S-1-5-32-544')
+        $state.single_user_mode_configured = (
+            $personal -and $a -ceq $b -and $state.config_disabled -and
+            $trusted -cnotcontains $a -and
+            $untrusted -cnotcontains $a -and
+            $forbiddenSids -cnotcontains $a)
+        $state.single_user_sid_observed = (
+            $state.windows -and $state.caller_non_elevated -and $null -ne $identity -and
+            $null -ne $identity.User)
+        $state.single_user_current_sid_match = (
+            $state.single_user_mode_configured -and
+            $state.single_user_sid_observed -and
+            $a -match $sidPattern -and
+            $a -ceq [string]$identity.User.Value)
         $state.distinct_non_admin_sid_configured = (
             $a -match $sidPattern -and $b -match $sidPattern -and
             $a -cne $b -and
@@ -164,7 +191,15 @@ if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
 # Bounded two exact local SID lookups and four explicit root-only ACL reads.
 # No names, SIDs, paths, ACE lists, exception text or user data leave this process.
 if ($NativeReadOnly) {
-    if (-not ($state.windows -and $state.caller_non_elevated -and
+    if ($state.single_user_mode_configured) {
+        # The Windows process token is the only identity for this mode.
+        # No extra local accounts, native two-SID claims, or ACL-derived isolation.
+        # The shared-token public runner can reach same-user secrets: not enrolled.
+        if (-not $state.single_user_current_sid_match) {
+            $reasons.Add('SINGLE_USER_CURRENT_SID_UNPROVEN')
+        }
+        $reasons.Add('PERSONAL_RUNTIME_NOT_ENROLLED')
+    } elseif (-not ($state.windows -and $state.caller_non_elevated -and
               $state.config_schema_valid -and $state.distinct_non_admin_sid_configured -and
               $state.untrusted_identities_isolated)) {
         $reasons.Add('NATIVE_READONLY_PREREQUISITES_MISSING')
@@ -265,12 +300,23 @@ if ($NativeReadOnly) {
 # Keep all activation gates hard-false until separately observed native evidence.
 if (-not $state.config_disabled) { $reasons.Add('CONFIG_NOT_PROVEN_DISABLED') }
 if (-not $state.source_public_control_private_declared) { $reasons.Add('REPOSITORY_BINDING_UNPROVEN') }
-if (-not $state.distinct_non_admin_sid_configured) { $reasons.Add('DISTINCT_SID_UNPROVEN') }
+if ($state.account_mode -ceq 'PERSONAL_SINGLE_USER') {
+    if (-not $state.single_user_current_sid_match) {
+        $reasons.Add('SINGLE_USER_CURRENT_SID_UNPROVEN')
+    }
+    $reasons.Add('PERSONAL_RUNTIME_NOT_ENROLLED')
+} elseif (-not $state.distinct_non_admin_sid_configured) {
+    $reasons.Add('DISTINCT_SID_UNPROVEN')
+}
 if (-not $state.untrusted_identities_isolated) { $reasons.Add('UNTRUSTED_IDENTITIES_UNPROVEN') }
 if (-not $state.pinned_binary_hashes_configured) { $reasons.Add('PINNED_BINARY_HASHES_UNPROVEN') }
 if (-not $state.kill_marker_present) { $reasons.Add('KILL_MARKER_NOT_PROVEN') }
 if (-not $state.release_signature_present) { $reasons.Add('SIGNED_RELEASE_MISSING') }
-$reasons.Add('NATIVE_ACL_AND_TWO_ACCOUNT_IPC_NOT_VERIFIED')
+if ($state.account_mode -ceq 'PERSONAL_SINGLE_USER') {
+    $reasons.Add('SINGLE_USER_NATIVE_AUTHORIZATION_NOT_VERIFIED')
+} else {
+    $reasons.Add('NATIVE_ACL_AND_TWO_ACCOUNT_IPC_NOT_VERIFIED')
+}
 $reasons.Add('PRIVATE_CONTROL_PROVENANCE_NOT_VERIFIED')
 $state.block_reasons = @($reasons)
 # Intentionally no enable/install/apply mode; absence of independent proof is HOLD.
