@@ -865,3 +865,47 @@ def test_v22_independent_baseline_oracle_rejects_manifest_argv(tmp_path):
             repo=tmp_path, changed_paths=set(ctx["changed_paths"]),
             base_paths=set(ctx["base_paths"]),
             base_groups=ctx["existing_groups"])
+
+
+def test_v22_ef02_replays_dynamic_argv_against_immutable_git_baseline(tmp_path, monkeypatch):
+    """No provider invocation: actual Git baseline + receipt binding replay."""
+    import subprocess
+    import copy
+    from ai_commerce.engineering import minimum_test as mt
+    from ai_commerce.engineering.impact_v21 import (
+        registered_action_plan, verified_onboarding_binding)
+    old_src = "src/ai_commerce/learning/export.py"
+    old_test = "tests/test_prior.py"
+    mk(tmp_path, old_src)
+    mk(tmp_path, old_test)
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=tmp_path, stderr=subprocess.DEVNULL).decode().strip()
+    git("init", "-q")
+    git("config", "core.autocrlf", "false")
+    git("add", ".")
+    git("-c", "user.name=MT01", "-c", "user.email=mt01@example.invalid", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD")
+    baseline_files = mt.file_hashes(tmp_path)
+    _, data, ctx = _v22_manifest_fixture(tmp_path)
+    monkeypatch.setattr(mt, "approved_groups", lambda: ctx["existing_groups"])
+    ingress = ["python", "-m", "pytest", "tests/test_mt01_v21.py", "-q", "-n", "12"]
+    profiles = {"mt01-component-onboarding": ingress}
+    plan = registered_action_plan(
+        repo=tmp_path, base_sha=base, base_files=baseline_files,
+        candidate_files=mt.file_hashes(tmp_path),
+        changed_paths=ctx["changed_paths"],
+        required_acs=data["acs"], fallback_argv=ingress,
+        groups=ctx["existing_groups"], registered_profiles=profiles,
+        allowed_paths=ctx["allowed_paths"])
+    binding = next(g["binding"] for g in plan["groups"] if g["group"] == "fresh")
+    kwargs = dict(workspace=tmp_path, binding=binding,
+                  changed_paths=ctx["changed_paths"],
+                  allowed_paths=ctx["allowed_paths"], base_sha=base,
+                  registered_profiles=profiles, expected_group="fresh")
+    assert verified_onboarding_binding(**kwargs)
+    assert not verified_onboarding_binding(**{**kwargs, "expected_group": "prior"})
+    copied = copy.deepcopy(binding)
+    copied["argv"] = ["python", "-m", "pytest", "tests", "-q", "-n", "12"]
+    assert not verified_onboarding_binding(**{**kwargs, "binding": copied})
+    assert not verified_onboarding_binding(**{**kwargs,
+           "allowed_paths": ("tests/test_prior.py",)})
