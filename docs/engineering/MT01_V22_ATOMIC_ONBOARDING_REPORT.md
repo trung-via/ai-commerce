@@ -1,21 +1,36 @@
-# MT-01 V2.2 — Atomic Component Onboarding engineering checkpoint
+# MT-01 V2.2 — Atomic Component Onboarding
 
-## Authorization and status
-- Human approved Option C on 2026-11-03; [Issue #260](https://github.com/trung-via/ai-commerce/issues/260) records normative scope and mandatory negative acceptance.
-- Main at branch creation: `e96c374a90f4a786710a1b39c126d234b34160d9`.
-- **STATUS: PARTIAL IMPLEMENTATION / DRAFT / NO ENGINEERING OR BRAIN ACCEPTANCE.**
-- Current patch only introduces a pure bounded, data-only new-owner manifest validator in `impact_v21.py` and adversarial tests. This validation alone does **NOT** enable EF02 onboarding, candidate-based test execution, trusted CI or production merge.
+## Human decision and scope
+Human adopted Option C on 2026-11-03: eliminate the preregistration PR for each new Roadmap A component while preserving EF02 scope and immutable evidence. Engineering Issue [#260](https://github.com/trung-via/ai-commerce/issues/260) is the accepted implementation handoff.
 
-## Current code
-`validate_component_onboarding_manifest()` enforces strict version+fields, finite sources/tests/ACs, no executable argv/globs, no overlap with main-owned source/tests, new paths within actual diff+allowed_paths, fixed `work_items/mt01-components/<name>.json`, contract and consumer closure against main, no symlink/path traversal, on-disk manifest byte hash and an explicit `VALIDATED_DATA_ONLY_NOT_VERIFICATION_PASS` status.
+- Replacement single review PR: [#265](https://github.com/trung-via/ai-commerce/pull/265), based on `main@b46e4a14889bc127085abd7b9769b0219b430c2a` with HostOps #262/#263 preserved.
+- Obsolete conflicted Draft PR [#261](https://github.com/trung-via/ai-commerce/pull/261) was closed **without merge**.
+- A17.1 EF02 Issue #258 was NOT retried, modified or re-dispatched.
 
-Tests cover valid new component, reownership, path traversal, executor-command injection, missing/symlinked files, source family escape, untrusted consumer, duplicate sources/ACs, incomplete allowed_paths and exact on-disk mismatch.
+## Implemented on review branch
+1. One registered *ingress-only* `mt01-component-onboarding` profile in the protected registry. EF02 v1 Issue schema, owner/issuer authentication, claim and source integrity are unchanged.
+2. Static, versioned `MT01ComponentOwner.v1` manifest under `work_items/mt01-components/<id>.json`; the manifest is DATA, never executable code or pytest argv. Constrained fields are sources, tests, AC, consumers, contracts. Validation enforces exact on-disk bytes, new owner uniqueness, actual changed paths, signed scope (finite directory prefixes permitted), contract/test existence and path/symlink safety.
+3. Post-executor MT01 V2.1/V2.2 dynamically derives finite `python -m pytest <reviewed tests> -q -n 12` for new groups; legacy consumer owners are also selected even when untouched. Unmapped code, missing manifest/profile, unproven AC and aggregate fan-in HOLD, never implicitly expand to full.
+4. EF02 independently replays new-owner mapping against immutable Git base, source diff, signed allowed paths, manifest hash, expected test argv, exact compiled evidence and actual candidate bytes. Fake ingress argv is not accepted as dynamic verification.
+5. PR CI discovers only new declarative owner manifests, then computes ordinary impact tests. Independent stdlib baseline oracle enforces old + new owner test closure; protected merge gate re-fetches exact GitHub manifest blobs by PR HEAD and independently rechecks owners, legacy consumers and both-OS artifacts/JUnit. No candidate manifest is executed as Python.
+6. PR-only workflow concurrency cancels superseded PR runs. Main push CI is not canceled. Hosted pytest remains 4 workers; self-hosted EF02 requests 12.
 
-## Critical unfinished scope — do not prematurely merge
-1. Base register trusted `mt01-component-onboarding` ingress profile and preserve fixed v1 packet authorization/role/claim validation. Must not allow executor-written arbitrary `.github` paths.
-2. Add post-executor candidate manifest load to MT-01 + V2.1 impact selection; derive trusted finite test argv `python -m pytest <approved paths> -q -n 12` and link actual source/test/AC/consumer closure; bind manifest+test/env hashes in EF01 and EF02 receipt/transport.
-3. Independent PR CI/base oracle/merge gate must inspect candidate manifest as data from pinned GitHub blobs (not imported code), union existing owners, prohibit omissions and verify both-OS JUnit and ZIP.
-4. Replay A17-before-PR#256 **offline only**, simulate unknown/missing/forged source, stale profiles, 12-workers, cross-component tests, fan-in, wrong HEAD/base and existing legacy component regression. No retry EF02 #258; no live provider calls or external publish.
-5. Verify exact-HEAD CI on both OS; Brain review only after all ACs are proven. Maintain V2.1 rollback.
+## Tests authored
+- Good manifest admission, exact bytes, file and git-tree source, path-prefix authorization and scoped argv from a new owner;
+- Malicious extras, shell argv, re-own baseline, duplicate IDs, symlink/path traversal, unknown consumers, missing manifest/source/tests, incorrect group/argv and allowed scope;
+- Real temporary Git baseline replay of EF02 binding;
+- Independent merge-gate GitHub blob SHA & changed-file source proofs;
+- Baseline oracle omission of old consumer tests, manifest tampering, invalid test path;
+- CI concurrency source invariant.
 
-Do not use this PR as proof that new components currently run through one EF02 PR. It deliberately remains DRAFT until all five workstreams are implemented.
+## Status, known limitations, no false claims
+**ENGINEERING_IMPLEMENTED_ON_DRAFT / BRAIN_ACCEPTANCE_PENDING / NO_MERGE.**
+
+The source now contains the main V2.2 implementation, but final exact-HEAD Ubuntu+Windows CI and ZIP/JUnit artifacts have NOT yet been independently accepted at the time of writing. Earlier #261 builds failed an overly strict success reason assertion (`SCOPED_CONSUMER_CLOSURE`), then a later exact commit passed; that evidence is NOT transferable to #265 current HEAD. A live EF02 executor-to-candidate-to-auto-merge demonstration has not occurred. Aggregate multi-component onboarding explicitly returns HOLD until exact-tree fan-in proof exists.
+
+### Remaining acceptance before marking Ready
+1. Read exact current #265 HEAD/base/main and latest Ubuntu+Windows CI run; verify actual selected/collected/executed counts, oracle, Node, artifact ZIP/JUnit and closure, not just workflow SUCCESS.
+2. Repair any failed targeted tests within #265 and rerun scoped verification. Confirm the baseline consumer tests are included by deliberate A17-before-#256 offline canary (no paid executor).
+3. Independent Brain source/security review of the 13-file diff and protected file changes; keep Draft / HOLD if any AC or CI is UNKNOWN.
+4. Only after successful evidence and current-base reconciliation can authenticated Brain PASS trigger the existing guarded auto-merge. Do not manually merge Draft or bypass exact-tree checks.
+5. Preserve V2.1 rollback; collect runtime measurements later. No unverified percentage speed saving is claimed.
