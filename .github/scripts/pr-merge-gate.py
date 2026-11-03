@@ -27,6 +27,8 @@ from typing import Any, Callable
 # This module is loaded by filename during auto-merge unit tests as well as CI.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mt01_v21_proof import validate_receipt_zip
+from mt01_v21_oracle import trusted_baseline_manifest_groups
+import subprocess
 
 # Brain PASS auto-merge workflow checks out protected main. Load only its reviewed registry source:
 # no package __init__, pip dependencies or PR-controlled Python imports.
@@ -42,6 +44,27 @@ def approved_groups():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module.approved_groups()
+
+
+def protected_owner_groups():
+    """Main-branch registry plus previously merged declarative manifests.
+
+    Reads only the protected checkout's pinned Git HEAD, never PR-controlled
+    source, to preserve ownership in every subsequent component update.
+    """
+    groups = tuple(approved_groups())
+    repo = Path(__file__).resolve().parents[2]
+    manifest_dir = repo / "work_items" / "mt01-components"
+    if not manifest_dir.exists():
+        return groups
+    proc = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo,
+        capture_output=True, text=True, timeout=20, check=False)
+    if proc.returncode or not re.fullmatch(r"[0-9a-f]{40}", proc.stdout.strip()):
+        raise ValueError("PROTECTED_BASELINE_SHA_UNPROVEN")
+    return (*groups, *trusted_baseline_manifest_groups(
+        repo=repo, base_sha=proc.stdout.strip(), base_groups=groups))
+
 
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
@@ -372,7 +395,7 @@ def reviewed_manifest_groups_for_pr(api: Callable, base: str, head: str,
             or ONBOARDING_REGISTRY_PATH in changes
             or any(changes[p] != "added" for p in paths)):
         raise ValueError("MANIFEST_ONBOARDING_CHANGE_UNREVIEWED")
-    current = approved_groups()
+    current = protected_owner_groups()
     existing_names = {g.name for g in current}
     owned = {p for g in current for p in
              (*g.paths, *g.tests, *g.consumers, *g.contracts)}
@@ -476,7 +499,7 @@ def reviewed_coverage_for_changed_files(files: object, *, onboarded_groups=()):
         return None
     # The merge gate's main-tree owner map is independent of candidate plans.
     # Existing components inherit full reviewed owner/consumer obligations.
-    groups = approved_groups()
+    groups = protected_owner_groups()
     newly_owned = {}
     for admission in onboarded_groups:
         for consumer in admission.get("consumers", ()):
