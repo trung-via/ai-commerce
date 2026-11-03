@@ -4,9 +4,47 @@ from __future__ import annotations
 import ctypes
 import os
 from pathlib import Path
+import shutil
 import stat
 
-from .contract import decode, deny, shape
+from .contract import CONTROL_REPOSITORY, SOURCE_REPOSITORY, decode, deny, digest, ident, sha, shape, text
+
+
+def prefer_readable_pwsh_path():
+    """Prefer a byte-readable pwsh binary over an unreadable WindowsApps AppExecLink stub."""
+    if os.name != "nt":
+        return shutil.which("pwsh")
+    current = shutil.which("pwsh")
+    if current:
+        try:
+            with Path(current).open("rb") as handle:
+                handle.read(4)
+            return current
+        except OSError:
+            pass
+    entries = os.environ.get("PATH", "").split(os.pathsep)
+    readable_dirs = []
+    other_dirs = []
+    for entry in entries:
+        candidate = Path(entry) / "pwsh.exe" if entry else None
+        is_readable = False
+        if candidate is not None:
+            try:
+                if candidate.is_file():
+                    with candidate.open("rb") as handle:
+                        is_readable = bool(handle.read(4))
+            except OSError:
+                is_readable = False
+        if is_readable:
+            readable_dirs.append(entry)
+        else:
+            other_dirs.append(entry)
+    if readable_dirs:
+        os.environ["PATH"] = os.pathsep.join([*readable_dirs, *other_dirs])
+    return shutil.which("pwsh")
+
+
+prefer_readable_pwsh_path()
 
 
 def windows_identity(process=None):
@@ -165,3 +203,74 @@ def admit(config, config_path):
         windows_acl(key, trusted, private_readers=trusted | {transport})
     elif key.stat().st_mode & 0o007:
         deny("ACL_SECRET_EXPOSED")
+
+
+CONFIG_KEYS_V4 = CONFIG_KEYS + " source_repository control_repository"
+NON_BROKER_SIDS = frozenset({"S-1-5-18", "S-1-5-19", "S-1-5-20", "S-1-5-32-544", "0"})
+
+
+def _validate_v4_config_dict(config):
+    shape(config, CONFIG_KEYS_V4)
+    if config["schema"] != "hostops.config.v4" or type(config["enabled"]) is not bool:
+        deny("BAD_CONFIG")
+    if (config["source_repository"] != SOURCE_REPOSITORY or
+            config["control_repository"] != CONTROL_REPOSITORY):
+        deny("REPOSITORY_MISMATCH")
+    ident(config["host_id"])
+    text(config["broker_identity"], 256)
+    text(config["transport_identity"], 256)
+    for key in ("policy_dir", "state_dir", "transport_state_dir", "release_dir", "ssh_keygen", "pwsh"):
+        text(config[key])
+        if not Path(config[key]).is_absolute() or str(config[key]).startswith("\\\\"):
+            deny("BAD_CONFIG")
+    text(config["endpoint"])
+    for key in ("ssh_keygen_sha256", "pwsh_sha256"):
+        sha(config[key])
+    for key in ("untrusted_identities", "trusted_owners"):
+        if type(config[key]) is not list or not config[key] or len(config[key]) > 32:
+            deny("BAD_CONFIG")
+        for item in config[key]:
+            text(item, 256)
+    if (config["broker_identity"] == config["transport_identity"] or
+            config["broker_identity"] in config["untrusted_identities"] or
+            config["transport_identity"] in config["untrusted_identities"] or
+            config["broker_identity"] in config["trusted_owners"] or
+            config["transport_identity"] in config["trusted_owners"] or
+            set(config["trusted_owners"]) & set(config["untrusted_identities"])):
+        deny("IDENTITIES_NOT_ISOLATED")
+    return config
+
+
+def load_config_v4(path):
+    """Strict V4 configuration loader; rejects v3 schemas and mismatched repos."""
+    return _validate_v4_config_dict(decode(Path(path).read_bytes()))
+
+
+def admit_v4(config, config_path):
+    """Strict V4 admission; enforces disabled/KILL gates, non-admin SIDs, and ACLs."""
+    _validate_v4_config_dict(config)
+    if not config["enabled"] or (Path(config["policy_dir"]) / "KILL").exists():
+        deny("KILL_SWITCH")
+    if "0" * 64 in (config["ssh_keygen_sha256"], config["pwsh_sha256"]):
+        deny("VERIFIER_UNVERIFIED")
+    for exe_key, sha_key, err_code in (
+        ("ssh_keygen", "ssh_keygen_sha256", "VERIFIER_UNVERIFIED"),
+        ("pwsh", "pwsh_sha256", "POWERSHELL_UNVERIFIED"),
+    ):
+        exe = Path(config[exe_key])
+        if not exe.is_absolute() or not exe.is_file() or digest(exe.read_bytes()) != config[sha_key]:
+            deny(err_code)
+    broker, transport = config["broker_identity"], config["transport_identity"]
+    if broker in NON_BROKER_SIDS or transport in NON_BROKER_SIDS:
+        deny("ELEVATION_DENIED")
+    if (broker.startswith("REPLACE_WITH_") or transport.startswith("REPLACE_WITH_") or
+            any(str(item).startswith("REPLACE_WITH_") for item in config["untrusted_identities"])):
+        deny("IDENTITIES_NOT_ISOLATED")
+    admit(config, config_path)
+    transport_root = Path(config["transport_state_dir"])
+    if transport_root.exists():
+        for p in (transport_root, *transport_root.rglob("*")):
+            s = p.lstat()
+            if stat.S_ISLNK(s.st_mode) or getattr(s, "st_file_attributes", 0) & 0x400:
+                deny("INSTALL_REPARSE_DENIED")
+
