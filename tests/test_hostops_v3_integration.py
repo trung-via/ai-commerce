@@ -1157,7 +1157,7 @@ def test_personal_local_inspect_needs_local_console_matching_sid_and_consent(
         "console_confirmation_received": True,
         "architecture": "X64", "logical_cpu_count": 8,
         "github_contacted": False, "broker_started": False,
-        "private_keys_used": False, "filesystem_written": False,
+        "private_keys_used": False, "operation_file_write_requested": False,
         "ready_to_enable": False}
     assert sid not in output.out + output.err
     assert not called and config_file.read_bytes() == before
