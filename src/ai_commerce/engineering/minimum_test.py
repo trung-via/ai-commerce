@@ -304,7 +304,7 @@ def approved_groups() -> tuple[TestGroup, ...]:
             "tests/test_hostops_v3_repair.py",
         ), ("HOSTOPS.v3.security-contract", "HOSTOPS.v3.issue225-matrix"),
                    sources("hostops_v3",
-                           "__init__ contract auth filesystem journal worker security broker transport cli personal_session")
+                           "__init__ contract auth filesystem journal worker security broker transport cli")
                    ,
                    # Executable CLI/PowerShell entrypoints are governed interface
                    # contracts in this first-component onboarding snapshot;
