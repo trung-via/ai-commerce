@@ -834,17 +834,33 @@ class GitHubAPI:
 
 
 def candidates(api: Callable, repo: str, event: dict) -> list[tuple[int, str | None]]:
-    """Only a canonical Brain PASS/HOLD comment or matching PR CI completion."""
-    if "comment" in event and "issue" in event:
-        c = event["comment"]
-        issue = event["issue"]
-        if (not issue.get("pull_request") or not isinstance(c.get("user"), dict) or
-                c["user"].get("login") != repo.split("/")[0]
-                or c.get("author_association") != "OWNER" or parse_approval(c.get("body")) is None):
+    """Only a canonical owner PR review wake or matching PR CI completion.
+
+    Review is a SIGNAL, not an approval source. verify_one() independently
+    re-fetches the latest exact owner-authenticated PR Conversation PASS/HOLD
+    and exact-head/base/CI oracle before any merge side effect.
+    """
+    pr, review = event.get("pull_request"), event.get("review")
+    if isinstance(pr, dict) and isinstance(review, dict):
+        directive = parse_approval(review.get("body"))
+        number = pr.get("number")
+        head = pr.get("head", {}).get("sha")
+        base = pr.get("base", {}).get("sha")
+        if (event.get("action") != "submitted" or
+                review.get("state") != "commented" or
+                not isinstance(review.get("user"), dict) or
+                review["user"].get("login") != repo.partition("/")[0] or
+                review.get("author_association") != "OWNER" or
+                type(number) is not int or not SHA.fullmatch(str(head)) or
+                not SHA.fullmatch(str(base)) or pr.get("state") != "open" or
+                review.get("commit_id") != head or
+                not directive or directive["revoke"] or
+                (directive["pr"], directive["head"], directive["base"]) !=
+                    (number, head, base)):
             return []
-        number = issue.get("number")
-        directive = parse_approval(c["body"])
-        return [(number, None)] if type(number) is int and directive["pr"] == number else []
+        return [(number, head)]
+    # Ordinary Issue comments are intentionally NOT a trigger. GitHub would
+    # otherwise create one Skipped workflow run per EF02/HostOps comment.
     run = event.get("workflow_run")
     if not isinstance(run, dict) or run.get("name") != "EF02 source tests" or run.get("event") != "pull_request":
         return []
