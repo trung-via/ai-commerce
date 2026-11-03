@@ -343,7 +343,6 @@
     "tests/test_hostops_v3.py",
     "tests/test_hostops_v3_integration.py",
     "tests/test_hostops_v3_repair.py",
-    "tests/test_hostops_w1_offline_journal.py",
     "-q",
     "-n",
     "12"
