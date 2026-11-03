@@ -1228,6 +1228,141 @@ def test_personal_local_inspect_rejects_nonlocal_config(tmp_path, monkeypatch, c
     assert "HOSTOPS_V4_BLOCKED" in capsys.readouterr().err
 
 
+def test_personal_r1_private_issue_validates_request_provenance_replay_and_receipt():
+    """One immutable private fixed read, no arbitrary operation or disclosure."""
+    from ai_commerce.hostops_v3 import transport as t
+    source, issue_id, issued = "a"*40, 420, 1800000000
+    request = {"schema":"hostops.personal.remote_read.v1",
+        "request_id":"r1-"+"b"*24, "source_repository":"trung-via/ai-commerce",
+        "control_repository":"trung-via/ai-commerce-hostops-control",
+        "source_sha":source, "operation":"local_os_inventory",
+        "parameters":{}, "issued_at":issued, "expires_at":issued+300}
+    prefix = "/repos/trung-via/ai-commerce-hostops-control"
+    class FakeAPI:
+        repo = {"private":True,"full_name":"trung-via/ai-commerce-hostops-control"}
+        issue = {"number":issue_id,"state":"open","title":"[HOSTOPS-R1] local_os_inventory",
+                 "user":{"login":"trung-via"},"body":c.canonical(request).decode()}
+        comments = []
+        def get(self, path):
+            if path == prefix: return self.repo
+            if path == prefix+"/issues/420": return self.issue
+            if path == prefix+"/issues/420/comments?per_page=100": return self.comments
+            raise AssertionError("unexpected route: "+path)
+        def post(self, path, data):
+            assert path == prefix+"/issues/420/comments"
+            self.last = data["body"]
+            return {"id":30,"body":self.last}
+    api=FakeAPI()
+    assert t.personal_remote_prepare(api,issue_id,source,now=issued+60)==request
+    receipt=t.personal_remote_publish(api,issue_id,request,{"architecture":"X64","logical_cpu_count":22})
+    assert receipt["status"]=="OBSERVED_HUMAN_ATTENDED"
+    assert receipt["result"]["broker_started"] is False
+    assert receipt["result"]["ready_to_enable"] is False
+    assert api.last.startswith("HOSTOPS_R1_RESULT\n")
+    assert not any(x in api.last for x in ("S-1-5-21", "github_pat_", "USERPROFILE"))
+    api.comments=[{"body":api.last}]
+    with pytest.raises(c.Denied,match="REMOTE_RESULT_ALREADY_PRESENT"):
+        t.personal_remote_prepare(api,issue_id,source,now=issued+60)
+    api.comments=[]
+    for mutation in [
+        {"operation":"powershell"},{"parameters":{"path":"C:\\Users"}},
+        {"source_sha":"c"*40},{"request_id":"invalid"},
+        {"expires_at":issued+601},{"extra":"shell"},{"control_repository":"trung-via/ai-commerce"},
+        {"schema":"hostops.request.v3"}]:
+        api.issue={**FakeAPI.issue,"body":c.canonical({**request,**mutation}).decode()}
+        with pytest.raises(c.Denied):
+            t.personal_remote_prepare(api,issue_id,source,now=issued+60)
+    api.issue=dict(FakeAPI.issue)
+    for mutation in [{"private":False},{"full_name":"trung-via/ai-commerce"}]:
+        api.repo={**FakeAPI.repo,**mutation}
+        with pytest.raises(c.Denied,match="PRIVATE_CONTROL_UNVERIFIED"):
+            t.personal_remote_prepare(api,issue_id,source,now=issued+60)
+    api.repo=dict(FakeAPI.repo)
+    for mutation in [{"state":"closed"},{"user":{"login":"attacker"}},{"title":"[HOSTOPS3] unsafe"}]:
+        api.issue={**FakeAPI.issue,**mutation}
+        with pytest.raises(c.Denied,match="OWNER_ISSUE_UNVERIFIED"):
+            t.personal_remote_prepare(api,issue_id,source,now=issued+60)
+    api.issue=dict(FakeAPI.issue)
+    for now in (issued-1,issued+301):
+        with pytest.raises(c.Denied,match="REMOTE_REQUEST_EXPIRED"):
+            t.personal_remote_prepare(api,issue_id,source,now=now)
+    api.comments=[{"body":"unrelated"}]*100
+    with pytest.raises(c.Denied,match="REMOTE_REPLAY_UNVERIFIED"):
+        t.personal_remote_prepare(api,issue_id,source,now=issued+60)
+    for invalid in ({"architecture":"X64","logical_cpu_count":-1},
+                    {"architecture":"X64","logical_cpu_count":True},
+                    {"architecture":"X64","logical_cpu_count":22,"secret":"leak"}):
+        with pytest.raises(c.Denied):
+            t.personal_remote_publish(api,issue_id,request,invalid)
+    api.post=lambda *_a,**_kw: (_ for _ in ()).throw(c.Denied("GITHUB_UNAVAILABLE"))
+    with pytest.raises(c.Denied,match="REMOTE_POST_UNKNOWN"):
+        t.personal_remote_publish(api,issue_id,request,{"architecture":"X64","logical_cpu_count":22})
+
+
+def test_personal_r1_cli_requires_single_user_nonadmin_console_and_exact_consent(
+        tmp_path,monkeypatch,capsys):
+    import builtins
+    import getpass
+    import sys as sysmod
+    import platform as machine
+    sid="S-1-5-21-12345-67890-13579-1001"
+    cfg=security.load_config_v4(ROOT/"config/hostops-v3/config-v4.example.json")
+    cfg["broker_identity"]=sid
+    cfg["transport_identity"]=sid
+    cfg["policy_dir"]=str(tmp_path/"policy")
+    file=tmp_path/"local.json"
+    file.write_bytes(c.canonical(cfg))
+    options=["personal-remote-once","--config",str(file),"--issue","420"]
+    req={"request_id":"r1-"+"a"*24,"source_sha":"b"*40}
+    seen=[]
+    monkeypatch.setattr(cli,"os",SimpleNamespace(name="nt",cpu_count=lambda:22))
+    monkeypatch.setattr(cli,"sys",SimpleNamespace(
+        stdin=SimpleNamespace(isatty=lambda:True),stdout=SimpleNamespace(isatty=lambda:True),
+        stderr=sysmod.stderr))
+    monkeypatch.setattr(cli,"windows_identity",lambda:(sid,False))
+    monkeypatch.setattr(cli.subprocess,"run",lambda cmd,**kw:SimpleNamespace(
+        returncode=0,stdout=("b"*40+"\n") if "rev-parse" in cmd else "",stderr=""))
+    monkeypatch.setattr(machine,"machine",lambda:"AMD64")
+    monkeypatch.setattr(getpass,"getpass",lambda *_:"ephemeral-private-token")
+    monkeypatch.setattr(cli,"personal_remote_prepare",lambda api,issue,sha: seen.append(("prepare",issue,sha)) or req)
+    monkeypatch.setattr(cli,"personal_remote_publish",lambda api,issue,r,inventory:
+        seen.append(("publish",issue,inventory)) or {"status":"OBSERVED_HUMAN_ATTENDED"})
+    monkeypatch.setattr(builtins,"input",lambda:"ALLOW READ 420 "+req["request_id"])
+    before=file.read_bytes()
+    assert cli.main_v4(options)==0
+    output=capsys.readouterr()
+    assert "HOSTOPS_R1_RESULT_POSTED" in output.out
+    assert sid not in output.out and "ephemeral-private-token" not in output.out
+    assert seen[0]==("prepare",420,"b"*40)
+    assert seen[1]==("publish",420,{"architecture":"X64","logical_cpu_count":22})
+    assert file.read_bytes()==before
+    for mutation in [
+        {"confirm":"reject"},{"sid":"S-1-5-18"},{"elevated":True},
+        {"osname":"posix"},{"tty":False},{"flags":["--output",str(tmp_path/"leak")]},
+        {"flags":["--token-file",str(tmp_path/"token")]}]:
+        seen.clear()
+        monkeypatch.setattr(cli,"os",SimpleNamespace(name=mutation.get("osname","nt"),cpu_count=lambda:22))
+        tty=mutation.get("tty",True)
+        monkeypatch.setattr(cli,"sys",SimpleNamespace(
+            stdin=SimpleNamespace(isatty=lambda:tty),stdout=SimpleNamespace(isatty=lambda:tty),
+            stderr=sysmod.stderr))
+        monkeypatch.setattr(cli,"windows_identity",lambda m=mutation:(m.get("sid",sid),m.get("elevated",False)))
+        monkeypatch.setattr(builtins,"input",lambda m=mutation:m.get("confirm","ALLOW READ 420 "+req["request_id"]))
+        assert cli.main_v4([*options,*mutation.get("flags",[])])==2
+        assert not (tmp_path/"leak").exists()
+        assert not any(x[0]=="publish" for x in seen)
+    monkeypatch.setattr(cli,"os",SimpleNamespace(name="nt",cpu_count=lambda:22))
+    monkeypatch.setattr(cli,"sys",SimpleNamespace(
+        stdin=SimpleNamespace(isatty=lambda:True),stdout=SimpleNamespace(isatty=lambda:True),
+        stderr=sysmod.stderr))
+    monkeypatch.setattr(cli,"windows_identity",lambda:(sid,False))
+    monkeypatch.setattr(builtins,"input",lambda:"ALLOW READ 420 "+req["request_id"])
+    monkeypatch.setattr(cli,"personal_remote_publish",
+                        lambda *_a,**_kw: (_ for _ in ()).throw(c.Denied("REMOTE_POST_UNKNOWN")))
+    assert cli.main_v4(options)==3
+    assert "HOSTOPS_R1_UNKNOWN" in capsys.readouterr().err
+
+
 def test_v4_legacy_two_account_contract_rejects_equal_sid(h):
     cfg = _v4_config(h)
     assert cfg["schema"] == "hostops.config.v4"
