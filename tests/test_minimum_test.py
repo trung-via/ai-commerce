@@ -1424,8 +1424,10 @@ def test_mt01_project_model_policy_is_reviewed_ef01_consumer():
 
 
 def test_pr_ci_real_a12_component_can_select_narrow_test_files(pr_ci_module):
+    import subprocess
+    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     result = pr_ci_module.choose(
-        ROOT, event="pull_request", base="a" * 40,
+        ROOT, event="pull_request", base=base,
         paths={"src/ai_commerce/product/identity.py"},
     )
     assert result[1] == "SELECTED_AFFECTED_INTEGRATION", result
