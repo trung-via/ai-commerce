@@ -252,7 +252,7 @@ def _validate_v4_config_dict(config):
         native_absolute = Path(value).is_absolute()
         offline_windows_absolute = (config["enabled"] is False and
                                     PureWindowsPath(value).is_absolute())
-        if value.startswith("\\\\") or not (native_absolute or offline_windows_absolute):
+        if value.startswith(("\\\\", "//")) or not (native_absolute or offline_windows_absolute):
             deny("BAD_CONFIG")
     text(config["endpoint"])
     for key in ("ssh_keygen_sha256", "pwsh_sha256"):
