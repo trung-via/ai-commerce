@@ -563,6 +563,14 @@ def registered_action_plan(
         executable = shutil.which(argv[0]) if argv else None
         paths = (set(group.tests) | set(group.paths) | set(group.consumers) |
                  set(group.contracts) | (set(changed_paths) & set(impact.affected_paths)))
+        if new_owner:
+            # Nonexecutable review documents and work-item records are still
+            # changed candidate bytes: include them in immutable evidence so
+            # EF02's all-changed-files coverage check cannot be bypassed.
+            reviewed_auxiliary = {p for p in changed_paths if p in set(allowed_paths)
+                and ((p.startswith("docs/engineering/") and p.endswith(".md"))
+                     or (p.startswith("work_items/") and p.endswith(".json")))}
+            paths.update(reviewed_auxiliary)
         if aggregate_sources:
             # Current composed-source hashes are required by aggregate receipt verification.
             paths.update(candidate_files)
