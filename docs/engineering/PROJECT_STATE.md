@@ -1,5 +1,9 @@
 # AI Commerce — Living project state
 
+
+> **Chronological archive notice (2026-11-03).** This file's dated status sections cover earlier Roadmap and runner milestones; statements such as "not yet implemented" apply only to those timestamps. Do not treat them as current main status. After [PR #300](https://github.com/trung-via/ai-commerce/pull/300), active GitHub Actions and independent merge evidence are **Windows-only**; live HostOps/EF02/12-worker evidence still requires the Windows self-host. See the current PRs/Actions for the latest product and engineering disposition.
+
+
 Updated: 2026-10-29. Repository: `trung-via/ai-commerce`.
 
 ## Source of truth
