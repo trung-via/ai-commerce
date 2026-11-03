@@ -1529,10 +1529,10 @@ def test_hostops_v3_script_and_schema_change_select_registered_group(real_tree, 
 
 def test_xdist_receipt_must_be_unique_and_controller_grounded():
     parse = verification.observed_xdist_workers
-    assert parse(b"12 workers [100 items]\\ncreated: 12/12 workers") is None
-    assert parse(b"MT01_XDIST_WORKERS_COLLECTED=12\\n") == 12
-    assert parse(b"MT01_XDIST_WORKERS_COLLECTED=0\\r\\n") == 0
-    assert parse(b"MT01_XDIST_WORKERS_COLLECTED=12\\nMT01_XDIST_WORKERS_COLLECTED=8\\n") is None
+    assert parse(b"12 workers [100 items]\ncreated: 12/12 workers") is None
+    assert parse(b"MT01_XDIST_WORKERS_COLLECTED=12\n") == 12
+    assert parse(b"MT01_XDIST_WORKERS_COLLECTED=0\r\n") == 0
+    assert parse(b"MT01_XDIST_WORKERS_COLLECTED=12\nMT01_XDIST_WORKERS_COLLECTED=8\n") is None
     assert parse(b"prefix MT01_XDIST_WORKERS_COLLECTED=12") is None
     assert parse(b"MT01_XDIST_WORKERS_COLLECTED=invalid") is None
 
@@ -1547,7 +1547,7 @@ def test_worker_observation_env_preserves_other_plugins_without_duplicates(monke
 def test_registered_parallel_success_without_receipt_is_unproven(mapped, monkeypatch):
     argv = ["python", "-m", "pytest", "tests/test_a.py", "-q", "-n", "12"]
     def run(argv, **kwargs):
-        return subprocess.CompletedProcess(argv, 0, "12 workers [3 items]\\n2 passed in 0.01s", "")
+        return subprocess.CompletedProcess(argv, 0, "12 workers [3 items]\n2 passed in 0.01s", "")
     monkeypatch.setattr(verification.subprocess, "run", run)
     outcome, selected, prior = _execute(
         mapped, registered_only=True, fallback_argv=[*FULL, "-n", "12"],
@@ -1583,7 +1583,7 @@ def test_live_twelve_workers_self_host_only(tmp_path):
         pytest.skip("requires explicit Windows self-host worker evidence opt-in")
     assert importlib.util.find_spec("xdist") is not None, "xdist must be installed on self-host"
     fixture = tmp_path / "test_worker_fixture.py"
-    fixture.write_text("def test_one():\\n    assert True\\n")
+    fixture.write_text("def test_one():\n    assert True\n")
     env = verification.pytest_observation_env()
     env.pop("PYTEST_ADDOPTS", None)
     env.pop("PYTEST_DISABLE_PLUGIN_AUTOLOAD", None)
