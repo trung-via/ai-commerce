@@ -266,6 +266,8 @@ def validation_v4(raw):
 
 def submit_v4(config, raw, *, reconcile=False):
     """V4 HMAC client; v3 CLI cannot invoke this function."""
+    if config.get("schema") == "hostops.config.v4.personal":
+        deny("PERSONAL_MODE_NOT_ENROLLED")
     envelope_data, request = dual_repo_envelope(raw)
     if request.value["operation"] not in READ_ONLY_V4:
         deny("OPERATION_NOT_ENABLED")
@@ -307,6 +309,8 @@ def report_v4(response):
 
 def poll_once_v4(api, config, release, issue_number, run_id, *, send=submit_v4):
     """Single Private Issue, no daemon/CLI activation in this stage."""
+    if config.get("schema") == "hostops.config.v4.personal":
+        deny("PERSONAL_MODE_NOT_ENROLLED")
     if not config.get("enabled") or (Path(config["policy_dir"]) / "KILL").exists():
         deny("KILL_SWITCH")
     if (release.get("schema") != "hostops.release.v4" or
@@ -342,6 +346,8 @@ def poll_once_v4(api, config, release, issue_number, run_id, *, send=submit_v4):
 
 def poll_inbox_v4(api, config, release, *, send=submit_v4):
     """One bounded V4 private control scan; never repeats reported runs."""
+    if config.get("schema") == "hostops.config.v4.personal":
+        deny("PERSONAL_MODE_NOT_ENROLLED")
     if not config.get("enabled") or (Path(config["policy_dir"]) / "KILL").exists():
         deny("KILL_SWITCH")
     if (release.get("schema") != "hostops.release.v4" or
