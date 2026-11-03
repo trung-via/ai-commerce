@@ -837,7 +837,7 @@ def test_v22_manifest_owner_admitted_from_exact_github_blob(gate):
     closure = gate.reviewed_coverage_for_changed_files(
         changed, onboarded_groups=reviewed)
     assert closure is not None
-    assert closure[1] == ("tests/test_fresh_service.py",)
+    assert closure[1] == ("tests/test_fresh_service.py", "tests/test_minimum_test.py")
 
 
 def test_v22_merge_gate_rejects_manifest_shell_and_owner_theft(gate):
