@@ -329,31 +329,21 @@ def test_manifest_has_exact_48_unique_existing_test_names():
 
 
 
-def test_hostops_v3_hosted_queue_is_digest_only_without_host_execution():
-    """Enforce hosted-only issue queue, no laptop executor or payload echo."""
+def test_hostops_v3_issue_queue_is_retired_and_personal_is_only_active_route():
+    """Legacy signed broker queue remains historical source, not live Issue ingress."""
     p = ROOT / ".github" / "workflows" / "hostops-v3.yml"
-    text = p.read_text(encoding="utf-8")
-    assert text.endswith(chr(10))
-    assert 'name: AI Commerce HostOps v3 signed broker queue' in text
-    assert 'run-name: "HostOpsV3 Issue #' in text
-    # Issue events are now routed by one shared top-level workflow.
+    assert not p.exists()
     ingress = (ROOT / ".github" / "workflows" / "issue-ingress.yml").read_text(encoding="utf-8")
-    assert '  workflow_call:' in text
-    assert '  issues:' not in text
-    assert '    types: [opened, labeled]' in ingress
-    assert 'uses: ./.github/workflows/hostops-v3.yml' in ingress
-    assert "github.event.action == 'opened'" in ingress
-    assert '  contents: read' in text
-    assert '    runs-on: windows-latest' in text
-    assert '        shell: pwsh' in text
-    assert 'HOSTOPS_V3_QUEUED_UNVERIFIED' in text
-    assert 'envelope_sha256=' in text
-    assert 'github.event.repository.private == true' in text
-    assert 'github.event.issue.user.login == github.repository_owner' in text
-    for forbidden in ('self-hosted', 'actions/checkout', 'secrets.', 'ssh-keygen -Y',
-                      'github.event.issue.body', 'broker --config',
-                      'hostops_v3.py', 'curl', 'wget'):
-        assert forbidden not in text
+    assert "  hostops-personal:" in ingress
+    assert "  ef02:" in ingress
+    for legacy in ("hostops-v3", "hostops-v2", "hostops-readonly"):
+        assert "  " + legacy + ":" not in ingress
+        assert "uses: ./.github/workflows/" + legacy + ".yml" not in ingress
+    assert "[HOSTOPS READ] " in ingress
+    assert "[HOSTOPS WRITE] " in ingress
+    assert "APPROVE WRITE #" in ingress
+    assert "github.event.repository.full_name == 'trung-via/ai-commerce'" in ingress
+    assert "github.event.comment.user.login == github.repository_owner" in ingress
 
 
 def _v4_fixture(h):

@@ -1002,8 +1002,7 @@ def test_noise_cleanup_and_issue_router_are_independently_covered(gate):
     """Keep trusted merge-gate witnesses independent of candidate MT01 map."""
     expected = {
         ".github/workflows/issue-ingress.yml": {
-            "tests/test_ef02.py", "tests/test_hostops_request.py",
-            "tests/test_hostops_v2.py", "tests/test_hostops_v3_integration.py",
+            "tests/test_ef02.py", "tests/test_hostops_personal.py",
             "tests/test_mt01_v21.py",
         },
         ".github/workflows/actions-skipped-cleanup.yml": {
@@ -1017,6 +1016,13 @@ def test_noise_cleanup_and_issue_router_are_independently_covered(gate):
             "tests/test_mt01_v21.py",
         },
     }
+    # Historical mappings remain reviewed solely for removal and rollback.
+    # None of these legacy workflow YAML files is present in the release.
+    for retired in ("hostops-readonly.yml", "hostops-v2.yml",
+                    "hostops-v3.yml", "hostops-ci.yml", "hostops-v2-ci.yml"):
+        path = ".github/workflows/" + retired
+        assert path in gate.REVIEWED_CONTROL_TESTS
+        assert not (ROOT / path).exists()
     for path, required_tests in expected.items():
         assert set(gate.REVIEWED_CONTROL_TESTS[path]) == required_tests
         paths, witness = gate.reviewed_coverage_for_changed_files([
@@ -1138,5 +1144,18 @@ def test_repository_wide_windows_only_audit():
         "historical_reference_samples": historical_references[:30],
     }
     print("WINDOWS_ONLY_REPO_AUDIT_V1=" + json.dumps(report, ensure_ascii=False))
-    assert active_workflows >= 20, "ACTIVE_WORKFLOW_INVENTORY_INCOMPLETE"
+    # Retiring obsolete workflows must not fail a hardcoded file-count floor.
+    # Require the actual reviewed routing/CI contracts instead.
+    essential = {
+        ".github/workflows/ef02-tests.yml",
+        ".github/workflows/ef02-batch.yml",
+        ".github/workflows/issue-ingress.yml",
+        ".github/workflows/brain-pass-auto-merge.yml",
+        ".github/workflows/actions-skipped-cleanup.yml",
+    }
+    existing = {p for p in tracked if p.startswith(".github/workflows/")
+                and p.endswith((".yml", ".yaml")) and (ROOT / p).is_file()}
+    missing = sorted(essential - existing)
+    assert not missing, "ESSENTIAL_WORKFLOW_MISSING: " + repr(missing)
+    assert active_workflows >= len(essential), "ACTIVE_WORKFLOW_INVENTORY_INCOMPLETE"
     assert not blocking, "WINDOWS_ONLY_ACTIVE_DEPENDENCY_REMAINS: " + repr(blocking[:20])
