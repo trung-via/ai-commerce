@@ -2022,7 +2022,7 @@ def test_w1_native_fixture_has_no_remote_cli_or_runner_registration(h):
 
 # W1 attended-CLI bridge: no private GitHub token, service or remote polling.
 @pytest.mark.skipif(os.name != "nt", reason="requires real Windows native NT create")
-def test_w1_attended_cli_one_signed_file_and_ledger_replay_hold(h, tmp_path, monkeypatch):
+def test_w1_attended_cli_one_signed_file_and_ledger_replay_hold(h, tmp_path, monkeypatch, capsys):
     from ai_commerce.hostops_v3 import filesystem as fs
     from ai_commerce.hostops_v3.journal import OfflineW1IntentLedger
 
@@ -2070,8 +2070,24 @@ def test_w1_attended_cli_one_signed_file_and_ledger_replay_hold(h, tmp_path, mon
         root_file_index=root_id["file_index_hex"],
     )
     phrase = "CREATE W1 123 " + signed["request_id"]
+    # A nearly matching approval MUST fail before any intent or disk effect.
+    monkeypatch.setattr("builtins.input", lambda: phrase + " ")
+    with pytest.raises(c.Denied, match="W1_ATTENDED_CONSENT_DENIED"):
+        cli._w1_attended_command(args)
+    assert not (state / "w1-intent.sqlite3").exists()
+    assert not (h.data / cli.W1_PROOF_NAME).exists()
+    capsys.readouterr()
+
     monkeypatch.setattr("builtins.input", lambda: phrase)
     assert cli._w1_attended_command(args) == 0
+    output = capsys.readouterr().out
+    for checkpoint in (
+        "SIGNED_PRECONSENT", "CONSENT_EXACT", "STATE_RECHECK_PASSED",
+        "SIGNATURE_RECHECK_PASSED", "INTENT_RESERVED_UNKNOWN",
+        "NATIVE_READBACK_VERIFIED",
+    ):
+        assert "HOSTOPS_W1_CHECKPOINT=" + checkpoint in output
+    assert "approval_signature_b64" not in output
     dest = h.data / cli.W1_PROOF_NAME
     assert dest.read_bytes() == payload.encode("ascii")
     with OfflineW1IntentLedger(state / "w1-intent.sqlite3") as ledger:
@@ -2160,3 +2176,37 @@ def test_w1_android_public_signer_enrollment_exact_and_distinct_from_v2():
     # Public enrollment alone must not enable remote write or a worker route.
     assert "personal-w1-attended-once" in cli.V4_COMMANDS
     assert not hasattr(transport, "personal_w1_attended_once")
+
+
+@pytest.mark.parametrize("code,expected", [
+    ("W1_ATTENDED_CONSENT_DENIED", "W1_ATTENDED_CONSENT_DENIED"),
+    ("W1_ATTENDED_STATE_CHANGED", "W1_ATTENDED_STATE_CHANGED"),
+    ("W1_REQUEST_EXPIRED", "W1_REQUEST_EXPIRED"),
+    ("SIGNATURE_INVALID", "SIGNATURE_INVALID"),
+    ("W1_LEDGER_UNAVAILABLE", "W1_LEDGER_UNAVAILABLE"),
+    ("W1_NATIVE_EFFECT_UNKNOWN", "W1_NATIVE_EFFECT_UNKNOWN"),
+    ("PRIVATE_SENSITIVE_VALUE=/user/secret", "OTHER_BLOCKED"),
+])
+def test_w1_attended_cli_reports_only_allowlisted_local_diagnostic(
+        monkeypatch, capsys, code, expected):
+    def blocked(_):
+        raise c.Denied(code)
+    monkeypatch.setattr(cli, "_w1_attended_command", blocked)
+    assert cli.main(["personal-w1-attended-once"]) == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "HOSTOPS_W1_LOCAL_DENIAL=" + expected in output.err
+    assert "HOSTOPS_V4_BLOCKED" in output.err
+    assert "PRIVATE_SENSITIVE_VALUE" not in output.err
+    assert "/user/secret" not in output.err
+
+
+def test_w1_attended_cli_oserror_does_not_disclose_local_paths(monkeypatch, capsys):
+    def fail(_):
+        raise OSError("C:\\PRIVATE\\signer\\not-to-be-shown")
+    monkeypatch.setattr(cli, "_w1_attended_command", fail)
+    assert cli.main(["personal-w1-attended-once"]) == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "HOSTOPS_W1_LOCAL_DENIAL=OTHER_BLOCKED" in output.err
+    assert "C:\\PRIVATE" not in output.err
