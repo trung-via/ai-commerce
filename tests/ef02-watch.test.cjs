@@ -181,7 +181,10 @@ test('retired M0-R cancellation probe cannot bypass standard EF02 hosted authori
   assert.ok(validate.includes("$validationExit = $LASTEXITCODE"));
   assert.ok(execute.includes("needs.validate.result == 'success'"));
   assert.ok(execute.includes('runs-on: [self-hosted, Windows, ai-commerce-ef02]'));
-  assert.ok(execute.includes('python -m ai_commerce.remote run'));
+  // Two EF02 runner instances share one Windows account, not site-packages.
+  // The execute job must use the per-job isolated Python interpreter.
+  assert.ok(execute.includes('EF02_ISOLATED_PYTHON_NOT_SET'));
+  assert.ok(execute.includes('& $venvPython -m ai_commerce.remote run'));
   assert.ok(execute.includes('--issuer-login "$env:EF02_ISSUER" --owner-login "$env:EF02_OWNER"'));
 });
 
