@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from ai_commerce.hostops_v3 import contract as c, w1_bridge, w1_github_reader as reader
+from ai_commerce.hostops_v3 import contract as c, w1_bridge, w14_origin, w1_github_reader as reader
 from test_hostops_v3 import h, keys
 from test_hostops_w14_ingress import _personal_w1_signed_fixture
 
@@ -22,15 +22,17 @@ def payloads(proposal, verify):
         expected_source_sha=verify["expected_source_sha"], now=verify["now"])
     repo = {
         "full_name": c.CONTROL_REPOSITORY, "private": True,
-        "html_url": HTML, "id": 515,
-        "owner": {"login": "trung-via", "id": 42},
+        "html_url": HTML, "url": BASE, "id": w14_origin.REPO_ID,
+        "owner": {"login": "trung-via", "id": w14_origin.OWNER_ID},
     }
     n = verify["issue_number"]
     issue = {
         "number": n, "id": 900, "repository_url": BASE,
         "url": BASE + "/issues/" + str(n),
         "html_url": HTML + "/issues/" + str(n),
-        "state": "open", "user": {"login": "trung-via", "id": 42},
+        "state": "open", "user": {"login": "trung-via", "id": w14_origin.OWNER_ID},
+        "node_id": "I_0123456789",
+        "updated_at": "2026-11-04T00:00:00Z",
         "body": body,
     }
     return repo, issue
@@ -92,7 +94,7 @@ def test_w14_real_signed_rest_reader_never_enables_remote_write(h, monkeypatch):
     assert result["status"] == "GITHUB_ISSUE_SIGNATURE_CHECKED_NO_EFFECT"
     assert result["request_id"] == proposal["request_id"]
     assert result["source_sha"] == verify["expected_source_sha"]
-    assert (result["repo_id"], result["issue_id"]) == (515, 900)
+    assert (result["repo_id"], result["issue_id"]) == (w14_origin.REPO_ID, 900)
     assert result["human_signature_verified"] is True
     for field in ("github_origin_independently_attested",
                   "external_token_custody_proven", "replay_prevented",
@@ -126,6 +128,7 @@ def test_w14_real_signed_rest_reader_never_enables_remote_write(h, monkeypatch):
     ({"full_name": c.SOURCE_REPOSITORY}, {}),
     ({"html_url": "https://fake.github.invalid"}, {}),
     ({"id": True}, {}),
+    ({"id": w14_origin.REPO_ID + 1}, {}),
     ({"owner": {"login": "attacker", "id": 42}}, {}),
     ({"owner": {"login": "trung-via", "id": 0}}, {}),
 ])
@@ -150,13 +153,15 @@ def test_w14_repository_must_be_private_and_exact(h, monkeypatch, bad):
     ("user", {"login": "attacker", "id": 42}),
     ("user", {"login": "trung-via", "id": 99}),
     ("body", ""),
+    ("node_id", "invalid"),
+    ("updated_at", "1900-01-01"),
 ])
 def test_w14_issue_metadata_identity_mismatch_denied(h, monkeypatch, field, value):
     proposal, verify = _personal_w1_signed_fixture(h)
     repo, issue = payloads(proposal, verify)
     issue[field] = value
     opener = simulated(monkeypatch, repo, issue)
-    with pytest.raises(c.Denied, match="W14_GITHUB_ISSUE_DENIED|W14_ISSUE_BODY_DENIED"):
+    with pytest.raises(c.Denied, match="W14_GITHUB_ISSUE_DENIED|W14_ISSUE_BODY_DENIED|W14_GITHUB_METADATA_DENIED"):
         reader.read_private_issue_snapshot(TOKEN, issue_number=123)
     assert len(opener.seen) == 2
 
