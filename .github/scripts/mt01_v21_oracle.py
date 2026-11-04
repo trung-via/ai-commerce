@@ -175,6 +175,51 @@ def _git(root: Path, *args: str) -> bytes:
     ).stdout
 
 
+
+def _independent_baseline_manifest_dependency_order(paths, repo, base_sha):
+    """Independently check Git-owned component edges before owner admission.
+
+    No candidate planner import or candidate-owned dependency hints.
+    Cycles, duplicate source ownership, malformed data fail closed.
+    """
+    docs = {}
+    owners = {}
+    for path in paths:
+        raw = _git(repo, "show", f"{base_sha}:{path}")
+        if len(raw) > 32768:
+            raise ValueError("BASELINE_OWNER_MANIFEST_UNAVAILABLE")
+        try:
+            item = json.loads(raw.decode("utf-8-sig"))
+        except (ValueError, UnicodeError) as exc:
+            raise ValueError("BASELINE_OWNER_MANIFEST_INVALID") from exc
+        if (type(item) is not dict or type(item.get("sources")) is not list
+                or type(item.get("consumers")) is not list
+                or any(type(v) is not str for v in item["sources"])
+                or any(type(v) is not str for v in item["consumers"])):
+            raise ValueError("BASELINE_OWNER_DEPENDENCY_SHAPE")
+        docs[path] = item
+        for source in item["sources"]:
+            if source in owners:
+                raise ValueError("BASELINE_OWNER_DUPLICATE_SOURCE")
+            owners[source] = path
+    pending = set(paths)
+    resolved = []
+    while pending:
+        ready = sorted(
+            p for p in pending
+            if not any(
+                owners.get(consumer) in pending and owners.get(consumer) != p
+                for consumer in docs[p]["consumers"]
+            )
+        )
+        if not ready:
+            raise ValueError("BASELINE_OWNER_DEPENDENCY_CYCLE")
+        next_path = ready[0]
+        pending.remove(next_path)
+        resolved.append(next_path)
+    return tuple(resolved)
+
+
 def trusted_baseline_manifest_groups(*, repo: Path, base_sha: str,
                                      base_groups: tuple) -> tuple:
     """Independent stdlib review of persisted owners from *base Git blobs*.
@@ -192,6 +237,7 @@ def trusted_baseline_manifest_groups(*, repo: Path, base_sha: str,
     paths = sorted(p for p in base_paths if p.startswith("work_items/mt01-components/"))
     if len(paths) > 256:
         raise ValueError("BASELINE_OWNER_LIMIT")
+    paths = _independent_baseline_manifest_dependency_order(paths, repo, base_sha)
     accepted = []
     names = {g.name for g in base_groups}
     owned = {p for g in base_groups for p in _owned(g)}
