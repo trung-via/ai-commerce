@@ -1,10 +1,8 @@
-"""Personal HostOps v1: one private Issue = one bounded Windows operation.
+"""Personal HostOps v2: fixed AI Commerce Windows reads and attended new file creates.
 
-Read requests are submitted to the PUBLIC AI Commerce repository with ChatGPT
-approval (only sanitized inventory and tracked public Markdown documents).
-Write requests require one exact owner comment in the GitHub UI.
-No unsigned arbitrary command execution, overwrite, deletion, service install
-or access to secrets is provided by this tool.
+ChatGPT-approved READ sends only public committed source, safe git metadata or
+file hashes to public Issues. A Human GitHub comment authorizes each WRITE.
+No arbitrary shell, secret file access, overwrite, delete or provider effect.
 """
 from __future__ import annotations
 
@@ -26,7 +24,10 @@ WRITE_TITLE = "[HOSTOPS WRITE] "
 ROOTS = {
     "workspace": Path("C:/TOOL/ai-commerce"),
     "scratch": Path("C:/TOOL/AI-Commerce-HostOps-Approved"),
+    "workspace_notes": Path("C:/TOOL/ai-commerce/.local"),
 }
+PUBLIC_PREFIXES = ("docs/", "src/ai_commerce/", "tests/", "work_items/", ".github/workflows/")
+PUBLIC_EXTENSIONS = {".md", ".py", ".json", ".yml", ".yaml", ".toml", ".cjs", ".txt"}
 MAX_READ = 8192
 MAX_WRITE = 2048
 
@@ -122,19 +123,33 @@ def parse_event(event, mode):
             if params:
                 deny("INVALID_PARAMETERS")
         elif operation == "read_text":
-            if set(params) != {"root_id", "relative_path"} or params["root_id"] != "workspace":
+            if set(params) != {"root_id", "relative_path"} or params.get("root_id") != "workspace":
                 deny("READ_SCOPE_DENIED")
-            rel = params["relative_path"]
+            rel = params.get("relative_path")
             _relative_path(rel)
-            # Public Issues must never disclose private Windows files.
-            if not (rel == "README.md" or rel.startswith("docs/")) or not rel.lower().endswith(".md"):
+            if not (rel == "README.md" or rel.startswith(PUBLIC_PREFIXES)) or Path(rel).suffix.lower() not in PUBLIC_EXTENSIONS:
                 deny("PUBLIC_READ_SCOPE_DENIED")
+        elif operation == "git_snapshot":
+            if params:
+                deny("INVALID_PARAMETERS")
+        elif operation == "tracked_paths":
+            if set(params) != {"prefix"} or type(params.get("prefix")) is not str:
+                deny("TRACKED_PREFIX_DENIED")
+            prefix = params["prefix"]
+            _relative_path(prefix.rstrip("/"))
+            if (not prefix.endswith("/") or
+                    not any(prefix.startswith(allowed) for allowed in PUBLIC_PREFIXES)):
+                deny("TRACKED_PREFIX_DENIED")
+        elif operation == "file_digest":
+            if set(params) != {"root_id", "relative_path"} or params.get("root_id") not in ("scratch", "workspace_notes"):
+                deny("DIGEST_SCOPE_DENIED")
+            _relative_path(params.get("relative_path"), write=True)
         else:
             deny("READ_OPERATION_DENIED")
     else:
         if (operation != "create_text" or
                 set(params) != {"root_id", "relative_path", "content_utf8"} or
-                params.get("root_id") != "scratch"):
+                params.get("root_id") not in ("scratch", "workspace_notes")):
             deny("WRITE_SCOPE_DENIED")
         _relative_path(params["relative_path"], write=True)
         content = params["content_utf8"]
@@ -176,6 +191,23 @@ def _get_path(root_id, relative, *, write=False):
     return target
 
 
+def _git(*args):
+    root = ROOTS["workspace"]
+    if not root.is_dir():
+        deny("ROOT_NOT_ENROLLED")
+    # Avoid git refreshing/writing index and do not run arbitrary issue commands.
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), *args], capture_output=True, text=True,
+            timeout=12, check=False, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        deny("GIT_READ_UNAVAILABLE")
+    if result.returncode:
+        deny("GIT_READ_FAILED")
+    return result.stdout
+
+
 def perform(request):
     op = request["operation"]
     params = request["parameters"]
@@ -187,19 +219,43 @@ def perform(request):
             "logical_cpu_count": os.cpu_count(),
             "no_shell_command_executed": True,
         }
+    if op == "git_snapshot":
+        head = _git("rev-parse", "HEAD").strip()
+        branch = _git("rev-parse", "--abbrev-ref", "HEAD").strip()
+        if not re.fullmatch(r"[a-f0-9]{40}", head):
+            deny("GIT_HEAD_INVALID")
+        changed = _git("status", "--porcelain=v1", "--untracked-files=no")
+        return {
+            "status": "OBSERVED", "operation": op, "git_head_sha": head,
+            "branch": branch[:120], "tracked_changes": len(changed.splitlines()),
+        }
+    if op == "tracked_paths":
+        prefix = params["prefix"]
+        paths = _git("ls-files", "--", prefix).splitlines()
+        # Paths originate from public git-tracked repository only.
+        return {
+            "status": "OBSERVED", "operation": op, "prefix": prefix,
+            "paths": paths[:50], "total_tracked_in_scope": len(paths),
+            "truncated": len(paths) > 50,
+        }
+    if op == "file_digest":
+        path = _get_path(params["root_id"], params["relative_path"], write=True)
+        if not path.is_file() or path.stat().st_size > MAX_READ:
+            deny("DIGEST_FILE_MISSING_OR_TOO_LARGE")
+        raw = path.read_bytes()
+        if len(raw) > MAX_READ:
+            deny("DIGEST_FILE_TOO_LARGE")
+        return {
+            "status": "OBSERVED", "operation": op, "root_id": params["root_id"],
+            "relative_path": params["relative_path"], "bytes": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        }
     if op == "read_text":
         path = _get_path(params["root_id"], params["relative_path"])
-        root = ROOTS["workspace"]
-        try:
-            check = subprocess.run(
-                ["git", "-C", str(root), "ls-files", "--error-unmatch", "--",
-                 params["relative_path"]],
-                capture_output=True, text=True, timeout=8, check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            deny("PUBLIC_TRACKED_FILE_ONLY")
-        if check.returncode != 0:
-            deny("PUBLIC_TRACKED_FILE_ONLY")
+        rel = params["relative_path"]
+        _git("ls-files", "--error-unmatch", "--", rel)
+        # A tracked path can contain uncommitted secrets: never post those bytes publicly.
+        _git("diff", "--quiet", "HEAD", "--", rel)
         if not path.is_file():
             deny("READ_FILE_NOT_FOUND")
         if path.stat().st_size > MAX_READ:
@@ -239,7 +295,7 @@ def perform(request):
             deny("WRITE_READBACK_MISMATCH_NO_RETRY")
         return {
             "status": "OBSERVED", "operation": op,
-            "root_id": "scratch", "relative_path": params["relative_path"],
+            "root_id": params["root_id"], "relative_path": params["relative_path"],
             "bytes": len(observed), "sha256": hashlib.sha256(observed).hexdigest(),
             "overwritten": False,
         }
