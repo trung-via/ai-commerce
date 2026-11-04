@@ -179,7 +179,13 @@ def test_component_local_m02_requires_profile_that_actually_collects_it(real_tre
     path = "src/ai_commerce/opportunity/trends/tracking.py"
     selected = real_plan(real_tree, monkeypatch, path, registry=current)
     if "mt01-a10-m02-tests" in current:
-        assert not selected["fallback"] and "a10-m02" in selected["selected_groups"]
+        assert not selected["fallback"] and "a10-m02" in selected["selected_groups"], {
+            "reason_codes": selected["reason_codes"],
+            "selected_groups": selected["selected_groups"],
+            "unknown_tests": selected.get("unknown_tests"),
+            "unknown_consumers": selected.get("unknown_consumers"),
+            "environment_v21": os.environ.get("MT01_V21_ENABLED"),
+        }
     else:
         assert selected["fallback"] and selected["groups"][0]["state"] == "UNPROVEN"
         assert selected["groups"][0]["binding"]["argv"] == current["project-tests"]
