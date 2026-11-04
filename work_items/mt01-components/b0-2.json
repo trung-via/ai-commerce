@@ -1,0 +1,18 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "b0-2",
+  "sources": [
+    "src/ai_commerce/production_runtime/journal.py",
+    "src/ai_commerce/production_runtime/recovery.py"
+  ],
+  "tests": ["tests/test_b0_2_journal.py"],
+  "acs": ["B0.2.durable-journal-recovery-offline"],
+  "consumers": [
+    "src/ai_commerce/production_runtime/contracts.py",
+    "src/ai_commerce/production_runtime/state_machine.py",
+    "src/ai_commerce/distribution/assisted.py",
+    "src/ai_commerce/analytics/importer.py",
+    "src/ai_commerce/operations/retry_guard.py"
+  ],
+  "contracts": []
+}

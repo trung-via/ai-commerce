@@ -1,0 +1,696 @@
+{
+  "schema_version": "WorkItem.v1",
+  "work_id": "B0-2-PULSE-JOURNAL-001",
+  "title": "PULSE B0.2 offline durable coordination journal and recovery",
+  "owner": "Commerce Operations",
+  "source_sha": "76212ef690347ed380753da8192a56caaabf2425",
+  "human_decision": {
+    "date": "2026-11-04",
+    "channel": "CURRENT_CHATGPT_AI_COMMERCE_CONVERSATION",
+    "evidence_type": "HUMAN_SUPPLIED",
+    "instruction": "Continue to B0.2 after AI Commerce Unified v1.3.0 and Creative Reasoner v0.3.0 updates; EF01/EF02 source engineering only.",
+    "independently_authenticated": false,
+    "production_authority": false
+  },
+  "dependencies": [
+    "B0.1 merged PR #320",
+    "docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md",
+    "docs/architecture/ADR_B001_BRAIN_LED_INDEPENDENT_RUNTIME.md"
+  ],
+  "allowed_paths": [
+    "src/ai_commerce/production_runtime/journal.py",
+    "src/ai_commerce/production_runtime/recovery.py",
+    "tests/test_b0_2_journal.py",
+    "work_items/mt01-components/b0-2.json",
+    "work_items/B0-2-PULSE-JOURNAL-001.json",
+    "docs/engineering/B0_2_JOURNAL_HANDOFF_REPORT.md"
+  ],
+  "scope_policy": "ADD_ONLY_SIX_PATHS_NO_EXECUTOR_GIT_WRITES",
+  "positive_acs": [
+    "B0.2.durable-journal-recovery-offline",
+    "Offline journey reopens with identical sequence, owner pins and evidence SHA",
+    "BEGIN IMMEDIATE, expected-sequence CAS, immutable records and reserve commit before modeled call",
+    "Separate process contention permits one lease writer; monotonically fenced takeover",
+    "Process kill boundaries retain unknown effects and original semantic/request/key identities",
+    "Verified read-only replay and failure injection receipts"
+  ],
+  "negative_acs": [
+    "Zero external/provider/publish/spend/HostOps/CDP/Wake calls and no service",
+    "UNKNOWN cannot retry, rekey or falsely complete; modeled observations confer no authority",
+    "Missing/corrupt/foreign/truncated journal HOLD, never silently reset",
+    "Contradictory owner refs denied; no second A08/A09/A15/A16 business ledger",
+    "B0.1 contracts/reducer/tests and all existing files unchanged",
+    "Same-SID anti-tamper, anti-rollback and unattended credential custody NOT_PROVEN"
+  ],
+  "preflight": {
+    "head_exact": true,
+    "clean_checkout": true,
+    "all_six_paths_absent": true,
+    "applicable_agents_files": [],
+    "baseline_fingerprint": "60b630a3d2b45c6ee13afe55245fdcdb9809d8e0597c887b09a90fe6da263c76"
+  },
+  "verification_profile": "mt01-component-onboarding",
+  "verification": {
+    "status": "LOCAL_SCOPED_PASS_PENDING_INDEPENDENT_FINAL_TREE",
+    "max_verify_fix_rounds": 2,
+    "attempts": [
+      {
+        "round": 0,
+        "result": "UNPROVEN",
+        "reason": "MT01_SOURCE_DRIFT_DURING_VERIFICATION",
+        "diagnosis": "Backslash diagnostic PYTEST_ADDOPTS paths were parsed by pytest shlex as worktree-relative names. MT01 stopped after A08; no scoped PASS admitted. Repair uses quoted forward-slash absolute diagnostic paths. Guard environment not changed.",
+        "platform": "win32",
+        "runner_environment": "self-hosted",
+        "github_actions": "true",
+        "selected_groups": [
+          "a08",
+          "a09",
+          "a15",
+          "b0-1",
+          "b0-2"
+        ],
+        "executed_groups": [
+          {
+            "group": "a08",
+            "result": "UNPROVEN",
+            "pytest_outcome": {
+              "passed": 10,
+              "failed": 0,
+              "skipped": 0
+            },
+            "workers_requested": 12,
+            "workers_actual": 12,
+            "worker_count_provenance": "XDIST_CONTROLLER_COLLECTION_HOOK",
+            "collected_each_worker": 10,
+            "collection_node_ids_sha256": "019b95c063e041f4477b61c18e8da55b0a353f2a555ee794e8241c5ef1d643c6",
+            "junit_cases": 10,
+            "junit_sha256": "5eae1eac79a4a9fe103fc82c9cb647e0d6b970c4df2a6ec0931419b4d95bf305"
+          }
+        ],
+        "remaining_groups": "NOT_EXECUTED",
+        "raw_stdout": "RETAINED_IN_EXECUTOR_TOOL_TRANSCRIPT",
+        "admitted_as_final": false
+      },
+      {
+        "round": 1,
+        "platform": "win32",
+        "python": "3.14.7 (tags/v3.14.7:823f032, Aug  5 2026, 10:51:32) [MSC v.1944 64 bit (AMD64)]",
+        "runner_environment": "self-hosted",
+        "github_actions": "true",
+        "overall_exit_code": 0,
+        "exception": null,
+        "fallback": false,
+        "unknown_acs": [],
+        "groups": [
+          {
+            "group": "a08",
+            "state": "EXECUTE",
+            "selected_profile": "mt01-a08-tests",
+            "actual_argv": [
+              "python",
+              "-m",
+              "pytest",
+              "tests/test_a08_distribution.py",
+              "-q",
+              "-n",
+              "12"
+            ],
+            "result": "PASS",
+            "reason": null,
+            "tests_executed": {
+              "passed": 10,
+              "failed": 0,
+              "skipped": 0,
+              "errors": 0,
+              "xfailed": 0,
+              "xpassed": 0
+            },
+            "workers_requested": 12,
+            "workers_actual": 12,
+            "worker_count_provenance": "XDIST_CONTROLLER_COLLECTION_HOOK",
+            "actual_exit_code": 0,
+            "wall_seconds": 6.61467719997745,
+            "evidence_sha256": "0e5a1f88c43790116693d0d97dcc8891206b88729e9ba271e0bf55c2b054202e",
+            "started_at": "2026-11-04T06:39:46.515584+00:00",
+            "finished_at": "2026-11-04T06:39:53.130288+00:00",
+            "worker_collections": {
+              "gw0": [
+                10,
+                "019b95c063e041f4477b61c18e8da55b0a353f2a555ee794e8241c5ef1d643c6"
+              ],
+              "gw1": [
+                10,
+                "019b95c063e041f4477b61c18e8da55b0a353f2a555ee794e8241c5ef1d643c6"
+              ],
+              "gw10": [
+                10,
+                "019b95c063e041f4477b61c18e8da55b0a353f2a555ee794e8241c5ef1d643c6"
+              ],
+              "gw11": [
+                10,
+                "019b95c063e041f4477b61c18e8da55b0a353f2a555ee794e8241c5ef1d643c6"
+              ],
+              "gw2": [
+                10,
+                "019b95c063e041f4477b61c18e8da55b0a353f2a555ee794e8241c5ef1d643c6"
+              ],
+              "gw3": [
+                10,
+                "019b95c063e041f4477b61c18e8da55b0a353f2a555ee794e8241c5ef1d643c6"
+              ],
+              "gw4": [
+                10,
+                "019b95c063e041f4477b61c18e8da55b0a353f2a555ee794e8241c5ef1d643c6"
+              ],
+              "gw5": [
+                10,
+                "019b95c063e041f4477b61c18e8da55b0a353f2a555ee794e8241c5ef1d643c6"
+              ],
+              "gw6": [
+                10,
+                "019b95c063e041f4477b61c18e8da55b0a353f2a555ee794e8241c5ef1d643c6"
+              ],
+              "gw7": [
+                10,
+                "019b95c063e041f4477b61c18e8da55b0a353f2a555ee794e8241c5ef1d643c6"
+              ],
+              "gw8": [
+                10,
+                "019b95c063e041f4477b61c18e8da55b0a353f2a555ee794e8241c5ef1d643c6"
+              ],
+              "gw9": [
+                10,
+                "019b95c063e041f4477b61c18e8da55b0a353f2a555ee794e8241c5ef1d643c6"
+              ]
+            },
+            "selected_collected_per_worker": 10,
+            "all_12_collections_identical": true,
+            "junit": {
+              "collected_executed": 10,
+              "passed": 10,
+              "failed": 0,
+              "errors": 0,
+              "skipped": 0,
+              "sha256": "c086055803908678ebe4537467b88d27f393591f46d39c3fcc64521b9fb48520"
+            },
+            "skip_reasons": []
+          },
+          {
+            "group": "a09",
+            "state": "EXECUTE",
+            "selected_profile": "mt01-a09-tests",
+            "actual_argv": [
+              "python",
+              "-m",
+              "pytest",
+              "tests/test_a09_analytics.py",
+              "tests/test_a09_e02.py",
+              "-q",
+              "-n",
+              "12"
+            ],
+            "result": "PASS",
+            "reason": null,
+            "tests_executed": {
+              "passed": 180,
+              "failed": 0,
+              "skipped": 2,
+              "errors": 0,
+              "xfailed": 0,
+              "xpassed": 0
+            },
+            "workers_requested": 12,
+            "workers_actual": 12,
+            "worker_count_provenance": "XDIST_CONTROLLER_COLLECTION_HOOK",
+            "actual_exit_code": 0,
+            "wall_seconds": 5.738087999983691,
+            "evidence_sha256": "31a5ac78f2adb263830182bb4ab8e26ff85453a991089a9979611ffe4fca322c",
+            "started_at": "2026-11-04T06:39:53.756836+00:00",
+            "finished_at": "2026-11-04T06:39:59.494942+00:00",
+            "worker_collections": {
+              "gw0": [
+                182,
+                "dc2b9b63570657acaafbcc5959324958d82989af2881bd30feed49cb9d6c4116"
+              ],
+              "gw1": [
+                182,
+                "dc2b9b63570657acaafbcc5959324958d82989af2881bd30feed49cb9d6c4116"
+              ],
+              "gw10": [
+                182,
+                "dc2b9b63570657acaafbcc5959324958d82989af2881bd30feed49cb9d6c4116"
+              ],
+              "gw11": [
+                182,
+                "dc2b9b63570657acaafbcc5959324958d82989af2881bd30feed49cb9d6c4116"
+              ],
+              "gw2": [
+                182,
+                "dc2b9b63570657acaafbcc5959324958d82989af2881bd30feed49cb9d6c4116"
+              ],
+              "gw3": [
+                182,
+                "dc2b9b63570657acaafbcc5959324958d82989af2881bd30feed49cb9d6c4116"
+              ],
+              "gw4": [
+                182,
+                "dc2b9b63570657acaafbcc5959324958d82989af2881bd30feed49cb9d6c4116"
+              ],
+              "gw5": [
+                182,
+                "dc2b9b63570657acaafbcc5959324958d82989af2881bd30feed49cb9d6c4116"
+              ],
+              "gw6": [
+                182,
+                "dc2b9b63570657acaafbcc5959324958d82989af2881bd30feed49cb9d6c4116"
+              ],
+              "gw7": [
+                182,
+                "dc2b9b63570657acaafbcc5959324958d82989af2881bd30feed49cb9d6c4116"
+              ],
+              "gw8": [
+                182,
+                "dc2b9b63570657acaafbcc5959324958d82989af2881bd30feed49cb9d6c4116"
+              ],
+              "gw9": [
+                182,
+                "dc2b9b63570657acaafbcc5959324958d82989af2881bd30feed49cb9d6c4116"
+              ]
+            },
+            "selected_collected_per_worker": 182,
+            "all_12_collections_identical": true,
+            "junit": {
+              "collected_executed": 182,
+              "passed": 180,
+              "failed": 0,
+              "errors": 0,
+              "skipped": 2,
+              "sha256": "d5e7a53963ef2f2e5cc20ce092871381d12911ca6c429de452f0081c6db8461a"
+            },
+            "skip_reasons": [
+              "Host does not permit creating this symlink; no native symlink proof",
+              "Host does not permit creating this symlink; no native symlink proof"
+            ]
+          },
+          {
+            "group": "a15",
+            "state": "EXECUTE",
+            "selected_profile": "mt01-a15-tests",
+            "actual_argv": [
+              "python",
+              "-m",
+              "pytest",
+              "tests/test_a15_operations.py",
+              "-q",
+              "-n",
+              "12"
+            ],
+            "result": "PASS",
+            "reason": null,
+            "tests_executed": {
+              "passed": 43,
+              "failed": 0,
+              "skipped": 0,
+              "errors": 0,
+              "xfailed": 0,
+              "xpassed": 0
+            },
+            "workers_requested": 12,
+            "workers_actual": 12,
+            "worker_count_provenance": "XDIST_CONTROLLER_COLLECTION_HOOK",
+            "actual_exit_code": 0,
+            "wall_seconds": 4.2408225000835955,
+            "evidence_sha256": "d586a8dfdbd42d8936ee393d2136d36dce809e10d2983a77de5e50fd271657fb",
+            "started_at": "2026-11-04T06:40:00.122593+00:00",
+            "finished_at": "2026-11-04T06:40:04.363432+00:00",
+            "worker_collections": {
+              "gw0": [
+                43,
+                "d814b53b20c3c248e65b730ef364411cbf87ed7312b24d7d4402b47cda855510"
+              ],
+              "gw1": [
+                43,
+                "d814b53b20c3c248e65b730ef364411cbf87ed7312b24d7d4402b47cda855510"
+              ],
+              "gw10": [
+                43,
+                "d814b53b20c3c248e65b730ef364411cbf87ed7312b24d7d4402b47cda855510"
+              ],
+              "gw11": [
+                43,
+                "d814b53b20c3c248e65b730ef364411cbf87ed7312b24d7d4402b47cda855510"
+              ],
+              "gw2": [
+                43,
+                "d814b53b20c3c248e65b730ef364411cbf87ed7312b24d7d4402b47cda855510"
+              ],
+              "gw3": [
+                43,
+                "d814b53b20c3c248e65b730ef364411cbf87ed7312b24d7d4402b47cda855510"
+              ],
+              "gw4": [
+                43,
+                "d814b53b20c3c248e65b730ef364411cbf87ed7312b24d7d4402b47cda855510"
+              ],
+              "gw5": [
+                43,
+                "d814b53b20c3c248e65b730ef364411cbf87ed7312b24d7d4402b47cda855510"
+              ],
+              "gw6": [
+                43,
+                "d814b53b20c3c248e65b730ef364411cbf87ed7312b24d7d4402b47cda855510"
+              ],
+              "gw7": [
+                43,
+                "d814b53b20c3c248e65b730ef364411cbf87ed7312b24d7d4402b47cda855510"
+              ],
+              "gw8": [
+                43,
+                "d814b53b20c3c248e65b730ef364411cbf87ed7312b24d7d4402b47cda855510"
+              ],
+              "gw9": [
+                43,
+                "d814b53b20c3c248e65b730ef364411cbf87ed7312b24d7d4402b47cda855510"
+              ]
+            },
+            "selected_collected_per_worker": 43,
+            "all_12_collections_identical": true,
+            "junit": {
+              "collected_executed": 43,
+              "passed": 43,
+              "failed": 0,
+              "errors": 0,
+              "skipped": 0,
+              "sha256": "baa11cad9430c65ef242aa5d4f9a94f76c4f70b2cc7915f03244d4066524b45e"
+            },
+            "skip_reasons": []
+          },
+          {
+            "group": "b0-1",
+            "state": "EXECUTE",
+            "selected_profile": "mt01-component-onboarding",
+            "actual_argv": [
+              "python",
+              "-m",
+              "pytest",
+              "tests/test_b0_production_contracts.py",
+              "-q",
+              "-n",
+              "12"
+            ],
+            "result": "PASS",
+            "reason": null,
+            "tests_executed": {
+              "passed": 82,
+              "failed": 0,
+              "skipped": 0,
+              "errors": 0,
+              "xfailed": 0,
+              "xpassed": 0
+            },
+            "workers_requested": 12,
+            "workers_actual": 12,
+            "worker_count_provenance": "XDIST_CONTROLLER_COLLECTION_HOOK",
+            "actual_exit_code": 0,
+            "wall_seconds": 3.316815600031987,
+            "evidence_sha256": "88e5d2aa7aa0c04a88e4af2a193531b5102c02c6d4359025df811a11fddf96df",
+            "started_at": "2026-11-04T06:40:04.950621+00:00",
+            "finished_at": "2026-11-04T06:40:08.267445+00:00",
+            "worker_collections": {
+              "gw0": [
+                82,
+                "ec37f3d299a53088bcda35a851c72483db55a5be403e4bebbf7eb9917859b788"
+              ],
+              "gw1": [
+                82,
+                "ec37f3d299a53088bcda35a851c72483db55a5be403e4bebbf7eb9917859b788"
+              ],
+              "gw10": [
+                82,
+                "ec37f3d299a53088bcda35a851c72483db55a5be403e4bebbf7eb9917859b788"
+              ],
+              "gw11": [
+                82,
+                "ec37f3d299a53088bcda35a851c72483db55a5be403e4bebbf7eb9917859b788"
+              ],
+              "gw2": [
+                82,
+                "ec37f3d299a53088bcda35a851c72483db55a5be403e4bebbf7eb9917859b788"
+              ],
+              "gw3": [
+                82,
+                "ec37f3d299a53088bcda35a851c72483db55a5be403e4bebbf7eb9917859b788"
+              ],
+              "gw4": [
+                82,
+                "ec37f3d299a53088bcda35a851c72483db55a5be403e4bebbf7eb9917859b788"
+              ],
+              "gw5": [
+                82,
+                "ec37f3d299a53088bcda35a851c72483db55a5be403e4bebbf7eb9917859b788"
+              ],
+              "gw6": [
+                82,
+                "ec37f3d299a53088bcda35a851c72483db55a5be403e4bebbf7eb9917859b788"
+              ],
+              "gw7": [
+                82,
+                "ec37f3d299a53088bcda35a851c72483db55a5be403e4bebbf7eb9917859b788"
+              ],
+              "gw8": [
+                82,
+                "ec37f3d299a53088bcda35a851c72483db55a5be403e4bebbf7eb9917859b788"
+              ],
+              "gw9": [
+                82,
+                "ec37f3d299a53088bcda35a851c72483db55a5be403e4bebbf7eb9917859b788"
+              ]
+            },
+            "selected_collected_per_worker": 82,
+            "all_12_collections_identical": true,
+            "junit": {
+              "collected_executed": 82,
+              "passed": 82,
+              "failed": 0,
+              "errors": 0,
+              "skipped": 0,
+              "sha256": "a742824a6d5af389e544ff2c68b7d34d6bf3dfe2425ca7fc1e0b43edb91aaa73"
+            },
+            "skip_reasons": []
+          },
+          {
+            "group": "b0-2",
+            "state": "EXECUTE",
+            "selected_profile": "mt01-component-onboarding",
+            "actual_argv": [
+              "python",
+              "-m",
+              "pytest",
+              "tests/test_b0_2_journal.py",
+              "-q",
+              "-n",
+              "12"
+            ],
+            "result": "PASS",
+            "reason": null,
+            "tests_executed": {
+              "passed": 60,
+              "failed": 0,
+              "skipped": 0,
+              "errors": 0,
+              "xfailed": 0,
+              "xpassed": 0
+            },
+            "workers_requested": 12,
+            "workers_actual": 12,
+            "worker_count_provenance": "XDIST_CONTROLLER_COLLECTION_HOOK",
+            "actual_exit_code": 0,
+            "wall_seconds": 4.1046395999146625,
+            "evidence_sha256": "e3e7078a0dc9fde275fcda2529d6bbb01b11e218ddc876d0010af94de6320e7c",
+            "started_at": "2026-11-04T06:40:08.867023+00:00",
+            "finished_at": "2026-11-04T06:40:12.971678+00:00",
+            "worker_collections": {
+              "gw0": [
+                60,
+                "5187a945f759843481183f198e2399bf682543b45a62e7a6ba8c11373abf5206"
+              ],
+              "gw1": [
+                60,
+                "5187a945f759843481183f198e2399bf682543b45a62e7a6ba8c11373abf5206"
+              ],
+              "gw10": [
+                60,
+                "5187a945f759843481183f198e2399bf682543b45a62e7a6ba8c11373abf5206"
+              ],
+              "gw11": [
+                60,
+                "5187a945f759843481183f198e2399bf682543b45a62e7a6ba8c11373abf5206"
+              ],
+              "gw2": [
+                60,
+                "5187a945f759843481183f198e2399bf682543b45a62e7a6ba8c11373abf5206"
+              ],
+              "gw3": [
+                60,
+                "5187a945f759843481183f198e2399bf682543b45a62e7a6ba8c11373abf5206"
+              ],
+              "gw4": [
+                60,
+                "5187a945f759843481183f198e2399bf682543b45a62e7a6ba8c11373abf5206"
+              ],
+              "gw5": [
+                60,
+                "5187a945f759843481183f198e2399bf682543b45a62e7a6ba8c11373abf5206"
+              ],
+              "gw6": [
+                60,
+                "5187a945f759843481183f198e2399bf682543b45a62e7a6ba8c11373abf5206"
+              ],
+              "gw7": [
+                60,
+                "5187a945f759843481183f198e2399bf682543b45a62e7a6ba8c11373abf5206"
+              ],
+              "gw8": [
+                60,
+                "5187a945f759843481183f198e2399bf682543b45a62e7a6ba8c11373abf5206"
+              ],
+              "gw9": [
+                60,
+                "5187a945f759843481183f198e2399bf682543b45a62e7a6ba8c11373abf5206"
+              ]
+            },
+            "selected_collected_per_worker": 60,
+            "all_12_collections_identical": true,
+            "junit": {
+              "collected_executed": 60,
+              "passed": 60,
+              "failed": 0,
+              "errors": 0,
+              "skipped": 0,
+              "sha256": "0d28470c6a721b1bff6d790198288d9e550ff974f9512cb6a0abec5cf834edec"
+            },
+            "skip_reasons": []
+          }
+        ],
+        "all_tree_hashes_unchanged_during_tests": true,
+        "scope_hashes": {
+          "src/ai_commerce/production_runtime/journal.py": "75fc0e9011165fdd99e56cc99b3dc130919692f0d9902996c715ab790fbc5fc6",
+          "src/ai_commerce/production_runtime/recovery.py": "d958d0004e6fa99f51888bdf2cb40f5ca53e7c83f9797ae16b18b7de8c602f03",
+          "tests/test_b0_2_journal.py": "91e33e6f6091bd06dbadf8aad5754729fbe85c1744022ba8d88acb86b6db5dcf",
+          "work_items/mt01-components/b0-2.json": "4d05527e6500a6dde11b9f89840cce1b6a1817313b4a868aab41ff4f663dc926",
+          "work_items/B0-2-PULSE-JOURNAL-001.json": "8ec7038579f1e8d7f3b668d7edaf4a42a35718fa0093d28b7d4b0897238bbf03",
+          "docs/engineering/B0_2_JOURNAL_HANDOFF_REPORT.md": "8605488a42778a55804d5b91f02d0170fe3cd4bb4099cd205aeef78e680e2a64"
+        },
+        "artifact_hashes": {
+          "current-junit.xml": "0d28470c6a721b1bff6d790198288d9e550ff974f9512cb6a0abec5cf834edec",
+          "mt01.0.evidence.json": "0e5a1f88c43790116693d0d97dcc8891206b88729e9ba271e0bf55c2b054202e",
+          "mt01.0.junit.xml": "c086055803908678ebe4537467b88d27f393591f46d39c3fcc64521b9fb48520",
+          "mt01.0.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "mt01.0.stdout.log": "8b80991458f0d5254ce55215bdfafbf4edb2ab6b95ed6f3b67a0b275ccf6b48e",
+          "mt01.1.evidence.json": "31a5ac78f2adb263830182bb4ab8e26ff85453a991089a9979611ffe4fca322c",
+          "mt01.1.junit.xml": "d5e7a53963ef2f2e5cc20ce092871381d12911ca6c429de452f0081c6db8461a",
+          "mt01.1.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "mt01.1.stdout.log": "647299a9672a791fc068fcf572fd22531ef9fa2f4901af1149413aa567814464",
+          "mt01.2.evidence.json": "d586a8dfdbd42d8936ee393d2136d36dce809e10d2983a77de5e50fd271657fb",
+          "mt01.2.junit.xml": "baa11cad9430c65ef242aa5d4f9a94f76c4f70b2cc7915f03244d4066524b45e",
+          "mt01.2.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "mt01.2.stdout.log": "1ac718259e337c836cd4a83ed50c1402b393754722b03f95ee8f7f8a4a646492",
+          "mt01.3.evidence.json": "88e5d2aa7aa0c04a88e4af2a193531b5102c02c6d4359025df811a11fddf96df",
+          "mt01.3.junit.xml": "a742824a6d5af389e544ff2c68b7d34d6bf3dfe2425ca7fc1e0b43edb91aaa73",
+          "mt01.3.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "mt01.3.stdout.log": "ae900d62df3dbfc227db9c30d9291dc79b50447d1daf587f128d911b5ee258b1",
+          "mt01.4.evidence.json": "e3e7078a0dc9fde275fcda2529d6bbb01b11e218ddc876d0010af94de6320e7c",
+          "mt01.4.junit.xml": "0d28470c6a721b1bff6d790198288d9e550ff974f9512cb6a0abec5cf834edec",
+          "mt01.4.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "mt01.4.stdout.log": "2272d4b08538e74a83f06a80015c83cf26e967d38df52d09fd31874f5e8899bf",
+          "mt01.plan.json": "63db9a41e8663d9f0452cf9d9e10c754308fee4b80c063f8e7c5ad7d1b01f272",
+          "mt01.results.json": "3097dc43ca4b659dfb7604355c6182065d10e500a98be8a0532d65cdb1540005",
+          "pulse_collection_observer.py": "79a16845f569d1d780a5d9e3f8a377dff01b09aa20a5b37737c8a0c7743052e1"
+        },
+        "artifact_location": "C:\\Users\\TRUNG\\AppData\\Local\\Packages\\sandbox.{a138c9d1-b278-40b0-a6a7-0def6a3b4140}\\AC\\Temp\\pulse-b02-round1-i98jkdqe",
+        "artifact_retention": "RAW_LOGS_PER_INVOCATION_SANDBOX_TEMP_NOT_DURABLE; HASHES_AND_SUMMARIES_RETAINED_IN_WORKITEM_AND_TOOL_TRANSCRIPT",
+        "claim_boundary": "LOCAL_SCOPE_ONLY_NOT_INDEPENDENT_FINAL_TREE_EF02_OR_PR_CI_OR_BRAIN_PASS"
+      }
+    ],
+    "independent_ef02_final_tree": "PENDING",
+    "hosted_windows_ci_workers": 4,
+    "pr_ci": "NOT_RUN",
+    "brain_exact_head_base_review": "PENDING",
+    "candidate_sha": null,
+    "publication_owner": "EF02_TRUSTED_WORKER_ONLY",
+    "local_rollup": {
+      "selected": 377,
+      "collected": 377,
+      "executed": 377,
+      "passed": 375,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 2,
+      "groups": 5,
+      "actual_workers_per_group": 12,
+      "verify_fix_rounds_used": 1
+    },
+    "unknowns_retained": [
+      "ROUND_0_MT01_SOURCE_DRIFT_UNPROVEN",
+      "A09_NATIVE_SYMLINK_HOST_CAPABILITY",
+      "INDEPENDENT_EF02_FINAL_TREE_AND_CANDIDATE",
+      "HOSTED_WINDOWS_PYTHON_3_11_CI",
+      "BRAIN_EXACT_HEAD_BASE_PASS",
+      "REAL_PROVIDER_OBSERVATION",
+      "SAME_SID_ANTI_ROLLBACK_AND_CREDENTIAL_CUSTODY"
+    ],
+    "metadata_updated_after_tests": true,
+    "tested_scope_pin_policy": "SOURCE_TEST_MANIFEST_HASHES_RECHECKED; FINAL_WORKITEM_REPORT_BYTES_REQUIRE_INDEPENDENT_EF02_VERIFICATION",
+    "failure_injection_receipt": {
+      "test": "test_actual_process_kill_at_crash_boundaries",
+      "cases": 4,
+      "result": "PASS_IN_60_CASE_B0_2_GROUP",
+      "mechanism": "LOCAL_SUBPROCESS_POPEN_KILL_BOUNDED_HANDSHAKE",
+      "cut_points": [
+        "before_intent_commit",
+        "after_intent_before_modeled_call",
+        "after_modeled_call_before_receipt",
+        "after_receipt_commit"
+      ],
+      "actual_provider_calls": 0,
+      "actual_provider_attestation": false,
+      "unknown_effect_replay": "READ_ONLY_NO_RETRY_NO_REKEY"
+    },
+    "binding_check_status": "LOCAL_AUDITED_BINDING_REPLAY_PASSED_NOT_INDEPENDENT_EF02_ACCEPTANCE",
+    "final_local_guard": {
+      "head": "76212ef690347ed380753da8192a56caaabf2425",
+      "status": "EXACTLY_SIX_ALLOWED_UNTRACKED_ADDITIONS",
+      "tracked_diff_empty": true,
+      "diff_check_exit": 0,
+      "baseline_fingerprint": "60b630a3d2b45c6ee13afe55245fdcdb9809d8e0597c887b09a90fe6da263c76",
+      "all_existing_files_unchanged": true,
+      "tested_source_test_manifest_hashes_unchanged": true,
+      "selected_groups": [
+        "a08",
+        "a09",
+        "a15",
+        "b0-1",
+        "b0-2"
+      ],
+      "audited_dynamic_bindings": {
+        "b0-1": true,
+        "b0-2": true
+      },
+      "protected_source_hashes": {
+        "src/ai_commerce/production_runtime/contracts.py": "e602cda5a9da2e1e015596bddb21b892de824e97466d6b53930db4014e06ae81",
+        "src/ai_commerce/production_runtime/state_machine.py": "ba0b647f00e32e5ac360f748e1dbddc732d04f04a3e33dd2945d16bd7ada8c3b",
+        "tests/test_b0_production_contracts.py": "84fe2dad6482e5f9e84651d2081db72107845a7de2f7c9d0d8d665230f6c2950",
+        "contracts/CreativeDirective.v1.schema.json": "100004a74833232dee2262bef2d8d45939871a8d842f860d57e811431a43a8d2",
+        "contracts/BrainDecision.v1.schema.json": "284287f34fa8afce3c6f3b239587f91330544fd38efb580c50c0584cdd31cdd8",
+        "contracts/ProductJourneyReceipt.v1.schema.json": "89261fc3785d0624ab552d66f70d627745bf2320a06867483e352f7f1254ef65",
+        ".github/ef02/verify-profiles.json": "7135eca52af7bf296a2f2753319ef8e878086d5ff6727ab138673d15fded20d0"
+      },
+      "self_hash_excluded": "WorkItem and report are post-test receipt metadata; independent final-tree verification remains pending"
+    }
+  },
+  "external_effects_authorized": false,
+  "automatic_b0_3_dispatch": false,
+  "production_launch": "NOT_AUTHORIZED",
+  "provider_attestation": "NOT_PERFORMED",
+  "same_sid_anti_rollback_proof": "NOT_PROVEN"
+}
