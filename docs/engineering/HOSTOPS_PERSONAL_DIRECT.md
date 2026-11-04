@@ -1,6 +1,6 @@
 # HostOps Personal — direct route in AI Commerce
 
-**Decision:** Human on 2026-11-04 selected single-account personal use within `trung-via/ai-commerce`. The original one-runner Personal implementation was demonstrated live. Human subsequently approved a **three-instance topology** (two EF02 + one dedicated HostOps), without CPU/RAM limits; see [staged rollout](THREE_RUNNER_ROLLOUT_20261104.md). Until the new dedicated HostOps instance is independently proven Online and a second routing PR merges, the original shared `ai-commerce-ef02` runner stays active. No new Windows account or private broker repository is needed.
+**Decision:** Human on 2026-11-04 selected single-account personal use within `trung-via/ai-commerce`. The original one-runner Personal implementation was demonstrated live. Human subsequently approved a **three-instance topology** (two EF02 + one dedicated HostOps), without CPU/RAM limits; see [staged rollout](THREE_RUNNER_ROLLOUT_20261104.md). On 2026-11-04 the Human reported both added runner instances Online. The dedicated HostOps routing was approved for a subsequent PR, with an independent READ smoke required after merge. EF02 remains on the `ai-commerce-ef02` label; no CPU/RAM limits are configured. No new Windows account or private broker repository is needed.
 
 ## One existing pipeline
 

@@ -66,11 +66,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\AI-Commerce-Th
   directory and GitHub registration **before any retry**. Do not
   delete credentials or run `config.cmd --replace`.
 
-**Phase C (after live evidence):** Verify
-`AI-COMMERCE-EF02-02` and `AI-COMMERCE-HOSTOPS-01` both
-show `online` in GitHub Settings → Actions → Runners and in local
-`-Mode Status`. Then submit a **separate reviewed PR** changing only the
-Personal HostOps job from:
+**Phase C (operator observed 2026-11-04):** The Human supplied the
+attended installer/status readback with both `AI-COMMERCE-EF02-02` and
+`AI-COMMERCE-HOSTOPS-01` showing `ROOT_INSTALLED=True`, `TASK=Running`,
+`GITHUB=online/busy=False`. This is **Human-reported host evidence**, not a
+separately queried GitHub runner-admin API receipt or a dispatched job proof.
+The source routing PR changes only the Personal HostOps job from:
 
 ```yaml
 runs-on: [self-hosted, Windows, ai-commerce-ef02]
@@ -86,9 +87,11 @@ Keep the existing `personal-hostops-workspace` concurrency for
 WRITE non-overlap, the exact Human `APPROVE WRITE #N` gate,
 and all fixed Personal operation allowlists. Keep EF02's
 `ai-commerce-ef02` label so GitHub can select either EF02 runner.
-This stage is explicitly **NOT YET EXECUTED** by Phase A.
+This source-routing step is authorized by the Human-reported Online status.
+It is **not** proof the new runner successfully executed a HostOps job;
+Phase D independent live acceptance is still required after merge.
 
-**Phase D (independent live acceptance):** Send one harmless Personal
+**Phase D (independent live acceptance, pending):** Send one harmless Personal
 `inventory` READ and verify its job lands on
 `AI-COMMERCE-HOSTOPS-01`; separately run an authorized *no-model*
 EF02 Windows preflight to observe `AI-COMMERCE-EF02-02`, or record

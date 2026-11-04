@@ -38,7 +38,8 @@ jobs:
          startsWith(github.event.issue.title, '[HOSTOPS WRITE] ') &&
          github.event.comment.body == format('APPROVE WRITE #{0}', github.event.issue.number))
       )
-    runs-on: [self-hosted, Windows, ai-commerce-ef02]
+    # Dedicated operator-interactive instance; EF02 uses only ai-commerce-ef02.
+    runs-on: [self-hosted, Windows, ai-commerce-hostops]
     timeout-minutes: 5
     permissions:
       contents: read
