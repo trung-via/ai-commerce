@@ -119,12 +119,12 @@ class PersonalHostOpsContractTests(unittest.TestCase):
             old = hostops.ROOTS["scratch"]
             hostops.ROOTS["scratch"] = Path(tmp)
             try:
-                params = {"root_id": "scratch", "relative_path": "probe.txt",
-                          "content_utf8": "private proof"}
+                params = {"root_id": "scratch", "relative_path": "hostops-personal-probe.txt",
+                          "content_utf8": "public safe proof"}
                 request = hostops.parse_event(event("write", "create_text", params), "write")
                 result = hostops.perform(request)
                 self.assertEqual(result["status"], "OBSERVED")
-                self.assertEqual((Path(tmp) / "probe.txt").read_text(), "private proof")
+                self.assertEqual((Path(tmp) / "hostops-personal-probe.txt").read_text(), "public safe proof")
                 with self.assertRaisesRegex(hostops.Denied, "TARGET_ALREADY_EXISTS_NO_RETRY"):
                     hostops.perform(request)
             finally:
@@ -135,7 +135,8 @@ class PersonalHostOpsContractTests(unittest.TestCase):
             old = hostops.ROOTS["workspace"]
             hostops.ROOTS["workspace"] = Path(tmp)
             try:
-                (Path(tmp) / "docs/hello.md").write_text("hello world", encoding="utf-8")
+                (Path(tmp) / "docs").mkdir()
+                (Path(tmp) / "docs" / "hello.md").write_text("hello world", encoding="utf-8")
                 request = hostops.parse_event(event("read", "read_text", {
                     "root_id": "workspace", "relative_path": "docs/hello.md"
                 }), "read")
