@@ -96,7 +96,7 @@ def test_current_route_intentionally_unmoved_until_live_hostops_online():
     assert "  execute:" in ef02
     assert "runs-on: [self-hosted, Windows, ai-commerce-ef02]" in ef02
     assert "group: ef02-issue-" in ef02
-    assert "ai-commerce-ef02-\" + $env:GITHUB_RUN_ID" in ef02
+    assert '("ai-commerce-ef02-" + $env:GITHUB_RUN_ID' in ef02
     assert "python -m venv" in ef02
     assert "EF02_VENV_ALREADY_EXISTS_RECONCILE" in ef02
     assert "VIRTUAL_ENV=" in ef02
