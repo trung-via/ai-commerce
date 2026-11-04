@@ -73,7 +73,7 @@ jobs:
               try { record = JSON.parse(fs.readFileSync(file,'utf8')); }
               catch (_) { record = {status:'BLOCKED',code:'INVALID_NATIVE_RECEIPT'}; }
             }
-            const publicFields = ['status','code','operation','issue_number','root_id','relative_path','bytes','sha256','windows','architecture','logical_cpu_count','no_shell_command_executed','overwritten','remote_shell_enabled','source_sha','approval_channel','content_utf8','git_head_sha','branch','tracked_changes','prefix','paths','total_tracked_in_scope','truncated','git_before_sha','git_after_sha','target_sha','fast_forward_only','sync_result','all_listener_count','unmatched_listener_count','arbitrary_shell_enabled'];
+            const publicFields = ['status','code','operation','issue_number','root_id','relative_path','bytes','sha256','windows','architecture','logical_cpu_count','no_shell_command_executed','overwritten','remote_shell_enabled','source_sha','approval_channel','content_utf8','git_head_sha','branch','tracked_changes','prefix','paths','total_tracked_in_scope','truncated','git_before_sha','git_after_sha','target_sha','fast_forward_only','sync_result','all_listener_count','unmatched_listener_count','arbitrary_shell_enabled','cdp_port','listener_count','loopback_count','unexpected_binding_count','chrome_owned_loopback_count','same_session_chrome_count','devtools_protocol_ok','infrastructure_ready','exact_chat_verified','wake_sent'];
             const sanitized = {};
             for (const key of publicFields) {
               if (Object.prototype.hasOwnProperty.call(record,key)) sanitized[key] = record[key];
@@ -119,6 +119,29 @@ jobs:
                 sanitized.code = 'INVALID_PUBLIC_RUNNER_RECEIPT';
                 delete sanitized.all_listener_count;
                 delete sanitized.unmatched_listener_count;
+              }
+            }
+            if (record.operation === 'cdp_9333_status') {
+              const counts = ['listener_count','loopback_count','unexpected_binding_count',
+                'chrome_owned_loopback_count','same_session_chrome_count'];
+              const valid = sanitized.status === 'OBSERVED' &&
+                sanitized.cdp_port === 9333 &&
+                counts.every(k => Number.isInteger(sanitized[k]) &&
+                  sanitized[k] >= 0 && sanitized[k] <= 16) &&
+                sanitized.loopback_count + sanitized.unexpected_binding_count === sanitized.listener_count &&
+                sanitized.same_session_chrome_count <= sanitized.chrome_owned_loopback_count &&
+                sanitized.chrome_owned_loopback_count <= sanitized.loopback_count &&
+                typeof sanitized.devtools_protocol_ok === 'boolean' &&
+                typeof sanitized.infrastructure_ready === 'boolean' &&
+                sanitized.exact_chat_verified === false &&
+                sanitized.wake_sent === false &&
+                sanitized.arbitrary_shell_enabled === false;
+              if (!valid) {
+                sanitized.status = 'BLOCKED';
+                sanitized.code = 'INVALID_PUBLIC_CDP_RECEIPT';
+                for (const k of counts) delete sanitized[k];
+                for (const k of ['cdp_port','devtools_protocol_ok','infrastructure_ready',
+                  'exact_chat_verified','wake_sent']) delete sanitized[k];
               }
             }
             const result = 'AI_COMMERCE_PERSONAL_HOSTOPS_RESULT_V1\n' + JSON.stringify(sanitized);
