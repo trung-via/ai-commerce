@@ -6,7 +6,7 @@
 
 `ChatGPT → public AI Commerce Issue → existing Windows self-hosted runner (ai-commerce-ef02) → result comment on the same Issue → ChatGPT`.
 
-The trusted `.github/workflows/issue-ingress.yml` is the only issue ingress. It calls `hostops-personal.yml`; old private-only HostOps workflows are not modified or reactivated.
+The trusted `.github/workflows/issue-ingress.yml` is the only issue ingress. It contains the new Personal HostOps job directly, without a second workflow; old private-only HostOps workflows are not modified or reactivated.
 
 **READ:** The Human requests and approves a read in ChatGPT. An authenticated GitHub connector creates an owner-authored Issue titled `[HOSTOPS READ] <purpose>` with an exact JSON body; its opening triggers one Windows operation. No second Human approval. Only fixed metadata (architecture, logical CPU) and UTF-8 **public git-tracked Markdown** under `C:\TOOL\ai-commerce\docs` or `README.md` (max 8 KiB) may be returned in a public Issue.
 
