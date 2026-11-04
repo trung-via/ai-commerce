@@ -26,6 +26,8 @@ CONTROL_TESTS = {
     ".github/workflows/a10-opportunity.yml": ("tests/test_a10_m01.py",),
     ".github/workflows/ef02-reconcile-evidence.yml": ("tests/test_ef02.py",),
     ".github/workflows/ef02-watch.yml": ("tests/test_ef02.py",),
+    # Retired legacy targeted CI files remain in reviewed historical path map
+    # so deletion attempts are audited; EF02 Windows MT-01 runs live tests.
     ".github/workflows/hostops-ci.yml": ("tests/test_hostops_request.py",),
     ".github/workflows/hostops-v2-ci.yml": ("tests/test_hostops_v2.py",),
     ".github/scripts/mt01_v21_proof.py": (
@@ -40,13 +42,14 @@ CONTROL_TESTS = {
     # Reviewed workflow ingress/cleanup controls: select affected authorization,
     # CI/Merge and MT01 oracle regression tests, not a blanket full-suite.
     ".github/workflows/issue-ingress.yml": (
-        "tests/test_ef02.py", "tests/test_hostops_request.py",
-        "tests/test_hostops_v2.py", "tests/test_hostops_v3_integration.py",
+        "tests/test_ef02.py", "tests/test_hostops_personal.py",
         "tests/test_mt01_v21.py",
     ),
     ".github/workflows/actions-skipped-cleanup.yml": (
         "tests/test_mt01_v21.py", "tests/test_pr_merge_gate.py",
     ),
+    # RETIRED 2026-11-04: leave historical path review mappings for the
+    # delete/rollback boundary; none is an active GitHub Actions workflow.
     ".github/workflows/hostops-readonly.yml": (
         "tests/test_hostops_request.py", "tests/test_mt01_v21.py",
     ),
