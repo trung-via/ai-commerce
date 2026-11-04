@@ -114,6 +114,20 @@ try {
         if (-not [IO.Path]::IsPathRooted($ChromeConfig)) {
             Stop-Bounded 'PRIVATE_CONFIG_MUST_BE_ABSOLUTE'
         }
+        # Historic D5 configurations may still target CDP 9222. This
+        # accepted operator action is exclusively for 127.0.0.1:9333.
+        # Core chrome_acquisition separately enforces the full config shape,
+        # file owner ACL, signed Chrome and exact process/port identity.
+        try {
+            $configPort = Get-Content -LiteralPath $ChromeConfig -Raw -Encoding UTF8 |
+                ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            Stop-Bounded 'PRIVATE_CONFIG_UNREADABLE'
+        }
+        if ([string]$configPort.cdp_endpoint -cne 'http://127.0.0.1:9333' -and
+                [string]$configPort.cdp_endpoint -cne 'http://127.0.0.1:9333/') {
+            Stop-Bounded 'CONFIG_NOT_EXACT_9333'
+        }
         if ($Mode -eq 'StartCDP') {
             $answer = Read-Host 'Type START-CDP-9333 to launch/reuse signed dedicated Chrome once'
             if ($answer -cne 'START-CDP-9333') { Stop-Bounded 'HUMAN_DECLINED' }
