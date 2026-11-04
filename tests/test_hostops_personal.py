@@ -149,5 +149,106 @@ class PersonalHostOpsContractTests(unittest.TestCase):
                 hostops.ROOTS["workspace"] = old
 
 
+    def test_extended_public_source_restrictions(self):
+        for rel in (
+            "src/ai_commerce/hostops_v3/personal.py",
+            "tests/test_hostops_personal.py",
+            ".github/workflows/issue-ingress.yml",
+            "work_items/mt01-components/hostops-personal.json",
+        ):
+            with self.subTest(rel=rel):
+                req = hostops.parse_event(event("read", "read_text", {
+                    "root_id": "workspace", "relative_path": rel
+                }), "read")
+                self.assertEqual(req["operation"], "read_text")
+        for rel in (".env", "secrets/data.json", ".github/private.env",
+                    "src/ai_commerce/hidden.ps1", "../secrets.txt"):
+            with self.subTest(rel=rel):
+                with self.assertRaises(hostops.Denied):
+                    hostops.parse_event(event("read", "read_text", {
+                        "root_id": "workspace", "relative_path": rel
+                    }), "read")
+
+    def test_git_snapshot_does_not_return_untracked_paths(self):
+        req = hostops.parse_event(event("read", "git_snapshot", {}), "read")
+        with patch.object(hostops, "_git", side_effect=[
+            "a" * 40 + "\n", "main\n", " M src/example.py\n"
+        ]) as git:
+            actual = hostops.perform(req)
+        self.assertEqual(actual["git_head_sha"], "a" * 40)
+        self.assertEqual(actual["tracked_changes"], 1)
+        self.assertNotIn("src/example.py", json.dumps(actual))
+        self.assertEqual(git.call_count, 3)
+        with self.assertRaises(hostops.Denied):
+            hostops.parse_event(event("read", "git_snapshot", {"shell": "dir"}), "read")
+
+    def test_tracked_paths_restricted_and_capped(self):
+        req = hostops.parse_event(event("read", "tracked_paths", {
+            "prefix": "src/ai_commerce/hostops_v3/"
+        }), "read")
+        with patch.object(hostops, "_git", return_value="\n".join(
+                "src/ai_commerce/hostops_v3/f%03d.py" % i for i in range(65))):
+            result = hostops.perform(req)
+        self.assertEqual(result["total_tracked_in_scope"], 65)
+        self.assertEqual(len(result["paths"]), 50)
+        self.assertTrue(result["truncated"])
+        for prefix in (".git/", "C:/", "secrets/", "src/ai_commerce/../", ".github/", "tests"):
+            with self.subTest(prefix=prefix):
+                with self.assertRaises(hostops.Denied):
+                    hostops.parse_event(event("read", "tracked_paths", {
+                        "prefix": prefix
+                    }), "read")
+
+    def test_digest_after_independent_read_and_workspace_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_scratch = hostops.ROOTS["scratch"]
+            old_notes = hostops.ROOTS["workspace_notes"]
+            hostops.ROOTS["scratch"] = Path(tmp)
+            hostops.ROOTS["workspace_notes"] = Path(tmp)
+            try:
+                params = {"root_id": "workspace_notes", "relative_path": "hostops-personal-note.md",
+                          "content_utf8": "approved notes"}
+                write = hostops.parse_event(event("write", "create_text", params), "write")
+                observed = hostops.perform(write)
+                read = hostops.parse_event(event("read", "file_digest", {
+                    "root_id": "workspace_notes", "relative_path": "hostops-personal-note.md"
+                }), "read")
+                receipt = hostops.perform(read)
+                self.assertEqual(receipt["sha256"], observed["sha256"])
+                self.assertEqual(receipt["bytes"], len("approved notes"))
+                self.assertNotIn("content_utf8", receipt)
+                self.assertFalse(observed["overwritten"])
+                with self.assertRaisesRegex(hostops.Denied, "TARGET_ALREADY_EXISTS_NO_RETRY"):
+                    hostops.perform(write)
+            finally:
+                hostops.ROOTS["scratch"] = old_scratch
+                hostops.ROOTS["workspace_notes"] = old_notes
+        for root in ("workspace", "private", "C:/"):
+            with self.subTest(root=root):
+                with self.assertRaises(hostops.Denied):
+                    hostops.parse_event(event("read", "file_digest", {
+                        "root_id": root, "relative_path": "hostops-personal-note.md"
+                    }), "read")
+
+    def test_public_dirty_worktree_file_is_denied(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_root = hostops.ROOTS["workspace"]
+            hostops.ROOTS["workspace"] = Path(tmp)
+            try:
+                (Path(tmp) / "docs").mkdir()
+                (Path(tmp) / "docs" / "readme.md").write_text(
+                    "maybe secret uncommitted edits", encoding="utf-8")
+                req = hostops.parse_event(event("read", "read_text", {
+                    "root_id": "workspace", "relative_path": "docs/readme.md"
+                }), "read")
+                with patch.object(hostops, "_git", side_effect=[
+                    "", hostops.Denied("GIT_READ_FAILED")
+                ]):
+                    with self.assertRaises(hostops.Denied):
+                        hostops.perform(req)
+            finally:
+                hostops.ROOTS["workspace"] = old_root
+
+
 if __name__ == "__main__":
     unittest.main()
