@@ -6,7 +6,7 @@
 
 `ChatGPT → public AI Commerce Issue → existing Windows self-hosted runner (ai-commerce-ef02) → result comment on the same Issue → ChatGPT`.
 
-The trusted `.github/workflows/issue-ingress.yml` is the only issue ingress. It contains the new Personal HostOps job directly, without a second workflow; old private-only HostOps workflows are not modified or reactivated.
+The trusted `.github/workflows/issue-ingress.yml` is the only issue ingress. It contains **Personal HostOps** and the existing **EF02** path. On 2026-11-04, the obsolete v1/v2/v3 HostOps caller jobs and their five hosted/reusable workflows were **retired from active GitHub Actions** (see [retirement record](HOSTOPS_LEGACY_RETIREMENT_20261104.md)). Historical source, contracts, tests and signed receipts remain available for audit, but have no active GitHub Issue route.
 
 **READ:** The Human requests and approves a read in ChatGPT. An authenticated GitHub connector creates an owner-authored Issue titled `[HOSTOPS READ] <purpose>` with an exact JSON body; its opening triggers one Windows operation. No second Human approval. READ operations now support `inventory`, `git_snapshot` (HEAD, branch, count of tracked changes only), `tracked_paths` (up to 50 public git-tracked paths), `read_text` (max 8 KiB, committed and unchanged public source/docs), and `file_digest` (SHA-256/size only for approved scratch/local-note files). Untracked names, changed file content, secrets and credential files are not sent to a public Issue.
 
