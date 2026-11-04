@@ -472,6 +472,7 @@ foreach ($item in $items) {
     if (record["loopback_count"] + record["unexpected_binding_count"] !=
             record["listener_count"] or
             record["same_session_chrome_count"] >
+            record["chrome_owned_loopback_count"] or
             record["chrome_owned_loopback_count"] >
             record["loopback_count"]):
         deny("CDP_NATIVE_COUNT_MISMATCH")
