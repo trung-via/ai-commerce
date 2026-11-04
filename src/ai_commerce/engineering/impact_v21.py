@@ -574,6 +574,55 @@ def candidate_onboarding_groups(
     return tuple(results)
 
 
+
+def _trusted_baseline_manifest_dependency_order(paths, read_raw):
+    """Order committed owner manifests by source/consumer dependencies.
+
+    Independent manifests stay lexically ordered. If a consumer belongs to a
+    later named manifest, read that owner FIRST. Never bypass validation:
+    duplicate owners, malformed dependency data and cycles all stop admission.
+    Manifest bytes come only from the immutable base Git tree.
+    """
+    import json
+    owner_by_source = {}
+    consumer_paths = {}
+    for path in paths:
+        raw = read_raw(path)
+        if len(raw) > 32768:
+            raise ValueError("ONBOARD_BASELINE_MANIFEST_TOO_LARGE")
+        try:
+            data = json.loads(raw.decode("utf-8-sig"))
+        except (ValueError, UnicodeError) as exc:
+            raise ValueError("ONBOARD_BASELINE_MANIFEST_INVALID") from exc
+        if (type(data) is not dict or
+                type(data.get("sources")) is not list or
+                type(data.get("consumers")) is not list or
+                any(type(s) is not str for s in data["sources"]) or
+                any(type(s) is not str for s in data["consumers"])):
+            raise ValueError("ONBOARD_BASELINE_DEPENDENCY_SHAPE")
+        for source in data["sources"]:
+            if source in owner_by_source:
+                raise ValueError("ONBOARD_BASELINE_DUPLICATE_SOURCE_OWNER")
+            owner_by_source[source] = path
+        consumer_paths[path] = data["consumers"]
+    dependencies = {
+        path: {
+            owner_by_source[c] for c in consumer_paths[path]
+            if c in owner_by_source and owner_by_source[c] != path
+        } for path in paths
+    }
+    pending = set(paths)
+    ordered = []
+    while pending:
+        ready = sorted(p for p in pending if not (dependencies[p] & pending))
+        if not ready:
+            raise ValueError("ONBOARD_BASELINE_DEPENDENCY_CYCLE")
+        chosen = ready[0]
+        ordered.append(chosen)
+        pending.remove(chosen)
+    return tuple(ordered)
+
+
 def load_baseline_component_owner_records(
     *, root: Path, base_sha: str, existing_groups: Sequence,
 ) -> tuple[dict, ...]:
@@ -609,6 +658,8 @@ def load_baseline_component_owner_records(
                        if p.startswith("work_items/mt01-components/"))
     if len(manifests) > 256:
         raise ValueError("ONBOARD_BASELINE_OWNER_LIMIT")
+    manifests = _trusted_baseline_manifest_dependency_order(
+        manifests, lambda path: git("show", f"{base_sha}:{path}"))
     accepted = []
     groups = tuple(existing_groups)
     for path in manifests:
