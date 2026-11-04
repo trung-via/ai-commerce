@@ -1,0 +1,19 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "hostops-w14-origin",
+  "sources": [
+    "src/ai_commerce/hostops_v3/w14_origin.py"
+  ],
+  "tests": [
+    "tests/test_hostops_w14_origin.py"
+  ],
+  "acs": [
+    "HOSTOPS.W14.github-rest-identity-and-dual-signature-offline"
+  ],
+  "consumers": [
+    "src/ai_commerce/hostops_v3/w1_bridge.py",
+    "src/ai_commerce/hostops_v3/auth.py",
+    "src/ai_commerce/hostops_v3/contract.py"
+  ],
+  "contracts": []
+}
