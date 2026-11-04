@@ -2144,8 +2144,8 @@ def test_w1_android_public_signer_enrollment_exact_and_distinct_from_v2():
     )
     public_blob = base64.b64decode(encoded_key, validate=True)
     assert len(public_blob) == 51
-    assert public_blob[:15] == b"\\x00\\x00\\x00\\x0bssh-ed25519"
-    assert public_blob[15:19] == b"\\x00\\x00\\x00\\x20"
+    assert public_blob[:15] == bytes((0, 0, 0, 11)) + b"ssh-ed25519"
+    assert public_blob[15:19] == bytes((0, 0, 0, 32))
     fingerprint = "SHA256:" + base64.b64encode(
         hashlib.sha256(public_blob).digest()
     ).decode("ascii").rstrip("=")
