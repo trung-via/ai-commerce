@@ -1,6 +1,6 @@
 # HostOps Personal — direct route in AI Commerce
 
-**Decision:** Human on 2026-11-04 selected single-account personal use and requested that setup occur entirely in `trung-via/ai-commerce`, using the existing Windows self-hosted runner. No second repository runner, external credential broker, Android signing, or new Windows account is needed for this limited mode.
+**Decision:** Human on 2026-11-04 selected single-account personal use within `trung-via/ai-commerce`. The original one-runner Personal implementation was demonstrated live. Human subsequently approved a **three-instance topology** (two EF02 + one dedicated HostOps), without CPU/RAM limits; see [staged rollout](THREE_RUNNER_ROLLOUT_20261104.md). Until the new dedicated HostOps instance is independently proven Online and a second routing PR merges, the original shared `ai-commerce-ef02` runner stays active. No new Windows account or private broker repository is needed.
 
 ## One existing pipeline
 
