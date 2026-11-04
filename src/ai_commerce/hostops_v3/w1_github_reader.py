@@ -13,7 +13,7 @@ import ssl
 import urllib.error
 import urllib.request
 
-from . import w1_bridge
+from . import w1_bridge, w14_origin
 from .contract import CONTROL_REPOSITORY, canonical, decode, deny, digest
 
 _API_BASE = "https://api.github.com/repos/" + CONTROL_REPOSITORY
@@ -119,20 +119,18 @@ def read_private_issue_snapshot(token, *, issue_number):
     if (not body.isascii() or len(body) > w1_bridge.W14_BODY_MAX or
             not body.startswith(w1_bridge.W14_BODY_MARKER)):
         deny("W14_ISSUE_BODY_DENIED")
-    snapshot = {
-        "schema": w1_bridge.W14_ISSUE_SCHEMA,
-        "repository": CONTROL_REPOSITORY,
-        "issue_number": issue_number,
-        "issue_state": "open",
-        "author_login": w1_bridge.W14_EXPECTED_AUTHOR,
-        "body": body,
-    }
+    # Reuse the separately Brain-reviewed, fixed GitHub repo/user ID and
+    # immutable Issue node/timestamp constraints from W1.4 broker origin.
+    # Normalization does NOT attest who provided the REST response.
+    candidate = w14_origin.normalize_private_issue_rest(
+        repo, issue, issue_number=issue_number)
+    snapshot = candidate["snapshot"]
     return {
         "schema": "hostops.personal.w14_api_read.v1",
         "status": "GITHUB_API_FIELDS_CHECKED_NO_EFFECT",
         "snapshot": snapshot,
-        "repo_id": repo["id"],
-        "issue_id": issue["id"],
+        "repo_id": candidate["repository_id"],
+        "issue_id": candidate["issue_id"],
         "snapshot_sha256": digest(canonical(snapshot)),
         "github_origin_independently_attested": False,
         "external_token_custody_proven": False,
