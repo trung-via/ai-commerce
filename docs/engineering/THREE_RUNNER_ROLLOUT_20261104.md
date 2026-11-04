@@ -20,7 +20,11 @@ set CPU/RAM quotas, pytest-worker reductions, or resource throttling in this
 phase. A second EF02 job may run while another EF02 job is active; keep the
 per-Issue concurrency/idempotency protection unchanged. Two simultaneous
 12-worker pytest runs may contend for physical resources; observe rather
-than prematurely claim throughput improvements.
+than prematurely claim throughput improvements. To prevent an actual
+shared-state conflict (not a resource cap), each EF02 job now installs
+Python dependencies into a separate venv under its own RUNNER_TEMP, with
+a run-ID/attempt-specific folder, rather than simultaneous pip mutation
+of the same Windows user Python site-packages.
 
 ## Staged change without downtime
 
