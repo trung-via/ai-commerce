@@ -63,9 +63,9 @@ def _relative_path(value, *, write=False):
     segments = value.split("/")
     if write and len(segments) != 1:
         deny("WRITE_FLAT_NAME_ONLY")
-    for segment in segments:
+    for i, segment in enumerate(segments):
         if (segment in (".", "..") or not segment or
-                not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_. -]{0,90}", segment) or
+                (segment != ".github" or i != 0 or write) and not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_. -]{0,90}", segment) or
                 segment[-1] in (".", " ") or
                 re.fullmatch(r"(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?",
                              segment, re.IGNORECASE)):
