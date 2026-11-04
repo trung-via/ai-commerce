@@ -1,0 +1,631 @@
+{
+  "work_id": "B0-3-PULSE-ATTENDED-WORKER-001",
+  "source_sha": "32f42b84567e1217a93854389b1c96435bbf454d",
+  "mode": "SOURCE_ONLY_HUMAN_ATTENDED_OFFLINE",
+  "owner": "COMMERCE_OPERATIONS",
+  "human_authorization": {
+    "channel": "CURRENT_CHATGPT_AI_COMMERCE",
+    "date": "2026-11-04",
+    "quote": "ok đồng ý, tiếp tục",
+    "scope": "Source-only B0.3 after merged B0.1 PR #320 and B0.2 PR #323; engineering fixtures only"
+  },
+  "dependencies": [
+    "B0.1/PR320",
+    "B0.2/PR323",
+    "A06/E01"
+  ],
+  "verification_profile": "mt01-component-onboarding",
+  "acceptance": [
+    "A06.e01",
+    "B0.3.attended-offline-worker-wait-brain"
+  ],
+  "baseline_ac_disclosure": "B0.3 is new and may be unknown at ingress. A06.e01 alone proves no B0.3 acceptance. Data-only owner admission is not registered baseline PASS; independent Brain must reconcile exact candidate, Windows CI and AC.",
+  "allowed_paths": [
+    "src/ai_commerce/production_runtime/attended_worker.py",
+    "src/ai_commerce/production_runtime/attended_cli.py",
+    "src/ai_commerce/production_runtime/receipt.py",
+    "tests/test_b0_3_attended_worker.py",
+    "work_items/mt01-components/b0-3.json",
+    "work_items/B0-3-PULSE-ATTENDED-WORKER-001.json",
+    "docs/engineering/B0_3_ATTENDED_WORKER_HANDOFF_REPORT.md"
+  ],
+  "scope": "Exactly seven add-only files. Original schemas, owners, registry, workflows and host configuration unchanged.",
+  "positive_ac": [
+    "Actual separate Windows Python CLI processes and real A06 FFmpeg/ffprobe/full-decode",
+    "Null product_ref, durable four-event WAIT_BRAIN and identical sealed receipt re-export",
+    "Attended verification-only completion after process termination; no duplicate render",
+    "Sanitized companion binds directive file bytes, local artifact, A06 verification and exact B0.2 QA checkpoint"
+  ],
+  "negative_ac": [
+    "Invalid digest/source/scope/tools, arbitrary argv and unapproved/reparse/device/UNC/escaping paths HOLD",
+    "Concurrent worker lock, stale fencing, abandoned lease and ambiguous/partial/corrupt evidence HOLD",
+    "Directive, asset, source or retained checkpoint drift HOLD without resetting journal",
+    "No forged Brain acceptance, network/provider generation, spend or publish; B0.2 UNKNOWN preserved"
+  ],
+  "proof_thresholds": {
+    "selfhost_platform": "Windows",
+    "workers_actual_each_selected_group": 12,
+    "worker_proof": "Controller collection hook plus all-worker ordered collection observer",
+    "hosted_workers_pending": 4,
+    "max_verify_fix_rounds": 2,
+    "missing_material_ffmpeg": "UNPROVEN_NOT_READY",
+    "global_full_suite": false
+  },
+  "expected_process_refs": [
+    "python -m ai_commerce.production_runtime.attended_cli run|inspect|resume|export",
+    "Only local synthetic test processes; no live worker activation"
+  ],
+  "expected_receipt_refs": [
+    "ProductJourneyReceipt.v1.json",
+    "attended-evidence.json",
+    "B0.2 QA commit checkpoint and journey sequence 1..4"
+  ],
+  "verification": {
+    "state": "HOLD_NOT_READY",
+    "material_ac": "UNPROVEN",
+    "brain_acceptance": "PENDING_INDEPENDENT_EXACT_CANDIDATE_REVIEW",
+    "max_verify_fix_rounds": 2,
+    "verify_fix_rounds_used": 2,
+    "environment": {
+      "platform": "win32",
+      "runner_environment_observed": "self-hosted",
+      "github_actions_observed": "true",
+      "python": "3.14.7",
+      "pytest": "8.4.2",
+      "xdist": "3.8.0",
+      "sqlite": "3.50.4",
+      "ffmpeg": "9.0.1-essentials_build-www.gyan.dev",
+      "ffprobe": "9.0.1-essentials_build-www.gyan.dev",
+      "attestation": "ENVIRONMENT_OBSERVATION_ONLY"
+    },
+    "selection": {
+      "profile": "mt01-component-onboarding",
+      "post_edit_selected_groups": [
+        "a06",
+        "b0-1",
+        "b0-2",
+        "b0-3"
+      ],
+      "reason": "ONBOARD_CONSUMER_OWNER_CLOSURE",
+      "supplemental_forward_import_owners": [
+        "a02",
+        "a03",
+        "a04",
+        "a05",
+        "cli"
+      ],
+      "supplemental_provenance": "Exact registered profiles, executed in round0 on unchanged native owner source/test bytes; not a final candidate PASS.",
+      "fallback": false,
+      "fallback_reason": null,
+      "full_suite": false,
+      "raw_planner_ac_adoption_state": "REGISTERED",
+      "raw_planner_flag_limit": "Candidate data-only owner mapping only. New B0.3 remains independently unaccepted; baseline registry was not edited and no registered PASS is inferred."
+    },
+    "attempts": [
+      {
+        "round": 0,
+        "b0_3_pytest_exit_code": 1,
+        "workers_actual": 12,
+        "worker_observers": 12,
+        "selected_collected_executed": 50,
+        "passed": 28,
+        "failed": 21,
+        "skipped": 1,
+        "reason": "Initial publication used hard links denied by this Windows sandbox; first native junction proof also denied.",
+        "junit_sha256": "2816eee4326ec665271f9ab46a75253a490a75e70111847d4288b34114158bf8",
+        "collections_sha256": "382e862d780dba6e9b6b246713a999cf559f3c9db2437394a0ec6a458ea1f971",
+        "controller_state": "UNKNOWN",
+        "controller_error": "MISSING_ARTIFACT_REFERENCE_KEY",
+        "stdout_sha256": "ad740e193bdbbfcf3542d6881485bda37f9e14ab97d9e2b9ba9eb410c3b16d17",
+        "controller_summary_sha256": "d72cfdab238bc9abb486ffbf8e22746b80a6e029f0de55f715b759b2a47385b4"
+      },
+      {
+        "round": 1,
+        "b0_3_pytest_exit_code": 1,
+        "workers_actual": 12,
+        "worker_observers": 12,
+        "selected_collected_executed": 55,
+        "passed": 33,
+        "failed": 20,
+        "skipped": 2,
+        "reason": "Windows no-replace rename repaired local publication; test audit hook wrongly rejected Windows' argv-to-commandline conversion.",
+        "junit_sha256": "ca65b50f0564023dbdd359031055a2aa3f8a22e4d58c1351c8e5576143dff604",
+        "collections_sha256": "a5a4dcdf618572d987f51c94310ce63ba0b4a5982ba6164d17272f641b679983",
+        "controller_state": "UNKNOWN",
+        "controller_error": "ARTIFACT_REFERENCE_TYPE_MISMATCH",
+        "stdout_sha256": "045e6d571359101dbdf24f80346ca729e26c52a0d2175c42d992beeb36952f26",
+        "controller_summary_sha256": "ed55c7e42d3514628b8706b79813109b1ffb4183a689be0c9c6c9f565fcb8b33"
+      },
+      {
+        "round": 2,
+        "b0_3_pytest_exit_code": 1,
+        "workers_actual": 12,
+        "worker_observers": 12,
+        "selected_collected_executed": 55,
+        "passed": 37,
+        "failed": 16,
+        "skipped": 2,
+        "reason": "Audit requires exact prechecked Windows argv conversion. Concurrent material tests exceeded bounded CLI/handshake timeouts; MT01 classifies infrastructure as UNPROVEN.",
+        "junit_sha256": "b3f4dfb057d7038ff66079a54f8eaed0853ae5dff692c070d64b34902dec8c58",
+        "collections_sha256": "a5a4dcdf618572d987f51c94310ce63ba0b4a5982ba6164d17272f641b679983",
+        "controller_state": "UNPROVEN",
+        "controller_error": null,
+        "stdout_sha256": "6640ca88debd8e0c3cdc85e1e85f51348d6b860d3d4cf99064f850aba334b219",
+        "controller_summary_sha256": "4d388b092d890fa24b699e20878b9a2df11b955064f70f06a54308928fccf193"
+      }
+    ],
+    "final_mt01_exit_code": 3,
+    "final_b0_3_mt01_result": "UNPROVEN",
+    "final_b0_3_mt01_reason": "VERIFY_INFRASTRUCTURE_ERROR",
+    "groups": [
+      {
+        "group": "a06",
+        "receipt_round": "round2",
+        "workers_actual": 12,
+        "worker_observers": 12,
+        "ordered_collection_sha256": "4e2b4f83a3bc3b84aae09bbc6dcda4c65406c248f447a92fedc6ea36bc55cb12",
+        "selected": 7,
+        "collected": 7,
+        "executed": 7,
+        "passed": 7,
+        "failed": 0,
+        "skipped": 0,
+        "stdout_sha256": "f7ed37fcf7f0c4224e7a107a2391c34a14d38666aeb461ae846ea9ca70956c4a",
+        "junit_sha256": "c1fb0b569a15efefc50e01bf77d7a694fad4e1df4c6c179f71c3007e891e57c6",
+        "collections_sha256": "07699e2194825a1c486a5352daaceafa3f7dc6ca8c93a2f52e0bee021b564fde",
+        "material_properties": [],
+        "failed_tests": [],
+        "skipped_tests": [],
+        "actual_argv": [
+          "python",
+          "-m",
+          "pytest",
+          "tests/test_a06_e01.py",
+          "-q",
+          "-n",
+          "12"
+        ],
+        "registered_profile": "mt01-a06-tests",
+        "tested_binding_sha256": "6863a89bb95ef814e9345051f95e00db2ebcbd2d2eeee533824300c573bc6365",
+        "result": "PASS",
+        "started_utc": "2026-11-04T08:15:19.232156+00:00",
+        "finished_utc": "2026-11-04T08:15:32.187604+00:00",
+        "executed_non_skipped": 7
+      },
+      {
+        "group": "b0-1",
+        "receipt_round": "round2",
+        "workers_actual": 12,
+        "worker_observers": 12,
+        "ordered_collection_sha256": "ec37f3d299a53088bcda35a851c72483db55a5be403e4bebbf7eb9917859b788",
+        "selected": 82,
+        "collected": 82,
+        "executed": 82,
+        "passed": 82,
+        "failed": 0,
+        "skipped": 0,
+        "stdout_sha256": "1cdc84895c49dacdbd897eab62b1096d1f4b0a9fbe00154fff53991126605aa0",
+        "junit_sha256": "c264d9d0993dc7067f952e4282ff493b372aa1977f4300392355e5263e59e0a5",
+        "collections_sha256": "7ac0fde954de8be198d020f547eef3721cecdd7a74b95331191fb77503506d97",
+        "material_properties": [],
+        "failed_tests": [],
+        "skipped_tests": [],
+        "actual_argv": [
+          "python",
+          "-m",
+          "pytest",
+          "tests/test_b0_production_contracts.py",
+          "-q",
+          "-n",
+          "12"
+        ],
+        "registered_profile": "mt01-component-onboarding",
+        "tested_binding_sha256": "9d47a9ea17cd17edbc76831cdcf10f2fed13fc76c1654db822849e124e771875",
+        "result": "PASS",
+        "started_utc": "2026-11-04T08:15:32.804613+00:00",
+        "finished_utc": "2026-11-04T08:15:36.640847+00:00",
+        "executed_non_skipped": 82
+      },
+      {
+        "group": "b0-2",
+        "receipt_round": "round2",
+        "workers_actual": 12,
+        "worker_observers": 12,
+        "ordered_collection_sha256": "5187a945f759843481183f198e2399bf682543b45a62e7a6ba8c11373abf5206",
+        "selected": 60,
+        "collected": 60,
+        "executed": 60,
+        "passed": 60,
+        "failed": 0,
+        "skipped": 0,
+        "stdout_sha256": "72d49a4709c59bc8be9073832c4e62916d972e06f39962d94323a2455e86682f",
+        "junit_sha256": "5a4b2b53ac838312d3bbe5afaac0060d2ac98324d482c513eb7e464ede1c8d73",
+        "collections_sha256": "7048567cec230f8099f693df2fe955dc19592eebd503f8ba5cdcd735728b6c13",
+        "material_properties": [],
+        "failed_tests": [],
+        "skipped_tests": [],
+        "actual_argv": [
+          "python",
+          "-m",
+          "pytest",
+          "tests/test_b0_2_journal.py",
+          "-q",
+          "-n",
+          "12"
+        ],
+        "registered_profile": "mt01-component-onboarding",
+        "tested_binding_sha256": "7f9104d48f8e57dd6969f5be8ccb4ab8ee013fe59a4419b556bb1d39c049b9e6",
+        "result": "PASS",
+        "started_utc": "2026-11-04T08:15:37.228671+00:00",
+        "finished_utc": "2026-11-04T08:15:42.132971+00:00",
+        "executed_non_skipped": 60
+      },
+      {
+        "group": "b0-3",
+        "receipt_round": "round2",
+        "workers_actual": 12,
+        "worker_observers": 12,
+        "ordered_collection_sha256": "3dd69d456309e96498f395ce8a5c71f0634335ecda07cc74bc1109ea7405cf72",
+        "selected": 55,
+        "collected": 55,
+        "executed": 55,
+        "passed": 37,
+        "failed": 16,
+        "skipped": 2,
+        "stdout_sha256": "6640ca88debd8e0c3cdc85e1e85f51348d6b860d3d4cf99064f850aba334b219",
+        "junit_sha256": "b3f4dfb057d7038ff66079a54f8eaed0853ae5dff692c070d64b34902dec8c58",
+        "collections_sha256": "a5a4dcdf618572d987f51c94310ce63ba0b4a5982ba6164d17272f641b679983",
+        "material_properties": [
+          {
+            "test": "test_real_process_kill_at_commit_cuts_never_rerenders[after_start]",
+            "properties": {
+              "actual_kill_cut": "after_start",
+              "render_calls": "0",
+              "terminated_process_exit": "1"
+            }
+          },
+          {
+            "test": "test_real_process_kill_at_commit_cuts_never_rerenders[after_a06]",
+            "properties": {
+              "actual_kill_cut": "after_a06",
+              "render_calls": "1",
+              "terminated_process_exit": "1"
+            }
+          },
+          {
+            "test": "test_real_process_kill_at_commit_cuts_never_rerenders[before_start]",
+            "properties": {
+              "actual_kill_cut": "before_start",
+              "render_calls": "0",
+              "terminated_process_exit": "1"
+            }
+          }
+        ],
+        "failed_tests": [
+          {
+            "test": "test_real_process_kill_at_commit_cuts_never_rerenders[after_output]",
+            "code": "CRASH_HANDSHAKE_TIMEOUT_50_SECONDS"
+          },
+          {
+            "test": "test_windows_selfhost_real_separate_process_mp4_reopen_and_identical_export",
+            "code": "CLI_SUBPROCESS_TIMEOUT_60_SECONDS"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[journal-corrupt]",
+            "code": "CLI_SUBPROCESS_TIMEOUT_60_SECONDS"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[output-missing]",
+            "code": "CLI_SUBPROCESS_TIMEOUT_60_SECONDS"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[output-partial]",
+            "code": "CLI_SUBPROCESS_TIMEOUT_60_SECONDS"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[asset]",
+            "code": "CLI_SUBPROCESS_TIMEOUT_60_SECONDS"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[directive]",
+            "code": "CLI_SUBPROCESS_TIMEOUT_60_SECONDS"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[directive-file-bytes]",
+            "code": "CLI_SUBPROCESS_TIMEOUT_60_SECONDS"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[intent-source]",
+            "code": "CLI_SUBPROCESS_TIMEOUT_60_SECONDS"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[journal-rollback]",
+            "code": "CLI_SUBPROCESS_TIMEOUT_60_SECONDS"
+          },
+          {
+            "test": "test_human_import_requires_matching_local_rights_with_freshness[valid]",
+            "code": "CLI_SUBPROCESS_TIMEOUT_60_SECONDS"
+          },
+          {
+            "test": "test_real_process_kill_at_commit_cuts_never_rerenders[after_wait]",
+            "code": "CRASH_HANDSHAKE_TIMEOUT_50_SECONDS"
+          },
+          {
+            "test": "test_stale_fence_and_exact_lease_reconciliation",
+            "code": "CRASH_HANDSHAKE_TIMEOUT_50_SECONDS"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[output-corrupt]",
+            "code": "CLI_SUBPROCESS_TIMEOUT_60_SECONDS"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[output-foreign]",
+            "code": "CLI_SUBPROCESS_TIMEOUT_60_SECONDS"
+          },
+          {
+            "test": "test_export_conflict_and_atomic_concurrent_byte_identical_publication",
+            "code": "CLI_SUBPROCESS_TIMEOUT_60_SECONDS"
+          }
+        ],
+        "skipped_tests": [
+          {
+            "test": "test_actual_file_symlink_when_host_permits",
+            "reason": "Host denied native symlink/junction creation; UNPROVEN"
+          },
+          {
+            "test": "test_real_windows_junction_denied_when_host_permits",
+            "reason": "Host denied native symlink/junction creation; UNPROVEN"
+          }
+        ],
+        "actual_argv": [
+          "python",
+          "-m",
+          "pytest",
+          "tests/test_b0_3_attended_worker.py",
+          "-q",
+          "-n",
+          "12"
+        ],
+        "registered_profile": "mt01-component-onboarding",
+        "tested_binding_sha256": "82b39c9b3d4999ea4c67edfa1363fc2b00713c527c7b7226c3b309c8b4ff926e",
+        "result": "UNPROVEN",
+        "started_utc": "2026-11-04T08:15:42.738075+00:00",
+        "finished_utc": "2026-11-04T08:18:23.837978+00:00",
+        "executed_non_skipped": 53
+      },
+      {
+        "group": "a02",
+        "receipt_round": "round0",
+        "workers_actual": 12,
+        "worker_observers": 12,
+        "ordered_collection_sha256": "9c0a7f25431ae54e4cc47262d7b2f01abc942000dfdb88d9c8468bd7062cfdf3",
+        "selected": 30,
+        "collected": 30,
+        "executed": 30,
+        "passed": 30,
+        "failed": 0,
+        "skipped": 0,
+        "stdout_sha256": "2bf4f8be8ff5dc97648177cb3a78d8fa8e2e1ec82d623d0f526a71323cdabd39",
+        "junit_sha256": "37589d5980dacb739e2a43d7551a2b7aac738d7afeaf1ac614b4e3f47490782c",
+        "collections_sha256": "04a8f4cd59f31c9463c0a650d85d69f3afe3b7bb09fce353b0d75a0aca7eb4e1",
+        "material_properties": [],
+        "failed_tests": [],
+        "skipped_tests": [],
+        "actual_argv": [
+          "python",
+          "-m",
+          "pytest",
+          "tests/test_a02_contracts.py",
+          "tests/test_a02_mock_provider.py",
+          "-q",
+          "-n",
+          "12"
+        ],
+        "registered_profile": "mt01-a02-tests",
+        "result": "DATED_EXECUTED_NATIVE_OWNER_BYTES_UNCHANGED",
+        "executed_non_skipped": 30
+      },
+      {
+        "group": "a03",
+        "receipt_round": "round0",
+        "workers_actual": 12,
+        "worker_observers": 12,
+        "ordered_collection_sha256": "67b6758acbb73f8ef7052136108162cfc63ba8216e760c521200e5ca367afdb0",
+        "selected": 193,
+        "collected": 193,
+        "executed": 193,
+        "passed": 193,
+        "failed": 0,
+        "skipped": 0,
+        "stdout_sha256": "d3dcc2d95c74d4e00794632688b5c79e2508e10aeb045cbe04e95b38b41ccf7f",
+        "junit_sha256": "1b7aed46ba2cc330d47ccf891ea9b4f7b7f98e3540df4bc04ff8d4ce65c8e4dc",
+        "collections_sha256": "1070e80df89baac5385b9d47331c33cb9321dcc0fa2eb68bd3cb0cf886c4acfe",
+        "material_properties": [],
+        "failed_tests": [],
+        "skipped_tests": [],
+        "actual_argv": [
+          "python",
+          "-m",
+          "pytest",
+          "tests/test_a03_creative.py",
+          "tests/test_a03_upgrade_v11.py",
+          "-q",
+          "-n",
+          "12"
+        ],
+        "registered_profile": "mt01-a03-tests",
+        "result": "DATED_EXECUTED_NATIVE_OWNER_BYTES_UNCHANGED",
+        "executed_non_skipped": 193
+      },
+      {
+        "group": "a04",
+        "receipt_round": "round0",
+        "workers_actual": 12,
+        "worker_observers": 12,
+        "ordered_collection_sha256": "bee4beb2b64109047bc855b18d918f71ded25f2487a0b9e23803d5df0b45473b",
+        "selected": 181,
+        "collected": 181,
+        "executed": 181,
+        "passed": 178,
+        "failed": 0,
+        "skipped": 3,
+        "stdout_sha256": "69e0464519dc04e7c3ca099b21e0dc6f678a5e902fae3dfe4a36efdb744b29b1",
+        "junit_sha256": "d9e2168e7571f20d8ee16c3364f27be7a4157bb8423a359636db39eb748e59c4",
+        "collections_sha256": "7026eb66359d1530c681f3cc854c414df299665ca03fd56b8b03cf417a296dec",
+        "material_properties": [],
+        "failed_tests": [],
+        "skipped_tests": [
+          {
+            "test": "test_symlink_or_junction_cannot_escape_storage_root",
+            "reason": "Host denied native symlink/junction creation; UNPROVEN"
+          },
+          {
+            "test": "test_symlink_or_junction_root_is_rejected",
+            "reason": "Host denied native symlink/junction creation; UNPROVEN"
+          },
+          {
+            "test": "test_source_hardlink_is_rejected",
+            "reason": "Host denied native hardlink creation (WinError 5); UNPROVEN"
+          }
+        ],
+        "actual_argv": [
+          "python",
+          "-m",
+          "pytest",
+          "tests/test_a04_media_operations.py",
+          "tests/test_a04_upgrade_v11.py",
+          "tests/test_a03_a04_integration.py",
+          "-q",
+          "-n",
+          "12"
+        ],
+        "registered_profile": "mt01-a04-tests",
+        "result": "DATED_EXECUTED_NATIVE_OWNER_BYTES_UNCHANGED",
+        "executed_non_skipped": 178
+      },
+      {
+        "group": "a05",
+        "receipt_round": "round0",
+        "workers_actual": 12,
+        "worker_observers": 12,
+        "ordered_collection_sha256": "478767835765e4b936dd27c6d4f26fa0756f4a843572a17901f464b35848642b",
+        "selected": 217,
+        "collected": 217,
+        "executed": 217,
+        "passed": 217,
+        "failed": 0,
+        "skipped": 0,
+        "stdout_sha256": "bccf1b9c6063ffe8a0a5c1b5e14a6cb86c10f950729f05e6087e49a987d8e37f",
+        "junit_sha256": "34b216b481b14d17ed0fd23fb77c0874124a90d385f02823b543f976dbfed424",
+        "collections_sha256": "2f0bf8aa7abb8b47399882daa6ff9fed6a1af6af03b0db3b703f7d29d3b89138",
+        "material_properties": [],
+        "failed_tests": [],
+        "skipped_tests": [],
+        "actual_argv": [
+          "python",
+          "-m",
+          "pytest",
+          "tests/test_a05_composition.py",
+          "tests/test_a05_render.py",
+          "tests/test_a05_integration.py",
+          "tests/test_creative_asset_link_v11.py",
+          "-q",
+          "-n",
+          "12"
+        ],
+        "registered_profile": "mt01-a05-tests",
+        "result": "DATED_EXECUTED_NATIVE_OWNER_BYTES_UNCHANGED",
+        "executed_non_skipped": 217
+      },
+      {
+        "group": "cli",
+        "receipt_round": "round0",
+        "workers_actual": 12,
+        "worker_observers": 12,
+        "ordered_collection_sha256": "46d2e0ccd5859acb2035ac464bf0305d5b0045a43af3720e9468f305a4a6979b",
+        "selected": 8,
+        "collected": 8,
+        "executed": 8,
+        "passed": 8,
+        "failed": 0,
+        "skipped": 0,
+        "stdout_sha256": "3838657c9b0fd961a92d79d065787a580cea3280264a7633ceb28dd017dcc6f8",
+        "junit_sha256": "a48d4d3ab348cd860bae312d04950ecb87dfca38fa98b109659b51231b0f8f90",
+        "collections_sha256": "5a3ce285a7f34004a2fdcb03ab832518d4f945e5f6190c512067ff1a82c71ce1",
+        "material_properties": [],
+        "failed_tests": [],
+        "skipped_tests": [],
+        "actual_argv": [
+          "python",
+          "-m",
+          "pytest",
+          "tests/test_cli.py",
+          "tests/test_isolation.py",
+          "-q",
+          "-n",
+          "12"
+        ],
+        "registered_profile": "mt01-cli-tests",
+        "result": "DATED_EXECUTED_NATIVE_OWNER_BYTES_UNCHANGED",
+        "executed_non_skipped": 8
+      }
+    ],
+    "combined_counts": {
+      "selected": 833,
+      "collected": 833,
+      "executed": 833,
+      "passed": 812,
+      "failed": 16,
+      "skipped": 5,
+      "executed_non_skipped": 828,
+      "executed_includes_skipped_junit_records": true
+    },
+    "actual_independent_synthetic_diagnostic": {
+      "proof_level": "DIAGNOSTIC_ONLY_NOT_REGISTERED_GROUP_PASS",
+      "child_python_process": true,
+      "state": "WAIT_BRAIN",
+      "receipt_file_sha256": "c5639f99e08ca59b3db526373b83657d5d5de25eb52d1d20365bd5892436a8fd",
+      "render_calls": 1,
+      "ffmpeg_processes": 11,
+      "ffprobe_processes": 7,
+      "denied_network_attempts": 0,
+      "denied_process_attempts": 0,
+      "provider_generation_calls": 0,
+      "publish_calls": 0,
+      "artifact_sha256_retained": false
+    },
+    "material_unproven": [
+      "Primary five-process receipt/re-export test timed out",
+      "After OUTPUT_READY and after WAIT_BRAIN kill handshakes timed out",
+      "Several tamper/export and valid Human-import runs timed out",
+      "Native file symlink, junction and inherited hardlink controls unavailable on this host"
+    ],
+    "baseline_snapshot_sha256": "f0a9ee76c11b0857d69955fada2692b10a6f12fd5d149aff9b9316cc256f26c1",
+    "dependency_closure_sha256": "6fe91360c3585770deeb0fe7f4d6173a62197fc8104c7c2e826ae8898e4e8433",
+    "mt01_plan_sha256": "f7588263c1ede49ede4cbc4221c679e4ee07ec6bbdbe05ab5e9ca292788d5255",
+    "mt01_results_sha256": "39e3bc91f6eabbcf3e9b16ed11b60919d296b78a7244433793dbf22489a18f94",
+    "runtime_python_tree_sha256": "b30289ad68672ddae2233adb311621d1f580643e9483a4c234a028b6bc6df8fc",
+    "tested_executable_and_manifest_sha256": {
+      "src/ai_commerce/production_runtime/attended_worker.py": "65aba2acf24db6207b97c1d4dfeef871fb676d027fceb92314a9510d7e812220",
+      "src/ai_commerce/production_runtime/attended_cli.py": "8ea97478a9f9171aa3a53f6b8bdeba11df216af5896d3381a7478270c0a96d54",
+      "src/ai_commerce/production_runtime/receipt.py": "77b87667d3879627a250782a4f333a2f977f7da686e07ea11df92831f97d18f3",
+      "tests/test_b0_3_attended_worker.py": "af691f5b78eee33c6e039d97f9d9a136762b059e58e7266bcf7af47f1fab280a",
+      "work_items/mt01-components/b0-3.json": "e9bb2564ffb1a1cdb43cc0bf8c38ccd3e2a2e153f652e18379acae8492c763ee"
+    },
+    "unchanged_frozen_schema_sha256": {
+      "contracts/CreativeDirective.v1.schema.json": "100004a74833232dee2262bef2d8d45939871a8d842f860d57e811431a43a8d2",
+      "contracts/BrainDecision.v1.schema.json": "284287f34fa8afce3c6f3b239587f91330544fd38efb580c50c0584cdd31cdd8",
+      "contracts/ProductJourneyReceipt.v1.schema.json": "89261fc3785d0624ab552d66f70d627745bf2320a06867483e352f7f1254ef65"
+    },
+    "receipt_retention": "Sanitized counts, hashes and failure/UNKNOWN summaries are retained here. Raw logs/collections were temporary local engineering artifacts, not a durable public delivery. No private fixture directories/prompts are committed.",
+    "metadata_after_tests": "This WorkItem and handoff report were updated after tests. Executable/test/manifest bytes remain pinned; final-tree/candidate verification is pending. No verified candidate publication is authorized by these failed receipts.",
+    "temporary_proof_cleanup": {
+      "state": "BLOCKED_BY_AUTOMATIC_APPROVAL_REVIEW",
+      "reason": "blocked by policy",
+      "ignored_local_directory": ".local/b03-proof",
+      "alternate_deletion_attempted": false,
+      "candidate_source_paths_unchanged": 7
+    }
+  },
+  "restrictions": "No Git writes/PR/merge/dispatch, runtime activation, Windows service/daemon, provider/network/public posting/spend, HostOps/CDP/Wake, credentials or authenticated Brain identity. EF02 publishes one verified candidate; independent Brain decides later. B0.4/B0-S not implemented."
+}
