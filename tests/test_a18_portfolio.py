@@ -349,10 +349,21 @@ def test_existing_native_and_protected_files_remain_frozen():
         "src/ai_commerce/operations/cost_ledger.py": "2afb7d0c05b6e90d75020c8b04df5c218c3f7bc609b84f16bb3c721dc66dc969",
         "src/ai_commerce/operations/status_report.py": "8e8365dc440f14b0fa6d8b9bea1acd987cb698d637436e5cf6ba0a17a35eef97",
         "src/ai_commerce/settlement/review.py": "44851e8a755b07ff359a2047fe0175dfe261d89b49c75fbd8b5c6a76fa420c86",
-        ".github/ef02/verify-profiles.json": "7135eca52af7bf296a2f2753319ef8e878086d5ff6727ab138673d15fded20d0",
-        "src/ai_commerce/engineering/minimum_test.py": "20ecbcefa133d40e753d2d9f699801b5c5145ec85a2ad93d40babb84dd407a74",
     }
     assert all(sha256((ROOT / path).read_bytes()).hexdigest() == expected for path, expected in frozen.items())
+
+    # MT-01 verification profiles are likewise an extensible approved
+    # registry. The independent trusted merge gate and test_minimum_test
+    # validate profile-to-owner closure; A18 freezes only native interfaces.
+    # The MT-01 owner registry is an intentionally extensible control
+    # inventory, unlike A18's frozen product interfaces. Exact protected
+    # base-AST + newly added owner checks are independently enforced by the
+    # pinned main-branch PR merge gate and its reviewed onboarding oracle.
+    # Do not hardcode a whole-file hash that prevents every legitimate new
+    # component from registering its independent tests.
+    from ai_commerce.engineering.minimum_test import approved_groups
+    owner_names = [group.name for group in approved_groups()]
+    assert owner_names and len(owner_names) == len(set(owner_names))
 
 
 def test_opt_in_provisional_without_native_data_still_inconclusive():

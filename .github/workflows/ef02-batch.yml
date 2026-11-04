@@ -128,9 +128,20 @@ jobs:
         with:
           name: ef02-request-${{ needs.validate.outputs.issue_number }}
           path: .local/ef02-input
-      - name: Install project package with pytest-xdist
+      - name: Install isolated per-job EF02 Python environment with pytest-xdist
         shell: pwsh
-        run: python -m pip install -e ".[parallel-tests]"
+        run: |
+          # Two self-hosted runner instances share a Windows account but must
+          # never mutate one shared user/site-packages tree concurrently.
+          $venv = Join-Path $env:RUNNER_TEMP ("ai-commerce-ef02-" + $env:GITHUB_RUN_ID + "-" + $env:GITHUB_RUN_ATTEMPT)
+          if (Test-Path -LiteralPath $venv) { throw 'EF02_VENV_ALREADY_EXISTS_RECONCILE' }
+          python -m venv "$venv"
+          if ($LASTEXITCODE -ne 0) { throw 'EF02_VENV_CREATION_FAILED' }
+          $venvPython = Join-Path $venv 'Scripts\python.exe'
+          & $venvPython -m pip install -e ".[parallel-tests]"
+          if ($LASTEXITCODE -ne 0) { throw 'EF02_VENV_DEPENDENCY_INSTALL_FAILED' }
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value (Join-Path $venv 'Scripts')
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value ("VIRTUAL_ENV=" + $venv)
       - name: Execute bounded concurrent EF01 jobs
         shell: pwsh
         env:
@@ -142,7 +153,9 @@ jobs:
           MT01_V21_ENABLED: '1'
           EF02_HOST_SLOTS: ${{ vars.EF02_HOST_SLOTS || '2' }}
         run: |
-          python -m ai_commerce.remote run --checkout . --request-file .local/ef02-input/request.json --issuer-login "$env:EF02_ISSUER" --owner-login "$env:EF02_OWNER" --brain-issuers "$env:EF02_BRAIN_ISSUERS" --issue-number "$env:EF02_ISSUE_NUMBER"
+          if (-not $env:VIRTUAL_ENV) { throw 'EF02_ISOLATED_PYTHON_NOT_SET' }
+          $venvPython = Join-Path $env:VIRTUAL_ENV 'Scripts\python.exe'
+          & $venvPython -m ai_commerce.remote run --checkout . --request-file .local/ef02-input/request.json --issuer-login "$env:EF02_ISSUER" --owner-login "$env:EF02_OWNER" --brain-issuers "$env:EF02_BRAIN_ISSUERS" --issue-number "$env:EF02_ISSUE_NUMBER"
           exit $LASTEXITCODE
       - name: Preserve all attempt evidence even when actions fail
         if: always()
