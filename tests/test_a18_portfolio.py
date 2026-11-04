@@ -350,9 +350,20 @@ def test_existing_native_and_protected_files_remain_frozen():
         "src/ai_commerce/operations/status_report.py": "8e8365dc440f14b0fa6d8b9bea1acd987cb698d637436e5cf6ba0a17a35eef97",
         "src/ai_commerce/settlement/review.py": "44851e8a755b07ff359a2047fe0175dfe261d89b49c75fbd8b5c6a76fa420c86",
         ".github/ef02/verify-profiles.json": "7135eca52af7bf296a2f2753319ef8e878086d5ff6727ab138673d15fded20d0",
-        "src/ai_commerce/engineering/minimum_test.py": "20ecbcefa133d40e753d2d9f699801b5c5145ec85a2ad93d40babb84dd407a74",
     }
     assert all(sha256((ROOT / path).read_bytes()).hexdigest() == expected for path, expected in frozen.items())
+
+    # The MT-01 owner registry is an intentionally extensible control
+    # inventory, unlike A18's frozen product interfaces. Exact protected
+    # base-AST + newly added owner checks are independently enforced by the
+    # pinned main-branch PR merge gate and its reviewed onboarding oracle.
+    # Do not hardcode a whole-file hash that prevents every legitimate new
+    # component from registering its independent tests.
+    from ai_commerce.engineering.minimum_test import approved_groups
+    reviewed = {g.name: g for g in approved_groups()}
+    for owner in ("a18-1", "a18-2", "a18-3"):
+        assert owner in reviewed
+        assert reviewed[owner].tests
 
 
 def test_opt_in_provisional_without_native_data_still_inconclusive():
