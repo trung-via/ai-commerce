@@ -2,6 +2,10 @@
 
 Date: 2026-11-04. Source: **26398290f8c2440eaa383783dbdf84f8d95610ab**. Status: **SOURCE_DESIGN_IMPLEMENTED / LOCAL_SCOPED_WINDOWS_TESTS_PASSED / INDEPENDENT_EF02_AND_BRAIN_REVIEW_PENDING**. No candidate SHA, PR CI, merge or post-merge acceptance is claimed.
 
+## Post-candidate reviewer note — PULSE naming
+
+The original Codex executor report below is retained as historical evidence with its exact frozen source and local test receipts. **After** that execution, Human accepted the product-runtime name **PULSE (AI Commerce Production Runtime)** on 2026-11-04. A separate GitHub documentation-only PR branch derived from trusted EF02 candidate updates Roadmap B and ADR nomenclature to PULSE, with logical modules Core/Ledger/Studio/Bridge/Adapters. This does not retroactively change the executor's historical local tests, candidate source, contract names or independently authenticate Brain authority. Exact PR head CI and independent Brain acceptance remain required.
+
 ## Source and authorization observations
 
 Observed before edits: `git rev-parse HEAD` exactly matched the required SHA; `git status --porcelain=v1` was empty; all twelve explicit target paths were absent. Parent-chain/repository AGENTS.md search found no applicable file. Required source is the Human-supplied main baseline, not a claim that remote main remains unchanged. No existing file is authorized for modification; drift requires HOLD.
