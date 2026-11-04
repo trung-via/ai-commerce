@@ -132,6 +132,100 @@ class PersonalHostOpsContractTests(unittest.TestCase):
             with self.assertRaisesRegex(hostops.Denied, "RUNNER_RUNTIME_READ_FAILED"):
                 hostops.perform(request)
 
+    def test_cdp_9333_status_owner_only_bounded_read(self):
+        request = hostops.parse_event(event("read", "cdp_9333_status", {}), "read")
+        self.assertEqual(request["operation"], "cdp_9333_status")
+        for params in ({"command": "Get-Process"},
+                       {"port": 9222},
+                       {"chat_url": "https://chatgpt.com/c/private"}):
+            with self.subTest(params=params):
+                with self.assertRaises(hostops.Denied):
+                    hostops.parse_event(event("read", "cdp_9333_status", params), "read")
+        with self.assertRaises(hostops.Denied):
+            hostops.parse_event(event("write", "cdp_9333_status", {}), "write")
+        other = event("read", "cdp_9333_status", {})
+        other["sender"]["login"] = "untrusted"
+        with self.assertRaises(hostops.Denied):
+            hostops.parse_event(other, "read")
+
+    def test_cdp_9333_status_absent_never_accesses_http(self):
+        req = hostops.parse_event(event("read", "cdp_9333_status", {}), "read")
+        record = {"listener_count": 0, "loopback_count": 0,
+                  "unexpected_binding_count": 0,
+                  "chrome_owned_loopback_count": 0,
+                  "same_session_chrome_count": 0}
+        with patch.object(hostops.os, "name", "nt"), patch.object(
+            hostops.subprocess, "run"
+        ) as native, patch.object(hostops, "build_opener") as opener:
+            native.return_value.returncode = 0
+            native.return_value.stdout = json.dumps(record)
+            answer = hostops.perform(req)
+            opener.assert_not_called()
+            self.assertEqual(native.call_args.args[0][:4],
+                             ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command"])
+            self.assertEqual(native.call_args.kwargs["timeout"], 18)
+            self.assertNotIn("shell", native.call_args.kwargs)
+        self.assertEqual(answer["status"], "OBSERVED")
+        self.assertEqual(answer["cdp_port"], 9333)
+        self.assertFalse(answer["infrastructure_ready"])
+        self.assertFalse(answer["devtools_protocol_ok"])
+        self.assertFalse(answer["wake_sent"])
+        self.assertFalse(answer["exact_chat_verified"])
+
+    def test_cdp_9333_status_exact_local_chrome_and_devtools(self):
+        req = hostops.parse_event(event("read", "cdp_9333_status", {}), "read")
+        record = {"listener_count": 1, "loopback_count": 1,
+                  "unexpected_binding_count": 0,
+                  "chrome_owned_loopback_count": 1,
+                  "same_session_chrome_count": 1}
+        with patch.object(hostops.os, "name", "nt"), patch.object(
+            hostops.subprocess, "run"
+        ) as native, patch.object(hostops, "build_opener") as opener:
+            native.return_value.returncode = 0
+            native.return_value.stdout = json.dumps(record)
+            response = opener.return_value.open.return_value.__enter__.return_value
+            response.status = 200
+            response.read.return_value = json.dumps({
+                "Browser": "Chrome/153.0.0.0", "Protocol-Version": "1.3",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/browser/PRIVATE",
+            }).encode()
+            answer = hostops.perform(req)
+            self.assertEqual(opener.return_value.open.call_args.kwargs["timeout"], 2)
+            request = opener.return_value.open.call_args.args[0]
+            self.assertEqual(request.full_url, "http://127.0.0.1:9333/json/version")
+        self.assertTrue(answer["infrastructure_ready"])
+        self.assertTrue(answer["devtools_protocol_ok"])
+        self.assertFalse(answer["wake_sent"])
+        self.assertFalse(answer["exact_chat_verified"])
+        self.assertNotIn("PRIVATE", json.dumps(answer))
+        self.assertNotIn("webSocketDebuggerUrl", json.dumps(answer))
+
+    def test_cdp_9333_status_rejects_bad_native_evidence(self):
+        req = hostops.parse_event(event("read", "cdp_9333_status", {}), "read")
+        base = {"listener_count": 1, "loopback_count": 1,
+                "unexpected_binding_count": 0,
+                "chrome_owned_loopback_count": 1,
+                "same_session_chrome_count": 1}
+        invalid = [
+            {**base, "chrome_owned_loopback_count": 2},
+            {**base, "same_session_chrome_count": 2},
+            {**base, "unexpected_binding_count": 1},
+            {**base, "listener_count": True},
+            {**base, "CommandLine": "secret"},
+        ]
+        with patch.object(hostops.os, "name", "nt"), patch.object(
+            hostops.subprocess, "run"
+        ) as native, patch.object(hostops, "build_opener") as opener:
+            native.return_value.returncode = 0
+            for obj in invalid:
+                native.return_value.stdout = json.dumps(obj)
+                with self.assertRaises(hostops.Denied):
+                    hostops.perform(req)
+            opener.assert_not_called()
+            native.return_value.returncode = 1
+            with self.assertRaisesRegex(hostops.Denied, "CDP_NATIVE_READ_FAILED"):
+                hostops.perform(req)
+
     def test_no_read_approval_comment_required(self):
         value = event("read", "inventory", {})
         self.assertNotIn("comment", value)
