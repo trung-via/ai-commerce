@@ -1144,5 +1144,18 @@ def test_repository_wide_windows_only_audit():
         "historical_reference_samples": historical_references[:30],
     }
     print("WINDOWS_ONLY_REPO_AUDIT_V1=" + json.dumps(report, ensure_ascii=False))
-    assert active_workflows >= 20, "ACTIVE_WORKFLOW_INVENTORY_INCOMPLETE"
+    # Retiring obsolete workflows must not fail a hardcoded file-count floor.
+    # Require the actual reviewed routing/CI contracts instead.
+    essential = {
+        ".github/workflows/ef02-tests.yml",
+        ".github/workflows/ef02-batch.yml",
+        ".github/workflows/issue-ingress.yml",
+        ".github/workflows/brain-pass-auto-merge.yml",
+        ".github/workflows/actions-skipped-cleanup.yml",
+    }
+    existing = {p for p in tracked if p.startswith(".github/workflows/")
+                and p.endswith((".yml", ".yaml")) and (ROOT / p).is_file()}
+    missing = sorted(essential - existing)
+    assert not missing, "ESSENTIAL_WORKFLOW_MISSING: " + repr(missing)
+    assert active_workflows >= len(essential), "ACTIVE_WORKFLOW_INVENTORY_INCOMPLETE"
     assert not blocking, "WINDOWS_ONLY_ACTIVE_DEPENDENCY_REMAINS: " + repr(blocking[:20])
