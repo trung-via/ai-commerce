@@ -8,7 +8,7 @@
 
 The trusted `.github/workflows/issue-ingress.yml` is the only issue ingress. It contains **Personal HostOps** and the existing **EF02** path. On 2026-11-04, the obsolete v1/v2/v3 HostOps caller jobs and their five hosted/reusable workflows were **retired from active GitHub Actions** (see [retirement record](HOSTOPS_LEGACY_RETIREMENT_20261104.md)). Historical source, contracts, tests and signed receipts remain available for audit, but have no active GitHub Issue route.
 
-**READ:** The Human requests and approves a read in ChatGPT. An authenticated GitHub connector creates an owner-authored Issue titled `[HOSTOPS READ] <purpose>` with an exact JSON body; its opening triggers one Windows operation. No second Human approval. READ operations now support `inventory`, `runner_runtime_inventory` (strictly three predefined AI Commerce runner names, Task Scheduler state, hidden-launcher presence and listener process/session counts, plus total and unidentified listener count), `git_snapshot` (HEAD, branch, count of tracked changes only), `tracked_paths` (up to 50 public git-tracked paths), `read_text` (max 8 KiB, committed and unchanged public source/docs), and `file_digest` (SHA-256/size only for approved scratch/local-note files). Untracked names, changed file content, secrets and credential files are not sent to a public Issue.
+**READ:** The Human requests and approves a read in ChatGPT. An authenticated GitHub connector creates an owner-authored Issue titled `[HOSTOPS READ] <purpose>` with an exact JSON body; its opening triggers one Windows operation. No second Human approval. READ operations now support `inventory`, `runner_runtime_inventory` (strictly three predefined AI Commerce runner names, Task Scheduler state, hidden-launcher presence and listener process/session counts, plus total and unidentified listener count), `cdp_9333_status` (fixed loopback TCP owner/session and DevTools version metadata, no chat access, no Wake), `git_snapshot` (HEAD, branch, count of tracked changes only), `tracked_paths` (up to 50 public git-tracked paths), `read_text` (max 8 KiB, committed and unchanged public source/docs), and `file_digest` (SHA-256/size only for approved scratch/local-note files). Untracked names, changed file content, secrets and credential files are not sent to a public Issue.
 
 **WRITE:** ChatGPT creates a public Issue titled `[HOSTOPS WRITE] <purpose>` containing the exact target and non-sensitive text. Merely opening it NEVER executes the write. The Human opens this Issue in the ordinary GitHub UI and types **exactly** `APPROVE WRITE #N` (N is the Issue number) as a new comment. The dedicated workflow admits this one owner-comment event, then creates **one new** `hostops-personal-*.txt|md|json` file, <=2048 UTF-8 bytes, in either the existing scratch root `C:\TOOL\AI-Commerce-HostOps-Approved` (`root_id=scratch`) or the existing ignored worktree notes directory `C:\TOOL\ai-commerce\.local` (`root_id=workspace_notes`). A missing directory produces HOLD; no directory auto-creation, overwrite, source edit or arbitrary command. No overwrite, delete or arbitrary PowerShell. Success returns SHA256/size; ambiguous effect returns HOLD and must be checked on disk before attempting a different request.
 
@@ -56,6 +56,38 @@ the two states are independently observed. A count of unmatched listeners
 means other or unreadable runner processes, **not** a known named runner.
 This probe does not confirm GitHub API online state or successful EF02
 model execution. No service, task or process is stopped/restarted/modified.
+
+### Chrome CDP 9333 — read-only HostOps bridge
+
+The owner may create a single `[HOSTOPS READ]` Issue with:
+
+```json
+{"schema":"ai-commerce.personal-hostops.v1","operation":"cdp_9333_status","parameters":{}}
+```
+
+This executes one **fixed source-owned** Windows read under the dedicated
+interactive `AI-COMMERCE-HOSTOPS-01` runner, not a generic remote
+PowerShell API. It checks the listener for exact `127.0.0.1:9333`,
+unexpected nonloopback binds, whether the owning process is `chrome.exe`
+in the calling Windows session, and reads only the local
+`/json/version` DevTools metadata (no proxy, no redirects). Public output
+contains only a fixed port, counts and status booleans. It never includes
+Chrome command lines, profile paths, PID, cookie, bearer credential, chat
+URL, tab list, editor contents, message, or WebSocket debugger URL.
+
+`infrastructure_ready=true` means **local CDP foundation only**:
+it does **not** prove signed Chrome acquisition, enrolled exact ChatGPT
+conversation, composer idle, private D2 state, fresh completion event,
+D3 grants, Brain continuation or Send permission. It does not start/restart
+Chrome, switch profiles, create a tab, navigate ChatGPT, send a Wake,
+change the D2 ledger, dispatch EF02, or attempt to fix the old #179
+`UNKNOWN/UI_USER_TURN_OBSERVED` record.
+
+On CDP absent/nonloopback/foreign process/wrong session/invalid version,
+the response remains an observed diagnostic with
+`infrastructure_ready=false`. The next action is a **separately
+authorized interactive D5 readiness flow** per #220 and the existing
+guarded local operator contract, not an automatic retry.
 
 ## Expanded V2 requests (same schema, same approval)
 
