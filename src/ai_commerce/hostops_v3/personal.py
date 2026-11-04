@@ -1,8 +1,8 @@
-"""Personal HostOps v2: fixed AI Commerce Windows reads and attended new file creates.
+"""Personal HostOps v3: bounded reads, new-file writes and attended git-main fast-forward.
 
 ChatGPT-approved READ sends only public committed source, safe git metadata or
 file hashes to public Issues. A Human GitHub comment authorizes each WRITE.
-No arbitrary shell, secret file access, overwrite, delete or provider effect.
+No arbitrary shell, secret file access, force update, delete or provider effect.
 """
 from __future__ import annotations
 
@@ -147,17 +147,26 @@ def parse_event(event, mode):
         else:
             deny("READ_OPERATION_DENIED")
     else:
-        if (operation != "create_text" or
-                set(params) != {"root_id", "relative_path", "content_utf8"} or
-                params.get("root_id") not in ("scratch", "workspace_notes")):
+        if operation == "git_sync_main":
+            if set(params) != {"expected_local_sha", "target_sha"} or any(
+                type(params.get(key)) is not str or
+                not re.fullmatch(r"[0-9a-f]{40}", params[key])
+                for key in ("expected_local_sha", "target_sha")
+            ):
+                deny("GIT_SYNC_PIN_REQUIRED")
+        elif operation == "create_text":
+            if (set(params) != {"root_id", "relative_path", "content_utf8"} or
+                    params.get("root_id") not in ("scratch", "workspace_notes")):
+                deny("WRITE_SCOPE_DENIED")
+            _relative_path(params["relative_path"], write=True)
+            content = params["content_utf8"]
+            if type(content) is not str or "\x00" in content:
+                deny("WRITE_CONTENT_DENIED")
+            size = len(content.encode("utf-8"))
+            if not 0 < size <= MAX_WRITE:
+                deny("WRITE_SIZE_DENIED")
+        else:
             deny("WRITE_SCOPE_DENIED")
-        _relative_path(params["relative_path"], write=True)
-        content = params["content_utf8"]
-        if type(content) is not str or "\x00" in content:
-            deny("WRITE_CONTENT_DENIED")
-        size = len(content.encode("utf-8"))
-        if not 0 < size <= MAX_WRITE:
-            deny("WRITE_SIZE_DENIED")
     return {"issue_number": number, "operation": operation, "parameters": params}
 
 
@@ -208,9 +217,85 @@ def _git(*args):
     return result.stdout
 
 
+TRUSTED_ORIGIN_URLS = frozenset((
+    "https://github.com/trung-via/ai-commerce.git",
+    "https://github.com/trung-via/ai-commerce",
+    "git@github.com:trung-via/ai-commerce.git",
+    "ssh://git@github.com/trung-via/ai-commerce.git",
+))
+
+
+def _git_write(*args):
+    """Fixed argv only, no issue-supplied shell, Git hooks disabled for merge."""
+    root = ROOTS["workspace"]
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "-c", "core.hooksPath=NUL", *args],
+            capture_output=True, text=True, timeout=90, check=False,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"},
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        deny("GIT_SYNC_UNKNOWN_CHECK_HEAD_NO_RETRY")
+    if result.returncode != 0:
+        deny("GIT_SYNC_FAILED_CHECK_HEAD_NO_RETRY")
+    return result.stdout
+
+
+def _sync_main(params):
+    """One attended fast-forward, pinned to observed local and remote commits."""
+    root = ROOTS["workspace"]
+    if not root.is_dir() or any(_is_reparse(p) for p in (root, *root.parents)):
+        deny("GIT_SYNC_ROOT_DENIED")
+    top = _git("rev-parse", "--show-toplevel").strip()
+    if Path(top).resolve() != root.resolve():
+        deny("GIT_SYNC_ROOT_MISMATCH")
+    if _git("symbolic-ref", "--quiet", "--short", "HEAD").strip() != "main":
+        deny("GIT_SYNC_NOT_MAIN")
+    origin = _git("config", "--get", "remote.origin.url").strip()
+    if origin not in TRUSTED_ORIGIN_URLS:
+        deny("GIT_SYNC_ORIGIN_DENIED")
+    before = _git("rev-parse", "HEAD").strip()
+    if before != params["expected_local_sha"]:
+        deny("GIT_SYNC_LOCAL_SHA_DRIFT")
+    if _git("status", "--porcelain=v1", "--untracked-files=normal").strip():
+        deny("GIT_SYNC_DIRTY_WORKTREE")
+    # Fetch changes only remote-tracking refs, not tracked workspace files.
+    _git_write("fetch", "--no-tags", "origin",
+               "refs/heads/main:refs/remotes/origin/main")
+    if (_git("symbolic-ref", "--quiet", "--short", "HEAD").strip() != "main" or
+            _git("rev-parse", "HEAD").strip() != before):
+        deny("GIT_SYNC_WORKTREE_DRIFT")
+    if _git("status", "--porcelain=v1", "--untracked-files=normal").strip():
+        deny("GIT_SYNC_DIRTY_AFTER_FETCH")
+    remote = _git("rev-parse", "refs/remotes/origin/main").strip()
+    if remote != params["target_sha"]:
+        deny("GIT_SYNC_TARGET_MOVED")
+    try:
+        _git("merge-base", "--is-ancestor", before, remote)
+    except Denied:
+        deny("GIT_SYNC_NON_FAST_FORWARD")
+    if before != remote:
+        _git_write("merge", "--ff-only", "--no-edit",
+                   "refs/remotes/origin/main")
+    after = _git("rev-parse", "HEAD").strip()
+    if after != remote:
+        deny("GIT_SYNC_UNKNOWN_CHECK_HEAD_NO_RETRY")
+    if _git("status", "--porcelain=v1", "--untracked-files=normal").strip():
+        deny("GIT_SYNC_POST_MERGE_DIRTY_CHECK_HEAD")
+    return {
+        "status": "OBSERVED", "operation": "git_sync_main",
+        "git_before_sha": before, "git_after_sha": after,
+        "target_sha": remote, "fast_forward_only": True,
+        "sync_result": "ALREADY_AT_TARGET" if before == remote else "FAST_FORWARDED",
+        "branch": "main",
+    }
+
+
 def perform(request):
     op = request["operation"]
     params = request["parameters"]
+    if op == "git_sync_main":
+        return _sync_main(params)
     if op == "inventory":
         return {
             "status": "OBSERVED", "operation": op,
