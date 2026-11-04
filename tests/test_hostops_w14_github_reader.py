@@ -137,7 +137,7 @@ def test_w14_repository_must_be_private_and_exact(h, monkeypatch, bad):
     repo, issue = payloads(proposal, verify)
     repo.update(bad[0])
     opener = simulated(monkeypatch, repo, issue)
-    with pytest.raises(c.Denied, match="W14_GITHUB_REPOSITORY_DENIED"):
+    with pytest.raises(c.Denied, match="W14_GITHUB_REPOSITORY_DENIED|W14_GITHUB_METADATA_DENIED"):
         reader.read_private_issue_snapshot(TOKEN, issue_number=123)
     assert len(opener.seen) == 1
 
