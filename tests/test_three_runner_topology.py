@@ -82,8 +82,11 @@ def test_release_digest_one_time_token_and_private_local_tasks():
         assert fragment in source, fragment
     assert "Write-Host $token" not in source
     assert "NO_CPU_RAM_LIMITS" in source
-    assert "CPU_QUOTA" not in source
-    assert "RAM_QUOTA" not in source
+    # Status text explicitly says NO_CPU_RAM_QUOTAS_CONFIGURED.
+    # Exclude actual resource control, not that truthful reporting string.
+    assert "Set-ProcessMitigation" not in source
+    assert "--cpu-limit" not in source
+    assert "--memory-limit" not in source
 
 
 def test_current_route_intentionally_unmoved_until_live_hostops_online():
