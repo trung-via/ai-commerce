@@ -116,7 +116,8 @@ def read_private_issue_snapshot(token, *, issue_number):
             type(issue.get("body")) is not str):
         deny("W14_GITHUB_ISSUE_DENIED")
     body = issue["body"]
-    if len(body) > w1_bridge.W14_BODY_MAX or not body.isascii():
+    if (not body.isascii() or len(body) > w1_bridge.W14_BODY_MAX or
+            not body.startswith(w1_bridge.W14_BODY_MARKER)):
         deny("W14_ISSUE_BODY_DENIED")
     snapshot = {
         "schema": w1_bridge.W14_ISSUE_SCHEMA,
