@@ -250,5 +250,161 @@ class PersonalHostOpsContractTests(unittest.TestCase):
                 hostops.ROOTS["workspace"] = old_root
 
 
+    def test_git_sync_requires_owner_approval_and_exact_pinned_commits(self):
+        params = {"expected_local_sha": "a" * 40, "target_sha": "b" * 40}
+        req = hostops.parse_event(event("write", "git_sync_main", params), "write")
+        self.assertEqual(req["parameters"], params)
+        for message in ("APPROVE WRITE #16", "APPROVE WRITE #17 ", "yes", ""):
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(hostops.Denied, "EXACT_WRITE_APPROVAL_REQUIRED"):
+                    hostops.parse_event(event("write", "git_sync_main", params,
+                                            comment=message), "write")
+        with self.assertRaisesRegex(hostops.Denied, "READ_OPERATION_DENIED"):
+            hostops.parse_event(event("read", "git_sync_main", params), "read")
+        for bad in (
+            {"expected_local_sha": "a" * 39, "target_sha": "b" * 40},
+            {"expected_local_sha": "a" * 40, "target_sha": "b" * 41},
+            {"expected_local_sha": "a" * 40, "target_sha": "B" * 40},
+            {"expected_local_sha": "a" * 40, "target_sha": "b" * 40, "cmd": "reset --hard"},
+            {},
+        ):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(hostops.Denied, "GIT_SYNC_PIN_REQUIRED"):
+                    hostops.parse_event(event("write", "git_sync_main", bad), "write")
+        with self.assertRaises(hostops.Denied):
+            hostops.parse_event(event("write", "git_reset", params), "write")
+
+    def test_git_sync_never_fetches_on_wrong_branch_origin_or_dirty_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_root = hostops.ROOTS["workspace"]
+            hostops.ROOTS["workspace"] = root
+            params = {"expected_local_sha": "a" * 40, "target_sha": "b" * 40}
+            req = hostops.parse_event(event("write", "git_sync_main", params), "write")
+            try:
+                with patch.object(hostops, "_git", side_effect=[
+                    str(root), "feature\n"
+                ]), patch.object(hostops, "_git_write") as write:
+                    with self.assertRaisesRegex(hostops.Denied, "GIT_SYNC_NOT_MAIN"):
+                        hostops.perform(req)
+                    write.assert_not_called()
+                with patch.object(hostops, "_git", side_effect=[
+                    str(root), "main\n", "https://untrusted.invalid/repo"
+                ]), patch.object(hostops, "_git_write") as write:
+                    with self.assertRaisesRegex(hostops.Denied, "GIT_SYNC_ORIGIN_DENIED"):
+                        hostops.perform(req)
+                    write.assert_not_called()
+                with patch.object(hostops, "_git", side_effect=[
+                    str(root), "main\n",
+                    "https://github.com/trung-via/ai-commerce.git",
+                    "a" * 40, "?? newfile.txt\n"
+                ]), patch.object(hostops, "_git_write") as write:
+                    with self.assertRaisesRegex(hostops.Denied, "GIT_SYNC_DIRTY_WORKTREE"):
+                        hostops.perform(req)
+                    write.assert_not_called()
+                with patch.object(hostops, "_git", side_effect=[
+                    str(root), "main\n",
+                    "https://github.com/trung-via/ai-commerce.git",
+                    "c" * 40
+                ]), patch.object(hostops, "_git_write") as write:
+                    with self.assertRaisesRegex(hostops.Denied, "GIT_SYNC_LOCAL_SHA_DRIFT"):
+                        hostops.perform(req)
+                    write.assert_not_called()
+            finally:
+                hostops.ROOTS["workspace"] = old_root
+
+    @staticmethod
+    def _run_git(*args):
+        import subprocess
+        cp = subprocess.run(["git", *map(str, args)], capture_output=True,
+                            text=True, check=True, timeout=20)
+        return cp.stdout.strip()
+
+    def _new_local_git_fixture(self, root):
+        bare = root / "origin.git"
+        producer = root / "producer"
+        local = root / "workspace"
+        self._run_git("init", "--bare", "-b", "main", bare)
+        self._run_git("clone", bare, producer)
+        self._run_git("-C", producer, "config", "user.name", "HostOps test")
+        self._run_git("-C", producer, "config", "user.email", "hostops-test@example.invalid")
+        (producer / "README.md").write_text("v1\n", encoding="utf-8")
+        self._run_git("-C", producer, "add", "README.md")
+        self._run_git("-C", producer, "commit", "-m", "v1")
+        self._run_git("-C", producer, "push", "origin", "main")
+        self._run_git("clone", bare, local)
+        local_before = self._run_git("-C", local, "rev-parse", "HEAD")
+        (producer / "README.md").write_text("v2\n", encoding="utf-8")
+        self._run_git("-C", producer, "commit", "-am", "v2")
+        self._run_git("-C", producer, "push", "origin", "main")
+        target = self._run_git("-C", producer, "rev-parse", "HEAD")
+        return bare, producer, local, local_before, target
+
+    def test_git_sync_real_offline_fast_forward_and_no_replay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bare, _, local, before, target = self._new_local_git_fixture(Path(tmp))
+            params = {"expected_local_sha": before, "target_sha": target}
+            req = hostops.parse_event(event("write", "git_sync_main", params), "write")
+            old_root = hostops.ROOTS["workspace"]
+            hostops.ROOTS["workspace"] = local
+            try:
+                with patch.object(hostops, "TRUSTED_ORIGIN_URLS",
+                                  frozenset([str(bare)])):
+                    result = hostops.perform(req)
+                    self.assertEqual(result["git_before_sha"], before)
+                    self.assertEqual(result["git_after_sha"], target)
+                    self.assertEqual(result["sync_result"], "FAST_FORWARDED")
+                    self.assertTrue(result["fast_forward_only"])
+                    self.assertEqual(
+                        self._run_git("-C", local, "rev-parse", "HEAD"), target)
+                    self.assertEqual((local / "README.md").read_text(), "v2\n")
+                    with self.assertRaisesRegex(hostops.Denied, "GIT_SYNC_LOCAL_SHA_DRIFT"):
+                        hostops.perform(req)
+            finally:
+                hostops.ROOTS["workspace"] = old_root
+
+    def test_git_sync_target_drift_does_not_change_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bare, _, local, before, target = self._new_local_git_fixture(Path(tmp))
+            req = hostops.parse_event(event("write", "git_sync_main", {
+                "expected_local_sha": before, "target_sha": "a" * 40
+            }), "write")
+            old = hostops.ROOTS["workspace"]
+            hostops.ROOTS["workspace"] = local
+            try:
+                with patch.object(hostops, "TRUSTED_ORIGIN_URLS",
+                                  frozenset([str(bare)])):
+                    with self.assertRaisesRegex(hostops.Denied, "GIT_SYNC_TARGET_MOVED"):
+                        hostops.perform(req)
+                self.assertEqual(self._run_git("-C", local, "rev-parse", "HEAD"), before)
+            finally:
+                hostops.ROOTS["workspace"] = old
+
+    def test_git_sync_real_divergence_is_denied_without_reset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bare, _, local, _, target = self._new_local_git_fixture(Path(tmp))
+            self._run_git("-C", local, "config", "user.name", "HostOps test")
+            self._run_git("-C", local, "config", "user.email",
+                          "hostops-test@example.invalid")
+            (local / "local-note.txt").write_text("local commit\n", encoding="utf-8")
+            self._run_git("-C", local, "add", "local-note.txt")
+            self._run_git("-C", local, "commit", "-m", "local diverged")
+            before = self._run_git("-C", local, "rev-parse", "HEAD")
+            req = hostops.parse_event(event("write", "git_sync_main", {
+                "expected_local_sha": before, "target_sha": target
+            }), "write")
+            old = hostops.ROOTS["workspace"]
+            hostops.ROOTS["workspace"] = local
+            try:
+                with patch.object(hostops, "TRUSTED_ORIGIN_URLS",
+                                  frozenset([str(bare)])):
+                    with self.assertRaisesRegex(hostops.Denied, "GIT_SYNC_NON_FAST_FORWARD"):
+                        hostops.perform(req)
+                self.assertEqual(self._run_git("-C", local, "rev-parse", "HEAD"), before)
+                self.assertEqual((local / "local-note.txt").read_text(), "local commit\n")
+            finally:
+                hostops.ROOTS["workspace"] = old
+
+
 if __name__ == "__main__":
     unittest.main()
