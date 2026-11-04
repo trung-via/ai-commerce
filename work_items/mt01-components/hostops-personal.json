@@ -1,0 +1,17 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "hostops-personal",
+  "sources": [
+    "scripts/hostops_personal.py"
+  ],
+  "tests": [
+    "tests/test_hostops_personal.py"
+  ],
+  "acs": [
+    "HOSTOPS.PERSONAL.chat-approved-public-read-owner-comment-new-scratch-write"
+  ],
+  "consumers": [
+    "src/ai_commerce/hostops_v3/contract.py"
+  ],
+  "contracts": []
+}
