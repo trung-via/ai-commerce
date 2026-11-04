@@ -50,9 +50,6 @@ jobs:
             const allowed = new Map([
               ['.github/workflows/brain-pass-auto-merge.yml', 'issue_comment'],
               ['.github/workflows/ef02-batch.yml', 'issues'],
-              ['.github/workflows/hostops-readonly.yml', 'issues'],
-              ['.github/workflows/hostops-v2.yml', 'issues'],
-              ['.github/workflows/hostops-v3.yml', 'issues'],
               ['.github/workflows/issue-ingress.yml', 'issues'],
               // Retired historical M0-R / Human queue flows; never run these again.
               ['.github/workflows/human-merge-queue.yml', 'issue_comment'],

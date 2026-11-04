@@ -99,8 +99,7 @@ REVIEWED_CONTROL_TESTS = {
     # Reviewed single-ingress and artifact-free cleanup controls. These
     # require independent owner/consumer tests; unknown .github files HOLD.
     ".github/workflows/issue-ingress.yml": (
-        "tests/test_ef02.py", "tests/test_hostops_request.py",
-        "tests/test_hostops_v2.py", "tests/test_hostops_v3_integration.py",
+        "tests/test_ef02.py", "tests/test_hostops_personal.py",
         "tests/test_mt01_v21.py"),
     ".github/workflows/actions-skipped-cleanup.yml": (
         "tests/test_mt01_v21.py", "tests/test_pr_merge_gate.py"),
