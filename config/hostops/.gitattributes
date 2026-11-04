@@ -1,0 +1,3 @@
+# W1 signer policy is a byte-pinned SSH allowed_signers payload.
+# Never let Windows core.autocrlf rewrite its LF bytes.
+w1-human-allowed-signers -text -eol
