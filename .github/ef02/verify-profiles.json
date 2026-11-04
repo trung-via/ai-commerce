@@ -403,6 +403,15 @@
     "-n",
     "12"
   ],
+  "mt01-three-runner-topology-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_three_runner_topology.py",
+    "-q",
+    "-n",
+    "12"
+  ],
   "mt01-component-onboarding": [
     "python",
     "-m",
