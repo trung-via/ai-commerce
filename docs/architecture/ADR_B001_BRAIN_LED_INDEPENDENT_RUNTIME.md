@@ -1,6 +1,10 @@
-# ADR B001 — Brain-led independent production runtime (PA2)
+# ADR B001 — PULSE: Brain-led independent production runtime (PA2)
 
 Date: 2026-11-04. Status: **ARCHITECTURAL DIRECTION HUMAN_SELECTED_PA2; IMPLEMENTATION DETAILS PROPOSED; B0.1 SOURCE ONLY**.
+
+## Runtime name and logical boundaries
+
+**PULSE = AI Commerce Production Runtime**, approved as the mnemonic name in a follow-up Human ChatGPT decision on 2026-11-04, after the original B0.1 candidate was published. This documentation-only alignment does not change PA2 authority or claims. It is one independently deployable product runtime with logical modules **PULSE Core, Ledger, Studio, Bridge, Adapters**, not five agents, services or independently authoritative ledgers. ChatGPT Brain/Creative Reasoner remains the decision-maker; EF01/EF02 remains the engineering builder. The technical Python package stays `ai_commerce.production_runtime` and schema names remain unchanged. Nothing here provides a verified private authority bridge, SQLite worker, media generation, publish permission or actual chat Wake.
 
 ## Decision, exact source and permission
 
