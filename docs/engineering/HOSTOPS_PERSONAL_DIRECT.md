@@ -70,43 +70,43 @@ These fixed operations are not general PowerShell, arbitrary shell, repo source 
 
 ## Attended Git main sync (fast-forward only)
 
-HostOps also supports the fixed WRITE operation \`git_sync_main\` in the **existing**
-\`C:\TOOL\ai-commerce\` worktree. The Human's **one** exact GitHub Issue comment
-\`APPROVE WRITE #N\` is required for each request. Never approve by ChatGPT
+HostOps also supports the fixed WRITE operation `git_sync_main` in the **existing**
+`C:\TOOL\ai-commerce` worktree. The Human's **one** exact GitHub Issue comment
+`APPROVE WRITE #N` is required for each request. Never approve by ChatGPT
 connector, reuse an earlier approval, or let Issue creation update the laptop.
 
-Before creating the Issue, ChatGPT should read the current laptop \`git_snapshot\`
-receipt and the live GitHub \`main\` SHA. It pins both values in the immutable
+Before creating the Issue, ChatGPT should read the current laptop `git_snapshot`
+receipt and the live GitHub `main` SHA. It pins both values in the immutable
 Issue body (the user need not type SHA values):
 
-\`\`\`json
+```json
 {"schema":"ai-commerce.personal-hostops.v1","operation":"git_sync_main","parameters":{"expected_local_sha":"<40-lowercase-hex-from-local-git-snapshot>","target_sha":"<40-lowercase-hex-from-GitHub-main>"}}
-\`\`\`
+```
 
-Once the Human comments on that new \`[HOSTOPS WRITE]\` Issue, the Windows runner:
-1. Verifies the fixed, non-reparse repo path, attached \`main\` branch, recognized
-   \`origin\` URL, exact old HEAD, and clean tracked/untracked (excluding ignored)
+Once the Human comments on that new `[HOSTOPS WRITE]` Issue, the Windows runner:
+1. Verifies the fixed, non-reparse repo path, attached `main` branch, recognized
+   `origin` URL, exact old HEAD, and clean tracked/untracked (excluding ignored)
    worktree.
-2. Runs a fixed \`git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main\`
+2. Runs a fixed `git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main`
    with no shell expansion, noninteractive Git and a bounded subprocess timeout.
 3. Rechecks HEAD, branch and clean status; insists fetched remote HEAD matches
-   the Issue's pinned \`target_sha\`, and \`expected_local_sha\` is an ancestor.
-4. Uses only \`git -c core.hooksPath=NUL merge --ff-only --no-edit refs/remotes/origin/main\`
-   (or reports \`ALREADY_AT_TARGET\`), then independently reads back final HEAD and
+   the Issue's pinned `target_sha`, and `expected_local_sha` is an ancestor.
+4. Uses only `git -c core.hooksPath=NUL merge --ff-only --no-edit refs/remotes/origin/main`
+   (or reports `ALREADY_AT_TARGET`), then independently reads back final HEAD and
    worktree status. The receipt contains only before/after/target SHA, branch and
-   \`fast_forward_only=true\`.
+   `fast_forward_only=true`.
 
-Disallowed: \`git reset\`, \`pull --rebase\`, stash, force push, code execution from
+Disallowed: `git reset`, `pull --rebase`, stash, force push, code execution from
 user-supplied command strings, arbitrary path, switching branch, overwriting local
 changes, and automatic replay of an UNKNOWN outcome. If local untracked files,
 diverging commits, origin mismatch, or a newer remote target appear, the request
 is **HOLD** and no merge is attempted. A network/fetch failure may change Git
 remote-tracking metadata but must not be represented as successful worktree sync.
 The Human-authorized write has the same GitHub-owner-comment limitation as
-\`create_text\`; the owner identity alone is not an independent signature.
+`create_text`; the owner identity alone is not an independent signature.
 
-After successful WRITE, use **a new ChatGPT-approved** \`git_snapshot\` READ Issue
-to prove the *actual laptop* \`main\` HEAD equals the requested target. A GitHub
+After successful WRITE, use **a new ChatGPT-approved** `git_snapshot` READ Issue
+to prove the *actual laptop* `main` HEAD equals the requested target. A GitHub
 Action success without the result SHA is insufficient.
 
 ## Operational acceptance
