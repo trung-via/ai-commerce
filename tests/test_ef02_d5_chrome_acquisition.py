@@ -319,3 +319,59 @@ def test_actual_windows_command_line_quoting_when_available():
     assert argv[0].endswith("chrome.exe")
     assert argv[1] == r"--user-data-dir=C:\Users\My User\Chrome"
     assert argv[2] == "--profile-directory=Default"
+
+
+def test_attended_d5_cdp_wrapper_fixed_user_only_modes_and_no_send():
+    script = (Path(__file__).resolve().parents[1] /
+              "scripts" / "AI-Commerce-D5-Attended-CDP.ps1").read_text(encoding="utf-8")
+    assert "ValidateSet('Inspect', 'StartCDP', 'PrepareChat')" in script
+    assert "LOCAL_OPERATOR_ONLY" in script
+    assert "INTERACTIVE_SESSION_REQUIRED" in script
+    assert "USE_NON_ELEVATED_POWERSHELL" in script
+    assert "CHECKOUT_REPOSITORY_UNVERIFIED" in script
+    assert "CHECKOUT_TRACKED_CHANGES" in script
+    assert "EXISTING_PRIVATE_CONFIG_REQUIRED" in script
+    assert "PRIVATE_CONFIG_AMBIGUOUS_EXPLICIT_PATH_REQUIRED" in script
+    assert "START-CDP-9333" in script
+    assert "PREPARE-EXACT-CHAT" in script
+    assert "ai_commerce.remote.chrome_acquisition" in script
+    assert "ai_commerce.remote.wake_readiness_flow" in script
+    assert "--opt-in-open-chat" in script
+    assert "--opt-in" in script
+    assert "Get-Command python.exe" in script
+    assert "PYTHONPATH" in script
+    assert "D5_WAKE_SENT=False" in script
+    assert "READY_FOR_PREPARE_NO_SEND" in script
+    assert "wake-readiness.json" in script
+    assert "Status" not in script.split("ValidateSet(", 1)[1].split(")", 1)[0]
+    for forbidden in (
+        "Invoke-Expression", "iex ", "Start-Process", "Stop-Process",
+        "Stop-ScheduledTask", "Register-ScheduledTask", "New-ScheduledTask",
+        "Remove-Item -Recurse", "Set-Content", "Out-File",
+        "send-once", "local_wake_entry send", "deliver_wake",
+        "chrome.exe --remote-debugging-port",
+    ):
+        assert forbidden not in script
+
+
+def test_attended_d5_cdp_wrapper_powershell_parser_on_hosted_windows():
+    if os.name != "nt":
+        pytest.skip("PowerShell AST parser acceptance only on Windows")
+    from shutil import which
+    shell = which("powershell.exe")
+    assert shell, "Windows PowerShell 5.1 is required"
+    source = (Path(__file__).resolve().parents[1] /
+              "scripts" / "AI-Commerce-D5-Attended-CDP.ps1")
+    # Parse only. Do not invoke the script, process Chrome or read private paths.
+    check = (
+        "$found=$null;"
+        "[System.Management.Automation.Language.Parser]::ParseFile("
+        "'" + str(source).replace("'", "''") +
+        "',[ref]$null,[ref]$found) | Out-Null;"
+        "if(@($found).Count -gt 0) {$found | Out-String | Write-Host; exit 1}"
+    )
+    run = subprocess.run(
+        [shell, "-NoProfile", "-NonInteractive", "-Command", check],
+        capture_output=True, text=True, check=False, timeout=30
+    )
+    assert run.returncode == 0, run.stdout + run.stderr
