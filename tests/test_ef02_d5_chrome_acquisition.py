@@ -333,6 +333,8 @@ def test_attended_d5_cdp_wrapper_fixed_user_only_modes_and_no_send():
     assert "EXISTING_PRIVATE_CONFIG_REQUIRED" in script
     assert "PRIVATE_CONFIG_AMBIGUOUS_EXPLICIT_PATH_REQUIRED" in script
     assert "START-CDP-9333" in script
+    assert "CONFIG_NOT_EXACT_9333" in script
+    assert "http://127.0.0.1:9333" in script
     assert "PREPARE-EXACT-CHAT" in script
     assert "ai_commerce.remote.chrome_acquisition" in script
     assert "ai_commerce.remote.wake_readiness_flow" in script
