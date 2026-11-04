@@ -15,6 +15,7 @@ import platform
 import re
 import stat
 import subprocess
+from urllib.request import Request, ProxyHandler, HTTPRedirectHandler, build_opener
 
 REPO = "trung-via/ai-commerce"
 OWNER = "trung-via"
@@ -119,7 +120,9 @@ def parse_event(event, mode):
     params = _dict(request["parameters"])
     operation = request["operation"]
     if mode == "read":
-        if operation == "inventory":
+        if operation in ("inventory", "runner_runtime_inventory", "cdp_9333_status"):
+            # Runtime inventory has fixed, compiled-in three-runner targets.
+            # The public Issue cannot choose a task, executable or command.
             if params:
                 deny("INVALID_PARAMETERS")
         elif operation == "read_text":
@@ -291,11 +294,233 @@ def _sync_main(params):
     }
 
 
+def _runner_runtime_inventory():
+    """Read-only Windows Task Scheduler/CIM snapshot; never publish process commands.
+
+    The PowerShell source is a fixed literal with three fixed AI Commerce roots.
+    No Issue field, shell fragment, credential, full path or process command line
+    is interpolated into the subprocess or returned in a public Issue.
+    """
+    if os.name != "nt":
+        deny("RUNNER_RUNTIME_WINDOWS_ONLY")
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$specs = @(
+  @{ name='AI-COMMERCE-EF02-01'; root='C:\TOOL\ai-commerce-runner'; task='AI-Commerce-EF02-Interactive'; launcher='EF02-Hidden-Runner.vbs' },
+  @{ name='AI-COMMERCE-EF02-02'; root='C:\TOOL\ai-commerce-runner-ef02-02'; task='AI-Commerce-EF02-02-Interactive'; launcher='Runner-Hidden.vbs' },
+  @{ name='AI-COMMERCE-HOSTOPS-01'; root='C:\TOOL\ai-commerce-runner-hostops-01'; task='AI-Commerce-HostOps-01-Interactive'; launcher='Runner-Hidden.vbs' }
+)
+$listeners = @(Get-CimInstance Win32_Process -Filter "Name='Runner.Listener.exe'" -ErrorAction Stop)
+$launchers = @(Get-CimInstance Win32_Process -Filter "Name='wscript.exe'" -ErrorAction Stop)
+$found = 0
+$records = @(
+  foreach ($spec in $specs) {
+    $task = Get-ScheduledTask -TaskName $spec.task -ErrorAction SilentlyContinue
+    $expected = Join-Path $spec.root 'bin\Runner.Listener.exe'
+    $matched = @($listeners | Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -ieq $expected) })
+    $found += $matched.Count
+    $launcher = Join-Path $spec.root $spec.launcher
+    $active = @($launchers | Where-Object { $_.CommandLine -and ($_.CommandLine -like ('*' + $launcher + '*')) })
+    $taskState = if ($null -eq $task) { 'NOT_REGISTERED' } else { [string]$task.State }
+    $taskInteractive = ($null -ne $task -and [string]$task.Principal.LogonType -eq 'Interactive')
+    $taskHidden = ($null -ne $task -and @($task.Actions).Count -eq 1 -and
+        [string]$task.Actions[0].Execute -ilike '*\wscript.exe' -and
+        [string]$task.Actions[0].Arguments -like ('*' + $spec.launcher + '*'))
+    [pscustomobject]@{
+      name = $spec.name
+      task_state = $taskState
+      task_interactive = [bool]$taskInteractive
+      hidden_launcher_configured = [bool]$taskHidden
+      hidden_launcher_process_count = [int]$active.Count
+      listener_process_count = [int]$matched.Count
+      listener_session_ids = @($matched | ForEach-Object { [int]$_.SessionId } | Sort-Object -Unique)
+    }
+  }
+)
+[pscustomobject]@{
+  all_listener_count = [int]$listeners.Count
+  unmatched_listener_count = [int]($listeners.Count - $found)
+  runners = $records
+} | ConvertTo-Json -Compress -Depth 5
+"""
+    try:
+        # No user-provided tokens, paths, script, arguments or shell=True.
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=25, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        deny("RUNNER_RUNTIME_READ_UNAVAILABLE")
+    if result.returncode != 0 or len(result.stdout) > 16384:
+        deny("RUNNER_RUNTIME_READ_FAILED")
+    try:
+        data = json.loads(result.stdout.lstrip("\ufeff"))
+    except (ValueError, UnicodeError):
+        deny("RUNNER_RUNTIME_INVALID_JSON")
+    if type(data) is not dict or set(data) != {
+        "all_listener_count", "unmatched_listener_count", "runners"
+    }:
+        deny("RUNNER_RUNTIME_INVALID_SHAPE")
+    records = data["runners"]
+    expected = ("AI-COMMERCE-EF02-01", "AI-COMMERCE-EF02-02",
+                "AI-COMMERCE-HOSTOPS-01")
+    if type(records) is not list or len(records) != 3 or [r.get("name") for r in records] != list(expected):
+        deny("RUNNER_RUNTIME_TARGET_MISMATCH")
+    if (type(data["all_listener_count"]) is not int or
+            type(data["unmatched_listener_count"]) is not int or
+            not 0 <= data["unmatched_listener_count"] <= data["all_listener_count"] <= 1000):
+        deny("RUNNER_RUNTIME_COUNT_INVALID")
+    for row in records:
+        if type(row) is not dict or set(row) != {
+            "name", "task_state", "task_interactive", "hidden_launcher_configured",
+            "hidden_launcher_process_count", "listener_process_count", "listener_session_ids"
+        }:
+            deny("RUNNER_RUNTIME_ROW_INVALID")
+        if (row["task_state"] not in ("Running", "Ready", "Disabled", "Queued",
+                                     "NOT_REGISTERED") or
+                any(type(row[key]) is not bool for key in
+                    ("task_interactive", "hidden_launcher_configured")) or
+                any(type(row[key]) is not int or not 0 <= row[key] <= 10 for key in
+                    ("hidden_launcher_process_count", "listener_process_count")) or
+                type(row["listener_session_ids"]) is not list or
+                any(type(sid) is not int or not 0 <= sid < 100000 for sid in
+                    row["listener_session_ids"])):
+            deny("RUNNER_RUNTIME_ROW_VALUE_INVALID")
+    if sum(row["listener_process_count"] for row in records) != (
+            data["all_listener_count"] - data["unmatched_listener_count"]):
+        deny("RUNNER_RUNTIME_COUNT_MISMATCH")
+    return {
+        "status": "OBSERVED", "operation": "runner_runtime_inventory",
+        "windows": True, "all_listener_count": data["all_listener_count"],
+        "unmatched_listener_count": data["unmatched_listener_count"],
+        "runners": records,
+        "arbitrary_shell_enabled": False,
+    }
+
+
+class _CdpNoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _cdp_9333_status():
+    """Fixed READ-ONLY Chrome 9333 probe, no navigation, tab content or Send.
+
+    Native information is reduced to bounded counters/booleans before leaving
+    the Windows process; command lines, profile paths, PIDs and URLs are never
+    exported into a public GitHub Issue. This DOES NOT validate a D2 route,
+    a logged-in exact ChatGPT tab, a grant, or any Wake authorization.
+    """
+    if os.name != "nt":
+        deny("CDP_DIAGNOSTIC_WINDOWS_ONLY")
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$port = 9333
+$items = @(Get-NetTCPConnection -State Listen -ErrorAction Stop |
+    Where-Object { [int]$_.LocalPort -eq $port })
+$session = [int](Get-Process -Id $PID -ErrorAction Stop).SessionId
+$loopback = 0
+$other = 0
+$chromeOwned = 0
+$sameSession = 0
+foreach ($item in $items) {
+    if ([string]$item.LocalAddress -cne '127.0.0.1') {
+        $other++
+        continue
+    }
+    $loopback++
+    $owner = Get-CimInstance Win32_Process -Filter (
+        'ProcessId=' + [int]$item.OwningProcess) -ErrorAction SilentlyContinue
+    if ($null -ne $owner -and [string]$owner.Name -ieq 'chrome.exe') {
+        $chromeOwned++
+        if ([int]$owner.SessionId -eq $session -and $session -gt 0) {
+            $sameSession++
+        }
+    }
+}
+@{
+  listener_count = [int]$items.Count
+  loopback_count = [int]$loopback
+  unexpected_binding_count = [int]$other
+  chrome_owned_loopback_count = [int]$chromeOwned
+  same_session_chrome_count = [int]$sameSession
+} | ConvertTo-Json -Compress
+"""
+    try:
+        native = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=18, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        deny("CDP_NATIVE_READ_UNAVAILABLE")
+    if native.returncode != 0 or len(native.stdout) > 4096:
+        deny("CDP_NATIVE_READ_FAILED")
+    try:
+        record = json.loads(native.stdout.lstrip("\ufeff"))
+    except (UnicodeError, ValueError):
+        deny("CDP_NATIVE_INVALID_JSON")
+    names = (
+        "listener_count", "loopback_count", "unexpected_binding_count",
+        "chrome_owned_loopback_count", "same_session_chrome_count"
+    )
+    if type(record) is not dict or set(record) != set(names):
+        deny("CDP_NATIVE_INVALID_SHAPE")
+    if any(type(record[key]) is not int or not 0 <= record[key] <= 16 for key in names):
+        deny("CDP_NATIVE_INVALID_COUNTS")
+    if (record["loopback_count"] + record["unexpected_binding_count"] !=
+            record["listener_count"] or
+            record["same_session_chrome_count"] >
+            record["chrome_owned_loopback_count"] or
+            record["chrome_owned_loopback_count"] >
+            record["loopback_count"]):
+        deny("CDP_NATIVE_COUNT_MISMATCH")
+    protocol_ok = False
+    if (record["listener_count"] == 1 and
+            record["loopback_count"] == 1 and
+            record["chrome_owned_loopback_count"] == 1 and
+            record["same_session_chrome_count"] == 1):
+        # Safe fixed localhost GET. No redirect, no proxy, no cookies, no tabs.
+        request = Request(
+            "http://127.0.0.1:9333/json/version",
+            headers={"Accept": "application/json", "User-Agent": "AI-Commerce-CDP-ReadOnly"},
+            method="GET",
+        )
+        try:
+            opener = build_opener(ProxyHandler({}), _CdpNoRedirect())
+            with opener.open(request, timeout=2) as response:
+                raw = response.read(16385)
+                if response.status == 200 and 0 < len(raw) <= 16384:
+                    version = json.loads(raw.decode("utf-8"))
+                    protocol_ok = (type(version) is dict and
+                                   isinstance(version.get("Browser"), str) and
+                                   version["Browser"].startswith("Chrome/") and
+                                   isinstance(version.get("Protocol-Version"), str))
+        except (OSError, ValueError, UnicodeError, TimeoutError):
+            protocol_ok = False
+    ready = (record["listener_count"] == 1 and
+             record["loopback_count"] == 1 and
+             record["chrome_owned_loopback_count"] == 1 and
+             record["same_session_chrome_count"] == 1 and protocol_ok)
+    return {
+        "status": "OBSERVED", "operation": "cdp_9333_status", "cdp_port": 9333,
+        **record, "devtools_protocol_ok": bool(protocol_ok),
+        "infrastructure_ready": bool(ready),
+        "exact_chat_verified": False, "wake_sent": False,
+        "arbitrary_shell_enabled": False,
+    }
+
+
 def perform(request):
     op = request["operation"]
     params = request["parameters"]
     if op == "git_sync_main":
         return _sync_main(params)
+    if op == "runner_runtime_inventory":
+        return _runner_runtime_inventory()
+    if op == "cdp_9333_status":
+        return _cdp_9333_status()
     if op == "inventory":
         return {
             "status": "OBSERVED", "operation": op,

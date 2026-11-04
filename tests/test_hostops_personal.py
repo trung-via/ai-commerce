@@ -50,6 +50,182 @@ class PersonalHostOpsContractTests(unittest.TestCase):
         output = hostops.perform(request)
         self.assertEqual(output["status"], "OBSERVED")
 
+    def test_runner_runtime_inventory_is_owner_only_exact_read(self):
+        req = hostops.parse_event(event("read", "runner_runtime_inventory", {}), "read")
+        self.assertEqual(req["operation"], "runner_runtime_inventory")
+        for mode, params in (("read", {"command": "Get-Process"}),
+                             ("read", {"task_name": "ALL"}),
+                             ("write", {})):
+            with self.subTest(mode=mode, params=params):
+                with self.assertRaises(hostops.Denied):
+                    hostops.parse_event(event(mode, "runner_runtime_inventory", params), mode)
+        owner = event("read", "runner_runtime_inventory", {})
+        owner["sender"]["login"] = "other-user"
+        with self.assertRaises(hostops.Denied):
+            hostops.parse_event(owner, "read")
+
+    def test_runner_runtime_inventory_sanitized_native_response(self):
+        names = ["AI-COMMERCE-EF02-01", "AI-COMMERCE-EF02-02",
+                 "AI-COMMERCE-HOSTOPS-01"]
+        rows = [
+            {"name": name, "task_state": "Running", "task_interactive": True,
+             "hidden_launcher_configured": True,
+             "hidden_launcher_process_count": 1,
+             "listener_process_count": 1, "listener_session_ids": [1]}
+            for name in names
+        ]
+        payload = {"all_listener_count": 4, "unmatched_listener_count": 1,
+                   "runners": rows}
+        req = hostops.parse_event(event("read", "runner_runtime_inventory", {}), "read")
+        with patch.object(hostops.os, "name", "nt"), patch.object(
+            hostops.subprocess, "run"
+        ) as fake:
+            fake.return_value.returncode = 0
+            fake.return_value.stdout = json.dumps(payload)
+            result = hostops.perform(req)
+            args, kwargs = fake.call_args
+        self.assertEqual(result["status"], "OBSERVED")
+        self.assertEqual(result["operation"], "runner_runtime_inventory")
+        self.assertEqual(result["all_listener_count"], 4)
+        self.assertEqual(result["unmatched_listener_count"], 1)
+        self.assertEqual([x["name"] for x in result["runners"]], names)
+        self.assertFalse(result["arbitrary_shell_enabled"])
+        self.assertEqual(args[0][:4],
+                         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command"])
+        self.assertNotIn("shell", kwargs)
+        self.assertEqual(kwargs["timeout"], 25)
+        self.assertEqual(kwargs["check"], False)
+        self.assertNotIn("COMMANDLINE", json.dumps(result).upper())
+        self.assertNotIn("EXECUTABLEPATH", json.dumps(result).upper())
+
+    def test_runner_runtime_inventory_rejects_native_unbounded_or_wrong_identity(self):
+        names = ["AI-COMMERCE-EF02-01", "AI-COMMERCE-EF02-02",
+                 "AI-COMMERCE-HOSTOPS-01"]
+        records = [
+            {"name": name, "task_state": "Running", "task_interactive": True,
+             "hidden_launcher_configured": True,
+             "hidden_launcher_process_count": 1,
+             "listener_process_count": 1, "listener_session_ids": [1]}
+            for name in names
+        ]
+        request = hostops.parse_event(event("read", "runner_runtime_inventory", {}), "read")
+        samples = [
+            {"all_listener_count": 3, "unmatched_listener_count": 0,
+             "runners": records[:-1]},
+            {"all_listener_count": 3, "unmatched_listener_count": 0,
+             "runners": [{**records[0], "command_line": "secret"}, *records[1:]]},
+            {"all_listener_count": 3, "unmatched_listener_count": 0,
+             "runners": [{**records[0], "name": "OTHER-RUNNER"}, *records[1:]]},
+            {"all_listener_count": 2, "unmatched_listener_count": 0,
+             "runners": records},
+        ]
+        with patch.object(hostops.os, "name", "nt"), patch.object(
+            hostops.subprocess, "run"
+        ) as fake:
+            fake.return_value.returncode = 0
+            for payload in samples:
+                fake.return_value.stdout = json.dumps(payload)
+                with self.assertRaises(hostops.Denied):
+                    hostops.perform(request)
+            fake.return_value.returncode = 1
+            fake.return_value.stdout = ""
+            with self.assertRaisesRegex(hostops.Denied, "RUNNER_RUNTIME_READ_FAILED"):
+                hostops.perform(request)
+
+    def test_cdp_9333_status_owner_only_bounded_read(self):
+        request = hostops.parse_event(event("read", "cdp_9333_status", {}), "read")
+        self.assertEqual(request["operation"], "cdp_9333_status")
+        for params in ({"command": "Get-Process"},
+                       {"port": 9222},
+                       {"chat_url": "https://chatgpt.com/c/private"}):
+            with self.subTest(params=params):
+                with self.assertRaises(hostops.Denied):
+                    hostops.parse_event(event("read", "cdp_9333_status", params), "read")
+        with self.assertRaises(hostops.Denied):
+            hostops.parse_event(event("write", "cdp_9333_status", {}), "write")
+        other = event("read", "cdp_9333_status", {})
+        other["sender"]["login"] = "untrusted"
+        with self.assertRaises(hostops.Denied):
+            hostops.parse_event(other, "read")
+
+    def test_cdp_9333_status_absent_never_accesses_http(self):
+        req = hostops.parse_event(event("read", "cdp_9333_status", {}), "read")
+        record = {"listener_count": 0, "loopback_count": 0,
+                  "unexpected_binding_count": 0,
+                  "chrome_owned_loopback_count": 0,
+                  "same_session_chrome_count": 0}
+        with patch.object(hostops.os, "name", "nt"), patch.object(
+            hostops.subprocess, "run"
+        ) as native, patch.object(hostops, "build_opener") as opener:
+            native.return_value.returncode = 0
+            native.return_value.stdout = json.dumps(record)
+            answer = hostops.perform(req)
+            opener.assert_not_called()
+            self.assertEqual(native.call_args.args[0][:4],
+                             ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command"])
+            self.assertEqual(native.call_args.kwargs["timeout"], 18)
+            self.assertNotIn("shell", native.call_args.kwargs)
+        self.assertEqual(answer["status"], "OBSERVED")
+        self.assertEqual(answer["cdp_port"], 9333)
+        self.assertFalse(answer["infrastructure_ready"])
+        self.assertFalse(answer["devtools_protocol_ok"])
+        self.assertFalse(answer["wake_sent"])
+        self.assertFalse(answer["exact_chat_verified"])
+
+    def test_cdp_9333_status_exact_local_chrome_and_devtools(self):
+        req = hostops.parse_event(event("read", "cdp_9333_status", {}), "read")
+        record = {"listener_count": 1, "loopback_count": 1,
+                  "unexpected_binding_count": 0,
+                  "chrome_owned_loopback_count": 1,
+                  "same_session_chrome_count": 1}
+        with patch.object(hostops.os, "name", "nt"), patch.object(
+            hostops.subprocess, "run"
+        ) as native, patch.object(hostops, "build_opener") as opener:
+            native.return_value.returncode = 0
+            native.return_value.stdout = json.dumps(record)
+            response = opener.return_value.open.return_value.__enter__.return_value
+            response.status = 200
+            response.read.return_value = json.dumps({
+                "Browser": "Chrome/153.0.0.0", "Protocol-Version": "1.3",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/browser/PRIVATE",
+            }).encode()
+            answer = hostops.perform(req)
+            self.assertEqual(opener.return_value.open.call_args.kwargs["timeout"], 2)
+            request = opener.return_value.open.call_args.args[0]
+            self.assertEqual(request.full_url, "http://127.0.0.1:9333/json/version")
+        self.assertTrue(answer["infrastructure_ready"])
+        self.assertTrue(answer["devtools_protocol_ok"])
+        self.assertFalse(answer["wake_sent"])
+        self.assertFalse(answer["exact_chat_verified"])
+        self.assertNotIn("PRIVATE", json.dumps(answer))
+        self.assertNotIn("webSocketDebuggerUrl", json.dumps(answer))
+
+    def test_cdp_9333_status_rejects_bad_native_evidence(self):
+        req = hostops.parse_event(event("read", "cdp_9333_status", {}), "read")
+        base = {"listener_count": 1, "loopback_count": 1,
+                "unexpected_binding_count": 0,
+                "chrome_owned_loopback_count": 1,
+                "same_session_chrome_count": 1}
+        invalid = [
+            {**base, "chrome_owned_loopback_count": 2},
+            {**base, "same_session_chrome_count": 2},
+            {**base, "unexpected_binding_count": 1},
+            {**base, "listener_count": True},
+            {**base, "CommandLine": "secret"},
+        ]
+        with patch.object(hostops.os, "name", "nt"), patch.object(
+            hostops.subprocess, "run"
+        ) as native, patch.object(hostops, "build_opener") as opener:
+            native.return_value.returncode = 0
+            for obj in invalid:
+                native.return_value.stdout = json.dumps(obj)
+                with self.assertRaises(hostops.Denied):
+                    hostops.perform(req)
+            opener.assert_not_called()
+            native.return_value.returncode = 1
+            with self.assertRaisesRegex(hostops.Denied, "CDP_NATIVE_READ_FAILED"):
+                hostops.perform(req)
+
     def test_no_read_approval_comment_required(self):
         value = event("read", "inventory", {})
         self.assertNotIn("comment", value)
