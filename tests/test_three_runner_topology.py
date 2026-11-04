@@ -89,15 +89,18 @@ def test_release_digest_one_time_token_and_private_local_tasks():
     assert "--memory-limit" not in source
 
 
-def test_current_route_intentionally_unmoved_until_live_hostops_online():
+def test_dedicated_hostops_route_after_operator_reports_both_runners_online():
     ingress = INGRESS.read_text(encoding="utf-8")
     ef02 = EF02.read_text(encoding="utf-8")
     assert "  hostops-personal:" in ingress
     assert "group: personal-hostops-workspace" in ingress
     assert "github.event.comment.body == format('APPROVE WRITE #{0}', github.event.issue.number)" in ingress
-    assert "runs-on: [self-hosted, Windows, ai-commerce-ef02]" in ingress
+    # HostOps must not compete for the EF02 runner label any more.
+    assert "runs-on: [self-hosted, Windows, ai-commerce-hostops]" in ingress
+    assert "runs-on: [self-hosted, Windows, ai-commerce-ef02]" not in ingress
     assert "  execute:" in ef02
     assert "runs-on: [self-hosted, Windows, ai-commerce-ef02]" in ef02
+    assert "runs-on: [self-hosted, Windows, ai-commerce-hostops]" not in ef02
     assert "group: ef02-issue-" in ef02
     assert '("ai-commerce-ef02-" + $env:GITHUB_RUN_ID' in ef02
     assert "python -m venv" in ef02
