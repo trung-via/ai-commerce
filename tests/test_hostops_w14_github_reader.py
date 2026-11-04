@@ -248,9 +248,25 @@ def test_w14_expiry_and_source_sha_fail_when_github_fields_valid(h, monkeypatch)
             TOKEN, **{**verify, "expected_source_sha": "f" * 40})
 
 
-def test_w14_https_builder_has_no_inherited_proxy():
+def test_w14_https_builder_has_no_inherited_proxy(monkeypatch):
+    # urllib.build_opener intentionally omits an EMPTY ProxyHandler from
+    # opener.handlers; validate the explicit construction input, not a
+    # handler instance which is absent by design on Python 3.11/3.14.
+    builder = reader.urllib.request.build_opener
+    supplied = []
+
+    def inspect_builder(*handlers):
+        supplied.extend(handlers)
+        return builder(*handlers)
+
+    monkeypatch.setattr(reader.urllib.request, "build_opener", inspect_builder)
     opener = reader._build_https_opener()
-    proxies = [h for h in opener.handlers if h.__class__.__name__ == "ProxyHandler"]
+    proxies = [h for h in supplied
+               if isinstance(h, reader.urllib.request.ProxyHandler)]
     assert len(proxies) == 1
-    assert not proxies[0].proxies
-    assert any(isinstance(h, reader._DenyRedirect) for h in opener.handlers)
+    assert proxies[0].proxies == {}
+    # A proxy handler should not survive in the configured runtime opener.
+    assert not any(isinstance(h, reader.urllib.request.ProxyHandler)
+                   for h in opener.handlers)
+    assert any(isinstance(h, reader._DenyRedirect)
+               for h in opener.handlers)
