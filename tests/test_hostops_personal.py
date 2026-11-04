@@ -6,7 +6,7 @@ from unittest.mock import patch
 import tempfile
 import unittest
 
-MODULE = Path(__file__).resolve().parents[1] / "scripts" / "hostops_personal.py"
+MODULE = Path(__file__).resolve().parents[1] / "src" / "ai_commerce" / "hostops_v3" / "personal.py"
 spec = importlib.util.spec_from_file_location("hostops_personal", MODULE)
 hostops = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(hostops)
