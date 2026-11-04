@@ -15,6 +15,7 @@ import platform
 import re
 import stat
 import subprocess
+from urllib.request import Request, ProxyHandler, HTTPRedirectHandler, build_opener
 
 REPO = "trung-via/ai-commerce"
 OWNER = "trung-via"
@@ -119,7 +120,7 @@ def parse_event(event, mode):
     params = _dict(request["parameters"])
     operation = request["operation"]
     if mode == "read":
-        if operation in ("inventory", "runner_runtime_inventory"):
+        if operation in ("inventory", "runner_runtime_inventory", "cdp_9333_status"):
             # Runtime inventory has fixed, compiled-in three-runner targets.
             # The public Issue cannot choose a task, executable or command.
             if params:
@@ -398,6 +399,118 @@ $records = @(
     }
 
 
+class _CdpNoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _cdp_9333_status():
+    """Fixed READ-ONLY Chrome 9333 probe, no navigation, tab content or Send.
+
+    Native information is reduced to bounded counters/booleans before leaving
+    the Windows process; command lines, profile paths, PIDs and URLs are never
+    exported into a public GitHub Issue. This DOES NOT validate a D2 route,
+    a logged-in exact ChatGPT tab, a grant, or any Wake authorization.
+    """
+    if os.name != "nt":
+        deny("CDP_DIAGNOSTIC_WINDOWS_ONLY")
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$port = 9333
+$items = @(Get-NetTCPConnection -State Listen -ErrorAction Stop |
+    Where-Object { [int]$_.LocalPort -eq $port })
+$session = [int](Get-Process -Id $PID -ErrorAction Stop).SessionId
+$loopback = 0
+$other = 0
+$chromeOwned = 0
+$sameSession = 0
+foreach ($item in $items) {
+    if ([string]$item.LocalAddress -cne '127.0.0.1') {
+        $other++
+        continue
+    }
+    $loopback++
+    $owner = Get-CimInstance Win32_Process -Filter (
+        'ProcessId=' + [int]$item.OwningProcess) -ErrorAction SilentlyContinue
+    if ($null -ne $owner -and [string]$owner.Name -ieq 'chrome.exe') {
+        $chromeOwned++
+        if ([int]$owner.SessionId -eq $session -and $session -gt 0) {
+            $sameSession++
+        }
+    }
+}
+@{
+  listener_count = [int]$items.Count
+  loopback_count = [int]$loopback
+  unexpected_binding_count = [int]$other
+  chrome_owned_loopback_count = [int]$chromeOwned
+  same_session_chrome_count = [int]$sameSession
+} | ConvertTo-Json -Compress
+"""
+    try:
+        native = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=18, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        deny("CDP_NATIVE_READ_UNAVAILABLE")
+    if native.returncode != 0 or len(native.stdout) > 4096:
+        deny("CDP_NATIVE_READ_FAILED")
+    try:
+        record = json.loads(native.stdout.lstrip("\ufeff"))
+    except (UnicodeError, ValueError):
+        deny("CDP_NATIVE_INVALID_JSON")
+    names = (
+        "listener_count", "loopback_count", "unexpected_binding_count",
+        "chrome_owned_loopback_count", "same_session_chrome_count"
+    )
+    if type(record) is not dict or set(record) != set(names):
+        deny("CDP_NATIVE_INVALID_SHAPE")
+    if any(type(record[key]) is not int or not 0 <= record[key] <= 16 for key in names):
+        deny("CDP_NATIVE_INVALID_COUNTS")
+    if (record["loopback_count"] + record["unexpected_binding_count"] !=
+            record["listener_count"] or
+            record["same_session_chrome_count"] >
+            record["chrome_owned_loopback_count"] >
+            record["loopback_count"]):
+        deny("CDP_NATIVE_COUNT_MISMATCH")
+    protocol_ok = False
+    if (record["listener_count"] == 1 and
+            record["loopback_count"] == 1 and
+            record["chrome_owned_loopback_count"] == 1 and
+            record["same_session_chrome_count"] == 1):
+        # Safe fixed localhost GET. No redirect, no proxy, no cookies, no tabs.
+        request = Request(
+            "http://127.0.0.1:9333/json/version",
+            headers={"Accept": "application/json", "User-Agent": "AI-Commerce-CDP-ReadOnly"},
+            method="GET",
+        )
+        try:
+            opener = build_opener(ProxyHandler({}), _CdpNoRedirect())
+            with opener.open(request, timeout=2) as response:
+                raw = response.read(16385)
+                if response.status == 200 and 0 < len(raw) <= 16384:
+                    version = json.loads(raw.decode("utf-8"))
+                    protocol_ok = (type(version) is dict and
+                                   isinstance(version.get("Browser"), str) and
+                                   version["Browser"].startswith("Chrome/") and
+                                   isinstance(version.get("Protocol-Version"), str))
+        except (OSError, ValueError, UnicodeError, TimeoutError):
+            protocol_ok = False
+    ready = (record["listener_count"] == 1 and
+             record["loopback_count"] == 1 and
+             record["chrome_owned_loopback_count"] == 1 and
+             record["same_session_chrome_count"] == 1 and protocol_ok)
+    return {
+        "status": "OBSERVED", "operation": "cdp_9333_status", "cdp_port": 9333,
+        **record, "devtools_protocol_ok": bool(protocol_ok),
+        "infrastructure_ready": bool(ready),
+        "exact_chat_verified": False, "wake_sent": False,
+        "arbitrary_shell_enabled": False,
+    }
+
+
 def perform(request):
     op = request["operation"]
     params = request["parameters"]
@@ -405,6 +518,8 @@ def perform(request):
         return _sync_main(params)
     if op == "runner_runtime_inventory":
         return _runner_runtime_inventory()
+    if op == "cdp_9333_status":
+        return _cdp_9333_status()
     if op == "inventory":
         return {
             "status": "OBSERVED", "operation": op,
