@@ -1002,8 +1002,7 @@ def test_noise_cleanup_and_issue_router_are_independently_covered(gate):
     """Keep trusted merge-gate witnesses independent of candidate MT01 map."""
     expected = {
         ".github/workflows/issue-ingress.yml": {
-            "tests/test_ef02.py", "tests/test_hostops_request.py",
-            "tests/test_hostops_v2.py", "tests/test_hostops_v3_integration.py",
+            "tests/test_ef02.py", "tests/test_hostops_personal.py",
             "tests/test_mt01_v21.py",
         },
         ".github/workflows/actions-skipped-cleanup.yml": {
@@ -1017,6 +1016,13 @@ def test_noise_cleanup_and_issue_router_are_independently_covered(gate):
             "tests/test_mt01_v21.py",
         },
     }
+    # Historical mappings remain reviewed solely for removal and rollback.
+    # None of these legacy workflow YAML files is present in the release.
+    for retired in ("hostops-readonly.yml", "hostops-v2.yml",
+                    "hostops-v3.yml", "hostops-ci.yml", "hostops-v2-ci.yml"):
+        path = ".github/workflows/" + retired
+        assert path in gate.REVIEWED_CONTROL_TESTS
+        assert not (ROOT / path).exists()
     for path, required_tests in expected.items():
         assert set(gate.REVIEWED_CONTROL_TESTS[path]) == required_tests
         paths, witness = gate.reviewed_coverage_for_changed_files([
