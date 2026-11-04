@@ -1238,15 +1238,13 @@ def test_v22_committed_component_owner_persists_in_followup_pr(tmp_path, monkeyp
 
 
 def test_issue_ingress_and_skipped_cleanup_reviewed_safety_contract():
-    """Live workflow files must remain scoped and covered by reviewed MT01 regressions."""
+    """Personal is the only live HostOps route; EF02 and cleanup stay reviewed."""
     from ai_commerce.engineering.impact_v21 import CONTROL_TESTS
 
     root = Path(__file__).resolve().parents[1]
     expected = (
         ".github/workflows/issue-ingress.yml",
         ".github/workflows/actions-skipped-cleanup.yml",
-        ".github/workflows/hostops-readonly.yml",
-        ".github/workflows/hostops-v2.yml",
     )
     for path in expected:
         assert path in CONTROL_TESTS
@@ -1256,15 +1254,20 @@ def test_issue_ingress_and_skipped_cleanup_reviewed_safety_contract():
     ingress = (root / expected[0]).read_text(encoding="utf-8")
     assert "types: [opened, labeled]" in ingress
     assert "uses: ./.github/workflows/ef02-batch.yml" in ingress
-    for old in ("hostops-readonly.yml", "hostops-v2.yml", "hostops-v3.yml"):
-        assert "uses: ./.github/workflows/" + old in ingress
-    for old in ("ef02-batch.yml", "hostops-readonly.yml",
-                "hostops-v2.yml", "hostops-v3.yml"):
-        called = (root / ".github/workflows" / old).read_text(encoding="utf-8")
-        assert "  workflow_call:" in called
-        assert "  issues:\n" not in called
+    assert "  hostops-personal:" in ingress
+    assert "APPROVE WRITE #" in ingress
+    assert "github.event.repository.full_name == 'trung-via/ai-commerce'" in ingress
+    for old in ("hostops-readonly.yml", "hostops-v2.yml", "hostops-v3.yml",
+                "hostops-ci.yml", "hostops-v2-ci.yml"):
+        assert not (root / ".github/workflows" / old).exists()
+        assert "uses: ./.github/workflows/" + old not in ingress
+        assert ".github/workflows/" + old in CONTROL_TESTS
+    called = (root / ".github/workflows/ef02-batch.yml").read_text(encoding="utf-8")
+    assert "  workflow_call:" in called
 
     cleanup = (root / expected[1]).read_text(encoding="utf-8")
+    for old in ("hostops-readonly.yml", "hostops-v2.yml", "hostops-v3.yml"):
+        assert old not in cleanup
     for required in (
         "status: 'skipped'", "run.status !== 'completed'",
         "run.conclusion !== 'skipped'", "run.run_attempt !== 1",
