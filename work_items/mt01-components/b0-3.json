@@ -1,0 +1,19 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "b0-3",
+  "sources": [
+    "src/ai_commerce/production_runtime/attended_worker.py",
+    "src/ai_commerce/production_runtime/attended_cli.py",
+    "src/ai_commerce/production_runtime/receipt.py"
+  ],
+  "tests": ["tests/test_b0_3_attended_worker.py"],
+  "acs": ["B0.3.attended-offline-worker-wait-brain"],
+  "consumers": [
+    "src/ai_commerce/production_runtime/contracts.py",
+    "src/ai_commerce/production_runtime/state_machine.py",
+    "src/ai_commerce/production_runtime/journal.py",
+    "src/ai_commerce/production_runtime/recovery.py",
+    "src/ai_commerce/e2e/service.py"
+  ],
+  "contracts": []
+}
