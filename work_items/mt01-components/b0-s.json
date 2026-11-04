@@ -1,0 +1,22 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "b0-s",
+  "sources": [
+    "src/ai_commerce/production_runtime/security_claims.py",
+    "src/ai_commerce/production_runtime/security_policy.py"
+  ],
+  "tests": ["tests/test_b0_s_trust_boundary.py"],
+  "acs": ["B0-S.1.trust-zone-inventory", "B0-S.2.fail-closed-authority-model"],
+  "consumers": [
+    "src/ai_commerce/production_runtime/contracts.py",
+    "src/ai_commerce/production_runtime/state_machine.py",
+    "src/ai_commerce/production_runtime/journal.py",
+    "src/ai_commerce/production_runtime/recovery.py",
+    "src/ai_commerce/production_runtime/attended_worker.py",
+    "src/ai_commerce/production_runtime/receipt.py",
+    "src/ai_commerce/production_runtime/operator.py",
+    "src/ai_commerce/production_runtime/handoff.py",
+    "src/ai_commerce/production_runtime/metrics.py"
+  ],
+  "contracts": []
+}
