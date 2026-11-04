@@ -1276,3 +1276,87 @@ def test_issue_ingress_and_skipped_cleanup_reviewed_safety_contract():
         "actions: write", "skipped-cleanup-receipt.json",
     ):
         assert required in cleanup, required
+
+
+def _v22_two_baseline_owners_in_git(tmp_path, *, cyclic=False, ghost=False):
+    """A lexically earlier manifest consumes a later reviewed source owner."""
+    import json
+    import subprocess
+    _, original, ctx = _v22_manifest_fixture(tmp_path)
+    dependent_source = "src/ai_commerce/aa_dependent/client.py"
+    dependent_test = "tests/test_aa_dependent.py"
+    dependent_path = "work_items/mt01-components/aa-dependent.json"
+    mk(tmp_path, dependent_source, "def value():\n    return 2\n")
+    mk(tmp_path, dependent_test, "def test_dep():\n    assert True\n")
+    dependent = {
+        "schema_version": "MT01ComponentOwner.v1",
+        "component": "aa-dependent",
+        "sources": [dependent_source],
+        "tests": [dependent_test],
+        "acs": ["AA_DEPENDENT.offline"],
+        "consumers": [original["sources"][0]],
+        "contracts": [],
+    }
+    mk(tmp_path, dependent_path, json.dumps(dependent))
+    if cyclic or ghost:
+        original["consumers"].append(
+            dependent_source if cyclic else "src/ai_commerce/unknown/ghost.py")
+        (tmp_path / ctx["manifest_path"]).write_text(
+            json.dumps(original), encoding="utf-8")
+    def git(*args):
+        return subprocess.check_output(
+            ["git", *args], cwd=tmp_path, stderr=subprocess.DEVNULL).decode().strip()
+    git("init", "-q")
+    git("config", "core.autocrlf", "false")
+    git("add", ".")
+    git("-c", "user.name=MT01", "-c", "user.email=mt01@example.invalid",
+        "commit", "-qm", "fixture with dependency-ordered owner manifests")
+    return git("rev-parse", "HEAD"), ctx["existing_groups"]
+
+
+def test_v22_baseline_owner_dependency_order_beats_lexicographic_order(tmp_path):
+    import runpy
+    from ai_commerce.engineering.impact_v21 import load_baseline_component_owner_records
+    base, old_groups = _v22_two_baseline_owners_in_git(tmp_path)
+    records = load_baseline_component_owner_records(
+        root=tmp_path, base_sha=base, existing_groups=old_groups)
+    assert [item["group"].name for item in records] == [
+        "fresh", "aa-dependent"]
+    oracle = runpy.run_path(str(Path(__file__).resolve().parents[1] /
+                                ".github/scripts/mt01_v21_oracle.py"))
+    independent = oracle["trusted_baseline_manifest_groups"](
+        repo=tmp_path, base_sha=base, base_groups=old_groups)
+    assert [item.name for item in independent] == [
+        "fresh", "aa-dependent"]
+    assert [g.tests for g in independent] == [
+        ("tests/test_fresh_svc.py",), ("tests/test_aa_dependent.py",)]
+
+
+def test_v22_baseline_dependency_cycle_stays_denied_by_planner_and_oracle(tmp_path):
+    import runpy
+    import pytest
+    from ai_commerce.engineering.impact_v21 import load_baseline_component_owner_records
+    base, old_groups = _v22_two_baseline_owners_in_git(tmp_path, cyclic=True)
+    with pytest.raises(ValueError, match="ONBOARD_BASELINE_DEPENDENCY_CYCLE"):
+        load_baseline_component_owner_records(
+            root=tmp_path, base_sha=base, existing_groups=old_groups)
+    oracle = runpy.run_path(str(Path(__file__).resolve().parents[1] /
+                                ".github/scripts/mt01_v21_oracle.py"))
+    with pytest.raises(ValueError, match="BASELINE_OWNER_DEPENDENCY_CYCLE"):
+        oracle["trusted_baseline_manifest_groups"](
+            repo=tmp_path, base_sha=base, base_groups=old_groups)
+
+
+def test_v22_baseline_unowned_consumer_never_silently_admitted(tmp_path):
+    import runpy
+    import pytest
+    from ai_commerce.engineering.impact_v21 import load_baseline_component_owner_records
+    base, old_groups = _v22_two_baseline_owners_in_git(tmp_path, ghost=True)
+    with pytest.raises(ValueError, match="ONBOARD_CONSUMER_UNPROVEN"):
+        load_baseline_component_owner_records(
+            root=tmp_path, base_sha=base, existing_groups=old_groups)
+    oracle = runpy.run_path(str(Path(__file__).resolve().parents[1] /
+                                ".github/scripts/mt01_v21_oracle.py"))
+    with pytest.raises(ValueError, match="BASELINE_OWNER_CLOSURE_MISSING"):
+        oracle["trusted_baseline_manifest_groups"](
+            repo=tmp_path, base_sha=base, base_groups=old_groups)
