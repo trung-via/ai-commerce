@@ -1,10 +1,23 @@
-# Roadmap B v2.0 — Production Runtime độc lập, Brain dẫn dắt (PA2)
+# Roadmap B v2.0 — PULSE: Production Runtime độc lập, Brain dẫn dắt (PA2)
 
 **Ngày thiết kế:** 2026-11-04. **Trạng thái:** CANONICAL PROPOSED IMPLEMENTATION ROADMAP cho **PA2 đã được Human chọn** trong ChatGPT. Chấp thuận **hướng kiến trúc** không đồng nghĩa chấp thuận mọi work package, lịch chạy, provider, chi phí, tài khoản hay phát hành bên ngoài. B0.1 là lần cắt **SOURCE_ONLY_DESIGN**, không phải production runtime đã hoạt động.
 
 **Nguồn đóng băng:** `trung-via/ai-commerce@26398290f8c2440eaa383783dbdf84f8d95610ab`. HEAD local đúng SHA này, tree sạch và cả 12 đường dẫn được phép đều chưa tồn tại trước khi viết. Đây là kiểm tra checkout, không phải lời xác nhận remote `main` không thể thay đổi sau đó. Có source/path drift thì HOLD; không ghi đè source cũ hoặc sửa workflow bảo vệ.
 
 Thẩm quyền lựa chọn đến từ chỉ thị Human ngày 2026-11-04 trong hội thoại hiện tại, được chép có giới hạn trong [WorkItem B0.1](../../work_items/B0-1-PA2-DESIGN-001.json). Chưa có independent Brain review, PR CI hay post-merge acceptance cho thay đổi này. PA1 mở rộng EF02 thành product scheduler đã được cân nhắc và **không được chọn**. PA2 dùng EF01/EF02 để xây/sửa phần mềm; một process production riêng sẽ chạy product journey. Brain là **ChatGPT chat hiện tại**, không phải OpenAI API đóng vai thay thế.
+
+## Quy ước tên sản phẩm — Human chọn PULSE sau candidate B0.1
+
+**Tên ngắn chính thức theo quyết định Human trong ChatGPT ngày 2026-11-04: PULSE (AI Commerce Production Runtime).** PULSE là runtime production độc lập; không phải tên mới của EF01/EF02, ChatGPT Brain hoặc một hệ thống thứ hai. Đây là cập nhật tên gọi đối với PA2 đã chọn, không cấp phép triển khai live hay tăng quyền.
+
+- **PULSE Core:** state machine, scheduler, transaction và recovery.
+- **PULSE Ledger:** coordination journal, lease, checkpoint, action/effect intent và evidence refs; không thay các owner business ledger của Roadmap A.
+- **PULSE Studio:** các tool media, FFmpeg/voice/subtitle, provider-capability adapters và technical QA.
+- **PULSE Bridge:** giao tiếp directive/review packet giữa ChatGPT Brain và PULSE, mặc định Human-attended; exact-chat CDP/Wake chỉ là lựa chọn tương lai chưa được nghiệm thu.
+- **PULSE Adapters:** adapter A06/A08/A09 và, khi có quyền riêng, external media/social/analytics/product provider.
+- **EF01/EF02:** chỉ xây dựng, kiểm thử, sửa source PULSE; không phải scheduler cho video thường lệ.
+
+Tên kỹ thuật package `ai_commerce.production_runtime`, ba JSON Schema và các owner tích hợp hiện có **được giữ nguyên** trong B0.1 để tránh thay đổi contract chỉ vì đổi nhãn hiển thị. Không diễn giải tên PULSE là một implementation hoặc runtime live đã chứng minh.
 
 ## 1. Mục tiêu và ranh giới chung
 
