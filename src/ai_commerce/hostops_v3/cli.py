@@ -455,6 +455,8 @@ def _w1_attended_command(args):
     # Verify BEFORE any irreversible intent. A signed Issue number is not
     # an independently authenticated private GitHub Issue origin.
     auth.personal_w1_verify_offline(proposal, **verify)
+    # Local operator-only milestones: no request/signature/path bytes disclosed.
+    print("HOSTOPS_W1_CHECKPOINT=SIGNED_PRECONSENT", flush=True)
     if os.path.lexists(W1_PROOF_ROOT / W1_PROOF_NAME):
         deny("W1_NATIVE_ALREADY_EXISTS")
     expected_phrase = "CREATE W1 " + str(args.issue) + " " + proposal["request_id"]
@@ -469,6 +471,7 @@ def _w1_attended_command(args):
         deny("W1_ATTENDED_CONSENT_DENIED")
     if consent != expected_phrase:
         deny("W1_ATTENDED_CONSENT_DENIED")
+    print("HOSTOPS_W1_CHECKPOINT=CONSENT_EXACT", flush=True)
     # Recheck after human interaction: TTL, source, KILL and root identity.
     if ((W1_PROOF_STATE / "KILL").exists() or
             _clean_source_sha(Path(args.source_root)) != source_sha or
@@ -476,13 +479,18 @@ def _w1_attended_command(args):
             fs.w1_windows_root_identity(W1_PROOF_STATE) != state_identity or
             ledger_path.is_symlink()):
         deny("W1_ATTENDED_STATE_CHANGED")
+    print("HOSTOPS_W1_CHECKPOINT=STATE_RECHECK_PASSED", flush=True)
     auth.personal_w1_verify_offline(proposal, **verify)
+    print("HOSTOPS_W1_CHECKPOINT=SIGNATURE_RECHECK_PASSED", flush=True)
     with OfflineW1IntentLedger(ledger_path) as ledger:
         staged = ledger.record_verified_proposal(proposal, **verify)
         if staged["status"] != "INTENT_STAGED_NO_EFFECT":
             deny("W1_ATTENDED_REPLAY_UNKNOWN")
+        # Reservation is durable and UNKNOWN until independently reconciled.
+        print("HOSTOPS_W1_CHECKPOINT=INTENT_RESERVED_UNKNOWN", flush=True)
         result = fs.w1_windows_native_create_fixture(
             W1_PROOF_ROOT, expected_identity, W1_PROOF_NAME, W1_PROOF_TEXT)
+    print("HOSTOPS_W1_CHECKPOINT=NATIVE_READBACK_VERIFIED", flush=True)
     print("HOSTOPS_W1_LOCAL_ATTENDED_RESULT", flush=True)
     print(canonical({
         "schema": "hostops.personal.w1_local_attended_result.v1",
@@ -634,6 +642,27 @@ def main(argv=None):
             unavailable = isinstance(exc, OSError) or str(exc) in ("BROKER_UNAVAILABLE", "GITHUB_UNAVAILABLE")
             maker = receipt_v4 if is_v4 else receipt
             Path(args.output).write_bytes(canonical(maker(None, "UNAVAILABLE" if unavailable else "BLOCKED", "CLI_BLOCKED")))
+        if args.command == "personal-w1-attended-once":
+            # Interactive local operator diagnostic ONLY. Fixed codes, never
+            # echo exception details, paths, signatures or signed request data.
+            w1_safe_codes = frozenset({
+                "W1_ATTENDED_CONSENT_DENIED",
+                "W1_ATTENDED_STATE_CHANGED",
+                "W1_ATTENDED_STATE_OR_KILL",
+                "W1_ATTENDED_REPLAY_UNKNOWN",
+                "W1_REQUEST_EXPIRED",
+                "W1_SOURCE_MISMATCH",
+                "W1_NATIVE_ALREADY_EXISTS",
+                "W1_NATIVE_ROOT_MISMATCH",
+                "W1_NATIVE_CREATE_DENIED",
+                "W1_NATIVE_EFFECT_UNKNOWN",
+                "W1_LEDGER_UNAVAILABLE",
+                "W1_SIGNER_POLICY_UNTRUSTED",
+                "SIGNATURE_INVALID",
+                "SIGNATURE_UNAVAILABLE",
+            })
+            safe_code = str(exc) if isinstance(exc, Denied) and str(exc) in w1_safe_codes else "OTHER_BLOCKED"
+            print("HOSTOPS_W1_LOCAL_DENIAL=" + safe_code, file=sys.stderr)
         print("HOSTOPS_V4_BLOCKED" if is_v4 else "HOSTOPS_V3_BLOCKED", file=sys.stderr)
         return 2
 
