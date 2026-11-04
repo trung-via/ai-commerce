@@ -22,10 +22,10 @@ function Stop-Bounded([string]$Code) {
     exit 2
 }
 if ($env:GITHUB_ACTIONS -eq 'true') { Stop-Bounded 'LOCAL_OPERATOR_ONLY' }
-if (-not $IsWindows -and $PSVersionTable.PSEdition -ne 'Desktop') {
-    # Windows PowerShell 5.1 doesn't declare $IsWindows.
+if ($env:OS -ne 'Windows_NT') {
     Stop-Bounded 'WINDOWS_ONLY'
 }
+if (-not $env:LOCALAPPDATA) { Stop-Bounded 'PRIVATE_APPDATA_REQUIRED' }
 if ([System.Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
     Stop-Bounded 'INTERACTIVE_SESSION_REQUIRED'
 }
@@ -73,6 +73,7 @@ try {
     # Prefer the source of this exact inspected checkout, never another repo's
     # separately installed editable Python package.
     $env:PYTHONPATH = Join-Path $checkout 'src'
+    Push-Location -LiteralPath $checkout
     $argsList = @()
     if ($Mode -eq 'PrepareChat') {
         if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
@@ -163,6 +164,7 @@ try {
     }
     Stop-Bounded 'RESULT_NOT_VERIFIED'
 } finally {
+    Pop-Location
     if ($null -eq $previousPythonPath) {
         Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
     } else {
