@@ -91,10 +91,12 @@ def read_private_issue_snapshot(token, *, issue_number):
             repo.get("full_name") != CONTROL_REPOSITORY or
             repo.get("private") is not True or
             repo.get("html_url") != _REPO_HTML or
-            type(repo.get("id")) is not int or repo["id"] <= 0 or
+            type(repo.get("id")) is not int or
+            repo["id"] != w14_origin.REPO_ID or
             type(owner) is not dict or
             owner.get("login") != w1_bridge.W14_EXPECTED_AUTHOR or
-            type(owner.get("id")) is not int or owner["id"] <= 0):
+            type(owner.get("id")) is not int or
+            owner["id"] != w14_origin.OWNER_ID):
         deny("W14_GITHUB_REPOSITORY_DENIED")
 
     url = _API_BASE + "/issues/" + str(issue_number)
