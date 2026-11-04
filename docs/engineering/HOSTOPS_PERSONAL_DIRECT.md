@@ -8,7 +8,7 @@
 
 The trusted `.github/workflows/issue-ingress.yml` is the only issue ingress. It contains **Personal HostOps** and the existing **EF02** path. On 2026-11-04, the obsolete v1/v2/v3 HostOps caller jobs and their five hosted/reusable workflows were **retired from active GitHub Actions** (see [retirement record](HOSTOPS_LEGACY_RETIREMENT_20261104.md)). Historical source, contracts, tests and signed receipts remain available for audit, but have no active GitHub Issue route.
 
-**READ:** The Human requests and approves a read in ChatGPT. An authenticated GitHub connector creates an owner-authored Issue titled `[HOSTOPS READ] <purpose>` with an exact JSON body; its opening triggers one Windows operation. No second Human approval. READ operations now support `inventory`, `git_snapshot` (HEAD, branch, count of tracked changes only), `tracked_paths` (up to 50 public git-tracked paths), `read_text` (max 8 KiB, committed and unchanged public source/docs), and `file_digest` (SHA-256/size only for approved scratch/local-note files). Untracked names, changed file content, secrets and credential files are not sent to a public Issue.
+**READ:** The Human requests and approves a read in ChatGPT. An authenticated GitHub connector creates an owner-authored Issue titled `[HOSTOPS READ] <purpose>` with an exact JSON body; its opening triggers one Windows operation. No second Human approval. READ operations now support `inventory`, `runner_runtime_inventory` (strictly three predefined AI Commerce runner names, Task Scheduler state, hidden-launcher presence and listener process/session counts, plus total and unidentified listener count), `git_snapshot` (HEAD, branch, count of tracked changes only), `tracked_paths` (up to 50 public git-tracked paths), `read_text` (max 8 KiB, committed and unchanged public source/docs), and `file_digest` (SHA-256/size only for approved scratch/local-note files). Untracked names, changed file content, secrets and credential files are not sent to a public Issue.
 
 **WRITE:** ChatGPT creates a public Issue titled `[HOSTOPS WRITE] <purpose>` containing the exact target and non-sensitive text. Merely opening it NEVER executes the write. The Human opens this Issue in the ordinary GitHub UI and types **exactly** `APPROVE WRITE #N` (N is the Issue number) as a new comment. The dedicated workflow admits this one owner-comment event, then creates **one new** `hostops-personal-*.txt|md|json` file, <=2048 UTF-8 bytes, in either the existing scratch root `C:\TOOL\AI-Commerce-HostOps-Approved` (`root_id=scratch`) or the existing ignored worktree notes directory `C:\TOOL\ai-commerce\.local` (`root_id=workspace_notes`). A missing directory produces HOLD; no directory auto-creation, overwrite, source edit or arbitrary command. No overwrite, delete or arbitrary PowerShell. Success returns SHA256/size; ambiguous effect returns HOLD and must be checked on disk before attempting a different request.
 
@@ -33,6 +33,29 @@ Request a new scratch proof; the Human alone posts `APPROVE WRITE #N` on that Is
 ```json
 {"schema":"ai-commerce.personal-hostops.v1","operation":"create_text","parameters":{"root_id":"scratch","relative_path":"hostops-personal-proof.txt","content_utf8":"AI_COMMERCE_PERSONAL_HOSTOPS_PROOF_V1"}}
 ```
+
+
+Read bounded Windows runner runtime inventory directly through the dedicated HostOps
+runner, after Human chat authorization (no second Human approval):
+
+```json
+{"schema":"ai-commerce.personal-hostops.v1","operation":"runner_runtime_inventory","parameters":{}}
+```
+
+This invokes a **fixed, source-owned read-only PowerShell CIM/Task Scheduler
+probe** for exactly `AI-COMMERCE-EF02-01`, `AI-COMMERCE-EF02-02` and
+`AI-COMMERCE-HOSTOPS-01`. The public Issue result contains only fixed
+names, `task_state`, `task_interactive`, `hidden_launcher_configured`,
+`hidden_launcher_process_count`, `listener_process_count`,
+`listener_session_ids`, and total/unmatched runner listener counts.
+It omits private executable paths, account identities, raw commands,
+environment variables, tokens and identities of unrelated runners.
+
+`TASK=Running` alone is not proof that `Runner.Listener.exe` is alive;
+the two states are independently observed. A count of unmatched listeners
+means other or unreadable runner processes, **not** a known named runner.
+This probe does not confirm GitHub API online state or successful EF02
+model execution. No service, task or process is stopped/restarted/modified.
 
 ## Expanded V2 requests (same schema, same approval)
 

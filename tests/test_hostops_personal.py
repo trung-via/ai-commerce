@@ -50,6 +50,88 @@ class PersonalHostOpsContractTests(unittest.TestCase):
         output = hostops.perform(request)
         self.assertEqual(output["status"], "OBSERVED")
 
+    def test_runner_runtime_inventory_is_owner_only_exact_read(self):
+        req = hostops.parse_event(event("read", "runner_runtime_inventory", {}), "read")
+        self.assertEqual(req["operation"], "runner_runtime_inventory")
+        for mode, params in (("read", {"command": "Get-Process"}),
+                             ("read", {"task_name": "ALL"}),
+                             ("write", {})):
+            with self.subTest(mode=mode, params=params):
+                with self.assertRaises(hostops.Denied):
+                    hostops.parse_event(event(mode, "runner_runtime_inventory", params), mode)
+        owner = event("read", "runner_runtime_inventory", {})
+        owner["sender"]["login"] = "other-user"
+        with self.assertRaises(hostops.Denied):
+            hostops.parse_event(owner, "read")
+
+    def test_runner_runtime_inventory_sanitized_native_response(self):
+        names = ["AI-COMMERCE-EF02-01", "AI-COMMERCE-EF02-02",
+                 "AI-COMMERCE-HOSTOPS-01"]
+        rows = [
+            {"name": name, "task_state": "Running", "task_interactive": True,
+             "hidden_launcher_configured": True,
+             "hidden_launcher_process_count": 1,
+             "listener_process_count": 1, "listener_session_ids": [1]}
+            for name in names
+        ]
+        payload = {"all_listener_count": 4, "unmatched_listener_count": 1,
+                   "runners": rows}
+        req = hostops.parse_event(event("read", "runner_runtime_inventory", {}), "read")
+        with patch.object(hostops.os, "name", "nt"), patch.object(
+            hostops.subprocess, "run"
+        ) as fake:
+            fake.return_value.returncode = 0
+            fake.return_value.stdout = json.dumps(payload)
+            result = hostops.perform(req)
+            args, kwargs = fake.call_args
+        self.assertEqual(result["status"], "OBSERVED")
+        self.assertEqual(result["operation"], "runner_runtime_inventory")
+        self.assertEqual(result["all_listener_count"], 4)
+        self.assertEqual(result["unmatched_listener_count"], 1)
+        self.assertEqual([x["name"] for x in result["runners"]], names)
+        self.assertFalse(result["arbitrary_shell_enabled"])
+        self.assertEqual(args[0][:4],
+                         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command"])
+        self.assertNotIn("shell", kwargs)
+        self.assertEqual(kwargs["timeout"], 25)
+        self.assertEqual(kwargs["check"], False)
+        self.assertNotIn("COMMANDLINE", json.dumps(result).upper())
+        self.assertNotIn("EXECUTABLEPATH", json.dumps(result).upper())
+
+    def test_runner_runtime_inventory_rejects_native_unbounded_or_wrong_identity(self):
+        names = ["AI-COMMERCE-EF02-01", "AI-COMMERCE-EF02-02",
+                 "AI-COMMERCE-HOSTOPS-01"]
+        records = [
+            {"name": name, "task_state": "Running", "task_interactive": True,
+             "hidden_launcher_configured": True,
+             "hidden_launcher_process_count": 1,
+             "listener_process_count": 1, "listener_session_ids": [1]}
+            for name in names
+        ]
+        request = hostops.parse_event(event("read", "runner_runtime_inventory", {}), "read")
+        samples = [
+            {"all_listener_count": 3, "unmatched_listener_count": 0,
+             "runners": records[:-1]},
+            {"all_listener_count": 3, "unmatched_listener_count": 0,
+             "runners": [{**records[0], "command_line": "secret"}, *records[1:]]},
+            {"all_listener_count": 3, "unmatched_listener_count": 0,
+             "runners": [{**records[0], "name": "OTHER-RUNNER"}, *records[1:]]},
+            {"all_listener_count": 2, "unmatched_listener_count": 0,
+             "runners": records},
+        ]
+        with patch.object(hostops.os, "name", "nt"), patch.object(
+            hostops.subprocess, "run"
+        ) as fake:
+            fake.return_value.returncode = 0
+            for payload in samples:
+                fake.return_value.stdout = json.dumps(payload)
+                with self.assertRaises(hostops.Denied):
+                    hostops.perform(request)
+            fake.return_value.returncode = 1
+            fake.return_value.stdout = ""
+            with self.assertRaisesRegex(hostops.Denied, "RUNNER_RUNTIME_READ_FAILED"):
+                hostops.perform(request)
+
     def test_no_read_approval_comment_required(self):
         value = event("read", "inventory", {})
         self.assertNotIn("comment", value)
