@@ -1,0 +1,25 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "b0-1",
+  "sources": [
+    "src/ai_commerce/production_runtime/__init__.py",
+    "src/ai_commerce/production_runtime/contracts.py",
+    "src/ai_commerce/production_runtime/state_machine.py"
+  ],
+  "tests": ["tests/test_b0_production_contracts.py"],
+  "acs": ["B0.1.pa2-independent-runtime-contract-and-roadmap"],
+  "consumers": [
+    "src/ai_commerce/creative/live.py",
+    "src/ai_commerce/e2e/service.py",
+    "src/ai_commerce/distribution/assisted.py",
+    "src/ai_commerce/analytics/importer.py",
+    "src/ai_commerce/operations/retry_guard.py",
+    "src/ai_commerce/channel_adapters/direct_post.py",
+    "src/ai_commerce/opportunity/scale_option/memo.py"
+  ],
+  "contracts": [
+    "contracts/CreativeDirective.v1.schema.json",
+    "contracts/BrainDecision.v1.schema.json",
+    "contracts/ProductJourneyReceipt.v1.schema.json"
+  ]
+}

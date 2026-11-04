@@ -1,0 +1,480 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-commerce:production-runtime:ProductJourneyReceipt.v1",
+  "title": "ProductJourneyReceipt.v1 (DRAFT, structural claims only)",
+  "description": "No credentials or raw cookies. Validation and digests do not attest truth or authorize effects.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "journey_id",
+    "source_sha",
+    "directive_version",
+    "directive_sha256",
+    "scope",
+    "provenance",
+    "authorization",
+    "receipt_sha256",
+    "state",
+    "brain_decision",
+    "owner_evidence_refs",
+    "effect",
+    "network_calls_performed",
+    "external_effects_performed"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "ProductJourneyReceipt.v1"
+    },
+    "journey_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_./:@-]*$"
+    },
+    "source_sha": {
+      "type": "string",
+      "minLength": 40,
+      "maxLength": 40,
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "directive_version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "directive_sha256": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "scope": {
+      "$ref": "#/$defs/scope"
+    },
+    "provenance": {
+      "$ref": "#/$defs/provenance"
+    },
+    "authorization": {
+      "$ref": "#/$defs/authorization"
+    },
+    "receipt_sha256": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "state": {
+      "enum": [
+        "NEW",
+        "INPUT_VALIDATED",
+        "RUNNING",
+        "TECHNICAL_QA",
+        "WAIT_BRAIN",
+        "READY_FOR_HUMAN_RELEASE",
+        "RELEASE_INTENT",
+        "UNKNOWN_EFFECT",
+        "RELEASE_CONFIRMED",
+        "ANALYTICS_IMPORTED",
+        "LEARNING_REVIEW",
+        "COMPLETE",
+        "HOLD",
+        "STOPPED"
+      ]
+    },
+    "brain_decision": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/pin"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "owner_evidence_refs": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/evidence"
+      }
+    },
+    "effect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "idempotency_key",
+        "request_sha256",
+        "receipt"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "NONE",
+            "INTENT_RECORDED",
+            "UNKNOWN",
+            "CONFIRMED",
+            "NO_EFFECT"
+          ]
+        },
+        "idempotency_key": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_./:@-]*$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "request_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 64,
+              "maxLength": 64,
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "receipt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/pin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "network_calls_performed": {
+      "const": false
+    },
+    "external_effects_performed": {
+      "const": false
+    }
+  },
+  "$defs": {
+    "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_./:@-]*$"
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "source": {
+      "type": "string",
+      "minLength": 40,
+      "maxLength": 40,
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action_class",
+        "provider_ref",
+        "account_ref",
+        "surface",
+        "asset_sha256"
+      ],
+      "properties": {
+        "action_class": {
+          "enum": [
+            "PLAN_OFFLINE",
+            "GENERATE_MEDIA",
+            "EXPORT_DRAFT",
+            "PUBLISH",
+            "IMPORT_ANALYTICS",
+            "REVIEW_LEARNING"
+          ]
+        },
+        "provider_ref": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_./:@-]*$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "account_ref": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_./:@-]*$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "surface": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_./:@-]*$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "asset_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 64,
+              "maxLength": 64,
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_type",
+        "actor",
+        "actor_ref",
+        "source_ref",
+        "source_sha"
+      ],
+      "properties": {
+        "evidence_type": {
+          "enum": [
+            "SYNTHETIC_FIXTURE",
+            "HUMAN_SUPPLIED",
+            "PROVIDER_ATTESTED",
+            "UNKNOWN"
+          ]
+        },
+        "actor": {
+          "enum": [
+            "HUMAN",
+            "CHATGPT_BRAIN",
+            "PROVIDER",
+            "FIXTURE",
+            "UNKNOWN"
+          ]
+        },
+        "actor_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_./:@-]*$"
+        },
+        "source_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_./:@-]*$"
+        },
+        "source_sha": {
+          "type": "string",
+          "minLength": 40,
+          "maxLength": 40,
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      }
+    },
+    "authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allow_network",
+        "allow_spend",
+        "allow_publish",
+        "provider_entitlement",
+        "spend_ceiling_minor",
+        "currency",
+        "authorization_ref"
+      ],
+      "properties": {
+        "allow_network": {
+          "type": "boolean",
+          "const": false,
+          "default": false
+        },
+        "allow_spend": {
+          "type": "boolean",
+          "const": false,
+          "default": false
+        },
+        "allow_publish": {
+          "type": "boolean",
+          "const": false,
+          "default": false
+        },
+        "provider_entitlement": {
+          "type": "boolean",
+          "const": false,
+          "default": false
+        },
+        "spend_ceiling_minor": {
+          "type": "integer",
+          "const": 0,
+          "default": 0
+        },
+        "currency": {
+          "type": "null",
+          "default": null
+        },
+        "authorization_ref": {
+          "type": "null",
+          "default": null
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "owner",
+        "ref",
+        "sha256",
+        "evidence_type",
+        "attestation_ref"
+      ],
+      "properties": {
+        "owner": {
+          "enum": [
+            "COMMERCE_OPPORTUNITY",
+            "PRODUCT_INTELLIGENCE",
+            "MEDIA_CREATIVE",
+            "DISTRIBUTION",
+            "COMMERCE_OPERATIONS"
+          ]
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_./:@-]*$"
+        },
+        "sha256": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "evidence_type": {
+          "enum": [
+            "SYNTHETIC_FIXTURE",
+            "HUMAN_SUPPLIED",
+            "PROVIDER_ATTESTED",
+            "UNKNOWN"
+          ]
+        },
+        "attestation_ref": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_./:@-]*$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "rights": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "ref",
+        "sha256"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "UNKNOWN",
+            "GRANTED",
+            "RESTRICTED",
+            "NOT_APPLICABLE"
+          ]
+        },
+        "ref": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_./:@-]*$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 64,
+              "maxLength": 64,
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "pin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref",
+        "sha256"
+      ],
+      "properties": {
+        "ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_./:@-]*$"
+        },
+        "sha256": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}
