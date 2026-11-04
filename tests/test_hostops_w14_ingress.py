@@ -6,7 +6,7 @@ import pytest
 from pathlib import Path
 
 from ai_commerce.hostops_v3 import auth, transport, contract as c
-from test_hostops_v3 import h
+from test_hostops_v3 import h, keys
 
 
 def _personal_w1_signed_fixture(h, *, now=1800000000):
