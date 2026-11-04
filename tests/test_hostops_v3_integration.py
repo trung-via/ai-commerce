@@ -2123,3 +2123,38 @@ def test_w1_attended_cli_not_dispatchable_by_normal_hostops_worker():
     assert not hasattr(Worker, "personal_w1_attended_once")
     assert not hasattr(transport, "personal_w1_attended_once")
     assert not hasattr(cli, "w1_windows_native_create_fixture")
+
+
+def test_w1_android_public_signer_enrollment_exact_and_distinct_from_v2():
+    """User-supplied Termux public key only; no Android private key is present."""
+    import hashlib
+
+    approved = ROOT / "config" / "hostops" / "w1-human-allowed-signers"
+    actual = approved.read_bytes()
+    assert hashlib.sha256(actual).hexdigest() == (
+        "f7c41e41d3429750aa423665f41b07c7c4a7ddeb6a3c776eee940fcbf85d5e26"
+    )
+    lines = actual.decode("ascii").splitlines()
+    assert len(lines) == 1
+    columns = lines[0].split()
+    assert len(columns) == 4
+    principal, algorithm, encoded_key, label = columns
+    assert (principal, algorithm, label) == (
+        "hostops-human", "ssh-ed25519", "ai-commerce-w1-human"
+    )
+    public_blob = base64.b64decode(encoded_key, validate=True)
+    assert len(public_blob) == 51
+    assert public_blob[:15] == b"\\x00\\x00\\x00\\x0bssh-ed25519"
+    assert public_blob[15:19] == b"\\x00\\x00\\x00\\x20"
+    fingerprint = "SHA256:" + base64.b64encode(
+        hashlib.sha256(public_blob).digest()
+    ).decode("ascii").rstrip("=")
+    assert fingerprint == "SHA256:idxqzTG8hI/g3CL72aj9zzI+jEvXElaEg+40HrGbS9w"
+
+    legacy = (ROOT / "config" / "hostops" /
+              "human-allowed-signers").read_text(encoding="ascii")
+    assert encoded_key not in legacy
+    assert "ai-commerce-human ssh-ed25519 " in legacy
+    # Public enrollment alone must not enable remote write or a worker route.
+    assert "personal-w1-attended-once" in cli.V4_COMMANDS
+    assert not hasattr(transport, "personal_w1_attended_once")
