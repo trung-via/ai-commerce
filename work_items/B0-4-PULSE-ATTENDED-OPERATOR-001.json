@@ -1,0 +1,1177 @@
+{
+  "schema_version": "PULSESourceWorkItem.v1",
+  "id": "B0-4-PULSE-ATTENDED-OPERATOR-001",
+  "state": "HOLD_B03_REQUIRED_PROOF_AND_NATIVE_LINK_CONTROLS_UNPROVEN",
+  "human_authorization": {
+    "actor": "Human @AI Commerce",
+    "date": "2026-11-04",
+    "supplied_statement": "đồng ý tiếp tục B0.4",
+    "provenance": "HUMAN_SUPPLIED_NOT_AUTHENTICATED_BY_SOURCE",
+    "scope": "Source-only EF02 Engineering and Windows synthetic fixtures"
+  },
+  "baseline_sha": "8d3ec319a10231b5603b2a435c83eb2f8b1c66d5",
+  "preflight": {
+    "head_exact": true,
+    "tracked_checkout_clean": true,
+    "exactly_eight_allowed_targets_absent": true
+  },
+  "allowed_paths": [
+    "src/ai_commerce/production_runtime/operator.py",
+    "src/ai_commerce/production_runtime/operator_cli.py",
+    "src/ai_commerce/production_runtime/handoff.py",
+    "src/ai_commerce/production_runtime/metrics.py",
+    "tests/test_b0_4_operator.py",
+    "work_items/mt01-components/b0-4.json",
+    "work_items/B0-4-PULSE-ATTENDED-OPERATOR-001.json",
+    "docs/engineering/B0_4_ATTENDED_OPERATOR_HANDOFF.md"
+  ],
+  "owner_manifest": "work_items/mt01-components/b0-4.json",
+  "owner": "b0-4",
+  "acceptance_ids": [
+    "B0.3.attended-offline-worker-wait-brain",
+    "B0.4.attended-operator-evidence-metrics"
+  ],
+  "source_ingress_new_ac_state": "UNKNOWN_BEFORE_MANIFEST_ADMISSION__INDEPENDENT_BRAIN_ACCEPTANCE_PENDING",
+  "native_b03_source_sha": "32f42b84567e1217a93854389b1c96435bbf454d",
+  "source_pin_meaning": "Operator baseline is pinned separately. Native directives retain the unchanged B0.3 historical source pin. Neither is current-chat or production authority.",
+  "historical_b03": {
+    "source": "work_items/B0-3-PULSE-ATTENDED-WORKER-001.json",
+    "final_recorded_result": "HOLD_UNPROVEN",
+    "passed": 37,
+    "failed": 16,
+    "skipped": 2,
+    "limits": "60-second CLI and 50-second kill handshake timeouts under twelve workers; immutable historical evidence, not erased by B0.4"
+  },
+  "verification": {
+    "state": "HOLD_REQUIRED_B03_GROUP_UNPROVEN",
+    "initial_storage_observation": {
+      "state": "UNKNOWN",
+      "pytest_executed": false,
+      "reason": "Temporary snapshot unavailable on subsequent tool invocation; reconstructed from unchanged tracked tree excluding exactly eight additions"
+    },
+    "rounds": [
+      {
+        "round": "initial",
+        "b04": {
+          "collected": 65,
+          "collections_sha256": "01613791117f3fa27bb89afbcbb2f8506f0f5be91b41511f6958a7af53a0ef8d",
+          "errors": 0,
+          "executed": 65,
+          "executed_non_skipped": 63,
+          "failed": 0,
+          "failed_tests": [],
+          "group": "b0-4",
+          "independent_collection_proven": true,
+          "independent_worker_observers": 12,
+          "junit_sha256": "82846014c7e92916ca3b15e3d290591c8fd4d6efe3c2d331eca3dbd83e2d7f66",
+          "material_properties": [
+            {
+              "properties": {
+                "actual_kill_cut": "after_wait",
+                "render_calls": "1",
+                "terminated_process_exit": "1"
+              },
+              "test": "test_actual_process_kill_preserves_attempt_and_never_rerenders[after_wait]"
+            },
+            {
+              "properties": {
+                "actual_kill_cut": "before_start",
+                "render_calls": "0",
+                "terminated_process_exit": "1"
+              },
+              "test": "test_actual_process_kill_preserves_attempt_and_never_rerenders[before_start]"
+            },
+            {
+              "properties": {
+                "artifact_sha256": "a81e8dbd70b643ee34d2a810c1d07f42a26e78aa07e672eec9137bb4c3503c9c",
+                "companion_file_sha256": "0040ec19f8c90f596a1a3df0e3b3e930b8bcae32da99b6f2ffc198252cc99127",
+                "ffprobe_full_decode": "True",
+                "independent_python_processes": "9",
+                "journal_sequence": "4",
+                "manifest_sha256": "dc5d1443d3e6aae2b980a979d379f90c4b034255f4c7bfda7b537a634a2a7762",
+                "network_git_coding_agent_calls_observed_in_boundary": "0",
+                "receipt_file_sha256": "ab64d1b38252f82285891848d8d36fe4831c5ad6051294d72bfe87bdc40caee9",
+                "render_calls": "1",
+                "summary_sha256": "874cbce7f15cae7d6a3f2ffe4ef3ce11dca0e7420d1acc363eae8a9898700cc8",
+                "tree_sha256": "e19c9c187fedbb07c30ab3d747c51a522f23c0dd3f2271e1753e706a3c90f53f"
+              },
+              "test": "test_windows_independent_cli_session_handoff_learning_metrics"
+            },
+            {
+              "properties": {
+                "actual_kill_cut": "after_a06",
+                "render_calls": "1",
+                "terminated_process_exit": "1"
+              },
+              "test": "test_actual_process_kill_preserves_attempt_and_never_rerenders[after_a06]"
+            },
+            {
+              "properties": {
+                "actual_kill_cut": "after_start",
+                "render_calls": "0",
+                "terminated_process_exit": "1"
+              },
+              "test": "test_actual_process_kill_preserves_attempt_and_never_rerenders[after_start]"
+            },
+            {
+              "properties": {
+                "audit_denied_boundaries": "network,git,coding-agent"
+              },
+              "test": "test_real_audit_boundary_denies_network_git_and_coding_agents"
+            },
+            {
+              "properties": {
+                "actual_competing_python_processes": "2",
+                "journal_preserved": "True"
+              },
+              "test": "test_two_real_processes_hold_without_lease_deletion"
+            },
+            {
+              "properties": {
+                "actual_kill_cut": "before_call",
+                "render_calls": "0",
+                "terminated_process_exit": "1"
+              },
+              "test": "test_actual_process_kill_preserves_attempt_and_never_rerenders[before_call]"
+            },
+            {
+              "properties": {
+                "actual_kill_cut": "after_output",
+                "render_calls": "1",
+                "terminated_process_exit": "1"
+              },
+              "test": "test_actual_process_kill_preserves_attempt_and_never_rerenders[after_output]"
+            }
+          ],
+          "ordered_collection_sha256": "e0d193ad39f697184a6a3947a2db006b37eb281dc7aac61bc68acb7772f05c66",
+          "passed": 63,
+          "skipped": 2,
+          "skipped_tests": [
+            {
+              "reason": "Host denied native symlink creation; UNPROVEN",
+              "test": "test_real_file_symlink_or_unproven"
+            },
+            {
+              "reason": "Host denied native junction creation; UNPROVEN",
+              "test": "test_real_windows_junction_or_unproven"
+            }
+          ]
+        },
+        "execution": {
+          "actual_argv": [
+            "python",
+            "-m",
+            "pytest",
+            "tests/test_b0_4_operator.py",
+            "-q",
+            "-n",
+            "12"
+          ],
+          "exit_code": 0,
+          "finished_utc": "2026-11-04T14:31:52.583212+00:00",
+          "group": "b0-4",
+          "started_utc": "2026-11-04T14:25:38.350097+00:00",
+          "workers_actual": 12
+        },
+        "tested_executable_test_manifest_sha256": {
+          "src/ai_commerce/production_runtime/operator.py": "fb31287c0a172fecc832254b8d2924efe555a4c6a96b14726200fb47f9de74b6",
+          "src/ai_commerce/production_runtime/operator_cli.py": "b6fb5b18b71631fa1f55998378361583dcfb66e06fb0466fd5a8cd57fc33141d",
+          "src/ai_commerce/production_runtime/handoff.py": "f1924bf17672455ac4823ba0127b203a4dc35f568ba899ff8d772e1680bb4a8b",
+          "src/ai_commerce/production_runtime/metrics.py": "06f2221c3c7e6468042b7364d601dfcf87e0d0c29f835edd452eb730d6878624",
+          "tests/test_b0_4_operator.py": "385a7f6e8a1086f17ba218b37607ef1e38efc6e1a82c21629fd952d4876002a3",
+          "work_items/mt01-components/b0-4.json": "fc31740830c463fc350bc147b2b9fc58b94f6ede26e884db4f4a64ecff892280"
+        }
+      },
+      {
+        "round": "round1",
+        "b04": {
+          "collected": 68,
+          "collections_sha256": "5f04fbb1a3ca73a2dd148519cc77f32b18c0a57d827eb2fe4f5a5ff644cfc6fa",
+          "errors": 0,
+          "executed": 68,
+          "executed_non_skipped": 66,
+          "failed": 0,
+          "failed_tests": [],
+          "group": "b0-4",
+          "independent_collection_proven": true,
+          "independent_worker_observers": 12,
+          "junit_sha256": "22251f2442a582c960e0d4aba950aa642f6784d9d3e88e930d26ac82cb95269a",
+          "material_properties": [
+            {
+              "properties": {
+                "actual_kill_cut": "before_start",
+                "render_calls": "0",
+                "terminated_process_exit": "1"
+              },
+              "test": "test_actual_process_kill_preserves_attempt_and_never_rerenders[before_start]"
+            },
+            {
+              "properties": {
+                "artifact_sha256": "a81e8dbd70b643ee34d2a810c1d07f42a26e78aa07e672eec9137bb4c3503c9c",
+                "companion_file_sha256": "f1f622e697c361e8c3e20e6970bd05d960c557f6f23651b53f32a2b858b6c98b",
+                "ffprobe_full_decode": "True",
+                "independent_python_processes": "9",
+                "journal_sequence": "4",
+                "manifest_sha256": "23107febcc08250b2d9858da5963fed8ae8b01ca0d1b54c290091333d362a294",
+                "network_git_coding_agent_calls_observed_in_boundary": "0",
+                "receipt_file_sha256": "d5c4af61736a62a5c670ebdf6ac22846e6bf2c3f7ae0cd46e4c7ba8bc605cf4f",
+                "render_calls": "1",
+                "summary_sha256": "58412c1f87b743eec127749abaff97c75dbbd9b6f85c7528b4cd34ad7656d5d4",
+                "tree_sha256": "e4f7b32931564228c3d8cb72fd6b8423c64021240bcd47344f3e251b085e03ed"
+              },
+              "test": "test_windows_independent_cli_session_handoff_learning_metrics"
+            },
+            {
+              "properties": {
+                "actual_kill_cut": "after_wait",
+                "render_calls": "1",
+                "terminated_process_exit": "1"
+              },
+              "test": "test_actual_process_kill_preserves_attempt_and_never_rerenders[after_wait]"
+            },
+            {
+              "properties": {
+                "actual_kill_cut": "after_a06",
+                "render_calls": "1",
+                "terminated_process_exit": "1"
+              },
+              "test": "test_actual_process_kill_preserves_attempt_and_never_rerenders[after_a06]"
+            },
+            {
+              "properties": {
+                "actual_kill_cut": "after_start",
+                "render_calls": "0",
+                "terminated_process_exit": "1"
+              },
+              "test": "test_actual_process_kill_preserves_attempt_and_never_rerenders[after_start]"
+            },
+            {
+              "properties": {
+                "audit_denied_boundaries": "network,git,coding-agent"
+              },
+              "test": "test_real_audit_boundary_denies_network_git_and_coding_agents"
+            },
+            {
+              "properties": {
+                "actual_competing_python_processes": "2",
+                "journal_preserved": "True"
+              },
+              "test": "test_two_real_processes_hold_without_lease_deletion"
+            },
+            {
+              "properties": {
+                "actual_kill_cut": "before_call",
+                "render_calls": "0",
+                "terminated_process_exit": "1"
+              },
+              "test": "test_actual_process_kill_preserves_attempt_and_never_rerenders[before_call]"
+            },
+            {
+              "properties": {
+                "actual_kill_cut": "after_output",
+                "render_calls": "1",
+                "terminated_process_exit": "1"
+              },
+              "test": "test_actual_process_kill_preserves_attempt_and_never_rerenders[after_output]"
+            }
+          ],
+          "ordered_collection_sha256": "157ac2b9a5ffef2d56c2a2ae69ebf20e702a4fd92a110cf2f38e2a1091f1b39f",
+          "passed": 66,
+          "skipped": 2,
+          "skipped_tests": [
+            {
+              "reason": "Host denied native symlink creation; UNPROVEN",
+              "test": "test_real_file_symlink_or_unproven"
+            },
+            {
+              "reason": "Host denied native junction creation; UNPROVEN",
+              "test": "test_real_windows_junction_or_unproven"
+            }
+          ]
+        },
+        "execution": {
+          "actual_argv": [
+            "python",
+            "-m",
+            "pytest",
+            "tests/test_b0_4_operator.py",
+            "-q",
+            "-n",
+            "12"
+          ],
+          "exit_code": 0,
+          "finished_utc": "2026-11-04T14:45:17.778426+00:00",
+          "group": "b0-4",
+          "started_utc": "2026-11-04T14:38:35.636146+00:00",
+          "workers_actual": 12
+        },
+        "tested_executable_test_manifest_sha256": {
+          "src/ai_commerce/production_runtime/operator.py": "a62cf0fe71a1d3e901871a6c494cd241fdcd371d9730cf0a10d4c3a0ddcbf590",
+          "src/ai_commerce/production_runtime/operator_cli.py": "b6fb5b18b71631fa1f55998378361583dcfb66e06fb0466fd5a8cd57fc33141d",
+          "src/ai_commerce/production_runtime/handoff.py": "f1924bf17672455ac4823ba0127b203a4dc35f568ba899ff8d772e1680bb4a8b",
+          "src/ai_commerce/production_runtime/metrics.py": "c20410836c4a82cb7c8b53be4a4831080c36b3681aba58262f7dd520d4050776",
+          "tests/test_b0_4_operator.py": "5113c8fe7cd3e0862614ba76f339ceb8d8bafba7929d899e91968ba377b81bdf",
+          "work_items/mt01-components/b0-4.json": "fc31740830c463fc350bc147b2b9fc58b94f6ede26e884db4f4a64ecff892280"
+        }
+      },
+      {
+        "round": "round2",
+        "b04": {
+          "collected": 69,
+          "collections_sha256": "8dc33069e71fe462ac557246350d611fa7cd79980ba4956c3b7706f83b2abc61",
+          "errors": 0,
+          "executed": 69,
+          "executed_non_skipped": 67,
+          "failed": 0,
+          "failed_tests": [],
+          "group": "b0-4",
+          "independent_collection_proven": true,
+          "independent_worker_observers": 12,
+          "junit_sha256": "be6b47bb52f4d85a7c8355d8917a344be87d2eed7d4a95741c24056431802f1f",
+          "material_properties": [
+            {
+              "properties": {
+                "actual_kill_cut": "after_wait",
+                "render_calls": "1",
+                "terminated_process_exit": "1"
+              },
+              "test": "test_actual_process_kill_preserves_attempt_and_never_rerenders[after_wait]"
+            },
+            {
+              "properties": {
+                "actual_kill_cut": "after_a06",
+                "render_calls": "1",
+                "terminated_process_exit": "1"
+              },
+              "test": "test_actual_process_kill_preserves_attempt_and_never_rerenders[after_a06]"
+            },
+            {
+              "properties": {
+                "actual_kill_cut": "before_start",
+                "render_calls": "0",
+                "terminated_process_exit": "1"
+              },
+              "test": "test_actual_process_kill_preserves_attempt_and_never_rerenders[before_start]"
+            },
+            {
+              "properties": {
+                "artifact_sha256": "a81e8dbd70b643ee34d2a810c1d07f42a26e78aa07e672eec9137bb4c3503c9c",
+                "companion_file_sha256": "c2b4f3617c0c7a8e8f22fb815bb766a118d18c1554c20b9f353dd38758081e03",
+                "ffprobe_full_decode": "True",
+                "independent_python_processes": "9",
+                "journal_sequence": "4",
+                "manifest_sha256": "0d03111764192ed44378bb4bd62845f94ddb0129ec6d952ed7ff2d40e27e77d9",
+                "network_git_coding_agent_calls_observed_in_boundary": "0",
+                "receipt_file_sha256": "d87042f321419ad71bf9ca2203f186ed43ab8ef41c3056d407a6e6739d768491",
+                "render_calls": "1",
+                "summary_sha256": "680447780736430dd9e2e54371f18e4c0d9a9ba6202aa45fdf1996dc25b12816",
+                "tree_sha256": "0bb37a1ac5ae54212418c05069a456c45e3b85e77bcb5b34f4e83a14bd33f0d3"
+              },
+              "test": "test_windows_independent_cli_session_handoff_learning_metrics"
+            },
+            {
+              "properties": {
+                "actual_kill_cut": "after_start",
+                "render_calls": "0",
+                "terminated_process_exit": "1"
+              },
+              "test": "test_actual_process_kill_preserves_attempt_and_never_rerenders[after_start]"
+            },
+            {
+              "properties": {
+                "actual_external_b03_state": "WAIT_BRAIN",
+                "b04_attributed_passes": "0",
+                "external_journal_preserved": "True"
+              },
+              "test": "test_unobserved_external_b03_is_unknown_and_not_counted_pass"
+            },
+            {
+              "properties": {
+                "actual_competing_python_processes": "2",
+                "journal_preserved": "True"
+              },
+              "test": "test_two_real_processes_hold_without_lease_deletion"
+            },
+            {
+              "properties": {
+                "actual_kill_cut": "before_call",
+                "render_calls": "0",
+                "terminated_process_exit": "1"
+              },
+              "test": "test_actual_process_kill_preserves_attempt_and_never_rerenders[before_call]"
+            },
+            {
+              "properties": {
+                "actual_kill_cut": "after_output",
+                "render_calls": "1",
+                "terminated_process_exit": "1"
+              },
+              "test": "test_actual_process_kill_preserves_attempt_and_never_rerenders[after_output]"
+            },
+            {
+              "properties": {
+                "audit_denied_boundaries": "network,git,coding-agent"
+              },
+              "test": "test_real_audit_boundary_denies_network_git_and_coding_agents"
+            }
+          ],
+          "ordered_collection_sha256": "533025251d43c122b8e9242362c6806dd26abe165edfba130c8768a0b0bd7c12",
+          "passed": 67,
+          "skipped": 2,
+          "skipped_tests": [
+            {
+              "reason": "Host denied native symlink creation; UNPROVEN",
+              "test": "test_real_file_symlink_or_unproven"
+            },
+            {
+              "reason": "Host denied native junction creation; UNPROVEN",
+              "test": "test_real_windows_junction_or_unproven"
+            }
+          ]
+        },
+        "execution": {
+          "actual_argv": [
+            "python",
+            "-m",
+            "pytest",
+            "tests/test_b0_4_operator.py",
+            "-q",
+            "-n",
+            "12"
+          ],
+          "exit_code": 0,
+          "finished_utc": "2026-11-04T14:56:49.563922+00:00",
+          "group": "b0-4",
+          "started_utc": "2026-11-04T14:49:58.639290+00:00",
+          "workers_actual": 12
+        },
+        "tested_executable_test_manifest_sha256": {
+          "src/ai_commerce/production_runtime/operator.py": "5a5b3e04ac78a1a40665fb96cbe68460452547857a8a4e523801927b3ffb3520",
+          "src/ai_commerce/production_runtime/operator_cli.py": "b6fb5b18b71631fa1f55998378361583dcfb66e06fb0466fd5a8cd57fc33141d",
+          "src/ai_commerce/production_runtime/handoff.py": "f1924bf17672455ac4823ba0127b203a4dc35f568ba899ff8d772e1680bb4a8b",
+          "src/ai_commerce/production_runtime/metrics.py": "8204aa05fd4a29b1c009d8b3105cf7c74b503f403c1a70ba3a0bacd61a1b1f00",
+          "tests/test_b0_4_operator.py": "94901df4d4f93acb02ad2e127e9402f900dfc9d22355c33e08fa0295b417dceb",
+          "work_items/mt01-components/b0-4.json": "fc31740830c463fc350bc147b2b9fc58b94f6ede26e884db4f4a64ecff892280"
+        },
+        "result": "PASS_EXECUTED_TESTS__TWO_NATIVE_LINK_CONTROLS_UNPROVEN"
+      }
+    ],
+    "initial_native_controller": {
+      "exit_code": 3,
+      "groups": [
+        {
+          "group": "a06",
+          "result": "PASS",
+          "reason": null,
+          "actual_argv": [
+            "python",
+            "-m",
+            "pytest",
+            "tests/test_a06_e01.py",
+            "-q",
+            "-n",
+            "12"
+          ],
+          "workers_actual": 12,
+          "started_at": "2026-11-04T14:33:28.412548+00:00",
+          "finished_at": "2026-11-04T14:33:38.851422+00:00",
+          "tests_executed": {
+            "errors": 0,
+            "failed": 0,
+            "passed": 7,
+            "skipped": 0,
+            "xfailed": 0,
+            "xpassed": 0
+          },
+          "evidence_sha256": "851dfa7127b95a852d21a7035cf888a4fb7939e6d571a3a9af0e558a9d454eff",
+          "collected": 7,
+          "collections_sha256": "f0d53561c82af1b82dba3524beda9aa490b2fde0814dbc1f3999cb0031dc7a19",
+          "errors": 0,
+          "executed": 7,
+          "executed_non_skipped": 7,
+          "failed": 0,
+          "failed_tests": [],
+          "independent_collection_proven": true,
+          "independent_worker_observers": 12,
+          "junit_sha256": "9ba68f3ee45f77e495d9c88e6e0f783ef33b2f9b75652510f6fbd9eb75a292e4",
+          "material_properties": [],
+          "ordered_collection_sha256": "4e2b4f83a3bc3b84aae09bbc6dcda4c65406c248f447a92fedc6ea36bc55cb12",
+          "passed": 7,
+          "skipped": 0,
+          "skipped_tests": []
+        },
+        {
+          "group": "b0-1",
+          "result": "PASS",
+          "reason": null,
+          "actual_argv": [
+            "python",
+            "-m",
+            "pytest",
+            "tests/test_b0_production_contracts.py",
+            "-q",
+            "-n",
+            "12"
+          ],
+          "workers_actual": 12,
+          "started_at": "2026-11-04T14:33:39.458788+00:00",
+          "finished_at": "2026-11-04T14:33:42.794855+00:00",
+          "tests_executed": {
+            "errors": 0,
+            "failed": 0,
+            "passed": 82,
+            "skipped": 0,
+            "xfailed": 0,
+            "xpassed": 0
+          },
+          "evidence_sha256": "b48bcaada09a507679e784767294fe17dbc003ed9646c4c29c7c719a0944e648",
+          "collected": 82,
+          "collections_sha256": "4621f443025e4844ebd967e7e1211fcc9236cd874e45bce76605f6ba8dd0040c",
+          "errors": 0,
+          "executed": 82,
+          "executed_non_skipped": 82,
+          "failed": 0,
+          "failed_tests": [],
+          "independent_collection_proven": true,
+          "independent_worker_observers": 12,
+          "junit_sha256": "e48a21f12609a2aaa8fb1342fec0565d3390ea5db3efcaaf1c7366623c9cf0eb",
+          "material_properties": [],
+          "ordered_collection_sha256": "ec37f3d299a53088bcda35a851c72483db55a5be403e4bebbf7eb9917859b788",
+          "passed": 82,
+          "skipped": 0,
+          "skipped_tests": []
+        },
+        {
+          "group": "b0-2",
+          "result": "PASS",
+          "reason": null,
+          "actual_argv": [
+            "python",
+            "-m",
+            "pytest",
+            "tests/test_b0_2_journal.py",
+            "-q",
+            "-n",
+            "12"
+          ],
+          "workers_actual": 12,
+          "started_at": "2026-11-04T14:33:43.335080+00:00",
+          "finished_at": "2026-11-04T14:33:47.684579+00:00",
+          "tests_executed": {
+            "errors": 0,
+            "failed": 0,
+            "passed": 60,
+            "skipped": 0,
+            "xfailed": 0,
+            "xpassed": 0
+          },
+          "evidence_sha256": "966f681c3d4da4f25411924773fe2137f81b1e41ec4b5a06657bab839c3acc62",
+          "collected": 60,
+          "collections_sha256": "1b1bdafb72ed5269b93d47be407c7451d396d12843ce5cbe8eef0c3e34feb04d",
+          "errors": 0,
+          "executed": 60,
+          "executed_non_skipped": 60,
+          "failed": 0,
+          "failed_tests": [],
+          "independent_collection_proven": true,
+          "independent_worker_observers": 12,
+          "junit_sha256": "0767ff4cb10a087ab6607cd58358ab8ab664ea00c53e2f0f38f52e0eb9ec7be8",
+          "material_properties": [],
+          "ordered_collection_sha256": "5187a945f759843481183f198e2399bf682543b45a62e7a6ba8c11373abf5206",
+          "passed": 60,
+          "skipped": 0,
+          "skipped_tests": []
+        },
+        {
+          "group": "b0-3",
+          "result": "UNPROVEN",
+          "reason": "VERIFY_INFRASTRUCTURE_ERROR",
+          "actual_argv": [
+            "python",
+            "-m",
+            "pytest",
+            "tests/test_b0_3_attended_worker.py",
+            "-q",
+            "-n",
+            "12"
+          ],
+          "workers_actual": 12,
+          "started_at": "2026-11-04T14:33:48.254783+00:00",
+          "finished_at": "2026-11-04T14:37:00.488891+00:00",
+          "tests_executed": {
+            "errors": 0,
+            "failed": 7,
+            "passed": 46,
+            "skipped": 2,
+            "xfailed": 0,
+            "xpassed": 0
+          },
+          "evidence_sha256": null,
+          "collected": 55,
+          "collections_sha256": "5fb22754fdaeed84ade87ecc0d5e2b729b35af6a635444f4af009b9b080b943b",
+          "errors": 0,
+          "executed": 55,
+          "executed_non_skipped": 53,
+          "failed": 7,
+          "failed_tests": [
+            {
+              "diagnostic_sha256": "d430b3bb7ffe121d851606246879905902aae038c734242788fe0f2fa3d00ca5",
+              "test": "test_windows_selfhost_real_separate_process_mp4_reopen_and_identical_export"
+            },
+            {
+              "diagnostic_sha256": "2bf904b4e70eb768a520610735799ad71ff554a2759e1eff1c7d61616b1c583b",
+              "test": "test_post_run_tamper_or_rollback_holds_without_rerender[journal-corrupt]"
+            },
+            {
+              "diagnostic_sha256": "584467c049e2b297eddfa75bfd2a367ef288d311d979984b32156eed46b52452",
+              "test": "test_post_run_tamper_or_rollback_holds_without_rerender[output-partial]"
+            },
+            {
+              "diagnostic_sha256": "f92f6e2a4a57ba26e3950c5b9d283a0b5058141690c9b97952e467d6f2b4bf6a",
+              "test": "test_post_run_tamper_or_rollback_holds_without_rerender[directive]"
+            },
+            {
+              "diagnostic_sha256": "e1513dd80f367613215f1e9b5a7639a3155da55d00739f638c9da3ee1f350bfa",
+              "test": "test_post_run_tamper_or_rollback_holds_without_rerender[directive-file-bytes]"
+            },
+            {
+              "diagnostic_sha256": "a6318427f0690f11ad3aba157314ca2416a0a5a9b99d403e8dffccf9fac5d597",
+              "test": "test_human_import_requires_matching_local_rights_with_freshness[valid]"
+            },
+            {
+              "diagnostic_sha256": "81c6a1b48d2390aed8eba663ecca7d9894f508119b9e897d3849e20cb0cc94b2",
+              "test": "test_post_run_tamper_or_rollback_holds_without_rerender[output-corrupt]"
+            }
+          ],
+          "independent_collection_proven": true,
+          "independent_worker_observers": 12,
+          "junit_sha256": "66591f13ac326dff87e156ba1bea4240edcb036eac5396af0b67ff44cd13115e",
+          "material_properties": [
+            {
+              "properties": {
+                "actual_kill_cut": "after_start",
+                "render_calls": "0",
+                "terminated_process_exit": "1"
+              },
+              "test": "test_real_process_kill_at_commit_cuts_never_rerenders[after_start]"
+            },
+            {
+              "properties": {
+                "actual_kill_cut": "after_output",
+                "render_calls": "1",
+                "terminated_process_exit": "1"
+              },
+              "test": "test_real_process_kill_at_commit_cuts_never_rerenders[after_output]"
+            },
+            {
+              "properties": {
+                "actual_kill_cut": "after_a06",
+                "render_calls": "1",
+                "terminated_process_exit": "1"
+              },
+              "test": "test_real_process_kill_at_commit_cuts_never_rerenders[after_a06]"
+            },
+            {
+              "properties": {
+                "actual_kill_cut": "before_start",
+                "render_calls": "0",
+                "terminated_process_exit": "1"
+              },
+              "test": "test_real_process_kill_at_commit_cuts_never_rerenders[before_start]"
+            },
+            {
+              "properties": {
+                "actual_kill_cut": "after_wait",
+                "render_calls": "1",
+                "terminated_process_exit": "1"
+              },
+              "test": "test_real_process_kill_at_commit_cuts_never_rerenders[after_wait]"
+            }
+          ],
+          "ordered_collection_sha256": "3dd69d456309e96498f395ce8a5c71f0634335ecda07cc74bc1109ea7405cf72",
+          "passed": 46,
+          "skipped": 2,
+          "skipped_tests": [
+            {
+              "reason": "UNPROVEN_NATIVE_JUNCTION: host denies creation; lexical escape and structural link guard tested separately",
+              "test": "test_real_windows_junction_denied_when_host_permits"
+            },
+            {
+              "reason": "UNPROVEN_NATIVE_FILE_SYMLINK: host denies creation; structural link guard tested separately",
+              "test": "test_actual_file_symlink_when_host_permits"
+            }
+          ]
+        },
+        {
+          "group": "b0-4",
+          "result": "UNPROVEN",
+          "reason": "NOT_EXECUTED_AFTER_UNPROVEN_GROUP",
+          "actual_argv": null,
+          "workers_actual": null,
+          "started_at": null,
+          "finished_at": null,
+          "tests_executed": {
+            "errors": 0,
+            "failed": 0,
+            "passed": 0,
+            "skipped": 0,
+            "xfailed": 0,
+            "xpassed": 0
+          },
+          "evidence_sha256": null
+        }
+      ],
+      "results_sha256": "b11530239d4f5598dd297952268883ce65dd6c08cf3862d9e69e15d36b719f56"
+    },
+    "blocker": {
+      "code": "B03_REQUIRED_12_WORKER_PROOF_UNPROVEN",
+      "failed_tests": [
+        {
+          "code": "CLI_SUBPROCESS_TIMEOUT_60_SECONDS",
+          "test": "test_windows_selfhost_real_separate_process_mp4_reopen_and_identical_export"
+        },
+        {
+          "code": "CLI_SUBPROCESS_TIMEOUT_60_SECONDS",
+          "test": "test_post_run_tamper_or_rollback_holds_without_rerender[journal-corrupt]"
+        },
+        {
+          "code": "CLI_SUBPROCESS_TIMEOUT_60_SECONDS",
+          "test": "test_post_run_tamper_or_rollback_holds_without_rerender[output-partial]"
+        },
+        {
+          "code": "CLI_SUBPROCESS_TIMEOUT_60_SECONDS",
+          "test": "test_post_run_tamper_or_rollback_holds_without_rerender[directive]"
+        },
+        {
+          "code": "CLI_SUBPROCESS_TIMEOUT_60_SECONDS",
+          "test": "test_post_run_tamper_or_rollback_holds_without_rerender[directive-file-bytes]"
+        },
+        {
+          "code": "CLI_SUBPROCESS_TIMEOUT_60_SECONDS",
+          "test": "test_human_import_requires_matching_local_rights_with_freshness[valid]"
+        },
+        {
+          "code": "CLI_SUBPROCESS_TIMEOUT_60_SECONDS",
+          "test": "test_post_run_tamper_or_rollback_holds_without_rerender[output-corrupt]"
+        }
+      ],
+      "required_action": "Separately scoped B0.3 subprocess/performance proof investigation; baseline source/tests are frozen in this action. No worker reduction or hidden native retry."
+    },
+    "round2": {
+      "state": "COMPLETED_67_PASSED_0_FAILED_2_SKIPPED",
+      "source_fix_rounds_exhausted": true,
+      "new_regressions": [
+        "terminal capacity reservation before call",
+        "content-addressed asset reference",
+        "rehash of session cannot replace original input path",
+        "real external B0.3 remains UNKNOWN across repeated commands",
+        "forged/corrupt run admission cannot replace hash-chained original admission"
+      ]
+    },
+    "max_scoped_fix_rounds": 2,
+    "scoped_fix_rounds_used": 2,
+    "hosted_exact_head_ci": "PENDING_LATER_GATE",
+    "independent_brain": "PENDING_LATER_GATE",
+    "candidate_publication": "NONE_EXECUTOR_NOT_PUBLISHER",
+    "final_tree_scoped_pass": "NOT_ESTABLISHED",
+    "final_forward_consumers": [
+      {
+        "execution": {
+          "actual_argv": [
+            "python",
+            "-m",
+            "pytest",
+            "tests/test_a02_contracts.py",
+            "tests/test_a02_mock_provider.py",
+            "-q",
+            "-n",
+            "12"
+          ],
+          "exit_code": 0,
+          "finished_utc": "2026-11-04T14:58:39.426743+00:00",
+          "group": "a02",
+          "started_utc": "2026-11-04T14:58:34.893365+00:00",
+          "workers_actual": 12
+        },
+        "summary": {
+          "collected": 30,
+          "collections_sha256": "99a00e1908261d7f5becb854e9a557bcaed0f69e6be8f0c36e44c9bb2c5ef1db",
+          "errors": 0,
+          "executed": 30,
+          "executed_non_skipped": 30,
+          "failed": 0,
+          "failed_tests": [],
+          "group": "a02",
+          "independent_collection_proven": true,
+          "independent_worker_observers": 12,
+          "junit_sha256": "9ef5a923c85906608cbb24cb64d973fdcc90622b12f3ead796c81ffc65a4b533",
+          "material_properties": [],
+          "ordered_collection_sha256": "9c0a7f25431ae54e4cc47262d7b2f01abc942000dfdb88d9c8468bd7062cfdf3",
+          "passed": 30,
+          "skipped": 0,
+          "skipped_tests": []
+        },
+        "result": "PASS_EXECUTED_TESTS"
+      },
+      {
+        "execution": {
+          "actual_argv": [
+            "python",
+            "-m",
+            "pytest",
+            "tests/test_a03_creative.py",
+            "tests/test_a03_upgrade_v11.py",
+            "-q",
+            "-n",
+            "12"
+          ],
+          "exit_code": 0,
+          "finished_utc": "2026-11-04T14:58:57.676238+00:00",
+          "group": "a03",
+          "started_utc": "2026-11-04T14:58:39.427437+00:00",
+          "workers_actual": 12
+        },
+        "summary": {
+          "collected": 193,
+          "collections_sha256": "3131bef2b9fb020c8b3a7fa948ca6e87b88d30e49001f83e51bac655dccf87a2",
+          "errors": 0,
+          "executed": 193,
+          "executed_non_skipped": 193,
+          "failed": 0,
+          "failed_tests": [],
+          "group": "a03",
+          "independent_collection_proven": true,
+          "independent_worker_observers": 12,
+          "junit_sha256": "d3cb470ff33e8c5c475fc85a6b3cd8e5b16d056f5d2babb5319269bdd11c8521",
+          "material_properties": [],
+          "ordered_collection_sha256": "67b6758acbb73f8ef7052136108162cfc63ba8216e760c521200e5ca367afdb0",
+          "passed": 193,
+          "skipped": 0,
+          "skipped_tests": []
+        },
+        "result": "PASS_EXECUTED_TESTS"
+      },
+      {
+        "execution": {
+          "actual_argv": [
+            "python",
+            "-m",
+            "pytest",
+            "tests/test_a04_media_operations.py",
+            "tests/test_a04_upgrade_v11.py",
+            "tests/test_a03_a04_integration.py",
+            "-q",
+            "-n",
+            "12"
+          ],
+          "exit_code": 0,
+          "finished_utc": "2026-11-04T14:59:15.390803+00:00",
+          "group": "a04",
+          "started_utc": "2026-11-04T14:58:57.676779+00:00",
+          "workers_actual": 12
+        },
+        "summary": {
+          "collected": 181,
+          "collections_sha256": "63759182a780f0ef1be2941f1531f2512b0a83573e0bafc202d78f79d17e54f2",
+          "errors": 0,
+          "executed": 181,
+          "executed_non_skipped": 178,
+          "failed": 0,
+          "failed_tests": [],
+          "group": "a04",
+          "independent_collection_proven": true,
+          "independent_worker_observers": 12,
+          "junit_sha256": "fd6432dabc807b38e96cb85519812a5ab37d618edaa10583d177ace12e21c832",
+          "material_properties": [],
+          "ordered_collection_sha256": "bee4beb2b64109047bc855b18d918f71ded25f2487a0b9e23803d5df0b45473b",
+          "passed": 178,
+          "skipped": 3,
+          "skipped_tests": [
+            {
+              "reason": "Host denied native symlink/junction creation; UNPROVEN",
+              "test": "test_symlink_or_junction_cannot_escape_storage_root",
+              "original_reason_sha256": "b4b756a157dd0a48e803d078176f7cfff6f43618197d7bc0879c6bd3e3a34faa"
+            },
+            {
+              "reason": "Host denied native symlink/junction creation; UNPROVEN",
+              "test": "test_symlink_or_junction_root_is_rejected",
+              "original_reason_sha256": "b4b756a157dd0a48e803d078176f7cfff6f43618197d7bc0879c6bd3e3a34faa"
+            },
+            {
+              "reason": "Host denied native hardlink creation (WinError 5); UNPROVEN",
+              "test": "test_source_hardlink_is_rejected",
+              "original_reason_sha256": "aa14d476ef910ac6047504e43e5bbf77a396add01b4cbcf35f656da590407203"
+            }
+          ]
+        },
+        "result": "PASS_EXECUTED_TESTS_WITH_UNPROVEN_SKIPS"
+      },
+      {
+        "execution": {
+          "actual_argv": [
+            "python",
+            "-m",
+            "pytest",
+            "tests/test_a05_composition.py",
+            "tests/test_a05_render.py",
+            "tests/test_a05_integration.py",
+            "tests/test_creative_asset_link_v11.py",
+            "-q",
+            "-n",
+            "12"
+          ],
+          "exit_code": 0,
+          "finished_utc": "2026-11-04T14:59:41.470293+00:00",
+          "group": "a05",
+          "started_utc": "2026-11-04T14:59:15.392067+00:00",
+          "workers_actual": 12
+        },
+        "summary": {
+          "collected": 217,
+          "collections_sha256": "9107ffff3ed74def7730aec1069e87cfcfed9d037b921d887756f04e2ecee161",
+          "errors": 0,
+          "executed": 217,
+          "executed_non_skipped": 217,
+          "failed": 0,
+          "failed_tests": [],
+          "group": "a05",
+          "independent_collection_proven": true,
+          "independent_worker_observers": 12,
+          "junit_sha256": "e39998a01912270227845f73a34428ace7059856d82790ab0e822b8c8f1268ac",
+          "material_properties": [],
+          "ordered_collection_sha256": "478767835765e4b936dd27c6d4f26fa0756f4a843572a17901f464b35848642b",
+          "passed": 217,
+          "skipped": 0,
+          "skipped_tests": []
+        },
+        "result": "PASS_EXECUTED_TESTS"
+      },
+      {
+        "execution": {
+          "actual_argv": [
+            "python",
+            "-m",
+            "pytest",
+            "tests/test_cli.py",
+            "tests/test_isolation.py",
+            "-q",
+            "-n",
+            "12"
+          ],
+          "exit_code": 0,
+          "finished_utc": "2026-11-04T14:59:45.937911+00:00",
+          "group": "cli",
+          "started_utc": "2026-11-04T14:59:41.471655+00:00",
+          "workers_actual": 12
+        },
+        "summary": {
+          "collected": 8,
+          "collections_sha256": "fffa0dcfe1a4c721cf76dac1fd57054a1458f77d6993ab33a2db5f3db9fa6caa",
+          "errors": 0,
+          "executed": 8,
+          "executed_non_skipped": 8,
+          "failed": 0,
+          "failed_tests": [],
+          "group": "cli",
+          "independent_collection_proven": true,
+          "independent_worker_observers": 12,
+          "junit_sha256": "20fcd4b40e0a01171a906004370ce688548a125dfb25b9b065f705bff8d50088",
+          "material_properties": [],
+          "ordered_collection_sha256": "46d2e0ccd5859acb2035ac464bf0305d5b0045a43af3720e9468f305a4a6979b",
+          "passed": 8,
+          "skipped": 0,
+          "skipped_tests": []
+        },
+        "result": "PASS_EXECUTED_TESTS"
+      }
+    ],
+    "final_tested_tree_sha256": "a2a95f6c130fcecfe46233307a11080e72d33b84556e02a940e765263f9f0a6b",
+    "final_executable_test_manifest_sha256": {
+      "src/ai_commerce/production_runtime/operator.py": "5a5b3e04ac78a1a40665fb96cbe68460452547857a8a4e523801927b3ffb3520",
+      "src/ai_commerce/production_runtime/operator_cli.py": "b6fb5b18b71631fa1f55998378361583dcfb66e06fb0466fd5a8cd57fc33141d",
+      "src/ai_commerce/production_runtime/handoff.py": "f1924bf17672455ac4823ba0127b203a4dc35f568ba899ff8d772e1680bb4a8b",
+      "src/ai_commerce/production_runtime/metrics.py": "8204aa05fd4a29b1c009d8b3105cf7c74b503f403c1a70ba3a0bacd61a1b1f00",
+      "tests/test_b0_4_operator.py": "94901df4d4f93acb02ad2e127e9402f900dfc9d22355c33e08fa0295b417dceb",
+      "work_items/mt01-components/b0-4.json": "fc31740830c463fc350bc147b2b9fc58b94f6ede26e884db4f4a64ecff892280"
+    },
+    "material_unproven": [
+      "Required unchanged B0.3 primary subprocess receipt/re-export test and six other cases exceeded 60 seconds under twelve workers",
+      "B0.4 two actual native symlink/junction creation controls skipped because host denied creation",
+      "B0.3 two and A04 three native link controls also skipped; structural/lexical guard tests do not replace native creation proof",
+      "No power-loss/storage-controller durability, secure same-SID custody, live provider effect or authenticated Brain identity is established"
+    ],
+    "acceptance_assessment": {
+      "B0.3.attended-offline-worker-wait-brain": "HOLD_REQUIRED_GROUP_UNPROVEN",
+      "B0.4.attended-operator-evidence-metrics": "EXECUTED_POSITIVE_AND_NEGATIVE_EVIDENCE_WITH_NATIVE_LINK_CONTROLS_UNPROVEN__INDEPENDENT_BRAIN_PENDING"
+    },
+    "metadata_after_tests": "Only this WorkItem and engineering handoff report are finalized after tests. Four Python sources, test and owner manifest match final round2 and consumer test bytes. Exact final-tree aggregate PASS is NOT established; native initial consumer receipts remain dated observations. No candidate publication is authorized.",
+    "combined_dated_observations": {
+      "collected": 902,
+      "executed": 902,
+      "executed_non_skipped": 895,
+      "passed": 888,
+      "failed": 7,
+      "errors": 0,
+      "skipped": 7,
+      "result": "NOT_AN_AGGREGATE_PASS__DIFFERENT_RECEIPT_STAGES"
+    }
+  },
+  "restrictions": "No Git writes or candidate publication by executor; no PR/merge/dispatch, service installation, daemon, background product worker, live media/provider, authenticated ChatGPT identity, private MCP/CDP/Wake, customer data, HostOps effects, publishing, network spend or production credentials. No baseline source/test/schema/CI/registry/config edits.",
+  "consumers": [
+    "src/ai_commerce/production_runtime/attended_worker.py",
+    "src/ai_commerce/production_runtime/attended_cli.py",
+    "src/ai_commerce/production_runtime/receipt.py",
+    "src/ai_commerce/production_runtime/journal.py",
+    "src/ai_commerce/production_runtime/recovery.py",
+    "src/ai_commerce/production_runtime/contracts.py",
+    "src/ai_commerce/production_runtime/state_machine.py",
+    "src/ai_commerce/e2e/service.py"
+  ],
+  "mt01": {
+    "after_manifest_admission": "REGISTERED",
+    "independent_brain_acceptance": "PENDING",
+    "reasons": [],
+    "selection_valid": true,
+    "source_ingress_unknown_acs": [
+      "B0.4.attended-operator-evidence-metrics"
+    ],
+    "selected_groups": [
+      "a06",
+      "b0-1",
+      "b0-2",
+      "b0-3",
+      "b0-4"
+    ],
+    "reason_codes": [
+      "ONBOARD_CONSUMER_OWNER_CLOSURE"
+    ],
+    "fallback": false,
+    "forward_owner_groups": [
+      {
+        "group": "a02",
+        "paths": [
+          "src/ai_commerce/contracts/__init__.py",
+          "src/ai_commerce/contracts/schema.py",
+          "src/ai_commerce/providers/__init__.py",
+          "src/ai_commerce/providers/base.py"
+        ],
+        "tests": [
+          "tests/test_a02_contracts.py",
+          "tests/test_a02_mock_provider.py"
+        ]
+      },
+      {
+        "group": "a03",
+        "paths": [
+          "src/ai_commerce/creative/__init__.py",
+          "src/ai_commerce/creative/_validation.py",
+          "src/ai_commerce/creative/briefs.py",
+          "src/ai_commerce/creative/decisions.py",
+          "src/ai_commerce/creative/intent.py",
+          "src/ai_commerce/creative/live.py",
+          "src/ai_commerce/creative/models.py",
+          "src/ai_commerce/creative/reasoner.py",
+          "src/ai_commerce/creative/sidecars.py",
+          "src/ai_commerce/creative/store.py",
+          "src/ai_commerce/creative/v2.py"
+        ],
+        "tests": [
+          "tests/test_a03_creative.py",
+          "tests/test_a03_upgrade_v11.py"
+        ]
+      },
+      {
+        "group": "a04",
+        "paths": [
+          "src/ai_commerce/media/__init__.py",
+          "src/ai_commerce/media/base.py",
+          "src/ai_commerce/media/fake_generation.py",
+          "src/ai_commerce/media/files.py",
+          "src/ai_commerce/media/generation.py",
+          "src/ai_commerce/media/local.py",
+          "src/ai_commerce/media/provenance.py",
+          "src/ai_commerce/operations/__init__.py",
+          "src/ai_commerce/operations/errors.py",
+          "src/ai_commerce/operations/generation.py",
+          "src/ai_commerce/operations/manifest.py",
+          "src/ai_commerce/operations/registry.py",
+          "src/ai_commerce/operations/runner.py"
+        ],
+        "tests": [
+          "tests/test_a04_media_operations.py",
+          "tests/test_a04_upgrade_v11.py",
+          "tests/test_a03_a04_integration.py"
+        ]
+      },
+      {
+        "group": "a05",
+        "paths": [
+          "src/ai_commerce/bridge/__init__.py",
+          "src/ai_commerce/bridge/link.py",
+          "src/ai_commerce/bridge/render_plan.py",
+          "src/ai_commerce/bridge/store.py",
+          "src/ai_commerce/composition/__init__.py",
+          "src/ai_commerce/composition/_validation.py",
+          "src/ai_commerce/composition/authoring.py",
+          "src/ai_commerce/composition/compiler.py",
+          "src/ai_commerce/composition/models.py",
+          "src/ai_commerce/composition/sources.py",
+          "src/ai_commerce/composition/store.py",
+          "src/ai_commerce/render/__init__.py",
+          "src/ai_commerce/render/manifest.py",
+          "src/ai_commerce/render/models.py",
+          "src/ai_commerce/render/process.py",
+          "src/ai_commerce/render/renderer.py",
+          "src/ai_commerce/render/verify.py"
+        ],
+        "tests": [
+          "tests/test_a05_composition.py",
+          "tests/test_a05_render.py",
+          "tests/test_a05_integration.py",
+          "tests/test_creative_asset_link_v11.py"
+        ]
+      },
+      {
+        "group": "a06",
+        "paths": [
+          "src/ai_commerce/e2e/__init__.py",
+          "src/ai_commerce/e2e/service.py"
+        ],
+        "tests": [
+          "tests/test_a06_e01.py"
+        ]
+      },
+      {
+        "group": "cli",
+        "paths": [
+          "src/ai_commerce/__init__.py",
+          "src/ai_commerce/core/__init__.py",
+          "src/ai_commerce/core/provenance.py"
+        ],
+        "tests": [
+          "tests/test_cli.py",
+          "tests/test_isolation.py"
+        ]
+      }
+    ],
+    "manifest_admission_is_not_brain_acceptance": true
+  },
+  "environment": {
+    "platform": "Windows",
+    "python": "3.14.7",
+    "pytest": "8.4.2",
+    "pytest_xdist": "3.8.0",
+    "sqlite": "3.50.4",
+    "ffmpeg": "ffmpeg version 9.0.1-essentials_build-www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers",
+    "ffprobe": "ffprobe version 9.0.1-essentials_build-www.gyan.dev Copyright (c) 2007-2026 the FFmpeg developers",
+    "runner_class": "OBSERVED_ENVIRONMENT_SELF_HOSTED_NOT_INDEPENDENT_ATTESTATION"
+  },
+  "receipt_retention": "Sanitized counts, hashes and material properties only in this WorkItem. Generated local proof logs/observers are ignored under .local/b04-proof and are not a durable public artifact delivery. No private input path, raw prompt, media, customer record or credential is included.",
+  "scope_observation": {
+    "baseline_files_unchanged": 783,
+    "candidate_additions": 8,
+    "git_head_unchanged": "8d3ec319a10231b5603b2a435c83eb2f8b1c66d5",
+    "git_writes_performed": false,
+    "executor_candidate_publication": false
+  }
+}
