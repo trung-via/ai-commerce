@@ -2130,6 +2130,8 @@ def test_w1_android_public_signer_enrollment_exact_and_distinct_from_v2():
     import hashlib
 
     approved = ROOT / "config" / "hostops" / "w1-human-allowed-signers"
+    attrs = (ROOT / "config" / "hostops" / ".gitattributes").read_text("ascii")
+    assert "w1-human-allowed-signers -text -eol" in attrs.splitlines()
     actual = approved.read_bytes()
     assert hashlib.sha256(actual).hexdigest() == (
         "f7c41e41d3429750aa423665f41b07c7c4a7ddeb6a3c776eee940fcbf85d5e26"
