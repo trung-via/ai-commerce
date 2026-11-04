@@ -32,7 +32,28 @@ The root-check output includes source SHA and candidate Windows volume serial/fi
 
 ## Signing/enrollment prerequisite
 
-The operator must independently verify the allowed public signing key and `ssh-keygen.exe` hash, and keep the corresponding **private key outside the reach of any public Actions runner sharing the Windows SID**. The old HostOps V2 key is not automatically eligible for W1; W1 requires the dedicated principal `hostops-human` and the namespace `hostops-w1-create@ai-commerce`. Do not silently repurpose a same-SID private key.
+The operator must independently verify the allowed public signing key and `ssh-keygen.exe` hash, and keep the corresponding **private key outside the reach of any public Actions runner sharing the Windows SID**.
+
+### W1 Android public signer enrollment (source policy only)
+
+The user generated a dedicated Termux/OpenSSH Ed25519 key on a separate Android device. The **public** key from that device is registered (subject to merge) in `config/hostops/w1-human-allowed-signers`, with the single allowed principal `hostops-human` and label `ai-commerce-w1-human`. The distinct V2 public key remains untouched.
+
+User-observed and programmatically re-derived SSH public-key fingerprint:
+
+```text
+SHA256:idxqzTG8hI/g3CL72aj9zzI+jEvXElaEg+40HrGbS9w
+```
+
+Exact one-line W1 signer-policy file SHA256 (UTF-8 with LF):
+
+```text
+f7c41e41d3429750aa423665f41b07c7c4a7ddeb6a3c776eee940fcbf85d5e26
+```
+
+For the attended Windows command, the user may use the **absolute path** `C:\\TOOL\\ai-commerce\\config\\hostops\\w1-human-allowed-signers` for `--allowed-signers`, after a fresh clean merge checkout and independent comparison against the Android fingerprint. Pass the exact file hash above for `--signers-sha256` only after out-of-band verification. Record the locally observed `ssh-keygen.exe` SHA256 separately; do not invent or reuse a hash from CI. The Android **private** key and passphrase stay in Termux, never in GitHub, a Windows filesystem, ChatGPT, public CI, logs, or a shared Android storage directory. Do not start sshd or ssh-agent services for this workflow.
+
+A committed public signer is **not** evidence that the actual signer can produce a live signature, that the verifier is independently protected from same-SID public runner tampering, that the private Issue exists, or that any Windows native write was executed. Keep W1 remote transport disabled and require the per-effect Human SSHSIG and independent root/Issue/ledger checks before any effect.
+ The old HostOps V2 key is not automatically eligible for W1; W1 requires the dedicated principal `hostops-human` and the namespace `hostops-w1-create@ai-commerce`. Do not silently repurpose a same-SID private key.
 
 The signer must first inspect and sign canonical JSON consisting of exactly the W1 unsigned fields:
 
