@@ -26,6 +26,10 @@ CONTROL_TESTS = {
     ".github/workflows/ef02-tests.yml": {"tests/test_minimum_test.py", "tests/test_pr_merge_gate.py"},
     ".github/workflows/ef02-batch.yml": {"tests/test_ef02.py"},
     "src/ai_commerce/engineering/impact_v21.py": {"tests/test_mt01_v21.py"},
+    # Reviewed exact operator-attended D5 script; no generic .ps1 admission.
+    "scripts/AI-Commerce-D5-Attended-CDP.ps1": {
+        "tests/test_ef02_d5_chrome_acquisition.py", "tests/test_minimum_test.py",
+        "tests/test_mt01_v21.py", "tests/test_pr_merge_gate.py"},
     "src/ai_commerce/engineering/minimum_test.py": {"tests/test_minimum_test.py"},
     "src/ai_commerce/remote/validation.py": {"tests/test_ef02.py"},
     ".github/ef02/verify-profiles.json": {"tests/test_ef02_mt01_registry.py"},
