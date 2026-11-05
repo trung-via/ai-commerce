@@ -72,7 +72,14 @@ def test_reviewed_map_contains_exact_real_paths_and_all_current_python_test_fami
 ])
 def test_real_known_component_uses_exact_registered_companion(real_tree, monkeypatch, path, expected):
     selected = real_plan(real_tree, monkeypatch, path)
-    assert not selected["fallback"] and selected["selected_groups"] == [expected]
+    assert not selected["fallback"] and selected["selected_groups"] == [expected], (
+        "EXACT_COMPANION_REVIEW_DIAGNOSTIC "
+        + repr({"path": path, "reasons": selected.get("reason_codes"),
+                "unknown_tests": selected.get("unknown_tests"),
+                "unknown_consumers": selected.get("unknown_consumers"),
+                "unsupported_paths": selected.get("unsupported_paths"),
+                "selected": selected.get("selected_groups")})
+    )
     entry = selected["groups"][0]
     assert entry["binding"]["argv"] == real_tree.registry["mt01-" + expected + "-tests"]
     assert entry["selected_profile"] == "mt01-" + expected + "-tests"
