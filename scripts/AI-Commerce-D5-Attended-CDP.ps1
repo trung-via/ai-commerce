@@ -202,7 +202,7 @@ try {
             $data.cdp_endpoint = 'http://127.0.0.1:9333'
             $stagedText = $data | ConvertTo-Json -Depth 4
             $beforeHash = (Get-FileHash -LiteralPath $ChromeConfig -Algorithm SHA256).Hash
-            $dir = Split-Path -LiteralPath $ChromeConfig -Parent
+            $dir = [IO.Path]::GetDirectoryName($ChromeConfig)
             $nonce = [guid]::NewGuid().ToString('N')
             $stage = Join-Path $dir ('.ai-commerce-9333-' + $nonce + '.stage')
             $backup = Join-Path $dir ('.ai-commerce-9333-' + $nonce + '.backup')
