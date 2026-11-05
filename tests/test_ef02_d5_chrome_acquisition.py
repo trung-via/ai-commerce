@@ -1,6 +1,7 @@
 """D5 Chrome Acquisition: synthetic and read-only checks; never launch Chrome."""
 from pathlib import Path
 import json
+import re
 import os
 import subprocess
 
@@ -376,6 +377,11 @@ def test_attended_d5_repair_is_explicit_local_fixed_port_write_only():
         "REPAIR_POST_WRITE_UNKNOWN_RECONCILE",
     ):
         assert guard in repair
+    assert "$preflightExit = $LASTEXITCODE" in repair
+    assert "Get-Repair-Preflight-Code -Lines $preflight" in repair
+    assert "Stop-Bounded ('REPAIR_PREFLIGHT_' + $cause)" in repair
+    assert repair.index("Stop-Bounded ('REPAIR_PREFLIGHT_' + $cause)") < repair.index(
+        "Read-Host 'Type REPAIR-CONFIG-9333")
     assert "REPAIR_REPARSE_DENIED" in repair
     assert "REPAIR_REPARSE_CHECK_UNAVAILABLE" in repair
     assert "[IO.FileAttributes]::ReparsePoint" in repair
@@ -393,6 +399,66 @@ def test_attended_d5_repair_is_explicit_local_fixed_port_write_only():
                       "wake_adapter", "subprocess.Popen", "LaunchChrome",
                       "Invoke-Expression", "iex ", "Move-Item -Force"):
         assert forbidden not in repair
+
+
+def test_repair_preflight_diagnostic_contract_has_exact_source_owned_code_catalog():
+    script = (Path(__file__).resolve().parents[1] /
+              "scripts" / "AI-Commerce-D5-Attended-CDP.ps1").read_text(encoding="utf-8")
+    acquisition = (Path(__file__).resolve().parents[1] /
+                   "src" / "ai_commerce" / "remote" / "chrome_acquisition.py").read_text(encoding="utf-8")
+    helper = script.split("function Get-Repair-Preflight-Code", 1)[1].split(
+        "if ($env:GITHUB_ACTIONS", 1)[0]
+    allowed = set(re.findall(r"'([A-Z0-9_]{3,90})'", helper))
+    defined = set(re.findall(r'AcquisitionBlocked\("([A-Z0-9_]+)"\)', acquisition))
+    assert allowed == defined and len(allowed) >= 25
+    assert "CHROME_ACQUISITION_BLOCKED: ([A-Z0-9_]{1,90})$" in helper
+    assert "$seen.Count -ne 1" in helper
+    assert "Write-Output $value" not in helper
+    assert "Write-Host $value" not in helper
+    assert "Write-Error $value" not in helper
+    assert "Invoke-Expression" not in helper
+    assert "Out-File" not in helper
+    assert "D5_WAKE_SENT=False" in script
+    assert "[IO.File]::Replace(" in script
+
+
+def test_repair_preflight_diagnostic_decoder_native_powershell(tmp_path):
+    """Execute only the isolated read-only enum filter on actual Windows PS."""
+    if os.name != "nt":
+        pytest.skip("Windows PowerShell native-only filter verification")
+    from shutil import which
+    shell = which("powershell.exe")
+    assert shell, "Native Windows PowerShell 5.1 is required"
+    script = (Path(__file__).resolve().parents[1] /
+              "scripts" / "AI-Commerce-D5-Attended-CDP.ps1").read_text(encoding="utf-8")
+    isolated = "function Get-Repair-Preflight-Code" + script.split(
+        "function Get-Repair-Preflight-Code", 1)[1].split("if ($env:GITHUB_ACTIONS", 1)[0]
+    synthetic = r"""
+$ErrorActionPreference = 'Stop'
+$cases = @(
+    @{ Rows=@('CHROME_ACQUISITION_BLOCKED: OPERATOR_OWNERSHIP_UNPROVEN'); Expected='OPERATOR_OWNERSHIP_UNPROVEN' },
+    @{ Rows=@('python.exe : CHROME_ACQUISITION_BLOCKED: PROFILE_ALREADY_ACTIVE_NO_CDP'); Expected='PROFILE_ALREADY_ACTIVE_NO_CDP' },
+    @{ Rows=@('CHROME_ACQUISITION_BLOCKED: WINDOWS_INTERACTIVE_REQUIRED'); Expected='WINDOWS_INTERACTIVE_REQUIRED' },
+    @{ Rows=@('CHROME_ACQUISITION_BLOCKED: UNTRUSTED_SECRET_CODE'); Expected='UNVERIFIED' },
+    @{ Rows=@('PRIVATE SECRET PATH=foo', 'Traceback (most recent call last)'); Expected='UNVERIFIED' },
+    @{ Rows=@('CHROME_ACQUISITION_BLOCKED: CONFIG_INVALID', 'CHROME_ACQUISITION_BLOCKED: PROFILE_LOCKED'); Expected='UNVERIFIED' },
+    @{ Rows=@('CHROME_ACQUISITION_BLOCKED: CONFIG_INVALID', 'PRIVATE_SECRET_123'); Expected='CONFIG_INVALID' }
+)
+foreach ($case in $cases) {
+    $actual = Get-Repair-Preflight-Code -Lines $case.Rows
+    if ($actual -cne $case.Expected) { throw 'FILTER_MISMATCH' }
+}
+Write-Output 'D5_REPAIR_PREFLIGHT_ENUM_FILTER_PASS'
+"""
+    standalone = tmp_path / "d5-enum-filter.ps1"
+    standalone.write_text(isolated + "\n" + synthetic, encoding="utf-8")
+    result = subprocess.run(
+        [shell, "-NoProfile", "-NonInteractive", "-File", str(standalone)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        check=False, timeout=25)
+    assert result.returncode == 0, result.stderr[-1300:]
+    assert result.stdout.strip() == "D5_REPAIR_PREFLIGHT_ENUM_FILTER_PASS"
+    assert "PRIVATE_SECRET_123" not in result.stdout
 
 
 def test_attended_d5_cdp_wrapper_powershell_parser_on_hosted_windows():
