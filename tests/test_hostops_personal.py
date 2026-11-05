@@ -89,7 +89,7 @@ class PersonalHostOpsContractTests(unittest.TestCase):
 
     def test_standing_read_protected_workflow_catalog_matches_python_contract(self):
         workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
-        match = re.search(r"const standingCatalog = (\\[[^\\n]+\\]);", workflow)
+        match = re.search(r"const standingCatalog = (\[[^\n]+\]);", workflow)
         self.assertIsNotNone(match, "Missing independently reviewed, exact ordered sanitizer table")
         self.assertEqual(json.loads(match.group(1)),
                          [[category, list(codes)]
@@ -118,8 +118,8 @@ class PersonalHostOpsContractTests(unittest.TestCase):
             self.skipTest("Node CLI unavailable: hosted Windows JS sanitizer verification required")
         workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
         self.assertEqual(workflow.count("          script: |"), 1)
-        script = "\\n".join(line[12:] if line.startswith("            ") else line
-                           for line in workflow.split("          script: |\\n", 1)[1].splitlines())
+        script = "\n".join(line[12:] if line.startswith("            ") else line
+                           for line in workflow.split("          script: |\n", 1)[1].splitlines())
         original = {**self._standing_snapshot(),
                     "issue_number": 17,
                     "approval_channel": "CHATGPT_TO_AI_COMMERCE_ISSUE",
@@ -166,11 +166,11 @@ const script = fs.readFileSync(process.argv[2],'utf8');
     const comments = [];
     const context = {repo:{owner:'trung-via',repo:'ai-commerce'},issue:{number:17},sha:'f'.repeat(40)};
     const github = {rest:{issues:{createComment:async args => { comments.push(args.body); }}}};
-    await vm.runInNewContext('(async () => {\\n'+script+'\\n})()',
+    await vm.runInNewContext('(async () => {\n'+script+'\n})()',
       {require,process,context,github,Buffer});
-    if (comments.length !== 1 || !comments[0].startsWith('AI_COMMERCE_PERSONAL_HOSTOPS_RESULT_V1\\n'))
+    if (comments.length !== 1 || !comments[0].startsWith('AI_COMMERCE_PERSONAL_HOSTOPS_RESULT_V1\n'))
       throw new Error(item.name+': missing result');
-    const result = JSON.parse(comments[0].split('\\n').slice(1).join('\\n'));
+    const result = JSON.parse(comments[0].split('\n').slice(1).join('\n'));
     if (result.status !== item.status ||
         (item.code && result.code !== item.code))
       throw new Error(item.name+': unexpected '+JSON.stringify(result));
