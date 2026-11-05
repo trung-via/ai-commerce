@@ -232,3 +232,31 @@ Ngày 2026-11-04 đã đọc nguồn chính thức để kiểm lựa chọn, kh
 | Ngày 61–90 | B2 measurements → B3 next Brain brief; B4 gap memo nếu Human chọn | Không data thì NO_DATA, không economic proof thì no commercial outcome claim |
 
 Nếu nhóm chỉ có một engineer 6h/ngày, tổng effort phase không được coi là lịch song song miễn phí. Provider access/Brain attention/private boundary có thể là critical lead time. Human có thể đổi thứ tự hoặc dừng; không tự diễn giải hết 90 ngày thành quyền phát hành/chi tiền.
+
+## 12. B-QUALITY-001 — CIMQ + CRI R1–R8: Human-adopted PA2 planning extension (2026-11-05)
+
+**Decision:** [Human Issue #373](https://github.com/trung-via/ai-commerce/issues/373) chọn bổ sung **Creative Intelligence, Realism & Media Quality (CIMQ + CRI)** vào PA2/PULSE hiện tại. Đây là **kiến trúc và kế hoạch được Human chọn**, không phải chứng cứ BQ-01..06 đã chạy, không phải Roadmap C và không ủy quyền media provider, publish, spend hoặc private credentials. EF01/EF02 tiếp tục là software Engineering, không biến thành media job scheduler. Brain vẫn là đúng ChatGPT chat hiện tại; PULSE vẫn là một runtime độc lập với năm semantic owner của A-series là nguồn truth.
+
+**Tài liệu versioned:**
+- [Q1–Q6 và Q3 CRI R1–R8, K1–K6 tổng hợp](../research/B_QUALITY_001_CIMQ_CRI_SYNTHESIS_V1_0.md)
+- [ADR B002 — ranh giới Brain, PULSE, Q1–Q6, quyền và sidecar](../architecture/ADR_B002_CREATIVE_INTELLIGENCE_QUALITY.md)
+- [Work Tree B-QUALITY-001 v1.0 (MD)](WORK_TREE_B_QUALITY_001_V1_0.md) / [bản JSON tương ứng](WORK_TREE_B_QUALITY_001_V1_0.json)
+
+**Giữ nguyên lịch sử:** [Work Tree v1.1](WORK_TREE_DETAILED_V1_1.md) và [63 WBS ID gốc](WORK_TREE_V1_1.json) không sửa và không bị đánh số lại. Các BQ ID dưới đây là **bảy planning package riêng**, không tự trở thành công việc đã implement.
+
+| BQ ID | Nội dung bổ sung có điều kiện | Priority | Trạng thái |
+|---|---|---|---|
+| **BQ-00** | Owner/consumer, Q1–Q6, R1–R8, K1–K6, sidecar/ref/digest migration decision | P0 | AUTHORIZED_PLANNING_ONLY |
+| **BQ-01** | Q1 brief + Q3 CRI causal shot/human performance/Vietnamese audio, capability compiler mock | P0 | IMPLEMENTATION_NOT_STARTED |
+| **BQ-02** | Q2 preflight adversarial critic + Q4 actual-asset timestamped multimodal inspection | P0 | IMPLEMENTATION_NOT_STARTED |
+| **BQ-03** | R6 blind/pairwise Human perceptual calibration, bias/disagreement | P1 | IMPLEMENTATION_NOT_STARTED |
+| **BQ-04** | Q5/R7 scoped media repair + preservation + Q4 reinspection | P1 | IMPLEMENTATION_NOT_STARTED |
+| **BQ-05** | PULSE Studio media integration; only after B0-S independent trust and separate provider/rights/effect grants | P1 | IMPLEMENTATION_NOT_STARTED |
+| **BQ-06** | Q6 evidence-linked behavioral learning → next Brain brief proposal using B2 source/window/asset metrics | P1 | IMPLEMENTATION_NOT_STARTED |
+
+**Mapping PA2:** B0 = offline closed contracts/source refs; B0-S = private trust gate trước mọi external effect; B1.1 = Q1/Q3 briefs và realism; B1.2 = ModelCapabilityProfile + model-neutral compiler mock; B1.3 = Vietnamese voice/acoustics; B1.4 = Product Intelligence/rights khi có sản phẩm (product_ref=null vẫn hợp lệ); B1.5 = Q2/Q4/Q5 critic/inspector/repair, R6 human calibration; B2 = observed media/source/window/metric refs; B3 = Q6 evidence learning và Brain review; B4 = affiliate/economics/own-brand tùy chọn, không gate content-only.
+
+**Trust & schema:** Q2 ≠ Q4; Q3 ≠ Q5; Q1 ≠ Q6. Các schema đóng CreativeDirective.v1, BrainDecision.v1, ProductJourneyReceipt.v1 giữ nguyên. Sidecar ref/digest hoặc schema v2 chỉ là phương án phải có thiết kế compatibility/migration và independent receiver verification; không được thêm quyền qua metadata chưa được chứng thực. Fiction, meme, animation, silence, content-only đều là sáng tạo hợp lệ. Không suy từ quality score thành virality, ROI, Human publish approval hay provider rights.
+
+**Triển khai theo thứ tự, chưa dispatch:** BQ-00 (planning) → BQ-01/02 offline tests → BQ-03 tùy nhu cầu calibration → BQ-04 repair → BQ-05 chỉ sau B0-S grants + actual receipt; BQ-06 dùng B2 evidence mới có thể kết luận có cơ sở. BQ source implementation cần WorkItem, positive/negative AC, review source/consumer và PR CI Windows riêng. Không có BQ runtime, media benchmark, thương mại hoặc external outcome nào được chứng minh chỉ bởi cập nhật Roadmap này.
+
