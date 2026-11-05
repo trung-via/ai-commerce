@@ -228,12 +228,15 @@ def select_impact(
         if (root / "tests").is_dir() else set()
     python = _python_paths(root)
     reverse, uncertain = _reverse_import_graph(root, python)
-    affected = _consumers(changed, reverse)
-    group_tests = {t for g in groups for t in g.tests}
-    registered = set(group_tests) | LEGACY_UNMAPPED
     extra_controls = dict(CONTROL_TESTS)
     if additional_control_tests:
         extra_controls.update(additional_control_tests)
+    # Control files have finite reviewed test closure; do not fan out through
+    # transitive Python imports of the verification infrastructure itself.
+    component_changed = tuple(p for p in changed if p not in extra_controls)
+    affected = _consumers(component_changed, reverse)
+    group_tests = {t for g in groups for t in g.tests}
+    registered = set(group_tests) | LEGACY_UNMAPPED
     selected_tests: set[str] = set()
     selected_groups: set[str] = set()
     missing: set[str] = set()

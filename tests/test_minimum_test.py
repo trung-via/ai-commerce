@@ -44,6 +44,7 @@ def real_plan(real_tree, monkeypatch, path, *, registry=None, acs=(), aggregate=
     return mt.select_plan(repo=ROOT, base_sha="6601881e7b498ae139fbe8a8f04c195905b15ed3",
         base_files=real_tree.files, candidate_files=real_tree.files, changed_paths=[path], required_acs=acs,
         fallback_argv=real_tree.registry["project-tests"], registered_only=True,
+        groups=real_tree.groups,
         registered_profiles=real_tree.registry if registry is None else registry, aggregate_sources=aggregate, env={})
 
 
@@ -72,11 +73,19 @@ def test_reviewed_map_contains_exact_real_paths_and_all_current_python_test_fami
 ])
 def test_real_known_component_uses_exact_registered_companion(real_tree, monkeypatch, path, expected):
     selected = real_plan(real_tree, monkeypatch, path)
-    assert not selected["fallback"] and selected["selected_groups"] == [expected]
-    entry = selected["groups"][0]
-    assert entry["binding"]["argv"] == real_tree.registry["mt01-" + expected + "-tests"]
-    assert entry["selected_profile"] == "mt01-" + expected + "-tests"
-    assert entry["binding"]["argv"][-2:] == ["-n", "12"]
+    assert not selected["fallback"], selected["reason_codes"]
+    groups = set(selected["selected_groups"])
+    assert expected in groups
+    # Newly committed declarative owners extend the true downstream closure;
+    # every extra group must come from an independently validated base manifest.
+    assert groups - {expected} <= real_tree.persisted_names
+    if path == "src/ai_commerce/remote/chrome_acquisition.py":
+        assert "hostops-personal" in groups  # real reverse consumer of D5 Chrome
+    for entry in selected["groups"]:
+        profile = "mt01-" + entry["group"] + "-tests"
+        assert entry["selected_profile"] == profile
+        assert entry["binding"]["argv"] == real_tree.registry[profile]
+        assert entry["binding"]["argv"][-2:] == ["-n", "12"]
     assert not selected["narrow_execution_observed"]  # Planning is not an execution saving.
 
 
@@ -191,14 +200,18 @@ def test_component_local_m02_requires_profile_that_actually_collects_it(real_tre
             # A source graph that grew with reviewed owner manifests may have
             # unresolved import/consumer edges. Do not fake narrow coverage or
             # execute the registered broad profile that omits local M02 tests.
-            assert "IMPORT_OR_CONSUMER_MAP_INCOMPLETE" in plan["reason_codes"], {
-                "reasons": plan["reason_codes"],
-                "unknown_tests": plan.get("unknown_tests"),
-                "unknown_consumers": plan.get("unknown_consumers"),
-            }
-            assert any(plan.get(k) for k in ("unknown_tests", "unknown_consumers")) or (
-                "IMPORT_OR_CONSUMER_MAP_INCOMPLETE" in plan["reason_codes"]
-            )
+            # Either incomplete imports OR a missing registered M02 companion
+            # must HOLD. The latter is more precise once persisted owners are
+            # loaded and the import graph is complete.
+            reasons = set(plan["reason_codes"])
+            assert reasons & {
+                "IMPORT_OR_CONSUMER_MAP_INCOMPLETE",
+                "REGISTERED_ARGV_ONLY_COMPANION_REGISTRATION_REQUIRED",
+            }, plan
+            if "IMPORT_OR_CONSUMER_MAP_INCOMPLETE" in reasons:
+                assert any(plan.get(k) for k in ("unknown_tests", "unknown_consumers")) or (
+                    "IMPORT_OR_CONSUMER_MAP_INCOMPLETE" in reasons
+                )
             assert len(plan["groups"]) == 1
             assert plan["groups"][0]["state"] == "UNPROVEN"
             assert plan["groups"][0]["execute"] is False
@@ -1552,9 +1565,16 @@ def test_hostops_v3_script_and_schema_change_select_registered_group(real_tree, 
     for path in ("scripts/HostOps-V3-TokenInventory.ps1",
                  "contracts/hostops-v3.request.schema.json"):
         selected = real_plan(real_tree, monkeypatch, path)
-        assert selected["selected_groups"] == ["hostops-v3"]
         assert not selected["fallback"]
-        assert selected["groups"][0]["selected_profile"] == "mt01-hostops-v3-tests"
+        owners = set(selected["selected_groups"])
+        assert "hostops-v3" in owners
+        assert owners - {"hostops-v3"} <= real_tree.persisted_names
+        assert any(entry["selected_profile"] == "mt01-hostops-v3-tests"
+                   for entry in selected["groups"])
+        for entry in selected["groups"]:
+            profile = "mt01-" + entry["group"] + "-tests"
+            assert entry["selected_profile"] == profile
+            assert entry["binding"]["argv"] == real_tree.registry[profile]
 
 
 @pytest.mark.parametrize("changed", [
@@ -1565,9 +1585,12 @@ def test_hostops_v4_plan_requires_both_hostops_and_mt01_owner_tests(real_tree, m
     """#288: protected-main merge-gate control closure for both PLAN-only inputs."""
     selected = real_plan(real_tree, monkeypatch, changed)
     assert not selected["fallback"]
-    assert set(selected["selected_groups"]) == {"hostops-v3", "mt01"}
+    required = {"hostops-v3", "mt01"}
+    actual = set(selected["selected_groups"])
+    assert required <= actual
+    assert actual - required <= real_tree.persisted_names
     bindings = {entry["group"]: entry for entry in selected["groups"]}
-    for group in ("hostops-v3", "mt01"):
+    for group in actual:
         expected = real_tree.registry["mt01-" + group + "-tests"]
         assert bindings[group]["selected_profile"] == "mt01-" + group + "-tests"
         assert bindings[group]["binding"]["argv"] == expected
