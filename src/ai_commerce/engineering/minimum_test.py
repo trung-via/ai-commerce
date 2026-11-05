@@ -335,8 +335,7 @@ def approved_groups() -> tuple[TestGroup, ...]:
             "test_ef02_d3_signed_origin_consent", "test_ef02_d3_two_grant_delivery", "test_ef02_d5_chrome_acquisition",
             "test_ef02_d5_local_handoff", "test_ef02_d5_local_wake_entry", "test_ef02_d5_local_wake_trigger", "test_ef02_d5_run_registration",
             "test_ef02_d5_wake_readiness_flow", "test_ef02_d5_wake_readiness_cache", "test_ef02_d5_wake_readiness_bootstrap")),
-                  ("EF02.wake-boundaries",), sources("remote", "_private_state cdp_doorbell chrome_acquisition completion_event conversation_binding github_artifact_authority local_completion_handoff local_run_registration local_wake_entry local_wake_trigger plugin_selection_probe plugin_selection_probe_cli plugin_turn_handoff plugin_turn_store plugin_turn_stage_only plugin_turn_send_once plugin_turn_cli plugin_turn_evidence wake_control_center signed_origin_consent trusted_origin wake_adapter wake_dual_plugin_preview wake_readiness_flow wake_readiness_cache wake_readiness_bootstrap"),
-                  contracts=("scripts/AI-Commerce-D5-Attended-CDP.ps1",)),
+                  ("EF02.wake-boundaries",), sources("remote", "_private_state cdp_doorbell chrome_acquisition completion_event conversation_binding github_artifact_authority local_completion_handoff local_run_registration local_wake_entry local_wake_trigger plugin_selection_probe plugin_selection_probe_cli plugin_turn_handoff plugin_turn_store plugin_turn_stage_only plugin_turn_send_once plugin_turn_cli plugin_turn_evidence wake_control_center signed_origin_consent trusted_origin wake_adapter wake_dual_plugin_preview wake_readiness_flow wake_readiness_cache wake_readiness_bootstrap")),
         # Reviewed, source-only three-runner topology; actual installation is
         # a separate Human-attended Windows admin action.
         TestGroup("three-runner-topology",
