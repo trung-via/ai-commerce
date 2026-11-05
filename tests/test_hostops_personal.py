@@ -234,11 +234,98 @@ const script = fs.readFileSync(process.argv[2],'utf8');
             with self.subTest(row=row), self.assertRaises(hostops.Denied):
                 hostops._validate_standing_snapshot({**base, "diagnostics": [row, *base["diagnostics"][1:]]})
 
+    def test_fixed_private_metadata_without_content_or_manifest_following(self):
+        # No manifest bytes are parsed and its chrome_config field is never
+        # followed: the three reviewed literal Chrome config names are the
+        # only candidates. No raw names/path/contents enter the public result.
+        with tempfile.TemporaryDirectory() as temp:
+            local = Path(temp)
+            root = local / "AI-Commerce"
+            root.mkdir()
+            with patch.dict(hostops.os.environ, {"LOCALAPPDATA": str(local)}):
+                result = hostops._private_d5_metadata_codes()
+                self.assertEqual(result["chrome_config"], "KNOWN_CANDIDATES_ABSENT")
+                self.assertEqual(result["chrome_profile"], "UNVERIFIED")
+                self.assertEqual(result["chrome_markers"], "UNVERIFIED")
+                self.assertEqual(result["d5_metadata"], "MANIFEST_ABSENT")
+                (root / "wake-readiness.json").write_text(
+                    '{"chrome_config":"C:/DO-NOT-FOLLOW/SECRET","private":"SECRET_TOKEN"}',
+                    encoding="utf-8")
+                with patch.object(hostops.Path, "read_text",
+                                  side_effect=AssertionError("private manifest bytes read")):
+                    result = hostops._private_d5_metadata_codes()
+                self.assertEqual(result["d5_metadata"], "MANIFEST_PRESENT")
+                self.assertEqual(result["chrome_config"], "KNOWN_CANDIDATES_ABSENT")
+                self.assertNotIn("SECRET", json.dumps(result))
+
+    def test_private_d5_config_profile_markers_locally_reduced_to_enums(self):
+        # Existing real Chrome validator is used, but neither the input config
+        # nor the manifest, profile paths, and lock-marker bytes are published.
+        with tempfile.TemporaryDirectory() as temp:
+            local = Path(temp) / "Local"
+            root = local / "AI-Commerce"
+            config = root / "Chrome-Acquisition" / "config.json"
+            config.parent.mkdir(parents=True)
+            user_data = root / "Chrome-Doorbell"
+            profile = user_data / "Default"
+            profile.mkdir(parents=True)
+            chrome = Path(temp) / "chrome.exe"
+            chrome.write_bytes(b"fixture executable, not a signed Chrome proof")
+            record = {
+                "version": 1, "executable": str(chrome),
+                "user_data_dir": str(user_data), "profile_directory": "Default",
+                "cdp_endpoint": "http://127.0.0.1:9333",
+                "allow_launch": False, "exclusive_user_data": True,
+            }
+            with patch.dict(hostops.os.environ, {"LOCALAPPDATA": str(local)}):
+                config.write_text(json.dumps(record), encoding="utf-8")
+                result = hostops._private_d5_metadata_codes()
+                self.assertEqual(result["chrome_config"], "KNOWN_CONFIG_EXACT_9333")
+                self.assertEqual(result["chrome_profile"], "DEDICATED_DIR_PRESENT")
+                self.assertEqual(result["chrome_markers"], "LOCK_MARKERS_ABSENT")
+                self.assertEqual(result["d5_metadata"], "MANIFEST_ABSENT")
+                self.assertNotIn(str(local), json.dumps(result))
+                (user_data / "SingletonLock").write_text("SECRET_MARKER_CONTENT", encoding="utf-8")
+                result = hostops._private_d5_metadata_codes()
+                self.assertEqual(result["chrome_markers"], "LOCK_MARKER_PRESENT")
+                self.assertNotIn("SECRET_MARKER_CONTENT", json.dumps(result))
+                record["cdp_endpoint"] = "http://127.0.0.1:9222"
+                config.write_text(json.dumps(record), encoding="utf-8")
+                self.assertEqual(hostops._private_d5_metadata_codes()["chrome_config"],
+                                 "KNOWN_CONFIG_OTHER_PORT")
+                (root / "chrome.json").write_text(json.dumps(record), encoding="utf-8")
+                result = hostops._private_d5_metadata_codes()
+                self.assertEqual(result["chrome_config"], "KNOWN_CANDIDATES_AMBIGUOUS")
+                self.assertEqual(result["chrome_profile"], "UNVERIFIED")
+                (root / "chrome.json").unlink()
+                config.write_text('{"private_token":"VERY_SECRET"}', encoding="utf-8")
+                result = hostops._private_d5_metadata_codes()
+                self.assertEqual(result["chrome_config"], "KNOWN_CONFIG_NOT_VERIFIED")
+                self.assertNotIn("VERY_SECRET", json.dumps(result))
+
+    def test_private_metadata_missing_root_and_nonexistent_reparse_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            local = Path(temp) / "Missing"
+            with patch.dict(hostops.os.environ, {"LOCALAPPDATA": str(local)}):
+                result = hostops._private_d5_metadata_codes()
+                self.assertEqual(result["chrome_config"], "KNOWN_CANDIDATES_ABSENT")
+                self.assertEqual(result["d5_metadata"], "MANIFEST_ABSENT")
+            with patch.dict(hostops.os.environ, {"LOCALAPPDATA": "relative-do-not-accept"}):
+                result = hostops._private_d5_metadata_codes()
+                self.assertEqual(result["chrome_config"], "UNAVAILABLE")
+            self.assertEqual(hostops._fixed_private_metadata_kind(local / "not-found.json"),
+                             "ABSENT")
+
     def test_standing_read_internal_snapshot_never_reads_private_files_or_mutates(self):
         cdp = {"listener_count": 1, "loopback_count": 1, "unexpected_binding_count": 0,
                "chrome_owned_loopback_count": 1, "same_session_chrome_count": 1, "devtools_protocol_ok": True}
         runners = {"runners": [{"task_state": "Running", "listener_process_count": count} for count in (0, 1, 1)]}
-        with patch.object(hostops.os, "name", "nt"), patch.object(hostops, "_cdp_9333_status", return_value=cdp), patch.object(
+        with patch.object(hostops.os, "name", "nt"), patch.object(hostops, "_private_d5_metadata_codes",
+            return_value={"chrome_profile": "DEDICATED_DIR_PRESENT",
+                          "chrome_config": "KNOWN_CONFIG_EXACT_9333",
+                          "chrome_markers": "LOCK_MARKERS_ABSENT",
+                          "d5_metadata": "MANIFEST_PRESENT"}), patch.object(
+            hostops, "_cdp_9333_status", return_value=cdp), patch.object(
             hostops, "_runner_runtime_inventory", return_value=runners
         ), patch.object(hostops, "_git", side_effect=["a" * 40, " M private-filename\n"]) as git, patch.object(
             hostops.Path, "read_bytes", side_effect=AssertionError("no private bytes")
@@ -252,8 +339,10 @@ const script = fs.readFileSync(process.argv[2],'utf8');
         self.assertEqual(codes["ef02_02_listener"], "PRESENT")
         self.assertEqual(codes["cdp_protocol"], "RESPONDING")
         self.assertEqual(codes["repo_git"], "TRACKED_CHANGES")
-        for name in ("chrome_profile", "chrome_config", "chrome_markers", "d5_metadata"):
-            self.assertEqual(codes[name], "PRIVATE_READ_CHANNEL_REQUIRED")
+        self.assertEqual(codes["chrome_profile"], "DEDICATED_DIR_PRESENT")
+        self.assertEqual(codes["chrome_config"], "KNOWN_CONFIG_EXACT_9333")
+        self.assertEqual(codes["chrome_markers"], "LOCK_MARKERS_ABSENT")
+        self.assertEqual(codes["d5_metadata"], "MANIFEST_PRESENT")
         self.assertNotIn("private", json.dumps(result))
         self.assertEqual(git.call_args_list[0].args, ("rev-parse", "HEAD"))
         self.assertEqual(git.call_args_list[1].args, ("status", "--porcelain=v1", "--untracked-files=no"))
@@ -262,7 +351,8 @@ const script = fs.readFileSync(process.argv[2],'utf8');
 
     def test_standing_read_probe_errors_stay_enum_unavailable(self):
         with patch.object(hostops.os, "name", "nt"), patch.object(
-            hostops, "_cdp_9333_status", side_effect=hostops.Denied("private exception")
+            hostops, "_private_d5_metadata_codes", side_effect=ValueError("private error")
+        ), patch.object(hostops, "_cdp_9333_status", side_effect=hostops.Denied("private exception")
         ), patch.object(hostops, "_runner_runtime_inventory", side_effect=OSError("private path")), patch.object(
             hostops, "_git", side_effect=hostops.Denied("private output")
         ):
@@ -283,7 +373,12 @@ const script = fs.readFileSync(process.argv[2],'utf8');
         for version, expected in ((('3', '9', '9'), 'UNSUPPORTED'), (('3', '14', '0'), 'SUPPORTED')):
             with self.subTest(version=version), patch.object(hostops.os, "name", "nt"), patch.object(
                 hostops.platform, "python_version_tuple", return_value=version
-            ), patch.object(hostops, "_cdp_9333_status", side_effect=hostops.Denied("unavailable")), patch.object(
+            ), patch.object(hostops, "_private_d5_metadata_codes",
+                return_value={"chrome_profile": "UNVERIFIED",
+                              "chrome_config": "UNAVAILABLE",
+                              "chrome_markers": "UNVERIFIED",
+                              "d5_metadata": "UNAVAILABLE"}), patch.object(
+                hostops, "_cdp_9333_status", side_effect=hostops.Denied("unavailable")), patch.object(
                 hostops, "_runner_runtime_inventory", side_effect=hostops.Denied("unavailable")
             ), patch.object(hostops, "_git", side_effect=hostops.Denied("unavailable")):
                 rows = hostops._standing_read_snapshot()["diagnostics"]
