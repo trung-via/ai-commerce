@@ -72,18 +72,130 @@ class PersonalHostOpsContractTests(unittest.TestCase):
             with self.subTest(params=params), self.assertRaisesRegex(hostops.Denied, "INVALID_PARAMETERS"):
                 hostops.parse_event(event("read", "standing_read_diagnostics", params), "read")
 
-    def test_standing_read_public_gap_prevents_collection_and_empty_success(self):
+    def test_standing_read_uses_independently_approved_public_contract(self):
         request = hostops.parse_event(event("read", "standing_read_diagnostics", {}), "read")
-        with patch.object(hostops, "_standing_read_snapshot") as collect:
-            with self.assertRaisesRegex(hostops.Denied, "PUBLIC_TRANSPORT_GAP"):
-                hostops.perform(request)
-            collect.assert_not_called()
-        self.assertNotIn("diagnostics", hostops.PERSONAL_PUBLIC_FIELDS)
+        with patch.object(hostops, "_standing_read_snapshot", return_value=self._standing_snapshot()) as collect:
+            result = hostops.perform(request)
+            collect.assert_called_once_with()
+        self.assertEqual(result["status"], "OBSERVED")
+        self.assertEqual(result["operation"], "standing_read_diagnostics")
+        self.assertEqual(len(result["diagnostics"]), 16)
+        self.assertIn("diagnostics", hostops.PERSONAL_PUBLIC_FIELDS)
 
     def test_standing_read_public_fields_match_protected_workflow(self):
         workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
         fields = re.search(r"const publicFields = \[(.*?)\];", workflow).group(1)
         self.assertEqual(hostops.PERSONAL_PUBLIC_FIELDS, set(re.findall(r"'([^']+)'", fields)) | {"runners"})
+
+    def test_standing_read_protected_workflow_catalog_matches_python_contract(self):
+        workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+        match = re.search(r"const standingCatalog = (\\[[^\\n]+\\]);", workflow)
+        self.assertIsNotNone(match, "Missing independently reviewed, exact ordered sanitizer table")
+        self.assertEqual(json.loads(match.group(1)),
+                         [[category, list(codes)]
+                          for category, codes in hostops._STANDING_CATEGORY_CODES.items()])
+        self.assertIn("INVALID_PUBLIC_DIAGNOSTIC_RECEIPT", workflow)
+        self.assertIn("rawNativeText.trim() === JSON.stringify(record)", workflow)
+        self.assertIn("record.issue_number === context.issue.number", workflow)
+        self.assertIn("record.source_sha === context.sha", workflow)
+        self.assertIn("delete sanitized.diagnostics", workflow)
+
+    def test_standing_read_protected_sanitizer_runtime_positive_and_negative(self):
+        """Execute the actual GitHub workflow JS with Node, no GitHub or host effects."""
+        import copy
+        import os
+        import shutil
+        import subprocess
+        node = shutil.which("node") or shutil.which("node.exe")
+        if not node and os.name == "nt" and os.environ.get("RUNNER_TEMP"):
+            runner_root = Path(os.environ["RUNNER_TEMP"]).parents[1]
+            for version in ("node24", "node20"):
+                candidate = runner_root / "externals" / version / "bin" / "node.exe"
+                if candidate.is_file():
+                    node = str(candidate)
+                    break
+        if not node:
+            self.skipTest("Node CLI unavailable: hosted Windows JS sanitizer verification required")
+        workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+        self.assertEqual(workflow.count("          script: |"), 1)
+        script = "\\n".join(line[12:] if line.startswith("            ") else line
+                           for line in workflow.split("          script: |\\n", 1)[1].splitlines())
+        original = {**self._standing_snapshot(),
+                    "issue_number": 17,
+                    "approval_channel": "CHATGPT_TO_AI_COMMERCE_ISSUE",
+                    "remote_shell_enabled": False,
+                    "source_sha": "f" * 40}
+        encode = lambda x: json.dumps(x, ensure_ascii=True, separators=(",", ":"))
+        valid = encode(original)
+        cases = [{"name": "valid", "body": valid, "status": "OBSERVED", "code": None}]
+        for key, val in (
+            ("extra_public_field", {**original, "content_utf8": "PRIVATE_SECRET"}),
+            ("wrong_source_sha", {**original, "source_sha": "0" * 40}),
+            ("wrong_issue", {**original, "issue_number": 99}),
+            ("wrong_approval", {**original, "approval_channel": "OTHER"}),
+            ("wrong_flag", {**original, "wake_sent": True}),
+            ("wrong_windows", {**original, "windows": 1}),
+            ("short_rows", {**original, "diagnostics": original["diagnostics"][:-1]}),
+            ("reversed_rows", {**original, "diagnostics": list(reversed(original["diagnostics"]))}),
+            ("raw_row", {**original, "diagnostics": [
+                {**original["diagnostics"][0], "private_path": "PRIVATE_SECRET"},
+                *original["diagnostics"][1:]]}),
+            ("foreign_code", {**original, "diagnostics": [
+                {"category": original["diagnostics"][0]["category"], "code": "PRIVATE_SECRET"},
+                *original["diagnostics"][1:]]}),
+        ):
+            cases.append({"name": key, "body": encode(val), "status": "BLOCKED",
+                          "code": "INVALID_PUBLIC_DIAGNOSTIC_RECEIPT"})
+        duplicate_raw = valid.replace('"status":"OBSERVED"',
+                                      '"status":"OBSERVED","status":"OBSERVED"', 1)
+        cases.append({"name": "duplicate_json_key", "body": duplicate_raw, "status": "BLOCKED",
+                      "code": "INVALID_PUBLIC_DIAGNOSTIC_RECEIPT"})
+        cases.append({"name": "oversize", "body": valid[:-1] + (',"padding":"' + "x" * 8192 + '"}'),
+                      "status": "BLOCKED", "code": "INVALID_PUBLIC_DIAGNOSTIC_RECEIPT"})
+        cases.append({"name": "legacy_no_nested_leak",
+                      "body": encode({"status": "OBSERVED", "operation": "inventory",
+                                     "diagnostics": [{"private_path": "PRIVATE_SECRET"}]}),
+                      "status": "OBSERVED", "code": None, "no_diagnostics": True})
+        harness = r"""
+const fs = require('fs'), path = require('path'), vm = require('vm');
+const cases = JSON.parse(fs.readFileSync(process.argv[1],'utf8'));
+const script = fs.readFileSync(process.argv[2],'utf8');
+(async () => {
+  for (const item of cases) {
+    fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'personal-hostops-result.json'),item.body,'utf8');
+    const comments = [];
+    const context = {repo:{owner:'trung-via',repo:'ai-commerce'},issue:{number:17},sha:'f'.repeat(40)};
+    const github = {rest:{issues:{createComment:async args => { comments.push(args.body); }}}};
+    await vm.runInNewContext('(async () => {\\n'+script+'\\n})()',
+      {require,process,context,github,Buffer});
+    if (comments.length !== 1 || !comments[0].startsWith('AI_COMMERCE_PERSONAL_HOSTOPS_RESULT_V1\\n'))
+      throw new Error(item.name+': missing result');
+    const result = JSON.parse(comments[0].split('\\n').slice(1).join('\\n'));
+    if (result.status !== item.status ||
+        (item.code && result.code !== item.code))
+      throw new Error(item.name+': unexpected '+JSON.stringify(result));
+    if (item.status === 'OBSERVED' && !item.no_diagnostics &&
+        (!Array.isArray(result.diagnostics) || result.diagnostics.length !== 16))
+      throw new Error(item.name+': diagnostics missing');
+    if (item.no_diagnostics && Object.prototype.hasOwnProperty.call(result,'diagnostics'))
+      throw new Error(item.name+': leaked legacy diagnostics');
+    if (JSON.stringify(result).includes('PRIVATE_SECRET'))
+      throw new Error(item.name+': private data leak');
+  }
+  process.stdout.write('VERIFIED_CASES='+cases.length);
+})().catch(error => { console.error(error); process.exitCode=1; });
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            (path / "cases.json").write_text(encode(cases), encoding="utf-8")
+            (path / "workflow.js").write_text(script, encoding="utf-8")
+            env = {**os.environ, "RUNNER_TEMP": str(path)}
+            completed = subprocess.run(
+                [node, "-e", harness, str(path / "cases.json"), str(path / "workflow.js")],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=30, env=env, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr[-3000:])
+        self.assertIn("VERIFIED_CASES=" + str(len(cases)), completed.stdout)
 
     def test_standing_read_snapshot_schema_is_fixed_bounded_and_copied(self):
         snapshot = self._standing_snapshot()
