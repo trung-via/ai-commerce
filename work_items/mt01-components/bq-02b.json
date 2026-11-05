@@ -1,0 +1,26 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "bq-02b",
+  "sources": [
+    "src/ai_commerce/creative_quality/t2_sampling.py",
+    "src/ai_commerce/creative_quality/t3_assessment.py",
+    "src/ai_commerce/creative_quality/multimodal_review.py"
+  ],
+  "tests": ["tests/test_bq_02b_multimodal.py"],
+  "acs": [
+    "BQ-02b.q4-t2-real-local-selective-probes",
+    "BQ-02b.q4-t3-unverified-assessor-boundary",
+    "BQ-02b.q2-q4-multimodal-evidence-closure"
+  ],
+  "consumers": [
+    "src/ai_commerce/creative_quality/inspection_evidence.py",
+    "src/ai_commerce/creative_quality/quality_review.py",
+    "src/ai_commerce/creative_quality/critic.py",
+    "src/ai_commerce/affiliate_release/inspection.py",
+    "src/ai_commerce/creative_quality/behavioral.py",
+    "src/ai_commerce/creative_quality/causality.py",
+    "src/ai_commerce/creative/briefs.py",
+    "src/ai_commerce/e2e/service.py"
+  ],
+  "contracts": []
+}
