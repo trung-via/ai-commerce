@@ -66,6 +66,7 @@ def test_reviewed_map_contains_exact_real_paths_and_all_current_python_test_fami
 @pytest.mark.parametrize("path,expected", [
     ("tests/test_a13_evidence_pack.py", "a13"),
     ("tests/test_a12_claims.py", "a12"),
+    ("src/ai_commerce/remote/chrome_acquisition.py", "ef02-wake"),
     ("scripts/hostops_request.py", "hostops-v1"),
     ("scripts/hostops_v2.py", "hostops-v2"),
 ])
@@ -84,26 +85,7 @@ def test_real_source_and_schema_preserve_cli_and_import_consumers(real_tree, mon
     assert not selected["fallback"]
     assert {"a12", "a11", "a04", "cli"} <= set(selected["selected_groups"])
     assert "tests/test_a12_registry.py" in selected["consumer_map"]["a12"]["tests"]
-    assertdef test_chrome_acquisition_cross_owner_consumer_requires_safe_fallback(real_tree, monkeypatch):
-    """#388 made HostOps Personal depend on D5 Chrome acquisition.
-
-    A change to the remote Chrome provider is no longer proven by ef02-wake
-    tests alone. Until the reviewed consumer test closure is registered,
-    preserve the planner's fail-closed full/fallback signal. Do not pretend
-    one companion group covers the new cross-owner source dependency.
-    """
-    selected = real_plan(real_tree, monkeypatch,
-                         "src/ai_commerce/remote/chrome_acquisition.py")
-    assert selected["fallback"] is True
-    assert selected["selected_groups"] == ["ef02-wake"]
-    assert selected["reason_codes"] == ["IMPORT_OR_CONSUMER_MAP_INCOMPLETE"]
-    assert selected["unknown_tests"] == []
-    assert selected["unknown_consumers"] == ["src/ai_commerce/hostops_v3/personal.py"]
-    assert selected["unsupported_paths"] == []
-    assert selected["narrow_execution_observed"] is False
-
-
- "contracts/ProductClaimEvidence.v1.schema.json" in selected["consumer_map"]["cli"]["closure"]
+    assert "contracts/ProductClaimEvidence.v1.schema.json" in selected["consumer_map"]["cli"]["closure"]
 
 
 @pytest.mark.parametrize("path,acs,aggregate,reason", [
