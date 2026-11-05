@@ -462,6 +462,49 @@ Write-Output 'D5_REPAIR_PREFLIGHT_ENUM_FILTER_PASS'
     assert "PRIVATE_SECRET_123" not in result.stdout
 
 
+def test_d5_repair_config_parent_path_is_valid_and_bounded():
+    script = (Path(__file__).resolve().parents[1] /
+              "scripts" / "AI-Commerce-D5-Attended-CDP.ps1").read_text(encoding="utf-8")
+    repair = script.split("if ($Mode -eq 'RepairConfig')", 1)[1].split(
+        "if ($Mode -eq 'PrepareChat')", 1)[0]
+    assert "$dir = [IO.Path]::GetDirectoryName($ChromeConfig)" in repair
+    assert "Split-Path -LiteralPath $ChromeConfig -Parent" not in script
+    assert "GetDirectoryName($ChromeConfig)" in repair.split(
+        "Read-Host 'Type REPAIR-CONFIG-9333", 1)[1]
+    assert repair.index("GetDirectoryName($ChromeConfig)") < repair.index(
+        "[IO.File]::Open($stage")
+    assert "D5_WAKE_SENT=False" in repair
+
+
+def test_d5_repair_config_parent_path_native_windows(tmp_path):
+    """PowerShell 5.1: actual path selection on synthetic input, no private IO."""
+    if os.name != "nt":
+        pytest.skip("Windows-only PowerShell path acceptance")
+    from shutil import which
+    shell = which("powershell.exe")
+    assert shell
+    source = (Path(__file__).resolve().parents[1] /
+              "scripts" / "AI-Commerce-D5-Attended-CDP.ps1").read_text(encoding="utf-8")
+    repair = source.split("if ($Mode -eq 'RepairConfig')", 1)[1].split(
+        "if ($Mode -eq 'PrepareChat')", 1)[0]
+    assignment = "$dir = [IO.Path]::GetDirectoryName($ChromeConfig)"
+    assert assignment in repair
+    safe = tmp_path / "Chrome-Acquisition"
+    cfg = safe / "config.json"
+    test = (
+        "$ErrorActionPreference='Stop';"
+        "$ChromeConfig=" + "'" + str(cfg).replace("'", "''") + "';"
+        + assignment + ";"
+        "if($dir -cne [IO.Path]::GetFullPath("
+        "'" + str(safe).replace("'", "''") + "')){exit 3};"
+        "Write-Output 'D5_PARENT_PATH_PASS'"
+    )
+    result = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-Command", test],
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr[-500:]
+    assert result.stdout.strip() == "D5_PARENT_PATH_PASS"
+
+
 def test_attended_d5_cdp_wrapper_powershell_parser_on_hosted_windows():
     if os.name != "nt":
         pytest.skip("PowerShell AST parser acceptance only on Windows")
