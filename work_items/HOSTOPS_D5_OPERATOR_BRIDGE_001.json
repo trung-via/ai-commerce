@@ -1,0 +1,48 @@
+{
+  "id": "HOSTOPS_D5_OPERATOR_BRIDGE_001",
+  "source_sha": "28e0ec8ee1a29d0f2cd563f1b8a092028c407fb6",
+  "issue": 437,
+  "attempt_id": "hostops_d5_bridge_20261105_28e0ec8_r5",
+  "repair_of": "432",
+  "delivery": "CANDIDATE_BRANCH",
+  "publisher": "EF02_WORKER_ONLY",
+  "verification_profile": "mt01-component-onboarding",
+  "max_repair_rounds": 2,
+  "owner_manifest": "work_items/mt01-components/hostops-d5-control.json",
+  "selected_strategy": "AUDITED_ACQUISITION_PLAYWRIGHT",
+  "old_downloads_bytes": "UNAVAILABLE_NOT_EXECUTED",
+  "new_reset_strategy_selected": false,
+  "enabled_by_default": false,
+  "native_acceptance": "PENDING_GENUINE_HOSTOPS_DEPLOYMENT",
+  "executor_verification": {
+    "state": "BLOCKED_RUNNER_TEMP_ACCESS_DENIED",
+    "pytest_invocations": 0,
+    "workers_actual": null,
+    "candidate_sha": null,
+    "note": "External OS RUNNER_TEMP subdirectory creation denied before pytest. EF01 must verify in its authorized runner context; no alternate temp or ACL change used."
+  },
+  "allowed_paths": [
+    "src/ai_commerce/hostops_v3/d5_control.py",
+    "src/ai_commerce/remote/chrome_acquisition.py",
+    "scripts/AI-Commerce-D5-Operator-Bridge.ps1",
+    "tests/test_hostops_d5_control.py",
+    "tests/test_ef02_d5_chrome_acquisition.py",
+    "docs/engineering/D5_HOSTOPS_OPERATOR_BRIDGE.md",
+    "work_items/HOSTOPS_D5_OPERATOR_BRIDGE_001.json",
+    "work_items/mt01-components/hostops-d5-control.json"
+  ],
+  "acceptance": [
+    "HOSTOPS.D5.enrolled-fixed-lifecycle",
+    "HOSTOPS.D5.ownership-migration-preservation",
+    "HOSTOPS.D5.replay-crash-unknown-privacy"
+  ],
+  "required_consumers": ["hostops-v3", "hostops-personal", "ef02-wake"],
+  "constraints": [
+    "SOURCE_ONLY_NO_DESKTOP_EFFECT",
+    "NO_GIT_WRITES_BY_EXECUTOR",
+    "NO_WORKFLOW_EDITS",
+    "EXTERNAL_ABSOLUTE_RUNNER_TEMP_ONLY",
+    "NO_WAKE_NO_CHAT_NO_PROFILE_RESET",
+    "NO_SHARED_SID_SECRET_ISOLATION_CLAIM"
+  ]
+}

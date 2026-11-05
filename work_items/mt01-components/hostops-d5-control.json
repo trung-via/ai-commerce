@@ -1,0 +1,16 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "hostops-d5-control",
+  "sources": ["src/ai_commerce/hostops_v3/d5_control.py"],
+  "tests": ["tests/test_hostops_d5_control.py"],
+  "acs": [
+    "HOSTOPS.D5.enrolled-fixed-lifecycle",
+    "HOSTOPS.D5.ownership-migration-preservation",
+    "HOSTOPS.D5.replay-crash-unknown-privacy"
+  ],
+  "consumers": [
+    "src/ai_commerce/remote/chrome_acquisition.py",
+    "src/ai_commerce/hostops_v3/contract.py"
+  ],
+  "contracts": []
+}

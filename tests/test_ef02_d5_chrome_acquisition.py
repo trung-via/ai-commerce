@@ -61,6 +61,65 @@ def test_environment_command_exact_profile_and_no_automation_flag(tmp_path):
     assert not any("chatgpt.com" in x for x in env.command())
 
 
+@pytest.mark.parametrize("sid,created,allowed", [
+    ("S-1-5-21-1-2-3-1001", "2026-11-05T01:00:00Z", True),
+    ("S-1-5-21-1-2-3-1002", "2026-11-05T01:00:00Z", False),
+    (None, "2026-11-05T01:00:00Z", False),
+    ("S-1-5-21-1-2-3-1001", None, False),
+    ("S-1-5-21-1-2-3-1001", "", False),
+])
+def test_enrolled_d5_owner_requires_sid_and_creation_time(tmp_path, sid, created, allowed):
+    env = read(*fixture(tmp_path)[:3])
+    snapshot = read_inventory(env)
+    snapshot["processes"][0].update(OwnerSid=sid, CreationDate=created)
+    def probe():
+        return ca.evaluate(env, snapshot, session_id=1, parse=lambda _: args(env),
+                           expected_sid="S-1-5-21-1-2-3-1001")
+    if allowed:
+        assert probe() == ("OWNED", 123)
+    else:
+        with pytest.raises(ca.AcquisitionBlocked, match="BROWSER_OWNERSHIP_UNPROVEN"):
+            probe()
+
+
+@pytest.mark.parametrize("extra", ["split", "duplicate", "uppercase"])
+def test_ambiguous_profile_switch_is_never_absent(tmp_path, extra):
+    env = read(*fixture(tmp_path)[:3])
+    command = env.command()
+    if extra == "split":
+        command = [x for x in command if not x.startswith("--user-data-dir=")]
+        command += ["--user-data-dir", str(env.user_data_dir)]
+    elif extra == "duplicate":
+        command += [f"--user-data-dir={env.user_data_dir}"]
+    else:
+        command = [x.replace("--user-data-dir=", "--USER-DATA-DIR=") for x in command]
+    with pytest.raises(ca.AcquisitionBlocked, match="BROWSER_OWNERSHIP_UNPROVEN"):
+        ca.evaluate(env, {"listeners": [], "processes": [owner(env)]}, session_id=1, parse=lambda _: command)
+
+
+def test_old_acquisition_playwright_attach_never_closes_browser_or_reads_pages(monkeypatch, tmp_path):
+    import sys
+    import types
+    env = read(*fixture(tmp_path)[:3])
+    events = []
+    class Browser:
+        def is_connected(self): return True
+        def close(self): pytest.fail("browser close forbidden")
+        @property
+        def contexts(self): pytest.fail("content access forbidden")
+    class Chromium:
+        def connect_over_cdp(self, endpoint, timeout):
+            events.append((endpoint, timeout))
+            return Browser()
+    class Client:
+        chromium = Chromium()
+        def __enter__(self): return self
+        def __exit__(self, *_): events.append("transport-stopped")
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", types.SimpleNamespace(sync_playwright=Client))
+    ca.verify_playwright_attach(env)
+    assert events == [(env.endpoint, 3000), "transport-stopped"]
+
+
 @pytest.mark.parametrize("patch,expected", [
     ({"exclusive_user_data": False}, "CONFIG_INVALID"),
     ({"allow_launch": "true"}, "CONFIG_INVALID"),
