@@ -1,0 +1,266 @@
+{
+  "schema_version": "BQQualityWorkTree.v1",
+  "project": "AI Commerce",
+  "plan_id": "B-QUALITY-001",
+  "version": "1.0",
+  "decision_ref": "https://github.com/trung-via/ai-commerce/issues/373",
+  "decision_date": "2026-11-05",
+  "architecture": "PA2 PULSE extension, not Roadmap C",
+  "planning_status": "HUMAN_SELECTED_ARCHITECTURE",
+  "repository_document_status": "SOURCE_PROPOSAL_UNTIL_MERGED",
+  "implementation_state": "BQ_IMPLEMENTATION_NOT_STARTED",
+  "legacy_work_tree": {
+    "md": "docs/roadmap/WORK_TREE_DETAILED_V1_1.md",
+    "json": "docs/roadmap/WORK_TREE_V1_1.json",
+    "preserved_count": 63,
+    "mutated": false,
+    "namespace": "historical IDs unchanged"
+  },
+  "semantic_boundaries": {
+    "brain": "one ChatGPT current-chat strategy owner",
+    "runtime": "one independent PULSE with Core/Ledger/Studio/Bridge/Adapters",
+    "engineering": "EF01/EF02 source build-repair only",
+    "ledgers": "five Roadmap A semantic owner truth stores remain authoritative",
+    "schemas_closed": [
+      "CreativeDirective.v1",
+      "BrainDecision.v1",
+      "ProductJourneyReceipt.v1"
+    ]
+  },
+  "knowledge_keys": [
+    "K1 Cinematic & Visual",
+    "K2 Physical & Causal",
+    "K3 Identity & Product",
+    "K4 Temporal & Spatial",
+    "K5 Human Performance & Audio",
+    "K6 Evidence/Trust/Rights"
+  ],
+  "realism_axes": [
+    "R1 video realism",
+    "R2 knowledge spec",
+    "R3 human performance/causality",
+    "R4 speech-face-gesture-environment",
+    "R5 Vietnamese natural audio",
+    "R6 blind human calibration",
+    "R7 critic-to-repair",
+    "R8 Brain/PULSE integration"
+  ],
+  "cross_cutting": [
+    "ModelCapabilityProfile",
+    "PerceptualCalibration"
+  ],
+  "planning_packages": [
+    {
+      "status": "AUTHORIZED_PLANNING_ONLY",
+      "implementation_state": "IMPLEMENTATION_NOT_STARTED",
+      "id": "BQ-00",
+      "title": "Kiến trúc CIMQ+CRI, registry chất lượng và ràng buộc sidecar",
+      "priority": "P0",
+      "semantic_owner": "Media & Creative",
+      "depends_on": [],
+      "external_dependencies": [
+        "B0 source contracts"
+      ],
+      "consumers": [
+        "PULSE Bridge",
+        "A03",
+        "A06",
+        "A09",
+        "A13"
+      ],
+      "deliverables": [
+        "ADR B002 và bản đồ Q1–Q6/R1–R8/K1–K6",
+        "Phương án ref/digest sidecar, không sửa schema đóng",
+        "Owner/consumer và negative AC có phiên bản"
+      ],
+      "acceptance_positive": "Danh sách owner/consumer và dữ liệu Q/R/K khớp roadmap; schema CreativeDirective.v1, BrainDecision.v1, ProductJourneyReceipt.v1 không thay đổi",
+      "acceptance_negative": "Không cấp quyền PULSE/provider và không nhận việc thay schema v1 bằng sidecar chưa được migration",
+      "phase": "B0; B0-S chỉ gate external effects"
+    },
+    {
+      "status": "AUTHORIZED_PLANNING_ONLY",
+      "implementation_state": "IMPLEMENTATION_NOT_STARTED",
+      "id": "BQ-01",
+      "title": "Q1 behavioral brief + Q3 CRI: causal shots, con người, tiếng Việt và compiler mock",
+      "priority": "P0",
+      "semantic_owner": "Media & Creative",
+      "depends_on": [
+        "BQ-00"
+      ],
+      "external_dependencies": [
+        "A03 C01–C03",
+        "B1.1",
+        "B1.2",
+        "B1.3"
+      ],
+      "consumers": [
+        "A03",
+        "A05",
+        "A12 optional",
+        "PULSE Studio future"
+      ],
+      "deliverables": [
+        "Brief và creative hypotheses có nguồn/counterexample",
+        "Shot graph nhân quả, identity và action constraints",
+        "K1–K6 capability-aware plan; thử nghiệm voice/acoustic tiếng Việt offline"
+      ],
+      "acceptance_positive": "Brief cho product_ref=null, silent, fiction, animation; compiler output có model constraints và kiểm tra tính nhất quán kịch bản",
+      "acceptance_negative": "Không chọn model/provider tốt nhất nếu chưa có benchmark; không tự tạo product facts hoặc hợp thức hóa lời chứng thực giả",
+      "phase": "B1.1–B1.4"
+    },
+    {
+      "status": "AUTHORIZED_PLANNING_ONLY",
+      "implementation_state": "IMPLEMENTATION_NOT_STARTED",
+      "id": "BQ-02",
+      "title": "Q2 adversarial critic + Q4 actual-asset multimodal quality inspection",
+      "priority": "P0",
+      "semantic_owner": "Media & Creative",
+      "depends_on": [
+        "BQ-00",
+        "BQ-01"
+      ],
+      "external_dependencies": [
+        "A06",
+        "A13",
+        "B1.5"
+      ],
+      "consumers": [
+        "A06",
+        "A13",
+        "PULSE Studio future"
+      ],
+      "deliverables": [
+        "Critic preflight độc lập trước render",
+        "Inspector đa tầng trên asset có timestamp/region/ref SHA",
+        "Finding/confidence/escalation và adverse examples"
+      ],
+      "acceptance_positive": "Phân biệt Q2 đánh giá ý tưởng/counterevidence với Q4 đo media thật; mỗi finding gắn ảnh/video/âm thanh đúng hash",
+      "acceptance_negative": "Không báo kiểm chứng đa phương thức nếu chưa mở asset; điểm quality không cấp publish/rights",
+      "phase": "B1.5"
+    },
+    {
+      "status": "AUTHORIZED_PLANNING_ONLY",
+      "implementation_state": "IMPLEMENTATION_NOT_STARTED",
+      "id": "BQ-03",
+      "title": "R6 hiệu chuẩn cảm nhận bằng blind/pairwise Human evaluation",
+      "priority": "P1",
+      "semantic_owner": "Media & Creative",
+      "depends_on": [
+        "BQ-02"
+      ],
+      "external_dependencies": [
+        "Human reviewer consent"
+      ],
+      "consumers": [
+        "Q2",
+        "Q4",
+        "BQ-04"
+      ],
+      "deliverables": [
+        "Bộ mẫu blind/pairwise chuẩn hóa",
+        "Inter-rater disagreement, bias và calibration report",
+        "Ngưỡng quyết định có uncertainty"
+      ],
+      "acceptance_positive": "Mẫu, phiên đánh giá và bất đồng giữa người chấm truy nguyên được; phân biệt synthetic khỏi live perceptions",
+      "acceptance_negative": "Không suy luận viral/ROI từ điểm thích của reviewer; không dùng dữ liệu cá nhân không được cấp",
+      "phase": "B1.5 calibration"
+    },
+    {
+      "status": "AUTHORIZED_PLANNING_ONLY",
+      "implementation_state": "IMPLEMENTATION_NOT_STARTED",
+      "id": "BQ-04",
+      "title": "Q5/R7 targeted media repair, preservation và re-inspection",
+      "priority": "P1",
+      "semantic_owner": "Media & Creative",
+      "depends_on": [
+        "BQ-02"
+      ],
+      "conditional_dependencies": [
+        "BQ-03 when perceptual thresholds drive repair"
+      ],
+      "external_dependencies": [
+        "A05",
+        "A06",
+        "A13",
+        "A15"
+      ],
+      "consumers": [
+        "A05",
+        "A06",
+        "A13",
+        "A15",
+        "PULSE Studio future"
+      ],
+      "deliverables": [
+        "KEEP/local-edit/shot-regenerate/return-to-Brain/HOLD decision",
+        "Scoped repair input/output hashes, cost and rights checks",
+        "Preservation assertions và measured re-inspection"
+      ],
+      "acceptance_positive": "Chỉ phần được phép thay đổi; before/after asset digest, identity/claim preservation và Q4 reinspection minh bạch",
+      "acceptance_negative": "Không tự sửa creative strategy hoặc retry provider khi UNKNOWN_EFFECT; generative repair cần quyền riêng",
+      "phase": "B1.5"
+    },
+    {
+      "status": "AUTHORIZED_PLANNING_ONLY",
+      "implementation_state": "IMPLEMENTATION_NOT_STARTED",
+      "id": "BQ-05",
+      "title": "PULSE Studio integration theo capability, quyền riêng và một provider proof",
+      "priority": "P1",
+      "semantic_owner": "PULSE coordination + Media & Creative assets",
+      "depends_on": [
+        "BQ-01",
+        "BQ-02",
+        "BQ-04"
+      ],
+      "external_dependencies": [
+        "B0.2/B0.3 attended runtime",
+        "B0-S independent custody",
+        "separate Human/provider/asset-rights/spend grants"
+      ],
+      "consumers": [
+        "PULSE Core",
+        "PULSE Studio",
+        "A04",
+        "A06",
+        "A09"
+      ],
+      "deliverables": [
+        "ModelCapabilityProfile/PerceptualCalibration refs",
+        "Attended media plan-to-asset trace with private custody",
+        "Một provider proof chỉ khi có grants hợp lệ"
+      ],
+      "acceptance_positive": "Một path offline có media QA và WAIT_BRAIN; live path chỉ ghi PASS nếu provider receipt + per-effect auth tồn tại",
+      "acceptance_negative": "Không trộn EF02 engineering runner với PULSE scheduler; không coi GitHub issue là provider grant; không ghi GO_PUBLISH tự động",
+      "phase": "B0-S then B1.2/B1.5"
+    },
+    {
+      "status": "AUTHORIZED_PLANNING_ONLY",
+      "implementation_state": "IMPLEMENTATION_NOT_STARTED",
+      "id": "BQ-06",
+      "title": "Q6 source-linked behavioral learning và next-Brain-brief",
+      "priority": "P1",
+      "semantic_owner": "Commerce Opportunity + Media & Creative; A09/A11 retain truth",
+      "depends_on": [
+        "BQ-00"
+      ],
+      "external_dependencies": [
+        "B2 actual source/window/asset metrics for audience outcome claims"
+      ],
+      "consumers": [
+        "A09",
+        "A11",
+        "A17",
+        "PULSE Bridge",
+        "B3"
+      ],
+      "deliverables": [
+        "Learning record: source/cohort/window/asset/metric/uncertainty",
+        "Counterevidence và next Brain brief proposal",
+        "Attended Brain accept/revise/HOLD with versioned feedback"
+      ],
+      "acceptance_positive": "Tách outcome observed/supplied/synthetic, không so sánh nhầm window; Brain nắm quyết định thay đổi brief",
+      "acceptance_negative": "Không tự sửa chiến lược hoặc suy đoán causal lift, doanh thu, ROI khi thiếu dữ liệu",
+      "phase": "B2 → B3"
+    }
+  ]
+}
