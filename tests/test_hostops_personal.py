@@ -137,6 +137,8 @@ new AsyncFunction('github','context','require',code)(github,context,require)
                                       *valid["diagnostics"][1:]]}, "BLOCKED"),
             ({**valid, "issue_number": 18}, "BLOCKED"),
             ({**valid, "source_sha": "b" * 40}, "BLOCKED"),
+            ({**valid, "operation": "git_snapshot", "diagnostics": [{"private": "secret"}]},
+             "OBSERVED_NO_DIAGNOSTICS"),
             ({**valid, "diagnostics": [{"category": "chrome_profile", "code": "ACTIVE"},
                                       *valid["diagnostics"][1:]]}, "BLOCKED"),
         ]
@@ -152,9 +154,13 @@ new AsyncFunction('github','context','require',code)(github,context,require)
                 with self.subTest(index=index), self.assertEqual(run.returncode, 0, run.stderr):
                     self.assertTrue(run.stdout.startswith("AI_COMMERCE_PERSONAL_HOSTOPS_RESULT_V1\n"))
                     response = json.loads(run.stdout.split("\n", 1)[1])
-                    self.assertEqual(response["status"], expected)
+                    self.assertEqual(response["status"],
+                                     "OBSERVED" if expected == "OBSERVED_NO_DIAGNOSTICS" else expected)
                     if expected == "OBSERVED":
                         self.assertEqual(response["diagnostics"], valid["diagnostics"])
+                    elif expected == "OBSERVED_NO_DIAGNOSTICS":
+                        self.assertNotIn("diagnostics", response)
+                        self.assertNotIn("secret", run.stdout)
                     else:
                         self.assertEqual(response["code"], "INVALID_PUBLIC_DIAGNOSTIC_RECEIPT")
                         self.assertNotIn("diagnostics", response)
