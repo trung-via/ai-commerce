@@ -1,10 +1,27 @@
-# D5 HostOps operator bridge — source candidate r5
+# D5 HostOps operator bridge — source candidate r6 (Root Closure)
 
-Authority: Human correction [#220 comment 6655660004](https://github.com/trung-via/ai-commerce/issues/220#issuecomment-6655660004), single-user architecture #293, original positive/negative AC #428, new immutable attempt [#437](https://github.com/trung-via/ai-commerce/issues/437). Base is exactly `28e0ec8ee1a29d0f2cd563f1b8a092028c407fb6`. r1–r4 are terminal historical attempts, not reusable mutable worktrees. PR #436's corrected ACL fixture is baseline and remains untouched.
+Authority: Human correction [#220 comment 6655660004](https://github.com/trung-via/ai-commerce/issues/220#issuecomment-6655660004), single-user architecture #293, original positive/negative AC #428, PR #440 merged bridge source, sanitized receipt #444, and human request 2026-11-05. Base commit: `655668b41eebb721762bcc5b4bf6aadf6a153351`. PR #436's corrected ACL fixture is baseline and remains untouched.
 
-This is SOURCE ONLY. Native installation, interactive login, subsequent logon, stable CDP and recovery acceptance are **PENDING_GENUINE_HOSTOPS_DEPLOYMENT**. No current CLI, public Issue route or Actions workflow enables this bridge. Candidate publication belongs to the EF02 worker; the code executor edits only the eight granted paths. CI is not Brain PASS, merge, enrollment or laptop effect.
+This is SOURCE ONLY. Native installation, interactive login, subsequent logon, stable CDP and recovery acceptance are **PENDING_GENUINE_HOSTOPS_DEPLOYMENT**. No current CLI, public Issue route or Actions workflow enables this bridge. Candidate publication belongs to the EF02 worker; the code executor edits only the eight granted paths. CI is not Brain PASS, merge, enrollment or laptop effect. Code alone does NOT activate Windows.
 
 The selected behavior is audited dedicated Chrome acquisition followed by Playwright attach, preserving the existing config/profile/ACL guard. Old Downloads scripts are unavailable as trusted bytes; their names and historical READY_ATTACH are workflow evidence only. No Downloads content is fetched, executed or packaged. The new reset chain is not selected. No automatic #179 replay or D5 manifest/authenticated chat claim exists.
+
+## Three Root Gaps Addressed
+
+1. **GitHub HostOps route only bounded READ/WRITE not D5**: `.github/workflows/issue-ingress.yml` only routes `[HOSTOPS READ]` (diagnostics, status) and `[HOSTOPS WRITE]` (file write, git sync). Public Personal READ permission does NOT grant D5 WRITE. Protected workflow integration is specified in the exact patch handoff below under the mandatory truth label `PROTECTED_INGRESS_NOT_MERGED`.
+2. **PR #440 merged Bridge but lacked private operator receiver/logon service**: Implemented source-side `D5Receiver` and `D5IngressBoundary` with named-pipe logon trigger (`AI-Commerce-D5-Operator-v1`), client attestation (SID, interactive session > 0, limited non-elevated token, input desktop), enrollment verification, and durable receipts. Bounded tests cover logon delivery without local EF02 service installation.
+3. **ChatGPT cannot issue approved D5 operations and obtain native receipts**: Defined fail-closed ingress boundary with parameterless fixed operation schema, strict off-host signing/custody checks, journal serialization, durable native effect receipts, and field-level public receipt sanitization.
+
+## Operational Bug Fix: Graceful Stop under Active Profile without Listener
+
+In PR #440, `Bridge.execute` checked `if snapshot["state"] == "PROFILE_ALREADY_ACTIVE_NO_CDP": return receipt(op, "PROFILE_ALREADY_ACTIVE_NO_CDP")` at the beginning of execution, preventing `STOP_OWNED_D5_CHROME` from executing.
+
+A verified exact owned D5 root in `PROFILE_ALREADY_ACTIVE_NO_CDP` state now permits a bounded graceful close:
+- `execute` allows `STOP_OWNED_D5_CHROME` to proceed when `snapshot["state"] == "PROFILE_ALREADY_ACTIVE_NO_CDP"`.
+- Native adapter and PowerShell script revalidate the root process identity (exact owner SID, interactive session, creation timestamp, executable path, command-line arguments matching port 9333, address 127.0.0.1, user-data-dir, profile-directory, and no `--type=` arguments).
+- Bounded graceful termination via `CloseMainWindow()` with 10-second timeout; NEVER permits force-kill (`Kill()`), profile deletion, lock deletion, or relaunch under ambiguity.
+- If stopping fails to reach `ABSENT` state, raises `UNKNOWN_EFFECT_HOLD` fail-closed.
+- All other non-read operations under `PROFILE_ALREADY_ACTIVE_NO_CDP` hold without mutation.
 
 ## Closed call path and one-time enrollment
 
@@ -14,7 +31,7 @@ Brain → private authenticated HostOps receiver → `Bridge.invoke` → native 
 
 Signed policy fields are `source_sha`, `epoch`, `sid`, `expires`, `release_root`, `files`, `chrome_config`, `local_app_data`, `state_root`, `key_file`, `legacy_tasks`, `runner_tasks`, `enabled`, `revoked`, `private_control_plane`, `public_runner_exposed`. `files` pins the entire installed ai_commerce Python import closure and reviewed PS bytes, including all package initializers/dependencies. The executing code must be inside that pinned private release. Install optional Playwright from a separately verified private runtime; its absence returns HOLD, never downloads on demand. `state_root` is the source-defined per-operator AI-Commerce/D5-Operator directory and `key_file` is its `control.key` (32 random bytes). Actual paths/keys/configs never go to GitHub. Exact-SID owner/ACL and reparse checks apply; no ACL weakening is implemented.
 
-**Same account is not secret isolation.** All three public self-host runners must be preserved. Their same-SID ability to read operator files is incompatible with storing private broker credentials on that host while executing untrusted public jobs. There is no default assertion that ACLs solve this. If the private deployment cannot demonstrate that public jobs cannot read/use the key or invoke the credential-bearing runtime, leave `public_runner_exposed=true` and the bridge DISABLED. A separate private control plane/trusted execution arrangement is a prerequisite, not a new Windows account assumption or authority to change/stop runner tasks in this action.
+**Same account is not secret isolation.** Both `ai-commerce` and `ai-commerce-hostops-control` repositories report visibility PUBLIC. All three public self-host runners (`AI-Commerce-EF02-Interactive`, `AI-Commerce-EF02-02-Interactive`, `AI-Commerce-HostOps-01-Interactive`) run under the SAME Windows SID as the operator. Their same-SID ability to read operator files is incompatible with storing private broker credentials or signing keys on that host while executing untrusted public jobs. There is no default assertion that ACLs solve this. If the private deployment cannot demonstrate independent secret custody (e.g., off-host signing capability or hardware token), `public_runner_exposed` must remain `true` and the bridge DISABLED (`BLOCKED_NOT_DEPLOYED`).
 
 ## Deterministic operation contracts
 
@@ -25,7 +42,7 @@ Every operation first validates enrollment/source/session and inventories all th
 | STATUS | Inspect owned process/listener, CDP version and read-only Playwright connection; distinguish NOT_RUNNING, ROOT_PROCESS_LOST, PROFILE_ALREADY_ACTIVE_NO_CDP, listener loss, restart and READY_ATTACH. |
 | MIGRATION_PREFLIGHT | All three runners exist; every discovered D5 task and launcher matches enrolled metadata. Returns MIGRATION_READY without change. |
 | RETIRE_NEW_AUTOSTART | Browser absent; exact D5 legacy XML/launcher hashes; versioned metadata backup; remove only those verified task/launcher entries; verify absent and runners unchanged. |
-| STOP_OWNED_D5_CHROME | Exact signed exe/argv/root SID/session/PID/creation; recheck immediately; graceful CloseMainWindow and bounded exit; verify absent. No forced termination, profile or lock deletion. |
+| STOP_OWNED_D5_CHROME | Exact signed exe/argv/root SID/session/PID/creation; recheck immediately; graceful CloseMainWindow and bounded exit; verify absent. No forced termination, profile or lock deletion. Operates from OWNED or PROFILE_ALREADY_ACTIVE_NO_CDP state. |
 | INSTALL_VERIFIED_OLD_BEHAVIOR_LAUNCHER | Browser absent, conflicts retired; create only source-pinned launcher, or verify existing exact bytes. |
 | START_OR_REUSE_D5_CHROME | Reuse exact owned listener, otherwise launch once only from absent/no-claim/no-lock state. Check returned PID/creation, tolerate up to 20 × 0.5 seconds stabilization. |
 | VERIFY_CDP_9333_AND_PLAYWRIGHT | Exact loopback owner; bounded `/json/version`; Playwright connects without accessing contexts/pages/content, then stops its client transport (never Browser.close). Repeat ownership and attach after 0.5 seconds. |
@@ -46,15 +63,53 @@ SQLite reserves an INTENT with synchronous FULL before any native effect. A cras
 
 The journal caps at 2048 requests and never drops replay IDs silently. The private operator must archive it and rotate enrollment epoch/key with no pending intents, preserving old replay evidence before creating a fresh journal. Native nonce/receipt storage must be archived in that same attended bounded maintenance; no age-based deletion or automatic retry exists.
 
-Native logon action invokes only the pinned launcher with `-Logon`, without input prompts. It sends fixed `D5_LOGON_START_V1` to the private receiver, which authenticates the client desktop and calls `Bridge.logon()`. Delivery means only LOGON_TRIGGER_DELIVERED. No claim of browser start is derived from task registration or trigger delivery. Bridge journal serialization and process/port guards prevent duplicate browsers even if the trigger arrives twice.
+Native logon action invokes only the pinned launcher with `-Logon`, without input prompts. It sends fixed `D5_LOGON_START_V1` to the private receiver over `AI-Commerce-D5-Operator-v1`, which authenticates the client desktop and calls `Bridge.logon()`. Delivery means only LOGON_TRIGGER_DELIVERED. No claim of browser start is derived from task registration or trigger delivery. Bridge journal serialization and process/port guards prevent duplicate browsers even if the trigger arrives twice.
 
-## Exact protected/private deployment handoff (not implemented by this candidate)
+## Protected Ingress Patch Handoff (Truth Label: PROTECTED_INGRESS_NOT_MERGED)
 
-1. Separately review the private receiver and trust configuration. Provision a trusted signature verifier (existing HostOps SSH signature authority can be reused only with a new D5 enrollment namespace and private trust root), signed revocation list and pinned release/import closure. Bind signer, exact SID, epoch, expiry, source, catalog and dedicated D5 metadata. Refuse custody when same-SID public jobs can read the key/runtime. Do not place these values in repository files, Actions artifacts or public Issues.
-2. Receiver startup imports installed signed source, calls `private_bridge(private_enrollment, verify_signed=trusted_verifier)` and rejects unknown schema/fields. Expose only authenticated `invoke` requests and the fixed native logon trigger. For the named pipe `AI-Commerce-D5-Operator-v1`, verify local client token SID, process creation/session, non-elevated interactive input desktop and trusted launcher release bytes; deny remote pipe clients. Receive exactly `D5_LOGON_START_V1` with a short size/time limit, call `Bridge.logon`, persist its actual result. An unauthenticated pipe, a public queue artifact or a same-SID check alone is insufficient.
-3. If a public ingress is later proposed, protected `.github/workflows/issue-ingress.yml` must accept only source-owned parameterless operation enums, exact private receiver identity, request digest/expiry/epoch and a public-safe receipt whitelist. It must never send private key/path/token, construct shell, or dispatch native work to a public self-host worker. No workflow change is authorized here; enabling public dispatch before independent private custody proof is forbidden.
-4. Protected verification owner maps must independently admit `scripts/AI-Commerce-D5-Operator-Bridge.ps1` to `tests/test_hostops_d5_control.py` plus the existing acquisition/HostOps owner tests. This candidate's data-only manifest owns only new Python source/tests; it cannot self-authorize protected PS/transport integration. Review native adapter bytes with the exact candidate and signed release hashes, including task XML verification.
-5. The deployment owner performs one native attended enrollment, installs the immutable signed release and private receiver, then requests the fixed catalog through authenticated HostOps. No native operation is authorized by this source-only action. No repeat Human shell on ordinary status/install/start/stop/verify/recovery; only initial login/physical confirmation or explicit ambiguous-state reconciliation remains separate.
+> [!IMPORTANT]
+> **Truth Label: `PROTECTED_INGRESS_NOT_MERGED`**
+> The current public Personal READ permission does NOT grant D5 WRITE. GitHub Issue Ingress currently routes only `[HOSTOPS READ]` and `[HOSTOPS WRITE]`. Workflow files in `.github/workflows/` are protected and CANNOT be edited by this EF01/EF02 invocation. An independently reviewed protected workflow owner must approve and merge the following change separately once genuine private custody is proven.
+
+### Proposed Protected Diff for `.github/workflows/issue-ingress.yml`
+
+```diff
+--- a/.github/workflows/issue-ingress.yml
++++ b/.github/workflows/issue-ingress.yml
+@@ -37,7 +37,12 @@ jobs:
+          github.event.comment.user.login == github.repository_owner &&
+          startsWith(github.event.issue.title, '[HOSTOPS WRITE] ') &&
+-         github.event.comment.body == format('APPROVE WRITE #{0}', github.event.issue.number))
++         github.event.comment.body == format('APPROVE WRITE #{0}', github.event.issue.number))) ||
++        (github.event_name == 'issue_comment' &&
++         github.event.action == 'created' &&
++         github.event.issue.user.login == github.repository_owner &&
++         github.event.comment.user.login == github.repository_owner &&
++         startsWith(github.event.issue.title, '[HOSTOPS D5] ') &&
++         startsWith(github.event.comment.body, 'APPROVE D5 #'))
+       )
+     # Dedicated operator-interactive instance; EF02 uses only ai-commerce-ef02.
+     runs-on: [self-hosted, Windows, ai-commerce-hostops]
+@@ -58,6 +63,14 @@ jobs:
+         env:
+           HOSTOPS_PERSONAL_MODE: ${{ github.event_name == 'issues' && 'read' || 'write' }}
++          HOSTOPS_D5_TRIGGER: ${{ startsWith(github.event.issue.title, '[HOSTOPS D5] ') && 'true' || 'false' }}
+         run: |
+           $env:PYTHONPATH = Join-Path $env:GITHUB_WORKSPACE "src"
++          if ($env:HOSTOPS_D5_TRIGGER -eq 'true') {
++            # Require off-host private signature and fail-closed receiver boundary.
++            # Never execute arbitrary shell, commands, or unsigned scripts.
++            python -m ai_commerce.hostops_v3.d5_control --ingress-event "$env:RUNNER_TEMP\d5-event.json" --output "$env:RUNNER_TEMP\personal-hostops-result.json"
++            exit $LASTEXITCODE
++          }
+           python -m ai_commerce.hostops_v3.personal --mode "$env:HOSTOPS_PERSONAL_MODE" --output "$env:RUNNER_TEMP\personal-hostops-result.json"
+           exit $LASTEXITCODE
+```
+
+### Ingress Safety Constraints
+1. **No Fake Transport**: Requests must never fabricate local pipe or HTTP listeners to simulate private connectivity from CI.
+2. **Fail-Closed on Unproven Custody**: If private off-host signing/control infrastructure is absent, the boundary returns `BLOCKED_NOT_DEPLOYED` with minimal attended enrollment metadata.
+3. **Field Whitelist Only**: Public comments on GitHub Issues carry strictly sanitized receipts (`sanitize_receipt`), never raw process command-lines, CIM properties, file paths, or private cookies.
 
 ## Verification and remaining acceptance
 
@@ -63,5 +118,3 @@ Compile/import smoke precedes tests. Run new component and acquisition tests, th
 Automated tests use simulated authenticated lifecycle and synthetic process/port/session ownership only. Native PowerShell tests parse AST or isolate pure functions with synthetic values; they must not invoke the entrypoint, scheduler, real desktop or real Chrome. Tests cover fixed lifecycle and repeated logon, all dry-runs, signature tamper/replay/stale epoch/source, private custody and revocation, missing/wrong tasks, session/elevation/SID, listener/root loss/restart, rate limit, bounded stabilization, crash/UNKNOWN and private disclosure.
 
 Still pending genuine HostOps receipts: exact migration inventory + backup + selective retirement, graceful stop preserving profiles/runners, one logon task registration, actual post-login launch followed by subsequent stable attach, observed port loss root cause, bounded safe recovery and rollback; two logon deliveries must show one browser. Receipts must correlate private intent/native ID/source/epoch/SID/session/timing, pre/post task XML and root PID/creation/port owner, CDP version, both Playwright checks, and independent local receipt readback. Publish only sanitized enums/digests and acceptance status. CI alone cannot satisfy these native gates.
-
-Executor r5 verification observation (2026-11-05): creating an absolute child directory in the existing OS `RUNNER_TEMP` returned Access denied before any pytest invocation. No alternate location, in-repo fixture key, ACL change or cleanup was attempted. In-memory Python compile/import/JSON validation, PowerShell AST parse (no script execution), scope checks and `git diff --check` succeeded. These are smoke checks only. Targeted tests, registered owner/consumer verification, actual 12-worker proof and candidate SHA remain UNVERIFIED; EF01 must perform them in its authorized runner context. No candidate or native PASS is claimed by this executor.

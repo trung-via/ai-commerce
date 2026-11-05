@@ -366,7 +366,7 @@ class Bridge:
     def execute(self, policy, op, dry_run):
         self.native.inventory(policy)  # verify all 3 runner tasks + exact D5 metadata
         snapshot = self.observe(policy)
-        if snapshot["state"] == "PROFILE_ALREADY_ACTIVE_NO_CDP":
+        if snapshot["state"] == "PROFILE_ALREADY_ACTIVE_NO_CDP" and op != "STOP_OWNED_D5_CHROME":
             return receipt(op, "PROFILE_ALREADY_ACTIVE_NO_CDP")
         if dry_run:
             return receipt(op, "DRY_RUN")
@@ -417,7 +417,7 @@ PUBLIC_CODES = frozenset({
     "RUNNER_PRESERVATION_UNPROVEN", "PROFILE_LOCKED", "PLAYWRIGHT_UNAVAILABLE",
     "CDP_PROTOCOL_UNAVAILABLE", "LAUNCHER_UNVERIFIED", "SOURCE_DRIFT",
     "UNSUPPORTED_SESSION", "NATIVE_FAILURE_HOLD", "BACKUP_UNVERIFIED",
-    "LAUNCH_NOT_AUTHORIZED",
+    "LAUNCH_NOT_AUTHORIZED", "BLOCKED_NOT_DEPLOYED", "LOGON_TRIGGER_DELIVERED",
 })
 
 
@@ -540,3 +540,201 @@ def private_bridge(path: Path, *, verify_signed: Callable[[dict], dict]) -> Brid
     if not ca._no_links(journal):
         raise D5Blocked("PRIVATE_STORAGE_UNPROVEN")
     return Bridge(enrolled, WindowsNative(), Journal(journal))
+
+
+D5_PIPE_NAME = "AI-Commerce-D5-Operator-v1"
+D5_LOGON_TRIGGER_PAYLOAD = b"D5_LOGON_START_V1\n"
+PUBLIC_RECEIPT_FIELDS = frozenset({
+    "operation", "code", "status", "effect_observed", "registered",
+    "started", "listener_bound", "playwright_attached", "stable",
+    "wake_sent", "login_verified", "manifest_verified",
+    "request_id", "source_sha", "epoch", "attended_enrollment_required",
+    "minimal_attended_enrollment", "reason", "recorded_at", "bridge_receipt",
+})
+
+
+def sanitize_receipt(result: dict) -> dict:
+    """Return strictly allowlisted public receipt fields without internal paths or data."""
+    if not isinstance(result, dict):
+        return {"code": "INPUT_INVALID", "status": "BLOCKED"}
+    sanitized = {k: result[k] for k in PUBLIC_RECEIPT_FIELDS if k in result}
+    if "bridge_receipt" in sanitized and isinstance(sanitized["bridge_receipt"], dict):
+        sanitized["bridge_receipt"] = sanitize_receipt(sanitized["bridge_receipt"])
+    return sanitized
+
+
+def create_blocked_not_deployed_evidence(*, op: str = "UNKNOWN", state_root: Path | None = None) -> dict:
+    """Produces explicit BLOCKED_NOT_DEPLOYED evidence with minimal attended enrollment spec.
+
+    Contains NO private keys, HMAC keys, paths or secrets.
+    """
+    return {
+        "status": "BLOCKED",
+        "code": "BLOCKED_NOT_DEPLOYED",
+        "operation": op if op in OPS else "UNKNOWN",
+        "effect_observed": False,
+        "reason": "OFF_HOST_SIGNER_UNAVAILABLE_OR_UNPROVEN_CUSTODY",
+        "attended_enrollment_required": True,
+        "minimal_attended_enrollment": {
+            "required_fields": [
+                "source_sha", "epoch", "sid", "expires", "release_root",
+                "files", "chrome_config", "local_app_data", "state_root",
+                "key_file", "legacy_tasks", "runner_tasks", "enabled",
+                "revoked", "private_control_plane", "public_runner_exposed",
+            ],
+            "runner_tasks": list(RUNNER_TASKS),
+            "strategy": STRATEGY,
+            "port": 9333,
+            "public_runners_present": 3,
+            "shared_sid_isolation_claimed": False,
+        },
+    }
+
+
+class D5Receiver:
+    """Closed D5-only private operator receiver.
+
+    Serves the at-logon named-pipe trigger and authenticated D5 requests.
+    Enforces strict enrollment checks, source SHA pinning, replay/TTL guards,
+    and durable native receipts. Default disabled when off-host custody
+    or private enrollment is unproven.
+    """
+    def __init__(self, bridge_or_factory: Callable[[], Bridge] | Bridge | None = None,
+                 *, enrollment_path: Path | None = None,
+                 verify_signed: Callable[[dict], dict] | None = None,
+                 clock: Callable[[], float] = time.time):
+        self._bridge_or_factory = bridge_or_factory
+        self.enrollment_path = enrollment_path
+        self.verify_signed = verify_signed
+        self.clock = clock
+
+    def get_bridge(self) -> Bridge:
+        if callable(self._bridge_or_factory):
+            return self._bridge_or_factory()
+        if isinstance(self._bridge_or_factory, Bridge):
+            return self._bridge_or_factory
+        if self.enrollment_path and self.verify_signed:
+            return private_bridge(self.enrollment_path, verify_signed=self.verify_signed)
+        raise D5Blocked("BLOCKED_NOT_DEPLOYED")
+
+    def handle_logon_trigger(self, trigger_bytes: bytes, client_attestation: dict | None = None) -> dict:
+        """Process incoming trigger on named pipe AI-Commerce-D5-Operator-v1.
+
+        Authenticates client interactive session/SID/elevation, verifies exact
+        trigger payload (<=64 bytes), reloads enrollment and executes Bridge.logon().
+        """
+        if len(trigger_bytes) > 64 or trigger_bytes.strip() != b"D5_LOGON_START_V1":
+            raise D5Blocked("INPUT_INVALID")
+
+        if client_attestation is not None:
+            if (not isinstance(client_attestation, dict)
+                    or client_attestation.get("elevated") is True
+                    or client_attestation.get("session_id", 0) <= 0
+                    or not client_attestation.get("desktop_available")):
+                raise D5Blocked("UNSUPPORTED_SESSION")
+
+        try:
+            bridge = self.get_bridge()
+            policy = bridge.enrollment()
+            now = int(self.clock())
+            policy.validate(now)
+            if client_attestation is not None:
+                if client_attestation.get("sid") != policy.sid:
+                    raise D5Blocked("UNSUPPORTED_SESSION")
+            result = bridge.logon()
+            return {
+                "status": "OBSERVED",
+                "code": "LOGON_TRIGGER_DELIVERED",
+                "operation": "LOGON_TRIGGER",
+                "effect_observed": result.get("effect_observed", False),
+                "bridge_receipt": sanitize_receipt(result),
+                "recorded_at": now,
+            }
+        except D5Blocked as exc:
+            if str(exc) in ("PRIVATE_ENROLLMENT_REQUIRED", "BLOCKED_NOT_DEPLOYED"):
+                return {
+                    "status": "BLOCKED",
+                    "code": "BLOCKED_NOT_DEPLOYED",
+                    "operation": "LOGON_TRIGGER",
+                    "reason": str(exc),
+                }
+            raise
+
+    def handle_request(self, request: dict) -> dict:
+        """Handle incoming authenticated D5 request with full replay/TTL/SHA guards."""
+        try:
+            bridge = self.get_bridge()
+        except D5Blocked as exc:
+            op = request.get("op", "UNKNOWN") if isinstance(request, dict) else "UNKNOWN"
+            if op not in OPS:
+                op = "UNKNOWN"
+            return {
+                "operation": op,
+                "code": "BLOCKED_NOT_DEPLOYED",
+                "status": "BLOCKED",
+                "effect_observed": False,
+                "reason": str(exc),
+            }
+
+        return sanitize_receipt(bridge.invoke(request))
+
+
+class D5IngressBoundary:
+    """Fail-closed ingress boundary from ChatGPT/GitHub to trusted private operator.
+
+    Validates fixed D5 operation enums, rejects any arbitrary command/script/path/PID,
+    refuses to treat public GitHub issues or same-SID runner credentials as signatures,
+    and requires verified off-host signatures.
+    """
+    def __init__(self, receiver: D5Receiver | None = None, *,
+                 verify_off_host_signature: Callable[[dict], bool] | None = None,
+                 off_host_custody_proven: bool = False):
+        self.receiver = receiver
+        self.verify_off_host_signature = verify_off_host_signature
+        self.off_host_custody_proven = off_host_custody_proven
+
+    def evaluate_ingress_request(self, request_payload: dict) -> dict:
+        """Evaluate raw ingress request from ChatGPT / GitHub.
+
+        Enforces closed parameterless schema:
+        Only op, request_id, issued, expires, source_sha, epoch, dry_run, mac/signature.
+        Rejects arbitrary commands, scripts, paths, PIDs, environment variables.
+        """
+        if not isinstance(request_payload, dict):
+            return {
+                "status": "BLOCKED",
+                "code": "INPUT_INVALID",
+                "operation": "UNKNOWN",
+            }
+
+        allowed_keys = {"op", "request_id", "issued", "expires", "source_sha", "epoch", "dry_run", "mac", "signature"}
+        if not set(request_payload).issubset(allowed_keys):
+            return {
+                "status": "BLOCKED",
+                "code": "INPUT_INVALID",
+                "operation": request_payload.get("op", "UNKNOWN") if request_payload.get("op") in OPS else "UNKNOWN",
+            }
+
+        op = request_payload.get("op")
+        if op not in OPS:
+            return {
+                "status": "BLOCKED",
+                "code": "INPUT_INVALID",
+                "operation": "UNKNOWN",
+            }
+
+        # Refuse to treat public GitHub issues or runner-owned keys as private signatures
+        if not self.off_host_custody_proven or self.verify_off_host_signature is None:
+            return create_blocked_not_deployed_evidence(op=op)
+
+        if not self.verify_off_host_signature(request_payload):
+            return {
+                "status": "BLOCKED",
+                "code": "AUTHENTICATION_FAILED",
+                "operation": op,
+            }
+
+        if self.receiver is None:
+            return create_blocked_not_deployed_evidence(op=op)
+
+        return self.receiver.handle_request(request_payload)

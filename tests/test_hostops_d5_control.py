@@ -198,12 +198,38 @@ def test_elevated_wrong_sid_missing_desktop_or_unpinned_source_never_effects(rig
     assert native.effects == []
 
 
-@pytest.mark.parametrize("op", [op for op in d5.OPS if op not in d5.READS])
+@pytest.mark.parametrize("op", [op for op in d5.OPS if op not in d5.READS and op != "STOP_OWNED_D5_CHROME"])
 def test_active_profile_without_listener_holds_every_mutation(rig, op):
     _, native, _, _ = rig
     native.snapshot = CLAIMED.copy()
     assert invoke(rig, op)["code"] == "PROFILE_ALREADY_ACTIVE_NO_CDP"
     assert native.effects == [] and native.profile == b"private cookies preserved"
+
+
+def test_stop_owned_d5_chrome_under_profile_already_active_no_cdp(rig):
+    _, native, _, _ = rig
+    native.snapshot = CLAIMED.copy()
+    # Dry-run returns DRY_RUN without effects
+    assert invoke(rig, "STOP_OWNED_D5_CHROME", 1, dry_run=True)["code"] == "DRY_RUN"
+    assert native.effects == []
+    # Graceful stop succeeds when process exits and observe confirms ABSENT
+    result = invoke(rig, "STOP_OWNED_D5_CHROME", 2)
+    assert result["code"] == "STOPPED"
+    assert result["effect_observed"] is True
+    assert native.effects == ["STOP_OWNED_D5_CHROME"]
+    assert native.snapshot["state"] == "ABSENT"
+
+
+def test_stop_owned_d5_chrome_unverified_exit_raises_unknown_effect(rig, monkeypatch):
+    _, native, _, _ = rig
+    native.snapshot = CLAIMED.copy()
+    def effect_leaving_process(policy, op, snapshot):
+        native.effects.append(op)
+        # Snapshot remains CLAIMED (not ABSENT)
+        return None
+    monkeypatch.setattr(native, "effect", effect_leaving_process)
+    result = invoke(rig, "STOP_OWNED_D5_CHROME")
+    assert result["code"] == "UNKNOWN_EFFECT_HOLD"
 
 
 @pytest.mark.parametrize("after,code", [(CLAIMED, "CDP_LISTENER_LOST"), (ABSENT, "ROOT_PROCESS_LOST"),
@@ -416,3 +442,157 @@ def test_mt01_owner_manifest_has_real_legacy_consumers_and_eight_path_scope():
     work = json.loads((ROOT / "work_items/HOSTOPS_D5_OPERATOR_BRIDGE_001.json").read_text())
     assert len(work["allowed_paths"]) == 8 and work["source_sha"] == BASE
     assert work["native_acceptance"] == "PENDING_GENUINE_HOSTOPS_DEPLOYMENT"
+
+
+def test_d5_receiver_handle_request_lifecycle(rig):
+    policy, native, bridge, _ = rig
+    receiver = d5.D5Receiver(bridge, clock=lambda: NOW)
+    request = d5.sign_request(policy, "STATUS", "1" * 32, NOW)
+    res = receiver.handle_request(request)
+    assert res["code"] == "NOT_RUNNING"
+    assert res["operation"] == "STATUS"
+    assert "private" not in json.dumps(res).lower()
+
+
+def test_d5_receiver_handle_logon_trigger(rig):
+    policy, native, bridge, _ = rig
+    receiver = d5.D5Receiver(bridge, clock=lambda: NOW)
+    attestation = {
+        "sid": policy.sid,
+        "session_id": 1,
+        "elevated": False,
+        "desktop_available": True,
+    }
+    result = receiver.handle_logon_trigger(b"D5_LOGON_START_V1\n", client_attestation=attestation)
+    assert result["status"] == "OBSERVED"
+    assert result["code"] == "LOGON_TRIGGER_DELIVERED"
+    assert result["operation"] == "LOGON_TRIGGER"
+    assert result["bridge_receipt"]["code"] == "READY_ATTACH"
+    assert native.effects.count("START_OR_REUSE_D5_CHROME") == 1
+
+
+def test_d5_receiver_logon_trigger_rejected_inputs(rig):
+    policy, native, bridge, _ = rig
+    receiver = d5.D5Receiver(bridge, clock=lambda: NOW)
+    # Reject wrong payload
+    with pytest.raises(d5.D5Blocked, match="INPUT_INVALID"):
+        receiver.handle_logon_trigger(b"WRONG_TRIGGER\n")
+    # Reject oversized payload
+    with pytest.raises(d5.D5Blocked, match="INPUT_INVALID"):
+        receiver.handle_logon_trigger(b"A" * 65)
+    # Reject elevated client
+    with pytest.raises(d5.D5Blocked, match="UNSUPPORTED_SESSION"):
+        receiver.handle_logon_trigger(b"D5_LOGON_START_V1\n", client_attestation={
+            "sid": policy.sid, "session_id": 1, "elevated": True, "desktop_available": True,
+        })
+    # Reject wrong SID client
+    with pytest.raises(d5.D5Blocked, match="UNSUPPORTED_SESSION"):
+        receiver.handle_logon_trigger(b"D5_LOGON_START_V1\n", client_attestation={
+            "sid": "S-1-5-21-999", "session_id": 1, "elevated": False, "desktop_available": True,
+        })
+    # Reject session 0 (non-interactive)
+    with pytest.raises(d5.D5Blocked, match="UNSUPPORTED_SESSION"):
+        receiver.handle_logon_trigger(b"D5_LOGON_START_V1\n", client_attestation={
+            "sid": policy.sid, "session_id": 0, "elevated": False, "desktop_available": True,
+        })
+
+
+def test_d5_receiver_not_deployed_fail_closed():
+    receiver = d5.D5Receiver(None)
+    result = receiver.handle_request({"op": "STATUS"})
+    assert result["status"] == "BLOCKED"
+    assert result["code"] == "BLOCKED_NOT_DEPLOYED"
+    logon_res = receiver.handle_logon_trigger(b"D5_LOGON_START_V1\n")
+    assert logon_res["status"] == "BLOCKED"
+    assert logon_res["code"] == "BLOCKED_NOT_DEPLOYED"
+
+
+def test_d5_receiver_repeated_logon_delivery_does_not_duplicate_browser(rig):
+    policy, native, bridge, _ = rig
+    receiver = d5.D5Receiver(bridge, clock=lambda: NOW)
+    attestation = {
+        "sid": policy.sid,
+        "session_id": 1,
+        "elevated": False,
+        "desktop_available": True,
+    }
+    r1 = receiver.handle_logon_trigger(b"D5_LOGON_START_V1\n", client_attestation=attestation)
+    assert r1["code"] == "LOGON_TRIGGER_DELIVERED"
+    assert r1["bridge_receipt"]["code"] == "READY_ATTACH"
+    # Second logon delivery reuses existing owned process
+    r2 = receiver.handle_logon_trigger(b"D5_LOGON_START_V1\n", client_attestation=attestation)
+    assert r2["code"] == "LOGON_TRIGGER_DELIVERED"
+    assert r2["bridge_receipt"]["code"] == "READY_ATTACH"
+    assert native.effects.count("START_OR_REUSE_D5_CHROME") == 1
+
+
+def test_ingress_boundary_rejects_arbitrary_commands_scripts_and_paths():
+    boundary = d5.D5IngressBoundary()
+    # Reject arbitrary command
+    res1 = boundary.evaluate_ingress_request({"op": "STATUS", "command": "cmd.exe"})
+    assert res1["status"] == "BLOCKED"
+    assert res1["code"] == "INPUT_INVALID"
+    # Reject arbitrary script
+    res2 = boundary.evaluate_ingress_request({"op": "STATUS", "script": "exploit.ps1"})
+    assert res2["status"] == "BLOCKED"
+    assert res2["code"] == "INPUT_INVALID"
+    # Reject arbitrary PID
+    res3 = boundary.evaluate_ingress_request({"op": "STATUS", "pid": 1234})
+    assert res3["status"] == "BLOCKED"
+    assert res3["code"] == "INPUT_INVALID"
+    # Reject unknown op
+    res4 = boundary.evaluate_ingress_request({"op": "EXECUTE_SHELL"})
+    assert res4["status"] == "BLOCKED"
+    assert res4["code"] == "INPUT_INVALID"
+
+
+def test_ingress_boundary_off_host_custody_absent_returns_blocked_not_deployed():
+    boundary = d5.D5IngressBoundary(off_host_custody_proven=False)
+    res = boundary.evaluate_ingress_request({
+        "op": "STATUS", "request_id": "1" * 32, "issued": NOW, "expires": NOW + 30,
+        "source_sha": "a" * 40, "epoch": 1, "dry_run": False, "mac": "0" * 64,
+    })
+    assert res["status"] == "BLOCKED"
+    assert res["code"] == "BLOCKED_NOT_DEPLOYED"
+    assert res["attended_enrollment_required"] is True
+    assert "minimal_attended_enrollment" in res
+
+
+def test_ingress_boundary_valid_off_host_signed_request_dispatches(rig):
+    policy, native, bridge, _ = rig
+    receiver = d5.D5Receiver(bridge, clock=lambda: NOW)
+    boundary = d5.D5IngressBoundary(receiver, verify_off_host_signature=lambda req: True,
+                                    off_host_custody_proven=True)
+    request = d5.sign_request(policy, "STATUS", "2" * 32, NOW)
+    res = boundary.evaluate_ingress_request(request)
+    assert res["code"] == "NOT_RUNNING"
+    assert res["operation"] == "STATUS"
+
+
+def test_create_blocked_not_deployed_evidence_contains_no_secrets():
+    evidence = d5.create_blocked_not_deployed_evidence(op="STATUS")
+    raw = json.dumps(evidence)
+    assert evidence["status"] == "BLOCKED"
+    assert evidence["code"] == "BLOCKED_NOT_DEPLOYED"
+    assert evidence["attended_enrollment_required"] is True
+    assert "key" not in evidence
+    assert "control.key" not in raw
+    assert "secret" not in raw.lower()
+
+
+def test_sanitize_receipt_preserves_allowlist_only():
+    raw_receipt = {
+        "operation": "STATUS",
+        "code": "READY_ATTACH",
+        "status": "OBSERVED",
+        "effect_observed": False,
+        "internal_path": "C:\\Secret\\Path",
+        "raw_cookie": "secret_cookie",
+        "registered": True,
+    }
+    sanitized = d5.sanitize_receipt(raw_receipt)
+    assert "internal_path" not in sanitized
+    assert "raw_cookie" not in sanitized
+    assert sanitized["operation"] == "STATUS"
+    assert sanitized["code"] == "READY_ATTACH"
+    assert sanitized["registered"] is True
