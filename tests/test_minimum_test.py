@@ -19,6 +19,25 @@ FULL = ["python", "-m", "pytest", "tests", "-q"]
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def _isolate_legacy_selector_mode(monkeypatch):
+    """Legacy MT-01 contracts must not inherit the EF01 V2.1 selector toggle.
+
+    The EF01 Windows runner can set MT01_V21_ENABLED=1 for its *outer* impact
+    planner.  This test module deliberately covers the V1 selector as well;
+    individual V2 tests opt in via monkeypatch.setenv inside their bodies.
+    Only the child pytest process is isolated; runtime/CI policy is unchanged.
+    """
+    monkeypatch.delenv("MT01_V21_ENABLED", raising=False)
+
+
+def test_legacy_selector_mode_does_not_inherit_runner_toggle(monkeypatch):
+    assert os.environ.get("MT01_V21_ENABLED") != "1"
+    monkeypatch.setenv("MT01_V21_ENABLED", "1")
+    assert os.environ["MT01_V21_ENABLED"] == "1"
+
+
+
 @pytest.fixture(scope="module")
 def real_tree():
     files = mt.file_hashes(ROOT)
