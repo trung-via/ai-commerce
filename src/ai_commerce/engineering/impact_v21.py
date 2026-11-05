@@ -72,6 +72,12 @@ CONTROL_TESTS = {
     "src/ai_commerce/engineering/impact_v21.py": (
         "tests/test_mt01_v21.py", "tests/test_minimum_test.py",
     ),
+    # Approved exact D5 operator PowerShell source, narrow reviewed test
+    # closure only; unexpected script paths remain unowned and HOLD.
+    "scripts/AI-Commerce-D5-Attended-CDP.ps1": (
+        "tests/test_ef02_d5_chrome_acquisition.py", "tests/test_minimum_test.py",
+        "tests/test_mt01_v21.py", "tests/test_pr_merge_gate.py",
+    ),
     "src/ai_commerce/remote/validation.py": (
         "tests/test_minimum_test.py", "tests/test_ef02.py",
     ),
