@@ -1,0 +1,27 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "bq-03a",
+  "sources": [
+    "src/ai_commerce/creative_quality/blind_trials.py",
+    "src/ai_commerce/creative_quality/rater_receipts.py",
+    "src/ai_commerce/creative_quality/calibration_stats.py"
+  ],
+  "tests": ["tests/test_bq_03a_blind_calibration.py"],
+  "acs": [
+    "BQ-03a.r6-counterbalanced-blind-trial-plan",
+    "BQ-03a.r6-synthetic-rater-provenance-and-privacy",
+    "BQ-03a.r6-disagreement-bias-uncertainty-report"
+  ],
+  "consumers": [
+    "src/ai_commerce/creative_quality/multimodal_review.py",
+    "src/ai_commerce/creative_quality/t3_assessment.py",
+    "src/ai_commerce/creative_quality/t2_sampling.py",
+    "src/ai_commerce/creative_quality/critic.py",
+    "src/ai_commerce/creative_quality/quality_review.py",
+    "src/ai_commerce/creative_quality/inspection_evidence.py",
+    "src/ai_commerce/creative_quality/behavioral.py",
+    "src/ai_commerce/creative_quality/causality.py",
+    "src/ai_commerce/creative/briefs.py"
+  ],
+  "contracts": []
+}
