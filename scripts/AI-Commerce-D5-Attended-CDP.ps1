@@ -92,6 +92,22 @@ try {
         if ($found.Count -eq 0) { Stop-Bounded 'REPAIR_KNOWN_CONFIG_ABSENT' }
         if ($found.Count -ne 1) { Stop-Bounded 'REPAIR_KNOWN_CONFIG_AMBIGUOUS' }
         $ChromeConfig = [string]$found[0]
+        # Reject reparse/junction components and symlinks; never follow them
+        # for a private config WRITE, even if the fixed name appears valid.
+        try {
+            $cursor = [IO.Path]::GetFullPath($ChromeConfig)
+            while ($true) {
+                $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+                if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    Stop-Bounded 'REPAIR_REPARSE_DENIED'
+                }
+                $parent = Split-Path -Path $cursor -Parent
+                if ([string]::IsNullOrEmpty($parent) -or $parent -eq $cursor) { break }
+                $cursor = $parent
+            }
+        } catch {
+            Stop-Bounded 'REPAIR_REPARSE_CHECK_UNAVAILABLE'
+        }
         $probeArgs = @('-m', 'ai_commerce.remote.chrome_acquisition',
             'probe', '--config', $ChromeConfig, '--checkout', $checkout)
         # The existing Chrome acquisition layer checks exact local owner ACL,
