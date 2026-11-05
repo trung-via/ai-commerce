@@ -176,43 +176,56 @@ Old private W1.3 Issues #6/#7 and signed requests remain **CONSUMED / NO_RETRY**
 
 `SOURCE_MERGED`, `RUNNER_JOB_OBSERVED`, `READ_RETURNED` and `WRITE_DISK_VERIFIED` are separate. Do not claim a live laptop operation based on CI, source code or an Issue created by ChatGPT alone.
 
-## Standing READ source recovery and public transport dependency
+## Standing READ — merged public transport and privacy-limited metadata extension
 
-The parameterless `standing_read_diagnostics` READ has a source-owned,
-sixteen-category snapshot. Each ordered row contains only `category` and a
-category-specific `code` enum. Exact types, order, count, fields and serialized
-size (at most 8192 bytes) are validated by `_validate_standing_snapshot`.
-There are no Issue-selected paths, ports, processes, commands or PowerShell.
+The parameterless `standing_read_diagnostics` READ has a source-owned
+16-category snapshot. Each row has only `category` and an allowlisted `code`;
+the Python producer and the protected JavaScript sanitizer independently
+validate exact order/types, canonical JSON, issue/source binding and at most
+8192 bytes before publishing to a public Issue. The issue cannot choose a
+path, profile, port, command, task, process, private file, or extra field.
 
-The internal snapshot reduces the existing fixed CDP 9333 and three-runner
-probes to enums, distinguishes task state from listener presence, and reports
-Git tracked-change state and Python runtime support. Chrome profile/config/
-marker contents and private D5 metadata remain `PRIVATE_READ_CHANNEL_REQUIRED`:
-this route has no enrolled independent private channel and does not guess
-private paths or read those files. It never claims exact-chat, signed Chrome,
-D5 readiness or Wake proof from these diagnostics. Missing or failed probes
-remain `UNAVAILABLE`; exception text and raw native output are not findings.
+**Proven source and live READ baseline:** PR #379 merged into
+`main@f20ef7409fdbb4732b547657d09cb2d4a7d766b8`.
+Windows hosted MT01 run #41943714455 returned 386 passed and
+`PASS_BASELINE_CLOSURE`. A new owner-authored READ Issue #381 returned
+`OBSERVED` for all 16 sanitized categories on dedicated
+`AI-COMMERCE-HOSTOPS-01` in run #41944315328; no recurring Human approval
+was required for that safe READ. Its observed Chrome CDP 9333 listener was
+`ABSENT`. Historical failed #368/#370 attempts are not replayed.
 
-**PUBLIC TRANSPORT — protected workflow candidate for #371:** The previous
-source-only PR #376 intentionally returned `PUBLIC_TRANSPORT_GAP` because the
-protected Issue ingress did not know how to validate `diagnostics`. This
-separately reviewed follow-up changes both source `PERSONAL_PUBLIC_FIELDS`
-and `.github/workflows/issue-ingress.yml` together, with an independent strict
-16-row fixed-order/category/code validator, canonical JSON and size checks,
-exact Issue/source binding and a public-only output projection. Malformed,
-duplicate-key, reordered, unexpected and private fields are rejected as
-`BLOCKED / INVALID_PUBLIC_DIAGNOSTIC_RECEIPT`; no `content_utf8` workaround
-is permitted. The new field is removed for all legacy operations.
+**Current proposed extension (not yet deployed):** add local-only D5
+metadata classification. Only three literal config candidates under
+`%LOCALAPPDATA%/AI-Commerce` are permitted, matching the bounded candidate
+list in D5 attended source; optional manifest-supplied arbitrary config paths
+are *not followed*. The fixed `wake-readiness.json` manifest is checked
+by file metadata only, never read. If exactly one known config candidate is
+present, the existing `chrome_acquisition.load_environment` validator reads
+at most 8192 local bytes and checks version, exact schema, dedicated profile,
+local allowed parent and CDP endpoint; the request/Issue sees only one of
+the fixed enums `KNOWN_CONFIG_EXACT_9333`, `KNOWN_CONFIG_OTHER_PORT`,
+`KNOWN_CONFIG_NOT_VERIFIED`, `KNOWN_CANDIDATES_AMBIGUOUS`,
+`KNOWN_CANDIDATES_ABSENT` or `UNAVAILABLE`. It never posts the config,
+Chrome executable/profile directory, raw errors or environment variables.
 
-**Not yet LIVE:** These are proposed branch changes, not installed capability.
-They require exact-HEAD Windows CI, independent Brain review, trusted merge to
-main, and one genuine new owner-authored `[HOSTOPS READ]` request on
-`AI-COMMERCE-HOSTOPS-01` before claiming `READ_RETURNED`. A source or CI PASS
-alone is not an independent laptop receipt. Profile/config/markers/D5 remain
-`PRIVATE_READ_CHANNEL_REQUIRED` unless separately reviewed metadata-only
-diagnostics gain a suitable private or privacy-preserving channel. The Human's
-exact new `APPROVE WRITE #N` remains mandatory for every WRITE; Chrome launch,
-navigation, Send, Wake, credential access and D2 mutation are outside READ.
+The profile status reports only whether that validator observed a dedicated
+directory; lock-marker checks use metadata (stat) for four fixed names only,
+never reading marker bytes or mutating them. A lock marker is **not** proof of
+a running browser. The D5 manifest existence is **not** proof of readiness.
+These statuses are not Chrome signature verification, successful authenticated
+exact ChatGPT tab, CDP 9333 connected, effective D5 authority, credential
+custody, or an authorization to launch/send. Unknown or unsafe/reparse paths
+fail closed to `UNAVAILABLE` or `UNVERIFIED`.
+
+After the protected source vocabulary and workflow sanitizer change passes
+exact HEAD/base Windows CI and independent Brain review, merge through the
+trusted PASS mechanism. Then issue **one new** fixed owner READ and verify
+real runner codes before claiming the metadata extension live. No raw private
+bytes are ever sent to GitHub; arbitrary private reading and all HostOps
+WRITE/Chrome launch/navigation/Wake actions remain separately gated by Human
+authorization and existing trust boundaries.
+
+### Historical #372 recovery notes (preserved)
 
 This recovery is new source authorship: `ARTIFACT_REUSE_UNAVAILABLE`. The normal
 repository tool returned #370 artifact 13374903964 from run 41936937393 attempt

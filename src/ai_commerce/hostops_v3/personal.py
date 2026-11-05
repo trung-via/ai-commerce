@@ -32,13 +32,18 @@ PUBLIC_EXTENSIONS = {".md", ".py", ".json", ".yml", ".yaml", ".toml", ".cjs", ".
 MAX_READ = 8192
 MAX_WRITE = 2048
 
-# Source-owned vocabulary; no Issue-supplied selectors or free-form findings.
-# Private config/profile/marker and D5 values have no independently enrolled
-# public read channel here. Do not infer their paths from process commands.
+# Source-owned PUBLIC vocabulary. Private config is locally validated by the
+# existing acquisition contract and reduced to fixed enums; path/name/JSON
+# contents never leave the runner. Only three known fixed config candidates and
+# the fixed D5 manifest name are considered. Manifest-provided config paths
+# and private browser state remain outside this operation.
 _STANDING_CATEGORY_CODES = {
-    "chrome_profile": ("PRIVATE_READ_CHANNEL_REQUIRED",),
-    "chrome_config": ("PRIVATE_READ_CHANNEL_REQUIRED",),
-    "chrome_markers": ("PRIVATE_READ_CHANNEL_REQUIRED",),
+    "chrome_profile": ("UNVERIFIED", "DEDICATED_DIR_PRESENT", "UNAVAILABLE"),
+    "chrome_config": ("UNAVAILABLE", "KNOWN_CANDIDATES_ABSENT", "KNOWN_CANDIDATES_AMBIGUOUS",
+                      "KNOWN_CONFIG_NOT_VERIFIED", "KNOWN_CONFIG_EXACT_9333",
+                      "KNOWN_CONFIG_OTHER_PORT"),
+    "chrome_markers": ("UNVERIFIED", "LOCK_MARKER_PRESENT",
+                       "LOCK_MARKERS_ABSENT", "UNAVAILABLE"),
     "cdp_9333_listener": ("ABSENT", "EXACT_LOOPBACK", "UNSAFE_BINDING", "UNAVAILABLE"),
     "chrome_process": ("MATCHED", "UNVERIFIED", "UNAVAILABLE"),
     "chrome_session": ("MATCHED", "UNVERIFIED", "UNAVAILABLE"),
@@ -51,7 +56,7 @@ _STANDING_CATEGORY_CODES = {
     "hostops_01_listener": ("PRESENT", "ABSENT", "UNAVAILABLE"),
     "repo_git": ("CLEAN", "TRACKED_CHANGES", "UNAVAILABLE"),
     "python_runtime": ("SUPPORTED", "UNSUPPORTED"),
-    "d5_metadata": ("PRIVATE_READ_CHANNEL_REQUIRED",),
+    "d5_metadata": ("UNAVAILABLE", "MANIFEST_PRESENT", "MANIFEST_ABSENT"),
 }
 STANDING_READ_CATEGORIES = tuple(_STANDING_CATEGORY_CODES)
 STANDING_READ_CODES = frozenset(code for codes in _STANDING_CATEGORY_CODES.values() for code in codes)
@@ -579,17 +584,126 @@ def _validate_standing_snapshot(snapshot):
     return result
 
 
-def _standing_read_snapshot():
-    """Internal enum snapshot only; never reads private config/profile/ledger bytes.
+def _fixed_private_metadata_kind(path: Path, *, directory: bool = False) -> str:
+    """Stat only one fixed path and its ancestors, never follow reparse points.
 
-    Existing fixed probes independently observe listener/session/protocol and
-    three runner tasks. No launch, task mutation, browser tab or Wake API.
-    Unknown probe results stay UNAVAILABLE; exceptions never become findings.
+    No file content, directory listing, arbitrary user path or name is returned.
+    Missing and unreadable/unsafe paths are different. These checks are advisory
+    metadata, not ownership, signature, active session or D5 readiness proof.
+    """
+    try:
+        for item in (path, *path.parents):
+            info = item.lstat()
+            if (stat.S_ISLNK(info.st_mode) or
+                    getattr(info, "st_file_attributes", 0) &
+                    getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)):
+                return "UNAVAILABLE"
+            if item == path and not (stat.S_ISDIR(info.st_mode) if directory
+                                     else stat.S_ISREG(info.st_mode)):
+                return "UNAVAILABLE"
+        return "PRESENT"
+    except FileNotFoundError:
+        return "ABSENT"
+    except (OSError, ValueError, TypeError):
+        return "UNAVAILABLE"
+
+
+def _private_d5_metadata_codes():
+    """Bounded local-only metadata preflight; emits four fixed public enums.
+
+    Reuse the real Chrome acquisition *validator* for one of three literal
+    config locations. It may read that single <=8KiB private config locally,
+    but returns no values, file names, paths, exceptions or raw content.
+    No profile contents, Chrome tabs, tokens, D5 ledger or external calls.
+    A manifest-selected alternative config is deliberately NOT followed.
+    """
+    codes = {
+        "chrome_profile": "UNVERIFIED",
+        "chrome_config": "UNAVAILABLE",
+        "chrome_markers": "UNVERIFIED",
+        "d5_metadata": "UNAVAILABLE",
+    }
+    raw_local = os.environ.get("LOCALAPPDATA")
+    if type(raw_local) is not str or not raw_local:
+        return codes
+    local = Path(raw_local)
+    if not local.is_absolute():
+        return codes
+    private_root = local / "AI-Commerce"
+    root_kind = _fixed_private_metadata_kind(private_root, directory=True)
+    if root_kind == "ABSENT":
+        codes["chrome_config"] = "KNOWN_CANDIDATES_ABSENT"
+        codes["d5_metadata"] = "MANIFEST_ABSENT"
+        return codes
+    if root_kind != "PRESENT":
+        return codes
+    manifest = _fixed_private_metadata_kind(private_root / "wake-readiness.json")
+    codes["d5_metadata"] = (
+        "MANIFEST_PRESENT" if manifest == "PRESENT" else
+        "MANIFEST_ABSENT" if manifest == "ABSENT" else "UNAVAILABLE")
+    candidates = (
+        private_root / "Chrome-Acquisition" / "config.json",
+        private_root / "chrome.json",
+        private_root / "chrome-acquisition.json",
+    )
+    checks = tuple(_fixed_private_metadata_kind(candidate) for candidate in candidates)
+    if "UNAVAILABLE" in checks:
+        return codes
+    found = [candidate for candidate, state in zip(candidates, checks)
+             if state == "PRESENT"]
+    if not found:
+        codes["chrome_config"] = "KNOWN_CANDIDATES_ABSENT"
+        return codes
+    if len(found) != 1:
+        codes["chrome_config"] = "KNOWN_CANDIDATES_AMBIGUOUS"
+        return codes
+    try:
+        from ai_commerce.remote import chrome_acquisition
+        checkout = Path(__file__).resolve().parents[3]
+        env = chrome_acquisition.load_environment(
+            found[0], checkout, local_app_data=local)
+        # A valid acquisition contract is not proof of a signed Chrome
+        # executable or an authenticated exact ChatGPT tab.
+        if (_fixed_private_metadata_kind(env.user_data_dir, directory=True) != "PRESENT"
+                or _fixed_private_metadata_kind(
+                    env.user_data_dir / env.profile_directory, directory=True) != "PRESENT"):
+            codes["chrome_config"] = "KNOWN_CONFIG_NOT_VERIFIED"
+            return codes
+        codes["chrome_config"] = (
+            "KNOWN_CONFIG_EXACT_9333" if env.port == 9333
+            else "KNOWN_CONFIG_OTHER_PORT")
+        codes["chrome_profile"] = "DEDICATED_DIR_PRESENT"
+        marker_states = tuple(_fixed_private_metadata_kind(env.user_data_dir / name)
+                              for name in chrome_acquisition._MARKERS)
+        codes["chrome_markers"] = (
+            "UNAVAILABLE" if "UNAVAILABLE" in marker_states else
+            "LOCK_MARKER_PRESENT" if "PRESENT" in marker_states else
+            "LOCK_MARKERS_ABSENT")
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError, ImportError):
+        codes["chrome_config"] = "KNOWN_CONFIG_NOT_VERIFIED"
+    return codes
+
+
+def _standing_read_snapshot():
+    """Read fixed operational probes; only public enum codes leave runner.
+
+    A single locally verified, bounded private Chrome config may be parsed
+    strictly via the existing acquisition validator. Its bytes, profile paths,
+    marker names, private D5 manifest and all failures remain local. Never
+    infer browser login, an exact ChatGPT chat, Chrome signature or Wake.
     """
     if os.name != "nt":
         deny("STANDING_READ_WINDOWS_ONLY")
     codes = {category: allowed[0] if len(allowed) == 1 else "UNAVAILABLE"
              for category, allowed in _STANDING_CATEGORY_CODES.items()}
+    try:
+        private_codes = _private_d5_metadata_codes()
+        for key in ("chrome_profile", "chrome_config", "chrome_markers", "d5_metadata"):
+            value = private_codes[key]
+            if value in _STANDING_CATEGORY_CODES[key]:
+                codes[key] = value
+    except (OSError, ValueError, TypeError, KeyError, ImportError):
+        pass
     try:
         cdp = _cdp_9333_status()
     except (Denied, OSError, ValueError, KeyError, TypeError):
