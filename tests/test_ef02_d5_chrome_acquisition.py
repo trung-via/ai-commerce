@@ -408,7 +408,8 @@ def test_repair_preflight_diagnostic_contract_has_exact_source_owned_code_catalo
                    "src" / "ai_commerce" / "remote" / "chrome_acquisition.py").read_text(encoding="utf-8")
     helper = script.split("function Get-Repair-Preflight-Code", 1)[1].split(
         "if ($env:GITHUB_ACTIONS", 1)[0]
-    allowed = set(re.findall(r"'([A-Z0-9_]{3,90})'", helper))
+    literal_enum = helper.split("$allowed = @(", 1)[1].split("\n    )", 1)[0]
+    allowed = set(re.findall(r"'([A-Z0-9_]{3,90})'", literal_enum))
     defined = set(re.findall(r'AcquisitionBlocked\("([A-Z0-9_]+)"\)', acquisition))
     assert allowed == defined and len(allowed) >= 25
     assert "CHROME_ACQUISITION_BLOCKED: ([A-Z0-9_]{1,90})$" in helper
