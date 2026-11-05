@@ -27,7 +27,12 @@ $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction Stop |
     Where-Object { $_.LocalPort -eq $portNumber } |
     Select-Object LocalAddress, OwningProcess)
 $processes = @(Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction Stop |
-    Select-Object ProcessId, ExecutablePath, CommandLine, SessionId)
+    ForEach-Object {
+        $owner = Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -ErrorAction Stop
+        [pscustomobject]@{ ProcessId=$_.ProcessId; ExecutablePath=$_.ExecutablePath;
+            CommandLine=$_.CommandLine; SessionId=$_.SessionId; OwnerSid=$owner.Sid;
+            CreationDate=$_.CreationDate.ToUniversalTime().ToString('o') }
+    })
 @{listeners=$listeners; processes=$processes} | ConvertTo-Json -Depth 5 -Compress
 """
 
@@ -57,7 +62,16 @@ class ChromeEnvironment:
 
 def _no_links(path: Path) -> bool:
     """Do not follow a link in any existing ancestor of a trusted path."""
-    return not any(part.is_symlink() for part in (path, *path.parents))
+    for part in (path, *path.parents):
+        try:
+            info = part.lstat()
+            if part.is_symlink() or getattr(info, "st_file_attributes", 0) & 0x400:
+                return False
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return False
+    return True
 
 
 def _inside(path: Path, parent: Path) -> bool:
@@ -307,7 +321,7 @@ def _rows(value) -> list[dict]:
 
 
 def evaluate(env: ChromeEnvironment, inventory: dict, *, parse=_commandline_argv,
-             session_id: int) -> tuple[str, int | None]:
+             session_id: int, expected_sid: str | None = None) -> tuple[str, int | None]:
     """Return ABSENT or OWNED only with nonambiguous loopback/process evidence."""
     try:
         listeners = _rows(inventory["listeners"])
@@ -323,6 +337,10 @@ def evaluate(env: ChromeEnvironment, inventory: dict, *, parse=_commandline_argv
             argv = parse(commandline)
             if any(arg.startswith("--type=") for arg in argv):
                 continue
+            profile_args = [arg for arg in argv if arg.lower().startswith("--user-data-dir")]
+            if profile_args and (len(profile_args) != 1 or
+                                 not profile_args[0].startswith("--user-data-dir=")):
+                raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
             path_arg = _switch(argv, "--user-data-dir")
             if path_arg:
                 try:
@@ -341,7 +359,9 @@ def evaluate(env: ChromeEnvironment, inventory: dict, *, parse=_commandline_argv
         if (proc is None or type(proc.get("SessionId")) is not int
                 or proc["SessionId"] != session_id or not isinstance(proc.get("ExecutablePath"), str)
                 or not _identity_matches(env, proc["ExecutablePath"], parse(proc["CommandLine"]))
-                or len(claimed) != 1 or claimed[0] is not proc):
+                or len(claimed) != 1 or claimed[0] is not proc
+                or (expected_sid is not None and (proc.get("OwnerSid") != expected_sid
+                    or not isinstance(proc.get("CreationDate"), str) or not proc["CreationDate"]))):
             raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
         return "OWNED", proc["ProcessId"]
     except AcquisitionBlocked:
@@ -441,6 +461,20 @@ def run(env: ChromeEnvironment, *, launch: bool, opt_in: bool) -> dict:
         if child.poll() is not None:
             break
     raise AcquisitionBlocked("LAUNCH_UNPROVEN")
+
+
+def verify_playwright_attach(env: ChromeEnvironment) -> None:
+    """Old acquisition -> attach contract; no pages, URLs, cookies or messages.
+
+    Stop only the client transport. Browser.close() would affect the owned
+    browser and is deliberately never called. The bridge rechecks ownership
+    before and after this probe; this is not login or manifest acceptance.
+    """
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as client:
+        browser = client.chromium.connect_over_cdp(env.endpoint, timeout=3000)
+        if not browser.is_connected():
+            raise AcquisitionBlocked("CDP_PROTOCOL_UNAVAILABLE")
 
 
 def main(argv: list[str] | None = None) -> int:
