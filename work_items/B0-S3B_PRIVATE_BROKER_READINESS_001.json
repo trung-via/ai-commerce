@@ -1,0 +1,1330 @@
+{
+  "schema_version": "PULSESourceWorkItem.v1",
+  "id": "B0-S3B_PRIVATE_BROKER_READINESS_001",
+  "action_id": "B0-S3B-BROKER-SELECTION-READINESS-01",
+  "state": "S3B_SELECTION_AND_ATTESTATION_PLAN_ONLY",
+  "live_state": "HUMAN_PLATFORM_AND_AUTHENTICATOR_SELECTION_PENDING",
+  "private_custody_verified": "UNKNOWN",
+  "live_verified_status": "IMPOSSIBLE_FROM_THIS_SOURCE_CUT",
+  "baseline_sha": "c7ae34c5a670277aaadbd422404fd41a06959d11",
+  "executor_pin": {
+    "executor": "antigravity",
+    "model": "gemini-4-argon",
+    "model_display": "Gemini 4 Argon",
+    "effort": "medium",
+    "override_mode": "HUMAN_EXPLICIT",
+    "fallback_permitted": false
+  },
+  "human_authorization": {
+    "actor": "Human @AI Commerce",
+    "date": "2026-11-05",
+    "supplied_statement": "ok tiếp tục, sử dụng antigravity gemini 4 argon medium",
+    "provenance": "HUMAN_SUPPLIED_SOURCE_AUTHORIZATION_NOT_LIVE_BROKER_OR_CUSTODY_ENROLLMENT",
+    "scope": "Exactly eight add-only files: vendor-neutral off-host broker selection matrix, isolation attestation plan and threat table T01..T20, pure stdlib untrusted broker intake parser, fail-closed broker readiness model, 260 synthetic offline tests, data-only MT01 component owner manifest, work item and source handoff",
+    "research_ref": "https://github.com/trung-via/ai-commerce/issues/356",
+    "merged_predecessors": [
+      "PR #365 (B0-S.1/S.2)",
+      "PR #374 (B0-S.3a)"
+    ],
+    "roadmap_refs": [
+      "PA2 B0-S.3 G05",
+      "PA2 B0-S.3 G08"
+    ]
+  },
+  "preflight": {
+    "head_exact": true,
+    "worktree_clean": true,
+    "exactly_eight_allowed_targets_absent": true,
+    "applicable_agents_md_found": false,
+    "protected_files_count": 806,
+    "protected_worktree_sha256": "9317ab913fccb9fe1c11767c62f033bfab1c51b92d564f40d0f260012ce31ad3",
+    "method": "Read-only git rev-parse/status/diff and full protected worktree SHA-256 fingerprint before and after verification"
+  },
+  "allowed_paths": [
+    "docs/security/B0_S3B_BROKER_SELECTION_MATRIX_V1.md",
+    "docs/security/B0_S3B_ISOLATION_ATTESTATION_PLAN_V1.md",
+    "src/ai_commerce/production_runtime/broker_intake.py",
+    "src/ai_commerce/production_runtime/broker_readiness.py",
+    "tests/test_b0_s3b_broker_readiness.py",
+    "work_items/mt01-components/b0-s3b.json",
+    "work_items/B0-S3B_PRIVATE_BROKER_READINESS_001.json",
+    "docs/engineering/B0_S3B_SOURCE_HANDOFF.md"
+  ],
+  "owner": "b0-s3b",
+  "owner_manifest": "work_items/mt01-components/b0-s3b.json",
+  "acceptance_ids": [
+    "B0-S.3b.broker-selection-readiness",
+    "B0-S.3b.private-isolation-evidence-gates"
+  ],
+  "stages": {
+    "S3A_PRIVATE_CUSTODY": "UNKNOWN",
+    "S3B_SOURCE_STATE": "S3B_SELECTION_AND_ATTESTATION_PLAN_ONLY",
+    "LIVE_SELECTION_STATE": "HUMAN_PLATFORM_AND_AUTHENTICATOR_SELECTION_PENDING",
+    "PRIVATE_CUSTODY_VERIFIED": "UNKNOWN",
+    "LIVE_VERIFIED": "IMPOSSIBLE_IN_THIS_CUT",
+    "EXTERNAL_EFFECT_POLICY": "HOLD_PRIVATE_VERIFIER_NOT_ENROLLED",
+    "candidate_branch": "NOT_RELEASED_BY_EXECUTOR_OUTER_EF02_WORKER_ONLY"
+  },
+  "positive_acceptance": {
+    "B0-S.3b.broker-selection-readiness": [
+      "Primary-sourced vendor-neutral matrix comparing P1 (Cloudflare Workers + Durable Objects + secret binding), P2 (Azure Managed Compute + Key Vault + Managed Identity), P3 (Google Cloud Run + Secret Manager + transactional store), and P4 (separate device broker) against rejected same-SID/KMS-only/Passkey-only baselines",
+      "Conditional preferred off-host broker architecture pattern where broker holds provider credentials, maintains outside-SID durable nonce/idempotency/semantic-target/budget/epoch indexes, checks independent Human WYSIWYS consent, and never returns bearer tokens to Z1/Z2",
+      "Explicit threat modeling of compromised cloud deploy admin and separation of independent auditor and WYSIWYS display from cloud IAM and deployment roles",
+      "Selection gates G01..G10 and credential-free positive/negative trial tasks using synthetic non-secret canaries",
+      "Pure stdlib closed canonical intake for BrokerSelectionDraft.v1, BrokerIsolationClaimDraft.v1, and BrokerReceiptDraft.v1 normalizing every input as UNTRUSTED"
+    ],
+    "B0-S.3b.private-isolation-evidence-gates": [
+      "Stepwise future read-only installation checklist, 20-threat table T01..T20, and strict DESIGNED / SIMULATED_ONLY / UNPROVEN / LIVE_VERIFIED evidence tiers",
+      "Deterministic readiness evaluator capped at DESIGN_READY_FOR_HUMAN_SELECTION or HOLD/REJECT; never emits AUTHORIZED, GRANT_ACCEPTED, ENROLLED, ALLOW_EXTERNAL, VALIDATED_CUSTODY, or LIVE_VERIFIED",
+      "All simulated isolated, keys_safe, human_verified, and provider_ready claims forced to UNPROVEN; self-certified broker objects rejected",
+      "Fail-closed gates for vendor pre-selection, unsafe architecture pattern, same-SID access, cloud deploy admin overlap, long-lived bearer or KMS/secret binding without full policy, WebAuthn UV without WYSIWYS, replay/idempotency/semantic-target rekey, budget reservation, epoch rollback/revoke/incident kill, scope tamper, and UNKNOWN_EFFECT retention",
+      "260 parametrized synthetic tests and data-only MT01 component owner manifest with full B0-S2, B0-S3a, and B0.1-B0.4 consumer closure"
+    ]
+  },
+  "negative_acceptance": [
+    "Never AUTHORIZED, GRANT_ACCEPTED, ENROLLED, ALLOW_EXTERNAL, VALIDATED_CUSTODY, or LIVE_VERIFIED",
+    "Never select a live vendor, purchase an account, enroll a key/secret, or contact a network/provider endpoint",
+    "Never accept KMS access, Worker secret binding, or WebAuthn UV alone as full transaction policy or WYSIWYS consent",
+    "Never allow broker self-certification via JSON object or overlap between same-SID runner and cloud deploy admin",
+    "Never retry, rekey, or release budget reservation after UNKNOWN_EFFECT, timeout, or unverified receipt claim",
+    "Never leak secret canaries, bearer tokens, private host paths, phone numbers, or account identifiers in errors or readiness reports",
+    "Never modify protected B0-S1/S2, B0-S3a, B0.1-B0.4, contracts, HostOps, EF01/EF02, .github, or model configuration files",
+    "Never perform git write subcommands from the code executor"
+  ],
+  "risk_and_evidence": {
+    "evidence_tiers": {
+      "DESIGNED": "Architecture matrix, isolation attestation plan, and closed draft/gate specifications present in source",
+      "SIMULATED_ONLY": "260 offline synthetic tests in test_b0_s3b_broker_readiness.py verified with 12 xdist workers",
+      "UNPROVEN": "All live isolation, key custody, independent Human WYSIWYS display, durable outside-SID replay/budget storage, out-of-band auditor, and native non-elevated Windows file symlink controls",
+      "LIVE_VERIFIED": "IMPOSSIBLE_IN_THIS_CUT"
+    },
+    "forced_unproven_claims": {
+      "isolated": "UNPROVEN",
+      "keys_safe": "UNPROVEN",
+      "human_verified": "UNPROVEN",
+      "provider_ready": "UNPROVEN"
+    },
+    "external_effect_ceiling": "HOLD_PRIVATE_VERIFIER_NOT_ENROLLED",
+    "custody_gate_ceiling": "ISSUER_NOT_ENROLLED"
+  },
+  "historical_negative_siblings": {
+    "b0_s1_s2_handoff": {
+      "source": "docs/engineering/B0_S1_S2_SOURCE_HANDOFF.md",
+      "passed": 3654,
+      "failed": 7,
+      "skipped": 23,
+      "not_executed": 9
+    },
+    "b0_s3a_handoff": {
+      "source": "docs/engineering/B0_S3_SOURCE_HANDOFF.md",
+      "passed": 4017,
+      "failed": 19,
+      "skipped": 23,
+      "not_executed": 9,
+      "b0_3_under_30_group_load": {
+        "selected": 55,
+        "passed": 37,
+        "failed": 16,
+        "skipped": 2
+      }
+    },
+    "meaning": "Historical broad-closure diagnostic records preserved untouched; current 7-group scoped B0 closure passed 973/975 with 0 failures and 2 native symlink skips, which does not erase historical broad-suite records or establish live custody."
+  },
+  "verification": {
+    "maximum_verify_fix_rounds": 2,
+    "rounds_used": 1,
+    "rounds_remaining": 1,
+    "state": "SCOPED_LOCAL_VERIFICATION_PASSED_WITH_TWO_NATIVE_SYMLINK_SKIPS__POSTEXECUTOR_EF01_PENDING",
+    "local_manifest_admission": {
+      "status": "VALIDATED_DATA_ONLY_NOT_VERIFICATION_PASS",
+      "manifest_path": "work_items/mt01-components/b0-s3b.json",
+      "manifest_sha256": "fbe9b6787ccc5d9afb60ccd16a1cce5640d3e916c21fd1df2cacc09b1578366c"
+    },
+    "affected_consumer_closure": {
+      "status": "AFFECTED_SCOPED_OWNER_AND_CONSUMER_CLOSURE",
+      "mode": "AFFECTED",
+      "reason_codes": [
+        "ONBOARD_CONSUMER_OWNER_CLOSURE"
+      ],
+      "missing_mapping": [],
+      "selected_groups": [
+        "b0-1",
+        "b0-2",
+        "b0-3",
+        "b0-4",
+        "b0-s",
+        "b0-s3",
+        "b0-s3b"
+      ],
+      "selected_tests": [
+        "tests/test_b0_2_journal.py",
+        "tests/test_b0_3_attended_worker.py",
+        "tests/test_b0_4_operator.py",
+        "tests/test_b0_production_contracts.py",
+        "tests/test_b0_s3_custody_boundary.py",
+        "tests/test_b0_s3b_broker_readiness.py",
+        "tests/test_b0_s_trust_boundary.py"
+      ]
+    },
+    "runtime_environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "python": "3.14.7",
+      "pytest": "9.2.0",
+      "pytest_xdist": "3.8.0",
+      "ffmpeg": "9.0.1-essentials_build-www.gyan.dev",
+      "ffprobe": "9.0.1-essentials_build-www.gyan.dev"
+    },
+    "local_summary": {
+      "distinct_groups": 7,
+      "selected": 975,
+      "collected": 975,
+      "executed": 973,
+      "passed": 973,
+      "failed": 0,
+      "skipped": 2,
+      "errors": 0,
+      "not_executed_count": 0,
+      "b0_s3b_passed": 260,
+      "all_7_groups_observed_12_collecting_workers": true,
+      "all_7_groups_worker_collection_hashes_equal": true,
+      "elapsed_seconds_sum": 137.863,
+      "skipped_controls": [
+        {
+          "group": "b0-4",
+          "skipped": 1,
+          "test_ids": [
+            "tests/test_b0_4_operator.py::test_real_file_symlink_or_unproven"
+          ],
+          "status": "UNPROVEN_WINDOWS_FILE_SYMLINK_PRIVILEGE_NOT_GRANTED"
+        },
+        {
+          "group": "b0-3",
+          "skipped": 1,
+          "test_ids": [
+            "tests/test_b0_3_attended_worker.py::test_actual_file_symlink_when_host_permits"
+          ],
+          "status": "UNPROVEN_WINDOWS_FILE_SYMLINK_PRIVILEGE_NOT_GRANTED"
+        }
+      ]
+    },
+    "rounds": [
+      {
+        "round": 1,
+        "state": "PASSED_ZERO_FAILURES_TWO_NATIVE_SYMLINK_SKIPS_PRESERVED",
+        "groups": [
+          {
+            "round": 1,
+            "group": "b0-s3b",
+            "base_sha": "c7ae34c5a670277aaadbd422404fd41a06959d11",
+            "observation": "LOCAL_WINDOWS_EXECUTOR_DIAGNOSTIC_NOT_AUTHENTICATED_SELFHOST_OR_POSTEXECUTOR_EF01",
+            "registered_profile": "mt01-component-onboarding",
+            "registered_argv": [
+              "python",
+              "-m",
+              "pytest",
+              "tests/test_b0_s3b_broker_readiness.py",
+              "-q",
+              "-n",
+              "12"
+            ],
+            "diagnostic_options": [
+              "cache_dir=SESSION_TEMP",
+              "basetemp=SESSION_TEMP"
+            ],
+            "selected": 260,
+            "collected": 260,
+            "executed": 260,
+            "passed": 260,
+            "failed": 0,
+            "skipped": 0,
+            "errors": 0,
+            "not_executed": [],
+            "unreported": [],
+            "deselected": 0,
+            "omission_reason": null,
+            "workers_requested": 12,
+            "workers_actual": 12,
+            "collections": {
+              "gw0": {
+                "worker_id": "gw0",
+                "collected": 260,
+                "ordered_sha256": "78a9e73ba7fc56565c46a148bf4a4467ed469708e26cab2453c1d1f2ea27cace",
+                "call_reports": 20,
+                "completion": "COMPLETED"
+              },
+              "gw1": {
+                "worker_id": "gw1",
+                "collected": 260,
+                "ordered_sha256": "78a9e73ba7fc56565c46a148bf4a4467ed469708e26cab2453c1d1f2ea27cace",
+                "call_reports": 21,
+                "completion": "COMPLETED"
+              },
+              "gw2": {
+                "worker_id": "gw2",
+                "collected": 260,
+                "ordered_sha256": "78a9e73ba7fc56565c46a148bf4a4467ed469708e26cab2453c1d1f2ea27cace",
+                "call_reports": 16,
+                "completion": "COMPLETED"
+              },
+              "gw3": {
+                "worker_id": "gw3",
+                "collected": 260,
+                "ordered_sha256": "78a9e73ba7fc56565c46a148bf4a4467ed469708e26cab2453c1d1f2ea27cace",
+                "call_reports": 18,
+                "completion": "COMPLETED"
+              },
+              "gw4": {
+                "worker_id": "gw4",
+                "collected": 260,
+                "ordered_sha256": "78a9e73ba7fc56565c46a148bf4a4467ed469708e26cab2453c1d1f2ea27cace",
+                "call_reports": 24,
+                "completion": "COMPLETED"
+              },
+              "gw5": {
+                "worker_id": "gw5",
+                "collected": 260,
+                "ordered_sha256": "78a9e73ba7fc56565c46a148bf4a4467ed469708e26cab2453c1d1f2ea27cace",
+                "call_reports": 24,
+                "completion": "COMPLETED"
+              },
+              "gw6": {
+                "worker_id": "gw6",
+                "collected": 260,
+                "ordered_sha256": "78a9e73ba7fc56565c46a148bf4a4467ed469708e26cab2453c1d1f2ea27cace",
+                "call_reports": 22,
+                "completion": "COMPLETED"
+              },
+              "gw7": {
+                "worker_id": "gw7",
+                "collected": 260,
+                "ordered_sha256": "78a9e73ba7fc56565c46a148bf4a4467ed469708e26cab2453c1d1f2ea27cace",
+                "call_reports": 24,
+                "completion": "COMPLETED"
+              },
+              "gw8": {
+                "worker_id": "gw8",
+                "collected": 260,
+                "ordered_sha256": "78a9e73ba7fc56565c46a148bf4a4467ed469708e26cab2453c1d1f2ea27cace",
+                "call_reports": 22,
+                "completion": "COMPLETED"
+              },
+              "gw9": {
+                "worker_id": "gw9",
+                "collected": 260,
+                "ordered_sha256": "78a9e73ba7fc56565c46a148bf4a4467ed469708e26cab2453c1d1f2ea27cace",
+                "call_reports": 23,
+                "completion": "COMPLETED"
+              },
+              "gw10": {
+                "worker_id": "gw10",
+                "collected": 260,
+                "ordered_sha256": "78a9e73ba7fc56565c46a148bf4a4467ed469708e26cab2453c1d1f2ea27cace",
+                "call_reports": 24,
+                "completion": "COMPLETED"
+              },
+              "gw11": {
+                "worker_id": "gw11",
+                "collected": 260,
+                "ordered_sha256": "78a9e73ba7fc56565c46a148bf4a4467ed469708e26cab2453c1d1f2ea27cace",
+                "call_reports": 22,
+                "completion": "COMPLETED"
+              }
+            },
+            "all_gw0_through_gw11_collected": true,
+            "worker_collection_hashes_equal": true,
+            "pytest_exit": 0,
+            "duration_seconds": 1.663,
+            "failed_tests": [],
+            "error_tests": [],
+            "skipped_tests": [],
+            "failure_kinds": {},
+            "collection_errors": [],
+            "log_sha256": "21f242012d95e135a72463a62b4b4aa2bd857615c2988e4a9353adbe7b921293",
+            "source_hashes_before": {
+              "docs/security/B0_S3B_BROKER_SELECTION_MATRIX_V1.md": "4eb4d2d7dcc1403b8fa70d3c0608d3bd71f3d9678778f8b3965e5374c5f57901",
+              "docs/security/B0_S3B_ISOLATION_ATTESTATION_PLAN_V1.md": "7e66ff5a7dec4e8d77a71c2f5be7ea8ada5300e42dfdbdde138a2ad45264f295",
+              "src/ai_commerce/production_runtime/broker_intake.py": "fc8726020452eaefcca9b756a1cb71b8008801720c37baedaedd41b1e74984ba",
+              "src/ai_commerce/production_runtime/broker_readiness.py": "7ac617e5e4cc7af852eaabec184cc589e918b871fb6b826db900ce9675a09062",
+              "tests/test_b0_s3b_broker_readiness.py": "2ad67314890332dcc80ea77cb7f25c3d168e5530b858c7cdc58fccfc29c87eb4",
+              "work_items/mt01-components/b0-s3b.json": "fbe9b6787ccc5d9afb60ccd16a1cce5640d3e916c21fd1df2cacc09b1578366c"
+            },
+            "source_hashes_after": {
+              "docs/security/B0_S3B_BROKER_SELECTION_MATRIX_V1.md": "4eb4d2d7dcc1403b8fa70d3c0608d3bd71f3d9678778f8b3965e5374c5f57901",
+              "docs/security/B0_S3B_ISOLATION_ATTESTATION_PLAN_V1.md": "7e66ff5a7dec4e8d77a71c2f5be7ea8ada5300e42dfdbdde138a2ad45264f295",
+              "src/ai_commerce/production_runtime/broker_intake.py": "fc8726020452eaefcca9b756a1cb71b8008801720c37baedaedd41b1e74984ba",
+              "src/ai_commerce/production_runtime/broker_readiness.py": "7ac617e5e4cc7af852eaabec184cc589e918b871fb6b826db900ce9675a09062",
+              "tests/test_b0_s3b_broker_readiness.py": "2ad67314890332dcc80ea77cb7f25c3d168e5530b858c7cdc58fccfc29c87eb4",
+              "work_items/mt01-components/b0-s3b.json": "fbe9b6787ccc5d9afb60ccd16a1cce5640d3e916c21fd1df2cacc09b1578366c"
+            },
+            "source_stable": true,
+            "runtime": {
+              "system": "Windows",
+              "python": "3.14.7",
+              "pytest": "9.2.0",
+              "xdist": "3.8.0"
+            }
+          },
+          {
+            "round": 1,
+            "group": "b0-s3",
+            "base_sha": "c7ae34c5a670277aaadbd422404fd41a06959d11",
+            "observation": "LOCAL_WINDOWS_EXECUTOR_DIAGNOSTIC_NOT_AUTHENTICATED_SELFHOST_OR_POSTEXECUTOR_EF01",
+            "registered_profile": "mt01-component-onboarding",
+            "registered_argv": [
+              "python",
+              "-m",
+              "pytest",
+              "tests/test_b0_s3_custody_boundary.py",
+              "-q",
+              "-n",
+              "12"
+            ],
+            "diagnostic_options": [
+              "cache_dir=SESSION_TEMP",
+              "basetemp=SESSION_TEMP"
+            ],
+            "selected": 255,
+            "collected": 255,
+            "executed": 255,
+            "passed": 255,
+            "failed": 0,
+            "skipped": 0,
+            "errors": 0,
+            "not_executed": [],
+            "unreported": [],
+            "deselected": 0,
+            "omission_reason": null,
+            "workers_requested": 12,
+            "workers_actual": 12,
+            "collections": {
+              "gw0": {
+                "worker_id": "gw0",
+                "collected": 255,
+                "ordered_sha256": "6780d30cbdc98dd7c9bee3adc717b8ad556a7696875829eec6a628852b0a0532",
+                "call_reports": 20,
+                "completion": "COMPLETED"
+              },
+              "gw1": {
+                "worker_id": "gw1",
+                "collected": 255,
+                "ordered_sha256": "6780d30cbdc98dd7c9bee3adc717b8ad556a7696875829eec6a628852b0a0532",
+                "call_reports": 20,
+                "completion": "COMPLETED"
+              },
+              "gw2": {
+                "worker_id": "gw2",
+                "collected": 255,
+                "ordered_sha256": "6780d30cbdc98dd7c9bee3adc717b8ad556a7696875829eec6a628852b0a0532",
+                "call_reports": 24,
+                "completion": "COMPLETED"
+              },
+              "gw3": {
+                "worker_id": "gw3",
+                "collected": 255,
+                "ordered_sha256": "6780d30cbdc98dd7c9bee3adc717b8ad556a7696875829eec6a628852b0a0532",
+                "call_reports": 18,
+                "completion": "COMPLETED"
+              },
+              "gw4": {
+                "worker_id": "gw4",
+                "collected": 255,
+                "ordered_sha256": "6780d30cbdc98dd7c9bee3adc717b8ad556a7696875829eec6a628852b0a0532",
+                "call_reports": 22,
+                "completion": "COMPLETED"
+              },
+              "gw5": {
+                "worker_id": "gw5",
+                "collected": 255,
+                "ordered_sha256": "6780d30cbdc98dd7c9bee3adc717b8ad556a7696875829eec6a628852b0a0532",
+                "call_reports": 19,
+                "completion": "COMPLETED"
+              },
+              "gw6": {
+                "worker_id": "gw6",
+                "collected": 255,
+                "ordered_sha256": "6780d30cbdc98dd7c9bee3adc717b8ad556a7696875829eec6a628852b0a0532",
+                "call_reports": 22,
+                "completion": "COMPLETED"
+              },
+              "gw7": {
+                "worker_id": "gw7",
+                "collected": 255,
+                "ordered_sha256": "6780d30cbdc98dd7c9bee3adc717b8ad556a7696875829eec6a628852b0a0532",
+                "call_reports": 19,
+                "completion": "COMPLETED"
+              },
+              "gw8": {
+                "worker_id": "gw8",
+                "collected": 255,
+                "ordered_sha256": "6780d30cbdc98dd7c9bee3adc717b8ad556a7696875829eec6a628852b0a0532",
+                "call_reports": 25,
+                "completion": "COMPLETED"
+              },
+              "gw9": {
+                "worker_id": "gw9",
+                "collected": 255,
+                "ordered_sha256": "6780d30cbdc98dd7c9bee3adc717b8ad556a7696875829eec6a628852b0a0532",
+                "call_reports": 21,
+                "completion": "COMPLETED"
+              },
+              "gw10": {
+                "worker_id": "gw10",
+                "collected": 255,
+                "ordered_sha256": "6780d30cbdc98dd7c9bee3adc717b8ad556a7696875829eec6a628852b0a0532",
+                "call_reports": 25,
+                "completion": "COMPLETED"
+              },
+              "gw11": {
+                "worker_id": "gw11",
+                "collected": 255,
+                "ordered_sha256": "6780d30cbdc98dd7c9bee3adc717b8ad556a7696875829eec6a628852b0a0532",
+                "call_reports": 20,
+                "completion": "COMPLETED"
+              }
+            },
+            "all_gw0_through_gw11_collected": true,
+            "worker_collection_hashes_equal": true,
+            "pytest_exit": 0,
+            "duration_seconds": 1.608,
+            "failed_tests": [],
+            "error_tests": [],
+            "skipped_tests": [],
+            "failure_kinds": {},
+            "collection_errors": [],
+            "log_sha256": "e8b94468a5b23edb98a4d560edf23f3faae66fdcdd580f16ba29fa69198d0a2c",
+            "source_hashes_before": {
+              "docs/security/B0_S3B_BROKER_SELECTION_MATRIX_V1.md": "4eb4d2d7dcc1403b8fa70d3c0608d3bd71f3d9678778f8b3965e5374c5f57901",
+              "docs/security/B0_S3B_ISOLATION_ATTESTATION_PLAN_V1.md": "7e66ff5a7dec4e8d77a71c2f5be7ea8ada5300e42dfdbdde138a2ad45264f295",
+              "src/ai_commerce/production_runtime/broker_intake.py": "fc8726020452eaefcca9b756a1cb71b8008801720c37baedaedd41b1e74984ba",
+              "src/ai_commerce/production_runtime/broker_readiness.py": "7ac617e5e4cc7af852eaabec184cc589e918b871fb6b826db900ce9675a09062",
+              "tests/test_b0_s3b_broker_readiness.py": "2ad67314890332dcc80ea77cb7f25c3d168e5530b858c7cdc58fccfc29c87eb4",
+              "work_items/mt01-components/b0-s3b.json": "fbe9b6787ccc5d9afb60ccd16a1cce5640d3e916c21fd1df2cacc09b1578366c"
+            },
+            "source_hashes_after": {
+              "docs/security/B0_S3B_BROKER_SELECTION_MATRIX_V1.md": "4eb4d2d7dcc1403b8fa70d3c0608d3bd71f3d9678778f8b3965e5374c5f57901",
+              "docs/security/B0_S3B_ISOLATION_ATTESTATION_PLAN_V1.md": "7e66ff5a7dec4e8d77a71c2f5be7ea8ada5300e42dfdbdde138a2ad45264f295",
+              "src/ai_commerce/production_runtime/broker_intake.py": "fc8726020452eaefcca9b756a1cb71b8008801720c37baedaedd41b1e74984ba",
+              "src/ai_commerce/production_runtime/broker_readiness.py": "7ac617e5e4cc7af852eaabec184cc589e918b871fb6b826db900ce9675a09062",
+              "tests/test_b0_s3b_broker_readiness.py": "2ad67314890332dcc80ea77cb7f25c3d168e5530b858c7cdc58fccfc29c87eb4",
+              "work_items/mt01-components/b0-s3b.json": "fbe9b6787ccc5d9afb60ccd16a1cce5640d3e916c21fd1df2cacc09b1578366c"
+            },
+            "source_stable": true,
+            "runtime": {
+              "system": "Windows",
+              "python": "3.14.7",
+              "pytest": "9.2.0",
+              "xdist": "3.8.0"
+            }
+          },
+          {
+            "round": 1,
+            "group": "b0-s",
+            "base_sha": "c7ae34c5a670277aaadbd422404fd41a06959d11",
+            "observation": "LOCAL_WINDOWS_EXECUTOR_DIAGNOSTIC_NOT_AUTHENTICATED_SELFHOST_OR_POSTEXECUTOR_EF01",
+            "registered_profile": "mt01-component-onboarding",
+            "registered_argv": [
+              "python",
+              "-m",
+              "pytest",
+              "tests/test_b0_s_trust_boundary.py",
+              "-q",
+              "-n",
+              "12"
+            ],
+            "diagnostic_options": [
+              "cache_dir=SESSION_TEMP",
+              "basetemp=SESSION_TEMP"
+            ],
+            "selected": 194,
+            "collected": 194,
+            "executed": 194,
+            "passed": 194,
+            "failed": 0,
+            "skipped": 0,
+            "errors": 0,
+            "not_executed": [],
+            "unreported": [],
+            "deselected": 0,
+            "omission_reason": null,
+            "workers_requested": 12,
+            "workers_actual": 12,
+            "collections": {
+              "gw0": {
+                "worker_id": "gw0",
+                "collected": 194,
+                "ordered_sha256": "4947d78e9b5b3db6ddc10788a2d457224f2733020f403f66f0a2510063463793",
+                "call_reports": 15,
+                "completion": "COMPLETED"
+              },
+              "gw1": {
+                "worker_id": "gw1",
+                "collected": 194,
+                "ordered_sha256": "4947d78e9b5b3db6ddc10788a2d457224f2733020f403f66f0a2510063463793",
+                "call_reports": 15,
+                "completion": "COMPLETED"
+              },
+              "gw2": {
+                "worker_id": "gw2",
+                "collected": 194,
+                "ordered_sha256": "4947d78e9b5b3db6ddc10788a2d457224f2733020f403f66f0a2510063463793",
+                "call_reports": 17,
+                "completion": "COMPLETED"
+              },
+              "gw3": {
+                "worker_id": "gw3",
+                "collected": 194,
+                "ordered_sha256": "4947d78e9b5b3db6ddc10788a2d457224f2733020f403f66f0a2510063463793",
+                "call_reports": 15,
+                "completion": "COMPLETED"
+              },
+              "gw4": {
+                "worker_id": "gw4",
+                "collected": 194,
+                "ordered_sha256": "4947d78e9b5b3db6ddc10788a2d457224f2733020f403f66f0a2510063463793",
+                "call_reports": 16,
+                "completion": "COMPLETED"
+              },
+              "gw5": {
+                "worker_id": "gw5",
+                "collected": 194,
+                "ordered_sha256": "4947d78e9b5b3db6ddc10788a2d457224f2733020f403f66f0a2510063463793",
+                "call_reports": 17,
+                "completion": "COMPLETED"
+              },
+              "gw6": {
+                "worker_id": "gw6",
+                "collected": 194,
+                "ordered_sha256": "4947d78e9b5b3db6ddc10788a2d457224f2733020f403f66f0a2510063463793",
+                "call_reports": 16,
+                "completion": "COMPLETED"
+              },
+              "gw7": {
+                "worker_id": "gw7",
+                "collected": 194,
+                "ordered_sha256": "4947d78e9b5b3db6ddc10788a2d457224f2733020f403f66f0a2510063463793",
+                "call_reports": 16,
+                "completion": "COMPLETED"
+              },
+              "gw8": {
+                "worker_id": "gw8",
+                "collected": 194,
+                "ordered_sha256": "4947d78e9b5b3db6ddc10788a2d457224f2733020f403f66f0a2510063463793",
+                "call_reports": 16,
+                "completion": "COMPLETED"
+              },
+              "gw9": {
+                "worker_id": "gw9",
+                "collected": 194,
+                "ordered_sha256": "4947d78e9b5b3db6ddc10788a2d457224f2733020f403f66f0a2510063463793",
+                "call_reports": 16,
+                "completion": "COMPLETED"
+              },
+              "gw10": {
+                "worker_id": "gw10",
+                "collected": 194,
+                "ordered_sha256": "4947d78e9b5b3db6ddc10788a2d457224f2733020f403f66f0a2510063463793",
+                "call_reports": 16,
+                "completion": "COMPLETED"
+              },
+              "gw11": {
+                "worker_id": "gw11",
+                "collected": 194,
+                "ordered_sha256": "4947d78e9b5b3db6ddc10788a2d457224f2733020f403f66f0a2510063463793",
+                "call_reports": 19,
+                "completion": "COMPLETED"
+              }
+            },
+            "all_gw0_through_gw11_collected": true,
+            "worker_collection_hashes_equal": true,
+            "pytest_exit": 0,
+            "duration_seconds": 1.713,
+            "failed_tests": [],
+            "error_tests": [],
+            "skipped_tests": [],
+            "failure_kinds": {},
+            "collection_errors": [],
+            "log_sha256": "d15484095171cba71134752454dd56676257bd5e3a2f63cecca03778bdb72603",
+            "source_hashes_before": {
+              "docs/security/B0_S3B_BROKER_SELECTION_MATRIX_V1.md": "4eb4d2d7dcc1403b8fa70d3c0608d3bd71f3d9678778f8b3965e5374c5f57901",
+              "docs/security/B0_S3B_ISOLATION_ATTESTATION_PLAN_V1.md": "7e66ff5a7dec4e8d77a71c2f5be7ea8ada5300e42dfdbdde138a2ad45264f295",
+              "src/ai_commerce/production_runtime/broker_intake.py": "fc8726020452eaefcca9b756a1cb71b8008801720c37baedaedd41b1e74984ba",
+              "src/ai_commerce/production_runtime/broker_readiness.py": "7ac617e5e4cc7af852eaabec184cc589e918b871fb6b826db900ce9675a09062",
+              "tests/test_b0_s3b_broker_readiness.py": "2ad67314890332dcc80ea77cb7f25c3d168e5530b858c7cdc58fccfc29c87eb4",
+              "work_items/mt01-components/b0-s3b.json": "fbe9b6787ccc5d9afb60ccd16a1cce5640d3e916c21fd1df2cacc09b1578366c"
+            },
+            "source_hashes_after": {
+              "docs/security/B0_S3B_BROKER_SELECTION_MATRIX_V1.md": "4eb4d2d7dcc1403b8fa70d3c0608d3bd71f3d9678778f8b3965e5374c5f57901",
+              "docs/security/B0_S3B_ISOLATION_ATTESTATION_PLAN_V1.md": "7e66ff5a7dec4e8d77a71c2f5be7ea8ada5300e42dfdbdde138a2ad45264f295",
+              "src/ai_commerce/production_runtime/broker_intake.py": "fc8726020452eaefcca9b756a1cb71b8008801720c37baedaedd41b1e74984ba",
+              "src/ai_commerce/production_runtime/broker_readiness.py": "7ac617e5e4cc7af852eaabec184cc589e918b871fb6b826db900ce9675a09062",
+              "tests/test_b0_s3b_broker_readiness.py": "2ad67314890332dcc80ea77cb7f25c3d168e5530b858c7cdc58fccfc29c87eb4",
+              "work_items/mt01-components/b0-s3b.json": "fbe9b6787ccc5d9afb60ccd16a1cce5640d3e916c21fd1df2cacc09b1578366c"
+            },
+            "source_stable": true,
+            "runtime": {
+              "system": "Windows",
+              "python": "3.14.7",
+              "pytest": "9.2.0",
+              "xdist": "3.8.0"
+            }
+          },
+          {
+            "round": 1,
+            "group": "b0-1",
+            "base_sha": "c7ae34c5a670277aaadbd422404fd41a06959d11",
+            "observation": "LOCAL_WINDOWS_EXECUTOR_DIAGNOSTIC_NOT_AUTHENTICATED_SELFHOST_OR_POSTEXECUTOR_EF01",
+            "registered_profile": "mt01-component-onboarding",
+            "registered_argv": [
+              "python",
+              "-m",
+              "pytest",
+              "tests/test_b0_production_contracts.py",
+              "-q",
+              "-n",
+              "12"
+            ],
+            "diagnostic_options": [
+              "cache_dir=SESSION_TEMP",
+              "basetemp=SESSION_TEMP"
+            ],
+            "selected": 82,
+            "collected": 82,
+            "executed": 82,
+            "passed": 82,
+            "failed": 0,
+            "skipped": 0,
+            "errors": 0,
+            "not_executed": [],
+            "unreported": [],
+            "deselected": 0,
+            "omission_reason": null,
+            "workers_requested": 12,
+            "workers_actual": 12,
+            "collections": {
+              "gw0": {
+                "worker_id": "gw0",
+                "collected": 82,
+                "ordered_sha256": "60adec761b988e38408ff706ceb58604da5023fed1c5fedb18e7df18f68b334d",
+                "call_reports": 3,
+                "completion": "COMPLETED"
+              },
+              "gw1": {
+                "worker_id": "gw1",
+                "collected": 82,
+                "ordered_sha256": "60adec761b988e38408ff706ceb58604da5023fed1c5fedb18e7df18f68b334d",
+                "call_reports": 4,
+                "completion": "COMPLETED"
+              },
+              "gw2": {
+                "worker_id": "gw2",
+                "collected": 82,
+                "ordered_sha256": "60adec761b988e38408ff706ceb58604da5023fed1c5fedb18e7df18f68b334d",
+                "call_reports": 7,
+                "completion": "COMPLETED"
+              },
+              "gw3": {
+                "worker_id": "gw3",
+                "collected": 82,
+                "ordered_sha256": "60adec761b988e38408ff706ceb58604da5023fed1c5fedb18e7df18f68b334d",
+                "call_reports": 8,
+                "completion": "COMPLETED"
+              },
+              "gw4": {
+                "worker_id": "gw4",
+                "collected": 82,
+                "ordered_sha256": "60adec761b988e38408ff706ceb58604da5023fed1c5fedb18e7df18f68b334d",
+                "call_reports": 7,
+                "completion": "COMPLETED"
+              },
+              "gw5": {
+                "worker_id": "gw5",
+                "collected": 82,
+                "ordered_sha256": "60adec761b988e38408ff706ceb58604da5023fed1c5fedb18e7df18f68b334d",
+                "call_reports": 8,
+                "completion": "COMPLETED"
+              },
+              "gw6": {
+                "worker_id": "gw6",
+                "collected": 82,
+                "ordered_sha256": "60adec761b988e38408ff706ceb58604da5023fed1c5fedb18e7df18f68b334d",
+                "call_reports": 8,
+                "completion": "COMPLETED"
+              },
+              "gw7": {
+                "worker_id": "gw7",
+                "collected": 82,
+                "ordered_sha256": "60adec761b988e38408ff706ceb58604da5023fed1c5fedb18e7df18f68b334d",
+                "call_reports": 7,
+                "completion": "COMPLETED"
+              },
+              "gw8": {
+                "worker_id": "gw8",
+                "collected": 82,
+                "ordered_sha256": "60adec761b988e38408ff706ceb58604da5023fed1c5fedb18e7df18f68b334d",
+                "call_reports": 8,
+                "completion": "COMPLETED"
+              },
+              "gw9": {
+                "worker_id": "gw9",
+                "collected": 82,
+                "ordered_sha256": "60adec761b988e38408ff706ceb58604da5023fed1c5fedb18e7df18f68b334d",
+                "call_reports": 8,
+                "completion": "COMPLETED"
+              },
+              "gw10": {
+                "worker_id": "gw10",
+                "collected": 82,
+                "ordered_sha256": "60adec761b988e38408ff706ceb58604da5023fed1c5fedb18e7df18f68b334d",
+                "call_reports": 7,
+                "completion": "COMPLETED"
+              },
+              "gw11": {
+                "worker_id": "gw11",
+                "collected": 82,
+                "ordered_sha256": "60adec761b988e38408ff706ceb58604da5023fed1c5fedb18e7df18f68b334d",
+                "call_reports": 7,
+                "completion": "COMPLETED"
+              }
+            },
+            "all_gw0_through_gw11_collected": true,
+            "worker_collection_hashes_equal": true,
+            "pytest_exit": 0,
+            "duration_seconds": 1.586,
+            "failed_tests": [],
+            "error_tests": [],
+            "skipped_tests": [],
+            "failure_kinds": {},
+            "collection_errors": [],
+            "log_sha256": "fb9173798b416929040bb577ed91f9a61abbff6729b64ece7349543e13819218",
+            "source_hashes_before": {
+              "docs/security/B0_S3B_BROKER_SELECTION_MATRIX_V1.md": "4eb4d2d7dcc1403b8fa70d3c0608d3bd71f3d9678778f8b3965e5374c5f57901",
+              "docs/security/B0_S3B_ISOLATION_ATTESTATION_PLAN_V1.md": "7e66ff5a7dec4e8d77a71c2f5be7ea8ada5300e42dfdbdde138a2ad45264f295",
+              "src/ai_commerce/production_runtime/broker_intake.py": "fc8726020452eaefcca9b756a1cb71b8008801720c37baedaedd41b1e74984ba",
+              "src/ai_commerce/production_runtime/broker_readiness.py": "7ac617e5e4cc7af852eaabec184cc589e918b871fb6b826db900ce9675a09062",
+              "tests/test_b0_s3b_broker_readiness.py": "2ad67314890332dcc80ea77cb7f25c3d168e5530b858c7cdc58fccfc29c87eb4",
+              "work_items/mt01-components/b0-s3b.json": "fbe9b6787ccc5d9afb60ccd16a1cce5640d3e916c21fd1df2cacc09b1578366c"
+            },
+            "source_hashes_after": {
+              "docs/security/B0_S3B_BROKER_SELECTION_MATRIX_V1.md": "4eb4d2d7dcc1403b8fa70d3c0608d3bd71f3d9678778f8b3965e5374c5f57901",
+              "docs/security/B0_S3B_ISOLATION_ATTESTATION_PLAN_V1.md": "7e66ff5a7dec4e8d77a71c2f5be7ea8ada5300e42dfdbdde138a2ad45264f295",
+              "src/ai_commerce/production_runtime/broker_intake.py": "fc8726020452eaefcca9b756a1cb71b8008801720c37baedaedd41b1e74984ba",
+              "src/ai_commerce/production_runtime/broker_readiness.py": "7ac617e5e4cc7af852eaabec184cc589e918b871fb6b826db900ce9675a09062",
+              "tests/test_b0_s3b_broker_readiness.py": "2ad67314890332dcc80ea77cb7f25c3d168e5530b858c7cdc58fccfc29c87eb4",
+              "work_items/mt01-components/b0-s3b.json": "fbe9b6787ccc5d9afb60ccd16a1cce5640d3e916c21fd1df2cacc09b1578366c"
+            },
+            "source_stable": true,
+            "runtime": {
+              "system": "Windows",
+              "python": "3.14.7",
+              "pytest": "9.2.0",
+              "xdist": "3.8.0"
+            }
+          },
+          {
+            "round": 1,
+            "group": "b0-2",
+            "base_sha": "c7ae34c5a670277aaadbd422404fd41a06959d11",
+            "observation": "LOCAL_WINDOWS_EXECUTOR_DIAGNOSTIC_NOT_AUTHENTICATED_SELFHOST_OR_POSTEXECUTOR_EF01",
+            "registered_profile": "mt01-component-onboarding",
+            "registered_argv": [
+              "python",
+              "-m",
+              "pytest",
+              "tests/test_b0_2_journal.py",
+              "-q",
+              "-n",
+              "12"
+            ],
+            "diagnostic_options": [
+              "cache_dir=SESSION_TEMP",
+              "basetemp=SESSION_TEMP"
+            ],
+            "selected": 60,
+            "collected": 60,
+            "executed": 60,
+            "passed": 60,
+            "failed": 0,
+            "skipped": 0,
+            "errors": 0,
+            "not_executed": [],
+            "unreported": [],
+            "deselected": 0,
+            "omission_reason": null,
+            "workers_requested": 12,
+            "workers_actual": 12,
+            "collections": {
+              "gw0": {
+                "worker_id": "gw0",
+                "collected": 60,
+                "ordered_sha256": "7f67053a1a69a1686592c53546a4027347e779031953bfa4c433529fd752bafe",
+                "call_reports": 5,
+                "completion": "COMPLETED"
+              },
+              "gw1": {
+                "worker_id": "gw1",
+                "collected": 60,
+                "ordered_sha256": "7f67053a1a69a1686592c53546a4027347e779031953bfa4c433529fd752bafe",
+                "call_reports": 6,
+                "completion": "COMPLETED"
+              },
+              "gw2": {
+                "worker_id": "gw2",
+                "collected": 60,
+                "ordered_sha256": "7f67053a1a69a1686592c53546a4027347e779031953bfa4c433529fd752bafe",
+                "call_reports": 6,
+                "completion": "COMPLETED"
+              },
+              "gw3": {
+                "worker_id": "gw3",
+                "collected": 60,
+                "ordered_sha256": "7f67053a1a69a1686592c53546a4027347e779031953bfa4c433529fd752bafe",
+                "call_reports": 4,
+                "completion": "COMPLETED"
+              },
+              "gw4": {
+                "worker_id": "gw4",
+                "collected": 60,
+                "ordered_sha256": "7f67053a1a69a1686592c53546a4027347e779031953bfa4c433529fd752bafe",
+                "call_reports": 4,
+                "completion": "COMPLETED"
+              },
+              "gw5": {
+                "worker_id": "gw5",
+                "collected": 60,
+                "ordered_sha256": "7f67053a1a69a1686592c53546a4027347e779031953bfa4c433529fd752bafe",
+                "call_reports": 6,
+                "completion": "COMPLETED"
+              },
+              "gw6": {
+                "worker_id": "gw6",
+                "collected": 60,
+                "ordered_sha256": "7f67053a1a69a1686592c53546a4027347e779031953bfa4c433529fd752bafe",
+                "call_reports": 4,
+                "completion": "COMPLETED"
+              },
+              "gw7": {
+                "worker_id": "gw7",
+                "collected": 60,
+                "ordered_sha256": "7f67053a1a69a1686592c53546a4027347e779031953bfa4c433529fd752bafe",
+                "call_reports": 5,
+                "completion": "COMPLETED"
+              },
+              "gw8": {
+                "worker_id": "gw8",
+                "collected": 60,
+                "ordered_sha256": "7f67053a1a69a1686592c53546a4027347e779031953bfa4c433529fd752bafe",
+                "call_reports": 5,
+                "completion": "COMPLETED"
+              },
+              "gw9": {
+                "worker_id": "gw9",
+                "collected": 60,
+                "ordered_sha256": "7f67053a1a69a1686592c53546a4027347e779031953bfa4c433529fd752bafe",
+                "call_reports": 4,
+                "completion": "COMPLETED"
+              },
+              "gw10": {
+                "worker_id": "gw10",
+                "collected": 60,
+                "ordered_sha256": "7f67053a1a69a1686592c53546a4027347e779031953bfa4c433529fd752bafe",
+                "call_reports": 5,
+                "completion": "COMPLETED"
+              },
+              "gw11": {
+                "worker_id": "gw11",
+                "collected": 60,
+                "ordered_sha256": "7f67053a1a69a1686592c53546a4027347e779031953bfa4c433529fd752bafe",
+                "call_reports": 6,
+                "completion": "COMPLETED"
+              }
+            },
+            "all_gw0_through_gw11_collected": true,
+            "worker_collection_hashes_equal": true,
+            "pytest_exit": 0,
+            "duration_seconds": 7.382,
+            "failed_tests": [],
+            "error_tests": [],
+            "skipped_tests": [],
+            "failure_kinds": {},
+            "collection_errors": [],
+            "log_sha256": "14a772e4ba4d6c71db4eeb803f110b35381f510e1894ba4d1af30ea4ef6ec71a",
+            "source_hashes_before": {
+              "docs/security/B0_S3B_BROKER_SELECTION_MATRIX_V1.md": "4eb4d2d7dcc1403b8fa70d3c0608d3bd71f3d9678778f8b3965e5374c5f57901",
+              "docs/security/B0_S3B_ISOLATION_ATTESTATION_PLAN_V1.md": "7e66ff5a7dec4e8d77a71c2f5be7ea8ada5300e42dfdbdde138a2ad45264f295",
+              "src/ai_commerce/production_runtime/broker_intake.py": "fc8726020452eaefcca9b756a1cb71b8008801720c37baedaedd41b1e74984ba",
+              "src/ai_commerce/production_runtime/broker_readiness.py": "7ac617e5e4cc7af852eaabec184cc589e918b871fb6b826db900ce9675a09062",
+              "tests/test_b0_s3b_broker_readiness.py": "2ad67314890332dcc80ea77cb7f25c3d168e5530b858c7cdc58fccfc29c87eb4",
+              "work_items/mt01-components/b0-s3b.json": "fbe9b6787ccc5d9afb60ccd16a1cce5640d3e916c21fd1df2cacc09b1578366c"
+            },
+            "source_hashes_after": {
+              "docs/security/B0_S3B_BROKER_SELECTION_MATRIX_V1.md": "4eb4d2d7dcc1403b8fa70d3c0608d3bd71f3d9678778f8b3965e5374c5f57901",
+              "docs/security/B0_S3B_ISOLATION_ATTESTATION_PLAN_V1.md": "7e66ff5a7dec4e8d77a71c2f5be7ea8ada5300e42dfdbdde138a2ad45264f295",
+              "src/ai_commerce/production_runtime/broker_intake.py": "fc8726020452eaefcca9b756a1cb71b8008801720c37baedaedd41b1e74984ba",
+              "src/ai_commerce/production_runtime/broker_readiness.py": "7ac617e5e4cc7af852eaabec184cc589e918b871fb6b826db900ce9675a09062",
+              "tests/test_b0_s3b_broker_readiness.py": "2ad67314890332dcc80ea77cb7f25c3d168e5530b858c7cdc58fccfc29c87eb4",
+              "work_items/mt01-components/b0-s3b.json": "fbe9b6787ccc5d9afb60ccd16a1cce5640d3e916c21fd1df2cacc09b1578366c"
+            },
+            "source_stable": true,
+            "runtime": {
+              "system": "Windows",
+              "python": "3.14.7",
+              "pytest": "9.2.0",
+              "xdist": "3.8.0"
+            }
+          },
+          {
+            "round": 1,
+            "group": "b0-4",
+            "base_sha": "c7ae34c5a670277aaadbd422404fd41a06959d11",
+            "observation": "LOCAL_WINDOWS_EXECUTOR_DIAGNOSTIC_NOT_AUTHENTICATED_SELFHOST_OR_POSTEXECUTOR_EF01",
+            "registered_profile": "mt01-component-onboarding",
+            "registered_argv": [
+              "python",
+              "-m",
+              "pytest",
+              "tests/test_b0_4_operator.py",
+              "-q",
+              "-n",
+              "12"
+            ],
+            "diagnostic_options": [
+              "cache_dir=SESSION_TEMP",
+              "basetemp=SESSION_TEMP"
+            ],
+            "selected": 69,
+            "collected": 69,
+            "executed": 68,
+            "passed": 68,
+            "failed": 0,
+            "skipped": 1,
+            "errors": 0,
+            "not_executed": [],
+            "unreported": [],
+            "deselected": 0,
+            "omission_reason": null,
+            "workers_requested": 12,
+            "workers_actual": 12,
+            "collections": {
+              "gw0": {
+                "worker_id": "gw0",
+                "collected": 69,
+                "ordered_sha256": "66d959e591a5291971603b794d53861b60ff1b3171b4fbf6567f7dd3e0e894c4",
+                "call_reports": 3,
+                "completion": "COMPLETED"
+              },
+              "gw1": {
+                "worker_id": "gw1",
+                "collected": 69,
+                "ordered_sha256": "66d959e591a5291971603b794d53861b60ff1b3171b4fbf6567f7dd3e0e894c4",
+                "call_reports": 5,
+                "completion": "COMPLETED"
+              },
+              "gw2": {
+                "worker_id": "gw2",
+                "collected": 69,
+                "ordered_sha256": "66d959e591a5291971603b794d53861b60ff1b3171b4fbf6567f7dd3e0e894c4",
+                "call_reports": 3,
+                "completion": "COMPLETED"
+              },
+              "gw3": {
+                "worker_id": "gw3",
+                "collected": 69,
+                "ordered_sha256": "66d959e591a5291971603b794d53861b60ff1b3171b4fbf6567f7dd3e0e894c4",
+                "call_reports": 5,
+                "completion": "COMPLETED"
+              },
+              "gw4": {
+                "worker_id": "gw4",
+                "collected": 69,
+                "ordered_sha256": "66d959e591a5291971603b794d53861b60ff1b3171b4fbf6567f7dd3e0e894c4",
+                "call_reports": 26,
+                "completion": "COMPLETED"
+              },
+              "gw5": {
+                "worker_id": "gw5",
+                "collected": 69,
+                "ordered_sha256": "66d959e591a5291971603b794d53861b60ff1b3171b4fbf6567f7dd3e0e894c4",
+                "call_reports": 4,
+                "completion": "COMPLETED"
+              },
+              "gw6": {
+                "worker_id": "gw6",
+                "collected": 69,
+                "ordered_sha256": "66d959e591a5291971603b794d53861b60ff1b3171b4fbf6567f7dd3e0e894c4",
+                "call_reports": 3,
+                "completion": "COMPLETED"
+              },
+              "gw7": {
+                "worker_id": "gw7",
+                "collected": 69,
+                "ordered_sha256": "66d959e591a5291971603b794d53861b60ff1b3171b4fbf6567f7dd3e0e894c4",
+                "call_reports": 3,
+                "completion": "COMPLETED"
+              },
+              "gw8": {
+                "worker_id": "gw8",
+                "collected": 69,
+                "ordered_sha256": "66d959e591a5291971603b794d53861b60ff1b3171b4fbf6567f7dd3e0e894c4",
+                "call_reports": 3,
+                "completion": "COMPLETED"
+              },
+              "gw9": {
+                "worker_id": "gw9",
+                "collected": 69,
+                "ordered_sha256": "66d959e591a5291971603b794d53861b60ff1b3171b4fbf6567f7dd3e0e894c4",
+                "call_reports": 5,
+                "completion": "COMPLETED"
+              },
+              "gw10": {
+                "worker_id": "gw10",
+                "collected": 69,
+                "ordered_sha256": "66d959e591a5291971603b794d53861b60ff1b3171b4fbf6567f7dd3e0e894c4",
+                "call_reports": 6,
+                "completion": "COMPLETED"
+              },
+              "gw11": {
+                "worker_id": "gw11",
+                "collected": 69,
+                "ordered_sha256": "66d959e591a5291971603b794d53861b60ff1b3171b4fbf6567f7dd3e0e894c4",
+                "call_reports": 3,
+                "completion": "COMPLETED"
+              }
+            },
+            "all_gw0_through_gw11_collected": true,
+            "worker_collection_hashes_equal": true,
+            "pytest_exit": 0,
+            "duration_seconds": 73.301,
+            "failed_tests": [],
+            "error_tests": [],
+            "skipped_tests": [
+              "tests/test_b0_4_operator.py::test_real_file_symlink_or_unproven"
+            ],
+            "failure_kinds": {},
+            "collection_errors": [],
+            "log_sha256": "65b78ee1cd93a13acbc69f3707a063fc26b4ddcdab404e61a61b50e197bdab8f",
+            "source_hashes_before": {
+              "docs/security/B0_S3B_BROKER_SELECTION_MATRIX_V1.md": "4eb4d2d7dcc1403b8fa70d3c0608d3bd71f3d9678778f8b3965e5374c5f57901",
+              "docs/security/B0_S3B_ISOLATION_ATTESTATION_PLAN_V1.md": "7e66ff5a7dec4e8d77a71c2f5be7ea8ada5300e42dfdbdde138a2ad45264f295",
+              "src/ai_commerce/production_runtime/broker_intake.py": "fc8726020452eaefcca9b756a1cb71b8008801720c37baedaedd41b1e74984ba",
+              "src/ai_commerce/production_runtime/broker_readiness.py": "7ac617e5e4cc7af852eaabec184cc589e918b871fb6b826db900ce9675a09062",
+              "tests/test_b0_s3b_broker_readiness.py": "2ad67314890332dcc80ea77cb7f25c3d168e5530b858c7cdc58fccfc29c87eb4",
+              "work_items/mt01-components/b0-s3b.json": "fbe9b6787ccc5d9afb60ccd16a1cce5640d3e916c21fd1df2cacc09b1578366c"
+            },
+            "source_hashes_after": {
+              "docs/security/B0_S3B_BROKER_SELECTION_MATRIX_V1.md": "4eb4d2d7dcc1403b8fa70d3c0608d3bd71f3d9678778f8b3965e5374c5f57901",
+              "docs/security/B0_S3B_ISOLATION_ATTESTATION_PLAN_V1.md": "7e66ff5a7dec4e8d77a71c2f5be7ea8ada5300e42dfdbdde138a2ad45264f295",
+              "src/ai_commerce/production_runtime/broker_intake.py": "fc8726020452eaefcca9b756a1cb71b8008801720c37baedaedd41b1e74984ba",
+              "src/ai_commerce/production_runtime/broker_readiness.py": "7ac617e5e4cc7af852eaabec184cc589e918b871fb6b826db900ce9675a09062",
+              "tests/test_b0_s3b_broker_readiness.py": "2ad67314890332dcc80ea77cb7f25c3d168e5530b858c7cdc58fccfc29c87eb4",
+              "work_items/mt01-components/b0-s3b.json": "fbe9b6787ccc5d9afb60ccd16a1cce5640d3e916c21fd1df2cacc09b1578366c"
+            },
+            "source_stable": true,
+            "runtime": {
+              "system": "Windows",
+              "python": "3.14.7",
+              "pytest": "9.2.0",
+              "xdist": "3.8.0"
+            }
+          },
+          {
+            "round": 1,
+            "group": "b0-3",
+            "base_sha": "c7ae34c5a670277aaadbd422404fd41a06959d11",
+            "observation": "LOCAL_WINDOWS_EXECUTOR_DIAGNOSTIC_NOT_AUTHENTICATED_SELFHOST_OR_POSTEXECUTOR_EF01",
+            "registered_profile": "mt01-component-onboarding",
+            "registered_argv": [
+              "python",
+              "-m",
+              "pytest",
+              "tests/test_b0_3_attended_worker.py",
+              "-q",
+              "-n",
+              "12"
+            ],
+            "diagnostic_options": [
+              "cache_dir=SESSION_TEMP",
+              "basetemp=SESSION_TEMP"
+            ],
+            "selected": 55,
+            "collected": 55,
+            "executed": 54,
+            "passed": 54,
+            "failed": 0,
+            "skipped": 1,
+            "errors": 0,
+            "not_executed": [],
+            "unreported": [],
+            "deselected": 0,
+            "omission_reason": null,
+            "workers_requested": 12,
+            "workers_actual": 12,
+            "collections": {
+              "gw0": {
+                "worker_id": "gw0",
+                "collected": 55,
+                "ordered_sha256": "aecd57397e3b27f9c182fdcfe745c1475b0df07073033b4feade8ac0ad11d2ba",
+                "call_reports": 2,
+                "completion": "COMPLETED"
+              },
+              "gw1": {
+                "worker_id": "gw1",
+                "collected": 55,
+                "ordered_sha256": "aecd57397e3b27f9c182fdcfe745c1475b0df07073033b4feade8ac0ad11d2ba",
+                "call_reports": 4,
+                "completion": "COMPLETED"
+              },
+              "gw2": {
+                "worker_id": "gw2",
+                "collected": 55,
+                "ordered_sha256": "aecd57397e3b27f9c182fdcfe745c1475b0df07073033b4feade8ac0ad11d2ba",
+                "call_reports": 2,
+                "completion": "COMPLETED"
+              },
+              "gw3": {
+                "worker_id": "gw3",
+                "collected": 55,
+                "ordered_sha256": "aecd57397e3b27f9c182fdcfe745c1475b0df07073033b4feade8ac0ad11d2ba",
+                "call_reports": 7,
+                "completion": "COMPLETED"
+              },
+              "gw4": {
+                "worker_id": "gw4",
+                "collected": 55,
+                "ordered_sha256": "aecd57397e3b27f9c182fdcfe745c1475b0df07073033b4feade8ac0ad11d2ba",
+                "call_reports": 5,
+                "completion": "COMPLETED"
+              },
+              "gw5": {
+                "worker_id": "gw5",
+                "collected": 55,
+                "ordered_sha256": "aecd57397e3b27f9c182fdcfe745c1475b0df07073033b4feade8ac0ad11d2ba",
+                "call_reports": 5,
+                "completion": "COMPLETED"
+              },
+              "gw6": {
+                "worker_id": "gw6",
+                "collected": 55,
+                "ordered_sha256": "aecd57397e3b27f9c182fdcfe745c1475b0df07073033b4feade8ac0ad11d2ba",
+                "call_reports": 5,
+                "completion": "COMPLETED"
+              },
+              "gw7": {
+                "worker_id": "gw7",
+                "collected": 55,
+                "ordered_sha256": "aecd57397e3b27f9c182fdcfe745c1475b0df07073033b4feade8ac0ad11d2ba",
+                "call_reports": 5,
+                "completion": "COMPLETED"
+              },
+              "gw8": {
+                "worker_id": "gw8",
+                "collected": 55,
+                "ordered_sha256": "aecd57397e3b27f9c182fdcfe745c1475b0df07073033b4feade8ac0ad11d2ba",
+                "call_reports": 5,
+                "completion": "COMPLETED"
+              },
+              "gw9": {
+                "worker_id": "gw9",
+                "collected": 55,
+                "ordered_sha256": "aecd57397e3b27f9c182fdcfe745c1475b0df07073033b4feade8ac0ad11d2ba",
+                "call_reports": 5,
+                "completion": "COMPLETED"
+              },
+              "gw10": {
+                "worker_id": "gw10",
+                "collected": 55,
+                "ordered_sha256": "aecd57397e3b27f9c182fdcfe745c1475b0df07073033b4feade8ac0ad11d2ba",
+                "call_reports": 5,
+                "completion": "COMPLETED"
+              },
+              "gw11": {
+                "worker_id": "gw11",
+                "collected": 55,
+                "ordered_sha256": "aecd57397e3b27f9c182fdcfe745c1475b0df07073033b4feade8ac0ad11d2ba",
+                "call_reports": 5,
+                "completion": "COMPLETED"
+              }
+            },
+            "all_gw0_through_gw11_collected": true,
+            "worker_collection_hashes_equal": true,
+            "pytest_exit": 0,
+            "duration_seconds": 50.61,
+            "failed_tests": [],
+            "error_tests": [],
+            "skipped_tests": [
+              "tests/test_b0_3_attended_worker.py::test_actual_file_symlink_when_host_permits"
+            ],
+            "failure_kinds": {},
+            "collection_errors": [],
+            "log_sha256": "e8dcfeea0c246ecdfc072130f647f3a8cf6c457a0929596eeadde3008d388076",
+            "source_hashes_before": {
+              "docs/security/B0_S3B_BROKER_SELECTION_MATRIX_V1.md": "4eb4d2d7dcc1403b8fa70d3c0608d3bd71f3d9678778f8b3965e5374c5f57901",
+              "docs/security/B0_S3B_ISOLATION_ATTESTATION_PLAN_V1.md": "7e66ff5a7dec4e8d77a71c2f5be7ea8ada5300e42dfdbdde138a2ad45264f295",
+              "src/ai_commerce/production_runtime/broker_intake.py": "fc8726020452eaefcca9b756a1cb71b8008801720c37baedaedd41b1e74984ba",
+              "src/ai_commerce/production_runtime/broker_readiness.py": "7ac617e5e4cc7af852eaabec184cc589e918b871fb6b826db900ce9675a09062",
+              "tests/test_b0_s3b_broker_readiness.py": "2ad67314890332dcc80ea77cb7f25c3d168e5530b858c7cdc58fccfc29c87eb4",
+              "work_items/mt01-components/b0-s3b.json": "fbe9b6787ccc5d9afb60ccd16a1cce5640d3e916c21fd1df2cacc09b1578366c"
+            },
+            "source_hashes_after": {
+              "docs/security/B0_S3B_BROKER_SELECTION_MATRIX_V1.md": "4eb4d2d7dcc1403b8fa70d3c0608d3bd71f3d9678778f8b3965e5374c5f57901",
+              "docs/security/B0_S3B_ISOLATION_ATTESTATION_PLAN_V1.md": "7e66ff5a7dec4e8d77a71c2f5be7ea8ada5300e42dfdbdde138a2ad45264f295",
+              "src/ai_commerce/production_runtime/broker_intake.py": "fc8726020452eaefcca9b756a1cb71b8008801720c37baedaedd41b1e74984ba",
+              "src/ai_commerce/production_runtime/broker_readiness.py": "7ac617e5e4cc7af852eaabec184cc589e918b871fb6b826db900ce9675a09062",
+              "tests/test_b0_s3b_broker_readiness.py": "2ad67314890332dcc80ea77cb7f25c3d168e5530b858c7cdc58fccfc29c87eb4",
+              "work_items/mt01-components/b0-s3b.json": "fbe9b6787ccc5d9afb60ccd16a1cce5640d3e916c21fd1df2cacc09b1578366c"
+            },
+            "source_stable": true,
+            "runtime": {
+              "system": "Windows",
+              "python": "3.14.7",
+              "pytest": "9.2.0",
+              "xdist": "3.8.0"
+            }
+          }
+        ]
+      }
+    ],
+    "postexecutor_ef01": {
+      "status": "PENDING_NOT_RUN_BY_EXECUTOR",
+      "receipt": null,
+      "receipt_sha256": null,
+      "verified_candidate_sha": null,
+      "base_sha": "c7ae34c5a670277aaadbd422404fd41a06959d11"
+    },
+    "hosted_windows_pr_ci": "PENDING_INDEPENDENT_N4_EXACT_HEAD_BASE",
+    "brain_review": "PENDING_INDEPENDENT_EXACT_HEAD_BASE",
+    "trusted_merge": "NOT_REQUESTED_NOT_PERFORMED"
+  },
+  "proof_receipts": {
+    "preflight": "EXACT_BASE_CLEAN_EIGHT_ABSENT_OBSERVED",
+    "tested_file_hashes": {
+      "docs/security/B0_S3B_BROKER_SELECTION_MATRIX_V1.md": "4eb4d2d7dcc1403b8fa70d3c0608d3bd71f3d9678778f8b3965e5374c5f57901",
+      "docs/security/B0_S3B_ISOLATION_ATTESTATION_PLAN_V1.md": "7e66ff5a7dec4e8d77a71c2f5be7ea8ada5300e42dfdbdde138a2ad45264f295",
+      "src/ai_commerce/production_runtime/broker_intake.py": "fc8726020452eaefcca9b756a1cb71b8008801720c37baedaedd41b1e74984ba",
+      "src/ai_commerce/production_runtime/broker_readiness.py": "7ac617e5e4cc7af852eaabec184cc589e918b871fb6b826db900ce9675a09062",
+      "tests/test_b0_s3b_broker_readiness.py": "2ad67314890332dcc80ea77cb7f25c3d168e5530b858c7cdc58fccfc29c87eb4",
+      "work_items/mt01-components/b0-s3b.json": "fbe9b6787ccc5d9afb60ccd16a1cce5640d3e916c21fd1df2cacc09b1578366c"
+    },
+    "final_handoff_sha256": "4a40fb677d44c4f7857b7eee97fc7f843f65dadb2b0cb1a1b95de98ed887b6ba",
+    "final_scope": {
+      "head_sha": "c7ae34c5a670277aaadbd422404fd41a06959d11",
+      "tracked_diff_empty": true,
+      "exactly_eight_authorized_additions": true,
+      "additions": [
+        "docs/engineering/B0_S3B_SOURCE_HANDOFF.md",
+        "docs/security/B0_S3B_BROKER_SELECTION_MATRIX_V1.md",
+        "docs/security/B0_S3B_ISOLATION_ATTESTATION_PLAN_V1.md",
+        "src/ai_commerce/production_runtime/broker_intake.py",
+        "src/ai_commerce/production_runtime/broker_readiness.py",
+        "tests/test_b0_s3b_broker_readiness.py",
+        "work_items/B0-S3B_PRIVATE_BROKER_READINESS_001.json",
+        "work_items/mt01-components/b0-s3b.json"
+      ],
+      "protected_files_stable": true,
+      "protected_worktree_sha256": "9317ab913fccb9fe1c11767c62f033bfab1c51b92d564f40d0f260012ce31ad3",
+      "tested_static_files_stable": true,
+      "executor_git_writes": "NONE"
+    }
+  },
+  "native_b03_source_sha": "32f42b84567e1217a93854389b1c96435bbf454d",
+  "source_ingress_new_ac_state": "LOCAL_DATA_OWNER_VALIDATED__SCOPED_B0_CLOSURE_TESTED__POSTEXECUTOR_EF01_AND_BRAIN_ACCEPTANCE_PENDING"
+}
