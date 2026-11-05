@@ -129,6 +129,11 @@ REVIEWED_CONTROL_TESTS = {
     # broker token, signed write, ACL mutation or installer execution path.
     "scripts/HostOps-V4-InstallPlan.ps1": (
         "tests/test_hostops_v3_integration.py", "tests/test_minimum_test.py"),
+    # Independently reviewed operator-ATTENDED D5 script path only. Never
+    # authorize arbitrary PowerShell, service creation or a Send/Wake command.
+    "scripts/AI-Commerce-D5-Attended-CDP.ps1": (
+        "tests/test_ef02_d5_chrome_acquisition.py", "tests/test_minimum_test.py",
+        "tests/test_mt01_v21.py", "tests/test_pr_merge_gate.py"),
     "config/hostops-v3/config-v4.example.json": (
         "tests/test_hostops_v3_integration.py", "tests/test_minimum_test.py"),
     "src/ai_commerce/remote/validation.py": (

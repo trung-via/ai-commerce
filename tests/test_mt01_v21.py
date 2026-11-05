@@ -1363,3 +1363,41 @@ def test_v22_baseline_unowned_consumer_never_silently_admitted(tmp_path):
     with pytest.raises(ValueError, match="BASELINE_OWNER_CLOSURE_MISSING"):
         oracle["trusted_baseline_manifest_groups"](
             repo=tmp_path, base_sha=base, base_groups=old_groups)
+
+def test_d5_attended_cdp_script_control_map_and_independent_oracle(tmp_path):
+    """Only exact D5 operator script selects its mandatory regression closure."""
+    import runpy
+    from ai_commerce.engineering.impact_v21 import CONTROL_TESTS, select_impact
+    path = "scripts/AI-Commerce-D5-Attended-CDP.ps1"
+    required = {
+        "tests/test_ef02_d5_chrome_acquisition.py", "tests/test_minimum_test.py",
+        "tests/test_mt01_v21.py", "tests/test_pr_merge_gate.py",
+    }
+    assert set(CONTROL_TESTS[path]) == required
+    for p in required:
+        mk(tmp_path, p, "# synthetic registered test file\n")
+    mk(tmp_path, path, "# synthetic PowerShell control only\n")
+    plan = select_impact(root=tmp_path, changed_paths=[path], groups=())
+    assert plan.runnable
+    assert set(plan.selected_tests) == required
+    assert "REVIEWED_CONTROL_CLOSURE" in plan.reason_codes
+    oracle = runpy.run_path(str(Path(__file__).resolve().parents[1] /
+                                ".github/scripts/mt01_v21_oracle.py"))
+    assert oracle["CONTROL_TESTS"][path] == required
+    proof = {"version": 2, "changed_paths": [path], "selected_tests": sorted(required),
+             "selected_groups": []}
+    ok, reasons = oracle["check_selection"](
+        proof, base_groups=(), candidate_groups=(),
+        changed_paths={path}, present_paths=required)
+    assert ok, reasons
+    proof["selected_tests"] = sorted(required - {"tests/test_mt01_v21.py"})
+    ok, reasons = oracle["check_selection"](
+        proof, base_groups=(), candidate_groups=(),
+        changed_paths={path}, present_paths=required)
+    assert not ok
+    assert "REQUIRED_TEST_OMITTED:tests/test_mt01_v21.py" in reasons
+    other = "scripts/AI-Commerce-D5-Unreviewed-Remote-Shell.ps1"
+    mk(tmp_path, other, "# do not trust this script\n")
+    blocked = select_impact(root=tmp_path, changed_paths=[other], groups=())
+    assert not blocked.runnable
+    assert other not in CONTROL_TESTS

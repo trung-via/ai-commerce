@@ -1159,3 +1159,27 @@ def test_repository_wide_windows_only_audit():
     assert not missing, "ESSENTIAL_WORKFLOW_MISSING: " + repr(missing)
     assert active_workflows >= len(essential), "ACTIVE_WORKFLOW_INVENTORY_INCOMPLETE"
     assert not blocking, "WINDOWS_ONLY_ACTIVE_DEPENDENCY_REMAINS: " + repr(blocking[:20])
+
+def test_d5_attended_cdp_script_has_exact_protected_main_review_owner(gate):
+    """Review only the one Human-attended no-Send script, not arbitrary .ps1."""
+    exact = "scripts/AI-Commerce-D5-Attended-CDP.ps1"
+    required = {
+        "tests/test_ef02_d5_chrome_acquisition.py",
+        "tests/test_minimum_test.py", "tests/test_mt01_v21.py",
+        "tests/test_pr_merge_gate.py",
+    }
+    assert set(gate.REVIEWED_CONTROL_TESTS[exact]) == required
+    reviewed = gate.reviewed_coverage_for_changed_files(
+        [{"filename": exact, "status": "added"}])
+    assert reviewed is not None
+    paths, witness = reviewed
+    assert paths == (exact,)
+    assert required <= set(witness)
+    # An unrelated operator shell script cannot piggyback on this contract.
+    assert gate.reviewed_coverage_for_changed_files([
+        {"filename": "scripts/AI-Commerce-D5-Arbitrary-Execute.ps1", "status": "added"}
+    ]) is None
+    assert gate.reviewed_coverage_for_changed_files([
+        {"filename": exact, "status": "added"},
+        {"filename": "scripts/AI-Commerce-D5-Arbitrary-Execute.ps1", "status": "added"},
+    ]) is None
