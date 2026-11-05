@@ -1,0 +1,21 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "bq-01b",
+  "sources": [
+    "src/ai_commerce/creative_quality/voice_intent.py",
+    "src/ai_commerce/creative_quality/acoustic_scene.py",
+    "src/ai_commerce/creative_quality/voice_compile.py"
+  ],
+  "tests": ["tests/test_bq_01b_voice_acoustics.py"],
+  "acs": [
+    "BQ-01b.vn-voice-intent-and-provenance",
+    "BQ-01b.acoustic-scene-and-capability-mock"
+  ],
+  "consumers": [
+    "src/ai_commerce/creative_quality/causality.py",
+    "src/ai_commerce/creative_quality/capability.py",
+    "src/ai_commerce/creative_quality/behavioral.py",
+    "src/ai_commerce/creative/briefs.py"
+  ],
+  "contracts": []
+}
