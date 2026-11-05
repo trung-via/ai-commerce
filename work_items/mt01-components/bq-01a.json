@@ -1,0 +1,19 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "bq-01a",
+  "sources": [
+    "src/ai_commerce/creative_quality/__init__.py",
+    "src/ai_commerce/creative_quality/behavioral.py",
+    "src/ai_commerce/creative_quality/causality.py",
+    "src/ai_commerce/creative_quality/capability.py"
+  ],
+  "tests": ["tests/test_bq_01a_brief_causality.py"],
+  "acs": ["BQ-01a.offline-behavioral-brief", "BQ-01a.causal-and-capability-mock"],
+  "consumers": [
+    "src/ai_commerce/creative/briefs.py",
+    "src/ai_commerce/creative/intent.py",
+    "src/ai_commerce/creative/reasoner.py",
+    "src/ai_commerce/creative/sidecars.py"
+  ],
+  "contracts": []
+}
