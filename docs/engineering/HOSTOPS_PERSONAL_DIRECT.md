@@ -193,16 +193,26 @@ private paths or read those files. It never claims exact-chat, signed Chrome,
 D5 readiness or Wake proof from these diagnostics. Missing or failed probes
 remain `UNAVAILABLE`; exception text and raw native output are not findings.
 
-**PUBLIC_TRANSPORT_GAP:** The existing protected Issue ingress cannot serialize
-the new `diagnostics` field. The public operation therefore fails closed before
-collecting a snapshot. It does not return empty `OBSERVED`, put diagnostics in
-`content_utf8`, or expand the workflow allowlist from an EF02 source change.
-[Separate dependency #371](https://github.com/trung-via/ai-commerce/issues/371)
-requires a reviewed protected-source PR with an independent strict sanitizer
-and matching source binding. Source CI alone proves neither end-to-end public
-delivery nor acceptance on the live laptop. The Human's exact new
-`APPROVE WRITE #N` remains mandatory for every WRITE; Chrome launch, navigation,
-Send, Wake, credential access and D2 mutation are outside this READ decision.
+**PUBLIC TRANSPORT — protected workflow candidate for #371:** The previous
+source-only PR #376 intentionally returned `PUBLIC_TRANSPORT_GAP` because the
+protected Issue ingress did not know how to validate `diagnostics`. This
+separately reviewed follow-up changes both source `PERSONAL_PUBLIC_FIELDS`
+and `.github/workflows/issue-ingress.yml` together, with an independent strict
+16-row fixed-order/category/code validator, canonical JSON and size checks,
+exact Issue/source binding and a public-only output projection. Malformed,
+duplicate-key, reordered, unexpected and private fields are rejected as
+`BLOCKED / INVALID_PUBLIC_DIAGNOSTIC_RECEIPT`; no `content_utf8` workaround
+is permitted. The new field is removed for all legacy operations.
+
+**Not yet LIVE:** These are proposed branch changes, not installed capability.
+They require exact-HEAD Windows CI, independent Brain review, trusted merge to
+main, and one genuine new owner-authored `[HOSTOPS READ]` request on
+`AI-COMMERCE-HOSTOPS-01` before claiming `READ_RETURNED`. A source or CI PASS
+alone is not an independent laptop receipt. Profile/config/markers/D5 remain
+`PRIVATE_READ_CHANNEL_REQUIRED` unless separately reviewed metadata-only
+diagnostics gain a suitable private or privacy-preserving channel. The Human's
+exact new `APPROVE WRITE #N` remains mandatory for every WRITE; Chrome launch,
+navigation, Send, Wake, credential access and D2 mutation are outside READ.
 
 This recovery is new source authorship: `ARTIFACT_REUSE_UNAVAILABLE`. The normal
 repository tool returned #370 artifact 13374903964 from run 41936937393 attempt
