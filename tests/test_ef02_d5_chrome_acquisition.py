@@ -376,6 +376,9 @@ def test_attended_d5_repair_is_explicit_local_fixed_port_write_only():
         "REPAIR_POST_WRITE_UNKNOWN_RECONCILE",
     ):
         assert guard in repair
+    assert "REPAIR_REPARSE_DENIED" in repair
+    assert "REPAIR_REPARSE_CHECK_UNAVAILABLE" in repair
+    assert "[IO.FileAttributes]::ReparsePoint" in repair
     assert "REPAIR-CONFIG-9333" in repair
     assert repair.index("REPAIR-CONFIG-9333") < repair.index("[IO.File]::Replace(")
     assert repair.index("Get-Acl -LiteralPath $ChromeConfig") < repair.index("WriteAllText(")
