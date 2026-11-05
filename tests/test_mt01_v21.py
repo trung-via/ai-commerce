@@ -1401,3 +1401,20 @@ def test_d5_attended_cdp_script_control_map_and_independent_oracle(tmp_path):
     blocked = select_impact(root=tmp_path, changed_paths=[other], groups=())
     assert not blocked.runnable
     assert other not in CONTROL_TESTS
+
+
+def test_mt01_impact_control_only_selects_reviewed_self_tests():
+    """Bootstrap regression #386: planner control change must not fan out to unrelated suites."""
+    from ai_commerce.engineering.minimum_test import approved_groups
+    from ai_commerce.engineering.impact_v21 import CONTROL_TESTS, select_impact
+
+    source = "src/ai_commerce/engineering/impact_v21.py"
+    root = Path(__file__).resolve().parents[1]
+    assert CONTROL_TESTS[source] == ("tests/test_mt01_v21.py",)
+    selected = select_impact(
+        root=root, changed_paths=(source, "tests/test_mt01_v21.py"),
+        groups=approved_groups(),
+    )
+    assert selected.runnable, selected
+    assert selected.selected_groups == ("mt01-v21",)
+    assert selected.selected_tests == ("tests/test_mt01_v21.py",)
