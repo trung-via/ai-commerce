@@ -1,0 +1,24 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "bq-02a",
+  "sources": [
+    "src/ai_commerce/creative_quality/critic.py",
+    "src/ai_commerce/creative_quality/inspection_evidence.py",
+    "src/ai_commerce/creative_quality/quality_review.py"
+  ],
+  "tests": ["tests/test_bq_02a_critic_t1.py"],
+  "acs": [
+    "BQ-02a.q2-source-bound-adversarial-preflight",
+    "BQ-02a.q4-t1-observed-media-evidence",
+    "BQ-02a.q2-post-inspection-boundary"
+  ],
+  "consumers": [
+    "src/ai_commerce/creative_quality/causality.py",
+    "src/ai_commerce/creative_quality/behavioral.py",
+    "src/ai_commerce/affiliate_release/inspection.py",
+    "src/ai_commerce/creative_quality/voice_intent.py",
+    "src/ai_commerce/creative_quality/acoustic_scene.py",
+    "src/ai_commerce/creative/briefs.py"
+  ],
+  "contracts": []
+}
