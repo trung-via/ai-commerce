@@ -56,9 +56,9 @@ _STANDING_CATEGORY_CODES = {
 STANDING_READ_CATEGORIES = tuple(_STANDING_CATEGORY_CODES)
 STANDING_READ_CODES = frozenset(code for codes in _STANDING_CATEGORY_CODES.values() for code in codes)
 
-# Mirror the existing protected Issue ingress allowlist, including its separate
-# runner sanitizer. Adding diagnostics requires the separate reviewed #371
-# workflow AND source binding change; a source-only change cannot enable it.
+# Mirror the reviewed protected Issue ingress allowlist, including its separate
+# runner and standing-READ sanitizers. The workflow independently checks all
+# sixteen closed-code categories and the entire sanitized receipt before posting.
 PERSONAL_PUBLIC_FIELDS = frozenset((
     "status code operation issue_number root_id relative_path bytes sha256 windows architecture "
     "logical_cpu_count no_shell_command_executed overwritten remote_shell_enabled source_sha "
@@ -67,7 +67,7 @@ PERSONAL_PUBLIC_FIELDS = frozenset((
     "sync_result all_listener_count unmatched_listener_count arbitrary_shell_enabled cdp_port "
     "listener_count loopback_count unexpected_binding_count chrome_owned_loopback_count "
     "same_session_chrome_count devtools_protocol_ok infrastructure_ready exact_chat_verified "
-    "wake_sent runners"
+    "wake_sent runners diagnostics"
 ).split())
 
 
