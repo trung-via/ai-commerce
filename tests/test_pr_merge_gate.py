@@ -1183,3 +1183,32 @@ def test_d5_attended_cdp_script_has_exact_protected_main_review_owner(gate):
         {"filename": exact, "status": "added"},
         {"filename": "scripts/AI-Commerce-D5-Arbitrary-Execute.ps1", "status": "added"},
     ]) is None
+
+
+def test_d5_operator_bridge_script_has_independent_protected_main_review_owner(gate):
+    """Source-only D5 adapter gets exact, narrow independent review coverage."""
+    exact = "scripts/AI-Commerce-D5-Operator-Bridge.ps1"
+    required = {
+        "tests/test_hostops_d5_control.py",
+        "tests/test_ef02_d5_chrome_acquisition.py",
+        "tests/test_hostops_personal.py",
+        "tests/test_hostops_v3.py",
+        "tests/test_mt01_v21.py",
+        "tests/test_pr_merge_gate.py",
+    }
+    assert set(gate.REVIEWED_CONTROL_TESTS[exact]) == required
+    reviewed = gate.reviewed_coverage_for_changed_files([
+        {"filename": exact, "status": "added"},
+    ])
+    assert reviewed is not None
+    paths, tests = reviewed
+    assert paths == (exact,)
+    assert required <= set(tests)
+    # No wildcard privilege for other scripts, chrome actions or Wake sends.
+    assert gate.reviewed_coverage_for_changed_files([
+        {"filename": "scripts/AI-Commerce-D5-Unreviewed-Launch.ps1", "status": "added"},
+    ]) is None
+    assert gate.reviewed_coverage_for_changed_files([
+        {"filename": exact, "status": "added"},
+        {"filename": "scripts/AI-Commerce-D5-Unreviewed-Launch.ps1", "status": "added"},
+    ]) is None
