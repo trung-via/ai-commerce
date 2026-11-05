@@ -16,6 +16,53 @@ It is a **current foundation blocker** only: Chrome may be running
 elsewhere without CDP. This new wrapper builds on the existing
 \`chrome_acquisition\` guard and does **not** widen the HostOps route.
 
+### Approved private configuration correction (no Chrome launch)
+
+The independently verified [HostOps READ #389](https://github.com/trung-via/ai-commerce/issues/389)
+on 2026-11-05 observed `KNOWN_CONFIG_OTHER_PORT`, a dedicated Chrome profile
+directory, no lock markers, no CDP 9333 listener and an absent fixed D5
+manifest. The Human then approved correction to **only**
+`http://127.0.0.1:9333`. Neither private config contents nor the alternate
+port were published. **GitHub HostOps WRITE must not modify this private
+config**; its public Issue scope is intentionally much narrower.
+
+Once this exact PR is independently reviewed/merged and the operator's
+`C:\TOOL\ai-commerce` checkout is synchronized to reviewed main, in
+the local **non-elevated interactive PowerShell** session run:
+
+~~~powershell
+Set-Location C:\TOOL\ai-commerce
+.\scripts\AI-Commerce-D5-Attended-CDP.ps1 -Mode RepairConfig
+~~~
+
+The operator types `REPAIR-CONFIG-9333` once locally. This operation:
+1. Selects exactly one existing file from the three known fixed private
+   `%LOCALAPPDATA%\AI-Commerce` config names; no manifest-provided or
+   user-supplied alternative config path is permitted in RepairConfig mode.
+2. Rejects Windows reparse/junction/symlink path components, validates the
+   original config with existing Chrome acquisition owner ACL + Google
+   Authenticode guards, and requires **NOT_RUNNING** (no contested or active
+   dedicated profile).
+3. Updates only the JSON `cdp_endpoint` value. It stages the configuration
+   under the same private directory after copying the exact ACL to the empty
+   stage, verifies the stage using the same Chrome acquisition probe, then
+   uses Windows `File.Replace` to preserve the target ACL and keep a
+   temporary private backup.
+4. Performs a second read-only probe and checks the final port. It deletes
+   the private backup **only after verification succeeds**. No private path,
+   JSON, token, command line or exception is sent to GitHub.
+5. Returns only `D5_ATTENDED_STATUS=CONFIG_9333_UPDATED_NO_LAUNCH` and
+   `D5_WAKE_SENT=False` (or `CONFIG_9333_ALREADY`). An uncertain result
+   is a local **HOLD/RECONCILE**, not permission to rerun blindly.
+
+`RepairConfig` does **not** start Chrome, create a missing D5 manifest,
+authenticate a browser, open a chat tab or send Wake. After its reported
+success, request a *new* ChatGPT-initiated standing READ and require
+`chrome_config=KNOWN_CONFIG_EXACT_9333`; `cdp_9333_listener=ABSENT`
+may still be entirely normal because no Chrome launch is authorized.
+Human-attended `StartCDP`, signed grants and exact-chat/Wake remain
+separate future decisions and checks.
+
 After merging this source PR and synchronizing the operator checkout
 \`C:\TOOL\ai-commerce\` through the already reviewed Git fast-forward
 procedure, a Human opens **non-elevated PowerShell in their logged-in
