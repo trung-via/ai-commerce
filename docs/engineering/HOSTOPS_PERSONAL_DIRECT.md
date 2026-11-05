@@ -193,16 +193,29 @@ private paths or read those files. It never claims exact-chat, signed Chrome,
 D5 readiness or Wake proof from these diagnostics. Missing or failed probes
 remain `UNAVAILABLE`; exception text and raw native output are not findings.
 
-**PUBLIC_TRANSPORT_GAP:** The existing protected Issue ingress cannot serialize
-the new `diagnostics` field. The public operation therefore fails closed before
-collecting a snapshot. It does not return empty `OBSERVED`, put diagnostics in
-`content_utf8`, or expand the workflow allowlist from an EF02 source change.
-[Separate dependency #371](https://github.com/trung-via/ai-commerce/issues/371)
-requires a reviewed protected-source PR with an independent strict sanitizer
-and matching source binding. Source CI alone proves neither end-to-end public
-delivery nor acceptance on the live laptop. The Human's exact new
-`APPROVE WRITE #N` remains mandatory for every WRITE; Chrome launch, navigation,
-Send, Wake, credential access and D2 mutation are outside this READ decision.
+**Public transport implementation — #371 (source candidate):** The reviewed
+`issue-ingress.yml` field allowlist and `PERSONAL_PUBLIC_FIELDS` agree on
+`diagnostics`. The separate GitHub `github-script` sanitizer validates all
+16 ordered category names, category-specific finite code enums, mandatory
+top-level receipt fields, GitHub Issue number, event source SHA, exact READ
+approval channel and booleans; the complete receipt is bounded to 8192 UTF-8
+bytes. Unrecognized keys, altered row fields, unexpected enums and malformed
+receipts yield `BLOCKED/INVALID_PUBLIC_DIAGNOSTIC_RECEIPT` with no raw
+diagnostic data. The source still fails closed with `PUBLIC_TRANSPORT_GAP`
+if the deployed source/workflow field contracts drift, and never uses
+`content_utf8` to bypass sanitization.
+
+**Activation depends on trusted merge and a separate native READ receipt.**
+A green source CI run and PR merge alone do not establish laptop READ.
+After independent Brain source acceptance, issue one owner-authored
+`[HOSTOPS READ]` request with
+`{"schema":"ai-commerce.personal-hostops.v1","operation":"standing_read_diagnostics","parameters":{}}`
+and verify `OBSERVED` plus the 16 safe rows in the original Issue's
+HOSTOPS-01 comment. Chrome profile/config/markers and private D5 details
+remain `PRIVATE_READ_CHANNEL_REQUIRED`, not inferred as observed.
+The Human's exact `APPROVE WRITE #N` remains mandatory for every WRITE;
+Chrome launch, navigation, Send, Wake, credential access and D2 mutation
+are outside READ consent.
 
 This recovery is new source authorship: `ARTIFACT_REUSE_UNAVAILABLE`. The normal
 repository tool returned #370 artifact 13374903964 from run 41936937393 attempt
