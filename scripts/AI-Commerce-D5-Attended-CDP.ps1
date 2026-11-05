@@ -22,6 +22,56 @@ function Stop-Bounded([string]$Code) {
     Write-Output ('D5_ATTENDED_STATUS=BLOCKED_' + $Code)
     exit 2
 }
+
+# Return ONE approved enum only; never return native stderr, stack traces or paths.
+function Get-Repair-Preflight-Code([object[]]$Lines) {
+    $allowed = @(
+        'BROWSER_OWNERSHIP_UNPROVEN',
+        'CDP_ENDPOINT_INVALID',
+        'CDP_NOT_LOOPBACK_OWNED',
+        'CDP_PROTOCOL_UNAVAILABLE',
+        'CHROME_EXECUTABLE_UNTRUSTED',
+        'CHROME_PATH_INVALID',
+        'CONFIG_DUPLICATE_KEY',
+        'CONFIG_INVALID',
+        'CONFIG_IN_CHROME_PROFILE',
+        'CONFIG_IN_REPOSITORY',
+        'CONFIG_NOT_OPERATOR_OWNED',
+        'CONFIG_PATH_INVALID',
+        'ELEVATED_CHROME_DISALLOWED',
+        'LAUNCH_NOT_AUTHORIZED',
+        'LAUNCH_OWNER_MISMATCH',
+        'LAUNCH_UNCERTAIN',
+        'LAUNCH_UNPROVEN',
+        'LOCAL_APP_DATA_UNAVAILABLE',
+        'OPERATOR_OWNERSHIP_UNPROVEN',
+        'POWERSHELL_UNAVAILABLE',
+        'PROCESS_IDENTITY_UNKNOWN',
+        'PROFILE_ALREADY_ACTIVE_NO_CDP',
+        'PROFILE_LOCKED',
+        'PROFILE_NOT_DEDICATED',
+        'PROFILE_UNAVAILABLE',
+        'WINDOWS_INTERACTIVE_REQUIRED',
+        'WINDOWS_PROBE_INVALID',
+        'WINDOWS_PROBE_UNAVAILABLE',
+        'WINDOWS_TOKEN_UNAVAILABLE'
+    )
+    if ($null -eq $Lines -or $Lines.Count -gt 8) { return 'UNVERIFIED' }
+    $seen = @()
+    foreach ($entry in $Lines) {
+        $value = [string]$entry
+        if ($value.Length -gt 4096) { return 'UNVERIFIED' }
+        # PowerShell 5.1 may prefix native stderr with "python.exe : ".
+        # Only one terminal fixed code is ever allowed into the output.
+        if ($value -cmatch 'CHROME_ACQUISITION_BLOCKED: ([A-Z0-9_]{1,90})$') {
+            $code = [string]$Matches[1]
+            if ($allowed -ccontains $code) { $seen += $code }
+        }
+    }
+    if ($seen.Count -ne 1) { return 'UNVERIFIED' }
+    return [string]$seen[0]
+}
+
 if ($env:GITHUB_ACTIONS -eq 'true') { Stop-Bounded 'LOCAL_OPERATOR_ONLY' }
 if ($env:OS -ne 'Windows_NT') {
     Stop-Bounded 'WINDOWS_ONLY'
@@ -115,10 +165,15 @@ try {
         # Never change the config when Chrome ownership is uncertain or active.
         try {
             $preflight = @(& $python @probeArgs 2>&1 | ForEach-Object { [string]$_ })
-            if ($LASTEXITCODE -ne 0 -or $preflight.Count -lt 1) {
-                Stop-Bounded 'REPAIR_PREFLIGHT_UNVERIFIED'
+            $preflightExit = $LASTEXITCODE
+            if ($preflightExit -ne 0) {
+                # A refused native guard is not a generic failure. Forward
+                # only the fixed enum from the source-owned Chrome CLI.
+                $cause = Get-Repair-Preflight-Code -Lines $preflight
+                Stop-Bounded ('REPAIR_PREFLIGHT_' + $cause)
             }
-            $preflightRecord = $preflight[-1] | ConvertFrom-Json -ErrorAction Stop
+            if ($preflight.Count -ne 1) { Stop-Bounded 'REPAIR_PREFLIGHT_UNVERIFIED' }
+            $preflightRecord = $preflight[0] | ConvertFrom-Json -ErrorAction Stop
             if ($preflightRecord.status -cne 'NOT_RUNNING' -or
                     $preflightRecord.browser_accessed -ne $false) {
                 Stop-Bounded 'REPAIR_BROWSER_STATE_NOT_IDLE'

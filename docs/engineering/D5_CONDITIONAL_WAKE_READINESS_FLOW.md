@@ -16,6 +16,38 @@ It is a **current foundation blocker** only: Chrome may be running
 elsewhere without CDP. This new wrapper builds on the existing
 \`chrome_acquisition\` guard and does **not** widen the HostOps route.
 
+### Live RepairConfig preflight failure — bounded cause recovery
+
+On 2026-11-05, after source PR #391 and a verified laptop `main`
+fast-forward, one Human-attended `-Mode RepairConfig` invocation returned
+`BLOCKED_REPAIR_PREFLIGHT_UNVERIFIED`. This is **before the private JSON
+write / Windows File.Replace**. The previous operator script collapsed every
+nonzero Chrome-acquisition native probe exit into the same generic message
+and discarded a genuine source-owned `CHROME_ACQUISITION_BLOCKED: CODE`
+explanation. Consequently, the underlying cause could **not** be determined
+from that receipt; do not infer a corrupted config, wrong port being active,
+missing signature, or current browser process without further evidence.
+
+A separately reviewed follow-up tightens only the **preflight reporting**
+path. On a nonzero exit, it extracts exactly one code from the bounded,
+source-owned Chrome acquisition error vocabulary (owner ACL, signed Chrome,
+interactive desktop, process/profile lock, Windows probe, configuration).
+Output has only `D5_ATTENDED_STATUS=BLOCKED_REPAIR_PREFLIGHT_<CODE>`;
+unexpected stderr, multiple codes, stack traces and arbitrary strings still
+map to `BLOCKED_REPAIR_PREFLIGHT_UNVERIFIED`. Private file names, old port,
+profile path, process argv, stderr and stack traces are **never** printed or
+sent to GitHub. The guard remains fail-closed and is not bypassed.
+
+**No retry while source is not accepted/deployed.** After independent
+Windows source CI, Brain PASS trusted merge, Human-authorized laptop sync,
+a new locally attended attempt may report one concrete safe diagnostic.
+If `PROFILE_ALREADY_ACTIVE_NO_CDP` / `BROWSER_OWNERSHIP_UNPROVEN`,
+do not stop or relaunch Chrome automatically; reconcile the existing
+profile/process first. If `OPERATOR_OWNERSHIP_UNPROVEN` or
+`CHROME_EXECUTABLE_UNTRUSTED`, do not relax ACL/signature checks. The only
+authorized actual effect remains one port-only config correction, with local
+typed Human consent and independent readback; no Wake, Send or browser launch.
+
 ### Approved private configuration correction (no Chrome launch)
 
 The independently verified [HostOps READ #389](https://github.com/trung-via/ai-commerce/issues/389)
