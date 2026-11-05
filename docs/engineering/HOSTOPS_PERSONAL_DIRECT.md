@@ -8,7 +8,7 @@
 
 The trusted `.github/workflows/issue-ingress.yml` is the only issue ingress. It contains **Personal HostOps** and the existing **EF02** path. On 2026-11-04, the obsolete v1/v2/v3 HostOps caller jobs and their five hosted/reusable workflows were **retired from active GitHub Actions** (see [retirement record](HOSTOPS_LEGACY_RETIREMENT_20261104.md)). Historical source, contracts, tests and signed receipts remain available for audit, but have no active GitHub Issue route.
 
-**READ:** The Human requests and approves a read in ChatGPT. An authenticated GitHub connector creates an owner-authored Issue titled `[HOSTOPS READ] <purpose>` with an exact JSON body; its opening triggers one Windows operation. No second Human approval. READ operations now support `inventory`, `runner_runtime_inventory` (strictly three predefined AI Commerce runner names, Task Scheduler state, hidden-launcher presence and listener process/session counts, plus total and unidentified listener count), `cdp_9333_status` (fixed loopback TCP owner/session and DevTools version metadata, no chat access, no Wake), `git_snapshot` (HEAD, branch, count of tracked changes only), `tracked_paths` (up to 50 public git-tracked paths), `read_text` (max 8 KiB, committed and unchanged public source/docs), and `file_digest` (SHA-256/size only for approved scratch/local-note files). Untracked names, changed file content, secrets and credential files are not sent to a public Issue.
+**READ:** On 2026-11-05 the Human granted standing approval for safe operational READ diagnostics. No recurring Human approval is required for each safe READ. An authenticated GitHub connector creates an owner-authored Issue titled `[HOSTOPS READ] <purpose>` with an exact JSON body; its opening triggers one Windows operation. READ operations support `inventory`, `runner_runtime_inventory` (strictly three predefined AI Commerce runner names, Task Scheduler state, hidden-launcher presence and listener process/session counts, plus total and unidentified listener count), `cdp_9333_status` (fixed loopback TCP owner/session and DevTools version metadata, no chat access, no Wake), `git_snapshot` (HEAD, branch, count of tracked changes only), `tracked_paths` (up to 50 public git-tracked paths), `read_text` (max 8 KiB, committed and unchanged public source/docs), and `file_digest` (SHA-256/size only for approved scratch/local-note files). Untracked names, changed file content, secrets and credential files are not sent to a public Issue. Standing consent does not authorize public disclosure of private data or any WRITE.
 
 **WRITE:** ChatGPT creates a public Issue titled `[HOSTOPS WRITE] <purpose>` containing the exact target and non-sensitive text. Merely opening it NEVER executes the write. The Human opens this Issue in the ordinary GitHub UI and types **exactly** `APPROVE WRITE #N` (N is the Issue number) as a new comment. The dedicated workflow admits this one owner-comment event, then creates **one new** `hostops-personal-*.txt|md|json` file, <=2048 UTF-8 bytes, in either the existing scratch root `C:\TOOL\AI-Commerce-HostOps-Approved` (`root_id=scratch`) or the existing ignored worktree notes directory `C:\TOOL\ai-commerce\.local` (`root_id=workspace_notes`). A missing directory produces HOLD; no directory auto-creation, overwrite, source edit or arbitrary command. No overwrite, delete or arbitrary PowerShell. Success returns SHA256/size; ambiguous effect returns HOLD and must be checked on disk before attempting a different request.
 
@@ -175,3 +175,90 @@ Old private W1.3 Issues #6/#7 and signed requests remain **CONSUMED / NO_RETRY**
 ## Status claims
 
 `SOURCE_MERGED`, `RUNNER_JOB_OBSERVED`, `READ_RETURNED` and `WRITE_DISK_VERIFIED` are separate. Do not claim a live laptop operation based on CI, source code or an Issue created by ChatGPT alone.
+
+## Standing READ source recovery and public transport dependency
+
+The parameterless `standing_read_diagnostics` READ has a source-owned,
+sixteen-category snapshot. Each ordered row contains only `category` and a
+category-specific `code` enum. Exact types, order, count, fields and serialized
+size (at most 8192 bytes) are validated by `_validate_standing_snapshot`.
+There are no Issue-selected paths, ports, processes, commands or PowerShell.
+
+The internal snapshot reduces the existing fixed CDP 9333 and three-runner
+probes to enums, distinguishes task state from listener presence, and reports
+Git tracked-change state and Python runtime support. Chrome profile/config/
+marker contents and private D5 metadata remain `PRIVATE_READ_CHANNEL_REQUIRED`:
+this route has no enrolled independent private channel and does not guess
+private paths or read those files. It never claims exact-chat, signed Chrome,
+D5 readiness or Wake proof from these diagnostics. Missing or failed probes
+remain `UNAVAILABLE`; exception text and raw native output are not findings.
+
+**PUBLIC TRANSPORT — protected workflow candidate for #371:** The previous
+source-only PR #376 intentionally returned `PUBLIC_TRANSPORT_GAP` because the
+protected Issue ingress did not know how to validate `diagnostics`. This
+separately reviewed follow-up changes both source `PERSONAL_PUBLIC_FIELDS`
+and `.github/workflows/issue-ingress.yml` together, with an independent strict
+16-row fixed-order/category/code validator, canonical JSON and size checks,
+exact Issue/source binding and a public-only output projection. Malformed,
+duplicate-key, reordered, unexpected and private fields are rejected as
+`BLOCKED / INVALID_PUBLIC_DIAGNOSTIC_RECEIPT`; no `content_utf8` workaround
+is permitted. The new field is removed for all legacy operations.
+
+**Not yet LIVE:** These are proposed branch changes, not installed capability.
+They require exact-HEAD Windows CI, independent Brain review, trusted merge to
+main, and one genuine new owner-authored `[HOSTOPS READ]` request on
+`AI-COMMERCE-HOSTOPS-01` before claiming `READ_RETURNED`. A source or CI PASS
+alone is not an independent laptop receipt. Profile/config/markers/D5 remain
+`PRIVATE_READ_CHANNEL_REQUIRED` unless separately reviewed metadata-only
+diagnostics gain a suitable private or privacy-preserving channel. The Human's
+exact new `APPROVE WRITE #N` remains mandatory for every WRITE; Chrome launch,
+navigation, Send, Wake, credential access and D2 mutation are outside READ.
+
+This recovery is new source authorship: `ARTIFACT_REUSE_UNAVAILABLE`. The normal
+repository tool returned #370 artifact 13374903964 from run 41936937393 attempt
+1 with the expected archive digest, but its download host could not be resolved
+in this executor. Archive and patch bytes could not be verified or reapplied.
+#370 remains `EXECUTION_UNKNOWN`; neither its attempt nor its earlier tests are
+represented as a verified candidate, and no provider effect is replayed.
+
+The common HostOps-v3 test harness now verifies full readable bytes from the
+existing real-pwsh resolver before hashing its fixture executable. A launchable
+Store App Execution Alias can be unreadable with `EINVAL` or access denied;
+only this fixture falls back to readable `sys.executable` bytes. This pin is
+**not production signed PowerShell proof**. Tests requiring native PowerShell
+select and execute it separately and still fail specifically if unavailable.
+Production Auth, executable hash/signature checks, ACLs, PATH, registry and
+execution policy are unchanged. Original negative tests remain in place.
+
+### Recovery verification scope
+
+The registered `mt01-component-onboarding` planner selects `hostops-personal`,
+`hostops-v3`, `hostops-w14`, `hostops-w14-api` and `hostops-w14-origin`, reason
+`ONBOARD_CONSUMER_OWNER_CLOSURE`, with no unknown AC, test or source mapping and
+no fallback. The additional W14 owners import the common `h` fixture. The
+persisted `work_items/mt01-components/hostops-personal.json` is unchanged.
+
+Windows self-host diagnostics in new run 41939878199, attempt 1:
+
+| Executed scope | Passed | Failed / errors / skipped | workers_actual |
+|---|---:|---:|---:|
+| Twelve new standing-READ test nodes (preflight only) | 12 | 0 / 0 / 0 | 12 |
+| `tests/test_hostops_v3.py` (one file, preflight only) | 52 | 0 / 0 / 0 | 12 |
+| Registered `hostops-w14` group | 11 | 0 / 0 / 0 | 12 |
+| Registered `hostops-w14-api` group | 39 | 0 / 0 / 0 | 12 |
+| Registered `hostops-w14-origin` group | 23 | 0 / 0 / 0 | 12 |
+
+Each command requested `-n 12`; actual counts come from the existing MT01
+xdist controller collection hook. These are current diagnostic observations,
+not reused #370 evidence and not aggregate MT01 PASS. No Verify-Fix repair
+round was needed. The final reporting update changes documentation only.
+
+The full Personal group contains offline Git commit/push fixtures, which this
+executor's explicit Git-write guard forbids. The full v3 group additionally
+contains actual native host inventory, outside this executor's no-live-read
+scope. Neither registered group was represented as fully verified; no test was
+rewritten, skipped or mocked to bypass these limits. EF01 must perform the exact
+registered verification under its own authority. Full MT01, exact PR HEAD/base
+hosted Windows CI, independent Brain acceptance and the separate protected
+sanitizer remain pending. No candidate, PR, Git ref write, live HostOps read,
+Chrome action or Wake was performed by this executor.

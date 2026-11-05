@@ -32,6 +32,44 @@ PUBLIC_EXTENSIONS = {".md", ".py", ".json", ".yml", ".yaml", ".toml", ".cjs", ".
 MAX_READ = 8192
 MAX_WRITE = 2048
 
+# Source-owned vocabulary; no Issue-supplied selectors or free-form findings.
+# Private config/profile/marker and D5 values have no independently enrolled
+# public read channel here. Do not infer their paths from process commands.
+_STANDING_CATEGORY_CODES = {
+    "chrome_profile": ("PRIVATE_READ_CHANNEL_REQUIRED",),
+    "chrome_config": ("PRIVATE_READ_CHANNEL_REQUIRED",),
+    "chrome_markers": ("PRIVATE_READ_CHANNEL_REQUIRED",),
+    "cdp_9333_listener": ("ABSENT", "EXACT_LOOPBACK", "UNSAFE_BINDING", "UNAVAILABLE"),
+    "chrome_process": ("MATCHED", "UNVERIFIED", "UNAVAILABLE"),
+    "chrome_session": ("MATCHED", "UNVERIFIED", "UNAVAILABLE"),
+    "cdp_protocol": ("RESPONDING", "UNVERIFIED", "UNAVAILABLE"),
+    "ef02_01_task": ("RUNNING", "READY", "DISABLED", "QUEUED", "NOT_REGISTERED", "UNAVAILABLE"),
+    "ef02_01_listener": ("PRESENT", "ABSENT", "UNAVAILABLE"),
+    "ef02_02_task": ("RUNNING", "READY", "DISABLED", "QUEUED", "NOT_REGISTERED", "UNAVAILABLE"),
+    "ef02_02_listener": ("PRESENT", "ABSENT", "UNAVAILABLE"),
+    "hostops_01_task": ("RUNNING", "READY", "DISABLED", "QUEUED", "NOT_REGISTERED", "UNAVAILABLE"),
+    "hostops_01_listener": ("PRESENT", "ABSENT", "UNAVAILABLE"),
+    "repo_git": ("CLEAN", "TRACKED_CHANGES", "UNAVAILABLE"),
+    "python_runtime": ("SUPPORTED", "UNSUPPORTED"),
+    "d5_metadata": ("PRIVATE_READ_CHANNEL_REQUIRED",),
+}
+STANDING_READ_CATEGORIES = tuple(_STANDING_CATEGORY_CODES)
+STANDING_READ_CODES = frozenset(code for codes in _STANDING_CATEGORY_CODES.values() for code in codes)
+
+# Mirror the reviewed protected Issue ingress allowlist, including its separate
+# runner and standing-READ sanitizers. The workflow independently checks all
+# sixteen closed-code categories and the entire sanitized receipt before posting.
+PERSONAL_PUBLIC_FIELDS = frozenset((
+    "status code operation issue_number root_id relative_path bytes sha256 windows architecture "
+    "logical_cpu_count no_shell_command_executed overwritten remote_shell_enabled source_sha "
+    "approval_channel content_utf8 git_head_sha branch tracked_changes prefix paths "
+    "total_tracked_in_scope truncated git_before_sha git_after_sha target_sha fast_forward_only "
+    "sync_result all_listener_count unmatched_listener_count arbitrary_shell_enabled cdp_port "
+    "listener_count loopback_count unexpected_binding_count chrome_owned_loopback_count "
+    "same_session_chrome_count devtools_protocol_ok infrastructure_ready exact_chat_verified "
+    "wake_sent runners diagnostics"
+).split())
+
 
 class Denied(Exception):
     pass
@@ -120,7 +158,8 @@ def parse_event(event, mode):
     params = _dict(request["parameters"])
     operation = request["operation"]
     if mode == "read":
-        if operation in ("inventory", "runner_runtime_inventory", "cdp_9333_status"):
+        if operation in ("inventory", "runner_runtime_inventory", "cdp_9333_status",
+                         "standing_read_diagnostics"):
             # Runtime inventory has fixed, compiled-in three-runner targets.
             # The public Issue cannot choose a task, executable or command.
             if params:
@@ -512,9 +551,97 @@ foreach ($item in $items) {
     }
 
 
+def _validate_standing_snapshot(snapshot):
+    """Return only a fixed, typed public schema; reject raw/extra/duplicate data."""
+    if (type(snapshot) is not dict or set(snapshot) != {
+            "status", "operation", "windows", "diagnostics",
+            "arbitrary_shell_enabled", "exact_chat_verified", "wake_sent"} or
+            type(snapshot["status"]) is not str or snapshot["status"] != "OBSERVED" or
+            type(snapshot["operation"]) is not str or
+            snapshot["operation"] != "standing_read_diagnostics" or
+            snapshot["windows"] is not True or
+            any(snapshot[key] is not False for key in (
+                "arbitrary_shell_enabled", "exact_chat_verified", "wake_sent"))):
+        deny("INVALID_PUBLIC_DIAGNOSTIC_RECEIPT")
+    rows = snapshot["diagnostics"]
+    if type(rows) is not list or len(rows) != len(STANDING_READ_CATEGORIES):
+        deny("INVALID_PUBLIC_DIAGNOSTIC_RECEIPT")
+    clean = []
+    for category, row in zip(STANDING_READ_CATEGORIES, rows):
+        if (type(row) is not dict or set(row) != {"category", "code"} or
+                type(row["category"]) is not str or row["category"] != category or
+                type(row["code"]) is not str or row["code"] not in _STANDING_CATEGORY_CODES[category]):
+            deny("INVALID_PUBLIC_DIAGNOSTIC_RECEIPT")
+        clean.append({"category": category, "code": row["code"]})
+    result = {**snapshot, "diagnostics": clean}
+    if len(json.dumps(result, ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode()) > MAX_READ:
+        deny("INVALID_PUBLIC_DIAGNOSTIC_RECEIPT")
+    return result
+
+
+def _standing_read_snapshot():
+    """Internal enum snapshot only; never reads private config/profile/ledger bytes.
+
+    Existing fixed probes independently observe listener/session/protocol and
+    three runner tasks. No launch, task mutation, browser tab or Wake API.
+    Unknown probe results stay UNAVAILABLE; exceptions never become findings.
+    """
+    if os.name != "nt":
+        deny("STANDING_READ_WINDOWS_ONLY")
+    codes = {category: allowed[0] if len(allowed) == 1 else "UNAVAILABLE"
+             for category, allowed in _STANDING_CATEGORY_CODES.items()}
+    try:
+        cdp = _cdp_9333_status()
+    except (Denied, OSError, ValueError, KeyError, TypeError):
+        pass
+    else:
+        codes["cdp_9333_listener"] = (
+            "UNSAFE_BINDING" if cdp["unexpected_binding_count"] else
+            "ABSENT" if cdp["listener_count"] == 0 else
+            "EXACT_LOOPBACK" if cdp["listener_count"] == cdp["loopback_count"] == 1 else "UNSAFE_BINDING")
+        codes["chrome_process"] = "MATCHED" if cdp["chrome_owned_loopback_count"] == 1 else "UNVERIFIED"
+        codes["chrome_session"] = "MATCHED" if cdp["same_session_chrome_count"] == 1 else "UNVERIFIED"
+        codes["cdp_protocol"] = "RESPONDING" if cdp["devtools_protocol_ok"] is True else "UNVERIFIED"
+    try:
+        runners = _runner_runtime_inventory()
+    except (Denied, OSError, ValueError, KeyError, TypeError):
+        pass
+    else:
+        for name, row in zip(("ef02_01", "ef02_02", "hostops_01"), runners["runners"]):
+            codes[name + "_task"] = row["task_state"].upper()
+            codes[name + "_listener"] = "PRESENT" if row["listener_process_count"] else "ABSENT"
+    try:
+        head = _git("rev-parse", "HEAD").strip()
+        if re.fullmatch(r"[a-f0-9]{40}", head):
+            changed = _git("status", "--porcelain=v1", "--untracked-files=no")
+            codes["repo_git"] = "TRACKED_CHANGES" if changed.strip() else "CLEAN"
+    except (Denied, OSError, ValueError, TypeError):
+        pass
+    version = tuple(int(part) for part in platform.python_version_tuple())
+    codes["python_runtime"] = "SUPPORTED" if version >= (3, 11, 0) else "UNSUPPORTED"
+    return _validate_standing_snapshot({
+        "status": "OBSERVED", "operation": "standing_read_diagnostics", "windows": True,
+        "diagnostics": [{"category": category, "code": codes[category]}
+                        for category in STANDING_READ_CATEGORIES],
+        "arbitrary_shell_enabled": False, "exact_chat_verified": False, "wake_sent": False,
+    })
+
+
 def perform(request):
     op = request["operation"]
     params = request["parameters"]
+    if op == "standing_read_diagnostics":
+        if type(params) is not dict or params:
+            deny("INVALID_PARAMETERS")
+        # Fail before collecting anything: the current protected public
+        # workflow would silently discard diagnostics. Never launder them via
+        # content_utf8 or claim an empty OBSERVED receipt is successful READ.
+        if "diagnostics" not in PERSONAL_PUBLIC_FIELDS:
+            deny("PUBLIC_TRANSPORT_GAP")
+        snapshot = _validate_standing_snapshot(_standing_read_snapshot())
+        if set(snapshot) - PERSONAL_PUBLIC_FIELDS:
+            deny("PUBLIC_TRANSPORT_GAP")
+        return snapshot
     if op == "git_sync_main":
         return _sync_main(params)
     if op == "runner_runtime_inventory":
