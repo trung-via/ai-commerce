@@ -2,6 +2,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import re
 from unittest.mock import patch
 import tempfile
 import unittest
@@ -44,6 +45,138 @@ def event(mode, operation, parameters, *, comment=None):
 
 
 class PersonalHostOpsContractTests(unittest.TestCase):
+    @staticmethod
+    def _standing_snapshot():
+        return {
+            "status": "OBSERVED", "operation": "standing_read_diagnostics", "windows": True,
+            "diagnostics": [{"category": category, "code": hostops._STANDING_CATEGORY_CODES[category][0]}
+                            for category in hostops.STANDING_READ_CATEGORIES],
+            "arbitrary_shell_enabled": False, "exact_chat_verified": False, "wake_sent": False,
+        }
+
+    def test_standing_read_uses_standing_consent_and_owner_event(self):
+        value = event("read", "standing_read_diagnostics", {})
+        self.assertNotIn("comment", value)
+        self.assertEqual(hostops.parse_event(value, "read")["operation"], "standing_read_diagnostics")
+        for location in ("sender", "issue"):
+            bad = event("read", "standing_read_diagnostics", {})
+            (bad["issue"]["user"] if location == "issue" else bad["sender"])["login"] = "other"
+            with self.subTest(location=location), self.assertRaises(hostops.Denied):
+                hostops.parse_event(bad, "read")
+        with self.assertRaises(hostops.Denied):
+            hostops.parse_event(event("write", "standing_read_diagnostics", {}), "write")
+
+    def test_standing_read_rejects_all_issue_selectors(self):
+        for params in ({"path": "C:/private"}, {"port": 9222}, {"command": "Get-Process"},
+                       {"category": "chrome_profile"}, {"pid": 1}, {"root_id": "scratch"}):
+            with self.subTest(params=params), self.assertRaisesRegex(hostops.Denied, "INVALID_PARAMETERS"):
+                hostops.parse_event(event("read", "standing_read_diagnostics", params), "read")
+
+    def test_standing_read_public_gap_prevents_collection_and_empty_success(self):
+        request = hostops.parse_event(event("read", "standing_read_diagnostics", {}), "read")
+        with patch.object(hostops, "_standing_read_snapshot") as collect:
+            with self.assertRaisesRegex(hostops.Denied, "PUBLIC_TRANSPORT_GAP"):
+                hostops.perform(request)
+            collect.assert_not_called()
+        self.assertNotIn("diagnostics", hostops.PERSONAL_PUBLIC_FIELDS)
+
+    def test_standing_read_public_fields_match_protected_workflow(self):
+        workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+        fields = re.search(r"const publicFields = \[(.*?)\];", workflow).group(1)
+        self.assertEqual(hostops.PERSONAL_PUBLIC_FIELDS, set(re.findall(r"'([^']+)'", fields)) | {"runners"})
+
+    def test_standing_read_snapshot_schema_is_fixed_bounded_and_copied(self):
+        snapshot = self._standing_snapshot()
+        result = hostops._validate_standing_snapshot(snapshot)
+        self.assertEqual(len(result["diagnostics"]), 16)
+        self.assertLessEqual(len(json.dumps(result).encode()), 8192)
+        self.assertEqual(result, snapshot)
+        self.assertIsNot(result["diagnostics"], snapshot["diagnostics"])
+        self.assertIsNot(result["diagnostics"][0], snapshot["diagnostics"][0])
+
+    def test_standing_read_schema_rejects_raw_fields_and_wrong_types(self):
+        base = self._standing_snapshot()
+        invalid = [None, [], {**base, "raw": "private"}, {**base, "windows": 1},
+                   {**base, "wake_sent": 0}, {**base, "exact_chat_verified": True},
+                   {**base, "arbitrary_shell_enabled": True}, {**base, "status": "READY"},
+                   {**base, "operation": "read_text"}, {**base, "diagnostics": {}},
+                   {**base, "content_utf8": "private"}]
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaisesRegex(hostops.Denied, "INVALID_PUBLIC_DIAGNOSTIC_RECEIPT"):
+                hostops._validate_standing_snapshot(value)
+
+    def test_standing_read_schema_rejects_missing_duplicate_reordered_and_extra_rows(self):
+        base = self._standing_snapshot()
+        rows = base["diagnostics"]
+        for invalid in (rows[:-1], rows + [rows[0]], [rows[0]] * 16, list(reversed(rows))):
+            with self.subTest(rows=invalid), self.assertRaises(hostops.Denied):
+                hostops._validate_standing_snapshot({**base, "diagnostics": invalid})
+
+    def test_standing_read_schema_rejects_unknown_and_cross_category_codes(self):
+        base = self._standing_snapshot()
+        for row in (None, {"category": "chrome_profile", "code": "private-path"},
+                    {"category": "chrome_profile", "code": "RUNNING"},
+                    {"category": "chrome_profile", "code": True},
+                    {"category": "chrome_profile", "code": "PRIVATE_READ_CHANNEL_REQUIRED", "path": "private"},
+                    {"category": ["chrome_profile"], "code": "PRIVATE_READ_CHANNEL_REQUIRED"}):
+            with self.subTest(row=row), self.assertRaises(hostops.Denied):
+                hostops._validate_standing_snapshot({**base, "diagnostics": [row, *base["diagnostics"][1:]]})
+
+    def test_standing_read_internal_snapshot_never_reads_private_files_or_mutates(self):
+        cdp = {"listener_count": 1, "loopback_count": 1, "unexpected_binding_count": 0,
+               "chrome_owned_loopback_count": 1, "same_session_chrome_count": 1, "devtools_protocol_ok": True}
+        runners = {"runners": [{"task_state": "Running", "listener_process_count": count} for count in (0, 1, 1)]}
+        with patch.object(hostops.os, "name", "nt"), patch.object(hostops, "_cdp_9333_status", return_value=cdp), patch.object(
+            hostops, "_runner_runtime_inventory", return_value=runners
+        ), patch.object(hostops, "_git", side_effect=["a" * 40, " M private-filename\n"]) as git, patch.object(
+            hostops.Path, "read_bytes", side_effect=AssertionError("no private bytes")
+        ), patch.object(hostops.Path, "read_text", side_effect=AssertionError("no private text")), patch.object(
+            hostops, "_git_write", side_effect=AssertionError("no Git write")
+        ), patch.object(hostops.subprocess, "run", side_effect=AssertionError("fixed probes mocked")):
+            result = hostops._standing_read_snapshot()
+        codes = {row["category"]: row["code"] for row in result["diagnostics"]}
+        self.assertEqual(codes["ef02_01_task"], "RUNNING")
+        self.assertEqual(codes["ef02_01_listener"], "ABSENT")
+        self.assertEqual(codes["ef02_02_listener"], "PRESENT")
+        self.assertEqual(codes["cdp_protocol"], "RESPONDING")
+        self.assertEqual(codes["repo_git"], "TRACKED_CHANGES")
+        for name in ("chrome_profile", "chrome_config", "chrome_markers", "d5_metadata"):
+            self.assertEqual(codes[name], "PRIVATE_READ_CHANNEL_REQUIRED")
+        self.assertNotIn("private", json.dumps(result))
+        self.assertEqual(git.call_args_list[0].args, ("rev-parse", "HEAD"))
+        self.assertEqual(git.call_args_list[1].args, ("status", "--porcelain=v1", "--untracked-files=no"))
+        self.assertFalse(result["exact_chat_verified"])
+        self.assertFalse(result["wake_sent"])
+
+    def test_standing_read_probe_errors_stay_enum_unavailable(self):
+        with patch.object(hostops.os, "name", "nt"), patch.object(
+            hostops, "_cdp_9333_status", side_effect=hostops.Denied("private exception")
+        ), patch.object(hostops, "_runner_runtime_inventory", side_effect=OSError("private path")), patch.object(
+            hostops, "_git", side_effect=hostops.Denied("private output")
+        ):
+            result = hostops._standing_read_snapshot()
+        codes = {row["category"]: row["code"] for row in result["diagnostics"]}
+        self.assertEqual(codes["cdp_protocol"], "UNAVAILABLE")
+        self.assertEqual(codes["repo_git"], "UNAVAILABLE")
+        self.assertEqual(codes["hostops_01_task"], "UNAVAILABLE")
+        self.assertNotIn("private", json.dumps(result))
+
+    def test_standing_read_requires_windows_before_any_probe(self):
+        with patch.object(hostops.os, "name", "posix"), patch.object(hostops, "_cdp_9333_status") as cdp:
+            with self.assertRaisesRegex(hostops.Denied, "STANDING_READ_WINDOWS_ONLY"):
+                hostops._standing_read_snapshot()
+            cdp.assert_not_called()
+
+    def test_standing_read_python_version_is_numeric(self):
+        for version, expected in ((('3', '9', '9'), 'UNSUPPORTED'), (('3', '14', '0'), 'SUPPORTED')):
+            with self.subTest(version=version), patch.object(hostops.os, "name", "nt"), patch.object(
+                hostops.platform, "python_version_tuple", return_value=version
+            ), patch.object(hostops, "_cdp_9333_status", side_effect=hostops.Denied("unavailable")), patch.object(
+                hostops, "_runner_runtime_inventory", side_effect=hostops.Denied("unavailable")
+            ), patch.object(hostops, "_git", side_effect=hostops.Denied("unavailable")):
+                rows = hostops._standing_read_snapshot()["diagnostics"]
+            self.assertEqual(next(row["code"] for row in rows if row["category"] == "python_runtime"), expected)
+
     def test_inventory_read_auto_from_owner_chat_issue(self):
         request = hostops.parse_event(event("read", "inventory", {}), "read")
         self.assertEqual(request["operation"], "inventory")

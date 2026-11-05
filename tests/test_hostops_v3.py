@@ -37,6 +37,63 @@ class Crash(BaseException):
     pass
 
 
+def fixture_powershell_pin():
+    """Pin readable fixture bytes, never attest production signed PowerShell.
+
+    Store App Execution Aliases can launch but raise EINVAL on read_bytes().
+    The existing resolver prefers a readable real pwsh in PATH. Recheck its
+    complete bytes; only this test harness may fall back to readable Python.
+    Tests needing native PowerShell select and execute it independently.
+    """
+    candidate = security.prefer_readable_pwsh_path()
+    if candidate:
+        executable = Path(candidate)
+        try:
+            raw = executable.read_bytes()
+        except OSError:
+            pass
+        else:
+            if raw:
+                return str(executable), c.digest(raw)
+    executable = Path(sys.executable)
+    raw = executable.read_bytes()  # A broken fallback is a fixture error.
+    assert raw, "readable nonempty fixture executable required"
+    return str(executable), c.digest(raw)
+
+
+def test_fixture_powershell_pin_prefers_readable_pwsh(tmp_path, monkeypatch):
+    executable = tmp_path / "pwsh.exe"
+    executable.write_bytes(b"readable test fixture")
+    monkeypatch.setattr(security, "prefer_readable_pwsh_path", lambda: str(executable))
+    assert fixture_powershell_pin() == (str(executable), c.digest(executable.read_bytes()))
+
+
+@pytest.mark.parametrize("error_number", [errno.EINVAL, errno.EACCES])
+def test_fixture_powershell_pin_unreadable_alias(tmp_path, monkeypatch, error_number):
+    alias = tmp_path / "WindowsApps" / "pwsh.EXE"
+    original_read = Path.read_bytes
+    expected = (sys.executable, c.digest(original_read(Path(sys.executable))))
+    path_before = os.environ.get("PATH")
+    monkeypatch.setattr(security, "prefer_readable_pwsh_path", lambda: str(alias))
+
+    def read_bytes(path):
+        if path == alias:
+            raise OSError(error_number, "simulated unreadable App Execution Alias")
+        return original_read(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    assert fixture_powershell_pin() == expected
+    assert os.environ.get("PATH") == path_before
+
+
+def test_fixture_powershell_pin_missing_pwsh_and_broken_fallback(monkeypatch):
+    monkeypatch.setattr(security, "prefer_readable_pwsh_path", lambda: None)
+    assert fixture_powershell_pin() == (sys.executable, c.digest(Path(sys.executable).read_bytes()))
+    monkeypatch.setattr(Path, "read_bytes", lambda _: (_ for _ in ()).throw(OSError(errno.EINVAL, "unreadable")))
+    with pytest.raises(OSError):
+        fixture_powershell_pin()
+
+
 @pytest.fixture(scope="session")
 def keys(tmp_path_factory):
     root = tmp_path_factory.mktemp("h225-independent-test-keys")
@@ -54,12 +111,12 @@ class Harness:
         self.data, self.state, self.policy, self.release = [root / k for k in ("data", "state", "policy", "release")]
         for p in (self.data, self.state, self.policy, self.release):
             p.mkdir()
+        pwsh, pwsh_sha256 = fixture_powershell_pin()
         self.config = {"schema": "hostops.config.v3", "enabled": True, "host_id": "test-host-001",
             "policy_dir": str(self.policy), "state_dir": str(self.state), "release_dir": str(self.release),
             "transport_state_dir": str(self.state),
             "ssh_keygen": str(exe), "ssh_keygen_sha256": c.digest(exe.read_bytes()),
-            "pwsh": str(Path(shutil.which("pwsh") or sys.executable)),
-            "pwsh_sha256": c.digest(Path(shutil.which("pwsh") or sys.executable).read_bytes()),
+            "pwsh": pwsh, "pwsh_sha256": pwsh_sha256,
             "broker_identity": "broker-identity", "transport_identity": "transport-identity",
             "untrusted_identities": ["ci-identity"], "trusted_owners": ["installer-identity"],
             "endpoint": str(self.state / "socket")}
