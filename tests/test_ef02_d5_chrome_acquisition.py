@@ -324,7 +324,7 @@ def test_actual_windows_command_line_quoting_when_available():
 def test_attended_d5_cdp_wrapper_fixed_user_only_modes_and_no_send():
     script = (Path(__file__).resolve().parents[1] /
               "scripts" / "AI-Commerce-D5-Attended-CDP.ps1").read_text(encoding="utf-8")
-    assert "ValidateSet('Inspect', 'StartCDP', 'PrepareChat')" in script
+    assert "ValidateSet('Inspect', 'RepairConfig', 'StartCDP', 'PrepareChat')" in script
     assert "LOCAL_OPERATOR_ONLY" in script
     assert "INTERACTIVE_SESSION_REQUIRED" in script
     assert "USE_NON_ELEVATED_POWERSHELL" in script
@@ -354,6 +354,42 @@ def test_attended_d5_cdp_wrapper_fixed_user_only_modes_and_no_send():
         "chrome.exe --remote-debugging-port",
     ):
         assert forbidden not in script
+
+
+def test_attended_d5_repair_is_explicit_local_fixed_port_write_only():
+    """No public Issue payload can choose config or invoke a private write."""
+    script = (Path(__file__).resolve().parents[1] /
+              "scripts" / "AI-Commerce-D5-Attended-CDP.ps1").read_text(encoding="utf-8")
+    repair_start = script.index("if ($Mode -eq 'RepairConfig')")
+    repair_end = script.index("if ($Mode -eq 'PrepareChat')", repair_start)
+    repair = script[repair_start:repair_end]
+    assert "REPAIR_FIXED_CANDIDATES_ONLY" in repair
+    for known in (
+        r"Chrome-Acquisition\config.json", "chrome.json", "chrome-acquisition.json",
+    ):
+        assert known in repair
+    for guard in (
+        "REPAIR_KNOWN_CONFIG_ABSENT", "REPAIR_KNOWN_CONFIG_AMBIGUOUS",
+        "REPAIR_PREFLIGHT_UNVERIFIED", "REPAIR_BROWSER_STATE_NOT_IDLE",
+        "REPAIR_CONFIG_SCHEMA_CHANGED", "REPAIR_CONFIG_CHANGED_RECHECK",
+        "REPAIR_STAGED_ACL_UNVERIFIED", "REPAIR_STAGING_UNVERIFIED",
+        "REPAIR_POST_WRITE_UNKNOWN_RECONCILE",
+    ):
+        assert guard in repair
+    assert "REPAIR-CONFIG-9333" in repair
+    assert repair.index("REPAIR-CONFIG-9333") < repair.index("[IO.File]::Replace(")
+    assert repair.index("Get-Acl -LiteralPath $ChromeConfig") < repair.index("WriteAllText(")
+    assert repair.index("Set-Acl -LiteralPath $stage") < repair.index("WriteAllText(")
+    assert "Get-FileHash -LiteralPath $ChromeConfig -Algorithm SHA256" in repair
+    assert "[IO.File]::Replace($stage, $ChromeConfig, $backup, $false)" in repair
+    assert "CONFIG_9333_UPDATED_NO_LAUNCH" in repair
+    assert "CONFIG_9333_ALREADY" in repair
+    assert "D5_WAKE_SENT=False" in repair
+    assert "CHROME_ACQUISITION_BLOCKED" not in repair  # collapse private errors
+    for forbidden in ("GITHUB_EVENT_PATH", "github.rest", "local_wake_entry",
+                      "wake_adapter", "subprocess.Popen", "LaunchChrome",
+                      "Invoke-Expression", "iex ", "Move-Item -Force"):
+        assert forbidden not in repair
 
 
 def test_attended_d5_cdp_wrapper_powershell_parser_on_hosted_windows():
