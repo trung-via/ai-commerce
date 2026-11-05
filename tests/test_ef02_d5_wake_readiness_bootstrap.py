@@ -44,8 +44,7 @@ def _provision_private_file(path):
 @pytest.fixture
 def fixture(tmp_path):
     root = _provision_private_directory(tmp_path / "AI-Commerce")
-    checkout = tmp_path / "checkout"
-    checkout.mkdir(mode=0o700)
+    checkout = _provision_private_directory(tmp_path / "checkout")
     c = root / "chrome.json"
     ledger = root / "ledger.json"
     reg = root / "registry.json"
