@@ -57,8 +57,8 @@ STANDING_READ_CATEGORIES = tuple(_STANDING_CATEGORY_CODES)
 STANDING_READ_CODES = frozenset(code for codes in _STANDING_CATEGORY_CODES.values() for code in codes)
 
 # Mirror the existing protected Issue ingress allowlist, including its separate
-# runner sanitizer. Adding diagnostics requires the separate reviewed #371
-# workflow AND source binding change; a source-only change cannot enable it.
+# runner sanitizer. This source field is enabled only with the independently validated #371
+# public workflow sanitizer; the source and workflow must land together.
 PERSONAL_PUBLIC_FIELDS = frozenset((
     "status code operation issue_number root_id relative_path bytes sha256 windows architecture "
     "logical_cpu_count no_shell_command_executed overwritten remote_shell_enabled source_sha "
@@ -67,7 +67,7 @@ PERSONAL_PUBLIC_FIELDS = frozenset((
     "sync_result all_listener_count unmatched_listener_count arbitrary_shell_enabled cdp_port "
     "listener_count loopback_count unexpected_binding_count chrome_owned_loopback_count "
     "same_session_chrome_count devtools_protocol_ok infrastructure_ready exact_chat_verified "
-    "wake_sent runners"
+    "wake_sent runners diagnostics"
 ).split())
 
 
@@ -633,9 +633,8 @@ def perform(request):
     if op == "standing_read_diagnostics":
         if type(params) is not dict or params:
             deny("INVALID_PARAMETERS")
-        # Fail before collecting anything: the current protected public
-        # workflow would silently discard diagnostics. Never launder them via
-        # content_utf8 or claim an empty OBSERVED receipt is successful READ.
+        # Refuse collection if the separately reviewed public transport is
+        # unavailable; never launder diagnostics via content_utf8.
         if "diagnostics" not in PERSONAL_PUBLIC_FIELDS:
             deny("PUBLIC_TRANSPORT_GAP")
         snapshot = _validate_standing_snapshot(_standing_read_snapshot())
