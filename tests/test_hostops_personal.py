@@ -72,13 +72,94 @@ class PersonalHostOpsContractTests(unittest.TestCase):
             with self.subTest(params=params), self.assertRaisesRegex(hostops.Denied, "INVALID_PARAMETERS"):
                 hostops.parse_event(event("read", "standing_read_diagnostics", params), "read")
 
-    def test_standing_read_public_gap_prevents_collection_and_empty_success(self):
+    def test_standing_read_public_transport_returns_only_enum_snapshot(self):
         request = hostops.parse_event(event("read", "standing_read_diagnostics", {}), "read")
-        with patch.object(hostops, "_standing_read_snapshot") as collect:
-            with self.assertRaisesRegex(hostops.Denied, "PUBLIC_TRANSPORT_GAP"):
-                hostops.perform(request)
-            collect.assert_not_called()
-        self.assertNotIn("diagnostics", hostops.PERSONAL_PUBLIC_FIELDS)
+        with patch.object(hostops, "_standing_read_snapshot", return_value=self._standing_snapshot()) as collect:
+            result = hostops.perform(request)
+            collect.assert_called_once_with()
+        self.assertEqual(result["status"], "OBSERVED")
+        self.assertEqual(len(result["diagnostics"]), 16)
+        self.assertIn("diagnostics", hostops.PERSONAL_PUBLIC_FIELDS)
+        self.assertNotIn("content_utf8", result)
+
+    def test_standing_read_public_sanitizer_vocab_and_fail_closed_contract(self):
+        workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+        marker = "if (record.operation === 'standing_read_diagnostics') {"
+        self.assertEqual(workflow.count(marker), 1)
+        section = workflow.split(marker, 1)[1].split("const expectedKeys =", 1)[0]
+        rows = re.findall(r"^\s*\['([^']+)',\[(.*?)\]\],\s*$", section, flags=re.M)
+        parsed = [(name, tuple(re.findall(r"'([^']+)'", codes))) for name, codes in rows]
+        self.assertEqual(parsed, list(hostops._STANDING_CATEGORY_CODES.items()))
+        self.assertIn("Buffer.byteLength(JSON.stringify(record),'utf8') <= 8192", workflow)
+        self.assertIn("INVALID_PUBLIC_DIAGNOSTIC_RECEIPT", workflow)
+        self.assertIn("record.source_sha === context.sha", workflow)
+        self.assertIn("Object.keys(record).length === expectedKeys.length", workflow)
+        self.assertIn("record.issue_number === context.issue.number", workflow)
+        self.assertIn("sanitized.diagnostics = allowed.map(", workflow)
+
+    def test_standing_read_public_javascript_rejects_malformed_and_private_data(self):
+        # Execute the actual embedded github-script with a stub GitHub client
+        # when a Node runtime is available. Static contract checks above always run.
+        import shutil
+        import subprocess
+        node = shutil.which("node")
+        if not node:
+            return
+        workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+        source_lines = workflow.splitlines()
+        start = source_lines.index("          script: |") + 1
+        script_lines = []
+        for line in source_lines[start:]:
+            if line and not line.startswith("            "):
+                break
+            script_lines.append(line[12:] if line else "")
+        script = "\n".join(script_lines) + "\n"
+        harness = """
+const fs=require('fs'), path=require('path');
+const code=fs.readFileSync(process.argv[1],'utf8');
+process.env.RUNNER_TEMP=process.argv[2];
+const context={repo:{owner:'trung-via',repo:'ai-commerce'},issue:{number:17},sha:'a'.repeat(40)};
+const posts=[];
+const github={rest:{issues:{createComment:async x=>posts.push(x.body)}}};
+const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor;
+new AsyncFunction('github','context','require',code)(github,context,require)
+  .then(()=>process.stdout.write(posts[0]||''))
+  .catch(e=>{process.stderr.write(String(e));process.exitCode=1});
+"""
+        valid = {**self._standing_snapshot(),
+                 "issue_number": 17, "approval_channel": "CHATGPT_TO_AI_COMMERCE_ISSUE",
+                 "remote_shell_enabled": False, "source_sha": "a" * 40}
+        cases = [
+            (valid, "OBSERVED"),
+            ({**valid, "content_utf8": "sensitive-private-data"}, "BLOCKED"),
+            ({**valid, "diagnostics": valid["diagnostics"][:-1]}, "BLOCKED"),
+            ({**valid, "diagnostics": [{**valid["diagnostics"][0], "path": "SECRET"},
+                                      *valid["diagnostics"][1:]]}, "BLOCKED"),
+            ({**valid, "issue_number": 18}, "BLOCKED"),
+            ({**valid, "source_sha": "b" * 40}, "BLOCKED"),
+            ({**valid, "diagnostics": [{"category": "chrome_profile", "code": "ACTIVE"},
+                                      *valid["diagnostics"][1:]]}, "BLOCKED"),
+        ]
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            js = root / "sanitizer.js"
+            js.write_text(script, encoding="utf-8")
+            for index, (record, expected) in enumerate(cases):
+                (root / "personal-hostops-result.json").write_text(json.dumps(record), encoding="utf-8")
+                run = subprocess.run([node, "-e", harness, str(js), str(root)],
+                                     capture_output=True, text=True, encoding="utf-8",
+                                     errors="replace", timeout=20, check=False)
+                with self.subTest(index=index), self.assertEqual(run.returncode, 0, run.stderr):
+                    self.assertTrue(run.stdout.startswith("AI_COMMERCE_PERSONAL_HOSTOPS_RESULT_V1\n"))
+                    response = json.loads(run.stdout.split("\n", 1)[1])
+                    self.assertEqual(response["status"], expected)
+                    if expected == "OBSERVED":
+                        self.assertEqual(response["diagnostics"], valid["diagnostics"])
+                    else:
+                        self.assertEqual(response["code"], "INVALID_PUBLIC_DIAGNOSTIC_RECEIPT")
+                        self.assertNotIn("diagnostics", response)
+                        self.assertNotIn("content_utf8", response)
+                        self.assertNotIn("sensitive-private-data", run.stdout)
 
     def test_standing_read_public_fields_match_protected_workflow(self):
         workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
