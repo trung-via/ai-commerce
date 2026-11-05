@@ -44,6 +44,7 @@ def real_plan(real_tree, monkeypatch, path, *, registry=None, acs=(), aggregate=
     return mt.select_plan(repo=ROOT, base_sha="6601881e7b498ae139fbe8a8f04c195905b15ed3",
         base_files=real_tree.files, candidate_files=real_tree.files, changed_paths=[path], required_acs=acs,
         fallback_argv=real_tree.registry["project-tests"], registered_only=True,
+        groups=real_tree.groups,
         registered_profiles=real_tree.registry if registry is None else registry, aggregate_sources=aggregate, env={})
 
 
