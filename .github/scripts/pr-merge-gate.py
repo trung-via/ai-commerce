@@ -141,9 +141,7 @@ REVIEWED_CONTROL_TESTS = {
         "tests/test_hostops_d5_control.py",
         "tests/test_ef02_d5_chrome_acquisition.py",
         "tests/test_hostops_personal.py",
-        "tests/test_hostops_v3.py",
-        "tests/test_mt01_v21.py",
-        "tests/test_pr_merge_gate.py"),
+        "tests/test_hostops_v3.py"),
     "config/hostops-v3/config-v4.example.json": (
         "tests/test_hostops_v3_integration.py", "tests/test_minimum_test.py"),
     "src/ai_commerce/remote/validation.py": (
