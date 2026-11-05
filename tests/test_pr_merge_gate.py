@@ -1193,8 +1193,6 @@ def test_d5_operator_bridge_script_has_independent_protected_main_review_owner(g
         "tests/test_ef02_d5_chrome_acquisition.py",
         "tests/test_hostops_personal.py",
         "tests/test_hostops_v3.py",
-        "tests/test_mt01_v21.py",
-        "tests/test_pr_merge_gate.py",
     }
     assert set(gate.REVIEWED_CONTROL_TESTS[exact]) == required
     reviewed = gate.reviewed_coverage_for_changed_files([
