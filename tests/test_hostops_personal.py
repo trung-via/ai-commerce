@@ -151,7 +151,8 @@ new AsyncFunction('github','context','require',code)(github,context,require)
                 run = subprocess.run([node, "-e", harness, str(js), str(root)],
                                      capture_output=True, text=True, encoding="utf-8",
                                      errors="replace", timeout=20, check=False)
-                with self.subTest(index=index), self.assertEqual(run.returncode, 0, run.stderr):
+                with self.subTest(index=index):
+                    self.assertEqual(run.returncode, 0, run.stderr)
                     self.assertTrue(run.stdout.startswith("AI_COMMERCE_PERSONAL_HOSTOPS_RESULT_V1\n"))
                     response = json.loads(run.stdout.split("\n", 1)[1])
                     self.assertEqual(response["status"],
