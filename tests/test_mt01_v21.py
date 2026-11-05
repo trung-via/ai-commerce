@@ -1410,11 +1410,11 @@ def test_mt01_impact_control_only_selects_reviewed_self_tests():
 
     source = "src/ai_commerce/engineering/impact_v21.py"
     root = Path(__file__).resolve().parents[1]
-    assert CONTROL_TESTS[source] == ("tests/test_mt01_v21.py",)
+    assert CONTROL_TESTS[source] == ("tests/test_mt01_v21.py", "tests/test_minimum_test.py")
     selected = select_impact(
         root=root, changed_paths=(source, "tests/test_mt01_v21.py"),
         groups=approved_groups(),
     )
     assert selected.runnable, selected
     assert selected.selected_groups == ("mt01-v21",)
-    assert selected.selected_tests == ("tests/test_mt01_v21.py",)
+    assert selected.selected_tests == ("tests/test_minimum_test.py", "tests/test_mt01_v21.py")
