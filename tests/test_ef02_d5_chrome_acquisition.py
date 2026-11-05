@@ -319,3 +319,100 @@ def test_actual_windows_command_line_quoting_when_available():
     assert argv[0].endswith("chrome.exe")
     assert argv[1] == r"--user-data-dir=C:\Users\My User\Chrome"
     assert argv[2] == "--profile-directory=Default"
+
+
+def test_attended_d5_cdp_wrapper_fixed_user_only_modes_and_no_send():
+    script = (Path(__file__).resolve().parents[1] /
+              "scripts" / "AI-Commerce-D5-Attended-CDP.ps1").read_text(encoding="utf-8")
+    assert "ValidateSet('Inspect', 'RepairConfig', 'StartCDP', 'PrepareChat')" in script
+    assert "LOCAL_OPERATOR_ONLY" in script
+    assert "INTERACTIVE_SESSION_REQUIRED" in script
+    assert "USE_NON_ELEVATED_POWERSHELL" in script
+    assert "CHECKOUT_REPOSITORY_UNVERIFIED" in script
+    assert "CHECKOUT_TRACKED_CHANGES" in script
+    assert "EXISTING_PRIVATE_CONFIG_REQUIRED" in script
+    assert "PRIVATE_CONFIG_AMBIGUOUS_EXPLICIT_PATH_REQUIRED" in script
+    assert "START-CDP-9333" in script
+    assert "CONFIG_NOT_EXACT_9333" in script
+    assert "http://127.0.0.1:9333" in script
+    assert "PREPARE-EXACT-CHAT" in script
+    assert "ai_commerce.remote.chrome_acquisition" in script
+    assert "ai_commerce.remote.wake_readiness_flow" in script
+    assert "--opt-in-open-chat" in script
+    assert "--opt-in" in script
+    assert "Get-Command python.exe" in script
+    assert "PYTHONPATH" in script
+    assert "D5_WAKE_SENT=False" in script
+    assert "READY_FOR_PREPARE_NO_SEND" in script
+    assert "wake-readiness.json" in script
+    assert "Status" not in script.split("ValidateSet(", 1)[1].split(")", 1)[0]
+    for forbidden in (
+        "Invoke-Expression", "iex ", "Start-Process", "Stop-Process",
+        "Stop-ScheduledTask", "Register-ScheduledTask", "New-ScheduledTask",
+        "Remove-Item -Recurse", "Set-Content", "Out-File",
+        "send-once", "local_wake_entry send", "deliver_wake",
+        "chrome.exe --remote-debugging-port",
+    ):
+        assert forbidden not in script
+
+
+def test_attended_d5_repair_is_explicit_local_fixed_port_write_only():
+    """No public Issue payload can choose config or invoke a private write."""
+    script = (Path(__file__).resolve().parents[1] /
+              "scripts" / "AI-Commerce-D5-Attended-CDP.ps1").read_text(encoding="utf-8")
+    repair_start = script.index("if ($Mode -eq 'RepairConfig')")
+    repair_end = script.index("if ($Mode -eq 'PrepareChat')", repair_start)
+    repair = script[repair_start:repair_end]
+    assert "REPAIR_FIXED_CANDIDATES_ONLY" in repair
+    for known in (
+        r"Chrome-Acquisition\config.json", "chrome.json", "chrome-acquisition.json",
+    ):
+        assert known in repair
+    for guard in (
+        "REPAIR_KNOWN_CONFIG_ABSENT", "REPAIR_KNOWN_CONFIG_AMBIGUOUS",
+        "REPAIR_PREFLIGHT_UNVERIFIED", "REPAIR_BROWSER_STATE_NOT_IDLE",
+        "REPAIR_CONFIG_SCHEMA_CHANGED", "REPAIR_CONFIG_CHANGED_RECHECK",
+        "REPAIR_STAGED_ACL_UNVERIFIED", "REPAIR_STAGING_UNVERIFIED",
+        "REPAIR_POST_WRITE_UNKNOWN_RECONCILE",
+    ):
+        assert guard in repair
+    assert "REPAIR_REPARSE_DENIED" in repair
+    assert "REPAIR_REPARSE_CHECK_UNAVAILABLE" in repair
+    assert "[IO.FileAttributes]::ReparsePoint" in repair
+    assert "REPAIR-CONFIG-9333" in repair
+    assert repair.index("REPAIR-CONFIG-9333") < repair.index("[IO.File]::Replace(")
+    assert repair.index("Get-Acl -LiteralPath $ChromeConfig") < repair.index("WriteAllText(")
+    assert repair.index("Set-Acl -LiteralPath $stage") < repair.index("WriteAllText(")
+    assert "Get-FileHash -LiteralPath $ChromeConfig -Algorithm SHA256" in repair
+    assert "[IO.File]::Replace($stage, $ChromeConfig, $backup, $false)" in repair
+    assert "CONFIG_9333_UPDATED_NO_LAUNCH" in repair
+    assert "CONFIG_9333_ALREADY" in repair
+    assert "D5_WAKE_SENT=False" in repair
+    assert "CHROME_ACQUISITION_BLOCKED" not in repair  # collapse private errors
+    for forbidden in ("GITHUB_EVENT_PATH", "github.rest", "local_wake_entry",
+                      "wake_adapter", "subprocess.Popen", "LaunchChrome",
+                      "Invoke-Expression", "iex ", "Move-Item -Force"):
+        assert forbidden not in repair
+
+
+def test_attended_d5_cdp_wrapper_powershell_parser_on_hosted_windows():
+    if os.name != "nt":
+        pytest.skip("PowerShell AST parser acceptance only on Windows")
+    from shutil import which
+    shell = which("powershell.exe")
+    assert shell, "Windows PowerShell 5.1 is required"
+    source = (Path(__file__).resolve().parents[1] /
+              "scripts" / "AI-Commerce-D5-Attended-CDP.ps1")
+    # Parse only. Do not invoke the script, process Chrome or read private paths.
+    check = (
+        "$found=$null;"
+        "[System.Management.Automation.Language.Parser]::ParseFile("
+        "'" + str(source).replace("'", "''") +
+        "',[ref]$null,[ref]$found) | Out-Null;"
+        "if(@($found).Count -gt 0) {$found | Out-String | Write-Host; exit 1}"
+    )
+    run = subprocess.run(
+        [shell, "-NoProfile", "-NonInteractive", "-Command", check],
+        capture_output=True, text=True, check=False, timeout=30
+    )
+    assert run.returncode == 0, run.stdout + run.stderr

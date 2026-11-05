@@ -8,6 +8,130 @@ interactive Chrome, and it never issues browser Send. It reuses existing
 `chrome_acquisition`, `WakePanel`, D5 ledger, enrolled exact-chat route
 and original signed-consent/send-once authority.
 
+## Human-attended Chrome CDP activation (Issue #220)
+
+The previous HostOps READ [#361](https://github.com/trung-via/ai-commerce/issues/361)
+ran on the dedicated HOSTOPS-01 and observed **0 TCP listeners on 9333**.
+It is a **current foundation blocker** only: Chrome may be running
+elsewhere without CDP. This new wrapper builds on the existing
+\`chrome_acquisition\` guard and does **not** widen the HostOps route.
+
+### Approved private configuration correction (no Chrome launch)
+
+The independently verified [HostOps READ #389](https://github.com/trung-via/ai-commerce/issues/389)
+on 2026-11-05 observed `KNOWN_CONFIG_OTHER_PORT`, a dedicated Chrome profile
+directory, no lock markers, no CDP 9333 listener and an absent fixed D5
+manifest. The Human then approved correction to **only**
+`http://127.0.0.1:9333`. Neither private config contents nor the alternate
+port were published. **GitHub HostOps WRITE must not modify this private
+config**; its public Issue scope is intentionally much narrower.
+
+Once this exact PR is independently reviewed/merged and the operator's
+`C:\TOOL\ai-commerce` checkout is synchronized to reviewed main, in
+the local **non-elevated interactive PowerShell** session run:
+
+~~~powershell
+Set-Location C:\TOOL\ai-commerce
+.\scripts\AI-Commerce-D5-Attended-CDP.ps1 -Mode RepairConfig
+~~~
+
+The operator types `REPAIR-CONFIG-9333` once locally. This operation:
+1. Selects exactly one existing file from the three known fixed private
+   `%LOCALAPPDATA%\AI-Commerce` config names; no manifest-provided or
+   user-supplied alternative config path is permitted in RepairConfig mode.
+2. Rejects Windows reparse/junction/symlink path components, validates the
+   original config with existing Chrome acquisition owner ACL + Google
+   Authenticode guards, and requires **NOT_RUNNING** (no contested or active
+   dedicated profile).
+3. Updates only the JSON `cdp_endpoint` value. It stages the configuration
+   under the same private directory after copying the exact ACL to the empty
+   stage, verifies the stage using the same Chrome acquisition probe, then
+   uses Windows `File.Replace` to preserve the target ACL and keep a
+   temporary private backup.
+4. Performs a second read-only probe and checks the final port. It deletes
+   the private backup **only after verification succeeds**. No private path,
+   JSON, token, command line or exception is sent to GitHub.
+5. Returns only `D5_ATTENDED_STATUS=CONFIG_9333_UPDATED_NO_LAUNCH` and
+   `D5_WAKE_SENT=False` (or `CONFIG_9333_ALREADY`). An uncertain result
+   is a local **HOLD/RECONCILE**, not permission to rerun blindly.
+
+`RepairConfig` does **not** start Chrome, create a missing D5 manifest,
+authenticate a browser, open a chat tab or send Wake. After its reported
+success, request a *new* ChatGPT-initiated standing READ and require
+`chrome_config=KNOWN_CONFIG_EXACT_9333`; `cdp_9333_listener=ABSENT`
+may still be entirely normal because no Chrome launch is authorized.
+Human-attended `StartCDP`, signed grants and exact-chat/Wake remain
+separate future decisions and checks.
+
+After merging this source PR and synchronizing the operator checkout
+\`C:\TOOL\ai-commerce\` through the already reviewed Git fast-forward
+procedure, a Human opens **non-elevated PowerShell in their logged-in
+Windows desktop session**. One attended command:
+
+~~~powershell
+Set-Location C:\TOOL\ai-commerce
+.\scripts\AI-Commerce-D5-Attended-CDP.ps1 -Mode StartCDP
+~~~
+
+It first verifies local user/session, exact repo \`main\`, clean tracked
+worktree, local Python source, and one preexisting private Chrome config.
+Known existing config paths are searched only under
+\`%LOCALAPPDATA%\AI-Commerce\`. If none or more than one matches,
+the script **HOLDs**; the Human may explicitly select their *real*
+preexisting operator-owned config, without posting it publicly:
+
+~~~powershell
+.\scripts\AI-Commerce-D5-Attended-CDP.ps1 -Mode StartCDP -ChromeConfig '<existing-private-CDP-config.json>'
+~~~
+
+The owner types \`START-CDP-9333\` once locally. The wrapper delegates to
+the preexisting \`chrome_acquisition launch --opt-in\`: it refuses
+non-Google-signed Chrome, elevated session, wrong/private profile,
+untrusted ACL, contested port, nonloopback binding, old singleton locks
+or uncertain launcher ownership. No profile copy, arbitrary subprocess
+or issue-passed shell command. A successful result:
+
+~~~text
+D5_ATTENDED_STATUS=CDP_9333_READY
+D5_LAUNCHED_NEW_CHROME=True
+D5_WAKE_SENT=False
+~~~
+
+\`False\` for \`D5_LAUNCHED_NEW_CHROME\` is also correct when the same
+dedicated browser was already verified. There is **one launch attempt**;
+if it reports uncertainty, **do not immediately rerun**. The operator
+may inspect CDP read-only with \`-Mode Inspect\` and share only the
+sanitized \`D5_ATTENDED_STATUS\` lines, not private paths or tokens.
+
+Once CDP is confirmed by a new ChatGPT-initiated HostOps
+\`cdp_9333_status\` READ, exact-chat preparation remains a **separate**
+private D5 state gate. If an owner-enrolled \`wake-readiness.json\`
+already exists with a genuinely new \`READY\` ledger at current main,
+the owner can opt into navigation/check only:
+
+~~~powershell
+.\scripts\AI-Commerce-D5-Attended-CDP.ps1 -Mode PrepareChat
+~~~
+
+This requires typing \`PREPARE-EXACT-CHAT\` locally and returns
+\`READY_FOR_PREPARE_NO_SEND\` only when the original readiness flow
+independently verifies exact enrollment and chat. No manifest, a stale
+SHA, or a \`SUBMISSION_UNKNOWN\` ledger means HOLD; do not repurpose the
+historic #179 record. If no existing manifest, use the previously
+reviewed \`wake_readiness_bootstrap\` with **actual** owner-private files
+and a *separately authorized fresh READY episode*, never a synthetic
+ledger or rewritten old record. \`PrepareChat\` may need the optional
+\`local-chat-wake\` Playwright dependency; missing dependency blocks
+without Send. Neither \`StartCDP\` nor \`PrepareChat\` automatically
+dispatches an EF02 batch or sends a message.
+
+The new wrapper is *local source*, **not a HostOps arbitrary-shell
+capability** or deployed unattended bridge. Human operating the
+interactive session supplies the one Chrome launch opt-in; HostOps
+independently measures only public TCP/CDP metadata. A future
+fixed, enrolled remote bridge would still need separate Human-scoped
+authorization and direct native task/receipt evidence.
+
 ## Smart readiness decision tree
 
 ~~~text
