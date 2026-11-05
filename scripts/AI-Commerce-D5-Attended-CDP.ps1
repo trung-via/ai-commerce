@@ -1,8 +1,9 @@
 #Requires -Version 5.1
 <#
 Human-attended Chrome CDP 9333 for AI Commerce D5.
-Modes: Inspect (default; read only), StartCDP (single signed-Chrome launch
-only when the existing acquisition policy explicitly permits it),
+Modes: Inspect (default; read only), RepairConfig (one explicitly approved,
+Human-attended private port-only config update, NO CHROME LAUNCH),
+StartCDP (single signed-Chrome launch only with separate opt-in),
 PrepareChat (existing READY private ledger + enrolled exact chat; NO SEND).
 NEVER run from GitHub Actions, a Windows service, or an elevated shell.
 No private paths/chat URLs/tokens are printed, written to a public issue,
@@ -10,7 +11,7 @@ or passed to an AI Commerce remote task.
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Inspect', 'StartCDP', 'PrepareChat')]
+    [ValidateSet('Inspect', 'RepairConfig', 'StartCDP', 'PrepareChat')]
     [string] $Mode = 'Inspect',
     [string] $ChromeConfig = ''
 )
@@ -75,6 +76,123 @@ try {
     $env:PYTHONPATH = Join-Path $checkout 'src'
     Push-Location -LiteralPath $checkout
     $argsList = @()
+    if ($Mode -eq 'RepairConfig') {
+        # This is an operator-local PRIVATE WRITE, not a GitHub/HostOps remote
+        # command. Select exactly one of the three audited literal names.
+        # No Issue, manifest, custom -ChromeConfig or recursive path is followed.
+        if (-not [string]::IsNullOrWhiteSpace($ChromeConfig)) {
+            Stop-Bounded 'REPAIR_FIXED_CANDIDATES_ONLY'
+        }
+        $known = @(
+            (Join-Path $privateRoot 'Chrome-Acquisition\config.json'),
+            (Join-Path $privateRoot 'chrome.json'),
+            (Join-Path $privateRoot 'chrome-acquisition.json')
+        )
+        $found = @($known | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+        if ($found.Count -eq 0) { Stop-Bounded 'REPAIR_KNOWN_CONFIG_ABSENT' }
+        if ($found.Count -ne 1) { Stop-Bounded 'REPAIR_KNOWN_CONFIG_AMBIGUOUS' }
+        $ChromeConfig = [string]$found[0]
+        $probeArgs = @('-m', 'ai_commerce.remote.chrome_acquisition',
+            'probe', '--config', $ChromeConfig, '--checkout', $checkout)
+        # The existing Chrome acquisition layer checks exact local owner ACL,
+        # signed Google Chrome and any active/profile-conflicting process.
+        # Never change the config when Chrome ownership is uncertain or active.
+        try {
+            $preflight = @(& $python @probeArgs 2>&1 | ForEach-Object { [string]$_ })
+            if ($LASTEXITCODE -ne 0 -or $preflight.Count -lt 1) {
+                Stop-Bounded 'REPAIR_PREFLIGHT_UNVERIFIED'
+            }
+            $preflightRecord = $preflight[-1] | ConvertFrom-Json -ErrorAction Stop
+            if ($preflightRecord.status -cne 'NOT_RUNNING' -or
+                    $preflightRecord.browser_accessed -ne $false) {
+                Stop-Bounded 'REPAIR_BROWSER_STATE_NOT_IDLE'
+            }
+            $rawPrivate = [IO.File]::ReadAllText(
+                $ChromeConfig, [Text.UTF8Encoding]::new($false, $true))
+            $data = $rawPrivate | ConvertFrom-Json -ErrorAction Stop
+            $keys = @($data.PSObject.Properties | ForEach-Object { $_.Name })
+            $expected = @('version','executable','user_data_dir',
+                'profile_directory','cdp_endpoint','allow_launch','exclusive_user_data')
+            if ($keys.Count -ne $expected.Count -or
+                    @($expected | Where-Object { $keys -cnotcontains $_ }).Count -ne 0) {
+                Stop-Bounded 'REPAIR_CONFIG_SCHEMA_CHANGED'
+            }
+            $prior = [string]$data.cdp_endpoint
+            if ($prior -ceq 'http://127.0.0.1:9333' -or
+                    $prior -ceq 'http://127.0.0.1:9333/') {
+                Write-Output 'D5_ATTENDED_STATUS=CONFIG_9333_ALREADY'
+                Write-Output 'D5_WAKE_SENT=False'
+                exit 0
+            }
+            $approval = Read-Host 'Type REPAIR-CONFIG-9333 for PRIVATE config port change ONLY (NO CHROME, NO SEND)'
+            if ($approval -cne 'REPAIR-CONFIG-9333') { Stop-Bounded 'HUMAN_DECLINED' }
+            # Modify only the endpoint field. The source has passed strict
+            # duplicate-key/schema and existing ownership/signature checks.
+            $data.cdp_endpoint = 'http://127.0.0.1:9333'
+            $stagedText = $data | ConvertTo-Json -Depth 4
+            $beforeHash = (Get-FileHash -LiteralPath $ChromeConfig -Algorithm SHA256).Hash
+            $dir = Split-Path -LiteralPath $ChromeConfig -Parent
+            $nonce = [guid]::NewGuid().ToString('N')
+            $stage = Join-Path $dir ('.ai-commerce-9333-' + $nonce + '.stage')
+            $backup = Join-Path $dir ('.ai-commerce-9333-' + $nonce + '.backup')
+            $replaced = $false
+            try {
+                # Stage an empty file under the private folder, copy its exact
+                # owner/ACL BEFORE writing any private config bytes.
+                $acl = Get-Acl -LiteralPath $ChromeConfig -ErrorAction Stop
+                $handle = [IO.File]::Open($stage, [IO.FileMode]::CreateNew,
+                    [IO.FileAccess]::Write, [IO.FileShare]::None)
+                $handle.Dispose()
+                Set-Acl -LiteralPath $stage -AclObject $acl -ErrorAction Stop
+                $stagedAcl = Get-Acl -LiteralPath $stage -ErrorAction Stop
+                if ($stagedAcl.Sddl -cne $acl.Sddl) {
+                    Stop-Bounded 'REPAIR_STAGED_ACL_UNVERIFIED'
+                }
+                [IO.File]::WriteAllText(
+                    $stage, $stagedText, [Text.UTF8Encoding]::new($false))
+                # Verify stage via exact same signed Chrome/ACL/native probe.
+                $stageArgs = @('-m', 'ai_commerce.remote.chrome_acquisition',
+                    'probe', '--config', $stage, '--checkout', $checkout)
+                $stageProbe = @(& $python @stageArgs 2>&1 | ForEach-Object { [string]$_ })
+                if ($LASTEXITCODE -ne 0 -or $stageProbe.Count -lt 1 -or
+                        ($stageProbe[-1] | ConvertFrom-Json).status -cne 'NOT_RUNNING') {
+                    Stop-Bounded 'REPAIR_STAGING_UNVERIFIED'
+                }
+                if ((Get-FileHash -LiteralPath $ChromeConfig -Algorithm SHA256).Hash -cne $beforeHash) {
+                    Stop-Bounded 'REPAIR_CONFIG_CHANGED_RECHECK'
+                }
+                # Win32 replacement preserves target DACL/attributes. Backup
+                # stays in private parent and is kept on UNKNOWN readback.
+                [IO.File]::Replace($stage, $ChromeConfig, $backup, $false)
+                $replaced = $true
+                $post = @(& $python @probeArgs 2>&1 | ForEach-Object { [string]$_ })
+                if ($LASTEXITCODE -ne 0 -or $post.Count -lt 1 -or
+                        ($post[-1] | ConvertFrom-Json).status -cne 'NOT_RUNNING') {
+                    Stop-Bounded 'REPAIR_POST_WRITE_UNKNOWN_RECONCILE'
+                }
+                $verifyData = [IO.File]::ReadAllText(
+                    $ChromeConfig, [Text.UTF8Encoding]::new($false, $true)) |
+                    ConvertFrom-Json -ErrorAction Stop
+                if ([string]$verifyData.cdp_endpoint -cne 'http://127.0.0.1:9333') {
+                    Stop-Bounded 'REPAIR_POST_WRITE_UNKNOWN_RECONCILE'
+                }
+                # Cleanup of the one private backup only after verified result.
+                Remove-Item -LiteralPath $backup -Force -ErrorAction Stop
+                Write-Output 'D5_ATTENDED_STATUS=CONFIG_9333_UPDATED_NO_LAUNCH'
+                Write-Output 'D5_WAKE_SENT=False'
+                exit 0
+            } finally {
+                # Never remove the original or a possibly-needed backup.
+                if (-not $replaced -and (Test-Path -LiteralPath $stage -PathType Leaf)) {
+                    Remove-Item -LiteralPath $stage -Force -ErrorAction SilentlyContinue
+                }
+            }
+        } catch {
+            # No exception text, private path, config bytes or backup filename
+            # leaves the local operator action. On UNKNOWN, do not retry.
+            Stop-Bounded 'REPAIR_FAILED_RECONCILE_LOCAL'
+        }
+    }
     if ($Mode -eq 'PrepareChat') {
         if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
             Stop-Bounded 'CURRENT_READY_MANIFEST_ABSENT'
