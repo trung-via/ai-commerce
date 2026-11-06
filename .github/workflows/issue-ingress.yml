@@ -1,6 +1,7 @@
 name: AI Commerce Issue ingress (EF02 / HostOps Personal)
 run-name: "${{ github.event.issue.title }} (#${{ github.event.issue.number }}, ${{ github.event.action }})"
-# Personal HostOps is the only active HostOps route in this public repository.
+# Personal HostOps remains active; D5 carrier below is OFF by default.
+# D5 cannot run without an explicit protected variable and separately signed private enrollment.
 # Legacy HostOps v1/v2/v3 reusable workflows were retired; EF02 remains unchanged.
 on:
   issues:
@@ -221,3 +222,86 @@ jobs:
               owner: context.repo.owner, repo: context.repo.repo,
               issue_number: context.issue.number, body: result,
             });
+
+  hostops-d5-carrier:
+    if: >-
+      vars.HOSTOPS_D5_PROTECTED_ENABLE == 'REVIEWED' &&
+      github.repository == 'trung-via/ai-commerce' &&
+      github.actor == github.repository_owner &&
+      github.event_name == 'issue_comment' && github.event.action == 'created' &&
+      github.event.issue.user.login == github.repository_owner &&
+      github.event.comment.user.login == github.repository_owner &&
+      startsWith(github.event.issue.title, '[HOSTOPS D5] ')
+    runs-on: [self-hosted, Windows, ai-commerce-hostops]
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: d5-signed-carrier
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Materialize and relay fixed signed envelope
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = Join-Path $env:GITHUB_WORKSPACE 'src'
+          $request = Join-Path $env:RUNNER_TEMP "d5-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)-request.json"
+          $receipt = Join-Path $env:RUNNER_TEMP "d5-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)-receipt.json"
+          python -B -m ai_commerce.hostops_v3.d5_control --prepare-event "$env:GITHUB_EVENT_PATH" --output "$request"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -B -m ai_commerce.hostops_v3.d5_control --request "$request" --output "$receipt"
+          exit $LASTEXITCODE
+      - name: Publish independently sanitized receipt to same Issue
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs'), path = require('path');
+            const file = path.join(process.env.RUNNER_TEMP,
+              `d5-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}-receipt.json`);
+            const ops = ['STATUS','MIGRATION_PREFLIGHT','RETIRE_NEW_AUTOSTART','STOP_OWNED_D5_CHROME',
+              'INSTALL_VERIFIED_OLD_BEHAVIOR_LAUNCHER','START_OR_REUSE_D5_CHROME',
+              'VERIFY_CDP_9333_AND_PLAYWRIGHT','INSTALL_SINGLE_LOGON_AUTOSTART',
+              'REMOVE_D5_AUTOSTART','RECOVER_BOUNDED','ROLLBACK'];
+            const codes = ['BLOCKED_NOT_DEPLOYED','INPUT_INVALID','SIGNATURE_INVALID','REVOKED_OR_STALE',
+              'REQUEST_INVALID_OR_STALE','REQUEST_REPLAY','ENROLLMENT_REUSE_DENIED','UNKNOWN_EFFECT_HOLD',
+              'PIPE_UNAVAILABLE','INVALID_PUBLIC_RECEIPT','SOURCE_DRIFT','OWNERSHIP_UNPROVEN',
+              'PROFILE_ALREADY_ACTIVE_NO_CDP','RUNNER_PRESERVATION_UNPROVEN','TASK_OWNERSHIP_UNPROVEN',
+              'UNSUPPORTED_SESSION','NATIVE_FAILURE_HOLD','CONFLICTING_D5_TASK','LAUNCHER_UNVERIFIED',
+              'PROFILE_LOCKED','BACKUP_UNVERIFIED','LAUNCH_NOT_AUTHORIZED','PLAYWRIGHT_UNAVAILABLE',
+              'CDP_PROTOCOL_UNAVAILABLE','JOURNAL_UNAVAILABLE','JOURNAL_ROTATION_REQUIRED','RECOVERY_RATE_LIMIT',
+              'DRY_RUN','NOT_RUNNING','ALREADY_STOPPED','MIGRATION_READY','RETIRED','STOPPED',
+              'LAUNCHER_INSTALLED','READY_ATTACH','REGISTERED','AUTOSTART_REMOVED','ROLLED_BACK_DISABLED',
+              'ROOT_PROCESS_LOST','CDP_LISTENER_LOST','BROWSER_RESTARTED','BROWSER_MUST_BE_STOPPED'];
+            const flags = ['effect_observed','registered','started','listener_bound','playwright_attached',
+              'stable','wake_sent','login_verified','manifest_verified'];
+            const allowed = new Set(['status','code','operation','request_id','source_sha','epoch',...flags]);
+            let safe = {status:'BLOCKED',code:'INVALID_PUBLIC_RECEIPT',effect_observed:false};
+            try {
+              if (fs.statSync(file).size > 8192) throw Error();
+              const raw = fs.readFileSync(file,'utf8'), r = JSON.parse(raw);
+              if (!r || Array.isArray(r) || raw !== JSON.stringify(r) ||
+                  Object.keys(r).some(k => !allowed.has(k)) ||
+                  !['BLOCKED','OBSERVED'].includes(r.status) || !codes.includes(r.code) ||
+                  (r.operation !== undefined && ![...ops,'UNKNOWN'].includes(r.operation)) ||
+                  flags.some(k => r[k] !== undefined && typeof r[k] !== 'boolean') ||
+                  ['wake_sent','login_verified','manifest_verified'].some(k => r[k] !== undefined && r[k] !== false)) throw Error();
+              const signed = JSON.parse(context.payload.comment.body).body;
+              if (r.status === 'OBSERVED' &&
+                  (!ops.includes(r.operation) || r.operation !== signed.op ||
+                   !/^[0-9a-f]{32}$/.test(r.request_id) || r.request_id !== signed.request_id ||
+                   !/^[0-9a-f]{40}$/.test(r.source_sha) || r.source_sha !== context.sha ||
+                   r.source_sha !== signed.source_sha || !Number.isInteger(r.epoch) || r.epoch < 1 ||
+                   r.epoch !== signed.epoch || signed.issue_number !== context.issue.number)) throw Error();
+              // Validate optional IDs even on a BLOCKED receipt before copying them.
+              if ((r.request_id !== undefined && !/^[0-9a-f]{32}$/.test(r.request_id)) ||
+                  (r.source_sha !== undefined && !/^[0-9a-f]{40}$/.test(r.source_sha)) ||
+                  (r.epoch !== undefined && (!Number.isInteger(r.epoch) || r.epoch < 1))) throw Error();
+              safe = r;
+            } catch (_) {}
+            await github.rest.issues.createComment({...context.repo, issue_number:context.issue.number,
+              body:'AI_COMMERCE_D5_RESULT_V1\n```json\n'+JSON.stringify(safe)+'\n```'});
