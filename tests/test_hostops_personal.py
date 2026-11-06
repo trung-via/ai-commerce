@@ -969,7 +969,7 @@ const script = fs.readFileSync(process.argv[2],'utf8');
         assert "CHROME_ACQUISITION_BLOCKED" in boot
         assert "ai_commerce.remote.chrome_acquisition launch --config" in boot
         assert "--checkout $root --opt-in" in boot
-        assert "C:\TOOL\ai-commerce" in boot
+        assert r"C:\TOOL\ai-commerce" in boot
         assert "CONFIG_AMBIGUOUS_OR_ABSENT" in boot
         assert "SOURCE_DRIFT" in boot and "NO_INTERACTIVE_SESSION" in boot
         assert "Get-NetTCPConnection" not in boot  # delegated to source-owned native guard
