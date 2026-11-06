@@ -1494,8 +1494,11 @@ def test_mt01_real_impact_planner_uses_static_owner_not_reserved_profile(tmp_pat
         },
     )
     assert plan["selected_groups"] == ["mt01-v21"]
-    assert plan["groups"][0]["state"] == "EXECUTE"
+    # A disposable minimal sandbox may remain UNPROVEN for unrelated source/
+    # consumer coverage. This regression is specifically about *identity*;
+    # it must not claim an EF01 or EF02 PASS from the synthetic planner.
     assert plan["groups"][0]["binding"]["registered_profile"] == "mt01-mt01-v21-tests"
+    assert not any("REGISTERED_PROFILE_REQUIRED" in reason for reason in plan["reason_codes"])
     assert "onboarding_data_only" not in plan["groups"][0]["binding"]
 
 
