@@ -925,8 +925,6 @@ const script = fs.readFileSync(process.argv[2],'utf8');
                 hostops.ROOTS["workspace"] = old
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
     def test_d5_carrier_is_only_signed_closed_ingress_and_off_by_default(self):
@@ -949,3 +947,6 @@ if __name__ == "__main__":
         assert "script: |" in d5
         assert "Invoke-Expression" not in d5 and "iex " not in d5
         assert "permissions:\n      contents: read\n      issues: write" in d5
+
+if __name__ == "__main__":
+    unittest.main()
