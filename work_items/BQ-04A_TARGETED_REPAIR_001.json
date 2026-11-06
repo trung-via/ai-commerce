@@ -1,0 +1,171 @@
+{
+  "schema_version": "WorkItem.v1",
+  "work_id": "BQ-04A_TARGETED_REPAIR_001",
+  "attempt_id": "BQ04A-Q5-R7-OFFLINE-REPAIR-AGY-03-bq04a_offline_repair_20261106_r3_agy",
+  "objective": "Offline BQ-04a Q5/R7 media repair decision policy, preservation plan, and reinspection protocol; zero media mutation, provider dispatch, or spend",
+  "status": "OFFLINE_SCOPE_TESTS_PASS_INDEPENDENT_EF02_PROOF_PENDING",
+  "source_sha": "158cd193b18315374c29848b5697641853304959",
+  "source_base_commit": "158cd193b18315374c29848b5697641853304959",
+  "source_decision": "Issue #373 architecture plus explicit Human continuation 2026-11-06: tiếp tục roadmap; this is fresh R3 source-only attempt",
+  "human_request": {
+    "text": "tiếp tục roadmap",
+    "date": "2026-11-06",
+    "authorization": "Exactly eight ADD-only source files; chat approval is not media mutation, rights authorization or independent attestation"
+  },
+  "owner": "Media & Creative",
+  "component": "bq-04a",
+  "verification_profile": "mt01-component-onboarding",
+  "allowed_operation": "ADD_ONLY; no Git writes or candidate publication by executor",
+  "allowed_paths": [
+    "src/ai_commerce/creative_quality/repair_policy.py",
+    "src/ai_commerce/creative_quality/repair_preservation.py",
+    "src/ai_commerce/creative_quality/repair_reinspection.py",
+    "tests/test_bq_04a_targeted_repair.py",
+    "work_items/mt01-components/bq-04a.json",
+    "work_items/BQ-04A_TARGETED_REPAIR_001.json",
+    "docs/engineering/BQ_04A_OFFLINE_HANDOFF.md",
+    "docs/creative/BQ_04A_TARGETED_REPAIR_PROTOCOL.md"
+  ],
+  "acceptance": [
+    "BQ-04a.q5-r7-evidence-bound-minimal-repair-decision",
+    "BQ-04a.q5-r7-preservation-scope-fail-closed",
+    "BQ-04a.q5-r7-reinspection-no-false-improvement"
+  ],
+  "negative_acceptance": [
+    "No provider invocation, cost, publishing, recruitment, video generation, actual file mutation",
+    "No signed-looking JSON, consent boolean, callback or self-attestation can yield VERIFIED or QUALITY_PASS",
+    "No observed media improvement, perceptual verdict or production release",
+    "No modifications to existing source, tests, MT01 infrastructure, workflow, profiles, contracts or model defaults",
+    "Unknown provider outcomes remain HOLD; source tests do not prove executor/provider completion or independent EF02 acceptance"
+  ],
+  "model_selection": {
+    "executor": "antigravity",
+    "model": "gemini-3.8-flash",
+    "effort": "high",
+    "human_selected_display": "Antigravity Gemini 3.8 Flash High",
+    "requested_executor": "antigravity/gemini-3.8-flash/high",
+    "provider_execution_proof": "REQUIRES_INDEPENDENT_CURRENT_EF01_EF02_ARTIFACT",
+    "fallback_used": false
+  },
+  "precheck": {
+    "local_head_exact": true,
+    "clean_entry": true,
+    "eight_paths_absent_at_entry": true,
+    "github_exact_commit_read": true,
+    "issue_373_read": true,
+    "bq04_roadmap_and_protocol_read": true,
+    "native_bq02b_and_bq03b_sources_read": true
+  },
+  "historical_attempts": [
+    {
+      "attempt": "R1",
+      "issue": 484,
+      "status": "EXECUTION_UNKNOWN / Codex quota exhausted",
+      "candidate": "NONE",
+      "policy": "Historical attempt preserved unchanged"
+    },
+    {
+      "attempt": "R2",
+      "issue": 487,
+      "run_id": "42157742494",
+      "status": "HEADLESS_TOOL_PERMISSION_DENIED / exit=0 with no changed files",
+      "candidate": "NONE",
+      "policy": "Headless write denial recognized; interactive write permission verified in R3"
+    }
+  ],
+  "verification_round_limit": 2,
+  "verification_rounds": [
+    {
+      "round": 1,
+      "exit_code": 1,
+      "source_sha": "158cd193b18315374c29848b5697641853304959",
+      "description": "Initial test suite verification",
+      "passed": 70,
+      "failed": 2,
+      "failures_retained": [
+        "test_study_readiness_reference_attaches_without_falsifying_human_proof: AttributeError on sp.draft_protocol",
+        "test_successful_reinspection_technical_correction_preserves_brain_authority: make_mp4 identical deterministic bytes triggered UNCHANGED_ORIGINAL_BYTES"
+      ],
+      "followup": "Corrected study protocol API call to build_protocol and generated distinct after-repair asset bytes via segmented=False; expanded test matrix"
+    },
+    {
+      "round": 2,
+      "exit_code": 0,
+      "source_sha": "158cd193b18315374c29848b5697641853304959",
+      "environment": {
+        "platform": "Windows-11-10.0.26300-SP0",
+        "python": "3.14.7",
+        "runner_environment": "self-hosted",
+        "github_actions": "true",
+        "mt01_v21": "1"
+      },
+      "fallback": false,
+      "reason_codes": [
+        "ONBOARD_CONSUMER_OWNER_CLOSURE"
+      ],
+      "selected_groups": [
+        "a13",
+        "bq-02a",
+        "bq-02b",
+        "bq-03b",
+        "bq-04a"
+      ],
+      "groups": [
+        {
+          "group": "bq-04a",
+          "passed": 107,
+          "failed": 0,
+          "skipped": 0,
+          "errors": 0,
+          "workers_requested": 12,
+          "workers_actual": 12,
+          "worker_count_provenance": "XDIST_CONTROLLER_COLLECTION_HOOK"
+        },
+        {
+          "group": "bq-02a",
+          "passed": 282,
+          "failed": 0,
+          "skipped": 0,
+          "errors": 0,
+          "workers_requested": 12,
+          "workers_actual": 12,
+          "worker_count_provenance": "XDIST_CONTROLLER_COLLECTION_HOOK"
+        },
+        {
+          "group": "bq-02b",
+          "passed": 249,
+          "failed": 0,
+          "skipped": 0,
+          "errors": 0,
+          "workers_requested": 12,
+          "workers_actual": 12,
+          "worker_count_provenance": "XDIST_CONTROLLER_COLLECTION_HOOK"
+        },
+        {
+          "group": "bq-03b",
+          "passed": 298,
+          "failed": 0,
+          "skipped": 0,
+          "errors": 0,
+          "workers_requested": 12,
+          "workers_actual": 12,
+          "worker_count_provenance": "XDIST_CONTROLLER_COLLECTION_HOOK"
+        },
+        {
+          "group": "a13",
+          "passed": 197,
+          "failed": 0,
+          "skipped": 0,
+          "errors": 0,
+          "workers_requested": 12,
+          "workers_actual": 12,
+          "worker_count_provenance": "XDIST_CONTROLLER_COLLECTION_HOOK"
+        }
+      ],
+      "passed_total": 1133,
+      "failed_total": 0,
+      "errors_total": 0,
+      "evidence_retention": "SUMMARY_OBSERVED_IN_TOOL_OUTPUT"
+    }
+  ]
+}
