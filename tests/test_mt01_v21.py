@@ -1465,9 +1465,13 @@ def test_mt01_duplicate_onboarding_command_never_claims_static_owner(tmp_path):
     assert canonical_registered_profile(
         {"unrelated-a": argv, "unrelated-b": argv}, argv,
         group_name="mt01-v21", onboarding=False) is None
+    # Onboarding argv is derived from a validated manifest, not the
+    # registration's fixed bootstrap argv.
     assert canonical_registered_profile(
         {"mt01-component-onboarding": ["python", "-m", "pytest", "other.py"]},
-        argv, group_name="new-owner", onboarding=True) is None
+        argv, group_name="new-owner", onboarding=True) == "mt01-component-onboarding"
+    assert canonical_registered_profile(
+        {}, argv, group_name="new-owner", onboarding=True) is None
 
 
 def test_mt01_real_impact_planner_uses_static_owner_not_reserved_profile(tmp_path):
