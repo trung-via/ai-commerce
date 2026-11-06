@@ -59,8 +59,15 @@ def _verified_receipt_evidence(report: dict, *, root: Path, workspace: Path,
             return rejected("MT01_GROUP_EVIDENCE_MISSING")
         for index, group in enumerate(groups):
             binding = group["binding"]
-            onboarding_claim = binding.get("registered_profile") == "mt01-component-onboarding"
-            approved_argv = binding["argv"] in profiles.values() and not onboarding_claim
+            registered_name = binding.get("registered_profile")
+            onboarding_claim = registered_name == "mt01-component-onboarding"
+            # The recorded name and exact argv must BOTH be in the trusted
+            # registry. An unrelated alias with identical argv is not proof.
+            approved_argv = (
+                isinstance(registered_name, str)
+                and registered_name != "mt01-component-onboarding"
+                and profiles.get(registered_name) == binding.get("argv")
+            )
             if onboarding_claim:
                 from ai_commerce.engineering.impact_v21 import verified_onboarding_binding
                 approved_argv = verified_onboarding_binding(
