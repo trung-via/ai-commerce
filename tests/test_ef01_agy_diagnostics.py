@@ -100,6 +100,8 @@ def run_fixture(tmp_path, monkeypatch, events, *, exit_code=0, verify_code=0):
                 "tracked_diff_sha256": hashlib.sha256(json.dumps(hashes).encode()).hexdigest(),
                 "scope_valid": True}, b"fixture diff"
     monkeypatch.setattr(runner, "_snapshot", snapshot)
+    monkeypatch.setattr(runner, "_agy_source_binding", lambda r, s, *a: {
+        "source_root": str(r), "source_sha": s["git_head_after"], "git_dir": s["git_dir"]})
     monkeypatch.setattr(runner, "command_for", lambda *a, **k: (["fixture-provider"], None))
     original_run = subprocess.run
     def execute(argv, **kwargs):
@@ -163,6 +165,47 @@ def test_provider_internal_pytest_is_not_registered_verification(tmp_path, monke
 def test_provider_comment_cannot_claim_internal_pytest_execution():
     assert runner._provider_test_observations(stream({"type": "item.completed", "item": {
         "type": "agent_message", "text": "I ran python -m pytest: 1 failed"}})) == []
+
+
+@pytest.mark.parametrize("quote", ["'", "\u2018", "\u2019", "\u201b", "\u02bc", "\uff07"])
+def test_usage_limit_only_in_failed_provider_fields(quote):
+    message = f"You{quote}ve hit your usage limit. Try again later."
+    failure = stream({"type": "error", "message": message},
+                     {"type": "turn.failed", "error": {"message": message}})
+    assert runner._provider_problem(failure) == ("QUOTA_EXHAUSTED", "QUOTA_EXHAUSTED")
+    for kind in ("command_execution", "tool_result", "agent_message"):
+        success = stream({"type": "item.completed", "item": {
+            "type": kind, "status": "completed", "exit_code": 0,
+            "aggregated_output": message, "error": {"message": message}}},
+            {"type": "turn.completed"})
+        assert runner._provider_problem(success) is None
+
+
+@pytest.mark.parametrize("quote", ["'", "\u2019"])
+def test_codex_usage_limit_stops_same_attempt_without_verify(tmp_path, monkeypatch, quote):
+    from test_ef01_repair import fixture, _provider, VERIFY
+    f = fixture.__wrapped__(tmp_path, monkeypatch)
+    selection, _, _ = _provider(f)
+    calls = []
+    raw = stream({"type": "error", "message": f"You{quote}ve hit your usage limit"},
+                 {"type": "turn.failed", "error": {"message": f"You{quote}ve hit your usage limit"}})
+    actual_run = subprocess.run
+    def fail(argv, **kwargs):
+        if argv[0] == "git":
+            return actual_run(argv, **kwargs)
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1, raw.decode(), "")
+    monkeypatch.setattr(runner.subprocess, "run", fail)
+    result = runner.execute_attempt(repo=f.repo, output_dir=f.root / "evidence",
+        work_id="quota", attempt_id="fresh-quota", selection=selection,
+        instruction="scoped source change", verify_argv=VERIFY, max_repair_rounds=2)
+    assert result["status"] == result["error_code"] == "QUOTA_EXHAUSTED"
+    assert len(calls) == result["invocation_count"] == 1
+    assert result["verify_exit_code"] is None and result["repair_rounds_used"] == 0
+    assert result["replay_authorized"] is False
+    assert (f.root / "evidence/executor.stdout.log").read_bytes() == raw
+    assert (f.root / "evidence/source.before.json").is_file()
+    assert (f.root / "evidence/source.after_executor.json").is_file()
 
 
 def test_agy_repair_uses_mirrored_feedback_without_requiring_external_logs(tmp_path, monkeypatch):

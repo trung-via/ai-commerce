@@ -3,6 +3,8 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -365,8 +367,10 @@ def test_agy_headless_evidence_scope_registers_only_prepared_directory(tmp_path)
     assert "--dangerously-skip-permissions" not in argv
     assert "--yolo" not in argv
 
+    unprepared = tmp_path / "unprepared"
+    unprepared.mkdir()
     with pytest.raises(ValueError, match="AGY_EVIDENCE_DIR_NOT_PREPARED"):
-        command_for(selection, repo, "task", antigravity_evidence_dir=tmp_path)
+        command_for(selection, repo, "task", antigravity_evidence_dir=unprepared)
     with pytest.raises(FileNotFoundError):
         command_for(selection, repo, "task", antigravity_evidence_dir=tmp_path / "missing")
     with pytest.raises(ValueError, match="AGY_EVIDENCE_WITH_NON_AGY_EXECUTOR"):
@@ -400,10 +404,204 @@ print(json.dumps({'status': 'SUCCESS', 'denied_actions': []}))
     )
     assert result["status"] == "BUILD_VERIFIED_FOR_SCOPE"
     assert (outdir / "invocations" / "000" / "instruction.txt").is_file()
-    assert seen[-1] == ("antigravity", outdir / "invocations" / "000" / "agy_input")
-    assert (outdir / "invocations" / "000" / "agy_input" / "instruction.txt").is_file()
-    assert not (outdir / "invocations" / "000" / "agy_input" / "provider_boundary.json").exists()
+    mirror = seen[-1][1]
+    assert seen[-1][0] == "antigravity" and mirror is not None
+    assert mirror != outdir / "invocations" / "000" / "agy_input"
+    assert not mirror.exists()
+    assert not any((p / ".git").exists() for p in mirror.parents)
+    assert not (outdir / "invocations" / "000" / "agy_input").exists()
     assert result["denied_actions"] == []
+
+
+@pytest.mark.parametrize("mode", ["repair", "no-change", "denied"])
+def test_agy_bound_linked_worktree_from_primary_evidence(monkeypatch, mode):
+    """Real disposable Git fixtures + fake CLI; not live AGY permission proof."""
+    import ai_commerce.engineering.runner as runner_module
+    # Fixture Git administration stays in a separate disposable repository;
+    # never change the executor's real source checkout or inherited guard.
+    with tempfile.TemporaryDirectory(prefix="ag") as scratch:
+        root = Path(scratch)
+        primary = _repo(root)
+        source = root / "source space \U0001f680"
+        subprocess.run(["git", "-C", str(primary), "worktree", "add", "--detach", str(source), "HEAD"],
+                       check=True, capture_output=True)
+        assert (source / ".git").is_file()
+        baseline = (primary / "README.md").read_bytes()
+        outdir = primary / ".local" / "ef02" / "evidence"
+        script = root / "fake_agy.py"
+        script.write_text('''import json, os, subprocess, sys
+from pathlib import Path
+args = sys.argv[1:]
+roots = [Path(args[i+1]) for i, a in enumerate(args[:-1]) if a == '--add-dir']
+source, mirror = roots
+prompt = args[args.index('--print')+1]
+assert len(roots) == 2
+assert 'CODE WRITE ROOT' in prompt and 'READ ONLY INPUT' in prompt
+assert json.dumps(str(source), ensure_ascii=False) in prompt
+assert json.dumps(str(mirror), ensure_ascii=False) in prompt
+assert not any((p / '.git').exists() for p in (mirror, *mirror.parents))
+instruction = (mirror / 'instruction.txt').read_bytes()
+import hashlib
+assert hashlib.sha256(instruction).hexdigest() in prompt
+original_cwd = str(Path.cwd())
+os.chdir(mirror)  # Reproduce the ambiguous selected cwd from the failed AGY run.
+identity = []
+for flag in ('--show-toplevel', '--absolute-git-dir'):
+    p = subprocess.run(['git', '-C', str(source), 'rev-parse', flag], check=True,
+        capture_output=True, text=True, encoding='utf-8')
+    identity.append(p.stdout.strip())
+assert Path(identity[0]).resolve() == source.resolve()
+mode = MODE
+target = source / 'README.md'
+if mode != 'no-change':
+    target.write_bytes(b'bad\\n' if mode == 'repair' and target.read_bytes().strip() == b'start' else b'fixed\\n')
+print(json.dumps({'status':'SUCCESS', 'denied_actions': [{'action':'write_file'}] if mode == 'denied' else [],
+    'fixture': {'source':str(source), 'mirror':str(mirror), 'cwd':original_cwd,
+                'git_dir':identity[1], 'files':sorted(p.name for p in mirror.iterdir())}}))
+'''.replace("MODE", repr(mode)), encoding="utf-8")
+        original_command = runner_module.command_for
+        original_run = subprocess.run
+        commands, verifies = [], []
+        def command(selection, repo, instruction, **kwargs):
+            argv, stdin = original_command(selection, repo, instruction, **kwargs)
+            return [sys.executable, str(script), *argv[1:]], stdin
+        def execute(argv, **kwargs):
+            if len(argv) > 1 and argv[1] == str(script):
+                commands.append(argv)
+                assert kwargs["cwd"] == source.resolve()
+            if list(argv[1:3]) == ["-m", "pytest"]:
+                verifies.append(argv)
+                code = int((source / "README.md").read_bytes() != b"fixed\n")
+                return subprocess.CompletedProcess(argv, code, "1 failed\n" if code else "1 passed\n", "")
+            return original_run(argv, **kwargs)
+        monkeypatch.setattr(runner_module, "command_for", command)
+        monkeypatch.setattr(runner_module.subprocess, "run", execute)
+        # Verification is simulated here. The containing registered profile
+        # observes twelve real workers; this fake makes no inner worker claim.
+        monkeypatch.setattr(runner_module, "xdist_available", lambda: False)
+        instruction = 'approved "quoted" input \\ ' * 1000 + "\U0001f680" * 1000
+        result = execute_attempt(repo=source, output_dir=outdir, work_id="isolated-source",
+            attempt_id="new-fixture", selection=ExecutorSelection("antigravity", "fixture", "high"),
+            instruction=instruction, allowed_prefixes=["README.md"], max_repair_rounds=2,
+            verify_argv=[sys.executable, "-m", "pytest", "test_scope.py", "-q"])
+        assert result["status"] == {"repair": "BUILD_VERIFIED_FOR_SCOPE",
+            "no-change": "NO_CODE_CHANGE", "denied": "EXECUTOR_PERMISSION_DENIED"}[mode]
+        assert len(commands) == (2 if mode == "repair" else 1)
+        assert len(verifies) == (2 if mode == "repair" else 0)
+        assert (primary / "README.md").read_bytes() == baseline
+        assert original_run(["git", "-C", str(primary), "diff", "HEAD", "--", "README.md"],
+                            capture_output=True, check=True).stdout == b""
+        if mode == "repair":
+            assert (source / "README.md").read_bytes() == b"fixed\n"
+            diff = original_run(["git", "-C", str(source), "diff", "HEAD"], capture_output=True, check=True).stdout
+            assert b"+fixed" in diff
+            import hashlib
+            assert result["candidate_file_sha256"]["README.md"] == hashlib.sha256(b"fixed\n").hexdigest()
+        mirrors = []
+        for invocation, argv in zip(result["invocations"], commands):
+            assert runner_module._windows_command_units(argv) <= 8000
+            files = invocation["evidence_files"]
+            binding = json.loads((outdir / files["agy_source_binding"]).read_text(encoding="utf-8"))
+            raw = json.loads((outdir / files["executor_stdout"]).read_text(encoding="utf-8"))
+            mirror = Path(binding["input_mirror"])
+            mirrors.append(mirror)
+            assert not mirror.exists() and primary not in mirror.parents and source not in mirror.parents
+            assert binding["source_root"] == raw["fixture"]["source"] == str(source.resolve())
+            assert Path(binding["git_dir"]) == Path(raw["fixture"]["git_dir"])
+            assert raw["fixture"]["cwd"] == str(source.resolve())
+            assert raw["fixture"]["files"] == (["instruction.txt", "repair_feedback.json"]
+                if invocation["repair_round"] else ["instruction.txt"])
+            assert (outdir / files["instruction"]).is_file()
+        assert len(mirrors) == len(set(mirrors))
+        assert not list(outdir.rglob("agy_input"))
+
+
+@pytest.mark.parametrize("option", ["--show-toplevel", "--absolute-git-dir", "HEAD"])
+def test_agy_host_preflight_rejects_source_identity_mismatch(tmp_path, monkeypatch, option):
+    from ai_commerce.engineering import runner
+    repo = _repo(tmp_path)
+    expected, _ = runner._snapshot(repo, [], time.monotonic() + 30)
+    original = runner._git
+    calls = []
+    def git(root, *args, **kwargs):
+        calls.append((root, args))
+        if args == ("rev-parse", option):
+            return subprocess.CompletedProcess([], 0, str(tmp_path) if option != "HEAD" else "b" * 40, "")
+        return original(root, *args, **kwargs)
+    monkeypatch.setattr(runner, "_git", git)
+    with pytest.raises(ValueError, match="AGY_SOURCE_IDENTITY_CHANGED"):
+        runner._agy_source_binding(repo, expected, time.monotonic() + 30)
+    assert all(root == repo and args[0] == "rev-parse" for root, args in calls)
+
+
+def _directory_alias(target, alias):
+    if os.name == "nt":
+        import _winapi
+        _winapi.CreateJunction(str(target), str(alias))
+    else:
+        alias.symlink_to(target, target_is_directory=True)
+
+
+@pytest.mark.parametrize("location", ["source", "mirror", "mirror-parent"])
+def test_agy_adapter_rejects_reparse_roots(tmp_path, monkeypatch, location):
+    from types import SimpleNamespace
+    source = tmp_path / "source"
+    mirror = tmp_path / "input"
+    source.mkdir()
+    mirror.mkdir()
+    (mirror / "instruction.txt").write_text("task")
+    alias = tmp_path / "alias"
+    alias.mkdir()
+    # Exercise the shared production detector's native Windows reparse bit
+    # without requiring the sandbox to grant junction-creation privileges.
+    original_lstat = Path.lstat
+    def lstat(path, *args, **kwargs):
+        result = original_lstat(path, *args, **kwargs)
+        if path == alias:
+            return SimpleNamespace(st_mode=result.st_mode, st_file_attributes=0x400)
+        return result
+    monkeypatch.setattr(Path, "lstat", lstat)
+    with pytest.raises(ValueError, match="AGY_PATH_INDIRECTION"):
+        command_for(ExecutorSelection("antigravity", "fixture", "high"),
+            alias if location == "source" else source, "task",
+            antigravity_evidence_dir=mirror if location == "source" else (
+                alias if location == "mirror" else alias / "child"))
+
+
+@pytest.mark.parametrize("git_marker", ["file", "directory"])
+def test_agy_input_rejects_all_checkout_ancestors_and_poisoned_temp(tmp_path, monkeypatch, git_marker):
+    from ai_commerce.engineering import runner
+    source = tmp_path / "source"
+    source.mkdir()
+    primary = tmp_path / "primary"
+    primary.mkdir()
+    marker = primary / ".git"
+    marker.mkdir() if git_marker == "directory" else marker.write_text("gitdir: other")
+    mirror = primary / ".local" / "ef02" / "input"
+    mirror.mkdir(parents=True)
+    (mirror / "instruction.txt").write_text("task")
+    with pytest.raises(ValueError, match="AGY_INPUT_INSIDE_GIT"):
+        command_for(ExecutorSelection("antigravity", "fixture", "high"), source, "task",
+                    antigravity_evidence_dir=mirror)
+    monkeypatch.setattr(runner.tempfile, "gettempdir", lambda: str(mirror))
+    before = set(mirror.iterdir())
+    with pytest.raises(ValueError, match="AGY_INPUT_INSIDE_GIT"):
+        with runner._agy_input_mirror(source, "task", None):
+            pytest.fail("poisoned temp must never be granted")
+    assert set(mirror.iterdir()) == before
+
+
+def test_agy_cleanup_does_not_follow_nested_junction(tmp_path):
+    from ai_commerce.engineering import runner
+    sentinel = tmp_path / "outside"
+    sentinel.mkdir()
+    (sentinel / "keep.txt").write_text("keep")
+    with runner._agy_input_mirror(tmp_path, "task", None) as mirror:
+        try:
+            _directory_alias(sentinel, mirror / "escape")
+        except PermissionError:
+            pytest.skip("native junction creation denied by sandbox; no permission bypass")
+    assert not mirror.exists() and (sentinel / "keep.txt").read_text() == "keep"
 
 
 # Human-selected project soft default: no unapproved within-attempt switch.

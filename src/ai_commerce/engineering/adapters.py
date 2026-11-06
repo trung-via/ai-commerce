@@ -5,9 +5,48 @@ AGY flag support must be confirmed against the user's installed CLI version.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from .profile import ExecutorSelection
+from .source_safety import is_link
+
+
+def agy_directory(path: Path) -> Path:
+    """Bind an existing physical directory without accepting reparse aliases."""
+    if ".." in Path(path).parts:
+        raise ValueError("AGY_PATH_INDIRECTION")
+    absolute = Path(os.path.abspath(path))
+    if any(is_link(p) for p in (absolute, *absolute.parents)):
+        raise ValueError("AGY_PATH_INDIRECTION")
+    resolved = absolute.resolve(strict=True)
+    if not resolved.is_dir():
+        raise ValueError("AGY_DIRECTORY_REQUIRED")
+    return resolved
+
+
+def agy_data_directory(path: Path) -> Path:
+    """Input data must not acquire a checkout's implicit source authority."""
+    directory = agy_directory(path)
+    for ancestor in (directory, *directory.parents):
+        marker = ancestor / ".git"
+        if marker.exists() or is_link(marker) or (
+                (ancestor / "HEAD").is_file() and (ancestor / "objects").is_dir()
+                and (ancestor / "refs").is_dir()):
+            raise ValueError("AGY_INPUT_INSIDE_GIT")
+    return directory
+
+
+def agy_input_files(repo: Path, path: Path) -> dict[str, bytes]:
+    source, directory = agy_directory(repo), agy_data_directory(path)
+    if source == directory or source in directory.parents or directory in source.parents:
+        raise ValueError("AGY_INPUT_SOURCE_OVERLAP")
+    files = list(directory.iterdir())
+    if (not (directory / "instruction.txt").is_file() or
+            any(p.name not in ("instruction.txt", "repair_feedback.json") or
+                is_link(p) or not p.is_file() for p in files)):
+        raise ValueError("AGY_EVIDENCE_DIR_NOT_PREPARED")
+    return {p.name: p.read_bytes() for p in files}
 
 
 def command_for(selection: ExecutorSelection, repo: Path, instruction: str,
@@ -32,18 +71,16 @@ def command_for(selection: ExecutorSelection, repo: Path, instruction: str,
             "-c", f'model_reasoning_effort="{selection.effort}"',
             "--sandbox", "workspace-write", "--color", "never", "--json", "-",
         ], instruction
-    # The EF02 evidence directory is outside the temporary worktree. In headless
-    # AGY, reading such an unregistered directory can require an interactive
-    # read_file approval (impossible in --print mode). Add ONLY this attempt's
-    # evidence directory as a workspace root; never allow every file or command.
+    # Register only the bound source and disposable input, never runner evidence
+    # or the primary checkout. The second root carries data, not source authority.
+    source = agy_directory(repo)
     evidence_args: list[str] = []
     if antigravity_evidence_dir is not None:
-        evidence = Path(antigravity_evidence_dir).resolve(strict=True)
-        if not evidence.is_dir() or not (evidence / "instruction.txt").is_file():
-            raise ValueError("AGY_EVIDENCE_DIR_NOT_PREPARED")
+        evidence = agy_data_directory(antigravity_evidence_dir)
+        agy_input_files(source, evidence)
         evidence_args = ["--add-dir", str(evidence)]
     return [
-        antigravity_bin, "--print", instruction, "--add-dir", str(repo),
+        antigravity_bin, "--print", instruction, "--add-dir", str(source),
         *evidence_args, "--model", selection.model, "--effort", selection.effort,
         "--mode", "accept-edits", "--disable-slash-commands", "--output-format", "json",
     ], None
