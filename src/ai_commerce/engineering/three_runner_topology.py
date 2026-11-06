@@ -6,6 +6,7 @@ authorizes any new HostOps command, GitHub credential or browser/CDP action.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -60,19 +61,34 @@ _CHROME_STATES = frozenset({
     "UNVERIFIED", "PROFILE_CONFLICT",
 })
 
+WakeHubDecisionCode = Literal[
+    "HOLD_UNKNOWN_EFFECT", "HOLD_SOURCE_DRIFT",
+    "HOLD_EVENT_RECEIVER_UNAVAILABLE", "PAUSED_BY_HUMAN",
+    "WAIT_INTERACTIVE_SESSION", "HOLD_CHROME_OWNERSHIP",
+    "WAIT_PRIVATE_CHROME_START_GRANT", "READY_DEGRADED_ENGINEERING",
+    "READY_FOR_ORIGIN_PREPARE",
+]
+WakeHubNextAction = Literal[
+    "RECONCILE_ONLY", "REFRESH_SOURCE_EVIDENCE",
+    "RESTORE_RECEIVER_WITH_SEPARATE_NATIVE_AUTHORITY", "NO_EFFECT_KEEP_STOPPED",
+    "WAIT_FOR_OWNER_LOGON_NO_BROWSER_ACTION", "VERIFY_EXACT_OWNER_AND_PROFILE",
+    "REQUEST_BOUNDED_START_AUTHORITY",
+    "REUSE_9444_AND_REPORT_ENGINEERING_LISTENERS", "REUSE_9444_WITHOUT_RELAUNCH",
+]
+
 
 @dataclass(frozen=True)
 class WakeHubPreflight:
     """Sanitized decision only, never an effect/grant or Wake authorization."""
 
-    code: str
-    next_action: str
-    cdp_port: int
+    code: WakeHubDecisionCode
+    next_action: WakeHubNextAction
+    cdp_port: Literal[9444]
     listener_count: int
     ready_for_origin_prepare: bool
-    start_permitted: bool = False
-    wake_send_authorized: bool = False
-    effect_attempted: bool = False
+    start_permitted: Literal[False] = False
+    wake_send_authorized: Literal[False] = False
+    effect_attempted: Literal[False] = False
 
 
 def assess_wakehub_preflight(
@@ -84,6 +100,7 @@ def assess_wakehub_preflight(
     chrome_ownership: str,
     source_current: bool,
     unknown_effect: bool,
+    trusted_human_pause: bool = False,
 ) -> WakeHubPreflight:
     """Choose a bounded no-effect next action for the single-user Windows host.
 
@@ -93,6 +110,19 @@ def assess_wakehub_preflight(
     receive a GitHub event if every runner is offline. The returned action
     strings instruct the future private operator to recheck authority, not
     execute a start/retry/send.
+
+    trusted_human_pause is a boolean supplied by a separately trusted private
+    operator after authenticating Human intent. This function does not verify
+    or sign a pause token, or authenticate a GitHub Issue self-assertion. True
+    preserves an intentional stop even with independently absent Chrome;
+    False (the backward-compatible default) only releases this pause gate and
+    never grants native start authority. Pause proves no session, ownership,
+    private enrollment, installed logon task or successful logon.
+
+    interactive_session_proven requires the exact authenticated owner's usable
+    interactive desktop; wrong, locked, absent or ambiguous sessions are False.
+    OWNED_CDP_9444 requires fresh independent process/session/profile ownership
+    evidence, not merely a listening port or a NOT_RUNNING probe receipt.
     """
     if (
         type(hostops_task) is not str or hostops_task not in _RUNNER_TASK_STATES
@@ -107,13 +137,15 @@ def assess_wakehub_preflight(
         or chrome_ownership not in _CHROME_STATES
         or type(source_current) is not bool
         or type(unknown_effect) is not bool
+        or type(trusted_human_pause) is not bool
     ):
         raise ValueError("WAKEHUB_PREFLIGHT_INPUT_INVALID")
 
     count = sum(v == "PRESENT" for v in
                 (hostops_listener, *engineering_listeners))
 
-    def result(code: str, action: str, ready: bool = False) -> WakeHubPreflight:
+    def result(code: WakeHubDecisionCode, action: WakeHubNextAction,
+               ready: bool = False) -> WakeHubPreflight:
         return WakeHubPreflight(
             code=code, next_action=action, cdp_port=9444,
             listener_count=count, ready_for_origin_prepare=ready,
@@ -128,6 +160,11 @@ def assess_wakehub_preflight(
     if hostops_listener != "PRESENT":
         return result("HOLD_EVENT_RECEIVER_UNAVAILABLE",
                       "RESTORE_RECEIVER_WITH_SEPARATE_NATIVE_AUTHORITY")
+    # Pause cannot reconcile UNKNOWN, refresh source or restore the event
+    # receiver, so those HOLDs take precedence. Keep-stop advice needs no
+    # desktop/browser authority and must precede every reuse/start suggestion.
+    if trusted_human_pause:
+        return result("PAUSED_BY_HUMAN", "NO_EFFECT_KEEP_STOPPED")
     if not interactive_session_proven:
         return result("WAIT_INTERACTIVE_SESSION",
                       "WAIT_FOR_OWNER_LOGON_NO_BROWSER_ACTION")

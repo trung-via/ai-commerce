@@ -4,10 +4,15 @@ No registration token, GitHub call, Windows task or model is invoked here.
 """
 from __future__ import annotations
 
+import builtins
+from dataclasses import FrozenInstanceError
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
+
+import pytest
 
 from ai_commerce.engineering.three_runner_topology import (
     EXISTING_RUNNER, NEW_RUNNERS, hostops_route_activation_allowed,
@@ -222,8 +227,16 @@ def test_wakehub_preflight_closed_input_rejects_untrusted_runner_or_browser_fiel
         {"interactive_session_proven": 1},
         {"chrome_ownership": "ANY_BROWSER"},
         {"chrome_ownership": "OWNED_CDP_ANY"},
+        {"chrome_ownership": "OWNED_CDP_9333"},
+        {"chrome_ownership": "OWNED_CDP_9222"},
         {"source_current": 1},
         {"unknown_effect": "False"},
+        {"trusted_human_pause": None},
+        {"trusted_human_pause": 0},
+        {"trusted_human_pause": 1},
+        {"trusted_human_pause": "False"},
+        {"trusted_human_pause": "EXPECTED_MANUAL_STOP"},
+        {"trusted_human_pause": {"issue": 500, "human_pause": True}},
     ]
     for item in invalid:
         try:
@@ -244,3 +257,144 @@ def test_wakehub_preflight_is_pure_and_repeats_without_starting_anything():
                       "open(", "browser.click("):
         assert forbidden not in source
     assert first.effect_attempted is False
+
+
+def test_wakehub_supervisor_paused_absent_is_idempotent_and_frozen():
+    evidence = dict(trusted_human_pause=True,
+                    chrome_ownership="ABSENT_INDEPENDENTLY_VERIFIED")
+    paused = _wakehub(**evidence)
+    assert paused.code == "PAUSED_BY_HUMAN"
+    assert paused.next_action == "NO_EFFECT_KEEP_STOPPED"
+    assert paused.cdp_port == 9444
+    assert not paused.ready_for_origin_prepare
+    assert not paused.start_permitted
+    assert not paused.wake_send_authorized
+    assert not paused.effect_attempted
+    assert _wakehub(**evidence) == _wakehub(**evidence) == paused
+    for field, value in (("code", "READY_FOR_ORIGIN_PREPARE"),
+                         ("next_action", "REQUEST_BOUNDED_START_AUTHORITY"),
+                         ("start_permitted", True),
+                         ("wake_send_authorized", True),
+                         ("effect_attempted", True)):
+        with pytest.raises(FrozenInstanceError):
+            setattr(paused, field, value)
+
+
+@pytest.mark.parametrize(("interactive_session_proven", "chrome_ownership"), [
+    (False, "UNVERIFIED"),
+    (False, "OWNED_CDP_9444"),
+    (False, "ABSENT_INDEPENDENTLY_VERIFIED"),
+    (True, "UNVERIFIED"),
+    (True, "PROFILE_CONFLICT"),
+    (True, "OWNED_CDP_9444"),
+])
+def test_wakehub_supervisor_pause_never_proves_session_or_ownership(
+    interactive_session_proven, chrome_ownership,
+):
+    # Keep-stop advice needs no desktop/browser authority. Pause is not
+    # evidence that this owner logged on or owns an existing Chrome process.
+    paused = _wakehub(trusted_human_pause=True,
+                      interactive_session_proven=interactive_session_proven,
+                      chrome_ownership=chrome_ownership)
+    assert paused.code == "PAUSED_BY_HUMAN"
+    assert paused.next_action == "NO_EFFECT_KEEP_STOPPED"
+    assert not paused.ready_for_origin_prepare
+    assert not paused.start_permitted
+    assert not paused.wake_send_authorized
+    assert not paused.effect_attempted
+
+
+def test_wakehub_supervisor_explicit_resume_still_needs_private_native_grant():
+    evidence = dict(chrome_ownership="ABSENT_INDEPENDENTLY_VERIFIED")
+    paused = _wakehub(trusted_human_pause=True, **evidence)
+    resumed = _wakehub(trusted_human_pause=False, **evidence)
+    assert resumed == _wakehub(**evidence)  # Backward-compatible default.
+    assert resumed.code == "WAIT_PRIVATE_CHROME_START_GRANT"
+    assert resumed.next_action == "REQUEST_BOUNDED_START_AUTHORITY"
+    assert not resumed.ready_for_origin_prepare
+    assert not resumed.start_permitted
+    assert not resumed.wake_send_authorized
+    assert not resumed.effect_attempted
+    assert _wakehub(trusted_human_pause=True, **evidence) == paused
+    assert _wakehub(trusted_human_pause=False) == _wakehub()
+
+
+@pytest.mark.parametrize(("overrides", "code", "action"), [
+    # A pause cannot resolve a lost effect receipt, refresh stale source, or
+    # restore the receiver. Those independent HOLDs must remain visible.
+    (dict(unknown_effect=True, source_current=False, hostops_listener="ABSENT"),
+     "HOLD_UNKNOWN_EFFECT", "RECONCILE_ONLY"),
+    (dict(source_current=False, hostops_listener="ABSENT"),
+     "HOLD_SOURCE_DRIFT", "REFRESH_SOURCE_EVIDENCE"),
+    (dict(hostops_listener="ABSENT"), "HOLD_EVENT_RECEIVER_UNAVAILABLE",
+     "RESTORE_RECEIVER_WITH_SEPARATE_NATIVE_AUTHORITY"),
+    (dict(hostops_listener="UNAVAILABLE"), "HOLD_EVENT_RECEIVER_UNAVAILABLE",
+     "RESTORE_RECEIVER_WITH_SEPARATE_NATIVE_AUTHORITY"),
+])
+def test_wakehub_supervisor_holds_take_precedence_over_trusted_pause(
+    overrides, code, action,
+):
+    result = _wakehub(trusted_human_pause=True,
+                      interactive_session_proven=False,
+                      chrome_ownership="ABSENT_INDEPENDENTLY_VERIFIED",
+                      **overrides)
+    assert result.code == code
+    assert result.next_action == action
+    assert not result.ready_for_origin_prepare
+    assert not result.start_permitted
+    assert not result.wake_send_authorized
+    assert not result.effect_attempted
+
+
+@pytest.mark.parametrize("chrome_ownership", [
+    "OWNED_CDP_9444", "ABSENT_INDEPENDENTLY_VERIFIED",
+    "UNVERIFIED", "PROFILE_CONFLICT",
+])
+def test_wakehub_supervisor_resume_requires_proven_owner_desktop(chrome_ownership):
+    # False covers wrong, locked, absent and ambiguous owner desktops; even
+    # owned/absent Chrome evidence cannot substitute for this independent gate.
+    result = _wakehub(trusted_human_pause=False,
+                      interactive_session_proven=False,
+                      chrome_ownership=chrome_ownership)
+    assert result.code == "WAIT_INTERACTIVE_SESSION"
+    assert result.next_action == "WAIT_FOR_OWNER_LOGON_NO_BROWSER_ACTION"
+    assert not result.ready_for_origin_prepare
+    assert not result.start_permitted
+
+
+def test_wakehub_supervisor_decisions_have_no_external_effects_or_legacy_port(monkeypatch):
+    cases = [
+        (dict(unknown_effect=True), "HOLD_UNKNOWN_EFFECT"),
+        (dict(source_current=False), "HOLD_SOURCE_DRIFT"),
+        (dict(hostops_listener="ABSENT"), "HOLD_EVENT_RECEIVER_UNAVAILABLE"),
+        (dict(trusted_human_pause=True,
+              chrome_ownership="ABSENT_INDEPENDENTLY_VERIFIED"), "PAUSED_BY_HUMAN"),
+        (dict(interactive_session_proven=False), "WAIT_INTERACTIVE_SESSION"),
+        (dict(chrome_ownership="PROFILE_CONFLICT"), "HOLD_CHROME_OWNERSHIP"),
+        (dict(chrome_ownership="UNVERIFIED"), "HOLD_CHROME_OWNERSHIP"),
+        (dict(chrome_ownership="ABSENT_INDEPENDENTLY_VERIFIED"),
+         "WAIT_PRIVATE_CHROME_START_GRANT"),
+        (dict(engineering_listeners=("ABSENT", "UNAVAILABLE")),
+         "READY_DEGRADED_ENGINEERING"),
+        ({}, "READY_FOR_ORIGIN_PREPARE"),
+    ]
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Supervisor attempted an external effect")
+
+    # Tripwires run only around the pure decisions. No Chrome, Windows task,
+    # network/Wake, process launch or profile/file access occurs in this test.
+    with monkeypatch.context() as guard:
+        guard.setattr(builtins, "open", forbidden)
+        guard.setattr(Path, "open", forbidden)
+        guard.setattr(subprocess, "Popen", forbidden)
+        guard.setattr(os, "system", forbidden)
+        guard.setattr(socket, "socket", forbidden)
+        for overrides, expected_code in cases:
+            result = _wakehub(**overrides)
+            assert result == _wakehub(**overrides)
+            assert result.code == expected_code
+            assert result.cdp_port == 9444  # Never route to legacy D5 9333.
+            assert result.start_permitted is False
+            assert result.wake_send_authorized is False
+            assert result.effect_attempted is False
