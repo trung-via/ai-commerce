@@ -1112,3 +1112,198 @@ jobs:
             await github.rest.issues.createComment({...context.repo,
               issue_number:context.issue.number,
               body:'AI_COMMERCE_D5_PLAYWRIGHT_9444_READ_V1\n'+JSON.stringify(result)});
+
+  # Classify the foreground ChatGPT conversation UI over owned local CDP,
+  # read-only. Never expose account data, tab URL, chat ID or transcript.
+  hostops-d5-9444-chat-read:
+    if: >-
+      github.repository == 'trung-via/ai-commerce' &&
+      github.actor == github.repository_owner &&
+      github.event_name == 'issues' && github.event.action == 'opened' &&
+      github.event.issue.user.login == github.repository_owner &&
+      startsWith(github.event.issue.title, '[HOSTOPS D5 CHAT READ] ')
+    runs-on: [self-hosted, Windows, ai-commerce-hostops]
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: d5-chat-ui-readonly-9444
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Inspect only ChatGPT tab and login UI flags on CDP 9444
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $file = Join-Path $env:RUNNER_TEMP ('d5-chat-read-' + $env:GITHUB_RUN_ID + '-' + $env:GITHUB_RUN_ATTEMPT + '.json')
+          $code = 'INVALID_EVENT'
+          $status = 'BLOCKED'
+          $chatTab = $false
+          $focused = $false
+          $composer = $false
+          $accountUi = $false
+          $count = 0
+          try {
+            if ($env:OS -cne 'Windows_NT' -or $env:GITHUB_ACTIONS -cne 'true' -or
+                $env:GITHUB_REPOSITORY -cne 'trung-via/ai-commerce') { throw 'BAD_HOST' }
+            $evt = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($evt.action -cne 'opened' -or $evt.issue.user.login -cne 'trung-via' -or
+                $evt.sender.login -cne 'trung-via' -or
+                -not $evt.issue.title.StartsWith('[HOSTOPS D5 CHAT READ] ') -or
+                [string]$evt.issue.body -cne '{"schema":"ai-commerce.d5.chat-read9444.v1","operation":"INSPECT_FOREGROUND_CHAT_UI","parameters":{}}') {
+              throw 'BAD_ISSUE'
+            }
+            if ([Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) { throw 'NO_INTERACTIVE_SESSION' }
+            $principal = [Security.Principal.WindowsPrincipal]::new(
+              [Security.Principal.WindowsIdentity]::GetCurrent())
+            if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'ELEVATED' }
+            $root = $env:GITHUB_WORKSPACE
+            $head = (& git -C $root rev-parse HEAD 2>$null | Out-String).Trim()
+            $remote = (& git -C $root remote get-url origin 2>$null | Out-String).Trim()
+            $dirty = @(& git -C $root status --porcelain=v1 --untracked-files=no 2>$null)
+            if ($head -cne $env:GITHUB_SHA -or $dirty.Count -ne 0 -or
+                $remote -cnotin @(
+                  'https://github.com/trung-via/ai-commerce.git',
+                  'https://github.com/trung-via/ai-commerce',
+                  'git@github.com:trung-via/ai-commerce.git')) { throw 'SOURCE_DRIFT' }
+            $oldPythonPath = $env:PYTHONPATH
+            try {
+              $env:PYTHONPATH = Join-Path $root 'src'
+              # Only the explicitly opened local conversation is inspected.
+              # This does not inspect chat contents, account names, cookies,
+              # page titles, screenshot pixels or private route identity.
+              $script = @(
+                'import json, re',
+                'from urllib.parse import urlsplit',
+                'from types import SimpleNamespace',
+                'from ai_commerce.remote.chrome_acquisition import _probe_cdp',
+                'out = dict(code="CHAT_READ_UNKNOWN",chat_tab=False,focused=False,composer=False,account_ui=False,count=0)',
+                'try:',
+                '    _probe_cdp(SimpleNamespace(endpoint="http://127.0.0.1:9444",port=9444))',
+                'except Exception:',
+                '    out["code"] = "CDP_UNAVAILABLE"',
+                'else:',
+                '    try:',
+                '        from playwright.sync_api import sync_playwright',
+                '        with sync_playwright() as pw:',
+                '            browser = pw.chromium.connect_over_cdp("http://127.0.0.1:9444",timeout=3000)',
+                '            pages = []',
+                '            for ctx in browser.contexts:',
+                '                for page in ctx.pages:',
+                '                    u = urlsplit(page.url)',
+                '                    if u.scheme == "https" and u.hostname == "chatgpt.com" and re.search(r"(?:^|/)c/[a-fA-F0-9-]{16,64}(?:/|$)", u.path):',
+                '                        pages.append(page)',
+                '            out["count"] = min(len(pages),2)',
+                '            if len(pages) != 1:',
+                '                out["code"] = "CHAT_NOT_OPEN" if not pages else "CHAT_AMBIGUOUS"',
+                '            else:',
+                '                page = pages[0]',
+                '                info = page.evaluate("""() => ({',
+                '                  focused: document.hasFocus(),',
+                '                  composer: !!document.querySelector(' + "'#prompt-textarea,[data-testid=\"composer-input\"],[contenteditable=\"true\"][data-placeholder]'" + '),',
+                '                  account: !!document.querySelector(' + "'[data-testid=\"profile-button\"],[data-testid=\"user-menu-button\"],[data-testid=\"account-menu-button\"]'" + ')',
+                '                })""")',
+                '                out["chat_tab"] = True',
+                '                out["focused"] = info.get("focused") is True',
+                '                out["composer"] = info.get("composer") is True',
+                '                out["account_ui"] = info.get("account") is True',
+                '                out["code"] = "CHAT_NOT_FOCUSED" if not out["focused"] else ("COMPOSER_PRESENT" if out["composer"] else "COMPOSER_UNAVAILABLE")',
+                '    except ImportError:',
+                '        out["code"] = "PLAYWRIGHT_UNAVAILABLE"',
+                '    except Exception:',
+                '        out["code"] = "CHAT_READ_UNKNOWN"',
+                'print(json.dumps(out,sort_keys=True,separators=(",",":")))'
+              ) -join [Environment]::NewLine
+              $output = @(& python -B -c $script 2>$null | ForEach-Object { [string]$_ })
+              $exit = $LASTEXITCODE
+            } finally { $env:PYTHONPATH = $oldPythonPath }
+            if ($exit -eq 0 -and $output.Count -eq 1) {
+              $o = $output[0] | ConvertFrom-Json
+              $codes = @('CDP_UNAVAILABLE','CHAT_NOT_OPEN','CHAT_AMBIGUOUS',
+                'CHAT_NOT_FOCUSED','COMPOSER_PRESENT','COMPOSER_UNAVAILABLE',
+                'PLAYWRIGHT_UNAVAILABLE','CHAT_READ_UNKNOWN')
+              if ($o.code -cin $codes -and $o.chat_tab -is [bool] -and
+                  $o.focused -is [bool] -and $o.composer -is [bool] -and
+                  $o.account_ui -is [bool] -and $o.count -in @(0,1,2)) {
+                $code = [string]$o.code
+                $chatTab = [bool]$o.chat_tab
+                $focused = [bool]$o.focused
+                $composer = [bool]$o.composer
+                $accountUi = [bool]$o.account_ui
+                $count = [int]$o.count
+                $status = 'OBSERVED'
+              } else { $code = 'CHAT_READ_UNKNOWN' }
+            } else { $code = 'CHAT_READ_UNKNOWN' }
+          } catch {
+            $known = @('BAD_HOST','BAD_ISSUE','NO_INTERACTIVE_SESSION','ELEVATED','SOURCE_DRIFT')
+            $why = [string]$_.Exception.Message
+            $code = if ($known -ccontains $why) { $why } else { 'CHAT_READ_UNKNOWN' }
+          }
+          $receipt = [ordered]@{
+            status=$status
+            code=$code
+            source_sha=$env:GITHUB_SHA
+            cdp_port=9444
+            chat_tab_present=$chatTab
+            foreground_verified=$focused
+            composer_present=$composer
+            account_ui_present=$accountUi
+            candidate_chat_tabs=$count
+            exact_chat_verified=$false
+            browser_mutated=$false
+            wake_sent=$false
+          }
+          try {
+            $bytes = [Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $receipt -Compress))
+            $stream = [IO.File]::Open($file,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+            try { $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true) }
+            finally { $stream.Dispose() }
+          } catch { Write-Output 'D5_CHAT_READ_RECEIPT_UNAVAILABLE'; exit 2 }
+          Write-Output ('D5_CHAT_UI_STATUS=' + $status + ';CODE=' + $code)
+      - name: Publish restricted UI evidence without private URL or chat content
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs'), path = require('path');
+            const file = path.join(process.env.RUNNER_TEMP,
+              'd5-chat-read-' + process.env.GITHUB_RUN_ID + '-' +
+              process.env.GITHUB_RUN_ATTEMPT + '.json');
+            let result = {status:'BLOCKED',code:'RECEIPT_UNAVAILABLE',
+              source_sha:context.sha,cdp_port:9444,
+              chat_tab_present:false,foreground_verified:false,
+              composer_present:false,account_ui_present:false,
+              candidate_chat_tabs:0,exact_chat_verified:false,
+              browser_mutated:false,wake_sent:false};
+            try {
+              if (fs.statSync(file).size > 1024) throw Error();
+              const v = JSON.parse(fs.readFileSync(file,'utf8'));
+              const fields=['status','code','source_sha','cdp_port',
+                'chat_tab_present','foreground_verified','composer_present',
+                'account_ui_present','candidate_chat_tabs',
+                'exact_chat_verified','browser_mutated','wake_sent'];
+              const codes=['BAD_HOST','BAD_ISSUE','NO_INTERACTIVE_SESSION',
+                'ELEVATED','SOURCE_DRIFT','CDP_UNAVAILABLE','CHAT_NOT_OPEN',
+                'CHAT_AMBIGUOUS','CHAT_NOT_FOCUSED','COMPOSER_PRESENT',
+                'COMPOSER_UNAVAILABLE','PLAYWRIGHT_UNAVAILABLE','CHAT_READ_UNKNOWN'];
+              if (!v || Array.isArray(v) ||
+                  Object.keys(v).sort().join()!==fields.sort().join() ||
+                  !['OBSERVED','BLOCKED'].includes(v.status) ||
+                  !codes.includes(v.code) ||
+                  v.source_sha!==context.sha || v.cdp_port!==9444 ||
+                  ['chat_tab_present','foreground_verified','composer_present',
+                   'account_ui_present'].some(k=>typeof v[k]!=='boolean') ||
+                  ![0,1,2].includes(v.candidate_chat_tabs) ||
+                  v.exact_chat_verified!==false || v.browser_mutated!==false ||
+                  v.wake_sent!==false ||
+                  (v.code==='COMPOSER_PRESENT' &&
+                   (!v.chat_tab_present || !v.foreground_verified || !v.composer_present ||
+                    v.candidate_chat_tabs!==1))) throw Error();
+              result=v;
+            } catch (_) {}
+            await github.rest.issues.createComment({...context.repo,
+              issue_number:context.issue.number,
+              body:'AI_COMMERCE_D5_CHAT_READ_9444_V1\n'+JSON.stringify(result)});
