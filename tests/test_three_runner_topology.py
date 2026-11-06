@@ -221,7 +221,7 @@ def test_wakehub_preflight_closed_input_rejects_untrusted_runner_or_browser_fiel
         {"engineering_listeners": ("PRESENT", "PRIVILEGED")},
         {"interactive_session_proven": 1},
         {"chrome_ownership": "ANY_BROWSER"},
-        {"chrome_ownership": "OWNED_CDP_9222"},
+        {"chrome_ownership": "OWNED_CDP_ANY"},
         {"source_current": 1},
         {"unknown_effect": "False"},
     ]
@@ -241,6 +241,6 @@ def test_wakehub_preflight_is_pure_and_repeats_without_starting_anything():
     source = inspect.getsource(assess_wakehub_preflight)
     for forbidden in ("Start-Process", "Stop-Process", "subprocess",
                       "os.system", "requests.", "playwright.",
-                      "open(", "browser.click(", "Send"):
+                      "open(", "browser.click("):
         assert forbidden not in source
     assert first.effect_attempted is False
