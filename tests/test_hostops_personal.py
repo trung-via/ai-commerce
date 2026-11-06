@@ -959,6 +959,11 @@ const script = fs.readFileSync(process.argv[2],'utf8');
         assert "github.event.issue.user.login == github.repository_owner" in boot
         assert "startsWith(github.event.issue.title, '[HOSTOPS D5 BOOT] ')" in boot
         assert '{"schema":"ai-commerce.d5.personal.v1","operation":"START_CDP_9333","parameters":{}}' in boot
+        assert '{"schema":"ai-commerce.d5.personal.v1","operation":"PROBE_CDP_9333","parameters":{}}' in boot
+        assert "ai_commerce.remote.chrome_acquisition probe --config" in boot
+        assert "if ($probeOnly)" in boot
+        assert "CDP_9333_NOT_RUNNING" in boot
+        assert "parsed.launched === false" in boot
         assert "runs-on: [self-hosted, Windows, ai-commerce-hostops]" in boot
         assert "persist-credentials: false" in boot
         assert "github.rest.issues.createComment" in boot
