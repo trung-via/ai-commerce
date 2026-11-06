@@ -13,7 +13,7 @@ OTHER = "https://chatgpt.com/c/00000000-0000-0000-0000-000000000002"
 EVENT = "ef02-completion-v1:" + "a" * 64
 BIND = ResolvedBinding(
     route_id="route-A", generation=1, chat_url=URL,
-    cdp_endpoint="http://127.0.0.1:9222",
+    cdp_endpoint="http://127.0.0.1:9444",
 )
 
 
@@ -527,18 +527,20 @@ def test_preload_before_wake_uses_enrolled_route_only(monkeypatch):
     inv = d4._PlaywrightInventory()
     @contextmanager
     def fake_browser(endpoint):
-        # The legacy D4 send fixture uses 9222; D5 auto-preload is 9444.
+        # D4 and D5 use the same isolated 9444 endpoint.
         assert endpoint == "http://127.0.0.1:9444"
         yield SimpleNamespace(contexts=[ctx])
     monkeypatch.setattr(inv, "_browser", fake_browser)
-    # D4 fixture normally uses port 9222; preload is deliberately 9444 only.
+    # This preload does not touch a browser or route outside the isolated 9444.
     binding = ResolvedBinding(route_id=BIND.route_id, generation=1,
                               chat_url=URL, cdp_endpoint="http://127.0.0.1:9444")
     assert inv.preload(binding, current_binding=lambda: binding) == "EXACT_CHAT_OPENED"
     assert len(created) == 1 and created[0].url == URL
     assert existing.url == OTHER
     assert inv.preload(binding) == "EXACT_CHAT_PRESENT"  # idempotent reuse
-    assert inv.preload(BIND) == "PRELOAD_ROUTE_INVALID"
+    wrong_port = ResolvedBinding(route_id=BIND.route_id, generation=1,
+                                 chat_url=URL, cdp_endpoint="http://127.0.0.1:9222")
+    assert inv.preload(wrong_port) == "PRELOAD_ROUTE_INVALID"
 
 
 def test_preload_rejects_ambiguous_targets_and_contexts(monkeypatch):
