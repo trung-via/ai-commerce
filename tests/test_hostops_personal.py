@@ -991,7 +991,8 @@ const script = fs.readFileSync(process.argv[2],'utf8');
         """Bind-check 9333 versus 9444 without relaunch or removing any Chrome profile."""
         workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
         assert workflow.count("  hostops-d5-compare-loopback:") == 1
-        job = workflow.split("  hostops-d5-compare-loopback:", 1)[1]
+        job = workflow.split("  hostops-d5-compare-loopback:", 1)[1].split(
+            "  hostops-d5-isolated-9444-trial:", 1)[0]
         assert "github.actor == github.repository_owner" in job
         assert "github.event.issue.user.login == github.repository_owner" in job
         assert "github.event_name == 'issues' && github.event.action == 'opened'" in job
