@@ -78,6 +78,15 @@ CONTROL_TESTS = {
         "tests/test_ef02_d5_chrome_acquisition.py", "tests/test_minimum_test.py",
         "tests/test_mt01_v21.py", "tests/test_pr_merge_gate.py",
     ),
+    # Keep candidate MT-01 selection aligned with trusted main's Brain merge
+    # gate for the reviewed D5 operator bridge PowerShell source. In particular,
+    # the existing HostOps Personal consumer MUST run in hosted Windows CI.
+    "scripts/AI-Commerce-D5-Operator-Bridge.ps1": (
+        "tests/test_hostops_d5_control.py",
+        "tests/test_ef02_d5_chrome_acquisition.py",
+        "tests/test_hostops_personal.py",
+        "tests/test_hostops_v3.py",
+    ),
     "src/ai_commerce/remote/validation.py": (
         "tests/test_minimum_test.py", "tests/test_ef02.py",
     ),
