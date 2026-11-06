@@ -42,6 +42,14 @@ def test_plain_text_error_and_unknown_provider_error():
              "EXECUTION_UNKNOWN", "EXECUTOR_OUTCOME_UNCONFIRMED")
 
 
+def test_native_usage_limit_is_quota_but_successful_tool_quote_is_not():
+    message = "You've hit your usage limit. Try again at 11:15 AM"
+    assert _provider_problem(message.encode()) == ("QUOTA_EXHAUSTED", "QUOTA_EXHAUSTED")
+    assert _provider_problem(_stream({"type": "item.completed", "item": {
+        "type": "command_execution", "exit_code": 0, "aggregated_output": message}},
+        {"type": "turn.completed"})) is None
+
+
 # Reconnect recovery contract: exact Codex top-level diagnostic with bounded N/M
 from ai_commerce.engineering.runner import (
     _parse_reconnect_warning,

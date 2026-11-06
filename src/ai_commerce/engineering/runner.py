@@ -5,6 +5,7 @@ Local CLI only. Not a remote wake, provider permission check, or AIOS lifecycle.
 from __future__ import annotations
 
 import hashlib
+from contextlib import ExitStack
 import json
 import ntpath
 import os
@@ -20,12 +21,12 @@ from typing import Any, Sequence
 
 from .adapters import command_for
 from .git_write_guard import GIT_GUARD_INSTRUCTION, git_write_guard_env
-from .profile import ExecutorSelection
+from .profile import ExecutorSelection, diagnose_failure
 from .git import git_argv, resolve_git_executable
 from .git_byte_consistency import GitByteConsistencyError, stabilize_candidate_newlines_before_verify
 from .minimum_test import file_hashes
 from .source_safety import checked_path, protected_change, is_link
-from .verification import execute_plan, pytest_observation_env, observed_xdist_workers
+from .verification import execute_plan, pytest_execution_env, observed_xdist_workers, git_hook_environment_failure
 from .pytest_profile import host_capacity, profile_command, worker_decision, xdist_available, require_managed_parallelism
 
 
@@ -613,7 +614,8 @@ def _provider_problem(data: bytes) -> tuple[str, str] | None:
                     messages.append(event[key].lower())
     for phrases, status in (
         (("model is at capacity", "no capacity available"), "MODEL_AT_CAPACITY"),
-        (("resource_exhausted", "quota exceeded", "quota reached", "429 too many requests"), "QUOTA_EXHAUSTED"),
+        (("resource_exhausted", "quota exceeded", "quota reached", "429 too many requests",
+          "you've hit your usage limit", "you have hit your usage limit"), "QUOTA_EXHAUSTED"),
         (("model_not_found", "model is not supported", "unknown model"), "MODEL_UNSUPPORTED"),
         (("model unavailable", "service unavailable"), "EXECUTOR_UNAVAILABLE"),
         (("permission denied", "permissionerror", "approval denied", "approval required",
@@ -668,10 +670,12 @@ def _provider_completed(data: bytes, executor: str) -> bool:
 
 def _verify_infrastructure_failure(stdout: bytes, stderr: bytes) -> bool:
     messages = (stdout + b"\n" + stderr).decode("utf-8", "replace").lower()
-    return bool(_provider_problem(stdout + b"\n" + stderr) or any(
+    return bool(git_hook_environment_failure(stdout, stderr) or _provider_problem(stdout + b"\n" + stderr) or any(
         text in messages for text in (
             "no module named pytest", "0xc0000142", "3221225794", "-1073741502",
             "[winerror 1920]", "subprocess.timeoutexpired", "worker crashed", "workers crashed",
+            "[winerror 1314]", "[winerror 5]", "a required privilege is not held",
+            "git_write_guard_blocked", "ef01_git_write_denied",
             "memoryerror", "cannot allocate memory", "can't start new thread",
             "failed to start worker", "could not start worker", "error while receiving from worker")))
 
@@ -887,7 +891,9 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
 
     inv.update(status="EXECUTION_UNKNOWN", verify_started_at=_now())
     vout, verr = b"", b""
+    runtime = ExitStack()
     try:
+        verify_env = runtime.enter_context(pytest_execution_env(repo)) if _is_pytest(verify_argv) else None
         inv["verify_timeout_seconds"] = _remaining(deadline, verify_timeout_seconds)
         registered = bool(mt_context and mt_context["registered_only"])
         inv["verification_origin"] = "REGISTERED_EF01" if registered else "LOCAL_EF01"
@@ -909,8 +915,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
                     xdist_available=xdist_available(), windows=(os.name == "nt"),
                     registered_only=True, registered_argv=argv)
                 inv["pytest_profile"] = decision
-            temp_dir = output_dir / "pytest-temp" / group
-            temp_dir.mkdir(parents=True, exist_ok=True)
+            temp_dir = Path(verify_env["AI_COMMERCE_PYTEST_SCRATCH"]) / group
             return profile_command(argv, decision=decision, temp_dir=temp_dir), decision
         if mt_context is not None:
             # Publishing scope drift requires a fresh full registered run even
@@ -936,7 +941,11 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
             check = subprocess.run(actual_argv, cwd=repo, capture_output=True,
                                    text=True, encoding="utf-8", errors="replace",
                                    timeout=inv["verify_timeout_seconds"], check=False,
-                                   env=pytest_observation_env() if _is_pytest(actual_argv) else None)
+                                   env=verify_env)
+            if verify_env is not None:
+                junit = Path(verify_env["AI_COMMERCE_PYTEST_SCRATCH"]) / "junit.xml"
+                if junit.is_file():
+                    save("verify_junit", "verify.junit.xml", junit.read_bytes())
         inv.update(verify_exit_code=check.returncode, verify_completed=True)
         vout, verr = check.stdout.encode("utf-8"), check.stderr.encode("utf-8")
         if mt_context is None:
@@ -983,7 +992,13 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     except PermissionError as exc:
         inv.update(status="VERIFICATION_FAILED", error_code="VERIFY_PERMISSION_DENIED",
                    verify_diagnostic=str(exc))
+    except ValueError as exc:
+        code = str(exc).split(":", 1)[0]
+        if not re.fullmatch(r"(?:MT01|PYTEST|XDIST|REGISTERED)_[A-Z0-9_]{1,100}", code):
+            raise
+        inv.update(status="UNPROVEN", error_code=code, repair_eligible=False)
     finally:
+        runtime.close()
         inv["verify_finished_at"] = _now()
         save("verify_stdout", "verify.stdout.log", vout)
         save("verify_stderr", "verify.stderr.log", verr)
@@ -1113,6 +1128,8 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
             not _is_pytest(argv)
             for name, argv in registered_profiles.items())):
         raise ValueError("MT01_INVALID_REGISTERED_PROFILES")
+    if registered_only and registered_profiles is not None and list(verify_argv) not in registered_profiles.values():
+        raise ValueError("MT01_REQUESTED_PROFILE_ARGV_UNREGISTERED")
     for value in (timeout_seconds, verify_timeout_seconds, action_timeout_seconds):
         if type(value) is not int or not 1 <= value <= MAX_TIMEOUT_SECONDS:
             raise ValueError(f"Timeouts must be integers from 1 to {MAX_TIMEOUT_SECONDS}")
@@ -1177,6 +1194,8 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
         "verify_first_scope": verify_first_scope,
         "out_of_scope_files": [], "scope_review_required": False, "review_required": False,
         "invocations": [], "repair_rounds_used": 0, "stop_reason": None,
+        "hypothesis_trail": [],
+        "preflight": {"state": "READY", "source_sha": initial["git_head_after"], "proves_pass": False},
     }
     output_dir.mkdir(parents=True, exist_ok=False)
     expected = initial
@@ -1197,6 +1216,7 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                 "scope_valid": None, "git_head_after": None, "denied_actions": [],
                 "denied_action_diagnostics": [], "provider_test_observations": [],
                 "out_of_scope_files": [], "scope_review_required": False, "review_required": False,
+                "verify_first_scope": verify_first_scope,
                 "usage": None, "usage_status": "UNKNOWN", "cost": None, "cost_status": "UNKNOWN",
                 "evidence_files": {}, "evidence_sha256": {}, "repair_eligible": False,
                 "replay_authorized": False, "provider_return_determinate": False,
@@ -1210,6 +1230,7 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                     "max_repair_rounds": max_repair_rounds, "allowed_prefixes": list(allowed_prefixes),
                     "verify_argv": list(verify_argv), "evidence_root": str(output_dir),
                     "previous_invocations": report["invocations"],
+                    "hypothesis_trail": report["hypothesis_trail"],
                 }
                 # Freeze prior rounds before appending the current mutable record.
                 feedback = json.loads(json.dumps(feedback))
@@ -1242,11 +1263,32 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                     precondition_instruction_sha256=report["instruction_sha256"],
                     sandbox_backend=report["sandbox_backend"])
                 inv["failure_provenance"] = provenance
+                diagnosis = diagnose_failure(inv)
+                inv["failure_diagnosis"] = diagnosis.payload() if diagnosis else None
+                # repair_eligible is derived only by the native verifier above.
+                # Advisory UNKNOWN gaps cannot short-circuit the existing
+                # unchanged-precondition sentinel for a determinate round.
+                if (diagnosis and diagnosis.disposition == "OWNER_ESCALATION" and
+                        not (inv["repair_eligible"] and diagnosis.failure_class.value == "UNKNOWN")):
+                    inv.update(repair_eligible=False, repair_stop_reason="OWNER_ESCALATION")
                 if provenance:
                     signature = provenance["fingerprint"]
                     if inv["repair_eligible"] and signature in seen_failure_fingerprints:
                         inv.update(repair_eligible=False, repair_stop_reason="UNCHANGED_FAILURE_PRECONDITION")
                     seen_failure_fingerprints.add(signature)
+                # Only bounded native codes and hashes are shared as hypotheses.
+                # Full private diagnostic logs remain separate evidence artifacts.
+                if diagnosis:
+                    report["hypothesis_trail"] = (report["hypothesis_trail"] + [{
+                        "round": round_index, "diagnosis": diagnosis.payload(),
+                        "precondition_sha256": provenance["precondition_sha256"] if provenance else None,
+                        "source_changed": inv.get("input_snapshot", {}).get("candidate_file_sha256") != inv.get("candidate_file_sha256"),
+                        "hypothesis": "SCOPED_ASSERTION_REPAIR" if inv["repair_eligible"] else "OWNER_RECONCILIATION_REQUIRED",
+                        "rejected_hypothesis": ("NO_SOURCE_CHANGE" if inv.get("error_code") == "REPAIR_NO_CODE_CHANGE" else
+                            "UNCHANGED_FAILURE_PRECONDITION" if inv.get("repair_stop_reason") == "UNCHANGED_FAILURE_PRECONDITION" else None),
+                        "next_experiment": "TARGETED_PYTEST_ON_CHANGED_SOURCE" if inv["repair_eligible"] else "STOP_AND_RECONCILE_NATIVE_EVIDENCE",
+                    }])[-4:]
+                report["failure_diagnosis"] = inv["failure_diagnosis"]
                 for key in ("status", "error_code", "executor_exit_code", "verify_exit_code",
                             "changed_files", "candidate_file_sha256", "tracked_diff_sha256",
                             "scope_valid", "git_head_after", "denied_actions", "evidence_files",

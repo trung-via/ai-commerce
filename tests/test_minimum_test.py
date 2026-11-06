@@ -19,6 +19,56 @@ FULL = ["python", "-m", "pytest", "tests", "-q"]
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_pytest_scratch_and_nested_temporary_environment_are_external_and_guard_preserving(tmp_path, monkeypatch):
+    repo = tmp_path / "checkout with spaces"
+    repo.mkdir()
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "guard-path")
+    monkeypatch.setenv("SYSTEMROOT", "preserved-system-root")
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-ra")
+    with verification.pytest_execution_env(repo) as env:
+        scratch = Path(env["AI_COMMERCE_PYTEST_SCRATCH"])
+        assert scratch.is_dir() and repo not in scratch.resolve().parents
+        assert all(env[key] == str(scratch) for key in ("TEMP", "TMP", "TMPDIR"))
+        assert env["GIT_CONFIG_VALUE_0"] == "guard-path" and env["SYSTEMROOT"] == "preserved-system-root"
+        assert env["PYTEST_ADDOPTS"] == "-ra"
+        assert env["PYTEST_PLUGINS"].split(",").count("ai_commerce.engineering.profile") == 1
+    assert not scratch.exists() and list(repo.iterdir()) == []
+
+
+def test_pytest_rejects_worktree_temp_instead_of_hiding_generated_gitignore(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    poisoned = repo / ".local" / "pytest-scratch"
+    poisoned.mkdir(parents=True)
+    monkeypatch.setattr(verification.tempfile, "gettempdir", lambda: str(poisoned))
+    with pytest.raises(ValueError, match="PYTEST_SCRATCH_INSIDE_WORKSPACE"):
+        with verification.pytest_execution_env(repo):
+            pytest.fail("unsafe pytest must never start")
+    assert list(poisoned.iterdir()) == []
+
+
+def test_runtime_plugin_isolates_nested_pytest_without_changing_registered_argv(tmp_path, monkeypatch):
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    test = repo / "test_scratch.py"
+    test.write_text("import os,tempfile\nfrom pathlib import Path\n"
+        "def test_scratch(tmp_path):\n"
+        "    root=Path.cwd().resolve()\n"
+        "    assert root not in tmp_path.resolve().parents\n"
+        "    assert len(tmp_path.relative_to(Path(os.environ['AI_COMMERCE_PYTEST_SCRATCH'])).parts) == 2\n"
+        "    assert root not in Path(tempfile.gettempdir()).resolve().parents\n"
+        "    assert all(Path(os.environ[k]).is_dir() for k in ('TMP','TEMP','TMPDIR'))\n")
+    monkeypatch.setenv("PYTHONPATH", str(ROOT / "src"))
+    argv = [sys.executable, "-m", "pytest", "test_scratch.py", "-q"]
+    original = list(argv)
+    junit = []
+    response = verification.run_pytest(argv, repo=repo, timeout=60, save_junit=junit.append)
+    assert response.returncode == 0, response.stdout + response.stderr
+    assert argv == original and junit and b'failures="0"' in junit[0]
+    assert sorted(p.name for p in repo.iterdir()) in (["test_scratch.py"], ["__pycache__", "test_scratch.py"])
+
+
 @pytest.fixture(autouse=True)
 def _isolate_legacy_selector_mode(monkeypatch):
     """Legacy MT-01 contracts must not inherit the EF01 V2.1 selector toggle.
@@ -608,6 +658,44 @@ def _execute(mapped, *, prior=None, acs=("AC-A",), changed=("feature_a.py",), na
     return result, selected, prior
 
 
+def test_bad_binding_stops_provisional_and_registered_execution(mapped, monkeypatch):
+    select = verification.select_plan
+    def tampered(**kwargs):
+        selected = select(**kwargs)
+        selected["groups"][0]["binding"]["registered_profile"] = "unregistered-collision"
+        return selected
+    monkeypatch.setattr(verification, "select_plan", tampered)
+    monkeypatch.setattr(verification, "select_provisional_tests", lambda **_kw: pytest.fail("provisional ran after binding rejection"))
+    monkeypatch.setattr(verification, "run_pytest", lambda *_a, **_kw: pytest.fail("pytest ran after binding rejection"))
+    response, selected, prior = _execute(mapped, registered_only=True,
+        registered_profiles={"project-tests": FULL})
+    assert response.returncode == 5 and not prior
+    assert selected["groups"][0]["tests_executed"]["unknown"] is None
+    assert selected["preflight"]["state"] == "OWNER_ESCALATION"
+    assert "MT01_GROUP_0_REGISTERED_BINDING_REJECTED" in selected["reason_codes"]
+    assert all(g["actual_argv"] is None for g in selected["groups"])
+
+
+def test_empty_registered_plan_never_attests_coverage():
+    assert verification.registered_binding_problems({"groups": []}, {}) == ["MT01_PLAN_EMPTY"]
+
+
+def test_native_git_hook_barrier_is_environment_evidence_without_hook_bypass(mapped, monkeypatch):
+    native = b"sh.exe: fatal error - NtCreateDirectoryObject(\\BaseNamedObjects\\msys): 0xC0000022\n"
+    assert verification.git_hook_environment_failure(native, b"")
+    monkeypatch.setattr(verification, "subprocess", SimpleNamespace(
+        run=lambda argv, **_kw: subprocess.CompletedProcess(argv, 1,
+            "MT01_XDIST_WORKERS_COLLECTED=12\nFAILED tests/test_a.py::test_a\n1 failed\n" + native.decode(), ""),
+        TimeoutExpired=subprocess.TimeoutExpired, CompletedProcess=subprocess.CompletedProcess))
+    response, selected, prior = _execute(mapped)
+    entry = selected["groups"][0]
+    assert response.returncode == 3 and not prior
+    assert entry["result"] == "UNPROVEN" and entry["reason"] == "VERIFY_GIT_HOOK_ENVIRONMENT_ERROR"
+    assert entry["actual_exit_code"] == 1 and entry["tests_executed"]["failed"] == 1
+    assert entry["tests_executed"]["unknown"] is None
+    assert selected["failure_diagnosis"]["root_owner"] == "RUNNER_ENVIRONMENT_OWNER"
+
+
 def test_group_timeout_preserves_partial_logs_and_cannot_repair(mapped, monkeypatch):
     def timeout(argv, **kwargs):
         raise subprocess.TimeoutExpired(argv, kwargs["timeout"], b"created: 12/12 workers\npartial", b"timeout")
@@ -675,6 +763,7 @@ def test_parallel_execution_receipt_has_observed_counts_argv_and_timing(mapped, 
         assert entry["state"] == "UNPROVEN" and entry["reason"] == "PYTEST_WORKER_COUNT_MISMATCH"
     assert entry["actual_argv"] == argv
     assert entry["tests_executed"]["passed"] == 2 and entry["tests_executed"]["skipped"] == 1
+    assert entry["tests_executed"]["unknown"] == (0 if workers == 12 else None)
     assert entry["started_at"] <= entry["finished_at"] and entry["wall_seconds"] >= 0
     assert json.loads((mapped.evidence / "round-0/mt01.results.json").read_text()) == selected
 
