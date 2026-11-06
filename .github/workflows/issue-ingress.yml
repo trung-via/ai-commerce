@@ -824,3 +824,122 @@ jobs:
             await github.rest.issues.createComment({...context.repo,
               issue_number:context.issue.number,
               body:'AI_COMMERCE_D5_ISOLATED_9444_V1\n' + JSON.stringify(result)});
+
+  # Read-only DevTools HTTP /json/version. No process inventory, tab access or
+  # profile modification: independently isolates Windows CIM probe failures.
+  hostops-d5-9444-cdp-protocol:
+    if: >-
+      github.repository == 'trung-via/ai-commerce' &&
+      github.actor == github.repository_owner &&
+      github.event_name == 'issues' && github.event.action == 'opened' &&
+      github.event.issue.user.login == github.repository_owner &&
+      startsWith(github.event.issue.title, '[HOSTOPS D5 9444 HTTP READ] ')
+    runs-on: [self-hosted, Windows, ai-commerce-hostops]
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: d5-cdp-9444-protocol-read
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Probe fixed Chrome DevTools protocol on loopback 9444
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $file = Join-Path $env:RUNNER_TEMP ('d5-9444-http-' + $env:GITHUB_RUN_ID + '-' + $env:GITHUB_RUN_ATTEMPT + '.json')
+          $status = 'BLOCKED'
+          $code = 'INVALID_EVENT'
+          $ready = $false
+          try {
+            if ($env:OS -cne 'Windows_NT' -or $env:GITHUB_ACTIONS -cne 'true' -or
+                $env:GITHUB_REPOSITORY -cne 'trung-via/ai-commerce') { throw 'INVALID_EVENT' }
+            $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($event.action -cne 'opened' -or
+                $event.issue.user.login -cne 'trung-via' -or
+                $event.sender.login -cne 'trung-via' -or
+                -not $event.issue.title.StartsWith('[HOSTOPS D5 9444 HTTP READ] ') -or
+                [string]$event.issue.body -cne '{"schema":"ai-commerce.d5.cdp-protocol.v1","operation":"PROBE_LOCAL_CDP_9444","parameters":{}}') {
+              throw 'INVALID_EVENT'
+            }
+            $root = $env:GITHUB_WORKSPACE
+            $head = (& git -C $root rev-parse HEAD 2>$null | Out-String).Trim()
+            if ($head -cne $env:GITHUB_SHA) { throw 'SOURCE_DRIFT' }
+            $prior = $env:PYTHONPATH
+            try {
+              $env:PYTHONPATH = Join-Path $root 'src'
+              # Reuse the original source-owned bounded /json/version check:
+              # no redirects, no proxy, strict Chrome/Protocol/CDP WS identity.
+              $script = @'
+from types import SimpleNamespace
+from ai_commerce.remote.chrome_acquisition import _probe_cdp, AcquisitionBlocked
+try:
+    _probe_cdp(SimpleNamespace(endpoint="http://127.0.0.1:9444", port=9444))
+    print("CDP_PROTOCOL_VERIFIED")
+except AcquisitionBlocked:
+    print("CDP_PROTOCOL_UNAVAILABLE")
+'@
+              $result = @(& python -B -c $script 2>$null | ForEach-Object { [string]$_ })
+              $exit = $LASTEXITCODE
+            } finally { $env:PYTHONPATH = $prior }
+            if ($exit -eq 0 -and $result.Count -eq 1 -and
+                $result[0] -cin @('CDP_PROTOCOL_VERIFIED','CDP_PROTOCOL_UNAVAILABLE')) {
+              $status = 'OBSERVED'
+              $code = [string]$result[0]
+              $ready = $code -ceq 'CDP_PROTOCOL_VERIFIED'
+            } else {
+              $code = 'HTTP_CHECK_UNAVAILABLE'
+            }
+          } catch { $code = 'HTTP_CHECK_UNAVAILABLE' }
+          $record = [ordered]@{
+            status = $status
+            code = $code
+            source_sha = $env:GITHUB_SHA
+            cdp_port = 9444
+            protocol_verified = $ready
+            chrome_touched = $false
+            wake_sent = $false
+          }
+          try {
+            $buf = [Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $record -Compress))
+            $stream = [IO.File]::Open($file,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+            try { $stream.Write($buf,0,$buf.Length); $stream.Flush($true) }
+            finally { $stream.Dispose() }
+          } catch { Write-Output 'D5_9444_HTTP_RECEIPT_UNAVAILABLE'; exit 2 }
+          Write-Output ('D5_9444_HTTP_CODE=' + $code)
+      - name: Publish closed DevTools protocol result
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs'), path = require('path');
+            const file = path.join(process.env.RUNNER_TEMP,
+              'd5-9444-http-' + process.env.GITHUB_RUN_ID + '-' +
+              process.env.GITHUB_RUN_ATTEMPT + '.json');
+            let result = {status:'BLOCKED',code:'RECEIPT_UNAVAILABLE',
+              source_sha:context.sha,cdp_port:9444,protocol_verified:false,
+              chrome_touched:false,wake_sent:false};
+            try {
+              if (fs.statSync(file).size > 1024) throw Error();
+              const r = JSON.parse(fs.readFileSync(file,'utf8'));
+              const names = ['status','code','source_sha','cdp_port',
+                'protocol_verified','chrome_touched','wake_sent'];
+              if (!r || Array.isArray(r) ||
+                  Object.keys(r).sort().join() !== names.sort().join() ||
+                  !['BLOCKED','OBSERVED'].includes(r.status) ||
+                  !['INVALID_EVENT','HTTP_CHECK_UNAVAILABLE','CDP_PROTOCOL_VERIFIED',
+                    'CDP_PROTOCOL_UNAVAILABLE'].includes(r.code) ||
+                  r.source_sha !== context.sha || r.cdp_port !== 9444 ||
+                  typeof r.protocol_verified !== 'boolean' ||
+                  r.chrome_touched !== false || r.wake_sent !== false ||
+                  (r.status === 'OBSERVED' &&
+                   (r.protocol_verified !== (r.code === 'CDP_PROTOCOL_VERIFIED') ||
+                    !['CDP_PROTOCOL_VERIFIED','CDP_PROTOCOL_UNAVAILABLE'].includes(r.code)))) throw Error();
+              result = r;
+            } catch (_) {}
+            await github.rest.issues.createComment({...context.repo,
+              issue_number:context.issue.number,
+              body:'AI_COMMERCE_D5_9444_HTTP_PROTOCOL_V1\n' + JSON.stringify(result)});
