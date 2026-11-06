@@ -873,15 +873,15 @@ jobs:
               $env:PYTHONPATH = Join-Path $root 'src'
               # Reuse the original source-owned bounded /json/version check:
               # no redirects, no proxy, strict Chrome/Protocol/CDP WS identity.
-              $script = @'
-from types import SimpleNamespace
-from ai_commerce.remote.chrome_acquisition import _probe_cdp, AcquisitionBlocked
-try:
-    _probe_cdp(SimpleNamespace(endpoint="http://127.0.0.1:9444", port=9444))
-    print("CDP_PROTOCOL_VERIFIED")
-except AcquisitionBlocked:
-    print("CDP_PROTOCOL_UNAVAILABLE")
-'@
+              $script = @(
+                'from types import SimpleNamespace',
+                'from ai_commerce.remote.chrome_acquisition import _probe_cdp, AcquisitionBlocked',
+                'try:',
+                '    _probe_cdp(SimpleNamespace(endpoint="http://127.0.0.1:9444", port=9444))',
+                '    print("CDP_PROTOCOL_VERIFIED")',
+                'except AcquisitionBlocked:',
+                '    print("CDP_PROTOCOL_UNAVAILABLE")'
+              ) -join [Environment]::NewLine
               $result = @(& python -B -c $script 2>$null | ForEach-Object { [string]$_ })
               $exit = $LASTEXITCODE
             } finally { $env:PYTHONPATH = $prior }
