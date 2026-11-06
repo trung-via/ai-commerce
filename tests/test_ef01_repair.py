@@ -488,18 +488,29 @@ def _git_repo(tmp_path, real_git=True):
     (repo / "pytest.ini").write_text("[pytest]\naddopts = -p no:cacheprovider\n")
     if not real_git:
         return repo, BASE
+    git_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG_") and k != "AI_COMMERCE_GIT_GUARD_PATHS"}
     for args in (["init", "-q"], ["config", "user.email", "local@example.invalid"],
                  ["config", "user.name", "repair fixture"], ["add", "."], ["commit", "-qm", "initial"]):
-        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, env=git_env)
     head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
-                          capture_output=True, text=True).stdout.strip()
+                          capture_output=True, text=True, env=git_env).stdout.strip()
     return repo, head
 
 
 def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, checkpoint_error=False, real_git=True,
-                    drift=None):
+                    drift=None, mt01_v21=False):
+    if not mt01_v21:
+        monkeypatch.delenv("MT01_V21_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("MT01_V21_ENABLED", "1")
+    for key in list(os.environ):
+        if key.startswith("GIT_CONFIG_") or key == "AI_COMMERCE_GIT_GUARD_PATHS":
+            monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+    import shutil
+    shutil_which = shutil.which
+    monkeypatch.setattr(shutil, "which", lambda cmd: sys.executable if cmd in ("python", "py") else shutil_which(cmd))
     repo, head = _git_repo(tmp_path, real_git)
     monkeypatch.setattr(remote, 'load_approved_candidates', lambda *_a: {'version': 1, 'candidates': {}})
     worktree_run = subprocess.run
@@ -953,3 +964,27 @@ def test_pretty_antigravity_usage_is_observed_without_inventing_cost():
         "input_tokens": 10, "cached_input_tokens": 2, "output_tokens": 3}}, indent=2)
     assert runner._observe_usage(payload.encode(), "antigravity") == {
         "input_tokens": 10, "cached_input_tokens": 2, "output_tokens": 3}
+
+
+def test_ef02_worker_with_mt01_v21_enabled_and_registered_groups_accepts_candidate(tmp_path, monkeypatch):
+    """When MT01_V21_ENABLED=1 and groups are registered, worker passes and produces candidate."""
+    from ai_commerce.engineering import minimum_test as mt
+    from ai_commerce.remote import validation
+    context = _worker_fixture(tmp_path, monkeypatch, real_git=False, mt01_v21=True)
+    groups = (mt.TestGroup("scope", ("tests/test_scope.py",), ("FIXTURE.acceptance",), ("impl.py", "kept.txt")),)
+    monkeypatch.setattr(mt, "approved_groups", lambda: groups)
+    monkeypatch.setattr(validation, "approved_groups", lambda: groups)
+    context.worker.profiles["mt01-scope-tests"] = ["python", "-m", "pytest", "tests/test_scope.py", "-q"]
+    a = _action("a")
+    a["instruction"] += '\nMT01_ACCEPTANCE_JSON: ["FIXTURE.acceptance"]'
+    result = context.worker.execute_action(a)
+    assert result["status"] == "CANDIDATE_READY"
+
+
+def test_ef02_worker_with_mt01_v21_enabled_and_unregistered_fixture_fails_closed(tmp_path, monkeypatch):
+    """When MT01_V21_ENABLED=1 and synthetic fixture has unregistered changes, fail-closed UNPROVEN."""
+    context = _worker_fixture(tmp_path, monkeypatch, real_git=False, mt01_v21=True)
+    a = _action("a")
+    result = context.worker.execute_action(a)
+    assert result["status"] == "UNPROVEN"
+    assert result.get("error_code") == "MT01_COVERAGE_UNPROVEN"

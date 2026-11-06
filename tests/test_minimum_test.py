@@ -29,6 +29,9 @@ def _isolate_legacy_selector_mode(monkeypatch):
     Only the child pytest process is isolated; runtime/CI policy is unchanged.
     """
     monkeypatch.delenv("MT01_V21_ENABLED", raising=False)
+    for key in list(os.environ):
+        if key.startswith("GIT_CONFIG_") or key == "AI_COMMERCE_GIT_GUARD_PATHS":
+            monkeypatch.delenv(key, raising=False)
 
 
 def test_legacy_selector_mode_does_not_inherit_runner_toggle(monkeypatch):
@@ -483,7 +486,9 @@ def test_targeted_requested_profile_falls_back_only_when_required_for_ac_coverag
         {"ef02-tests": registry["ef02-tests"]})["state"] == "UNPROVEN"
 
 
-def test_registered_known_group_selects_exact_minimal_command_and_invalidates_registry_edit(mapped):
+def test_registered_known_group_selects_exact_minimal_command_and_invalidates_registry_edit(mapped, monkeypatch):
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda cmd: sys.executable if cmd in ("python", "py") else None)
     command = ["python", "-m", "pytest", "tests/test_a.py", "-q", "-n", "12"]
     parallel_full = [*FULL, "-n", "12"]
     registry = {"project-tests": parallel_full, "component-a": command}
