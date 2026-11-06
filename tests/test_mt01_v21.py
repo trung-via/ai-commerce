@@ -1418,3 +1418,33 @@ def test_mt01_impact_control_only_selects_reviewed_self_tests():
     assert selected.runnable, selected
     assert selected.selected_groups == ("mt01-v21",)
     assert selected.selected_tests == ("tests/test_minimum_test.py", "tests/test_mt01_v21.py")
+
+
+def test_d5_operator_bridge_pr_ci_covers_independent_hostops_personal_consumer(tmp_path):
+    """The trusted merge gate's mandatory D5 script tests must be selected by CI.
+
+    Regression for #450: before this mapping was added, 1,064 hosted tests
+    passed but the merge gate correctly returned V21_CONTENT_PROOF_INVALID
+    because tests/test_hostops_personal.py was never selected.
+    """
+    from ai_commerce.engineering.impact_v21 import CONTROL_TESTS, select_impact
+
+    path = "scripts/AI-Commerce-D5-Operator-Bridge.ps1"
+    mandatory = {
+        "tests/test_hostops_d5_control.py",
+        "tests/test_ef02_d5_chrome_acquisition.py",
+        "tests/test_hostops_personal.py",
+        "tests/test_hostops_v3.py",
+    }
+    assert set(CONTROL_TESTS[path]) == mandatory
+    for test_file in mandatory:
+        mk(tmp_path, test_file, "# synthetic test file; no Windows effects\n")
+    mk(tmp_path, path, "# source-pinned PowerShell path only\n")
+    plan = select_impact(root=tmp_path, changed_paths=[path], groups=())
+    assert plan.runnable, plan
+    assert mandatory <= set(plan.selected_tests)
+    assert "REVIEWED_CONTROL_CLOSURE" in plan.reason_codes
+
+    # The independent protected Brain merge gate requires precisely this
+    # already-reviewed list; never drop the Personal HostOps consumer.
+    assert "tests/test_hostops_personal.py" in plan.selected_tests
