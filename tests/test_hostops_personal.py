@@ -1022,7 +1022,8 @@ const script = fs.readFileSync(process.argv[2],'utf8');
         """An independent empty 9444 user-data-dir must not reuse D5's occupied 9333 profile."""
         workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
         assert workflow.count("  hostops-d5-isolated-9444-trial:") == 1
-        job = workflow.split("  hostops-d5-isolated-9444-trial:", 1)[1]
+        job = workflow.split("  hostops-d5-isolated-9444-trial:", 1)[1].split(
+            "  hostops-d5-9444-cdp-protocol:", 1)[0]
         assert "github.actor == github.repository_owner" in job
         assert "github.event.issue.user.login == github.repository_owner" in job
         assert "github.event_name == 'issues' && github.event.action == 'opened'" in job
@@ -1050,6 +1051,33 @@ const script = fs.readFileSync(process.argv[2],'utf8');
         assert "Register-ScheduledTask" not in job and "Invoke-Expression" not in job
         assert "Copy-Item" not in job and "SEND_WAKE" not in job
         assert "User Data\\Default" not in job
+
+
+
+    def test_d5_9444_http_only_checks_devtools_version_without_process_or_profile_access(self):
+        """Bypass failing Windows CIM to prove local CDP protocol directly, read-only."""
+        workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+        assert workflow.count("  hostops-d5-9444-cdp-protocol:") == 1
+        job = workflow.split("  hostops-d5-9444-cdp-protocol:", 1)[1]
+        assert "github.actor == github.repository_owner" in job
+        assert "github.event.issue.user.login == github.repository_owner" in job
+        assert "github.event_name == 'issues' && github.event.action == 'opened'" in job
+        assert "PROBE_LOCAL_CDP_9444" in job
+        assert "runs-on: [self-hosted, Windows, ai-commerce-hostops]" in job
+        assert "persist-credentials: false" in job
+        assert 'endpoint="http://127.0.0.1:9444", port=9444' in job
+        assert "_probe_cdp(SimpleNamespace" in job
+        assert "CDP_PROTOCOL_VERIFIED" in job
+        assert "CDP_PROTOCOL_UNAVAILABLE" in job
+        assert "AI_COMMERCE_D5_9444_HTTP_PROTOCOL_V1" in job
+        assert "r.source_sha !== context.sha" in job
+        assert "r.chrome_touched !== false || r.wake_sent !== false" in job
+        assert "Get-NetTCPConnection" not in job
+        assert "Get-CimInstance" not in job
+        assert "Start-Process" not in job and "Stop-Process" not in job
+        assert "Remove-Item" not in job and "Register-ScheduledTask" not in job
+        assert "chrome_acquisition launch" not in job and "Invoke-Expression" not in job
+        assert "SEND_WAKE" not in job and "Copy-Item" not in job
 
 
 
