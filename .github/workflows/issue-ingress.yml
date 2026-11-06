@@ -587,3 +587,240 @@ jobs:
             await github.rest.issues.createComment({...context.repo,
               issue_number:context.issue.number,
               body:'AI_COMMERCE_D5_PORT_COMPARE_V1\n'+JSON.stringify(result)});
+
+  # Fixed isolated Chrome CDP experiment. A fresh blank 9444 user-data-dir
+  # never inherits the currently occupied 9333 profile or browser login.
+  hostops-d5-isolated-9444-trial:
+    if: >-
+      github.repository == 'trung-via/ai-commerce' &&
+      github.actor == github.repository_owner &&
+      github.event_name == 'issues' && github.event.action == 'opened' &&
+      github.event.issue.user.login == github.repository_owner &&
+      startsWith(github.event.issue.title, '[HOSTOPS D5 9444 TRIAL] ')
+    runs-on: [self-hosted, Windows, ai-commerce-hostops]
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: d5-isolated-9444-trial
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Fixed isolated fresh profile launch or read-only probe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP ('d5-isolated-' + $env:GITHUB_RUN_ID + '-' + $env:GITHUB_RUN_ATTEMPT + '.json')
+          $status = 'BLOCKED'
+          $code = 'INVALID_EVENT'
+          $cdp = $false
+          $launched = $false
+          $profileSeparate = $false
+          $lockMarker = $false
+          $operation = 'UNKNOWN'
+          try {
+            if ($env:OS -cne 'Windows_NT' -or $env:GITHUB_ACTIONS -cne 'true' -or
+                $env:GITHUB_REPOSITORY -cne 'trung-via/ai-commerce') { throw 'INVALID_ENVIRONMENT' }
+            $evt = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($evt.action -cne 'opened' -or $evt.issue.user.login -cne 'trung-via' -or
+                $evt.sender.login -cne 'trung-via' -or
+                -not $evt.issue.title.StartsWith('[HOSTOPS D5 9444 TRIAL] ')) { throw 'INVALID_EVENT' }
+            $launchBody = '{"schema":"ai-commerce.d5.isolated9444.v1","operation":"START_FRESH_9444","parameters":{}}'
+            $probeBody = '{"schema":"ai-commerce.d5.isolated9444.v1","operation":"PROBE_FRESH_9444","parameters":{}}'
+            if ([string]$evt.issue.body -cne $launchBody -and [string]$evt.issue.body -cne $probeBody) {
+              throw 'INVALID_EVENT'
+            }
+            $operation = if ([string]$evt.issue.body -ceq $launchBody) { 'START_FRESH_9444' } else { 'PROBE_FRESH_9444' }
+            $sid = [Security.Principal.WindowsIdentity]::GetCurrent()
+            $admin = [Security.Principal.WindowsPrincipal]::new($sid)
+            if ([Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
+                $admin.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+              throw 'NON_INTERACTIVE_OR_ELEVATED'
+            }
+            $root = $env:GITHUB_WORKSPACE
+            $head = (& git -C $root rev-parse HEAD 2>$null | Out-String).Trim()
+            $remote = (& git -C $root remote get-url origin 2>$null | Out-String).Trim()
+            $dirty = @(& git -C $root status --porcelain=v1 --untracked-files=no 2>$null)
+            if ($head -cne $env:GITHUB_SHA -or $dirty.Count -ne 0 -or
+                $remote -cnotin @('https://github.com/trung-via/ai-commerce.git',
+                  'https://github.com/trung-via/ai-commerce',
+                  'git@github.com:trung-via/ai-commerce.git')) { throw 'SOURCE_DRIFT' }
+            if (-not $env:LOCALAPPDATA) { throw 'NO_PRIVATE_ROOT' }
+            $private = Join-Path $env:LOCALAPPDATA 'AI-Commerce'
+            $trial = Join-Path $private 'D5-Isolated-9444-Trial'
+            $cfg = Join-Path $trial 'config.json'
+            $data = Join-Path $trial 'UserData'
+            $profile = Join-Path $data 'Default'
+            if ($operation -ceq 'START_FRESH_9444') {
+              # Never overwrite/reuse an existing trial, private profile or config.
+              if (Test-Path -LiteralPath $trial) { throw 'TRIAL_ALREADY_EXISTS_HOLD' }
+              # A temporary exclusive bind proves 9444 is currently available.
+              $listener = $null
+              try {
+                $listener = [Net.Sockets.TcpListener]::new(
+                  [Net.IPAddress]::Parse('127.0.0.1'), 9444)
+                $listener.Server.ExclusiveAddressUse = $true
+                $listener.Start(1)
+              } catch { throw 'PORT_9444_UNAVAILABLE' }
+              finally { if ($null -ne $listener) { try { $listener.Stop() } catch {} } }
+              # Read exactly one previously verified private D5 config to reuse
+              # only the Google-signed Chrome executable and trusted owner ACL.
+              $known = @(
+                (Join-Path $private 'Chrome-Acquisition\config.json'),
+                (Join-Path $private 'chrome.json'),
+                (Join-Path $private 'chrome-acquisition.json')
+              )
+              $found = @($known | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+              if ($found.Count -ne 1) { throw 'SOURCE_CONFIG_AMBIGUOUS' }
+              $original = [string]$found[0]
+              $originalValue = Get-Content -LiteralPath $original -Raw -Encoding UTF8 | ConvertFrom-Json
+              if ($originalValue.version -ne 1 -or
+                  -not [IO.Path]::IsPathRooted([string]$originalValue.executable) -or
+                  -not [IO.Path]::IsPathRooted([string]$originalValue.user_data_dir) -or
+                  [string]$originalValue.profile_directory -ceq '') {
+                throw 'SOURCE_CONFIG_INVALID'
+              }
+              $originalProfile = Join-Path ([string]$originalValue.user_data_dir) ([string]$originalValue.profile_directory)
+              $dirAcl = Get-Acl -LiteralPath $originalProfile -ErrorAction Stop
+              $configAcl = Get-Acl -LiteralPath $original -ErrorAction Stop
+              [void][IO.Directory]::CreateDirectory($trial)
+              Set-Acl -LiteralPath $trial -AclObject $dirAcl -ErrorAction Stop
+              [void][IO.Directory]::CreateDirectory($data)
+              Set-Acl -LiteralPath $data -AclObject $dirAcl -ErrorAction Stop
+              [void][IO.Directory]::CreateDirectory($profile)
+              Set-Acl -LiteralPath $profile -AclObject $dirAcl -ErrorAction Stop
+              $privateConfig = [ordered]@{
+                version = 1
+                executable = [string]$originalValue.executable
+                user_data_dir = [string]$data
+                profile_directory = 'Default'
+                cdp_endpoint = 'http://127.0.0.1:9444'
+                allow_launch = $true
+                exclusive_user_data = $true
+              }
+              $bytes = [Text.Encoding]::UTF8.GetBytes(
+                (ConvertTo-Json -InputObject $privateConfig -Compress))
+              $stream = [IO.File]::Open($cfg,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+              try { $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true) }
+              finally { $stream.Dispose() }
+              Set-Acl -LiteralPath $cfg -AclObject $configAcl -ErrorAction Stop
+            }
+            if (-not (Test-Path -LiteralPath $cfg -PathType Leaf) -or
+                -not (Test-Path -LiteralPath $profile -PathType Container)) {
+              throw 'TRIAL_NOT_PREPARED'
+            }
+            $profileSeparate = $true
+            $python = Join-Path $root '.venv\Scripts\python.exe'
+            if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+              $cmd = Get-Command python.exe -ErrorAction SilentlyContinue
+              if ($null -eq $cmd) { throw 'PYTHON_UNAVAILABLE' }
+              $python = $cmd.Source
+            }
+            $oldPythonPath = $env:PYTHONPATH
+            try {
+              $env:PYTHONPATH = Join-Path $root 'src'
+              if ($operation -ceq 'START_FRESH_9444') {
+                $native = @(& $python -m ai_commerce.remote.chrome_acquisition launch --config $cfg --checkout $root --opt-in 2>&1 | ForEach-Object { [string]$_ })
+              } else {
+                $native = @(& $python -m ai_commerce.remote.chrome_acquisition probe --config $cfg --checkout $root 2>&1 | ForEach-Object { [string]$_ })
+              }
+              $exit = $LASTEXITCODE
+            } finally { $env:PYTHONPATH = $oldPythonPath }
+            if ($exit -eq 0 -and $native.Count -eq 1) {
+              $record = $native[0] | ConvertFrom-Json
+              if ($record.status -ceq 'READY_ATTACH' -and $record.cdp_verified -eq $true) {
+                $status = 'OBSERVED'; $code = 'CDP_9444_READY'
+                $cdp = $true
+                $launched = [bool]$record.launched
+              } elseif ($operation -ceq 'PROBE_FRESH_9444' -and
+                        $record.status -ceq 'NOT_RUNNING' -and $record.cdp_verified -eq $false) {
+                $status = 'OBSERVED'; $code = 'CDP_9444_NOT_RUNNING'
+              } else { $code = 'NATIVE_RESULT_UNVERIFIED' }
+            } else {
+              $matched = @($native | Where-Object {
+                $_ -cmatch '^CHROME_ACQUISITION_BLOCKED: [A-Z0-9_]{1,70}$'
+              })
+              if ($matched.Count -eq 1 -and $matched[0] -cmatch '^CHROME_ACQUISITION_BLOCKED: ([A-Z0-9_]{1,70})$') {
+                $code = [string]$Matches[1]
+              } else { $code = 'NATIVE_RESULT_UNVERIFIED' }
+            }
+            foreach ($name in @('SingletonLock','SingletonCookie','SingletonSocket','lockfile')) {
+              if (Test-Path -LiteralPath (Join-Path $data $name)) { $lockMarker = $true }
+            }
+          } catch {
+            $rawCode = [string]$_.Exception.Message
+            $allowed = @('INVALID_EVENT','INVALID_ENVIRONMENT','NON_INTERACTIVE_OR_ELEVATED',
+              'SOURCE_DRIFT','NO_PRIVATE_ROOT','TRIAL_ALREADY_EXISTS_HOLD','PORT_9444_UNAVAILABLE',
+              'SOURCE_CONFIG_AMBIGUOUS','SOURCE_CONFIG_INVALID','TRIAL_NOT_PREPARED','PYTHON_UNAVAILABLE')
+            $code = if ($allowed -ccontains $rawCode) { $rawCode } else { 'PRECHECK_UNKNOWN' }
+          }
+          $result = [ordered]@{
+            status = $status
+            code = $code
+            operation = $operation
+            source_sha = $env:GITHUB_SHA
+            cdp_port = 9444
+            cdp_verified = $cdp
+            launched = $launched
+            profile_separate = $profileSeparate
+            lock_marker_present = $lockMarker
+            wake_sent = $false
+          }
+          try {
+            $bytes = [Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $result -Compress))
+            $stream = [IO.File]::Open($out,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+            try { $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true) }
+            finally { $stream.Dispose() }
+          } catch { Write-Output 'D5_9444_TRIAL_RECEIPT_UNAVAILABLE'; exit 2 }
+          Write-Output ('D5_9444_TRIAL_STATUS=' + $status)
+      - name: Publish only fixed diagnostic fields
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs'), path = require('path');
+            const file = path.join(process.env.RUNNER_TEMP,
+              'd5-isolated-' + process.env.GITHUB_RUN_ID + '-' +
+              process.env.GITHUB_RUN_ATTEMPT + '.json');
+            let result = {status:'BLOCKED',code:'RECEIPT_UNAVAILABLE',operation:'UNKNOWN',
+              source_sha:context.sha,cdp_port:9444,cdp_verified:false,launched:false,
+              profile_separate:false,lock_marker_present:false,wake_sent:false};
+            try {
+              if (fs.statSync(file).size > 1536) throw Error();
+              const r = JSON.parse(fs.readFileSync(file,'utf8'));
+              const names = ['status','code','operation','source_sha','cdp_port',
+                'cdp_verified','launched','profile_separate','lock_marker_present','wake_sent'];
+              const codes = ['CDP_9444_READY','CDP_9444_NOT_RUNNING','PROFILE_ALREADY_ACTIVE_NO_CDP',
+                'PROFILE_LOCKED','BROWSER_OWNERSHIP_UNPROVEN','CDP_NOT_LOOPBACK_OWNED',
+                'OPERATOR_OWNERSHIP_UNPROVEN','CHROME_EXECUTABLE_UNTRUSTED',
+                'LAUNCH_NOT_AUTHORIZED','LAUNCH_UNPROVEN','LAUNCH_OWNER_MISMATCH',
+                'CDP_PROTOCOL_UNAVAILABLE','CONFIG_INVALID','CONFIG_PATH_INVALID',
+                'CHROME_PATH_INVALID','PROFILE_NOT_DEDICATED','PROFILE_UNAVAILABLE',
+                'WINDOWS_PROBE_UNAVAILABLE','WINDOWS_PROBE_INVALID',
+                'INVALID_EVENT','INVALID_ENVIRONMENT','NON_INTERACTIVE_OR_ELEVATED',
+                'SOURCE_DRIFT','NO_PRIVATE_ROOT','TRIAL_ALREADY_EXISTS_HOLD',
+                'PORT_9444_UNAVAILABLE','SOURCE_CONFIG_AMBIGUOUS','SOURCE_CONFIG_INVALID',
+                'TRIAL_NOT_PREPARED','PYTHON_UNAVAILABLE','PRECHECK_UNKNOWN',
+                'NATIVE_RESULT_UNVERIFIED'];
+              const ops = ['START_FRESH_9444','PROBE_FRESH_9444','UNKNOWN'];
+              if (!r || Array.isArray(r) ||
+                  Object.keys(r).sort().join() !== names.sort().join() ||
+                  !['OBSERVED','BLOCKED'].includes(r.status) ||
+                  !codes.includes(r.code) || !ops.includes(r.operation) ||
+                  r.source_sha !== context.sha || r.cdp_port !== 9444 ||
+                  ['cdp_verified','launched','profile_separate','lock_marker_present','wake_sent']
+                    .some(k => typeof r[k] !== 'boolean') || r.wake_sent !== false ||
+                  (r.status === 'OBSERVED' &&
+                    (r.code !== 'CDP_9444_READY' && r.code !== 'CDP_9444_NOT_RUNNING' ||
+                    !r.profile_separate || r.operation === 'UNKNOWN' ||
+                    (r.code === 'CDP_9444_READY' && !r.cdp_verified) ||
+                    (r.code === 'CDP_9444_NOT_RUNNING' &&
+                     (r.cdp_verified || r.launched))))) throw Error();
+              result = r;
+            } catch (_) {}
+            await github.rest.issues.createComment({...context.repo,
+              issue_number:context.issue.number,
+              body:'AI_COMMERCE_D5_ISOLATED_9444_V1\n' + JSON.stringify(result)});
