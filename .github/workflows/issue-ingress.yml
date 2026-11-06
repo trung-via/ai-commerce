@@ -345,7 +345,11 @@ jobs:
                 $evt.issue.user.login -cne 'trung-via' -or
                 $evt.sender.login -cne 'trung-via' -or
                 -not $evt.issue.title.StartsWith('[HOSTOPS D5 BOOT] ') -or
-                [string]$evt.issue.body -cne '{"schema":"ai-commerce.d5.personal.v1","operation":"START_CDP_9333","parameters":{}}') { throw 'BAD_ISSUE' }
+                [string]$evt.issue.body -cnotin @(
+                  '{"schema":"ai-commerce.d5.personal.v1","operation":"START_CDP_9333","parameters":{}}',
+                  '{"schema":"ai-commerce.d5.personal.v1","operation":"PROBE_CDP_9333","parameters":{}}')) { throw 'BAD_ISSUE' }
+            $probeOnly = ([string]$evt.issue.body -ceq
+              '{"schema":"ai-commerce.d5.personal.v1","operation":"PROBE_CDP_9333","parameters":{}}')
             if ([Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) { throw 'NO_INTERACTIVE_SESSION' }
             $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
             $principal = [Security.Principal.WindowsPrincipal]::new($identity)
@@ -383,7 +387,12 @@ jobs:
               # The source-owned acquisition independently verifies the signed
               # Google Chrome executable, dedicated profile, exact loopback,
               # input desktop, ownership and zero conflicting root processes.
-              $native = @(& $py -m ai_commerce.remote.chrome_acquisition launch --config $config --checkout $root --opt-in 2>&1 | ForEach-Object { [string]$_ })
+              if ($probeOnly) {
+                # Read-only probe: even stale profile locks are never removed.
+                $native = @(& $py -m ai_commerce.remote.chrome_acquisition probe --config $config --checkout $root 2>&1 | ForEach-Object { [string]$_ })
+              } else {
+                $native = @(& $py -m ai_commerce.remote.chrome_acquisition launch --config $config --checkout $root --opt-in 2>&1 | ForEach-Object { [string]$_ })
+              }
               $exit = $LASTEXITCODE
             } finally {
               $env:PYTHONPATH = $oldPython
@@ -394,6 +403,9 @@ jobs:
                   $record.launched -is [bool]) {
                 $status = 'OBSERVED'; $code = 'CDP_9333_READY'
                 $verified = $true; $launched = [bool]$record.launched
+              } elseif ($probeOnly -and $record.status -ceq 'NOT_RUNNING' -and
+                        $record.cdp_verified -eq $false -and $record.launched -eq $false) {
+                $status = 'OBSERVED'; $code = 'CDP_9333_NOT_RUNNING'
               } else { $code = 'RESULT_UNVERIFIED' }
             } else {
               # Never publish local paths, profile contents, argv or stderr.
@@ -443,7 +455,9 @@ jobs:
                   typeof parsed.cdp_verified !== 'boolean' ||
                   typeof parsed.launched !== 'boolean' || parsed.wake_sent !== false ||
                   (parsed.status === 'OBSERVED' &&
-                   (parsed.code !== 'CDP_9333_READY' || !parsed.cdp_verified))) throw Error();
+                   !((parsed.code === 'CDP_9333_READY' && parsed.cdp_verified) ||
+                     (parsed.code === 'CDP_9333_NOT_RUNNING' &&
+                      parsed.cdp_verified === false && parsed.launched === false)))) throw Error();
               result = parsed;
             } catch (_) {}
             await github.rest.issues.createComment({...context.repo,
