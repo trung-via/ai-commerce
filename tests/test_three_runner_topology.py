@@ -11,7 +11,8 @@ import subprocess
 
 from ai_commerce.engineering.three_runner_topology import (
     EXISTING_RUNNER, NEW_RUNNERS, hostops_route_activation_allowed,
-    planned_topology, resource_policy,
+    planned_topology, resource_policy, assess_wakehub_preflight,
+    WakeHubPreflight,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -133,3 +134,113 @@ def test_windows_powershell_parser_accepts_installer():
         capture_output=True, text=True, timeout=30, check=False
     )
     assert result.returncode == 0, result.stderr + result.stdout
+
+
+
+def _wakehub(**overrides):
+    # Only synthetic read-only receipt flags; no actual Windows operation.
+    data = dict(
+        hostops_task="READY", hostops_listener="PRESENT",
+        engineering_listeners=("PRESENT", "PRESENT"),
+        interactive_session_proven=True,
+        chrome_ownership="OWNED_CDP_9444",
+        source_current=True, unknown_effect=False,
+    )
+    data.update(overrides)
+    return assess_wakehub_preflight(**data)
+
+
+def test_wakehub_preflight_reuses_verified_9444_and_all_three_listeners():
+    result = _wakehub()
+    assert isinstance(result, WakeHubPreflight)
+    assert result.code == "READY_FOR_ORIGIN_PREPARE"
+    assert result.next_action == "REUSE_9444_WITHOUT_RELAUNCH"
+    assert result.cdp_port == 9444
+    assert result.listener_count == 3
+    assert result.ready_for_origin_prepare
+    assert not result.start_permitted
+    assert not result.wake_send_authorized
+    assert not result.effect_attempted
+    # The scheduled task can be READY while its separate runner listener
+    # is PRESENT. This must never be classified as "offline".
+    assert _wakehub(hostops_task="RUNNING") == result
+
+
+def test_wakehub_preflight_avoids_all_runner_offline_deadlock():
+    result = _wakehub(hostops_listener="ABSENT",
+                      engineering_listeners=("PRESENT", "PRESENT"))
+    assert result.code == "HOLD_EVENT_RECEIVER_UNAVAILABLE"
+    assert result.next_action == "RESTORE_RECEIVER_WITH_SEPARATE_NATIVE_AUTHORITY"
+    assert result.listener_count == 2
+    assert not result.ready_for_origin_prepare
+    assert not result.start_permitted
+    assert _wakehub(hostops_listener="UNAVAILABLE").code == result.code
+
+
+def test_wakehub_preflight_no_browser_mutation_when_logged_off_or_unverified():
+    no_session = _wakehub(interactive_session_proven=False)
+    assert no_session.code == "WAIT_INTERACTIVE_SESSION"
+    assert no_session.next_action == "WAIT_FOR_OWNER_LOGON_NO_BROWSER_ACTION"
+    absent = _wakehub(chrome_ownership="ABSENT_INDEPENDENTLY_VERIFIED")
+    assert absent.code == "WAIT_PRIVATE_CHROME_START_GRANT"
+    assert absent.next_action == "REQUEST_BOUNDED_START_AUTHORITY"
+    assert not absent.start_permitted
+    for state in ("UNVERIFIED", "PROFILE_CONFLICT"):
+        r = _wakehub(chrome_ownership=state)
+        assert r.code == "HOLD_CHROME_OWNERSHIP"
+        assert r.next_action == "VERIFY_EXACT_OWNER_AND_PROFILE"
+        assert not r.ready_for_origin_prepare
+        assert not r.effect_attempted
+
+
+def test_wakehub_preflight_requires_fresh_source_and_unknown_reconciliation():
+    assert _wakehub(source_current=False).code == "HOLD_SOURCE_DRIFT"
+    ambiguous = _wakehub(
+        unknown_effect=True, source_current=False, hostops_listener="ABSENT",
+        chrome_ownership="PROFILE_CONFLICT")
+    assert ambiguous.code == "HOLD_UNKNOWN_EFFECT"
+    assert ambiguous.next_action == "RECONCILE_ONLY"
+    assert not ambiguous.wake_send_authorized
+
+
+def test_wakehub_preflight_reports_engineering_listener_degraded_without_killing_core():
+    result = _wakehub(engineering_listeners=("ABSENT", "UNAVAILABLE"))
+    assert result.code == "READY_DEGRADED_ENGINEERING"
+    assert result.listener_count == 1
+    assert result.ready_for_origin_prepare
+    assert result.next_action == "REUSE_9444_AND_REPORT_ENGINEERING_LISTENERS"
+    assert not result.effect_attempted
+
+
+def test_wakehub_preflight_closed_input_rejects_untrusted_runner_or_browser_fields():
+    invalid = [
+        {"hostops_task": "NOT_A_TASK_STATE"},
+        {"hostops_listener": "RUNNING"},
+        {"engineering_listeners": ["PRESENT", "PRESENT"]},
+        {"engineering_listeners": ("PRESENT", "PRESENT", "PRESENT")},
+        {"engineering_listeners": ("PRESENT", "PRIVILEGED")},
+        {"interactive_session_proven": 1},
+        {"chrome_ownership": "ANY_BROWSER"},
+        {"chrome_ownership": "OWNED_CDP_9222"},
+        {"source_current": 1},
+        {"unknown_effect": "False"},
+    ]
+    for item in invalid:
+        try:
+            _wakehub(**item)
+        except ValueError as exc:
+            assert str(exc) == "WAKEHUB_PREFLIGHT_INPUT_INVALID"
+        else:
+            raise AssertionError("untrusted WH-01A preflight value was accepted")
+
+
+def test_wakehub_preflight_is_pure_and_repeats_without_starting_anything():
+    first = _wakehub()
+    assert _wakehub() == first
+    import inspect
+    source = inspect.getsource(assess_wakehub_preflight)
+    for forbidden in ("Start-Process", "Stop-Process", "subprocess",
+                      "os.system", "requests.", "playwright.",
+                      "open(", "browser.click(", "Send"):
+        assert forbidden not in source
+    assert first.effect_attempted is False
