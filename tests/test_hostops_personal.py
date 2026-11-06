@@ -1067,6 +1067,15 @@ const script = fs.readFileSync(process.argv[2],'utf8');
         assert "persist-credentials: false" in job
         assert 'endpoint="http://127.0.0.1:9444", port=9444' in job
         assert "_probe_cdp(SimpleNamespace" in job
+        assert "$script = @(" in job
+        assert "$script = @'" not in job
+        # Critical YAML regression: no unindented Python heredoc may escape the
+        # PowerShell run: | block and disable the whole protected issue router.
+        for line in workflow.splitlines():
+            assert not line.startswith((
+                "from types import", "from ai_commerce.", "except AcquisitionBlocked:",
+                "try:", "'@",
+            )), line
         assert "CDP_PROTOCOL_VERIFIED" in job
         assert "CDP_PROTOCOL_UNAVAILABLE" in job
         assert "AI_COMMERCE_D5_9444_HTTP_PROTOCOL_V1" in job
