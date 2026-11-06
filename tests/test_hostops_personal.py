@@ -948,5 +948,39 @@ const script = fs.readFileSync(process.argv[2],'utf8');
         assert "Invoke-Expression" not in d5 and "iex " not in d5
         assert "permissions:\n      contents: read\n      issues: write" in d5
 
+    def test_personal_d5_bootstrap_is_single_fixed_owner_only_chrome_operation(self):
+        """Personal fallback remains Chrome-only, with no signed-bridge bypass for other operations."""
+        workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+        assert workflow.count("  hostops-d5-personal-bootstrap:") == 1
+        boot = workflow.split("  hostops-d5-personal-bootstrap:", 1)[1]
+        assert "github.repository == 'trung-via/ai-commerce'" in boot
+        assert "github.actor == github.repository_owner" in boot
+        assert "github.event_name == 'issues' && github.event.action == 'opened'" in boot
+        assert "github.event.issue.user.login == github.repository_owner" in boot
+        assert "startsWith(github.event.issue.title, '[HOSTOPS D5 BOOT] ')" in boot
+        assert '{"schema":"ai-commerce.d5.personal.v1","operation":"START_CDP_9333","parameters":{}}' in boot
+        assert "runs-on: [self-hosted, Windows, ai-commerce-hostops]" in boot
+        assert "persist-credentials: false" in boot
+        assert "github.rest.issues.createComment" in boot
+        assert "AI_COMMERCE_D5_PERSONAL_BOOT_RESULT_V1" in boot
+        assert "source_sha:context.sha" in boot
+        assert "cdp_verified=$verified" in boot
+        assert "wake_sent=$false" in boot and "wake_sent !== false" in boot
+        assert "CHROME_ACQUISITION_BLOCKED" in boot
+        assert "ai_commerce.remote.chrome_acquisition launch --config" in boot
+        assert "--checkout $root --opt-in" in boot
+        assert "C:\TOOL\ai-commerce" in boot
+        assert "CONFIG_AMBIGUOUS_OR_ABSENT" in boot
+        assert "SOURCE_DRIFT" in boot and "NO_INTERACTIVE_SESSION" in boot
+        assert "Get-NetTCPConnection" not in boot  # delegated to source-owned native guard
+        assert "Invoke-Expression" not in boot and "Start-Process" not in boot
+        assert "Remove-Item" not in boot and "Stop-Process" not in boot
+        assert "wake-readiness" not in boot and "SEND_WAKE" not in boot
+        assert "Register-ScheduledTask" not in boot
+        assert "contents: read" in boot and "issues: write" in boot
+        assert "python -m pip install" not in boot and "curl " not in boot
+
+
+
 if __name__ == "__main__":
     unittest.main()
