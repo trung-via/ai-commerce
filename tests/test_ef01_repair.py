@@ -88,6 +88,10 @@ def fixture(tmp_path, monkeypatch):
     baseline = _files(repo)
     state = {"scope": ["impl.py", "kept.txt"]}
     monkeypatch.setattr(runner, "_snapshot", lambda r, _scope, _d: _snapshot_fake(r, baseline, state))
+    # This fixture deliberately models Git; real linked-worktree coverage lives
+    # in test_ef01.py and uses the unpatched host preflight.
+    monkeypatch.setattr(runner, "_agy_source_binding", lambda r, s, *a: {
+        "source_root": str(r), "source_sha": s["git_head_after"], "git_dir": s["git_dir"]})
     return SimpleNamespace(repo=repo, root=tmp_path, state=state, monkeypatch=monkeypatch)
 
 
@@ -564,6 +568,8 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
         monkeypatch.setattr(remote, "check_source", lambda *_a: None)
         monkeypatch.setattr(remote, "_snapshot", observed_snapshot)
         monkeypatch.setattr(runner, "_snapshot", observed_snapshot)
+        monkeypatch.setattr(runner, "_agy_source_binding", lambda r, s, *a: {
+            "source_root": str(r), "source_sha": s["git_head_after"], "git_dir": s["git_dir"]})
         # Fake worktree add copies fixture files without creating a .git worktree.
         # Stub only the new checkout preflight here, not in real_git tests.
         monkeypatch.setattr(remote, "checkout_diagnostics", lambda *_a, **_kw: {
@@ -953,12 +959,16 @@ def test_antigravity_argv_budget_records_complete_original_prompt(fixture):
     from ai_commerce.engineering.adapters import command_for
     fixture.monkeypatch.setattr(runner, "command_for", command_for)
     commands = []
+    mirrors = []
     original_prompt = 'approved instructions "quoted" \\ ' * 3000 + "\U0001f680" * 500
 
     def execute(argv, **kwargs):
         if argv == VERIFY:
             return subprocess.CompletedProcess(argv, 0, "1 passed", "")
         commands.append(argv)
+        mirror = Path(argv[argv.index("--add-dir", argv.index("--add-dir") + 1) + 1])
+        assert (mirror / "instruction.txt").read_text(encoding="utf-8") == original_prompt
+        mirrors.append(mirror)
         (fixture.repo / "impl.py").write_text("good")
         return subprocess.CompletedProcess(argv, 0, '{"status":"SUCCESS"}', "")
 
@@ -979,11 +989,62 @@ def test_antigravity_argv_budget_records_complete_original_prompt(fixture):
     transport = evidence / inv["evidence_files"]["transport_instruction"]
     assert transport.read_text(encoding="utf-8") == commands[0][commands[0].index("--print") + 1]
     # AGY receives only the disposable input mirror, not the authoritative log root.
-    mirror = evidence / "invocations" / "000" / "agy_input" / "instruction.txt"
-    assert mirror.read_bytes() == original.read_bytes()
-    assert str(mirror) in transport.read_text(encoding="utf-8")
+    mirror = mirrors[0]
+    assert not mirror.exists()
+    assert json.dumps(str(mirror / "instruction.txt"), ensure_ascii=False) in transport.read_text(encoding="utf-8")
     assert str(original) not in transport.read_text(encoding="utf-8")
+    wire = transport.read_text(encoding="utf-8")
+    assert "CODE WRITE ROOT" in wire and "READ ONLY INPUT" in wire
+    assert json.dumps(str(fixture.repo), ensure_ascii=False) in wire
+    assert hashlib.sha256(original_prompt.encode()).hexdigest() in wire
     assert inv["evidence_sha256"]["instruction"] == hashlib.sha256(original_prompt.encode()).hexdigest()
+
+
+def test_agy_every_repair_round_cleans_its_own_mirror(fixture):
+    result, calls, profiles = _run(fixture, executor="antigravity", max_repair_rounds=2)
+    assert result["status"] == "BUILD_VERIFIED_FOR_SCOPE" and len(calls) == 2
+    mirrors = [p[2]["antigravity_evidence_dir"] for p in profiles if p[2].get("antigravity_evidence_dir")]
+    assert len(mirrors) == len(set(mirrors)) == 2
+    assert all(not p.exists() for p in mirrors)
+    assert all(not (p / ".git").exists() for root in mirrors for p in root.parents)
+    assert (fixture.root / "evidence/invocations/001/repair_feedback.json").is_file()
+
+
+@pytest.mark.parametrize("fault", ["timeout", "error", "interruption", "mutated-input"])
+def test_agy_mirror_cleanup_after_failed_provider(fixture, fault):
+    from ai_commerce.engineering.adapters import command_for
+    fixture.monkeypatch.setattr(runner, "command_for", command_for)
+    mirrors = []
+    actual_run = subprocess.run
+    def execute(argv, **kwargs):
+        if argv[0] != "agy":
+            return actual_run(argv, **kwargs)
+        mirrors.append(Path(argv[argv.index("--add-dir", argv.index("--add-dir") + 1) + 1]))
+        assert (mirrors[-1] / "instruction.txt").is_file()
+        if fault == "timeout":
+            raise subprocess.TimeoutExpired(argv, 1, output=b'{"status":"STARTED"}')
+        if fault == "error":
+            raise RuntimeError("fixture provider failed")
+        if fault == "interruption":
+            raise KeyboardInterrupt()
+        (mirrors[-1] / "instruction.txt").write_text("untrusted replacement")
+        (fixture.repo / "impl.py").write_text("good")
+        return subprocess.CompletedProcess(argv, 0, '{"status":"SUCCESS"}', "")
+    fixture.monkeypatch.setattr(runner.subprocess, "run", execute)
+    args = dict(repo=fixture.repo, output_dir=fixture.root / "evidence", work_id="w", attempt_id="a",
+                selection=ExecutorSelection("antigravity", "fixture", "high"), instruction="scoped change",
+                verify_argv=VERIFY, allowed_prefixes=fixture.state["scope"])
+    if fault == "interruption":
+        with pytest.raises(KeyboardInterrupt):
+            runner.execute_attempt(**args)
+        result = json.loads((fixture.root / "evidence/engineering_result.json").read_text())
+    else:
+        result = runner.execute_attempt(**args)
+    assert len(mirrors) == 1 and not mirrors[0].exists()
+    assert result["verify_exit_code"] is None and result["replay_authorized"] is False
+    assert result["status"] == ("SOURCE_DRIFT" if fault == "mutated-input" else "EXECUTION_UNKNOWN")
+    if fault == "mutated-input":
+        assert result["error_code"] == "AGY_READ_ONLY_INPUT_CHANGED"
 
 
 @pytest.mark.parametrize("pretty", [False, True])

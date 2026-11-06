@@ -5,13 +5,15 @@ Local CLI only. Not a remote wake, provider permission check, or AIOS lifecycle.
 from __future__ import annotations
 
 import hashlib
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import json
 import ntpath
 import os
 import posixpath
 import re
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from subprocess import list2cmdline
@@ -19,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
-from .adapters import command_for
+from .adapters import command_for, agy_directory, agy_data_directory, agy_input_files
 from .git_write_guard import GIT_GUARD_INSTRUCTION, git_write_guard_env
 from .profile import ExecutorSelection, diagnose_failure
 from .git import git_argv, resolve_git_executable
@@ -595,7 +597,14 @@ def _provider_problem(data: bytes) -> tuple[str, str] | None:
     if events is None:
         messages.append(data.decode("utf-8", "replace").lower())
     else:
+        # Normalize only trusted failed provider fields, never a serialized
+        # item/tool/command transcript or the raw JSONL stream.
+        quotes = str.maketrans({c: "'" for c in "\u2018\u2019\u201b\u02bc\uff07"})
+        def normalized(message: str) -> str:
+            return message.translate(quotes).lower()
         for event in events:
+            if str(event.get("type", "")).startswith("item."):
+                continue
             failed = (event.get("type") in ("turn.failed", "error", "warning") or
                       str(event.get("status", "")).lower() in ("error", "failed", "failure", "warning") or
                       bool(event.get("error")) or
@@ -605,13 +614,13 @@ def _provider_problem(data: bytes) -> tuple[str, str] | None:
             failed_events.append(event)
             error = event.get("error")
             if isinstance(error, str):
-                messages.append(error.lower())
+                messages.append(normalized(error))
             elif isinstance(error, dict):
-                messages.extend(error[key].lower() for key in ("message", "code", "type")
+                messages.extend(normalized(error[key]) for key in ("message", "code", "type")
                                 if isinstance(error.get(key), str))
             for key in ("message", "detail"):
                 if isinstance(event.get(key), str):
-                    messages.append(event[key].lower())
+                    messages.append(normalized(event[key]))
     for phrases, status in (
         (("model is at capacity", "no capacity available"), "MODEL_AT_CAPACITY"),
         (("resource_exhausted", "quota exceeded", "quota reached", "429 too many requests",
@@ -685,6 +694,74 @@ def _windows_command_units(command: Sequence[str]) -> int:
     return len(list2cmdline(command).encode("utf-16-le")) // 2 + 1
 
 
+@contextmanager
+def _agy_input_mirror(repo: Path, prompt: str, feedback: dict | None):
+    # Reject poisoned TEMP (including primary .local/ef02) before allocation.
+    parent = agy_data_directory(Path(tempfile.gettempdir()))
+    if parent == repo or repo in parent.parents:
+        raise ValueError("AGY_INPUT_SOURCE_OVERLAP")
+    directory = Path(tempfile.mkdtemp(prefix="agy_input-", dir=parent))
+    try:
+        agy_data_directory(directory)
+        _write(directory / "instruction.txt", prompt.encode("utf-8"))
+        if feedback is not None:
+            _write(directory / "repair_feedback.json", _json_bytes(feedback))
+        yield directory
+    finally:
+        # Delete only the exact allocated tree. rmtree unlinks child symlinks
+        # and Windows junctions without descending through their targets.
+        if directory.parent != parent or directory == parent:
+            raise ValueError("AGY_INPUT_CLEANUP_UNSAFE")
+        if agy_directory(parent) != parent:
+            raise ValueError("AGY_INPUT_CLEANUP_UNSAFE")
+        if is_link(directory):
+            if directory.is_symlink():
+                directory.unlink()
+            else:
+                directory.rmdir()  # Windows junction: remove the link only.
+            raise ValueError("AGY_INPUT_PATH_CHANGED")
+        if directory.exists():
+            if directory.resolve(strict=True) != directory:
+                raise ValueError("AGY_INPUT_CLEANUP_UNSAFE")
+            shutil.rmtree(directory)
+
+
+def _agy_source_binding(repo: Path, expected: dict, deadline: float,
+                        git_executable: str | None = None) -> dict:
+    """Host-observed exact source identity, independent of AGY's selected cwd."""
+    source = agy_directory(repo)
+    values = []
+    for option in ("--show-toplevel", "--absolute-git-dir", "HEAD"):
+        result = _git(source, "rev-parse", option, timeout_seconds=_remaining(deadline),
+                      git_executable=git_executable)
+        if result.returncode or not result.stdout.strip():
+            raise ValueError("AGY_SOURCE_IDENTITY_UNPROVEN")
+        values.append(result.stdout.strip())
+    top, git_dir, head = values
+    if (agy_directory(Path(top)) != source or
+            Path(git_dir).resolve(strict=True) != Path(expected["git_dir"]).resolve(strict=True) or
+            head != expected["git_head_after"]):
+        raise ValueError("AGY_SOURCE_IDENTITY_CHANGED")
+    return {"source_root": str(source), "source_sha": head, "git_dir": git_dir}
+
+
+def _agy_source_context(binding: dict, mirror: Path, instruction_sha: str,
+                        git_executable: str | None) -> str:
+    source = binding["source_root"]
+    probes = [list2cmdline([git_executable or "git", "-C", source, "rev-parse", option])
+              for option in ("--show-toplevel", "--absolute-git-dir")]
+    return (AGY_INPUT_CONTEXT + "\nCODE WRITE ROOT (unique, exact bound path): "
+            + json.dumps(source, ensure_ascii=False) + ".\nREAD ONLY INPUT (data only; never code or Git root): "
+            + json.dumps(str(mirror), ensure_ascii=False) + ".\n"
+            + "Source HEAD: " + binding["source_sha"] + "; absolute Git dir: "
+            + json.dumps(binding["git_dir"], ensure_ascii=False) + ".\n"
+            + "Full instruction SHA256: " + instruction_sha + ".\n"
+            + "Validate source identity using exactly " + " and ".join(probes)
+            + ". Compare to the bound root and Git dir above; stop on mismatch. "
+            + "Never use unqualified git rev-parse from an input directory. "
+            + "Make every code read/write target absolute under CODE WRITE ROOT.\n")
+
+
 def _pytest_failure(argv: Sequence[str], code: int | None, stdout: bytes, stderr: bytes) -> bool:
     # Pytest: 1 = test failure; 2/3/4/5 = interruption/internal/usage/no tests.
     # Arbitrary CLI nonzero exits never authorize another provider invocation.
@@ -700,6 +777,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
                     timeout_seconds: int, verify_timeout_seconds: int,
                     codex_bin: str, antigravity_bin: str,
                     codex_windows_sandbox: str | None,
+                    input_runtime: ExitStack,
                     git_executable: str | None = None, mt_context: dict | None = None,
                     pytest_profile: str = "windows-12", pytest_isolation_approved: bool = False,
                     pytest_known_flaky: bool = False, host_slots: int = 1,
@@ -723,15 +801,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     save("instruction", "instruction.txt", prompt.encode("utf-8"))
     if feedback is not None:
         save("repair_feedback", "repair_feedback.json", _json_bytes(feedback))
-    # Grant AGY only a disposable input mirror, never the authoritative logs,
-    # hashes, provider boundary, or feedback evidence owned by the runner.
     agy_input_dir = None
-    if selection.executor == "antigravity":
-        agy_input_dir = directory / "agy_input"
-        agy_input_dir.mkdir(parents=True, exist_ok=False)
-        _write(agy_input_dir / "instruction.txt", prompt.encode("utf-8"))
-        if feedback is not None:
-            _write(agy_input_dir / "repair_feedback.json", _json_bytes(feedback))
     before, _ = snapshot()
     inv["input_snapshot"] = before
     save("source_before", "source.before.json", _json_bytes(before))
@@ -741,7 +811,16 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         inv.update(status=status, error_code=error)
         return
     # Preserve the original instruction evidence; guard only the provider wire prompt.
-    context = AGY_INPUT_CONTEXT if selection.executor == "antigravity" else ""
+    context = ""
+    mirrored_files = None
+    if selection.executor == "antigravity":
+        binding = _agy_source_binding(repo, before, deadline, git_executable)
+        agy_input_dir = input_runtime.enter_context(_agy_input_mirror(repo, prompt, feedback))
+        mirrored_files = agy_input_files(repo, agy_input_dir)
+        context = _agy_source_context(binding, agy_input_dir, _sha(prompt.encode("utf-8")), git_executable)
+        save("agy_source_binding", "agy_source_binding.json", _json_bytes({
+            **binding, "input_mirror": str(agy_input_dir), "input_role": "READ_ONLY_INPUT",
+            "source_role": "CODE_WRITE_ROOT", "instruction_sha256": _sha(prompt.encode("utf-8"))}))
     guarded_prompt = GIT_GUARD_INSTRUCTION + "\n\n" + context + prompt
     command, stdin = command_for(selection, repo, guarded_prompt, codex_bin=codex_bin,
                                  antigravity_bin=antigravity_bin,
@@ -751,9 +830,9 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         # Preserve the complete original instruction/feedback on disk. Shorten only
         # the transported --print argument; never truncate recorded diagnostics.
         compact = (
-            GIT_GUARD_INSTRUCTION + " " + AGY_INPUT_CONTEXT +
+            GIT_GUARD_INSTRUCTION + " " + context +
             "Read and follow the complete authorized instruction file "
-            + str((agy_input_dir or directory) / "instruction.txt") + " (UTF-8; SHA256 "
+            + json.dumps(str(agy_input_dir / "instruction.txt"), ensure_ascii=False) + " (UTF-8; SHA256 "
             + _sha(prompt.encode("utf-8")) + "). "
             "Keep the same worktree, source HEAD, executor/model/effort and allowed scope. "
             "This file contains the full original request and any repair evidence references."
@@ -843,6 +922,13 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     # Even a provider failure gets a scoped snapshot and cumulative diff.
     save("tracked_diff", "git.tracked.diff.patch", diff)
     problem = _source_problem(after, initial, verify_first_scope=verify_first_scope)
+    if problem is None and agy_input_dir is not None:
+        try:
+            unchanged = agy_input_files(repo, agy_input_dir) == mirrored_files
+        except (OSError, ValueError):
+            unchanged = False
+        if not unchanged:
+            problem = ("SOURCE_DRIFT", "AGY_READ_ONLY_INPUT_CHANGED")
     if problem is None and inv["denied_actions"]:
         problem = ("EXECUTOR_PERMISSION_DENIED", "HEADLESS_TOOL_PERMISSION_DENIED")
     # Interrupted/abnormal exits are UNKNOWN effects even if a partial provider
@@ -1134,7 +1220,8 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
         if type(value) is not int or not 1 <= value <= MAX_TIMEOUT_SECONDS:
             raise ValueError(f"Timeouts must be integers from 1 to {MAX_TIMEOUT_SECONDS}")
     deadline = time.monotonic() + action_timeout_seconds
-    repo, output_dir = repo.resolve(), output_dir.resolve()
+    repo = agy_directory(repo) if selection.executor == "antigravity" else repo.resolve()
+    output_dir = output_dir.resolve()
     if not work_id.strip() or not attempt_id.strip():
         raise ValueError("work_id and attempt_id must be nonempty")
     if not instruction.strip() or not verify_argv or not all(isinstance(x, str) and x for x in verify_argv):
@@ -1239,16 +1326,17 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
             inv["instruction_sha256"] = _sha(prompt.encode("utf-8"))
             report["invocations"].append(inv)
             try:
-                _run_invocation(
-                    repo=repo, output_dir=output_dir, invocation=inv, initial=initial, expected=expected,
-                    selection=selection, prompt=prompt, feedback=feedback, verify_argv=verify_argv,
-                    allowed_prefixes=allowed_prefixes, deadline=deadline, timeout_seconds=timeout_seconds,
-                    verify_timeout_seconds=verify_timeout_seconds, codex_bin=codex_bin,
-                    antigravity_bin=antigravity_bin, codex_windows_sandbox=codex_windows_sandbox,
-                    git_executable=git_executable, mt_context=mt_context,
-                    pytest_profile=pytest_profile, pytest_isolation_approved=pytest_isolation_approved,
-                    pytest_known_flaky=pytest_known_flaky, host_slots=host_slots,
-                    verify_first_scope=verify_first_scope)
+                with ExitStack() as input_runtime:
+                    _run_invocation(
+                        repo=repo, output_dir=output_dir, invocation=inv, initial=initial, expected=expected,
+                        selection=selection, prompt=prompt, feedback=feedback, verify_argv=verify_argv,
+                        allowed_prefixes=allowed_prefixes, deadline=deadline, timeout_seconds=timeout_seconds,
+                        verify_timeout_seconds=verify_timeout_seconds, codex_bin=codex_bin,
+                        antigravity_bin=antigravity_bin, codex_windows_sandbox=codex_windows_sandbox,
+                        git_executable=git_executable, mt_context=mt_context,
+                        pytest_profile=pytest_profile, pytest_isolation_approved=pytest_isolation_approved,
+                        pytest_known_flaky=pytest_known_flaky, host_slots=host_slots,
+                        verify_first_scope=verify_first_scope, input_runtime=input_runtime)
             except Exception as exc:
                 inv.update(status="EXECUTION_UNKNOWN",
                            error_code="ACTION_TIMEOUT" if isinstance(exc, TimeoutError) else "RUNNER_ERROR",
