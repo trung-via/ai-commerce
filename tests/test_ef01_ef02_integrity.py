@@ -11,7 +11,7 @@ import pytest
 
 from ai_commerce.engineering import runner
 from ai_commerce.engineering.profile import ExecutorSelection
-from ai_commerce.remote.transport import CandidateIntegrityError, GitHubTransport
+from ai_commerce.remote.transport import CandidateIntegrityError, GitHubTransport, RemoteTransportError
 
 
 def _repo(tmp_path: Path) -> Path:
@@ -55,6 +55,7 @@ class RecordingTransport(GitHubTransport):
         self.calls = []
         self.tree_items = None
         self.commit_data = None
+        self.refs = {}
 
     def api(self, method, path, data=None):
         self.calls.append((method, path))
@@ -69,7 +70,23 @@ class RecordingTransport(GitHubTransport):
             self.commit_data = data
             return {"sha": "d" * 40}
         if method == "POST" and path == "/git/refs":
-            return {}
+            if not isinstance(data, dict) or "ref" not in data or "sha" not in data:
+                raise RemoteTransportError("GITHUB_HTTP_422", http_status=422,
+                                           github_codes=("missing_field",))
+            ref = data["ref"]
+            sha = data["sha"]
+            if ref in self.refs:
+                raise RemoteTransportError("GITHUB_HTTP_422", http_status=422,
+                                           github_codes=("already_exists",),
+                                           validation_fields=("ref",))
+            self.refs[ref] = sha
+            return {"ref": ref, "object": {"sha": sha, "type": "commit"}}
+        if method == "GET" and path.startswith("/git/ref/"):
+            ref_subpath = path.removeprefix("/git/ref/")
+            full_ref = ref_subpath if ref_subpath.startswith("refs/") else "refs/" + ref_subpath
+            if full_ref not in self.refs:
+                raise RemoteTransportError("GITHUB_HTTP_404", http_status=404)
+            return {"ref": full_ref, "object": {"sha": self.refs[full_ref], "type": "commit"}}
         raise AssertionError("unexpected GitHub API " + path)
 
 
@@ -123,6 +140,37 @@ def test_candidate_rename_deletes_original_and_adds_destination(tmp_path):
     assert set(tree) == {"old.txt", "new.txt"}
     assert tree["old.txt"]["sha"] is None
     assert tree["new.txt"]["sha"] == "b" * 40
+    assert result["candidate_ref"] in t.refs
+    assert t.refs[result["candidate_ref"]] == "d" * 40
+    candidate_get_path = "/git/ref/" + result["candidate_ref"].removeprefix("refs/")
+    assert t.calls[-2] == ("POST", "/git/refs")
+    assert t.calls[-1] == ("GET", candidate_get_path)
+
+
+def test_recording_transport_stateful_ref_storage_and_collision():
+    t = RecordingTransport()
+    ref = "refs/heads/feature/branch"
+    sha = "1" * 40
+
+    # Unrecorded ref lookup fails closed with 404
+    with pytest.raises(RemoteTransportError) as get_err:
+        t.api("GET", "/git/ref/heads/feature/branch")
+    assert get_err.value.http_status == 404
+
+    # Successful POST records the ref and returns GitHub-shaped payload
+    post_res = t.api("POST", "/git/refs", {"ref": ref, "sha": sha})
+    assert post_res == {"ref": ref, "object": {"sha": sha, "type": "commit"}}
+    assert t.refs[ref] == sha
+
+    # Subsequent GET returns the recorded ref and sha
+    get_res = t.api("GET", "/git/ref/heads/feature/branch")
+    assert get_res == {"ref": ref, "object": {"sha": sha, "type": "commit"}}
+
+    # Duplicate POST collision is rejected with 422
+    with pytest.raises(RemoteTransportError) as coll_err:
+        t.api("POST", "/git/refs", {"ref": ref, "sha": sha})
+    assert coll_err.value.http_status == 422
+    assert coll_err.value.github_codes == ("already_exists",)
 
 
 def test_candidate_hash_manifest_missing_path_rejected_before_github(tmp_path):
