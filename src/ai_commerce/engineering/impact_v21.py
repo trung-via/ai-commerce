@@ -725,6 +725,30 @@ def load_baseline_component_owner_records(
     return tuple(accepted)
 
 
+def canonical_registered_profile(
+    profiles: dict[str, list[str]], expected: Sequence[str], *,
+    group_name: str, onboarding: bool,
+) -> str | None:
+    """Select the *name* of an authorized command, not just matching argv.
+
+    Onboarding is a reserved, separately attested capability. Its argv may
+    coincide with an ordinary test group's registered command; lexical order
+    must never turn a normal MT-01 group into an onboarding claim.
+    Ambiguous non-onboarding aliases without a matching owner name fail closed.
+    """
+    if onboarding:
+        # The registered onboarding entry is a capability, NOT the runtime
+        # command for the candidate's validated manifest. The separate EF02
+        # verified_onboarding_binding check reconstructs dynamic argv.
+        return "mt01-component-onboarding" if "mt01-component-onboarding" in profiles else None
+    names = sorted(name for name, command in profiles.items()
+                   if name != "mt01-component-onboarding" and list(command) == list(expected))
+    preferred = f"mt01-{group_name}-tests"
+    if preferred in names:
+        return preferred
+    return names[0] if len(names) == 1 else None
+
+
 def registered_action_plan(
     *, repo: Path, base_sha: str, base_files, candidate_files,
     changed_paths: Sequence[str], required_acs: Sequence[str], fallback_argv,
@@ -818,8 +842,8 @@ def registered_action_plan(
                          or (onboarding and name in persisted_by_name))
         verified_owner = (admission if admission is not None and name == admission["name"]
                           else persisted_by_name.get(name))
-        matched = ("mt01-component-onboarding" if new_owner else
-                   next((key for key, value in sorted(profiles.items()) if value == expected), None))
+        matched = canonical_registered_profile(
+            profiles, expected, group_name=name, onboarding=new_owner)
         if matched is None:
             problems.append(name + ":REGISTERED_PROFILE_REQUIRED")
         # The only dynamic command is generated from a VALIDATED bounded

@@ -578,3 +578,70 @@ def test_authenticated_human_full_is_distinct_from_default_profile(monkeypatch):
     serial = action("a")
     serial["verification_profile"] = "project-tests-serial"
     assert approved_verification_plan(serial, registry)["human_full_suite_authorized"] is False
+
+
+def test_ef02_independent_receipt_accepts_correct_profile_and_rejects_alias(tmp_path):
+    """Exact artifact hashes + registered profile identity; not a mocked PASS."""
+    from ai_commerce.remote.worker import _verified_receipt_evidence
+    from ai_commerce.engineering.minimum_test import Evidence, file_hashes
+    workspace = tmp_path / "worktree"
+    root = tmp_path / "evidence"
+    workspace.mkdir()
+    root.mkdir()
+    (workspace / "impl.py").write_text("verified", encoding="utf-8")
+    source = "a" * 40
+    command = ["python", "-m", "pytest", "tests/test_mt01_v21.py", "-q", "-n", "12"]
+    profiles = {
+        "mt01-component-onboarding": command,
+        "mt01-mt01-v21-tests": command,
+        "unrelated-alias": ["python", "-m", "pytest", "tests/test_ef02.py", "-q", "-n", "12"],
+    }
+    binding = {
+        "base_sha": source, "aggregate_sources": [],
+        "workspace": str(workspace.resolve()),
+        "candidate_files": {"impl.py": file_hashes(workspace)["impl.py"]},
+        "registered_profile": "mt01-mt01-v21-tests",
+        "argv": command, "environment_proven": True,
+    }
+    refs = {}
+    hashes = {}
+
+    def store(key, filename, data):
+        (root / filename).write_bytes(data)
+        refs[key] = filename
+        hashes[key] = hashlib.sha256(data).hexdigest()
+
+    store("tracked_diff", "tracked.patch", b"diff --git a/impl.py b/impl.py\\n")
+    store("source_after_verify", "source.after.json", b'{"clean": true}')
+    store("verify_stdout", "verify.stdout.log", b"1 passed\\n")
+    store("provider_return_observed", "provider-return.json", b'{"observed": true}')
+    passed = b"1 passed in 0.01s\\nMT01_XDIST_WORKERS_COLLECTED=12\\n"
+    store("mt01_0_stdout", "mt01.stdout.log", passed)
+    proof = Evidence.from_success(binding, exit_code=0, stdout=passed,
+                                  artifacts={"stdout": refs["mt01_0_stdout"]},
+                                  evidence_root=root)
+    store("mt01_0_evidence", "mt01.evidence.json", proof.payload.encode("utf-8"))
+    report = {
+        "verify_completed": True, "provider_return_determinate": True,
+        "evidence_files": refs, "evidence_sha256": hashes,
+        "tracked_diff_sha256": hashes["tracked_diff"],
+        "minimum_test_enabled": True,
+        "changed_files": ["impl.py"],
+        "minimum_test": {"groups": [
+            {"group": "mt01-v21", "binding": binding,
+             "evidence_sha256": proof.sha256},
+        ]},
+    }
+    args = dict(root=root, workspace=workspace, source_sha=source,
+                sources=[], profiles=profiles, allowed_paths=["impl.py"])
+    assert _verified_receipt_evidence(report, **args) is True
+    import copy
+    for forged_name in ("mt01-component-onboarding", "unrelated-alias", "unknown-profile"):
+        bad = copy.deepcopy(report)
+        bad["minimum_test"]["groups"][0]["binding"]["registered_profile"] = forged_name
+        diagnostics = []
+        assert _verified_receipt_evidence(bad, **args, diagnostics=diagnostics) is False
+        assert diagnostics == ["MT01_GROUP_0_REGISTERED_BINDING_REJECTED"]
+    tampered = copy.deepcopy(report)
+    tampered["evidence_sha256"]["tracked_diff"] = "0" * 64
+    assert _verified_receipt_evidence(tampered, **args) is False

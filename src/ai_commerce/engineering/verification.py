@@ -38,6 +38,28 @@ def observed_console_workers(out: bytes) -> int | None:
     return int(match[1] or match[2]) if match else None
 
 
+def registered_binding_problems(plan: dict, profiles: Mapping[str, list[str]]) -> list[str]:
+    """Early, bounded form of EF02's independent registered-binding check.
+
+    Do not run expensive pytest groups with an ambiguous profile that the
+    trusted publisher must reject. This is a *negative* preflight, not a
+    replacement for post-execution hash/manifest/evidence validation.
+    """
+    problems = []
+    for index, entry in enumerate(plan.get("groups", ())):
+        binding = entry.get("binding", {})
+        name = binding.get("registered_profile")
+        if name == "mt01-component-onboarding":
+            if (binding.get("onboarding_data_only") is not True
+                    or not binding.get("onboarding_manifest_path")
+                    or not binding.get("onboarding_manifest_sha256")):
+                problems.append(f"MT01_GROUP_{index}_ONBOARDING_PROOF_MISSING")
+        elif (not isinstance(name, str)
+                or profiles.get(name) != binding.get("argv")):
+            problems.append(f"MT01_GROUP_{index}_REGISTERED_BINDING_REJECTED")
+    return problems
+
+
 def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dict,
                  changed_paths: list[str], required_acs: tuple[str, ...], fallback_argv: list[str],
                  prior: dict[str, Evidence], save: Callable, evidence_files: Mapping[str, str],
@@ -56,6 +78,15 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
                        registered_profiles=registered_profiles,
                        human_full_suite_authorized=human_full_suite_authorized,
                        allowed_paths=allowed_paths)
+    if registered_only and registered_profiles is not None:
+        binding_errors = registered_binding_problems(plan, registered_profiles)
+        if binding_errors:
+            plan["reason_codes"] = list(plan.get("reason_codes", ())) + binding_errors
+            # An untrusted/ambiguous profile is a hard HOLD before running
+            # pytest; it cannot become repair-eligible test failure.
+            for entry in plan["groups"]:
+                entry.update(state="UNPROVEN", execute=False)
+                entry["explanation"] = list(entry.get("explanation", ())) + binding_errors
     if command_transform:
         for entry in plan["groups"]:
             argv, decision = command_transform(entry["binding"]["argv"], entry["group"])
