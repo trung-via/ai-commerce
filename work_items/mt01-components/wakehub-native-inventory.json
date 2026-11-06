@@ -1,0 +1,12 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "wakehub-native-inventory",
+  "sources": [
+    "src/ai_commerce/wakehub/__init__.py",
+    "src/ai_commerce/wakehub/native_inventory.py"
+  ],
+  "tests": ["tests/test_wakehub_native_inventory.py"],
+  "acs": ["WAKEHUB.WH01B.native-inventory-readonly"],
+  "consumers": ["src/ai_commerce/engineering/three_runner_topology.py"],
+  "contracts": []
+}
