@@ -114,6 +114,30 @@ function Assert-Absent {
         }
     }
 }
+function Check-Only-Owned-Root([int]$targetPid) {
+    $listeners = @(Get-NetTCPConnection -State Listen | Where-Object LocalPort -eq 9333)
+    if ($listeners.Count -gt 1) { Deny 'OWNERSHIP_UNPROVEN' }
+    if ($listeners.Count -eq 1 -and
+        ($listeners[0].LocalAddress -cne '127.0.0.1' -or $listeners[0].OwningProcess -ne $targetPid)) { Deny 'OWNERSHIP_UNPROVEN' }
+    $roots = @(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'")
+    if ($roots.Count -gt 256) { Deny 'OWNERSHIP_UNPROVEN' }
+    $claims = 0
+    foreach ($root in $roots) {
+        if (-not $root.CommandLine) { Deny 'OWNERSHIP_UNPROVEN' }
+        $argv = [D5Argv]::Parse($root.CommandLine)
+        if (@($argv | Where-Object { $_ -like '--type=*' }).Count) { continue }
+        $profileArgs = @($argv | Where-Object { $_ -ilike '--user-data-dir*' })
+        if ($profileArgs.Count) {
+            if ($profileArgs.Count -ne 1 -or -not $profileArgs[0].StartsWith('--user-data-dir=')) { Deny 'OWNERSHIP_UNPROVEN' }
+            if ([IO.Path]::GetFullPath($profileArgs[0].Substring(16)).TrimEnd('\') -ieq
+                [IO.Path]::GetFullPath($cfg.user_data_dir).TrimEnd('\')) {
+                $claims++
+                if ($root.ProcessId -ne $targetPid) { Deny 'OWNERSHIP_UNPROVEN' }
+            }
+        }
+    }
+    if ($claims -ne 1) { Deny 'OWNERSHIP_UNPROVEN' }
+}
 try {
     if ($env:GITHUB_ACTIONS -eq 'true' -or $env:OS -ne 'Windows_NT') { Deny 'UNSUPPORTED_SESSION' }
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -126,19 +150,29 @@ try {
     if ($Logon) {
         # The private receiver authenticates native client SID/session, reloads
         # signed enrollment/revocation and calls Bridge.logon(). Never Wake.
-        $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', 'AI-Commerce-D5-Operator-v1', [IO.Pipes.PipeDirection]::Out)
+        $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', 'AI-Commerce-D5-Operator-v1',
+            [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::Asynchronous,
+            [Security.Principal.TokenImpersonationLevel]::Impersonation)
         try {
             $pipe.Connect(2000)
+            $pipe.ReadMode = [IO.Pipes.PipeTransmissionMode]::Message
             $bytes = [Text.Encoding]::UTF8.GetBytes("D5_LOGON_START_V1`n")
             $pipe.Write($bytes,0,$bytes.Length); $pipe.Flush()
+            $reply = New-Object byte[] 8192
+            $read = $pipe.ReadAsync($reply,0,$reply.Length)
+            if (-not $read.Wait(55000) -or $read.Result -le 0 -or -not $pipe.IsMessageComplete) { Deny 'UNKNOWN_EFFECT_HOLD' }
+            $ack = [Text.Encoding]::UTF8.GetString($reply,0,$read.Result) | ConvertFrom-Json
+            if ($ack.code -cne 'LOGON_TRIGGER_DELIVERED' -or $ack.status -cne 'OBSERVED') { Deny 'UNKNOWN_EFFECT_HOLD' }
         } finally { $pipe.Dispose() }
         # Trigger delivery is NOT evidence of browser startup.
         Write-Output '{"code":"LOGON_TRIGGER_DELIVERED"}'
         exit 0
     }
     Private-Path (Join-Path $state 'control.key')
-    $text = [Console]::In.ReadToEnd()
-    if ($text.Length -gt 65536) { Deny 'OWNERSHIP_UNPROVEN' }
+    $inputBuffer = New-Object char[] 65537
+    $inputCount = [Console]::In.ReadBlock($inputBuffer,0,$inputBuffer.Length)
+    if ($inputCount -gt 65536) { Deny 'OWNERSHIP_UNPROVEN' }
+    $text = [string]::new($inputBuffer,0,$inputCount)
     $envelope = $text | ConvertFrom-Json
     if (@($envelope.PSObject.Properties.Name).Count -ne 2) { Deny 'OWNERSHIP_UNPROVEN' }
     $body = [Convert]::FromBase64String($envelope.body)
@@ -147,6 +181,37 @@ try {
     finally { $mac.Dispose() }
     if ($envelope.mac -cne $expected) { Deny 'OWNERSHIP_UNPROVEN' }
     $p = [Text.Encoding]::UTF8.GetString($body) | ConvertFrom-Json
+    # A local MAC is never evidence of independent custody. Revalidate the
+    # signed grant/lease through the fixed protected isolated runtime first.
+    $runtime = Join-Path $env:ProgramFiles 'AI-Commerce\D5-Runtime\python.exe'
+    No-Links $runtime
+    foreach ($trustedPath in @($runtime,[IO.Path]::GetDirectoryName($runtime))) {
+        $trustedAcl = Get-Acl -LiteralPath $trustedPath
+        $trustedSids = @('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+        if ($trustedAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin $trustedSids) { Deny 'BLOCKED_NOT_DEPLOYED' }
+        foreach ($ace in $trustedAcl.Access) {
+            if ($ace.AccessControlType -eq 'Allow' -and
+                ($ace.FileSystemRights -band 0x500D0156) -ne 0 -and
+                $ace.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin $trustedSids) { Deny 'BLOCKED_NOT_DEPLOYED' }
+        }
+    }
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $runtime
+    $start.Arguments = '-I -B -m ai_commerce.hostops_v3.d5_control --native-preflight'
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $guard = [Diagnostics.Process]::Start($start)
+    try {
+        $guard.StandardInput.Write([Text.Encoding]::UTF8.GetString($body)); $guard.StandardInput.Close()
+        if (-not $guard.WaitForExit(15000)) { Deny 'BLOCKED_NOT_DEPLOYED' }
+        $guardBuffer = New-Object char[] 128
+        $guardCount = $guard.StandardOutput.ReadBlock($guardBuffer,0,$guardBuffer.Length)
+        $guardText = [string]::new($guardBuffer,0,$guardCount)
+        if ($guard.ExitCode -ne 0 -or $guardCount -ge 128 -or $guardText.Trim() -cne '{"code":"OK"}') { Deny 'BLOCKED_NOT_DEPLOYED' }
+    } finally { $guard.Dispose() }
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     if ($p.sid -cne $sid -or $p.state -ine $state -or $p.nonce -cnotmatch '^[0-9a-f]{32}$' -or
         $p.request_id -cnotmatch '^[0-9a-f]{32}$' -or $p.expires -le $now -or $p.expires -gt ($now+30)) { Deny 'OWNERSHIP_UNPROVEN' }
@@ -173,6 +238,8 @@ try {
     $launcher = Join-Path $state 'launcher.ps1'
     $runnerBefore = @{}
     if (@($p.runner_tasks).Count -ne 3 -or @($p.runner_tasks | Select-Object -Unique).Count -ne 3) { Deny 'RUNNER_PRESERVATION_UNPROVEN' }
+    $requiredRunners = @('AI-Commerce-EF02-Interactive','AI-Commerce-EF02-02-Interactive','AI-Commerce-HostOps-01-Interactive')
+    if (@(Compare-Object $requiredRunners @($p.runner_tasks)).Count -ne 0) { Deny 'RUNNER_PRESERVATION_UNPROVEN' }
     foreach ($name in $p.runner_tasks) {
         if ($name -eq $taskName -or -not (Task-Exists $name)) { Deny 'RUNNER_PRESERVATION_UNPROVEN' }
         $runnerBefore[$name] = Task-Hash $name
@@ -238,6 +305,7 @@ public static class D5Desktop {
             try {
                 $null = $process.Handle # pin the process object before rechecking PID/creation
                 $null = Check-Root $p.snapshot.pid $p.snapshot.created
+                Check-Only-Owned-Root $p.snapshot.pid
                 $changed = $true
                 if (-not $process.CloseMainWindow() -or -not $process.WaitForExit(10000)) { Deny 'UNKNOWN_EFFECT_HOLD' }
                 if ($null -ne (Get-CimInstance Win32_Process -Filter "ProcessId=$($p.snapshot.pid)")) { Deny 'UNKNOWN_EFFECT_HOLD' }
@@ -317,7 +385,7 @@ public static class D5Desktop {
     # Never emit a stack trace, native stderr, private path or arbitrary message.
     $code = 'NATIVE_FAILURE_HOLD'
     if ($changed) { $code = 'UNKNOWN_EFFECT_HOLD' }
-    elseif ($_.Exception.Message -cin @('UNSUPPORTED_SESSION','OWNERSHIP_UNPROVEN','SOURCE_DRIFT','RUNNER_PRESERVATION_UNPROVEN','TASK_OWNERSHIP_UNPROVEN','CONFLICTING_D5_TASK','LAUNCHER_UNVERIFIED','PROFILE_ALREADY_ACTIVE_NO_CDP','PROFILE_LOCKED','BACKUP_UNVERIFIED','UNKNOWN_EFFECT_HOLD')) { $code=$_.Exception.Message }
+    elseif ($_.Exception.Message -cin @('BLOCKED_NOT_DEPLOYED','UNSUPPORTED_SESSION','OWNERSHIP_UNPROVEN','SOURCE_DRIFT','RUNNER_PRESERVATION_UNPROVEN','TASK_OWNERSHIP_UNPROVEN','CONFLICTING_D5_TASK','LAUNCHER_UNVERIFIED','PROFILE_ALREADY_ACTIVE_NO_CDP','PROFILE_LOCKED','BACKUP_UNVERIFIED','UNKNOWN_EFFECT_HOLD')) { $code=$_.Exception.Message }
     @{code=$code} | ConvertTo-Json -Compress
     exit 2
 }
