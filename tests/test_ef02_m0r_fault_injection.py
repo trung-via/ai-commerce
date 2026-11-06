@@ -5,6 +5,7 @@ do not assert that a live Windows runner was taken offline or cancelled.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -1047,6 +1048,72 @@ def test_workowner_lineage_cross_issue_hijack_or_forged_repair_of():
         WorkOwner.identity(storage, 508, storage.issues[508], storage.issues[508]["actions"][0])
 
 
+def _make_valid_proof(action_id, attempt_id, source_sha, fingerprint):
+    diff_hash = "2" * 64
+    return {
+        "version": 1,
+        "status": "CANDIDATE_READY",
+        "scope_valid": True,
+        "review_required": False,
+        "out_of_scope_files": [],
+        "changed_files": ["tests/test_ef02.py"],
+        "allowed_paths": ["tests/test_ef02.py"],
+        "candidate_file_sha256": {"tests/test_ef02.py": "1" * 64},
+        "tracked_diff_sha256": diff_hash,
+        "source_sha": source_sha,
+        "effective_source_sha": source_sha,
+        "action_id": action_id,
+        "attempt_id": attempt_id,
+        "fingerprint": fingerprint,
+        "verification": {
+            "status": "BUILD_VERIFIED_FOR_SCOPE",
+            "exit_code": 0,
+            "profile": "project-tests",
+            "argv": ["python", "-m", "pytest", "tests", "-q", "-n", "12"],
+            "evidence_sha256": {"tracked_diff": diff_hash},
+            "report_sha256": "e" * 64,
+        },
+        "provenance": {
+            "executor": "antigravity",
+            "model": "gemini-3.8-flash",
+            "effort": "high",
+            "dependency_candidates": [],
+            "run_id": None,
+            "run_attempt": None,
+        },
+    }
+
+
+def _publish_owner(storage, owner, action, source_sha=BASE, attempt_id=None):
+    from ai_commerce.remote.transport import WorkOwner
+    from ai_commerce.remote.candidate_policy import canonical, evidence_digest, EVIDENCE_MARKER
+    attempt_id = attempt_id or action["attempt_id"]
+    fp = hashlib.sha256(json.dumps({"batch_id": storage.issue_body.get("batch_id", "b1") if isinstance(storage.issue_body, dict) else "b1",
+        "source_sha": source_sha, "action": {k: v for k, v in action.items() if k != "resolved_dependencies"}},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    claim_key = storage.attempt_key(attempt_id)
+    claim_sha = hashlib.sha1((f"claim-{attempt_id}").encode()).hexdigest()
+    storage.refs[f"refs/heads/ef02/claims/{claim_key}"] = claim_sha
+    storage.commits[claim_sha] = {"message": f"EF02 CLAIM\n\nfingerprint={fp}\nattempt_id={attempt_id}", "parents": [{"sha": source_sha}]}
+
+    proof = _make_valid_proof(action["action_id"], attempt_id, source_sha, fp)
+    receipt = evidence_digest(proof)
+
+    owner.append("CLAIMED")
+    owner.append("SPAWN_INTENT")
+    owner.append("PROVIDER_INTENT", round=0)
+    owner.append("ROUND_VERIFIED", round=0, receipt=receipt)
+    owner.append("RESULT_VERIFIED", receipt=receipt)
+    owner.append("PUBLISH_INTENT", receipt=receipt)
+
+    cand_sha = hashlib.sha1((f"cand-{attempt_id}").encode()).hexdigest()
+    storage.refs[f"refs/heads/ef02/candidate/{claim_key}"] = cand_sha
+    cand_msg = f"EF02 candidate attempt {attempt_id}{EVIDENCE_MARKER}{canonical(proof)}"
+    storage.commits[cand_sha] = {"message": cand_msg, "tree": {"sha": "e" * 40}, "parents": [{"sha": source_sha}]}
+    owner.append("PUBLISHED", receipt=receipt, candidate=WorkOwner.digest(cand_sha), attempt_id=attempt_id)
+    return cand_sha, receipt
+
+
 def test_workowner_conflicting_successors_one_generation_winner():
     """Two concurrent successors attempt to claim generation 2; exactly one wins create-only primitive."""
     from test_ef01_repair import WorkOwnerMemoryTransport
@@ -1061,15 +1128,7 @@ def test_workowner_conflicting_successors_one_generation_winner():
     storage.issue_body = packet1
     id1 = WorkOwner.identity(storage, 506, packet1, action1)
     owner1 = WorkOwner.acquire(storage, id1)
-    owner1.append("CLAIMED")
-    owner1.append("UNKNOWN")
-
-    fp1 = hashlib.sha256(json.dumps({"batch_id": "b-root", "source_sha": BASE, "action": action1},
-        sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
-    claim_key1 = storage.attempt_key("attempt-r1")
-    claim_sha1 = hashlib.sha1(b"claim1").hexdigest()
-    storage.refs[f"refs/heads/ef02/claims/{claim_key1}"] = claim_sha1
-    storage.commits[claim_sha1] = {"message": f"EF02 CLAIM\n\nfingerprint={fp1}\nattempt_id=attempt-r1"}
+    _publish_owner(storage, owner1, action1, attempt_id="attempt-r1")
 
     action_a = {**_action(), "attempt_id": "attempt-r2a", "repair_of": "#506"}
     packet_a = {"batch_id": "b-succ-a", "source_sha": BASE, "actions": [action_a]}
@@ -1106,15 +1165,7 @@ def test_workowner_stale_generation_rejected_at_all_fences():
     storage.issue_body = packet1
     id1 = WorkOwner.identity(storage, 506, packet1, action1)
     owner1 = WorkOwner.acquire(storage, id1)
-    owner1.append("CLAIMED")
-    owner1.append("UNKNOWN")
-
-    fp1 = hashlib.sha256(json.dumps({"batch_id": "b1", "source_sha": BASE, "action": action1},
-        sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
-    claim_key1 = storage.attempt_key("attempt-r1")
-    claim_sha1 = hashlib.sha1(b"c1").hexdigest()
-    storage.refs[f"refs/heads/ef02/claims/{claim_key1}"] = claim_sha1
-    storage.commits[claim_sha1] = {"message": f"EF02 CLAIM\n\nfingerprint={fp1}\nattempt_id=attempt-r1"}
+    _publish_owner(storage, owner1, action1, attempt_id="attempt-r1")
 
     action2 = {**_action(), "attempt_id": "attempt-r2", "repair_of": "#506"}
     packet2 = {"batch_id": "b2", "source_sha": BASE, "actions": [action2]}
@@ -1132,7 +1183,7 @@ def test_workowner_stale_generation_rejected_at_all_fences():
 
 
 def test_workowner_unknown_or_unresolved_predecessor_blocks_transfer():
-    """Unresolved predecessor (e.g. at PROVIDER_INTENT) denies generation transfer."""
+    """Unresolved predecessor (e.g. at PROVIDER_INTENT or UNKNOWN) denies generation transfer."""
     from test_ef01_repair import WorkOwnerMemoryTransport
     from ai_commerce.remote.transport import WorkOwner
     import hashlib
@@ -1153,7 +1204,7 @@ def test_workowner_unknown_or_unresolved_predecessor_blocks_transfer():
     claim_key1 = storage.attempt_key("attempt-r1")
     claim_sha1 = hashlib.sha1(b"c1").hexdigest()
     storage.refs[f"refs/heads/ef02/claims/{claim_key1}"] = claim_sha1
-    storage.commits[claim_sha1] = {"message": f"EF02 CLAIM\n\nfingerprint={fp1}\nattempt_id=attempt-r1"}
+    storage.commits[claim_sha1] = {"message": f"EF02 CLAIM\n\nfingerprint={fp1}\nattempt_id=attempt-r1", "parents": [{"sha": BASE}]}
 
     action2 = {**_action(), "attempt_id": "attempt-r2", "repair_of": "#506"}
     packet2 = {"batch_id": "b2", "source_sha": BASE, "actions": [action2]}
@@ -1161,6 +1212,11 @@ def test_workowner_unknown_or_unresolved_predecessor_blocks_transfer():
     storage.issue_body = packet2
     id2 = WorkOwner.identity(storage, 508, packet2, action2)
 
+    with pytest.raises(RemoteTransportError, match="WORK_OWNER_PREDECESSOR_UNRESOLVED"):
+        WorkOwner.acquire(storage, id2)
+
+    # Predecessor ending in UNKNOWN also strictly denies transfer (UNKNOWN_FAIL_CLOSED)
+    owner1.append("UNKNOWN")
     with pytest.raises(RemoteTransportError, match="WORK_OWNER_PREDECESSOR_UNRESOLVED"):
         WorkOwner.acquire(storage, id2)
 
@@ -1210,15 +1266,7 @@ def test_workowner_422_or_timeout_during_transfer_holds_without_retry():
     storage.issue_body = packet1
     id1 = WorkOwner.identity(storage, 506, packet1, action1)
     owner1 = WorkOwner.acquire(storage, id1)
-    owner1.append("CLAIMED")
-    owner1.append("UNKNOWN")
-
-    fp1 = hashlib.sha256(json.dumps({"batch_id": "b1", "source_sha": BASE, "action": action1},
-        sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
-    claim_key1 = storage.attempt_key("attempt-r1")
-    claim_sha1 = hashlib.sha1(b"c1").hexdigest()
-    storage.refs[f"refs/heads/ef02/claims/{claim_key1}"] = claim_sha1
-    storage.commits[claim_sha1] = {"message": f"EF02 CLAIM\n\nfingerprint={fp1}\nattempt_id=attempt-r1"}
+    _publish_owner(storage, owner1, action1, attempt_id="attempt-r1")
 
     action2 = {**_action(), "attempt_id": "attempt-r2", "repair_of": "#506"}
     packet2 = {"batch_id": "b2", "source_sha": BASE, "actions": [action2]}
@@ -1241,3 +1289,343 @@ def test_workowner_422_or_timeout_during_transfer_holds_without_retry():
 
     with pytest.raises(RemoteTransportError, match="GITHUB_TIMEOUT"):
         WorkOwner.acquire(storage, id2)
+
+
+def test_workowner_exact_506_508_520_523_legacy_repair_of_sequence():
+    """Exact sequence: #506 -> #508 -> #520 -> #523 -> R5 with raw attempt string lookup."""
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+    import hashlib
+    storage = WorkOwnerMemoryTransport(BASE)
+
+    # #506: action R1-EPWO-WP02-WORKOWNER-001 attempt r1_epwo_wp02_5f316c0e4_20261106_r1 no repair_of
+    a506 = {"action_id": "R1-EPWO-WP02-WORKOWNER-001", "attempt_id": "r1_epwo_wp02_5f316c0e4_20261106_r1",
+            "executor": "antigravity", "model": "gemini-3.8-flash", "effort": "high"}
+    p506 = {"batch_id": "batch-506", "source_sha": BASE, "actions": [a506]}
+    storage.issues[506] = p506
+
+    fp506 = hashlib.sha256(json.dumps({"batch_id": "batch-506", "source_sha": BASE, "action": a506},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    k506 = storage.attempt_key(a506["attempt_id"])
+    c506 = hashlib.sha1(b"c506").hexdigest()
+    storage.refs[f"refs/heads/ef02/claims/{k506}"] = c506
+    storage.commits[c506] = {"message": f"EF02 CLAIM\n\nfingerprint={fp506}\nattempt_id={a506['attempt_id']}",
+                             "parents": [{"sha": BASE}]}
+
+    # #508: action R1-WP02-CODEX-R2 attempt r1_wp02_codex_r2_20261106 repair_of r1_epwo_wp02_5f316c0e4_20261106_r1
+    a508 = {"action_id": "R1-WP02-CODEX-R2", "attempt_id": "r1_wp02_codex_r2_20261106",
+            "repair_of": "r1_epwo_wp02_5f316c0e4_20261106_r1", "executor": "codex", "model": "gpt-5", "effort": "high"}
+    p508 = {"batch_id": "batch-508", "source_sha": BASE, "actions": [a508]}
+    storage.issues[508] = p508
+
+    fp508 = hashlib.sha256(json.dumps({"batch_id": "batch-508", "source_sha": BASE, "action": a508},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    k508 = storage.attempt_key(a508["attempt_id"])
+    c508 = hashlib.sha1(b"c508").hexdigest()
+    storage.refs[f"refs/heads/ef02/claims/{k508}"] = c508
+    storage.commits[c508] = {"message": f"EF02 CLAIM\n\nfingerprint={fp508}\nattempt_id={a508['attempt_id']}",
+                             "parents": [{"sha": BASE}]}
+
+    # #520: action R1-WP02-CODEX-R3 attempt r1_wp02_codex_r3_20261106 repair_of r1_wp02_codex_r2_20261106
+    a520 = {"action_id": "R1-WP02-CODEX-R3", "attempt_id": "r1_wp02_codex_r3_20261106",
+            "repair_of": "r1_wp02_codex_r2_20261106", "executor": "codex", "model": "gpt-5", "effort": "high"}
+    p520 = {"batch_id": "batch-520", "source_sha": BASE, "actions": [a520]}
+    storage.issues[520] = p520
+
+    fp520 = hashlib.sha256(json.dumps({"batch_id": "batch-520", "source_sha": BASE, "action": a520},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    k520 = storage.attempt_key(a520["attempt_id"])
+    c520 = hashlib.sha1(b"c520").hexdigest()
+    storage.refs[f"refs/heads/ef02/claims/{k520}"] = c520
+    storage.commits[c520] = {"message": f"EF02 CLAIM\n\nfingerprint={fp520}\nattempt_id={a520['attempt_id']}",
+                             "parents": [{"sha": BASE}]}
+
+    # #523: action R1-WP02-AGY-R4 attempt r1_wp02_agy38_high_r4_20261106 repair_of r1_wp02_codex_r3_20261106
+    a523 = {"action_id": "R1-WP02-AGY-R4", "attempt_id": "r1_wp02_agy38_high_r4_20261106",
+            "repair_of": "r1_wp02_codex_r3_20261106", "executor": "antigravity", "model": "gemini-3.8-flash", "effort": "high"}
+    p523 = {"batch_id": "batch-523", "source_sha": BASE, "actions": [a523]}
+    storage.issues[523] = p523
+
+    fp523 = hashlib.sha256(json.dumps({"batch_id": "batch-523", "source_sha": BASE, "action": a523},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    k523 = storage.attempt_key(a523["attempt_id"])
+    c523 = hashlib.sha1(b"c523").hexdigest()
+    storage.refs[f"refs/heads/ef02/claims/{k523}"] = c523
+    storage.commits[c523] = {"message": f"EF02 CLAIM\n\nfingerprint={fp523}\nattempt_id={a523['attempt_id']}",
+                             "parents": [{"sha": BASE}]}
+
+    # R5: repair_of r1_wp02_agy38_high_r4_20261106
+    a_r5 = {"action_id": "R1-WP02-AGY-R5", "attempt_id": "r1_wp02_agy38_high_r5_20261106",
+            "repair_of": "r1_wp02_agy38_high_r4_20261106", "executor": "antigravity", "model": "gemini-3.8-flash", "effort": "high"}
+    p_r5 = {"batch_id": "batch-r5", "source_sha": BASE, "actions": [a_r5]}
+    storage.issues[524] = p_r5
+
+    id_r5 = WorkOwner.identity(storage, 524, p_r5, a_r5)
+    assert id_r5["root_issue"] == 506
+    assert id_r5["root_action_id"] == "R1-EPWO-WP02-WORKOWNER-001"
+    assert id_r5["generation"] == 5
+    assert len(id_r5["lineage"]) == 4
+    assert [p["issue"] for p in id_r5["lineage"]] == [523, 520, 508, 506]
+    assert [p["attempt_id"] for p in id_r5["lineage"]] == [
+        "r1_wp02_agy38_high_r4_20261106",
+        "r1_wp02_codex_r3_20261106",
+        "r1_wp02_codex_r2_20261106",
+        "r1_epwo_wp02_5f316c0e4_20261106_r1"
+    ]
+
+    # Explicit future #issue:attempt validation
+    a_r5_explicit = {**a_r5, "repair_of": "#523:r1_wp02_agy38_high_r4_20261106"}
+    p_r5_explicit = {"batch_id": "batch-r5", "source_sha": BASE, "actions": [a_r5_explicit]}
+    storage.issues[524] = p_r5_explicit
+    id_r5_explicit = WorkOwner.identity(storage, 524, p_r5_explicit, a_r5_explicit)
+    assert id_r5_explicit["root_issue"] == 506
+    assert id_r5_explicit["generation"] == 5
+
+
+def test_workowner_unknown_predecessor_strictly_denies_transfer():
+    """Defect 2: UNKNOWN predecessor provider/publication/reownership strictly denied."""
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+    import hashlib
+    storage = WorkOwnerMemoryTransport(BASE)
+
+    action1 = {"action_id": "R1-WP02-CODEX-R3", "attempt_id": "r1_wp02_codex_r3_20261106",
+               "executor": "codex", "model": "gpt-5", "effort": "high"}
+    packet1 = {"batch_id": "b-r3", "source_sha": BASE, "actions": [action1]}
+    storage.issues[520] = packet1
+    storage.issue_body = packet1
+    id1 = WorkOwner.identity(storage, 520, packet1, action1)
+    owner1 = WorkOwner.acquire(storage, id1)
+    owner1.append("CLAIMED")
+    owner1.append("SPAWN_INTENT")
+    owner1.append("UNKNOWN")
+
+    fp1 = hashlib.sha256(json.dumps({"batch_id": "b-r3", "source_sha": BASE, "action": action1},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    k1 = storage.attempt_key(action1["attempt_id"])
+    c1 = hashlib.sha1(b"c1").hexdigest()
+    storage.refs[f"refs/heads/ef02/claims/{k1}"] = c1
+    storage.commits[c1] = {"message": f"EF02 CLAIM\n\nfingerprint={fp1}\nattempt_id={action1['attempt_id']}",
+                           "parents": [{"sha": BASE}]}
+
+    # Successor attempts acquire
+    action2 = {"action_id": "R1-WP02-AGY-R4", "attempt_id": "r1_wp02_agy38_high_r4_20261106",
+               "repair_of": "r1_wp02_codex_r3_20261106", "executor": "antigravity", "model": "gemini-3.8-flash", "effort": "high"}
+    packet2 = {"batch_id": "b-r4", "source_sha": BASE, "actions": [action2]}
+    storage.issues[523] = packet2
+    storage.issue_body = packet2
+    id2 = WorkOwner.identity(storage, 523, packet2, action2)
+
+    with pytest.raises(RemoteTransportError, match="WORK_OWNER_PREDECESSOR_UNRESOLVED"):
+        WorkOwner.acquire(storage, id2)
+
+    # Reconcile reflects UNKNOWN, never authorized
+    reconciled = WorkOwner(storage, id1, "").reconcile()
+    assert reconciled["status"] == "HOLD_UNKNOWN_EFFECT"
+    assert reconciled["stage"] == "UNKNOWN"
+    assert reconciled["replay_authorized"] is False
+    assert reconciled["publication_authorized"] is False
+    assert reconciled["lineage_gap"] == "PREDECESSOR_EXECUTION_UNKNOWN"
+
+
+def test_workowner_v1_legacy_journal_reader_and_bridge():
+    """Defect 3: Historic V1 journal reader and bridge with immutable hash chain and candidate verification."""
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+    import hashlib
+    storage = WorkOwnerMemoryTransport(BASE)
+
+    # Predecessor issue #508
+    a508 = {"action_id": "R1-WP02-CODEX-R2", "attempt_id": "r1_wp02_codex_r2_20261106",
+            "executor": "codex", "model": "gpt-5", "effort": "high"}
+    p508 = {"batch_id": "batch-508", "source_sha": BASE, "actions": [a508]}
+    storage.issues[508] = p508
+
+    fp508 = hashlib.sha256(json.dumps({"batch_id": "batch-508", "source_sha": BASE, "action": a508},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    k508 = storage.attempt_key(a508["attempt_id"])
+    c508 = hashlib.sha1(b"claim-508").hexdigest()
+    storage.refs[f"refs/heads/ef02/claims/{k508}"] = c508
+    storage.commits[c508] = {"message": f"EF02 CLAIM\n\nfingerprint={fp508}\nattempt_id={a508['attempt_id']}",
+                             "parents": [{"sha": BASE}]}
+
+    cand_sha = hashlib.sha1(b"cand-508").hexdigest()
+    storage.refs[f"refs/heads/ef02/candidate/{k508}"] = cand_sha
+    proof = _make_valid_proof(a508["action_id"], a508["attempt_id"], BASE, fp508)
+    from ai_commerce.remote.candidate_policy import canonical, EVIDENCE_MARKER
+    storage.commits[cand_sha] = {
+        "message": f"EF02 candidate attempt {a508['attempt_id']}{EVIDENCE_MARKER}{canonical(proof)}",
+        "tree": {"sha": "e" * 40}, "parents": [{"sha": BASE}]
+    }
+
+    # Write a deterministic historic V1 journal under #508's WorkId
+    v1_base_id = {"repo": storage.repo, "issue": 508, "action_id": a508["action_id"]}
+    v1_work_key = WorkOwner.digest(v1_base_id)
+    v1_prefix = f"ef02/workowner/{v1_work_key}/"
+
+    v1_full_identity = {
+        **v1_base_id,
+        "work_key": v1_work_key,
+        "source_sha": BASE,
+        "batch_id": "batch-508",
+        "attempt_id": a508["attempt_id"],
+        "fingerprint": fp508
+    }
+
+    fence = "f" * 64
+    receipt = WorkOwner.digest(proof)
+    stages = [
+        ("OWNED", {}),
+        ("CLAIMED", {}),
+        ("SPAWN_INTENT", {}),
+        ("PROVIDER_INTENT", {"round": 0}),
+        ("ROUND_VERIFIED", {"round": 0, "receipt": receipt}),
+        ("RESULT_VERIFIED", {"receipt": receipt}),
+        ("PUBLISH_INTENT", {"receipt": receipt}),
+        ("PUBLISHED", {"receipt": receipt, "candidate": WorkOwner.digest(cand_sha), "attempt_id": a508["attempt_id"]})
+    ]
+
+    prior_digest = None
+    prior_sha = BASE
+    for idx, (stage, data) in enumerate(stages):
+        rec = {
+            "kind": "WorkOwner", "version": 1, "identity": v1_full_identity,
+            "generation": 1, "fence": fence, "sequence": idx,
+            "previous": prior_digest, "stage": stage, "data": data
+        }
+        digest = WorkOwner.digest(rec)
+        prior_digest = digest
+        c_sha = hashlib.sha1(f"v1-commit-{idx}".encode()).hexdigest()
+        storage.commits[c_sha] = {
+            "message": WorkOwner.MARKER + json.dumps({**rec, "digest": digest}, sort_keys=True, separators=(",", ":")),
+            "tree": {"sha": "e" * 40},
+            "parents": [{"sha": prior_sha}]
+        }
+        prior_sha = c_sha
+        storage.refs[f"refs/heads/{v1_prefix}{idx:03d}"] = c_sha
+
+    # Successor R3 on #520 with repair_of r1_wp02_codex_r2_20261106
+    a520 = {"action_id": "R1-WP02-CODEX-R3", "attempt_id": "r1_wp02_codex_r3_20261106",
+            "repair_of": "r1_wp02_codex_r2_20261106", "executor": "codex", "model": "gpt-5", "effort": "high"}
+    p520 = {"batch_id": "batch-520", "source_sha": BASE, "actions": [a520]}
+    storage.issues[520] = p520
+    storage.issue_body = p520
+
+    id520 = WorkOwner.identity(storage, 520, p520, a520)
+    assert id520["generation"] == 2
+
+    # V2 owner successfully reads and bridges the legacy V1 journal
+    owner2 = WorkOwner.acquire(storage, id520)
+    assert owner2.generation == 2
+    chain = owner2.read()
+    assert len(chain) == 9  # 8 legacy + 1 new generation OWNED
+    assert chain[0]["identity"] == v1_full_identity
+    assert chain[-1]["generation"] == 2
+
+    # Honest negative case: tampered digest in legacy record raises LEGACY_MIGRATION_UNPROVEN
+    bad_storage = WorkOwnerMemoryTransport(BASE)
+    bad_storage.issues[508] = p508
+    bad_storage.issues[520] = p520
+    bad_storage.issue_body = p520
+    bad_storage.refs = dict(storage.refs)
+    bad_storage.commits = {k: dict(v) for k, v in storage.commits.items()}
+    # Tamper with message digest of record 000
+    first_sha = bad_storage.refs[f"refs/heads/{v1_prefix}000"]
+    bad_storage.commits[first_sha]["message"] = WorkOwner.MARKER + json.dumps({
+        "kind": "WorkOwner", "version": 1, "identity": v1_full_identity,
+        "generation": 1, "fence": fence, "sequence": 0,
+        "previous": None, "stage": "OWNED", "data": {}, "digest": "0" * 64
+    })
+    bad_owner = WorkOwner(bad_storage, id520, "")
+    with pytest.raises(RemoteTransportError, match="LEGACY_MIGRATION_UNPROVEN"):
+        bad_owner.read()
+
+    reconciled = bad_owner.reconcile()
+    assert reconciled["status"] == "HOLD_UNKNOWN_EFFECT"
+    assert reconciled["lineage_gap"] == "LEGACY_MIGRATION_UNPROVEN"
+
+
+def test_workowner_tampered_claim_candidate_and_cycle():
+    """Negative tests: missing attempt, ambiguous attempt, forged claim, candidate proof mismatch, cycle."""
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+    import hashlib
+    storage = WorkOwnerMemoryTransport(BASE)
+
+    action = {"action_id": "R1-WP02-AGY-R5", "attempt_id": "attempt-r5",
+              "repair_of": "non-existent-attempt", "executor": "antigravity", "model": "gemini-3.8-flash", "effort": "high"}
+    packet = {"batch_id": "b-r5", "source_sha": BASE, "actions": [action]}
+    storage.issues[524] = packet
+
+    # 1. Missing attempt ID
+    with pytest.raises(RemoteTransportError, match="WORK_LINEAGE_PREDECESSOR_ATTEMPT_NOT_FOUND"):
+        WorkOwner.identity(storage, 524, packet, action)
+
+    # 2. Ambiguous attempt ID across two issues
+    dup_action = {"action_id": "dup", "attempt_id": "dup-attempt", "executor": "codex", "model": "gpt-5", "effort": "high"}
+    storage.issues[506] = {"batch_id": "b1", "source_sha": BASE, "actions": [dup_action]}
+    storage.issues[508] = {"batch_id": "b2", "source_sha": BASE, "actions": [dup_action]}
+    action["repair_of"] = "dup-attempt"
+    with pytest.raises(RemoteTransportError, match="WORK_LINEAGE_PREDECESSOR_ATTEMPT_AMBIGUOUS"):
+        WorkOwner.identity(storage, 524, packet, action)
+
+    # 3. Forged claim fingerprint
+    storage.issues.clear()
+    pred_action = {"action_id": "R1-WP02-CODEX-R2", "attempt_id": "target-attempt", "executor": "codex", "model": "gpt-5", "effort": "high"}
+    pred_packet = {"batch_id": "b-pred", "source_sha": BASE, "actions": [pred_action]}
+    storage.issues[508] = pred_packet
+    storage.issues[524] = {"batch_id": "b-r5", "source_sha": BASE, "actions": [{**action, "repair_of": "target-attempt"}]}
+
+    claim_key = storage.attempt_key("target-attempt")
+    claim_sha = hashlib.sha1(b"claim-forged").hexdigest()
+    storage.refs[f"refs/heads/ef02/claims/{claim_key}"] = claim_sha
+    storage.commits[claim_sha] = {"message": f"EF02 CLAIM\n\nfingerprint={'0'*64}\nattempt_id=target-attempt", "parents": [{"sha": BASE}]}
+
+    with pytest.raises(RemoteTransportError, match="WORK_LINEAGE_PREDECESSOR_CLAIM_MISMATCH"):
+        WorkOwner.identity(storage, 524, storage.issues[524], storage.issues[524]["actions"][0])
+
+    # 4. Candidate proof mismatch
+    fp_pred = hashlib.sha256(json.dumps({"batch_id": "b-pred", "source_sha": BASE, "action": pred_action},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    storage.commits[claim_sha] = {"message": f"EF02 CLAIM\n\nfingerprint={fp_pred}\nattempt_id=target-attempt", "parents": [{"sha": BASE}]}
+
+    cand_sha = hashlib.sha1(b"cand-bad").hexdigest()
+    storage.refs[f"refs/heads/ef02/candidate/{claim_key}"] = cand_sha
+    bad_proof = {
+        "action_id": "WRONG-ACTION", "attempt_id": "target-attempt",
+        "effective_source_sha": BASE, "source_sha": BASE,
+        "changed_files": ["tests/test_ef02.py"], "candidate_file_sha256": {"tests/test_ef02.py": "1" * 64},
+        "allowed_paths": ["tests/test_ef02.py"], "status": "CANDIDATE_READY",
+        "review_required": False, "fingerprint": fp_pred, "scope_valid": True, "version": 1
+    }
+    storage.commits[cand_sha] = {
+        "message": f"EF02 candidate attempt target-attempt\n\nEF02-CANDIDATE-EVIDENCE-V1\n{json.dumps(bad_proof, sort_keys=True)}",
+        "tree": {"sha": "e" * 40}, "parents": [{"sha": BASE}]
+    }
+
+    with pytest.raises(RemoteTransportError, match="WORK_LINEAGE_PREDECESSOR_CANDIDATE_MISMATCH"):
+        WorkOwner.identity(storage, 524, storage.issues[524], storage.issues[524]["actions"][0])
+
+
+def test_workowner_true_absence_zero_refs():
+    """Defect 3: True absence with zero refs on GitHub reports ABSENT, never PASS."""
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+    storage = WorkOwnerMemoryTransport(BASE)
+    storage.refs.clear()
+
+    action = _action()
+    packet = {"batch_id": "absent-batch", "source_sha": BASE, "actions": [action]}
+    storage.issue_body = packet
+    storage.issues[506] = packet
+
+    id1 = WorkOwner.identity(storage, 506, packet, action)
+    owner = WorkOwner(storage, id1, "")
+    reconciled = owner.reconcile()
+
+    assert reconciled["status"] == "ABSENT"
+    assert reconciled["stage"] == "ABSENT"
+    assert reconciled["proves_current_mt01_pass"] is False
+    assert reconciled["replay_authorized"] is False
+    assert reconciled["publication_authorized"] is False
+    assert reconciled["generation"] == 1

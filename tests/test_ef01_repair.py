@@ -40,6 +40,18 @@ class WorkOwnerMemoryTransport(GitHubTransport):
     def api(self, method, path, data=None):
         with self.storage_lock:
             self.requests.append((method, path, data))
+            if method == "GET" and (path == "/issues" or path.startswith("/issues?")):
+                items = []
+                if self.issues:
+                    for num in sorted(self.issues):
+                        b = self.issues[num]
+                        if isinstance(b, dict):
+                            b = json.dumps(b)
+                        items.append({"number": num, "body": b})
+                elif self.issue_body:
+                    b = json.dumps(self.issue_body) if isinstance(self.issue_body, dict) else self.issue_body
+                    items.append({"number": 506, "body": b})
+                return items
             if method == "GET" and path.startswith("/issues/"):
                 num = int(path.rsplit("/", 1)[1])
                 body = self.issues.get(num) if self.issues else self.issue_body
@@ -680,7 +692,7 @@ def _git_repo(tmp_path, real_git=True):
     (repo / "pytest.ini").write_text("[pytest]\naddopts = -p no:cacheprovider\n")
     if not real_git:
         return repo, BASE
-    git_env = dict(os.environ)
+    git_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG_")}
     for args in (["init", "-q"], ["config", "user.email", "local@example.invalid"],
                  ["config", "user.name", "repair fixture"], ["add", "."], ["commit", "-qm", "initial"]):
         subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, env=git_env)

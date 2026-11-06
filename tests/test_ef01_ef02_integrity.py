@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 import sys
 import time
@@ -13,22 +14,24 @@ from ai_commerce.engineering import runner
 from ai_commerce.engineering.profile import ExecutorSelection
 from ai_commerce.remote.transport import CandidateIntegrityError, GitHubTransport
 
+GIT_ENV = {k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG_")}
+
 
 def _repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.name", "EF fixture"], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.email", "ef@example.invalid"], check=True)
+    subprocess.run(["git", "init", "-q", str(repo)], env=GIT_ENV, check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "EF fixture"], env=GIT_ENV, check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "ef@example.invalid"], env=GIT_ENV, check=True)
     (repo / "old.txt").write_bytes(b"original\n")
-    subprocess.run(["git", "-C", str(repo), "add", "old.txt"], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "initial"], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "old.txt"], env=GIT_ENV, check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "initial"], env=GIT_ENV, check=True)
     return repo
 
 
 def test_staged_git_rename_reports_old_and_new_paths(tmp_path):
     repo = _repo(tmp_path)
-    subprocess.run(["git", "-C", str(repo), "mv", "old.txt", "new.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "mv", "old.txt", "new.txt"], env=GIT_ENV, check=True)
     assert runner._changes(repo) == ["new.txt", "old.txt"]
     assert runner._candidate_hashes(repo, ["old.txt"]) == {"old.txt": None}
 
@@ -116,7 +119,7 @@ def test_candidate_bytes_changed_after_verify_rejected_without_github_writes(tmp
 
 def test_candidate_rename_deletes_original_and_adds_destination(tmp_path):
     repo = _repo(tmp_path)
-    subprocess.run(["git", "-C", str(repo), "mv", "old.txt", "new.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "mv", "old.txt", "new.txt"], env=GIT_ENV, check=True)
     paths = runner._changes(repo)
     hashes = runner._candidate_hashes(repo, paths)
     evidence = candidate_evidence(repo, "rename-001", paths)
