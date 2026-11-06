@@ -1090,5 +1090,44 @@ const script = fs.readFileSync(process.argv[2],'utf8');
 
 
 
+    def test_d5_9444_playwright_only_attaches_without_browser_or_chat_mutation(self):
+        """Two connection-only Playwright clients preserve browser, profile, and user session."""
+        workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+        assert workflow.count("  hostops-d5-playwright-9444-read:") == 1
+        job = workflow.split("  hostops-d5-playwright-9444-read:", 1)[1]
+        assert "github.actor == github.repository_owner" in job
+        assert "github.event.issue.user.login == github.repository_owner" in job
+        assert "github.event_name == 'issues' && github.event.action == 'opened'" in job
+        assert "ATTACH_READONLY_TWICE" in job
+        assert '"schema":"ai-commerce.d5.playwright9444.v1"' in job
+        assert "runs-on: [self-hosted, Windows, ai-commerce-hostops]" in job
+        assert "persist-credentials: false" in job
+        assert 'endpoint="http://127.0.0.1:9444", port=9444' in job
+        assert "verify_playwright_attach(e)" in job
+        assert "for i in range(2):" in job
+        assert "PLAYWRIGHT_TWICE_VERIFIED" in job
+        assert "PLAYWRIGHT_MODULE_UNAVAILABLE" in job
+        assert "CDP_AFTER_ATTACH_UNAVAILABLE" in job
+        assert "AI_COMMERCE_D5_PLAYWRIGHT_9444_READ_V1" in job
+        assert "r.source_sha !== context.sha" in job
+        assert "r.chat_verified !== false || r.browser_mutated !== false" in job
+        assert "r.wake_sent !== false" in job
+        assert "NO_INTERACTIVE_SESSION" in job and "ELEVATED" in job
+        assert "$head -cne $env:GITHUB_SHA" in job
+        assert "$script = @(" in job
+        assert "browser.contexts" not in job.split("$script = @(", 1)[1].split(") -join", 1)[0]
+        assert ".pages" not in job and ".cookies(" not in job
+        assert "Get-CimInstance" not in job
+        assert "Start-Process" not in job and "Stop-Process" not in job
+        assert "Remove-Item" not in job and "Register-ScheduledTask" not in job
+        assert "Invoke-Expression" not in job and "SEND_WAKE" not in job
+        for line in workflow.splitlines():
+            assert not line.startswith((
+                "from ai_commerce.", "from types import", "except ImportError:",
+                "try:", "for i in range(2):",
+            )), line
+
+
+
 if __name__ == "__main__":
     unittest.main()
