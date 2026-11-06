@@ -94,6 +94,9 @@ def _verified_receipt_evidence(report: dict, *, root: Path, workspace: Path,
         return rejected("RECEIPT_EVIDENCE_UNAVAILABLE")
 
 
+_verified_ef01_proof = _verified_receipt_evidence
+
+
 def _fresh_aggregate_evidence(report: dict, *, root: Path, workspace: Path,
                               source_sha: str, sources: list[str], argv: list[str]) -> bool:
     """Validate immutable executed proof against the actual combined worktree."""

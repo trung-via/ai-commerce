@@ -645,3 +645,137 @@ def test_ef02_independent_receipt_accepts_correct_profile_and_rejects_alias(tmp_
     tampered = copy.deepcopy(report)
     tampered["evidence_sha256"]["tracked_diff"] = "0" * 64
     assert _verified_receipt_evidence(tampered, **args) is False
+
+
+def _build_authentic_16_group_report(tmp_path, *, group_12_profile="mt01-mt01-v21-tests"):
+    from ai_commerce.engineering.minimum_test import canonical, digest, file_hashes
+    workspace = tmp_path / "workspace"
+    evidence_dir = tmp_path / "evidence"
+    workspace.mkdir(parents=True, exist_ok=True)
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    (workspace / "impl.py").write_text("content", encoding="utf-8")
+    current = file_hashes(workspace)
+    source_sha = "a" * 40
+
+    profiles = {
+        "mt01-mt01-v21-tests": ["python", "-m", "pytest", "tests/test_mt01_v21.py", "-q", "-n", "12"],
+        "mt01-component-onboarding": ["python", "-m", "pytest", "tests/test_mt01_v21.py", "-q", "-n", "12"],
+    }
+    for i in range(16):
+        if i != 12:
+            profiles[f"mt01-group-{i}-tests"] = ["python", "-m", "pytest", f"tests/test_{i}.py", "-q", "-n", "12"]
+
+    diff_data = b"diff --git a/impl.py b/impl.py\n"
+    (evidence_dir / "git.tracked.diff.patch").write_bytes(diff_data)
+    (evidence_dir / "source.after_verify.json").write_bytes(b'{"changed_files": ["impl.py"]}')
+    (evidence_dir / "verify.stdout.log").write_bytes(b"16 passed\n")
+    (evidence_dir / "provider_return_observed.json").write_bytes(b'{"status": "SUCCESS"}')
+
+    refs = {
+        "tracked_diff": "git.tracked.diff.patch",
+        "source_after_verify": "source.after_verify.json",
+        "verify_stdout": "verify.stdout.log",
+        "provider_return_observed": "provider_return_observed.json",
+    }
+    sha_map = {k: hashlib.sha256((evidence_dir / v).read_bytes()).hexdigest() for k, v in refs.items()}
+
+    groups = []
+    for i in range(16):
+        gname = "mt01-v21" if i == 12 else f"group-{i}"
+        pname = group_12_profile if i == 12 else f"mt01-group-{i}-tests"
+        argv = ["python", "-m", "pytest", "tests/test_mt01_v21.py" if i == 12 else f"tests/test_{i}.py", "-q", "-n", "12"]
+        binding = {
+            "base_sha": source_sha,
+            "aggregate_sources": [],
+            "workspace": str(workspace.resolve()),
+            "candidate_files": {"impl.py": current.get("impl.py")},
+            "argv": argv,
+            "registered_profile": pname,
+            "environment_proven": True,
+        }
+        stdout_data = b"12 passed in 1.0s\nMT01_XDIST_WORKERS_COLLECTED=12\n"
+        (evidence_dir / f"mt01_{i}_stdout.log").write_bytes(stdout_data)
+        refs[f"mt01_{i}_stdout"] = f"mt01_{i}_stdout.log"
+        sha_map[f"mt01_{i}_stdout"] = hashlib.sha256(stdout_data).hexdigest()
+
+        art_map = {"stdout": {"path": f"mt01_{i}_stdout.log", "sha256": hashlib.sha256(stdout_data).hexdigest()}}
+        payload = canonical({"binding": binding, "exit_code": 0, "nonempty": True, "artifacts": art_map})
+        p_sha = digest(payload.encode())
+        (evidence_dir / f"mt01_{i}_evidence.json").write_text(payload, encoding="utf-8")
+        refs[f"mt01_{i}_evidence"] = f"mt01_{i}_evidence.json"
+        sha_map[f"mt01_{i}_evidence"] = hashlib.sha256(payload.encode()).hexdigest()
+
+        groups.append({"group": gname, "binding": binding, "evidence_sha256": p_sha})
+
+    report = {
+        "verify_completed": True,
+        "provider_return_determinate": True,
+        "evidence_files": refs,
+        "evidence_sha256": sha_map,
+        "tracked_diff_sha256": sha_map["tracked_diff"],
+        "minimum_test_enabled": True,
+        "minimum_test": {"groups": groups},
+        "changed_files": ["impl.py"],
+    }
+    return report, evidence_dir, workspace, source_sha, profiles
+
+
+def test_verified_ef01_proof_accepts_authentic_16_group_report(tmp_path):
+    from ai_commerce.remote.worker import _verified_ef01_proof
+    report, ev_dir, ws, source_sha, profiles = _build_authentic_16_group_report(tmp_path)
+    diagnostics = []
+    assert _verified_ef01_proof(
+        report, root=ev_dir, workspace=ws, source_sha=source_sha,
+        sources=[], profiles=profiles, allowed_paths=["impl.py"], diagnostics=diagnostics
+    ) is True
+    assert diagnostics == []
+
+
+def test_verified_ef01_proof_rejects_group_12_collision_without_manifest(tmp_path):
+    from ai_commerce.remote.worker import _verified_ef01_proof
+    # Collision: group 12 with registered_profile="mt01-component-onboarding" without valid onboarding manifest
+    report, ev_dir, ws, source_sha, profiles = _build_authentic_16_group_report(
+        tmp_path, group_12_profile="mt01-component-onboarding")
+    diagnostics = []
+    assert _verified_ef01_proof(
+        report, root=ev_dir, workspace=ws, source_sha=source_sha,
+        sources=[], profiles=profiles, allowed_paths=["impl.py"], diagnostics=diagnostics
+    ) is False
+    assert diagnostics == ["MT01_GROUP_12_REGISTERED_BINDING_REJECTED"]
+
+
+@pytest.mark.parametrize("mutation,expected_diag", [
+    ("fake_profile", "MT01_GROUP_0_REGISTERED_BINDING_REJECTED"),
+    ("tampered_argv", "MT01_GROUP_0_REGISTERED_BINDING_REJECTED"),
+    ("tampered_stdout", "RECEIPT_ARTIFACT_HASH_MISMATCH"),
+    ("tampered_diff", "RECEIPT_TRACKED_DIFF_HASH_MISMATCH"),
+    ("source_sha_mismatch", "MT01_GROUP_0_SOURCE_OR_HASH_MISMATCH"),
+    ("uncovered_changed_file", "MT01_CHANGED_FILES_UNCOVERED"),
+    ("missing_provenance", "RECEIPT_PROVENANCE_INCOMPLETE"),
+])
+def test_verified_ef01_proof_mutation_negatives(tmp_path, mutation, expected_diag):
+    from ai_commerce.remote.worker import _verified_ef01_proof
+    report, ev_dir, ws, source_sha, profiles = _build_authentic_16_group_report(tmp_path)
+
+    if mutation == "fake_profile":
+        report["minimum_test"]["groups"][0]["binding"]["registered_profile"] = "mt01-fake-injection"
+    elif mutation == "tampered_argv":
+        report["minimum_test"]["groups"][0]["binding"]["argv"] = ["python", "-m", "pytest", "tests/injected.py"]
+    elif mutation == "tampered_stdout":
+        (ev_dir / "verify.stdout.log").write_bytes(b"tampered stdout")
+    elif mutation == "tampered_diff":
+        report["tracked_diff_sha256"] = "0" * 64
+    elif mutation == "source_sha_mismatch":
+        report["minimum_test"]["groups"][0]["binding"]["base_sha"] = "0" * 40
+    elif mutation == "uncovered_changed_file":
+        report["changed_files"].append("uncovered.py")
+    elif mutation == "missing_provenance":
+        report["verify_completed"] = False
+
+    diagnostics = []
+    result = _verified_ef01_proof(
+        report, root=ev_dir, workspace=ws, source_sha=source_sha,
+        sources=[], profiles=profiles, allowed_paths=["impl.py"], diagnostics=diagnostics
+    )
+    assert result is False
+    assert expected_diag in diagnostics

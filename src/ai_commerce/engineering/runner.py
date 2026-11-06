@@ -438,6 +438,150 @@ def _source_problem(snapshot: dict, initial: dict, *,
     return None
 
 
+def _parse_reconnect_warning(event: dict) -> tuple[int, int] | None:
+    """Parse a Codex top-level reconnect diagnostic warning with bounded N/M."""
+    if not isinstance(event, dict):
+        return None
+    # Reject non-top-level or item events (like tool call results or user/assistant turns)
+    event_type = event.get("type")
+    if event_type in ("item.completed", "item.started", "turn.started", "turn.completed", "turn.failed"):
+        return None
+    # Must be an error or warning level event or contain an error/warning field
+    msg = None
+    if isinstance(event.get("error"), str):
+        msg = event["error"]
+    elif isinstance(event.get("error"), dict) and isinstance(event["error"].get("message"), str):
+        msg = event["error"]["message"]
+    elif isinstance(event.get("message"), str):
+        msg = event["message"]
+    elif isinstance(event.get("detail"), str):
+        msg = event["detail"]
+    elif isinstance(event.get("warning"), str):
+        msg = event["warning"]
+    if not isinstance(msg, str):
+        return None
+    # Reject fatal / quota / permission phrases inside warning
+    msg_lower = msg.lower()
+    for phrase in (
+        "model is at capacity", "no capacity available",
+        "resource_exhausted", "quota exceeded", "quota reached", "429 too many requests",
+        "model_not_found", "model is not supported", "unknown model",
+        "model unavailable", "service unavailable",
+        "permission denied", "permissionerror", "approval denied", "approval required",
+        "requires approval", "auto-denied", "operation not permitted",
+    ):
+        if phrase in msg_lower:
+            return None
+    match = re.search(r"(?i)\breconnect(?:ing)?\b.*?(?<![\w-])([1-9]\d*)\s*(?:/|of)\s*([1-9]\d*)\b", msg)
+    if not match:
+        return None
+    n, m = int(match.group(1)), int(match.group(2))
+    if 1 <= n <= m <= 100:
+        return (n, m)
+    return None
+
+
+def _is_real_completed_command(event: dict) -> str | None:
+    """Identify a genuine completed command_execution item with exit 0 and valid id."""
+    if not isinstance(event, dict):
+        return None
+    if event.get("type") != "item.completed":
+        return None
+    item = event.get("item")
+    if not isinstance(item, dict):
+        return None
+    if item.get("type") != "command_execution":
+        return None
+    if str(item.get("status", "")).lower() != "completed":
+        return None
+    exit_code = item.get("exit_code")
+    if exit_code is None:
+        exit_code = item.get("exit_status")
+    if exit_code is None:
+        exit_code = item.get("returncode")
+    if exit_code != 0:
+        return None
+    item_id = item.get("id") or item.get("call_id")
+    if isinstance(item_id, str) and item_id.strip():
+        return item_id.strip()
+    return None
+
+
+def _codex_reconnect_recovery(stdout: bytes, stderr: bytes = b"", exit_code: int = 0) -> bool:
+    """Validate strict Codex reconnect recovery: valid JSONL, bounded N/M, subsequent command, single final turn.completed."""
+    if exit_code != 0:
+        return False
+    if stderr.strip():
+        return False
+    try:
+        text = stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return False
+    events = []
+    for line in lines:
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            return False
+        if not isinstance(obj, dict):
+            return False
+        events.append(obj)
+
+    warnings: list[tuple[int, tuple[int, int]]] = []
+    for idx, ev in enumerate(events):
+        parsed = _parse_reconnect_warning(ev)
+        if parsed is not None:
+            warnings.append((idx, parsed))
+    if not warnings:
+        return False
+
+    # Check for genuine later command_execution with distinct valid ids
+    used_cmd_ids: set[str] = set()
+    for w_idx, _ in warnings:
+        matched = False
+        for c_idx in range(w_idx + 1, len(events)):
+            cmd_id = _is_real_completed_command(events[c_idx])
+            if cmd_id is not None and cmd_id not in used_cmd_ids:
+                used_cmd_ids.add(cmd_id)
+                matched = True
+                break
+        if not matched:
+            return False
+
+    # Exactly one final turn.completed
+    turn_completed_indices = [i for i, ev in enumerate(events) if ev.get("type") == "turn.completed"]
+    if len(turn_completed_indices) != 1:
+        return False
+    if turn_completed_indices[0] != len(events) - 1:
+        return False
+
+    # No fatal/turn.failed/quota/permission/extra object/error-after-done
+    for idx, ev in enumerate(events):
+        if ev.get("type") == "turn.failed":
+            return False
+        flat_text = json.dumps(ev).lower()
+        for phrase in (
+            "model is at capacity", "no capacity available",
+            "resource_exhausted", "quota exceeded", "quota reached", "429 too many requests",
+            "model_not_found", "model is not supported", "unknown model",
+            "model unavailable", "service unavailable",
+            "permission denied", "permissionerror", "approval denied", "approval required",
+            "requires approval", "auto-denied", "operation not permitted",
+        ):
+            if phrase in flat_text:
+                return False
+        failed = (ev.get("type") in ("error",) or
+                  str(ev.get("status", "")).lower() in ("error", "failed", "failure") or
+                  bool(ev.get("error")))
+        if failed and idx not in {w[0] for w in warnings}:
+            return False
+
+    return True
+
+
 def _provider_problem(data: bytes) -> tuple[str, str] | None:
     """Classify provider-level errors, not arbitrary GitHub/tool results in JSONL.
 
@@ -451,9 +595,10 @@ def _provider_problem(data: bytes) -> tuple[str, str] | None:
         messages.append(data.decode("utf-8", "replace").lower())
     else:
         for event in events:
-            failed = (event.get("type") in ("turn.failed", "error") or
-                      str(event.get("status", "")).lower() in ("error", "failed", "failure") or
-                      bool(event.get("error")))
+            failed = (event.get("type") in ("turn.failed", "error", "warning") or
+                      str(event.get("status", "")).lower() in ("error", "failed", "failure", "warning") or
+                      bool(event.get("error")) or
+                      _parse_reconnect_warning(event) is not None)
             if not failed:
                 continue
             failed_events.append(event)
@@ -477,6 +622,8 @@ def _provider_problem(data: bytes) -> tuple[str, str] | None:
         if any(phrase in message for message in messages for phrase in phrases):
             return status, status
     if failed_events:
+        if _codex_reconnect_recovery(data):
+            return None
         return "EXECUTION_UNKNOWN", "EXECUTOR_OUTCOME_UNCONFIRMED"
     return None
 
@@ -762,7 +909,9 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
                     xdist_available=xdist_available(), windows=(os.name == "nt"),
                     registered_only=True, registered_argv=argv)
                 inv["pytest_profile"] = decision
-            return profile_command(argv, decision=decision, temp_dir=output_dir / "pytest-temp" / group), decision
+            temp_dir = output_dir / "pytest-temp" / group
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            return profile_command(argv, decision=decision, temp_dir=temp_dir), decision
         if mt_context is not None:
             # Publishing scope drift requires a fresh full registered run even
             # when a companion narrow group or prior group PASS is available.

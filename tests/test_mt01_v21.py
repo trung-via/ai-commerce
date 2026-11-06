@@ -1,9 +1,18 @@
 """MT-01 V2.1 adversarial selection contract. No model, network or host effects."""
+import os
 from pathlib import Path
+import pytest
 from ai_commerce.engineering.minimum_test import TestGroup, file_hashes
 from ai_commerce.engineering.impact_v21 import registered_action_plan
 
 from ai_commerce.engineering.impact_v21 import select_impact
+
+
+@pytest.fixture(autouse=True)
+def _isolate_test_git_env(monkeypatch):
+    for key in list(os.environ):
+        if key.startswith("GIT_CONFIG_") or key == "AI_COMMERCE_GIT_GUARD_PATHS":
+            monkeypatch.delenv(key, raising=False)
 
 
 def mk(repo: Path, path: str, data: str = "# test\n"):
@@ -487,8 +496,10 @@ def _v21_make_git_sandbox(tmp_path):
        "from ai_commerce.product.beta import value as b\n"
        "def test_aggregate():\n    assert b() in (0, 2)\n    if b() == 2:\n        assert a() == 1\n")
     def git(*args):
+        import os
+        git_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG_") and k != "AI_COMMERCE_GIT_GUARD_PATHS"}
         return subprocess.check_output(["git", "-C", str(root), *args],
-                                       stderr=subprocess.STDOUT).decode().strip()
+                                       stderr=subprocess.STDOUT, env=git_env).decode().strip()
     git("init", "-q")
     git("add", ".")
     git("-c", "user.name=MT01 Test", "-c", "user.email=mt01@example.invalid",
@@ -557,7 +568,10 @@ def test_v21_offline_ef02_two_action_fanin_real_git_pytest_verify_fix(tmp_path, 
         selected = sorted({p for g in plan["groups"] for p in g["binding"]["mapping"]["tests"]})
         assert selected
         def verify():
-            env = dict(os.environ)
+            env = {k: v for k, v in os.environ.items()
+                   if not k.startswith("GIT_CONFIG_") and k not in (
+                       "AI_COMMERCE_GIT_GUARD_PATHS", "PYTEST_CURRENT_TEST", "PYTEST_PLUGINS"
+                   )}
             env["PYTHONPATH"] = str(root / "src")
             return subprocess.run([sys.executable, "-m", "pytest", *selected,
                                    "-q", "-p", "no:cacheprovider"],
@@ -777,16 +791,25 @@ def test_v22_manifest_rejects_owner_theft_and_unsafe_changes(tmp_path):
             validator(candidate, **args)
 
 
-def test_v22_manifest_rejects_missing_or_linked_source(tmp_path):
+def test_v22_manifest_rejects_missing_or_linked_source(tmp_path, monkeypatch):
     import pytest
+    from pathlib import Path
     validator, values, ctx = _v22_manifest_fixture(tmp_path)
     source = tmp_path / values["sources"][0]
     source.unlink()
     with pytest.raises(ValueError, match="ONBOARD_FILE_MISSING_OR_LINK"):
         validator(values, **ctx)
-    source.symlink_to(tmp_path / "tests/test_prior.py")
-    with pytest.raises(ValueError, match="ONBOARD_FILE_MISSING_OR_LINK"):
-        validator(values, **ctx)
+    try:
+        source.symlink_to(tmp_path / "tests/test_prior.py")
+        with pytest.raises(ValueError, match="ONBOARD_FILE_MISSING_OR_LINK"):
+            validator(values, **ctx)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) != 1314:
+            raise
+        original = Path.is_symlink
+        monkeypatch.setattr(Path, "is_symlink", lambda p: p == source or original(p))
+        with pytest.raises(ValueError, match="ONBOARD_FILE_MISSING_OR_LINK"):
+            validator(values, **ctx)
 
 
 def test_v22_manifest_binding_rejects_untrusted_in_memory_owner(tmp_path):
@@ -1528,3 +1551,27 @@ def test_mt01_preflight_refuses_bad_profile_before_running_any_pytest():
     }}]}
     assert registered_binding_problems(valid_owner, profiles) == []
     # Still only a preflight; private manifest/evidence validation happens in EF02.
+
+
+def test_forged_onboarding_binding_rejected_by_verified_onboarding_binding(tmp_path):
+    from ai_commerce.engineering.impact_v21 import verified_onboarding_binding
+    argv = ["python", "-m", "pytest", "tests/test_mt01_v21.py", "-q", "-n", "12"]
+    profiles = {
+        "mt01-component-onboarding": argv,
+        "mt01-mt01-v21-tests": argv,
+    }
+    # Forged onboarding profile on normal group without manifest metadata
+    forged_binding = {
+        "base_sha": "d" * 40,
+        "argv": argv,
+        "registered_profile": "mt01-component-onboarding",
+    }
+    assert not verified_onboarding_binding(
+        workspace=tmp_path,
+        binding=forged_binding,
+        changed_paths=["src/ai_commerce/engineering/impact_v21.py"],
+        allowed_paths=["src/ai_commerce/engineering/impact_v21.py"],
+        base_sha="d" * 40,
+        registered_profiles=profiles,
+        expected_group="mt01-v21",
+    )
