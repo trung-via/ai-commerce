@@ -737,8 +737,10 @@ def canonical_registered_profile(
     Ambiguous non-onboarding aliases without a matching owner name fail closed.
     """
     if onboarding:
-        return ("mt01-component-onboarding"
-                if profiles.get("mt01-component-onboarding") == list(expected) else None)
+        # The registered onboarding entry is a capability, NOT the runtime
+        # command for the candidate's validated manifest. The separate EF02
+        # verified_onboarding_binding check reconstructs dynamic argv.
+        return "mt01-component-onboarding" if "mt01-component-onboarding" in profiles else None
     names = sorted(name for name, command in profiles.items()
                    if name != "mt01-component-onboarding" and list(command) == list(expected))
     preferred = f"mt01-{group_name}-tests"
