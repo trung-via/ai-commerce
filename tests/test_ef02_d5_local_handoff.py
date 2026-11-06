@@ -851,7 +851,7 @@ def test_real_d31_d32_d2_d4_composition_uses_two_grants_and_holds_unknown(setup,
     scope = {k: event[k] for k in ("repository", "batch_id", "source_sha", "issue_number")}
     registry = {"version": 1, "routes": [
         {"route_id": "route-A", "generation": 1, "chat_url": URL,
-         "cdp_endpoint": "http://127.0.0.1:9222", "consent": True}],
+         "cdp_endpoint": "http://127.0.0.1:9444", "consent": True}],
         "claims": [scope | {"route_id": "route-A", "generation": 1}]}
     def signed(operation, claim):
         grant = {"kind": "AI_COMMERCE_SIGNED_ORIGIN_CONSENT", "version": 1,
@@ -879,7 +879,9 @@ def test_real_d31_d32_d2_d4_composition_uses_two_grants_and_holds_unknown(setup,
     page = FakePage(gate="DRAFT_PRESENT" if gate == "unsafe_cdp" else "READY")
     inventory = FakeInventory(page)
     monkeypatch.setattr(local_wake_entry, "LocalChromeDoorbellAdapter",
-                        lambda **kw: LocalChromeDoorbellAdapter(allow_submit=True, inventory=inventory))
+                        lambda **kw: LocalChromeDoorbellAdapter(
+                            allow_submit=True, inventory=inventory,
+                            send_only=kw.get("send_only") is True))
     enroll(s, mode="deliver")
     emit(s)
     outcome = listen(s, deliver=True, delivery=options)
@@ -887,6 +889,9 @@ def test_real_d31_d32_d2_d4_composition_uses_two_grants_and_holds_unknown(setup,
     assert outcome["chat_delivery_proven"] is outcome["brain_continuation_proven"] is False
     assert page.counts["click"] == (1 if gate == "valid" else 0)
     if gate == "valid":
+        assert "delivery_scope: send_only" in page.submitted_text
+        assert "fresh_brain_sync_required: false" in page.submitted_text
+        assert "automation_followup_requested: false" in page.submitted_text
         assert options["idempotency"].exists()
         assert "UNKNOWN" in options["idempotency"].read_text()
     before = len(s.source.calls)
