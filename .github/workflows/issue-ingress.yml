@@ -305,3 +305,147 @@ jobs:
             } catch (_) {}
             await github.rest.issues.createComment({...context.repo, issue_number:context.issue.number,
               body:'AI_COMMERCE_D5_RESULT_V1\n```json\n'+JSON.stringify(safe)+'\n```'});
+
+# Personal-mode D5 bootstrap only. This is intentionally narrower than the
+  # off-host-signed D5 operator lifecycle: one owner-approved CDP activation,
+  # no browser chat access, no Wake, no service or scheduled-task mutation.
+  hostops-d5-personal-bootstrap:
+    if: >-
+      github.repository == 'trung-via/ai-commerce' &&
+      github.actor == github.repository_owner &&
+      github.event_name == 'issues' && github.event.action == 'opened' &&
+      github.event.issue.user.login == github.repository_owner &&
+      startsWith(github.event.issue.title, '[HOSTOPS D5 BOOT] ')
+    runs-on: [self-hosted, Windows, ai-commerce-hostops]
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: d5-personal-bootstrap-9333
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Run fixed personally authorized Chrome 9333 acquisition
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $outFile = Join-Path $env:RUNNER_TEMP ('d5-personal-' + $env:GITHUB_RUN_ID + '-' + $env:GITHUB_RUN_ATTEMPT + '.json')
+          $status = 'BLOCKED'
+          $code = 'PRECHECK_UNKNOWN'
+          $verified = $false
+          $launched = $false
+          try {
+            if ($env:GITHUB_ACTIONS -cne 'true' -or $env:OS -cne 'Windows_NT' -or
+                $env:GITHUB_REPOSITORY -cne 'trung-via/ai-commerce') { throw 'BAD_HOST' }
+            $evt = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($evt.action -cne 'opened' -or
+                $evt.issue.user.login -cne 'trung-via' -or
+                $evt.sender.login -cne 'trung-via' -or
+                -not $evt.issue.title.StartsWith('[HOSTOPS D5 BOOT] ') -or
+                [string]$evt.issue.body -cne '{"schema":"ai-commerce.d5.personal.v1","operation":"START_CDP_9333","parameters":{}}') { throw 'BAD_ISSUE' }
+            if ([Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) { throw 'NO_INTERACTIVE_SESSION' }
+            $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+            $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+            if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'ELEVATED' }
+            # Use this protected workflow's exact GitHub main checkout, not a
+            # potentially stale operator workspace; no extra Human git-sync.
+            $root = $env:GITHUB_WORKSPACE
+            $remote = (& git -C $root remote get-url origin 2>$null | Out-String).Trim()
+            $head = (& git -C $root rev-parse HEAD 2>$null | Out-String).Trim()
+            $dirty = @(& git -C $root status --porcelain=v1 --untracked-files=no 2>$null)
+            if ($head -cne $env:GITHUB_SHA -or
+                $dirty.Count -ne 0 -or $remote -cnotin @(
+                  'https://github.com/trung-via/ai-commerce.git',
+                  'https://github.com/trung-via/ai-commerce',
+                  'git@github.com:trung-via/ai-commerce.git')) { throw 'SOURCE_DRIFT' }
+            if (-not $env:LOCALAPPDATA) { throw 'NO_APPDATA' }
+            $configRoot = Join-Path $env:LOCALAPPDATA 'AI-Commerce'
+            $candidates = @(
+              (Join-Path $configRoot 'Chrome-Acquisition\config.json'),
+              (Join-Path $configRoot 'chrome.json'),
+              (Join-Path $configRoot 'chrome-acquisition.json')
+            )
+            $found = @($candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+            if ($found.Count -ne 1) { throw 'CONFIG_AMBIGUOUS_OR_ABSENT' }
+            $config = [string]$found[0]
+            $py = Join-Path $root '.venv\Scripts\python.exe'
+            if (-not (Test-Path -LiteralPath $py -PathType Leaf)) {
+              $cmd = Get-Command python.exe -ErrorAction SilentlyContinue
+              if ($null -eq $cmd) { throw 'PYTHON_UNAVAILABLE' }
+              $py = $cmd.Source
+            }
+            $oldPython = $env:PYTHONPATH
+            try {
+              $env:PYTHONPATH = Join-Path $root 'src'
+              # The source-owned acquisition independently verifies the signed
+              # Google Chrome executable, dedicated profile, exact loopback,
+              # input desktop, ownership and zero conflicting root processes.
+              $native = @(& $py -m ai_commerce.remote.chrome_acquisition launch --config $config --checkout $root --opt-in 2>&1 | ForEach-Object { [string]$_ })
+              $exit = $LASTEXITCODE
+            } finally {
+              $env:PYTHONPATH = $oldPython
+            }
+            if ($exit -eq 0 -and $native.Count -eq 1) {
+              $record = $native[0] | ConvertFrom-Json
+              if ($record.status -ceq 'READY_ATTACH' -and $record.cdp_verified -eq $true -and
+                  $record.launched -is [bool]) {
+                $status = 'OBSERVED'; $code = 'CDP_9333_READY'
+                $verified = $true; $launched = [bool]$record.launched
+              } else { $code = 'RESULT_UNVERIFIED' }
+            } else {
+              # Never publish local paths, profile contents, argv or stderr.
+              $matched = @($native | Where-Object { $_ -cmatch '^CHROME_ACQUISITION_BLOCKED: [A-Z0-9_]{1,70}$' })
+              if ($matched.Count -eq 1 -and $matched[0] -cmatch '^CHROME_ACQUISITION_BLOCKED: ([A-Z0-9_]{1,70})$') {
+                $code = [string]$Matches[1]
+              } else { $code = 'NATIVE_RESULT_UNKNOWN' }
+            }
+          } catch {
+            $safeCode = [string]$_.Exception.Message
+            $known = @('BAD_HOST','BAD_ISSUE','NO_INTERACTIVE_SESSION','ELEVATED','SOURCE_DRIFT','NO_APPDATA','CONFIG_AMBIGUOUS_OR_ABSENT','PYTHON_UNAVAILABLE')
+            $code = if ($known -ccontains $safeCode) { $safeCode } else { 'PRECHECK_UNKNOWN' }
+          }
+          $receipt = [ordered]@{status=$status; code=$code; source_sha=$env:GITHUB_SHA;
+              cdp_port=9333; cdp_verified=$verified; launched=$launched; wake_sent=$false}
+          $text = ConvertTo-Json -InputObject $receipt -Compress
+          $bytes = [Text.Encoding]::UTF8.GetBytes($text)
+          try {
+            $stream = [IO.File]::Open($outFile,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+            try { $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true) }
+            finally { $stream.Dispose() }
+          } catch { Write-Output 'D5_PERSONAL_RECEIPT_UNAVAILABLE'; exit 2 }
+          Write-Output ('D5_PERSONAL_STATUS=' + $status + ';CODE=' + $code)
+          exit 0
+      - name: Publish closed public receipt
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs'), path = require('path');
+            const name = 'd5-personal-' + process.env.GITHUB_RUN_ID + '-' +
+              process.env.GITHUB_RUN_ATTEMPT + '.json';
+            const target = path.join(process.env.RUNNER_TEMP, name);
+            let result = {status:'BLOCKED',code:'RECEIPT_UNAVAILABLE',
+              source_sha:context.sha,cdp_port:9333,cdp_verified:false,
+              launched:false,wake_sent:false};
+            try {
+              if (fs.statSync(target).size > 1024) throw Error();
+              const parsed = JSON.parse(fs.readFileSync(target,'utf8'));
+              const fields = ['status','code','source_sha','cdp_port',
+                'cdp_verified','launched','wake_sent'];
+              if (!parsed || Array.isArray(parsed) ||
+                  Object.keys(parsed).sort().join() !== fields.sort().join() ||
+                  !['OBSERVED','BLOCKED'].includes(parsed.status) ||
+                  !/^[A-Z0-9_]{1,70}$/.test(parsed.code) ||
+                  parsed.source_sha !== context.sha || parsed.cdp_port !== 9333 ||
+                  typeof parsed.cdp_verified !== 'boolean' ||
+                  typeof parsed.launched !== 'boolean' || parsed.wake_sent !== false ||
+                  (parsed.status === 'OBSERVED' &&
+                   (parsed.code !== 'CDP_9333_READY' || !parsed.cdp_verified))) throw Error();
+              result = parsed;
+            } catch (_) {}
+            await github.rest.issues.createComment({...context.repo,
+              issue_number:context.issue.number,
+              body:'AI_COMMERCE_D5_PERSONAL_BOOT_RESULT_V1\n' + JSON.stringify(result)});
