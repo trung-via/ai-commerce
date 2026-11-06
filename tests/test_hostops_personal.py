@@ -987,5 +987,35 @@ const script = fs.readFileSync(process.argv[2],'utf8');
 
 
 
+    def test_d5_port_compare_is_bounded_loopback_only(self):
+        """Bind-check 9333 versus 9444 without relaunch or removing any Chrome profile."""
+        workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+        assert workflow.count("  hostops-d5-compare-loopback:") == 1
+        job = workflow.split("  hostops-d5-compare-loopback:", 1)[1]
+        assert "github.actor == github.repository_owner" in job
+        assert "github.event.issue.user.login == github.repository_owner" in job
+        assert "github.event_name == 'issues' && github.event.action == 'opened'" in job
+        assert "startsWith(github.event.issue.title, '[HOSTOPS D5 PORT TEST] ')" in job
+        assert '{"schema":"ai-commerce.d5.port-test.v1","operation":"BIND_LOOPBACK_9333_9444","parameters":{}}' in job
+        assert "runs-on: [self-hosted, Windows, ai-commerce-hostops]" in job
+        assert "persist-credentials: false" in job
+        assert "Test-ExactLoopbackBind 9333" in job
+        assert "Test-ExactLoopbackBind 9444" in job
+        assert "127.0.0.1" in job
+        assert "ExclusiveAddressUse = $true" in job
+        assert "$listener.Start(1)" in job
+        assert "$listener.Stop()" in job
+        assert "PORT_IN_USE" in job and "ACCESS_DENIED" in job
+        assert "AI_COMMERCE_D5_PORT_COMPARE_V1" in job
+        assert "value.source_sha !== context.sha" in job
+        assert "chrome_touched:false,wake_sent:false" in job
+        assert "Get-NetTCPConnection" not in job
+        assert "Start-Process" not in job and "Stop-Process" not in job
+        assert "Remove-Item" not in job and "Register-ScheduledTask" not in job
+        assert "chrome_acquisition launch" not in job and "Invoke-Expression" not in job
+        assert "SEND_WAKE" not in job
+
+
+
 if __name__ == "__main__":
     unittest.main()

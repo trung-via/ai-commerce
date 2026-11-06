@@ -463,3 +463,127 @@ jobs:
             await github.rest.issues.createComment({...context.repo,
               issue_number:context.issue.number,
               body:'AI_COMMERCE_D5_PERSONAL_BOOT_RESULT_V1\n' + JSON.stringify(result)});
+
+  # One-shot, read-only TCP bind comparison. A listener is opened and immediately
+  # closed on loopback for each fixed port; no Chrome launch or profile mutation.
+  hostops-d5-compare-loopback:
+    if: >-
+      github.repository == 'trung-via/ai-commerce' &&
+      github.actor == github.repository_owner &&
+      github.event_name == 'issues' && github.event.action == 'opened' &&
+      github.event.issue.user.login == github.repository_owner &&
+      startsWith(github.event.issue.title, '[HOSTOPS D5 PORT TEST] ')
+    runs-on: [self-hosted, Windows, ai-commerce-hostops]
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: d5-loopback-compare-9333-9444
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compare exact loopback TCP bind for 9333 and 9444
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $file = Join-Path $env:RUNNER_TEMP ('d5-port-compare-' + $env:GITHUB_RUN_ID + '-' + $env:GITHUB_RUN_ATTEMPT + '.json')
+          $state = 'BLOCKED'
+          $reason = 'INVALID_EVENT'
+          $p9333 = 'NOT_CHECKED'
+          $p9444 = 'NOT_CHECKED'
+          function Test-ExactLoopbackBind([int]$port) {
+            $listener = $null
+            try {
+              $ip = [System.Net.IPAddress]::Parse('127.0.0.1')
+              $listener = [System.Net.Sockets.TcpListener]::new($ip, $port)
+              $listener.Server.ExclusiveAddressUse = $true
+              $listener.Start(1)
+              return 'BIND_OK'
+            } catch [System.Net.Sockets.SocketException] {
+              if ($_.Exception.SocketErrorCode -eq [System.Net.Sockets.SocketError]::AddressAlreadyInUse) { return 'PORT_IN_USE' }
+              if ($_.Exception.SocketErrorCode -eq [System.Net.Sockets.SocketError]::AccessDenied) { return 'ACCESS_DENIED' }
+              return 'BIND_UNKNOWN'
+            } catch {
+              return 'BIND_UNKNOWN'
+            } finally {
+              if ($null -ne $listener) { try { $listener.Stop() } catch {} }
+            }
+          }
+          try {
+            if ($env:GITHUB_REPOSITORY -cne 'trung-via/ai-commerce' -or
+                $env:OS -cne 'Windows_NT' -or
+                $env:GITHUB_ACTIONS -cne 'true') { throw 'BAD_HOST' }
+            $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($event.action -cne 'opened' -or
+                $event.issue.user.login -cne 'trung-via' -or
+                $event.sender.login -cne 'trung-via' -or
+                -not $event.issue.title.StartsWith('[HOSTOPS D5 PORT TEST] ') -or
+                [string]$event.issue.body -cne '{"schema":"ai-commerce.d5.port-test.v1","operation":"BIND_LOOPBACK_9333_9444","parameters":{}}') {
+              throw 'INVALID_EVENT'
+            }
+            $p9333 = Test-ExactLoopbackBind 9333
+            $p9444 = Test-ExactLoopbackBind 9444
+            $state = 'OBSERVED'
+            $reason = 'PORTS_CHECKED'
+          } catch {
+            $state = 'BLOCKED'
+            $reason = 'INVALID_EVENT'
+          }
+          $record = [ordered]@{
+            status = $state
+            code = $reason
+            source_sha = $env:GITHUB_SHA
+            port_9333 = $p9333
+            port_9444 = $p9444
+            chrome_touched = $false
+            wake_sent = $false
+          }
+          $raw = ConvertTo-Json -InputObject $record -Compress
+          try {
+            $bytes = [Text.Encoding]::UTF8.GetBytes($raw)
+            $stream = [IO.File]::Open($file,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+            try { $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true) }
+            finally { $stream.Dispose() }
+          } catch {
+            Write-Output 'D5_PORT_TEST_RECEIPT_UNAVAILABLE'
+            exit 2
+          }
+          Write-Output ('D5_PORT_TEST_STATUS=' + $state)
+      - name: Publish bounded diagnostic codes
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs'), path = require('path');
+            const file = path.join(process.env.RUNNER_TEMP,
+              'd5-port-compare-' + process.env.GITHUB_RUN_ID + '-' +
+              process.env.GITHUB_RUN_ATTEMPT + '.json');
+            let result = {status:'BLOCKED',code:'RECEIPT_UNAVAILABLE',
+              source_sha:context.sha,port_9333:'NOT_CHECKED',port_9444:'NOT_CHECKED',
+              chrome_touched:false,wake_sent:false};
+            try {
+              if (fs.statSync(file).size > 1024) throw Error();
+              const value = JSON.parse(fs.readFileSync(file,'utf8'));
+              const names = ['status','code','source_sha','port_9333','port_9444',
+                'chrome_touched','wake_sent'];
+              const states = ['BIND_OK','PORT_IN_USE','ACCESS_DENIED','BIND_UNKNOWN','NOT_CHECKED'];
+              if (!value || Array.isArray(value) ||
+                  Object.keys(value).sort().join() !== names.sort().join() ||
+                  !['BLOCKED','OBSERVED'].includes(value.status) ||
+                  !['PORTS_CHECKED','INVALID_EVENT'].includes(value.code) ||
+                  value.source_sha !== context.sha ||
+                  !states.includes(value.port_9333) ||
+                  !states.includes(value.port_9444) ||
+                  value.chrome_touched !== false || value.wake_sent !== false ||
+                  (value.status === 'OBSERVED' &&
+                   (value.code !== 'PORTS_CHECKED' ||
+                    value.port_9333 === 'NOT_CHECKED' ||
+                    value.port_9444 === 'NOT_CHECKED'))) throw Error();
+              result = value;
+            } catch (_) {}
+            await github.rest.issues.createComment({...context.repo,
+              issue_number:context.issue.number,
+              body:'AI_COMMERCE_D5_PORT_COMPARE_V1\n'+JSON.stringify(result)});
