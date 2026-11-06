@@ -533,11 +533,19 @@ def select_plan(*, repo: Path, base_sha: str, base_files: Mapping[str, str],
         parallel_args = serial_args + ["-n", "12"]
         eligible_args = ((parallel_args,) if parallel_requested else (serial_args,)) if registered_only else (
             serial_args, parallel_args)
-        for name, argv in sorted((registered_profiles or {}).items()):
-            if (list(argv[:3]) in (["python", "-m", "pytest"], ["py", "-m", "pytest"]) and
-                    list(argv[3:]) in eligible_args):
-                registered[group.name] = (name, list(argv))
-                break
+        candidates = [
+            (name, list(argv)) for name, argv in sorted((registered_profiles or {}).items())
+            if name != "mt01-component-onboarding"
+            and list(argv[:3]) in (["python", "-m", "pytest"], ["py", "-m", "pytest"])
+            and list(argv[3:]) in eligible_args
+        ]
+        preferred = f"mt01-{group.name}-tests"
+        matching_owner = next((entry for entry in candidates if entry[0] == preferred), None)
+        if matching_owner is not None:
+            registered[group.name] = matching_owner
+        elif len(candidates) == 1:
+            registered[group.name] = candidates[0]
+        # Multiple unrelated aliases are not independent registered proof.
     reasons = []
     if set(changed_paths) & global_files:
         reasons.append("SHARED_TEST_CONFIGURATION_REQUIRES_FULL_SUITE")
