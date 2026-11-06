@@ -1448,3 +1448,83 @@ def test_d5_operator_bridge_pr_ci_covers_independent_hostops_personal_consumer(t
     # The independent protected Brain merge gate requires precisely this
     # already-reviewed list; never drop the Personal HostOps consumer.
     assert "tests/test_hostops_personal.py" in plan.selected_tests
+
+
+def test_mt01_duplicate_onboarding_command_never_claims_static_owner(tmp_path):
+    """#447/#449: identical argv must not switch an ordinary test into onboarding."""
+    from ai_commerce.engineering.impact_v21 import canonical_registered_profile
+    argv = ["python", "-m", "pytest", "tests/test_mt01_v21.py", "-q", "-n", "12"]
+    profiles = {"mt01-component-onboarding": argv, "mt01-mt01-v21-tests": argv}
+    assert canonical_registered_profile(
+        profiles, argv, group_name="mt01-v21", onboarding=False) == "mt01-mt01-v21-tests"
+    assert canonical_registered_profile(
+        profiles, argv, group_name="fresh-owner", onboarding=True) == "mt01-component-onboarding"
+    assert canonical_registered_profile(
+        {"mt01-component-onboarding": argv}, argv,
+        group_name="mt01-v21", onboarding=False) is None
+    assert canonical_registered_profile(
+        {"unrelated-a": argv, "unrelated-b": argv}, argv,
+        group_name="mt01-v21", onboarding=False) is None
+    # Onboarding argv is derived from a validated manifest, not the
+    # registration's fixed bootstrap argv.
+    assert canonical_registered_profile(
+        {"mt01-component-onboarding": ["python", "-m", "pytest", "other.py"]},
+        argv, group_name="new-owner", onboarding=True) == "mt01-component-onboarding"
+    assert canonical_registered_profile(
+        {}, argv, group_name="new-owner", onboarding=True) is None
+
+
+def test_mt01_real_impact_planner_uses_static_owner_not_reserved_profile(tmp_path):
+    from ai_commerce.engineering.impact_v21 import registered_action_plan
+    src = "src/ai_commerce/fresh/service.py"
+    test = "tests/test_mt01_v21.py"
+    mk(tmp_path, src, "x = 1\\n")
+    mk(tmp_path, test, "def test_value(): assert True\\n")
+    baseline = file_hashes(tmp_path)
+    mk(tmp_path, src, "x = 2\\n")
+    command = ["python", "-m", "pytest", test, "-q", "-n", "12"]
+    plan = registered_action_plan(
+        repo=tmp_path, base_sha="a" * 40, base_files=baseline,
+        candidate_files=file_hashes(tmp_path), changed_paths=[src],
+        required_acs=["MT01.test"], fallback_argv=command,
+        groups=(group("mt01-v21", (test,), (src,)),),
+        registered_profiles={
+            "mt01-component-onboarding": command,
+            "mt01-mt01-v21-tests": command,
+        },
+    )
+    assert plan["selected_groups"] == ["mt01-v21"]
+    # A disposable minimal sandbox may remain UNPROVEN for unrelated source/
+    # consumer coverage. This regression is specifically about *identity*;
+    # it must not claim an EF01 or EF02 PASS from the synthetic planner.
+    assert plan["groups"][0]["binding"]["registered_profile"] == "mt01-mt01-v21-tests"
+    assert not any("REGISTERED_PROFILE_REQUIRED" in reason for reason in plan["reason_codes"])
+    assert "onboarding_data_only" not in plan["groups"][0]["binding"]
+
+
+def test_mt01_preflight_refuses_bad_profile_before_running_any_pytest():
+    from ai_commerce.engineering.verification import registered_binding_problems
+    argv = ["python", "-m", "pytest", "tests/test_mt01_v21.py", "-q", "-n", "12"]
+    profiles = {"mt01-component-onboarding": argv, "mt01-mt01-v21-tests": argv}
+    ordinary = {"groups": [{"binding": {
+        "registered_profile": "mt01-mt01-v21-tests", "argv": argv,
+    }}]}
+    assert registered_binding_problems(ordinary, profiles) == []
+    forged = {"groups": [{"binding": {
+        "registered_profile": "mt01-component-onboarding", "argv": argv,
+    }}]}
+    assert registered_binding_problems(forged, profiles) == [
+        "MT01_GROUP_0_ONBOARDING_PROOF_MISSING"]
+    wrong_name = {"groups": [{"binding": {
+        "registered_profile": "other", "argv": argv,
+    }}]}
+    assert registered_binding_problems(wrong_name, profiles) == [
+        "MT01_GROUP_0_REGISTERED_BINDING_REJECTED"]
+    valid_owner = {"groups": [{"binding": {
+        "registered_profile": "mt01-component-onboarding", "argv": argv,
+        "onboarding_data_only": True, "onboarding_manifest_path":
+            "work_items/mt01-components/new-owner.json",
+        "onboarding_manifest_sha256": "f" * 64,
+    }}]}
+    assert registered_binding_problems(valid_owner, profiles) == []
+    # Still only a preflight; private manifest/evidence validation happens in EF02.
