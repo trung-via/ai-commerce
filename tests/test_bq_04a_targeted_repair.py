@@ -19,6 +19,7 @@ from ai_commerce.creative_quality import multimodal_review as mm
 from ai_commerce.creative_quality import repair_policy as rp
 from ai_commerce.creative_quality import repair_preservation as r_pres
 from ai_commerce.creative_quality import repair_reinspection as r_re
+from ai_commerce.creative_quality import t2_sampling as t2
 from test_bq_02a_critic_t1 import make_mp4, make_plan
 from test_bq_02b_multimodal import probe, compose, chain
 
@@ -74,6 +75,38 @@ def real_media_bundle():
     }
 
 
+def make_native_defect_review(
+    bundle,
+    *,
+    defect_time="1.500",
+    defect_region=None,
+    defect_kind="FRAME_SIGNAL_DEFECT",
+):
+    if defect_region is None:
+        defect_region = [0.1, 0.1, 0.9, 0.9]
+    sampled = bundle["sampled"]
+    s_dict = copy.deepcopy(sampled.to_dict())
+    s_dict["frames"].append({
+        "state": "OBSERVED",
+        "defect": True,
+        "time": defect_time,
+        "region": defect_region,
+        "kind": defect_kind,
+        "severity": "LOCAL_DEFECT",
+        "shot_id": "shot_001",
+    })
+    s_obj = object.__new__(t2.BQ02bT2SelectiveEvidence)
+    object.__setattr__(s_obj, "_source", sampled._source)
+    object.__setattr__(s_obj, "_authenticated_json", critic._canonical(s_dict))
+    critic._Record.__init__(s_obj, critic._canonical(s_dict))
+    return mm.multimodal_review(
+        bundle["original_review"],
+        s_obj,
+        original_review_digest=bundle["original_review"].digest,
+        t2_digest=s_obj.digest,
+    )
+
+
 def make_grounded_defect():
     return {
         "kind": "SIGNAL_BLACK_FRAME",
@@ -102,7 +135,7 @@ def test_real_media_clean_review_decides_keep(real_media_bundle):
     assert d["semantic_quality"] == "UNKNOWN"
 
 
-def test_grounded_defect_proposes_local_edit(real_media_bundle):
+def test_unverified_caller_defect_returns_to_brain(real_media_bundle):
     rev = real_media_bundle["multimodal_review"]
     asset = real_media_bundle["asset"]
     defect = make_grounded_defect()
@@ -113,9 +146,26 @@ def test_grounded_defect_proposes_local_edit(real_media_bundle):
         context={"grounded_defect": defect},
     )
     d = dec.to_dict()
+    assert d["choice"] == "RETURN_TO_BRAIN"
+    assert d["status"] == "RETURNED_TO_BRAIN"
+    assert d["grounded_fault"] is None
+    assert "UNPROVEN_CALLER_DEFECT_NO_NATIVE_OBSERVATION" in d["reason_codes"]
+
+
+def test_native_grounded_defect_proposes_local_edit(real_media_bundle):
+    rev = make_native_defect_review(real_media_bundle)
+    asset = real_media_bundle["asset"]
+    dec = rp.decide_repair(
+        rev,
+        review_digest=rev.digest,
+        asset_sha256=asset.expected_sha256,
+    )
+    d = dec.to_dict()
     assert d["choice"] == "PROPOSE_LOCAL_DETERMINISTIC_EDIT"
     assert d["status"] == "PROPOSED_LOCAL_EDIT"
-    assert d["grounded_fault"] == defect
+    assert d["grounded_fault"] is not None
+    assert d["grounded_fault"]["kind"] == "FRAME_SIGNAL_DEFECT"
+    assert d["grounded_fault"]["time"] == "1.500"
     assert "LOCAL_DETERMINISTIC_EDIT_PROPOSED_NO_EXECUTION" in d["reason_codes"]
 
 
@@ -318,14 +368,12 @@ def test_study_readiness_reference_attaches_without_falsifying_human_proof(real_
 # ---------------------------------------------------------------------------
 
 def test_preservation_plan_locks_all_non_target_invariants(real_media_bundle):
-    rev = real_media_bundle["multimodal_review"]
+    rev = make_native_defect_review(real_media_bundle)
     asset = real_media_bundle["asset"]
-    defect = make_grounded_defect()
     dec = rp.decide_repair(
         rev,
         review_digest=rev.digest,
         asset_sha256=asset.expected_sha256,
-        context={"grounded_defect": defect},
     )
     plan = r_pres.create_preservation_plan(
         dec,
@@ -336,6 +384,7 @@ def test_preservation_plan_locks_all_non_target_invariants(real_media_bundle):
     )
     p = plan.to_dict()
     assert p["status"] == "PRESERVATION_PLAN_ESTABLISHED"
+    assert p["decision_choice"] == "PROPOSE_LOCAL_DETERMINISTIC_EDIT"
     assert p["original_asset_sha256"] == asset.expected_sha256
     assert p["expected_derived_sha256"] is None  # Never made up
     assert all(p["non_target_invariants"].values())
@@ -420,14 +469,12 @@ def test_invalid_target_scope_region_rejected(real_media_bundle, bad_region):
 
 
 def test_missing_oracle_fails_closed_to_hold(real_media_bundle):
-    rev = real_media_bundle["multimodal_review"]
+    rev = make_native_defect_review(real_media_bundle)
     asset = real_media_bundle["asset"]
-    defect = make_grounded_defect()
     dec = rp.decide_repair(
         rev,
         review_digest=rev.digest,
         asset_sha256=asset.expected_sha256,
-        context={"grounded_defect": defect},
     )
     plan = r_pres.create_preservation_plan(
         dec,
@@ -511,14 +558,12 @@ def test_after_review_sha_mismatch_rejected(real_media_bundle):
 
 
 def test_successful_reinspection_technical_correction_preserves_brain_authority(real_media_bundle):
-    rev = real_media_bundle["multimodal_review"]
+    rev = make_native_defect_review(real_media_bundle)
     asset = real_media_bundle["asset"]
-    defect = make_grounded_defect()
     dec = rp.decide_repair(
         rev,
         review_digest=rev.digest,
         asset_sha256=asset.expected_sha256,
-        context={"grounded_defect": defect},
     )
     plan = r_pres.create_preservation_plan(
         dec,
@@ -556,14 +601,18 @@ def test_successful_reinspection_technical_correction_preserves_brain_authority(
         after_asset_sha256=asset2.expected_sha256,
     )
     c = closure.to_dict()
-    assert c["status"] == "TECHNICAL_TARGET_CORRECTED_INVARIANTS_UNREGRESSED"
-    assert c["outcome"] == "FORWARD_TO_BRAIN_FOR_ATTENDED_REVIEW"
-    assert c["target_corrected"] is True
-    assert c["invariants_unregressed"] is True
+    # In BQ-04a source-only, clean alternative media difference alone is NOT proof of repair.
+    # Independent Q4 before/after evidence + genuine non-target receipts required (pending BQ-04b).
+    assert c["status"] == "IMPROVEMENT_UNPROVEN"
+    assert c["outcome"] == "IMPROVEMENT_UNPROVEN"
+    assert c["target_corrected"] is False
+    assert c["invariants_unregressed"] is False
     assert c["quality_pass"] is False  # Never automatic PASS
     assert c["release_authorization"] == "NONE"
     assert c["semantic_quality"] == "UNKNOWN"
     assert c["human_calibration"] == "NOT_RUN"
+    assert "IMPROVEMENT_UNPROVEN" in c["reason_codes"]
+    assert "PRESERVATION_UNPROVEN" in c["reason_codes"]
 
 
 # ---------------------------------------------------------------------------
@@ -753,14 +802,12 @@ def test_preservation_plan_handles_non_local_choices_fail_closed(real_media_bund
     ids=["none", "trim", "audio_norm", "crop", "mock"],
 )
 def test_supported_editors_accepted(real_media_bundle, ed_name):
-    rev = real_media_bundle["multimodal_review"]
+    rev = make_native_defect_review(real_media_bundle)
     asset = real_media_bundle["asset"]
-    defect = make_grounded_defect()
     dec = rp.decide_repair(
         rev,
         review_digest=rev.digest,
         asset_sha256=asset.expected_sha256,
-        context={"grounded_defect": defect},
     )
     plan = r_pres.create_preservation_plan(
         dec,
@@ -820,13 +867,39 @@ def test_invalid_reinspection_probes_rejected(real_media_bundle, bad_probe_input
 @pytest.mark.parametrize(
     "tamper_field,tamper_val",
     [
+        ("status", "TAMPERED_STATUS"),
+        ("choice", "HOLD"),
         ("t1_digest", "0" * 64),
         ("t2_digest", "0" * 64),
         ("plan_digest", "0" * 64),
         ("original_asset_sha256", "0" * 64),
         ("authority", {"publication": "UNAUTHORIZED_GO"}),
+        ("human_calibration", "CALIBRATED"),
+        ("t3_status", "PASS"),
+        ("semantic_quality", "HIGH"),
+        ("reason_codes", ["TAMPERED_REASON"]),
+        ("risks", ["TAMPERED_RISK"]),
+        ("uncertainties", ["TAMPERED_UNCERTAINTY"]),
+        ("grounded_fault", {"defect_id": "TAMPERED"}),
+        ("injected_extra", 123),
     ],
-    ids=["t1_digest", "t2_digest", "plan_digest", "asset_sha", "authority"],
+    ids=[
+        "status",
+        "choice",
+        "t1_digest",
+        "t2_digest",
+        "plan_digest",
+        "asset_sha",
+        "authority",
+        "human_cal",
+        "t3_status",
+        "semantic_q",
+        "reasons",
+        "risks",
+        "uncertainties",
+        "grounded_fault",
+        "injected_extra",
+    ],
 )
 def test_decision_replay_tamper_matrix(real_media_bundle, tamper_field, tamper_val):
     rev = real_media_bundle["multimodal_review"]
@@ -841,12 +914,31 @@ def test_decision_replay_tamper_matrix(real_media_bundle, tamper_field, tamper_v
 @pytest.mark.parametrize(
     "tamper_field,tamper_val",
     [
+        ("status", "TAMPERED_STATUS"),
         ("decision_choice", "HOLD"),
         ("decision_digest", "0" * 64),
         ("editor", "OFFLINE_DETERMINISTIC_CROP"),
         ("authority", {"publication": "UNAUTHORIZED_GO"}),
+        ("target_scope", {"time_range": [0.0, 99.0]}),
+        ("non_target_invariants", {"product_identity_and_claims": False}),
+        ("test_oracle", {"oracle_type": "TAMPERED"}),
+        ("expected_derived_sha256", "0" * 64),
+        ("reason_codes", ["TAMPERED_REASON"]),
+        ("injected_extra", 123),
     ],
-    ids=["dec_choice", "dec_digest", "editor", "authority"],
+    ids=[
+        "status",
+        "dec_choice",
+        "dec_digest",
+        "editor",
+        "authority",
+        "target_scope",
+        "non_target_inv",
+        "test_oracle",
+        "expected_sha",
+        "reasons",
+        "injected_extra",
+    ],
 )
 def test_preservation_replay_tamper_matrix(real_media_bundle, tamper_field, tamper_val):
     rev = real_media_bundle["multimodal_review"]
@@ -862,11 +954,29 @@ def test_preservation_replay_tamper_matrix(real_media_bundle, tamper_field, tamp
 @pytest.mark.parametrize(
     "tamper_field,tamper_val",
     [
+        ("status", "TAMPERED_STATUS"),
         ("preservation_plan_digest", "0" * 64),
         ("original_asset_sha256", "0" * 64),
+        ("expected_derived_sha256", "0" * 64),
         ("target_scope", {"target_type": "OVERRIDE"}),
+        ("non_target_invariants", {"scene_intent": False}),
+        ("expected_probes", ["tampered_probe"]),
+        ("reason_codes", ["TAMPERED_REASON"]),
+        ("authority", {"publication": "UNAUTHORIZED_GO"}),
+        ("injected_extra", 123),
     ],
-    ids=["plan_digest", "asset_sha", "scope"],
+    ids=[
+        "status",
+        "plan_digest",
+        "asset_sha",
+        "expected_sha",
+        "scope",
+        "non_target_inv",
+        "probes",
+        "reasons",
+        "authority",
+        "injected_extra",
+    ],
 )
 def test_reinspection_request_replay_tamper_matrix(real_media_bundle, tamper_field, tamper_val):
     rev = real_media_bundle["multimodal_review"]
@@ -876,19 +986,48 @@ def test_reinspection_request_replay_tamper_matrix(real_media_bundle, tamper_fie
     req = r_re.request_reinspection(plan, plan_digest=plan.digest)
     tampered = req.to_dict()
     tampered[tamper_field] = tamper_val
-    with pytest.raises(critic.Error, match="replay mismatch"):
+    with pytest.raises(critic.Error):
         r_re.BQ04aReinspectionRequest.from_dict(tampered, plan=plan)
 
 
 @pytest.mark.parametrize(
     "tamper_field,tamper_val",
     [
+        ("status", "TAMPERED_STATUS"),
         ("outcome", "UNVERIFIED_SUCCESS"),
+        ("target_corrected", True),
+        ("invariants_unregressed", True),
+        ("regressions", ["TAMPERED_REGRESSION"]),
+        ("counterexamples", ["TAMPERED_COUNTEREXAMPLE"]),
         ("quality_pass", True),
         ("release_authorization", "GO_PUBLISH"),
+        ("spend_authorization", "UNLIMITED"),
+        ("semantic_quality", "HIGH"),
+        ("human_calibration", "CALIBRATED"),
+        ("after_review_digest", "0" * 64),
         ("reinspection_request_digest", "0" * 64),
+        ("reason_codes", ["TAMPERED_REASON"]),
+        ("authority", {"publication": "UNAUTHORIZED_GO"}),
+        ("injected_extra", 123),
     ],
-    ids=["outcome", "quality_pass", "release_auth", "req_digest"],
+    ids=[
+        "status",
+        "outcome",
+        "target_corrected",
+        "invariants_unregressed",
+        "regressions",
+        "counterexamples",
+        "quality_pass",
+        "release_auth",
+        "spend_auth",
+        "semantic_q",
+        "human_cal",
+        "after_digest",
+        "req_digest",
+        "reasons",
+        "authority",
+        "injected_extra",
+    ],
 )
 def test_closure_replay_tamper_matrix(real_media_bundle, tamper_field, tamper_val):
     rev = real_media_bundle["multimodal_review"]
@@ -899,8 +1038,215 @@ def test_closure_replay_tamper_matrix(real_media_bundle, tamper_field, tamper_va
     closure = r_re.evaluate_repair_closure(req, request_digest=req.digest)
     tampered = closure.to_dict()
     tampered[tamper_field] = tamper_val
-    with pytest.raises(critic.Error, match="replay mismatch"):
+    with pytest.raises(critic.Error):
         r_re.BQ04aRepairClosure.from_dict(tampered, request=req)
+
+
+def test_hold_preservation_plan_blocks_actionable_reinspection(real_media_bundle):
+    rev = make_native_defect_review(real_media_bundle)
+    asset = real_media_bundle["asset"]
+    dec = rp.decide_repair(rev, review_digest=rev.digest, asset_sha256=asset.expected_sha256)
+    plan = r_pres.create_preservation_plan(
+        dec,
+        decision_digest=dec.digest,
+        target_scope={"time_range": [1.0, 2.0]},
+        test_oracle=None,
+    )
+    assert plan.to_dict()["status"] == "HOLD_MISSING_TEST_ORACLE"
+
+    req = r_re.request_reinspection(plan, plan_digest=plan.digest)
+    req_dict = req.to_dict()
+    assert req_dict["status"] == "HOLD_MISSING_TEST_ORACLE"
+    assert "HOLD_PRESERVATION_CANNOT_REQUEST_REINSPECTION" in req_dict["reason_codes"]
+
+    closure = r_re.evaluate_repair_closure(req, request_digest=req.digest)
+    c_dict = closure.to_dict()
+    assert c_dict["status"] == "HOLD_REINSPECTION_BLOCKED"
+    assert c_dict["outcome"] == "NON_ACTIONABLE_REQUEST"
+    assert c_dict["quality_pass"] is False
+    assert "HOLD_REINSPECTION_NOT_ACTIONABLE" in c_dict["reason_codes"]
+
+
+def test_returned_to_brain_plan_blocks_actionable_reinspection(real_media_bundle):
+    rev = real_media_bundle["multimodal_review"]
+    asset = real_media_bundle["asset"]
+    dec = rp.decide_repair(
+        rev,
+        review_digest=rev.digest,
+        asset_sha256=asset.expected_sha256,
+        context={"narrative_conflict": True, "plan_revision": True},
+    )
+    assert dec.to_dict()["choice"] == "RETURN_TO_BRAIN"
+
+    plan = r_pres.create_preservation_plan(dec, decision_digest=dec.digest)
+    assert plan.to_dict()["status"] == "RETURNED_TO_BRAIN_NO_LOCAL_PLAN"
+
+    req = r_re.request_reinspection(plan, plan_digest=plan.digest)
+    req_dict = req.to_dict()
+    assert req_dict["status"] == "RETURNED_TO_BRAIN_NON_ACTIONABLE"
+    assert "RETURNED_TO_BRAIN_NO_REINSPECTION" in req_dict["reason_codes"]
+
+    closure = r_re.evaluate_repair_closure(req, request_digest=req.digest)
+    c_dict = closure.to_dict()
+    assert c_dict["status"] == "HOLD_REINSPECTION_BLOCKED"
+    assert c_dict["outcome"] == "NON_ACTIONABLE_REQUEST"
+    assert c_dict["quality_pass"] is False
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        {"is_synthetic": True, "target_corrected": True, "invariants_unregressed": True},
+        {"type": "SYNTHETIC", "target_corrected": True},
+        {"synthetic": True},
+    ],
+    ids=["is_synthetic", "type_synthetic", "synthetic_flag"],
+)
+def test_synthetic_and_forged_receipts_excluded_from_technical_success(real_media_bundle, receipt):
+    rev = make_native_defect_review(real_media_bundle)
+    asset = real_media_bundle["asset"]
+    dec = rp.decide_repair(rev, review_digest=rev.digest, asset_sha256=asset.expected_sha256)
+    plan = r_pres.create_preservation_plan(
+        dec,
+        decision_digest=dec.digest,
+        target_scope={"time_range": [1.0, 2.0], "spatial_region": [0.1, 0.1, 0.9, 0.9]},
+        test_oracle={"oracle_type": "DETECTOR_LOCAL_CHECK"},
+        editor="OFFLINE_DETERMINISTIC_TRIM",
+    )
+    req = r_re.request_reinspection(plan, plan_digest=plan.digest)
+
+    tmp = real_media_bundle["root"]
+    asset2 = make_mp4(tmp, segmented=False, name=f"movie_receipt_{receipt.get('type', 'synth')}.mp4")
+    src2, sampled2 = probe(tmp, asset2, frames=("1/10", "3/10"))
+    pre2 = real_media_bundle["preflight"]
+    orig2 = qr.adversarial_review(
+        pre2,
+        preflight_digest=pre2.digest,
+        technical_evidence=src2,
+        technical_evidence_digest=src2.digest,
+    )
+    rev2 = mm.multimodal_review(
+        orig2,
+        sampled2,
+        original_review_digest=orig2.digest,
+        t2_digest=sampled2.digest,
+    )
+
+    closure = r_re.evaluate_repair_closure(
+        req,
+        request_digest=req.digest,
+        after_review=rev2,
+        after_review_digest=rev2.digest,
+        after_asset_sha256=asset2.expected_sha256,
+        test_receipt=receipt,
+    )
+    c = closure.to_dict()
+    assert c["status"] == "IMPROVEMENT_UNPROVEN"
+    assert c["target_corrected"] is False
+    assert c["invariants_unregressed"] is False
+    assert "SYNTHETIC_OR_UNOBSERVED_PROOF_EXCLUDED" in c["reason_codes"]
+
+
+def test_bad_expected_derived_sha_closure(real_media_bundle):
+    rev = make_native_defect_review(real_media_bundle)
+    asset = real_media_bundle["asset"]
+    dec = rp.decide_repair(rev, review_digest=rev.digest, asset_sha256=asset.expected_sha256)
+    plan = r_pres.create_preservation_plan(
+        dec,
+        decision_digest=dec.digest,
+        target_scope={"time_range": [1.0, 2.0], "spatial_region": [0.1, 0.1, 0.9, 0.9]},
+        test_oracle={"oracle_type": "DETECTOR_LOCAL_CHECK"},
+        editor="OFFLINE_DETERMINISTIC_TRIM",
+    )
+    req = r_re.request_reinspection(
+        plan,
+        plan_digest=plan.digest,
+        expected_after_sha256="4" * 64,
+    )
+
+    tmp = real_media_bundle["root"]
+    asset2 = make_mp4(tmp, segmented=False, name="movie_mismatched_sha.mp4")
+    src2, sampled2 = probe(tmp, asset2, frames=("1/10", "3/10"))
+    pre2 = real_media_bundle["preflight"]
+    orig2 = qr.adversarial_review(
+        pre2,
+        preflight_digest=pre2.digest,
+        technical_evidence=src2,
+        technical_evidence_digest=src2.digest,
+    )
+    rev2 = mm.multimodal_review(
+        orig2,
+        sampled2,
+        original_review_digest=orig2.digest,
+        t2_digest=sampled2.digest,
+    )
+
+    closure = r_re.evaluate_repair_closure(
+        req,
+        request_digest=req.digest,
+        after_review=rev2,
+        after_review_digest=rev2.digest,
+        after_asset_sha256=asset2.expected_sha256,
+    )
+    c = closure.to_dict()
+    assert c["status"] == "IMPROVEMENT_UNPROVEN"
+    assert c["outcome"] == "AFTER_SHA_MISMATCH"
+    assert c["target_corrected"] is False
+    assert c["invariants_unregressed"] is False
+    assert "EXPECTED_AFTER_SHA_MISMATCH" in c["reason_codes"]
+
+
+def test_review_without_asset_sha_yields_hold(real_media_bundle, monkeypatch):
+    import shutil
+    root = real_media_bundle["root"]
+    asset = real_media_bundle["asset"]
+    pre = real_media_bundle["preflight"]
+    src = real_media_bundle["source"]
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    sampled = t2.sample_local_t2(src, t2.SamplingRequest(asset.asset_ref, asset.expected_sha256), root=root, allow_local_probe=True)
+    orig = qr.adversarial_review(
+        pre,
+        preflight_digest=pre.digest,
+        technical_evidence=src,
+        technical_evidence_digest=src.digest,
+    )
+    rev_no_sha = mm.multimodal_review(
+        orig,
+        sampled,
+        original_review_digest=orig.digest,
+        t2_digest=sampled.digest,
+    )
+    assert rev_no_sha.to_dict()["observed_asset_sha256"] is None
+    dec = rp.decide_repair(rev_no_sha, review_digest=rev_no_sha.digest)
+    d = dec.to_dict()
+    assert d["choice"] == "HOLD"
+    assert d["status"] == "HELD"
+    assert "NO_OBSERVED_ASSET_HOLD" in d["reason_codes"]
+
+
+def test_preservation_replay_with_context_and_roundtrip(real_media_bundle):
+    rev = make_native_defect_review(real_media_bundle)
+    asset = real_media_bundle["asset"]
+    dec = rp.decide_repair(rev, review_digest=rev.digest, asset_sha256=asset.expected_sha256)
+    ctx = {"missing_rights": True}
+    plan = r_pres.create_preservation_plan(
+        dec,
+        decision_digest=dec.digest,
+        target_scope={"time_range": [1.0, 2.0]},
+        test_oracle={"oracle_type": "DETECTOR"},
+        editor="OFFLINE_DETERMINISTIC_TRIM",
+        context=ctx,
+    )
+    assert plan.to_dict()["status"] == "HOLD_MISSING_RIGHTS"
+
+    replayed = r_pres.BQ04aPreservationPlan.from_dict(plan.to_dict(), decision=dec, context=ctx)
+    assert replayed.digest == plan.digest
+
+    replayed_json = r_pres.BQ04aPreservationPlan.from_json(plan.to_json(), decision=dec, context=ctx)
+    assert replayed_json.digest == plan.digest
+
+    with pytest.raises(critic.Error):
+        r_pres.BQ04aPreservationPlan.from_dict(plan.to_dict(), decision=dec, context=None)
 
 
 # ---------------------------------------------------------------------------

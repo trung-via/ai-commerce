@@ -36,6 +36,19 @@ def _payload_request(
     plan._validate(plan.to_dict())
     p_dict = plan.to_dict()
     orig_sha = p_dict["original_asset_sha256"]
+    plan_status = p_dict.get("status", "")
+    choice = p_dict.get("decision_choice", "")
+
+    # Non-actionable HOLD or RETURN_TO_BRAIN preservation plans must never become actionable PENDING_REINSPECTION
+    if plan_status.startswith("HOLD_") or choice == "HOLD":
+        status = plan_status if plan_status.startswith("HOLD_") else "HOLD_REINSPECTION_BLOCKED"
+        reasons = ["HOLD_PRESERVATION_CANNOT_REQUEST_REINSPECTION", plan_status]
+    elif plan_status == "RETURNED_TO_BRAIN_NO_LOCAL_PLAN" or choice == "RETURN_TO_BRAIN":
+        status = "RETURNED_TO_BRAIN_NON_ACTIONABLE"
+        reasons = ["RETURNED_TO_BRAIN_NO_REINSPECTION", "NON_ACTIONABLE_PLAN"]
+    else:
+        status = "PENDING_REINSPECTION"
+        reasons = ["REINSPECTION_PENDING_OBSERVED_AFTER_MEDIA"]
 
     after_sha = None
     if expected_after_sha256 is not None:
@@ -49,14 +62,14 @@ def _payload_request(
 
     return {
         "schema_version": SCHEMA_REQUEST,
-        "status": "PENDING_REINSPECTION",
+        "status": status,
         "preservation_plan_digest": plan.digest,
         "original_asset_sha256": orig_sha,
         "expected_derived_sha256": after_sha,
         "target_scope": p_dict["target_scope"],
         "non_target_invariants": p_dict["non_target_invariants"],
         "expected_probes": sorted(set(probes)),
-        "reason_codes": ["REINSPECTION_PENDING_OBSERVED_AFTER_MEDIA"],
+        "reason_codes": sorted(set(reasons)),
         "authority": dict(rp.AUTHORITY),
     }
 
@@ -84,6 +97,8 @@ class BQ04aReinspectionRequest(critic._Record):
         value: Any,
         *,
         plan: r_pres.BQ04aPreservationPlan | None = None,
+        expected_probes: list[str] | None = None,
+        expected_after_sha256: str | None = None,
         root: Any = None,
     ) -> BQ04aReinspectionRequest:
         data = critic._read(critic._canonical(value))
@@ -96,26 +111,25 @@ class BQ04aReinspectionRequest(critic._Record):
             else:
                 raise critic.Error("preservation plan required for verified replay")
 
+        plan_expected_sha = plan.to_dict().get("expected_derived_sha256")
+        target_sha = expected_after_sha256 if expected_after_sha256 is not None else plan_expected_sha
+
         expected = request_reinspection(
             plan,
             plan_digest=plan.digest,
-            expected_probes=data.get("expected_probes"),
-            expected_after_sha256=data.get("expected_derived_sha256"),
+            expected_probes=expected_probes,
+            expected_after_sha256=target_sha,
         )
 
         expected_dict = expected.to_dict()
-        for key in (
-            "schema_version",
-            "preservation_plan_digest",
-            "original_asset_sha256",
-            "expected_derived_sha256",
-            "target_scope",
-            "authority",
-        ):
-            if data.get(key) != expected_dict.get(key):
+        if set(data.keys()) != set(expected_dict.keys()):
+            raise critic.Error("unexpected, extra, or missing fields in reinspection request")
+
+        for key in expected_dict:
+            if data[key] != expected_dict[key]:
                 raise critic.Error(f"replay mismatch on reinspection request key: {key}")
 
-        return _bind_request(data, plan)
+        return _bind_request(expected_dict, plan)
 
     @classmethod
     def from_json(
@@ -123,9 +137,17 @@ class BQ04aReinspectionRequest(critic._Record):
         raw: str,
         *,
         plan: r_pres.BQ04aPreservationPlan | None = None,
+        expected_probes: list[str] | None = None,
+        expected_after_sha256: str | None = None,
         root: Any = None,
     ) -> BQ04aReinspectionRequest:
-        return cls.from_dict(critic._read(raw), plan=plan, root=root)
+        return cls.from_dict(
+            critic._read(raw),
+            plan=plan,
+            expected_probes=expected_probes,
+            expected_after_sha256=expected_after_sha256,
+            root=root,
+        )
 
 
 def _bind_request(data: dict[str, Any], plan: r_pres.BQ04aPreservationPlan) -> BQ04aReinspectionRequest:
@@ -170,6 +192,35 @@ def _payload_closure(
     req_dict = request.to_dict()
     orig_sha = req_dict["original_asset_sha256"]
 
+    # Reinspection request must be actionable PENDING_REINSPECTION
+    if req_dict.get("status") != "PENDING_REINSPECTION":
+        return {
+            "schema_version": SCHEMA_CLOSURE,
+            "status": "HOLD_REINSPECTION_BLOCKED",
+            "outcome": "NON_ACTIONABLE_REQUEST",
+            "reinspection_request_digest": request.digest,
+            "original_asset_sha256": orig_sha,
+            "after_asset_sha256": None,
+            "after_review_digest": None,
+            "target_corrected": False,
+            "invariants_unregressed": False,
+            "regressions": [],
+            "counterexamples": [
+                "Reinspection request is in a non-actionable or HOLD status.",
+                "Non-actionable requests cannot evaluate closure.",
+            ],
+            "semantic_quality": "UNKNOWN",
+            "human_calibration": "NOT_RUN",
+            "quality_pass": False,
+            "release_authorization": "NONE",
+            "spend_authorization": "NONE",
+            "reason_codes": [
+                "HOLD_REINSPECTION_NOT_ACTIONABLE",
+                "REINSPECTION_BLOCKED_BY_REQUEST_STATUS",
+            ],
+            "authority": dict(rp.AUTHORITY),
+        }
+
     # Default fail-closed state when no after measurement is supplied
     if after_review is None or after_asset_sha256 is None:
         return {
@@ -211,10 +262,37 @@ def _payload_closure(
     if after_dict["observed_asset_sha256"] != after_sha:
         raise critic.Error("after_review asset SHA mismatch with provided after_asset_sha256")
 
-    reasons: list[str] = []
-    regressions: list[str] = []
-    target_corrected = False
-    invariants_unregressed = True
+    # Check expected derived SHA
+    if (
+        req_dict.get("expected_derived_sha256") is not None
+        and after_sha != req_dict["expected_derived_sha256"]
+    ):
+        return {
+            "schema_version": SCHEMA_CLOSURE,
+            "status": "IMPROVEMENT_UNPROVEN",
+            "outcome": "AFTER_SHA_MISMATCH",
+            "reinspection_request_digest": request.digest,
+            "original_asset_sha256": orig_sha,
+            "after_asset_sha256": after_sha,
+            "after_review_digest": after_review.digest,
+            "target_corrected": False,
+            "invariants_unregressed": False,
+            "regressions": [],
+            "counterexamples": [
+                "Observed AFTER asset SHA does not match expected derived SHA from preservation plan.",
+            ],
+            "semantic_quality": "UNKNOWN",
+            "human_calibration": "NOT_RUN",
+            "quality_pass": False,
+            "release_authorization": "NONE",
+            "spend_authorization": "NONE",
+            "reason_codes": [
+                "EXPECTED_AFTER_SHA_MISMATCH",
+                "IMPROVEMENT_UNPROVEN",
+                "PRESERVATION_UNPROVEN",
+            ],
+            "authority": dict(rp.AUTHORITY),
+        }
 
     # Check for unchanged bytes
     if after_sha == orig_sha:
@@ -227,7 +305,7 @@ def _payload_closure(
             "after_asset_sha256": after_sha,
             "after_review_digest": after_review.digest,
             "target_corrected": False,
-            "invariants_unregressed": True,
+            "invariants_unregressed": False,
             "regressions": [],
             "counterexamples": [
                 "Unchanged asset bytes indicate no repair execution occurred.",
@@ -245,68 +323,91 @@ def _payload_closure(
             "authority": dict(rp.AUTHORITY),
         }
 
-    # Exclude synthetic fixtures / unobserved proofs
-    if (
-        test_receipt
-        and test_receipt.get("is_synthetic") is True
-        or after_dict.get("confidence", {}).get("T2") != "MEASURED_SIGNAL_ONLY"
-    ):
-        reasons.append("SYNTHETIC_OR_UNOBSERVED_PROOF_EXCLUDED")
-
-    # Evaluate target correction
-    # Check if technical or signal defects are resolved
+    # Evaluate invariant regressions
     after_orig = after_dict.get("original_review", {})
     after_t1_status = after_orig.get("technical_evidence", {}).get("status")
-    after_t2_status = after_dict.get("sampled_evidence", {}).get("status")
     after_reasons = set(after_dict.get("reason_codes", []))
+    regressions: list[str] = []
 
-    if after_t1_status == "PASS" and after_t2_status == "OBSERVED":
-        # Check if defect reason codes from before were cleared
-        target_corrected = True
-        reasons.append("TARGET_FAULT_MEASURED_CORRECTED")
-    else:
-        target_corrected = False
-        reasons.append("TARGET_DEFECT_PERSISTS_IN_AFTER_REVIEW")
-
-    # Evaluate invariant regressions
     if "A13_TECHNICAL_FAIL" in after_reasons or after_t1_status == "FAIL":
-        invariants_unregressed = False
         regressions.append("A13_TECHNICAL_DECODING_REGRESSION")
 
     if any(r.startswith("P0_") for r in after_reasons) or "P0_SOURCE_HOLD" in after_reasons:
-        invariants_unregressed = False
         regressions.append("P0_LEGAL_OR_RIGHTS_REGRESSION")
 
-    # Determine final closure status
-    if not target_corrected:
-        status = "REINSPECTION_FAILED_DEFECT_PERSISTS"
-        outcome = "DEFECT_PERSISTS"
-        reasons.append("REINSPECTION_DEFECT_NOT_CORRECTED")
-    elif not invariants_unregressed:
-        status = "REINSPECTION_FAILED_REGRESSION"
-        outcome = "REGRESSION_DETECTED"
-        reasons.append("REINSPECTION_INVARIANTS_VIOLATED")
-    else:
-        status = "TECHNICAL_TARGET_CORRECTED_INVARIANTS_UNREGRESSED"
-        outcome = "FORWARD_TO_BRAIN_FOR_ATTENDED_REVIEW"
-        reasons.extend([
-            "INVARIANTS_PRESERVED_WITHOUT_REGRESSION",
-            "SEMANTIC_AND_HUMAN_QUALITY_REMAIN_UNPROVEN",
-        ])
+    if regressions:
+        return {
+            "schema_version": SCHEMA_CLOSURE,
+            "status": "REINSPECTION_FAILED_REGRESSION",
+            "outcome": "REGRESSION_DETECTED",
+            "reinspection_request_digest": request.digest,
+            "original_asset_sha256": orig_sha,
+            "after_asset_sha256": after_sha,
+            "after_review_digest": after_review.digest,
+            "target_corrected": False,
+            "invariants_unregressed": False,
+            "regressions": sorted(set(regressions)),
+            "counterexamples": [
+                "Reinspection detected technical, legal or rights regressions in AFTER media.",
+            ],
+            "semantic_quality": "UNKNOWN",
+            "human_calibration": "NOT_RUN",
+            "quality_pass": False,
+            "release_authorization": "NONE",
+            "spend_authorization": "NONE",
+            "reason_codes": sorted(set(["REINSPECTION_INVARIANTS_VIOLATED", "REINSPECTION_FAILED_REGRESSION"] + regressions)),
+            "authority": dict(rp.AUTHORITY),
+        }
+
+    reasons: list[str] = []
+
+    # Check synthetic receipt or unobserved proof
+    is_synthetic = bool(
+        (test_receipt and (
+            test_receipt.get("is_synthetic") is True
+            or test_receipt.get("type") == "SYNTHETIC"
+            or test_receipt.get("synthetic") is True
+        ))
+        or after_dict.get("confidence", {}).get("T2") != "MEASURED_SIGNAL_ONLY"
+    )
+    if is_synthetic:
+        reasons.append("SYNTHETIC_OR_UNOBSERVED_PROOF_EXCLUDED")
+
+    target_scope = req_dict.get("target_scope", {})
+    has_target = bool(
+        target_scope.get("time_range")
+        or target_scope.get("spatial_region")
+        or target_scope.get("shot_id")
+    )
+    if not has_target:
+        reasons.append("NO_ORIGINAL_LOCALIZED_FAULT_TO_CORRECT")
+
+    # In BQ-04a source-only, there is no authenticated live measurement (which requires BQ-04b).
+    # Caller JSON 'test_receipt', boolean flags, or self-attestation cannot prove a real Q4 probe happened.
+    # Therefore, improvement and preservation remain UNPROVEN.
+    reasons.extend([
+        "AUTHENTICATED_MEASUREMENT_PENDING_BQ04B",
+        "IMPROVEMENT_UNPROVEN",
+        "INDEPENDENT_TARGET_AND_INVARIANT_PROOF_REQUIRED",
+        "PRESERVATION_UNPROVEN",
+    ])
 
     return {
         "schema_version": SCHEMA_CLOSURE,
-        "status": status,
-        "outcome": outcome,
+        "status": "IMPROVEMENT_UNPROVEN",
+        "outcome": "IMPROVEMENT_UNPROVEN",
         "reinspection_request_digest": request.digest,
         "original_asset_sha256": orig_sha,
         "after_asset_sha256": after_sha,
         "after_review_digest": after_review.digest,
-        "target_corrected": target_corrected,
-        "invariants_unregressed": invariants_unregressed,
-        "regressions": sorted(set(regressions)),
+        "target_corrected": False,
+        "invariants_unregressed": False,
+        "regressions": [],
         "counterexamples": [
-            "Independent AFTER measurement confirms local technical signal change only.",
+            "AFTER asset SHA difference alone is not proof of repair.",
+            "Independent Q4 before/after localized target evidence and non-target receipts required.",
+            "Synthetic or caller-attested receipts cannot prove real Q4 probe execution.",
+            "BQ-04a source-only cannot authenticate live measurement; requires BQ-04b.",
             "T1/T2 measurements cannot prove semantic or human perceptual improvement.",
             "Q4 green technical signal is never a license to publish or spend.",
         ],
@@ -347,6 +448,7 @@ class BQ04aRepairClosure(critic._Record):
         *,
         request: BQ04aReinspectionRequest | None = None,
         after_review: mm.BQ02bMultimodalReview | None = None,
+        test_receipt: dict[str, Any] | None = None,
         root: Any = None,
     ) -> BQ04aRepairClosure:
         data = critic._read(critic._canonical(value))
@@ -362,32 +464,25 @@ class BQ04aRepairClosure(critic._Record):
         if after_review is None and "after_review" in data:
             after_review = mm.BQ02bMultimodalReview.from_dict(data["after_review"], root=root)
 
+        receipt = test_receipt if test_receipt is not None else data.get("test_receipt")
         expected = evaluate_repair_closure(
             request,
             request_digest=request.digest,
             after_review=after_review,
+            after_review_digest=after_review.digest if after_review else None,
             after_asset_sha256=data.get("after_asset_sha256"),
+            test_receipt=receipt,
         )
 
         expected_dict = expected.to_dict()
-        for key in (
-            "schema_version",
-            "status",
-            "outcome",
-            "reinspection_request_digest",
-            "original_asset_sha256",
-            "after_asset_sha256",
-            "target_corrected",
-            "invariants_unregressed",
-            "quality_pass",
-            "release_authorization",
-            "spend_authorization",
-            "authority",
-        ):
-            if data.get(key) != expected_dict.get(key):
+        if set(data.keys()) != set(expected_dict.keys()):
+            raise critic.Error("unexpected, extra, or missing fields in repair closure")
+
+        for key in expected_dict:
+            if data[key] != expected_dict[key]:
                 raise critic.Error(f"replay mismatch on closure key: {key}")
 
-        return _bind_closure(data, request, after_review)
+        return _bind_closure(expected_dict, request, after_review)
 
     @classmethod
     def from_json(
@@ -396,9 +491,16 @@ class BQ04aRepairClosure(critic._Record):
         *,
         request: BQ04aReinspectionRequest | None = None,
         after_review: mm.BQ02bMultimodalReview | None = None,
+        test_receipt: dict[str, Any] | None = None,
         root: Any = None,
     ) -> BQ04aRepairClosure:
-        return cls.from_dict(critic._read(raw), request=request, after_review=after_review, root=root)
+        return cls.from_dict(
+            critic._read(raw),
+            request=request,
+            after_review=after_review,
+            test_receipt=test_receipt,
+            root=root,
+        )
 
 
 def _bind_closure(

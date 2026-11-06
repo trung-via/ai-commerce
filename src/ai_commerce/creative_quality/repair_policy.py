@@ -232,11 +232,13 @@ def _payload(
                         "severity": "LOCAL_DEFECT",
                     })
 
-        # Also check context injected defects
-        if ctx.get("grounded_defect"):
-            d = ctx["grounded_defect"]
-            if type(d) is dict and (d.get("time") is not None or d.get("region") is not None):
-                detected_faults.append(d)
+        # Also check context injected defects - caller-provided context is UNTRUSTED!
+        # Context cannot directly create verified Q4 fault or location.
+        has_unproven_caller_defect = bool(
+            ctx.get("grounded_defect")
+            or ctx.get("caller_defect")
+            or ctx.get("unproven_defect")
+        )
 
         # Plan revisions (P1)
         has_p1 = (
@@ -262,7 +264,14 @@ def _payload(
             )
         )
 
-        if has_ungrounded:
+        if has_unproven_caller_defect and not detected_faults:
+            # Caller defect claim not verified by native Q4 observed evidence
+            choice = "RETURN_TO_BRAIN"
+            status = "RETURNED_TO_BRAIN"
+            reasons.append("UNPROVEN_CALLER_DEFECT_NO_NATIVE_OBSERVATION")
+            risks.append("CALLER_DEFECT_NOT_VERIFIED_BY_Q4_EVIDENCE")
+
+        elif has_ungrounded:
             choice = "RETURN_TO_BRAIN"
             status = "RETURNED_TO_BRAIN"
             reasons.append("UNGROUNDED_FAULT_CANNOT_INVENT_COORDINATES")
@@ -288,7 +297,7 @@ def _payload(
                 reasons.append("SHOT_REGENERATION_REQUIRES_NEW_GRANTS_NO_DISPATCH")
                 risks.append("SHOT_REGENERATION_REQUIRES_RESOURCE_AND_SPEND_GRANTS")
 
-        elif has_p3_preference and ctx.get("force_p3_return") is True:
+        elif has_p3_preference and (ctx.get("force_p3_return") is True or ctx.get("subjective_preference") is True):
             choice = "RETURN_TO_BRAIN"
             status = "RETURNED_TO_BRAIN"
             reasons.append("Q2_P3_SUBJECTIVE_PREFERENCE_TO_BRAIN")
@@ -351,6 +360,8 @@ class BQ04aRepairDecision(critic._Record):
         if value.get("original_asset_sha256") is not None:
             _check_sha(value.get("original_asset_sha256"), "original_asset_sha256")
         _check_sha(value.get("multimodal_review_digest"), "multimodal_review_digest")
+        if value.get("study_readiness_digest") is not None:
+            _check_sha(value.get("study_readiness_digest"), "study_readiness_digest")
 
     @classmethod
     def from_dict(
@@ -359,6 +370,7 @@ class BQ04aRepairDecision(critic._Record):
         *,
         review: mm.BQ02bMultimodalReview | None = None,
         study_readiness: Any | None = None,
+        context: dict[str, Any] | None = None,
         root: Any = None,
     ) -> BQ04aRepairDecision:
         data = critic._read(critic._canonical(value))
@@ -371,29 +383,35 @@ class BQ04aRepairDecision(critic._Record):
             else:
                 raise critic.Error("review record required for verified replay")
 
+        readiness_digest = data.get("study_readiness_digest")
+        if study_readiness is not None:
+            if sr is not None and type(study_readiness) is not sr.BQ03bStudyReadiness:
+                raise critic.Error("native BQ03bStudyReadiness required")
+            if not hasattr(study_readiness, "digest") or not hasattr(study_readiness, "to_dict"):
+                raise critic.Error("valid study readiness record required")
+            if readiness_digest is not None and study_readiness.digest != readiness_digest:
+                raise critic.Error("study readiness digest mismatch")
+        elif readiness_digest is not None:
+            raise critic.Error("study readiness record required for replay with study_readiness_digest")
+
         expected = decide_repair(
             review,
             review_digest=review.digest,
-            asset_sha256=data["original_asset_sha256"],
+            asset_sha256=data.get("original_asset_sha256"),
             study_readiness=study_readiness,
+            readiness_digest=readiness_digest,
+            context=context,
         )
 
         expected_dict = expected.to_dict()
-        # Verify core invariants match
-        for key in (
-            "schema_version",
-            "choice",
-            "original_asset_sha256",
-            "multimodal_review_digest",
-            "t1_digest",
-            "t2_digest",
-            "plan_digest",
-            "authority",
-        ):
-            if data.get(key) != expected_dict.get(key):
-                raise critic.Error(f"replay mismatch on key: {key}")
+        if set(data.keys()) != set(expected_dict.keys()):
+            raise critic.Error("unexpected, extra, or missing fields in repair decision")
 
-        return _bind_decision(data, review, study_readiness)
+        for key in expected_dict:
+            if data[key] != expected_dict[key]:
+                raise critic.Error(f"replay mismatch on decision field: {key}")
+
+        return _bind_decision(expected_dict, review, study_readiness)
 
     @classmethod
     def from_json(
@@ -402,9 +420,16 @@ class BQ04aRepairDecision(critic._Record):
         *,
         review: mm.BQ02bMultimodalReview | None = None,
         study_readiness: Any | None = None,
+        context: dict[str, Any] | None = None,
         root: Any = None,
     ) -> BQ04aRepairDecision:
-        return cls.from_dict(critic._read(raw), review=review, study_readiness=study_readiness, root=root)
+        return cls.from_dict(
+            critic._read(raw),
+            review=review,
+            study_readiness=study_readiness,
+            context=context,
+            root=root,
+        )
 
 
 def _bind_decision(
@@ -423,7 +448,7 @@ def decide_repair(
     review: mm.BQ02bMultimodalReview,
     *,
     review_digest: str,
-    asset_sha256: str,
+    asset_sha256: str | None = None,
     study_readiness: Any | None = None,
     readiness_digest: str | None = None,
     context: dict[str, Any] | None = None,

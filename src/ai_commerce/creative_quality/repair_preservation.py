@@ -208,6 +208,7 @@ class BQ04aPreservationPlan(critic._Record):
         value: Any,
         *,
         decision: rp.BQ04aRepairDecision | None = None,
+        context: dict[str, Any] | None = None,
         root: Any = None,
     ) -> BQ04aPreservationPlan:
         data = critic._read(critic._canonical(value))
@@ -227,23 +228,18 @@ class BQ04aPreservationPlan(critic._Record):
             non_target_invariants=data.get("non_target_invariants"),
             test_oracle=data.get("test_oracle"),
             editor=data.get("editor", "NONE"),
+            context=context,
         )
 
         expected_dict = expected.to_dict()
-        for key in (
-            "schema_version",
-            "decision_choice",
-            "decision_digest",
-            "original_asset_sha256",
-            "target_scope",
-            "non_target_invariants",
-            "editor",
-            "authority",
-        ):
-            if data.get(key) != expected_dict.get(key):
+        if set(data.keys()) != set(expected_dict.keys()):
+            raise critic.Error("unexpected, extra, or missing fields in preservation plan")
+
+        for key in expected_dict:
+            if data[key] != expected_dict[key]:
                 raise critic.Error(f"replay mismatch on preservation key: {key}")
 
-        return _bind_plan(data, decision)
+        return _bind_plan(expected_dict, decision)
 
     @classmethod
     def from_json(
@@ -251,9 +247,10 @@ class BQ04aPreservationPlan(critic._Record):
         raw: str,
         *,
         decision: rp.BQ04aRepairDecision | None = None,
+        context: dict[str, Any] | None = None,
         root: Any = None,
     ) -> BQ04aPreservationPlan:
-        return cls.from_dict(critic._read(raw), decision=decision, root=root)
+        return cls.from_dict(critic._read(raw), decision=decision, context=context, root=root)
 
 
 def _bind_plan(data: dict[str, Any], decision: rp.BQ04aRepairDecision) -> BQ04aPreservationPlan:

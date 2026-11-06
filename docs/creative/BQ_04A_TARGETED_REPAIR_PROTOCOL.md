@@ -10,7 +10,7 @@ Giao thức này quy định quy trình và chính sách đưa ra quyết địn
 
 ### Nguyên Tắc Bất Di Bất Dịch:
 1. **Quy Hoạch Ngoại Tuyến (Offline Plan Only):** BQ-04a thuần túy là bộ máy suy luận kế hoạch, đưa ra quyết định có căn cứ và ràng buộc bảo toàn; **tuyệt đối không thực thi chỉnh sửa media, không gọi công cụ dựng hình (renderer), không gọi mô hình tạo sinh (generative provider), không gọi PULSE runtime hay giải ngân chi phí.**
-2. **Không Tự Động Phê Duyệt Xuất Bản (No False Pass / No Auto-Publish):** Điểm kiểm định xanh từ Q4 hay đề xuất sửa đổi không bao giờ tương đương với giấy phép phân phối (`GO_PUBLISH`). Thẩm quyền phát hành luôn thuộc về Human và Brain độc lập.
+2. **Không Tự Động Phê Duyệt Xuất Bản & Không Khẳng Định Cải Thiện Giả Tạo (No False Pass / No Unproven Improvement):** Điểm kiểm định xanh từ Q4 hay đề xuất sửa đổi không bao giờ tương đương với giấy phép phân phối (`GO_PUBLISH`). Đặc biệt, việc media sau sửa có byte/SHA khác hoặc có biên nhận tự xưng không chứng minh được khiếm khuyết đã khắc phục hay bất biến không bị suy giảm; trạng thái tái kiểm định luôn là `IMPROVEMENT_UNPROVEN` và `PRESERVATION_UNPROVEN` cho đến khi có đo lường trực tiếp có xác thực (BQ-04b). Thẩm quyền phát hành luôn thuộc về Human và Brain độc lập.
 3. **Phân Định Thẩm Quyền Nghiêm Ngặt:**
    - **Brain (ChatGPT duy nhất):** Nắm giữ thẩm quyền tối cao về mục tiêu nghệ thuật, thông điệp thương mại, sự thật sản phẩm và phê duyệt chi phí/chiến lược.
    - **Q2 (Adversarial Critic):** Đặt câu hỏi phản biện, nêu rủi ro P0/P1/P2/P3 trước và sau kiểm định.
@@ -51,6 +51,7 @@ Giao thức này quy định quy trình và chính sách đưa ra quyết địn
 ### Bước 1: Tiếp Nhận Phát Hiện Từ Q4 (Q4 Finding Intake)
 - Chỉ chấp nhận đầu vào là thực thể `BQ02bMultimodalReview` chuẩn hóa gốc và các chuỗi băm bằng chứng (`digest`, `asset_sha256`) đã được ghim.
 - Tuyệt đối từ chối đầu vào dạng từ điển tự do (arbitrary dict/JSON) hoặc các phát biểu chưa được công cụ đo kiểm chứng thực.
+- Khiếm khuyết do người gọi tự khai báo (`grounded_defect` trong context) nếu thiếu dữ liệu đo lường kỹ thuật thực tế từ Q4 (`measured_findings` hoặc `technical_evidence.findings`) bắt buộc phải chuyển về `RETURN_TO_BRAIN` (`UNPROVEN_CALLER_DEFECT_NO_NATIVE_OBSERVATION`), tuyệt đối không được tự động thăng hạng thành lỗi để đề xuất sửa chữa cục bộ.
 - Tách bạch rõ: Đo lường kỹ thuật quan sát được (T1 qua A13, T2 qua tín hiệu khung hình/âm thanh) và các phần chưa chạy (`T3_NOT_RUN`, `SEMANTIC_UNKNOWN`).
 
 ### Bước 2: Lựa Chọn Hướng Sửa Đổi (Repair Choice)
@@ -78,8 +79,9 @@ Mỗi kế hoạch sửa chữa phải định nghĩa tường minh danh sách c
 
 ### Bước 6: Tái Kiểm Định Độc Lập Đối Chứng (Q4 Re-Inspection)
 - Mọi sửa đổi phải được chứng minh bằng một đợt kiểm định Q4 mới hoàn toàn độc lập (`AFTER` measurement).
+- Nếu kế hoạch bảo toàn ở trạng thái `HOLD` hoặc `RETURN_TO_BRAIN`, yêu cầu tái kiểm định lập tức chuyển sang trạng thái không khả thi (`HOLD_...`, `RETURNED_TO_BRAIN_NON_ACTIONABLE`), và bản đối soát đóng bị chặn hoàn toàn (`HOLD_REINSPECTION_BLOCKED`, `outcome="NON_ACTIONABLE_REQUEST"`).
 - Nếu chưa có tài sản mới hoặc chưa chạy đo lường thực tế, trạng thái bắt buộc là: `PENDING_REINSPECTION`, `IMPROVEMENT_UNPROVEN`, `PRESERVATION_UNPROVEN`.
-- Không chấp nhận suy luận: đo lường kỹ thuật T1/T2 đạt không chứng minh được ngữ nghĩa hay sự hài lòng của con người được cải thiện.
+- Không chấp nhận suy luận: đo lường kỹ thuật T1/T2 đạt không chứng minh được ngữ nghĩa hay sự hài lòng của con người được cải thiện. Media thay thế có SHA khác không chứng minh được sửa chữa thành công hay không thoái lui bất biến.
 
 ### Bước 7: Đối Soát Phản Biện Q2 Và Chuyển Brain Đánh Giá (Q2 Challenge & Brain)
 - Bản đối soát sửa chữa (`Repair Closure`) lưu giữ toàn bộ khiếm khuyết còn tồn đọng (regressions), các trường hợp phản chứng (counterexamples).

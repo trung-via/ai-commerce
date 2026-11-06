@@ -1,16 +1,16 @@
 {
   "schema_version": "WorkItem.v1",
   "work_id": "BQ-04A_TARGETED_REPAIR_001",
-  "attempt_id": "BQ04A-Q5-R7-OFFLINE-REPAIR-AGY-03-bq04a_offline_repair_20261106_r3_agy",
-  "objective": "Offline BQ-04a Q5/R7 media repair decision policy, preservation plan, and reinspection protocol; zero media mutation, provider dispatch, or spend",
+  "attempt_id": "BQ04A-Q5-R7-BRAIN-HOLD-REPAIR-AGY-04-bq04a_brain_hold_repair_20261106_r4_agy",
+  "objective": "Human-authorized repair of Brain hold (issue #490); source-only BQ-04a offline repair decision policy, preservation plan, and reinspection protocol; zero media mutation, provider dispatch, or spend",
   "status": "OFFLINE_SCOPE_TESTS_PASS_INDEPENDENT_EF02_PROOF_PENDING",
-  "source_sha": "158cd193b18315374c29848b5697641853304959",
-  "source_base_commit": "158cd193b18315374c29848b5697641853304959",
-  "source_decision": "Issue #373 architecture plus explicit Human continuation 2026-11-06: tiếp tục roadmap; this is fresh R3 source-only attempt",
+  "source_sha": "3f8715d8020df646d646a527c012c9695be9bc64",
+  "source_base_commit": "3f8715d8020df646d646a527c012c9695be9bc64",
+  "source_decision": "Human continuation 2026-11-06 addressing Brain hold (issue #490) over unmerged R3 candidate 3f8715d8020df646d646a527c012c9695be9bc64; strictly source-only repair under AI Commerce Git write guard",
   "human_request": {
     "text": "tiếp tục roadmap",
     "date": "2026-11-06",
-    "authorization": "Exactly eight ADD-only source files; chat approval is not media mutation, rights authorization or independent attestation"
+    "authorization": "Human authorization to repair Brain hold (issue #490); exactly eight allowed worktree paths; chat approval is not media mutation, rights authorization or independent attestation"
   },
   "owner": "Media & Creative",
   "component": "bq-04a",
@@ -50,9 +50,9 @@
   "precheck": {
     "local_head_exact": true,
     "clean_entry": true,
-    "eight_paths_absent_at_entry": true,
+    "eight_paths_present_from_r3": true,
     "github_exact_commit_read": true,
-    "issue_373_read": true,
+    "issue_490_read": true,
     "bq04_roadmap_and_protocol_read": true,
     "native_bq02b_and_bq03b_sources_read": true
   },
@@ -71,6 +71,13 @@
       "status": "HEADLESS_TOOL_PERMISSION_DENIED / exit=0 with no changed files",
       "candidate": "NONE",
       "policy": "Headless write denial recognized; interactive write permission verified in R3"
+    },
+    {
+      "attempt": "R3",
+      "issue": 490,
+      "candidate": "3f8715d8020df646d646a527c012c9695be9bc64",
+      "status": "BRAIN_HOLD / material logic flaws identified by Brain review",
+      "policy": "Human-authorized R4 repair over unmerged R3 candidate; fixed untrusted caller defect promotion, non-actionable hold request leakage, and unproven improvement/preservation assertions"
     }
   ],
   "verification_round_limit": 2,
@@ -78,20 +85,26 @@
     {
       "round": 1,
       "exit_code": 1,
-      "source_sha": "158cd193b18315374c29848b5697641853304959",
-      "description": "Initial test suite verification",
-      "passed": 70,
-      "failed": 2,
+      "source_sha": "3f8715d8020df646d646a527c012c9695be9bc64",
+      "description": "Initial regression expansion verification",
+      "passed": 144,
+      "failed": 8,
       "failures_retained": [
-        "test_study_readiness_reference_attaches_without_falsifying_human_proof: AttributeError on sp.draft_protocol",
-        "test_successful_reinspection_technical_correction_preserves_brain_authority: make_mp4 identical deterministic bytes triggered UNCHANGED_ORIGINAL_BYTES"
+        "test_reinspection_request_replay_tamper_matrix[expected_sha]: BQ04aReinspectionRequest.from_dict trusted tampered expected_derived_sha256 from serialized dict rather than plan",
+        "test_reinspection_request_replay_tamper_matrix[probes]: BQ04aReinspectionRequest.from_dict trusted tampered expected_probes from serialized dict rather than default probes",
+        "test_reinspection_request_replay_tamper_matrix[injected_extra]: AssertionError on regex 'replay mismatch' when exception message was 'unexpected, extra, or missing fields'",
+        "test_closure_replay_tamper_matrix[injected_extra]: AssertionError on regex 'replay mismatch' when exception message was 'unexpected, extra, or missing fields'",
+        "test_hold_preservation_plan_blocks_actionable_reinspection: assertion on HOLD_PRESERVATION_PLAN_NOT_ACTIONABLE instead of HOLD_PRESERVATION_CANNOT_REQUEST_REINSPECTION",
+        "test_returned_to_brain_plan_blocks_actionable_reinspection: assertion on RETURNED_TO_BRAIN_NOT_ACTIONABLE instead of RETURNED_TO_BRAIN_NO_REINSPECTION",
+        "test_bad_expected_derived_sha_closure: assertion on EXPECTED_DERIVED_SHA_MISMATCH instead of EXPECTED_AFTER_SHA_MISMATCH",
+        "test_preservation_replay_with_context_and_roundtrip: context was non-semantic run_42; replaced with semantic context missing_rights: True"
       ],
-      "followup": "Corrected study protocol API call to build_protocol and generated distinct after-repair asset bytes via segmented=False; expanded test matrix"
+      "followup": "Bound expected_derived_sha256 and expected_probes in BQ04aReinspectionRequest.from_dict to plan defaults, aligned reason code assertions, and updated preservation replay test with semantic context"
     },
     {
       "round": 2,
       "exit_code": 0,
-      "source_sha": "158cd193b18315374c29848b5697641853304959",
+      "source_sha": "3f8715d8020df646d646a527c012c9695be9bc64",
       "environment": {
         "platform": "Windows-11-10.0.26300-SP0",
         "python": "3.14.7",
@@ -113,7 +126,7 @@
       "groups": [
         {
           "group": "bq-04a",
-          "passed": 107,
+          "passed": 152,
           "failed": 0,
           "skipped": 0,
           "errors": 0,
@@ -153,7 +166,7 @@
         },
         {
           "group": "a13",
-          "passed": 197,
+          "passed": 39,
           "failed": 0,
           "skipped": 0,
           "errors": 0,
@@ -162,7 +175,7 @@
           "worker_count_provenance": "XDIST_CONTROLLER_COLLECTION_HOOK"
         }
       ],
-      "passed_total": 1133,
+      "passed_total": 1020,
       "failed_total": 0,
       "errors_total": 0,
       "evidence_retention": "SUMMARY_OBSERVED_IN_TOOL_OUTPUT"
