@@ -19,6 +19,271 @@ from ai_commerce.remote.worker import LocalBatchWorker
 BASE = "a" * 40
 
 
+def _workowner_fixture():
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+    storage = WorkOwnerMemoryTransport(BASE)
+    action = _action()
+    packet = {"batch_id": "durable-fixture", "source_sha": BASE, "actions": [action]}
+    storage.issue_body = packet
+    identity = WorkOwner.identity(storage, 506, packet, action)
+    return storage, identity, WorkOwner
+
+
+def test_workowner_orderly_journal_rounds_and_read_only_restart_without_workspace():
+    storage, identity, owner_type = _workowner_fixture()
+    owner = owner_type.acquire(storage, identity)
+    owner.append("CLAIMED")
+    owner.append("SPAWN_INTENT")
+    owner.append("CHILD_OBSERVED", pid=73)
+    owner.append("PROVIDER_INTENT", round=0)
+    owner.append("ROUND_VERIFIED", round=0, receipt="a" * 64)
+    owner.append("PROVIDER_INTENT", round=1)
+    owner.append("ROUND_VERIFIED", round=1, receipt="b" * 64)
+    assert len(owner.read()) == 8
+    storage.requests.clear()
+    restarted = owner_type(storage, identity, "")
+    result = restarted.reconcile()
+    assert result["stage"] == "ROUND_VERIFIED" and not result["replay_authorized"]
+    assert result["status"] == "HOLD_UNKNOWN_EFFECT" and not result["publication_authorized"]
+    assert all(method == "GET" for method, *_ in storage.requests)
+    with pytest.raises(RemoteTransportError):
+        restarted.append("PROVIDER_INTENT", round=2)
+
+
+def test_workowner_simultaneous_contenders_have_one_authoritative_generation():
+    from concurrent.futures import ThreadPoolExecutor
+    storage, identity, owner_type = _workowner_fixture()
+    def claim():
+        try:
+            return owner_type.acquire(storage, identity)
+        except RemoteTransportError:
+            return None
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        owners = list(pool.map(lambda _: claim(), range(8)))
+    assert sum(owner is not None for owner in owners) == 1
+    assert len(storage.refs) == 1
+    assert next(owner for owner in owners if owner).read()[0]["generation"] == 1
+
+
+@pytest.mark.parametrize("stage", ["OWNED", "CLAIMED", "SPAWN_INTENT", "CHILD_OBSERVED", "PROVIDER_INTENT", "UNKNOWN"])
+def test_workowner_crash_at_each_boundary_never_reclaims_or_dispatches(stage):
+    storage, identity, owner_type = _workowner_fixture()
+    owner = owner_type.acquire(storage, identity)
+    for next_stage, data in [("CLAIMED", {}), ("SPAWN_INTENT", {}),
+                             ("CHILD_OBSERVED", {"pid": 73}),
+                             ("PROVIDER_INTENT", {"round": 0}), ("UNKNOWN", {})]:
+        if owner.read()[-1]["stage"] == stage:
+            break
+        owner.append(next_stage, **data)
+    before = dict(storage.refs)
+    assert owner_type(storage, identity, "").reconcile()["status"] == "HOLD_UNKNOWN_EFFECT"
+    with pytest.raises(RemoteTransportError):
+        owner_type.acquire(storage, identity)
+    assert storage.refs == before
+
+
+@pytest.mark.parametrize("fault", ["parent", "digest", "sequence", "source", "attempt", "repo", "fence", "tree", "gap", "truncate"])
+def test_workowner_corrupt_reordered_hijacked_or_rolled_back_journal_fails_closed(fault):
+    storage, identity, owner_type = _workowner_fixture()
+    owner = owner_type.acquire(storage, identity)
+    owner.append("CLAIMED")
+    last_ref = sorted(storage.refs)[-1]
+    commit = storage.commits[storage.refs[last_ref]]
+    record = json.loads(commit["message"][len(owner_type.MARKER):])
+    if fault == "parent":
+        commit["parents"] = [{"sha": BASE}]
+    elif fault == "tree":
+        commit["tree"]["sha"] = "f" * 40
+    elif fault == "gap":
+        storage.refs[last_ref[:-3] + "002"] = storage.refs.pop(last_ref)
+    elif fault == "truncate":
+        del storage.refs[last_ref]
+    else:
+        if fault in ("source", "attempt", "repo"):
+            record["identity"][{"source": "source_sha", "attempt": "attempt_id", "repo": "repo"}[fault]] = "wrong"
+        elif fault == "sequence":
+            record["sequence"] = 0
+        else:
+            record[fault] = "0" * 64
+        # A recomputed digest cannot hide a wrong identity, fence or sequence.
+        if fault != "digest":
+            record.pop("digest")
+            record["digest"] = owner_type.digest(record)
+        commit["message"] = owner_type.MARKER + json.dumps(record)
+    requests = len(storage.requests)
+    with pytest.raises(RemoteTransportError):
+        owner.append("SPAWN_INTENT")
+    assert all(method == "GET" for method, *_ in storage.requests[requests:])
+
+
+@pytest.mark.parametrize("phase", ["read", "create-before", "create-after"])
+def test_workowner_transport_unknown_has_no_second_write_or_claim(phase):
+    storage, identity, owner_type = _workowner_fixture()
+    owner = owner_type.acquire(storage, identity)
+    api = storage.api
+    def fault(method, path, data=None):
+        if phase == "read" and method == "GET":
+            raise RemoteTransportError("GITHUB_TRANSPORT_UNKNOWN")
+        if method == "POST" and path == "/git/refs":
+            if phase == "create-after":
+                api(method, path, data)
+            raise RemoteTransportError("GITHUB_TRANSPORT_UNKNOWN")
+        return api(method, path, data)
+    storage.api = fault
+    with pytest.raises(RemoteTransportError):
+        owner.append("CLAIMED")
+    storage.api = api
+    before = len(storage.requests)
+    with pytest.raises(RemoteTransportError):
+        owner.append("CLAIMED")
+    assert all(method == "GET" for method, *_ in storage.requests[before:])
+    assert not owner.reconcile()["replay_authorized"]
+
+
+def test_workowner_stale_owner_duplicate_provider_and_receipt_mismatch_deny_effects():
+    storage, identity, owner_type = _workowner_fixture()
+    owner = owner_type.acquire(storage, identity)
+    stale = owner_type(storage, identity, "untrusted-holder")
+    with pytest.raises(RemoteTransportError, match="STALE_FENCE"):
+        stale.append("CLAIMED")
+    owner.append("CLAIMED")
+    owner.append("SPAWN_INTENT")
+    owner.append("PROVIDER_INTENT", round=0)
+    with pytest.raises(RemoteTransportError):
+        owner.append("PROVIDER_INTENT", round=0)
+    assert owner.reconcile()["stage"] == "PROVIDER_INTENT"
+    with pytest.raises(RemoteTransportError):
+        owner.append("ROUND_VERIFIED", round=1, receipt="e" * 64)
+
+
+def test_workowner_cross_batch_attempt_cannot_claim_existing_work_and_prose_is_not_lineage():
+    storage, identity, owner_type = _workowner_fixture()
+    owner_type.acquire(storage, identity)
+    packet = storage.issue_body
+    packet["batch_id"] = "successor"
+    packet["actions"][0]["attempt_id"] = "new-attempt"
+    packet["actions"][0]["instruction"] = "repair of #466; generation 2 authorized (untrusted prose)"
+    successor = owner_type.identity(storage, 506, packet, packet["actions"][0])
+    assert successor["work_key"] == identity["work_key"]
+    with pytest.raises(RemoteTransportError):
+        owner_type.acquire(storage, successor)
+    with pytest.raises(RemoteTransportError, match="TRUSTED_ISSUE_REQUIRED"):
+        owner_type.identity(storage, 0, packet, packet["actions"][0])
+
+
+def test_workowner_ingress_mismatch_rejected_before_remote_write():
+    storage, identity, owner_type = _workowner_fixture()
+    packet = {**storage.issue_body, "source_sha": "b" * 40}
+    with pytest.raises(RemoteTransportError, match="INGRESS_MISMATCH"):
+        owner_type.identity(storage, 506, packet, packet["actions"][0])
+    assert not any(method == "POST" for method, *_ in storage.requests)
+
+
+@pytest.mark.parametrize("namespace", ["claims", "pre-spawn", "spawned", "candidate"])
+def test_workowner_partial_legacy_boundaries_require_reconciliation(namespace):
+    storage, identity, owner_type = _workowner_fixture()
+    storage.refs["refs/heads/ef02/" + namespace + "/" + storage.attempt_key(identity["attempt_id"])] = BASE
+    with pytest.raises(RemoteTransportError, match="LEGACY_BOUNDARY_RECONCILE_ONLY"):
+        owner_type.acquire(storage, identity)
+    assert not any(method == "POST" for method, *_ in storage.requests)
+
+
+def _publishable_workowner(tmp_path, monkeypatch):
+    """Real candidate bytes + modeled Git snapshot; no provider or Git writes."""
+    from ai_commerce.remote import transport
+    storage, identity, owner_type = _workowner_fixture()
+    owner = owner_type.acquire(storage, identity)
+    relative = _action()["allowed_paths"][0]
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"x = 1\n")
+    hashes = {relative: owner_type.digest("verified-file")}
+    import hashlib
+    hashes[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+    proof = {"version": 1, "status": "CANDIDATE_READY", "review_required": False, "scope_valid": True,
+             "out_of_scope_files": [], "changed_files": [relative], "allowed_paths": [relative],
+             "candidate_file_sha256": hashes, "tracked_diff_sha256": "b" * 64,
+             "source_sha": BASE, "effective_source_sha": BASE,
+             "action_id": identity["action_id"], "attempt_id": identity["attempt_id"],
+             "fingerprint": identity["fingerprint"],
+             "verification": {"status": "BUILD_VERIFIED_FOR_SCOPE", "exit_code": 0,
+                "profile": "ef02-tests", "argv": ["python", "-m", "pytest", "tests/test_ef02.py", "-q", "-n", "12"],
+                "evidence_sha256": {"tracked_diff": "b" * 64}, "report_sha256": "c" * 64},
+             "provenance": {"executor": "codex", "model": "fixture", "effort": "high",
+                "dependency_candidates": [], "run_id": None, "run_attempt": None}}
+    monkeypatch.setattr(transport, "assert_candidate_git_filter_consistency", lambda *_a: None)
+    monkeypatch.setattr(transport, "_snapshot", lambda *_a: ({
+        "git_head_after": BASE, "changed_files": [relative], "scope_valid": True,
+        "candidate_file_sha256": hashes, "tracked_diff_sha256": "b" * 64}, b""))
+    for stage, data in [("CLAIMED", {}), ("SPAWN_INTENT", {}), ("CHILD_OBSERVED", {"pid": 7}),
+                        ("PROVIDER_INTENT", {"round": 0}),
+                        ("ROUND_VERIFIED", {"round": 0, "receipt": "d" * 64}),
+                        ("RESULT_VERIFIED", {"receipt": transport.evidence_digest(proof)}),
+                        ("PUBLISH_INTENT", {"receipt": transport.evidence_digest(proof)})]:
+        owner.append(stage, **data)
+    arguments = {"source_sha": BASE, "attempt_id": identity["attempt_id"], "workspace": tmp_path,
+                 "paths": [relative], "expected_hashes": hashes, "evidence": proof, "owner": owner}
+    return storage, owner, arguments
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+def test_workowner_verified_terminal_and_lost_publish_response_reconcile_get_only(tmp_path, monkeypatch, terminal):
+    from ai_commerce.remote.transport import WorkOwner
+    from ai_commerce.remote.candidate_policy import evidence_digest
+    storage, owner, arguments = _publishable_workowner(tmp_path, monkeypatch)
+    candidate = storage.candidate(**arguments)
+    if terminal:
+        owner.append("PUBLISHED", receipt=evidence_digest(arguments["evidence"]),
+                     candidate=WorkOwner.digest(candidate["candidate_sha"]))
+    storage.requests.clear()
+    result = WorkOwner(storage, owner.identity, "").reconcile()
+    assert result["status"] == "RECONCILED_VERIFIED_TERMINAL"
+    assert result["candidate_sha"] == candidate["candidate_sha"]
+    assert not result["replay_authorized"] and not result["publication_authorized"]
+    assert all(method == "GET" for method, *_ in storage.requests)
+
+
+def test_workowner_lost_generation_during_candidate_preparation_never_publishes(tmp_path, monkeypatch):
+    storage, owner, arguments = _publishable_workowner(tmp_path, monkeypatch)
+    api = storage.api
+    def lost_fence(method, path, data=None):
+        response = api(method, path, data)
+        if method == "POST" and path == "/git/trees":
+            owner.uncertain = True
+        return response
+    storage.api = lost_fence
+    with pytest.raises(RemoteTransportError, match="STALE_FENCE"):
+        storage.candidate(**arguments)
+    assert not any("/candidate/" in ref for ref in storage.refs)
+
+
+def test_workowner_candidate_publication_race_is_create_only(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    storage, owner, arguments = _publishable_workowner(tmp_path, monkeypatch)
+    def publish():
+        try:
+            return storage.candidate(**arguments)
+        except RemoteTransportError:
+            return None
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: publish(), range(2)))
+    assert sum(r is not None for r in results) == 1
+    assert len([ref for ref in storage.refs if "/candidate/" in ref]) == 1
+    assert not any(method in ("PATCH", "PUT", "DELETE") for method, *_ in storage.requests)
+
+
+def test_workowner_mismatched_terminal_candidate_receipt_is_rejected(tmp_path, monkeypatch):
+    from ai_commerce.remote.transport import WorkOwner
+    storage, owner, arguments = _publishable_workowner(tmp_path, monkeypatch)
+    candidate = storage.candidate(**arguments)
+    storage.refs[candidate["candidate_ref"]] = BASE
+    before = len(storage.requests)
+    with pytest.raises((RemoteTransportError, ValueError)):
+        WorkOwner(storage, owner.identity, "").reconcile()
+    assert all(method == "GET" for method, *_ in storage.requests[before:])
+
+
 def _action():
     return {
         "action_id": "fault-probe",
@@ -35,6 +300,8 @@ def _action():
 
 @pytest.fixture(autouse=True)
 def _fake_worktree_checkout_is_clean(monkeypatch):
+    from test_ef01_repair import DirectWorkOwnerBroker
+    monkeypatch.setattr("ai_commerce.remote.worker.WorkOwnerBroker", DirectWorkOwnerBroker)
     """Fault-injection tests mock 'git worktree add' without creating .git.
 
     Keep checkout-preflight positive in these tests so each test can reach
@@ -51,6 +318,7 @@ def _fake_worktree_checkout_is_clean(monkeypatch):
 
 
 def _worker(tmp_path: Path, github):
+    from test_ef01_repair import memory_owner, WorkOwnerMemoryTransport
     worker = object.__new__(LocalBatchWorker)
     worker.checkout = tmp_path
     worker.root = tmp_path / "evidence"
@@ -59,6 +327,8 @@ def _worker(tmp_path: Path, github):
     worker.profiles = {"ef02-tests": ["python", "-m", "pytest", "tests/test_ef02.py", "-q"]}
     worker.profiles["project-tests"] = ["python", "-m", "pytest", "tests", "-q"]
     worker.github = github
+    storage = WorkOwnerMemoryTransport(BASE)
+    worker._acquire_owner = lambda action: memory_owner(action, worker.batch, storage)
     if not hasattr(github, "pre_spawn_checkpoint"):
         # This fixture exercises unrelated faults; provide the fake positive
         # remote checkpoint explicitly rather than touching GitHub.
@@ -118,7 +388,7 @@ def test_post_claim_integration_transport_failure_is_not_blindly_retried(tmp_pat
     assert first["executor_invoked"] is False
     assert _persisted(worker)["status"] == "INTEGRATION_FAILED"
     second = worker.execute_action(_action())
-    assert github.calls == 2
+    assert github.calls == 1  # WorkOwner refuses a second distributed claim.
     assert second["status"] == "DUPLICATE_CLAIM_NO_REEXECUTION"
     assert second["executor_invoked"] is False
     assert second["candidate_sha"] is None
@@ -279,6 +549,11 @@ def test_candidate_publication_failure_preserves_verified_result_but_not_pass(tm
         def __init__(self, argv, **_kwargs):
             self.argv = argv
         def communicate(self, timeout=None):
+            inv = {"work_id": "m0r-negative-fi:fault-probe", "attempt_id": _action()["attempt_id"],
+                   "invocation_id": _action()["attempt_id"] + ":invocation-000", "repair_round": 0,
+                   "source_base_sha": BASE, "provider_return_determinate": True, "verify_completed": True}
+            self.owner_fence("PROVIDER_INTENT", inv)
+            self.owner_fence("ROUND_VERIFIED", inv)
             out = Path(self.argv[self.argv.index("--out-dir") + 1])
             out.mkdir(parents=True, exist_ok=True)
             (out / "engineering_result.json").write_text(json.dumps({
@@ -291,6 +566,7 @@ def test_candidate_publication_failure_preserves_verified_result_but_not_pass(tm
                 "candidate_file_sha256": {"tests/test_ef02_m0r_fixture.py": "0" * 64},
                 "verify_exit_code": 0,
                 "error_code": None,
+                "invocations": [inv],
             }), encoding="utf-8")
             return ("fixture stdout", "fixture stderr")
     monkeypatch.setattr("ai_commerce.remote.worker.subprocess.run",
@@ -401,7 +677,7 @@ def test_parent_interrupted_at_popen_preserves_pre_spawn_unknown_without_replay(
     assert not (evidence / "invocation_spawned.json").exists()
     assert not (evidence / "action_result.json").exists()
     assert worker.execute_action(_action())["status"] == "DUPLICATE_CLAIM_NO_REEXECUTION"
-    assert github.claim_calls == 2
+    assert github.claim_calls == 1
 
 
 def test_parent_interrupted_after_ef01_child_spawn_preserves_observed_pid_unknown(
@@ -452,7 +728,7 @@ def test_parent_interrupted_after_ef01_child_spawn_preserves_observed_pid_unknow
     assert not (worker.root / "fault-probe-m0r-fault-probe-001" / "action_result.json").exists()
     assert worker.execute_action(_action())["status"] == "DUPLICATE_CLAIM_NO_REEXECUTION"
     assert spawn_count == 1
-    assert github.claim_calls == 2
+    assert github.claim_calls == 1
 
 
 def test_remote_checkpoint_transport_failure_stops_before_model(tmp_path, monkeypatch):
@@ -483,7 +759,7 @@ def test_remote_checkpoint_transport_failure_stops_before_model(tmp_path, monkey
                 "invocation_spawned.json").exists()
     repeat = worker.execute_action(_action())
     assert repeat["status"] == "DUPLICATE_CLAIM_NO_REEXECUTION"
-    assert github.calls == 2
+    assert github.calls == 1
 
 
 def test_confirmed_remote_checkpoint_precedes_ef01_popen(tmp_path, monkeypatch):

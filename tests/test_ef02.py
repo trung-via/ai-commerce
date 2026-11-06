@@ -19,6 +19,31 @@ from ai_commerce.remote.validation import (
 from ai_commerce.remote.scheduler import run_schedule
 from ai_commerce.remote.transport import GitHubTransport, RemoteTransportError
 
+
+@pytest.mark.parametrize("field", ["action_id", "attempt_id"])
+def test_workowner_scheduler_rejects_duplicate_identity_before_dispatch(field):
+    from ai_commerce.remote.scheduler import run_schedule
+    first, second = action("a"), action("b")
+    second[field] = first[field]
+    calls = []
+    with pytest.raises(ValueError, match="DUPLICATE_DISPATCH_IDENTITY"):
+        run_schedule({"batch_id": "duplicate", "source_sha": "a" * 40,
+                      "actions": [first, second]}, lambda a: calls.append(a))
+    assert calls == []
+
+
+def test_workowner_scheduler_mismatched_worker_identity_blocks_dependent():
+    from ai_commerce.remote.scheduler import run_schedule
+    first, second = action("a"), action("b", ["a"])
+    calls = []
+    def work(a):
+        calls.append(a["action_id"])
+        return {"status": "CANDIDATE_READY", "action_id": "foreign"}
+    result = run_schedule({"batch_id": "mismatch", "source_sha": "a" * 40,
+                           "actions": [first, second]}, work)
+    assert result["succeeded"] == 0 and calls == ["a"]
+    assert result["actions"][1]["status"] == "BLOCKED_DEPENDENCY"
+
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = ROOT / "contracts" / "RemoteActionBatch.v1.schema.json"
 REGISTRY = ROOT / ".github" / "ef02" / "verify-profiles.json"

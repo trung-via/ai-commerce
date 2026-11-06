@@ -56,6 +56,11 @@ class RecordingTransport(GitHubTransport):
         self.tree_items = None
         self.commit_data = None
 
+    def _candidate_owner_fence(self, owner, proof):
+        # This transport models byte/MT01 proof only; WorkOwner transport
+        # integration and negative publication fences are exercised separately.
+        pass
+
     def api(self, method, path, data=None):
         self.calls.append((method, path))
         if method == "GET" and path.startswith("/git/commits/"):
