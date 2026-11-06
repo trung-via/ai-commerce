@@ -1,0 +1,23 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "bq-03b",
+  "sources": [
+    "src/ai_commerce/creative_quality/study_protocol.py",
+    "src/ai_commerce/creative_quality/human_attestation.py",
+    "src/ai_commerce/creative_quality/study_readiness.py"
+  ],
+  "tests": ["tests/test_bq_03b_human_study_readiness.py"],
+  "acs": [
+    "BQ-03b.r6-preregistered-consent-first-session-design",
+    "BQ-03b.r6-independent-human-attestation-fail-closed",
+    "BQ-03b.r6-privacy-withdrawal-and-readiness-closure"
+  ],
+  "consumers": [
+    "src/ai_commerce/creative_quality/blind_trials.py",
+    "src/ai_commerce/creative_quality/rater_receipts.py",
+    "src/ai_commerce/creative_quality/calibration_stats.py",
+    "src/ai_commerce/creative_quality/t3_assessment.py",
+    "src/ai_commerce/creative_quality/multimodal_review.py"
+  ],
+  "contracts": []
+}
