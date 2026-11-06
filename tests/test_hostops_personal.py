@@ -117,6 +117,9 @@ class PersonalHostOpsContractTests(unittest.TestCase):
         if not node:
             self.skipTest("Node CLI unavailable: hosted Windows JS sanitizer verification required")
         workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+        # Keep this historical Personal sanitizer harness scoped to its
+        # actual job: the new D5 carrier has a different independent JS receipt.
+        workflow = workflow.split("  hostops-d5-carrier:", 1)[0]
         self.assertEqual(workflow.count("          script: |"), 1)
         script = "\n".join(line[12:] if line.startswith("            ") else line
                            for line in workflow.split("          script: |\n", 1)[1].splitlines())
@@ -921,6 +924,29 @@ const script = fs.readFileSync(process.argv[2],'utf8');
             finally:
                 hostops.ROOTS["workspace"] = old
 
+
+
+
+    def test_d5_carrier_is_only_signed_closed_ingress_and_off_by_default(self):
+        """D5 workflow source has no unsigned, generic shell or automatic Wake route."""
+        workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+        assert workflow.count("  hostops-d5-carrier:") == 1
+        d5 = workflow.split("  hostops-d5-carrier:", 1)[1]
+        assert "vars.HOSTOPS_D5_PROTECTED_ENABLE == 'REVIEWED'" in d5
+        assert "github.actor == github.repository_owner" in d5
+        assert "github.event_name == 'issue_comment'" in d5
+        assert "startsWith(github.event.issue.title, '[HOSTOPS D5] ')" in d5
+        assert "runs-on: [self-hosted, Windows, ai-commerce-hostops]" in d5
+        assert "persist-credentials: false" in d5
+        assert "python -B -m ai_commerce.hostops_v3.d5_control --prepare-event" in d5
+        assert "python -B -m ai_commerce.hostops_v3.d5_control --request" in d5
+        assert "AI_COMMERCE_D5_RESULT_V1" in d5
+        assert "wake_sent" in d5 and "signed.issue_number !== context.issue.number" in d5
+        assert "START_OR_REUSE_D5_CHROME" in d5  # enum only, not a shell command
+        assert "--serve" not in d5  # never start the private operator under Actions
+        assert "script: |" in d5
+        assert "Invoke-Expression" not in d5 and "iex " not in d5
+        assert "permissions:\n      contents: read\n      issues: write" in d5
 
 if __name__ == "__main__":
     unittest.main()
