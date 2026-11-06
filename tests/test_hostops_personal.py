@@ -1017,5 +1017,40 @@ const script = fs.readFileSync(process.argv[2],'utf8');
 
 
 
+    def test_d5_isolated_9444_uses_new_profile_fixed_input_and_never_touches_old_chrome(self):
+        """An independent empty 9444 user-data-dir must not reuse D5's occupied 9333 profile."""
+        workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+        assert workflow.count("  hostops-d5-isolated-9444-trial:") == 1
+        job = workflow.split("  hostops-d5-isolated-9444-trial:", 1)[1]
+        assert "github.actor == github.repository_owner" in job
+        assert "github.event.issue.user.login == github.repository_owner" in job
+        assert "github.event_name == 'issues' && github.event.action == 'opened'" in job
+        assert '{"schema":"ai-commerce.d5.isolated9444.v1","operation":"START_FRESH_9444","parameters":{}}' in job
+        assert '{"schema":"ai-commerce.d5.isolated9444.v1","operation":"PROBE_FRESH_9444","parameters":{}}' in job
+        assert "D5-Isolated-9444-Trial" in job
+        assert "Join-Path $trial 'UserData'" in job
+        assert "Join-Path $data 'Default'" in job
+        assert "Join-Path $trial 'config.json'" in job
+        assert "Test-Path -LiteralPath $trial" in job
+        assert "TRIAL_ALREADY_EXISTS_HOLD" in job
+        assert "ExclusiveAddressUse = $true" in job
+        assert "127.0.0.1" in job and "9444" in job
+        assert "Set-Acl -LiteralPath $profile -AclObject $dirAcl" in job
+        assert "Set-Acl -LiteralPath $cfg -AclObject $configAcl" in job
+        assert "[IO.FileMode]::CreateNew" in job
+        assert "ai_commerce.remote.chrome_acquisition launch --config $cfg" in job
+        assert "ai_commerce.remote.chrome_acquisition probe --config $cfg" in job
+        assert "AI_COMMERCE_D5_ISOLATED_9444_V1" in job
+        assert "r.source_sha !== context.sha" in job
+        assert "r.wake_sent !== false" in job
+        assert "lock_marker_present" in job and "profile_separate" in job
+        assert "persist-credentials: false" in job
+        assert "Stop-Process" not in job and "Remove-Item" not in job
+        assert "Register-ScheduledTask" not in job and "Invoke-Expression" not in job
+        assert "Copy-Item" not in job and "SEND_WAKE" not in job
+        assert "User Data\\Default" not in job
+
+
+
 if __name__ == "__main__":
     unittest.main()
