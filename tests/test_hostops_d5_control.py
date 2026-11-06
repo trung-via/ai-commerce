@@ -1,4 +1,6 @@
 """Offline component tests: no desktop, scheduler, Chrome, profile or live IPC."""
+
+
 from dataclasses import replace
 import hashlib
 import json
@@ -6,8 +8,9 @@ import os
 from pathlib import Path
 import sqlite3
 import subprocess
-
 import pytest
+import base64
+import uuid
 
 from ai_commerce.hostops_v3 import d5_control as d5
 from ai_commerce.remote import chrome_acquisition as ca
@@ -355,7 +358,7 @@ def test_duplicate_json_no_unsigned_default_verifier_and_no_path_leaks(rig, tmp_
     def reject(value):
         raise ValueError("PRIVATE_OPERATOR_KEY")
     with pytest.raises(d5.D5Blocked, match="^ENROLLMENT_UNVERIFIED$"):
-        d5.load_enrollment(path, verify_signed=reject, now=NOW)
+        d5.load_enrollment(path, authority=reject, now=NOW)
     with pytest.raises(TypeError):
         d5.load_enrollment(path, now=NOW)
 
@@ -444,155 +447,603 @@ def test_mt01_owner_manifest_has_real_legacy_consumers_and_eight_path_scope():
     assert work["native_acceptance"] == "PENDING_GENUINE_HOSTOPS_DEPLOYMENT"
 
 
-def test_d5_receiver_handle_request_lifecycle(rig):
+def test_no_external_hmac_or_callback_authentication_route(rig):
     policy, native, bridge, _ = rig
     receiver = d5.D5Receiver(bridge, clock=lambda: NOW)
-    request = d5.sign_request(policy, "STATUS", "1" * 32, NOW)
-    res = receiver.handle_request(request)
-    assert res["code"] == "NOT_RUNNING"
-    assert res["operation"] == "STATUS"
-    assert "private" not in json.dumps(res).lower()
+    assert receiver.handle_request(d5.sign_request(policy, "STATUS", "1"*32, NOW))["code"] == "INPUT_INVALID"
+    with pytest.raises(TypeError):
+        d5.D5IngressBoundary(receiver, verify_off_host_signature=lambda _: True, off_host_custody_proven=True)
+    assert native.effects == []
 
 
-def test_d5_receiver_handle_logon_trigger(rig):
+@pytest.mark.parametrize("field,value", [
+    ("code", "PRIVATE_PATH"), ("operation", "PRIVATE_COOKIE"), ("request_id", "PRIVATE_VALUE"),
+    ("epoch", True), ("effect_observed", "PRIVATE_VALUE"), ("bridge_receipt", "PRIVATE_VALUE"),
+    ("wake_sent", True),
+])
+def test_sanitizer_checks_values_not_only_field_names(field, value):
+    result = d5.sanitize_receipt({"code": "READY_ATTACH", "operation": "STATUS", field: value})
+    assert result["code"] == "INVALID_PUBLIC_RECEIPT"
+    assert "PRIVATE" not in json.dumps(result)
+
+
+def test_sanitizer_drops_unknown_fields_and_nested_private_fields():
+    value = d5.sanitize_receipt({"code": "LOGON_TRIGGER_DELIVERED", "operation": "LOGON_TRIGGER",
+        "bridge_receipt": {"code": "READY_ATTACH", "private_path": "DO_NOT_PUBLISH"},
+        "raw_cookie": "DO_NOT_PUBLISH"})
+    assert "DO_NOT_PUBLISH" not in json.dumps(value)
+    assert value["bridge_receipt"]["code"] == "READY_ATTACH"
+
+
+
+
+
+
+receiver = transport = d5
+
+
+class KernelPipe:
+    def __init__(self, sid, *, fail=None):
+        self.sid, self.fail, self.writes = sid, fail, []
+
+    def identity(self, pipe, *, logon=False):
+        if self.fail == "identity":
+            raise d5.D5Blocked("UNSUPPORTED_SESSION")
+        return self.sid, 1
+
+    def io(self, pipe, action, data=None, **kwargs):
+        if self.fail == action:
+            raise d5.D5Blocked("PIPE_UNAVAILABLE")
+        if action == "read":
+            return d5.D5_LOGON_TRIGGER_PAYLOAD
+        self.writes.append(data)
+
+
+@pytest.mark.parametrize("attestation", [None, {}, {
+    "sid": "S-1-5-21-111-222-333-1001", "session_id": 1,
+    "elevated": False, "desktop_available": True,
+}])
+def test_missing_or_forged_attestation_cannot_launch(rig, attestation):
+    _, native, bridge, _ = rig
+    core = d5.D5Receiver(bridge, clock=lambda: NOW)
+    with pytest.raises(d5.D5Blocked, match="UNTRUSTED_PEER_ATTESTATION"):
+        core.handle_logon_trigger(d5.D5_LOGON_TRIGGER_PAYLOAD, client_attestation=attestation)
+    assert native.effects == []
+
+
+def test_attested_at_logon_delivery_then_reuse_one_browser(rig):
     policy, native, bridge, _ = rig
-    receiver = d5.D5Receiver(bridge, clock=lambda: NOW)
-    attestation = {
-        "sid": policy.sid,
-        "session_id": 1,
-        "elevated": False,
-        "desktop_available": True,
+    core, api = d5.D5Receiver(bridge, clock=lambda: NOW), KernelPipe(policy.sid)
+    for _ in range(2):
+        result = receiver.serve_one(core, api, "SYNTHETIC_HANDLE")
+        assert result["code"] == "LOGON_TRIGGER_DELIVERED"
+        assert result["bridge_receipt"]["code"] == "READY_ATTACH"
+    assert native.effects == ["START_OR_REUSE_D5_CHROME"]
+    assert native.attaches == 4
+    assert set(native.tasks) == set(d5.RUNNER_TASKS)
+    assert native.profile == b"private cookies preserved"
+    assert "sid" not in json.loads(api.writes[0])
+
+
+@pytest.mark.parametrize("current,peer,session", [
+    (("sid", 1, False), ("other", 1, False), 1),
+    (("sid", 1, False), ("sid", 2, False), 1),
+    (("sid", 1, False), ("sid", 1, True), 1),
+    (("sid", 1, True), ("sid", 1, True), 1),
+    (("sid", 0, False), ("sid", 0, False), 0),
+    (("sid", 1, False), ("sid", 1, False), 2),
+    (("sid", 1, False), ("sid", True, False), 1),
+])
+def test_kernel_sid_session_elevation_mismatch_is_closed(current, peer, session):
+    with pytest.raises(d5.D5Blocked, match="UNSUPPORTED_SESSION"):
+        receiver._same_operator(current, peer, session)
+
+
+def test_absent_input_desktop_denied_without_real_windows_call():
+    class User:
+        def GetUserObjectInformationW(self, *args):
+            raise AssertionError("absent desktop must short circuit")
+    api = object.__new__(receiver.Win32)
+    api.u = User()
+    with pytest.raises(d5.D5Blocked, match="UNSUPPORTED_SESSION"):
+        api.desktop(None, "sid")
+
+
+def test_wrong_peer_sid_and_kernel_failure_have_no_effect(rig):
+    policy, native, bridge, _ = rig
+    core = d5.D5Receiver(bridge, clock=lambda: NOW)
+    for api in (KernelPipe("other-sid"), KernelPipe(policy.sid, fail="identity")):
+        result = receiver.serve_one(core, api, "SYNTHETIC_HANDLE")
+        assert result["status"] == "BLOCKED"
+    assert native.effects == []
+
+
+def test_capability_is_frame_bound_single_use_and_cannot_be_supplied_as_dict(rig):
+    policy, native, bridge, _ = rig
+    core, api = d5.D5Receiver(bridge, clock=lambda: NOW), KernelPipe(policy.sid)
+    with pytest.raises(d5.D5Blocked, match="UNTRUSTED_PEER_ATTESTATION"):
+        receiver.TrustedPeer(object(), d5.D5_LOGON_TRIGGER_PAYLOAD, policy.sid, 1, expires=999999999)
+    peer = receiver.attest_peer(api, "SYNTHETIC_HANDLE", d5.D5_LOGON_TRIGGER_PAYLOAD)
+    assert core.handle_logon_trigger(d5.D5_LOGON_TRIGGER_PAYLOAD, _peer=peer)["code"] == "LOGON_TRIGGER_DELIVERED"
+    with pytest.raises(d5.D5Blocked, match="UNTRUSTED_PEER_ATTESTATION"):
+        core.handle_logon_trigger(d5.D5_LOGON_TRIGGER_PAYLOAD, _peer=peer)
+    other = receiver.attest_peer(api, "SYNTHETIC_HANDLE", b"OTHER_FRAME")
+    with pytest.raises(d5.D5Blocked, match="UNTRUSTED_PEER_ATTESTATION"):
+        core.handle_logon_trigger(d5.D5_LOGON_TRIGGER_PAYLOAD, _peer=other)
+    assert native.effects == ["START_OR_REUSE_D5_CHROME"]
+
+
+def test_broken_pipe_never_repeats_an_effect(rig):
+    policy, native, bridge, _ = rig
+    core = d5.D5Receiver(bridge, clock=lambda: NOW)
+    with pytest.raises(d5.D5Blocked, match="PIPE_UNAVAILABLE"):
+        receiver.serve_one(core, KernelPipe(policy.sid, fail="read"), "SYNTHETIC_HANDLE")
+    assert not native.effects
+    with pytest.raises(d5.D5Blocked, match="PIPE_UNAVAILABLE"):
+        receiver.serve_one(core, KernelPipe(policy.sid, fail="write"), "SYNTHETIC_HANDLE")
+    assert native.snapshot == OWNED
+    receiver.serve_one(core, KernelPipe(policy.sid), "SYNTHETIC_HANDLE")
+    assert native.effects == ["START_OR_REUSE_D5_CHROME"]
+
+
+def test_unknown_native_effect_blocks_later_logon_after_restart(rig, monkeypatch):
+    policy, native, bridge, _ = rig
+    def uncertain(*args):
+        native.effects.append("ONE_ATTEMPT")
+        raise TimeoutError("PRIVATE_VALUE")
+    monkeypatch.setattr(native, "effect", uncertain)
+    core, api = d5.D5Receiver(bridge, clock=lambda: NOW), KernelPipe(policy.sid)
+    result = receiver.serve_one(core, api, "SYNTHETIC_HANDLE")
+    assert result["bridge_receipt"]["code"] == "UNKNOWN_EFFECT_HOLD"
+    reopened = d5.Bridge(bridge.enrollment, native, d5.Journal(bridge.journal.path), clock=lambda: NOW)
+    result = receiver.serve_one(d5.D5Receiver(reopened, clock=lambda: NOW), api, "SYNTHETIC_HANDLE")
+    assert result["code"] == "UNKNOWN_EFFECT_HOLD"
+    assert native.effects == ["ONE_ATTEMPT"]
+    assert "PRIVATE_VALUE" not in json.dumps(result)
+
+
+
+
+
+
+@pytest.fixture(scope="session")
+def signing_keys(tmp_path_factory):
+    folder = tmp_path_factory.mktemp("d5-ephemeral-crypto")
+    assert ROOT not in folder.resolve().parents
+    executable = Path(os.environ["SystemRoot"]) / "System32" / "OpenSSH" / "ssh-keygen.exe"
+    assert executable.is_file(), "Windows OpenSSH verifier required; no crypto bypass"
+    keys = {}
+    for name in ("authority", "issuer", "rogue"):
+        path = folder / name
+        result = subprocess.run([str(executable), "-q", "-t", "ed25519", "-N", "", "-f", str(path)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False)
+        assert result.returncode == 0, "ephemeral Ed25519 fixture generation failed"
+        keys[name] = path
+    return executable, keys
+
+
+def signed(signing_keys, name, body, namespace, folder):
+    executable, keys = signing_keys
+    message = folder / (uuid.uuid4().hex + ".message")
+    message.write_bytes(d5.canonical(body))
+    result = subprocess.run([str(executable), "-Y", "sign", "-f", str(keys[name]), "-n", namespace, str(message)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
+    assert result.returncode == 0, "ephemeral signing failed"
+    return {"body": body, "signature": base64.b64encode(Path(str(message) + ".sig").read_bytes()).decode()}
+
+
+def public_key(keys, name):
+    return " ".join(Path(str(keys[name]) + ".pub").read_text().split()[:2])
+
+
+@pytest.fixture
+def enrolled(rig, tmp_path, monkeypatch, signing_keys):
+    policy, native, bridge, holder = rig
+    state = tmp_path / "operator-state"
+    state.mkdir()
+    policy = replace(policy, state_root=state)
+    holder[0] = policy
+    executable, keys = signing_keys
+    anchor = tmp_path / "synthetic-protected-anchor.json"
+    anchor.write_bytes(d5.canonical({"schema": "ai-commerce.d5.root.v1", "identity": "d5-authority",
+                                    "public_key": public_key(keys, "authority")}))
+    monkeypatch.setattr(transport, "fixed_state", lambda: state)
+    monkeypatch.setattr(transport, "fixed_anchor", lambda: anchor)
+    # Synthetic filesystem ACL seam ONLY, never signature verification.
+    def synthetic_protected(path):
+        assert path in (anchor, executable)
+        return path
+    monkeypatch.setattr(transport, "protected_path", synthetic_protected)
+    monkeypatch.setattr(d5, "private_path", lambda path, **kwargs: path)
+    native_policy = {
+        "source_sha": policy.source_sha, "epoch": policy.epoch, "sid": policy.sid, "expires": policy.expires,
+        "release_root": str(policy.release_root), "files": policy.files, "chrome_config": str(policy.environment.config_path),
+        "local_app_data": str(tmp_path), "state_root": str(state), "key_file": str(state / "control.key"),
+        "legacy_tasks": [], "runner_tasks": list(d5.RUNNER_TASKS), "enabled": True, "revoked": False,
+        "private_control_plane": True, "public_runner_exposed": False,
     }
-    result = receiver.handle_logon_trigger(b"D5_LOGON_START_V1\n", client_attestation=attestation)
-    assert result["status"] == "OBSERVED"
-    assert result["code"] == "LOGON_TRIGGER_DELIVERED"
-    assert result["operation"] == "LOGON_TRIGGER"
-    assert result["bridge_receipt"]["code"] == "READY_ATTACH"
-    assert native.effects.count("START_OR_REUSE_D5_CHROME") == 1
+    grant = {"schema": transport.GRANT_SCHEMA, "enrollment_id": "a"*32,
+        "issued": NOW-1, "expires": NOW+1000, "issuer": "d5-issuer", "issuer_public_key": public_key(keys, "issuer"),
+        "custody": {"signer": "OFF_HOST_PRIVATE", "operator": "INDEPENDENT_EXECUTION_BOUNDARY", "audit_sha256": "b"*64},
+        "native": native_policy}
+    lease = {"schema": transport.LEASE_SCHEMA, "enrollment_id": grant["enrollment_id"],
+        "source_sha": policy.source_sha, "epoch": policy.epoch, "grant_sha256": d5.digest(d5.canonical(grant)),
+        "serial": 1, "issued": NOW-1, "expires": NOW+59,
+        "revoked": False, "signer_exposed": False, "runtime_exposed": False}
+    def save_grant(value=grant, signer="authority"):
+        (state / "enrollment.json").write_bytes(d5.canonical(signed(signing_keys, signer, value,
+            "ai-commerce-d5-enrollment-v1", tmp_path)))
+    def save_lease(value=lease, signer="authority"):
+        (state / "custody-lease.json").write_bytes(d5.canonical(signed(signing_keys, signer, value,
+            "ai-commerce-d5-custody-v1", tmp_path)))
+    save_grant()
+    save_lease()
+    authority = transport.SignedPolicy()
+    def current():
+        authority.verify(authority.path, NOW)
+        return holder[0]
+    bridge.enrollment = current
+    core = d5.D5Receiver(bridge, authority=authority, clock=lambda: NOW)
+    def request(op="STATUS", number=1, patch=None, signer="issuer", namespace="ai-commerce-d5-request-v1"):
+        body = {"schema": transport.REQUEST_SCHEMA, "op": op, "request_id": f"{number:032x}",
+            "nonce": f"{number+1000:032x}", "issued": NOW, "expires": NOW+30,
+            "source_sha": policy.source_sha, "epoch": policy.epoch, "enrollment_id": grant["enrollment_id"],
+            "issue_number": 446, "dry_run": False}
+        body.update(patch or {})
+        return signed(signing_keys, signer, body, namespace, tmp_path)
+    return core, native, bridge, request, grant, lease, save_grant, save_lease, authority
 
 
-def test_d5_receiver_logon_trigger_rejected_inputs(rig):
-    policy, native, bridge, _ = rig
-    receiver = d5.D5Receiver(bridge, clock=lambda: NOW)
-    # Reject wrong payload
+def test_authenticated_synthetic_lifecycle_preserves_all_runners_and_profile(enrolled):
+    core, native, bridge, request, *_ = enrolled
+    lifecycle = [
+        ("STATUS", "NOT_RUNNING"), ("MIGRATION_PREFLIGHT", "MIGRATION_READY"),
+        ("RETIRE_NEW_AUTOSTART", "RETIRED"), ("INSTALL_VERIFIED_OLD_BEHAVIOR_LAUNCHER", "LAUNCHER_INSTALLED"),
+        ("INSTALL_SINGLE_LOGON_AUTOSTART", "REGISTERED"), ("START_OR_REUSE_D5_CHROME", "READY_ATTACH"),
+        ("START_OR_REUSE_D5_CHROME", "READY_ATTACH"), ("VERIFY_CDP_9333_AND_PLAYWRIGHT", "READY_ATTACH"),
+        ("STOP_OWNED_D5_CHROME", "STOPPED"), ("RECOVER_BOUNDED", "READY_ATTACH"),
+        ("STOP_OWNED_D5_CHROME", "STOPPED"), ("REMOVE_D5_AUTOSTART", "AUTOSTART_REMOVED"),
+        ("ROLLBACK", "ROLLED_BACK_DISABLED"),
+    ]
+    for number, (op, code) in enumerate(lifecycle, 1):
+        result = core.handle_request(request(op, number))
+        assert result["code"] == code, (op, result)
+        assert result["request_id"] == f"{number:032x}"
+        assert result["wake_sent"] is False
+    api = KernelPipe(bridge.enrollment().sid)
+    for _ in range(2):
+        result = receiver.serve_one(core, api, "SYNTHETIC_HANDLE")
+        assert result["bridge_receipt"]["code"] == "READY_ATTACH"
+    assert native.effects.count("START_OR_REUSE_D5_CHROME") == 3
+    assert native.profile == b"private cookies preserved" and set(native.tasks) == set(d5.RUNNER_TASKS)
+
+
+@pytest.mark.parametrize("op", d5.OPS)
+def test_authenticated_dry_run_catalog_has_no_effect(enrolled, op):
+    core, native, _, request, *_ = enrolled
+    assert core.handle_request(request(op, patch={"dry_run": True}))["code"] == "DRY_RUN"
+    assert not native.effects and not native.attaches
+
+
+@pytest.mark.parametrize("patch", [
+    {"expires": NOW}, {"issued": NOW+1}, {"expires": NOW+61}, {"source_sha": "f"*40},
+    {"epoch": 2}, {"enrollment_id": "f"*32}, {"epoch": True}, {"op": "SHELL"},
+    {"command": "PRIVATE"}, {"script": "PRIVATE"}, {"path": "PRIVATE"},
+    {"pid": 22}, {"env": {}}, {"dry_run": 1}, {"nonce": "wrong"},
+])
+def test_signed_but_invalid_schema_or_stale_envelope_cannot_mutate(enrolled, patch):
+    core, native, _, request, *_ = enrolled
+    result = core.handle_request(request("START_OR_REUSE_D5_CHROME", patch=patch))
+    assert result["status"] == "BLOCKED" and not native.effects
+    assert "PRIVATE" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n"], ids=["LF", "CRLF"])
+@pytest.mark.parametrize("damage", [None, "body", "header"], ids=["valid", "tampered-body", "invalid-header"])
+def test_real_crypto_verifies_openssh_armor_line_endings(enrolled, newline, damage):
+    core, native, _, request, *_ = enrolled
+    value = request()
+    armor = base64.b64decode(value["signature"], validate=True)
+    armor = armor.replace(b"\r\n", b"\n").replace(b"\n", newline)
+    assert armor.startswith(b"-----BEGIN SSH SIGNATURE-----" + newline)
+    if damage == "body":
+        value["body"]["dry_run"] = True
+    elif damage == "header":
+        armor = armor.replace(b"-----BEGIN SSH SIGNATURE-----" + newline,
+                              b"-----BEGIN SSH SIGNATURE----- \n", 1)
+    value["signature"] = base64.b64encode(armor).decode("ascii")
+    result = core.handle_request(value)
+    assert result["code"] == ("NOT_RUNNING" if damage is None else "SIGNATURE_INVALID"), result
+    assert native.effects == [] and native.attaches == 0
+
+
+def test_real_verifier_keeps_programdata_without_runner_credentials(enrolled, monkeypatch):
+    core, native, _, request, *_ = enrolled
+    value = request()
+    expected = {key.upper(): value for key, value in os.environ.items()
+                if key.upper() in {"SYSTEMROOT", "WINDIR", "TEMP", "TMP", "PROGRAMDATA"}}
+    assert expected.get("PROGRAMDATA"), "Windows OpenSSH initialization needs PROGRAMDATA"
+    for key in ("GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN", "SSH_AUTH_SOCK", "PYTHONPATH"):
+        monkeypatch.setenv(key, "SYNTHETIC_RUNNER_CREDENTIAL_DO_NOT_INHERIT")
+    run = subprocess.run
+    verified = []
+
+    def inspect_environment(argv, **kwargs):
+        assert argv[1:3] == ["-Y", "verify"]
+        actual = {key.upper(): value for key, value in kwargs["env"].items()}
+        assert actual == expected, "Offline verifier must retain only its Windows initialization allowlist"
+        verified.append(True)
+        return run(argv, **kwargs)  # Real OpenSSH; no signature/return-code stub.
+
+    monkeypatch.setattr(subprocess, "run", inspect_environment)
+    result = core.handle_request(value)
+    assert result["code"] == "NOT_RUNNING", result
+    assert verified, "The request must pass the real OpenSSH verifier"
+    assert native.effects == [] and native.attaches == 0
+
+
+@pytest.mark.parametrize("mode", ["unsigned", "rogue", "wrong-namespace", "tampered"])
+def test_real_crypto_rejects_unsigned_forged_issuer_and_tamper(enrolled, mode):
+    core, native, _, request, *_ = enrolled
+    value = request("START_OR_REUSE_D5_CHROME", signer="rogue" if mode == "rogue" else "issuer",
+                    namespace="wrong-namespace" if mode == "wrong-namespace" else "ai-commerce-d5-request-v1")
+    if mode == "unsigned":
+        value["signature"] = ""
+    elif mode == "tampered":
+        value["body"]["dry_run"] = True
+    assert core.handle_request(value)["code"] == "SIGNATURE_INVALID"
+    assert native.effects == []
+
+
+def test_request_id_and_nonce_replay_survive_restart(enrolled):
+    core, native, bridge, request, *rest = enrolled
+    assert core.handle_request(request())["code"] == "NOT_RUNNING"
+    reopened = d5.Bridge(bridge.enrollment, native, d5.Journal(bridge.journal.path), clock=lambda: NOW)
+    restarted = d5.D5Receiver(reopened, authority=rest[-1], clock=lambda: NOW)
+    assert restarted.handle_request(request())["code"] == "REQUEST_REPLAY"
+    assert restarted.handle_request(request(number=2, patch={"nonce": f"{1001:032x}"}))["code"] == "REQUEST_REPLAY"
+
+
+@pytest.mark.parametrize("patch", [{"revoked": True}, {"signer_exposed": True}, {"runtime_exposed": True},
+                                  {"expires": NOW}, {"issued": NOW-61}, {"serial": 0}])
+def test_signed_revocation_or_exposed_custody_stops_effects(enrolled, patch):
+    core, native, _, request, _, lease, _, save, _ = enrolled
+    save({**lease, **patch})
+    assert core.handle_request(request("START_OR_REUSE_D5_CHROME"))["code"] == "REVOKED_OR_STALE"
+    assert native.effects == []
+
+
+def test_lease_rollback_and_reenrollment_do_not_clear_one_time_pin(enrolled):
+    core, native, _, request, grant, lease, save_grant, save_lease, _ = enrolled
+    save_lease({**lease, "serial": 2})
+    assert core.handle_request(request())["code"] == "NOT_RUNNING"
+    save_lease(lease)
+    assert core.handle_request(request(number=2))["code"] == "ENROLLMENT_REUSE_DENIED"
+    changed = {**grant, "enrollment_id": "f"*32}
+    save_grant(changed)
+    save_lease({**lease, "serial": 3, "enrollment_id": changed["enrollment_id"], "grant_sha256": d5.digest(d5.canonical(changed))})
+    assert core.handle_request(request(number=2))["code"] == "ENROLLMENT_REUSE_DENIED"
+    assert native.effects == []
+
+
+def test_untrusted_authority_and_absent_custody_are_not_deployment(enrolled):
+    core, native, _, request, grant, _, save_grant, _, _ = enrolled
+    save_grant(grant, signer="rogue")
+    assert core.handle_request(request())["code"] == "SIGNATURE_INVALID"
+    save_grant({**grant, "custody": {**grant["custody"], "signer": "SAME_SID_RUNNER"}})
+    assert core.handle_request(request())["code"] == "BLOCKED_NOT_DEPLOYED"
+    assert native.effects == []
+
+
+def test_no_private_signer_no_authority_is_blocked(enrolled):
+    _, native, _, request, *_ = enrolled
+    assert d5.D5IngressBoundary().evaluate_ingress_request(request())["code"] == "BLOCKED_NOT_DEPLOYED"
+    assert native.effects == []
+
+
+def test_signed_stop_can_close_only_identity_verified_claim(enrolled):
+    core, native, _, request, *_ = enrolled
+    native.snapshot = CLAIMED.copy()
+    assert core.handle_request(request("START_OR_REUSE_D5_CHROME"))["code"] == "PROFILE_ALREADY_ACTIVE_NO_CDP"
+    assert native.effects == []
+    assert core.handle_request(request("STOP_OWNED_D5_CHROME", 2))["code"] == "STOPPED"
+    assert native.effects == ["STOP_OWNED_D5_CHROME"]
+
+
+def test_authenticated_unknown_and_broken_response_never_retry(enrolled, monkeypatch):
+    core, native, bridge, request, *_ = enrolled
+    def uncertain(*args):
+        native.effects.append("ONE_ATTEMPT")
+        raise TimeoutError("PRIVATE_COMMAND_LINE")
+    monkeypatch.setattr(native, "effect", uncertain)
+    assert core.handle_request(request("START_OR_REUSE_D5_CHROME"))["code"] == "UNKNOWN_EFFECT_HOLD"
+    assert core.handle_request(request("START_OR_REUSE_D5_CHROME", 2))["code"] == "UNKNOWN_EFFECT_HOLD"
+    assert native.effects == ["ONE_ATTEMPT"]
+    with sqlite3.connect(bridge.journal.path) as db:
+        assert db.execute("SELECT state FROM requests").fetchall() == [("UNKNOWN",)]
+
+
+def test_runnable_event_preparation_transport_cli_and_sanitized_receipt(enrolled, tmp_path, monkeypatch):
+    core, native, bridge, request, *_ = enrolled
+    event = {"action": "created", "repository": {"full_name": "trung-via/ai-commerce", "owner": {"login": "trung-via"}},
+        "issue": {"number": 446, "user": {"login": "trung-via"}, "title": "[HOSTOPS D5] signed carrier"},
+        "comment": {"user": {"login": "trung-via"}, "body": json.dumps(request("START_OR_REUSE_D5_CHROME"))}}
+    source, prepared, output = tmp_path / "event.json", tmp_path / "request.json", tmp_path / "receipt.json"
+    source.write_bytes(d5.canonical(event))
+    assert transport.main(["--prepare-event", str(source), "--output", str(prepared)]) == 0
+    def exchange(frame):
+        peer = receiver.attest_peer(KernelPipe(bridge.enrollment().sid), "SYNTHETIC_HANDLE", frame)
+        return d5.canonical(receiver.dispatch(core, frame, peer))
+    monkeypatch.setattr(receiver, "pipe_exchange", exchange)
+    assert transport.main(["--request", str(prepared), "--output", str(output)]) == 0
+    result = d5.decode(output.read_bytes())
+    assert result["code"] == "READY_ATTACH" and result["stable"]
+    assert native.effects == ["START_OR_REUSE_D5_CHROME"] and native.attaches == 2
+    assert "private" not in output.read_text().lower() and "sid" not in result
+    # No overwrite of immutable receipt and no repeat native effect.
+    old = output.read_bytes()
+    assert transport.main(["--request", str(prepared), "--output", str(output)]) == 2
+    assert output.read_bytes() == old and native.effects == ["START_OR_REUSE_D5_CHROME"]
+
+
+def test_event_carrier_does_not_replace_signature_or_issue_binding(enrolled):
+    _, _, _, request, *_ = enrolled
+    event = {"action": "opened", "repository": {"full_name": "trung-via/ai-commerce", "owner": {"login": "trung-via"}},
+        "issue": {"number": 447, "user": {"login": "trung-via"}, "title": "[HOSTOPS D5] carrier", "body": json.dumps(request())}}
     with pytest.raises(d5.D5Blocked, match="INPUT_INVALID"):
-        receiver.handle_logon_trigger(b"WRONG_TRIGGER\n")
-    # Reject oversized payload
-    with pytest.raises(d5.D5Blocked, match="INPUT_INVALID"):
-        receiver.handle_logon_trigger(b"A" * 65)
-    # Reject elevated client
+        transport.prepare_event(event)
+
+
+def test_revocation_is_durable_and_old_good_lease_cannot_reactivate(enrolled):
+    core, native, _, request, _, lease, _, save_lease, _ = enrolled
+    assert core.handle_request(request())["code"] == "NOT_RUNNING"
+    save_lease({**lease, "serial": 2, "revoked": True})
+    assert core.handle_request(request(number=2))["code"] == "REVOKED_OR_STALE"
+    save_lease(lease)
+    assert core.handle_request(request("START_OR_REUSE_D5_CHROME", 3))["code"] == "ENROLLMENT_REUSE_DENIED"
+    save_lease({**lease, "serial": 3})
+    assert core.handle_request(request("START_OR_REUSE_D5_CHROME", 4))["code"] == "ENROLLMENT_REUSE_DENIED"
+    assert native.effects == []
+
+
+@pytest.mark.parametrize("wrong_name", [True, False])
+def test_wrong_desktop_name_or_owner_is_denied_synthetically(monkeypatch, wrong_name):
+    class User:
+        def GetUserObjectInformationW(self, handle, kind, name, *args):
+            name.value = "OtherDesktop" if wrong_name else "Default"
+            return True
+        def GetUserObjectSecurity(self, *args):
+            return True
+    class Adv:
+        def GetSecurityDescriptorOwner(self, *args):
+            return True
+    api = object.__new__(receiver.Win32)
+    api.u, api.a = User(), Adv()
+    monkeypatch.setattr(d5, "_sid_text", lambda _: "other-sid")
     with pytest.raises(d5.D5Blocked, match="UNSUPPORTED_SESSION"):
-        receiver.handle_logon_trigger(b"D5_LOGON_START_V1\n", client_attestation={
-            "sid": policy.sid, "session_id": 1, "elevated": True, "desktop_available": True,
-        })
-    # Reject wrong SID client
-    with pytest.raises(d5.D5Blocked, match="UNSUPPORTED_SESSION"):
-        receiver.handle_logon_trigger(b"D5_LOGON_START_V1\n", client_attestation={
-            "sid": "S-1-5-21-999", "session_id": 1, "elevated": False, "desktop_available": True,
-        })
-    # Reject session 0 (non-interactive)
-    with pytest.raises(d5.D5Blocked, match="UNSUPPORTED_SESSION"):
-        receiver.handle_logon_trigger(b"D5_LOGON_START_V1\n", client_attestation={
-            "sid": policy.sid, "session_id": 0, "elevated": False, "desktop_available": True,
-        })
+        api.desktop(123, "operator-sid")
 
 
-def test_d5_receiver_not_deployed_fail_closed():
-    receiver = d5.D5Receiver(None)
-    result = receiver.handle_request({"op": "STATUS"})
-    assert result["status"] == "BLOCKED"
-    assert result["code"] == "BLOCKED_NOT_DEPLOYED"
-    logon_res = receiver.handle_logon_trigger(b"D5_LOGON_START_V1\n")
-    assert logon_res["status"] == "BLOCKED"
-    assert logon_res["code"] == "BLOCKED_NOT_DEPLOYED"
+def test_no_private_custody_native_gate_cannot_be_bypassed_by_local_mac(monkeypatch, capsys):
+    import io
+    import types
+    def absent():
+        raise d5.D5Blocked("CUSTODY_UNPROVEN")
+    monkeypatch.setattr(d5, "SignedPolicy", absent)
+    monkeypatch.setattr(d5.sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(b'{"mac":"forged"}')))
+    assert d5.main(["--native-preflight"]) == 2
+    assert capsys.readouterr().out.strip() == '{"code":"BLOCKED_NOT_DEPLOYED"}'
 
 
-def test_d5_receiver_repeated_logon_delivery_does_not_duplicate_browser(rig):
-    policy, native, bridge, _ = rig
-    receiver = d5.D5Receiver(bridge, clock=lambda: NOW)
-    attestation = {
-        "sid": policy.sid,
-        "session_id": 1,
-        "elevated": False,
-        "desktop_available": True,
-    }
-    r1 = receiver.handle_logon_trigger(b"D5_LOGON_START_V1\n", client_attestation=attestation)
-    assert r1["code"] == "LOGON_TRIGGER_DELIVERED"
-    assert r1["bridge_receipt"]["code"] == "READY_ATTACH"
-    # Second logon delivery reuses existing owned process
-    r2 = receiver.handle_logon_trigger(b"D5_LOGON_START_V1\n", client_attestation=attestation)
-    assert r2["code"] == "LOGON_TRIGGER_DELIVERED"
-    assert r2["bridge_receipt"]["code"] == "READY_ATTACH"
-    assert native.effects.count("START_OR_REUSE_D5_CHROME") == 1
+def test_existing_output_refuses_delivery_before_a_different_request(enrolled, tmp_path, monkeypatch):
+    _, native, _, request, *_ = enrolled
+    source, output = tmp_path / "request.json", tmp_path / "immutable-receipt.json"
+    source.write_bytes(d5.canonical(request("START_OR_REUSE_D5_CHROME")))
+    output.write_bytes(b"IMMUTABLE")
+    def forbidden(*args):
+        raise AssertionError("existing output must prevent transport delivery")
+    monkeypatch.setattr(d5, "pipe_exchange", forbidden)
+    assert d5.main(["--request", str(source), "--output", str(output)]) == 2
+    assert output.read_bytes() == b"IMMUTABLE" and native.effects == []
 
 
-def test_ingress_boundary_rejects_arbitrary_commands_scripts_and_paths():
-    boundary = d5.D5IngressBoundary()
-    # Reject arbitrary command
-    res1 = boundary.evaluate_ingress_request({"op": "STATUS", "command": "cmd.exe"})
-    assert res1["status"] == "BLOCKED"
-    assert res1["code"] == "INPUT_INVALID"
-    # Reject arbitrary script
-    res2 = boundary.evaluate_ingress_request({"op": "STATUS", "script": "exploit.ps1"})
-    assert res2["status"] == "BLOCKED"
-    assert res2["code"] == "INPUT_INVALID"
-    # Reject arbitrary PID
-    res3 = boundary.evaluate_ingress_request({"op": "STATUS", "pid": 1234})
-    assert res3["status"] == "BLOCKED"
-    assert res3["code"] == "INPUT_INVALID"
-    # Reject unknown op
-    res4 = boundary.evaluate_ingress_request({"op": "EXECUTE_SHELL"})
-    assert res4["status"] == "BLOCKED"
-    assert res4["code"] == "INPUT_INVALID"
+@pytest.mark.parametrize("damage", [None, "missing", "runner-drift", "wrong-source", "wrong-session"])
+def test_native_stdout_requires_independent_correlated_receipt(rig, monkeypatch, damage):
+    policy, _, _, _ = rig
+    policy.state_root.mkdir()
+    monkeypatch.setattr(d5, "private_path", lambda path, **kwargs: path)
+    monkeypatch.setattr(ca, "_interactive_session", lambda: 1)
+    payload = {"nonce": "a"*32, "request_id": "b"*32, "op": "MIGRATION_PREFLIGHT", "snapshot": None}
+    audit = {"request_id": payload["request_id"], "operation": payload["op"], "source_sha": policy.source_sha,
+        "code": "OK", "native": True, "sid": policy.sid, "session": 1,
+        "runner_before": dict.fromkeys(d5.RUNNER_TASKS, "d"*64), "runner_after": dict.fromkeys(d5.RUNNER_TASKS, "d"*64),
+        "process_before": None, "process_result": {"code": "OK"}, "registered": False, "observed_utc": "2026-11-06T00:00:00Z"}
+    if damage == "runner-drift":
+        audit["runner_after"][d5.RUNNER_TASKS[0]] = "e"*64
+    if damage == "wrong-source":
+        audit["source_sha"] = "f"*40
+    if damage == "wrong-session":
+        audit["session"] = 2
+    if damage != "missing":
+        (policy.state_root / (payload["nonce"] + ".receipt.json")).write_bytes(d5.canonical(audit))
+    if damage:
+        with pytest.raises(d5.D5Blocked, match="UNKNOWN_EFFECT_HOLD"):
+            d5.WindowsNative().verify_native_receipt(policy, payload, {"code": "OK"})
+    else:
+        d5.WindowsNative().verify_native_receipt(policy, payload, {"code": "OK"})
 
 
-def test_ingress_boundary_off_host_custody_absent_returns_blocked_not_deployed():
-    boundary = d5.D5IngressBoundary(off_host_custody_proven=False)
-    res = boundary.evaluate_ingress_request({
-        "op": "STATUS", "request_id": "1" * 32, "issued": NOW, "expires": NOW + 30,
-        "source_sha": "a" * 40, "epoch": 1, "dry_run": False, "mac": "0" * 64,
-    })
-    assert res["status"] == "BLOCKED"
-    assert res["code"] == "BLOCKED_NOT_DEPLOYED"
-    assert res["attended_enrollment_required"] is True
-    assert "minimal_attended_enrollment" in res
+def test_same_sid_operator_owned_root_is_not_a_trust_anchor(tmp_path, monkeypatch):
+    import ctypes
+    import types
+    def get_security(*args):
+        ctypes.cast(args[3], ctypes.POINTER(ctypes.c_void_p))[0] = ctypes.c_void_p(1)
+        ctypes.cast(args[5], ctypes.POINTER(ctypes.c_void_p))[0] = ctypes.c_void_p(1)
+        return 0
+    adv = types.SimpleNamespace(GetNamedSecurityInfoW=get_security, GetAce=lambda *args: True)
+    kernel = types.SimpleNamespace(LocalFree=lambda *args: 0)
+    monkeypatch.setattr(ctypes, "WinDLL", lambda name, **kwargs: adv if name == "advapi32" else kernel)
+    monkeypatch.setattr(d5, "_sid_text", lambda _: "S-1-5-21-111-222-333-1001")
+    with pytest.raises(d5.D5Blocked, match="TRUST_ANCHOR_UNPROVEN"):
+        d5.protected_path(tmp_path / "operator-owned-anchor.json")
 
 
-def test_ingress_boundary_valid_off_host_signed_request_dispatches(rig):
-    policy, native, bridge, _ = rig
-    receiver = d5.D5Receiver(bridge, clock=lambda: NOW)
-    boundary = d5.D5IngressBoundary(receiver, verify_off_host_signature=lambda req: True,
-                                    off_host_custody_proven=True)
-    request = d5.sign_request(policy, "STATUS", "2" * 32, NOW)
-    res = boundary.evaluate_ingress_request(request)
-    assert res["code"] == "NOT_RUNNING"
-    assert res["operation"] == "STATUS"
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_no_cdp_stop_identity_counts_every_profile_claim_not_only_matching_argv(rig, monkeypatch, ambiguous):
+    policy, native, _, _ = rig
+    policy.environment.user_data_dir.mkdir()
+    exact = {"ProcessId": 101, "ExecutablePath": "exact", "CommandLine": "exact",
+             "OwnerSid": policy.sid, "SessionId": 1, "CreationDate": OWNED["created"]}
+    # A second profile claimant with wrong flags must make graceful stop HOLD.
+    rows = [exact, {**exact, "ProcessId": 102, "ExecutablePath": "wrong", "CommandLine": "wrong"}] if ambiguous else [exact]
+    monkeypatch.setattr(ca, "_query_windows", lambda _: {"processes": rows, "listeners": []})
+    def active(*args, **kwargs):
+        raise ca.AcquisitionBlocked("PROFILE_ALREADY_ACTIVE_NO_CDP")
+    monkeypatch.setattr(ca, "evaluate", active)
+    monkeypatch.setattr(ca, "_interactive_session", lambda: 1)
+    monkeypatch.setattr(ca, "_commandline_argv", lambda text: [text, "--user-data-dir=" + str(policy.environment.user_data_dir)])
+    monkeypatch.setattr(ca, "_identity_matches", lambda env, exe, argv: exe == "exact")
+    if ambiguous:
+        with pytest.raises(d5.D5Blocked, match="OWNERSHIP_UNPROVEN"):
+            d5.WindowsNative().observe(policy)
+    else:
+        assert d5.WindowsNative().observe(policy) == CLAIMED
+    assert native.effects == []
 
 
-def test_create_blocked_not_deployed_evidence_contains_no_secrets():
-    evidence = d5.create_blocked_not_deployed_evidence(op="STATUS")
-    raw = json.dumps(evidence)
-    assert evidence["status"] == "BLOCKED"
-    assert evidence["code"] == "BLOCKED_NOT_DEPLOYED"
-    assert evidence["attended_enrollment_required"] is True
-    assert "key" not in evidence
-    assert "control.key" not in raw
-    assert "secret" not in raw.lower()
-
-
-def test_sanitize_receipt_preserves_allowlist_only():
-    raw_receipt = {
-        "operation": "STATUS",
-        "code": "READY_ATTACH",
-        "status": "OBSERVED",
-        "effect_observed": False,
-        "internal_path": "C:\\Secret\\Path",
-        "raw_cookie": "secret_cookie",
-        "registered": True,
-    }
-    sanitized = d5.sanitize_receipt(raw_receipt)
-    assert "internal_path" not in sanitized
-    assert "raw_cookie" not in sanitized
-    assert sanitized["operation"] == "STATUS"
-    assert sanitized["code"] == "READY_ATTACH"
-    assert sanitized["registered"] is True
+@pytest.mark.parametrize("damage", [None, "wrong-command", "wrong-script", "source-drift"])
+def test_kernel_logon_peer_must_run_exact_pinned_launcher(rig, monkeypatch, damage):
+    import types
+    policy, native, _, _ = rig
+    policy.state_root.mkdir()
+    launcher = policy.state_root / "launcher.ps1"
+    launcher.write_bytes(b"SYNTHETIC_REVIEWED_LAUNCHER")
+    policy = replace(policy, files={d5.RELEASE_FILES[2]: d5.digest(launcher.read_bytes())})
+    if damage == "source-drift":
+        launcher.write_bytes(b"UNVERIFIED_LAUNCHER")
+    exe = policy.state_root / "powershell.exe"
+    monkeypatch.setattr(d5, "SignedPolicy", lambda: types.SimpleNamespace(path=policy.state_root / "enrollment.json"))
+    monkeypatch.setattr(d5, "load_enrollment", lambda *args, **kwargs: policy)
+    monkeypatch.setattr(d5, "private_path", lambda path, **kwargs: path)
+    monkeypatch.setattr(d5, "protected_path", lambda path: path)
+    monkeypatch.setattr(ca, "_powershell", lambda: exe)
+    argv = [str(exe), "-NoProfile", "-NonInteractive", "-File", str(launcher), "-Logon"]
+    if damage == "wrong-command":
+        argv[3] = "-Command"
+    if damage == "wrong-script":
+        argv[4] = str(policy.state_root / "arbitrary.ps1")
+    monkeypatch.setattr(ca, "_commandline_argv", lambda _: argv)
+    calls = []
+    def probe(args, **kwargs):
+        calls.append((args, kwargs))
+        return types.SimpleNamespace(returncode=0, stdout=d5.canonical({"image": str(exe), "argv": "SYNTHETIC_OS_REPLY"}))
+    monkeypatch.setattr(subprocess, "run", probe)
+    api = object.__new__(d5.Win32)
+    if damage:
+        with pytest.raises(d5.D5Blocked, match="UNTRUSTED_PEER_ATTESTATION"):
+            api.logon_launcher(321)
+    else:
+        api.logon_launcher(321)
+        assert calls[0][1]["env"]["AI_COMMERCE_D5_PEER_PID"] == "321"
+        assert calls[0][1]["timeout"] == 5
+    assert native.effects == []
