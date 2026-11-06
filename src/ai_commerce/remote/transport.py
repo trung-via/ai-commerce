@@ -4,6 +4,9 @@ import base64
 import hashlib
 import json
 import os
+import re
+import secrets
+import threading
 import time
 from pathlib import Path
 
@@ -24,6 +27,240 @@ class RemoteTransportError(RuntimeError):
 
 class CandidateIntegrityError(RemoteTransportError):
     """Workspace bytes do not match the verified EF01 manifest."""
+
+
+class WorkOwner:
+    """WorkOwner.v1: create-only generation 1, bounded hash-linked journal.
+
+    Identity is repository + independently read issue number + action ID. v1
+    ingress has no authenticated cross-issue repair lineage or transfer grant:
+    existing owners are HOLD, including terminal owners. There is no lease
+    expiry, generation takeover, ref update, rollback or automatic replay.
+
+    Transitions: OWNED -> CLAIMED -> SPAWN_INTENT -> CHILD_OBSERVED (optional)
+    -> PROVIDER_INTENT -> ROUND_VERIFIED [-> PROVIDER_INTENT ...]
+    -> RESULT_VERIFIED -> PUBLISH_INTENT -> PUBLISHED. UNKNOWN is terminal
+    from every nonterminal state. Intent means effect MAY have occurred.
+    Only hashes/normalized IDs enter public commit messages; never logs/input.
+    """
+    LIMIT = 32
+    MARKER = "EF02 WorkOwner.v1\n\n"
+    EDGES = {
+        "OWNED": {"CLAIMED"}, "CLAIMED": {"SPAWN_INTENT"},
+        "SPAWN_INTENT": {"CHILD_OBSERVED", "PROVIDER_INTENT"},
+        "CHILD_OBSERVED": {"PROVIDER_INTENT", "ROUND_VERIFIED", "RESULT_VERIFIED"},
+        "PROVIDER_INTENT": {"CHILD_OBSERVED", "ROUND_VERIFIED"},
+        "ROUND_VERIFIED": {"PROVIDER_INTENT", "CHILD_OBSERVED", "RESULT_VERIFIED"},
+        "RESULT_VERIFIED": {"PUBLISH_INTENT"}, "PUBLISH_INTENT": {"PUBLISHED"},
+        "PUBLISHED": set(), "UNKNOWN": set(),
+    }
+
+    @staticmethod
+    def digest(value):
+        return hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()
+
+    @classmethod
+    def identity(cls, github, issue_number, batch, action):
+        if type(issue_number) is not int or not 1 <= issue_number <= 2**53:
+            raise RemoteTransportError("WORK_IDENTITY_UNKNOWN_TRUSTED_ISSUE_REQUIRED")
+        issue = github.api("GET", "/issues/" + str(issue_number))
+        body = issue.get("body")
+        if (issue.get("number") != issue_number or "pull_request" in issue or
+                not isinstance(body, str) or len(body.encode("utf-8")) > 262144):
+            raise RemoteTransportError("WORK_INGRESS_MISMATCH")
+        try:
+            packet = json.loads(body)
+        except (TypeError, ValueError) as exc:
+            raise RemoteTransportError("WORK_INGRESS_MISMATCH") from exc
+        # Compare the entire validated request, not instruction prose or an
+        # executor-provided root ID. resolved_dependencies is scheduler-only.
+        if packet != batch or not any(a == action for a in packet.get("actions", [])):
+            raise RemoteTransportError("WORK_INGRESS_MISMATCH")
+        identity = {"repo": github.repo, "issue": issue_number,
+                    "action_id": action["action_id"]}
+        return {**identity, "work_key": cls.digest(identity),
+                "source_sha": batch["source_sha"], "batch_id": batch["batch_id"],
+                "attempt_id": action["attempt_id"],
+                "fingerprint": hashlib.sha256(json.dumps({"batch_id": batch["batch_id"],
+                    "source_sha": batch["source_sha"], "action": action}, sort_keys=True,
+                    separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")).hexdigest()}
+
+    def __init__(self, github, identity, fence):
+        self.github, self.identity, self.fence = github, dict(identity), fence
+        self.prefix = "ef02/workowner/" + identity["work_key"] + "/"
+        self.lock = threading.RLock()
+        self.tip = None
+        self.uncertain = False
+
+    @classmethod
+    def acquire(cls, github, identity):
+        owner = cls(github, identity, secrets.token_hex(32))
+        # Read failures are UNKNOWN, never absence. Never adopt an existing
+        # journal after restart, even if it has the same request fingerprint.
+        if owner.read():
+            raise RemoteTransportError("WORK_OWNER_EXISTS_RECONCILE_ONLY")
+        for namespace in ("claims", "pre-spawn", "spawned", "candidate"):
+            try:
+                github.api("GET", "/git/ref/heads/ef02/" + namespace + "/" +
+                           github.attempt_key(identity["attempt_id"]))
+            except RemoteTransportError as exc:
+                if str(exc) != "GITHUB_HTTP_404":
+                    raise
+            else:
+                raise RemoteTransportError("WORK_LEGACY_BOUNDARY_RECONCILE_ONLY")
+        owner._create("OWNED", [], {})
+        return owner
+
+    def read(self):
+        deadline = time.monotonic() + 60
+        def get(path):
+            if time.monotonic() >= deadline:
+                raise RemoteTransportError("WORK_RECONCILE_READ_BUDGET_EXHAUSTED")
+            return self.github.api("GET", path)
+        refs = get("/git/matching-refs/heads/" + self.prefix)
+        if not isinstance(refs, list) or len(refs) > self.LIMIT:
+            raise RemoteTransportError("WORK_JOURNAL_BOUND_INVALID")
+        refs = sorted(refs, key=lambda ref: ref.get("ref", ""))
+        chain = []
+        tree = None
+        for index, ref in enumerate(refs):
+            if ref.get("ref") != "refs/heads/" + self.prefix + f"{index:03d}":
+                raise RemoteTransportError("WORK_JOURNAL_ORDER_INVALID")
+            sha = ref.get("object", {}).get("sha")
+            if not isinstance(sha, str) or not re.fullmatch("[0-9a-f]{40}", sha):
+                raise RemoteTransportError("WORK_JOURNAL_REF_INVALID")
+            commit = get("/git/commits/" + sha)
+            message = commit.get("message", "")
+            if not isinstance(message, str) or len(message) > 4096 or not message.startswith(self.MARKER):
+                raise RemoteTransportError("WORK_JOURNAL_RECORD_INVALID")
+            try:
+                record = json.loads(message[len(self.MARKER):])
+                digest = record.pop("digest")
+            except (TypeError, ValueError, KeyError, AttributeError) as exc:
+                raise RemoteTransportError("WORK_JOURNAL_RECORD_INVALID") from exc
+            prior = chain[-1] if chain else None
+            parent = prior["sha"] if prior else self.identity["source_sha"]
+            if (set(record) != {"kind", "version", "identity", "generation", "fence",
+                    "sequence", "previous", "stage", "data"} or
+                    record["kind"] != "WorkOwner" or type(record["version"]) is not int or record["version"] != 1 or
+                    type(record["generation"]) is not int or record["generation"] != 1 or
+                    record["identity"] != self.identity or type(record["sequence"]) is not int or record["sequence"] != index or
+                    record["previous"] != (prior["digest"] if prior else None) or
+                    digest != self.digest(record) or
+                    not re.fullmatch("[0-9a-f]{64}", str(record["fence"])) or
+                    (prior and record["fence"] != prior["fence"]) or
+                    [p.get("sha") for p in commit.get("parents", [])] != [parent]):
+                raise RemoteTransportError("WORK_JOURNAL_INTEGRITY_MISMATCH")
+            current_tree = commit.get("tree", {}).get("sha")
+            if tree is None:
+                source = get("/git/commits/" + self.identity["source_sha"])
+                tree = source.get("tree", {}).get("sha")
+            if not tree or current_tree != tree:
+                raise RemoteTransportError("WORK_JOURNAL_TREE_MISMATCH")
+            self._transition(record["stage"], chain, record["data"])
+            chain.append({**record, "digest": digest, "sha": sha})
+        return chain
+
+    @classmethod
+    def _transition(cls, stage, chain, data):
+        previous = chain[-1]["stage"] if chain else None
+        if (stage not in cls.EDGES or (not chain and stage != "OWNED") or
+                (chain and stage not in cls.EDGES[previous] and not (
+                    stage == "UNKNOWN" and previous not in ("PUBLISHED", "UNKNOWN")))):
+            raise RemoteTransportError("WORK_JOURNAL_TRANSITION_INVALID")
+        if (not isinstance(data, dict) or set(data) - {"round", "pid", "receipt", "candidate"} or
+                any(not re.fullmatch("[0-9a-f]{64}", str(data[k]))
+                    for k in ("receipt", "candidate") if k in data) or
+                ("pid" in data and (type(data["pid"]) is not int or not 0 < data["pid"] < 2**32))):
+            raise RemoteTransportError("WORK_JOURNAL_DATA_INVALID")
+        intents = [r for r in chain if r["stage"] == "PROVIDER_INTENT"]
+        verified = [r for r in chain if r["stage"] == "ROUND_VERIFIED"]
+        if stage in ("PROVIDER_INTENT", "ROUND_VERIFIED"):
+            expected = len(intents) if stage == "PROVIDER_INTENT" else len(verified)
+            if type(data.get("round")) is not int or data["round"] != expected or not 0 <= expected <= 5:
+                raise RemoteTransportError("WORK_PROVIDER_DUPLICATE_OR_MISMATCH")
+            if stage == "PROVIDER_INTENT" and len(intents) != len(verified):
+                raise RemoteTransportError("WORK_PROVIDER_OUTCOME_UNKNOWN")
+            if stage == "ROUND_VERIFIED" and (len(intents) != len(verified) + 1 or "receipt" not in data):
+                raise RemoteTransportError("WORK_PROVIDER_RECEIPT_MISMATCH")
+        if stage in ("RESULT_VERIFIED", "PUBLISH_INTENT", "PUBLISHED") and "receipt" not in data:
+            raise RemoteTransportError("WORK_VERIFIED_RECEIPT_REQUIRED")
+        if stage == "PUBLISHED" and "candidate" not in data:
+            raise RemoteTransportError("WORK_CANDIDATE_RECEIPT_REQUIRED")
+        if stage in ("PUBLISH_INTENT", "PUBLISHED") and data.get("receipt") != chain[-1]["data"].get("receipt"):
+            raise RemoteTransportError("WORK_VERIFIED_RECEIPT_MISMATCH")
+        if stage == "RESULT_VERIFIED" and (not verified or len(intents) != len(verified)):
+            raise RemoteTransportError("WORK_PROVIDER_OUTCOME_UNKNOWN")
+        if stage == "CHILD_OBSERVED" and ("pid" not in data or any(r["stage"] == stage for r in chain)):
+            raise RemoteTransportError("WORK_CHILD_DUPLICATE_OR_MISMATCH")
+
+    def assert_current(self):
+        if self.uncertain:
+            raise RemoteTransportError("WORK_OWNER_STALE_FENCE")
+        chain = self.read()
+        if (self.uncertain or not chain or chain[0]["fence"] != self.digest(self.fence) or
+                (self.tip is not None and chain[-1]["digest"] != self.tip) or
+                chain[-1]["stage"] in ("UNKNOWN", "PUBLISHED")):
+            raise RemoteTransportError("WORK_OWNER_STALE_FENCE")
+        return chain
+
+    def _create(self, stage, chain, data):
+        if len(chain) >= self.LIMIT:
+            raise RemoteTransportError("WORK_JOURNAL_BOUND_INVALID")
+        self._transition(stage, chain, data)
+        record = {"kind": "WorkOwner", "version": 1, "identity": self.identity,
+                  "generation": 1, "fence": self.digest(self.fence), "sequence": len(chain),
+                  "previous": chain[-1]["digest"] if chain else None, "stage": stage, "data": data}
+        record["digest"] = self.digest(record)
+        source = self.github.api("GET", "/git/commits/" + self.identity["source_sha"])
+        commit = self.github.api("POST", "/git/commits", {
+            "message": self.MARKER + canonical(record), "tree": source["tree"]["sha"],
+            "parents": [chain[-1]["sha"] if chain else self.identity["source_sha"]]})
+        # No retry for 422, timeout or transport failure. A ref may exist.
+        self.github._create_ref(self.prefix + f"{len(chain):03d}", commit["sha"])
+        confirmed = self.read()
+        if not confirmed or confirmed[-1]["sha"] != commit["sha"]:
+            raise RemoteTransportError("WORK_JOURNAL_WRITE_UNKNOWN")
+        self.tip = record["digest"]
+        return record["digest"]
+
+    def append(self, stage, **data):
+        with self.lock:
+            try:
+                return self._create(stage, self.assert_current(), data)
+            except Exception:
+                self.uncertain = True
+                raise
+
+    def reconcile(self):
+        chain = self.read()
+        result = {"status": "HOLD_UNKNOWN_EFFECT", "replay_authorized": False,
+                  "publication_authorized": False, "generation": 1,
+                  "proves_current_mt01_pass": False,
+                  "stage": chain[-1]["stage"] if chain else "ABSENT",
+                  "lineage_gap": "V1_HAS_NO_TRUSTED_CROSS_ISSUE_REPAIR_OR_TRANSFER"}
+        if chain and chain[-1]["stage"] in ("PUBLISH_INTENT", "PUBLISHED"):
+            try:
+                ref = self.github.api("GET", "/git/ref/heads/ef02/candidate/" +
+                                      self.github.attempt_key(self.identity["attempt_id"]))
+            except RemoteTransportError as exc:
+                if str(exc) == "GITHUB_HTTP_404":
+                    return result
+                raise
+            sha = ref.get("object", {}).get("sha")
+            candidate = self.github.api("GET", "/git/commits/" + str(sha))
+            proof = commit_evidence(candidate.get("message", ""))
+            receipt = chain[-1]["data"]
+            if (proof is None or ("candidate" in receipt and self.digest(sha) != receipt["candidate"]) or
+                    evidence_digest(proof) != receipt["receipt"] or
+                    proof["source_sha"] != self.identity["source_sha"] or
+                    proof["attempt_id"] != self.identity["attempt_id"] or
+                    proof["action_id"] != self.identity["action_id"] or
+                    proof["fingerprint"] != self.identity["fingerprint"] or
+                    [p.get("sha") for p in candidate.get("parents", [])] != [proof["effective_source_sha"]]):
+                raise RemoteTransportError("WORK_TERMINAL_RECEIPT_MISMATCH")
+            result.update(status="RECONCILED_VERIFIED_TERMINAL", candidate_sha=sha)
+        return result
 
 
 class GitHubTransport:
@@ -177,7 +414,8 @@ class GitHubTransport:
 
     def candidate(self, *, source_sha: str, attempt_id: str,
                   workspace: Path, paths: list[str],
-                  expected_hashes: dict[str, str | None], evidence: dict | None = None) -> dict:
+                  expected_hashes: dict[str, str | None], evidence: dict | None = None,
+                  owner: WorkOwner | None = None) -> dict:
         """Publish precisely the EF01-verified bytes, including deletions.
 
         Validate the entire manifest and snapshot every file before any GitHub
@@ -224,6 +462,7 @@ class GitHubTransport:
                 snapshot[key] != proof[key] for key in (
                     "changed_files", "candidate_file_sha256", "tracked_diff_sha256", "scope_valid"))):
             raise CandidateIntegrityError("CANDIDATE_VERIFIED_TREE_CHANGED")
+        self._candidate_owner_fence(owner, proof)
         base = self.api("GET", "/git/commits/" + source_sha)
         tree_items = []
         for relative, content, mode in prepared:
@@ -239,10 +478,22 @@ class GitHubTransport:
                           {"message": "EF02 candidate attempt " + attempt_id + EVIDENCE_MARKER + canonical(proof),
                            "tree": remote_tree["sha"], "parents": [source_sha]})
         name = "ef02/candidate/" + self.attempt_key(attempt_id)
+        self._candidate_owner_fence(owner, proof)
         self._create_ref(name, commit["sha"])
         return {"candidate_sha": commit["sha"], "candidate_ref": "refs/heads/" + name,
                 "status": proof["status"], "review_required": proof["review_required"],
                 "candidate_evidence": proof, "candidate_evidence_sha256": evidence_digest(proof)}
+
+    def _candidate_owner_fence(self, owner, proof):
+        if owner is None or owner.github is not self:
+            raise CandidateIntegrityError("WORK_OWNER_PUBLICATION_FENCE_REQUIRED")
+        chain = owner.assert_current()
+        identity = owner.identity
+        if (chain[-1]["stage"] != "PUBLISH_INTENT" or
+                chain[-1]["data"].get("receipt") != evidence_digest(proof) or
+                identity["repo"] != self.repo or
+                any(identity[k] != proof[k] for k in ("source_sha", "attempt_id", "action_id", "fingerprint"))):
+            raise CandidateIntegrityError("WORK_OWNER_PUBLICATION_FENCE_MISMATCH")
 
     def integrated_source(self, *, source_sha: str, attempt_id: str,
                           dependencies: list[dict]) -> dict:

@@ -18,10 +18,76 @@ from ai_commerce.engineering.profile import ExecutorSelection
 from ai_commerce.remote import worker as remote
 from ai_commerce.remote.scheduler import run_schedule
 from ai_commerce.remote.validation import validate_batch
+from ai_commerce.remote.transport import WorkOwner, GitHubTransport, RemoteTransportError
 
 BASE = "a" * 40
 ROOT = Path(__file__).resolve().parents[1]
 VERIFY = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "test_scope.py"]
+
+
+class WorkOwnerMemoryTransport(GitHubTransport):
+    """Deterministic GitHub storage only; exercises real WorkOwner validation."""
+    def __init__(self, source=BASE):
+        super().__init__("fixture/repository", "fixture-not-a-credential")
+        self.source = source
+        self.refs, self.commits, self.requests = {}, {}, []
+        self.commits[source] = {"tree": {"sha": "e" * 40}, "parents": [], "message": "source"}
+        self.storage_lock = threading.Lock()
+        self.issue_body = None
+        self.before_write = None
+
+    def api(self, method, path, data=None):
+        with self.storage_lock:
+            self.requests.append((method, path, data))
+            if method == "GET" and path.startswith("/issues/"):
+                return {"number": int(path.rsplit("/", 1)[1]), "body": json.dumps(self.issue_body)}
+            if method == "GET" and path.startswith("/git/matching-refs/heads/"):
+                prefix = "refs/heads/" + path.split("/heads/", 1)[1]
+                return [{"ref": ref, "object": {"sha": sha}} for ref, sha in self.refs.items() if ref.startswith(prefix)]
+            if method == "GET" and path.startswith("/git/ref/heads/"):
+                ref = "refs/heads/" + path.split("/heads/", 1)[1]
+                if ref not in self.refs:
+                    raise RemoteTransportError("GITHUB_HTTP_404")
+                return {"ref": ref, "object": {"sha": self.refs[ref]}}
+            if method == "GET" and path.startswith("/git/commits/"):
+                return json.loads(json.dumps(self.commits[path.rsplit("/", 1)[1]]))
+            if method == "POST" and path == "/git/commits":
+                sha = hashlib.sha1(json.dumps(data, sort_keys=True).encode()).hexdigest()
+                self.commits[sha] = {**data, "tree": {"sha": data["tree"]},
+                                     "parents": [{"sha": sha} for sha in data["parents"]]}
+                return {"sha": sha}
+            if method == "POST" and path in ("/git/blobs", "/git/trees"):
+                return {"sha": hashlib.sha1(json.dumps(data, sort_keys=True).encode()).hexdigest()}
+            if method == "POST" and path == "/git/refs":
+                if data["ref"] in self.refs:
+                    raise RemoteTransportError("GITHUB_HTTP_422")
+                if self.before_write:
+                    self.before_write(data)
+                self.refs[data["ref"]] = data["sha"]
+                return {}
+            raise AssertionError((method, path))
+
+
+def memory_owner(action, batch, storage=None):
+    storage = storage or WorkOwnerMemoryTransport(batch["source_sha"])
+    submitted = {k: v for k, v in action.items() if k != "resolved_dependencies"}
+    packet = {**batch, "actions": [submitted]}
+    storage.issue_body = packet
+    identity = WorkOwner.identity(storage, 42, packet, submitted)
+    return WorkOwner.acquire(storage, identity)
+
+
+class DirectWorkOwnerBroker(remote.WorkOwnerBroker):
+    """Fake only child stdio for in-process EF01 fixtures; real journal/fences."""
+    def communicate(self, child, timeout):
+        def fence(stage, inv):
+            request = {"stage": stage, "round": inv["repair_round"],
+                       "attempt_id": inv["attempt_id"], "token": self.token}
+            if stage == "ROUND_VERIFIED":
+                request["receipt"] = runner.owner_round_receipt(inv)
+            self.fence(request)
+        child.owner_fence = fence
+        return child.communicate(timeout=timeout)
 
 
 @pytest.mark.parametrize("native,kind,owner", [
@@ -145,6 +211,90 @@ def _run(fixture, mode="pass-after-repair", executor="codex", **kwargs):
         verify_argv=kwargs.pop("verify_argv", VERIFY), allowed_prefixes=fixture.state["scope"], **kwargs)
     observations = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
     return result, observations, profiles
+
+
+@pytest.mark.parametrize("deny_round", [0, 1])
+def test_workowner_fence_before_initial_provider_and_every_internal_repair(fixture, deny_round):
+    events = []
+    def fence(stage, inv):
+        events.append((stage, inv["repair_round"]))
+        if stage == "PROVIDER_INTENT" and inv["repair_round"] == deny_round:
+            raise RuntimeError("WORK_OWNER_STALE_FENCE")
+    result, calls, _ = _run(fixture, owner_fence=fence)
+    assert result["status"] == "EXECUTION_UNKNOWN" and not result["replay_authorized"]
+    assert len(calls) == deny_round
+    assert events[-1] == ("PROVIDER_INTENT", deny_round)
+    assert result["invocations"][-1]["executor_invoked"] is False
+
+
+def test_workowner_broker_duplicate_request_and_parent_loss_fail_closed():
+    from ai_commerce.remote.worker import WorkOwnerBroker
+    owner = memory_owner({"action_id": "a", "attempt_id": "a-1"},
+                         {"batch_id": "b", "source_sha": BASE})
+    owner.append("CLAIMED")
+    owner.append("SPAWN_INTENT")
+    broker = WorkOwnerBroker(owner)
+    # Standalone children do not inherit pytest's worktree-local sys.path.
+    environment = {**remote._safe_child_env(ROOT), **broker.environment()}
+    script = """import os, sys
+from pathlib import Path
+from ai_commerce.engineering import runner
+assert Path(runner.__file__).resolve() == Path(sys.argv[1]).resolve()
+fence = runner.owner_fence_client(os.environ)
+assert not any(k.startswith('AI_COMMERCE_EF02_OWNER_') for k in os.environ)
+inv = {'repair_round': 0, 'attempt_id': 'a-1'}
+fence('PROVIDER_INTENT', inv)
+try:
+    fence('PROVIDER_INTENT', inv)
+except RuntimeError:
+    print('DUPLICATE_DENIED')
+else:
+    raise AssertionError('duplicate admitted')
+"""
+    child = subprocess.Popen([sys.executable, "-c", script, str(Path(runner.__file__).resolve())],
+                             env=environment,
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True, encoding="utf-8")
+    try:
+        output, errors = broker.communicate(child, timeout=20)
+        assert child.returncode == 0, errors
+        assert output.strip() == "DUPLICATE_DENIED" and broker.token not in output
+    finally:
+        broker.close()
+    with pytest.raises(RemoteTransportError):
+        owner.append("PROVIDER_INTENT", round=1)
+
+
+def test_workowner_parent_eof_denies_provider_without_any_dispatch(monkeypatch):
+    import io
+    environment = {"AI_COMMERCE_EF02_OWNER_REQUIRED": "1",
+                   "AI_COMMERCE_EF02_OWNER_ENDPOINT": "stdio-v1",
+                   "AI_COMMERCE_EF02_OWNER_TOKEN": "f" * 64}
+    fence = runner.owner_fence_client(environment)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    with pytest.raises(RuntimeError, match="UNCONFIRMED"):
+        fence("PROVIDER_INTENT", {"repair_round": 0, "attempt_id": "a"})
+
+
+@pytest.mark.parametrize("field", ["attempt_id", "source_base_sha", "status"])
+def test_workowner_mismatched_round_receipt_cannot_publish(tmp_path, monkeypatch, field):
+    context = _worker_fixture(tmp_path, monkeypatch, real_git=False)
+    original = remote.subprocess.Popen
+    class Tampered(original):
+        def communicate(self, timeout=None):
+            result = super().communicate(timeout)
+            args = build_parser().parse_args(self.argv[3:])
+            path = args.out_dir / "engineering_result.json"
+            report = json.loads(path.read_text())
+            report["invocations"][0][field] = "mismatched"
+            path.write_text(json.dumps(report))
+            return result
+    monkeypatch.setattr(remote.subprocess, "Popen", Tampered)
+    result = context.worker.execute_action(_action("a"))
+    assert result["status"] == "CANDIDATE_INTEGRITY_FAILED"
+    assert result["error_code"] == "WORK_PROVIDER_RECEIPT_MISMATCH"
+    assert not context.candidates and len(context.calls) == 2
 
 
 @pytest.mark.parametrize("executor", ["codex", "antigravity"])
@@ -523,7 +673,7 @@ def _git_repo(tmp_path, real_git=True):
     (repo / "pytest.ini").write_text("[pytest]\naddopts = -p no:cacheprovider\n")
     if not real_git:
         return repo, BASE
-    git_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG_") and k != "AI_COMMERCE_GIT_GUARD_PATHS"}
+    git_env = dict(os.environ)
     for args in (["init", "-q"], ["config", "user.email", "local@example.invalid"],
                  ["config", "user.name", "repair fixture"], ["add", "."], ["commit", "-qm", "initial"]):
         subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, env=git_env)
@@ -534,13 +684,11 @@ def _git_repo(tmp_path, real_git=True):
 
 def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, checkpoint_error=False, real_git=True,
                     drift=None, mt01_v21=False):
+    monkeypatch.setattr(remote, "WorkOwnerBroker", DirectWorkOwnerBroker)
     if not mt01_v21:
         monkeypatch.delenv("MT01_V21_ENABLED", raising=False)
     else:
         monkeypatch.setenv("MT01_V21_ENABLED", "1")
-    for key in list(os.environ):
-        if key.startswith("GIT_CONFIG_") or key == "AI_COMMERCE_GIT_GUARD_PATHS":
-            monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
     import shutil
@@ -630,6 +778,8 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
 
         def __init__(self, argv, **kwargs):
             self.argv = argv
+            self.owner_environment = {k: v for k, v in kwargs["env"].items()
+                                      if k.startswith("AI_COMMERCE_EF02_OWNER_")}
             children.append(self)
 
         def communicate(self, timeout=None):
@@ -644,7 +794,8 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
                 acceptance_ids=args.acceptance,
                 aggregate_sources=args.aggregate_source, host_slots=args.host_slots,
                 registered_profiles=json.loads(args.registered_profiles_json.read_text())
-                if args.registered_profiles_json else None)
+                if args.registered_profiles_json else None,
+                owner_fence=self.owner_fence)
             self.returncode = 0 if result["status"] in remote.VERIFIED_STATUSES else 1
             return "", ""
 
@@ -657,6 +808,8 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
     worker = remote.LocalBatchWorker(checkout=repo, batch=batch,
                                     profiles={"scope": VERIFY, "project-tests": ["python", "-m", "pytest", "tests", "-q"]},
                                     github=Github(), root=tmp_path / "action-evidence")
+    storage = WorkOwnerMemoryTransport(head)
+    worker._acquire_owner = lambda action: memory_owner(action, batch, storage)
     return SimpleNamespace(worker=worker, batch=batch, calls=calls, children=children,
                            claims=claims, candidates=candidates, resolved=resolved, head=head)
 
