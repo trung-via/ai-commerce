@@ -34,13 +34,20 @@ class WorkOwnerMemoryTransport(GitHubTransport):
         self.commits[source] = {"tree": {"sha": "e" * 40}, "parents": [], "message": "source"}
         self.storage_lock = threading.Lock()
         self.issue_body = None
+        self.issues = {}
         self.before_write = None
 
     def api(self, method, path, data=None):
         with self.storage_lock:
             self.requests.append((method, path, data))
             if method == "GET" and path.startswith("/issues/"):
-                return {"number": int(path.rsplit("/", 1)[1]), "body": json.dumps(self.issue_body)}
+                num = int(path.rsplit("/", 1)[1])
+                body = self.issues.get(num) if self.issues else self.issue_body
+                if body is None:
+                    raise RemoteTransportError("GITHUB_HTTP_404")
+                if isinstance(body, dict):
+                    body = json.dumps(body)
+                return {"number": num, "body": body}
             if method == "GET" and path.startswith("/git/matching-refs/heads/"):
                 prefix = "refs/heads/" + path.split("/heads/", 1)[1]
                 return [{"ref": ref, "object": {"sha": sha}} for ref, sha in self.refs.items() if ref.startswith(prefix)]

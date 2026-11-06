@@ -6,7 +6,9 @@ do not assert that a live Windows runner was taken offline or cancelled.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 
 import pytest
 from pathlib import Path
@@ -915,3 +917,327 @@ def test_ef01_untrusted_success_receipt_never_promotes_batch_action_to_pass(
     assert result["candidate_sha"] is None
     assert gh.candidate_calls == 0
     assert _persisted(worker)["status"] == expected_status
+
+
+def test_windows_fresh_subprocess_restart_readonly_recovery(tmp_path):
+    """Deterministic real fresh subprocess restart-readonly recovery on Windows.
+
+    Reconstructs owner from source-independent durable GitHub-like state in a real
+    fresh Python subprocess. Asserts no duplicate invocation or publication.
+    Differentiates fresh-process proof from actual Windows reboot; explicitly records
+    gap honestly.
+    """
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+    storage = WorkOwnerMemoryTransport(BASE)
+    action = _action()
+    packet = {"batch_id": "restart-obs", "source_sha": BASE, "actions": [action]}
+    storage.issue_body = packet
+    identity = WorkOwner.identity(storage, 506, packet, action)
+    owner = WorkOwner.acquire(storage, identity)
+    owner.append("CLAIMED")
+    owner.append("SPAWN_INTENT")
+    owner.append("CHILD_OBSERVED", pid=1024)
+    owner.append("PROVIDER_INTENT", round=0)
+    owner.append("ROUND_VERIFIED", round=0, receipt="a" * 64)
+    owner.append("UNKNOWN")
+
+    state_file = tmp_path / "github_state.json"
+    state = {
+        "repo": storage.repo,
+        "source": storage.source,
+        "refs": storage.refs,
+        "commits": storage.commits,
+        "issue_body": storage.issue_body,
+        "identity": identity,
+    }
+    state_file.write_text(json.dumps(state), encoding="utf-8")
+
+    script = """
+import sys, json, os
+from pathlib import Path
+from test_ef01_repair import WorkOwnerMemoryTransport
+from ai_commerce.remote.transport import WorkOwner
+
+state_path = Path(sys.argv[1])
+state = json.loads(state_path.read_text(encoding="utf-8"))
+
+storage = WorkOwnerMemoryTransport(state["source"])
+storage.refs = state["refs"]
+storage.commits = state["commits"]
+storage.issue_body = state["issue_body"]
+storage.requests.clear()
+
+reconstructed = WorkOwner(storage, state["identity"], "")
+reconciled = reconstructed.reconcile()
+
+get_only = all(method == "GET" for method, *_ in storage.requests)
+post_count = sum(1 for method, *_ in storage.requests if method == "POST")
+
+output = {
+    "reconciled": reconciled,
+    "get_only": get_only,
+    "post_count": post_count,
+    "process_pid": os.getpid(),
+    "fresh_process_proven": True,
+    "windows_reboot_gap": "FRESH_SUBPROCESS_CONFIRMED_HOSTOPS_REBOOT_NOT_GRANTED",
+}
+print(json.dumps(output))
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src") + os.pathsep + str(Path(__file__).resolve().parent)
+    for k in list(env):
+        if k.startswith("GIT_CONFIG_"):
+            env.pop(k, None)
+
+    proc = subprocess.run(
+        [sys.executable, "-c", script, str(state_file)],
+        capture_output=True, text=True, check=True, env=env
+    )
+    result = json.loads(proc.stdout)
+    assert result["fresh_process_proven"] is True
+    assert result["get_only"] is True
+    assert result["post_count"] == 0
+    assert result["reconciled"]["stage"] == "UNKNOWN"
+    assert result["reconciled"]["replay_authorized"] is False
+    assert result["reconciled"]["publication_authorized"] is False
+    assert result["windows_reboot_gap"] == "FRESH_SUBPROCESS_CONFIRMED_HOSTOPS_REBOOT_NOT_GRANTED"
+    assert result["process_pid"] != os.getpid()
+
+
+def test_workowner_lineage_cross_issue_hijack_or_forged_repair_of():
+    """Negative tests: cross-issue hijack, non-existent issue, forged claim fingerprint, cycle."""
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+    import hashlib
+    storage = WorkOwnerMemoryTransport(BASE)
+
+    action = _action()
+    action["repair_of"] = "#9999"
+    packet = {"batch_id": "hijack-probe", "source_sha": BASE, "actions": [action]}
+    storage.issues[508] = packet
+    with pytest.raises(RemoteTransportError, match="WORK_LINEAGE_PREDECESSOR_ISSUE_INVALID"):
+        WorkOwner.identity(storage, 508, packet, action)
+
+    pred_action = {**_action(), "action_id": "other-action", "attempt_id": "other-attempt"}
+    pred_packet = {"batch_id": "other-batch", "source_sha": BASE, "actions": [pred_action]}
+    storage.issues[506] = pred_packet
+    action["repair_of"] = "#506:target-attempt"
+    with pytest.raises(RemoteTransportError, match="WORK_LINEAGE_PREDECESSOR_ACTION_NOT_FOUND"):
+        WorkOwner.identity(storage, 508, packet, action)
+
+    pred_action2 = {**_action(), "action_id": "target-action", "attempt_id": "target-attempt"}
+    pred_packet2 = {"batch_id": "pred-batch", "source_sha": BASE, "actions": [pred_action2]}
+    storage.issues[506] = pred_packet2
+    action["repair_of"] = "#506"
+    action["action_id"] = "target-action"
+    with pytest.raises(RemoteTransportError, match="WORK_LINEAGE_PREDECESSOR_CLAIM_MISSING"):
+        WorkOwner.identity(storage, 508, packet, action)
+
+    action_in_506 = {**pred_action2, "repair_of": "#508"}
+    storage.issues[506] = {**pred_packet2, "actions": [action_in_506]}
+    storage.issues[508] = {**packet, "actions": [{**action, "repair_of": "#506"}]}
+    fp506 = hashlib.sha256(json.dumps({"batch_id": pred_packet2["batch_id"], "source_sha": pred_packet2["source_sha"],
+        "action": action_in_506}, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    claim_key = storage.attempt_key("target-attempt")
+    claim_sha = hashlib.sha1(b"claim506").hexdigest()
+    storage.refs[f"refs/heads/ef02/claims/{claim_key}"] = claim_sha
+    storage.commits[claim_sha] = {"message": f"EF02 CLAIM\n\nfingerprint={fp506}\nattempt_id=target-attempt"}
+    with pytest.raises(RemoteTransportError, match="WORK_LINEAGE_CYCLE_DETECTED"):
+        WorkOwner.identity(storage, 508, storage.issues[508], storage.issues[508]["actions"][0])
+
+
+def test_workowner_conflicting_successors_one_generation_winner():
+    """Two concurrent successors attempt to claim generation 2; exactly one wins create-only primitive."""
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+    import hashlib
+    storage = WorkOwnerMemoryTransport(BASE)
+
+    action1 = _action()
+    action1["attempt_id"] = "attempt-r1"
+    packet1 = {"batch_id": "b-root", "source_sha": BASE, "actions": [action1]}
+    storage.issues[506] = packet1
+    storage.issue_body = packet1
+    id1 = WorkOwner.identity(storage, 506, packet1, action1)
+    owner1 = WorkOwner.acquire(storage, id1)
+    owner1.append("CLAIMED")
+    owner1.append("UNKNOWN")
+
+    fp1 = hashlib.sha256(json.dumps({"batch_id": "b-root", "source_sha": BASE, "action": action1},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    claim_key1 = storage.attempt_key("attempt-r1")
+    claim_sha1 = hashlib.sha1(b"claim1").hexdigest()
+    storage.refs[f"refs/heads/ef02/claims/{claim_key1}"] = claim_sha1
+    storage.commits[claim_sha1] = {"message": f"EF02 CLAIM\n\nfingerprint={fp1}\nattempt_id=attempt-r1"}
+
+    action_a = {**_action(), "attempt_id": "attempt-r2a", "repair_of": "#506"}
+    packet_a = {"batch_id": "b-succ-a", "source_sha": BASE, "actions": [action_a]}
+    storage.issues[508] = packet_a
+    storage.issue_body = packet_a
+    id_a = WorkOwner.identity(storage, 508, packet_a, action_a)
+    assert id_a["work_key"] == id1["work_key"]
+    assert id_a["generation"] == 2
+
+    action_b = {**_action(), "attempt_id": "attempt-r2b", "repair_of": "#506"}
+    packet_b = {"batch_id": "b-succ-b", "source_sha": BASE, "actions": [action_b]}
+    storage.issues[509] = packet_b
+    id_b = WorkOwner.identity(storage, 509, packet_b, action_b)
+    assert id_b["work_key"] == id1["work_key"]
+    assert id_b["generation"] == 2
+
+    owner_a = WorkOwner.acquire(storage, id_a)
+    assert owner_a.generation == 2
+
+    with pytest.raises(RemoteTransportError, match="WORK_OWNER_TRANSFER_CONFLICT"):
+        WorkOwner.acquire(storage, id_b)
+
+
+def test_workowner_stale_generation_rejected_at_all_fences():
+    """Generation 1 attempts to append or publish after Generation 2 transferred; rejected at all fences."""
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+    import hashlib
+    storage = WorkOwnerMemoryTransport(BASE)
+
+    action1 = {**_action(), "attempt_id": "attempt-r1"}
+    packet1 = {"batch_id": "b1", "source_sha": BASE, "actions": [action1]}
+    storage.issues[506] = packet1
+    storage.issue_body = packet1
+    id1 = WorkOwner.identity(storage, 506, packet1, action1)
+    owner1 = WorkOwner.acquire(storage, id1)
+    owner1.append("CLAIMED")
+    owner1.append("UNKNOWN")
+
+    fp1 = hashlib.sha256(json.dumps({"batch_id": "b1", "source_sha": BASE, "action": action1},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    claim_key1 = storage.attempt_key("attempt-r1")
+    claim_sha1 = hashlib.sha1(b"c1").hexdigest()
+    storage.refs[f"refs/heads/ef02/claims/{claim_key1}"] = claim_sha1
+    storage.commits[claim_sha1] = {"message": f"EF02 CLAIM\n\nfingerprint={fp1}\nattempt_id=attempt-r1"}
+
+    action2 = {**_action(), "attempt_id": "attempt-r2", "repair_of": "#506"}
+    packet2 = {"batch_id": "b2", "source_sha": BASE, "actions": [action2]}
+    storage.issues[508] = packet2
+    storage.issue_body = packet2
+    id2 = WorkOwner.identity(storage, 508, packet2, action2)
+    owner2 = WorkOwner.acquire(storage, id2)
+    assert owner2.generation == 2
+
+    with pytest.raises(RemoteTransportError, match="WORK_OWNER_STALE_FENCE"):
+        owner1.append("PROVIDER_INTENT", round=0)
+
+    with pytest.raises(RemoteTransportError, match="WORK_OWNER_STALE_FENCE"):
+        owner1.assert_current()
+
+
+def test_workowner_unknown_or_unresolved_predecessor_blocks_transfer():
+    """Unresolved predecessor (e.g. at PROVIDER_INTENT) denies generation transfer."""
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+    import hashlib
+    storage = WorkOwnerMemoryTransport(BASE)
+
+    action1 = {**_action(), "attempt_id": "attempt-r1"}
+    packet1 = {"batch_id": "b1", "source_sha": BASE, "actions": [action1]}
+    storage.issues[506] = packet1
+    storage.issue_body = packet1
+    id1 = WorkOwner.identity(storage, 506, packet1, action1)
+    owner1 = WorkOwner.acquire(storage, id1)
+    owner1.append("CLAIMED")
+    owner1.append("SPAWN_INTENT")
+    owner1.append("PROVIDER_INTENT", round=0)
+
+    fp1 = hashlib.sha256(json.dumps({"batch_id": "b1", "source_sha": BASE, "action": action1},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    claim_key1 = storage.attempt_key("attempt-r1")
+    claim_sha1 = hashlib.sha1(b"c1").hexdigest()
+    storage.refs[f"refs/heads/ef02/claims/{claim_key1}"] = claim_sha1
+    storage.commits[claim_sha1] = {"message": f"EF02 CLAIM\n\nfingerprint={fp1}\nattempt_id=attempt-r1"}
+
+    action2 = {**_action(), "attempt_id": "attempt-r2", "repair_of": "#506"}
+    packet2 = {"batch_id": "b2", "source_sha": BASE, "actions": [action2]}
+    storage.issues[508] = packet2
+    storage.issue_body = packet2
+    id2 = WorkOwner.identity(storage, 508, packet2, action2)
+
+    with pytest.raises(RemoteTransportError, match="WORK_OWNER_PREDECESSOR_UNRESOLVED"):
+        WorkOwner.acquire(storage, id2)
+
+
+def test_workowner_lost_workspace_recovery_readonly_no_duplicate(tmp_path):
+    """Local workspace deleted; owner reconstructed from GitHub storage; GET-only calls; no duplicate dispatch."""
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+    import shutil
+    storage = WorkOwnerMemoryTransport(BASE)
+    action = _action()
+    packet = {"batch_id": "lost-ws", "source_sha": BASE, "actions": [action]}
+    storage.issue_body = packet
+    id1 = WorkOwner.identity(storage, 506, packet, action)
+    owner = WorkOwner.acquire(storage, id1)
+    owner.append("CLAIMED")
+    owner.append("SPAWN_INTENT")
+    owner.append("UNKNOWN")
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    (ws / "file.txt").write_text("hello")
+    shutil.rmtree(ws)
+    assert not ws.exists()
+
+    storage.requests.clear()
+    recovered = WorkOwner(storage, id1, "")
+    result = recovered.reconcile()
+    assert result["status"] == "HOLD_UNKNOWN_EFFECT"
+    assert result["stage"] == "UNKNOWN"
+    assert result["replay_authorized"] is False
+    assert result["publication_authorized"] is False
+    assert all(method == "GET" for method, *_ in storage.requests)
+    assert not any(method == "POST" for method, *_ in storage.requests)
+
+
+def test_workowner_422_or_timeout_during_transfer_holds_without_retry():
+    """Transport failure during transfer record creation raises without retry."""
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+    import hashlib
+    storage = WorkOwnerMemoryTransport(BASE)
+
+    action1 = {**_action(), "attempt_id": "attempt-r1"}
+    packet1 = {"batch_id": "b1", "source_sha": BASE, "actions": [action1]}
+    storage.issues[506] = packet1
+    storage.issue_body = packet1
+    id1 = WorkOwner.identity(storage, 506, packet1, action1)
+    owner1 = WorkOwner.acquire(storage, id1)
+    owner1.append("CLAIMED")
+    owner1.append("UNKNOWN")
+
+    fp1 = hashlib.sha256(json.dumps({"batch_id": "b1", "source_sha": BASE, "action": action1},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    claim_key1 = storage.attempt_key("attempt-r1")
+    claim_sha1 = hashlib.sha1(b"c1").hexdigest()
+    storage.refs[f"refs/heads/ef02/claims/{claim_key1}"] = claim_sha1
+    storage.commits[claim_sha1] = {"message": f"EF02 CLAIM\n\nfingerprint={fp1}\nattempt_id=attempt-r1"}
+
+    action2 = {**_action(), "attempt_id": "attempt-r2", "repair_of": "#506"}
+    packet2 = {"batch_id": "b2", "source_sha": BASE, "actions": [action2]}
+    storage.issues[508] = packet2
+    storage.issue_body = packet2
+    id2 = WorkOwner.identity(storage, 508, packet2, action2)
+
+    def fail_ref(data):
+        if "workowner" in data.get("ref", ""):
+            raise RemoteTransportError("GITHUB_HTTP_422")
+    storage.before_write = fail_ref
+
+    with pytest.raises(RemoteTransportError, match="WORK_OWNER_TRANSFER_CONFLICT"):
+        WorkOwner.acquire(storage, id2)
+
+    def fail_timeout(data):
+        if "workowner" in data.get("ref", ""):
+            raise RemoteTransportError("GITHUB_TIMEOUT")
+    storage.before_write = fail_timeout
+
+    with pytest.raises(RemoteTransportError, match="GITHUB_TIMEOUT"):
+        WorkOwner.acquire(storage, id2)

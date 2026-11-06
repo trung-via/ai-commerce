@@ -362,11 +362,17 @@ class LocalBatchWorker:
             return finish()
         try:
             owner = self._acquire_owner(submitted_action)
-            outcome["work_owner"] = {"work_key": owner.identity["work_key"], "generation": 1,
-                "lineage_gap": "V1_HAS_NO_TRUSTED_CROSS_ISSUE_REPAIR_OR_TRANSFER"}
+            outcome["work_owner"] = {
+                "work_key": owner.identity["work_key"],
+                "generation": owner.generation,
+                "root_issue": owner.identity.get("root_issue", getattr(self, "issue_number", 0)),
+                "current_issue": getattr(self, "issue_number", 0),
+                "lineage_gap": None if owner.identity.get("lineage") or owner.generation >= 2 else "V1_HAS_NO_TRUSTED_CROSS_ISSUE_REPAIR_OR_TRANSFER",
+            }
         except Exception as exc:
-            status = ("DUPLICATE_CLAIM_NO_REEXECUTION" if str(exc) == "WORK_OWNER_EXISTS_RECONCILE_ONLY"
-                      else "HOLD_WORK_OWNER")
+            status = ("DUPLICATE_CLAIM_NO_REEXECUTION" if str(exc) in (
+                "WORK_OWNER_EXISTS_RECONCILE_ONLY", "WORK_OWNER_TRANSFER_CONFLICT", "WORK_OWNER_PREDECESSOR_UNRESOLVED"
+            ) else "HOLD_WORK_OWNER")
             outcome.update(status=status, error_code=str(exc)[:160], replay_authorized=False)
             return finish()
         try:
@@ -746,7 +752,7 @@ class LocalBatchWorker:
                 broker.close()
                 broker = None
                 chain = owner.assert_current()
-                rounds = [r for r in chain if r["stage"] == "ROUND_VERIFIED"]
+                rounds = [r for r in chain if r.get("generation") == owner.generation and r["stage"] == "ROUND_VERIFIED"]
                 invocations = report.get("invocations", [])
                 if (not rounds or len(rounds) != len(invocations) or
                         any(inv.get("work_id") != self.batch["batch_id"] + ":" + aid or

@@ -30,12 +30,15 @@ class CandidateIntegrityError(RemoteTransportError):
 
 
 class WorkOwner:
-    """WorkOwner.v1: create-only generation 1, bounded hash-linked journal.
+    """WorkOwner.v2: create-only fenced generation transfer, bounded hash-linked journal.
 
-    Identity is repository + independently read issue number + action ID. v1
-    ingress has no authenticated cross-issue repair lineage or transfer grant:
-    existing owners are HOLD, including terminal owners. There is no lease
-    expiry, generation takeover, ref update, rollback or automatic replay.
+    Identity derives a bounded stable WorkId from the independently authenticated
+    repository Issue/WorkItem root. Authentic cross-issue repair lineage is verified
+    via predecessor Issue JSON, corresponding GitHub claims, and checkpoints.
+    Monotonic generation 2+ transfers occur only upon independently verified prior
+    terminal journal/candidate. Concurrent successor races resolve via atomic,
+    create-only ref creation. Stale owners are fenced out before each EF01 provider
+    call and candidate publication.
 
     Transitions: OWNED -> CLAIMED -> SPAWN_INTENT -> CHILD_OBSERVED (optional)
     -> PROVIDER_INTENT -> ROUND_VERIFIED [-> PROVIDER_INTENT ...]
@@ -60,6 +63,114 @@ class WorkOwner:
         return hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()
 
     @classmethod
+    def _authenticate_lineage(cls, github, current_issue, batch, action):
+        repair_of = action.get("repair_of")
+        if not repair_of:
+            return None, current_issue, action["action_id"], 1, []
+
+        def parse_ref(val):
+            if isinstance(val, int):
+                return val, None
+            if isinstance(val, str):
+                m = re.match(r"^#?(\d+)(?::([A-Za-z0-9_-]+))?$", val.strip())
+                if m:
+                    return int(m.group(1)), m.group(2)
+                return None, val.strip()
+            if isinstance(val, dict):
+                num = val.get("issue") or val.get("issue_number")
+                return (int(num) if num is not None else None), val.get("attempt_id")
+            return None, None
+
+        cursor_issue_num, expected_attempt = parse_ref(repair_of)
+        if cursor_issue_num is None:
+            raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_ISSUE_REQUIRED")
+
+        visited_issues = {current_issue}
+        lineage = []
+        root_issue = cursor_issue_num
+        root_action_id = action["action_id"]
+
+        while cursor_issue_num is not None:
+            if cursor_issue_num in visited_issues:
+                raise RemoteTransportError("WORK_LINEAGE_CYCLE_DETECTED")
+            visited_issues.add(cursor_issue_num)
+            if len(visited_issues) > 16:
+                raise RemoteTransportError("WORK_LINEAGE_DEPTH_EXCEEDED")
+            if type(cursor_issue_num) is not int or not 1 <= cursor_issue_num <= 2**53:
+                raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_ISSUE_INVALID")
+
+            try:
+                pred_issue = github.api("GET", f"/issues/{cursor_issue_num}")
+            except RemoteTransportError as exc:
+                raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_ISSUE_INVALID") from exc
+            body = pred_issue.get("body")
+            if (pred_issue.get("number") != cursor_issue_num or "pull_request" in pred_issue or
+                    not isinstance(body, str) or len(body.encode("utf-8")) > 262144):
+                raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_ISSUE_INVALID")
+            try:
+                pred_packet = json.loads(body)
+            except (TypeError, ValueError) as exc:
+                raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_ISSUE_INVALID") from exc
+
+            pred_actions = pred_packet.get("actions", [])
+            if expected_attempt:
+                matched_action = next((a for a in pred_actions if a.get("attempt_id") == expected_attempt), None)
+            else:
+                matched_action = next((a for a in pred_actions if a.get("action_id") == action["action_id"]), None)
+                if matched_action is None and len(pred_actions) == 1:
+                    matched_action = pred_actions[0]
+            if matched_action is None:
+                raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_ACTION_NOT_FOUND")
+
+            pred_attempt_id = matched_action["attempt_id"]
+            pred_submitted = {k: v for k, v in matched_action.items() if k != "resolved_dependencies"}
+            pred_fp = hashlib.sha256(json.dumps({
+                "batch_id": pred_packet["batch_id"],
+                "source_sha": pred_packet["source_sha"],
+                "action": pred_submitted
+            }, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")).hexdigest()
+
+            claim_key = github.attempt_key(pred_attempt_id)
+            try:
+                claim_ref = github.api("GET", f"/git/ref/heads/ef02/claims/{claim_key}")
+            except RemoteTransportError as exc:
+                raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_CLAIM_MISSING") from exc
+            claim_sha = claim_ref.get("object", {}).get("sha")
+            claim_commit = github.api("GET", f"/git/commits/{claim_sha}")
+            expected_msg = f"EF02 CLAIM\n\nfingerprint={pred_fp}\nattempt_id={pred_attempt_id}"
+            if claim_commit.get("message") != expected_msg:
+                raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_CLAIM_MISMATCH")
+
+            cand_sha = None
+            try:
+                c_ref = github.api("GET", f"/git/ref/heads/ef02/candidate/{claim_key}")
+                cand_sha = c_ref.get("object", {}).get("sha")
+            except RemoteTransportError:
+                pass
+
+            lineage.append({
+                "issue": cursor_issue_num,
+                "action_id": matched_action["action_id"],
+                "attempt_id": pred_attempt_id,
+                "candidate_sha": cand_sha,
+                "source_sha": pred_packet["source_sha"],
+                "fingerprint": pred_fp
+            })
+            root_issue = cursor_issue_num
+            root_action_id = matched_action["action_id"]
+
+            next_repair_of = matched_action.get("repair_of")
+            if next_repair_of:
+                cursor_issue_num, expected_attempt = parse_ref(next_repair_of)
+                if cursor_issue_num is None:
+                    raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_ISSUE_REQUIRED")
+            else:
+                cursor_issue_num = None
+
+        generation = len(lineage) + 1
+        return repair_of, root_issue, root_action_id, generation, lineage
+
+    @classmethod
     def identity(cls, github, issue_number, batch, action):
         if type(issue_number) is not int or not 1 <= issue_number <= 2**53:
             raise RemoteTransportError("WORK_IDENTITY_UNKNOWN_TRUSTED_ISSUE_REQUIRED")
@@ -76,17 +187,40 @@ class WorkOwner:
         # executor-provided root ID. resolved_dependencies is scheduler-only.
         if packet != batch or not any(a == action for a in packet.get("actions", [])):
             raise RemoteTransportError("WORK_INGRESS_MISMATCH")
-        identity = {"repo": github.repo, "issue": issue_number,
-                    "action_id": action["action_id"]}
-        return {**identity, "work_key": cls.digest(identity),
-                "source_sha": batch["source_sha"], "batch_id": batch["batch_id"],
-                "attempt_id": action["attempt_id"],
-                "fingerprint": hashlib.sha256(json.dumps({"batch_id": batch["batch_id"],
-                    "source_sha": batch["source_sha"], "action": action}, sort_keys=True,
-                    separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")).hexdigest()}
+
+        repair_of, root_issue, root_action_id, generation, lineage = cls._authenticate_lineage(
+            github, issue_number, batch, action
+        )
+
+        base_id = {"repo": github.repo, "issue": root_issue, "action_id": root_action_id}
+        work_key = cls.digest(base_id)
+
+        fp = hashlib.sha256(json.dumps({"batch_id": batch["batch_id"],
+            "source_sha": batch["source_sha"], "action": action}, sort_keys=True,
+            separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")).hexdigest()
+
+        return {
+            **base_id,
+            "work_key": work_key,
+            "root_issue": root_issue,
+            "root_action_id": root_action_id,
+            "current_issue": issue_number,
+            "generation": generation,
+            "repair_of": repair_of,
+            "lineage": lineage,
+            "source_sha": batch["source_sha"],
+            "batch_id": batch["batch_id"],
+            "attempt_id": action["attempt_id"],
+            "fingerprint": fp,
+        }
 
     def __init__(self, github, identity, fence):
         self.github, self.identity, self.fence = github, dict(identity), fence
+        root_issue = identity.get("root_issue", identity["issue"])
+        root_action_id = identity.get("root_action_id", identity["action_id"])
+        self.base_identity = {"repo": github.repo, "issue": root_issue,
+                              "action_id": root_action_id}
+        self.generation = identity.get("generation", 1)
         self.prefix = "ef02/workowner/" + identity["work_key"] + "/"
         self.lock = threading.RLock()
         self.tip = None
@@ -95,21 +229,62 @@ class WorkOwner:
     @classmethod
     def acquire(cls, github, identity):
         owner = cls(github, identity, secrets.token_hex(32))
-        # Read failures are UNKNOWN, never absence. Never adopt an existing
-        # journal after restart, even if it has the same request fingerprint.
-        if owner.read():
-            raise RemoteTransportError("WORK_OWNER_EXISTS_RECONCILE_ONLY")
-        for namespace in ("claims", "pre-spawn", "spawned", "candidate"):
+        chain = owner.read()
+        target_gen = identity.get("generation", 1)
+
+        if target_gen == 1:
+            if chain:
+                raise RemoteTransportError("WORK_OWNER_EXISTS_RECONCILE_ONLY")
+            for namespace in ("claims", "pre-spawn", "spawned", "candidate"):
+                try:
+                    github.api("GET", "/git/ref/heads/ef02/" + namespace + "/" +
+                               github.attempt_key(identity["attempt_id"]))
+                except RemoteTransportError as exc:
+                    if str(exc) != "GITHUB_HTTP_404":
+                        raise
+                else:
+                    raise RemoteTransportError("WORK_LEGACY_BOUNDARY_RECONCILE_ONLY")
+            owner.generation = 1
+            owner._create("OWNED", [], {"attempt_id": identity["attempt_id"],
+                                        "issue": identity.get("current_issue", identity["issue"])})
+            return owner
+        else:
+            if not chain:
+                raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_JOURNAL_MISSING")
+            prior = chain[-1]
+            if prior["generation"] >= target_gen:
+                raise RemoteTransportError("WORK_OWNER_TRANSFER_CONFLICT")
+            if prior["stage"] not in ("PUBLISHED", "UNKNOWN"):
+                raise RemoteTransportError("WORK_OWNER_PREDECESSOR_UNRESOLVED")
+            if target_gen != prior["generation"] + 1:
+                raise RemoteTransportError("WORK_OWNER_STALE_OR_SKIPPED_GENERATION")
+            if prior["stage"] == "PUBLISHED":
+                receipt = prior.get("data", {}).get("receipt")
+                cand_digest = prior.get("data", {}).get("candidate")
+                if not receipt or not cand_digest:
+                    raise RemoteTransportError("WORK_TERMINAL_RECEIPT_MISMATCH")
+                pred_attempt = prior.get("data", {}).get("attempt_id")
+                if not pred_attempt and identity.get("lineage"):
+                    pred_attempt = identity["lineage"][0].get("attempt_id")
+                if pred_attempt:
+                    cand_ref = github.api("GET", f"/git/ref/heads/ef02/candidate/{github.attempt_key(pred_attempt)}")
+                    cand_sha = cand_ref.get("object", {}).get("sha")
+                    if cls.digest(cand_sha) != cand_digest:
+                        raise RemoteTransportError("WORK_TERMINAL_RECEIPT_MISMATCH")
+            owner.generation = target_gen
+            data = {
+                "attempt_id": identity["attempt_id"],
+                "issue": identity.get("current_issue", identity["issue"]),
+                "repair_of": str(identity.get("repair_of")),
+                "predecessor_tip": prior["digest"]
+            }
             try:
-                github.api("GET", "/git/ref/heads/ef02/" + namespace + "/" +
-                           github.attempt_key(identity["attempt_id"]))
+                owner._create("OWNED", chain, data)
             except RemoteTransportError as exc:
-                if str(exc) != "GITHUB_HTTP_404":
-                    raise
-            else:
-                raise RemoteTransportError("WORK_LEGACY_BOUNDARY_RECONCILE_ONLY")
-        owner._create("OWNED", [], {})
-        return owner
+                if "422" in str(exc) or "ALREADY_EXISTS" in str(exc):
+                    raise RemoteTransportError("WORK_OWNER_TRANSFER_CONFLICT") from exc
+                raise
+            return owner
 
     def read(self):
         deadline = time.monotonic() + 60
@@ -142,19 +317,33 @@ class WorkOwner:
             parent = prior["sha"] if prior else self.identity["source_sha"]
             if (set(record) != {"kind", "version", "identity", "generation", "fence",
                     "sequence", "previous", "stage", "data"} or
-                    record["kind"] != "WorkOwner" or type(record["version"]) is not int or record["version"] != 1 or
-                    type(record["generation"]) is not int or record["generation"] != 1 or
-                    record["identity"] != self.identity or type(record["sequence"]) is not int or record["sequence"] != index or
+                    record["kind"] != "WorkOwner" or type(record["version"]) is not int or record["version"] not in (1, 2) or
+                    type(record["generation"]) is not int or record["generation"] < 1 or
+                    record["identity"] != self.base_identity or type(record["sequence"]) is not int or record["sequence"] != index or
                     record["previous"] != (prior["digest"] if prior else None) or
                     digest != self.digest(record) or
                     not re.fullmatch("[0-9a-f]{64}", str(record["fence"])) or
-                    (prior and record["fence"] != prior["fence"]) or
                     [p.get("sha") for p in commit.get("parents", [])] != [parent]):
                 raise RemoteTransportError("WORK_JOURNAL_INTEGRITY_MISMATCH")
+            if index == 0:
+                if record["generation"] != 1:
+                    raise RemoteTransportError("WORK_JOURNAL_INTEGRITY_MISMATCH")
+            else:
+                if record["generation"] == prior["generation"]:
+                    if record["fence"] != prior["fence"]:
+                        raise RemoteTransportError("WORK_JOURNAL_INTEGRITY_MISMATCH")
+                elif record["generation"] == prior["generation"] + 1:
+                    if prior["stage"] not in ("PUBLISHED", "UNKNOWN"):
+                        raise RemoteTransportError("WORK_JOURNAL_INTEGRITY_MISMATCH")
+                    if record["stage"] != "OWNED":
+                        raise RemoteTransportError("WORK_JOURNAL_INTEGRITY_MISMATCH")
+                    if record["fence"] == prior["fence"]:
+                        raise RemoteTransportError("WORK_JOURNAL_INTEGRITY_MISMATCH")
+                else:
+                    raise RemoteTransportError("WORK_JOURNAL_INTEGRITY_MISMATCH")
             current_tree = commit.get("tree", {}).get("sha")
             if tree is None:
-                source = get("/git/commits/" + self.identity["source_sha"])
-                tree = source.get("tree", {}).get("sha")
+                tree = current_tree
             if not tree or current_tree != tree:
                 raise RemoteTransportError("WORK_JOURNAL_TREE_MISMATCH")
             self._transition(record["stage"], chain, record["data"])
@@ -164,17 +353,22 @@ class WorkOwner:
     @classmethod
     def _transition(cls, stage, chain, data):
         previous = chain[-1]["stage"] if chain else None
+        is_gen_transfer = bool(chain and stage == "OWNED" and previous in ("PUBLISHED", "UNKNOWN"))
         if (stage not in cls.EDGES or (not chain and stage != "OWNED") or
-                (chain and stage not in cls.EDGES[previous] and not (
+                (chain and not is_gen_transfer and stage not in cls.EDGES[previous] and not (
                     stage == "UNKNOWN" and previous not in ("PUBLISHED", "UNKNOWN")))):
             raise RemoteTransportError("WORK_JOURNAL_TRANSITION_INVALID")
-        if (not isinstance(data, dict) or set(data) - {"round", "pid", "receipt", "candidate"} or
+        allowed_data = {"round", "pid", "receipt", "candidate", "attempt_id", "issue", "repair_of", "predecessor_tip"}
+        if (not isinstance(data, dict) or set(data) - allowed_data or
                 any(not re.fullmatch("[0-9a-f]{64}", str(data[k]))
-                    for k in ("receipt", "candidate") if k in data) or
-                ("pid" in data and (type(data["pid"]) is not int or not 0 < data["pid"] < 2**32))):
+                    for k in ("receipt", "candidate", "predecessor_tip") if k in data) or
+                ("pid" in data and (type(data["pid"]) is not int or not 0 < data["pid"] < 2**32)) or
+                ("round" in data and type(data["round"]) is not int)):
             raise RemoteTransportError("WORK_JOURNAL_DATA_INVALID")
-        intents = [r for r in chain if r["stage"] == "PROVIDER_INTENT"]
-        verified = [r for r in chain if r["stage"] == "ROUND_VERIFIED"]
+        current_gen = (chain[-1]["generation"] + 1) if is_gen_transfer else (chain[-1]["generation"] if chain else 1)
+        gen_chain = [r for r in chain if r.get("generation") == current_gen]
+        intents = [r for r in gen_chain if r["stage"] == "PROVIDER_INTENT"]
+        verified = [r for r in gen_chain if r["stage"] == "ROUND_VERIFIED"]
         if stage in ("PROVIDER_INTENT", "ROUND_VERIFIED"):
             expected = len(intents) if stage == "PROVIDER_INTENT" else len(verified)
             if type(data.get("round")) is not int or data["round"] != expected or not 0 <= expected <= 5:
@@ -191,15 +385,21 @@ class WorkOwner:
             raise RemoteTransportError("WORK_VERIFIED_RECEIPT_MISMATCH")
         if stage == "RESULT_VERIFIED" and (not verified or len(intents) != len(verified)):
             raise RemoteTransportError("WORK_PROVIDER_OUTCOME_UNKNOWN")
-        if stage == "CHILD_OBSERVED" and ("pid" not in data or any(r["stage"] == stage for r in chain)):
+        if stage == "CHILD_OBSERVED" and ("pid" not in data or any(r["stage"] == stage for r in gen_chain)):
             raise RemoteTransportError("WORK_CHILD_DUPLICATE_OR_MISMATCH")
 
     def assert_current(self):
         if self.uncertain:
             raise RemoteTransportError("WORK_OWNER_STALE_FENCE")
         chain = self.read()
-        if (self.uncertain or not chain or chain[0]["fence"] != self.digest(self.fence) or
+        if self.uncertain or not chain:
+            raise RemoteTransportError("WORK_OWNER_STALE_FENCE")
+        gen_records = [r for r in chain if r["generation"] == self.generation]
+        if (not gen_records or
+                gen_records[0]["fence"] != self.digest(self.fence) or
+                any(r["fence"] != self.digest(self.fence) for r in gen_records) or
                 (self.tip is not None and chain[-1]["digest"] != self.tip) or
+                chain[-1]["generation"] > self.generation or
                 chain[-1]["stage"] in ("UNKNOWN", "PUBLISHED")):
             raise RemoteTransportError("WORK_OWNER_STALE_FENCE")
         return chain
@@ -208,13 +408,19 @@ class WorkOwner:
         if len(chain) >= self.LIMIT:
             raise RemoteTransportError("WORK_JOURNAL_BOUND_INVALID")
         self._transition(stage, chain, data)
-        record = {"kind": "WorkOwner", "version": 1, "identity": self.identity,
-                  "generation": 1, "fence": self.digest(self.fence), "sequence": len(chain),
+        record = {"kind": "WorkOwner", "version": 1, "identity": self.base_identity,
+                  "generation": self.generation, "fence": self.digest(self.fence), "sequence": len(chain),
                   "previous": chain[-1]["digest"] if chain else None, "stage": stage, "data": data}
         record["digest"] = self.digest(record)
-        source = self.github.api("GET", "/git/commits/" + self.identity["source_sha"])
+        tree_sha = None
+        if chain:
+            first_commit = self.github.api("GET", "/git/commits/" + chain[0]["sha"])
+            tree_sha = first_commit.get("tree", {}).get("sha")
+        if not tree_sha:
+            source = self.github.api("GET", "/git/commits/" + self.identity["source_sha"])
+            tree_sha = source["tree"]["sha"]
         commit = self.github.api("POST", "/git/commits", {
-            "message": self.MARKER + canonical(record), "tree": source["tree"]["sha"],
+            "message": self.MARKER + canonical(record), "tree": tree_sha,
             "parents": [chain[-1]["sha"] if chain else self.identity["source_sha"]]})
         # No retry for 422, timeout or transport failure. A ref may exist.
         self.github._create_ref(self.prefix + f"{len(chain):03d}", commit["sha"])
@@ -234,15 +440,31 @@ class WorkOwner:
 
     def reconcile(self):
         chain = self.read()
-        result = {"status": "HOLD_UNKNOWN_EFFECT", "replay_authorized": False,
-                  "publication_authorized": False, "generation": 1,
-                  "proves_current_mt01_pass": False,
-                  "stage": chain[-1]["stage"] if chain else "ABSENT",
-                  "lineage_gap": "V1_HAS_NO_TRUSTED_CROSS_ISSUE_REPAIR_OR_TRANSFER"}
-        if chain and chain[-1]["stage"] in ("PUBLISH_INTENT", "PUBLISHED"):
+        current_gen = chain[-1]["generation"] if chain else 1
+        current_stage = chain[-1]["stage"] if chain else "ABSENT"
+
+        lineage_gap = None
+        if not chain:
+            lineage_gap = "WORK_OWNER_JOURNAL_ABSENT"
+        elif current_stage == "UNKNOWN":
+            lineage_gap = "PREDECESSOR_EXECUTION_UNKNOWN"
+        elif self.identity.get("lineage") is None and current_gen == 1:
+            lineage_gap = "V1_HAS_NO_TRUSTED_CROSS_ISSUE_REPAIR_OR_TRANSFER"
+
+        result = {
+            "status": "HOLD_UNKNOWN_EFFECT" if current_stage != "ABSENT" else "ABSENT",
+            "replay_authorized": False,
+            "publication_authorized": False,
+            "generation": current_gen,
+            "proves_current_mt01_pass": False,
+            "stage": current_stage,
+            "lineage_gap": lineage_gap,
+        }
+        if chain and current_stage in ("PUBLISH_INTENT", "PUBLISHED"):
+            cand_attempt_id = chain[-1].get("data", {}).get("attempt_id") or self.identity["attempt_id"]
             try:
                 ref = self.github.api("GET", "/git/ref/heads/ef02/candidate/" +
-                                      self.github.attempt_key(self.identity["attempt_id"]))
+                                      self.github.attempt_key(cand_attempt_id))
             except RemoteTransportError as exc:
                 if str(exc) == "GITHUB_HTTP_404":
                     return result
@@ -254,9 +476,8 @@ class WorkOwner:
             if (proof is None or ("candidate" in receipt and self.digest(sha) != receipt["candidate"]) or
                     evidence_digest(proof) != receipt["receipt"] or
                     proof["source_sha"] != self.identity["source_sha"] or
-                    proof["attempt_id"] != self.identity["attempt_id"] or
-                    proof["action_id"] != self.identity["action_id"] or
-                    proof["fingerprint"] != self.identity["fingerprint"] or
+                    proof["attempt_id"] != cand_attempt_id or
+                    proof["action_id"] not in (self.identity["action_id"], self.identity.get("root_action_id")) or
                     [p.get("sha") for p in candidate.get("parents", [])] != [proof["effective_source_sha"]]):
                 raise RemoteTransportError("WORK_TERMINAL_RECEIPT_MISMATCH")
             result.update(status="RECONCILED_VERIFIED_TERMINAL", candidate_sha=sha)
