@@ -779,3 +779,147 @@ def test_verified_ef01_proof_mutation_negatives(tmp_path, mutation, expected_dia
     )
     assert result is False
     assert expected_diag in diagnostics
+
+
+@pytest.mark.parametrize("kind", ["http", "timeout"])
+def test_publication_diagnostic_survives_worker_batch_artifact_and_safe_issue_summary(
+        tmp_path, monkeypatch, capsys, kind):
+    """Exercise the real result consumers; all provider/GitHub effects are fakes."""
+    from types import SimpleNamespace
+    from ai_commerce.remote import __main__ as cli
+    from ai_commerce.remote import transport
+    from test_ef01_repair import _action, _worker_fixture
+    from test_ef02_candidate_integrity import _publication_fixture, _PRIVATE
+
+    wire = _publication_fixture(tmp_path, monkeypatch, fault=("POST", "/git/refs"),
+        body=json.dumps({"message": _PRIVATE, "errors": [{"code": "invalid", "field": "ref"}]}).encode(),
+        kind=kind)
+    with pytest.raises(RemoteTransportError) as failure:
+        wire.publish()
+    context = _worker_fixture(tmp_path, monkeypatch, real_git=False)
+    attempts = []
+    def reject_publication(**kwargs):
+        attempts.append(kwargs["attempt_id"])
+        raise failure.value
+    monkeypatch.setattr(context.worker.github, "candidate", reject_publication)
+    request = _action("a")
+    report = run_schedule({**context.batch, "actions": [request]}, context.worker.execute_action)
+    result = report["actions"][0]
+    assert result["status"] == "RESULT_PUBLICATION_FAILED" and report["succeeded"] == 0
+    assert result["error_code"] == "RemoteTransportError" and result["candidate_sha"] is result["candidate_ref"] is None
+    safe = result["diagnostic"]
+    assert safe == str(failure.value) and "CANDIDATE_REF_CREATE" in safe
+    assert ("UNKNOWN_EFFECT_RECONCILE" if kind == "timeout" else
+            "TERMINAL_VALIDATION_OR_POLICY_REJECTION") in safe
+    saved = json.loads(next(context.worker.root.rglob("action_result.json")).read_text())
+    assert saved["diagnostic"] == safe and _PRIVATE not in json.dumps(saved)
+
+    comments = []
+    monkeypatch.setattr(cli, "GitHubTransport", lambda *_: SimpleNamespace(comment=lambda n, body: comments.append((n, body))))
+    monkeypatch.setattr(cli, "LocalBatchWorker", lambda **_: context.worker)
+    monkeypatch.setattr(cli, "run_schedule", lambda *_a, **_kw: report)
+    monkeypatch.setattr(cli, "check_source", lambda *_a, **_kw: None)
+    monkeypatch.setattr(cli, "verify_registry", lambda _: context.worker.profiles)
+    monkeypatch.setattr(cli, "load_approved_candidates", lambda _: {"version": 1, "candidates": {}})
+    monkeypatch.setattr(cli, "start_worker_signal", lambda **_: None)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_TOKEN", "fixture")
+    monkeypatch.setenv("GITHUB_RUN_ID", "42")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
+    packet = {"kind": "AI_COMMERCE_REMOTE_ACTION_BATCH", "version": 1, "batch_id": context.batch["batch_id"],
+              "source_sha": context.head, "actor": "HUMAN", "authorization_ref": "fixture-grant", "actions": [request]}
+    path = tmp_path / "request.json"
+    path.write_text(json.dumps(packet))
+    assert cli.main(["run", "--request-file", str(path), "--checkout", str(ROOT),
+                     "--issuer-login", "owner", "--owner-login", "owner", "--issue-number", "512"]) == 1
+    persisted = json.loads((context.worker.root / "batch_result.json").read_text())
+    assert persisted["actions"][0]["diagnostic"] == safe
+    assert len(comments) == 1 and "RESULT_PUBLICATION_FAILED" in comments[0][1]
+    # The existing public summary points to the per-attempt artifact. Inline
+    # stage diagnostics would require the __main__.py owner, outside this patch.
+    assert "Full per-attempt diagnostics are in this workflow's artifact." in comments[0][1]
+    assert _PRIVATE not in comments[0][1] + json.dumps(persisted) + capsys.readouterr().out
+    assert attempts == [request["attempt_id"]] and len(context.calls) == 2
+    before = len(context.calls)
+    assert context.worker.execute_action(request)["status"] == "DUPLICATE_CLAIM_NO_REEXECUTION"
+    assert len(context.calls) == before and len(attempts) == 1
+
+
+def test_real_http_claim_collision_keeps_legacy_error_and_duplicate_semantics(monkeypatch):
+    from io import BytesIO
+    from urllib.error import HTTPError
+    from ai_commerce.remote import transport
+    calls = []
+    fingerprint_value = "f" * 64
+    message = "EF02 CLAIM\n\nfingerprint=" + fingerprint_value + "\nattempt_id=claim-001"
+    def open_request(request, timeout):
+        method, url = request.get_method(), request.full_url
+        calls.append((method, url))
+        if method == "POST" and url.endswith("/git/refs"):
+            raise HTTPError(url, 422, "private reason", {}, BytesIO(b'{"message":"private body"}'))
+        if method == "POST":
+            response = {"sha": "b" * 40}
+        elif "/git/ref/" in url:
+            response = {"object": {"sha": "b" * 40}}
+        else:
+            response = {"tree": {"sha": "c" * 40}, "message": message}
+        return BytesIO(json.dumps(response).encode())
+    monkeypatch.setattr(transport, "urlopen", open_request)
+    github = GitHubTransport("owner/repo", "private token")
+    assert github.claim(source_sha="a" * 40, attempt_id="claim-001", fingerprint=fingerprint_value) == "DUPLICATE_CLAIM_NO_REEXECUTION"
+    assert [method for method, _ in calls] == ["GET", "POST", "POST", "GET", "GET"]
+
+
+def test_http_422_body_read_timeout_retains_status_without_plaintext_or_replay(monkeypatch):
+    from io import BytesIO
+    from urllib.error import HTTPError
+    from ai_commerce.remote import transport
+    bodies = []
+    class Unreadable(BytesIO):
+        def read(self, size=-1):
+            assert size == 8193
+            raise TimeoutError("private token in response reader")
+    def open_request(request, timeout):
+        body = Unreadable()
+        bodies.append(body)
+        raise HTTPError(request.full_url, 422, "private reason", {}, body)
+    monkeypatch.setattr(transport, "urlopen", open_request)
+    with pytest.raises(RemoteTransportError) as failure:
+        GitHubTransport("owner/repo", "private token")._publication_api(transport.PublicationStage.BLOB_CREATE, {})
+    payload = failure.value.publication.payload()
+    assert payload["http_status"] == 422 and payload["github_codes"] == payload["validation_fields"] == []
+    assert payload["disposition"] == "TERMINAL_VALIDATION_OR_POLICY_REJECTION"
+    assert len(bodies) == 1 and bodies[0].closed and "private" not in str(failure.value)
+
+
+def test_candidate_ref_get_verification_failure_survives_worker_batch_artifact(tmp_path, monkeypatch, capsys):
+    """Exercise worker batch reporting when POST /git/refs succeeds but GET ref fails."""
+    from types import SimpleNamespace
+    from io import BytesIO
+    from urllib.error import HTTPError
+    from ai_commerce.remote import __main__ as cli
+    from ai_commerce.remote import transport
+    from test_ef01_repair import _action, _worker_fixture
+    from test_ef02_candidate_integrity import _publication_fixture, _PRIVATE
+
+    fixture = _publication_fixture(tmp_path, monkeypatch)
+    orig_open = transport.urlopen
+    def open_request(request, timeout):
+        if request.get_method() == "GET" and "/git/ref/" in request.full_url:
+            raise HTTPError(request.full_url, 404, "Not Found", {}, BytesIO(b'{"message":"' + _PRIVATE.encode() + b'"}'))
+        return orig_open(request, timeout)
+    monkeypatch.setattr(transport, "urlopen", open_request)
+
+    with pytest.raises(RemoteTransportError) as failure:
+        fixture.publish()
+
+    context = _worker_fixture(tmp_path, monkeypatch, real_git=False)
+    monkeypatch.setattr(context.worker.github, "candidate", lambda **_: (_ for _ in ()).throw(failure.value))
+    request = _action("a")
+    report = run_schedule({**context.batch, "actions": [request]}, context.worker.execute_action)
+    result = report["actions"][0]
+    assert result["status"] == "RESULT_PUBLICATION_FAILED" and report["succeeded"] == 0
+    assert result["error_code"] == "RemoteTransportError" and result["candidate_sha"] is result["candidate_ref"] is None
+    safe = result["diagnostic"]
+    assert "CANDIDATE_REF_CREATE" in safe and "UNKNOWN_EFFECT_RECONCILE" in safe
+    assert _PRIVATE not in safe
