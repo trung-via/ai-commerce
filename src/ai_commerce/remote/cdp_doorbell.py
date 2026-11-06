@@ -158,14 +158,21 @@ _PROVE = "(args) => { " + _GUARD + """
 
 
 
-def _doorbell_text(event_id: str, repository: str) -> str:
-    """Full expected content with real line breaks, never literal backslash-n."""
-    return "\n".join((
+def _doorbell_text(event_id: str, repository: str, *, send_only: bool = False) -> str:
+    """Bounded exact Wake text. Send-only requests NO downstream orchestration."""
+    lines = [
         "[AI COMMERCE LOCAL CHAT WAKE]",
         "event_id: " + event_id,
         "repository: " + repository,
-        "fresh_brain_sync_required: true",
-    ))
+    ]
+    if send_only:
+        lines.extend(("delivery_scope: send_only",
+                      "fresh_brain_sync_required: false",
+                      "automation_followup_requested: false"))
+    else:
+        # Historical text shape remains available for old read-only fixtures.
+        lines.append("fresh_brain_sync_required: true")
+    return "\n".join(lines)
 
 
 def _is_windows() -> bool:
@@ -200,7 +207,7 @@ class _PlaywrightInventory:
                 type(binding.chat_url) is not str or
                 _CHAT.fullmatch(binding.chat_url) is None or
                 not _endpoint(binding.cdp_endpoint) or
-                urlsplit(binding.cdp_endpoint).port != 9333):
+                urlsplit(binding.cdp_endpoint).port != 9444):
             return "PRELOAD_ROUTE_INVALID"
         if current_binding is not None and not callable(current_binding):
             return "PRELOAD_ROUTE_INVALID"
@@ -244,13 +251,15 @@ class LocalChromeDoorbellAdapter:
     def __init__(self, *, repository: str = "trung-via/ai-commerce",
                  allow_submit: bool = False,
                  inventory: BrowserInventory | None = None,
-                 preload_exact_chat: bool = False):
+                 preload_exact_chat: bool = False,
+                 send_only: bool = False):
         if not isinstance(repository, str) or not _REPOSITORY.fullmatch(repository):
             raise ValueError("DOORBELL_REPOSITORY_INVALID")
         self.repository = repository
         self.allow_submit = allow_submit is True
         self.inventory = inventory or _PlaywrightInventory()
         self.preload_exact_chat = preload_exact_chat is True
+        self.send_only = send_only is True
 
     def send_wake(self, *, binding: ResolvedBinding,
                   message: str, event_id: str) -> WakeReceipt:
@@ -278,7 +287,8 @@ class LocalChromeDoorbellAdapter:
                     else "PRELOAD_UNAVAILABLE")
             if code not in ("EXACT_CHAT_PRESENT", "EXACT_CHAT_OPENED"):
                 return receipt("UNSUPPORTED", code)
-        doorbell = _doorbell_text(event_id, self.repository)
+        doorbell = _doorbell_text(event_id, self.repository,
+                                  send_only=self.send_only)
         args = {**_ARGS, "url": binding.chat_url, "text": doorbell}
         clicked = False
         staging_started = False
