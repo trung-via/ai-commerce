@@ -5,6 +5,9 @@ import hashlib
 import json
 import os
 import time
+from dataclasses import dataclass
+from enum import Enum
+from http.client import HTTPException
 from pathlib import Path
 
 from ai_commerce.engineering.git_byte_consistency import assert_candidate_git_filter_consistency
@@ -18,8 +21,121 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
+# Exact identifiers only: never retain GitHub's message, resource, value, URL,
+# headers or response body. In particular, "custom" does not authorize copying
+# its accompanying free-text message. Oversized/malformed bodies yield no detail.
+_ERROR_BODY_LIMIT = 8192
+_GITHUB_CODES = frozenset({"missing", "missing_field", "invalid", "already_exists",
+                           "unprocessable", "custom"})
+_VALIDATION_FIELDS = frozenset({"sha", "ref", "tree", "base_tree", "parents", "message",
+                               "content", "encoding", "path", "mode", "type"})
+
+
+def _safe_identifiers(values, allowed: frozenset[str]) -> tuple[str, ...]:
+    return tuple(sorted({v for v in values if type(v) is str and v in allowed}))[:8]
+
+
+def _github_validation(error: HTTPError) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    try:
+        raw = error.read(_ERROR_BODY_LIMIT + 1)
+        if len(raw) > _ERROR_BODY_LIMIT:
+            return (), ()
+        body = json.loads(raw)
+        if not isinstance(body, dict):
+            return (), ()
+        errors = body.get("errors", [])
+        entries = [e for e in errors[:16] if isinstance(e, dict)] if isinstance(errors, list) else []
+        codes = _safe_identifiers([body.get("code"), *(e.get("code") for e in entries)], _GITHUB_CODES)
+        fields = _safe_identifiers([e.get("field") for e in entries], _VALIDATION_FIELDS)
+        return codes, fields
+    except (ValueError, TypeError, OSError, HTTPException, RecursionError):
+        return (), ()
+    finally:
+        try:
+            error.close()
+        except OSError:
+            pass
+
+
+class PublicationStage(str, Enum):
+    BASE_GET = "BASE_GET"
+    BLOB_CREATE = "BLOB_CREATE"
+    TREE_CREATE = "TREE_CREATE"
+    COMMIT_CREATE = "COMMIT_CREATE"
+    CANDIDATE_REF_CREATE = "CANDIDATE_REF_CREATE"
+
+
+class PublicationRoute(str, Enum):
+    GIT_COMMIT = "GIT_COMMIT"
+    GIT_BLOBS = "GIT_BLOBS"
+    GIT_TREES = "GIT_TREES"
+    GIT_COMMITS = "GIT_COMMITS"
+    GIT_REFS = "GIT_REFS"
+
+
+class PublicationDisposition(str, Enum):
+    TERMINAL_VALIDATION_OR_POLICY_REJECTION = "TERMINAL_VALIDATION_OR_POLICY_REJECTION"
+    HTTP_REJECTION = "HTTP_REJECTION"
+    UNKNOWN_EFFECT_RECONCILE = "UNKNOWN_EFFECT_RECONCILE"
+    READ_UNCONFIRMED = "READ_UNCONFIRMED"
+
+
+_PUBLICATION_STEPS = {
+    PublicationStage.BASE_GET: ("GET", PublicationRoute.GIT_COMMIT, "/git/commits/"),
+    PublicationStage.BLOB_CREATE: ("POST", PublicationRoute.GIT_BLOBS, "/git/blobs"),
+    PublicationStage.TREE_CREATE: ("POST", PublicationRoute.GIT_TREES, "/git/trees"),
+    PublicationStage.COMMIT_CREATE: ("POST", PublicationRoute.GIT_COMMITS, "/git/commits"),
+    PublicationStage.CANDIDATE_REF_CREATE: ("POST", PublicationRoute.GIT_REFS, "/git/refs"),
+}
+
+
+@dataclass(frozen=True)
+class PublicationDiagnostic:
+    """Closed, bounded public vocabulary; no request/response content or paths."""
+    stage: PublicationStage
+    http_status: int | None = None
+    github_codes: tuple[str, ...] = ()
+    validation_fields: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        if not isinstance(self.stage, PublicationStage):
+            raise ValueError("PUBLICATION_STAGE_INVALID")
+        if self.http_status is not None and (
+                type(self.http_status) is not int or not 100 <= self.http_status <= 599):
+            raise ValueError("PUBLICATION_HTTP_STATUS_INVALID")
+        object.__setattr__(self, "github_codes", _safe_identifiers(self.github_codes, _GITHUB_CODES))
+        object.__setattr__(self, "validation_fields", _safe_identifiers(self.validation_fields, _VALIDATION_FIELDS))
+
+    def payload(self) -> dict:
+        method, route, _ = _PUBLICATION_STEPS[self.stage]
+        if self.http_status == 422:
+            disposition = PublicationDisposition.TERMINAL_VALIDATION_OR_POLICY_REJECTION
+        elif self.http_status is not None and 400 <= self.http_status < 500:
+            disposition = PublicationDisposition.HTTP_REJECTION
+        elif method == "POST":
+            disposition = PublicationDisposition.UNKNOWN_EFFECT_RECONCILE
+        else:
+            disposition = PublicationDisposition.READ_UNCONFIRMED
+        return {"stage": self.stage.value, "method": method, "route": route.value,
+                "http_status": self.http_status, "github_codes": list(self.github_codes),
+                "validation_fields": list(self.validation_fields), "disposition": disposition.value,
+                "root_owner": "REMOTE_GITHUB_OWNER", "replay_authorized": False}
+
+
 class RemoteTransportError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, http_status: int | None = None,
+                 github_codes: tuple[str, ...] = (), validation_fields: tuple[str, ...] = (),
+                 publication: PublicationDiagnostic | None = None):
+        self.http_status = publication.http_status if publication is not None else http_status
+        self.github_codes = publication.github_codes if publication is not None else _safe_identifiers(github_codes, _GITHUB_CODES)
+        self.validation_fields = publication.validation_fields if publication is not None else _safe_identifiers(validation_fields, _VALIDATION_FIELDS)
+        self.publication = publication
+        # worker.py persists str(exc); only this sanitized vocabulary crosses
+        # that boundary. Keep the legacy prefix and exception type intact.
+        if publication is not None:
+            message = ("GITHUB_HTTP_" + str(publication.http_status) if publication.http_status is not None
+                       else "GITHUB_TRANSPORT_UNKNOWN") + ";publication=" + canonical(publication.payload())
+        super().__init__(message)
 
 
 class CandidateIntegrityError(RemoteTransportError):
@@ -46,9 +162,38 @@ class GitHubTransport:
             with urlopen(req, timeout=35) as stream:
                 return json.loads(stream.read().decode("utf-8")) if method != "DELETE" else {}
         except HTTPError as exc:
-            raise RemoteTransportError("GITHUB_HTTP_" + str(exc.code)) from exc
-        except (URLError, TimeoutError) as exc:
-            raise RemoteTransportError("GITHUB_TRANSPORT_UNKNOWN") from exc
+            status = exc.code if type(exc.code) is int and 100 <= exc.code <= 599 else None
+            codes, fields = _github_validation(exc)
+            raise RemoteTransportError("GITHUB_HTTP_" + str(status) if status is not None
+                                       else "GITHUB_TRANSPORT_UNKNOWN", http_status=status,
+                                       github_codes=codes, validation_fields=fields) from None
+        except (URLError, OSError, HTTPException, ValueError):
+            # Includes a lost/truncated or non-JSON reply after a successful write.
+            # Never chain the URL, raw reason or JSON decoder's response document.
+            raise RemoteTransportError("GITHUB_TRANSPORT_UNKNOWN") from None
+
+    def _publication_api(self, stage: PublicationStage, data: dict | None = None,
+                         *, source_sha: str = "") -> dict:
+        method, _, path = _PUBLICATION_STEPS[stage]
+        if stage is PublicationStage.BASE_GET:
+            path += source_sha
+        try:
+            result = self.api(method, path, data)
+            if not isinstance(result, dict):
+                raise TypeError("PUBLICATION_RESPONSE_INVALID")
+            # Missing object identity after a write is ambiguous, never success.
+            # Ref creation keeps its existing success contract; collisions and
+            # lost replies MUST NOT turn into inferred reuse or a second write.
+            if stage is not PublicationStage.CANDIDATE_REF_CREATE:
+                sha = result["tree"]["sha"] if stage is PublicationStage.BASE_GET else result["sha"]
+                if type(sha) is not str or len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
+                    raise ValueError("PUBLICATION_OBJECT_ID_INVALID")
+            return result
+        except RemoteTransportError as exc:
+            diagnostic = PublicationDiagnostic(stage, exc.http_status, exc.github_codes, exc.validation_fields)
+            raise RemoteTransportError("", publication=diagnostic) from None
+        except (KeyError, TypeError, ValueError, OSError, HTTPException):
+            raise RemoteTransportError("", publication=PublicationDiagnostic(stage)) from None
 
     def attempt_key(self, attempt_id: str) -> str:
         return hashlib.sha256((self.repo + ":" + attempt_id).encode("utf-8")).hexdigest()[:32]
@@ -224,22 +369,24 @@ class GitHubTransport:
                 snapshot[key] != proof[key] for key in (
                     "changed_files", "candidate_file_sha256", "tracked_diff_sha256", "scope_valid"))):
             raise CandidateIntegrityError("CANDIDATE_VERIFIED_TREE_CHANGED")
-        base = self.api("GET", "/git/commits/" + source_sha)
+        base = self._publication_api(PublicationStage.BASE_GET, source_sha=source_sha)
         tree_items = []
         for relative, content, mode in prepared:
             if content is None:
                 tree_items.append({"path": relative, "mode": "100644", "type": "blob", "sha": None})
                 continue
             encoded = base64.b64encode(content).decode("ascii")
-            blob = self.api("POST", "/git/blobs", {"content": encoded, "encoding": "base64"})
+            blob = self._publication_api(PublicationStage.BLOB_CREATE,
+                                         {"content": encoded, "encoding": "base64"})
             tree_items.append({"path": relative, "mode": mode, "type": "blob", "sha": blob["sha"]})
-        remote_tree = self.api("POST", "/git/trees",
-                               {"base_tree": base["tree"]["sha"], "tree": tree_items})
-        commit = self.api("POST", "/git/commits",
+        remote_tree = self._publication_api(PublicationStage.TREE_CREATE,
+                                            {"base_tree": base["tree"]["sha"], "tree": tree_items})
+        commit = self._publication_api(PublicationStage.COMMIT_CREATE,
                           {"message": "EF02 candidate attempt " + attempt_id + EVIDENCE_MARKER + canonical(proof),
                            "tree": remote_tree["sha"], "parents": [source_sha]})
         name = "ef02/candidate/" + self.attempt_key(attempt_id)
-        self._create_ref(name, commit["sha"])
+        self._publication_api(PublicationStage.CANDIDATE_REF_CREATE,
+                              {"ref": "refs/heads/" + name, "sha": commit["sha"]})
         return {"candidate_sha": commit["sha"], "candidate_ref": "refs/heads/" + name,
                 "status": proof["status"], "review_required": proof["review_required"],
                 "candidate_evidence": proof, "candidate_evidence_sha256": evidence_digest(proof)}

@@ -4,8 +4,12 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import traceback
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -384,3 +388,223 @@ def test_completion_cannot_turn_review_candidate_into_success(tmp_path, monkeypa
               "source_sha": result["source_sha"], "status": "COMPLETE", "actions": [result], "total": 1, "succeeded": 1}
     with pytest.raises(CompletionEventError, match="CANDIDATE_SCOPE_REVIEW_LAUNDERED"):
         build_completion_event(report, repository="owner/repo", run_id=42, run_attempt=1, issue_number=12)
+
+
+# #512's old api() discarded both phase and body. Its GITHUB_HTTP_422 receipt
+# therefore proves ROOT_CAUSE_UNPROVEN, not a policy/ref/tree/quota diagnosis.
+# No replay can reconstruct that lost observation. No-executor recovery would
+# need an independently granted, hash-pinned snapshot release; existing reuse
+# requires an already published candidate SHA/ref and cannot authorize it.
+_PUBLICATION_CASES = [
+    (transport.PublicationStage.BASE_GET, "GET", "/git/commits/" + "a" * 40, "GIT_COMMIT"),
+    (transport.PublicationStage.BLOB_CREATE, "POST", "/git/blobs", "GIT_BLOBS"),
+    (transport.PublicationStage.TREE_CREATE, "POST", "/git/trees", "GIT_TREES"),
+    (transport.PublicationStage.COMMIT_CREATE, "POST", "/git/commits", "GIT_COMMITS"),
+    (transport.PublicationStage.CANDIDATE_REF_CREATE, "POST", "/git/refs", "GIT_REFS"),
+]
+_PRIVATE = "private-token-and-owner-workspace-marker"
+
+
+def _publication_fixture(tmp_path, monkeypatch, *, fault=None, body=None, status=422, kind="http"):
+    repo = _candidate_repo(tmp_path, monkeypatch)
+    (repo / "ordinary.py").write_bytes(b"verified\n")
+    proof = candidate_evidence(repo, "publication-001", ["old.txt", "ordinary.py"])
+    github = transport.GitHubTransport("private-owner/private-repo", _PRIVATE)
+    calls, writes, reads = [], [], []
+
+    class ErrorBody(BytesIO):
+        def read(self, size=-1):
+            reads.append(size)
+            return super().read(size)
+
+    def open_request(request, timeout):
+        method = request.get_method()
+        path = urlsplit(request.full_url).path.removeprefix("/repos/private-owner/private-repo")
+        calls.append((method, path))
+        data = json.loads(request.data) if request.data else None
+        if method == "POST":
+            # Simulate an external effect before its reply is lost. This record
+            # must never itself authorize a retry or prove ref publication.
+            writes.append((path, data))
+        if (method, path) == fault:
+            if kind == "timeout":
+                raise TimeoutError(_PRIVATE)
+            if kind == "url-timeout":
+                raise URLError(TimeoutError(_PRIVATE))
+            if kind == "reset":
+                raise ConnectionResetError(_PRIVATE)
+            if kind == "truncated":
+                from http.client import IncompleteRead
+                raise IncompleteRead(_PRIVATE.encode(), 200)
+            if kind == "json":
+                return BytesIO(_PRIVATE.encode())
+            if kind == "shape":
+                return BytesIO(json.dumps([] if path == "/git/refs" else
+                    {"sha": _PRIVATE, "tree": {"sha": _PRIVATE}}).encode())
+            raise HTTPError(request.full_url + "?token=" + _PRIVATE, status,
+                            _PRIVATE, {"X-Private": _PRIVATE}, ErrorBody(body or b"{}"))
+        if method == "GET":
+            response = {"tree": {"sha": "a" * 40}}
+        elif path == "/git/commits":
+            response = {"sha": "d" * 40}
+        elif path == "/git/refs":
+            response = {"ref": data["ref"], "object": {"sha": data["sha"]}}
+        else:
+            response = {"sha": ("b" if path == "/git/blobs" else "c") * 40}
+        return BytesIO(json.dumps(response).encode())
+
+    monkeypatch.setattr(transport, "urlopen", open_request)
+    def publish():
+        return github.candidate(source_sha=proof["effective_source_sha"], attempt_id=proof["attempt_id"],
+                                workspace=repo, paths=proof["changed_files"],
+                                expected_hashes=proof["candidate_file_sha256"], evidence=proof)
+    return SimpleNamespace(publish=publish, github=github, calls=calls, writes=writes,
+                           reads=reads, proof=proof)
+
+
+@pytest.mark.parametrize("stage,method,path,route", _PUBLICATION_CASES)
+def test_candidate_http_422_retains_only_closed_stage_and_safe_identifiers(
+        tmp_path, monkeypatch, stage, method, path, route):
+    body = json.dumps({"message": _PRIVATE, "code": "unprocessable", "token": _PRIVATE,
+        "documentation_url": "https://" + _PRIVATE, "errors": [
+            {"code": "invalid", "field": "sha", "value": _PRIVATE, "resource": _PRIVATE},
+            {"code": _PRIVATE, "field": "C:/" + _PRIVATE},
+            {"code": "custom", "field": "ref", "message": _PRIVATE}]}).encode()
+    fixture = _publication_fixture(tmp_path, monkeypatch, fault=(method, path), body=body)
+    with pytest.raises(transport.RemoteTransportError) as error:
+        fixture.publish()
+    exc = error.value
+    payload = exc.publication.payload()
+    assert payload == {"stage": stage.value, "method": method, "route": route, "http_status": 422,
+        "github_codes": ["custom", "invalid", "unprocessable"], "validation_fields": ["ref", "sha"],
+        "disposition": "TERMINAL_VALIDATION_OR_POLICY_REJECTION",
+        "root_owner": "REMOTE_GITHUB_OWNER", "replay_authorized": False}
+    assert str(exc).startswith("GITHUB_HTTP_422;publication=")
+    assert len(str(exc)) < 1024 and _PRIVATE not in str(exc) and "private-owner" not in str(exc)
+    assert str(tmp_path) not in str(exc) and "ordinary.py" not in str(exc)
+    assert _PRIVATE not in "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    assert exc.__cause__ is None and exc.__suppress_context__
+    assert fixture.calls == [(m, p) for _, m, p, _ in _PUBLICATION_CASES[:len(fixture.calls)]]
+    assert fixture.calls[-1] == (method, path) and fixture.reads == [8193]
+
+
+@pytest.mark.parametrize("body", [
+    b"not-json", b"\xff", b"[]", b"null", b'{"errors":"private"}',
+    b'{"errors":["private",null,42,{"code":{},"field":[]}]}',
+    b'{"code":"INVALID","errors":[{"code":"invalid-secret","field":"refs/heads/private"}]}',
+    b'{"message":"' + b"x" * 9000 + b'","errors":[{"code":"invalid","field":"sha"}]}',
+])
+def test_candidate_validation_body_is_bounded_and_fail_closed(tmp_path, monkeypatch, body):
+    fixture = _publication_fixture(tmp_path, monkeypatch, fault=("POST", "/git/refs"), body=body)
+    with pytest.raises(transport.RemoteTransportError) as error:
+        fixture.publish()
+    payload = error.value.publication.payload()
+    assert payload["http_status"] == 422 and payload["github_codes"] == payload["validation_fields"] == []
+    assert payload["stage"] == "CANDIDATE_REF_CREATE" and fixture.reads == [8193]
+    assert fixture.calls.count(("POST", "/git/refs")) == 1
+
+
+@pytest.mark.parametrize("stage,method,path,route", _PUBLICATION_CASES)
+@pytest.mark.parametrize("kind", ["timeout", "url-timeout", "reset", "truncated", "json", "shape"])
+def test_candidate_ambiguous_reply_stops_at_exact_stage_without_second_write(
+        tmp_path, monkeypatch, stage, method, path, route, kind):
+    fixture = _publication_fixture(tmp_path, monkeypatch, fault=(method, path), kind=kind)
+    with pytest.raises(transport.RemoteTransportError) as error:
+        fixture.publish()
+    payload = error.value.publication.payload()
+    assert payload["stage"] == stage.value and payload["route"] == route
+    assert payload["http_status"] is None and payload["replay_authorized"] is False
+    assert payload["disposition"] == ("READ_UNCONFIRMED" if method == "GET" else "UNKNOWN_EFFECT_RECONCILE")
+    assert fixture.calls == [(m, p) for _, m, p, _ in _PUBLICATION_CASES[:len(fixture.calls)]]
+    assert fixture.calls[-1] == (method, path)
+    assert len(fixture.writes) == len(fixture.calls) - 1
+    assert _PRIVATE not in str(error.value)
+
+
+def test_candidate_ref_collision_never_infers_matching_commit_or_reuses_ref(tmp_path, monkeypatch):
+    fixture = _publication_fixture(tmp_path, monkeypatch, fault=("POST", "/git/refs"),
+        body=b'{"message":"Reference already exists","errors":[{"code":"already_exists","field":"ref"}]}')
+    with pytest.raises(transport.RemoteTransportError) as error:
+        fixture.publish()
+    assert error.value.publication.payload()["github_codes"] == ["already_exists"]
+    assert error.value.publication.payload()["stage"] == "CANDIDATE_REF_CREATE"
+    assert len(fixture.calls) == 5  # No update, fallback, read-based guess or second commit/ref.
+
+
+def test_candidate_success_preserves_payload_evidence_and_create_only_protocol(tmp_path, monkeypatch):
+    fixture = _publication_fixture(tmp_path, monkeypatch)
+    result = fixture.publish()
+    assert result["candidate_sha"] == "d" * 40 and result["candidate_evidence"] == fixture.proof
+    assert result["status"] == "CANDIDATE_READY" and result["review_required"] is False
+    assert result["candidate_evidence_sha256"] == evidence_digest(fixture.proof)
+    assert fixture.calls == [(m, p) for _, m, p, _ in _PUBLICATION_CASES]
+    assert fixture.writes[0][1] == {"content": "dmVyaWZpZWQK", "encoding": "base64"}
+    assert fixture.writes[1][1]["base_tree"] == "a" * 40
+    assert commit_evidence(fixture.writes[2][1]["message"]) == fixture.proof
+    assert fixture.writes[2][1]["parents"] == ["a" * 40]
+    assert fixture.writes[-1] == ("/git/refs", {"ref": result["candidate_ref"], "sha": "d" * 40})
+
+
+@pytest.mark.parametrize("status,disposition", [(403, "HTTP_REJECTION"), (500, "UNKNOWN_EFFECT_RECONCILE")])
+def test_candidate_http_rejection_and_server_ambiguity_have_no_write_retry(tmp_path, monkeypatch, status, disposition):
+    fixture = _publication_fixture(tmp_path, monkeypatch, fault=("POST", "/git/refs"), status=status)
+    with pytest.raises(transport.RemoteTransportError) as error:
+        fixture.publish()
+    assert error.value.publication.payload()["disposition"] == disposition
+    assert len(fixture.calls) == 5
+
+
+def test_publication_vocabulary_rejects_arbitrary_stage_status_and_details():
+    with pytest.raises(ValueError, match="PUBLICATION_STAGE_INVALID"):
+        transport.PublicationDiagnostic(_PRIVATE)
+    for status in (True, "422", 999, -1):
+        with pytest.raises(ValueError, match="PUBLICATION_HTTP_STATUS_INVALID"):
+            transport.PublicationDiagnostic(transport.PublicationStage.BLOB_CREATE, status)
+    diagnostic = transport.PublicationDiagnostic(transport.PublicationStage.TREE_CREATE, 422,
+        ("invalid", _PRIVATE) * 100, ("sha", _PRIVATE) * 100)
+    assert diagnostic.payload()["github_codes"] == ["invalid"]
+    assert diagnostic.payload()["validation_fields"] == ["sha"]
+    assert set(transport.PublicationRoute) == {route for _, route, _ in transport._PUBLICATION_STEPS.values()}
+
+
+@pytest.mark.parametrize("state", ["missing-ref", "different-sha", "altered-evidence", "matching"])
+def test_reuse_requires_remote_ref_exact_commit_and_evidence_reads(tmp_path, monkeypatch, state):
+    fixture = _publication_fixture(tmp_path, monkeypatch)
+    github, proof = fixture.github, fixture.proof
+    attempt = proof["attempt_id"]
+    ref = "refs/heads/ef02/candidate/" + github.attempt_key(attempt)
+    approved = {"attempt_id": attempt, "candidate_sha": "d" * 40, "candidate_ref": ref,
+                "parent_sha": "a" * 40, "tree_sha": "c" * 40, "source_sha": "a" * 40,
+                "candidate_evidence_sha256": evidence_digest(proof)}
+    reads = []
+    def open_request(request, timeout):
+        assert request.get_method() == "GET"  # Reconciliation cannot create anything.
+        path = urlsplit(request.full_url).path.removeprefix("/repos/private-owner/private-repo")
+        reads.append(path)
+        if "/git/ref/heads/ef02/candidate/" in path:
+            if state == "missing-ref":
+                raise HTTPError(request.full_url, 404, _PRIVATE, {}, BytesIO(b'{"message":"private"}'))
+            response = {"object": {"sha": ("e" if state == "different-sha" else "d") * 40}}
+        elif path == "/git/commits/" + "d" * 40:
+            bound = {**proof, "fingerprint": "0" * 64} if state == "altered-evidence" else proof
+            response = {"message": "EF02 candidate attempt " + attempt + EVIDENCE_MARKER + canonical(bound),
+                        "tree": {"sha": "c" * 40}, "parents": [{"sha": "a" * 40}]}
+        elif "/git/ref/heads/ef02/claims/" in path:
+            response = {"object": {"sha": "b" * 40}}
+        elif path == "/git/commits/" + "b" * 40:
+            response = {"message": "EF02 CLAIM\n\nfingerprint=" + proof["fingerprint"] + "\nattempt_id=" + attempt,
+                        "parents": [{"sha": "a" * 40}]}
+        else:
+            raise AssertionError("unexpected reconciliation read")
+        return BytesIO(json.dumps(response).encode())
+    monkeypatch.setattr(transport, "urlopen", open_request)
+    if state == "matching":
+        assert github.verify_reused_candidate(approved) is None and len(reads) == 4
+    else:
+        expected = {"missing-ref": "GITHUB_HTTP_404", "different-sha": "REUSE_REF_SHA_CHANGED",
+                    "altered-evidence": "REUSE_COMMIT_MISMATCH"}[state]
+        with pytest.raises(transport.RemoteTransportError, match=expected) as error:
+            github.verify_reused_candidate(approved)
+        assert _PRIVATE not in str(error.value)
+        assert len(reads) == (2 if state == "altered-evidence" else 1)
+    assert not fixture.writes
