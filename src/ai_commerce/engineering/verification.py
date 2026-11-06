@@ -2,18 +2,22 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from contextlib import contextmanager
 from pathlib import Path
 import os
 import re
 import subprocess
 import time
+import tempfile
 from typing import Callable, Mapping
 
 from .minimum_test import Evidence, apply_evidence, canonical, file_hashes, select_plan, pytest_counts, select_provisional_tests
 from .pytest_profile import require_managed_parallelism, registered_workers
+from .profile import diagnose_failure
 
 
 _OBSERVER_PLUGIN = "ai_commerce.engineering.pytest_profile"
+_RUNTIME_PLUGIN = "ai_commerce.engineering.profile"
 
 
 def pytest_observation_env() -> dict[str, str]:
@@ -24,6 +28,45 @@ def pytest_observation_env() -> dict[str, str]:
         plugins.append(_OBSERVER_PLUGIN)
     env["PYTEST_PLUGINS"] = ",".join(plugins)
     return env
+
+
+@contextmanager
+def pytest_execution_env(repo: Path):
+    """Own disposable scratch outside the checkout, including nested children.
+
+    Do not clear Git guards, shell/system variables, plugin policy or addopts.
+    A poisoned runtime temp location is an environment HOLD, never cleanup of
+    arbitrary worktree content. TemporaryDirectory removes only our own tree.
+    """
+    root = repo.resolve()
+    temporary_root = Path(tempfile.gettempdir()).resolve()
+    if temporary_root == root or root in temporary_root.parents:
+        raise ValueError("PYTEST_SCRATCH_INSIDE_WORKSPACE")
+    # Windows Git may stat <cwd>/<40-char-sha>:<manifest> while resolving
+    # revisions. Keep owned names short enough for that ambiguity check too.
+    with tempfile.TemporaryDirectory(prefix="p", dir=temporary_root,
+                                     ignore_cleanup_errors=True) as scratch:
+        env = pytest_observation_env()
+        plugins = env["PYTEST_PLUGINS"].split(",")
+        if _RUNTIME_PLUGIN not in plugins:
+            plugins.append(_RUNTIME_PLUGIN)
+        env["PYTEST_PLUGINS"] = ",".join(plugins)
+        env.update(TEMP=scratch, TMP=scratch, TMPDIR=scratch,
+                   AI_COMMERCE_PYTEST_SCRATCH=scratch,
+                   AI_COMMERCE_PYTEST_REPO=str(root))
+        yield env
+
+
+def run_pytest(argv, *, repo: Path, timeout: float, save_junit=None):
+    """Synchronous exit and optional JUnit artifact on the unchanged command."""
+    with pytest_execution_env(repo) as env:
+        result = subprocess.run(argv, cwd=repo, capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", timeout=timeout,
+                                check=False, env=env)
+        junit = Path(env["AI_COMMERCE_PYTEST_SCRATCH"]) / "junit.xml"
+        if save_junit is not None and junit.is_file():
+            save_junit(junit.read_bytes())
+        return result
 
 
 def observed_xdist_workers(out: bytes) -> int | None:
@@ -38,6 +81,13 @@ def observed_console_workers(out: bytes) -> int | None:
     return int(match[1] or match[2]) if match else None
 
 
+def git_hook_environment_failure(stdout: bytes, stderr: bytes) -> bool:
+    """Native Windows/Git barrier evidence; never authorize hook overrides."""
+    text = (stdout + b"\n" + stderr).decode("utf-8", "replace").lower()
+    return (("ntcreatedirectoryobject" in text and "0xc0000022" in text)
+            or "update aborted by the reference-transaction hook" in text)
+
+
 def registered_binding_problems(plan: dict, profiles: Mapping[str, list[str]]) -> list[str]:
     """Early, bounded form of EF02's independent registered-binding check.
 
@@ -45,7 +95,7 @@ def registered_binding_problems(plan: dict, profiles: Mapping[str, list[str]]) -
     trusted publisher must reject. This is a *negative* preflight, not a
     replacement for post-execution hash/manifest/evidence validation.
     """
-    problems = []
+    problems = [] if plan.get("groups") else ["MT01_PLAN_EMPTY"]
     for index, entry in enumerate(plan.get("groups", ())):
         binding = entry.get("binding", {})
         name = binding.get("registered_profile")
@@ -78,27 +128,38 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
                        registered_profiles=registered_profiles,
                        human_full_suite_authorized=human_full_suite_authorized,
                        allowed_paths=allowed_paths)
-    if registered_only and registered_profiles is not None:
-        binding_errors = registered_binding_problems(plan, registered_profiles)
-        if binding_errors:
-            plan["reason_codes"] = list(plan.get("reason_codes", ())) + binding_errors
-            # An untrusted/ambiguous profile is a hard HOLD before running
-            # pytest; it cannot become repair-eligible test failure.
-            for entry in plan["groups"]:
-                entry.update(state="UNPROVEN", execute=False)
-                entry["explanation"] = list(entry.get("explanation", ())) + binding_errors
+    binding_errors = (registered_binding_problems(plan, registered_profiles)
+                      if registered_only and registered_profiles is not None else [])
     if command_transform:
         for entry in plan["groups"]:
             argv, decision = command_transform(entry["binding"]["argv"], entry["group"])
             entry["binding"]["argv"] = argv
             entry["pytest_profile"] = decision
             entry["binding"]["pytest_profile"] = {k: decision[k] for k in ("profile", "workers", "host_slots")}
+    # Check the command after transformation too. In particular, provisional
+    # diagnostics must not execute after a failed registered binding preflight.
+    if registered_only and registered_profiles is not None:
+        binding_errors += registered_binding_problems(plan, registered_profiles)
+    if binding_errors:
+        binding_errors = sorted(set(binding_errors))
+        plan["reason_codes"] = list(plan.get("reason_codes", ())) + binding_errors
+        for entry in plan["groups"]:
+            entry.update(state="UNPROVEN", execute=False)
+            entry["explanation"] = list(entry.get("explanation", ())) + binding_errors
+    preflight_blocked = bool(binding_errors) or any(not entry["execute"] and entry["state"] != "REUSE"
+                                                  for entry in plan["groups"])
+    if preflight_blocked:
+        for entry in plan["groups"]:
+            entry.update(state="UNPROVEN", execute=False)
+    plan["preflight"] = {"state": "OWNER_ESCALATION" if preflight_blocked else "READY",
+                         "source_sha": base_sha, "proves_pass": False,
+                         "reason_codes": list(plan.get("reason_codes", ()))[:32]}
     # A provisional test family is only a diagnostic preflight. An actual
     # candidate PASS still requires the final, exact registered full profile.
     provisional = (select_provisional_tests(
         base_files=base_files, candidate_files=before,
         changed_paths=changed_paths, plan=plan, fallback_argv=fallback_argv)
-        if registered_only and not human_full_suite_authorized else None)
+        if registered_only and not human_full_suite_authorized and not preflight_blocked else None)
     if provisional is not None:
         plan["provisional_mapping"] = provisional
     apply_evidence(plan, prior, output_dir)
@@ -113,16 +174,26 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
         on_plan(plan)  # Keep failure diagnostics visible in EF01 and the action result.
     save("mt01_plan", "mt01.plan.json", (canonical(plan) + "\n").encode())
     stdout, stderr = [], []
-    code = 0
+    code = 5 if preflight_blocked else 0
     def finish():
         for group in plan["groups"]:
             if group["state"] not in ("REUSE", "UNPROVEN") and "result" not in group:
                 group.update(state="UNPROVEN", execute=False, result="UNPROVEN",
                              reason="NOT_EXECUTED_AFTER_UNPROVEN_GROUP")
+            # None means the number of unfinished/unobserved tests is unknown;
+            # a missing receipt must never be projected as zero unknown tests.
+            group["tests_executed"]["unknown"] = 0 if group.get("result") == "PASS" else None
+        if provisional is not None and "tests_executed" in provisional:
+            provisional["tests_executed"]["unknown"] = (
+                0 if provisional.get("result") == "PASS_PREFLIGHT_ONLY" else None)
         plan["finished_at"] = datetime.now(timezone.utc).isoformat()
         plan["wall_seconds"] = time.monotonic() - started_plan
         plan["narrow_execution_observed"] = not plan["fallback"] and any(
             g.get("actual_exit_code") == 0 and g.get("result") == "PASS" for g in plan["groups"])
+        reason = next((g.get("reason") for g in plan["groups"] if g.get("result") == "UNPROVEN"), None)
+        diagnosis = diagnose_failure({"status": "UNPROVEN", "error_code": (
+            "MT01_COVERAGE_UNPROVEN" if preflight_blocked else reason)})
+        plan["failure_diagnosis"] = diagnosis.payload() if diagnosis else None
         save("mt01_results", "mt01.results.json", (canonical(plan) + "\n").encode())
 
     def unproven(entry, reason, started):
@@ -156,10 +227,8 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
             remaining = verify_deadline - started
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(argv, timeout_seconds)
-            response = subprocess.run(argv, cwd=repo, capture_output=True,
-                                      text=True, encoding="utf-8", errors="replace",
-                                      timeout=remaining, check=False,
-                                      env=pytest_observation_env())
+            response = run_pytest(argv, repo=repo, timeout=remaining,
+                save_junit=lambda data: save("mt01_provisional_junit", "mt01.provisional.junit.xml", data))
             out, err = response.stdout.encode(), response.stderr.encode()
         except subprocess.TimeoutExpired as exc:
             out = exc.stdout if isinstance(exc.stdout, bytes) else (exc.stdout or "").encode()
@@ -191,7 +260,7 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
             finish()
             raise RuntimeError("MT01_SOURCE_DRIFT_DURING_VERIFICATION")
         diag = (out + b"\n" + err).decode("utf-8", "replace").lower()
-        if workers not in (None, 12) or any(s in diag for s in (
+        if git_hook_environment_failure(out, err) or workers not in (None, 12) or any(s in diag for s in (
                 "internalerror", "worker crashed", "workers crashed",
                 "permission denied", "memoryerror", "can't start new thread",
                 "failed to start worker", "error while receiving from worker")):
@@ -227,9 +296,8 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
             if remaining <= 0:
                 entry["actual_argv"] = None
                 raise subprocess.TimeoutExpired(argv, timeout_seconds)
-            result = subprocess.run(argv, cwd=repo, capture_output=True, text=True,
-                                    encoding="utf-8", errors="replace", timeout=remaining,
-                                    check=False, env=pytest_observation_env())
+            result = run_pytest(argv, repo=repo, timeout=remaining,
+                save_junit=lambda data: save(f"mt01_{index}_junit", f"mt01.{index}.junit.xml", data))
             out, err = result.stdout.encode(), result.stderr.encode()
         except subprocess.TimeoutExpired as exc:
             out = exc.stdout if isinstance(exc.stdout, bytes) else (exc.stdout or "").encode()
@@ -275,7 +343,8 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
         worker_mismatch = (entry["workers_requested"] == 12 and (
             entry["workers_actual"] not in (None, 12) or
             (result.returncode == 0 and entry["workers_actual"] is None)))
-        infrastructure = worker_mismatch or any(s in diagnostics for s in (
+        git_hook_blocked = git_hook_environment_failure(out, err)
+        infrastructure = git_hook_blocked or worker_mismatch or any(s in diagnostics for s in (
             "permission denied", "permissionerror", "no module named pytest", "internalerror",
             "worker crashed", "workers crashed", "winerror", "subprocess.timeoutexpired",
             "memoryerror", "cannot allocate memory", "can't start new thread",
@@ -294,6 +363,7 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
             entry["result"] = "FAIL" if determinate else "UNPROVEN"
             if not determinate:
                 entry.update(state="UNPROVEN", reason="PYTEST_WORKER_COUNT_MISMATCH" if worker_mismatch
+                             else "VERIFY_GIT_HOOK_ENVIRONMENT_ERROR" if git_hook_blocked
                              else "VERIFY_INFRASTRUCTURE_ERROR" if infrastructure
                              else "NO_SUCCESSFUL_NONEMPTY_PYTEST_RESULT")
             # Only a known code failure permits collecting other groups, then repair.

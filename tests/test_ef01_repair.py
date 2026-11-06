@@ -24,6 +24,38 @@ ROOT = Path(__file__).resolve().parents[1]
 VERIFY = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "test_scope.py"]
 
 
+@pytest.mark.parametrize("native,kind,owner", [
+    ({"status": "INVALID_REQUEST", "error_code": "ISSUER_NOT_AUTHORIZED_FOR_ACTOR"}, "INTAKE_AUTH", "INTAKE_OWNER"),
+    ({"status": "QUOTA_EXHAUSTED", "error_code": "QUOTA_EXHAUSTED"}, "PROVIDER_QUOTA", "PROVIDER_OWNER"),
+    ({"status": "EXECUTION_UNKNOWN", "error_code": "EXECUTOR_OUTCOME_UNCONFIRMED"}, "PROVIDER_TRANSPORT", "PROVIDER_OWNER"),
+    ({"status": "UNPROVEN", "error_code": "MT01_COVERAGE_UNPROVEN"}, "MT01_SELECTOR", "MT01_OWNER"),
+    ({"status": "UNPROVEN", "error_code": "MT01_COVERAGE_UNPROVEN", "scope_valid": False}, "SOURCE_GIT", "SOURCE_OWNER"),
+    ({"status": "SOURCE_DRIFT", "error_code": "WORKTREE_CHANGED_BETWEEN_INVOCATIONS"}, "SOURCE_GIT", "SOURCE_OWNER"),
+    ({"status": "CANDIDATE_INTEGRITY_FAILED", "error_code": "EF01_VERIFIED_TREE_CHANGED"}, "TRUSTED_PROOF", "TRUSTED_VERIFIER_OWNER"),
+    ({"status": "EXECUTION_UNKNOWN", "error_code": "GITHUB_TRANSPORT_UNKNOWN"}, "REMOTE_GITHUB", "REMOTE_GITHUB_OWNER"),
+    ({"status": "VERIFICATION_FAILED", "error_code": "VERIFY_PERMISSION_DENIED"}, "TEST_ENVIRONMENT", "RUNNER_ENVIRONMENT_OWNER"),
+    ({"status": "VERIFICATION_FAILED", "error_code": "TARGETED_VERIFY_NONZERO_OR_UNAVAILABLE"}, "UNKNOWN", "ENGINEERING_OWNER"),
+])
+def test_failure_intelligence_uses_native_boundaries_and_scope_precedence(native, kind, owner):
+    from ai_commerce.engineering.profile import diagnose_failure
+    diagnosis = diagnose_failure(native).payload()
+    assert diagnosis["failure_class"] == kind and diagnosis["root_owner"] == owner
+    assert diagnosis["disposition"] == "OWNER_ESCALATION"
+    assert diagnosis["proves_pass"] is False and diagnosis["replay_authorized"] is False
+
+
+def test_failure_intelligence_requires_actual_repair_evidence_and_bounds_private_input():
+    from ai_commerce.engineering.profile import diagnose_failure
+    native = {"error_code": "TARGETED_VERIFY_NONZERO_OR_UNAVAILABLE", "repair_eligible": True,
+              "verify_completed": True, "verify_exit_code": 1, "provider_return_determinate": True,
+              "diagnostic": "token=private-secret; claimed PASS"}
+    assert diagnose_failure(native).payload()["disposition"] == "SCOPED_REPAIR"
+    for field in ("repair_eligible", "verify_completed", "provider_return_determinate"):
+        assert diagnose_failure({**native, field: False}).payload()["disposition"] == "OWNER_ESCALATION"
+    payload = diagnose_failure({**native, "error_code": "token=private-secret"}).payload()
+    assert "private-secret" not in json.dumps(payload) and payload["evidence_gaps"]
+
+
 def _files(repo):
     return {p.relative_to(repo).as_posix(): p.read_bytes() for p in repo.rglob("*")
             if p.is_file() and ".git" not in p.relative_to(repo).parts
@@ -148,6 +180,9 @@ def test_fail_repair_pass_same_profile_worktree_and_immutable_evidence(fixture, 
     previous = feedback["previous_invocations"][0]
     assert previous["verify_exit_code"] == 1 and "test_value" in previous["verify_failure_details"]
     assert previous["candidate_file_sha256"]["impl.py"] != result["candidate_file_sha256"]["impl.py"]
+    assert feedback["hypothesis_trail"][0]["diagnosis"]["failure_class"] == "CODE_ASSERTION"
+    assert result["hypothesis_trail"][0]["next_experiment"] == "TARGETED_PYTEST_ON_CHANGED_SOURCE"
+    assert len(result["hypothesis_trail"]) <= 4
     assert feedback["allowed_prefixes"] == fixture.state["scope"]
     assert "fresh CLI invocation" in calls[1]["prompt"]
     assert previous["evidence_files"]["verify_stderr"] in calls[1]["prompt"]
@@ -534,6 +569,7 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
         monkeypatch.setattr(remote, "checkout_diagnostics", lambda *_a, **_kw: {
             "clean": True, "dirty_entries": [], "dirty_entry_count": 0,
             "index_refresh_exit": None, "metadata_only_reconciled": False,
+            "git_head_after": BASE,
         })
     lock = threading.Lock()
     calls, children, claims, candidates, resolved = [], [], [], [], {}
@@ -779,6 +815,10 @@ def test_ef02_rechecks_final_tree_before_any_candidate_write(tmp_path, monkeypat
 
     def snapshot(*args):
         tree, patch = observed(*args)
+        # Inject only after execution: the earlier source preflight must stay
+        # clean so this test still exercises independent final-tree rejection.
+        if not context.calls:
+            return tree, patch
         key, value = {
             "head": ("git_head_after", "b" * 40),
             "files": ("changed_files", ["impl.py"]),
@@ -794,6 +834,26 @@ def test_ef02_rechecks_final_tree_before_any_candidate_write(tmp_path, monkeypat
     assert result["status"] == "CANDIDATE_INTEGRITY_FAILED"
     assert result["error_code"] == "EF01_VERIFIED_TREE_CHANGED"
     assert len(context.calls) == 2 and not context.candidates and len(context.claims) == 1
+
+
+@pytest.mark.parametrize("field,value,code", [
+    ("git_head_after", "b" * 40, "SOURCE_PREFLIGHT_MISMATCH"),
+    ("clean", False, "SOURCE_CHECKOUT_INCONSISTENT")])
+def test_ef02_source_preflight_mismatch_stops_before_provider(tmp_path, monkeypatch, field, value, code):
+    context = _worker_fixture(tmp_path, monkeypatch, real_git=False)
+    observed = remote.checkout_diagnostics
+    def mismatched(*args, **kwargs):
+        details = observed(*args, **kwargs)
+        details[field] = value
+        return details
+    monkeypatch.setattr(remote, "checkout_diagnostics", mismatched)
+    result = context.worker.execute_action(_action("a"))
+    assert result["status"] == "SOURCE_WORKTREE_FAILED"
+    assert result["error_code"] == code
+    assert result["failure_diagnosis"]["disposition"] == "OWNER_ESCALATION"
+    if field == "git_head_after":
+        assert result["source_preflight"]["proves_pass"] is False
+    assert not context.calls and not context.candidates
 
 def test_large_diagnostics_use_artifact_references_in_bounded_repair_prompt(fixture):
     actual_run = subprocess.run
@@ -848,6 +908,9 @@ def test_ambiguous_zero_exit_cannot_authorize_repair(fixture, executor, payload,
     "git returned -1073741502",
     "OSError: [WinError 1920] The file cannot be accessed by the system",
     "E   subprocess.TimeoutExpired: Command ['tool'] timed out after 1 seconds",
+    "E   OSError: [WinError 1314] A required privilege is not held by the client",
+    "E   PermissionError: [WinError 5] Access is denied",
+    "fatal: in 'preparing' phase, update aborted by the reference-transaction hook",
 ])
 def test_nested_host_failure_is_not_a_code_repair_trigger(fixture, signature):
     actual_run = subprocess.run

@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from .candidate_policy import candidate_accepted
+from ai_commerce.engineering.profile import diagnose_failure
 
 def run_schedule(batch: dict, work, *, max_workers: int | None = None) -> dict:
     actions = {a["action_id"]: a for a in batch["actions"]}
@@ -26,6 +27,8 @@ def run_schedule(batch: dict, work, *, max_workers: int | None = None) -> dict:
                       "error_code": type(exc).__name__, "diagnostic": str(exc)}
         result.setdefault("action_id", action["action_id"])
         result.setdefault("attempt_id", action["attempt_id"])
+        diagnosis = diagnose_failure(result)
+        result["failure_diagnosis"] = diagnosis.payload() if diagnosis else None
         result["scheduler_started_at"] = start
         result["scheduler_finished_at"] = time.time()
         return result
@@ -41,6 +44,7 @@ def run_schedule(batch: dict, work, *, max_workers: int | None = None) -> dict:
                     results[aid] = {"action_id": aid, "attempt_id": actions[aid]["attempt_id"],
                                     "status": "BLOCKED_DEPENDENCY",
                                     "error_code": "PREREQUISITE_NOT_SUCCESSFUL"}
+                    results[aid]["failure_diagnosis"] = diagnose_failure(results[aid]).payload()
                     progress = True
             ready = sorted(
                 (actions[aid] for aid in pending if all(

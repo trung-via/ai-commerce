@@ -7,7 +7,7 @@ import re
 import subprocess
 from pathlib import Path, PurePosixPath
 from jsonschema import Draft202012Validator
-from ai_commerce.engineering.profile import ExecutorSelection
+from ai_commerce.engineering.profile import ExecutorSelection, diagnose_failure
 from ai_commerce.engineering.runner import validate_max_repair_rounds, DEFAULT_MAX_REPAIR_ROUNDS
 from ai_commerce.engineering.git import git_argv
 from ai_commerce.engineering.pytest_profile import registered_workers
@@ -17,7 +17,9 @@ IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 HEX_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 class RemoteRequestError(ValueError):
-    pass
+    def __init__(self, code):
+        super().__init__(code)
+        self.failure_diagnosis = diagnose_failure({"status": "INVALID_REQUEST", "error_code": code}).payload()
 
 def canonical(data: dict) -> bytes:
     return json.dumps(data, ensure_ascii=False, sort_keys=True,

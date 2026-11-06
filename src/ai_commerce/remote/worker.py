@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -21,9 +22,22 @@ from ai_commerce.engineering.runner import (
     validate_max_repair_rounds, _snapshot, _provider_problem, _outside_scope,
 )
 from ai_commerce.engineering.git import git_argv, resolve_git_executable
-from ai_commerce.engineering.git_byte_consistency import (GitByteConsistencyError, checkout_diagnostics)
+from ai_commerce.engineering.git_byte_consistency import (GitByteConsistencyError, checkout_diagnostics as _checkout_diagnostics)
 from ai_commerce.engineering.minimum_test import Evidence, file_hashes
+from ai_commerce.engineering.profile import diagnose_failure
 from ai_commerce.engineering.source_safety import checked_path, protected_change, ordinary_scope_drift
+
+
+def checkout_diagnostics(repo: Path, *, refresh_index=False, git_executable=None) -> dict:
+    """Keep source identity inside the existing native checkout boundary."""
+    details = _checkout_diagnostics(repo, refresh_index=refresh_index, git_executable=git_executable)
+    if details["clean"]:
+        head = subprocess.run(git_argv(repo, "rev-parse", "HEAD", executable=git_executable),
+            capture_output=True, text=True, encoding="utf-8", errors="strict", check=False, timeout=30)
+        if head.returncode or not re.fullmatch(r"[0-9a-f]{40}", head.stdout.strip()):
+            raise GitByteConsistencyError("GIT_SOURCE_IDENTITY_UNPROVEN")
+        details["git_head_after"] = head.stdout.strip()
+    return details
 
 
 def _verified_receipt_evidence(report: dict, *, root: Path, workspace: Path,
@@ -204,6 +218,8 @@ class LocalBatchWorker:
                    "dependency_semantics": "PINNED_DEPENDENCY_TREE_COMPOSITION",
                    "evidence_path": str(path), "executor_invoked": False}
         def finish():
+            diagnosis = diagnose_failure(outcome)
+            outcome["failure_diagnosis"] = diagnosis.payload() if diagnosis else None
             _write_json(path / "action_result.json", outcome)
             return outcome
         try:
@@ -319,6 +335,12 @@ class LocalBatchWorker:
                                 "entry_count": checkout["dirty_entry_count"],
                                 "index_refresh_exit": checkout["index_refresh_exit"]},
                     provider_invocation_proven=False)
+                return finish()
+            outcome["source_preflight"] = {"expected_source_sha": effective,
+                "observed_source_sha": checkout.get("git_head_after"), "proves_pass": False}
+            if "git_head_after" in checkout and checkout["git_head_after"] != effective:
+                outcome.update(status="SOURCE_WORKTREE_FAILED", error_code="SOURCE_PREFLIGHT_MISMATCH",
+                               provider_invocation_proven=False)
                 return finish()
             if action.get("verification_intent") == "HUMAN_FULL" and self.batch.get("actor") != "HUMAN":
                 outcome.update(status="INVALID_ACTION", error_code="UNAUTHORIZED_HUMAN_FULL")
@@ -484,6 +506,8 @@ class LocalBatchWorker:
             outcome["workers_actual_by_group"] = report.get("workers_actual_by_group")
             outcome["worker_count_provenance"] = report.get("worker_count_provenance")
             outcome["minimum_test"] = report.get("minimum_test")
+            outcome["hypothesis_trail"] = report.get("hypothesis_trail", [])[-4:]
+            outcome["ef01_failure_diagnosis"] = report.get("failure_diagnosis")
             # Trust neither a success-shaped receipt after a nonzero process
             # exit nor an EF01 PASS receipt contradicted by verification.
             # Both cases can arise when the EF01 process dies after writing
