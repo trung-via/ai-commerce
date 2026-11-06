@@ -126,6 +126,26 @@ def test_send_one_wires_exact_event_provenance_and_two_grant_authorities(tmp_pat
         "resolve_claim_route", "deliver_wake",
     ]
 
+    # The production default (no injected adapter) is now strictly send-only,
+    # while provenance, signed grants and the existing D2 intent remain intact.
+    captured = {}
+    def fake_adapter_factory(**options):
+        captured.update(options)
+        return sentinel
+    monkeypatch.setattr(d5, "LocalChromeDoorbellAdapter", fake_adapter_factory)
+    again = d5.send_one(
+        event=event, report=report, workflow_id=399104102, caller_id="operator",
+        grants_path=grants_path, registry_path=tmp_path / "private" / "registry.json",
+        idempotency_path=tmp_path / "private" / "idem.json",
+        repository_root=checkout, token_provider=lambda: "read-token",
+        secret_provider=lambda: b"test-key" * 5,
+        principal_provider=lambda: "S-1-5-21-999",
+    )
+    assert again.error_code == "UI_USER_TURN_OBSERVED"
+    assert captured == {"allow_submit": True, "preload_exact_chat": True,
+                        "send_only": True}
+    assert calls["deliver"]["adapter"] is sentinel
+
 
 def test_grants_must_live_outside_checkout(tmp_path):
     ep, rp, event, report = files(tmp_path)

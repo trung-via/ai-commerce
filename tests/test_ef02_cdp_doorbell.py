@@ -13,7 +13,7 @@ OTHER = "https://chatgpt.com/c/00000000-0000-0000-0000-000000000002"
 EVENT = "ef02-completion-v1:" + "a" * 64
 BIND = ResolvedBinding(
     route_id="route-A", generation=1, chat_url=URL,
-    cdp_endpoint="http://127.0.0.1:9222",
+    cdp_endpoint="http://127.0.0.1:9444",
 )
 
 
@@ -177,6 +177,40 @@ def test_doorbell_payload_uses_real_newlines_not_literal_backslash_n():
     ]
     assert payload.count("\n") == 3
     assert r"\n" not in payload
+
+
+
+def test_send_only_9444_one_click_witness_never_requests_brain_or_plugin_work():
+    page = FakePage()
+    adapter = LocalChromeDoorbellAdapter(
+        allow_submit=True, inventory=FakeInventory(page), send_only=True)
+    receipt = adapter.send_wake(
+        binding=BIND, message="untrusted caller-supplied content", event_id=EVENT)
+    assert receipt.delivery_status == "UNKNOWN"  # UI witness, not server ACK
+    assert receipt.error_code == "UI_USER_TURN_OBSERVED"
+    assert receipt.chat_delivery_proven is False
+    assert receipt.brain_continuation_proven is False
+    assert page.counts == {"insert": 1, "click": 1, "prove": 2}
+    assert page.submitted_text.splitlines() == [
+        "[AI COMMERCE LOCAL CHAT WAKE]",
+        "event_id: " + EVENT,
+        "repository: trung-via/ai-commerce",
+        "delivery_scope: send_only",
+        "fresh_brain_sync_required: false",
+        "automation_followup_requested: false",
+    ]
+    assert "caller-supplied" not in page.submitted_text
+    assert "@AI Commerce" not in page.submitted_text
+
+
+def test_send_only_rejects_wrong_chat_without_send_or_partial_stage():
+    other = FakePage(OTHER)
+    inventory = FakeInventory(other)
+    receipt = LocalChromeDoorbellAdapter(
+        allow_submit=True, inventory=inventory, send_only=True).send_wake(
+            binding=BIND, message="", event_id=EVENT)
+    assert receipt.error_code == "EXACT_CHAT_TAB_NOT_FOUND"
+    assert other.counts == {"insert": 0, "click": 0, "prove": 0}
 
 
 def test_real_guard_accepts_nested_editor_span_but_rejects_unexpected_text():
@@ -493,18 +527,20 @@ def test_preload_before_wake_uses_enrolled_route_only(monkeypatch):
     inv = d4._PlaywrightInventory()
     @contextmanager
     def fake_browser(endpoint):
-        # The legacy D4 send fixture uses 9222; D5 auto-preload is 9333.
-        assert endpoint == "http://127.0.0.1:9333"
+        # D4 and D5 use the same isolated 9444 endpoint.
+        assert endpoint == "http://127.0.0.1:9444"
         yield SimpleNamespace(contexts=[ctx])
     monkeypatch.setattr(inv, "_browser", fake_browser)
-    # D4 fixture normally uses port 9222; preload is deliberately 9333 only.
+    # This preload does not touch a browser or route outside the isolated 9444.
     binding = ResolvedBinding(route_id=BIND.route_id, generation=1,
-                              chat_url=URL, cdp_endpoint="http://127.0.0.1:9333")
+                              chat_url=URL, cdp_endpoint="http://127.0.0.1:9444")
     assert inv.preload(binding, current_binding=lambda: binding) == "EXACT_CHAT_OPENED"
     assert len(created) == 1 and created[0].url == URL
     assert existing.url == OTHER
     assert inv.preload(binding) == "EXACT_CHAT_PRESENT"  # idempotent reuse
-    assert inv.preload(BIND) == "PRELOAD_ROUTE_INVALID"
+    wrong_port = ResolvedBinding(route_id=BIND.route_id, generation=1,
+                                 chat_url=URL, cdp_endpoint="http://127.0.0.1:9222")
+    assert inv.preload(wrong_port) == "PRELOAD_ROUTE_INVALID"
 
 
 def test_preload_rejects_ambiguous_targets_and_contexts(monkeypatch):
@@ -518,7 +554,7 @@ def test_preload_rejects_ambiguous_targets_and_contexts(monkeypatch):
             SimpleNamespace(pages=[FakePage(URL), FakePage(URL)])])
     monkeypatch.setattr(inv, "_browser", two_targets)
     binding = ResolvedBinding(route_id="enrolled", generation=1, chat_url=URL,
-                              cdp_endpoint="http://127.0.0.1:9333")
+                              cdp_endpoint="http://127.0.0.1:9444")
     assert inv.preload(binding) == "PRELOAD_EXACT_CHAT_AMBIGUOUS"
     @contextmanager
     def two_contexts(_endpoint):
