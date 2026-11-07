@@ -1,0 +1,638 @@
+{
+  "schema_version": "WorkItem.v1",
+  "work_id": "BQ-05B0_EFFECT_PREFLIGHT_001",
+  "action_id": "BQ05B0-CODEX-XHIGH-PULSE-LIVE-READINESS-BINDER-01",
+  "attempt_id": "bq05b0_codex_sol_xhigh_source_live_readiness_main_e33a316_20261108_v1",
+  "source_sha": "e33a3162aae34e8ffc3b57c85bc1eeef64c9880e",
+  "status": "HOLD_NATIVE_LINK_ENVIRONMENT_AND_REGISTERED_NATIVE_CONSUMER_FAILURES",
+  "objective": "BQ-05b.0 inert read-only source readiness binder from current native BQ-05a offline Q4/Q5 to unchanged B0-S external-effect denial gates; no BQ-05b LIVE",
+  "owner": "Media & Creative",
+  "component": "bq-05b0",
+  "verification_profile": "mt01-component-onboarding",
+  "verification_round_limit": 2,
+  "model_selection": {
+    "executor": "codex",
+    "model": "gpt-6.1-sol",
+    "effort": "xhigh",
+    "fallback_allowed": false,
+    "execution_attestation": "EF02_NATIVE_TERMINAL_RECEIPT_REQUIRED"
+  },
+  "add_only_paths": [
+    "src/ai_commerce/creative_quality/pulse_studio_effect_preflight.py",
+    "tests/test_bq_05b_effect_preflight.py",
+    "work_items/mt01-components/bq-05b0.json",
+    "work_items/BQ-05B0_EFFECT_PREFLIGHT_001.json",
+    "docs/creative/BQ_05B0_EFFECT_PREFLIGHT_PROTOCOL.md"
+  ],
+  "modified_paths": [
+    "docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md"
+  ],
+  "allowed_paths": [
+    "src/ai_commerce/creative_quality/pulse_studio_effect_preflight.py",
+    "tests/test_bq_05b_effect_preflight.py",
+    "work_items/mt01-components/bq-05b0.json",
+    "work_items/BQ-05B0_EFFECT_PREFLIGHT_001.json",
+    "docs/creative/BQ_05B0_EFFECT_PREFLIGHT_PROTOCOL.md",
+    "docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md"
+  ],
+  "acceptance": [
+    "BQ-05b0.native-bq05a-qa-source-binding",
+    "BQ-05b0.readiness-matrix-preserves-b0s-denial",
+    "BQ-05b0.closed-redacted-brain-handoff"
+  ],
+  "negative_acceptance": [
+    {
+      "ac": "BQ-05b0.stale-native-evidence-and-rollback-hold",
+      "tests": [
+        "test_actual_native_asset_receipt_and_journal_damage",
+        "test_native_replay_detects_change_between_fresh_sidecar_and_recheck",
+        "test_self_resealed_native_pins_and_forged_receipt",
+        "test_pre_wait_brain_is_not_positive",
+        "test_human_supplied_rights_reopened_and_revoked",
+        "test_current_native_q4_failure_is_not_readiness"
+      ]
+    },
+    {
+      "ac": "BQ-05b0.untrusted-authority-and-scope-hold",
+      "tests": [
+        "test_caller_reports_never_supply_authority",
+        "test_every_external_request_holds_before_native_media",
+        "test_invalid_expired_replayed_and_inconsistent_broker_drafts",
+        "test_broker_receipt_scope_compared_to_current_native",
+        "test_self_resealed_preflight_still_requires_current_owner_replay",
+        "test_closed_redacted_brain_handoff"
+      ]
+    },
+    {
+      "ac": "BQ-05b0.native-path-protection-preserved",
+      "tests": [
+        "test_native_hardlink_protection_inherited",
+        "test_native_junction_protection_inherited"
+      ],
+      "policy": "MANDATORY_REAL_WINDOWS; no skip or xfail; construction denial is environment HOLD"
+    }
+  ],
+  "read_only_dependency_policy": "All manifest consumers and the three closed PULSE v1 schemas are READ_ONLY. No re-ownership, policy relaxation, runtime wiring, CLI, journal or contract changes. Five semantic A-series owners and 63 historical WBS IDs remain immutable.",
+  "source_binding_policy": "Binder source base e33a3162aae34e8ffc3b57c85bc1eeef64c9880e; BQ05a historical source pin and native PULSE source pin retain their owner meanings. Current native runtime SHA binds the actual Python tree, not an asserted provider deployment. Fresh in-memory BQ05a sidecar is replayed against current native bytes on every inspection. No report/file/hash/provenance string is sufficient evidence.",
+  "effect_receipt_policy": "BQ05bEffectPreflight.v1 is a canonical redacted technical decision matrix, never an authenticated BrainDecision, live grant, provider receipt or custody credential. Unknown cap and currency are null, never zero. All thirteen owner action scopes retain LIVE_EFFECT_HOLD and missing independent proofs even when owner design drafts are structurally admissible.",
+  "private_evidence_proposal": "BQ05bPrivateEvidenceChecklist.v1; Human chooses broker/provider/account/model/region/currency/cap and separately authorizes each exact effect only after independent private issuer/isolation/challenge/rights/entitlement/revocation/replay/budget evidence. Proposed receipt names do not register new live contracts or verifiers.",
+  "live_limits": [
+    "NO_PROVIDER_ACTIVATION",
+    "NO_PRIVATE_ISSUER_ENROLLMENT",
+    "NO_SIGN_IN",
+    "NO_EXTERNAL_REQUEST",
+    "NO_CREDENTIALS",
+    "NO_SPEND",
+    "NO_UPLOAD",
+    "NO_PUBLICATION",
+    "NO_AUTHENTICATED_BRAIN_DECISION",
+    "NO_ACCOUNT_PROVIDER_MODEL_REGION_OR_COST_SELECTION",
+    "NO_GITHUB_ISSUE_AS_HUMAN_GRANT",
+    "NO_CI_GREEN_AS_LIVE_PULSE_RECEIPT"
+  ],
+  "verification_policy": {
+    "native_windows": "Mandatory fresh actual B0.4 subprocess/FFmpeg A06 fixture, observed Q4 T1/T2, WAIT_BRAIN, deterministic sidecar, unchanged retained bytes",
+    "workers": "12 only when observed in actual self-host Windows execution",
+    "scratch": "pytest basetemp, cache, JUnit, plan and receipts outside protected worktree",
+    "selector": "Registered onboarding owner/consumer closure; no full fallback unless registered selector requires it",
+    "explicit_consumers": [
+      "bq-05a",
+      "b0-s",
+      "b0-s3",
+      "b0-s3b",
+      "b0-3",
+      "b0-4",
+      "a06"
+    ],
+    "hosted_windows": "PENDING_INDEPENDENT_CI",
+    "private_live_custody": "UNPROVEN_NOT_A_CI_TEST; never substitute a fake broker or skip mandatory offline gates"
+  },
+  "executor_observations": {
+    "type": "EXECUTOR_LOCAL_ONLY_NOT_EF01_EF02_HOSTED_OR_BRAIN_ACCEPTANCE",
+    "local_head": "e33a3162aae34e8ffc3b57c85bc1eeef64c9880e",
+    "platform": "win32",
+    "python": "3.14.7",
+    "runner_environment_reported": "self-hosted",
+    "workers_observed": 12,
+    "worker_observation_kind": "ACTUAL_XDIST_WORKER_FIXTURE_DIRECTORIES_ALL_TWELVE_USED",
+    "source_builder_attempts": 1,
+    "verify_fix_rounds_used": 1,
+    "production_or_test_fix_after_round": false,
+    "source_bytes_unchanged_during_all_execution": true,
+    "registration": {
+      "status": "ACCEPTED_DATA_ONLY_NOT_VERIFICATION_PASS",
+      "fallback": false,
+      "selected_groups": [
+        "a06",
+        "b0-1",
+        "b0-3",
+        "b0-4",
+        "b0-s",
+        "b0-s3",
+        "b0-s3b",
+        "bq-02a",
+        "bq-04a",
+        "bq-05a",
+        "bq-05b0"
+      ],
+      "missing_mapping": []
+    },
+    "positive_acs": {
+      "BQ-05b0.native-bq05a-qa-source-binding": {
+        "test": "test_native_bq05a_qa_source_binding",
+        "result": "PASS_OFFLINE_SOURCE_ONLY",
+        "properties": {
+          "ac": "BQ-05b0.native-bq05a-qa-source-binding",
+          "actual_windows_q4_t1_t2": "True",
+          "a06_current_asset_sha256": "a81e8dbd70b643ee34d2a810c1d07f42a26e78aa07e672eec9137bb4c3503c9c",
+          "bq05a_sidecar_sha256": "7e30ae8ecb136e1c796b71a3b83a8946d4abd0ae6005491b5fdbe4076a96645e",
+          "preflight_sha256": "11aecb1dd622d28c25288ecd2d0483582210d380801cdb2193d419e248ebd4d8",
+          "retained_native_bytes_unchanged": "True"
+        }
+      },
+      "BQ-05b0.closed-redacted-brain-handoff": {
+        "test": "test_closed_redacted_brain_handoff",
+        "result": "PASS_OFFLINE_SOURCE_ONLY",
+        "properties": {
+          "ac": "BQ-05b0.closed-redacted-brain-handoff",
+          "brain_authentication": "NOT_PROVEN"
+        }
+      },
+      "BQ-05b0.readiness-matrix-preserves-b0s-denial": {
+        "test": "test_readiness_matrix_preserves_b0s_denial",
+        "result": "PASS_OFFLINE_SOURCE_ONLY",
+        "properties": {
+          "ac": "BQ-05b0.readiness-matrix-preserves-b0s-denial",
+          "live_effect_decision": "HOLD_PRIVATE_VERIFIER_NOT_ENROLLED"
+        }
+      }
+    },
+    "round_1_groups": [
+      {
+        "group": "bq-05b0",
+        "result": "UNPROVEN",
+        "counts": {
+          "collected": 39,
+          "passed": 37,
+          "failed": 2,
+          "errors": 0,
+          "skipped": 0
+        },
+        "seconds": 1069.93,
+        "workers_requested": 12,
+        "workers_with_fixture_directories_observed": 12,
+        "failure_codes": [
+          {
+            "test": "test_native_junction_protection_inherited",
+            "code": "NATIVE_CONSTRUCTION_ACCESS_DENIED"
+          },
+          {
+            "test": "test_native_hardlink_protection_inherited",
+            "code": "NATIVE_CONSTRUCTION_ACCESS_DENIED"
+          }
+        ],
+        "skipped_tests": []
+      },
+      {
+        "group": "a06",
+        "result": "PASS_OFFLINE_SOURCE_ONLY",
+        "counts": {
+          "collected": 7,
+          "passed": 7,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "seconds": 16.12,
+        "workers_requested": 12,
+        "workers_with_fixture_directories_observed": 7,
+        "failure_codes": [],
+        "skipped_tests": []
+      },
+      {
+        "group": "b0-1",
+        "result": "PASS_OFFLINE_SOURCE_ONLY",
+        "counts": {
+          "collected": 82,
+          "passed": 82,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "seconds": 4.21,
+        "workers_requested": 12,
+        "workers_with_fixture_directories_observed": null,
+        "failure_codes": [],
+        "skipped_tests": []
+      },
+      {
+        "group": "b0-s",
+        "result": "PASS_OFFLINE_SOURCE_ONLY",
+        "counts": {
+          "collected": 194,
+          "passed": 194,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "seconds": 4.29,
+        "workers_requested": 12,
+        "workers_with_fixture_directories_observed": null,
+        "failure_codes": [],
+        "skipped_tests": []
+      },
+      {
+        "group": "b0-s3",
+        "result": "PASS_OFFLINE_SOURCE_ONLY",
+        "counts": {
+          "collected": 255,
+          "passed": 255,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "seconds": 4.39,
+        "workers_requested": 12,
+        "workers_with_fixture_directories_observed": null,
+        "failure_codes": [],
+        "skipped_tests": []
+      },
+      {
+        "group": "b0-s3b",
+        "result": "PASS_OFFLINE_SOURCE_ONLY",
+        "counts": {
+          "collected": 260,
+          "passed": 260,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "seconds": 4.64,
+        "workers_requested": 12,
+        "workers_with_fixture_directories_observed": null,
+        "failure_codes": [],
+        "skipped_tests": []
+      },
+      {
+        "group": "bq-02a",
+        "result": "PASS_OFFLINE_SOURCE_ONLY",
+        "counts": {
+          "collected": 282,
+          "passed": 282,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "seconds": 25.46,
+        "workers_requested": 12,
+        "workers_with_fixture_directories_observed": 12,
+        "failure_codes": [],
+        "skipped_tests": []
+      },
+      {
+        "group": "bq-04a",
+        "result": "PASS_OFFLINE_SOURCE_ONLY",
+        "counts": {
+          "collected": 154,
+          "passed": 154,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "seconds": 13.4,
+        "workers_requested": 12,
+        "workers_with_fixture_directories_observed": null,
+        "failure_codes": [],
+        "skipped_tests": []
+      },
+      {
+        "group": "b0-3",
+        "result": "UNPROVEN",
+        "counts": {
+          "collected": 55,
+          "passed": 34,
+          "failed": 19,
+          "errors": 0,
+          "skipped": 2
+        },
+        "seconds": 198.05,
+        "workers_requested": 12,
+        "workers_with_fixture_directories_observed": 12,
+        "failure_codes": [
+          {
+            "test": "test_windows_selfhost_real_separate_process_mp4_reopen_and_identical_export",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_real_process_kill_at_commit_cuts_never_rerenders[after_output]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[journal-corrupt]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[journal-rollback]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[output-missing]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[asset]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[directive]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[directive-file-bytes]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[intent-source]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[output-partial]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_human_import_requires_matching_local_rights_with_freshness[valid]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_real_process_kill_at_commit_cuts_never_rerenders[after_wait]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_stale_fence_and_exact_lease_reconciliation",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[output-foreign]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[output-corrupt]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_killed_after_a06_with_ambiguous_package_holds_without_mutation[partial]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_killed_after_a06_with_ambiguous_package_holds_without_mutation[missing]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_killed_after_a06_with_ambiguous_package_holds_without_mutation[corrupt]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_export_conflict_and_atomic_concurrent_byte_identical_publication",
+            "code": "SUBPROCESS_TIMEOUT"
+          }
+        ],
+        "skipped_tests": [
+          "test_real_windows_junction_denied_when_host_permits",
+          "test_actual_file_symlink_when_host_permits"
+        ]
+      },
+      {
+        "group": "b0-4",
+        "result": "UNPROVEN",
+        "counts": {
+          "collected": 69,
+          "passed": 64,
+          "failed": 3,
+          "errors": 0,
+          "skipped": 2
+        },
+        "seconds": 750.97,
+        "workers_requested": 12,
+        "workers_with_fixture_directories_observed": 12,
+        "failure_codes": [
+          {
+            "test": "test_actual_process_kill_preserves_attempt_and_never_rerenders[after_a06]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_stale_pins_and_native_history_hold_without_retry[lease]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_stale_pins_and_native_history_hold_without_retry[intent]",
+            "code": "SUBPROCESS_TIMEOUT"
+          }
+        ],
+        "skipped_tests": [
+          "test_real_file_symlink_or_unproven",
+          "test_real_windows_junction_or_unproven"
+        ]
+      },
+      {
+        "group": "bq-05a",
+        "result": "UNPROVEN",
+        "counts": {
+          "collected": 39,
+          "passed": 37,
+          "failed": 2,
+          "errors": 0,
+          "skipped": 0
+        },
+        "seconds": 535.67,
+        "workers_requested": 12,
+        "workers_with_fixture_directories_observed": 12,
+        "failure_codes": [
+          {
+            "test": "test_native_windows_junction_rejected_before_owner_or_media",
+            "code": "NATIVE_CONSTRUCTION_ACCESS_DENIED"
+          },
+          {
+            "test": "test_native_windows_hardlink_rejected_before_owner_or_media",
+            "code": "NATIVE_CONSTRUCTION_ACCESS_DENIED"
+          }
+        ],
+        "skipped_tests": []
+      }
+    ],
+    "round_1_totals": {
+      "collected": 1436,
+      "passed": 1406,
+      "failed": 26,
+      "errors": 0,
+      "skipped": 4
+    },
+    "artifact_sha256": {
+      "round1-new.junit.xml": "c9a14a921510eb6fc0ad9bf6599a538016eb810053c7aa25cad64b582241f9a8",
+      "round1-a06.junit.xml": "b82a53743d22db0877540d7f654d04d21768a550e7f0e61b47fcd37857d95b14",
+      "round1-b0-1.junit.xml": "5c51775f314a82b4ebc87820f25f2fc8dfd0ce0a61f6cdcbf61cb96f19016f95",
+      "round1-b0-s.junit.xml": "76ed5599d535af535c929a4a9972a9e4726e514db4c27124ee9347314c61b1a8",
+      "round1-b0-s3.junit.xml": "bbef21d165498356e6bcc4af3b9206209f17590ecc78524ac55a5219fd151962",
+      "round1-b0-s3b.junit.xml": "6cd48f0a052b2171208bfa87d0093cb1144e284b1a5192a5a1fd688d147fcb95",
+      "round1-bq-02a.junit.xml": "97c05c0e0c0cdce877a98b5531f0829ec31c7c405aaa7b2f66b12d0d5612fc4e",
+      "round1-bq-04a.junit.xml": "331522e632ea500bb2797e6cabf4cda0e6a73bf29be407ba813bf836f9135518",
+      "round1-b0-3.junit.xml": "0f84fcbda7f32659b3d1180693a19059feaebbf2714f8fafecd8314550420ace",
+      "round1-b0-4.junit.xml": "eb963506e423966c9666d374e4e6568bf3782d6a7153d43c450e7cb2dcffcab5",
+      "round1-bq-05a.junit.xml": "b09eb6a62ae6a21606f4461f956c9b2232371a903b46e29e54f9a4b789f41cc6"
+    },
+    "tested_code_sha256": {
+      "src/ai_commerce/creative_quality/pulse_studio_effect_preflight.py": "ad9509bc09c0a45ef51058e38841ae1eb85444178e02e9c96be478e8db0f3118",
+      "tests/test_bq_05b_effect_preflight.py": "e4a9b1b279cbe66fae052968b3daa355b9208e54201526173d4eed99ca200352"
+    },
+    "actual_effects": {
+      "local_fixture_render": "OBSERVED_NATIVE_WINDOWS_FFMPEG",
+      "provider_dispatch": "NOT_ATTEMPTED",
+      "network_provider_request": "NOT_ATTEMPTED",
+      "spend": "NOT_ATTEMPTED",
+      "upload": "NOT_ATTEMPTED",
+      "publish": "NOT_ATTEMPTED",
+      "private_issuer_enrollment": "NOT_ATTEMPTED",
+      "sign_in": "NOT_ATTEMPTED",
+      "git_write": "NOT_ATTEMPTED"
+    },
+    "live_effect_decision": "HOLD_PRIVATE_VERIFIER_NOT_ENROLLED",
+    "private_live_custody": "UNPROVEN_NOT_A_CI_TEST",
+    "candidate_sha": null,
+    "independent_verification": "PENDING_EF01_EF02",
+    "hosted_windows_ci": "PENDING_INDEPENDENT",
+    "current_chat_brain": "PENDING_INDEPENDENT",
+    "post_execution_change": "OBSERVATION_METADATA_AND_ROADMAP_APPEND_ONLY; executable source, tests and manifest unchanged",
+    "final_disposition": "HOLD_NO_CANDIDATE_ACCEPTANCE; mandatory native path construction and failed registered consumers require independent verification or separate owner work"
+  },
+  "publication_status": "Executor edits allowed worktree files only; no Git writes, candidate publication, PR creation or acceptance. EF02 worker alone publishes a verified candidate after independent EF01/EF02 verification; hosted CI, independent current-chat Brain PASS and trusted auto-merge remain later stages.",
+  "cross_owner_escalation": {
+    "applied": false,
+    "scope_extension_authorized": false,
+    "native_environment": {
+      "observed": "Real Windows hardlink and junction fixture creation denied; mandatory assertions not reached; no skip, privilege change or alternative creation method used",
+      "required": "Authorized independent EF01/EF02 Windows verifier must demonstrate actual link creation and unchanged owner rejection; do not edit ACL, HostOps, workflows or owner policies in this action",
+      "new_tests": [
+        "test_native_hardlink_protection_inherited",
+        "test_native_junction_protection_inherited"
+      ]
+    },
+    "registered_owner_failures": [
+      {
+        "component": "b0-3",
+        "read_only_test_owner": "tests/test_b0_3_attended_worker.py",
+        "failures": [
+          {
+            "test": "test_windows_selfhost_real_separate_process_mp4_reopen_and_identical_export",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_real_process_kill_at_commit_cuts_never_rerenders[after_output]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[journal-corrupt]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[journal-rollback]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[output-missing]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[asset]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[directive]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[directive-file-bytes]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[intent-source]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[output-partial]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_human_import_requires_matching_local_rights_with_freshness[valid]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_real_process_kill_at_commit_cuts_never_rerenders[after_wait]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_stale_fence_and_exact_lease_reconciliation",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[output-foreign]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_post_run_tamper_or_rollback_holds_without_rerender[output-corrupt]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_killed_after_a06_with_ambiguous_package_holds_without_mutation[partial]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_killed_after_a06_with_ambiguous_package_holds_without_mutation[missing]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_killed_after_a06_with_ambiguous_package_holds_without_mutation[corrupt]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_export_conflict_and_atomic_concurrent_byte_identical_publication",
+            "code": "SUBPROCESS_TIMEOUT"
+          }
+        ],
+        "request": "Separate bounded owner investigation at this source and twelve workers; preserve failing evidence, measure subprocess/cut timing and native environment capability; root cause unproven; no deadline, worker, lease, policy or source relaxation here"
+      },
+      {
+        "component": "b0-4",
+        "read_only_test_owner": "tests/test_b0_4_operator.py",
+        "failures": [
+          {
+            "test": "test_actual_process_kill_preserves_attempt_and_never_rerenders[after_a06]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_stale_pins_and_native_history_hold_without_retry[lease]",
+            "code": "SUBPROCESS_TIMEOUT"
+          },
+          {
+            "test": "test_stale_pins_and_native_history_hold_without_retry[intent]",
+            "code": "SUBPROCESS_TIMEOUT"
+          }
+        ],
+        "request": "Separate bounded owner investigation at this source and twelve workers; preserve failing evidence, measure subprocess/cut timing and native environment capability; root cause unproven; no deadline, worker, lease, policy or source relaxation here"
+      },
+      {
+        "component": "bq-05a",
+        "read_only_test_owner": "tests/test_bq_05a_pulse_studio_offline_bridge.py",
+        "failures": [
+          {
+            "test": "test_native_windows_junction_rejected_before_owner_or_media",
+            "code": "NATIVE_CONSTRUCTION_ACCESS_DENIED"
+          },
+          {
+            "test": "test_native_windows_hardlink_rejected_before_owner_or_media",
+            "code": "NATIVE_CONSTRUCTION_ACCESS_DENIED"
+          }
+        ],
+        "request": "Separate bounded owner investigation at this source and twelve workers; preserve failing evidence, measure subprocess/cut timing and native environment capability; root cause unproven; no deadline, worker, lease, policy or source relaxation here"
+      }
+    ]
+  }
+}

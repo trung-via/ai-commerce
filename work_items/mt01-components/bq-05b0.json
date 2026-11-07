@@ -1,0 +1,31 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "bq-05b0",
+  "sources": ["src/ai_commerce/creative_quality/pulse_studio_effect_preflight.py"],
+  "tests": ["tests/test_bq_05b_effect_preflight.py"],
+  "acs": [
+    "BQ-05b0.native-bq05a-qa-source-binding",
+    "BQ-05b0.readiness-matrix-preserves-b0s-denial",
+    "BQ-05b0.closed-redacted-brain-handoff"
+  ],
+  "consumers": [
+    "src/ai_commerce/creative_quality/pulse_studio_offline_bridge.py",
+    "src/ai_commerce/production_runtime/operator.py",
+    "src/ai_commerce/production_runtime/attended_worker.py",
+    "src/ai_commerce/production_runtime/handoff.py",
+    "src/ai_commerce/production_runtime/receipt.py",
+    "src/ai_commerce/production_runtime/contracts.py",
+    "src/ai_commerce/production_runtime/security_policy.py",
+    "src/ai_commerce/production_runtime/custody_gate.py",
+    "src/ai_commerce/production_runtime/broker_readiness.py",
+    "src/ai_commerce/production_runtime/broker_intake.py",
+    "src/ai_commerce/e2e/service.py",
+    "src/ai_commerce/creative_quality/inspection_evidence.py",
+    "src/ai_commerce/creative_quality/repair_policy.py"
+  ],
+  "contracts": [
+    "contracts/CreativeDirective.v1.schema.json",
+    "contracts/ProductJourneyReceipt.v1.schema.json",
+    "contracts/BrainDecision.v1.schema.json"
+  ]
+}
