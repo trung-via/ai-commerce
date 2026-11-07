@@ -827,6 +827,30 @@ def _agy_input_mirror(repo: Path, prompt: str, feedback: dict | None, **cleanup)
         yield directory
 
 
+def _agy_child_env(environment: dict[str, str], scratch: Path, *, repo: Path) -> dict[str, str]:
+    """Prevent incidental Python/pytest cache writes in the instruction mirror.
+
+    TEMP alone does not contain pytest's root-relative .pytest_cache. Replace
+    inherited addopts for provider children only: caller options must not undo
+    the transport default or send caches/basetemp into immutable input. EF01's
+    independent verifier keeps its own environment and registered command.
+    Rebind the EF01 pytest runtime plugin too: its inherited scratch setting
+    otherwise overrides TEMP for nested pytest fixtures and JUnit artifacts.
+
+    These are subprocess-inherited defaults, not a security sandbox. Explicit
+    child overrides/direct writes still require the mandatory input manifest
+    and native process reconciliation before verification/publication.
+    """
+    root = agy_data_directory(scratch)
+    return {**environment, **{key: str(root) for key in ("TEMP", "TMP", "TMPDIR")},
+            "PYTEST_ADDOPTS": "-p no:cacheprovider",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONPYCACHEPREFIX": str(root / "pycache"),
+            "XDG_CACHE_HOME": str(root / "user-cache"),
+            "AI_COMMERCE_PYTEST_SCRATCH": str(root),
+            "AI_COMMERCE_PYTEST_REPO": str(repo)}
+
+
 # An isolated Python gate blocks on stdin. No provider code runs until the host
 # has assigned the gate to a non-breakaway, kill-on-close Windows job. The job
 # handle stays exclusively in the host; descendants cannot keep it alive.
@@ -1141,8 +1165,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     # Hook configuration applies only to the executor; EF02 owns publication.
     child_env = git_write_guard_env(directory, repo=repo, git_executable=git_executable or "git")
     if agy_scratch_dir is not None:
-        child_env.update({key: str(agy_scratch_dir) for key in ("TEMP", "TMP", "TMPDIR")})
-        child_env["PYTHONPYCACHEPREFIX"] = str(agy_scratch_dir / "pycache")
+        child_env = _agy_child_env(child_env, agy_scratch_dir, repo=repo)
     budget = _remaining(deadline, timeout_seconds)
     boundary = {
         "kind": "AI_COMMERCE_EF01_PROVIDER_BOUNDARY", "version": 1,

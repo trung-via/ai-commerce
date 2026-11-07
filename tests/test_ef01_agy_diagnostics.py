@@ -241,6 +241,210 @@ def test_scratch_is_a_distinct_explicit_root_and_preserves_model(tmp_path):
                                  antigravity_scratch_dir=alias)
 
 
+def test_agy_cache_environment_is_source_owned_and_child_only(tmp_path):
+    repo, mirror, _, _ = input_fixture(tmp_path)
+    scratch = tmp_path / "scratch with spaces"
+    scratch.mkdir()
+    inherited = {"PYTEST_ADDOPTS": f'-p cacheprovider -o cache_dir="{mirror}"',
+                 "PYTHONDONTWRITEBYTECODE": "0", "PYTHONPYCACHEPREFIX": str(repo),
+                 "XDG_CACHE_HOME": str(mirror), "TEMP": str(mirror),
+                 "AI_COMMERCE_PYTEST_SCRATCH": str(mirror),
+                 "AI_COMMERCE_PYTEST_REPO": str(mirror),
+                 "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
+                 "GIT_CONFIG_VALUE_0": "unchanged guard", "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}
+    before = inherited.copy()
+    child = runner._agy_child_env(inherited, scratch, repo=repo)
+    assert inherited == before
+    assert child["PYTEST_ADDOPTS"] == "-p no:cacheprovider"
+    assert child["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert child["PYTHONPYCACHEPREFIX"] == str(scratch / "pycache")
+    assert child["XDG_CACHE_HOME"] == str(scratch / "user-cache")
+    assert child["AI_COMMERCE_PYTEST_SCRATCH"] == str(scratch)
+    assert child["AI_COMMERCE_PYTEST_REPO"] == str(repo)
+    assert all(child[key] == str(scratch) for key in ("TEMP", "TMP", "TMPDIR"))
+    assert all(child[key] == value for key, value in inherited.items()
+               if key.startswith("GIT_") or key == "PYTEST_DISABLE_PLUGIN_AUTOLOAD")
+
+
+def _native_cache_attempt(tmp_path, monkeypatch, scenario, provider_exit=0):
+    """Real Windows provider ingress/process tree, with explicitly modeled Git.
+
+    Python is the diagnostic provider, not a live AGY/model permission proof.
+    The production invocation supplies cwd, env, mirror and scratch; neither
+    the provider nor its pytest/xdist descendants receive a replacement env.
+    """
+    repo = tmp_path / "source"
+    repo.mkdir()
+    (repo / "probe_module.py").write_bytes(b"VALUE = 611\n")
+    sentinel = (repo / "probe_module.py").read_bytes()
+    def snapshot(*_args, **_kwargs):
+        changed = repo / "changed.txt"
+        hashes = {changed.name: hashlib.sha256(changed.read_bytes()).hexdigest()} if changed.exists() else {}
+        assert (repo / "probe_module.py").read_bytes() == sentinel
+        assert sorted(p.name for p in repo.iterdir()) == sorted(["probe_module.py", *hashes])
+        return {"git_head_after": "a" * 40, "git_dir": str(repo / ".git"),
+                "changed_files": list(hashes), "candidate_file_sha256": hashes,
+                "tracked_diff_sha256": hashlib.sha256(json.dumps(hashes).encode()).hexdigest(),
+                "scope_valid": True}, b"modeled Git diff; not a native Git receipt"
+    monkeypatch.setattr(runner, "_snapshot", snapshot)
+    monkeypatch.setattr(runner, "_agy_source_binding", lambda r, s, *a: {
+        "source_root": str(r), "source_sha": s["git_head_after"], "git_dir": s["git_dir"]})
+    # A caller must not be able to redirect the provider's default cache back
+    # into input. No parent Git guard or plugin policy is removed here.
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-p cacheprovider -o cache_dir=.pytest_cache")
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "0")
+    # Reproduce registered verification's runtime plugin inheritance even
+    # when this regression is run directly, without an outer EF01 verifier.
+    verifier_scratch = tmp_path / "verifier-scratch"
+    verifier_scratch.mkdir()
+    plugins = [p for p in os.environ.get("PYTEST_PLUGINS", "").split(",") if p]
+    if "ai_commerce.engineering.profile" not in plugins:
+        plugins.append("ai_commerce.engineering.profile")
+    monkeypatch.setenv("PYTEST_PLUGINS", ",".join(plugins))
+    monkeypatch.setenv("AI_COMMERCE_PYTEST_SCRATCH", str(verifier_scratch))
+    monkeypatch.setenv("AI_COMMERCE_PYTEST_REPO", str(repo))
+    roots, observations = [], []
+    prompt = 'Trusted infrastructure probe "Việt" \\ 🚀'
+    code = r'''
+import hashlib, json, os, subprocess, sys
+from pathlib import Path
+args = sys.argv[1:]
+source, mirror, scratch = [Path(args[i+1]) for i, a in enumerate(args[:-1]) if a == '--add-dir']
+assert Path.cwd() == source
+assert hashlib.sha256((mirror / 'instruction.txt').read_bytes()).hexdigest() == EXPECTED_SHA
+assert os.environ['PYTEST_ADDOPTS'] == '-p no:cacheprovider'
+assert os.environ['PYTHONDONTWRITEBYTECODE'] == '1'
+assert all(os.environ[k] == str(scratch) for k in ('TEMP', 'TMP', 'TMPDIR'))
+assert os.environ['AI_COMMERCE_PYTEST_SCRATCH'] == str(scratch)
+assert os.environ['AI_COMMERCE_PYTEST_REPO'] == str(source)
+sys.path.insert(0, str(source))
+import probe_module
+assert probe_module.VALUE == 611
+if SCENARIO in ('pytest', 'xdist'):
+    test = scratch / 'test_native_cache.py'
+    test.write_text("import json, os\nfrom pathlib import Path\nimport pytest\n"
+        "@pytest.mark.parametrize('value', [1, 2])\n"
+        "def test_native_cache(value, tmp_path, request):\n"
+        "    assert not request.config.pluginmanager.hasplugin('cacheprovider')\n"
+        "    scratch = Path(os.environ['TEMP'])\n"
+        "    assert scratch in tmp_path.parents\n"
+        "    (scratch / ('worker-' + str(value) + '.json')).write_text(json.dumps({"
+        "'pid': os.getpid(), 'worker': os.environ.get('PYTEST_XDIST_WORKER'), "
+        "'cwd': str(Path.cwd()), 'addopts': os.environ['PYTEST_ADDOPTS']}))\n", encoding='utf-8')
+    argv = [sys.executable, '-m', 'pytest', str(test), '--rootdir', str(mirror),
+            '-o', 'cache_dir=' + str(mirror / '.pytest_cache'), '-q']
+    if SCENARIO == 'xdist':
+        argv += ['-n', '2']
+    child = subprocess.run(argv, cwd=mirror, capture_output=True, timeout=40)
+    assert child.returncode == 0, (child.stdout + child.stderr).decode('utf-8', 'replace')
+    workers = [json.loads(p.read_text()) for p in sorted(scratch.glob('worker-*.json'))]
+    assert len(workers) == 2 and all(w['cwd'] == str(mirror) for w in workers)
+    assert all(w['addopts'] == '-p no:cacheprovider' for w in workers)
+    assert not list(source.rglob('__pycache__'))
+    assert not list(scratch.rglob('__pycache__'))
+    assert not (mirror / '.pytest_cache').exists()
+    (scratch / 'native.receipt.json').write_text(json.dumps({'pytest_exit': child.returncode, 'workers': workers}))
+elif SCENARIO == 'directory':
+    (mirror / '.pytest_cache').mkdir()
+elif SCENARIO == 'junction':
+    child = subprocess.run(['cmd', '/d', '/c', 'mklink', '/J', str(mirror / '.pytest_cache'), str(scratch)], capture_output=True)
+    assert child.returncode == 0
+elif SCENARIO == 'ads':
+    with open(str(mirror / 'instruction.txt') + ':hidden', 'wb') as stream:
+        stream.write(b'hostile stream')
+elif SCENARIO == 'collision':
+    (mirror / 'INSTRUCTION.TXT').write_bytes(b'hostile case collision')
+elif SCENARIO == 'replacement':
+    target = mirror / 'instruction.txt'
+    data = target.read_bytes()
+    target.rename(scratch / 'old-instruction.txt')
+    target.write_bytes(data)
+elif SCENARIO != 'nonzero':
+    raise AssertionError(SCENARIO)
+(source / 'changed.txt').write_bytes(b'allowed source edit')
+print(json.dumps({'status': 'SUCCESS'}))
+sys.exit(PROVIDER_EXIT)
+'''.replace("EXPECTED_SHA", repr(hashlib.sha256(prompt.encode()).hexdigest()))
+    code = code.replace("SCENARIO", repr(scenario)).replace("PROVIDER_EXIT", str(provider_exit))
+    def command(selection, source, instruction, **kwargs):
+        argv, stdin = adapters.command_for(selection, source, instruction,
+            antigravity_evidence_dir=kwargs.get("antigravity_evidence_dir"),
+            antigravity_scratch_dir=kwargs.get("antigravity_scratch_dir"))
+        if kwargs.get("antigravity_evidence_dir") is not None:
+            roots.extend([source, kwargs["antigravity_evidence_dir"], kwargs["antigravity_scratch_dir"]])
+        return [sys.executable, "-c", code, *argv[1:]], stdin
+    monkeypatch.setattr(runner, "command_for", command)
+    native_run = runner._run_agy_owned
+    def observe(command, **kwargs):
+        assert kwargs["cwd"] == repo and kwargs["env"]["PYTEST_ADDOPTS"] == "-p no:cacheprovider"
+        result = native_run(command, **kwargs)
+        receipt = roots[2] / "native.receipt.json"
+        observations.append(json.loads(receipt.read_text()) if receipt.exists() else {})
+        return result
+    monkeypatch.setattr(runner, "_run_agy_owned", observe)
+    marker = tmp_path / "verifier-ran"
+    result = runner.execute_attempt(repo=repo, output_dir=tmp_path / "evidence",
+        work_id="input-cache-owner", attempt_id="fresh-cache-" + scenario,
+        selection=ExecutorSelection("antigravity", "gemini-3.8-flash", "high"),
+        instruction=prompt, allowed_prefixes=["changed.txt"], max_repair_rounds=2,
+        verify_argv=[sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).write_bytes(b'verified')"])
+    assert len(observations) == result["invocation_count"] == 1
+    assert result["process_lifecycle"]["status"] == "RECONCILED"
+    assert result["process_lifecycle"]["tree_empty"] and not result["process_lifecycle"]["forced_termination"]
+    assert result["scratch_teardown"]["status"] == "CLEAN"
+    assert all(r["status"] == "CLEAN" for r in result["scratch_teardown"]["roots"])
+    assert not roots[1].exists() and not roots[2].exists()
+    assert (repo / "changed.txt").is_file(), (result["status"],
+        (tmp_path / "evidence" / result["evidence_files"]["executor_stderr"]).read_text())
+    assert (repo / "changed.txt").read_bytes() == b"allowed source edit"
+    assert (repo / "probe_module.py").read_bytes() == sentinel
+    assert not list(verifier_scratch.iterdir())
+    assert result["model"] == "gemini-3.8-flash" and result["reasoning_effort"] == "high"
+    assert result["replay_authorized"] is False and "candidate_ref" not in result
+    return result, marker, observations[0]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows provider/pytest/xdist ingress")
+@pytest.mark.parametrize("scenario", ["pytest", "xdist"])
+def test_native_provider_pytest_in_input_keeps_manifest_intact(tmp_path, monkeypatch, record_property, scenario):
+    result, marker, receipt = _native_cache_attempt(tmp_path, monkeypatch, scenario)
+    assert result["status"] == "BUILD_VERIFIED_FOR_SCOPE" and marker.exists()
+    assert result["verify_completed"] and result["verify_exit_code"] == 0
+    evidence = tmp_path / "evidence"
+    manifests = [json.loads((evidence / result["evidence_files"]["agy_input_" + phase]).read_text())
+                 for phase in ("before", "after_executor", "after_verify")]
+    assert manifests[0] == manifests[1] == manifests[2]
+    assert manifests[0]["status"] == "INTACT"
+    assert [f["name"] for f in manifests[0]["files"]] == ["instruction.txt"]
+    if scenario == "xdist":
+        assert len({w["pid"] for w in receipt["workers"]}) == 2
+        assert {w["worker"] for w in receipt["workers"]} == {"gw0", "gw1"}
+    record_property("native_input_cache_receipt", json.dumps({
+        "fixture": "NATIVE_PROCESS_MODELED_GIT_NOT_LIVE_AGY", "scenario": scenario,
+        "input_manifest": manifests[0], "pytest": receipt,
+        "lifecycle": result["process_lifecycle"], "teardown": result["scratch_teardown"]}, sort_keys=True))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows hostile input and nonzero ingress")
+@pytest.mark.parametrize("scenario,reason", [
+    ("directory", "AGY_INPUT_NON_REGULAR"), ("junction", "AGY_INPUT_NON_REGULAR"),
+    ("ads", "AGY_INPUT_NAMED_STREAM"), ("collision", "AGY_INPUT_CONTRACT_MODIFIED"),
+    ("replacement", "AGY_INPUT_CONTRACT_REPLACED"), ("nonzero", None)])
+@pytest.mark.parametrize("provider_exit", [0, 1])
+def test_native_hostile_input_or_nonzero_never_verifies_or_replays(tmp_path, monkeypatch, scenario, reason, provider_exit):
+    if scenario == "nonzero" and provider_exit == 0:
+        # Cover a second ordinary nonzero code despite SUCCESS in stdout.
+        provider_exit = 7
+    result, marker, _ = _native_cache_attempt(tmp_path, monkeypatch, scenario, provider_exit)
+    assert not marker.exists() and result["verify_exit_code"] is None and not result["verify_completed"]
+    assert "quarantine_manifest" in result["evidence_files"]
+    if reason:
+        assert result["status"] == "SOURCE_DRIFT" and result["error_code"] == "AGY_INPUT_INTEGRITY_FAILED"
+        assert result["input_integrity_reason"] == reason
+    else:
+        assert result["status"] == "EXECUTOR_FAILED" and result["error_code"] == "EXECUTOR_NONZERO"
+
+
 def stream(*events):
     return ("\n".join(json.dumps(e) for e in events) + "\n").encode()
 
