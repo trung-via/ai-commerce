@@ -5,7 +5,7 @@ No registration token, GitHub call, Windows task or model is invoked here.
 from __future__ import annotations
 
 import builtins
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, fields, replace
 import os
 from pathlib import Path
 import shutil
@@ -18,6 +18,12 @@ from ai_commerce.engineering.three_runner_topology import (
     EXISTING_RUNNER, NEW_RUNNERS, hostops_route_activation_allowed,
     planned_topology, resource_policy, assess_wakehub_preflight,
     WakeHubPreflight,
+    WAKEHUB_MAX_SAMPLES, WAKEHUB_MAX_PIDS_PER_SAMPLE,
+    WakeHubBaseline, WakeHubChromeOwnership, WakeHubCoreIdleCode,
+    WakeHubCoreIdleEvidence, WakeHubCoreIdlePlan, WakeHubCoreInputError,
+    WakeHubIdleSample, WakeHubListenerState, WakeHubMeasurementCode,
+    WakeHubObservationState, WakeHubReadinessSample, WakeHubTaskState,
+    WakeHubWorkState, assess_wakehub_core_idle, plan_wakehub_measurements,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -398,3 +404,466 @@ def test_wakehub_supervisor_decisions_have_no_external_effects_or_legacy_port(mo
             assert result.start_permitted is False
             assert result.wake_send_authorized is False
             assert result.effect_attempted is False
+
+
+# WH-02A fixtures are explicitly synthetic. No fixture is a host measurement,
+# a savings claim, native deployment evidence or an accepted readiness target.
+def _synthetic_baseline(**overrides):
+    data = dict(
+        observation=WakeHubObservationState.INDEPENDENTLY_OBSERVED,
+        continuous_idle_window_proven=True,
+        idle_samples=tuple(
+            WakeHubIdleSample(t, 0.5, 2**30, 1234, (10, 20))
+            for t in (0, 900, 1800)
+        ),
+        warm_samples=tuple(
+            WakeHubReadinessSample(i, (20 - i) * 10) for i in range(20)
+        ),
+        cold_samples=tuple(
+            WakeHubReadinessSample(i, (20 - i) * 100) for i in range(20)
+        ),
+    )
+    data.update(overrides)
+    return WakeHubBaseline(**data)
+
+
+def _core_evidence(**overrides):
+    data = dict(
+        source_current=True, unknown_effect=False, lost_effect_receipt=False,
+        hostops_task=WakeHubTaskState.READY,
+        hostops_listener=WakeHubListenerState.PRESENT,
+        engineering_listeners=(WakeHubListenerState.PRESENT,
+                               WakeHubListenerState.PRESENT),
+        queue_state=WakeHubWorkState.CLEAR, pending_work=WakeHubWorkState.CLEAR,
+        outstanding_send=WakeHubWorkState.CLEAR,
+        outstanding_signer=WakeHubWorkState.CLEAR,
+        outstanding_lease=WakeHubWorkState.CLEAR,
+        pending_wake=WakeHubWorkState.CLEAR,
+        trusted_human_pause=False, interactive_session_proven=True,
+        chrome_ownership=WakeHubChromeOwnership.OWNED_CDP_9444,
+        baseline=_synthetic_baseline(),
+    )
+    data.update(overrides)
+    return WakeHubCoreIdleEvidence(**data)
+
+
+def _assert_wh02a_no_authority(plan):
+    for name in (
+        "effect_attempted", "start_permitted", "stop_permitted", "kill_permitted",
+        "wake_send_authorized", "chrome_operation_authorized",
+        "native_operation_authorized", "receiver_disable_authorized",
+    ):
+        assert getattr(plan, name) is False
+        assert next(item for item in fields(plan) if item.name == name).init is False
+    assert plan.resource_mode == resource_policy() == "OBSERVE_ONLY_NO_CPU_RAM_LIMITS"
+    assert plan.native_owner_proof == "UNRESOLVED"
+    assert plan.savings == "NOT_MEASURED"
+
+
+def test_wh02a_synthetic_readiness_percentiles_are_only_measured_input_values():
+    evidence = _synthetic_baseline()
+    result = plan_wakehub_measurements(evidence)
+    assert result == plan_wakehub_measurements(evidence)
+    assert result.code is WakeHubMeasurementCode.MEASURED_SAMPLES_COMPLETE
+    assert result.idle_duration_seconds == 1800
+    assert result.idle_sample_count == 3
+    assert result.warm.sample_count == result.cold.sample_count == 20
+    assert (result.warm.p50_ms, result.warm.p95_ms) == (100, 190)
+    assert (result.cold.p50_ms, result.cold.p95_ms) == (1000, 1900)
+    assert result.warm.method == result.cold.method == "EMPIRICAL_NEAREST_RANK"
+    changed = plan_wakehub_measurements(replace(
+        evidence, warm_samples=(WakeHubReadinessSample(0, 7.5),)))
+    assert changed.warm.sample_count == 1
+    assert changed.warm.p50_ms == changed.warm.p95_ms == 7.5
+    assert changed.cold == result.cold  # No warm/cold mixing or hidden history.
+    assert plan_wakehub_measurements(evidence) == result
+    _assert_wh02a_no_authority(result)
+
+
+@pytest.mark.parametrize(("values", "p50", "p95"), [
+    ((0,), 0, 0), ((1, 2), 1, 2), ((3, 1, 2), 2, 3),
+    (tuple(range(1, 22)), 11, 20),
+])
+def test_wh02a_empirical_nearest_rank_rounding_is_explicit(values, p50, p95):
+    baseline = _synthetic_baseline(warm_samples=tuple(
+        WakeHubReadinessSample(i, value) for i, value in enumerate(values)))
+    result = plan_wakehub_measurements(baseline)
+    assert (result.warm.p50_ms, result.warm.p95_ms) == (p50, p95)
+    assert result.warm.sample_count == len(values)
+    assert result.warm.p50_ms in values and result.warm.p95_ms in values
+
+
+def test_wh02a_no_observations_has_no_numeric_claims():
+    for observation in WakeHubObservationState:
+        baseline = WakeHubBaseline(observation)
+        result = plan_wakehub_measurements(baseline)
+        assert result.code is WakeHubMeasurementCode.NOT_MEASURED
+        assert result.idle_sample_count is result.idle_duration_seconds is None
+        assert result.warm is result.cold is None
+        _assert_wh02a_no_authority(result)
+        plan = assess_wakehub_core_idle(_core_evidence(baseline=baseline))
+        assert plan.code is WakeHubCoreIdleCode.WAIT_MEASUREMENT
+        assert not plan.core_logical_idle_eligible
+        assert plan.keep_event_receiver_alive
+
+
+@pytest.mark.parametrize("overrides", [
+    dict(observation=WakeHubObservationState.UNVERIFIED),
+    dict(continuous_idle_window_proven=False),
+    dict(idle_samples=()), dict(warm_samples=()), dict(cold_samples=()),
+    dict(idle_samples=(WakeHubIdleSample(1800, 1, 100, 10, (1,)),)),
+    dict(idle_samples=(WakeHubIdleSample(0, 1, 100, 10, (1,)),
+                       WakeHubIdleSample(1799.999, 1, 100, 10, (1,)))),
+    dict(idle_samples=(WakeHubIdleSample(100, 1, 100, 10, (1,)),
+                       WakeHubIdleSample(1800, 1, 100, 10, (1,)))),
+])
+def test_wh02a_insufficient_independent_30_minute_evidence_holds(overrides):
+    baseline = _synthetic_baseline(**overrides)
+    result = plan_wakehub_measurements(baseline)
+    assert result.code is WakeHubMeasurementCode.INSUFFICIENT_EVIDENCE
+    assert result.idle_sample_count is result.idle_duration_seconds is None
+    assert result.warm is result.cold is None
+    plan = assess_wakehub_core_idle(_core_evidence(baseline=baseline))
+    assert plan.code is WakeHubCoreIdleCode.WAIT_MEASUREMENT
+    assert not plan.core_logical_idle_eligible
+    _assert_wh02a_no_authority(plan)
+
+
+@pytest.mark.parametrize("hostops_task", [
+    value for value in WakeHubTaskState if value is not WakeHubTaskState.QUEUED
+])
+@pytest.mark.parametrize("engineering_listeners", [
+    (left, right) for left in WakeHubListenerState for right in WakeHubListenerState
+])
+def test_wh02a_only_verified_hostops_receiver_allows_logical_idle(
+    hostops_task, engineering_listeners,
+):
+    evidence = _core_evidence(hostops_task=hostops_task,
+                              engineering_listeners=engineering_listeners)
+    result = assess_wakehub_core_idle(evidence)
+    assert type(result) is WakeHubCoreIdlePlan
+    assert result == assess_wakehub_core_idle(evidence)
+    assert result.code is WakeHubCoreIdleCode.CORE_LOGICAL_IDLE_ELIGIBLE
+    assert result.core_logical_idle_eligible
+    assert result.receiver_present and result.keep_event_receiver_alive
+    assert result.desktop_ready_for_planning
+    assert result.idle_scope == "HEADLESS_LOGICAL_CORE_ONLY"
+    assert result.listener_count == 1 + sum(
+        value is WakeHubListenerState.PRESENT for value in engineering_listeners)
+    _assert_wh02a_no_authority(result)
+    _assert_wh02a_no_authority(result.measurements)
+    # Task status cannot substitute for a listener, even when both Engineering
+    # listeners are online. An absent receiver gets no self-wake/start advice.
+    for absent in (WakeHubListenerState.ABSENT, WakeHubListenerState.UNAVAILABLE):
+        held = assess_wakehub_core_idle(replace(evidence, hostops_listener=absent))
+        assert held.code is WakeHubCoreIdleCode.WAIT_RECEIVER
+        assert not held.receiver_present and not held.core_logical_idle_eligible
+        assert held.keep_event_receiver_alive
+        _assert_wh02a_no_authority(held)
+
+
+@pytest.mark.parametrize(("overrides", "code"), [
+    (dict(unknown_effect=True, lost_effect_receipt=True, source_current=False,
+          hostops_listener=WakeHubListenerState.ABSENT, trusted_human_pause=True),
+     WakeHubCoreIdleCode.HOLD_UNKNOWN_EFFECT),
+    (dict(lost_effect_receipt=True), WakeHubCoreIdleCode.HOLD_UNKNOWN_EFFECT),
+    (dict(source_current=False, hostops_listener=WakeHubListenerState.ABSENT,
+          trusted_human_pause=True), WakeHubCoreIdleCode.HOLD_SOURCE_DRIFT),
+    (dict(hostops_listener=WakeHubListenerState.ABSENT, trusted_human_pause=True),
+     WakeHubCoreIdleCode.WAIT_RECEIVER),
+    (dict(trusted_human_pause=True), WakeHubCoreIdleCode.PAUSED_BY_HUMAN),
+    (dict(hostops_task=WakeHubTaskState.QUEUED),
+     WakeHubCoreIdleCode.KEEP_ACTIVE_PENDING),
+    (dict(interactive_session_proven=False),
+     WakeHubCoreIdleCode.WAIT_INTERACTIVE_SESSION),
+    (dict(chrome_ownership=WakeHubChromeOwnership.UNVERIFIED),
+     WakeHubCoreIdleCode.HOLD_CHROME_OWNERSHIP),
+    (dict(chrome_ownership=WakeHubChromeOwnership.PROFILE_CONFLICT),
+     WakeHubCoreIdleCode.HOLD_CHROME_OWNERSHIP),
+    (dict(chrome_ownership=WakeHubChromeOwnership.ABSENT_INDEPENDENTLY_VERIFIED),
+     WakeHubCoreIdleCode.WAIT_PRIVATE_CHROME_START_GRANT),
+])
+def test_wh02a_safety_fences_are_idempotent(overrides, code):
+    evidence = _core_evidence(**overrides)
+    result = assess_wakehub_core_idle(evidence)
+    assert result == assess_wakehub_core_idle(evidence)
+    assert result.code is code
+    assert not result.core_logical_idle_eligible
+    assert result.keep_event_receiver_alive
+    _assert_wh02a_no_authority(result)
+
+
+@pytest.mark.parametrize("work_field", [
+    "queue_state", "pending_work", "outstanding_send", "outstanding_signer",
+    "outstanding_lease", "pending_wake",
+])
+@pytest.mark.parametrize(("state", "code"), [
+    (WakeHubWorkState.PENDING, WakeHubCoreIdleCode.KEEP_ACTIVE_PENDING),
+    (WakeHubWorkState.UNKNOWN, WakeHubCoreIdleCode.HOLD_UNKNOWN_EFFECT),
+])
+def test_wh02a_queued_jobs_send_signer_duplicate_wake_and_lease_block_idle(
+    work_field, state, code,
+):
+    evidence = _core_evidence(**{work_field: state})
+    result = assess_wakehub_core_idle(evidence)
+    assert result.code is code
+    assert not result.core_logical_idle_eligible
+    assert result == assess_wakehub_core_idle(evidence)
+    _assert_wh02a_no_authority(result)
+
+
+@pytest.mark.parametrize("chrome_ownership", list(WakeHubChromeOwnership))
+def test_wh02a_core_inbox_survives_absent_desktop_and_human_pause(chrome_ownership):
+    evidence = _core_evidence(interactive_session_proven=False,
+                              chrome_ownership=chrome_ownership)
+    paused = assess_wakehub_core_idle(replace(evidence, trusted_human_pause=True))
+    resumed = assess_wakehub_core_idle(evidence)
+    assert paused.code is WakeHubCoreIdleCode.PAUSED_BY_HUMAN
+    assert resumed.code is WakeHubCoreIdleCode.WAIT_INTERACTIVE_SESSION
+    for result in (paused, resumed):
+        assert result.keep_event_receiver_alive and result.receiver_present
+        assert not result.desktop_ready_for_planning
+        assert not result.core_logical_idle_eligible
+        _assert_wh02a_no_authority(result)
+    # Explicitly releasing a pause cannot grant private Chrome start either.
+    absent = _core_evidence(
+        chrome_ownership=WakeHubChromeOwnership.ABSENT_INDEPENDENTLY_VERIFIED)
+    assert assess_wakehub_core_idle(absent).code is (
+        WakeHubCoreIdleCode.WAIT_PRIVATE_CHROME_START_GRANT)
+    _assert_wh02a_no_authority(assess_wakehub_core_idle(absent))
+
+
+@pytest.mark.parametrize("overrides", [
+    dict(source_current=1), dict(unknown_effect="False"),
+    dict(lost_effect_receipt=0), dict(trusted_human_pause=None),
+    dict(interactive_session_proven=1), dict(hostops_task="READY"),
+    dict(hostops_listener="PRESENT"), dict(hostops_listener="OFFLINE"),
+    dict(hostops_listener=WakeHubWorkState.CLEAR),
+    dict(engineering_listeners=[WakeHubListenerState.PRESENT] * 2),
+    dict(engineering_listeners=()),
+    dict(engineering_listeners=(WakeHubListenerState.PRESENT,) * 3),
+    dict(engineering_listeners=(WakeHubListenerState.PRESENT, "PRESENT")),
+    dict(queue_state=None), dict(pending_work="CLEAR"),
+    dict(outstanding_send=False), dict(outstanding_signer={"token": "synthetic-secret"}),
+    dict(outstanding_lease="CLEAR"), dict(pending_wake=0),
+    dict(chrome_ownership="OWNED_CDP_9444"),
+    dict(chrome_ownership="OWNED_CDP_9333"),
+    dict(chrome_ownership="OWNED_CDP_9222"),
+    dict(chrome_ownership=r"C:\private\synthetic-profile"),
+    dict(baseline={"secret": "synthetic-secret"}),
+])
+def test_wh02a_closed_core_schema_rejects_missing_or_wrong_enums_privately(overrides):
+    with pytest.raises(WakeHubCoreInputError) as caught:
+        assess_wakehub_core_idle(_core_evidence(**overrides))
+    assert caught.value.args == ("WAKEHUB_CORE_INPUT_INVALID",)
+    assert caught.value.__context__ is None
+
+
+def test_wh02a_missing_fields_and_unknown_schema_never_get_a_default_grant():
+    with pytest.raises(TypeError):
+        WakeHubCoreIdleEvidence()
+    with pytest.raises(TypeError):
+        WakeHubBaseline(WakeHubObservationState.NOT_MEASURED, secret="synthetic")
+    for value in (None, {}, "synthetic-secret", r"C:\private\profile"):
+        with pytest.raises(WakeHubCoreInputError, match="^WAKEHUB_CORE_INPUT_INVALID$"):
+            assess_wakehub_core_idle(value)
+        with pytest.raises(WakeHubCoreInputError, match="^WAKEHUB_CORE_INPUT_INVALID$"):
+            plan_wakehub_measurements(value)
+
+
+def test_wh02a_only_canonical_enum_members_and_builtin_numbers_are_accepted():
+    # A string-backed enum's type alone does not guarantee a declared member.
+    for name, enum_type, value in (
+        ("hostops_task", WakeHubTaskState, "READY"),
+        ("hostops_listener", WakeHubListenerState, "PRESENT"),
+        ("queue_state", WakeHubWorkState, "CLEAR"),
+        ("chrome_ownership", WakeHubChromeOwnership, "OWNED_CDP_9444"),
+    ):
+        forged = str.__new__(enum_type, value)
+        with pytest.raises(WakeHubCoreInputError):
+            assess_wakehub_core_idle(_core_evidence(**{name: forged}))
+    with pytest.raises(WakeHubCoreInputError):
+        plan_wakehub_measurements(_synthetic_baseline(observation=str.__new__(
+            WakeHubObservationState, "INDEPENDENTLY_OBSERVED")))
+
+    class UntrustedNumber(float):
+        def __le__(self, other):
+            raise AssertionError("Untrusted numeric operator was invoked")
+
+        def __ge__(self, other):
+            raise AssertionError("Untrusted numeric operator was invoked")
+
+    with pytest.raises(WakeHubCoreInputError) as caught:
+        plan_wakehub_measurements(_synthetic_baseline(
+            warm_samples=(WakeHubReadinessSample(0, UntrustedNumber(1)),)))
+    assert caught.value.args == ("WAKEHUB_CORE_INPUT_INVALID",)
+
+
+def test_wh02a_schema_upper_bounds_are_accepted_without_resource_policy_changes():
+    sample = WakeHubIdleSample(0, 100, 2**53 - 1, 2**32 - 1,
+                               tuple(range(1, WAKEHUB_MAX_PIDS_PER_SAMPLE + 1)))
+    baseline = _synthetic_baseline(
+        idle_samples=(sample, replace(sample, elapsed_seconds=1800)),
+        warm_samples=tuple(WakeHubReadinessSample(i, 2**53 - 1)
+                           for i in range(WAKEHUB_MAX_SAMPLES)),
+    )
+    result = plan_wakehub_measurements(baseline)
+    assert result.code is WakeHubMeasurementCode.MEASURED_SAMPLES_COMPLETE
+    assert result.warm.sample_count == WAKEHUB_MAX_SAMPLES
+    assert result.warm.p50_ms == result.warm.p95_ms == 2**53 - 1
+    _assert_wh02a_no_authority(result)
+
+
+@pytest.mark.parametrize(("name", "value"), [
+    ("elapsed_seconds", True), ("elapsed_seconds", -1),
+    ("elapsed_seconds", float("nan")), ("elapsed_seconds", float("inf")),
+    ("elapsed_seconds", 10**1000), ("elapsed_seconds", 2**53),
+    ("cpu_percent", True), ("cpu_percent", -0.1), ("cpu_percent", 100.1),
+    ("cpu_percent", float("nan")), ("cpu_percent", float("-inf")),
+    ("cpu_percent", "synthetic-secret"),
+    ("ram_bytes", False), ("ram_bytes", 1.5), ("ram_bytes", -1),
+    ("ram_bytes", 2**53), ("ram_bytes", float("inf")),
+    ("handles", True), ("handles", -1), ("handles", 2**32),
+    ("handles", float("nan")),
+    ("pids", ()), ("pids", [1, 2]), ("pids", (True,)),
+    ("pids", (0,)), ("pids", (-1,)), ("pids", (2**32,)),
+    ("pids", (1, 1)), ("pids", ("synthetic-secret",)),
+    ("pids", tuple(range(1, WAKEHUB_MAX_PIDS_PER_SAMPLE + 2))),
+])
+def test_wh02a_invalid_host_metrics_raise_typed_private_error(name, value):
+    baseline = _synthetic_baseline()
+    invalid = replace(baseline.idle_samples[0], **{name: value})
+    baseline = replace(baseline, idle_samples=(invalid, *baseline.idle_samples[1:]))
+    with pytest.raises(WakeHubCoreInputError) as caught:
+        plan_wakehub_measurements(baseline)
+    assert str(caught.value) == "WAKEHUB_CORE_INPUT_INVALID"
+
+
+@pytest.mark.parametrize("value", [
+    True, -1, float("nan"), float("inf"), float("-inf"),
+    10**1000, 2**53, "synthetic-secret", r"C:\private\receipt", None,
+])
+@pytest.mark.parametrize("stream", ["warm_samples", "cold_samples"])
+@pytest.mark.parametrize("name", ["elapsed_seconds", "duration_ms"])
+def test_wh02a_readiness_numeric_failures_are_closed(stream, name, value):
+    invalid = replace(WakeHubReadinessSample(0, 10), **{name: value})
+    baseline = _synthetic_baseline(**{stream: (invalid,)})
+    with pytest.raises(WakeHubCoreInputError) as caught:
+        plan_wakehub_measurements(baseline)
+    assert caught.value.args == ("WAKEHUB_CORE_INPUT_INVALID",)
+
+
+@pytest.mark.parametrize("stream", ["idle_samples", "warm_samples", "cold_samples"])
+def test_wh02a_unordered_duplicate_huge_or_open_sample_arrays_fail_closed(stream):
+    baseline = _synthetic_baseline()
+    samples = getattr(baseline, stream)
+    invalid_sets = (
+        list(samples), tuple(reversed(samples)), (samples[0], samples[0]),
+        (samples[0],) * (WAKEHUB_MAX_SAMPLES + 1), (None,),
+        ({"path": r"C:\private\sample", "token": "synthetic-secret"},),
+    )
+    for invalid in invalid_sets:
+        with pytest.raises(WakeHubCoreInputError) as caught:
+            plan_wakehub_measurements(replace(baseline, **{stream: invalid}))
+        assert caught.value.args == ("WAKEHUB_CORE_INPUT_INVALID",)
+
+
+@pytest.mark.parametrize("overrides", [
+    dict(observation="INDEPENDENTLY_OBSERVED"),
+    dict(observation=WakeHubMeasurementCode.NOT_MEASURED),
+    dict(observation=WakeHubObservationState.NOT_MEASURED),
+    dict(continuous_idle_window_proven=1),
+])
+def test_wh02a_measurement_provenance_and_coverage_types_are_strict(overrides):
+    with pytest.raises(WakeHubCoreInputError):
+        plan_wakehub_measurements(_synthetic_baseline(**overrides))
+    with pytest.raises(WakeHubCoreInputError):
+        plan_wakehub_measurements(WakeHubBaseline(
+            WakeHubObservationState.NOT_MEASURED, continuous_idle_window_proven=True))
+
+
+def test_wh02a_outputs_and_nested_evidence_are_frozen_and_cannot_enable_effects():
+    evidence = _core_evidence()
+    result = assess_wakehub_core_idle(evidence)
+    for item, name, value in (
+        (evidence, "source_current", False),
+        (evidence.baseline, "continuous_idle_window_proven", False),
+        (evidence.baseline.idle_samples[0], "cpu_percent", 1),
+        (evidence.baseline.warm_samples[0], "duration_ms", 1),
+        (result, "code", WakeHubCoreIdleCode.WAIT_RECEIVER),
+        (result.measurements, "idle_duration_seconds", 0),
+        (result.measurements.warm, "p95_ms", 0),
+    ):
+        with pytest.raises(FrozenInstanceError):
+            setattr(item, name, value)
+    for name in (
+        "start_permitted", "stop_permitted", "kill_permitted", "effect_attempted",
+        "wake_send_authorized", "chrome_operation_authorized",
+        "native_operation_authorized", "receiver_disable_authorized",
+    ):
+        for plan in (result, result.measurements):
+            with pytest.raises(FrozenInstanceError):
+                setattr(plan, name, True)
+            # Python 3.14 uses TypeError for init=False replacement; older
+            # versions use ValueError. Both must reject the specific field.
+            with pytest.raises(
+                (TypeError, ValueError),
+                match=rf"^field {name} is declared with init=False,",
+            ):
+                replace(plan, **{name: True})
+            assert getattr(plan, name) is False
+    assert assess_wakehub_core_idle(evidence) == result
+
+
+def test_wh02a_all_decisions_and_exceptions_have_no_os_network_or_file_effects(monkeypatch):
+    cases = [
+        (dict(unknown_effect=True), WakeHubCoreIdleCode.HOLD_UNKNOWN_EFFECT),
+        (dict(lost_effect_receipt=True), WakeHubCoreIdleCode.HOLD_UNKNOWN_EFFECT),
+        (dict(source_current=False), WakeHubCoreIdleCode.HOLD_SOURCE_DRIFT),
+        (dict(hostops_listener=WakeHubListenerState.ABSENT),
+         WakeHubCoreIdleCode.WAIT_RECEIVER),
+        (dict(trusted_human_pause=True), WakeHubCoreIdleCode.PAUSED_BY_HUMAN),
+        (dict(pending_wake=WakeHubWorkState.PENDING),
+         WakeHubCoreIdleCode.KEEP_ACTIVE_PENDING),
+        (dict(interactive_session_proven=False),
+         WakeHubCoreIdleCode.WAIT_INTERACTIVE_SESSION),
+        (dict(chrome_ownership=WakeHubChromeOwnership.PROFILE_CONFLICT),
+         WakeHubCoreIdleCode.HOLD_CHROME_OWNERSHIP),
+        (dict(chrome_ownership=WakeHubChromeOwnership.ABSENT_INDEPENDENTLY_VERIFIED),
+         WakeHubCoreIdleCode.WAIT_PRIVATE_CHROME_START_GRANT),
+        (dict(baseline=WakeHubBaseline(WakeHubObservationState.NOT_MEASURED)),
+         WakeHubCoreIdleCode.WAIT_MEASUREMENT),
+        (dict(engineering_listeners=(WakeHubListenerState.ABSENT,
+                                    WakeHubListenerState.UNAVAILABLE)),
+         WakeHubCoreIdleCode.CORE_LOGICAL_IDLE_ELIGIBLE),
+    ]
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("WH-02A attempted an external effect")
+
+    with monkeypatch.context() as guard:
+        for owner, name in (
+            (builtins, "open"), (Path, "open"), (Path, "write_text"),
+            (Path, "write_bytes"), (subprocess, "Popen"), (os, "system"),
+            (os, "kill"), (os, "remove"), (os, "rename"), (socket, "socket"),
+        ):
+            guard.setattr(owner, name, forbidden)
+        for overrides, code in cases:
+            evidence = _core_evidence(**overrides)
+            result = assess_wakehub_core_idle(evidence)
+            assert result == assess_wakehub_core_idle(evidence)
+            assert result.code is code
+            assert result.keep_event_receiver_alive
+            _assert_wh02a_no_authority(result)
+            _assert_wh02a_no_authority(result.measurements)
+        for invalid in (
+            _core_evidence(outstanding_send="synthetic-secret"),
+            _core_evidence(baseline=_synthetic_baseline(
+                warm_samples=(WakeHubReadinessSample(0, float("nan")),))),
+            # Even a HOLD must validate/reject malformed private input.
+            _core_evidence(unknown_effect=True, baseline={"token": "synthetic-secret"}),
+        ):
+            for _ in range(2):
+                with pytest.raises(WakeHubCoreInputError) as caught:
+                    assess_wakehub_core_idle(invalid)
+                assert caught.value.args == ("WAKEHUB_CORE_INPUT_INVALID",)
