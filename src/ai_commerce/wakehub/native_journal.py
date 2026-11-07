@@ -448,7 +448,14 @@ class SQLitePrivateJournal:
             # after a desktop enrollment has pinned its executing modules.
             from ai_commerce.wakehub.native_broker import WindowsServiceAuthority
             if type(authority) is not WindowsServiceAuthority:
-                deny()
+                # G3 strengthens the desktop boundary with a durable fresh
+                # challenge. Admit ONLY this concrete source verifier, never
+                # arbitrary subclasses or a caller-supplied verifier object.
+                # Keep this import lazy so G2 desktop/service enrollment does
+                # not acquire a new executing-module dependency on normal use.
+                from ai_commerce.wakehub.g3_service_host import G3ServiceAuthority
+                if type(authority) is not G3ServiceAuthority:
+                    deny()
         if authority.verify_original_outcome(record, signed_outcome) != observation:
             deny()
         with self._transaction() as db:

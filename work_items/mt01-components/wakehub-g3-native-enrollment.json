@@ -1,0 +1,22 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "wakehub-g3-native-enrollment",
+  "sources": [
+    "src/ai_commerce/wakehub/g3_desktop_observer.py",
+    "src/ai_commerce/wakehub/g3_enrollment.py",
+    "src/ai_commerce/wakehub/g3_service_host.py"
+  ],
+  "tests": ["tests/test_wakehub_g3_native_enrollment.py"],
+  "acs": [
+    "WAKEHUB.G3.fixed-attended-idempotent-readback",
+    "WAKEHUB.G3.service-sid-authentic-pipe-status-only",
+    "WAKEHUB.G3.signed-desktop-nonce-source-generation",
+    "WAKEHUB.G3.first-wins-unknown-reconciliation"
+  ],
+  "consumers": [
+    "src/ai_commerce/wakehub/native_broker.py",
+    "src/ai_commerce/wakehub/native_runtime.py",
+    "src/ai_commerce/wakehub/native_inventory.py"
+  ],
+  "contracts": []
+}
