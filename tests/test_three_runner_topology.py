@@ -34,6 +34,11 @@ from ai_commerce.engineering.three_runner_topology import (
     WakeHubAutoloadReason, WakeHubChatBinding, WakeHubChatTabEvidence,
     WakeHubChatAutoloadEvidence, WakeHubChatAutoloadPlan,
     assess_wakehub_chat_autoload_plan,
+    WakeHubCompletionState, WakeHubSendConsentScope, WakeHubSendIntentState,
+    WakeHubSendDeliveryState, WakeHubSendPreviewAdvice, WakeHubSendPreviewReason,
+    WakeHubSendPreviewSafety, WakeHubSendPreviewInputError,
+    WakeHubSendAuthorizationEvidence, WakeHubSendOnlyPreviewEvidence,
+    assess_wakehub_send_only_preview,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1953,4 +1958,398 @@ def test_wh05a_every_reason_and_invalid_input_are_pure_under_external_effect_tra
                 assess_wakehub_chat_autoload_plan(invalid)
             assert caught.value.args == ("WAKEHUB_AUTOLOAD_INPUT_INVALID",)
     assert codes == set(WakeHubAutoloadReason)
+
+
+# WH06A facts are synthetic PRIVATE observer projections, never native proof.
+def _send_authorization(**overrides):
+    current = WakeHubProofState.INDEPENDENTLY_CURRENT
+    values = dict(
+        projection=current, native_observer=current,
+        completion=WakeHubCompletionState.NEW_WORK_COMPLETION,
+        completion_proof=current, consent=WakeHubConsentState.CURRENT,
+        consent_scope=WakeHubSendConsentScope.SEND_ONLY,
+        consent_signature=current, signer=current, origin_binding=current,
+        lease=current, correlation=current,
+        intent=WakeHubSendIntentState.WRITE_AHEAD_RECORDED, intent_proof=current,
+    )
+    return WakeHubSendAuthorizationEvidence(**(values | overrides))
+
+
+def _send_preview(**overrides):
+    values = dict(
+        autoload=_autoload_evidence(), authorization=_send_authorization(),
+        composer_empty=True, send_control_count=1, send_control_visible=True,
+        send_control_enabled=True, delivery=WakeHubSendDeliveryState.NOT_ATTEMPTED,
+        ui_user_turn=WakeHubProofState.MISSING,
+    )
+    return WakeHubSendOnlyPreviewEvidence(**(values | overrides))
+
+
+def _assert_wh06a_no_effect(plan):
+    _assert_wh02a_no_authority(plan)
+    assert plan.scope == "WH06A_PURE_SEND_PREVIEW_POLICY_ONLY"
+    assert plan.keep_event_receiver_alive is True
+    for name in ("native_operations", "chrome", "navigation", "send", "click",
+                 "plugin", "start", "stop", "task", "process", "grant",
+                 "authorization", "d2_intent_written", "server_ack_counted"):
+        assert getattr(plan, name) is False
+        assert next(item for item in fields(plan) if item.name == name).init is False
+
+
+def _send_policy_cases():
+    reason = WakeHubSendPreviewReason
+    advice = WakeHubSendPreviewAdvice
+    current = WakeHubProofState.INDEPENDENTLY_CURRENT
+    cases = [
+        (_send_preview(), reason.PREVIEW_REQUIREMENTS_CURRENT,
+         advice.PREVIEW_READY_ADVISORY_ONLY),
+        (_send_preview(autoload=_autoload_evidence(tabs=())),
+         reason.WAIT_NAVIGATION_AND_REPROOF, advice.WAIT),
+        (_send_preview(composer_empty=False), reason.HOLD_COMPOSER_NOT_EMPTY, advice.HOLD),
+        (_send_preview(send_control_count=2), reason.HOLD_SEND_CONTROL_AMBIGUOUS, advice.HOLD),
+        (_send_preview(send_control_count=2**32 - 1), reason.HOLD_SEND_CONTROL_AMBIGUOUS, advice.HOLD),
+        (_send_preview(send_control_count=0), reason.WAIT_VISIBLE_SEND_CONTROL, advice.WAIT),
+        (_send_preview(send_control_visible=False), reason.WAIT_VISIBLE_SEND_CONTROL, advice.WAIT),
+        (_send_preview(send_control_enabled=False), reason.WAIT_SEND_CONTROL_ENABLED, advice.WAIT),
+        (_send_preview(ui_user_turn=current), reason.RECONCILE_UNBOUND_UI_WITNESS,
+         advice.RECONCILE_UNKNOWN_NO_RETRY),
+        (_send_preview(autoload=_autoload_evidence(readiness=_smart_case("core", unknown_effect=True))),
+         reason.RECONCILE_UNKNOWN_EFFECT, advice.RECONCILE_UNKNOWN_NO_RETRY),
+        (_send_preview(authorization=_send_authorization(intent=WakeHubSendIntentState.UNKNOWN)),
+         reason.RECONCILE_UNKNOWN_EFFECT, advice.RECONCILE_UNKNOWN_NO_RETRY),
+    ]
+    for name, code in (
+        ("projection", reason.HOLD_PRIVATE_SEND_PROJECTION),
+        ("native_observer", reason.HOLD_NATIVE_OBSERVER_PROOF),
+        ("completion_proof", reason.HOLD_COMPLETION_PROOF),
+        ("consent_signature", reason.HOLD_CONSENT_SIGNATURE),
+        ("signer", reason.HOLD_CONSENT_SIGNER),
+        ("origin_binding", reason.HOLD_SEND_ORIGIN_BINDING),
+        ("lease", reason.HOLD_SEND_LEASE),
+        ("correlation", reason.HOLD_SEND_CORRELATION),
+        ("intent_proof", reason.HOLD_D2_INTENT_PROOF),
+    ):
+        for proof in WakeHubProofState:
+            if proof is not current:
+                cases.append((_send_preview(authorization=_send_authorization(**{name: proof})),
+                              code, advice.HOLD))
+    for state in WakeHubCompletionState:
+        if state is WakeHubCompletionState.NEW_WORK_COMPLETION:
+            continue
+        code, decision = reason.HOLD_COMPLETION_PROOF, advice.HOLD
+        if state is WakeHubCompletionState.ABSENT:
+            code, decision = reason.WAIT_NEW_WORK_COMPLETION, advice.WAIT
+        elif state is WakeHubCompletionState.DUPLICATE:
+            code, decision = reason.RECONCILE_DUPLICATE_KEY, advice.RECONCILE_UNKNOWN_NO_RETRY
+        cases.append((_send_preview(authorization=_send_authorization(completion=state)), code, decision))
+    for state in WakeHubConsentState:
+        if state is not WakeHubConsentState.CURRENT:
+            cases.append((_send_preview(authorization=_send_authorization(consent=state)),
+                          reason.HOLD_SEND_ONLY_CONSENT, advice.HOLD))
+    for scope in (WakeHubSendConsentScope.OTHER, WakeHubSendConsentScope.ABSENT):
+        cases.append((_send_preview(authorization=_send_authorization(consent_scope=scope)),
+                      reason.HOLD_SEND_ONLY_CONSENT, advice.HOLD))
+    cases.append((_send_preview(authorization=_send_authorization(intent=WakeHubSendIntentState.NOT_RECORDED)),
+                  reason.WAIT_D2_WRITE_AHEAD_INTENT, advice.WAIT))
+    for changes in (
+        dict(authorization=_send_authorization(intent=WakeHubSendIntentState.DUPLICATE_KEY)),
+        dict(delivery=WakeHubSendDeliveryState.DUPLICATE_KEY),
+        dict(autoload=_autoload_evidence(readiness=_smart_case(
+            "origin", event=WakeHubEventState.DUPLICATE_AMBIGUOUS))),
+    ):
+        cases.append((_send_preview(**changes), reason.RECONCILE_DUPLICATE_KEY,
+                      advice.RECONCILE_UNKNOWN_NO_RETRY))
+    for delivery in (WakeHubSendDeliveryState.ATTEMPT_BEGUN,
+                     WakeHubSendDeliveryState.RECEIPT_LOST,
+                     WakeHubSendDeliveryState.OUTCOME_UNOBSERVED):
+        for proof in WakeHubProofState:
+            complete = proof is current
+            cases.append((_send_preview(delivery=delivery, ui_user_turn=proof),
+                          reason.COMPLETE_UI_USER_TURN_WITHOUT_SERVER_ACK if complete
+                          else reason.RECONCILE_PRIOR_ATTEMPT,
+                          advice.COMPLETE_UI_ONLY if complete else advice.RECONCILE_UNKNOWN_NO_RETRY))
+    return cases
+
+
+@pytest.mark.parametrize(("evidence", "reason", "advice"), _send_policy_cases())
+def test_wh06a_every_send_policy_gate(evidence, reason, advice):
+    plan = assess_wakehub_send_only_preview(evidence)
+    assert plan == assess_wakehub_send_only_preview(evidence)
+    assert plan.reason is reason
+    assert plan.advice is advice
+    expected_safety = {
+        WakeHubSendPreviewAdvice.PREVIEW_READY_ADVISORY_ONLY: WakeHubSendPreviewSafety.ADVISORY_NO_EFFECT,
+        WakeHubSendPreviewAdvice.WAIT: WakeHubSendPreviewSafety.BLOCKED_NO_EFFECT,
+        WakeHubSendPreviewAdvice.HOLD: WakeHubSendPreviewSafety.BLOCKED_NO_EFFECT,
+        WakeHubSendPreviewAdvice.RECONCILE_UNKNOWN_NO_RETRY: WakeHubSendPreviewSafety.RECONCILE_ONLY_NO_RETRY,
+        WakeHubSendPreviewAdvice.COMPLETE_UI_ONLY: WakeHubSendPreviewSafety.UI_ONLY_WITHOUT_SERVER_ACK,
+    }
+    assert plan.safety_state is expected_safety[advice]
+    _assert_wh06a_no_effect(plan)
+
+
+def _send_upstream_cases():
+    cases = []
+    for section, changes, reason in (
+        ("core", dict(source_current=False), "HOLD_SOURCE_DRIFT"),
+        ("core", dict(hostops_listener=WakeHubListenerState.ABSENT), "WAIT_RECEIVER"),
+        ("core", dict(pending_work=WakeHubWorkState.PENDING), "WAIT_PENDING_WORK"),
+        ("core", dict(interactive_session_proven=False), "WAIT_INTERACTIVE_SESSION"),
+        ("core", dict(chrome_ownership=WakeHubChromeOwnership.ABSENT_INDEPENDENTLY_VERIFIED), "WAIT_CHROME"),
+        ("browser", dict(port=9333), "HOLD_CHROME_ENDPOINT"),
+        ("browser", dict(ownership=WakeHubChromeOwnership.PROFILE_CONFLICT), "HOLD_CHROME_OWNERSHIP"),
+        ("browser", dict(host=WakeHubEndpointHost.IPV6_LOOPBACK), "HOLD_CHROME_ENDPOINT"),
+        ("browser", dict(pid=0), "HOLD_CHROME_IDENTITY"),
+        ("browser", dict(profile=WakeHubProofState.MISMATCH), "HOLD_CHROME_IDENTITY"),
+        ("browser", dict(retained_account=WakeHubProofState.MISSING), "HOLD_BROWSER_ACCOUNT"),
+        ("origin", dict(event=WakeHubEventState.ABSENT), "WAIT_EVENT"),
+        ("origin", dict(event=WakeHubEventState.STALE), "HOLD_EVENT_STALE"),
+        ("origin", dict(issuer=WakeHubProofState.MISSING), "HOLD_ORIGIN_ISSUER"),
+        ("origin", dict(owner=WakeHubProofState.MISMATCH), "HOLD_ORIGIN_OWNER"),
+        ("origin", dict(route=WakeHubProofState.MISSING), "HOLD_ORIGIN_ROUTE"),
+        ("origin", dict(generation=WakeHubProofState.STALE), "HOLD_ORIGIN_GENERATION"),
+        ("origin", dict(consent=WakeHubConsentState.REVOKED), "HOLD_ORIGIN_CONSENT"),
+    ):
+        cases.append((_autoload_evidence(readiness=_smart_case(section, **changes)),
+                      WakeHubAutoloadReason[reason]))
+    for changes, reason in (
+        (dict(projection=WakeHubProofState.MISSING), "HOLD_PRIVATE_PROJECTION"),
+        (dict(session_owner=WakeHubProofState.MISMATCH), "HOLD_SESSION_OWNER"),
+    ):
+        cases.append((_autoload_evidence(readiness=_smart_evidence(**changes)),
+                      WakeHubAutoloadReason[reason]))
+    for changes, reason in (
+        (dict(tabs=(_autoload_tab(), _autoload_tab(tab_id=2))), "HOLD_DUPLICATE_MATCHING_TABS"),
+        (dict(dedicated_context=WakeHubProofState.MISSING), "WAIT_DEDICATED_CONTEXT"),
+        (dict(dedicated_context=WakeHubProofState.MISMATCH), "HOLD_NON_DEDICATED_CONTEXT"),
+        (dict(tab_generation=WakeHubProofState.STALE), "HOLD_GENERATION_DRIFT"),
+        (dict(unrelated_tab_mutation=True), "HOLD_UNRELATED_TAB_MUTATION"),
+        (dict(route_authorized=WakeHubProofState.MISSING), "HOLD_ORIGIN_ROUTE"),
+    ):
+        cases.append((_autoload_evidence(**changes), WakeHubAutoloadReason[reason]))
+    for changes, reason in (
+        (dict(chat_binding=WakeHubChatBinding.WRONG_CHAT_B), "HOLD_WRONG_CHAT_TARGET"),
+        (dict(chat_binding=WakeHubChatBinding.UNBOUND), "HOLD_WRONG_CHAT_TARGET"),
+        (dict(marker=WakeHubProofState.AMBIGUOUS), "HOLD_MARKER_AMBIGUOUS"),
+        (dict(security_challenge_present=True), "HOLD_LOGIN_OR_CAPTCHA_CHALLENGE"),
+        (dict(human_draft_present=True), "HOLD_HUMAN_DRAFT_PRESENT"),
+        (dict(actively_generating=True), "WAIT_RESPONSE_STREAMING_ACTIVE"),
+        (dict(redirect_drift=True), "HOLD_GENERATION_DRIFT"),
+        (dict(post_navigation_recheck=WakeHubProofState.MISSING), "WAIT_POST_NAVIGATION_RECHECK"),
+        (dict(post_navigation_recheck=WakeHubProofState.STALE), "HOLD_POST_NAVIGATION_RECHECK_REQUIRED"),
+        (dict(account_proof=WakeHubProofState.MISMATCH), "HOLD_BROWSER_ACCOUNT"),
+    ):
+        cases.append((_autoload_evidence(tabs=(_autoload_tab(**changes),)), WakeHubAutoloadReason[reason]))
+    return cases
+
+
+@pytest.mark.parametrize(("autoload", "reason"), _send_upstream_cases())
+def test_wh06a_derives_unready_from_wh05a_and_wh04a(autoload, reason):
+    plan = assess_wakehub_send_only_preview(_send_preview(autoload=autoload))
+    assert plan.reason is reason
+    assert plan.advice in (WakeHubSendPreviewAdvice.WAIT, WakeHubSendPreviewAdvice.HOLD)
+    _assert_wh06a_no_effect(plan)
+
+
+@pytest.mark.parametrize("unknown", [False, True])
+def test_wh06a_human_pause_wins_even_over_unknown_or_completed_ui(unknown):
+    evidence = _send_preview(
+        autoload=_autoload_evidence(readiness=_smart_case(
+            "core", trusted_human_pause=True, unknown_effect=unknown)),
+        delivery=WakeHubSendDeliveryState.RECEIPT_LOST,
+        ui_user_turn=WakeHubProofState.INDEPENDENTLY_CURRENT,
+    )
+    plan = assess_wakehub_send_only_preview(evidence)
+    assert plan.advice is WakeHubSendPreviewAdvice.HOLD
+    assert plan.reason is WakeHubAutoloadReason.HOLD_HUMAN_PAUSED
+    assert plan.paused_by_human
+    _assert_wh06a_no_effect(plan)
+
+
+@pytest.mark.parametrize("changes", [dict(actively_generating=True), dict(human_draft_present=True)])
+def test_wh06a_ui_completion_is_independent_of_composer_and_send_controls(changes):
+    evidence = _send_preview(
+        autoload=_autoload_evidence(tabs=(_autoload_tab(**changes),)),
+        delivery=WakeHubSendDeliveryState.ATTEMPT_BEGUN,
+        ui_user_turn=WakeHubProofState.INDEPENDENTLY_CURRENT,
+        composer_empty=False, send_control_count=0, send_control_enabled=False,
+    )
+    plan = assess_wakehub_send_only_preview(evidence)
+    assert plan.advice is WakeHubSendPreviewAdvice.COMPLETE_UI_ONLY
+    assert plan.safety_state is WakeHubSendPreviewSafety.UI_ONLY_WITHOUT_SERVER_ACK
+    _assert_wh06a_no_effect(plan)
+    for drift in (dict(redirect_drift=True), dict(generation=WakeHubProofState.STALE),
+                  dict(post_navigation_recheck=WakeHubProofState.MISSING)):
+        changed = replace(evidence, autoload=_autoload_evidence(tabs=(_autoload_tab(**(changes | drift)),)))
+        assert assess_wakehub_send_only_preview(changed).advice is WakeHubSendPreviewAdvice.RECONCILE_UNKNOWN_NO_RETRY
+
+
+@pytest.mark.parametrize("section", ["native_observer", "origin_binding", "intent_proof", "lease", "consent_signature"])
+def test_wh06a_prior_attempt_cannot_be_retried_when_private_proof_is_missing(section):
+    evidence = _send_preview(
+        authorization=_send_authorization(**{section: WakeHubProofState.MISSING}),
+        delivery=WakeHubSendDeliveryState.RECEIPT_LOST,
+        ui_user_turn=WakeHubProofState.INDEPENDENTLY_CURRENT,
+    )
+    plan = assess_wakehub_send_only_preview(evidence)
+    assert plan.advice is WakeHubSendPreviewAdvice.RECONCILE_UNKNOWN_NO_RETRY
+    _assert_wh06a_no_effect(plan)
+
+
+@pytest.mark.parametrize("name", ["queue_state", "pending_work", "outstanding_send",
+                                 "outstanding_signer", "outstanding_lease", "pending_wake"])
+@pytest.mark.parametrize("state", [WakeHubWorkState.PENDING, WakeHubWorkState.UNKNOWN])
+def test_wh06a_pending_or_unknown_work_never_becomes_send_ready(name, state):
+    plan = assess_wakehub_send_only_preview(_send_preview(
+        autoload=_autoload_evidence(readiness=_smart_case("core", **{name: state}))))
+    assert plan.advice is (WakeHubSendPreviewAdvice.WAIT if state is WakeHubWorkState.PENDING
+                           else WakeHubSendPreviewAdvice.RECONCILE_UNKNOWN_NO_RETRY)
+    _assert_wh06a_no_effect(plan)
+
+
+def test_wh06a_lost_core_receipt_is_not_resolved_by_an_unrelated_ui_witness():
+    evidence = _send_preview(
+        autoload=_autoload_evidence(readiness=_smart_case("core", lost_effect_receipt=True)),
+        delivery=WakeHubSendDeliveryState.RECEIPT_LOST,
+        ui_user_turn=WakeHubProofState.INDEPENDENTLY_CURRENT,
+    )
+    plan = assess_wakehub_send_only_preview(evidence)
+    assert plan.advice is WakeHubSendPreviewAdvice.RECONCILE_UNKNOWN_NO_RETRY
+    assert plan.reason is WakeHubSendPreviewReason.RECONCILE_UNKNOWN_EFFECT
+
+
+@pytest.mark.parametrize(("name", "value"), [
+    ("autoload", {}), ("autoload", assess_wakehub_chat_autoload_plan(_autoload_evidence())),
+    ("authorization", {}), ("composer_empty", 1), ("composer_empty", "secret-value"),
+    ("send_control_count", True), ("send_control_count", -1), ("send_control_count", 2**32),
+    ("send_control_count", 10**1000), ("send_control_count", 1.0),
+    ("send_control_count", float("inf")), ("send_control_count", float("nan")),
+    ("send_control_visible", 0), ("send_control_enabled", None),
+    ("delivery", "NOT_ATTEMPTED"), ("delivery", WakeHubWorkState.CLEAR),
+    ("ui_user_turn", "INDEPENDENTLY_CURRENT"), ("ui_user_turn", True),
+])
+def test_wh06a_strict_closed_schema_rejects_untrusted_values(name, value):
+    with pytest.raises(WakeHubSendPreviewInputError) as caught:
+        replace(_send_preview(), **{name: value})
+    assert caught.value.args == ("WAKEHUB_SEND_PREVIEW_INPUT_INVALID",)
+
+
+def test_wh06a_all_authorization_fields_are_strict_and_errors_sanitized():
+    evidence = _send_preview()
+    for item in fields(evidence.authorization):
+        for value in ("secret-value", True, 1, None, WakeHubWorkState.CLEAR):
+            with pytest.raises(WakeHubSendPreviewInputError) as caught:
+                replace(evidence.authorization, **{item.name: value})
+            assert caught.value.args == ("WAKEHUB_SEND_PREVIEW_INPUT_INVALID",)
+    for item in (evidence, evidence.authorization):
+        values = {f.name: getattr(item, f.name) for f in fields(item)}
+        for invalid in ({}, values | {"secret-key": "secret-value"},
+                        values | {"verified": True}, values | {"send": True}):
+            with pytest.raises(WakeHubSendPreviewInputError) as caught:
+                type(item)(**invalid)
+            assert caught.value.args == ("WAKEHUB_SEND_PREVIEW_INPUT_INVALID",)
+        with pytest.raises(WakeHubSendPreviewInputError):
+            type(item)(values)
+    for invalid in (None, {}, "secret-value", (evidence,)):
+        with pytest.raises(WakeHubSendPreviewInputError) as caught:
+            assess_wakehub_send_only_preview(invalid)
+        assert caught.value.args == ("WAKEHUB_SEND_PREVIEW_INPUT_INVALID",)
+    with pytest.raises(WakeHubSendPreviewInputError) as caught:
+        assess_wakehub_send_only_preview(evidence, **{"secret-key": "secret-value"})
+    assert caught.value.args == ("WAKEHUB_SEND_PREVIEW_INPUT_INVALID",)
+
+
+def test_wh06a_rejects_subclasses_forged_enums_and_nested_invalid_evidence():
+    class UnsafeInt(int):
+        def __le__(self, other):
+            pytest.fail("numeric subclass executed")
+
+    class UnsafeEvidence(WakeHubSendOnlyPreviewEvidence):
+        def _validate(self):
+            pytest.fail("evidence subclass executed")
+
+    class UnsafeAuthorization(WakeHubSendAuthorizationEvidence):
+        def _validate(self):
+            pytest.fail("authorization subclass executed")
+
+    for invalid in (object.__new__(UnsafeEvidence), object.__new__(WakeHubSendOnlyPreviewEvidence)):
+        with pytest.raises(WakeHubSendPreviewInputError):
+            assess_wakehub_send_only_preview(invalid)
+    with pytest.raises(WakeHubSendPreviewInputError):
+        _send_preview(authorization=object.__new__(UnsafeAuthorization))
+    with pytest.raises(WakeHubSendPreviewInputError):
+        _send_preview(send_control_count=UnsafeInt(1))
+    for enum_type, name in ((WakeHubSendDeliveryState, "delivery"), (WakeHubProofState, "ui_user_turn")):
+        forged = str.__new__(enum_type, next(iter(enum_type)).value)
+        with pytest.raises(WakeHubSendPreviewInputError):
+            _send_preview(**{name: forged})
+    bad_core = replace(_smart_evidence().core, source_current="secret-value")
+    # Revalidate nested WH01/02/04/05 facts; never accept a stored READY plan.
+    bad_smart = object.__new__(WakeHubSmartReadinessEvidence)
+    for item in fields(_smart_evidence()):
+        object.__setattr__(bad_smart, item.name, bad_core if item.name == "core"
+                           else getattr(_smart_evidence(), item.name))
+    bad_autoload = object.__new__(WakeHubChatAutoloadEvidence)
+    for item in fields(_autoload_evidence()):
+        object.__setattr__(bad_autoload, item.name, bad_smart if item.name == "readiness"
+                           else getattr(_autoload_evidence(), item.name))
+    with pytest.raises(WakeHubSendPreviewInputError) as caught:
+        _send_preview(autoload=bad_autoload)
+    assert caught.value.args == ("WAKEHUB_SEND_PREVIEW_INPUT_INVALID",)
+
+
+def test_wh06a_nested_projections_and_every_no_effect_flag_are_immutable():
+    evidence = _send_preview()
+    plan = assess_wakehub_send_only_preview(evidence)
+    for item, name in ((evidence, "composer_empty"), (evidence.authorization, "native_observer"),
+                       (plan, "advice")):
+        assert not hasattr(item, "__dict__")
+        with pytest.raises(FrozenInstanceError):
+            setattr(item, name, True)
+    for item in fields(plan):
+        if not item.init:
+            original = getattr(plan, item.name)
+            with pytest.raises(FrozenInstanceError):
+                setattr(plan, item.name, True)
+            with pytest.raises(
+                (TypeError, ValueError),
+                match=rf"^field {item.name} is declared with init=False,",
+            ):
+                replace(plan, **{item.name: True})
+            assert getattr(plan, item.name) == original
+
+
+def test_wh06a_all_reasons_and_invalid_inputs_under_external_effect_traps(monkeypatch):
+    cases = _send_policy_cases()
+    upstream_cases = _send_upstream_cases()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("WH06A attempted an external effect")
+
+    seen = set()
+    with monkeypatch.context() as guard:
+        for owner, names in (
+            (builtins, ("open",)),
+            (Path, ("open", "read_text", "read_bytes", "write_text", "write_bytes", "stat",
+                    "iterdir", "mkdir", "unlink", "rename", "replace")),
+            (os, ("open", "stat", "listdir", "scandir", "mkdir", "remove", "rename", "replace",
+                  "system", "kill", "startfile", "popen", "spawnv", "spawnve")),
+            (subprocess, ("Popen", "run", "call", "check_call", "check_output")),
+            (socket, ("socket", "create_connection", "getaddrinfo", "gethostbyname")),
+            (time, ("sleep", "time", "monotonic", "perf_counter")),
+        ):
+            for name in names:
+                guard.setattr(owner, name, forbidden)
+        for evidence, reason, advice in cases:
+            plan = assess_wakehub_send_only_preview(evidence)
+            assert plan == assess_wakehub_send_only_preview(evidence)
+            assert plan.reason is reason and plan.advice is advice
+            seen.add(plan.reason)
+            _assert_wh06a_no_effect(plan)
+        for autoload, reason in upstream_cases:
+            assert assess_wakehub_send_only_preview(_send_preview(autoload=autoload)).reason is reason
+        for invalid in (None, {"token": "secret-value"}):
+            with pytest.raises(WakeHubSendPreviewInputError):
+                assess_wakehub_send_only_preview(invalid)
+    assert seen == set(WakeHubSendPreviewReason)
 
