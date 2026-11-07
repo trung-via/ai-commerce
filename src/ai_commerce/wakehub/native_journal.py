@@ -151,13 +151,16 @@ class WindowsPathCustody:
                 deny()
 
     @staticmethod
-    def _descriptor(name, object_type=1):
+    def _descriptor(name, object_type=1, *, handle=False):
         adv = ctypes.WinDLL("advapi32", use_last_error=True)
         kernel = ctypes.WinDLL("kernel32", use_last_error=True)
         ptr = ctypes.c_void_p
         adv.GetNamedSecurityInfoW.argtypes = [wintypes.LPWSTR, wintypes.DWORD,
             wintypes.DWORD, ctypes.POINTER(ptr), ptr, ctypes.POINTER(ptr), ptr, ctypes.POINTER(ptr)]
         adv.GetNamedSecurityInfoW.restype = wintypes.DWORD
+        adv.GetSecurityInfo.argtypes = [wintypes.HANDLE, wintypes.DWORD,
+            wintypes.DWORD, ctypes.POINTER(ptr), ptr, ctypes.POINTER(ptr), ptr, ctypes.POINTER(ptr)]
+        adv.GetSecurityInfo.restype = wintypes.DWORD
         adv.ConvertSidToStringSidW.argtypes = [ptr, ctypes.POINTER(wintypes.LPWSTR)]
         adv.ConvertSidToStringSidW.restype = wintypes.BOOL
         adv.GetAclInformation.argtypes = [ptr, ptr, wintypes.DWORD, wintypes.DWORD]
@@ -175,7 +178,8 @@ class WindowsPathCustody:
                 return out.value
             finally:
                 kernel.LocalFree(ctypes.cast(out, ptr))
-        if adv.GetNamedSecurityInfoW(name, object_type, 5, ctypes.byref(owner), None,
+        reader = adv.GetSecurityInfo if handle else adv.GetNamedSecurityInfoW
+        if reader(name, object_type, 5, ctypes.byref(owner), None,
                                     ctypes.byref(dacl), None, ctypes.byref(sd)):
             deny()
         try:
@@ -440,7 +444,11 @@ class SQLitePrivateJournal:
     def resolve_verified(self, record, observation, signed_outcome, authority):
         from ai_commerce.wakehub.native_authority import WindowsGrantVerifier
         if type(authority) is not WindowsGrantVerifier:
-            deny()
+            # Preserve the legacy release inventory: do not load service code
+            # after a desktop enrollment has pinned its executing modules.
+            from ai_commerce.wakehub.native_broker import WindowsServiceAuthority
+            if type(authority) is not WindowsServiceAuthority:
+                deny()
         if authority.verify_original_outcome(record, signed_outcome) != observation:
             deny()
         with self._transaction() as db:

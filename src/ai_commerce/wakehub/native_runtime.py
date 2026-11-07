@@ -69,7 +69,70 @@ class WindowsPrivateRuntime:
             pass  # No private OS errors, reprs, paths or transcript in receipts.
         return runtime
 
+    @classmethod
+    def from_service_connection(cls, pipe_handle):
+        """Called only by a separately installed service, on its server handle.
+
+        A raw pipe message, shared user SID, or source checkout is insufficient.
+        No listener, service installation, key creation or GUI action occurs.
+        """
+        from ai_commerce.wakehub.native_broker import WindowsServiceAuthority, BrokerRequests, ServiceEffectJournal
+        runtime = cls()
+        runtime._broker = None
+        try:
+            windows_only()
+            authority = WindowsServiceAuthority(pipe_handle)
+            value = authority.enrolled
+            runtime._unresolved = True
+            journal = ServiceEffectJournal(value["journal_path"],
+                owner_sid=authority.journal_owner(authority.target),
+                journal_id=value["journal_id"], lane=value["lane"])
+            authority.journal = journal
+            authority._load(authority.clock())
+            requests = BrokerRequests(authority.broker["requests_path"],
+                owner_sid=authority.service_sid, journal_id=value["journal_id"])
+            runtime._authority = authority
+            runtime._operator = op.PrivateLifecycleOperator(op.LifecyclePolicy(authority.source),
+                verifier=authority, journal=journal, executor=WindowsExecutor(), clock=authority.clock)
+            runtime._broker = requests
+            runtime._unresolved = False
+        except Exception:
+            # Partial initialization can never fall back to the desktop path.
+            runtime._operator = None
+            runtime._authority = None
+        return runtime
+
+    def run_service_request(self, raw):
+        """Only a signed fixed broker envelope can reach service policy."""
+        operation = op.Operation.STATUS
+        claimed = False
+        try:
+            authority = self._authority
+            if getattr(self, "_broker", None) is None:
+                raise ValueError()
+            operation, proof, nonce, digest = authority.verify_request(raw)
+            # Persist UNKNOWN before dispatch. Lost ACK/timeout never retries.
+            if not self._broker.claim(nonce, digest):
+                return op.PublicReceipt(operation, op.Decision.HOLD, op.Reason.DUPLICATE)
+            claimed = True
+            authority._load(authority.clock())
+            result = self._run_authenticated(operation, proof)
+            self._broker.finish(nonce, digest, result)
+            return result
+        except Exception:
+            return op.PublicReceipt(operation, op.Decision.UNKNOWN_EFFECT
+                if claimed or self._unresolved else op.Decision.HOLD,
+                op.Reason.RECONCILE_ONLY if claimed or self._unresolved
+                else op.Reason.AUTHORITY_REQUIRED)
+
     def run(self, operation, proof=None):
+        # Service callers must authenticate the pipe AND signed envelope first.
+        if hasattr(self, "_broker"):
+            return op.PublicReceipt(operation if type(operation) is op.Operation else op.Operation.STATUS,
+                op.Decision.HOLD, op.Reason.AUTHORITY_REQUIRED)
+        return self._run_authenticated(operation, proof)
+
+    def _run_authenticated(self, operation, proof=None):
         if type(operation) is not op.Operation:
             return op.PublicReceipt(op.Operation.STATUS, op.Decision.HOLD, op.Reason.INVALID_REQUEST)
         if self._operator is None:

@@ -677,28 +677,27 @@ def test_owner_admission_and_existing_consumer_closure():
         base_sha=auth.TASK_PARENT, existing_groups=groups)
     baseline = (*groups, *(r["group"] for r in records))
     data = json.loads((ROOT / PATHS[-1]).read_text())
-    admission = impact_v21.validate_component_onboarding_manifest(data, manifest_path=PATHS[-1],
-        changed_paths=PATHS, base_paths=tuple(p for g in baseline for p in (*g.paths, *g.tests, *g.contracts)),
-        existing_groups=baseline, allowed_paths=PATHS, root=ROOT)
-    owner = minimum_test.TestGroup(admission["name"], admission["tests"], admission["acs"],
-        admission["paths"], admission["consumers"], (admission["manifest_path"],))
-    impact = impact_v21.select_impact(root=ROOT, changed_paths=PATHS, groups=(*baseline, owner))
+    # This owner is now committed on the authorized baseline. Re-admitting its
+    # manifest as NEW would defeat the immutable owner rule behind #541.
+    assert any(r["group"].name == "wakehub-g2-native" for r in records)
+    changed = PATHS[:-1]
+    impact = impact_v21.select_impact(root=ROOT, changed_paths=changed, groups=baseline)
     assert impact.runnable, impact.missing_mapping
     assert {"wakehub-g2-native", "wakehub-private-operator", "wakehub-native-inventory"} <= set(impact.selected_groups)
     assert set(impact.selected_tests) == {PATHS[3], "tests/test_wakehub_private_operator.py", "tests/test_wakehub_native_inventory.py"}
     assert "ONBOARD_CONSUMER_OWNER_CLOSURE" in impact.reason_codes
     profiles = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_text())
     candidate = minimum_test.file_hashes(ROOT)
-    base = {p: h for p, h in candidate.items() if p not in PATHS}
+    base = dict(candidate)
     plan = impact_v21.registered_action_plan(repo=ROOT, base_sha=auth.TASK_PARENT,
-        base_files=base, candidate_files=candidate, changed_paths=PATHS, required_acs=data["acs"],
+        base_files=base, candidate_files=candidate, changed_paths=changed, required_acs=data["acs"],
         fallback_argv=profiles["mt01-component-onboarding"], groups=groups,
-        registered_profiles=profiles, allowed_paths=PATHS)
+        registered_profiles=profiles, allowed_paths=changed)
     assert plan["selected_groups"] == sorted(impact.selected_groups)
     assert not plan["unknown_acs"]
     assert all(g["execute"] for g in plan["groups"]), plan["reason_codes"]
     for selected in plan["groups"]:
         assert selected["selected_profile"] == "mt01-component-onboarding"
         assert impact_v21.verified_onboarding_binding(workspace=ROOT, binding=selected["binding"],
-            changed_paths=PATHS, allowed_paths=PATHS, base_sha=auth.TASK_PARENT,
+            changed_paths=changed, allowed_paths=changed, base_sha=auth.TASK_PARENT,
             registered_profiles=profiles, expected_group=selected["group"])

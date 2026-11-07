@@ -38,7 +38,7 @@ from ai_commerce.wakehub.native_journal import (
 )
 
 
-TASK_PARENT = "c51b3bc4e717d11b4eadc89eba2791876d645419"
+TASK_PARENT = "a7cd1b4fbe02ec4474ca44719125a351d923d762"
 ANCHOR_KEY = r"SOFTWARE\AI-Commerce\WakeHubG2"
 NAMESPACES = {role: "wakehub-g2-9444-" + role + "@ai-commerce" for role in
               ("enrollment", "grant", "consent", "revocations", "inventory", "outcome")}
@@ -117,6 +117,11 @@ def _validate_anchor(anchor):
                    for s in anchor["runner_sids"])
             or anchor["operator_sid"] in anchor["runner_sids"]):
         deny()
+    return _validate_anchor_material(anchor)
+
+
+def _validate_anchor_material(anchor):
+    """Shared public key/release pins; does not authorize any principal."""
     custody = WindowsPathCustody()
     keys = []
     for role in ("issuer", "human", "observer"):
@@ -248,7 +253,7 @@ class WindowsGrantVerifier:
         self._load(self.clock())
 
     def _load(self, now):
-        anchor = _load_anchor()
+        anchor = self._read_anchor()
         digest = _digest(canonical(anchor))
         if self._anchor_digest is not None and digest != self._anchor_digest:
             deny()  # Changing trust anchors requires a new explicit enrollment.
@@ -260,15 +265,13 @@ class WindowsGrantVerifier:
                 or value["enabled"] is not True or not 0 < value["issued_at"] <= now < value["expires_at"]):
             deny()
         source, target = op.SourceBinding(**value["source"]), op.PrivateTarget(**value["target"])
-        if (target.user_sid != anchor["operator_sid"] or target.user_sid in anchor["runner_sids"]
-                or value["observer_sid"] in (target.user_sid, *anchor["runner_sids"])
-                or not re.fullmatch(r"S-1-(?:[0-9]+-)+[0-9]+", value["observer_sid"])
-                or value["lane"] != lane_for(target)
+        self._check_principals(anchor, value, target)
+        if (value["lane"] != lane_for(target)
                 or not re.fullmatch(r"[0-9a-f]{32}", value["journal_id"])):
             deny()
-        _desktop_identity(target)
+        self._check_desktop(target)
         _verify_release(value)
-        state = WindowsPathCustody(target.user_sid)
+        state = WindowsPathCustody(self.journal_owner(target))
         state.check(value["journal_path"])
         observer = WindowsPathCustody(value["observer_sid"])
         observer_root = observer.check(value["observer_root"], directory=True)
@@ -307,6 +310,23 @@ class WindowsGrantVerifier:
                 if self._original_outcome(record, raw, now) != record.observation:
                     deny()
         return value
+
+    def _read_anchor(self):
+        return _load_anchor()
+
+    def _check_principals(self, anchor, value, target):
+        # The legacy desktop path still rejects shared runner/operator SIDs.
+        # Only the separately authenticated service implementation replaces it.
+        if (target.user_sid != anchor["operator_sid"] or target.user_sid in anchor["runner_sids"]
+                or value["observer_sid"] in (target.user_sid, *anchor["runner_sids"])
+                or not re.fullmatch(r"S-1-(?:[0-9]+-)+[0-9]+", value["observer_sid"])):
+            deny()
+
+    def _check_desktop(self, target):
+        _desktop_identity(target)
+
+    def journal_owner(self, target):
+        return target.user_sid
 
     def _check(self, grant, now):
         self._load(now)
@@ -400,7 +420,7 @@ class WindowsGrantVerifier:
                 or body["pause"] != consent["pause"] or body["receiver"] != consent["receiver"]
                 or not observed["observed_at"] <= body["verified_at"] <= now):
             deny()
-        _desktop_identity(grant.target)
+        self._check_desktop(grant.target)
         return inv.PrivateAttestation(inv._private_digest(snapshot), inv._private_digest(enrollment), now)
 
     def read_verified(self, grant, now):
