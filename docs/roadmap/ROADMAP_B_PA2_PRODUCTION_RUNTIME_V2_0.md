@@ -260,3 +260,11 @@ Nếu nhóm chỉ có một engineer 6h/ngày, tổng effort phase không đư�
 
 **Triển khai theo thứ tự, chưa dispatch:** BQ-00 (planning) → BQ-01/02 offline tests → BQ-03 tùy nhu cầu calibration → BQ-04 repair → BQ-05 chỉ sau B0-S grants + actual receipt; BQ-06 dùng B2 evidence mới có thể kết luận có cơ sở. BQ source implementation cần WorkItem, positive/negative AC, review source/consumer và PR CI Windows riêng. Không có BQ runtime, media benchmark, thương mại hoặc external outcome nào được chứng minh chỉ bởi cập nhật Roadmap này.
 
+## 13. Dated source evidence — 2026-11-07
+
+This appended section preserves the historical planning table and all 63 original WBS IDs.
+
+- **BQ-04b:** PR #627 MERGED at exact main SHA `c868b989382763b03f5040390a8adaf99c25e064`. Its offline exact-fixture repair evidence does not prove PULSE provider effects or authorize edits on arbitrary A06 videos.
+- **BQ-05a R2:** SOURCE REPAIR / ACCEPTANCE HOLD, base `22b4220936cc9eaf1d952ed1e5e2909d20d4e374`, action `BQ05A-R2-CODEX-XHIGH-HOSTED-CI-FAILCLOSED-TRIAGE-01`, attempt `bq05a_r2_codex_sol_xhigh_hosted_positive_hold_main_22b422_20261107_v1`. Finite internal phase triage and native identity-checked owned scratch correction; all five positives pass locally, but registered B0.3 timeouts, native link construction denials and an unrerun added diagnostic assertion keep verification incomplete. Historical hosted cause remains unproven pending exact-head hosted evidence. R1 candidate `61104898bfc3dca58f6e3c186685cad7e85955f4` / PR #632 stays Brain HOLD after hosted 1150 PASS / 5 FAIL. See [offline protocol](../creative/BQ_05A_PULSE_STUDIO_OFFLINE_QA_PROTOCOL.md). EF02 publication, new hosted CI and independent Brain acceptance remain separate and unclaimed.
+- **BQ-05 LIVE:** independent private rights/per-effect permission, provider entitlement, custody, spending and attended actual-provider proof remain **NOT_STARTED / NOT_AUTHORIZED**. SOURCE-only local technical evidence is not authenticated provider or Brain approval; no provider dispatch, publish, spend or human study is authorized. Separate BQ-05b planning and Human authorization are still required.
+
