@@ -13,6 +13,7 @@ import posixpath
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -22,7 +23,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .adapters import (command_for, agy_directory, agy_data_directory,
-                       agy_input_manifest, agy_read_regular)
+                       agy_input_manifest, agy_read_regular, agy_remove_owned_tree)
 from .git_write_guard import GIT_GUARD_INSTRUCTION, git_write_guard_env
 from .profile import ExecutorSelection, diagnose_failure
 from .git import git_argv, resolve_git_executable
@@ -315,6 +316,9 @@ def _failure_provenance(inv: dict, *, precondition_instruction_sha256: str,
         tool = tools[0] if len(tools) == 1 else "MULTIPLE_OR_UNKNOWN"
     elif inv.get("status") in ("MODEL_AT_CAPACITY", "QUOTA_EXHAUSTED"):
         phase = "PROVIDER_CAPACITY" if inv["status"] == "MODEL_AT_CAPACITY" else "PROVIDER_QUOTA"
+    elif inv.get("error_code", "").startswith(("AGY_PROCESS_", "AGY_DESCENDANTS_", "AGY_SCRATCH_")):
+        phase = "AGY_SCRATCH_TEARDOWN" if inv["error_code"].startswith("AGY_SCRATCH_") else "AGY_PROCESS_RECONCILIATION"
+        tool = "windows-host"
     elif inv.get("verify_started_at") or inv.get("verify_completed"):
         phase = "EF01_REGISTERED_VERIFY" if inv.get("verification_origin") == "REGISTERED_EF01" else "EF01_VERIFY"
         tool = "pytest" if _is_pytest(inv.get("verify_argv", [])) else "local-verifier"
@@ -747,44 +751,211 @@ def _windows_command_units(command: Sequence[str]) -> int:
 
 
 @contextmanager
-def _agy_temp_tree(repo: Path, prefix: str):
+def _agy_temp_tree(repo: Path, prefix: str, *, cleanup_receipts=None, reconciliation=None):
     # Reject poisoned TEMP (including primary .local/ef02) before allocation.
     parent = agy_data_directory(Path(tempfile.gettempdir()))
     if parent == repo or repo in parent.parents:
         raise ValueError("AGY_INPUT_SOURCE_OVERLAP")
     directory = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
     identity = (directory.stat().st_dev, directory.stat().st_ino)
+    parent_identity = (parent.stat().st_dev, parent.stat().st_ino)
     try:
         agy_data_directory(directory)
         yield directory
     finally:
-        # Delete only the exact allocated tree. rmtree unlinks child symlinks
-        # and Windows junctions without descending through their targets.
-        if directory.parent != parent or directory == parent:
-            raise ValueError("AGY_INPUT_CLEANUP_UNSAFE")
-        if agy_directory(parent) != parent:
-            raise ValueError("AGY_INPUT_CLEANUP_UNSAFE")
-        if is_link(directory):
-            if directory.is_symlink():
-                directory.unlink()
-            else:
-                directory.rmdir()  # Windows junction: remove the link only.
-            raise ValueError("AGY_INPUT_PATH_CHANGED")
-        if directory.exists():
-            info = directory.lstat()
-            if (directory.resolve(strict=True) != directory or
-                    (info.st_dev, info.st_ino) != identity):
-                raise ValueError("AGY_INPUT_CLEANUP_UNSAFE")
-            shutil.rmtree(directory)
+        if reconciliation is not None and not reconciliation.get("tree_empty"):
+            receipt = {"status": "HOLD", "reason": "AGY_PROCESS_RECONCILIATION_UNPROVEN",
+                       "root_token_sha256": _sha(str(directory).encode())}
+        else:
+            receipt = agy_remove_owned_tree(directory, parent, identity, parent_identity)
+        receipt["role"] = "INPUT" if prefix == "agy_input-" else "SCRATCH"
+        if cleanup_receipts is not None:
+            cleanup_receipts.append(receipt)
+        if receipt["status"] != "CLEAN":
+            raise _AgyScratchCleanupError(receipt["reason"])
+
+
+class _AgyScratchCleanupError(ValueError):
+    pass
+
+
+class _AgyProcessUnproven(ValueError):
+    pass
 
 
 @contextmanager
-def _agy_input_mirror(repo: Path, prompt: str, feedback: dict | None):
-    with _agy_temp_tree(repo, "agy_input-") as directory:
+def _agy_input_mirror(repo: Path, prompt: str, feedback: dict | None, **cleanup):
+    with _agy_temp_tree(repo, "agy_input-", **cleanup) as directory:
         _write(directory / "instruction.txt", prompt.encode("utf-8"))
         if feedback is not None:
             _write(directory / "repair_feedback.json", _json_bytes(feedback))
         yield directory
+
+
+# An isolated Python gate blocks on stdin. No provider code runs until the host
+# has assigned the gate to a non-breakaway, kill-on-close Windows job. The job
+# handle stays exclusively in the host; descendants cannot keep it alive.
+_AGY_PROCESS_GATE = """import json,subprocess,sys
+payload = json.loads(sys.stdin.buffer.readline())
+result = subprocess.run(payload['argv'], input=payload['stdin'], text=True,
+                        encoding='utf-8', errors='replace', check=False)
+sys.exit(result.returncode)
+"""
+
+
+class _WindowsAgyJob:
+    def __init__(self):
+        import ctypes
+        from ctypes import wintypes as w
+        self.ctypes, self.w = ctypes, w
+        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel = self.kernel
+        for name, args, result in (
+            ("CreateJobObjectW", [w.LPVOID, w.LPCWSTR], w.HANDLE),
+            ("SetInformationJobObject", [w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD], w.BOOL),
+            ("QueryInformationJobObject", [w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD, w.LPVOID], w.BOOL),
+            ("AssignProcessToJobObject", [w.HANDLE, w.HANDLE], w.BOOL),
+            ("IsProcessInJob", [w.HANDLE, w.HANDLE, ctypes.POINTER(w.BOOL)], w.BOOL),
+            ("GetProcessTimes", [w.HANDLE, w.LPVOID, w.LPVOID, w.LPVOID, w.LPVOID], w.BOOL),
+            ("TerminateJobObject", [w.HANDLE, w.UINT], w.BOOL),
+            ("CloseHandle", [w.HANDLE], w.BOOL),
+        ):
+            fn = getattr(kernel, name)
+            fn.argtypes, fn.restype = args, result
+        class BasicLimit(ctypes.Structure):
+            _fields_ = [("process_time", ctypes.c_longlong), ("job_time", ctypes.c_longlong),
+                        ("flags", w.DWORD), ("min_working", ctypes.c_size_t), ("max_working", ctypes.c_size_t),
+                        ("active_limit", w.DWORD), ("affinity", ctypes.c_size_t), ("priority", w.DWORD), ("scheduling", w.DWORD)]
+        class ExtendedLimit(ctypes.Structure):
+            _fields_ = [("basic", BasicLimit), ("io", ctypes.c_ulonglong * 6),
+                        ("process_memory", ctypes.c_size_t), ("job_memory", ctypes.c_size_t),
+                        ("peak_process", ctypes.c_size_t), ("peak_job", ctypes.c_size_t)]
+        self.handle = kernel.CreateJobObjectW(None, None)
+        if not self.handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        limits = ExtendedLimit()
+        limits.basic.flags = 0x2000  # KILL_ON_JOB_CLOSE; no BREAKAWAY flags.
+        if not kernel.SetInformationJobObject(self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+            error = ctypes.get_last_error()
+            self.close()
+            raise ctypes.WinError(error)
+
+    def assign(self, process):
+        ctypes, w = self.ctypes, self.w
+        member = w.BOOL()
+        if (not self.kernel.AssignProcessToJobObject(self.handle, int(process._handle))
+                or not self.kernel.IsProcessInJob(int(process._handle), self.handle, ctypes.byref(member)) or not member):
+            raise ctypes.WinError(ctypes.get_last_error())
+        creation, exit_time, kernel_time, user_time = (ctypes.c_ulonglong() for _ in range(4))
+        if not self.kernel.GetProcessTimes(int(process._handle), *(ctypes.byref(v) for v in
+                (creation, exit_time, kernel_time, user_time))):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return {"pid": process.pid, "creation_filetime": creation.value}
+
+    def observe(self):
+        ctypes, w = self.ctypes, self.w
+        class Accounting(ctypes.Structure):
+            _fields_ = [("times", ctypes.c_longlong * 4), ("faults", w.DWORD),
+                        ("total", w.DWORD), ("active", w.DWORD), ("terminated", w.DWORD)]
+        class ProcessIds(ctypes.Structure):
+            _fields_ = [("assigned", w.DWORD), ("count", w.DWORD), ("ids", ctypes.c_size_t * 1024)]
+        accounting, processes = Accounting(), ProcessIds()
+        for kind, value in ((1, accounting), (3, processes)):
+            if not self.kernel.QueryInformationJobObject(self.handle, kind, ctypes.byref(value), ctypes.sizeof(value), None):
+                raise ctypes.WinError(ctypes.get_last_error())
+        return {"active": accounting.active, "total": accounting.total,
+                "pids": [int(v) for v in processes.ids[:min(processes.count, 64)]],
+                "pid_count": processes.count}
+
+    def terminate(self):
+        if not self.kernel.TerminateJobObject(self.handle, 1):
+            raise self.ctypes.WinError(self.ctypes.get_last_error())
+
+    def close(self):
+        if self.handle:
+            self.kernel.CloseHandle(self.handle)
+            self.handle = None
+
+
+def _run_agy_owned(command, *, lifecycle, **kwargs):
+    """Native containment proof before verification, independent of model prose.
+
+    Timeout/interruption/forced child termination never become source PASS.
+    Unavailable native detection does not launch a provider or assume success.
+    """
+    lifecycle.update(status="HOLD", reason="AGY_PROCESS_RECONCILIATION_UNPROVEN",
+                     tree_empty=False, containment_proven=False, forced_termination=False,
+                     provider_launch_released=False,
+                     authority="WINDOWS_JOB_OBJECT" if os.name == "nt" else "UNAVAILABLE")
+    if os.name != "nt":
+        # No child has been launched; scratch can still be safely reclaimed.
+        lifecycle.update(tree_empty=True, reason="AGY_PROCESS_TRACKING_UNAVAILABLE")
+        raise _AgyProcessUnproven("AGY_PROCESS_TRACKING_UNAVAILABLE")
+    job, process = None, None
+    try:
+        job = _WindowsAgyJob()
+        process = subprocess.Popen([sys.executable, "-I", "-S", "-c", _AGY_PROCESS_GATE],
+            cwd=kwargs["cwd"], env=kwargs["env"], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW)
+        lifecycle["gate_identity"] = job.assign(process)
+        lifecycle["containment_proven"] = True
+        wire = (json.dumps({"argv": list(command), "stdin": kwargs.get("input")}) + "\n").encode("utf-8")
+        lifecycle["provider_launch_released"] = True
+        stdout, stderr = process.communicate(wire, timeout=kwargs["timeout"])
+        lifecycle["root_exit_code"] = process.returncode
+        observed = job.observe()
+        lifecycle["at_return"] = observed
+        grace = time.monotonic() + 0.75
+        while (observed["active"] or observed["pid_count"]) and time.monotonic() < grace:
+            time.sleep(0.05)
+            observed = job.observe()
+        lifecycle["after_grace"] = observed
+        if observed["active"] or observed["pid_count"]:
+            lifecycle["reason"] = "AGY_DESCENDANTS_STILL_ACTIVE"
+        else:
+            lifecycle.update(status="RECONCILED", reason=None, tree_empty=True)
+        return subprocess.CompletedProcess(command, process.returncode,
+            stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace"))
+    except OSError as exc:
+        lifecycle["native_error"] = getattr(exc, "winerror", None)
+        raise _AgyProcessUnproven("AGY_PROCESS_TRACKING_UNAVAILABLE") from None
+    finally:
+        try:
+            if job is not None and lifecycle["containment_proven"]:
+                if not lifecycle["tree_empty"]:
+                    lifecycle["forced_termination"] = True
+                    job.terminate()
+                    end = time.monotonic() + 2.0
+                    while True:
+                        observed = job.observe()
+                        lifecycle["after_reconcile"] = observed
+                        if not observed["active"] and not observed["pid_count"]:
+                            lifecycle["tree_empty"] = True
+                            break
+                        if time.monotonic() >= end:
+                            break
+                        time.sleep(0.05)
+            elif process is not None:
+                # Only our blocked gate exists; no provider input was released.
+                process.kill()
+            else:
+                lifecycle["tree_empty"] = True  # launch did not occur
+            if process is not None:
+                try:
+                    process.communicate(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    lifecycle.update(status="HOLD", tree_empty=False,
+                                     reason="AGY_PROCESS_RECONCILIATION_UNPROVEN")
+        except OSError:
+            lifecycle.update(status="HOLD", tree_empty=False,
+                             reason="AGY_PROCESS_RECONCILIATION_UNPROVEN")
+        finally:
+            if job is not None:
+                job.close()
+            if process is not None:
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    if stream is not None:
+                        stream.close()
 
 
 def _agy_source_binding(repo: Path, expected: dict, deadline: float,
@@ -883,8 +1054,12 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     mirrored_files = None
     if selection.executor == "antigravity":
         binding = _agy_source_binding(repo, before, deadline, git_executable)
-        agy_input_dir = input_runtime.enter_context(_agy_input_mirror(repo, prompt, feedback))
-        agy_scratch_dir = input_runtime.enter_context(_agy_temp_tree(repo, "agy_scratch-"))
+        reconciliation = {"status": "NOT_LAUNCHED", "tree_empty": True}
+        inv["process_lifecycle"] = reconciliation
+        inv["scratch_teardown"] = {"status": "PENDING", "roots": []}
+        cleanup = {"cleanup_receipts": inv["scratch_teardown"]["roots"], "reconciliation": reconciliation}
+        agy_input_dir = input_runtime.enter_context(_agy_input_mirror(repo, prompt, feedback, **cleanup))
+        agy_scratch_dir = input_runtime.enter_context(_agy_temp_tree(repo, "agy_scratch-", **cleanup))
         scratch_identity = (agy_scratch_dir.stat().st_dev, agy_scratch_dir.stat().st_ino)
         # Authority comes from the host-owned prompt/feedback, never a mutable
         # mirror reread that could adopt an already replaced instruction.
@@ -953,6 +1128,11 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
             process = _run_codex_with_live_event_mirror(
                 command, repo=repo, stdin_text=stdin, timeout_seconds=budget,
                 live_path=live, env=child_env)
+        elif selection.executor == "antigravity":
+            process = _run_agy_owned(command, lifecycle=inv["process_lifecycle"],
+                                     cwd=repo, input=stdin, capture_output=True,
+                                     text=True, encoding="utf-8", errors="replace",
+                                     timeout=budget, check=False, env=child_env)
         else:
             process = subprocess.run(command, cwd=repo, input=stdin, capture_output=True,
                                      text=True, encoding="utf-8", errors="replace",
@@ -981,10 +1161,15 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     except PermissionError as exc:
         err = str(exc).encode("utf-8")
         inv.update(status="EXECUTOR_PERMISSION_DENIED", error_code="EXECUTOR_PERMISSION_DENIED")
+    except _AgyProcessUnproven as exc:
+        inv.update(status="UNPROVEN", error_code=str(exc), repair_eligible=False,
+                   executor_invoked=inv["process_lifecycle"].get("provider_launch_released", False))
     finally:
         inv["executor_finished_at"] = _now()
         save("executor_stdout", "executor.stdout.log", out)
         save("executor_stderr", "executor.stderr.log", err)
+        if selection.executor == "antigravity":
+            save("process_lifecycle", "agy.process_lifecycle.json", _json_bytes(inv["process_lifecycle"]))
         if live is not None and live.exists():
             data = live.read_bytes()
             if live.parent != directory:
@@ -1039,6 +1224,10 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         problem = problem or input_problem
     if problem is None and inv["denied_actions"]:
         problem = ("EXECUTOR_PERMISSION_DENIED", "HEADLESS_TOOL_PERMISSION_DENIED")
+    if (problem is None and selection.executor == "antigravity"
+            and inv["process_lifecycle"].get("status") != "RECONCILED"
+            and inv["status"] == "EXECUTOR_RETURNED_UNVERIFIED"):
+        problem = ("UNPROVEN", inv["process_lifecycle"].get("reason") or "AGY_PROCESS_RECONCILIATION_UNPROVEN")
     # Interrupted/abnormal exits are UNKNOWN effects even if a partial provider
     # event or stderr mentions a determinate-looking quota/capacity error.
     # Never overwrite EXECUTOR_INTERRUPTED with a recoverable provider status.
@@ -1247,6 +1436,44 @@ def _stream_bytes(value: bytes | str | None) -> bytes:
     return value if isinstance(value, bytes) else (value or "").encode("utf-8")
 
 
+def _seal_agy_teardown(repo, inv, output_dir, allowed, deadline, git_executable):
+    """Seal independent build/lifecycle/teardown receipts before candidate status."""
+    if "scratch_teardown" not in inv:
+        return
+    inv.setdefault("source_build_status", inv["status"])
+    inv.setdefault("source_build_error_code", inv.get("error_code"))
+    teardown = inv["scratch_teardown"]
+    roots = teardown["roots"]
+    teardown["status"] = "CLEAN" if (len(roots) == 2 and all(r["status"] == "CLEAN" for r in roots)) else "HOLD"
+    accepted = ("BUILD_VERIFIED_FOR_SCOPE", "VERIFIED_SCOPE_REVIEW_REQUIRED")
+    if teardown["status"] != "CLEAN":
+        inv["repair_eligible"] = False
+        if inv["status"] in accepted:
+            inv.update(status="UNPROVEN", error_code="AGY_SCRATCH_CLEANUP_UNPROVEN")
+    def save(key, name, data):
+        target = output_dir / inv["evidence_dir"] / name
+        _write(target, data)
+        inv["evidence_files"][key] = target.relative_to(output_dir).as_posix()
+        inv["evidence_sha256"][key] = _sha(data)
+    # The final diff must match the verified snapshot even after teardown. A
+    # late mutation remains SOURCE_DRIFT; clean scratch cannot bless it.
+    if teardown["status"] == "CLEAN" and inv["status"] in accepted:
+        options = {"git_executable": git_executable} if git_executable is not None else {}
+        final, diff = _snapshot(repo, allowed, deadline, **options)
+        save("source_after_teardown", "source.after_teardown.json", _json_bytes(final))
+        if final != inv.get("final_snapshot"):
+            inv.update(status="SOURCE_DRIFT", error_code="AGY_SOURCE_CHANGED_AFTER_TEARDOWN", repair_eligible=False)
+            inv.update(final)
+            inv["final_snapshot"] = final
+            save("teardown_diff", "git.after_teardown.diff.patch", diff)
+    save("scratch_teardown", "agy.scratch_teardown.json", _json_bytes(teardown))
+    save("source_build", "source.build_result.json", _json_bytes({
+        "status": inv["source_build_status"], "error_code": inv["source_build_error_code"],
+        "verify_completed": inv["verify_completed"], "verify_exit_code": inv["verify_exit_code"],
+        "source_after_verify_sha256": inv["evidence_sha256"].get("source_after_verify"),
+        "candidate": False, "requires_clean_teardown": True}))
+
+
 def _is_pytest(argv: Sequence[str]) -> bool:
     executable = Path(argv[0]).name.lower()
     return (list(argv[1:3]) == ["-m", "pytest"] and
@@ -1449,12 +1676,20 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                         pytest_profile=pytest_profile, pytest_isolation_approved=pytest_isolation_approved,
                         pytest_known_flaky=pytest_known_flaky, host_slots=host_slots,
                         verify_first_scope=verify_first_scope, input_runtime=input_runtime)
+                    inv["source_build_status"] = inv["status"]
+                    inv["source_build_error_code"] = inv["error_code"]
             except Exception as exc:
                 code = str(exc)
+                inv.setdefault("source_build_status", inv["status"])
+                inv.setdefault("source_build_error_code", inv.get("error_code"))
                 # ExitStack cleanup can itself fail after a precise native
                 # failure. Keep the original cause and record the secondary
                 # failure without promoting any source or permitting a retry.
-                if inv.get("error_code"):
+                if isinstance(exc, _AgyScratchCleanupError):
+                    inv.update(runtime_cleanup_error=code, repair_eligible=False)
+                    if inv["status"] in ("BUILD_VERIFIED_FOR_SCOPE", "VERIFIED_SCOPE_REVIEW_REQUIRED") or not inv.get("error_code"):
+                        inv.update(status="UNPROVEN", error_code="AGY_SCRATCH_CLEANUP_UNPROVEN")
+                elif inv.get("error_code"):
                     inv.update(runtime_cleanup_error=code if re.fullmatch(r"AGY_[A-Z_]+", code)
                                else "RUNTIME_CLEANUP_UNPROVEN", repair_eligible=False)
                 elif re.fullmatch(r"AGY_[A-Z_]+", code):
@@ -1468,6 +1703,8 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                 inv.update(status="EXECUTION_UNKNOWN", error_code="RUNNER_INTERRUPTED", repair_eligible=False)
                 raise
             finally:
+                if selection.executor == "antigravity":
+                    _seal_agy_teardown(repo, inv, output_dir, allowed_prefixes, deadline, git_executable)
                 if (selection.executor == "antigravity" and inv.get("changed_files") and
                         inv["status"] not in ("BUILD_VERIFIED_FOR_SCOPE", "VERIFIED_SCOPE_REVIEW_REQUIRED")):
                     # The existing EF02 .local/ef02/** upload includes these
@@ -1525,7 +1762,8 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                 report["git_dir"] = inv.get("git_dir", initial["git_dir"])
                 for key in ("minimum_test", "pytest_profile", "pytest_profiles",
                             "observed_pytest_workers", "workers_actual",
-                            "workers_actual_by_group", "worker_count_provenance"):
+                            "workers_actual_by_group", "worker_count_provenance", "source_build_status",
+                            "source_build_error_code", "process_lifecycle", "scratch_teardown"):
                     if key in inv:
                         report[key] = inv[key]
                 _write(output_dir / inv["result_file"], _json_bytes(inv))

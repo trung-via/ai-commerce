@@ -78,6 +78,10 @@ def _snapshot_fake(repo, baseline, state):
 
 @pytest.fixture
 def fixture(tmp_path, monkeypatch):
+    from test_ef01 import _fixture_agy_process
+    # Provider/lifecycle fixtures exercise status logic, separately from native
+    # Job Object tests in the registered AGY diagnostics owner.
+    monkeypatch.setattr(runner, "_run_agy_owned", _fixture_agy_process)
     monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
     repo = tmp_path / "workspace"
@@ -1157,8 +1161,8 @@ def test_cleanup_failure_preserves_native_input_reason_and_quarantine(fixture):
     from contextlib import contextmanager
     original = runner._agy_temp_tree
     @contextmanager
-    def failed_cleanup(repo, prefix):
-        with original(repo, prefix) as path:
+    def failed_cleanup(repo, prefix, **kwargs):
+        with original(repo, prefix, **kwargs) as path:
             yield path
         if prefix == "agy_input-":
             raise ValueError("AGY_INPUT_CLEANUP_UNSAFE")

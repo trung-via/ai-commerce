@@ -3,8 +3,10 @@ import copy
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +15,39 @@ import pytest
 from ai_commerce.engineering import runner
 from ai_commerce.engineering.profile import ExecutorSelection
 from ai_commerce.engineering import adapters
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows Git loose-object diagnostic")
+def test_native_git_loose_object_rmtree_winerror5(tmp_path, record_property):
+    """Real Git/NTFS discriminator; no provider, locks, ACL or Defender inference."""
+    from test_ef01 import _repo
+    tree = tmp_path / "owned-git-repro"
+    tree.mkdir()
+    repo = _repo(tree)
+    child = subprocess.Popen(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, _ = child.communicate(timeout=10)
+    assert child.returncode == 0 and len(stdout.strip()) == 40
+    with pytest.raises(PermissionError) as raised:
+        shutil.rmtree(tree)
+    failure = raised.value
+    target = Path(failure.filename)
+    assert tree in target.parents and ".git" in target.parts and "objects" in target.parts
+    info = target.lstat()
+    diagnostic = {"winerror": failure.winerror, "readonly": bool(info.st_file_attributes & 1),
+                  "reparse": bool(info.st_file_attributes & 0x400), "mode": info.st_mode,
+                  "links": info.st_nlink, "file_identity": [info.st_dev, info.st_ino],
+                  "worker": os.environ.get("PYTEST_XDIST_WORKER"), "pid": os.getpid(),
+                  "git_child_pid": child.pid, "git_child_exit": child.returncode,
+                  "classification": "READONLY_GIT_LOOSE_OBJECT_REPRODUCED"}
+    assert diagnostic["winerror"] == 5 and diagnostic["readonly"] and not diagnostic["reparse"]
+    record_property("native_scratch_discriminator", json.dumps(diagnostic, sort_keys=True))
+    print(json.dumps(diagnostic, sort_keys=True))
+    identity, parent_identity = tree.stat(), tmp_path.stat()
+    result = adapters.agy_remove_owned_tree(tree, tmp_path,
+        (identity.st_dev, identity.st_ino), (parent_identity.st_dev, parent_identity.st_ino))
+    assert result["status"] == "CLEAN" and result["readonly_files_cleared"] >= 1
+    assert not tree.exists()
 
 
 def input_fixture(tmp_path, feedback=True):
@@ -280,7 +315,13 @@ def test_registered_roots_under_private_ancestors_are_still_exact_roots(tmp_path
         data, "antigravity", repo=repo, agy_input_dir=agy_input)] == ["WORKTREE", "AGY_INPUT", "PRIVATE_PATH"]
 
 
-def run_fixture(tmp_path, monkeypatch, events, *, exit_code=0, verify_code=0):
+def run_fixture(tmp_path, monkeypatch, events, *, exit_code=0, verify_code=0, lifecycle_result=None):
+    from test_ef01 import _fixture_agy_process
+    def process_fixture(command, *, lifecycle, **kwargs):
+        result = _fixture_agy_process(command, lifecycle=lifecycle, **kwargs)
+        lifecycle.update(lifecycle_result or {})
+        return result
+    monkeypatch.setattr(runner, "_run_agy_owned", process_fixture)
     repo = tmp_path / "workspace"
     repo.mkdir()
     calls = []
@@ -303,13 +344,14 @@ def run_fixture(tmp_path, monkeypatch, events, *, exit_code=0, verify_code=0):
             return subprocess.CompletedProcess(argv, exit_code, stream(*events).decode(), "")
         if list(argv[1:3]) == ["-m", "pytest"]:
             calls.append("verify")
-            return subprocess.CompletedProcess(argv, verify_code, "1 failed\n" if verify_code else "1 passed\n", "")
+            return subprocess.CompletedProcess(argv, verify_code,
+                "MT01_XDIST_WORKERS_COLLECTED=12\n" + ("1 failed\n" if verify_code else "1 passed\n"), "")
         return original_run(argv, **kwargs)
     monkeypatch.setattr(runner.subprocess, "run", execute)
     result = runner.execute_attempt(repo=repo, output_dir=tmp_path / "evidence",
         work_id="fixture", attempt_id="fixture-attempt", instruction="create changed.txt",
         selection=ExecutorSelection("antigravity", "fixture-model", "high"),
-        verify_argv=[sys.executable, "-m", "pytest", "tests", "-q", "-n", "12"],
+        verify_argv=[sys.executable, "-m", "pytest", "tests", "-q"],
         allowed_prefixes=["changed.txt"], max_repair_rounds=2)
     return result, calls
 
@@ -472,3 +514,274 @@ def test_interrupted_provider_exit_preserves_unknown_effects_despite_quota(tmp_p
     assert result["verify_exit_code"] is None
     assert result["replay_authorized"] is False
     assert calls == ["provider"]
+
+
+def owned_cleanup(path):
+    info, parent = path.lstat(), path.parent.lstat()
+    return adapters.agy_remove_owned_tree(path, path.parent,
+        (info.st_dev, info.st_ino), (parent.st_dev, parent.st_ino))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows sharing semantics")
+@pytest.mark.parametrize("release", [True, False])
+def test_native_held_open_file_cleanup_is_bounded_and_does_not_change_acl(tmp_path, release):
+    """CreateFile without FILE_SHARE_DELETE discriminates an actual open handle."""
+    import ctypes
+    from ctypes import wintypes as w
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, w.LPVOID, w.DWORD, w.DWORD, w.HANDLE]
+    kernel.CreateFileW.restype = w.HANDLE
+    kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [w.HANDLE], w.BOOL
+    tree = tmp_path / "owned"
+    tree.mkdir()
+    target = tree / "held.txt"
+    target.write_bytes(b"locked")
+    handle = kernel.CreateFileW(str(target), 0x80000000, 1, None, 3, 0x80, None)
+    assert handle != ctypes.c_void_p(-1).value
+    timer = None
+    if release:
+        timer = threading.Timer(0.12, lambda: kernel.CloseHandle(handle))
+        timer.start()
+    try:
+        result = owned_cleanup(tree)
+        assert result["attempts"] > 1 and result["readonly_files_cleared"] == 0
+        assert result["diagnostics"][0]["winerror"] == 32
+        assert result["status"] == ("CLEAN" if release else "HOLD")
+        if not release:
+            assert result["attempts"] == 5 and target.read_bytes() == b"locked"
+    finally:
+        if timer:
+            timer.join(timeout=2)
+        else:
+            kernel.CloseHandle(handle)
+        if tree.exists():
+            assert owned_cleanup(tree)["status"] == "CLEAN"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="fault injection around native Windows handles")
+@pytest.mark.parametrize("permanent", [False, True])
+def test_mock_transient_scanner_style_vs_permanent_access_denied(tmp_path, monkeypatch, permanent):
+    """WinError5 injection fixture; this is explicitly NOT Defender evidence."""
+    tree = tmp_path / "owned"
+    tree.mkdir()
+    (tree / "credential-do-not-log.txt").write_bytes(b"opaque")
+    original = adapters._AgyCleanupHandle.delete
+    failures = []
+    def denied(handle, info, report):
+        if permanent or len(failures) < 2:
+            failures.append(1)
+            error = PermissionError(13, "SECRET path must not escape into diagnostics")
+            error.winerror = 5
+            raise error
+        return original(handle, info, report)
+    with monkeypatch.context() as patch:
+        patch.setattr(adapters._AgyCleanupHandle, "delete", denied)
+        result = owned_cleanup(tree)
+    assert result["attempts"] == (5 if permanent else 3)
+    assert result["status"] == ("HOLD" if permanent else "CLEAN")
+    assert all(d["classification"] == "ACCESS_DENIED_UNATTRIBUTED" for d in result["diagnostics"])
+    assert "SECRET" not in json.dumps(result) and "credential" not in json.dumps(result)
+    if permanent:
+        assert tree.exists() and owned_cleanup(tree)["status"] == "CLEAN"
+
+
+def test_multiple_scratch_roots_do_not_cross_delete_or_reuse_identity(tmp_path, monkeypatch):
+    repo = tmp_path / "source"
+    repo.mkdir()
+    monkeypatch.setattr(runner.tempfile, "gettempdir", lambda: str(tmp_path))
+    first, second = [], []
+    with runner._agy_temp_tree(repo, "agy_scratch-", cleanup_receipts=second) as two:
+        (two / "sentinel").write_bytes(b"second")
+        with runner._agy_temp_tree(repo, "agy_scratch-", cleanup_receipts=first) as one:
+            (one / "sentinel").write_bytes(b"first")
+        assert not one.exists() and (two / "sentinel").read_bytes() == b"second"
+    assert not two.exists() and first[0]["status"] == second[0]["status"] == "CLEAN"
+    assert first[0]["root_token_sha256"] != second[0]["root_token_sha256"]
+
+
+def test_nested_reparse_cleanup_never_touches_external_readonly_file(tmp_path):
+    from test_ef01 import _directory_alias
+    import stat
+    tree, outside = tmp_path / "owned", tmp_path / "outside"
+    (tree / "nested").mkdir(parents=True)
+    outside.mkdir()
+    target = outside / "sentinel"
+    target.write_bytes(b"keep")
+    if os.name == "nt":
+        os.chmod(target, stat.S_IREAD)  # exact fixture file, not an arbitrary parent
+    link = tree / "nested/escape"
+    try:
+        _directory_alias(outside, link)
+    except PermissionError:
+        pytest.skip("native directory reparse creation denied; no bypass")
+    before = target.lstat()
+    result = owned_cleanup(tree)
+    assert target.read_bytes() == b"keep"
+    assert getattr(before, "st_file_attributes", 0) == getattr(target.lstat(), "st_file_attributes", 0)
+    assert result["status"] in ("CLEAN", "HOLD")
+    if result["status"] == "CLEAN":
+        assert result["reparse_links_removed"] == 1
+    else:
+        # A filesystem that cannot attest/delete the link handle must retain
+        # it and HOLD, never traverse its target as a cleanup workaround.
+        assert adapters.is_link(link)
+
+
+def test_root_reparse_replacement_is_preserved_and_never_followed(tmp_path, monkeypatch):
+    from test_ef01 import _directory_alias
+    repo, outside = tmp_path / "source", tmp_path / "outside"
+    repo.mkdir()
+    outside.mkdir()
+    (outside / "sentinel").write_bytes(b"keep")
+    monkeypatch.setattr(runner.tempfile, "gettempdir", lambda: str(tmp_path))
+    try:
+        with pytest.raises(runner._AgyScratchCleanupError):
+            with runner._agy_temp_tree(repo, "agy_scratch-") as root:
+                root.rename(tmp_path / "original-root")
+                _directory_alias(outside, root)
+        assert root.exists() and (outside / "sentinel").read_bytes() == b"keep"
+    finally:
+        if 'root' in locals() and adapters.is_link(root):
+            if root.is_symlink():
+                root.unlink()
+            else:
+                root.rmdir()
+
+
+@pytest.mark.parametrize("component", ["..", "file:stream"])
+def test_cleanup_path_indirection_is_rejected_before_deletion(tmp_path, component):
+    tree = tmp_path / "owned"
+    tree.mkdir()
+    (tree / "sentinel").write_bytes(b"keep")
+    info, parent = tree.stat(), tmp_path.stat()
+    result = adapters.agy_remove_owned_tree(tree / component, tmp_path,
+        (info.st_dev, info.st_ino), (parent.st_dev, parent.st_ino))
+    assert result["status"] == "HOLD" and (tree / "sentinel").read_bytes() == b"keep"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows Job Object proof")
+@pytest.mark.parametrize("mode", ["normal", "lingering", "abrupt", "timeout"])
+def test_native_job_proves_children_empty_or_holds_before_verification(tmp_path, mode):
+    lifecycle = {}
+    code = "import subprocess,sys,os,time,json; "
+    if mode in ("lingering", "abrupt", "timeout"):
+        code += ("subprocess.Popen([sys.executable,'-I','-S','-c','import time; time.sleep(30)'],"
+                 "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); ")
+    code += "print(json.dumps({'status':'SUCCESS'}),flush=True); "
+    if mode == "abrupt":
+        code += "os._exit(137)"
+    elif mode == "timeout":
+        code += "time.sleep(30)"
+    else:
+        # Pending-task prose alone must not override native process accounting.
+        code += "print('root agent idle; waiting for 1 background task(s) to finish',file=sys.stderr)"
+    args = dict(lifecycle=lifecycle, cwd=tmp_path, env=os.environ.copy(), input=None,
+                timeout=0.3 if mode == "timeout" else 10)
+    if mode == "timeout":
+        with pytest.raises(subprocess.TimeoutExpired):
+            runner._run_agy_owned([sys.executable, "-I", "-S", "-c", code], **args)
+    else:
+        result = runner._run_agy_owned([sys.executable, "-I", "-S", "-c", code], **args)
+        assert result.returncode == (137 if mode == "abrupt" else 0)
+    assert lifecycle["authority"] == "WINDOWS_JOB_OBJECT" and lifecycle["containment_proven"]
+    assert lifecycle["tree_empty"] is True
+    if mode == "normal":
+        assert lifecycle["status"] == "RECONCILED" and not lifecycle["forced_termination"]
+        assert lifecycle["after_grace"]["active"] == lifecycle["after_grace"]["pid_count"] == 0
+    else:
+        assert lifecycle["status"] == "HOLD" and lifecycle["forced_termination"]
+        assert lifecycle["after_reconcile"]["active"] == lifecycle["after_reconcile"]["pid_count"] == 0
+
+
+def test_tracking_unavailable_never_launches_provider(tmp_path, monkeypatch):
+    def unavailable():
+        raise PermissionError(13, "SECRET unavailable Windows job API")
+    monkeypatch.setattr(runner, "_WindowsAgyJob", unavailable)
+    lifecycle = {}
+    marker = tmp_path / "provider-ran"
+    with pytest.raises(runner._AgyProcessUnproven, match="AGY_PROCESS_TRACKING_UNAVAILABLE"):
+        runner._run_agy_owned([sys.executable, "-c", f"open({str(marker)!r},'w').close()"],
+            lifecycle=lifecycle, cwd=tmp_path, env=os.environ.copy(), input=None, timeout=3)
+    assert not marker.exists() and lifecycle["status"] == "HOLD"
+    assert "SECRET" not in json.dumps(lifecycle)
+
+
+@pytest.mark.parametrize("tree_empty", [False, True])
+def test_fake_success_cannot_replace_process_proof(tmp_path, monkeypatch, tree_empty):
+    result, calls = run_fixture(tmp_path, monkeypatch, [{"status": "SUCCESS"}],
+        lifecycle_result={"status": "HOLD", "tree_empty": tree_empty,
+                          "reason": "AGY_PROCESS_RECONCILIATION_UNPROVEN"})
+    assert calls == ["provider"] and result["verify_exit_code"] is None
+    assert result["status"] == "UNPROVEN" and result["replay_authorized"] is False
+    assert "quarantine_manifest" in result["evidence_files"]
+    assert result["scratch_teardown"]["status"] == ("CLEAN" if tree_empty else "HOLD")
+
+
+@pytest.mark.parametrize("verify_code", [0, 1])
+def test_cleanup_hold_preserves_separate_build_result_and_never_replays(tmp_path, monkeypatch, verify_code):
+    original = runner.agy_remove_owned_tree
+    def unproven(*args, **kwargs):
+        result = original(*args, **kwargs)
+        # Simulated cleanup uncertainty, independently labeled as a fixture.
+        result.update(status="HOLD", reason="AGY_SCRATCH_CLEANUP_UNPROVEN", fixture=True)
+        return result
+    monkeypatch.setattr(runner, "agy_remove_owned_tree", unproven)
+    result, calls = run_fixture(tmp_path, monkeypatch, [{"status": "SUCCESS"}], verify_code=verify_code)
+    assert calls == ["provider", "verify"] and result["verify_completed"]
+    assert result["verify_exit_code"] == verify_code and result["scratch_teardown"]["status"] == "HOLD"
+    assert result["source_build_status"] == ("VERIFICATION_FAILED" if verify_code else "BUILD_VERIFIED_FOR_SCOPE")
+    assert result["status"] == ("VERIFICATION_FAILED" if verify_code else "UNPROVEN")
+    assert not result["invocations"][0]["repair_eligible"] and result["invocation_count"] == 1
+    assert "quarantine_manifest" in result["evidence_files"]
+
+
+def test_clean_teardown_does_not_bless_subsequent_source_change(tmp_path, monkeypatch):
+    original = runner.agy_remove_owned_tree
+    def late_change(*args, **kwargs):
+        result = original(*args, **kwargs)
+        (tmp_path / "workspace/changed.txt").write_bytes(b"late mutation")
+        return result
+    monkeypatch.setattr(runner, "agy_remove_owned_tree", late_change)
+    result, calls = run_fixture(tmp_path, monkeypatch, [{"status": "SUCCESS"}])
+    assert calls == ["provider", "verify"] and result["verify_exit_code"] == 0
+    assert result["status"] == "SOURCE_DRIFT" and result["error_code"] == "AGY_SOURCE_CHANGED_AFTER_TEARDOWN"
+    assert result["scratch_teardown"]["status"] == "CLEAN" and "quarantine_manifest" in result["evidence_files"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Git, Job Object and readonly teardown integration")
+@pytest.mark.parametrize("lingering", [False, True])
+def test_native_agy_fixture_end_to_end_readonly_git_and_lingering_writer(tmp_path, monkeypatch, lingering):
+    from test_ef01 import _repo
+    repo = _repo(tmp_path)
+    marker = tmp_path / "verifier-ran"
+    # The real Git fixture was created above under the inherited guard. Copy
+    # its exact readonly object bytes/attributes into disposable provider TEMP;
+    # do not bypass a Git/MSYS hook environment failure in a provider child.
+    code = ("import os,sys,subprocess,json,shutil; from pathlib import Path; "
+            "shutil.copytree(Path.cwd(),Path(os.environ['TEMP'])/'fixture'); "
+            "Path('changed.txt').write_bytes(b'verified'); ")
+    if lingering:
+        child = "import time; from pathlib import Path; time.sleep(30); Path('changed.txt').write_bytes(b'late')"
+        code += (f"subprocess.Popen([sys.executable,'-I','-S','-c',{child!r}],"
+                 "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); ")
+    code += "print(json.dumps({'status':'SUCCESS'}))"
+    monkeypatch.setattr(runner, "command_for", lambda *a, **k: ([sys.executable, "-c", code], None))
+    result = runner.execute_attempt(repo=repo, output_dir=tmp_path / "evidence",
+        work_id="scratch-native", attempt_id="fresh-rootfix-native",
+        selection=ExecutorSelection("antigravity", "gemini-4-argon-medium", "medium"),
+        instruction="fixture source edit only", allowed_prefixes=["changed.txt"], max_repair_rounds=0,
+        verify_argv=[sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).write_bytes(b'verified')"])
+    assert result["process_lifecycle"]["authority"] == "WINDOWS_JOB_OBJECT"
+    assert result["process_lifecycle"]["tree_empty"]
+    assert result["scratch_teardown"]["status"] == "CLEAN"
+    assert any(r["readonly_files_cleared"] for r in result["scratch_teardown"]["roots"])
+    assert marker.exists() is (not lingering)
+    assert result["status"] == ("UNPROVEN" if lingering else "BUILD_VERIFIED_FOR_SCOPE")
+    assert result["model"] == "gemini-4-argon-medium" and result["reasoning_effort"] == "medium"
+    if lingering:
+        assert result["error_code"] == "AGY_DESCENDANTS_STILL_ACTIVE"
+        assert result["verify_exit_code"] is None and "quarantine_manifest" in result["evidence_files"]
+    else:
+        after_verify = result["evidence_sha256"]["source_after_verify"]
+        assert after_verify == result["evidence_sha256"]["source_after_teardown"]
+        assert result["verify_exit_code"] == 0
