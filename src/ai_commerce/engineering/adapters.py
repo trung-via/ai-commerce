@@ -6,9 +6,11 @@ AGY flag support must be confirmed against the user's installed CLI version.
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import re
 import stat
+import threading
 import time
 from pathlib import Path
 
@@ -152,6 +154,39 @@ def agy_data_directory(path: Path) -> Path:
     return directory
 
 
+# Immutable safe maxima for scratch teardown. Callers may only tighten them.
+AGY_CLEANUP_MAX_ENTRIES = 100_000
+AGY_CLEANUP_MAX_DEPTH = 128
+AGY_CLEANUP_DEFAULT_SECONDS = 30.0
+AGY_CLEANUP_MAX_SECONDS = 120.0
+_AGY_KERNEL = None
+_AGY_KERNEL_LOCK = threading.Lock()
+
+
+def _agy_kernel():
+    """Load kernel32 and bind signatures once per process, thread-safely."""
+    global _AGY_KERNEL
+    if _AGY_KERNEL is None:
+        with _AGY_KERNEL_LOCK:
+            if _AGY_KERNEL is None:
+                import ctypes
+                from ctypes import wintypes as w
+                kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+                signatures = {
+                    "CreateFileW": ([w.LPCWSTR, w.DWORD, w.DWORD, w.LPVOID, w.DWORD, w.DWORD, w.HANDLE], w.HANDLE),
+                    "GetCurrentProcess": ([], w.HANDLE),
+                    "DuplicateHandle": ([w.HANDLE, w.HANDLE, w.HANDLE, ctypes.POINTER(w.HANDLE), w.DWORD, w.BOOL, w.DWORD], w.BOOL),
+                    "GetFinalPathNameByHandleW": ([w.HANDLE, w.LPWSTR, w.DWORD, w.DWORD], w.DWORD),
+                    "SetFileInformationByHandle": ([w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD], w.BOOL),
+                    "CloseHandle": ([w.HANDLE], w.BOOL),
+                }
+                for name, (args, result) in signatures.items():
+                    function = getattr(kernel, name)
+                    function.argtypes, function.restype = args, result
+                _AGY_KERNEL = kernel
+    return _AGY_KERNEL
+
+
 class _AgyCleanupHandle:
     """Bind an NTFS entry without following reparse points or allowing rename.
 
@@ -163,19 +198,8 @@ class _AgyCleanupHandle:
         import ctypes
         from ctypes import wintypes as w
         self.ctypes, self.w = ctypes, w
-        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.kernel = _agy_kernel()
         kernel = self.kernel
-        signatures = {
-            "CreateFileW": ([w.LPCWSTR, w.DWORD, w.DWORD, w.LPVOID, w.DWORD, w.DWORD, w.HANDLE], w.HANDLE),
-            "GetCurrentProcess": ([], w.HANDLE),
-            "DuplicateHandle": ([w.HANDLE, w.HANDLE, w.HANDLE, ctypes.POINTER(w.HANDLE), w.DWORD, w.BOOL, w.DWORD], w.BOOL),
-            "GetFinalPathNameByHandleW": ([w.HANDLE, w.LPWSTR, w.DWORD, w.DWORD], w.DWORD),
-            "SetFileInformationByHandle": ([w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD], w.BOOL),
-            "CloseHandle": ([w.HANDLE], w.BOOL),
-        }
-        for name, (args, result) in signatures.items():
-            function = getattr(kernel, name)
-            function.argtypes, function.restype = args, result
         # FILE_READ_ATTRIBUTES; DELETE + FILE_WRITE_ATTRIBUTES for owned entries.
         access = 0x80 if parent_only else 0x10180
         self.handle = kernel.CreateFileW(str(path), access, 3, None, 3, 0x02200000, None)
@@ -248,19 +272,43 @@ class _AgyCleanupHandle:
 
 
 def agy_remove_owned_tree(directory: Path, parent: Path, identity: tuple,
-                          parent_identity: tuple, *, timeout_seconds=5.0) -> dict:
+                          parent_identity: tuple, *,
+                          timeout_seconds: float = AGY_CLEANUP_DEFAULT_SECONDS) -> dict:
     """Bounded scratch teardown with sanitized diagnostics and no ACL changes.
 
     Native Windows uses handle-bound deletion. POSIX is a separate fixture path
     with lstat/containment checks; it does not claim native Windows proof.
     """
+    started = time.monotonic()
+    last_progress = started
     report = {"status": "HOLD", "reason": "AGY_SCRATCH_CLEANUP_UNPROVEN",
               "platform": "WINDOWS_HANDLES" if os.name == "nt" else "POSIX_FIXTURE",
               "root_token_sha256": hashlib.sha256(str(directory).encode()).hexdigest(),
               "attempts": 0, "readonly_files_cleared": 0, "reparse_links_removed": 0,
-              "diagnostics": []}
-    deadline = time.monotonic() + timeout_seconds
+              "diagnostics": [],
+              # Sanitized measurements only: counts, depth and monotonic seconds.
+              "measurements": {"entries_visited": 0, "max_depth": 0, "elapsed_seconds": 0.0,
+                               "seconds_since_progress": 0.0, "deleted_entries": 0,
+                               "budget_seconds": 0.0, "entry_limit": AGY_CLEANUP_MAX_ENTRIES,
+                               "depth_limit": AGY_CLEANUP_MAX_DEPTH}}
+    measurements = report["measurements"]
     target = directory
+
+    def update_measurements(moment, visited=None, depth=None):
+        nonlocal last_progress
+        if visited is not None:
+            measurements["entries_visited"] = max(measurements["entries_visited"], visited)
+        if depth is not None:
+            measurements["max_depth"] = max(measurements["max_depth"], depth)
+        measurements["elapsed_seconds"] = round(moment - started, 3)
+        measurements["seconds_since_progress"] = round(moment - last_progress, 3)
+
+    def note_progress(moment):
+        nonlocal last_progress
+        last_progress = moment
+        measurements["deleted_entries"] += 1
+        update_measurements(moment)
+
     def inspect(path):
         if path != directory and directory not in path.parents:
             raise ValueError("AGY_INPUT_CLEANUP_UNSAFE")
@@ -268,7 +316,28 @@ def agy_remove_owned_tree(directory: Path, parent: Path, identity: tuple,
         if any(p in ("", ".", "..") or ":" in p or p.rstrip(". ") != p for p in relative.parts):
             raise ValueError("AGY_INPUT_CLEANUP_UNSAFE")
         return path.lstat()
+
+    parent_handle = None
     try:
+        # Explicit strict finite numeric timeout validation before creating deadline
+        try:
+            if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
+                raise ValueError("AGY_SCRATCH_CLEANUP_TIMEOUT_INVALID")
+            if timeout_seconds < 0 or timeout_seconds > AGY_CLEANUP_MAX_SECONDS:
+                raise ValueError("AGY_SCRATCH_CLEANUP_TIMEOUT_INVALID")
+            if math.isnan(timeout_seconds) or math.isinf(timeout_seconds):
+                raise ValueError("AGY_SCRATCH_CLEANUP_TIMEOUT_INVALID")
+            budget = float(timeout_seconds)
+        except (ValueError, OverflowError, TypeError) as exc:
+            if str(exc) == "AGY_SCRATCH_CLEANUP_TIMEOUT_INVALID":
+                raise
+            raise ValueError("AGY_SCRATCH_CLEANUP_TIMEOUT_INVALID") from None
+
+        measurements["budget_seconds"] = budget
+        deadline = started + budget
+        if budget <= 0.0:
+            raise ValueError("AGY_SCRATCH_CLEANUP_TIME_EXCEEDED")
+
         if (directory.parent != parent or directory == parent or agy_directory(parent) != parent
                 or (parent.stat().st_dev, parent.stat().st_ino) != parent_identity):
             raise ValueError("AGY_INPUT_CLEANUP_UNSAFE")
@@ -281,8 +350,14 @@ def agy_remove_owned_tree(directory: Path, parent: Path, identity: tuple,
                     nonlocal count, target
                     target = path
                     count += 1
-                    if count > 100000 or depth > 128 or time.monotonic() >= deadline:
-                        raise ValueError("AGY_SCRATCH_CLEANUP_BOUND_EXCEEDED")
+                    now = time.monotonic()
+                    update_measurements(now, visited=count, depth=depth)
+                    if count > AGY_CLEANUP_MAX_ENTRIES:
+                        raise ValueError("AGY_SCRATCH_CLEANUP_ENTRY_LIMIT_EXCEEDED")
+                    if depth > AGY_CLEANUP_MAX_DEPTH:
+                        raise ValueError("AGY_SCRATCH_CLEANUP_DEPTH_LIMIT_EXCEEDED")
+                    if now >= deadline:
+                        raise ValueError("AGY_SCRATCH_CLEANUP_TIME_EXCEEDED")
                     info = inspect(path)
                     reparse = is_link(path)
                     if path == directory and (reparse or (info.st_dev, info.st_ino) != identity):
@@ -309,6 +384,7 @@ def agy_remove_owned_tree(directory: Path, parent: Path, identity: tuple,
                             path.unlink()
                         if reparse:
                             report["reparse_links_removed"] += 1
+                        note_progress(time.monotonic())
                     finally:
                         if handle is not None:
                             handle.close()
@@ -320,10 +396,16 @@ def agy_remove_owned_tree(directory: Path, parent: Path, identity: tuple,
                     break
                 except OSError as exc:
                     native_code = getattr(exc, "winerror", None)
-                    report["diagnostics"].append({"winerror": native_code,
-                        "target_sha256": hashlib.sha256(str(target.relative_to(parent)).encode()).hexdigest(),
+                    try:
+                        rel_target = str(target.relative_to(parent))
+                    except ValueError:
+                        rel_target = str(target)
+                    report["diagnostics"].append({
+                        "winerror": native_code,
+                        "target_sha256": hashlib.sha256(rel_target.encode()).hexdigest(),
                         "classification": "SHARING_VIOLATION" if native_code in (32, 33) else
-                        "ACCESS_DENIED_UNATTRIBUTED" if native_code == 5 else "OS_ERROR"})
+                        "ACCESS_DENIED_UNATTRIBUTED" if native_code == 5 else "OS_ERROR"
+                    })
                     # ERROR_ACCESS_DENIED may be transient (including scanners),
                     # but is never labeled Defender/ACL without independent proof.
                     if os.name != "nt" or native_code not in (5, 32, 33) or attempt == 4:
@@ -339,6 +421,16 @@ def agy_remove_owned_tree(directory: Path, parent: Path, identity: tuple,
         code = str(exc)
         if re.fullmatch(r"AGY_[A-Z_]+", code):
             report["reason"] = code
+        elif isinstance(exc, OSError):
+            native_code = getattr(exc, "winerror", None)
+            if native_code in (32, 33):
+                report["reason"] = "AGY_SCRATCH_CLEANUP_SHARING_VIOLATION"
+            elif native_code == 5:
+                report["reason"] = "AGY_SCRATCH_CLEANUP_ACCESS_DENIED"
+            else:
+                report["reason"] = "AGY_SCRATCH_CLEANUP_OS_ERROR"
+    finally:
+        update_measurements(time.monotonic())
     return report
 
 

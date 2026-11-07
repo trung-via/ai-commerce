@@ -2,8 +2,10 @@
 import copy
 import hashlib
 import json
+import math
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -785,3 +787,176 @@ def test_native_agy_fixture_end_to_end_readonly_git_and_lingering_writer(tmp_pat
         after_verify = result["evidence_sha256"]["source_after_verify"]
         assert after_verify == result["evidence_sha256"]["source_after_teardown"]
         assert result["verify_exit_code"] == 0
+
+
+def _measured_tree(tmp_path, files=12, depth=2):
+    tree = tmp_path / "measured"
+    leaf = tree
+    for level in range(depth):
+        leaf = leaf / f"d{level}"
+    leaf.mkdir(parents=True)
+    for index in range(files):
+        (leaf / f"f{index}.txt").write_bytes(b"x")
+    identity, parent = tree.stat(), tmp_path.stat()
+    return tree, (identity.st_dev, identity.st_ino), (parent.st_dev, parent.st_ino)
+
+
+def test_cleanup_reports_sanitized_measurements(tmp_path):
+    tree, identity, parent = _measured_tree(tmp_path)
+    result = adapters.agy_remove_owned_tree(tree, tmp_path, identity, parent)
+    measured = result["measurements"]
+    assert result["status"] == "CLEAN" and not tree.exists()
+    assert measured["entries_visited"] == 12 + 2 + 1
+    assert measured["deleted_entries"] == 15 and measured["max_depth"] == 3
+    assert 0 <= measured["elapsed_seconds"] <= measured["budget_seconds"]
+    assert measured["entry_limit"] == adapters.AGY_CLEANUP_MAX_ENTRIES
+    assert measured["depth_limit"] == adapters.AGY_CLEANUP_MAX_DEPTH
+    assert str(tmp_path) not in json.dumps(result)
+
+
+@pytest.mark.parametrize("zero_timeout", [0, 0.0])
+def test_cleanup_zero_budget_holds_immediately(tmp_path, zero_timeout):
+    tree, identity, parent = _measured_tree(tmp_path)
+    result = adapters.agy_remove_owned_tree(tree, tmp_path, identity, parent, timeout_seconds=zero_timeout)
+    assert result["status"] == "HOLD"
+    assert result["reason"] == "AGY_SCRATCH_CLEANUP_TIME_EXCEEDED"
+    assert result["measurements"]["budget_seconds"] == 0.0
+    assert tree.exists()
+
+
+@pytest.mark.parametrize("invalid_timeout", [
+    float("nan"),
+    float("inf"),
+    float("-inf"),
+    True,
+    False,
+    -1.0,
+    -0.001,
+    -1,
+    -(10**400),
+    -(2**4096),
+    adapters.AGY_CLEANUP_MAX_SECONDS + 0.001,
+    adapters.AGY_CLEANUP_MAX_SECONDS + 1,
+    10**9,
+    2**1024,
+    10**400,
+    2**4096,
+    "30",
+    None,
+    [],
+    {},
+])
+def test_cleanup_rejects_nonfinite_and_invalid_timeout(tmp_path, invalid_timeout):
+    tree, identity, parent = _measured_tree(tmp_path)
+    result = adapters.agy_remove_owned_tree(tree, tmp_path, identity, parent, timeout_seconds=invalid_timeout)
+    assert result["status"] == "HOLD"
+    assert result["reason"] == "AGY_SCRATCH_CLEANUP_TIMEOUT_INVALID"
+    assert tree.exists()
+    assert (tree / "d0" / "d1" / "f0.txt").is_file()
+    assert result["attempts"] == 0
+    assert result["readonly_files_cleared"] == 0
+    assert result["reparse_links_removed"] == 0
+    assert result["measurements"]["deleted_entries"] == 0
+    assert result["measurements"]["entries_visited"] == 0
+
+
+@pytest.mark.parametrize("valid_timeout", [
+    15.0,
+    adapters.AGY_CLEANUP_MAX_SECONDS,
+    int(adapters.AGY_CLEANUP_MAX_SECONDS),
+])
+def test_cleanup_valid_custom_budget(tmp_path, valid_timeout):
+    tree, identity, parent = _measured_tree(tmp_path)
+    result = adapters.agy_remove_owned_tree(tree, tmp_path, identity, parent, timeout_seconds=valid_timeout)
+    assert result["status"] == "CLEAN" and not tree.exists()
+    assert result["measurements"]["budget_seconds"] == float(valid_timeout)
+
+
+def test_cleanup_entry_and_depth_limits_are_separate_reasons(tmp_path, monkeypatch):
+    tree, identity, parent = _measured_tree(tmp_path)
+    monkeypatch.setattr(adapters, "AGY_CLEANUP_MAX_ENTRIES", 5)
+    entries = adapters.agy_remove_owned_tree(tree, tmp_path, identity, parent)
+    assert entries["status"] == "HOLD"
+    assert entries["reason"] == "AGY_SCRATCH_CLEANUP_ENTRY_LIMIT_EXCEEDED"
+    assert tree.exists()
+    monkeypatch.setattr(adapters, "AGY_CLEANUP_MAX_ENTRIES", 100_000)
+    monkeypatch.setattr(adapters, "AGY_CLEANUP_MAX_DEPTH", 1)
+    depth = adapters.agy_remove_owned_tree(tree, tmp_path, identity, parent)
+    assert depth["status"] == "HOLD"
+    assert depth["reason"] == "AGY_SCRATCH_CLEANUP_DEPTH_LIMIT_EXCEEDED"
+    assert tree.exists()
+
+
+def test_cleanup_residual_present_holds(tmp_path, monkeypatch):
+    tree, identity, parent = _measured_tree(tmp_path)
+    if os.name == "nt":
+        monkeypatch.setattr(adapters._AgyCleanupHandle, "delete", lambda self, info, report: None)
+    else:
+        monkeypatch.setattr(Path, "rmdir", lambda self: None)
+        monkeypatch.setattr(Path, "unlink", lambda self: None)
+    result = adapters.agy_remove_owned_tree(tree, tmp_path, identity, parent)
+    assert result["status"] == "HOLD"
+    assert result["reason"] == "AGY_SCRATCH_RESIDUAL_PRESENT"
+    assert tree.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="kernel32 DLL is Windows-only")
+def test_agy_kernel_thread_safety(monkeypatch):
+    monkeypatch.setattr(adapters, "_AGY_KERNEL", None)
+    results = []
+    def worker():
+        results.append(adapters._agy_kernel())
+    threads = [threading.Thread(target=worker) for _ in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(results) == 16
+    first = results[0]
+    assert all(r is first for r in results)
+    assert first is adapters._AGY_KERNEL
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows performance and Git loose objects")
+def test_native_medium_large_scratch_scope_proof(tmp_path):
+    """Host-owned targeted fixture with >=1,000 ordinary scratch leaves,
+
+    moderate nested tree, multiple read-only Git loose-object-like files,
+    and observed elapsed/entries/depth/final root ABSENT.
+    """
+    tree = tmp_path / "large_scratch"
+    tree.mkdir()
+    total_files = 0
+    readonly_count = 0
+    for d_idx in range(10):
+        branch = tree / f"dir_{d_idx:02d}" / "sub"
+        branch.mkdir(parents=True)
+        for f_idx in range(100):
+            file_path = branch / f"leaf_{f_idx:03d}.tmp"
+            file_path.write_bytes(b"disposable payload")
+            total_files += 1
+            if f_idx < 2:  # 2 per dir * 10 dirs = 20 read-only files
+                os.chmod(file_path, stat.S_IREAD)
+                readonly_count += 1
+    assert total_files == 1000
+    assert readonly_count == 20
+
+    identity = tree.stat()
+    parent_identity = tmp_path.stat()
+    result = adapters.agy_remove_owned_tree(
+        tree, tmp_path,
+        (identity.st_dev, identity.st_ino),
+        (parent_identity.st_dev, parent_identity.st_ino)
+    )
+
+    assert result["status"] == "CLEAN"
+    assert result["reason"] is None
+    assert not tree.exists()
+    assert result["readonly_files_cleared"] == 20
+    measurements = result["measurements"]
+    assert measurements["entries_visited"] == 1021
+    assert measurements["deleted_entries"] == 1021
+    assert measurements["max_depth"] == 3
+    assert measurements["elapsed_seconds"] >= 0.0
+    assert measurements["elapsed_seconds"] <= measurements["budget_seconds"]
+    assert str(tmp_path) not in json.dumps(result)
