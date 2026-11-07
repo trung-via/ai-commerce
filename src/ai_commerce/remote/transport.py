@@ -184,7 +184,10 @@ class WorkOwner:
 
     Transitions: OWNED -> CLAIMED -> SPAWN_INTENT -> CHILD_OBSERVED (optional)
     -> PROVIDER_INTENT -> ROUND_VERIFIED [-> PROVIDER_INTENT ...]
-    -> RESULT_VERIFIED -> PUBLISH_INTENT -> PUBLISHED. UNKNOWN is terminal
+    -> RESULT_VERIFIED -> PUBLISH_INTENT -> PUBLISHED. FAIL_VERIFIED (only from
+    ROUND_VERIFIED, i.e. every provider intent resolved with a determinate
+    receipt and no publish boundary reached) is a typed terminal for a
+    deterministically rejected verification. UNKNOWN is terminal
     from every nonterminal state. Intent means effect MAY have occurred.
     Only hashes/normalized IDs enter public commit messages; never logs/input.
     """
@@ -195,9 +198,9 @@ class WorkOwner:
         "SPAWN_INTENT": {"CHILD_OBSERVED", "PROVIDER_INTENT"},
         "CHILD_OBSERVED": {"PROVIDER_INTENT", "ROUND_VERIFIED", "RESULT_VERIFIED"},
         "PROVIDER_INTENT": {"CHILD_OBSERVED", "ROUND_VERIFIED"},
-        "ROUND_VERIFIED": {"PROVIDER_INTENT", "CHILD_OBSERVED", "RESULT_VERIFIED"},
+        "ROUND_VERIFIED": {"PROVIDER_INTENT", "CHILD_OBSERVED", "RESULT_VERIFIED", "FAIL_VERIFIED"},
         "RESULT_VERIFIED": {"PUBLISH_INTENT"}, "PUBLISH_INTENT": {"PUBLISHED"},
-        "PUBLISHED": set(), "UNKNOWN": set(),
+        "PUBLISHED": set(), "UNKNOWN": set(), "FAIL_VERIFIED": set(),
     }
 
     @staticmethod
@@ -594,19 +597,21 @@ class WorkOwner:
             if prior["generation"] >= target_gen:
                 raise RemoteTransportError("WORK_OWNER_TRANSFER_CONFLICT")
             # UNKNOWN_FAIL_CLOSED: Strictly DENY UNKNOWN predecessor provider/publication/reownership
-            if prior["stage"] != "PUBLISHED":
+            if prior["stage"] == "FAIL_VERIFIED":
+                cls._check_fail_verified_transfer(github, prior, identity)
+            elif prior["stage"] != "PUBLISHED":
                 raise RemoteTransportError("WORK_OWNER_PREDECESSOR_UNRESOLVED")
             if target_gen != prior["generation"] + 1:
                 raise RemoteTransportError("WORK_OWNER_STALE_OR_SKIPPED_GENERATION")
 
             receipt = prior.get("data", {}).get("receipt")
             cand_digest = prior.get("data", {}).get("candidate")
-            if not receipt or not cand_digest:
+            if prior["stage"] == "PUBLISHED" and (not receipt or not cand_digest):
                 raise RemoteTransportError("WORK_TERMINAL_RECEIPT_MISMATCH")
             pred_attempt = prior.get("data", {}).get("attempt_id")
             if not pred_attempt and identity.get("lineage"):
                 pred_attempt = identity["lineage"][0].get("attempt_id")
-            if pred_attempt:
+            if pred_attempt and prior["stage"] == "PUBLISHED":
                 cand_ref = github.api("GET", f"/git/ref/heads/ef02/candidate/{github.attempt_key(pred_attempt)}")
                 cand_sha = cand_ref.get("object", {}).get("sha")
                 if cls.digest(cand_sha) != cand_digest:
@@ -635,6 +640,23 @@ class WorkOwner:
                     raise RemoteTransportError("WORK_OWNER_TRANSFER_CONFLICT") from exc
                 raise
             return owner
+
+    def _genesis_source_sha(self):
+        """Source SHA that must parent sequence 000 of this journal.
+
+        The journal genesis is bound to the independently authenticated root
+        issue/claim lineage (the last, oldest, entry produced by
+        _authenticate_lineage), never to the successor attempt's source SHA.
+        """
+        lineage = self.identity.get("lineage")
+        if not lineage:
+            return self.identity["source_sha"]
+        root = lineage[-1]
+        if (root.get("issue") != self.base_identity["issue"] or
+                root.get("action_id") != self.base_identity["action_id"] or
+                not re.fullmatch("[0-9a-f]{40}", str(root.get("source_sha")))):
+            raise RemoteTransportError("WORK_JOURNAL_INTEGRITY_MISMATCH")
+        return root["source_sha"]
 
     def read(self):
         deadline = time.monotonic() + 60
@@ -725,7 +747,7 @@ class WorkOwner:
                         raise RemoteTransportError("LEGACY_MIGRATION_UNPROVEN")
                     raise RemoteTransportError("WORK_JOURNAL_INTEGRITY_MISMATCH")
 
-            parent = prior["sha"] if prior else (matched_pred["source_sha"] if is_legacy else self.identity["source_sha"])
+            parent = prior["sha"] if prior else (matched_pred["source_sha"] if is_legacy else self._genesis_source_sha())
 
             if (set(record) != {"kind", "version", "identity", "generation", "fence",
                     "sequence", "previous", "stage", "data"} or
@@ -735,7 +757,7 @@ class WorkOwner:
                     record["previous"] != (prior["digest"] if prior else None) or
                     not re.fullmatch("[0-9a-f]{64}", str(record["fence"])) or
                     [p.get("sha") for p in commit.get("parents", [])] != [parent]):
-                if legacy_pred or is_legacy or record.get("version") == 1:
+                if legacy_pred or is_legacy:
                     raise RemoteTransportError("LEGACY_MIGRATION_UNPROVEN")
                 raise RemoteTransportError("WORK_JOURNAL_INTEGRITY_MISMATCH")
 
@@ -769,7 +791,7 @@ class WorkOwner:
                     if record["fence"] != prior["fence"]:
                         raise RemoteTransportError("WORK_JOURNAL_INTEGRITY_MISMATCH")
                 elif record["generation"] == prior["generation"] + 1:
-                    if prior["stage"] != "PUBLISHED":
+                    if prior["stage"] not in ("PUBLISHED", "FAIL_VERIFIED"):
                         raise RemoteTransportError("WORK_JOURNAL_INTEGRITY_MISMATCH")
                     if record["stage"] != "OWNED":
                         raise RemoteTransportError("WORK_JOURNAL_INTEGRITY_MISMATCH")
@@ -793,10 +815,10 @@ class WorkOwner:
     @classmethod
     def _transition(cls, stage, chain, data):
         previous = chain[-1]["stage"] if chain else None
-        is_gen_transfer = bool(chain and stage == "OWNED" and previous == "PUBLISHED")
+        is_gen_transfer = bool(chain and stage == "OWNED" and previous in ("PUBLISHED", "FAIL_VERIFIED"))
         if (stage not in cls.EDGES or (not chain and stage != "OWNED") or
                 (chain and not is_gen_transfer and stage not in cls.EDGES[previous] and not (
-                    stage == "UNKNOWN" and previous not in ("PUBLISHED", "UNKNOWN")))):
+                    stage == "UNKNOWN" and previous not in ("PUBLISHED", "UNKNOWN", "FAIL_VERIFIED")))):
             raise RemoteTransportError("WORK_JOURNAL_TRANSITION_INVALID")
         allowed_data = {"round", "pid", "receipt", "candidate", "attempt_id", "issue", "repair_of", "predecessor_tip"}
         if (not isinstance(data, dict) or set(data) - allowed_data or
@@ -817,6 +839,10 @@ class WorkOwner:
                 raise RemoteTransportError("WORK_PROVIDER_OUTCOME_UNKNOWN")
             if stage == "ROUND_VERIFIED" and (len(intents) != len(verified) + 1 or "receipt" not in data):
                 raise RemoteTransportError("WORK_PROVIDER_RECEIPT_MISMATCH")
+        if stage == "FAIL_VERIFIED" and (not verified or len(intents) != len(verified) or
+                                         data.get("receipt") != verified[-1]["data"].get("receipt") or
+                                         "candidate" in data):
+            raise RemoteTransportError("WORK_FAIL_VERIFIED_PROOF_REQUIRED")
         if stage in ("RESULT_VERIFIED", "PUBLISH_INTENT", "PUBLISHED") and "receipt" not in data:
             raise RemoteTransportError("WORK_VERIFIED_RECEIPT_REQUIRED")
         if stage == "PUBLISHED" and "candidate" not in data:
@@ -827,6 +853,24 @@ class WorkOwner:
             raise RemoteTransportError("WORK_PROVIDER_OUTCOME_UNKNOWN")
         if stage == "CHILD_OBSERVED" and ("pid" not in data or any(r["stage"] == stage for r in gen_chain)):
             raise RemoteTransportError("WORK_CHILD_DUPLICATE_OR_MISMATCH")
+
+    @classmethod
+    def _check_fail_verified_transfer(cls, github, prior, identity):
+        """Transfer past FAIL_VERIFIED only when no candidate ref was ever published."""
+        if not prior.get("data", {}).get("receipt"):
+            raise RemoteTransportError("WORK_OWNER_PREDECESSOR_UNRESOLVED")
+        pred_attempt = prior.get("data", {}).get("attempt_id")
+        if not pred_attempt and identity.get("lineage"):
+            pred_attempt = identity["lineage"][0].get("attempt_id")
+        if not pred_attempt:
+            raise RemoteTransportError("WORK_OWNER_PREDECESSOR_UNRESOLVED")
+        try:
+            github.api("GET", f"/git/ref/heads/ef02/candidate/{github.attempt_key(pred_attempt)}")
+        except RemoteTransportError as exc:
+            if str(exc) == "GITHUB_HTTP_404":
+                return
+            raise
+        raise RemoteTransportError("WORK_OWNER_PREDECESSOR_UNRESOLVED")
 
     def assert_current(self):
         if self.uncertain:
@@ -840,7 +884,7 @@ class WorkOwner:
                 any(r["fence"] != self.digest(self.fence) for r in gen_records) or
                 (self.tip is not None and chain[-1]["digest"] != self.tip) or
                 chain[-1]["generation"] > self.generation or
-                chain[-1]["stage"] in ("UNKNOWN", "PUBLISHED")):
+                chain[-1]["stage"] in ("UNKNOWN", "PUBLISHED", "FAIL_VERIFIED")):
             raise RemoteTransportError("WORK_OWNER_STALE_FENCE")
         return chain
 
@@ -902,6 +946,13 @@ class WorkOwner:
             lineage_gap = "WORK_OWNER_JOURNAL_ABSENT"
         elif current_stage == "UNKNOWN":
             lineage_gap = "PREDECESSOR_EXECUTION_UNKNOWN"
+        elif current_stage == "FAIL_VERIFIED":
+            return {
+                "status": "FAIL_VERIFIED_TERMINAL", "replay_authorized": False,
+                "publication_authorized": False, "generation": current_gen,
+                "proves_current_mt01_pass": False, "stage": current_stage,
+                "lineage_gap": None,
+            }
         elif self.identity.get("lineage") is None and current_gen == 1:
             lineage_gap = "V1_HAS_NO_TRUSTED_CROSS_ISSUE_REPAIR_OR_TRANSFER"
 

@@ -184,6 +184,29 @@ def _classify_failed_executor(report: dict, evidence: Path) -> str:
         return problem[0]
     return "EXECUTOR_FAILED"
 
+def _verified_terminal_failure(owner, outcome):
+    """True only when a deterministic verification rejection is independently proved.
+
+    Requires: the EF01 child returned a determinate VERIFICATION_FAILED report,
+    every recorded provider invocation returned determinately with a completed
+    verify, no candidate/publication boundary was reached, and the durable
+    journal ends at ROUND_VERIFIED (every PROVIDER_INTENT resolved).  Anything
+    else (provider/transport/publish uncertainty, quota, nonzero exit with a
+    success-shaped receipt, missing proof) stays UNKNOWN and strictly HOLDs.
+    """
+    if outcome.get("status") != "VERIFICATION_FAILED" or outcome.get("candidate_sha") or outcome.get("candidate_ref"):
+        return False
+    invocations = outcome.get("ef01_invocations")
+    if (not isinstance(invocations, list) or not invocations or
+            any(not isinstance(i, dict) or i.get("provider_return_determinate") is not True or
+                i.get("verify_completed") is not True for i in invocations)):
+        return False
+    if outcome.get("verify_exit_code") in (None, 0):
+        return False
+    chain = owner.assert_current()
+    return bool(chain and chain[-1]["stage"] == "ROUND_VERIFIED" and chain[-1].get("data", {}).get("receipt"))
+
+
 class WorkOwnerBroker:
     """Fence requests use existing EF01 stdin/stdout; no network or credentials.
 
@@ -316,7 +339,11 @@ class LocalBatchWorker:
                 broker = None
             if owner is not None and outcome.get("status") not in ("CANDIDATE_READY", REVIEW_STATUS):
                 try:
-                    owner.append("UNKNOWN")
+                    if _verified_terminal_failure(owner, outcome):
+                        owner.append("FAIL_VERIFIED", receipt=owner.assert_current()[-1]["data"]["receipt"])
+                        outcome["work_owner_terminal"] = "FAIL_VERIFIED"
+                    else:
+                        owner.append("UNKNOWN")
                 except Exception:
                     pass  # Durable last intent still denies replay; never rollback.
             outcome["replay_authorized"] = False

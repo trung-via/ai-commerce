@@ -2272,3 +2272,142 @@ def test_r9_defect_b_idempotent_same_payload_and_concurrent_race(tmp_path):
         fingerprint=fp, issuer=None
     ) == expected_ref
 
+
+def _seed_root_576_journal(storage, root_src, stages, parent_override=None):
+    """Seed an original root #576 claim + WorkOwner journal whose genesis parent is root_src."""
+    from ai_commerce.remote.transport import WorkOwner
+    from ai_commerce.remote.candidate_policy import canonical  # noqa: F401
+    a576 = {"action_id": "R1-WP02-CODEX-ROOT", "attempt_id": "r1_wp02_codex_root_576",
+            "executor": "codex", "model": "gpt-5", "effort": "high"}
+    p576 = {"batch_id": "batch-576", "source_sha": root_src, "actions": [a576]}
+    storage.issues[576] = p576
+    fp = hashlib.sha256(json.dumps({"batch_id": "batch-576", "source_sha": root_src, "action": a576},
+                                   sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    key = storage.attempt_key(a576["attempt_id"])
+    claim = hashlib.sha1(b"claim-576").hexdigest()
+    storage.refs[f"refs/heads/ef02/claims/{key}"] = claim
+    storage.commits[claim] = {"message": f"EF02 CLAIM\n\nfingerprint={fp}\nattempt_id={a576['attempt_id']}",
+                              "parents": [{"sha": root_src}]}
+    base = {"repo": storage.repo, "issue": 576, "action_id": a576["action_id"]}
+    prefix = f"ef02/workowner/{WorkOwner.digest(base)}/"
+    prior_digest, prior_sha = None, parent_override or root_src
+    for idx, (stage, data) in enumerate(stages):
+        rec = {"kind": "WorkOwner", "version": 1, "identity": base, "generation": 1, "fence": "f" * 64,
+               "sequence": idx, "previous": prior_digest, "stage": stage, "data": data}
+        digest = WorkOwner.digest(rec)
+        prior_digest = digest
+        sha = hashlib.sha1(f"576-journal-{idx}".encode()).hexdigest()
+        storage.commits[sha] = {"message": WorkOwner.MARKER + json.dumps({**rec, "digest": digest}, sort_keys=True,
+                                                                        separators=(",", ":")),
+                                "tree": {"sha": "e" * 40}, "parents": [{"sha": prior_sha}]}
+        prior_sha = sha
+        storage.refs[f"refs/heads/{prefix}{idx:03d}"] = sha
+    return a576
+
+
+def _successor_581(storage, succ_src):
+    from ai_commerce.remote.transport import WorkOwner
+    a581 = {"action_id": "R1-WP02-AGY-REPAIR", "attempt_id": "r1_wp02_agy_repair_581",
+            "repair_of": "r1_wp02_codex_root_576", "executor": "antigravity",
+            "model": "claude-sonnet-5-5-medium", "effort": "medium"}
+    p581 = {"batch_id": "batch-581", "source_sha": succ_src, "actions": [a581]}
+    storage.issues[581] = p581
+    storage.issue_body = p581
+    return WorkOwner.identity(storage, 581, p581, a581)
+
+
+_ROOT_SRC = "0" * 39 + "d"
+_SUCC_SRC = "d" * 40
+_ROOT_STAGES = [("OWNED", {}), ("CLAIMED", {}), ("SPAWN_INTENT", {}),
+                ("PROVIDER_INTENT", {"round": 0}), ("UNKNOWN", {})]
+
+
+def test_workowner_historical_root_parent_cross_source_accepted():
+    """Root genesis parent is the authenticated ROOT source, not the successor's source."""
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+    storage = WorkOwnerMemoryTransport(_SUCC_SRC)
+    storage.commits[_ROOT_SRC] = {"tree": {"sha": "e" * 40}, "parents": [], "message": "root"}
+    _seed_root_576_journal(storage, _ROOT_SRC, _ROOT_STAGES)
+    ident = _successor_581(storage, _SUCC_SRC)
+    assert ident["generation"] == 2 and ident["source_sha"] != _ROOT_SRC
+    chain = WorkOwner(storage, ident, "").read()
+    assert [r["stage"] for r in chain] == [s for s, _ in _ROOT_STAGES]
+    # The original UNKNOWN is surfaced precisely, never as a legacy-migration gap.
+    with pytest.raises(RemoteTransportError, match="WORK_OWNER_PREDECESSOR_UNRESOLVED"):
+        WorkOwner.acquire(storage, ident)
+    rec = WorkOwner(storage, ident, "").reconcile()
+    assert rec["stage"] == "UNKNOWN" and rec["lineage_gap"] == "PREDECESSOR_EXECUTION_UNKNOWN"
+    assert rec["replay_authorized"] is False
+
+
+def test_workowner_historical_root_fake_parent_rejected():
+    """Forged genesis parent (successor source or arbitrary SHA) is still rejected."""
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+    for forged in (_SUCC_SRC, "9" * 40):
+        storage = WorkOwnerMemoryTransport(_SUCC_SRC)
+        storage.commits[_ROOT_SRC] = {"tree": {"sha": "e" * 40}, "parents": [], "message": "root"}
+        storage.commits[forged] = storage.commits.get(forged) or {"tree": {"sha": "e" * 40}, "parents": [],
+                                                                  "message": "x"}
+        _seed_root_576_journal(storage, _ROOT_SRC, _ROOT_STAGES, parent_override=forged)
+        ident = _successor_581(storage, _SUCC_SRC)
+        with pytest.raises(RemoteTransportError, match="WORK_JOURNAL_INTEGRITY_MISMATCH"):
+            WorkOwner(storage, ident, "").read()
+
+
+def test_workowner_fail_verified_typed_terminal_and_transfer():
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+    storage = WorkOwnerMemoryTransport(_SUCC_SRC)
+    storage.commits[_ROOT_SRC] = {"tree": {"sha": "e" * 40}, "parents": [], "message": "root"}
+    receipt = "ab" * 32
+    stages = [("OWNED", {}), ("CLAIMED", {}), ("SPAWN_INTENT", {}),
+              ("PROVIDER_INTENT", {"round": 0}), ("ROUND_VERIFIED", {"round": 0, "receipt": receipt}),
+              ("FAIL_VERIFIED", {"receipt": receipt, "attempt_id": "r1_wp02_codex_root_576"})]
+    _seed_root_576_journal(storage, _ROOT_SRC, stages)
+    ident = _successor_581(storage, _SUCC_SRC)
+    owner = WorkOwner(storage, ident, "")
+    assert owner.read()[-1]["stage"] == "FAIL_VERIFIED"
+    rec = owner.reconcile()
+    assert rec["status"] == "FAIL_VERIFIED_TERMINAL" and rec["replay_authorized"] is False
+    # No candidate ref was ever published: owner-authenticated transfer is allowed.
+    new_owner = WorkOwner.acquire(storage, ident)
+    assert new_owner.generation == 2
+    assert [r["stage"] for r in new_owner.read()][-2:] == ["FAIL_VERIFIED", "OWNED"]
+    # Transition proof is mandatory: no FAIL_VERIFIED without a resolved round receipt.
+    with pytest.raises(RemoteTransportError, match="WORK_FAIL_VERIFIED_PROOF_REQUIRED"):
+        WorkOwner._transition("FAIL_VERIFIED", [
+            {"stage": "PROVIDER_INTENT", "generation": 1, "data": {"round": 0}},
+            {"stage": "ROUND_VERIFIED", "generation": 1, "data": {"round": 0, "receipt": receipt}}],
+            {"receipt": "cd" * 32})
+    # A published candidate ref for the failed attempt denies transfer (fail closed).
+    storage2 = WorkOwnerMemoryTransport(_SUCC_SRC)
+    storage2.commits[_ROOT_SRC] = {"tree": {"sha": "e" * 40}, "parents": [], "message": "root"}
+    a = _seed_root_576_journal(storage2, _ROOT_SRC, stages)
+    storage2.refs[f"refs/heads/ef02/candidate/{storage2.attempt_key(a['attempt_id'])}"] = "7" * 40
+    storage2.commits["7" * 40] = {"message": "not evidence", "tree": {"sha": "e" * 40}, "parents": []}
+    with pytest.raises(RemoteTransportError, match="WORK_LINEAGE_PREDECESSOR_CANDIDATE_MISMATCH"):
+        _successor_581(storage2, _SUCC_SRC)
+
+
+def test_worker_fail_verified_classification_is_strict():
+    from ai_commerce.remote.worker import _verified_terminal_failure
+
+    class _Owner:
+        def __init__(self, stage):
+            self.stage = stage
+
+        def assert_current(self):
+            return [{"stage": self.stage, "data": {"receipt": "ab" * 32}}]
+
+    good = {"status": "VERIFICATION_FAILED", "verify_exit_code": 1, "candidate_sha": None, "candidate_ref": None,
+            "ef01_invocations": [{"provider_return_determinate": True, "verify_completed": True}]}
+    assert _verified_terminal_failure(_Owner("ROUND_VERIFIED"), good) is True
+    for bad in ({**good, "status": "EXECUTION_UNKNOWN"}, {**good, "status": "QUOTA_EXHAUSTED"},
+                {**good, "verify_exit_code": 0}, {**good, "candidate_sha": "c" * 40},
+                {**good, "ef01_invocations": []},
+                {**good, "ef01_invocations": [{"provider_return_determinate": False, "verify_completed": True}]},
+                {**good, "ef01_invocations": [{"provider_return_determinate": True, "verify_completed": False}]}):
+        assert _verified_terminal_failure(_Owner("ROUND_VERIFIED"), bad) is False
+    assert _verified_terminal_failure(_Owner("PROVIDER_INTENT"), good) is False
