@@ -44,6 +44,7 @@ def _payload(
     asset_sha256: str,
     study_readiness: Any | None = None,
     context: dict[str, Any] | None = None,
+    fixture: Any | None = None,
 ) -> dict[str, Any]:
     if type(review) is not mm.BQ02bMultimodalReview:
         raise critic.Error("native BQ02bMultimodalReview required")
@@ -190,6 +191,47 @@ def _payload(
 
         # Look for concrete localized flaws
         detected_faults: list[dict[str, Any]] = []
+        is_fixture_held = False
+
+        # Root Semantic Negative AC:
+        # Untrusted caller context/dict, strings, bearer tokens, forged oracle, receipt, asserted rights/claim
+        # or guessed hashes must NEVER be treated as an observed defect.
+        # Only an unforgeable live native fixture object in explicit fixture= can authorize synthetic fault.
+        fixture_candidate = fixture
+        token_candidate = ctx.get("fixture_token") or ctx.get("synthetic_fixture_token")
+        has_caller_fixture_claim = bool(
+            fixture_candidate is not None
+            or token_candidate is not None
+            or ctx.get("fixture_oracle")
+        )
+
+        if has_caller_fixture_claim:
+            try:
+                from ai_commerce.creative_quality import repair_offline_adapter as adapter
+                valid, reject_reason = adapter.verify_live_fixture_capability(
+                    fixture=fixture_candidate,
+                    token=token_candidate,
+                    asset_sha256=observed_asset_sha,
+                    review=review,
+                )
+            except Exception:
+                valid, reject_reason = False, "FIXTURE_VERIFICATION_EXCEPTION"
+
+            if valid:
+                detected_faults.append({
+                    "kind": "SYNTHETIC_WHITE_SLATE_BLACK_SIGNAL",
+                    "time": "1/2",
+                    "region": [0.0, 0.0, 1.0, 1.0],
+                    "shot_id": None,
+                    "severity": "SYNTHETIC_TECHNICAL_ONLY",
+                })
+            else:
+                # Forged fixture token/JSON/stale SHA/released fixture/bearer token without fixture also holds!
+                is_fixture_held = True
+                choice = "HOLD"
+                status = "HELD"
+                reasons.append("FIXTURE_CAPABILITY_VERIFICATION_FAILED_HOLD")
+                risks.append("UNVERIFIED_OR_FORGED_FIXTURE_CAPABILITY")
 
         # T2 Frame findings (e.g. freeze or black frame)
         for frame in t2_frames:
@@ -264,7 +306,9 @@ def _payload(
             )
         )
 
-        if has_unproven_caller_defect and not detected_faults:
+        if is_fixture_held:
+            pass
+        elif has_unproven_caller_defect and not detected_faults:
             # Caller defect claim not verified by native Q4 observed evidence
             choice = "RETURN_TO_BRAIN"
             status = "RETURNED_TO_BRAIN"
@@ -347,6 +391,7 @@ def _payload(
 class BQ04aRepairDecision(critic._Record):
     _review: mm.BQ02bMultimodalReview
     _readiness: Any | None
+    _fixture: Any | None = None
     SCHEMA = SCHEMA
 
     def __init__(self, raw: Any):
@@ -372,6 +417,7 @@ class BQ04aRepairDecision(critic._Record):
         study_readiness: Any | None = None,
         context: dict[str, Any] | None = None,
         root: Any = None,
+        fixture: Any | None = None,
     ) -> BQ04aRepairDecision:
         data = critic._read(critic._canonical(value))
         if type(data) is not dict or data.get("schema_version") != SCHEMA:
@@ -401,6 +447,7 @@ class BQ04aRepairDecision(critic._Record):
             study_readiness=study_readiness,
             readiness_digest=readiness_digest,
             context=context,
+            fixture=fixture,
         )
 
         expected_dict = expected.to_dict()
@@ -411,7 +458,7 @@ class BQ04aRepairDecision(critic._Record):
             if data[key] != expected_dict[key]:
                 raise critic.Error(f"replay mismatch on decision field: {key}")
 
-        return _bind_decision(expected_dict, review, study_readiness)
+        return _bind_decision(expected_dict, review, study_readiness, fixture=fixture)
 
     @classmethod
     def from_json(
@@ -422,6 +469,7 @@ class BQ04aRepairDecision(critic._Record):
         study_readiness: Any | None = None,
         context: dict[str, Any] | None = None,
         root: Any = None,
+        fixture: Any | None = None,
     ) -> BQ04aRepairDecision:
         return cls.from_dict(
             critic._read(raw),
@@ -429,6 +477,7 @@ class BQ04aRepairDecision(critic._Record):
             study_readiness=study_readiness,
             context=context,
             root=root,
+            fixture=fixture,
         )
 
 
@@ -436,10 +485,12 @@ def _bind_decision(
     data: dict[str, Any],
     review: mm.BQ02bMultimodalReview,
     study_readiness: Any | None = None,
+    fixture: Any | None = None,
 ) -> BQ04aRepairDecision:
     result = object.__new__(BQ04aRepairDecision)
     object.__setattr__(result, "_review", review)
     object.__setattr__(result, "_readiness", study_readiness)
+    object.__setattr__(result, "_fixture", fixture)
     critic._Record.__init__(result, critic._canonical(data))
     return result
 
@@ -452,6 +503,7 @@ def decide_repair(
     study_readiness: Any | None = None,
     readiness_digest: str | None = None,
     context: dict[str, Any] | None = None,
+    fixture: Any | None = None,
 ) -> BQ04aRepairDecision:
     if type(review) is not mm.BQ02bMultimodalReview:
         raise critic.Error("native BQ02bMultimodalReview required")
@@ -470,5 +522,6 @@ def decide_repair(
         asset_sha256=asset_sha256,
         study_readiness=study_readiness,
         context=context,
+        fixture=fixture,
     )
-    return _bind_decision(data, review, study_readiness)
+    return _bind_decision(data, review, study_readiness, fixture=fixture)
