@@ -31,6 +31,46 @@ MT01_REPORT = "docs/engineering/MT01_COMPONENT_AWARE_IMPLEMENTATION_REPORT.md"
 REVIEWED_REGISTRY_REGRESSIONS = ("tests/test_ef02_mt01_registry.py", "tests/test_minimum_test.py")
 HOSTED_WORKERS = (0, 2, 4)
 
+# Source-owned test-path dependency map, independent of component names.
+# Keep this list synchronized with tests that require an actual external media
+# binary; candidate Issue data and self-described group names cannot override it.
+_FFMPEG_EXTERNAL_TESTS = frozenset({
+    "tests/test_a04_media_operations.py",
+    "tests/test_a04_upgrade_v11.py",
+    "tests/test_a03_a04_integration.py",
+    "tests/test_a05_composition.py",
+    "tests/test_a05_render.py",
+    "tests/test_a05_integration.py",
+    "tests/test_a06_e01.py",
+    "tests/test_a13_media_inspection.py",
+})
+_FFMPEG_TEST_HINTS = ("ffmpeg", "ffprobe", "libx264", "transcode", "render", "video", "media")
+
+
+def _needs_ffmpeg_for_plan(plan) -> bool:
+    """Conservatively infer media binaries from reviewed *test paths*.
+
+    Keep test-path selection / owner closure unchanged. Unknown or unsafe paths
+    require media provisioning (or fail at the unchanged MT-01 safety gate).
+    A missing true dependency still fails tests; this helper never marks a
+    selected test as passed, skipped or reusable.
+    """
+    selected = getattr(plan, "selected_tests", None)
+    if not isinstance(selected, (list, tuple)) or not selected:
+        return True
+    for path in selected:
+        if not isinstance(path, str) or not path.endswith(".py"):
+            return True
+        if not (path.startswith("tests/test_") or
+                path.startswith("src/ai_commerce/opportunity/trends/tests/test_")):
+            return True
+        if ".." in path.split("/") or "\\" in path:
+            return True
+        if path in _FFMPEG_EXTERNAL_TESTS or any(token in path.lower() for token in _FFMPEG_TEST_HINTS):
+            return True
+    return False
+
+
 
 def additive_registry_tests(before: object, after: object, groups: tuple) -> tuple[str, ...] | None:
     """Prove additive reviewed profile entries OR test-only extensions.
@@ -435,15 +475,10 @@ def main() -> int:
     print("MT01_V21_MISSING_MAPPING=" + json.dumps(plan.missing_mapping), flush=True)
     print("MT01_V21_INVENTORY_WARNINGS=" + json.dumps(plan.inventory_warnings), flush=True)
     print("MT01_V21_PLAN=" + json.dumps(plan.as_dict(), sort_keys=True), flush=True)
-    no_media_groups = {
-        "diagnostics", "ef01", "ef01p", "ef02", "ef02-recovery",
-        "ef02-scope", "ef02-wake", "git-integrity", "integrity",
-        "mt01", "mt01-v21", "provider", "repair", "merge-queue",
-        "hostops-v1", "hostops-v2",
-        "a02", "a03", "a07", "a08", "a09", "a10", "a10-m02",
-        "a11", "a12", "a14", "foundation", "cli",
-    }
-    need_ffmpeg = bool(set(plan.selected_groups) - no_media_groups)
+    # FFmpeg is a dependency of individual media tests, not of an unknown
+    # MT-01 owner name. A new non-media component must not require Chocolatey
+    # before pytest can run. Unknown media-shaped tests remain conservative.
+    need_ffmpeg = _needs_ffmpeg_for_plan(plan)
     if sys.argv[1:] == ["--v21-plan-only"]:
         # A separate baseline comparison step must inspect the exact plan
         # *before* running the candidate-selected test subset.
