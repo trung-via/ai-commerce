@@ -191,6 +191,26 @@ def _payload(
         # Look for concrete localized flaws
         detected_faults: list[dict[str, Any]] = []
 
+        # This profile describes a test-owned white slate, not a rule that
+        # black frames in creative media are defects. It grants no execution.
+        if ctx.get("synthetic_fixture_profile") == "bq04b-white-slate-4fps/v1":
+            samples = {
+                frame["time"]["requested_seconds"]: frame
+                for frame in t2_frames
+                if isinstance(frame, dict) and isinstance(frame.get("time"), dict)
+                and "requested_seconds" in frame["time"]
+            }
+            target_samples = [samples.get(time) for time in ("1/2", "3/4")]
+            if all(sample is not None and sample.get("state") == "OBSERVED"
+                   and sample.get("region") == "FULL_FRAME"
+                   and sample.get("minimum") == sample.get("maximum") == 0
+                   and sample.get("mean_luma") == "0" for sample in target_samples):
+                detected_faults.append({
+                    "kind": "SYNTHETIC_WHITE_SLATE_BLACK_SIGNAL", "time": "1/2",
+                    "region": [0.0, 0.0, 1.0, 1.0], "shot_id": None,
+                    "severity": "SYNTHETIC_TECHNICAL_ONLY",
+                })
+
         # T2 Frame findings (e.g. freeze or black frame)
         for frame in t2_frames:
             if type(frame) is dict and frame.get("defect"):

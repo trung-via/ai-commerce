@@ -1,0 +1,81 @@
+{
+  "schema_version": "WorkItem.v1",
+  "work_id": "BQ-04B_OFFLINE_REPAIR_001",
+  "action_id": "BQ04B-R11-CODEX-XHIGH-NATIVE-LINK-AC-01",
+  "attempt_id": "bq04b_r11_codex_xhigh_link_proof_20261107_v1",
+  "source_sha": "426ef49748ca27ea8d4216743c58b9b48049e6d2",
+  "status": "HOLD_SOURCE_STALE_AND_NATIVE_LINK_PROOF_PENDING",
+  "objective": "Fresh offline synthetic Q4/Q5 implementation and nonprivileged executable reparse guard equivalence after immutable R10 privilege HOLD",
+  "owner": "Media & Creative",
+  "component": "bq-04b",
+  "verification_profile": "mt01-component-onboarding",
+  "verification_round_limit": 2,
+  "executor_observations": {
+    "local_head": "426ef49748ca27ea8d4216743c58b9b48049e6d2",
+    "remote_main_at_final_check": "da70e0cbf03991bff39f527ac2146d12fcc17cf2",
+    "source_gate": "HOLD_SOURCE_MAIN_STALE; no rebase or source-pin change authorized",
+    "final_bq04b_local": {"collected_total": 103, "passed": 101, "native_environment_failed": 2, "skipped": 0, "errors": 0, "code_assertion_failed": 0},
+    "native_environment_causes": ["hardlink: WinError 5 Access denied", "junction: Access denied"],
+    "optional_symlink_probe": "SYMLINK_NATIVE_EFFECT_UNPROVEN: WinError 1314",
+    "onboarding_tests": {"passed": 60, "failed": 0, "skipped": 0},
+    "selected_groups": ["a13", "bq-02a", "bq-02b", "bq-03b", "bq-04a", "bq-04b"],
+    "code_verify_fix_cycles_used": 2,
+    "independent_ef01_mt01": "NOT_RUN_BY_EXECUTOR; host receipt required",
+    "r11_host_worker_count": "UNOBSERVED",
+    "candidate": "NONE"
+  },
+  "model_selection": {"executor": "codex", "model": "gpt-6.1-sol", "effort": "xhigh", "fallback_used": false, "provider_proof": "EF02_NATIVE_TERMINAL_RECEIPT_REQUIRED"},
+  "allowed_paths": [
+    "src/ai_commerce/creative_quality/repair_offline_adapter.py",
+    "src/ai_commerce/creative_quality/repair_verified_evidence.py",
+    "tests/test_bq_04b_offline_repair.py",
+    "work_items/mt01-components/bq-04b.json",
+    "work_items/BQ-04B_OFFLINE_REPAIR_001.json",
+    "docs/engineering/BQ_04B_OFFLINE_HANDOFF.md",
+    "docs/creative/BQ_04B_OFFLINE_REPAIR_PROTOCOL.md",
+    "src/ai_commerce/creative_quality/t2_sampling.py",
+    "src/ai_commerce/creative_quality/multimodal_review.py",
+    "src/ai_commerce/creative_quality/repair_policy.py",
+    "src/ai_commerce/creative_quality/repair_preservation.py",
+    "tests/test_bq_02b_multimodal.py",
+    "tests/test_bq_04a_targeted_repair.py"
+  ],
+  "add_only_paths": [
+    "src/ai_commerce/creative_quality/repair_offline_adapter.py",
+    "src/ai_commerce/creative_quality/repair_verified_evidence.py",
+    "tests/test_bq_04b_offline_repair.py",
+    "work_items/mt01-components/bq-04b.json",
+    "work_items/BQ-04B_OFFLINE_REPAIR_001.json",
+    "docs/engineering/BQ_04B_OFFLINE_HANDOFF.md",
+    "docs/creative/BQ_04B_OFFLINE_REPAIR_PROTOCOL.md"
+  ],
+  "modified_paths": [
+    "src/ai_commerce/creative_quality/repair_policy.py",
+    "src/ai_commerce/creative_quality/repair_preservation.py"
+  ],
+  "acceptance": [
+    "BQ-04b.q5-deterministic-edit-fixture-isolated",
+    "BQ-04b.q5-artifact-identity-attempt-receipt",
+    "BQ-04b.q5-independent-technical-reinspection-fail-closed"
+  ],
+  "native_link_contract": {
+    "mandatory": ["REAL_WINDOWS_HARDLINK_REJECTED_BEFORE_MEDIA_READ", "REAL_WINDOWS_JUNCTION_REPARSE_REJECTED_BEFORE_MEDIA_READ", "SYMLINK_TAG_METADATA_REAL_VERIFIER_REJECTION", "CURRENT_BYTES_UNCHANGED", "ORDINARY_FILE_POSITIVE_CONTROL"],
+    "mandatory_skip_policy": "NO_SKIP_NO_XFAIL; capability denial is NATIVE_LINK_ENVIRONMENT_HOLD",
+    "optional_privileged_probe": "optional_native_symlink_probe; not a pytest acceptance case",
+    "native_symlink_effect": "SYMLINK_NATIVE_EFFECT_UNPROVEN",
+    "product_acceptance_scope": "Synthetic current-byte guard rejection; does not establish creation or traversal of an OS symlink",
+    "brain_requires_os_symlink": "HOLD; separate Human/HostOps authorization required"
+  },
+  "negative_acceptance": [
+    "Untrusted JSON, archived Q4 or caller rights claims cannot mint a live execution witness",
+    "Every reparse tag, reparse attribute, symlink mode and file hardlink must fail before media reads",
+    "Current identity requires complete locked reinspection, including final lock exit checks",
+    "No provider, rights, publication, spend, production semantics or perceptual quality authority",
+    "Executor cannot publish a candidate or alter Git; EF01 host evidence and independent Brain acceptance remain required"
+  ],
+  "historical_attempts": [
+    {"issue": 584, "run": 42342752418, "artifact": 13562444303, "sha256": "acca6570ce88b06f1861ec38ebb5abf21896e792e0ca2da8d6fba187d56b1975", "status": "IMMUTABLE_29_PASS_6_CODE_FAILURES"},
+    {"issue": 588, "run": 42344486590, "artifact": 13563518864, "sha256": "025960e8ea4b14cbfb4b806bc76f002a64367d41c8fb94e406ce15900953f04a", "status": "IMMUTABLE_PROVIDER_OUTCOME_UNCONFIRMED", "replay_authorized": false},
+    {"issue": 598, "run": 42352888975, "artifact": 13567092030, "sha256": "9ce460d3d1ef85205a8b2155300af590c6679a54b16f3f1135d1671d79faec94", "status": "IMMUTABLE_1252_PASS_1_SKIP_HOLD_NATIVE_SYMLINK_PRIVILEGE", "source_trust": "QUARANTINED_ADVISORY_ONLY", "replay_authorized": false}
+  ]
+}
