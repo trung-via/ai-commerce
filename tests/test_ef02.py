@@ -19,6 +19,31 @@ from ai_commerce.remote.validation import (
 from ai_commerce.remote.scheduler import run_schedule
 from ai_commerce.remote.transport import GitHubTransport, RemoteTransportError
 
+
+@pytest.mark.parametrize("field", ["action_id", "attempt_id"])
+def test_workowner_scheduler_rejects_duplicate_identity_before_dispatch(field):
+    from ai_commerce.remote.scheduler import run_schedule
+    first, second = action("a"), action("b")
+    second[field] = first[field]
+    calls = []
+    with pytest.raises(ValueError, match="DUPLICATE_DISPATCH_IDENTITY"):
+        run_schedule({"batch_id": "duplicate", "source_sha": "a" * 40,
+                      "actions": [first, second]}, lambda a: calls.append(a))
+    assert calls == []
+
+
+def test_workowner_scheduler_mismatched_worker_identity_blocks_dependent():
+    from ai_commerce.remote.scheduler import run_schedule
+    first, second = action("a"), action("b", ["a"])
+    calls = []
+    def work(a):
+        calls.append(a["action_id"])
+        return {"status": "CANDIDATE_READY", "action_id": "foreign"}
+    result = run_schedule({"batch_id": "mismatch", "source_sha": "a" * 40,
+                           "actions": [first, second]}, work)
+    assert result["succeeded"] == 0 and calls == ["a"]
+    assert result["actions"][1]["status"] == "BLOCKED_DEPENDENCY"
+
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = ROOT / "contracts" / "RemoteActionBatch.v1.schema.json"
 REGISTRY = ROOT / ".github" / "ef02" / "verify-profiles.json"
@@ -923,3 +948,25 @@ def test_candidate_ref_get_verification_failure_survives_worker_batch_artifact(t
     safe = result["diagnostic"]
     assert "CANDIDATE_REF_CREATE" in safe and "UNKNOWN_EFFECT_RECONCILE" in safe
     assert _PRIVATE not in safe
+
+
+def test_workowner_candidate_publication_enforces_owner_fence_and_ref_readback(tmp_path, monkeypatch):
+    """Integration consumer check: WorkOwner fence + main's _publication_api ref readback."""
+    from ai_commerce.remote import transport
+    from ai_commerce.remote.transport import CandidateIntegrityError, RemoteTransportError
+    from test_ef02_m0r_fault_injection import _publishable_workowner
+    storage, owner, arguments = _publishable_workowner(tmp_path, monkeypatch)
+
+    # Wrong owner transport rejected before any publication API call
+    other_storage = transport.GitHubTransport("other/repo", "token")
+    bad_owner = transport.WorkOwner(other_storage, owner.identity, "f" * 64)
+    with pytest.raises(CandidateIntegrityError, match="WORK_OWNER_PUBLICATION_FENCE_REQUIRED"):
+        storage.candidate(**{**arguments, "owner": bad_owner})
+
+    # Valid WorkOwner publishes via _publication_api and performs GET readback verification
+    storage.requests.clear()
+    res = storage.candidate(**arguments)
+    assert res["candidate_ref"] in storage.refs
+    assert storage.requests[-2][0] == "POST" and storage.requests[-2][1] == "/git/refs"
+    assert storage.requests[-1][0] == "GET" and storage.requests[-1][1].startswith("/git/ref/heads/ef02/candidate/")
+
