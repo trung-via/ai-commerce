@@ -138,6 +138,7 @@ class PersonalHostOpsContractTests(unittest.TestCase):
         for key, val in (
             ("extra_public_field", {**original, "content_utf8": "PRIVATE_SECRET"}),
             ("private_executor_receipt", {**original, "executors": [{"account": "PRIVATE_SECRET"}]}),
+            ("private_bridge_snapshot", {**original, "snapshot": {"executors": [{"account": "PRIVATE_SECRET"}]}}),
             ("wrong_source_sha", {**original, "source_sha": "0" * 40}),
             ("wrong_issue", {**original, "issue_number": 99}),
             ("wrong_approval", {**original, "approval_channel": "OTHER"}),
@@ -1425,6 +1426,336 @@ class ExecutorHealthLocalTests(unittest.TestCase):
             with self.assertRaisesRegex(hostops.Denied, "EXECUTOR_HEALTH_TIME_INVALID"):
                 hostops.collect_executor_health_local(now=value)
         self.native.assert_not_called()
+
+
+class ExecutorHealthPrivateBridgeTests(unittest.TestCase):
+    """Host-owned tests only; all authorization, clock and native results are stubs."""
+
+    NOW = ExecutorHealthLocalTests.NOW
+    setUp = ExecutorHealthLocalTests.setUp
+    native_result = ExecutorHealthLocalTests.native_result
+
+    def request(self, **changes):
+        return {"schema_version": "ExecutorHealthPrivateRequest.v1",
+                "operation": "executor_health_snapshot", "visibility": "LOCAL_PRIVATE",
+                "origin_id": "a" * 64, "chat_id": "b" * 64, "nonce": "c" * 32,
+                "sequence": 1, "issued_at": "2026-11-07T08:00:00Z", "ttl_seconds": 60,
+                "max_age_seconds": 60, "providers": ["codex", "antigravity"],
+                "requested_fields": ["preferred", "fallback", "executors"], **changes}
+
+    @staticmethod
+    def wire(value):
+        return json.dumps(value).encode("utf-8")
+
+    def bridge(self, **changes):
+        options = {"origin_id": "a" * 64, "chat_id": "b" * 64,
+                   "authorize": lambda _: True, "clock": lambda: self.NOW, **changes}
+        return hostops.ExecutorHealthPrivateBridge(**options)
+
+    def assert_no_collection(self, raw, code, *, bridge=None):
+        with patch.object(hostops, "collect_executor_health_local") as collector:
+            with self.assertRaisesRegex(hostops.Denied, code):
+                (bridge if bridge is not None else self.bridge()).read(raw)
+        collector.assert_not_called()
+        self.native.assert_not_called()
+        self._health_executable_mock.assert_not_called()
+        self._executor_defaults_mock.assert_not_called()
+
+    def test_valid_request_reuses_single_local_collector_and_three_fixed_slots(self):
+        raw = self.wire(self.request())
+        verifier = unittest.mock.Mock(return_value=True)
+        with patch.object(hostops, "collect_executor_health_local",
+                          wraps=hostops.collect_executor_health_local) as collector:
+            result = self.bridge(authorize=verifier).read(raw)
+        collector.assert_called_once_with(now=self.NOW)
+        expected = json.dumps(self.request(), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        verifier.assert_called_once_with(expected)
+        self.assertEqual(result["request_sha256"], hostops.hashlib.sha256(expected).hexdigest())
+        self.assertEqual(result["status"], "OBSERVED")
+        self.assertEqual(result["code"], "LOCAL_OBSERVATION_ONLY")
+        self.assertEqual(result["visibility"], "LOCAL_PRIVATE")
+        self.assertEqual(result["capability"], "SOURCE_ONLY_NOT_DEPLOYED")
+        self.assertEqual(result["freshness"], "FRESH")
+        self.assertEqual(result["responded_at"], "2026-11-07T08:00:00Z")
+        self.assertEqual(result["valid_until"], "2026-11-07T08:01:00Z")
+        snapshot = result["snapshot"]
+        self.assertEqual(snapshot["preferred"], "CODEX_GPT_6_1_SOL_XHIGH")
+        self.assertEqual(snapshot["fallback"], "ANTIGRAVITY_GEMINI_3_8_FLASH_HIGH")
+        self.assertEqual([row["executor"] for row in snapshot["executors"]], ["codex", "antigravity"])
+        self.assertEqual([c.args[0] for c in self.native.call_args_list], [
+            [self.codex, "--version"], [self.codex, "login", "status"], [self.agy, "--version"]])
+        for call in self.native.call_args_list:
+            self.assertEqual(call.kwargs["timeout"], 5)
+            self.assertIs(call.kwargs["shell"], False)
+            self.assertEqual(call.kwargs["stdin"], subprocess.DEVNULL)
+        for row in snapshot["executors"]:
+            for field in ("provider_identity", "account", "quota"):
+                self.assertEqual(row[field], "UNKNOWN")
+            for field in ("remaining", "reset_at", "percentage"):
+                self.assertIsNone(row[field])
+        self.assertEqual(snapshot["context_identity"], "UNKNOWN")
+        self.assertEqual(hostops.validate_executor_health_private_response(result), result)
+        self.assertIsNot(hostops.validate_executor_health_private_response(result)["snapshot"], snapshot)
+
+    def test_closed_request_types_versions_and_selector_injection_before_reads(self):
+        invalid = [None, [], {}, {**self.request(), "extra": "PRIVATE_SECRET"}]
+        for field, values in (
+            ("schema_version", ["ExecutorHealthPrivateRequest.v2", None]),
+            ("operation", ["powershell", "codex exec", "executor_health_snapshot;whoami"]),
+            ("visibility", ["PUBLIC", "REMOTE_PRIVATE"]),
+            ("providers", [["codex"], ["antigravity", "codex"], ["codex", "codex"],
+                           ["codex", "unknown"], ["C:/private/codex.exe", "antigravity"], "codex"]),
+            ("requested_fields", [["account"], ["quota"], ["executors", "preferred", "fallback"],
+                                  ["preferred", "fallback", "executors", "stdout"], []]),
+            ("origin_id", ["https://chat.invalid/current", "../private", "A" * 64, "a" * 63, None]),
+            ("chat_id", ["$(Get-Content secret)", "b" * 65, True]),
+            ("nonce", ["../cache", "c" * 31, "c" * 33, "c" * 31 + "\n", 1]),
+            ("sequence", [True, False, 0, -1, 1.0, "1", 2**53]),
+            ("ttl_seconds", [True, 0, 61, 1.0, "60"]),
+            ("max_age_seconds", [True, 0, 61, 1.0, "60"]),
+            ("issued_at", ["2026-11-07T08:00:00", "2026-11-07T08:00:00+00:00",
+                           "2026-11-07T15:00:00+07:00", "2026-11-31T08:00:00Z", None]),
+        ):
+            invalid.extend(self.request(**{field: value}) for value in values)
+        for key in self.request():
+            value = self.request()
+            del value[key]
+            invalid.append(value)
+        for value in invalid:
+            with self.subTest(value=value):
+                self.assert_no_collection(self.wire(value), "PRIVATE_HEALTH_REQUEST_INVALID")
+        for key in ("path", "shell", "command", "executable", "ef01_report", "verify_ef01", "authenticated"):
+            self.assert_no_collection(self.wire({**self.request(), key: "PRIVATE_SECRET"}),
+                                      "PRIVATE_HEALTH_REQUEST_INVALID")
+
+    def test_duplicate_keys_malformed_oversized_nonbytes_before_reads(self):
+        raw = self.wire(self.request())
+        duplicate = raw.replace(b'"sequence": 1', b'"sequence": 1, "sequence": 2')
+        self.assert_no_collection(duplicate, "DUPLICATE_JSON_KEY")
+        for raw in (b"", b"\xff", b"{", b"x" * 4097, b"[" * 2000, "{}", bytearray(b"{}")):
+            self.assert_no_collection(raw, "PRIVATE_HEALTH_REQUEST_INVALID")
+
+    def test_stale_future_and_exact_expiry_rejected_before_authorization_or_reads(self):
+        verifier = unittest.mock.Mock(return_value=True)
+        for issued in ("2026-11-07T08:00:01Z", "2026-11-07T07:59:00Z", "2026-11-07T07:58:59Z",
+                       "9999-12-31T23:59:59Z"):
+            self.assert_no_collection(self.wire(self.request(issued_at=issued)),
+                                      "PRIVATE_HEALTH_REQUEST_TIME_DENIED", bridge=self.bridge(authorize=verifier))
+        verifier.assert_not_called()
+
+    def test_missing_trust_and_false_or_exception_verifier_never_collect(self):
+        def failed(_):
+            raise RuntimeError("PRIVATE_SECRET")
+        options = ({"origin_id": None}, {"chat_id": None}, {"authorize": None},
+                   {"authorize": lambda _: False}, {"authorize": lambda _: 1},
+                   {"authorize": lambda _: {"authenticated": True}}, {"authorize": failed})
+        with patch.object(hostops, "collect_executor_health_local") as collector:
+            for changes in options:
+                result = self.bridge(**changes).read(self.wire(self.request()))
+                self.assertEqual(result["status"], "UNAVAILABLE")
+                self.assertIn(result["code"], ("TRUST_UNAVAILABLE", "AUTHORIZATION_UNPROVEN"))
+                self.assertEqual(result["freshness"], "NOT_READY")
+                self.assertIsNone(result["snapshot"])
+                self.assertNotIn("PRIVATE_SECRET", json.dumps(result))
+            result = hostops.ExecutorHealthPrivateBridge(clock=lambda: self.NOW).read(self.wire(self.request()))
+            self.assertEqual(result["code"], "TRUST_UNAVAILABLE")
+        collector.assert_not_called()
+        self.native.assert_not_called()
+
+    def test_exact_origin_and_current_chat_binding_before_authorization(self):
+        verifier = unittest.mock.Mock(return_value=True)
+        for changes in ({"origin_id": "d" * 64}, {"chat_id": "d" * 64}):
+            self.assert_no_collection(self.wire(self.request(**changes)), "PRIVATE_HEALTH_ORIGIN_DENIED",
+                                      bridge=self.bridge(authorize=verifier))
+        verifier.assert_not_called()
+        for changes in ({"origin_id": "../private"}, {"chat_id": True}):
+            with self.assertRaisesRegex(hostops.Denied, "PRIVATE_HEALTH_ORIGIN_INVALID"):
+                self.bridge(**changes)
+
+    def test_replay_sequence_nonce_and_timestamp_order_before_any_collector(self):
+        bridge = self.bridge()
+        accepted = self.request(issued_at="2026-11-07T07:59:59Z", sequence=10)
+        bridge.read(self.wire(accepted))
+        self.native.reset_mock()
+        self._health_executable_mock.reset_mock()
+        self._executor_defaults_mock.reset_mock()
+        for changes in ({}, {"sequence": 11}, {"nonce": "d" * 32},
+                        {"sequence": 9, "nonce": "d" * 32},
+                        {"sequence": 11, "nonce": "d" * 32, "issued_at": "2026-11-07T07:59:58Z"}):
+            self.assert_no_collection(self.wire({**accepted, **changes}), "PRIVATE_HEALTH_REPLAY_DENIED", bridge=bridge)
+        result = bridge.read(self.wire(self.request(sequence=11, nonce="d" * 32)))
+        self.assertEqual(result["status"], "OBSERVED")
+        self.assertEqual(self.native.call_count, 3)
+
+    def test_failed_collector_consumes_nonce_and_suppresses_private_errors(self):
+        bridge = self.bridge()
+        with patch.object(hostops, "collect_executor_health_local", side_effect=OSError("PRIVATE_SECRET")) as collector:
+            result = bridge.read(self.wire(self.request()))
+            self.assertEqual(result["code"], "SOURCE_UNAVAILABLE")
+            self.assertIsNone(result["snapshot"])
+            self.assertNotIn("PRIVATE_SECRET", json.dumps(result))
+            with self.assertRaisesRegex(hostops.Denied, "PRIVATE_HEALTH_REPLAY_DENIED"):
+                bridge.read(self.wire(self.request()))
+            self.assertEqual(collector.call_count, 1)
+        self.native.assert_not_called()
+
+    def test_replay_capacity_never_evicts_and_busy_never_collects(self):
+        bridge = self.bridge()
+        with patch.object(hostops, "_PRIVATE_HEALTH_REPLAY_LIMIT", 1):
+            bridge.read(self.wire(self.request()))
+            self.native.reset_mock()
+            with patch.object(hostops, "collect_executor_health_local") as collector:
+                result = bridge.read(self.wire(self.request(sequence=2, nonce="d" * 32)))
+                self.assertEqual(result["code"], "REPLAY_CAPACITY")
+                with self.assertRaisesRegex(hostops.Denied, "PRIVATE_HEALTH_REPLAY_DENIED"):
+                    bridge.read(self.wire(self.request()))
+                collector.assert_not_called()
+        self.assertTrue(bridge._lock.acquire(blocking=False))
+        try:
+            with patch.object(hostops, "collect_executor_health_local") as collector:
+                result = bridge.read(self.wire(self.request(sequence=2, nonce="d" * 32)))
+                self.assertEqual(result["code"], "BUSY")
+                collector.assert_not_called()
+        finally:
+            bridge._lock.release()
+        self.native.assert_not_called()
+
+    def test_expiry_during_authorization_rejected_before_collector(self):
+        for admitted in (self.NOW + timedelta(seconds=60), self.NOW - timedelta(seconds=1)):
+            clock = unittest.mock.Mock(side_effect=[self.NOW, admitted])
+            self.assert_no_collection(self.wire(self.request()), "PRIVATE_HEALTH_REQUEST_TIME_DENIED",
+                                      bridge=self.bridge(clock=clock))
+
+    def test_collector_completion_freshness_and_clock_rollback(self):
+        for changes, completion, expected in (
+            ({"max_age_seconds": 5}, 5, "SNAPSHOT_NOT_READY"),
+            ({"ttl_seconds": 5}, 5, "SNAPSHOT_NOT_READY"),
+            ({}, -1, "SNAPSHOT_NOT_READY"),
+            ({"max_age_seconds": 5}, 4, "LOCAL_OBSERVATION_ONLY"),
+        ):
+            with self.subTest(changes=changes, completion=completion):
+                clock = unittest.mock.Mock(side_effect=[self.NOW, self.NOW, self.NOW + timedelta(seconds=completion)])
+                result = self.bridge(clock=clock).read(self.wire(self.request(**changes)))
+                self.assertEqual(result["code"], expected)
+                if expected == "SNAPSHOT_NOT_READY":
+                    self.assertEqual(result["status"], "UNKNOWN")
+                    self.assertIsNone(result["snapshot"])
+        clock = unittest.mock.Mock(return_value=self.NOW)
+        bridge = self.bridge(clock=clock)
+        bridge.read(self.wire(self.request(issued_at="2026-11-07T07:59:59Z")))
+        self.native.reset_mock()
+        self._health_executable_mock.reset_mock()
+        self._executor_defaults_mock.reset_mock()
+        clock.return_value = self.NOW - timedelta(seconds=1)
+        self.assert_no_collection(self.wire(self.request(issued_at="2026-11-07T07:59:59Z", sequence=2, nonce="d" * 32)),
+                                  "PRIVATE_HEALTH_REPLAY_DENIED", bridge=bridge)
+
+    def test_invalid_clocks_never_collect(self):
+        for now in (datetime(2026, 11, 7), "2026-11-07", self.NOW.astimezone(timezone(timedelta(hours=7)))):
+            self.assert_no_collection(self.wire(self.request()), "PRIVATE_HEALTH_TIME_INVALID",
+                                      bridge=self.bridge(clock=lambda: now))
+
+    def test_non_windows_absent_source_and_unrecognized_policy_are_typed(self):
+        self.platform_mock.return_value = "Linux"
+        result = self.bridge().read(self.wire(self.request()))
+        self.assertEqual(result["code"], "SOURCE_UNAVAILABLE")
+        self.assertIsNone(result["snapshot"])
+        self.native.assert_not_called()
+        self.platform_mock.return_value = "Windows"
+        self.defaults["preferred"]["model"] = "private-model-name"
+        self.defaults["fallback"]["effort"] = "private-effort"
+        result = self.bridge().read(self.wire(self.request()))
+        self.assertEqual(result["snapshot"]["preferred"], "UNKNOWN")
+        self.assertEqual(result["snapshot"]["fallback"], "UNKNOWN")
+        self.assertNotIn("private-model-name", json.dumps(result))
+        self.assertNotIn("private-effort", json.dumps(result))
+
+    def test_malformed_stale_future_and_private_collector_values_never_escape(self):
+        local = hostops.collect_executor_health_local(now=self.NOW)
+        invalid = [None, {**local, "stdout": "PRIVATE_SECRET"},
+                   {**local, "observed_at": "2026-11-07T07:59:59Z"},
+                   {**local, "observed_at": "2026-11-07T08:00:01Z"},
+                   {**local, "observed_at": "9999-12-31T23:59:59Z"}]
+        for field, value in (("account", "PRIVATE_SECRET"), ("remaining", 99), ("percentage", 99)):
+            receipt = copy.deepcopy(local)
+            receipt["executors"][0][field] = value
+            invalid.append(receipt)
+        for receipt in invalid:
+            with patch.object(hostops, "collect_executor_health_local", return_value=receipt):
+                result = self.bridge().read(self.wire(self.request()))
+            self.assertIn(result["code"], ("SOURCE_UNAVAILABLE", "SNAPSHOT_NOT_READY"))
+            self.assertIsNone(result["snapshot"])
+            self.assertNotIn("PRIVATE_SECRET", json.dumps(result))
+
+    def test_response_schema_rejects_fields_quota_identity_time_and_status_forgery(self):
+        valid = self.bridge().read(self.wire(self.request()))
+        invalid = [None, {}, {**valid, "stdout": "PRIVATE_SECRET"}]
+        for field, value in (("schema_version", "v2"), ("capability", "DEPLOYED"),
+                             ("visibility", "PUBLIC"), ("request_sha256", "bad"),
+                             ("status", "READY"), ("code", "LIVE_QUOTA"), ("freshness", "NOT_READY"),
+                             ("responded_at", "2026-11-07T07:59:59Z"),
+                             ("responded_at", "2026-11-07T08:01:00Z"),
+                             ("valid_until", "2026-11-07T08:01:01Z"), ("max_age_seconds", True)):
+            invalid.append({**valid, field: value})
+        for field, value in (("preferred", "PRIVATE_SECRET"), ("fallback", "codex"),
+                             ("context_identity", "PRIVATE_SECRET"), ("windows", 1)):
+            receipt = copy.deepcopy(valid)
+            receipt["snapshot"][field] = value
+            invalid.append(receipt)
+        for field, value in (("percentage", 1), ("quota", "AVAILABLE"), ("remaining", 1),
+                             ("reset_at", "tomorrow"), ("account", "PRIVATE_SECRET"),
+                             ("provider_identity", "PRIVATE_SECRET"), ("stdout", "PRIVATE_SECRET")):
+            receipt = copy.deepcopy(valid)
+            receipt["snapshot"]["executors"][0][field] = value
+            invalid.append(receipt)
+        for receipt in invalid:
+            with self.subTest(receipt=receipt), self.assertRaisesRegex(hostops.Denied, "PRIVATE_HEALTH_RESPONSE_INVALID"):
+                hostops.validate_executor_health_private_response(receipt)
+        unavailable = self.bridge(authorize=None).read(self.wire(self.request()))
+        with self.assertRaisesRegex(hostops.Denied, "PRIVATE_HEALTH_RESPONSE_INVALID"):
+            hostops.validate_executor_health_private_response({**unavailable, "snapshot": valid["snapshot"]})
+
+    def test_public_issue_deny_path_and_both_public_contracts_stay_closed(self):
+        from ai_commerce.hostops_v3 import contract
+        categories = ("chrome_profile", "chrome_config", "chrome_markers", "cdp_9333_listener",
+                      "chrome_process", "chrome_session", "cdp_protocol", "ef02_01_task", "ef02_01_listener",
+                      "ef02_02_task", "ef02_02_listener", "hostops_01_task", "hostops_01_listener",
+                      "repo_git", "python_runtime", "d5_metadata")
+        self.assertEqual(tuple(hostops.STANDING_READ_CATEGORIES), categories)
+        with patch.object(hostops, "collect_executor_health_local") as collector:
+            for operation in ("executor_health_snapshot", "executor_health_private", "executor_health",
+                              "ExecutorHealthPrivateBridge", "collect_executor_health_local"):
+                with self.assertRaisesRegex(hostops.Denied, "READ_OPERATION_DENIED"):
+                    hostops.parse_event(event("read", operation, {}), "read")
+                with self.assertRaisesRegex(hostops.Denied, "OPERATION_DENIED"):
+                    hostops.perform({"operation": operation, "parameters": {}})
+            request = hostops.parse_event(event("read", "standing_read_diagnostics", {}), "read")
+            with patch.object(hostops, "_standing_read_snapshot", return_value=PersonalHostOpsContractTests._standing_snapshot()):
+                result = hostops.perform(request)
+            self.assertEqual(tuple(row["category"] for row in result["diagnostics"]), categories)
+        collector.assert_not_called()
+        self.native.assert_not_called()
+        private_fields = {"snapshot", "executors", "preferred", "fallback", "account", "quota", "remaining",
+                          "reset_at", "percentage", "request_sha256", "nonce", "origin_id", "chat_id"}
+        self.assertFalse(private_fields & hostops.PERSONAL_PUBLIC_FIELDS)
+        self.assertFalse(private_fields & contract.PUBLIC_FIELDS)
+        old = contract.receipt(None, "UNKNOWN", result={"snapshot": {"account": "PRIVATE_SECRET"}})
+        with self.assertRaisesRegex(contract.Denied, "PRIVATE_RECEIPT_FIELD"):
+            contract.public_receipt(old)
+
+    def test_persisted_owner_consumer_and_registered_downstream_present(self):
+        root = MODULE.parents[3]
+        owner = json.loads((root / "work_items/mt01-components/hostops-personal.json").read_text(encoding="utf-8"))
+        self.assertEqual(owner["sources"], ["src/ai_commerce/hostops_v3/personal.py"])
+        self.assertEqual(owner["tests"], ["tests/test_hostops_personal.py"])
+        self.assertEqual(owner["consumers"], ["src/ai_commerce/hostops_v3/contract.py"])
+        self.assertTrue((root / owner["consumers"][0]).is_file())
+        registry = (root / "src/ai_commerce/engineering/minimum_test.py").read_text(encoding="utf-8")
+        self.assertIn('TestGroup("hostops-v3"', registry)
+        self.assertIn('"tests/test_hostops_v3.py"', registry)
+        profiles = json.loads((root / ".github/ef02/verify-profiles.json").read_text(encoding="utf-8"))
+        self.assertIn("mt01-component-onboarding", profiles)
+        self.assertEqual(profiles["mt01-hostops-v3-tests"][-2:], ["-n", "12"])
 
 
 if __name__ == "__main__":

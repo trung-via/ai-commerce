@@ -7,7 +7,7 @@ No arbitrary shell, secret file access, force update, delete or provider effect.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -17,6 +17,7 @@ import re
 import shutil
 import stat
 import subprocess
+from threading import Lock
 from typing import Callable, Literal, TypedDict
 from urllib.request import Request, ProxyHandler, HTTPRedirectHandler, build_opener
 
@@ -1082,6 +1083,255 @@ def collect_executor_health_local(*, now: datetime | None = None, ef01_report: b
         "defaults": _executor_defaults() if windows else {"state": "UNKNOWN", "preferred": None,
             "fallback": None, "recovery_probe_cooldown_seconds": None},
     })
+
+
+# Private source contract only. No public operation, CLI entrypoint, transport,
+# account verifier or durable replay store is installed by this implementation.
+_PRIVATE_HEALTH_TTL = 60
+_PRIVATE_HEALTH_REPLAY_LIMIT = 4096
+_PRIVATE_HEALTH_PROVIDERS = ["codex", "antigravity"]
+_PRIVATE_HEALTH_FIELDS = ["preferred", "fallback", "executors"]
+_PRIVATE_HEALTH_POLICY = {
+    "preferred": ({"executor": "codex", "model": "gpt-6.1-sol", "effort": "xhigh"},
+                  "CODEX_GPT_6_1_SOL_XHIGH"),
+    "fallback": ({"executor": "antigravity", "model": "gemini-3.8-flash", "effort": "high"},
+                 "ANTIGRAVITY_GEMINI_3_8_FLASH_HIGH"),
+}
+
+
+class ExecutorHealthPrivateRequest(TypedDict):
+    schema_version: Literal["ExecutorHealthPrivateRequest.v1"]
+    operation: Literal["executor_health_snapshot"]
+    visibility: Literal["LOCAL_PRIVATE"]
+    origin_id: str
+    chat_id: str
+    nonce: str
+    sequence: int
+    issued_at: str
+    ttl_seconds: int
+    max_age_seconds: int
+    providers: list[Literal["codex", "antigravity"]]
+    requested_fields: list[Literal["preferred", "fallback", "executors"]]
+
+
+class ExecutorHealthPrivateRow(ExecutorHealthRow):
+    percentage: None
+
+
+class ExecutorHealthPrivateSnapshot(TypedDict):
+    observed_at: str
+    windows: bool
+    context_identity: Literal["UNKNOWN"]
+    preferred: Literal["CODEX_GPT_6_1_SOL_XHIGH", "UNKNOWN"]
+    fallback: Literal["ANTIGRAVITY_GEMINI_3_8_FLASH_HIGH", "UNKNOWN"]
+    executors: list[ExecutorHealthPrivateRow]
+
+
+class ExecutorHealthPrivateResponse(TypedDict):
+    schema_version: Literal["ExecutorHealthPrivateResponse.v1"]
+    visibility: Literal["LOCAL_PRIVATE"]
+    capability: Literal["SOURCE_ONLY_NOT_DEPLOYED"]
+    request_sha256: str
+    responded_at: str
+    valid_until: str | None
+    max_age_seconds: int
+    status: Literal["OBSERVED", "UNAVAILABLE", "UNKNOWN"]
+    code: Literal["LOCAL_OBSERVATION_ONLY", "TRUST_UNAVAILABLE", "AUTHORIZATION_UNPROVEN",
+                  "BUSY", "REPLAY_CAPACITY", "SOURCE_UNAVAILABLE", "SNAPSHOT_NOT_READY"]
+    freshness: Literal["FRESH", "NOT_READY"]
+    snapshot: ExecutorHealthPrivateSnapshot | None
+
+
+def _private_health_utc(value):
+    if (type(value) is not datetime or value.tzinfo is None
+            or value.utcoffset() != timedelta(0)):
+        deny("PRIVATE_HEALTH_TIME_INVALID")
+    return value.astimezone(timezone.utc)
+
+
+def _private_health_stamp(value):
+    return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def parse_executor_health_private_request(raw: bytes) -> ExecutorHealthPrivateRequest:
+    """Closed shape only; parsing never authenticates or performs local reads."""
+    if type(raw) is not bytes or not 0 < len(raw) <= 4096:
+        deny("PRIVATE_HEALTH_REQUEST_INVALID")
+    try:
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=_object_unique)
+    except (ValueError, UnicodeError, RecursionError):
+        deny("PRIVATE_HEALTH_REQUEST_INVALID")
+    if (type(value) is not dict or set(value) != set(ExecutorHealthPrivateRequest.__annotations__)
+            or value["schema_version"] != "ExecutorHealthPrivateRequest.v1"
+            or value["operation"] != "executor_health_snapshot"
+            or value["visibility"] != "LOCAL_PRIVATE"):
+        deny("PRIVATE_HEALTH_REQUEST_INVALID")
+    for field, size in (("origin_id", 64), ("chat_id", 64), ("nonce", 32)):
+        if type(value[field]) is not str or not re.fullmatch("[0-9a-f]{" + str(size) + "}", value[field]):
+            deny("PRIVATE_HEALTH_REQUEST_INVALID")
+    for field, high in (("sequence", 2**53 - 1), ("ttl_seconds", _PRIVATE_HEALTH_TTL),
+                        ("max_age_seconds", _PRIVATE_HEALTH_TTL)):
+        if type(value[field]) is not int or not 1 <= value[field] <= high:
+            deny("PRIVATE_HEALTH_REQUEST_INVALID")
+    for field, expected in (("providers", _PRIVATE_HEALTH_PROVIDERS),
+                            ("requested_fields", _PRIVATE_HEALTH_FIELDS)):
+        if type(value[field]) is not list or value[field] != expected:
+            deny("PRIVATE_HEALTH_REQUEST_INVALID")
+    try:
+        _health_parse_time(value["issued_at"])
+    except ValueError:
+        deny("PRIVATE_HEALTH_REQUEST_INVALID")
+    return value
+
+
+def validate_executor_health_private_response(value) -> ExecutorHealthPrivateResponse:
+    """Validate the entire private projection, never redact arbitrary fields."""
+    def require(condition):
+        if not condition:
+            deny("PRIVATE_HEALTH_RESPONSE_INVALID")
+
+    require(type(value) is dict and set(value) == set(ExecutorHealthPrivateResponse.__annotations__))
+    require(value["schema_version"] == "ExecutorHealthPrivateResponse.v1"
+            and value["visibility"] == "LOCAL_PRIVATE" and value["capability"] == "SOURCE_ONLY_NOT_DEPLOYED")
+    require(type(value["request_sha256"]) is str and re.fullmatch("[0-9a-f]{64}", value["request_sha256"]) is not None)
+    require(type(value["max_age_seconds"]) is int and 1 <= value["max_age_seconds"] <= _PRIVATE_HEALTH_TTL)
+    try:
+        responded = _health_parse_time(value["responded_at"])
+        if value["status"] == "OBSERVED":
+            require(value["code"] == "LOCAL_OBSERVATION_ONLY" and value["freshness"] == "FRESH")
+            snapshot = value["snapshot"]
+            require(type(snapshot) is dict and set(snapshot) == set(ExecutorHealthPrivateSnapshot.__annotations__))
+            require(snapshot["context_identity"] == "UNKNOWN")
+            for field, (_, code) in _PRIVATE_HEALTH_POLICY.items():
+                require(snapshot[field] in (code, "UNKNOWN"))
+            rows = snapshot["executors"]
+            require(type(rows) is list and len(rows) == 2)
+            for row in rows:
+                require(type(row) is dict and set(row) == set(ExecutorHealthRow.__annotations__) | {"percentage"}
+                        and row["percentage"] is None)
+            # Reuse the existing strict row validator; policy is exposed only
+            # through the two closed enums above, never raw model selectors.
+            local = validate_executor_health_local_receipt({
+                "schema_version": _HEALTH_SCHEMA, "visibility": "LOCAL_PRIVATE", "capability": "SOURCE_ONLY",
+                "observed_at": snapshot["observed_at"], "windows": snapshot["windows"],
+                "context_identity": snapshot["context_identity"],
+                "defaults": {"state": "UNKNOWN", "preferred": None, "fallback": None,
+                             "recovery_probe_cooldown_seconds": None},
+                "executors": [{k: v for k, v in row.items() if k != "percentage"} for row in rows],
+            })
+            require(local["windows"] is True)
+            observed = _health_parse_time(snapshot["observed_at"])
+            until = _health_parse_time(value["valid_until"])
+            require(0 <= (responded - observed).total_seconds() < value["max_age_seconds"]
+                    and responded < until <= observed + timedelta(seconds=value["max_age_seconds"]))
+        else:
+            require((value["status"] == "UNAVAILABLE" and value["code"] in (
+                "TRUST_UNAVAILABLE", "AUTHORIZATION_UNPROVEN", "BUSY", "REPLAY_CAPACITY", "SOURCE_UNAVAILABLE"))
+                or (value["status"] == "UNKNOWN" and value["code"] == "SNAPSHOT_NOT_READY"))
+            require(value["freshness"] == "NOT_READY" and value["snapshot"] is None and value["valid_until"] is None)
+        raw = json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(",", ":"), allow_nan=False)
+        require(len(raw) <= 16384)
+        return json.loads(raw)
+    except (Denied, ValueError, TypeError, KeyError, OverflowError, RecursionError):
+        deny("PRIVATE_HEALTH_RESPONSE_INVALID")
+
+
+class ExecutorHealthPrivateBridge:
+    """Transport-agnostic source adapter with in-memory, fail-closed admission.
+
+    Trusted local code pins the exact origin/current chat and supplies an
+    independent authorization verifier over canonical request bytes. A request
+    flag cannot establish trust. One instance must cover an entire trust session;
+    restart-safe replay/signatures and installed transport remain future work.
+    """
+
+    def __init__(self, *, origin_id: str | None = None, chat_id: str | None = None,
+                 authorize: Callable[[bytes], bool] | None = None,
+                 clock: Callable[[], datetime] | None = None):
+        for value in (origin_id, chat_id):
+            if value is not None and (type(value) is not str or not re.fullmatch("[0-9a-f]{64}", value)):
+                deny("PRIVATE_HEALTH_ORIGIN_INVALID")
+        self._origin_id, self._chat_id, self._authorize = origin_id, chat_id, authorize
+        self._clock = clock if clock is not None else lambda: datetime.now(timezone.utc)
+        self._lock = Lock()
+        self._nonces: set[str] = set()
+        self._sequence = 0
+        self._issued_at: datetime | None = None
+        self._last_now: datetime | None = None
+
+    def read(self, raw: bytes) -> ExecutorHealthPrivateResponse:
+        request = parse_executor_health_private_request(raw)
+        canonical = json.dumps(request, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        now = _private_health_utc(self._clock())
+        issued = _health_parse_time(request["issued_at"])
+        try:
+            expires = issued + timedelta(seconds=request["ttl_seconds"])
+        except OverflowError:
+            deny("PRIVATE_HEALTH_REQUEST_TIME_DENIED")
+        if not issued <= now < expires:
+            deny("PRIVATE_HEALTH_REQUEST_TIME_DENIED")
+
+        def response(status, code, *, at=now, snapshot=None, until=None):
+            return validate_executor_health_private_response({
+                "schema_version": "ExecutorHealthPrivateResponse.v1", "visibility": "LOCAL_PRIVATE",
+                "capability": "SOURCE_ONLY_NOT_DEPLOYED", "request_sha256": hashlib.sha256(canonical).hexdigest(),
+                "responded_at": _private_health_stamp(at), "valid_until": _private_health_stamp(until) if until else None,
+                "max_age_seconds": request["max_age_seconds"], "status": status, "code": code,
+                "freshness": "FRESH" if status == "OBSERVED" else "NOT_READY", "snapshot": snapshot,
+            })
+
+        if self._origin_id is None or self._chat_id is None or self._authorize is None:
+            return response("UNAVAILABLE", "TRUST_UNAVAILABLE")
+        if request["origin_id"] != self._origin_id or request["chat_id"] != self._chat_id:
+            deny("PRIVATE_HEALTH_ORIGIN_DENIED")
+        if not self._lock.acquire(blocking=False):
+            return response("UNAVAILABLE", "BUSY")
+        try:
+            if (request["nonce"] in self._nonces or request["sequence"] <= self._sequence
+                    or (self._issued_at is not None and issued < self._issued_at)
+                    or (self._last_now is not None and now < self._last_now)):
+                deny("PRIVATE_HEALTH_REPLAY_DENIED")
+            if len(self._nonces) >= _PRIVATE_HEALTH_REPLAY_LIMIT:
+                return response("UNAVAILABLE", "REPLAY_CAPACITY")
+            try:
+                authorized = self._authorize(canonical) is True
+            except Exception:
+                authorized = False
+            if not authorized:
+                return response("UNAVAILABLE", "AUTHORIZATION_UNPROVEN")
+            # Authorization may take time. Recheck expiry/clock BEFORE reads.
+            admitted = _private_health_utc(self._clock())
+            if not now <= admitted < expires:
+                deny("PRIVATE_HEALTH_REQUEST_TIME_DENIED")
+            # Consume before the collector, including failures. No retries,
+            # nonce eviction, background tasks or extra diagnostic probes.
+            self._nonces.add(request["nonce"])
+            self._sequence, self._issued_at, self._last_now = request["sequence"], issued, admitted
+            try:
+                local = validate_executor_health_local_receipt(collect_executor_health_local(now=admitted))
+            except Exception:
+                return response("UNAVAILABLE", "SOURCE_UNAVAILABLE", at=admitted)
+            completed = _private_health_utc(self._clock())
+            self._last_now = max(admitted, completed)
+            observed = _health_parse_time(local["observed_at"])
+            if completed < admitted or observed != admitted.replace(microsecond=0):
+                return response("UNKNOWN", "SNAPSHOT_NOT_READY", at=completed)
+            try:
+                until = min(expires, observed + timedelta(seconds=request["max_age_seconds"]))
+            except OverflowError:
+                return response("UNKNOWN", "SNAPSHOT_NOT_READY", at=completed)
+            if not completed < until:
+                return response("UNKNOWN", "SNAPSHOT_NOT_READY", at=completed)
+            if not local["windows"]:
+                return response("UNAVAILABLE", "SOURCE_UNAVAILABLE", at=completed)
+            snapshot = {key: local[key] for key in ("observed_at", "windows", "context_identity")}
+            for field, (selection, code) in _PRIVATE_HEALTH_POLICY.items():
+                snapshot[field] = (code if local["defaults"]["state"] == "VALIDATED"
+                                   and local["defaults"][field] == selection else "UNKNOWN")
+            snapshot["executors"] = [{**row, "percentage": None} for row in local["executors"]]
+            return response("OBSERVED", "LOCAL_OBSERVATION_ONLY", at=completed, snapshot=snapshot, until=until)
+        finally:
+            self._lock.release()
 
 
 def perform(request):
