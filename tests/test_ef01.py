@@ -433,9 +433,12 @@ def test_agy_bound_linked_worktree_from_primary_evidence(monkeypatch, mode):
 from pathlib import Path
 args = sys.argv[1:]
 roots = [Path(args[i+1]) for i, a in enumerate(args[:-1]) if a == '--add-dir']
-source, mirror = roots
+source, mirror, scratch = roots
 prompt = args[args.index('--print')+1]
-assert len(roots) == 2
+assert len(roots) == 3
+assert scratch != mirror and scratch.parent == mirror.parent
+assert os.environ['TEMP'] == str(scratch)
+assert 'WRITABLE SCRATCH' in prompt
 assert 'CODE WRITE ROOT' in prompt and 'READ ONLY INPUT' in prompt
 assert json.dumps(str(source), ensure_ascii=False) in prompt
 assert json.dumps(str(mirror), ensure_ascii=False) in prompt
@@ -504,6 +507,7 @@ print(json.dumps({'status':'SUCCESS', 'denied_actions': [{'action':'write_file'}
             binding = json.loads((outdir / files["agy_source_binding"]).read_text(encoding="utf-8"))
             raw = json.loads((outdir / files["executor_stdout"]).read_text(encoding="utf-8"))
             mirror = Path(binding["input_mirror"])
+            assert not Path(binding["scratch_root"]).exists()
             mirrors.append(mirror)
             assert not mirror.exists() and primary not in mirror.parents and source not in mirror.parents
             assert binding["source_root"] == raw["fixture"]["source"] == str(source.resolve())
