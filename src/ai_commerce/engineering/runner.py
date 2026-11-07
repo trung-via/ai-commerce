@@ -38,6 +38,41 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def owner_round_receipt(inv: dict) -> str:
+    """Bind the native round result, never publicize logs or instructions."""
+    value = {k: inv.get(k) for k in (
+        "work_id", "attempt_id", "invocation_id", "repair_round", "source_base_sha",
+        "status", "error_code", "executor_exit_code", "verify_exit_code", "verify_completed",
+        "provider_return_determinate", "candidate_file_sha256", "tracked_diff_sha256")}
+    return _sha(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=True, allow_nan=False).encode("utf-8"))
+
+
+def owner_fence_client(environment: dict):
+    """Consume parent-only capability before starting provider/verifier children."""
+    required = environment.pop("AI_COMMERCE_EF02_OWNER_REQUIRED", None)
+    address = environment.pop("AI_COMMERCE_EF02_OWNER_ENDPOINT", None)
+    token = environment.pop("AI_COMMERCE_EF02_OWNER_TOKEN", None)
+    if required is None and address is None and token is None:
+        return None  # Manual EF01 creates no remotely publishable owner proof.
+    if (required != "1" or not isinstance(address, str) or
+            address != "stdio-v1" or
+            not isinstance(token, str) or not re.fullmatch("[0-9a-f]{64}", token)):
+        raise RuntimeError("WORK_OWNER_FENCE_UNAVAILABLE")
+
+    def fence(stage, inv):
+        data = {"stage": stage, "round": inv["repair_round"], "attempt_id": inv["attempt_id"]}
+        if stage == "ROUND_VERIFIED":
+            data["receipt"] = owner_round_receipt(inv)
+        import sys
+        sys.stdout.write("EF02_OWNER_FENCE_V1:" + json.dumps({**data, "token": token}) + "\n")
+        sys.stdout.flush()
+        response = sys.stdin.readline(256)
+        if response != '{"status":"CONFIRMED"}\n':
+            raise RuntimeError("WORK_OWNER_FENCE_UNCONFIRMED")
+    return fence
+
+
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -1018,7 +1053,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
                     git_executable: str | None = None, mt_context: dict | None = None,
                     pytest_profile: str = "windows-12", pytest_isolation_approved: bool = False,
                     pytest_known_flaky: bool = False, host_slots: int = 1,
-                    verify_first_scope: bool = True) -> None:
+                    verify_first_scope: bool = True, owner_fence=None) -> None:
     inv = invocation
     directory = output_dir / inv["evidence_dir"]
     directory.mkdir(parents=True, exist_ok=False)
@@ -1118,6 +1153,9 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         "provider_effects_reconciled": False, "replay_authorized": False,
     }
     save("provider_boundary", "provider_boundary.json", _json_bytes(boundary))
+    if owner_fence is not None:
+        owner_fence("PROVIDER_INTENT", inv)
+        budget = _remaining(deadline, timeout_seconds)
     inv.update(status="EXECUTION_UNKNOWN", executor_invoked=True, executor_started_at=_now(),
                executor_timeout_seconds=budget)
     out, err = b"", b""
@@ -1536,13 +1574,14 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                     registered_profiles: dict[str, list[str]] | None = None,
                     human_full_suite_authorized: bool = False,
                     verify_first_scope: bool = True,
-                    selection_source: str = "HUMAN_EXPLICIT") -> dict[str, Any]:
+                    selection_source: str = "HUMAN_EXPLICIT", owner_fence=None) -> dict[str, Any]:
     """One attempt on an initially clean tree, with bounded same-profile repairs.
 
     Only a completed scoped pytest code failure permits repair. Each CLI call is
     independent; no vendor session continuation is assumed. No commits or push.
     """
     validate_max_repair_rounds(max_repair_rounds)
+    owner_fence = owner_fence if owner_fence is not None else owner_fence_client(os.environ)
     # Validate bad explicit Git/profile configuration before any provider call.
     configured_git = git_executable if git_executable is not None else os.environ.get("AI_COMMERCE_GIT_EXECUTABLE")
     git_executable = resolve_git_executable(configured_git) if configured_git is not None else None
@@ -1675,9 +1714,13 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                         git_executable=git_executable, mt_context=mt_context,
                         pytest_profile=pytest_profile, pytest_isolation_approved=pytest_isolation_approved,
                         pytest_known_flaky=pytest_known_flaky, host_slots=host_slots,
-                        verify_first_scope=verify_first_scope, input_runtime=input_runtime)
+                        verify_first_scope=verify_first_scope, input_runtime=input_runtime,
+                        owner_fence=owner_fence)
                     inv["source_build_status"] = inv["status"]
                     inv["source_build_error_code"] = inv["error_code"]
+                if owner_fence is not None and inv["executor_invoked"]:
+                    if inv["provider_return_determinate"] and inv["verify_completed"]:
+                        owner_fence("ROUND_VERIFIED", inv)
             except Exception as exc:
                 code = str(exc)
                 inv.setdefault("source_build_status", inv["status"])
