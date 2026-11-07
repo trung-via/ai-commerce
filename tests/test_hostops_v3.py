@@ -28,6 +28,7 @@ import pytest
 from ai_commerce.hostops_v3 import auth, broker, cli, contract as c, filesystem as fs, security, transport
 from ai_commerce.hostops_v3.journal import Journal
 from ai_commerce.hostops_v3.worker import Worker
+from ai_commerce.remote.transport import _EffectDenied
 
 ROOT = Path(__file__).resolve().parents[1]
 NOW = 1800000000
@@ -35,6 +36,136 @@ NOW = 1800000000
 
 class Crash(BaseException):
     pass
+
+
+@pytest.mark.parametrize("kind", ["owned_new", "missing_parent", "foreign_sentinel", "escape", "wal", "shm"])
+def test_r4_native_sqlite_never_opens_without_custody_proof(tmp_path, monkeypatch, kind):
+    from ai_commerce.hostops_v3.journal import OfflineWorkOwnerEffectLedger
+    sentinel = tmp_path / "foreign-sentinel.sqlite"
+    sentinel.write_bytes(b"FOREIGN SENTINEL; NEVER ALTER ACL OR CONTENT")
+    before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+    path = {"owned_new": tmp_path / "new.sqlite", "missing_parent": tmp_path / "absent" / "new.sqlite",
+            "foreign_sentinel": sentinel, "escape": tmp_path / ".." / "escape.sqlite",
+            "wal": tmp_path / "db.sqlite-wal", "shm": tmp_path / "db.sqlite-shm"}[kind]
+    monkeypatch.setattr(sqlite3, "connect", lambda *a, **kw: pytest.fail("native SQLite open before custody proof"))
+    with pytest.raises(c.Denied, match="^SOURCE_ONLY_HOLD_LEDGER_CUSTODY_UNPROVEN$"):
+        OfflineWorkOwnerEffectLedger(path, private_root=tmp_path)
+    assert before == {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows alias operations")
+@pytest.mark.parametrize("kind", ["sqlite_symlink", "parent_symlink", "hardlink", "wal_hardlink", "shm_symlink", "junction"])
+def test_r4_native_alias_denied_without_external_sentinel_effects(tmp_path, kind):
+    from ai_commerce.hostops_v3.journal import OfflineWorkOwnerEffectLedger
+    outside = tmp_path / "foreign"; outside.mkdir()
+    sentinel = outside / "sentinel.sqlite"; sentinel.write_bytes(b"FOREIGN SENTINEL")
+    private = tmp_path / "private"; private.mkdir()
+    alias = private / "ledger.sqlite"
+    directory_alias = False
+    try:
+        if kind == "junction":
+            import _winapi
+            alias = private / "junction"
+            _winapi.CreateJunction(str(outside), str(alias))
+            directory_alias = True
+        elif kind == "parent_symlink":
+            alias = private / "parent"; alias.symlink_to(outside, target_is_directory=True)
+            directory_alias = True
+        elif kind in ("hardlink", "wal_hardlink"):
+            if kind == "wal_hardlink": alias = private / "ledger.sqlite-wal"
+            os.link(sentinel, alias)
+        else:
+            if kind == "shm_symlink": alias = private / "ledger.sqlite-shm"
+            alias.symlink_to(sentinel)
+    except OSError:
+        pytest.skip("native alias creation denied by target environment; no privilege workaround")
+    try:
+        assert alias.lstat().st_ino
+        with pytest.raises(c.Denied, match="SOURCE_ONLY_HOLD_LEDGER_CUSTODY_UNPROVEN"):
+            OfflineWorkOwnerEffectLedger(alias / "sentinel.sqlite" if directory_alias else private / "ledger.sqlite",
+                                         private_root=private)
+        assert sentinel.read_bytes() == b"FOREIGN SENTINEL"
+        assert sorted(p.name for p in outside.iterdir()) == ["sentinel.sqlite"]
+    finally:
+        # Remove only the alias itself; never recursively traverse its target.
+        if directory_alias: os.rmdir(alias)
+        else: alias.unlink()
+
+
+def test_r4_parent_replacement_and_wal_swap_cannot_trigger_sqlite(tmp_path, monkeypatch):
+    from ai_commerce.hostops_v3.journal import OfflineWorkOwnerEffectLedger
+    parent = tmp_path / "private"; parent.mkdir()
+    old_parent = tmp_path / "old-private"
+    parent.rename(old_parent); parent.mkdir()
+    wal = parent / "ledger.sqlite-wal"; wal.write_bytes(b"FOREIGN WAL")
+    monkeypatch.setattr(sqlite3, "connect", lambda *a, **kw: pytest.fail("SQLite opened during parent/WAL replacement"))
+    with pytest.raises(c.Denied, match="SOURCE_ONLY_HOLD_LEDGER_CUSTODY_UNPROVEN"):
+        OfflineWorkOwnerEffectLedger(parent / "ledger.sqlite", private_root=parent)
+    assert wal.read_bytes() == b"FOREIGN WAL"
+    assert not list(old_parent.iterdir())
+
+
+@pytest.mark.parametrize("field", ["source_sha", "work_owner.journal_tip_sha", "work_owner.journal_digest",
+    "work_owner.fence", "work_owner.generation", "provider_intent.digest"])
+def test_r4_sqlite_effect_slot_conflicts_rollback_in_source_fixture(tmp_path, monkeypatch, field):
+    from test_ef02_m0r_fault_injection import _r4_bridge_fixture
+    from ai_commerce.hostops_v3.journal import _AuthenticatedEffectIntent
+    f = _r4_bridge_fixture(tmp_path, monkeypatch)
+    with f.ledger:
+        assert f.bridge()["status"] == "SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED"
+        binding = c.decode(c.canonical(f.binding)); node = binding; parts = field.split(".")
+        for name in parts[:-1]: node = node[name]
+        old = node[parts[-1]]; node[parts[-1]] = old + 1 if type(old) is int else "0" * len(old)
+        replay = {"replay_id": "a" * 64, "nonce": "b" * 64, "ledger_sha256": "4" * 64}
+        intent = _AuthenticatedEffectIntent(binding, replay, f.request()["candidate_boundary"])
+        with pytest.raises(_EffectDenied, match="EFFECT_BINDING_CONFLICT|EFFECT_GENERATION_CONFLICT"):
+            f.ledger.record_effect_intent(intent, request_id="c" * 64, revalidate=lambda: None)
+        assert f.ledger.unreconciled_intents_count() == 1
+
+
+def test_r4_sqlite_source_rounds_require_new_pinned_provenance_and_no_reclaim(tmp_path, monkeypatch):
+    from test_ef02_m0r_fault_injection import _r4_bridge_fixture
+    from ai_commerce.hostops_v3.journal import _AuthenticatedEffectIntent
+    f = _r4_bridge_fixture(tmp_path, monkeypatch)
+    with f.ledger:
+        assert f.bridge()["status"] == "SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED"
+        binding = c.decode(c.canonical(f.binding))
+        replay = {"replay_id": "a" * 64, "nonce": "b" * 64, "ledger_sha256": "4" * 64}
+        def reserve():
+            return f.ledger.record_effect_intent(_AuthenticatedEffectIntent(binding, replay,
+                f.request()["candidate_boundary"]), request_id="c" * 64, revalidate=lambda: None)
+        binding["provider_intent"]["round"] = 1
+        with pytest.raises(_EffectDenied, match="EFFECT_PROVENANCE_REUSED"): reserve()
+        binding["work_owner"].update(journal_tip_sha="0" * 40, journal_digest="0" * 64)
+        binding["provider_intent"].update(commit_sha="1" * 40, digest="1" * 64)
+        assert reserve()["status"] == "INTENT_RESERVED_NO_EFFECT"
+        binding["provider_intent"]["round"] = 3
+        with pytest.raises(_EffectDenied, match="EFFECT_ROUND_ROLLBACK_OR_GAP"): reserve()
+        assert f.ledger.unreconciled_intents_count() == 2
+
+
+def test_r4_raw_witness_and_mutated_intent_cannot_change_fixture_ledger():
+    from dataclasses import FrozenInstanceError
+    from ai_commerce.hostops_v3.journal import OfflineWorkOwnerEffectLedger, _AuthenticatedEffectIntent
+    with OfflineWorkOwnerEffectLedger.source_contract_fixture() as ledger:
+        with pytest.raises(_EffectDenied, match="UNAUTHENTICATED_EFFECT_INTENT"):
+            ledger.record_effect_intent({}, request_id="a" * 64, revalidate=lambda: None)
+        intent = _AuthenticatedEffectIntent({}, {}, {})
+        with pytest.raises(FrozenInstanceError): intent._wire = b"forged"
+        assert ledger.unreconciled_intents_count() == 0
+
+
+def test_r4_source_fixture_interrupted_reservation_rolls_back_without_expiry(tmp_path, monkeypatch):
+    from test_ef02_m0r_fault_injection import _r4_bridge_fixture
+    from ai_commerce.hostops_v3.journal import _AuthenticatedEffectIntent
+    f = _r4_bridge_fixture(tmp_path, monkeypatch)
+    with f.ledger:
+        intent = _AuthenticatedEffectIntent(f.binding, f.payload["replay"], f.request()["candidate_boundary"])
+        def interrupt():
+            if f.ledger.unreconciled_intents_count(): raise Crash()
+        with pytest.raises(Crash):
+            f.ledger.record_effect_intent(intent, request_id="c" * 64, revalidate=interrupt)
+        assert not f.ledger.db.in_transaction and f.ledger.unreconciled_intents_count() == 0
 
 
 def fixture_powershell_pin():

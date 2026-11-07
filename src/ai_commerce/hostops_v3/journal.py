@@ -86,6 +86,23 @@ from . import auth
 from .contract import Denied, sha, shape
 
 
+# Remote owns the immutable authenticated command and source fixture. Keep
+# this adapter one-way so unrelated HostOps contracts cannot become remote
+# verifier inputs through a circular import dependency.
+from ..remote.transport import _AuthenticatedEffectIntent, _OfflineWorkOwnerEffectFixture
+
+
+class OfflineWorkOwnerEffectLedger:
+    """Native admission gate; the explicit source fixture never opens a path."""
+    def __init__(self, path, *, private_root=None):
+        from .security import admit_work_owner_ledger_path
+        admit_work_owner_ledger_path(path, private_root=private_root)
+
+    @classmethod
+    def source_contract_fixture(cls):
+        return _OfflineWorkOwnerEffectFixture()
+
+
 class OfflineW1IntentLedger:
     """Durable, fail-closed prototype for one-request-at-most-once admission.
 

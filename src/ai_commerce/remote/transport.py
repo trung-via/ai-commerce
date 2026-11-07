@@ -6,11 +6,12 @@ import json
 import os
 import re
 import secrets
+import sqlite3
 import subprocess
 import tempfile
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from http.client import HTTPException
 from pathlib import Path
@@ -1034,6 +1035,8 @@ def _effect_verify_signature(body, signature, signers, identity, namespace, exec
 WORK_OWNER_EFFECT_SCHEMA = "WorkOwnerEffectWitness.v1"
 WORK_OWNER_EFFECT_NAMESPACE = "workowner-effect-witness-v1@ai-commerce"
 WORK_OWNER_EFFECT_NATIVE_GATE = "HOLD_PENDING_ADOPTED_NATIVE_OWNER_POLICY"
+SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED = "SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED"
+WORK_OWNER_WITNESS_BRIDGE_SCHEMA = "WorkOwnerWitnessBridge.v1"
 _WORK_OWNER_EFFECT_ENROLLMENTS: tuple[bytes, ...] = ()
 
 
@@ -1095,6 +1098,7 @@ class WorkOwnerEffectResult:
     def payload(self):
         return {"schema": "WorkOwnerEffectSourceGate.v1", "gate": self.gate.value,
                 "scope": self.scope, "native_owner_policy_gate": WORK_OWNER_EFFECT_NATIVE_GATE,
+                "native_signer_gate": SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED,
                 "work_owner_transition_authorized": False, "replay_authorized": False,
                 "transfer_authorized": False, "publication_authorized": False,
                 "execution_allowed": False, "credential_custody_proven": False,
@@ -1300,6 +1304,240 @@ def work_owner_effect_witness_verify_offline(raw, *, expected_binding, enrollmen
         return result(gate.SOURCE_BOUNDARY_CONTRADICTION)
 
 
+@dataclass(frozen=True, init=False)
+class _AuthenticatedEffectIntent:
+    """Detached source-verifier output, never an Issue-selected request dict."""
+    _wire: bytes
+
+    def __init__(self, binding, replay, candidate_boundary):
+        object.__setattr__(self, "_wire", _effect_canonical({"binding": binding, "replay": replay,
+                                                   "candidate_boundary": candidate_boundary}))
+
+
+class _OfflineWorkOwnerEffectFixture:
+    """In-memory SQLite source contract, never a native persistence receipt.
+
+    This fixture belongs to the remote source verifier. HostOps adapts to it;
+    remote verification has no dependency on HostOps filesystem authority.
+    Reservations never expire or become executable. No disk path, reclaim,
+    APPLIED transition or export/import is supported.
+    """
+    def __init__(self):
+        self.db = sqlite3.connect(":memory:", timeout=0.25, isolation_level=None)
+        self.db.execute("""CREATE TABLE workowner_effect_intents (
+            effect_key TEXT PRIMARY KEY,
+            request_id TEXT NOT NULL UNIQUE,
+            replay_id TEXT NOT NULL UNIQUE,
+            nonce TEXT NOT NULL UNIQUE,
+            attempt_key TEXT NOT NULL,
+            binding_hash TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            round INTEGER NOT NULL,
+            state TEXT NOT NULL CHECK(state='INTENT_RESERVED_NO_EFFECT'),
+            binding BLOB NOT NULL)""")
+
+    def close(self):
+        self.db.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *unused):
+        self.close()
+
+    def record_effect_intent(self, intent, *, request_id, revalidate):
+        # No raw/unverified witness can update even the fixture's private state.
+        if type(intent) is not _AuthenticatedEffectIntent or not callable(revalidate):
+            _effect_deny("UNAUTHENTICATED_EFFECT_INTENT")
+        _effect_sha(request_id)
+        value = _effect_decode(intent._wire)
+        binding, replay, boundary = (value[k] for k in
+                                    ("binding", "replay", "candidate_boundary"))
+        binding = work_owner_effect_binding(binding)
+        _effect_shape(replay, "replay_id nonce ledger_sha256")
+        for v in replay.values():
+            _effect_sha(v)
+        _effect_shape(boundary, "candidate_sha receipt_sha256 post_effect_sha256")
+        _effect_sha(boundary["candidate_sha"], 40)
+        _effect_sha(boundary["receipt_sha256"])
+        _effect_sha(boundary["post_effect_sha256"])
+        owner, provider = binding["work_owner"], binding["provider_intent"]
+        # Tokens, journal digest, fence, source and candidate are NOT part of the
+        # effect slot: changing them must never manufacture another reservation.
+        scope = {k: binding[k] for k in ("repo", "root_issue", "action_id", "attempt_id")}
+        scope["operation"] = "OWNER_POST_EFFECT_WITNESS"
+        attempt_key = _effect_digest(_effect_canonical(scope))
+        scope.update(generation=owner["generation"], round=provider["round"])
+        effect_key = _effect_digest(_effect_canonical(scope))
+        binding_hash = _effect_digest(_effect_canonical({"binding": binding, "candidate_boundary": boundary}))
+        status = "INTENT_RESERVED_NO_EFFECT"
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+            revalidate()
+            row = self.db.execute("SELECT binding_hash FROM workowner_effect_intents WHERE effect_key=?",
+                                  (effect_key,)).fetchone()
+            if row is not None:
+                if row[0] != binding_hash:
+                    _effect_deny("EFFECT_BINDING_CONFLICT")
+                status = "HOLD_REPLAY_UNKNOWN"
+            else:
+                prior = self.db.execute("SELECT binding, generation, round FROM workowner_effect_intents "
+                                        "WHERE attempt_key=? ORDER BY round DESC LIMIT 1",
+                                        (attempt_key,)).fetchone()
+                if prior:
+                    previous = _effect_decode(prior[0])
+                    # A new generation requires a separately authenticated NEW
+                    # attempt; resetting generation/round in one attempt is denied.
+                    if owner["generation"] != prior[1]:
+                        _effect_deny("EFFECT_GENERATION_CONFLICT")
+                    for k in ("source_sha", "refs"):
+                        if binding[k] != previous[k]:
+                            _effect_deny("EFFECT_SOURCE_CONFLICT")
+                    for k in ("root_commit_sha", "root_digest", "work_key", "fingerprint", "fence"):
+                        if owner[k] != previous["work_owner"][k]:
+                            _effect_deny("EFFECT_OWNER_CONFLICT")
+                    if provider["round"] != prior[2] + 1:
+                        _effect_deny("EFFECT_ROUND_ROLLBACK_OR_GAP")
+                    if (owner["journal_tip_sha"] == previous["work_owner"]["journal_tip_sha"] or
+                            owner["journal_digest"] == previous["work_owner"]["journal_digest"] or
+                            provider["commit_sha"] == previous["provider_intent"]["commit_sha"] or
+                            provider["digest"] == previous["provider_intent"]["digest"]):
+                        _effect_deny("EFFECT_PROVENANCE_REUSED")
+                if self.unreconciled_intents_count() >= 10000:
+                    _effect_deny("EFFECT_LEDGER_LIMIT")
+                self.db.execute("INSERT INTO workowner_effect_intents VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (effect_key, request_id, replay["replay_id"], replay["nonce"], attempt_key,
+                     binding_hash, owner["generation"], provider["round"], status, _effect_canonical(binding)))
+            # Confirmation after insertion still runs inside the transaction:
+            # any observed source race rolls back rather than poisoning a slot.
+            revalidate()
+            self.db.execute("COMMIT")
+        except BaseException as exc:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            if isinstance(exc, sqlite3.Error):
+                _effect_deny("EFFECT_TOKEN_CONFLICT_OR_LEDGER_UNAVAILABLE")
+            raise
+        return {"schema": "hostops.workowner_effect_intent.v1", "status": status,
+                "scope": "SOURCE_CONTRACT_FIXTURE", "effect_key": effect_key,
+                "durable": False, "execution_allowed": False,
+                "work_owner_transition_authorized": False, "replay_authorized": False,
+                "publication_authorized": False, "native_side_effect_granted": False}
+
+    def unreconciled_intents_count(self):
+        return self.db.execute("SELECT count(*) FROM workowner_effect_intents").fetchone()[0]
+
+
+@dataclass(frozen=True)
+class _WorkOwnerSourceSnapshot:
+    binding: bytes
+    candidate_sha: str
+    receipt_sha256: str
+    reads: object = field(repr=False, compare=False)
+
+    def confirm(self):
+        self.reads.confirm()
+
+
+@dataclass(frozen=True)
+class WorkOwnerWitnessSource:
+    """Owner-configured READ ONLY source; identifiers never come from the frame.
+
+    This uses the existing strict journal and ingress reader, its original
+    cumulative read budget, and committed candidate provenance. It is still
+    Git source evidence, never an independent native signer/custody proof.
+    """
+    github: object
+    issue_number: int
+    batch: dict
+    action: dict
+    trusted_issuer: str
+    read_budget: int = 192
+
+    def acquire(self):
+        report = WorkOwnerAudit.run(self.github, issue_number=self.issue_number,
+            batch=self.batch, action=self.action, trusted_issuer=self.trusted_issuer,
+            read_budget=self.read_budget, capture_bridge_source=True)
+        if report.source_gate is not AuditGate.VERIFIED or report._bridge_source is None:
+            _effect_deny("TRUSTED_WORKOWNER_SOURCE_UNCONFIRMED")
+        return report._bridge_source
+
+
+def work_owner_witness_bridge(request, *, source=None, enrollment=None, context=None,
+        ssh_keygen=None, ledger=None, source_contract_fixture=False):
+    """Authenticate the entire source boundary BEFORE a single-use reservation.
+
+    No native effect path exists. Native ledgers are denied before open; the
+    only implemented ledger is explicitly in-memory SOURCE_CONTRACT_FIXTURE.
+    """
+    scope = "SOURCE_CONTRACT_FIXTURE" if source_contract_fixture is True else "UNENROLLED"
+    def result(reason, *, gate=WorkOwnerEffectGate.SOURCE_BOUNDARY_CONTRADICTION, receipt=None):
+        return {"schema": "WorkOwnerWitnessBridgeResult.v1", "status": reason,
+                "reason": reason, "gate": gate.value, "scope": scope,
+                "native_signer_gate": SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED,
+                "execution_allowed": False, "work_owner_transition_authorized": False,
+                "replay_authorized": False, "publication_authorized": False,
+                "transfer_authorized": False, "credential_custody_proven": False,
+                "replay_ledger_proven": False, "ledger_receipt": receipt}
+    try:
+        if type(source_contract_fixture) is not bool:
+            return result("SOURCE_CONTRACT_FIXTURE_INVALID")
+        # Detach once before any verifier/reader callback can mutate the frame.
+        r = _effect_decode(_effect_canonical(request))
+        _effect_shape(r, "schema request_id repo root_issue current_issue action_id attempt_id source_sha work_owner refs provider_intent witness_envelope candidate_boundary")
+        if r["schema"] != WORK_OWNER_WITNESS_BRIDGE_SCHEMA:
+            return result("BRIDGE_SCHEMA_INVALID")
+        _effect_sha(r["request_id"])
+        binding = work_owner_effect_binding({k: r[k] for k in
+            ("repo", "root_issue", "current_issue", "action_id", "attempt_id", "source_sha",
+             "work_owner", "refs", "provider_intent")})
+        if type(source) is not WorkOwnerWitnessSource:
+            return result("TRUSTED_WORKOWNER_READER_REQUIRED")
+        observed = source.acquire()
+        if _effect_canonical(binding) != observed.binding:
+            return result("WORKOWNER_BINDING_CONFLICT")
+        raw = r["witness_envelope"]
+        if type(raw) is dict:
+            raw = _effect_canonical(raw)
+        elif type(raw) is str:
+            raw = raw.encode("utf-8")
+        witness = work_owner_effect_witness_verify_offline(raw, expected_binding=binding,
+            enrollment=enrollment, context=context, ssh_keygen=ssh_keygen,
+            source_contract_fixture=source_contract_fixture)
+        if witness.gate is not WorkOwnerEffectGate.EFFECT_DETERMINATE_AUTHENTICATED:
+            return result(witness.gate.value, gate=witness.gate)
+        p = _effect_decode(raw)["payload"]
+        cb = r["candidate_boundary"]
+        _effect_shape(cb, "candidate_sha receipt_sha256 post_effect_sha256")
+        _effect_sha(cb["candidate_sha"], 40)
+        _effect_sha(cb["receipt_sha256"])
+        _effect_sha(cb["post_effect_sha256"])
+        if (p["publication"]["state"] != "COMMITTED_CANDIDATE" or
+                cb["candidate_sha"] != observed.candidate_sha or
+                cb["candidate_sha"] != p["publication"]["candidate_sha"] or
+                cb["receipt_sha256"] != observed.receipt_sha256 or
+                cb["receipt_sha256"] != p["verification"]["receipt_sha256"] or
+                cb["post_effect_sha256"] != p["publication"]["post_effect_sha256"]):
+            return result("CANDIDATE_OR_RECEIPT_BOUNDARY_CONFLICT")
+        observed.confirm()
+        if type(ledger) is not _OfflineWorkOwnerEffectFixture:
+            return result("MISSING_PRIVATE_LEDGER")
+        if not source_contract_fixture:
+            return result("SOURCE_ONLY_HOLD_LEDGER_CUSTODY_UNPROVEN")
+        intent = _AuthenticatedEffectIntent(binding, p["replay"], cb)
+        receipt = ledger.record_effect_intent(intent, request_id=r["request_id"],
+                                             revalidate=observed.confirm)
+        # An observed post-commit race retains the unresolved intent forever.
+        observed.confirm()
+        if receipt["status"] != "INTENT_RESERVED_NO_EFFECT":
+            return result("HOLD_REPLAY_UNKNOWN", gate=WorkOwnerEffectGate.REPLAY_OR_STALE,
+                          receipt=receipt)
+        return result(SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED, gate=witness.gate, receipt=receipt)
+    except Exception:
+        # Fixed public code only: no raw signature, Issue prose, paths or secrets.
+        return result("HOLD_SOURCE_OR_LEDGER_UNCONFIRMED")
+
+
 class AuditGate(str, Enum):
     VERIFIED = "VERIFIED"
     CONTRADICTED = "CONTRADICTED"
@@ -1337,6 +1575,7 @@ class WorkOwnerAuditReport:
     reads: int
     provider_status: AuditProviderStatus
     effect_witness: WorkOwnerEffectResult | None = None
+    _bridge_source: _WorkOwnerSourceSnapshot | None = field(default=None, repr=False, compare=False)
 
     def payload(self) -> dict:
         # Source authentication does not authenticate native effects, cleanup,
@@ -1491,14 +1730,20 @@ class WorkOwnerAudit:
     @classmethod
     def run(cls, github, *, issue_number, batch, action, trusted_issuer,
             read_budget=192, diagnostics=None, effect_witness=None, witness_enrollment=None,
-            witness_context=None, witness_verifier=None, source_contract_fixture=False) -> WorkOwnerAuditReport:
+            witness_context=None, witness_verifier=None, source_contract_fixture=False,
+            ledger=None, capture_bridge_source=False) -> WorkOwnerAuditReport:
+        # Compatibility input is intentionally never used: forensic audits
+        # cannot consume nonces or mutate a private ledger, even on success.
         reads = None
         stage, generation, candidate_sha = "UNOBSERVED", None, None
         provider = AuditProviderStatus.UNOBSERVED
         witness = None
+        bridge_source = None
         if effect_witness is not None:
             witness = WorkOwnerEffectResult(WorkOwnerEffectGate.SOURCE_BOUNDARY_CONTRADICTION)
         try:
+            if type(capture_bridge_source) is not bool:
+                raise _AuditUnknown("BRIDGE_SOURCE_REQUEST_INVALID")
             diagnostics = diagnostics or WorkOwnerAuditDiagnostics()
             if (not isinstance(diagnostics, WorkOwnerAuditDiagnostics) or
                     not isinstance(diagnostics.provider_status, AuditProviderStatus) or
@@ -1575,8 +1820,16 @@ class WorkOwnerAudit:
             if diagnostics.scratch_dirty is True or provider is AuditProviderStatus.QUOTA_EXHAUSTED:
                 raise _AuditUnknown("LOCAL_EFFECT_UNCONFIRMED")
             gate, code = AuditGate.VERIFIED, "PUBLISHED_SOURCE_AUTHENTICATED_OWNER_WITNESS_MISSING"
-            if effect_witness is not None:
+            # Ordinary source forensics do not require effect enrollment. Only
+            # an explicit bridge or witness join needs the closed effect binding.
+            if capture_bridge_source or effect_witness is not None:
                 binding = cls._effect_binding(reads, identity, chain)
+                proof = commit_evidence(reads.api("GET", "/git/commits/" + candidate_sha)["message"])
+                if capture_bridge_source:
+                    bridge_source = _WorkOwnerSourceSnapshot(_effect_canonical(binding), candidate_sha,
+                        proof["verification"]["report_sha256"], reads)
+                reads.confirm()
+            if effect_witness is not None:
                 witness = work_owner_effect_witness_verify_offline(effect_witness,
                     expected_binding=binding, enrollment=witness_enrollment, context=witness_context,
                     ssh_keygen=witness_verifier, source_contract_fixture=source_contract_fixture)
@@ -1609,7 +1862,8 @@ class WorkOwnerAudit:
             witness = WorkOwnerEffectResult(WorkOwnerEffectGate.SOURCE_BOUNDARY_CONTRADICTION)
         return WorkOwnerAuditReport(gate, code, stage, generation, candidate_sha,
             tuple(sorted(reads.provenance, key=lambda p: (p.ref, p.sha))) if reads else (),
-            reads.reads if reads else 0, provider, witness)
+            reads.reads if reads else 0, provider, witness,
+            bridge_source if gate is AuditGate.VERIFIED else None)
 
     @staticmethod
     def _effect_binding(reads, identity, chain):
@@ -1704,6 +1958,8 @@ class WorkOwnerAudit:
             raise _AuditContradicted("CANDIDATE_EVIDENCE_INVALID") from None
         if proof is None:
             raise _AuditUnknown("TERMINAL_EVIDENCE_UNOBSERVED")
+        if not candidate_accepted(proof):
+            raise _AuditContradicted("CANDIDATE_SCOPE_UNPROVEN")
         if (proof["source_sha"] != packet["source_sha"] or proof["fingerprint"] != fp or
                 proof["attempt_id"] != action["attempt_id"] or proof["action_id"] != action["action_id"] or
                 proof["allowed_paths"] != action["allowed_paths"] or
