@@ -1043,7 +1043,7 @@ def test_workowner_lineage_cross_issue_hijack_or_forged_repair_of():
     claim_key = storage.attempt_key("target-attempt")
     claim_sha = hashlib.sha1(b"claim506").hexdigest()
     storage.refs[f"refs/heads/ef02/claims/{claim_key}"] = claim_sha
-    storage.commits[claim_sha] = {"message": f"EF02 CLAIM\n\nfingerprint={fp506}\nattempt_id=target-attempt"}
+    storage.commits[claim_sha] = {"message": f"EF02 CLAIM\n\nfingerprint={fp506}\nattempt_id=target-attempt", "parents": [{"sha": BASE}]}
     with pytest.raises(RemoteTransportError, match="WORK_LINEAGE_CYCLE_DETECTED"):
         WorkOwner.identity(storage, 508, storage.issues[508], storage.issues[508]["actions"][0])
 
@@ -1088,7 +1088,15 @@ def _publish_owner(storage, owner, action, source_sha=BASE, attempt_id=None):
     from ai_commerce.remote.transport import WorkOwner
     from ai_commerce.remote.candidate_policy import canonical, evidence_digest, EVIDENCE_MARKER
     attempt_id = attempt_id or action["attempt_id"]
-    fp = hashlib.sha256(json.dumps({"batch_id": storage.issue_body.get("batch_id", "b1") if isinstance(storage.issue_body, dict) else "b1",
+    issue_data = None
+    if hasattr(owner, "identity") and isinstance(owner.identity, dict):
+        issue_num = owner.identity.get("current_issue") or owner.identity.get("issue")
+        if issue_num and isinstance(storage.issues, dict):
+            issue_data = storage.issues.get(issue_num)
+    if issue_data is None and isinstance(storage.issue_body, dict):
+        issue_data = storage.issue_body
+    batch_id = issue_data.get("batch_id", "b1") if isinstance(issue_data, dict) else "b1"
+    fp = hashlib.sha256(json.dumps({"batch_id": batch_id,
         "source_sha": source_sha, "action": {k: v for k, v in action.items() if k != "resolved_dependencies"}},
         sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
     claim_key = storage.attempt_key(attempt_id)
@@ -1629,3 +1637,260 @@ def test_workowner_true_absence_zero_refs():
     assert reconciled["replay_authorized"] is False
     assert reconciled["publication_authorized"] is False
     assert reconciled["generation"] == 1
+
+
+def test_workowner_lineage_index_issuer_mismatch():
+    """Negative test: durable index lookup detects issuer mismatch."""
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+    storage = WorkOwnerMemoryTransport(BASE)
+
+    pred_action = {"action_id": "R1-WP02-CODEX-R2", "attempt_id": "target-attempt", "executor": "codex", "model": "gpt-5", "effort": "high"}
+    pred_packet = {"batch_id": "b-pred", "source_sha": BASE, "actions": [pred_action]}
+    storage.issues[508] = {**pred_packet, "user": {"login": "attacker"}}
+
+    pred_fp = hashlib.sha256(json.dumps({
+        "batch_id": "b-pred", "source_sha": BASE, "action": pred_action
+    }, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    storage.index_attempt(
+        issue_number=508, source_sha=BASE, attempt_id="target-attempt",
+        fingerprint=pred_fp, issuer="authorized-owner"
+    )
+
+    action = {"action_id": "R1-WP02-AGY-R8", "attempt_id": "attempt-r8", "repair_of": "target-attempt",
+              "executor": "antigravity", "model": "gemini-3.8-flash", "effort": "high"}
+    packet = {"batch_id": "b-r8", "source_sha": BASE, "actions": [action]}
+    storage.issues[524] = packet
+
+    with pytest.raises(RemoteTransportError, match="WORK_LINEAGE_INDEX_ISSUER_MISMATCH"):
+        WorkOwner.identity(storage, 524, packet, action)
+
+
+def test_workowner_lineage_index_collision():
+    """Negative test: index collision when re-indexing attempt with conflicting metadata."""
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+    storage = WorkOwnerMemoryTransport(BASE)
+
+    storage.index_attempt(
+        issue_number=508, source_sha=BASE, attempt_id="attempt-coll",
+        fingerprint="1" * 64, issuer="owner"
+    )
+
+    with pytest.raises(RemoteTransportError, match="WORK_LINEAGE_INDEX_COLLISION"):
+        storage.index_attempt(
+            issue_number=510, source_sha=BASE, attempt_id="attempt-coll",
+            fingerprint="1" * 64, issuer="owner"
+        )
+
+    with pytest.raises(RemoteTransportError, match="WORK_LINEAGE_INDEX_COLLISION"):
+        storage.index_attempt(
+            issue_number=508, source_sha=BASE, attempt_id="attempt-coll",
+            fingerprint="2" * 64, issuer="owner"
+        )
+
+
+def test_workowner_lineage_unindexed_pagination_150_issues_and_hidden_duplicate():
+    """150+ issues: resolves attempt on page 2, and detects hidden duplicate across pages."""
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+    storage = WorkOwnerMemoryTransport(BASE)
+
+    for i in range(1, 151):
+        storage.issues[i] = {
+            "batch_id": f"b-{i}",
+            "source_sha": BASE,
+            "actions": [{"action_id": f"act-{i}", "attempt_id": f"att-{i}", "executor": "antigravity", "model": "gemini-3.8-flash", "effort": "high"}]
+        }
+
+    target_action = {"action_id": "target-act", "attempt_id": "target-page2", "executor": "codex", "model": "gpt-5", "effort": "high"}
+    storage.issues[150] = {"batch_id": "b-150", "source_sha": BASE, "actions": [target_action]}
+
+    id150 = WorkOwner.identity(storage, 150, storage.issues[150], target_action)
+    owner150 = WorkOwner.acquire(storage, id150)
+    _publish_owner(storage, owner150, target_action, attempt_id="target-page2")
+
+    succ_action = {"action_id": "succ-act", "attempt_id": "succ-att", "repair_of": "target-page2",
+                   "executor": "antigravity", "model": "gemini-3.8-flash", "effort": "high"}
+    succ_packet = {"batch_id": "b-succ", "source_sha": BASE, "actions": [succ_action]}
+    storage.issues[200] = succ_packet
+
+    id200 = WorkOwner.identity(storage, 200, succ_packet, succ_action)
+    assert id200["generation"] == 2
+    assert id200["root_issue"] == 150
+
+    storage.issues[10] = {"batch_id": "b-10", "source_sha": BASE, "actions": [target_action]}
+    with pytest.raises(RemoteTransportError, match="WORK_LINEAGE_PREDECESSOR_ATTEMPT_AMBIGUOUS"):
+        WorkOwner.identity(storage, 200, succ_packet, succ_action)
+
+
+def test_workowner_lineage_page_overflow():
+    """Negative test: cap expiry / page overflow prevents false global uniqueness."""
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+    storage = WorkOwnerMemoryTransport(BASE)
+
+    for i in range(1, 1101):
+        storage.issues[i] = {
+            "batch_id": f"b-{i}",
+            "source_sha": BASE,
+            "actions": [{"action_id": f"act-{i}", "attempt_id": f"att-{i}", "executor": "antigravity", "model": "gemini-3.8-flash", "effort": "high"}]
+        }
+
+    succ_action = {"action_id": "succ", "attempt_id": "succ-att", "repair_of": "never-found-att",
+                   "executor": "antigravity", "model": "gemini-3.8-flash", "effort": "high"}
+    succ_packet = {"batch_id": "b-succ", "source_sha": BASE, "actions": [succ_action]}
+    storage.issues[1200] = succ_packet
+
+    with pytest.raises(RemoteTransportError, match="WORK_LINEAGE_PAGE_OVERFLOW"):
+        WorkOwner.identity(storage, 1200, succ_packet, succ_action)
+
+
+def test_workowner_lineage_missing_claim_parent_fails_closed():
+    """Negative test: claim with missing parent strictly rejected."""
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+    storage = WorkOwnerMemoryTransport(BASE)
+
+    pred_action = {"action_id": "R1-WP02-CODEX-R2", "attempt_id": "target-attempt", "executor": "codex", "model": "gpt-5", "effort": "high"}
+    pred_packet = {"batch_id": "b-pred", "source_sha": BASE, "actions": [pred_action]}
+    storage.issues[508] = pred_packet
+
+    fp_pred = hashlib.sha256(json.dumps({"batch_id": "b-pred", "source_sha": BASE, "action": pred_action},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    claim_key = storage.attempt_key("target-attempt")
+    claim_sha = hashlib.sha1(b"claim-noparent").hexdigest()
+    storage.refs[f"refs/heads/ef02/claims/{claim_key}"] = claim_sha
+    storage.commits[claim_sha] = {"message": f"EF02 CLAIM\n\nfingerprint={fp_pred}\nattempt_id=target-attempt", "parents": []}
+
+    action = {"action_id": "R1-WP02-AGY-R8", "attempt_id": "attempt-r8", "repair_of": "target-attempt",
+              "executor": "antigravity", "model": "gemini-3.8-flash", "effort": "high"}
+    packet = {"batch_id": "b-r8", "source_sha": BASE, "actions": [action]}
+    storage.issues[524] = packet
+
+    with pytest.raises(RemoteTransportError, match="WORK_LINEAGE_PREDECESSOR_CLAIM_MISMATCH"):
+        WorkOwner.identity(storage, 524, packet, action)
+
+
+def test_workowner_lineage_evidenceless_candidate_rejected():
+    """Negative test: candidate present without non-null signed evidence marker is rejected."""
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+    storage = WorkOwnerMemoryTransport(BASE)
+
+    pred_action = {"action_id": "R1-WP02-CODEX-R2", "attempt_id": "target-attempt", "executor": "codex", "model": "gpt-5", "effort": "high"}
+    pred_packet = {"batch_id": "b-pred", "source_sha": BASE, "actions": [pred_action]}
+    storage.issues[508] = pred_packet
+
+    fp_pred = hashlib.sha256(json.dumps({"batch_id": "b-pred", "source_sha": BASE, "action": pred_action},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    claim_key = storage.attempt_key("target-attempt")
+    claim_sha = hashlib.sha1(b"claim-valid").hexdigest()
+    storage.refs[f"refs/heads/ef02/claims/{claim_key}"] = claim_sha
+    storage.commits[claim_sha] = {"message": f"EF02 CLAIM\n\nfingerprint={fp_pred}\nattempt_id=target-attempt", "parents": [{"sha": BASE}]}
+
+    cand_sha = hashlib.sha1(b"cand-no-evidence").hexdigest()
+    storage.refs[f"refs/heads/ef02/candidate/{claim_key}"] = cand_sha
+    storage.commits[cand_sha] = {
+        "message": "EF02 candidate attempt target-attempt",
+        "tree": {"sha": "e" * 40},
+        "parents": [{"sha": BASE}]
+    }
+
+    action = {"action_id": "R1-WP02-AGY-R8", "attempt_id": "attempt-r8", "repair_of": "target-attempt",
+              "executor": "antigravity", "model": "gemini-3.8-flash", "effort": "high"}
+    packet = {"batch_id": "b-r8", "source_sha": BASE, "actions": [action]}
+    storage.issues[524] = packet
+
+    with pytest.raises(RemoteTransportError, match="WORK_LINEAGE_PREDECESSOR_CANDIDATE_MISMATCH"):
+        WorkOwner.identity(storage, 524, packet, action)
+
+
+def test_workowner_lineage_literal_r1_r7_repair_of():
+    """Negative and positive tests for literal R1..R7 repair_of attempt IDs."""
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+    storage = WorkOwnerMemoryTransport(BASE)
+
+    action = {"action_id": "R1-WP02-AGY-R8", "attempt_id": "attempt-r8",
+              "repair_of": "r1_wp02_agy38_high_r5_20261106",
+              "executor": "antigravity", "model": "gemini-3.8-flash", "effort": "high"}
+    packet = {"batch_id": "b-r8", "source_sha": BASE, "actions": [action]}
+    storage.issues[543] = packet
+
+    with pytest.raises(RemoteTransportError, match="WORK_LINEAGE_PREDECESSOR_ATTEMPT_NOT_FOUND"):
+        WorkOwner.identity(storage, 543, packet, action)
+
+    r5_action = {"action_id": "R1-WP02-AGY-R5", "attempt_id": "r1_wp02_agy38_high_r5_20261106",
+                 "executor": "antigravity", "model": "gemini-3.8-flash", "effort": "high"}
+    storage.issues[524] = {"batch_id": "b-r5", "source_sha": BASE, "actions": [r5_action]}
+    r5_id = WorkOwner.identity(storage, 524, storage.issues[524], r5_action)
+    r5_owner = WorkOwner.acquire(storage, r5_id)
+    _publish_owner(storage, r5_owner, r5_action, attempt_id="r1_wp02_agy38_high_r5_20261106")
+
+    r5_fp = hashlib.sha256(json.dumps({
+        "batch_id": "b-r5", "source_sha": BASE, "action": r5_action
+    }, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    storage.index_attempt(
+        issue_number=524, source_sha=BASE, attempt_id="r1_wp02_agy38_high_r5_20261106",
+        fingerprint=r5_fp, issuer="trung-via"
+    )
+
+    ident = WorkOwner.identity(storage, 543, packet, action)
+    assert ident["generation"] == 2
+    assert ident["root_issue"] == 524
+
+
+def test_workowner_acquire_unknown_and_stale_generation():
+    """Negative tests: UNKNOWN predecessor denied, stale/skipped generations rejected."""
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+    storage = WorkOwnerMemoryTransport(BASE)
+
+    action1 = _action()
+    packet1 = {"batch_id": "b1", "source_sha": BASE, "actions": [action1]}
+    storage.issue_body = packet1
+    id1 = WorkOwner.identity(storage, 506, packet1, action1)
+    owner1 = WorkOwner.acquire(storage, id1)
+    owner1.append("CLAIMED")
+    owner1.append("UNKNOWN")
+
+    id2 = dict(id1)
+    id2["generation"] = 2
+    id2["attempt_id"] = "attempt-gen2"
+    with pytest.raises(RemoteTransportError, match="WORK_OWNER_PREDECESSOR_UNRESOLVED"):
+        WorkOwner.acquire(storage, id2)
+
+    with pytest.raises(RemoteTransportError, match="(?:WORK_OWNER_TRANSFER_CONFLICT|WORK_OWNER_EXISTS_RECONCILE_ONLY)"):
+        WorkOwner.acquire(storage, id1)
+
+    id3 = dict(id1)
+    id3["generation"] = 3
+    id3["attempt_id"] = "attempt-gen3"
+    with pytest.raises(RemoteTransportError, match="WORK_OWNER_PREDECESSOR_UNRESOLVED"):
+        WorkOwner.acquire(storage, id3)
+
+    action_pub = _action()
+    action_pub["attempt_id"] = "attempt-pub"
+    packet_pub = {"batch_id": "b-pub", "source_sha": BASE, "actions": [action_pub]}
+    storage.issues[600] = packet_pub
+    id_pub = WorkOwner.identity(storage, 600, packet_pub, action_pub)
+    owner_pub = WorkOwner.acquire(storage, id_pub)
+    _publish_owner(storage, owner_pub, action_pub, attempt_id="attempt-pub")
+
+    id_skipped = dict(id_pub)
+    id_skipped["generation"] = 3
+    id_skipped["attempt_id"] = "attempt-gen3-skipped"
+    with pytest.raises(RemoteTransportError, match="WORK_OWNER_STALE_OR_SKIPPED_GENERATION"):
+        WorkOwner.acquire(storage, id_skipped)
+
+    id_gen2 = dict(id_pub)
+    id_gen2["generation"] = 2
+    id_gen2["attempt_id"] = "attempt-gen2-ok"
+    owner_gen2 = WorkOwner.acquire(storage, id_gen2)
+
+    id_stale = dict(id_pub)
+    id_stale["generation"] = 2
+    id_stale["attempt_id"] = "attempt-gen2-conflict"
+    with pytest.raises(RemoteTransportError, match="WORK_OWNER_TRANSFER_CONFLICT"):
+        WorkOwner.acquire(storage, id_stale)

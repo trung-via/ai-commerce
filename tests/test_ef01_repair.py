@@ -45,21 +45,33 @@ class WorkOwnerMemoryTransport(GitHubTransport):
                 if self.issues:
                     for num in sorted(self.issues):
                         b = self.issues[num]
+                        user = {"login": "trung-via"}
                         if isinstance(b, dict):
+                            user = b.get("user", user)
                             b = json.dumps(b)
-                        items.append({"number": num, "body": b})
+                        items.append({"number": num, "body": b, "user": user})
                 elif self.issue_body:
                     b = json.dumps(self.issue_body) if isinstance(self.issue_body, dict) else self.issue_body
-                    items.append({"number": 506, "body": b})
+                    items.append({"number": 506, "body": b, "user": {"login": "trung-via"}})
+                if "?" in path:
+                    from urllib.parse import parse_qs, urlparse
+                    qs = parse_qs(urlparse(path).query)
+                    if "per_page" in qs or "page" in qs:
+                        page = int(qs.get("page", [1])[0])
+                        per_page = int(qs.get("per_page", [100])[0])
+                        start = (page - 1) * per_page
+                        return items[start:start + per_page]
                 return items
             if method == "GET" and path.startswith("/issues/"):
                 num = int(path.rsplit("/", 1)[1])
                 body = self.issues.get(num) if self.issues else self.issue_body
                 if body is None:
                     raise RemoteTransportError("GITHUB_HTTP_404")
+                user = {"login": "trung-via"}
                 if isinstance(body, dict):
+                    user = body.get("user", user)
                     body = json.dumps(body)
-                return {"number": num, "body": body}
+                return {"number": num, "body": body, "user": user}
             if method == "GET" and path.startswith("/git/matching-refs/heads/"):
                 prefix = "refs/heads/" + path.split("/heads/", 1)[1]
                 return [{"ref": ref, "object": {"sha": sha}} for ref, sha in self.refs.items() if ref.startswith(prefix)]

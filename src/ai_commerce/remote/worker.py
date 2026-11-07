@@ -267,6 +267,7 @@ class LocalBatchWorker:
         self.profiles = profiles
         self.github = github
         self.issue_number = issue_number
+        self.issuer_login = batch.get("issuer_login") or batch.get("actor")
         configured_git = git_executable if git_executable is not None else os.environ.get("AI_COMMERCE_GIT_EXECUTABLE")
         self.git_executable = resolve_git_executable(configured_git) if configured_git is not None else None
         self.root = (root or (self.checkout / ".local" / "ef02" / batch["batch_id"])).resolve()
@@ -275,6 +276,25 @@ class LocalBatchWorker:
             self.checkout / ".github" / "ef02" / "approved-candidates.v1.json")
         check_source(self.checkout, batch["source_sha"],
                      **({"git_executable": self.git_executable} if self.git_executable is not None else {}))
+        if self.issue_number > 0 and hasattr(self.github, "index_attempt"):
+            for act in self.batch.get("actions", []):
+                aid = act.get("attempt_id")
+                if aid:
+                    act_fp = hashlib.sha256(json.dumps({
+                        "batch_id": self.batch["batch_id"],
+                        "source_sha": self.batch["source_sha"],
+                        "action": {k: v for k, v in act.items() if k != "resolved_dependencies"}
+                    }, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")).hexdigest()
+                    try:
+                        self.github.index_attempt(
+                            issue_number=self.issue_number,
+                            source_sha=self.batch["source_sha"],
+                            attempt_id=aid,
+                            fingerprint=act_fp,
+                            issuer=self.issuer_login
+                        )
+                    except Exception:
+                        pass
 
     def _acquire_owner(self, action):
         identity = WorkOwner.identity(self.github, self.issue_number, self.batch, action)
@@ -547,6 +567,19 @@ class LocalBatchWorker:
                          "remote_confirmation_observed_at": time.time()})
             # Never pass GitHub credentials into untrusted model/verification process.
             owner.assert_current()
+            if getattr(self, "issue_number", 0) > 0 and hasattr(self.github, "index_attempt"):
+                try:
+                    self.github.index_attempt(
+                        issue_number=self.issue_number,
+                        source_sha=source,
+                        attempt_id=attempt_id,
+                        fingerprint=fp,
+                        issuer=getattr(self, "issuer_login", None)
+                    )
+                except Exception as exc:
+                    if "WORK_LINEAGE_INDEX_COLLISION" in str(exc):
+                        outcome.update(status="HOLD_WORK_OWNER", error_code="WORK_LINEAGE_INDEX_COLLISION", replay_authorized=False)
+                        return finish()
             broker = WorkOwnerBroker(owner)
             child_env = _safe_child_env(self.checkout)
             child_env.update(broker.environment())

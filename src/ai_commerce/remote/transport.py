@@ -64,41 +64,130 @@ class WorkOwner:
 
     @classmethod
     def _lookup_attempt_issue(cls, github, target_attempt_id):
-        """Bounded unambiguous owner-authenticated attempt ID lookup through trusted Issue data."""
-        try:
-            issues = github.api("GET", "/issues?state=all&per_page=100")
-        except RemoteTransportError as exc:
-            raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_ISSUE_INVALID") from exc
+        """Bounded unambiguous owner-authenticated attempt ID lookup through trusted Issue data or durable index."""
+        key = github.attempt_key(target_attempt_id)
+        index_sha = None
+        for ns in ("ef02/index/", "ef02/indices/"):
+            try:
+                ref_obj = github.api("GET", f"/git/ref/heads/{ns}{key}")
+                index_sha = ref_obj.get("object", {}).get("sha")
+                if index_sha:
+                    break
+            except RemoteTransportError as exc:
+                if str(exc) != "GITHUB_HTTP_404":
+                    raise
 
-        if not isinstance(issues, list):
-            raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_ISSUE_INVALID")
+        if index_sha:
+            index_commit = github.api("GET", f"/git/commits/{index_sha}")
+            parsed = GitHubTransport._parse_index_message(index_commit.get("message", ""))
+            if not parsed or parsed.get("attempt_id") != target_attempt_id:
+                raise RemoteTransportError("WORK_LINEAGE_INDEX_COLLISION")
 
-        matches = []
-        # Bounded search: limit inspection to at most 100 issues
-        for issue in issues[:100]:
-            if not isinstance(issue, dict) or "pull_request" in issue:
-                continue
-            num = issue.get("number")
+            src_sha = parsed.get("source_sha")
+            if [p.get("sha") for p in index_commit.get("parents", [])] != [src_sha]:
+                raise RemoteTransportError("WORK_LINEAGE_INDEX_COLLISION")
+
+            num = parsed.get("issue")
             if type(num) is not int or not 1 <= num <= 2**53:
-                continue
+                raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_ISSUE_INVALID")
+
+            try:
+                issue = github.api("GET", f"/issues/{num}")
+            except RemoteTransportError as exc:
+                raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_ISSUE_INVALID") from exc
+
+            if issue.get("number") != num or "pull_request" in issue:
+                raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_ISSUE_INVALID")
+
+            expected_issuer = parsed.get("issuer")
+            if expected_issuer:
+                actual_issuer = issue.get("user", {}).get("login", "")
+                if actual_issuer.casefold() != expected_issuer.casefold():
+                    raise RemoteTransportError("WORK_LINEAGE_INDEX_ISSUER_MISMATCH")
+
             body = issue.get("body")
-            if not isinstance(body, str):
-                try:
-                    full_issue = github.api("GET", f"/issues/{num}")
-                    body = full_issue.get("body")
-                except RemoteTransportError:
-                    continue
             if not isinstance(body, str) or len(body.encode("utf-8")) > 262144:
-                continue
+                raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_ISSUE_INVALID")
+
             try:
                 packet = json.loads(body)
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(packet, dict):
-                continue
-            for a in packet.get("actions", []):
-                if isinstance(a, dict) and a.get("attempt_id") == target_attempt_id:
-                    matches.append((num, packet, a))
+            except (TypeError, ValueError) as exc:
+                raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_ISSUE_INVALID") from exc
+
+            if not isinstance(packet, dict) or packet.get("source_sha") != src_sha:
+                raise RemoteTransportError("WORK_LINEAGE_INDEX_COLLISION")
+
+            matched = next((a for a in packet.get("actions", []) if isinstance(a, dict) and a.get("attempt_id") == target_attempt_id), None)
+            if matched is None:
+                raise RemoteTransportError("WORK_LINEAGE_INDEX_COLLISION")
+
+            sub = {k: v for k, v in matched.items() if k != "resolved_dependencies"}
+            calc_fp = hashlib.sha256(json.dumps({
+                "batch_id": packet["batch_id"],
+                "source_sha": packet["source_sha"],
+                "action": sub
+            }, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")).hexdigest()
+
+            if parsed.get("fingerprint") and calc_fp != parsed.get("fingerprint"):
+                raise RemoteTransportError("WORK_LINEAGE_INDEX_COLLISION")
+
+            return num, packet, matched
+
+        matches = []
+        page = 1
+        page_limit = 10
+        seen_numbers = set()
+        while page <= page_limit:
+            try:
+                issues = github.api("GET", f"/issues?state=all&per_page=100&page={page}")
+            except RemoteTransportError as exc:
+                if str(exc) == "GITHUB_HTTP_404":
+                    break
+                raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_ISSUE_INVALID") from exc
+
+            if not isinstance(issues, list):
+                raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_ISSUE_INVALID")
+
+            if not issues:
+                break
+
+            new_issues = [i for i in issues if isinstance(i, dict) and i.get("number") not in seen_numbers]
+            if not new_issues and page > 1:
+                break
+
+            for issue in issues:
+                if not isinstance(issue, dict) or "pull_request" in issue:
+                    continue
+                num = issue.get("number")
+                if type(num) is not int or not 1 <= num <= 2**53:
+                    continue
+                if num in seen_numbers:
+                    continue
+                seen_numbers.add(num)
+                body = issue.get("body")
+                if not isinstance(body, str):
+                    try:
+                        full_issue = github.api("GET", f"/issues/{num}")
+                        body = full_issue.get("body")
+                    except RemoteTransportError:
+                        continue
+                if not isinstance(body, str) or len(body.encode("utf-8")) > 262144:
+                    continue
+                try:
+                    packet = json.loads(body)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(packet, dict):
+                    continue
+                for a in packet.get("actions", []):
+                    if isinstance(a, dict) and a.get("attempt_id") == target_attempt_id:
+                        matches.append((num, packet, a))
+
+            if len(issues) < 100:
+                break
+            page += 1
+        else:
+            raise RemoteTransportError("WORK_LINEAGE_PAGE_OVERFLOW")
 
         if len(matches) == 0:
             raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_ATTEMPT_NOT_FOUND")
@@ -200,15 +289,16 @@ class WorkOwner:
             if claim_commit.get("message") != expected_msg:
                 raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_CLAIM_MISMATCH")
             parents = [p.get("sha") for p in claim_commit.get("parents", [])]
-            if parents and parents != [pred_packet["source_sha"]]:
+            if parents != [pred_packet["source_sha"]]:
                 raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_CLAIM_MISMATCH")
 
             cand_sha = None
             try:
                 c_ref = github.api("GET", f"/git/ref/heads/ef02/candidate/{claim_key}")
                 cand_sha = c_ref.get("object", {}).get("sha")
-            except RemoteTransportError:
-                pass
+            except RemoteTransportError as exc:
+                if str(exc) != "GITHUB_HTTP_404":
+                    raise
 
             if cand_sha:
                 cand_commit = github.api("GET", f"/git/commits/{cand_sha}")
@@ -216,13 +306,14 @@ class WorkOwner:
                     proof = commit_evidence(cand_commit.get("message", ""))
                 except ValueError as exc:
                     raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_CANDIDATE_MISMATCH") from exc
-                if proof is not None:
-                    if (proof.get("attempt_id") != pred_attempt_id or
-                            proof.get("source_sha") != pred_packet["source_sha"] or
-                            proof.get("action_id") != matched_action["action_id"] or
-                            proof.get("fingerprint") != pred_fp or
-                            [p.get("sha") for p in cand_commit.get("parents", [])] != [proof.get("effective_source_sha")]):
-                        raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_CANDIDATE_MISMATCH")
+                if proof is None:
+                    raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_CANDIDATE_MISMATCH")
+                if (proof.get("attempt_id") != pred_attempt_id or
+                        proof.get("source_sha") != pred_packet["source_sha"] or
+                        proof.get("action_id") != matched_action["action_id"] or
+                        proof.get("fingerprint") != pred_fp or
+                        [p.get("sha") for p in cand_commit.get("parents", [])] != [proof.get("effective_source_sha")]):
+                    raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_CANDIDATE_MISMATCH")
 
             lineage.append({
                 "issue": cursor_issue_num,
@@ -284,6 +375,23 @@ class WorkOwner:
             "attempt_id": action["attempt_id"],
             "fingerprint": fp,
         }
+
+    @classmethod
+    def index_ingress(cls, github, issue_number: int, batch: dict, action: dict, issuer: str | None = None) -> str:
+        if type(issue_number) is not int or not 1 <= issue_number <= 2**53:
+            raise RemoteTransportError("WORK_IDENTITY_UNKNOWN_TRUSTED_ISSUE_REQUIRED")
+        fp = hashlib.sha256(json.dumps({
+            "batch_id": batch["batch_id"],
+            "source_sha": batch["source_sha"],
+            "action": {k: v for k, v in action.items() if k != "resolved_dependencies"}
+        }, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")).hexdigest()
+        return github.index_attempt(
+            issue_number=issue_number,
+            source_sha=batch["source_sha"],
+            attempt_id=action["attempt_id"],
+            fingerprint=fp,
+            issuer=issuer
+        )
 
     def __init__(self, github, identity, fence):
         self.github, self.identity, self.fence = github, dict(identity), fence
@@ -696,6 +804,106 @@ class GitHubTransport:
 
     def attempt_key(self, attempt_id: str) -> str:
         return hashlib.sha256((self.repo + ":" + attempt_id).encode("utf-8")).hexdigest()[:32]
+
+    @staticmethod
+    def _parse_index_message(msg: str) -> dict | None:
+        if not isinstance(msg, str):
+            return None
+        parts = msg.strip().split("\n\n")
+        if not parts or not (parts[0].startswith("EF02 INDEX") or parts[0].startswith("EF02-INDEX")):
+            return None
+        res = {}
+        for part in parts[1:]:
+            part_str = part.strip()
+            if part_str.startswith("{") and part_str.endswith("}"):
+                try:
+                    data = json.loads(part_str)
+                    if isinstance(data, dict):
+                        res.update(data)
+                except Exception:
+                    pass
+            for line in part_str.splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip()
+                    if k in ("issue", "issue_number"):
+                        try:
+                            v = int(v)
+                        except ValueError:
+                            pass
+                    res[k] = v
+        if "attempt_id" in res and ("issue" in res or "issue_number" in res):
+            if "issue" not in res and "issue_number" in res:
+                res["issue"] = res["issue_number"]
+            return res
+        return None
+
+    def index_attempt(self, *, issue_number: int, source_sha: str, attempt_id: str,
+                      fingerprint: str, issuer: str | None = None) -> str:
+        """Create-only SHA-authenticated attempt->issue index ref.
+
+        Binds attempt_id to issue_number, source_sha, fingerprint, and issuer login.
+        Fails on collision if already indexed with conflicting metadata.
+        """
+        key = self.attempt_key(attempt_id)
+        ref_name = "ef02/index/" + key
+
+        existing_sha = None
+        try:
+            current = self.api("GET", "/git/ref/heads/" + ref_name)
+            existing_sha = current.get("object", {}).get("sha")
+        except RemoteTransportError as exc:
+            if str(exc) != "GITHUB_HTTP_404":
+                raise
+
+        if existing_sha:
+            existing_commit = self.api("GET", "/git/commits/" + existing_sha)
+            parsed = self._parse_index_message(existing_commit.get("message", ""))
+            if (not parsed or
+                    parsed.get("attempt_id") != attempt_id or
+                    parsed.get("issue") != issue_number or
+                    parsed.get("source_sha") != source_sha or
+                    parsed.get("fingerprint") != fingerprint or
+                    (issuer and parsed.get("issuer") and parsed.get("issuer").casefold() != issuer.casefold()) or
+                    [p.get("sha") for p in existing_commit.get("parents", [])] != [source_sha]):
+                raise RemoteTransportError("WORK_LINEAGE_INDEX_COLLISION")
+            return "refs/heads/" + ref_name
+
+        source_commit = self.api("GET", "/git/commits/" + source_sha)
+        tree_sha = source_commit["tree"]["sha"]
+        payload = {
+            "attempt_id": attempt_id,
+            "issue": issue_number,
+            "source_sha": source_sha,
+            "fingerprint": fingerprint,
+            "issuer": issuer or ""
+        }
+        msg = (f"EF02 INDEX\n\nattempt_id={attempt_id}\nissue={issue_number}\nsource_sha={source_sha}"
+               f"\nfingerprint={fingerprint}\nissuer={issuer or ''}\n\n" + canonical(payload))
+        commit_obj = self.api("POST", "/git/commits", {
+            "message": msg,
+            "tree": tree_sha,
+            "parents": [source_sha]
+        })
+        try:
+            self._create_ref(ref_name, commit_obj["sha"])
+        except RemoteTransportError as exc:
+            if "422" in str(exc) or "ALREADY_EXISTS" in str(exc):
+                cur = self.api("GET", "/git/ref/heads/" + ref_name)
+                c_sha = cur.get("object", {}).get("sha")
+                c_commit = self.api("GET", "/git/commits/" + c_sha)
+                parsed = self._parse_index_message(c_commit.get("message", ""))
+                if (not parsed or
+                        parsed.get("attempt_id") != attempt_id or
+                        parsed.get("issue") != issue_number or
+                        parsed.get("source_sha") != source_sha or
+                        parsed.get("fingerprint") != fingerprint or
+                        [p.get("sha") for p in c_commit.get("parents", [])] != [source_sha]):
+                    raise RemoteTransportError("WORK_LINEAGE_INDEX_COLLISION") from exc
+            else:
+                raise
+        return "refs/heads/" + ref_name
 
     def _create_ref(self, ref: str, sha: str) -> None:
         self.api("POST", "/git/refs", {"ref": "refs/heads/" + ref, "sha": sha})
