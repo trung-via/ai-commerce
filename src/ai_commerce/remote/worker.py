@@ -5,13 +5,15 @@ import hashlib
 import json
 import os
 import re
+import secrets
+import threading
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
 
-from .transport import GitHubTransport, RemoteTransportError, CandidateIntegrityError
+from .transport import GitHubTransport, RemoteTransportError, CandidateIntegrityError, WorkOwner
 from .validation import fingerprint, check_source, approved_verification_plan, approved_acceptance_plan
 from .reuse import load_approved_candidates, approve_reuse
 from .candidate_policy import (
@@ -20,6 +22,7 @@ from .candidate_policy import (
 from ai_commerce.engineering.runner import (
     DEFAULT_MAX_REPAIR_ROUNDS, DEFAULT_ACTION_TIMEOUT_SECONDS,
     validate_max_repair_rounds, _snapshot, _provider_problem, _outside_scope,
+    owner_round_receipt,
 )
 from ai_commerce.engineering.git import git_argv, resolve_git_executable
 from ai_commerce.engineering.git_byte_consistency import (GitByteConsistencyError, checkout_diagnostics as _checkout_diagnostics)
@@ -181,13 +184,92 @@ def _classify_failed_executor(report: dict, evidence: Path) -> str:
         return problem[0]
     return "EXECUTOR_FAILED"
 
+class WorkOwnerBroker:
+    """Fence requests use existing EF01 stdin/stdout; no network or credentials.
+
+    Only the native EF01 process receives the random capability. The runner
+    consumes it before starting provider/verifier children. Requests are never
+    copied into logs. Parent loss/EOF denies further rounds.
+    """
+    PREFIX = "EF02_OWNER_FENCE_V1:"
+
+    def __init__(self, owner):
+        self.owner, self.token = owner, secrets.token_hex(32)
+        self.child = None
+        self.output, self.errors, self.threads = [], [], []
+
+    def fence(self, request):
+        stage = request.get("stage")
+        if (set(request) != ({"stage", "round", "attempt_id", "receipt", "token"}
+                if stage == "ROUND_VERIFIED" else {"stage", "round", "attempt_id", "token"}) or
+                stage not in ("PROVIDER_INTENT", "ROUND_VERIFIED") or
+                request["attempt_id"] != self.owner.identity["attempt_id"] or
+                not isinstance(request["token"], str) or
+                not secrets.compare_digest(request["token"], self.token)):
+            raise ValueError("WORK_FENCE_REQUEST_INVALID")
+        data = {"round": request["round"]}
+        if stage == "ROUND_VERIFIED":
+            data["receipt"] = request["receipt"]
+        self.owner.append(stage, **data)
+
+    def environment(self):
+        return {"AI_COMMERCE_EF02_OWNER_REQUIRED": "1",
+                "AI_COMMERCE_EF02_OWNER_ENDPOINT": "stdio-v1",
+                "AI_COMMERCE_EF02_OWNER_TOKEN": self.token}
+
+    def communicate(self, child, timeout):
+        if self.child is None:
+            self.child = child
+            def stdout():
+                while line := child.stdout.readline(2049):
+                    if line.startswith(self.PREFIX):
+                        try:
+                            if len(line) > 2048:
+                                raise ValueError("WORK_FENCE_REQUEST_INVALID")
+                            self.fence(json.loads(line[len(self.PREFIX):]))
+                            response = '{"status":"CONFIRMED"}\n'
+                        except Exception:
+                            response = '{"status":"UNKNOWN"}\n'
+                        try:
+                            child.stdin.write(response)
+                            child.stdin.flush()
+                        except OSError:
+                            break
+                    else:
+                        self.output.append(line)
+            def stderr():
+                while chunk := child.stderr.read(4096):
+                    self.errors.append(chunk)
+            self.threads = [threading.Thread(target=reader, daemon=True) for reader in (stdout, stderr)]
+            for thread in self.threads:
+                thread.start()
+        child.wait(timeout=timeout)
+        for thread in self.threads:
+            thread.join(timeout=5)
+        if any(thread.is_alive() for thread in self.threads):
+            raise RemoteTransportError("WORK_FENCE_DRAIN_UNKNOWN")
+        return "".join(self.output), "".join(self.errors)
+
+    def close(self):
+        if self.child is not None:
+            try:
+                self.child.stdin.close()
+            except OSError:
+                self.owner.uncertain = True
+
+
 class LocalBatchWorker:
     def __init__(self, *, checkout: Path, batch: dict, profiles: dict[str, list[str]],
-                 github: GitHubTransport, root: Path | None = None, git_executable: str | None = None):
+                 github: GitHubTransport, root: Path | None = None, git_executable: str | None = None,
+                 issue_number: int = 0, issuer_login: str | None = None):
         self.checkout = checkout.resolve()
         self.batch = batch
         self.profiles = profiles
         self.github = github
+        self.issue_number = issue_number
+        if issuer_login is not None and not GitHubTransport._valid_issuer_login(issuer_login):
+            raise RemoteTransportError("WORK_INDEX_ISSUER_INVALID")
+        self.issuer_login = issuer_login
         configured_git = git_executable if git_executable is not None else os.environ.get("AI_COMMERCE_GIT_EXECUTABLE")
         self.git_executable = resolve_git_executable(configured_git) if configured_git is not None else None
         self.root = (root or (self.checkout / ".local" / "ef02" / batch["batch_id"])).resolve()
@@ -196,6 +278,15 @@ class LocalBatchWorker:
             self.checkout / ".github" / "ef02" / "approved-candidates.v1.json")
         check_source(self.checkout, batch["source_sha"],
                      **({"git_executable": self.git_executable} if self.git_executable is not None else {}))
+
+    def _acquire_owner(self, action):
+        identity = WorkOwner.identity(self.github, self.issue_number, self.batch, action)
+        return WorkOwner.acquire(self.github, identity)
+
+    def reconcile_action(self, action: dict) -> dict:
+        submitted = {k: v for k, v in action.items() if k != "resolved_dependencies"}
+        identity = WorkOwner.identity(self.github, self.issue_number, self.batch, submitted)
+        return WorkOwner(self.github, identity, "").reconcile()
 
     def execute_action(self, action: dict) -> dict:
         """One independent action; claim precedes any executor invocation."""
@@ -217,7 +308,18 @@ class LocalBatchWorker:
                    "depends_on": action["depends_on"],
                    "dependency_semantics": "PINNED_DEPENDENCY_TREE_COMPOSITION",
                    "evidence_path": str(path), "executor_invoked": False}
+        owner = broker = None
         def finish():
+            nonlocal broker
+            if broker is not None:
+                broker.close()
+                broker = None
+            if owner is not None and outcome.get("status") not in ("CANDIDATE_READY", REVIEW_STATUS):
+                try:
+                    owner.append("UNKNOWN")
+                except Exception:
+                    pass  # Durable last intent still denies replay; never rollback.
+            outcome["replay_authorized"] = False
             diagnosis = diagnose_failure(outcome)
             outcome["failure_diagnosis"] = diagnosis.payload() if diagnosis else None
             _write_json(path / "action_result.json", outcome)
@@ -262,12 +364,44 @@ class LocalBatchWorker:
                                reused=True, reused_verified=False)
             return finish()
         try:
+            explicit_issuer = getattr(self, "issuer_login", None)
+            if explicit_issuer is not None and not GitHubTransport._valid_issuer_login(explicit_issuer):
+                raise RemoteTransportError("WORK_INDEX_ISSUER_INVALID")
+            issue_num = getattr(self, "issue_number", 0)
+            if issue_num > 0:
+                if not hasattr(self.github, "index_attempt"):
+                    raise RemoteTransportError("WORK_INDEX_TRANSPORT_UNAVAILABLE")
+                outcome["attempt_index_ref"] = WorkOwner.index_ingress(
+                    self.github, issue_num, self.batch, submitted_action, issuer=explicit_issuer
+                )
+            owner = self._acquire_owner(submitted_action)
+            owner_issuer = owner.identity.get("issuer_login")
+            if explicit_issuer is not None and owner_issuer is not None:
+                if owner_issuer.casefold() != explicit_issuer.casefold():
+                    raise RemoteTransportError("WORK_LINEAGE_INDEX_ISSUER_MISMATCH")
+            outcome["work_owner"] = {
+                "work_key": owner.identity["work_key"],
+                "generation": owner.generation,
+                "root_issue": owner.identity.get("root_issue", issue_num),
+                "current_issue": issue_num,
+                "lineage_gap": None if owner.identity.get("lineage") or owner.generation >= 2 else "V1_HAS_NO_TRUSTED_CROSS_ISSUE_REPAIR_OR_TRANSFER",
+            }
+        except Exception as exc:
+            err_code = str(exc)[:160] if isinstance(exc, RemoteTransportError) and str(exc) else type(exc).__name__
+            status = ("DUPLICATE_CLAIM_NO_REEXECUTION" if err_code in (
+                "WORK_OWNER_EXISTS_RECONCILE_ONLY", "WORK_OWNER_TRANSFER_CONFLICT", "WORK_OWNER_PREDECESSOR_UNRESOLVED"
+            ) else "HOLD_WORK_OWNER")
+            outcome.update(status=status, error_code=err_code, diagnostic=str(exc)[:160], replay_authorized=False)
+            return finish()
+        try:
+            owner.assert_current()
             claim = self.github.claim(source_sha=source, attempt_id=attempt_id, fingerprint=fp)
             outcome["claim_status"] = claim
             if claim != "CLAIMED":
                 outcome["status"] = claim
                 outcome["error_code"] = claim
                 return finish()
+            owner.append("CLAIMED")
         except Exception as exc:
             outcome.update(status="CLAIM_UNAVAILABLE", error_code=type(exc).__name__,
                            diagnostic=str(exc))
@@ -276,6 +410,7 @@ class LocalBatchWorker:
         try:
             if any(not candidate_accepted(d) for d in action.get("resolved_dependencies", [])):
                 raise RemoteTransportError("DEPENDENCY_BRAIN_SCOPE_REVIEW_REQUIRED")
+            owner.assert_current()
             merged = self.github.integrated_source(
                 source_sha=source, attempt_id=attempt_id,
                 dependencies=action.get("resolved_dependencies", []))
@@ -423,15 +558,25 @@ class LocalBatchWorker:
                                replay_authorized=False)
                 return finish()
             outcome["pre_spawn_remote_ref"] = remote_stage
+            owner.append("SPAWN_INTENT")
             _write_json(path / "invocation_remote_confirmed.json",
                         {**progress, "stage": "PRESPAWN_REMOTE_REF_CONFIRMED",
                          "pre_spawn_remote_ref": remote_stage,
                          "remote_confirmation_observed_at": time.time()})
             # Never pass GitHub credentials into untrusted model/verification process.
-            child = subprocess.Popen(argv, cwd=self.checkout, env=_safe_child_env(self.checkout),
-                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            owner.assert_current()
+            broker = WorkOwnerBroker(owner)
+            child_env = _safe_child_env(self.checkout)
+            child_env.update(broker.environment())
+            child = subprocess.Popen(argv, cwd=self.checkout, env=child_env,
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                     encoding="utf-8", errors="replace")
             outcome.update(executor_invoked=True, process_id=child.pid,
                            process_started_at=started)
+            try:
+                owner.append("CHILD_OBSERVED", pid=child.pid)
+            except Exception:
+                outcome["work_owner_child_observation"] = "UNKNOWN"
             # This records an EF01 process PID, not proof that EF01 launched or
             # completed a provider invocation. Keep the immutable pre-spawn
             # boundary alongside it for reconciliation after parent termination.
@@ -444,6 +589,7 @@ class LocalBatchWorker:
             # If GitHub confirmation fails, keep running/collecting the child
             # result; never interpret absence as permission to replay.
             try:
+                owner.assert_current()
                 spawned_ref = self.github.spawned_checkpoint(
                     source_sha=source, attempt_id=attempt_id,
                     fingerprint=fp, child_pid=child.pid)
@@ -456,14 +602,15 @@ class LocalBatchWorker:
                              "provider_invocation_proven": False,
                              "remote_confirmation_observed_at": time.time()})
             except Exception as exc:
+                owner.uncertain = True
                 outcome["spawned_remote_checkpoint"] = "READ_UNKNOWN"
                 outcome["spawned_remote_error_type"] = type(exc).__name__
             timed_out = False
             try:
-                stdout, stderr = child.communicate(timeout=7500)
+                stdout, stderr = broker.communicate(child, timeout=7500)
             except subprocess.TimeoutExpired:
                 child.kill()
-                stdout, stderr = child.communicate()
+                stdout, stderr = broker.communicate(child, timeout=30)
                 timed_out = True
                 outcome.update(status="EXECUTION_UNKNOWN",
                                error_code="EF01_PROCESS_TIMEOUT")
@@ -620,9 +767,30 @@ class LocalBatchWorker:
             })
             outcome.update(candidate_evidence=evidence, candidate_evidence_sha256=evidence_digest(evidence))
             try:
+                broker.close()
+                broker = None
+                chain = owner.assert_current()
+                rounds = [r for r in chain if r.get("generation") == owner.generation and r["stage"] == "ROUND_VERIFIED"]
+                invocations = report.get("invocations", [])
+                if (not rounds or len(rounds) != len(invocations) or
+                        any(inv.get("work_id") != self.batch["batch_id"] + ":" + aid or
+                            inv.get("attempt_id") != attempt_id or
+                            inv.get("source_base_sha") != effective or
+                            inv.get("invocation_id") != f"{attempt_id}:invocation-{index:03d}" or
+                            inv.get("repair_round") != index or
+                            inv.get("provider_return_determinate") is not True or
+                            inv.get("verify_completed") is not True
+                            for index, inv in enumerate(invocations)) or
+                        any(r["data"]["receipt"] != owner_round_receipt(inv)
+                            for r, inv in zip(rounds, invocations))):
+                    raise CandidateIntegrityError("WORK_PROVIDER_RECEIPT_MISMATCH")
+                owner.append("RESULT_VERIFIED", receipt=evidence_digest(evidence))
+                owner.append("PUBLISH_INTENT", receipt=evidence_digest(evidence))
                 candidate = self.github.candidate(source_sha=effective, attempt_id=attempt_id,
                                                   workspace=worktree, paths=changed,
-                                                  expected_hashes=hashes, evidence=evidence)
+                                                  expected_hashes=hashes, evidence=evidence, owner=owner)
+                owner.append("PUBLISHED", receipt=evidence_digest(evidence),
+                             candidate=WorkOwner.digest(candidate["candidate_sha"]))
             except GitByteConsistencyError as exc:
                 outcome.update(status="CANDIDATE_INTEGRITY_FAILED",
                                error_code=str(exc).split(":", 1)[0], diagnostic=str(exc))
