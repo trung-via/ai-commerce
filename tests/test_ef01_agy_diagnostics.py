@@ -833,6 +833,9 @@ def test_cleanup_zero_budget_holds_immediately(tmp_path):
     -0.001,
     adapters.AGY_CLEANUP_MAX_SECONDS + 0.1,
     10**9,
+    10**400,  # Regression: math.isnan(huge_int) formerly raised OverflowError.
+    -(10**400),
+    10**1000,
     "30",
     None,
     [],
@@ -842,6 +845,7 @@ def test_cleanup_rejects_nonfinite_and_invalid_timeout(tmp_path, invalid_timeout
     result = adapters.agy_remove_owned_tree(tree, tmp_path, identity, parent, timeout_seconds=invalid_timeout)
     assert result["status"] == "HOLD"
     assert result["reason"] == "AGY_SCRATCH_CLEANUP_TIMEOUT_INVALID"
+    assert result["attempts"] == 0 and result["diagnostics"] == []
     assert tree.exists()
 
 
