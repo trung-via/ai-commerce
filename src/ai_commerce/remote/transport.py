@@ -725,7 +725,11 @@ class WorkOwner:
                         raise RemoteTransportError("LEGACY_MIGRATION_UNPROVEN")
                     raise RemoteTransportError("WORK_JOURNAL_INTEGRITY_MISMATCH")
 
-            parent = prior["sha"] if prior else (matched_pred["source_sha"] if is_legacy else self.identity["source_sha"])
+            # A successor's source is not the immutable genesis parent. Lineage
+            # was authenticated by identity(); retain that root source binding.
+            genesis_source = (self.identity["lineage"][-1]["source_sha"]
+                              if self.identity.get("lineage") else self.identity["source_sha"])
+            parent = prior["sha"] if prior else (matched_pred["source_sha"] if is_legacy else genesis_source)
 
             if (set(record) != {"kind", "version", "identity", "generation", "fence",
                     "sequence", "previous", "stage", "data"} or
@@ -936,6 +940,381 @@ class WorkOwner:
                 raise RemoteTransportError("WORK_TERMINAL_RECEIPT_MISMATCH")
             result.update(status="RECONCILED_VERIFIED_TERMINAL", candidate_sha=sha)
         return result
+
+
+class AuditGate(str, Enum):
+    VERIFIED = "VERIFIED"
+    CONTRADICTED = "CONTRADICTED"
+    UNKNOWN = "UNKNOWN"
+
+
+class AuditProviderStatus(str, Enum):
+    UNOBSERVED = "UNOBSERVED"
+    QUOTA_EXHAUSTED = "QUOTA_EXHAUSTED"
+
+
+@dataclass(frozen=True)
+class WorkOwnerAuditDiagnostics:
+    """Untrusted local hints can only add a HOLD, never establish authority."""
+    provider_status: AuditProviderStatus = AuditProviderStatus.UNOBSERVED
+    scratch_dirty: bool | None = None
+    cleanup_completed: bool | None = None
+    ef01_report_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class WorkOwnerAuditProvenance:
+    ref: str
+    sha: str
+
+
+@dataclass(frozen=True)
+class WorkOwnerAuditReport:
+    source_gate: AuditGate
+    code: str
+    stage: str
+    generation: int | None
+    candidate_sha: str | None
+    provenance: tuple[WorkOwnerAuditProvenance, ...]
+    reads: int
+    provider_status: AuditProviderStatus
+
+    def payload(self) -> dict:
+        # Source authentication does not authenticate native effects, cleanup,
+        # an EF01 signer, or a new owner. No writable witness contract exists.
+        return {"kind": "WorkOwnerReadOnlyAudit.v1", "status": "HOLD_UNKNOWN_EFFECT",
+                "gate": (AuditGate.CONTRADICTED if self.source_gate is AuditGate.CONTRADICTED
+                         else AuditGate.UNKNOWN).value,
+                "source_gate": self.source_gate.value, "code": self.code,
+                "stage": self.stage, "generation": self.generation,
+                "candidate_sha": self.candidate_sha,
+                "provenance": [{"ref": p.ref, "sha": p.sha} for p in self.provenance],
+                "reads": self.reads, "provider_status": self.provider_status.value,
+                "owner_witness_gate": AuditGate.UNKNOWN.value,
+                "writable_contract": "INACTIVE", "replay_authorized": False,
+                "publication_authorized": False, "proves_current_mt01_pass": False}
+
+
+class _AuditUnknown(Exception):
+    pass
+
+
+class _AuditContradicted(Exception):
+    pass
+
+
+class _WorkOwnerAuditReads:
+    """GET-only capability with a cumulative budget, including strict readers.
+
+    Mutable Issue/ref observations are re-read before a successful report. This
+    detects observed races, not atomic absence or a future publication boundary.
+    Immutable commits are cached; missing refs are also checked again. No token,
+    request body, exception detail, or Issue prose enters the report.
+    """
+    MAX_READS = 256
+    MAX_BYTES = 4 * 1024 * 1024
+
+    def __init__(self, github, budget):
+        if type(budget) is not int or not 1 <= budget <= self.MAX_READS:
+            raise _AuditUnknown("READ_BUDGET_INVALID")
+        self.repo = github.repo
+        if not isinstance(self.repo, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", self.repo):
+            raise _AuditUnknown("REPOSITORY_INVALID")
+        self._github, self.budget = github, budget
+        self.reads, self.bytes = 0, 0
+        self.deadline = time.monotonic() + 60
+        self.commits, self.mutable = {}, {}
+        self.provenance = set()
+
+    def attempt_key(self, attempt_id):
+        return GitHubTransport.attempt_key(self, attempt_id)
+
+    @staticmethod
+    def sha(value):
+        return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) is not None
+
+    def _ref(self, value, expected):
+        if (not isinstance(value, dict) or value.get("ref") != expected or
+                not isinstance(value.get("object"), dict) or
+                not self.sha(value["object"].get("sha")) or
+                value["object"].get("type", "commit") != "commit"):
+            raise _AuditContradicted("REF_IDENTITY_MISMATCH")
+        self.provenance.add(WorkOwnerAuditProvenance(expected, value["object"]["sha"]))
+
+    def api(self, method, path, data=None):
+        if method != "GET" or data is not None:
+            raise _AuditContradicted("READ_ONLY_BOUNDARY")
+        if not isinstance(path, str) or not re.fullmatch(
+                r"/issues(?:/[1-9][0-9]*|\?state=all&per_page=100&page=[1-9][0-9]*)|"
+                r"/git/commits/[0-9a-f]{40}|"
+                r"/git/(?:ref|matching-refs)/heads/ef02/[a-z-]+/[0-9a-f]{32,64}(?:/[0-9]{3})?/?", path):
+            raise _AuditContradicted("READ_ROUTE_INVALID")
+        if path in self.commits:
+            return json.loads(self.commits[path])
+        if self.reads >= self.budget or time.monotonic() >= self.deadline:
+            raise _AuditUnknown("READ_BUDGET_EXHAUSTED")
+        self.reads += 1
+        try:
+            value = self._github.api("GET", path)
+        except RemoteTransportError as exc:
+            if exc.http_status == 404 or str(exc) == "GITHUB_HTTP_404":
+                self.mutable[path] = None
+            raise
+        if isinstance(value, list) and len(value) > (WorkOwner.LIMIT if "/git/" in path else 100):
+            raise _AuditContradicted("RESPONSE_BOUND_INVALID")
+        encoded = canonical(value)
+        self.bytes += len(encoded.encode("utf-8"))
+        if len(encoded) > 262144 or self.bytes > self.MAX_BYTES:
+            raise _AuditUnknown("READ_SIZE_BUDGET_EXHAUSTED")
+        if path.startswith("/git/ref/"):
+            self._ref(value, "refs/" + path.removeprefix("/git/ref/"))
+        elif path.startswith("/git/matching-refs/"):
+            prefix = "refs/" + path.removeprefix("/git/matching-refs/")
+            if not isinstance(value, list):
+                raise _AuditContradicted("JOURNAL_REFS_INVALID")
+            names = []
+            for ref in value:
+                name = ref.get("ref") if isinstance(ref, dict) else None
+                if not isinstance(name, str) or not re.fullmatch(re.escape(prefix) + r"[0-9]{3}", name):
+                    raise _AuditContradicted("JOURNAL_REF_NAMESPACE_MISMATCH")
+                self._ref(ref, name)
+                names.append(name)
+            if len(names) != len(set(names)):
+                raise _AuditContradicted("JOURNAL_REF_DUPLICATE")
+        elif path.startswith("/git/commits/"):
+            sha = path.rsplit("/", 1)[1]
+            if (not isinstance(value, dict) or value.get("sha", sha) != sha or
+                    not isinstance(value.get("tree"), dict) or not self.sha(value["tree"].get("sha")) or
+                    not isinstance(value.get("parents"), list) or
+                    any(not isinstance(p, dict) or not self.sha(p.get("sha")) for p in value["parents"])):
+                raise _AuditContradicted("COMMIT_IDENTITY_INVALID")
+            self.commits[path] = encoded
+        if path not in self.commits:
+            previous = self.mutable.get(path, encoded)
+            if previous != encoded:
+                raise _AuditUnknown("CONCURRENT_SOURCE_CHANGE")
+            self.mutable[path] = encoded
+        return value
+
+    def optional_ref(self, namespace, key):
+        try:
+            return self.api("GET", f"/git/ref/heads/ef02/{namespace}/{key}")
+        except RemoteTransportError as exc:
+            if exc.http_status == 404 or str(exc) == "GITHUB_HTTP_404":
+                return None
+            raise
+
+    def confirm(self):
+        for path, original in tuple(self.mutable.items()):
+            try:
+                current = canonical(self.api("GET", path))
+            except RemoteTransportError as exc:
+                if exc.http_status != 404 and str(exc) != "GITHUB_HTTP_404":
+                    raise
+                current = None
+            if current != original:
+                raise _AuditUnknown("CONCURRENT_SOURCE_CHANGE")
+
+
+class WorkOwnerAudit:
+    """Bounded source forensics, never reconciliation or a terminal transfer.
+
+    trusted_issuer comes from the owner's validated ingress configuration, not
+    the Issue or model. A VERIFIED source gate identifies an authenticated
+    PUBLISHED Git candidate only. Native receipt/signer/owner witness remains
+    UNKNOWN. Any future writable contract is INACTIVE and requires independent
+    owner authentication at the actual publication boundary. This class cannot
+    acquire, append, transfer, replay, or publish a WorkOwner.
+    """
+    @classmethod
+    def run(cls, github, *, issue_number, batch, action, trusted_issuer,
+            read_budget=192, diagnostics=None) -> WorkOwnerAuditReport:
+        reads = None
+        stage, generation, candidate_sha = "UNOBSERVED", None, None
+        provider = AuditProviderStatus.UNOBSERVED
+        try:
+            diagnostics = diagnostics or WorkOwnerAuditDiagnostics()
+            if (not isinstance(diagnostics, WorkOwnerAuditDiagnostics) or
+                    not isinstance(diagnostics.provider_status, AuditProviderStatus) or
+                    any(v is not None and type(v) is not bool for v in
+                        (diagnostics.scratch_dirty, diagnostics.cleanup_completed)) or
+                    (diagnostics.ef01_report_sha256 is not None and not re.fullmatch(
+                        r"[0-9a-f]{64}", diagnostics.ef01_report_sha256))):
+                raise _AuditUnknown("DIAGNOSTIC_HINT_INVALID")
+            provider = diagnostics.provider_status
+            if not GitHubTransport._valid_issuer_login(trusted_issuer):
+                raise _AuditUnknown("TRUSTED_ISSUER_REQUIRED")
+            reads = _WorkOwnerAuditReads(github, read_budget)
+            identity = WorkOwner.identity(reads, issue_number, batch, action)
+            contexts = []
+            for pred in reversed(identity["lineage"]):
+                packet, submitted = cls._ingress(reads, pred["issue"], pred["attempt_id"], trusted_issuer)
+                contexts.append((pred["issue"], packet, submitted, pred["fingerprint"]))
+            packet, submitted = cls._ingress(reads, issue_number, action["attempt_id"], trusted_issuer)
+            contexts.append((issue_number, packet, submitted, identity["fingerprint"]))
+            # Retain the existing strict transition reader; no permissive second
+            # journal decoder or downgrade around LEGACY_MIGRATION_UNPROVEN.
+            owner = WorkOwner(reads, identity, "")
+            chain = owner.read()
+            if not chain:
+                raise _AuditUnknown("JOURNAL_UNOBSERVED")
+            stage, generation = chain[-1]["stage"], chain[-1]["generation"]
+            if generation > identity["generation"]:
+                raise _AuditContradicted("STALE_GENERATION")
+            if generation != identity["generation"]:
+                raise _AuditUnknown("GENERATION_NOT_OBSERVED")
+            root_source = reads.api("GET", "/git/commits/" + contexts[0][1]["source_sha"])
+            first = reads.api("GET", "/git/commits/" + chain[0]["sha"])
+            if first["tree"] != root_source["tree"]:
+                raise _AuditContradicted("GENESIS_TREE_MISMATCH")
+            for gen, (number, packet, submitted, fp) in enumerate(contexts, 1):
+                records = [r for r in chain if r["generation"] == gen]
+                if not records:
+                    raise _AuditUnknown("GENERATION_NOT_OBSERVED")
+                calculated = hashlib.sha256(json.dumps({"batch_id": packet["batch_id"],
+                    "source_sha": packet["source_sha"], "action": submitted}, sort_keys=True,
+                    separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+                if calculated != fp:
+                    raise _AuditContradicted("ACTION_FINGERPRINT_MISMATCH")
+                genesis = records[0]
+                if gen > 1 and (genesis["data"].get("predecessor_tip") != chain[genesis["sequence"] - 1]["digest"] or
+                        genesis["data"].get("repair_of") != str(submitted.get("repair_of"))):
+                    raise _AuditContradicted("GENERATION_TRANSFER_MISMATCH")
+                if genesis["identity"] == owner.base_identity:
+                    if (genesis["data"].get("attempt_id") != submitted["attempt_id"] or
+                            genesis["data"].get("issue") != number):
+                        raise _AuditContradicted("GENERATION_INGRESS_MISMATCH")
+                else:
+                    legacy_identity = {"repo": reads.repo, "issue": number, "action_id": submitted["action_id"],
+                        "work_key": WorkOwner.digest({"repo": reads.repo, "issue": number,
+                                                       "action_id": submitted["action_id"]}),
+                        "source_sha": packet["source_sha"], "batch_id": packet["batch_id"],
+                        "attempt_id": submitted["attempt_id"], "fingerprint": fp}
+                    if any(r["identity"] != legacy_identity for r in records):
+                        raise _AuditContradicted("LEGACY_INGRESS_MISMATCH")
+                # Legacy full identities were already authenticated by read().
+                cls._boundaries(reads, number, packet, submitted, fp, trusted_issuer, records)
+                intents = [r for r in records if r["stage"] == "PROVIDER_INTENT"]
+                completed = [r for r in records if r["stage"] == "ROUND_VERIFIED"]
+                if len(intents) != len(completed):
+                    raise _AuditUnknown("PROVIDER_OUTCOME_UNKNOWN")
+                terminal = records[-1]
+                candidate = cls._candidate(reads, packet, submitted, fp, terminal,
+                    diagnostics if gen == generation else WorkOwnerAuditDiagnostics())
+                if gen == generation:
+                    candidate_sha = candidate
+            reads.confirm()
+            if diagnostics.cleanup_completed is False:
+                raise _AuditUnknown("CLEANUP_UNCONFIRMED")
+            if diagnostics.scratch_dirty is True or provider is AuditProviderStatus.QUOTA_EXHAUSTED:
+                raise _AuditUnknown("LOCAL_EFFECT_UNCONFIRMED")
+            gate, code = AuditGate.VERIFIED, "PUBLISHED_SOURCE_AUTHENTICATED_OWNER_WITNESS_MISSING"
+        except _AuditContradicted as exc:
+            gate, code = AuditGate.CONTRADICTED, str(exc)
+        except _AuditUnknown as exc:
+            gate, code = AuditGate.UNKNOWN, str(exc)
+        except RemoteTransportError as exc:
+            # Never persist arbitrary transport text, even from a fake reader.
+            if (exc.http_status is not None or str(exc).startswith("GITHUB_") or
+                    str(exc) == "WORK_RECONCILE_READ_BUDGET_EXHAUSTED"):
+                gate, code = AuditGate.UNKNOWN, "REMOTE_READ_UNCONFIRMED"
+            else:
+                gate, code = AuditGate.CONTRADICTED, "STRICT_WORKOWNER_REJECTED"
+        except Exception:
+            gate, code = AuditGate.UNKNOWN, "MALFORMED_OR_UNAVAILABLE_SOURCE"
+        return WorkOwnerAuditReport(gate, code, stage, generation, candidate_sha,
+            tuple(sorted(reads.provenance, key=lambda p: (p.ref, p.sha))) if reads else (),
+            reads.reads if reads else 0, provider)
+
+    @staticmethod
+    def _ingress(reads, number, attempt_id, issuer):
+        issue = reads.api("GET", f"/issues/{number}")
+        if (not isinstance(issue, dict) or issue.get("number") != number or "pull_request" in issue or
+                not isinstance(issue.get("user"), dict) or
+                not isinstance(issue["user"].get("login"), str) or
+                issue["user"]["login"].casefold() != issuer.casefold()):
+            raise _AuditContradicted("ISSUE_ISSUER_MISMATCH")
+        packet = json.loads(issue["body"])
+        actions = [a for a in packet["actions"] if a.get("attempt_id") == attempt_id]
+        if len(actions) != 1 or "resolved_dependencies" in actions[0]:
+            raise _AuditContradicted("ATTEMPT_IDENTITY_AMBIGUOUS")
+        return packet, actions[0]
+
+    @staticmethod
+    def _boundaries(reads, number, packet, action, fp, issuer, records):
+        key = reads.attempt_key(action["attempt_id"])
+        source = reads.api("GET", "/git/commits/" + packet["source_sha"])
+        index = reads.optional_ref("index", key)
+        if index is None:
+            index = reads.optional_ref("indices", key)
+        if index is None:
+            raise _AuditUnknown("INDEX_UNOBSERVED")
+        index_commit = reads.api("GET", "/git/commits/" + index["object"]["sha"])
+        GitHubTransport._verify_index_commit_object(reads._github, index_commit,
+            attempt_id=action["attempt_id"], issue_number=number,
+            source_sha=packet["source_sha"], fingerprint=fp, expected_issuer=issuer)
+        if index_commit["tree"] != source["tree"]:
+            raise _AuditContradicted("INDEX_TREE_MISMATCH")
+        stages = {r["stage"] for r in records}
+        if "PUBLISHED" in stages and "CHILD_OBSERVED" not in stages:
+            raise _AuditUnknown("CHILD_WITNESS_UNOBSERVED")
+        parent = packet["source_sha"]
+        for namespace, marker, needed in (("claims", "CLAIM", "CLAIMED" in stages),
+                ("pre-spawn", "PRESPAWN", "SPAWN_INTENT" in stages),
+                ("spawned", "SPAWNED", "CHILD_OBSERVED" in stages)):
+            ref = reads.optional_ref(namespace, key)
+            if ref is None:
+                if needed:
+                    raise _AuditUnknown("BOUNDARY_WITNESS_UNOBSERVED")
+                continue
+            commit = reads.api("GET", "/git/commits/" + ref["object"]["sha"])
+            message = f"EF02 {marker}\n\nfingerprint={fp}\nattempt_id={action['attempt_id']}"
+            if namespace == "spawned":
+                observed = [r for r in records if r["stage"] == "CHILD_OBSERVED"]
+                if len(observed) != 1:
+                    raise _AuditUnknown("CHILD_WITNESS_UNOBSERVED")
+                message += "\nchild_pid=" + str(observed[0]["data"]["pid"])
+            if (commit.get("message") != message or
+                    [p["sha"] for p in commit["parents"]] != [parent] or
+                    commit["tree"] != source["tree"]):
+                raise _AuditContradicted("BOUNDARY_IDENTITY_MISMATCH")
+            parent = ref["object"]["sha"]
+
+    @staticmethod
+    def _candidate(reads, packet, action, fp, terminal, diagnostics):
+        ref = reads.optional_ref("candidate", reads.attempt_key(action["attempt_id"]))
+        if ref is None:
+            raise _AuditUnknown("CANDIDATE_UNOBSERVED_NOT_EFFECT_ABSENCE")
+        sha = ref["object"]["sha"]
+        commit = reads.api("GET", "/git/commits/" + sha)
+        try:
+            proof = commit_evidence(commit.get("message", ""))
+        except ValueError:
+            raise _AuditContradicted("CANDIDATE_EVIDENCE_INVALID") from None
+        if proof is None:
+            raise _AuditUnknown("TERMINAL_EVIDENCE_UNOBSERVED")
+        if (proof["source_sha"] != packet["source_sha"] or proof["fingerprint"] != fp or
+                proof["attempt_id"] != action["attempt_id"] or proof["action_id"] != action["action_id"] or
+                proof["allowed_paths"] != action["allowed_paths"] or
+                proof["verification"]["profile"] != action["verification_profile"] or
+                any(proof["provenance"][k] != action[k] for k in ("executor", "model", "effort")) or
+                [p["sha"] for p in commit["parents"]] != [proof["effective_source_sha"]]):
+            raise _AuditContradicted("CANDIDATE_IDENTITY_MISMATCH")
+        if (diagnostics.ef01_report_sha256 is not None and
+                proof["verification"]["report_sha256"] != diagnostics.ef01_report_sha256):
+            raise _AuditContradicted("EF01_RECEIPT_CONTRADICTED")
+        if proof["provenance"]["dependency_candidates"] or action.get("depends_on"):
+            raise _AuditUnknown("DEPENDENCY_SOURCE_WITNESS_UNOBSERVED")
+        if proof["effective_source_sha"] != packet["source_sha"]:
+            raise _AuditContradicted("CANDIDATE_PARENT_MISMATCH")
+        if terminal["stage"] != "PUBLISHED":
+            raise _AuditUnknown("PUBLISHED_TERMINAL_UNOBSERVED")
+        if terminal["data"].get("attempt_id", action["attempt_id"]) != action["attempt_id"]:
+            raise _AuditContradicted("TERMINAL_ATTEMPT_MISMATCH")
+        if (terminal["data"].get("candidate") != WorkOwner.digest(sha) or
+                terminal["data"].get("receipt") != evidence_digest(proof)):
+            raise _AuditContradicted("TERMINAL_RECEIPT_MISMATCH")
+        return sha
 
 
 class GitHubTransport:

@@ -13,7 +13,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from .transport import GitHubTransport, RemoteTransportError, CandidateIntegrityError, WorkOwner
+from .transport import GitHubTransport, RemoteTransportError, CandidateIntegrityError, WorkOwner, WorkOwnerAudit
 from .validation import fingerprint, check_source, approved_verification_plan, approved_acceptance_plan
 from .reuse import load_approved_candidates, approve_reuse
 from .candidate_policy import (
@@ -287,6 +287,13 @@ class LocalBatchWorker:
         submitted = {k: v for k, v in action.items() if k != "resolved_dependencies"}
         identity = WorkOwner.identity(self.github, self.issue_number, self.batch, submitted)
         return WorkOwner(self.github, identity, "").reconcile()
+
+    def audit_action(self, action: dict, *, read_budget=192, diagnostics=None) -> dict:
+        """Explicit source-only entrypoint; never routes through execute/claim."""
+        submitted = {k: v for k, v in action.items() if k != "resolved_dependencies"}
+        return WorkOwnerAudit.run(self.github, issue_number=self.issue_number,
+            batch=self.batch, action=submitted, trusted_issuer=self.issuer_login,
+            read_budget=read_budget, diagnostics=diagnostics).payload()
 
     def execute_action(self, action: dict) -> dict:
         """One independent action; claim precedes any executor invocation."""
