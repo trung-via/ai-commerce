@@ -288,12 +288,16 @@ class LocalBatchWorker:
         identity = WorkOwner.identity(self.github, self.issue_number, self.batch, submitted)
         return WorkOwner(self.github, identity, "").reconcile()
 
-    def audit_action(self, action: dict, *, read_budget=192, diagnostics=None) -> dict:
+    def audit_action(self, action: dict, *, read_budget=192, diagnostics=None,
+            effect_witness=None, witness_enrollment=None, witness_context=None,
+            witness_verifier=None, source_contract_fixture=False) -> dict:
         """Explicit source-only entrypoint; never routes through execute/claim."""
         submitted = {k: v for k, v in action.items() if k != "resolved_dependencies"}
         return WorkOwnerAudit.run(self.github, issue_number=self.issue_number,
             batch=self.batch, action=submitted, trusted_issuer=self.issuer_login,
-            read_budget=read_budget, diagnostics=diagnostics).payload()
+            read_budget=read_budget, diagnostics=diagnostics, effect_witness=effect_witness,
+            witness_enrollment=witness_enrollment, witness_context=witness_context,
+            witness_verifier=witness_verifier, source_contract_fixture=source_contract_fixture).payload()
 
     def execute_action(self, action: dict) -> dict:
         """One independent action; claim precedes any executor invocation."""

@@ -6,9 +6,11 @@ import json
 import os
 import re
 import secrets
+import subprocess
+import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import Enum
 from http.client import HTTPException
 from pathlib import Path
@@ -942,6 +944,362 @@ class WorkOwner:
         return result
 
 
+class _EffectDenied(Exception):
+    pass
+
+
+def _effect_deny(code):
+    raise _EffectDenied(code)
+
+
+def _effect_canonical(value):
+    # Same closed canonical ASCII JSON wire format as HostOps offline signatures,
+    # without a runtime dependency on that independently registered owner.
+    def walk(v):
+        if v is None or type(v) in (str, bool):
+            return
+        if type(v) is int and abs(v) <= 2**53 - 1:
+            return
+        if type(v) is list:
+            for item in v:
+                walk(item)
+            return
+        if type(v) is dict and all(type(k) is str for k in v):
+            for item in v.values():
+                walk(item)
+            return
+        _effect_deny("NON_CANONICAL_TYPE")
+    walk(value)
+    return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")
+
+
+def _effect_decode(raw, *, limit=32768):
+    if type(raw) is not bytes or not 0 < len(raw) <= limit:
+        _effect_deny("WIRE_LIMIT")
+    def pairs(items):
+        value = {}
+        for k, v in items:
+            if k in value:
+                _effect_deny("DUPLICATE_KEY")
+            value[k] = v
+        return value
+    value = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs)
+    _effect_canonical(value)
+    return value
+
+
+def _effect_digest(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _effect_shape(value, keys):
+    if type(value) is not dict or set(value) != set(keys.split()):
+        _effect_deny("BAD_SHAPE")
+
+
+def _effect_sha(value, size=64):
+    if type(value) is not str or not re.fullmatch("[0-9a-f]{" + str(size) + "}", value):
+        _effect_deny("BAD_HASH")
+
+
+def _effect_integer(value, low, high):
+    if type(value) is not int or not low <= value <= high:
+        _effect_deny("BAD_INTEGER")
+
+
+def _effect_verify_signature(body, signature, signers, identity, namespace, executable):
+    # Fixed OpenSSH offline verification only. No Issue-selected arguments,
+    # shell, network, private keys, raw output or native HostOps operation.
+    try:
+        signature_bytes = base64.b64decode(signature, validate=True)
+        if not 20 <= len(signature_bytes) <= 12288:
+            _effect_deny("SIGNATURE_INVALID")
+        with tempfile.TemporaryDirectory(prefix="effect-signature-public-") as folder:
+            sig = Path(folder) / "attestation.sig"
+            sig.write_bytes(signature_bytes)
+            process = subprocess.run([str(executable), "-Y", "verify", "-f", str(signers),
+                "-I", identity, "-n", namespace, "-s", str(sig)], input=_effect_canonical(body),
+                capture_output=True, timeout=5, check=False,
+                env={k: v for k, v in os.environ.items()
+                     if k.casefold() in {"systemroot", "windir", "temp", "tmp", "programdata"}})
+        if process.returncode != 0:
+            _effect_deny("SIGNATURE_INVALID")
+    except (ValueError, OSError, subprocess.TimeoutExpired):
+        _effect_deny("SIGNATURE_UNAVAILABLE")
+
+
+# E1 is an offline source contract, separate from W1 and the HostOps catalogue.
+# No production enrollment is adopted. Only a separately reviewed policy may
+# populate this exact canonical public-enrollment allowlist; Issue data cannot.
+WORK_OWNER_EFFECT_SCHEMA = "WorkOwnerEffectWitness.v1"
+WORK_OWNER_EFFECT_NAMESPACE = "workowner-effect-witness-v1@ai-commerce"
+WORK_OWNER_EFFECT_NATIVE_GATE = "HOLD_PENDING_ADOPTED_NATIVE_OWNER_POLICY"
+_WORK_OWNER_EFFECT_ENROLLMENTS: tuple[bytes, ...] = ()
+
+
+class WorkOwnerEffectGate(str, Enum):
+    NO_AUTHENTICATED_OWNER_WITNESS = "NO_AUTHENTICATED_OWNER_WITNESS"
+    BAD_SIGNATURE = "BAD_SIGNATURE"
+    REPLAY_OR_STALE = "REPLAY_OR_STALE"
+    SOURCE_BOUNDARY_CONTRADICTION = "SOURCE_BOUNDARY_CONTRADICTION"
+    EFFECT_DETERMINATE_AUTHENTICATED = "EFFECT_DETERMINATE_AUTHENTICATED"
+
+
+@dataclass(frozen=True)
+class WorkOwnerEffectEnrollment:
+    """PUBLIC, out-of-band policy input, never enrollment by an Issue.
+
+    Hashes identify the exact external principal, public key and supported
+    verifier. They do not prove custody: the production allowlist is empty.
+    A same-SID runner or a fixture key cannot become a native owner signer.
+    """
+    identity: str
+    public_key: str
+    verifier_sha256: str
+    signer_principal_sha256: str
+    executor_principal_sha256: str
+    custody: str
+    purpose: str
+
+    def encoded(self):
+        return _effect_canonical(asdict(self))
+
+
+@dataclass(frozen=True)
+class WorkOwnerEffectReadContext:
+    """Immutable acquisition snapshot supplied outside Issue/receipt claims.
+
+    Future native integration must authenticate both this post-effect snapshot
+    and enrollment independently. Caller clocks and caller-populated sets are
+    insufficient for native replay prevention. No default clock/ledger exists.
+    All digest pins must come from independently acquired immutable evidence.
+    """
+    attestation_sha256: str
+    artifact_sha256: str
+    verification_sha256: str
+    post_effect_sha256: str
+    replay_ledger_sha256: str
+    clock_id: str
+    monotonic_ns: int
+    unix_time: int
+    seen_nonces: frozenset[str]
+    seen_replay_ids: frozenset[str]
+
+
+@dataclass(frozen=True)
+class WorkOwnerEffectResult:
+    gate: WorkOwnerEffectGate
+    scope: str = "UNENROLLED"
+    evidence_hashes: tuple[tuple[str, str], ...] = ()
+
+    def payload(self):
+        return {"schema": "WorkOwnerEffectSourceGate.v1", "gate": self.gate.value,
+                "scope": self.scope, "native_owner_policy_gate": WORK_OWNER_EFFECT_NATIVE_GATE,
+                "work_owner_transition_authorized": False, "replay_authorized": False,
+                "transfer_authorized": False, "publication_authorized": False,
+                "execution_allowed": False, "credential_custody_proven": False,
+                "replay_ledger_proven": False,
+                "evidence_hashes": dict(self.evidence_hashes)}
+
+
+def work_owner_effect_binding(binding):
+    """Closed public source identity. Returns a detached canonical snapshot."""
+    _effect_shape(binding, "repo root_issue current_issue action_id attempt_id source_sha work_owner refs provider_intent")
+    if binding["repo"] != "trung-via/ai-commerce":
+        _effect_deny("EFFECT_BINDING_INVALID")
+    for name in ("root_issue", "current_issue"):
+        _effect_integer(binding[name], 1, 2147483647)
+    for name in ("action_id", "attempt_id"):
+        if type(binding[name]) is not str or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", binding[name]):
+            _effect_deny("EFFECT_BINDING_INVALID")
+    _effect_sha(binding["source_sha"], 40)
+    owner = binding["work_owner"]
+    _effect_shape(owner, "root_commit_sha root_digest journal_tip_sha journal_digest work_key fingerprint fence generation")
+    for name in ("root_commit_sha", "journal_tip_sha"):
+        _effect_sha(owner[name], 40)
+    for name in ("root_digest", "journal_digest", "work_key", "fingerprint", "fence"):
+        _effect_sha(owner[name])
+    _effect_integer(owner["generation"], 1, 32)
+    _effect_shape(binding["refs"], "claim pre_spawn spawned")
+    key = hashlib.sha256((binding["repo"] + ":" + binding["attempt_id"]).encode()).hexdigest()[:32]
+    for name, namespace in (("claim", "claims"), ("pre_spawn", "pre-spawn"), ("spawned", "spawned")):
+        ref = binding["refs"][name]
+        _effect_shape(ref, "ref sha")
+        if ref["ref"] != f"refs/heads/ef02/{namespace}/{key}":
+            _effect_deny("EFFECT_BINDING_INVALID")
+        _effect_sha(ref["sha"], 40)
+    intent = binding["provider_intent"]
+    _effect_shape(intent, "commit_sha digest round")
+    _effect_sha(intent["commit_sha"], 40)
+    _effect_sha(intent["digest"])
+    _effect_integer(intent["round"], 0, 31)
+    return _effect_decode(_effect_canonical(binding), limit=16384)
+
+
+def _work_owner_effect_verifier_snapshot(executable, expected):
+    """Bounded read of an out-of-band pinned verifier; no Issue-selected path."""
+    exe = Path(executable)
+    if not exe.is_absolute() or not exe.is_file():
+        _effect_deny("EFFECT_VERIFIER_UNTRUSTED")
+    for part in (exe, *exe.parents):
+        if part.is_symlink() or getattr(part.lstat(), "st_file_attributes", 0) & 0x400:
+            _effect_deny("EFFECT_VERIFIER_UNTRUSTED")
+    before = exe.stat()
+    with exe.open("rb") as stream:
+        raw = stream.read(32 * 1024 * 1024 + 1)
+    after = exe.stat()
+    if (not raw or len(raw) > 32 * 1024 * 1024 or _effect_digest(raw) != expected or
+            (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) !=
+            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
+        _effect_deny("EFFECT_VERIFIER_UNTRUSTED")
+    return after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+
+
+def work_owner_effect_witness_verify_offline(raw, *, expected_binding, enrollment=None,
+        context=None, ssh_keygen=None, source_contract_fixture=False):
+    """Read-only E1 validation. No network, enrollment, clock read or ledger write.
+
+    Wire bytes are canonical ASCII JSON with one trailing LF (contract.canonical).
+    The external OpenSSH Ed25519 signature covers the complete payload in the
+    E1 namespace; only the detached signature is excluded. The full envelope's
+    SHA256 must equal an independently acquired immutable attestation pin.
+    Fixture mode is explicit and ALWAYS labeled SOURCE_CONTRACT_FIXTURE. Even
+    future enrolled source validation grants no native effect or owner transition.
+    """
+    gate = WorkOwnerEffectGate
+    scope = "SOURCE_CONTRACT_FIXTURE" if source_contract_fixture is True else "UNENROLLED"
+    def result(value):
+        return WorkOwnerEffectResult(value, scope)
+    try:
+        if type(source_contract_fixture) is not bool or type(enrollment) is not WorkOwnerEffectEnrollment:
+            return result(gate.NO_AUTHENTICATED_OWNER_WITNESS)
+        enrolled = enrollment.encoded()
+        if source_contract_fixture:
+            if enrollment.purpose != "SOURCE_CONTRACT_FIXTURE":
+                return result(gate.NO_AUTHENTICATED_OWNER_WITNESS)
+        elif (enrollment.purpose != "AUTHENTICATED_EXTERNAL_OWNER" or
+                enrolled not in _WORK_OWNER_EFFECT_ENROLLMENTS):
+            return result(gate.NO_AUTHENTICATED_OWNER_WITNESS)
+        if (enrollment.custody != "EXTERNAL_ISOLATED_SIGNER" or
+                enrollment.signer_principal_sha256 == enrollment.executor_principal_sha256 or
+                type(enrollment.identity) is not str or
+                not re.fullmatch(r"effect-owner-[a-z0-9-]{1,48}", enrollment.identity)):
+            return result(gate.NO_AUTHENTICATED_OWNER_WITNESS)
+        for value in (enrollment.verifier_sha256, enrollment.signer_principal_sha256,
+                      enrollment.executor_principal_sha256):
+            _effect_sha(value)
+        # One exact, option-free Ed25519 key. Never a URL, wildcard or W1 signer.
+        if type(enrollment.public_key) is not str or not re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/]{68}", enrollment.public_key):
+            return result(gate.NO_AUTHENTICATED_OWNER_WITNESS)
+        key = base64.b64decode(enrollment.public_key.split()[1], validate=True)
+        if len(key) != 51 or key[:19] != b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20":
+            return result(gate.NO_AUTHENTICATED_OWNER_WITNESS)
+        fingerprint = "SHA256:" + base64.b64encode(hashlib.sha256(key).digest()).decode().rstrip("=")
+        if type(raw) is not bytes or not 1 <= len(raw) <= 32768:
+            return result(gate.SOURCE_BOUNDARY_CONTRADICTION)
+        envelope = _effect_decode(raw, limit=32768)
+        _effect_shape(envelope, "payload signature_b64")
+        if _effect_canonical(envelope) != raw:
+            return result(gate.SOURCE_BOUNDARY_CONTRADICTION)
+        p = envelope["payload"]
+        _effect_shape(p, "schema namespace binding signer provider verification cleanup publication timestamp replay")
+        if (p["schema"] != WORK_OWNER_EFFECT_SCHEMA or p["namespace"] != WORK_OWNER_EFFECT_NAMESPACE or
+                work_owner_effect_binding(p["binding"]) != work_owner_effect_binding(expected_binding)):
+            return result(gate.SOURCE_BOUNDARY_CONTRADICTION)
+        _effect_shape(p["signer"], "identity fingerprint enrollment_sha256")
+        if p["signer"] != {"identity": enrollment.identity, "fingerprint": fingerprint,
+                           "enrollment_sha256": _effect_digest(enrolled)}:
+            return result(gate.NO_AUTHENTICATED_OWNER_WITNESS)
+        sig = envelope["signature_b64"]
+        if type(sig) is not str or not 40 <= len(sig) <= 16384:
+            return result(gate.BAD_SIGNATURE)
+        try:
+            original = _work_owner_effect_verifier_snapshot(ssh_keygen, enrollment.verifier_sha256)
+            with tempfile.TemporaryDirectory(prefix="effect-witness-public-") as folder:
+                allowed = Path(folder) / "allowed-signers"
+                allowed.write_text(enrollment.identity + " " + enrollment.public_key + "\n", encoding="ascii")
+                _effect_verify_signature(p, sig, allowed, enrollment.identity, WORK_OWNER_EFFECT_NAMESPACE, Path(ssh_keygen))
+            if _work_owner_effect_verifier_snapshot(ssh_keygen, enrollment.verifier_sha256) != original:
+                return result(gate.NO_AUTHENTICATED_OWNER_WITNESS)
+        except (_EffectDenied, OSError, ValueError, TypeError):
+            return result(gate.BAD_SIGNATURE)
+        if type(context) is not WorkOwnerEffectReadContext:
+            return result(gate.NO_AUTHENTICATED_OWNER_WITNESS)
+        for value in (context.attestation_sha256, context.artifact_sha256, context.verification_sha256,
+                      context.post_effect_sha256, context.replay_ledger_sha256, context.clock_id):
+            _effect_sha(value)
+        if _effect_digest(raw) != context.attestation_sha256:
+            return result(gate.SOURCE_BOUNDARY_CONTRADICTION)
+        t, replay = p["timestamp"], p["replay"]
+        _effect_shape(t, "clock_id monotonic_ns issued_at expires_at")
+        _effect_shape(replay, "nonce replay_id ledger_sha256")
+        for value in (replay["nonce"], replay["replay_id"], replay["ledger_sha256"], t["clock_id"]):
+            _effect_sha(value)
+        for value in (t["monotonic_ns"], t["issued_at"], t["expires_at"], context.monotonic_ns, context.unix_time):
+            _effect_integer(value, 1, 2**53 - 1)
+        if (type(context.seen_nonces) is not frozenset or type(context.seen_replay_ids) is not frozenset or
+                len(context.seen_nonces) > 4096 or len(context.seen_replay_ids) > 4096):
+            return result(gate.REPLAY_OR_STALE)
+        for value in context.seen_nonces | context.seen_replay_ids:
+            _effect_sha(value)
+        if (t["clock_id"] != context.clock_id or not 1 <= t["expires_at"] - t["issued_at"] <= 600 or
+                not t["issued_at"] <= context.unix_time <= t["expires_at"] or
+                not 0 <= context.monotonic_ns - t["monotonic_ns"] <= 600_000_000_000 or
+                replay["ledger_sha256"] != context.replay_ledger_sha256 or
+                replay["nonce"] in context.seen_nonces or replay["replay_id"] in context.seen_replay_ids):
+            return result(gate.REPLAY_OR_STALE)
+        provider, verification, cleanup, publication = (p[n] for n in
+            ("provider", "verification", "cleanup", "publication"))
+        _effect_shape(provider, "intent_digest return_determinate outcome return_sha256")
+        _effect_shape(verification, "completed completed_monotonic_ns exit_code groups passed skipped failed xdist_workers receipt_sha256 artifact_sha256")
+        _effect_shape(cleanup, "completed observed_monotonic_ns scratch_dirty process_tree_empty verified_tree_sha256 post_verify_tree_sha256 receipt_sha256")
+        _effect_shape(publication, "state candidate_sha candidate_at_acquisition fence acquisition_monotonic_ns monotonic_ns acquisition_sha256 commit_sha256 post_effect_sha256 intent_only absence_basis")
+        for value in (provider["return_sha256"], verification["receipt_sha256"], verification["artifact_sha256"],
+                cleanup["receipt_sha256"], cleanup["verified_tree_sha256"], cleanup["post_verify_tree_sha256"],
+                publication["acquisition_sha256"], publication["commit_sha256"], publication["post_effect_sha256"]):
+            _effect_sha(value)
+        for name in ("groups", "passed", "skipped", "failed", "xdist_workers"):
+            _effect_integer(verification[name], 0, 1000000)
+        # One externally witnessed clock domain, ordered acquisition -> genuine
+        # verification -> post-verification cleanup -> committed boundary.
+        _effect_integer(publication["acquisition_monotonic_ns"], 1, t["monotonic_ns"])
+        _effect_integer(verification["completed_monotonic_ns"], publication["acquisition_monotonic_ns"], t["monotonic_ns"])
+        _effect_integer(cleanup["observed_monotonic_ns"], verification["completed_monotonic_ns"], t["monotonic_ns"])
+        _effect_integer(publication["monotonic_ns"], cleanup["observed_monotonic_ns"], t["monotonic_ns"])
+        if (provider["intent_digest"] != p["binding"]["provider_intent"]["digest"] or
+                provider["return_determinate"] is not True or provider["outcome"] != "COMPLETED" or
+                verification["completed"] is not True or type(verification["exit_code"]) is not int or
+                verification["exit_code"] != 0 or verification["failed"] != 0 or
+                verification["groups"] < 1 or verification["passed"] < 1 or
+                verification["receipt_sha256"] != context.verification_sha256 or
+                verification["artifact_sha256"] != context.artifact_sha256 or
+                cleanup["completed"] is not True or cleanup["scratch_dirty"] is not False or
+                cleanup["process_tree_empty"] is not True or
+                cleanup["verified_tree_sha256"] != cleanup["post_verify_tree_sha256"] or
+                publication["fence"] != p["binding"]["work_owner"]["fence"] or
+                publication["candidate_at_acquisition"] is not None or
+                publication["post_effect_sha256"] != context.post_effect_sha256 or
+                publication["intent_only"] is not False):
+            return result(gate.SOURCE_BOUNDARY_CONTRADICTION)
+        if publication["state"] == "ABSENT_AT_COMMIT_BOUNDARY":
+            if publication["candidate_sha"] is not None or publication["absence_basis"] != "FENCED_OWNER_COMMIT_BOUNDARY":
+                return result(gate.SOURCE_BOUNDARY_CONTRADICTION)
+        elif publication["state"] == "COMMITTED_CANDIDATE":
+            _effect_sha(publication["candidate_sha"], 40)
+            if publication["absence_basis"] != "NOT_ABSENT":
+                return result(gate.SOURCE_BOUNDARY_CONTRADICTION)
+        else:
+            return result(gate.SOURCE_BOUNDARY_CONTRADICTION)
+        return WorkOwnerEffectResult(gate.EFFECT_DETERMINATE_AUTHENTICATED, scope, tuple(sorted({
+            "attestation_sha256": _effect_digest(raw), "payload_sha256": _effect_digest(_effect_canonical(p)),
+            "enrollment_sha256": _effect_digest(enrolled), "artifact_sha256": context.artifact_sha256,
+            "verification_sha256": context.verification_sha256, "post_effect_sha256": context.post_effect_sha256,
+            "replay_ledger_sha256": context.replay_ledger_sha256}.items())))
+    except Exception:
+        # No exception text, signer bytes, paths, Issue prose or signature leaks.
+        return result(gate.SOURCE_BOUNDARY_CONTRADICTION)
+
+
 class AuditGate(str, Enum):
     VERIFIED = "VERIFIED"
     CONTRADICTED = "CONTRADICTED"
@@ -978,11 +1336,12 @@ class WorkOwnerAuditReport:
     provenance: tuple[WorkOwnerAuditProvenance, ...]
     reads: int
     provider_status: AuditProviderStatus
+    effect_witness: WorkOwnerEffectResult | None = None
 
     def payload(self) -> dict:
         # Source authentication does not authenticate native effects, cleanup,
-        # an EF01 signer, or a new owner. No writable witness contract exists.
-        return {"kind": "WorkOwnerReadOnlyAudit.v1", "status": "HOLD_UNKNOWN_EFFECT",
+        # an EF01 signer, or a new owner. The E1 contract is read-only as well.
+        result = {"kind": "WorkOwnerReadOnlyAudit.v1", "status": "HOLD_UNKNOWN_EFFECT",
                 "gate": (AuditGate.CONTRADICTED if self.source_gate is AuditGate.CONTRADICTED
                          else AuditGate.UNKNOWN).value,
                 "source_gate": self.source_gate.value, "code": self.code,
@@ -993,6 +1352,9 @@ class WorkOwnerAuditReport:
                 "owner_witness_gate": AuditGate.UNKNOWN.value,
                 "writable_contract": "INACTIVE", "replay_authorized": False,
                 "publication_authorized": False, "proves_current_mt01_pass": False}
+        if self.effect_witness is not None:
+            result["effect_witness"] = self.effect_witness.payload()
+        return result
 
 
 class _AuditUnknown(Exception):
@@ -1128,10 +1490,14 @@ class WorkOwnerAudit:
     """
     @classmethod
     def run(cls, github, *, issue_number, batch, action, trusted_issuer,
-            read_budget=192, diagnostics=None) -> WorkOwnerAuditReport:
+            read_budget=192, diagnostics=None, effect_witness=None, witness_enrollment=None,
+            witness_context=None, witness_verifier=None, source_contract_fixture=False) -> WorkOwnerAuditReport:
         reads = None
         stage, generation, candidate_sha = "UNOBSERVED", None, None
         provider = AuditProviderStatus.UNOBSERVED
+        witness = None
+        if effect_witness is not None:
+            witness = WorkOwnerEffectResult(WorkOwnerEffectGate.SOURCE_BOUNDARY_CONTRADICTION)
         try:
             diagnostics = diagnostics or WorkOwnerAuditDiagnostics()
             if (not isinstance(diagnostics, WorkOwnerAuditDiagnostics) or
@@ -1209,6 +1575,23 @@ class WorkOwnerAudit:
             if diagnostics.scratch_dirty is True or provider is AuditProviderStatus.QUOTA_EXHAUSTED:
                 raise _AuditUnknown("LOCAL_EFFECT_UNCONFIRMED")
             gate, code = AuditGate.VERIFIED, "PUBLISHED_SOURCE_AUTHENTICATED_OWNER_WITNESS_MISSING"
+            if effect_witness is not None:
+                binding = cls._effect_binding(reads, identity, chain)
+                witness = work_owner_effect_witness_verify_offline(effect_witness,
+                    expected_binding=binding, enrollment=witness_enrollment, context=witness_context,
+                    ssh_keygen=witness_verifier, source_contract_fixture=source_contract_fixture)
+                if witness.gate is WorkOwnerEffectGate.EFFECT_DETERMINATE_AUTHENTICATED:
+                    # Join only to the SAME already-authenticated committed candidate.
+                    # A signed absence/staged-intent receipt cannot describe it.
+                    p = json.loads(effect_witness)["payload"]
+                    proof = commit_evidence(reads.api("GET", "/git/commits/" + candidate_sha)["message"])
+                    if (p["publication"]["state"] != "COMMITTED_CANDIDATE" or
+                            p["publication"]["candidate_sha"] != candidate_sha or
+                            p["verification"]["receipt_sha256"] != proof["verification"]["report_sha256"]):
+                        witness = WorkOwnerEffectResult(WorkOwnerEffectGate.SOURCE_BOUNDARY_CONTRADICTION)
+                # Includes races during offline signature verification and all
+                # extra witness reads in the original cumulative budget.
+                reads.confirm()
         except _AuditContradicted as exc:
             gate, code = AuditGate.CONTRADICTED, str(exc)
         except _AuditUnknown as exc:
@@ -1222,9 +1605,37 @@ class WorkOwnerAudit:
                 gate, code = AuditGate.CONTRADICTED, "STRICT_WORKOWNER_REJECTED"
         except Exception:
             gate, code = AuditGate.UNKNOWN, "MALFORMED_OR_UNAVAILABLE_SOURCE"
+        if gate is not AuditGate.VERIFIED and witness is not None:
+            witness = WorkOwnerEffectResult(WorkOwnerEffectGate.SOURCE_BOUNDARY_CONTRADICTION)
         return WorkOwnerAuditReport(gate, code, stage, generation, candidate_sha,
             tuple(sorted(reads.provenance, key=lambda p: (p.ref, p.sha))) if reads else (),
-            reads.reads if reads else 0, provider)
+            reads.reads if reads else 0, provider, witness)
+
+    @staticmethod
+    def _effect_binding(reads, identity, chain):
+        """Use strict-reader objects only, never expected values from a witness."""
+        current = [r for r in chain if r["generation"] == identity["generation"]]
+        intents = [r for r in current if r["stage"] == "PROVIDER_INTENT"]
+        if not intents:
+            raise _AuditUnknown("PROVIDER_INTENT_UNOBSERVED")
+        intent, tip, root = intents[-1], chain[-1], chain[0]
+        key = reads.attempt_key(identity["attempt_id"])
+        provenance = {p.ref: p.sha for p in reads.provenance}
+        refs = {}
+        for name, namespace in (("claim", "claims"), ("pre_spawn", "pre-spawn"), ("spawned", "spawned")):
+            ref = f"refs/heads/ef02/{namespace}/{key}"
+            if ref not in provenance:
+                raise _AuditUnknown("BOUNDARY_WITNESS_UNOBSERVED")
+            refs[name] = {"ref": ref, "sha": provenance[ref]}
+        return work_owner_effect_binding({"repo": reads.repo, "root_issue": identity["root_issue"],
+            "current_issue": identity["current_issue"], "action_id": identity["action_id"],
+            "attempt_id": identity["attempt_id"], "source_sha": identity["source_sha"],
+            "work_owner": {"root_commit_sha": root["sha"], "root_digest": root["digest"],
+                "journal_tip_sha": tip["sha"], "journal_digest": tip["digest"],
+                "work_key": identity["work_key"], "fingerprint": identity["fingerprint"],
+                "fence": tip["fence"], "generation": tip["generation"]}, "refs": refs,
+            "provider_intent": {"commit_sha": intent["sha"], "digest": intent["digest"],
+                                "round": intent["data"]["round"]}})
 
     @staticmethod
     def _ingress(reads, number, attempt_id, issuer):
