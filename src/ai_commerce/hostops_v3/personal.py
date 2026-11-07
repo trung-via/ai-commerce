@@ -7,14 +7,17 @@ No arbitrary shell, secret file access, force update, delete or provider effect.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
 from pathlib import Path
 import platform
 import re
+import shutil
 import stat
 import subprocess
+from typing import Callable, Literal, TypedDict
 from urllib.request import Request, ProxyHandler, HTTPRedirectHandler, build_opener
 
 REPO = "trung-via/ai-commerce"
@@ -738,6 +741,346 @@ def _standing_read_snapshot():
         "diagnostics": [{"category": category, "code": codes[category]}
                         for category in STANDING_READ_CATEGORIES],
         "arbitrary_shell_enabled": False, "exact_chat_verified": False, "wake_sent": False,
+    })
+
+
+# LOCAL PRIVATE foundation only. Deliberately absent from parse_event, perform,
+# main, PERSONAL_PUBLIC_FIELDS and the sixteen standing READ categories.
+_HEALTH_SCHEMA = "ExecutorHealthLocalReceipt.v1"
+_HEALTH_TIMEOUT = 5
+_HEALTH_MAX_AGE = 3600
+_HEALTH_LIMIT = 8192
+_HEALTH_VERSION = r"\d{1,4}\.\d{1,4}\.\d{1,4}(?:-(?:alpha|beta|rc)\.\d{1,4})?"
+_HEALTH_PROBES = {
+    "codex_version": ("codex.exe", ("--version",)),
+    "codex_login": ("codex.exe", ("login", "status")),
+    "antigravity_version": ("agy.exe", ("--version",)),
+}
+
+
+class ExecutorDefaults(TypedDict):
+    state: Literal["VALIDATED", "INVALID", "UNKNOWN"]
+    preferred: dict[str, str] | None
+    fallback: dict[str, str] | None
+    recovery_probe_cooldown_seconds: int | None
+
+
+class EF01HealthObservation(TypedDict):
+    state: Literal["UNKNOWN", "UNTRUSTED", "INVALID", "FRESH", "STALE"]
+    outcome: Literal["UNKNOWN", "QUOTA_EXHAUSTED", "DETERMINATE_RETURN"]
+    observed_at: str | None
+
+
+class ExecutorHealthRow(TypedDict):
+    executor: Literal["codex", "antigravity"]
+    executable: Literal["PRESENT", "ABSENT", "UNAVAILABLE", "UNSUPPORTED_LAUNCHER", "UNKNOWN"]
+    version_state: Literal["OBSERVED", "UNKNOWN", "TIMEOUT", "UNAVAILABLE", "MALFORMED"]
+    version: str | None
+    authentication: Literal["LOGIN_REPORTED", "NOT_LOGGED_IN", "UNKNOWN"]
+    login_probe: Literal["OBSERVED", "UNKNOWN", "TIMEOUT", "UNAVAILABLE", "MALFORMED", "NOT_SUPPORTED"]
+    provider_identity: Literal["UNKNOWN"]
+    account: Literal["UNKNOWN"]
+    quota: Literal["UNKNOWN"]
+    remaining: None
+    reset_at: None
+    last_ef01: EF01HealthObservation
+
+
+class ExecutorHealthLocalReceipt(TypedDict):
+    schema_version: Literal["ExecutorHealthLocalReceipt.v1"]
+    visibility: Literal["LOCAL_PRIVATE"]
+    capability: Literal["SOURCE_ONLY"]
+    observed_at: str
+    windows: bool
+    context_identity: Literal["UNKNOWN"]
+    defaults: ExecutorDefaults
+    executors: list[ExecutorHealthRow]
+
+
+def _health_parse_time(value):
+    if type(value) is not str or not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", value):
+        raise ValueError("HEALTH_TIME_INVALID")
+    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
+def _executor_defaults() -> ExecutorDefaults:
+    """Read one bounded public policy, never mutable .local preference state.
+
+    Share the existing ExecutorSelection validation; report configuration only.
+    No resolve_model, observe_result, cooldown scheduling, fallback or save.
+    """
+    from ai_commerce.engineering.model_defaults import POLICY_PATH
+    from ai_commerce.engineering.profile import ExecutorSelection
+    invalid = {"state": "INVALID", "preferred": None, "fallback": None,
+               "recovery_probe_cooldown_seconds": None}
+    path = Path(__file__).absolute().parents[3] / POLICY_PATH
+    if _fixed_private_metadata_kind(path) != "PRESENT":
+        return invalid
+    try:
+        with path.open("rb") as stream:
+            raw = stream.read(_HEALTH_LIMIT + 1)
+        if not 0 < len(raw) <= _HEALTH_LIMIT:
+            return invalid
+        obj = json.loads(raw.decode("utf-8"), object_pairs_hook=_object_unique)
+        if (type(obj) is not dict or set(obj) != {
+                "version", "hard_default", "preferred", "fallback", "recovery_probe_cooldown_seconds"}
+                or type(obj["version"]) is not int or obj["version"] != 1
+                or obj["hard_default"] is not False):
+            return invalid
+        result = {"state": "VALIDATED"}
+        for field, executor in (("preferred", "codex"), ("fallback", "antigravity")):
+            selection = obj[field]
+            if type(selection) is not dict or set(selection) != {"executor", "model", "effort"}:
+                return invalid
+            ExecutorSelection(**selection)
+            if selection["executor"] != executor:
+                return invalid
+            result[field] = selection
+        seconds = obj["recovery_probe_cooldown_seconds"]
+        if type(seconds) is not int or not 60 <= seconds <= 604800:
+            return invalid
+        return {**result, "recovery_probe_cooldown_seconds": seconds}
+    except (Denied, OSError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+        return invalid
+
+
+def _health_executable(executor):
+    """Fixed PATH names only; never search homes or execute shell launchers."""
+    name = {"codex": "codex", "antigravity": "agy"}[executor]
+    try:
+        executable = shutil.which(name + ".exe")
+        if executable is None:
+            wrapper = shutil.which(name + ".cmd")
+            return ("UNSUPPORTED_LAUNCHER" if wrapper else "ABSENT"), None
+        path = Path(executable)
+        if (not path.is_absolute() or path.name.lower() != name + ".exe"
+                or _fixed_private_metadata_kind(path) != "PRESENT"):
+            return "UNAVAILABLE", None
+        return "PRESENT", str(path)
+    except (OSError, ValueError, TypeError):
+        return "UNAVAILABLE", None
+
+
+def _health_probe(probe, executable):
+    """Three fixed argv only. Raw stdout/stderr/exception text never escape.
+
+    The size check bounds accepted responses; subprocess capture is memory-only
+    and time-bounded, not a hostile-process output sandbox. No files are written.
+    """
+    if probe not in _HEALTH_PROBES:
+        deny("EXECUTOR_HEALTH_PROBE_DENIED")
+    name, args = _HEALTH_PROBES[probe]
+    if (type(executable) is not str or not Path(executable).is_absolute()
+            or Path(executable).name.lower() != name):
+        deny("EXECUTOR_HEALTH_PROBE_DENIED")
+    try:
+        result = subprocess.run(
+            [executable, *args], shell=False, stdin=subprocess.DEVNULL,
+            capture_output=True, timeout=_HEALTH_TIMEOUT, check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired:
+        return "TIMEOUT", None
+    except OSError:
+        return "UNAVAILABLE", None
+    # Only exact known responses are projected; never redact-and-forward logs.
+    if (type(result.returncode) is not int
+            or type(result.stdout) is not bytes or type(result.stderr) is not bytes
+            or len(result.stdout) + len(result.stderr) > _HEALTH_LIMIT):
+        return "MALFORMED", None
+    try:
+        stdout, stderr = (part.decode("utf-8").strip() for part in (result.stdout, result.stderr))
+    except UnicodeError:
+        return "MALFORMED", None
+    if stdout and stderr:
+        return "MALFORMED", None
+    text = stdout or stderr
+    if probe == "codex_login":
+        if result.returncode == 0 and text in (
+                "Logged in using ChatGPT", "Logged in using an API key"):
+            return "OBSERVED", "LOGIN_REPORTED"
+        if result.returncode == 1 and text == "Not logged in":
+            return "OBSERVED", "NOT_LOGGED_IN"
+    elif result.returncode == 0:
+        prefix = r"codex-cli " if probe == "codex_version" else r"(?:(?:agy|Antigravity CLI) )?"
+        match = re.fullmatch(prefix + "(" + _HEALTH_VERSION + ")", text)
+        if match:
+            return "OBSERVED", match.group(1)
+    return "MALFORMED", None
+
+
+def _health_ef01(report, verifier, now) -> dict[str, EF01HealthObservation]:
+    """Optional caller-supplied independent trust boundary; NOT a trust verifier.
+
+    No report discovery or .local scan. A JSON flag, digest alone, agent prose or
+    model-defaults-state file cannot establish trust. With no independently
+    authenticated EF01 verifier, all supplied reports remain UNTRUSTED.
+    """
+    unknown = {"state": "UNKNOWN", "outcome": "UNKNOWN", "observed_at": None}
+    def both(value):
+        return {executor: dict(value) for executor in ("codex", "antigravity")}
+
+    if report is None:
+        return both(unknown)
+    if type(report) is not bytes or not 0 < len(report) <= 131072:
+        return both({**unknown, "state": "INVALID"})
+    if verifier is None:
+        return both({**unknown, "state": "UNTRUSTED"})
+    try:
+        if verifier(report) is not True:
+            return both({**unknown, "state": "UNTRUSTED"})
+        obj = json.loads(report.decode("utf-8"), object_pairs_hook=_object_unique)
+        if type(obj) is not dict:
+            raise ValueError()
+        from ai_commerce.engineering.profile import ExecutorSelection
+        ExecutorSelection(obj["executor"], obj["model"], obj["reasoning_effort"])
+        executor = obj["executor"]
+        calls = obj["invocations"]
+        if type(calls) is not list or not calls or type(calls[-1]) is not dict:
+            raise ValueError()
+        call = calls[-1]
+        if call.get("executor_invoked") is not True or type(call.get("executor_exit_code")) is not int:
+            raise ValueError()
+        # Native EF01 timestamps are ISO-8601 with an explicit UTC offset.
+        observed = datetime.fromisoformat(call["executor_finished_at"].replace("Z", "+00:00"))
+        started = datetime.fromisoformat(obj["started_at"].replace("Z", "+00:00"))
+        if (observed.tzinfo is None or observed.utcoffset() is None
+                or started.tzinfo is None or started.utcoffset() is None or started > observed):
+            raise ValueError()
+        observed = observed.astimezone(timezone.utc)
+        age = (now - observed).total_seconds()
+        if age < 0:
+            raise ValueError()
+        quota = obj.get("status") == call.get("status") == "QUOTA_EXHAUSTED"
+        if quota:
+            outcome = "QUOTA_EXHAUSTED"
+        elif (obj.get("status") == call.get("status")
+                and obj.get("status") in ("BUILD_VERIFIED_FOR_SCOPE", "VERIFICATION_FAILED", "UNPROVEN")
+                and call["executor_exit_code"] == 0
+                and call.get("provider_return_determinate") is True):
+            outcome = "DETERMINATE_RETURN"
+        else:
+            return both(unknown)
+        return {**both(unknown), executor: {
+            "state": "FRESH" if age <= _HEALTH_MAX_AGE else "STALE", "outcome": outcome,
+            "observed_at": observed.replace(microsecond=0).isoformat().replace("+00:00", "Z")}}
+    except Exception:
+        # An independent verifier can fail with private evidence; suppress its
+        # text too. Never retry the provider or downgrade to self-attestation.
+        return both({**unknown, "state": "INVALID"})
+
+
+def validate_executor_health_local_receipt(receipt) -> ExecutorHealthLocalReceipt:
+    """Strict versioned local contract; this does NOT approve public transport."""
+    def require(condition):
+        if not condition:
+            deny("INVALID_EXECUTOR_HEALTH_LOCAL_RECEIPT")
+
+    require(type(receipt) is dict and set(receipt) == set(ExecutorHealthLocalReceipt.__annotations__))
+    require(receipt["schema_version"] == _HEALTH_SCHEMA and receipt["visibility"] == "LOCAL_PRIVATE"
+            and receipt["capability"] == "SOURCE_ONLY" and type(receipt["windows"]) is bool
+            and receipt["context_identity"] == "UNKNOWN")
+    try:
+        now = _health_parse_time(receipt["observed_at"])
+    except ValueError:
+        deny("INVALID_EXECUTOR_HEALTH_LOCAL_RECEIPT")
+    defaults = receipt["defaults"]
+    require(type(defaults) is dict and set(defaults) == set(ExecutorDefaults.__annotations__))
+    require(defaults["state"] in ("VALIDATED", "INVALID", "UNKNOWN"))
+    if defaults["state"] == "VALIDATED":
+        from ai_commerce.engineering.profile import ExecutorSelection
+        for field, executor in (("preferred", "codex"), ("fallback", "antigravity")):
+            choice = defaults[field]
+            require(type(choice) is dict and set(choice) == {"executor", "model", "effort"})
+            try:
+                ExecutorSelection(**choice)
+            except (ValueError, TypeError):
+                deny("INVALID_EXECUTOR_HEALTH_LOCAL_RECEIPT")
+            require(choice["executor"] == executor)
+        require(type(defaults["recovery_probe_cooldown_seconds"]) is int
+                and 60 <= defaults["recovery_probe_cooldown_seconds"] <= 604800)
+    else:
+        require(all(defaults[key] is None for key in ("preferred", "fallback", "recovery_probe_cooldown_seconds")))
+    rows = receipt["executors"]
+    require(type(rows) is list and len(rows) == 2)
+    for row, executor in zip(rows, ("codex", "antigravity")):
+        require(type(row) is dict and set(row) == set(ExecutorHealthRow.__annotations__))
+        require(row["executor"] == executor and row["provider_identity"] == row["account"] == row["quota"] == "UNKNOWN"
+                and row["remaining"] is None and row["reset_at"] is None)
+        require(row["executable"] in ("PRESENT", "ABSENT", "UNAVAILABLE", "UNSUPPORTED_LAUNCHER", "UNKNOWN"))
+        require(row["version_state"] in ("OBSERVED", "UNKNOWN", "TIMEOUT", "UNAVAILABLE", "MALFORMED"))
+        if row["version_state"] == "OBSERVED":
+            require(row["executable"] == "PRESENT" and type(row["version"]) is str
+                    and re.fullmatch(_HEALTH_VERSION, row["version"]) is not None)
+        else:
+            require(row["version"] is None)
+        require(row["authentication"] in ("LOGIN_REPORTED", "NOT_LOGGED_IN", "UNKNOWN"))
+        require(row["login_probe"] in ("OBSERVED", "UNKNOWN", "TIMEOUT", "UNAVAILABLE", "MALFORMED", "NOT_SUPPORTED"))
+        require((row["login_probe"] == "OBSERVED") == (row["authentication"] != "UNKNOWN"))
+        if row["login_probe"] == "OBSERVED":
+            require(row["executable"] == "PRESENT" and row["version_state"] == "OBSERVED")
+        if executor == "antigravity":
+            require(row["login_probe"] == "NOT_SUPPORTED" and row["authentication"] == "UNKNOWN")
+        else:
+            require(row["login_probe"] != "NOT_SUPPORTED")
+        if row["executable"] != "PRESENT":
+            require(row["version_state"] == "UNKNOWN" and row["authentication"] == "UNKNOWN"
+                    and row["login_probe"] == ("UNKNOWN" if executor == "codex" else "NOT_SUPPORTED"))
+        if not receipt["windows"]:
+            require(row["executable"] == "UNKNOWN" and defaults["state"] == "UNKNOWN")
+        last = row["last_ef01"]
+        require(type(last) is dict and set(last) == set(EF01HealthObservation.__annotations__))
+        require(last["state"] in ("UNKNOWN", "UNTRUSTED", "INVALID", "FRESH", "STALE"))
+        if last["state"] in ("FRESH", "STALE"):
+            require(last["outcome"] in ("QUOTA_EXHAUSTED", "DETERMINATE_RETURN"))
+            try:
+                age = (now - _health_parse_time(last["observed_at"])).total_seconds()
+            except ValueError:
+                deny("INVALID_EXECUTOR_HEALTH_LOCAL_RECEIPT")
+            require(age >= 0 and (age <= _HEALTH_MAX_AGE) == (last["state"] == "FRESH"))
+        else:
+            require(last["outcome"] == "UNKNOWN" and last["observed_at"] is None)
+    raw = json.dumps(receipt, ensure_ascii=True, separators=(",", ":"), allow_nan=False)
+    require(len(raw.encode("ascii")) <= _HEALTH_LIMIT)
+    return json.loads(raw)
+
+
+def collect_executor_health_local(*, now: datetime | None = None, ef01_report: bytes | None = None,
+                                  verify_ef01: Callable[[bytes], bool] | None = None) -> ExecutorHealthLocalReceipt:
+    """Local observation only, no operation/transport wiring or durable writes.
+
+    No provider/model invocation, auth mutation, profile/home scan, scheduling,
+    installation or account identification. Fixed CLI metadata reads run only
+    on Windows. Test stubs establish source behavior, never native capability.
+    """
+    timestamp = now if now is not None else datetime.now(timezone.utc)
+    if (type(timestamp) is not datetime or timestamp.tzinfo is None
+            or timestamp.utcoffset() is None):
+        deny("EXECUTOR_HEALTH_TIME_INVALID")
+    timestamp = timestamp.astimezone(timezone.utc).replace(microsecond=0)
+    windows = platform.system() == "Windows"
+    ef01 = _health_ef01(ef01_report, verify_ef01, timestamp)
+    rows = []
+    for executor in ("codex", "antigravity"):
+        row = {"executor": executor, "executable": "UNKNOWN", "version_state": "UNKNOWN", "version": None,
+               "authentication": "UNKNOWN", "login_probe": "UNKNOWN" if executor == "codex" else "NOT_SUPPORTED",
+               "provider_identity": "UNKNOWN", "account": "UNKNOWN", "quota": "UNKNOWN", "remaining": None, "reset_at": None,
+               "last_ef01": ef01[executor]}
+        if windows:
+            row["executable"], executable = _health_executable(executor)
+            if executable is not None:
+                row["version_state"], row["version"] = _health_probe(executor + "_version", executable)
+                if executor == "codex" and row["version_state"] == "OBSERVED":
+                    row["login_probe"], auth = _health_probe("codex_login", executable)
+                    if auth is not None:
+                        row["authentication"] = auth
+        rows.append(row)
+    return validate_executor_health_local_receipt({
+        "schema_version": _HEALTH_SCHEMA, "visibility": "LOCAL_PRIVATE", "capability": "SOURCE_ONLY",
+        "observed_at": timestamp.isoformat().replace("+00:00", "Z"), "windows": windows,
+        "context_identity": "UNKNOWN", "executors": rows,
+        "defaults": _executor_defaults() if windows else {"state": "UNKNOWN", "preferred": None,
+            "fallback": None, "recovery_probe_cooldown_seconds": None},
     })
 
 
