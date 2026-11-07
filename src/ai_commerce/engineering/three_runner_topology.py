@@ -5,7 +5,7 @@ authorizes any new HostOps command, GitHub credential or browser/CDP action.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import Enum
 from math import isfinite
 from typing import Literal
@@ -535,3 +535,337 @@ def assess_wakehub_core_idle(evidence: WakeHubCoreIdleEvidence) -> WakeHubCoreId
         core_logical_idle_eligible=(code is WakeHubCoreIdleCode.CORE_LOGICAL_IDLE_ELIGIBLE),
         paused_by_human=evidence.trusted_human_pause,
     )
+
+
+# WH-04A is a pure policy over PRIVATE composition-root projections. These
+# types neither implement the WH-03 origin issuer nor compose the WH-04B
+# runtime. Constructing a CURRENT member authenticates nothing outside Python.
+class WakeHubSmartInputError(ValueError):
+    """Closed-schema diagnostic without caller values or private identifiers."""
+
+    def __init__(self) -> None:
+        super().__init__("WAKEHUB_SMART_READINESS_INPUT_INVALID")
+
+
+class WakeHubProofState(str, Enum):
+    MISSING = "MISSING"
+    INDEPENDENTLY_CURRENT = "INDEPENDENTLY_CURRENT"
+    STALE = "STALE"
+    MISMATCH = "MISMATCH"
+    AMBIGUOUS = "AMBIGUOUS"
+
+
+class WakeHubDesktopState(str, Enum):
+    ABSENT = "ABSENT"
+    LOCKED = "LOCKED"
+    SESSION_ZERO = "SESSION_ZERO"
+    OWNER_INTERACTIVE = "OWNER_INTERACTIVE"
+
+
+class WakeHubEndpointHost(str, Enum):
+    IPV4_LOOPBACK = "IPV4_LOOPBACK"  # Exactly 127.0.0.1, not a hostname/range.
+    IPV6_LOOPBACK = "IPV6_LOOPBACK"
+    OTHER = "OTHER"
+
+
+class WakeHubEventState(str, Enum):
+    UNIQUE_CURRENT = "UNIQUE_CURRENT"
+    ABSENT = "ABSENT"
+    STALE = "STALE"
+    DUPLICATE_AMBIGUOUS = "DUPLICATE_AMBIGUOUS"
+
+
+class WakeHubConsentState(str, Enum):
+    CURRENT = "CURRENT"
+    ABSENT = "ABSENT"
+    REVOKED = "REVOKED"
+    STALE = "STALE"
+
+
+class WakeHubSmartCoreStatus(str, Enum):
+    HOLD_UNKNOWN_EFFECT = "HOLD_UNKNOWN_EFFECT"
+    HOLD_SOURCE_DRIFT = "HOLD_SOURCE_DRIFT"
+    HOLD_PRIVATE_PROJECTION = "HOLD_PRIVATE_PROJECTION"
+    WAIT_RECEIVER = "WAIT_RECEIVER"
+    WAIT_EVENT = "WAIT_EVENT"
+    HOLD_EVENT_STALE = "HOLD_EVENT_STALE"
+    HOLD_EVENT_AMBIGUITY = "HOLD_EVENT_AMBIGUITY"
+    WAIT_PENDING_WORK = "WAIT_PENDING_WORK"
+    CORE_RECEIVE_IDLE_HEALTHY = "CORE_RECEIVE_IDLE_HEALTHY"
+
+
+class WakeHubSmartReadinessCode(str, Enum):
+    HOLD_UNKNOWN_EFFECT = "HOLD_UNKNOWN_EFFECT"
+    HOLD_SOURCE_DRIFT = "HOLD_SOURCE_DRIFT"
+    HOLD_PRIVATE_PROJECTION = "HOLD_PRIVATE_PROJECTION"
+    WAIT_RECEIVER = "WAIT_RECEIVER"
+    WAIT_EVENT = "WAIT_EVENT"
+    HOLD_EVENT_STALE = "HOLD_EVENT_STALE"
+    HOLD_EVENT_AMBIGUITY = "HOLD_EVENT_AMBIGUITY"
+    WAIT_PENDING_WORK = "WAIT_PENDING_WORK"
+    HOLD_HUMAN_PAUSED = "HOLD_HUMAN_PAUSED"
+    WAIT_INTERACTIVE_SESSION = "WAIT_INTERACTIVE_SESSION"
+    HOLD_SESSION_OWNER = "HOLD_SESSION_OWNER"
+    WAIT_CHROME = "WAIT_CHROME"
+    HOLD_CHROME_OWNERSHIP = "HOLD_CHROME_OWNERSHIP"
+    HOLD_CHROME_ENDPOINT = "HOLD_CHROME_ENDPOINT"
+    HOLD_CHROME_IDENTITY = "HOLD_CHROME_IDENTITY"
+    HOLD_BROWSER_ACCOUNT = "HOLD_BROWSER_ACCOUNT"
+    HOLD_ORIGIN_ISSUER = "HOLD_ORIGIN_ISSUER"
+    HOLD_ORIGIN_OWNER = "HOLD_ORIGIN_OWNER"
+    HOLD_ORIGIN_ROUTE = "HOLD_ORIGIN_ROUTE"
+    HOLD_ORIGIN_GENERATION = "HOLD_ORIGIN_GENERATION"
+    HOLD_ORIGIN_CONSENT = "HOLD_ORIGIN_CONSENT"
+    READY_TO_PREPARE_ADVISORY_ONLY = "READY_TO_PREPARE_ADVISORY_ONLY"
+
+
+class WakeHubBrowserAdvice(str, Enum):
+    WAIT = "WAIT"
+    REUSE_VERIFIED_OWNER = "REUSE_VERIFIED_OWNER"
+
+
+class _WakeHubSmartProjection:
+    """Required keyword fields only; even unknown-field errors are sanitized.
+
+    This is representation validation, not an authentication boundary. A
+    separately authenticated private root must derive these categories from
+    independent receipts; public Issue dictionaries cannot establish them.
+    """
+
+    __slots__ = ()
+
+    def __init__(self, *args: object, **values: object) -> None:
+        schema = fields(self)
+        if args or len(values) != len(schema) or any(
+            item.name not in values for item in schema
+        ):
+            raise WakeHubSmartInputError()
+        for item in schema:
+            object.__setattr__(self, item.name, values[item.name])
+        self._validate()
+
+
+def _wakehub_smart_enums(*pairs: tuple[object, type[Enum]]) -> None:
+    if any(not _wakehub_enum(value, expected) for value, expected in pairs):
+        raise WakeHubSmartInputError()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class WakeHubSmartBrowserEvidence(_WakeHubSmartProjection):
+    """Sanitized independent browser facts, never paths, argv or credentials.
+
+    pid_creation binds the PID to its exact process creation identity;
+    executable/profile/port_owner bind that same process and owner session.
+    identity_current requires unchanged, privately current evidence for the
+    entire binding. retained_account requires independent authentication of
+    the retained account, not merely an open page or a listening port.
+    """
+
+    ownership: WakeHubChromeOwnership
+    host: WakeHubEndpointHost
+    port: int
+    pid: int
+    pid_creation: WakeHubProofState
+    executable: WakeHubProofState
+    profile: WakeHubProofState
+    port_owner: WakeHubProofState
+    identity_current: WakeHubProofState
+    retained_account: WakeHubProofState
+
+    def _validate(self) -> None:
+        _wakehub_smart_enums(
+            (self.ownership, WakeHubChromeOwnership),
+            (self.host, WakeHubEndpointHost),
+            *((value, WakeHubProofState) for value in (
+                self.pid_creation, self.executable, self.profile,
+                self.port_owner, self.identity_current, self.retained_account,
+            )),
+        )
+        if (type(self.port) is not int or not 0 <= self.port <= 65535
+                or type(self.pid) is not int
+                or not 0 <= self.pid <= _MAX_WINDOWS_COUNT):
+            raise WakeHubSmartInputError()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class WakeHubSmartOriginEvidence(_WakeHubSmartProjection):
+    """Projection from an independently proven issuer, never a route ticket.
+
+    route requires independently proven uniqueness of originating Chat A,
+    excluding copied/ambiguous Chat B. generation must be freshly bound to
+    that route, event, owner and consent. No raw route/account/token is held.
+    WH-03 owner registration remains external and blocked until proven; no
+    constructor, matching integer, enum or self-issued permission proves it.
+    """
+
+    event: WakeHubEventState
+    issuer: WakeHubProofState
+    owner: WakeHubProofState
+    route: WakeHubProofState
+    generation: WakeHubProofState
+    consent: WakeHubConsentState
+
+    def _validate(self) -> None:
+        _wakehub_smart_enums(
+            (self.event, WakeHubEventState),
+            (self.consent, WakeHubConsentState),
+            *((value, WakeHubProofState) for value in (
+                self.issuer, self.owner, self.route, self.generation,
+            )),
+        )
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class WakeHubSmartReadinessEvidence(_WakeHubSmartProjection):
+    """PRIVATE independently authenticated projection; synthetic in WH-04A.
+
+    projection attests provenance/freshness of the complete composition;
+    source binds fresh evidence to the exact independently approved source.
+    listeners independently proves the existing three-runner inventory and
+    their supplied listener states, including the one always-online HostOps
+    receiver. A ScheduledTask READY value is never listener proof.
+    session_owner binds the usable desktop and browser to the exact owner.
+    No constructor performs these attestations or upgrades public assertions.
+    """
+
+    core: WakeHubCoreIdleEvidence
+    projection: WakeHubProofState
+    source: WakeHubProofState
+    listeners: WakeHubProofState
+    desktop: WakeHubDesktopState
+    session_owner: WakeHubProofState
+    browser: WakeHubSmartBrowserEvidence
+    origin: WakeHubSmartOriginEvidence
+
+    def _validate(self) -> WakeHubCoreIdlePlan:
+        _wakehub_smart_enums(
+            (self.desktop, WakeHubDesktopState),
+            *((value, WakeHubProofState) for value in (
+                self.projection, self.source, self.listeners, self.session_owner,
+            )),
+        )
+        if (type(self.core) is not WakeHubCoreIdleEvidence
+                or type(self.browser) is not WakeHubSmartBrowserEvidence
+                or type(self.origin) is not WakeHubSmartOriginEvidence):
+            raise WakeHubSmartInputError()
+        self.browser._validate()
+        self.origin._validate()
+        try:
+            return assess_wakehub_core_idle(self.core)
+        except WakeHubCoreInputError:
+            raise WakeHubSmartInputError() from None
+
+
+@dataclass(frozen=True, slots=True)
+class WakeHubSmartReadinessPlan(WakeHubNoEffectPlan):
+    """Categorical advice only, including READY; never consumable as a grant."""
+
+    code: WakeHubSmartReadinessCode
+    core_status: WakeHubSmartCoreStatus
+    browser_advice: WakeHubBrowserAdvice
+    listener_count: int
+    paused_by_human: bool
+    scope: Literal["PURE_SYNTHETIC_POLICY_ONLY"] = field(
+        default="PURE_SYNTHETIC_POLICY_ONLY", init=False)
+    keep_event_receiver_alive: Literal[True] = field(default=True, init=False)
+    native_operations: Literal[False] = field(default=False, init=False)
+    start: Literal[False] = field(default=False, init=False)
+    stop: Literal[False] = field(default=False, init=False)
+    task: Literal[False] = field(default=False, init=False)
+    chrome: Literal[False] = field(default=False, init=False)
+    send: Literal[False] = field(default=False, init=False)
+    plugin: Literal[False] = field(default=False, init=False)
+    prepare_authorized: Literal[False] = field(default=False, init=False)
+
+
+def assess_wakehub_smart_readiness(
+    evidence: WakeHubSmartReadinessEvidence | None = None, **unknown: object,
+) -> WakeHubSmartReadinessPlan:
+    """Deterministic WH-04A policy; no probing, clocks, attach, start or Send.
+
+    Validate the entire closed input before selecting a reason. Priority is
+    unknown/lost effect, source, private provenance, receiver, event, pending
+    work, Human pause, desktop/owner, browser identity/account, then origin
+    issuer/owner/route/generation/consent. Missing proof always waits or holds.
+    Core receive/idle health is independent of desktop, Chrome, Human pause,
+    route availability and optional WH-02A measurements. No resource metrics
+    are required and no savings are claimed. READY/reuse are advisory words,
+    not authority for a private operator or a Playwright attach. Real runtime
+    composition, origin registration and authenticated UI remain separate.
+    """
+    if unknown or type(evidence) is not WakeHubSmartReadinessEvidence:
+        raise WakeHubSmartInputError()
+    core_plan = evidence._validate()
+    core = evidence.core
+    current = WakeHubProofState.INDEPENDENTLY_CURRENT
+    status = WakeHubSmartCoreStatus
+    code = WakeHubSmartReadinessCode
+    if core_plan.code is WakeHubCoreIdleCode.HOLD_UNKNOWN_EFFECT:
+        core_status = status.HOLD_UNKNOWN_EFFECT
+    elif (core_plan.code is WakeHubCoreIdleCode.HOLD_SOURCE_DRIFT
+          or evidence.source is not current):
+        core_status = status.HOLD_SOURCE_DRIFT
+    elif evidence.projection is not current:
+        core_status = status.HOLD_PRIVATE_PROJECTION
+    elif (core_plan.code is WakeHubCoreIdleCode.WAIT_RECEIVER
+          or evidence.listeners is not current):
+        core_status = status.WAIT_RECEIVER
+    elif evidence.origin.event is WakeHubEventState.ABSENT:
+        core_status = status.WAIT_EVENT
+    elif evidence.origin.event is WakeHubEventState.STALE:
+        core_status = status.HOLD_EVENT_STALE
+    elif evidence.origin.event is WakeHubEventState.DUPLICATE_AMBIGUOUS:
+        core_status = status.HOLD_EVENT_AMBIGUITY
+    elif core_plan.code is WakeHubCoreIdleCode.KEEP_ACTIVE_PENDING:
+        core_status = status.WAIT_PENDING_WORK
+    else:
+        core_status = status.CORE_RECEIVE_IDLE_HEALTHY
+
+    def result(reason: WakeHubSmartReadinessCode) -> WakeHubSmartReadinessPlan:
+        return WakeHubSmartReadinessPlan(
+            code=reason, core_status=core_status,
+            browser_advice=(WakeHubBrowserAdvice.REUSE_VERIFIED_OWNER
+                            if reason is code.READY_TO_PREPARE_ADVISORY_ONLY
+                            else WakeHubBrowserAdvice.WAIT),
+            listener_count=core_plan.listener_count,
+            paused_by_human=core.trusted_human_pause,
+        )
+
+    if core_status is not status.CORE_RECEIVE_IDLE_HEALTHY:
+        return result(code(core_status.value))
+    if core.trusted_human_pause:
+        return result(code.HOLD_HUMAN_PAUSED)
+    if (evidence.desktop is not WakeHubDesktopState.OWNER_INTERACTIVE
+            or not core.interactive_session_proven):
+        return result(code.WAIT_INTERACTIVE_SESSION)
+    if evidence.session_owner is not current:
+        return result(code.HOLD_SESSION_OWNER)
+    browser = evidence.browser
+    if (browser.ownership is WakeHubChromeOwnership.ABSENT_INDEPENDENTLY_VERIFIED
+            or core.chrome_ownership
+            is WakeHubChromeOwnership.ABSENT_INDEPENDENTLY_VERIFIED):
+        return result(code.WAIT_CHROME)
+    if (browser.ownership is not WakeHubChromeOwnership.OWNED_CDP_9444
+            or core.chrome_ownership is not WakeHubChromeOwnership.OWNED_CDP_9444):
+        return result(code.HOLD_CHROME_OWNERSHIP)
+    if browser.host is not WakeHubEndpointHost.IPV4_LOOPBACK or browser.port != 9444:
+        return result(code.HOLD_CHROME_ENDPOINT)
+    if browser.pid == 0 or any(value is not current for value in (
+        browser.pid_creation, browser.executable, browser.profile,
+        browser.port_owner, browser.identity_current,
+    )):
+        return result(code.HOLD_CHROME_IDENTITY)
+    if browser.retained_account is not current:
+        return result(code.HOLD_BROWSER_ACCOUNT)
+    origin = evidence.origin
+    for proof, reason in (
+        (origin.issuer, code.HOLD_ORIGIN_ISSUER),
+        (origin.owner, code.HOLD_ORIGIN_OWNER),
+        (origin.route, code.HOLD_ORIGIN_ROUTE),
+        (origin.generation, code.HOLD_ORIGIN_GENERATION),
+    ):
+        if proof is not current:
+            return result(reason)
+    if origin.consent is not WakeHubConsentState.CURRENT:
+        return result(code.HOLD_ORIGIN_CONSENT)
+    return result(code.READY_TO_PREPARE_ADVISORY_ONLY)

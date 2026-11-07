@@ -11,6 +11,7 @@ from pathlib import Path
 import shutil
 import socket
 import subprocess
+import time
 
 import pytest
 
@@ -24,6 +25,11 @@ from ai_commerce.engineering.three_runner_topology import (
     WakeHubIdleSample, WakeHubListenerState, WakeHubMeasurementCode,
     WakeHubObservationState, WakeHubReadinessSample, WakeHubTaskState,
     WakeHubWorkState, assess_wakehub_core_idle, plan_wakehub_measurements,
+    WakeHubBrowserAdvice, WakeHubConsentState, WakeHubDesktopState,
+    WakeHubEndpointHost, WakeHubEventState, WakeHubProofState,
+    WakeHubSmartBrowserEvidence, WakeHubSmartCoreStatus, WakeHubSmartInputError,
+    WakeHubSmartOriginEvidence, WakeHubSmartReadinessCode,
+    WakeHubSmartReadinessEvidence, assess_wakehub_smart_readiness,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -954,3 +960,469 @@ def test_wh02a_all_decisions_and_exceptions_have_no_os_network_or_file_effects(m
                 with pytest.raises(WakeHubCoreInputError) as caught:
                     assess_wakehub_core_idle(invalid)
                 assert caught.value.args == ("WAKEHUB_CORE_INPUT_INVALID",)
+
+
+# All WH-04A positive facts below are synthetic private-root projections.
+# They prove policy behavior, never a native owner, route, account or grant.
+def _smart_evidence(**overrides):
+    current = WakeHubProofState.INDEPENDENTLY_CURRENT
+    values = dict(
+        core=_core_evidence(baseline=WakeHubBaseline(
+            WakeHubObservationState.NOT_MEASURED)),
+        projection=current, source=current, listeners=current,
+        desktop=WakeHubDesktopState.OWNER_INTERACTIVE, session_owner=current,
+        browser=WakeHubSmartBrowserEvidence(
+            ownership=WakeHubChromeOwnership.OWNED_CDP_9444,
+            host=WakeHubEndpointHost.IPV4_LOOPBACK, port=9444, pid=123,
+            pid_creation=current, executable=current, profile=current,
+            port_owner=current, identity_current=current, retained_account=current,
+        ),
+        origin=WakeHubSmartOriginEvidence(
+            event=WakeHubEventState.UNIQUE_CURRENT, issuer=current,
+            owner=current, route=current, generation=current,
+            consent=WakeHubConsentState.CURRENT,
+        ),
+    )
+    values.update(overrides)
+    return WakeHubSmartReadinessEvidence(**values)
+
+
+def _smart_case(section, **changes):
+    evidence = _smart_evidence()
+    return replace(evidence, **{section: replace(getattr(evidence, section), **changes)})
+
+
+def _assert_wh04a_no_effect(plan):
+    _assert_wh02a_no_authority(plan)
+    assert plan.scope == "PURE_SYNTHETIC_POLICY_ONLY"
+    assert plan.keep_event_receiver_alive is True
+    for name in ("native_operations", "start", "stop", "task", "chrome", "send",
+                 "plugin", "prepare_authorized"):
+        assert getattr(plan, name) is False
+    assert plan.native_owner_proof == "UNRESOLVED"
+    assert plan.savings == "NOT_MEASURED"
+    assert plan.resource_mode == "OBSERVE_ONLY_NO_CPU_RAM_LIMITS"
+
+
+def test_wh04a_synthetic_ready_is_deterministic_advice_without_measurements_or_effects():
+    evidence = _smart_evidence()
+    plan = assess_wakehub_smart_readiness(evidence)
+    assert plan == assess_wakehub_smart_readiness(evidence)
+    assert plan.code is WakeHubSmartReadinessCode.READY_TO_PREPARE_ADVISORY_ONLY
+    assert plan.core_status is WakeHubSmartCoreStatus.CORE_RECEIVE_IDLE_HEALTHY
+    assert plan.browser_advice is WakeHubBrowserAdvice.REUSE_VERIFIED_OWNER
+    assert plan.listener_count == len(planned_topology()) == 3
+    assert not plan.paused_by_human
+    _assert_wh04a_no_effect(plan)
+    assert "REUSE_EFFECT_EXECUTED" not in repr(plan)
+    # Optional historical samples cannot change the categorical policy output.
+    measured = replace(evidence, core=replace(evidence.core, baseline=_synthetic_baseline()))
+    assert assess_wakehub_smart_readiness(measured) == plan
+
+
+@pytest.mark.parametrize("desktop", list(WakeHubDesktopState))
+@pytest.mark.parametrize("paused", [False, True])
+def test_wh04a_headless_receive_idle_survives_desktop_lock_absence_session_zero_pause(
+    desktop, paused,
+):
+    evidence = _smart_evidence(desktop=desktop)
+    evidence = replace(evidence, core=replace(evidence.core, trusted_human_pause=paused))
+    plan = assess_wakehub_smart_readiness(evidence)
+    assert plan.core_status is WakeHubSmartCoreStatus.CORE_RECEIVE_IDLE_HEALTHY
+    if paused:
+        assert plan.code is WakeHubSmartReadinessCode.HOLD_HUMAN_PAUSED
+    elif desktop is WakeHubDesktopState.OWNER_INTERACTIVE:
+        assert plan.code is WakeHubSmartReadinessCode.READY_TO_PREPARE_ADVISORY_ONLY
+    else:
+        assert plan.code is WakeHubSmartReadinessCode.WAIT_INTERACTIVE_SESSION
+    assert plan.paused_by_human is paused
+    _assert_wh04a_no_effect(plan)
+
+
+@pytest.mark.parametrize("listener", [WakeHubListenerState.ABSENT,
+                                    WakeHubListenerState.UNAVAILABLE])
+@pytest.mark.parametrize("task", list(WakeHubTaskState))
+def test_wh04a_task_ready_or_running_never_substitutes_for_online_receiver(listener, task):
+    plan = assess_wakehub_smart_readiness(_smart_case(
+        "core", hostops_task=task, hostops_listener=listener))
+    assert plan.code is WakeHubSmartReadinessCode.WAIT_RECEIVER
+    assert plan.core_status is WakeHubSmartCoreStatus.WAIT_RECEIVER
+    assert plan.browser_advice is WakeHubBrowserAdvice.WAIT
+    _assert_wh04a_no_effect(plan)
+
+
+def test_wh04a_exact_three_registered_runners_with_degraded_engineering_keeps_receiver():
+    plan = assess_wakehub_smart_readiness(_smart_case(
+        "core", hostops_task=WakeHubTaskState.READY,
+        engineering_listeners=(WakeHubListenerState.ABSENT, WakeHubListenerState.UNAVAILABLE)))
+    assert len(planned_topology()) == 3
+    assert plan.listener_count == 1
+    assert plan.code is WakeHubSmartReadinessCode.READY_TO_PREPARE_ADVISORY_ONLY
+    _assert_wh04a_no_effect(plan)
+
+
+@pytest.mark.parametrize("name", [
+    "queue_state", "pending_work", "outstanding_send", "outstanding_signer",
+    "outstanding_lease", "pending_wake",
+])
+@pytest.mark.parametrize(("state", "expected"), [
+    (WakeHubWorkState.UNKNOWN, WakeHubSmartReadinessCode.HOLD_UNKNOWN_EFFECT),
+    (WakeHubWorkState.PENDING, WakeHubSmartReadinessCode.WAIT_PENDING_WORK),
+])
+def test_wh04a_each_unknown_or_pending_effect_blocks_even_with_all_browser_proofs(
+    name, state, expected,
+):
+    plan = assess_wakehub_smart_readiness(_smart_case("core", **{name: state}))
+    assert plan.code is expected
+    assert plan.core_status.value == expected.value
+    assert plan.browser_advice is WakeHubBrowserAdvice.WAIT
+    _assert_wh04a_no_effect(plan)
+
+
+@pytest.mark.parametrize(("changes", "expected"), [
+    (dict(unknown_effect=True), WakeHubSmartReadinessCode.HOLD_UNKNOWN_EFFECT),
+    (dict(lost_effect_receipt=True), WakeHubSmartReadinessCode.HOLD_UNKNOWN_EFFECT),
+    (dict(source_current=False), WakeHubSmartReadinessCode.HOLD_SOURCE_DRIFT),
+    (dict(hostops_task=WakeHubTaskState.QUEUED), WakeHubSmartReadinessCode.WAIT_PENDING_WORK),
+    (dict(interactive_session_proven=False), WakeHubSmartReadinessCode.WAIT_INTERACTIVE_SESSION),
+])
+def test_wh04a_source_receipts_task_and_session_fences(changes, expected):
+    plan = assess_wakehub_smart_readiness(_smart_case("core", **changes))
+    assert plan.code is expected
+    _assert_wh04a_no_effect(plan)
+
+
+@pytest.mark.parametrize(("name", "expected"), [
+    ("projection", WakeHubSmartReadinessCode.HOLD_PRIVATE_PROJECTION),
+    ("source", WakeHubSmartReadinessCode.HOLD_SOURCE_DRIFT),
+    ("listeners", WakeHubSmartReadinessCode.WAIT_RECEIVER),
+    ("session_owner", WakeHubSmartReadinessCode.HOLD_SESSION_OWNER),
+])
+@pytest.mark.parametrize("proof", [state for state in WakeHubProofState
+                                  if state is not WakeHubProofState.INDEPENDENTLY_CURRENT])
+def test_wh04a_independent_private_source_listener_and_owner_proofs_fail_closed(name, expected, proof):
+    plan = assess_wakehub_smart_readiness(_smart_evidence(**{name: proof}))
+    assert plan.code is expected
+    _assert_wh04a_no_effect(plan)
+
+
+@pytest.mark.parametrize(("event", "expected"), [
+    (WakeHubEventState.ABSENT, WakeHubSmartReadinessCode.WAIT_EVENT),
+    (WakeHubEventState.STALE, WakeHubSmartReadinessCode.HOLD_EVENT_STALE),
+    (WakeHubEventState.DUPLICATE_AMBIGUOUS, WakeHubSmartReadinessCode.HOLD_EVENT_AMBIGUITY),
+])
+def test_wh04a_missing_stale_or_ambiguous_duplicate_event_blocks_idle_and_prepare(event, expected):
+    plan = assess_wakehub_smart_readiness(_smart_case("origin", event=event))
+    assert plan.code is expected
+    assert plan.core_status.value == expected.value
+    _assert_wh04a_no_effect(plan)
+
+
+@pytest.mark.parametrize("section", ["core", "browser"])
+@pytest.mark.parametrize("ownership", [state for state in WakeHubChromeOwnership
+                                      if state is not WakeHubChromeOwnership.OWNED_CDP_9444])
+def test_wh04a_absent_conflicting_unverified_chrome_keeps_headless_core_healthy(section, ownership):
+    field_name = "chrome_ownership" if section == "core" else "ownership"
+    plan = assess_wakehub_smart_readiness(_smart_case(section, **{field_name: ownership}))
+    expected = (WakeHubSmartReadinessCode.WAIT_CHROME
+                if ownership is WakeHubChromeOwnership.ABSENT_INDEPENDENTLY_VERIFIED
+                else WakeHubSmartReadinessCode.HOLD_CHROME_OWNERSHIP)
+    assert plan.code is expected
+    assert plan.core_status is WakeHubSmartCoreStatus.CORE_RECEIVE_IDLE_HEALTHY
+    _assert_wh04a_no_effect(plan)
+
+
+@pytest.mark.parametrize("changes", [
+    dict(port=9333), dict(port=0), dict(port=65535),
+    dict(host=WakeHubEndpointHost.IPV6_LOOPBACK), dict(host=WakeHubEndpointHost.OTHER),
+])
+def test_wh04a_only_exact_ipv4_loopback_9444_is_advisable(changes):
+    plan = assess_wakehub_smart_readiness(_smart_case("browser", **changes))
+    assert plan.code is WakeHubSmartReadinessCode.HOLD_CHROME_ENDPOINT
+    _assert_wh04a_no_effect(plan)
+
+
+@pytest.mark.parametrize("name", [
+    "pid_creation", "executable", "profile", "port_owner", "identity_current", "retained_account",
+])
+@pytest.mark.parametrize("proof", [state for state in WakeHubProofState
+                                  if state is not WakeHubProofState.INDEPENDENTLY_CURRENT])
+def test_wh04a_browser_pid_creation_executable_profile_port_account_drift_blocks_reuse(name, proof):
+    plan = assess_wakehub_smart_readiness(_smart_case("browser", **{name: proof}))
+    expected = (WakeHubSmartReadinessCode.HOLD_BROWSER_ACCOUNT if name == "retained_account"
+                else WakeHubSmartReadinessCode.HOLD_CHROME_IDENTITY)
+    assert plan.code is expected
+    assert plan.core_status is WakeHubSmartCoreStatus.CORE_RECEIVE_IDLE_HEALTHY
+    assert plan.browser_advice is WakeHubBrowserAdvice.WAIT
+    _assert_wh04a_no_effect(plan)
+
+
+def test_wh04a_missing_pid_holds_and_maximum_windows_pid_is_a_schema_bound_only():
+    plan = assess_wakehub_smart_readiness(_smart_case("browser", pid=0))
+    assert plan.code is WakeHubSmartReadinessCode.HOLD_CHROME_IDENTITY
+    upper = assess_wakehub_smart_readiness(_smart_case("browser", pid=2**32 - 1))
+    assert upper.code is WakeHubSmartReadinessCode.READY_TO_PREPARE_ADVISORY_ONLY
+    _assert_wh04a_no_effect(upper)
+
+
+@pytest.mark.parametrize(("name", "expected"), [
+    ("issuer", WakeHubSmartReadinessCode.HOLD_ORIGIN_ISSUER),
+    ("owner", WakeHubSmartReadinessCode.HOLD_ORIGIN_OWNER),
+    ("route", WakeHubSmartReadinessCode.HOLD_ORIGIN_ROUTE),
+    ("generation", WakeHubSmartReadinessCode.HOLD_ORIGIN_GENERATION),
+])
+@pytest.mark.parametrize("proof", [state for state in WakeHubProofState
+                                  if state is not WakeHubProofState.INDEPENDENTLY_CURRENT])
+def test_wh04a_copied_chat_wrong_owner_missing_issuer_or_generation_cannot_prepare(name, expected, proof):
+    plan = assess_wakehub_smart_readiness(_smart_case("origin", **{name: proof}))
+    assert plan.code is expected
+    assert plan.core_status is WakeHubSmartCoreStatus.CORE_RECEIVE_IDLE_HEALTHY
+    _assert_wh04a_no_effect(plan)
+
+
+@pytest.mark.parametrize("consent", [WakeHubConsentState.ABSENT, WakeHubConsentState.REVOKED,
+                                   WakeHubConsentState.STALE])
+def test_wh04a_absent_revoked_or_stale_consent_prevents_prepare(consent):
+    plan = assess_wakehub_smart_readiness(_smart_case("origin", consent=consent))
+    assert plan.code is WakeHubSmartReadinessCode.HOLD_ORIGIN_CONSENT
+    _assert_wh04a_no_effect(plan)
+
+
+def test_wh04a_reason_priority_is_typed_and_preserves_pause_on_holds():
+    # Remove one higher-priority fault at a time from a multi-fault input.
+    missing = WakeHubProofState.MISSING
+    evidence = _smart_evidence(
+        projection=missing, source=missing, listeners=missing,
+        desktop=WakeHubDesktopState.LOCKED, session_owner=missing,
+    )
+    evidence = replace(evidence, core=replace(
+        evidence.core, lost_effect_receipt=True, source_current=False,
+        hostops_listener=WakeHubListenerState.ABSENT, outstanding_send=WakeHubWorkState.PENDING,
+        trusted_human_pause=True,
+    ), origin=replace(evidence.origin, event=WakeHubEventState.DUPLICATE_AMBIGUOUS))
+    steps = [
+        (None, {}, WakeHubSmartReadinessCode.HOLD_UNKNOWN_EFFECT),
+        ("core", dict(lost_effect_receipt=False), WakeHubSmartReadinessCode.HOLD_SOURCE_DRIFT),
+        ("core", dict(source_current=True), WakeHubSmartReadinessCode.HOLD_SOURCE_DRIFT),
+        (None, dict(source=WakeHubProofState.INDEPENDENTLY_CURRENT),
+         WakeHubSmartReadinessCode.HOLD_PRIVATE_PROJECTION),
+        (None, dict(projection=WakeHubProofState.INDEPENDENTLY_CURRENT),
+         WakeHubSmartReadinessCode.WAIT_RECEIVER),
+        ("core", dict(hostops_listener=WakeHubListenerState.PRESENT),
+         WakeHubSmartReadinessCode.WAIT_RECEIVER),
+        (None, dict(listeners=WakeHubProofState.INDEPENDENTLY_CURRENT),
+         WakeHubSmartReadinessCode.HOLD_EVENT_AMBIGUITY),
+        ("origin", dict(event=WakeHubEventState.UNIQUE_CURRENT),
+         WakeHubSmartReadinessCode.WAIT_PENDING_WORK),
+        ("core", dict(outstanding_send=WakeHubWorkState.CLEAR),
+         WakeHubSmartReadinessCode.HOLD_HUMAN_PAUSED),
+        ("core", dict(trusted_human_pause=False), WakeHubSmartReadinessCode.WAIT_INTERACTIVE_SESSION),
+        (None, dict(desktop=WakeHubDesktopState.OWNER_INTERACTIVE),
+         WakeHubSmartReadinessCode.HOLD_SESSION_OWNER),
+    ]
+    for section, changes, expected in steps:
+        evidence = (replace(evidence, **{section: replace(getattr(evidence, section), **changes)})
+                    if section else replace(evidence, **changes))
+        plan = assess_wakehub_smart_readiness(evidence)
+        assert plan.code is expected
+        assert type(plan.code) is WakeHubSmartReadinessCode
+        assert type(plan.core_status) is WakeHubSmartCoreStatus
+        assert plan.paused_by_human is evidence.core.trusted_human_pause
+        _assert_wh04a_no_effect(plan)
+
+
+def test_wh04a_browser_and_origin_priority_never_infers_reuse_from_partial_proofs():
+    missing = WakeHubProofState.MISSING
+    current = WakeHubProofState.INDEPENDENTLY_CURRENT
+    evidence = _smart_case(
+        "browser", ownership=WakeHubChromeOwnership.UNVERIFIED, port=9333,
+        pid_creation=missing, retained_account=missing,
+    )
+    evidence = replace(evidence, origin=replace(
+        evidence.origin, issuer=missing, owner=missing, route=missing,
+        generation=missing, consent=WakeHubConsentState.REVOKED,
+    ))
+    steps = [
+        ("browser", {}, WakeHubSmartReadinessCode.HOLD_CHROME_OWNERSHIP),
+        ("browser", dict(ownership=WakeHubChromeOwnership.OWNED_CDP_9444),
+         WakeHubSmartReadinessCode.HOLD_CHROME_ENDPOINT),
+        ("browser", dict(port=9444), WakeHubSmartReadinessCode.HOLD_CHROME_IDENTITY),
+        ("browser", dict(pid_creation=current), WakeHubSmartReadinessCode.HOLD_BROWSER_ACCOUNT),
+        ("browser", dict(retained_account=current), WakeHubSmartReadinessCode.HOLD_ORIGIN_ISSUER),
+        ("origin", dict(issuer=current), WakeHubSmartReadinessCode.HOLD_ORIGIN_OWNER),
+        ("origin", dict(owner=current), WakeHubSmartReadinessCode.HOLD_ORIGIN_ROUTE),
+        ("origin", dict(route=current), WakeHubSmartReadinessCode.HOLD_ORIGIN_GENERATION),
+        ("origin", dict(generation=current), WakeHubSmartReadinessCode.HOLD_ORIGIN_CONSENT),
+        ("origin", dict(consent=WakeHubConsentState.CURRENT),
+         WakeHubSmartReadinessCode.READY_TO_PREPARE_ADVISORY_ONLY),
+    ]
+    for section, changes, expected in steps:
+        evidence = replace(evidence, **{section: replace(getattr(evidence, section), **changes)})
+        plan = assess_wakehub_smart_readiness(evidence)
+        assert plan.code is expected
+        assert plan.core_status is WakeHubSmartCoreStatus.CORE_RECEIVE_IDLE_HEALTHY
+        assert (plan.browser_advice is WakeHubBrowserAdvice.REUSE_VERIFIED_OWNER) is (
+            expected is WakeHubSmartReadinessCode.READY_TO_PREPARE_ADVISORY_ONLY)
+        _assert_wh04a_no_effect(plan)
+
+
+@pytest.mark.parametrize(("section", "name", "value"), [
+    (None, "projection", True), (None, "source", "INDEPENDENTLY_CURRENT"),
+    (None, "listeners", None), (None, "desktop", WakeHubListenerState.ABSENT),
+    (None, "session_owner", "synthetic-secret"), (None, "core", {}),
+    (None, "browser", {}), (None, "origin", None),
+    ("browser", "ownership", "OWNED_CDP_9444"),
+    ("browser", "ownership", WakeHubListenerState.PRESENT),
+    ("browser", "host", "127.0.0.1"),
+    ("browser", "host", "https://synthetic-secret.invalid/private"),
+    ("browser", "pid_creation", WakeHubConsentState.CURRENT),
+    ("browser", "port", True), ("browser", "port", 9444.0),
+    ("browser", "port", None), ("browser", "port", -1),
+    ("browser", "port", 65536), ("browser", "port", 10**1000),
+    ("browser", "pid", True), ("browser", "pid", 2**32),
+    ("browser", "pid", 10**1000), ("browser", "pid", -1),
+    ("browser", "pid", (1,) * (WAKEHUB_MAX_SAMPLES + 1)),
+    ("origin", "event", "UNIQUE_CURRENT"),
+    ("origin", "generation", True), ("origin", "route", {"verified": True}),
+    ("origin", "consent", WakeHubProofState.INDEPENDENTLY_CURRENT),
+    ("core", "engineering_listeners", [WakeHubListenerState.PRESENT] * 2),
+    ("core", "engineering_listeners", (WakeHubListenerState.PRESENT,)),
+    ("core", "engineering_listeners", (WakeHubListenerState.PRESENT,) * (WAKEHUB_MAX_SAMPLES + 1)),
+    ("core", "queue_state", None), ("core", "outstanding_send", "synthetic-secret"),
+    ("core", "source_current", 1), ("core", "baseline", {"token": "synthetic-secret"}),
+    ("core", "baseline", WakeHubBaseline(WakeHubObservationState.UNVERIFIED,
+                                         idle_samples=(None,) * (WAKEHUB_MAX_SAMPLES + 1))),
+])
+def test_wh04a_closed_nested_schema_errors_are_typed_and_sanitized(section, name, value):
+    evidence = _smart_evidence()
+    with pytest.raises(WakeHubSmartInputError) as caught:
+        if section:
+            changed = replace(getattr(evidence, section), **{name: value})
+            assess_wakehub_smart_readiness(replace(evidence, **{section: changed}))
+        else:
+            assess_wakehub_smart_readiness(replace(evidence, **{name: value}))
+    assert caught.value.args == ("WAKEHUB_SMART_READINESS_INPUT_INVALID",)
+    assert "synthetic-secret" not in str(caught.value)
+
+
+def test_wh04a_missing_unknown_fields_and_public_dict_cannot_authenticate_or_enable_effects():
+    evidence = _smart_evidence()
+    for item in (evidence, evidence.browser, evidence.origin):
+        values = {item_field.name: getattr(item, item_field.name) for item_field in fields(item)}
+        for invalid in ({}, {**values, "synthetic-secret": "private-value"},
+                        {**values, "verified": True}, {**values, "send": True}):
+            with pytest.raises(WakeHubSmartInputError) as caught:
+                type(item)(**invalid)
+            assert caught.value.args == ("WAKEHUB_SMART_READINESS_INPUT_INVALID",)
+        with pytest.raises(WakeHubSmartInputError):
+            type(item)(values)
+    for invalid in (None, {}, {"verified": True}, "synthetic-secret", (evidence,)):
+        with pytest.raises(WakeHubSmartInputError) as caught:
+            assess_wakehub_smart_readiness(invalid)
+        assert caught.value.args == ("WAKEHUB_SMART_READINESS_INPUT_INVALID",)
+    with pytest.raises(WakeHubSmartInputError) as caught:
+        assess_wakehub_smart_readiness(evidence, **{"synthetic-secret": True})
+    assert caught.value.args == ("WAKEHUB_SMART_READINESS_INPUT_INVALID",)
+
+
+def test_wh04a_rejects_subclasses_and_forged_enum_members_without_invoking_user_code():
+    class UnsafeInt(int):
+        def __le__(self, other):
+            pytest.fail("numeric subclass executed")
+
+    class UnsafeStr(str):
+        def __eq__(self, other):
+            pytest.fail("string subclass executed")
+
+    class UnsafeEvidence(WakeHubSmartReadinessEvidence):
+        def _validate(self):
+            pytest.fail("evidence subclass executed")
+
+    forged = str.__new__(WakeHubProofState, "INDEPENDENTLY_CURRENT")
+    for changes in (dict(source=forged), dict(source=UnsafeStr("INDEPENDENTLY_CURRENT"))):
+        with pytest.raises(WakeHubSmartInputError):
+            _smart_evidence(**changes)
+    with pytest.raises(WakeHubSmartInputError):
+        _smart_case("browser", port=UnsafeInt(9444))
+    with pytest.raises(WakeHubSmartInputError):
+        assess_wakehub_smart_readiness(object.__new__(UnsafeEvidence))
+
+
+def test_wh04a_nested_evidence_and_every_external_effect_field_are_frozen():
+    evidence = _smart_evidence()
+    plan = assess_wakehub_smart_readiness(evidence)
+    for item, name, value in (
+        (evidence, "source", WakeHubProofState.MISSING),
+        (evidence.core, "source_current", False),
+        (evidence.core.baseline, "idle_samples", ()),
+        (evidence.browser, "port", 9333),
+        (evidence.origin, "consent", WakeHubConsentState.REVOKED),
+        (plan, "code", WakeHubSmartReadinessCode.WAIT_RECEIVER),
+    ):
+        with pytest.raises(FrozenInstanceError):
+            setattr(item, name, value)
+    for item_field in fields(plan):
+        if item_field.init:
+            continue
+        name = item_field.name
+        original = getattr(plan, name)
+        with pytest.raises(FrozenInstanceError):
+            setattr(plan, name, True)
+        with pytest.raises((TypeError, ValueError), match=rf"^field {name} is declared with init=False,"):
+            replace(plan, **{name: True})
+        assert getattr(plan, name) == original
+    for item in (evidence, evidence.core, evidence.core.baseline, evidence.browser, evidence.origin, plan):
+        assert not hasattr(item, "__dict__")
+
+
+def test_wh04a_every_reason_and_invalid_input_are_pure_under_external_effect_traps(monkeypatch):
+    cases = [
+        _smart_evidence(),
+        *(_smart_case("core", **change) for change in (
+            dict(unknown_effect=True), dict(lost_effect_receipt=True), dict(source_current=False),
+            dict(hostops_listener=WakeHubListenerState.ABSENT),
+            dict(outstanding_send=WakeHubWorkState.PENDING), dict(trusted_human_pause=True),
+            dict(interactive_session_proven=False),
+        )),
+        _smart_evidence(projection=WakeHubProofState.MISSING),
+        _smart_evidence(session_owner=WakeHubProofState.MISSING),
+        *(_smart_case("origin", event=state) for state in WakeHubEventState),
+        *(_smart_case("browser", ownership=state) for state in WakeHubChromeOwnership),
+        _smart_case("browser", port=9333),
+        _smart_case("browser", pid_creation=WakeHubProofState.MISMATCH),
+        _smart_case("browser", retained_account=WakeHubProofState.MISSING),
+        *(_smart_case("origin", **{name: WakeHubProofState.MISSING})
+          for name in ("issuer", "owner", "route", "generation")),
+        _smart_case("origin", consent=WakeHubConsentState.REVOKED),
+    ]
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("WH-04A attempted an external effect")
+
+    codes = set()
+    with monkeypatch.context() as guard:
+        for owner, names in (
+            (builtins, ("open",)),
+            (Path, ("open", "read_text", "read_bytes", "write_text", "write_bytes", "stat",
+                    "iterdir", "mkdir", "unlink", "rename", "replace")),
+            (os, ("open", "stat", "listdir", "scandir", "mkdir", "remove", "rename",
+                  "replace", "system", "kill", "startfile", "popen", "spawnv", "spawnve")),
+            (subprocess, ("Popen", "run", "call", "check_call", "check_output")),
+            (socket, ("socket", "create_connection", "getaddrinfo", "gethostbyname")),
+            (time, ("sleep", "time", "monotonic", "perf_counter")),
+        ):
+            for name in names:
+                guard.setattr(owner, name, forbidden)
+        for evidence in cases:
+            plan = assess_wakehub_smart_readiness(evidence)
+            assert plan == assess_wakehub_smart_readiness(evidence)
+            codes.add(plan.code)
+            _assert_wh04a_no_effect(plan)
+        # Validation must still fail before a priority HOLD and leak no input.
+        for invalid in (None, {"token": "synthetic-secret"}):
+            with pytest.raises(WakeHubSmartInputError) as caught:
+                assess_wakehub_smart_readiness(invalid)
+            assert caught.value.args == ("WAKEHUB_SMART_READINESS_INPUT_INVALID",)
+        with pytest.raises(WakeHubSmartInputError):
+            _smart_case("core", unknown_effect=True, outstanding_send="synthetic-secret")
+    assert codes == set(WakeHubSmartReadinessCode)
