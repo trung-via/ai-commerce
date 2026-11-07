@@ -2272,3 +2272,322 @@ def test_r9_defect_b_idempotent_same_payload_and_concurrent_race(tmp_path):
         fingerprint=fp, issuer=None
     ) == expected_ref
 
+
+def _readonly_audit_fixture(*, published=True, unknown=False, source=BASE, storage=None,
+                            issue=599, repair_of=None):
+    """Fresh modeled source only. No historical artifacts, native Git or providers."""
+    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.candidate_policy import canonical, EVIDENCE_MARKER, evidence_digest
+    storage = storage or WorkOwnerMemoryTransport(source)
+    storage.commits.setdefault(source, {"tree": {"sha": "e" * 40}, "parents": [], "message": "source"})
+    action = {**_action(), "attempt_id": f"audit-{issue}", "effort": "xhigh"}
+    if repair_of:
+        action["repair_of"] = repair_of
+    packet = {"batch_id": f"audit-source-{issue}", "source_sha": source, "actions": [action]}
+    storage.issues[issue] = packet
+    identity = WorkOwner.identity(storage, issue, packet, action)
+    owner = WorkOwner.acquire(storage, identity)
+    fp = identity["fingerprint"]
+    storage.index_attempt(issue_number=issue, source_sha=source, attempt_id=action["attempt_id"],
+                          fingerprint=fp, issuer="trung-via")
+    storage.claim(source_sha=source, attempt_id=action["attempt_id"], fingerprint=fp)
+    owner.append("CLAIMED")
+    storage.pre_spawn_checkpoint(source_sha=source, attempt_id=action["attempt_id"], fingerprint=fp)
+    owner.append("SPAWN_INTENT")
+    storage.spawned_checkpoint(source_sha=source, attempt_id=action["attempt_id"], fingerprint=fp, child_pid=28248)
+    owner.append("CHILD_OBSERVED", pid=28248)
+    owner.append("PROVIDER_INTENT", round=0)
+    if unknown:
+        owner.append("UNKNOWN")
+    elif published:
+        proof = _make_valid_proof(action["action_id"], action["attempt_id"], source, fp)
+        proof["allowed_paths"] = action["allowed_paths"]
+        proof["changed_files"] = action["allowed_paths"]
+        proof["candidate_file_sha256"] = {action["allowed_paths"][0]: "1" * 64}
+        proof["verification"]["profile"] = action["verification_profile"]
+        proof["provenance"].update({k: action[k] for k in ("executor", "model", "effort")})
+        receipt = evidence_digest(proof)
+        # Per-round invocation digest differs from the aggregate candidate digest.
+        owner.append("ROUND_VERIFIED", round=0, receipt="d" * 64)
+        owner.append("RESULT_VERIFIED", receipt=receipt)
+        owner.append("PUBLISH_INTENT", receipt=receipt)
+        sha = hashlib.sha1(f"audit-candidate-{issue}".encode()).hexdigest()
+        key = storage.attempt_key(action["attempt_id"])
+        storage.refs[f"refs/heads/ef02/candidate/{key}"] = sha
+        storage.commits[sha] = {"message": f"EF02 candidate attempt {action['attempt_id']}{EVIDENCE_MARKER}{canonical(proof)}",
+                                "tree": {"sha": "c" * 40}, "parents": [{"sha": source}]}
+        owner.append("PUBLISHED", receipt=receipt, candidate=WorkOwner.digest(sha))
+    return storage, packet, action, owner
+
+
+def _run_readonly_audit(storage, packet, action, owner, **kwargs):
+    from ai_commerce.remote.transport import WorkOwnerAudit
+    before = json.dumps({"refs": storage.refs, "commits": storage.commits}, sort_keys=True)
+    storage.requests.clear()
+    report = WorkOwnerAudit.run(storage, issue_number=owner.identity["current_issue"], batch=packet,
+        action=action, trusted_issuer="trung-via", **kwargs).payload()
+    assert all(method == "GET" for method, *_ in storage.requests)
+    assert before == json.dumps({"refs": storage.refs, "commits": storage.commits}, sort_keys=True)
+    assert report["status"] == "HOLD_UNKNOWN_EFFECT"
+    assert report["gate"] != "VERIFIED" and report["owner_witness_gate"] == "UNKNOWN"
+    assert report["writable_contract"] == "INACTIVE"
+    assert report["replay_authorized"] is report["publication_authorized"] is False
+    assert report["proves_current_mt01_pass"] is False
+    return report
+
+
+def _rewrite_audit_record(storage, owner, index, mutate):
+    from ai_commerce.remote.candidate_policy import canonical
+    ref = f"refs/heads/{owner.prefix}{index:03d}"
+    commit = storage.commits[storage.refs[ref]]
+    record = json.loads(commit["message"][len(owner.MARKER):])
+    record.pop("digest")
+    mutate(record)
+    record["digest"] = owner.digest(record)
+    commit["message"] = owner.MARKER + canonical(record)
+
+
+@pytest.mark.parametrize("fault", ["issue", "issuer", "claim", "index", "attempt_key", "digest",
+    "fingerprint", "parent", "tree", "genesis_tree", "fence", "skipped_generation", "ref_namespace",
+    "terminal_receipt", "terminal_candidate", "terminal_attempt", "candidate_parent", "candidate_proof"])
+def test_readonly_audit_rejects_forgery_without_writing(fault):
+    storage, packet, action, owner = _readonly_audit_fixture()
+    key = storage.attempt_key(action["attempt_id"])
+    journal = f"refs/heads/{owner.prefix}"
+    if fault in ("claim", "index"):
+        namespace = "claims" if fault == "claim" else "index"
+        commit = storage.commits[storage.refs[f"refs/heads/ef02/{namespace}/{key}"]]
+        commit["message"] = commit["message"].replace(owner.identity["fingerprint"], "0" * 64)
+    elif fault in ("issue", "issuer"):
+        storage.issues[599] = {**packet, "user": {"login": "forged-issuer"}}
+        if fault == "issuer":
+            packet = storage.issues[599]  # Full packet equality cannot authenticate its issuer.
+            action = packet["actions"][0]
+    elif fault == "attempt_key":
+        storage.refs[f"refs/heads/ef02/claims/{key}"] = storage.refs[f"refs/heads/ef02/index/{key}"]
+    elif fault == "digest":
+        storage.commits[storage.refs[journal + "005"]]["message"] += " "
+        commit = storage.commits[storage.refs[journal + "005"]]
+        commit["message"] = commit["message"].replace('"digest":"', '"digest":"0')
+    elif fault == "fingerprint":
+        action = {**action, "instruction": "forged model prose"}
+    elif fault in ("parent", "tree", "genesis_tree"):
+        indices = range(9) if fault == "genesis_tree" else [5]
+        for idx in indices:
+            commit = storage.commits[storage.refs[journal + f"{idx:03d}"]]
+            if fault == "parent":
+                commit["parents"] = [{"sha": "f" * 40}]
+            else:
+                commit["tree"] = {"sha": "f" * 40}
+    elif fault in ("fence", "skipped_generation"):
+        _rewrite_audit_record(storage, owner, 5, lambda r: r.update(
+            {"fence": "0" * 64} if fault == "fence" else {"generation": 3}))
+    elif fault == "ref_namespace":
+        storage.refs[journal + "evil005"] = storage.refs.pop(journal + "005")
+    elif fault.startswith("terminal_"):
+        field = {"terminal_receipt": "receipt", "terminal_candidate": "candidate", "terminal_attempt": "attempt_id"}[fault]
+        _rewrite_audit_record(storage, owner, 8, lambda r: r["data"].update({field: "0" * 64}))
+    else:
+        commit = storage.commits[storage.refs[f"refs/heads/ef02/candidate/{key}"]]
+        if fault == "candidate_parent":
+            commit["parents"] = [{"sha": "f" * 40}]
+        else:
+            commit["message"] = commit["message"].replace('"exit_code":0', '"exit_code":1')
+    result = _run_readonly_audit(storage, packet, action, owner)
+    assert result["source_gate"] == "CONTRADICTED", result
+
+
+@pytest.mark.parametrize("namespace", ["index", "claims", "pre-spawn", "spawned", "candidate"])
+def test_readonly_audit_missing_boundary_never_means_no_effect(namespace):
+    storage, packet, action, owner = _readonly_audit_fixture()
+    storage.refs.pop(f"refs/heads/ef02/{namespace}/{storage.attempt_key(action['attempt_id'])}")
+    result = _run_readonly_audit(storage, packet, action, owner)
+    assert result["source_gate"] == "UNKNOWN"
+
+
+@pytest.mark.parametrize("unknown", [False, True])
+def test_readonly_audit_provider_quota_and_partial_scratch_cannot_complete_round(unknown):
+    from ai_commerce.remote.transport import WorkOwnerAuditDiagnostics, AuditProviderStatus
+    storage, packet, action, owner = _readonly_audit_fixture(published=False, unknown=unknown)
+    result = _run_readonly_audit(storage, packet, action, owner, diagnostics=WorkOwnerAuditDiagnostics(
+        provider_status=AuditProviderStatus.QUOTA_EXHAUSTED, scratch_dirty=True, cleanup_completed=False))
+    assert result["source_gate"] == "UNKNOWN" and result["code"] == "PROVIDER_OUTCOME_UNKNOWN"
+    assert result["provider_status"] == "QUOTA_EXHAUSTED"
+    assert result["stage"] == ("UNKNOWN" if unknown else "PROVIDER_INTENT")
+
+
+def test_readonly_audit_identifies_published_without_signer_or_new_authority():
+    storage, packet, action, owner = _readonly_audit_fixture()
+    first = _run_readonly_audit(storage, packet, action, owner)
+    second = _run_readonly_audit(storage, packet, action, owner)
+    assert first == second
+    assert first["source_gate"] == "VERIFIED" and first["stage"] == "PUBLISHED"
+    assert first["candidate_sha"] == storage.refs[f"refs/heads/ef02/candidate/{storage.attempt_key(action['attempt_id'])}"]
+    assert any(p["ref"].endswith("/008") for p in first["provenance"])
+    assert first["code"] == "PUBLISHED_SOURCE_AUTHENTICATED_OWNER_WITNESS_MISSING"
+
+
+def test_readonly_audit_failed_cleanup_holds_even_with_authenticated_candidate():
+    from ai_commerce.remote.transport import WorkOwnerAuditDiagnostics
+    args = _readonly_audit_fixture()
+    result = _run_readonly_audit(*args, diagnostics=WorkOwnerAuditDiagnostics(cleanup_completed=False))
+    assert result["source_gate"] == "UNKNOWN" and result["code"] == "CLEANUP_UNCONFIRMED"
+
+
+def test_readonly_audit_contradictory_ef01_receipt_fails_closed():
+    from ai_commerce.remote.transport import WorkOwnerAuditDiagnostics
+    result = _run_readonly_audit(*_readonly_audit_fixture(),
+        diagnostics=WorkOwnerAuditDiagnostics(ef01_report_sha256="0" * 64))
+    assert result["source_gate"] == "CONTRADICTED" and result["code"] == "EF01_RECEIPT_CONTRADICTED"
+
+
+@pytest.mark.parametrize("budget", [0, True, 1, 8, 257])
+def test_readonly_audit_cumulative_read_budget_includes_existing_strict_reader(budget):
+    args = _readonly_audit_fixture()
+    result = _run_readonly_audit(*args, read_budget=budget)
+    assert result["source_gate"] == "UNKNOWN"
+    assert result["reads"] <= (budget if type(budget) is int and 1 <= budget <= 256 else 0)
+
+
+def test_readonly_audit_detects_concurrent_candidate_change_without_repairing_it(monkeypatch):
+    storage, packet, action, owner = _readonly_audit_fixture()
+    api = storage.api
+    path = "/git/ref/heads/ef02/candidate/" + storage.attempt_key(action["attempt_id"])
+    count = 0
+    def racing(method, route, data=None):
+        nonlocal count
+        result = api(method, route, data)
+        if route == path:
+            count += 1
+            if count > 1:
+                result["object"]["sha"] = "f" * 40
+        return result
+    monkeypatch.setattr(storage, "api", racing)
+    result = _run_readonly_audit(storage, packet, action, owner)
+    assert result["source_gate"] == "UNKNOWN" and result["code"] == "CONCURRENT_SOURCE_CHANGE"
+
+
+def test_readonly_audit_404_candidate_and_later_publication_never_grant_replay(monkeypatch):
+    storage, packet, action, owner = _readonly_audit_fixture()
+    api = storage.api
+    def missing(method, route, data=None):
+        if "/candidate/" in route:
+            raise RemoteTransportError("GITHUB_HTTP_404", http_status=404)
+        return api(method, route, data)
+    monkeypatch.setattr(storage, "api", missing)
+    result = _run_readonly_audit(storage, packet, action, owner)
+    assert result["source_gate"] == "UNKNOWN"
+    assert result["code"] == "CANDIDATE_UNOBSERVED_NOT_EFFECT_ABSENCE"
+
+
+def test_readonly_audit_never_exports_exception_issue_prose_or_token(monkeypatch):
+    storage, packet, action, owner = _readonly_audit_fixture()
+    sentinel = "secret-DO-NOT-EXPORT"
+    monkeypatch.setattr(storage, "api", lambda *a, **k: (_ for _ in ()).throw(RuntimeError(sentinel)))
+    result = _run_readonly_audit(storage, packet, action, owner)
+    assert sentinel not in json.dumps(result) and "fixture-not-a-credential" not in json.dumps(result)
+    assert result["source_gate"] == "UNKNOWN"
+
+
+def test_readonly_audit_successor_uses_authentic_root_source_and_rejects_stale_owner():
+    storage, packet, action, owner = _readonly_audit_fixture(issue=587)
+    successor = _readonly_audit_fixture(storage=storage, issue=595, source="b" * 40, repair_of="#587", unknown=True)
+    result = _run_readonly_audit(*successor)
+    assert result["generation"] == 2 and result["stage"] == "UNKNOWN"
+    assert result["code"] == "PROVIDER_OUTCOME_UNKNOWN"
+    stale = _run_readonly_audit(storage, packet, action, owner)
+    assert stale["source_gate"] == "CONTRADICTED" and stale["code"] == "STALE_GENERATION"
+
+
+def test_readonly_audit_forged_v1_genesis_never_uses_successor_source():
+    storage, packet, action, owner = _readonly_audit_fixture()
+    legacy = {**owner.base_identity, "work_key": owner.identity["work_key"], "source_sha": "b" * 40,
+              "batch_id": packet["batch_id"], "attempt_id": action["attempt_id"], "fingerprint": owner.identity["fingerprint"]}
+    _rewrite_audit_record(storage, owner, 0, lambda r: r.update(identity=legacy))
+    result = _run_readonly_audit(storage, packet, action, owner)
+    assert result["source_gate"] == "CONTRADICTED" and result["code"] == "STRICT_WORKOWNER_REJECTED"
+
+
+def test_readonly_audit_worker_entrypoint_never_acquires_or_executes(monkeypatch):
+    storage, packet, action, owner = _readonly_audit_fixture(unknown=True)
+    worker = object.__new__(LocalBatchWorker)
+    worker.github, worker.batch, worker.issue_number, worker.issuer_login = storage, packet, 599, "trung-via"
+    def forbidden(*a, **k):
+        pytest.fail("audit crossed mutation boundary")
+    monkeypatch.setattr(worker, "_acquire_owner", forbidden)
+    monkeypatch.setattr(worker, "execute_action", forbidden)
+    monkeypatch.setattr(worker, "reconcile_action", forbidden)
+    monkeypatch.setattr(owner.__class__, "acquire", forbidden)
+    monkeypatch.setattr(owner.__class__, "append", forbidden)
+    storage.requests.clear()
+    result = worker.audit_action(action)
+    assert result["stage"] == "UNKNOWN" and result["replay_authorized"] is False
+    assert all(method == "GET" for method, *_ in storage.requests)
+
+
+@pytest.mark.parametrize("namespace", ["pre-spawn", "spawned"])
+@pytest.mark.parametrize("field", ["message", "parents", "tree"])
+def test_readonly_audit_tampered_spawn_witnesses_fail_closed(namespace, field):
+    storage, packet, action, owner = _readonly_audit_fixture()
+    commit = storage.commits[storage.refs[f"refs/heads/ef02/{namespace}/{storage.attempt_key(action['attempt_id'])}"]]
+    commit[field] = {"message": "forged checkpoint", "parents": [{"sha": BASE}], "tree": {"sha": "0" * 40}}[field]
+    result = _run_readonly_audit(storage, packet, action, owner)
+    assert result["source_gate"] == "CONTRADICTED" and result["code"] == "BOUNDARY_IDENTITY_MISMATCH"
+
+
+@pytest.mark.parametrize("terminal", ["missing", "forged"])
+def test_readonly_audit_missing_or_forged_terminal_never_downgrades_reader(terminal):
+    storage, packet, action, owner = _readonly_audit_fixture()
+    if terminal == "missing":
+        storage.refs.pop(f"refs/heads/{owner.prefix}008")
+    else:
+        _rewrite_audit_record(storage, owner, 8, lambda r: r.update(stage="FAIL_VERIFIED"))
+    result = _run_readonly_audit(storage, packet, action, owner)
+    assert result["source_gate"] == ("UNKNOWN" if terminal == "missing" else "CONTRADICTED")
+
+
+def test_readonly_audit_authentic_v1_genesis_with_different_successor_source():
+    storage, packet, action, owner = _readonly_audit_fixture(issue=587)
+    full_identity = {**owner.base_identity, **{k: owner.identity[k] for k in
+        ("work_key", "source_sha", "batch_id", "attempt_id", "fingerprint")}}
+    previous = None
+    for index in range(9):
+        def migrate(record):
+            record.update(identity=full_identity, previous=previous)
+        _rewrite_audit_record(storage, owner, index, migrate)
+        commit = storage.commits[storage.refs[f"refs/heads/{owner.prefix}{index:03d}"]]
+        previous = json.loads(commit["message"][len(owner.MARKER):])["digest"]
+    assert _run_readonly_audit(storage, packet, action, owner)["source_gate"] == "VERIFIED"
+    successor = _readonly_audit_fixture(storage=storage, issue=595, source="b" * 40, repair_of="#587")
+    result = _run_readonly_audit(*successor)
+    assert result["source_gate"] == "VERIFIED" and result["generation"] == 2
+
+
+def test_readonly_audit_requires_external_trusted_issuer():
+    from ai_commerce.remote.transport import WorkOwnerAudit
+    storage, packet, action, owner = _readonly_audit_fixture()
+    storage.requests.clear()
+    result = WorkOwnerAudit.run(storage, issue_number=599, batch=packet, action=action,
+                               trusted_issuer=None).payload()
+    assert result["source_gate"] == "UNKNOWN" and result["code"] == "TRUSTED_ISSUER_REQUIRED"
+    assert storage.requests == [] and result["reads"] == 0
+
+
+def test_readonly_audit_read_capability_rejects_mutation_and_unbounded_responses():
+    from ai_commerce.remote.transport import _WorkOwnerAuditReads, _AuditContradicted, WorkOwnerAudit
+    storage, packet, action, owner = _readonly_audit_fixture()
+    reads = _WorkOwnerAuditReads(storage, 10)
+    storage.requests.clear()
+    with pytest.raises(_AuditContradicted, match="READ_ONLY_BOUNDARY"):
+        reads.api("POST", "/git/refs", {})
+    assert storage.requests == []
+    api = storage.api
+    def excessive(method, route, data=None):
+        if "/matching-refs/" in route:
+            return [{}] * 33
+        return api(method, route, data)
+    storage.api = excessive
+    result = _run_readonly_audit(storage, packet, action, owner)
+    assert result["source_gate"] == "CONTRADICTED" and result["code"] == "RESPONSE_BOUND_INVALID"
+
