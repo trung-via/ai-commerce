@@ -2,14 +2,206 @@
 import copy
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from ai_commerce.engineering import runner
 from ai_commerce.engineering.profile import ExecutorSelection
+from ai_commerce.engineering import adapters
+
+
+def input_fixture(tmp_path, feedback=True):
+    repo, mirror = tmp_path / "source", tmp_path / "input"
+    repo.mkdir()
+    mirror.mkdir()
+    expected = {"instruction.txt": 'Sửa mã nguồn "Việt" \\ 🚀'.encode()}
+    if feedback:
+        expected["repair_feedback.json"] = b'{"trusted_host_feedback":true}\n'
+    for name, data in expected.items():
+        (mirror / name).write_bytes(data)
+    baseline = adapters.agy_input_manifest(repo, mirror, expected)
+    assert baseline["status"] == "INTACT", baseline
+    return repo, mirror, expected, baseline
+
+
+def test_benign_sidecar_keeps_contract_hash_and_is_never_read(tmp_path, monkeypatch):
+    repo, mirror, expected, baseline = input_fixture(tmp_path)
+    (mirror / "pytest-session.log").write_bytes(b"not an instruction")
+    # The old guard rejects exactly this reproduction before comparing bytes.
+    with pytest.raises(ValueError, match="AGY_EVIDENCE_DIR_NOT_PREPARED"):
+        adapters.agy_input_files(repo, mirror)
+    original = adapters.agy_read_regular
+    def read_contract_only(path, limit):
+        assert path.name in expected
+        return original(path, limit)
+    monkeypatch.setattr(adapters, "agy_read_regular", read_contract_only)
+    result = adapters.agy_input_manifest(repo, mirror, expected, baseline)
+    assert result["status"] == "INTACT"
+    contract = next(f for f in result["files"] if f["name"] == "instruction.txt")
+    assert contract["sha256"] == hashlib.sha256(expected["instruction.txt"]).hexdigest()
+    sidecar = next(f for f in result["files"] if f["role"] == "AUXILIARY")
+    assert sidecar["sha256"] is None and sidecar["hash_status"] == "AUXILIARY_CONTENT_NOT_READ"
+
+
+@pytest.mark.parametrize("name", ["instruction.txt", "repair_feedback.json"])
+@pytest.mark.parametrize("change,reason", [("modify", "MODIFIED"), ("delete", "DELETED"), ("replace", "REPLACED")])
+def test_contract_tampering_has_exact_reason(tmp_path, name, change, reason):
+    repo, mirror, expected, baseline = input_fixture(tmp_path)
+    target = mirror / name
+    if change == "modify":
+        target.write_bytes(b"tampered")
+    elif change == "delete":
+        target.unlink()
+    else:
+        # Keep the old inode alive to make identity replacement deterministic.
+        target.rename(tmp_path / "old-contract")
+        target.write_bytes(expected[name])
+    result = adapters.agy_input_manifest(repo, mirror, expected, baseline)
+    assert result["status"] == "HOLD"
+    assert result["reason"] == "AGY_INPUT_CONTRACT_" + reason
+
+
+@pytest.mark.parametrize("name", ["settings.json", "AGENTS.md", "metadata.json", "pytest.ini",
+                                  "pytest-session.exe", "pytest-session.py", "scratch-session.cmd",
+                                  "cache-agent.log.json", "repair_feedback.json"])
+def test_unknown_config_and_executable_names_hold(tmp_path, name):
+    repo, mirror, expected, baseline = input_fixture(tmp_path, feedback=False)
+    (mirror / name).write_bytes(b"opaque")
+    result = adapters.agy_input_manifest(repo, mirror, expected, baseline)
+    assert result["status"] == "HOLD"
+    assert result["reason"] in ("AGY_INPUT_UNEXPECTED_AUXILIARY", "AGY_INPUT_EXECUTABLE")
+
+
+@pytest.mark.parametrize("target", ["instruction.txt", "pytest-session.log"])
+def test_hardlinks_hold_without_opening_external_bytes(tmp_path, target):
+    repo, mirror, expected, baseline = input_fixture(tmp_path)
+    outside = tmp_path / "external"
+    outside.write_bytes(b"private outside")
+    (mirror / target).unlink(missing_ok=True)
+    try:
+        os.link(outside, mirror / target)
+    except PermissionError:
+        pytest.skip("native hardlink creation denied; no bypass")
+    result = adapters.agy_input_manifest(repo, mirror, expected, baseline)
+    assert result["status"] == "HOLD" and result["reason"] == "AGY_INPUT_HARDLINK"
+
+
+def test_reported_hardlink_metadata_holds_even_when_native_creation_is_unavailable(tmp_path, monkeypatch):
+    """Simulated stat metadata, explicitly not native hardlink proof."""
+    repo, mirror, expected, baseline = input_fixture(tmp_path)
+    original = Path.lstat
+    target = mirror / "instruction.txt"
+    def linked_stat(path, *args, **kwargs):
+        info = original(path, *args, **kwargs)
+        if path == target:
+            return SimpleNamespace(st_mode=info.st_mode, st_size=info.st_size,
+                                   st_file_attributes=getattr(info, "st_file_attributes", 0), st_nlink=2)
+        return info
+    monkeypatch.setattr(Path, "lstat", linked_stat)
+    result = adapters.agy_input_manifest(repo, mirror, expected, baseline)
+    assert result["status"] == "HOLD" and result["reason"] == "AGY_INPUT_HARDLINK"
+
+
+@pytest.mark.parametrize("target", ["instruction.txt", "pytest-session.log"])
+def test_reparse_entries_hold_and_cleanup_never_follows_target(tmp_path, target):
+    repo, _, _, _ = input_fixture(tmp_path)
+    from test_ef01 import _directory_alias
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "sentinel.txt").write_bytes(b"keep")
+    with runner._agy_input_mirror(repo, "task", None) as mirror:
+        expected = adapters.agy_input_files(repo, mirror)
+        baseline = adapters.agy_input_manifest(repo, mirror, expected)
+        (mirror / target).unlink(missing_ok=True)
+        try:
+            _directory_alias(outside, mirror / target)
+        except PermissionError:
+            pytest.skip("native reparse creation denied; no bypass")
+        result = adapters.agy_input_manifest(repo, mirror, expected, baseline)
+        assert result["status"] == "HOLD" and result["reason"] == "AGY_INPUT_NON_REGULAR"
+    assert (outside / "sentinel.txt").read_bytes() == b"keep"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native NTFS ADS check")
+@pytest.mark.parametrize("target", ["instruction.txt", "pytest-session.log", "."])
+def test_ntfs_alternate_streams_hold(tmp_path, target):
+    repo, mirror, expected, baseline = input_fixture(tmp_path)
+    if target == "pytest-session.log":
+        (mirror / target).write_bytes(b"opaque")
+    stream_path = str(mirror if target == "." else mirror / target) + ":hidden"
+    with open(stream_path, "wb") as stream_file:
+        stream_file.write(b"hidden payload")
+    result = adapters.agy_input_manifest(repo, mirror, expected, baseline)
+    assert result["status"] == "HOLD" and result["reason"] == "AGY_INPUT_NAMED_STREAM"
+
+
+@pytest.mark.parametrize("kind", ["directory", "count", "size", "root-swap", "traversal"])
+def test_input_bounds_and_root_replacement_hold(tmp_path, kind):
+    repo, mirror, expected, baseline = input_fixture(tmp_path)
+    if kind == "directory":
+        (mirror / "pytest-dir.log").mkdir()
+    elif kind == "count":
+        for index in range(17):
+            (mirror / f"pytest-{index}.log").write_bytes(b"")
+    elif kind == "size":
+        with (mirror / "cache-large.tmp").open("wb") as file:
+            file.truncate(1024 * 1024 + 1)
+    elif kind == "root-swap":
+        mirror.rename(tmp_path / "old-input")
+        mirror.mkdir()
+        for name, data in expected.items():
+            (mirror / name).write_bytes(data)
+    else:
+        mirror = mirror / ".." / "input"
+    result = adapters.agy_input_manifest(repo, mirror, expected, baseline)
+    assert result["status"] == "HOLD"
+
+
+def test_contract_race_is_observed_before_read(tmp_path, monkeypatch):
+    repo, mirror, expected, baseline = input_fixture(tmp_path)
+    original = adapters.os.open
+    def racing_open(path, flags, *args, **kwargs):
+        if Path(path).name == "instruction.txt":
+            (mirror / "instruction.txt").write_bytes(b"raced")
+        return original(path, flags, *args, **kwargs)
+    monkeypatch.setattr(adapters.os, "open", racing_open)
+    result = adapters.agy_input_manifest(repo, mirror, expected, baseline)
+    assert result["status"] == "HOLD" and result["reason"] == "AGY_INPUT_RACE"
+
+
+def test_cleanup_refuses_to_delete_replacement_directory(tmp_path, monkeypatch):
+    repo = tmp_path / "source"
+    repo.mkdir()
+    monkeypatch.setattr(runner.tempfile, "gettempdir", lambda: str(tmp_path))
+    with pytest.raises(ValueError, match="AGY_INPUT_CLEANUP_UNSAFE"):
+        with runner._agy_input_mirror(repo, "task", None) as mirror:
+            mirror.rename(tmp_path / "original-input")
+            mirror.mkdir()
+            (mirror / "unrelated.txt").write_bytes(b"keep")
+    assert (mirror / "unrelated.txt").read_bytes() == b"keep"
+    assert (tmp_path / "original-input/instruction.txt").read_bytes() == b"task"
+
+
+def test_scratch_is_a_distinct_explicit_root_and_preserves_model(tmp_path):
+    repo, mirror, _, _ = input_fixture(tmp_path)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    selection = ExecutorSelection("antigravity", "gemini-3.8-flash", "high")
+    argv, stdin = adapters.command_for(selection, repo, "task", antigravity_evidence_dir=mirror,
+                                       antigravity_scratch_dir=scratch)
+    assert stdin is None
+    assert [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "--add-dir"] == list(map(str, (repo, mirror, scratch)))
+    assert argv[argv.index("--model") + 1] == selection.model
+    assert argv[argv.index("--effort") + 1] == "high"
+    for alias in (repo, mirror, mirror / ".." / "scratch"):
+        with pytest.raises(ValueError):
+            adapters.command_for(selection, repo, "task", antigravity_evidence_dir=mirror,
+                                 antigravity_scratch_dir=alias)
 
 
 def stream(*events):

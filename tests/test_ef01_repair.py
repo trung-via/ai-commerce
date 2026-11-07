@@ -1044,7 +1044,192 @@ def test_agy_mirror_cleanup_after_failed_provider(fixture, fault):
     assert result["verify_exit_code"] is None and result["replay_authorized"] is False
     assert result["status"] == ("SOURCE_DRIFT" if fault == "mutated-input" else "EXECUTION_UNKNOWN")
     if fault == "mutated-input":
-        assert result["error_code"] == "AGY_READ_ONLY_INPUT_CHANGED"
+        assert result["error_code"] == "AGY_INPUT_INTEGRITY_FAILED"
+        assert result["input_integrity_reason"] == "AGY_INPUT_CONTRACT_MODIFIED"
+
+
+def _boundary_attempt(fixture, fault=None, *, repair=False, long_prompt=False):
+    """Real TEMP/source bytes with simulated provider/verifier, never native proof."""
+    from ai_commerce.engineering.adapters import command_for
+    fixture.monkeypatch.setattr(runner, "command_for", command_for)
+    providers, verifies, roots_seen = [], [], []
+    prompt = ('Sửa đúng phạm vi "tiếng Việt" \\ 🚀\n' * 2000 if long_prompt else "approved source edit")
+
+    def execute(argv, **kwargs):
+        if argv == VERIFY:
+            verifies.append(argv)
+            if fault == "late-input":
+                (roots_seen[-1][1] / "instruction.txt").write_bytes(b"late background mutation")
+            if fault == "late-source":
+                (fixture.repo / "impl.py").write_bytes(b"late source mutation")
+            if fault == "late-aux-modify":
+                (roots_seen[-1][1] / "pytest-session.log").write_bytes(b"late sidecar write")
+            if fault == "late-aux-delete":
+                (roots_seen[-1][1] / "pytest-session.log").unlink()
+            if fault == "late-aux-add":
+                (roots_seen[-1][1] / "scratch-late.tmp").write_bytes(b"late new sidecar")
+            code = int(repair and len(verifies) == 1)
+            return subprocess.CompletedProcess(argv, code, "1 failed\n" if code else "1 passed\n", "")
+        assert argv[0] == "agy"
+        providers.append(argv)
+        roots = [Path(argv[i + 1]) for i, arg in enumerate(argv[:-1]) if arg == "--add-dir"]
+        roots_seen.append(roots)
+        source, mirror, scratch = roots
+        assert source == fixture.repo and source != mirror != scratch
+        assert kwargs["cwd"] == source and kwargs["input"] is None
+        assert all(kwargs["env"][key] == str(scratch) for key in ("TEMP", "TMP", "TMPDIR"))
+        assert argv[argv.index("--model") + 1] == "gemini-3.8-flash"
+        assert argv[argv.index("--effort") + 1] == "high"
+        assert runner._windows_command_units(argv) <= 8000
+        instruction = (mirror / "instruction.txt").read_bytes()
+        if len(providers) == 1:
+            assert instruction == prompt.encode()
+        else:
+            assert prompt.encode() in instruction and (mirror / "repair_feedback.json").is_file()
+        (mirror / "pytest-session.log").write_bytes(b"benign opaque sidecar")
+        (scratch / "generated-cache.bin").write_bytes(b"\x00\xff")
+        (source / "impl.py").write_bytes(b"bad\r\n" if repair and len(providers) == 1 else b"good\r\n")
+        if fault in ("modify", "delete", "feedback") and (fault != "feedback" or len(providers) == 2):
+            target = mirror / ("repair_feedback.json" if fault == "feedback" else "instruction.txt")
+            if fault == "delete":
+                target.unlink()
+            else:
+                target.write_bytes(b"tampered")
+        if fault == "unsafe":
+            (mirror / "metadata.json").write_bytes(b"{}")
+        if fault == "scope":
+            (source / "outside.py").write_bytes(b"outside allowlist")
+        if fault == "head":
+            fixture.state["head"] = "b" * 40
+        if fault == "gitdir":
+            fixture.state["git_dir"] = "other-checkout"
+        payload = {"status": "UNKNOWN" if fault == "unknown" else "SUCCESS"}
+        if fault == "denied":
+            payload["denied_actions"] = [{"action": "write_file"}]
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+
+    fixture.monkeypatch.setattr(runner, "subprocess", SimpleNamespace(run=execute, TimeoutExpired=subprocess.TimeoutExpired))
+    result = runner.execute_attempt(repo=fixture.repo, output_dir=fixture.root / "boundary-evidence",
+        work_id="approved", attempt_id="new-boundary", instruction=prompt,
+        selection=ExecutorSelection("antigravity", "gemini-3.8-flash", "high"),
+        verify_argv=VERIFY, allowed_prefixes=fixture.state["scope"], verify_first_scope=False,
+        max_repair_rounds=1)
+    assert all(not root.exists() for roots in roots_seen for root in roots[1:])
+    return result, providers, verifies
+
+
+def test_535_sidecar_and_real_add_bytes_reach_independent_verifier(fixture):
+    result, providers, verifies = _boundary_attempt(fixture)
+    assert result["status"] == "BUILD_VERIFIED_FOR_SCOPE"
+    assert len(providers) == len(verifies) == 1
+    assert result["candidate_file_sha256"]["impl.py"] == hashlib.sha256(b"good\r\n").hexdigest()
+    evidence = fixture.root / "boundary-evidence"
+    manifest = json.loads((evidence / result["evidence_files"]["agy_input_after_executor"]).read_text())
+    assert manifest["status"] == "INTACT"
+    assert next(f for f in manifest["files"] if f["name"] == "instruction.txt")["sha256"] == result["instruction_sha256"]
+
+
+@pytest.mark.parametrize("fault,reason", [("modify", "AGY_INPUT_CONTRACT_MODIFIED"),
+    ("delete", "AGY_INPUT_CONTRACT_DELETED"), ("unsafe", "AGY_INPUT_UNEXPECTED_AUXILIARY"),
+    ("late-input", "AGY_INPUT_CONTRACT_MODIFIED"), ("late-aux-modify", "AGY_INPUT_LATE_WRITE"),
+    ("late-aux-delete", "AGY_INPUT_LATE_WRITE"), ("late-aux-add", "AGY_INPUT_LATE_WRITE")])
+def test_input_failure_is_non_candidate_and_quarantines_exact_add_bytes(fixture, fault, reason):
+    result, providers, verifies = _boundary_attempt(fixture, fault)
+    assert result["error_code"] == "AGY_INPUT_INTEGRITY_FAILED"
+    assert result["input_integrity_reason"] == reason and result["status"] == "SOURCE_DRIFT"
+    assert len(providers) == 1 and len(verifies) == int(fault.startswith("late-"))
+    assert not result["invocations"][0]["repair_eligible"] and result["replay_authorized"] is False
+    evidence = fixture.root / "boundary-evidence"
+    manifest = json.loads((evidence / result["evidence_files"]["quarantine_manifest"]).read_text())
+    assert manifest["candidate"] is False and manifest["replay_authorized"] is False
+    record = next(f for f in manifest["files"] if f["path"] == "impl.py")
+    copied = evidence / "invocations/000" / record["evidence_name"]
+    assert copied.read_bytes() == b"good\r\n"
+    assert record["sha256"] == hashlib.sha256(copied.read_bytes()).hexdigest()
+    assert record["status"] == "QUARANTINED" and record["mode"]
+    if fault.startswith("late-aux-"):
+        diagnostic = json.loads((evidence / result["evidence_files"]["agy_input_after_verify"]).read_text())
+        delta = {f["change"] for f in diagnostic["files"] if f["role"] == "AUXILIARY"}
+        assert {"late-aux-modify": "MODIFIED", "late-aux-delete": "DELETED", "late-aux-add": "ADDED"}[fault] in delta
+
+
+def test_cleanup_failure_preserves_native_input_reason_and_quarantine(fixture):
+    from contextlib import contextmanager
+    original = runner._agy_temp_tree
+    @contextmanager
+    def failed_cleanup(repo, prefix):
+        with original(repo, prefix) as path:
+            yield path
+        if prefix == "agy_input-":
+            raise ValueError("AGY_INPUT_CLEANUP_UNSAFE")
+    fixture.monkeypatch.setattr(runner, "_agy_temp_tree", failed_cleanup)
+    result, _, _ = _boundary_attempt(fixture, "modify")
+    assert result["error_code"] == "AGY_INPUT_INTEGRITY_FAILED"
+    assert result["input_integrity_reason"] == "AGY_INPUT_CONTRACT_MODIFIED"
+    assert result["invocations"][0]["runtime_cleanup_error"] == "AGY_INPUT_CLEANUP_UNSAFE"
+    assert "quarantine_manifest" in result["evidence_files"]
+
+
+@pytest.mark.parametrize("fault,error", [("scope", "CHANGES_OUTSIDE_ALLOWED_SCOPE"),
+    ("head", "GIT_HEAD_CHANGED"), ("gitdir", "GIT_WORKTREE_IDENTITY_CHANGED"),
+    ("denied", "HEADLESS_TOOL_PERMISSION_DENIED"), ("unknown", "EXECUTOR_OUTCOME_UNCONFIRMED"),
+    ("late-source", "VERIFY_CHANGED_SOURCE")])
+def test_sidecar_acceptance_never_weakens_other_fail_closed_boundaries(fixture, fault, error):
+    result, providers, _ = _boundary_attempt(fixture, fault)
+    assert result["error_code"] == error
+    assert result["status"] != "BUILD_VERIFIED_FOR_SCOPE" and len(providers) == 1
+
+
+@pytest.mark.parametrize("feedback_mutation", [False, True])
+def test_unicode_long_prompt_first_and_repair_round_contracts(fixture, feedback_mutation):
+    result, providers, verifies = _boundary_attempt(fixture, "feedback" if feedback_mutation else None,
+                                                   repair=True, long_prompt=True)
+    assert len(providers) == 2 and len(verifies) == (1 if feedback_mutation else 2)
+    if feedback_mutation:
+        assert result["error_code"] == "AGY_INPUT_INTEGRITY_FAILED"
+        assert result["input_integrity_reason"] == "AGY_INPUT_CONTRACT_MODIFIED"
+    else:
+        assert result["status"] == "BUILD_VERIFIED_FOR_SCOPE"
+    assert all("transport_instruction" in inv["evidence_files"] for inv in result["invocations"])
+
+
+@pytest.mark.parametrize("kind", ["protected", "binary", "oversize", "secret", "hash-race", "hardlink", "out-of-scope"])
+def test_quarantine_refuses_unsafe_source_bytes(tmp_path, kind):
+    repo = tmp_path / "source"
+    repo.mkdir()
+    name = ".env" if kind == "protected" else "new.py"
+    data = b"\x00binary" if kind == "binary" else b"a" * (128 * 1024 + 1) if kind == "oversize" else (
+        b'password = "sensitive-value"' if kind == "secret" else b"safe ordinary text\n")
+    (repo / name).write_bytes(data)
+    if kind == "hardlink":
+        try:
+            os.link(repo / name, tmp_path / "external-link")
+        except PermissionError:
+            pytest.skip("native hardlink creation denied; no bypass")
+    snapshot = {"changed_files": [name], "candidate_file_sha256": {name:
+        "wrong" if kind == "hash-race" else hashlib.sha256(data).hexdigest()}}
+    saved = {}
+    runner._quarantine_source(repo, snapshot, ["other.py"] if kind == "out-of-scope" else [name],
+                               lambda key, path, raw: saved.update({key: raw}))
+    assert set(saved) == {"quarantine_manifest"}
+    assert json.loads(saved["quarantine_manifest"])["files"][0]["status"] == "REJECTED"
+    assert (repo / name).read_bytes() == data
+
+
+def test_quarantine_enforces_count_and_total_caps(tmp_path):
+    repo = tmp_path / "source"
+    repo.mkdir()
+    data = b"ordinary text\n" * 4000
+    names = [f"new-{i}.py" for i in range(40)]
+    for name in names:
+        (repo / name).write_bytes(data)
+    snapshot = {"changed_files": names, "candidate_file_sha256": {name: hashlib.sha256(data).hexdigest() for name in names}}
+    saved = {}
+    runner._quarantine_source(repo, snapshot, names, lambda key, path, raw: saved.update({key: raw}))
+    manifest = json.loads(saved.pop("quarantine_manifest"))
+    assert len(saved) <= 32 and sum(map(len, saved.values())) <= 1024 * 1024
+    assert manifest["total_bytes"] == sum(map(len, saved.values()))
+    assert any(item["status"] == "REJECTED" for item in manifest["files"])
 
 
 @pytest.mark.parametrize("pretty", [False, True])

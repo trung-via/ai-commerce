@@ -21,7 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
-from .adapters import command_for, agy_directory, agy_data_directory, agy_input_files
+from .adapters import (command_for, agy_directory, agy_data_directory,
+                       agy_input_manifest, agy_read_regular)
 from .git_write_guard import GIT_GUARD_INSTRUCTION, git_write_guard_env
 from .profile import ExecutorSelection, diagnose_failure
 from .git import git_argv, resolve_git_executable
@@ -141,6 +142,57 @@ def _write(path: Path, data: bytes) -> None:
     # One attempt identity per folder; never silently overwrite prior evidence.
     with path.open("xb") as f:
         f.write(data)
+
+
+def _quarantine_source(repo: Path, snapshot: dict, allowed: Sequence[str], save) -> None:
+    """Failure evidence only, including ADD bytes absent from git diff.
+
+    Never import, execute or reuse these copies as a candidate. Restrict copies
+    to ordinary allowlisted UTF-8 source text and bind each to the failed snapshot.
+    """
+    manifest = {"kind": "EF01_QUARANTINED_SOURCE", "candidate": False,
+                "replay_authorized": False, "files": [],
+                "limits": {"files": 32, "file_bytes": 128 * 1024, "total_bytes": 1024 * 1024}}
+    total = 0
+    suffixes = {".py", ".pyi", ".js", ".cjs", ".mjs", ".ts", ".tsx", ".jsx",
+                ".md", ".rst", ".txt", ".json", ".yaml", ".yml", ".toml", ".html", ".css"}
+    for index, relative in enumerate(snapshot.get("changed_files", [])[:128]):
+        item = {"path": relative, "status": "REJECTED", "reason": None}
+        manifest["files"].append(item)
+        try:
+            if index >= 32 or total >= 1024 * 1024:
+                raise ValueError("QUARANTINE_COUNT_OR_TOTAL_LIMIT")
+            if not allowed or not _safe_scope([relative], allowed):
+                raise ValueError("QUARANTINE_OUTSIDE_ALLOWLIST")
+            path = checked_path(repo, relative)
+            if path.suffix.lower() not in suffixes:
+                raise ValueError("QUARANTINE_NON_TEXT_FAMILY")
+            if (any(word in path.name.lower() for word in ("secret", "credential", "password", "token", "private_key"))
+                    or any(part.lower() in (".gemini", ".config", ".antigravity", "node_modules")
+                           for part in Path(relative).parts)):
+                raise ValueError("QUARANTINE_PRIVATE_NAME")
+            data, identity = agy_read_regular(path, min(128 * 1024, 1024 * 1024 - total))
+            text = data.decode("utf-8")
+            if any(ord(c) < 32 and c not in "\n\r\t" for c in text):
+                raise ValueError("QUARANTINE_BINARY")
+            if re.search(r"-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:gh[pousr]_[A-Za-z0-9]{20,}|"
+                         r"AKIA[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{30,})|"
+                         r"(?i:(?:api[_-]?key|access[_-]?token|password|client[_-]?secret)\s*[:=]\s*['\"])[^'\"\r\n]{8,}", text):
+                raise ValueError("QUARANTINE_POSSIBLE_SECRET")
+            digest = _sha(data)
+            if digest != snapshot.get("candidate_file_sha256", {}).get(relative):
+                raise ValueError("QUARANTINE_SNAPSHOT_MISMATCH")
+            name = f"quarantine/source-{index:03d}.txt"
+            save(f"quarantine_source_{index:03d}", name, data)
+            total += len(data)
+            item.update(status="QUARANTINED", reason=None, sha256=digest,
+                        size=len(data), mode=identity[2], evidence_name=name)
+        except (OSError, ValueError) as exc:
+            code = str(exc)
+            item["reason"] = code if re.fullmatch(r"[A-Z_]+", code) else "QUARANTINE_READ_UNPROVEN"
+    manifest["total_bytes"] = total
+    manifest["omitted_paths"] = max(0, len(snapshot.get("changed_files", [])) - 128)
+    save("quarantine_manifest", "quarantine/manifest.json", _json_bytes(manifest))
 
 
 def _observe_usage(data: bytes, executor: str) -> dict[str, int] | None:
@@ -369,7 +421,7 @@ MAX_TIMEOUT_SECONDS = 86400
 # Stay below cmd.exe's limit too: AGY may be installed as a Windows .cmd shim.
 AGY_COMMANDLINE_MAX_UNITS = 8000
 AGY_INPUT_CONTEXT = (
-    "Use the current isolated source worktree and this invocation's prepared agy_input only. "
+    "Use the current isolated source worktree, this invocation's prepared agy_input and named scratch only. "
     "External archived artifacts are OPTIONAL, including prior GitHub artifacts, sibling worktrees "
     "and runner-owned .local records. Do not read user profiles, credentials or authoritative runner logs. "
     "Use current source and the disposable instruction/repair_feedback.json copies. "
@@ -695,17 +747,15 @@ def _windows_command_units(command: Sequence[str]) -> int:
 
 
 @contextmanager
-def _agy_input_mirror(repo: Path, prompt: str, feedback: dict | None):
+def _agy_temp_tree(repo: Path, prefix: str):
     # Reject poisoned TEMP (including primary .local/ef02) before allocation.
     parent = agy_data_directory(Path(tempfile.gettempdir()))
     if parent == repo or repo in parent.parents:
         raise ValueError("AGY_INPUT_SOURCE_OVERLAP")
-    directory = Path(tempfile.mkdtemp(prefix="agy_input-", dir=parent))
+    directory = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
+    identity = (directory.stat().st_dev, directory.stat().st_ino)
     try:
         agy_data_directory(directory)
-        _write(directory / "instruction.txt", prompt.encode("utf-8"))
-        if feedback is not None:
-            _write(directory / "repair_feedback.json", _json_bytes(feedback))
         yield directory
     finally:
         # Delete only the exact allocated tree. rmtree unlinks child symlinks
@@ -721,9 +771,20 @@ def _agy_input_mirror(repo: Path, prompt: str, feedback: dict | None):
                 directory.rmdir()  # Windows junction: remove the link only.
             raise ValueError("AGY_INPUT_PATH_CHANGED")
         if directory.exists():
-            if directory.resolve(strict=True) != directory:
+            info = directory.lstat()
+            if (directory.resolve(strict=True) != directory or
+                    (info.st_dev, info.st_ino) != identity):
                 raise ValueError("AGY_INPUT_CLEANUP_UNSAFE")
             shutil.rmtree(directory)
+
+
+@contextmanager
+def _agy_input_mirror(repo: Path, prompt: str, feedback: dict | None):
+    with _agy_temp_tree(repo, "agy_input-") as directory:
+        _write(directory / "instruction.txt", prompt.encode("utf-8"))
+        if feedback is not None:
+            _write(directory / "repair_feedback.json", _json_bytes(feedback))
+        yield directory
 
 
 def _agy_source_binding(repo: Path, expected: dict, deadline: float,
@@ -746,13 +807,18 @@ def _agy_source_binding(repo: Path, expected: dict, deadline: float,
 
 
 def _agy_source_context(binding: dict, mirror: Path, instruction_sha: str,
-                        git_executable: str | None) -> str:
+                        git_executable: str | None, scratch: Path | None = None) -> str:
     source = binding["source_root"]
     probes = [list2cmdline([git_executable or "git", "-C", source, "rev-parse", option])
               for option in ("--show-toplevel", "--absolute-git-dir")]
     return (AGY_INPUT_CONTEXT + "\nCODE WRITE ROOT (unique, exact bound path): "
             + json.dumps(source, ensure_ascii=False) + ".\nREAD ONLY INPUT (data only; never code or Git root): "
             + json.dumps(str(mirror), ensure_ascii=False) + ".\n"
+            + ("WRITABLE SCRATCH (disposable tests/FFmpeg/cache; never instructions or source): "
+               + json.dumps(str(scratch), ensure_ascii=False)
+               + ". Direct all temporary output here, never into READ ONLY INPUT. "
+               "Wait for every child command to finish before returning; do not leave background writers.\n"
+               if scratch is not None else "")
             + "Source HEAD: " + binding["source_sha"] + "; absolute Git dir: "
             + json.dumps(binding["git_dir"], ensure_ascii=False) + ".\n"
             + "Full instruction SHA256: " + instruction_sha + ".\n"
@@ -802,6 +868,8 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     if feedback is not None:
         save("repair_feedback", "repair_feedback.json", _json_bytes(feedback))
     agy_input_dir = None
+    agy_scratch_dir = None
+    input_baseline = None
     before, _ = snapshot()
     inv["input_snapshot"] = before
     save("source_before", "source.before.json", _json_bytes(before))
@@ -816,16 +884,32 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     if selection.executor == "antigravity":
         binding = _agy_source_binding(repo, before, deadline, git_executable)
         agy_input_dir = input_runtime.enter_context(_agy_input_mirror(repo, prompt, feedback))
-        mirrored_files = agy_input_files(repo, agy_input_dir)
-        context = _agy_source_context(binding, agy_input_dir, _sha(prompt.encode("utf-8")), git_executable)
+        agy_scratch_dir = input_runtime.enter_context(_agy_temp_tree(repo, "agy_scratch-"))
+        scratch_identity = (agy_scratch_dir.stat().st_dev, agy_scratch_dir.stat().st_ino)
+        # Authority comes from the host-owned prompt/feedback, never a mutable
+        # mirror reread that could adopt an already replaced instruction.
+        mirrored_files = {"instruction.txt": prompt.encode("utf-8")}
+        if feedback is not None:
+            mirrored_files["repair_feedback.json"] = _json_bytes(feedback)
+        input_baseline = agy_input_manifest(repo, agy_input_dir, mirrored_files)
+        if input_baseline["status"] != "INTACT":
+            inv.update(status="SOURCE_DRIFT", error_code="AGY_INPUT_INTEGRITY_FAILED",
+                       input_integrity_reason=input_baseline["reason"])
+            save("agy_input_before", "agy_input.before.json", _json_bytes(input_baseline))
+            return
+        save("agy_input_before", "agy_input.before.json", _json_bytes(input_baseline))
+        context = _agy_source_context(binding, agy_input_dir, _sha(prompt.encode("utf-8")),
+                                      git_executable, agy_scratch_dir)
         save("agy_source_binding", "agy_source_binding.json", _json_bytes({
             **binding, "input_mirror": str(agy_input_dir), "input_role": "READ_ONLY_INPUT",
+            "scratch_root": str(agy_scratch_dir), "scratch_role": "DISPOSABLE_SCRATCH",
             "source_role": "CODE_WRITE_ROOT", "instruction_sha256": _sha(prompt.encode("utf-8"))}))
     guarded_prompt = GIT_GUARD_INSTRUCTION + "\n\n" + context + prompt
     command, stdin = command_for(selection, repo, guarded_prompt, codex_bin=codex_bin,
                                  antigravity_bin=antigravity_bin,
                                  codex_windows_sandbox=codex_windows_sandbox,
-                                 antigravity_evidence_dir=agy_input_dir)
+                                 antigravity_evidence_dir=agy_input_dir,
+                                 **({"antigravity_scratch_dir": agy_scratch_dir} if agy_scratch_dir else {}))
     if selection.executor == "antigravity" and _windows_command_units(command) > AGY_COMMANDLINE_MAX_UNITS:
         # Preserve the complete original instruction/feedback on disk. Shorten only
         # the transported --print argument; never truncate recorded diagnostics.
@@ -846,6 +930,9 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         save("transport_instruction", "transport_instruction.txt", compact.encode("utf-8"))
     # Hook configuration applies only to the executor; EF02 owns publication.
     child_env = git_write_guard_env(directory, repo=repo, git_executable=git_executable or "git")
+    if agy_scratch_dir is not None:
+        child_env.update({key: str(agy_scratch_dir) for key in ("TEMP", "TMP", "TMPDIR")})
+        child_env["PYTHONPYCACHEPREFIX"] = str(agy_scratch_dir / "pycache")
     budget = _remaining(deadline, timeout_seconds)
     boundary = {
         "kind": "AI_COMMERCE_EF01_PROVIDER_BOUNDARY", "version": 1,
@@ -922,13 +1009,34 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     # Even a provider failure gets a scoped snapshot and cumulative diff.
     save("tracked_diff", "git.tracked.diff.patch", diff)
     problem = _source_problem(after, initial, verify_first_scope=verify_first_scope)
-    if problem is None and agy_input_dir is not None:
+    def check_input(phase: str):
+        nonlocal input_baseline
+        manifest = agy_input_manifest(repo, agy_input_dir, mirrored_files, input_baseline)
+        if manifest["status"] == "INTACT" and phase == "after_verify" and (
+                manifest["directory_state"] != input_baseline["directory_state"] or
+                any(f["role"] == "AUXILIARY" and f["change"] != "UNCHANGED" for f in manifest["files"])):
+            manifest.update(status="HOLD", reason="AGY_INPUT_LATE_WRITE")
+        save("agy_input_" + phase, "agy_input." + phase + ".json", _json_bytes(manifest))
+        if manifest["status"] != "INTACT":
+            inv["input_integrity_reason"] = manifest["reason"]
+            return "SOURCE_DRIFT", "AGY_INPUT_INTEGRITY_FAILED"
         try:
-            unchanged = agy_input_files(repo, agy_input_dir) == mirrored_files
+            info = agy_scratch_dir.lstat()
+            if (agy_data_directory(agy_scratch_dir) != agy_scratch_dir or
+                    (info.st_dev, info.st_ino) != scratch_identity):
+                raise ValueError("AGY_SCRATCH_ROOT_CHANGED")
         except (OSError, ValueError):
-            unchanged = False
-        if not unchanged:
-            problem = ("SOURCE_DRIFT", "AGY_READ_ONLY_INPUT_CHANGED")
+            inv["input_integrity_reason"] = "AGY_SCRATCH_ROOT_CHANGED"
+            return "SOURCE_DRIFT", "AGY_INPUT_INTEGRITY_FAILED"
+        # Original contract bytes/identity have already matched the host-owned
+        # baseline. Freeze the observed auxiliary state when the provider ends;
+        # subsequent writes are late effects, never verifier-approved progress.
+        input_baseline = manifest
+        return None
+
+    if agy_input_dir is not None:
+        input_problem = check_input("after_executor")
+        problem = problem or input_problem
     if problem is None and inv["denied_actions"]:
         problem = ("EXECUTOR_PERMISSION_DENIED", "HEADLESS_TOOL_PERMISSION_DENIED")
     # Interrupted/abnormal exits are UNKNOWN effects even if a partial provider
@@ -1129,6 +1237,10 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         else:
             inv["repair_eligible"] = _pytest_failure(
                 list(verify_argv), inv["verify_exit_code"], vout, verr)
+    if agy_input_dir is not None:
+        input_problem = check_input("after_verify")
+        if input_problem:
+            inv.update(status=input_problem[0], error_code=input_problem[1], repair_eligible=False)
 
 
 def _stream_bytes(value: bytes | str | None) -> bytes:
@@ -1338,13 +1450,37 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                         pytest_known_flaky=pytest_known_flaky, host_slots=host_slots,
                         verify_first_scope=verify_first_scope, input_runtime=input_runtime)
             except Exception as exc:
-                inv.update(status="EXECUTION_UNKNOWN",
-                           error_code="ACTION_TIMEOUT" if isinstance(exc, TimeoutError) else "RUNNER_ERROR",
-                           diagnostic=f"{type(exc).__name__}: {exc}", repair_eligible=False)
+                code = str(exc)
+                # ExitStack cleanup can itself fail after a precise native
+                # failure. Keep the original cause and record the secondary
+                # failure without promoting any source or permitting a retry.
+                if inv.get("error_code"):
+                    inv.update(runtime_cleanup_error=code if re.fullmatch(r"AGY_[A-Z_]+", code)
+                               else "RUNTIME_CLEANUP_UNPROVEN", repair_eligible=False)
+                elif re.fullmatch(r"AGY_[A-Z_]+", code):
+                    inv.update(status="SOURCE_DRIFT", error_code="AGY_INPUT_INTEGRITY_FAILED",
+                               input_integrity_reason=code, repair_eligible=False)
+                else:
+                    inv.update(status="EXECUTION_UNKNOWN",
+                               error_code="ACTION_TIMEOUT" if isinstance(exc, TimeoutError) else "RUNNER_ERROR",
+                               diagnostic=f"{type(exc).__name__}: {exc}", repair_eligible=False)
             except BaseException:
                 inv.update(status="EXECUTION_UNKNOWN", error_code="RUNNER_INTERRUPTED", repair_eligible=False)
                 raise
             finally:
+                if (selection.executor == "antigravity" and inv.get("changed_files") and
+                        inv["status"] not in ("BUILD_VERIFIED_FOR_SCOPE", "VERIFIED_SCOPE_REVIEW_REQUIRED")):
+                    # The existing EF02 .local/ef02/** upload includes these
+                    # invocation-local evidence files, including failed attempts.
+                    def quarantine_save(key, name, data):
+                        target = output_dir / inv["evidence_dir"] / name
+                        _write(target, data)
+                        inv["evidence_files"][key] = target.relative_to(output_dir).as_posix()
+                        inv["evidence_sha256"][key] = _sha(data)
+                    try:
+                        _quarantine_source(repo, inv.get("final_snapshot", inv), allowed_prefixes, quarantine_save)
+                    except (OSError, ValueError):
+                        inv["quarantine_diagnostic"] = "QUARANTINE_STORAGE_UNPROVEN"
                 inv["finished_at"] = _now()
                 inv["result_file"] = inv["evidence_dir"] + "/invocation_result.json"
                 provenance = _failure_provenance(inv,
@@ -1384,6 +1520,8 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                             "provider_test_observations", "failure_provenance", "review_required",
                             "evidence_sha256", "verify_completed", "provider_return_determinate"):
                     report[key] = inv[key]
+                if inv.get("input_integrity_reason"):
+                    report["input_integrity_reason"] = inv["input_integrity_reason"]
                 report["git_dir"] = inv.get("git_dir", initial["git_dir"])
                 for key in ("minimum_test", "pytest_profile", "pytest_profiles",
                             "observed_pytest_workers", "workers_actual",
