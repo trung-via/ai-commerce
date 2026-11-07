@@ -785,3 +785,49 @@ def test_native_agy_fixture_end_to_end_readonly_git_and_lingering_writer(tmp_pat
         after_verify = result["evidence_sha256"]["source_after_verify"]
         assert after_verify == result["evidence_sha256"]["source_after_teardown"]
         assert result["verify_exit_code"] == 0
+
+
+def _measured_tree(tmp_path, files=12, depth=2):
+    tree = tmp_path / "measured"
+    leaf = tree
+    for level in range(depth):
+        leaf = leaf / f"d{level}"
+    leaf.mkdir(parents=True)
+    for index in range(files):
+        (leaf / f"f{index}.txt").write_bytes(b"x")
+    identity, parent = tree.stat(), tmp_path.stat()
+    return tree, (identity.st_dev, identity.st_ino), (parent.st_dev, parent.st_ino)
+
+
+def test_cleanup_reports_sanitized_measurements(tmp_path):
+    tree, identity, parent = _measured_tree(tmp_path)
+    result = adapters.agy_remove_owned_tree(tree, tmp_path, identity, parent)
+    measured = result["measurements"]
+    assert result["status"] == "CLEAN" and not tree.exists()
+    assert measured["entries_visited"] == 12 + 2 + 1
+    assert measured["deleted_entries"] == 15 and measured["max_depth"] == 3
+    assert 0 <= measured["elapsed_seconds"] <= measured["budget_seconds"]
+    assert measured["entry_limit"] == adapters.AGY_CLEANUP_MAX_ENTRIES
+    assert str(tmp_path) not in json.dumps(result)
+
+
+def test_cleanup_time_budget_is_typed_capped_and_holds(tmp_path):
+    tree, identity, parent = _measured_tree(tmp_path)
+    result = adapters.agy_remove_owned_tree(tree, tmp_path, identity, parent, timeout_seconds=0)
+    assert result["status"] == "HOLD"
+    assert result["reason"] == "AGY_SCRATCH_CLEANUP_TIME_EXCEEDED"
+    assert tree.exists()
+    capped = adapters.agy_remove_owned_tree(tree, tmp_path, identity, parent, timeout_seconds=10**9)
+    assert capped["measurements"]["budget_seconds"] == adapters.AGY_CLEANUP_MAX_SECONDS
+    assert capped["status"] == "CLEAN"
+
+
+def test_cleanup_entry_and_depth_limits_are_separate_reasons(tmp_path, monkeypatch):
+    tree, identity, parent = _measured_tree(tmp_path)
+    monkeypatch.setattr(adapters, "AGY_CLEANUP_MAX_ENTRIES", 5)
+    entries = adapters.agy_remove_owned_tree(tree, tmp_path, identity, parent)
+    assert entries["reason"] == "AGY_SCRATCH_CLEANUP_ENTRY_LIMIT_EXCEEDED" and tree.exists()
+    monkeypatch.setattr(adapters, "AGY_CLEANUP_MAX_ENTRIES", 100_000)
+    monkeypatch.setattr(adapters, "AGY_CLEANUP_MAX_DEPTH", 1)
+    depth = adapters.agy_remove_owned_tree(tree, tmp_path, identity, parent)
+    assert depth["reason"] == "AGY_SCRATCH_CLEANUP_DEPTH_LIMIT_EXCEEDED" and tree.exists()
