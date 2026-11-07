@@ -322,7 +322,7 @@ def agy_remove_owned_tree(directory: Path, parent: Path, identity: tuple,
         # Explicit strict finite numeric timeout validation before creating deadline
         if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
             raise ValueError("AGY_SCRATCH_CLEANUP_TIMEOUT_INVALID")
-        if math.isnan(timeout_seconds) or math.isinf(timeout_seconds):
+        if isinstance(timeout_seconds, float) and not math.isfinite(timeout_seconds):
             raise ValueError("AGY_SCRATCH_CLEANUP_TIMEOUT_INVALID")
         if timeout_seconds < 0.0 or timeout_seconds > AGY_CLEANUP_MAX_SECONDS:
             raise ValueError("AGY_SCRATCH_CLEANUP_TIMEOUT_INVALID")
