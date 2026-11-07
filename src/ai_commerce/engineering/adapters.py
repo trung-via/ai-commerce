@@ -176,6 +176,7 @@ def _agy_kernel():
                     "CreateFileW": ([w.LPCWSTR, w.DWORD, w.DWORD, w.LPVOID, w.DWORD, w.DWORD, w.HANDLE], w.HANDLE),
                     "GetCurrentProcess": ([], w.HANDLE),
                     "DuplicateHandle": ([w.HANDLE, w.HANDLE, w.HANDLE, ctypes.POINTER(w.HANDLE), w.DWORD, w.BOOL, w.DWORD], w.BOOL),
+                    "GetFileInformationByHandleEx": ([w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD], w.BOOL),
                     "GetFinalPathNameByHandleW": ([w.HANDLE, w.LPWSTR, w.DWORD, w.DWORD], w.DWORD),
                     "SetFileInformationByHandle": ([w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD], w.BOOL),
                     "CloseHandle": ([w.HANDLE], w.BOOL),
@@ -185,6 +186,12 @@ def _agy_kernel():
                     function.argtypes, function.restype = args, result
                 _AGY_KERNEL = kernel
     return _AGY_KERNEL
+
+
+class _AgyCleanupUnsafe(ValueError):
+    def __init__(self, reason, subtype):
+        super().__init__(reason)
+        self.subtype = subtype
 
 
 class _AgyCleanupHandle:
@@ -225,23 +232,68 @@ class _AgyCleanupHandle:
                 os.close(descriptor)
             actual_id = (opened.st_dev, opened.st_ino)
             if actual_id != (expected.st_dev, expected.st_ino):
-                raise ValueError("AGY_INPUT_CLEANUP_UNSAFE")
+                raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "IDENTITY_CHANGED")
+            self._validate_metadata(expected)
             buffer = ctypes.create_unicode_buffer(32768)
             length = kernel.GetFinalPathNameByHandleW(self.handle, buffer, len(buffer), 0)
             if not 0 < length < len(buffer):
-                raise ValueError("AGY_SCRATCH_HANDLE_UNPROVEN")
+                raise _AgyCleanupUnsafe("AGY_SCRATCH_HANDLE_UNPROVEN", "HANDLE_PATH_UNPROVEN")
             actual = buffer.value
             if actual.startswith("\\\\?\\UNC\\"):
                 actual = "\\\\" + actual[8:]
             elif actual.startswith("\\\\?\\"):
                 actual = actual[4:]
             if os.path.normcase(actual) != os.path.normcase(str(path)):
-                raise ValueError("AGY_INPUT_CLEANUP_UNSAFE")
+                raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "HANDLE_PATH_CHANGED")
         except BaseException:
             self.close()
             raise
 
+    def _validate_metadata(self, expected):
+        """Query safety metadata on the deletion handle, without reopening.
+
+        Full Windows attributes are not a stable lstat/fstat equivalence:
+        opening a new directory can change non-safety bits. Native type,
+        reparse tag and link count are checked independently of Python's
+        version-specific stat representation. The exact dev/ino comparison
+        above still uses the interpreter's representation on the same handle.
+        """
+        ctypes, w = self.ctypes, self.w
+        class AttributeTag(ctypes.Structure):
+            _fields_ = [("attributes", w.DWORD), ("tag", w.DWORD)]
+        class Standard(ctypes.Structure):
+            _fields_ = [("allocation", ctypes.c_longlong), ("size", ctypes.c_longlong),
+                        ("links", w.DWORD), ("delete_pending", ctypes.c_ubyte),
+                        ("directory", ctypes.c_ubyte)]
+        tag, standard = AttributeTag(), Standard()
+        for kind, value in ((9, tag), (1, standard)):
+            if not self.kernel.GetFileInformationByHandleEx(
+                    self.handle, kind, ctypes.byref(value), ctypes.sizeof(value)):
+                raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "HANDLE_METADATA_UNPROVEN")
+        attributes = getattr(expected, "st_file_attributes", 0)
+        # ReparseTag is unused unless FILE_ATTRIBUTE_REPARSE_POINT is set.
+        if ((tag.attributes & 0x400) != (attributes & 0x400) or
+                (attributes & 0x400 and tag.tag != getattr(expected, "st_reparse_tag", 0))):
+            raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "REPARSE_CHANGED")
+        if (bool(standard.directory) != bool(tag.attributes & 0x10) or
+                bool(tag.attributes & 0x10) != bool(attributes & 0x10) or
+                (not attributes & 0x400 and
+                 bool(standard.directory) != stat.S_ISDIR(expected.st_mode)) or
+                (not attributes & 0x400 and not standard.directory and
+                 not stat.S_ISREG(expected.st_mode))):
+            raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "FILE_TYPE_CHANGED")
+        # Directory link counts are not the single-file ownership predicate.
+        # Reparse entries are removed through their own nofollow handle only.
+        if not standard.directory and not attributes & 0x400:
+            if standard.links != 1 or expected.st_nlink != 1:
+                raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "HARDLINK")
+        if (tag.attributes & 1) != (attributes & 1):
+            raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "READONLY_CHANGED")
+
     def delete(self, info, report):
+        # Link creation can race the path inspection even with rename denied.
+        # Recheck immediately before deletion or a readonly attribute change.
+        self._validate_metadata(info)
         ctypes, w = self.ctypes, self.w
         class Disposition(ctypes.Structure):
             _fields_ = [("delete", ctypes.c_ubyte)]
@@ -285,7 +337,7 @@ def agy_remove_owned_tree(directory: Path, parent: Path, identity: tuple,
               "platform": "WINDOWS_HANDLES" if os.name == "nt" else "POSIX_FIXTURE",
               "root_token_sha256": hashlib.sha256(str(directory).encode()).hexdigest(),
               "attempts": 0, "readonly_files_cleared": 0, "reparse_links_removed": 0,
-              "diagnostics": [],
+              "diagnostics": [], "first_unsafe_entry": None,
               # Sanitized measurements only: counts, depth and monotonic seconds.
               "measurements": {"entries_visited": 0, "max_depth": 0, "elapsed_seconds": 0.0,
                                "seconds_since_progress": 0.0, "deleted_entries": 0,
@@ -311,10 +363,10 @@ def agy_remove_owned_tree(directory: Path, parent: Path, identity: tuple,
 
     def inspect(path):
         if path != directory and directory not in path.parents:
-            raise ValueError("AGY_INPUT_CLEANUP_UNSAFE")
+            raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "PATH_OUTSIDE_ROOT")
         relative = path.relative_to(parent)
         if any(p in ("", ".", "..") or ":" in p or p.rstrip(". ") != p for p in relative.parts):
-            raise ValueError("AGY_INPUT_CLEANUP_UNSAFE")
+            raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "PATH_INDIRECTION")
         return path.lstat()
 
     parent_handle = None
@@ -340,7 +392,7 @@ def agy_remove_owned_tree(directory: Path, parent: Path, identity: tuple,
 
         if (directory.parent != parent or directory == parent or agy_directory(parent) != parent
                 or (parent.stat().st_dev, parent.stat().st_ino) != parent_identity):
-            raise ValueError("AGY_INPUT_CLEANUP_UNSAFE")
+            raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "PARENT_IDENTITY_CHANGED")
         parent_handle = _AgyCleanupHandle(parent, parent.lstat(), parent_only=True) if os.name == "nt" else None
         try:
             for attempt in range(5):
@@ -361,10 +413,11 @@ def agy_remove_owned_tree(directory: Path, parent: Path, identity: tuple,
                     info = inspect(path)
                     reparse = is_link(path)
                     if path == directory and (reparse or (info.st_dev, info.st_ino) != identity):
-                        raise ValueError("AGY_INPUT_CLEANUP_UNSAFE")
+                        raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "ROOT_IDENTITY_CHANGED")
                     if not reparse and not stat.S_ISDIR(info.st_mode) and (
                             not stat.S_ISREG(info.st_mode) or info.st_nlink != 1):
-                        raise ValueError("AGY_SCRATCH_ENTRY_UNSAFE")
+                        raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE",
+                            "HARDLINK" if stat.S_ISREG(info.st_mode) else "NON_REGULAR")
                     handle = _AgyCleanupHandle(path, info) if os.name == "nt" else None
                     try:
                         if stat.S_ISDIR(info.st_mode) and not reparse:
@@ -374,8 +427,10 @@ def agy_remove_owned_tree(directory: Path, parent: Path, identity: tuple,
                                 for entry in entries:
                                     remove(Path(entry.path), depth + 1)
                         current = inspect(path)
-                        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino) or is_link(path) != reparse:
-                            raise ValueError("AGY_INPUT_CLEANUP_UNSAFE")
+                        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+                            raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "IDENTITY_CHANGED")
+                        if is_link(path) != reparse:
+                            raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "REPARSE_CHANGED")
                         if handle is not None:
                             handle.delete(current, report)
                         elif stat.S_ISDIR(info.st_mode) and not path.is_symlink():
@@ -418,6 +473,14 @@ def agy_remove_owned_tree(directory: Path, parent: Path, identity: tuple,
             if parent_handle is not None:
                 parent_handle.close()
     except (OSError, ValueError) as exc:
+        if isinstance(exc, _AgyCleanupUnsafe):
+            try:
+                relative_entry = target.relative_to(directory).as_posix()
+            except ValueError:
+                relative_entry = "."  # An unbound path cannot supply a relative entry.
+            report["first_unsafe_entry"] = {
+                "subtype": exc.subtype,
+                "relative_entry_sha256": hashlib.sha256(relative_entry.encode()).hexdigest()}
         code = str(exc)
         if re.fullmatch(r"AGY_[A-Z_]+", code):
             report["reason"] = code

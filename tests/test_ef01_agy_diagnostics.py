@@ -728,6 +728,212 @@ def owned_cleanup(path):
         (info.st_dev, info.st_ino), (parent.st_dev, parent.st_ino))
 
 
+@pytest.mark.skipif(os.name != "nt", reason="native Windows cleanup handle metadata")
+@pytest.mark.parametrize("kind", ["file", "readonly", "directory"])
+def test_native_cleanup_handle_accepts_ordinary_metadata(tmp_path, kind):
+    target = tmp_path / kind
+    if kind == "directory":
+        target.mkdir()
+    else:
+        target.write_bytes(b"owned")
+        if kind == "readonly":
+            os.chmod(target, stat.S_IREAD)
+    expected = target.lstat()
+    handle = adapters._AgyCleanupHandle(target, expected)
+    try:
+        report = {"readonly_files_cleared": 0}
+        handle.delete(target.lstat(), report)
+    finally:
+        handle.close()
+    assert not target.exists()
+    assert report["readonly_files_cleared"] == (kind == "readonly")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows handle versus path metadata")
+@pytest.mark.parametrize("field,value", [
+    ("st_nlink", 2), ("st_mode", stat.S_IFDIR | 0o700),
+    ("st_file_attributes", 0x400), ("st_ino", 0), ("st_dev", 0),
+])
+def test_native_cleanup_handle_rejects_mismatched_safety_metadata(tmp_path, field, value):
+    target = tmp_path / "owned"
+    target.write_bytes(b"keep")
+    info = target.lstat()
+    expected = SimpleNamespace(**{name: getattr(info, name) for name in (
+        "st_dev", "st_ino", "st_mode", "st_nlink", "st_file_attributes", "st_reparse_tag")})
+    setattr(expected, field, value)
+    with pytest.raises(ValueError, match="AGY_INPUT_CLEANUP_UNSAFE"):
+        handle = adapters._AgyCleanupHandle(target, expected)
+        handle.close()
+    assert target.read_bytes() == b"keep"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows directory attribute differential")
+def test_native_cleanup_ignores_non_safety_directory_attribute(tmp_path):
+    target = tmp_path / "directory"
+    target.mkdir()
+    info = target.lstat()
+    # Observed native differential: 0x10000000 can disappear on opening a
+    # newly created directory. It is not a type, readonly or reparse bit.
+    expected = SimpleNamespace(**{name: getattr(info, name) for name in (
+        "st_dev", "st_ino", "st_mode", "st_nlink", "st_file_attributes", "st_reparse_tag")})
+    expected.st_file_attributes ^= 0x10000000
+    handle = adapters._AgyCleanupHandle(target, expected)
+    handle.close()
+    assert target.is_dir()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native handle query with labeled metadata faults")
+@pytest.mark.parametrize("phase", ["open", "delete"])
+@pytest.mark.parametrize("fault,subtype", [
+    ("hardlink", "HARDLINK"), ("nonregular", "FILE_TYPE_CHANGED"),
+    ("readonly", "READONLY_CHANGED"), ("reparse", "REPARSE_CHANGED"),
+    ("query-failed", "HANDLE_METADATA_UNPROVEN"),
+])
+def test_native_cleanup_handle_metadata_fault_holds_before_mutation(tmp_path, monkeypatch, phase, fault, subtype):
+    tree = tmp_path / "owned"
+    tree.mkdir()
+    target = tree / "private-leaf"
+    target.write_bytes(b"keep")
+    kernel = adapters._agy_kernel()
+    class FaultQuery:
+        """Real handles and queries; only the explicitly named metadata is modeled."""
+        handle = None
+        queries = 0
+        def __getattr__(self, name):
+            return getattr(kernel, name)
+        def CreateFileW(self, path, *args):
+            handle = kernel.CreateFileW(path, *args)
+            if path == str(target):
+                self.handle = handle
+            return handle
+        def GetFileInformationByHandleEx(self, handle, kind, value, size):
+            success = kernel.GetFileInformationByHandleEx(handle, kind, value, size)
+            if handle != self.handle:
+                return success
+            if kind == 9:
+                self.queries += 1
+            if success and self.queries >= (1 if phase == "open" else 2):
+                if fault == "query-failed":
+                    return False
+                if kind == 1 and fault == "hardlink":
+                    value._obj.links = 2
+                if kind == 1 and fault == "nonregular":
+                    value._obj.directory = True
+                if kind == 9 and fault == "readonly":
+                    value._obj.attributes |= 1
+                if kind == 9 and fault == "reparse":
+                    value._obj.attributes |= 0x400
+            return success
+    proxy = FaultQuery()
+    monkeypatch.setattr(adapters, "_agy_kernel", lambda: proxy)
+    result = owned_cleanup(tree)
+    assert result["status"] == "HOLD" and target.read_bytes() == b"keep"
+    assert result["first_unsafe_entry"] == {
+        "subtype": subtype, "relative_entry_sha256": hashlib.sha256(target.name.encode()).hexdigest()}
+    assert result["readonly_files_cleared"] == result["measurements"]["deleted_entries"] == 0
+    assert "private-leaf" not in json.dumps(result) and str(tmp_path) not in json.dumps(result)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native file with unused reparse tag field modeled")
+def test_native_cleanup_ignores_reparse_tag_when_attribute_is_absent(tmp_path, monkeypatch):
+    tree = tmp_path / "owned"
+    tree.mkdir()
+    (tree / "ordinary").write_bytes(b"owned")
+    kernel = adapters._agy_kernel()
+    class UnusedTag:
+        def __getattr__(self, name):
+            return getattr(kernel, name)
+        def GetFileInformationByHandleEx(self, handle, kind, value, size):
+            success = kernel.GetFileInformationByHandleEx(handle, kind, value, size)
+            if success and kind == 9 and not value._obj.attributes & 0x400:
+                # Windows defines this member as unused without the reparse bit.
+                value._obj.tag = 0xDEADBEEF
+            return success
+    monkeypatch.setattr(adapters, "_agy_kernel", UnusedTag)
+    result = owned_cleanup(tree)
+    assert result["status"] == "CLEAN" and not tree.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows hardlink race")
+@pytest.mark.parametrize("phase", ["open", "delete"])
+def test_native_cleanup_hardlink_race_holds_external_sentinel(tmp_path, monkeypatch, phase):
+    tree = tmp_path / "owned"
+    tree.mkdir()
+    target, external = tree / "private-leaf", tmp_path / "external-sentinel"
+    target.write_bytes(b"keep")
+    original = getattr(adapters._AgyCleanupHandle, "__init__" if phase == "open" else "delete")
+    def link():
+        try:
+            os.link(target, external)
+        except OSError as exc:
+            pytest.skip(f"native hardlink creation unavailable: {getattr(exc, 'winerror', None)}")
+    if phase == "open":
+        def racing(handle, path, expected, **kwargs):
+            if path == target:
+                link()
+            original(handle, path, expected, **kwargs)
+        monkeypatch.setattr(adapters._AgyCleanupHandle, "__init__", racing)
+    else:
+        def racing(handle, info, report):
+            if stat.S_ISREG(info.st_mode):
+                link()
+            original(handle, info, report)
+        monkeypatch.setattr(adapters._AgyCleanupHandle, "delete", racing)
+    result = owned_cleanup(tree)
+    assert external.read_bytes() == target.read_bytes() == b"keep"
+    assert result["status"] == "HOLD"
+    assert result["first_unsafe_entry"] == {
+        "subtype": "HARDLINK", "relative_entry_sha256": hashlib.sha256(b"private-leaf").hexdigest()}
+    assert "private-leaf" not in json.dumps(result) and str(tmp_path) not in json.dumps(result)
+    assert result["readonly_files_cleared"] == 0
+
+
+@pytest.mark.parametrize("kind", ["hardlink", "nonregular"])
+def test_cleanup_6000_leaves_then_unsafe_entry_is_sanitized(tmp_path, monkeypatch, kind):
+    tree, external = tmp_path / "owned", tmp_path / "external-sentinel"
+    tree.mkdir()
+    external.write_bytes(b"keep")
+    for index in range(6000):
+        (tree / f"leaf-{index:04d}").write_bytes(b"x")
+    unsafe = tree / "private-last-entry"
+    unsafe.write_bytes(b"opaque")
+    original_lstat, original_scandir = Path.lstat, os.scandir
+    def lstat(path, *args, **kwargs):
+        info = original_lstat(path, *args, **kwargs)
+        if path == unsafe:
+            return SimpleNamespace(st_dev=info.st_dev, st_ino=info.st_ino,
+                st_mode=stat.S_IFCHR if kind == "nonregular" else info.st_mode,
+                st_nlink=2 if kind == "hardlink" else info.st_nlink,
+                st_file_attributes=getattr(info, "st_file_attributes", 0))
+        return info
+    class LastUnsafe:
+        def __enter__(self):
+            self.entries = original_scandir(tree)
+            return self
+        def __exit__(self, *args):
+            self.entries.close()
+        def __iter__(self):
+            last = None
+            for entry in self.entries:
+                if entry.name == unsafe.name:
+                    last = entry
+                else:
+                    yield entry
+            assert last is not None
+            yield last
+    monkeypatch.setattr(Path, "lstat", lstat)
+    monkeypatch.setattr(adapters.os, "scandir", lambda path: LastUnsafe() if Path(path) == tree else original_scandir(path))
+    result = owned_cleanup(tree)
+    assert result["status"] == "HOLD" and result["reason"] == "AGY_SCRATCH_ENTRY_UNSAFE"
+    assert result["measurements"]["deleted_entries"] == 6000
+    assert result["measurements"]["entries_visited"] == 6002
+    assert result["first_unsafe_entry"] == {
+        "subtype": "HARDLINK" if kind == "hardlink" else "NON_REGULAR",
+        "relative_entry_sha256": hashlib.sha256(unsafe.name.encode()).hexdigest()}
+    assert external.read_bytes() == b"keep" and unsafe.read_bytes() == b"opaque"
+    assert "private-last-entry" not in json.dumps(result) and str(tmp_path) not in json.dumps(result)
+
+
 @pytest.mark.skipif(os.name != "nt", reason="native Windows sharing semantics")
 @pytest.mark.parametrize("release", [True, False])
 def test_native_held_open_file_cleanup_is_bounded_and_does_not_change_acl(tmp_path, release):
@@ -840,11 +1046,20 @@ def test_root_reparse_replacement_is_preserved_and_never_followed(tmp_path, monk
     outside.mkdir()
     (outside / "sentinel").write_bytes(b"keep")
     monkeypatch.setattr(runner.tempfile, "gettempdir", lambda: str(tmp_path))
+    creation_denied = False
     try:
         with pytest.raises(runner._AgyScratchCleanupError):
             with runner._agy_temp_tree(repo, "agy_scratch-") as root:
                 root.rename(tmp_path / "original-root")
-                _directory_alias(outside, root)
+                try:
+                    _directory_alias(outside, root)
+                except PermissionError:
+                    # Teardown's identity HOLD can mask this creation failure.
+                    # Do not count an ordinary residual directory as a junction.
+                    creation_denied = True
+        if creation_denied:
+            pytest.skip("native root reparse creation denied; no bypass")
+        assert adapters.is_link(root)
         assert root.exists() and (outside / "sentinel").read_bytes() == b"keep"
     finally:
         if 'root' in locals() and adapters.is_link(root):
