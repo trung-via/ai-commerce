@@ -1,0 +1,112 @@
+{
+  "schema_version": "WorkItem.v1",
+  "work_id": "BQ-04B_OFFLINE_REPAIR_001",
+  "action_id": "BQ04B-R13-AGY38HIGH-TRUSTED-ORACLE-POST616-01",
+  "attempt_id": "bq04b_r13_agy38high_trusted_oracle_post616_20261107_v1",
+  "source_sha": "2a4561e8ff7c855d430c298ee8f2c21921f80797",
+  "status": "CANDIDATE_READY",
+  "objective": "R13 bounded offline synthetic Q4/Q5 implementation with test-owned trusted live fixture capability/oracle and fail-closed reparse guard following merged #616 EF01 rootfix PR #620 on main",
+  "owner": "Media & Creative",
+  "component": "bq-04b",
+  "verification_profile": "mt01-component-onboarding",
+  "verification_round_limit": 2,
+  "executor_observations": {
+    "local_head": "2a4561e8ff7c855d430c298ee8f2c21921f80797",
+    "final_bq04b_local": {
+      "collected_total": 105,
+      "passed": 105,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "native_environment_failed": 0
+    },
+    "owner_and_consumer_suite": {
+      "a13": 197,
+      "bq-02a": 282,
+      "bq-02b": 249,
+      "bq-03b": 298,
+      "bq-04a": 153,
+      "bq-04b": 105,
+      "total_passed": 1284,
+      "total_failed": 0,
+      "total_skipped": 0
+    },
+    "selected_groups": ["a13", "bq-02a", "bq-02b", "bq-03b", "bq-04a", "bq-04b"],
+    "code_verify_fix_cycles_used": 1,
+    "native_link_proof": "REAL_WINDOWS_HARDLINK_AND_JUNCTION_REJECTED_BEFORE_MEDIA_READS",
+    "native_symlink_effect": "SYMLINK_NATIVE_EFFECT_UNPROVEN",
+    "candidate": "NONE; EF02 worker alone publishes verified candidate"
+  },
+  "model_selection": {
+    "executor": "antigravity",
+    "model": "gemini-3.8-flash",
+    "effort": "high",
+    "fallback_used": false,
+    "provider_proof": "EF02_NATIVE_TERMINAL_RECEIPT_REQUIRED"
+  },
+  "allowed_paths": [
+    "src/ai_commerce/creative_quality/repair_offline_adapter.py",
+    "src/ai_commerce/creative_quality/repair_verified_evidence.py",
+    "tests/test_bq_04b_offline_repair.py",
+    "work_items/mt01-components/bq-04b.json",
+    "work_items/BQ-04B_OFFLINE_REPAIR_001.json",
+    "docs/engineering/BQ_04B_OFFLINE_HANDOFF.md",
+    "docs/creative/BQ_04B_OFFLINE_REPAIR_PROTOCOL.md",
+    "src/ai_commerce/creative_quality/t2_sampling.py",
+    "src/ai_commerce/creative_quality/multimodal_review.py",
+    "src/ai_commerce/creative_quality/repair_policy.py",
+    "src/ai_commerce/creative_quality/repair_preservation.py",
+    "tests/test_bq_02b_multimodal.py",
+    "tests/test_bq_04a_targeted_repair.py"
+  ],
+  "add_only_paths": [
+    "src/ai_commerce/creative_quality/repair_offline_adapter.py",
+    "src/ai_commerce/creative_quality/repair_verified_evidence.py",
+    "tests/test_bq_04b_offline_repair.py",
+    "work_items/mt01-components/bq-04b.json",
+    "work_items/BQ-04B_OFFLINE_REPAIR_001.json",
+    "docs/engineering/BQ_04B_OFFLINE_HANDOFF.md",
+    "docs/creative/BQ_04B_OFFLINE_REPAIR_PROTOCOL.md"
+  ],
+  "modified_paths": [
+    "src/ai_commerce/creative_quality/repair_policy.py",
+    "src/ai_commerce/creative_quality/repair_preservation.py",
+    "tests/test_bq_04a_targeted_repair.py"
+  ],
+  "acceptance": [
+    "BQ-04b.q5-deterministic-edit-fixture-isolated",
+    "BQ-04b.q5-artifact-identity-attempt-receipt",
+    "BQ-04b.q5-independent-technical-reinspection-fail-closed"
+  ],
+  "native_link_contract": {
+    "mandatory": [
+      "REAL_WINDOWS_HARDLINK_REJECTED_BEFORE_MEDIA_READ",
+      "REAL_WINDOWS_JUNCTION_REPARSE_REJECTED_BEFORE_MEDIA_READ",
+      "SYMLINK_TAG_METADATA_REAL_VERIFIER_REJECTION",
+      "CURRENT_BYTES_UNCHANGED",
+      "ORDINARY_FILE_POSITIVE_CONTROL"
+    ],
+    "mandatory_skip_policy": "NO_SKIP_NO_XFAIL; capability denial is NATIVE_LINK_ENVIRONMENT_HOLD",
+    "optional_privileged_probe": "optional_native_symlink_probe; not a pytest acceptance case",
+    "native_symlink_effect": "SYMLINK_NATIVE_EFFECT_UNPROVEN",
+    "product_acceptance_scope": "Synthetic current-byte guard rejection; does not establish creation or traversal of an OS symlink",
+    "brain_requires_os_symlink": "HOLD; separate Human/HostOps authorization required"
+  },
+  "negative_acceptance": [
+    "Generic decide_repair never treats caller context/dict, strings, forged oracle, receipt, asserted rights/claim or guessed hashes as an observed defect",
+    "False positive even with legitimate black Q4 measurements fails (KEEP_ORIGINAL or HOLD, no local edit) unless native grounded fault exists",
+    "Forged fixture token/JSON, stale SHA, and released fixture all HOLD fail-closed",
+    "Every reparse tag, reparse attribute, symlink mode and file hardlink must fail before media reads",
+    "Current identity requires complete locked reinspection, including final lock exit checks",
+    "No provider, rights, publication, spend, production semantics or perceptual quality authority",
+    "Executor cannot publish a candidate or alter Git; EF01 host evidence and independent Brain acceptance remain required"
+  ],
+  "historical_attempts": [
+    {"issue": 584, "run": 42342752418, "artifact": 13562444303, "sha256": "acca6570ce88b06f1861ec38ebb5abf21896e792e0ca2da8d6fba187d56b1975", "status": "IMMUTABLE_29_PASS_6_CODE_FAILURES"},
+    {"issue": 588, "run": 42344486590, "artifact": 13563518864, "sha256": "025960e8ea4b14cbfb4b806bc76f002a64367d41c8fb94e406ce15900953f04a", "status": "IMMUTABLE_PROVIDER_OUTCOME_UNCONFIRMED", "replay_authorized": false},
+    {"issue": 598, "run": 42352888975, "artifact": 13567092030, "sha256": "9ce460d3d1ef85205a8b2155300af590c6679a54b16f3f1135d1671d79faec94", "status": "IMMUTABLE_1252_PASS_1_SKIP_HOLD_NATIVE_SYMLINK_PRIVILEGE", "source_trust": "QUARANTINED_ADVISORY_ONLY", "replay_authorized": false},
+    {"issue": 604, "run": 42355430852, "artifact": "none", "sha256": "8a1285bd0e91c63e6590cdabb1ece45ba21807e7", "status": "IMMUTABLE_1281_PASS_0_FAIL_SKIP_HOLD_SEMANTIC_NEGATIVE_AC", "note": "Brain HOLD at issuecomment-6704905880: caller context dictionary promoting black frames unsafe for legitimate creative footage"},
+    {"issue": 611, "run": 42359144994, "artifact": 13569642458, "sha256": "f988a0eb6d0ba166d5d176d2f4b5ce951428515ace7d3b38ebbbfeeae0a9c3c2", "status": "IMMUTABLE_INPUT_INTEGRITY_FAILED_QUARANTINED", "note": "AGY read-only input gained .pytest_cache; 9-file quarantine is read-only advisory"},
+    {"issue": 616, "pr": 620, "sha256": "2a4561e8ff7c855d430c298ee8f2c21921f80797", "status": "MERGED_EF01_TRANSPORT_ROOTFIX", "note": "runner._agy_child_env ensures pytest cache/temp/bytecode outside read-only input"}
+  ]
+}

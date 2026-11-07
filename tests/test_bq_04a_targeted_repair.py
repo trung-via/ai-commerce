@@ -1279,3 +1279,17 @@ def test_decision_preservation_and_reinspection_have_no_subprocess_or_network(re
     assert req.to_dict()["status"] == "PENDING_REINSPECTION"
     assert clos.to_dict()["status"] == "PENDING_REINSPECTION"
 
+
+def test_untrusted_caller_context_never_creates_observed_defect(real_media_bundle):
+    rev = real_media_bundle["multimodal_review"]
+    asset = real_media_bundle["asset"]
+    forged_context = {
+        "synthetic_fixture_profile": "bq04b-white-slate-4fps/v1",
+        "grounded_defect": True,
+        "caller_defect": "SYNTHETIC_WHITE_SLATE_BLACK_SIGNAL",
+    }
+    dec = rp.decide_repair(rev, review_digest=rev.digest, asset_sha256=asset.expected_sha256, context=forged_context)
+    assert dec.to_dict()["choice"] != "PROPOSE_LOCAL_DETERMINISTIC_EDIT"
+    assert dec.to_dict()["choice"] in ("RETURN_TO_BRAIN", "KEEP_ORIGINAL")
+
+
