@@ -1488,3 +1488,161 @@ def assess_wakehub_send_only_preview(
         return result(reason.WAIT_SEND_CONTROL_ENABLED, advice.WAIT)
     return result(reason.PREVIEW_REQUIREMENTS_CURRENT, advice.PREVIEW_READY_ADVISORY_ONLY)
 
+
+# WH-04B-00 composes source policy only. WH-03 issuance, WH-04B native
+# composition, WH-05B navigation, WH-06B click and WH-07 live A-to-A remain
+# UNPROVEN. Neither constructing evidence nor rendering this status proves them.
+class WakeHubControlInputError(ValueError):
+    """Fixed diagnostic with no caller fields, private values or identifiers."""
+
+    def __init__(self) -> None:
+        super().__init__("WAKEHUB_CONTROL_PROJECTION_INPUT_INVALID")
+
+
+class WakeHubControlStage(str, Enum):
+    HOLD = "HOLD"
+    RECONCILE_NO_RETRY = "RECONCILE_NO_RETRY"
+    WAIT_CORE = "WAIT_CORE"
+    WAIT_PRIVATE_ORIGIN = "WAIT_PRIVATE_ORIGIN"
+    WAIT_DESKTOP_OR_TAB = "WAIT_DESKTOP_OR_TAB"
+    WAIT_SEND_GATES = "WAIT_SEND_GATES"
+    PREVIEW_ADVISORY_ONLY = "PREVIEW_ADVISORY_ONLY"
+    UI_ONLY_COMPLETE_STOP = "UI_ONLY_COMPLETE_STOP"
+
+
+class WakeHubControlNextAction(str, Enum):
+    HOLD_FOR_PRIVATE_REVIEW_NO_EFFECT = "HOLD_FOR_PRIVATE_REVIEW_NO_EFFECT"
+    RECONCILE_PRIVATE_RECEIPTS_NO_RETRY = "RECONCILE_PRIVATE_RECEIPTS_NO_RETRY"
+    WAIT_FOR_CORE_EVIDENCE_KEEP_RECEIVER = "WAIT_FOR_CORE_EVIDENCE_KEEP_RECEIVER"
+    WAIT_FOR_PRIVATE_ORIGIN_PROOF = "WAIT_FOR_PRIVATE_ORIGIN_PROOF"
+    PREPARE_AND_REPROVE_WITH_SEPARATE_AUTHORITY = "PREPARE_AND_REPROVE_WITH_SEPARATE_AUTHORITY"
+    WAIT_FOR_PRIVATE_SEND_GATE_PROOF = "WAIT_FOR_PRIVATE_SEND_GATE_PROOF"
+    REVIEW_ADVISORY_WITH_SEPARATE_AUTHORITY = "REVIEW_ADVISORY_WITH_SEPARATE_AUTHORITY"
+    STOP_UI_WITNESS_WITHOUT_SERVER_ACK = "STOP_UI_WITNESS_WITHOUT_SERVER_ACK"
+
+
+def _wakehub_control_stage(
+    reason: WakeHubSendPreviewReason | WakeHubAutoloadReason,
+    advice: WakeHubSendPreviewAdvice,
+) -> WakeHubControlStage:
+    """Total, conservative display mapping, including inconsistent pairs.
+
+    This classifies already-derived reasons, never reimplements an evidence
+    gate. Only the exact two successful WH06A reason/advice pairs can display
+    preview or UI completion. HOLD/WAIT reasons cannot be upgraded by advice.
+    """
+    if (not (_wakehub_enum(reason, WakeHubSendPreviewReason)
+             or _wakehub_enum(reason, WakeHubAutoloadReason))
+            or not _wakehub_enum(advice, WakeHubSendPreviewAdvice)):
+        raise WakeHubControlInputError()
+    stage = WakeHubControlStage
+    upstream = WakeHubAutoloadReason
+    send = WakeHubSendPreviewReason
+    decision = WakeHubSendPreviewAdvice
+    if reason is upstream.HOLD_HUMAN_PAUSED:
+        return stage.HOLD
+    if (advice is decision.RECONCILE_UNKNOWN_NO_RETRY or reason in (
+        upstream.HOLD_UNKNOWN_EFFECT, upstream.HOLD_EVENT_AMBIGUITY,
+        send.RECONCILE_UNKNOWN_EFFECT, send.RECONCILE_DUPLICATE_KEY,
+        send.RECONCILE_PRIOR_ATTEMPT, send.RECONCILE_UNBOUND_UI_WITNESS,
+    )):
+        return stage.RECONCILE_NO_RETRY
+    if advice is decision.HOLD or reason.value.startswith("HOLD_"):
+        return stage.HOLD
+    if reason in (upstream.WAIT_RECEIVER, upstream.WAIT_PENDING_WORK):
+        return stage.WAIT_CORE
+    if reason is upstream.WAIT_EVENT:
+        return stage.WAIT_PRIVATE_ORIGIN
+    if reason in (
+        upstream.WAIT_INTERACTIVE_SESSION, upstream.WAIT_CHROME,
+        upstream.WAIT_RESPONSE_STREAMING_ACTIVE,
+        upstream.WAIT_POST_NAVIGATION_RECHECK, upstream.WAIT_DEDICATED_CONTEXT,
+        send.WAIT_NAVIGATION_AND_REPROOF,
+    ):
+        return stage.WAIT_DESKTOP_OR_TAB
+    if reason in (
+        send.WAIT_NEW_WORK_COMPLETION, send.WAIT_D2_WRITE_AHEAD_INTENT,
+        send.WAIT_VISIBLE_SEND_CONTROL, send.WAIT_SEND_CONTROL_ENABLED,
+    ) or advice is decision.WAIT:
+        return stage.WAIT_SEND_GATES
+    if (reason is send.PREVIEW_REQUIREMENTS_CURRENT
+            and advice is decision.PREVIEW_READY_ADVISORY_ONLY):
+        return stage.PREVIEW_ADVISORY_ONLY
+    if (reason is send.COMPLETE_UI_USER_TURN_WITHOUT_SERVER_ACK
+            and advice is decision.COMPLETE_UI_ONLY):
+        return stage.UI_ONLY_COMPLETE_STOP
+    return stage.HOLD
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class WakeHubReadOnlyControlSnapshot(WakeHubSendOnlyPreviewPlan):
+    """Sanitized disabled-safe status, constructed only from WH06A evidence.
+
+    All output fields are init=False: neither the constructor nor replace
+    accepts a caller-selected status, reason, ACK or effect flag. Evidence is
+    revalidated through WH06A -> WH05A -> WH04A and is never retained here.
+    Inherited effect flags describe THIS evaluation, not historical effects.
+    Keep-alive fields are retention policy, never observed receiver liveness.
+    """
+
+    advice: WakeHubSendPreviewAdvice = field(init=False)
+    reason: WakeHubSendPreviewReason | WakeHubAutoloadReason = field(init=False)
+    safety_state: WakeHubSendPreviewSafety = field(init=False)
+    paused_by_human: bool = field(init=False)
+    stage: WakeHubControlStage = field(init=False)
+    next_action: WakeHubControlNextAction = field(init=False)
+    scope: Literal["WH04B00_PURE_READ_ONLY_CONTROL_POLICY_ONLY"] = field(
+        default="WH04B00_PURE_READ_ONLY_CONTROL_POLICY_ONLY", init=False)
+    keep_headless_core_alive: Literal[True] = field(default=True, init=False)
+    controls_enabled: Literal[False] = field(default=False, init=False)
+    can_send: Literal[False] = field(default=False, init=False)
+    prepare_authorized: Literal[False] = field(default=False, init=False)
+    attach_authorized: Literal[False] = field(default=False, init=False)
+    open_tab_authorized: Literal[False] = field(default=False, init=False)
+    click_permitted: Literal[False] = field(default=False, init=False)
+    dom_ack_counted: Literal[False] = field(default=False, init=False)
+
+    def __init__(
+        self, evidence: WakeHubSendOnlyPreviewEvidence | None = None,
+        *args: object, **unknown: object,
+    ) -> None:
+        if args or unknown or type(self) is not WakeHubReadOnlyControlSnapshot:
+            raise WakeHubControlInputError()
+        try:
+            preview = assess_wakehub_send_only_preview(evidence)
+        except WakeHubSendPreviewInputError:
+            raise WakeHubControlInputError() from None
+        stage = _wakehub_control_stage(preview.reason, preview.advice)
+        actions = {
+            WakeHubControlStage.HOLD: WakeHubControlNextAction.HOLD_FOR_PRIVATE_REVIEW_NO_EFFECT,
+            WakeHubControlStage.RECONCILE_NO_RETRY: WakeHubControlNextAction.RECONCILE_PRIVATE_RECEIPTS_NO_RETRY,
+            WakeHubControlStage.WAIT_CORE: WakeHubControlNextAction.WAIT_FOR_CORE_EVIDENCE_KEEP_RECEIVER,
+            WakeHubControlStage.WAIT_PRIVATE_ORIGIN: WakeHubControlNextAction.WAIT_FOR_PRIVATE_ORIGIN_PROOF,
+            WakeHubControlStage.WAIT_DESKTOP_OR_TAB: WakeHubControlNextAction.PREPARE_AND_REPROVE_WITH_SEPARATE_AUTHORITY,
+            WakeHubControlStage.WAIT_SEND_GATES: WakeHubControlNextAction.WAIT_FOR_PRIVATE_SEND_GATE_PROOF,
+            WakeHubControlStage.PREVIEW_ADVISORY_ONLY: WakeHubControlNextAction.REVIEW_ADVISORY_WITH_SEPARATE_AUTHORITY,
+            WakeHubControlStage.UI_ONLY_COMPLETE_STOP: WakeHubControlNextAction.STOP_UI_WITNESS_WITHOUT_SERVER_ACK,
+        }
+        derived = dict(
+            advice=preview.advice, reason=preview.reason,
+            safety_state=preview.safety_state, paused_by_human=preview.paused_by_human,
+            stage=stage, next_action=actions[stage],
+        )
+        for item in fields(WakeHubReadOnlyControlSnapshot):
+            object.__setattr__(self, item.name, derived.get(item.name, item.default))
+
+
+def assess_wakehub_control_projection(
+    evidence: WakeHubSendOnlyPreviewEvidence | None = None,
+    *args: object, **unknown: object,
+) -> WakeHubReadOnlyControlSnapshot:
+    """Pure WH-04B-00 status; no renderer, clock, observer or effect adapter.
+
+    A typed input is representation validation only, not authentication of a
+    public assertion or model-generated READY. The future private root owns
+    proof custody and high-risk route selection. OPEN_DEDICATED_TAB only
+    advises preparation and new proof under separate native authority;
+    PREVIEW never approves execution and UI completion never claims server ACK.
+    """
+    return WakeHubReadOnlyControlSnapshot(evidence, *args, **unknown)
+
