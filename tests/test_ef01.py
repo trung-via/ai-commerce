@@ -14,6 +14,22 @@ from ai_commerce.engineering.profile import ExecutorSelection, SelectionError
 from ai_commerce.engineering.runner import execute_attempt, _observe_usage
 
 
+def _fixture_agy_process(command, *, lifecycle, **kwargs):
+    """Explicit process-lifecycle mock; never native Windows containment proof."""
+    from ai_commerce.engineering import runner
+    lifecycle.update(status="RECONCILED", tree_empty=True, reason=None,
+                     authority="MOCK_FIXTURE_NOT_NATIVE", containment_proven=False,
+                     forced_termination=False)
+    return runner.subprocess.run(command, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _non_windows_agy_process_fixture(monkeypatch):
+    if os.name != "nt":
+        from ai_commerce.engineering import runner
+        monkeypatch.setattr(runner, "_run_agy_owned", _fixture_agy_process)
+
+
 def _repo(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -463,14 +479,18 @@ print(json.dumps({'status':'SUCCESS', 'denied_actions': [{'action':'write_file'}
                 'git_dir':identity[1], 'files':sorted(p.name for p in mirror.iterdir())}}))
 '''.replace("MODE", repr(mode)), encoding="utf-8")
         original_command = runner_module.command_for
+        original_owned = runner_module._run_agy_owned
         original_run = subprocess.run
         commands, verifies = [], []
         def command(selection, repo, instruction, **kwargs):
             argv, stdin = original_command(selection, repo, instruction, **kwargs)
             return [sys.executable, str(script), *argv[1:]], stdin
+        def owned(command, **kwargs):
+            commands.append(command)
+            assert kwargs["cwd"] == source.resolve()
+            return original_owned(command, **kwargs)
         def execute(argv, **kwargs):
             if len(argv) > 1 and argv[1] == str(script):
-                commands.append(argv)
                 assert kwargs["cwd"] == source.resolve()
             if list(argv[1:3]) == ["-m", "pytest"]:
                 verifies.append(argv)
@@ -478,6 +498,7 @@ print(json.dumps({'status':'SUCCESS', 'denied_actions': [{'action':'write_file'}
                 return subprocess.CompletedProcess(argv, code, "1 failed\n" if code else "1 passed\n", "")
             return original_run(argv, **kwargs)
         monkeypatch.setattr(runner_module, "command_for", command)
+        monkeypatch.setattr(runner_module, "_run_agy_owned", owned)
         monkeypatch.setattr(runner_module.subprocess, "run", execute)
         # Verification is simulated here. The containing registered profile
         # observes twelve real workers; this fake makes no inner worker claim.
