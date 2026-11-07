@@ -43,6 +43,15 @@ _FFMPEG_EXTERNAL_TESTS = frozenset({
     "tests/test_a05_integration.py",
     "tests/test_a06_e01.py",
     "tests/test_a13_media_inspection.py",
+    # #559: these reviewed Q4/quality test paths require genuine A13 media
+    # probes. Their filenames do not contain "ffmpeg", "video", or "media".
+    # BQ-04a imports BQ-02b's actual MP4/ffprobe fixture helpers.
+    "tests/test_bq_02a_critic_t1.py",
+    "tests/test_bq_02b_multimodal.py",
+    "tests/test_bq_04a_targeted_repair.py",
+    # A14 E2E consumes the offline A13 inspected media bridge. Provisioning
+    # the tool is conservative, not a claim every case invokes ffprobe.
+    "tests/test_a14_commerce_e2e.py",
 })
 _FFMPEG_TEST_HINTS = ("ffmpeg", "ffprobe", "libx264", "transcode", "render", "video", "media")
 
