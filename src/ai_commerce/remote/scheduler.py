@@ -7,6 +7,9 @@ from ai_commerce.engineering.profile import diagnose_failure
 
 def run_schedule(batch: dict, work, *, max_workers: int | None = None) -> dict:
     actions = {a["action_id"]: a for a in batch["actions"]}
+    if (len(actions) != len(batch["actions"]) or
+            len({a["attempt_id"] for a in batch["actions"]}) != len(actions)):
+        raise ValueError("DUPLICATE_DISPATCH_IDENTITY")
     budget = max_workers or batch.get("max_parallel", 2)
     if budget < 1:
         raise ValueError("INVALID_PARALLEL_LIMIT")
@@ -22,6 +25,8 @@ def run_schedule(batch: dict, work, *, max_workers: int | None = None) -> dict:
             result = work(action)
             if not isinstance(result, dict) or "status" not in result:
                 raise ValueError("WORKER_RETURN_MALFORMED")
+            if any(result.get(key, action[key]) != action[key] for key in ("action_id", "attempt_id")):
+                raise ValueError("WORKER_IDENTITY_MISMATCH")
         except Exception as exc:
             result = {"status": "EXECUTION_UNKNOWN",
                       "error_code": type(exc).__name__, "diagnostic": str(exc)}
