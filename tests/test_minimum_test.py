@@ -1779,3 +1779,45 @@ def test_live_twelve_workers_self_host_only(tmp_path):
     stdout = run.stdout.encode()
     assert run.returncode == 0, run.stdout + run.stderr
     assert verification.observed_xdist_workers(stdout) == 12, run.stdout
+
+
+def test_pr_ci_ffmpeg_dependency_is_per_test_not_per_unknown_owner():
+    """#549: a new source-only owner must not require an external media binary."""
+    import importlib.util
+
+    file = ROOT / ".github" / "scripts" / "ef02-pr-ci-tests.py"
+    spec = importlib.util.spec_from_file_location("mt01_ci_ffmpeg_dependency_549", file)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    needs = module._needs_ffmpeg_for_plan
+
+    def plan(*tests):
+        return SimpleNamespace(selected_tests=tuple(tests))
+
+    # Exact owner/consumer closure from WakeHub G2-Broker PR #547.
+    assert not needs(plan(
+        "tests/test_wakehub_g2_broker.py",
+        "tests/test_wakehub_g2_native.py",
+        "tests/test_wakehub_native_inventory.py",
+        "tests/test_wakehub_private_operator.py",
+    ))
+    # Valid new components are not implicitly treated as video providers.
+    assert not needs(plan("tests/test_future_offline_agent.py"))
+    # Real FFmpeg/ffprobe or rendering suites retain the dependency.
+    assert needs(plan("tests/test_a05_render.py"))
+    assert needs(plan("tests/test_a05_integration.py"))
+    assert needs(plan("tests/test_a13_media_inspection.py"))
+    assert needs(plan("tests/test_future_ffprobe_validation.py"))
+    assert needs(plan("tests/test_future_video_transcode.py"))
+    assert needs(plan("tests/test_future_media_implementation.py"))
+
+    # Malformed/unmapped test paths never silently disable dependency setup.
+    for invalid in ((), ("unknown/path.py",), ("tests/../escape.py",),
+                    ("tests/test_binary.exe",)):
+        assert needs(plan(*invalid))
+
+    # The selection oracle still owns the actual test closure.
+    from ai_commerce.engineering.impact_v21 import CONTROL_TESTS
+    assert set(CONTROL_TESTS[".github/scripts/ef02-pr-ci-tests.py"]) == {
+        "tests/test_minimum_test.py", "tests/test_ef02_mt01_registry.py"
+    }
