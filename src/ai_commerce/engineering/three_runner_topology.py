@@ -1165,3 +1165,326 @@ def assess_wakehub_chat_autoload_plan(
 
     return result(reason_enum.OPEN_NEW_DEDICATED_TAB_ROUTE_PROVEN)
 
+
+# WH-06A projects private observer categories only. WH-03 issuance and WH-04B
+# native composition remain external/unresolved; no constructor is a verifier.
+class WakeHubSendPreviewInputError(ValueError):
+    """Fixed diagnostic; never interpolate caller fields, values or secrets."""
+
+    def __init__(self) -> None:
+        super().__init__("WAKEHUB_SEND_PREVIEW_INPUT_INVALID")
+
+
+class WakeHubCompletionState(str, Enum):
+    NEW_WORK_COMPLETION = "NEW_WORK_COMPLETION"
+    ABSENT = "ABSENT"
+    PUBLIC_ASSERTION = "PUBLIC_ASSERTION"
+    STALE = "STALE"
+    DUPLICATE = "DUPLICATE"
+
+
+class WakeHubSendConsentScope(str, Enum):
+    SEND_ONLY = "SEND_ONLY"
+    OTHER = "OTHER"
+    ABSENT = "ABSENT"
+
+
+class WakeHubSendIntentState(str, Enum):
+    WRITE_AHEAD_RECORDED = "WRITE_AHEAD_RECORDED"
+    NOT_RECORDED = "NOT_RECORDED"
+    DUPLICATE_KEY = "DUPLICATE_KEY"
+    UNKNOWN = "UNKNOWN"
+
+
+class WakeHubSendDeliveryState(str, Enum):
+    NOT_ATTEMPTED = "NOT_ATTEMPTED"
+    ATTEMPT_BEGUN = "ATTEMPT_BEGUN"
+    RECEIPT_LOST = "RECEIPT_LOST"
+    OUTCOME_UNOBSERVED = "OUTCOME_UNOBSERVED"
+    DUPLICATE_KEY = "DUPLICATE_KEY"
+
+
+class WakeHubSendPreviewAdvice(str, Enum):
+    PREVIEW_READY_ADVISORY_ONLY = "PREVIEW_READY_ADVISORY_ONLY"
+    WAIT = "WAIT"
+    HOLD = "HOLD"
+    RECONCILE_UNKNOWN_NO_RETRY = "RECONCILE_UNKNOWN_NO_RETRY"
+    COMPLETE_UI_ONLY = "COMPLETE_UI_ONLY"
+
+
+class WakeHubSendPreviewSafety(str, Enum):
+    ADVISORY_NO_EFFECT = "ADVISORY_NO_EFFECT"
+    BLOCKED_NO_EFFECT = "BLOCKED_NO_EFFECT"
+    RECONCILE_ONLY_NO_RETRY = "RECONCILE_ONLY_NO_RETRY"
+    UI_ONLY_WITHOUT_SERVER_ACK = "UI_ONLY_WITHOUT_SERVER_ACK"
+
+
+class WakeHubSendPreviewReason(str, Enum):
+    PREVIEW_REQUIREMENTS_CURRENT = "PREVIEW_REQUIREMENTS_CURRENT"
+    COMPLETE_UI_USER_TURN_WITHOUT_SERVER_ACK = "COMPLETE_UI_USER_TURN_WITHOUT_SERVER_ACK"
+    RECONCILE_UNKNOWN_EFFECT = "RECONCILE_UNKNOWN_EFFECT"
+    RECONCILE_DUPLICATE_KEY = "RECONCILE_DUPLICATE_KEY"
+    RECONCILE_PRIOR_ATTEMPT = "RECONCILE_PRIOR_ATTEMPT"
+    RECONCILE_UNBOUND_UI_WITNESS = "RECONCILE_UNBOUND_UI_WITNESS"
+    HOLD_PRIVATE_SEND_PROJECTION = "HOLD_PRIVATE_SEND_PROJECTION"
+    HOLD_NATIVE_OBSERVER_PROOF = "HOLD_NATIVE_OBSERVER_PROOF"
+    WAIT_NEW_WORK_COMPLETION = "WAIT_NEW_WORK_COMPLETION"
+    HOLD_COMPLETION_PROOF = "HOLD_COMPLETION_PROOF"
+    HOLD_SEND_ONLY_CONSENT = "HOLD_SEND_ONLY_CONSENT"
+    HOLD_CONSENT_SIGNATURE = "HOLD_CONSENT_SIGNATURE"
+    HOLD_CONSENT_SIGNER = "HOLD_CONSENT_SIGNER"
+    HOLD_SEND_ORIGIN_BINDING = "HOLD_SEND_ORIGIN_BINDING"
+    HOLD_SEND_LEASE = "HOLD_SEND_LEASE"
+    HOLD_SEND_CORRELATION = "HOLD_SEND_CORRELATION"
+    WAIT_D2_WRITE_AHEAD_INTENT = "WAIT_D2_WRITE_AHEAD_INTENT"
+    HOLD_D2_INTENT_PROOF = "HOLD_D2_INTENT_PROOF"
+    WAIT_NAVIGATION_AND_REPROOF = "WAIT_NAVIGATION_AND_REPROOF"
+    HOLD_COMPOSER_NOT_EMPTY = "HOLD_COMPOSER_NOT_EMPTY"
+    WAIT_VISIBLE_SEND_CONTROL = "WAIT_VISIBLE_SEND_CONTROL"
+    HOLD_SEND_CONTROL_AMBIGUOUS = "HOLD_SEND_CONTROL_AMBIGUOUS"
+    WAIT_SEND_CONTROL_ENABLED = "WAIT_SEND_CONTROL_ENABLED"
+
+
+class _WakeHubSendPreviewProjection:
+    __slots__ = ()
+
+    def __init__(self, *args: object, **values: object) -> None:
+        schema = fields(self)
+        if args or len(values) != len(schema) or any(
+            item.name not in values for item in schema
+        ):
+            raise WakeHubSendPreviewInputError()
+        for item in schema:
+            object.__setattr__(self, item.name, values[item.name])
+        try:
+            self._validate()
+        except AttributeError:
+            raise WakeHubSendPreviewInputError() from None
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class WakeHubSendAuthorizationEvidence(_WakeHubSendPreviewProjection):
+    """Synthetic PRIVATE projection, never a grant or public Issue input.
+
+    native_observer independently authenticates current native observations;
+    completion_proof verifies a genuine new work-completion event, never a
+    synthetic-data flag. consent_signature includes independent signature,
+    scope, freshness and revocation verification by the current trusted signer.
+    origin_binding independently binds source, event, consent, owner, original
+    Chat A route/proof/generation, lease and correlation to ONE origin. Matching
+    strings/integers cannot establish this binding. No raw identifier is held.
+    intent_proof independently witnesses the same D2 idempotent intent durably
+    recorded BEFORE any click, including completion/delivery key uniqueness.
+    This policy reads categories; it implements none of those attestations.
+    """
+
+    projection: WakeHubProofState
+    native_observer: WakeHubProofState
+    completion: WakeHubCompletionState
+    completion_proof: WakeHubProofState
+    consent: WakeHubConsentState
+    consent_scope: WakeHubSendConsentScope
+    consent_signature: WakeHubProofState
+    signer: WakeHubProofState
+    origin_binding: WakeHubProofState
+    lease: WakeHubProofState
+    correlation: WakeHubProofState
+    intent: WakeHubSendIntentState
+    intent_proof: WakeHubProofState
+
+    def _validate(self) -> None:
+        pairs = (
+            (self.completion, WakeHubCompletionState),
+            (self.consent, WakeHubConsentState),
+            (self.consent_scope, WakeHubSendConsentScope),
+            (self.intent, WakeHubSendIntentState),
+            *((getattr(self, name), WakeHubProofState) for name in (
+                "projection", "native_observer", "completion_proof",
+                "consent_signature", "signer", "origin_binding", "lease",
+                "correlation", "intent_proof",
+            )),
+        )
+        if any(not _wakehub_enum(value, expected) for value, expected in pairs):
+            raise WakeHubSendPreviewInputError()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class WakeHubSendOnlyPreviewEvidence(_WakeHubSendPreviewProjection):
+    """Immutable observer projection, not precomputed READY or executable data.
+
+    ui_user_turn is an independent current DOM witness of the EXACT matching
+    user turn after this intent's prior Send, bound to the original Chat A,
+    event, source, owner and generation. It is never a ChatGPT server ACK.
+    Counts/booleans describe privately observed composer/Send controls only;
+    their constructors authenticate neither the DOM nor any native authority.
+    """
+
+    autoload: WakeHubChatAutoloadEvidence
+    authorization: WakeHubSendAuthorizationEvidence
+    composer_empty: bool
+    send_control_count: int
+    send_control_visible: bool
+    send_control_enabled: bool
+    delivery: WakeHubSendDeliveryState
+    ui_user_turn: WakeHubProofState
+
+    def _validate(self) -> WakeHubChatAutoloadPlan:
+        if (type(self.autoload) is not WakeHubChatAutoloadEvidence
+                or type(self.authorization) is not WakeHubSendAuthorizationEvidence
+                or not _wakehub_enum(self.delivery, WakeHubSendDeliveryState)
+                or not _wakehub_enum(self.ui_user_turn, WakeHubProofState)
+                or any(type(value) is not bool for value in (
+                    self.composer_empty, self.send_control_visible,
+                    self.send_control_enabled,
+                ))
+                or type(self.send_control_count) is not int
+                or not 0 <= self.send_control_count <= _MAX_WINDOWS_COUNT):
+            raise WakeHubSendPreviewInputError()
+        self.authorization._validate()
+        try:
+            return assess_wakehub_chat_autoload_plan(self.autoload)
+        except WakeHubAutoloadInputError:
+            raise WakeHubSendPreviewInputError() from None
+
+
+@dataclass(frozen=True, slots=True)
+class WakeHubSendOnlyPreviewPlan(WakeHubNoEffectPlan):
+    """Every effect flag describes THIS evaluation and is permanently false."""
+
+    advice: WakeHubSendPreviewAdvice
+    reason: WakeHubSendPreviewReason | WakeHubAutoloadReason
+    safety_state: WakeHubSendPreviewSafety
+    paused_by_human: bool
+    scope: Literal["WH06A_PURE_SEND_PREVIEW_POLICY_ONLY"] = field(
+        default="WH06A_PURE_SEND_PREVIEW_POLICY_ONLY", init=False)
+    keep_event_receiver_alive: Literal[True] = field(default=True, init=False)
+    native_operations: Literal[False] = field(default=False, init=False)
+    chrome: Literal[False] = field(default=False, init=False)
+    navigation: Literal[False] = field(default=False, init=False)
+    send: Literal[False] = field(default=False, init=False)
+    click: Literal[False] = field(default=False, init=False)
+    plugin: Literal[False] = field(default=False, init=False)
+    start: Literal[False] = field(default=False, init=False)
+    stop: Literal[False] = field(default=False, init=False)
+    task: Literal[False] = field(default=False, init=False)
+    process: Literal[False] = field(default=False, init=False)
+    grant: Literal[False] = field(default=False, init=False)
+    authorization: Literal[False] = field(default=False, init=False)
+    d2_intent_written: Literal[False] = field(default=False, init=False)
+    server_ack_counted: Literal[False] = field(default=False, init=False)
+
+
+def assess_wakehub_send_only_preview(
+    evidence: WakeHubSendOnlyPreviewEvidence | None = None, **unknown: object,
+) -> WakeHubSendOnlyPreviewPlan:
+    """Pure WH-06A advice; no runtime, clock, I/O, issuer, signing or effects.
+
+    Validate the complete schema, derive WH05A/WH04A readiness internally,
+    then apply Human pause, no-retry history, private provenance and UI gates.
+    OPEN_DEDICATED_TAB advice requires future real navigation and new proof.
+    READY is synthetic policy coverage only; no native origin is attested here.
+    """
+    if unknown or type(evidence) is not WakeHubSendOnlyPreviewEvidence:
+        raise WakeHubSendPreviewInputError()
+    try:
+        autoload = evidence._validate()
+    except AttributeError:
+        raise WakeHubSendPreviewInputError() from None
+    auth = evidence.authorization
+    current = WakeHubProofState.INDEPENDENTLY_CURRENT
+    advice = WakeHubSendPreviewAdvice
+    reason = WakeHubSendPreviewReason
+    upstream = WakeHubAutoloadReason
+    safety = WakeHubSendPreviewSafety
+
+    def result(code: WakeHubSendPreviewReason | WakeHubAutoloadReason,
+               decision: WakeHubSendPreviewAdvice) -> WakeHubSendOnlyPreviewPlan:
+        state = safety.BLOCKED_NO_EFFECT
+        if decision is advice.PREVIEW_READY_ADVISORY_ONLY:
+            state = safety.ADVISORY_NO_EFFECT
+        elif decision is advice.RECONCILE_UNKNOWN_NO_RETRY:
+            state = safety.RECONCILE_ONLY_NO_RETRY
+        elif decision is advice.COMPLETE_UI_ONLY:
+            state = safety.UI_ONLY_WITHOUT_SERVER_ACK
+        return WakeHubSendOnlyPreviewPlan(
+            advice=decision, reason=code, safety_state=state,
+            paused_by_human=autoload.paused_by_human,
+        )
+
+    if autoload.paused_by_human:
+        return result(upstream.HOLD_HUMAN_PAUSED, advice.HOLD)
+    if (autoload.reason is upstream.HOLD_UNKNOWN_EFFECT
+            or auth.intent is WakeHubSendIntentState.UNKNOWN):
+        return result(reason.RECONCILE_UNKNOWN_EFFECT, advice.RECONCILE_UNKNOWN_NO_RETRY)
+    if (auth.completion is WakeHubCompletionState.DUPLICATE
+            or auth.intent is WakeHubSendIntentState.DUPLICATE_KEY
+            or evidence.delivery is WakeHubSendDeliveryState.DUPLICATE_KEY
+            or autoload.reason is upstream.HOLD_EVENT_AMBIGUITY):
+        return result(reason.RECONCILE_DUPLICATE_KEY, advice.RECONCILE_UNKNOWN_NO_RETRY)
+
+    # Each proof has independent provenance semantics, not enum authentication.
+    blocked = None
+    for value, code in (
+        (auth.projection, reason.HOLD_PRIVATE_SEND_PROJECTION),
+        (auth.native_observer, reason.HOLD_NATIVE_OBSERVER_PROOF),
+        (auth.completion_proof, reason.HOLD_COMPLETION_PROOF),
+        (auth.consent_signature, reason.HOLD_CONSENT_SIGNATURE),
+        (auth.signer, reason.HOLD_CONSENT_SIGNER),
+        (auth.origin_binding, reason.HOLD_SEND_ORIGIN_BINDING),
+        (auth.lease, reason.HOLD_SEND_LEASE),
+        (auth.correlation, reason.HOLD_SEND_CORRELATION),
+        (auth.intent_proof, reason.HOLD_D2_INTENT_PROOF),
+    ):
+        if value is not current:
+            blocked = code
+            break
+    if auth.completion is not WakeHubCompletionState.NEW_WORK_COMPLETION:
+        blocked = (reason.WAIT_NEW_WORK_COMPLETION
+                   if auth.completion is WakeHubCompletionState.ABSENT
+                   else reason.HOLD_COMPLETION_PROOF)
+    elif (auth.consent is not WakeHubConsentState.CURRENT
+          or auth.consent_scope is not WakeHubSendConsentScope.SEND_ONLY):
+        blocked = reason.HOLD_SEND_ONLY_CONSENT
+    elif auth.intent is WakeHubSendIntentState.NOT_RECORDED:
+        blocked = reason.WAIT_D2_WRITE_AHEAD_INTENT
+
+    if evidence.delivery is not WakeHubSendDeliveryState.NOT_ATTEMPTED:
+        # A response stream or new Human draft cannot erase an exact prior
+        # user-turn witness. Still require unchanged Chat A/recheck/generation;
+        # WH05A checks draft/stream before those later integrity checks.
+        tabs = evidence.autoload.tabs
+        if (blocked is None and evidence.ui_user_turn is current
+                and evidence.autoload.route_authorized is current
+                and autoload.reason in (
+                    upstream.ATTACH_EXISTING_EXACT_CHAT_A_TAB,
+                    upstream.WAIT_RESPONSE_STREAMING_ACTIVE,
+                    upstream.HOLD_HUMAN_DRAFT_PRESENT,
+                ) and len(tabs) == 1 and not tabs[0].redirect_drift
+                and tabs[0].generation is current
+                and tabs[0].post_navigation_recheck is current):
+            return result(reason.COMPLETE_UI_USER_TURN_WITHOUT_SERVER_ACK,
+                          advice.COMPLETE_UI_ONLY)
+        return result(reason.RECONCILE_PRIOR_ATTEMPT, advice.RECONCILE_UNKNOWN_NO_RETRY)
+    if evidence.ui_user_turn is not WakeHubProofState.MISSING:
+        return result(reason.RECONCILE_UNBOUND_UI_WITNESS, advice.RECONCILE_UNKNOWN_NO_RETRY)
+    if blocked is not None:
+        return result(blocked, advice.WAIT if blocked in (
+            reason.WAIT_NEW_WORK_COMPLETION, reason.WAIT_D2_WRITE_AHEAD_INTENT,
+        ) else advice.HOLD)
+    if autoload.advice is WakeHubAutoloadAdvice.OPEN_DEDICATED_TAB_ADVISORY_ONLY:
+        return result(reason.WAIT_NAVIGATION_AND_REPROOF, advice.WAIT)
+    if autoload.advice is not WakeHubAutoloadAdvice.ATTACH_EXISTING_ADVISORY_ONLY:
+        return result(autoload.reason, advice.WAIT if autoload.advice
+                      is WakeHubAutoloadAdvice.WAIT else advice.HOLD)
+    if evidence.autoload.route_authorized is not current:
+        return result(upstream.HOLD_ORIGIN_ROUTE, advice.HOLD)
+    if not evidence.composer_empty:
+        return result(reason.HOLD_COMPOSER_NOT_EMPTY, advice.HOLD)
+    if evidence.send_control_count > 1:
+        return result(reason.HOLD_SEND_CONTROL_AMBIGUOUS, advice.HOLD)
+    if evidence.send_control_count == 0 or not evidence.send_control_visible:
+        return result(reason.WAIT_VISIBLE_SEND_CONTROL, advice.WAIT)
+    if not evidence.send_control_enabled:
+        return result(reason.WAIT_SEND_CONTROL_ENABLED, advice.WAIT)
+    return result(reason.PREVIEW_REQUIREMENTS_CURRENT, advice.PREVIEW_READY_ADVISORY_ONLY)
+
