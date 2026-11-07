@@ -290,14 +290,25 @@ class LocalBatchWorker:
 
     def audit_action(self, action: dict, *, read_budget=192, diagnostics=None,
             effect_witness=None, witness_enrollment=None, witness_context=None,
-            witness_verifier=None, source_contract_fixture=False) -> dict:
+            witness_verifier=None, source_contract_fixture=False, ledger=None) -> dict:
         """Explicit source-only entrypoint; never routes through execute/claim."""
         submitted = {k: v for k, v in action.items() if k != "resolved_dependencies"}
         return WorkOwnerAudit.run(self.github, issue_number=self.issue_number,
             batch=self.batch, action=submitted, trusted_issuer=self.issuer_login,
             read_budget=read_budget, diagnostics=diagnostics, effect_witness=effect_witness,
             witness_enrollment=witness_enrollment, witness_context=witness_context,
-            witness_verifier=witness_verifier, source_contract_fixture=source_contract_fixture).payload()
+            witness_verifier=witness_verifier, source_contract_fixture=source_contract_fixture,
+            ledger=ledger).payload()
+
+    def witness_bridge(self, action: dict, request: dict, *,
+                       enrollment=None, context=None, ssh_keygen=None,
+                       ledger=None, source_contract_fixture=False) -> dict:
+        from .transport import work_owner_witness_bridge
+        return work_owner_witness_bridge(
+            request, enrollment=enrollment, context=context,
+            ssh_keygen=ssh_keygen, ledger=ledger,
+            source_contract_fixture=source_contract_fixture
+        )
 
     def execute_action(self, action: dict) -> dict:
         """One independent action; claim precedes any executor invocation."""

@@ -786,3 +786,82 @@ def test_h225_48_hash_mismatch_before_and_after_effect(h, monkeypatch):
     h.worker.fault = corrupt
     out = result(h.execute(h.write(path=target)))
     assert out["status"] == "PARTIAL" and out["error_code"] == "POSTCONDITION_FAILED"
+
+
+def test_workowner_effect_ledger_lifecycle_and_conflict_rejection(tmp_path):
+    from ai_commerce.hostops_v3.journal import OfflineWorkOwnerEffectLedger
+    from ai_commerce.hostops_v3.contract import Denied
+
+    # Invalid path rejection
+    with pytest.raises(Denied, match="EFFECT_LEDGER_PATH_DENIED"):
+        OfflineWorkOwnerEffectLedger(tmp_path / "relative.txt")
+
+    db_path = tmp_path / "effect_ledger.sqlite3"
+    with OfflineWorkOwnerEffectLedger(db_path) as ledger:
+        base_req = {
+            "request_id": "1" * 64, "replay_id": "2" * 64, "nonce": "3" * 64,
+            "repo": "trung-via/ai-commerce", "action_id": "effect-test",
+            "root_issue": 587, "current_issue": 595, "attempt_id": "attempt-001",
+            "source_sha": "a" * 40,
+            "work_owner": {
+                "root_commit_sha": "b" * 40, "root_digest": "c" * 64,
+                "journal_tip_sha": "d" * 40, "journal_digest": "e" * 64,
+                "work_key": "f" * 64, "fingerprint": "1" * 64,
+                "fence": "2" * 64, "generation": 2
+            },
+            "provider_intent": {"commit_sha": "3" * 40, "digest": "4" * 64, "round": 0}
+        }
+        res1 = ledger.record_effect_intent(base_req)
+        assert res1["status"] == "INTENT_RESERVED_NO_EFFECT"
+        assert res1["execution_allowed"] is False
+        assert ledger.unreconciled_intents_count() == 1
+
+        # Duplicate exact request returns HOLD_REPLAY_UNKNOWN (at-most-once)
+        res_dup = ledger.record_effect_intent(base_req)
+        assert res_dup["status"] == "HOLD_REPLAY_UNKNOWN"
+
+        # Conflict on same request_id with different nonce raises Denied
+        conflicting = dict(base_req)
+        conflicting["nonce"] = "9" * 64
+        with pytest.raises(Denied, match="EFFECT_REQUEST_ID_CONFLICT"):
+            ledger.record_effect_intent(conflicting)
+
+        # Generation rollback on same (repo, attempt_id) raises Denied
+        gen_rollback = dict(base_req)
+        gen_rollback["request_id"] = "4" * 64
+        gen_rollback["replay_id"] = "5" * 64
+        gen_rollback["nonce"] = "6" * 64
+        gen_rollback["work_owner"] = dict(base_req["work_owner"])
+        gen_rollback["work_owner"]["generation"] = 1
+        with pytest.raises(Denied, match="EFFECT_GENERATION_ROLLBACK"):
+            ledger.record_effect_intent(gen_rollback)
+
+        # Source drift on same attempt raises Denied
+        src_drift = dict(base_req)
+        src_drift["request_id"] = "7" * 64
+        src_drift["replay_id"] = "8" * 64
+        src_drift["nonce"] = "a" * 64
+        src_drift["source_sha"] = "0" * 40
+        with pytest.raises(Denied, match="EFFECT_SOURCE_DRIFT"):
+            ledger.record_effect_intent(src_drift)
+
+
+def test_owner_witness_isolation_and_safe_path(tmp_path):
+    from ai_commerce.hostops_v3.security import validate_owner_witness_isolation, assert_safe_reparse_and_scratch
+    from ai_commerce.hostops_v3.contract import Denied
+
+    # Same principal denied
+    with pytest.raises(Denied, match="SAME_PRINCIPAL_SIGNER_DENIED"):
+        validate_owner_witness_isolation("1" * 64, "1" * 64)
+
+    # Isolated principals allowed
+    validate_owner_witness_isolation("1" * 64, "2" * 64)
+
+    # Safe path validation
+    safe_file = tmp_path / "valid.txt"
+    safe_file.write_text("content")
+    assert_safe_reparse_and_scratch(safe_file)
+
+    with pytest.raises(Denied, match="UNSAFE_PATH_NOT_ABSOLUTE"):
+        assert_safe_reparse_and_scratch("relative_file.txt")
+

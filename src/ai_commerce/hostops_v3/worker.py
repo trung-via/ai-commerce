@@ -210,6 +210,38 @@ class Worker:
             observed = {"sha256": value, "bytes": count}
         return self._receipt(request, "UNKNOWN", "RECONCILED_OBSERVATION_ONLY", {**observed, "reconciled": True})
 
+    def verify_owner_witness(self, request_payload: dict, *, ledger=None, source_contract_fixture: bool = False) -> dict:
+        """Source-owned bridge between isolated Windows owner witness and E1 WorkOwnerEffectWitness."""
+        from ..remote.transport import work_owner_witness_bridge, WorkOwnerEffectEnrollment, WorkOwnerEffectReadContext
+        from .security import validate_owner_witness_isolation
+
+        enrollment_dict = request_payload.get("enrollment")
+        enrollment = None
+        if enrollment_dict is not None:
+            enrollment = WorkOwnerEffectEnrollment(**enrollment_dict)
+            validate_owner_witness_isolation(enrollment.signer_principal_sha256, enrollment.executor_principal_sha256)
+
+        context_dict = request_payload.get("context")
+        context = None
+        if context_dict is not None:
+            ctx_copy = dict(context_dict)
+            if "seen_nonces" in ctx_copy and not isinstance(ctx_copy["seen_nonces"], frozenset):
+                ctx_copy["seen_nonces"] = frozenset(ctx_copy["seen_nonces"])
+            if "seen_replay_ids" in ctx_copy and not isinstance(ctx_copy["seen_replay_ids"], frozenset):
+                ctx_copy["seen_replay_ids"] = frozenset(ctx_copy["seen_replay_ids"])
+            context = WorkOwnerEffectReadContext(**ctx_copy)
+
+        req = request_payload.get("bridge_request", request_payload)
+        return work_owner_witness_bridge(
+            req,
+            enrollment=enrollment,
+            context=context,
+            ssh_keygen=request_payload.get("ssh_keygen"),
+            ledger=ledger,
+            source_contract_fixture=source_contract_fixture
+        )
+
+
 
 
 class WorkerV4(Worker):

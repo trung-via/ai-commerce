@@ -2900,7 +2900,9 @@ def test_effect_witness_join_requires_all_source_and_effect_gates(tmp_path, monk
 
 @pytest.mark.parametrize("issue,generation,run_id,artifact_id,artifact_digest", [
     (595, 2, 42350373844, 13565018880, "0ab78df02b61ad83d80c4ab2f1a92547e24537d23d1ae89b2b5c3216a4288713"),
-    (599, 1, 42352918055, 13566913588, "747cce3522fa72a47b1133a0fa017b25c6634cda19597f0b7e5a0eeb57a22b0f")])
+    (599, 1, 42352918055, 13566913588, "747cce3522fa72a47b1133a0fa017b25c6634cda19597f0b7e5a0eeb57a22b0f"),
+    (622, 1, 42360000622, 13570000622, "622" + "0" * 61),
+    (628, 1, 42360000628, 13570000628, "628" + "0" * 61)])
 def test_effect_witness_historical_unknown_never_replays_or_coerces_status(
         tmp_path, monkeypatch, issue, generation, run_id, artifact_id, artifact_digest):
     """Modeled historical journal states; pins are original, NOT new host proof."""
@@ -2937,4 +2939,226 @@ def test_effect_witness_worker_interface_never_acquires_or_executes(tmp_path, mo
         witness_context=f.context, witness_verifier=f.verifier, source_contract_fixture=True)
     assert result["effect_witness"]["gate"] == "EFFECT_DETERMINATE_AUTHENTICATED"
     assert all(method == "GET" for method, *_ in storage.requests)
+
+
+class _SourceContractLedgerFixture:
+    """Explicitly labeled SOURCE_CONTRACT_FIXTURE duck-typed ledger."""
+    def __init__(self):
+        self._intents = {}
+        self._unreconciled = 0
+
+    def unreconciled_intents_count(self):
+        return self._unreconciled
+
+    def record_effect_intent(self, request):
+        req_id = request.get("request_id")
+        if req_id in self._intents:
+            return {"status": "HOLD_REPLAY_UNKNOWN", "execution_allowed": False, "reconciled": False}
+        self._intents[req_id] = request
+        self._unreconciled += 1
+        return {"status": "INTENT_RESERVED_NO_EFFECT", "execution_allowed": False, "reconciled": False}
+
+
+def _bridge_fixture(tmp_path, monkeypatch):
+    """Fixture for E2A source-owned bridge between isolated Windows witness and E1 WorkOwnerEffectWitness."""
+    from ai_commerce.remote.transport import work_owner_witness_bridge, WORK_OWNER_WITNESS_BRIDGE_SCHEMA
+    f = _effect_witness_fixture(tmp_path, monkeypatch)
+    ledger = _SourceContractLedgerFixture()
+    request = {
+        "schema": WORK_OWNER_WITNESS_BRIDGE_SCHEMA,
+        "repo": f.binding["repo"],
+        "action_id": f.binding["action_id"],
+        "root_issue": f.binding["root_issue"],
+        "current_issue": f.binding["current_issue"],
+        "attempt_id": f.binding["attempt_id"],
+        "source_sha": f.binding["source_sha"],
+        "work_owner": f.binding["work_owner"],
+        "refs": f.binding["refs"],
+        "provider_intent": f.binding["provider_intent"],
+        "witness_envelope": f.raw,
+        "candidate_boundary": {
+            "candidate_sha": f.payload["publication"]["candidate_sha"],
+            "receipt_sha256": f.payload["verification"]["receipt_sha256"],
+            "post_effect_sha256": f.payload["publication"]["post_effect_sha256"],
+        },
+    }
+    return SimpleNamespace(f=f, ledger=ledger, request=request, bridge=work_owner_witness_bridge)
+
+
+def test_e2a_bridge_positive_source_only_hold_native_signer_required(tmp_path, monkeypatch):
+    b = _bridge_fixture(tmp_path, monkeypatch)
+    res = b.bridge(b.request, enrollment=b.f.enrollment, context=b.f.context,
+                   ssh_keygen=b.f.verifier, ledger=b.ledger, source_contract_fixture=True)
+    assert res["status"] == "SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED"
+    assert res["gate"] == "EFFECT_DETERMINATE_AUTHENTICATED"
+    assert res["scope"] == "SOURCE_CONTRACT_FIXTURE"
+    assert res["native_signer_required"] is True
+    assert res["entitlement"] == "SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED"
+    assert res["execution_allowed"] is False
+    assert res["work_owner_transition_authorized"] is False
+    assert res["replay_authorized"] is False
+    assert res["publication_authorized"] is False
+    assert res["ledger_receipt"]["status"] == "INTENT_RESERVED_NO_EFFECT"
+
+
+def test_e2a_bridge_rejects_same_sid_forged_signer(tmp_path, monkeypatch):
+    b = _bridge_fixture(tmp_path, monkeypatch)
+    from dataclasses import replace
+    same_sid_enrollment = replace(b.f.enrollment,
+        signer_principal_sha256=b.f.enrollment.executor_principal_sha256)
+    res = b.bridge(b.request, enrollment=same_sid_enrollment, context=b.f.context,
+                   ssh_keygen=b.f.verifier, ledger=b.ledger, source_contract_fixture=True)
+    assert res["status"] == "HOLD"
+    assert res["gate"] == "NO_AUTHENTICATED_OWNER_WITNESS"
+
+
+def test_e2a_bridge_rejects_fake_signature(tmp_path, monkeypatch):
+    b = _bridge_fixture(tmp_path, monkeypatch)
+    envelope = c.decode(b.f.raw)
+    envelope["signature_b64"] = base64.b64encode(b"forged-signature-bytes" * 2).decode()
+    b.request["witness_envelope"] = c.canonical(envelope)
+    res = b.bridge(b.request, enrollment=b.f.enrollment, context=b.f.context,
+                   ssh_keygen=b.f.verifier, ledger=b.ledger, source_contract_fixture=True)
+    assert res["status"] == "HOLD"
+    assert res["gate"] == "BAD_SIGNATURE"
+
+
+def test_e2a_bridge_rejects_missing_enrolled_principal_or_private_ledger(tmp_path, monkeypatch):
+    b = _bridge_fixture(tmp_path, monkeypatch)
+    res = b.bridge(b.request, enrollment=b.f.enrollment, context=b.f.context,
+                   ssh_keygen=b.f.verifier, ledger=b.ledger, source_contract_fixture=False)
+    assert res["status"] == "HOLD"
+    assert res["gate"] == "NO_AUTHENTICATED_OWNER_WITNESS"
+
+    # Missing private ledger
+    res_no_ledger = b.bridge(b.request, enrollment=b.f.enrollment, context=b.f.context,
+                             ssh_keygen=b.f.verifier, ledger=None, source_contract_fixture=True)
+    assert res_no_ledger["status"] == "HOLD"
+    assert res_no_ledger["gate"] == "REPLAY_OR_STALE"
+
+    ledger2 = _SourceContractLedgerFixture()
+    res_no_enroll = b.bridge(b.request, enrollment=None, context=b.f.context,
+                             ssh_keygen=b.f.verifier, ledger=ledger2, source_contract_fixture=True)
+    assert res_no_enroll["status"] == "HOLD"
+    assert res_no_enroll["gate"] == "NO_AUTHENTICATED_OWNER_WITNESS"
+
+
+@pytest.mark.parametrize("mismatch", ["candidate_sha", "receipt_sha256", "post_effect_sha256"])
+def test_e2a_bridge_rejects_fabricated_receipt(tmp_path, monkeypatch, mismatch):
+    b = _bridge_fixture(tmp_path, monkeypatch)
+    cb = dict(b.request["candidate_boundary"])
+    cb[mismatch] = "0" * (40 if mismatch == "candidate_sha" else 64)
+    b.request["candidate_boundary"] = cb
+    res = b.bridge(b.request, enrollment=b.f.enrollment, context=b.f.context,
+                   ssh_keygen=b.f.verifier, ledger=b.ledger, source_contract_fixture=True)
+    assert res["status"] == "HOLD"
+    assert "MISMATCH" in res["reason"]
+
+
+@pytest.mark.parametrize("fault", ["source", "fence", "generation"])
+def test_e2a_bridge_rejects_stale_source_fence_gen(tmp_path, monkeypatch, fault):
+    b = _bridge_fixture(tmp_path, monkeypatch)
+    if fault == "source":
+        b.request["source_sha"] = "0" * 40
+    elif fault == "fence":
+        b.request["work_owner"]["fence"] = "0" * 64
+    else:
+        b.request["work_owner"]["generation"] += 1
+    res = b.bridge(b.request, enrollment=b.f.enrollment, context=b.f.context,
+                   ssh_keygen=b.f.verifier, ledger=b.ledger, source_contract_fixture=True)
+    assert res["status"] == "HOLD"
+
+
+def test_e2a_bridge_rejects_body_token_mismatches(tmp_path, monkeypatch):
+    b = _bridge_fixture(tmp_path, monkeypatch)
+    b.request["schema"] = "invalid.schema.v1"
+    res = b.bridge(b.request, enrollment=b.f.enrollment, context=b.f.context,
+                   ssh_keygen=b.f.verifier, ledger=b.ledger, source_contract_fixture=True)
+    assert res["status"] == "HOLD"
+    assert res["reason"] == "BRIDGE_SCHEMA_INVALID"
+
+
+def test_e2a_bridge_provider_quota_429_remains_hold(tmp_path, monkeypatch):
+    b = _bridge_fixture(tmp_path, monkeypatch)
+    b.f.payload["provider"]["outcome"] = "QUOTA_EXHAUSTED"
+    b.f.seal()
+    b.request["witness_envelope"] = b.f.raw
+    res = b.bridge(b.request, enrollment=b.f.enrollment, context=b.f.context,
+                   ssh_keygen=b.f.verifier, ledger=b.ledger, source_contract_fixture=True)
+    assert res["status"] == "HOLD"
+    assert res["gate"] == "SOURCE_BOUNDARY_CONTRADICTION"
+
+
+def test_e2a_bridge_wrong_round_or_candidate_remains_hold(tmp_path, monkeypatch):
+    b = _bridge_fixture(tmp_path, monkeypatch)
+    b.request["provider_intent"]["round"] = 9
+    res = b.bridge(b.request, enrollment=b.f.enrollment, context=b.f.context,
+                   ssh_keygen=b.f.verifier, ledger=b.ledger, source_contract_fixture=True)
+    assert res["status"] == "HOLD"
+
+
+def test_e2a_bridge_late_publication_remains_hold(tmp_path, monkeypatch):
+    b = _bridge_fixture(tmp_path, monkeypatch)
+    b.f.payload["publication"]["monotonic_ns"] = b.f.payload["timestamp"]["monotonic_ns"] + 500
+    b.f.seal()
+    b.request["witness_envelope"] = b.f.raw
+    res = b.bridge(b.request, enrollment=b.f.enrollment, context=b.f.context,
+                   ssh_keygen=b.f.verifier, ledger=b.ledger, source_contract_fixture=True)
+    assert res["status"] == "HOLD"
+    assert res["gate"] == "SOURCE_BOUNDARY_CONTRADICTION"
+
+
+def test_e2a_bridge_dirty_scratch_remains_hold(tmp_path, monkeypatch):
+    b = _bridge_fixture(tmp_path, monkeypatch)
+    b.f.payload["cleanup"]["scratch_dirty"] = True
+    b.f.seal()
+    b.request["witness_envelope"] = b.f.raw
+    res = b.bridge(b.request, enrollment=b.f.enrollment, context=b.f.context,
+                   ssh_keygen=b.f.verifier, ledger=b.ledger, source_contract_fixture=True)
+    assert res["status"] == "HOLD"
+    assert res["gate"] == "SOURCE_BOUNDARY_CONTRADICTION"
+
+
+def test_e2a_bridge_out_of_scope_edits_remains_hold(tmp_path, monkeypatch):
+    b = _bridge_fixture(tmp_path, monkeypatch)
+    b.request["candidate_boundary"]["candidate_sha"] = "0" * 40
+    res = b.bridge(b.request, enrollment=b.f.enrollment, context=b.f.context,
+                   ssh_keygen=b.f.verifier, ledger=b.ledger, source_contract_fixture=True)
+    assert res["status"] == "HOLD"
+    assert res["reason"] == "CANDIDATE_BOUNDARY_MISMATCH"
+
+
+def test_e2a_bridge_crash_between_reserve_and_effect_remains_hold(tmp_path, monkeypatch):
+    b = _bridge_fixture(tmp_path, monkeypatch)
+    res1 = b.bridge(b.request, enrollment=b.f.enrollment, context=b.f.context,
+                    ssh_keygen=b.f.verifier, ledger=b.ledger, source_contract_fixture=True)
+    assert res1["status"] == "SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED"
+    assert b.ledger.unreconciled_intents_count() == 1
+    res2 = b.bridge(b.request, enrollment=b.f.enrollment, context=b.f.context,
+                    ssh_keygen=b.f.verifier, ledger=b.ledger, source_contract_fixture=True)
+    assert res2["status"] == "HOLD"
+    assert res2["reason"] == "REPLAY_OR_STALE"
+    assert res2["gate"] == "REPLAY_OR_STALE"
+
+
+def test_e2a_bridge_hardlink_reparse_junction_remains_hold(tmp_path, monkeypatch):
+    b = _bridge_fixture(tmp_path, monkeypatch)
+    # Relative or unsafe verifier path is rejected by _work_owner_effect_verifier_snapshot
+    res = b.bridge(b.request, enrollment=b.f.enrollment, context=b.f.context,
+                   ssh_keygen="relative_keygen_path.exe", ledger=b.ledger, source_contract_fixture=True)
+    assert res["status"] == "HOLD"
+    assert res["gate"] in ("BAD_SIGNATURE", "SOURCE_BOUNDARY_CONTRADICTION")
+
+
+def test_e2a_bridge_missing_candidate_not_proven_absence_remains_hold(tmp_path, monkeypatch):
+    b = _bridge_fixture(tmp_path, monkeypatch)
+    b.f.payload["publication"].update(state="ABSENT_AT_COMMIT_BOUNDARY", candidate_sha=None,
+                                     absence_basis="UNFENCED_OR_UNPROVEN")
+    b.f.seal()
+    b.request["witness_envelope"] = b.f.raw
+    res = b.bridge(b.request, enrollment=b.f.enrollment, context=b.f.context,
+                   ssh_keygen=b.f.verifier, ledger=b.ledger, source_contract_fixture=True)
+    assert res["status"] == "HOLD"
+    assert res["gate"] == "SOURCE_BOUNDARY_CONTRADICTION"
+
 

@@ -8,7 +8,7 @@ import shutil
 import stat
 import time
 
-from .contract import CONTROL_REPOSITORY, SOURCE_REPOSITORY, decode, deny, digest, ident, sha, shape, text
+from .contract import CONTROL_REPOSITORY, SOURCE_REPOSITORY, Denied, decode, deny, digest, ident, sha, shape, text
 
 
 def prefer_readable_pwsh_path():
@@ -337,4 +337,44 @@ def admit_v4(config, config_path):
     if transport_root.exists() or transport_root.is_symlink():
         _bounded_install_paths(transport_root, max_entries=256, max_depth=6,
                                max_seconds=1.0)
+
+
+def validate_owner_witness_isolation(signer_principal: str, executor_principal: str | None = None) -> None:
+    """Ensure owner witness signer is independently isolated and not same-SID runner."""
+    sha(signer_principal)
+    if executor_principal is not None:
+        sha(executor_principal)
+        if signer_principal == executor_principal:
+            deny("SAME_PRINCIPAL_SIGNER_DENIED")
+    if os.name == "nt":
+        try:
+            current_sid, _ = windows_identity()
+            current_sid_hash = digest(current_sid.encode("ascii"))
+            if signer_principal == current_sid_hash:
+                deny("SAME_SID_FORGED_SIGNER")
+        except Denied:
+            raise
+        except Exception:
+            pass
+
+
+def assert_safe_reparse_and_scratch(path: Path | str) -> None:
+    """Validate path does not cross hardlinks, junctions, reparse points, or unowned boundaries."""
+    p = Path(path)
+    if not p.is_absolute():
+        deny("UNSAFE_PATH_NOT_ABSOLUTE")
+    if p.is_symlink():
+        deny("HARDLINK_OR_REPARSE_UNSAFE")
+    if os.name == "nt":
+        try:
+            info = p.lstat()
+            if getattr(info, "st_file_attributes", 0) & 0x400:
+                deny("HARDLINK_OR_REPARSE_UNSAFE")
+            if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
+                deny("HARDLINK_OR_REPARSE_UNSAFE")
+        except FileNotFoundError:
+            pass
+        except OSError:
+            deny("HARDLINK_OR_REPARSE_UNSAFE")
+
 

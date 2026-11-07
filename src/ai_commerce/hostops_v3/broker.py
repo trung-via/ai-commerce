@@ -541,3 +541,14 @@ def serve_v4(config_path, *, once=False, execute=None):
         listener.close()
         endpoint.unlink()
 
+
+def ipc_request_owner_witness(payload):
+    """Strict Owner Witness IPC framing, validating schema and mode."""
+    message = decode(payload)
+    shape(message, "schema mode envelope")
+    if message["schema"] != "hostops.owner_witness.v1" or message["mode"] not in ("bridge", "verify"):
+        deny("BAD_IPC_MODE")
+    raw = canonical(message["envelope"])
+    return message["mode"], raw
+
+

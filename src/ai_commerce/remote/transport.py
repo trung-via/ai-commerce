@@ -1034,6 +1034,8 @@ def _effect_verify_signature(body, signature, signers, identity, namespace, exec
 WORK_OWNER_EFFECT_SCHEMA = "WorkOwnerEffectWitness.v1"
 WORK_OWNER_EFFECT_NAMESPACE = "workowner-effect-witness-v1@ai-commerce"
 WORK_OWNER_EFFECT_NATIVE_GATE = "HOLD_PENDING_ADOPTED_NATIVE_OWNER_POLICY"
+SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED = "SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED"
+WORK_OWNER_WITNESS_BRIDGE_SCHEMA = "WorkOwnerWitnessBridge.v1"
 _WORK_OWNER_EFFECT_ENROLLMENTS: tuple[bytes, ...] = ()
 
 
@@ -1091,10 +1093,13 @@ class WorkOwnerEffectResult:
     gate: WorkOwnerEffectGate
     scope: str = "UNENROLLED"
     evidence_hashes: tuple[tuple[str, str], ...] = ()
+    native_signer_gate: str = SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED
 
     def payload(self):
         return {"schema": "WorkOwnerEffectSourceGate.v1", "gate": self.gate.value,
                 "scope": self.scope, "native_owner_policy_gate": WORK_OWNER_EFFECT_NATIVE_GATE,
+                "native_signer_gate": self.native_signer_gate,
+                "native_signer_required": True,
                 "work_owner_transition_authorized": False, "replay_authorized": False,
                 "transfer_authorized": False, "publication_authorized": False,
                 "execution_allowed": False, "credential_custody_proven": False,
@@ -1300,6 +1305,171 @@ def work_owner_effect_witness_verify_offline(raw, *, expected_binding, enrollmen
         return result(gate.SOURCE_BOUNDARY_CONTRADICTION)
 
 
+def work_owner_witness_bridge(
+    request: dict,
+    *,
+    enrollment: WorkOwnerEffectEnrollment | None = None,
+    context: WorkOwnerEffectReadContext | None = None,
+    ssh_keygen: Path | str | None = None,
+    ledger: Any | None = None,
+    source_contract_fixture: bool = False
+) -> dict:
+    """Source-owned bridge between isolated Windows owner witness and E1 WorkOwnerEffectWitness.v1.
+
+    Exact typed request pins repo, action, issue, attempt, source, WorkOwner
+    journal tip/fence/generation, claim/pre-spawn/spawned, provider intent, signed
+    owner witness and verified post-effect receipt/candidate boundary.
+    Strong deny-by-default: production enrollment defaults empty.
+    Returns SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED for verified source contract fixtures.
+    """
+    scope = "SOURCE_CONTRACT_FIXTURE" if source_contract_fixture is True else "UNENROLLED"
+
+    def hold_result(reason: str, gate=WorkOwnerEffectGate.SOURCE_BOUNDARY_CONTRADICTION, **extra):
+        return {
+            "schema": "WorkOwnerWitnessBridgeResult.v1",
+            "status": "HOLD",
+            "reason": reason,
+            "gate": gate.value if isinstance(gate, WorkOwnerEffectGate) else str(gate),
+            "scope": scope,
+            "entitlement": "HOLD_NATIVE_SIGNER_REQUIRED",
+            "native_signer_required": True,
+            "native_owner_policy_gate": WORK_OWNER_EFFECT_NATIVE_GATE,
+            "work_owner_transition_authorized": False,
+            "replay_authorized": False,
+            "publication_authorized": False,
+            "execution_allowed": False,
+            "evidence_hashes": {},
+            **extra
+        }
+
+    try:
+        if type(source_contract_fixture) is not bool:
+            return hold_result("SOURCE_CONTRACT_FIXTURE_INVALID")
+        if not isinstance(request, dict):
+            return hold_result("BRIDGE_REQUEST_INVALID")
+
+        _effect_shape(request, "schema repo action_id root_issue current_issue attempt_id source_sha work_owner refs provider_intent witness_envelope candidate_boundary")
+        if request["schema"] != WORK_OWNER_WITNESS_BRIDGE_SCHEMA:
+            return hold_result("BRIDGE_SCHEMA_INVALID")
+
+        binding_data = {
+            "repo": request["repo"],
+            "root_issue": request["root_issue"],
+            "current_issue": request["current_issue"],
+            "action_id": request["action_id"],
+            "attempt_id": request["attempt_id"],
+            "source_sha": request["source_sha"],
+            "work_owner": request["work_owner"],
+            "refs": request["refs"],
+            "provider_intent": request["provider_intent"]
+        }
+        verified_binding = work_owner_effect_binding(binding_data)
+
+        cb = request["candidate_boundary"]
+        _effect_shape(cb, "candidate_sha receipt_sha256 post_effect_sha256")
+        if cb["candidate_sha"] is not None:
+            _effect_sha(cb["candidate_sha"], 40)
+        _effect_sha(cb["receipt_sha256"])
+        _effect_sha(cb["post_effect_sha256"])
+
+        if enrollment is not None:
+            if enrollment.signer_principal_sha256 == enrollment.executor_principal_sha256:
+                return hold_result("SAME_SID_FORGED_SIGNER", gate=WorkOwnerEffectGate.NO_AUTHENTICATED_OWNER_WITNESS)
+            if os.name == "nt":
+                try:
+                    from .local_wake_entry import _windows_process_sid
+                    curr_sid = _windows_process_sid()
+                    curr_hash = _effect_digest(curr_sid.encode("ascii"))
+                    if enrollment.signer_principal_sha256 == curr_hash:
+                        return hold_result("SAME_SID_FORGED_SIGNER", gate=WorkOwnerEffectGate.NO_AUTHENTICATED_OWNER_WITNESS)
+                except Exception:
+                    pass
+
+        if ledger is None:
+            return hold_result("MISSING_PRIVATE_LEDGER", gate=WorkOwnerEffectGate.REPLAY_OR_STALE)
+
+        ledger_receipt = None
+        try:
+            envelope_raw = request["witness_envelope"]
+            if isinstance(envelope_raw, str):
+                envelope_raw = envelope_raw.encode("utf-8")
+            elif isinstance(envelope_raw, dict):
+                envelope_raw = _effect_canonical(envelope_raw)
+            env_obj = _effect_decode(envelope_raw)
+            replay_info = env_obj["payload"]["replay"]
+            intent_record_req = {
+                "request_id": replay_info["replay_id"],
+                "replay_id": replay_info["replay_id"],
+                "nonce": replay_info["nonce"],
+                "repo": request["repo"],
+                "action_id": request["action_id"],
+                "root_issue": request["root_issue"],
+                "current_issue": request["current_issue"],
+                "attempt_id": request["attempt_id"],
+                "source_sha": request["source_sha"],
+                "work_owner": request["work_owner"],
+                "provider_intent": request["provider_intent"]
+            }
+            ledger_receipt = ledger.record_effect_intent(intent_record_req)
+            if ledger_receipt.get("status") == "HOLD_REPLAY_UNKNOWN":
+                return hold_result("REPLAY_OR_STALE", gate=WorkOwnerEffectGate.REPLAY_OR_STALE, ledger_receipt=ledger_receipt)
+        except Exception:
+            return hold_result("LEDGER_RESERVATION_FAILED", gate=WorkOwnerEffectGate.REPLAY_OR_STALE)
+
+        envelope_bytes = request["witness_envelope"]
+        if isinstance(envelope_bytes, dict):
+            envelope_bytes = _effect_canonical(envelope_bytes)
+        elif isinstance(envelope_bytes, str):
+            envelope_bytes = envelope_bytes.encode("utf-8")
+
+        witness_result = work_owner_effect_witness_verify_offline(
+            envelope_bytes,
+            expected_binding=verified_binding,
+            enrollment=enrollment,
+            context=context,
+            ssh_keygen=ssh_keygen,
+            source_contract_fixture=source_contract_fixture
+        )
+
+        if witness_result.gate is not WorkOwnerEffectGate.EFFECT_DETERMINATE_AUTHENTICATED:
+            return hold_result(
+                witness_result.gate.value,
+                gate=witness_result.gate,
+                evidence_hashes=dict(witness_result.evidence_hashes)
+            )
+
+        env_dict = _effect_decode(envelope_bytes)
+        payload = env_dict["payload"]
+        pub = payload["publication"]
+        ver = payload["verification"]
+
+        if pub["candidate_sha"] != cb["candidate_sha"]:
+            return hold_result("CANDIDATE_BOUNDARY_MISMATCH")
+        if ver["receipt_sha256"] != cb["receipt_sha256"]:
+            return hold_result("RECEIPT_HASH_MISMATCH")
+        if pub["post_effect_sha256"] != cb["post_effect_sha256"]:
+            return hold_result("POST_EFFECT_HASH_MISMATCH")
+
+        return {
+            "schema": "WorkOwnerWitnessBridgeResult.v1",
+            "status": SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED,
+            "gate": witness_result.gate.value,
+            "scope": witness_result.scope,
+            "entitlement": SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED,
+            "native_signer_required": True,
+            "native_owner_policy_gate": WORK_OWNER_EFFECT_NATIVE_GATE,
+            "work_owner_transition_authorized": False,
+            "replay_authorized": False,
+            "publication_authorized": False,
+            "execution_allowed": False,
+            "evidence_hashes": dict(witness_result.evidence_hashes),
+            "ledger_receipt": ledger_receipt,
+        }
+    except Exception:
+        return hold_result("BRIDGE_VERIFICATION_FAILED")
+
+
+
 class AuditGate(str, Enum):
     VERIFIED = "VERIFIED"
     CONTRADICTED = "CONTRADICTED"
@@ -1491,7 +1661,8 @@ class WorkOwnerAudit:
     @classmethod
     def run(cls, github, *, issue_number, batch, action, trusted_issuer,
             read_budget=192, diagnostics=None, effect_witness=None, witness_enrollment=None,
-            witness_context=None, witness_verifier=None, source_contract_fixture=False) -> WorkOwnerAuditReport:
+            witness_context=None, witness_verifier=None, source_contract_fixture=False,
+            ledger=None) -> WorkOwnerAuditReport:
         reads = None
         stage, generation, candidate_sha = "UNOBSERVED", None, None
         provider = AuditProviderStatus.UNOBSERVED
@@ -1577,9 +1748,30 @@ class WorkOwnerAudit:
             gate, code = AuditGate.VERIFIED, "PUBLISHED_SOURCE_AUTHENTICATED_OWNER_WITNESS_MISSING"
             if effect_witness is not None:
                 binding = cls._effect_binding(reads, identity, chain)
-                witness = work_owner_effect_witness_verify_offline(effect_witness,
-                    expected_binding=binding, enrollment=witness_enrollment, context=witness_context,
-                    ssh_keygen=witness_verifier, source_contract_fixture=source_contract_fixture)
+                if ledger is not None:
+                    try:
+                        p_env = json.loads(effect_witness)["payload"]
+                        rep = p_env["replay"]
+                        intent_req = {
+                            "request_id": rep["replay_id"], "replay_id": rep["replay_id"],
+                            "nonce": rep["nonce"], "repo": reads.repo,
+                            "action_id": identity["action_id"],
+                            "root_issue": identity["root_issue"],
+                            "current_issue": identity["current_issue"],
+                            "attempt_id": identity["attempt_id"],
+                            "source_sha": identity["source_sha"],
+                            "work_owner": binding["work_owner"],
+                            "provider_intent": binding["provider_intent"]
+                        }
+                        l_rec = ledger.record_effect_intent(intent_req)
+                        if l_rec.get("status") == "HOLD_REPLAY_UNKNOWN":
+                            witness = WorkOwnerEffectResult(WorkOwnerEffectGate.REPLAY_OR_STALE)
+                    except Exception:
+                        witness = WorkOwnerEffectResult(WorkOwnerEffectGate.REPLAY_OR_STALE)
+                if witness is None or witness.gate is not WorkOwnerEffectGate.REPLAY_OR_STALE:
+                    witness = work_owner_effect_witness_verify_offline(effect_witness,
+                        expected_binding=binding, enrollment=witness_enrollment, context=witness_context,
+                        ssh_keygen=witness_verifier, source_contract_fixture=source_contract_fixture)
                 if witness.gate is WorkOwnerEffectGate.EFFECT_DETERMINATE_AUTHENTICATED:
                     # Join only to the SAME already-authenticated committed candidate.
                     # A signed absence/staged-intent receipt cannot describe it.

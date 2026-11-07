@@ -970,3 +970,19 @@ def test_workowner_candidate_publication_enforces_owner_fence_and_ref_readback(t
     assert storage.requests[-2][0] == "POST" and storage.requests[-2][1] == "/git/refs"
     assert storage.requests[-1][0] == "GET" and storage.requests[-1][1].startswith("/git/ref/heads/ef02/candidate/")
 
+
+def test_workowner_witness_bridge_worker_interface(tmp_path, monkeypatch):
+    """Test LocalBatchWorker support for E2A witness bridge."""
+    from ai_commerce.remote.worker import LocalBatchWorker
+    from test_ef02_m0r_fault_injection import _bridge_fixture, _publishable_workowner
+
+    storage, owner, arguments = _publishable_workowner(tmp_path, monkeypatch)
+    b = _bridge_fixture(tmp_path, monkeypatch)
+    worker = object.__new__(LocalBatchWorker)
+    worker.github = storage
+    res = worker.witness_bridge({}, b.request, enrollment=b.f.enrollment, context=b.f.context,
+                                ssh_keygen=b.f.verifier, ledger=b.ledger, source_contract_fixture=True)
+    assert res["status"] == "SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED"
+    assert res["gate"] == "EFFECT_DETERMINATE_AUTHENTICATED"
+
+

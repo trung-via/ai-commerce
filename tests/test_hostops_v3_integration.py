@@ -2200,3 +2200,50 @@ def test_w1_attended_cli_oserror_does_not_disclose_local_paths(monkeypatch, caps
     assert output.out == ""
     assert "HOSTOPS_W1_LOCAL_DENIAL=OTHER_BLOCKED" in output.err
     assert "C:\\PRIVATE" not in output.err
+
+
+def test_hostops_worker_verify_owner_witness_bridge_contract_fixture(h, tmp_path, monkeypatch):
+    from dataclasses import asdict
+    from ai_commerce.hostops_v3.broker import ipc_request_owner_witness
+    from ai_commerce.hostops_v3.journal import OfflineWorkOwnerEffectLedger
+    from test_ef02_m0r_fault_injection import _bridge_fixture
+
+    # Test IPC framing validation
+    valid_ipc = c.canonical({
+        "schema": "hostops.owner_witness.v1",
+        "mode": "bridge",
+        "envelope": {"test": "data"}
+    })
+    mode, raw = ipc_request_owner_witness(valid_ipc)
+    assert mode == "bridge"
+    assert c.decode(raw) == {"test": "data"}
+
+    bad_ipc = c.canonical({
+        "schema": "hostops.owner_witness.v1",
+        "mode": "unauthorized_execute",
+        "envelope": {}
+    })
+    with pytest.raises(c.Denied, match="BAD_IPC_MODE"):
+        ipc_request_owner_witness(bad_ipc)
+
+    # Test Worker verify_owner_witness bridge method
+    b = _bridge_fixture(tmp_path, monkeypatch)
+    req_payload = {
+        "bridge_request": b.request,
+        "enrollment": asdict(b.f.enrollment),
+        "context": asdict(b.f.context),
+        "ssh_keygen": str(b.f.verifier),
+    }
+    # With source_contract_fixture=True: returns SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED
+    ledger1 = OfflineWorkOwnerEffectLedger(tmp_path / "ledger_auth.sqlite3")
+    res_fixture = h.worker.verify_owner_witness(req_payload, ledger=ledger1, source_contract_fixture=True)
+    assert res_fixture["status"] == "SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED"
+    assert res_fixture["gate"] == "EFFECT_DETERMINATE_AUTHENTICATED"
+    assert res_fixture["native_signer_required"] is True
+
+    # With source_contract_fixture=False: defaults empty allowlist -> HOLD
+    ledger2 = OfflineWorkOwnerEffectLedger(tmp_path / "ledger_unauth.sqlite3")
+    res_unauth = h.worker.verify_owner_witness(req_payload, ledger=ledger2, source_contract_fixture=False)
+    assert res_unauth["status"] == "HOLD"
+    assert res_unauth["gate"] == "NO_AUTHENTICATED_OWNER_WITNESS"
+

@@ -82,6 +82,7 @@ class Journal:
 
 # W1 signed-intent source prototype. Never called by HostOps worker/CLI.
 from pathlib import Path
+import time
 from . import auth
 from .contract import Denied, sha, shape
 
@@ -197,3 +198,172 @@ def classify_custody_claim(claim):
         "write_enabled": False,
         "human_enrollment_required": True,
     }
+
+
+class OfflineWorkOwnerEffectLedger:
+    """Durable, fail-closed ledger for WorkOwner effect-intent reservations.
+
+    At-most-once reservation with exclusive ownership, fsync, and bounded crash behavior.
+    Preserves unknown-before/after effect semantics, independently binds
+    ledger/journal/source/round, and rejects drift, replay, duplicate or rollback.
+    """
+
+    def __init__(self, path):
+        path = Path(path)
+        if not path.is_absolute() or path.suffix not in (".sqlite3", ".sqlite") or not path.parent.is_dir():
+            deny("EFFECT_LEDGER_PATH_DENIED")
+        self.path = path
+        self.db = sqlite3.connect(str(path), timeout=0.25, isolation_level=None)
+        try:
+            self.db.execute("PRAGMA journal_mode=WAL")
+            self.db.execute("PRAGMA synchronous=FULL")
+            self.db.execute("""
+                CREATE TABLE IF NOT EXISTS workowner_effect_intents (
+                    request_id TEXT PRIMARY KEY,
+                    replay_id TEXT NOT NULL UNIQUE,
+                    nonce TEXT NOT NULL UNIQUE,
+                    repo TEXT NOT NULL,
+                    action_id TEXT NOT NULL,
+                    root_issue INTEGER NOT NULL,
+                    current_issue INTEGER NOT NULL,
+                    attempt_id TEXT NOT NULL,
+                    source_sha TEXT NOT NULL,
+                    journal_tip_sha TEXT NOT NULL,
+                    journal_digest TEXT NOT NULL,
+                    fence TEXT NOT NULL,
+                    generation INTEGER NOT NULL,
+                    round INTEGER NOT NULL,
+                    provider_intent_digest TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN ('INTENT_RESERVED_NO_EFFECT', 'HOLD_REPLAY_UNKNOWN')),
+                    created_at INTEGER NOT NULL
+                )
+            """)
+        except sqlite3.Error:
+            self.close()
+            deny("EFFECT_LEDGER_UNAVAILABLE")
+
+    def close(self):
+        self.db.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+
+    def record_effect_intent(self, request, *, now=None):
+        shape(request, "request_id replay_id nonce repo action_id root_issue current_issue attempt_id source_sha work_owner provider_intent")
+        shape(request["work_owner"], "root_commit_sha root_digest journal_tip_sha journal_digest work_key fingerprint fence generation")
+        shape(request["provider_intent"], "commit_sha digest round")
+
+        req_id = request["request_id"]
+        replay_id = request["replay_id"]
+        nonce = request["nonce"]
+        for val in (req_id, replay_id, nonce, request["provider_intent"]["digest"],
+                    request["work_owner"]["root_digest"], request["work_owner"]["journal_digest"],
+                    request["work_owner"]["work_key"], request["work_owner"]["fingerprint"],
+                    request["work_owner"]["fence"]):
+            sha(val)
+        for val in (request["source_sha"], request["work_owner"]["root_commit_sha"],
+                    request["work_owner"]["journal_tip_sha"], request["provider_intent"]["commit_sha"]):
+            sha(val, 40)
+        for num in (request["root_issue"], request["current_issue"], request["work_owner"]["generation"]):
+            if type(num) is not int or num < 1 or num > 2**53 - 1:
+                deny("EFFECT_INTEGER_INVALID")
+        round_num = request["provider_intent"]["round"]
+        if type(round_num) is not int or round_num < 0 or round_num > 31:
+            deny("EFFECT_INTEGER_INVALID")
+        if not isinstance(request["repo"], str) or not request["repo"]:
+            deny("EFFECT_REPO_INVALID")
+        if not isinstance(request["action_id"], str) or not request["action_id"]:
+            deny("EFFECT_ACTION_INVALID")
+        if not isinstance(request["attempt_id"], str) or not request["attempt_id"]:
+            deny("EFFECT_ATTEMPT_INVALID")
+
+        timestamp = int(now if now is not None else time.time())
+        result_status = "INTENT_RESERVED_NO_EFFECT"
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+            if self.db.execute("SELECT COUNT(*) FROM workowner_effect_intents").fetchone()[0] >= 10000:
+                deny("EFFECT_LEDGER_LIMIT")
+
+            existing = self.db.execute(
+                "SELECT request_id, replay_id, nonce, repo, action_id, root_issue, current_issue, attempt_id, "
+                "source_sha, journal_tip_sha, journal_digest, fence, generation, round, provider_intent_digest "
+                "FROM workowner_effect_intents WHERE request_id=? OR replay_id=? OR nonce=?",
+                (req_id, replay_id, nonce)
+            ).fetchone()
+
+            expected_tuple = (
+                req_id, replay_id, nonce, request["repo"], request["action_id"],
+                request["root_issue"], request["current_issue"], request["attempt_id"],
+                request["source_sha"], request["work_owner"]["journal_tip_sha"],
+                request["work_owner"]["journal_digest"], request["work_owner"]["fence"],
+                request["work_owner"]["generation"], round_num, request["provider_intent"]["digest"]
+            )
+
+            if existing is not None:
+                if existing != expected_tuple:
+                    deny("EFFECT_REQUEST_ID_CONFLICT")
+                result_status = "HOLD_REPLAY_UNKNOWN"
+            else:
+                prior = self.db.execute(
+                    "SELECT fence, generation, round, source_sha, journal_digest FROM workowner_effect_intents "
+                    "WHERE repo=? AND attempt_id=?",
+                    (request["repo"], request["attempt_id"])
+                ).fetchall()
+                for p_fence, p_gen, p_round, p_source, p_j_digest in prior:
+                    if p_source != request["source_sha"]:
+                        deny("EFFECT_SOURCE_DRIFT")
+                    if p_gen > request["work_owner"]["generation"]:
+                        deny("EFFECT_GENERATION_ROLLBACK")
+                    if p_gen == request["work_owner"]["generation"] and p_round > round_num:
+                        deny("EFFECT_ROUND_ROLLBACK")
+                    if p_gen == request["work_owner"]["generation"] and p_fence != request["work_owner"]["fence"]:
+                        deny("EFFECT_FENCE_CONFLICT")
+
+                self.db.execute(
+                    "INSERT INTO workowner_effect_intents VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (req_id, replay_id, nonce, request["repo"], request["action_id"],
+                     request["root_issue"], request["current_issue"], request["attempt_id"],
+                     request["source_sha"], request["work_owner"]["journal_tip_sha"],
+                     request["work_owner"]["journal_digest"], request["work_owner"]["fence"],
+                     request["work_owner"]["generation"], round_num,
+                     request["provider_intent"]["digest"], "INTENT_RESERVED_NO_EFFECT", timestamp)
+                )
+            self.db.execute("COMMIT")
+        except (sqlite3.Error, Denied) as exc:
+            try:
+                self.db.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            if isinstance(exc, Denied):
+                raise
+            deny("EFFECT_LEDGER_UNAVAILABLE")
+
+        return {
+            "schema": "hostops.workowner_effect_intent.v1",
+            "status": result_status,
+            "request_id": req_id,
+            "replay_id": replay_id,
+            "nonce": nonce,
+            "repo": request["repo"],
+            "action_id": request["action_id"],
+            "root_issue": request["root_issue"],
+            "current_issue": request["current_issue"],
+            "attempt_id": request["attempt_id"],
+            "source_sha": request["source_sha"],
+            "fence": request["work_owner"]["fence"],
+            "generation": request["work_owner"]["generation"],
+            "round": round_num,
+            "execution_allowed": False,
+            "disk_effect_verified": False,
+            "credential_custody_proven": False,
+            "native_side_effect_granted": False,
+        }
+
+    def unreconciled_intents_count(self) -> int:
+        return self.db.execute(
+            "SELECT COUNT(*) FROM workowner_effect_intents WHERE state='INTENT_RESERVED_NO_EFFECT'"
+        ).fetchone()[0]
+
