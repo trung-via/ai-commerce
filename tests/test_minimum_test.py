@@ -1807,6 +1807,29 @@ def test_pr_ci_ffmpeg_dependency_is_per_test_not_per_unknown_owner():
     assert needs(plan("tests/test_a05_render.py"))
     assert needs(plan("tests/test_a05_integration.py"))
     assert needs(plan("tests/test_a13_media_inspection.py"))
+    # #559: real media test fixtures and their BQ04a transitive imports
+    # need ffmpeg even when the filename contains no media/ffmpeg hint.
+    for media_test in (
+        "tests/test_bq_02a_critic_t1.py",
+        "tests/test_bq_02b_multimodal.py",
+        "tests/test_bq_04a_targeted_repair.py",
+        "tests/test_a14_commerce_e2e.py",
+    ):
+        assert needs(plan(media_test)), media_test
+    # Representative exact owner/consumer selection: one media obligation
+    # must turn on provisioning without narrowing or dropping other tests.
+    assert needs(plan(
+        "tests/test_wakehub_g2_broker.py",
+        "tests/test_bq_04a_targeted_repair.py",
+        "tests/test_a18_portfolio_integration.py",
+    ))
+    # A18 pure model integrations and new non-media tests retain the
+    # no-install fast path when no actual media consumer is selected.
+    assert not needs(plan(
+        "tests/test_a18_portfolio_integration.py",
+        "tests/test_a18_scale_option_integration.py",
+        "tests/test_future_offline_agent.py",
+    ))
     assert needs(plan("tests/test_future_ffprobe_validation.py"))
     assert needs(plan("tests/test_future_video_transcode.py"))
     assert needs(plan("tests/test_future_media_implementation.py"))
