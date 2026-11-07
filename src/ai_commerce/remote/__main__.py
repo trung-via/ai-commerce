@@ -63,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         worker = LocalBatchWorker(checkout=checkout, batch=batch, profiles=profiles,
                                   github=github, issue_number=args.issue_number,
+                                  issuer_login=args.issuer_login,
                                   **({"git_executable": args.git_bin} if args.git_bin is not None else {}))
         host_slots = int(os.environ.get("EF02_HOST_SLOTS", "2"))
         if host_slots < 1 or host_slots > 128:

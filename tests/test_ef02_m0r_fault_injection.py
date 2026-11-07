@@ -1640,23 +1640,33 @@ def test_workowner_true_absence_zero_refs():
 
 
 def test_workowner_lineage_index_issuer_mismatch():
-    """Negative test: durable index lookup detects issuer mismatch."""
+    """Negative test: durable index creation and lookup detect issuer mismatch."""
     from test_ef01_repair import WorkOwnerMemoryTransport
     from ai_commerce.remote.transport import WorkOwner
     storage = WorkOwnerMemoryTransport(BASE)
 
     pred_action = {"action_id": "R1-WP02-CODEX-R2", "attempt_id": "target-attempt", "executor": "codex", "model": "gpt-5", "effort": "high"}
     pred_packet = {"batch_id": "b-pred", "source_sha": BASE, "actions": [pred_action]}
-    storage.issues[508] = {**pred_packet, "user": {"login": "attacker"}}
+    storage.issues[508] = {**pred_packet, "user": {"login": "authorized-owner"}}
 
     pred_fp = hashlib.sha256(json.dumps({
         "batch_id": "b-pred", "source_sha": BASE, "action": pred_action
     }, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+
+    # Mismatched issuer at index creation is rejected immediately before commit
+    with pytest.raises(RemoteTransportError, match="WORK_LINEAGE_INDEX_ISSUER_MISMATCH"):
+        storage.index_attempt(
+            issue_number=508, source_sha=BASE, attempt_id="target-attempt",
+            fingerprint=pred_fp, issuer="attacker"
+        )
+
     storage.index_attempt(
         issue_number=508, source_sha=BASE, attempt_id="target-attempt",
         fingerprint=pred_fp, issuer="authorized-owner"
     )
 
+    # If the issue author on lookup does not match the indexed issuer, lookup rejects it
+    storage.issues[508] = {**pred_packet, "user": {"login": "attacker"}}
     action = {"action_id": "R1-WP02-AGY-R8", "attempt_id": "attempt-r8", "repair_of": "target-attempt",
               "executor": "antigravity", "model": "gemini-3.8-flash", "effort": "high"}
     packet = {"batch_id": "b-r8", "source_sha": BASE, "actions": [action]}
@@ -1671,6 +1681,8 @@ def test_workowner_lineage_index_collision():
     from test_ef01_repair import WorkOwnerMemoryTransport
     from ai_commerce.remote.transport import WorkOwner
     storage = WorkOwnerMemoryTransport(BASE)
+    storage.issues[508] = {"batch_id": "b1", "source_sha": BASE, "actions": [], "user": {"login": "owner"}}
+    storage.issues[510] = {"batch_id": "b2", "source_sha": BASE, "actions": [], "user": {"login": "owner"}}
 
     storage.index_attempt(
         issue_number=508, source_sha=BASE, attempt_id="attempt-coll",
@@ -1894,3 +1906,369 @@ def test_workowner_acquire_unknown_and_stale_generation():
     id_stale["attempt_id"] = "attempt-gen2-conflict"
     with pytest.raises(RemoteTransportError, match="WORK_OWNER_TRANSFER_CONFLICT"):
         WorkOwner.acquire(storage, id_stale)
+
+
+def _issue_544_packet(source_sha=BASE):
+    return {
+        "kind": "AI_COMMERCE_REMOTE_ACTION_BATCH",
+        "version": 1,
+        "batch_id": "ef02-batch-544",
+        "source_sha": source_sha,
+        "actor": "HUMAN",
+        "authorization_ref": "human-approval-544",
+        "max_parallel": 2,
+        "actions": [{
+            "action_id": "R1-WP02-ARGON-R9",
+            "attempt_id": "r1_wp02_argon_medium_r9_20261107",
+            "repair_of": "r1_wp02_agy38_high_r8_20261107",
+            "executor": "antigravity",
+            "model": "gemini-4-argon-medium",
+            "effort": "medium",
+            "instruction": "Fix Defect A and Defect B.\nMT01_ACCEPTANCE_JSON:[\"EF02.action-and-fanin\"]",
+            "allowed_paths": ["src/ai_commerce/remote/transport.py", "src/ai_commerce/remote/worker.py"],
+            "verification_profile": "ef02-tests",
+            "depends_on": []
+        }]
+    }
+
+
+def test_r9_defect_a_and_b_cli_ingress_544_packet_and_successor_r10_lineage_round_trip(tmp_path, monkeypatch):
+    """Real RemoteActionBatch CLI ingress -> LocalBatchWorker -> index_attempt -> successor R10 lineage.
+
+    Tests actual #544 packet semantics (actor='HUMAN', no issuer_login field in packet,
+    authenticated GitHub Issue creator='trung-via'), verifies index commit records
+    issuer='trung-via' (never 'HUMAN'), and verifies successor R10 resolves predecessor
+    via durable index without WORK_LINEAGE_INDEX_ISSUER_MISMATCH. Also tests BRAIN actor
+    with authorized brain issuer login.
+    """
+    from ai_commerce.remote import __main__ as cli
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from ai_commerce.remote.transport import WorkOwner
+
+    storage = WorkOwnerMemoryTransport(BASE)
+
+    # Predecessor R8 on issue #543
+    r8_action = {
+        "action_id": "R1-WP02-AGY-R8",
+        "attempt_id": "r1_wp02_agy38_high_r8_20261107",
+        "executor": "antigravity",
+        "model": "gemini-3.8-flash",
+        "effort": "high",
+        "instruction": "R8 attempt",
+        "allowed_paths": ["src/ai_commerce/remote/transport.py"],
+        "verification_profile": "ef02-tests",
+        "depends_on": []
+    }
+    r8_packet = {
+        "kind": "AI_COMMERCE_REMOTE_ACTION_BATCH",
+        "version": 1,
+        "batch_id": "ef02-batch-543",
+        "source_sha": BASE,
+        "actor": "HUMAN",
+        "authorization_ref": "human-543",
+        "actions": [r8_action]
+    }
+    storage.issues[543] = r8_packet
+    WorkOwner.index_ingress(storage, 543, r8_packet, r8_action, issuer="trung-via")
+    id_r8 = WorkOwner.identity(storage, 543, r8_packet, r8_action)
+    owner_r8 = WorkOwner.acquire(storage, id_r8)
+    _publish_owner(storage, owner_r8, r8_action, attempt_id=r8_action["attempt_id"])
+
+    # Issue #544 (R9) with actor='HUMAN' and no issuer_login field in packet
+    p544 = _issue_544_packet(BASE)
+    assert "issuer_login" not in p544
+    assert p544["actor"] == "HUMAN"
+    storage.issues[544] = p544
+
+    req_file = tmp_path / "request_544.json"
+    req_file.write_text(json.dumps(p544), encoding="utf-8")
+
+    # Setup checkout files required by CLI main()
+    (tmp_path / ".github" / "ef02").mkdir(parents=True)
+    (tmp_path / "contracts").mkdir(parents=True)
+    root_repo = Path(__file__).resolve().parents[1]
+    (tmp_path / ".github" / "ef02" / "verify-profiles.json").write_bytes(
+        (root_repo / ".github" / "ef02" / "verify-profiles.json").read_bytes()
+    )
+    (tmp_path / ".github" / "ef02" / "approved-candidates.v1.json").write_text(
+        json.dumps({"version": 1, "approved_source_sha": BASE, "candidates": {}}), encoding="utf-8"
+    )
+    (tmp_path / "contracts" / "RemoteActionBatch.v1.schema.json").write_bytes(
+        (root_repo / "contracts" / "RemoteActionBatch.v1.schema.json").read_bytes()
+    )
+
+    monkeypatch.setattr(cli, "check_source", lambda *_a, **_kw: None)
+    monkeypatch.setattr("ai_commerce.remote.worker.check_source", lambda *_a, **_kw: None)
+    monkeypatch.setattr(cli, "GitHubTransport", lambda repo, token: storage)
+    storage.comment = lambda issue_num, body: None
+
+    # Stop at pre_spawn_checkpoint so we test full admission + index + owner + claim without launching real EF01
+    def stop_at_prespawn(**_kw):
+        raise RemoteTransportError("GITHUB_TRANSPORT_UNKNOWN")
+    storage.pre_spawn_checkpoint = stop_at_prespawn
+    monkeypatch.setattr("ai_commerce.remote.worker.subprocess.run",
+                        lambda *_a, **_k: SimpleNamespace(returncode=0, stderr=""))
+    _forbid_model(monkeypatch)
+    monkeypatch.setenv("GITHUB_TOKEN", "fixture-token")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "fixture/repository")
+    monkeypatch.setenv("GITHUB_RUN_ID", "544001")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
+
+    rc = cli.main([
+        "run", "--request-file", str(req_file), "--checkout", str(tmp_path),
+        "--issuer-login", "trung-via", "--owner-login", "trung-via",
+        "--issue-number", "544"
+    ])
+    assert rc == 1  # Stopped at prespawn checkpoint as designed
+
+    # Check indexed commit for R9
+    r9_key = storage.attempt_key("r1_wp02_argon_medium_r9_20261107")
+    r9_index_sha = storage.refs[f"refs/heads/ef02/index/{r9_key}"]
+    r9_index_commit = storage.commits[r9_index_sha]
+    parsed = storage._parse_index_message(r9_index_commit["message"])
+    assert parsed["issuer"] == "trung-via"
+    assert parsed["issue"] == 544
+    assert parsed["attempt_id"] == "r1_wp02_argon_medium_r9_20261107"
+
+    # Now publish R9 on its WorkOwner so R10 can transfer generation 3
+    # First find the owner created for R9 and publish it in storage
+    r9_action = p544["actions"][0]
+    r9_fp = hashlib.sha256(json.dumps({
+        "batch_id": p544["batch_id"], "source_sha": BASE, "action": r9_action
+    }, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    proof_r9 = _make_valid_proof(r9_action["action_id"], r9_action["attempt_id"], BASE, r9_fp)
+    from ai_commerce.remote.candidate_policy import canonical, evidence_digest, EVIDENCE_MARKER
+    receipt_r9 = evidence_digest(proof_r9)
+    cand_r9 = hashlib.sha1(b"cand-r9").hexdigest()
+    storage.refs[f"refs/heads/ef02/candidate/{r9_key}"] = cand_r9
+    storage.commits[cand_r9] = {
+        "message": f"EF02 candidate attempt {r9_action['attempt_id']}{EVIDENCE_MARKER}{canonical(proof_r9)}",
+        "tree": {"sha": "e" * 40}, "parents": [{"sha": BASE}]
+    }
+    # Replace the trailing UNKNOWN record (written when pre_spawn_checkpoint raised) with PUBLISHED for R10 transfer test
+    work_key = id_r8["work_key"]
+    prefix = f"refs/heads/ef02/workowner/{work_key}/"
+    wo_refs = sorted(r for r in storage.refs if r.startswith(prefix))
+    # Remove UNKNOWN record at the tip and append PROVIDER_INTENT..PUBLISHED using the gen 2 fence
+    last_ref = wo_refs[-1]
+    last_commit = storage.commits[storage.refs[last_ref]]
+    last_rec = json.loads(last_commit["message"][len(WorkOwner.MARKER):])
+    assert last_rec["stage"] == "UNKNOWN"
+    del storage.refs[last_ref]
+    prev_ref = wo_refs[-2]
+    prev_sha = storage.refs[prev_ref]
+    prev_rec = json.loads(storage.commits[prev_sha]["message"][len(WorkOwner.MARKER):])
+    fence_digest = prev_rec["fence"]
+    seq = prev_rec["sequence"]
+    prior_dig = prev_rec["digest"]
+    for stg, dt in [
+        ("SPAWN_INTENT", {}),
+        ("PROVIDER_INTENT", {"round": 0}),
+        ("ROUND_VERIFIED", {"round": 0, "receipt": receipt_r9}),
+        ("RESULT_VERIFIED", {"receipt": receipt_r9}),
+        ("PUBLISH_INTENT", {"receipt": receipt_r9}),
+        ("PUBLISHED", {"receipt": receipt_r9, "candidate": WorkOwner.digest(cand_r9), "attempt_id": r9_action["attempt_id"]})
+    ]:
+        seq += 1
+        rec = {
+            "kind": "WorkOwner", "version": 1, "identity": prev_rec["identity"],
+            "generation": 2, "fence": fence_digest, "sequence": seq,
+            "previous": prior_dig, "stage": stg, "data": dt
+        }
+        prior_dig = WorkOwner.digest(rec)
+        rec["digest"] = prior_dig
+        c_sha = hashlib.sha1(json.dumps(rec, sort_keys=True).encode()).hexdigest()
+        storage.commits[c_sha] = {
+            "message": WorkOwner.MARKER + canonical(rec),
+            "tree": {"sha": "e" * 40}, "parents": [{"sha": prev_sha}]
+        }
+        prev_sha = c_sha
+        storage.refs[f"{prefix}{seq:03d}"] = c_sha
+
+    # Successor R10 on issue #545 with actor='BRAIN' and authorized brain issuer 'ai-commerce-brain[bot]'
+    r10_action = {
+        **r9_action,
+        "action_id": "R1-WP02-ARGON-R10",
+        "attempt_id": "r1_wp02_argon_medium_r10_20261107",
+        "repair_of": "r1_wp02_argon_medium_r9_20261107"
+    }
+    p545 = {
+        **p544,
+        "batch_id": "ef02-batch-545",
+        "actor": "BRAIN",
+        "actions": [r10_action]
+    }
+    storage.issues[545] = p545
+    storage.issue_users = {545: {"login": "ai-commerce-brain[bot]"}}
+    orig_storage_api = storage.api
+    def api_with_user(method, path, data=None):
+        res = orig_storage_api(method, path, data)
+        if method == "GET" and path == "/issues/545":
+            res["user"] = {"login": "ai-commerce-brain[bot]"}
+        return res
+    storage.api = api_with_user
+    req_545 = tmp_path / "request_545.json"
+    req_545.write_text(json.dumps(p545), encoding="utf-8")
+
+    rc10 = cli.main([
+        "run", "--request-file", str(req_545), "--checkout", str(tmp_path),
+        "--issuer-login", "ai-commerce-brain[bot]", "--owner-login", "trung-via",
+        "--brain-issuers", "ai-commerce-brain[bot]", "--issue-number", "545"
+    ])
+    assert rc10 == 1
+    r10_key = storage.attempt_key("r1_wp02_argon_medium_r10_20261107")
+    r10_index_sha = storage.refs[f"refs/heads/ef02/index/{r10_key}"]
+    parsed10 = storage._parse_index_message(storage.commits[r10_index_sha]["message"])
+    assert parsed10["issuer"] == "ai-commerce-brain[bot]"
+    assert parsed10["issue"] == 545
+
+    batch_res_10 = json.loads((tmp_path / ".local" / "ef02" / "ef02-batch-545" / "batch_result.json").read_text(encoding="utf-8"))
+    act_res_10 = batch_res_10["actions"][0]
+    assert "work_owner" in act_res_10, (act_res_10.get("status"), act_res_10.get("error_code"), act_res_10.get("diagnostic"))
+    assert act_res_10["work_owner"]["generation"] == 3
+    assert act_res_10["work_owner"]["root_issue"] == 543
+
+
+@pytest.mark.parametrize("failure_mode,expected_code", [
+    ("role_name_human", "WORK_INDEX_ISSUER_INVALID"),
+    ("role_name_brain", "WORK_INDEX_ISSUER_INVALID"),
+    ("missing_issue_creator", "WORK_INDEX_ISSUE_CREATOR_MISSING"),
+    ("issuer_mismatch_with_issue", "WORK_LINEAGE_INDEX_ISSUER_MISMATCH"),
+    ("unreachable_get_issue", "GITHUB_HTTP_503"),
+    ("unreachable_get_ref_403", "GITHUB_HTTP_403"),
+    ("unreachable_get_ref_429", "GITHUB_HTTP_429"),
+    ("unreachable_post_commit_500", "GITHUB_HTTP_500"),
+    ("unreachable_post_ref_timeout", "GITHUB_TRANSPORT_UNKNOWN"),
+    ("unreachable_verify_ref", "GITHUB_HTTP_502"),
+    ("malformed_existing_ref", "WORK_LINEAGE_INDEX_REF_INVALID"),
+    ("malformed_existing_commit", "WORK_LINEAGE_INDEX_COMMIT_INVALID"),
+    ("readback_mismatch_collision", "WORK_LINEAGE_INDEX_COLLISION"),
+    ("readback_404_after_422", "GITHUB_HTTP_404"),
+])
+def test_r9_defect_b_index_admission_failures_fail_closed_zero_claims_zero_spawns(
+    tmp_path, monkeypatch, failure_mode, expected_code
+):
+    """Every index GET/POST/verify failure or issuer error fails CLOSED before any claim or Popen."""
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    storage = WorkOwnerMemoryTransport(BASE)
+    p544 = _issue_544_packet(BASE)
+    action = p544["actions"][0]
+    # Remove repair_of so we isolate index admission of the current action
+    action["repair_of"] = None
+    storage.issues[544] = p544
+
+    if failure_mode == "missing_issue_creator":
+        storage.issues[544] = {**p544, "user": {"login": ""}}
+
+    key = storage.attempt_key(action["attempt_id"])
+    ref_path = f"/git/ref/heads/ef02/index/{key}"
+
+    if failure_mode == "malformed_existing_ref":
+        storage.refs[f"refs/heads/ef02/index/{key}"] = "not-a-valid-sha"
+    elif failure_mode == "malformed_existing_commit":
+        bad_sha = "b" * 40
+        storage.refs[f"refs/heads/ef02/index/{key}"] = bad_sha
+        storage.commits[bad_sha] = {"message": "NOT AN INDEX COMMIT", "parents": [{"sha": BASE}]}
+
+    orig_api = storage.api
+    ref_get_count = 0
+
+    def faulty_api(method, path, data=None):
+        nonlocal ref_get_count
+        if failure_mode == "unreachable_get_issue" and method == "GET" and path == "/issues/544":
+            raise RemoteTransportError("GITHUB_HTTP_503")
+        if method == "GET" and path == ref_path:
+            ref_get_count += 1
+            if failure_mode == "unreachable_get_ref_403" and ref_get_count == 1:
+                raise RemoteTransportError("GITHUB_HTTP_403")
+            if failure_mode == "unreachable_get_ref_429" and ref_get_count == 1:
+                raise RemoteTransportError("GITHUB_HTTP_429")
+            if failure_mode == "unreachable_verify_ref" and ref_get_count == 2:
+                raise RemoteTransportError("GITHUB_HTTP_502")
+            if failure_mode == "readback_404_after_422" and ref_get_count == 2:
+                raise RemoteTransportError("GITHUB_HTTP_404")
+        if failure_mode == "unreachable_post_commit_500" and method == "POST" and path == "/git/commits":
+            raise RemoteTransportError("GITHUB_HTTP_500")
+        if method == "POST" and path == "/git/refs" and data and "ef02/index/" in data.get("ref", ""):
+            if failure_mode == "unreachable_post_ref_timeout":
+                raise RemoteTransportError("GITHUB_TRANSPORT_UNKNOWN")
+            if failure_mode == "readback_404_after_422":
+                raise RemoteTransportError("GITHUB_HTTP_422")
+            if failure_mode == "readback_mismatch_collision":
+                # Simulate another writer winning the 422 race with conflicting issue number
+                other_sha = "c" * 40
+                storage.commits[other_sha] = {
+                    "message": f"EF02 INDEX\n\nattempt_id={action['attempt_id']}\nissue=999\nsource_sha={BASE}\nfingerprint={'0'*64}\nissuer=trung-via",
+                    "tree": {"sha": "e" * 40},
+                    "parents": [{"sha": BASE}]
+                }
+                storage.refs[f"refs/heads/ef02/index/{key}"] = other_sha
+                raise RemoteTransportError("GITHUB_HTTP_422")
+        return orig_api(method, path, data)
+
+    storage.api = faulty_api
+    _forbid_model(monkeypatch)
+    monkeypatch.setattr("ai_commerce.remote.worker.check_source", lambda *_a, **_kw: None)
+    monkeypatch.setattr("ai_commerce.remote.worker.load_approved_candidates", lambda *_a: {"version": 1, "candidates": {}})
+
+    issuer_arg = "trung-via"
+    if failure_mode == "role_name_human":
+        issuer_arg = "HUMAN"
+    elif failure_mode == "role_name_brain":
+        issuer_arg = "BRAIN"
+    elif failure_mode == "issuer_mismatch_with_issue":
+        issuer_arg = "other-user"
+
+    if failure_mode in ("role_name_human", "role_name_brain"):
+        with pytest.raises(RemoteTransportError, match="WORK_INDEX_ISSUER_INVALID"):
+            LocalBatchWorker(
+                checkout=tmp_path, batch=p544,
+                profiles={"ef02-tests": ["python", "-m", "pytest", "tests/test_ef02.py", "-q"]},
+                github=storage, root=tmp_path / "ev", issue_number=544, issuer_login=issuer_arg
+            )
+        return
+
+    worker = LocalBatchWorker(
+        checkout=tmp_path, batch=p544,
+        profiles={"ef02-tests": ["python", "-m", "pytest", "tests/test_ef02.py", "-q"]},
+        github=storage, root=tmp_path / "ev", issue_number=544, issuer_login=issuer_arg
+    )
+    res = worker.execute_action(action)
+    assert res["status"] == "HOLD_WORK_OWNER"
+    assert res["error_code"] == expected_code
+    assert res["executor_invoked"] is False
+    assert res["replay_authorized"] is False
+    # Zero claims, zero pre-spawn, zero spawned, zero workowner refs created
+    assert not any("/claims/" in r or "/pre-spawn/" in r or "/spawned/" in r or "/workowner/" in r for r in storage.refs)
+
+
+def test_r9_defect_b_idempotent_same_payload_and_concurrent_race(tmp_path):
+    """Idempotent existing index and concurrent 422 race with identical payload succeed; conflicting payload fails."""
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    from concurrent.futures import ThreadPoolExecutor
+    storage = WorkOwnerMemoryTransport(BASE)
+    p544 = _issue_544_packet(BASE)
+    action = p544["actions"][0]
+    storage.issues[544] = p544
+    fp = hashlib.sha256(json.dumps({
+        "batch_id": p544["batch_id"], "source_sha": BASE, "action": action
+    }, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+
+    # Concurrent writers with identical payload all succeed via read-back verification
+    def write_same():
+        return storage.index_attempt(
+            issue_number=544, source_sha=BASE, attempt_id=action["attempt_id"],
+            fingerprint=fp, issuer="trung-via"
+        )
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        results = list(pool.map(lambda _: write_same(), range(6)))
+    expected_ref = f"refs/heads/ef02/index/{storage.attempt_key(action['attempt_id'])}"
+    assert all(r == expected_ref for r in results)
+
+    # Subsequent idempotent call without explicit issuer derives from issue #544 and succeeds
+    assert storage.index_attempt(
+        issue_number=544, source_sha=BASE, attempt_id=action["attempt_id"],
+        fingerprint=fp, issuer=None
+    ) == expected_ref
+

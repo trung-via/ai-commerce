@@ -261,13 +261,15 @@ class WorkOwnerBroker:
 class LocalBatchWorker:
     def __init__(self, *, checkout: Path, batch: dict, profiles: dict[str, list[str]],
                  github: GitHubTransport, root: Path | None = None, git_executable: str | None = None,
-                 issue_number: int = 0):
+                 issue_number: int = 0, issuer_login: str | None = None):
         self.checkout = checkout.resolve()
         self.batch = batch
         self.profiles = profiles
         self.github = github
         self.issue_number = issue_number
-        self.issuer_login = batch.get("issuer_login") or batch.get("actor")
+        if issuer_login is not None and not GitHubTransport._valid_issuer_login(issuer_login):
+            raise RemoteTransportError("WORK_INDEX_ISSUER_INVALID")
+        self.issuer_login = issuer_login
         configured_git = git_executable if git_executable is not None else os.environ.get("AI_COMMERCE_GIT_EXECUTABLE")
         self.git_executable = resolve_git_executable(configured_git) if configured_git is not None else None
         self.root = (root or (self.checkout / ".local" / "ef02" / batch["batch_id"])).resolve()
@@ -276,25 +278,6 @@ class LocalBatchWorker:
             self.checkout / ".github" / "ef02" / "approved-candidates.v1.json")
         check_source(self.checkout, batch["source_sha"],
                      **({"git_executable": self.git_executable} if self.git_executable is not None else {}))
-        if self.issue_number > 0 and hasattr(self.github, "index_attempt"):
-            for act in self.batch.get("actions", []):
-                aid = act.get("attempt_id")
-                if aid:
-                    act_fp = hashlib.sha256(json.dumps({
-                        "batch_id": self.batch["batch_id"],
-                        "source_sha": self.batch["source_sha"],
-                        "action": {k: v for k, v in act.items() if k != "resolved_dependencies"}
-                    }, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")).hexdigest()
-                    try:
-                        self.github.index_attempt(
-                            issue_number=self.issue_number,
-                            source_sha=self.batch["source_sha"],
-                            attempt_id=aid,
-                            fingerprint=act_fp,
-                            issuer=self.issuer_login
-                        )
-                    except Exception:
-                        pass
 
     def _acquire_owner(self, action):
         identity = WorkOwner.identity(self.github, self.issue_number, self.batch, action)
@@ -381,19 +364,34 @@ class LocalBatchWorker:
                                reused=True, reused_verified=False)
             return finish()
         try:
+            explicit_issuer = getattr(self, "issuer_login", None)
+            if explicit_issuer is not None and not GitHubTransport._valid_issuer_login(explicit_issuer):
+                raise RemoteTransportError("WORK_INDEX_ISSUER_INVALID")
+            issue_num = getattr(self, "issue_number", 0)
+            if issue_num > 0:
+                if not hasattr(self.github, "index_attempt"):
+                    raise RemoteTransportError("WORK_INDEX_TRANSPORT_UNAVAILABLE")
+                outcome["attempt_index_ref"] = WorkOwner.index_ingress(
+                    self.github, issue_num, self.batch, submitted_action, issuer=explicit_issuer
+                )
             owner = self._acquire_owner(submitted_action)
+            owner_issuer = owner.identity.get("issuer_login")
+            if explicit_issuer is not None and owner_issuer is not None:
+                if owner_issuer.casefold() != explicit_issuer.casefold():
+                    raise RemoteTransportError("WORK_LINEAGE_INDEX_ISSUER_MISMATCH")
             outcome["work_owner"] = {
                 "work_key": owner.identity["work_key"],
                 "generation": owner.generation,
-                "root_issue": owner.identity.get("root_issue", getattr(self, "issue_number", 0)),
-                "current_issue": getattr(self, "issue_number", 0),
+                "root_issue": owner.identity.get("root_issue", issue_num),
+                "current_issue": issue_num,
                 "lineage_gap": None if owner.identity.get("lineage") or owner.generation >= 2 else "V1_HAS_NO_TRUSTED_CROSS_ISSUE_REPAIR_OR_TRANSFER",
             }
         except Exception as exc:
-            status = ("DUPLICATE_CLAIM_NO_REEXECUTION" if str(exc) in (
+            err_code = str(exc)[:160] if isinstance(exc, RemoteTransportError) and str(exc) else type(exc).__name__
+            status = ("DUPLICATE_CLAIM_NO_REEXECUTION" if err_code in (
                 "WORK_OWNER_EXISTS_RECONCILE_ONLY", "WORK_OWNER_TRANSFER_CONFLICT", "WORK_OWNER_PREDECESSOR_UNRESOLVED"
             ) else "HOLD_WORK_OWNER")
-            outcome.update(status=status, error_code=str(exc)[:160], replay_authorized=False)
+            outcome.update(status=status, error_code=err_code, diagnostic=str(exc)[:160], replay_authorized=False)
             return finish()
         try:
             owner.assert_current()
@@ -567,19 +565,6 @@ class LocalBatchWorker:
                          "remote_confirmation_observed_at": time.time()})
             # Never pass GitHub credentials into untrusted model/verification process.
             owner.assert_current()
-            if getattr(self, "issue_number", 0) > 0 and hasattr(self.github, "index_attempt"):
-                try:
-                    self.github.index_attempt(
-                        issue_number=self.issue_number,
-                        source_sha=source,
-                        attempt_id=attempt_id,
-                        fingerprint=fp,
-                        issuer=getattr(self, "issuer_login", None)
-                    )
-                except Exception as exc:
-                    if "WORK_LINEAGE_INDEX_COLLISION" in str(exc):
-                        outcome.update(status="HOLD_WORK_OWNER", error_code="WORK_LINEAGE_INDEX_COLLISION", replay_authorized=False)
-                        return finish()
             broker = WorkOwnerBroker(owner)
             child_env = _safe_child_env(self.checkout)
             child_env.update(broker.environment())
