@@ -30,6 +30,10 @@ from ai_commerce.engineering.three_runner_topology import (
     WakeHubSmartBrowserEvidence, WakeHubSmartCoreStatus, WakeHubSmartInputError,
     WakeHubSmartOriginEvidence, WakeHubSmartReadinessCode,
     WakeHubSmartReadinessEvidence, assess_wakehub_smart_readiness,
+    WakeHubAutoloadAdvice, WakeHubAutoloadCode, WakeHubAutoloadInputError,
+    WakeHubAutoloadReason, WakeHubChatBinding, WakeHubChatTabEvidence,
+    WakeHubChatAutoloadEvidence, WakeHubChatAutoloadPlan,
+    assess_wakehub_chat_autoload_plan,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1426,3 +1430,527 @@ def test_wh04a_every_reason_and_invalid_input_are_pure_under_external_effect_tra
         with pytest.raises(WakeHubSmartInputError):
             _smart_case("core", unknown_effect=True, outstanding_send="synthetic-secret")
     assert codes == set(WakeHubSmartReadinessCode)
+
+
+# WH-05A pure exact Chat A autoload helpers
+def _autoload_tab(**overrides):
+    current = WakeHubProofState.INDEPENDENTLY_CURRENT
+    values = dict(
+        tab_id=1,
+        chat_binding=WakeHubChatBinding.EXACT_CHAT_A,
+        marker=current,
+        dedicated_context=True,
+        human_draft_present=False,
+        actively_generating=False,
+        security_challenge_present=False,
+        generation=current,
+        redirect_drift=False,
+        post_navigation_recheck=current,
+        account_proof=current,
+    )
+    values.update(overrides)
+    return WakeHubChatTabEvidence(**values)
+
+
+def _autoload_evidence(**overrides):
+    current = WakeHubProofState.INDEPENDENTLY_CURRENT
+    values = dict(
+        readiness=_smart_evidence(),
+        tabs=(_autoload_tab(),),
+        dedicated_context=current,
+        tab_generation=current,
+        route_authorized=current,
+        unrelated_tab_mutation=False,
+    )
+    values.update(overrides)
+    return WakeHubChatAutoloadEvidence(**values)
+
+
+def _assert_wh05a_no_effect(plan):
+    _assert_wh02a_no_authority(plan)
+    assert plan.scope == "PURE_EXACT_CHAT_AUTOLOAD_POLICY_ONLY"
+    assert plan.keep_event_receiver_alive is True
+    for name in (
+        "native_operations", "start", "stop", "task", "chrome",
+        "navigation", "send", "plugin", "attach_authorized",
+        "open_tab_authorized", "click_permitted",
+        "dom_ack_counted", "server_ack_counted",
+    ):
+        assert getattr(plan, name) is False
+    assert plan.post_navigation_recheck_required is True
+
+
+def test_wh05a_positive_attach_existing_tab_advisory_is_pure_and_deterministic():
+    evidence = _autoload_evidence()
+    plan = assess_wakehub_chat_autoload_plan(evidence)
+    assert plan == assess_wakehub_chat_autoload_plan(evidence)
+    assert plan.advice is WakeHubAutoloadAdvice.ATTACH_EXISTING_ADVISORY_ONLY
+    assert plan.reason is WakeHubAutoloadReason.ATTACH_EXISTING_EXACT_CHAT_A_TAB
+    assert plan.code is WakeHubAutoloadReason.ATTACH_EXISTING_EXACT_CHAT_A_TAB
+    assert plan.listener_count == len(planned_topology()) == 3
+    assert plan.readiness_code is WakeHubSmartReadinessCode.READY_TO_PREPARE_ADVISORY_ONLY
+    assert not plan.paused_by_human
+    _assert_wh05a_no_effect(plan)
+
+
+def test_wh05a_positive_zero_tabs_open_dedicated_tab_advisory_is_pure_and_deterministic():
+    evidence = _autoload_evidence(tabs=())
+    plan = assess_wakehub_chat_autoload_plan(evidence)
+    assert plan == assess_wakehub_chat_autoload_plan(evidence)
+    assert plan.advice is WakeHubAutoloadAdvice.OPEN_DEDICATED_TAB_ADVISORY_ONLY
+    assert plan.reason is WakeHubAutoloadReason.OPEN_NEW_DEDICATED_TAB_ROUTE_PROVEN
+    assert plan.code is WakeHubAutoloadReason.OPEN_NEW_DEDICATED_TAB_ROUTE_PROVEN
+    assert plan.listener_count == 3
+    assert plan.readiness_code is WakeHubSmartReadinessCode.READY_TO_PREPARE_ADVISORY_ONLY
+    assert not plan.paused_by_human
+    _assert_wh05a_no_effect(plan)
+
+
+def test_wh05a_duplicate_matching_tabs_and_multiple_tabs_hold():
+    # Two exact Chat A tabs
+    two_matching = _autoload_evidence(tabs=(_autoload_tab(tab_id=1), _autoload_tab(tab_id=2)))
+    plan1 = assess_wakehub_chat_autoload_plan(two_matching)
+    assert plan1.advice is WakeHubAutoloadAdvice.HOLD
+    assert plan1.reason is WakeHubAutoloadReason.HOLD_DUPLICATE_MATCHING_TABS
+    _assert_wh05a_no_effect(plan1)
+
+    # One Chat A and one Chat B
+    two_mixed = _autoload_evidence(tabs=(
+        _autoload_tab(tab_id=1),
+        _autoload_tab(tab_id=2, chat_binding=WakeHubChatBinding.WRONG_CHAT_B),
+    ))
+    plan2 = assess_wakehub_chat_autoload_plan(two_mixed)
+    assert plan2.advice is WakeHubAutoloadAdvice.HOLD
+    assert plan2.reason is WakeHubAutoloadReason.HOLD_DUPLICATE_MATCHING_TABS
+    _assert_wh05a_no_effect(plan2)
+
+
+@pytest.mark.parametrize("binding", [
+    WakeHubChatBinding.WRONG_CHAT_B,
+    WakeHubChatBinding.UNBOUND,
+    WakeHubChatBinding.AMBIGUOUS,
+])
+def test_wh05a_wrong_or_unbound_chat_tab_holds(binding):
+    evidence = _autoload_evidence(tabs=(_autoload_tab(chat_binding=binding),))
+    plan = assess_wakehub_chat_autoload_plan(evidence)
+    assert plan.advice is WakeHubAutoloadAdvice.HOLD
+    assert plan.reason is WakeHubAutoloadReason.HOLD_WRONG_CHAT_TARGET
+    _assert_wh05a_no_effect(plan)
+
+
+@pytest.mark.parametrize("marker_state", [
+    state for state in WakeHubProofState
+    if state is not WakeHubProofState.INDEPENDENTLY_CURRENT
+])
+def test_wh05a_copied_or_ambiguous_marker_holds(marker_state):
+    evidence = _autoload_evidence(tabs=(_autoload_tab(marker=marker_state),))
+    plan = assess_wakehub_chat_autoload_plan(evidence)
+    assert plan.advice is WakeHubAutoloadAdvice.HOLD
+    assert plan.reason is WakeHubAutoloadReason.HOLD_MARKER_AMBIGUOUS
+    _assert_wh05a_no_effect(plan)
+
+
+def test_wh05a_tab_negative_conditions_fail_closed():
+    # Non-dedicated tab
+    p_context = assess_wakehub_chat_autoload_plan(_autoload_evidence(
+        tabs=(_autoload_tab(dedicated_context=False),)))
+    assert p_context.advice is WakeHubAutoloadAdvice.HOLD
+    assert p_context.reason is WakeHubAutoloadReason.HOLD_NON_DEDICATED_CONTEXT
+    _assert_wh05a_no_effect(p_context)
+
+    # Missing tab_id / 0
+    p_zero = assess_wakehub_chat_autoload_plan(_autoload_evidence(
+        tabs=(_autoload_tab(tab_id=0),)))
+    assert p_zero.advice is WakeHubAutoloadAdvice.HOLD
+    assert p_zero.reason is WakeHubAutoloadReason.HOLD_NON_DEDICATED_CONTEXT
+    _assert_wh05a_no_effect(p_zero)
+
+    # Wrong account
+    p_account = assess_wakehub_chat_autoload_plan(_autoload_evidence(
+        tabs=(_autoload_tab(account_proof=WakeHubProofState.MISMATCH),)))
+    assert p_account.advice is WakeHubAutoloadAdvice.HOLD
+    assert p_account.reason is WakeHubAutoloadReason.HOLD_BROWSER_ACCOUNT
+    _assert_wh05a_no_effect(p_account)
+
+    # Login / Captcha challenge
+    p_captcha = assess_wakehub_chat_autoload_plan(_autoload_evidence(
+        tabs=(_autoload_tab(security_challenge_present=True),)))
+    assert p_captcha.advice is WakeHubAutoloadAdvice.HOLD
+    assert p_captcha.reason is WakeHubAutoloadReason.HOLD_LOGIN_OR_CAPTCHA_CHALLENGE
+    _assert_wh05a_no_effect(p_captcha)
+
+    # Human draft present
+    p_draft = assess_wakehub_chat_autoload_plan(_autoload_evidence(
+        tabs=(_autoload_tab(human_draft_present=True),)))
+    assert p_draft.advice is WakeHubAutoloadAdvice.HOLD
+    assert p_draft.reason is WakeHubAutoloadReason.HOLD_HUMAN_DRAFT_PRESENT
+    _assert_wh05a_no_effect(p_draft)
+
+    # Actively generating response
+    p_gen = assess_wakehub_chat_autoload_plan(_autoload_evidence(
+        tabs=(_autoload_tab(actively_generating=True),)))
+    assert p_gen.advice is WakeHubAutoloadAdvice.WAIT
+    assert p_gen.reason is WakeHubAutoloadReason.WAIT_RESPONSE_STREAMING_ACTIVE
+    _assert_wh05a_no_effect(p_gen)
+
+    # Redirect drift
+    p_redirect = assess_wakehub_chat_autoload_plan(_autoload_evidence(
+        tabs=(_autoload_tab(redirect_drift=True),)))
+    assert p_redirect.advice is WakeHubAutoloadAdvice.HOLD
+    assert p_redirect.reason is WakeHubAutoloadReason.HOLD_GENERATION_DRIFT
+    _assert_wh05a_no_effect(p_redirect)
+
+    # Tab generation drift
+    p_tabgen = assess_wakehub_chat_autoload_plan(_autoload_evidence(
+        tabs=(_autoload_tab(generation=WakeHubProofState.STALE),)))
+    assert p_tabgen.advice is WakeHubAutoloadAdvice.HOLD
+    assert p_tabgen.reason is WakeHubAutoloadReason.HOLD_GENERATION_DRIFT
+    _assert_wh05a_no_effect(p_tabgen)
+
+    # Post-navigation recheck missing -> WAIT
+    p_recheck_wait = assess_wakehub_chat_autoload_plan(_autoload_evidence(
+        tabs=(_autoload_tab(post_navigation_recheck=WakeHubProofState.MISSING),)))
+    assert p_recheck_wait.advice is WakeHubAutoloadAdvice.WAIT
+    assert p_recheck_wait.reason is WakeHubAutoloadReason.WAIT_POST_NAVIGATION_RECHECK
+    _assert_wh05a_no_effect(p_recheck_wait)
+
+    # Post-navigation recheck stale/ambiguous/mismatch -> HOLD
+    for recheck_state in (WakeHubProofState.STALE, WakeHubProofState.AMBIGUOUS, WakeHubProofState.MISMATCH):
+        p_recheck_hold = assess_wakehub_chat_autoload_plan(_autoload_evidence(
+            tabs=(_autoload_tab(post_navigation_recheck=recheck_state),)))
+        assert p_recheck_hold.advice is WakeHubAutoloadAdvice.HOLD
+        assert p_recheck_hold.reason is WakeHubAutoloadReason.HOLD_POST_NAVIGATION_RECHECK_REQUIRED
+        _assert_wh05a_no_effect(p_recheck_hold)
+
+
+def test_wh05a_top_level_evidence_gates_fail_closed():
+    # Dedicated context missing -> WAIT
+    p_ctx_wait = assess_wakehub_chat_autoload_plan(_autoload_evidence(
+        dedicated_context=WakeHubProofState.MISSING))
+    assert p_ctx_wait.advice is WakeHubAutoloadAdvice.WAIT
+    assert p_ctx_wait.reason is WakeHubAutoloadReason.WAIT_DEDICATED_CONTEXT
+    _assert_wh05a_no_effect(p_ctx_wait)
+
+    # Dedicated context stale/mismatch/ambiguous -> HOLD
+    p_ctx_hold = assess_wakehub_chat_autoload_plan(_autoload_evidence(
+        dedicated_context=WakeHubProofState.STALE))
+    assert p_ctx_hold.advice is WakeHubAutoloadAdvice.HOLD
+    assert p_ctx_hold.reason is WakeHubAutoloadReason.HOLD_NON_DEDICATED_CONTEXT
+    _assert_wh05a_no_effect(p_ctx_hold)
+
+    # Tab generation drift
+    p_drift = assess_wakehub_chat_autoload_plan(_autoload_evidence(
+        tab_generation=WakeHubProofState.STALE))
+    assert p_drift.advice is WakeHubAutoloadAdvice.HOLD
+    assert p_drift.reason is WakeHubAutoloadReason.HOLD_GENERATION_DRIFT
+    _assert_wh05a_no_effect(p_drift)
+
+    # Unrelated tab mutation
+    p_mut = assess_wakehub_chat_autoload_plan(_autoload_evidence(
+        unrelated_tab_mutation=True))
+    assert p_mut.advice is WakeHubAutoloadAdvice.HOLD
+    assert p_mut.reason is WakeHubAutoloadReason.HOLD_UNRELATED_TAB_MUTATION
+    _assert_wh05a_no_effect(p_mut)
+
+    # Zero tabs with route not authorized / missing
+    p_route = assess_wakehub_chat_autoload_plan(_autoload_evidence(
+        tabs=(), route_authorized=WakeHubProofState.MISSING))
+    assert p_route.advice is WakeHubAutoloadAdvice.HOLD
+    assert p_route.reason is WakeHubAutoloadReason.HOLD_ORIGIN_ROUTE
+    _assert_wh05a_no_effect(p_route)
+
+
+@pytest.mark.parametrize(("smart_code", "expected_advice"), [
+    (WakeHubSmartReadinessCode.HOLD_UNKNOWN_EFFECT, WakeHubAutoloadAdvice.HOLD),
+    (WakeHubSmartReadinessCode.HOLD_SOURCE_DRIFT, WakeHubAutoloadAdvice.HOLD),
+    (WakeHubSmartReadinessCode.HOLD_PRIVATE_PROJECTION, WakeHubAutoloadAdvice.HOLD),
+    (WakeHubSmartReadinessCode.WAIT_RECEIVER, WakeHubAutoloadAdvice.WAIT),
+    (WakeHubSmartReadinessCode.WAIT_EVENT, WakeHubAutoloadAdvice.WAIT),
+    (WakeHubSmartReadinessCode.HOLD_EVENT_STALE, WakeHubAutoloadAdvice.HOLD),
+    (WakeHubSmartReadinessCode.HOLD_EVENT_AMBIGUITY, WakeHubAutoloadAdvice.HOLD),
+    (WakeHubSmartReadinessCode.WAIT_PENDING_WORK, WakeHubAutoloadAdvice.WAIT),
+    (WakeHubSmartReadinessCode.HOLD_HUMAN_PAUSED, WakeHubAutoloadAdvice.HOLD),
+    (WakeHubSmartReadinessCode.WAIT_INTERACTIVE_SESSION, WakeHubAutoloadAdvice.WAIT),
+    (WakeHubSmartReadinessCode.HOLD_SESSION_OWNER, WakeHubAutoloadAdvice.HOLD),
+    (WakeHubSmartReadinessCode.WAIT_CHROME, WakeHubAutoloadAdvice.WAIT),
+    (WakeHubSmartReadinessCode.HOLD_CHROME_OWNERSHIP, WakeHubAutoloadAdvice.HOLD),
+    (WakeHubSmartReadinessCode.HOLD_CHROME_ENDPOINT, WakeHubAutoloadAdvice.HOLD),
+    (WakeHubSmartReadinessCode.HOLD_CHROME_IDENTITY, WakeHubAutoloadAdvice.HOLD),
+    (WakeHubSmartReadinessCode.HOLD_BROWSER_ACCOUNT, WakeHubAutoloadAdvice.HOLD),
+    (WakeHubSmartReadinessCode.HOLD_ORIGIN_ISSUER, WakeHubAutoloadAdvice.HOLD),
+    (WakeHubSmartReadinessCode.HOLD_ORIGIN_OWNER, WakeHubAutoloadAdvice.HOLD),
+    (WakeHubSmartReadinessCode.HOLD_ORIGIN_ROUTE, WakeHubAutoloadAdvice.HOLD),
+    (WakeHubSmartReadinessCode.HOLD_ORIGIN_GENERATION, WakeHubAutoloadAdvice.HOLD),
+    (WakeHubSmartReadinessCode.HOLD_ORIGIN_CONSENT, WakeHubAutoloadAdvice.HOLD),
+])
+def test_wh05a_propagates_unready_smart_readiness_code_and_advice(smart_code, expected_advice):
+    smart = _smart_evidence()
+    if smart_code is WakeHubSmartReadinessCode.HOLD_UNKNOWN_EFFECT:
+        smart = replace(smart, core=replace(smart.core, unknown_effect=True))
+    elif smart_code is WakeHubSmartReadinessCode.HOLD_SOURCE_DRIFT:
+        smart = replace(smart, source=WakeHubProofState.MISSING)
+    elif smart_code is WakeHubSmartReadinessCode.HOLD_PRIVATE_PROJECTION:
+        smart = replace(smart, projection=WakeHubProofState.MISSING)
+    elif smart_code is WakeHubSmartReadinessCode.WAIT_RECEIVER:
+        smart = replace(smart, core=replace(smart.core, hostops_listener=WakeHubListenerState.ABSENT))
+    elif smart_code is WakeHubSmartReadinessCode.WAIT_EVENT:
+        smart = replace(smart, origin=replace(smart.origin, event=WakeHubEventState.ABSENT))
+    elif smart_code is WakeHubSmartReadinessCode.HOLD_EVENT_STALE:
+        smart = replace(smart, origin=replace(smart.origin, event=WakeHubEventState.STALE))
+    elif smart_code is WakeHubSmartReadinessCode.HOLD_EVENT_AMBIGUITY:
+        smart = replace(smart, origin=replace(smart.origin, event=WakeHubEventState.DUPLICATE_AMBIGUOUS))
+    elif smart_code is WakeHubSmartReadinessCode.WAIT_PENDING_WORK:
+        smart = replace(smart, core=replace(smart.core, outstanding_send=WakeHubWorkState.PENDING))
+    elif smart_code is WakeHubSmartReadinessCode.HOLD_HUMAN_PAUSED:
+        smart = replace(smart, core=replace(smart.core, trusted_human_pause=True))
+    elif smart_code is WakeHubSmartReadinessCode.WAIT_INTERACTIVE_SESSION:
+        smart = replace(smart, core=replace(smart.core, interactive_session_proven=False))
+    elif smart_code is WakeHubSmartReadinessCode.HOLD_SESSION_OWNER:
+        smart = replace(smart, session_owner=WakeHubProofState.MISSING)
+    elif smart_code is WakeHubSmartReadinessCode.WAIT_CHROME:
+        smart = replace(smart, core=replace(smart.core, chrome_ownership=WakeHubChromeOwnership.ABSENT_INDEPENDENTLY_VERIFIED),
+                        browser=replace(smart.browser, ownership=WakeHubChromeOwnership.ABSENT_INDEPENDENTLY_VERIFIED))
+    elif smart_code is WakeHubSmartReadinessCode.HOLD_CHROME_OWNERSHIP:
+        smart = replace(smart, browser=replace(smart.browser, ownership=WakeHubChromeOwnership.PROFILE_CONFLICT),
+                        core=replace(smart.core, chrome_ownership=WakeHubChromeOwnership.PROFILE_CONFLICT))
+    elif smart_code is WakeHubSmartReadinessCode.HOLD_CHROME_ENDPOINT:
+        smart = replace(smart, browser=replace(smart.browser, port=9333))
+    elif smart_code is WakeHubSmartReadinessCode.HOLD_CHROME_IDENTITY:
+        smart = replace(smart, browser=replace(smart.browser, pid=0))
+    elif smart_code is WakeHubSmartReadinessCode.HOLD_BROWSER_ACCOUNT:
+        smart = replace(smart, browser=replace(smart.browser, retained_account=WakeHubProofState.MISSING))
+    elif smart_code is WakeHubSmartReadinessCode.HOLD_ORIGIN_ISSUER:
+        smart = replace(smart, origin=replace(smart.origin, issuer=WakeHubProofState.MISSING))
+    elif smart_code is WakeHubSmartReadinessCode.HOLD_ORIGIN_OWNER:
+        smart = replace(smart, origin=replace(smart.origin, owner=WakeHubProofState.MISSING))
+    elif smart_code is WakeHubSmartReadinessCode.HOLD_ORIGIN_ROUTE:
+        smart = replace(smart, origin=replace(smart.origin, route=WakeHubProofState.MISSING))
+    elif smart_code is WakeHubSmartReadinessCode.HOLD_ORIGIN_GENERATION:
+        smart = replace(smart, origin=replace(smart.origin, generation=WakeHubProofState.MISSING))
+    elif smart_code is WakeHubSmartReadinessCode.HOLD_ORIGIN_CONSENT:
+        smart = replace(smart, origin=replace(smart.origin, consent=WakeHubConsentState.REVOKED))
+
+    evidence = _autoload_evidence(readiness=smart)
+    plan = assess_wakehub_chat_autoload_plan(evidence)
+    assert plan.advice is expected_advice
+    assert plan.reason.value == smart_code.value
+    assert plan.readiness_code is smart_code
+    _assert_wh05a_no_effect(plan)
+
+
+@pytest.mark.parametrize(("section", "name", "value"), [
+    (None, "readiness", {}),
+    (None, "tabs", None),
+    (None, "tabs", [1, 2]),
+    (None, "tabs", (_autoload_tab(),) * (WAKEHUB_MAX_SAMPLES + 1)),
+    (None, "dedicated_context", "INDEPENDENTLY_CURRENT"),
+    (None, "dedicated_context", True),
+    (None, "tab_generation", 123),
+    (None, "route_authorized", "synthetic-secret"),
+    (None, "unrelated_tab_mutation", 1),
+    (None, "unrelated_tab_mutation", "false"),
+    ("tab", "tab_id", True),
+    ("tab", "tab_id", -1),
+    ("tab", "tab_id", 2**32),
+    ("tab", "tab_id", 10**1000),
+    ("tab", "tab_id", 1.5),
+    ("tab", "chat_binding", "EXACT_CHAT_A"),
+    ("tab", "chat_binding", WakeHubListenerState.PRESENT),
+    ("tab", "marker", "CURRENT"),
+    ("tab", "dedicated_context", 1),
+    ("tab", "human_draft_present", "synthetic-secret"),
+    ("tab", "actively_generating", 0),
+    ("tab", "security_challenge_present", None),
+    ("tab", "generation", True),
+    ("tab", "redirect_drift", 1),
+    ("tab", "post_navigation_recheck", "synthetic-secret"),
+    ("tab", "account_proof", 9444),
+])
+def test_wh05a_closed_schema_errors_are_typed_and_sanitized(section, name, value):
+    evidence = _autoload_evidence()
+    with pytest.raises(WakeHubAutoloadInputError) as caught:
+        if section == "tab":
+            tab = replace(evidence.tabs[0], **{name: value})
+            assess_wakehub_chat_autoload_plan(replace(evidence, tabs=(tab,)))
+        else:
+            assess_wakehub_chat_autoload_plan(replace(evidence, **{name: value}))
+    assert caught.value.args == ("WAKEHUB_AUTOLOAD_INPUT_INVALID",)
+    assert "synthetic-secret" not in str(caught.value)
+
+
+def test_wh05a_missing_unknown_fields_and_dict_cannot_authenticate_or_enable_effects():
+    evidence = _autoload_evidence()
+    tab = evidence.tabs[0]
+    for item in (evidence, tab):
+        values = {item_field.name: getattr(item, item_field.name) for item_field in fields(item)}
+        for invalid in ({}, {**values, "synthetic-secret": "private-value"},
+                        {**values, "verified": True}, {**values, "navigation": True}):
+            with pytest.raises(WakeHubAutoloadInputError) as caught:
+                type(item)(**invalid)
+            assert caught.value.args == ("WAKEHUB_AUTOLOAD_INPUT_INVALID",)
+        with pytest.raises(WakeHubAutoloadInputError):
+            type(item)(values)
+    for invalid in (None, {}, {"verified": True}, "synthetic-secret", (evidence,)):
+        with pytest.raises(WakeHubAutoloadInputError) as caught:
+            assess_wakehub_chat_autoload_plan(invalid)
+        assert caught.value.args == ("WAKEHUB_AUTOLOAD_INPUT_INVALID",)
+    with pytest.raises(WakeHubAutoloadInputError) as caught:
+        assess_wakehub_chat_autoload_plan(evidence, **{"synthetic-secret": True})
+    assert caught.value.args == ("WAKEHUB_AUTOLOAD_INPUT_INVALID",)
+
+
+def test_wh05a_rejects_subclasses_and_forged_enum_members_without_invoking_user_code():
+    class UnsafeInt(int):
+        def __le__(self, other):
+            pytest.fail("numeric subclass executed")
+
+    class UnsafeStr(str):
+        def __eq__(self, other):
+            pytest.fail("string subclass executed")
+
+    class UnsafeTabEvidence(WakeHubChatTabEvidence):
+        def _validate(self):
+            pytest.fail("tab evidence subclass executed")
+
+    class UnsafeAutoloadEvidence(WakeHubChatAutoloadEvidence):
+        def _validate(self):
+            pytest.fail("autoload evidence subclass executed")
+
+    forged = str.__new__(WakeHubProofState, "INDEPENDENTLY_CURRENT")
+    with pytest.raises(WakeHubAutoloadInputError):
+        _autoload_evidence(dedicated_context=forged)
+    with pytest.raises(WakeHubAutoloadInputError):
+        _autoload_evidence(dedicated_context=UnsafeStr("INDEPENDENTLY_CURRENT"))
+    with pytest.raises(WakeHubAutoloadInputError):
+        _autoload_tab(tab_id=UnsafeInt(1))
+    with pytest.raises(WakeHubAutoloadInputError):
+        _autoload_evidence(tabs=(object.__new__(UnsafeTabEvidence),))
+    with pytest.raises(WakeHubAutoloadInputError):
+        assess_wakehub_chat_autoload_plan(object.__new__(UnsafeAutoloadEvidence))
+
+
+def test_wh05a_maximum_windows_tab_id_is_a_schema_bound_only():
+    upper = assess_wakehub_chat_autoload_plan(_autoload_evidence(
+        tabs=(_autoload_tab(tab_id=2**32 - 1),)))
+    assert upper.advice is WakeHubAutoloadAdvice.ATTACH_EXISTING_ADVISORY_ONLY
+    assert upper.reason is WakeHubAutoloadReason.ATTACH_EXISTING_EXACT_CHAT_A_TAB
+    _assert_wh05a_no_effect(upper)
+
+
+def test_wh05a_nested_evidence_and_every_external_effect_field_are_frozen():
+    evidence = _autoload_evidence()
+    tab = evidence.tabs[0]
+    plan = assess_wakehub_chat_autoload_plan(evidence)
+    for item, name, value in (
+        (evidence, "dedicated_context", WakeHubProofState.MISSING),
+        (tab, "tab_id", 2),
+        (tab, "chat_binding", WakeHubChatBinding.WRONG_CHAT_B),
+        (plan, "advice", WakeHubAutoloadAdvice.WAIT),
+        (plan, "reason", WakeHubAutoloadReason.WAIT_RECEIVER),
+    ):
+        with pytest.raises(FrozenInstanceError):
+            setattr(item, name, value)
+    for item_field in fields(plan):
+        if item_field.init:
+            continue
+        name = item_field.name
+        original = getattr(plan, name)
+        with pytest.raises(FrozenInstanceError):
+            setattr(plan, name, True)
+        with pytest.raises((TypeError, ValueError), match=rf"^field {name} is declared with init=False,"):
+            replace(plan, **{name: True})
+        assert getattr(plan, name) == original
+    for item in (evidence, tab, plan):
+        assert not hasattr(item, "__dict__")
+
+
+def test_wh05a_every_reason_and_invalid_input_are_pure_under_external_effect_traps(monkeypatch):
+    cases = [
+        # Positive attach existing
+        _autoload_evidence(),
+        # Positive open dedicated tab
+        _autoload_evidence(tabs=()),
+        # Duplicate matching tabs
+        _autoload_evidence(tabs=(_autoload_tab(tab_id=1), _autoload_tab(tab_id=2))),
+        # Wrong chat binding
+        _autoload_evidence(tabs=(_autoload_tab(chat_binding=WakeHubChatBinding.WRONG_CHAT_B),)),
+        # Ambiguous marker
+        _autoload_evidence(tabs=(_autoload_tab(marker=WakeHubProofState.AMBIGUOUS),)),
+        # Captcha
+        _autoload_evidence(tabs=(_autoload_tab(security_challenge_present=True),)),
+        # Non-dedicated tab
+        _autoload_evidence(tabs=(_autoload_tab(dedicated_context=False),)),
+        # Human draft
+        _autoload_evidence(tabs=(_autoload_tab(human_draft_present=True),)),
+        # Generation drift (tab redirect)
+        _autoload_evidence(tabs=(_autoload_tab(redirect_drift=True),)),
+        # Generation drift (top-level tab generation)
+        _autoload_evidence(tab_generation=WakeHubProofState.STALE),
+        # Actively generating response (WAIT)
+        _autoload_evidence(tabs=(_autoload_tab(actively_generating=True),)),
+        # Post-navigation recheck missing (WAIT)
+        _autoload_evidence(tabs=(_autoload_tab(post_navigation_recheck=WakeHubProofState.MISSING),)),
+        # Post-navigation recheck stale (HOLD)
+        _autoload_evidence(tabs=(_autoload_tab(post_navigation_recheck=WakeHubProofState.STALE),)),
+        # Dedicated context missing (WAIT)
+        _autoload_evidence(dedicated_context=WakeHubProofState.MISSING),
+        # Dedicated context stale (HOLD)
+        _autoload_evidence(dedicated_context=WakeHubProofState.STALE),
+        # Wrong account (HOLD)
+        _autoload_evidence(tabs=(_autoload_tab(account_proof=WakeHubProofState.MISSING),)),
+        # Unrelated tab mutation (HOLD)
+        _autoload_evidence(unrelated_tab_mutation=True),
+        # Route not authorized when opening (HOLD)
+        _autoload_evidence(tabs=(), route_authorized=WakeHubProofState.MISSING),
+        # Propagated WH04A reasons:
+        _autoload_evidence(readiness=_smart_case("core", unknown_effect=True)),
+        _autoload_evidence(readiness=_smart_case("core", source_current=False)),
+        _autoload_evidence(readiness=_smart_evidence(projection=WakeHubProofState.MISSING)),
+        _autoload_evidence(readiness=_smart_case("origin", event=WakeHubEventState.STALE)),
+        _autoload_evidence(readiness=_smart_case("origin", event=WakeHubEventState.DUPLICATE_AMBIGUOUS)),
+        _autoload_evidence(readiness=_smart_case("core", hostops_listener=WakeHubListenerState.ABSENT)),
+        _autoload_evidence(readiness=_smart_case("origin", event=WakeHubEventState.ABSENT)),
+        _autoload_evidence(readiness=_smart_case("core", outstanding_send=WakeHubWorkState.PENDING)),
+        _autoload_evidence(readiness=_smart_case("core", trusted_human_pause=True)),
+        _autoload_evidence(readiness=_smart_case("core", interactive_session_proven=False)),
+        _autoload_evidence(readiness=_smart_evidence(session_owner=WakeHubProofState.MISSING)),
+        _autoload_evidence(readiness=_smart_case("browser", ownership=WakeHubChromeOwnership.ABSENT_INDEPENDENTLY_VERIFIED)),
+        _autoload_evidence(readiness=_smart_case("browser", ownership=WakeHubChromeOwnership.PROFILE_CONFLICT)),
+        _autoload_evidence(readiness=_smart_case("browser", port=9333)),
+        _autoload_evidence(readiness=_smart_case("browser", pid=0)),
+        _autoload_evidence(readiness=_smart_case("browser", retained_account=WakeHubProofState.MISSING)),
+        _autoload_evidence(readiness=_smart_case("origin", issuer=WakeHubProofState.MISSING)),
+        _autoload_evidence(readiness=_smart_case("origin", owner=WakeHubProofState.MISSING)),
+        _autoload_evidence(readiness=_smart_case("origin", route=WakeHubProofState.MISSING)),
+        _autoload_evidence(readiness=_smart_case("origin", generation=WakeHubProofState.MISSING)),
+        _autoload_evidence(readiness=_smart_case("origin", consent=WakeHubConsentState.REVOKED)),
+    ]
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("WH-05A attempted an external effect")
+
+    codes = set()
+    with monkeypatch.context() as guard:
+        for owner, names in (
+            (builtins, ("open",)),
+            (Path, ("open", "read_text", "read_bytes", "write_text", "write_bytes", "stat",
+                    "iterdir", "mkdir", "unlink", "rename", "replace")),
+            (os, ("open", "stat", "listdir", "scandir", "mkdir", "remove", "rename",
+                  "replace", "system", "kill", "startfile", "popen", "spawnv", "spawnve")),
+            (subprocess, ("Popen", "run", "call", "check_call", "check_output")),
+            (socket, ("socket", "create_connection", "getaddrinfo", "gethostbyname")),
+            (time, ("sleep", "time", "monotonic", "perf_counter")),
+        ):
+            for name in names:
+                guard.setattr(owner, name, forbidden)
+        for evidence in cases:
+            plan = assess_wakehub_chat_autoload_plan(evidence)
+            assert plan == assess_wakehub_chat_autoload_plan(evidence)
+            codes.add(plan.reason)
+            _assert_wh05a_no_effect(plan)
+        for invalid in (None, {"token": "synthetic-secret"}):
+            with pytest.raises(WakeHubAutoloadInputError) as caught:
+                assess_wakehub_chat_autoload_plan(invalid)
+            assert caught.value.args == ("WAKEHUB_AUTOLOAD_INPUT_INVALID",)
+    assert codes == set(WakeHubAutoloadReason)
+
