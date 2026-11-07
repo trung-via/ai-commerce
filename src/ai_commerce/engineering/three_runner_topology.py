@@ -869,3 +869,299 @@ def assess_wakehub_smart_readiness(
     if origin.consent is not WakeHubConsentState.CURRENT:
         return result(code.HOLD_ORIGIN_CONSENT)
     return result(code.READY_TO_PREPARE_ADVISORY_ONLY)
+
+
+# WH-05A is a pure source policy over PRIVATE exact-chat autoload projections.
+# It advises only: no browser, Playwright, CDP, task, network, file or Send
+# operation is reachable or authorized from this module.
+class WakeHubAutoloadInputError(ValueError):
+    """Closed-schema diagnostic without caller values or private identifiers."""
+
+    def __init__(self) -> None:
+        super().__init__("WAKEHUB_AUTOLOAD_INPUT_INVALID")
+
+
+class WakeHubChatBinding(str, Enum):
+    EXACT_CHAT_A = "EXACT_CHAT_A"
+    WRONG_CHAT_B = "WRONG_CHAT_B"
+    UNBOUND = "UNBOUND"
+    AMBIGUOUS = "AMBIGUOUS"
+
+
+class WakeHubAutoloadAdvice(str, Enum):
+    ATTACH_EXISTING_ADVISORY_ONLY = "ATTACH_EXISTING_ADVISORY_ONLY"
+    OPEN_DEDICATED_TAB_ADVISORY_ONLY = "OPEN_DEDICATED_TAB_ADVISORY_ONLY"
+    WAIT = "WAIT"
+    HOLD = "HOLD"
+
+
+class WakeHubAutoloadReason(str, Enum):
+    # Advisory outcomes
+    ATTACH_EXISTING_EXACT_CHAT_A_TAB = "ATTACH_EXISTING_EXACT_CHAT_A_TAB"
+    OPEN_NEW_DEDICATED_TAB_ROUTE_PROVEN = "OPEN_NEW_DEDICATED_TAB_ROUTE_PROVEN"
+
+    # Wait conditions
+    WAIT_RECEIVER = "WAIT_RECEIVER"
+    WAIT_EVENT = "WAIT_EVENT"
+    WAIT_PENDING_WORK = "WAIT_PENDING_WORK"
+    WAIT_INTERACTIVE_SESSION = "WAIT_INTERACTIVE_SESSION"
+    WAIT_CHROME = "WAIT_CHROME"
+    WAIT_RESPONSE_STREAMING_ACTIVE = "WAIT_RESPONSE_STREAMING_ACTIVE"
+    WAIT_POST_NAVIGATION_RECHECK = "WAIT_POST_NAVIGATION_RECHECK"
+    WAIT_DEDICATED_CONTEXT = "WAIT_DEDICATED_CONTEXT"
+
+    # Hold conditions
+    HOLD_UNKNOWN_EFFECT = "HOLD_UNKNOWN_EFFECT"
+    HOLD_SOURCE_DRIFT = "HOLD_SOURCE_DRIFT"
+    HOLD_PRIVATE_PROJECTION = "HOLD_PRIVATE_PROJECTION"
+    HOLD_EVENT_STALE = "HOLD_EVENT_STALE"
+    HOLD_EVENT_AMBIGUITY = "HOLD_EVENT_AMBIGUITY"
+    HOLD_HUMAN_PAUSED = "HOLD_HUMAN_PAUSED"
+    HOLD_SESSION_OWNER = "HOLD_SESSION_OWNER"
+    HOLD_CHROME_OWNERSHIP = "HOLD_CHROME_OWNERSHIP"
+    HOLD_CHROME_ENDPOINT = "HOLD_CHROME_ENDPOINT"
+    HOLD_CHROME_IDENTITY = "HOLD_CHROME_IDENTITY"
+    HOLD_BROWSER_ACCOUNT = "HOLD_BROWSER_ACCOUNT"
+    HOLD_ORIGIN_ISSUER = "HOLD_ORIGIN_ISSUER"
+    HOLD_ORIGIN_OWNER = "HOLD_ORIGIN_OWNER"
+    HOLD_ORIGIN_ROUTE = "HOLD_ORIGIN_ROUTE"
+    HOLD_ORIGIN_GENERATION = "HOLD_ORIGIN_GENERATION"
+    HOLD_ORIGIN_CONSENT = "HOLD_ORIGIN_CONSENT"
+    HOLD_DUPLICATE_MATCHING_TABS = "HOLD_DUPLICATE_MATCHING_TABS"
+    HOLD_WRONG_CHAT_TARGET = "HOLD_WRONG_CHAT_TARGET"
+    HOLD_MARKER_AMBIGUOUS = "HOLD_MARKER_AMBIGUOUS"
+    HOLD_LOGIN_OR_CAPTCHA_CHALLENGE = "HOLD_LOGIN_OR_CAPTCHA_CHALLENGE"
+    HOLD_NON_DEDICATED_CONTEXT = "HOLD_NON_DEDICATED_CONTEXT"
+    HOLD_HUMAN_DRAFT_PRESENT = "HOLD_HUMAN_DRAFT_PRESENT"
+    HOLD_GENERATION_DRIFT = "HOLD_GENERATION_DRIFT"
+    HOLD_POST_NAVIGATION_RECHECK_REQUIRED = "HOLD_POST_NAVIGATION_RECHECK_REQUIRED"
+    HOLD_UNRELATED_TAB_MUTATION = "HOLD_UNRELATED_TAB_MUTATION"
+
+
+# Code alias for parity with earlier readiness planners
+WakeHubAutoloadCode = WakeHubAutoloadReason
+
+
+class _WakeHubAutoloadProjection:
+    """Closed-schema representation validation for WH-05A projections."""
+
+    __slots__ = ()
+
+    def __init__(self, *args: object, **values: object) -> None:
+        schema = fields(self)
+        if args or len(values) != len(schema) or any(
+            item.name not in values for item in schema
+        ):
+            raise WakeHubAutoloadInputError()
+        for item in schema:
+            object.__setattr__(self, item.name, values[item.name])
+        self._validate()
+
+
+def _wakehub_autoload_enums(*pairs: tuple[object, type[Enum]]) -> None:
+    if any(not _wakehub_enum(value, expected) for value, expected in pairs):
+        raise WakeHubAutoloadInputError()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class WakeHubChatTabEvidence(_WakeHubAutoloadProjection):
+    """Sanitized evidence for an observed tab candidate; no URLs, scripts or DOM."""
+
+    tab_id: int
+    chat_binding: WakeHubChatBinding
+    marker: WakeHubProofState
+    dedicated_context: bool
+    human_draft_present: bool
+    actively_generating: bool
+    security_challenge_present: bool
+    generation: WakeHubProofState
+    redirect_drift: bool
+    post_navigation_recheck: WakeHubProofState
+    account_proof: WakeHubProofState
+
+    def _validate(self) -> None:
+        _wakehub_autoload_enums(
+            (self.chat_binding, WakeHubChatBinding),
+            (self.marker, WakeHubProofState),
+            (self.generation, WakeHubProofState),
+            (self.post_navigation_recheck, WakeHubProofState),
+            (self.account_proof, WakeHubProofState),
+        )
+        for bool_field in (
+            self.dedicated_context, self.human_draft_present,
+            self.actively_generating, self.security_challenge_present,
+            self.redirect_drift,
+        ):
+            if type(bool_field) is not bool:
+                raise WakeHubAutoloadInputError()
+        if type(self.tab_id) is not int or not 0 <= self.tab_id <= _MAX_WINDOWS_COUNT:
+            raise WakeHubAutoloadInputError()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class WakeHubChatAutoloadEvidence(_WakeHubAutoloadProjection):
+    """Sanitized independent evidence projection for exact Chat A autoload planning."""
+
+    readiness: WakeHubSmartReadinessEvidence
+    tabs: tuple[WakeHubChatTabEvidence, ...]
+    dedicated_context: WakeHubProofState
+    tab_generation: WakeHubProofState
+    route_authorized: WakeHubProofState
+    unrelated_tab_mutation: bool
+
+    def _validate(self) -> WakeHubSmartReadinessPlan:
+        _wakehub_autoload_enums(
+            (self.dedicated_context, WakeHubProofState),
+            (self.tab_generation, WakeHubProofState),
+            (self.route_authorized, WakeHubProofState),
+        )
+        if type(self.unrelated_tab_mutation) is not bool:
+            raise WakeHubAutoloadInputError()
+        if type(self.readiness) is not WakeHubSmartReadinessEvidence:
+            raise WakeHubAutoloadInputError()
+        if type(self.tabs) is not tuple or len(self.tabs) > WAKEHUB_MAX_SAMPLES:
+            raise WakeHubAutoloadInputError()
+        for tab in self.tabs:
+            if type(tab) is not WakeHubChatTabEvidence:
+                raise WakeHubAutoloadInputError()
+            tab._validate()
+        try:
+            return assess_wakehub_smart_readiness(self.readiness)
+        except WakeHubSmartInputError:
+            raise WakeHubAutoloadInputError() from None
+
+
+@dataclass(frozen=True, slots=True)
+class WakeHubChatAutoloadPlan(WakeHubNoEffectPlan):
+    """Sanitized categorical autoload advice only; never permits execution."""
+
+    advice: WakeHubAutoloadAdvice
+    reason: WakeHubAutoloadReason
+    listener_count: int
+    readiness_code: WakeHubSmartReadinessCode
+    paused_by_human: bool
+    scope: Literal["PURE_EXACT_CHAT_AUTOLOAD_POLICY_ONLY"] = field(
+        default="PURE_EXACT_CHAT_AUTOLOAD_POLICY_ONLY", init=False)
+    keep_event_receiver_alive: Literal[True] = field(default=True, init=False)
+    native_operations: Literal[False] = field(default=False, init=False)
+    start: Literal[False] = field(default=False, init=False)
+    stop: Literal[False] = field(default=False, init=False)
+    task: Literal[False] = field(default=False, init=False)
+    chrome: Literal[False] = field(default=False, init=False)
+    navigation: Literal[False] = field(default=False, init=False)
+    send: Literal[False] = field(default=False, init=False)
+    plugin: Literal[False] = field(default=False, init=False)
+    attach_authorized: Literal[False] = field(default=False, init=False)
+    open_tab_authorized: Literal[False] = field(default=False, init=False)
+    click_permitted: Literal[False] = field(default=False, init=False)
+    dom_ack_counted: Literal[False] = field(default=False, init=False)
+    server_ack_counted: Literal[False] = field(default=False, init=False)
+    post_navigation_recheck_required: Literal[True] = field(
+        default=True, init=False)
+
+    @property
+    def code(self) -> WakeHubAutoloadReason:
+        return self.reason
+
+
+def assess_wakehub_chat_autoload_plan(
+    evidence: WakeHubChatAutoloadEvidence | None = None, **unknown: object,
+) -> WakeHubChatAutoloadPlan:
+    """Pure, deterministic WH-05A exact Chat A autoload advisory planner.
+
+    Evaluates private projections without browser actions, Playwright attach,
+    CDP navigation or DOM interaction. Strictly fail-closed on unknown effect,
+    source drift, stale/missing proof, wrong account, captcha, human draft or
+    redirects. Advises ATTACH_EXISTING_ADVISORY_ONLY when exactly one confirmed
+    Chat A tab is verified in dedicated context, or OPEN_DEDICATED_TAB_ADVISORY_ONLY
+    when zero matching tabs exist and origin route is authorized.
+    """
+    if unknown or type(evidence) is not WakeHubChatAutoloadEvidence:
+        raise WakeHubAutoloadInputError()
+    readiness_plan = evidence._validate()
+    readiness = evidence.readiness
+    core = readiness.core
+    current = WakeHubProofState.INDEPENDENTLY_CURRENT
+    advice_enum = WakeHubAutoloadAdvice
+    reason_enum = WakeHubAutoloadReason
+
+    def result(reason: WakeHubAutoloadReason) -> WakeHubChatAutoloadPlan:
+        if reason is reason_enum.ATTACH_EXISTING_EXACT_CHAT_A_TAB:
+            advice = advice_enum.ATTACH_EXISTING_ADVISORY_ONLY
+        elif reason is reason_enum.OPEN_NEW_DEDICATED_TAB_ROUTE_PROVEN:
+            advice = advice_enum.OPEN_DEDICATED_TAB_ADVISORY_ONLY
+        elif reason.value.startswith("WAIT_"):
+            advice = advice_enum.WAIT
+        else:
+            advice = advice_enum.HOLD
+        return WakeHubChatAutoloadPlan(
+            advice=advice,
+            reason=reason,
+            listener_count=readiness_plan.listener_count,
+            readiness_code=readiness_plan.code,
+            paused_by_human=core.trusted_human_pause,
+        )
+
+    # 1. Gate on WH04A smart readiness
+    if readiness_plan.code is not WakeHubSmartReadinessCode.READY_TO_PREPARE_ADVISORY_ONLY:
+        return result(reason_enum(readiness_plan.code.value))
+
+    # 2. Gate on dedicated context proof
+    if evidence.dedicated_context is WakeHubProofState.MISSING:
+        return result(reason_enum.WAIT_DEDICATED_CONTEXT)
+    if evidence.dedicated_context is not current:
+        return result(reason_enum.HOLD_NON_DEDICATED_CONTEXT)
+
+    # 3. Gate on tab generation drift
+    if evidence.tab_generation is not current:
+        return result(reason_enum.HOLD_GENERATION_DRIFT)
+
+    # 4. Gate on unrelated tab mutation
+    if evidence.unrelated_tab_mutation:
+        return result(reason_enum.HOLD_UNRELATED_TAB_MUTATION)
+
+    # 5. Evaluate tabs
+    matching_tabs = [
+        t for t in evidence.tabs
+        if t.chat_binding is WakeHubChatBinding.EXACT_CHAT_A
+    ]
+
+    # Multiple tabs or duplicate matching tabs
+    if len(matching_tabs) > 1 or len(evidence.tabs) > 1:
+        return result(reason_enum.HOLD_DUPLICATE_MATCHING_TABS)
+
+    # Exactly one tab present
+    if len(evidence.tabs) == 1:
+        tab = evidence.tabs[0]
+        if tab.tab_id == 0:
+            return result(reason_enum.HOLD_NON_DEDICATED_CONTEXT)
+        if tab.chat_binding is WakeHubChatBinding.WRONG_CHAT_B:
+            return result(reason_enum.HOLD_WRONG_CHAT_TARGET)
+        if tab.chat_binding is not WakeHubChatBinding.EXACT_CHAT_A:
+            return result(reason_enum.HOLD_WRONG_CHAT_TARGET)
+        if tab.marker is not current:
+            return result(reason_enum.HOLD_MARKER_AMBIGUOUS)
+        if not tab.dedicated_context:
+            return result(reason_enum.HOLD_NON_DEDICATED_CONTEXT)
+        if tab.account_proof is not current:
+            return result(reason_enum.HOLD_BROWSER_ACCOUNT)
+        if tab.security_challenge_present:
+            return result(reason_enum.HOLD_LOGIN_OR_CAPTCHA_CHALLENGE)
+        if tab.human_draft_present:
+            return result(reason_enum.HOLD_HUMAN_DRAFT_PRESENT)
+        if tab.actively_generating:
+            return result(reason_enum.WAIT_RESPONSE_STREAMING_ACTIVE)
+        if tab.redirect_drift or tab.generation is not current:
+            return result(reason_enum.HOLD_GENERATION_DRIFT)
+        if tab.post_navigation_recheck is WakeHubProofState.MISSING:
+            return result(reason_enum.WAIT_POST_NAVIGATION_RECHECK)
+        if tab.post_navigation_recheck is not current:
+            return result(reason_enum.HOLD_POST_NAVIGATION_RECHECK_REQUIRED)
+        return result(reason_enum.ATTACH_EXISTING_EXACT_CHAT_A_TAB)
+
+    # Zero tabs present: check if open dedicated tab is authorized
+    if evidence.route_authorized is not current:
+        return result(reason_enum.HOLD_ORIGIN_ROUTE)
+
+    return result(reason_enum.OPEN_NEW_DEDICATED_TAB_ROUTE_PROVEN)
+
