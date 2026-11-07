@@ -1,0 +1,83 @@
+{
+  "schema_version": "WorkItem.v1",
+  "work_id": "BQ-05A_PULSE_STUDIO_OFFLINE_QA_001",
+  "action_id": "BQ05A-PULSE-STUDIO-OFFLINE-QA-BRIDGE-CODEX-XHIGH-01",
+  "attempt_id": "bq05a_pulse_offline_qa_bridge_codex_xhigh_c868b989_20261107_v1",
+  "source_sha": "c868b989382763b03f5040390a8adaf99c25e064",
+  "status": "HOLD_NATIVE_LINK_ENVIRONMENT_AND_POST_FIX_VERIFICATION_REQUIRED",
+  "objective": "Read-only native B0.4 WAIT_BRAIN current A06 LOCAL_IMPORT video interoperability with real bounded Q4 technical inspection and advisory Q5; separate sanitized deterministic sidecar, no live authority",
+  "owner": "Media & Creative",
+  "component": "bq-05a",
+  "verification_profile": "mt01-component-onboarding",
+  "verification_round_limit": 2,
+  "executor_observations": {
+    "local_head": "c868b989382763b03f5040390a8adaf99c25e064",
+    "registration": "ACCEPTED_DATA_ONLY; no missing mapping or broad fallback",
+    "selected_groups": ["a06", "a13", "b0-3", "b0-4", "bq-02a", "bq-02b", "bq-04a", "bq-04b", "bq-05a"],
+    "verify_fix_rounds_used": 2,
+    "round_1": {"status": "TIMEOUT_UNPROVEN", "timeout_seconds": 900, "collected": null, "passed": null, "workers_observed": null},
+    "standalone_native_diagnostic": "Fresh native CLI SETUP -> WAIT_BRAIN -> existing sealed handoff -> real bridge Q4 OBSERVED and Q5 KEEP_ORIGINAL; no provider proof",
+    "round_2_owner": {
+      "collected": 36, "passed": 32, "failed": 4, "skipped": 0, "errors": 0,
+      "workers_observed": 12, "pytest_seconds": 588.96,
+      "input_manifest_unchanged_during_execution": true,
+      "native_integration_positive": "PASSED: actual B0.4 A06 video, A13/T1 and T2, canonical sidecar, repeated native replay, retained bytes unchanged",
+      "failures": [
+        "NATIVE_JUNCTION_ENVIRONMENT_HOLD: native creation denied with Access is denied",
+        "NATIVE_HARDLINK_ENVIRONMENT_HOLD: os.link denied with WinError 5",
+        "Incorrect test lookup assumed custody render had .mp4 suffix; owner uses content-addressed objects",
+        "Optional T2 NOT_RUN passed a T1 artifact SHA to Q5 despite native multimodal observed asset being null"
+      ]
+    },
+    "second_fix_step": [
+      "Q5 receives its native observed asset pin or null; missing T2 retains native HOLD without inventing observation",
+      "Test resolves actual A06 render output through its native owner manifest and content-addressed output ref"
+    ],
+    "post_fix_test_status": "NOT_RETESTED; no third executor verification round",
+    "consumer_execution": "NOT_EXECUTED; stopped after owner failure, no coverage or PASS claim",
+    "native_link_policy": "Mandatory failures retained; no skip, privilege escalation, alternate creation method or guard bypass",
+    "candidate": "NONE; not verified or accepted; EF01/EF02 independent verification required"
+  },
+  "model_selection": {
+    "executor": "codex",
+    "model": "gpt-6.1-sol",
+    "effort": "xhigh",
+    "fallback_used": false,
+    "provider_proof": "EF02_NATIVE_TERMINAL_RECEIPT_REQUIRED"
+  },
+  "allowed_paths": [
+    "src/ai_commerce/creative_quality/pulse_studio_offline_bridge.py",
+    "tests/test_bq_05a_pulse_studio_offline_bridge.py",
+    "work_items/BQ-05A_PULSE_STUDIO_OFFLINE_QA_001.json",
+    "work_items/mt01-components/bq-05a.json",
+    "docs/creative/BQ_05A_PULSE_STUDIO_OFFLINE_QA_PROTOCOL.md",
+    "docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md"
+  ],
+  "add_only_paths": [
+    "src/ai_commerce/creative_quality/pulse_studio_offline_bridge.py",
+    "tests/test_bq_05a_pulse_studio_offline_bridge.py",
+    "work_items/BQ-05A_PULSE_STUDIO_OFFLINE_QA_001.json",
+    "work_items/mt01-components/bq-05a.json",
+    "docs/creative/BQ_05A_PULSE_STUDIO_OFFLINE_QA_PROTOCOL.md"
+  ],
+  "modified_paths": ["docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md"],
+  "acceptance": [
+    "BQ-05a.wait-brain-current-asset-q4",
+    "BQ-05a.closed-offline-qa-sidecar",
+    "BQ-05a.no-provider-no-authority-upgrade"
+  ],
+  "negative_acceptance": [
+    {"ac": "BQ-05a.reject-unverified-or-stale-native-asset", "tests": ["test_fabricated_receipt_or_prestart_session_is_not_native", "test_current_asset_and_native_provenance_tampering_holds", "test_self_resealed_session_pin_mismatch_is_not_authenticated", "test_resealed_directive_digest_drift_holds", "test_stale_sidecar_cannot_authenticate_replaced_video"]},
+    {"ac": "BQ-05a.reject-path-alias-and-unproven-lock", "tests": ["test_path_alias_and_worktree_escape_holds", "test_native_windows_hardlink_rejected_before_owner_or_media", "test_native_windows_junction_rejected_before_owner_or_media", "test_symlink_tag_and_unknown_reparse_metadata_rejected", "test_locked_source_denies_real_mutation_and_rename", "test_final_lock_exit_failure_cannot_return_success"]},
+    {"ac": "BQ-05a.reject-authority-upgrade-and-forged-sidecar", "tests": ["test_untrusted_context_never_upgrades_source", "test_effects_without_native_grants_fail_before_media", "test_sidecar_closed_and_hashes_never_authenticate_forgery", "test_actual_tool_start_failure_never_promotes"]}
+  ],
+  "contract_policy": "Three existing closed PULSE v1 schemas are READ_ONLY consumers. Sidecar is separate; hashes are not signed attestations. A03-A18 owner ledgers and all provider rights remain unchanged.",
+  "source_binding_policy": "Bridge source pinned c868b989382763b03f5040390a8adaf99c25e064. Native B0.3 SOURCE_SHA remains its shipped protocol baseline; packet.runtime_sha256 independently pins the full current shipped Python tree. Fresh B0.4 sessions only; genuine drift HOLD, no baseline rewriting.",
+  "native_link_contract": {
+    "mandatory": ["REAL_WINDOWS_HARDLINK_REJECTION", "REAL_WINDOWS_JUNCTION_REJECTION", "SYMLINK_REPARSE_TAG_METADATA_REJECTION", "REAL_WINDOWS_WRITE_RENAME_DENIAL", "FINAL_LOCK_EXIT_CHECK", "ORDINARY_FILE_POSITIVE_CONTROL"],
+    "mandatory_skip_policy": "NO_SKIP_NO_XFAIL; absent capability is environment HOLD",
+    "os_symlink_creation": "UNPROVEN; metadata rejection is not a claim of privileged OS symlink creation"
+  },
+  "live_status": "NOT_STARTED_NOT_AUTHORIZED; separate B0-S private per-effect rights, provider entitlement, custody, spend and attended provider proof required",
+  "publication_status": "Executor edits ordinary allowed worktree files only. No Git writes or candidate/PR/Brain acceptance claim; EF02 worker alone may publish verified source."
+}

@@ -260,3 +260,11 @@ Nếu nhóm chỉ có một engineer 6h/ngày, tổng effort phase không đư�
 
 **Triển khai theo thứ tự, chưa dispatch:** BQ-00 (planning) → BQ-01/02 offline tests → BQ-03 tùy nhu cầu calibration → BQ-04 repair → BQ-05 chỉ sau B0-S grants + actual receipt; BQ-06 dùng B2 evidence mới có thể kết luận có cơ sở. BQ source implementation cần WorkItem, positive/negative AC, review source/consumer và PR CI Windows riêng. Không có BQ runtime, media benchmark, thương mại hoặc external outcome nào được chứng minh chỉ bởi cập nhật Roadmap này.
 
+## 13. Dated source evidence — 2026-11-07
+
+This appended section preserves the historical planning table and all 63 original WBS IDs.
+
+- **BQ-04b:** PR #627 MERGED at exact main SHA `c868b989382763b03f5040390a8adaf99c25e064`. Its offline exact-fixture repair evidence does not prove PULSE provider effects or authorize edits on arbitrary A06 videos.
+- **BQ-05a:** SOURCE UNDER EXECUTION, action `BQ05A-PULSE-STUDIO-OFFLINE-QA-BRIDGE-CODEX-XHIGH-01`, attempt `bq05a_pulse_offline_qa_bridge_codex_xhigh_c868b989_20261107_v1`. Bounded read-only interoperability from native B0.4 WAIT_BRAIN/current A06 LOCAL_IMPORT bytes to existing Q4 and advisory Q5; separate `BQ05aStudioQAEvidence.v1` sidecar. See [offline protocol](../creative/BQ_05A_PULSE_STUDIO_OFFLINE_QA_PROTOCOL.md). Candidate publication, hosted Windows CI and independent Brain acceptance remain unclaimed here.
+- **BQ-05 LIVE:** independent private rights/per-effect permission, provider entitlement, custody, spending and attended actual-provider proof remain **NOT_STARTED / NOT_AUTHORIZED**. SOURCE-only local technical evidence is not authenticated provider or Brain approval; no provider dispatch, publish, spend or human study is authorized. Separate BQ-05b planning and Human authorization are still required.
+
