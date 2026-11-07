@@ -2591,3 +2591,350 @@ def test_readonly_audit_read_capability_rejects_mutation_and_unbounded_responses
     result = _run_readonly_audit(storage, packet, action, owner)
     assert result["source_gate"] == "CONTRADICTED" and result["code"] == "RESPONSE_BOUND_INVALID"
 
+
+from dataclasses import replace
+import base64
+from ai_commerce.remote import transport as effect_auth
+
+_EFFECT_NOW = 1800000000
+
+# Fixture wire helpers use the WorkOwner owner, without importing HostOps.
+c = SimpleNamespace(canonical=effect_auth._effect_canonical, decode=effect_auth._effect_decode,
+    digest=effect_auth._effect_digest, SOURCE_REPOSITORY="trung-via/ai-commerce")
+
+
+def _effect_witness_fixture(tmp_path, monkeypatch, binding=None):
+    """SOURCE_CONTRACT_FIXTURE: mocked public offline verification, no host signer.
+
+    The hash-based signature below is deliberately NOT real authentication.
+    Only this test monkeypatch accepts it; production has no enrolled signer.
+    No private key, production enrollment or real effect is created here.
+    """
+    import hashlib
+    binding = binding or {"repo": c.SOURCE_REPOSITORY, "root_issue": 587, "current_issue": 595,
+        "action_id": "effect-contract", "attempt_id": "effect-contract-attempt", "source_sha": "a" * 40,
+        "work_owner": {"root_commit_sha": "b" * 40, "root_digest": "c" * 64,
+            "journal_tip_sha": "d" * 40, "journal_digest": "e" * 64, "work_key": "f" * 64,
+            "fingerprint": "1" * 64, "fence": "2" * 64, "generation": 2},
+        "refs": {}, "provider_intent": {"commit_sha": "3" * 40, "digest": "4" * 64, "round": 0}}
+    if not binding["refs"]:
+        key = hashlib.sha256((binding["repo"] + ":" + binding["attempt_id"]).encode()).hexdigest()[:32]
+        binding["refs"] = {name: {"ref": f"refs/heads/ef02/{ns}/{key}", "sha": "5" * 40}
+            for name, ns in (("claim", "claims"), ("pre_spawn", "pre-spawn"), ("spawned", "spawned"))}
+    verifier = tmp_path / "mock-offline-verifier.exe"
+    verifier.write_bytes(b"SOURCE_CONTRACT_FIXTURE; NEVER EXECUTE")
+    public = b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20" + b"k" * 32
+    enrollment = effect_auth.WorkOwnerEffectEnrollment("effect-owner-fixture", "ssh-ed25519 " +
+        base64.b64encode(public).decode(), c.digest(verifier.read_bytes()), "6" * 64, "7" * 64,
+        "EXTERNAL_ISOLATED_SIGNER", "SOURCE_CONTRACT_FIXTURE")
+    fixture = SimpleNamespace(binding=binding, enrollment=enrollment, verifier=verifier)
+    def signature(payload, namespace=effect_auth.WORK_OWNER_EFFECT_NAMESPACE):
+        return base64.b64encode(hashlib.sha256(namespace.encode() + c.canonical(payload)).digest()).decode()
+    def verify(payload, sig, signers, identity, namespace, executable):
+        assert signers.read_text().strip() == enrollment.identity + " " + enrollment.public_key
+        assert identity == enrollment.identity and executable == verifier
+        if sig != signature(payload, namespace):
+            effect_auth._effect_deny("SIGNATURE_INVALID")
+    monkeypatch.setattr(effect_auth, "_effect_verify_signature", verify)
+    fixture.payload = {"schema": effect_auth.WORK_OWNER_EFFECT_SCHEMA, "namespace": effect_auth.WORK_OWNER_EFFECT_NAMESPACE,
+        "binding": c.decode(c.canonical(binding)), "signer": {"identity": enrollment.identity,
+            "fingerprint": "SHA256:" + base64.b64encode(hashlib.sha256(public).digest()).decode().rstrip("="),
+            "enrollment_sha256": c.digest(enrollment.encoded())},
+        "provider": {"intent_digest": binding["provider_intent"]["digest"], "return_determinate": True,
+            "outcome": "COMPLETED", "return_sha256": "8" * 64},
+        "verification": {"completed": True, "completed_monotonic_ns": 500, "exit_code": 0, "groups": 13, "passed": 1770,
+            "skipped": 7, "failed": 0, "xdist_workers": 12, "receipt_sha256": "9" * 64,
+            "artifact_sha256": "a" * 64},
+        "cleanup": {"completed": True, "observed_monotonic_ns": 800, "scratch_dirty": False, "process_tree_empty": True,
+            "verified_tree_sha256": "b" * 64, "post_verify_tree_sha256": "b" * 64, "receipt_sha256": "c" * 64},
+        "publication": {"state": "ABSENT_AT_COMMIT_BOUNDARY", "candidate_sha": None,
+            "candidate_at_acquisition": None, "acquisition_monotonic_ns": 100,
+            "fence": binding["work_owner"]["fence"], "monotonic_ns": 900,
+            "acquisition_sha256": "d" * 64, "commit_sha256": "e" * 64, "post_effect_sha256": "f" * 64,
+            "intent_only": False, "absence_basis": "FENCED_OWNER_COMMIT_BOUNDARY"},
+        "timestamp": {"clock_id": "1" * 64, "monotonic_ns": 1000, "issued_at": _EFFECT_NOW, "expires_at": _EFFECT_NOW + 120},
+        "replay": {"nonce": "2" * 64, "replay_id": "3" * 64, "ledger_sha256": "4" * 64}}
+    def seal():
+        fixture.raw = c.canonical({"payload": fixture.payload, "signature_b64": signature(fixture.payload)})
+        fixture.context = effect_auth.WorkOwnerEffectReadContext(c.digest(fixture.raw), "a" * 64, "9" * 64,
+            "f" * 64, "4" * 64, "1" * 64, 1100, _EFFECT_NOW + 1, frozenset(), frozenset())
+    def validate(**updates):
+        args = {"expected_binding": fixture.binding, "enrollment": fixture.enrollment,
+                "context": fixture.context, "ssh_keygen": fixture.verifier, "source_contract_fixture": True}
+        args.update(updates)
+        return effect_auth.work_owner_effect_witness_verify_offline(fixture.raw, **args).payload()
+    fixture.seal, fixture.validate = seal, validate
+    seal()
+    return fixture
+
+
+def test_effect_witness_mocked_offline_canonical_receipt_is_source_only(tmp_path, monkeypatch):
+    f = _effect_witness_fixture(tmp_path, monkeypatch)
+    result = f.validate()
+    assert result["gate"] == "EFFECT_DETERMINATE_AUTHENTICATED"
+    assert result["scope"] == "SOURCE_CONTRACT_FIXTURE" and result["work_owner_transition_authorized"] is False
+    assert result["native_owner_policy_gate"] == "HOLD_PENDING_ADOPTED_NATIVE_OWNER_POLICY"
+    assert result["evidence_hashes"]["attestation_sha256"] == c.digest(f.raw)
+    for name in ("replay_authorized", "transfer_authorized", "publication_authorized", "execution_allowed",
+                 "credential_custody_proven", "replay_ledger_proven"):
+        assert result[name] is False
+    # No implicit enrollment or unsigned/empty success.
+    assert f.validate(source_contract_fixture=False)["gate"] == "NO_AUTHENTICATED_OWNER_WITNESS"
+    assert f.validate(enrollment=None)["gate"] == "NO_AUTHENTICATED_OWNER_WITNESS"
+
+
+@pytest.mark.parametrize("field", ["repo", "root_issue", "current_issue", "action_id", "attempt_id", "source_sha",
+    "work_owner.root_commit_sha", "work_owner.root_digest", "work_owner.journal_tip_sha", "work_owner.journal_digest",
+    "work_owner.work_key", "work_owner.fingerprint", "work_owner.fence", "work_owner.generation",
+    "refs.claim.ref", "refs.claim.sha", "refs.pre_spawn.sha", "refs.spawned.sha", "provider_intent.digest"])
+def test_effect_witness_rejects_signed_forged_source_binding(tmp_path, monkeypatch, field):
+    f = _effect_witness_fixture(tmp_path, monkeypatch)
+    parts, node = field.split("."), f.payload["binding"]
+    for part in parts[:-1]:
+        node = node[part]
+    value = node[parts[-1]]
+    node[parts[-1]] = value + 1 if type(value) is int else "0" * len(value)
+    f.seal()
+    assert f.validate()["gate"] == "SOURCE_BOUNDARY_CONTRADICTION"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("provider.return_determinate", False), ("provider.outcome", "QUOTA_EXHAUSTED"),
+    ("provider.intent_digest", "0" * 64), ("verification.completed", False),
+    ("verification.exit_code", 1), ("verification.exit_code", False), ("verification.groups", 0),
+    ("verification.passed", 0), ("verification.failed", 1), ("verification.artifact_sha256", "0" * 64),
+    ("verification.receipt_sha256", "0" * 64), ("cleanup.completed", False),
+    ("cleanup.scratch_dirty", True), ("cleanup.process_tree_empty", False),
+    ("cleanup.post_verify_tree_sha256", "0" * 64), ("publication.state", "HTTP404"),
+    ("publication.absence_basis", "HTTP404"), ("publication.intent_only", True),
+    ("publication.state", "PUBLISH_INTENT"), ("publication.candidate_sha", "0" * 40),
+    ("publication.post_effect_sha256", "0" * 64), ("publication.fence", "0" * 64),
+    ("publication.monotonic_ns", 1001), ("verification.completed_monotonic_ns", 99),
+    ("cleanup.observed_monotonic_ns", 499), ("publication.monotonic_ns", 799),
+    ("publication.candidate_at_acquisition", "a" * 40), ("namespace", "hostops-w1-create@ai-commerce")])
+def test_effect_witness_signed_effect_contradictions_fail_closed(tmp_path, monkeypatch, field, value):
+    f = _effect_witness_fixture(tmp_path, monkeypatch)
+    node = f.payload
+    parts = field.split(".")
+    for part in parts[:-1]:
+        node = node[part]
+    node[parts[-1]] = value
+    f.seal()
+    assert f.validate()["gate"] == "SOURCE_BOUNDARY_CONTRADICTION"
+
+
+@pytest.mark.parametrize("fault", ["fake", "reused", "w1", "empty", "mismatched", "unsupported", "verifier_mutated"])
+def test_effect_witness_bad_signatures_and_verifier(tmp_path, monkeypatch, fault):
+    f = _effect_witness_fixture(tmp_path, monkeypatch)
+    envelope = c.decode(f.raw)
+    if fault in ("fake", "empty", "w1"):
+        envelope["signature_b64"] = {"fake": base64.b64encode(b"x" * 32).decode(), "empty": "",
+            "w1": base64.b64encode(__import__("hashlib").sha256("hostops-w1-create@ai-commerce".encode() + c.canonical(f.payload)).digest()).decode()}[fault]
+    elif fault == "reused":
+        envelope["payload"]["replay"]["nonce"] = "a" * 64
+    elif fault == "mismatched":
+        envelope["payload"]["verification"]["passed"] += 1
+    elif fault == "unsupported":
+        monkeypatch.setattr(effect_auth, "_effect_verify_signature", lambda *a: effect_auth._effect_deny("SIGNATURE_UNAVAILABLE"))
+    else:
+        f.verifier.write_bytes(b"mutated verifier")
+    f.raw = c.canonical(envelope)
+    assert f.validate()["gate"] == "BAD_SIGNATURE"
+
+
+@pytest.mark.parametrize("fault", ["nonce", "replay_id", "expired", "future", "monotonic", "clock", "ledger"])
+def test_effect_witness_replay_and_clock_snapshots(tmp_path, monkeypatch, fault):
+    f = _effect_witness_fixture(tmp_path, monkeypatch)
+    changes = {"nonce": {"seen_nonces": frozenset({f.payload["replay"]["nonce"]})},
+        "replay_id": {"seen_replay_ids": frozenset({f.payload["replay"]["replay_id"]})},
+        "expired": {"unix_time": _EFFECT_NOW + 121}, "future": {"unix_time": _EFFECT_NOW - 1},
+        "monotonic": {"monotonic_ns": 999}, "clock": {"clock_id": "0" * 64},
+        "ledger": {"replay_ledger_sha256": "0" * 64}}
+    # A forged local wall clock cannot rescue the immutable snapshot.
+    monkeypatch.setattr(effect_auth.time, "time", lambda: _EFFECT_NOW)
+    assert f.validate(context=replace(f.context, **changes[fault]))["gate"] == "REPLAY_OR_STALE"
+
+
+@pytest.mark.parametrize("fault", ["same_sid", "custody", "fixture_as_real", "fingerprint", "enrollment", "key"])
+def test_effect_witness_signer_policy_never_trusts_receipt_claims(tmp_path, monkeypatch, fault):
+    f = _effect_witness_fixture(tmp_path, monkeypatch)
+    if fault == "same_sid":
+        f.enrollment = replace(f.enrollment, signer_principal_sha256=f.enrollment.executor_principal_sha256)
+    elif fault == "custody":
+        f.enrollment = replace(f.enrollment, custody="SAME_SID_SELF_HOSTED_RUNNER")
+    elif fault == "fixture_as_real":
+        f.enrollment = replace(f.enrollment, purpose="AUTHENTICATED_EXTERNAL_OWNER")
+        assert f.validate(source_contract_fixture=False)["gate"] == "NO_AUTHENTICATED_OWNER_WITNESS"
+    elif fault == "key":
+        f.enrollment = replace(f.enrollment, public_key="https://issue.invalid/key")
+    else:
+        f.payload["signer"]["fingerprint" if fault == "fingerprint" else "enrollment_sha256"] = "0" * 64
+        f.seal()
+    assert f.validate()["gate"] == "NO_AUTHENTICATED_OWNER_WITNESS"
+
+
+@pytest.mark.parametrize("fault", ["artifact", "attestation", "verification", "post_effect", "status", "url", "duplicate", "noncanonical", "oversized"])
+def test_effect_witness_pins_closed_shape_and_public_sanitization(tmp_path, monkeypatch, fault):
+    f = _effect_witness_fixture(tmp_path, monkeypatch)
+    if fault in ("artifact", "attestation", "verification", "post_effect"):
+        f.context = replace(f.context, **{fault + "_sha256": "0" * 64})
+    elif fault in ("status", "url"):
+        f.payload[fault] = "secret-C:\\private\\host; https://issue.invalid/execute"
+        f.seal()
+    elif fault == "duplicate":
+        f.raw = f.raw.replace(b'"signature_b64":', b'"signature_b64":"forged","signature_b64":')
+    elif fault == "noncanonical":
+        f.raw = b" " + f.raw
+    else:
+        f.raw = b"x" * 32769
+    result = f.validate()
+    assert result["gate"] == "SOURCE_BOUNDARY_CONTRADICTION" and result["evidence_hashes"] == {}
+    assert "private" not in json.dumps(result) and "issue.invalid" not in json.dumps(result)
+
+
+def _audit_effect_fixture(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from ai_commerce.remote.candidate_policy import commit_evidence
+    from ai_commerce.remote.transport import WorkOwnerAudit, WorkOwnerAuditProvenance
+    from test_ef01_repair import WorkOwnerMemoryTransport
+    storage = WorkOwnerMemoryTransport(BASE)
+    storage.repo = c.SOURCE_REPOSITORY
+    args = _readonly_audit_fixture(storage=storage)
+    report = _run_readonly_audit(*args)
+    assert report["source_gate"] == "VERIFIED"
+    reads = SimpleNamespace(repo=storage.repo, attempt_key=storage.attempt_key,
+        provenance=tuple(WorkOwnerAuditProvenance(**p) for p in report["provenance"]))
+    binding = WorkOwnerAudit._effect_binding(reads, args[3].identity, args[3].read())
+    f = _effect_witness_fixture(tmp_path, monkeypatch, binding)
+    f.payload["publication"].update(state="COMMITTED_CANDIDATE", candidate_sha=report["candidate_sha"], absence_basis="NOT_ABSENT")
+    proof = commit_evidence(storage.commits[report["candidate_sha"]]["message"])
+    f.payload["verification"]["receipt_sha256"] = proof["verification"]["report_sha256"]
+    seal = f.seal
+    def seal_candidate():
+        seal()
+        f.context = replace(f.context, verification_sha256=proof["verification"]["report_sha256"])
+    f.seal = seal_candidate
+    f.seal()
+    def audit(**updates):
+        kwargs = {"effect_witness": f.raw, "witness_enrollment": f.enrollment, "witness_context": f.context,
+            "witness_verifier": f.verifier, "source_contract_fixture": True}
+        kwargs.update(updates)
+        return _run_readonly_audit(*args, **kwargs)
+    f.audit, f.args = audit, args
+    return f
+
+
+def test_effect_witness_immutable_hash_join_preserves_all_owner_gates(tmp_path, monkeypatch):
+    f = _audit_effect_fixture(tmp_path, monkeypatch)
+    result = f.audit()
+    joined = result["effect_witness"]
+    assert joined["gate"] == "EFFECT_DETERMINATE_AUTHENTICATED", result
+    assert joined["scope"] == "SOURCE_CONTRACT_FIXTURE"
+    assert joined["evidence_hashes"]["attestation_sha256"] == hashlib.sha256(f.raw).hexdigest()
+    assert result["status"] == "HOLD_UNKNOWN_EFFECT" and result["owner_witness_gate"] == "UNKNOWN"
+    assert joined["native_owner_policy_gate"] == "HOLD_PENDING_ADOPTED_NATIVE_OWNER_POLICY"
+    assert result == f.audit()  # Immutable read; no nonce consumption or append.
+
+
+@pytest.mark.parametrize("fault", ["fixture_as_real", "bad_signature", "candidate_mismatch", "absence",
+    "artifact_mismatch", "dirty", "cleanup", "budget", "join_budget", "concurrent", "during_verification"])
+def test_effect_witness_join_requires_all_source_and_effect_gates(tmp_path, monkeypatch, fault):
+    from dataclasses import replace
+    from ai_commerce.remote import transport as effect_auth
+    from ai_commerce.remote.transport import WorkOwnerAuditDiagnostics
+    f = _audit_effect_fixture(tmp_path, monkeypatch)
+    kwargs = {}
+    if fault == "fixture_as_real":
+        kwargs["source_contract_fixture"] = False
+    elif fault == "bad_signature":
+        raw = json.loads(f.raw)
+        raw["signature_b64"] = "x" * 44
+        f.raw = effect_auth._effect_canonical(raw)
+    elif fault == "artifact_mismatch":
+        f.context = replace(f.context, artifact_sha256="0" * 64)
+    elif fault == "candidate_mismatch":
+        f.payload["publication"]["candidate_sha"] = "0" * 40
+        f.seal()
+    elif fault == "absence":
+        f.payload["publication"].update(state="ABSENT_AT_COMMIT_BOUNDARY", candidate_sha=None,
+                                       absence_basis="FENCED_OWNER_COMMIT_BOUNDARY")
+        f.seal()
+    elif fault in ("dirty", "cleanup"):
+        kwargs["diagnostics"] = WorkOwnerAuditDiagnostics(scratch_dirty=fault == "dirty", cleanup_completed=False)
+    elif fault == "budget":
+        kwargs["read_budget"] = 1
+    elif fault == "join_budget":
+        # The original audit fits; the witness's final confirmation must still
+        # consume the SAME cumulative capability rather than escaping its cap.
+        kwargs["read_budget"] = _run_readonly_audit(*f.args)["reads"]
+    elif fault == "concurrent":
+        storage = f.args[0]
+        api, count = storage.api, 0
+        def racing(method, path, data=None):
+            nonlocal count
+            result = api(method, path, data)
+            if "/candidate/" in path:
+                count += 1
+                if count >= 3:  # Second confirm, after the signed join.
+                    result["object"]["sha"] = "f" * 40
+            return result
+        monkeypatch.setattr(storage, "api", racing)
+    else:
+        verify, api = effect_auth._effect_verify_signature, f.args[0].api
+        changed = False
+        def verify_and_mutate(*args):
+            nonlocal changed
+            verify(*args)
+            changed = True
+        def racing(method, path, data=None):
+            result = api(method, path, data)
+            if changed and "/candidate/" in path:
+                result["object"]["sha"] = "f" * 40
+            return result
+        monkeypatch.setattr(effect_auth, "_effect_verify_signature", verify_and_mutate)
+        monkeypatch.setattr(f.args[0], "api", racing)
+    result = f.audit(**kwargs)
+    assert result["effect_witness"]["gate"] != "EFFECT_DETERMINATE_AUTHENTICATED", result
+    assert result["effect_witness"]["evidence_hashes"] == {}
+
+
+@pytest.mark.parametrize("issue,generation,run_id,artifact_id,artifact_digest", [
+    (595, 2, 42350373844, 13565018880, "0ab78df02b61ad83d80c4ab2f1a92547e24537d23d1ae89b2b5c3216a4288713"),
+    (599, 1, 42352918055, 13566913588, "747cce3522fa72a47b1133a0fa017b25c6634cda19597f0b7e5a0eeb57a22b0f")])
+def test_effect_witness_historical_unknown_never_replays_or_coerces_status(
+        tmp_path, monkeypatch, issue, generation, run_id, artifact_id, artifact_digest):
+    """Modeled historical journal states; pins are original, NOT new host proof."""
+    from ai_commerce.remote.transport import WorkOwnerAuditDiagnostics, AuditProviderStatus
+    if generation == 2:
+        storage, *_ = _readonly_audit_fixture(issue=587)
+        args = _readonly_audit_fixture(storage=storage, issue=issue, repair_of="#587", unknown=True)
+    else:
+        args = _readonly_audit_fixture(issue=issue, unknown=True)
+    f = _effect_witness_fixture(tmp_path, monkeypatch)
+    diagnostics = WorkOwnerAuditDiagnostics(cleanup_completed=False,
+        provider_status=AuditProviderStatus.QUOTA_EXHAUSTED if issue == 599 else AuditProviderStatus.UNOBSERVED)
+    result = _run_readonly_audit(*args, effect_witness=f.raw, witness_enrollment=f.enrollment,
+        witness_context=f.context, witness_verifier=f.verifier, source_contract_fixture=True, diagnostics=diagnostics)
+    assert result["stage"] == "UNKNOWN" and result["generation"] == generation
+    assert result["code"] == "PROVIDER_OUTCOME_UNKNOWN" and result["effect_witness"]["evidence_hashes"] == {}
+    assert args[3].read()[-1]["stage"] == "UNKNOWN"
+    assert "effect_witness" in result and run_id != artifact_id
+
+
+def test_effect_witness_worker_interface_never_acquires_or_executes(tmp_path, monkeypatch):
+    f = _audit_effect_fixture(tmp_path, monkeypatch)
+    storage, packet, action, owner = f.args
+    worker = object.__new__(LocalBatchWorker)
+    worker.github, worker.batch, worker.issue_number, worker.issuer_login = storage, packet, 599, "trung-via"
+    def forbidden(*args, **kwargs):
+        pytest.fail("source witness crossed native boundary")
+    for method in ("_acquire_owner", "execute_action", "reconcile_action"):
+        monkeypatch.setattr(worker, method, forbidden)
+    for method in ("acquire", "append"):
+        monkeypatch.setattr(owner.__class__, method, forbidden)
+    storage.requests.clear()
+    result = worker.audit_action(action, effect_witness=f.raw, witness_enrollment=f.enrollment,
+        witness_context=f.context, witness_verifier=f.verifier, source_contract_fixture=True)
+    assert result["effect_witness"]["gate"] == "EFFECT_DETERMINATE_AUTHENTICATED"
+    assert all(method == "GET" for method, *_ in storage.requests)
+
