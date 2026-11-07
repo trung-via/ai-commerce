@@ -5,13 +5,15 @@ No registration token, GitHub call, Windows task or model is invoked here.
 from __future__ import annotations
 
 import builtins
-from dataclasses import FrozenInstanceError, fields, replace
+from dataclasses import FrozenInstanceError, asdict, fields, replace
+import json
 import os
 from pathlib import Path
 import shutil
 import socket
 import subprocess
 import time
+import webbrowser
 
 import pytest
 
@@ -39,6 +41,9 @@ from ai_commerce.engineering.three_runner_topology import (
     WakeHubSendPreviewSafety, WakeHubSendPreviewInputError,
     WakeHubSendAuthorizationEvidence, WakeHubSendOnlyPreviewEvidence,
     assess_wakehub_send_only_preview,
+    WakeHubControlInputError, WakeHubControlStage, WakeHubControlNextAction,
+    WakeHubReadOnlyControlSnapshot, assess_wakehub_control_projection,
+    _wakehub_control_stage,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -2352,4 +2357,330 @@ def test_wh06a_all_reasons_and_invalid_inputs_under_external_effect_traps(monkey
             with pytest.raises(WakeHubSendPreviewInputError):
                 assess_wakehub_send_only_preview(invalid)
     assert seen == set(WakeHubSendPreviewReason)
+
+
+# WH04B00 proves source policy composition only. All positive data is synthetic.
+def _assert_wh04b00_no_effect(snapshot):
+    _assert_wh02a_no_authority(snapshot)
+    assert type(snapshot) is WakeHubReadOnlyControlSnapshot
+    assert snapshot.scope == "WH04B00_PURE_READ_ONLY_CONTROL_POLICY_ONLY"
+    assert snapshot.keep_event_receiver_alive is True
+    assert snapshot.keep_headless_core_alive is True
+    for name in (
+        "effect_attempted", "native_operations", "chrome", "navigation", "send",
+        "click", "plugin", "start", "stop", "task", "process", "grant",
+        "authorization", "d2_intent_written", "server_ack_counted",
+        "can_send", "controls_enabled", "prepare_authorized", "attach_authorized",
+        "open_tab_authorized", "click_permitted", "dom_ack_counted",
+    ):
+        assert getattr(snapshot, name) is False
+    assert all(not item.init for item in fields(snapshot))
+
+
+def _control_evidence_cases():
+    cases = [evidence for evidence, _, _ in _send_policy_cases()]
+    cases.extend(_send_preview(autoload=autoload) for autoload, _ in _send_upstream_cases())
+    cases.extend([
+        _send_preview(autoload=_autoload_evidence(readiness=_smart_case(
+            "core", trusted_human_pause=True, unknown_effect=True))),
+        _send_preview(autoload=_autoload_evidence(readiness=_smart_case(
+            "core", lost_effect_receipt=True))),
+        _send_preview(autoload=_autoload_evidence(readiness=_smart_evidence(
+            listeners=WakeHubProofState.MISSING))),
+        _send_preview(autoload=_autoload_evidence(readiness=_smart_case(
+            "origin", owner=WakeHubProofState.MISSING))),
+    ])
+    return cases
+
+
+@pytest.mark.parametrize("evidence", _control_evidence_cases())
+def test_wh04b00_composes_source_policies_with_typed_sanitized_deterministic_output(evidence):
+    original = asdict(evidence)
+    upstream = assess_wakehub_send_only_preview(evidence)
+    snapshot = assess_wakehub_control_projection(evidence)
+    assert snapshot == assess_wakehub_control_projection(evidence)
+    assert snapshot == WakeHubReadOnlyControlSnapshot(evidence)
+    assert snapshot.reason is upstream.reason
+    assert snapshot.advice is upstream.advice
+    assert snapshot.safety_state is upstream.safety_state
+    assert snapshot.paused_by_human is upstream.paused_by_human
+    assert type(snapshot.reason) in (WakeHubAutoloadReason, WakeHubSendPreviewReason)
+    assert type(snapshot.stage) is WakeHubControlStage
+    assert type(snapshot.next_action) is WakeHubControlNextAction
+    serialized = json.dumps(asdict(snapshot), sort_keys=True)
+    assert serialized == json.dumps(asdict(assess_wakehub_control_projection(evidence)), sort_keys=True)
+    payload = json.loads(serialized)
+    assert payload["stage"] == snapshot.stage.value
+    assert payload["reason"] == snapshot.reason.value
+    assert payload["next_action"] == snapshot.next_action.value
+    assert not any(word in payload for word in (
+        "evidence", "autoload", "readiness", "browser", "origin", "pid", "tab_id",
+        "token", "account", "transcript", "url", "signer", "confidence", "percentage",
+        "receiver_present", "listener_count",
+    ))
+    assert asdict(evidence) == original
+    _assert_wh04b00_no_effect(snapshot)
+
+
+@pytest.mark.parametrize(("evidence", "stage", "action"), [
+    (_send_preview(), "PREVIEW_ADVISORY_ONLY", "REVIEW_ADVISORY_WITH_SEPARATE_AUTHORITY"),
+    (_send_preview(autoload=_autoload_evidence(readiness=_smart_case(
+        "core", trusted_human_pause=True))), "HOLD", "HOLD_FOR_PRIVATE_REVIEW_NO_EFFECT"),
+    (_send_preview(delivery=WakeHubSendDeliveryState.RECEIPT_LOST),
+     "RECONCILE_NO_RETRY", "RECONCILE_PRIVATE_RECEIPTS_NO_RETRY"),
+    (_send_preview(autoload=_autoload_evidence(readiness=_smart_case(
+        "core", hostops_listener=WakeHubListenerState.ABSENT))),
+     "WAIT_CORE", "WAIT_FOR_CORE_EVIDENCE_KEEP_RECEIVER"),
+    (_send_preview(autoload=_autoload_evidence(readiness=_smart_case(
+        "origin", event=WakeHubEventState.ABSENT))),
+     "WAIT_PRIVATE_ORIGIN", "WAIT_FOR_PRIVATE_ORIGIN_PROOF"),
+    (_send_preview(autoload=_autoload_evidence(tabs=())),
+     "WAIT_DESKTOP_OR_TAB", "PREPARE_AND_REPROVE_WITH_SEPARATE_AUTHORITY"),
+    (_send_preview(authorization=_send_authorization(intent=WakeHubSendIntentState.NOT_RECORDED)),
+     "WAIT_SEND_GATES", "WAIT_FOR_PRIVATE_SEND_GATE_PROOF"),
+    (_send_preview(delivery=WakeHubSendDeliveryState.ATTEMPT_BEGUN,
+                   ui_user_turn=WakeHubProofState.INDEPENDENTLY_CURRENT),
+     "UI_ONLY_COMPLETE_STOP", "STOP_UI_WITNESS_WITHOUT_SERVER_ACK"),
+])
+def test_wh04b00_every_stage_has_a_disabled_safe_advisory(evidence, stage, action):
+    snapshot = assess_wakehub_control_projection(evidence)
+    assert snapshot.stage is WakeHubControlStage[stage]
+    assert snapshot.next_action is WakeHubControlNextAction[action]
+    _assert_wh04b00_no_effect(snapshot)
+
+
+@pytest.mark.parametrize("reason", [*WakeHubAutoloadReason, *WakeHubSendPreviewReason])
+@pytest.mark.parametrize("advice", list(WakeHubSendPreviewAdvice))
+def test_wh04b00_display_mapping_is_total_and_cannot_promote_inconsistent_pairs(reason, advice):
+    stage = _wakehub_control_stage(reason, advice)
+    assert type(stage) is WakeHubControlStage
+    assert stage is _wakehub_control_stage(reason, advice)
+    if reason is WakeHubAutoloadReason.HOLD_HUMAN_PAUSED:
+        assert stage is WakeHubControlStage.HOLD
+    elif advice is WakeHubSendPreviewAdvice.RECONCILE_UNKNOWN_NO_RETRY:
+        assert stage is WakeHubControlStage.RECONCILE_NO_RETRY
+    if reason.value.startswith(("WAIT_", "HOLD_", "RECONCILE_")):
+        assert stage not in (WakeHubControlStage.PREVIEW_ADVISORY_ONLY,
+                             WakeHubControlStage.UI_ONLY_COMPLETE_STOP)
+    if stage is WakeHubControlStage.PREVIEW_ADVISORY_ONLY:
+        assert reason is WakeHubSendPreviewReason.PREVIEW_REQUIREMENTS_CURRENT
+        assert advice is WakeHubSendPreviewAdvice.PREVIEW_READY_ADVISORY_ONLY
+    if stage is WakeHubControlStage.UI_ONLY_COMPLETE_STOP:
+        assert reason is WakeHubSendPreviewReason.COMPLETE_UI_USER_TURN_WITHOUT_SERVER_ACK
+        assert advice is WakeHubSendPreviewAdvice.COMPLETE_UI_ONLY
+
+
+@pytest.mark.parametrize("ownership", list(WakeHubChromeOwnership))
+@pytest.mark.parametrize("desktop", list(WakeHubDesktopState))
+def test_wh04b00_unavailable_desktop_or_browser_keeps_core_and_receiver_policy(ownership, desktop):
+    evidence = _send_preview(autoload=_autoload_evidence(readiness=_smart_evidence(
+        desktop=desktop, core=replace(_smart_evidence().core, chrome_ownership=ownership),
+        browser=replace(_smart_evidence().browser, ownership=ownership))))
+    snapshot = assess_wakehub_control_projection(evidence)
+    assert snapshot.keep_headless_core_alive and snapshot.keep_event_receiver_alive
+    if desktop is not WakeHubDesktopState.OWNER_INTERACTIVE or ownership is not WakeHubChromeOwnership.OWNED_CDP_9444:
+        assert snapshot.stage in (WakeHubControlStage.HOLD, WakeHubControlStage.WAIT_DESKTOP_OR_TAB)
+    _assert_wh04b00_no_effect(snapshot)
+
+
+@pytest.mark.parametrize("name", ["queue_state", "pending_work", "outstanding_send",
+                                 "outstanding_signer", "outstanding_lease", "pending_wake"])
+def test_wh04b00_prior_unknown_is_not_resolved_by_ready_gates_or_a_ui_witness(name):
+    evidence = _send_preview(
+        autoload=_autoload_evidence(readiness=_smart_case("core", **{name: WakeHubWorkState.UNKNOWN})),
+        delivery=WakeHubSendDeliveryState.RECEIPT_LOST,
+        ui_user_turn=WakeHubProofState.INDEPENDENTLY_CURRENT)
+    snapshot = assess_wakehub_control_projection(evidence)
+    assert snapshot.stage is WakeHubControlStage.RECONCILE_NO_RETRY
+    assert snapshot.reason is WakeHubSendPreviewReason.RECONCILE_UNKNOWN_EFFECT
+
+
+@pytest.mark.parametrize("delivery", list(WakeHubSendDeliveryState))
+def test_wh04b00_human_pause_wins_over_every_delivery_and_lost_receipt(delivery):
+    evidence = _send_preview(
+        autoload=_autoload_evidence(readiness=_smart_case(
+            "core", trusted_human_pause=True, lost_effect_receipt=True, source_current=False)),
+        delivery=delivery, ui_user_turn=WakeHubProofState.INDEPENDENTLY_CURRENT,
+        authorization=_send_authorization(intent=WakeHubSendIntentState.UNKNOWN))
+    snapshot = assess_wakehub_control_projection(evidence)
+    assert snapshot.stage is WakeHubControlStage.HOLD
+    assert snapshot.reason is WakeHubAutoloadReason.HOLD_HUMAN_PAUSED
+    assert snapshot.paused_by_human is True
+
+
+@pytest.mark.parametrize("evidence", [
+    _send_preview(autoload=_autoload_evidence(readiness=_smart_case("core", lost_effect_receipt=True))),
+    _send_preview(autoload=_autoload_evidence(readiness=_smart_case("core", unknown_effect=True))),
+    _send_preview(authorization=_send_authorization(intent=WakeHubSendIntentState.UNKNOWN)),
+    _send_preview(authorization=_send_authorization(intent=WakeHubSendIntentState.DUPLICATE_KEY)),
+    _send_preview(delivery=WakeHubSendDeliveryState.ATTEMPT_BEGUN),
+    _send_preview(delivery=WakeHubSendDeliveryState.RECEIPT_LOST),
+    _send_preview(delivery=WakeHubSendDeliveryState.OUTCOME_UNOBSERVED),
+    _send_preview(delivery=WakeHubSendDeliveryState.DUPLICATE_KEY),
+    _send_preview(ui_user_turn=WakeHubProofState.INDEPENDENTLY_CURRENT),
+])
+def test_wh04b00_unknown_attempts_and_unbound_witnesses_are_never_retryable(evidence):
+    snapshot = assess_wakehub_control_projection(evidence)
+    assert snapshot.stage is WakeHubControlStage.RECONCILE_NO_RETRY
+    _assert_wh04b00_no_effect(snapshot)
+
+
+def _corrupt_control_evidence(path, value, *, missing=False):
+    # Model a deserialized/corrupted frozen object without its constructor.
+    # Each call owns a fresh tree; no shared parameter or source is mutated.
+    evidence = _send_preview()
+    target = evidence
+    for name in path[:-1]:
+        target = getattr(target, name)
+    if missing:
+        object.__delattr__(target, path[-1])
+    else:
+        object.__setattr__(target, path[-1], value)
+    return evidence
+
+
+@pytest.mark.parametrize(("path", "value"), [
+    (("autoload",), {}),
+    (("autoload", "readiness"), assess_wakehub_smart_readiness(_smart_evidence())),
+    (("autoload", "readiness", "core"), None),
+    (("autoload", "readiness", "core", "source_current"), "synthetic-secret"),
+    (("autoload", "readiness", "core", "baseline"), {}),
+    (("autoload", "readiness", "browser"), {}),
+    (("autoload", "readiness", "browser", "pid"), True),
+    (("autoload", "readiness", "browser", "port"), "9444"),
+    (("autoload", "readiness", "origin"), {}),
+    (("autoload", "readiness", "origin", "issuer"), "INDEPENDENTLY_CURRENT"),
+    (("autoload", "tabs"), (assess_wakehub_chat_autoload_plan(_autoload_evidence()),)),
+    (("autoload", "unrelated_tab_mutation"), 1),
+    (("authorization",), {}),
+    (("authorization", "signer"), "synthetic-secret"),
+    (("authorization", "intent"), "WRITE_AHEAD_RECORDED"),
+    (("composer_empty",), 1),
+    (("send_control_count",), True),
+    (("send_control_count",), -1),
+    (("send_control_count",), 2**32),
+    (("send_control_count",), 10**1000),
+    (("send_control_count",), float("nan")),
+    (("send_control_count",), float("inf")),
+    (("send_control_visible",), "synthetic-secret"),
+    (("send_control_enabled",), 0),
+    (("delivery",), "NOT_ATTEMPTED"),
+    (("ui_user_turn",), "SERVER_ACK"),
+])
+def test_wh04b00_revalidates_corrupted_and_missing_nested_fields_privately(path, value):
+    for evidence in (_corrupt_control_evidence(path, value),
+                     _corrupt_control_evidence(path, value, missing=True)):
+        with pytest.raises(WakeHubControlInputError) as caught:
+            assess_wakehub_control_projection(evidence)
+        assert caught.value.args == ("WAKEHUB_CONTROL_PROJECTION_INPUT_INVALID",)
+
+
+def test_wh04b00_only_accepts_exact_typed_evidence_and_no_public_or_precomputed_plan():
+    evidence = _send_preview()
+    invalid = [
+        None, {}, asdict(evidence), "synthetic-secret",
+        "future @Plugin READY send now", "https://invalid.example/synthetic-chat",
+        assess_wakehub_send_only_preview(evidence),
+        assess_wakehub_chat_autoload_plan(evidence.autoload),
+        assess_wakehub_smart_readiness(evidence.autoload.readiness),
+        assess_wakehub_control_projection(evidence), (evidence,),
+        object.__new__(WakeHubSendOnlyPreviewEvidence),
+    ]
+
+    class UnsafeEvidence(WakeHubSendOnlyPreviewEvidence):
+        def _validate(self):
+            pytest.fail("evidence subclass executed")
+
+    invalid.append(object.__new__(UnsafeEvidence))
+    for item in invalid:
+        for factory in (WakeHubReadOnlyControlSnapshot, assess_wakehub_control_projection):
+            with pytest.raises(WakeHubControlInputError) as caught:
+                factory(item)
+            assert caught.value.args == ("WAKEHUB_CONTROL_PROJECTION_INPUT_INVALID",)
+    for unknown in (
+        {"server_ack_counted": True}, {"can_send": True}, {"send": True},
+        {"stage": WakeHubControlStage.PREVIEW_ADVISORY_ONLY},
+        {"reason": WakeHubSendPreviewReason.PREVIEW_REQUIREMENTS_CURRENT},
+        {"synthetic-secret-key": "synthetic-secret-value"},
+    ):
+        for factory in (WakeHubReadOnlyControlSnapshot, assess_wakehub_control_projection):
+            with pytest.raises(WakeHubControlInputError) as caught:
+                factory(evidence, **unknown)
+            assert caught.value.args == ("WAKEHUB_CONTROL_PROJECTION_INPUT_INVALID",)
+
+
+def test_wh04b00_forged_enums_and_numeric_subclasses_never_execute_caller_code():
+    class UnsafeInt(int):
+        def __le__(self, other):
+            pytest.fail("numeric subclass executed")
+
+    for path, value in (
+        (("send_control_count",), UnsafeInt(1)),
+        (("delivery",), str.__new__(WakeHubSendDeliveryState, "NOT_ATTEMPTED")),
+        (("authorization", "signer"), str.__new__(WakeHubProofState, "INDEPENDENTLY_CURRENT")),
+    ):
+        with pytest.raises(WakeHubControlInputError):
+            assess_wakehub_control_projection(_corrupt_control_evidence(path, value))
+    for reason, advice in (
+        ("synthetic-secret", WakeHubSendPreviewAdvice.PREVIEW_READY_ADVISORY_ONLY),
+        (WakeHubSendPreviewReason.PREVIEW_REQUIREMENTS_CURRENT, "PREVIEW_READY_ADVISORY_ONLY"),
+    ):
+        with pytest.raises(WakeHubControlInputError):
+            _wakehub_control_stage(reason, advice)
+
+
+def test_wh04b00_frozen_snapshot_cannot_be_forged_by_constructor_or_replace():
+    snapshot = assess_wakehub_control_projection(_send_preview(autoload=_autoload_evidence(
+        readiness=_smart_case("origin", issuer=WakeHubProofState.MISSING))))
+    assert snapshot.stage is WakeHubControlStage.HOLD
+    assert snapshot.reason is WakeHubAutoloadReason.HOLD_ORIGIN_ISSUER
+    assert not hasattr(snapshot, "__dict__")
+    for item in fields(snapshot):
+        with pytest.raises(FrozenInstanceError):
+            setattr(snapshot, item.name, True)
+        with pytest.raises((TypeError, ValueError), match=rf"^field {item.name} is declared with init=False,"):
+            replace(snapshot, **{item.name: True})
+    for factory in (WakeHubReadOnlyControlSnapshot, assess_wakehub_control_projection):
+        with pytest.raises(WakeHubControlInputError):
+            factory(**asdict(snapshot))
+        with pytest.raises(WakeHubControlInputError):
+            factory(_send_preview(), "synthetic-secret")
+    with pytest.raises(WakeHubControlInputError):
+        replace(snapshot)
+    _assert_wh04b00_no_effect(snapshot)
+
+
+def test_wh04b00_all_statuses_and_invalid_inputs_are_pure_under_external_effect_traps(monkeypatch):
+    cases = _control_evidence_cases()
+    invalid = [None, {"token": "synthetic-secret"},
+               _corrupt_control_evidence(("autoload", "readiness", "origin"), {})]
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("WH04B00 attempted an external effect")
+
+    seen = set()
+    with monkeypatch.context() as guard:
+        for owner, names in (
+            (builtins, ("open",)),
+            (Path, ("open", "read_text", "read_bytes", "write_text", "write_bytes", "stat",
+                    "iterdir", "mkdir", "unlink", "rename", "replace")),
+            (os, ("open", "stat", "listdir", "scandir", "mkdir", "remove", "rename", "replace",
+                  "system", "kill", "startfile", "popen", "spawnv", "spawnve")),
+            (subprocess, ("Popen", "run", "call", "check_call", "check_output")),
+            (socket, ("socket", "create_connection", "getaddrinfo", "gethostbyname")),
+            (webbrowser, ("open", "open_new", "open_new_tab", "get")),
+            (time, ("sleep", "time", "monotonic", "perf_counter")),
+        ):
+            for name in names:
+                guard.setattr(owner, name, forbidden)
+        for evidence in cases:
+            snapshot = assess_wakehub_control_projection(evidence)
+            assert snapshot == assess_wakehub_control_projection(evidence)
+            seen.add(snapshot.stage)
+            _assert_wh04b00_no_effect(snapshot)
+        for evidence in invalid:
+            with pytest.raises(WakeHubControlInputError) as caught:
+                assess_wakehub_control_projection(evidence)
+            assert caught.value.args == ("WAKEHUB_CONTROL_PROJECTION_INPUT_INVALID",)
+    assert seen == set(WakeHubControlStage)
 
