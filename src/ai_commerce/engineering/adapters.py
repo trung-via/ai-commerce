@@ -12,6 +12,7 @@ import re
 import stat
 import threading
 import time
+from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 
 from .profile import ExecutorSelection
@@ -180,6 +181,11 @@ def _agy_kernel():
                     "GetFinalPathNameByHandleW": ([w.HANDLE, w.LPWSTR, w.DWORD, w.DWORD], w.DWORD),
                     "SetFileInformationByHandle": ([w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD], w.BOOL),
                     "CloseHandle": ([w.HANDLE], w.BOOL),
+                    "FindFirstFileNameW": ([w.LPCWSTR, w.DWORD, ctypes.POINTER(w.DWORD), w.LPWSTR], w.HANDLE),
+                    "FindNextFileNameW": ([w.HANDLE, ctypes.POINTER(w.DWORD), w.LPWSTR], w.BOOL),
+                    "FindClose": ([w.HANDLE], w.BOOL),
+                    "GetVolumeInformationByHandleW": ([w.HANDLE, w.LPWSTR, w.DWORD, ctypes.POINTER(w.DWORD),
+                        ctypes.POINTER(w.DWORD), ctypes.POINTER(w.DWORD), w.LPWSTR, w.DWORD], w.BOOL),
                 }
                 for name, (args, result) in signatures.items():
                     function = getattr(kernel, name)
@@ -194,6 +200,170 @@ class _AgyCleanupUnsafe(ValueError):
         self.subtype = subtype
 
 
+def _agy_link_relative(name: str, root_name: str) -> tuple[str, ...]:
+    """Accept only exact, volume-relative native names, never casefold aliases."""
+    prefix = root_name.rstrip("\\") + "\\"
+    if not name.startswith(prefix):
+        raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE", "HARDLINK")
+    parts = name[len(prefix):].split("\\")
+    if any(p in ("", ".", "..") or ":" in p or "/" in p or p.rstrip(". ") != p for p in parts):
+        raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE", "HARDLINK_NAME_UNPROVEN")
+    return tuple(parts)
+
+
+class _AgyScratchLinks:
+    """Per-deletion proof for a freshly owned SCRATCH, never INPUT/source.
+
+    FindFirst/NextFileNameW enumerates volume-relative NTFS names. Every name
+    must be exact and beneath the pinned root, with all directory components
+    pinned nofollow and every alias bound to the same full FILE_ID_INFO.
+    No cached enumeration, truncated IDs, same-SID or path-count heuristics.
+    """
+    def __init__(self, root, identity, checkpoint):
+        self.root, self.identity, self.checkpoint = root, identity, checkpoint
+        self.directories = {}
+
+    @staticmethod
+    def file_id(kernel, handle):
+        import ctypes
+        class FileId(ctypes.Structure):
+            _fields_ = [("volume", ctypes.c_ulonglong), ("identifier", ctypes.c_ubyte * 16)]
+        value = FileId()
+        if (not kernel.GetFileInformationByHandleEx(handle, 18, ctypes.byref(value), ctypes.sizeof(value))
+                or not value.volume or not any(value.identifier)):
+            raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE", "HARDLINK_ID_UNPROVEN")
+        return value.volume, bytes(value.identifier)
+
+    @staticmethod
+    def final_name(kernel, handle, flags=0):
+        import ctypes
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = kernel.GetFinalPathNameByHandleW(handle, buffer, len(buffer), flags)
+        if not 0 < length < len(buffer):
+            raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE", "HARDLINK_NAME_UNPROVEN")
+        return buffer.value
+
+    def names(self, kernel, path, expected_links):
+        import ctypes
+        from ctypes import wintypes as w
+        buffer, size = ctypes.create_unicode_buffer(32768), w.DWORD(32768)
+        search = kernel.FindFirstFileNameW(str(path), 0, ctypes.byref(size), buffer)
+        if search == ctypes.c_void_p(-1).value:
+            raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE", "HARDLINK_ENUMERATION_UNPROVEN")
+        names = set()
+        try:
+            while True:
+                self.checkpoint()
+                name = buffer.value
+                if name in names or len(names) >= expected_links:
+                    raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE", "HARDLINK_ENUMERATION_UNPROVEN")
+                names.add(name)
+                size.value = len(buffer)
+                if not kernel.FindNextFileNameW(search, ctypes.byref(size), buffer):
+                    if ctypes.get_last_error() != 38:  # ERROR_HANDLE_EOF only
+                        raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE", "HARDLINK_ENUMERATION_UNPROVEN")
+                    break
+        finally:
+            kernel.FindClose(search)
+        if len(names) != expected_links:
+            raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE", "HARDLINK_ENUMERATION_UNPROVEN")
+        return names
+
+    @contextmanager
+    def prove(self, owner, expected):
+        import ctypes
+        kernel, w = owner.kernel, owner.w
+        with ExitStack() as pins:
+            def pin(path, directory=False):
+                self.checkpoint()
+                # Attribute-only aliases share the deletion handle's DELETE
+                # access. Directory READ_DATA makes denial of delete sharing
+                # effective for every component, including cross-branch names.
+                if directory and path in self.directories:
+                    handle = self.directories[path].handle
+                else:
+                    handle = kernel.CreateFileW(str(path), 0x81 if directory else 0x80,
+                        3 if directory else 7, None, 3, 0x02200000, None)
+                    if handle == ctypes.c_void_p(-1).value:
+                        raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE", "HARDLINK_ACCESS_UNPROVEN")
+                    pins.callback(kernel.CloseHandle, handle)
+                actual = self.final_name(kernel, handle)
+                if actual != "\\\\?\\" + str(path):
+                    raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE", "HARDLINK_NAME_UNPROVEN")
+                class Tag(ctypes.Structure):
+                    _fields_ = [("attributes", w.DWORD), ("tag", w.DWORD)]
+                tag = Tag()
+                if (not kernel.GetFileInformationByHandleEx(handle, 9, ctypes.byref(tag), ctypes.sizeof(tag))
+                        or tag.attributes & 0x400 or bool(tag.attributes & 0x10) != directory):
+                    raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE", "HARDLINK_REPARSE_UNPROVEN")
+                agy_no_named_streams(path)
+                return handle
+
+            root_handle = pin(self.root, True)
+            root_info = self.root.lstat()
+            if (root_info.st_dev, root_info.st_ino) != self.identity:
+                raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE", "ROOT_IDENTITY_CHANGED")
+            # Reject remote shares, non-NTFS volumes and ambiguous mount names.
+            filesystem = ctypes.create_unicode_buffer(32)
+            if (not kernel.GetVolumeInformationByHandleW(root_handle, None, 0, None, None,
+                    None, filesystem, len(filesystem)) or filesystem.value != "NTFS"):
+                raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE", "HARDLINK_VOLUME_UNPROVEN")
+            root_native = self.final_name(kernel, root_handle, 1)
+            match = re.fullmatch(r"(\\\\\?\\Volume\{[0-9a-fA-F-]{36}\})(\\.*)", root_native)
+            if match is None:
+                raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE", "HARDLINK_VOLUME_UNPROVEN")
+            file_id = self.file_id(kernel, owner.handle)
+            if (file_id != owner.native_id or self.file_id(kernel, root_handle)[0] != file_id[0]
+                    or (self.root in self.directories and self.file_id(kernel, root_handle) !=
+                        self.directories[self.root].native_id)):
+                raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE", "HARDLINK_ID_UNPROVEN")
+            names = self.names(kernel, owner.path, expected.st_nlink)
+            directories = {self.root: (root_handle, self.file_id(kernel, root_handle))}
+            paths = []
+            for name in sorted(names):
+                parts = _agy_link_relative(name, match[2])
+                if len(parts) > AGY_CLEANUP_MAX_DEPTH:
+                    raise ValueError("AGY_SCRATCH_CLEANUP_DEPTH_LIMIT_EXCEEDED")
+                path = self.root
+                for part in parts[:-1]:
+                    path = path / part
+                    if path not in directories:
+                        handle = pin(path, True)
+                        directories[path] = (handle, self.file_id(kernel, handle))
+                path = path / parts[-1]
+                alias = pin(path)
+                info = path.lstat()
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != expected.st_nlink
+                        or (info.st_dev, info.st_ino) != (expected.st_dev, expected.st_ino)
+                        or self.file_id(kernel, alias) != file_id
+                        or self.final_name(kernel, alias, 1) != match[1] + name):
+                    raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE", "HARDLINK_ID_UNPROVEN")
+                paths.append((path, alias))
+            if str(owner.path) not in {str(p) for p, _ in paths}:
+                raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE", "HARDLINK_NAME_UNPROVEN")
+            if self.names(kernel, owner.path, expected.st_nlink) != names:
+                raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE", "HARDLINK_RACE")
+            for path, (handle, identity) in directories.items():
+                self.checkpoint()
+                if (is_link(path) or not stat.S_ISDIR(path.lstat().st_mode)
+                        or self.file_id(kernel, handle) != identity
+                        or self.final_name(kernel, handle) != "\\\\?\\" + str(path)):
+                    raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE", "HARDLINK_RACE")
+                agy_no_named_streams(path)
+            for path, alias in paths:
+                self.checkpoint()
+                info = path.lstat()
+                if ((info.st_dev, info.st_ino, info.st_nlink) !=
+                        (expected.st_dev, expected.st_ino, expected.st_nlink)
+                        or is_link(path) or not stat.S_ISREG(info.st_mode)
+                        or self.file_id(kernel, alias) != file_id
+                        or self.final_name(kernel, alias) != "\\\\?\\" + str(path)):
+                    raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE", "HARDLINK_RACE")
+                agy_no_named_streams(path)
+            owner._validate_metadata(expected)
+            yield
+
+
 class _AgyCleanupHandle:
     """Bind an NTFS entry without following reparse points or allowing rename.
 
@@ -201,14 +371,15 @@ class _AgyCleanupHandle:
     Directory handles remain open while their children are inspected/deleted.
     This is confined scratch ownership, not an ACL/privilege repair facility.
     """
-    def __init__(self, path: Path, expected, *, parent_only=False):
+    def __init__(self, path: Path, expected, *, parent_only=False, link_scope=None):
         import ctypes
         from ctypes import wintypes as w
         self.ctypes, self.w = ctypes, w
         self.kernel = _agy_kernel()
+        self.path, self.link_scope = path, link_scope
         kernel = self.kernel
         # FILE_READ_ATTRIBUTES; DELETE + FILE_WRITE_ATTRIBUTES for owned entries.
-        access = 0x80 if parent_only else 0x10180
+        access = 0x81 if parent_only else 0x10180
         self.handle = kernel.CreateFileW(str(path), access, 3, None, 3, 0x02200000, None)
         if self.handle == ctypes.c_void_p(-1).value:
             self.handle = None
@@ -234,6 +405,7 @@ class _AgyCleanupHandle:
             if actual_id != (expected.st_dev, expected.st_ino):
                 raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "IDENTITY_CHANGED")
             self._validate_metadata(expected)
+            self.native_id = _AgyScratchLinks.file_id(kernel, self.handle) if link_scope is not None else None
             buffer = ctypes.create_unicode_buffer(32768)
             length = kernel.GetFinalPathNameByHandleW(self.handle, buffer, len(buffer), 0)
             if not 0 < length < len(buffer):
@@ -245,6 +417,9 @@ class _AgyCleanupHandle:
                 actual = actual[4:]
             if os.path.normcase(actual) != os.path.normcase(str(path)):
                 raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "HANDLE_PATH_CHANGED")
+            if expected.st_nlink > 1 and link_scope is not None and stat.S_ISREG(expected.st_mode):
+                with link_scope.prove(self, expected):
+                    pass
         except BaseException:
             self.close()
             raise
@@ -285,19 +460,40 @@ class _AgyCleanupHandle:
         # Directory link counts are not the single-file ownership predicate.
         # Reparse entries are removed through their own nofollow handle only.
         if not standard.directory and not attributes & 0x400:
-            if standard.links != 1 or expected.st_nlink != 1:
+            if (standard.links != expected.st_nlink or standard.links < 1 or
+                    (standard.links != 1 and self.link_scope is None)):
                 raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "HARDLINK")
         if (tag.attributes & 1) != (attributes & 1):
             raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "READONLY_CHANGED")
 
     def delete(self, info, report):
+        proof = (self.link_scope.prove(self, info) if self.link_scope is not None
+                 and stat.S_ISREG(info.st_mode) and info.st_nlink > 1 else nullcontext())
+        with proof:
+            self._delete(info, report)
+
+    def _delete(self, info, report):
         # Link creation can race the path inspection even with rename denied.
         # Recheck immediately before deletion or a readonly attribute change.
         self._validate_metadata(info)
+        if self.link_scope is not None:
+            self.link_scope.checkpoint()
+            if _AgyScratchLinks.file_id(self.kernel, self.handle) != self.native_id:
+                raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE", "HARDLINK_ID_UNPROVEN")
+            agy_no_named_streams(self.path)
+            self._validate_metadata(info)
         ctypes, w = self.ctypes, self.w
         class Disposition(ctypes.Structure):
             _fields_ = [("delete", ctypes.c_ubyte)]
         disposition = Disposition(1)
+        if info.st_nlink > 1 and stat.S_ISREG(info.st_mode):
+            # Never clear shared attributes on a multi-link file. The native
+            # disposition can ignore readonly without modifying its attributes.
+            flags = w.DWORD(0x11)  # DELETE | IGNORE_READONLY_ATTRIBUTE
+            if not self.kernel.SetFileInformationByHandle(self.handle, 21, ctypes.byref(flags), ctypes.sizeof(flags)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            report["internal_hardlinks_removed"] += 1
+            return
         if self.kernel.SetFileInformationByHandle(self.handle, 4, ctypes.byref(disposition), ctypes.sizeof(disposition)):
             return
         error = ctypes.get_last_error()
@@ -310,6 +506,7 @@ class _AgyCleanupHandle:
                         ("write", ctypes.c_longlong), ("change", ctypes.c_longlong), ("attributes", w.DWORD)]
         # Zero timestamps preserve their current values. Clear ONLY the proven
         # readonly bit on this single-link, non-reparse, exact owned file handle.
+        self._validate_metadata(info)
         basic = BasicInfo(0, 0, 0, 0, (info.st_file_attributes & ~1) or 0x80)
         if not self.kernel.SetFileInformationByHandle(self.handle, 0, ctypes.byref(basic), ctypes.sizeof(basic)):
             raise ctypes.WinError(ctypes.get_last_error())
@@ -325,7 +522,8 @@ class _AgyCleanupHandle:
 
 def agy_remove_owned_tree(directory: Path, parent: Path, identity: tuple,
                           parent_identity: tuple, *,
-                          timeout_seconds: float = AGY_CLEANUP_DEFAULT_SECONDS) -> dict:
+                          timeout_seconds: float = AGY_CLEANUP_DEFAULT_SECONDS,
+                          scratch_internal_links: bool = False) -> dict:
     """Bounded scratch teardown with sanitized diagnostics and no ACL changes.
 
     Native Windows uses handle-bound deletion. POSIX is a separate fixture path
@@ -337,6 +535,7 @@ def agy_remove_owned_tree(directory: Path, parent: Path, identity: tuple,
               "platform": "WINDOWS_HANDLES" if os.name == "nt" else "POSIX_FIXTURE",
               "root_token_sha256": hashlib.sha256(str(directory).encode()).hexdigest(),
               "attempts": 0, "readonly_files_cleared": 0, "reparse_links_removed": 0,
+              "internal_hardlinks_removed": 0, "hardlink_proof_checks": 0,
               "diagnostics": [], "first_unsafe_entry": None,
               # Sanitized measurements only: counts, depth and monotonic seconds.
               "measurements": {"entries_visited": 0, "max_depth": 0, "elapsed_seconds": 0.0,
@@ -390,6 +589,15 @@ def agy_remove_owned_tree(directory: Path, parent: Path, identity: tuple,
         if budget <= 0.0:
             raise ValueError("AGY_SCRATCH_CLEANUP_TIME_EXCEEDED")
 
+        def link_checkpoint():
+            report["hardlink_proof_checks"] += 1
+            if report["hardlink_proof_checks"] > AGY_CLEANUP_MAX_ENTRIES:
+                raise ValueError("AGY_SCRATCH_CLEANUP_ENTRY_LIMIT_EXCEEDED")
+            if time.monotonic() >= deadline:
+                raise ValueError("AGY_SCRATCH_CLEANUP_TIME_EXCEEDED")
+        link_scope = (_AgyScratchLinks(directory, identity, link_checkpoint)
+                      if scratch_internal_links is True and os.name == "nt" else None)
+
         if (directory.parent != parent or directory == parent or agy_directory(parent) != parent
                 or (parent.stat().st_dev, parent.stat().st_ino) != parent_identity):
             raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "PARENT_IDENTITY_CHANGED")
@@ -412,15 +620,22 @@ def agy_remove_owned_tree(directory: Path, parent: Path, identity: tuple,
                         raise ValueError("AGY_SCRATCH_CLEANUP_TIME_EXCEEDED")
                     info = inspect(path)
                     reparse = is_link(path)
+                    if link_scope is not None:
+                        if reparse:
+                            raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE", "REPARSE_UNPROVEN")
+                        agy_no_named_streams(path)
                     if path == directory and (reparse or (info.st_dev, info.st_ino) != identity):
                         raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "ROOT_IDENTITY_CHANGED")
                     if not reparse and not stat.S_ISDIR(info.st_mode) and (
-                            not stat.S_ISREG(info.st_mode) or info.st_nlink != 1):
+                            not stat.S_ISREG(info.st_mode) or (info.st_nlink != 1 and link_scope is None)):
                         raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE",
                             "HARDLINK" if stat.S_ISREG(info.st_mode) else "NON_REGULAR")
-                    handle = _AgyCleanupHandle(path, info) if os.name == "nt" else None
+                    handle = (_AgyCleanupHandle(path, info, **({"link_scope": link_scope}
+                        if link_scope is not None else {})) if os.name == "nt" else None)
                     try:
                         if stat.S_ISDIR(info.st_mode) and not reparse:
+                            if link_scope is not None:
+                                link_scope.directories[path] = handle
                             with os.scandir(path) as entries:
                                 # Bound enumeration as well as deletion; never
                                 # materialize an attacker-sized list of paths.
@@ -441,6 +656,8 @@ def agy_remove_owned_tree(directory: Path, parent: Path, identity: tuple,
                             report["reparse_links_removed"] += 1
                         note_progress(time.monotonic())
                     finally:
+                        if link_scope is not None:
+                            link_scope.directories.pop(path, None)
                         if handle is not None:
                             handle.close()
                 try:
