@@ -520,6 +520,72 @@ class _AgyCleanupHandle:
             self.handle = None
 
 
+
+@contextmanager
+def _agy_prove_owned_pytest_alias(path: Path, expected, scope: _AgyScratchLinks,
+                                  deletion_handle: _AgyCleanupHandle):
+    """Permit deleting an exact same-parent pytest tmp_path current symlink.
+
+    This is NOT a general reparse exception. Only symbolic links in the owned
+    pytest-basetemp are eligible. Junctions, outside targets, malformed names
+    and unknown identities still fail closed. Nofollow native handles pin the
+    symlink and its real sibling while the symlink itself is removed.
+    """
+    def reject():
+        raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE", "REPARSE_UNPROVEN")
+
+    scope.checkpoint()
+    try:
+        rel = path.relative_to(scope.root)
+    except ValueError:
+        reject()
+    if (len(rel.parts) < 2 or rel.parts[0] != "pytest-basetemp"
+            or not path.name.endswith("current")
+            or getattr(expected, "st_reparse_tag", 0) != 0xA000000C
+            or not path.is_symlink() or path.parent not in scope.directories):
+        reject()
+    prefix = path.name[:-len("current")]
+    if not prefix:
+        reject()
+    original_target = os.readlink(path)
+    raw = original_target
+    if raw.startswith("\\\\?\\"):
+        raw = raw[4:]
+    target = Path(raw)
+    if (not target.is_absolute() or ".." in target.parts
+            or str(target.parent) != str(path.parent)
+            or not target.name.startswith(prefix)
+            or not target.name[len(prefix):].isdecimal()
+            or target == path or is_link(target)):
+        reject()
+    try:
+        sibling = target.lstat()
+    except OSError:
+        reject()
+    if not stat.S_ISDIR(sibling.st_mode):
+        reject()
+    owner = scope.directories[path.parent]
+    if (_AgyScratchLinks.file_id(owner.kernel, owner.handle) != owner.native_id
+            or _AgyScratchLinks.final_name(owner.kernel, owner.handle)
+               != "\\\\?\\" + str(path.parent)):
+        reject()
+    sibling_handle = _AgyCleanupHandle(target, sibling, parent_only=True)
+    try:
+        if (_AgyScratchLinks.final_name(sibling_handle.kernel, sibling_handle.handle)
+                != "\\\\?\\" + str(target)):
+            reject()
+        before = path.lstat()
+        if (before.st_dev, before.st_ino, getattr(before, "st_reparse_tag", 0)) != (
+                expected.st_dev, expected.st_ino, expected.st_reparse_tag):
+            reject()
+        if os.readlink(path) != original_target:
+            reject()
+        deletion_handle._validate_metadata(expected)
+        yield
+    finally:
+        sibling_handle.close()
+
+
 def agy_remove_owned_tree(directory: Path, parent: Path, identity: tuple,
                           parent_identity: tuple, *,
                           timeout_seconds: float = AGY_CLEANUP_DEFAULT_SECONDS,
@@ -620,9 +686,7 @@ def agy_remove_owned_tree(directory: Path, parent: Path, identity: tuple,
                         raise ValueError("AGY_SCRATCH_CLEANUP_TIME_EXCEEDED")
                     info = inspect(path)
                     reparse = is_link(path)
-                    if link_scope is not None:
-                        if reparse:
-                            raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE", "REPARSE_UNPROVEN")
+                    if link_scope is not None and not reparse:
                         agy_no_named_streams(path)
                     if path == directory and (reparse or (info.st_dev, info.st_ino) != identity):
                         raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "ROOT_IDENTITY_CHANGED")
@@ -636,18 +700,25 @@ def agy_remove_owned_tree(directory: Path, parent: Path, identity: tuple,
                         if stat.S_ISDIR(info.st_mode) and not reparse:
                             if link_scope is not None:
                                 link_scope.directories[path] = handle
-                            with os.scandir(path) as entries:
-                                # Bound enumeration as well as deletion; never
-                                # materialize an attacker-sized list of paths.
-                                for entry in entries:
-                                    remove(Path(entry.path), depth + 1)
+                            # Process a proven local alias before its numbered
+                            # real sibling. Both scans stream bounded entries.
+                            for reparse_first in (True, False):
+                                with os.scandir(path) as entries:
+                                    for entry in entries:
+                                        child = Path(entry.path)
+                                        if is_link(child) == reparse_first:
+                                            remove(child, depth + 1)
                         current = inspect(path)
                         if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
                             raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "IDENTITY_CHANGED")
                         if is_link(path) != reparse:
                             raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "REPARSE_CHANGED")
                         if handle is not None:
-                            handle.delete(current, report)
+                            alias_proof = (_agy_prove_owned_pytest_alias(
+                                path, info, link_scope, handle)
+                                if link_scope is not None and reparse else nullcontext())
+                            with alias_proof:
+                                handle.delete(current, report)
                         elif stat.S_ISDIR(info.st_mode) and not path.is_symlink():
                             path.rmdir()
                         else:
