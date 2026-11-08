@@ -802,7 +802,8 @@ def _agy_temp_tree(repo: Path, prefix: str, *, cleanup_receipts=None, reconcilia
             receipt = {"status": "HOLD", "reason": "AGY_PROCESS_RECONCILIATION_UNPROVEN",
                        "root_token_sha256": _sha(str(directory).encode())}
         else:
-            receipt = agy_remove_owned_tree(directory, parent, identity, parent_identity)
+            receipt = agy_remove_owned_tree(directory, parent, identity, parent_identity,
+                **({"scratch_internal_links": True} if prefix == "agy_scratch-" else {}))
         receipt["role"] = "INPUT" if prefix == "agy_input-" else "SCRATCH"
         if cleanup_receipts is not None:
             cleanup_receipts.append(receipt)
@@ -836,17 +837,30 @@ def _agy_child_env(environment: dict[str, str], scratch: Path, *, repo: Path) ->
     independent verifier keeps its own environment and registered command.
     Rebind the EF01 pytest runtime plugin too: its inherited scratch setting
     otherwise overrides TEMP for nested pytest fixtures and JUnit artifacts.
+    Package caches also belong to this scratch; uv must copy instead of
+    importing hardlinks from an inherited shared cache (owner PR #664).
 
     These are subprocess-inherited defaults, not a security sandbox. Explicit
     child overrides/direct writes still require the mandatory input manifest
     and native process reconciliation before verification/publication.
     """
     root = agy_data_directory(scratch)
-    return {**environment, **{key: str(root) for key in ("TEMP", "TMP", "TMPDIR")},
+    # Windows environment keys are case-insensitive even in a plain dict.
+    # Remove hostile case variants before creating the child's environment.
+    controlled = {"TEMP", "TMP", "TMPDIR", "PYTEST_ADDOPTS", "PYTHONDONTWRITEBYTECODE",
+                  "PYTHONPYCACHEPREFIX", "XDG_CACHE_HOME", "UV_CACHE_DIR", "UV_LINK_MODE",
+                  "PIP_CACHE_DIR", "NPM_CONFIG_CACHE", "AI_COMMERCE_PYTEST_SCRATCH",
+                  "AI_COMMERCE_PYTEST_REPO"}
+    inherited = {key: value for key, value in environment.items() if key.upper() not in controlled}
+    return {**inherited, **{key: str(root) for key in ("TEMP", "TMP", "TMPDIR")},
             "PYTEST_ADDOPTS": "-p no:cacheprovider",
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONPYCACHEPREFIX": str(root / "pycache"),
             "XDG_CACHE_HOME": str(root / "user-cache"),
+            "UV_CACHE_DIR": str(root / "uv-cache"),
+            "UV_LINK_MODE": "copy",
+            "PIP_CACHE_DIR": str(root / "pip-cache"),
+            "npm_config_cache": str(root / "npm-cache"),
             "AI_COMMERCE_PYTEST_SCRATCH": str(root),
             "AI_COMMERCE_PYTEST_REPO": str(repo)}
 
