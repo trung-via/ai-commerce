@@ -693,7 +693,7 @@ def load_baseline_component_owner_records(
         if not target.is_file() or target.is_symlink():
             raise ValueError("ONBOARD_BASELINE_MANIFEST_MISSING")
         actual = target.read_bytes()
-        if raw != actual and actual.replace(bytes([13, 10]), bytes([10])) != raw:
+        if raw != actual:
             raise ValueError("ONBOARD_BASELINE_MANIFEST_DRIFT")
         try:
             data = json.loads(raw.decode("utf-8-sig"))
@@ -775,14 +775,23 @@ def registered_action_plan(
         profiles.get("mt01-component-onboarding") == list(fallback_argv)
         and bool(allowed_paths)
     )
-    admission, onboarding_error = None, None
-    persisted_records = (
-        load_baseline_component_owner_records(
-            root=repo, base_sha=base_sha, existing_groups=groups)
-        if onboarding and (repo / ".git").exists() else ())
+    admission, onboarding_error, baseline_error = None, None, None
+    # Committed owners are trusted base data for EVERY source action. Only
+    # candidate-supplied new owners require the explicit onboarding ingress.
+    # Never substitute candidate bytes or an empty owner map on a bad base.
+    persisted_records = ()
+    if (repo / ".git").exists():
+        try:
+            persisted_records = load_baseline_component_owner_records(
+                root=repo, base_sha=base_sha, existing_groups=groups)
+        except (ValueError, OSError, UnicodeError, TypeError) as exc:
+            baseline_error = "ONBOARD_INVALID_BASELINE:" + str(exc)[:128]
     persisted_by_name = {item["group"].name: item for item in persisted_records}
     if persisted_records:
         groups = (*groups, *(item["group"] for item in persisted_records))
+    if not onboarding and any(p.startswith("work_items/mt01-components/")
+                              for p in changed_paths):
+        onboarding_error = "ONBOARD_EXPLICIT_INGRESS_REQUIRED"
     if onboarding:
         candidates = sorted(p for p in changed_paths
                             if p.startswith("work_items/mt01-components/") and p.endswith(".json"))
@@ -810,6 +819,8 @@ def registered_action_plan(
     by_name = {g.name: g for g in groups}
     entries = []
     problems = list(impact.missing_mapping)
+    if baseline_error:
+        problems.append(baseline_error)
     if onboarding_error:
         problems.append(onboarding_error)
     if admission is not None and aggregate_sources:
@@ -824,6 +835,10 @@ def registered_action_plan(
     required = set(required_acs)
     unknown_acs = sorted(required - known_acs)
     unselected_acs = sorted((required & known_acs) - selected_acs)
+    if unknown_acs and (admission is not None or
+                        set(impact.selected_groups) & persisted_by_name.keys()):
+        # The data-only manifest capability cannot attest an undeclared AC.
+        problems.extend("ONBOARD_UNKNOWN_AC:" + ac for ac in unknown_acs)
     # A previously unregistered AC is a product-review question, not a
     # reason to skip independently selected and registered source tests.
     # Retain its exact identity in the immutable verification receipt; Brain
@@ -835,24 +850,24 @@ def registered_action_plan(
     select_parallel = list(fallback_argv[-2:]) == ["-n", "12"]
     for name in impact.selected_groups:
         group = by_name[name]
+        manifest_owner = bool((admission is not None and name == admission["name"])
+                              or name in persisted_by_name)
         expected = ["python", "-m", "pytest", *group.tests, "-q"]
-        if select_parallel:
+        if select_parallel or manifest_owner:
             expected.extend(["-n", "12"])
-        new_owner = bool((admission is not None and name == admission["name"])
-                         or (onboarding and name in persisted_by_name))
         verified_owner = (admission if admission is not None and name == admission["name"]
                           else persisted_by_name.get(name))
         matched = canonical_registered_profile(
-            profiles, expected, group_name=name, onboarding=new_owner)
+            profiles, expected, group_name=name, onboarding=manifest_owner)
         if matched is None:
             problems.append(name + ":REGISTERED_PROFILE_REQUIRED")
         # The only dynamic command is generated from a VALIDATED bounded
         # manifest; all original components still use exact registry argv.
-        argv = expected if new_owner else list(profiles[matched]) if matched is not None else list(fallback_argv)
+        argv = expected if manifest_owner else list(profiles[matched]) if matched is not None else list(fallback_argv)
         executable = shutil.which(argv[0]) if argv else None
         paths = (set(group.tests) | set(group.paths) | set(group.consumers) |
                  set(group.contracts) | (set(changed_paths) & set(impact.affected_paths)))
-        if new_owner:
+        if manifest_owner:
             # Nonexecutable review documents and work-item records are still
             # changed candidate bytes: include them in immutable evidence so
             # EF02's all-changed-files coverage check cannot be bypassed.
@@ -879,7 +894,7 @@ def registered_action_plan(
             "selected_impact_tests": list(impact.selected_tests),
             **({"onboarding_manifest_path": verified_owner["manifest_path"],
                 "onboarding_manifest_sha256": verified_owner["manifest_sha256"],
-                "onboarding_data_only": True} if new_owner else {}),
+                "onboarding_data_only": True} if manifest_owner else {}),
         }
         executable_scope = bool(impact.runnable and matched)
         entries.append({
@@ -917,11 +932,10 @@ def registered_action_plan(
             },
         })
     impact_receipt = impact.as_dict()
-    if unselected_acs:
+    if problems and (impact.runnable or unselected_acs):
         impact_receipt["mode"] = "HOLD_COVERAGE"
         impact_receipt["missing_mapping"] = sorted(
-            set(impact_receipt["missing_mapping"]) |
-            {"AC_REQUIRED_GROUP_NOT_SELECTED:" + ac for ac in unselected_acs})
+            set(impact_receipt["missing_mapping"]) | set(problems))
     return {
         "kind": "AI_COMMERCE_MT01_PLAN", "version": 2,
         "required_acs": sorted(set(required_acs)),
