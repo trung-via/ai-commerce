@@ -248,6 +248,8 @@ def test_agy_cache_environment_is_source_owned_and_child_only(tmp_path):
     inherited = {"PYTEST_ADDOPTS": f'-p cacheprovider -o cache_dir="{mirror}"',
                  "PYTHONDONTWRITEBYTECODE": "0", "PYTHONPYCACHEPREFIX": str(repo),
                  "XDG_CACHE_HOME": str(mirror), "TEMP": str(mirror),
+                 "UV_LINK_MODE": "hardlink", "UV_CACHE_DIR": str(mirror),
+                 "PIP_CACHE_DIR": str(mirror), "npm_config_cache": str(mirror),
                  "AI_COMMERCE_PYTEST_SCRATCH": str(mirror),
                  "AI_COMMERCE_PYTEST_REPO": str(mirror),
                  "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
@@ -259,11 +261,45 @@ def test_agy_cache_environment_is_source_owned_and_child_only(tmp_path):
     assert child["PYTHONDONTWRITEBYTECODE"] == "1"
     assert child["PYTHONPYCACHEPREFIX"] == str(scratch / "pycache")
     assert child["XDG_CACHE_HOME"] == str(scratch / "user-cache")
+    assert child["UV_LINK_MODE"] == "copy"
+    assert child["UV_CACHE_DIR"] == str(scratch / "uv-cache")
+    assert child["PIP_CACHE_DIR"] == str(scratch / "pip-cache")
+    assert child["npm_config_cache"] == str(scratch / "npm-cache")
     assert child["AI_COMMERCE_PYTEST_SCRATCH"] == str(scratch)
     assert child["AI_COMMERCE_PYTEST_REPO"] == str(repo)
     assert all(child[key] == str(scratch) for key in ("TEMP", "TMP", "TMPDIR"))
     assert all(child[key] == value for key, value in inherited.items()
                if key.startswith("GIT_") or key == "PYTEST_DISABLE_PLUGIN_AUTOLOAD")
+
+
+def test_agy_cache_isolation_does_not_weaken_external_hardlink_holds(tmp_path):
+    """Copy-only provider defaults must coexist with fail-closed native teardown."""
+    source, mirror, _, _ = input_fixture(tmp_path)
+    scratch = tmp_path / "owned-provider-scratch"
+    scratch.mkdir()
+    original = {"UV_LINK_MODE": "hardlink", "UV_CACHE_DIR": str(mirror),
+                "PIP_CACHE_DIR": str(mirror), "npm_config_cache": str(mirror)}
+    child = runner._agy_child_env(original, scratch, repo=source)
+    assert original["UV_LINK_MODE"] == "hardlink"
+    assert child["UV_LINK_MODE"] == "copy"
+    for key in ("UV_CACHE_DIR", "PIP_CACHE_DIR", "npm_config_cache"):
+        assert Path(child[key]).parent == scratch
+        assert Path(child[key]) != mirror
+    external = tmp_path / "outside-scratch-sentinel"
+    external.write_bytes(b"outside bytes must survive")
+    linked = scratch / "external-alias"
+    try:
+        os.link(external, linked)
+    except OSError:
+        pytest.skip("native hardlink creation unavailable; no bypass")
+    info, parent_info = scratch.lstat(), scratch.parent.lstat()
+    report = adapters.agy_remove_owned_tree(
+        scratch, scratch.parent, (info.st_dev, info.st_ino),
+        (parent_info.st_dev, parent_info.st_ino))
+    assert report["status"] == "HOLD"
+    assert report["reason"] == "AGY_SCRATCH_ENTRY_UNSAFE"
+    assert external.read_bytes() == b"outside bytes must survive"
+    assert linked.exists()
 
 
 def _native_cache_attempt(tmp_path, monkeypatch, scenario, provider_exit=0):
