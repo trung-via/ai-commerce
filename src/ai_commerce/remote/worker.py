@@ -299,6 +299,17 @@ class LocalBatchWorker:
             witness_enrollment=witness_enrollment, witness_context=witness_context,
             witness_verifier=witness_verifier, source_contract_fixture=source_contract_fixture).payload()
 
+    def witness_bridge(self, action, request, *, enrollment=None, context=None,
+            ssh_keygen=None, ledger=None, source_contract_fixture=False, read_budget=192):
+        """Owner-configured read source; frame identifiers supply no authority."""
+        from .transport import WorkOwnerWitnessSource, work_owner_witness_bridge
+        submitted = {k: v for k, v in action.items() if k != "resolved_dependencies"}
+        source = WorkOwnerWitnessSource(self.github, self.issue_number, self.batch,
+                                       submitted, self.issuer_login, read_budget)
+        return work_owner_witness_bridge(request, source=source, enrollment=enrollment,
+            context=context, ssh_keygen=ssh_keygen, ledger=ledger,
+            source_contract_fixture=source_contract_fixture)
+
     def execute_action(self, action: dict) -> dict:
         """One independent action; claim precedes any executor invocation."""
         attempt_id = action["attempt_id"]

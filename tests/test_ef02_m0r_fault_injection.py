@@ -2428,6 +2428,22 @@ def test_readonly_audit_identifies_published_without_signer_or_new_authority():
     assert first["code"] == "PUBLISHED_SOURCE_AUTHENTICATED_OWNER_WITNESS_MISSING"
 
 
+def test_r4_bridge_capture_is_explicit_and_never_enrolls_a_source_repository():
+    from ai_commerce.remote.transport import WorkOwnerAudit, WorkOwnerWitnessSource, _EffectDenied
+    storage, packet, action, owner = _readonly_audit_fixture()
+    kwargs = dict(issue_number=owner.identity["current_issue"], batch=packet,
+                  action=action, trusted_issuer="trung-via")
+    before = json.dumps({"refs": storage.refs, "commits": storage.commits}, sort_keys=True)
+    report = WorkOwnerAudit.run(storage, **kwargs)
+    assert report.source_gate.value == "VERIFIED" and report._bridge_source is None
+    # The normal forensic reader supports this repository. It must not silently
+    # enroll it into the separately pinned effect bridge.
+    source = WorkOwnerWitnessSource(storage, kwargs["issue_number"], packet, action, "trung-via")
+    with pytest.raises(_EffectDenied, match="TRUSTED_WORKOWNER_SOURCE_UNCONFIRMED"):
+        source.acquire()
+    assert before == json.dumps({"refs": storage.refs, "commits": storage.commits}, sort_keys=True)
+
+
 def test_readonly_audit_failed_cleanup_holds_even_with_authenticated_candidate():
     from ai_commerce.remote.transport import WorkOwnerAuditDiagnostics
     args = _readonly_audit_fixture()
@@ -2792,14 +2808,14 @@ def test_effect_witness_pins_closed_shape_and_public_sanitization(tmp_path, monk
     assert "private" not in json.dumps(result) and "issue.invalid" not in json.dumps(result)
 
 
-def _audit_effect_fixture(tmp_path, monkeypatch):
+def _audit_effect_fixture(tmp_path, monkeypatch, *, issue=599):
     from dataclasses import replace
     from ai_commerce.remote.candidate_policy import commit_evidence
     from ai_commerce.remote.transport import WorkOwnerAudit, WorkOwnerAuditProvenance
     from test_ef01_repair import WorkOwnerMemoryTransport
     storage = WorkOwnerMemoryTransport(BASE)
     storage.repo = c.SOURCE_REPOSITORY
-    args = _readonly_audit_fixture(storage=storage)
+    args = _readonly_audit_fixture(storage=storage, issue=issue)
     report = _run_readonly_audit(*args)
     assert report["source_gate"] == "VERIFIED"
     reads = SimpleNamespace(repo=storage.repo, attempt_key=storage.attempt_key,
@@ -2937,4 +2953,166 @@ def test_effect_witness_worker_interface_never_acquires_or_executes(tmp_path, mo
         witness_context=f.context, witness_verifier=f.verifier, source_contract_fixture=True)
     assert result["effect_witness"]["gate"] == "EFFECT_DETERMINATE_AUTHENTICATED"
     assert all(method == "GET" for method, *_ in storage.requests)
+
+
+def _r4_bridge_fixture(tmp_path, monkeypatch):
+    """Fresh modeled #643 source, hash-signature fixture; no native custody."""
+    from ai_commerce.remote.transport import _OfflineWorkOwnerEffectFixture
+    f = _audit_effect_fixture(tmp_path, monkeypatch, issue=643)
+    storage, packet, action, owner = f.args
+    f.source = effect_auth.WorkOwnerWitnessSource(storage, 643, packet, action, "trung-via")
+    f.ledger = _OfflineWorkOwnerEffectFixture()
+    def request():
+        return {"schema": effect_auth.WORK_OWNER_WITNESS_BRIDGE_SCHEMA,
+                "request_id": "8" * 64, **c.decode(c.canonical(f.binding)),
+                "witness_envelope": c.decode(f.raw),
+                "candidate_boundary": {"candidate_sha": f.payload["publication"]["candidate_sha"],
+                    "receipt_sha256": f.payload["verification"]["receipt_sha256"],
+                    "post_effect_sha256": f.payload["publication"]["post_effect_sha256"]}}
+    def bridge(r=None, **updates):
+        kw = dict(source=f.source, enrollment=f.enrollment, context=f.context,
+                  ssh_keygen=f.verifier, ledger=f.ledger, source_contract_fixture=True)
+        kw.update(updates)
+        return effect_auth.work_owner_witness_bridge(request() if r is None else r, **kw)
+    f.request, f.bridge = request, bridge
+    return f
+
+
+def test_r4_bridge_semantic_key_fresh_tokens_hold_source_only(tmp_path, monkeypatch):
+    f = _r4_bridge_fixture(tmp_path, monkeypatch)
+    with f.ledger:
+        result = f.bridge()
+        assert result["status"] == "SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED", result
+        assert result["scope"] == "SOURCE_CONTRACT_FIXTURE"
+        for key in ("execution_allowed", "work_owner_transition_authorized", "replay_authorized",
+                    "publication_authorized", "transfer_authorized", "credential_custody_proven",
+                    "replay_ledger_proven"):
+            assert result[key] is False
+        assert result["ledger_receipt"]["durable"] is False
+        f.payload["replay"].update(nonce="a" * 64, replay_id="b" * 64)
+        f.seal()
+        r = f.request(); r["request_id"] = "c" * 64
+        second = f.bridge(r)
+        assert second["status"] == "HOLD_REPLAY_UNKNOWN", second
+        assert second["ledger_receipt"]["effect_key"] == result["ledger_receipt"]["effect_key"]
+        assert f.ledger.unreconciled_intents_count() == 1
+
+
+@pytest.mark.parametrize("fault", ["signature", "candidate", "receipt", "post_effect", "missing_candidate",
+    "same_sid", "fake_grant", "unenrolled", "429", "wrong_round", "dirty", "private_signer_release"])
+def test_r4_bridge_authentication_and_boundary_precede_every_intent(tmp_path, monkeypatch, fault):
+    f = _r4_bridge_fixture(tmp_path, monkeypatch)
+    r, kw = f.request(), {}
+    if fault == "signature":
+        r["witness_envelope"]["signature_b64"] = base64.b64encode(b"x" * 32).decode()
+    elif fault in ("candidate", "receipt", "post_effect"):
+        key = {"candidate": "candidate_sha", "receipt": "receipt_sha256", "post_effect": "post_effect_sha256"}[fault]
+        r["candidate_boundary"][key] = "0" * (40 if fault == "candidate" else 64)
+    elif fault == "missing_candidate":
+        storage = f.args[0]
+        storage.refs.pop("refs/heads/ef02/candidate/" + storage.attempt_key(f.args[2]["attempt_id"]))
+    elif fault == "same_sid":
+        kw["enrollment"] = replace(f.enrollment, signer_principal_sha256=f.enrollment.executor_principal_sha256)
+    elif fault == "unenrolled":
+        kw["source_contract_fixture"] = False
+    elif fault in ("fake_grant", "private_signer_release"):
+        r[fault] = "secret-fixture-only-never-disclose"
+    else:
+        if fault == "429": f.payload["provider"]["outcome"] = "QUOTA_EXHAUSTED"
+        if fault == "wrong_round": f.payload["binding"]["provider_intent"]["round"] += 1
+        if fault == "dirty": f.payload["cleanup"]["scratch_dirty"] = True
+        f.seal(); r = f.request()
+    with f.ledger:
+        result = f.bridge(r, **kw)
+        assert result["status"] != "SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED", result
+        if fault == "signature": assert result["gate"] == "BAD_SIGNATURE", result
+        assert f.ledger.unreconciled_intents_count() == 0
+        assert "secret-fixture" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("field", ["source_sha", "work_owner.journal_tip_sha", "work_owner.journal_digest",
+    "work_owner.fence", "work_owner.generation", "provider_intent.round", "provider_intent.digest",
+    "refs.claim.sha", "refs.pre_spawn.sha", "refs.spawned.sha"])
+def test_r4_bridge_requires_independent_strict_reader_pins(tmp_path, monkeypatch, field):
+    f = _r4_bridge_fixture(tmp_path, monkeypatch)
+    r = f.request(); node = r; parts = field.split(".")
+    for name in parts[:-1]: node = node[name]
+    old = node[parts[-1]]
+    node[parts[-1]] = old + 1 if type(old) is int else "0" * len(old)
+    with f.ledger:
+        result = f.bridge(r)
+        assert result["status"] == "WORKOWNER_BINDING_CONFLICT", result
+        assert f.ledger.unreconciled_intents_count() == 0
+
+
+@pytest.mark.parametrize("during_transaction", [False, True])
+def test_r4_bridge_source_race_never_commits_unverified_intent(tmp_path, monkeypatch, during_transaction):
+    f = _r4_bridge_fixture(tmp_path, monkeypatch)
+    storage = f.args[0]
+    ref = "refs/heads/ef02/candidate/" + storage.attempt_key(f.args[2]["attempt_id"])
+    if during_transaction:
+        confirm = effect_auth._WorkOwnerSourceSnapshot.confirm
+        def racing(snapshot):
+            if f.ledger.db.in_transaction and f.ledger.unreconciled_intents_count():
+                storage.refs[ref] = "0" * 40
+            return confirm(snapshot)
+        monkeypatch.setattr(effect_auth._WorkOwnerSourceSnapshot, "confirm", racing)
+    else:
+        verify = effect_auth._effect_verify_signature
+        def racing(*args):
+            verify(*args); storage.refs[ref] = "0" * 40
+        monkeypatch.setattr(effect_auth, "_effect_verify_signature", racing)
+    with f.ledger:
+        assert f.bridge()["status"] == "HOLD_SOURCE_OR_LEDGER_UNCONFIRMED"
+        assert f.ledger.unreconciled_intents_count() == 0
+
+
+@pytest.mark.parametrize("forged", [False, True])
+def test_r4_audit_never_writes_a_private_ledger(tmp_path, monkeypatch, forged):
+    f = _r4_bridge_fixture(tmp_path, monkeypatch)
+    class ForbiddenLedger:
+        def record_effect_intent(self, *args, **kwargs):
+            pytest.fail("read-only audit tried to reserve a private intent")
+    raw = f.raw
+    if forged:
+        env = c.decode(raw); env["signature_b64"] = base64.b64encode(b"x" * 32).decode()
+        raw = c.canonical(env)
+    try:
+        result = f.audit(effect_witness=raw, ledger=ForbiddenLedger())
+        assert result["effect_witness"]["gate"] == ("BAD_SIGNATURE" if forged else "EFFECT_DETERMINATE_AUTHENTICATED")
+    finally:
+        f.ledger.close()
+
+
+def test_r4_actual_unauthorized_changed_paths_fail_scope_before_receipt_join(tmp_path, monkeypatch):
+    from ai_commerce.remote.candidate_policy import EVIDENCE_MARKER, canonical, commit_evidence
+    f = _r4_bridge_fixture(tmp_path, monkeypatch)
+    storage, _, _, owner = f.args
+    commit = storage.commits[f.payload["publication"]["candidate_sha"]]
+    proof = commit_evidence(commit["message"])
+    extra = "src/ai_commerce/remote/unapproved_consumer.py"
+    proof["changed_files"] = sorted([*proof["changed_files"], extra])
+    proof["candidate_file_sha256"][extra] = "a" * 64
+    proof.update(status="CANDIDATE_READY_SCOPE_REVIEW", review_required=True, scope_valid=False,
+                 out_of_scope_files=[extra])
+    proof["verification"]["status"] = "VERIFIED_SCOPE_REVIEW_REQUIRED"
+    commit["message"] = commit["message"].split(EVIDENCE_MARKER)[0] + EVIDENCE_MARKER + canonical(proof)
+    with f.ledger:
+        report = f.audit()
+        assert report["code"] == "CANDIDATE_SCOPE_UNPROVEN", report
+        assert f.bridge()["status"] != "SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED"
+        assert f.ledger.unreconciled_intents_count() == 0
+
+
+@pytest.mark.parametrize("issue", [595, 599, 622, 628])
+def test_r4_unknown_source_reader_never_replays_historical_effects(tmp_path, monkeypatch, issue):
+    f = _r4_bridge_fixture(tmp_path, monkeypatch)
+    args = _readonly_audit_fixture(issue=issue, unknown=True)
+    source = effect_auth.WorkOwnerWitnessSource(args[0], issue, args[1], args[2], "trung-via")
+    with f.ledger:
+        result = f.bridge(source=source)
+        assert result["status"] == "HOLD_SOURCE_OR_LEDGER_UNCONFIRMED"
+        assert result["replay_authorized"] is result["publication_authorized"] is False
+        assert args[3].read()[-1]["stage"] == "UNKNOWN"
+        assert f.ledger.unreconciled_intents_count() == 0
 

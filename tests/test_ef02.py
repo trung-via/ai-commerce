@@ -20,6 +20,37 @@ from ai_commerce.remote.scheduler import run_schedule
 from ai_commerce.remote.transport import GitHubTransport, RemoteTransportError
 
 
+def test_r4_remote_bridge_uses_configured_source_and_never_schedules(tmp_path, monkeypatch):
+    from test_ef02_m0r_fault_injection import _r4_bridge_fixture
+    from ai_commerce.remote.worker import LocalBatchWorker
+    f = _r4_bridge_fixture(tmp_path, monkeypatch)
+    worker = object.__new__(LocalBatchWorker)
+    worker.github, worker.batch, worker.issue_number, worker.issuer_login = f.args[0], f.args[1], 643, "trung-via"
+    def forbidden(*a, **kw): pytest.fail("source bridge scheduled native execution")
+    for method in ("execute_action", "_acquire_owner", "reconcile_action"):
+        monkeypatch.setattr(worker, method, forbidden)
+    with f.ledger:
+        report = worker.witness_bridge(f.args[2], f.request(), enrollment=f.enrollment,
+            context=f.context, ssh_keygen=f.verifier, ledger=f.ledger, source_contract_fixture=True)
+        assert report["status"] == "SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED", report
+        assert report["execution_allowed"] is report["replay_authorized"] is report["publication_authorized"] is False
+
+
+def test_r4_requested_acceptance_ids_are_registered_with_owner_and_consumers():
+    from ai_commerce.engineering.minimum_test import approved_groups
+    requested = {"EF01.execution", "EF01.repair", "EF01.source-integrity", "EF01.provider-boundary",
+        "EF02.action-and-fanin", "EF02.scope-review", "MT01.selection-and-evidence",
+        "EF01P.git-and-host-budget", "EF02.recovery"}
+    groups = approved_groups()
+    assert requested <= {ac for group in groups for ac in group.acs}
+    assert {g.name for g in groups if requested & set(g.acs)} == {
+        "ef01", "repair", "integrity", "provider", "ef02", "ef02-scope", "mt01", "ef01p", "ef02-recovery"}
+    for path in ("src/ai_commerce/remote/transport.py", "src/ai_commerce/remote/worker.py",
+                 "src/ai_commerce/hostops_v3/journal.py", "src/ai_commerce/hostops_v3/security.py",
+                 "src/ai_commerce/hostops_v3/broker.py", "src/ai_commerce/hostops_v3/worker.py"):
+        assert any(path in g.paths for g in groups)
+
+
 @pytest.mark.parametrize("field", ["action_id", "attempt_id"])
 def test_workowner_scheduler_rejects_duplicate_identity_before_dispatch(field):
     from ai_commerce.remote.scheduler import run_schedule
