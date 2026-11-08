@@ -37,6 +37,291 @@ CLI = [sys.executable, "-m", "ai_commerce.production_runtime.attended_cli"]
 PRIVATE_TEXT = "SYNTHETIC_PRIVATE_BRIEF_đừng_xuất_customer_fixture"
 
 
+@pytest.fixture
+def source_tree(tmp_path, monkeypatch):
+    assert ROOT != tmp_path and ROOT not in tmp_path.parents
+    root = tmp_path / "shipped"
+    module = root / "production_runtime" / "attended_worker.py"
+    module.parent.mkdir(parents=True)
+    module.write_bytes(b"# synthetic shipped worker\n")
+    monkeypatch.setattr(worker, "__file__", str(module))
+    return root, module
+
+
+def legacy_source_digest(root):
+    digest = sha256()
+    for path in sorted(root.rglob("*.py")):
+        name = path.relative_to(root).as_posix().encode("utf-8")
+        digest.update(len(name).to_bytes(4, "big") + name + sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
+@pytest.mark.parametrize("size", [0, 131072, 131073, 3 * 65536 + 17, 8 * 1024 * 1024])
+def test_runtime_hash_streams_full_source_with_legacy_delimiter(source_tree, monkeypatch, size):
+    root, _ = source_tree
+    path = root / "large.py"
+    # Sparse creation bounds fixture allocation even at the exact source cap.
+    with path.open("wb") as stream:
+        stream.truncate(size)
+        if size:
+            stream.seek(size - 1)
+            stream.write(b"z")
+    (root / "z.py").write_bytes(b"# last\n")
+    expected = legacy_source_digest(root)
+    original, reads = os.read, []
+    def bounded_read(fd, count):
+        assert 0 < count <= 65536
+        block = original(fd, count)
+        reads.append(len(block))
+        return block
+    def forbidden(*args, **kwargs):
+        pytest.fail("source hashing used the document reader or one-shot allocation")
+    monkeypatch.setattr(os, "read", bounded_read)
+    monkeypatch.setattr(worker, "_bytes", forbidden)
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+    assert worker._runtime_hash() == expected
+    assert sum(reads) == size + len(b"# last\n") + len(b"# synthetic shipped worker\n")
+
+
+def test_runtime_hash_current_sources_match_legacy_digest(record_property):
+    root = Path(worker.__file__).parent.parent
+    files = sorted(root.rglob("*.py"))
+    assert (root / "remote" / "transport.py").stat().st_size > worker.MAX_BYTES
+    expected = legacy_source_digest(root)
+    assert worker._runtime_hash() == expected
+    record_property("shipped_python_modules", len(files))
+    record_property("runtime_sha256", expected)
+
+
+def test_runtime_hash_small_source_and_document_limit_are_unchanged(source_tree):
+    root, module = source_tree
+    assert worker._bytes(module) == module.read_bytes()
+    assert worker._runtime_hash() == legacy_source_digest(root)
+    large = root / "large.py"
+    with large.open("wb") as stream:
+        stream.truncate(worker.MAX_BYTES + 1)
+    assert worker.MAX_BYTES == 131072
+    with pytest.raises(worker.WorkerHold, match="^LOCAL_FILE_TOO_LARGE$"):
+        worker._bytes(large)
+    assert worker._runtime_hash() == legacy_source_digest(root)
+
+
+def test_runtime_hash_rejects_oversized_source_before_read(source_tree, monkeypatch):
+    root, _ = source_tree
+    with (root / "oversized.py").open("wb") as stream:
+        stream.truncate(8 * 1024 * 1024 + 1)
+    monkeypatch.setattr(os, "read", lambda *args: pytest.fail("oversized source was read"))
+    with pytest.raises(worker.WorkerHold, match="^SOURCE_FILE_TOO_LARGE$"):
+        worker._runtime_hash()
+
+
+def test_runtime_hash_module_inventory_is_bounded(source_tree):
+    root, _ = source_tree
+    for index in range(1023):
+        (root / f"module-{index:04d}.py").write_bytes(b"")
+    assert worker._runtime_hash() == legacy_source_digest(root)
+    (root / "overflow.py").write_bytes(b"")
+    with pytest.raises(worker.WorkerHold, match="^SOURCE_TREE_LIMIT$"):
+        worker._runtime_hash()
+
+
+@pytest.mark.parametrize("operation", ["disappear", "replace", "permission"])
+def test_runtime_hash_open_races_hold(source_tree, monkeypatch, operation):
+    root, module = source_tree
+    original, attempted = os.open, []
+    def raced(path, flags, *args, **kwargs):
+        if Path(path) == module:
+            attempted.append(path)
+            if operation == "permission":
+                raise PermissionError("PRIVATE_PATH_MUST_NOT_LEAVE_WORKER")
+            module.unlink()
+            if operation == "replace":
+                module.write_bytes(b"# replacement\n")
+        return original(path, flags, *args, **kwargs)
+    monkeypatch.setattr(os, "open", raced)
+    with pytest.raises(worker.WorkerHold, match="^SOURCE_TREE_(DRIFT|UNREADABLE)$"):
+        worker._runtime_hash()
+    assert attempted
+
+
+@pytest.mark.parametrize("mutation", ["rewrite", "truncate", "grow", "grow-past-cap", "permission"])
+def test_runtime_hash_changes_during_stream_hold(source_tree, monkeypatch, mutation):
+    root, module = source_tree
+    with module.open("wb") as stream:
+        stream.truncate(2 * 65536 + 1)
+    before = module.stat()
+    original, changed, read_sizes = os.read, False, []
+    def raced(fd, count):
+        nonlocal changed
+        assert 0 < count <= 65536
+        read_sizes.append(count)
+        if mutation == "permission":
+            raise PermissionError("PRIVATE_SOURCE_READ_DENIED")
+        block = original(fd, count)
+        if not changed:
+            changed = True
+            with module.open("r+b") as stream:
+                if mutation == "rewrite":
+                    stream.seek(65536)
+                    stream.write(b"x")
+                else:
+                    stream.truncate({"truncate": 1, "grow": before.st_size + 1,
+                                     "grow-past-cap": 8 * 1024 * 1024 + 1}[mutation])
+            os.utime(module, ns=(before.st_atime_ns, before.st_mtime_ns + 1000000000))
+        return block
+    monkeypatch.setattr(os, "read", raced)
+    with pytest.raises(worker.WorkerHold, match="^SOURCE_(TREE_(DRIFT|UNREADABLE)|FILE_TOO_LARGE)$"):
+        worker._runtime_hash()
+    assert read_sizes
+
+
+@pytest.mark.parametrize("mutation", ["add", "remove", "change-earlier", "unreadable-directory"])
+def test_runtime_hash_rechecks_complete_inventory(source_tree, monkeypatch, mutation):
+    root, module = source_tree
+    earlier = root / "a.py"
+    earlier.write_bytes(b"# original\n")
+    original, scans = os.scandir, 0
+    def raced(path):
+        nonlocal scans
+        if Path(path) == root:
+            scans += 1
+            if scans == 2:
+                if mutation == "add":
+                    (root / "new.py").write_bytes(b"# new\n")
+                elif mutation == "remove":
+                    earlier.unlink()
+                elif mutation == "change-earlier":
+                    earlier.write_bytes(b"# changed\n")
+                else:
+                    raise PermissionError("PRIVATE_DIRECTORY_DENIED")
+        return original(path)
+    monkeypatch.setattr(os, "scandir", raced)
+    with pytest.raises(worker.WorkerHold, match="^SOURCE_TREE_(DRIFT|UNREADABLE)$"):
+        worker._runtime_hash()
+    assert scans == 2
+
+
+
+@pytest.mark.parametrize("mutation", ["create", "remove", "rewrite"])
+def test_runtime_hash_accepts_bytecode_only_cache_churn_between_scans(source_tree, monkeypatch, mutation):
+    """Unrelated imports may mutate pyc caches between two source inventories."""
+    root, _ = source_tree
+    cache = root / "production_runtime" / "__pycache__"
+    bytecode = cache / "attended_worker.cpython-311.pyc"
+    if mutation != "create":
+        cache.mkdir()
+        bytecode.write_bytes(b"initial bytecode")
+    expected = legacy_source_digest(root)
+    original, scans = os.scandir, 0
+
+    def raced(path):
+        nonlocal scans
+        if Path(path) == root:
+            scans += 1
+            if scans == 2:
+                if mutation == "create":
+                    cache.mkdir()
+                    bytecode.write_bytes(b"created bytecode")
+                elif mutation == "remove":
+                    bytecode.unlink()
+                    cache.rmdir()
+                else:
+                    bytecode.write_bytes(b"new bytecode from concurrent worker")
+        return original(path)
+
+    monkeypatch.setattr(os, "scandir", raced)
+    assert worker._runtime_hash() == expected
+    assert scans == 2
+
+
+def test_runtime_hash_rejects_new_python_source_even_inside_cache_directory(source_tree, monkeypatch):
+    """Cache tolerance must not hide a new real Python source or path swap."""
+    root, _ = source_tree
+    expected = legacy_source_digest(root)
+    original, scans = os.scandir, 0
+    def raced(path):
+        nonlocal scans
+        if Path(path) == root:
+            scans += 1
+            if scans == 2:
+                cache = root / "production_runtime" / "__pycache__"
+                cache.mkdir()
+                (cache / "unexpected.py").write_bytes(b"# new shipped python source\\n")
+        return original(path)
+    monkeypatch.setattr(os, "scandir", raced)
+    with pytest.raises(worker.WorkerHold, match="^SOURCE_TREE_DRIFT$"):
+        worker._runtime_hash()
+    assert scans == 2
+    assert expected != legacy_source_digest(root)
+
+
+def test_runtime_hash_cannot_accept_an_incomplete_worker_inventory(source_tree):
+    _, module = source_tree
+    module.unlink()
+    with pytest.raises(worker.WorkerHold, match="^SOURCE_TREE_DRIFT$"):
+        worker._runtime_hash()
+
+
+@pytest.mark.parametrize("kind", ["symlink", "junction", "reparse"])
+def test_runtime_hash_structural_path_guards_before_read(source_tree, monkeypatch, kind):
+    _, module = source_tree
+    if kind in {"symlink", "junction"}:
+        method = "is_symlink" if kind == "symlink" else "is_junction"
+        original = getattr(Path, method, lambda self: False)
+        monkeypatch.setattr(Path, method, lambda p: p == module or original(p), raising=False)
+    else:
+        original = Path.lstat
+        class ReparseStat:
+            st_file_attributes = 0x400
+            def __init__(self, info):
+                self.info = info
+            def __getattr__(self, key):
+                return getattr(self.info, key)
+        monkeypatch.setattr(Path, "lstat", lambda p, **kw:
+                            ReparseStat(original(p, **kw)) if p == module else original(p, **kw))
+    monkeypatch.setattr(os, "read", lambda *args: pytest.fail("link/reparse source was read"))
+    with pytest.raises(worker.WorkerHold, match="^PATH_(LINK|REPARSE)_DENIED$"):
+        worker._runtime_hash()
+
+
+def test_runtime_hash_opened_identity_checked_before_any_contents(source_tree, tmp_path, monkeypatch):
+    _, module = source_tree
+    external = tmp_path / "private.py"
+    external.write_bytes(b"PRIVATE_EXTERNAL_SOURCE_MUST_NOT_BE_READ")
+    original, attempted = os.open, []
+    def substituted(path, flags, *args, **kwargs):
+        attempted.append(path)
+        return original(external if Path(path) == module else path, flags, *args, **kwargs)
+    monkeypatch.setattr(os, "open", substituted)
+    monkeypatch.setattr(os, "read", lambda *args: pytest.fail("substituted source target was read"))
+    with pytest.raises(worker.WorkerHold, match="^SOURCE_TREE_DRIFT$"):
+        worker._runtime_hash()
+    assert attempted == [module]
+
+
+@pytest.mark.parametrize("kind", ["file-symlink", "directory-symlink", "junction"])
+def test_runtime_hash_native_links_cannot_escape(source_tree, tmp_path, monkeypatch, kind):
+    root, _ = source_tree
+    external = tmp_path / "private-sources"
+    external.mkdir()
+    secret = external / "secret.py"
+    secret.write_bytes(b"PRIVATE_EXTERNAL_SOURCE_MUST_NOT_BE_READ")
+    link = root / ("escape.py" if kind == "file-symlink" else "escape")
+    try:
+        if kind == "junction":
+            assert sys.platform == "win32", "MATERIAL_UNPROVEN_WINDOWS_REQUIRED"
+            import _winapi
+            _winapi.CreateJunction(str(external), str(link))
+        else:
+            link.symlink_to(secret if kind == "file-symlink" else external,
+                            target_is_directory=kind == "directory-symlink")
+    except OSError:
+        pytest.skip("UNPROVEN_NATIVE_SOURCE_LINK: host denies link creation")
+    monkeypatch.setattr(os, "read", lambda *args: pytest.fail("external source contents were read"))
+    with pytest.raises(worker.WorkerHold, match="^PATH_(LINK|REPARSE)_DENIED$"):
+        worker._runtime_hash()
+
+
 def png(red):
     def chunk(kind, content):
         return struct.pack(">I", len(content)) + kind + content + struct.pack(">I", zlib.crc32(kind + content) & 0xffffffff)

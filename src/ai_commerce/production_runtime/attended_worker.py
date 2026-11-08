@@ -98,16 +98,107 @@ def _json(path, *, canonical=True):
 
 
 def _runtime_hash():
-    base = Path(__file__).parent
+    root = Path(__file__).parent.parent
     # Pin every shipped Python source, including native owner dependencies.
     # This is drift detection against the retained intent, not a Git signature.
-    files = sorted(base.parent.rglob("*.py"))
-    _need(len(files) <= 1024, "SOURCE_TREE_LIMIT")
-    digest = sha256()
-    for path in files:
-        name = path.relative_to(base.parent).as_posix().encode("utf-8")
-        digest.update(len(name).to_bytes(4, "big") + name + sha256(_bytes(path)).digest())
-    return digest.hexdigest()
+    # Source limits are separate from the unchanged private-document _bytes cap.
+    maximum, chunk = 8 * 1024 * 1024, 64 * 1024
+
+    def stamp(info, *, directory=False):
+        _need(not (info.st_mode & 0o170000 == 0o120000), "PATH_LINK_DENIED")
+        _need(not (getattr(info, "st_file_attributes", 0) & 0x400), "PATH_REPARSE_DENIED")
+        _need(info.st_mode & 0o170000 == (0o040000 if directory else 0o100000),
+              "LOCAL_PATH_TYPE_INVALID")
+        identity = (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+                    getattr(info, "st_file_attributes", 0))
+        # Cache/non-source writes do not change directory identity. The complete
+        # Python inventory and each source's metadata are compared separately.
+        return identity if directory else (*identity, info.st_size, info.st_mtime_ns,
+                                           getattr(info, "st_birthtime_ns", None), info.st_ctime_ns)
+
+    def inventory():
+        files, directories, pending, entries = {}, {}, [root], 0
+        while pending:
+            directory = _local(str(pending.pop()), directory=True)
+            before = stamp(directory.lstat(), directory=True)
+            directories[directory] = before
+            with os.scandir(directory) as children:
+                for entry in children:
+                    entries += 1
+                    _need(entries <= 8192, "SOURCE_TREE_LIMIT")
+                    path = Path(entry.path)
+                    # Windows DirEntry.stat() omits inode/device/link count;
+                    # use fresh nofollow metadata, consistent with fstat().
+                    info = path.lstat()
+                    _need(not (getattr(info, "st_file_attributes", 0) & 0x400), "PATH_REPARSE_DENIED")
+                    _need(info.st_mode & 0o170000 != 0o120000, "PATH_LINK_DENIED")
+                    if info.st_mode & 0o170000 == 0o040000:
+                        _need(len(directories) + len(pending) < 1024, "SOURCE_TREE_LIMIT")
+                        pending.append(path)
+                    elif path.match("*.py"):
+                        files[path] = stamp(info)
+                        _need(len(files) <= 1024, "SOURCE_TREE_LIMIT")
+                        _need(info.st_size <= maximum, "SOURCE_FILE_TOO_LARGE")
+            _local(str(directory), directory=True)
+            _need(stamp(directory.lstat(), directory=True) == before, "SOURCE_TREE_DRIFT")
+        return files, directories
+
+    try:
+        files, directories = inventory()
+        _need(Path(__file__) in files, "SOURCE_TREE_DRIFT")
+        digest = sha256()
+        for path in sorted(files):
+            _local(str(path), under=root)
+            _need(stamp(path.lstat()) == files[path], "SOURCE_TREE_DRIFT")
+            flags = (os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_NONBLOCK", 0))
+            fd = os.open(path, flags)
+            try:
+                # Validate the opened identity BEFORE reading, including on
+                # Windows where O_NOFOLLOW is unavailable. A swapped link may
+                # be opened, but its target's contents must never be read.
+                opened = stamp(os.fstat(fd))
+                # Windows Python versions can expose different ctime semantics
+                # for paths and handles. Compare creation time across them,
+                # and retain ctime checks within each metadata API separately.
+                _need(opened[:-1] == files[path][:-1], "SOURCE_TREE_DRIFT")
+                _local(str(path), under=root)
+                _need(stamp(path.lstat()) == files[path], "SOURCE_TREE_DRIFT")
+                source, total = sha256(), 0
+                while True:
+                    block = os.read(fd, min(chunk, maximum + 1 - total))
+                    if not block:
+                        break
+                    total += len(block)
+                    _need(total <= maximum, "SOURCE_FILE_TOO_LARGE")
+                    source.update(block)
+                _need(total == files[path][5] and stamp(os.fstat(fd)) == opened, "SOURCE_TREE_DRIFT")
+                _local(str(path), under=root)
+                _need(stamp(path.lstat()) == files[path], "SOURCE_TREE_DRIFT")
+            finally:
+                os.close(fd)
+            name = path.relative_to(root).as_posix().encode("utf-8")
+            digest.update(len(name).to_bytes(4, "big") + name + source.digest())
+        # Python workers may create/remove bytecode-only __pycache__ folders
+        # while independent processes inspect the shipped sources. Such
+        # directories are not part of the source hash and must not make an
+        # unchanged tree appear to drift. Keep the strict full *.py inventory,
+        # and pin identities of EVERY directory containing shipped source
+        # files (including their ancestors), not incidental cache directories.
+        source_parents = {root}
+        for path in files:
+            parent = path.parent
+            while parent != root:
+                source_parents.add(parent)
+                parent = parent.parent
+        newer_files, newer_dirs = inventory()
+        _need(newer_files == files and all(
+            newer_dirs.get(path) == directories[path]
+            for path in source_parents
+        ), "SOURCE_TREE_DRIFT")
+        return digest.hexdigest()
+    except OSError:
+        raise WorkerHold("SOURCE_TREE_UNREADABLE") from None
 
 
 def _mapping(values):
