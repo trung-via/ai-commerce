@@ -179,7 +179,23 @@ def _runtime_hash():
                 os.close(fd)
             name = path.relative_to(root).as_posix().encode("utf-8")
             digest.update(len(name).to_bytes(4, "big") + name + source.digest())
-        _need(inventory() == (files, directories), "SOURCE_TREE_DRIFT")
+        # Python workers may create/remove bytecode-only __pycache__ folders
+        # while independent processes inspect the shipped sources. Such
+        # directories are not part of the source hash and must not make an
+        # unchanged tree appear to drift. Keep the strict full *.py inventory,
+        # and pin identities of EVERY directory containing shipped source
+        # files (including their ancestors), not incidental cache directories.
+        source_parents = {root}
+        for path in files:
+            parent = path.parent
+            while parent != root:
+                source_parents.add(parent)
+                parent = parent.parent
+        newer_files, newer_dirs = inventory()
+        _need(newer_files == files and all(
+            newer_dirs.get(path) == directories[path]
+            for path in source_parents
+        ), "SOURCE_TREE_DRIFT")
         return digest.hexdigest()
     except OSError:
         raise WorkerHold("SOURCE_TREE_UNREADABLE") from None
