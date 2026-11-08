@@ -853,7 +853,13 @@ def registered_action_plan(
         manifest_owner = bool((admission is not None and name == admission["name"])
                               or name in persisted_by_name)
         expected = ["python", "-m", "pytest", *group.tests, "-q"]
-        if select_parallel or manifest_owner:
+        # A committed data-only owner may use the verified parallel onboarding
+        # capability, but a serial WorkItem must never be upgraded to -n 12.
+        # Until an independently registered serial manifest-owner binding exists,
+        # fail closed instead of silently changing the authorized execution mode.
+        if manifest_owner and not select_parallel:
+            problems.append(name + ":SERIAL_MANIFEST_OWNER_PROFILE_UNPROVEN")
+        if select_parallel:
             expected.extend(["-n", "12"])
         verified_owner = (admission if admission is not None and name == admission["name"]
                           else persisted_by_name.get(name))
