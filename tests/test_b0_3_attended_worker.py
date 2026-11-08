@@ -201,6 +201,59 @@ def test_runtime_hash_rechecks_complete_inventory(source_tree, monkeypatch, muta
     assert scans == 2
 
 
+
+@pytest.mark.parametrize("mutation", ["create", "remove", "rewrite"])
+def test_runtime_hash_accepts_bytecode_only_cache_churn_between_scans(source_tree, monkeypatch, mutation):
+    """Unrelated imports may mutate pyc caches between two source inventories."""
+    root, _ = source_tree
+    cache = root / "production_runtime" / "__pycache__"
+    bytecode = cache / "attended_worker.cpython-311.pyc"
+    if mutation != "create":
+        cache.mkdir()
+        bytecode.write_bytes(b"initial bytecode")
+    expected = legacy_source_digest(root)
+    original, scans = os.scandir, 0
+
+    def raced(path):
+        nonlocal scans
+        if Path(path) == root:
+            scans += 1
+            if scans == 2:
+                if mutation == "create":
+                    cache.mkdir()
+                    bytecode.write_bytes(b"created bytecode")
+                elif mutation == "remove":
+                    shutil.rmtree(cache)
+                else:
+                    bytecode.write_bytes(b"new bytecode from concurrent worker")
+        return original(path)
+
+    monkeypatch.setattr(os, "scandir", raced)
+    assert worker._runtime_hash() == expected
+    assert scans == 2
+
+
+def test_runtime_hash_rejects_new_python_source_even_inside_cache_directory(source_tree, monkeypatch):
+    """Cache tolerance must not hide a new real Python source or path swap."""
+    root, _ = source_tree
+    expected = legacy_source_digest(root)
+    original, scans = os.scandir, 0
+    def raced(path):
+        nonlocal scans
+        if Path(path) == root:
+            scans += 1
+            if scans == 2:
+                cache = root / "production_runtime" / "__pycache__"
+                cache.mkdir()
+                (cache / "unexpected.py").write_bytes(b"# new shipped python source\\n")
+        return original(path)
+    monkeypatch.setattr(os, "scandir", raced)
+    with pytest.raises(worker.WorkerHold, match="^SOURCE_TREE_DRIFT$"):
+        worker._runtime_hash()
+    assert scans == 2
+    assert expected != legacy_source_digest(root)
+
+
 def test_runtime_hash_cannot_accept_an_incomplete_worker_inventory(source_tree):
     _, module = source_tree
     module.unlink()
