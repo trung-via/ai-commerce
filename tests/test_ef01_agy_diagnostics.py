@@ -251,12 +251,15 @@ def test_agy_cache_environment_is_source_owned_and_child_only(tmp_path):
                  "XDG_CACHE_HOME": str(mirror), "TEMP": str(mirror),
                  "AI_COMMERCE_PYTEST_SCRATCH": str(mirror),
                  "AI_COMMERCE_PYTEST_REPO": str(mirror),
+                 "PYTEST_PLUGINS": "ai_commerce.engineering.profile,provider_own_plugin",
                  "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
                  "GIT_CONFIG_VALUE_0": "unchanged guard", "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}
     before = inherited.copy()
     child = runner._agy_child_env(inherited, scratch, repo=repo)
     assert inherited == before
+    assert child["PYTEST_PLUGINS"] == "provider_own_plugin"
     assert shlex.split(child["PYTEST_ADDOPTS"]) == ["-p", "no:cacheprovider",
+        "-p", "no:ai_commerce.engineering.profile",
         "--basetemp=" + str(scratch / "pytest-basetemp")]
     assert child["PYTHONDONTWRITEBYTECODE"] == "1"
     assert child["PYTHONPYCACHEPREFIX"] == str(scratch / "pycache")
@@ -732,7 +735,9 @@ args = sys.argv[1:]
 source, mirror, scratch = [Path(args[i+1]) for i, a in enumerate(args[:-1]) if a == '--add-dir']
 assert Path.cwd() == source
 assert hashlib.sha256((mirror / 'instruction.txt').read_bytes()).hexdigest() == EXPECTED_SHA
+assert 'ai_commerce.engineering.profile' not in os.environ.get('PYTEST_PLUGINS', '').split(',')
 assert shlex.split(os.environ['PYTEST_ADDOPTS']) == ['-p', 'no:cacheprovider',
+    '-p', 'no:ai_commerce.engineering.profile',
     '--basetemp=' + str(scratch / 'pytest-basetemp')]
 assert os.environ['PYTHONDONTWRITEBYTECODE'] == '1'
 assert all(os.environ[k] == str(scratch) for k in ('TEMP', 'TMP', 'TMPDIR'))
@@ -749,6 +754,7 @@ if SCENARIO in ('pytest', 'xdist'):
         "@pytest.mark.parametrize('value', [1, 2])\n"
         "def test_native_cache(value, tmp_path, request):\n"
         "    assert not request.config.pluginmanager.hasplugin('cacheprovider')\n"
+        "    assert not request.config.pluginmanager.hasplugin('ai_commerce.engineering.profile')\n"
         "    scratch = Path(os.environ['TEMP'])\n"
         "    assert scratch in tmp_path.parents\n"
         "    assert (scratch / 'pytest-basetemp') in tmp_path.parents\n"
@@ -764,6 +770,7 @@ if SCENARIO in ('pytest', 'xdist'):
     workers = [json.loads(p.read_text()) for p in sorted(scratch.glob('worker-*.json'))]
     assert len(workers) == 2 and all(w['cwd'] == str(mirror) for w in workers)
     assert all(shlex.split(w['addopts']) == ['-p', 'no:cacheprovider',
+        '-p', 'no:ai_commerce.engineering.profile',
         '--basetemp=' + str(scratch / 'pytest-basetemp')] for w in workers)
     assert not list(source.rglob('__pycache__'))
     assert not list(scratch.rglob('__pycache__'))
@@ -806,7 +813,9 @@ sys.exit(PROVIDER_EXIT)
     native_run = runner._run_agy_owned
     def observe(command, **kwargs):
         assert kwargs["cwd"] == repo and shlex.split(kwargs["env"]["PYTEST_ADDOPTS"]) == [
-            "-p", "no:cacheprovider", "--basetemp=" + str(roots[2] / "pytest-basetemp")]
+            "-p", "no:cacheprovider", "-p", "no:ai_commerce.engineering.profile",
+            "--basetemp=" + str(roots[2] / "pytest-basetemp")]
+        assert "ai_commerce.engineering.profile" not in kwargs["env"]["PYTEST_PLUGINS"].split(",")
         result = native_run(command, **kwargs)
         inventories.append(_native_scratch_inventory(roots[2]))
         receipt = roots[2] / "native.receipt.json"
