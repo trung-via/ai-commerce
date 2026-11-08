@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -250,12 +251,16 @@ def test_agy_cache_environment_is_source_owned_and_child_only(tmp_path):
                  "XDG_CACHE_HOME": str(mirror), "TEMP": str(mirror),
                  "AI_COMMERCE_PYTEST_SCRATCH": str(mirror),
                  "AI_COMMERCE_PYTEST_REPO": str(mirror),
+                 "PYTEST_PLUGINS": "ai_commerce.engineering.profile,provider_own_plugin",
                  "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
                  "GIT_CONFIG_VALUE_0": "unchanged guard", "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}
     before = inherited.copy()
     child = runner._agy_child_env(inherited, scratch, repo=repo)
     assert inherited == before
-    assert child["PYTEST_ADDOPTS"] == "-p no:cacheprovider"
+    assert child["PYTEST_PLUGINS"] == "provider_own_plugin"
+    assert shlex.split(child["PYTEST_ADDOPTS"]) == ["-p", "no:cacheprovider",
+        "-p", "no:ai_commerce.engineering.profile",
+        "--basetemp=" + str(scratch / "pytest-basetemp")]
     assert child["PYTHONDONTWRITEBYTECODE"] == "1"
     assert child["PYTHONPYCACHEPREFIX"] == str(scratch / "pycache")
     assert child["XDG_CACHE_HOME"] == str(scratch / "user-cache")
@@ -266,7 +271,482 @@ def test_agy_cache_environment_is_source_owned_and_child_only(tmp_path):
                if key.startswith("GIT_") or key == "PYTEST_DISABLE_PLUGIN_AUTOLOAD")
 
 
-def _native_cache_attempt(tmp_path, monkeypatch, scenario, provider_exit=0):
+def test_owned_cache_policy_overrides_case_variants_in_actual_child(tmp_path):
+    source, mirror, expected, _ = input_fixture(tmp_path)
+    scratch = tmp_path / "private-scratch"
+    scratch.mkdir()
+    hostile = dict(os.environ)
+    hostile.update({"UV_LINK_MODE": "hardlink", "uv_link_mode": "hardlink",
+                    "UV_CACHE_DIR": str(mirror), "uv_cache_dir": str(source),
+                    "PIP_CACHE_DIR": str(source), "pip_cache_dir": str(mirror),
+                    "npm_config_cache": str(source), "NPM_CONFIG_CACHE": str(mirror),
+                    "temp": str(source)})
+    before = dict(hostile)
+    child = runner._agy_child_env(hostile, scratch, repo=source)
+    assert hostile == before
+    assert len({key.upper() for key in child}) == len(child)
+    canary = subprocess.run([sys.executable, "-I", "-B", "-c",
+        "import json,os; print(json.dumps({k:os.environ[k] for k in "
+        "('UV_LINK_MODE','UV_CACHE_DIR','PIP_CACHE_DIR','npm_config_cache','TEMP')}))"],
+        cwd=scratch, env=child, capture_output=True, check=True, timeout=15)
+    observed = json.loads(canary.stdout)
+    assert observed.pop("UV_LINK_MODE") == "copy"
+    assert observed.pop("TEMP") == str(scratch)
+    assert all(Path(value).parent == scratch for value in observed.values())
+    assert {p.name: p.read_bytes() for p in mirror.iterdir()} == expected
+    assert list(source.iterdir()) == []
+
+
+def test_only_fresh_provider_scratch_enables_internal_link_proof(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    seen = []
+    def cleanup(root, parent, identity, parent_identity, **kwargs):
+        assert (root.stat().st_dev, root.stat().st_ino) == identity
+        seen.append(kwargs)
+        root.rmdir()
+        return {"status": "CLEAN", "reason": None}
+    monkeypatch.setattr(runner, "agy_remove_owned_tree", cleanup)
+    for prefix in ("agy_scratch-", "agy_input-", "unrecognized-"):
+        with runner._agy_temp_tree(source, prefix):
+            pass
+    assert seen == [{"scratch_internal_links": True}, {}, {}]
+
+
+@pytest.mark.parametrize("name", [
+    r"\outside\leaf", r"\owned-other\leaf", r"\Owned\leaf", r"\\server\owned\leaf",
+    r"\owned\..\outside", r"\owned\.\leaf", r"\owned\file:stream",
+    "\\owned\\leaf ", "\\owned\\leaf.", "\\owned\\", r"\owned\a/b", r"\owned\\leaf",
+])
+def test_modeled_hardlink_names_reject_foreign_and_inexact_paths(name):
+    """Pure name validation, not native hardlink evidence."""
+    with pytest.raises(ValueError):
+        adapters._agy_link_relative(name, r"\owned")
+
+
+def test_modeled_hardlink_names_preserve_exact_case_and_components():
+    assert adapters._agy_link_relative(r"\owned\Branch\Leaf", r"\owned") == ("Branch", "Leaf")
+
+
+@pytest.mark.parametrize("fault", ["zero-volume", "zero-id", "query-failed"])
+def test_modeled_full_file_id_rejects_unproven_identity(fault):
+    class Query:
+        def GetFileInformationByHandleEx(self, handle, kind, value, size):
+            assert kind == 18 and size == 24
+            value._obj.volume = 0 if fault == "zero-volume" else 1
+            value._obj.identifier[15] = 0 if fault == "zero-id" else 1
+            return fault != "query-failed"
+    with pytest.raises(ValueError, match="AGY_SCRATCH_ENTRY_UNSAFE"):
+        adapters._AgyScratchLinks.file_id(Query(), 1)
+
+
+def test_modeled_full_file_id_keeps_high_volume_and_file_bits():
+    class Query:
+        def GetFileInformationByHandleEx(self, handle, kind, value, size):
+            value._obj.volume = (1 << 63) + 7
+            value._obj.identifier[0] = 1
+            value._obj.identifier[15] = handle
+            return True
+    first = adapters._AgyScratchLinks.file_id(Query(), 1)
+    second = adapters._AgyScratchLinks.file_id(Query(), 2)
+    assert first[0] == (1 << 63) + 7 and first != second
+    assert first[1][15] == 1 and len(first[1]) == 16
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows enumeration API error model")
+@pytest.mark.parametrize("fault", ["access", "more-data", "short", "duplicate", "overflow"])
+def test_modeled_hardlink_enumeration_never_accepts_partial_or_duplicate_names(fault):
+    """API faults are modeled explicitly; no native hardlink claim."""
+    import ctypes
+    closed = []
+    class Query:
+        def FindFirstFileNameW(self, path, flags, size, buffer):
+            buffer.value = r"\owned\a"
+            return ctypes.c_void_p(-1).value if fault == "access" else 42
+        def FindNextFileNameW(self, handle, size, buffer):
+            if fault in ("duplicate", "overflow"):
+                buffer.value = r"\owned\a" if fault == "duplicate" else r"\owned\b"
+                return True
+            ctypes.set_last_error(234 if fault == "more-data" else 38)
+            return False
+        def FindClose(self, handle):
+            closed.append(handle)
+    scope = adapters._AgyScratchLinks(None, None, lambda: None)
+    with pytest.raises(ValueError):
+        scope.names(Query(), "modeled", 1 if fault == "overflow" else 2)
+    assert closed == ([] if fault == "access" else [42])
+
+
+def _required_native_link(source, alias):
+    try:
+        os.link(source, alias)
+    except OSError as exc:
+        native_error = getattr(exc, "winerror", None)
+    else:
+        return
+    # Raise outside the handler: exception chaining would print private paths.
+    pytest.fail("SANDBOX_NATIVE_LINK_UNAVAILABLE / UNPROVEN_MODEL_SANDBOX "
+                "when executed in a model sandbox; independent HOST must HOLD "
+                f"if unavailable there (winerror={native_error}). No native proof.",
+                pytrace=False)
+
+
+def test_native_link_denial_diagnostic_excludes_private_paths(tmp_path, monkeypatch):
+    private = tmp_path / "private-sentinel"
+    def denied(*args):
+        raise PermissionError(13, "access denied", str(private))
+    monkeypatch.setattr(os, "link", denied)
+    with pytest.raises(pytest.fail.Exception) as raised:
+        _required_native_link(private, tmp_path / "alias")
+    assert "UNPROVEN_MODEL_SANDBOX" in str(raised.value)
+    assert str(private) not in str(raised.value)
+    assert raised.value.__context__ is None
+
+
+def _native_outside_state(path):
+    """Metadata and security descriptor without reading/changing file data."""
+    import ctypes
+    from ctypes import wintypes as w
+    get_security = ctypes.WinDLL("advapi32", use_last_error=True).GetFileSecurityW
+    get_security.argtypes = [w.LPCWSTR, w.DWORD, w.LPVOID, w.DWORD, ctypes.POINTER(w.DWORD)]
+    get_security.restype = w.BOOL
+    size = w.DWORD()
+    get_security(str(path), 7, None, 0, ctypes.byref(size))
+    assert size.value
+    buffer = ctypes.create_string_buffer(size.value)
+    assert get_security(str(path), 7, buffer, len(buffer), ctypes.byref(size))
+    info = path.lstat()
+    return (info.st_dev, info.st_ino, info.st_nlink, info.st_mode, info.st_size,
+            info.st_mtime_ns, getattr(info, "st_birthtime_ns", info.st_ctime_ns),
+            info.st_file_attributes, buffer.raw)
+
+
+def _scratch_link_cleanup(tree):
+    info, parent = tree.lstat(), tree.parent.lstat()
+    return adapters.agy_remove_owned_tree(tree, tree.parent, (info.st_dev, info.st_ino),
+        (parent.st_dev, parent.st_ino), scratch_internal_links=True)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native containment APIs on an ordinary single-link file")
+def test_native_scratch_single_link_containment_api_roundtrip(tmp_path):
+    """Exercise real enumeration/volume/ID/pins; not multi-link native AC."""
+    tree = tmp_path / "fresh-private-scratch"
+    tree.mkdir()
+    branch = tree / "branch"
+    branch.mkdir()
+    leaf = branch / "single-link"
+    leaf.write_bytes(b"ordinary")
+    root_info, info = tree.lstat(), leaf.lstat()
+    checks = []
+    scope = adapters._AgyScratchLinks(tree, (root_info.st_dev, root_info.st_ino),
+                                      lambda: checks.append(True))
+    handle = adapters._AgyCleanupHandle(leaf, info, link_scope=scope)
+    try:
+        with scope.prove(handle, info):
+            handle.delete(info, {"readonly_files_cleared": 0})
+    finally:
+        handle.close()
+    assert checks and not leaf.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows pytest symlink proof")
+def test_native_scoped_pytest_current_link_clean_without_following_target(tmp_path):
+    tree = tmp_path / "fresh-private-scratch"
+    pytest_dir = tree / "pytest-basetemp"
+    pytest_dir.mkdir(parents=True)
+    target = pytest_dir / "test_example_0"
+    target.mkdir()
+    (target / "data").write_bytes(b"owned")
+    link = pytest_dir / "test_example_current"
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("native directory symlink creation denied")
+    assert link.is_symlink()
+    result = _scratch_link_cleanup(tree)
+    assert result["status"] == "CLEAN", result
+    assert result["reparse_links_removed"] == 1
+    assert not tree.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows foreign pytest-style symlink denial")
+@pytest.mark.parametrize("scenario", ["outside", "bad-name", "junction"])
+def test_native_scoped_pytest_current_link_rejects_unproven_target(tmp_path, scenario):
+    from test_ef01 import _directory_alias
+    tree = tmp_path / "fresh-private-scratch"
+    pytest_dir = tree / "pytest-basetemp"
+    pytest_dir.mkdir(parents=True)
+    outside = tmp_path / "protected-external"
+    outside.mkdir()
+    sentinel = outside / "sentinel"
+    sentinel.write_bytes(b"never alter")
+    internal = pytest_dir / "test_example_0"
+    internal.mkdir()
+    alias = pytest_dir / ("unexpected_alias" if scenario == "bad-name" else "test_example_current")
+    try:
+        if scenario == "junction":
+            _directory_alias(outside, alias)
+        else:
+            alias.symlink_to(outside if scenario == "outside" else internal,
+                             target_is_directory=True)
+    except OSError:
+        pytest.skip("native link privilege not available")
+    result = _scratch_link_cleanup(tree)
+    assert result["status"] == "HOLD", result
+    assert result["first_unsafe_entry"]["subtype"] == "REPARSE_UNPROVEN", result
+    assert alias.is_symlink() or adapters.is_link(alias)
+    assert sentinel.read_bytes() == b"never alter"
+    assert (pytest_dir / "test_example_0").exists()
+
+
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native scratch lifecycle without hardlink creation")
+def test_native_scratch_single_link_cleanup_retains_readonly_behavior(tmp_path):
+    """Single-link compatibility only; not a substitute for hardlink AC."""
+    tree = tmp_path / "fresh-private-scratch"
+    tree.mkdir()
+    branch = tree / "branch"
+    branch.mkdir()
+    leaf = branch / "readonly"
+    leaf.write_bytes(b"ordinary")
+    os.chmod(leaf, stat.S_IREAD)
+    result = _scratch_link_cleanup(tree)
+    assert result["status"] == "CLEAN" and not tree.exists(), result
+    assert result["readonly_files_cleared"] == 1
+    assert result["internal_hardlinks_removed"] == 0
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native scratch ADS containment")
+@pytest.mark.parametrize("target", ["root", "leaf"])
+def test_native_scratch_named_stream_holds_before_deletion(tmp_path, target):
+    tree = tmp_path / "fresh-private-scratch"
+    tree.mkdir()
+    leaf = tree / "leaf"
+    leaf.write_bytes(b"owned")
+    path = tree if target == "root" else leaf
+    Path(str(path) + ":private-stream").write_bytes(b"must not disappear")
+    before = _native_outside_state(leaf)
+    result = _scratch_link_cleanup(tree)
+    assert result["status"] == "HOLD" and result["reason"] == "AGY_INPUT_NAMED_STREAM", result
+    assert result["measurements"]["deleted_entries"] == 0
+    assert _native_outside_state(leaf) == before
+    assert Path(str(path) + ":private-stream").read_bytes() == b"must not disappear"
+
+
+def test_modeled_scoped_reparse_holds_before_cleanup_mutation(tmp_path, monkeypatch):
+    if os.name != "nt":
+        pytest.skip("Windows reparse metadata model")
+    tree = tmp_path / "fresh-private-scratch"
+    tree.mkdir()
+    leaf = tree / "leaf"
+    leaf.write_bytes(b"owned")
+    original = Path.lstat
+    def reparse(path, *args, **kwargs):
+        info = original(path, *args, **kwargs)
+        if path == leaf:
+            return SimpleNamespace(st_dev=info.st_dev, st_ino=info.st_ino, st_mode=info.st_mode,
+                st_nlink=info.st_nlink, st_file_attributes=info.st_file_attributes | 0x400)
+        return info
+    monkeypatch.setattr(Path, "lstat", reparse)
+    result = _scratch_link_cleanup(tree)
+    # Injected lstat claims a reparse attribute that the pinned native handle
+    # proves absent: that is a metadata CHANGED mismatch, not an unproven
+    # actual symlink. Both dispositions remain fail-closed before unlink.
+    assert result["status"] == "HOLD", result
+    assert result["reason"] == "AGY_INPUT_CLEANUP_UNSAFE", result
+    assert result["first_unsafe_entry"]["subtype"] == "REPARSE_CHANGED", result
+    assert result["measurements"]["deleted_entries"] == 0 and leaf.read_bytes() == b"owned"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="independent HOST NTFS hardlink acceptance")
+@pytest.mark.parametrize("entries", [700, 6500])
+def test_native_owned_scratch_internal_hardlinks_clean(tmp_path, entries, record_property):
+    source, mirror, expected, baseline = input_fixture(tmp_path)
+    sentinel = source / "source-sentinel"
+    sentinel.write_bytes(b"source byte identity")
+    tree = tmp_path / "fresh-private-scratch"
+    tree.mkdir()
+    branches = [tree / f"branch-{i}" for i in range(4)]
+    for branch in branches:
+        branch.mkdir()
+    leaf = branches[0] / "native-owned"
+    leaf.write_bytes(b"internal group")
+    for branch in branches[1:3]:
+        _required_native_link(leaf, branch / "native-alias")
+    assert leaf.stat().st_nlink == 3
+    os.chmod(leaf, stat.S_IREAD)
+    # Exactly entries names including root/directories/native link names.
+    for index in range(entries - 8):
+        (branches[3] / f"leaf-{index:05d}").write_bytes(b"private")
+    before = _native_outside_state(sentinel)
+    result = _scratch_link_cleanup(tree)
+    record_property("native_internal_hardlink_receipt", json.dumps(result, sort_keys=True))
+    assert result["status"] == "CLEAN", result
+    assert not tree.exists() and result["internal_hardlinks_removed"] == 2
+    assert result["measurements"]["deleted_entries"] == entries
+    assert result["measurements"]["entries_visited"] == entries
+    assert result["measurements"]["elapsed_seconds"] <= 30
+    assert _native_outside_state(sentinel) == before
+    assert sentinel.read_bytes() == b"source byte identity"
+    assert adapters.agy_input_manifest(source, mirror, expected, baseline)["status"] == "INTACT"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="independent HOST external alias negative AC")
+@pytest.mark.parametrize("outside", ["readonly-git", "input", "same-sid"])
+def test_native_owned_scratch_external_alias_holds_without_metadata_change(tmp_path, outside):
+    source, mirror, expected, baseline = input_fixture(tmp_path)
+    tree = tmp_path / "fresh-private-scratch"
+    tree.mkdir()
+    if outside == "readonly-git":
+        sentinel = source / ".git" / "objects" / "sentinel"
+        sentinel.parent.mkdir(parents=True)
+    else:
+        sentinel = (mirror if outside == "input" else tmp_path) / "outside-sentinel"
+    sentinel.write_bytes(b"outside byte identity")
+    _required_native_link(sentinel, tree / "alias")
+    os.chmod(sentinel, stat.S_IREAD)
+    before = _native_outside_state(sentinel)
+    result = _scratch_link_cleanup(tree)
+    assert result["status"] == "HOLD" and result["reason"] == "AGY_SCRATCH_ENTRY_UNSAFE", result
+    assert result["readonly_files_cleared"] == result["measurements"]["deleted_entries"] == 0
+    assert _native_outside_state(sentinel) == before
+    assert sentinel.read_bytes() == b"outside byte identity" and (tree / "alias").exists()
+    assert {name: (mirror / name).read_bytes() for name in expected} == expected
+
+
+@pytest.mark.skipif(os.name != "nt", reason="independent HOST hardlink proof fault AC")
+@pytest.mark.parametrize("fault", ["enum-access", "volume", "zero-id", "high-id", "alias-name", "late-enum"])
+def test_native_owned_scratch_proof_fault_holds_before_deletion(tmp_path, monkeypatch, fault):
+    tree = tmp_path / "fresh-private-scratch"
+    tree.mkdir()
+    leaf = tree / "a"
+    leaf.write_bytes(b"owned untouched")
+    _required_native_link(leaf, tree / "b")
+    os.chmod(leaf, stat.S_IREAD)
+    before = _native_outside_state(leaf)
+    kernel = adapters._agy_kernel()
+    class Fault:
+        names = 0
+        ids = None
+        def __getattr__(self, name):
+            return getattr(kernel, name)
+        def FindFirstFileNameW(self, *args):
+            import ctypes
+            self.names += 1
+            if fault == "enum-access" or (fault == "late-enum" and self.names >= 3):
+                return ctypes.c_void_p(-1).value
+            return kernel.FindFirstFileNameW(*args)
+        def GetFileInformationByHandleEx(self, handle, kind, value, size):
+            success = kernel.GetFileInformationByHandleEx(handle, kind, value, size)
+            if success and kind == 18:
+                if fault == "volume":
+                    value._obj.volume = 0
+                if fault == "zero-id":
+                    for i in range(16):
+                        value._obj.identifier[i] = 0
+                if fault == "high-id":
+                    if self.ids is None:
+                        self.ids = {}
+                    self.ids.setdefault(handle, len(self.ids) + 1)
+                    value._obj.identifier[15] ^= self.ids[handle]
+            return success
+        def GetFinalPathNameByHandleW(self, handle, buffer, size, flags):
+            length = kernel.GetFinalPathNameByHandleW(handle, buffer, size, flags)
+            if fault == "alias-name" and length and buffer.value.endswith("\\b"):
+                buffer.value = buffer.value[:-1] + "B"
+            return length
+    monkeypatch.setattr(adapters, "_agy_kernel", Fault)
+    result = _scratch_link_cleanup(tree)
+    assert result["status"] == "HOLD", result
+    assert result["measurements"]["deleted_entries"] == result["readonly_files_cleared"] == 0
+    assert _native_outside_state(leaf) == before and (tree / "b").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="independent HOST external alias race AC")
+def test_native_owned_scratch_late_external_alias_holds(tmp_path, monkeypatch):
+    tree = tmp_path / "fresh-private-scratch"
+    tree.mkdir()
+    leaf, external = tree / "a", tmp_path / "outside-race"
+    leaf.write_bytes(b"unchanged")
+    _required_native_link(leaf, tree / "b")
+    before = []
+    original = adapters._AgyCleanupHandle.delete
+    def race(handle, info, report):
+        if handle.path == leaf:
+            _required_native_link(leaf, external)
+            before.append(_native_outside_state(external))
+        return original(handle, info, report)
+    monkeypatch.setattr(adapters._AgyCleanupHandle, "delete", race)
+    result = _scratch_link_cleanup(tree)
+    assert before and result["status"] == "HOLD", result
+    assert _native_outside_state(external) == before[0]
+    assert external.read_bytes() == b"unchanged" and leaf.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="independent HOST INPUT remains single-link")
+def test_native_input_cleanup_still_holds_provably_internal_aliases(tmp_path):
+    tree = tmp_path / "input"
+    tree.mkdir()
+    (tree / "a").write_bytes(b"INPUT must remain single-link")
+    _required_native_link(tree / "a", tree / "b")
+    result = owned_cleanup(tree)
+    assert result["status"] == "HOLD" and (tree / "a").exists() and (tree / "b").exists()
+
+
+def _native_scratch_inventory(root):
+    """Observe pytest artifacts before teardown, without following any alias.
+
+    Hosted pytest can create `current` symlinks when its Windows token permits
+    them. Record that possibility instead of changing cleanup or assuming it
+    explains a historical HOLD. Match entry hashes to first_unsafe_entry.
+    """
+    report = {"status": "COMPLETE", "entries": 0, "reparse_entries": 0,
+              "hardlink_entries": 0, "readonly_entries": 0, "special_entries": []}
+    def visit(path, depth):
+        if depth > 128 or report["entries"] >= 100_000:
+            raise ValueError("INVENTORY_LIMIT")
+        info = path.lstat()
+        report["entries"] += 1
+        attributes = getattr(info, "st_file_attributes", 0)
+        reparse = bool(attributes & 0x400) or stat.S_ISLNK(info.st_mode)
+        hardlink = stat.S_ISREG(info.st_mode) and info.st_nlink > 1
+        report["reparse_entries"] += int(reparse)
+        report["hardlink_entries"] += int(hardlink)
+        report["readonly_entries"] += int(bool(attributes & 1))
+        if reparse or hardlink or attributes & 1:
+            report["special_entries"].append({
+                "relative_entry_sha256": hashlib.sha256(path.relative_to(root).as_posix().encode()).hexdigest(),
+                "reparse": reparse, "links": info.st_nlink, "readonly": bool(attributes & 1)})
+        if stat.S_ISDIR(info.st_mode) and not reparse:
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    visit(Path(entry.path), depth + 1)
+    try:
+        visit(root, 0)
+    except (OSError, ValueError) as exc:
+        report.update(status="UNPROVEN", winerror=getattr(exc, "winerror", None))
+    return report
+
+
+def _native_cache_diagnostic(result, scenario, inventory=None):
+    """Keep failure receipts useful without disclosing provider/source paths."""
+    teardown = result.get("scratch_teardown", {})
+    lifecycle = result.get("process_lifecycle", {})
+    return {"scenario": scenario, "status": result.get("status"),
+            "error_code": result.get("error_code"), "scratch_before_teardown": inventory,
+            "lifecycle": {key: lifecycle.get(key) for key in
+                ("status", "reason", "authority", "tree_empty", "forced_termination",
+                 "containment_proven", "native_error", "gate_identity", "at_return",
+                 "after_grace", "after_reconcile")},
+            "teardown_status": teardown.get("status"),
+            "roots": [{key: root.get(key) for key in
+                ("role", "status", "reason", "platform", "attempts", "first_unsafe_entry",
+                 "measurements", "diagnostics", "internal_hardlinks_removed", "hardlink_proof_checks")}
+                for root in teardown.get("roots", [])]}
+
+
+def _native_cache_attempt(tmp_path, monkeypatch, scenario, provider_exit=0, record_property=None):
     """Real Windows provider ingress/process tree, with explicitly modeled Git.
 
     Python is the diagnostic provider, not a live AGY/model permission proof.
@@ -303,20 +783,25 @@ def _native_cache_attempt(tmp_path, monkeypatch, scenario, provider_exit=0):
     monkeypatch.setenv("PYTEST_PLUGINS", ",".join(plugins))
     monkeypatch.setenv("AI_COMMERCE_PYTEST_SCRATCH", str(verifier_scratch))
     monkeypatch.setenv("AI_COMMERCE_PYTEST_REPO", str(repo))
-    roots, observations = [], []
+    roots, observations, inventories = [], [], []
     prompt = 'Trusted infrastructure probe "Việt" \\ 🚀'
     code = r'''
-import hashlib, json, os, subprocess, sys
+import hashlib, json, os, shlex, subprocess, sys
 from pathlib import Path
 args = sys.argv[1:]
 source, mirror, scratch = [Path(args[i+1]) for i, a in enumerate(args[:-1]) if a == '--add-dir']
 assert Path.cwd() == source
 assert hashlib.sha256((mirror / 'instruction.txt').read_bytes()).hexdigest() == EXPECTED_SHA
-assert os.environ['PYTEST_ADDOPTS'] == '-p no:cacheprovider'
+assert 'ai_commerce.engineering.profile' not in os.environ.get('PYTEST_PLUGINS', '').split(',')
+assert shlex.split(os.environ['PYTEST_ADDOPTS']) == ['-p', 'no:cacheprovider',
+    '-p', 'no:ai_commerce.engineering.profile',
+    '--basetemp=' + str(scratch / 'pytest-basetemp')]
 assert os.environ['PYTHONDONTWRITEBYTECODE'] == '1'
 assert all(os.environ[k] == str(scratch) for k in ('TEMP', 'TMP', 'TMPDIR'))
 assert os.environ['AI_COMMERCE_PYTEST_SCRATCH'] == str(scratch)
 assert os.environ['AI_COMMERCE_PYTEST_REPO'] == str(source)
+assert os.environ['UV_LINK_MODE'] == 'copy'
+assert all(Path(os.environ[k]).parent == scratch for k in ('UV_CACHE_DIR', 'PIP_CACHE_DIR', 'npm_config_cache'))
 sys.path.insert(0, str(source))
 import probe_module
 assert probe_module.VALUE == 611
@@ -326,8 +811,10 @@ if SCENARIO in ('pytest', 'xdist'):
         "@pytest.mark.parametrize('value', [1, 2])\n"
         "def test_native_cache(value, tmp_path, request):\n"
         "    assert not request.config.pluginmanager.hasplugin('cacheprovider')\n"
+        "    assert not request.config.pluginmanager.hasplugin('ai_commerce.engineering.profile')\n"
         "    scratch = Path(os.environ['TEMP'])\n"
         "    assert scratch in tmp_path.parents\n"
+        "    assert (scratch / 'pytest-basetemp') in tmp_path.parents\n"
         "    (scratch / ('worker-' + str(value) + '.json')).write_text(json.dumps({"
         "'pid': os.getpid(), 'worker': os.environ.get('PYTEST_XDIST_WORKER'), "
         "'cwd': str(Path.cwd()), 'addopts': os.environ['PYTEST_ADDOPTS']}))\n", encoding='utf-8')
@@ -339,11 +826,17 @@ if SCENARIO in ('pytest', 'xdist'):
     assert child.returncode == 0, (child.stdout + child.stderr).decode('utf-8', 'replace')
     workers = [json.loads(p.read_text()) for p in sorted(scratch.glob('worker-*.json'))]
     assert len(workers) == 2 and all(w['cwd'] == str(mirror) for w in workers)
-    assert all(w['addopts'] == '-p no:cacheprovider' for w in workers)
+    assert all(shlex.split(w['addopts']) == ['-p', 'no:cacheprovider',
+        '-p', 'no:ai_commerce.engineering.profile',
+        '--basetemp=' + str(scratch / 'pytest-basetemp')] for w in workers)
     assert not list(source.rglob('__pycache__'))
     assert not list(scratch.rglob('__pycache__'))
     assert not (mirror / '.pytest_cache').exists()
-    (scratch / 'native.receipt.json').write_text(json.dumps({'pytest_exit': child.returncode, 'workers': workers}))
+    assert not list(mirror.rglob('__pycache__'))
+    for worker in workers:
+        worker['cwd_is_input'] = worker.pop('cwd') == str(mirror)
+    (scratch / 'native.receipt.json').write_text(json.dumps({'pytest_exit': child.returncode,
+        'workers': workers, 'owned_cache_canary': True}))
 elif SCENARIO == 'directory':
     (mirror / '.pytest_cache').mkdir()
 elif SCENARIO == 'junction':
@@ -376,8 +869,12 @@ sys.exit(PROVIDER_EXIT)
     monkeypatch.setattr(runner, "command_for", command)
     native_run = runner._run_agy_owned
     def observe(command, **kwargs):
-        assert kwargs["cwd"] == repo and kwargs["env"]["PYTEST_ADDOPTS"] == "-p no:cacheprovider"
+        assert kwargs["cwd"] == repo and shlex.split(kwargs["env"]["PYTEST_ADDOPTS"]) == [
+            "-p", "no:cacheprovider", "-p", "no:ai_commerce.engineering.profile",
+            "--basetemp=" + str(roots[2] / "pytest-basetemp")]
+        assert "ai_commerce.engineering.profile" not in kwargs["env"]["PYTEST_PLUGINS"].split(",")
         result = native_run(command, **kwargs)
+        inventories.append(_native_scratch_inventory(roots[2]))
         receipt = roots[2] / "native.receipt.json"
         observations.append(json.loads(receipt.read_text()) if receipt.exists() else {})
         return result
@@ -388,10 +885,21 @@ sys.exit(PROVIDER_EXIT)
         selection=ExecutorSelection("antigravity", "gemini-3.8-flash", "high"),
         instruction=prompt, allowed_prefixes=["changed.txt"], max_repair_rounds=2,
         verify_argv=[sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).write_bytes(b'verified')"])
-    assert len(observations) == result["invocation_count"] == 1
+    diagnostic = json.dumps(_native_cache_diagnostic(result, scenario, inventories[0]), sort_keys=True)
+    if scenario in {"pytest", "xdist"}:
+        # pytest tmp_path creates two same-parent *current aliases. Native
+        # cleanup must remove only these pinned and fully proven links.
+        assert inventories[0]["reparse_entries"] == 2, diagnostic
+    print("NATIVE_CACHE_DIAGNOSTIC=" + diagnostic)
+    if record_property is not None:
+        record_property("native_cache_diagnostic", diagnostic)
+    assert len(observations) == result["invocation_count"] == 1, diagnostic
     assert result["process_lifecycle"]["status"] == "RECONCILED"
     assert result["process_lifecycle"]["tree_empty"] and not result["process_lifecycle"]["forced_termination"]
-    assert result["scratch_teardown"]["status"] == "CLEAN"
+    assert result["scratch_teardown"]["status"] == "CLEAN", diagnostic
+    if scenario in {"pytest", "xdist"}:
+        scratch_root = next(x for x in result["scratch_teardown"]["roots"] if x["role"] == "SCRATCH")
+        assert scratch_root["reparse_links_removed"] == 2, diagnostic
     assert all(r["status"] == "CLEAN" for r in result["scratch_teardown"]["roots"])
     assert not roots[1].exists() and not roots[2].exists()
     assert (repo / "changed.txt").is_file(), (result["status"],
@@ -407,7 +915,7 @@ sys.exit(PROVIDER_EXIT)
 @pytest.mark.skipif(os.name != "nt", reason="native Windows provider/pytest/xdist ingress")
 @pytest.mark.parametrize("scenario", ["pytest", "xdist"])
 def test_native_provider_pytest_in_input_keeps_manifest_intact(tmp_path, monkeypatch, record_property, scenario):
-    result, marker, receipt = _native_cache_attempt(tmp_path, monkeypatch, scenario)
+    result, marker, receipt = _native_cache_attempt(tmp_path, monkeypatch, scenario, record_property=record_property)
     assert result["status"] == "BUILD_VERIFIED_FOR_SCOPE" and marker.exists()
     assert result["verify_completed"] and result["verify_exit_code"] == 0
     evidence = tmp_path / "evidence"
@@ -415,6 +923,7 @@ def test_native_provider_pytest_in_input_keeps_manifest_intact(tmp_path, monkeyp
                  for phase in ("before", "after_executor", "after_verify")]
     assert manifests[0] == manifests[1] == manifests[2]
     assert manifests[0]["status"] == "INTACT"
+    assert receipt["owned_cache_canary"] and all(w["cwd_is_input"] for w in receipt["workers"])
     assert [f["name"] for f in manifests[0]["files"]] == ["instruction.txt"]
     if scenario == "xdist":
         assert len({w["pid"] for w in receipt["workers"]}) == 2
@@ -423,6 +932,51 @@ def test_native_provider_pytest_in_input_keeps_manifest_intact(tmp_path, monkeyp
         "fixture": "NATIVE_PROCESS_MODELED_GIT_NOT_LIVE_AGY", "scenario": scenario,
         "input_manifest": manifests[0], "pytest": receipt,
         "lifecycle": result["process_lifecycle"], "teardown": result["scratch_teardown"]}, sort_keys=True))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows sharing denial diagnostic")
+@pytest.mark.parametrize("scenario", ["pytest", "xdist"])
+def test_native_nested_cache_hold_emits_sanitized_root_proof(tmp_path, monkeypatch, scenario):
+    """A real retained handle distinguishes teardown HOLD from a live child.
+
+    This deliberately introduces a sharing violation; it does not claim the
+    historical hosted failure had that cause. Positive scenarios stay CLEAN.
+    """
+    import ctypes
+    native_run = runner._run_agy_owned
+    kernel = adapters._agy_kernel()
+    pins, roots, properties = [], [], {}
+    def retain_handle(command, **kwargs):
+        result = native_run(command, **kwargs)
+        scratch = Path(kwargs["env"]["TEMP"])
+        handle = kernel.CreateFileW(str(scratch / "native.receipt.json"),
+                                   0x80000000, 1, None, 3, 0x02200000, None)
+        assert handle != ctypes.c_void_p(-1).value
+        pins.append(handle)
+        roots.append(scratch)
+        return result
+    monkeypatch.setattr(runner, "_run_agy_owned", retain_handle)
+    try:
+        with pytest.raises(AssertionError):
+            _native_cache_attempt(tmp_path, monkeypatch, scenario,
+                                  record_property=properties.__setitem__)
+        diagnostic = json.loads(properties["native_cache_diagnostic"])
+        assert str(tmp_path) not in json.dumps(diagnostic)
+        assert all(str(root) not in json.dumps(diagnostic) for root in roots)
+        assert diagnostic["lifecycle"]["status"] == "RECONCILED"
+        assert diagnostic["lifecycle"]["tree_empty"]
+        assert not diagnostic["lifecycle"]["forced_termination"]
+        scratch = next(root for root in diagnostic["roots"] if root["role"] == "SCRATCH")
+        assert scratch["status"] == "HOLD"
+        assert scratch["reason"] == "AGY_SCRATCH_CLEANUP_SHARING_VIOLATION"
+        assert scratch["diagnostics"][-1]["winerror"] == 32
+        assert scratch["measurements"]["entries_visited"] > 0
+        assert diagnostic["scratch_before_teardown"]["status"] == "COMPLETE"
+    finally:
+        for handle in pins:
+            assert kernel.CloseHandle(handle)
+        for root in roots:
+            assert _scratch_link_cleanup(root)["status"] == "CLEAN"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows hostile input and nonzero ingress")
