@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import asdict, replace
 import hashlib
 import json
 import multiprocessing
@@ -29,6 +30,13 @@ from ai_commerce.remote.trusted_origin import (
     LocalCallerAttestation,
     LocalOriginRegistrar,
     OriginError,
+    PrivateOriginRendezvous,
+    PrivateOriginSnapshot,
+    RendezvousAck,
+    RendezvousEmission,
+    RendezvousHit,
+    RendezvousObservation,
+    RendezvousTrust,
 )
 from ai_commerce.remote.wake_adapter import (
     DurableIdempotencyStore,
@@ -1427,3 +1435,593 @@ def test_d2_preload_codes_are_explicitly_safe_failure_diagnostics():
     assert expected <= _OUTCOME_CODES
     assert "EXACT_CHAT_OPENED" not in _OUTCOME_CODES
     assert "EXACT_CHAT_PRESENT" not in _OUTCOME_CODES
+
+
+class SyntheticRendezvousAuthority:
+    """Independent test enrollment. This fixture has NO native/live authority."""
+    def __init__(self, caller, origin):
+        self.caller, self.origin = caller, origin
+        self.adapters = []
+        self.check_context = lambda operation, context: True
+
+    def authorize_origin(self, caller, *, operation, context):
+        return (caller is self.caller and operation in {
+            "register_route", "rendezvous_issue", "rendezvous_verify"} and
+            ("origin" not in context or context["origin"] == asdict(self.origin)) and
+            self.check_context(operation, context) is True)
+
+    def authenticate_rendezvous_adapter(self, adapter, *, role, context):
+        return next((trust for enrolled, name, trust in self.adapters
+                     if enrolled is adapter and name == role), None)
+
+
+class InMemoryRendezvousCarrier:
+    """Synthetic output into an in-memory page universe; never ChatGPT Send."""
+    def __init__(self, world):
+        self.world, self.emissions = world, []
+        self.before = lambda emission: None
+        self.ack = lambda emission: RendezvousAck(
+            emission.request_id, emission.marker_digest, self.world.output_origin, "turnA")
+
+    def emit_marker(self, emission):
+        self.before(emission)
+        self.emissions.append(emission)
+        self.world.hits.append(RendezvousHit(emission.marker, self.world.output_origin, "turnA"))
+        return self.ack(emission)
+
+
+class InMemoryRendezvousObserver:
+    """Independent synthetic browser state. No native enrollment or CDP access."""
+    def __init__(self, world):
+        self.world, self.capture_calls, self.search_calls = world, 0, 0
+        self.before_search = lambda emission: None
+        self.change_proof = lambda proof: proof
+
+    def capture_origin(self, *, request_id, binding):
+        self.capture_calls += 1
+        # Independently configured by fixture setup, never inferred from focus
+        # or obtained by echoing the requested binding or a caller's flags.
+        return self.world.opened_origin
+
+    def search_and_reprove(self, emission, *, nonce):
+        self.search_calls += 1
+        self.before_search(emission)
+        return self.change_proof(RendezvousObservation(
+            emission.request_id, emission.marker_digest, nonce,
+            tuple(hit for hit in self.world.hits if hit.marker == emission.marker),
+            self.world.opened_origin))
+
+
+def make_rendezvous_env(tmp_path, *, entropy=None):
+    registry, _, root = setup_env(tmp_path)
+    caller = LocalCallerAttestation("rendezvous-operator", True, "PRIVATE_TOKEN", True)
+    origin = PrivateOriginSnapshot("routeA", 1, CHAT_A, CDP_PORT,
+                                   "private-profile", "private-account", "private-session", "private-login")
+    authority = SyntheticRendezvousAuthority(caller, origin)
+    registrar = LocalOriginRegistrar(registry, root, authority=authority)
+    if not registry.exists():
+        registrar.register_route(route_id="routeA", generation=1, chat_url=CHAT_A,
+                                 cdp_endpoint=CDP_PORT, consent=True, attestation=caller)
+    world = SimpleNamespace(opened_origin=origin, output_origin=origin, hits=[])
+    carrier, observer = InMemoryRendezvousCarrier(world), InMemoryRendezvousObserver(world)
+    authority.adapters = [(carrier, "carrier", RendezvousTrust.SYNTHETIC),
+                          (observer, "observer", RendezvousTrust.SYNTHETIC)]
+    if entropy is not None:
+        authority.adapters.append((entropy, "test_entropy", RendezvousTrust.SYNTHETIC))
+    path = registry.with_name("origin_rendezvous.json")
+    issuer = PrivateOriginRendezvous(registrar, path, carrier=carrier, observer=observer,
+                                     _test_entropy=entropy)
+    return SimpleNamespace(issuer=issuer, registrar=registrar, caller=caller, authority=authority,
+                           carrier=carrier, observer=observer, world=world, path=path, origin=origin)
+
+
+def issue_rendezvous(env, **overrides):
+    return env.issuer.issue(**(dict(request_id="requestA", route_id="routeA", generation=1,
+                                   attestation=env.caller) | overrides))
+
+
+def verify_rendezvous(env, **overrides):
+    return env.issuer.verify(**(dict(request_id="requestA", attestation=env.caller) | overrides))
+
+
+def test_rendezvous_precommit_precedes_output_and_verification_is_one_shot(tmp_path):
+    env = make_rendezvous_env(tmp_path)
+    order = []
+
+    def before_emit(emission):
+        record = json.loads(env.path.read_text())["requests"]["requestA"]
+        assert record["phase"] == "PRECOMMITTED"
+        assert record["origin"] == asdict(env.origin)
+        assert record["marker"] == emission.marker
+        assert record["digest"] == hashlib.sha256(emission.marker.encode("ascii")).hexdigest()
+        assert record["message_id"] is None
+        assert env.carrier.emissions == []
+        order.append("durable-before-output")
+
+    def before_search(emission):
+        assert json.loads(env.path.read_text())["requests"]["requestA"]["phase"] == "VERIFYING"
+        order.append("durable-before-search")
+
+    env.carrier.before, env.observer.before_search = before_emit, before_search
+    pending = issue_rendezvous(env)
+    assert (pending.status, pending.code, pending.live_authority) == (
+        "SYNTHETIC_PENDING", "SYNTHETIC_EMISSION_ACKNOWLEDGED", False)
+    receipt = verify_rendezvous(env)
+    assert (receipt.status, receipt.code, receipt.live_authority) == (
+        "SYNTHETIC_MATCH", "NO_LIVE_AUTHORITY", False)
+    assert order == ["durable-before-output", "durable-before-search"]
+    assert json.loads(env.path.read_text())["requests"]["requestA"]["phase"] == "CONSUMED"
+    assert issue_rendezvous(env).code == verify_rendezvous(env).code == "RENDEZVOUS_REPLAY"
+    assert len(env.carrier.emissions) == env.observer.search_calls == 1
+
+
+def test_rendezvous_acknowledged_marker_survives_restart_without_reemission(tmp_path):
+    env = make_rendezvous_env(tmp_path)
+    assert issue_rendezvous(env).status == "SYNTHETIC_PENDING"
+    env.issuer = PrivateOriginRendezvous(env.registrar, env.path, carrier=env.carrier, observer=env.observer)
+    assert verify_rendezvous(env).status == "SYNTHETIC_MATCH"
+    assert len(env.carrier.emissions) == 1
+    assert issue_rendezvous(env).code == "RENDEZVOUS_REPLAY"
+
+
+@pytest.mark.parametrize("missing,code", [
+    ("carrier", "CARRIER_UNAVAILABLE"), ("observer", "NATIVE_OBSERVER_NOT_CONNECTED")])
+def test_rendezvous_absent_native_integrations_fail_closed(tmp_path, missing, code):
+    env = make_rendezvous_env(tmp_path)
+    setattr(env.issuer, missing, None)
+    receipt = issue_rendezvous(env)
+    assert (receipt.status, receipt.code, receipt.live_authority) == ("HOLD", code, False)
+    assert not env.path.exists()
+    assert not env.carrier.emissions and env.observer.capture_calls == 0
+
+
+@pytest.mark.parametrize("caller", [None, {}, object(),
+    LocalCallerAttestation("rendezvous-operator", True, "PRIVATE_TOKEN", True)])
+def test_rendezvous_caller_flags_and_equal_token_cannot_mint_authority(tmp_path, caller):
+    env = make_rendezvous_env(tmp_path)
+    assert issue_rendezvous(env, attestation=caller).code == "UNVERIFIED_ORIGIN"
+    assert not env.path.exists() and not env.carrier.emissions
+
+
+@pytest.mark.parametrize("role", ["carrier", "observer"])
+@pytest.mark.parametrize("trust", [None, False, True, 1, "NATIVE", "SYNTHETIC"])
+def test_rendezvous_adapter_enrollment_requires_exact_private_authority(tmp_path, role, trust):
+    env = make_rendezvous_env(tmp_path)
+    env.authority.adapters = [(adapter, name, trust if name == role else mode)
+                               for adapter, name, mode in env.authority.adapters]
+    assert issue_rendezvous(env).code == "RENDEZVOUS_ADAPTER_UNTRUSTED"
+    assert not env.path.exists() and not env.carrier.emissions
+
+
+def test_rendezvous_forged_and_shared_adapter_objects_are_rejected(tmp_path):
+    env = make_rendezvous_env(tmp_path)
+    env.issuer.carrier = InMemoryRendezvousCarrier(env.world)
+    assert issue_rendezvous(env).code == "RENDEZVOUS_ADAPTER_UNTRUSTED"
+    env.issuer.carrier = env.issuer.observer = env.carrier
+    assert issue_rendezvous(env).code == "RENDEZVOUS_ADAPTER_UNTRUSTED"
+    assert not env.path.exists()
+
+
+def test_rendezvous_independent_authority_pins_registry_and_private_origin(tmp_path):
+    env = make_rendezvous_env(tmp_path)
+    original = env.registrar.read_registry()
+    env.authority.check_context = lambda operation, context: (
+        "registry" not in context or context["registry"] == original)
+    changed = copy.deepcopy(original)
+    changed["routes"][0]["chat_url"] = CHAT_B
+    env.registrar.registry_path.write_text(json.dumps(changed))
+    assert issue_rendezvous(env).code == "UNVERIFIED_ORIGIN"
+    assert env.observer.capture_calls == 0
+    env.registrar.registry_path.write_text(json.dumps(original))
+    env.world.opened_origin = replace(env.origin, profile_id="wrong-profile")
+    assert issue_rendezvous(env).code == "UNVERIFIED_ORIGIN"
+    assert not env.path.exists() and not env.carrier.emissions
+
+
+@pytest.mark.parametrize("field,value", [
+    ("request_id", ""), ("request_id", []), ("route_id", {}), ("generation", True),
+    ("generation", 0), ("lease_seconds", False), ("lease_seconds", 0), ("lease_seconds", 301)])
+def test_rendezvous_malformed_input_is_content_free(tmp_path, field, value):
+    env = make_rendezvous_env(tmp_path)
+    assert issue_rendezvous(env, **{field: value}).code == "RENDEZVOUS_INPUT_INVALID"
+    assert not env.path.exists()
+
+
+@pytest.mark.parametrize("case,code", [
+    ("zero", "RENDEZVOUS_SEARCH_NOT_UNIQUE"),
+    ("duplicate", "RENDEZVOUS_SEARCH_NOT_UNIQUE"),
+    ("copied-chatB", "RENDEZVOUS_SEARCH_NOT_UNIQUE"),
+    ("partial", "RENDEZVOUS_OBSERVATION_INVALID"),
+    ("copied-message", "RENDEZVOUS_OBSERVATION_INVALID"),
+    ("stale-nonce", "RENDEZVOUS_OBSERVATION_INVALID"),
+    ("wrong-request", "RENDEZVOUS_OBSERVATION_INVALID"),
+    ("wrong-digest", "RENDEZVOUS_OBSERVATION_INVALID"),
+    ("forged-dict", "RENDEZVOUS_OBSERVATION_INVALID"),
+    ("forged-hit", "RENDEZVOUS_OBSERVATION_INVALID"),
+    ("forged-origin", "RENDEZVOUS_OBSERVATION_INVALID"),
+    ("chatB-only", "RENDEZVOUS_ORIGIN_MISMATCH"),
+])
+def test_rendezvous_exact_unique_complete_marker_and_output_message_required(tmp_path, case, code):
+    env = make_rendezvous_env(tmp_path)
+    assert issue_rendezvous(env).status == "SYNTHETIC_PENDING"
+
+    def change(proof):
+        hit = proof.hits[0]
+        changes = {
+            "zero": dict(hits=()), "duplicate": dict(hits=(hit, hit)),
+            "copied-chatB": dict(hits=(hit, replace(hit, origin=replace(env.origin, chat_url=CHAT_B)))),
+            "partial": dict(hits=(replace(hit, marker=hit.marker[:-1]),)),
+            "copied-message": dict(hits=(replace(hit, message_id="copied-turn"),)),
+            "stale-nonce": dict(nonce="stale"), "wrong-request": dict(request_id="requestB"),
+            "wrong-digest": dict(marker_digest="0" * 64),
+            "forged-hit": dict(hits=({"marker": hit.marker},)),
+            "forged-origin": dict(hits=(replace(hit, origin=asdict(env.origin)),)),
+            "chatB-only": dict(hits=(replace(hit, origin=replace(env.origin, chat_url=CHAT_B)),)),
+        }
+        return asdict(proof) if case == "forged-dict" else replace(proof, **changes[case])
+
+    env.observer.change_proof = change
+    receipt = verify_rendezvous(env)
+    assert (receipt.status, receipt.code, receipt.live_authority) == ("HOLD", code, False)
+    assert verify_rendezvous(env).code == "RENDEZVOUS_REPLAY"
+    assert env.observer.search_calls == len(env.carrier.emissions) == 1
+
+
+@pytest.mark.parametrize("field,value", [
+    ("route_id", "routeB"), ("generation", 2), ("chat_url", CHAT_B),
+    ("cdp_endpoint", "http://127.0.0.1:9444"), ("profile_id", "other-profile"),
+    ("account_id", "other-account"), ("session_id", "other-session"), ("login_id", "logged-out")])
+@pytest.mark.parametrize("changed", ["opened", "hit"])
+def test_rendezvous_reproves_actual_opened_route_account_login_session_generation(tmp_path, field, value, changed):
+    env = make_rendezvous_env(tmp_path)
+    assert issue_rendezvous(env).status == "SYNTHETIC_PENDING"
+    different = replace(env.origin, **{field: value})
+    if changed == "opened":
+        env.world.opened_origin = different
+    else:
+        env.world.hits[0] = replace(env.world.hits[0], origin=different)
+    receipt = verify_rendezvous(env)
+    assert (receipt.status, receipt.code) == ("HOLD", "RENDEZVOUS_ORIGIN_MISMATCH")
+    assert receipt.live_authority is False
+
+
+@pytest.mark.parametrize("change", ["generation", "chat_url", "cdp_endpoint"])
+def test_rendezvous_route_changes_are_held_without_rebind(tmp_path, change):
+    env = make_rendezvous_env(tmp_path)
+    issue_rendezvous(env)
+    data = env.registrar.read_registry()
+    data["routes"][0][change] = {"generation": 2, "chat_url": CHAT_B,
+                                 "cdp_endpoint": "http://127.0.0.1:9444"}[change]
+    env.registrar.registry_path.write_text(json.dumps(data))
+    assert verify_rendezvous(env).code == "RENDEZVOUS_ROUTE_CHANGED"
+    assert env.observer.search_calls == 0
+    assert json.loads(env.path.read_text())["requests"]["requestA"]["origin"] == asdict(env.origin)
+
+
+@pytest.mark.parametrize("fault", ["lost-ack", "no-ack", "forged-ack", "wrong-chat-ack"])
+def test_rendezvous_callback_failure_burns_marker_and_never_retries(tmp_path, fault):
+    env = make_rendezvous_env(tmp_path)
+
+    def bad_ack(emission):
+        if fault == "lost-ack":
+            raise RuntimeError("PRIVATE_COOKIE_AND_PAGE")
+        if fault == "no-ack":
+            return None
+        if fault == "forged-ack":
+            return {"request_id": emission.request_id, "marker_digest": emission.marker_digest}
+        return RendezvousAck(emission.request_id, emission.marker_digest,
+                             replace(env.origin, chat_url=CHAT_B), "turnA")
+
+    env.carrier.ack = bad_ack
+    receipt = issue_rendezvous(env)
+    assert (receipt.status, receipt.code) == ("UNKNOWN", "RENDEZVOUS_ACK_UNKNOWN")
+    assert "PRIVATE_COOKIE_AND_PAGE" not in repr(receipt)
+    assert issue_rendezvous(env).code == verify_rendezvous(env).code == "RENDEZVOUS_REPLAY"
+    assert len(env.carrier.emissions) == 1 and env.observer.search_calls == 0
+
+
+def _rendezvous_crash_after_precommit(directory):
+    env = make_rendezvous_env(Path(directory))
+    env.carrier.before = lambda emission: os._exit(73)
+    issue_rendezvous(env)
+
+
+def test_rendezvous_actual_process_crash_recovers_unknown_without_emission_retry(tmp_path):
+    child = multiprocessing.get_context("spawn").Process(
+        target=_rendezvous_crash_after_precommit, args=(str(tmp_path),))
+    child.start()
+    child.join(timeout=20)
+    try:
+        assert child.exitcode == 73
+    finally:
+        if child.is_alive():
+            child.terminate()
+            child.join(timeout=5)
+    env = make_rendezvous_env(tmp_path)
+    record = json.loads(env.path.read_text())["requests"]["requestA"]
+    assert record["phase"] == "PRECOMMITTED" and record["message_id"] is None
+    receipt = verify_rendezvous(env)
+    assert (receipt.status, receipt.code) == ("UNKNOWN", "RENDEZVOUS_PRECOMMIT_UNKNOWN")
+    assert issue_rendezvous(env).code == verify_rendezvous(env).code == "RENDEZVOUS_REPLAY"
+    assert not env.carrier.emissions and env.observer.search_calls == 0
+
+
+def test_rendezvous_crash_during_search_cannot_repeat_observation(tmp_path):
+    class Crash(BaseException):
+        pass
+
+    env = make_rendezvous_env(tmp_path)
+    issue_rendezvous(env)
+
+    def crash(emission):
+        raise Crash()
+
+    env.observer.before_search = crash
+    with pytest.raises(Crash):
+        verify_rendezvous(env)
+    env.issuer = PrivateOriginRendezvous(env.registrar, env.path, carrier=env.carrier, observer=env.observer)
+    receipt = verify_rendezvous(env)
+    assert (receipt.status, receipt.code) == ("UNKNOWN", "RENDEZVOUS_OBSERVATION_UNKNOWN")
+    assert env.observer.search_calls == 1
+
+
+def test_rendezvous_failed_durable_precommit_prevents_output(tmp_path, monkeypatch):
+    from ai_commerce.remote import _private_state
+    env = make_rendezvous_env(tmp_path)
+
+    def disk_failure(fd):
+        raise OSError("PRIVATE_STATE_PATH")
+
+    monkeypatch.setattr(_private_state.os, "fsync", disk_failure)
+    receipt = issue_rendezvous(env)
+    assert receipt.status in {"HOLD", "UNKNOWN"}
+    assert receipt.code == "RENDEZVOUS_STORE_UNAVAILABLE"
+    assert not env.carrier.emissions and not env.path.exists()
+    assert "PRIVATE_STATE_PATH" not in repr(receipt)
+
+
+@pytest.mark.parametrize("advance_ms", [60000, 60001, -1])
+def test_rendezvous_expired_or_rolled_back_lease_never_searches(tmp_path, monkeypatch, advance_ms):
+    from ai_commerce.remote import trusted_origin
+    env = make_rendezvous_env(tmp_path)
+    issue_rendezvous(env)
+    issued = json.loads(env.path.read_text())["requests"]["requestA"]["issued_ms"]
+    monkeypatch.setattr(trusted_origin.time, "time_ns", lambda: (issued + advance_ms) * 1000000)
+    assert verify_rendezvous(env).code == "RENDEZVOUS_EXPIRED"
+    assert env.observer.search_calls == 0
+    assert issue_rendezvous(env).code == "RENDEZVOUS_REPLAY"
+
+
+@pytest.mark.parametrize("damage", ["phase", "trust", "digest", "extra", "origin", "generation", "ack"])
+def test_rendezvous_malformed_private_state_never_reaches_observer(tmp_path, damage):
+    env = make_rendezvous_env(tmp_path)
+    issue_rendezvous(env)
+    data = json.loads(env.path.read_text())
+    record = data["requests"]["requestA"]
+    if damage == "extra":
+        record["cookie"] = "PRIVATE_COOKIE"
+    elif damage == "origin":
+        record["origin"] = {"chat_url": CHAT_A}
+    elif damage == "generation":
+        record["origin"]["generation"] = True
+    else:
+        record[{"phase": "phase", "trust": "trust", "digest": "digest", "ack": "message_id"}[damage]] = (
+            None if damage == "ack" else "PRIVATE_UNKNOWN_VALUE")
+    env.path.write_text(json.dumps(data))
+    receipt = verify_rendezvous(env)
+    assert (receipt.status, receipt.code) == ("HOLD", "RENDEZVOUS_STATE_INVALID")
+    assert env.observer.search_calls == 0
+    assert "PRIVATE_" not in repr(receipt)
+
+
+def test_rendezvous_direct_private_state_requires_external_non_aliasing_paths(tmp_path):
+    env = make_rendezvous_env(tmp_path)
+    registry = env.registrar.registry_path
+    for path in (env.registrar.repository_root / "private.json", registry,
+                 registry.with_name(registry.name + ".lock")):
+        with pytest.raises(OriginError, match="RENDEZVOUS_STATE_LOCATION_INVALID"):
+            PrivateOriginRendezvous(env.registrar, path)
+
+
+def test_rendezvous_production_entropy_is_256_bit_windows_csprng(tmp_path, monkeypatch):
+    import secrets
+    import random
+    env = make_rendezvous_env(tmp_path)
+    assert env.issuer._test_entropy is None
+    assert isinstance(secrets._sysrand, random.SystemRandom)
+    # Transparent instrumentation delegates to the real OS CSPRNG, including
+    # the real Windows implementation on the registered self-hosted runner.
+    actual_urandom, observed = os.urandom, []
+    assert random._urandom is actual_urandom
+
+    def observe_os_random(size):
+        value = actual_urandom(size)
+        if size == 32:
+            observed.append(value)
+        return value
+
+    monkeypatch.setattr(random, "_urandom", observe_os_random)
+    issue_rendezvous(env)
+    assert issue_rendezvous(env, request_id="requestB").status == "SYNTHETIC_PENDING"
+    markers = [item.marker for item in env.carrier.emissions]
+    assert len(set(markers)) == 2
+    for marker in markers:
+        assert marker.startswith("wh03.") and len(bytes.fromhex(marker[5:])) == 32
+    assert observed == [bytes.fromhex(marker[5:]) for marker in markers]
+
+
+def test_rendezvous_deterministic_entropy_seam_requires_trusted_synthetic_enrollment(tmp_path):
+    calls = []
+
+    def entropy(size):
+        calls.append(size)
+        return bytes(range(size))
+
+    env = make_rendezvous_env(tmp_path, entropy=entropy)
+    env.authority.adapters = [entry for entry in env.authority.adapters if entry[1] != "test_entropy"]
+    assert issue_rendezvous(env).code == "RENDEZVOUS_TEST_ENTROPY_FORBIDDEN"
+    assert not calls
+    env.authority.adapters.append((entropy, "test_entropy", RendezvousTrust.SYNTHETIC))
+    assert issue_rendezvous(env).status == "SYNTHETIC_PENDING"
+    assert calls == [32] and env.carrier.emissions[0].marker == "wh03." + bytes(range(32)).hex()
+    # Even a trusted deterministic seam cannot recycle a marker for a new request.
+    assert issue_rendezvous(env, request_id="requestB").code == "RENDEZVOUS_REPLAY"
+    assert len(env.carrier.emissions) == 1
+
+
+def test_rendezvous_native_enrollment_cannot_use_deterministic_entropy(tmp_path):
+    env = make_rendezvous_env(tmp_path, entropy=lambda size: b"a" * size)
+    env.authority.adapters = [(adapter, role, RendezvousTrust.NATIVE if role != "test_entropy" else trust)
+                               for adapter, role, trust in env.authority.adapters]
+    assert issue_rendezvous(env).code == "RENDEZVOUS_TEST_ENTROPY_FORBIDDEN"
+    assert not env.path.exists() and not env.carrier.emissions
+
+
+def test_rendezvous_public_receipts_and_private_values_are_redacted(tmp_path, caplog, capsys):
+    env = make_rendezvous_env(tmp_path)
+    pending = issue_rendezvous(env)
+    emission = env.carrier.emissions[0]
+    receipt = verify_rendezvous(env)
+    public = repr((pending, receipt, env.caller, env.origin, emission, env.world.hits[0],
+                   RendezvousAck("requestA", emission.marker_digest, env.origin, "turnA")))
+    public += json.dumps(asdict(receipt)) + caplog.text + capsys.readouterr().out
+    for private in (CHAT_A, CDP_PORT, "PRIVATE_TOKEN", "private-profile", "private-account",
+                    "private-session", "private-login", emission.marker, emission.marker_digest):
+        assert private not in public
+    assert receipt.status == "SYNTHETIC_MATCH" and receipt.live_authority is False
+
+
+def test_rendezvous_concurrent_issuers_share_one_durable_single_use_marker(tmp_path):
+    env = make_rendezvous_env(tmp_path)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        receipts = list(pool.map(lambda _: issue_rendezvous(env), range(4)))
+    assert [r.status for r in receipts].count("SYNTHETIC_PENDING") == 1
+    assert [r.code for r in receipts].count("RENDEZVOUS_REPLAY") == 3
+    assert len(env.carrier.emissions) == 1
+
+
+def test_rendezvous_concurrent_verifiers_perform_only_one_search(tmp_path):
+    env = make_rendezvous_env(tmp_path)
+    issue_rendezvous(env)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        receipts = list(pool.map(lambda _: verify_rendezvous(env), range(4)))
+    assert [r.status for r in receipts].count("SYNTHETIC_MATCH") == 1
+    assert [r.code for r in receipts].count("RENDEZVOUS_REPLAY") == 3
+    assert env.observer.search_calls == 1
+
+
+def test_rendezvous_untrusted_verification_cannot_consume_legitimate_marker(tmp_path):
+    env = make_rendezvous_env(tmp_path)
+    issue_rendezvous(env)
+    assert verify_rendezvous(env, attestation=None).code == "UNVERIFIED_ORIGIN"
+    assert verify_rendezvous(env, request_id="requestB").code == "RENDEZVOUS_NOT_FOUND"
+    assert verify_rendezvous(env, request_id={}).code == "RENDEZVOUS_INPUT_INVALID"
+    assert env.observer.search_calls == 0
+    assert verify_rendezvous(env).status == "SYNTHETIC_MATCH"
+
+
+@pytest.mark.parametrize("stage", ["before-emission", "after-emission", "after-search"])
+def test_rendezvous_private_authority_revocation_is_rechecked_at_effect_boundaries(tmp_path, stage):
+    env = make_rendezvous_env(tmp_path)
+    if stage == "before-emission":
+        env.authority.check_context = lambda operation, context: "record" not in context
+    elif stage == "after-emission":
+        env.carrier.ack = lambda emission: (
+            env.authority.adapters.clear() or
+            RendezvousAck(emission.request_id, emission.marker_digest, env.origin, "turnA"))
+    else:
+        issue_rendezvous(env)
+        env.observer.before_search = lambda emission: env.authority.adapters.clear()
+    receipt = verify_rendezvous(env) if stage == "after-search" else issue_rendezvous(env)
+    assert receipt.status in {"HOLD", "UNKNOWN"} and receipt.live_authority is False
+    assert receipt.code == ("UNVERIFIED_ORIGIN" if stage == "before-emission" else
+                            "RENDEZVOUS_ADAPTER_UNTRUSTED")
+    assert len(env.carrier.emissions) == (0 if stage == "before-emission" else 1)
+    assert issue_rendezvous(env).status == "HOLD"
+
+
+@pytest.mark.parametrize("stage", ["emission", "search"])
+@pytest.mark.parametrize("change", ["expire", "route", "authority"])
+def test_rendezvous_changes_during_callback_never_confirm_origin(tmp_path, monkeypatch, stage, change):
+    from ai_commerce.remote import trusted_origin
+    env = make_rendezvous_env(tmp_path)
+
+    def mutate(emission):
+        if change == "expire":
+            record = json.loads(env.path.read_text())["requests"]["requestA"]
+            monkeypatch.setattr(trusted_origin.time, "time_ns", lambda: record["expires_ms"] * 1000000)
+        elif change == "route":
+            registry = json.loads(env.registrar.registry_path.read_text())
+            registry["routes"][0]["generation"] = 2
+            env.registrar.registry_path.write_text(json.dumps(registry))
+        else:
+            env.authority.check_context = lambda operation, context: False
+
+    if stage == "emission":
+        env.carrier.before = mutate
+        receipt = issue_rendezvous(env)
+    else:
+        issue_rendezvous(env)
+        env.observer.before_search = mutate
+        receipt = verify_rendezvous(env)
+    assert receipt.status in {"HOLD", "UNKNOWN"} and receipt.live_authority is False
+    assert receipt.code == {"expire": "RENDEZVOUS_EXPIRED", "route": "RENDEZVOUS_ROUTE_CHANGED",
+                            "authority": "UNVERIFIED_ORIGIN"}[change]
+    assert len(env.carrier.emissions) == 1
+
+
+def test_rendezvous_observer_failure_is_unknown_and_never_retried(tmp_path):
+    env = make_rendezvous_env(tmp_path)
+    issue_rendezvous(env)
+
+    def fail(emission):
+        raise RuntimeError("PRIVATE_PAGE_COOKIE_SID_WEBSOCKET")
+
+    env.observer.before_search = fail
+    receipt = verify_rendezvous(env)
+    assert (receipt.status, receipt.code) == ("UNKNOWN", "RENDEZVOUS_OBSERVATION_UNKNOWN")
+    assert "PRIVATE_PAGE_COOKIE_SID_WEBSOCKET" not in repr(receipt)
+    assert verify_rendezvous(env).code == "RENDEZVOUS_REPLAY"
+    assert env.observer.search_calls == 1
+
+
+@pytest.mark.parametrize("value", [b"short", "x" * 32, bytearray(32), None])
+def test_rendezvous_entropy_seam_cannot_supply_malformed_randomness(tmp_path, value):
+    env = make_rendezvous_env(tmp_path, entropy=lambda size: value)
+    assert issue_rendezvous(env).code == "RENDEZVOUS_ENTROPY_INVALID"
+    assert not env.path.exists() and not env.carrier.emissions
+
+
+def test_rendezvous_forged_value_subclasses_cannot_assert_origin(tmp_path):
+    class ForgedObservation(RendezvousObservation):
+        pass
+
+    env = make_rendezvous_env(tmp_path)
+    issue_rendezvous(env)
+    env.observer.change_proof = lambda p: ForgedObservation(
+        p.request_id, p.marker_digest, p.nonce, p.hits, p.opened_origin)
+    assert verify_rendezvous(env).code == "RENDEZVOUS_OBSERVATION_INVALID"
+
+
+def test_rendezvous_private_authority_receives_and_rejects_forged_durable_record(tmp_path):
+    env = make_rendezvous_env(tmp_path)
+    issue_rendezvous(env)
+    pinned = json.loads(env.path.read_text())["requests"]["requestA"]
+    env.authority.check_context = lambda operation, context: (
+        "record" not in context or context["record"] == pinned)
+    changed = json.loads(env.path.read_text())
+    changed["requests"]["requestA"]["origin"]["session_id"] = "forged-session"
+    env.path.write_text(json.dumps(changed))
+    assert verify_rendezvous(env).code == "UNVERIFIED_ORIGIN"
+    assert env.observer.search_calls == 0
+
+
+def test_rendezvous_synthetic_record_cannot_be_promoted_to_native_authority(tmp_path):
+    env = make_rendezvous_env(tmp_path)
+    issue_rendezvous(env)
+    env.authority.adapters = [(adapter, role, RendezvousTrust.NATIVE)
+                               for adapter, role, trust in env.authority.adapters]
+    receipt = verify_rendezvous(env)
+    assert (receipt.status, receipt.code, receipt.live_authority) == (
+        "HOLD", "RENDEZVOUS_TRUST_MISMATCH", False)
+    assert env.observer.search_calls == 0
