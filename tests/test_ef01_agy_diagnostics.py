@@ -421,10 +421,10 @@ def _native_outside_state(path):
             info.st_file_attributes, buffer.raw)
 
 
-def _scratch_link_cleanup(tree):
+def _scratch_link_cleanup(tree, *, timeout_seconds=adapters.AGY_CLEANUP_DEFAULT_SECONDS):
     info, parent = tree.lstat(), tree.parent.lstat()
     return adapters.agy_remove_owned_tree(tree, tree.parent, (info.st_dev, info.st_ino),
-        (parent.st_dev, parent.st_ino), scratch_internal_links=True)
+        (parent.st_dev, parent.st_ino), timeout_seconds=timeout_seconds, scratch_internal_links=True)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native containment APIs on an ordinary single-link file")
@@ -580,13 +580,19 @@ def test_native_owned_scratch_internal_hardlinks_clean(tmp_path, entries, record
     for index in range(entries - 8):
         (branches[3] / f"leaf-{index:05d}").write_bytes(b"private")
     before = _native_outside_state(sentinel)
-    result = _scratch_link_cleanup(tree)
+    # This is native containment/count acceptance, not a host throughput bound.
+    # At 12 workers the 6500-entry fixture can exhaust the 30-second default
+    # while still making progress. Use the API's supported finite budget for
+    # that case; the smaller fixture and negative timeout tests keep defaults.
+    budget = 120.0 if entries == 6500 else adapters.AGY_CLEANUP_DEFAULT_SECONDS
+    result = _scratch_link_cleanup(tree, timeout_seconds=budget)
     record_property("native_internal_hardlink_receipt", json.dumps(result, sort_keys=True))
     assert result["status"] == "CLEAN", result
     assert not tree.exists() and result["internal_hardlinks_removed"] == 2
     assert result["measurements"]["deleted_entries"] == entries
     assert result["measurements"]["entries_visited"] == entries
-    assert result["measurements"]["elapsed_seconds"] <= 30
+    assert result["measurements"]["budget_seconds"] == budget
+    assert 0 <= result["measurements"]["elapsed_seconds"] <= budget
     assert _native_outside_state(sentinel) == before
     assert sentinel.read_bytes() == b"source byte identity"
     assert adapters.agy_input_manifest(source, mirror, expected, baseline)["status"] == "INTACT"
@@ -729,12 +735,13 @@ def _native_scratch_inventory(root):
     return report
 
 
-def _native_cache_diagnostic(result, scenario, inventory=None):
+def _native_cache_diagnostic(result, scenario, inventory=None, aliases=None):
     """Keep failure receipts useful without disclosing provider/source paths."""
     teardown = result.get("scratch_teardown", {})
     lifecycle = result.get("process_lifecycle", {})
     return {"scenario": scenario, "status": result.get("status"),
             "error_code": result.get("error_code"), "scratch_before_teardown": inventory,
+            "pytest_current_aliases": aliases,
             "lifecycle": {key: lifecycle.get(key) for key in
                 ("status", "reason", "authority", "tree_empty", "forced_termination",
                  "containment_proven", "native_error", "gate_identity", "at_return",
@@ -746,7 +753,8 @@ def _native_cache_diagnostic(result, scenario, inventory=None):
                 for root in teardown.get("roots", [])]}
 
 
-def _native_cache_attempt(tmp_path, monkeypatch, scenario, provider_exit=0, record_property=None):
+def _native_cache_attempt(tmp_path, monkeypatch, scenario, provider_exit=0, record_property=None,
+                          *, expected_scratch_status="CLEAN"):
     """Real Windows provider ingress/process tree, with explicitly modeled Git.
 
     Python is the diagnostic provider, not a live AGY/model permission proof.
@@ -806,6 +814,31 @@ sys.path.insert(0, str(source))
 import probe_module
 assert probe_module.VALUE == 611
 if SCENARIO in ('pytest', 'xdist'):
+    # Observe pytest's real syscall, preserving its arguments and exception.
+    # _force_symlink deliberately swallows creation failures on Windows.
+    (scratch / 'conftest.py').write_text("""import os
+from pathlib import Path
+
+def pytest_configure(config):
+    config._native_current_attempts = []
+    original = Path.symlink_to
+    base = Path(os.environ['TEMP']) / 'pytest-basetemp'
+    def observe(path, target, target_is_directory=False):
+        if base not in path.parents or not path.name.endswith('current'):
+            return original(path, target, target_is_directory=target_is_directory)
+        proof = {'alias': path.relative_to(base).as_posix(),
+                 'target': Path(target).relative_to(base).as_posix()}
+        config._native_current_attempts.append(proof)
+        try:
+            result = original(path, target, target_is_directory=target_is_directory)
+        except OSError as exc:
+            proof.update(created=False, errno=exc.errno, winerror=exc.winerror)
+            raise
+        else:
+            proof.update(created=True, errno=None, winerror=None)
+            return result
+    Path.symlink_to = observe
+""", encoding='utf-8')
     test = scratch / 'test_native_cache.py'
     test.write_text("import json, os\nfrom pathlib import Path\nimport pytest\n"
         "@pytest.mark.parametrize('value', [1, 2])\n"
@@ -815,9 +848,13 @@ if SCENARIO in ('pytest', 'xdist'):
         "    scratch = Path(os.environ['TEMP'])\n"
         "    assert scratch in tmp_path.parents\n"
         "    assert (scratch / 'pytest-basetemp') in tmp_path.parents\n"
+        "    relative = tmp_path.relative_to(scratch / 'pytest-basetemp').as_posix()\n"
+        "    attempts = [p for p in request.config._native_current_attempts if p['target'] == relative]\n"
+        "    assert len(attempts) == 1\n"
         "    (scratch / ('worker-' + str(value) + '.json')).write_text(json.dumps({"
         "'pid': os.getpid(), 'worker': os.environ.get('PYTEST_XDIST_WORKER'), "
-        "'cwd': str(Path.cwd()), 'addopts': os.environ['PYTEST_ADDOPTS']}))\n", encoding='utf-8')
+        "'cwd': str(Path.cwd()), 'addopts': os.environ['PYTEST_ADDOPTS'], "
+        "'pytest_current_alias': attempts[0]}))\n", encoding='utf-8')
     argv = [sys.executable, '-m', 'pytest', str(test), '--rootdir', str(mirror),
             '-o', 'cache_dir=' + str(mirror / '.pytest_cache'), '-q']
     if SCENARIO == 'xdist':
@@ -835,6 +872,24 @@ if SCENARIO in ('pytest', 'xdist'):
     assert not list(mirror.rglob('__pycache__'))
     for worker in workers:
         worker['cwd_is_input'] = worker.pop('cwd') == str(mirror)
+        proof = worker['pytest_current_alias']
+        alias = scratch / 'pytest-basetemp' / proof['alias']
+        target = scratch / 'pytest-basetemp' / proof['target']
+        assert alias.parent == target.parent and target.is_dir() and not target.is_symlink()
+        assert alias.name.endswith('current')
+        suffix = target.name[len(alias.name[:-len('current')]):]
+        assert suffix.isdecimal()
+        try:
+            info = alias.lstat()
+        except FileNotFoundError:
+            proof['entry_state'] = 'ABSENT'
+        else:
+            proof.update(entry_state='PRESENT', reparse_tag=info.st_reparse_tag,
+                         reparse=bool(info.st_file_attributes & 0x400),
+                         symlink=alias.is_symlink(), target_matches=os.readlink(alias) == str(target))
+        proof['relative_entry_sha256'] = hashlib.sha256(
+            alias.relative_to(scratch).as_posix().encode()).hexdigest()
+        del proof['alias'], proof['target']
     (scratch / 'native.receipt.json').write_text(json.dumps({'pytest_exit': child.returncode,
         'workers': workers, 'owned_cache_canary': True}))
 elif SCENARIO == 'directory':
@@ -865,6 +920,11 @@ sys.exit(PROVIDER_EXIT)
             antigravity_scratch_dir=kwargs.get("antigravity_scratch_dir"))
         if kwargs.get("antigravity_evidence_dir") is not None:
             roots.extend([source, kwargs["antigravity_evidence_dir"], kwargs["antigravity_scratch_dir"]])
+            # Keep the diagnostic fixture below the production command limit;
+            # its script and audit conftest belong to this owned scratch root.
+            script = kwargs["antigravity_scratch_dir"] / "native-provider.py"
+            script.write_text(code, encoding="utf-8")
+            return [sys.executable, str(script), *argv[1:]], stdin
         return [sys.executable, "-c", code, *argv[1:]], stdin
     monkeypatch.setattr(runner, "command_for", command)
     native_run = runner._run_agy_owned
@@ -885,23 +945,39 @@ sys.exit(PROVIDER_EXIT)
         selection=ExecutorSelection("antigravity", "gemini-3.8-flash", "high"),
         instruction=prompt, allowed_prefixes=["changed.txt"], max_repair_rounds=2,
         verify_argv=[sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).write_bytes(b'verified')"])
-    diagnostic = json.dumps(_native_cache_diagnostic(result, scenario, inventories[0]), sort_keys=True)
-    if scenario in {"pytest", "xdist"}:
-        # pytest tmp_path creates two same-parent *current aliases. Native
-        # cleanup must remove only these pinned and fully proven links.
-        assert inventories[0]["reparse_entries"] == 2, diagnostic
+    aliases = [w["pytest_current_alias"] for w in observations[0].get("workers", [])] if observations else []
+    diagnostic = json.dumps(_native_cache_diagnostic(
+        result, scenario, inventories[0] if inventories else None, aliases), sort_keys=True)
     print("NATIVE_CACHE_DIAGNOSTIC=" + diagnostic)
     if record_property is not None:
         record_property("native_cache_diagnostic", diagnostic)
     assert len(observations) == result["invocation_count"] == 1, diagnostic
     assert result["process_lifecycle"]["status"] == "RECONCILED"
     assert result["process_lifecycle"]["tree_empty"] and not result["process_lifecycle"]["forced_termination"]
-    assert result["scratch_teardown"]["status"] == "CLEAN", diagnostic
+    assert result["scratch_teardown"]["status"] == expected_scratch_status, diagnostic
     if scenario in {"pytest", "xdist"}:
         scratch_root = next(x for x in result["scratch_teardown"]["roots"] if x["role"] == "SCRATCH")
-        assert scratch_root["reparse_links_removed"] == 2, diagnostic
-    assert all(r["status"] == "CLEAN" for r in result["scratch_teardown"]["roots"])
-    assert not roots[1].exists() and not roots[2].exists()
+        assert inventories[0]["status"] == "COMPLETE", diagnostic
+        assert len(aliases) == len({p["relative_entry_sha256"] for p in aliases}) == 2, diagnostic
+        if all(p["created"] for p in aliases):
+            assert all(p["entry_state"] == "PRESENT" and p["reparse"] and p["symlink"]
+                       and p["reparse_tag"] == 0xA000000C and p["target_matches"] for p in aliases), diagnostic
+            assert inventories[0]["reparse_entries"] == 2, diagnostic
+            assert {p["relative_entry_sha256"] for p in inventories[0]["special_entries"] if p["reparse"]} == {
+                p["relative_entry_sha256"] for p in aliases}, diagnostic
+            if expected_scratch_status == "CLEAN":
+                assert scratch_root["reparse_links_removed"] == 2, diagnostic
+        else:
+            # Zero links is acceptable only with two independent native
+            # creation denials AND no directory entry, including dangling links.
+            assert all(p["created"] is False and p["winerror"] in {5, 50, 1314}
+                       and p["entry_state"] == "ABSENT" for p in aliases), diagnostic
+            assert inventories[0]["reparse_entries"] == scratch_root["reparse_links_removed"] == 0, diagnostic
+    assert {r["role"] for r in result["scratch_teardown"]["roots"]} == {"INPUT", "SCRATCH"}
+    assert all(r["status"] == (expected_scratch_status if r["role"] == "SCRATCH" else "CLEAN")
+               for r in result["scratch_teardown"]["roots"]), diagnostic
+    assert not roots[1].exists()
+    assert roots[2].exists() is (expected_scratch_status == "HOLD")
     assert (repo / "changed.txt").is_file(), (result["status"],
         (tmp_path / "evidence" / result["evidence_files"]["executor_stderr"]).read_text())
     assert (repo / "changed.txt").read_bytes() == b"allowed source edit"
@@ -936,7 +1012,7 @@ def test_native_provider_pytest_in_input_keeps_manifest_intact(tmp_path, monkeyp
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows sharing denial diagnostic")
 @pytest.mark.parametrize("scenario", ["pytest", "xdist"])
-def test_native_nested_cache_hold_emits_sanitized_root_proof(tmp_path, monkeypatch, scenario):
+def test_native_nested_cache_hold_emits_sanitized_root_proof(tmp_path, monkeypatch, record_property, scenario):
     """A real retained handle distinguishes teardown HOLD from a live child.
 
     This deliberately introduces a sharing violation; it does not claim the
@@ -957,10 +1033,13 @@ def test_native_nested_cache_hold_emits_sanitized_root_proof(tmp_path, monkeypat
         return result
     monkeypatch.setattr(runner, "_run_agy_owned", retain_handle)
     try:
-        with pytest.raises(AssertionError):
-            _native_cache_attempt(tmp_path, monkeypatch, scenario,
-                                  record_property=properties.__setitem__)
+        result, marker, _ = _native_cache_attempt(tmp_path, monkeypatch, scenario,
+            record_property=properties.__setitem__, expected_scratch_status="HOLD")
+        assert len(pins) == len(roots) == 1
+        assert result["status"] == "UNPROVEN" and marker.exists()
+        assert result["verify_completed"] and result["verify_exit_code"] == 0
         diagnostic = json.loads(properties["native_cache_diagnostic"])
+        record_property("native_cache_diagnostic", properties["native_cache_diagnostic"])
         assert str(tmp_path) not in json.dumps(diagnostic)
         assert all(str(root) not in json.dumps(diagnostic) for root in roots)
         assert diagnostic["lifecycle"]["status"] == "RECONCILED"
@@ -972,11 +1051,18 @@ def test_native_nested_cache_hold_emits_sanitized_root_proof(tmp_path, monkeypat
         assert scratch["diagnostics"][-1]["winerror"] == 32
         assert scratch["measurements"]["entries_visited"] > 0
         assert diagnostic["scratch_before_teardown"]["status"] == "COMPLETE"
+        evidence = tmp_path / "evidence"
+        manifests = [json.loads((evidence / result["evidence_files"]["agy_input_" + phase]).read_text())
+                     for phase in ("before", "after_executor", "after_verify")]
+        assert manifests[0] == manifests[1] == manifests[2]
+        assert manifests[0]["status"] == "INTACT"
     finally:
         for handle in pins:
             assert kernel.CloseHandle(handle)
         for root in roots:
-            assert _scratch_link_cleanup(root)["status"] == "CLEAN"
+            recovery = _scratch_link_cleanup(root)
+            record_property("native_cache_recovery", json.dumps(recovery, sort_keys=True))
+            assert recovery["status"] == "CLEAN" and not root.exists()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows hostile input and nonzero ingress")
@@ -1477,8 +1563,20 @@ def test_cleanup_6000_leaves_then_unsafe_entry_is_sanitized(tmp_path, monkeypatc
             yield last
     monkeypatch.setattr(Path, "lstat", lstat)
     monkeypatch.setattr(adapters.os, "scandir", lambda path: LastUnsafe() if Path(path) == tree else original_scandir(path))
+    # This models unsafe metadata after 6000 real deletions, not host throughput.
+    # Advance only the adapter's clock so a slow Windows runner still reaches
+    # that metadata. Keep pytest's clock and the separate deadline tests real.
+    ticks = 0
+    def monotonic():
+        nonlocal ticks
+        ticks += 1
+        return ticks / 1000
+    monkeypatch.setattr(adapters, "time", SimpleNamespace(
+        monotonic=monotonic, sleep=adapters.time.sleep))
     result = owned_cleanup(tree)
-    assert result["status"] == "HOLD" and result["reason"] == "AGY_SCRATCH_ENTRY_UNSAFE"
+    assert result["status"] == "HOLD" and result["reason"] == "AGY_SCRATCH_ENTRY_UNSAFE", result
+    assert result["measurements"]["budget_seconds"] == adapters.AGY_CLEANUP_DEFAULT_SECONDS
+    assert 0 < result["measurements"]["elapsed_seconds"] < result["measurements"]["budget_seconds"]
     assert result["measurements"]["deleted_entries"] == 6000
     assert result["measurements"]["entries_visited"] == 6002
     assert result["first_unsafe_entry"] == {
@@ -1795,6 +1893,25 @@ def test_cleanup_zero_budget_holds_immediately(tmp_path, zero_timeout):
     assert result["reason"] == "AGY_SCRATCH_CLEANUP_TIME_EXCEEDED"
     assert result["measurements"]["budget_seconds"] == 0.0
     assert tree.exists()
+
+
+def test_cleanup_elapsed_budget_holds_before_mutation(tmp_path, monkeypatch):
+    tree, identity, parent = _measured_tree(tmp_path)
+    # A positive default budget must still expire before touching the tree.
+    moments = iter((0.0, adapters.AGY_CLEANUP_DEFAULT_SECONDS + 1,
+                    adapters.AGY_CLEANUP_DEFAULT_SECONDS + 2))
+    monkeypatch.setattr(adapters, "time", SimpleNamespace(
+        monotonic=lambda: next(moments), sleep=adapters.time.sleep))
+    result = adapters.agy_remove_owned_tree(tree, tmp_path, identity, parent)
+    assert result["status"] == "HOLD"
+    assert result["reason"] == "AGY_SCRATCH_CLEANUP_TIME_EXCEEDED"
+    assert result["measurements"]["budget_seconds"] == adapters.AGY_CLEANUP_DEFAULT_SECONDS
+    assert result["measurements"]["elapsed_seconds"] > result["measurements"]["budget_seconds"]
+    assert result["measurements"]["entries_visited"] == 1
+    assert result["measurements"]["deleted_entries"] == 0
+    assert result["first_unsafe_entry"] is None
+    assert len(list((tree / "d0" / "d1").iterdir())) == 12
+    assert (tree / "d0" / "d1" / "f0.txt").read_bytes() == b"x"
 
 
 @pytest.mark.parametrize("invalid_timeout", [
