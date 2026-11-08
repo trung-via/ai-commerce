@@ -848,7 +848,15 @@ def _agy_child_env(environment: dict[str, str], scratch: Path, *, repo: Path) ->
     root = agy_data_directory(scratch)
     # Windows environment keys are case-insensitive even in a plain dict.
     # Remove hostile case variants before creating the child's environment.
-    controlled = {"TEMP", "TMP", "TMPDIR", "PYTEST_ADDOPTS", "PYTHONDONTWRITEBYTECODE",
+    # EF01's host verifier loads a pytest runtime plugin which overwrites the
+    # explicitly owned basetemp in pytest_configure. It must NEVER be inherited
+    # by AGY's provider-side pytest; this is an executor/verification boundary.
+    # Preserve every other inherited provider plugin unchanged.
+    inherited_pytest_plugins = next((v for k, v in environment.items()
+        if k.upper() == "PYTEST_PLUGINS"), "")
+    provider_pytest_plugins = ",".join(p for item in inherited_pytest_plugins.split(",")
+        if (p := item.strip()) and p != "ai_commerce.engineering.profile")
+    controlled = {"TEMP", "TMP", "TMPDIR", "PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTHONDONTWRITEBYTECODE",
                   "PYTHONPYCACHEPREFIX", "XDG_CACHE_HOME", "UV_CACHE_DIR", "UV_LINK_MODE",
                   "PIP_CACHE_DIR", "NPM_CONFIG_CACHE", "AI_COMMERCE_PYTEST_SCRATCH",
                   "AI_COMMERCE_PYTEST_REPO"}
@@ -858,7 +866,8 @@ def _agy_child_env(environment: dict[str, str], scratch: Path, *, repo: Path) ->
             # implicit tempfile mode creates `*-current` reparse/symlink aliases
             # that our fail-closed native SCRATCH cleanup intentionally rejects.
             # shlex quoting protects paths containing spaces/apostrophes.
-            "PYTEST_ADDOPTS": "-p no:cacheprovider --basetemp=" +
+            "PYTEST_PLUGINS": provider_pytest_plugins,
+            "PYTEST_ADDOPTS": "-p no:cacheprovider -p no:ai_commerce.engineering.profile --basetemp=" +
                              shlex.quote(str(root / "pytest-basetemp")),
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONPYCACHEPREFIX": str(root / "pycache"),
