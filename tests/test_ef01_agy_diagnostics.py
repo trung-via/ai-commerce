@@ -550,7 +550,12 @@ def test_modeled_scoped_reparse_holds_before_cleanup_mutation(tmp_path, monkeypa
         return info
     monkeypatch.setattr(Path, "lstat", reparse)
     result = _scratch_link_cleanup(tree)
-    assert result["status"] == "HOLD" and result["first_unsafe_entry"]["subtype"] == "REPARSE_UNPROVEN"
+    # Injected lstat claims a reparse attribute that the pinned native handle
+    # proves absent: that is a metadata CHANGED mismatch, not an unproven
+    # actual symlink. Both dispositions remain fail-closed before unlink.
+    assert result["status"] == "HOLD", result
+    assert result["reason"] == "AGY_INPUT_CLEANUP_UNSAFE", result
+    assert result["first_unsafe_entry"]["subtype"] == "REPARSE_CHANGED", result
     assert result["measurements"]["deleted_entries"] == 0 and leaf.read_bytes() == b"owned"
 
 
