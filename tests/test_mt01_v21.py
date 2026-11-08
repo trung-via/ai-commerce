@@ -9,10 +9,11 @@ from ai_commerce.engineering.impact_v21 import select_impact
 
 
 @pytest.fixture(autouse=True)
-def _isolate_test_git_env(monkeypatch):
-    for key in list(os.environ):
-        if key.startswith("GIT_CONFIG_") or key == "AI_COMMERCE_GIT_GUARD_PATHS":
-            monkeypatch.delenv(key, raising=False)
+def _external_test_git_sandbox(tmp_path):
+    # Disposable repositories are disjoint from the protected checkout.
+    # Inherit its guard unchanged; the hook can independently verify this.
+    root = Path(__file__).resolve().parents[1]
+    assert root != tmp_path.resolve() and root not in tmp_path.resolve().parents
 
 
 def mk(repo: Path, path: str, data: str = "# test\n"):
@@ -496,10 +497,8 @@ def _v21_make_git_sandbox(tmp_path):
        "from ai_commerce.product.beta import value as b\n"
        "def test_aggregate():\n    assert b() in (0, 2)\n    if b() == 2:\n        assert a() == 1\n")
     def git(*args):
-        import os
-        git_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG_") and k != "AI_COMMERCE_GIT_GUARD_PATHS"}
         return subprocess.check_output(["git", "-C", str(root), *args],
-                                       stderr=subprocess.STDOUT, env=git_env).decode().strip()
+                                       stderr=subprocess.STDOUT).decode().strip()
     git("init", "-q")
     git("add", ".")
     git("-c", "user.name=MT01 Test", "-c", "user.email=mt01@example.invalid",
@@ -1575,3 +1574,252 @@ def test_forged_onboarding_binding_rejected_by_verified_onboarding_binding(tmp_p
         registered_profiles=profiles,
         expected_group="mt01-v21",
     )
+
+
+def _v22_normal_owner_repo(tmp_path, monkeypatch, *, manifest=True, malformed=False):
+    """Real immutable base in an external repository, with inherited Git guard."""
+    import json
+    import subprocess
+    from ai_commerce.engineering import minimum_test as mt
+
+    _, data, ctx = _v22_manifest_fixture(tmp_path)
+    source, test = data["sources"][0], data["tests"][0]
+    mk(tmp_path, source, "def value():\n    return 1\n")
+    mk(tmp_path, test, 'import runpy\ndef test_value():\n'
+       f'    assert runpy.run_path("{source}")["value"]() == 1\n')
+    if not manifest:
+        (tmp_path / ctx["manifest_path"]).unlink()
+    else:
+        (tmp_path / ctx["manifest_path"]).write_bytes(
+            json.dumps({} if malformed else data, indent=2).encode() + b"\n")
+
+    def git(*args):
+        return subprocess.check_output(
+            ["git", *args], cwd=tmp_path, stderr=subprocess.STDOUT).decode().strip()
+
+    git("init", "-q")
+    git("config", "core.autocrlf", "false")
+    git("add", ".")
+    git("-c", "user.name=MT01", "-c", "user.email=mt01@example.invalid",
+        "commit", "-qm", "reviewed baseline owner fixture")
+    base_sha, base_files = git("rev-parse", "HEAD"), file_hashes(tmp_path)
+    monkeypatch.setattr(mt, "approved_groups", lambda: ctx["existing_groups"])
+    mk(tmp_path, source, "def value():\n    return 2\n")
+    mk(tmp_path, test, 'import runpy\ndef test_value():\n'
+       f'    assert runpy.run_path("{source}")["value"]() == 2\n')
+    ingress = ["python", "-m", "pytest", "tests/test_mt01_v21.py", "-q", "-n", "12"]
+    project = ["python", "-m", "pytest", "tests", "-q", "-n", "12"]
+    return data, ctx, dict(
+        repo=tmp_path, base_sha=base_sha, base_files=base_files,
+        candidate_files=file_hashes(tmp_path), changed_paths=[source, test],
+        allowed_paths=[source, test], required_acs=data["acs"],
+        fallback_argv=project, groups=ctx["existing_groups"],
+        registered_profiles={
+            "project-tests": project, "mt01-component-onboarding": ingress,
+            "mt01-prior-tests": ["python", "-m", "pytest", "tests/test_prior.py", "-q", "-n", "12"],
+        })
+
+
+def test_v22_normal_project_action_executes_committed_owner_and_replays_binding(tmp_path, monkeypatch):
+    import copy
+    import hashlib
+    from ai_commerce.engineering import verification
+    from ai_commerce.engineering.impact_v21 import verified_onboarding_binding
+
+    data, ctx, args = _v22_normal_owner_repo(tmp_path, monkeypatch)
+    plan = registered_action_plan(**args)
+    assert plan["selected_groups"] == ["fresh", "prior"]
+    assert plan["impact_v21"]["missing_mapping"] == ()
+    assert plan["unknown_acs"] == [] and not plan["fallback"]
+    assert all(entry["execute"] for entry in plan["groups"])
+    owner, prior = plan["groups"]
+    assert prior["selected_profile"] == "mt01-prior-tests"
+    assert "onboarding_data_only" not in prior["binding"]
+    binding = owner["binding"]
+    expected = ["python", "-m", "pytest", *data["tests"], "-q", "-n", "12"]
+    assert owner["selected_profile"] == "mt01-component-onboarding"
+    assert binding["argv"] == expected
+    assert binding["onboarding_manifest_path"] == ctx["manifest_path"]
+    assert binding["onboarding_manifest_sha256"] == hashlib.sha256(
+        (tmp_path / ctx["manifest_path"]).read_bytes()).hexdigest()
+    assert binding["selected_impact_tests"] == sorted([*data["tests"], "tests/test_prior.py"])
+    replay = dict(workspace=tmp_path, binding=binding,
+                  base_sha=args["base_sha"], changed_paths=args["changed_paths"],
+                  allowed_paths=args["allowed_paths"],
+                  registered_profiles=args["registered_profiles"], expected_group="fresh")
+    assert verified_onboarding_binding(**replay)
+    for key, value in (("base_sha", "f" * 40), ("onboarding_manifest_sha256", "0" * 64),
+                       ("mapping", prior["binding"]["mapping"]),
+                       ("selected_impact_tests", data["tests"]),
+                       ("argv", args["fallback_argv"])):
+        forged = copy.deepcopy(binding)
+        forged[key] = value
+        assert not verified_onboarding_binding(**{**replay, "binding": forged}), key
+    assert verification.registered_binding_problems(plan, args["registered_profiles"]) == []
+    execution = verification.run_pytest(expected, repo=tmp_path, timeout=90)
+    assert execution.returncode == 0, execution.stdout + execution.stderr
+    assert "1 passed" in execution.stdout
+    assert verification.observed_xdist_workers(execution.stdout.encode()) == 12
+    # A later source change cannot reuse the receipt's exact source binding.
+    mk(tmp_path, data["sources"][0], "def value():\n    return 3\n")
+    newer = registered_action_plan(**{**args, "candidate_files": file_hashes(tmp_path)})
+    new_binding = next(e["binding"] for e in newer["groups"] if e["group"] == "fresh")
+    assert new_binding["candidate_files"] != binding["candidate_files"]
+
+
+def test_v22_serial_action_with_committed_owner_holds_without_parallel_upgrade(tmp_path, monkeypatch):
+    """A serial WorkItem may not inherit the reserved -n12 manifest capability."""
+    from ai_commerce.engineering.impact_v21 import verified_onboarding_binding
+
+    data, _, args = _v22_normal_owner_repo(tmp_path, monkeypatch)
+    serial = ["python", "-m", "pytest", "tests", "-q"]
+    prior_serial = ["python", "-m", "pytest", "tests/test_prior.py", "-q"]
+    args["fallback_argv"] = serial
+    args["registered_profiles"]["project-tests-serial"] = serial
+    args["registered_profiles"]["mt01-prior-serial-tests"] = prior_serial
+    plan = registered_action_plan(**args)
+
+    assert plan["fallback"] is False
+    assert "fresh:SERIAL_MANIFEST_OWNER_PROFILE_UNPROVEN" in plan["reason_codes"]
+    assert plan["impact_v21"]["mode"] == "HOLD_COVERAGE"
+    assert all(entry["execute"] is False for entry in plan["groups"])
+    assert plan["groups"][-1]["group"] == "v21-coverage-hold"
+    owner = next(e for e in plan["groups"] if e["group"] == "fresh")
+    prior = next(e for e in plan["groups"] if e["group"] == "prior")
+    assert owner["binding"]["argv"] == ["python", "-m", "pytest", *data["tests"], "-q"]
+    assert "-n" not in owner["binding"]["argv"]
+    assert prior["binding"]["argv"] == prior_serial
+    assert prior["selected_profile"] == "mt01-prior-serial-tests"
+    assert not verified_onboarding_binding(
+        workspace=tmp_path, binding=owner["binding"],
+        changed_paths=args["changed_paths"], allowed_paths=args["allowed_paths"],
+        base_sha=args["base_sha"], registered_profiles=args["registered_profiles"],
+        expected_group="fresh",
+    )
+
+
+def test_v22_normal_project_action_without_baseline_owner_stays_held(tmp_path, monkeypatch):
+    _, _, args = _v22_normal_owner_repo(tmp_path, monkeypatch, manifest=False)
+    plan = registered_action_plan(**args)
+    assert not any(entry["execute"] for entry in plan["groups"])
+    assert any("SOURCE_OWNERSHIP_REQUIRED" in p for p in plan["impact_v21"]["missing_mapping"])
+    assert any("TEST_REGISTRATION_REQUIRED" in p for p in plan["impact_v21"]["missing_mapping"])
+
+
+def test_v22_candidate_manifest_requires_explicit_ingress_with_real_base(tmp_path, monkeypatch):
+    import subprocess
+    from ai_commerce.engineering import minimum_test as mt
+
+    old_source, old_test = "src/ai_commerce/learning/export.py", "tests/test_prior.py"
+    mk(tmp_path, old_source)
+    mk(tmp_path, old_test)
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=tmp_path,
+                                       stderr=subprocess.STDOUT).decode().strip()
+    git("init", "-q")
+    git("add", ".")
+    git("-c", "user.name=MT01", "-c", "user.email=mt01@example.invalid",
+        "commit", "-qm", "base without new component")
+    base_sha, base_files = git("rev-parse", "HEAD"), file_hashes(tmp_path)
+    _, data, ctx = _v22_manifest_fixture(tmp_path)
+    monkeypatch.setattr(mt, "approved_groups", lambda: ctx["existing_groups"])
+    project = ["python", "-m", "pytest", "tests", "-q", "-n", "12"]
+    ingress = ["python", "-m", "pytest", "tests/test_mt01_v21.py", "-q", "-n", "12"]
+    args = dict(repo=tmp_path, base_sha=base_sha, base_files=base_files,
+                candidate_files=file_hashes(tmp_path), changed_paths=ctx["changed_paths"],
+                allowed_paths=ctx["allowed_paths"], required_acs=data["acs"],
+                fallback_argv=project, groups=ctx["existing_groups"],
+                registered_profiles={"project-tests": project, "mt01-component-onboarding": ingress,
+                    "mt01-prior-tests": ["python", "-m", "pytest", old_test, "-q", "-n", "12"]})
+    denied = registered_action_plan(**args)
+    assert "ONBOARD_EXPLICIT_INGRESS_REQUIRED" in denied["reason_codes"]
+    assert not any(entry["execute"] for entry in denied["groups"])
+    admitted = registered_action_plan(**{**args, "fallback_argv": ingress})
+    assert all(entry["execute"] for entry in admitted["groups"])
+    assert admitted["selected_groups"] == ["fresh", "prior"]
+
+
+@pytest.mark.parametrize("failure", [
+    "malformed", "drifted", "crlf", "missing", "no-capability", "wrong-base",
+    "unknown-source", "unknown-test", "unknown-ac", "changed-manifest", "unsafe-edit",
+])
+def test_v22_normal_baseline_owner_failures_hold_entire_action(tmp_path, monkeypatch, failure):
+    from ai_commerce.engineering.impact_v21 import verified_onboarding_binding
+
+    data, ctx, args = _v22_normal_owner_repo(tmp_path, monkeypatch, malformed=failure == "malformed")
+    manifest = tmp_path / ctx["manifest_path"]
+    if failure == "drifted":
+        manifest.write_text("{}", encoding="utf-8")
+    elif failure == "crlf":
+        manifest.write_bytes(manifest.read_bytes().replace(b"\n", b"\r\n"))
+    elif failure == "missing":
+        manifest.unlink()
+    elif failure == "no-capability":
+        args["registered_profiles"].pop("mt01-component-onboarding")
+    elif failure == "wrong-base":
+        args["base_sha"] = "f" * 40
+    elif failure in ("unknown-source", "unknown-test", "unsafe-edit"):
+        path = {"unknown-source": "src/ai_commerce/unknown/service.py",
+                "unknown-test": "tests/test_unknown.py", "unsafe-edit": "pytest.ini"}[failure]
+        mk(tmp_path, path)
+        args["changed_paths"].append(path)
+        args["allowed_paths"].append(path)
+    elif failure == "unknown-ac":
+        args["required_acs"] = [*data["acs"], "UNKNOWN.offline"]
+    elif failure == "changed-manifest":
+        # Even unchanged manifest bytes cannot be claimed as new admission.
+        args["changed_paths"].append(ctx["manifest_path"])
+        args["allowed_paths"].append(ctx["manifest_path"])
+    args["candidate_files"] = file_hashes(tmp_path)
+    plan = registered_action_plan(**args)
+    assert plan["impact_v21"]["mode"].startswith("HOLD"), plan
+    assert not any(entry["execute"] for entry in plan["groups"]), plan
+    assert plan["groups"][-1]["group"] == "v21-coverage-hold"
+    for entry in plan["groups"]:
+        if entry["group"] == "fresh" and failure != "unknown-ac":
+            assert not verified_onboarding_binding(
+                workspace=tmp_path, binding=entry["binding"], changed_paths=args["changed_paths"],
+                allowed_paths=args["allowed_paths"], base_sha=args["base_sha"],
+                registered_profiles=args["registered_profiles"], expected_group="fresh")
+
+
+@pytest.mark.parametrize("changed", [
+    ["src/ai_commerce/production_runtime/attended_worker.py", "tests/test_b0_3_attended_worker.py"],
+    ["tests/test_b0_3_attended_worker.py"],
+    ["src/ai_commerce/production_runtime/operator.py"],
+    ["src/ai_commerce/creative_quality/pulse_studio_offline_bridge.py"],
+    ["src/ai_commerce/creative_quality/pulse_studio_effect_preflight.py"],
+])
+def test_v22_normal_real_main_manifests_resolve_production_owner_closure(changed):
+    import json
+    import subprocess
+    from ai_commerce.engineering.minimum_test import approved_groups
+    from ai_commerce.engineering.impact_v21 import verified_onboarding_binding
+
+    root = Path(__file__).resolve().parents[1]
+    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    profiles = json.loads((root / ".github/ef02/verify-profiles.json").read_text(encoding="utf-8-sig"))
+    files = file_hashes(root)
+    plan = registered_action_plan(
+        repo=root, base_sha=base, base_files=files, candidate_files=files,
+        changed_paths=changed, allowed_paths=changed, required_acs=(),
+        fallback_argv=profiles["project-tests"], groups=approved_groups(), registered_profiles=profiles)
+    assert not plan["impact_v21"]["missing_mapping"], plan["reason_codes"]
+    assert all(entry["execute"] for entry in plan["groups"]), plan["reason_codes"]
+    expected = {"b0-3", "b0-4", "bq-05a", "bq-05b0"} if changed[0] == "src/ai_commerce/production_runtime/attended_worker.py" else {
+        "tests/test_b0_3_attended_worker.py": {"b0-3"},
+        "src/ai_commerce/production_runtime/operator.py": {"b0-4", "bq-05a", "bq-05b0"},
+        "src/ai_commerce/creative_quality/pulse_studio_offline_bridge.py": {"bq-05a", "bq-05b0"},
+        "src/ai_commerce/creative_quality/pulse_studio_effect_preflight.py": {"bq-05b0"},
+    }[changed[0]]
+    assert expected <= set(plan["selected_groups"])
+    for entry in plan["groups"]:
+        binding = entry["binding"]
+        if "onboarding_manifest_path" in binding:
+            assert binding["registered_profile"] == "mt01-component-onboarding"
+            assert verified_onboarding_binding(
+                workspace=root, binding=binding, changed_paths=changed, allowed_paths=changed,
+                base_sha=base, registered_profiles=profiles, expected_group=entry["group"])
+        else:
+            assert binding["registered_profile"] == f'mt01-{entry["group"]}-tests'
+            assert profiles[binding["registered_profile"]] == binding["argv"]
