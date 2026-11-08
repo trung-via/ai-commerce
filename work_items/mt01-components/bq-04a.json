@@ -1,0 +1,26 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "bq-04a",
+  "sources": [
+    "src/ai_commerce/creative_quality/repair_policy.py",
+    "src/ai_commerce/creative_quality/repair_preservation.py",
+    "src/ai_commerce/creative_quality/repair_reinspection.py"
+  ],
+  "tests": [
+    "tests/test_bq_04a_targeted_repair.py"
+  ],
+  "acs": [
+    "BQ-04a.q5-r7-evidence-bound-minimal-repair-decision",
+    "BQ-04a.q5-r7-preservation-scope-fail-closed",
+    "BQ-04a.q5-r7-reinspection-no-false-improvement"
+  ],
+  "consumers": [
+    "src/ai_commerce/creative_quality/multimodal_review.py",
+    "src/ai_commerce/creative_quality/quality_review.py",
+    "src/ai_commerce/creative_quality/t2_sampling.py",
+    "src/ai_commerce/creative_quality/t3_assessment.py",
+    "src/ai_commerce/creative_quality/study_readiness.py",
+    "src/ai_commerce/affiliate_release/inspection.py"
+  ],
+  "contracts": []
+}

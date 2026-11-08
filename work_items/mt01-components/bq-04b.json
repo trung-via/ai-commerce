@@ -1,0 +1,27 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "bq-04b",
+  "sources": [
+    "src/ai_commerce/creative_quality/repair_offline_adapter.py",
+    "src/ai_commerce/creative_quality/repair_verified_evidence.py"
+  ],
+  "tests": [
+    "tests/test_bq_04b_offline_repair.py"
+  ],
+  "acs": [
+    "BQ-04b.q5-deterministic-edit-fixture-isolated",
+    "BQ-04b.q5-artifact-identity-attempt-receipt",
+    "BQ-04b.q5-independent-technical-reinspection-fail-closed"
+  ],
+  "consumers": [
+    "src/ai_commerce/affiliate_release/inspection.py",
+    "src/ai_commerce/creative_quality/inspection_evidence.py",
+    "src/ai_commerce/creative_quality/quality_review.py",
+    "src/ai_commerce/creative_quality/t2_sampling.py",
+    "src/ai_commerce/creative_quality/multimodal_review.py",
+    "src/ai_commerce/creative_quality/repair_policy.py",
+    "src/ai_commerce/creative_quality/repair_preservation.py",
+    "src/ai_commerce/creative_quality/repair_reinspection.py"
+  ],
+  "contracts": []
+}

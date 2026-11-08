@@ -1,0 +1,16 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "wakehub-private-operator",
+  "sources": ["src/ai_commerce/wakehub/private_operator.py"],
+  "tests": ["tests/test_wakehub_private_operator.py"],
+  "acs": [
+    "WAKEHUB.WH01B.lifecycle-typed-grants",
+    "WAKEHUB.WH01B.lifecycle-unknown-reconcile",
+    "WAKEHUB.WH01B.lifecycle-no-native-without-enrollment"
+  ],
+  "consumers": [
+    "src/ai_commerce/wakehub/native_inventory.py",
+    "src/ai_commerce/engineering/three_runner_topology.py"
+  ],
+  "contracts": []
+}

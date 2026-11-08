@@ -1,0 +1,20 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "wakehub-g2-native",
+  "sources": [
+    "src/ai_commerce/wakehub/native_runtime.py",
+    "src/ai_commerce/wakehub/native_authority.py",
+    "src/ai_commerce/wakehub/native_journal.py"
+  ],
+  "tests": ["tests/test_wakehub_g2_native.py"],
+  "acs": [
+    "WAKEHUB.G2.native-source-custody",
+    "WAKEHUB.G2.native-durable-first-wins",
+    "WAKEHUB.G2.native-no-replay-and-private-evidence"
+  ],
+  "consumers": [
+    "src/ai_commerce/wakehub/private_operator.py",
+    "src/ai_commerce/wakehub/native_inventory.py"
+  ],
+  "contracts": []
+}

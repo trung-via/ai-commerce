@@ -19,6 +19,62 @@ from ai_commerce.remote.validation import (
 from ai_commerce.remote.scheduler import run_schedule
 from ai_commerce.remote.transport import GitHubTransport, RemoteTransportError
 
+
+def test_r4_remote_bridge_uses_configured_source_and_never_schedules(tmp_path, monkeypatch):
+    from test_ef02_m0r_fault_injection import _r4_bridge_fixture
+    from ai_commerce.remote.worker import LocalBatchWorker
+    f = _r4_bridge_fixture(tmp_path, monkeypatch)
+    worker = object.__new__(LocalBatchWorker)
+    worker.github, worker.batch, worker.issue_number, worker.issuer_login = f.args[0], f.args[1], 643, "trung-via"
+    def forbidden(*a, **kw): pytest.fail("source bridge scheduled native execution")
+    for method in ("execute_action", "_acquire_owner", "reconcile_action"):
+        monkeypatch.setattr(worker, method, forbidden)
+    with f.ledger:
+        report = worker.witness_bridge(f.args[2], f.request(), enrollment=f.enrollment,
+            context=f.context, ssh_keygen=f.verifier, ledger=f.ledger, source_contract_fixture=True)
+        assert report["status"] == "SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED", report
+        assert report["execution_allowed"] is report["replay_authorized"] is report["publication_authorized"] is False
+
+
+def test_r4_requested_acceptance_ids_are_registered_with_owner_and_consumers():
+    from ai_commerce.engineering.minimum_test import approved_groups
+    requested = {"EF01.execution", "EF01.repair", "EF01.source-integrity", "EF01.provider-boundary",
+        "EF02.action-and-fanin", "EF02.scope-review", "MT01.selection-and-evidence",
+        "EF01P.git-and-host-budget", "EF02.recovery"}
+    groups = approved_groups()
+    assert requested <= {ac for group in groups for ac in group.acs}
+    assert {g.name for g in groups if requested & set(g.acs)} == {
+        "ef01", "repair", "integrity", "provider", "ef02", "ef02-scope", "mt01", "ef01p", "ef02-recovery"}
+    for path in ("src/ai_commerce/remote/transport.py", "src/ai_commerce/remote/worker.py",
+                 "src/ai_commerce/hostops_v3/journal.py", "src/ai_commerce/hostops_v3/security.py",
+                 "src/ai_commerce/hostops_v3/broker.py", "src/ai_commerce/hostops_v3/worker.py"):
+        assert any(path in g.paths for g in groups)
+
+
+@pytest.mark.parametrize("field", ["action_id", "attempt_id"])
+def test_workowner_scheduler_rejects_duplicate_identity_before_dispatch(field):
+    from ai_commerce.remote.scheduler import run_schedule
+    first, second = action("a"), action("b")
+    second[field] = first[field]
+    calls = []
+    with pytest.raises(ValueError, match="DUPLICATE_DISPATCH_IDENTITY"):
+        run_schedule({"batch_id": "duplicate", "source_sha": "a" * 40,
+                      "actions": [first, second]}, lambda a: calls.append(a))
+    assert calls == []
+
+
+def test_workowner_scheduler_mismatched_worker_identity_blocks_dependent():
+    from ai_commerce.remote.scheduler import run_schedule
+    first, second = action("a"), action("b", ["a"])
+    calls = []
+    def work(a):
+        calls.append(a["action_id"])
+        return {"status": "CANDIDATE_READY", "action_id": "foreign"}
+    result = run_schedule({"batch_id": "mismatch", "source_sha": "a" * 40,
+                           "actions": [first, second]}, work)
+    assert result["succeeded"] == 0 and calls == ["a"]
+    assert result["actions"][1]["status"] == "BLOCKED_DEPENDENCY"
+
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = ROOT / "contracts" / "RemoteActionBatch.v1.schema.json"
 REGISTRY = ROOT / ".github" / "ef02" / "verify-profiles.json"
@@ -779,3 +835,169 @@ def test_verified_ef01_proof_mutation_negatives(tmp_path, mutation, expected_dia
     )
     assert result is False
     assert expected_diag in diagnostics
+
+
+@pytest.mark.parametrize("kind", ["http", "timeout"])
+def test_publication_diagnostic_survives_worker_batch_artifact_and_safe_issue_summary(
+        tmp_path, monkeypatch, capsys, kind):
+    """Exercise the real result consumers; all provider/GitHub effects are fakes."""
+    from types import SimpleNamespace
+    from ai_commerce.remote import __main__ as cli
+    from ai_commerce.remote import transport
+    from test_ef01_repair import _action, _worker_fixture
+    from test_ef02_candidate_integrity import _publication_fixture, _PRIVATE
+
+    wire = _publication_fixture(tmp_path, monkeypatch, fault=("POST", "/git/refs"),
+        body=json.dumps({"message": _PRIVATE, "errors": [{"code": "invalid", "field": "ref"}]}).encode(),
+        kind=kind)
+    with pytest.raises(RemoteTransportError) as failure:
+        wire.publish()
+    context = _worker_fixture(tmp_path, monkeypatch, real_git=False)
+    attempts = []
+    def reject_publication(**kwargs):
+        attempts.append(kwargs["attempt_id"])
+        raise failure.value
+    monkeypatch.setattr(context.worker.github, "candidate", reject_publication)
+    request = _action("a")
+    report = run_schedule({**context.batch, "actions": [request]}, context.worker.execute_action)
+    result = report["actions"][0]
+    assert result["status"] == "RESULT_PUBLICATION_FAILED" and report["succeeded"] == 0
+    assert result["error_code"] == "RemoteTransportError" and result["candidate_sha"] is result["candidate_ref"] is None
+    safe = result["diagnostic"]
+    assert safe == str(failure.value) and "CANDIDATE_REF_CREATE" in safe
+    assert ("UNKNOWN_EFFECT_RECONCILE" if kind == "timeout" else
+            "TERMINAL_VALIDATION_OR_POLICY_REJECTION") in safe
+    saved = json.loads(next(context.worker.root.rglob("action_result.json")).read_text())
+    assert saved["diagnostic"] == safe and _PRIVATE not in json.dumps(saved)
+
+    comments = []
+    monkeypatch.setattr(cli, "GitHubTransport", lambda *_: SimpleNamespace(comment=lambda n, body: comments.append((n, body))))
+    monkeypatch.setattr(cli, "LocalBatchWorker", lambda **_: context.worker)
+    monkeypatch.setattr(cli, "run_schedule", lambda *_a, **_kw: report)
+    monkeypatch.setattr(cli, "check_source", lambda *_a, **_kw: None)
+    monkeypatch.setattr(cli, "verify_registry", lambda _: context.worker.profiles)
+    monkeypatch.setattr(cli, "load_approved_candidates", lambda _: {"version": 1, "candidates": {}})
+    monkeypatch.setattr(cli, "start_worker_signal", lambda **_: None)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_TOKEN", "fixture")
+    monkeypatch.setenv("GITHUB_RUN_ID", "42")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
+    packet = {"kind": "AI_COMMERCE_REMOTE_ACTION_BATCH", "version": 1, "batch_id": context.batch["batch_id"],
+              "source_sha": context.head, "actor": "HUMAN", "authorization_ref": "fixture-grant", "actions": [request]}
+    path = tmp_path / "request.json"
+    path.write_text(json.dumps(packet))
+    assert cli.main(["run", "--request-file", str(path), "--checkout", str(ROOT),
+                     "--issuer-login", "owner", "--owner-login", "owner", "--issue-number", "512"]) == 1
+    persisted = json.loads((context.worker.root / "batch_result.json").read_text())
+    assert persisted["actions"][0]["diagnostic"] == safe
+    assert len(comments) == 1 and "RESULT_PUBLICATION_FAILED" in comments[0][1]
+    # The existing public summary points to the per-attempt artifact. Inline
+    # stage diagnostics would require the __main__.py owner, outside this patch.
+    assert "Full per-attempt diagnostics are in this workflow's artifact." in comments[0][1]
+    assert _PRIVATE not in comments[0][1] + json.dumps(persisted) + capsys.readouterr().out
+    assert attempts == [request["attempt_id"]] and len(context.calls) == 2
+    before = len(context.calls)
+    assert context.worker.execute_action(request)["status"] == "DUPLICATE_CLAIM_NO_REEXECUTION"
+    assert len(context.calls) == before and len(attempts) == 1
+
+
+def test_real_http_claim_collision_keeps_legacy_error_and_duplicate_semantics(monkeypatch):
+    from io import BytesIO
+    from urllib.error import HTTPError
+    from ai_commerce.remote import transport
+    calls = []
+    fingerprint_value = "f" * 64
+    message = "EF02 CLAIM\n\nfingerprint=" + fingerprint_value + "\nattempt_id=claim-001"
+    def open_request(request, timeout):
+        method, url = request.get_method(), request.full_url
+        calls.append((method, url))
+        if method == "POST" and url.endswith("/git/refs"):
+            raise HTTPError(url, 422, "private reason", {}, BytesIO(b'{"message":"private body"}'))
+        if method == "POST":
+            response = {"sha": "b" * 40}
+        elif "/git/ref/" in url:
+            response = {"object": {"sha": "b" * 40}}
+        else:
+            response = {"tree": {"sha": "c" * 40}, "message": message}
+        return BytesIO(json.dumps(response).encode())
+    monkeypatch.setattr(transport, "urlopen", open_request)
+    github = GitHubTransport("owner/repo", "private token")
+    assert github.claim(source_sha="a" * 40, attempt_id="claim-001", fingerprint=fingerprint_value) == "DUPLICATE_CLAIM_NO_REEXECUTION"
+    assert [method for method, _ in calls] == ["GET", "POST", "POST", "GET", "GET"]
+
+
+def test_http_422_body_read_timeout_retains_status_without_plaintext_or_replay(monkeypatch):
+    from io import BytesIO
+    from urllib.error import HTTPError
+    from ai_commerce.remote import transport
+    bodies = []
+    class Unreadable(BytesIO):
+        def read(self, size=-1):
+            assert size == 8193
+            raise TimeoutError("private token in response reader")
+    def open_request(request, timeout):
+        body = Unreadable()
+        bodies.append(body)
+        raise HTTPError(request.full_url, 422, "private reason", {}, body)
+    monkeypatch.setattr(transport, "urlopen", open_request)
+    with pytest.raises(RemoteTransportError) as failure:
+        GitHubTransport("owner/repo", "private token")._publication_api(transport.PublicationStage.BLOB_CREATE, {})
+    payload = failure.value.publication.payload()
+    assert payload["http_status"] == 422 and payload["github_codes"] == payload["validation_fields"] == []
+    assert payload["disposition"] == "TERMINAL_VALIDATION_OR_POLICY_REJECTION"
+    assert len(bodies) == 1 and bodies[0].closed and "private" not in str(failure.value)
+
+
+def test_candidate_ref_get_verification_failure_survives_worker_batch_artifact(tmp_path, monkeypatch, capsys):
+    """Exercise worker batch reporting when POST /git/refs succeeds but GET ref fails."""
+    from types import SimpleNamespace
+    from io import BytesIO
+    from urllib.error import HTTPError
+    from ai_commerce.remote import __main__ as cli
+    from ai_commerce.remote import transport
+    from test_ef01_repair import _action, _worker_fixture
+    from test_ef02_candidate_integrity import _publication_fixture, _PRIVATE
+
+    fixture = _publication_fixture(tmp_path, monkeypatch)
+    orig_open = transport.urlopen
+    def open_request(request, timeout):
+        if request.get_method() == "GET" and "/git/ref/" in request.full_url:
+            raise HTTPError(request.full_url, 404, "Not Found", {}, BytesIO(b'{"message":"' + _PRIVATE.encode() + b'"}'))
+        return orig_open(request, timeout)
+    monkeypatch.setattr(transport, "urlopen", open_request)
+
+    with pytest.raises(RemoteTransportError) as failure:
+        fixture.publish()
+
+    context = _worker_fixture(tmp_path, monkeypatch, real_git=False)
+    monkeypatch.setattr(context.worker.github, "candidate", lambda **_: (_ for _ in ()).throw(failure.value))
+    request = _action("a")
+    report = run_schedule({**context.batch, "actions": [request]}, context.worker.execute_action)
+    result = report["actions"][0]
+    assert result["status"] == "RESULT_PUBLICATION_FAILED" and report["succeeded"] == 0
+    assert result["error_code"] == "RemoteTransportError" and result["candidate_sha"] is result["candidate_ref"] is None
+    safe = result["diagnostic"]
+    assert "CANDIDATE_REF_CREATE" in safe and "UNKNOWN_EFFECT_RECONCILE" in safe
+    assert _PRIVATE not in safe
+
+
+def test_workowner_candidate_publication_enforces_owner_fence_and_ref_readback(tmp_path, monkeypatch):
+    """Integration consumer check: WorkOwner fence + main's _publication_api ref readback."""
+    from ai_commerce.remote import transport
+    from ai_commerce.remote.transport import CandidateIntegrityError, RemoteTransportError
+    from test_ef02_m0r_fault_injection import _publishable_workowner
+    storage, owner, arguments = _publishable_workowner(tmp_path, monkeypatch)
+
+    # Wrong owner transport rejected before any publication API call
+    other_storage = transport.GitHubTransport("other/repo", "token")
+    bad_owner = transport.WorkOwner(other_storage, owner.identity, "f" * 64)
+    with pytest.raises(CandidateIntegrityError, match="WORK_OWNER_PUBLICATION_FENCE_REQUIRED"):
+        storage.candidate(**{**arguments, "owner": bad_owner})
+
+    # Valid WorkOwner publishes via _publication_api and performs GET readback verification
+    storage.requests.clear()
+    res = storage.candidate(**arguments)
+    assert res["candidate_ref"] in storage.refs
+    assert storage.requests[-2][0] == "POST" and storage.requests[-2][1] == "/git/refs"
+    assert storage.requests[-1][0] == "GET" and storage.requests[-1][1].startswith("/git/ref/heads/ef02/candidate/")
+

@@ -1,0 +1,428 @@
+{
+  "schema_version": "WorkItem.v1",
+  "work_id": "BQ-05A_PULSE_STUDIO_OFFLINE_QA_001",
+  "action_id": "BQ05A-R2-CODEX-XHIGH-HOSTED-CI-FAILCLOSED-TRIAGE-01",
+  "attempt_id": "bq05a_r2_codex_sol_xhigh_hosted_positive_hold_main_22b422_20261107_v1",
+  "source_sha": "22b4220936cc9eaf1d952ed1e5e2909d20d4e374",
+  "status": "HOLD_NATIVE_LINK_ENVIRONMENT_CONSUMER_TIMEOUTS_AND_HOSTED_ROOT_UNPROVEN",
+  "objective": "Read-only native B0.4 WAIT_BRAIN current A06 LOCAL_IMPORT video interoperability with real bounded Q4 technical inspection and advisory Q5; separate sanitized deterministic sidecar, no live authority",
+  "owner": "Media & Creative",
+  "component": "bq-05a",
+  "verification_profile": "mt01-component-onboarding",
+  "verification_round_limit": 2,
+  "executor_observations": {
+    "type": "R2_EXECUTOR_LOCAL_ONLY_NOT_EF01_OR_HOSTED_ACCEPTANCE",
+    "local_head": "22b4220936cc9eaf1d952ed1e5e2909d20d4e374",
+    "platform": "win32",
+    "python": "3.14.7",
+    "runner_environment_reported": "self-hosted",
+    "verify_fix_rounds_used": 2,
+    "five_positive_diagnostic_before_scratch_fix": {
+      "collected": 5,
+      "executed": 5,
+      "passed": 5,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "workers_observed": 12,
+      "pytest_seconds": 217.79,
+      "source_unchanged": true
+    },
+    "native_python311_probe": {
+      "python": "3.11.9",
+      "directory_handle_final_paths": "MATCH",
+      "file_lstat_fstat_identity_size_mtime": "MATCH",
+      "full_journey": "NOT_RUN_DEPENDENCY_NETWORK_RESOLUTION_FAILURE"
+    },
+    "native_short_scratch_reproducer": {
+      "fixture": "FRESH_REAL_B04_OPERATOR_SUBPROCESS_A06_LOCAL_IMPORT_SEALED_HANDOFF",
+      "operation": "REAL_NATIVE_SHORT_NAME_SAME_DIRECTORY",
+      "failed_phase": "T2_CAPTURE",
+      "failure_code": "CHECK_REJECTED",
+      "sample_true": "FAIL_CLOSED_HOLD",
+      "sample_false": "OFFLINE_TECHNICAL_REVIEW_ONLY",
+      "scope": "REPRODUCED_COMPATIBILITY_DEFECT_NOT_PROVEN_R1_HOSTED_CAUSE"
+    },
+    "registered_verification": "STOPPED_UNPROVEN; six groups unexecuted after B0.3 infrastructure failure",
+    "candidate_sha": null,
+    "hosted_windows_r2": "NOT_RUN; historical hosted root cause still unproven, no R2 candidate HEAD exists",
+    "brain_r2": "PENDING",
+    "round_1_registered": {
+      "exit_code": 3,
+      "groups": [
+        {
+          "counts": {
+            "errors": 0,
+            "failed": 0,
+            "passed": 7,
+            "skipped": 0,
+            "unknown": 0,
+            "xfailed": 0,
+            "xpassed": 0
+          },
+          "group": "a06",
+          "result": "PASS",
+          "workers_actual": 12
+        },
+        {
+          "counts": {
+            "errors": 0,
+            "failed": 0,
+            "passed": 196,
+            "skipped": 1,
+            "unknown": 0,
+            "xfailed": 0,
+            "xpassed": 0
+          },
+          "group": "a13",
+          "result": "PASS",
+          "workers_actual": 12
+        },
+        {
+          "counts": {
+            "errors": 0,
+            "failed": 19,
+            "passed": 34,
+            "skipped": 2,
+            "unknown": null,
+            "xfailed": 0,
+            "xpassed": 0
+          },
+          "group": "b0-3",
+          "result": "UNPROVEN",
+          "workers_actual": 12
+        },
+        {
+          "counts": {
+            "errors": 0,
+            "failed": 0,
+            "passed": 0,
+            "skipped": 0,
+            "unknown": null,
+            "xfailed": 0,
+            "xpassed": 0
+          },
+          "group": "b0-4",
+          "result": "UNPROVEN",
+          "workers_actual": null
+        },
+        {
+          "counts": {
+            "errors": 0,
+            "failed": 0,
+            "passed": 0,
+            "skipped": 0,
+            "unknown": null,
+            "xfailed": 0,
+            "xpassed": 0
+          },
+          "group": "bq-02a",
+          "result": "UNPROVEN",
+          "workers_actual": null
+        },
+        {
+          "counts": {
+            "errors": 0,
+            "failed": 0,
+            "passed": 0,
+            "skipped": 0,
+            "unknown": null,
+            "xfailed": 0,
+            "xpassed": 0
+          },
+          "group": "bq-02b",
+          "result": "UNPROVEN",
+          "workers_actual": null
+        },
+        {
+          "counts": {
+            "errors": 0,
+            "failed": 0,
+            "passed": 0,
+            "skipped": 0,
+            "unknown": null,
+            "xfailed": 0,
+            "xpassed": 0
+          },
+          "group": "bq-04a",
+          "result": "UNPROVEN",
+          "workers_actual": null
+        },
+        {
+          "counts": {
+            "errors": 0,
+            "failed": 0,
+            "passed": 0,
+            "skipped": 0,
+            "unknown": null,
+            "xfailed": 0,
+            "xpassed": 0
+          },
+          "group": "bq-04b",
+          "result": "UNPROVEN",
+          "workers_actual": null
+        },
+        {
+          "counts": {
+            "errors": 0,
+            "failed": 0,
+            "passed": 0,
+            "skipped": 0,
+            "unknown": null,
+            "xfailed": 0,
+            "xpassed": 0
+          },
+          "group": "bq-05a",
+          "result": "UNPROVEN",
+          "workers_actual": null
+        }
+      ],
+      "source_unchanged": true,
+      "artifact_sha256": {
+        "mt01.plan.json": "d38f4e195786e2d0408318088d8e8c8188a980614b60a246df8dbb5d4fe791c3",
+        "mt01.results.json": "91890e741a268eb715ded187ca1edb8943384a8b8fe1c6dc0cc2b95320be8916",
+        "mt01.0.junit.xml": "9a32227b94f8a9797a39a49378a8509dba0cb880951631f91ea348cdc9bb5e54",
+        "mt01.1.junit.xml": "c5830eb07a4ab1c623dd837c634c07b0c06d23372132e7ddbcb75aab4f162336",
+        "mt01.2.junit.xml": "eb16a15653447f959a93fee10701af838c57fc3acb2b701f282d76febb696801"
+      },
+      "type": "R2_EXECUTOR_LOCAL_REGISTERED_ROUND_NOT_EF01_PROOF",
+      "collected": 259,
+      "executed": 256,
+      "passed": 237,
+      "failed": 19,
+      "errors": 0,
+      "skipped": 3,
+      "stop_reason": "VERIFY_INFRASTRUCTURE_ERROR_B03_NATIVE_SUBPROCESS_TIMEOUTS",
+      "not_executed": [
+        "b0-4",
+        "bq-02a",
+        "bq-02b",
+        "bq-04a",
+        "bq-04b",
+        "bq-05a"
+      ]
+    },
+    "round_2_owner_diagnostic": {
+      "counts": {
+        "collected": 39,
+        "errors": 0,
+        "executed": 39,
+        "failed": 3,
+        "passed": 36,
+        "skipped": 0
+      },
+      "exit_code": 1,
+      "failed_tests": [
+        "test_native_windows_junction_rejected_before_owner_or_media",
+        "test_native_windows_hardlink_rejected_before_owner_or_media",
+        "test_final_lock_exit_failure_cannot_return_success"
+      ],
+      "junit_sha256": "a7046b35592ef7054a246520a39fef000f69f283905d13b0febaec3072802416",
+      "source_unchanged": true,
+      "type": "OWNER_DIAGNOSTIC_ONLY_NOT_COMPLETE_REGISTERED_VERIFICATION",
+      "workers_observed": 12,
+      "five_original_positive_results": {
+        "test_wait_brain_actual_a06_q4_closed_deterministic_readonly": "PASS",
+        "test_locked_source_denies_real_mutation_and_rename": "PASS",
+        "test_sidecar_closed_and_hashes_never_authenticate_forgery": "PASS",
+        "test_stale_sidecar_cannot_authenticate_replaced_video": "PASS",
+        "test_human_local_rights_never_become_live_grants_and_revocation_holds": "PASS"
+      },
+      "pytest_seconds": 455.458,
+      "failure_classification": {
+        "test_native_windows_junction_rejected_before_owner_or_media": "NATIVE_CONSTRUCTION_DENIED_ACCESS_IS_DENIED",
+        "test_native_windows_hardlink_rejected_before_owner_or_media": "NATIVE_CONSTRUCTION_DENIED_WINERROR_5",
+        "test_final_lock_exit_failure_cannot_return_success": "ADDED_DIAGNOSTIC_ASSERTION_EXPECTED_NATIVE_IO_BUT_OBSERVED_UNEXPECTED_FAILURE; FINAL_LOCK_AND_PUBLIC_HOLD_CONFIRMED"
+      },
+      "native_owned_scratch_short_alias_observed": true,
+      "passed_additional_checks": [
+        "REAL_SHORT_ALIAS_T2_OBSERVED_INPUT_BYTES_UNCHANGED",
+        "EXPANDED_SCRATCH_SUBSTITUTED_IDENTITY_REJECTED",
+        "INTERNAL_STAGE_AND_PRIVATE_ERROR_REDACTION",
+        "SAMPLE_FALSE_NO_OBSERVED_ASSET_Q5_HOLD"
+      ],
+      "post_round_change": {
+        "scope": "ONLY_ADDED_DIAGNOSTIC_CATEGORY_ASSERTION_AND_REPORT_METADATA",
+        "test_change": "Expected UNEXPECTED_FAILURE, the recorded finite category after owner exception translation; original public HOLD acceptance remains unchanged.",
+        "test_status": "NOT_RETESTED_NO_THIRD_ROUND",
+        "production_bridge_changed_after_round": false
+      },
+      "tested_source_sha256": "8b431457324895112724443a6846c6d8607f0fe518ebcbb3ed26bc093e62af23"
+    },
+    "scope_extension_proposal": {
+      "applied": false,
+      "owner_paths": [
+        "tests/test_b0_3_attended_worker.py"
+      ],
+      "evidence": "19 existing native subprocess tests timed out; same source hashes, 12 observed workers; standalone five B0.4 positives passed. Timeout root cause not established.",
+      "proposal": "Separate owner investigation of existing B0.3 subprocess deadlines/runtime under guarded native execution; no timeout increase, worker reduction, test edit, or policy change in this action."
+    },
+    "final_disposition": "HOLD_NO_CANDIDATE_ACCEPTANCE; two bounded rounds exhausted, no third executor round"
+  },
+  "model_selection": {
+    "executor": "codex",
+    "model": "gpt-6.1-sol",
+    "effort": "xhigh",
+    "fallback_used": false,
+    "provider_proof": "EF02_NATIVE_TERMINAL_RECEIPT_REQUIRED"
+  },
+  "allowed_paths": [
+    "src/ai_commerce/creative_quality/pulse_studio_offline_bridge.py",
+    "tests/test_bq_05a_pulse_studio_offline_bridge.py",
+    "work_items/BQ-05A_PULSE_STUDIO_OFFLINE_QA_001.json",
+    "work_items/mt01-components/bq-05a.json",
+    "docs/creative/BQ_05A_PULSE_STUDIO_OFFLINE_QA_PROTOCOL.md",
+    "docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md"
+  ],
+  "add_only_paths": [
+    "src/ai_commerce/creative_quality/pulse_studio_offline_bridge.py",
+    "tests/test_bq_05a_pulse_studio_offline_bridge.py",
+    "work_items/BQ-05A_PULSE_STUDIO_OFFLINE_QA_001.json",
+    "work_items/mt01-components/bq-05a.json",
+    "docs/creative/BQ_05A_PULSE_STUDIO_OFFLINE_QA_PROTOCOL.md"
+  ],
+  "modified_paths": [
+    "docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md"
+  ],
+  "acceptance": [
+    "BQ-05a.wait-brain-current-asset-q4",
+    "BQ-05a.closed-offline-qa-sidecar",
+    "BQ-05a.no-provider-no-authority-upgrade"
+  ],
+  "negative_acceptance": [
+    {
+      "ac": "BQ-05a.reject-unverified-or-stale-native-asset",
+      "tests": [
+        "test_fabricated_receipt_or_prestart_session_is_not_native",
+        "test_current_asset_and_native_provenance_tampering_holds",
+        "test_self_resealed_session_pin_mismatch_is_not_authenticated",
+        "test_resealed_directive_digest_drift_holds",
+        "test_stale_sidecar_cannot_authenticate_replaced_video"
+      ]
+    },
+    {
+      "ac": "BQ-05a.reject-path-alias-and-unproven-lock",
+      "tests": [
+        "test_path_alias_and_worktree_escape_holds",
+        "test_native_windows_hardlink_rejected_before_owner_or_media",
+        "test_native_windows_junction_rejected_before_owner_or_media",
+        "test_symlink_tag_and_unknown_reparse_metadata_rejected",
+        "test_locked_source_denies_real_mutation_and_rename",
+        "test_final_lock_exit_failure_cannot_return_success"
+      ]
+    },
+    {
+      "ac": "BQ-05a.reject-authority-upgrade-and-forged-sidecar",
+      "tests": [
+        "test_untrusted_context_never_upgrades_source",
+        "test_effects_without_native_grants_fail_before_media",
+        "test_sidecar_closed_and_hashes_never_authenticate_forgery",
+        "test_actual_tool_start_failure_never_promotes"
+      ]
+    }
+  ],
+  "contract_policy": "Three existing closed PULSE v1 schemas are READ_ONLY consumers. Sidecar is separate; hashes are not signed attestations. A03-A18 owner ledgers and all provider rights remain unchanged.",
+  "source_binding_policy": "Bridge source base is 22b4220936cc9eaf1d952ed1e5e2909d20d4e374. Historical R1 pins are separately typed. Native B0.3 SOURCE_SHA is unchanged; runtime_sha256 pins the actual current Python tree. Fresh sessions only; drift HOLD.",
+  "native_link_contract": {
+    "mandatory": [
+      "REAL_WINDOWS_HARDLINK_REJECTION",
+      "REAL_WINDOWS_JUNCTION_REJECTION",
+      "SYMLINK_REPARSE_TAG_METADATA_REJECTION",
+      "REAL_WINDOWS_WRITE_RENAME_DENIAL",
+      "FINAL_LOCK_EXIT_CHECK",
+      "ORDINARY_FILE_POSITIVE_CONTROL"
+    ],
+    "mandatory_skip_policy": "NO_SKIP_NO_XFAIL; absent capability is environment HOLD",
+    "os_symlink_creation": "UNPROVEN; metadata rejection is not a claim of privileged OS symlink creation"
+  },
+  "live_status": "NOT_STARTED_NOT_AUTHORIZED; separate B0-S private per-effect rights, provider entitlement, custody, spend and attended provider proof required",
+  "publication_status": "Executor edits ordinary allowed worktree files only. No Git writes or candidate/PR/Brain acceptance claim; EF02 worker alone may publish verified source.",
+  "historical_r1": {
+    "type": "IMMUTABLE_HISTORICAL_R1_NOT_R2_PROOF",
+    "executor_local_workitem": {
+      "action_id": "BQ05A-PULSE-STUDIO-OFFLINE-QA-BRIDGE-CODEX-XHIGH-01",
+      "attempt_id": "bq05a_pulse_offline_qa_bridge_codex_xhigh_c868b989_20261107_v1",
+      "source_sha": "c868b989382763b03f5040390a8adaf99c25e064",
+      "status": "HOLD_NATIVE_LINK_ENVIRONMENT_AND_POST_FIX_VERIFICATION_REQUIRED",
+      "executor_observations": {
+        "local_head": "c868b989382763b03f5040390a8adaf99c25e064",
+        "registration": "ACCEPTED_DATA_ONLY; no missing mapping or broad fallback",
+        "selected_groups": [
+          "a06",
+          "a13",
+          "b0-3",
+          "b0-4",
+          "bq-02a",
+          "bq-02b",
+          "bq-04a",
+          "bq-04b",
+          "bq-05a"
+        ],
+        "verify_fix_rounds_used": 2,
+        "round_1": {
+          "status": "TIMEOUT_UNPROVEN",
+          "timeout_seconds": 900,
+          "collected": null,
+          "passed": null,
+          "workers_observed": null
+        },
+        "standalone_native_diagnostic": "Fresh native CLI SETUP -> WAIT_BRAIN -> existing sealed handoff -> real bridge Q4 OBSERVED and Q5 KEEP_ORIGINAL; no provider proof",
+        "round_2_owner": {
+          "collected": 36,
+          "passed": 32,
+          "failed": 4,
+          "skipped": 0,
+          "errors": 0,
+          "workers_observed": 12,
+          "pytest_seconds": 588.96,
+          "input_manifest_unchanged_during_execution": true,
+          "native_integration_positive": "PASSED: actual B0.4 A06 video, A13/T1 and T2, canonical sidecar, repeated native replay, retained bytes unchanged",
+          "failures": [
+            "NATIVE_JUNCTION_ENVIRONMENT_HOLD: native creation denied with Access is denied",
+            "NATIVE_HARDLINK_ENVIRONMENT_HOLD: os.link denied with WinError 5",
+            "Incorrect test lookup assumed custody render had .mp4 suffix; owner uses content-addressed objects",
+            "Optional T2 NOT_RUN passed a T1 artifact SHA to Q5 despite native multimodal observed asset being null"
+          ]
+        },
+        "second_fix_step": [
+          "Q5 receives its native observed asset pin or null; missing T2 retains native HOLD without inventing observation",
+          "Test resolves actual A06 render output through its native owner manifest and content-addressed output ref"
+        ],
+        "post_fix_test_status": "NOT_RETESTED; no third executor verification round",
+        "consumer_execution": "NOT_EXECUTED; stopped after owner failure, no coverage or PASS claim",
+        "native_link_policy": "Mandatory failures retained; no skip, privilege escalation, alternate creation method or guard bypass",
+        "candidate": "NONE; not verified or accepted; EF01/EF02 independent verification required"
+      }
+    },
+    "candidate_sha": "61104898bfc3dca58f6e3c186685cad7e85955f4",
+    "ef02_run": 42377121163,
+    "ef02_artifact": 13577946952,
+    "ef02_artifact_sha256": "b48c92a59d403e3baf7f2e5667026d291e07bd72e987f32ccf17d236dedddc3d",
+    "independent_selfhost": {
+      "collected": 1155,
+      "executed": 1153,
+      "passed": 1153,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 2,
+      "bq05a_passed": 36
+    },
+    "hosted_ci": {
+      "run": 42381987961,
+      "artifact": 13578212856,
+      "artifact_sha256": "707e605c40acf3eb84d5704d666d8f3dca4e3663d3f15ff2e6a59ee1f7d6089f",
+      "collected": 1155,
+      "executed": 1155,
+      "passed": 1150,
+      "failed": 5,
+      "errors": 0,
+      "skipped": 0,
+      "root_cause": "UNKNOWN_BROAD_EXCEPTION_SUPPRESSION"
+    },
+    "pr": 632,
+    "brain_decision": "HOLD",
+    "rerun_authorized": false
+  },
+  "diagnostic_policy": "Internal opt-in finite phase/code triage counts successful protected blocks, never infers a complete phase from entry. No raw exception strings/types, stack, paths, prompts or private state. Public sidecar remains closed generic HOLD/UNKNOWN; no asserted hosted reason.",
+  "repair_scope": "Only bridge-owned scratch may expand a native Windows short spelling, after original/expanded directory identities and native handle final paths agree under all ancestor locks. Caller ingress aliases remain denied. This reproduced defect is not claimed as the historical hosted cause."
+}

@@ -1,0 +1,16 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "wakehub-g2-private-broker",
+  "sources": ["src/ai_commerce/wakehub/native_broker.py"],
+  "tests": ["tests/test_wakehub_g2_broker.py"],
+  "acs": [
+    "WAKEHUB.G2.broker-service-custody",
+    "WAKEHUB.G2.broker-signed-peer",
+    "WAKEHUB.G2.broker-unknown-reconcile"
+  ],
+  "consumers": [
+    "src/ai_commerce/wakehub/native_runtime.py",
+    "src/ai_commerce/wakehub/native_authority.py"
+  ],
+  "contracts": []
+}
