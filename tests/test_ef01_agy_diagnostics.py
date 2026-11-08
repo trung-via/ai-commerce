@@ -728,6 +728,112 @@ def owned_cleanup(path):
         (info.st_dev, info.st_ino), (parent.st_dev, parent.st_ino))
 
 
+def _native_link_metadata(path):
+    """Fixture-only nofollow handle metadata; never log paths or security SIDs."""
+    import ctypes
+    from ctypes import wintypes as w
+    kernel = adapters._agy_kernel()
+    handle = kernel.CreateFileW(str(path), 0x20080, 7, None, 3, 0x02200000, None)
+    assert handle != ctypes.c_void_p(-1).value
+    class Standard(ctypes.Structure):
+        _fields_ = [("allocation", ctypes.c_longlong), ("size", ctypes.c_longlong),
+                    ("links", w.DWORD), ("pending", ctypes.c_ubyte), ("directory", ctypes.c_ubyte)]
+    class Tag(ctypes.Structure):
+        _fields_ = [("attributes", w.DWORD), ("tag", w.DWORD)]
+    try:
+        standard, tag = Standard(), Tag()
+        for kind, value in ((1, standard), (9, tag)):
+            assert kernel.GetFileInformationByHandleEx(handle, kind, ctypes.byref(value), ctypes.sizeof(value))
+        security = ctypes.WinDLL("advapi32", use_last_error=True).GetKernelObjectSecurity
+        security.argtypes = [w.HANDLE, w.DWORD, w.LPVOID, w.DWORD, ctypes.POINTER(w.DWORD)]
+        security.restype = w.BOOL
+        needed = w.DWORD()
+        security(handle, 7, None, 0, ctypes.byref(needed))
+        assert needed.value > 0
+        data = ctypes.create_string_buffer(needed.value)
+        assert security(handle, 7, data, len(data), ctypes.byref(needed))
+        info = path.lstat()
+        assert standard.links == info.st_nlink and tag.attributes == info.st_file_attributes
+        return {"identity": (info.st_dev, info.st_ino), "links": standard.links,
+                "attributes": tag.attributes, "security_sha256": hashlib.sha256(data.raw).hexdigest()}
+    finally:
+        kernel.CloseHandle(handle)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real Windows hardlink discriminator")
+@pytest.mark.parametrize("external", [False, True])
+@pytest.mark.parametrize("readonly", [False, True])
+@pytest.mark.parametrize("ordinary_leaves", [0, 707])
+def test_native_scratch_hardlink_discriminator_holds(
+        tmp_path, monkeypatch, record_property, external, readonly, ordinary_leaves):
+    tree = tmp_path / "owned"
+    tree.mkdir()
+    sentinel = (tmp_path if external else tree) / "private-sentinel"
+    sentinel.write_bytes(b"external bytes must remain unchanged")
+    link = tree / "private-alias"
+    try:
+        original = _native_link_metadata(sentinel)
+        try:
+            os.link(sentinel, link)
+        except OSError as exc:
+            assert _native_link_metadata(sentinel) == original
+            assert sentinel.read_bytes() == b"external bytes must remain unchanged" and not link.exists()
+            proof = {"status": "HOLD", "code": "AGY_SCRATCH_HARDLINK_PROOF_UNAVAILABLE",
+                     "operation": "os.link", "winerror": getattr(exc, "winerror", None),
+                     "external": external, "readonly_requested": readonly,
+                     "ordinary_leaves_requested": ordinary_leaves,
+                     "native_metadata_checked": True, "sentinel_unchanged": True}
+            record_property("native_hardlink_proof", json.dumps(proof, sort_keys=True))
+            pytest.skip("AGY_SCRATCH_HARDLINK_PROOF_UNAVAILABLE: os.link denied; no unlink proof")
+        if readonly:
+            # Fixture setup only. Production cleanup must never change this inode.
+            os.chmod(sentinel, stat.S_IREAD)
+        for index in range(ordinary_leaves):
+            (tree / f"leaf-{index:04d}").write_bytes(b"disposable")
+        original_scandir = os.scandir
+        class HardlinksLast:
+            def __enter__(self):
+                self.entries = original_scandir(tree)
+                return self
+            def __exit__(self, *args):
+                self.entries.close()
+            def __iter__(self):
+                deferred = []  # At most the two fixture hardlink names.
+                for entry in self.entries:
+                    if entry.name in (sentinel.name, link.name):
+                        deferred.append(entry)
+                    else:
+                        yield entry
+                yield from deferred
+        monkeypatch.setattr(adapters.os, "scandir",
+            lambda path: HardlinksLast() if Path(path) == tree else original_scandir(path))
+        before = _native_link_metadata(sentinel)
+        assert before["links"] == 2 and _native_link_metadata(link) == before
+        with pytest.raises(ValueError, match="AGY_INPUT_CLEANUP_UNSAFE"):
+            adapters._AgyCleanupHandle(link, link.lstat())
+        result = owned_cleanup(tree)
+        assert result["status"] == "HOLD" and result["reason"] == "AGY_SCRATCH_ENTRY_UNSAFE"
+        assert result["first_unsafe_entry"]["subtype"] == "HARDLINK"
+        assert result["attempts"] == 1 and result["readonly_files_cleared"] == 0
+        assert result["measurements"]["deleted_entries"] == ordinary_leaves
+        assert result["hardlink_diagnostic"] == {
+            "code": "AGY_SCRATCH_HARDLINK_UNLINK_UNPROVEN", "alias_scope": "UNKNOWN",
+            "provenance": "UNKNOWN", "lstat_links": 2, "handle_links": None, "action": "HOLD"}
+        assert _native_link_metadata(sentinel) == before and link.exists()
+        assert sentinel.read_bytes() == b"external bytes must remain unchanged"
+        assert "private-" not in json.dumps(result) and str(tmp_path) not in json.dumps(result)
+        record_property("native_hardlink_discriminator", json.dumps({
+            "external": external, "readonly": readonly, "native_links": before["links"],
+            "bytes_attributes_security_unchanged": True, "receipt": result}, sort_keys=True))
+    finally:
+        if readonly and sentinel.lstat().st_file_attributes & 1:
+            os.chmod(sentinel, stat.S_IWRITE | stat.S_IREAD)
+        if link.exists():
+            link.unlink()
+        sentinel.unlink()
+        assert owned_cleanup(tree)["status"] == "CLEAN"
+
+
 @pytest.mark.skipif(os.name != "nt", reason="native Windows cleanup handle metadata")
 @pytest.mark.parametrize("kind", ["file", "readonly", "directory"])
 def test_native_cleanup_handle_accepts_ordinary_metadata(tmp_path, kind):
@@ -832,6 +938,13 @@ def test_native_cleanup_handle_metadata_fault_holds_before_mutation(tmp_path, mo
         "subtype": subtype, "relative_entry_sha256": hashlib.sha256(target.name.encode()).hexdigest()}
     assert result["readonly_files_cleared"] == result["measurements"]["deleted_entries"] == 0
     assert "private-leaf" not in json.dumps(result) and str(tmp_path) not in json.dumps(result)
+    if fault == "hardlink":
+        # Deliberately modeled metadata on a real handle, not native os.link proof.
+        assert result["hardlink_diagnostic"] == {
+            "code": "AGY_SCRATCH_HARDLINK_UNLINK_UNPROVEN", "alias_scope": "UNKNOWN",
+            "provenance": "UNKNOWN", "lstat_links": 1, "handle_links": 2, "action": "HOLD"}
+    else:
+        assert "hardlink_diagnostic" not in result
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native file with unused reparse tag field modeled")
@@ -886,6 +999,8 @@ def test_native_cleanup_hardlink_race_holds_external_sentinel(tmp_path, monkeypa
         "subtype": "HARDLINK", "relative_entry_sha256": hashlib.sha256(b"private-leaf").hexdigest()}
     assert "private-leaf" not in json.dumps(result) and str(tmp_path) not in json.dumps(result)
     assert result["readonly_files_cleared"] == 0
+    assert result["hardlink_diagnostic"]["handle_links"] == 2
+    assert result["hardlink_diagnostic"]["alias_scope"] == "UNKNOWN"
 
 
 @pytest.mark.parametrize("kind", ["hardlink", "nonregular"])
@@ -932,6 +1047,12 @@ def test_cleanup_6000_leaves_then_unsafe_entry_is_sanitized(tmp_path, monkeypatc
         "relative_entry_sha256": hashlib.sha256(unsafe.name.encode()).hexdigest()}
     assert external.read_bytes() == b"keep" and unsafe.read_bytes() == b"opaque"
     assert "private-last-entry" not in json.dumps(result) and str(tmp_path) not in json.dumps(result)
+    if kind == "hardlink":
+        assert result["hardlink_diagnostic"] == {
+            "code": "AGY_SCRATCH_HARDLINK_UNLINK_UNPROVEN", "alias_scope": "UNKNOWN",
+            "provenance": "UNKNOWN", "lstat_links": 2, "handle_links": None, "action": "HOLD"}
+    else:
+        assert "hardlink_diagnostic" not in result
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows sharing semantics")

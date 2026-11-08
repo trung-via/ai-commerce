@@ -189,9 +189,10 @@ def _agy_kernel():
 
 
 class _AgyCleanupUnsafe(ValueError):
-    def __init__(self, reason, subtype):
+    def __init__(self, reason, subtype, *, hardlink_counts=None):
         super().__init__(reason)
         self.subtype = subtype
+        self.hardlink_counts = hardlink_counts
 
 
 class _AgyCleanupHandle:
@@ -286,7 +287,8 @@ class _AgyCleanupHandle:
         # Reparse entries are removed through their own nofollow handle only.
         if not standard.directory and not attributes & 0x400:
             if standard.links != 1 or expected.st_nlink != 1:
-                raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "HARDLINK")
+                raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "HARDLINK",
+                    hardlink_counts=(expected.st_nlink, standard.links))
         if (tag.attributes & 1) != (attributes & 1):
             raise _AgyCleanupUnsafe("AGY_INPUT_CLEANUP_UNSAFE", "READONLY_CHANGED")
 
@@ -417,7 +419,8 @@ def agy_remove_owned_tree(directory: Path, parent: Path, identity: tuple,
                     if not reparse and not stat.S_ISDIR(info.st_mode) and (
                             not stat.S_ISREG(info.st_mode) or info.st_nlink != 1):
                         raise _AgyCleanupUnsafe("AGY_SCRATCH_ENTRY_UNSAFE",
-                            "HARDLINK" if stat.S_ISREG(info.st_mode) else "NON_REGULAR")
+                            "HARDLINK" if stat.S_ISREG(info.st_mode) else "NON_REGULAR",
+                            hardlink_counts=(info.st_nlink, None) if stat.S_ISREG(info.st_mode) else None)
                     handle = _AgyCleanupHandle(path, info) if os.name == "nt" else None
                     try:
                         if stat.S_ISDIR(info.st_mode) and not reparse:
@@ -481,6 +484,15 @@ def agy_remove_owned_tree(directory: Path, parent: Path, identity: tuple,
             report["first_unsafe_entry"] = {
                 "subtype": exc.subtype,
                 "relative_entry_sha256": hashlib.sha256(relative_entry.encode()).hexdigest()}
+            if exc.subtype == "HARDLINK":
+                # Counts cannot establish where other names live or who created
+                # them. Never infer cache provenance or mutate a shared inode.
+                lstat_links, handle_links = exc.hardlink_counts or (None, None)
+                report["hardlink_diagnostic"] = {
+                    "code": "AGY_SCRATCH_HARDLINK_UNLINK_UNPROVEN",
+                    "alias_scope": "UNKNOWN", "provenance": "UNKNOWN",
+                    "lstat_links": lstat_links, "handle_links": handle_links,
+                    "action": "HOLD"}
         code = str(exc)
         if re.fullmatch(r"AGY_[A-Z_]+", code):
             report["reason"] = code

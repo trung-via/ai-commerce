@@ -1363,6 +1363,53 @@ def test_cleanup_failure_preserves_native_input_reason_and_quarantine(fixture):
     assert "quarantine_manifest" in result["evidence_files"]
 
 
+def test_shared_scratch_hold_keeps_input_hashes_and_quarantines_verified_source(fixture):
+    """Modeled link count, real cleanup/receipts; never native hardlink proof."""
+    import stat
+    original_cleanup, original_lstat = runner.agy_remove_owned_tree, Path.lstat
+    disposals = []
+    def cleanup(directory, *args, **kwargs):
+        if not directory.name.startswith("agy_scratch-"):
+            return original_cleanup(directory, *args, **kwargs)
+        target = directory / "generated-cache.bin"
+        def shared(path, *a, **k):
+            info = original_lstat(path, *a, **k)
+            if path != target:
+                return info
+            assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+            return SimpleNamespace(st_dev=info.st_dev, st_ino=info.st_ino,
+                st_mode=info.st_mode, st_nlink=2,
+                st_file_attributes=getattr(info, "st_file_attributes", 0))
+        with fixture.monkeypatch.context() as scoped:
+            scoped.setattr(Path, "lstat", shared)
+            receipt = original_cleanup(directory, *args, **kwargs)
+        # Dispose only the real single-link fixture after recording the modeled
+        # HOLD. Do not misrepresent this disposal as production hardlink CLEAN.
+        disposals.append(original_cleanup(directory, *args, **kwargs))
+        return receipt
+    fixture.monkeypatch.setattr(runner, "agy_remove_owned_tree", cleanup)
+    result, providers, verifies = _boundary_attempt(fixture)
+    assert result["status"] == "UNPROVEN" and result["error_code"] == "AGY_SCRATCH_CLEANUP_UNPROVEN"
+    assert len(providers) == len(verifies) == 1 and result["verify_exit_code"] == 0
+    assert not result["replay_authorized"] and not result["invocations"][0]["repair_eligible"]
+    roots = {r["role"]: r for r in result["scratch_teardown"]["roots"]}
+    assert roots["INPUT"]["status"] == "CLEAN" and roots["SCRATCH"]["status"] == "HOLD"
+    assert roots["SCRATCH"]["hardlink_diagnostic"] == {
+        "code": "AGY_SCRATCH_HARDLINK_UNLINK_UNPROVEN", "alias_scope": "UNKNOWN",
+        "provenance": "UNKNOWN", "lstat_links": 2, "handle_links": None, "action": "HOLD"}
+    assert all(d["status"] == "CLEAN" for d in disposals)
+    evidence = fixture.root / "boundary-evidence"
+    def load(key):
+        return json.loads((evidence / result["evidence_files"][key]).read_text())
+    before, after = load("agy_input_before"), load("agy_input_after_verify")
+    assert before["status"] == after["status"] == "INTACT"
+    assert [(f["name"], f["sha256"]) for f in before["files"]] == [
+        (f["name"], f["sha256"]) for f in after["files"] if f["role"] == "CONTRACT"]
+    quarantine = load("quarantine_manifest")
+    assert quarantine["candidate"] is False and quarantine["replay_authorized"] is False
+    assert any(f["path"] == "impl.py" and f["status"] == "QUARANTINED" for f in quarantine["files"])
+
+
 @pytest.mark.parametrize("fault,error", [("scope", "CHANGES_OUTSIDE_ALLOWED_SCOPE"),
     ("head", "GIT_HEAD_CHANGED"), ("gitdir", "GIT_WORKTREE_IDENTITY_CHANGED"),
     ("denied", "HEADLESS_TOOL_PERMISSION_DENIED"), ("unknown", "EXECUTOR_OUTCOME_UNCONFIRMED"),
