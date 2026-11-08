@@ -449,6 +449,58 @@ def test_native_scratch_single_link_containment_api_roundtrip(tmp_path):
     assert checks and not leaf.exists()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="native Windows pytest symlink proof")
+def test_native_scoped_pytest_current_link_clean_without_following_target(tmp_path):
+    tree = tmp_path / "fresh-private-scratch"
+    pytest_dir = tree / "pytest-basetemp"
+    pytest_dir.mkdir(parents=True)
+    target = pytest_dir / "test_example_0"
+    target.mkdir()
+    (target / "data").write_bytes(b"owned")
+    link = pytest_dir / "test_example_current"
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("native directory symlink creation denied")
+    assert link.is_symlink()
+    result = _scratch_link_cleanup(tree)
+    assert result["status"] == "CLEAN", result
+    assert result["reparse_links_removed"] == 1
+    assert not tree.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows foreign pytest-style symlink denial")
+@pytest.mark.parametrize("scenario", ["outside", "bad-name", "junction"])
+def test_native_scoped_pytest_current_link_rejects_unproven_target(tmp_path, scenario):
+    from test_ef01 import _directory_alias
+    tree = tmp_path / "fresh-private-scratch"
+    pytest_dir = tree / "pytest-basetemp"
+    pytest_dir.mkdir(parents=True)
+    outside = tmp_path / "protected-external"
+    outside.mkdir()
+    sentinel = outside / "sentinel"
+    sentinel.write_bytes(b"never alter")
+    internal = pytest_dir / "test_example_0"
+    internal.mkdir()
+    alias = pytest_dir / ("unexpected_alias" if scenario == "bad-name" else "test_example_current")
+    try:
+        if scenario == "junction":
+            _directory_alias(outside, alias)
+        else:
+            alias.symlink_to(outside if scenario == "outside" else internal,
+                             target_is_directory=True)
+    except OSError:
+        pytest.skip("native link privilege not available")
+    result = _scratch_link_cleanup(tree)
+    assert result["status"] == "HOLD", result
+    assert result["first_unsafe_entry"]["subtype"] == "REPARSE_UNPROVEN", result
+    assert alias.is_symlink() or adapters.is_link(alias)
+    assert sentinel.read_bytes() == b"never alter"
+    assert (pytest_dir / "test_example_0").exists()
+
+
+
+
 @pytest.mark.skipif(os.name != "nt", reason="native scratch lifecycle without hardlink creation")
 def test_native_scratch_single_link_cleanup_retains_readonly_behavior(tmp_path):
     """Single-link compatibility only; not a substitute for hardlink AC."""
@@ -830,7 +882,9 @@ sys.exit(PROVIDER_EXIT)
         verify_argv=[sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).write_bytes(b'verified')"])
     diagnostic = json.dumps(_native_cache_diagnostic(result, scenario, inventories[0]), sort_keys=True)
     if scenario in {"pytest", "xdist"}:
-        assert inventories[0]["reparse_entries"] == 0, diagnostic
+        # pytest tmp_path creates two same-parent *current aliases. Native
+        # cleanup must remove only these pinned and fully proven links.
+        assert inventories[0]["reparse_entries"] == 2, diagnostic
     print("NATIVE_CACHE_DIAGNOSTIC=" + diagnostic)
     if record_property is not None:
         record_property("native_cache_diagnostic", diagnostic)
@@ -838,6 +892,9 @@ sys.exit(PROVIDER_EXIT)
     assert result["process_lifecycle"]["status"] == "RECONCILED"
     assert result["process_lifecycle"]["tree_empty"] and not result["process_lifecycle"]["forced_termination"]
     assert result["scratch_teardown"]["status"] == "CLEAN", diagnostic
+    if scenario in {"pytest", "xdist"}:
+        scratch_root = next(x for x in result["scratch_teardown"]["roots"] if x["role"] == "SCRATCH")
+        assert scratch_root["reparse_links_removed"] == 2, diagnostic
     assert all(r["status"] == "CLEAN" for r in result["scratch_teardown"]["roots"])
     assert not roots[1].exists() and not roots[2].exists()
     assert (repo / "changed.txt").is_file(), (result["status"],
