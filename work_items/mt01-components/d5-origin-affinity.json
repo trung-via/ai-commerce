@@ -1,0 +1,20 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "d5-origin-affinity",
+  "sources": [
+    "src/ai_commerce/origin_affinity/__init__.py",
+    "src/ai_commerce/origin_affinity/contracts.py"
+  ],
+  "tests": [
+    "tests/test_origin_affinity_contract.py"
+  ],
+  "acs": [
+    "D5.origin-affine-workflow-return-structural-draft-only"
+  ],
+  "consumers": [
+    "src/ai_commerce/remote/conversation_binding.py"
+  ],
+  "contracts": [
+    "contracts/OriginReturnTicket.v1.schema.json"
+  ]
+}

@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-commerce:d5:OriginReturnTicket.v1",
+  "title": "OriginReturnTicket.v1 — data-only structural draft, NOT authorization",
+  "description": "Opaque conversation-affine return correlation only. Structural validation does not authenticate provenance, session, signed consent, completed work, ChatGPT route, or browser Send.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "route_id",
+    "generation",
+    "origin_method",
+    "origin_proof_sha256",
+    "work_namespace",
+    "work_id",
+    "event_ref",
+    "completion_evidence_sha256",
+    "source_sha",
+    "delivery_key",
+    "delivery_mode",
+    "authorization",
+    "effect"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "OriginReturnTicket.v1"
+    },
+    "route_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+      "maxLength": 128
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "origin_method": {
+      "enum": [
+        "OPAQUE_RENDEZVOUS_V1",
+        "PAGE_SCOPED_GESTURE_V1"
+      ]
+    },
+    "origin_proof_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "work_namespace": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{1,31}$",
+      "maxLength": 32
+    },
+    "work_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "maxLength": 128
+    },
+    "event_ref": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,160}$",
+      "maxLength": 161
+    },
+    "completion_evidence_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "source_sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "delivery_key": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "delivery_mode": {
+      "const": "SEND_ONLY"
+    },
+    "authorization": {
+      "const": "NOT_VERIFIED"
+    },
+    "effect": {
+      "const": "NOT_ATTEMPTED"
+    }
+  }
+}
