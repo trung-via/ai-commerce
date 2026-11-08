@@ -1667,6 +1667,37 @@ def test_v22_normal_project_action_executes_committed_owner_and_replays_binding(
     assert new_binding["candidate_files"] != binding["candidate_files"]
 
 
+def test_v22_serial_action_with_committed_owner_holds_without_parallel_upgrade(tmp_path, monkeypatch):
+    """A serial WorkItem may not inherit the reserved -n12 manifest capability."""
+    from ai_commerce.engineering.impact_v21 import verified_onboarding_binding
+
+    data, _, args = _v22_normal_owner_repo(tmp_path, monkeypatch)
+    serial = ["python", "-m", "pytest", "tests", "-q"]
+    prior_serial = ["python", "-m", "pytest", "tests/test_prior.py", "-q"]
+    args["fallback_argv"] = serial
+    args["registered_profiles"]["project-tests-serial"] = serial
+    args["registered_profiles"]["mt01-prior-serial-tests"] = prior_serial
+    plan = registered_action_plan(**args)
+
+    assert plan["fallback"] is False
+    assert "fresh:SERIAL_MANIFEST_OWNER_PROFILE_UNPROVEN" in plan["reason_codes"]
+    assert plan["impact_v21"]["mode"] == "HOLD_COVERAGE"
+    assert all(entry["execute"] is False for entry in plan["groups"])
+    assert plan["groups"][-1]["group"] == "v21-coverage-hold"
+    owner = next(e for e in plan["groups"] if e["group"] == "fresh")
+    prior = next(e for e in plan["groups"] if e["group"] == "prior")
+    assert owner["binding"]["argv"] == ["python", "-m", "pytest", *data["tests"], "-q"]
+    assert "-n" not in owner["binding"]["argv"]
+    assert prior["binding"]["argv"] == prior_serial
+    assert prior["selected_profile"] == "mt01-prior-serial-tests"
+    assert not verified_onboarding_binding(
+        workspace=tmp_path, binding=owner["binding"],
+        changed_paths=args["changed_paths"], allowed_paths=args["allowed_paths"],
+        base_sha=args["base_sha"], registered_profiles=args["registered_profiles"],
+        expected_group="fresh",
+    )
+
+
 def test_v22_normal_project_action_without_baseline_owner_stays_held(tmp_path, monkeypatch):
     _, _, args = _v22_normal_owner_repo(tmp_path, monkeypatch, manifest=False)
     plan = registered_action_plan(**args)
