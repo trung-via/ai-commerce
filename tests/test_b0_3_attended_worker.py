@@ -223,7 +223,8 @@ def test_runtime_hash_accepts_bytecode_only_cache_churn_between_scans(source_tre
                     cache.mkdir()
                     bytecode.write_bytes(b"created bytecode")
                 elif mutation == "remove":
-                    shutil.rmtree(cache)
+                    bytecode.unlink()
+                    cache.rmdir()
                 else:
                     bytecode.write_bytes(b"new bytecode from concurrent worker")
         return original(path)
