@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -255,7 +256,8 @@ def test_agy_cache_environment_is_source_owned_and_child_only(tmp_path):
     before = inherited.copy()
     child = runner._agy_child_env(inherited, scratch, repo=repo)
     assert inherited == before
-    assert child["PYTEST_ADDOPTS"] == "-p no:cacheprovider"
+    assert shlex.split(child["PYTEST_ADDOPTS"]) == ["-p", "no:cacheprovider",
+        "--basetemp=" + str(scratch / "pytest-basetemp")]
     assert child["PYTHONDONTWRITEBYTECODE"] == "1"
     assert child["PYTHONPYCACHEPREFIX"] == str(scratch / "pycache")
     assert child["XDG_CACHE_HOME"] == str(scratch / "user-cache")
@@ -724,13 +726,14 @@ def _native_cache_attempt(tmp_path, monkeypatch, scenario, provider_exit=0, reco
     roots, observations, inventories = [], [], []
     prompt = 'Trusted infrastructure probe "Việt" \\ 🚀'
     code = r'''
-import hashlib, json, os, subprocess, sys
+import hashlib, json, os, shlex, subprocess, sys
 from pathlib import Path
 args = sys.argv[1:]
 source, mirror, scratch = [Path(args[i+1]) for i, a in enumerate(args[:-1]) if a == '--add-dir']
 assert Path.cwd() == source
 assert hashlib.sha256((mirror / 'instruction.txt').read_bytes()).hexdigest() == EXPECTED_SHA
-assert os.environ['PYTEST_ADDOPTS'] == '-p no:cacheprovider'
+assert shlex.split(os.environ['PYTEST_ADDOPTS']) == ['-p', 'no:cacheprovider',
+    '--basetemp=' + str(scratch / 'pytest-basetemp')]
 assert os.environ['PYTHONDONTWRITEBYTECODE'] == '1'
 assert all(os.environ[k] == str(scratch) for k in ('TEMP', 'TMP', 'TMPDIR'))
 assert os.environ['AI_COMMERCE_PYTEST_SCRATCH'] == str(scratch)
@@ -748,6 +751,7 @@ if SCENARIO in ('pytest', 'xdist'):
         "    assert not request.config.pluginmanager.hasplugin('cacheprovider')\n"
         "    scratch = Path(os.environ['TEMP'])\n"
         "    assert scratch in tmp_path.parents\n"
+        "    assert (scratch / 'pytest-basetemp') in tmp_path.parents\n"
         "    (scratch / ('worker-' + str(value) + '.json')).write_text(json.dumps({"
         "'pid': os.getpid(), 'worker': os.environ.get('PYTEST_XDIST_WORKER'), "
         "'cwd': str(Path.cwd()), 'addopts': os.environ['PYTEST_ADDOPTS']}))\n", encoding='utf-8')
@@ -759,7 +763,8 @@ if SCENARIO in ('pytest', 'xdist'):
     assert child.returncode == 0, (child.stdout + child.stderr).decode('utf-8', 'replace')
     workers = [json.loads(p.read_text()) for p in sorted(scratch.glob('worker-*.json'))]
     assert len(workers) == 2 and all(w['cwd'] == str(mirror) for w in workers)
-    assert all(w['addopts'] == '-p no:cacheprovider' for w in workers)
+    assert all(shlex.split(w['addopts']) == ['-p', 'no:cacheprovider',
+        '--basetemp=' + str(scratch / 'pytest-basetemp')] for w in workers)
     assert not list(source.rglob('__pycache__'))
     assert not list(scratch.rglob('__pycache__'))
     assert not (mirror / '.pytest_cache').exists()
@@ -800,7 +805,8 @@ sys.exit(PROVIDER_EXIT)
     monkeypatch.setattr(runner, "command_for", command)
     native_run = runner._run_agy_owned
     def observe(command, **kwargs):
-        assert kwargs["cwd"] == repo and kwargs["env"]["PYTEST_ADDOPTS"] == "-p no:cacheprovider"
+        assert kwargs["cwd"] == repo and shlex.split(kwargs["env"]["PYTEST_ADDOPTS"]) == [
+            "-p", "no:cacheprovider", "--basetemp=" + str(roots[2] / "pytest-basetemp")]
         result = native_run(command, **kwargs)
         inventories.append(_native_scratch_inventory(roots[2]))
         receipt = roots[2] / "native.receipt.json"
@@ -814,6 +820,8 @@ sys.exit(PROVIDER_EXIT)
         instruction=prompt, allowed_prefixes=["changed.txt"], max_repair_rounds=2,
         verify_argv=[sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).write_bytes(b'verified')"])
     diagnostic = json.dumps(_native_cache_diagnostic(result, scenario, inventories[0]), sort_keys=True)
+    if scenario in {"pytest", "xdist"}:
+        assert inventories[0]["reparse_entries"] == 0, diagnostic
     print("NATIVE_CACHE_DIAGNOSTIC=" + diagnostic)
     if record_property is not None:
         record_property("native_cache_diagnostic", diagnostic)
