@@ -24,6 +24,72 @@ from ai_commerce.hostops_v3.worker import Worker
 from test_hostops_v3 import ROOT, NOW, h, keys, result
 
 
+@pytest.mark.parametrize("operation", ["bridge", "verify"])
+def test_r4_owner_witness_ipc_is_read_only_parser(operation):
+    mode, raw = broker.ipc_request_owner_witness(c.canonical({"schema": "hostops.owner_witness.v1",
+        "mode": "READ_ONLY", "operation": operation, "envelope": {"source": "fixture"}}))
+    assert mode == operation and c.decode(raw) == {"source": "fixture"}
+
+
+@pytest.mark.parametrize("fault", ["execute", "mode", "extra", "duplicate", "oversize", "policy_in_frame"])
+def test_r4_owner_witness_ipc_rejects_effect_and_authority_frames(fault):
+    frame = {"schema": "hostops.owner_witness.v1", "mode": "READ_ONLY",
+             "operation": "bridge", "envelope": {}}
+    if fault == "execute": frame["operation"] = "execute"
+    if fault == "mode": frame["mode"] = "bridge"
+    if fault == "extra": frame["execution_allowed"] = True
+    if fault == "policy_in_frame": frame["enrollment"] = {"trusted": True}
+    raw = c.canonical(frame)
+    if fault == "duplicate": raw = raw.replace(b'"mode":', b'"mode":"WRITE","mode":')
+    if fault == "oversize": raw = b"x" * (c.MAX_WIRE + 1)
+    with pytest.raises(c.Denied): broker.ipc_request_owner_witness(raw)
+
+
+def test_r4_hostops_worker_never_enrolls_or_schedules_from_request(tmp_path, monkeypatch):
+    from test_ef02_m0r_fault_injection import _r4_bridge_fixture
+    f = _r4_bridge_fixture(tmp_path, monkeypatch)
+    worker = object.__new__(Worker)
+    def forbidden(*a, **kw): pytest.fail("source witness dispatched a HostOps operation")
+    for method in ("execute", "reconcile", "_authenticate"):
+        monkeypatch.setattr(worker, method, forbidden)
+    with f.ledger:
+        value = worker.verify_owner_witness(f.request(), source=f.source, enrollment=f.enrollment,
+            context=f.context, ssh_keygen=f.verifier, ledger=f.ledger, source_contract_fixture=True)
+        assert value["status"] == "SOURCE_ONLY_HOLD_NATIVE_SIGNER_REQUIRED", value
+        forged = f.request(); forged["enrollment"] = {"trust_me": True}
+        assert worker.verify_owner_witness(forged)["execution_allowed"] is False
+        assert f.ledger.unreconciled_intents_count() == 1
+
+
+def test_r4_separate_process_native_reservations_and_restart_all_hold_without_open(tmp_path):
+    """Safety evidence only: NOT a two-process durable-positive reservation test."""
+    sentinel = tmp_path / "ledger.sqlite"; sentinel.write_bytes(b"NATIVE CUSTODY UNPROVEN")
+    code = '''
+import sys
+from ai_commerce.hostops_v3.journal import OfflineWorkOwnerEffectLedger
+from ai_commerce.hostops_v3.contract import Denied
+try:
+    OfflineWorkOwnerEffectLedger(sys.argv[1], private_root=sys.argv[2])
+except Denied as exc:
+    print(str(exc)); sys.exit(0)
+sys.exit(3)
+'''
+    env = {**os.environ, "PYTHONPATH": str(ROOT / "src"), "PYTHONDONTWRITEBYTECODE": "1"}
+    def start():
+        return subprocess.Popen([sys.executable, "-c", code, str(sentinel), str(tmp_path)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    children = [start(), start()]
+    for process in children:
+        stdout, stderr = process.communicate(timeout=10)
+        assert process.returncode == 0 and not stderr
+        assert stdout.strip() == b"SOURCE_ONLY_HOLD_LEDGER_CUSTODY_UNPROVEN"
+    restarted = start(); stdout, stderr = restarted.communicate(timeout=10)
+    assert restarted.returncode == 0 and not stderr
+    assert stdout.strip() == b"SOURCE_ONLY_HOLD_LEDGER_CUSTODY_UNPROVEN"
+    assert sentinel.read_bytes() == b"NATIVE CUSTODY UNPROVEN"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["ledger.sqlite"]
+
+
 def load_script(name):
     spec = importlib.util.spec_from_file_location(name, ROOT / "scripts" / (name + ".py"))
     value = importlib.util.module_from_spec(spec)

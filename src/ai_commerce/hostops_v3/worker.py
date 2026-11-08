@@ -210,6 +210,18 @@ class Worker:
             observed = {"sha256": value, "bytes": count}
         return self._receipt(request, "UNKNOWN", "RECONCILED_OBSERVATION_ONLY", {**observed, "reconciled": True})
 
+    def verify_owner_witness(self, request, *, source=None, enrollment=None,
+            context=None, ssh_keygen=None, ledger=None, source_contract_fixture=False):
+        """Explicit source-only call. Policy/context cannot be taken from a frame.
+
+        No authority.authenticate, operation, filesystem or provider dispatch.
+        Native enrollment remains empty and the native ledger gate denies open.
+        """
+        from ..remote.transport import work_owner_witness_bridge
+        return work_owner_witness_bridge(request, source=source, enrollment=enrollment,
+            context=context, ssh_keygen=ssh_keygen, ledger=ledger,
+            source_contract_fixture=source_contract_fixture)
+
 
 
 class WorkerV4(Worker):
