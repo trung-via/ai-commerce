@@ -836,6 +836,9 @@ def _agy_child_env(environment: dict[str, str], scratch: Path, *, repo: Path) ->
     independent verifier keeps its own environment and registered command.
     Rebind the EF01 pytest runtime plugin too: its inherited scratch setting
     otherwise overrides TEMP for nested pytest fixtures and JUnit artifacts.
+    Keep package caches private and force copy-only uv installs; inherited
+    hardlink mode can alias external cache files into owned scratch and make
+    mandatory native cleanup HOLD even when all source tests pass.
 
     These are subprocess-inherited defaults, not a security sandbox. Explicit
     child overrides/direct writes still require the mandatory input manifest
@@ -847,6 +850,10 @@ def _agy_child_env(environment: dict[str, str], scratch: Path, *, repo: Path) ->
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONPYCACHEPREFIX": str(root / "pycache"),
             "XDG_CACHE_HOME": str(root / "user-cache"),
+            "UV_CACHE_DIR": str(root / "uv-cache"),
+            "UV_LINK_MODE": "copy",
+            "PIP_CACHE_DIR": str(root / "pip-cache"),
+            "npm_config_cache": str(root / "npm-cache"),
             "AI_COMMERCE_PYTEST_SCRATCH": str(root),
             "AI_COMMERCE_PYTEST_REPO": str(repo)}
 
