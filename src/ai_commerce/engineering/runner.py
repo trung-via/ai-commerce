@@ -11,6 +11,7 @@ import ntpath
 import os
 import posixpath
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -853,7 +854,12 @@ def _agy_child_env(environment: dict[str, str], scratch: Path, *, repo: Path) ->
                   "AI_COMMERCE_PYTEST_REPO"}
     inherited = {key: value for key, value in environment.items() if key.upper() not in controlled}
     return {**inherited, **{key: str(root) for key in ("TEMP", "TMP", "TMPDIR")},
-            "PYTEST_ADDOPTS": "-p no:cacheprovider",
+            # Force nested pytest to use an owned deterministic basetemp. The
+            # implicit tempfile mode creates `*-current` reparse/symlink aliases
+            # that our fail-closed native SCRATCH cleanup intentionally rejects.
+            # shlex quoting protects paths containing spaces/apostrophes.
+            "PYTEST_ADDOPTS": "-p no:cacheprovider --basetemp=" +
+                             shlex.quote(str(root / "pytest-basetemp")),
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONPYCACHEPREFIX": str(root / "pycache"),
             "XDG_CACHE_HOME": str(root / "user-cache"),
