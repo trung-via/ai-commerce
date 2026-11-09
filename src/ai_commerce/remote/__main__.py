@@ -39,7 +39,8 @@ def main(argv: list[str] | None = None) -> int:
                                registry=profiles, issuer_login=args.issuer_login,
                                owner_login=args.owner_login,
                                brain_issuers=tuple(v.strip() for v in
-                                                   args.brain_issuers.split(",") if v.strip()))
+                                                   args.brain_issuers.split(",") if v.strip()),
+                               strict_ac=args.command != "reconcile")
         check_source(checkout, batch["source_sha"],
                      **({"git_executable": args.git_bin} if args.git_bin is not None else {}))
         # Hosted validation and self-host execution must agree before claim.
