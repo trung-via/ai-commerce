@@ -49,6 +49,9 @@ _FFMPEG_EXTERNAL_TESTS = frozenset({
     "tests/test_bq_02a_critic_t1.py",
     "tests/test_bq_02b_multimodal.py",
     "tests/test_bq_04a_targeted_repair.py",
+    # BQ-06a tests invoke the native Q4 media fixture (FFmpeg) even though
+    # their name is behavioral learning rather than video/media.
+    "tests/test_bq_06a_behavioral_learning.py",
     # A14 E2E consumes the offline A13 inspected media bridge. Provisioning
     # the tool is conservative, not a claim every case invokes ffprobe.
     "tests/test_a14_commerce_e2e.py",
