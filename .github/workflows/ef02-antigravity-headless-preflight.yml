@@ -66,6 +66,9 @@ jobs:
       github.run_attempt == 1
     runs-on: [self-hosted, Windows, ai-commerce-ef02]
     timeout-minutes: 4
+    concurrency:
+      group: epwo-710-g3b-owner-probe
+      cancel-in-progress: false
     steps:
       - name: Checkout trusted main without credentials
         uses: actions/checkout@v4
@@ -77,13 +80,14 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $probe = @'
-          import os, pathlib, secrets, shutil, subprocess, sys, tempfile
+          import os, pathlib, secrets, shutil, stat, subprocess, tempfile
           
           def outcome(result, provider="NOT_CALLED", effective="UNPROVEN", scope="UNPROVEN"):
               print("AGY_G3B_RESULT=" + result)
               print("AGY_G3B_PROVIDER_RETURN=" + provider)
               print("AGY_G3B_EFFECTIVE_WRITE=" + effective)
               print("AGY_G3B_SCRATCH_SCOPE=" + scope)
+              print("AGY_G3B_OUTSIDE_WRITES=UNPROVEN")
               print("AGY_G3B_QUOTA=UNPROVEN")
               raise SystemExit(0 if result == "PASS_SENTINEL" else 2)
           
@@ -96,8 +100,14 @@ jobs:
           checkout = pathlib.Path(os.environ["GITHUB_WORKSPACE"]).resolve()
           if not temp.is_dir() or temp == checkout or temp in checkout.parents or checkout in temp.parents:
               outcome("HOLD_TEMP_SOURCE_OVERLAP")
-          root = pathlib.Path(tempfile.mkdtemp(prefix="ai-commerce-g3b-", dir=temp)).resolve()
-          if root.parent != temp or root.is_symlink():
+          try:
+              root = pathlib.Path(tempfile.mkdtemp(prefix="ai-commerce-g3b-", dir=temp)).resolve()
+              root_original = root.lstat()
+          except OSError:
+              outcome("HOLD_SCRATCH_CREATION_UNPROVEN")
+          if (root.parent != temp or root.is_symlink() or
+                  not stat.S_ISDIR(root_original.st_mode) or
+                  root_original.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT):
               outcome("HOLD_SCRATCH_IDENTITY")
           nonce = secrets.token_hex(16)
           target = root / "proof.txt"
@@ -111,17 +121,17 @@ jobs:
                   "--disable-slash-commands", "--output-format", "json"]
           try:
               proc = subprocess.Popen(args, cwd=root, stdin=subprocess.DEVNULL,
-                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                       creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
           except (OSError, ValueError):
               outcome("HOLD_PROVIDER_SPAWN_UNPROVEN")
           try:
-              stdout, stderr = proc.communicate(timeout=90)
+              proc.wait(timeout=90)
           except subprocess.TimeoutExpired:
               try:
                   subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
                                  capture_output=True, timeout=12, check=False)
-                  proc.communicate(timeout=5)
+                  proc.wait(timeout=5)
               except Exception:
                   pass
               outcome("HOLD_TIMEOUT_EFFECT_UNKNOWN", provider="TIMEOUT_UNKNOWN")
@@ -129,18 +139,25 @@ jobs:
               outcome("HOLD_PROVIDER_RETURN_UNPROVEN", provider="UNKNOWN")
           if proc.returncode != 0:
               outcome("HOLD_PROVIDER_NONZERO", provider="NONZERO")
-          if not target.is_file() or target.is_symlink() or target.stat().st_nlink != 1:
-              outcome("HOLD_NO_WRITE_WITNESS", provider="EXIT_ZERO")
           try:
+              leaf = target.lstat()
+              root_after = root.lstat()
+              if (root_after.st_dev, root_after.st_ino) != (root_original.st_dev, root_original.st_ino):
+                  outcome("HOLD_SCRATCH_ROOT_DRIFT", provider="EXIT_ZERO")
+              if (not stat.S_ISREG(leaf.st_mode) or leaf.st_nlink != 1 or
+                      leaf.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+                  outcome("HOLD_NO_WRITE_WITNESS", provider="EXIT_ZERO")
               data = target.read_bytes()
               names = sorted(p.name for p in root.iterdir())
+              if (root.lstat().st_dev, root.lstat().st_ino) != (root_original.st_dev, root_original.st_ino):
+                  outcome("HOLD_SCRATCH_ROOT_DRIFT", provider="EXIT_ZERO")
           except (OSError, ValueError):
               outcome("HOLD_PROOF_READ_UNPROVEN", provider="EXIT_ZERO")
           if len(data) > 128 or data.rstrip(b"\r\n") != nonce.encode("ascii"):
               outcome("HOLD_WRONG_PROOF_BYTES", provider="EXIT_ZERO")
           if names != ["proof.txt"]:
               outcome("HOLD_EXTRA_SCRATCH_WRITES", provider="EXIT_ZERO", effective="PROVEN")
-          outcome("PASS_SENTINEL", provider="EXIT_ZERO", effective="PROVEN", scope="ONLY_SENTINEL")
+          outcome("PASS_SENTINEL", provider="EXIT_ZERO", effective="PROVEN", scope="ONLY_SENTINEL_IN_TEMP")
           '@
           & python -c $probe
           exit $LASTEXITCODE

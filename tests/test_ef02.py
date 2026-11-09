@@ -1159,13 +1159,18 @@ def test_ef02_710_g3b_owner_one_shot_bounded_model_and_disposable_scope():
         'os.environ["RUNNER_TEMP"]',
         "tempfile.mkdtemp",
         "subprocess.CREATE_NEW_PROCESS_GROUP",
-        "communicate(timeout=90)",
+        "wait(timeout=90)",
         '"taskkill", "/PID", str(proc.pid), "/T", "/F"',
         '"--model", "gemini-3.8-flash"',
         '"--effort", "high"',
         '"--mode", "accept-edits"',
         '"--output-format", "json"',
         'data.rstrip(b"\\r\\n")',
+        "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL",
+        "AGY_G3B_OUTSIDE_WRITES=UNPROVEN",
+        "root_original.st_dev, root_original.st_ino",
+        "stat.FILE_ATTRIBUTE_REPARSE_POINT",
+        "group: epwo-710-g3b-owner-probe",
         'names != ["proof.txt"]',
         'AGY_G3B_RESULT=',
         'AGY_G3B_EFFECTIVE_WRITE=',
@@ -1176,3 +1181,17 @@ def test_ef02_710_g3b_owner_one_shot_bounded_model_and_disposable_scope():
     assert "github.event.issue.body" not in src
     assert "--dangerously-skip-permissions" not in src
     assert "WORKOWNER" not in model
+
+
+def test_ef02_710_g3b_inline_python_script_syntax_and_scope_tokens():
+    import ast
+    import textwrap
+    src = (Path(__file__).resolve().parents[1] /
+           ".github/workflows/ef02-antigravity-headless-preflight.yml").read_text(encoding="utf-8")
+    g3b = src.split("  g3b-write:", 1)[1]
+    script = g3b.split("$probe = @'\n", 1)[1].split("\n          '@", 1)[0]
+    parsed = ast.parse(textwrap.dedent(script))
+    assert any(isinstance(node, ast.Call) for node in ast.walk(parsed))
+    assert "stdout=subprocess.PIPE" not in script
+    assert "stderr=subprocess.PIPE" not in script
+    assert "AGY_G3B_OUTSIDE_WRITES=UNPROVEN" in script
