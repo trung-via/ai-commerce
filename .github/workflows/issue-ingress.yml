@@ -1372,3 +1372,139 @@ jobs:
             await github.rest.issues.createComment({...context.repo,
               issue_number:context.issue.number,
               body:'AI_COMMERCE_HOSTOPS_EF02_ATTEMPT_RECONCILE_RESULT_V1\n'+JSON.stringify(publicResult)});
+
+  # #698 R0.2: new fixed read-only evidence catalog; no WorkOwner/provider writes.
+  hostops-ef02-698-r02-forensic:
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.action == 'opened' &&
+      github.event.repository.full_name == 'trung-via/ai-commerce' &&
+      github.actor == github.repository_owner &&
+      github.event.issue.user.login == github.repository_owner &&
+      github.event.issue.title == '[HOSTOPS EF02 FORENSIC] #698 R0.2 read-only'
+    runs-on: [self-hosted, Windows, ai-commerce-hostops]
+    timeout-minutes: 5
+    concurrency:
+      group: personal-hostops-workspace
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout source-owned forensic reader
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Verify only the fixed R0.2 Human read event
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw -Encoding UTF8 | ConvertFrom-Json
+          $expected = '{"schema":"ai-commerce.hostops.ef02-698-r02.v1","operation":"EF02_698_FORENSIC_READONLY_R02","issue_number":698,"parameters":{}}'
+          if ($event.action -cne 'opened' -or
+              $event.issue.title -cne '[HOSTOPS EF02 FORENSIC] #698 R0.2 read-only' -or
+              $event.issue.body -cne $expected -or
+              $event.issue.user.login -cne 'trung-via') {
+            throw 'EF02_698_R02_EVENT_REJECTED'
+          }
+      - name: R0.2 inspect fixed EF02 boundary and six source paths without mutation
+        shell: pwsh
+        env:
+          HOSTOPS_R02_RESULT: ${{ runner.temp }}\ef02-698-r02-result.json
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PYTHONPATH = Join-Path $env:GITHUB_WORKSPACE 'src'
+          python -B -m ai_commerce.hostops_v3.ef02_attempt_r02_readonly --output $env:HOSTOPS_R02_RESULT
+      - name: Publish strictly bounded HOLD-only R0.2 receipt
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          HOSTOPS_R02_RESULT: ${{ runner.temp }}\ef02-698-r02-result.json
+        with:
+          script: |
+            const fs = require('fs');
+            const schema = 'ai-commerce.hostops.ef02-698-r02.v1';
+            const operation = 'EF02_698_FORENSIC_READONLY_R02';
+            const source_sha = 'b9abe11c31954706caa816d9c53ca6c0519e913e';
+            const attempt_id = 'bq06b_r2_agy38flashhigh_legit_correction_reprocess_main_b9abe11c_20261109';
+            const keys = ['schema','operation','issue_number','source_sha','attempt_id',
+              'status','evidence_root','boundary','provider_return','terminal','source_state',
+              'scope_seen','scope_missing','roadmap_diff_unverified','scope_manifest_digest',
+              'replay_authorized','provider_outcome_proven','write_attempted'].sort().join(',');
+            const options = {
+              evidence_root: ['BATCH_ABSENT','ACTION_ABSENT','ACTION_PRESENT','ROOT_UNSAFE','ROOT_READ_UNKNOWN'],
+              boundary: ['ROOT_ABSENT','MISSING','UNSAFE','READ_UNKNOWN','PRESENT_UNVERIFIED'],
+              provider_return: ['ROOT_ABSENT','MISSING','UNSAFE','READ_UNKNOWN','PRESENT_UNVERIFIED'],
+              terminal: ['ROOT_ABSENT','MISSING','UNSAFE','READ_UNKNOWN','PRESENT_UNVERIFIED'],
+              source_state: ['SOURCE_READ_UNKNOWN','SOURCE_UNSAFE','WORKTREE_ABSENT',
+                'WORKTREE_AMBIGUOUS','WORKTREE_SINGLE','SCOPE_PARTIAL_UNVERIFIED',
+                'SCOPE_PRESENT_UNVERIFIED']
+            };
+            let r;
+            try {
+              const file = process.env.HOSTOPS_R02_RESULT;
+              if (fs.statSync(file).size > 2300) throw Error('OVERSIZE');
+              r = JSON.parse(fs.readFileSync(file,'utf8'));
+              if (!r || Array.isArray(r) || Object.keys(r).sort().join(',') !== keys ||
+                  r.schema !== schema || r.operation !== operation ||
+                  r.issue_number !== 698 || r.source_sha !== source_sha ||
+                  r.attempt_id !== attempt_id || r.status !== 'HOLD_UNKNOWN_EFFECT' ||
+                  r.replay_authorized !== false || r.provider_outcome_proven !== false ||
+                  r.write_attempted !== false ||
+                  Object.entries(options).some(([k,choices]) => !choices.includes(r[k])) ||
+                  !Number.isInteger(r.scope_seen) || !Number.isInteger(r.scope_missing) ||
+                  !Number.isInteger(r.roadmap_diff_unverified) ||
+                  r.scope_seen < 0 || r.scope_seen > 6 ||
+                  r.scope_missing < 0 || r.scope_missing > 6 ||
+                  r.roadmap_diff_unverified < 0 || r.roadmap_diff_unverified > 1 ||
+                  (r.scope_manifest_digest !== null &&
+                   (typeof r.scope_manifest_digest !== 'string' ||
+                     !/^[0-9a-f]{64}$/.test(r.scope_manifest_digest))) ||
+                  (r.source_state === 'SCOPE_PRESENT_UNVERIFIED' &&
+                   (r.scope_seen !== 6 || r.scope_missing !== 0 ||
+                    r.scope_manifest_digest === null)) ||
+                  (r.source_state === 'SCOPE_PARTIAL_UNVERIFIED' &&
+                   (r.scope_seen + r.scope_missing !== 6 ||
+                    r.scope_manifest_digest === null))) throw Error('UNTRUSTED');
+            } catch (_) {
+              r = {schema, operation,issue_number:698,source_sha,attempt_id,
+                status:'HOLD_UNKNOWN_EFFECT',evidence_root:'ROOT_READ_UNKNOWN',
+                boundary:'READ_UNKNOWN',provider_return:'READ_UNKNOWN',terminal:'READ_UNKNOWN',
+                source_state:'SOURCE_READ_UNKNOWN',scope_seen:0,scope_missing:0,
+                roadmap_diff_unverified:0,scope_manifest_digest:null,
+                replay_authorized:false,provider_outcome_proven:false,write_attempted:false};
+            }
+            let workowner = 'READ_UNKNOWN';
+            try {
+              const key = '3c3dd6a321ae73f8ba145ce97cb360281c327cddf5f58fbdabb9ed78ae008ae9';
+              const {data: refs} = await github.rest.git.listMatchingRefs({
+                ...context.repo,ref:'heads/ef02/workowner/'+key+'/'});
+              const valid = (refs||[]).filter(x => new RegExp(
+                '^refs/heads/ef02/workowner/'+key+'/[0-9]{3}$').test(x.ref))
+                .sort((a,b) => a.ref.localeCompare(b.ref));
+              if (valid.length && valid.length <= 32 && valid.every(
+                  (x,i) => x.ref.endsWith('/'+String(i).padStart(3,'0')))) {
+                const {data: commit} = await github.rest.git.getCommit({
+                  ...context.repo,commit_sha:valid[valid.length-1].object.sha});
+                const prefix = 'EF02 WorkOwner.v1\n\n';
+                if (!commit.message.startsWith(prefix)) throw Error('INVALID_MARKER');
+                const v = JSON.parse(commit.message.slice(prefix.length));
+                if (v.identity?.repo !== 'trung-via/ai-commerce' ||
+                    v.identity?.issue !== 698 ||
+                    v.identity?.action_id !== 'BQ06B-R2-AGY38FLASHHIGH-A09-LINEAGE-SUPERSESSION-ROOTFIX-01' ||
+                    v.generation !== 1 || v.sequence !== valid.length-1)
+                    throw Error('INVALID_OWNER');
+                const allowed = ['OWNED','CLAIMED','SPAWN_INTENT','CHILD_OBSERVED',
+                  'PROVIDER_INTENT','ROUND_VERIFIED','RESULT_VERIFIED','PUBLISH_INTENT',
+                  'PUBLISHED','UNKNOWN'];
+                if (!allowed.includes(v.stage)) throw Error('INVALID_STAGE');
+                workowner = v.stage;
+              }
+            } catch (_) {}
+            const result = {...r,workowner_stage_observed:workowner,
+              workowner_terminal_receipt_verified:false,
+              operator_source_sha:context.sha,next_action:'NO_R3_DISPATCH'};
+            await github.rest.issues.createComment({...context.repo,
+              issue_number:context.issue.number,
+              body:'AI_COMMERCE_HOSTOPS_EF02_698_R02_FORENSIC_V1\n'+JSON.stringify(result)});
