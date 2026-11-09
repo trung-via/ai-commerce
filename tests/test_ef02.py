@@ -1108,3 +1108,31 @@ def test_workowner_candidate_publication_enforces_owner_fence_and_ref_readback(t
     assert storage.requests[-2][0] == "POST" and storage.requests[-2][1] == "/git/refs"
     assert storage.requests[-1][0] == "GET" and storage.requests[-1][1].startswith("/git/ref/heads/ef02/candidate/")
 
+
+def test_ef02_710_headless_issue_preflight_has_owner_only_no_model_gate():
+    # The native read may only be initiated by an owner-created exact-title
+    # Issue; no Issue body is ever interpreted as a command, path or model prompt.
+    src = (Path(__file__).resolve().parents[1] /
+           ".github/workflows/ef02-antigravity-headless-preflight.yml").read_text(encoding="utf-8")
+    for fixed in (
+        "github.event_name == 'issues'",
+        "github.event.action == 'opened'",
+        "github.repository == 'trung-via/ai-commerce'",
+        "github.actor == github.repository_owner",
+        "github.event.issue.user.login == github.repository_owner",
+        "github.event.issue.title == '[EF02 HEADLESS READ] #710 G3'",
+        "runs-on: [self-hosted, Windows, ai-commerce-ef02]",
+        "ref: main",
+        "persist-credentials: false",
+        "EF02-Antigravity-Headless-Preflight.ps1",
+        "AGY_G3_STATIC_PREFLIGHT=PASS_NO_MODEL",
+        "EFFECTIVE_WRITE_PERMISSION=UNPROVEN_NO_MODEL",
+        "MODEL_AUTH_QUOTA=UNPROVEN_NO_MODEL",
+    ):
+        assert fixed in src
+    assert "issues: write" not in src
+    assert "ady --print" not in src and "agy --print" not in src
+    assert "issue.body" not in src
+    assert "Write-Output $resultLines" not in src
+
+
