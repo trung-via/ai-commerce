@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 from concurrent.futures import ThreadPoolExecutor
+import ctypes
 import errno
 import importlib.util
 import json
@@ -78,7 +79,7 @@ def test_r4_native_alias_denied_without_external_sentinel_effects(tmp_path, kind
             if kind == "shm_symlink": alias = private / "ledger.sqlite-shm"
             alias.symlink_to(sentinel)
     except OSError:
-        pytest.skip("native alias creation denied by target environment; no privilege workaround")
+        pytest.skip("UNPROVEN: native alias creation denied by target environment; no privilege workaround")
     try:
         assert alias.lstat().st_ino
         with pytest.raises(c.Denied, match="SOURCE_ONLY_HOLD_LEDGER_CUSTODY_UNPROVEN"):
@@ -103,6 +104,127 @@ def test_r4_parent_replacement_and_wal_swap_cannot_trigger_sqlite(tmp_path, monk
         OfflineWorkOwnerEffectLedger(parent / "ledger.sqlite", private_root=parent)
     assert wal.read_bytes() == b"FOREIGN WAL"
     assert not list(old_parent.iterdir())
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native owned fixture root preflight required")
+def test_windows_owned_fixture_root_preflight_positive():
+    with fs.windows_owned_fixture_root() as (fixture_path, receipt):
+        assert fixture_path.is_dir()
+        assert receipt["status"] == "OWNED_FIXTURE_ROOT_VERIFIED"
+        assert receipt["schema"] == "hostops.fixture.owned_root.v1"
+        assert receipt["effective_rights_verified"] is True
+        assert receipt["foreign_write_detected"] is False
+        assert receipt["ancestors_verified_count"] >= 1
+        assert receipt["inherited_foreign_read_only_count"] >= 0
+        assert isinstance(receipt["root_digest"], str) and len(receipt["root_digest"]) == 64
+        # Proves no raw SID or file path leaked into sanitized status/hashes
+        assert "S-1-" not in receipt["status"]
+        assert "S-1-" not in receipt["root_digest"]
+        assert ":" not in receipt["root_digest"]
+        assert "\\" not in receipt["root_digest"]
+        assert fixture_path.exists()
+    assert not fixture_path.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native owned fixture root preflight required")
+def test_windows_owned_fixture_root_preflight_temp_foreign_modify_hold_outside_sentinel_unchanged(tmp_path):
+    sentinel = tmp_path / "outside-sentinel.txt"
+    sentinel.write_bytes(b"OUTSIDE SENTINEL NEVER ALTER")
+    try:
+        with pytest.raises(c.Denied, match="^HOLD_NATIVE_CUSTODY_ACL_FOREIGN$"):
+            fs.windows_owned_fixture_root_preflight(tmp_path, check_ancestors=True, raise_denied=True)
+        assert sentinel.read_bytes() == b"OUTSIDE SENTINEL NEVER ALTER"
+    finally:
+        if sentinel.exists():
+            sentinel.unlink()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native owned fixture root preflight required")
+def test_windows_owned_fixture_root_preflight_hostile_child_delete_child_and_write_dac_hold():
+    with fs.windows_owned_fixture_root() as (fixture_path, _):
+        disposable = fixture_path / "hostile-child-disposable"
+        disposable.mkdir()
+        # Test DELETE_CHILD (DC)
+        subprocess.run(["icacls", str(disposable), "/grant", "*S-1-5-32-546:(DC)"], capture_output=True, check=True)
+        with pytest.raises(c.Denied, match="^HOLD_NATIVE_CUSTODY_ACL_FOREIGN$"):
+            fs.windows_owned_fixture_root_preflight(disposable, check_ancestors=False, raise_denied=True)
+
+        # Test WRITE_DAC (WDAC)
+        subprocess.run(["icacls", str(disposable), "/remove", "*S-1-5-32-546"], capture_output=True, check=True)
+        subprocess.run(["icacls", str(disposable), "/grant", "*S-1-5-32-546:(WDAC)"], capture_output=True, check=True)
+        with pytest.raises(c.Denied, match="^HOLD_NATIVE_CUSTODY_ACL_FOREIGN$"):
+            fs.windows_owned_fixture_root_preflight(disposable, check_ancestors=False, raise_denied=True)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native owned fixture root preflight required")
+def test_windows_owned_fixture_root_preflight_reparse_junction_parent_swap_drift_hold():
+    import _winapi
+    with fs.windows_owned_fixture_root() as (fixture_path, _):
+        target = fixture_path / "junc-target"
+        target.mkdir()
+        junc = fixture_path / "junc-link"
+        _winapi.CreateJunction(str(target), str(junc))
+        try:
+            with pytest.raises(c.Denied, match="^W1_NATIVE_ROOT_REPARSE$"):
+                fs.windows_owned_fixture_root_preflight(junc, check_ancestors=True, raise_denied=True)
+        finally:
+            os.rmdir(junc)
+
+        # Parent identity drift
+        fake_receipt = {"volume_serial_hex": "12345678", "file_index_hex": "0000000000000000"}
+        with pytest.raises(c.Denied, match="^W1_NATIVE_ROOT_MISMATCH$"):
+            fs.w1_windows_native_create_fixture(fixture_path, fake_receipt, "drift.txt", "data")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native owned fixture root preflight required")
+def test_windows_owned_fixture_root_preflight_unsupported_ace_typed_unproven(monkeypatch):
+    with fs.windows_owned_fixture_root() as (fixture_path, _):
+        disposable = fixture_path / "unsupported-ace-disposable"
+        disposable.mkdir()
+
+        fake_buf = (ctypes.c_ubyte * 16)(2, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        def fake_get_ace(pacl, idx, pace):
+            pace._obj.value = ctypes.addressof(fake_buf)
+            return 1
+
+        monkeypatch.setattr(fs._advapi32, "GetAce", fake_get_ace)
+        with pytest.raises(c.Denied, match="^UNPROVEN_UNSUPPORTED_ACE_TYPE$"):
+            fs.windows_owned_fixture_root_preflight(disposable, check_ancestors=False, raise_denied=True)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native owned fixture root preflight required")
+def test_windows_owned_fixture_root_no_available_ancestors_emits_hold():
+    with pytest.raises(c.Denied, match="^HOLD_NATIVE_FIXTURE_ROOT_UNAVAILABLE$"):
+        with fs.windows_owned_fixture_root(candidate_ancestors=[Path(os.environ["TEMP"])]):
+            pass
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native owned fixture root preflight required")
+def test_windows_owned_fixture_root_harmless_read_traverse_no_false_hold():
+    with fs.windows_owned_fixture_root() as (fixture_path, _):
+        disposable = fixture_path / "harmless-read-disposable"
+        disposable.mkdir()
+        subprocess.run(["icacls", str(disposable), "/grant", "*S-1-5-32-546:(RX)"], capture_output=True, check=True)
+        res = fs.windows_owned_fixture_root_preflight(disposable, check_ancestors=False, raise_denied=True)
+        assert res["status"] == "OWNED_FIXTURE_ROOT_VERIFIED"
+        assert res["foreign_write_detected"] is False
+        assert res["inherited_foreign_read_only_count"] >= 1
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native owned fixture root preflight required")
+def test_windows_owned_fixture_root_sanitized_receipt_never_leaks_raw_sids_or_paths():
+    with fs.windows_owned_fixture_root() as (fixture_path, receipt):
+        assert set(receipt.keys()) == {
+            "schema", "status", "root_digest", "root_identity",
+            "ancestor_identities", "ancestors_verified_count",
+            "effective_rights_verified", "inherited_foreign_read_only_count",
+            "foreign_write_detected", "verified",
+        }
+        for key in ("status", "schema", "root_digest"):
+            assert "S-1-" not in receipt[key]
+            assert "C:" not in receipt[key]
+            assert "\\" not in receipt[key]
+
 
 
 @pytest.mark.parametrize("field", ["source_sha", "work_owner.journal_tip_sha", "work_owner.journal_digest",
