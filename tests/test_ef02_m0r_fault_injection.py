@@ -2013,6 +2013,12 @@ def test_r9_defect_a_and_b_cli_ingress_544_packet_and_successor_r10_lineage_roun
     monkeypatch.setattr("ai_commerce.remote.worker.subprocess.run",
                         lambda *_a, **_k: SimpleNamespace(returncode=0, stderr=""))
     _forbid_model(monkeypatch)
+    # The synthetic WorkOwner fixture has no immutable Git checkout; source
+    # admission has separate exact-tree tests and is not under this fault test.
+    _fixture_ac = lambda _action, **_kw: {"ids": ["EF02.action-and-fanin"]}
+    monkeypatch.setattr("ai_commerce.remote.validation.require_preexecutor_acceptance", _fixture_ac)
+    monkeypatch.setattr(cli, "require_preexecutor_acceptance", _fixture_ac)
+    monkeypatch.setattr("ai_commerce.remote.worker.require_preexecutor_acceptance", _fixture_ac)
     monkeypatch.setenv("GITHUB_TOKEN", "fixture-token")
     monkeypatch.setenv("GITHUB_REPOSITORY", "fixture/repository")
     monkeypatch.setenv("GITHUB_RUN_ID", "544001")
@@ -2212,6 +2218,10 @@ def test_r9_defect_b_index_admission_failures_fail_closed_zero_claims_zero_spawn
 
     storage.api = faulty_api
     _forbid_model(monkeypatch)
+    # Keep in-memory index-failure diagnostics independent of native Git
+    # source admission; this fixture must never spawn a real provider.
+    monkeypatch.setattr("ai_commerce.remote.worker.require_preexecutor_acceptance",
+                        lambda _action, **_kw: {"ids": ["EF02.action-and-fanin"]})
     monkeypatch.setattr("ai_commerce.remote.worker.check_source", lambda *_a, **_kw: None)
     monkeypatch.setattr("ai_commerce.remote.worker.load_approved_candidates", lambda *_a: {"version": 1, "candidates": {}})
 
