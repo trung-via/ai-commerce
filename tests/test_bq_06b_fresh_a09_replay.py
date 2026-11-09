@@ -26,7 +26,7 @@ def _head_sha():
 def _action(acs=None, paths=None):
     return {
         "instruction": "MT01_ACCEPTANCE_JSON:" + json.dumps(
-            acs if acs is not None else ["A09.analytics","A11.learning","A17.C07.C10.E06.offline-creative-learning"]),
+            acs if acs is not None else ["BQ-06b.a09-raw-replay-pinned-to-a11","A09.analytics","A11.learning","A17.C07.C10.E06.offline-creative-learning"]),
         "allowed_paths": paths if paths is not None else [SOURCE, TEST],
     }
 
