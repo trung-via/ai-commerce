@@ -1195,3 +1195,8 @@ def test_ef02_710_g3b_inline_python_script_syntax_and_scope_tokens():
     assert "stdout=subprocess.PIPE" not in script
     assert "stderr=subprocess.PIPE" not in script
     assert "AGY_G3B_OUTSIDE_WRITES=UNPROVEN" in script
+    assert "stream.read(129)" in script
+    assert "handle.st_dev, handle.st_ino" in script
+    assert "itertools.islice(root.iterdir(), 2)" in script
+    assert "target.read_bytes()" not in script
+    assert "sorted(p.name for p in root.iterdir())" not in script

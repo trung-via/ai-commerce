@@ -80,7 +80,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $probe = @'
-          import os, pathlib, secrets, shutil, stat, subprocess, tempfile
+          import itertools, os, pathlib, secrets, shutil, stat, subprocess, tempfile
           
           def outcome(result, provider="NOT_CALLED", effective="UNPROVEN", scope="UNPROVEN"):
               print("AGY_G3B_RESULT=" + result)
@@ -147,8 +147,14 @@ jobs:
               if (not stat.S_ISREG(leaf.st_mode) or leaf.st_nlink != 1 or
                       leaf.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT):
                   outcome("HOLD_NO_WRITE_WITNESS", provider="EXIT_ZERO")
-              data = target.read_bytes()
-              names = sorted(p.name for p in root.iterdir())
+              with target.open("rb") as stream:
+                  handle = os.fstat(stream.fileno())
+                  if (handle.st_dev, handle.st_ino) != (leaf.st_dev, leaf.st_ino):
+                      outcome("HOLD_PROOF_FILE_DRIFT", provider="EXIT_ZERO")
+                  data = stream.read(129)
+              if (target.lstat().st_dev, target.lstat().st_ino) != (leaf.st_dev, leaf.st_ino):
+                  outcome("HOLD_PROOF_FILE_DRIFT", provider="EXIT_ZERO")
+              names = sorted(p.name for p in itertools.islice(root.iterdir(), 2))
               if (root.lstat().st_dev, root.lstat().st_ino) != (root_original.st_dev, root_original.st_ino):
                   outcome("HOLD_SCRATCH_ROOT_DRIFT", provider="EXIT_ZERO")
           except (OSError, ValueError):
