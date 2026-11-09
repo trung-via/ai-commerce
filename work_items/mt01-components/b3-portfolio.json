@@ -1,0 +1,21 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "b3-portfolio",
+  "sources": [
+    "src/ai_commerce/opportunity/portfolio/b3_review_bridge.py"
+  ],
+  "tests": [
+    "tests/test_b3_3_portfolio_review.py"
+  ],
+  "acs": [
+    "B3.3.fresh-native-context",
+    "B3.3.portfolio-uncertainty",
+    "B3.3.readonly-no-authority"
+  ],
+  "consumers": [
+    "src/ai_commerce/opportunity/portfolio/recommend.py",
+    "src/ai_commerce/creative_quality/b3_next_brief_handoff.py",
+    "src/ai_commerce/opportunity/portfolio/sources.py"
+  ],
+  "contracts": []
+}

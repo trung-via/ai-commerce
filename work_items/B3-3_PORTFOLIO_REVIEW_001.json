@@ -1,0 +1,50 @@
+{
+  "schema_version": "B3PortfolioReviewWorkItem.v1",
+  "id": "B3-3_PORTFOLIO_REVIEW_001",
+  "issue": 747,
+  "status": "SOURCE_CANDIDATE_UNDER_REVIEW",
+  "human_authorization": "2026-11-10 ChatGPT @AI Commerce ok tiếp tục after B3.2 PR #740 merged",
+  "source_sha_at_authoring": "5e8503b09f5100a38dfb5ae5e08e3020b9b05790",
+  "execution_lane": "DIRECT_GITHUB_SOURCE_ONLY_NO_PROVIDER",
+  "owner": "Commerce Opportunity / A18 M06 + B3.2 read-only consumer",
+  "allowed_paths": [
+    "src/ai_commerce/opportunity/portfolio/b3_review_bridge.py",
+    "tests/test_b3_3_portfolio_review.py",
+    "work_items/mt01-components/b3-portfolio.json",
+    "work_items/B3-3_PORTFOLIO_REVIEW_001.json",
+    "docs/creative/B3_3_PORTFOLIO_REVIEW_PROTOCOL.md",
+    "docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md"
+  ],
+  "accepted_acs": [
+    "B3.3.fresh-native-context",
+    "B3.3.portfolio-uncertainty",
+    "B3.3.readonly-no-authority"
+  ],
+  "positive_tests": [
+    "real A09/A11/A17 pending B3.2 recheck + native A18 portfolio evidence replay; compatible metric/cohort/window/timezone",
+    "counterevidence, missing data, currency buckets not erased",
+    "canonical digest, zero native writes"
+  ],
+  "negative_tests": [
+    "A09 correction/reprocess and A17 r2 hold",
+    "metric/cohort/window/timezone mismatch hold",
+    "unrelated A18 native source not cross-joined",
+    "forged digest/authority hold",
+    "no portfolio/finance/publishing action, no provider attestation"
+  ],
+  "permissions": {
+    "ef02_provider": false,
+    "workowner_replay": false,
+    "spend": false,
+    "publish": false,
+    "pulse_live": false,
+    "human_adoption": false,
+    "brain_decision": false
+  },
+  "claim_scope": "OFFLINE_READONLY_CONTEXT_COMPATIBILITY_NOT_SOURCE_JOIN_OR_BUSINESS_OUTCOME",
+  "release_gates": [
+    "hosted Windows exact-head MT01 owner+consumer and Node CI",
+    "independent Brain semantic review",
+    "trusted auto-merge"
+  ]
+}
