@@ -185,6 +185,8 @@ Mỗi phase dưới đây dùng cùng nguyên tắc MT-01: chỉ nhóm có mappi
 
 **Giả định:** 5–10 ngày công; external cap đề xuất $0, engineering/Brain quota giá chưa biết. **30/60/90:** ngày 30 lesson contract fixtures; ngày 60 1 evidence-linked proposal nếu data đủ; ngày 90 next brief/portfolio only sau Brain review; data thiếu thì ưu tiên đo tiếp thay tự kết luận thắng.
 
+**B3.3 source contract (2026-11-10, Issue #747):** Khởi tạo consumer đọc-only `B3PortfolioReview.v1` nối B3.2 A09/A11/A17 pending với A18 M06 portfolio qua metric/cohort/window/timezone exact; tương thích ngữ cảnh **không** chứng minh chung native source/campaign. A18 vẫn sở hữu cost buckets theo currency, reason/missingness, provisional advisory. Chỉ source CI + Brain review độc lập mới cho phép ghi `MERGED`; không tự đổi budget, portfolio, chiến lược hoặc cấp quyền PULSE.
+
 ## 9. B4 — Affiliate/economics/own-brand tùy chọn, evidence-gated
 
 **Mục tiêu:** chỉ đi nhánh thương mại khi Human chọn và evidence phù hợp; không buộc affiliate/own-brand để creative production được chạy.
