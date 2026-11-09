@@ -1863,3 +1863,18 @@ def test_710_no_model_headless_workflow_has_trusted_mt01_control_closure(tmp_pat
     assert unrelated + ":UNREVIEWED_CI_CONTROL" in denied.missing_mapping
 
 
+
+def test_710_g3b_existing_protected_workflow_mt01_owner_consumer_closure(tmp_path):
+    from ai_commerce.engineering.impact_v21 import CONTROL_TESTS, select_impact
+    path = ".github/workflows/ef02-antigravity-headless-preflight.yml"
+    required = ("tests/test_ef02.py", "tests/test_ef02_scope_main_integration.py",
+                "tests/test_mt01_v21.py")
+    assert tuple(CONTROL_TESTS[path]) == required
+    for name in required:
+        mk(tmp_path, name, "# trusted consumer fixture\\n")
+    actual = select_impact(root=tmp_path, changed_paths=[path], groups=())
+    assert actual.runnable and actual.missing_mapping == ()
+    assert set(actual.selected_tests) == set(required)
+    denied = select_impact(root=tmp_path, changed_paths=[
+        ".github/workflows/ef02-antigravity-headless-unsafe.yml"], groups=())
+    assert denied.mode == "HOLD_MAPPING"

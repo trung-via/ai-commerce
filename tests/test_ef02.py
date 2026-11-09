@@ -1131,8 +1131,72 @@ def test_ef02_710_headless_issue_preflight_has_owner_only_no_model_gate():
     ):
         assert fixed in src
     assert "issues: write" not in src
-    assert "ady --print" not in src and "agy --print" not in src
+    g3_read = src.split("  g3b-write:", 1)[0]
+    assert "agy --print" not in g3_read
+    assert "AGY_G3B_RESULT" not in g3_read
     assert "issue.body" not in src
     assert "Write-Output $resultLines" not in src
 
 
+
+def test_ef02_710_g3b_owner_one_shot_bounded_model_and_disposable_scope():
+    src = (Path(__file__).resolve().parents[1] /
+           ".github/workflows/ef02-antigravity-headless-preflight.yml").read_text(encoding="utf-8")
+    read, model = src.split("  g3b-write:", 1)
+    assert "AGY_G3_STATIC_PREFLIGHT=PASS_NO_MODEL" in read
+    for contract in (
+        "github.event_name == 'issues'",
+        "github.event.action == 'opened'",
+        "github.actor == github.repository_owner",
+        "github.event.issue.user.login == github.repository_owner",
+        "github.event.issue.title == '[EF02 HEADLESS WRITE] #710 G3B'",
+        "github.run_attempt == 1",
+        "runs-on: [self-hosted, Windows, ai-commerce-ef02]",
+        "timeout-minutes: 4",
+        "ref: main",
+        "persist-credentials: false",
+        'shutil.which("agy")',
+        'os.environ["RUNNER_TEMP"]',
+        "tempfile.mkdtemp",
+        "subprocess.CREATE_NEW_PROCESS_GROUP",
+        "wait(timeout=90)",
+        '"taskkill", "/PID", str(proc.pid), "/T", "/F"',
+        '"--model", "gemini-3.8-flash"',
+        '"--effort", "high"',
+        '"--mode", "accept-edits"',
+        '"--output-format", "json"',
+        'data.rstrip(b"\\r\\n")',
+        "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL",
+        "AGY_G3B_OUTSIDE_WRITES=UNPROVEN",
+        "root_original.st_dev, root_original.st_ino",
+        "stat.FILE_ATTRIBUTE_REPARSE_POINT",
+        "group: epwo-710-g3b-owner-probe",
+        'names != ["proof.txt"]',
+        'AGY_G3B_RESULT=',
+        'AGY_G3B_EFFECTIVE_WRITE=',
+    ):
+        assert contract in model
+    assert "issues: write" not in src
+    assert "issue.body" not in src
+    assert "github.event.issue.body" not in src
+    assert "--dangerously-skip-permissions" not in src
+    assert "WORKOWNER" not in model
+
+
+def test_ef02_710_g3b_inline_python_script_syntax_and_scope_tokens():
+    import ast
+    import textwrap
+    src = (Path(__file__).resolve().parents[1] /
+           ".github/workflows/ef02-antigravity-headless-preflight.yml").read_text(encoding="utf-8")
+    g3b = src.split("  g3b-write:", 1)[1]
+    script = g3b.split("$probe = @'\n", 1)[1].split("\n          '@", 1)[0]
+    parsed = ast.parse(textwrap.dedent(script))
+    assert any(isinstance(node, ast.Call) for node in ast.walk(parsed))
+    assert "stdout=subprocess.PIPE" not in script
+    assert "stderr=subprocess.PIPE" not in script
+    assert "AGY_G3B_OUTSIDE_WRITES=UNPROVEN" in script
+    assert "stream.read(129)" in script
+    assert "handle.st_dev, handle.st_ino" in script
+    assert "itertools.islice(root.iterdir(), 2)" in script
+    assert "target.read_bytes()" not in script
+    assert "sorted(p.name for p in root.iterdir())" not in script
