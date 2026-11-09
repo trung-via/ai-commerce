@@ -607,6 +607,10 @@ def test_issue_feedback_publication_failure_marks_batch_nonpass(tmp_path, monkey
     monkeypatch.setattr(cli, "load_approved_candidates", lambda *_a: {"version": 1, "candidates": {}})
     monkeypatch.setattr(cli, "validate_batch", lambda data, **_kw: data)
     monkeypatch.setattr(cli, "check_source", lambda *_a: None)
+    # This fixture exercises feedback after accepted dispatch; intake negatives
+    # are covered by the actual gate tests, not this simulated CLI response.
+    monkeypatch.setattr(cli, "require_preexecutor_acceptance",
+                        lambda _action: {"ids": ["EF02.recovery"]})
     class FakeWorker:
         def __init__(self, **_kwargs):
             self.root = tmp_path / "batch-output"
