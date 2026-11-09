@@ -62,7 +62,8 @@ def validate_batch(data: dict, *, schema: Path, registry: dict[str, list[str]],
                    issuer_login: str, owner_login: str,
                    brain_issuers: tuple[str, ...] = (),
                    approved_reuse: dict | None = None,
-                   strict_ac: bool = True) -> dict:
+                   strict_ac: bool = True, root: Path | None = None,
+                   source_sha: str | None = None) -> dict:
     Draft202012Validator(json.loads(schema.read_text(encoding="utf-8"))).validate(data)
     owner = issuer_login.casefold() == owner_login.casefold()
     brain = issuer_login.casefold() in {v.casefold() for v in brain_issuers if v}
@@ -70,7 +71,7 @@ def validate_batch(data: dict, *, schema: Path, registry: dict[str, list[str]],
             (data["actor"] == "BRAIN" and brain)):
         raise RemoteRequestError("ISSUER_NOT_AUTHORIZED_FOR_ACTOR")
     return _validate_actions(data, registry=registry, approved_reuse=approved_reuse,
-                             strict_ac=strict_ac)
+                             strict_ac=strict_ac, root=root, source_sha=source_sha)
 
 
 def validate_batch_content(data: dict, *, schema: Path, registry: dict[str, list[str]],
@@ -84,7 +85,8 @@ def validate_batch_content(data: dict, *, schema: Path, registry: dict[str, list
 
 
 def _validate_actions(data: dict, *, registry: dict[str, list[str]],
-                      approved_reuse: dict | None, strict_ac: bool = True) -> dict:
+                      approved_reuse: dict | None, strict_ac: bool = True,
+                      root: Path | None = None, source_sha: str | None = None) -> dict:
     ids = [a["action_id"] for a in data["actions"]]
     attempts = [a["attempt_id"] for a in data["actions"]]
     if len(set(ids)) != len(ids) or len(set(attempts)) != len(attempts):
@@ -108,7 +110,7 @@ def _validate_actions(data: dict, *, registry: dict[str, list[str]],
         # Marker-less history remains readable only; live CLI/worker run strict.
         if strict_ac and any(line.lstrip().startswith("MT01_ACCEPTANCE_JSON:")
                for line in action["instruction"].splitlines()):
-            require_preexecutor_acceptance(action)
+            require_preexecutor_acceptance(action, root=root, source_sha=source_sha)
         if action["verification_profile"] not in registry:
             raise RemoteRequestError("VERIFICATION_PROFILE_UNREGISTERED")
         if action.get("verification_intent", "AUTO") == "HUMAN_FULL":
@@ -133,7 +135,7 @@ def _validate_actions(data: dict, *, registry: dict[str, list[str]],
         dfs(node)
     return data
 
-def approved_acceptance_plan(action: dict) -> dict:
+def approved_acceptance_plan(action: dict, *, groups=None) -> dict:
     """Read a bounded declaration from the issuer's fingerprinted v1 instruction.
 
     No prose inference, new schema fields, executor file, or test argv is trusted.
@@ -155,7 +157,7 @@ def approved_acceptance_plan(action: dict) -> dict:
     except (ValueError, TypeError):
         ids = ["MT01.ACCEPTANCE_UNDECLARED"]
         reason = "AC_DECLARATION_MISSING_OR_INVALID_REQUIRES_BROAD_SCOPE"
-    mapping = {ac: {"group": g.name, "tests": list(g.tests)} for g in approved_groups() for ac in g.acs}
+    mapping = {ac: {"group": g.name, "tests": list(g.tests)} for g in (groups if groups is not None else approved_groups()) for ac in g.acs}
     unknown = sorted(set(ids) - mapping.keys())
     return {"ids": sorted(ids), "unknown_ids": unknown,
             "consumer_map": {ac: mapping[ac] for ac in sorted(ids) if ac in mapping},
@@ -177,17 +179,6 @@ def require_preexecutor_acceptance(
                if line.lstrip().startswith(prefix)]
     if len(markers) != 1:
         raise RemoteRequestError("INTAKE_AC_MISSING_OR_AMBIGUOUS")
-    plan = approved_acceptance_plan(action)
-    if plan["reason"] != "EXPLICIT_FINGERPRINTED_INSTRUCTION_ACCEPTANCE":
-        raise RemoteRequestError("INTAKE_AC_MALFORMED")
-    if plan["unknown_ids"]:
-        raise RemoteRequestError("INTAKE_AC_UNREGISTERED")
-    if not source_closure:
-        return plan
-
-    # All map entries come from source-reviewed registered groups in the
-    # pinned checkout. Issuer-declared ACs can expand, but cannot narrow
-    # registered owner/consumer coverage or invent new test argv.
     groups = approved_groups()
     if root is not None or source_sha is not None:
         # Source-only V2.2 owner manifests are trusted only from the exact
@@ -210,6 +201,17 @@ def require_preexecutor_acceptance(
             groups = (*groups, *(item["group"] for item in persisted))
         except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
             raise RemoteRequestError("INTAKE_BASELINE_OWNER_UNTRUSTED") from exc
+    plan = approved_acceptance_plan(action, groups=groups)
+    if plan["reason"] != "EXPLICIT_FINGERPRINTED_INSTRUCTION_ACCEPTANCE":
+        raise RemoteRequestError("INTAKE_AC_MALFORMED")
+    if plan["unknown_ids"]:
+        raise RemoteRequestError("INTAKE_AC_UNREGISTERED")
+    if not source_closure:
+        return plan
+
+    # All map entries come from source-reviewed registered groups in the
+    # pinned checkout. Issuer-declared ACs can expand, but cannot narrow
+    # registered owner/consumer coverage or invent new test argv.
     required: set[str] = set()
     for allowed in action["allowed_paths"]:
         registered = [
