@@ -163,7 +163,10 @@ def approved_acceptance_plan(action: dict) -> dict:
             "broad_required": bool(unknown)}
 
 
-def require_preexecutor_acceptance(action: dict, *, source_closure: bool = False) -> dict:
+def require_preexecutor_acceptance(
+    action: dict, *, source_closure: bool = False,
+    root: Path | None = None, source_sha: str | None = None,
+) -> dict:
     """Fail closed on malformed, missing or unregistered fingerprinted AC.
 
     Prose mentioning a marker is not a declaration. This gate never supplies
@@ -186,6 +189,27 @@ def require_preexecutor_acceptance(action: dict, *, source_closure: bool = False
     # pinned checkout. Issuer-declared ACs can expand, but cannot narrow
     # registered owner/consumer coverage or invent new test argv.
     groups = approved_groups()
+    if root is not None or source_sha is not None:
+        # Source-only V2.2 owner manifests are trusted only from the exact
+        # immutable checkout tree, never from a new/edited Issue declaration.
+        # This is REQUIRED for a new component whose owner was added by a
+        # separately reviewed source/bootstrap PR (BQ-06b, for example).
+        if root is None or source_sha is None or not HEX_SHA.fullmatch(source_sha):
+            raise RemoteRequestError("INTAKE_BASELINE_IDENTITY_UNPROVEN")
+        root = Path(root).resolve()
+        try:
+            result = subprocess.run(
+                git_argv(root, "rev-parse", "HEAD"), capture_output=True,
+                text=True, check=False, timeout=15,
+            )
+            if result.returncode or result.stdout.strip() != source_sha:
+                raise ValueError("CHECKOUT_SHA_MISMATCH")
+            from ai_commerce.engineering.impact_v21 import load_baseline_component_owner_records
+            persisted = load_baseline_component_owner_records(
+                root=root, base_sha=source_sha, existing_groups=groups)
+            groups = (*groups, *(item["group"] for item in persisted))
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            raise RemoteRequestError("INTAKE_BASELINE_OWNER_UNTRUSTED") from exc
     required: set[str] = set()
     for allowed in action["allowed_paths"]:
         registered = [
