@@ -9,6 +9,7 @@ import re
 import subprocess
 import time
 import tempfile
+import xml.etree.ElementTree as ET
 from typing import Callable, Mapping
 
 from .minimum_test import Evidence, apply_evidence, canonical, file_hashes, select_plan, pytest_counts, select_provisional_tests
@@ -86,6 +87,83 @@ def git_hook_environment_failure(stdout: bytes, stderr: bytes) -> bool:
     text = (stdout + b"\n" + stderr).decode("utf-8", "replace").lower()
     return (("ntcreatedirectoryobject" in text and "0xc0000022" in text)
             or "update aborted by the reference-transaction hook" in text)
+
+
+
+# Only this precise optional Windows-symlink test may explain a WinError 1314
+# in pytest's SKIPPED summary. Preserve the original stdout and JUnit evidence.
+_SYMLINK_SKIP_REASON = "NATIVE_SYMLINK_CREATION_UNPROVEN: WinError 1314"
+_SYMLINK_SKIP_CASE = "test_symlink_or_junction_is_never_read_as_source"
+_SYMLINK_SKIP_CLASS = (
+    "tests.test_hostops_ef02_attempt_reconcile_readonly."
+    "EF02Attempt698ReadOnlyTests"
+)
+_SYMLINK_SKIP_LINE = re.compile(
+    rb"SKIPPED \[1\] tests[\\/]+test_hostops_ef02_attempt_reconcile_readonly"
+    rb"\.py:[0-9]+: NATIVE_SYMLINK_CREATION_UNPROVEN: WinError 1314"
+)
+
+
+def _strip_verified_symlink_skip(
+    stdout: bytes, stderr: bytes, exit_code: int, junit: bytes | None,
+) -> bytes:
+    """Exclude one independently JUnit-backed skip from *classification only*.
+
+    A returned stdout differs only by one verified SKIPPED summary line.
+    Anything unrecognized keeps the raw text so real infrastructure faults
+    still fail closed. Never promote the skipped security test to a pass.
+    """
+    if (exit_code != 0 or not junit or len(junit) > 1048576
+            or b"winerror" in stderr.lower()
+            or b"<!DOCTYPE" in junit.upper() or b"<!ENTITY" in junit.upper()):
+        return stdout
+    try:
+        root = ET.fromstring(junit)
+        suites = ([root] if root.tag == "testsuite" else
+                  list(root) if root.tag == "testsuites" else [])
+        if len(suites) != 1 or suites[0].tag != "testsuite":
+            return stdout
+        suite = suites[0]
+        cases = list(suite.findall("testcase"))
+        if (int(suite.get("tests", "-1")) != len(cases)
+                or int(suite.get("errors", "-1")) != 0
+                or int(suite.get("failures", "-1")) != 0
+                or int(suite.get("skipped", "-1")) != 1):
+            return stdout
+        if any(c.find("failure") is not None or c.find("error") is not None
+               for c in cases):
+            return stdout
+        skipped = [(c, c.find("skipped")) for c in cases
+                   if c.find("skipped") is not None]
+        if len(skipped) != 1:
+            return stdout
+        case, skip = skipped[0]
+        if (case.get("classname") != _SYMLINK_SKIP_CLASS
+                or case.get("name") != _SYMLINK_SKIP_CASE
+                or skip.get("type") != "pytest.skip"
+                or (skip.get("message") or "").strip() != _SYMLINK_SKIP_REASON):
+            return stdout
+    except (ET.ParseError, ValueError, TypeError):
+        return stdout
+
+    counts = pytest_counts(stdout)
+    if (counts["passed"] != len(cases) - 1
+            or counts["passed"] < 1 or counts["skipped"] != 1
+            or any(counts[k] != 0 for k in
+                   ("failed", "errors", "xfailed", "xpassed"))):
+        return stdout
+
+    lines = stdout.splitlines(keepends=True)
+    skip_lines = [line for line in lines if
+                  line.rstrip(b"\r\n").startswith(b"SKIPPED [")]
+    marked = [line for line in lines if b"winerror" in line.lower()]
+    if (len(skip_lines) != 1 or marked != skip_lines
+            or _SYMLINK_SKIP_LINE.fullmatch(skip_lines[0].rstrip(b"\r\n")) is None):
+        return stdout
+    # The actual result, count and all original artifacts remain unchanged.
+    # Only the exact JUnit-proven diagnostic line is excluded from the
+    # substring-based infrastructure classifier.
+    return b"".join(line for line in lines if line is not skip_lines[0])
 
 
 def registered_binding_problems(plan: dict, profiles: Mapping[str, list[str]]) -> list[str]:
@@ -296,8 +374,12 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
             if remaining <= 0:
                 entry["actual_argv"] = None
                 raise subprocess.TimeoutExpired(argv, timeout_seconds)
+            junit_blobs: list[bytes] = []
+            def observe_junit(data: bytes) -> None:
+                junit_blobs.append(data)
+                save(f"mt01_{index}_junit", f"mt01.{index}.junit.xml", data)
             result = run_pytest(argv, repo=repo, timeout=remaining,
-                save_junit=lambda data: save(f"mt01_{index}_junit", f"mt01.{index}.junit.xml", data))
+                                save_junit=observe_junit)
             out, err = result.stdout.encode(), result.stderr.encode()
         except subprocess.TimeoutExpired as exc:
             out = exc.stdout if isinstance(exc.stdout, bytes) else (exc.stdout or "").encode()
@@ -335,7 +417,10 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
             unproven(entry, "MT01_SOURCE_DRIFT_DURING_VERIFICATION", started)
             finish()
             raise RuntimeError("MT01_SOURCE_DRIFT_DURING_VERIFICATION")
-        diagnostics = (out + b"\n" + err).decode("utf-8", "replace").lower()
+        diagnostic_out = _strip_verified_symlink_skip(
+            out, err, result.returncode,
+            junit_blobs[0] if len(junit_blobs) == 1 else None)
+        diagnostics = (diagnostic_out + b"\n" + err).decode("utf-8", "replace").lower()
         # A successful -n12 command without a controller receipt is UNPROVEN,
         # even when the quiet console or command line claims twelve workers.
         # A determinate test failure may still enter Verify-Fix when worker
