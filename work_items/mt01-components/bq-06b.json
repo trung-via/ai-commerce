@@ -40,5 +40,10 @@
     "src/ai_commerce/creative_quality/t2_sampling.py",
     "src/ai_commerce/creative_quality/behavioral_learning_bridge.py",
     "tests/test_bq_06a_behavioral_learning.py"
+  ],
+  "contracts": [
+    "contracts/CreativeDirective.v1.schema.json",
+    "contracts/ProductJourneyReceipt.v1.schema.json",
+    "contracts/BrainDecision.v1.schema.json"
   ]
 }
