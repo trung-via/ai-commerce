@@ -144,7 +144,7 @@ def test_two_hop_correction_then_reprocess_invalidates_original_pin(tmp_path):
     assert grandchild["lineage"]["parent_import_id"] == child["import_id"]
     assert [r["lineage"]["relationship"] for r in
             ledger.history(plan=ledger.inspect(pin.import_id)["import"]["plan"])["imports"]
-           ] == ["ROOT", "CORRECTION", "REPROCESS"]
+           ] == ["ORIGINAL", "CORRECTION", "REPROCESS"]
     result = run_fresh(args, ledger, pin, review)
     assert result["reason_codes"] == ["A09_LINEAGE_STALE_OR_CORRECTED"]
 
@@ -152,7 +152,7 @@ def test_two_hop_correction_then_reprocess_invalidates_original_pin(tmp_path):
 def test_unrelated_valid_root_in_same_scope_does_not_supersede_pin(tmp_path):
     args, advisory, learning, ledger, pin, review = actual_case(tmp_path)
     other = make_root_or_correction(ledger, pin, tmp_path, number=28)
-    assert other["lineage"] == {"relationship": "ROOT", "parent_import_id": None}
+    assert other["lineage"] == {"relationship": "ORIGINAL", "parent_import_id": None}
     result = run_fresh(args, ledger, pin, review)
     assert result["status"] == b06.CURRENT, result
     assert result["history_count"] == 2
