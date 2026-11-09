@@ -215,8 +215,10 @@ def review_fresh(*, a09_path, snapshot_pin, bq06a_raw, source_arguments):
             refs = _selected_refs(advisory, source_arguments)
             full = {canonical_bytes(snapshot.observation_ref(value["observation_id"]))
                     for value in snapshot.to_dict()["observations"]}
-            _need(all(ref.get("import_id") == snapshot.import_id for ref in refs),
-                  "A11_MIXED_IMPORTS_UNSUPPORTED")
+            ref_imports = {ref.get("import_id") for ref in refs}
+            _need(len(ref_imports) == 1, "A11_MIXED_IMPORTS_UNSUPPORTED")
+            _need(ref_imports == {snapshot.import_id},
+                  "A11_OBSERVATION_REFS_MISMATCH")
             _need(all(canonical_bytes(ref) in full for ref in refs),
                   "A11_OBSERVATION_REFS_MISMATCH")
             archived_value = archived.to_dict()
