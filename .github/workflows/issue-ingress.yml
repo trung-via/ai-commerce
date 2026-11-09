@@ -1112,3 +1112,131 @@ jobs:
             await github.rest.issues.createComment({...context.repo,
               issue_number:context.issue.number,
               body:'AI_COMMERCE_D5_PLAYWRIGHT_9444_READ_V1\n'+JSON.stringify(result)});
+
+  # Human-approved one-shot EF02 #698 read. Separate from standing public READ
+  # and all other D5/HostOps operations. Never runs an executor or mutates a claim.
+  hostops-ef02-attempt-698-readonly:
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.action == 'opened' &&
+      github.event.repository.full_name == 'trung-via/ai-commerce' &&
+      github.actor == github.repository_owner &&
+      github.event.issue.user.login == github.repository_owner &&
+      github.event.issue.title == '[HOSTOPS EF02 RECONCILE] #698 attempt-only'
+    runs-on: [self-hosted, Windows, ai-commerce-hostops]
+    timeout-minutes: 5
+    concurrency:
+      group: personal-hostops-workspace
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout exact source-owned native observer
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Verify one exact fixed read-only event
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw -Encoding UTF8 | ConvertFrom-Json
+          $expected = '{"schema":"ai-commerce.hostops.ef02-attempt-reconcile.v1","operation":"EF02_ATTEMPT_RECONCILE_READONLY","issue_number":698,"parameters":{}}'
+          if ($event.action -cne 'opened' -or
+              $event.issue.title -cne '[HOSTOPS EF02 RECONCILE] #698 attempt-only' -or
+              $event.issue.body -cne $expected -or
+              $event.issue.user.login -cne 'trung-via') {
+            throw 'EF02_ATTEMPT_READ_EVENT_REJECTED'
+          }
+      - name: Observe fixed PID and EF01 source evidence without mutation
+        shell: pwsh
+        env:
+          HOSTOPS_EF02_RECEIPT: ${{ runner.temp }}\ef02-attempt-698-readonly.json
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PYTHONPATH = Join-Path $env:GITHUB_WORKSPACE 'src'
+          python -B -m ai_commerce.hostops_v3.ef02_attempt_reconcile_readonly --output $env:HOSTOPS_EF02_RECEIPT
+      - name: Publish bounded independent HOLD-only receipt
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          HOSTOPS_EF02_RECEIPT: ${{ runner.temp }}\ef02-attempt-698-readonly.json
+        with:
+          script: |
+            const fs = require('fs');
+            const expectedSchema = 'ai-commerce.hostops.ef02-attempt-reconcile.v1';
+            const expectedAttempt = 'bq06b_r2_agy38flashhigh_legit_correction_reprocess_main_b9abe11c_20261109';
+            const expectedSource = 'b9abe11c31954706caa816d9c53ca6c0519e913e';
+            const expectedKeys = ['schema','issue_number','operation','source_sha','attempt_id',
+              'status','process','worktree','source','local_receipt',
+              'replay_authorized','write_attempted','provider_outcome_proven'].sort().join(',');
+            const enums = {
+              process: ['PID_ABSENT','PID_MATCHED_ACTIVE','PID_REUSED_OR_UNRELATED','PROCESS_READ_UNAVAILABLE'],
+              worktree: ['WORKTREE_ABSENT','WORKTREE_SINGLE','WORKTREE_AMBIGUOUS',
+                'WORKTREE_REPARSE_OR_HARDLINK','WORKTREE_READ_UNAVAILABLE'],
+              source: ['SOURCE_ABSENT_IN_WORKTREE','SOURCE_BYTES_PRESENT_UNVERIFIED',
+                'SOURCE_READ_UNAVAILABLE','SOURCE_NOT_INSPECTED'],
+              local_receipt: ['NO_TERMINAL_RECEIPT_OBSERVED','LOCAL_RESULT_PRESENT_UNVERIFIED',
+                'RECEIPT_READ_UNAVAILABLE','RECEIPT_NOT_INSPECTED']
+            };
+            let observation = null;
+            try {
+              const file = process.env.HOSTOPS_EF02_RECEIPT;
+              if (fs.statSync(file).size > 2048) throw Error('OVERSIZE');
+              const r = JSON.parse(fs.readFileSync(file,'utf8'));
+              if (!r || Array.isArray(r) || Object.keys(r).sort().join(',') !== expectedKeys ||
+                  r.schema !== expectedSchema || r.issue_number !== 698 ||
+                  r.operation !== 'EF02_ATTEMPT_RECONCILE_READONLY' ||
+                  r.source_sha !== expectedSource || r.attempt_id !== expectedAttempt ||
+                  r.status !== 'HOLD_UNKNOWN_EFFECT' ||
+                  r.replay_authorized !== false || r.write_attempted !== false ||
+                  r.provider_outcome_proven !== false ||
+                  Object.entries(enums).some(([name, values]) => !values.includes(r[name]))) throw Error('INVALID');
+              observation = r;
+            } catch (_) {
+              observation = {schema: expectedSchema, issue_number: 698,
+                operation: 'EF02_ATTEMPT_RECONCILE_READONLY',
+                source_sha: expectedSource, attempt_id: expectedAttempt,
+                status:'HOLD_UNKNOWN_EFFECT', process:'PROCESS_READ_UNAVAILABLE',
+                worktree:'WORKTREE_READ_UNAVAILABLE',source:'SOURCE_NOT_INSPECTED',
+                local_receipt:'RECEIPT_NOT_INSPECTED',
+                replay_authorized:false,write_attempted:false,provider_outcome_proven:false};
+            }
+            let workownerStage = 'READ_UNKNOWN';
+            try {
+              const key = '3c3dd6a321ae73f8ba145ce97cb360281c327cddf5f58fbdabb9ed78ae008ae9';
+              const {data: refs} = await github.rest.git.listMatchingRefs({
+                ...context.repo, ref: 'heads/ef02/workowner/' + key + '/'});
+              const valid = (refs || []).filter(x => new RegExp(
+                '^refs/heads/ef02/workowner/' + key + '/[0-9]{3}$').test(x.ref))
+                .sort((a,b)=>a.ref.localeCompare(b.ref));
+              if (valid.length > 0 && valid.length <= 32 &&
+                  valid.every((x,i)=>x.ref.endsWith('/'+String(i).padStart(3,'0')))) {
+                const last = valid[valid.length - 1];
+                const {data: commit} = await github.rest.git.getCommit({
+                  ...context.repo,commit_sha:last.object.sha});
+                const prefix = 'EF02 WorkOwner.v1\n\n';
+                if (!commit.message.startsWith(prefix)) throw Error('WRONG_MARKER');
+                const x = JSON.parse(commit.message.slice(prefix.length));
+                if (x.identity?.repo !== 'trung-via/ai-commerce' ||
+                    x.identity?.issue !== 698 ||
+                    x.identity?.action_id !== 'BQ06B-R2-AGY38FLASHHIGH-A09-LINEAGE-SUPERSESSION-ROOTFIX-01' ||
+                    x.generation !== 1 || x.sequence !== valid.length-1) throw Error('WRONG_IDENTITY');
+                const allowed = ['OWNED','CLAIMED','SPAWN_INTENT','CHILD_OBSERVED',
+                  'PROVIDER_INTENT','ROUND_VERIFIED','RESULT_VERIFIED','PUBLISH_INTENT',
+                  'PUBLISHED','UNKNOWN'];
+                if (!allowed.includes(x.stage)) throw Error('WRONG_STAGE');
+                workownerStage = x.stage;
+              }
+            } catch (_) {
+              workownerStage = 'READ_UNKNOWN';
+            }
+            const publicResult = {...observation,
+              workowner_stage_observed:workownerStage,
+              workowner_terminal_receipt_verified:false,
+              operator_source_sha:context.sha,
+              next_action:'NO_R3_DISPATCH'};
+            await github.rest.issues.createComment({...context.repo,
+              issue_number:context.issue.number,
+              body:'AI_COMMERCE_HOSTOPS_EF02_ATTEMPT_RECONCILE_RESULT_V1\n'+JSON.stringify(publicResult)});
