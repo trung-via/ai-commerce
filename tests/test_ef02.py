@@ -227,16 +227,19 @@ def test_preexecutor_acceptance_rejects_malformed_or_foreign_ids_before_provider
             validate(batch([a]))
 
 
-def test_direct_real_worker_ac_gate_precedes_workowner_operations(tmp_path):
-    from ai_commerce.remote.worker import LocalBatchWorker
-    worker = object.__new__(LocalBatchWorker)
-    worker.root = tmp_path
-    worker.batch = batch([action("a")])
-    worker._dispatch_strict_ac = True
+def test_direct_real_worker_ac_gate_precedes_workowner_operations(tmp_path, monkeypatch):
+    from ai_commerce.remote import worker as remote_worker
+    monkeypatch.setattr(remote_worker, "check_source", lambda *_a, **_kw: None)
+    monkeypatch.setattr(remote_worker, "load_approved_candidates",
+                        lambda *_a: {"version": 1, "candidates": {}})
     class ForbiddenClaim:
         def claim(self, **_kw):
             pytest.fail("invalid AC must not reach GitHub claim")
-    worker.github = ForbiddenClaim()
+    worker = remote_worker.LocalBatchWorker(
+        checkout=tmp_path, batch=batch([action("a")]),
+        profiles={"project-tests": ["python", "-m", "pytest", "tests", "-q"]},
+        github=ForbiddenClaim(), root=tmp_path / "evidence")
+    assert worker._dispatch_strict_ac is True
     out = worker.execute_action(worker.batch["actions"][0])
     assert out["status"] == "INVALID_ACTION"
     assert out["error_code"] == "INTAKE_AC_MISSING_OR_AMBIGUOUS"
