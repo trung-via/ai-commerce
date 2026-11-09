@@ -1,0 +1,21 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "bq-06b",
+  "sources": [
+    "src/ai_commerce/creative_quality/behavioral_learning_fresh_replay.py"
+  ],
+  "tests": [
+    "tests/test_bq_06b_fresh_a09_replay.py"
+  ],
+  "acs": [
+    "BQ-06b.a09-raw-replay-pinned-to-a11",
+    "BQ-06b.missingness-and-comparability",
+    "BQ-06b.brain-review-non-authoritative"
+  ],
+  "consumers": [
+    "src/ai_commerce/analytics/ledger.py",
+    "src/ai_commerce/learning/reader.py",
+    "src/ai_commerce/creative_quality/behavioral_learning_bridge.py"
+  ],
+  "contracts": []
+}
