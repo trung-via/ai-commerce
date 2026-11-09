@@ -1096,3 +1096,113 @@ if (res.total !== 2 || res.ambiguous !== true || res.matches.length !== 1 || res
     )
     assert result.returncode == 0, f"Node DOM search failed (exit={result.returncode}); stderr={result.stderr}"
 
+
+
+# WH03 candidate presence is intentionally weaker than authenticated origin.
+# All tests are pure fakes and never access Chrome/ChatGPT.
+class ProbePage:
+    def __init__(self, url=URL, result="CANDIDATE_READY", *, raises=False):
+        self.url, self.result, self.raises = url, result, raises
+        self.evaluations = 0
+        self.mutations = 0
+
+    def evaluate(self, script):
+        self.evaluations += 1
+        assert "document.querySelectorAll" in script
+        assert "innerText" not in script and "localStorage" not in script
+        assert "document.cookie" not in script and "fetch(" not in script
+        assert "button.click" not in script and ".goto(" not in script
+        if self.raises:
+            raise RuntimeError("PRIVATE-URL-AND-TOKEN-MUST-NOT-LEAK")
+        return self.result
+
+    def click(self, *args, **kwargs):
+        self.mutations += 1
+        raise AssertionError("read-only operator must never click")
+
+
+class ProbeContexts:
+    def __init__(self, *contexts):
+        self._contexts = contexts
+        self.calls = []
+
+    @contextmanager
+    def contexts(self, endpoint):
+        assert endpoint == "http://127.0.0.1:9444"
+        self.calls.append(endpoint)
+        yield [SimpleNamespace(pages=list(pages)) for pages in self._contexts]
+
+
+def test_wh03_chat_a_candidate_read_only_positive(monkeypatch):
+    from ai_commerce.remote import cdp_doorbell as d
+    monkeypatch.setattr(d, "_is_windows", lambda: True)
+    p = ProbePage()
+    another_tab = ProbePage("https://example.com/private", raises=True)
+    inv = ProbeContexts((p, another_tab))
+    result = d.probe_chat_a_candidate(inventory=inv)
+    assert result == "CHAT_A_CANDIDATE_PRESENT_UNATTESTED"
+    assert inv.calls == ["http://127.0.0.1:9444"]
+    assert p.evaluations == 1 and another_tab.evaluations == 0
+    assert p.mutations == another_tab.mutations == 0
+    assert "ORIGIN_ATTESTED" not in result
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("absent", "CHAT_A_CANDIDATE_NOT_FOUND"),
+    ("duplicate", "MULTIPLE_CHAT_CANDIDATES"),
+    ("two_contexts", "CONTEXT_UNPROVEN"),
+    ("no_contexts", "CONTEXT_UNPROVEN"),
+    ("many_tabs", "CONTEXT_UNPROVEN"),
+    ("login", "SURFACE_UNPROVEN"),
+    ("draft", "DRAFT_PRESENT"),
+    ("unrecognized", "SURFACE_UNPROVEN"),
+    ("exception", "CDP_READ_UNAVAILABLE"),
+    ("untrusted_url", "CHAT_A_CANDIDATE_NOT_FOUND"),
+])
+def test_wh03_candidate_negative_cases(monkeypatch, case, expected):
+    from ai_commerce.remote import cdp_doorbell as d
+    monkeypatch.setattr(d, "_is_windows", lambda: True)
+    p = ProbePage()
+    if case == "absent":
+        inv = ProbeContexts((ProbePage("https://example.com"),))
+    elif case == "duplicate":
+        inv = ProbeContexts((p, ProbePage(OTHER)))
+    elif case == "two_contexts":
+        inv = ProbeContexts((p,), (ProbePage("https://example.com"),))
+    elif case == "no_contexts":
+        inv = ProbeContexts()
+    elif case == "many_tabs":
+        inv = ProbeContexts(tuple([p] + [ProbePage("https://example.com")] * 32))
+    else:
+        if case == "login":
+            p.result = "SURFACE_UNPROVEN"
+        if case == "draft":
+            p.result = "DRAFT_PRESENT"
+        if case == "unrecognized":
+            p.result = {"attested": True}  # forged script payload, no status elevation
+        if case == "exception":
+            p.raises = True
+        if case == "untrusted_url":
+            p.url = "https://evil.example/c/00000000-0000-0000-0000-000000000001"
+        inv = ProbeContexts((p,))
+    assert d.probe_chat_a_candidate(inventory=inv) == expected
+
+
+def test_wh03_read_requires_exact_cdp_ipv4_and_windows(monkeypatch):
+    from ai_commerce.remote import cdp_doorbell as d
+    inv = ProbeContexts((ProbePage(),))
+    monkeypatch.setattr(d, "_is_windows", lambda: False)
+    assert d.probe_chat_a_candidate(inventory=inv) == "NATIVE_DESKTOP_UNPROVEN"
+    monkeypatch.setattr(d, "_is_windows", lambda: True)
+    for url in ("http://localhost:9444", "http://127.0.0.1:9333",
+                "http://0.0.0.0:9444", "http://127.0.0.1:9444/?x=1"):
+        assert d.probe_chat_a_candidate(endpoint=url, inventory=inv) == "NATIVE_DESKTOP_UNPROVEN"
+    assert inv.calls == []
+
+
+def test_wh03_candidate_enums_cannot_be_native_signature_or_send():
+    from ai_commerce.remote import cdp_doorbell as d
+    assert "ORIGIN_ATTESTED" not in d.probe_chat_a_candidate.__doc__
+    assert "read-only" not in str(d.probe_chat_a_candidate)  # no leaking URL
+    assert "browser.close()" not in d._CHAT_A_READ_ONLY_SURFACE
+    assert "new_page" not in d._CHAT_A_READ_ONLY_SURFACE

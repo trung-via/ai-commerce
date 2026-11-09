@@ -313,6 +313,12 @@ class _PlaywrightInventory:
         with self._browser(endpoint) as browser:
             yield [page for context in browser.contexts for page in context.pages]
 
+    @contextmanager
+    def contexts(self, endpoint: str):
+        # Read only; separate contexts must not be confused as one account.
+        with self._browser(endpoint) as browser:
+            yield list(browser.contexts)
+
     def preload(self, binding: ResolvedBinding, *, current_binding=None) -> str:
         """Auto-load exactly the private, enrolled chat; no Send or tab hijack.
 
@@ -359,6 +365,62 @@ class _PlaywrightInventory:
                 return "EXACT_CHAT_OPENED"
         except Exception:
             return "PRELOAD_CDP_UNAVAILABLE"
+
+
+
+# This script returns an enum, not transcript, account/session, cookies or URL.
+_CHAT_A_READ_ONLY_SURFACE = """
+() => {
+  const visible = sel => [...document.querySelectorAll(sel)].filter(el =>
+    el.getClientRects().length > 0 && getComputedStyle(el).visibility === 'visible');
+  if (location.origin !== 'https://chatgpt.com' || visible('main').length !== 1 ||
+      visible('[data-testid="login-button"], a[href^="/auth/login"]').length ||
+      visible('[data-workspace-type="team"], [data-workspace-type="enterprise"], [data-workspace-type="business"], [data-testid="work-composer"]').length ||
+      visible('[data-testid="stop-button"]').length) return 'SURFACE_UNPROVEN';
+  const editors = visible('#prompt-textarea[contenteditable="true"], main form [contenteditable="true"][role="textbox"][aria-multiline="true"]');
+  if (editors.length !== 1 || editors[0].getAttribute('aria-disabled') === 'true')
+    return 'SURFACE_UNPROVEN';
+  const box = editors[0];
+  if (box.textContent !== '') return 'DRAFT_PRESENT';
+  const forms = [];
+  for (let p = box.parentElement; p; p = p.parentElement)
+    if (p.tagName === 'FORM') forms.push(p);
+  return forms.length === 1 ? 'CANDIDATE_READY' : 'SURFACE_UNPROVEN';
+}
+"""
+
+
+def probe_chat_a_candidate(*, endpoint: str = "http://127.0.0.1:9444",
+                           inventory=None) -> str:
+    """Bounded native read of one open ChatGPT tab, NOT authenticated Chat A.
+
+    No Send, navigation, page creation, private URL output or live-origin grant.
+    """
+    if not _is_windows() or type(endpoint) is not str or endpoint != "http://127.0.0.1:9444":
+        return "NATIVE_DESKTOP_UNPROVEN"
+    source = inventory if inventory is not None else _PlaywrightInventory()
+    if not callable(getattr(source, "contexts", None)):
+        return "CONTEXT_UNPROVEN"
+    try:
+        with source.contexts(endpoint) as contexts:
+            if len(contexts) != 1:
+                return "CONTEXT_UNPROVEN"
+            pages = list(contexts[0].pages)
+            if len(pages) > 32:
+                return "CONTEXT_UNPROVEN"
+            matches = [p for p in pages
+                       if isinstance(getattr(p, "url", None), str)
+                       and _CHAT.fullmatch(p.url.rstrip("/")) is not None]
+            if len(matches) != 1:
+                return ("MULTIPLE_CHAT_CANDIDATES" if matches
+                        else "CHAT_A_CANDIDATE_NOT_FOUND")
+            result = matches[0].evaluate(_CHAT_A_READ_ONLY_SURFACE)
+            if result == "CANDIDATE_READY":
+                return "CHAT_A_CANDIDATE_PRESENT_UNATTESTED"
+            return "DRAFT_PRESENT" if result == "DRAFT_PRESENT" else "SURFACE_UNPROVEN"
+    except Exception:
+        # Raw Playwright exceptions can include private URLs/paths. Suppress.
+        return "CDP_READ_UNAVAILABLE"
 
 
 class LocalChromeDoorbellAdapter:
