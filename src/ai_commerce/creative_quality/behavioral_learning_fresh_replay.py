@@ -64,6 +64,16 @@ def _seal(missing=(), *, snapshot=None, source_count=0, review=None, provenance=
             "source_status": "LOCAL_SUPPLIED_OR_SYNTHETIC_ONLY",
             "matched_selected_a11_refs": source_count,
         },
+        "source_state_counts": None if snapshot is None else {
+            "available_zero": sum(
+                item["status"] == "AVAILABLE" and type(item["value"]) in (int, float)
+                and item["value"] == 0 for item in snapshot.to_dict()["observations"]
+            ),
+            "not_available": sum(
+                item["status"] == "NOT_AVAILABLE" and item["value"] is None
+                for item in snapshot.to_dict()["observations"]
+            ),
+        },
         "a11_review_sha256": None if review is None else sha256(review.raw).hexdigest(),
         "provenance": provenance,
         "missing_requirements": reasons,
@@ -214,7 +224,7 @@ def review_fresh(*, a09_path, snapshot_pin, bq06a_raw, source_arguments):
                   "A11_ARCHIVED_REVIEW_HOLD")
             source_kinds = {item["source"]["source_kind"]
                             for item in snapshot.to_dict()["observations"]}
-            _need(source_kinds <= {"SYNTHETIC_FIXTURE", "HUMAN_SUPPLIED"},
+            _need(source_kinds <= {"SYNTHETIC_FIXTURE", "USER_AUTHORED_MANUAL", "USER_PROVIDED_PLATFORM_EXPORT"},
                   "SOURCE_STATUS_NOT_PROVIDER_ATTESTED")
             return _seal(snapshot=snapshot, source_count=len(refs), review=archived,
                          provenance="LOCAL_SUPPLIED_OR_SYNTHETIC_ONLY")
