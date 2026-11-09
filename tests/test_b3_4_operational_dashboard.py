@@ -167,3 +167,15 @@ def test_partial_native_selection_requires_exact_type(tmp_path):
         operational_dashboard(cost_ledger=ledger, cost_entry_ids=["estimated"])
     with pytest.raises(DashboardHold, match="B34_COST_SELECTION_INVALID"):
         operational_dashboard(cost_entry_ids=("estimated",))
+
+def test_b04_native_selected_path_provisions_real_ffmpeg_without_global_install():
+    """True CI selector dependency; avoid hiding native B0.4 tests."""
+    import runpy
+    from types import SimpleNamespace
+
+    source = Path(__file__).resolve().parents[1] / ".github/scripts/ef02-pr-ci-tests.py"
+    checker = runpy.run_path(str(source))["_needs_ffmpeg_for_plan"]
+    assert checker(SimpleNamespace(selected_tests=["tests/test_b0_4_operator.py"])) is True
+    assert checker(SimpleNamespace(selected_tests=[
+        "tests/test_b3_4_operational_dashboard.py", "tests/test_b0_4_operator.py"])) is True
+    assert checker(SimpleNamespace(selected_tests=["tests/test_a15_operations.py"])) is False

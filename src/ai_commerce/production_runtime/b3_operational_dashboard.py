@@ -73,11 +73,12 @@ class B3OperationalDashboard:
                 "schema_version", "status", "sources", "observed", "cost_summary",
                 "unobserved", "missingness", "limits", "record_sha256"},
                 "B34_PACKET_FIELDS")
-            _need(value["schema_version"] == SCHEMA and value["limits"] == LIMITS,
-                  "B34_PACKET_AUTHORITY")
+            _need(value["schema_version"] == SCHEMA,
+                  "B34_PACKET_SCHEMA")
             body = {key: val for key, val in value.items() if key != "record_sha256"}
             _need(value["record_sha256"] == sha256(canonical_bytes(body)).hexdigest(),
                   "B34_PACKET_IDENTITY")
+            _need(value["limits"] == LIMITS, "B34_PACKET_AUTHORITY")
             _need(value["status"] in {"SCOPED_LOCAL_EVIDENCE_ONLY", "INSUFFICIENT_OBSERVATIONS"},
                   "B34_PACKET_STATUS")
             _need(value["missingness"] == sorted(set(value["missingness"]))
@@ -115,7 +116,7 @@ def operational_dashboard(*, operator_root: Path | None = None,
     """
     has_operator = operator_root is not None
     _need(not has_operator and session_sha256 is None and expected_audit_head_sha256 is None
-          or has_operator and type(operator_root) is Path and _valid_sha(session_sha256)
+          or has_operator and isinstance(operator_root, Path) and _valid_sha(session_sha256)
           and _valid_sha(expected_audit_head_sha256), "B34_OPERATOR_SELECTION_INVALID")
     has_cost = cost_ledger is not None
     _need(not has_cost and cost_entry_ids is None or has_cost

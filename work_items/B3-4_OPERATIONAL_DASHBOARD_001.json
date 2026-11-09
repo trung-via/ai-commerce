@@ -8,6 +8,7 @@
   "lane": "DIRECT_GITHUB_CI_FIRST_SOURCE_ONLY",
   "owner": "Production Runtime O07 / B0.4 observer + A15 cost native consumer",
   "allowed_paths": [
+    ".github/scripts/ef02-pr-ci-tests.py",
     "src/ai_commerce/production_runtime/b3_operational_dashboard.py",
     "tests/test_b3_4_operational_dashboard.py",
     "work_items/mt01-components/b3-operations-dashboard.json",
@@ -19,7 +20,8 @@
     "Read native pinned B0.4 audit head and actual B0.4 scoped recovery/latency counts",
     "A15 selected immutable cost ledger records preserve per-currency estimated/supplied/synthetic totals",
     "Missing external Brain/EF02/quota/Q4/lost-work values represented null not zero",
-    "Windows-hosted owner+consumer tests and genuine MT01 receipt"
+    "Windows-hosted owner+consumer tests and genuine MT01 receipt",
+    "Real native B0.4 operator tests require ffmpeg/ffprobe; exact selected-path provisioning repaired without altering tests or global selector"
   ],
   "negative_ac": [
     "Changed audit head/corrupt audit/incomplete native sources => typed HOLD, not retry",
