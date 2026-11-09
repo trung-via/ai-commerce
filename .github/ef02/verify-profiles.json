@@ -420,5 +420,14 @@
     "-q",
     "-n",
     "12"
+  ],
+  "mt01-bq-06b-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_bq_06b_fresh_a09_replay.py",
+    "-q",
+    "-n",
+    "12"
   ]
 }
