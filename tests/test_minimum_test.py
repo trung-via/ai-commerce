@@ -1813,9 +1813,20 @@ def test_pr_ci_ffmpeg_dependency_is_per_test_not_per_unknown_owner():
         "tests/test_bq_02a_critic_t1.py",
         "tests/test_bq_02b_multimodal.py",
         "tests/test_bq_04a_targeted_repair.py",
+        "tests/test_bq_06a_behavioral_learning.py",
         "tests/test_a14_commerce_e2e.py",
     ):
         assert needs(plan(media_test)), media_test
+    # BQ-06b's genuine owner+consumer closure includes BQ-06a native Q4
+    # media cases, which require real ffmpeg and ffprobe on Windows CI.
+    assert needs(plan(
+        "tests/test_bq_06b_fresh_a09_replay.py",
+        "tests/test_bq_06a_behavioral_learning.py",
+        "tests/test_a09_analytics.py",
+    ))
+    # BQ-06b source owner by itself remains an offline pure-read test.
+    assert not needs(plan("tests/test_bq_06b_fresh_a09_replay.py"))
+
     # Representative exact owner/consumer selection: one media obligation
     # must turn on provisioning without narrowing or dropping other tests.
     assert needs(plan(
