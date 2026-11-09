@@ -1245,6 +1245,142 @@ jobs:
               issue_number:context.issue.number,
               body:'AI_COMMERCE_WH03_CHAT_A_READONLY_V1\n'+JSON.stringify(result)});
 
+  # WH03 TEST-ONLY user-message signal read. Never enrolls a route or grants
+  # Wake Send; returns only a closed enum. Future workflow registration separate.
+  hostops-wh03-test-signal-read:
+    if: >-
+      github.repository == 'trung-via/ai-commerce' &&
+      github.actor == github.repository_owner &&
+      github.event_name == 'issues' && github.event.action == 'opened' &&
+      github.event.issue.user.login == github.repository_owner &&
+      startsWith(github.event.issue.title, '[HOSTOPS WH03 TEST SIGNAL READ] ')
+    runs-on: [self-hosted, Windows, ai-commerce-hostops]
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: wakehub-wh03-test-signal-read
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Observe one test-only user signal in Chat A without exporting transcript
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP ('wh03-test-signal-' + $env:GITHUB_RUN_ID + '-' + $env:GITHUB_RUN_ATTEMPT + '.json')
+          $status = 'BLOCKED'
+          $code = 'INVALID_EVENT'
+          try {
+            if ($env:OS -cne 'Windows_NT' -or $env:GITHUB_ACTIONS -cne 'true' -or
+                $env:GITHUB_REPOSITORY -cne 'trung-via/ai-commerce') { throw 'INVALID_ENVIRONMENT' }
+            $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($event.action -cne 'opened' -or
+                $event.issue.user.login -cne 'trung-via' -or
+                $event.sender.login -cne 'trung-via' -or
+                -not $event.issue.title.StartsWith('[HOSTOPS WH03 TEST SIGNAL READ] ') -or
+                [string]$event.issue.body -cne '{"schema":"ai-commerce.wakehub.chat-a-test-signal.v1","operation":"PROBE_TEST_REGISTRATION_SIGNAL_READONLY","parameters":{}}') {
+              throw 'INVALID_EVENT'
+            }
+            if ([Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
+              throw 'NO_INTERACTIVE_SESSION'
+            }
+            $principal = [Security.Principal.WindowsPrincipal]::new(
+              [Security.Principal.WindowsIdentity]::GetCurrent())
+            if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+              throw 'ELEVATED'
+            }
+            $root = $env:GITHUB_WORKSPACE
+            $head = (& git -C $root rev-parse HEAD 2>$null | Out-String).Trim()
+            $remote = (& git -C $root remote get-url origin 2>$null | Out-String).Trim()
+            $dirty = @(& git -C $root status --porcelain=v1 --untracked-files=no 2>$null)
+            if ($head -cne $env:GITHUB_SHA -or $dirty.Count -ne 0 -or
+                $remote -cnotin @(
+                  'https://github.com/trung-via/ai-commerce.git',
+                  'https://github.com/trung-via/ai-commerce',
+                  'git@github.com:trung-via/ai-commerce.git')) { throw 'SOURCE_DRIFT' }
+            $oldPythonPath = $env:PYTHONPATH
+            try {
+              $env:PYTHONPATH = Join-Path $root 'src'
+              $result = @(& python -B -c 'from ai_commerce.remote.cdp_doorbell import probe_wh03_test_registration_signal; print(probe_wh03_test_registration_signal())' 2>$null | ForEach-Object { [string]$_ })
+              $exit = $LASTEXITCODE
+            } finally { $env:PYTHONPATH = $oldPythonPath }
+            $allowed = @(
+              'TEST_SIGNAL_PRESENT_UNATTESTED','TEST_SIGNAL_NOT_FOUND',
+              'TEST_SIGNAL_AMBIGUOUS','TEST_SIGNAL_SCOPE_UNPROVEN',
+              'CHAT_A_CANDIDATE_NOT_FOUND',
+              'MULTIPLE_CHAT_CANDIDATES','CONTEXT_UNPROVEN','SURFACE_UNPROVEN',
+              'DRAFT_PRESENT','CDP_READ_UNAVAILABLE','NATIVE_DESKTOP_UNPROVEN')
+            if ($exit -eq 0 -and $result.Count -eq 1 -and $allowed -ccontains $result[0]) {
+              $status = 'OBSERVED'
+              $code = [string]$result[0]
+            } else { $code = 'READ_RESULT_UNAVAILABLE' }
+          } catch {
+            $reason = [string]$_.Exception.Message
+            $allowed = @('INVALID_ENVIRONMENT','INVALID_EVENT','NO_INTERACTIVE_SESSION',
+                         'ELEVATED','SOURCE_DRIFT')
+            $code = if ($allowed -ccontains $reason) { $reason } else { 'READ_RESULT_UNAVAILABLE' }
+          }
+          $receipt = [ordered]@{
+            status = $status
+            code = $code
+            source_sha = $env:GITHUB_SHA
+            cdp_port = 9444
+            chat_verified = $false
+            native_origin_attested = $false
+            browser_mutated = $false
+            wake_sent = $false
+          }
+          try {
+            $bytes = [Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $receipt -Compress))
+            $stream = [IO.File]::Open($out,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+            try { $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true) }
+            finally { $stream.Dispose() }
+          } catch { Write-Output 'WH03_TEST_SIGNAL_READ_RECEIPT_UNAVAILABLE'; exit 2 }
+          Write-Output ('WH03_TEST_SIGNAL_READ_STATUS=' + $status + ';CODE=' + $code)
+      - name: Publish allowlisted test-only registration signal observation
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs'), path = require('path');
+            const file = path.join(process.env.RUNNER_TEMP,
+              'wh03-test-signal-' + process.env.GITHUB_RUN_ID + '-' +
+              process.env.GITHUB_RUN_ATTEMPT + '.json');
+            let result = {status:'BLOCKED',code:'RECEIPT_UNAVAILABLE',
+              source_sha:context.sha,cdp_port:9444,
+              chat_verified:false,native_origin_attested:false,
+              browser_mutated:false,wake_sent:false};
+            try {
+              if (fs.statSync(file).size > 1024) throw Error();
+              const r = JSON.parse(fs.readFileSync(file,'utf8'));
+              const keys = ['status','code','source_sha','cdp_port',
+                'chat_verified','native_origin_attested','browser_mutated','wake_sent'];
+              const codes = ['INVALID_ENVIRONMENT','INVALID_EVENT',
+                'NO_INTERACTIVE_SESSION','ELEVATED','SOURCE_DRIFT',
+                'TEST_SIGNAL_PRESENT_UNATTESTED','TEST_SIGNAL_NOT_FOUND',
+              'TEST_SIGNAL_AMBIGUOUS','TEST_SIGNAL_SCOPE_UNPROVEN',
+              'CHAT_A_CANDIDATE_NOT_FOUND',
+                'MULTIPLE_CHAT_CANDIDATES','CONTEXT_UNPROVEN','SURFACE_UNPROVEN',
+                'DRAFT_PRESENT','CDP_READ_UNAVAILABLE','NATIVE_DESKTOP_UNPROVEN',
+                'READ_RESULT_UNAVAILABLE'];
+              if (!r || Array.isArray(r) ||
+                  Object.keys(r).sort().join() !== keys.sort().join() ||
+                  !['BLOCKED','OBSERVED'].includes(r.status) ||
+                  !codes.includes(r.code) || r.source_sha !== context.sha ||
+                  r.cdp_port !== 9444 || r.chat_verified !== false ||
+                  r.native_origin_attested !== false ||
+                  r.browser_mutated !== false || r.wake_sent !== false ||
+                  (r.status === 'OBSERVED' &&
+                   !codes.slice(5,16).includes(r.code))) throw Error();
+              result = r;
+            } catch (_) {}
+            await github.rest.issues.createComment({...context.repo,
+              issue_number:context.issue.number,
+              body:'AI_COMMERCE_WH03_TEST_SIGNAL_READONLY_V1\n'+JSON.stringify(result)});
+
   # Human-approved one-shot EF02 #698 read. Separate from standing public READ
   # and all other D5/HostOps operations. Never runs an executor or mutates a claim.
   hostops-ef02-attempt-698-readonly:
