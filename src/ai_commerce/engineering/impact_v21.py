@@ -16,6 +16,12 @@ CONTROL_TESTS = {
     ".github/scripts/ef02-pr-ci-tests.py": (
         "tests/test_minimum_test.py", "tests/test_ef02_mt01_registry.py",
     ),
+    # #710 G3: owner-only, no-model AGY static runner observation remains an
+    # explicitly reviewed CI control, never a generic permission to edit YAML.
+    ".github/workflows/ef02-antigravity-headless-preflight.yml": (
+        "tests/test_ef02.py", "tests/test_ef02_scope_main_integration.py",
+        "tests/test_mt01_v21.py",
+    ),
     ".github/workflows/ef02-batch.yml": ("tests/test_ef02.py", "tests/test_minimum_test.py"),
     ".github/workflows/ef02-tests.yml": (
         "tests/test_minimum_test.py", "tests/test_pr_merge_gate.py",
