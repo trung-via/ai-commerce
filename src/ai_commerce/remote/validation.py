@@ -102,6 +102,11 @@ def _validate_actions(data: dict, *, registry: dict[str, list[str]],
             approve_reuse(data, action, approved_reuse)
         for path in action["allowed_paths"]:
             safe_path(path)
+        # Validate explicit machine-readable AC even during offline v1 checks.
+        # Marker-less history remains readable only; live CLI/worker run strict.
+        if any(line.lstrip().startswith("MT01_ACCEPTANCE_JSON:")
+               for line in action["instruction"].splitlines()):
+            require_preexecutor_acceptance(action)
         if action["verification_profile"] not in registry:
             raise RemoteRequestError("VERIFICATION_PROFILE_UNREGISTERED")
         if action.get("verification_intent", "AUTO") == "HUMAN_FULL":
@@ -134,7 +139,8 @@ def approved_acceptance_plan(action: dict) -> dict:
     describe the reviewed test families; arbitrary issue ACs remain unknown.
     """
     prefix = "MT01_ACCEPTANCE_JSON:"
-    lines = [line.strip() for line in action["instruction"].splitlines() if prefix in line]
+    lines = [line.lstrip() for line in action["instruction"].splitlines()
+             if line.lstrip().startswith(prefix)]
     reason = "EXPLICIT_FINGERPRINTED_INSTRUCTION_ACCEPTANCE"
     try:
         if len(lines) != 1 or not lines[0].startswith(prefix):
@@ -153,6 +159,25 @@ def approved_acceptance_plan(action: dict) -> dict:
             "consumer_map": {ac: mapping[ac] for ac in sorted(ids) if ac in mapping},
             "source": "ISSUER_FINGERPRINTED_V1_INSTRUCTION", "reason": reason,
             "broad_required": bool(unknown)}
+
+
+def require_preexecutor_acceptance(action: dict) -> dict:
+    """Fail closed on malformed, missing or unregistered fingerprinted AC.
+
+    Prose mentioning a marker is not a declaration. This gate never supplies
+    authority to change registry mappings or skip MT-01 consumer tests.
+    """
+    prefix = "MT01_ACCEPTANCE_JSON:"
+    markers = [line.lstrip() for line in action["instruction"].splitlines()
+               if line.lstrip().startswith(prefix)]
+    if len(markers) != 1:
+        raise RemoteRequestError("INTAKE_AC_MISSING_OR_AMBIGUOUS")
+    plan = approved_acceptance_plan(action)
+    if plan["reason"] != "EXPLICIT_FINGERPRINTED_INSTRUCTION_ACCEPTANCE":
+        raise RemoteRequestError("INTAKE_AC_MALFORMED")
+    if plan["unknown_ids"]:
+        raise RemoteRequestError("INTAKE_AC_UNREGISTERED")
+    return plan
 
 
 def approved_verification_plan(action: dict, registry: dict[str, list[str]]) -> dict:
