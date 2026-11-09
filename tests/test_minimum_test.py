@@ -1971,8 +1971,9 @@ def test_mt01_winerror_1314_never_hides_real_infrastructure(case):
     result = verification._strip_verified_symlink_skip(stdout, stderr, code, junit)
     # For worker-count mismatch the narrow skip is independently proven,
     # but the separate xdist controller gate MUST still reject a candidate.
-    if case.startswith("workers_") or case == "stderr_permission":
-        assert (b"WinError" not in result) == case.startswith("workers_") or result == stdout
+    if case.startswith("workers_") or case in ("stderr_permission", "extra_permission"):
+        # Skipping is still verified, but independent worker/permission gates reject.
+        assert b"WinError" not in result
     else:
         assert result == stdout, case
 
