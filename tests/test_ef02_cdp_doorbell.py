@@ -1358,3 +1358,268 @@ if(probe(Array(20001).fill(0).map(()=>({nodeType:0})))!=='TEST_SIGNAL_SCOPE_UNPR
     assert proc.returncode == 0, (
         f"WH03 test signal DOM regression exit={proc.returncode}; "
         f"stderr={proc.stderr[:600]}")
+
+
+
+# WH03 R2: the earlier read (#733) was ambiguous because it counted every
+# matching pattern. A future enrolled private owner must pin ONE fresh attempt.
+def _wh03_committed_fixture(*, url=None, expired=False, consumed=False):
+    import hashlib
+    import time
+    from ai_commerce.remote import cdp_doorbell as d
+    now = time.time_ns() // 1_000_000
+    marker = "WAKEHUB_TEST_REGISTER_V1:" + "b" * 64
+    return d.WH03SignalCommitment(
+        registration_id="wh03_attempt_20261110",
+        marker_digest=hashlib.sha256(marker.encode("ascii")).hexdigest(),
+        chat_url=url or URL,
+        generation=2,
+        issued_ms=now - (120000 if expired else 1000),
+        expires_ms=now - 1000 if expired else now + 60000,
+        consumed=consumed,
+    )
+
+
+class CommittedSignalPage(TestRegistrationPage):
+    def __init__(self, **kwargs):
+        kwargs.setdefault("signal", "TEST_SIGNAL_MATCH_UNATTESTED")
+        super().__init__(**kwargs)
+        self.received_digest = None
+
+    def evaluate(self, script, args=None):
+        if "_SIGNAL" in script or "args.digest" in script:
+            assert type(args) is dict and set(args) == {"digest"}
+            assert len(args["digest"]) == 64
+            self.received_digest = args["digest"]
+            self.evaluations += 1
+            if self.raises:
+                raise RuntimeError("private browser path must never leak")
+            return self.signal
+        return super().evaluate(script)
+
+
+def test_wh03_committed_signal_ignores_old_marker_and_pins_current_chat(monkeypatch):
+    from ai_commerce.remote import cdp_doorbell as d
+    monkeypatch.setattr(d, "_is_windows", lambda: True)
+    p = CommittedSignalPage()
+    inv = ProbeContexts((p, TestRegistrationPage(url="https://example.com", raises=True)))
+    expected = _wh03_committed_fixture()
+    assert d.probe_wh03_committed_registration_signal(
+        commitment=expected, inventory=inv) == "TEST_SIGNAL_MATCH_UNATTESTED"
+    assert p.received_digest == expected.marker_digest
+    assert p.evaluations == 2 and p.mutations == 0
+    assert inv.calls == ["http://127.0.0.1:9444"]
+
+
+@pytest.mark.parametrize("case,code", [
+    ("missing", "TEST_COMMITMENT_REQUIRED"),
+    ("forged", "TEST_COMMITMENT_INVALID"),
+    ("expired", "TEST_COMMITMENT_EXPIRED"),
+    ("reused", "TEST_COMMITMENT_REPLAY"),
+    ("wrong_chat", "TEST_CHAT_ROUTE_MISMATCH"),
+    ("extra_chat", "MULTIPLE_CHAT_CANDIDATES"),
+    ("duplicate", "TEST_SIGNAL_AMBIGUOUS"),
+    ("not_found", "TEST_SIGNAL_NOT_FOUND"),
+    ("assistant_copy", "TEST_SIGNAL_AMBIGUOUS"),
+    ("not_windows", "NATIVE_DESKTOP_UNPROVEN"),
+])
+def test_wh03_committed_signal_fail_closed(monkeypatch, case, code):
+    from dataclasses import replace
+    from ai_commerce.remote import cdp_doorbell as d
+    monkeypatch.setattr(d, "_is_windows", lambda: case != "not_windows")
+    page = CommittedSignalPage()
+    commit = _wh03_committed_fixture()
+    if case == "missing": commit = None
+    elif case == "forged": commit = replace(commit, marker_digest="a" * 63)
+    elif case == "expired": commit = _wh03_committed_fixture(expired=True)
+    elif case == "reused": commit = _wh03_committed_fixture(consumed=True)
+    elif case == "wrong_chat": commit = _wh03_committed_fixture(url=OTHER)
+    elif case == "duplicate": page.signal = "TEST_SIGNAL_AMBIGUOUS"
+    elif case == "not_found": page.signal = "TEST_SIGNAL_NOT_FOUND"
+    elif case == "assistant_copy": page.signal = "TEST_SIGNAL_AMBIGUOUS"
+    inv = ProbeContexts((page, CommittedSignalPage(url=OTHER))) if case == "extra_chat" else ProbeContexts((page,))
+    assert d.probe_wh03_committed_registration_signal(
+        commitment=commit, inventory=inv) == code
+    assert page.mutations == 0
+    if case in {"missing", "forged", "expired", "reused", "not_windows"}:
+        assert inv.calls == []
+
+
+def test_wh03_committed_signal_rejects_unknown_port_and_future_lease(monkeypatch):
+    from dataclasses import replace
+    from ai_commerce.remote import cdp_doorbell as d
+    monkeypatch.setattr(d, "_is_windows", lambda: True)
+    commit = _wh03_committed_fixture()
+    inv = ProbeContexts((CommittedSignalPage(),))
+    assert d.probe_wh03_committed_registration_signal(
+        commitment=commit, endpoint="http://127.0.0.1:9333",
+        inventory=inv) == "NATIVE_DESKTOP_UNPROVEN"
+    assert d.probe_wh03_committed_registration_signal(
+        commitment=replace(commit, issued_ms=commit.expires_ms + 1000),
+        inventory=inv) == "TEST_COMMITMENT_INVALID"
+    assert inv.calls == []
+
+
+def test_wh03_committed_signal_real_dom_ignores_other_attempts_and_replay():
+    """Execute production JS with Node/WebCrypto, not a fake Python page."""
+    import hashlib
+    import json
+    import shutil
+    import subprocess
+    from ai_commerce.remote.cdp_doorbell import _WH03_COMMITTED_SIGNAL_DOM
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node unavailable")
+    program = r"""
+const fs=require('node:fs');
+const {webcrypto}=require('node:crypto');
+const {TextEncoder}=require('node:util');
+const crypto=webcrypto;
+const script=JSON.parse(fs.readFileSync(0,'utf8'));
+const oldMarker='WAKEHUB_TEST_REGISTER_V1:'+('a'.repeat(64));
+const newMarker='WAKEHUB_TEST_REGISTER_V1:'+('b'.repeat(64));
+const dig=s=>require('node:crypto').createHash('sha256').update(s).digest('hex');
+const style=el=>({visibility:el.hidden?'hidden':'visible',display:'block'});
+const el=(text,role,id)=>{
+  const parent={nodeType:1,textContent:text,children:[],getClientRects:()=>[1],
+    getAttribute:k=>k==='data-message-id'?id:null,
+    closest:sel=>sel==='[data-message-id],[data-turn-id]'?parent:null};
+  const leaf={nodeType:1,textContent:text,children:[],getClientRects:()=>[1],
+    closest:sel=>{
+      if(sel.includes('form,nav,header'))return null;
+      if(sel.includes('[data-message-author-role="assistant"]'))
+        return role==='assistant'?parent:null;
+      if(sel.includes('[data-message-author-role="user"]'))
+        return role==='user'?parent:null;
+      if(sel==='[data-message-id],[data-turn-id]')return parent;
+      return null;
+    }};
+  parent.children=[leaf];return [parent,leaf];
+};
+const probe=(nodes,hash)=>new Function('document','getComputedStyle',
+  'crypto','TextEncoder','args','return ('+script+')(args)')(
+  {querySelectorAll:()=>nodes},style,crypto,TextEncoder,{digest:hash});
+(async()=>{
+  const old=el(oldMarker,'user','msg_old');
+  const fresh=el(newMarker,'user','msg_new');
+  const copy=el(newMarker,'assistant','msg_copy');
+  const duplicate=el(newMarker,'user','msg_dupe');
+  const digest=dig(newMarker);
+  const check=async(nodes,expected,n)=>{if(await probe(nodes,expected)!==n)process.exit(12)};
+  await check([...old,...fresh],digest,'TEST_SIGNAL_MATCH_UNATTESTED');
+  await check(old,digest,'TEST_SIGNAL_NOT_FOUND');
+  await check([...old,...fresh,...duplicate],digest,'TEST_SIGNAL_AMBIGUOUS');
+  await check([...old,...fresh,...copy],digest,'TEST_SIGNAL_AMBIGUOUS');
+  await check(copy,digest,'TEST_SIGNAL_AMBIGUOUS');
+  await check(fresh,dig(oldMarker),'TEST_SIGNAL_NOT_FOUND');
+  await check([],digest,'TEST_SIGNAL_NOT_FOUND');
+  await check(Array.from({length:20001},()=>({nodeType:0})),
+    digest,'TEST_SIGNAL_SCOPE_UNPROVEN');
+})().catch(()=>process.exit(13));
+"""
+    proc = subprocess.run([node, "-e", program],
+                          input=json.dumps(_WH03_COMMITTED_SIGNAL_DOM),
+                          capture_output=True, text=True,
+                          timeout=45 if __import__("sys").platform == "win32" else 20)
+    assert proc.returncode == 0, f"WH03 DOM regression code={proc.returncode}"
+
+
+
+class _WH03SyntheticAuthority:
+    """TEST ONLY — this stub must never be a production enrollment source."""
+    def __init__(self, origin_proven=False):
+        self.origin_proven = origin_proven
+
+    def authorize_origin(self, attestation, *, operation, context):
+        return operation.startswith("test_registration_")
+
+    def authenticate_wh03_test_registration(self, *, registration_id, record, origin):
+        return self.origin_proven
+
+
+def _wh03_ledger(tmp_path, *, origin_proven=False):
+    from ai_commerce.remote import cdp_doorbell as d
+    from ai_commerce.remote.trusted_origin import LocalCallerAttestation
+    root, private = tmp_path / "repo", tmp_path / "private"
+    root.mkdir(exist_ok=True)
+    private.mkdir(exist_ok=True)
+    authority = _WH03SyntheticAuthority(origin_proven=origin_proven)
+    ledger = d.WH03TestRegistrationLedger(
+        private / "wh03.json", root, authority=authority)
+    attest = LocalCallerAttestation(caller_id="synthetic", is_local=True,
+                                    attestation_verified=True)
+    return ledger, attest
+
+
+def _wh03_test_origin():
+    from ai_commerce.remote.trusted_origin import PrivateOriginSnapshot
+    return PrivateOriginSnapshot(
+        route_id="chat-a-test", generation=3, chat_url=URL,
+        cdp_endpoint="http://127.0.0.1:9444",
+        profile_id="profile-test", account_id="account-test",
+        session_id="session-test", login_id="login-test")
+
+
+def test_wh03_pending_ledger_two_attempts_same_chat_old_marker_not_blocking(
+        tmp_path, monkeypatch):
+    import hashlib
+    import json
+    from ai_commerce.remote import cdp_doorbell as d
+    monkeypatch.setattr(d, "_is_windows", lambda: True)
+    ledger, attest = _wh03_ledger(tmp_path, origin_proven=True)
+    first = ledger.prepare(chat_url=URL, generation=3, attestation=attest)
+    second = ledger.prepare(chat_url=URL, generation=3, attestation=attest)
+    assert first.registration_id != second.registration_id
+    assert first.marker != second.marker
+    state = json.loads((tmp_path / "private" / "wh03.json").read_text())
+    assert first.marker not in repr(state) and second.marker not in repr(state)
+    assert len(state["registrations"]) == 2
+    assert state["registrations"][first.registration_id]["phase"] == "PENDING"
+    assert state["registrations"][second.registration_id]["phase"] == "PENDING"
+    page = CommittedSignalPage()
+    inv = ProbeContexts((page,))
+    assert ledger.observe(registration_id=second.registration_id,
+                          attestation=attest, inventory=inv) == "TEST_SIGNAL_MATCH_UNATTESTED"
+    assert page.received_digest == hashlib.sha256(second.marker.encode()).hexdigest()
+    assert ledger.complete(registration_id=second.registration_id,
+                           origin=_wh03_test_origin(),
+                           attestation=attest) == "TEST_REGISTERED"
+    assert ledger.observe(registration_id=second.registration_id,
+                          attestation=attest, inventory=inv) == "TEST_REGISTRATION_REPLAY"
+    state = json.loads((tmp_path / "private" / "wh03.json").read_text())
+    assert state["registrations"][first.registration_id]["phase"] == "PENDING"
+    assert state["registrations"][second.registration_id]["phase"] == "TEST_REGISTERED"
+
+
+def test_wh03_test_registration_requires_actual_source_verifier(tmp_path, monkeypatch):
+    from ai_commerce.remote import cdp_doorbell as d
+    monkeypatch.setattr(d, "_is_windows", lambda: True)
+    ledger, attest = _wh03_ledger(tmp_path, origin_proven=False)
+    prepared = ledger.prepare(chat_url=URL, generation=3, attestation=attest)
+    assert ledger.observe(registration_id=prepared.registration_id,
+                          attestation=attest,
+                          inventory=ProbeContexts((CommittedSignalPage(),))) == (
+                          "TEST_SIGNAL_MATCH_UNATTESTED")
+    assert ledger.complete(registration_id=prepared.registration_id,
+                           origin=_wh03_test_origin(),
+                           attestation=attest) == "TEST_CHAT_ORIGIN_UNATTESTED"
+    # The source-only marker read cannot complete test registration.
+    from dataclasses import replace
+    wrong = replace(_wh03_test_origin(), chat_url=OTHER)
+    assert ledger.complete(registration_id=prepared.registration_id,
+                           origin=wrong, attestation=attest) == "TEST_CHAT_ROUTE_MISMATCH"
+
+
+def test_wh03_test_registration_prepare_without_native_authority_fails(tmp_path):
+    from ai_commerce.remote import cdp_doorbell as d
+    from ai_commerce.remote.trusted_origin import LocalCallerAttestation, OriginError
+    import pytest
+    root, private = tmp_path / "repo", tmp_path / "private"
+    root.mkdir()
+    private.mkdir()
+    ledger = d.WH03TestRegistrationLedger(private / "state.json", root)
+    untrusted = LocalCallerAttestation(caller_id="untrusted", is_local=True,
+                                        attestation_verified=True)
+    with pytest.raises(OriginError, match="TEST_REGISTRATION_AUTHORITY_REQUIRED"):
+        ledger.prepare(chat_url=URL, generation=3, attestation=untrusted)
+    assert not (private / "state.json").exists()
