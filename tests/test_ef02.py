@@ -983,7 +983,7 @@ def test_publication_diagnostic_survives_worker_batch_artifact_and_safe_issue_su
     # Isolate post-admission publication uncertainty; issuer AC negatives
     # are separately covered by the real strict pre-executor acceptance gate.
     monkeypatch.setattr(cli, "require_preexecutor_acceptance",
-                        lambda _action: {"ids": ["EF02.action-and-fanin"]})
+                        lambda _action, **_kw: {"ids": ["EF02.action-and-fanin"]})
     monkeypatch.setattr(cli, "start_worker_signal", lambda **_: None)
     monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
     monkeypatch.setenv("GITHUB_TOKEN", "fixture")
