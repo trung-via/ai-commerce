@@ -1,0 +1,60 @@
+{
+  "schema_version": "B3NextBriefSourceWorkItem.v1",
+  "id": "B3-2_NEXT_BRIEF_HANDOFF_001",
+  "status": "SOURCE_CANDIDATE_UNDER_REVIEW",
+  "human_authorization": "2026-11-10 ChatGPT @AI Commerce 'ok tiếp tục' after B3.2 explicitly selected",
+  "source_sha_at_authoring": "eb75da90e0163959236eade3a1aff74c7ab453bf",
+  "issue": 739,
+  "execution_lane": "DIRECT_GITHUB_SOURCE_ONLY_NO_PROVIDER",
+  "owned_source": "src/ai_commerce/creative_quality/b3_next_brief_handoff.py",
+  "owned_test": "tests/test_b3_2_next_brief_handoff.py",
+  "allowed_paths": [
+    "src/ai_commerce/creative_quality/b3_next_brief_handoff.py",
+    "tests/test_b3_2_next_brief_handoff.py",
+    "work_items/mt01-components/b3-next-brief.json",
+    "work_items/B3-2_NEXT_BRIEF_HANDOFF_001.json",
+    "docs/creative/B3_2_NEXT_BRIEF_HANDOFF_PROTOCOL.md",
+    "docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md"
+  ],
+  "accepted_acs": [
+    "B3.2.source-current",
+    "B3.2.attended-handoff",
+    "B3.2.local-trust"
+  ],
+  "upstream_verification": "BQ-06b PR #732 merged eb75da90; Windows CI #42669126409 492 Python 48 Node PASS",
+  "positive_tests": [
+    "native pending A17 r1 and BQ06b genuine A09/A11 current",
+    "replay full A17 proposal and next_brief ref",
+    "positive and negative evidence IDs; zero vs UNKNOWN",
+    "redacted immutable local Brain review; no provider proof"
+  ],
+  "negative_tests": [
+    "native A09 correction/reprocess/two-hop invalidates old pin",
+    "forged/invalid A11 or A17 pointer and tampered stored proposal",
+    "adopted A17 revision-2 never pending",
+    "cross-owner first/second replay changes HOLD",
+    "no local write, no provider, no BrainDecision, no Human adoption"
+  ],
+  "read_only_dependencies": [
+    "src/ai_commerce/analytics",
+    "src/ai_commerce/learning",
+    "src/ai_commerce/creative_scaling",
+    "src/ai_commerce/creative_quality/behavioral_learning_bridge.py",
+    "src/ai_commerce/creative_quality/behavioral_learning_fresh_replay.py"
+  ],
+  "permissions": {
+    "ef02_provider": false,
+    "workowner_replay": false,
+    "spend": false,
+    "publish": false,
+    "pulse_live": false,
+    "human_adoption": false,
+    "brain_decision": false
+  },
+  "required_release": [
+    "hosted Windows exact-head MT01 owner and downstream closure",
+    "independent Brain semantic review",
+    "trusted auto-merge"
+  ],
+  "claim_scope": "LOCAL_READ_ONLY_NEXT_BRIEF_QUESTION_NOT_LIVE_MEASURED_WIN"
+}
