@@ -20,8 +20,9 @@ from typing import Callable, Protocol
 
 from .conversation_binding import ResolvedBinding, _CHAT, _REPOSITORY, _endpoint
 from .trusted_origin import (
-    OriginError, PrivateOriginSnapshot, RendezvousEmission,
-    RendezvousHit, RendezvousObservation, _MARKER, _private_id, _valid_origin,
+    CompleteSearchDomainWitness, OriginError, PrivateOriginSnapshot,
+    RendezvousEmission, RendezvousHit, RendezvousObservation,
+    VerifiedNativeOriginEvidenceConsumer, _MARKER, _private_id, _valid_origin,
 )
 from .wake_adapter import WakeReceipt
 
@@ -470,9 +471,10 @@ class LocalChromeObserverAdapter:
     def __init__(self, *,
                  inventory: BrowserInventory | None = None,
                  enrolled_origin: PrivateOriginSnapshot | None = None,
-                 scope_witness: Callable[..., bool] | None = None,
+                 scope_witness: Callable[..., bool] | CompleteSearchDomainWitness | None = None,
                  enrolled_chats: tuple[str, ...] | list[str] | set[str] | None = None,
                  native_authority: bool = False,
+                 native_evidence_consumer: VerifiedNativeOriginEvidenceConsumer | None = None,
                  profile_id: str | None = None,
                  account_id: str | None = None,
                  session_id: str | None = None,
@@ -485,6 +487,7 @@ class LocalChromeObserverAdapter:
         self.scope_witness = scope_witness
         self.enrolled_chats = tuple(enrolled_chats) if enrolled_chats is not None else None
         self.native_authority = native_authority is True
+        self.native_evidence_consumer = native_evidence_consumer
         self.profile_id = profile_id
         self.account_id = account_id
         self.session_id = session_id
@@ -632,10 +635,20 @@ class LocalChromeObserverAdapter:
                 )
 
                 if self.scope_witness is not None:
-                    try:
-                        scope_ok = self.scope_witness(observed_urls, emission.origin)
-                    except TypeError:
-                        scope_ok = self.scope_witness(observed_urls)
+                    if hasattr(self.scope_witness, "is_search_scope_complete"):
+                        try:
+                            scope_ok = self.scope_witness.is_search_scope_complete(
+                                origin=emission.origin, observed_urls=observed_urls, nonce=nonce
+                            )
+                        except Exception:
+                            scope_ok = False
+                    elif callable(self.scope_witness):
+                        try:
+                            scope_ok = self.scope_witness(observed_urls, emission.origin)
+                        except TypeError:
+                            scope_ok = self.scope_witness(observed_urls)
+                    else:
+                        scope_ok = False
                     if not scope_ok:
                         raise OriginError("SEARCH_COVERAGE_UNPROVEN")
                 elif self.enrolled_chats is not None:
