@@ -187,6 +187,8 @@ Mỗi phase dưới đây dùng cùng nguyên tắc MT-01: chỉ nhóm có mappi
 
 **B3.3 source contract (2026-11-10, Issue #747):** Khởi tạo consumer đọc-only `B3PortfolioReview.v1` nối B3.2 A09/A11/A17 pending với A18 M06 portfolio qua metric/cohort/window/timezone exact; tương thích ngữ cảnh **không** chứng minh chung native source/campaign. A18 vẫn sở hữu cost buckets theo currency, reason/missingness, provisional advisory. Chỉ source CI + Brain review độc lập mới cho phép ghi `MERGED`; không tự đổi budget, portfolio, chiến lược hoặc cấp quyền PULSE.
 
+**B3.4 source contract (2026-11-10, Issue #752):** Chọn native B0.4 audit theo session/head SHA và A15 cost ledger entry IDs, trả `B3OperationalDashboard.v1` hash-bound, read-only. Cố định ranh giới quan sát: B0.4 chỉ audit phiên operator, A15 chỉ chi phí tự khai/synthetic theo currency. EF02 toàn hệ thống, Brain ChatGPT turns, Codex/Antigravity quota, Q4, lost work, billing/provider chứng thực và journey latency giữ `UNKNOWN/null` khi chưa có instrumentation. Không suy luận zero, ROI hay bật LangGraph. Đây là **source candidate**, cần Windows MT01 + Brain independent review/merge để được coi MERGED.
+
 ## 9. B4 — Affiliate/economics/own-brand tùy chọn, evidence-gated
 
 **Mục tiêu:** chỉ đi nhánh thương mại khi Human chọn và evidence phù hợp; không buộc affiliate/own-brand để creative production được chạy.
