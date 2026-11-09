@@ -1,0 +1,63 @@
+{
+  "schema_version": "BQ06bIndependentWorkItem.v1",
+  "id": "BQ-06B-FRESH-A09-REPLAY-001",
+  "status": "SOURCE_CANDIDATE_UNDER_REVIEW",
+  "human_authorization": "2026-11-09 Issue #730 independent BQ06b six-path CI-first source reauthoring",
+  "prior_attempts": [
+    {
+      "issue": 694,
+      "verdict": "BRAIN_HOLD"
+    },
+    {
+      "issue": 698,
+      "verdict": "HOLD_UNKNOWN_EFFECT"
+    }
+  ],
+  "execution_lane": "DIRECT_GITHUB_SOURCE_ONLY_NO_PROVIDER",
+  "source_sha_at_authoring": "d1ec4c08d16a8b1e9017b5c2dc190fb5f3f84755",
+  "owned_sources": [
+    "src/ai_commerce/creative_quality/behavioral_learning_fresh_replay.py"
+  ],
+  "owned_tests": [
+    "tests/test_bq_06b_fresh_a09_replay.py"
+  ],
+  "allowed_paths": [
+    "src/ai_commerce/creative_quality/behavioral_learning_fresh_replay.py",
+    "tests/test_bq_06b_fresh_a09_replay.py",
+    "work_items/mt01-components/bq-06b.json",
+    "work_items/BQ-06B_FRESH_A09_REPLAY_001.json",
+    "docs/creative/BQ_06B_FRESH_EVIDENCE_PROTOCOL.md",
+    "docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md"
+  ],
+  "accepted_acs": [
+    "BQ-06b.a09-raw-replay-pinned-to-a11",
+    "BQ-06b.missingness-and-comparability",
+    "BQ-06b.brain-review-non-authoritative"
+  ],
+  "verification": [
+    "real AnalyticsLedger.import_file correction_of",
+    "real AnalyticsLedger.reprocess native",
+    "two-hop descendant",
+    "unrelated root",
+    "history pagination >100",
+    "read_snapshot exact A09/A11 identities",
+    "BQ06a recheck_review / A17 pending",
+    "null vs zero",
+    "source locks and SQLite sidecars",
+    "no provider or live PULSE"
+  ],
+  "required_release": [
+    "Windows hosted exact-head and MT01 owner+consumer selected/collected/executed",
+    "independent Brain semantic review",
+    "trusted merge"
+  ],
+  "permissions": {
+    "provider_invocation": false,
+    "ef02_replay": false,
+    "spend": false,
+    "publish": false,
+    "brain_decision": false,
+    "human_adoption": false
+  },
+  "business_claim": "LOCAL_SOURCE_ONLY_NO_LIFT"
+}
