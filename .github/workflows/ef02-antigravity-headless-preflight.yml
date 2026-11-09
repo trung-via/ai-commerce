@@ -1,20 +1,55 @@
 name: EF02 Antigravity headless access preflight (no model)
 on:
   workflow_dispatch:
+  # Exactly one owner-created diagnostic issue for #710; this is never
+  # RemoteActionBatch admission and cannot invoke EF01, AGY --print or a model.
+  issues:
+    types: [opened]
 
 permissions:
   contents: read
 
 jobs:
   check:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'issues' &&
+        github.event.action == 'opened' &&
+        github.repository == 'trung-via/ai-commerce' &&
+        github.actor == github.repository_owner &&
+        github.event.issue.user.login == github.repository_owner &&
+        github.event.issue.title == '[EF02 HEADLESS READ] #710 G3'
+      )
     runs-on: [self-hosted, Windows, ai-commerce-ef02]
     timeout-minutes: 10
     steps:
-      - name: Checkout trusted repository
+      - name: Checkout trusted main only
         uses: actions/checkout@v4
         with:
+          ref: main
           persist-credentials: false
-      - name: Inspect same-session AGY and read policy without invoking model
+      - name: Bounded same-session AGY static probe — no model and no raw account output
         shell: pwsh
         run: |
-          ./scripts/EF02-Antigravity-Headless-Preflight.ps1 -Workspace "$env:GITHUB_WORKSPACE"
+          # Capture all original preflight output privately in memory: it may
+          # include the Windows runner account and must NOT be printed to GitHub.
+          $resultLines = @()
+          $exitCode = 2
+          try {
+            $resultLines = @(& pwsh -NoProfile -NonInteractive -File ./scripts/EF02-Antigravity-Headless-Preflight.ps1 -Workspace "$env:GITHUB_WORKSPACE" 2>&1)
+            $exitCode = $LASTEXITCODE
+          } catch {
+            $exitCode = 2
+          }
+          $passMarkers = @($resultLines | Where-Object { [string]$_ -eq 'AGY_PREFLIGHT_PASS_NO_MODEL' })
+          if ($exitCode -eq 0 -and $passMarkers.Count -eq 1) {
+            Write-Output 'AGY_G3_STATIC_PREFLIGHT=PASS_NO_MODEL'
+            Write-Output 'EFFECTIVE_WRITE_PERMISSION=UNPROVEN_NO_MODEL'
+            Write-Output 'MODEL_AUTH_QUOTA=UNPROVEN_NO_MODEL'
+          } else {
+            Write-Output 'AGY_G3_STATIC_PREFLIGHT=FAILED_NO_MODEL'
+            Write-Output 'EFFECTIVE_WRITE_PERMISSION=UNPROVEN_NO_MODEL'
+            Write-Output 'MODEL_AUTH_QUOTA=UNPROVEN_NO_MODEL'
+            exit 2
+          }
