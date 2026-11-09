@@ -1300,3 +1300,21 @@ def test_merge_gate_duplicate_or_missing_same_attempt_artifact_remains_blocked(g
         assert (verdict.status, verdict.reason) == (
             "WAIT_EVIDENCE", "V21_EXACT_RUN_WINDOWS_ARTIFACT_PROOF_MISSING")
         assert api.read_ids == []
+
+def test_710_g3_no_model_workflow_has_exact_protected_merge_review(gate):
+    # Main review oracle is separate from candidate MT-01 impact mapping.
+    path = ".github/workflows/ef02-antigravity-headless-preflight.yml"
+    required = {"tests/test_ef02.py", "tests/test_ef02_scope_main_integration.py",
+                "tests/test_mt01_v21.py"}
+    assert set(gate.REVIEWED_CONTROL_TESTS[path]) == required
+    reviewed = gate.reviewed_coverage_for_changed_files(
+        [{"filename": path, "status": "modified"}])
+    assert reviewed is not None
+    changed, witness = reviewed
+    assert changed == (path,)
+    assert required <= set(witness)
+    assert gate.reviewed_coverage_for_changed_files(
+        [{"filename": ".github/workflows/ef02-headless-unsafe.yml",
+          "status": "added"}]) is None
+
+
