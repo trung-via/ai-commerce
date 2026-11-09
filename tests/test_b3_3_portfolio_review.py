@@ -106,6 +106,7 @@ def test_no_native_a18_data_is_not_customer_outcome(tmp_path):
 def test_native_a18_report_from_other_context_does_not_create_identity_join(tmp_path):
     data = native(tmp_path / "brain")
     # A18 replayed report is independently native but NOT the A17 campaign.
+    (tmp_path / "a18").mkdir()
     snapshot, path, report, report_source = analytics(tmp_path / "a18")
     from ai_commerce.opportunity.portfolio import EvidenceBundle
     result = review(data, EvidenceBundle(reports=(report_source,)))

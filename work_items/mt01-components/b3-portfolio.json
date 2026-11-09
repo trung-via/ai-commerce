@@ -15,7 +15,9 @@
   "consumers": [
     "src/ai_commerce/opportunity/portfolio/recommend.py",
     "src/ai_commerce/creative_quality/b3_next_brief_handoff.py",
-    "src/ai_commerce/opportunity/portfolio/sources.py"
+    "src/ai_commerce/opportunity/portfolio/sources.py",
+    "src/ai_commerce/creative_quality/behavioral_learning_bridge.py",
+    "src/ai_commerce/creative_quality/behavioral_learning_fresh_replay.py"
   ],
   "contracts": []
 }

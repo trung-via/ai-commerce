@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
-import os
+import platform
 
 from ai_commerce.core.provenance import canonical_bytes
 from ai_commerce.creative_quality.b3_next_brief_handoff import (
@@ -129,7 +129,7 @@ def review_b3_portfolio(*, ledger_path, pin, bq06a_raw, source_arguments,
     No retained A18 recommendation is accepted as proof of current custody.
     A09, A11 and A18 are different stores: this is NOT an atomic snapshot.
     """
-    if os.name != "nt":
+    if platform.system() != "Windows":
         return _seal(reason="WINDOWS_REQUIRED")
     if (type(ledger_path) is not str or type(bq06a_raw) is not bytes
             or type(source_arguments) is not dict or type(evaluation) is not dict
