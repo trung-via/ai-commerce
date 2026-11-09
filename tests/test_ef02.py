@@ -194,6 +194,56 @@ def test_missing_ambiguous_or_unknown_acceptance_requires_broad_verification(dec
     assert acceptance["broad_required"] and acceptance["unknown_ids"]
 
 
+
+def test_preexecutor_acceptance_ignores_prose_mentions_and_rejects_second_declaration():
+    from ai_commerce.remote.validation import require_preexecutor_acceptance
+    a = action("a")
+    a["instruction"] = (
+        'Prose mentions MT01_ACCEPTANCE_JSON: but is not a declaration.\n'
+        'MT01_ACCEPTANCE_JSON:["EF02.action-and-fanin"]'
+    )
+    assert require_preexecutor_acceptance(a)["ids"] == ["EF02.action-and-fanin"]
+    assert validate(batch([a]))["batch_id"] == "sample-001"
+    a["instruction"] += '\nMT01_ACCEPTANCE_JSON:["EF02.recovery"]'
+    with pytest.raises(RemoteRequestError, match="INTAKE_AC_MISSING_OR_AMBIGUOUS"):
+        validate(batch([a]))
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Only source instructions; no machine AC", "INTAKE_AC_MISSING_OR_AMBIGUOUS"),
+    ("MT01_ACCEPTANCE_JSON: not-json", "INTAKE_AC_MALFORMED"),
+    ("MT01_ACCEPTANCE_JSON: []", "INTAKE_AC_MALFORMED"),
+    ('MT01_ACCEPTANCE_JSON:["EF02.recovery","EF02.recovery"]', "INTAKE_AC_MALFORMED"),
+    ('MT01_ACCEPTANCE_JSON:["MT01.minimum-test-execution"]', "INTAKE_AC_UNREGISTERED"),
+])
+def test_preexecutor_acceptance_rejects_malformed_or_foreign_ids_before_provider(text, expected):
+    from ai_commerce.remote.validation import require_preexecutor_acceptance
+    a = action("a")
+    a["instruction"] = text
+    with pytest.raises(RemoteRequestError, match=expected):
+        require_preexecutor_acceptance(a)
+    if text.lstrip().startswith("MT01_ACCEPTANCE_JSON:"):
+        with pytest.raises(RemoteRequestError, match=expected):
+            validate(batch([a]))
+
+
+def test_direct_real_worker_ac_gate_precedes_workowner_operations(tmp_path):
+    from ai_commerce.remote.worker import LocalBatchWorker
+    worker = object.__new__(LocalBatchWorker)
+    worker.root = tmp_path
+    worker.batch = batch([action("a")])
+    worker._dispatch_strict_ac = True
+    class ForbiddenClaim:
+        def claim(self, **_kw):
+            pytest.fail("invalid AC must not reach GitHub claim")
+    worker.github = ForbiddenClaim()
+    out = worker.execute_action(worker.batch["actions"][0])
+    assert out["status"] == "INVALID_ACTION"
+    assert out["error_code"] == "INTAKE_AC_MISSING_OR_AMBIGUOUS"
+    assert out["executor_invoked"] is False
+    assert out["candidate_sha"] is None
+
+
 @pytest.mark.parametrize("key,value", [("acceptance_ids", ["A12.product-evidence"]),
                                      ("verify_argv", ["python", "-c", "arbitrary"])])
 def test_mt01_does_not_relax_v1_additional_properties(key, value):
