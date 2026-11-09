@@ -1844,3 +1844,164 @@ def test_pr_ci_ffmpeg_dependency_is_per_test_not_per_unknown_owner():
     assert set(CONTROL_TESTS[".github/scripts/ef02-pr-ci-tests.py"]) == {
         "tests/test_minimum_test.py", "tests/test_ef02_mt01_registry.py"
     }
+
+
+
+# #705/#709: exact Windows xdist/JUnit evidence, not synthetic success claims.
+_MT01_NATIVE_SKIP = "NATIVE_SYMLINK_CREATION_UNPROVEN: WinError 1314"
+_MT01_SKIP_CLASS = (
+    "tests.test_hostops_ef02_attempt_reconcile_readonly."
+    "EF02Attempt698ReadOnlyTests"
+)
+_MT01_SKIP_NAME = "test_symlink_or_junction_is_never_read_as_source"
+
+
+def _mt01_win_junit(*, message=_MT01_NATIVE_SKIP, classname=_MT01_SKIP_CLASS,
+                    name=_MT01_SKIP_NAME, skip_type="pytest.skip",
+                    failures=0, errors=0, skipped=1, tests=6):
+    cases = "".join(
+        f'<testcase classname="{_MT01_SKIP_CLASS}" name="test_other_{i}"/>'
+        for i in range(5))
+    cases += (f'<testcase classname="{classname}" name="{name}">'
+              f'<skipped type="{skip_type}" message="{message}"/>'
+              f'</testcase>')
+    return (f'<testsuites><testsuite tests="{tests}" errors="{errors}" '
+            f'failures="{failures}" skipped="{skipped}">{cases}'
+            f'</testsuite></testsuites>').encode()
+
+
+def _mt01_win_stdout(*, slash="\\", workers=12, reason=_MT01_NATIVE_SKIP,
+                     extra="", additional_skips=""):
+    return (
+        f"bringing up nodes...\n"
+        f"MT01_XDIST_WORKERS_COLLECTED={workers}\n"
+        f"================ short test summary info ==================\n"
+        f"SKIPPED [1] tests{slash}test_hostops_ef02_attempt_reconcile_readonly.py:97: {reason}\n"
+        f"{additional_skips}{extra}"
+        f"5 passed, 1 skipped in 1.83s\n"
+    ).encode()
+
+
+@pytest.mark.parametrize("slash", ["\\", "/"])
+def test_mt01_winerror_1314_valid_native_skip_continues_verification(mapped, monkeypatch, slash):
+    stdout = _mt01_win_stdout(slash=slash)
+    junit = _mt01_win_junit()
+    # The original report and the one legitimate security-test skip are preserved.
+    diagnostic = verification._strip_verified_symlink_skip(stdout, b"", 0, junit)
+    assert b"WinError" not in diagnostic
+    assert b"5 passed, 1 skipped" in diagnostic
+    def run(argv, *, repo, timeout, save_junit):
+        save_junit(junit)
+        return subprocess.CompletedProcess(argv, 0, stdout.decode(), "")
+    monkeypatch.setattr(verification, "run_pytest", run)
+    argv = ["python", "-m", "pytest", "tests/test_a.py", "-q", "-n", "12"]
+    result, selected, prior = _execute(
+        mapped, registered_only=True,
+        fallback_argv=[*FULL, "-n", "12"],
+        registered_profiles={"project-tests": [*FULL, "-n", "12"],
+                             "component-a": argv})
+    entry = selected["groups"][0]
+    assert result.returncode == 0
+    assert entry["result"] == "PASS"
+    assert entry["workers_actual"] == 12
+    assert entry["tests_executed"]["passed"] == 5
+    assert entry["tests_executed"]["skipped"] == 1
+    assert "a" in prior
+    assert (mapped.evidence / "round-0/mt01.0.evidence.json").is_file()
+    assert (mapped.evidence / "round-0/mt01.0.stdout.log").read_bytes() == stdout
+    assert (mapped.evidence / "round-0/mt01.0.junit.xml").read_bytes() == junit
+
+
+@pytest.mark.parametrize("case", [
+    "wrong_code", "stderr_winerror", "stderr_permission", "extra_winerror",
+    "extra_permission", "extra_skip", "duplicate_skip", "fake_console",
+    "different_message", "different_case", "different_class", "wrong_skip_type",
+    "bad_xml", "missing_xml", "doctype_xml", "two_suites", "xml_failure",
+    "xml_error", "xml_extra_skip", "xml_wrong_test_count", "workers_11",
+    "workers_missing",
+])
+def test_mt01_winerror_1314_never_hides_real_infrastructure(case):
+    stdout, stderr, code, junit = _mt01_win_stdout(), b"", 0, _mt01_win_junit()
+    if case == "wrong_code":
+        code = 1
+    elif case == "stderr_winerror":
+        stderr = b"Traceback: OSError: WinError 1314"
+    elif case == "stderr_permission":
+        stderr = b"PermissionError: access denied"
+    elif case == "extra_winerror":
+        stdout = _mt01_win_stdout(extra="Traceback: WinError 5\n")
+    elif case == "extra_permission":
+        stdout = _mt01_win_stdout(extra="PermissionError: access denied\n")
+    elif case == "extra_skip":
+        stdout = _mt01_win_stdout(additional_skips="SKIPPED [1] tests/other.py:1: other\n")
+    elif case == "duplicate_skip":
+        extra = "SKIPPED [1] tests/test_hostops_ef02_attempt_reconcile_readonly.py:97: " + _MT01_NATIVE_SKIP + "\n"
+        stdout = _mt01_win_stdout(additional_skips=extra)
+    elif case == "fake_console":
+        stdout = _mt01_win_stdout(reason="NATIVE_SYMLINK_CREATION_UNPROVEN: WinError 5")
+    elif case == "different_message":
+        junit = _mt01_win_junit(message="NATIVE_SYMLINK_CREATION_UNPROVEN: [WinError 1314]")
+    elif case == "different_case":
+        junit = _mt01_win_junit(name="test_other")
+    elif case == "different_class":
+        junit = _mt01_win_junit(classname="tests.unrelated.Fake")
+    elif case == "wrong_skip_type":
+        junit = _mt01_win_junit(skip_type="other")
+    elif case == "bad_xml":
+        junit = b"<testsuites><testsuite"
+    elif case == "missing_xml":
+        junit = None
+    elif case == "doctype_xml":
+        junit = b"<!DOCTYPE malicious>" + junit
+    elif case == "two_suites":
+        junit = junit.replace(b"</testsuite></testsuites>",
+            b"</testsuite><testsuite tests='0'/></testsuites>")
+    elif case == "xml_failure":
+        junit = _mt01_win_junit(failures=1)
+    elif case == "xml_error":
+        junit = _mt01_win_junit(errors=1)
+    elif case == "xml_extra_skip":
+        junit = _mt01_win_junit(skipped=2)
+    elif case == "xml_wrong_test_count":
+        junit = _mt01_win_junit(tests=7)
+    elif case == "workers_11":
+        stdout = _mt01_win_stdout(workers=11)
+    elif case == "workers_missing":
+        stdout = _mt01_win_stdout().replace(b"MT01_XDIST_WORKERS_COLLECTED=12\n", b"")
+    result = verification._strip_verified_symlink_skip(stdout, stderr, code, junit)
+    # For worker-count mismatch the narrow skip is independently proven,
+    # but the separate xdist controller gate MUST still reject a candidate.
+    if case.startswith("workers_") or case == "stderr_permission":
+        assert (b"WinError" not in result) == case.startswith("workers_") or result == stdout
+    else:
+        assert result == stdout, case
+
+
+@pytest.mark.parametrize("case", ["stderr_winerror", "extra_winerror",
+                                  "workers_11", "nonzero", "missing_xml"])
+def test_mt01_winerror_1314_integrated_negative_gate(mapped, monkeypatch, case):
+    stdout, stderr, code, junit = _mt01_win_stdout(), "", 0, _mt01_win_junit()
+    if case == "stderr_winerror":
+        stderr = "OSError: WinError 5"
+    elif case == "extra_winerror":
+        stdout = _mt01_win_stdout(extra="Traceback: WinError 5\n")
+    elif case == "workers_11":
+        stdout = _mt01_win_stdout(workers=11)
+    elif case == "nonzero":
+        code = 1
+    elif case == "missing_xml":
+        junit = None
+    def run(argv, *, repo, timeout, save_junit):
+        if junit is not None:
+            save_junit(junit)
+        return subprocess.CompletedProcess(argv, code, stdout.decode(), stderr)
+    monkeypatch.setattr(verification, "run_pytest", run)
+    argv = ["python", "-m", "pytest", "tests/test_a.py", "-q", "-n", "12"]
+    result, selected, prior = _execute(
+        mapped, registered_only=True,
+        fallback_argv=[*FULL, "-n", "12"],
+        registered_profiles={"project-tests": [*FULL, "-n", "12"], "component-a": argv})
+    assert result.returncode != 0
+    assert not prior
+    assert selected["groups"][0]["result"] == "UNPROVEN"
+    assert not (mapped.evidence / "round-0/mt01.0.evidence.json").exists()
