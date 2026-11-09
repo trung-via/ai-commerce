@@ -1823,3 +1823,23 @@ def test_v22_normal_real_main_manifests_resolve_production_owner_closure(changed
         else:
             assert binding["registered_profile"] == f'mt01-{entry["group"]}-tests'
             assert profiles[binding["registered_profile"]] == binding["argv"]
+
+def test_710_g3_baseline_oracle_has_exact_no_model_workflow_control():
+    # Independent trusted baseline must not inherit arbitrary new controls.
+    import importlib.util
+    import sys
+    path = Path(__file__).resolve().parents[1] / ".github/scripts/mt01_v21_oracle.py"
+    spec = importlib.util.spec_from_file_location("mt01_g3_trusted_control_oracle", path)
+    oracle = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = oracle
+    try:
+        spec.loader.exec_module(oracle)
+        exact = ".github/workflows/ef02-antigravity-headless-preflight.yml"
+        assert oracle.CONTROL_TESTS[exact] == {
+            "tests/test_ef02.py", "tests/test_ef02_scope_main_integration.py",
+            "tests/test_mt01_v21.py"}
+        assert ".github/workflows/ef02-headless-unsafe.yml" not in oracle.CONTROL_TESTS
+    finally:
+        sys.modules.pop(spec.name, None)
+
+

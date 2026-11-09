@@ -109,6 +109,11 @@ REVIEWED_CONTROL_TESTS = {
     ".github/workflows/hostops-v2.yml": (
         "tests/test_hostops_v2.py", "tests/test_hostops_ef02_202_recovery.py",
         "tests/test_mt01_v21.py"),
+    # #710 G3 no-model static probe: exactly this trusted workflow in main,
+    # with reviewed Python consumers. All unlisted controls continue HOLD.
+    ".github/workflows/ef02-antigravity-headless-preflight.yml": (
+        "tests/test_ef02.py", "tests/test_ef02_scope_main_integration.py",
+        "tests/test_mt01_v21.py"),
     ".github/workflows/ef02-batch.yml": (
         "tests/test_ef02.py", "tests/test_minimum_test.py"),
     ".github/workflows/ef02-tests.yml": (
