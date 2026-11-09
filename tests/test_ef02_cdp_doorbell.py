@@ -846,6 +846,64 @@ def test_observer_native_attestation_fails_closed():
         obs.search_and_reprove(EMISSION_A, nonce="f" * 32)
 
 
+def test_observer_typed_search_domain_witness_incomplete_fails_closed():
+    from ai_commerce.remote.trusted_origin import CompleteSearchDomainWitness
+
+    class IncompleteSearchWitness:
+        def is_search_scope_complete(self, *, origin, observed_urls, nonce):
+            return False  # Closed or unloaded chats in account were not searched
+
+    page = FakeObserverPage(URL, markers=[(OBSERVER_MARKER, "turn-1")])
+    obs = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page), enrolled_origin=ORIGIN_A,
+        scope_witness=IncompleteSearchWitness()
+    )
+    obs.capture_origin(request_id="req-1", binding=BIND)
+    with pytest.raises(OriginError, match="SEARCH_COVERAGE_UNPROVEN"):
+        obs.search_and_reprove(EMISSION_A, nonce="w" * 32)
+
+
+def test_observer_native_evidence_consumer_with_g3_status_only_fails_closed():
+    from ai_commerce.remote.trusted_origin import (
+        NativeOriginEvidence, VerifiedNativeOriginEvidenceConsumer,
+    )
+
+    consumer = VerifiedNativeOriginEvidenceConsumer(expected_source_sha="a" * 64)
+    # Evidence has valid G3 OS identity, but no complete search domain witness
+    evidence = NativeOriginEvidence(
+        source_sha="a" * 64,
+        route_id=BIND.route_id,
+        generation=BIND.generation,
+        nonce="test-nonce" + "0" * 22,
+        service_sid="S-1-5-80-1234567890",
+        client_sid="S-1-5-21-123-456-789-1001",
+        session_id=1,
+        logon_id="0000000000012345",
+        desktop=r"WinSta0\Default",
+        cdp_endpoint="http://127.0.0.1:9444",
+        profile_id="testProfileId",
+        account_id="testAccountId",
+        issued_ms=1000000,
+        expires_ms=1060000,
+        search_witness=None,
+    )
+    eval_res = consumer.evaluate_evidence(
+        evidence,
+        expected_route_id=BIND.route_id,
+        expected_generation=BIND.generation,
+        expected_nonce="test-nonce" + "0" * 22,
+        now_ms=1001000,
+    )
+    assert eval_res.status == "HOLD"
+    assert eval_res.code == "SEARCH_COVERAGE_UNPROVEN"
+    assert eval_res.live_authority is False
+    assert eval_res.partial_status is not None
+    assert eval_res.partial_status["os_identity"] == "VERIFIED_LIVE_UNLOCKED_OWNER"
+    assert "CHATGPT_ACCOUNT_SESSION_AUTHORITY" in eval_res.missing_owners
+    assert "COMPLETE_SEARCH_DOMAIN_WITNESS" in eval_res.missing_owners
+    assert consumer.is_complete_origin_attested() is False
+
+
 def test_observer_strict_no_side_effects():
     page = FakeObserverPage(URL, markers=[(OBSERVER_MARKER, "turn-1")])
     obs = LocalChromeObserverAdapter(

@@ -424,3 +424,72 @@ def test_all_g3_modules_import_without_native_or_storage_effect(monkeypatch):
         loaded = importlib.util.module_from_spec(spec)
         monkeypatch.setitem(sys.modules, name, loaded)
         spec.loader.exec_module(loaded)
+
+
+def test_hostops_status_preflight_specification_sanitized_and_differentiates():
+    default_report = host.assess_hostops_status_preflight()
+    assert default_report.service_installed == "SERVICE_NOT_INSTALLED"
+    assert default_report.signer_enrolled == "SIGNER_NOT_ENROLLED"
+    assert default_report.desktop_observer_enrolled == "DESKTOP_OBSERVER_NOT_ENROLLED"
+    assert default_report.loopback_9444_ownership == "LOOPBACK_9444_UNVERIFIED"
+    assert default_report.chatgpt_account_session == "ACCOUNT_UNPROVEN"
+    assert default_report.route_generation == "ROUTE_GENERATION_UNVERIFIED"
+    assert default_report.complete_search_scope == "SEARCH_COVERAGE_UNPROVEN"
+    assert default_report.overall_disposition == "OWNER_ESCALATION"
+    assert "CHATGPT_ACCOUNT_SESSION_AUTHORITY" in default_report.missing_owners
+    assert "COMPLETE_SEARCH_DOMAIN_WITNESS" in default_report.missing_owners
+
+    # Sanitized dict contains ONLY fixed status strings, no paths, URLs, PIDs, or secrets
+    data = default_report.to_sanitized_dict()
+    assert data["schema_version"] == "HostOpsStatusPreflight.v1"
+    assert set(data.keys()) == {
+        "schema_version", "service_installed", "signer_enrolled",
+        "desktop_observer_enrolled", "loopback_9444_ownership",
+        "chatgpt_account_session", "route_generation", "complete_search_scope",
+        "overall_disposition", "missing_owners", "required_human_grants",
+    }
+    for key, val in data.items():
+        if isinstance(val, str):
+            assert not any(p in val for p in ("\\", "/", ":", "@", "C:", "http"))
+
+    # Test differentiation across facets
+    stopped_report = host.assess_hostops_status_preflight(service_state="STOPPED")
+    assert stopped_report.service_installed == "SERVICE_STOPPED"
+
+    conflict_report = host.assess_hostops_status_preflight(cdp_port_owner="CONFLICT")
+    assert conflict_report.loopback_9444_ownership == "LOOPBACK_9444_CONFLICT"
+
+    stale_report = host.assess_hostops_status_preflight(route_generation_state="STALE")
+    assert stale_report.route_generation == "ROUTE_GENERATION_STALE"
+
+    partial_g3_report = host.assess_hostops_status_preflight(
+        service_state="INSTALLED", signer_state="ENROLLED", desktop_state="ENROLLED"
+    )
+    assert partial_g3_report.service_installed == "SERVICE_INSTALLED"
+    assert partial_g3_report.signer_enrolled == "SIGNER_ENROLLED"
+    assert partial_g3_report.desktop_observer_enrolled == "DESKTOP_OBSERVER_ENROLLED"
+    # Even with G3 OS facets verified, chat account and search coverage remain unproven -> OWNER_ESCALATION
+    assert partial_g3_report.overall_disposition == "OWNER_ESCALATION"
+    assert "CHATGPT_ACCOUNT_SESSION_AUTHORITY" in partial_g3_report.missing_owners
+    assert "COMPLETE_SEARCH_DOMAIN_WITNESS" in partial_g3_report.missing_owners
+
+
+def test_g3_status_retains_partial_os_evidence_without_enabling_origin_attestation(g3):
+    challenge = g3.host.begin(123)
+    raw_status = g3.status(challenge)
+    body = ob.verify_status(raw_status, expected=challenge, anchor=g3.broker.f.anchor, now=T)
+    assert body["state"] == "LIVE_UNLOCKED_OWNER"
+    assert body["logon_id"] == challenge.logon_id
+
+    partial = host.G3PartialStatusEvidence(
+        challenge_nonce=challenge.nonce,
+        logon_id=challenge.logon_id,
+        session_id=challenge.client.session_id,
+    )
+    assert partial.os_identity == "LIVE_UNLOCKED_OWNER"
+    assert partial.complete_search_proven is False
+    assert partial.origin_attested is False
+    assert partial.disposition == "OWNER_ESCALATION"
+    assert "CHATGPT_ACCOUNT_SESSION_AUTHORITY" in partial.missing_owners
+    assert "COMPLETE_SEARCH_DOMAIN_WITNESS" in partial.missing_owners
+
