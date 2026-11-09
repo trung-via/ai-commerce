@@ -2,11 +2,21 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
+import hashlib
+from types import SimpleNamespace
 
 import pytest
 
-from ai_commerce.remote.cdp_doorbell import LocalChromeDoorbellAdapter
+from ai_commerce.remote.cdp_doorbell import (
+    LocalChromeDoorbellAdapter, LocalChromeObserverAdapter, LocalChromeBrowserObserver,
+    _OBSERVER_CHECK, _SEARCH_MARKER,
+)
 from ai_commerce.remote.conversation_binding import ResolvedBinding
+from ai_commerce.remote.trusted_origin import (
+    OriginError, PrivateOriginSnapshot, RendezvousEmission,
+    RendezvousHit, RendezvousObservation,
+)
 
 URL = "https://chatgpt.com/c/00000000-0000-0000-0000-000000000001"
 OTHER = "https://chatgpt.com/c/00000000-0000-0000-0000-000000000002"
@@ -575,3 +585,453 @@ def test_wake_preload_failure_never_stages_or_sends():
     assert result.error_code == "PRELOAD_CDP_UNAVAILABLE"
     assert result.delivery_status == "UNSUPPORTED"
     assert inv.calls == []
+
+
+OBSERVER_MARKER = "wh03." + "1" * 64
+OBSERVER_DIGEST = hashlib.sha256(OBSERVER_MARKER.encode("ascii")).hexdigest()
+ORIGIN_A = PrivateOriginSnapshot(
+    route_id="route-A", generation=1, chat_url=URL,
+    cdp_endpoint="http://127.0.0.1:9444",
+    profile_id="profile-A", account_id="account-A",
+    session_id="session-A", login_id="login-A",
+)
+EMISSION_A = RendezvousEmission(
+    request_id="req-1",
+    marker=OBSERVER_MARKER,
+    marker_digest=OBSERVER_DIGEST,
+    origin=ORIGIN_A,
+)
+
+
+class FakeObserverPage:
+    def __init__(self, url=URL, *, gate="READY", markers=None, fail_step=None,
+                 profile_id="profile-A", account_id="account-A"):
+        self.url = url
+        self.gate = gate
+        self.markers = list(markers or [])  # list of (marker, message_id)
+        self.fail_step = fail_step
+        self.profile_id = profile_id
+        self.account_id = account_id
+        self.mutations = []
+        self.untrusted_marker_copies = 0
+
+    def set_default_timeout(self, n):
+        assert n == 3000
+
+    def goto(self, *args, **kwargs):
+        self.mutations.append("goto")
+        raise AssertionError("mutation forbidden: goto called on observer page")
+
+    def click(self, *args, **kwargs):
+        self.mutations.append("click")
+        raise AssertionError("mutation forbidden: click called on observer page")
+
+    def fill(self, *args, **kwargs):
+        self.mutations.append("fill")
+        raise AssertionError("mutation forbidden: fill called on observer page")
+
+    def type(self, *args, **kwargs):
+        self.mutations.append("type")
+        raise AssertionError("mutation forbidden: type called on observer page")
+
+    def evaluate(self, script, args):
+        if self.fail_step == "disconnect":
+            raise OSError("synthetic CDP disconnect")
+        if self.fail_step == "timeout":
+            raise TimeoutError("synthetic page timeout")
+        if "_SEARCH_MARKER" in script or "document.querySelectorAll('*')" in script or "marker" in script:
+            marker = args["marker"]
+            matches = [{"message_id": mid} for m, mid in self.markers if m == marker]
+            untrusted = getattr(self, "untrusted_marker_copies", 0)
+            total = len(matches) + untrusted
+            ambiguous = total > 1
+            return {"matches": matches, "total": total, "ambiguous": ambiguous}
+        if "location.href.replace" in script:
+            if self.fail_step == "inspect_fail":
+                return "SURFACE_UNPROVEN"
+            if self.profile_id is None:
+                return "PROFILE_UNPROVEN"
+            if args.get("profile_id") and self.profile_id != args["profile_id"]:
+                return "PROFILE_MISMATCH"
+            if self.account_id is None:
+                return "ACCOUNT_UNPROVEN"
+            if args.get("account_id") and self.account_id != args["account_id"]:
+                return "ACCOUNT_MISMATCH"
+            return self.gate
+        raise AssertionError("unexpected script evaluated on observer page")
+
+
+class FakeObserverInventory:
+    def __init__(self, *pages, contexts=None):
+        self._pages = list(pages)
+        self._contexts = contexts
+        self.calls = []
+
+    @contextmanager
+    def pages(self, endpoint):
+        self.calls.append(endpoint)
+        yield self._pages
+
+    @contextmanager
+    def contexts(self, endpoint):
+        self.calls.append(endpoint)
+        if self._contexts is not None:
+            yield self._contexts
+        else:
+            yield [SimpleNamespace(pages=self._pages)]
+
+
+def test_observer_positive_unique_marker_and_reprove():
+    page = FakeObserverPage(URL, markers=[(OBSERVER_MARKER, "turn-1")])
+    obs = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    snapshot = obs.capture_origin(request_id="req-1", binding=BIND)
+    assert snapshot == ORIGIN_A
+
+    observation = obs.search_and_reprove(EMISSION_A, nonce="n" * 32)
+    assert observation.request_id == "req-1"
+    assert observation.marker_digest == OBSERVER_DIGEST
+    assert observation.nonce == "n" * 32
+    assert len(observation.hits) == 1
+    assert observation.hits[0].marker == OBSERVER_MARKER
+    assert observation.hits[0].origin == ORIGIN_A
+    assert observation.hits[0].message_id == "turn-1"
+    assert observation.opened_origin == ORIGIN_A
+
+
+def test_observer_closed_chat_unproven_coverage():
+    page = FakeObserverPage(URL, markers=[(OBSERVER_MARKER, "turn-1")])
+    # Enrolled domain has 2 chats, but only 1 is open in browser (closed Chat B)
+    obs = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page), enrolled_origin=ORIGIN_A, enrolled_chats=(URL, OTHER)
+    )
+    obs.capture_origin(request_id="req-1", binding=BIND)
+    with pytest.raises(OriginError, match="SEARCH_COVERAGE_UNPROVEN"):
+        obs.search_and_reprove(EMISSION_A, nonce="n" * 32)
+
+
+def test_observer_partial_search_domain_unproven():
+    page = FakeObserverPage(URL, markers=[(OBSERVER_MARKER, "turn-1")])
+    scope_witness = lambda urls, orig: len(urls) >= 2 and OTHER in urls
+    obs = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page), enrolled_origin=ORIGIN_A, scope_witness=scope_witness
+    )
+    obs.capture_origin(request_id="req-1", binding=BIND)
+    with pytest.raises(OriginError, match="SEARCH_COVERAGE_UNPROVEN"):
+        obs.search_and_reprove(EMISSION_A, nonce="n" * 32)
+
+
+def test_observer_missing_profile_account_attributes_fails_closed():
+    page_no_prof = FakeObserverPage(URL, profile_id=None)
+    obs1 = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page_no_prof), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    with pytest.raises(OriginError, match="PROFILE_UNPROVEN"):
+        obs1.capture_origin(request_id="req-1", binding=BIND)
+
+    page_no_acc = FakeObserverPage(URL, account_id=None)
+    obs2 = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page_no_acc), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    with pytest.raises(OriginError, match="ACCOUNT_UNPROVEN"):
+        obs2.capture_origin(request_id="req-1", binding=BIND)
+
+
+def test_observer_tampered_identity_fails_closed():
+    page_tampered = FakeObserverPage(URL, profile_id="tampered-profile")
+    obs_t = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page_tampered), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    with pytest.raises(OriginError, match="PROFILE_MISMATCH"):
+        obs_t.capture_origin(request_id="req-1", binding=BIND)
+
+    obs_self = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page_tampered), profile_id="profile-A"
+    )
+    with pytest.raises(OriginError, match="UNVERIFIED_ORIGIN"):
+        obs_self.capture_origin(request_id="req-1", binding=BIND)
+
+
+def test_observer_stale_generation_and_wrong_route():
+    page = FakeObserverPage(URL)
+    obs = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    stale_bind = replace(BIND, generation=2)
+    with pytest.raises(OriginError, match="RENDEZVOUS_ORIGIN_INVALID"):
+        obs.capture_origin(request_id="req-1", binding=stale_bind)
+
+    wrong_route = replace(BIND, route_id="other-route")
+    with pytest.raises(OriginError, match="RENDEZVOUS_ORIGIN_INVALID"):
+        obs.capture_origin(request_id="req-1", binding=wrong_route)
+
+
+def test_observer_prior_capture_binding_required():
+    page = FakeObserverPage(URL, markers=[(OBSERVER_MARKER, "turn-1")])
+    obs = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    # Search without prior capture_origin for request_id
+    with pytest.raises(OriginError, match="RENDEZVOUS_ORIGIN_MISMATCH"):
+        obs.search_and_reprove(EMISSION_A, nonce="n" * 32)
+
+
+def test_observer_nonce_replay_fails_closed():
+    page = FakeObserverPage(URL, markers=[(OBSERVER_MARKER, "turn-1")])
+    obs = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    obs.capture_origin(request_id="req-1", binding=BIND)
+    obs.search_and_reprove(EMISSION_A, nonce="a" * 32)
+    with pytest.raises(OriginError, match="RENDEZVOUS_REPLAY"):
+        obs.search_and_reprove(EMISSION_A, nonce="a" * 32)
+
+
+def test_observer_disconnect_and_timeout_failures():
+    page_disc = FakeObserverPage(URL, fail_step="disconnect")
+    obs1 = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page_disc), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    with pytest.raises(OriginError, match="SEARCH_COVERAGE_UNPROVEN"):
+        obs1.capture_origin(request_id="req-1", binding=BIND)
+
+    page_timeout = FakeObserverPage(URL, markers=[(OBSERVER_MARKER, "turn-1")])
+    obs2 = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page_timeout), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    obs2.capture_origin(request_id="req-1", binding=BIND)
+    page_timeout.fail_step = "timeout"
+    with pytest.raises(OriginError, match="SEARCH_COVERAGE_UNPROVEN"):
+        obs2.search_and_reprove(EMISSION_A, nonce="b" * 32)
+
+
+def test_observer_zero_hits_and_two_user_hits():
+    page_0 = FakeObserverPage(URL, markers=[])
+    obs_0 = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page_0), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    obs_0.capture_origin(request_id="req-1", binding=BIND)
+    obs_res0 = obs_0.search_and_reprove(EMISSION_A, nonce="c" * 32)
+    assert len(obs_res0.hits) == 0
+
+    page_2 = FakeObserverPage(URL, markers=[(OBSERVER_MARKER, "turn-1"), (OBSERVER_MARKER, "turn-2")])
+    obs_2 = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page_2), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    obs_2.capture_origin(request_id="req-1", binding=BIND)
+    with pytest.raises(OriginError, match="RENDEZVOUS_SEARCH_NOT_UNIQUE"):
+        obs_2.search_and_reprove(EMISSION_A, nonce="d" * 32)
+
+
+def test_observer_duplicate_untrusted_marker_copies_fail_closed():
+    page_untrusted = FakeObserverPage(URL, markers=[(OBSERVER_MARKER, "turn-1")])
+    page_untrusted.untrusted_marker_copies = 1
+    obs = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page_untrusted), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    obs.capture_origin(request_id="req-1", binding=BIND)
+    with pytest.raises(OriginError, match="RENDEZVOUS_SEARCH_NOT_UNIQUE"):
+        obs.search_and_reprove(EMISSION_A, nonce="e" * 32)
+
+
+def test_observer_native_attestation_fails_closed():
+    page = FakeObserverPage(URL, markers=[(OBSERVER_MARKER, "turn-1")])
+    obs = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,),
+        native_authority=True
+    )
+    obs.capture_origin(request_id="req-1", binding=BIND)
+    with pytest.raises(OriginError, match="SEARCH_COVERAGE_UNPROVEN"):
+        obs.search_and_reprove(EMISSION_A, nonce="f" * 32)
+
+
+def test_observer_strict_no_side_effects():
+    page = FakeObserverPage(URL, markers=[(OBSERVER_MARKER, "turn-1")])
+    obs = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    obs.capture_origin(request_id="req-1", binding=BIND)
+    obs.search_and_reprove(EMISSION_A, nonce="side-effect-free" + "0" * 16)
+    assert page.mutations == []
+
+
+def test_observer_privacy_and_redaction():
+    obs = LocalChromeObserverAdapter(enrolled_origin=ORIGIN_A)
+    assert repr(obs) == "LocalChromeObserverAdapter(<private>)"
+
+
+def test_observer_search_marker_dom_semantics_in_node():
+    import json
+    import shutil
+    import subprocess
+    import sys
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js not installed")
+
+    program = r"""
+const fs = require('node:fs');
+const obj = JSON.parse(fs.readFileSync(0, 'utf8'));
+const marker = obj.marker;
+const search = eval(obj.code);
+
+const element = (tag, attrs={}, text='', parent=null) => {
+  const el = {
+    nodeType: 1, tagName: tag,
+    attrs: { ...attrs },
+    getAttribute: k => el.attrs[k] ?? null,
+    hasAttribute: k => k in el.attrs,
+    setAttribute: (k, v) => { throw Error('Mutation forbidden: setAttribute'); },
+    removeAttribute: (k) => { throw Error('Mutation forbidden: removeAttribute'); },
+    parent,
+    closest: function(sel) {
+      const selectors = sel.split(',').map(s => s.trim());
+      for (const s of selectors) {
+        if (s.startsWith('[') && s.endsWith(']')) {
+          const inner = s.slice(1, -1);
+          if (inner.includes('=')) {
+            const [k, val] = inner.split('=');
+            const cleanVal = val.replace(/[\"']/g, '');
+            if (this.getAttribute(k) === cleanVal) return this;
+          } else {
+            if (this.hasAttribute(inner)) return this;
+          }
+        } else if (this.tagName.toLowerCase() === s.toLowerCase()) {
+          return this;
+        }
+      }
+      return this.parent ? this.parent.closest(sel) : null;
+    },
+    textContent: text,
+    children: [],
+    childNodes: [],
+    getClientRects: () => [1]
+  };
+  return el;
+};
+
+const freezeTree = (el) => {
+  Object.freeze(el.attrs);
+  Object.freeze(el.children);
+  Object.freeze(el.childNodes);
+  Object.freeze(el);
+  return el;
+};
+
+globalThis.getComputedStyle = () => ({ visibility: 'visible', display: 'block' });
+
+// 1. Positive: exact match in user message container with data-message-id
+const userMsg = element('DIV', { 'data-message-author-role': 'user', 'data-message-id': 'turn-1' }, marker);
+const p = element('P', {}, marker, userMsg);
+userMsg.children = [p];
+userMsg.childNodes = [p];
+freezeTree(userMsg);
+freezeTree(p);
+globalThis.document = { querySelectorAll: () => [userMsg, p] };
+let res = search({ marker });
+if (res.matches.length !== 1 || res.matches[0].message_id !== 'turn-1' || res.total !== 1 || res.ambiguous !== false) process.exit(1);
+
+// 1b. Positive: exact match in user message container with data-turn-id
+const userMsgTurn = element('DIV', { 'data-message-author-role': 'user', 'data-turn-id': 'turn-2' }, marker);
+const pTurn = element('P', {}, marker, userMsgTurn);
+userMsgTurn.children = [pTurn];
+userMsgTurn.childNodes = [pTurn];
+freezeTree(userMsgTurn);
+freezeTree(pTurn);
+globalThis.document = { querySelectorAll: () => [userMsgTurn, pTurn] };
+res = search({ marker });
+if (res.matches.length !== 1 || res.matches[0].message_id !== 'turn-2' || res.total !== 1 || res.ambiguous !== false) process.exit(2);
+
+// 2. Substring match rejected
+const subMsg = element('DIV', { 'data-message-author-role': 'user', 'data-message-id': 'turn-1' }, 'prefix ' + marker + ' suffix');
+freezeTree(subMsg);
+document.querySelectorAll = () => [subMsg];
+res = search({ marker });
+if (res.matches.length !== 0 || res.total !== 0) process.exit(3);
+
+// 3. Assistant message rejected
+const asstMsg = element('DIV', { 'data-message-author-role': 'assistant', 'data-message-id': 'turn-1' }, marker);
+const asstP = element('P', {}, marker, asstMsg);
+asstMsg.children = [asstP];
+asstMsg.childNodes = [asstP];
+freezeTree(asstMsg);
+freezeTree(asstP);
+document.querySelectorAll = () => [asstMsg, asstP];
+res = search({ marker });
+if (res.matches.length !== 0 || res.total !== 1) process.exit(4);
+
+// 4. Draft / Editor rejected
+const form = element('FORM', {}, marker);
+const editor = element('DIV', { 'contenteditable': 'true' }, marker, form);
+form.children = [editor];
+form.childNodes = [editor];
+freezeTree(form);
+freezeTree(editor);
+document.querySelectorAll = () => [form, editor];
+res = search({ marker });
+if (res.matches.length !== 0 || res.total !== 1) process.exit(5);
+
+// 5. Non-user widget (button / toolbar / nav) rejected
+const btn = element('BUTTON', {}, marker);
+freezeTree(btn);
+document.querySelectorAll = () => [btn];
+res = search({ marker });
+if (res.matches.length !== 0 || res.total !== 1) process.exit(6);
+
+const nav = element('NAV', {}, marker);
+freezeTree(nav);
+document.querySelectorAll = () => [nav];
+res = search({ marker });
+if (res.matches.length !== 0 || res.total !== 1) process.exit(7);
+
+// 6. Missing message author rejected
+const divNoAuthor = element('DIV', { 'data-message-id': 'turn-1' }, marker);
+freezeTree(divNoAuthor);
+document.querySelectorAll = () => [divNoAuthor];
+res = search({ marker });
+if (res.matches.length !== 0 || res.total !== 1) process.exit(8);
+
+// 7. Generic HTML id without data-message-id / data-turn-id rejected
+const genericIdMsg = element('DIV', { 'data-message-author-role': 'user', 'id': 'generic-turn-id' }, marker);
+freezeTree(genericIdMsg);
+document.querySelectorAll = () => [genericIdMsg];
+res = search({ marker });
+if (res.matches.length !== 0 || res.total !== 1) process.exit(9);
+
+// 8. Hidden element rejected
+const hidden = element('DIV', { 'data-message-author-role': 'user', 'data-message-id': 'turn-1' }, marker);
+freezeTree(hidden);
+globalThis.getComputedStyle = () => ({ visibility: 'hidden' });
+document.querySelectorAll = () => [hidden];
+res = search({ marker });
+if (res.matches.length !== 0 || res.total !== 0) process.exit(10);
+globalThis.getComputedStyle = () => ({ visibility: 'visible', display: 'block' });
+
+// 9. Duplicate marker: two true user messages
+const u1 = element('DIV', { 'data-message-author-role': 'user', 'data-message-id': 'turn-1' }, marker);
+const u2 = element('DIV', { 'data-message-author-role': 'user', 'data-message-id': 'turn-2' }, marker);
+freezeTree(u1);
+freezeTree(u2);
+document.querySelectorAll = () => [u1, u2];
+res = search({ marker });
+if (res.matches.length !== 2 || res.total !== 2 || res.ambiguous !== true) process.exit(11);
+
+// 10. Non-user copy / duplicate marker: one user message + one copy in assistant
+// Must count copied marker as ambiguity without fabricating fake message IDs
+const uA = element('DIV', { 'data-message-author-role': 'user', 'data-message-id': 'turn-1' }, marker);
+const ast = element('DIV', { 'data-message-author-role': 'assistant', 'data-message-id': 'turn-asst' }, marker);
+freezeTree(uA);
+freezeTree(ast);
+document.querySelectorAll = () => [uA, ast];
+res = search({ marker });
+if (res.total !== 2 || res.ambiguous !== true || res.matches.length !== 1 || res.matches[0].message_id !== 'turn-1') process.exit(12);
+"""
+    result = subprocess.run(
+        [node, "-e", program],
+        input=json.dumps({"code": _SEARCH_MARKER, "marker": OBSERVER_MARKER}),
+        text=True, capture_output=True, timeout=45 if sys.platform == "win32" else 12,
+    )
+    assert result.returncode == 0, f"Node DOM search failed (exit={result.returncode}); stderr={result.stderr}"
+

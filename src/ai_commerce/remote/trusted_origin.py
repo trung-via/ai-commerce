@@ -504,6 +504,8 @@ _RENDEZVOUS_CODES = frozenset({
     "RENDEZVOUS_EXPIRED", "RENDEZVOUS_ACK_UNKNOWN", "RENDEZVOUS_PRECOMMIT_UNKNOWN",
     "RENDEZVOUS_OBSERVATION_UNKNOWN", "RENDEZVOUS_OBSERVATION_INVALID",
     "RENDEZVOUS_SEARCH_NOT_UNIQUE", "RENDEZVOUS_ORIGIN_MISMATCH",
+    "SEARCH_COVERAGE_UNPROVEN", "PROFILE_UNPROVEN", "ACCOUNT_UNPROVEN",
+    "PROFILE_MISMATCH", "ACCOUNT_MISMATCH",
 })
 
 
@@ -668,6 +670,8 @@ class PrivateOriginRendezvous:
                 origin = self.observer.capture_origin(
                     request_id=request_id, binding=ResolvedBinding(route_id, generation,
                     route["chat_url"], route["cdp_endpoint"]))
+            except OriginError:
+                raise
             except Exception:
                 raise OriginError("RENDEZVOUS_ORIGIN_INVALID") from None
             if not self._matches_route(origin, route):
@@ -764,10 +768,24 @@ class PrivateOriginRendezvous:
                 return self._finish(transaction, data, record, RendezvousPhase.HOLD, str(exc))
             record["phase"] = RendezvousPhase.VERIFYING.value
             transaction.write(data)  # search itself also has a one-shot crash boundary
+            native = trust is RendezvousTrust.NATIVE
+            is_local_obs = (
+                getattr(self.observer, "is_local_chrome_observer", False) or
+                type(self.observer).__name__ in {
+                    "LocalChromeObserverAdapter", "LocalChromeBrowserObserver",
+                    "LocalChromePrivateObserver", "ChromeCdpObserverAdapter",
+                } or
+                (hasattr(self.observer, "enrolled_origin") and hasattr(self.observer, "inventory"))
+            )
+            if native and is_local_obs:
+                return self._finish(transaction, data, record, RendezvousPhase.HOLD,
+                                    "SEARCH_COVERAGE_UNPROVEN")
             emission = RendezvousEmission(request_id, record["marker"], record["digest"], origin)
             nonce = secrets.token_hex(32)
             try:
                 proof = self.observer.search_and_reprove(emission, nonce=nonce)
+            except OriginError as exc:
+                return self._finish(transaction, data, record, RendezvousPhase.HOLD, str(exc))
             except Exception:
                 return self._finish(transaction, data, record, RendezvousPhase.UNKNOWN,
                                     "RENDEZVOUS_OBSERVATION_UNKNOWN")
@@ -783,9 +801,21 @@ class PrivateOriginRendezvous:
                 code = str(exc)
             if code is not None:
                 return self._finish(transaction, data, record, RendezvousPhase.HOLD, code)
+            native = trust is RendezvousTrust.NATIVE
+            if native:
+                is_local_obs = (
+                    getattr(self.observer, "is_local_chrome_observer", False) or
+                    type(self.observer).__name__ in {
+                        "LocalChromeObserverAdapter", "LocalChromeBrowserObserver",
+                        "LocalChromePrivateObserver", "ChromeCdpObserverAdapter",
+                    } or
+                    (hasattr(self.observer, "enrolled_origin") and hasattr(self.observer, "inventory"))
+                )
+                if is_local_obs:
+                    return self._finish(transaction, data, record, RendezvousPhase.HOLD,
+                                        "SEARCH_COVERAGE_UNPROVEN")
             record["phase"] = RendezvousPhase.CONSUMED.value
             transaction.write(data)
-            native = trust is RendezvousTrust.NATIVE
             return RendezvousReceipt("ORIGIN_ATTESTED" if native else "SYNTHETIC_MATCH",
                                      "ORIGIN_ATTESTED" if native else "NO_LIVE_AUTHORITY", native)
 
