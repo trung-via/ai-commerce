@@ -227,6 +227,42 @@ def test_preexecutor_acceptance_rejects_malformed_or_foreign_ids_before_provider
             validate(batch([a]))
 
 
+
+def test_preexecutor_source_closure_adds_registered_downstream_recovery():
+    from ai_commerce.remote.validation import require_preexecutor_acceptance
+    a = action("a")
+    a["allowed_paths"] = ["tests/test_ef02.py", "tests/test_ef02_m0r_fault_injection.py"]
+    a["instruction"] = 'Fix only registered source.\nMT01_ACCEPTANCE_JSON:["EF02.action-and-fanin"]'
+    original = fingerprint(a)
+    planned = require_preexecutor_acceptance(a, source_closure=True)
+    assert set(("EF02.action-and-fanin", "EF02.recovery")) <= set(planned["ids"])
+    assert "EF02.recovery" in planned["owner_derived_ids"]
+    assert "tests/test_ef02_m0r_fault_injection.py" in planned["consumer_map"]["EF02.recovery"]["tests"]
+    assert fingerprint(a) == original  # issuer payload is never rewritten
+
+
+@pytest.mark.parametrize("path", [
+    "tests/test_ef02_m0r_fixture.py",
+    "src/ai_commerce/remote/unregistered_feature.py",
+])
+def test_preexecutor_source_closure_rejects_unmapped_before_provider(path):
+    from ai_commerce.remote.validation import require_preexecutor_acceptance
+    a = action("a")
+    a["allowed_paths"] = [path]
+    a["instruction"] = 'MT01_ACCEPTANCE_JSON:["EF02.recovery"]'
+    with pytest.raises(RemoteRequestError, match="INTAKE_SOURCE_OWNER_UNMAPPED"):
+        require_preexecutor_acceptance(a, source_closure=True)
+
+
+def test_preexecutor_source_closure_does_not_accept_unrelated_registered_ac():
+    from ai_commerce.remote.validation import require_preexecutor_acceptance
+    a = action("a")
+    a["allowed_paths"] = ["tests/test_ef02_m0r_fault_injection.py"]
+    a["instruction"] = 'MT01_ACCEPTANCE_JSON:["A12.product-evidence"]'
+    with pytest.raises(RemoteRequestError, match="INTAKE_AC_NOT_OWNING_ALLOWED_PATH"):
+        require_preexecutor_acceptance(a, source_closure=True)
+
+
 def test_direct_real_worker_ac_gate_precedes_workowner_operations(tmp_path, monkeypatch):
     from ai_commerce.remote import worker as remote_worker
     monkeypatch.setattr(remote_worker, "check_source", lambda *_a, **_kw: None)
