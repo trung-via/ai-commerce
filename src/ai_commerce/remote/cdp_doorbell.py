@@ -10,10 +10,11 @@ continues to return UNKNOWN and holds the event against blind replay.
 """
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import hashlib
 import os
 import re
+import time
 from contextlib import contextmanager
 from urllib.parse import urlsplit
 from typing import Callable, Protocol
@@ -501,6 +502,149 @@ def probe_wh03_test_registration_signal(*, endpoint: str = "http://127.0.0.1:944
             return "TEST_SIGNAL_SCOPE_UNPROVEN"
     except Exception:
         # Suppress Playwright exception text; private routes may appear in it.
+        return "CDP_READ_UNAVAILABLE"
+
+
+
+
+# Test-only WH03 precommit-aware reader. A validated *value object* is not
+# private issuance or native authority. Its owner must load an immutable,
+# one-use attempt from a separately enrolled private rendezvous store.
+# Never select an arbitrary marker from the DOM or a public GitHub Issue.
+@dataclass(frozen=True, repr=False)
+class WH03SignalCommitment:
+    request_id: str
+    marker_digest: str
+    chat_url: str
+    generation: int
+    issued_ms: int
+    expires_ms: int
+    consumed: bool = False
+
+
+_WH03_COMMITTED_SIGNAL_DOM = """
+async (args) => {
+  if (!args || typeof args.digest !== 'string' ||
+      !/^[0-9a-f]{64}$/.test(args.digest))
+    return 'TEST_COMMITMENT_INVALID';
+  if (!globalThis.crypto || !crypto.subtle ||
+      typeof TextEncoder !== 'function')
+    return 'TEST_SIGNAL_SCOPE_UNPROVEN';
+  const signal = /^WAKEHUB_TEST_REGISTER_V1:[0-9a-f]{64}$/;
+  const visible = el => {
+    if (!el || el.nodeType !== 1 || !el.getClientRects().length) return false;
+    const style = getComputedStyle(el);
+    return style && style.visibility === 'visible' && style.display !== 'none';
+  };
+  const nodes = [...document.querySelectorAll('*')];
+  if (nodes.length > 20000) return 'TEST_SIGNAL_SCOPE_UNPROVEN';
+  let occurrences = 0, userTurns = 0;
+  const visited = new Set();
+  for (const el of nodes) {
+    if (!visible(el)) continue;
+    const text = (el.textContent || '').trim();
+    if (!signal.test(text)) continue;
+    const children = [...(el.children || [])].filter(visible);
+    if (children.some(child => signal.test((child.textContent || '').trim())))
+      continue;
+    const bytes = new TextEncoder().encode(text);
+    const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
+      .map(x => x.toString(16).padStart(2,'0')).join('');
+    // Old registrations use different commitments. Ignore them; do NOT
+    // count an old marker as this attempt or let it block an eligible one.
+    if (digest !== args.digest) continue;
+    occurrences++;
+    if (el.closest('form,nav,header,button,textarea,input,[contenteditable="true"],[role="textbox"],[role="toolbar"],[role="navigation"]') ||
+        el.closest('[data-message-author-role="assistant"]')) continue;
+    const user = el.closest('[data-message-author-role="user"],[data-user-message-bubble]');
+    if (!visible(user)) continue;
+    const turn = user.closest('[data-message-id],[data-turn-id]') || user;
+    const id = turn.getAttribute('data-message-id') || turn.getAttribute('data-turn-id');
+    if (typeof id !== 'string' || !/^[0-9a-zA-Z._-]{1,64}$/.test(id))
+      continue;
+    if (!visited.has(turn)) { visited.add(turn); userTurns++; }
+  }
+  if (occurrences === 0) return 'TEST_SIGNAL_NOT_FOUND';
+  if (occurrences !== 1 || userTurns !== 1) return 'TEST_SIGNAL_AMBIGUOUS';
+  return 'TEST_SIGNAL_MATCH_UNATTESTED';
+}
+"""
+
+
+def _wh03_commitment_gate(value: WH03SignalCommitment | None) -> str:
+    if value is None:
+        return "TEST_COMMITMENT_REQUIRED"
+    if (type(value) is not WH03SignalCommitment or
+            type(value.request_id) is not str or
+            re.fullmatch(r"[a-z0-9][a-z0-9._-]{7,63}", value.request_id) is None or
+            type(value.marker_digest) is not str or
+            re.fullmatch(r"[0-9a-f]{64}", value.marker_digest) is None or
+            type(value.chat_url) is not str or
+            _CHAT.fullmatch(value.chat_url) is None or
+            type(value.generation) is not int or value.generation < 1 or
+            type(value.issued_ms) is not int or
+            type(value.expires_ms) is not int or
+            not (1 <= value.expires_ms - value.issued_ms <= 300000) or
+            type(value.consumed) is not bool):
+        return "TEST_COMMITMENT_INVALID"
+    if value.consumed:
+        return "TEST_COMMITMENT_REPLAY"
+    now_ms = time.time_ns() // 1_000_000
+    if now_ms < value.issued_ms:
+        return "TEST_COMMITMENT_NOT_ACTIVE"
+    if now_ms >= value.expires_ms:
+        return "TEST_COMMITMENT_EXPIRED"
+    return "READY"
+
+
+def probe_wh03_committed_registration_signal(
+    *, commitment: WH03SignalCommitment | None = None,
+    endpoint: str = "http://127.0.0.1:9444", inventory=None
+) -> str:
+    """Observe only the current precommitted attempt and exact local Chat A.
+
+    Caller-provided commitments do not prove issuer, account, full search
+    domain, fresh user consent, private custody or a registered origin.
+    This read never sends, enrolls, or exports marker/chat/session data.
+    The fixed GitHub operator must HOLD until an authenticated private owner
+    supplies and consumes an independently issued, one-shot commitment.
+    """
+    gate = _wh03_commitment_gate(commitment)
+    if gate != "READY":
+        return gate
+    if not _is_windows() or type(endpoint) is not str or endpoint != "http://127.0.0.1:9444":
+        return "NATIVE_DESKTOP_UNPROVEN"
+    source = inventory if inventory is not None else _PlaywrightInventory()
+    if not callable(getattr(source, "contexts", None)):
+        return "CONTEXT_UNPROVEN"
+    try:
+        with source.contexts(endpoint) as contexts:
+            if len(contexts) != 1:
+                return "CONTEXT_UNPROVEN"
+            pages = list(contexts[0].pages)
+            if len(pages) > 32:
+                return "CONTEXT_UNPROVEN"
+            candidates = [p for p in pages
+                          if type(getattr(p, "url", None)) is str
+                          and _CHAT.fullmatch(p.url.rstrip("/")) is not None]
+            if len(candidates) != 1:
+                return ("MULTIPLE_CHAT_CANDIDATES" if candidates
+                        else "CHAT_A_CANDIDATE_NOT_FOUND")
+            page = candidates[0]
+            if page.url.rstrip("/") != commitment.chat_url:
+                return "TEST_CHAT_ROUTE_MISMATCH"
+            guard = page.evaluate(_CHAT_A_READ_ONLY_SURFACE)
+            if guard != "CANDIDATE_READY":
+                return "DRAFT_PRESENT" if guard == "DRAFT_PRESENT" else "SURFACE_UNPROVEN"
+            observed = page.evaluate(
+                _WH03_COMMITTED_SIGNAL_DOM, {"digest": commitment.marker_digest})
+            if observed in ("TEST_SIGNAL_NOT_FOUND", "TEST_SIGNAL_AMBIGUOUS",
+                            "TEST_SIGNAL_SCOPE_UNPROVEN",
+                            "TEST_SIGNAL_MATCH_UNATTESTED"):
+                return observed
+            return "TEST_SIGNAL_SCOPE_UNPROVEN"
+    except Exception:
+        # Browser exception messages might include private paths/chat URLs.
         return "CDP_READ_UNAVAILABLE"
 
 
