@@ -45,8 +45,8 @@ def test_authentic_native_b3_next_brief_pending_source_and_uncertainty_no_writes
     assert proposal["adoption"] == "PENDING"
     assert proposal["next_brief"]["ref"] and proposal["next_brief"]["sha256"]
     assert proposal["suggestion"] and proposal["hypothesis"]
-    assert proposal["negative_evidence_ids"] and proposal["evidence_ids"]
-    assert set(proposal["negative_evidence_ids"]) <= set(proposal["evidence_ids"])
+    assert proposal["counterevidence_ids"] and proposal["evidence_ids"]
+    assert set(proposal["counterevidence_ids"]) <= set(proposal["evidence_ids"])
     assert proposal["missing_data"] and "AFTER_WINDOW_NOT_OBSERVED" in proposal["missing_data"]
     assert result["comparison"]["after_status"] == "UNKNOWN"
     assert result["comparison"]["provider_metrics_verified"] is False
