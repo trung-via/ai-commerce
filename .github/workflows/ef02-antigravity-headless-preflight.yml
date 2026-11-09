@@ -1,8 +1,8 @@
-name: EF02 Antigravity headless access preflight (no model)
+name: EF02 Antigravity G3 static read and G3B bounded write probe
 on:
   workflow_dispatch:
-  # Exactly one owner-created diagnostic issue for #710; this is never
-  # RemoteActionBatch admission and cannot invoke EF01, AGY --print or a model.
+  # G3 READ: exact owner-created diagnostic issue, no EF01/provider invocation.
+  # G3B: a separate gated one-call disposable-scratch provider write probe.
   issues:
     types: [opened]
 
@@ -53,3 +53,94 @@ jobs:
             Write-Output 'MODEL_AUTH_QUOTA=UNPROVEN_NO_MODEL'
             exit 2
           }
+  g3b-write:
+    # G3B is a distinct bounded provider-effect probe; G3 above remains no-model.
+    # It can run only once per owner-created exact-title Issue, never from dispatch.
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.action == 'opened' &&
+      github.repository == 'trung-via/ai-commerce' &&
+      github.actor == github.repository_owner &&
+      github.event.issue.user.login == github.repository_owner &&
+      github.event.issue.title == '[EF02 HEADLESS WRITE] #710 G3B' &&
+      github.run_attempt == 1
+    runs-on: [self-hosted, Windows, ai-commerce-ef02]
+    timeout-minutes: 4
+    steps:
+      - name: Checkout trusted main without credentials
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: One bounded Antigravity model call and exact private sentinel witness
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $probe = @'
+          import os, pathlib, secrets, shutil, subprocess, sys, tempfile
+          
+          def outcome(result, provider="NOT_CALLED", effective="UNPROVEN", scope="UNPROVEN"):
+              print("AGY_G3B_RESULT=" + result)
+              print("AGY_G3B_PROVIDER_RETURN=" + provider)
+              print("AGY_G3B_EFFECTIVE_WRITE=" + effective)
+              print("AGY_G3B_SCRATCH_SCOPE=" + scope)
+              print("AGY_G3B_QUOTA=UNPROVEN")
+              raise SystemExit(0 if result == "PASS_SENTINEL" else 2)
+          
+          if os.name != "nt" or not os.environ.get("RUNNER_TEMP") or not os.environ.get("GITHUB_WORKSPACE"):
+              outcome("HOLD_WINDOWS_ENV_UNPROVEN")
+          binary = shutil.which("agy")
+          if binary is None:
+              outcome("HOLD_AGY_BINARY_UNAVAILABLE")
+          temp = pathlib.Path(os.environ["RUNNER_TEMP"]).resolve()
+          checkout = pathlib.Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          if not temp.is_dir() or temp == checkout or temp in checkout.parents or checkout in temp.parents:
+              outcome("HOLD_TEMP_SOURCE_OVERLAP")
+          root = pathlib.Path(tempfile.mkdtemp(prefix="ai-commerce-g3b-", dir=temp)).resolve()
+          if root.parent != temp or root.is_symlink():
+              outcome("HOLD_SCRATCH_IDENTITY")
+          nonce = secrets.token_hex(16)
+          target = root / "proof.txt"
+          if target.exists() or target.is_symlink():
+              outcome("HOLD_PREEXISTING_PROOF")
+          prompt = ("Create ONLY one new file at " + str(target) + " containing exactly " +
+                    nonce + " (a single trailing newline is allowed). Use your file-write tool. " +
+                    "Do not change any other files. Do not run commands or access external URLs.")
+          args = [binary, "--print", prompt, "--add-dir", str(root),
+                  "--model", "gemini-3.8-flash", "--effort", "high", "--mode", "accept-edits",
+                  "--disable-slash-commands", "--output-format", "json"]
+          try:
+              proc = subprocess.Popen(args, cwd=root, stdin=subprocess.DEVNULL,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+          except (OSError, ValueError):
+              outcome("HOLD_PROVIDER_SPAWN_UNPROVEN")
+          try:
+              stdout, stderr = proc.communicate(timeout=90)
+          except subprocess.TimeoutExpired:
+              try:
+                  subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                                 capture_output=True, timeout=12, check=False)
+                  proc.communicate(timeout=5)
+              except Exception:
+                  pass
+              outcome("HOLD_TIMEOUT_EFFECT_UNKNOWN", provider="TIMEOUT_UNKNOWN")
+          except Exception:
+              outcome("HOLD_PROVIDER_RETURN_UNPROVEN", provider="UNKNOWN")
+          if proc.returncode != 0:
+              outcome("HOLD_PROVIDER_NONZERO", provider="NONZERO")
+          if not target.is_file() or target.is_symlink() or target.stat().st_nlink != 1:
+              outcome("HOLD_NO_WRITE_WITNESS", provider="EXIT_ZERO")
+          try:
+              data = target.read_bytes()
+              names = sorted(p.name for p in root.iterdir())
+          except (OSError, ValueError):
+              outcome("HOLD_PROOF_READ_UNPROVEN", provider="EXIT_ZERO")
+          if len(data) > 128 or data.rstrip(b"\r\n") != nonce.encode("ascii"):
+              outcome("HOLD_WRONG_PROOF_BYTES", provider="EXIT_ZERO")
+          if names != ["proof.txt"]:
+              outcome("HOLD_EXTRA_SCRATCH_WRITES", provider="EXIT_ZERO", effective="PROVEN")
+          outcome("PASS_SENTINEL", provider="EXIT_ZERO", effective="PROVEN", scope="ONLY_SENTINEL")
+          '@
+          & python -c $probe
+          exit $LASTEXITCODE
