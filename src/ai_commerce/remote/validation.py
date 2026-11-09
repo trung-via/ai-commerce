@@ -61,14 +61,16 @@ def verify_registry(path: Path) -> dict[str, list[str]]:
 def validate_batch(data: dict, *, schema: Path, registry: dict[str, list[str]],
                    issuer_login: str, owner_login: str,
                    brain_issuers: tuple[str, ...] = (),
-                   approved_reuse: dict | None = None) -> dict:
+                   approved_reuse: dict | None = None,
+                   strict_ac: bool = True) -> dict:
     Draft202012Validator(json.loads(schema.read_text(encoding="utf-8"))).validate(data)
     owner = issuer_login.casefold() == owner_login.casefold()
     brain = issuer_login.casefold() in {v.casefold() for v in brain_issuers if v}
     if not ((data["actor"] == "HUMAN" and owner) or
             (data["actor"] == "BRAIN" and brain)):
         raise RemoteRequestError("ISSUER_NOT_AUTHORIZED_FOR_ACTOR")
-    return _validate_actions(data, registry=registry, approved_reuse=approved_reuse)
+    return _validate_actions(data, registry=registry, approved_reuse=approved_reuse,
+                             strict_ac=strict_ac)
 
 
 def validate_batch_content(data: dict, *, schema: Path, registry: dict[str, list[str]],
@@ -82,7 +84,7 @@ def validate_batch_content(data: dict, *, schema: Path, registry: dict[str, list
 
 
 def _validate_actions(data: dict, *, registry: dict[str, list[str]],
-                      approved_reuse: dict | None) -> dict:
+                      approved_reuse: dict | None, strict_ac: bool = True) -> dict:
     ids = [a["action_id"] for a in data["actions"]]
     attempts = [a["attempt_id"] for a in data["actions"]]
     if len(set(ids)) != len(ids) or len(set(attempts)) != len(attempts):
@@ -104,7 +106,7 @@ def _validate_actions(data: dict, *, registry: dict[str, list[str]],
             safe_path(path)
         # Validate explicit machine-readable AC even during offline v1 checks.
         # Marker-less history remains readable only; live CLI/worker run strict.
-        if any(line.lstrip().startswith("MT01_ACCEPTANCE_JSON:")
+        if strict_ac and any(line.lstrip().startswith("MT01_ACCEPTANCE_JSON:")
                for line in action["instruction"].splitlines()):
             require_preexecutor_acceptance(action)
         if action["verification_profile"] not in registry:
