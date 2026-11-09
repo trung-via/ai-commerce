@@ -8,6 +8,7 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -266,3 +267,79 @@ def test_unsafe_linked_a09_path_cannot_upgrade_native_source(tmp_path):
         source_arguments=args).to_dict()
     assert result["status"] == b06.HOLD
     assert result["provider_attested"] is False
+
+
+def test_native_bq06b_windows_symlink_denied_before_a09_owner(tmp_path, monkeypatch, record_property):
+    args, _, _, ledger, pin, review = actual_case(tmp_path)
+    link = tmp_path / "a09-symlink.sqlite"
+    try:
+        os.symlink(str(ledger.path), str(link))
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            record_property("NATIVE_SYMLINK_CREATION_UNPROVEN", True)
+            pytest.skip("NATIVE_SYMLINK_CREATION_UNPROVEN")
+        raise
+    assert link.is_symlink(), "NATIVE_SYMLINK_CONSTRUCTION_HOLD"
+    monkeypatch.setattr(AnalyticsLedger, "inspect",
+                        lambda *a, **k: pytest.fail("symlink reached A09 owner"))
+    result = b06.review_fresh_evidence(
+        ledger_path=str(link), pin=pin, bq06a_raw=review.raw,
+        source_arguments=args).to_dict()
+    assert result["status"] == b06.HOLD
+    assert result["provider_attested"] is False
+
+
+def test_native_bq06b_windows_junction_denied_before_a09_owner(tmp_path, monkeypatch):
+    args, _, _, ledger, pin, review = actual_case(tmp_path)
+    link = tmp_path / "a09-junction"
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(tmp_path)],
+        capture_output=True, timeout=15,
+    )
+    assert created.returncode == 0, "NATIVE_JUNCTION_CONSTRUCTION_HOLD"
+    try:
+        assert link.lstat().st_file_attributes & 0x400
+        monkeypatch.setattr(AnalyticsLedger, "inspect",
+                            lambda *a, **k: pytest.fail("junction reached A09 owner"))
+        result = b06.review_fresh_evidence(
+            ledger_path=str(link / Path(ledger.path).name), pin=pin,
+            bq06a_raw=review.raw, source_arguments=args).to_dict()
+        assert result["status"] == b06.HOLD
+        assert result["provider_attested"] is False
+    finally:
+        os.rmdir(link)
+
+
+@pytest.mark.parametrize("suffix", [":untrusted", ":untrusted:$DATA"])
+def test_native_bq06b_ads_spelling_denied_before_owner(tmp_path, monkeypatch, suffix):
+    args, _, _, ledger, pin, review = actual_case(tmp_path)
+    monkeypatch.setattr(AnalyticsLedger, "inspect",
+                        lambda *a, **k: pytest.fail("ADS reached A09 owner"))
+    result = b06.review_fresh_evidence(
+        ledger_path=str(ledger.path) + suffix, pin=pin,
+        bq06a_raw=review.raw, source_arguments=args).to_dict()
+    assert result["status"] == b06.HOLD
+    assert result["provider_attested"] is False
+
+
+def test_native_bq06b_write_and_rename_race_blocked_during_owner_replay(tmp_path, monkeypatch):
+    args, _, _, ledger, pin, review = actual_case(tmp_path)
+    before = file_bytes(tmp_path)
+    real = AnalyticsLedger.history
+    observed = []
+
+    def competing_history(owner, **kwargs):
+        for effect in (
+            lambda: open(owner.path, "r+b"),
+            lambda: os.replace(owner.path, str(owner.path) + ".moved"),
+        ):
+            with pytest.raises(OSError):
+                effect()
+            observed.append(True)
+        return real(owner, **kwargs)
+
+    monkeypatch.setattr(AnalyticsLedger, "history", competing_history)
+    result = run_fresh(args, ledger, pin, review)
+    assert result["status"] == b06.CURRENT, result
+    assert len(observed) >= 4, "NATIVE_REPLAY_NOT_BOUNDED_BY_SOURCE_LOCK"
+    assert file_bytes(tmp_path) == before
