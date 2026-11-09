@@ -167,3 +167,139 @@ jobs:
           '@
           & python -c $probe
           exit $LASTEXITCODE
+  g4-forensic:
+    # Independent fixed historical #710 forensic read. Never rereun EF02/model.
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.action == 'opened' &&
+      github.repository == 'trung-via/ai-commerce' &&
+      github.actor == github.repository_owner &&
+      github.event.issue.user.login == github.repository_owner &&
+      github.event.issue.title == '[EPWO 710 G4 FORENSIC READ] #710' &&
+      github.run_attempt == 1
+    runs-on: [self-hosted, Windows, ai-commerce-ef02]
+    timeout-minutes: 5
+    concurrency:
+      group: epwo-710-g4-forensic-read
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout protected main for fixed local read only
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Observe immutable historical local evidence without model or journal writes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PYTHONPATH = Join-Path $env:GITHUB_WORKSPACE 'src'
+          $probe = @'
+          import itertools
+          import json
+          import os
+          from pathlib import Path
+          import stat
+          import tempfile
+          from ai_commerce.hostops_v3 import ef02_attempt_r02_readonly as safe
+          
+          BATCH = "epwo-wp01-r2c-ef02-m0r-intake-shared-fixture-rootfix-g4argon-medium-20261109"
+          ACTION = "EPWO-WP01-R2C-VALIDATED-INTAKE-M0R-G4ARGONMED-001"
+          ATTEMPT = "epwo_wp01_r2c_preflight_m0r_g4argonmedium_20261109_01"
+          SOURCE = "0d6fb5b05281d765eee18b260117577f36893d0b"
+          EVIDENCE_ROOT = safe.EVIDENCE_ROOT.parents[1] / BATCH / (ACTION + "-" + ATTEMPT)
+          FILES = ("ef01/provider_boundary.json", "ef01/provider_return_observed.json",
+                   "ef01/engineering_result.json")
+          EXPECTED = ("BEFORE_EXECUTOR_SUBPROCESS", "EXECUTOR_SUBPROCESS_RETURNED", None)
+          MAX_BYTES = 4 * 1024 * 1024
+          
+          def _receipt(relative, stage):
+              target = EVIDENCE_ROOT.joinpath(*relative.split("/"))
+              try:
+                  if target.is_symlink():
+                      return "UNSAFE"
+                  if not target.exists():
+                      return "MISSING"
+                  if not safe._safe_absolute(target):
+                      return "UNSAFE"
+                  before = target.lstat()
+                  if before.st_size < 2 or before.st_size > MAX_BYTES:
+                      return "UNSAFE"
+                  with target.open("rb") as stream:
+                      opened = os.fstat(stream.fileno())
+                      content = stream.read(MAX_BYTES + 1)
+                      closed = os.fstat(stream.fileno())
+                  identity = lambda v: (v.st_dev, v.st_ino, v.st_size, v.st_mtime_ns, v.st_nlink)
+                  if (len(content) > MAX_BYTES or identity(before) != identity(opened)
+                          or identity(opened) != identity(closed) or not safe._safe_absolute(target)):
+                      return "UNSAFE"
+                  record = json.loads(content.decode("utf-8-sig"))
+                  if not isinstance(record, dict) or record.get("attempt_id") != ATTEMPT:
+                      return "UNSAFE"
+                  if stage is not None and record.get("stage") != stage:
+                      return "UNSAFE"
+                  if relative == FILES[2] and record.get("work_id") != BATCH + ":" + ACTION:
+                      return "UNSAFE"
+                  return "PRESENT_UNVERIFIED"
+              except (OSError, ValueError, TypeError, UnicodeError):
+                  return "READ_UNKNOWN"
+          
+          def _evidence():
+              try:
+                  batch = EVIDENCE_ROOT.parent
+                  if batch.is_symlink():
+                      return "ROOT_UNSAFE", ("READ_UNKNOWN",) * 3
+                  if not batch.exists():
+                      return "BATCH_ABSENT", ("ROOT_ABSENT",) * 3
+                  if not safe._safe_absolute(batch, directory=True):
+                      return "ROOT_UNSAFE", ("READ_UNKNOWN",) * 3
+                  if EVIDENCE_ROOT.is_symlink():
+                      return "ROOT_UNSAFE", ("READ_UNKNOWN",) * 3
+                  if not EVIDENCE_ROOT.exists():
+                      return "ACTION_ABSENT", ("ROOT_ABSENT",) * 3
+                  if not safe._safe_absolute(EVIDENCE_ROOT, directory=True):
+                      return "ROOT_UNSAFE", ("READ_UNKNOWN",) * 3
+                  return "ACTION_PRESENT", tuple(_receipt(p, s) for p, s in zip(FILES, EXPECTED))
+              except (OSError, ValueError):
+                  return "ROOT_READ_UNKNOWN", ("READ_UNKNOWN",) * 3
+          
+          def _worktree():
+              try:
+                  base = Path(tempfile.gettempdir())
+                  if not safe._safe_absolute(base, directory=True):
+                      return "WORKTREE_READ_UNKNOWN"
+                  matches = list(itertools.islice(base.glob("ai-commerce-ef02-" + ACTION + "-*"), 2))
+                  if not matches:
+                      return "WORKTREE_ABSENT"
+                  if len(matches) != 1:
+                      return "WORKTREE_AMBIGUOUS"
+                  item = matches[0]
+                  if item.is_symlink() or not safe._safe_absolute(item, directory=True):
+                      return "WORKTREE_UNSAFE"
+                  return "WORKTREE_SINGLE_UNVERIFIED"
+              except (OSError, ValueError, RuntimeError):
+                  return "WORKTREE_READ_UNKNOWN"
+          
+          def observe():
+              root, (before, returned, terminal) = _evidence()
+              return {"status": "HOLD_UNKNOWN_EFFECT", "root": root, "before": before,
+                      "return": returned, "terminal": terminal, "worktree": _worktree(),
+                      "replay_authorized": "FALSE", "provider_outcome_proven": "FALSE"}
+          
+          def main():
+              try:
+                  result = observe()
+                  for key in ("status", "root", "before", "return", "terminal", "worktree",
+                              "replay_authorized", "provider_outcome_proven"):
+                      print("EPWO_710_G4_" + key.upper() + "=" + result[key])
+              except Exception:
+                  print("EPWO_710_G4_STATUS=HOLD_UNKNOWN_EFFECT")
+                  print("EPWO_710_G4_OBSERVER=READ_UNKNOWN")
+                  print("EPWO_710_G4_REPLAY_AUTHORIZED=FALSE")
+          
+          if __name__ == "__main__":
+              main()
+          '@
+          & python -B -c $probe
+          exit $LASTEXITCODE

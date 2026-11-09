@@ -1200,3 +1200,87 @@ def test_ef02_710_g3b_inline_python_script_syntax_and_scope_tokens():
     assert "itertools.islice(root.iterdir(), 2)" in script
     assert "target.read_bytes()" not in script
     assert "sorted(p.name for p in root.iterdir())" not in script
+
+def _epwo_710_g4_script():
+    import textwrap
+    src = (Path(__file__).resolve().parents[1] /
+           ".github/workflows/ef02-antigravity-headless-preflight.yml").read_text(encoding="utf-8")
+    _, job = src.split("  g4-forensic:", 1)
+    script = job.split("$probe = @'\n", 1)[1].split("\n          '@", 1)[0]
+    return src, job, textwrap.dedent(script)
+
+
+def test_epwo_710_g4_owner_exact_one_shot_readonly_contract():
+    import ast
+    src, job, script = _epwo_710_g4_script()
+    for element in (
+        "github.event_name == 'issues'",
+        "github.event.action == 'opened'",
+        "github.actor == github.repository_owner",
+        "github.event.issue.user.login == github.repository_owner",
+        "github.event.issue.title == '[EPWO 710 G4 FORENSIC READ] #710'",
+        "github.run_attempt == 1",
+        "runs-on: [self-hosted, Windows, ai-commerce-ef02]",
+        "persist-credentials: false",
+        "contents: read",
+        "EPWO_710_G4_",
+        "HOLD_UNKNOWN_EFFECT",
+    ):
+        assert element in job
+    ast.parse(script)
+    assert "--print" not in job
+    assert "issues: write" not in src
+    assert "github.event.issue.body" not in job
+    assert "write_text(" not in script
+    assert "subprocess." not in script
+    assert "GITHUB_TOKEN" not in job
+
+
+def test_epwo_710_g4_historical_local_receipt_stays_unverified(tmp_path):
+    import json
+    import types
+    _, _, code = _epwo_710_g4_script()
+    scope = {"__name__": "epwo_710_g4_tests"}
+    exec(compile(code, "EPWO710_G4_REVIEWED_INLINE", "exec"), scope)
+    root = tmp_path / "batch" / "action"
+    scope["EVIDENCE_ROOT"] = root
+    result = scope["observe"]()
+    assert result["root"] == "BATCH_ABSENT"
+    assert result["status"] == "HOLD_UNKNOWN_EFFECT"
+    assert result["replay_authorized"] == "FALSE"
+    root.parent.mkdir()
+    assert scope["observe"]()["root"] == "ACTION_ABSENT"
+    ef01 = root / "ef01"
+    ef01.mkdir(parents=True)
+    valid = {"attempt_id": scope["ATTEMPT"], "stage": "EXECUTOR_SUBPROCESS_RETURNED"}
+    (ef01 / "provider_return_observed.json").write_text(json.dumps(valid), encoding="utf-8")
+    result = scope["observe"]()
+    assert result["root"] == "ACTION_PRESENT"
+    assert result["return"] == "PRESENT_UNVERIFIED"
+    assert result["provider_outcome_proven"] == "FALSE"
+    assert result["status"] == "HOLD_UNKNOWN_EFFECT"
+    valid["attempt_id"] = "unrelated-attempt"
+    (ef01 / "provider_return_observed.json").write_text(json.dumps(valid), encoding="utf-8")
+    assert scope["observe"]()["return"] == "UNSAFE"
+    (ef01 / "provider_return_observed.json").write_text("{broken", encoding="utf-8")
+    assert scope["observe"]()["return"] == "READ_UNKNOWN"
+    (ef01 / "provider_return_observed.json").unlink()
+    assert scope["observe"]()["return"] == "MISSING"
+
+
+def test_epwo_710_g4_never_trusts_synthetic_terminal(tmp_path):
+    import json
+    _, _, code = _epwo_710_g4_script()
+    scope = {"__name__": "epwo_710_g4_tests"}
+    exec(compile(code, "EPWO710_G4_REVIEWED_INLINE", "exec"), scope)
+    root = tmp_path / "batch" / "action"
+    (root / "ef01").mkdir(parents=True)
+    scope["EVIDENCE_ROOT"] = root
+    terminal = root / "ef01" / "engineering_result.json"
+    terminal.write_text(json.dumps({"attempt_id": scope["ATTEMPT"],
+                                    "work_id": scope["BATCH"] + ":" + scope["ACTION"]}), encoding="utf-8")
+    report = scope["observe"]()
+    assert report["terminal"] == "PRESENT_UNVERIFIED"
+    assert report["provider_outcome_proven"] == "FALSE"
+    terminal.write_text(json.dumps({"attempt_id": scope["ATTEMPT"],"work_id": "wrong"}), encoding="utf-8")
+    assert scope["observe"]()["terminal"] == "UNSAFE"
