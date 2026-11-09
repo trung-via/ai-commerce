@@ -362,7 +362,8 @@ class LocalBatchWorker:
         if getattr(self, "_dispatch_strict_ac", False):
             try:
                 preflight_acceptance = require_preexecutor_acceptance(
-                    submitted_action, source_closure=True)
+                    submitted_action, source_closure=True,
+                    root=self.checkout, source_sha=source)
             except RemoteRequestError as exc:
                 outcome.update(status="INVALID_ACTION", error_code=str(exc),
                                executor_invoked=False)
