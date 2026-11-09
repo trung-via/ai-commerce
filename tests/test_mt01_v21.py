@@ -1823,3 +1823,16 @@ def test_v22_normal_real_main_manifests_resolve_production_owner_closure(changed
         else:
             assert binding["registered_profile"] == f'mt01-{entry["group"]}-tests'
             assert profiles[binding["registered_profile"]] == binding["argv"]
+
+def test_bq06a_native_media_consumer_requires_ffmpeg_in_ci_plan():
+    """BQ06b consumer fan-in must provision actual Q4 media tools, not skip tests."""
+    import importlib.util
+    from types import SimpleNamespace
+    script = Path(__file__).resolve().parents[1] / '.github/scripts/ef02-pr-ci-tests.py'
+    spec = importlib.util.spec_from_file_location('bq06b_native_ffmpeg_selector', script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module._needs_ffmpeg_for_plan(SimpleNamespace(
+        selected_tests=['tests/test_bq_06a_behavioral_learning.py'])) is True
+    assert module._needs_ffmpeg_for_plan(SimpleNamespace(
+        selected_tests=['tests/test_bq_06b_fresh_a09_replay.py'])) is False
