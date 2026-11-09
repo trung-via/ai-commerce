@@ -83,7 +83,13 @@ def test_native_a09_a11_a17_fresh_replay_preserves_zero_null_counterevidence(tmp
     result = run_fresh(args, ledger, pin, review)
     assert result["status"] == b06.CURRENT, result
     assert result["reason_codes"] == []
-    assert result["selected_observation_count"] == 4
+    # A11 retains only independently selected observation refs. The original
+    # A09 import has four observations, but the actual selected A11 revision
+    # may use fewer; every selected ref has already been matched in full by
+    # the native reviewer. Never assert a fabricated all-import selection.
+    selected_facts = advisory.to_dict()["entries"][-1]["entry"]["observation_sources"]
+    assert 0 < len(selected_facts) < len(ledger.inspect(pin.import_id)["observations"])
+    assert result["selected_observation_count"] == len(selected_facts)
     assert result["history_count"] == 1
     assert result["source_kind"] == "SYNTHETIC_FIXTURE"
     assert result["verification_scope"] == "LOCAL_A09_RAW_AND_A11_ARCHIVE_ONLY"
