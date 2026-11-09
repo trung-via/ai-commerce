@@ -1206,3 +1206,155 @@ def test_wh03_candidate_enums_cannot_be_native_signature_or_send():
     assert "read-only" not in str(d.probe_chat_a_candidate)  # no leaking URL
     assert "browser.close()" not in d._CHAT_A_READ_ONLY_SURFACE
     assert "new_page" not in d._CHAT_A_READ_ONLY_SURFACE
+
+
+class TestRegistrationPage(ProbePage):
+    def __init__(self, *, surface="CANDIDATE_READY", signal="TEST_SIGNAL_PRESENT_UNATTESTED",
+                 url=URL, raises=False):
+        super().__init__(url=url, raises=raises)
+        self.surface, self.signal = surface, signal
+
+    def evaluate(self, script):
+        self.evaluations += 1
+        assert "button.click()" not in script and "document.cookie" not in script
+        assert "fetch(" not in script and "localStorage" not in script
+        assert "new_page" not in script and ".goto(" not in script
+        if self.raises:
+            raise RuntimeError("private profile/CHAT-URL must not leak")
+        if "WAKEHUB_TEST_REGISTER_V1" in script:
+            return self.signal
+        return self.surface
+
+
+def test_wh03_test_registration_signal_valid_candidate_only(monkeypatch):
+    from ai_commerce.remote import cdp_doorbell as d
+    monkeypatch.setattr(d, "_is_windows", lambda: True)
+    p, unrelated = TestRegistrationPage(), TestRegistrationPage(
+        url="https://example.com", raises=True)
+    inv = ProbeContexts((p, unrelated))
+    assert d.probe_wh03_test_registration_signal(inventory=inv) == \
+        "TEST_SIGNAL_PRESENT_UNATTESTED"
+    assert p.evaluations == 2 and unrelated.evaluations == 0
+    assert p.mutations == unrelated.mutations == 0
+    assert "ORIGIN_ATTESTED" not in d.probe_wh03_test_registration_signal(inventory=inv)
+    assert inv.calls == ["http://127.0.0.1:9444"] * 2
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("absent", "TEST_SIGNAL_NOT_FOUND"),
+    ("duplicate", "TEST_SIGNAL_AMBIGUOUS"),
+    ("invalid", "TEST_SIGNAL_SCOPE_UNPROVEN"),
+    ("surface", "SURFACE_UNPROVEN"),
+    ("draft", "DRAFT_PRESENT"),
+    ("exception", "CDP_READ_UNAVAILABLE"),
+    ("no_contexts", "CONTEXT_UNPROVEN"),
+    ("two_contexts", "CONTEXT_UNPROVEN"),
+    ("many_tabs", "CONTEXT_UNPROVEN"),
+    ("other_chat", "MULTIPLE_CHAT_CANDIDATES"),
+    ("no_chat", "CHAT_A_CANDIDATE_NOT_FOUND"),
+])
+def test_wh03_test_signal_fail_closed_cases(monkeypatch, case, expected):
+    from ai_commerce.remote import cdp_doorbell as d
+    monkeypatch.setattr(d, "_is_windows", lambda: True)
+    p = TestRegistrationPage()
+    if case == "absent": p.signal = "TEST_SIGNAL_NOT_FOUND"
+    if case == "duplicate": p.signal = "TEST_SIGNAL_AMBIGUOUS"
+    if case == "invalid": p.signal = {"status": "ORIGIN_ATTESTED"}
+    if case == "surface": p.surface = "SURFACE_UNPROVEN"
+    if case == "draft": p.surface = "DRAFT_PRESENT"
+    if case == "exception": p.raises = True
+    if case == "no_contexts": inv = ProbeContexts()
+    elif case == "two_contexts": inv = ProbeContexts((p,), (TestRegistrationPage(url=OTHER),))
+    elif case == "many_tabs": inv = ProbeContexts(tuple([p] + [
+        TestRegistrationPage(url="https://example.com")] * 32))
+    elif case == "other_chat": inv = ProbeContexts((p, TestRegistrationPage(url=OTHER)))
+    elif case == "no_chat": inv = ProbeContexts((TestRegistrationPage(url="https://example.com"),))
+    else: inv = ProbeContexts((p,))
+    assert d.probe_wh03_test_registration_signal(inventory=inv) == expected
+
+
+def test_wh03_test_signal_cannot_choose_endpoint_or_register_without_windows(monkeypatch):
+    from ai_commerce.remote import cdp_doorbell as d
+    inv = ProbeContexts((TestRegistrationPage(),))
+    monkeypatch.setattr(d, "_is_windows", lambda: False)
+    assert d.probe_wh03_test_registration_signal(inventory=inv) == "NATIVE_DESKTOP_UNPROVEN"
+    monkeypatch.setattr(d, "_is_windows", lambda: True)
+    for endpoint in ("http://127.0.0.1:9333", "http://localhost:9444",
+                     "http://0.0.0.0:9444", "http://127.0.0.1:9444/abc"):
+        assert d.probe_wh03_test_registration_signal(
+            endpoint=endpoint, inventory=inv) == "NATIVE_DESKTOP_UNPROVEN"
+    assert inv.calls == []
+
+
+def test_wh03_test_signal_source_is_not_a_registration_or_send_grant():
+    from ai_commerce.remote import cdp_doorbell as d
+    src = d._WH03_TEST_SIGNAL_DOM
+    assert "WAKEHUB_TEST_REGISTER_V1" in src
+    assert "data-message-author-role" in src
+    assert "button.click" not in src and "localStorage" not in src
+    assert "fetch(" not in src and "document.cookie" not in src
+    assert "origin_attested" not in src and "new_page" not in src
+
+
+def test_wh03_test_registration_signal_real_js_dom_cases():
+    """Production page script, not just Python fake returns: exact user-role only."""
+    import json
+    import shutil
+    import subprocess
+    from ai_commerce.remote.cdp_doorbell import _WH03_TEST_SIGNAL_DOM
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js unavailable")
+    program = r"""
+const fs=require('node:fs');
+const script=JSON.parse(fs.readFileSync(0,'utf8'));
+const marker='WAKEHUB_TEST_REGISTER_V1:'+('a'.repeat(64));
+const style=el=>({visibility:el.hidden?'hidden':'visible',display:'block'});
+const el=(text,role,id,hidden=false)=>{
+  const parent={nodeType:1,textContent:text,hidden,children:[],
+    getClientRects:()=>[1],
+    getAttribute:k=>k==='data-message-id'?id:null,
+    closest:sel=>{
+      if(sel==='[data-message-id],[data-turn-id]')return parent;
+      return null;
+    }};
+  const leaf={nodeType:1,textContent:text,hidden,children:[],
+    getClientRects:()=>[1],
+    closest:sel=>{
+      if(sel.includes('form,nav,header'))return null;
+      if(sel.includes('[data-message-author-role="assistant"]'))
+        return role==='assistant'?parent:null;
+      if(sel.includes('[data-message-author-role="user"]'))
+        return role==='user'?parent:null;
+      return null;
+    }};
+  parent.children=[leaf];
+  return [parent,leaf];
+};
+const probe=nodes=>new Function('document','getComputedStyle',
+  'return ('+script+')();')({querySelectorAll:()=>nodes},style);
+const good=el(marker,'user','msg_1');
+const copy=el(marker,'assistant','msg_2');
+const second=el(marker,'user','msg_3');
+const wrong=el(marker.toUpperCase(),'user','msg_4');
+const partial=el('prefix '+marker,'user','msg_5');
+const invalidId=el(marker,'user','bad id');
+const hidden=el(marker,'user','msg_6',true);
+if(probe(good)!=='TEST_SIGNAL_PRESENT_UNATTESTED')process.exit(11);
+if(probe([])!=='TEST_SIGNAL_NOT_FOUND')process.exit(12);
+if(probe([...good,...copy])!=='TEST_SIGNAL_AMBIGUOUS')process.exit(13);
+if(probe([...good,...second])!=='TEST_SIGNAL_AMBIGUOUS')process.exit(14);
+if(probe(copy)!=='TEST_SIGNAL_AMBIGUOUS')process.exit(15);
+if(probe(wrong)!=='TEST_SIGNAL_NOT_FOUND')process.exit(16);
+if(probe(partial)!=='TEST_SIGNAL_NOT_FOUND')process.exit(17);
+if(probe(invalidId)!=='TEST_SIGNAL_AMBIGUOUS')process.exit(18);
+if(probe(hidden)!=='TEST_SIGNAL_NOT_FOUND')process.exit(19);
+if(probe(Array(20001).fill(0).map(()=>({nodeType:0})))!=='TEST_SIGNAL_SCOPE_UNPROVEN')process.exit(20);
+"""
+    proc = subprocess.run([node, "-e", program], input=json.dumps(_WH03_TEST_SIGNAL_DOM),
+                          text=True, capture_output=True,
+                          timeout=45 if __import__("sys").platform == "win32" else 12)
+    assert proc.returncode == 0, (
+        f"WH03 test signal DOM regression exit={proc.returncode}; "
+        f"stderr={proc.stderr[:600]}")

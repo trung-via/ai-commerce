@@ -423,6 +423,88 @@ def probe_chat_a_candidate(*, endpoint: str = "http://127.0.0.1:9444",
         return "CDP_READ_UNAVAILABLE"
 
 
+# WH03 test-only signal. Intentionally not the eventual workflow registration
+# interface; a user-visible signal by itself cannot authenticate ChatGPT.
+# Read only exact synthetic test markers from displayed USER message bubbles,
+# never return their value, another message, route URL or account data.
+_WH03_TEST_SIGNAL_DOM = """
+() => {
+  const signal = /^WAKEHUB_TEST_REGISTER_V1:[0-9a-f]{64}$/;
+  const isVisible = el => {
+    if (!el || el.nodeType !== 1 || !el.getClientRects().length) return false;
+    const style = getComputedStyle(el);
+    return style && style.visibility === 'visible' && style.display !== 'none';
+  };
+  const nodes = [...document.querySelectorAll('*')];
+  if (nodes.length > 20000) return 'TEST_SIGNAL_SCOPE_UNPROVEN';
+  let total = 0, trusted = 0;
+  const containers = new Set();
+  for (const el of nodes) {
+    if (!isVisible(el)) continue;
+    const text = (el.textContent || '').trim();
+    if (!signal.test(text)) continue;
+    const children = [...(el.children || [])].filter(isVisible);
+    if (children.some(child => signal.test((child.textContent || '').trim())))
+      continue; // only count one leaf per visible occurrence
+    total++;
+    const excluded = el.closest('form,nav,header,button,textarea,input,[contenteditable="true"],[role="textbox"],[role="toolbar"],[role="navigation"]');
+    if (excluded || el.closest('[data-message-author-role="assistant"]')) continue;
+    const user = el.closest('[data-message-author-role="user"],[data-user-message-bubble]');
+    if (!isVisible(user)) continue;
+    const turn = user.closest('[data-message-id],[data-turn-id]') || user;
+    const id = turn.getAttribute('data-message-id') || turn.getAttribute('data-turn-id');
+    if (typeof id !== 'string' || !/^[0-9a-zA-Z._-]{1,64}$/.test(id)) continue;
+    if (!containers.has(turn)) { containers.add(turn); trusted++; }
+  }
+  if (total === 0) return 'TEST_SIGNAL_NOT_FOUND';
+  if (total !== 1 || trusted !== 1) return 'TEST_SIGNAL_AMBIGUOUS';
+  return 'TEST_SIGNAL_PRESENT_UNATTESTED';
+}
+"""
+
+
+def probe_wh03_test_registration_signal(*, endpoint: str = "http://127.0.0.1:9444",
+                                        inventory=None) -> str:
+    """Observe one explicit fresh-looking Chat A test signal; no enrollment.
+
+    This DOES NOT prove freshness, private account, complete search domain,
+    authenticated Chat A or native Send authority. Registration remains pending
+    until a separately approved private owner binds the origin.
+    """
+    if not _is_windows() or type(endpoint) is not str or endpoint != "http://127.0.0.1:9444":
+        return "NATIVE_DESKTOP_UNPROVEN"
+    source = inventory if inventory is not None else _PlaywrightInventory()
+    if not callable(getattr(source, "contexts", None)):
+        return "CONTEXT_UNPROVEN"
+    try:
+        with source.contexts(endpoint) as contexts:
+            if len(contexts) != 1:
+                return "CONTEXT_UNPROVEN"
+            pages = list(contexts[0].pages)
+            if len(pages) > 32:
+                return "CONTEXT_UNPROVEN"
+            matches = [p for p in pages
+                       if isinstance(getattr(p, "url", None), str)
+                       and _CHAT.fullmatch(p.url.rstrip("/")) is not None]
+            if len(matches) != 1:
+                return ("MULTIPLE_CHAT_CANDIDATES" if matches
+                        else "CHAT_A_CANDIDATE_NOT_FOUND")
+            page = matches[0]
+            guard = page.evaluate(_CHAT_A_READ_ONLY_SURFACE)
+            if guard != "CANDIDATE_READY":
+                return "DRAFT_PRESENT" if guard == "DRAFT_PRESENT" else "SURFACE_UNPROVEN"
+            observed = page.evaluate(_WH03_TEST_SIGNAL_DOM)
+            if observed in ("TEST_SIGNAL_NOT_FOUND", "TEST_SIGNAL_AMBIGUOUS",
+                            "TEST_SIGNAL_PRESENT_UNATTESTED",
+                            "TEST_SIGNAL_SCOPE_UNPROVEN"):
+                return observed
+            return "TEST_SIGNAL_SCOPE_UNPROVEN"
+    except Exception:
+        # Suppress Playwright exception text; private routes may appear in it.
+        return "CDP_READ_UNAVAILABLE"
+
+
+
 class LocalChromeDoorbellAdapter:
     """UI-only exact-chat doorbell, explicitly opt-in, without semantic authority."""
 
