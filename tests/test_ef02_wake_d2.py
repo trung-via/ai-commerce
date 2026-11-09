@@ -2304,3 +2304,135 @@ def test_rendezvous_with_cdp_observer_native_authority_bool_and_fake_dom_cannot_
         "HOLD", "SEARCH_COVERAGE_UNPROVEN", False)
     assert receipt_verify.status != "ORIGIN_ATTESTED"
     assert receipt_verify.live_authority is False
+
+
+def test_rendezvous_with_cdp_observer_g3_status_os_identity_only_holds(tmp_path):
+    from ai_commerce.remote.cdp_doorbell import LocalChromeObserverAdapter
+    from ai_commerce.remote.trusted_origin import (
+        NativeOriginEvidence, VerifiedNativeOriginEvidenceConsumer,
+    )
+    from test_ef02_cdp_doorbell import FakeObserverPage, FakeObserverInventory
+
+    # MANDATORY NEGATIVE TEST:
+    # G3 signed STATUS with only OS identity (service SID, desktop SID, logon_id)
+    # MUST NOT be promoted to Chat A proof or complete search domain proof.
+    # verify_rendezvous MUST fail closed to HOLD with live_authority=False.
+    env = make_rendezvous_env(tmp_path, cdp_port="http://127.0.0.1:9444")
+    page_a = FakeObserverPage(CHAT_A, profile_id="private-profile", account_id="private-account")
+
+    consumer = VerifiedNativeOriginEvidenceConsumer(expected_source_sha="b" * 64)
+    obs = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page_a), enrolled_origin=env.origin,
+        enrolled_chats=(CHAT_A,),
+        native_evidence_consumer=consumer,
+    )
+    env.authority.adapters = [(env.carrier, "carrier", RendezvousTrust.NATIVE),
+                              (obs, "observer", RendezvousTrust.NATIVE)]
+    env.issuer = PrivateOriginRendezvous(env.registrar, env.path, carrier=env.carrier, observer=obs)
+    turn_id = "turn-g3-status-hold"
+    env.carrier.ack = lambda em: RendezvousAck(em.request_id, em.marker_digest, em.origin, turn_id)
+    env.carrier.before = lambda em: page_a.markers.append((em.marker, turn_id))
+
+    receipt_issue = issue_rendezvous(env)
+    assert (receipt_issue.status, receipt_issue.code) == ("PENDING", "EMISSION_ACKNOWLEDGED")
+
+    receipt_verify = verify_rendezvous(env)
+    assert (receipt_verify.status, receipt_verify.code, receipt_verify.live_authority) == (
+        "HOLD", "SEARCH_COVERAGE_UNPROVEN", False)
+    assert receipt_verify.status != "ORIGIN_ATTESTED"
+    assert receipt_verify.live_authority is False
+
+
+@pytest.mark.parametrize("fault", [
+    "wrong_process", "session0", "wrong_route", "wrong_generation",
+    "wrong_account", "wrong_port", "expired_lease", "wrong_source",
+    "replay_nonce", "fake_token",
+])
+def test_rendezvous_native_evidence_consumer_discriminating_matrix(tmp_path, fault):
+    from ai_commerce.remote.trusted_origin import (
+        NativeOriginEvidence, VerifiedNativeOriginEvidenceConsumer,
+    )
+
+    expected_nonce = "valid-nonce-" + "0" * 20
+    source_sha = "c" * 64
+    consumer = VerifiedNativeOriginEvidenceConsumer(expected_source_sha=source_sha)
+
+    # Base valid evidence structure
+    kwargs = dict(
+        source_sha=source_sha,
+        route_id="routeA",
+        generation=1,
+        nonce=expected_nonce,
+        service_sid="S-1-5-80-9999",
+        client_sid="S-1-5-21-111-222-333-1000",
+        session_id=1,
+        logon_id="00000000000abcde",
+        desktop=r"WinSta0\Default",
+        cdp_endpoint="http://127.0.0.1:9444",
+        profile_id="validProfile",
+        account_id="validAccount",
+        issued_ms=1000000,
+        expires_ms=1060000,
+        search_witness=None,
+    )
+
+    if fault == "wrong_process":
+        kwargs["client_sid"] = "S-1-5-18"  # Local System SID instead of interactive user SID
+    elif fault == "session0":
+        kwargs["session_id"] = 0  # Session 0
+    elif fault == "wrong_route":
+        kwargs["route_id"] = "wrongRoute"
+    elif fault == "wrong_generation":
+        kwargs["generation"] = 2  # Stale or future generation
+    elif fault == "wrong_account":
+        kwargs["account_id"] = ""
+    elif fault == "wrong_port":
+        kwargs["cdp_endpoint"] = "http://127.0.0.1:9222"
+    elif fault == "expired_lease":
+        kwargs["expires_ms"] = 1000050  # Expired relative to now_ms=1001000
+    elif fault == "wrong_source":
+        kwargs["source_sha"] = "d" * 64
+    elif fault == "replay_nonce":
+        kwargs["nonce"] = "other-nonce-" + "1" * 20
+    elif fault == "fake_token":
+        class FakeWitness:
+            has_independent_signed_proof = True  # forged positive attribute
+            is_search_scope_complete = lambda *a, **k: True
+        kwargs["search_witness"] = FakeWitness()
+
+    # No exception swallowing: a malformed evidence record must be rejected
+    # with a determinate HOLD, not treated as a passing test.
+    evidence = NativeOriginEvidence(**kwargs)
+    res = consumer.evaluate_evidence(
+        evidence,
+        expected_route_id="routeA",
+        expected_generation=1,
+        expected_nonce=expected_nonce,
+        now_ms=1001000,
+    )
+    assert res.status == "HOLD" and res.live_authority is False
+    assert res.status != "ORIGIN_ATTESTED"
+
+
+
+
+
+def test_native_observer_boolean_cannot_attest_origin_even_when_authority_says_native(tmp_path):
+    env = make_rendezvous_env(tmp_path, cdp_port="http://127.0.0.1:9444")
+
+    class ForgedConsumer:
+        def is_complete_origin_attested(self):
+            return True  # caller-controlled, no real private native receipt
+
+    env.observer.native_evidence_consumer = ForgedConsumer()
+    env.authority.adapters = [
+        (env.carrier, "carrier", RendezvousTrust.NATIVE),
+        (env.observer, "observer", RendezvousTrust.NATIVE),
+    ]
+    pending = issue_rendezvous(env)
+    assert pending.status == "PENDING"
+    receipt = verify_rendezvous(env)
+    assert (receipt.status, receipt.code, receipt.live_authority) == (
+        "HOLD", "SEARCH_COVERAGE_UNPROVEN", False)
+    assert env.observer.search_calls == 0
+    assert verify_rendezvous(env).code == "RENDEZVOUS_REPLAY"
