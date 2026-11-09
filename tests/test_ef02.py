@@ -244,6 +244,20 @@ def test_direct_real_worker_ac_gate_precedes_workowner_operations(tmp_path):
     assert out["candidate_sha"] is None
 
 
+
+def test_reconcile_readonly_accepts_legacy_malformed_ac_without_dispatch():
+    # Read-only reconciliation must still inspect old immutable bad WorkItems;
+    # executable modes continue to reject the same source-bound request.
+    a = action("a")
+    a["instruction"] = 'MT01_ACCEPTANCE_JSON: not-json'
+    p = batch([a])
+    with pytest.raises(RemoteRequestError, match="INTAKE_AC_MALFORMED"):
+        validate(p)
+    assert validate_batch(p, schema=SCHEMA, registry=verify_registry(REGISTRY),
+                          issuer_login="trung-via", owner_login="trung-via",
+                          strict_ac=False) == p
+
+
 @pytest.mark.parametrize("key,value", [("acceptance_ids", ["A12.product-evidence"]),
                                      ("verify_argv", ["python", "-c", "arbitrary"])])
 def test_mt01_does_not_relax_v1_additional_properties(key, value):
