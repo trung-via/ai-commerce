@@ -10,6 +10,8 @@ continues to return UNKNOWN and holds the event against blind replay.
 """
 from __future__ import annotations
 
+from dataclasses import replace
+import hashlib
 import os
 import re
 from contextlib import contextmanager
@@ -17,6 +19,10 @@ from urllib.parse import urlsplit
 from typing import Protocol
 
 from .conversation_binding import ResolvedBinding, _CHAT, _REPOSITORY, _endpoint
+from .trusted_origin import (
+    OriginError, PrivateOriginSnapshot, RendezvousEmission,
+    RendezvousHit, RendezvousObservation, _MARKER, _private_id, _valid_origin,
+)
 from .wake_adapter import WakeReceipt
 
 _EVENT = re.compile(r"ef02-completion-v1:[0-9a-f]{64}\Z")
@@ -156,6 +162,59 @@ _PROVE = "(args) => { " + _GUARD + """
  return found.length===1 && found[0].getClientRects().length > 0;
 }"""
 
+_OBSERVER_CHECK = "(args) => { " + _GUARD + """
+ if (location.href.replace(/\\/$/,'') !== args.url) return 'TARGET_PAGE_CHANGED';
+ if (visible('main').length !== 1 || visible(args.login).length ||
+     visible(args.work).length) return 'SURFACE_UNPROVEN';
+ const boxes = visible(composerSel);
+ if (boxes.length !== 1 || boxes[0].getAttribute('aria-disabled') === 'true')
+   return 'SURFACE_UNPROVEN';
+ if (visible(args.stop).length) return 'GENERATION_ACTIVE';
+ if (args.profile_id) {
+   const p = document.querySelector('[data-profile-id]');
+   if (p && p.getAttribute('data-profile-id') !== args.profile_id) return 'PROFILE_MISMATCH';
+ }
+ if (args.account_id) {
+   const a = document.querySelector('[data-account-id]');
+   if (a && a.getAttribute('data-account-id') !== args.account_id) return 'ACCOUNT_MISMATCH';
+ }
+ return 'READY';
+}"""
+
+_SEARCH_MARKER = """(args) => {
+  const isVis = (el) => {
+    if (!el || el.nodeType !== 1) return false;
+    if (typeof getComputedStyle === 'function') {
+      try {
+        const s = getComputedStyle(el);
+        if (s && s.visibility === 'hidden') return false;
+      } catch (e) {}
+    }
+    if (typeof el.getClientRects === 'function') {
+      return el.getClientRects().length > 0;
+    }
+    return true;
+  };
+  const marker = args.marker;
+  const matches = [];
+  const candidates = [...document.querySelectorAll('*')].filter(isVis);
+  for (const el of candidates) {
+    const text = (el.textContent || '').replace(/\\r\\n/g, '\\n').trim();
+    if (text === marker) {
+      const children = [...(el.children || el.childNodes || [])].filter(c => c.nodeType === 1);
+      const childMatch = children.some(c => (c.textContent || '').replace(/\\r\\n/g, '\\n').trim() === marker);
+      if (!childMatch) {
+        const msgEl = (typeof el.closest === 'function') ?
+          (el.closest('[data-message-id]') || el.closest('[data-turn-id]') || el.closest('[data-message-author-role]') || el) : el;
+        const msgId = (typeof msgEl.getAttribute === 'function' ? (msgEl.getAttribute('data-message-id') || msgEl.getAttribute('data-turn-id')) : null) || msgEl.id || 'turnA';
+        matches.push({ message_id: msgId });
+      }
+    }
+  }
+  return { matches };
+}"""
+
+
 
 
 def _doorbell_text(event_id: str, repository: str, *, send_only: bool = False) -> str:
@@ -196,6 +255,11 @@ class _PlaywrightInventory:
         # Existing probes and Send remain attach-only.
         with self._browser(endpoint) as browser:
             yield [page for context in browser.contexts for page in context.pages]
+
+    @contextmanager
+    def contexts(self, endpoint: str):
+        with self._browser(endpoint) as browser:
+            yield list(browser.contexts)
 
     def preload(self, binding: ResolvedBinding, *, current_binding=None) -> str:
         """Auto-load exactly the private, enrolled chat; no Send or tab hijack.
@@ -341,3 +405,205 @@ class LocalChromeDoorbellAdapter:
             return receipt("UNKNOWN" if staging_started or clicked else "UNSUPPORTED",
                            "SUBMISSION_UNPROVEN" if clicked else (
                                "INSERT_BLOCKED" if staging_started else "CDP_UNAVAILABLE"))
+
+
+class LocalChromeObserverAdapter:
+    """Bounded, truly read-only Chrome CDP 127.0.0.1:9444 observer adapter.
+
+    Implements TrustedPrivateBrowserObserver for source-merged WakeHub F1A.
+    Disconnects Playwright client only. Never launches, opens tabs, navigates,
+    types, clicks, sends, or alters user session state.
+    """
+
+    def __init__(self, *,
+                 inventory: BrowserInventory | None = None,
+                 enrolled_origin: PrivateOriginSnapshot | None = None,
+                 profile_id: str | None = None,
+                 account_id: str | None = None,
+                 session_id: str | None = None,
+                 login_id: str | None = None):
+        self.inventory = inventory or _PlaywrightInventory()
+        if enrolled_origin is not None:
+            if not _valid_origin(enrolled_origin):
+                raise OriginError("UNVERIFIED_ORIGIN")
+        self.enrolled_origin = enrolled_origin
+        self.profile_id = profile_id
+        self.account_id = account_id
+        self.session_id = session_id
+        self.login_id = login_id
+        self._used_nonces: set[str] = set()
+
+    def __repr__(self) -> str:
+        return "LocalChromeObserverAdapter(<private>)"
+
+    @contextmanager
+    def _browser_pages(self, endpoint: str):
+        if hasattr(self.inventory, "contexts"):
+            with self.inventory.contexts(endpoint) as contexts:
+                if len(contexts) != 1:
+                    raise OriginError("SEARCH_COVERAGE_UNPROVEN")
+                yield list(contexts[0].pages)
+        elif hasattr(self.inventory, "pages"):
+            with self.inventory.pages(endpoint) as pages:
+                yield list(pages)
+        else:
+            raise OriginError("SEARCH_COVERAGE_UNPROVEN")
+
+    def capture_origin(self, *, request_id: str,
+                       binding: ResolvedBinding) -> PrivateOriginSnapshot:
+        """Capture and prove the explicitly supplied opened route and session."""
+        if not _is_windows():
+            raise OriginError("SEARCH_COVERAGE_UNPROVEN")
+        if not _private_id(request_id):
+            raise OriginError("RENDEZVOUS_INPUT_INVALID")
+        if (type(binding) is not ResolvedBinding or
+                not _private_id(binding.route_id) or
+                type(binding.generation) is not int or binding.generation < 1 or
+                type(binding.chat_url) is not str or _CHAT.fullmatch(binding.chat_url) is None or
+                not _endpoint(binding.cdp_endpoint) or
+                urlsplit(binding.cdp_endpoint).port != 9444):
+            raise OriginError("RENDEZVOUS_ORIGIN_INVALID")
+
+        if self.enrolled_origin is not None:
+            if (self.enrolled_origin.route_id != binding.route_id or
+                    self.enrolled_origin.generation != binding.generation or
+                    self.enrolled_origin.chat_url != binding.chat_url or
+                    self.enrolled_origin.cdp_endpoint != binding.cdp_endpoint):
+                raise OriginError("RENDEZVOUS_ORIGIN_INVALID")
+            pid = self.enrolled_origin.profile_id
+            aid = self.enrolled_origin.account_id
+            sid = self.enrolled_origin.session_id
+            lid = self.enrolled_origin.login_id
+        else:
+            pid = self.profile_id
+            aid = self.account_id
+            sid = self.session_id
+            lid = self.login_id
+            if not all(_private_id(x) for x in (pid, aid, sid, lid)):
+                raise OriginError("UNVERIFIED_ORIGIN")
+
+        try:
+            with self._browser_pages(binding.cdp_endpoint) as pages:
+                matching = [p for p in pages
+                            if isinstance(getattr(p, "url", None), str) and
+                            p.url.rstrip("/") == binding.chat_url]
+                if len(matching) != 1:
+                    raise OriginError("SEARCH_COVERAGE_UNPROVEN" if len(matching) > 1
+                                     else "RENDEZVOUS_ORIGIN_INVALID")
+                page = matching[0]
+                if hasattr(page, "set_default_timeout"):
+                    page.set_default_timeout(3000)
+                args = {**_ARGS, "url": binding.chat_url,
+                        "profile_id": pid, "account_id": aid}
+                result = page.evaluate(_OBSERVER_CHECK, args)
+                if result != "READY":
+                    raise OriginError("RENDEZVOUS_ORIGIN_INVALID")
+                if getattr(page, "url", "").rstrip("/") != binding.chat_url:
+                    raise OriginError("RENDEZVOUS_ORIGIN_INVALID")
+        except OriginError:
+            raise
+        except Exception:
+            raise OriginError("SEARCH_COVERAGE_UNPROVEN") from None
+
+        snapshot = PrivateOriginSnapshot(
+            route_id=binding.route_id,
+            generation=binding.generation,
+            chat_url=binding.chat_url,
+            cdp_endpoint=binding.cdp_endpoint,
+            profile_id=pid,
+            account_id=aid,
+            session_id=sid,
+            login_id=lid,
+        )
+        if not _valid_origin(snapshot):
+            raise OriginError("RENDEZVOUS_ORIGIN_INVALID")
+        return snapshot
+
+    def search_and_reprove(self, emission: RendezvousEmission, *,
+                           nonce: str) -> RendezvousObservation:
+        """Enumerate all complete marker occurrences across search domain and reprove origin."""
+        if not _is_windows():
+            raise OriginError("SEARCH_COVERAGE_UNPROVEN")
+        if (type(emission) is not RendezvousEmission or
+                not _private_id(emission.request_id) or
+                type(emission.marker) is not str or _MARKER.fullmatch(emission.marker) is None or
+                type(emission.marker_digest) is not str or
+                hashlib.sha256(emission.marker.encode("ascii")).hexdigest() != emission.marker_digest or
+                not _valid_origin(emission.origin)):
+            raise OriginError("RENDEZVOUS_OBSERVATION_INVALID")
+        if urlsplit(emission.origin.cdp_endpoint).port != 9444:
+            raise OriginError("SEARCH_COVERAGE_UNPROVEN")
+        if type(nonce) is not str or len(nonce) < 16:
+            raise OriginError("RENDEZVOUS_OBSERVATION_INVALID")
+
+        if self.enrolled_origin is not None and self.enrolled_origin != emission.origin:
+            raise OriginError("RENDEZVOUS_ORIGIN_MISMATCH")
+
+        if nonce in self._used_nonces:
+            raise OriginError("RENDEZVOUS_REPLAY")
+        self._used_nonces.add(nonce)
+
+        hits: list[RendezvousHit] = []
+        try:
+            with self._browser_pages(emission.origin.cdp_endpoint) as pages:
+                if not pages:
+                    raise OriginError("SEARCH_COVERAGE_UNPROVEN")
+                search_args = {"marker": emission.marker}
+                for page in pages:
+                    if hasattr(page, "set_default_timeout"):
+                        page.set_default_timeout(3000)
+                    try:
+                        raw = page.evaluate(_SEARCH_MARKER, search_args)
+                    except Exception:
+                        raise OriginError("SEARCH_COVERAGE_UNPROVEN") from None
+                    if type(raw) is not dict or "matches" not in raw or type(raw["matches"]) is not list:
+                        raise OriginError("SEARCH_COVERAGE_UNPROVEN")
+                    for m in raw["matches"]:
+                        if type(m) is not dict or "message_id" not in m or not _private_id(m["message_id"]):
+                            raise OriginError("RENDEZVOUS_OBSERVATION_INVALID")
+                        p_url = getattr(page, "url", "")
+                        if p_url.rstrip("/") == emission.origin.chat_url:
+                            hit_origin = emission.origin
+                        else:
+                            hit_origin = replace(emission.origin, chat_url=p_url.rstrip("/"))
+                        hits.append(RendezvousHit(
+                            marker=emission.marker,
+                            origin=hit_origin,
+                            message_id=m["message_id"],
+                        ))
+
+                if len(hits) == 1:
+                    matching = [p for p in pages
+                                if isinstance(getattr(p, "url", None), str) and
+                                p.url.rstrip("/") == emission.origin.chat_url]
+                    if len(matching) != 1:
+                        raise OriginError("RENDEZVOUS_ORIGIN_INVALID")
+                    chat_page = matching[0]
+                    if hasattr(chat_page, "set_default_timeout"):
+                        chat_page.set_default_timeout(3000)
+                    check_args = {**_ARGS, "url": emission.origin.chat_url,
+                                  "profile_id": emission.origin.profile_id,
+                                  "account_id": emission.origin.account_id}
+                    res = chat_page.evaluate(_OBSERVER_CHECK, check_args)
+                    if res != "READY":
+                        raise OriginError("RENDEZVOUS_ORIGIN_INVALID")
+                    if getattr(chat_page, "url", "").rstrip("/") != emission.origin.chat_url:
+                        raise OriginError("RENDEZVOUS_ORIGIN_INVALID")
+        except OriginError:
+            raise
+        except Exception:
+            raise OriginError("SEARCH_COVERAGE_UNPROVEN") from None
+
+        return RendezvousObservation(
+            request_id=emission.request_id,
+            marker_digest=emission.marker_digest,
+            nonce=nonce,
+            hits=tuple(hits),
+            opened_origin=emission.origin,
+        )
+
+
+LocalChromeBrowserObserver = LocalChromeObserverAdapter
+LocalChromePrivateObserver = LocalChromeObserverAdapter
+ChromeCdpObserverAdapter = LocalChromeObserverAdapter
+

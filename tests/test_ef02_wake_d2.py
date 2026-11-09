@@ -1492,16 +1492,16 @@ class InMemoryRendezvousObserver:
             self.world.opened_origin))
 
 
-def make_rendezvous_env(tmp_path, *, entropy=None):
+def make_rendezvous_env(tmp_path, *, entropy=None, cdp_port=CDP_PORT):
     registry, _, root = setup_env(tmp_path)
     caller = LocalCallerAttestation("rendezvous-operator", True, "PRIVATE_TOKEN", True)
-    origin = PrivateOriginSnapshot("routeA", 1, CHAT_A, CDP_PORT,
+    origin = PrivateOriginSnapshot("routeA", 1, CHAT_A, cdp_port,
                                    "private-profile", "private-account", "private-session", "private-login")
     authority = SyntheticRendezvousAuthority(caller, origin)
     registrar = LocalOriginRegistrar(registry, root, authority=authority)
     if not registry.exists():
         registrar.register_route(route_id="routeA", generation=1, chat_url=CHAT_A,
-                                 cdp_endpoint=CDP_PORT, consent=True, attestation=caller)
+                                 cdp_endpoint=cdp_port, consent=True, attestation=caller)
     world = SimpleNamespace(opened_origin=origin, output_origin=origin, hits=[])
     carrier, observer = InMemoryRendezvousCarrier(world), InMemoryRendezvousObserver(world)
     authority.adapters = [(carrier, "carrier", RendezvousTrust.SYNTHETIC),
@@ -2025,3 +2025,81 @@ def test_rendezvous_synthetic_record_cannot_be_promoted_to_native_authority(tmp_
     assert (receipt.status, receipt.code, receipt.live_authority) == (
         "HOLD", "RENDEZVOUS_TRUST_MISMATCH", False)
     assert env.observer.search_calls == 0
+
+
+def test_rendezvous_with_cdp_observer_adapter_positive(tmp_path):
+    from ai_commerce.remote.cdp_doorbell import LocalChromeObserverAdapter
+    from test_ef02_cdp_doorbell import FakeObserverPage, FakeObserverInventory
+
+    env = make_rendezvous_env(tmp_path, cdp_port="http://127.0.0.1:9444")
+    page = FakeObserverPage(CHAT_A, profile_id="private-profile", account_id="private-account")
+    observer = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page), enrolled_origin=env.origin
+    )
+    env.authority.adapters = [(env.carrier, "carrier", RendezvousTrust.SYNTHETIC),
+                              (observer, "observer", RendezvousTrust.SYNTHETIC)]
+    env.issuer = PrivateOriginRendezvous(env.registrar, env.path, carrier=env.carrier, observer=observer)
+
+    # Carrier records emission in page DOM
+    env.carrier.before = lambda emission: page.markers.append((emission.marker, "turnA"))
+
+    receipt_issue = issue_rendezvous(env)
+    assert (receipt_issue.status, receipt_issue.code) == ("SYNTHETIC_PENDING", "SYNTHETIC_EMISSION_ACKNOWLEDGED")
+
+    receipt_verify = verify_rendezvous(env)
+    assert (receipt_verify.status, receipt_verify.code) == ("SYNTHETIC_MATCH", "NO_LIVE_AUTHORITY")
+
+
+def test_rendezvous_with_cdp_observer_search_coverage_unproven(tmp_path):
+    from ai_commerce.remote.cdp_doorbell import LocalChromeObserverAdapter
+    from test_ef02_cdp_doorbell import FakeObserverPage, FakeObserverInventory
+
+    env = make_rendezvous_env(tmp_path, cdp_port="http://127.0.0.1:9444")
+    page = FakeObserverPage(CHAT_A, profile_id="private-profile", account_id="private-account")
+    # Inject disconnect before search
+    env.carrier.before = lambda em: setattr(page, "fail_step", "disconnect")
+    observer = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page), enrolled_origin=env.origin
+    )
+    env.authority.adapters = [(env.carrier, "carrier", RendezvousTrust.SYNTHETIC),
+                              (observer, "observer", RendezvousTrust.SYNTHETIC)]
+    env.issuer = PrivateOriginRendezvous(env.registrar, env.path, carrier=env.carrier, observer=observer)
+
+    receipt_issue = issue_rendezvous(env)
+    assert receipt_issue.status == "SYNTHETIC_PENDING"
+
+    receipt_verify = verify_rendezvous(env)
+    assert (receipt_verify.status, receipt_verify.code, receipt_verify.live_authority) == (
+        "HOLD", "SEARCH_COVERAGE_UNPROVEN", False)
+
+
+def test_rendezvous_with_cdp_observer_zero_and_duplicate_markers(tmp_path):
+    from ai_commerce.remote.cdp_doorbell import LocalChromeObserverAdapter
+    from test_ef02_cdp_doorbell import FakeObserverPage, FakeObserverInventory
+
+    # Zero matches: carrier emits, but marker not found in page
+    env = make_rendezvous_env(tmp_path, cdp_port="http://127.0.0.1:9444")
+    page_zero = FakeObserverPage(CHAT_A, profile_id="private-profile", account_id="private-account")
+    obs_zero = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page_zero), enrolled_origin=env.origin
+    )
+    env.authority.adapters = [(env.carrier, "carrier", RendezvousTrust.SYNTHETIC),
+                              (obs_zero, "observer", RendezvousTrust.SYNTHETIC)]
+    env.issuer = PrivateOriginRendezvous(env.registrar, env.path, carrier=env.carrier, observer=obs_zero)
+    issue_rendezvous(env)
+    receipt_zero = verify_rendezvous(env)
+    assert (receipt_zero.status, receipt_zero.code) == ("HOLD", "RENDEZVOUS_SEARCH_NOT_UNIQUE")
+
+    # Duplicate matches: marker appears twice
+    env2 = make_rendezvous_env(tmp_path, cdp_port="http://127.0.0.1:9444")
+    page_dup = FakeObserverPage(CHAT_A, profile_id="private-profile", account_id="private-account")
+    obs_dup = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page_dup), enrolled_origin=env2.origin
+    )
+    env2.authority.adapters = [(env2.carrier, "carrier", RendezvousTrust.SYNTHETIC),
+                               (obs_dup, "observer", RendezvousTrust.SYNTHETIC)]
+    env2.issuer = PrivateOriginRendezvous(env2.registrar, env2.path, carrier=env2.carrier, observer=obs_dup)
+    env2.carrier.before = lambda em: page_dup.markers.extend([(em.marker, "turnA"), (em.marker, "turnB")])
+    issue_rendezvous(env2, request_id="requestB")
+    receipt_dup = verify_rendezvous(env2, request_id="requestB")
+    assert (receipt_dup.status, receipt_dup.code) == ("HOLD", "RENDEZVOUS_SEARCH_NOT_UNIQUE")
