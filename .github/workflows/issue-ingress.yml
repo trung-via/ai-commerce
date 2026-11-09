@@ -1125,6 +1125,9 @@ jobs:
       github.event.issue.title == '[HOSTOPS EF02 RECONCILE] #698 attempt-only'
     runs-on: [self-hosted, Windows, ai-commerce-hostops]
     timeout-minutes: 5
+    concurrency:
+      group: personal-hostops-workspace
+      cancel-in-progress: false
     permissions:
       contents: read
       issues: write
@@ -1133,6 +1136,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - name: Verify one exact fixed read-only event
         shell: pwsh
         run: |
@@ -1151,6 +1155,7 @@ jobs:
           HOSTOPS_EF02_RECEIPT: ${{ runner.temp }}\ef02-attempt-698-readonly.json
         run: |
           $ErrorActionPreference = 'Stop'
+          $env:PYTHONPATH = Join-Path $env:GITHUB_WORKSPACE 'src'
           python -B -m ai_commerce.hostops_v3.ef02_attempt_reconcile_readonly --output $env:HOSTOPS_EF02_RECEIPT
       - name: Publish bounded independent HOLD-only receipt
         if: always()
