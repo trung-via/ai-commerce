@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
         # Historical read-only reconciliation must remain available.
         if args.command != "reconcile":
             for action in batch["actions"]:
-                require_preexecutor_acceptance(action)
+                require_preexecutor_acceptance(action, source_closure=True)
     except Exception as exc:
         print("EF02_REQUEST_REJECTED: " + type(exc).__name__ + ": " + str(exc),
               file=sys.stderr)
