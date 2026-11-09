@@ -1,0 +1,18 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "hostops-ef02-attempt-reconcile",
+  "sources": [
+    "src/ai_commerce/hostops_v3/ef02_attempt_reconcile_readonly.py"
+  ],
+  "tests": [
+    "tests/test_hostops_ef02_attempt_reconcile_readonly.py"
+  ],
+  "acs": [
+    "HOSTOPS.EF02.698.read-only-process-and-evidence-reconciliation"
+  ],
+  "consumers": [
+    "src/ai_commerce/remote/transport.py",
+    "src/ai_commerce/hostops_v3/personal.py"
+  ],
+  "contracts": []
+}
