@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import tempfile
 
@@ -21,6 +22,14 @@ OPERATION = "EF02_ATTEMPT_RECONCILE_READONLY"
 SOURCE_SHA = "b9abe11c31954706caa816d9c53ca6c0519e913e"
 ATTEMPT = "bq06b_r2_agy38flashhigh_legit_correction_reprocess_main_b9abe11c_20261109"
 ACTION = "BQ06B-R2-AGY38FLASHHIGH-A09-LINEAGE-SUPERSESSION-ROOTFIX-01"
+# EF02 evidence is stored under LocalBatchWorker.root, not Git worktree/ef01.
+# Exact path reconstructed from the authenticated Windows run 42572795120.
+# Never allow an Issue or command-line argument to choose this directory.
+BATCH = "bq06b-r2-valid-a09-lineage-rootfix-agy38flashhigh-main-b9abe11c-20261109"
+_EVIDENCE_ACTION_ROOT = (
+    Path(r"C:\TOOL\ai-commerce-runner\_work\ai-commerce\ai-commerce\.local\ef02")
+    / BATCH / (ACTION + "-" + ATTEMPT)
+)
 PID = 14636
 # Original GitHub SPAWNED checkpoint was created at 2026-11-09T06:26:05Z.
 NOT_BEFORE = dt.datetime(2026, 11, 9, 6, 25, tzinfo=dt.timezone.utc)
@@ -151,9 +160,72 @@ def _probe_worktree() -> tuple[str, str, str]:
         return "WORKTREE_READ_UNAVAILABLE", "SOURCE_READ_UNAVAILABLE", "RECEIPT_READ_UNAVAILABLE"
 
 
+def _safe_absolute_receipt_path(target: Path) -> bool:
+    """Fail closed for symlinks/reparse and nonregular evidence-path ancestors."""
+    try:
+        if not target.is_absolute():
+            return False
+        cursor = Path(target.anchor)
+        for name in target.parts[1:]:
+            if name in ("", ".", "..") or ":" in name or "\\" in name:
+                return False
+            cursor = cursor / name
+            info = cursor.lstat()
+            if (stat.S_ISLNK(info.st_mode)
+                    or getattr(info, "st_file_attributes", 0) & 0x400):
+                return False
+            if cursor == target:
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    return False
+            elif not stat.S_ISDIR(info.st_mode):
+                return False
+        return True
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def _probe_ef02_evidence_root() -> str:
+    """Observe only one fixed EF02 result; never publish private bytes or paths.
+
+    JSON presence is not an EF01 signer, verified provider return or replay grant.
+    """
+    if os.name != "nt":
+        return "RECEIPT_READ_UNAVAILABLE"
+    terminal = _EVIDENCE_ACTION_ROOT / "ef01" / "engineering_result.json"
+    try:
+        if not _EVIDENCE_ACTION_ROOT.exists():
+            return "NO_TERMINAL_RECEIPT_OBSERVED"
+        if not _EVIDENCE_ACTION_ROOT.is_dir() or not terminal.exists():
+            return "NO_TERMINAL_RECEIPT_OBSERVED"
+        if not _safe_absolute_receipt_path(terminal):
+            return "RECEIPT_READ_UNAVAILABLE"
+        prior = terminal.lstat()
+        if prior.st_size < 2 or prior.st_size > MAX_SOURCE_BYTES:
+            return "RECEIPT_READ_UNAVAILABLE"
+        with terminal.open("rb") as handle:
+            opened = os.fstat(handle.fileno())
+            content = handle.read(MAX_SOURCE_BYTES + 1)
+            closed = os.fstat(handle.fileno())
+        identity = lambda o: (o.st_dev, o.st_ino, o.st_size, o.st_mtime_ns, o.st_nlink)
+        if (len(content) > MAX_SOURCE_BYTES
+                or identity(prior) != identity(opened)
+                or identity(opened) != identity(closed)
+                or not _safe_absolute_receipt_path(terminal)):
+            return "RECEIPT_READ_UNAVAILABLE"
+        result = json.loads(content.decode("utf-8-sig"))
+        if (type(result) is not dict or result.get("attempt_id") != ATTEMPT
+                or result.get("work_id") != BATCH + ":" + ACTION):
+            return "RECEIPT_READ_UNAVAILABLE"
+        return "LOCAL_RESULT_PRESENT_UNVERIFIED"
+    except (OSError, ValueError, TypeError, UnicodeError, json.JSONDecodeError):
+        return "RECEIPT_READ_UNAVAILABLE"
+
+
 def observe() -> dict:
     process = _probe_pid()
     worktree, source, receipt = _probe_worktree()
+    if worktree == "WORKTREE_SINGLE" and receipt == "NO_TERMINAL_RECEIPT_OBSERVED":
+        receipt = _probe_ef02_evidence_root()
     assert process in _CODES_PROCESS and worktree in _CODES_WORKTREE
     assert source in _CODES_SOURCE and receipt in _CODES_RECEIPT
     return {
