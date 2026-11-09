@@ -1823,3 +1823,23 @@ def test_v22_normal_real_main_manifests_resolve_production_owner_closure(changed
         else:
             assert binding["registered_profile"] == f'mt01-{entry["group"]}-tests'
             assert profiles[binding["registered_profile"]] == binding["argv"]
+
+def test_710_no_model_headless_workflow_has_trusted_mt01_control_closure(tmp_path):
+    from ai_commerce.engineering.impact_v21 import CONTROL_TESTS, select_impact
+    path = ".github/workflows/ef02-antigravity-headless-preflight.yml"
+    reviewed = ("tests/test_ef02.py", "tests/test_ef02_scope_main_integration.py",
+                "tests/test_mt01_v21.py")
+    assert tuple(CONTROL_TESTS[path]) == reviewed
+    for test_path in reviewed:
+        mk(tmp_path, test_path, "# registered independent test\n")
+    result = select_impact(root=tmp_path, changed_paths=[path], groups=())
+    assert result.runnable, result
+    assert set(result.selected_tests) == set(reviewed)
+    assert result.missing_mapping == ()
+    # An attacker introducing another workflow does not inherit this approval.
+    unrelated = ".github/workflows/ef02-antigravity-unsafe.yml"
+    denied = select_impact(root=tmp_path, changed_paths=[unrelated], groups=())
+    assert denied.mode == "HOLD_MAPPING"
+    assert unrelated + ":UNREVIEWED_CI_CONTROL" in denied.missing_mapping
+
+
