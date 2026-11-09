@@ -4,12 +4,14 @@ This suite uses disposable authentic owner imports/registry records. It never
 executes a model, spends, publishes, or mutates any production owner.
 """
 import os
+import json
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from ai_commerce.analytics import AnalyticsLedger
+from ai_commerce.core.provenance import canonical_bytes
 from ai_commerce.learning import SnapshotPin
 from ai_commerce.creative_quality import behavioral_learning_bridge as bq06a
 from ai_commerce.creative_quality import behavioral_learning_fresh_replay as fresh
@@ -54,6 +56,8 @@ def test_real_native_a09_a11_a17_receiver_replay_keeps_every_byte(tmp_path):
     assert data["limits"]["causal_lift"] is None
     assert data["limits"]["provider_attested"] is False
     assert data["limits"]["authority"] == "NONE"
+    assert data["source_state_counts"]["available_zero"] == 1
+    assert data["source_state_counts"]["not_available"] == 1
     assert fresh.recheck_fresh(observed.raw, **params).raw == observed.raw
     assert file_bytes(tmp_path) == before
     assert not any(Path(params["a09_path"] + suffix).exists()
@@ -148,3 +152,87 @@ def test_bounded_history_bad_cursor_fails_closed_on_authentic_selection(tmp_path
             raise AssertionError("should not follow invalid cursor")
     with pytest.raises(fresh.FreshEvidenceHold, match="HISTORY_UNPROVEN"):
         fresh._history(BadCursor(), record)
+
+
+
+def append_native(tmp_path, ledger, record, *, value, correction_of=None):
+    raw = json.loads(ledger.raw_bytes(record["raw_sha256"]).decode("utf-8"))
+    assert raw["schema_version"] == "ManualAnalyticsRows.v1"
+    assert raw["rows"][0]["status"] == "AVAILABLE"
+    raw["rows"][0]["value"] = value
+    path = tmp_path / ("native-new-row-" + str(value) + ".json")
+    path.write_bytes(canonical_bytes(raw))
+    return ledger.import_file(
+        path,
+        plan=record["plan"],
+        profile=record["mapping"],
+        file_format=record["format"],
+        source_kind=record["source_kind"],
+        correction_of=correction_of,
+    )
+
+
+def test_native_correction_child_invalidates_old_pinned_source(tmp_path):
+    params, record = complete_case(tmp_path)
+    ledger = AnalyticsLedger(params["a09_path"])
+    child = append_native(tmp_path, ledger, record, value=19,
+                          correction_of=record["import_id"])
+    assert child["import"]["lineage"] == {
+        "relationship": "CORRECTION", "parent_import_id": record["import_id"],
+    }
+    before = file_bytes(tmp_path)
+    result = fresh.review_fresh(**params).to_dict()
+    assert result["status"] == "INSUFFICIENT_EVIDENCE_HOLD"
+    assert result["missing_requirements"] == ["A09_LINEAGE_STALE_OR_CORRECTED"], result
+    assert file_bytes(tmp_path) == before
+
+
+def test_authentic_two_hop_correction_then_reprocess_invalidates_original(tmp_path):
+    params, record = complete_case(tmp_path)
+    ledger = AnalyticsLedger(params["a09_path"])
+    corrected = append_native(tmp_path, ledger, record, value=21,
+                              correction_of=record["import_id"])["import"]
+    profile = dict(corrected["mapping"])
+    profile["mapping_version"] = "two-hop-valid-reprocess"
+    grandchild = ledger.reprocess(corrected["import_id"], plan=corrected["plan"],
+                                  profile=profile)["import"]
+    assert grandchild["lineage"] == {
+        "relationship": "REPROCESS", "parent_import_id": corrected["import_id"],
+    }
+    before = file_bytes(tmp_path)
+    result = fresh.review_fresh(**params).to_dict()
+    assert result["missing_requirements"] == ["A09_LINEAGE_STALE_OR_CORRECTED"]
+    assert file_bytes(tmp_path) == before
+
+
+def test_authentic_native_history_paginates_more_than_100_unrelated_roots(tmp_path):
+    params, record = complete_case(tmp_path)
+    ledger = AnalyticsLedger(params["a09_path"])
+    for n in range(101):
+        independent = append_native(tmp_path, ledger, record, value=1000 + n)
+        assert independent["import"]["lineage"] == {
+            "relationship": "ROOT", "parent_import_id": None,
+        }
+    assert ledger.history(plan=record["plan"], limit=100)["next_offset"] == 100
+    before = file_bytes(tmp_path)
+    result = fresh.review_fresh(**params).to_dict()
+    assert result["status"] == "EVIDENCE_REVIEW_FOR_BRAIN", result
+    assert result["a09"]["matched_selected_a11_refs"] > 0
+    assert file_bytes(tmp_path) == before
+
+
+def test_caller_cannot_auto_repin_a11_to_new_native_child(tmp_path):
+    params, record = complete_case(tmp_path)
+    ledger = AnalyticsLedger(params["a09_path"])
+    child = append_native(tmp_path, ledger, record, value=61,
+                          correction_of=record["import_id"])["import"]
+    checked = ledger.inspect(child["import_id"])
+    params["snapshot_pin"] = SnapshotPin(
+        child["import_id"], child["context_sha256"], child["raw_sha256"],
+        tuple(x["observation_id"] for x in checked["observations"]),
+    )
+    before = file_bytes(tmp_path)
+    result = fresh.review_fresh(**params).to_dict()
+    assert result["status"] == "INSUFFICIENT_EVIDENCE_HOLD"
+    assert "A11_OBSERVATION_REFS_MISMATCH" in result["missing_requirements"]
+    assert file_bytes(tmp_path) == before
