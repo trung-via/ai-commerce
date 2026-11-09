@@ -1,0 +1,266 @@
+{
+  "schema_version": "WorkItem.v1",
+  "work_id": "BQ-06A_OFFLINE_LEARNING_001",
+  "objective": "Bounded A11 retained learning evidence to read-only next-Brain-brief handoff, using genuine A17 pending proposal review and separately unbound native Q4 context",
+  "status": "HOLD_NATIVE_VERIFICATION_INCOMPLETE",
+  "source_sha": "6777b13f9effbf242b2ebd963ee5f7580c485651",
+  "source_base_commit": "6777b13f9effbf242b2ebd963ee5f7580c485651",
+  "action_id": "BQ06A-Q6-NATIVE-SYMLINK-AGY38FLASHHIGH-R4-001",
+  "attempt_id": "bq06a_q6_native_symlink_6777b13f_agy38_flash_high_r4_20261109",
+  "human_authorization": "Human @AI Commerce 2026-11-09 explicitly selected Antigravity Gemini 3.8 Flash High to fix Issue #682; new action BQ06A-Q6-NATIVE-SYMLINK-AGY38FLASHHIGH-R4-001, immutable attempt bq06a_q6_native_symlink_6777b13f_agy38_flash_high_r4_20261109, EXACT current-main source 6777b13f9effbf242b2ebd963ee5f7580c485651",
+  "historical_attempts": [
+    {
+      "round": "R1",
+      "issue": 675,
+      "run_id": 42503609793,
+      "artifact_id": 13630565083,
+      "artifact_sha256": "a969fc755108350228f864e4897cedd920959ac00c5592b46a433524d9765d99",
+      "failure": "MT01_COVERAGE_UNPROVEN / AC_DECLARATION_MISSING_OR_INVALID_REQUIRES_BROAD_SCOPE; pre-test selection; Windows pytest not executed",
+      "prior_local_source_reused": false
+    },
+    {
+      "round": "R2",
+      "issue": 679,
+      "run_id": 42518941547,
+      "artifact_id": 13635525799,
+      "artifact_sha256": "bdb89dd1f8707213c11ed014d9d1b064d05ebbee7c0978b61afc85c409092544",
+      "summary": "Valid six-allowlist source, 15 owner+consumer groups selected, 2,274 collected, 2,265 passed, 1 failed (test_native_windows_symlink_denied_before_registry WinError 1314 before guard execution), 8 skipped, 0 errors. No candidate released due verify_exit=3.",
+      "prior_local_source_reused": false
+    },
+    {
+      "round": "R3",
+      "issue": 682,
+      "run_id": 42539759303,
+      "artifact_id": 13640907207,
+      "artifact_sha256": "114f4f530e0cc52db068039c2d54094c46e52486a42a3ee72a0b1abc96a04d04",
+      "failure": "Codex subprocess returned 1 with QUOTA_EXHAUSTED; zero changed files, no candidate_sha, no MT01 tests. Immutable evidence preserved.",
+      "prior_local_source_reused": false
+    }
+  ],
+  "diagnosis_only_immutable_prior_attempt": {
+    "issue": 682,
+    "run_id": 42539759303,
+    "artifact_id": 13640907207,
+    "artifact_sha256": "114f4f530e0cc52db068039c2d54094c46e52486a42a3ee72a0b1abc96a04d04",
+    "failure": "QUOTA_EXHAUSTED; zero changed files",
+    "prior_local_source_reused": false
+  },
+  "component": "bq-06a",
+  "owner_manifest": "work_items/mt01-components/bq-06a.json",
+  "verification_profile": "mt01-component-onboarding",
+  "max_repair_rounds": 2,
+  "candidate_mode": "BRANCH_ONLY_EF02_WORKER_PUBLICATION",
+  "executor_ingress_existing_registered_acs": [
+    "A11.learning",
+    "A17.C07.C10.E06.offline-creative-learning"
+  ],
+  "acceptance": [
+    "BQ-06a.a11-sourced-evidence-lineage",
+    "BQ-06a.technical-quality-unbound-from-audience",
+    "BQ-06a.brain-handoff-advisory-only"
+  ],
+  "allowed_paths": [
+    "src/ai_commerce/creative_quality/behavioral_learning_bridge.py",
+    "tests/test_bq_06a_behavioral_learning.py",
+    "work_items/mt01-components/bq-06a.json",
+    "work_items/BQ-06A_OFFLINE_LEARNING_001.json",
+    "docs/creative/BQ_06A_OFFLINE_LEARNING_PROTOCOL.md",
+    "docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md"
+  ],
+  "add_only_paths": [
+    "src/ai_commerce/creative_quality/behavioral_learning_bridge.py",
+    "tests/test_bq_06a_behavioral_learning.py",
+    "work_items/mt01-components/bq-06a.json",
+    "work_items/BQ-06A_OFFLINE_LEARNING_001.json",
+    "docs/creative/BQ_06A_OFFLINE_LEARNING_PROTOCOL.md"
+  ],
+  "append_only_paths": [
+    "docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md"
+  ],
+  "acceptance_test_map": {
+    "BQ-06a.a11-sourced-evidence-lineage": {
+      "positive": [
+        "test_a11_sourced_evidence_lineage_zero_missing_counterevidence_readonly",
+        "test_report_denominator_window_uncertainty_preserved",
+        "test_supplied_provenance_never_upgraded"
+      ],
+      "negative": [
+        "test_rehashed_fabricated_truncated_archive_cannot_replace_retained_pin",
+        "test_native_registry_replacement_and_rollback_fail_without_writes",
+        "test_mismatched_metric_definition_rejected",
+        "test_mismatched_context_rejected",
+        "test_native_windows_hardlink_denied_before_registry",
+        "test_native_windows_junction_denied_before_registry",
+        "test_native_windows_symlink_denied_before_registry",
+        "test_native_windows_write_and_rename_race_denied_during_owner_replay",
+        "test_native_ads_traversal_dot_path_denied",
+        "test_nonquiescent_a11_registry_holds_without_owner_write",
+        "test_native_wal_header_without_sidecars_holds_before_sqlite_open"
+      ]
+    },
+    "BQ-06a.technical-quality-unbound-from-audience": {
+      "positive": [
+        "test_technical_quality_unbound_from_audience_native_wait_brain"
+      ],
+      "negative": [
+        "test_forged_q4_or_changed_native_media_journal_holds",
+        "test_unsupported_effect_association_and_fake_current_replay_hold"
+      ]
+    },
+    "BQ-06a.brain-handoff-advisory-only": {
+      "positive": [
+        "test_brain_handoff_actual_native_a17_pending_proposal_no_adoption",
+        "test_detached_bq01a_fiction_silence_intent_is_never_rewritten",
+        "test_mt01_new_owner_has_real_registered_consumer_closure"
+      ],
+      "negative": [
+        "test_stale_a17_source_revision_content_and_proposal_fail_closed",
+        "test_caller_json_cannot_authenticate_any_authority",
+        "test_private_prose_account_prompt_not_exported_and_closed_replay",
+        "test_existing_human_adoption_is_never_relabelled_pending",
+        "test_public_schema_is_detached_from_authority_flags_and_limits"
+      ]
+    }
+  },
+  "scope_out": [
+    "All existing owner code, acceptance parsers, root guards, Git refs/config and workflows",
+    "A09 fresh replay (explicit requests HOLD)",
+    "New A17 proposals or adoption writes",
+    "Provider requests, media generation by adapter, spend, publish, live PULSE, private enrollment or Brain impersonation"
+  ],
+  "execution_model": {
+    "required_executor": "antigravity",
+    "required_model": "gemini-3.8-flash",
+    "required_effort": "high",
+    "fallback_allowed": false,
+    "runtime_model_attestation": "Human @AI Commerce 2026-11-09 explicitly selected Antigravity Gemini 3.8 Flash High to fix Issue #682; no fallback"
+  },
+  "verification": {
+    "state": "HOLD_NATIVE_VERIFICATION_INCOMPLETE",
+    "initial_head_verified": "6777b13f9effbf242b2ebd963ee5f7580c485651",
+    "initial_worktree": "CLEAN_OBSERVED",
+    "candidate_sha": null,
+    "hosted_windows_ci": "PENDING_INDEPENDENT",
+    "brain_review": "PENDING_INDEPENDENT",
+    "native_symlink_privileged_proof": "NATIVE_SYMLINK_CREATION_UNPROVEN",
+    "native_symlink_handling": "Host denied native symlink creation (WinError 1314); test explicitly records NATIVE_SYMLINK_CREATION_UNPROVEN and skips. Hardlink and junction negative tests strictly PASSED.",
+    "r4_owner_verification": {
+      "scope": "new owner tests/test_bq_06a_behavioral_learning.py",
+      "collected": 61,
+      "passed": 60,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 1,
+      "skip_reason": "test_native_windows_symlink_denied_before_registry: NATIVE_SYMLINK_CREATION_UNPROVEN (WinError 1314)",
+      "requested_workers": 12,
+      "workers_with_fixture_directories_observed": [
+        "gw0",
+        "gw1",
+        "gw2",
+        "gw3",
+        "gw4",
+        "gw5",
+        "gw6",
+        "gw7",
+        "gw8",
+        "gw9",
+        "gw10",
+        "gw11"
+      ],
+      "tested_code_sha256": {
+        "src/ai_commerce/creative_quality/behavioral_learning_bridge.py": "3ba281d5b0d91a7eb87d046ee085141b2fa0a6ca4e5e0af60f1fc153507cb618",
+        "tests/test_bq_06a_behavioral_learning.py": "2d189e0c38a1ce5637ca8334799d11e804475f90ff3691c8d5dea77050646836",
+        "work_items/mt01-components/bq-06a.json": "3db69550a26ce6a62b5a333347e30311877dc5f420c91cd80b2a404f72f74703"
+      },
+      "code_bytes_unchanged_during_execution": true
+    },
+    "mt01_preflight": {
+      "selected_groups": [
+        "a03",
+        "a04",
+        "a06",
+        "a09",
+        "a11",
+        "a13",
+        "a17-1",
+        "b0-3",
+        "b0-4",
+        "bq-01a",
+        "bq-02a",
+        "bq-02b",
+        "bq-05a",
+        "bq-05b0",
+        "bq-06a"
+      ],
+      "fallback": false,
+      "reason_codes": [
+        "ONBOARD_CONSUMER_OWNER_CLOSURE"
+      ],
+      "unknown_acs": [],
+      "new_owner_binding": "mt01-component-onboarding",
+      "trusted_post_executor_verification": "PENDING_EF01_EF02"
+    },
+    "final_full_closure_collection": {
+      "selected_groups": [
+        "a03",
+        "a04",
+        "a06",
+        "a09",
+        "a11",
+        "a13",
+        "a17-1",
+        "b0-3",
+        "b0-4",
+        "bq-01a",
+        "bq-02a",
+        "bq-02b",
+        "bq-05a",
+        "bq-05b0",
+        "bq-06a"
+      ],
+      "test_files": [
+        "tests/test_a03_creative.py",
+        "tests/test_a03_upgrade_v11.py",
+        "tests/test_a04_media_operations.py",
+        "tests/test_a04_upgrade_v11.py",
+        "tests/test_a03_a04_integration.py",
+        "tests/test_a06_e01.py",
+        "tests/test_a09_analytics.py",
+        "tests/test_a09_e02.py",
+        "tests/test_a11_reader.py",
+        "tests/test_a11_registry.py",
+        "tests/test_a11_reporting.py",
+        "tests/test_a11_integration.py",
+        "tests/test_a13_media_inspection.py",
+        "tests/test_a13_claim_rights.py",
+        "tests/test_a13_link.py",
+        "tests/test_a13_evidence_pack.py",
+        "tests/test_a17_variants.py",
+        "tests/test_a17_feedback.py",
+        "tests/test_b0_3_attended_worker.py",
+        "tests/test_b0_4_operator.py",
+        "tests/test_bq_01a_brief_causality.py",
+        "tests/test_bq_02a_critic_t1.py",
+        "tests/test_bq_02b_multimodal.py",
+        "tests/test_bq_05a_pulse_studio_offline_bridge.py",
+        "tests/test_bq_05b_effect_preflight.py",
+        "tests/test_bq_06a_behavioral_learning.py"
+      ],
+      "collected": 2274,
+      "exit_code": 0,
+      "execution": "PENDING_INDEPENDENT_EF01_EF02; collection is not execution"
+    },
+    "final_disposition": "HOLD_NO_CANDIDATE_ACCEPTANCE: 60 owner PASS, 1 privilege-dependent symlink test SKIPPED as NATIVE_SYMLINK_CREATION_UNPROVEN; full 15-group closure execution required by EF01/EF02",
+    "protected_owners_changed": false,
+    "git_writes_attempted": false,
+    "provider_spend_publication_attempted_by_adapter": false,
+    "external_invocation_attestation": "Actual model/executor write receipt and immutable per-attempt artifact must be retained independently by EF02; not authenticated by this WorkItem"
+  },
+  "authority": "HANDOFF_ONLY; no signed BrainDecision, Human adoption, provider rights, audience popularity, ROI or launch claim",
+  "required_followup": {
+    "executor_source_work_complete": true,
+    "independent_ef01_ef02": "Replay final 15-group MT01 closure at these source bytes, on native Windows with actual 12-worker receipts and mandatory real link construction plus B0.4 WAIT_BRAIN/A06/Q4 evidence. Do not accept skipped or unexecuted gates as proof of rejection.",
+    "new_owner_registration": "Data-only candidate manifest validated locally; new AC adoption and trusted post-executor verification remain pending",
+    "publication": "EF02 worker only, genuine candidate branch -> independent Brain review -> hosted Windows CI -> canonical PASS/trusted auto-merge; no v1 issue amendment"
+  }
+}
