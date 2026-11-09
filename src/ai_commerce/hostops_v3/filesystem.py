@@ -66,7 +66,7 @@ def no_link(p):
     return info
 
 
-def _win_handle(path, *, directory=False, write=False):
+def _win_handle(path, *, directory=False, write=False, read_control=False, delete=False):
     # OPEN_REPARSE_POINT prevents following a replaced final link.
     from ctypes import wintypes
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -74,7 +74,10 @@ def _win_handle(path, *, directory=False, write=False):
     create.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
                        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
     create.restype = wintypes.HANDLE
-    access = 0x80 if directory else 0x80000000 | (0x40000000 if write else 0)
+    access = ((0x00020080 if read_control else 0x80)
+              if directory else 0x80000000 | (0x40000000 if write else 0))
+    if delete:
+        access |= 0x00010000
     share = 3 if directory else 1  # directories cannot be renamed; files deny writers/deleters
     flags = 0x00200000 | (0x02000000 if directory else 0)
     handle = create(str(path), access, share, None, 3, flags, None)
@@ -406,7 +409,7 @@ def _w1_valid_leaf(name):
         deny("W1_NATIVE_FILENAME_DENIED")
 
 
-def _w1_open_root(root):
+def _w1_open_root(root, *, read_control=False):
     """Open an absolute local directory, never a junction or UNC path."""
     if os.name != "nt":
         deny("W1_NATIVE_WINDOWS_ONLY")
@@ -424,7 +427,7 @@ def _w1_open_root(root):
                 deny("W1_NATIVE_ROOT_REPARSE")
         if not p.is_dir():
             deny("W1_NATIVE_ROOT_DENIED")
-        handle = _win_handle(p, directory=True)
+        handle = _win_handle(p, directory=True, read_control=read_control)
     except OSError:
         deny("W1_NATIVE_ROOT_DENIED")
     from ctypes import wintypes
@@ -563,3 +566,631 @@ def w1_windows_native_create_fixture(root, expected_root_identity, filename, con
         }
     finally:
         kernel.CloseHandle(root_handle)
+
+
+# ---------------------------------------------------------------------------
+# Windows Owned Fixture Root Pre-flight (non-production fixture only)
+# ---------------------------------------------------------------------------
+
+DANGEROUS_WRITE_RIGHTS = (
+    0x10000000  # GENERIC_ALL
+    | 0x40000000  # GENERIC_WRITE
+    | 0x00040000  # WRITE_DAC
+    | 0x00080000  # WRITE_OWNER
+    | 0x00010000  # DELETE
+    | 0x00000040  # FILE_DELETE_CHILD
+    | 0x00000002  # FILE_WRITE_DATA / FILE_ADD_FILE
+    | 0x00000004  # FILE_APPEND_DATA / FILE_ADD_SUBDIRECTORY
+    | 0x00000010  # FILE_WRITE_EA
+    | 0x00000100  # FILE_WRITE_ATTRIBUTES
+)
+VOLUME_ROOT_DANGEROUS_RIGHTS = (
+    0x10000000  # GENERIC_ALL
+    | 0x40000000  # GENERIC_WRITE
+    | 0x00040000  # WRITE_DAC
+    | 0x00080000  # WRITE_OWNER
+    | 0x00010000  # DELETE
+    | 0x00000040  # FILE_DELETE_CHILD
+)
+HARMLESS_READ_TRAVERSE = (
+    0x80000000  # GENERIC_READ
+    | 0x20000000  # GENERIC_EXECUTE
+    | 0x00020000  # READ_CONTROL
+    | 0x00100000  # SYNCHRONIZE
+    | 0x00000001  # FILE_READ_DATA / FILE_LIST_DIRECTORY
+    | 0x00000008  # FILE_READ_EA
+    | 0x00000020  # FILE_TRAVERSE / FILE_EXECUTE
+    | 0x00000080  # FILE_READ_ATTRIBUTES
+)
+
+# Pinned exact system identity for Windows TrustedInstaller on volume root.
+# Broad wildcard S-1-5-80-* is explicitly forbidden.
+TRUSTED_INSTALLER_SID = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+
+_advapi32 = ctypes.WinDLL("advapi32", use_last_error=True) if os.name == "nt" else None
+_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True) if os.name == "nt" else None
+
+
+def _windows_inspect_handle_security(handle, trusted_owners, *, is_ancestor=False, is_volume_root=False):
+    """Query owner and DACL directly from an opened Win32 directory HANDLE.
+
+    Returns a sanitized dictionary of findings. Never returns raw SIDs, paths,
+    or raw ACL pointers.
+    """
+    from ctypes import wintypes
+    adv = _advapi32 if _advapi32 is not None else ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = _kernel32 if _kernel32 is not None else ctypes.WinDLL("kernel32", use_last_error=True)
+
+    adv.GetSecurityInfo.argtypes = (
+        wintypes.HANDLE, ctypes.c_int, wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    adv.GetSecurityInfo.restype = wintypes.DWORD
+
+    adv.ConvertSidToStringSidW.argtypes = (ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR))
+    adv.ConvertSidToStringSidW.restype = wintypes.BOOL
+
+    kernel.LocalFree.argtypes = (ctypes.c_void_p,)
+
+    p_owner = ctypes.c_void_p()
+    p_dacl = ctypes.c_void_p()
+    p_desc = ctypes.c_void_p()
+
+    # SE_FILE_OBJECT = 1, OWNER_SECURITY_INFORMATION (1) | DACL_SECURITY_INFORMATION (4) = 5
+    err = adv.GetSecurityInfo(
+        handle, 1, 5,
+        ctypes.byref(p_owner), None, ctypes.byref(p_dacl), None,
+        ctypes.byref(p_desc),
+    )
+    if err != 0:
+        deny("ACL_UNAVAILABLE")
+
+    def sid_str(sid_ptr):
+        out = wintypes.LPWSTR()
+        if not adv.ConvertSidToStringSidW(sid_ptr, ctypes.byref(out)):
+            deny("ACL_UNAVAILABLE")
+        try:
+            return out.value
+        finally:
+            kernel.LocalFree(out)
+
+    try:
+        if not p_owner.value or not p_dacl.value:
+            deny("HOLD_NATIVE_CUSTODY_ACL_FOREIGN")
+
+        owner_sid = sid_str(p_owner)
+        is_trusted_owner = (
+            owner_sid in trusted_owners or
+            (is_ancestor and owner_sid == TRUSTED_INSTALLER_SID)
+        )
+        if not is_trusted_owner:
+            deny("HOLD_NATIVE_CUSTODY_ACL_FOREIGN")
+
+        count = ctypes.c_ushort.from_address(p_dacl.value + 4).value
+        adv.GetAce.argtypes = (ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p))
+        adv.GetAce.restype = wintypes.BOOL
+
+        inherited_foreign_read_count = 0
+        has_inherited_foreign_write = False
+        has_explicit_foreign_write = False
+        owner_granted_write = False
+        owner_denied_write = False
+
+        for i in range(count):
+            ace = ctypes.c_void_p()
+            if not adv.GetAce(p_dacl, i, ctypes.byref(ace)):
+                deny("ACL_UNAVAILABLE")
+            kind, flags = (ctypes.c_ubyte * 2).from_address(ace.value)
+            if kind not in (0, 1):
+                deny("UNPROVEN_UNSUPPORTED_ACE_TYPE")
+
+            is_inherited = bool(flags & 0x10)
+            is_inherit_only = bool(flags & 0x08)
+            mask = ctypes.c_uint32.from_address(ace.value + 4).value
+            ace_sid = sid_str(ctypes.c_void_p(ace.value + 8))
+
+            if kind == 1:  # ACCESS_DENIED_ACE_TYPE
+                is_owner_target = (ace_sid in trusted_owners) or (ace_sid in ("S-1-1-0", "S-1-5-11", "S-1-5-32-545"))
+                if is_owner_target and not is_inherit_only:
+                    if mask & (0x10000000 | 0x40000000 | 0x0002 | 0x0004 | 0x00010000 | 0x0040):
+                        owner_denied_write = True
+                continue
+
+            is_trusted_ace = (
+                ace_sid in trusted_owners or
+                (is_ancestor and ace_sid == TRUSTED_INSTALLER_SID)
+            )
+
+            if is_trusted_ace:
+                if not is_inherit_only:
+                    # Positive write rights: GENERIC_ALL, GENERIC_WRITE, or FILE_ADD_FILE/SUBDIR
+                    if (mask & 0x10000000) or (mask & 0x40000000) or ((mask & 0x0002) and (mask & 0x0004)):
+                        owner_granted_write = True
+            else:
+                if is_ancestor and is_inherit_only:
+                    continue
+                dangerous_mask = VOLUME_ROOT_DANGEROUS_RIGHTS if is_volume_root else DANGEROUS_WRITE_RIGHTS
+                if mask & dangerous_mask:
+                    if is_inherited:
+                        has_inherited_foreign_write = True
+                    else:
+                        has_explicit_foreign_write = True
+                    deny("HOLD_NATIVE_CUSTODY_ACL_FOREIGN")
+                else:
+                    inherited_foreign_read_count += 1
+
+        owner_has_effective_rights = owner_granted_write and not owner_denied_write
+        return {
+            "owner_trusted": True,
+            "owner_has_effective_rights": owner_has_effective_rights,
+            "inherited_foreign_read_count": inherited_foreign_read_count,
+            "has_inherited_foreign_write": has_inherited_foreign_write,
+            "has_explicit_foreign_write": has_explicit_foreign_write,
+            "foreign_write_detected": has_inherited_foreign_write or has_explicit_foreign_write,
+        }
+    finally:
+        kernel.LocalFree(p_desc)
+
+
+def windows_owned_fixture_root_preflight(path, *, trusted_owners=None, check_ancestors=True, raise_denied=True):
+    """Pre-flight check for Windows owned fixture root custody.
+
+    Verifies pinned directory handle identities, owner DACL effective rights,
+    and absence of foreign WRITE/DELETE/DELETE_CHILD/WRITE_DAC/WRITE_OWNER.
+    Returns typed sanitized status and hash evidence; never exposes raw SIDs or paths.
+    """
+    if os.name != "nt":
+        if raise_denied:
+            deny("W1_NATIVE_WINDOWS_ONLY")
+        return {
+            "schema": "hostops.fixture.owned_root.v1",
+            "status": "W1_NATIVE_WINDOWS_ONLY",
+            "root_digest": digest(str(path).encode("utf-8")),
+            "root_identity": None,
+            "ancestor_identities": [],
+            "ancestors_verified_count": 0,
+            "effective_rights_verified": False,
+            "inherited_foreign_read_only_count": 0,
+            "foreign_write_detected": False,
+            "verified": False,
+        }
+
+    # AC1: If ancestors disabled, NEVER claims verified
+    if not check_ancestors:
+        if raise_denied:
+            deny("HOLD_ANCESTORS_DISABLED")
+        return {
+            "schema": "hostops.fixture.owned_root.v1",
+            "status": "HOLD_ANCESTORS_DISABLED",
+            "root_digest": digest(str(path).encode("utf-8")),
+            "root_identity": None,
+            "ancestor_identities": [],
+            "ancestors_verified_count": 0,
+            "effective_rights_verified": False,
+            "inherited_foreign_read_only_count": 0,
+            "foreign_write_detected": False,
+            "verified": False,
+        }
+
+    try:
+        from .security import windows_identity
+        current_sid, _ = windows_identity()
+    except Exception:
+        if raise_denied:
+            deny("TOKEN_UNAVAILABLE")
+        return {
+            "schema": "hostops.fixture.owned_root.v1",
+            "status": "TOKEN_UNAVAILABLE",
+            "root_digest": digest(str(path).encode("utf-8")),
+            "root_identity": None,
+            "ancestor_identities": [],
+            "ancestors_verified_count": 0,
+            "effective_rights_verified": False,
+            "inherited_foreign_read_only_count": 0,
+            "foreign_write_detected": False,
+            "verified": False,
+        }
+
+    # AC3: Pinned exact trusted identities; no broad wildcards or untrusted caller-supplied allowances.
+    UNTRUSTED_WEAK_SIDS = frozenset({
+        "S-1-1-0",        # Everyone
+        "S-1-5-11",       # Authenticated Users
+        "S-1-5-32-545",   # Users
+        "S-1-5-32-546",   # Guests
+        "S-1-5-19",       # Local Service
+        "S-1-5-20",       # Network Service
+    })
+    pinned_trusted_sids = frozenset({current_sid, "S-1-5-18", "S-1-5-32-544"})
+
+    if trusted_owners is not None:
+        for sid in trusted_owners:
+            if sid in UNTRUSTED_WEAK_SIDS or not re.fullmatch(r"S-1-[0-9]+(?:-[0-9]+){2,}", sid):
+                if raise_denied:
+                    deny("HOLD_NATIVE_CUSTODY_ACL_FOREIGN")
+                return {
+                    "schema": "hostops.fixture.owned_root.v1",
+                    "status": "HOLD_NATIVE_CUSTODY_ACL_FOREIGN",
+                    "root_digest": digest(str(path).encode("utf-8")),
+                    "root_identity": None,
+                    "ancestor_identities": [],
+                    "ancestors_verified_count": 0,
+                    "effective_rights_verified": False,
+                    "inherited_foreign_read_only_count": 0,
+                    "foreign_write_detected": True,
+                    "verified": False,
+                }
+        trusted_sids = pinned_trusted_sids | (frozenset(trusted_owners) - UNTRUSTED_WEAK_SIDS)
+    else:
+        trusted_sids = pinned_trusted_sids
+
+    p = Path(path)
+    raw = str(path)
+    if (not p.is_absolute() or raw.startswith(("\\\\", "//", "\\\\.\\", "\\\\?\\")) or
+            ".." in p.parts or "." in p.parts):
+        if raise_denied:
+            deny("W1_NATIVE_ROOT_DENIED")
+        return {
+            "schema": "hostops.fixture.owned_root.v1",
+            "status": "W1_NATIVE_ROOT_DENIED",
+            "root_digest": digest(str(path).encode("utf-8")),
+            "root_identity": None,
+            "ancestor_identities": [],
+            "ancestors_verified_count": 0,
+            "effective_rights_verified": False,
+            "inherited_foreign_read_only_count": 0,
+            "foreign_write_detected": False,
+            "verified": False,
+        }
+
+    try:
+        canonical_path(str(p / "w1-fixture-check.txt"), [p], False)
+    except Exception as exc:
+        if raise_denied:
+            raise
+        return {
+            "schema": "hostops.fixture.owned_root.v1",
+            "status": "PROTECTED_PATH",
+            "root_digest": digest(str(p).encode("utf-8")),
+            "root_identity": None,
+            "ancestor_identities": [],
+            "ancestors_verified_count": 0,
+            "effective_rights_verified": False,
+            "inherited_foreign_read_only_count": 0,
+            "foreign_write_detected": False,
+            "verified": False,
+        }
+
+    from ctypes import wintypes
+    kernel = _kernel32 if _kernel32 is not None else ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel.CloseHandle.restype = wintypes.BOOL
+
+    ancestor_handles = []
+    ancestor_identities = []
+    total_inherited_foreign_reads = 0
+    base_volume_serial = None
+    path_identity = None
+
+    try:
+        # AC1: Missing target root NEVER claims verified
+        if not p.exists():
+            deny("W1_NATIVE_ROOT_DENIED")
+
+        try:
+            item = p.lstat()
+            if stat.S_ISLNK(item.st_mode) or getattr(item, "st_file_attributes", 0) & 0x400:
+                deny("W1_NATIVE_ROOT_REPARSE")
+            if not p.is_dir():
+                deny("W1_NATIVE_ROOT_DENIED")
+        except OSError:
+            deny("W1_NATIVE_ROOT_DENIED")
+
+        # Ancestor validation
+        ancestors_to_check = list(reversed(p.parents))
+        for ancestor in ancestors_to_check:
+            try:
+                item = ancestor.lstat()
+                if stat.S_ISLNK(item.st_mode) or getattr(item, "st_file_attributes", 0) & 0x400:
+                    deny("W1_NATIVE_ROOT_REPARSE")
+                if not ancestor.is_dir():
+                    deny("W1_NATIVE_ROOT_DENIED")
+            except OSError:
+                deny("W1_NATIVE_ROOT_DENIED")
+
+            h = _win_handle(ancestor, directory=True, read_control=True)
+            ancestor_handles.append(h)
+
+            data = (wintypes.DWORD * 13)()
+            if not kernel.GetFileInformationByHandle(h, ctypes.byref(data)):
+                deny("W1_NATIVE_ROOT_DENIED")
+            if data[0] & 0x400 or not (data[0] & 0x10):
+                deny("W1_NATIVE_ROOT_REPARSE")
+
+            vol_serial = f"{data[7]:08x}"
+            if base_volume_serial is None:
+                base_volume_serial = vol_serial
+            elif vol_serial != base_volume_serial:
+                deny("W1_NATIVE_WRONG_VOLUME")
+
+            anc_id = {
+                "volume_serial_hex": vol_serial,
+                "file_index_hex": f"{((data[11] << 32) | data[12]):016x}",
+            }
+            ancestor_identities.append(anc_id)
+
+            sec_info = _windows_inspect_handle_security(
+                h, trusted_sids, is_ancestor=True, is_volume_root=(ancestor == ancestor.parent)
+            )
+            total_inherited_foreign_reads += sec_info["inherited_foreign_read_count"]
+
+        if len(ancestor_identities) < 1:
+            deny("W1_NATIVE_ROOT_DENIED")
+
+        # Target handle & security
+        target_h = _win_handle(p, directory=True, read_control=True)
+        ancestor_handles.append(target_h)
+
+        data = (wintypes.DWORD * 13)()
+        if not kernel.GetFileInformationByHandle(target_h, ctypes.byref(data)):
+            deny("W1_NATIVE_ROOT_DENIED")
+        if data[0] & 0x400 or not (data[0] & 0x10):
+            deny("W1_NATIVE_ROOT_REPARSE")
+
+        vol_serial = f"{data[7]:08x}"
+        if base_volume_serial is not None and vol_serial != base_volume_serial:
+            deny("W1_NATIVE_WRONG_VOLUME")
+
+        path_identity = {
+            "volume_serial_hex": vol_serial,
+            "file_index_hex": f"{((data[11] << 32) | data[12]):016x}",
+        }
+
+        sec_info = _windows_inspect_handle_security(target_h, trusted_sids, is_ancestor=False)
+        effective_rights_verified = sec_info["owner_has_effective_rights"]
+        total_inherited_foreign_reads += sec_info["inherited_foreign_read_count"]
+
+        if not effective_rights_verified:
+            deny("HOLD_NATIVE_CUSTODY_ACL_FOREIGN")
+
+        return {
+            "schema": "hostops.fixture.owned_root.v1",
+            "status": "OWNED_FIXTURE_ROOT_VERIFIED",
+            "root_digest": digest(str(p).encode("utf-8")),
+            "root_identity": path_identity,
+            "ancestor_identities": ancestor_identities,
+            "ancestors_verified_count": len(ancestor_identities),
+            "effective_rights_verified": True,
+            "inherited_foreign_read_only_count": total_inherited_foreign_reads,
+            "foreign_write_detected": False,
+            "verified": True,
+        }
+    except Exception as exc:
+        if raise_denied:
+            raise
+        from .contract import Denied
+        err_msg = str(exc) if isinstance(exc, Denied) else "HOLD_NATIVE_CUSTODY_ACL_FOREIGN"
+        return {
+            "schema": "hostops.fixture.owned_root.v1",
+            "status": err_msg,
+            "root_digest": digest(str(p).encode("utf-8")),
+            "root_identity": path_identity,
+            "ancestor_identities": ancestor_identities,
+            "ancestors_verified_count": len(ancestor_identities),
+            "effective_rights_verified": False,
+            "inherited_foreign_read_only_count": total_inherited_foreign_reads,
+            "foreign_write_detected": True if "FOREIGN" in err_msg else False,
+            "verified": False,
+        }
+    finally:
+        for h in ancestor_handles:
+            kernel.CloseHandle(h)
+
+
+def _safe_remove_fixture_tree(fixture_path, expected_root_id, fixture_pin_handle_ref):
+    """Safely teardown fixture tree without traversing symlinks/junctions, dangling aliases,
+    root/ancestor rename-swap, or external hardlinks.
+    Revalidates identity before mutations and aborts (HOLD) on any drift or hardlink.
+    """
+    if os.name != "nt":
+        return
+
+    from ctypes import wintypes
+    kernel = _kernel32 if _kernel32 is not None else ctypes.WinDLL("kernel32", use_last_error=True)
+    data = (wintypes.DWORD * 13)()
+
+    fixture_pin_handle = fixture_pin_handle_ref[0]
+    if fixture_pin_handle is None or not kernel.GetFileInformationByHandle(fixture_pin_handle, ctypes.byref(data)):
+        return  # Hold, do not delete
+    current_root_id = {
+        "volume_serial_hex": f"{data[7]:08x}",
+        "file_index_hex": f"{((data[11] << 32) | data[12]):016x}",
+    }
+    if expected_root_id is not None and current_root_id != expected_root_id:
+        return  # Root drift / rename-swap detected! Hold, do not delete!
+
+    try:
+        s = fixture_path.lstat()
+    except OSError:
+        return
+    if stat.S_ISLNK(s.st_mode) or getattr(s, "st_file_attributes", 0) & 0x400:
+        return  # Root replaced with link/junction! Hold, do not delete target!
+
+    try:
+        cur_h = _win_handle(fixture_path, directory=True, read_control=True)
+        try:
+            cdata = (wintypes.DWORD * 13)()
+            if not kernel.GetFileInformationByHandle(cur_h, ctypes.byref(cdata)):
+                return
+            c_id = {
+                "volume_serial_hex": f"{cdata[7]:08x}",
+                "file_index_hex": f"{((cdata[11] << 32) | cdata[12]):016x}",
+            }
+            if expected_root_id is not None and c_id != expected_root_id:
+                return  # Root path was swapped! Hold, do not delete!
+        finally:
+            kernel.CloseHandle(cur_h)
+    except Exception:
+        return
+
+    def _clean_dir(dir_path):
+        if not kernel.GetFileInformationByHandle(fixture_pin_handle, ctypes.byref(data)):
+            return False
+        if expected_root_id is not None and (
+            f"{data[7]:08x}" != expected_root_id["volume_serial_hex"] or
+            f"{((data[11] << 32) | data[12]):016x}" != expected_root_id["file_index_hex"]
+        ):
+            return False
+
+        try:
+            entries = list(os.scandir(dir_path))
+        except OSError:
+            return False
+
+        for entry in entries:
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+
+            is_link = stat.S_ISLNK(st.st_mode) or getattr(st, "st_file_attributes", 0) & 0x400
+            if is_link:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        os.rmdir(entry.path)
+                    else:
+                        os.unlink(entry.path)
+                except OSError:
+                    pass
+                continue
+
+            if entry.is_dir(follow_symlinks=False):
+                if not _clean_dir(entry.path):
+                    return False
+                try:
+                    os.rmdir(entry.path)
+                except OSError:
+                    pass
+            else:
+                try:
+                    fh = _win_handle(entry.path, directory=False, write=False)
+                    try:
+                        fdata = (wintypes.DWORD * 13)()
+                        if kernel.GetFileInformationByHandle(fh, ctypes.byref(fdata)):
+                            if fdata[10] > 1:
+                                return False  # External hardlink! Hold!
+                    finally:
+                        kernel.CloseHandle(fh)
+                    os.unlink(entry.path)
+                except Exception:
+                    return False
+        return True
+
+    if not _clean_dir(fixture_path):
+        return
+
+    if not kernel.GetFileInformationByHandle(fixture_pin_handle, ctypes.byref(data)):
+        return
+    if expected_root_id is not None and (
+        f"{data[7]:08x}" != expected_root_id["volume_serial_hex"] or
+        f"{((data[11] << 32) | data[12]):016x}" != expected_root_id["file_index_hex"]
+    ):
+        return
+
+    kernel.CloseHandle(fixture_pin_handle)
+    fixture_pin_handle_ref[0] = None
+    try:
+        os.rmdir(fixture_path)
+    except OSError:
+        pass
+
+
+@contextmanager
+def windows_owned_fixture_root(candidate_ancestors=None, prefix=".hostops-fixture-", *, trusted_owners=None):
+    """Context manager to find a verified local ancestor, create a short-lived
+    test-owned private fixture root, prove pinned root + rename-relevant ancestor
+    identities, verify owner DACL effective rights, and perform bounded cleanup.
+    """
+    if os.name != "nt":
+        deny("W1_NATIVE_WINDOWS_ONLY")
+
+    from ctypes import wintypes
+    kernel = _kernel32 if _kernel32 is not None else ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel.CloseHandle.restype = wintypes.BOOL
+
+    if candidate_ancestors is None:
+        raw_candidates = []
+        local_app = os.environ.get("LOCALAPPDATA")
+        if local_app:
+            raw_candidates.append(Path(local_app))
+        user_home = Path.home()
+        raw_candidates.append(user_home / "AppData" / "Local")
+        app_data = os.environ.get("APPDATA")
+        if app_data:
+            raw_candidates.append(Path(app_data))
+        user_profile = os.environ.get("USERPROFILE")
+        if user_profile:
+            raw_candidates.append(Path(user_profile))
+    else:
+        raw_candidates = [Path(c) for c in candidate_ancestors]
+
+    verified_ancestor = None
+    ancestor_pin_handles = []
+    ancestor_receipt = None
+
+    for cand in raw_candidates:
+        if not cand.exists() or not cand.is_dir():
+            continue
+        try:
+            receipt = windows_owned_fixture_root_preflight(
+                cand, trusted_owners=trusted_owners, check_ancestors=True, raise_denied=True
+            )
+            h = _win_handle(cand, directory=True, read_control=True)
+            ancestor_pin_handles.append(h)
+            verified_ancestor = cand
+            ancestor_receipt = receipt
+            break
+        except Exception:
+            continue
+
+    if verified_ancestor is None:
+        deny("HOLD_NATIVE_FIXTURE_ROOT_UNAVAILABLE")
+
+    leaf = f"{prefix}{os.urandom(16).hex()}"
+    fixture_path = verified_ancestor / leaf
+    fixture_path.mkdir(exist_ok=False)
+
+    handle_ref = [None]
+    try:
+        handle_ref[0] = _win_handle(fixture_path, directory=True, read_control=True)
+        preflight = windows_owned_fixture_root_preflight(
+            fixture_path, trusted_owners=trusted_owners, check_ancestors=True, raise_denied=True
+        )
+
+        data = (wintypes.DWORD * 13)()
+        parent_h = ancestor_pin_handles[0]
+        if not kernel.GetFileInformationByHandle(parent_h, ctypes.byref(data)):
+            deny("W1_NATIVE_ROOT_DENIED")
+        parent_current_id = {
+            "volume_serial_hex": f"{data[7]:08x}",
+            "file_index_hex": f"{((data[11] << 32) | data[12]):016x}",
+        }
+        if parent_current_id != ancestor_receipt["root_identity"]:
+            deny("W1_NATIVE_ROOT_MISMATCH")
+
+        yield fixture_path, preflight
+    finally:
+        try:
+            if handle_ref[0] is not None and fixture_path.exists():
+                expected_id = preflight["root_identity"] if ("preflight" in locals() and preflight) else None
+                _safe_remove_fixture_tree(fixture_path, expected_id, handle_ref)
+        finally:
+            if handle_ref[0] is not None:
+                kernel.CloseHandle(handle_ref[0])
+                handle_ref[0] = None
+            for h in ancestor_pin_handles:
+                kernel.CloseHandle(h)
+            ancestor_pin_handles.clear()
+

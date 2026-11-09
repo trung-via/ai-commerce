@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import jsonschema
 import pytest
 
-from ai_commerce.hostops_v3 import auth, broker, cli, contract as c, security, transport
+from ai_commerce.hostops_v3 import auth, broker, cli, contract as c, filesystem, security, transport
 from ai_commerce.hostops_v3.journal import Journal
 from ai_commerce.hostops_v3.worker import Worker
 from test_hostops_v3 import ROOT, NOW, h, keys, result
@@ -2266,3 +2266,20 @@ def test_w1_attended_cli_oserror_does_not_disclose_local_paths(monkeypatch, caps
     assert output.out == ""
     assert "HOSTOPS_W1_LOCAL_DENIAL=OTHER_BLOCKED" in output.err
     assert "C:\\PRIVATE" not in output.err
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native owned fixture root preflight required")
+def test_windows_owned_fixture_root_native_fixture_create_and_clean_integration():
+    with filesystem.windows_owned_fixture_root() as (fixture_path, receipt):
+        assert fixture_path.is_dir()
+        assert receipt["status"] == "OWNED_FIXTURE_ROOT_VERIFIED"
+        assert receipt["effective_rights_verified"] is True
+
+        fx_receipt = filesystem.w1_windows_native_create_fixture(
+            fixture_path, receipt["root_identity"], "integration-test.json", '{"tested": true}'
+        )
+        assert fx_receipt["status"] == "NATIVE_FIXTURE_CREATE_VERIFIED"
+        assert (fixture_path / "integration-test.json").read_text("utf-8") == '{"tested": true}'
+        assert fixture_path.exists()
+    assert not fixture_path.exists()
+
