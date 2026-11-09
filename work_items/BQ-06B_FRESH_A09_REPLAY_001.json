@@ -1,0 +1,92 @@
+{
+  "schema_version": "WorkItem.v1",
+  "work_id": "BQ-06B_FRESH_A09_REPLAY_001",
+  "status": "SOURCE_ONLY_CI_FIRST_UNVERIFIED",
+  "objective": "Reauthor A09 native current replay pinned to independently retained A11, with complete correction/reprocess descendant freshness, hold-only unsupported source and Brain advisory without any provider/WorkOwner invocation.",
+  "human_authorization": "2026-11-09 @AI Commerce: ok xây dựng lại bq 06b, tìm kiếm quá mất thời gian",
+  "issue": 730,
+  "source_sha": "1dd406272f50d95d581c9e4b3a759f455db7cd22",
+  "source_base_commit": "1dd406272f50d95d581c9e4b3a759f455db7cd22",
+  "branch": "bq06b/ci-first-reauthor-730-20261109",
+  "implementation_lane": "DIRECT_GITHUB_SOURCE_ONLY_CI_FIRST",
+  "executor": "NONE",
+  "model": "NONE",
+  "provider_invocation_authorized": false,
+  "workowner_transfer_authorized": false,
+  "same_attempt_replay_authorized": false,
+  "quarantined_source_reuse_authorized": false,
+  "historical_holds": [
+    {
+      "issue": 694,
+      "reason": "R1 semantic lineage dict + missing history descendants",
+      "brain": "HOLD"
+    },
+    {
+      "issue": 698,
+      "reason": "R2 WorkOwner PROVIDER_INTENT; unknown provider effect",
+      "workowner": "HOLD_UNKNOWN_EFFECT",
+      "replay_authorized": false
+    },
+    {
+      "issue": 726,
+      "reason": "R0.2 native read BATCH_ABSENT / SOURCE_READ_UNKNOWN",
+      "terminal_proven": false
+    }
+  ],
+  "component": "bq-06b",
+  "owner_manifest": "work_items/mt01-components/bq-06b.json",
+  "verification_profile": "mt01-component-onboarding",
+  "max_repair_rounds": 2,
+  "allowed_paths": [
+    "src/ai_commerce/creative_quality/behavioral_learning_fresh_replay.py",
+    "tests/test_bq_06b_fresh_a09_replay.py",
+    "work_items/mt01-components/bq-06b.json",
+    "work_items/BQ-06B_FRESH_A09_REPLAY_001.json",
+    "docs/creative/BQ_06B_FRESH_EVIDENCE_PROTOCOL.md",
+    "docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md"
+  ],
+  "add_only_paths": [
+    "src/ai_commerce/creative_quality/behavioral_learning_fresh_replay.py",
+    "tests/test_bq_06b_fresh_a09_replay.py",
+    "work_items/mt01-components/bq-06b.json",
+    "work_items/BQ-06B_FRESH_A09_REPLAY_001.json",
+    "docs/creative/BQ_06B_FRESH_EVIDENCE_PROTOCOL.md"
+  ],
+  "append_only_paths": [
+    "docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md"
+  ],
+  "acceptance": [
+    "BQ-06b.a09-raw-replay-pinned-to-a11",
+    "BQ-06b.missingness-and-comparability",
+    "BQ-06b.brain-review-non-authoritative"
+  ],
+  "existing_owners": [
+    "A09.analytics",
+    "A11.learning",
+    "A17.C07.C10.E06.offline-creative-learning",
+    "BQ-06a"
+  ],
+  "mandatory_negative_regressions": [
+    "REAL_A09_CORRECTION_DESCENDANT_INVALIDATES_OLD_PIN",
+    "REAL_A09_REPROCESS_DESCENDANT_INVALIDATES_OLD_PIN",
+    "TWO_HOP_DESCENDANT_INVALIDATES_OLD_PIN",
+    "UNRELATED_ROOT_RETAINS_PIN",
+    "BOUNDED_COMPLETE_NATIVE_HISTORY_OVER_100",
+    "INCOMPLETE_HISTORY_FAILS_CLOSED",
+    "EXACT_A11_SOURCE_REF_SET_AND_INDEPENDENT_REVISION_PIN",
+    "NULL_ZERO_DISTINCTION",
+    "NATIVE_WINDOWS_HARDLINK_JUNCTION_SYMLINK_ADS_RACE",
+    "A09_A11_CROSS_DB_ATOMICITY_UNPROVEN_FAIL_CLOSED",
+    "NO_PROVIDER_ATTESTATION_OR_CAUSAL_INFERENCE"
+  ],
+  "release_gates": {
+    "source_contract": "IN_PROGRESS",
+    "native_owner_tests": "UNVERIFIED",
+    "mt01_selected_collected_executed": "UNVERIFIED",
+    "hosted_windows_ci": "UNVERIFIED",
+    "independent_brain_review": "NOT_REQUESTED",
+    "trusted_merge": "NOT_MERGED",
+    "native_provider_effect": "NOT_AUTHORIZED"
+  },
+  "notes": "Direct source branch does not attest native tests, MT01, model invocation, WorkOwner recovery, Brain PASS, PULSE, or external effect. Preserve all historical UNKNOWN evidence. No additional EF02 attempt for this WorkItem."
+}
