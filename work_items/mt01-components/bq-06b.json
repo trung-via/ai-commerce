@@ -38,8 +38,7 @@
     "src/ai_commerce/affiliate_release/inspection.py",
     "src/ai_commerce/creative_quality/inspection_evidence.py",
     "src/ai_commerce/creative_quality/t2_sampling.py",
-    "src/ai_commerce/creative_quality/behavioral_learning_bridge.py",
-    "tests/test_bq_06a_behavioral_learning.py"
+    "src/ai_commerce/creative_quality/behavioral_learning_bridge.py"
   ],
   "contracts": [
     "contracts/CreativeDirective.v1.schema.json",
