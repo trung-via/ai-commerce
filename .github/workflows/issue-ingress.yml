@@ -1304,17 +1304,21 @@ jobs:
             $oldPythonPath = $env:PYTHONPATH
             try {
               $env:PYTHONPATH = Join-Path $root 'src'
-              $result = @(& python -B -c 'from ai_commerce.remote.cdp_doorbell import probe_wh03_test_registration_signal; print(probe_wh03_test_registration_signal())' 2>$null | ForEach-Object { [string]$_ })
+              $result = @(& python -B -c 'from ai_commerce.remote.cdp_doorbell import probe_wh03_committed_registration_signal; print(probe_wh03_committed_registration_signal())' 2>$null | ForEach-Object { [string]$_ })
               $exit = $LASTEXITCODE
             } finally { $env:PYTHONPATH = $oldPythonPath }
             $allowed = @(
               'TEST_SIGNAL_PRESENT_UNATTESTED','TEST_SIGNAL_NOT_FOUND',
               'TEST_SIGNAL_AMBIGUOUS','TEST_SIGNAL_SCOPE_UNPROVEN',
+              'TEST_SIGNAL_MATCH_UNATTESTED','TEST_CHAT_ROUTE_MISMATCH',
+              'TEST_COMMITMENT_REQUIRED','TEST_COMMITMENT_INVALID',
+              'TEST_COMMITMENT_NOT_ACTIVE','TEST_COMMITMENT_EXPIRED',
+              'TEST_COMMITMENT_REPLAY',
               'CHAT_A_CANDIDATE_NOT_FOUND',
               'MULTIPLE_CHAT_CANDIDATES','CONTEXT_UNPROVEN','SURFACE_UNPROVEN',
               'DRAFT_PRESENT','CDP_READ_UNAVAILABLE','NATIVE_DESKTOP_UNPROVEN')
             if ($exit -eq 0 -and $result.Count -eq 1 -and $allowed -ccontains $result[0]) {
-              $status = 'OBSERVED'
+              $status = if ($result[0] -like 'TEST_COMMITMENT_*') { 'BLOCKED' } else { 'OBSERVED' }
               $code = [string]$result[0]
             } else { $code = 'READ_RESULT_UNAVAILABLE' }
           } catch {
@@ -1362,6 +1366,10 @@ jobs:
                 'NO_INTERACTIVE_SESSION','ELEVATED','SOURCE_DRIFT',
                 'TEST_SIGNAL_PRESENT_UNATTESTED','TEST_SIGNAL_NOT_FOUND',
               'TEST_SIGNAL_AMBIGUOUS','TEST_SIGNAL_SCOPE_UNPROVEN',
+              'TEST_SIGNAL_MATCH_UNATTESTED','TEST_CHAT_ROUTE_MISMATCH',
+              'TEST_COMMITMENT_REQUIRED','TEST_COMMITMENT_INVALID',
+              'TEST_COMMITMENT_NOT_ACTIVE','TEST_COMMITMENT_EXPIRED',
+              'TEST_COMMITMENT_REPLAY',
               'CHAT_A_CANDIDATE_NOT_FOUND',
                 'MULTIPLE_CHAT_CANDIDATES','CONTEXT_UNPROVEN','SURFACE_UNPROVEN',
                 'DRAFT_PRESENT','CDP_READ_UNAVAILABLE','NATIVE_DESKTOP_UNPROVEN',
@@ -1374,7 +1382,7 @@ jobs:
                   r.native_origin_attested !== false ||
                   r.browser_mutated !== false || r.wake_sent !== false ||
                   (r.status === 'OBSERVED' &&
-                   !codes.slice(5,16).includes(r.code))) throw Error();
+                   !codes.slice(5,23).includes(r.code))) throw Error();
               result = r;
             } catch (_) {}
             await github.rest.issues.createComment({...context.repo,
