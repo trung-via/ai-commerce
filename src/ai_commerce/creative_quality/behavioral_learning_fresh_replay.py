@@ -237,8 +237,11 @@ def _native_recheck(ledger_path: str, pin: SnapshotPin, source_arguments: dict,
                  "A11_A09_OBSERVATION_REF_MISMATCH")
         native_refs = [snap.observation_ref(ob["observation_id"])
                        for ob in snap.to_dict()["observations"]]
-        _require(len(refs) == len(native_refs)
-                 and {digest(r) for r in refs} == {digest(r) for r in native_refs},
+        native_ref_digests = {digest(r) for r in native_refs}
+        # The selected A11 evidence set may be a strict subset of the full
+        # authentic A09 import, but each selected ref must match in full.
+        _require(len(native_ref_digests) == len(native_refs)
+                 and all(digest(r) in native_ref_digests for r in refs),
                  "A11_A09_OBSERVATION_REF_MISMATCH")
         for ob in snap.to_dict()["observations"]:
             _require((ob["status"] == "AVAILABLE") == (ob["value"] is not None),
