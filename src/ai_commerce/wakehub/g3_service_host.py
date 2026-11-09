@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes as wt
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 import os
 from pathlib import Path
 import re
@@ -234,3 +234,153 @@ def staged_scm_entrypoint():
     table = (Entry * 2)(Entry(broker.SERVICE, service_main), Entry(None, main_type()))
     if not broker._api(adv, "StartServiceCtrlDispatcherW", [ctypes.POINTER(Entry)], wt.BOOL)(table):
         deny()
+
+
+@dataclass(frozen=True)
+class HostOpsStatusPreflightReport:
+    """SOURCE-ONLY advisory projection; NEVER authenticated native readiness."""
+    schema_version: str = "HostOpsStatusPreflight.v1"
+    service_installed: str = "SERVICE_NOT_INSTALLED"
+    signer_enrolled: str = "SIGNER_NOT_ENROLLED"
+    desktop_observer_enrolled: str = "DESKTOP_OBSERVER_NOT_ENROLLED"
+    loopback_9444_ownership: str = "LOOPBACK_9444_UNVERIFIED"
+    chatgpt_account_session: str = "ACCOUNT_UNPROVEN"
+    route_generation: str = "ROUTE_GENERATION_UNVERIFIED"
+    complete_search_scope: str = "SEARCH_COVERAGE_UNPROVEN"
+    overall_disposition: str = "OWNER_ESCALATION"
+    authority_scope: str = "SOURCE_ONLY_ADVISORY"
+    missing_owners: tuple[str, ...] = (
+        "WAKEHUB_SERVICE_INSTALLER",
+        "WAKEHUB_SIGNER_ENROLLMENT",
+        "CHATGPT_ACCOUNT_SESSION_AUTHORITY",
+        "COMPLETE_SEARCH_DOMAIN_WITNESS",
+    )
+    required_human_grants: tuple[str, ...] = (
+        "HUMAN_PER_EFFECT_GRANT_SERVICE_INSTALL",
+        "HUMAN_PER_EFFECT_GRANT_SIGNER_ENROLLMENT",
+        "HUMAN_PER_EFFECT_GRANT_CDP_ATTACH",
+    )
+
+    def to_sanitized_dict(self) -> dict:
+        """Sanitized fixed statuses ONLY: no PID, path, full URL, cookie, marker, or secrets."""
+        return {
+            "schema_version": self.schema_version,
+            "service_installed": self.service_installed,
+            "signer_enrolled": self.signer_enrolled,
+            "desktop_observer_enrolled": self.desktop_observer_enrolled,
+            "loopback_9444_ownership": self.loopback_9444_ownership,
+            "chatgpt_account_session": self.chatgpt_account_session,
+            "route_generation": self.route_generation,
+            "complete_search_scope": self.complete_search_scope,
+            "overall_disposition": "OWNER_ESCALATION",
+            "authority_scope": "SOURCE_ONLY_ADVISORY",
+            "missing_owners": list(self.missing_owners),
+            "required_human_grants": list(self.required_human_grants),
+        }
+
+
+def assess_hostops_status_preflight(*,
+                                    service_state: str = "NOT_INSTALLED",
+                                    signer_state: str = "NOT_ENROLLED",
+                                    desktop_state: str = "NOT_ENROLLED",
+                                    cdp_port_owner: str = "UNVERIFIED",
+                                    chat_account_state: str = "UNPROVEN",
+                                    route_generation_state: str = "UNVERIFIED",
+                                    search_scope_state: str = "UNPROVEN") -> HostOpsStatusPreflightReport:
+    """Project caller-reported facets only. No SCM/signer/ChatGPT authentication.
+
+    Positive input strings do not constitute native evidence, readiness or
+    permission to install, attach, navigate or Send. Always require owner.
+    """
+    svc = (
+        "SERVICE_INSTALLED" if service_state == "INSTALLED" else
+        "SERVICE_STOPPED" if service_state == "STOPPED" else
+        "SERVICE_NOT_INSTALLED"
+    )
+    signer = "SIGNER_ENROLLED" if signer_state == "ENROLLED" else "SIGNER_NOT_ENROLLED"
+    desktop = "DESKTOP_OBSERVER_ENROLLED" if desktop_state == "ENROLLED" else "DESKTOP_OBSERVER_NOT_ENROLLED"
+    cdp = (
+        "OWNED_CDP_9444" if cdp_port_owner == "OWNED_CDP_9444" else
+        "LOOPBACK_9444_CONFLICT" if cdp_port_owner == "CONFLICT" else
+        "LOOPBACK_9444_ABSENT" if cdp_port_owner == "ABSENT" else
+        "LOOPBACK_9444_UNVERIFIED"
+    )
+    acct = (
+        "ACCOUNT_SESSION_AUTHENTICATED" if chat_account_state == "AUTHENTICATED" else
+        "ACCOUNT_SESSION_MISMATCH" if chat_account_state == "MISMATCH" else
+        "ACCOUNT_UNPROVEN"
+    )
+    gen = (
+        "ROUTE_GENERATION_CURRENT" if route_generation_state == "CURRENT" else
+        "ROUTE_GENERATION_STALE" if route_generation_state == "STALE" else
+        "ROUTE_GENERATION_UNVERIFIED"
+    )
+    scope = (
+        "SEARCH_SCOPE_COMPLETE" if search_scope_state == "COMPLETE" else
+        "SEARCH_COVERAGE_UNPROVEN"
+    )
+
+    missing = []
+    if svc != "SERVICE_INSTALLED":
+        missing.append("WAKEHUB_SERVICE_INSTALLER")
+    if signer != "SIGNER_ENROLLED":
+        missing.append("WAKEHUB_SIGNER_ENROLLMENT")
+    if acct != "ACCOUNT_SESSION_AUTHENTICATED":
+        missing.append("CHATGPT_ACCOUNT_SESSION_AUTHORITY")
+    if scope != "SEARCH_SCOPE_COMPLETE":
+        missing.append("COMPLETE_SEARCH_DOMAIN_WITNESS")
+
+    ready = (
+        svc == "SERVICE_INSTALLED" and signer == "SIGNER_ENROLLED" and
+        desktop == "DESKTOP_OBSERVER_ENROLLED" and cdp == "OWNED_CDP_9444" and
+        acct == "ACCOUNT_SESSION_AUTHENTICATED" and gen == "ROUTE_GENERATION_CURRENT" and
+        scope == "SEARCH_SCOPE_COMPLETE"
+    )
+    # A caller may supply every positive string; without independently
+    # authenticated private receipts these remain claims, NOT a READY gate.
+    disposition = "OWNER_ESCALATION"
+
+    missing.extend(("WAKEHUB_G3_G4_SERVICE_PACKAGING_OWNER",
+                    "CHATGPT_ACCOUNT_SESSION_AUTHORITY",
+                    "COMPLETE_SEARCH_DOMAIN_WITNESS"))
+
+    return HostOpsStatusPreflightReport(
+        service_installed=svc,
+        signer_enrolled=signer,
+        desktop_observer_enrolled=desktop,
+        loopback_9444_ownership=cdp,
+        chatgpt_account_session=acct,
+        route_generation=gen,
+        complete_search_scope=scope,
+        overall_disposition=disposition,
+        missing_owners=tuple(dict.fromkeys(missing)),
+    )
+
+
+@dataclass(frozen=True)
+class G3PartialStatusEvidence:
+    """Retained source-level partial STATUS evidence without enabling ORIGIN_ATTESTED."""
+    schema_version: str = "WakeHubG3PartialStatusEvidence.v1"
+    os_identity: str = "UNVERIFIED"
+    challenge_nonce: str = ""
+    logon_id: str = ""
+    session_id: int = 0
+    disposition: str = "OWNER_ESCALATION"
+    complete_search_proven: bool = False
+    origin_attested: bool = False
+    missing_owners: tuple[str, ...] = (
+        "CHATGPT_ACCOUNT_SESSION_AUTHORITY",
+        "COMPLETE_SEARCH_DOMAIN_WITNESS",
+        "WAKEHUB_G3_G4_SERVICE_PACKAGING_OWNER",
+    )
+
+    def to_sanitized_dict(self) -> dict:
+        return {
+            "schema_version": self.schema_version,
+            "os_identity": "UNVERIFIED",
+            "disposition": "OWNER_ESCALATION",
+            "complete_search_proven": False,
+            "origin_attested": False,
+            "missing_owners": list(self.missing_owners),
+        }
+
