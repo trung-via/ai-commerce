@@ -1,0 +1,47 @@
+{
+  "schema_version": "BQ06bIndependentWorkItem.v1",
+  "id": "BQ-06B-FRESH-A09-REPLAY-001",
+  "human_direction": "2026-11-09 @AI Commerce chạy lại bq 06b độc lập",
+  "status": "BOOTSTRAP_REGISTERED_NOT_IMPLEMENTED",
+  "parent_roadmap": "B-QUALITY-001/BQ-06b",
+  "blocked_historical_attempts": [
+    {
+      "issue": 694,
+      "status": "BRAIN_HOLD_R1"
+    },
+    {
+      "issue": 698,
+      "status": "HOLD_UNKNOWN_EFFECT_R2"
+    }
+  ],
+  "source_only": true,
+  "executor_default": {
+    "executor": "codex",
+    "model": "gpt-6.1-sol",
+    "effort": "xhigh"
+  },
+  "next_authorized_writes": [
+    "src/ai_commerce/creative_quality/behavioral_learning_fresh_replay.py",
+    "tests/test_bq_06b_fresh_a09_replay.py"
+  ],
+  "owner_manifest": "work_items/mt01-components/bq-06b.json",
+  "verification_profile": "mt01-bq-06b-tests",
+  "acceptance": [
+    "BQ-06b.a09-raw-replay-pinned-to-a11",
+    "BQ-06b.missingness-and-comparability",
+    "BQ-06b.brain-review-non-authoritative"
+  ],
+  "negative_semantics": [
+    "GENUINE_A09_CORRECTION_DESCENDANT_HOLD",
+    "GENUINE_A09_REPROCESS_DESCENDANT_HOLD",
+    "TWO_HOP_LINEAGE_STALE_HOLD",
+    "INDEPENDENT_ROOT_UNAFFECTED",
+    "HISTORY_PAGINATION_COMPLETE_OR_HOLD",
+    "A11_PIN_FRESHNESS",
+    "SOURCE_CUSTODY_FAIL_CLOSED",
+    "NULL_NOT_ZERO",
+    "NO_PROVIDER_OR_PULSE_AUTHORITY"
+  ],
+  "release_gate": "fresh source delta and native owner+consumer MT01 plus hosted Windows CI, independent Brain review",
+  "product_result": "NOT_IMPLEMENTED"
+}
