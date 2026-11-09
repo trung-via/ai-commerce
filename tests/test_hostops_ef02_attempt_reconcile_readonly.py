@@ -111,6 +111,68 @@ class EF02Attempt698ReadOnlyTests(unittest.TestCase):
                 state = probe._probe_worktree()
             self.assertEqual(state[0], "WORKTREE_REPARSE_OR_HARDLINK")
 
+    @unittest.skipUnless(os.name == "nt", "fixed EF02 evidence root must be probed on Windows")
+    def test_actual_ef02_root_not_temp_worktree_receipt(self):
+        # Synthetic fixed-layout EF02 output, never a genuine provider receipt.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / "bq" / "action"
+            efdir = root / "ef01"
+            efdir.mkdir(parents=True)
+            terminal = efdir / "engineering_result.json"
+            with patch.object(probe, "_EVIDENCE_ACTION_ROOT", root):
+                self.assertEqual(probe._probe_ef02_evidence_root(), "NO_TERMINAL_RECEIPT_OBSERVED")
+                expected = {"attempt_id": probe.ATTEMPT, "work_id": probe.BATCH + ":" + probe.ACTION,
+                            "status": "SUCCESS"}
+                terminal.write_text(json.dumps(expected), encoding="utf-8")
+                before = terminal.read_bytes()
+                self.assertEqual(probe._probe_ef02_evidence_root(),
+                                 "LOCAL_RESULT_PRESENT_UNVERIFIED")
+                self.assertEqual(terminal.read_bytes(), before)
+                # This valid-looking local JSON is still UNVERIFIED, not replay authority.
+                with patch.object(probe, "_probe_pid", return_value="PID_ABSENT"), patch.object(
+                    probe, "_probe_worktree",
+                    return_value=("WORKTREE_SINGLE", "SOURCE_BYTES_PRESENT_UNVERIFIED",
+                                  "NO_TERMINAL_RECEIPT_OBSERVED")
+                ):
+                    result = probe.observe()
+                    self.assertEqual(result["local_receipt"], "LOCAL_RESULT_PRESENT_UNVERIFIED")
+                    self.assertEqual(result["status"], "HOLD_UNKNOWN_EFFECT")
+                    self.assertFalse(result["replay_authorized"])
+                    self.assertFalse(result["provider_outcome_proven"])
+
+                for broken in (
+                    {**expected, "attempt_id": "other"},
+                    {**expected, "work_id": "other"},
+                ):
+                    terminal.write_text(json.dumps(broken), encoding="utf-8")
+                    self.assertEqual(probe._probe_ef02_evidence_root(),
+                                     "RECEIPT_READ_UNAVAILABLE")
+                terminal.write_text("not-json", encoding="utf-8")
+                self.assertEqual(probe._probe_ef02_evidence_root(),
+                                 "RECEIPT_READ_UNAVAILABLE")
+
+    @unittest.skipUnless(os.name == "nt", "native filesystem identity needs Windows")
+    def test_fixed_ef02_root_does_not_follow_reparse(self):
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            real = base / "real"
+            (real / "ef01").mkdir(parents=True)
+            (real / "ef01" / "engineering_result.json").write_text(
+                json.dumps({"attempt_id": probe.ATTEMPT,
+                            "work_id": probe.BATCH + ":" + probe.ACTION}), encoding="utf-8"
+            )
+            link = base / "fixed"
+            try:
+                link.symlink_to(real, target_is_directory=True)
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 1314:
+                    self.skipTest("NATIVE_SYMLINK_CREATION_UNPROVEN: WinError 1314")
+                raise
+            with patch.object(probe, "_EVIDENCE_ACTION_ROOT", link):
+                self.assertEqual(probe._probe_ef02_evidence_root(),
+                                 "RECEIPT_READ_UNAVAILABLE")
+
+
     def test_workflow_gate_requires_owner_exact_698_and_sanitizer(self):
         workflow = (Path(__file__).resolve().parents[1]
                     / ".github" / "workflows" / "issue-ingress.yml").read_text(encoding="utf-8")
