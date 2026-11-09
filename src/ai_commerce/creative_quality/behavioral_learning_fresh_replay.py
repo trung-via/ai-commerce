@@ -138,11 +138,11 @@ def _complete_native_history(ledger: AnalyticsLedger, plan: dict, selected: str)
             lineage = record.get("lineage")
             _require(ident not in seen and type(lineage) is dict
                      and set(lineage) == {"relationship", "parent_import_id"}
-                     and lineage["relationship"] in ("ROOT", "CORRECTION", "REPROCESS"),
+                     and lineage["relationship"] in ("ORIGINAL", "CORRECTION", "REPROCESS"),
                      "HISTORY_UNPROVEN")
             parent = lineage["parent_import_id"]
-            _require((lineage["relationship"] == "ROOT" and parent is None)
-                     or (lineage["relationship"] != "ROOT"
+            _require((lineage["relationship"] == "ORIGINAL" and parent is None)
+                     or (lineage["relationship"] != "ORIGINAL"
                          and type(parent) is str and parent in seen),
                      "HISTORY_UNPROVEN")
             seen.add(ident)
@@ -195,7 +195,7 @@ def _a11_current_refs(advisory: LearningAdvisory, source_arguments: dict) -> lis
     _require(all(type(ref) is dict for ref in refs), "A11_SELECTED_HISTORY_REQUIRED")
     evidence_refs = [ev["observation_ref"] for ev in selected["evidence"]]
     _require(len(set(digest(ref) for ref in refs)) == len(refs)
-             and set(digest(ref) for ref in refs) == set(digest(ref) for ref in evidence_refs),
+             and evidence_refs and set(digest(ref) for ref in evidence_refs) <= set(digest(ref) for ref in refs),
              "A11_A09_OBSERVATION_REF_MISMATCH")
     _require(all(fact["metric"] == source_arguments["expected_metric"]
                  and fact["context"] == source_arguments["expected_context"] for fact in facts),
@@ -245,8 +245,11 @@ def _native_recheck(ledger_path: str, pin: SnapshotPin, source_arguments: dict,
                      "COHORT_OR_DENOMINATOR_UNPROVEN")
             _require(ob["metric"] == source_arguments["expected_metric"]
                      and all(ob[k] == source_arguments["expected_context"][k]
-                             for k in ("platform", "surface", "account_ref",
-                                       "cohort", "measurement_window", "timezone")),
+                             for k in ("platform", "surface",
+                                       "cohort", "measurement_window", "timezone"))
+                     and source_arguments["expected_context"]["account_ref"] == {
+                         "namespace": "internal_alias",
+                         "id": "a11-account-" + digest(ob["account_ref"])},
                      "COHORT_OR_DENOMINATOR_UNPROVEN")
         ledger = AnalyticsLedger(ledger_path)
         first = _complete_native_history(ledger, record["plan"], pin.import_id)
