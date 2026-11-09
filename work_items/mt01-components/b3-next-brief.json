@@ -1,0 +1,22 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "b3-next-brief",
+  "sources": [
+    "src/ai_commerce/creative_quality/b3_next_brief_handoff.py"
+  ],
+  "tests": [
+    "tests/test_b3_2_next_brief_handoff.py"
+  ],
+  "acs": [
+    "B3.2.source-current",
+    "B3.2.attended-handoff",
+    "B3.2.local-trust"
+  ],
+  "consumers": [
+    "src/ai_commerce/creative_quality/behavioral_learning_fresh_replay.py",
+    "src/ai_commerce/creative_quality/behavioral_learning_bridge.py",
+    "src/ai_commerce/creative_scaling/feedback.py",
+    "src/ai_commerce/creative_scaling/learning_bridge.py"
+  ],
+  "contracts": []
+}
