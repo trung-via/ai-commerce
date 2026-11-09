@@ -304,7 +304,7 @@ def test_cli_records_event_without_changing_ef02_result(monkeypatch, tmp_path):
     # This is a completion/signal fixture: intake issuer and registered AC are
     # independently tested by tests/test_ef02.py, not this mocked downstream lane.
     monkeypatch.setattr(cli, "require_preexecutor_acceptance",
-                        lambda _action: {"ids": ["EF02.action-and-fanin"]})
+                        lambda _action, **_kw: {"ids": ["EF02.action-and-fanin"]})
     called = []
     def fake_schedule(batch, worker, *, max_workers):
         called.append(max_workers)
