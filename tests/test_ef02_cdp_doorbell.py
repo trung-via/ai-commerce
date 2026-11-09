@@ -1374,7 +1374,7 @@ def _wh03_committed_fixture(*, url=None, expired=False, consumed=False):
         marker_digest=hashlib.sha256(marker.encode("ascii")).hexdigest(),
         chat_url=url or URL,
         generation=2,
-        issued_ms=now - (400000 if expired else 1000),
+        issued_ms=now - (120000 if expired else 1000),
         expires_ms=now - 1000 if expired else now + 60000,
         consumed=consumed,
     )
