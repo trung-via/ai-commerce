@@ -49,6 +49,10 @@ _FFMPEG_EXTERNAL_TESTS = frozenset({
     "tests/test_bq_02a_critic_t1.py",
     "tests/test_bq_02b_multimodal.py",
     "tests/test_bq_04a_targeted_repair.py",
+    # #730 BQ-06b owner closure selects BQ-06a's real Q4 video fixture tests.
+    # These tests call ffmpeg/ffprobe via B0.4 even though the test filename
+    # does not contain a media keyword. Provision; never skip or trim tests.
+    "tests/test_bq_06a_behavioral_learning.py",
     # A14 E2E consumes the offline A13 inspected media bridge. Provisioning
     # the tool is conservative, not a claim every case invokes ffprobe.
     "tests/test_a14_commerce_e2e.py",
