@@ -1374,7 +1374,7 @@ jobs:
                   r.native_origin_attested !== false ||
                   r.browser_mutated !== false || r.wake_sent !== false ||
                   (r.status === 'OBSERVED' &&
-                   !codes.slice(5,13).includes(r.code))) throw Error();
+                   !codes.slice(5,16).includes(r.code))) throw Error();
               result = r;
             } catch (_) {}
             await github.rest.issues.createComment({...context.repo,
