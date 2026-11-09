@@ -505,8 +505,149 @@ _RENDEZVOUS_CODES = frozenset({
     "RENDEZVOUS_OBSERVATION_UNKNOWN", "RENDEZVOUS_OBSERVATION_INVALID",
     "RENDEZVOUS_SEARCH_NOT_UNIQUE", "RENDEZVOUS_ORIGIN_MISMATCH",
     "SEARCH_COVERAGE_UNPROVEN", "PROFILE_UNPROVEN", "ACCOUNT_UNPROVEN",
-    "PROFILE_MISMATCH", "ACCOUNT_MISMATCH",
+    "PROFILE_MISMATCH", "ACCOUNT_MISMATCH", "OWNER_ESCALATION",
 })
+
+
+class CompleteSearchDomainWitness(Protocol):
+    """Independently authenticated complete private search-domain witness.
+
+    Proves complete search coverage across all chats in the account/profile,
+    including closed and unloaded chats, not just currently open browser pages.
+    Untyped callback lambdas, caller booleans, single-chat lists, or DOM queries
+    cannot implement this authority.
+    """
+    def is_search_scope_complete(self, *, origin: PrivateOriginSnapshot,
+                                 observed_urls: tuple[str, ...],
+                                 nonce: str) -> bool: ...
+
+
+@dataclass(frozen=True)
+class NativeOriginEvidence:
+    """Closed typed native-origin evidence binding OS identity, route, and scope witness."""
+    source_sha: str
+    route_id: str
+    generation: int
+    nonce: str
+    service_sid: str
+    client_sid: str
+    session_id: int
+    logon_id: str
+    desktop: str
+    cdp_endpoint: str
+    profile_id: str
+    account_id: str
+    issued_ms: int
+    expires_ms: int
+    search_witness: CompleteSearchDomainWitness | None = None
+    g3_status: Mapping | None = None
+
+
+@dataclass(frozen=True)
+class NativeOriginEvidenceEvaluation:
+    status: str
+    code: str
+    live_authority: bool = False
+    partial_status: dict | None = None
+    missing_owners: tuple[str, ...] = ()
+    escalation_reason: str = ""
+
+
+class VerifiedNativeOriginEvidenceConsumer:
+    """Closed typed consumer of verified native-origin evidence for F1A/WH03.
+
+    Only grants complete native origin attestation if it can bind:
+    - source, lease, route generation, nonce
+    - native service SID versus interactive desktop SID/session/login
+    - exact profile and CDP IPv4 127.0.0.1:9444
+    - independently authenticated complete private search-domain witness.
+
+    If only G3 STATUS is available, retains source-level partial STATUS
+    evidence without enabling ORIGIN_ATTESTED, and names missing separate
+    owners for chat account/login and complete closed/unloaded-domain search.
+    """
+    MISSING_ACCOUNT_OWNER = "CHATGPT_ACCOUNT_SESSION_AUTHORITY"
+    MISSING_SEARCH_OWNER = "COMPLETE_SEARCH_DOMAIN_WITNESS"
+    MISSING_PACKAGING_OWNER = "WAKEHUB_G3_G4_SERVICE_PACKAGING_OWNER"
+
+    def __init__(self, *, expected_source_sha: str | None = None):
+        self.expected_source_sha = expected_source_sha
+
+    def evaluate_evidence(self, evidence: NativeOriginEvidence, *,
+                          expected_route_id: str,
+                          expected_generation: int,
+                          expected_nonce: str,
+                          now_ms: int | None = None) -> NativeOriginEvidenceEvaluation:
+        if type(evidence) is not NativeOriginEvidence:
+            return NativeOriginEvidenceEvaluation("HOLD", "RENDEZVOUS_OBSERVATION_INVALID")
+
+        if now_ms is None:
+            now_ms = time.time_ns() // 1000000
+
+        # 1. Source binding
+        if self.expected_source_sha and evidence.source_sha != self.expected_source_sha:
+            return NativeOriginEvidenceEvaluation("HOLD", "RENDEZVOUS_TRUST_MISMATCH")
+
+        # 2. Lease
+        if not evidence.issued_ms <= now_ms < evidence.expires_ms:
+            return NativeOriginEvidenceEvaluation("HOLD", "RENDEZVOUS_EXPIRED")
+
+        # 3. Route & generation
+        if evidence.route_id != expected_route_id:
+            return NativeOriginEvidenceEvaluation("HOLD", "RENDEZVOUS_ROUTE_CHANGED")
+        if evidence.generation != expected_generation:
+            return NativeOriginEvidenceEvaluation("HOLD", "RENDEZVOUS_ROUTE_CHANGED")
+
+        # 4. Nonce
+        if not evidence.nonce or evidence.nonce != expected_nonce:
+            return NativeOriginEvidenceEvaluation("HOLD", "RENDEZVOUS_OBSERVATION_INVALID")
+
+        # 5. Service SID vs Interactive Desktop SID/Session/Desktop
+        if not isinstance(evidence.service_sid, str) or not evidence.service_sid.startswith("S-1-"):
+            return NativeOriginEvidenceEvaluation("HOLD", "RENDEZVOUS_ORIGIN_INVALID")
+        if not isinstance(evidence.client_sid, str) or not evidence.client_sid.startswith("S-1-5-21-"):
+            return NativeOriginEvidenceEvaluation("HOLD", "RENDEZVOUS_ORIGIN_INVALID")
+        if evidence.service_sid == evidence.client_sid:
+            return NativeOriginEvidenceEvaluation("HOLD", "RENDEZVOUS_ORIGIN_INVALID")
+        if type(evidence.session_id) is not int or evidence.session_id <= 0:
+            return NativeOriginEvidenceEvaluation("HOLD", "RENDEZVOUS_ORIGIN_INVALID")
+        if evidence.desktop != r"WinSta0\Default":
+            return NativeOriginEvidenceEvaluation("HOLD", "RENDEZVOUS_ORIGIN_INVALID")
+        if not isinstance(evidence.logon_id, str) or not re.fullmatch(r"[0-9a-f]{16}", evidence.logon_id):
+            return NativeOriginEvidenceEvaluation("HOLD", "RENDEZVOUS_ORIGIN_INVALID")
+
+        # 6. Exact profile and CDP IPv4 127.0.0.1:9444
+        if evidence.cdp_endpoint != "http://127.0.0.1:9444":
+            return NativeOriginEvidenceEvaluation("HOLD", "SEARCH_COVERAGE_UNPROVEN")
+        if not _private_id(evidence.profile_id) or not _private_id(evidence.account_id):
+            return NativeOriginEvidenceEvaluation("HOLD", "PROFILE_UNPROVEN")
+
+        # These are caller-provided source-only values. Nothing here validates
+        # a Windows service signature, authenticated ChatGPT account, or an
+        # account-wide search covering closed/unloaded chats. Do not disclose
+        # private SIDs, session/login IDs or markers in public receipts.
+        partial_status = {
+            "os_identity": "UNVERIFIED",
+            "status_scope": "SOURCE_ONLY_ADVISORY",
+            "account_session": "ACCOUNT_UNPROVEN",
+            "complete_search_scope": "SEARCH_COVERAGE_UNPROVEN",
+        }
+        # CRITICAL: A Protocol, property named has_independent_signed_proof,
+        # arbitrary callback, or signed G3 OS STATUS is NOT authenticated
+        # complete-domain evidence. No enrolled native proof verifier/owner is
+        # available to this consumer. Never invoke witness callbacks as an
+        # authorization decision. A later real native verifier must be a
+        # separately reviewed, authenticated source owner with replay custody.
+        return NativeOriginEvidenceEvaluation(
+            status="HOLD", code="SEARCH_COVERAGE_UNPROVEN",
+            live_authority=False, partial_status=partial_status,
+            missing_owners=(self.MISSING_ACCOUNT_OWNER, self.MISSING_SEARCH_OWNER,
+                            self.MISSING_PACKAGING_OWNER),
+            escalation_reason="G3 STATUS, caller identity fields and search callbacks are not independent native account and whole-domain proof.",
+        )
+
+    def is_complete_origin_attested(self) -> bool:
+        return False
 
 
 def _private_id(value: object) -> bool:
@@ -777,9 +918,12 @@ class PrivateOriginRendezvous:
                 } or
                 (hasattr(self.observer, "enrolled_origin") and hasattr(self.observer, "inventory"))
             )
-            if native and is_local_obs:
-                return self._finish(transaction, data, record, RendezvousPhase.HOLD,
-                                    "SEARCH_COVERAGE_UNPROVEN")
+            if native:
+                # No enrolled signer/complete search domain verifier exists.
+                # An injected observer object or is_complete_origin_attested()
+                # boolean cannot mint trusted native evidence. Fail CLOSED.
+                return self._finish(transaction, data, record,
+                                    RendezvousPhase.HOLD, "SEARCH_COVERAGE_UNPROVEN")
             emission = RendezvousEmission(request_id, record["marker"], record["digest"], origin)
             nonce = secrets.token_hex(32)
             try:
@@ -801,23 +945,12 @@ class PrivateOriginRendezvous:
                 code = str(exc)
             if code is not None:
                 return self._finish(transaction, data, record, RendezvousPhase.HOLD, code)
-            native = trust is RendezvousTrust.NATIVE
-            if native:
-                is_local_obs = (
-                    getattr(self.observer, "is_local_chrome_observer", False) or
-                    type(self.observer).__name__ in {
-                        "LocalChromeObserverAdapter", "LocalChromeBrowserObserver",
-                        "LocalChromePrivateObserver", "ChromeCdpObserverAdapter",
-                    } or
-                    (hasattr(self.observer, "enrolled_origin") and hasattr(self.observer, "inventory"))
-                )
-                if is_local_obs:
-                    return self._finish(transaction, data, record, RendezvousPhase.HOLD,
-                                        "SEARCH_COVERAGE_UNPROVEN")
+            if trust is RendezvousTrust.NATIVE:
+                return self._finish(transaction, data, record,
+                                    RendezvousPhase.HOLD, "SEARCH_COVERAGE_UNPROVEN")
             record["phase"] = RendezvousPhase.CONSUMED.value
             transaction.write(data)
-            return RendezvousReceipt("ORIGIN_ATTESTED" if native else "SYNTHETIC_MATCH",
-                                     "ORIGIN_ATTESTED" if native else "NO_LIVE_AUTHORITY", native)
+            return RendezvousReceipt("SYNTHETIC_MATCH", "NO_LIVE_AUTHORITY", False)
 
     @staticmethod
     def _check_proof(proof, emission, nonce, message_id):
