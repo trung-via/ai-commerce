@@ -1,0 +1,48 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "bq-06b",
+  "sources": [
+    "src/ai_commerce/creative_quality/behavioral_learning_fresh_replay.py"
+  ],
+  "tests": [
+    "tests/test_bq_06b_fresh_a09_replay.py"
+  ],
+  "acs": [
+    "BQ-06b.a09-raw-replay-pinned-to-a11",
+    "BQ-06b.missingness-and-comparability",
+    "BQ-06b.brain-review-non-authoritative"
+  ],
+  "consumers": [
+    "src/ai_commerce/analytics/importer.py",
+    "src/ai_commerce/analytics/ledger.py",
+    "src/ai_commerce/analytics/matching.py",
+    "src/ai_commerce/learning/reader.py",
+    "src/ai_commerce/learning/registry.py",
+    "src/ai_commerce/learning/export.py",
+    "src/ai_commerce/learning/reporting.py",
+    "src/ai_commerce/learning/schemas.py",
+    "src/ai_commerce/creative_scaling/feedback.py",
+    "src/ai_commerce/creative_scaling/learning_bridge.py",
+    "src/ai_commerce/creative_scaling/schemas.py",
+    "src/ai_commerce/creative_scaling/variants.py",
+    "src/ai_commerce/operations/registry.py",
+    "src/ai_commerce/creative_quality/behavioral.py",
+    "src/ai_commerce/creative/briefs.py",
+    "src/ai_commerce/creative_quality/behavioral_learning_bridge.py",
+    "src/ai_commerce/creative_quality/pulse_studio_offline_bridge.py",
+    "src/ai_commerce/creative_quality/pulse_studio_effect_preflight.py",
+    "src/ai_commerce/production_runtime/operator.py",
+    "src/ai_commerce/production_runtime/attended_worker.py",
+    "src/ai_commerce/production_runtime/handoff.py",
+    "src/ai_commerce/production_runtime/receipt.py",
+    "src/ai_commerce/e2e/service.py",
+    "src/ai_commerce/affiliate_release/inspection.py",
+    "src/ai_commerce/creative_quality/inspection_evidence.py",
+    "src/ai_commerce/creative_quality/t2_sampling.py"
+  ],
+  "contracts": [
+    "contracts/CreativeDirective.v1.schema.json",
+    "contracts/ProductJourneyReceipt.v1.schema.json",
+    "contracts/BrainDecision.v1.schema.json"
+  ]
+}

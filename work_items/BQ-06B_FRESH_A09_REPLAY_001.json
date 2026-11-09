@@ -1,0 +1,236 @@
+{
+  "schema_version": "WorkItem.v1",
+  "work_id": "BQ-06B_FRESH_A09_REPLAY_001",
+  "objective": "Bounded A09 fresh replay evidence recheck against exact retained A11 selected observation refs and read-only next-Brain-brief handoff, retaining A17 opt-in and BQ06a review semantics",
+  "status": "HOLD_NATIVE_VERIFICATION_INCOMPLETE",
+  "source_sha": "76589c479a10ff6788f5739cb3952dcf06c37d3b",
+  "source_base_commit": "76589c479a10ff6788f5739cb3952dcf06c37d3b",
+  "action_id": "BQ06B-Q6-FRESH-A09-A11-REPLAY-AGY38HIGH-01",
+  "attempt_id": "bq06b_q6_fresh_a09_a11_replay_76589c47_agy38flashhigh_20261109_v1",
+  "human_authorization": "Human @AI Commerce 2026-11-09 explicitly authorized: tiếp tục, dùng antigravity gemini 3.8 flash high; action BQ06B-Q6-FRESH-A09-A11-REPLAY-AGY38HIGH-01, attempt bq06b_q6_fresh_a09_a11_replay_76589c47_agy38flashhigh_20261109_v1, EXACT main source 76589c479a10ff6788f5739cb3952dcf06c37d3b",
+  "component": "bq-06b",
+  "owner_manifest": "work_items/mt01-components/bq-06b.json",
+  "verification_profile": "mt01-component-onboarding",
+  "max_repair_rounds": 2,
+  "candidate_mode": "BRANCH_ONLY_EF02_WORKER_PUBLICATION",
+  "executor_ingress_existing_registered_acs": [
+    "A09.analytics",
+    "A11.learning",
+    "A17.C07.C10.E06.offline-creative-learning"
+  ],
+  "acceptance": [
+    "BQ-06b.a09-raw-replay-pinned-to-a11",
+    "BQ-06b.missingness-and-comparability",
+    "BQ-06b.brain-review-non-authoritative"
+  ],
+  "allowed_paths": [
+    "src/ai_commerce/creative_quality/behavioral_learning_fresh_replay.py",
+    "tests/test_bq_06b_fresh_a09_replay.py",
+    "work_items/mt01-components/bq-06b.json",
+    "work_items/BQ-06B_FRESH_A09_REPLAY_001.json",
+    "docs/creative/BQ_06B_FRESH_EVIDENCE_PROTOCOL.md",
+    "docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md"
+  ],
+  "add_only_paths": [
+    "src/ai_commerce/creative_quality/behavioral_learning_fresh_replay.py",
+    "tests/test_bq_06b_fresh_a09_replay.py",
+    "work_items/mt01-components/bq-06b.json",
+    "work_items/BQ-06B_FRESH_A09_REPLAY_001.json",
+    "docs/creative/BQ_06B_FRESH_EVIDENCE_PROTOCOL.md"
+  ],
+  "append_only_paths": [
+    "docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md"
+  ],
+  "acceptance_test_map": {
+    "BQ-06b.a09-raw-replay-pinned-to-a11": {
+      "positive": [
+        "test_a09_raw_replay_pinned_to_a11_complete_match",
+        "test_a09_replay_exact_selected_history_subset",
+        "test_a09_read_snapshot_preserves_path_and_wal_controls"
+      ],
+      "negative": [
+        "test_mismatched_a09_context_raw_sha_or_import_id_rejected",
+        "test_reordered_deleted_or_duplicated_observation_ids_hold",
+        "test_stale_a11_selected_revision_or_source_refs_hold",
+        "test_after_the_fact_replacement_of_a09_raw_or_ledger_fails",
+        "test_native_windows_hardlink_denied_before_a09_or_a11",
+        "test_native_windows_junction_denied_before_a09_or_a11",
+        "test_native_windows_symlink_denied_before_a09_or_a11",
+        "test_native_windows_write_and_rename_race_denied_during_owner_replay",
+        "test_native_ads_traversal_dot_path_denied",
+        "test_nonquiescent_a09_or_a11_holds_without_owner_write",
+        "test_native_wal_header_without_sidecars_holds_before_sqlite_open"
+      ]
+    },
+    "BQ-06b.missingness-and-comparability": {
+      "positive": [
+        "test_source_zero_vs_missing_distinct_and_preserved",
+        "test_counterevidence_and_corrections_preserved_without_invented_comparison"
+      ],
+      "negative": [
+        "test_conflicting_account_window_timezone_metric_version_denominator_cohort_drift_holds",
+        "test_source_correcting_reprocessing_old_imports_holds",
+        "test_missing_zero_conflation_rejected",
+        "test_same_creative_cohort_display_name_independent_origin_rejected"
+      ]
+    },
+    "BQ-06b.brain-review-non-authoritative": {
+      "positive": [
+        "test_brain_review_accepts_only_bq06a_readonly_advisory_replay",
+        "test_archived_a11_only_mode_without_a09_replay",
+        "test_supplied_provenance_never_upgraded_to_provider",
+        "test_mt01_new_owner_has_real_registered_consumer_closure"
+      ],
+      "negative": [
+        "test_forged_archive_export_rehashed_without_receiver_pin_fails",
+        "test_caller_forged_human_brain_provider_rights_hold",
+        "test_budget_clickthrough_profit_lift_claims_rejected",
+        "test_all_failures_leave_a09_a11_a17_pulse_file_bytes_unchanged"
+      ]
+    }
+  },
+  "scope_out": [
+    "All existing owner code, acceptance parsers, root guards, Git refs/config and workflows",
+    "Provider measurements, spend, publish, live PULSE, or marketing uplift claims",
+    "New A17 proposals or adoption writes",
+    "Unverified cross-owner identity or comparative lift"
+  ],
+  "execution_model": {
+    "required_executor": "antigravity",
+    "required_model": "gemini-3.8-flash",
+    "required_effort": "high",
+    "fallback_allowed": false,
+    "runtime_model_attestation": "Human @AI Commerce 2026-11-09 explicitly authorized: tiếp tục, dùng antigravity gemini 3.8 flash high; no fallback"
+  },
+  "verification": {
+    "state": "HOLD_NATIVE_VERIFICATION_INCOMPLETE",
+    "initial_head_verified": "76589c479a10ff6788f5739cb3952dcf06c37d3b",
+    "initial_worktree": "CLEAN_OBSERVED",
+    "candidate_sha": null,
+    "hosted_windows_ci": "PENDING_INDEPENDENT",
+    "brain_review": "PENDING_INDEPENDENT",
+    "native_symlink_privileged_proof": "NATIVE_SYMLINK_CREATION_UNPROVEN",
+    "native_symlink_handling": "Host denied native symlink creation (WinError 1314); test explicitly records NATIVE_SYMLINK_CREATION_UNPROVEN and skips. Hardlink and junction negative tests strictly PASSED.",
+    "r1_owner_verification": {
+      "scope": "new owner tests/test_bq_06b_fresh_a09_replay.py",
+      "collected": 51,
+      "passed": 50,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 1,
+      "skip_reason": "test_native_windows_symlink_denied_before_a09_or_a11: NATIVE_SYMLINK_CREATION_UNPROVEN (WinError 1314)",
+      "requested_workers": 12,
+      "workers_with_fixture_directories_observed": [
+        "gw0",
+        "gw1",
+        "gw2",
+        "gw3",
+        "gw4",
+        "gw5",
+        "gw6",
+        "gw7",
+        "gw8",
+        "gw9",
+        "gw10",
+        "gw11"
+      ],
+      "tested_code_sha256": {
+        "src/ai_commerce/creative_quality/behavioral_learning_fresh_replay.py": "2abfcaf67c6785fd5ff571bf7b8ca044bcb33fe3e6818a86c823272d94c0c3db",
+        "tests/test_bq_06b_fresh_a09_replay.py": "3710d1a46c9063ce5c9cf80d2d644b3c3fae58a20809bf2cded1dcc49bfbbcab",
+        "work_items/mt01-components/bq-06b.json": "74161e4ffba0fd017f578b72c39fb4120cfe149e5b04bb182c39226d159b458a"
+      },
+      "code_bytes_unchanged_during_execution": true
+    },
+    "mt01_preflight": {
+      "selected_groups": [
+        "a03",
+        "a04",
+        "a06",
+        "a09",
+        "a11",
+        "a13",
+        "a17-1",
+        "b0-3",
+        "b0-4",
+        "bq-01a",
+        "bq-02a",
+        "bq-02b",
+        "bq-05a",
+        "bq-05b0",
+        "bq-06a",
+        "bq-06b"
+      ],
+      "fallback": false,
+      "reason_codes": [
+        "ONBOARD_CONSUMER_OWNER_CLOSURE"
+      ],
+      "unknown_acs": [],
+      "new_owner_binding": "mt01-component-onboarding",
+      "trusted_post_executor_verification": "PENDING_EF01_EF02"
+    },
+    "final_full_closure_collection": {
+      "selected_groups": [
+        "a03",
+        "a04",
+        "a06",
+        "a09",
+        "a11",
+        "a13",
+        "a17-1",
+        "b0-3",
+        "b0-4",
+        "bq-01a",
+        "bq-02a",
+        "bq-02b",
+        "bq-05a",
+        "bq-05b0",
+        "bq-06a",
+        "bq-06b"
+      ],
+      "test_files": [
+        "tests/test_a03_a04_integration.py",
+        "tests/test_a03_creative.py",
+        "tests/test_a03_upgrade_v11.py",
+        "tests/test_a04_media_operations.py",
+        "tests/test_a04_upgrade_v11.py",
+        "tests/test_a06_e01.py",
+        "tests/test_a09_analytics.py",
+        "tests/test_a09_e02.py",
+        "tests/test_a11_integration.py",
+        "tests/test_a11_reader.py",
+        "tests/test_a11_registry.py",
+        "tests/test_a11_reporting.py",
+        "tests/test_a13_claim_rights.py",
+        "tests/test_a13_evidence_pack.py",
+        "tests/test_a13_link.py",
+        "tests/test_a13_media_inspection.py",
+        "tests/test_a17_feedback.py",
+        "tests/test_a17_variants.py",
+        "tests/test_b0_3_attended_worker.py",
+        "tests/test_b0_4_operator.py",
+        "tests/test_bq_01a_brief_causality.py",
+        "tests/test_bq_02a_critic_t1.py",
+        "tests/test_bq_02b_multimodal.py",
+        "tests/test_bq_05a_pulse_studio_offline_bridge.py",
+        "tests/test_bq_05b_effect_preflight.py",
+        "tests/test_bq_06a_behavioral_learning.py",
+        "tests/test_bq_06b_fresh_a09_replay.py"
+      ],
+      "collected": 2325,
+      "exit_code": 0,
+      "execution": "PENDING_INDEPENDENT_EF01_EF02; collection is not execution"
+    },
+    "final_disposition": "HOLD_NO_CANDIDATE_ACCEPTANCE: 50 owner PASS, 1 privilege-dependent symlink test SKIPPED as NATIVE_SYMLINK_CREATION_UNPROVEN; full 16-group closure execution required by EF01/EF02",
+    "protected_owners_changed": false,
+    "git_writes_attempted": false,
+    "provider_spend_publication_attempted_by_adapter": false,
+    "external_invocation_attestation": "Actual model/executor write receipt and immutable per-attempt artifact must be retained independently by EF02; not authenticated by this WorkItem"
+  },
+  "authority": "HANDOFF_ONLY; no signed BrainDecision, Human adoption, provider rights, audience popularity, ROI or launch claim",
+  "required_followup": {
+    "executor_source_work_complete": true,
+    "independent_ef01_ef02": "Replay final MT01 closure at these source bytes on native Windows. Do not accept skipped or unexecuted gates as proof of rejection.",
+    "new_owner_registration": "Data-only candidate manifest validated locally; new AC adoption and trusted post-executor verification remain pending",
+    "publication": "EF02 worker only, genuine candidate branch -> independent Brain review -> hosted Windows CI -> canonical PASS/trusted auto-merge; no v1 issue amendment"
+  }
+}
