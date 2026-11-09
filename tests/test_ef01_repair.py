@@ -856,6 +856,12 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
                                     github=Github(), root=tmp_path / "action-evidence")
     storage = WorkOwnerMemoryTransport(head)
     worker._acquire_owner = lambda action: memory_owner(action, batch, storage)
+    # These legacy v1 fixture tests exercise post-admission WorkOwner, child,
+    # recovery and MT-01 branches with intentionally marker-less packets.
+    # New production dispatch AC validation is independently regression-tested
+    # through the strict initialized-worker path in tests/test_ef02.py.
+    worker._dispatch_strict_ac = False
+
     return SimpleNamespace(worker=worker, batch=batch, calls=calls, children=children,
                            claims=claims, candidates=candidates, resolved=resolved, head=head)
 

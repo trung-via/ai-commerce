@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 from .transport import GitHubTransport, RemoteTransportError, CandidateIntegrityError, WorkOwner, WorkOwnerAudit
-from .validation import fingerprint, check_source, approved_verification_plan, approved_acceptance_plan
+from .validation import fingerprint, check_source, approved_verification_plan, approved_acceptance_plan, require_preexecutor_acceptance, RemoteRequestError
 from .reuse import load_approved_candidates, approve_reuse
 from .candidate_policy import (
     REVIEW_STATUS, VERIFIED_STATUSES, candidate_accepted, evidence_digest, validate_candidate_evidence,
@@ -278,6 +278,7 @@ class LocalBatchWorker:
             self.checkout / ".github" / "ef02" / "approved-candidates.v1.json")
         check_source(self.checkout, batch["source_sha"],
                      **({"git_executable": self.git_executable} if self.git_executable is not None else {}))
+        self._dispatch_strict_ac = True
 
     def _acquire_owner(self, action):
         identity = WorkOwner.identity(self.github, self.issue_number, self.batch, action)
@@ -354,6 +355,16 @@ class LocalBatchWorker:
                            diagnostic=str(exc))
             return finish()
         outcome["max_repair_rounds"] = repair_limit
+        # Direct real worker calls enforce the same gate before GitHub index or
+        # WorkOwner claim. Unit-only object.__new__ fault fixtures remain scoped
+        # to claim/transport tests and cannot prove production admission.
+        if getattr(self, "_dispatch_strict_ac", False):
+            try:
+                require_preexecutor_acceptance(submitted_action)
+            except RemoteRequestError as exc:
+                outcome.update(status="INVALID_ACTION", error_code=str(exc),
+                               executor_invoked=False)
+                return finish()
         if action.get("reuse_candidate") is not None:
             if action["depends_on"]:
                 outcome.update(status="UNPROVEN", error_code="AGGREGATE_REQUIRES_FRESH_VERIFICATION",

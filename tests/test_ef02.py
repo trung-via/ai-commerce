@@ -194,6 +194,73 @@ def test_missing_ambiguous_or_unknown_acceptance_requires_broad_verification(dec
     assert acceptance["broad_required"] and acceptance["unknown_ids"]
 
 
+
+def test_preexecutor_acceptance_ignores_prose_mentions_and_rejects_second_declaration():
+    from ai_commerce.remote.validation import require_preexecutor_acceptance
+    a = action("a")
+    a["instruction"] = (
+        'Prose mentions MT01_ACCEPTANCE_JSON: but is not a declaration.\n'
+        'MT01_ACCEPTANCE_JSON:["EF02.action-and-fanin"]'
+    )
+    assert require_preexecutor_acceptance(a)["ids"] == ["EF02.action-and-fanin"]
+    assert validate(batch([a]))["batch_id"] == "sample-001"
+    a["instruction"] += '\nMT01_ACCEPTANCE_JSON:["EF02.recovery"]'
+    with pytest.raises(RemoteRequestError, match="INTAKE_AC_MISSING_OR_AMBIGUOUS"):
+        validate(batch([a]))
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Only source instructions; no machine AC", "INTAKE_AC_MISSING_OR_AMBIGUOUS"),
+    ("MT01_ACCEPTANCE_JSON: not-json", "INTAKE_AC_MALFORMED"),
+    ("MT01_ACCEPTANCE_JSON: []", "INTAKE_AC_MALFORMED"),
+    ('MT01_ACCEPTANCE_JSON:["EF02.recovery","EF02.recovery"]', "INTAKE_AC_MALFORMED"),
+    ('MT01_ACCEPTANCE_JSON:["MT01.minimum-test-execution"]', "INTAKE_AC_UNREGISTERED"),
+])
+def test_preexecutor_acceptance_rejects_malformed_or_foreign_ids_before_provider(text, expected):
+    from ai_commerce.remote.validation import require_preexecutor_acceptance
+    a = action("a")
+    a["instruction"] = text
+    with pytest.raises(RemoteRequestError, match=expected):
+        require_preexecutor_acceptance(a)
+    if text.lstrip().startswith("MT01_ACCEPTANCE_JSON:"):
+        with pytest.raises(RemoteRequestError, match=expected):
+            validate(batch([a]))
+
+
+def test_direct_real_worker_ac_gate_precedes_workowner_operations(tmp_path, monkeypatch):
+    from ai_commerce.remote import worker as remote_worker
+    monkeypatch.setattr(remote_worker, "check_source", lambda *_a, **_kw: None)
+    monkeypatch.setattr(remote_worker, "load_approved_candidates",
+                        lambda *_a: {"version": 1, "candidates": {}})
+    class ForbiddenClaim:
+        def claim(self, **_kw):
+            pytest.fail("invalid AC must not reach GitHub claim")
+    worker = remote_worker.LocalBatchWorker(
+        checkout=tmp_path, batch=batch([action("a")]),
+        profiles={"project-tests": ["python", "-m", "pytest", "tests", "-q"]},
+        github=ForbiddenClaim(), root=tmp_path / "evidence")
+    assert worker._dispatch_strict_ac is True
+    out = worker.execute_action(worker.batch["actions"][0])
+    assert out["status"] == "INVALID_ACTION"
+    assert out["error_code"] == "INTAKE_AC_MISSING_OR_AMBIGUOUS"
+    assert out["executor_invoked"] is False
+    assert out["candidate_sha"] is None
+
+
+
+def test_reconcile_readonly_accepts_legacy_malformed_ac_without_dispatch():
+    # Read-only reconciliation must still inspect old immutable bad WorkItems;
+    # executable modes continue to reject the same source-bound request.
+    a = action("a")
+    a["instruction"] = 'MT01_ACCEPTANCE_JSON: not-json'
+    p = batch([a])
+    with pytest.raises(RemoteRequestError, match="INTAKE_AC_MALFORMED"):
+        validate(p)
+    assert validate_batch(p, schema=SCHEMA, registry=verify_registry(REGISTRY),
+                          issuer_login="trung-via", owner_login="trung-via",
+                          strict_ac=False) == p
+
+
 @pytest.mark.parametrize("key,value", [("acceptance_ids", ["A12.product-evidence"]),
                                      ("verify_argv", ["python", "-c", "arbitrary"])])
 def test_mt01_does_not_relax_v1_additional_properties(key, value):
@@ -877,6 +944,10 @@ def test_publication_diagnostic_survives_worker_batch_artifact_and_safe_issue_su
     monkeypatch.setattr(cli, "check_source", lambda *_a, **_kw: None)
     monkeypatch.setattr(cli, "verify_registry", lambda _: context.worker.profiles)
     monkeypatch.setattr(cli, "load_approved_candidates", lambda _: {"version": 1, "candidates": {}})
+    # Isolate post-admission publication uncertainty; issuer AC negatives
+    # are separately covered by the real strict pre-executor acceptance gate.
+    monkeypatch.setattr(cli, "require_preexecutor_acceptance",
+                        lambda _action: {"ids": ["EF02.action-and-fanin"]})
     monkeypatch.setattr(cli, "start_worker_signal", lambda **_: None)
     monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
     monkeypatch.setenv("GITHUB_TOKEN", "fixture")
