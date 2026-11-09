@@ -807,7 +807,7 @@ def test_worker_final_boundary_and_signal_failure_preserve_result(setup, monkeyp
     # This is a completion/signal fixture: intake issuer and registered AC are
     # independently tested by tests/test_ef02.py, not this mocked downstream lane.
     monkeypatch.setattr(worker_cli, "require_preexecutor_acceptance",
-                        lambda _action: {"ids": ["EF02.action-and-fanin"]})
+                        lambda _action, **_kw: {"ids": ["EF02.action-and-fanin"]})
     monkeypatch.setattr(worker_cli, "GitHubTransport", lambda *a: SimpleNamespace(comment=lambda *a: None))
     monkeypatch.setattr(worker_cli, "LocalBatchWorker",
                         lambda **kw: SimpleNamespace(root=root, execute_action=lambda *a: None))

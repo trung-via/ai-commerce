@@ -355,12 +355,14 @@ class LocalBatchWorker:
                            diagnostic=str(exc))
             return finish()
         outcome["max_repair_rounds"] = repair_limit
+        preflight_acceptance = None
         # Direct real worker calls enforce the same gate before GitHub index or
         # WorkOwner claim. Unit-only object.__new__ fault fixtures remain scoped
         # to claim/transport tests and cannot prove production admission.
         if getattr(self, "_dispatch_strict_ac", False):
             try:
-                require_preexecutor_acceptance(submitted_action)
+                preflight_acceptance = require_preexecutor_acceptance(
+                    submitted_action, source_closure=True)
             except RemoteRequestError as exc:
                 outcome.update(status="INVALID_ACTION", error_code=str(exc),
                                executor_invoked=False)
@@ -514,7 +516,7 @@ class LocalBatchWorker:
                 outcome.update(status="INVALID_ACTION", error_code="UNAUTHORIZED_HUMAN_FULL")
                 return finish()
             plan = approved_verification_plan(action, self.profiles)
-            acceptance = approved_acceptance_plan(submitted_action)
+            acceptance = preflight_acceptance or approved_acceptance_plan(submitted_action)
             plan["acceptance"] = acceptance
             outcome["mt01_acceptance"] = acceptance
             outcome["verification_plan"] = plan

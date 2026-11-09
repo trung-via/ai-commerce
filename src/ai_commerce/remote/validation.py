@@ -163,7 +163,7 @@ def approved_acceptance_plan(action: dict) -> dict:
             "broad_required": bool(unknown)}
 
 
-def require_preexecutor_acceptance(action: dict) -> dict:
+def require_preexecutor_acceptance(action: dict, *, source_closure: bool = False) -> dict:
     """Fail closed on malformed, missing or unregistered fingerprinted AC.
 
     Prose mentioning a marker is not a declaration. This gate never supplies
@@ -179,7 +179,35 @@ def require_preexecutor_acceptance(action: dict) -> dict:
         raise RemoteRequestError("INTAKE_AC_MALFORMED")
     if plan["unknown_ids"]:
         raise RemoteRequestError("INTAKE_AC_UNREGISTERED")
-    return plan
+    if not source_closure:
+        return plan
+
+    # All map entries come from source-reviewed registered groups in the
+    # pinned checkout. Issuer-declared ACs can expand, but cannot narrow
+    # registered owner/consumer coverage or invent new test argv.
+    groups = approved_groups()
+    required: set[str] = set()
+    for allowed in action["allowed_paths"]:
+        registered = [
+            group for group in groups
+            if any(path == allowed or path.startswith(allowed.rstrip("/") + "/")
+                   for path in (*group.paths, *group.consumers,
+                                *group.contracts, *group.tests))
+        ]
+        if not registered:
+            raise RemoteRequestError("INTAKE_SOURCE_OWNER_UNMAPPED")
+        for group in registered:
+            required.update(group.acs)
+    if not set(plan["ids"]).intersection(required):
+        raise RemoteRequestError("INTAKE_AC_NOT_OWNING_ALLOWED_PATH")
+    expanded = sorted(set(plan["ids"]) | required)
+    if len(expanded) > 128:
+        raise RemoteRequestError("INTAKE_AC_CLOSURE_TOO_BROAD")
+    known = {ac: {"group": g.name, "tests": list(g.tests)}
+             for g in groups for ac in g.acs}
+    return {**plan, "ids": expanded,
+            "owner_derived_ids": sorted(required),
+            "consumer_map": {ac: known[ac] for ac in expanded}}
 
 
 def approved_verification_plan(action: dict, registry: dict[str, list[str]]) -> dict:
