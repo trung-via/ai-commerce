@@ -14,18 +14,22 @@ from dataclasses import dataclass, replace
 import hashlib
 import os
 import re
+import secrets
 import time
 from contextlib import contextmanager
 from urllib.parse import urlsplit
 from typing import Callable, Protocol
+from pathlib import Path
 
 from .conversation_binding import ResolvedBinding, _CHAT, _REPOSITORY, _endpoint
 from .trusted_origin import (
     CompleteSearchDomainWitness, OriginError, PrivateOriginSnapshot,
+    LocalCallerAttestation, OriginAuthority,
     RendezvousEmission, RendezvousHit, RendezvousObservation,
     VerifiedNativeOriginEvidenceConsumer, _MARKER, _private_id, _valid_origin,
 )
 from .wake_adapter import WakeReceipt
+from ._private_state import PrivateJsonState, PrivateStateError
 
 _EVENT = re.compile(r"ef02-completion-v1:[0-9a-f]{64}\Z")
 _COMPOSER = ('#prompt-textarea[contenteditable="true"], '
@@ -513,7 +517,7 @@ def probe_wh03_test_registration_signal(*, endpoint: str = "http://127.0.0.1:944
 # Never select an arbitrary marker from the DOM or a public GitHub Issue.
 @dataclass(frozen=True, repr=False)
 class WH03SignalCommitment:
-    request_id: str
+    registration_id: str
     marker_digest: str
     chat_url: str
     generation: int
@@ -571,12 +575,194 @@ async (args) => {
 """
 
 
-def _wh03_commitment_gate(value: WH03SignalCommitment | None) -> str:
-    if value is None:
-        return "TEST_COMMITMENT_REQUIRED"
+
+@dataclass(frozen=True, repr=False)
+class WH03PreparedRegistration:
+    """Private value for an independently enrolled same-chat signal carrier."""
+    registration_id: str
+    marker: str
+    expires_ms: int
+
+
+class WH03TestRegistrationLedger:
+    """Small test-only private ledger. No native authority is supplied here.
+
+    Each attempt gets its own random marker. Historical attempt records remain
+    distinct, so prior Chat A markers never count toward a newer registration.
+    A source-only mock authority is NOT evidence of native ChatGPT identity.
+    """
+    _STATES = frozenset({"PENDING", "OBSERVING", "SIGNAL_OBSERVED",
+                         "TEST_REGISTERED", "HOLD"})
+
+    def __init__(self, state_path: Path, repository_root: Path, *,
+                 authority: OriginAuthority | None = None):
+        self.authority = authority
+        self._state = PrivateJsonState(
+            Path(state_path), Path(repository_root),
+            label="WH03_TEST_REGISTRATION", max_bytes=131072)
+
+    def _authorized(self, attestation, operation: str, context: dict) -> None:
+        if (type(attestation) is not LocalCallerAttestation or
+                not attestation.is_trusted(
+                    authority=self.authority, operation=operation,
+                    context=context)):
+            raise OriginError("TEST_REGISTRATION_AUTHORITY_REQUIRED")
+
+    @classmethod
+    def _read(cls, transaction) -> dict:
+        data = transaction.read({"version": 1, "registrations": {}})
+        if (type(data) is not dict or set(data) != {"version", "registrations"} or
+                type(data["version"]) is not int or data["version"] != 1 or
+                type(data["registrations"]) is not dict or len(data["registrations"]) > 64):
+            raise OriginError("TEST_REGISTRATION_STATE_INVALID")
+        digests = set()
+        for registration_id, item in data["registrations"].items():
+            if (not isinstance(registration_id, str) or
+                    re.fullmatch(r"[0-9a-f]{32}", registration_id) is None or
+                    type(item) is not dict or set(item) != {
+                        "registration_id", "marker_digest", "chat_url",
+                        "generation", "issued_ms", "expires_ms", "phase"} or
+                    item["registration_id"] != registration_id or
+                    item["phase"] not in cls._STATES):
+                raise OriginError("TEST_REGISTRATION_STATE_INVALID")
+            c = WH03SignalCommitment(registration_id=item["registration_id"],
+                                     marker_digest=item["marker_digest"],
+                                     chat_url=item["chat_url"],
+                                     generation=item["generation"],
+                                     issued_ms=item["issued_ms"],
+                                     expires_ms=item["expires_ms"])
+            if (_wh03_commitment_gate_shape(c) != "READY" or
+                    c.marker_digest in digests):
+                raise OriginError("TEST_REGISTRATION_STATE_INVALID")
+            digests.add(c.marker_digest)
+        return data
+
+    def prepare(self, *, chat_url: str, generation: int,
+                attestation: LocalCallerAttestation | None,
+                lease_seconds: int = 90) -> WH03PreparedRegistration:
+        """Commit to private state BEFORE a trusted same-chat carrier emits."""
+        if (type(chat_url) is not str or _CHAT.fullmatch(chat_url) is None or
+                type(generation) is not int or generation < 1 or
+                type(lease_seconds) is not int or not 1 <= lease_seconds <= 300):
+            raise OriginError("TEST_REGISTRATION_INPUT_INVALID")
+        self._authorized(attestation, "test_registration_prepare",
+                         {"chat_url": chat_url, "generation": generation})
+        try:
+            with self._state.locked() as transaction:
+                data = self._read(transaction)
+                if len(data["registrations"]) >= 64:
+                    raise OriginError("TEST_REGISTRATION_STORE_FULL")
+                registration_id = secrets.token_hex(16)
+                marker = "WAKEHUB_TEST_REGISTER_V1:" + secrets.token_hex(32)
+                digest = hashlib.sha256(marker.encode("ascii")).hexdigest()
+                if registration_id in data["registrations"] or any(
+                    x["marker_digest"] == digest for x in data["registrations"].values()
+                ):
+                    raise OriginError("TEST_REGISTRATION_REPLAY")
+                now = time.time_ns() // 1_000_000
+                data["registrations"][registration_id] = {
+                    "registration_id": registration_id,
+                    "marker_digest": digest, "chat_url": chat_url,
+                    "generation": generation, "issued_ms": now,
+                    "expires_ms": now + lease_seconds * 1000,
+                    "phase": "PENDING",
+                }
+                transaction.write(data)
+                return WH03PreparedRegistration(registration_id, marker,
+                                                now + lease_seconds * 1000)
+        except PrivateStateError as exc:
+            raise OriginError("TEST_REGISTRATION_STORE_UNAVAILABLE") from exc
+
+    def observe(self, *, registration_id: str,
+                attestation: LocalCallerAttestation | None,
+                inventory=None) -> str:
+        """One-shot CDP read; pre-write OBSERVING prevents ambiguous replays."""
+        self._authorized(attestation, "test_registration_observe",
+                         {"registration_id": registration_id})
+        try:
+            with self._state.locked() as transaction:
+                data = self._read(transaction)
+                record = data["registrations"].get(registration_id)
+                if record is None:
+                    return "TEST_REGISTRATION_NOT_FOUND"
+                if record["phase"] != "PENDING":
+                    return "TEST_REGISTRATION_REPLAY"
+                value = WH03SignalCommitment(**{
+                    k: record[k] for k in ("registration_id", "marker_digest",
+                        "chat_url", "generation", "issued_ms", "expires_ms")})
+                gate = _wh03_commitment_gate(value)
+                if gate != "READY":
+                    record["phase"] = "HOLD"
+                    transaction.write(data)
+                    return gate
+                record["phase"] = "OBSERVING"
+                transaction.write(data)  # durable boundary before browser read
+                try:
+                    result = probe_wh03_committed_registration_signal(
+                        commitment=value, inventory=inventory)
+                except Exception:
+                    result = "CDP_READ_UNAVAILABLE"
+                record["phase"] = ("SIGNAL_OBSERVED" if
+                                   result == "TEST_SIGNAL_MATCH_UNATTESTED"
+                                   else "HOLD")
+                transaction.write(data)
+                return result
+        except PrivateStateError:
+            return "TEST_REGISTRATION_STORE_UNAVAILABLE"
+
+    def complete(self, *, registration_id: str,
+                 origin: PrivateOriginSnapshot,
+                 attestation: LocalCallerAttestation | None) -> str:
+        """Requires independently enrolled native exact-chat proof verifier.
+
+        The browser text matcher alone never returns TEST_REGISTERED. The
+        authority must independently verify origin and caller custody; a public
+        Issue/marker/boolean cannot implement this native decision.
+        """
+        self._authorized(attestation, "test_registration_complete",
+                         {"registration_id": registration_id})
+        try:
+            with self._state.locked() as transaction:
+                data = self._read(transaction)
+                record = data["registrations"].get(registration_id)
+                if record is None:
+                    return "TEST_REGISTRATION_NOT_FOUND"
+                if record["phase"] != "SIGNAL_OBSERVED":
+                    return "TEST_REGISTRATION_NOT_VERIFIED"
+                if (not _valid_origin(origin) or
+                        origin.chat_url != record["chat_url"] or
+                        origin.generation != record["generation"] or
+                        origin.cdp_endpoint != "http://127.0.0.1:9444"):
+                    return "TEST_CHAT_ROUTE_MISMATCH"
+                if time.time_ns() // 1_000_000 >= record["expires_ms"]:
+                    record["phase"] = "HOLD"
+                    transaction.write(data)
+                    return "TEST_COMMITMENT_EXPIRED"
+                verifier = getattr(self.authority,
+                                   "authenticate_wh03_test_registration", None)
+                # Enrollment/implementation of this exact private native owner
+                # is a separate effect: not present in the Skills/GitHub source.
+                if not callable(verifier):
+                    return "TEST_CHAT_ORIGIN_UNATTESTED"
+                try:
+                    proof = verifier(registration_id=registration_id,
+                                     record=dict(record), origin=origin)
+                except Exception:
+                    return "TEST_CHAT_ORIGIN_UNATTESTED"
+                if proof is not True:
+                    return "TEST_CHAT_ORIGIN_UNATTESTED"
+                record["phase"] = "TEST_REGISTERED"
+                transaction.write(data)
+                return "TEST_REGISTERED"
+        except PrivateStateError:
+            return "TEST_REGISTRATION_STORE_UNAVAILABLE"
+
+
+def _wh03_commitment_gate_shape(value: WH03SignalCommitment) -> str:
+    """Validate immutable commitment shape, excluding wall-clock expiry."""
     if (type(value) is not WH03SignalCommitment or
-            type(value.request_id) is not str or
-            re.fullmatch(r"[a-z0-9][a-z0-9._-]{7,63}", value.request_id) is None or
+            type(value.registration_id) is not str or
+            re.fullmatch(r"[a-z0-9][a-z0-9._-]{7,63}", value.registration_id) is None or
             type(value.marker_digest) is not str or
             re.fullmatch(r"[0-9a-f]{64}", value.marker_digest) is None or
             type(value.chat_url) is not str or
@@ -589,6 +775,15 @@ def _wh03_commitment_gate(value: WH03SignalCommitment | None) -> str:
         return "TEST_COMMITMENT_INVALID"
     if value.consumed:
         return "TEST_COMMITMENT_REPLAY"
+    return "READY"
+
+
+def _wh03_commitment_gate(value: WH03SignalCommitment | None) -> str:
+    if value is None:
+        return "TEST_COMMITMENT_REQUIRED"
+    shape = _wh03_commitment_gate_shape(value)
+    if shape != "READY":
+        return shape
     now_ms = time.time_ns() // 1_000_000
     if now_ms < value.issued_ms:
         return "TEST_COMMITMENT_NOT_ACTIVE"
