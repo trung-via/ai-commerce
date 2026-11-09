@@ -504,6 +504,7 @@ _RENDEZVOUS_CODES = frozenset({
     "RENDEZVOUS_EXPIRED", "RENDEZVOUS_ACK_UNKNOWN", "RENDEZVOUS_PRECOMMIT_UNKNOWN",
     "RENDEZVOUS_OBSERVATION_UNKNOWN", "RENDEZVOUS_OBSERVATION_INVALID",
     "RENDEZVOUS_SEARCH_NOT_UNIQUE", "RENDEZVOUS_ORIGIN_MISMATCH",
+    "SEARCH_COVERAGE_UNPROVEN", "PROFILE_UNPROVEN", "ACCOUNT_UNPROVEN",
 })
 
 
@@ -668,6 +669,8 @@ class PrivateOriginRendezvous:
                 origin = self.observer.capture_origin(
                     request_id=request_id, binding=ResolvedBinding(route_id, generation,
                     route["chat_url"], route["cdp_endpoint"]))
+            except OriginError:
+                raise
             except Exception:
                 raise OriginError("RENDEZVOUS_ORIGIN_INVALID") from None
             if not self._matches_route(origin, route):
@@ -768,6 +771,8 @@ class PrivateOriginRendezvous:
             nonce = secrets.token_hex(32)
             try:
                 proof = self.observer.search_and_reprove(emission, nonce=nonce)
+            except OriginError as exc:
+                return self._finish(transaction, data, record, RendezvousPhase.HOLD, str(exc))
             except Exception:
                 return self._finish(transaction, data, record, RendezvousPhase.UNKNOWN,
                                     "RENDEZVOUS_OBSERVATION_UNKNOWN")

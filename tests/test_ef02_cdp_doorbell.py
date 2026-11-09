@@ -2,11 +2,21 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
+import hashlib
+from types import SimpleNamespace
 
 import pytest
 
-from ai_commerce.remote.cdp_doorbell import LocalChromeDoorbellAdapter
+from ai_commerce.remote.cdp_doorbell import (
+    LocalChromeDoorbellAdapter, LocalChromeObserverAdapter, LocalChromeBrowserObserver,
+    _OBSERVER_CHECK, _SEARCH_MARKER,
+)
 from ai_commerce.remote.conversation_binding import ResolvedBinding
+from ai_commerce.remote.trusted_origin import (
+    OriginError, PrivateOriginSnapshot, RendezvousEmission,
+    RendezvousHit, RendezvousObservation,
+)
 
 URL = "https://chatgpt.com/c/00000000-0000-0000-0000-000000000001"
 OTHER = "https://chatgpt.com/c/00000000-0000-0000-0000-000000000002"
@@ -575,3 +585,408 @@ def test_wake_preload_failure_never_stages_or_sends():
     assert result.error_code == "PRELOAD_CDP_UNAVAILABLE"
     assert result.delivery_status == "UNSUPPORTED"
     assert inv.calls == []
+
+
+OBSERVER_MARKER = "wh03." + "1" * 64
+OBSERVER_DIGEST = hashlib.sha256(OBSERVER_MARKER.encode("ascii")).hexdigest()
+ORIGIN_A = PrivateOriginSnapshot(
+    route_id="route-A", generation=1, chat_url=URL,
+    cdp_endpoint="http://127.0.0.1:9444",
+    profile_id="profile-A", account_id="account-A",
+    session_id="session-A", login_id="login-A",
+)
+EMISSION_A = RendezvousEmission(
+    request_id="req-1",
+    marker=OBSERVER_MARKER,
+    marker_digest=OBSERVER_DIGEST,
+    origin=ORIGIN_A,
+)
+
+
+class FakeObserverPage:
+    def __init__(self, url=URL, *, gate="READY", markers=None, fail_step=None,
+                 profile_id="profile-A", account_id="account-A"):
+        self.url = url
+        self.gate = gate
+        self.markers = list(markers or [])  # list of (marker, message_id)
+        self.fail_step = fail_step
+        self.profile_id = profile_id
+        self.account_id = account_id
+        self.mutations = []
+
+    def set_default_timeout(self, n):
+        assert n == 3000
+
+    def goto(self, *args, **kwargs):
+        self.mutations.append("goto")
+        raise AssertionError("mutation forbidden: goto called on observer page")
+
+    def click(self, *args, **kwargs):
+        self.mutations.append("click")
+        raise AssertionError("mutation forbidden: click called on observer page")
+
+    def fill(self, *args, **kwargs):
+        self.mutations.append("fill")
+        raise AssertionError("mutation forbidden: fill called on observer page")
+
+    def type(self, *args, **kwargs):
+        self.mutations.append("type")
+        raise AssertionError("mutation forbidden: type called on observer page")
+
+    def evaluate(self, script, args):
+        if self.fail_step == "disconnect":
+            raise OSError("synthetic CDP disconnect")
+        if self.fail_step == "timeout":
+            raise TimeoutError("synthetic page timeout")
+        if "_SEARCH_MARKER" in script or "document.querySelectorAll('*')" in script:
+            marker = args["marker"]
+            matches = [{"message_id": mid} for m, mid in self.markers if m == marker]
+            return {"matches": matches}
+        if "location.href.replace" in script:
+            if self.fail_step == "inspect_fail":
+                return "SURFACE_UNPROVEN"
+            if self.profile_id is None:
+                return "PROFILE_UNPROVEN"
+            if args.get("profile_id") and self.profile_id != args["profile_id"]:
+                return "PROFILE_MISMATCH"
+            if self.account_id is None:
+                return "ACCOUNT_UNPROVEN"
+            if args.get("account_id") and self.account_id != args["account_id"]:
+                return "ACCOUNT_MISMATCH"
+            return self.gate
+        raise AssertionError("unexpected script evaluated on observer page")
+
+
+class FakeObserverInventory:
+    def __init__(self, *pages, contexts=None):
+        self._pages = list(pages)
+        self._contexts = contexts
+        self.calls = []
+
+    @contextmanager
+    def pages(self, endpoint):
+        self.calls.append(endpoint)
+        yield self._pages
+
+    @contextmanager
+    def contexts(self, endpoint):
+        self.calls.append(endpoint)
+        if self._contexts is not None:
+            yield self._contexts
+        else:
+            yield [SimpleNamespace(pages=self._pages)]
+
+
+def test_observer_positive_unique_marker_and_reprove():
+    page = FakeObserverPage(URL, markers=[(OBSERVER_MARKER, "turn-1")])
+    obs = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    snapshot = obs.capture_origin(request_id="req-1", binding=BIND)
+    assert snapshot == ORIGIN_A
+    nonce = "f" * 32
+    proof = obs.search_and_reprove(EMISSION_A, nonce=nonce)
+    assert proof.request_id == "req-1"
+    assert len(proof.hits) == 1
+    assert proof.hits[0].message_id == "turn-1"
+    assert proof.opened_origin == ORIGIN_A
+
+
+def test_observer_closed_chat_unproven_coverage():
+    page = FakeObserverPage(URL, markers=[(OBSERVER_MARKER, "turn-1")])
+    # Enrolled domain has 2 chats, but only 1 is open in browser (closed Chat B)
+    obs = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page), enrolled_origin=ORIGIN_A, enrolled_chats=(URL, OTHER)
+    )
+    obs.capture_origin(request_id="req-1", binding=BIND)
+    with pytest.raises(OriginError, match="SEARCH_COVERAGE_UNPROVEN"):
+        obs.search_and_reprove(EMISSION_A, nonce="a" * 32)
+
+
+def test_observer_partial_search_domain_unproven():
+    page = FakeObserverPage(URL, markers=[(OBSERVER_MARKER, "turn-1")])
+    scope_witness = lambda urls, orig: len(urls) >= 2 and OTHER in urls
+    obs = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page), enrolled_origin=ORIGIN_A, scope_witness=scope_witness
+    )
+    obs.capture_origin(request_id="req-1", binding=BIND)
+    with pytest.raises(OriginError, match="SEARCH_COVERAGE_UNPROVEN"):
+        obs.search_and_reprove(EMISSION_A, nonce="b" * 32)
+
+
+def test_observer_missing_profile_account_attributes_fails_closed():
+    page_no_prof = FakeObserverPage(URL, profile_id=None)
+    obs1 = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page_no_prof), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    with pytest.raises(OriginError, match="PROFILE_UNPROVEN"):
+        obs1.capture_origin(request_id="req-1", binding=BIND)
+
+    page_no_acc = FakeObserverPage(URL, account_id=None)
+    obs2 = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page_no_acc), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    with pytest.raises(OriginError, match="ACCOUNT_UNPROVEN"):
+        obs2.capture_origin(request_id="req-1", binding=BIND)
+
+
+def test_observer_tampered_identity_fails_closed():
+    page_tampered = FakeObserverPage(URL, profile_id="tampered-profile")
+    obs_t = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page_tampered), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    with pytest.raises(OriginError, match="RENDEZVOUS_ORIGIN_INVALID"):
+        obs_t.capture_origin(request_id="req-1", binding=BIND)
+
+    obs_none = LocalChromeObserverAdapter(inventory=FakeObserverInventory(page_tampered))
+    with pytest.raises(OriginError, match="UNVERIFIED_ORIGIN"):
+        obs_none.capture_origin(request_id="req-1", binding=BIND)
+
+
+def test_observer_stale_generation_and_wrong_route():
+    page = FakeObserverPage(URL)
+    obs = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    # Stale generation
+    binding_stale = ResolvedBinding(route_id="route-A", generation=2, chat_url=URL, cdp_endpoint="http://127.0.0.1:9444")
+    with pytest.raises(OriginError, match="RENDEZVOUS_ORIGIN_INVALID"):
+        obs.capture_origin(request_id="req-1", binding=binding_stale)
+
+    # Wrong route
+    binding_wrong_route = ResolvedBinding(route_id="wrong-route", generation=1, chat_url=URL, cdp_endpoint="http://127.0.0.1:9444")
+    with pytest.raises(OriginError, match="RENDEZVOUS_ORIGIN_INVALID"):
+        obs.capture_origin(request_id="req-1", binding=binding_wrong_route)
+
+    # Unexpected Chat B
+    binding_wrong_chat = ResolvedBinding(route_id="route-A", generation=1, chat_url=OTHER, cdp_endpoint="http://127.0.0.1:9444")
+    with pytest.raises(OriginError, match="RENDEZVOUS_ORIGIN_INVALID"):
+        obs.capture_origin(request_id="req-1", binding=binding_wrong_chat)
+
+
+def test_observer_prior_capture_binding_required():
+    page = FakeObserverPage(URL, markers=[(OBSERVER_MARKER, "turn-1")])
+    obs = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    # Never called capture_origin for req-1
+    with pytest.raises(OriginError, match="RENDEZVOUS_ORIGIN_MISMATCH"):
+        obs.search_and_reprove(EMISSION_A, nonce="c" * 32)
+
+
+def test_observer_nonce_replay_fails_closed():
+    page = FakeObserverPage(URL, markers=[(OBSERVER_MARKER, "turn-1")])
+    obs = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    obs.capture_origin(request_id="req-1", binding=BIND)
+    nonce = "repeat-nonce-" + "0" * 20
+    obs.search_and_reprove(EMISSION_A, nonce=nonce)
+    with pytest.raises(OriginError, match="RENDEZVOUS_REPLAY"):
+        obs.search_and_reprove(EMISSION_A, nonce=nonce)
+
+
+def test_observer_disconnect_and_timeout_failures():
+    page_disc = FakeObserverPage(URL, fail_step="disconnect")
+    obs1 = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page_disc), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    with pytest.raises(OriginError, match="SEARCH_COVERAGE_UNPROVEN"):
+        obs1.capture_origin(request_id="req-1", binding=BIND)
+
+    page_timeout = FakeObserverPage(URL, fail_step="timeout")
+    obs2 = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page_timeout), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    with pytest.raises(OriginError, match="SEARCH_COVERAGE_UNPROVEN"):
+        obs2.capture_origin(request_id="req-1", binding=BIND)
+
+    obs_ctx = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(contexts=[]), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    with pytest.raises(OriginError, match="SEARCH_COVERAGE_UNPROVEN"):
+        obs_ctx.capture_origin(request_id="req-1", binding=BIND)
+
+
+def test_observer_zero_hits_and_two_user_hits():
+    page_0 = FakeObserverPage(URL, markers=[])
+    obs_0 = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page_0), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    obs_0.capture_origin(request_id="req-1", binding=BIND)
+    proof_0 = obs_0.search_and_reprove(EMISSION_A, nonce="0" * 32)
+    assert proof_0.hits == ()
+
+    page_2 = FakeObserverPage(URL, markers=[(OBSERVER_MARKER, "turn-1"), (OBSERVER_MARKER, "turn-2")])
+    obs_2 = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page_2), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    obs_2.capture_origin(request_id="req-1", binding=BIND)
+    proof_2 = obs_2.search_and_reprove(EMISSION_A, nonce="2" * 32)
+    assert len(proof_2.hits) == 2
+
+
+def test_observer_native_attestation_fails_closed():
+    page = FakeObserverPage(URL, markers=[(OBSERVER_MARKER, "turn-1")])
+    obs = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,),
+        native_authority=True
+    )
+    obs.capture_origin(request_id="req-1", binding=BIND)
+    with pytest.raises(OriginError, match="SEARCH_COVERAGE_UNPROVEN"):
+        obs.search_and_reprove(EMISSION_A, nonce="n" * 32)
+
+
+def test_observer_strict_no_side_effects():
+    page = FakeObserverPage(URL, markers=[(OBSERVER_MARKER, "turn-1")])
+    obs = LocalChromeObserverAdapter(
+        inventory=FakeObserverInventory(page), enrolled_origin=ORIGIN_A, enrolled_chats=(URL,)
+    )
+    obs.capture_origin(request_id="req-1", binding=BIND)
+    obs.search_and_reprove(EMISSION_A, nonce="side-effect-free" + "0" * 16)
+    assert page.mutations == []
+
+
+def test_observer_privacy_and_redaction():
+    obs = LocalChromeObserverAdapter(enrolled_origin=ORIGIN_A)
+    assert repr(obs) == "LocalChromeObserverAdapter(<private>)"
+    assert "http" not in repr(obs)
+    assert URL not in repr(obs)
+    assert "profile-A" not in repr(obs)
+
+    with pytest.raises(OriginError) as exc_info:
+        obs.capture_origin(request_id="invalid/id", binding=BIND)
+    assert str(exc_info.value) == "RENDEZVOUS_INPUT_INVALID"
+    assert URL not in str(exc_info.value)
+    assert "http" not in str(exc_info.value)
+
+
+def test_observer_real_js_dom_search_in_node():
+    import json
+    import shutil
+    import subprocess
+    import sys
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js not installed")
+
+    program = r"""
+const fs = require('node:fs');
+const obj = JSON.parse(fs.readFileSync(0, 'utf8'));
+const marker = obj.marker;
+const search = eval(obj.code);
+
+const element = (tag, attrs={}, text='', parent=null) => {
+  const el = {
+    nodeType: 1, tagName: tag,
+    attrs,
+    getAttribute: k => attrs[k] ?? null,
+    hasAttribute: k => k in attrs,
+    parent,
+    closest: function(sel) {
+      const selectors = sel.split(',').map(s => s.trim());
+      for (const s of selectors) {
+        if (s.startsWith('[') && s.endsWith(']')) {
+          const inner = s.slice(1, -1);
+          if (inner.includes('=')) {
+            const [k, val] = inner.split('=');
+            const cleanVal = val.replace(/[\"']/g, '');
+            if (this.getAttribute(k) === cleanVal) return this;
+          } else {
+            if (this.hasAttribute(inner)) return this;
+          }
+        } else if (this.tagName.toLowerCase() === s.toLowerCase()) {
+          return this;
+        }
+      }
+      return this.parent ? this.parent.closest(sel) : null;
+    },
+    textContent: text,
+    children: [],
+    childNodes: [],
+    getClientRects: () => [1]
+  };
+  return el;
+};
+
+globalThis.getComputedStyle = () => ({ visibility: 'visible', display: 'block' });
+
+// 1. Positive: exact match in user message container with data-message-id
+const userMsg = element('DIV', { 'data-message-author-role': 'user', 'data-message-id': 'turn-1' }, marker);
+const p = element('P', {}, marker, userMsg);
+userMsg.children = [p];
+userMsg.childNodes = [p];
+globalThis.document = { querySelectorAll: () => [userMsg, p] };
+let res = search({ marker });
+if (res.matches.length !== 1 || res.matches[0].message_id !== 'turn-1') process.exit(1);
+
+// 2. Substring match
+const subMsg = element('DIV', { 'data-message-author-role': 'user', 'data-message-id': 'turn-1' }, 'before ' + marker + ' after');
+document.querySelectorAll = () => [subMsg];
+res = search({ marker });
+if (res.matches.length !== 0) process.exit(2);
+
+// 3. Assistant message
+const asstMsg = element('DIV', { 'data-message-author-role': 'assistant', 'data-message-id': 'turn-1' }, marker);
+const asstP = element('P', {}, marker, asstMsg);
+asstMsg.children = [asstP];
+document.querySelectorAll = () => [asstMsg, asstP];
+res = search({ marker });
+if (res.matches.length !== 0) process.exit(3);
+
+// 4. Draft / Editor
+const form = element('FORM', {}, marker);
+const editor = element('DIV', { 'contenteditable': 'true' }, marker, form);
+form.children = [editor];
+document.querySelectorAll = () => [form, editor];
+res = search({ marker });
+if (res.matches.length !== 0) process.exit(4);
+
+// 5. Non-user widget (button / toolbar)
+const btn = element('BUTTON', {}, marker);
+document.querySelectorAll = () => [btn];
+res = search({ marker });
+if (res.matches.length !== 0) process.exit(5);
+
+// 6. Missing author role
+const divNoAuthor = element('DIV', { 'data-message-id': 'turn-1' }, marker);
+document.querySelectorAll = () => [divNoAuthor];
+res = search({ marker });
+if (res.matches.length !== 0) process.exit(6);
+
+// 7. Missing message ID (must NOT fabricate default turnA)
+const userNoId = element('DIV', { 'data-message-author-role': 'user' }, marker);
+document.querySelectorAll = () => [userNoId];
+res = search({ marker });
+if (res.matches.length !== 0) process.exit(7);
+
+// 8. Hidden element
+const hidden = element('DIV', { 'data-message-author-role': 'user', 'data-message-id': 'turn-1' }, marker);
+globalThis.getComputedStyle = () => ({ visibility: 'hidden' });
+document.querySelectorAll = () => [hidden];
+res = search({ marker });
+if (res.matches.length !== 0) process.exit(8);
+globalThis.getComputedStyle = () => ({ visibility: 'visible', display: 'block' });
+
+// 9. Two true user messages
+const u1 = element('DIV', { 'data-message-author-role': 'user', 'data-message-id': 'turn-1' }, marker);
+const u2 = element('DIV', { 'data-message-author-role': 'user', 'data-message-id': 'turn-2' }, marker);
+document.querySelectorAll = () => [u1, u2];
+res = search({ marker });
+if (res.matches.length !== 2) process.exit(9);
+
+// 10. One user message + one copy in assistant (duplicate detection)
+const uA = element('DIV', { 'data-message-author-role': 'user', 'data-message-id': 'turn-1' }, marker);
+const ast = element('DIV', { 'data-message-author-role': 'assistant', 'data-message-id': 'turn-asst' }, marker);
+document.querySelectorAll = () => [uA, ast];
+res = search({ marker });
+if (res.matches.length !== 2) process.exit(10);
+"""
+    result = subprocess.run(
+        [node, "-e", program],
+        input=json.dumps({"code": _SEARCH_MARKER, "marker": OBSERVER_MARKER}),
+        text=True, capture_output=True, timeout=45 if sys.platform == "win32" else 12,
+    )
+    assert result.returncode == 0, f"Node DOM search failed (exit={result.returncode}); stderr={result.stderr}"
+
