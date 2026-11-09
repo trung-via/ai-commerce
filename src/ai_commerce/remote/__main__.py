@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 from .validation import (RemoteRequestError, validate_batch, verify_registry,
-                         check_source)
+                         check_source, require_preexecutor_acceptance)
 from .transport import GitHubTransport, WorkOwner
 from .worker import LocalBatchWorker, _write_json
 from .reuse import load_approved_candidates
@@ -42,6 +42,11 @@ def main(argv: list[str] | None = None) -> int:
                                                    args.brain_issuers.split(",") if v.strip()))
         check_source(checkout, batch["source_sha"],
                      **({"git_executable": args.git_bin} if args.git_bin is not None else {}))
+        # Hosted validation and self-host execution must agree before claim.
+        # Historical read-only reconciliation must remain available.
+        if args.command != "reconcile":
+            for action in batch["actions"]:
+                require_preexecutor_acceptance(action)
     except Exception as exc:
         print("EF02_REQUEST_REJECTED: " + type(exc).__name__ + ": " + str(exc),
               file=sys.stderr)
