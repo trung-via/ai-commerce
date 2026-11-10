@@ -173,6 +173,9 @@ def _reviewed_intake_groups(*, checkout: Path | None = None,
             root=checkout, base_sha=source, existing_groups=static)
         if head() != source:
             raise ValueError("INTAKE_SOURCE_HEAD_DRIFT")
+    except RemoteRequestError:
+        # Typed source-pin failures must never be masked as generic Git errors.
+        raise
     except (OSError, ValueError, UnicodeError, subprocess.CalledProcessError,
             subprocess.TimeoutExpired):
         raise RemoteRequestError("INTAKE_REVIEWED_OWNER_UNVERIFIED") from None

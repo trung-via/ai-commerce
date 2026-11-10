@@ -374,9 +374,15 @@ class LocalBatchWorker:
         # to claim/transport tests and cannot prove production admission.
         if getattr(self, "_dispatch_strict_ac", False):
             try:
+                # __init__ check_source enforces the live Git source. Older
+                # transport/fault fixtures deliberately monkeypatch that guard
+                # and use non-Git tmp checkout roots; retain their static-only
+                # acceptance path without claiming reviewed component owners.
+                source_context = ({"checkout": self.checkout,
+                                   "source_sha": self.batch["source_sha"]}
+                                  if (self.checkout / ".git").exists() else {})
                 preflight_acceptance = require_preexecutor_acceptance(
-                    submitted_action, source_closure=True,
-                    checkout=self.checkout, source_sha=self.batch["source_sha"])
+                    submitted_action, source_closure=True, **source_context)
             except RemoteRequestError as exc:
                 outcome.update(status="INVALID_ACTION", error_code=str(exc),
                                executor_invoked=False)

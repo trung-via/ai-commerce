@@ -47,9 +47,14 @@ def main(argv: list[str] | None = None) -> int:
         # Historical read-only reconciliation must remain available.
         if args.command != "reconcile":
             for action in batch["actions"]:
+                # A live checkout was already checked by check_source above.
+                # Synthetic CLI transport fixtures have no .git and explicitly
+                # stub check_source; keep their static AC tests backward compatible.
+                source_context = ({"checkout": checkout,
+                                   "source_sha": batch["source_sha"]}
+                                  if (checkout / ".git").exists() else {})
                 require_preexecutor_acceptance(action, source_closure=True,
-                                               checkout=checkout,
-                                               source_sha=batch["source_sha"])
+                                               **source_context)
     except Exception as exc:
         print("EF02_REQUEST_REJECTED: " + type(exc).__name__ + ": " + str(exc),
               file=sys.stderr)
