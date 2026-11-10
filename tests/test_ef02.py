@@ -263,6 +263,66 @@ def test_preexecutor_source_closure_does_not_accept_unrelated_registered_ac():
         require_preexecutor_acceptance(a, source_closure=True)
 
 
+
+def test_production_799_persisted_b13_owner_ac_maps_to_source_and_consumers():
+    """CI-only regression: merged B1.3 manifests are legitimate preexecutor ACs.
+
+    No executor/provider is invoked by these source-bound tests.
+    """
+    from ai_commerce.remote.validation import require_preexecutor_acceptance
+    from ai_commerce.engineering.minimum_test import approved_groups
+    if not (ROOT / ".git").exists():
+        pytest.skip("pinned repository checkout required")
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT).decode().strip()
+    ac = "B1.3-b.current-pcm-clock-srt-bounds"
+    assert ac not in {x for g in approved_groups() for x in g.acs}
+    owned = action("a")
+    owned["allowed_paths"] = [
+        "src/ai_commerce/creative_quality/subtitle_clock_observation.py",
+        "tests/test_b1_3_subtitle_clock.py",
+    ]
+    owned["instruction"] = 'MT01_ACCEPTANCE_JSON:["' + ac + '"]'
+    planned = require_preexecutor_acceptance(
+        owned, source_closure=True, checkout=ROOT, source_sha=sha)
+    assert ac in planned["ids"]
+    assert "tests/test_b1_3_subtitle_clock.py" in planned["consumer_map"][ac]["tests"]
+    assert planned["unknown_ids"] == []
+    assert "B1.3-b.optional-silent-no-inferred-sync" in planned["owner_derived_ids"]
+
+
+def test_production_799_pinned_source_blocks_old_sha_and_foreign_ac_before_executor(tmp_path):
+    """Neither a stale source pin nor a forged AC can borrow a valid owner."""
+    from ai_commerce.remote.validation import require_preexecutor_acceptance
+    if not (ROOT / ".git").exists():
+        pytest.skip("pinned repository checkout required")
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT).decode().strip()
+    owned = action("a")
+    owned["allowed_paths"] = ["tests/test_b1_3_subtitle_clock.py"]
+    owned["instruction"] = 'MT01_ACCEPTANCE_JSON:["B1.3-b.no-provider-rights-or-sync-upgrade"]'
+    with pytest.raises(RemoteRequestError, match="INTAKE_SOURCE_PIN_MISMATCH"):
+        require_preexecutor_acceptance(
+            owned, source_closure=True, checkout=ROOT, source_sha="0" * 40)
+    with pytest.raises(RemoteRequestError, match="INTAKE_REVIEWED_OWNER_UNVERIFIED"):
+        require_preexecutor_acceptance(
+            owned, source_closure=True, checkout=tmp_path, source_sha=sha)
+    owned["instruction"] = 'MT01_ACCEPTANCE_JSON:["B1.3-b.forged-owner"]'
+    with pytest.raises(RemoteRequestError, match="INTAKE_AC_UNREGISTERED"):
+        require_preexecutor_acceptance(
+            owned, source_closure=True, checkout=ROOT, source_sha=sha)
+
+
+def test_production_799_declared_b13_ac_cannot_authorize_unrelated_owner():
+    from ai_commerce.remote.validation import require_preexecutor_acceptance
+    if not (ROOT / ".git").exists():
+        pytest.skip("pinned repository checkout required")
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT).decode().strip()
+    owned = action("a")
+    owned["allowed_paths"] = ["src/ai_commerce/remote/worker.py"]
+    owned["instruction"] = 'MT01_ACCEPTANCE_JSON:["B1.3-a.pcm-current-byte-metrics"]'
+    with pytest.raises(RemoteRequestError, match="INTAKE_AC_NOT_OWNING_ALLOWED_PATH"):
+        require_preexecutor_acceptance(
+            owned, source_closure=True, checkout=ROOT, source_sha=sha)
+
 def test_direct_real_worker_ac_gate_precedes_workowner_operations(tmp_path, monkeypatch):
     from ai_commerce.remote import worker as remote_worker
     monkeypatch.setattr(remote_worker, "check_source", lambda *_a, **_kw: None)
