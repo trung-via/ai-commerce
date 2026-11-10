@@ -1632,3 +1632,30 @@ def test_wp02_native_supervisor_owner_gate_and_no_provider():
     forbidden = ("issues: write", "github.event.issue.body", "GITHUB_TOKEN",
                  "taskkill", "Restart-Service", "--model", "agy --print", "codex --")
     assert all(token not in job for token in forbidden)
+
+
+def test_wp02_live_github_readonly_job_closed_contract():
+    import ast
+    import textwrap
+    path = Path(__file__).resolve().parents[1] / ".github/workflows/ef02-antigravity-headless-preflight.yml"
+    job = path.read_text(encoding="utf-8").split("  wp02-live-github-journal-readonly:", 1)[1]
+    assert "github.event.issue.title == '[EPWO WP02 REAL GITHUB READONLY] #466'" in job
+    for text in ("github.actor == github.repository_owner", "github.run_attempt == 1",
+                 "github.event.issue.user.login == github.repository_owner",
+                 "runs-on: [self-hosted, Windows, ai-commerce-ef02]",
+                 "contents: read", "issues: read", "persist-credentials: false",
+                 "WP02_LIVE_JOURNAL_REAL_GITHUB_WRITES=0",
+                 "WP02_LIVE_JOURNAL_WORKOWNER_710=NOT_TOUCHED"):
+        assert text in job
+    assert all(x not in job for x in ("contents: write", "issues: write",
+               "github.event.issue.body", "taskkill", "Restart-Service"))
+    start = job.index("          $probe = @'\n") + len("          $probe = @'\n")
+    end = job.index("\n          '@", start)
+    script = textwrap.dedent(job[start:end])
+    ast.parse(script)
+    for text in ('method!="GET"', 'WorkOwner.identity(gh,643,packet,action[0])',
+                 'chain=owner.read()', 'verdict=owner.reconcile()',
+                 '"HOLD_UNVERIFIED"', 'replay_authorized', 'ROOT=', 'TIP='):
+        assert text in script
+    assert job.count("& python -B -c $probe") == 2
+    assert "$a -ne $b" in job

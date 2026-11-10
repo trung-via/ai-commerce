@@ -804,3 +804,88 @@ jobs:
           Write-Output 'EPWO_WP02_NATIVE_PROVIDER=NOT_INVOKED'
           Write-Output 'EPWO_WP02_NATIVE_WORKOWNER_710=NOT_TOUCHED'
           Write-Output 'EPWO_WP02_NATIVE_REPLAY_AUTHORIZED=FALSE'
+
+  wp02-live-github-journal-readonly:
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.action == 'opened' &&
+      github.repository == 'trung-via/ai-commerce' &&
+      github.actor == github.repository_owner &&
+      github.event.issue.user.login == github.repository_owner &&
+      github.event.issue.title == '[EPWO WP02 REAL GITHUB READONLY] #466' &&
+      github.run_attempt == 1
+    runs-on: [self-hosted, Windows, ai-commerce-ef02]
+    timeout-minutes: 4
+    concurrency:
+      group: epwo-wp02-real-github-readonly-once
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - name: Checkout trusted main without credentials
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Independent fresh Python readers of actual WorkOwner GitHub journal
+        shell: pwsh
+        env:
+          WP02_GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PYTHONPATH = "$env:GITHUB_WORKSPACE\src"
+          $probe = @'
+          import os,json,sys,re
+          from ai_commerce.remote.transport import GitHubTransport,WorkOwner,RemoteTransportError
+          KEY="b5b89d9aa58760ac4d6a5075085f4ee18c3d4d06473ed2c2fcc5e3450c7bf62e"
+          ROOT="453a910a57370bd7b3872757f60ce9c294871406"
+          TIP="acc3ccebf858e475130c0ee31152aa56939f1"
+          class ReadOnly(GitHubTransport):
+           def __init__(self,token):
+            super().__init__("trung-via/ai-commerce",token)
+            self.reads=0
+           def api(self,method,path,data=None):
+            if method!="GET" or data is not None: raise RuntimeError("WRITES_FORBIDDEN")
+            allowed=(path=="/issues/643" or path=="/git/matching-refs/heads/ef02/workowner/"+KEY+"/" or path.startswith("/git/ref/heads/ef02/candidate/") or bool(re.fullmatch(r"/git/commits/[0-9a-f]{40}",path)))
+            if not allowed or self.reads>=64: raise RuntimeError("READ_SCOPE_DENIED")
+            self.reads+=1
+            return super().api("GET",path)
+          def inspect():
+           token=os.environ.get("WP02_GITHUB_TOKEN")
+           if not token or os.environ.get("GITHUB_ACTIONS")!="true": return {"gate":"HOLD_TOKEN"}
+           try:
+            gh=ReadOnly(token)
+            issue=gh.api("GET","/issues/643")
+            packet=json.loads(issue["body"])
+            action=[a for a in packet["actions"] if a.get("action_id")=="EPWO-E2A-R4-FIX-641-LEDGER-AT-MOST-ONCE-AUTH-PATH" and a.get("attempt_id")=="epwo_e2a_r4_fix641_codex61sol_xhigh_20261108_01"]
+            if len(action)!=1 or packet["source_sha"]!="e33a3162aae34e8ffc3b57c85bc1eeef64c9880e": raise ValueError()
+            identity=WorkOwner.identity(gh,643,packet,action[0])
+            if identity["work_key"]!=KEY or identity["generation"]!=1: raise ValueError()
+            owner=WorkOwner(gh,identity,"")
+            chain=owner.read()
+            if len(chain)!=11 or chain[0]["sha"]!=ROOT or chain[-1]["sha"]!=TIP or chain[-1]["stage"]!="PUBLISHED": raise ValueError()
+            verdict=owner.reconcile()
+            if verdict["replay_authorized"] is not False or verdict["publication_authorized"] is not False or verdict["stage"]!="PUBLISHED": raise ValueError()
+            return {"gate":"PASS_REAL_GITHUB_GET_ONLY","root":ROOT,"tip":TIP,"stage":"PUBLISHED","records":11,"reconcile":verdict["status"],"replay_authorized":False,"writes":0}
+           except (RemoteTransportError,ValueError,KeyError,TypeError,RuntimeError):
+            return {"gate":"HOLD_UNVERIFIED"}
+          if __name__=="__main__":
+           receipt=inspect()
+           print(json.dumps(receipt,sort_keys=True,separators=(",",":")))
+           sys.exit(0 if receipt["gate"]=="PASS_REAL_GITHUB_GET_ONLY" else 2)
+
+          '@
+          $a = & python -B -c $probe
+          if ($LASTEXITCODE -ne 0) { exit 2 }
+          $b = & python -B -c $probe
+          if ($LASTEXITCODE -ne 0 -or $a -ne $b) { exit 2 }
+          $receipt = $b | ConvertFrom-Json
+          if ($receipt.gate -ne 'PASS_REAL_GITHUB_GET_ONLY') { exit 2 }
+          Write-Output 'WP02_LIVE_JOURNAL_STATUS=PASS_TWO_FRESH_GET_ONLY_READERS'
+          Write-Output 'WP02_LIVE_JOURNAL_RECORDS=11'
+          Write-Output 'WP02_LIVE_JOURNAL_REPLAY_AUTHORIZED=FALSE'
+          Write-Output 'WP02_LIVE_JOURNAL_REAL_GITHUB_WRITES=0'
+          Write-Output 'WP02_LIVE_JOURNAL_WORKOWNER_710=NOT_TOUCHED'
+          Write-Output 'WP02_LIVE_JOURNAL_PROVIDER=NOT_INVOKED'
+          Write-Output 'WP02_LIVE_JOURNAL_RUNNER_REBOOT=NOT_TESTED'
