@@ -1456,4 +1456,6 @@ def test_wp01_native_child_crash_deny_non_windows_before_any_process_spawn(monke
     assert isinstance(first, ast.If)
     assert isinstance(first.test, ast.Compare)
     assert "os.name" in ast.unparse(first.test)
-    assert 'return "HOLD_WINDOWS_UNPROVEN"' in ast.unparse(first)
+    assert isinstance(first.body[0], ast.Return)
+    assert isinstance(first.body[0].value, ast.Constant)
+    assert first.body[0].value.value == "HOLD_WINDOWS_UNPROVEN"
