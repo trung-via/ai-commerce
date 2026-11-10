@@ -1142,7 +1142,10 @@ def test_ef02_710_headless_issue_preflight_has_owner_only_no_model_gate():
 def test_ef02_710_g3b_owner_one_shot_bounded_model_and_disposable_scope():
     src = (Path(__file__).resolve().parents[1] /
            ".github/workflows/ef02-antigravity-headless-preflight.yml").read_text(encoding="utf-8")
-    read, model = src.split("  g3b-write:", 1)
+    read, after_g3b = src.split("  g3b-write:", 1)
+    model = after_g3b.split("\n  g4-forensic:", 1)[0]
+    assert "\n  g4-forensic:" in after_g3b
+    assert "wp01-native-recovery-restart" not in model
     assert "AGY_G3_STATIC_PREFLIGHT=PASS_NO_MODEL" in read
     for contract in (
         "github.event_name == 'issues'",
@@ -1488,3 +1491,116 @@ def test_wp01_native_child_crash_deny_non_windows_before_any_process_spawn(monke
     assert isinstance(first.body[0], ast.Return)
     assert isinstance(first.body[0].value, ast.Constant)
     assert first.body[0].value.value == "HOLD_WINDOWS_UNPROVEN"
+
+
+def _wp01_native_recovery_restart_source():
+    """Extract only the source-owned one-shot restart observer job."""
+    import textwrap
+    source = (Path(__file__).resolve().parents[1] /
+              ".github/workflows/ef02-antigravity-headless-preflight.yml").read_text(encoding="utf-8")
+    job = source.split("  wp01-native-recovery-restart:", 1)[1]
+    script = job.split("$probe = @'\n", 1)[1].split("\n          '@", 1)[0]
+    return job, textwrap.dedent(script)
+
+
+def test_wp01_recovery_restart_one_shot_owner_scope_and_ast():
+    import ast
+    job, script = _wp01_native_recovery_restart_source()
+    for required in (
+        "github.event_name == 'issues'",
+        "github.event.action == 'opened'",
+        "github.repository == 'trung-via/ai-commerce'",
+        "github.actor == github.repository_owner",
+        "github.event.issue.user.login == github.repository_owner",
+        "github.event.issue.title == '[EPWO WP01 NATIVE RESTART RECOVERY] #466'",
+        "github.run_attempt == 1",
+        "runs-on: [self-hosted, Windows, ai-commerce-ef02]",
+        "timeout-minutes: 4",
+        "group: epwo-wp01-native-recovery-restart-once",
+        "permissions:\n      contents: read",
+        "persist-credentials: false",
+        "ref: main",
+        "EPWO_WP01_RESTART_RUNNER_REBOOT=NOT_TESTED",
+        "EPWO_WP01_RESTART_WORKOWNER_710=NOT_TOUCHED",
+        "EPWO_WP01_RESTART_REPLAY_AUTHORIZED=FALSE",
+    ):
+        assert required in job, required
+    assert "github.event.issue.body" not in job
+    assert "issues: write" not in job
+    assert "GITHUB_TOKEN" not in job
+    assert "taskkill" not in job.lower()
+    assert "--model" not in job
+    assert "codex " not in job
+    assert "agy " not in job
+    ast.parse(script)
+    for token in ("os.fsync(fd)", "os.fsync(ready_fd)", "durable.ready", "FSYNC_DONE", "child.kill()", "child.wait(timeout=8)",
+                  "subprocess.run(", "HOLD_UNKNOWN_NO_REPLAY",
+                  "PASS_FRESH_READER_HOLD_UNKNOWN", "HOLD_READER_UNVERIFIED",
+                  'tempfile.TemporaryDirectory(prefix="epwo-wp01-restart-",dir=temp)'):
+        assert token in script, token
+    assert script.count("subprocess.Popen(") == 1
+    assert script.count("subprocess.run(") == 1
+
+
+def test_wp01_recovery_restart_reader_is_read_only_and_no_relaunch():
+    import ast
+    _, script = _wp01_native_recovery_restart_source()
+    tree = ast.parse(script)
+    observe = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "observe")
+    assert isinstance(observe.body[0], ast.If)
+    assert "os.name" in ast.unparse(observe.body[0].test)
+    assert isinstance(observe.body[0].body[0], ast.Return)
+    assert observe.body[0].body[0].value.value == "HOLD_WINDOWS_UNPROVEN"
+    assignment = next(n for n in tree.body if isinstance(n, ast.Assign) and
+                      any(isinstance(t, ast.Name) and t.id == "READER" for t in n.targets))
+    assert isinstance(assignment.value, (ast.Constant, ast.BinOp))
+    # Reconstruct the fixed reader literal from an inert AST, never invoke worker.
+    reader_text = ast.literal_eval(assignment.value)
+    reader_tree = ast.parse(reader_text)
+    assert "HOLD_UNKNOWN_NO_REPLAY" in reader_text
+    assert "FSYNC_DONE" in reader_text
+    assert "durable.ready" in reader_text
+    assert "HOLD_READER_UNVERIFIED" in reader_text
+    assert "terminal.exists()" in reader_text
+    forbidden = ("subprocess", "Popen(", "os.system", "unlink(", "write_bytes(", "write_text(", "open(")
+    assert all(term not in reader_text for term in forbidden)
+    assert not any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and
+                   n.name == "execute_action" for n in reader_tree.body)
+
+
+@pytest.mark.parametrize("mode,expected,exit_code", [
+    ("valid", "HOLD_UNKNOWN_NO_REPLAY", 0),
+    ("missing_intent", "HOLD_READER_UNVERIFIED", 2),
+    ("tampered_intent", "HOLD_READER_UNVERIFIED", 2),
+    ("missing_ready", "HOLD_READER_UNVERIFIED", 2),
+    ("tampered_ready", "HOLD_READER_UNVERIFIED", 2),
+    ("conflicting_terminal", "HOLD_READER_UNVERIFIED", 2),
+])
+def test_wp01_recovery_restart_reader_negative_cases(tmp_path, mode, expected, exit_code):
+    """Exercise the actual fresh reader in disposable pytest scratch only."""
+    import ast
+    _, script = _wp01_native_recovery_restart_source()
+    module = ast.parse(script)
+    assignment = next(n for n in module.body if isinstance(n, ast.Assign) and
+                      any(isinstance(t, ast.Name) and t.id == "READER" for t in n.targets))
+    reader_code = ast.literal_eval(assignment.value)
+    owned = tmp_path / "epwo-restart-reader"
+    owned.mkdir()
+    if mode != "missing_intent":
+        (owned / "intent.marker").write_bytes(
+            b"DIFFERENT" if mode == "tampered_intent" else b"INTENT_ONLY"
+        )
+    if mode != "missing_ready":
+        (owned / "durable.ready").write_bytes(
+            b"WRONG" if mode == "tampered_ready" else b"FSYNC_DONE"
+        )
+    if mode == "conflicting_terminal":
+        (owned / "terminal.marker").write_bytes(b"UNVERIFIED")
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", reader_code, str(owned)],
+        cwd=str(owned), capture_output=True, text=True, timeout=8, check=False,
+    )
+    assert result.returncode == exit_code
+    assert result.stdout.strip() == expected
+    assert result.stderr == ""
+    assert not list(owned.glob("*.new"))
