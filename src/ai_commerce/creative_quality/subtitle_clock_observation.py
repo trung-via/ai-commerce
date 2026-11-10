@@ -92,7 +92,7 @@ def _parse(raw: bytes, *, frames: int, rate: int) -> list[dict]:
         _need(end * rate <= frames * 1000, "SRT_EXCEEDS_MEASURED_PCM_DURATION")
         caption = "\n".join(lines[2:])
         _need(0 < len(caption) <= MAX_CUE_TEXT
-              and any(not line.isspace() for line in lines[2:]),
+              and any(line.strip() for line in lines[2:]),
               "SRT_CUE_TEXT_INVALID")
         cues.append({
             "ordinal": ordinal,
