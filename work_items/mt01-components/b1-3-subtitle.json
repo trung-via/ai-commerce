@@ -1,0 +1,26 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "b1-3-subtitle",
+  "sources": [
+    "src/ai_commerce/creative_quality/subtitle_clock_observation.py"
+  ],
+  "tests": [
+    "tests/test_b1_3_subtitle_clock.py"
+  ],
+  "acs": [
+    "B1.3-b.current-pcm-clock-srt-bounds",
+    "B1.3-b.optional-silent-no-inferred-sync",
+    "B1.3-b.no-provider-rights-or-sync-upgrade"
+  ],
+  "consumers": [
+    "src/ai_commerce/creative_quality/audio_observation.py",
+    "src/ai_commerce/media/files.py",
+    "src/ai_commerce/affiliate_release/inspection.py",
+    "src/ai_commerce/creative_quality/voice_intent.py",
+    "src/ai_commerce/creative_quality/acoustic_scene.py",
+    "src/ai_commerce/creative_quality/voice_compile.py",
+    "src/ai_commerce/creative_quality/t2_sampling.py",
+    "src/ai_commerce/creative_quality/inspection_evidence.py"
+  ],
+  "contracts": []
+}
