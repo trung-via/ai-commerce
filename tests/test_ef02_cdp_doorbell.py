@@ -43,7 +43,8 @@ class FakePage:
 
     def evaluate(self, script, args):
         assert args["url"] == URL
-        assert args["text"].startswith("[AI COMMERCE LOCAL CHAT WAKE]")
+        assert (args["text"].startswith("[AI COMMERCE LOCAL CHAT WAKE]") or
+                args["text"] == "kiểm tra")
         if "return 'READY'" in script:
             return self.gate
         if "document.execCommand(" in script:
@@ -211,6 +212,73 @@ def test_send_only_9444_one_click_witness_never_requests_brain_or_plugin_work():
     ]
     assert "caller-supplied" not in page.submitted_text
     assert "@AI Commerce" not in page.submitted_text
+
+
+def test_wh07_one_command_fixed_check_reply_stays_ui_only():
+    from ai_commerce.remote.cdp_doorbell import _doorbell_text
+    assert _doorbell_text(EVENT, "trung-via/ai-commerce", send_only=True,
+                          fixed_check_test=True) == "kiểm tra"
+    page = FakePage()
+    adapter = LocalChromeDoorbellAdapter(
+        allow_submit=True, inventory=FakeInventory(page),
+        send_only=True, fixed_check_test=True)
+    receipt = adapter.send_wake(binding=BIND, message="untrusted", event_id=EVENT)
+    assert receipt.error_code == "UI_USER_TURN_OBSERVED"
+    assert receipt.delivery_status == "UNKNOWN"
+    assert receipt.chat_delivery_proven is False
+    assert receipt.brain_continuation_proven is False
+    assert page.submitted_text == "kiểm tra"
+    assert page.counts == {"insert": 1, "click": 1, "prove": 2}
+
+
+@pytest.mark.parametrize("gate", ["DRAFT_PRESENT", "GENERATION_ACTIVE",
+                                   "SURFACE_UNPROVEN", "OUTBOUND_ALREADY_PRESENT"])
+def test_wh07_fixed_check_never_clicks_unready_ui(gate):
+    page = FakePage(gate=gate)
+    result = LocalChromeDoorbellAdapter(
+        allow_submit=True, send_only=True, fixed_check_test=True,
+        inventory=FakeInventory(page)).send_wake(
+            binding=BIND, message="", event_id=EVENT)
+    assert result.error_code == gate
+    assert page.counts["click"] == 0
+    assert page.counts["insert"] == 0
+
+
+def test_wh07_fixed_check_never_replaces_origin_or_consent_gates():
+    from ai_commerce.remote.cdp_doorbell import _doorbell_text
+    with pytest.raises(ValueError, match="DOORBELL_TEST_SCOPE_INVALID"):
+        _doorbell_text(EVENT, "trung-via/ai-commerce", fixed_check_test=True)
+    with pytest.raises(ValueError, match="DOORBELL_TEST_SCOPE_INVALID"):
+        LocalChromeDoorbellAdapter(fixed_check_test=True)
+    with pytest.raises(ValueError, match="DOORBELL_TEST_SCOPE_INVALID"):
+        LocalChromeDoorbellAdapter(send_only=True, fixed_check_test="true")
+    with pytest.raises(ValueError, match="DOORBELL_TEST_SCOPE_INVALID"):
+        LocalChromeDoorbellAdapter(send_only=True, fixed_check_test=True,
+                                   repository="other/repository")
+    disabled = FakePage()
+    inv = FakeInventory(disabled)
+    receipt = LocalChromeDoorbellAdapter(
+        allow_submit=False, send_only=True, fixed_check_test=True,
+        inventory=inv).send_wake(binding=BIND, message="", event_id=EVENT)
+    assert receipt.error_code == "CDP_PROBE_DISABLED"
+    assert disabled.counts["click"] == 0
+    assert inv.calls == []
+    wrong = FakePage(OTHER)
+    receipt = LocalChromeDoorbellAdapter(
+        allow_submit=True, send_only=True, fixed_check_test=True,
+        inventory=FakeInventory(wrong)).send_wake(
+            binding=BIND, message="", event_id=EVENT)
+    assert receipt.error_code == "EXACT_CHAT_TAB_NOT_FOUND"
+    assert wrong.counts["click"] == 0
+    invalid = FakePage()
+    inv2 = FakeInventory(invalid)
+    receipt = LocalChromeDoorbellAdapter(
+        allow_submit=True, send_only=True, fixed_check_test=True,
+        inventory=inv2).send_wake(
+            binding=BIND, message="", event_id="not-a-verified-event")
+    assert receipt.error_code == "CHAT_URL_INVALID"
+    assert invalid.counts["click"] == 0
+    assert inv2.calls == []
 
 
 def test_send_only_rejects_wrong_chat_without_send_or_partial_stage():
@@ -522,6 +590,9 @@ def test_preload_before_wake_uses_enrolled_route_only(monkeypatch):
     class NewPage:
         def __init__(self):
             self.url = "about:blank"
+        def evaluate(self, script):
+            assert "CANDIDATE_READY" in script
+            return "CANDIDATE_READY"
         def goto(self, url, **kwargs):
             assert url == URL and kwargs == {
                 "wait_until": "domcontentloaded", "timeout": 15000}
@@ -574,6 +645,111 @@ def test_preload_rejects_ambiguous_targets_and_contexts(monkeypatch):
     monkeypatch.setattr(inv, "_browser", two_contexts)
     assert inv.preload(binding) == "PRELOAD_CONTEXT_AMBIGUOUS"
     assert inv.preload(binding, current_binding=lambda: BIND) == "PRELOAD_ROUTE_CHANGED"
+
+
+def test_wh05_preload_rejects_wrong_context_even_with_exact_chat(monkeypatch):
+    from types import SimpleNamespace
+    from ai_commerce.remote import cdp_doorbell as d4
+    monkeypatch.setattr(d4, "_is_windows", lambda: True)
+    inv = d4._PlaywrightInventory()
+    binding = ResolvedBinding(route_id="route-a", generation=1,
+                              chat_url=URL, cdp_endpoint="http://127.0.0.1:9444")
+    class Safe:
+        url = URL
+        def evaluate(self, script):
+            raise AssertionError("must reject contexts BEFORE inspecting chat")
+    @contextmanager
+    def multiple_contexts(_endpoint):
+        yield SimpleNamespace(contexts=[
+            SimpleNamespace(pages=[Safe()]),
+            SimpleNamespace(pages=[FakePage(OTHER)])])
+    monkeypatch.setattr(inv, "_browser", multiple_contexts)
+    assert inv.preload(binding) == "PRELOAD_CONTEXT_AMBIGUOUS"
+
+
+@pytest.mark.parametrize("surface,expected", [
+    ("CANDIDATE_READY", "EXACT_CHAT_PRESENT"),
+    ("DRAFT_PRESENT", "PRELOAD_DRAFT_PRESENT"),
+    ("SURFACE_UNPROVEN", "PRELOAD_SURFACE_UNPROVEN"),
+])
+def test_wh05_existing_exact_chat_requires_safe_composer(monkeypatch, surface, expected):
+    from types import SimpleNamespace
+    from ai_commerce.remote import cdp_doorbell as d4
+    monkeypatch.setattr(d4, "_is_windows", lambda: True)
+    binding = ResolvedBinding(route_id="route-a", generation=1,
+                              chat_url=URL, cdp_endpoint="http://127.0.0.1:9444")
+    inv = d4._PlaywrightInventory()
+    class OpenChat:
+        url = URL
+        def evaluate(self, script):
+            assert "CANDIDATE_READY" in script
+            return surface
+    @contextmanager
+    def opened(_endpoint):
+        yield SimpleNamespace(contexts=[SimpleNamespace(pages=[OpenChat()])])
+    monkeypatch.setattr(inv, "_browser", opened)
+    assert inv.preload(binding) == expected
+
+
+@pytest.mark.parametrize("outcome,expected", [
+    ("DRAFT_PRESENT", "PRELOAD_DRAFT_PRESENT"),
+    ("SURFACE_UNPROVEN", "PRELOAD_SURFACE_UNPROVEN"),
+    (RuntimeError("private error"), "PRELOAD_SURFACE_UNPROVEN"),
+])
+def test_wh05_new_chat_blocks_unsafe_surface_no_retry(monkeypatch, outcome, expected):
+    from types import SimpleNamespace
+    from ai_commerce.remote import cdp_doorbell as d4
+    monkeypatch.setattr(d4, "_is_windows", lambda: True)
+    binding = ResolvedBinding(route_id="route-a", generation=1,
+                              chat_url=URL, cdp_endpoint="http://127.0.0.1:9444")
+    calls = []
+    class New:
+        url = "about:blank"
+        def goto(self, url, **kwargs):
+            calls.append("navigate")
+            self.url = url
+        def evaluate(self, script):
+            calls.append("inspect")
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+    class Ctx:
+        pages = [FakePage(OTHER)]
+        def new_page(self):
+            calls.append("new_page")
+            return New()
+    inv = d4._PlaywrightInventory()
+    @contextmanager
+    def opened(_endpoint):
+        yield SimpleNamespace(contexts=[Ctx()])
+    monkeypatch.setattr(inv, "_browser", opened)
+    assert inv.preload(binding) == expected
+    assert calls == ["new_page", "navigate", "inspect"]
+
+
+def test_wh05_rechecks_route_generation_after_surface_read(monkeypatch):
+    from types import SimpleNamespace
+    from ai_commerce.remote import cdp_doorbell as d4
+    monkeypatch.setattr(d4, "_is_windows", lambda: True)
+    binding = ResolvedBinding(route_id="route-a", generation=1,
+                              chat_url=URL, cdp_endpoint="http://127.0.0.1:9444")
+    changed = ResolvedBinding(route_id="route-a", generation=2,
+                              chat_url=URL, cdp_endpoint="http://127.0.0.1:9444")
+    calls = [0]
+    class OpenChat:
+        url = URL
+        def evaluate(self, script):
+            assert "CANDIDATE_READY" in script
+            calls[0] += 1
+            return "CANDIDATE_READY"
+    inv = d4._PlaywrightInventory()
+    @contextmanager
+    def opened(_endpoint):
+        yield SimpleNamespace(contexts=[SimpleNamespace(pages=[OpenChat()])])
+    monkeypatch.setattr(inv, "_browser", opened)
+    origin_checks = [binding, binding, changed]
+    assert inv.preload(binding, current_binding=lambda: origin_checks.pop(0)) == "PRELOAD_ROUTE_CHANGED"
+    assert calls == [1]
 
 
 def test_wake_preload_failure_never_stages_or_sends():

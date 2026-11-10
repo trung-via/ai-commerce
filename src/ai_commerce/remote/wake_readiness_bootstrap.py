@@ -42,14 +42,21 @@ def _private_root(local_app_data: Path) -> Path:
         raise SetupBlocked("PRIVATE_ROOT_NOT_TRUSTED") from None
 
 
-def _same_loopback_9333(url: str) -> bool:
+def _same_loopback_port(url: str, expected_port: int) -> bool:
+    if type(expected_port) is not int or expected_port not in (9333, 9444):
+        return False
     try:
         u = urlsplit(url)
-        return (u.scheme == "http" and u.hostname == "127.0.0.1"
-                and u.port == 9333 and not u.username and not u.password
+        return (u.scheme == "http" and u.netloc == f"127.0.0.1:{expected_port}"
+                and u.port == expected_port and not u.username and not u.password
                 and u.path in ("", "/") and not u.query and not u.fragment)
     except (ValueError, TypeError, AttributeError):
         return False
+
+
+def _same_loopback_9333(url: str) -> bool:
+    # Preserve historical 9333 config; never migrate its Chrome profile.
+    return _same_loopback_port(url, 9333)
 
 
 def _checkout_sha(checkout: Path) -> str:
@@ -76,6 +83,7 @@ def _checkout_sha(checkout: Path) -> str:
 
 def provision(*, checkout: Path, chrome_config: Path, state_file: Path,
               registry: Path, route_id: str, local_app_data: Path,
+              target_cdp_port: int = 9333,
               source_reader=_fresh_main_sha, checkout_reader=_checkout_sha,
               owner_reader=_private_identity,
               chrome_loader=chrome_acquisition.load_environment,
@@ -87,19 +95,21 @@ def provision(*, checkout: Path, chrome_config: Path, state_file: Path,
     Existing different or untrusted manifest is never overwritten.
     """
     try:
+        if type(target_cdp_port) is not int or target_cdp_port not in (9333, 9444):
+            raise SetupBlocked("CDP_PORT_NOT_SUPPORTED")
         root = _private_root(local_app_data)
         checkout = checkout.resolve(strict=True)
         if not checkout.is_dir():
             raise SetupBlocked("CHECKOUT_INVALID")
         env = chrome_loader(chrome_config, checkout, local_app_data=local_app_data)
-        if env.port != 9333 or not _same_loopback_9333(env.endpoint):
-            raise SetupBlocked("CONFIG_NOT_EXACT_CDP_9333")
+        if env.port != target_cdp_port or not _same_loopback_port(env.endpoint, target_cdp_port):
+            raise SetupBlocked("CONFIG_NOT_EXACT_CDP_" + str(target_cdp_port))
         if not route_id or len(route_id) > 128:
             raise SetupBlocked("ROUTE_ID_INVALID")
         binding = route_loader(
             registry_path=registry, checkout=checkout, route_id=route_id)
-        if not _same_loopback_9333(binding.cdp_endpoint):
-            raise SetupBlocked("ENROLLED_ROUTE_NOT_9333")
+        if not _same_loopback_port(binding.cdp_endpoint, target_cdp_port):
+            raise SetupBlocked("ENROLLED_ROUTE_NOT_" + str(target_cdp_port))
         ledger = store_cls(path=state_file, repository_root=checkout)
         session = ledger.read()
         if session["phase"] == "SUBMISSION_UNKNOWN":
@@ -133,7 +143,9 @@ def provision(*, checkout: Path, chrome_config: Path, state_file: Path,
             "registry": str(registry.resolve(strict=True)),
             "route_id": route_id,
         }
-        destination = root / "wake-readiness.json"
+        # A 9444 manifest never overwrites or silently reuses legacy 9333.
+        destination = root / ("wakehub-readiness-9444.json" if target_cdp_port == 9444
+                              else "wake-readiness.json")
         if destination.exists() or destination.is_symlink():
             current = load_flow_config(destination, local_app_data=local_app_data)
             if current != manifest:
@@ -166,6 +178,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--state-file", type=Path, required=True)
     p.add_argument("--registry", type=Path, required=True)
     p.add_argument("--route-id", required=True)
+    p.add_argument("--cdp-port", type=int, choices=(9333, 9444), default=9333)
     args = p.parse_args(argv)
     try:
         if os.name != "nt" or "LOCALAPPDATA" not in os.environ:
@@ -173,7 +186,8 @@ def main(argv: list[str] | None = None) -> int:
         result = provision(
             checkout=args.checkout, chrome_config=args.chrome_config,
             state_file=args.state_file, registry=args.registry,
-            route_id=args.route_id, local_app_data=Path(os.environ["LOCALAPPDATA"]))
+            route_id=args.route_id, local_app_data=Path(os.environ["LOCALAPPDATA"]),
+            target_cdp_port=args.cdp_port)
         print(json.dumps(result, sort_keys=True))
         return 0
     except SetupBlocked as exc:

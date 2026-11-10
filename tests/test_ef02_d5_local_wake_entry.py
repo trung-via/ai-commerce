@@ -216,3 +216,61 @@ def test_windows_process_identity_is_read_from_actual_process_token():
     identity = d5._windows_process_sid()
     assert isinstance(identity, str)
     assert re.fullmatch(r"S-1-(?:\d+-){1,14}\d+", identity)
+
+
+def test_wh07_cli_fixed_check_requires_existing_send_gate(tmp_path, monkeypatch, capsys):
+    ep, rp, _, _ = files(tmp_path)
+    args = ["send", "--event-file", str(ep), "--result-file", str(rp),
+            "--checkout", str(tmp_path), "--fixed-check-test"]
+    monkeypatch.delenv("AI_COMMERCE_LOCAL_WAKE_SEND_ENABLED", raising=False)
+    assert d5.main(args) == 2
+    assert "EF02_WAKE_BLOCKED" in capsys.readouterr().err
+    assert d5.main(["check", "--event-file", str(ep),
+                    "--result-file", str(rp), "--checkout", str(tmp_path),
+                    "--fixed-check-test"]) == 2
+
+
+def test_wh07_local_send_fixed_check_can_only_select_trusted_default_adapter(tmp_path, monkeypatch):
+    ep, rp, event, report = files(tmp_path)
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    grants = tmp_path / "private" / "grants.json"
+    grants.parent.mkdir()
+    grants.write_text(json.dumps({"version": 1, "grants": [
+        {"operation": "resolve_claim_route"}, {"operation": "deliver_wake"}]}),
+        encoding="utf-8")
+    sentinel = object()
+    calls = {}
+    monkeypatch.setattr(d5, "SignedOriginConsentAuthority",
+                        lambda **kwargs: sentinel)
+    monkeypatch.setattr(d5, "GitHubRestArtifactAuthority",
+                        lambda **kwargs: sentinel)
+    def fake_deliver(**kwargs):
+        calls["deliver"] = kwargs
+        return WakeReceipt(event_id=event["event_id"], route_id="route-a",
+                           generation=1, delivery_status="UNKNOWN",
+                           error_code="UI_USER_TURN_OBSERVED")
+    def fake_adapter(**kwargs):
+        calls["adapter"] = kwargs
+        return sentinel
+    monkeypatch.setattr(d5, "deliver_exact_chat_wake", fake_deliver)
+    monkeypatch.setattr(d5, "LocalChromeDoorbellAdapter", fake_adapter)
+    kw = dict(event=event, report=report, workflow_id=399104102,
+              caller_id="operator", grants_path=grants,
+              registry_path=tmp_path / "private" / "registry.json",
+              idempotency_path=tmp_path / "private" / "idem.json",
+              repository_root=checkout, token_provider=lambda: "read-token",
+              secret_provider=lambda: b"test-key" * 5,
+              principal_provider=lambda: "S-1-5-21-999")
+    with pytest.raises(d5.LocalWakeConfigError, match="WAKE_TEST_SCOPE_INVALID"):
+        d5.send_one(**kw, fixed_check_test="true")
+    with pytest.raises(d5.LocalWakeConfigError, match="WAKE_TEST_SCOPE_INVALID"):
+        d5.send_one(**kw, adapter=sentinel, fixed_check_test=True)
+    receipt = d5.send_one(**kw, fixed_check_test=True)
+    assert receipt.delivery_status == "UNKNOWN"
+    assert calls["adapter"] == {
+        "allow_submit": True, "preload_exact_chat": True,
+        "send_only": True, "fixed_check_test": True}
+    assert calls["deliver"]["adapter"] is sentinel
+
+

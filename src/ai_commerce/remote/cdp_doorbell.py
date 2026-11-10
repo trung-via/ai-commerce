@@ -279,8 +279,13 @@ _SEARCH_MARKER = """(args) => {
 
 
 
-def _doorbell_text(event_id: str, repository: str, *, send_only: bool = False) -> str:
-    """Bounded exact Wake text. Send-only requests NO downstream orchestration."""
+def _doorbell_text(event_id: str, repository: str, *, send_only: bool = False,
+                   fixed_check_test: bool = False) -> str:
+    """Bounded exact Wake text; opt-in test only sends literal 'kiểm tra'."""
+    if fixed_check_test:
+        if send_only is not True or repository != "trung-via/ai-commerce":
+            raise ValueError("DOORBELL_TEST_SCOPE_INVALID")
+        return "kiểm tra"
     lines = [
         "[AI COMMERCE LOCAL CHAT WAKE]",
         "event_id: " + event_id,
@@ -343,7 +348,11 @@ class _PlaywrightInventory:
                 return "PRELOAD_ROUTE_CHANGED"
             with self._browser(binding.cdp_endpoint) as browser:
                 contexts = list(browser.contexts)
-                pages = [page for ctx in contexts for page in ctx.pages]
+                # Even a matching tab in one of two contexts is not a
+                # uniquely authenticated browser/account for WH-05.
+                if len(contexts) != 1:
+                    return "PRELOAD_CONTEXT_AMBIGUOUS"
+                pages = list(contexts[0].pages)
                 matches = [page for page in pages
                            if isinstance(page.url, str) and
                            page.url.rstrip("/") == binding.chat_url]
@@ -352,9 +361,10 @@ class _PlaywrightInventory:
                 if current_binding is not None and current_binding() != binding:
                     return "PRELOAD_ROUTE_CHANGED"
                 if matches:
-                    return "EXACT_CHAT_PRESENT"
-                if len(contexts) != 1:
-                    return "PRELOAD_CONTEXT_AMBIGUOUS"
+                    outcome = _preload_surface_code(matches[0])
+                    if current_binding is not None and current_binding() != binding:
+                        return "PRELOAD_ROUTE_CHANGED"
+                    return "EXACT_CHAT_PRESENT" if outcome == "CANDIDATE_READY" else outcome
                 # Never navigate the currently active, latest, or other tab.
                 new_page = contexts[0].new_page()
                 try:
@@ -367,7 +377,10 @@ class _PlaywrightInventory:
                     return "PRELOAD_NAVIGATION_UNVERIFIED"
                 if current_binding is not None and current_binding() != binding:
                     return "PRELOAD_ROUTE_CHANGED"
-                return "EXACT_CHAT_OPENED"
+                outcome = _preload_surface_code(new_page)
+                if current_binding is not None and current_binding() != binding:
+                    return "PRELOAD_ROUTE_CHANGED"
+                return "EXACT_CHAT_OPENED" if outcome == "CANDIDATE_READY" else outcome
         except Exception:
             return "PRELOAD_CDP_UNAVAILABLE"
 
@@ -393,6 +406,21 @@ _CHAT_A_READ_ONLY_SURFACE = """
   return forms.length === 1 ? 'CANDIDATE_READY' : 'SURFACE_UNPROVEN';
 }
 """
+
+
+def _preload_surface_code(page) -> str:
+    """WH-05: check the actual exact-chat login/composer, never just its URL.
+
+    This cannot establish account/session identity or authorize a Wake Send.
+    A draft, loading/login surface, or failed read must stop before staging.
+    """
+    try:
+        code = page.evaluate(_CHAT_A_READ_ONLY_SURFACE)
+    except Exception:
+        return "PRELOAD_SURFACE_UNPROVEN"
+    if code == "CANDIDATE_READY":
+        return code
+    return "PRELOAD_DRAFT_PRESENT" if code == "DRAFT_PRESENT" else "PRELOAD_SURFACE_UNPROVEN"
 
 
 def probe_chat_a_candidate(*, endpoint: str = "http://127.0.0.1:9444",
@@ -851,7 +879,12 @@ class LocalChromeDoorbellAdapter:
                  allow_submit: bool = False,
                  inventory: BrowserInventory | None = None,
                  preload_exact_chat: bool = False,
-                 send_only: bool = False):
+                 send_only: bool = False,
+                 fixed_check_test: bool = False):
+        if (type(fixed_check_test) is not bool or
+                (fixed_check_test and
+                 (send_only is not True or repository != "trung-via/ai-commerce"))):
+            raise ValueError("DOORBELL_TEST_SCOPE_INVALID")
         if not isinstance(repository, str) or not _REPOSITORY.fullmatch(repository):
             raise ValueError("DOORBELL_REPOSITORY_INVALID")
         self.repository = repository
@@ -859,6 +892,8 @@ class LocalChromeDoorbellAdapter:
         self.inventory = inventory or _PlaywrightInventory()
         self.preload_exact_chat = preload_exact_chat is True
         self.send_only = send_only is True
+        # Only an explicitly configured trusted operator may select this mode.
+        self.fixed_check_test = fixed_check_test is True
 
     def send_wake(self, *, binding: ResolvedBinding,
                   message: str, event_id: str) -> WakeReceipt:
@@ -887,7 +922,8 @@ class LocalChromeDoorbellAdapter:
             if code not in ("EXACT_CHAT_PRESENT", "EXACT_CHAT_OPENED"):
                 return receipt("UNSUPPORTED", code)
         doorbell = _doorbell_text(event_id, self.repository,
-                                  send_only=self.send_only)
+                                  send_only=self.send_only,
+                                  fixed_check_test=self.fixed_check_test)
         args = {**_ARGS, "url": binding.chat_url, "text": doorbell}
         clicked = False
         staging_started = False
