@@ -1,0 +1,80 @@
+{
+  "schema_version": "WorkItem.v1",
+  "work_id": "B1_3_SUBTITLE_CLOCK_001",
+  "source_sha": "110fd1ea4093961c08114f51ceafd5eff89e3445",
+  "human_authorization_ref": "2026-11-10 Human @AI Commerce 'tiếp tục roadmap' after verified B1.3-a source-only PR #780 trusted-merged; scoped offline B1.3-b timed subtitles with no private/live effect.",
+  "component": "b1-3-subtitle",
+  "owner": "Media & Creative",
+  "status": "SOURCE_CANDIDATE_PENDING_EXACT_HEAD_WINDOWS_CI_AND_INDEPENDENT_BRAIN",
+  "objective": "Read-only local UTF-8 SRT timestamp evidence bounded by independently rechecked current WAV PCM sample duration; no claim of spoken Vietnamese sync or rights.",
+  "execution_route": "CI_FIRST_DIRECT_GITHUB_SOURCE_ONLY_NO_EF02_PROVIDER",
+  "verification_profile": "mt01-component-onboarding",
+  "verification_round_limit": 2,
+  "allowed_paths": [
+    "src/ai_commerce/creative_quality/subtitle_clock_observation.py",
+    "tests/test_b1_3_subtitle_clock.py",
+    "work_items/mt01-components/b1-3-subtitle.json",
+    "work_items/B1_3_SUBTITLE_CLOCK_001.json",
+    "docs/creative/B1_3_SUBTITLE_CLOCK_PROTOCOL.md",
+    "docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md"
+  ],
+  "add_only_paths": [
+    "src/ai_commerce/creative_quality/subtitle_clock_observation.py",
+    "tests/test_b1_3_subtitle_clock.py",
+    "work_items/mt01-components/b1-3-subtitle.json",
+    "work_items/B1_3_SUBTITLE_CLOCK_001.json",
+    "docs/creative/B1_3_SUBTITLE_CLOCK_PROTOCOL.md"
+  ],
+  "modified_paths": [
+    "docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md"
+  ],
+  "acceptance": [
+    "B1.3-b.current-pcm-clock-srt-bounds",
+    "B1.3-b.optional-silent-no-inferred-sync",
+    "B1.3-b.no-provider-rights-or-sync-upgrade"
+  ],
+  "negative_acceptance": [
+    {
+      "ac": "B1.3-b.malformed-or-outside-duration-denied",
+      "tests": [
+        "test_bad_srt_never_becomes_a_measured_sync"
+      ]
+    },
+    {
+      "ac": "B1.3-b.stale-native-bytes-hold",
+      "tests": [
+        "test_missing_and_incorrect_caption_pin_hold",
+        "test_stale_pcm_rejected_even_when_caption_is_current"
+      ]
+    },
+    {
+      "ac": "B1.3-b.path-alias-hold",
+      "tests": [
+        "test_unsafe_caption_path_is_denied",
+        "test_unsafe_hardlink_caption_never_inspected",
+        "test_native_symlink_caption_never_inspected_if_supported"
+      ]
+    },
+    {
+      "ac": "B1.3-b.unauthorized-rights-and-self-resealed-packet-denied",
+      "tests": [
+        "test_forged_rights_and_self_resealed_timing_cannot_replay",
+        "test_missing_pair_and_runtime_no_provider"
+      ]
+    }
+  ],
+  "source_consumers": [
+    "B1.3-a independently rechecked native PCM WAV source facts",
+    "BQ-01b subjective Vietnamese voice/acoustic owner",
+    "A13 native local regular-file custody",
+    "Q4 technical observation (read only)"
+  ],
+  "authority_limits": {
+    "audio": "B1.3-a native PCM sample duration; local identity SHA + reread is not cryptographic signer or atomic provider receipt.",
+    "captions": "One independently SHA-pinned strict local UTF-8 .srt, max 64KiB and 64 ordered bounded cues; optional absent is valid.",
+    "output": "Canonical packet with bounded cue milliseconds, hashed text only and explicit NOT_MEASURED speech-to-text/visual sync.",
+    "trust": "No PULSE provider calls, external services, credentials, paid models, spend, consent, authenticated rights, publish or upload.",
+    "historical": "Original #646 WorkOwner effect UNKNOWN, #656 native reconciliation HOLD; no replay or WorkOwner status change."
+  },
+  "candidate_claim": "NO_BRAIN_PASS_UNTIL_EXACT_HEAD_MT01_PYTHON_NODE_AND_WINDOWS_ARTIFACT"
+}
