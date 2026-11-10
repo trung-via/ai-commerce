@@ -2106,12 +2106,17 @@ def _wh03c_intake_action(acs, paths):
     }
 
 
-def test_wh03c_reviewed_d5_owner_is_exactly_mapped_from_committed_manifest():
-    manifest = json.loads((ROOT / "work_items/mt01-components/d5-origin-affinity.json")
-                          .read_text(encoding="utf-8"))
+def test_wh03c_reviewed_d5_owner_comes_only_from_committed_manifest():
+    from ai_commerce.remote.validation import _reviewed_intake_groups
+
+    manifest_path = "work_items/mt01-components/d5-origin-affinity.json"
+    manifest = json.loads((ROOT / manifest_path).read_text(encoding="utf-8"))
     assert manifest["schema_version"] == "MT01ComponentOwner.v1"
     assert manifest["component"] == "d5-origin-affinity"
-    matching = [g for g in mt.approved_groups() if g.name == manifest["component"]]
+    # Static duplicate ownership breaks MT-01 V2.1 PR planner.
+    assert all(g.name != manifest["component"] for g in mt.approved_groups())
+    matching = [g for g in _reviewed_intake_groups()
+                if g.name == manifest["component"]]
     assert len(matching) == 1
     group = matching[0]
     assert group.mapping() == {
@@ -2119,7 +2124,7 @@ def test_wh03c_reviewed_d5_owner_is_exactly_mapped_from_committed_manifest():
         "acs": manifest["acs"],
         "paths": manifest["sources"],
         "consumers": manifest["consumers"],
-        "contracts": manifest["contracts"],
+        "contracts": [*manifest["contracts"], manifest_path],
     }
     assert all((ROOT / p).is_file() for p in
                (*group.paths, *group.tests, *group.consumers, *group.contracts))
