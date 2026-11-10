@@ -294,8 +294,8 @@ def _action():
         "executor": "codex",
         "model": "gpt-6.1-sol",
         "effort": "max",
-        "instruction": "fixture only: must never reach a real model",
-        "allowed_paths": ["tests/test_ef02_m0r_fixture.py"],
+        "instruction": "fixture only: must never reach a real model\nMT01_ACCEPTANCE_JSON:[\"EF02.recovery\"]",
+        "allowed_paths": ["tests/test_ef02_m0r_fault_injection.py"],
         "verification_profile": "ef02-tests",
         "depends_on": [],
     }
@@ -339,6 +339,7 @@ def _worker(tmp_path: Path, github):
     if not hasattr(github, "spawned_checkpoint"):
         github.spawned_checkpoint = lambda **_kw: "refs/heads/ef02/spawned/mock"
     worker.approved_reuse = {"version": 1, "candidates": {}}
+    worker._dispatch_strict_ac = True
     return worker
 
 
@@ -496,7 +497,7 @@ def test_timed_out_child_with_leftover_verified_receipt_cannot_publish(tmp_path,
                 (self.out / "engineering_result.json").write_text(json.dumps({
                     "status": "BUILD_VERIFIED_FOR_SCOPE",
                     "source_base_sha": BASE,
-                    "changed_files": ["tests/test_ef02_m0r_fixture.py"],
+                    "changed_files": ["tests/test_ef02_m0r_fault_injection.py"],
                     "verify_exit_code": 0,
                     "error_code": None,
                 }), encoding="utf-8")
@@ -565,8 +566,8 @@ def test_candidate_publication_failure_preserves_verified_result_but_not_pass(tm
                 "git_head_after": BASE, "scope_valid": True, "executor_exit_code": 0,
                 "tracked_diff_sha256": "d" * 64,
                 "evidence_sha256": {"tracked_diff": "d" * 64},
-                "changed_files": ["tests/test_ef02_m0r_fixture.py"],
-                "candidate_file_sha256": {"tests/test_ef02_m0r_fixture.py": "0" * 64},
+                "changed_files": ["tests/test_ef02_m0r_fault_injection.py"],
+                "candidate_file_sha256": {"tests/test_ef02_m0r_fault_injection.py": "0" * 64},
                 "verify_exit_code": 0,
                 "error_code": None,
                 "invocations": [inv],
@@ -578,8 +579,8 @@ def test_candidate_publication_failure_preserves_verified_result_but_not_pass(tm
                         lambda argv, **kwargs: VerifiedChild(argv, **kwargs))
     monkeypatch.setattr("ai_commerce.remote.worker._snapshot", lambda *_a: ({
         "git_head_after": BASE, "scope_valid": True,
-        "changed_files": ["tests/test_ef02_m0r_fixture.py"],
-        "candidate_file_sha256": {"tests/test_ef02_m0r_fixture.py": "0" * 64},
+        "changed_files": ["tests/test_ef02_m0r_fault_injection.py"],
+        "candidate_file_sha256": {"tests/test_ef02_m0r_fault_injection.py": "0" * 64},
         "tracked_diff_sha256": "d" * 64,
     }, b"mock diff"))
     github = FakeGithub()
@@ -825,7 +826,7 @@ def test_ef01_cli_timeout_receipt_remains_unknown_in_ef02_and_never_publishes(
                 "status": "EXECUTION_UNKNOWN",
                 "error_code": "EXECUTOR_TIMEOUT",
                 "source_base_sha": BASE,
-                "changed_files": ["tests/test_ef02_m0r_fixture.py"],
+                "changed_files": ["tests/test_ef02_m0r_fault_injection.py"],
                 "verify_exit_code": None,
                 "replay_authorized": False,
             }), encoding="utf-8")
@@ -892,9 +893,9 @@ def test_ef01_untrusted_success_receipt_never_promotes_batch_action_to_pass(
             (self.out / "engineering_result.json").write_text(json.dumps({
                 "status": receipt_status,
                 "source_base_sha": BASE,
-                "changed_files": ["tests/test_ef02_m0r_fixture.py"],
+                "changed_files": ["tests/test_ef02_m0r_fault_injection.py"],
                 "candidate_file_sha256": {
-                    "tests/test_ef02_m0r_fixture.py": "0" * 64},
+                    "tests/test_ef02_m0r_fault_injection.py": "0" * 64},
                 "verify_exit_code": verify_exit,
                 "error_code": None,
             }), encoding="utf-8")
@@ -3120,3 +3121,75 @@ def test_r4_unknown_source_reader_never_replays_historical_effects(tmp_path, mon
         assert args[3].read()[-1]["stage"] == "UNKNOWN"
         assert f.ledger.unreconciled_intents_count() == 0
 
+
+
+def test_m0r_committed_fixture_and_registered_recovery_owner_positive(tmp_path, monkeypatch):
+    """Committed Git fixture tests/test_ef02_m0r_fault_injection.py and EF02.recovery owner pass intake."""
+    class FakeGithub:
+        def claim(self, **_kw):
+            return "CLAIMED"
+        def integrated_source(self, **_kw):
+            return {"effective_sha": BASE, "integration_ref": None}
+    def fake_run(argv, **_kw):
+        assert argv[0] == "git" and "worktree" in argv and "add" in argv
+        return SimpleNamespace(returncode=1, stderr="fixture git worktree failure")
+    monkeypatch.setattr("ai_commerce.remote.worker.subprocess.run", fake_run)
+    _forbid_model(monkeypatch)
+    worker = _worker(tmp_path, FakeGithub())
+    action = _action()
+    assert action["allowed_paths"] == ["tests/test_ef02_m0r_fault_injection.py"]
+    assert "EF02.recovery" in action["instruction"]
+    result = worker.execute_action(action)
+    assert result["status"] == "SOURCE_WORKTREE_FAILED"
+    assert result["error_code"] == "GIT_WORKTREE_ADD_NONZERO"
+    assert result["executor_invoked"] is False
+    assert result["candidate_sha"] is None
+
+
+def test_m0r_unregistered_fixture_fails_before_workowner_or_provider(tmp_path, monkeypatch):
+    """Unregistered or unmapped fixture path fails before WorkOwner claim or provider."""
+    _forbid_model(monkeypatch)
+    class ForbidClaim:
+        def claim(self, **_kw):
+            raise AssertionError("unmapped fixture must fail before claim")
+    worker = _worker(tmp_path, ForbidClaim())
+    unmapped = dict(_action())
+    unmapped["allowed_paths"] = ["tests/test_ef02_m0r_fixture.py"]
+    result = worker.execute_action(unmapped)
+    assert result["status"] == "INVALID_ACTION"
+    assert result["error_code"] == "INTAKE_SOURCE_OWNER_UNMAPPED"
+    assert result["executor_invoked"] is False
+    assert result["candidate_sha"] is None
+
+
+def test_m0r_unknown_owner_or_missing_ac_fails_before_workowner_or_provider(tmp_path, monkeypatch):
+    """Unknown owner or missing AC fails before WorkOwner claim or provider."""
+    _forbid_model(monkeypatch)
+    class ForbidClaim:
+        def claim(self, **_kw):
+            raise AssertionError("unknown owner must fail before claim")
+    worker = _worker(tmp_path, ForbidClaim())
+    # Missing AC
+    bad_action = dict(_action())
+    bad_action["instruction"] = "fixture only: no fingerprinted AC"
+    result = worker.execute_action(bad_action)
+    assert result["status"] == "INVALID_ACTION"
+    assert result["error_code"] == "INTAKE_AC_MISSING_OR_AMBIGUOUS"
+    assert result["executor_invoked"] is False
+    assert result["candidate_sha"] is None
+
+    # Unregistered AC
+    bad_action["instruction"] = "fixture\nMT01_ACCEPTANCE_JSON:[\"UNKNOWN.owner\"]"
+    result = worker.execute_action(bad_action)
+    assert result["status"] == "INVALID_ACTION"
+    assert result["error_code"] == "INTAKE_AC_UNREGISTERED"
+    assert result["executor_invoked"] is False
+    assert result["candidate_sha"] is None
+
+    # AC not owning allowed path
+    bad_action["instruction"] = "fixture\nMT01_ACCEPTANCE_JSON:[\"A12.product-evidence\"]"
+    result = worker.execute_action(bad_action)
+    assert result["status"] == "INVALID_ACTION"
+    assert result["error_code"] == "INTAKE_AC_NOT_OWNING_ALLOWED_PATH"
+    assert result["executor_invoked"] is False
+    assert result["candidate_sha"] is None
