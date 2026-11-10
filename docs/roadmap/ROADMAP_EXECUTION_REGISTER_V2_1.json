@@ -1,0 +1,1713 @@
+{
+  "schema_version": "AICommerceRoadmapExecutionOverlay.v2.1",
+  "document_kind": "NON_DESTRUCTIVE_EVIDENCE_SNAPSHOT",
+  "audit_date": "2026-11-10",
+  "source_repo": "trung-via/ai-commerce",
+  "source_main_sha": "9493bae0664c152df77dc5c7d0b61780f6159f1e",
+  "authority": "Brain roadmap audit + explicit Human request for docs/work-tree update; not a new provider/native grant",
+  "historical_truth_preserved": [
+    "docs/roadmap/WORK_TREE_V1_1.json",
+    "docs/roadmap/WORK_TREE_B_QUALITY_001_V1_0.json",
+    "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.json"
+  ],
+  "evidence_rule": "Human decisions govern scope; merged PR/CI demonstrate bounded source only; independent native/provider/UI/commercial receipts are required for higher claims. Issue open/closed is not a delivery state.",
+  "source_state_note": "HISTORICAL_PLAN_OR_SOURCE_REPORTED and CURRENT_REASSESSMENT_REQUIRED intentionally make no current implementation claim. PARTIAL_SOURCE_MERGED is not full package acceptance.",
+  "crosswalk_integrity": {
+    "canonical_wbs_count": 63,
+    "unique_wbs_ids": 63,
+    "wbs_dependency_cycles": 0,
+    "valid_dependency_refs": true,
+    "mapped_to_A01_A18": 58,
+    "separate_lane_ids": {
+      "EF01": "ENGINEERING_EF01",
+      "EF02": "ENGINEERING_EF02",
+      "C05": "PRODUCTION_B1_3",
+      "P02": "OPTIONAL_PRODUCTION_B4_1",
+      "P07": "PRODUCTION_B1_4_B4_1"
+    },
+    "added_wbs_ids": 0,
+    "removed_wbs_ids": 0
+  },
+  "wbs_crosswalk": [
+    {
+      "id": "G01",
+      "stream": "G",
+      "legacy_plan_status": "BUILD_VERIFIED_FOR_SCOPE",
+      "planned_owner": "Foundation",
+      "priority": "P0",
+      "depends_on": [],
+      "package_links": [
+        "A01"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "G02",
+      "stream": "G",
+      "legacy_plan_status": "BUILD_VERIFIED_FOR_SCOPE",
+      "planned_owner": "Foundation",
+      "priority": "P0",
+      "depends_on": [
+        "G01"
+      ],
+      "package_links": [
+        "A01"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "G03",
+      "stream": "G",
+      "legacy_plan_status": "BUILD_VERIFIED_FOR_SCOPE",
+      "planned_owner": "Foundation",
+      "priority": "P0",
+      "depends_on": [
+        "G01"
+      ],
+      "package_links": [
+        "A01"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "G04",
+      "stream": "G",
+      "legacy_plan_status": "BUILD_VERIFIED_FOR_SCOPE",
+      "planned_owner": "Foundation",
+      "priority": "P0",
+      "depends_on": [
+        "G02",
+        "G03"
+      ],
+      "package_links": [
+        "A02"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "G05",
+      "stream": "G",
+      "legacy_plan_status": "BUILD_VERIFIED_FOR_SCOPE",
+      "planned_owner": "Foundation",
+      "priority": "P0",
+      "depends_on": [
+        "G04"
+      ],
+      "package_links": [
+        "A02"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "G06",
+      "stream": "G",
+      "legacy_plan_status": "BUILD_VERIFIED_FOR_SCOPE",
+      "planned_owner": "Foundation",
+      "priority": "P0",
+      "depends_on": [
+        "G03"
+      ],
+      "package_links": [
+        "A01"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "G07",
+      "stream": "G",
+      "legacy_plan_status": "BUILD_VERIFIED_FOR_SCOPE",
+      "planned_owner": "Foundation",
+      "priority": "P0",
+      "depends_on": [
+        "G04"
+      ],
+      "package_links": [
+        "A02"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "G08",
+      "stream": "G",
+      "legacy_plan_status": "BUILD_VERIFIED_FOR_SCOPE",
+      "planned_owner": "Foundation",
+      "priority": "P0",
+      "depends_on": [
+        "G03"
+      ],
+      "package_links": [
+        "A01"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "EF01",
+      "stream": "EF",
+      "legacy_plan_status": "BUILD_VERIFIED_FOR_SCOPE",
+      "planned_owner": "Engineering Foundation (project tooling)",
+      "priority": "P0",
+      "depends_on": [
+        "G03",
+        "G06",
+        "G08"
+      ],
+      "package_links": [],
+      "additional_route": "ENGINEERING_EF01"
+    },
+    {
+      "id": "EF02",
+      "stream": "EF",
+      "legacy_plan_status": "ACCEPTED_WITH_DEFERRED_RISKS",
+      "planned_owner": "Engineering Foundation (project tooling)",
+      "priority": "P0",
+      "depends_on": [
+        "EF01"
+      ],
+      "package_links": [],
+      "additional_route": "ENGINEERING_EF02"
+    },
+    {
+      "id": "O01",
+      "stream": "O",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Commerce Operations",
+      "priority": "P0",
+      "depends_on": [
+        "G04",
+        "G05"
+      ],
+      "package_links": [
+        "A04"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "O02",
+      "stream": "O",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Commerce Operations",
+      "priority": "P0",
+      "depends_on": [
+        "O01",
+        "G07"
+      ],
+      "package_links": [
+        "A04"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "O03",
+      "stream": "O",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Commerce Operations",
+      "priority": "P0",
+      "depends_on": [
+        "G05",
+        "O01"
+      ],
+      "package_links": [
+        "A04"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "O04",
+      "stream": "O",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Commerce Operations",
+      "priority": "P0",
+      "depends_on": [
+        "O02"
+      ],
+      "package_links": [
+        "A04"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "O05",
+      "stream": "O",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Commerce Operations",
+      "priority": "P1",
+      "depends_on": [
+        "O01",
+        "G07"
+      ],
+      "package_links": [
+        "A15"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "O06",
+      "stream": "O",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Commerce Operations",
+      "priority": "P1",
+      "depends_on": [
+        "O04",
+        "O05"
+      ],
+      "package_links": [
+        "A15"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "O07",
+      "stream": "O",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Commerce Operations",
+      "priority": "P1",
+      "depends_on": [
+        "O04"
+      ],
+      "package_links": [
+        "A15"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "M01",
+      "stream": "M",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Commerce Opportunity",
+      "priority": "P1",
+      "depends_on": [
+        "G04"
+      ],
+      "package_links": [
+        "A10"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "M02",
+      "stream": "M",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Commerce Opportunity",
+      "priority": "P1",
+      "depends_on": [
+        "M01"
+      ],
+      "package_links": [
+        "A10"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "M03",
+      "stream": "M",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Commerce Opportunity",
+      "priority": "P1",
+      "depends_on": [
+        "M01"
+      ],
+      "package_links": [
+        "A10"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "M04",
+      "stream": "M",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Commerce Opportunity",
+      "priority": "P1",
+      "depends_on": [
+        "M02",
+        "M03"
+      ],
+      "package_links": [
+        "A10"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "M05",
+      "stream": "M",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Commerce Opportunity",
+      "priority": "P1",
+      "depends_on": [
+        "M03",
+        "C01"
+      ],
+      "package_links": [
+        "A10"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "M06",
+      "stream": "M",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Commerce Opportunity",
+      "priority": "P2",
+      "depends_on": [
+        "L06",
+        "M04"
+      ],
+      "package_links": [
+        "A18"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "M07",
+      "stream": "M",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Commerce Opportunity",
+      "priority": "P2",
+      "depends_on": [
+        "M06",
+        "L05"
+      ],
+      "package_links": [
+        "A18"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "P01",
+      "stream": "P",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Product Intelligence",
+      "priority": "P1",
+      "depends_on": [
+        "G04"
+      ],
+      "package_links": [
+        "A12"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "P02",
+      "stream": "P",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Product Intelligence",
+      "priority": "P2",
+      "depends_on": [
+        "P01",
+        "G07"
+      ],
+      "package_links": [],
+      "additional_route": "OPTIONAL_PRODUCTION_B4_1"
+    },
+    {
+      "id": "P03",
+      "stream": "P",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Product Intelligence",
+      "priority": "P1",
+      "depends_on": [
+        "P01"
+      ],
+      "package_links": [
+        "A12"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "P04",
+      "stream": "P",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Product Intelligence",
+      "priority": "P1",
+      "depends_on": [
+        "P03",
+        "G05"
+      ],
+      "package_links": [
+        "A12"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "P05",
+      "stream": "P",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Product Intelligence",
+      "priority": "P1",
+      "depends_on": [
+        "P01",
+        "G05"
+      ],
+      "package_links": [
+        "A12"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "P06",
+      "stream": "P",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Product Intelligence",
+      "priority": "P1",
+      "depends_on": [
+        "P04"
+      ],
+      "package_links": [
+        "A12"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "P07",
+      "stream": "P",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Product Intelligence",
+      "priority": "P2",
+      "depends_on": [
+        "P04",
+        "P05"
+      ],
+      "package_links": [],
+      "additional_route": "PRODUCTION_B1_4_B4_1"
+    },
+    {
+      "id": "C01",
+      "stream": "C",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Media & Creative",
+      "priority": "P0",
+      "depends_on": [
+        "G04"
+      ],
+      "package_links": [
+        "A03"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "C02",
+      "stream": "C",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Media & Creative",
+      "priority": "P0",
+      "depends_on": [
+        "C01",
+        "G07"
+      ],
+      "package_links": [
+        "A03"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "C03",
+      "stream": "C",
+      "legacy_plan_status": "ACCEPTED_FOR_WORK",
+      "planned_owner": "Media & Creative",
+      "priority": "P0",
+      "depends_on": [
+        "C02"
+      ],
+      "package_links": [
+        "A05"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "C04",
+      "stream": "C",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Media & Creative",
+      "priority": "P0",
+      "depends_on": [
+        "G07",
+        "O03"
+      ],
+      "package_links": [
+        "A04"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "C05",
+      "stream": "C",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Media & Creative",
+      "priority": "P1",
+      "depends_on": [
+        "C04"
+      ],
+      "package_links": [],
+      "additional_route": "PRODUCTION_B1_3"
+    },
+    {
+      "id": "C06",
+      "stream": "C",
+      "legacy_plan_status": "ACCEPTED_FOR_WORK",
+      "planned_owner": "Media & Creative",
+      "priority": "P0",
+      "depends_on": [
+        "C03",
+        "C04",
+        "O02"
+      ],
+      "package_links": [
+        "A05"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "C07",
+      "stream": "C",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Media & Creative",
+      "priority": "P1",
+      "depends_on": [
+        "C06",
+        "O03"
+      ],
+      "package_links": [
+        "A17"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "C08",
+      "stream": "C",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Media & Creative",
+      "priority": "P1",
+      "depends_on": [
+        "C06"
+      ],
+      "package_links": [
+        "A13"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "C09",
+      "stream": "C",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Media & Creative",
+      "priority": "P1",
+      "depends_on": [
+        "C08",
+        "P04",
+        "P05"
+      ],
+      "package_links": [
+        "A13"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "C10",
+      "stream": "C",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Media & Creative",
+      "priority": "P2",
+      "depends_on": [
+        "C02",
+        "L06"
+      ],
+      "package_links": [
+        "A17"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "D01",
+      "stream": "D",
+      "legacy_plan_status": "VERIFIED_FOR_OFFLINE_SCOPE",
+      "planned_owner": "Distribution",
+      "priority": "P1",
+      "depends_on": [
+        "G04"
+      ],
+      "package_links": [
+        "A07"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "D02",
+      "stream": "D",
+      "legacy_plan_status": "VERIFIED_FOR_OFFLINE_SCOPE",
+      "planned_owner": "Distribution",
+      "priority": "P1",
+      "depends_on": [
+        "C06",
+        "D01"
+      ],
+      "package_links": [
+        "A08"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "D03",
+      "stream": "D",
+      "legacy_plan_status": "VERIFIED_FOR_OFFLINE_SCOPE",
+      "planned_owner": "Distribution",
+      "priority": "P1",
+      "depends_on": [
+        "D02"
+      ],
+      "package_links": [
+        "A08"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "D04",
+      "stream": "D",
+      "legacy_plan_status": "VERIFIED_FOR_OFFLINE_SCOPE",
+      "planned_owner": "Distribution",
+      "priority": "P1",
+      "depends_on": [
+        "D03",
+        "O01"
+      ],
+      "package_links": [
+        "A08"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "D05",
+      "stream": "D",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Distribution",
+      "priority": "P1",
+      "depends_on": [
+        "D04",
+        "O06"
+      ],
+      "package_links": [
+        "A17"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "D06",
+      "stream": "D",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Distribution",
+      "priority": "P1",
+      "depends_on": [
+        "D01",
+        "P04"
+      ],
+      "package_links": [
+        "A13"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "D07",
+      "stream": "D",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Distribution",
+      "priority": "P2",
+      "depends_on": [
+        "D04",
+        "D05"
+      ],
+      "package_links": [
+        "A17"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "D08",
+      "stream": "D",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Distribution",
+      "priority": "P2",
+      "depends_on": [
+        "D02",
+        "D07"
+      ],
+      "package_links": [
+        "A17"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "L01",
+      "stream": "L",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Distribution/Operations/Creative split",
+      "priority": "P1",
+      "depends_on": [
+        "G04"
+      ],
+      "package_links": [
+        "A09"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "L02",
+      "stream": "L",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Distribution/Operations/Creative split",
+      "priority": "P1",
+      "depends_on": [
+        "L01",
+        "D04"
+      ],
+      "package_links": [
+        "A09"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "L03",
+      "stream": "L",
+      "legacy_plan_status": "BUILD_VERIFIED_FOR_SCOPE",
+      "planned_owner": "Distribution/Operations/Creative split",
+      "priority": "P1",
+      "depends_on": [
+        "L02"
+      ],
+      "package_links": [
+        "A11"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "L04",
+      "stream": "L",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Distribution/Operations/Creative split",
+      "priority": "P1",
+      "depends_on": [
+        "L02",
+        "D06"
+      ],
+      "package_links": [
+        "A14"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "L05",
+      "stream": "L",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Distribution/Operations/Creative split",
+      "priority": "P1",
+      "depends_on": [
+        "L04",
+        "O05"
+      ],
+      "package_links": [
+        "A16"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "L06",
+      "stream": "L",
+      "legacy_plan_status": "BUILD_VERIFIED_FOR_SCOPE",
+      "planned_owner": "Distribution/Operations/Creative split",
+      "priority": "P1",
+      "depends_on": [
+        "C01",
+        "L03"
+      ],
+      "package_links": [
+        "A11"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "L07",
+      "stream": "L",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Distribution/Operations/Creative split",
+      "priority": "P2",
+      "depends_on": [
+        "O07",
+        "L06"
+      ],
+      "package_links": [
+        "A17"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "E01",
+      "stream": "E",
+      "legacy_plan_status": "VERIFIED_OFFLINE_E01",
+      "planned_owner": "Cross-domain",
+      "priority": "P0",
+      "depends_on": [
+        "C01",
+        "C02",
+        "C04",
+        "C06",
+        "O02"
+      ],
+      "package_links": [
+        "A06"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "E02",
+      "stream": "E",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Cross-domain",
+      "priority": "P1",
+      "depends_on": [
+        "E01",
+        "D03",
+        "D04",
+        "L02"
+      ],
+      "package_links": [
+        "A09"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "E03",
+      "stream": "E",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Cross-domain",
+      "priority": "P1",
+      "depends_on": [
+        "P04",
+        "P05",
+        "D01",
+        "D06",
+        "C09"
+      ],
+      "package_links": [
+        "A13"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "E04",
+      "stream": "E",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Cross-domain",
+      "priority": "P1",
+      "depends_on": [
+        "E01",
+        "E03",
+        "D04",
+        "L04"
+      ],
+      "package_links": [
+        "A14"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "E05",
+      "stream": "E",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Cross-domain",
+      "priority": "P2",
+      "depends_on": [
+        "E04",
+        "L05"
+      ],
+      "package_links": [
+        "A16"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "E06",
+      "stream": "E",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Cross-domain",
+      "priority": "P2",
+      "depends_on": [
+        "L06",
+        "C10"
+      ],
+      "package_links": [
+        "A17"
+      ],
+      "additional_route": null
+    },
+    {
+      "id": "E07",
+      "stream": "E",
+      "legacy_plan_status": "PROPOSED",
+      "planned_owner": "Cross-domain",
+      "priority": "P2",
+      "depends_on": [
+        "E05",
+        "M07"
+      ],
+      "package_links": [
+        "A18"
+      ],
+      "additional_route": null
+    }
+  ],
+  "package_executions": [
+    {
+      "domain": "ROADMAP_A",
+      "id": "A01",
+      "source_state": "HISTORICAL_PLAN_OR_SOURCE_REPORTED",
+      "live_state": "LIVE_NOT_PROVEN",
+      "evidence_refs": [
+        "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.json"
+      ],
+      "blocker_refs": [],
+      "note": "Current source maturity not independently re-evaluated for every legacy WBS ID; do not infer unimplemented from PROPOSED snapshot",
+      "depends_on": []
+    },
+    {
+      "domain": "ROADMAP_A",
+      "id": "A02",
+      "source_state": "HISTORICAL_PLAN_OR_SOURCE_REPORTED",
+      "live_state": "LIVE_NOT_PROVEN",
+      "evidence_refs": [
+        "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.json"
+      ],
+      "blocker_refs": [],
+      "note": "Current source maturity not independently re-evaluated for every legacy WBS ID; do not infer unimplemented from PROPOSED snapshot",
+      "depends_on": [
+        "A01"
+      ]
+    },
+    {
+      "domain": "ROADMAP_A",
+      "id": "A03",
+      "source_state": "HISTORICAL_PLAN_OR_SOURCE_REPORTED",
+      "live_state": "LIVE_NOT_PROVEN",
+      "evidence_refs": [
+        "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.json"
+      ],
+      "blocker_refs": [],
+      "note": "Current source maturity not independently re-evaluated for every legacy WBS ID; do not infer unimplemented from PROPOSED snapshot",
+      "depends_on": [
+        "A02"
+      ]
+    },
+    {
+      "domain": "ROADMAP_A",
+      "id": "A04",
+      "source_state": "HISTORICAL_PLAN_OR_SOURCE_REPORTED",
+      "live_state": "LIVE_NOT_PROVEN",
+      "evidence_refs": [
+        "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.json"
+      ],
+      "blocker_refs": [],
+      "note": "Current source maturity not independently re-evaluated for every legacy WBS ID; do not infer unimplemented from PROPOSED snapshot",
+      "depends_on": [
+        "A02"
+      ]
+    },
+    {
+      "domain": "ROADMAP_A",
+      "id": "A05",
+      "source_state": "HISTORICAL_PLAN_OR_SOURCE_REPORTED",
+      "live_state": "LIVE_NOT_PROVEN",
+      "evidence_refs": [
+        "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.json"
+      ],
+      "blocker_refs": [],
+      "note": "Current source maturity not independently re-evaluated for every legacy WBS ID; do not infer unimplemented from PROPOSED snapshot",
+      "depends_on": [
+        "A03",
+        "A04"
+      ]
+    },
+    {
+      "domain": "ROADMAP_A",
+      "id": "A06",
+      "source_state": "HISTORICAL_OFFLINE_ACCEPTED",
+      "live_state": "HISTORICAL_OFFLINE_SCOPE_ONLY",
+      "evidence_refs": [
+        "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.json"
+      ],
+      "blocker_refs": [],
+      "note": "Offline E01 source evidence; not a private PULSE journey",
+      "depends_on": [
+        "A05"
+      ]
+    },
+    {
+      "domain": "ROADMAP_A",
+      "id": "A07",
+      "source_state": "HISTORICAL_PLAN_OR_SOURCE_REPORTED",
+      "live_state": "LIVE_NOT_PROVEN",
+      "evidence_refs": [
+        "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.json"
+      ],
+      "blocker_refs": [],
+      "note": "Current source maturity not independently re-evaluated for every legacy WBS ID; do not infer unimplemented from PROPOSED snapshot",
+      "depends_on": [
+        "A02"
+      ]
+    },
+    {
+      "domain": "ROADMAP_A",
+      "id": "A08",
+      "source_state": "HISTORICAL_PLAN_OR_SOURCE_REPORTED",
+      "live_state": "LIVE_NOT_PROVEN",
+      "evidence_refs": [
+        "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.json"
+      ],
+      "blocker_refs": [],
+      "note": "Current source maturity not independently re-evaluated for every legacy WBS ID; do not infer unimplemented from PROPOSED snapshot",
+      "depends_on": [
+        "A06",
+        "A07"
+      ]
+    },
+    {
+      "domain": "ROADMAP_A",
+      "id": "A09",
+      "source_state": "HISTORICAL_PLAN_OR_SOURCE_REPORTED",
+      "live_state": "LIVE_NOT_PROVEN",
+      "evidence_refs": [
+        "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.json"
+      ],
+      "blocker_refs": [],
+      "note": "Current source maturity not independently re-evaluated for every legacy WBS ID; do not infer unimplemented from PROPOSED snapshot",
+      "depends_on": [
+        "A08"
+      ]
+    },
+    {
+      "domain": "ROADMAP_A",
+      "id": "A10",
+      "source_state": "HISTORICAL_PLAN_OR_SOURCE_REPORTED",
+      "live_state": "LIVE_NOT_PROVEN",
+      "evidence_refs": [
+        "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.json"
+      ],
+      "blocker_refs": [],
+      "note": "Current source maturity not independently re-evaluated for every legacy WBS ID; do not infer unimplemented from PROPOSED snapshot",
+      "depends_on": [
+        "A03"
+      ]
+    },
+    {
+      "domain": "ROADMAP_A",
+      "id": "A11",
+      "source_state": "HISTORICAL_PLAN_OR_SOURCE_REPORTED",
+      "live_state": "LIVE_NOT_PROVEN",
+      "evidence_refs": [
+        "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.json"
+      ],
+      "blocker_refs": [],
+      "note": "Current source maturity not independently re-evaluated for every legacy WBS ID; do not infer unimplemented from PROPOSED snapshot",
+      "depends_on": [
+        "A09"
+      ]
+    },
+    {
+      "domain": "ROADMAP_A",
+      "id": "A12",
+      "source_state": "PARTIAL_SOURCE_MERGED",
+      "live_state": "LIVE_NOT_PROVEN",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/pull/758"
+      ],
+      "blocker_refs": [],
+      "note": "B4.1a feed/rights readiness is not all A12 source adapters or external rights",
+      "depends_on": [
+        "A02"
+      ]
+    },
+    {
+      "domain": "ROADMAP_A",
+      "id": "A13",
+      "source_state": "CURRENT_REASSESSMENT_REQUIRED",
+      "live_state": "LIVE_NOT_PROVEN",
+      "evidence_refs": [
+        "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.json"
+      ],
+      "blocker_refs": [],
+      "note": "Historical A-series plan is not live affiliate entitlement",
+      "depends_on": [
+        "A12",
+        "A07",
+        "A08"
+      ]
+    },
+    {
+      "domain": "ROADMAP_A",
+      "id": "A14",
+      "source_state": "CURRENT_REASSESSMENT_REQUIRED",
+      "live_state": "LIVE_NOT_PROVEN",
+      "evidence_refs": [
+        "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.json"
+      ],
+      "blocker_refs": [],
+      "note": "Prior A14 handoff/acceptance does not establish live order or settlement",
+      "depends_on": [
+        "A13",
+        "A06"
+      ]
+    },
+    {
+      "domain": "ROADMAP_A",
+      "id": "A15",
+      "source_state": "PARTIAL_SOURCE_MERGED",
+      "live_state": "LIVE_NOT_PROVEN",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/pull/753"
+      ],
+      "blocker_refs": [],
+      "note": "B3.4 consumes a read-only native A15 ledger; no full-cost/coding-quota telemetry",
+      "depends_on": [
+        "A02"
+      ]
+    },
+    {
+      "domain": "ROADMAP_A",
+      "id": "A16",
+      "source_state": "CURRENT_REASSESSMENT_REQUIRED",
+      "live_state": "LIVE_NOT_PROVEN",
+      "evidence_refs": [
+        "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.json"
+      ],
+      "blocker_refs": [],
+      "note": "No verified live settlement evidence in this audit",
+      "depends_on": [
+        "A14",
+        "A15"
+      ]
+    },
+    {
+      "domain": "ROADMAP_A",
+      "id": "A17",
+      "source_state": "PARTIAL_SOURCE_MERGED",
+      "live_state": "LIVE_NOT_PROVEN",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/pull/732",
+        "https://github.com/trung-via/ai-commerce/pull/748"
+      ],
+      "blocker_refs": [],
+      "note": "B3 source consumers do not imply autonomous feedback/scale",
+      "depends_on": [
+        "A11",
+        "A15"
+      ]
+    },
+    {
+      "domain": "ROADMAP_A",
+      "id": "A18",
+      "source_state": "PARTIAL_SOURCE_MERGED",
+      "live_state": "LIVE_NOT_PROVEN",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/pull/748"
+      ],
+      "blocker_refs": [],
+      "note": "B3.3 read-only portfolio context; not own-brand investment decision",
+      "depends_on": [
+        "A10",
+        "A11",
+        "A15",
+        "A16"
+      ]
+    },
+    {
+      "domain": "ROADMAP_B",
+      "id": "B0",
+      "source_state": "PARTIAL_SOURCE_MERGED",
+      "live_state": "PRIVATE_E2E_NOT_PROVEN",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/pull/323",
+        "https://github.com/trung-via/ai-commerce/pull/329"
+      ],
+      "blocker_refs": [],
+      "note": "Durable SQLite + attended WAIT_BRAIN offline source; actual private journey remains separate",
+      "depends_on": []
+    },
+    {
+      "domain": "ROADMAP_B",
+      "id": "B1",
+      "source_state": "PARTIAL_SOURCE_MERGED",
+      "live_state": "REAL_PROVIDER_NOT_PROVEN",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/pull/639",
+        "https://github.com/trung-via/ai-commerce/pull/768",
+        "https://github.com/trung-via/ai-commerce/pull/780",
+        "https://github.com/trung-via/ai-commerce/pull/785"
+      ],
+      "blocker_refs": [],
+      "note": "Offline Q4/Q5 and real local WAV/SRT timing; no provider, rights, speech-sync or publish proof",
+      "depends_on": [
+        "B0"
+      ]
+    },
+    {
+      "domain": "ROADMAP_B",
+      "id": "B2",
+      "source_state": "HISTORICAL_OFFLINE_SOURCE_REPORTED",
+      "live_state": "REAL_PUBLICATION_AND_METRICS_NOT_PROVEN",
+      "evidence_refs": [
+        "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.md"
+      ],
+      "blocker_refs": [],
+      "note": "Assisted distribution != confirmed external publication or authenticated metrics",
+      "depends_on": [
+        "B1"
+      ]
+    },
+    {
+      "domain": "ROADMAP_B",
+      "id": "B3",
+      "source_state": "PARTIAL_SOURCE_MERGED",
+      "live_state": "LIVE_LEARNING_NOT_PROVEN",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/pull/732",
+        "https://github.com/trung-via/ai-commerce/pull/748",
+        "https://github.com/trung-via/ai-commerce/pull/753"
+      ],
+      "blocker_refs": [],
+      "note": "Current A09/A11 lineage, portfolio and dashboard source; synthetic/supplied != live outcomes",
+      "depends_on": [
+        "B2"
+      ]
+    },
+    {
+      "domain": "ROADMAP_B",
+      "id": "B4",
+      "source_state": "OPTIONAL_PARTIAL_SOURCE_MERGED",
+      "live_state": "LIVE_AFFILIATE_SETTLEMENT_NOT_PROVEN",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/pull/758"
+      ],
+      "blocker_refs": [],
+      "note": "B4.1a offline readiness only; optional branch, not Creative gating",
+      "depends_on": [
+        "B2"
+      ]
+    },
+    {
+      "domain": "B_QUALITY",
+      "id": "BQ-00",
+      "source_state": "DOCS_SOURCE_MERGED",
+      "live_state": "NOT_APPLICABLE",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/pull/410"
+      ],
+      "blocker_refs": [],
+      "note": "Adopted docs only; not runtime",
+      "depends_on": []
+    },
+    {
+      "domain": "B_QUALITY",
+      "id": "BQ-01",
+      "source_state": "CURRENT_REASSESSMENT_REQUIRED",
+      "live_state": "LIVE_OUTCOME_NOT_PROVEN",
+      "evidence_refs": [
+        "docs/roadmap/WORK_TREE_B_QUALITY_001_V1_0.json"
+      ],
+      "blocker_refs": [],
+      "note": "Knowledge and CRI source should be rechecked against exact PRs before promotion",
+      "depends_on": [
+        "BQ-00"
+      ]
+    },
+    {
+      "domain": "B_QUALITY",
+      "id": "BQ-02",
+      "source_state": "PARTIAL_SOURCE_MERGED",
+      "live_state": "LIVE_OUTCOME_NOT_PROVEN",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/pull/426"
+      ],
+      "blocker_refs": [],
+      "note": "Q2/Q4 local-asset technical scope; not media provider QA",
+      "depends_on": [
+        "BQ-00",
+        "BQ-01"
+      ]
+    },
+    {
+      "domain": "B_QUALITY",
+      "id": "BQ-03",
+      "source_state": "PARTIAL_SOURCE_MERGED",
+      "live_state": "LIVE_OUTCOME_NOT_PROVEN",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/pull/435",
+        "https://github.com/trung-via/ai-commerce/pull/480"
+      ],
+      "blocker_refs": [],
+      "note": "Synthetic and consent-first readiness; no actual consented Human study",
+      "depends_on": [
+        "BQ-02"
+      ]
+    },
+    {
+      "domain": "B_QUALITY",
+      "id": "BQ-04",
+      "source_state": "PARTIAL_SOURCE_MERGED",
+      "live_state": "LIVE_OUTCOME_NOT_PROVEN",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/pull/627"
+      ],
+      "blocker_refs": [],
+      "note": "Synthetic/local bounded repairs only; not arbitrary generative repair",
+      "depends_on": [
+        "BQ-02"
+      ]
+    },
+    {
+      "domain": "B_QUALITY",
+      "id": "BQ-05",
+      "source_state": "PARTIAL_SOURCE_MERGED",
+      "live_state": "LIVE_EFFECT_HOLD",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/pull/639",
+        "https://github.com/trung-via/ai-commerce/pull/768"
+      ],
+      "blocker_refs": [
+        "https://github.com/trung-via/ai-commerce/issues/646",
+        "https://github.com/trung-via/ai-commerce/issues/698"
+      ],
+      "note": "Offline Studio/effect handoff source; live private broker/rights/grants unproven",
+      "depends_on": [
+        "BQ-01",
+        "BQ-02",
+        "BQ-04"
+      ]
+    },
+    {
+      "domain": "B_QUALITY",
+      "id": "BQ-06",
+      "source_state": "PARTIAL_SOURCE_MERGED",
+      "live_state": "LIVE_OUTCOME_NOT_PROVEN",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/pull/732"
+      ],
+      "blocker_refs": [],
+      "note": "Native A09/A11 freshness/learning source; real outcomes require B2",
+      "depends_on": [
+        "BQ-00"
+      ]
+    },
+    {
+      "domain": "EPWO",
+      "id": "WP01",
+      "source_state": "PARTIAL_SOURCE_MERGED",
+      "live_state": "REAL_RECOVERY_NOT_PROVEN",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/pull/762",
+        "https://github.com/trung-via/ai-commerce/pull/773"
+      ],
+      "blocker_refs": [
+        "https://github.com/trung-via/ai-commerce/issues/466"
+      ],
+      "note": "Disposable process restart proof is not actual runner reboot nor old UNKNOWN resolution",
+      "depends_on": []
+    },
+    {
+      "domain": "EPWO",
+      "id": "WP02",
+      "source_state": "PARTIAL_SOURCE_MERGED_OPEN_CI_RED",
+      "live_state": "REAL_RECOVERY_NOT_PROVEN",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/pull/781",
+        "https://github.com/trung-via/ai-commerce/actions/runs/42845647214"
+      ],
+      "blocker_refs": [
+        "https://github.com/trung-via/ai-commerce/pull/784",
+        "https://github.com/trung-via/ai-commerce/issues/466"
+      ],
+      "note": "WP02 PR #784 exact-head Windows CI failed; cross-job test boundary must be repaired without weakening negative gates",
+      "depends_on": []
+    },
+    {
+      "domain": "EPWO",
+      "id": "WP03",
+      "source_state": "CURRENT_REASSESSMENT_REQUIRED",
+      "live_state": "NOT_INDEPENDENTLY_VERIFIED",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/issues/466"
+      ],
+      "blocker_refs": [
+        "https://github.com/trung-via/ai-commerce/issues/466"
+      ],
+      "note": "Umbrella planning description is not a delivery receipt",
+      "depends_on": []
+    },
+    {
+      "domain": "EPWO",
+      "id": "WP04",
+      "source_state": "CURRENT_REASSESSMENT_REQUIRED",
+      "live_state": "NOT_INDEPENDENTLY_VERIFIED",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/issues/466"
+      ],
+      "blocker_refs": [
+        "https://github.com/trung-via/ai-commerce/issues/466"
+      ],
+      "note": "Umbrella planning description is not a delivery receipt",
+      "depends_on": []
+    },
+    {
+      "domain": "EPWO",
+      "id": "WP05",
+      "source_state": "CURRENT_REASSESSMENT_REQUIRED",
+      "live_state": "NOT_INDEPENDENTLY_VERIFIED",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/issues/466"
+      ],
+      "blocker_refs": [
+        "https://github.com/trung-via/ai-commerce/issues/466"
+      ],
+      "note": "Umbrella planning description is not a delivery receipt",
+      "depends_on": []
+    },
+    {
+      "domain": "EPWO",
+      "id": "WP06",
+      "source_state": "CURRENT_REASSESSMENT_REQUIRED",
+      "live_state": "NOT_INDEPENDENTLY_VERIFIED",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/issues/466"
+      ],
+      "blocker_refs": [
+        "https://github.com/trung-via/ai-commerce/issues/466"
+      ],
+      "note": "Umbrella planning description is not a delivery receipt",
+      "depends_on": []
+    },
+    {
+      "domain": "WAKEHUB",
+      "id": "WH00",
+      "source_state": "CURRENT_REASSESSMENT_REQUIRED",
+      "live_state": "ORIGIN_AUTHORITY_NOT_PROVEN",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/issues/492"
+      ],
+      "blocker_refs": [
+        "https://github.com/trung-via/ai-commerce/issues/496"
+      ],
+      "note": "9444 only; source does not prove exact Chat A. WH08 requires separate authorization after genuine WH07 Send witness",
+      "depends_on": []
+    },
+    {
+      "domain": "WAKEHUB",
+      "id": "WH01",
+      "source_state": "PARTIAL_SOURCE_MERGED",
+      "live_state": "NATIVE_LOGON_NOT_PROVEN",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/pull/498"
+      ],
+      "blocker_refs": [
+        "https://github.com/trung-via/ai-commerce/issues/499"
+      ],
+      "note": "9444 only; source does not prove exact Chat A. WH08 requires separate authorization after genuine WH07 Send witness",
+      "depends_on": []
+    },
+    {
+      "domain": "WAKEHUB",
+      "id": "WH02",
+      "source_state": "CURRENT_REASSESSMENT_REQUIRED",
+      "live_state": "NATIVE_RESOURCE_METRICS_NOT_PROVEN",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/issues/492"
+      ],
+      "blocker_refs": [
+        "https://github.com/trung-via/ai-commerce/issues/492"
+      ],
+      "note": "9444 only; source does not prove exact Chat A. WH08 requires separate authorization after genuine WH07 Send witness",
+      "depends_on": []
+    },
+    {
+      "domain": "WAKEHUB",
+      "id": "WH03",
+      "source_state": "PARTIAL_SOURCE_MERGED",
+      "live_state": "EXACT_CHAT_REGISTRATION_NATIVE_HOLD",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/pull/734"
+      ],
+      "blocker_refs": [
+        "https://github.com/trung-via/ai-commerce/issues/738"
+      ],
+      "note": "9444 only; source does not prove exact Chat A. WH08 requires separate authorization after genuine WH07 Send witness",
+      "depends_on": []
+    },
+    {
+      "domain": "WAKEHUB",
+      "id": "WH04",
+      "source_state": "SCOPED_SOURCE_MERGED",
+      "live_state": "LIVE_READINESS_NOT_PROVEN",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/pull/776"
+      ],
+      "blocker_refs": [],
+      "note": "9444 only; source does not prove exact Chat A. WH08 requires separate authorization after genuine WH07 Send witness",
+      "depends_on": []
+    },
+    {
+      "domain": "WAKEHUB",
+      "id": "WH05",
+      "source_state": "SCOPED_SOURCE_MERGED",
+      "live_state": "LIVE_AUTOLOAD_NOT_PROVEN",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/pull/775"
+      ],
+      "blocker_refs": [],
+      "note": "9444 only; source does not prove exact Chat A. WH08 requires separate authorization after genuine WH07 Send witness",
+      "depends_on": []
+    },
+    {
+      "domain": "WAKEHUB",
+      "id": "WH06",
+      "source_state": "SCOPED_SOURCE_MERGED",
+      "live_state": "LIVE_CONTROL_CENTER_NOT_PROVEN",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/pull/776",
+        "https://github.com/trung-via/ai-commerce/pull/779"
+      ],
+      "blocker_refs": [],
+      "note": "9444 only; source does not prove exact Chat A. WH08 requires separate authorization after genuine WH07 Send witness",
+      "depends_on": []
+    },
+    {
+      "domain": "WAKEHUB",
+      "id": "WH07",
+      "source_state": "SCOPED_SOURCE_MERGED",
+      "live_state": "LIVE_ONE_SHOT_SEND_NOT_PROVEN",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/pull/783"
+      ],
+      "blocker_refs": [
+        "https://github.com/trung-via/ai-commerce/issues/738"
+      ],
+      "note": "9444 only; source does not prove exact Chat A. WH08 requires separate authorization after genuine WH07 Send witness",
+      "depends_on": []
+    },
+    {
+      "domain": "WAKEHUB",
+      "id": "WH08",
+      "source_state": "FUTURE_PLANNED",
+      "live_state": "HOST_PLUGIN_INVOCATION_NOT_AUTHORIZED",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/issues/492"
+      ],
+      "blocker_refs": [
+        "https://github.com/trung-via/ai-commerce/issues/492"
+      ],
+      "note": "9444 only; source does not prove exact Chat A. WH08 requires separate authorization after genuine WH07 Send witness",
+      "depends_on": []
+    },
+    {
+      "domain": "WAKEHUB",
+      "id": "WH09",
+      "source_state": "FUTURE_PLANNED",
+      "live_state": "ATTENTION_ROUTING_NOT_AUTHORIZED",
+      "evidence_refs": [
+        "https://github.com/trung-via/ai-commerce/issues/492"
+      ],
+      "blocker_refs": [
+        "https://github.com/trung-via/ai-commerce/issues/492"
+      ],
+      "note": "9444 only; source does not prove exact Chat A. WH08 requires separate authorization after genuine WH07 Send witness",
+      "depends_on": []
+    },
+    {
+      "domain": "ENGINEERING_FOUNDATION",
+      "id": "EF01",
+      "source_state": "HISTORICAL_SOURCE_REPORTED",
+      "live_state": "NATIVE_CURRENT_RECHECK_REQUIRED",
+      "evidence_refs": [
+        "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.md"
+      ],
+      "blocker_refs": [],
+      "note": "Separate Engineering lane; not an A01–A18 package",
+      "depends_on": []
+    },
+    {
+      "domain": "ENGINEERING_FOUNDATION",
+      "id": "EF02",
+      "source_state": "HISTORICAL_SOURCE_REPORTED",
+      "live_state": "NATIVE_CURRENT_RECHECK_REQUIRED",
+      "evidence_refs": [
+        "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.md"
+      ],
+      "blocker_refs": [],
+      "note": "Separate Engineering lane; not an A01–A18 package",
+      "depends_on": []
+    }
+  ],
+  "integrated_gates": [
+    {
+      "id": "G0_CI_TRUST",
+      "scope": "engineering",
+      "required": "Current owned tests + exact-head Windows CI + independent Brain review",
+      "observed": "PR784_HOSTED_CI_FAILURE",
+      "blockers": [
+        "https://github.com/trung-via/ai-commerce/pull/784",
+        "https://github.com/trung-via/ai-commerce/actions/runs/42845647214"
+      ],
+      "next": "Bound YAML-job parser in tests; preserve token-negative assertions; recheck exact-head CI"
+    },
+    {
+      "id": "G1_WAKE_SEND_ONLY",
+      "scope": "wakehub",
+      "required": "Private registration marker + exact Chat A identity + event + one UI user-turn witness, Chat B/duplicate negatives",
+      "observed": "SOURCE_MERGED_NATIVE_HOLD",
+      "blockers": [
+        "https://github.com/trung-via/ai-commerce/issues/738",
+        "https://github.com/trung-via/ai-commerce/issues/499"
+      ],
+      "next": "Enroll native owner and perform one consented exact-chat Send-only test"
+    },
+    {
+      "id": "G2_PULSE_BQ_OFFLINE",
+      "scope": "production",
+      "required": "One B0 journal+worker to B1 media→Q4/Q5→WAIT_BRAIN→real attended Brain decision→B3 proposal",
+      "observed": "COMPONENT_SOURCE_ONLY_NO_INTEGRATED_RECEIPT",
+      "blockers": [],
+      "next": "Integrate already merged owners and collect independently pinned offline journey receipt"
+    },
+    {
+      "id": "G3_LIVE_MEDIA",
+      "scope": "production",
+      "required": "Separate private custody/provider entitlement/asset rights/spend cap + verifiable provider media and QA",
+      "observed": "NOT_AUTHORIZED_NOT_PROVEN",
+      "blockers": [
+        "https://github.com/trung-via/ai-commerce/issues/646",
+        "https://github.com/trung-via/ai-commerce/issues/698"
+      ],
+      "next": "Human-selected source-specific private approval and proof; no unknown replay"
+    },
+    {
+      "id": "G4_DISTRIBUTION_LEARNING",
+      "scope": "commerce",
+      "required": "Authenticated account×surface publication/analytics and compatible asset/cohort/window for B3",
+      "observed": "REAL_METRICS_NOT_PROVEN",
+      "blockers": [],
+      "next": "Assisted publication under separate grant, then imported measured metrics"
+    },
+    {
+      "id": "G5_OPTIONAL_AFFILIATE",
+      "scope": "commerce_optional",
+      "required": "Actual rights/affiliate entitlement, attribution, and settlement evidence where applicable",
+      "observed": "OFFLINE_READINESS_ONLY",
+      "blockers": [],
+      "next": "Only prioritize upon Human-selected business lane"
+    }
+  ],
+  "refresh_contract": {
+    "never_rewrite_historical_plan_state": true,
+    "never_infer_live_from_source_ci": true,
+    "never_infer_unimplemented_from_proposed_baseline": true,
+    "do_not_close_issues_from_merge_alone": true,
+    "on_new_pr": "Verify exact PR HEAD/base, actual merge and CI receipt, then refresh source_state for affected IDs",
+    "on_native_event": "Require distinct authenticated Windows owner/session/effect evidence before advancing live_state",
+    "on_unknown_effect": "Keep immutable prior attempt and HOLD, no replay/rekey",
+    "on_dependency_change": "Recalculate 63 WBS uniqueness/dangling/cycles; distinguish authoring dependencies from live gates",
+    "on_status_drift": "Report contradictions as pending reconciliation, never mutate historical or external authority",
+    "next_reconciliation": "After review/merge of this documentation snapshot, re-read main and update new overlay version; this snapshot is not self-updating"
+  }
+}
