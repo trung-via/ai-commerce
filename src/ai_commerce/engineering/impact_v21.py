@@ -825,6 +825,31 @@ def registered_action_plan(
     by_name = {g.name: g for g in groups}
     entries = []
     problems = list(impact.missing_mapping)
+    # #750: the one-file diff remains the independent changed-path oracle.
+    # Complete separately required registered ACs only against existing,
+    # issuer-authorized, source-owned paths in the immutable baseline.
+    # The source diff does NOT gain new files, owners or test argv.
+    trusted_allowed = set(allowed_paths) & set(base_files)
+    required_registered = set(required_acs) & {ac for g in groups for ac in g.acs}
+    required_scope_groups = []
+    if (impact.runnable and impact.selected_groups and not impact.missing_mapping
+            and baseline_error is None and onboarding_error is None):
+        for group in groups:
+            if (group.name in impact.selected_groups or group.name in persisted_by_name
+                    or (admission is not None and group.name == admission["name"])
+                    or not (set(group.acs) & required_registered)):
+                continue
+            reviewed_owner_paths = (set(group.tests) | set(group.paths)
+                                    | set(group.consumers) | set(group.contracts))
+            if not trusted_allowed.intersection(reviewed_owner_paths):
+                continue
+            # New manifest owners remain subject to independent onboarding.
+            required_scope_groups.append(group.name)
+            for test in group.tests:
+                target = repo / test
+                if test not in base_files or not target.is_file() or target.is_symlink():
+                    problems.append("AC_SCOPE_REQUIRED_TEST_MISSING_OR_UNSAFE:" + test)
+    selected_groups = tuple(sorted(set(impact.selected_groups) | set(required_scope_groups)))
     if baseline_error:
         problems.append(baseline_error)
     if onboarding_error:
@@ -837,7 +862,7 @@ def registered_action_plan(
     # A globally known AC is NOT verified unless its owning group is selected.
     # Do not expand silently: an unrelated action requirement needs a new
     # explicit impact plan or a precise HOLD_COVERAGE witness.
-    selected_acs = {ac for name in impact.selected_groups for ac in by_name[name].acs}
+    selected_acs = {ac for name in selected_groups for ac in by_name[name].acs}
     required = set(required_acs)
     unknown_acs = sorted(required - known_acs)
     unselected_acs = sorted((required & known_acs) - selected_acs)
@@ -854,7 +879,7 @@ def registered_action_plan(
     if unselected_acs:
         problems.extend("AC_REQUIRED_GROUP_NOT_SELECTED:" + ac for ac in unselected_acs)
     select_parallel = list(fallback_argv[-2:]) == ["-n", "12"]
-    for name in impact.selected_groups:
+    for name in selected_groups:
         group = by_name[name]
         manifest_owner = bool((admission is not None and name == admission["name"])
                               or name in persisted_by_name)
@@ -958,11 +983,15 @@ def registered_action_plan(
         "ac_adoption_state": "PENDING_BRAIN_REVIEW" if pending_brain_acs else "REGISTERED",
         "unknown_tests": [p for p in impact.missing_mapping if "TEST" in p],
         "unknown_consumers": [p for p in impact.missing_mapping if "SOURCE" in p or "IMPORT" in p],
-        "reason_codes": list(impact.reason_codes) + list(problems) +
-                        ["AC_PENDING_BRAIN_REVIEW:" + ac for ac in pending_brain_acs],
+        "reason_codes": list(impact.reason_codes) + [
+            "REVIEWED_ALLOWED_SCOPE_AC_GROUP:" + name for name in required_scope_groups
+        ] + list(problems) + [
+            "AC_PENDING_BRAIN_REVIEW:" + ac for ac in pending_brain_acs
+        ],
         "unsupported_paths": [],
-        "consumer_map": {g.name: g.mapping() for g in groups if g.name in impact.selected_groups},
-        "selected_groups": list(impact.selected_groups),
+        "consumer_map": {g.name: g.mapping() for g in groups if g.name in selected_groups},
+        "selected_groups": list(selected_groups),
+        "required_ac_group_closure": sorted(set(required_scope_groups)),
         "selected_profiles": [e["selected_profile"] for e in entries if e["selected_profile"]],
         "fallback_profile": None, "fallback_argv": list(fallback_argv),
         "narrow_execution_observed": False, "fallback": False,

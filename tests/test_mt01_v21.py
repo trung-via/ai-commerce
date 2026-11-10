@@ -1878,3 +1878,97 @@ def test_710_g3b_existing_protected_workflow_mt01_owner_consumer_closure(tmp_pat
     denied = select_impact(root=tmp_path, changed_paths=[
         ".github/workflows/ef02-antigravity-headless-unsafe.yml"], groups=())
     assert denied.mode == "HOLD_MAPPING"
+
+
+def test_epwo750_approved_allowed_path_closes_required_legacy_ac(tmp_path):
+    """Actual changed-path impact remains narrow, approved AC tests still execute."""
+    groups, a12, a14 = fixture(tmp_path)
+    groups = (
+        TestGroup("a12", (a12,), ("A12.product-evidence",),
+                  ("src/ai_commerce/product/identity.py",)),
+        TestGroup("a14", (a14,), ("A14.L04.offline-attribution-evidence",),
+                  ("src/ai_commerce/affiliate_attribution/evidence.py",)),
+    )
+    files = file_hashes(tmp_path)
+    profiles = {
+        "mt01-a12-tests": ["python", "-m", "pytest", a12, "-q", "-n", "12"],
+        "mt01-a14-tests": ["python", "-m", "pytest", a14, "-q", "-n", "12"],
+    }
+    changed = ["src/ai_commerce/affiliate_attribution/evidence.py"]
+    plan = registered_action_plan(
+        repo=tmp_path, base_sha="a" * 40, base_files=files,
+        candidate_files=files, changed_paths=changed,
+        required_acs=("A12.product-evidence",),
+        fallback_argv=["python", "-m", "pytest", "tests", "-q", "-n", "12"],
+        groups=groups, registered_profiles=profiles, env={},
+        allowed_paths=("src/ai_commerce/product/identity.py", *changed),
+    )
+    assert plan["changed_paths"] == changed
+    assert plan["impact_v21"]["selected_groups"] == ["a14"]
+    assert plan["selected_groups"] == ["a12", "a14"]
+    assert plan["required_ac_group_closure"] == ["a12"]
+    assert "REVIEWED_ALLOWED_SCOPE_AC_GROUP:a12" in plan["reason_codes"]
+    assert not any(x.startswith("AC_REQUIRED_GROUP_NOT_SELECTED") for x in plan["reason_codes"])
+    assert all(g["execute"] and g["state"] == "EXECUTE" for g in plan["groups"])
+    assert set(plan["consumer_map"]) == {"a12", "a14"}
+
+
+@pytest.mark.parametrize("allowed", [
+    ("src/ai_commerce/affiliate_attribution/evidence.py",),
+    ("src/ai_commerce/product/untracked_identity.py",),
+    (),
+])
+def test_epwo750_unapproved_or_untracked_path_cannot_waive_ac(tmp_path, allowed):
+    groups, a12, a14 = fixture(tmp_path)
+    groups = (
+        TestGroup("a12", (a12,), ("A12.product-evidence",),
+                  ("src/ai_commerce/product/identity.py",)),
+        TestGroup("a14", (a14,), ("A14.L04.offline-attribution-evidence",),
+                  ("src/ai_commerce/affiliate_attribution/evidence.py",)),
+    )
+    files = file_hashes(tmp_path)
+    profiles = {
+        "mt01-a12-tests": ["python", "-m", "pytest", a12, "-q", "-n", "12"],
+        "mt01-a14-tests": ["python", "-m", "pytest", a14, "-q", "-n", "12"],
+    }
+    plan = registered_action_plan(
+        repo=tmp_path, base_sha="a" * 40, base_files=files,
+        candidate_files=files,
+        changed_paths=["src/ai_commerce/affiliate_attribution/evidence.py"],
+        required_acs=("A12.product-evidence",),
+        fallback_argv=["python", "-m", "pytest", "tests", "-q", "-n", "12"],
+        groups=groups, registered_profiles=profiles, env={}, allowed_paths=allowed,
+    )
+    assert plan["selected_groups"] == ["a14"]
+    assert plan["required_ac_group_closure"] == []
+    assert "AC_REQUIRED_GROUP_NOT_SELECTED:A12.product-evidence" in plan["reason_codes"]
+    assert all(not g["execute"] and g["state"] == "UNPROVEN"
+               for g in plan["groups"])
+
+
+def test_epwo750_all_11_ac_owners_intersect_original_reviewed_allowed_scope():
+    """Source registry, not the unaccepted provider patch, owns this test graph."""
+    from ai_commerce.engineering.minimum_test import approved_groups
+    allowed = {
+        "src/ai_commerce/remote/validation.py",
+        "src/ai_commerce/remote/__main__.py",
+        "src/ai_commerce/remote/worker.py",
+        "tests/test_ef01_performance.py",
+        "tests/test_ef01_repair.py",
+        "tests/test_ef02.py",
+        "tests/test_ef02_d5_local_handoff.py",
+        "tests/test_ef02_m0r_fault_injection.py",
+        "tests/test_ef02_wake_d1.py",
+        "tests/test_mt01_v21.py",
+    }
+    required = {
+        "EF01.execution", "EF01.repair", "EF01.source-integrity",
+        "EF01.provider-boundary", "EF01P.git-and-host-budget",
+        "EF02.action-and-fanin", "EF02.recovery", "EF02.scope-review",
+        "MT01.selection-and-evidence", "MT01.v2-impact-selection",
+        "EF02.wake-boundaries",
+    }
+    owners = approved_groups()
+    assert all(any(ac in g.acs and allowed.intersection(
+        set(g.tests) | set(g.paths) | set(g.consumers) | set(g.contracts))
+        for g in owners) for ac in required)
