@@ -1923,6 +1923,84 @@ def test_mt01_winerror_1314_valid_native_skip_continues_verification(mapped, mon
     assert (mapped.evidence / "round-0/mt01.0.junit.xml").read_bytes() == junit
 
 
+
+# #745: exact real Windows JUnit R02 skip, not the earlier reconcile test.
+_R02_SKIP_CLASS = "tests.test_hostops_ef02_attempt_r02_readonly.EF02ForensicR02Tests"
+_R02_SKIP_NAME = "test_symlink_scope_path_is_unsafe"
+
+
+def _mt01_r02_win_skip_fixture(slash="\\"):
+    junit = _mt01_win_junit(
+        classname=_R02_SKIP_CLASS, name=_R02_SKIP_NAME, tests=8)
+    extra = (
+        '<testcase classname="' + _R02_SKIP_CLASS + '" name="test_extra_1"/>'
+        '<testcase classname="' + _R02_SKIP_CLASS + '" name="test_extra_2"/>'
+    ).encode()
+    junit = junit.replace(
+        b"</testsuite></testsuites>",
+        extra + b"</testsuite></testsuites>")
+    stdout = _mt01_win_stdout(slash=slash).replace(
+        b"test_hostops_ef02_attempt_reconcile_readonly.py:97",
+        b"test_hostops_ef02_attempt_r02_readonly.py:99").replace(
+        b"5 passed, 1 skipped", b"7 passed, 1 skipped")
+    return stdout, junit
+
+
+@pytest.mark.parametrize("slash", ["\\", "/"])
+def test_mt01_real_r02_winerror1314_junit_skip_does_not_block_other_groups(
+        mapped, monkeypatch, slash):
+    stdout, junit = _mt01_r02_win_skip_fixture(slash)
+    diagnostic = verification._strip_verified_symlink_skip(stdout, b"", 0, junit)
+    assert b"WinError" not in diagnostic
+    assert b"7 passed, 1 skipped" in diagnostic
+
+    def run(argv, *, repo, timeout, save_junit):
+        save_junit(junit)
+        return subprocess.CompletedProcess(argv, 0, stdout.decode(), "")
+    monkeypatch.setattr(verification, "run_pytest", run)
+    argv = ["python", "-m", "pytest", "tests/test_a.py", "-q", "-n", "12"]
+    result, selected, prior = _execute(
+        mapped, registered_only=True,
+        fallback_argv=[*FULL, "-n", "12"],
+        registered_profiles={"project-tests": [*FULL, "-n", "12"],
+                             "component-a": argv})
+    entry = selected["groups"][0]
+    assert result.returncode == 0
+    assert entry["result"] == "PASS"
+    assert entry["tests_executed"]["passed"] == 7
+    assert entry["tests_executed"]["skipped"] == 1
+    assert "a" in prior
+    assert (mapped.evidence / "round-0/mt01.0.junit.xml").read_bytes() == junit
+
+
+@pytest.mark.parametrize("case", [
+    "wrong_junit_class", "wrong_junit_case", "wrong_stdout_path",
+    "duplicate_skip", "wrong_junit_reason", "stderr_winerror",
+])
+def test_mt01_r02_winerror1314_forged_or_unrelated_is_not_stripped(case):
+    stdout, junit = _mt01_r02_win_skip_fixture()
+    stderr = b""
+    if case == "wrong_junit_class":
+        junit = junit.replace(b"EF02ForensicR02Tests", b"FakeR02Tests")
+    elif case == "wrong_junit_case":
+        junit = junit.replace(
+            b"test_symlink_scope_path_is_unsafe", b"test_unrelated")
+    elif case == "wrong_stdout_path":
+        stdout = stdout.replace(
+            b"test_hostops_ef02_attempt_r02_readonly.py",
+            b"test_unrelated.py")
+    elif case == "duplicate_skip":
+        stdout = stdout.replace(
+            b"7 passed, 1 skipped",
+            b"SKIPPED [1] tests/other.py:1: WinError 1314\n"
+            b"7 passed, 1 skipped")
+    elif case == "wrong_junit_reason":
+        junit = junit.replace(b"WinError 1314", b"WinError 5")
+    elif case == "stderr_winerror":
+        stderr = b"Traceback: OSError: WinError 5"
+    assert verification._strip_verified_symlink_skip(stdout, stderr, 0, junit) == stdout
+
+
 @pytest.mark.parametrize("case", [
     "wrong_code", "stderr_winerror", "stderr_permission", "extra_winerror",
     "extra_permission", "extra_skip", "duplicate_skip", "fake_console",
