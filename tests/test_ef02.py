@@ -1205,7 +1205,8 @@ def _epwo_710_g4_script():
     import textwrap
     src = (Path(__file__).resolve().parents[1] /
            ".github/workflows/ef02-antigravity-headless-preflight.yml").read_text(encoding="utf-8")
-    _, job = src.split("  g4-forensic:", 1)
+    _, tail = src.split("  g4-forensic:", 1)
+    job = tail.split("  wh03b-745-forensic:", 1)[0]
     script = job.split("$probe = @'\n", 1)[1].split("\n          '@", 1)[0]
     return src, job, textwrap.dedent(script)
 
@@ -1284,3 +1285,112 @@ def test_epwo_710_g4_never_trusts_synthetic_terminal(tmp_path):
     assert report["provider_outcome_proven"] == "FALSE"
     terminal.write_text(json.dumps({"attempt_id": scope["ATTEMPT"],"work_id": "wrong"}), encoding="utf-8")
     assert scope["observe"]()["terminal"] == "UNSAFE"
+
+
+# WH03B #745 fixed native Windows forensic read; script never adjudicates replay.
+def _wh03b_745_forensic_script():
+    import textwrap
+    src = (Path(__file__).resolve().parents[1] /
+           ".github/workflows/ef02-antigravity-headless-preflight.yml").read_text(encoding="utf-8")
+    job = src.split("  wh03b-745-forensic:", 1)[1]
+    script = job.split("$probe = @'\n", 1)[1].split("\n          '@", 1)[0]
+    return src, job, textwrap.dedent(script)
+
+
+def test_wh03b_745_forensic_exact_owner_native_read_only_contract():
+    import ast
+    src, job, script = _wh03b_745_forensic_script()
+    for required in (
+        "github.event_name == 'issues'",
+        "github.event.action == 'opened'",
+        "github.actor == github.repository_owner",
+        "github.event.issue.user.login == github.repository_owner",
+        "github.event.issue.title == '[WH03B #745 NATIVE FORENSIC READ] exact attempt only'",
+        "github.run_attempt == 1",
+        "runs-on: [self-hosted, Windows, ai-commerce-ef02]",
+        "group: wh03b-745-native-forensic-read",
+        "timeout-minutes: 5",
+        "contents: read",
+        "ref: main",
+        "persist-credentials: false",
+        "Get-CimInstance Win32_Process -Filter 'ProcessId=25736'",
+        "2026-11-09T19:21:00Z",
+        "2026-11-09T19:43:12Z",
+        "WH03B_745_PID=",
+        "HOLD_UNKNOWN_EFFECT",
+    ):
+        assert required in job
+    ast.parse(script)
+    assert "issue.body" not in src
+    assert "github.event.issue.body" not in job
+    assert "issues: write" not in src
+    assert "GITHUB_TOKEN" not in job
+    assert "subprocess" not in script
+    assert "write_text(" not in script
+    assert "write_bytes(" not in script
+    assert "taskkill" not in job
+    assert "agy --print" not in job
+    assert "START-Process" not in job
+    assert "Chrome" not in job
+    for pin in (
+        'ISSUE = 745',
+        'SOURCE = "5e8503b09f5100a38dfb5ae5e08e3020b9b05790"',
+        'ATTEMPT = "wh03b_native_adapter_agy38flashhigh_5e8503b0_20261110_r2b"',
+        'JOURNAL_TIP = "29527952859fb8421709345c34fb476a38a81707"',
+        '"replay_authorized": "FALSE"',
+        '"provider_effect_proven": "FALSE"',
+        '"native_identity_proven": "FALSE"',
+    ):
+        assert pin in script
+
+
+def test_wh03b_745_forensic_fails_closed_for_wrong_attempt_and_missing_evidence(tmp_path):
+    import json
+    _, _, code = _wh03b_745_forensic_script()
+    scope = {"__name__": "wh03b_745_forensic_test"}
+    exec(compile(code, "WH03B_745_NATIVE_READ_REVIEWED_INLINE", "exec"), scope)
+    root = tmp_path / "batch" / "action"
+    scope["EVIDENCE_ROOT"] = root
+    assert scope["_evidence"]()[0] == "BATCH_ABSENT_HERE"
+    root.parent.mkdir()
+    assert scope["_evidence"]()[0] == "ACTION_ABSENT_HERE"
+    ef01 = root / "ef01"
+    ef01.mkdir(parents=True)
+    rel, stage = scope["EXPECTED"][1]
+    target = ef01 / "provider_return_observed.json"
+    expected = {"attempt_id": scope["ATTEMPT"], "stage": stage}
+    target.write_text(json.dumps(expected), encoding="utf-8")
+    result = scope["observe"]()
+    assert result["root"] == "ACTION_PRESENT_UNVERIFIED"
+    assert result["return"] == "PRESENT_UNVERIFIED"
+    assert result["status"] == "HOLD_UNKNOWN_EFFECT"
+    assert result["provider_effect_proven"] == "FALSE"
+    assert result["replay_authorized"] == "FALSE"
+    target.write_text(json.dumps({**expected, "attempt_id": "other"}), encoding="utf-8")
+    assert scope["_file_state"](rel, stage) == "MISMATCH"
+    target.write_text(json.dumps({**expected, "stage": "OTHER"}), encoding="utf-8")
+    assert scope["_file_state"](rel, stage) == "MISMATCH"
+    target.write_text("{invalid", encoding="utf-8")
+    assert scope["_file_state"](rel, stage) == "READ_UNKNOWN"
+    target.unlink()
+    assert scope["_file_state"](rel, stage) == "MISSING"
+
+
+def test_wh03b_745_forensic_never_accepts_fake_terminal(tmp_path):
+    import json
+    _, _, code = _wh03b_745_forensic_script()
+    scope = {"__name__": "wh03b_745_forensic_test"}
+    exec(compile(code, "WH03B_745_NATIVE_READ_REVIEWED_INLINE", "exec"), scope)
+    root = tmp_path / "batch" / "action"
+    (root / "ef01").mkdir(parents=True)
+    scope["EVIDENCE_ROOT"] = root
+    rel, _ = scope["EXPECTED"][2]
+    terminal = root / rel
+    terminal.write_text(json.dumps({"attempt_id":scope["ATTEMPT"],
+                                     "work_id":scope["BATCH"] + ":" + scope["ACTION"]}),
+                        encoding="utf-8")
+    assert scope["observe"]()["terminal"] == "PRESENT_UNVERIFIED"
+    assert scope["observe"]()["replay_authorized"] == "FALSE"
+    terminal.write_text(json.dumps({"attempt_id":scope["ATTEMPT"],"work_id":"bad"}),encoding="utf-8")
+    assert scope["_file_state"](rel,None) == "MISMATCH"
+
