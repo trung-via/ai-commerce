@@ -1655,3 +1655,16 @@ def test_retired_epwo_packages_absent_from_active_roadmap_register():
     assert not any(item["domain"] == "EPWO" for item in index["package_executions"])
     assert len(index["package_executions"]) == 42
     assert len(index["wbs_crosswalk"]) == 63
+
+
+def test_retired_workowner_not_in_new_ef02_execute_path():
+    """Normal EF02 execution uses create-only claim and independent verification."""
+    import inspect
+    from ai_commerce.remote.worker import LocalBatchWorker
+    src = inspect.getsource(LocalBatchWorker.execute_action)
+    assert "WorkOwner" not in src and "WorkOwnerBroker" not in src
+    assert "owner.assert_current" not in src and "broker.communicate" not in src
+    assert "verify_claim_publication" in src
+    assert 'self.github.claim(source_sha=source, attempt_id=attempt_id, fingerprint=fp)' in src
+    assert "pre_spawn_checkpoint" in src and "spawned_checkpoint" in src
+    assert "stdin=subprocess.DEVNULL" in src

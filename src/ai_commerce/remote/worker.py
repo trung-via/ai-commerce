@@ -344,17 +344,7 @@ class LocalBatchWorker:
                    "depends_on": action["depends_on"],
                    "dependency_semantics": "PINNED_DEPENDENCY_TREE_COMPOSITION",
                    "evidence_path": str(path), "executor_invoked": False}
-        owner = broker = None
         def finish():
-            nonlocal broker
-            if broker is not None:
-                broker.close()
-                broker = None
-            if owner is not None and outcome.get("status") not in ("CANDIDATE_READY", REVIEW_STATUS):
-                try:
-                    owner.append("UNKNOWN")
-                except Exception:
-                    pass  # Durable last intent still denies replay; never rollback.
             outcome["replay_authorized"] = False
             diagnosis = diagnose_failure(outcome)
             outcome["failure_diagnosis"] = diagnosis.payload() if diagnosis else None
@@ -419,46 +409,24 @@ class LocalBatchWorker:
             if issue_num > 0:
                 if not hasattr(self.github, "index_attempt"):
                     raise RemoteTransportError("WORK_INDEX_TRANSPORT_UNAVAILABLE")
-                outcome["attempt_index_ref"] = WorkOwner.index_ingress(
-                    self.github, issue_num, self.batch, submitted_action, issuer=explicit_issuer
-                )
-            owner = self._acquire_owner(submitted_action)
-            owner_issuer = owner.identity.get("issuer_login")
-            if explicit_issuer is not None and owner_issuer is not None:
-                if owner_issuer.casefold() != explicit_issuer.casefold():
-                    raise RemoteTransportError("WORK_LINEAGE_INDEX_ISSUER_MISMATCH")
-            outcome["work_owner"] = {
-                "work_key": owner.identity["work_key"],
-                "generation": owner.generation,
-                "root_issue": owner.identity.get("root_issue", issue_num),
-                "current_issue": issue_num,
-                "lineage_gap": None if owner.identity.get("lineage") or owner.generation >= 2 else "V1_HAS_NO_TRUSTED_CROSS_ISSUE_REPAIR_OR_TRANSFER",
-            }
-        except Exception as exc:
-            err_code = str(exc)[:160] if isinstance(exc, RemoteTransportError) and str(exc) else type(exc).__name__
-            status = ("DUPLICATE_CLAIM_NO_REEXECUTION" if err_code in (
-                "WORK_OWNER_EXISTS_RECONCILE_ONLY", "WORK_OWNER_TRANSFER_CONFLICT", "WORK_OWNER_PREDECESSOR_UNRESOLVED"
-            ) else "HOLD_WORK_OWNER")
-            outcome.update(status=status, error_code=err_code, diagnostic=str(exc)[:160], replay_authorized=False)
-            return finish()
-        try:
-            owner.assert_current()
+                outcome["attempt_index_ref"] = self.github.index_attempt(
+                    issue_number=issue_num, source_sha=source, attempt_id=attempt_id,
+                    fingerprint=fp, issuer=explicit_issuer)
+            # The existing GitHub create-only claim is the sole fresh attempt key.
             claim = self.github.claim(source_sha=source, attempt_id=attempt_id, fingerprint=fp)
             outcome["claim_status"] = claim
             if claim != "CLAIMED":
                 outcome["status"] = claim
                 outcome["error_code"] = claim
                 return finish()
-            owner.append("CLAIMED")
         except Exception as exc:
             outcome.update(status="CLAIM_UNAVAILABLE", error_code=type(exc).__name__,
-                           diagnostic=str(exc))
+                           diagnostic=str(exc)[:160], replay_authorized=False)
             return finish()
         effective = source
         try:
             if any(not candidate_accepted(d) for d in action.get("resolved_dependencies", [])):
                 raise RemoteTransportError("DEPENDENCY_BRAIN_SCOPE_REVIEW_REQUIRED")
-            owner.assert_current()
             merged = self.github.integrated_source(
                 source_sha=source, attempt_id=attempt_id,
                 dependencies=action.get("resolved_dependencies", []))
@@ -606,25 +574,17 @@ class LocalBatchWorker:
                                replay_authorized=False)
                 return finish()
             outcome["pre_spawn_remote_ref"] = remote_stage
-            owner.append("SPAWN_INTENT")
             _write_json(path / "invocation_remote_confirmed.json",
                         {**progress, "stage": "PRESPAWN_REMOTE_REF_CONFIRMED",
                          "pre_spawn_remote_ref": remote_stage,
                          "remote_confirmation_observed_at": time.time()})
             # Never pass GitHub credentials into untrusted model/verification process.
-            owner.assert_current()
-            broker = WorkOwnerBroker(owner)
             child_env = _safe_child_env(self.checkout)
-            child_env.update(broker.environment())
             child = subprocess.Popen(argv, cwd=self.checkout, env=child_env,
-                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                      encoding="utf-8", errors="replace")
             outcome.update(executor_invoked=True, process_id=child.pid,
                            process_started_at=started)
-            try:
-                owner.append("CHILD_OBSERVED", pid=child.pid)
-            except Exception:
-                outcome["work_owner_child_observation"] = "UNKNOWN"
             # This records an EF01 process PID, not proof that EF01 launched or
             # completed a provider invocation. Keep the immutable pre-spawn
             # boundary alongside it for reconciliation after parent termination.
@@ -637,8 +597,7 @@ class LocalBatchWorker:
             # If GitHub confirmation fails, keep running/collecting the child
             # result; never interpret absence as permission to replay.
             try:
-                owner.assert_current()
-                spawned_ref = self.github.spawned_checkpoint(
+                    spawned_ref = self.github.spawned_checkpoint(
                     source_sha=source, attempt_id=attempt_id,
                     fingerprint=fp, child_pid=child.pid)
                 outcome["spawned_remote_ref"] = spawned_ref
@@ -650,15 +609,14 @@ class LocalBatchWorker:
                              "provider_invocation_proven": False,
                              "remote_confirmation_observed_at": time.time()})
             except Exception as exc:
-                owner.uncertain = True
                 outcome["spawned_remote_checkpoint"] = "READ_UNKNOWN"
                 outcome["spawned_remote_error_type"] = type(exc).__name__
             timed_out = False
             try:
-                stdout, stderr = broker.communicate(child, timeout=7500)
+                stdout, stderr = child.communicate(timeout=7500)
             except subprocess.TimeoutExpired:
                 child.kill()
-                stdout, stderr = broker.communicate(child, timeout=30)
+                stdout, stderr = child.communicate(timeout=30)
                 timed_out = True
                 outcome.update(status="EXECUTION_UNKNOWN",
                                error_code="EF01_PROCESS_TIMEOUT")
@@ -815,30 +773,21 @@ class LocalBatchWorker:
             })
             outcome.update(candidate_evidence=evidence, candidate_evidence_sha256=evidence_digest(evidence))
             try:
-                broker.close()
-                broker = None
-                chain = owner.assert_current()
-                rounds = [r for r in chain if r.get("generation") == owner.generation and r["stage"] == "ROUND_VERIFIED"]
                 invocations = report.get("invocations", [])
-                if (not rounds or len(rounds) != len(invocations) or
-                        any(inv.get("work_id") != self.batch["batch_id"] + ":" + aid or
-                            inv.get("attempt_id") != attempt_id or
-                            inv.get("source_base_sha") != effective or
-                            inv.get("invocation_id") != f"{attempt_id}:invocation-{index:03d}" or
-                            inv.get("repair_round") != index or
-                            inv.get("provider_return_determinate") is not True or
-                            inv.get("verify_completed") is not True
-                            for index, inv in enumerate(invocations)) or
-                        any(r["data"]["receipt"] != owner_round_receipt(inv)
-                            for r, inv in zip(rounds, invocations))):
-                    raise CandidateIntegrityError("WORK_PROVIDER_RECEIPT_MISMATCH")
-                owner.append("RESULT_VERIFIED", receipt=evidence_digest(evidence))
-                owner.append("PUBLISH_INTENT", receipt=evidence_digest(evidence))
-                candidate = self.github.candidate(source_sha=effective, attempt_id=attempt_id,
-                                                  workspace=worktree, paths=changed,
-                                                  expected_hashes=hashes, evidence=evidence, owner=owner)
-                owner.append("PUBLISHED", receipt=evidence_digest(evidence),
-                             candidate=WorkOwner.digest(candidate["candidate_sha"]))
+                if (not invocations or any(
+                        inv.get("work_id") != self.batch["batch_id"] + ":" + aid or
+                        inv.get("attempt_id") != attempt_id or
+                        inv.get("source_base_sha") != effective or
+                        inv.get("invocation_id") != f"{attempt_id}:invocation-{index:03d}" or
+                        inv.get("repair_round") != index or
+                        inv.get("provider_return_determinate") is not True or
+                        inv.get("verify_completed") is not True
+                        for index, inv in enumerate(invocations))):
+                    raise CandidateIntegrityError("EF01_PROVIDER_RECEIPT_MISMATCH")
+                self.github.verify_claim_publication(evidence)
+                candidate = self.github.candidate(
+                    source_sha=effective, attempt_id=attempt_id, workspace=worktree,
+                    paths=changed, expected_hashes=hashes, evidence=evidence)
             except GitByteConsistencyError as exc:
                 outcome.update(status="CANDIDATE_INTEGRITY_FAILED",
                                error_code=str(exc).split(":", 1)[0], diagnostic=str(exc))
