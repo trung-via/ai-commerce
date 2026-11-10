@@ -2026,3 +2026,70 @@ def test_epwo750_real_registered_one_file_change_covers_all_original_11_acs():
                for group in plan["groups"])
     assert {"ef01", "repair", "integrity", "provider", "ef02-wake",
             "mt01", "mt01-v21"} <= set(plan["selected_groups"])
+
+def test_wp01_failure_matrix_missing_required_owner_test_is_hard_hold(tmp_path):
+    """A required AC cannot be completed using a removed baseline owner test."""
+    groups, a12, a14 = fixture(tmp_path)
+    groups = (
+        TestGroup("a12", (a12,), ("A12.product-evidence",),
+                  ("src/ai_commerce/product/identity.py",)),
+        TestGroup("a14", (a14,), ("A14.L04.offline-attribution-evidence",),
+                  ("src/ai_commerce/affiliate_attribution/evidence.py",)),
+    )
+    baseline = file_hashes(tmp_path)
+    (tmp_path / a12).unlink()
+    changed = ["src/ai_commerce/affiliate_attribution/evidence.py"]
+    plan = registered_action_plan(
+        repo=tmp_path, base_sha="a" * 40, base_files=baseline,
+        candidate_files=file_hashes(tmp_path), changed_paths=changed,
+        allowed_paths=("src/ai_commerce/product/identity.py", *changed),
+        required_acs=("A12.product-evidence",),
+        fallback_argv=["python", "-m", "pytest", "tests", "-q", "-n", "12"],
+        groups=groups,
+        registered_profiles={
+            "mt01-a12-tests": ["python", "-m", "pytest", a12, "-q", "-n", "12"],
+            "mt01-a14-tests": ["python", "-m", "pytest", a14, "-q", "-n", "12"],
+        }, env={},
+    )
+    assert plan["changed_paths"] == changed
+    assert not any(entry["execute"] for entry in plan["groups"])
+    assert all(entry["state"] == "UNPROVEN" for entry in plan["groups"])
+    assert any(entry["group"] == "v21-coverage-hold" for entry in plan["groups"])
+    assert plan["impact_v21"]["mode"].startswith("HOLD")
+
+
+def test_wp01_failure_matrix_junit_verified_skip_is_not_infrastructure_or_pass():
+    """One exact Windows symlink skip remains skipped, never promoted to PASS."""
+    from ai_commerce.engineering import verification
+    from ai_commerce.engineering.minimum_test import pytest_counts
+    stdout = (
+        b"SKIPPED [1] tests/test_hostops_ef02_attempt_reconcile_readonly.py:18: "
+        b"NATIVE_SYMLINK_CREATION_UNPROVEN: WinError 1314\n"
+        b"1 passed, 1 skipped in 0.12s\n"
+    )
+    junit = (
+        b'<testsuite tests="2" errors="0" failures="0" skipped="1">'
+        b'<testcase classname="tests.test_hostops_ef02_attempt_reconcile_readonly.'
+        b'EF02Attempt698ReadOnlyTests" '
+        b'name="test_symlink_or_junction_is_never_read_as_source">'
+        b'<skipped type="pytest.skip" '
+        b'message="NATIVE_SYMLINK_CREATION_UNPROVEN: WinError 1314"/>'
+        b'</testcase><testcase classname="fixture" name="test_positive"/>'
+        b'</testsuite>'
+    )
+    reduced = verification._strip_verified_symlink_skip(stdout, b"", 0, junit)
+    assert b"WinError" not in reduced
+    assert pytest_counts(stdout) == pytest_counts(reduced) == {
+        "passed": 1, "failed": 0, "skipped": 1,
+        "errors": 0, "xfailed": 0, "xpassed": 0,
+    }
+    for fake in (
+        junit.replace(b'tests="2"', b'tests="3"'),
+        junit.replace(b'failures="0"', b'failures="1"'),
+        junit.replace(b'EF02Attempt698ReadOnlyTests', b'UnknownTestCase'),
+        junit.replace(b'pytest.skip', b'fake.skip'),
+        junit.replace(b'WinError 1314', b'WinError 5'),
+    ):
+        assert verification._strip_verified_symlink_skip(stdout, b"", 0, fake) == stdout
+    assert verification._strip_verified_symlink_skip(stdout, b"WinError 1314", 0, junit) == stdout
+    assert verification._strip_verified_symlink_skip(stdout, b"", 1, junit) == stdout

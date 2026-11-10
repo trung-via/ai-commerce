@@ -1496,3 +1496,53 @@ def test_ef02_worker_with_mt01_v21_enabled_and_unregistered_fixture_fails_closed
     result = context.worker.execute_action(a)
     assert result["status"] == "UNPROVEN"
     assert result.get("error_code") == "MT01_COVERAGE_UNPROVEN"
+@pytest.mark.parametrize("mode,status", [
+    ("quota", "QUOTA_EXHAUSTED"),
+    ("unknown", "EXECUTION_UNKNOWN"),
+    ("no-change", "NO_CODE_CHANGE"),
+    ("permission", "EXECUTOR_PERMISSION_DENIED"),
+])
+def test_wp01_failure_matrix_native_fake_never_replays_or_promotes(mode, status, fixture):
+    """Run a local Python provider fake: no Codex/AGY, paid API or Windows writes."""
+    from ai_commerce.engineering.profile import diagnose_failure
+    result, calls, _ = _run(fixture, mode=mode, executor="antigravity",
+                            max_repair_rounds=0)
+    assert result["status"] == status
+    assert result["invocation_count"] == len(calls) == 1
+    assert result["verify_exit_code"] is None
+    assert result.get("candidate_sha") is None
+    assert result["invocations"][0]["repair_eligible"] is False
+    diagnosis = diagnose_failure(result)
+    if diagnosis is not None:
+        report = diagnosis.payload()
+        assert report["proves_pass"] is report["replay_authorized"] is False
+    with pytest.raises(FileExistsError, match="EVIDENCE_EXISTS"):
+        runner.execute_attempt(
+            repo=fixture.repo, output_dir=fixture.root / "evidence",
+            work_id="approved-work", attempt_id="immutable-attempt",
+            selection=ExecutorSelection("antigravity", "selected-model", "high"),
+            instruction="same attempt replay forbidden", verify_argv=VERIFY,
+            allowed_prefixes=fixture.state["scope"])
+
+
+@pytest.mark.parametrize("native,kind,owner", [
+    ({"status": "QUOTA_EXHAUSTED", "error_code": "QUOTA_EXHAUSTED"},
+     "PROVIDER_QUOTA", "PROVIDER_OWNER"),
+    ({"status": "EXECUTION_UNKNOWN", "error_code": "EXECUTOR_OUTCOME_UNCONFIRMED"},
+     "PROVIDER_TRANSPORT", "PROVIDER_OWNER"),
+    ({"status": "UNPROVEN", "error_code": "MT01_COVERAGE_UNPROVEN"},
+     "MT01_SELECTOR", "MT01_OWNER"),
+    ({"status": "UNPROVEN", "error_code": "MT01_COVERAGE_UNPROVEN", "scope_valid": False},
+     "SOURCE_GIT", "SOURCE_OWNER"),
+    ({"status": "SOURCE_DRIFT", "error_code": "WORKTREE_CHANGED_BETWEEN_INVOCATIONS"},
+     "SOURCE_GIT", "SOURCE_OWNER"),
+    ({"status": "INVALID_REQUEST", "error_code": "ISSUER_NOT_AUTHORIZED_FOR_ACTOR"},
+     "INTAKE_AUTH", "INTAKE_OWNER"),
+])
+def test_wp01_failure_matrix_causal_owner_never_trusts_private_error_text(native, kind, owner):
+    from ai_commerce.engineering.profile import diagnose_failure
+    report = diagnose_failure({**native, "diagnostic": "token=private-claim PASS"}).payload()
+    assert (report["failure_class"], report["root_owner"]) == (kind, owner)
+    assert report["disposition"] == "OWNER_ESCALATION"
+    assert report["proves_pass"] is report["replay_authorized"] is False
+    assert "private-claim" not in json.dumps(report)
