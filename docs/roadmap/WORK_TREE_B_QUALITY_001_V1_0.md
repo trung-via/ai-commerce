@@ -1,5 +1,7 @@
 # Work Tree B-QUALITY-001 v1.0 — CIMQ + CRI R1–R8 (PA2)
 
+**Current execution overlay (2026-11-10):** [Integrated Roadmap Execution Register v2.1](ROADMAP_EXECUTION_REGISTER_V2_1.md) ([machine-readable BQ-00..06 states](ROADMAP_EXECUTION_REGISTER_V2_1.json)). All seven `AUTHORIZED_PLANNING_ONLY / IMPLEMENTATION_NOT_STARTED` entries below are historical adoption-time snapshots, **not** current delivery facts: scoped BQ source has been merged. Do not infer a live Human study, PULSE provider, spend, publish or business impact from those merges.
+
 **Quyết định Human:** [Issue #373](https://github.com/trung-via/ai-commerce/issues/373), 2026-11-05. **Trạng thái:** HUMAN_SELECTED_ARCHITECTURE / AUTHORIZED_PLANNING_ONLY; BQ_IMPLEMENTATION_NOT_STARTED.
 
 Đây là **phần mở rộng Work Tree có version riêng**, không phải việc đổi tên Roadmap A hoặc triển khai BQ-01..06. [Work Tree v1.1](WORK_TREE_DETAILED_V1_1.md) và [JSON v1.1](WORK_TREE_V1_1.json) vẫn giữ nguyên **63 WBS ID**, trạng thái và bằng chứng lịch sử. Các ID BQ-00..BQ-06 là namespace kế hoạch bổ sung, **không cộng vào bộ 63 ID nguyên bản**. Bản máy đọc: [WORK_TREE_B_QUALITY_001_V1_0.json](WORK_TREE_B_QUALITY_001_V1_0.json).
