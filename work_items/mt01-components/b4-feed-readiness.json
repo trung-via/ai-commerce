@@ -1,0 +1,26 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "b4-feed-readiness",
+  "sources": [
+    "src/ai_commerce/product/b4_feed_readiness.py"
+  ],
+  "tests": [
+    "tests/test_b4_1_feed_readiness.py",
+    "tests/test_a12_offer.py",
+    "tests/test_a12_rights.py",
+    "tests/test_a12_registry.py",
+    "tests/test_a12_integration.py"
+  ],
+  "acs": [
+    "B4.1a.local-A12-readonly-freshness",
+    "B4.1a.counterevidence-and-scope-review",
+    "B4.1a.fail-close-without-provider"
+  ],
+  "consumers": [
+    "src/ai_commerce/product/registry.py",
+    "src/ai_commerce/product/pack.py",
+    "src/ai_commerce/product/offers.py",
+    "src/ai_commerce/product/rights.py"
+  ],
+  "contracts": []
+}
