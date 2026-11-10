@@ -43,7 +43,8 @@ class FakePage:
 
     def evaluate(self, script, args):
         assert args["url"] == URL
-        assert args["text"].startswith("[AI COMMERCE LOCAL CHAT WAKE]")
+        assert (args["text"].startswith("[AI COMMERCE LOCAL CHAT WAKE]") or
+                args["text"] == "kiểm tra")
         if "return 'READY'" in script:
             return self.gate
         if "document.execCommand(" in script:
@@ -211,6 +212,73 @@ def test_send_only_9444_one_click_witness_never_requests_brain_or_plugin_work():
     ]
     assert "caller-supplied" not in page.submitted_text
     assert "@AI Commerce" not in page.submitted_text
+
+
+def test_wh07_one_command_fixed_check_reply_stays_ui_only():
+    from ai_commerce.remote.cdp_doorbell import _doorbell_text
+    assert _doorbell_text(EVENT, "trung-via/ai-commerce", send_only=True,
+                          fixed_check_test=True) == "kiểm tra"
+    page = FakePage()
+    adapter = LocalChromeDoorbellAdapter(
+        allow_submit=True, inventory=FakeInventory(page),
+        send_only=True, fixed_check_test=True)
+    receipt = adapter.send_wake(binding=BIND, message="untrusted", event_id=EVENT)
+    assert receipt.error_code == "UI_USER_TURN_OBSERVED"
+    assert receipt.delivery_status == "UNKNOWN"
+    assert receipt.chat_delivery_proven is False
+    assert receipt.brain_continuation_proven is False
+    assert page.submitted_text == "kiểm tra"
+    assert page.counts == {"insert": 1, "click": 1, "prove": 2}
+
+
+@pytest.mark.parametrize("gate", ["DRAFT_PRESENT", "GENERATION_ACTIVE",
+                                   "SURFACE_UNPROVEN", "OUTBOUND_ALREADY_PRESENT"])
+def test_wh07_fixed_check_never_clicks_unready_ui(gate):
+    page = FakePage(gate=gate)
+    result = LocalChromeDoorbellAdapter(
+        allow_submit=True, send_only=True, fixed_check_test=True,
+        inventory=FakeInventory(page)).send_wake(
+            binding=BIND, message="", event_id=EVENT)
+    assert result.error_code == gate
+    assert page.counts["click"] == 0
+    assert page.counts["insert"] == 0
+
+
+def test_wh07_fixed_check_never_replaces_origin_or_consent_gates():
+    from ai_commerce.remote.cdp_doorbell import _doorbell_text
+    with pytest.raises(ValueError, match="DOORBELL_TEST_SCOPE_INVALID"):
+        _doorbell_text(EVENT, "trung-via/ai-commerce", fixed_check_test=True)
+    with pytest.raises(ValueError, match="DOORBELL_TEST_SCOPE_INVALID"):
+        LocalChromeDoorbellAdapter(fixed_check_test=True)
+    with pytest.raises(ValueError, match="DOORBELL_TEST_SCOPE_INVALID"):
+        LocalChromeDoorbellAdapter(send_only=True, fixed_check_test="true")
+    with pytest.raises(ValueError, match="DOORBELL_TEST_SCOPE_INVALID"):
+        LocalChromeDoorbellAdapter(send_only=True, fixed_check_test=True,
+                                   repository="other/repository")
+    disabled = FakePage()
+    inv = FakeInventory(disabled)
+    receipt = LocalChromeDoorbellAdapter(
+        allow_submit=False, send_only=True, fixed_check_test=True,
+        inventory=inv).send_wake(binding=BIND, message="", event_id=EVENT)
+    assert receipt.error_code == "CDP_PROBE_DISABLED"
+    assert disabled.counts["click"] == 0
+    assert inv.calls == []
+    wrong = FakePage(OTHER)
+    receipt = LocalChromeDoorbellAdapter(
+        allow_submit=True, send_only=True, fixed_check_test=True,
+        inventory=FakeInventory(wrong)).send_wake(
+            binding=BIND, message="", event_id=EVENT)
+    assert receipt.error_code == "EXACT_CHAT_TAB_NOT_FOUND"
+    assert wrong.counts["click"] == 0
+    invalid = FakePage()
+    inv2 = FakeInventory(invalid)
+    receipt = LocalChromeDoorbellAdapter(
+        allow_submit=True, send_only=True, fixed_check_test=True,
+        inventory=inv2).send_wake(
+            binding=BIND, message="", event_id="not-a-verified-event")
+    assert receipt.error_code == "CHAT_URL_INVALID"
+    assert invalid.counts["click"] == 0
+    assert inv2.calls == []
 
 
 def test_send_only_rejects_wrong_chat_without_send_or_partial_stage():
