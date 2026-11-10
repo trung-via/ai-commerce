@@ -1972,3 +1972,57 @@ def test_epwo750_all_11_ac_owners_intersect_original_reviewed_allowed_scope():
     assert all(any(ac in g.acs and allowed.intersection(
         set(g.tests) | set(g.paths) | set(g.consumers) | set(g.contracts))
         for g in owners) for ac in required)
+
+
+def test_epwo750_real_registered_one_file_change_covers_all_original_11_acs():
+    """Dry-run the exact #750 MT01 selection without a model or changed file."""
+    import json
+    import subprocess
+    from ai_commerce.engineering.minimum_test import approved_groups
+    root = Path(__file__).resolve().parents[1]
+    pinned = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True,
+        text=True, check=True, timeout=20).stdout.strip()
+    assert len(pinned) == 40
+    files = file_hashes(root)
+    profiles = json.loads(
+        (root / ".github/ef02/verify-profiles.json").read_text(encoding="utf-8"))
+    allowed = (
+        "src/ai_commerce/remote/validation.py",
+        "src/ai_commerce/remote/__main__.py",
+        "src/ai_commerce/remote/worker.py",
+        "tests/test_ef01_performance.py",
+        "tests/test_ef01_repair.py",
+        "tests/test_ef02.py",
+        "tests/test_ef02_d5_local_handoff.py",
+        "tests/test_ef02_m0r_fault_injection.py",
+        "tests/test_ef02_wake_d1.py",
+        "tests/test_mt01_v21.py",
+    )
+    required = (
+        "EF01.execution", "EF01.repair", "EF01.source-integrity",
+        "EF01.provider-boundary", "EF01P.git-and-host-budget",
+        "EF02.action-and-fanin", "EF02.recovery", "EF02.scope-review",
+        "MT01.selection-and-evidence", "MT01.v2-impact-selection",
+        "EF02.wake-boundaries",
+    )
+    plan = registered_action_plan(
+        repo=root, base_sha=pinned, base_files=files, candidate_files=files,
+        changed_paths=["tests/test_ef02_m0r_fault_injection.py"],
+        required_acs=required, fallback_argv=profiles["ef02-tests"],
+        groups=approved_groups(), registered_profiles=profiles,
+        allowed_paths=allowed, env={},
+    )
+    assert plan["changed_paths"] == ["tests/test_ef02_m0r_fault_injection.py"]
+    assert plan["unknown_acs"] == []
+    assert plan["impact_v21"]["mode"] in ("TARGETED", "AFFECTED")
+    assert not any(code.startswith("AC_REQUIRED_GROUP_NOT_SELECTED:")
+                   for code in plan["reason_codes"])
+    assert all(g["execute"] and g["state"] == "EXECUTE" for g in plan["groups"])
+    assert not any(g["group"] == "v21-coverage-hold" for g in plan["groups"])
+    executed_acs = {ac for group in plan["groups"] for ac in group["acs"]}
+    assert set(required) <= executed_acs
+    assert all(group["binding"]["registered_profile"] in profiles
+               for group in plan["groups"])
+    assert {"ef01", "repair", "integrity", "provider", "ef02-wake",
+            "mt01", "mt01-v21"} <= set(plan["selected_groups"])
