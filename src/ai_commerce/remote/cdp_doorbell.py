@@ -348,7 +348,11 @@ class _PlaywrightInventory:
                 return "PRELOAD_ROUTE_CHANGED"
             with self._browser(binding.cdp_endpoint) as browser:
                 contexts = list(browser.contexts)
-                pages = [page for ctx in contexts for page in ctx.pages]
+                # Even a matching tab in one of two contexts is not a
+                # uniquely authenticated browser/account for WH-05.
+                if len(contexts) != 1:
+                    return "PRELOAD_CONTEXT_AMBIGUOUS"
+                pages = list(contexts[0].pages)
                 matches = [page for page in pages
                            if isinstance(page.url, str) and
                            page.url.rstrip("/") == binding.chat_url]
@@ -357,9 +361,10 @@ class _PlaywrightInventory:
                 if current_binding is not None and current_binding() != binding:
                     return "PRELOAD_ROUTE_CHANGED"
                 if matches:
-                    return "EXACT_CHAT_PRESENT"
-                if len(contexts) != 1:
-                    return "PRELOAD_CONTEXT_AMBIGUOUS"
+                    outcome = _preload_surface_code(matches[0])
+                    if current_binding is not None and current_binding() != binding:
+                        return "PRELOAD_ROUTE_CHANGED"
+                    return "EXACT_CHAT_PRESENT" if outcome == "CANDIDATE_READY" else outcome
                 # Never navigate the currently active, latest, or other tab.
                 new_page = contexts[0].new_page()
                 try:
@@ -372,7 +377,10 @@ class _PlaywrightInventory:
                     return "PRELOAD_NAVIGATION_UNVERIFIED"
                 if current_binding is not None and current_binding() != binding:
                     return "PRELOAD_ROUTE_CHANGED"
-                return "EXACT_CHAT_OPENED"
+                outcome = _preload_surface_code(new_page)
+                if current_binding is not None and current_binding() != binding:
+                    return "PRELOAD_ROUTE_CHANGED"
+                return "EXACT_CHAT_OPENED" if outcome == "CANDIDATE_READY" else outcome
         except Exception:
             return "PRELOAD_CDP_UNAVAILABLE"
 
@@ -398,6 +406,21 @@ _CHAT_A_READ_ONLY_SURFACE = """
   return forms.length === 1 ? 'CANDIDATE_READY' : 'SURFACE_UNPROVEN';
 }
 """
+
+
+def _preload_surface_code(page) -> str:
+    """WH-05: check the actual exact-chat login/composer, never just its URL.
+
+    This cannot establish account/session identity or authorize a Wake Send.
+    A draft, loading/login surface, or failed read must stop before staging.
+    """
+    try:
+        code = page.evaluate(_CHAT_A_READ_ONLY_SURFACE)
+    except Exception:
+        return "PRELOAD_SURFACE_UNPROVEN"
+    if code == "CANDIDATE_READY":
+        return code
+    return "PRELOAD_DRAFT_PRESENT" if code == "DRAFT_PRESENT" else "PRELOAD_SURFACE_UNPROVEN"
 
 
 def probe_chat_a_candidate(*, endpoint: str = "http://127.0.0.1:9444",

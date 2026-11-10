@@ -590,6 +590,9 @@ def test_preload_before_wake_uses_enrolled_route_only(monkeypatch):
     class NewPage:
         def __init__(self):
             self.url = "about:blank"
+        def evaluate(self, script):
+            assert "CANDIDATE_READY" in script
+            return "CANDIDATE_READY"
         def goto(self, url, **kwargs):
             assert url == URL and kwargs == {
                 "wait_until": "domcontentloaded", "timeout": 15000}
@@ -642,6 +645,111 @@ def test_preload_rejects_ambiguous_targets_and_contexts(monkeypatch):
     monkeypatch.setattr(inv, "_browser", two_contexts)
     assert inv.preload(binding) == "PRELOAD_CONTEXT_AMBIGUOUS"
     assert inv.preload(binding, current_binding=lambda: BIND) == "PRELOAD_ROUTE_CHANGED"
+
+
+def test_wh05_preload_rejects_wrong_context_even_with_exact_chat(monkeypatch):
+    from types import SimpleNamespace
+    from ai_commerce.remote import cdp_doorbell as d4
+    monkeypatch.setattr(d4, "_is_windows", lambda: True)
+    inv = d4._PlaywrightInventory()
+    binding = ResolvedBinding(route_id="route-a", generation=1,
+                              chat_url=URL, cdp_endpoint="http://127.0.0.1:9444")
+    class Safe:
+        url = URL
+        def evaluate(self, script):
+            raise AssertionError("must reject contexts BEFORE inspecting chat")
+    @contextmanager
+    def multiple_contexts(_endpoint):
+        yield SimpleNamespace(contexts=[
+            SimpleNamespace(pages=[Safe()]),
+            SimpleNamespace(pages=[FakePage(OTHER)])])
+    monkeypatch.setattr(inv, "_browser", multiple_contexts)
+    assert inv.preload(binding) == "PRELOAD_CONTEXT_AMBIGUOUS"
+
+
+@pytest.mark.parametrize("surface,expected", [
+    ("CANDIDATE_READY", "EXACT_CHAT_PRESENT"),
+    ("DRAFT_PRESENT", "PRELOAD_DRAFT_PRESENT"),
+    ("SURFACE_UNPROVEN", "PRELOAD_SURFACE_UNPROVEN"),
+])
+def test_wh05_existing_exact_chat_requires_safe_composer(monkeypatch, surface, expected):
+    from types import SimpleNamespace
+    from ai_commerce.remote import cdp_doorbell as d4
+    monkeypatch.setattr(d4, "_is_windows", lambda: True)
+    binding = ResolvedBinding(route_id="route-a", generation=1,
+                              chat_url=URL, cdp_endpoint="http://127.0.0.1:9444")
+    inv = d4._PlaywrightInventory()
+    class OpenChat:
+        url = URL
+        def evaluate(self, script):
+            assert "CANDIDATE_READY" in script
+            return surface
+    @contextmanager
+    def opened(_endpoint):
+        yield SimpleNamespace(contexts=[SimpleNamespace(pages=[OpenChat()])])
+    monkeypatch.setattr(inv, "_browser", opened)
+    assert inv.preload(binding) == expected
+
+
+@pytest.mark.parametrize("outcome,expected", [
+    ("DRAFT_PRESENT", "PRELOAD_DRAFT_PRESENT"),
+    ("SURFACE_UNPROVEN", "PRELOAD_SURFACE_UNPROVEN"),
+    (RuntimeError("private error"), "PRELOAD_SURFACE_UNPROVEN"),
+])
+def test_wh05_new_chat_blocks_unsafe_surface_no_retry(monkeypatch, outcome, expected):
+    from types import SimpleNamespace
+    from ai_commerce.remote import cdp_doorbell as d4
+    monkeypatch.setattr(d4, "_is_windows", lambda: True)
+    binding = ResolvedBinding(route_id="route-a", generation=1,
+                              chat_url=URL, cdp_endpoint="http://127.0.0.1:9444")
+    calls = []
+    class New:
+        url = "about:blank"
+        def goto(self, url, **kwargs):
+            calls.append("navigate")
+            self.url = url
+        def evaluate(self, script):
+            calls.append("inspect")
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+    class Ctx:
+        pages = [FakePage(OTHER)]
+        def new_page(self):
+            calls.append("new_page")
+            return New()
+    inv = d4._PlaywrightInventory()
+    @contextmanager
+    def opened(_endpoint):
+        yield SimpleNamespace(contexts=[Ctx()])
+    monkeypatch.setattr(inv, "_browser", opened)
+    assert inv.preload(binding) == expected
+    assert calls == ["new_page", "navigate", "inspect"]
+
+
+def test_wh05_rechecks_route_generation_after_surface_read(monkeypatch):
+    from types import SimpleNamespace
+    from ai_commerce.remote import cdp_doorbell as d4
+    monkeypatch.setattr(d4, "_is_windows", lambda: True)
+    binding = ResolvedBinding(route_id="route-a", generation=1,
+                              chat_url=URL, cdp_endpoint="http://127.0.0.1:9444")
+    changed = ResolvedBinding(route_id="route-a", generation=2,
+                              chat_url=URL, cdp_endpoint="http://127.0.0.1:9444")
+    calls = [0]
+    class OpenChat:
+        url = URL
+        def evaluate(self, script):
+            assert "CANDIDATE_READY" in script
+            calls[0] += 1
+            return "CANDIDATE_READY"
+    inv = d4._PlaywrightInventory()
+    @contextmanager
+    def opened(_endpoint):
+        yield SimpleNamespace(contexts=[SimpleNamespace(pages=[OpenChat()])])
+    monkeypatch.setattr(inv, "_browser", opened)
+    origin_checks = [binding, binding, changed]
+    assert inv.preload(binding, current_binding=lambda: origin_checks.pop(0)) == "PRELOAD_ROUTE_CHANGED"
+    assert calls == [1]
 
 
 def test_wake_preload_failure_never_stages_or_sends():
