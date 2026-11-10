@@ -152,7 +152,7 @@ def send_one(*, event: dict, report: dict, workflow_id: int,
              caller_id: str, grants_path: Path, registry_path: Path,
              idempotency_path: Path, repository_root: Path,
              token_provider, secret_provider, principal_provider,
-             adapter=None, read_budget=None):
+             adapter=None, read_budget=None, fixed_check_test: bool = False):
     """Wire D3.1/D3.2 into D2/D4 without granting new authority.
 
     Caller must be a trusted local entrypoint. Event and batch bytes are
@@ -161,6 +161,9 @@ def send_one(*, event: dict, report: dict, workflow_id: int,
     if (type(workflow_id) is not int or workflow_id <= 0 or
             not isinstance(caller_id, str) or not _ID.fullmatch(caller_id)):
         raise LocalWakeConfigError("LOCAL_CONFIG_INVALID")
+    if (type(fixed_check_test) is not bool or
+            (fixed_check_test and adapter is not None)):
+        raise LocalWakeConfigError("WAKE_TEST_SCOPE_INVALID")
     try:
         grants = _load_grants(grants_path, repository_root)
         origin = SignedOriginConsentAuthority(
@@ -185,7 +188,8 @@ def send_one(*, event: dict, report: dict, workflow_id: int,
             origin_authority=origin, artifact_authority=artifact,
             adapter=adapter if adapter is not None else LocalChromeDoorbellAdapter(
                 allow_submit=True, preload_exact_chat=True,
-                send_only=True),
+                send_only=True,
+                **({"fixed_check_test": True} if fixed_check_test else {})),
         )
     except LocalWakeConfigError:
         raise
@@ -204,6 +208,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--grants", type=Path)
     parser.add_argument("--workflow-id", type=int)
     parser.add_argument("--caller-id")
+    # Operator-selected fixed test payload, never derived from an Issue.
+    parser.add_argument("--fixed-check-test", action="store_true")
     args = parser.parse_args(argv)
     try:
         checkout = args.checkout.resolve(strict=True)
@@ -213,6 +219,8 @@ def main(argv: list[str] | None = None) -> int:
         if event["repository"] != _REPOSITORY:
             raise LocalWakeConfigError("REPOSITORY_MISMATCH")
         if args.command == "check":
+            if args.fixed_check_test:
+                raise LocalWakeConfigError("WAKE_TEST_SCOPE_INVALID")
             print(json.dumps({"status": "PRECHECK_ONLY", "event_id": event["event_id"],
                               "delivery_verified": False, "browser_accessed": False}))
             return 0
@@ -240,7 +248,8 @@ def main(argv: list[str] | None = None) -> int:
             caller_id=args.caller_id, grants_path=args.grants,
             registry_path=args.registry, idempotency_path=args.idempotency,
             repository_root=checkout, token_provider=lambda: token,
-            secret_provider=lambda: key, principal_provider=lambda: sid)
+            secret_provider=lambda: key, principal_provider=lambda: sid,
+            **({"fixed_check_test": True} if args.fixed_check_test else {}))
         print(json.dumps({
             "status": result.delivery_status,
             "error_code": result.error_code, "replayed": result.replayed,
