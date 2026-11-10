@@ -1668,3 +1668,50 @@ def test_retired_workowner_not_in_new_ef02_execute_path():
     assert 'self.github.claim(source_sha=source, attempt_id=attempt_id, fingerprint=fp)' in src
     assert "pre_spawn_checkpoint" in src and "spawned_checkpoint" in src
     assert "stdin=subprocess.DEVNULL" in src
+
+
+def test_ci_only_claim_publication_fence_requires_unmodified_remote_ancestry(monkeypatch):
+    """Non-WP EF02 candidate publication must fail closed on changed claim/ref lineage."""
+    from ai_commerce.remote.transport import GitHubTransport, CandidateIntegrityError, RemoteTransportError
+
+    source, attempt, fp = "a" * 40, "new-ef02-attempt-001", "b" * 64
+    storage = GitHubTransport("trung-via/ai-commerce", "fixture-token")
+    key = storage.attempt_key(attempt)
+    claim_sha, pre_sha, spawn_sha = "1" * 40, "2" * 40, "3" * 40
+    proof = {"source_sha": source, "attempt_id": attempt, "fingerprint": fp}
+    refs = {
+        "/git/ref/heads/ef02/claims/" + key: {"object": {"sha": claim_sha}},
+        "/git/commits/" + claim_sha: {"message":
+            "EF02 CLAIM\\n\\nfingerprint=" + fp + "\\nattempt_id=" + attempt,
+            "parents": [{"sha": source}]},
+        "/git/ref/heads/ef02/pre-spawn/" + key: {"object": {"sha": pre_sha}},
+        "/git/commits/" + pre_sha: {"message":
+            "EF02 PRESPAWN\\n\\nfingerprint=" + fp + "\\nattempt_id=" + attempt,
+            "parents": [{"sha": claim_sha}]},
+        "/git/ref/heads/ef02/spawned/" + key: {"object": {"sha": spawn_sha}},
+        "/git/commits/" + spawn_sha: {"message":
+            "EF02 SPAWNED\\n\\nfingerprint=" + fp + "\\nattempt_id=" + attempt + "\\nchild_pid=1234",
+            "parents": [{"sha": pre_sha}]},
+    }
+    def api(method, path):
+        assert method == "GET"
+        if path not in refs:
+            raise RemoteTransportError("GITHUB_HTTP_404")
+        return refs[path]
+    monkeypatch.setattr(storage, "api", api)
+    storage.verify_claim_publication(proof)
+
+    for path, key_name, tampered in (
+        ("/git/commits/" + claim_sha, "parents", [{"sha": "0" * 40}]),
+        ("/git/commits/" + pre_sha, "parents", [{"sha": "0" * 40}]),
+        ("/git/commits/" + spawn_sha, "parents", [{"sha": "0" * 40}]),
+    ):
+        good = refs[path][key_name]
+        refs[path][key_name] = tampered
+        with pytest.raises(CandidateIntegrityError):
+            storage.verify_claim_publication(proof)
+        refs[path][key_name] = good
+    missing = refs.pop("/git/ref/heads/ef02/spawned/" + key)
+    with pytest.raises(CandidateIntegrityError, match="EF02_CLAIM_PUBLICATION_UNPROVEN"):
+        storage.verify_claim_publication(proof)
+    refs["/git/ref/heads/ef02/spawned/" + key] = missing
