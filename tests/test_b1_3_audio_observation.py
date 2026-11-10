@@ -188,3 +188,25 @@ def test_registered_owner_and_actual_consumer_paths():
         "docs/creative/B1_3_AUDIO_OBSERVATION_PROTOCOL.md",
         "docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md",
     }
+
+
+def test_stereo_sample_count_is_not_frame_count(tmp_path):
+    record, _, _ = inspect(tmp_path, wav((100, -200, 300, -400), channels=2))
+    measured = record.to_dict()["observed"]
+    assert measured["channels"] == 2
+    assert measured["sample_count"] == 4
+    assert measured["frame_count"] == 2
+    assert measured["duration_fraction_seconds"] == "1/4000"
+    assert measured["peak_absolute_pcm"] == 400
+
+
+def test_self_resealed_pcm_measurement_requires_current_native_replay(tmp_path):
+    original, digest, path = inspect(tmp_path, wav((0, 32767, -32768)))
+    forged = original.to_dict()
+    forged["observed"]["peak_absolute_pcm"] = 0
+    body = {key: value for key, value in forged.items() if key != "record_sha256"}
+    forged["record_sha256"] = sha256(obs.canonical_bytes(body)).hexdigest()
+    # An SHA is a local content identity, not a trusted signer/inspector.
+    parsed = obs.PcmAudioObservation(obs.canonical_bytes(forged))
+    with pytest.raises(obs.AudioObservationHold, match="AUDIO_CURRENT_SOURCE_REPLAY_REQUIRED"):
+        obs.recheck_local_pcm_wav(parsed.raw, tmp_path, path.name, digest)
