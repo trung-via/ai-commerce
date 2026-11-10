@@ -334,7 +334,7 @@ def test_workowner_mismatched_round_receipt_cannot_publish(tmp_path, monkeypatch
     monkeypatch.setattr(remote.subprocess, "Popen", Tampered)
     result = context.worker.execute_action(_action("a"))
     assert result["status"] == "CANDIDATE_INTEGRITY_FAILED"
-    assert result["error_code"] == "WORK_PROVIDER_RECEIPT_MISMATCH"
+    assert result["error_code"] == "EF01_PROVIDER_RECEIPT_MISMATCH"
     assert not context.candidates and len(context.calls) == 2
 
 
@@ -767,6 +767,7 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
         })
     lock = threading.Lock()
     calls, children, claims, candidates, resolved = [], [], [], [], {}
+    confirmed_pre_spawn, confirmed_spawn = set(), set()
 
     class Github:
         def claim(self, **kwargs):
@@ -783,10 +784,20 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
         def pre_spawn_checkpoint(self, **kwargs):
             if checkpoint_error:
                 raise OSError("claim checkpoint uncertain")
+            assert kwargs["attempt_id"] in claims
+            confirmed_pre_spawn.add(kwargs["attempt_id"])
             return "mock/pre-spawn"
 
         def spawned_checkpoint(self, **kwargs):
+            assert kwargs["attempt_id"] in confirmed_pre_spawn
+            confirmed_spawn.add(kwargs["attempt_id"])
             return "mock/spawned"
+
+        def verify_claim_publication(self, evidence):
+            attempt = evidence["attempt_id"]
+            assert attempt in claims and attempt in confirmed_pre_spawn and attempt in confirmed_spawn
+            assert evidence["source_sha"] == head
+            assert isinstance(evidence["fingerprint"], str) and len(evidence["fingerprint"]) == 64
 
         def candidate(self, **kwargs):
             candidates.append(kwargs)
@@ -826,6 +837,8 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
             self.argv = argv
             self.owner_environment = {k: v for k, v in kwargs["env"].items()
                                       if k.startswith("AI_COMMERCE_EF02_OWNER_")}
+            assert not self.owner_environment  # Retired WP is not in new EF02 children.
+            self.owner_fence = None
             children.append(self)
 
         def communicate(self, timeout=None):
@@ -846,7 +859,8 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
             return "", ""
 
     monkeypatch.setattr(remote, "subprocess", SimpleNamespace(
-        run=worktree_run, Popen=Child, PIPE=subprocess.PIPE, TimeoutExpired=subprocess.TimeoutExpired))
+        run=worktree_run, Popen=Child, PIPE=subprocess.PIPE, DEVNULL=subprocess.DEVNULL,
+        TimeoutExpired=subprocess.TimeoutExpired))
     import tempfile
     monkeypatch.setattr(remote, "tempfile", SimpleNamespace(
         mkdtemp=lambda prefix: tempfile.mkdtemp(prefix=prefix, dir=tmp_path)))
