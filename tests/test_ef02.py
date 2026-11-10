@@ -1142,7 +1142,10 @@ def test_ef02_710_headless_issue_preflight_has_owner_only_no_model_gate():
 def test_ef02_710_g3b_owner_one_shot_bounded_model_and_disposable_scope():
     src = (Path(__file__).resolve().parents[1] /
            ".github/workflows/ef02-antigravity-headless-preflight.yml").read_text(encoding="utf-8")
-    read, model = src.split("  g3b-write:", 1)
+    read, after_g3b = src.split("  g3b-write:", 1)
+    model = after_g3b.split("\n  g4-forensic:", 1)[0]
+    assert "\n  g4-forensic:" in after_g3b
+    assert "wp01-native-recovery-restart" not in model
     assert "AGY_G3_STATIC_PREFLIGHT=PASS_NO_MODEL" in read
     for contract in (
         "github.event_name == 'issues'",
