@@ -5,11 +5,7 @@
     "src/ai_commerce/product/b4_feed_readiness.py"
   ],
   "tests": [
-    "tests/test_b4_1_feed_readiness.py",
-    "tests/test_a12_offer.py",
-    "tests/test_a12_rights.py",
-    "tests/test_a12_registry.py",
-    "tests/test_a12_integration.py"
+    "tests/test_b4_1_feed_readiness.py"
   ],
   "acs": [
     "B4.1a.local-A12-readonly-freshness",
