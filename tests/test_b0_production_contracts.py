@@ -467,11 +467,28 @@ def test_contract_validation_and_transition_perform_no_io(monkeypatch):
 
 
 def test_source_has_no_effect_adapters_or_implicit_dependency():
+    # B0.1's pure *contract/state-machine* boundary is an exact source-owned
+    # set, not every later production_runtime module. B3.4 is separately
+    # registered to read native local operator/cost evidence; checking it as
+    # a pure B0.1 contract would conflate the two semantic owners.
+    pure_owner_sources = (
+        "src/ai_commerce/production_runtime/__init__.py",
+        "src/ai_commerce/production_runtime/contracts.py",
+        "src/ai_commerce/production_runtime/state_machine.py",
+    )
+    owner = json.loads(
+        (ROOT / "work_items/mt01-components/b0-1.json").read_text(encoding="utf-8")
+    )
+    # Fail closed if B0.1's trusted owner registry expands or drops a module.
+    assert owner["component"] == "b0-1"
+    assert tuple(owner["sources"]) == pure_owner_sources
     allowed = {"__future__", "dataclasses", "enum", "hashlib", "json", "math", "re", "jsonschema", "referencing"}
-    for path in (ROOT / "src/ai_commerce/production_runtime").glob("*.py"):
+    for relative_path in pure_owner_sources:
+        path = ROOT / relative_path
+        assert path.is_file()
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
-                assert all(alias.name.split(".")[0] in allowed for alias in node.names)
+                assert all(alias.name.split(".")[0] in allowed for alias in node.names), path
             elif isinstance(node, ast.ImportFrom) and not node.level:
-                assert node.module.split(".")[0] in allowed
+                assert node.module.split(".")[0] in allowed, path
