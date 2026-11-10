@@ -360,7 +360,7 @@ class LocalBatchWorker:
         outcome["max_repair_rounds"] = repair_limit
         preflight_acceptance = None
         # Direct real worker calls enforce the same gate before GitHub index or
-        # WorkOwner claim. Unit-only object.__new__ fault fixtures remain scoped
+        # Create-only claim. Unit-only object.__new__ fault fixtures remain scoped
         # to claim/transport tests and cannot prove production admission.
         if getattr(self, "_dispatch_strict_ac", False):
             try:
@@ -597,7 +597,7 @@ class LocalBatchWorker:
             # If GitHub confirmation fails, keep running/collecting the child
             # result; never interpret absence as permission to replay.
             try:
-                    spawned_ref = self.github.spawned_checkpoint(
+                spawned_ref = self.github.spawned_checkpoint(
                     source_sha=source, attempt_id=attempt_id,
                     fingerprint=fp, child_pid=child.pid)
                 outcome["spawned_remote_ref"] = spawned_ref
