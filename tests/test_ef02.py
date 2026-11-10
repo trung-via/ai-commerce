@@ -1393,6 +1393,35 @@ def test_wh03b_745_forensic_never_accepts_fake_terminal(tmp_path):
     assert scope["observe"]()["replay_authorized"] == "FALSE"
     terminal.write_text(json.dumps({"attempt_id":scope["ATTEMPT"],"work_id":"bad"}),encoding="utf-8")
     assert scope["_file_state"](rel,None) == "MISMATCH"
+
+
+
+def test_epwo_656_worker_recovery_projection_never_acquires_or_dispatches(monkeypatch):
+    from test_ef02_m0r_fault_injection import _readonly_audit_fixture
+    from ai_commerce.remote.worker import LocalBatchWorker
+    from ai_commerce.remote.transport import WorkOwner
+    storage, packet, action, owner = _readonly_audit_fixture(unknown=True)
+    worker = object.__new__(LocalBatchWorker)
+    worker.github = storage
+    worker.batch = packet
+    worker.issue_number = owner.identity["current_issue"]
+    worker.issuer_login = "trung-via"
+    def forbidden(*args, **kwargs):
+        pytest.fail("recovery review attempted effectful WorkOwner/EF02 operation")
+    for name in ("execute_action", "_acquire_owner", "reconcile_action"):
+        monkeypatch.setattr(worker, name, forbidden)
+    monkeypatch.setattr(WorkOwner, "acquire", forbidden)
+    monkeypatch.setattr(WorkOwner, "append", forbidden)
+    original_refs = dict(storage.refs)
+    storage.requests.clear()
+    result = worker.independent_reconciliation_action(action)
+    assert result["classification"] == "UNRESOLVED_PROVIDER_BOUNDARY"
+    assert result["status"] == "HOLD_RECONCILIATION_REQUIRED"
+    assert result["authority"]["journal_write_authorized"] is False
+    assert result["authority"]["provider_dispatch_authorized"] is False
+    assert storage.refs == original_refs
+    assert all(method == "GET" for method, *_ in storage.requests)
+
 def _wp01_native_child_probe_source():
     """Extract only the independently gated WP01 job, not adjacent jobs."""
     import textwrap

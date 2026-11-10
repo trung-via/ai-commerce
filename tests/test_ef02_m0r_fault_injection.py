@@ -3228,3 +3228,81 @@ def test_wp01_failure_matrix_workowner_observation_is_get_only(stage):
         owner_type.acquire(storage, identity)
     assert storage.refs == original
     assert all(method == "GET" for method, *_ in storage.requests)
+
+@pytest.mark.parametrize("mode", ["provider_intent", "unknown", "published"])
+def test_epwo_656_independent_reconciliation_source_only_hold_no_write(mode):
+    from ai_commerce.remote.transport import (
+        WorkOwnerAudit, work_owner_independent_reconciliation,
+        verify_work_owner_independent_reconciliation,
+    )
+    storage, packet, action, owner = _readonly_audit_fixture(
+        published=mode == "published", unknown=mode == "unknown")
+    refs = dict(storage.refs)
+    commits = json.dumps(storage.commits, sort_keys=True)
+    storage.requests.clear()
+    audit = WorkOwnerAudit.run(
+        storage, issue_number=owner.identity["current_issue"],
+        batch=packet, action=action, trusted_issuer="trung-via")
+    report = work_owner_independent_reconciliation(audit)
+    assert report["status"] == "HOLD_RECONCILIATION_REQUIRED"
+    assert report["authority"]["replay_authorized"] is False
+    assert report["authority"]["owner_transfer_authorized"] is False
+    assert report["authority"]["provider_dispatch_authorized"] is False
+    assert report["observations"]["provider_effect"] == "UNKNOWN"
+    assert report["observations"]["child_process_tree"] == "UNKNOWN"
+    assert report["observations"]["owner_fence"] == "PRESERVE_NO_TRANSFER"
+    assert "INDEPENDENT_PROVIDER_RESULT_OR_ATTESTED_NO_EFFECT" in (
+        report["missing_independent_proofs"])
+    if mode == "published":
+        assert report["observations"]["github_source"] == (
+            "AUTHENTICATED_PUBLISHED_SOURCE_ONLY")
+        assert report["classification"] == "PUBLISHED_SOURCE_ONLY_NATIVE_UNVERIFIED"
+    else:
+        assert report["classification"] == "UNRESOLVED_PROVIDER_BOUNDARY"
+        assert report["observations"]["candidate_source"] == "UNPUBLISHED_OR_UNVERIFIED"
+    from ai_commerce.remote.candidate_policy import canonical as source_canonical
+    raw = source_canonical(report).encode("utf-8")
+    assert verify_work_owner_independent_reconciliation(raw) == report
+    assert dict(storage.refs) == refs
+    assert json.dumps(storage.commits, sort_keys=True) == commits
+    assert all(request[0] == "GET" for request in storage.requests)
+
+
+@pytest.mark.parametrize("fault", ["status", "provider", "owner", "digest", "replayed"])
+def test_epwo_656_sealed_or_forged_caller_cannot_promote_effect(fault):
+    from ai_commerce.remote.transport import (
+        WorkOwnerAudit, work_owner_independent_reconciliation,
+        verify_work_owner_independent_reconciliation,
+    )
+    from ai_commerce.remote.candidate_policy import canonical as source_canonical
+    storage, packet, action, owner = _readonly_audit_fixture()
+    audit = WorkOwnerAudit.run(
+        storage, issue_number=owner.identity["current_issue"],
+        batch=packet, action=action, trusted_issuer="trung-via")
+    report = work_owner_independent_reconciliation(audit)
+    if fault == "status":
+        report["status"] = "RECOVERED"
+    elif fault == "provider":
+        report["observations"]["provider_effect"] = "NO_EFFECT_VERIFIED"
+    elif fault == "owner":
+        report["authority"]["owner_transfer_authorized"] = True
+    elif fault == "digest":
+        report["record_sha256"] = "0" * 64
+    else:
+        report["authority"]["replay_authorized"] = True
+    if fault != "digest":
+        report["record_sha256"] = hashlib.sha256(source_canonical({
+            key: val for key, val in report.items() if key != "record_sha256"
+        }).encode()).hexdigest()
+    with pytest.raises(ValueError, match="EPWO_RECONCILIATION_"):
+        verify_work_owner_independent_reconciliation(
+            source_canonical(report).encode("utf-8"))
+
+
+def test_epwo_656_recovery_uses_existing_audit_not_untrusted_dict():
+    from ai_commerce.remote.transport import work_owner_independent_reconciliation
+    with pytest.raises(ValueError, match="EPWO_RECONCILIATION_AUDIT_OBJECT_REQUIRED"):
+        work_owner_independent_reconciliation({
+            "kind": "WorkOwnerReadOnlyAudit.v1",
+            "source_gate": "VERIFIED", "native_effect": "NO_EFFECT_VERIFIED",
+        })

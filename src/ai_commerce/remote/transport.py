@@ -1596,6 +1596,155 @@ class WorkOwnerAuditReport:
         return result
 
 
+# EPWO #656: diagnostic projection ONLY. Never mint a WorkOwner transition.
+_WORKOWNER_INDEPENDENT_PROOFS = (
+    "INDEPENDENT_CHILD_TREE_TERMINATION_AND_DESCENDANTS",
+    "INDEPENDENT_PROVIDER_RESULT_OR_ATTESTED_NO_EFFECT",
+    "EF01_NATIVE_TERMINAL_AND_LOCAL_DIFF_CUSTODY",
+    "IMMUTABLE_WORKOWNER_FENCE_AND_IDEMPOTENCY_KEY",
+    "EXACT_CANDIDATE_SOURCE_AND_RECEIPT_IF_ANY",
+    "SEPARATELY_ENROLLED_OPERATOR_AND_PRIVATE_EFFECT_VERIFIER",
+    "NEW_HUMAN_SCOPE_AND_CURRENT_MAIN_IF_ACTION_NEEDED",
+)
+_WORKOWNER_INDEPENDENT_AUTHORITY = {
+    "replay_authorized": False,
+    "owner_transfer_authorized": False,
+    "journal_write_authorized": False,
+    "provider_dispatch_authorized": False,
+    "publication_authorized": False,
+    "effect_settlement_authorized": False,
+    "native_effect_proven": False,
+}
+
+
+def work_owner_independent_reconciliation(report: WorkOwnerAuditReport) -> dict:
+    """Review the EXISTING source audit; do not make another GitHub reader.
+
+    Even authenticated published SOURCE does not establish native process,
+    provider effect, private signer or a safe successor. Call this only on
+    the result of WorkOwnerAudit.run with trusted source-owned issuer.
+    A report object, its digest or an offline fixture is not authority.
+    """
+    if type(report) is not WorkOwnerAuditReport:
+        raise ValueError("EPWO_RECONCILIATION_AUDIT_OBJECT_REQUIRED")
+    audit = report.payload()
+    if (audit.get("kind") != "WorkOwnerReadOnlyAudit.v1" or
+            audit.get("status") != "HOLD_UNKNOWN_EFFECT" or
+            audit.get("replay_authorized") is not False or
+            audit.get("publication_authorized") is not False or
+            audit.get("writable_contract") != "INACTIVE"):
+        raise ValueError("EPWO_RECONCILIATION_SOURCE_BOUNDARY_INVALID")
+    source_only = (
+        report.source_gate is AuditGate.VERIFIED and
+        report.stage == "PUBLISHED" and
+        isinstance(report.candidate_sha, str) and
+        re.fullmatch(r"[0-9a-f]{40}", report.candidate_sha) is not None
+    )
+    if report.source_gate is AuditGate.CONTRADICTED:
+        classification = "SOURCE_CONTRADICTION"
+    elif report.stage in {"PROVIDER_INTENT", "UNKNOWN"}:
+        classification = "UNRESOLVED_PROVIDER_BOUNDARY"
+    elif source_only:
+        classification = "PUBLISHED_SOURCE_ONLY_NATIVE_UNVERIFIED"
+    else:
+        classification = "SOURCE_OR_TERMINAL_UNCONFIRMED"
+    observed = {
+        "github_source": ("AUTHENTICATED_PUBLISHED_SOURCE_ONLY" if source_only
+                          else "CONTRADICTED" if report.source_gate is AuditGate.CONTRADICTED
+                          else "UNCONFIRMED"),
+        "workowner_stage": audit["stage"],
+        "workowner_generation": audit["generation"],
+        "candidate_source": ("PUBLISHED_SOURCE_ONLY" if source_only
+                             else "UNPUBLISHED_OR_UNVERIFIED"),
+        "local_diff": "UNKNOWN",
+        "child_process_tree": "UNKNOWN",
+        "ef01_terminal_receipt": "UNKNOWN",
+        "provider_effect": "UNKNOWN",
+        "external_billing": "UNKNOWN",
+        "owner_fence": "PRESERVE_NO_TRANSFER",
+    }
+    body = {
+        "kind": "WorkOwnerIndependentReconciliation.v1",
+        "status": "HOLD_RECONCILIATION_REQUIRED",
+        "classification": classification,
+        "source_audit_sha256": hashlib.sha256(
+            canonical(audit).encode("utf-8")).hexdigest(),
+        "source_audit": audit,
+        "observations": observed,
+        "missing_independent_proofs": list(_WORKOWNER_INDEPENDENT_PROOFS),
+        "next_step": "NATIVE_READ_ONLY_EVIDENCE_CUSTODY",
+        "authority": dict(_WORKOWNER_INDEPENDENT_AUTHORITY),
+        "limitations": {
+            "github_sha_is_provider_receipt": False,
+            "same_sid_is_independent_signer": False,
+            "missing_files_prove_no_effect": False,
+            "source_only_review_is_workowner_recovery": False,
+            "normal_provider_execution_is_claimed": False,
+        },
+    }
+    body["record_sha256"] = hashlib.sha256(
+        canonical(body).encode("utf-8")).hexdigest()
+    return body
+
+
+def verify_work_owner_independent_reconciliation(raw: bytes) -> dict:
+    """Validate a closed HOLD snapshot; validation does NOT trust its author."""
+    if type(raw) is not bytes or not 0 < len(raw) <= 65536:
+        raise ValueError("EPWO_RECONCILIATION_PACKET_BOUNDS")
+    try:
+        packet = json.loads(raw)
+        if type(packet) is not dict or canonical(packet).encode("utf-8") != raw:
+            raise ValueError("EPWO_RECONCILIATION_PACKET_CANONICAL")
+        if set(packet) != {
+            "kind", "status", "classification", "source_audit_sha256",
+            "source_audit", "observations", "missing_independent_proofs",
+            "next_step", "authority", "limitations", "record_sha256",
+        }:
+            raise ValueError("EPWO_RECONCILIATION_PACKET_FIELDS")
+        body = {k: v for k, v in packet.items() if k != "record_sha256"}
+        if packet["record_sha256"] != hashlib.sha256(
+                canonical(body).encode("utf-8")).hexdigest():
+            raise ValueError("EPWO_RECONCILIATION_PACKET_DIGEST")
+        audit = packet["source_audit"]
+        if (type(audit) is not dict or
+                packet["source_audit_sha256"] != hashlib.sha256(
+                    canonical(audit).encode("utf-8")).hexdigest() or
+                audit.get("kind") != "WorkOwnerReadOnlyAudit.v1" or
+                audit.get("status") != "HOLD_UNKNOWN_EFFECT" or
+                audit.get("replay_authorized") is not False or
+                audit.get("publication_authorized") is not False):
+            raise ValueError("EPWO_RECONCILIATION_AUDIT_INVALID")
+        observations = packet["observations"]
+        if (packet["kind"] != "WorkOwnerIndependentReconciliation.v1" or
+                packet["status"] != "HOLD_RECONCILIATION_REQUIRED" or
+                packet["classification"] not in {
+                    "SOURCE_CONTRADICTION", "UNRESOLVED_PROVIDER_BOUNDARY",
+                    "PUBLISHED_SOURCE_ONLY_NATIVE_UNVERIFIED",
+                    "SOURCE_OR_TERMINAL_UNCONFIRMED",
+                } or
+                packet["next_step"] != "NATIVE_READ_ONLY_EVIDENCE_CUSTODY" or
+                packet["missing_independent_proofs"] != list(
+                    _WORKOWNER_INDEPENDENT_PROOFS) or
+                packet["authority"] != _WORKOWNER_INDEPENDENT_AUTHORITY or
+                type(observations) is not dict or
+                observations.get("provider_effect") != "UNKNOWN" or
+                observations.get("child_process_tree") != "UNKNOWN" or
+                observations.get("local_diff") != "UNKNOWN" or
+                observations.get("owner_fence") != "PRESERVE_NO_TRANSFER" or
+                packet["limitations"] != {
+                    "github_sha_is_provider_receipt": False,
+                    "same_sid_is_independent_signer": False,
+                    "missing_files_prove_no_effect": False,
+                    "source_only_review_is_workowner_recovery": False,
+                    "normal_provider_execution_is_claimed": False,
+                }):
+            raise ValueError("EPWO_RECONCILIATION_FALSE_AUTHORITY")
+        return packet
+    except (TypeError, KeyError, AttributeError, UnicodeError,
+            json.JSONDecodeError):
+        raise ValueError("EPWO_RECONCILIATION_PACKET_INVALID") from None
+
+
 class _AuditUnknown(Exception):
     pass
 
