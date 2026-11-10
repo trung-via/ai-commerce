@@ -395,10 +395,13 @@ def _delivery_inputs(store, principal, delivery):
     return _secret_inputs()
 
 
-def listen(store, *, deliver=False, delivery=None, max_polls=120, interval_seconds=5,
+def listen(store, *, deliver=False, delivery=None, fixed_check_test=False,
+           max_polls=120, interval_seconds=5,
            max_seconds=600, max_reads=200, read_attempts=3, reader_factory=None,
            sender=None, wall_clock=time.time, clock=time.monotonic, sleep=time.sleep):
     """Finite session, default observe. No signal/enrollment means zero GETs."""
+    if type(fixed_check_test) is not bool or (fixed_check_test and deliver is not True):
+        raise HandoffBlocked("WAKE_TEST_SCOPE_INVALID")
     if (type(deliver) is not bool or type(max_polls) is not int or not 1 <= max_polls <= 120 or
             type(interval_seconds) is not int or not 1 <= interval_seconds <= 600):
         raise HandoffBlocked("HANDOFF_POLL_BUDGET_INVALID")
@@ -467,7 +470,8 @@ def listen(store, *, deliver=False, delivery=None, max_polls=120, interval_secon
                             idempotency_path=Path(delivery["idempotency"]),
                             repository_root=store.repository_root, token_provider=lambda: token,
                             secret_provider=lambda: key, principal_provider=lambda: principal,
-                            read_budget=budget)
+                            read_budget=budget,
+                            **({"fixed_check_test": True} if fixed_check_test else {}))
                     except Exception:
                         pass  # UNKNOWN is already durable; never replay this call.
                     return _result("UNKNOWN", "DELIVERY_ATTEMPT_UNPROVEN", registered=True)
@@ -491,6 +495,8 @@ def main(argv=None):
     parser.add_argument("--brain-issuer", action="append", default=[])
     parser.add_argument("--allow-delivery", action="store_true")
     parser.add_argument("--deliver", action="store_true")
+    # Only explicit local delivery may opt in to literal 'kiểm tra'; no Issue data.
+    parser.add_argument("--fixed-check-test", action="store_true")
     for name in ("registry", "idempotency", "grants"):
         parser.add_argument("--" + name, type=Path)
     parser.add_argument("--caller-id")
@@ -504,7 +510,7 @@ def main(argv=None):
             raise HandoffBlocked("HANDOFF_LOCATION_INVALID")
         store = HandoffStore(args.state, checkout)
         if args.command == "enroll":
-            if args.deliver or any((args.registry, args.idempotency, args.grants, args.caller_id)):
+            if args.fixed_check_test or args.deliver or any((args.registry, args.idempotency, args.grants, args.caller_id)):
                 raise HandoffBlocked("LOCAL_SEND_CONFIG_INVALID")
             intent = RegistrationIntent(args.repository, args.issue_number, args.batch_id,
                 args.source_sha, args.workflow_id, args.run_attempt, args.issuer_login,
@@ -514,6 +520,8 @@ def main(argv=None):
                    brain_issuers=tuple(args.brain_issuer))
             result = _result("ENROLLED", "AWAITING_SIGNAL")
         else:
+            if args.fixed_check_test and not args.deliver:
+                raise HandoffBlocked("WAKE_TEST_SCOPE_INVALID")
             if any((args.opt_in, args.allow_delivery, args.issue_number, args.run_id, args.workflow_id,
                     args.run_attempt, args.batch_id, args.source_sha, args.issuer_login, args.actor,
                     args.request_fingerprint, args.created_after, args.created_before,
@@ -522,6 +530,7 @@ def main(argv=None):
             delivery = dict(registry=args.registry, idempotency=args.idempotency,
                             grants=args.grants, caller_id=args.caller_id)
             result = listen(store, deliver=args.deliver, delivery=delivery,
+                fixed_check_test=args.fixed_check_test,
                 max_polls=args.max_polls, interval_seconds=args.interval_seconds,
                 max_seconds=args.max_seconds, max_reads=args.max_reads, read_attempts=args.read_attempts)
         print(json.dumps(result))
