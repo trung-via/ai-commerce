@@ -1,5 +1,7 @@
 # AI COMMERCE — DETAILED WORK TREE v1.1 (CANONICAL PLAN)
 
+**Current execution overlay (2026-11-10):** [Integrated Roadmap Execution Register v2.1](ROADMAP_EXECUTION_REGISTER_V2_1.md) ([machine-readable 63-WBS crosswalk](ROADMAP_EXECUTION_REGISTER_V2_1.json)). The 63 WBS IDs and historical statuses below remain immutable planning history. For current delivery/source versus native/live evidence, read the separate versioned overlay; do not interpret old `PROPOSED` labels as a proof that no source has since shipped.
+
 **Adopted:** 2026-10-28 · **Mode:** HUMAN-APPROVED CANONICAL PLANNING · **Canonical repo:** `trung-via/ai-commerce` (`main`)  
 **Source WBS v1.0 HEAD:** `13266240558aaf1ec3c80e0dfc3fe89911908002` · **Governance:** Human-adopted v0.3 · **Research reference:** Blueprint v1.2.  
 **Status:** Canonicalized planning reference with Human approval; **no engineering implementation, executor dispatch, provider entitlement, spend or media publication** is implied.
