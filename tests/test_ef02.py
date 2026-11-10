@@ -1604,3 +1604,31 @@ def test_wp01_recovery_restart_reader_negative_cases(tmp_path, mode, expected, e
     assert result.stdout.strip() == expected
     assert result.stderr == ""
     assert not list(owned.glob("*.new"))
+
+
+def test_wp02_native_supervisor_owner_gate_and_no_provider():
+    src = (Path(__file__).resolve().parents[1] /
+           ".github/workflows/ef02-antigravity-headless-preflight.yml").read_text(encoding="utf-8")
+    job = src.split("  wp02-native-supervisor-restart:", 1)[1]
+    required = (
+        "github.event_name == 'issues'",
+        "github.event.action == 'opened'",
+        "github.repository == 'trung-via/ai-commerce'",
+        "github.actor == github.repository_owner",
+        "github.event.issue.user.login == github.repository_owner",
+        "github.event.issue.title == '[EPWO WP02 NATIVE SUPERVISOR RESTART] #466'",
+        "github.run_attempt == 1",
+        "runs-on: [self-hosted, Windows, ai-commerce-ef02]",
+        "timeout-minutes: 4",
+        "permissions:\n      contents: read",
+        "ref: main",
+        "persist-credentials: false",
+        "test_wp02_disposable_supervisor_crash_new_supervisor_readonly",
+        "EPWO_WP02_NATIVE_EFFECT=SIMULATED_JOURNAL_ONLY",
+        "EPWO_WP02_NATIVE_WORKOWNER_710=NOT_TOUCHED",
+        "EPWO_WP02_NATIVE_REPLAY_AUTHORIZED=FALSE",
+    )
+    assert all(token in job for token in required)
+    forbidden = ("issues: write", "github.event.issue.body", "GITHUB_TOKEN",
+                 "taskkill", "Restart-Service", "--model", "agy --print", "codex --")
+    assert all(token not in job for token in forbidden)
