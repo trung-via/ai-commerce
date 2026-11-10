@@ -205,3 +205,132 @@ def test_unsafe_chrome_profile_claim_is_reconciliation_only():
     assert result["next_action"] == "RECONCILE_NO_RETRY"
     assert c.calls == [True]
     assert p.open_calls == 0
+
+
+# WH-04/06: the 9444 readiness+Control Center track is distinct from
+# the legacy 9333 @plugin Prepare interface. All fixtures are offline.
+def test_wh04_9444_reuses_owned_browser_and_exact_private_route_without_send():
+    from ai_commerce.remote.conversation_binding import ResolvedBinding
+    p = FakePanel()
+    p.binding = ResolvedBinding(
+        route_id="enrolled", generation=4,
+        chat_url="https://chatgpt.com/c/12345678-1234-4234-8234-123456789abc",
+        cdp_endpoint="http://127.0.0.1:9444")
+    c = FakeChrome()
+    f = ReadinessFlow(panel=p, acquire=c,
+                      source_reader=lambda: "a" * 40, cdp_port=9444)
+    result = f.execute(opt_in_launch=False, opt_in_open_chat=False)
+    assert result["status"] == "READY_TO_PREPARE"
+    assert result["chrome"] == "VERIFIED_9444"
+    assert result["wake_sent"] is False
+    assert result["auto_repaired"] == []
+    assert c.calls == [False]
+    assert p.open_calls == 0
+
+
+def test_wh04_9444_never_treats_legacy_9333_route_as_enrolled():
+    from ai_commerce.remote.conversation_binding import ResolvedBinding
+    p = FakePanel()
+    p.binding = ResolvedBinding(
+        route_id="old", generation=1,
+        chat_url="https://chatgpt.com/c/12345678-1234-4234-8234-123456789abc",
+        cdp_endpoint="http://127.0.0.1:9333")
+    c = FakeChrome()
+    f = ReadinessFlow(panel=p, acquire=c,
+                      source_reader=lambda: "a" * 40, cdp_port=9444)
+    result = f.execute(opt_in_launch=True, opt_in_open_chat=True)
+    assert result["code"] == "ROUTE_NOT_ENROLLED_9444"
+    assert result["wake_sent"] is False
+    assert c.calls == []  # deny BEFORE any Chrome interaction
+
+
+def test_wh04_invalid_port_never_constructs_readiness_flow():
+    with pytest.raises(ValueError, match="READINESS_CDP_PORT_INVALID"):
+        ReadinessFlow(panel=FakePanel(), acquire=FakeChrome(),
+                      source_reader=lambda: "a" * 40, cdp_port=True)
+    with pytest.raises(ValueError, match="READINESS_CDP_PORT_INVALID"):
+        ReadinessFlow(panel=FakePanel(), acquire=FakeChrome(),
+                      source_reader=lambda: "a" * 40, cdp_port=9222)
+
+
+def test_wh06_9444_panel_has_no_plugin_prepare_or_send_and_never_leaks_chat():
+    from ai_commerce.remote.wake_control_center import WakePanel, _HTML_9444
+    from ai_commerce.remote.conversation_binding import ResolvedBinding
+    binding = ResolvedBinding(
+        route_id="secret-route", generation=4,
+        chat_url="https://chatgpt.com/c/12345678-1234-4234-8234-123456789abc",
+        cdp_endpoint="http://127.0.0.1:9444")
+    class Store:
+        def read(self):
+            return dict(phase="READY", source_sha="a" * 40, turn_index=0)
+    p = WakePanel(store=Store(), route_reader=lambda: binding,
+                  tcp_probe=lambda: True, cdp_port=9444)
+    status = p.status()
+    assert status["route"] == "ENROLLED"
+    assert status["can_open"] is True
+    assert status["can_prepare"] is False
+    assert status["can_send"] is False
+    assert status["next_action"] == "OPEN_EXACT_CHAT_NO_SEND"
+    assert p.prepare_turn("PREPARE-D5-BRAIN-0") == {
+        "code": "WH07_NO_PLUGIN_PREPARE", "sent": False}
+    assert "id=\"open\"" in _HTML_9444
+    assert "/api/prepare-turn" not in _HTML_9444
+    assert "id=\"send\"" not in _HTML_9444
+    assert binding.chat_url not in _HTML_9444
+    assert binding.route_id not in _HTML_9444
+
+
+@pytest.mark.parametrize("endpoint", [
+    "http://127.0.0.1:9333", "http://localhost:9444",
+    "http://0.0.0.0:9444", "http://127.0.0.1:9444/?x=1",
+])
+def test_wh06_9444_panel_rejects_nonexact_browser_route(endpoint):
+    from ai_commerce.remote.wake_control_center import WakePanel
+    from ai_commerce.remote.conversation_binding import ResolvedBinding
+    class Store:
+        def read(self):
+            return dict(phase="READY", source_sha="a" * 40, turn_index=0)
+    binding = ResolvedBinding(
+        route_id="route", generation=1,
+        chat_url="https://chatgpt.com/c/12345678-1234-4234-8234-123456789abc",
+        cdp_endpoint=endpoint)
+    p = WakePanel(store=Store(), route_reader=lambda: binding,
+                  tcp_probe=lambda: True, cdp_port=9444)
+    s = p.status()
+    assert s["route"] == "UNAVAILABLE"
+    assert s["can_open"] is False
+    assert s["can_prepare"] is False
+    assert s["can_send"] is False
+
+
+def test_wh06_9444_readonly_inspection_requires_idle_safe_chat_surface():
+    from ai_commerce.remote.wake_control_center import WakePanel
+    from ai_commerce.remote.conversation_binding import ResolvedBinding
+    from contextlib import contextmanager
+    binding = ResolvedBinding(
+        route_id="route", generation=1,
+        chat_url="https://chatgpt.com/c/12345678-1234-4234-8234-123456789abc",
+        cdp_endpoint="http://127.0.0.1:9444")
+    class Store:
+        def read(self):
+            return dict(phase="READY", source_sha="a" * 40, turn_index=0)
+    state = ["DRAFT_PRESENT"]
+    class Page:
+        url = binding.chat_url
+        def evaluate(self, script):
+            assert "CANDIDATE_READY" in script
+            return state[0]
+    class Inventory:
+        @contextmanager
+        def pages(self, endpoint):
+            assert endpoint == binding.cdp_endpoint
+            yield [Page()]
+    panel = WakePanel(store=Store(), route_reader=lambda: binding,
+                      tcp_probe=lambda: True, cdp_port=9444,
+                      inventory_factory=Inventory)
+    assert panel.inspect_exact_chat()["code"] == "DRAFT_PRESENT"
+    state[0] = "SURFACE_UNPROVEN"
+    assert panel.inspect_exact_chat()["code"] == "SURFACE_UNPROVEN"
+    state[0] = "CANDIDATE_READY"
+    assert panel.inspect_exact_chat()["code"] == "EXACT_CHAT_PRESENT"
+    assert panel.status()["can_send"] is False

@@ -8,7 +8,7 @@ import secrets
 import socket
 import threading
 from urllib.parse import urlsplit
-from .cdp_doorbell import _PlaywrightInventory
+from .cdp_doorbell import _PlaywrightInventory, _CHAT_A_READ_ONLY_SURFACE
 from .conversation_binding import ResolvedBinding
 from .plugin_selection_probe_cli import load_registered_probe_route
 from .plugin_turn_store import TurnSessionStore
@@ -25,22 +25,32 @@ _UNCERTAIN = frozenset((
 ))
 
 
-def _tcp_9333() -> bool:
-    # TCP availability is NOT proof the server is an authenticated Chrome.
+def _tcp_port(port: int) -> bool:
+    # TCP availability is NOT proof of Chrome identity or a Send grant.
     try:
-        with socket.create_connection(("127.0.0.1", 9333), timeout=0.3):
+        with socket.create_connection(("127.0.0.1", port), timeout=0.3):
             return True
     except OSError:
         return False
 
 
+def _tcp_9333() -> bool:
+    return _tcp_port(9333)
+
+
 class WakePanel:
-    def __init__(self, *, store, route_reader, tcp_probe=_tcp_9333,
+    def __init__(self, *, store, route_reader, tcp_probe=None,
                  inventory_factory=_PlaywrightInventory,
                  source_reader=_fresh_main_sha,
-                 staging_factory=ExplicitTurnChipStager):
+                 staging_factory=ExplicitTurnChipStager,
+                 cdp_port: int = 9333):
+        if type(cdp_port) is not int or cdp_port not in (9333, 9444):
+            raise ValueError("CONTROL_CDP_PORT_INVALID")
+        self.cdp_port = cdp_port
         self.store, self.route_reader = store, route_reader
-        self.tcp_probe, self.inventory_factory = tcp_probe, inventory_factory
+        self.tcp_probe = tcp_probe if tcp_probe is not None else (
+            lambda: _tcp_port(self.cdp_port))
+        self.inventory_factory = inventory_factory
         self.source_reader, self.staging_factory = source_reader, staging_factory
         self._lock = threading.Lock()
         self._uncertain = False
@@ -62,7 +72,10 @@ class WakePanel:
             b = self.route_reader()
             u = urlsplit(b.cdp_endpoint)
             if (type(b) is not ResolvedBinding or u.scheme != "http" or
-                u.hostname not in ("127.0.0.1", "localhost") or u.port != 9333):
+                u.hostname not in ("127.0.0.1", "localhost") or
+                u.port != self.cdp_port or
+                (self.cdp_port == 9444 and
+                 b.cdp_endpoint != "http://127.0.0.1:9444")):
                 return None
             return b
         except Exception:
@@ -88,20 +101,22 @@ class WakePanel:
         elif not route:
             next_action = "CHECK_ENROLLED_ROUTE"
         elif not tcp:
-            next_action = "CHECK_CHROME_9333"
+            next_action = "CHECK_CHROME_" + str(self.cdp_port)
         elif self._uncertain:
             next_action = "INSPECT_NAVIGATION_UNKNOWN"
         elif self._prepare_attempted:
             next_action = "INSPECT_PREPARED_DRAFT_MANUALLY"
         else:
-            next_action = "OPEN_EXACT_CHAT_THEN_PREPARE"
+            next_action = ("OPEN_EXACT_CHAT_NO_SEND" if self.cdp_port == 9444
+                           else "OPEN_EXACT_CHAT_THEN_PREPARE")
         return {
             "phase": phase, "turn_index": idx,
             "role": _ROLES[idx] if 0 <= idx < 3 else "NONE",
             "route": "ENROLLED" if route else "UNAVAILABLE",
             "tcp": "REACHABLE_UNVERIFIED" if tcp else "NOT_REACHABLE",
             "next_action": next_action, "can_open": enabled,
-            "can_prepare": enabled, "can_send": False,
+            # WH-06 9444 UI never stages @plugin or sends; WH-08 remains disabled.
+            "can_prepare": enabled and self.cdp_port == 9333, "can_send": False,
             "host_selection_proven": False,
             "server_receipt_proven": False,
         }
@@ -112,6 +127,8 @@ class WakePanel:
         Serialized against the local Open Chat button. Caller must still use
         independent CLI consent for Send Once after visual inspection.
         """
+        if self.cdp_port == 9444:
+            return {"code": "WH07_NO_PLUGIN_PREPARE", "sent": False}
         with self._lock:
             if not self.status()["can_prepare"]:
                 return {"code": "PREPARE_NOT_ELIGIBLE", "sent": False}
@@ -171,7 +188,7 @@ class WakePanel:
             return {"code": "ROUTE_UNAVAILABLE"}
         try:
             if self.tcp_probe() is not True:
-                return {"code": "CHROME_9333_NOT_REACHABLE"}
+                return {"code": "CHROME_" + str(self.cdp_port) + "_NOT_REACHABLE"}
             with self.inventory_factory().pages(binding.cdp_endpoint) as pages:
                 matches = [page for page in pages
                            if isinstance(page.url, str) and
@@ -179,7 +196,15 @@ class WakePanel:
                 if len(matches) > 1:
                     code = "EXACT_CHAT_AMBIGUOUS"
                 elif len(matches) == 1:
-                    code = "EXACT_CHAT_PRESENT"
+                    if self.cdp_port == 9444:
+                        # WH-06 never displays a URL-only match as ready.
+                        # This is a candidate read, not account/route authority.
+                        observed = matches[0].evaluate(_CHAT_A_READ_ONLY_SURFACE)
+                        code = ("EXACT_CHAT_PRESENT" if observed == "CANDIDATE_READY"
+                                else "DRAFT_PRESENT" if observed == "DRAFT_PRESENT"
+                                else "SURFACE_UNPROVEN")
+                    else:
+                        code = "EXACT_CHAT_PRESENT"
                 else:
                     code = "EXACT_CHAT_NOT_OPEN"
                 return {"code": code}
@@ -360,6 +385,60 @@ refresh();setInterval(refresh,7000);
 </script></body></html>"""
 
 
+
+_HTML_9444 = """<!doctype html><html lang="vi"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WakeHub · CDP 9444</title>
+<style>
+:root{color-scheme:dark;font:16px/1.5 system-ui,Segoe UI,sans-serif;background:#101827;color:#eef3fb}
+body{margin:0}main{max-width:780px;margin:0 auto;padding:clamp(20px,5vw,48px)}
+section{background:#1c2940;border:1px solid #40516f;border-radius:16px;padding:18px;margin:16px 0}
+h1{font-size:clamp(25px,5vw,38px)}.status{font-weight:700;overflow-wrap:anywhere}
+small{color:#bbc9db}.controls{display:flex;flex-wrap:wrap;gap:10px}
+button{border:1px solid #7895c0;border-radius:10px;background:#b9d4fb;color:#111e32;
+padding:12px 18px;font:inherit;font-weight:bold;cursor:pointer}
+button:disabled{opacity:.45;cursor:not-allowed}button:focus-visible{outline:3px solid #ffcf72;outline-offset:3px}
+</style></head><body><main><small>AI Commerce · WakeHub WH-04/05/06</small>
+<h1>Chrome CDP 9444</h1><p>Chỉ kiểm tra và mở chat đã đăng ký. Không gửi Wake hoặc gọi @plugin.</p>
+<section><div>Chrome</div><div class="status" id="tcp">Đang kiểm tra…</div>
+<small>TCP chưa chứng minh danh tính Chrome, tài khoản hoặc quyền Send.</small></section>
+<section><div>Private route</div><div class="status" id="route">Đang kiểm tra…</div>
+<small>Không hiển thị URL hoặc nội dung cuộc trò chuyện.</small></section>
+<section><div>Ledger / Trạng thái</div><div class="status" id="phase">Đang kiểm tra…</div>
+<div class="status" id="next"></div><small>UNKNOWN yêu cầu đối soát, không tự gửi lại.</small></section>
+<section><div class="controls"><button id="inspect">Kiểm tra chat (chỉ đọc)</button>
+<button id="open" disabled>Mở đúng chat</button><button id="refresh">Làm mới</button></div>
+<p class="status" id="result" role="status" aria-live="polite"></p></section>
+<small>WH-07 chỉ được gửi bởi bộ điều khiển private đã xác thực sự kiện, tuyến và quyền một lần.
+Nút Send và Prepare @plugin cố ý không có trong giao diện này.</small></main>
+<script>
+const token=__TOKEN__,el=id=>document.getElementById(id);
+const display=x=>typeof x==='string'&&x.length<90?x:'UNAVAILABLE';
+async function refresh(){try{
+const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw Error();
+const x=await r.json();
+el('tcp').textContent=display(x.tcp);
+el('route').textContent=display(x.route);
+el('phase').textContent=display(x.phase);
+el('next').textContent=display(x.next_action);
+el('open').disabled=x.can_open!==true;
+}catch(e){el('open').disabled=true;el('next').textContent='Kiểm tra không khả dụng';}}
+el('refresh').onclick=refresh;
+el('inspect').onclick=async()=>{el('inspect').disabled=true;
+try{const r=await fetch('/api/inspect-chat',{cache:'no-store'});
+const x=await r.json();el('result').textContent=display(x.code);}
+catch(e){el('result').textContent='Không đọc được chat';}
+el('inspect').disabled=false;};
+el('open').onclick=async()=>{el('open').disabled=true;
+try{const r=await fetch('/api/open-chat',{method:'POST',
+headers:{'X-Wake-Token':token,'Content-Type':'application/json'},body:''});
+const x=await r.json();el('result').textContent=display(x.code);}
+catch(e){el('result').textContent='Kết quả mở chat không rõ; không tự thử lại';}
+await refresh();};
+refresh();
+</script></body></html>"""
+
+
 def make_handler(panel: WakePanel, *, port: int, token: str):
     origin = "http://127.0.0.1:" + str(port)
     host = "127.0.0.1:" + str(port)
@@ -392,7 +471,8 @@ def make_handler(panel: WakePanel, *, port: int, token: str):
             if self.headers.get("Host") != host:
                 return self._json(403, {"code": "HOST_REJECTED"})
             if self.path == "/":
-                html = _HTML.replace("__TOKEN__", json.dumps(token))
+                template = _HTML_9444 if panel.cdp_port == 9444 else _HTML
+                html = template.replace("__TOKEN__", json.dumps(token))
                 return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
             if self.path == "/api/status":
                 return self._json(200, panel.status())
@@ -409,7 +489,7 @@ def make_handler(panel: WakePanel, *, port: int, token: str):
                 if self.headers.get("Content-Length") not in ("0", None):
                     return self._json(400, {"code": "OPERATION_NOT_ALLOWED"})
                 return self._json(200, panel.open_exact_chat())
-            if self.path != "/api/prepare-turn":
+            if panel.cdp_port == 9444 or self.path != "/api/prepare-turn":
                 return self._json(400, {"code": "OPERATION_NOT_ALLOWED"})
             if self.headers.get("Content-Type") != "application/json":
                 return self._json(400, {"code": "INVALID_CONTENT_TYPE"})
@@ -435,6 +515,7 @@ def main(argv=None):
     p.add_argument("--registry", type=Path, required=True)
     p.add_argument("--route-id", required=True)
     p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--cdp-port", type=int, choices=(9333, 9444), default=9333)
     a = p.parse_args(argv)
     if not 1024 <= a.port <= 65535:
         p.error("Invalid local port")
@@ -444,7 +525,8 @@ def main(argv=None):
     panel = WakePanel(
         store=TurnSessionStore(path=a.state_file, repository_root=root),
         route_reader=lambda: load_registered_probe_route(
-            registry_path=a.registry, checkout=root, route_id=a.route_id))
+            registry_path=a.registry, checkout=root, route_id=a.route_id),
+        cdp_port=a.cdp_port)
     server = ThreadingHTTPServer(("127.0.0.1", a.port),
         make_handler(panel, port=a.port, token=secrets.token_urlsafe(32)))
     print("WAKE_UI_LOCAL_ONLY http://127.0.0.1:" + str(a.port), flush=True)
