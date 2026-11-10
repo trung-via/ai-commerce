@@ -1904,7 +1904,7 @@ def test_epwo750_approved_allowed_path_closes_required_legacy_ac(tmp_path):
         allowed_paths=("src/ai_commerce/product/identity.py", *changed),
     )
     assert plan["changed_paths"] == changed
-    assert plan["impact_v21"]["selected_groups"] == ["a14"]
+    assert tuple(plan["impact_v21"]["selected_groups"]) == ("a14",)
     assert plan["selected_groups"] == ["a12", "a14"]
     assert plan["required_ac_group_closure"] == ["a12"]
     assert "REVIEWED_ALLOWED_SCOPE_AC_GROUP:a12" in plan["reason_codes"]
