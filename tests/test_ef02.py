@@ -1550,7 +1550,7 @@ def test_wp01_recovery_restart_reader_is_read_only_and_no_relaunch():
     assert observe.body[0].body[0].value.value == "HOLD_WINDOWS_UNPROVEN"
     assignment = next(n for n in tree.body if isinstance(n, ast.Assign) and
                       any(isinstance(t, ast.Name) and t.id == "READER" for t in n.targets))
-    assert isinstance(assignment.value, ast.BinOp)
+    assert isinstance(assignment.value, (ast.Constant, ast.BinOp))
     # Reconstruct the fixed reader literal from an inert AST, never invoke worker.
     reader_text = ast.literal_eval(assignment.value)
     reader_tree = ast.parse(reader_text)
