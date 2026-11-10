@@ -176,7 +176,7 @@ def inspect_local_pcm_wav(root: Path, asset_ref: str, expected_sha256: str,
     A caller must pin SHA independently. A reread plus stat fence detects
     ordinary races; this is NOT an independently attested Windows share lock.
     """
-    _need(type(root) is Path and root.is_absolute()
+    _need(isinstance(root, Path) and root.is_absolute()
           and type(asset_ref) is str and type(expected_sha256) is str
           and bool(SHA.fullmatch(expected_sha256)), "AUDIO_REQUEST_INVALID")
     try:
