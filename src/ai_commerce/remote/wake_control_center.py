@@ -269,24 +269,21 @@ class WakePanel:
             return {"code": "CDP_INSPECTION_UNAVAILABLE"}
 
     def _inspect_pages(self, binding, pages):
-                matches = [page for page in pages
-                           if isinstance(page.url, str) and
-                           page.url.rstrip("/") == binding.chat_url]
-                if len(matches) > 1:
-                    code = "EXACT_CHAT_AMBIGUOUS"
-                elif len(matches) == 1:
-                    if self.cdp_port == 9444:
-                        # WH-06 never displays a URL-only match as ready.
-                        # This is a candidate read, not account/route authority.
-                        observed = matches[0].evaluate(_CHAT_A_READ_ONLY_SURFACE)
-                        code = ("EXACT_CHAT_PRESENT" if observed == "CANDIDATE_READY"
-                                else "DRAFT_PRESENT" if observed == "DRAFT_PRESENT"
-                                else "SURFACE_UNPROVEN")
-                    else:
-                        code = "EXACT_CHAT_PRESENT"
-                else:
-                    code = "EXACT_CHAT_NOT_OPEN"
-                return code
+        matches = [page for page in pages
+                   if isinstance(page.url, str) and
+                   page.url.rstrip("/") == binding.chat_url]
+        if len(matches) > 1:
+            return "EXACT_CHAT_AMBIGUOUS"
+        if len(matches) == 1:
+            if self.cdp_port == 9444:
+                # WH-06 never displays a URL-only match as ready.
+                # This is a candidate read, not account/route authority.
+                observed = matches[0].evaluate(_CHAT_A_READ_ONLY_SURFACE)
+                return ("EXACT_CHAT_PRESENT" if observed == "CANDIDATE_READY"
+                        else "DRAFT_PRESENT" if observed == "DRAFT_PRESENT"
+                        else "SURFACE_UNPROVEN")
+            return "EXACT_CHAT_PRESENT"
+        return "EXACT_CHAT_NOT_OPEN"
 
     def open_exact_chat(self):
         # Only entered by an independently authorized same-origin UI click.
