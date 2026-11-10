@@ -1,0 +1,95 @@
+{
+  "schema_version": "WorkItem.v1",
+  "work_id": "BQ-05B1_PRIVATE_BROKER_TRIAL_HANDOFF_001",
+  "source_sha": "0e6e420dc10e390d2c9d3db3b0c98adfebe40cb5",
+  "human_authorization_ref": "2026-11-10 Human continuation of #767: CI-first fresh independent BQ-05b.1 source only; no replay of #646 or #656 native journal.",
+  "parent_issue": 767,
+  "status": "SOURCE_CANDIDATE_PENDING_EXACT_HEAD_WINDOWS_CI_AND_BRAIN",
+  "objective": "Independent native-current B0.4/Q4/Q5 technical byte-bound PRIVATE_BROKER_TRIAL_INTERFACE_V1, deterministic field-name-only no-secret adversarial vectors; all live effects remain denied.",
+  "owner": "Media & Creative",
+  "component": "bq-05b1",
+  "execution_route": "DIRECT_SOURCE_AUTHORING_CI_FIRST_NO_EF02_EXECUTOR_INVOCATION",
+  "verification_profile": "mt01-component-onboarding",
+  "verification_round_limit": 2,
+  "add_only_paths": [
+    "src/ai_commerce/creative_quality/pulse_studio_broker_handoff.py",
+    "tests/test_bq_05b1_broker_handoff.py",
+    "work_items/mt01-components/bq-05b1.json",
+    "work_items/BQ-05B1_PRIVATE_BROKER_TRIAL_HANDOFF_001.json",
+    "docs/creative/BQ_05B1_PRIVATE_BROKER_TRIAL_HANDOFF.md"
+  ],
+  "modified_paths": [
+    "docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md"
+  ],
+  "allowed_paths": [
+    "src/ai_commerce/creative_quality/pulse_studio_broker_handoff.py",
+    "tests/test_bq_05b1_broker_handoff.py",
+    "work_items/mt01-components/bq-05b1.json",
+    "work_items/BQ-05B1_PRIVATE_BROKER_TRIAL_HANDOFF_001.json",
+    "docs/creative/BQ_05B1_PRIVATE_BROKER_TRIAL_HANDOFF.md",
+    "docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md"
+  ],
+  "acceptance": [
+    "BQ-05b1.native-current-handoff-binding",
+    "BQ-05b1.independent-broker-no-secret-trial-vectors",
+    "BQ-05b1.no-live-authority-translation"
+  ],
+  "negative_acceptance": [
+    {
+      "ac": "BQ-05b1.stale-native-and-issuer-forgery-denied",
+      "tests": [
+        "test_stale_media_journal_receipt_and_current_native_replay_hold",
+        "test_self_resealed_or_injected_trial_does_not_authenticate"
+      ]
+    },
+    {
+      "ac": "BQ-05b1.mismatched-selection-and-live-effect-denied",
+      "tests": [
+        "test_untrusted_selection_expired_scope_and_replay_holds_before_native",
+        "test_no_live_authority_translation_or_provider_effect"
+      ]
+    },
+    {
+      "ac": "BQ-05b1.native-stage-and-path-negative",
+      "tests": [
+        "test_pre_wait_brain_does_not_establish_trial",
+        "test_native_hardlink_alias_not_promoted"
+      ]
+    }
+  ],
+  "consumer_evidence": [
+    "bq-05b0",
+    "bq-05a",
+    "b0-s3b",
+    "b0-3",
+    "b0-4",
+    "a06",
+    "q4",
+    "q5",
+    "PULSE closed v1 contracts"
+  ],
+  "historical_workowner_policy": {
+    "original_issue": 646,
+    "original_stage": "UNKNOWN",
+    "original_tip_sha": "2dd88fb49d948eab1f37e4691d55a392bf112181",
+    "no_replay": true,
+    "no_transfer": true,
+    "no_journal_mutation": true,
+    "independent_product_source_only": true,
+    "epwo_native_tracking_issue": 656
+  },
+  "live_limits": [
+    "NO_PROVIDER_ACTIVATION",
+    "NO_CREDENTIALS",
+    "NO_SIGN_IN",
+    "NO_PRIVATE_ISSUER_ENROLLMENT",
+    "NO_EXTERNAL_EFFECT",
+    "NO_SPEND",
+    "NO_UPLOAD",
+    "NO_PUBLICATION",
+    "NO_AUTHENTICATED_BRAIN_DECISION",
+    "NO_REAL_HUMAN_EFFECT_GRANT",
+    "NO_HISTORICAL_WORKOWNER_REKEY"
+  ],
+  "candidate_claim": "UNVERIFIED_UNTIL_ACTUAL_HOSTED_WINDOWS_EXACT_HEAD_AND_INDEPENDENT_BRAIN"
+}
