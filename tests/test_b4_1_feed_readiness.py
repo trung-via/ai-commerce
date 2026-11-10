@@ -144,7 +144,7 @@ def test_packet_hash_forgery_and_false_provider_grant_rejected(tmp_path):
     with pytest.raises(B4FeedHold, match="B41_PACKET_DIGEST_INVALID"):
         B4FeedReadiness(canonical_bytes(out))
     out["record_sha256"] = sha256(canonical_bytes({
-        k: v for k, v in out.items() if k != "record_sha256",
+        k: v for k, v in out.items() if k != "record_sha256"
     })).hexdigest()
     with pytest.raises(B4FeedHold, match="B41_PACKET_AUTHORITY_INVALID"):
         B4FeedReadiness(canonical_bytes(out))
