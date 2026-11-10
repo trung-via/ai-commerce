@@ -4,14 +4,14 @@
   "audit_date": "2026-11-10",
   "source_repo": "trung-via/ai-commerce",
   "source_main_sha": "9493bae0664c152df77dc5c7d0b61780f6159f1e",
-  "authority": "Brain roadmap audit + explicit Human request for docs/work-tree update; not a new provider/native grant",
+  "authority": "Human decision 2026-11-11: WP/EPWO roadmap retired, to be removed from live Engineering via CI-only source PR. Historical refs preserved in immutable Git/Issue history.",
   "historical_truth_preserved": [
     "docs/roadmap/WORK_TREE_V1_1.json",
     "docs/roadmap/WORK_TREE_B_QUALITY_001_V1_0.json",
     "docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.json"
   ],
   "evidence_rule": "Human decisions govern scope; merged PR/CI demonstrate bounded source only; independent native/provider/UI/commercial receipts are required for higher claims. Issue open/closed is not a delivery state.",
-  "source_state_note": "HISTORICAL_PLAN_OR_SOURCE_REPORTED and CURRENT_REASSESSMENT_REQUIRED intentionally make no current implementation claim. PARTIAL_SOURCE_MERGED is not full package acceptance.",
+  "source_state_note": "This active execution register excludes retired EPWO WP01–WP06. Retirement of source runtime remains unverified until merged CI evidence; no inherited old UNKNOWN effect authorizes replay.",
   "crosswalk_integrity": {
     "canonical_wbs_count": 63,
     "unique_wbs_ids": 63,
@@ -1393,93 +1393,6 @@
       ]
     },
     {
-      "domain": "EPWO",
-      "id": "WP01",
-      "source_state": "PARTIAL_SOURCE_MERGED",
-      "live_state": "REAL_RECOVERY_NOT_PROVEN",
-      "evidence_refs": [
-        "https://github.com/trung-via/ai-commerce/pull/762",
-        "https://github.com/trung-via/ai-commerce/pull/773"
-      ],
-      "blocker_refs": [
-        "https://github.com/trung-via/ai-commerce/issues/466"
-      ],
-      "note": "Disposable process restart proof is not actual runner reboot nor old UNKNOWN resolution",
-      "depends_on": []
-    },
-    {
-      "domain": "EPWO",
-      "id": "WP02",
-      "source_state": "PARTIAL_SOURCE_MERGED_OPEN_CI_RED",
-      "live_state": "REAL_RECOVERY_NOT_PROVEN",
-      "evidence_refs": [
-        "https://github.com/trung-via/ai-commerce/pull/781",
-        "https://github.com/trung-via/ai-commerce/actions/runs/42845647214"
-      ],
-      "blocker_refs": [
-        "https://github.com/trung-via/ai-commerce/pull/784",
-        "https://github.com/trung-via/ai-commerce/issues/466"
-      ],
-      "note": "WP02 PR #784 exact-head Windows CI failed; cross-job test boundary must be repaired without weakening negative gates",
-      "depends_on": []
-    },
-    {
-      "domain": "EPWO",
-      "id": "WP03",
-      "source_state": "CURRENT_REASSESSMENT_REQUIRED",
-      "live_state": "NOT_INDEPENDENTLY_VERIFIED",
-      "evidence_refs": [
-        "https://github.com/trung-via/ai-commerce/issues/466"
-      ],
-      "blocker_refs": [
-        "https://github.com/trung-via/ai-commerce/issues/466"
-      ],
-      "note": "Umbrella planning description is not a delivery receipt",
-      "depends_on": []
-    },
-    {
-      "domain": "EPWO",
-      "id": "WP04",
-      "source_state": "CURRENT_REASSESSMENT_REQUIRED",
-      "live_state": "NOT_INDEPENDENTLY_VERIFIED",
-      "evidence_refs": [
-        "https://github.com/trung-via/ai-commerce/issues/466"
-      ],
-      "blocker_refs": [
-        "https://github.com/trung-via/ai-commerce/issues/466"
-      ],
-      "note": "Umbrella planning description is not a delivery receipt",
-      "depends_on": []
-    },
-    {
-      "domain": "EPWO",
-      "id": "WP05",
-      "source_state": "CURRENT_REASSESSMENT_REQUIRED",
-      "live_state": "NOT_INDEPENDENTLY_VERIFIED",
-      "evidence_refs": [
-        "https://github.com/trung-via/ai-commerce/issues/466"
-      ],
-      "blocker_refs": [
-        "https://github.com/trung-via/ai-commerce/issues/466"
-      ],
-      "note": "Umbrella planning description is not a delivery receipt",
-      "depends_on": []
-    },
-    {
-      "domain": "EPWO",
-      "id": "WP06",
-      "source_state": "CURRENT_REASSESSMENT_REQUIRED",
-      "live_state": "NOT_INDEPENDENTLY_VERIFIED",
-      "evidence_refs": [
-        "https://github.com/trung-via/ai-commerce/issues/466"
-      ],
-      "blocker_refs": [
-        "https://github.com/trung-via/ai-commerce/issues/466"
-      ],
-      "note": "Umbrella planning description is not a delivery receipt",
-      "depends_on": []
-    },
-    {
       "domain": "WAKEHUB",
       "id": "WH00",
       "source_state": "CURRENT_REASSESSMENT_REQUIRED",
@@ -1644,12 +1557,9 @@
       "id": "G0_CI_TRUST",
       "scope": "engineering",
       "required": "Current owned tests + exact-head Windows CI + independent Brain review",
-      "observed": "PR784_HOSTED_CI_FAILURE",
-      "blockers": [
-        "https://github.com/trung-via/ai-commerce/pull/784",
-        "https://github.com/trung-via/ai-commerce/actions/runs/42845647214"
-      ],
-      "next": "Bound YAML-job parser in tests; preserve token-negative assertions; recheck exact-head CI"
+      "observed": "WP_EPWO_RETIRED_BY_HUMAN; LEGACY_RUNTIME_REMOVAL_PENDING_CI",
+      "blockers": [],
+      "next": "CI-only retirement PR: prove WP dispatch denied; independently remove WorkOwner runtime without breaking EF01/EF02 and MT-01. No coding executor for retirement."
     },
     {
       "id": "G1_WAKE_SEND_ONLY",

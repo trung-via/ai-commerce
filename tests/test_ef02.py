@@ -1632,3 +1632,26 @@ def test_wp02_native_supervisor_owner_gate_and_no_provider():
     forbidden = ("issues: write", "github.event.issue.body", "GITHUB_TOKEN",
                  "taskkill", "Restart-Service", "--model", "agy --print", "codex --")
     assert all(token not in job for token in forbidden)
+
+
+
+def test_retired_epwo_wp_issues_fail_closed_before_ef02_executor():
+    """Human-retired WP action classes cannot be revived by Issue or dispatch."""
+    ingress = (ROOT / ".github" / "workflows" / "issue-ingress.yml").read_text(encoding="utf-8")
+    batch = (ROOT / ".github" / "workflows" / "ef02-batch.yml").read_text(encoding="utf-8")
+    assert "RETIRED_WP_NOT_DISPATCHABLE" in batch
+    assert "data.body" in batch and "data.title" in batch
+    assert "github.event.action == 'labeled'" in ingress
+    for token in ("EPWO", "WP01", "WP02", "WP03", "WP04", "WP05", "WP06"):
+        assert f"!contains(github.event.issue.title, '{token}')" in ingress
+    assert "data.pull_request || !data.title.startsWith('[EF02]')" in batch
+    assert "core.setFailed('RETIRED_WP_NOT_DISPATCHABLE')" in batch
+    assert "github.event_name == 'workflow_dispatch'" in batch
+
+
+def test_retired_epwo_packages_absent_from_active_roadmap_register():
+    index = json.loads((ROOT / "docs" / "roadmap" /
+                        "ROADMAP_EXECUTION_REGISTER_V2_1.json").read_text(encoding="utf-8"))
+    assert not any(item["domain"] == "EPWO" for item in index["package_executions"])
+    assert len(index["package_executions"]) == 42
+    assert len(index["wbs_crosswalk"]) == 63
