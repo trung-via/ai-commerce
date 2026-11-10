@@ -764,3 +764,43 @@ jobs:
           '@
           & python -B -c $probe
           exit $LASTEXITCODE
+
+  wp02-native-supervisor-restart:
+    # Exact owner-created issue, once only. Disposable supervisor process only.
+    # WorkOwner fixture uses fake GitHub refs in RUNNER_TEMP; no real provider.
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.action == 'opened' &&
+      github.repository == 'trung-via/ai-commerce' &&
+      github.actor == github.repository_owner &&
+      github.event.issue.user.login == github.repository_owner &&
+      github.event.issue.title == '[EPWO WP02 NATIVE SUPERVISOR RESTART] #466' &&
+      github.run_attempt == 1
+    runs-on: [self-hosted, Windows, ai-commerce-ef02]
+    timeout-minutes: 4
+    concurrency:
+      group: epwo-wp02-native-supervisor-restart-once
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout trusted main without credentials
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Kill only the disposable supervisor and hold WorkOwner in fresh process
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:RUNNER_TEMP -or -not (Test-Path -LiteralPath $env:RUNNER_TEMP -PathType Container)) { exit 2 }
+          $env:PYTHONPATH = "$env:GITHUB_WORKSPACE\src;$env:GITHUB_WORKSPACE\tests"
+          & python -B -m pytest -q -s --basetemp "$env:RUNNER_TEMP\epwo-wp02-supervisor-$env:GITHUB_RUN_ID" tests/test_ef02_m0r_fault_injection.py::test_wp02_disposable_supervisor_crash_new_supervisor_readonly
+          if ($LASTEXITCODE -ne 0) { exit 2 }
+          Write-Output 'EPWO_WP02_NATIVE_STATUS=PASS_DISPOSABLE_SUPERVISOR_RESTART_HOLD'
+          Write-Output 'EPWO_WP02_NATIVE_EFFECT=SIMULATED_JOURNAL_ONLY'
+          Write-Output 'EPWO_WP02_NATIVE_RUNNER_REBOOT=NOT_TESTED'
+          Write-Output 'EPWO_WP02_NATIVE_GITHUB_REFS=NOT_WRITTEN'
+          Write-Output 'EPWO_WP02_NATIVE_PROVIDER=NOT_INVOKED'
+          Write-Output 'EPWO_WP02_NATIVE_WORKOWNER_710=NOT_TOUCHED'
+          Write-Output 'EPWO_WP02_NATIVE_REPLAY_AUTHORIZED=FALSE'
