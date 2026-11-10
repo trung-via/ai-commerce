@@ -133,7 +133,44 @@ def _validate_actions(data: dict, *, registry: dict[str, list[str]],
         dfs(node)
     return data
 
-def approved_acceptance_plan(action: dict) -> dict:
+def _reviewed_intake_groups() -> tuple:
+    """Use static owners plus immutable Git-committed MT-01 onboarding owners.
+
+    The CI planner already loads accepted manifests from its pinned base; EF02
+    intake must use the same reviewed path, not register those owners a second
+    time in approved_groups(). A mutable Issue or uncommitted manifest is never
+    an authority to add ACs or source paths.
+    """
+    static = approved_groups()
+    checkout = Path(__file__).resolve().parents[3]
+    if not (checkout / ".git").exists():
+        # Installed wheels outside a source checkout keep known static owners.
+        # Committed dynamic owners remain unavailable, not self-certified.
+        return static
+    try:
+        from ai_commerce.engineering.impact_v21 import (
+            load_baseline_component_owner_records,
+        )
+        def head():
+            raw = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=checkout,
+                stderr=subprocess.DEVNULL, timeout=20).decode("ascii").strip()
+            if not HEX_SHA.fullmatch(raw):
+                raise ValueError("INTAKE_SOURCE_HEAD_INVALID")
+            return raw
+
+        source = head()
+        reviewed = load_baseline_component_owner_records(
+            root=checkout, base_sha=source, existing_groups=static)
+        if head() != source:
+            raise ValueError("INTAKE_SOURCE_HEAD_DRIFT")
+    except (OSError, ValueError, UnicodeError, subprocess.CalledProcessError,
+            subprocess.TimeoutExpired):
+        raise RemoteRequestError("INTAKE_REVIEWED_OWNER_UNVERIFIED") from None
+    return (*static, *(row["group"] for row in reviewed))
+
+
+def approved_acceptance_plan(action: dict, *, groups=None) -> dict:
     """Read a bounded declaration from the issuer's fingerprinted v1 instruction.
 
     No prose inference, new schema fields, executor file, or test argv is trusted.
@@ -155,7 +192,8 @@ def approved_acceptance_plan(action: dict) -> dict:
     except (ValueError, TypeError):
         ids = ["MT01.ACCEPTANCE_UNDECLARED"]
         reason = "AC_DECLARATION_MISSING_OR_INVALID_REQUIRES_BROAD_SCOPE"
-    mapping = {ac: {"group": g.name, "tests": list(g.tests)} for g in approved_groups() for ac in g.acs}
+    groups = _reviewed_intake_groups() if groups is None else groups
+    mapping = {ac: {"group": g.name, "tests": list(g.tests)} for g in groups for ac in g.acs}
     unknown = sorted(set(ids) - mapping.keys())
     return {"ids": sorted(ids), "unknown_ids": unknown,
             "consumer_map": {ac: mapping[ac] for ac in sorted(ids) if ac in mapping},
@@ -174,7 +212,8 @@ def require_preexecutor_acceptance(action: dict, *, source_closure: bool = False
                if line.lstrip().startswith(prefix)]
     if len(markers) != 1:
         raise RemoteRequestError("INTAKE_AC_MISSING_OR_AMBIGUOUS")
-    plan = approved_acceptance_plan(action)
+    groups = _reviewed_intake_groups()
+    plan = approved_acceptance_plan(action, groups=groups)
     if plan["reason"] != "EXPLICIT_FINGERPRINTED_INSTRUCTION_ACCEPTANCE":
         raise RemoteRequestError("INTAKE_AC_MALFORMED")
     if plan["unknown_ids"]:
@@ -185,7 +224,6 @@ def require_preexecutor_acceptance(action: dict, *, source_closure: bool = False
     # All map entries come from source-reviewed registered groups in the
     # pinned checkout. Issuer-declared ACs can expand, but cannot narrow
     # registered owner/consumer coverage or invent new test argv.
-    groups = approved_groups()
     required: set[str] = set()
     for allowed in action["allowed_paths"]:
         registered = [

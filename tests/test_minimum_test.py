@@ -2095,3 +2095,105 @@ def test_mt01_winerror_1314_integrated_negative_gate(mapped, monkeypatch, case):
     assert not prior
     assert selected["groups"][0]["result"] == "UNPROVEN"
     assert not (mapped.evidence / "round-0/mt01.0.evidence.json").exists()
+
+
+# WH-03C #794: keep the reviewed WH-00 owner/consumer AC connected to
+# EF02's strict pre-executor registry; source-only, no coding provider calls.
+def _wh03c_intake_action(acs, paths):
+    return {
+        "instruction": "MT01_ACCEPTANCE_JSON:" + json.dumps(acs),
+        "allowed_paths": paths,
+    }
+
+
+def test_wh03c_reviewed_d5_owner_comes_only_from_committed_manifest():
+    from ai_commerce.remote.validation import _reviewed_intake_groups
+
+    manifest_path = "work_items/mt01-components/d5-origin-affinity.json"
+    manifest = json.loads((ROOT / manifest_path).read_text(encoding="utf-8"))
+    assert manifest["schema_version"] == "MT01ComponentOwner.v1"
+    assert manifest["component"] == "d5-origin-affinity"
+    # Static duplicate ownership breaks MT-01 V2.1 PR planner.
+    assert all(g.name != manifest["component"] for g in mt.approved_groups())
+    matching = [g for g in _reviewed_intake_groups()
+                if g.name == manifest["component"]]
+    assert len(matching) == 1
+    group = matching[0]
+    assert group.mapping() == {
+        "tests": manifest["tests"],
+        "acs": manifest["acs"],
+        "paths": manifest["sources"],
+        "consumers": manifest["consumers"],
+        "contracts": [*manifest["contracts"], manifest_path],
+    }
+    assert all((ROOT / p).is_file() for p in
+               (*group.paths, *group.tests, *group.consumers, *group.contracts))
+
+
+@pytest.mark.parametrize("path", [
+    "src/ai_commerce/origin_affinity/__init__.py",
+    "src/ai_commerce/origin_affinity/contracts.py",
+    "tests/test_origin_affinity_contract.py",
+    "contracts/OriginReturnTicket.v1.schema.json",
+])
+def test_wh03c_accepted_ac_has_exact_registered_source_closure(path):
+    from ai_commerce.remote.validation import require_preexecutor_acceptance
+
+    ac = "D5.origin-affine-workflow-return-structural-draft-only"
+    result = require_preexecutor_acceptance(
+        _wh03c_intake_action([ac], [path]), source_closure=True)
+    assert result["owner_derived_ids"] == [ac]
+    assert result["ids"] == [ac]
+    assert result["consumer_map"][ac] == {
+        "group": "d5-origin-affinity",
+        "tests": ["tests/test_origin_affinity_contract.py"],
+    }
+
+
+def test_wh03c_shared_consumer_retains_wake_boundary_test_closure():
+    from ai_commerce.remote.validation import require_preexecutor_acceptance
+
+    ac = "D5.origin-affine-workflow-return-structural-draft-only"
+    result = require_preexecutor_acceptance(
+        _wh03c_intake_action([ac], [
+            "src/ai_commerce/remote/conversation_binding.py",
+        ]), source_closure=True)
+    assert set(result["owner_derived_ids"]) == {ac, "EF02.wake-boundaries"}
+    assert {result["consumer_map"][a]["group"] for a in result["ids"]} == {
+        "d5-origin-affinity", "ef02-wake",
+    }
+    assert result["broad_required"] is False
+
+
+@pytest.mark.parametrize("acs,paths,reason", [
+    (["D5.origin-affine-workflow-return-structural-draft-only.FORGED"],
+     ["src/ai_commerce/origin_affinity/contracts.py"], "INTAKE_AC_UNREGISTERED"),
+    (["EF02.wake-boundaries"],
+     ["src/ai_commerce/origin_affinity/contracts.py"], "INTAKE_AC_NOT_OWNING_ALLOWED_PATH"),
+    (["D5.origin-affine-workflow-return-structural-draft-only"],
+     ["src/ai_commerce/origin_affinity/unreviewed.py"], "INTAKE_SOURCE_OWNER_UNMAPPED"),
+    (["D5.origin-affine-workflow-return-structural-draft-only",
+      "WH03.fake-native-chat-attested"],
+     ["src/ai_commerce/origin_affinity/contracts.py"], "INTAKE_AC_UNREGISTERED"),
+])
+def test_wh03c_forged_or_unmapped_intake_still_fails_closed(acs, paths, reason):
+    from ai_commerce.remote.validation import (
+        RemoteRequestError, require_preexecutor_acceptance,
+    )
+
+    with pytest.raises(RemoteRequestError, match="^" + reason + "$"):
+        require_preexecutor_acceptance(
+            _wh03c_intake_action(acs, paths), source_closure=True)
+
+
+def test_wh03c_duplicate_ac_marker_is_not_admitted():
+    from ai_commerce.remote.validation import (
+        RemoteRequestError, require_preexecutor_acceptance,
+    )
+
+    action = _wh03c_intake_action(
+        ["D5.origin-affine-workflow-return-structural-draft-only"],
+        ["src/ai_commerce/origin_affinity/contracts.py"])
+    action["instruction"] += "\n" + action["instruction"]
+    with pytest.raises(RemoteRequestError, match="INTAKE_AC_MISSING_OR_AMBIGUOUS"):
+        require_preexecutor_acceptance(action, source_closure=True)
