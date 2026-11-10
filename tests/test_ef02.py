@@ -1682,15 +1682,15 @@ def test_ci_only_claim_publication_fence_requires_unmodified_remote_ancestry(mon
     refs = {
         "/git/ref/heads/ef02/claims/" + key: {"object": {"sha": claim_sha}},
         "/git/commits/" + claim_sha: {"message":
-            "EF02 CLAIM\\n\\nfingerprint=" + fp + "\\nattempt_id=" + attempt,
+            "EF02 CLAIM\n\nfingerprint=" + fp + "\nattempt_id=" + attempt,
             "parents": [{"sha": source}]},
         "/git/ref/heads/ef02/pre-spawn/" + key: {"object": {"sha": pre_sha}},
         "/git/commits/" + pre_sha: {"message":
-            "EF02 PRESPAWN\\n\\nfingerprint=" + fp + "\\nattempt_id=" + attempt,
+            "EF02 PRESPAWN\n\nfingerprint=" + fp + "\nattempt_id=" + attempt,
             "parents": [{"sha": claim_sha}]},
         "/git/ref/heads/ef02/spawned/" + key: {"object": {"sha": spawn_sha}},
         "/git/commits/" + spawn_sha: {"message":
-            "EF02 SPAWNED\\n\\nfingerprint=" + fp + "\\nattempt_id=" + attempt + "\\nchild_pid=1234",
+            "EF02 SPAWNED\n\nfingerprint=" + fp + "\nattempt_id=" + attempt + "\nchild_pid=1234",
             "parents": [{"sha": pre_sha}]},
     }
     def api(method, path):
