@@ -322,9 +322,10 @@ def test_wh06_9444_readonly_inspection_requires_idle_safe_chat_surface():
             return state[0]
     class Inventory:
         @contextmanager
-        def pages(self, endpoint):
+        def contexts(self, endpoint):
+            from types import SimpleNamespace
             assert endpoint == binding.cdp_endpoint
-            yield [Page()]
+            yield [SimpleNamespace(pages=[Page()])]
     panel = WakePanel(store=Store(), route_reader=lambda: binding,
                       tcp_probe=lambda: True, cdp_port=9444,
                       inventory_factory=Inventory)
@@ -334,3 +335,159 @@ def test_wh06_9444_readonly_inspection_requires_idle_safe_chat_surface():
     state[0] = "CANDIDATE_READY"
     assert panel.inspect_exact_chat()["code"] == "EXACT_CHAT_PRESENT"
     assert panel.status()["can_send"] is False
+
+
+def test_wh06_preview_only_literal_never_grants_send_even_when_enrolled():
+    from ai_commerce.remote.wake_control_center import WakePanel, _HTML_9444
+    from ai_commerce.remote.conversation_binding import ResolvedBinding
+    binding = ResolvedBinding(
+        route_id="private-route-A", generation=4,
+        chat_url="https://chatgpt.com/c/12345678-1234-4234-8234-123456789abc",
+        cdp_endpoint="http://127.0.0.1:9444")
+    class Store:
+        def read(self):
+            return dict(phase="READY", turn_index=0, source_sha="a"*40)
+    p = WakePanel(store=Store(), route_reader=lambda: binding,
+                  tcp_probe=lambda: True, cdp_port=9444)
+    result = p.preview_wake()
+    assert result == {
+        "schema_version": "WakeHubWH06Preview.v1",
+        "code": "PREVIEW_ONLY",
+        "text": "kiểm tra",
+        "route": "PRESENT_UNATTESTED",
+        "origin_proven": False, "event_proven": False,
+        "consent_proven": False, "send_authorized": False,
+        "wake_sent": False, "effect": "NOT_ATTEMPTED",
+    }
+    assert binding.chat_url not in str(result)
+    assert binding.route_id not in str(result)
+    assert "id=\"preview\"" in _HTML_9444
+    assert "id=\"dry-run\"" in _HTML_9444
+    assert "/api/preview" in _HTML_9444
+    assert "/api/dry-run" in _HTML_9444
+    assert "id=\"send\"" not in _HTML_9444
+    assert "/api/prepare-turn" not in _HTML_9444
+
+
+@pytest.mark.parametrize("visible,expected", [
+    ("CANDIDATE_READY", "SURFACE_CANDIDATE_ORIGIN_UNATTESTED"),
+    ("DRAFT_PRESENT", "DRAFT_PRESENT"),
+    ("SURFACE_UNPROVEN", "SURFACE_UNPROVEN"),
+    (None, "EXACT_CHAT_NOT_OPEN"),
+])
+def test_wh06_dry_run_only_read_does_not_create_tab_or_send(visible, expected):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from ai_commerce.remote.wake_control_center import WakePanel
+    from ai_commerce.remote.conversation_binding import ResolvedBinding
+    binding = ResolvedBinding(
+        route_id="private-A", generation=2,
+        chat_url="https://chatgpt.com/c/12345678-1234-4234-8234-123456789abc",
+        cdp_endpoint="http://127.0.0.1:9444")
+    attempts=[]
+    class Store:
+        def read(self):
+            attempts.append("read_state")
+            return dict(phase="READY", turn_index=0, source_sha="a"*40)
+    class Page:
+        url = binding.chat_url
+        def evaluate(self, script):
+            attempts.append("evaluate_only")
+            assert "CANDIDATE_READY" in script
+            return visible
+    class Inventory:
+        @contextmanager
+        def contexts(self, endpoint):
+            attempts.append("contexts_read")
+            assert endpoint == binding.cdp_endpoint
+            yield [SimpleNamespace(pages=[Page()] if visible is not None else [])]
+    p = WakePanel(store=Store(), route_reader=lambda: binding,
+                  tcp_probe=lambda: True, source_reader=lambda: "a"*40,
+                  inventory_factory=Inventory, cdp_port=9444)
+    result = p.dry_run_wake()
+    assert result["code"] == expected
+    assert result["send_authorized"] is False
+    assert result["origin_proven"] is False
+    assert result["event_proven"] is False
+    assert result["consent_proven"] is False
+    assert result["effect"] == "NOT_ATTEMPTED"
+    assert result["wake_sent"] is False
+    assert binding.chat_url not in str(result)
+    assert "contexts_read" in attempts
+    assert not any(x in attempts for x in ("new_page", "goto", "click", "send"))
+
+
+@pytest.mark.parametrize("phase,expected", [
+    ("SUBMISSION_UNKNOWN", "HOLD_UNKNOWN_EFFECT_NO_RETRY"),
+    ("COMPLETE_UI_ONLY", "LEDGER_NOT_READY"),
+])
+def test_wh06_dry_run_old_unknown_or_finished_ledger_never_touches_browser(phase, expected):
+    from ai_commerce.remote.wake_control_center import WakePanel
+    class Store:
+        def read(self):
+            return dict(phase=phase, turn_index=0, source_sha="a"*40)
+    class Forbidden:
+        def __init__(self):
+            raise AssertionError("browser should never be consulted")
+    p = WakePanel(store=Store(), route_reader=lambda: None, cdp_port=9444,
+                  tcp_probe=lambda: (_ for _ in ()).throw(AssertionError("no tcp")),
+                  inventory_factory=Forbidden)
+    assert p.dry_run_wake()["code"] == expected
+
+
+def test_wh06_dry_run_rejects_multiple_contexts_even_with_matching_chat():
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from ai_commerce.remote.wake_control_center import WakePanel
+    from ai_commerce.remote.conversation_binding import ResolvedBinding
+    binding = ResolvedBinding(route_id="private-A", generation=2,
+        chat_url="https://chatgpt.com/c/12345678-1234-4234-8234-123456789abc",
+        cdp_endpoint="http://127.0.0.1:9444")
+    class Store:
+        def read(self):
+            return dict(phase="READY", turn_index=0, source_sha="a"*40)
+    class BadPage:
+        url = binding.chat_url
+        def evaluate(self, script):
+            raise AssertionError("ambiguous context may not be used")
+    class Inventory:
+        @contextmanager
+        def contexts(self, endpoint):
+            yield [SimpleNamespace(pages=[BadPage()]), SimpleNamespace(pages=[])]
+    p = WakePanel(store=Store(), route_reader=lambda: binding,
+                  tcp_probe=lambda: True, source_reader=lambda:"a"*40,
+                  inventory_factory=Inventory, cdp_port=9444)
+    assert p.inspect_exact_chat()["code"] == "PRELOAD_CONTEXT_AMBIGUOUS"
+    assert p.dry_run_wake()["code"] == "PRELOAD_CONTEXT_AMBIGUOUS"
+    assert p.status()["can_send"] is False
+
+
+def test_wh06_dry_run_detects_source_drift_before_browser_access():
+    from ai_commerce.remote.wake_control_center import WakePanel
+    from ai_commerce.remote.conversation_binding import ResolvedBinding
+    binding = ResolvedBinding(route_id="private-A", generation=2,
+        chat_url="https://chatgpt.com/c/12345678-1234-4234-8234-123456789abc",
+        cdp_endpoint="http://127.0.0.1:9444")
+    class Store:
+        def read(self):
+            return dict(phase="READY", turn_index=0, source_sha="a"*40)
+    class Forbidden:
+        def __init__(self):
+            raise AssertionError("source mismatch must stop before browser")
+    p = WakePanel(store=Store(), route_reader=lambda: binding,
+                  tcp_probe=lambda: True, source_reader=lambda:"b"*40,
+                  inventory_factory=Forbidden, cdp_port=9444)
+    assert p.dry_run_wake()["code"] == "SOURCE_SHA_CHANGED"
+
+
+def test_wh06_legacy_9333_never_gets_wh07_preview_or_dry_run():
+    from ai_commerce.remote.wake_control_center import WakePanel
+    class Store:
+        def read(self):
+            return dict(phase="READY", turn_index=0, source_sha="a"*40)
+    p = WakePanel(store=Store(), route_reader=lambda: None,
+                  tcp_probe=lambda: False, cdp_port=9333)
+    assert p.preview_wake()["code"] == "WH07_SCOPE_UNAVAILABLE"
+    assert p.preview_wake()["text"] == ""
+    assert p.dry_run_wake()["code"] == "WH07_SCOPE_UNAVAILABLE"
+    assert p.dry_run_wake()["wake_sent"] is False

@@ -3306,3 +3306,125 @@ def test_epwo_656_recovery_uses_existing_audit_not_untrusted_dict():
             "kind": "WorkOwnerReadOnlyAudit.v1",
             "source_gate": "VERIFIED", "native_effect": "NO_EFFECT_VERIFIED",
         })
+
+@pytest.mark.parametrize("fault", ["clean", "digest", "truncate"])
+def test_wp02_disposable_supervisor_crash_new_supervisor_readonly(fault, tmp_path):
+    """Kill only an owned disposable supervisor; rehydrate real WorkOwner from
+    persistent, test-only GitHub-like ref snapshot in a fresh interpreter.
+    No real provider, GitHub ref write, runner restart or owner transfer.
+    """
+    root = tmp_path / ("wp02-supervisor-" + fault)
+    root.mkdir()
+    packet = {"batch_id": "wp02-supervisor-fixture", "source_sha": BASE,
+              "actions": [_action()]}
+    supervisor = """
+import json, os, sys, time
+from pathlib import Path
+from test_ef01_repair import WorkOwnerMemoryTransport
+from ai_commerce.remote.transport import WorkOwner
+root = Path(sys.argv[1])
+packet = json.loads(sys.argv[2])
+storage = WorkOwnerMemoryTransport("a" * 40)
+storage.issue_body = packet
+identity = WorkOwner.identity(storage, 506, packet, packet["actions"][0])
+owner = WorkOwner.acquire(storage, identity)
+owner.append("CLAIMED")
+owner.append("SPAWN_INTENT")
+owner.append("CHILD_OBSERVED", pid=os.getpid())
+# Simulate provider boundary, do not launch provider.
+owner.append("PROVIDER_INTENT", round=0)
+state = {"source": storage.source, "refs": storage.refs, "commits": storage.commits,
+         "issue_body": storage.issue_body, "identity": identity}
+with (root / "journal.json").open("x", encoding="utf-8") as out:
+    json.dump(state, out, sort_keys=True)
+    out.flush()
+    os.fsync(out.fileno())
+with (root / "durable.ready").open("x", encoding="ascii") as out:
+    out.write("FSYNC_DONE")
+    out.flush()
+    os.fsync(out.fileno())
+time.sleep(30)
+"""
+    reader = """
+import json, os, sys
+from pathlib import Path
+from test_ef01_repair import WorkOwnerMemoryTransport
+from ai_commerce.remote.transport import WorkOwner, RemoteTransportError
+state = json.loads((Path(sys.argv[1]) / "journal.json").read_text(encoding="utf-8"))
+storage = WorkOwnerMemoryTransport(state["source"])
+storage.refs = state["refs"]
+storage.commits = state["commits"]
+storage.issue_body = state["issue_body"]
+storage.requests.clear()
+try:
+    result = WorkOwner(storage, state["identity"], "").reconcile()
+except (RemoteTransportError, ValueError, KeyError):
+    result = {"status": "HOLD_UNVERIFIED", "stage": "INTEGRITY_UNVERIFIED",
+              "replay_authorized": False, "publication_authorized": False}
+print(json.dumps({"pid": os.getpid(), "status": result["status"],
+    "stage": result["stage"], "replay_authorized": result["replay_authorized"],
+    "publication_authorized": result["publication_authorized"],
+    "get_only": all(method == "GET" for method, *_ in storage.requests),
+    "post_count": sum(method == "POST" for method, *_ in storage.requests)}))
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = (str(Path(__file__).resolve().parents[1] / "src") +
+                         os.pathsep + str(Path(__file__).resolve().parent))
+    for name in list(env):
+        if name.startswith("GIT_CONFIG_"):
+            env.pop(name, None)
+    opts = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {}
+    child = subprocess.Popen(
+        [sys.executable, "-B", "-c", supervisor, str(root), json.dumps(packet)],
+        cwd=root, env=env, stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **opts)
+    try:
+        import time
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            if child.poll() is not None:
+                pytest.fail("supervisor died before durable checkpoint")
+            if (root / "durable.ready").is_file() and (
+                    root / "durable.ready").read_bytes() == b"FSYNC_DONE":
+                break
+            time.sleep(.05)
+        else:
+            pytest.fail("durable snapshot not witnessed")
+        assert (root / "journal.json").is_file()
+        child.kill()
+        assert child.wait(timeout=8) != 0
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=8)
+    if fault != "clean":
+        state = json.loads((root / "journal.json").read_text(encoding="utf-8"))
+        tip = sorted(state["refs"])[-1]
+        if fault == "digest":
+            commit = state["commits"][state["refs"][tip]]
+            assert "PROVIDER_INTENT" in commit["message"]
+            commit["message"] = commit["message"].replace(
+                "PROVIDER_INTENT", "FORGED_INTENT", 1)
+        else:
+            del state["refs"][tip]
+        (root / "journal.json").write_text(json.dumps(state), encoding="utf-8")
+    fresh = subprocess.run(
+        [sys.executable, "-B", "-c", reader, str(root)], cwd=root, env=env,
+        capture_output=True, text=True, timeout=12, check=False, **opts)
+    assert fresh.returncode == 0, fresh.stderr
+    assert fresh.stderr == ""
+    result = json.loads(fresh.stdout)
+    assert result["pid"] != child.pid and result["pid"] != os.getpid()
+    assert result["get_only"] and result["post_count"] == 0
+    assert result["replay_authorized"] is False
+    assert result["publication_authorized"] is False
+    assert result["status"] in ("HOLD_UNKNOWN_EFFECT", "HOLD_UNVERIFIED")
+    assert result["stage"] not in ("RESULT_VERIFIED", "PUBLISH_INTENT", "PUBLISHED")
+    if fault == "clean":
+        assert (result["stage"], result["status"]) == (
+            "PROVIDER_INTENT", "HOLD_UNKNOWN_EFFECT")
+    if fault == "digest":
+        # Historic v1 records may be classified as legacy migration HOLD.
+        assert result["stage"] in ("INTEGRITY_UNVERIFIED", "ABSENT")
+    print("EPWO_WP02_SUPERVISOR_" + fault.upper() +
+          "=PASS_KILLED_NEW_READER_HOLD_NO_REPLAY")
