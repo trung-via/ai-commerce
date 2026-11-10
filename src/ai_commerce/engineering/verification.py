@@ -104,6 +104,21 @@ _SYMLINK_SKIP_LINE = re.compile(
 )
 
 
+# A second, exact Windows skip occurs in HostOps R02's native reparse
+# negative test. Require the independently matching JUnit test identity AND
+# summary file/line/reason: never strip other WinError diagnostics.
+_SYMLINK_SKIP_CASES = {
+    (_SYMLINK_SKIP_CLASS, _SYMLINK_SKIP_CASE): _SYMLINK_SKIP_LINE,
+    (
+        "tests.test_hostops_ef02_attempt_r02_readonly.EF02ForensicR02Tests",
+        "test_symlink_scope_path_is_unsafe",
+    ): re.compile(
+        rb"SKIPPED \[1\] tests[\\/]+test_hostops_ef02_attempt_r02_readonly"
+        rb"\.py:[0-9]+: NATIVE_SYMLINK_CREATION_UNPROVEN: WinError 1314"
+    ),
+}
+
+
 def _strip_verified_symlink_skip(
     stdout: bytes, stderr: bytes, exit_code: int, junit: bytes | None,
 ) -> bytes:
@@ -138,8 +153,8 @@ def _strip_verified_symlink_skip(
         if len(skipped) != 1:
             return stdout
         case, skip = skipped[0]
-        if (case.get("classname") != _SYMLINK_SKIP_CLASS
-                or case.get("name") != _SYMLINK_SKIP_CASE
+        case_key = (case.get("classname"), case.get("name"))
+        if (case_key not in _SYMLINK_SKIP_CASES
                 or skip.get("type") != "pytest.skip"
                 or (skip.get("message") or "").strip() != _SYMLINK_SKIP_REASON):
             return stdout
@@ -158,7 +173,8 @@ def _strip_verified_symlink_skip(
                   line.rstrip(b"\r\n").startswith(b"SKIPPED [")]
     marked = [line for line in lines if b"winerror" in line.lower()]
     if (len(skip_lines) != 1 or marked != skip_lines
-            or _SYMLINK_SKIP_LINE.fullmatch(skip_lines[0].rstrip(b"\r\n")) is None):
+            or _SYMLINK_SKIP_CASES[case_key].fullmatch(
+                skip_lines[0].rstrip(b"\r\n")) is None):
         return stdout
     # The actual result, count and all original artifacts remain unchanged.
     # Only the exact JUnit-proven diagnostic line is excluded from the
