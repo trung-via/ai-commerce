@@ -1,0 +1,43 @@
+{
+  "schema_version": "B4FeedReadinessWorkItem.v1",
+  "id": "B4-1_FEED_READINESS_001",
+  "issue": 757,
+  "source_main_sha": "a7797b06bc8e99e23c7dd22fbeaf5ffaac598633",
+  "status": "SOURCE_CANDIDATE_UNVERIFIED",
+  "authorization": "Human @AI Commerce 2026-11-10 ok tiếp tục roadmap; B4 optional but only offline first source slice",
+  "lane": "DIRECT_GITHUB_CI_FIRST_NO_PROVIDER",
+  "owner": "Product Evidence A12 native reader / Roadmap B4.1a",
+  "allowed_paths": [
+    "src/ai_commerce/product/b4_feed_readiness.py",
+    "tests/test_b4_1_feed_readiness.py",
+    "work_items/mt01-components/b4-feed-readiness.json",
+    "work_items/B4-1_FEED_READINESS_001.json",
+    "docs/production/B4_1_PRODUCT_FEED_READINESS_PROTOCOL.md",
+    "docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md"
+  ],
+  "positive_ac": [
+    "Exact A12 native head, listing and variant; reevaluate A12 offer/rights pack at supplied as_of",
+    "A12 legitimate counterevidence/correction flags changed asset review, does not auto-apply external revocation",
+    "A12 native owner+consumer regressions, no writes and canonical source digest"
+  ],
+  "negative_ac": [
+    "Missing/stale/expired/conflicting A12 evidence remains HOLD, not feed current",
+    "Wrong head and variant fail closed",
+    "No API, provider, rights/license sign-in, automatic provider payment, publish or asset mutation"
+  ],
+  "authority": {
+    "provider_call": false,
+    "provider_entitlement": false,
+    "feed_extraction": false,
+    "pulse": false,
+    "hostops": false,
+    "wake": false,
+    "spend": false,
+    "publish": false
+  },
+  "release_gates": [
+    "hosted Windows exact-head MT01 Python/Node and artifact",
+    "independent Brain source AC review",
+    "trusted auto-merge"
+  ]
+}

@@ -210,6 +210,8 @@ Mỗi phase dưới đây dùng cùng nguyên tắc MT-01: chỉ nhóm có mappi
 
 **Giả định:** 10–25 ngày công nếu branch được chọn; access/settlement waiting time UNKNOWN. Provider thử nghiệm giả định $0–100, inventory/capital **không dự toán/không được cấp**. **30/60/90:** ngày 30 gap/rights/source review; ngày 60 chỉ affiliate evidence nếu Human chọn; ngày 90 economic/brand advisory nếu đủ actual evidence, nếu không giữ conditional research/HOLD. Không hứa doanh thu trong 90 ngày.
 
+**B4.1a offline source cut (2026-11-10, Issue #757):** phát triển consumer đọc-only `B4FeedReadiness.v1` dùng A12 native registry/pinned head/pack export tại thời điểm đánh giá, phát hiện source/offer stale, rights scope expired, và counterevidence để yêu cầu review. Chỉ báo local `OFFLINE_ADVISORY_ONLY` hoặc `LOCAL_EVIDENCE_HOLD` đều **không** chứng nhận feed hiện tại, provider API/affiliate eligibility, quyền media, revocation ngoài hệ thống hay publish/spend. Đây là **candidate**, cần Windows CI + Brain PASS + trusted merge; live B4.1/P02 chưa được cấp phép.
+
 ## 10. Benchmark quota, chi phí và recovery bắt buộc ghi đúng mức
 
 | Chỉ số | Định nghĩa và target đề xuất | Bằng chứng hiện tại |
