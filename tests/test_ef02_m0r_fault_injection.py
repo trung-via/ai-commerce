@@ -3193,3 +3193,38 @@ def test_m0r_unknown_owner_or_missing_ac_fails_before_workowner_or_provider(tmp_
     assert result["error_code"] == "INTAKE_AC_NOT_OWNING_ALLOWED_PATH"
     assert result["executor_invoked"] is False
     assert result["candidate_sha"] is None
+
+@pytest.mark.parametrize("stage", [
+    "OWNED", "CLAIMED", "SPAWN_INTENT", "CHILD_OBSERVED",
+    "PROVIDER_INTENT", "UNKNOWN",
+])
+def test_wp01_failure_matrix_workowner_observation_is_get_only(stage):
+    """An ambiguous historical boundary stays UNKNOWN and cannot be claimed.
+
+    This uses only the in-memory GitHub transport and the actual WorkOwner
+    state machine; it never invokes GitHub or a model provider.
+    """
+    storage, identity, owner_type = _workowner_fixture()
+    owner = owner_type.acquire(storage, identity)
+    for next_stage, details in (
+        ("CLAIMED", {}),
+        ("SPAWN_INTENT", {}),
+        ("CHILD_OBSERVED", {"pid": 73}),
+        ("PROVIDER_INTENT", {"round": 0}),
+        ("UNKNOWN", {}),
+    ):
+        if owner.read()[-1]["stage"] == stage:
+            break
+        owner.append(next_stage, **details)
+    original = dict(storage.refs)
+    storage.requests.clear()
+    result = owner_type(storage, identity, "").reconcile()
+    assert result["status"] == "HOLD_UNKNOWN_EFFECT"
+    assert result["replay_authorized"] is False
+    assert result["publication_authorized"] is False
+    assert storage.refs == original
+    assert storage.requests and all(method == "GET" for method, *_ in storage.requests)
+    with pytest.raises(RemoteTransportError):
+        owner_type.acquire(storage, identity)
+    assert storage.refs == original
+    assert all(method == "GET" for method, *_ in storage.requests)
