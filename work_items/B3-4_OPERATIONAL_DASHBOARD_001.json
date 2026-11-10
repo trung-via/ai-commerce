@@ -1,0 +1,46 @@
+{
+  "schema_version": "B3OperationalDashboardWorkItem.v1",
+  "id": "B3-4_OPERATIONAL_DASHBOARD_001",
+  "issue": 752,
+  "source_main_sha": "dd81e895911682a078ed7c2871a85b9742544919",
+  "status": "SOURCE_CANDIDATE_UNVERIFIED",
+  "authorization": "2026-11-10 Human @AI Commerce ok tiếp tục Roadmap B after B3.3 #747 merged",
+  "lane": "DIRECT_GITHUB_CI_FIRST_SOURCE_ONLY",
+  "owner": "Production Runtime O07 / B0.4 observer + A15 cost native consumer",
+  "allowed_paths": [
+    ".github/scripts/ef02-pr-ci-tests.py",
+    "src/ai_commerce/production_runtime/b3_operational_dashboard.py",
+    "tests/test_b3_4_operational_dashboard.py",
+    "work_items/mt01-components/b3-operations-dashboard.json",
+    "work_items/B3-4_OPERATIONAL_DASHBOARD_001.json",
+    "docs/production/B3_4_OPERATIONAL_DASHBOARD_PROTOCOL.md",
+    "docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md"
+  ],
+  "positive_ac": [
+    "Read native pinned B0.4 audit head and actual B0.4 scoped recovery/latency counts",
+    "A15 selected immutable cost ledger records preserve per-currency estimated/supplied/synthetic totals",
+    "Missing external Brain/EF02/quota/Q4/lost-work values represented null not zero",
+    "Windows-hosted owner+consumer tests and genuine MT01 receipt",
+    "Real native B0.4 operator tests require ffmpeg/ffprobe; exact selected-path provisioning repaired without altering tests or global selector"
+  ],
+  "negative_ac": [
+    "Changed audit head/corrupt audit/incomplete native sources => typed HOLD, not retry",
+    "A15 duplicate/missing entries or race => typed HOLD",
+    "False global quota or signed provider claims => rejected canonical packet",
+    "No operations, external provider, finance, PULSE, HostOps or Wake"
+  ],
+  "permissions": {
+    "native_effect": false,
+    "provider_calls": false,
+    "ef02_dispatch": false,
+    "hostops_write": false,
+    "pulse": false,
+    "wake": false,
+    "human_adoption": false
+  },
+  "release_gates": [
+    "hosted Windows Python and Node MT01 owner+consumer genuine evidence",
+    "Brain independent exact-head review",
+    "trusted auto-merge"
+  ]
+}
