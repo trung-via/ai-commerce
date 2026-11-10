@@ -279,8 +279,13 @@ _SEARCH_MARKER = """(args) => {
 
 
 
-def _doorbell_text(event_id: str, repository: str, *, send_only: bool = False) -> str:
-    """Bounded exact Wake text. Send-only requests NO downstream orchestration."""
+def _doorbell_text(event_id: str, repository: str, *, send_only: bool = False,
+                   fixed_check_test: bool = False) -> str:
+    """Bounded exact Wake text; opt-in test only sends literal 'kiểm tra'."""
+    if fixed_check_test:
+        if send_only is not True or repository != "trung-via/ai-commerce":
+            raise ValueError("DOORBELL_TEST_SCOPE_INVALID")
+        return "kiểm tra"
     lines = [
         "[AI COMMERCE LOCAL CHAT WAKE]",
         "event_id: " + event_id,
@@ -851,7 +856,12 @@ class LocalChromeDoorbellAdapter:
                  allow_submit: bool = False,
                  inventory: BrowserInventory | None = None,
                  preload_exact_chat: bool = False,
-                 send_only: bool = False):
+                 send_only: bool = False,
+                 fixed_check_test: bool = False):
+        if (type(fixed_check_test) is not bool or
+                (fixed_check_test and
+                 (send_only is not True or repository != "trung-via/ai-commerce"))):
+            raise ValueError("DOORBELL_TEST_SCOPE_INVALID")
         if not isinstance(repository, str) or not _REPOSITORY.fullmatch(repository):
             raise ValueError("DOORBELL_REPOSITORY_INVALID")
         self.repository = repository
@@ -859,6 +869,8 @@ class LocalChromeDoorbellAdapter:
         self.inventory = inventory or _PlaywrightInventory()
         self.preload_exact_chat = preload_exact_chat is True
         self.send_only = send_only is True
+        # Only an explicitly configured trusted operator may select this mode.
+        self.fixed_check_test = fixed_check_test is True
 
     def send_wake(self, *, binding: ResolvedBinding,
                   message: str, event_id: str) -> WakeReceipt:
@@ -887,7 +899,8 @@ class LocalChromeDoorbellAdapter:
             if code not in ("EXACT_CHAT_PRESENT", "EXACT_CHAT_OPENED"):
                 return receipt("UNSUPPORTED", code)
         doorbell = _doorbell_text(event_id, self.repository,
-                                  send_only=self.send_only)
+                                  send_only=self.send_only,
+                                  fixed_check_test=self.fixed_check_test)
         args = {**_ARGS, "url": binding.chat_url, "text": doorbell}
         clicked = False
         staging_started = False

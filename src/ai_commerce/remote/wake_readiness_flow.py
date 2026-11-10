@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 
+from .conversation_binding import ResolvedBinding
 from . import chrome_acquisition
 from .wake_readiness_cache import ChromeAttestationCache
 from .local_completion_handoff import _private_identity
@@ -41,10 +42,11 @@ def _blocked(code: str, *, chrome: str = "UNVERIFIED") -> dict:
     }
 
 
-def _ready(*, launched: bool, verification: str, chat_preloaded: bool) -> dict:
+def _ready(*, launched: bool, verification: str, chat_preloaded: bool,
+           cdp_port: int = 9333) -> dict:
     return {
-        "status": "READY_FOR_PREPARE",
-        "chrome": "VERIFIED_9333", "chat": "EXACT_CHAT_PRESENT",
+        "status": "READY_TO_PREPARE" if cdp_port == 9444 else "READY_FOR_PREPARE",
+        "chrome": "VERIFIED_" + str(cdp_port), "chat": "EXACT_CHAT_PRESENT",
         "ledger": "READY", "launched": launched, "verification": verification,
         "auto_repaired": (["CHROME_LAUNCHED"] if launched else []) +
                          (["EXACT_CHAT_PRELOADED"] if chat_preloaded else []),
@@ -56,10 +58,14 @@ def _ready(*, launched: bool, verification: str, chat_preloaded: bool) -> dict:
 class ReadinessFlow:
     """Pure, testable sequencing across existing guarded components."""
 
-    def __init__(self, *, acquire, panel: WakePanel, source_reader):
+    def __init__(self, *, acquire, panel: WakePanel, source_reader,
+                 cdp_port: int = 9333):
+        if type(cdp_port) is not int or cdp_port not in (9333, 9444):
+            raise ValueError("READINESS_CDP_PORT_INVALID")
         self.acquire = acquire
         self.panel = panel
         self.source_reader = source_reader
+        self.cdp_port = cdp_port
 
     def execute(self, *, opt_in_launch: bool, opt_in_open_chat: bool) -> dict:
         # Gate on a fresh enrolled episode BEFORE touching the browser.
@@ -71,8 +77,10 @@ class ReadinessFlow:
         if before["phase"] != "READY":
             return _blocked("LEDGER_NOT_READY")
         binding = self.panel._route()
-        if binding is None:
-            return _blocked("ROUTE_NOT_ENROLLED_9333")
+        if binding is None or (self.cdp_port == 9444 and
+                (type(binding) is not ResolvedBinding or
+                 binding.cdp_endpoint != "http://127.0.0.1:9444")):
+            return _blocked("ROUTE_NOT_ENROLLED_" + str(self.cdp_port))
         try:
             if self.source_reader() != before["source_sha"]:
                 return _blocked("SOURCE_SHA_CHANGED")
@@ -101,33 +109,33 @@ class ReadinessFlow:
                     state["route"] != "ENROLLED" or
                     state["tcp"] != "REACHABLE_UNVERIFIED"):
                 return _blocked("ROUTE_LEDGER_OR_TCP_CHANGED",
-                                chrome="VERIFIED_9333")
+                                chrome="VERIFIED_" + str(self.cdp_port))
             chat = self.panel.inspect_exact_chat().get("code")
             if chat == "EXACT_CHAT_NOT_OPEN" and opt_in_open_chat:
                 # One operator-approved navigation, never auto-retry UNKNOWN.
                 opened = self.panel.open_exact_chat().get("code")
                 if opened not in _GOOD_CHATS:
                     return _blocked("EXACT_CHAT_PRELOAD_" + str(opened),
-                                    chrome="VERIFIED_9333")
+                                    chrome="VERIFIED_" + str(self.cdp_port))
                 chat_preloaded = True
                 chat = self.panel.inspect_exact_chat().get("code")
             if chat != "EXACT_CHAT_PRESENT":
                 return _blocked("EXACT_CHAT_" + str(chat),
-                                chrome="VERIFIED_9333")
+                                chrome="VERIFIED_" + str(self.cdp_port))
             if (self.panel._state() != before or self.panel._route() != binding):
                 return _blocked("STATE_OR_ROUTE_CHANGED",
-                                chrome="VERIFIED_9333")
+                                chrome="VERIFIED_" + str(self.cdp_port))
             # A second network SHA read is warranted only after a browser
             # mutation (launch/preload); ordinary warm Wake gets one read.
             if (launched or chat_preloaded) and self.source_reader() != before["source_sha"]:
-                return _blocked("SOURCE_SHA_CHANGED", chrome="VERIFIED_9333")
+                return _blocked("SOURCE_SHA_CHANGED", chrome="VERIFIED_" + str(self.cdp_port))
         except Exception:
             return _blocked("READINESS_CHECK_UNKNOWN",
-                            chrome="VERIFIED_9333")
+                            chrome="VERIFIED_" + str(self.cdp_port))
         return _ready(
             launched=launched,
             verification=acquired.get("verification", "FULL_ACQUISITION"),
-            chat_preloaded=chat_preloaded)
+            chat_preloaded=chat_preloaded, cdp_port=self.cdp_port)
 
 
 def _unique_json(pairs):
@@ -184,14 +192,15 @@ def main(argv: list[str] | None = None) -> int:
         config = Path(raw["chrome_config"])
         env = chrome_acquisition.load_environment(
             config, checkout, local_app_data=Path(os.environ["LOCALAPPDATA"]))
-        if env.port != 9333:
-            raise ValueError("CDP_PORT_NOT_9333")
+        if env.port not in (9333, 9444):
+            raise ValueError("CDP_PORT_NOT_SUPPORTED")
         panel = WakePanel(
             store=TurnSessionStore(path=Path(raw["state_file"]),
                                    repository_root=checkout),
             route_reader=lambda: load_registered_probe_route(
                 registry_path=Path(raw["registry"]), checkout=checkout,
                 route_id=raw["route_id"]),
+            cdp_port=env.port,
         )
         # An out-of-repository owner-checked proof cache survives separate
         # one-shot invocations. It NEVER lets a dead/replaced PID inherit
@@ -201,14 +210,15 @@ def main(argv: list[str] | None = None) -> int:
             checkout=checkout, env=env)
         flow = ReadinessFlow(
             acquire=lambda opt_in: cache.acquire(opt_in_launch=opt_in),
-            panel=panel, source_reader=_fresh_main_sha)
+            panel=panel, source_reader=_fresh_main_sha,
+            cdp_port=env.port)
         result = flow.execute(
             opt_in_launch=args.opt_in_launch,
             opt_in_open_chat=args.opt_in_open_chat)
     except Exception:
         result = _blocked("FLOW_CONFIG_OR_ENV_INVALID")
     print(json.dumps(result, sort_keys=True))
-    return 0 if result["status"] == "READY_FOR_PREPARE" else 2
+    return 0 if result["status"] in ("READY_FOR_PREPARE", "READY_TO_PREPARE") else 2
 
 
 if __name__ == "__main__":
