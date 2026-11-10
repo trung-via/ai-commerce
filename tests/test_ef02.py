@@ -1563,3 +1563,41 @@ def test_wp01_recovery_restart_reader_is_read_only_and_no_relaunch():
     assert all(term not in reader_text for term in forbidden)
     assert not any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and
                    n.name == "execute_action" for n in reader_tree.body)
+
+
+@pytest.mark.parametrize("mode,expected,exit_code", [
+    ("valid", "HOLD_UNKNOWN_NO_REPLAY", 0),
+    ("missing_intent", "HOLD_READER_UNVERIFIED", 2),
+    ("tampered_intent", "HOLD_READER_UNVERIFIED", 2),
+    ("missing_ready", "HOLD_READER_UNVERIFIED", 2),
+    ("tampered_ready", "HOLD_READER_UNVERIFIED", 2),
+    ("conflicting_terminal", "HOLD_READER_UNVERIFIED", 2),
+])
+def test_wp01_recovery_restart_reader_negative_cases(tmp_path, mode, expected, exit_code):
+    """Exercise the actual fresh reader in disposable pytest scratch only."""
+    import ast
+    _, script = _wp01_native_recovery_restart_source()
+    module = ast.parse(script)
+    assignment = next(n for n in module.body if isinstance(n, ast.Assign) and
+                      any(isinstance(t, ast.Name) and t.id == "READER" for t in n.targets))
+    reader_code = ast.literal_eval(assignment.value)
+    owned = tmp_path / "epwo-restart-reader"
+    owned.mkdir()
+    if mode != "missing_intent":
+        (owned / "intent.marker").write_bytes(
+            b"DIFFERENT" if mode == "tampered_intent" else b"INTENT_ONLY"
+        )
+    if mode != "missing_ready":
+        (owned / "durable.ready").write_bytes(
+            b"WRONG" if mode == "tampered_ready" else b"FSYNC_DONE"
+        )
+    if mode == "conflicting_terminal":
+        (owned / "terminal.marker").write_bytes(b"UNVERIFIED")
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", reader_code, str(owned)],
+        cwd=str(owned), capture_output=True, text=True, timeout=8, check=False,
+    )
+    assert result.returncode == exit_code
+    assert result.stdout.strip() == expected
+    assert result.stderr == ""
+    assert not list(owned.glob("*.new"))
