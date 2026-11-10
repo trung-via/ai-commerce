@@ -22,6 +22,7 @@ _UNCERTAIN = frozenset((
     "PRELOAD_NAVIGATION_UNKNOWN", "PRELOAD_NAVIGATION_UNVERIFIED",
     "PRELOAD_CDP_UNAVAILABLE", "PRELOAD_EXACT_CHAT_AMBIGUOUS",
     "PRELOAD_CONTEXT_AMBIGUOUS",
+    "PRELOAD_SURFACE_UNPROVEN", "PRELOAD_DRAFT_PRESENT",
 ))
 
 
@@ -121,6 +122,69 @@ class WakePanel:
             "server_receipt_proven": False,
         }
 
+    def preview_wake(self) -> dict:
+        """WH-06 source-only literal preview; never grant or attempt Send."""
+        status = self.status()
+        return {
+            "schema_version": "WakeHubWH06Preview.v1",
+            "code": "PREVIEW_ONLY" if self.cdp_port == 9444 else "WH07_SCOPE_UNAVAILABLE",
+            "text": "kiểm tra" if self.cdp_port == 9444 else "",
+            "route": ("PRESENT_UNATTESTED" if status["route"] == "ENROLLED"
+                      else "UNAVAILABLE"),
+            "origin_proven": False, "event_proven": False,
+            "consent_proven": False, "send_authorized": False,
+            "wake_sent": False, "effect": "NOT_ATTEMPTED",
+        }
+
+    def dry_run_wake(self) -> dict:
+        """WH-06 read-only checks; even a ready DOM is NOT a valid Wake event.
+
+        No issuer, completion event, private grant, navigation, draft or Send
+        enters this path. Preserve only public enums, never chat URLs or tokens.
+        """
+        def outcome(code):
+            return {
+                "schema_version": "WakeHubWH06DryRun.v1",
+                "code": code,
+                "origin_proven": False, "event_proven": False,
+                "consent_proven": False, "send_authorized": False,
+                "wake_sent": False, "effect": "NOT_ATTEMPTED",
+            }
+
+        if self.cdp_port != 9444:
+            return outcome("WH07_SCOPE_UNAVAILABLE")
+        state = self._state()
+        if state is None:
+            return outcome("PRIVATE_LEDGER_UNAVAILABLE")
+        if state["phase"] == "SUBMISSION_UNKNOWN":
+            return outcome("HOLD_UNKNOWN_EFFECT_NO_RETRY")
+        if state["phase"] != "READY":
+            return outcome("LEDGER_NOT_READY")
+        route = self._route()
+        if route is None:
+            return outcome("ROUTE_NOT_ENROLLED_9444")
+        try:
+            if self.source_reader() != state["source_sha"]:
+                return outcome("SOURCE_SHA_CHANGED")
+        except Exception:
+            return outcome("SOURCE_UNAVAILABLE")
+        inspected = self.inspect_exact_chat().get("code")
+        try:
+            if (self._state() != state or self._route() != route or
+                    self.source_reader() != state["source_sha"]):
+                return outcome("STATE_OR_ROUTE_CHANGED")
+        except Exception:
+            return outcome("SOURCE_UNAVAILABLE")
+        if inspected == "EXACT_CHAT_PRESENT":
+            return outcome("SURFACE_CANDIDATE_ORIGIN_UNATTESTED")
+        recognized = frozenset((
+            "EXACT_CHAT_NOT_OPEN", "EXACT_CHAT_AMBIGUOUS",
+            "PRELOAD_CONTEXT_AMBIGUOUS", "DRAFT_PRESENT", "SURFACE_UNPROVEN",
+            "ROUTE_CHANGED", "CDP_INSPECTION_UNAVAILABLE",
+            "CHROME_9444_NOT_REACHABLE", "ROUTE_UNAVAILABLE",
+        ))
+        return outcome(inspected if inspected in recognized else "SURFACE_UNPROVEN")
+
     def prepare_turn(self, consent: str) -> dict:
         """One explicitly consented @chip+prompt staging; never Send/retry.
 
@@ -189,7 +253,22 @@ class WakePanel:
         try:
             if self.tcp_probe() is not True:
                 return {"code": "CHROME_" + str(self.cdp_port) + "_NOT_REACHABLE"}
-            with self.inventory_factory().pages(binding.cdp_endpoint) as pages:
+            if self.cdp_port == 9444:
+                with self.inventory_factory().contexts(binding.cdp_endpoint) as contexts:
+                    if len(contexts) != 1:
+                        return {"code": "PRELOAD_CONTEXT_AMBIGUOUS"}
+                    pages = list(contexts[0].pages)
+                    code = self._inspect_pages(binding, pages)
+            else:
+                with self.inventory_factory().pages(binding.cdp_endpoint) as pages:
+                    code = self._inspect_pages(binding, pages)
+            if self._route() != binding:
+                return {"code": "ROUTE_CHANGED"}
+            return {"code": code}
+        except Exception:
+            return {"code": "CDP_INSPECTION_UNAVAILABLE"}
+
+    def _inspect_pages(self, binding, pages):
                 matches = [page for page in pages
                            if isinstance(page.url, str) and
                            page.url.rstrip("/") == binding.chat_url]
@@ -207,9 +286,7 @@ class WakePanel:
                         code = "EXACT_CHAT_PRESENT"
                 else:
                     code = "EXACT_CHAT_NOT_OPEN"
-                return {"code": code}
-        except Exception:
-            return {"code": "CDP_INSPECTION_UNAVAILABLE"}
+                return code
 
     def open_exact_chat(self):
         # Only entered by an independently authorized same-origin UI click.
@@ -407,7 +484,8 @@ button:disabled{opacity:.45;cursor:not-allowed}button:focus-visible{outline:3px 
 <section><div>Ledger / Trạng thái</div><div class="status" id="phase">Đang kiểm tra…</div>
 <div class="status" id="next"></div><small>UNKNOWN yêu cầu đối soát, không tự gửi lại.</small></section>
 <section><div class="controls"><button id="inspect">Kiểm tra chat (chỉ đọc)</button>
-<button id="open" disabled>Mở đúng chat</button><button id="refresh">Làm mới</button></div>
+<button id="open" disabled>Mở đúng chat</button><button id="refresh">Làm mới</button>
+<button id="preview">Preview</button><button id="dry-run">Dry-run (chỉ đọc)</button></div>
 <p class="status" id="result" role="status" aria-live="polite"></p></section>
 <small>WH-07 chỉ được gửi bởi bộ điều khiển private đã xác thực sự kiện, tuyến và quyền một lần.
 Nút Send và Prepare @plugin cố ý không có trong giao diện này.</small></main>
@@ -424,6 +502,20 @@ el('next').textContent=display(x.next_action);
 el('open').disabled=x.can_open!==true;
 }catch(e){el('open').disabled=true;el('next').textContent='Kiểm tra không khả dụng';}}
 el('refresh').onclick=refresh;
+el('preview').onclick=async()=>{
+try{const r=await fetch('/api/preview',{cache:'no-store'});
+if(!r.ok)throw Error();
+const x=await r.json();
+el('result').textContent='Preview: '+display(x.text)+' · '+display(x.code)+' · Chưa có quyền Send';}
+catch(e){el('result').textContent='Preview không khả dụng';}};
+el('dry-run').onclick=async()=>{el('dry-run').disabled=true;
+try{const r=await fetch('/api/dry-run',{method:'POST',
+headers:{'X-Wake-Token':token,'Content-Type':'application/json'},body:''});
+if(!r.ok)throw Error();
+const x=await r.json();
+el('result').textContent='Dry-run: '+display(x.code)+' · Không gửi Wake';}
+catch(e){el('result').textContent='Dry-run chưa xác minh, không Send';}
+el('dry-run').disabled=false;};
 el('inspect').onclick=async()=>{el('inspect').disabled=true;
 try{const r=await fetch('/api/inspect-chat',{cache:'no-store'});
 const x=await r.json();el('result').textContent=display(x.code);}
@@ -478,6 +570,8 @@ def make_handler(panel: WakePanel, *, port: int, token: str):
                 return self._json(200, panel.status())
             if self.path == "/api/inspect-chat":
                 return self._json(200, panel.inspect_exact_chat())
+            if self.path == "/api/preview" and panel.cdp_port == 9444:
+                return self._json(200, panel.preview_wake())
             return self._json(404, {"code": "NOT_FOUND"})
 
         def do_POST(self):
@@ -485,6 +579,10 @@ def make_handler(panel: WakePanel, *, port: int, token: str):
                 return self._json(403, {"code": "ORIGIN_REJECTED"})
             if not secrets.compare_digest(self.headers.get("X-Wake-Token", ""), token):
                 return self._json(403, {"code": "TOKEN_REJECTED"})
+            if self.path == "/api/dry-run" and panel.cdp_port == 9444:
+                if self.headers.get("Content-Length") not in ("0", None):
+                    return self._json(400, {"code": "OPERATION_NOT_ALLOWED"})
+                return self._json(200, panel.dry_run_wake())
             if self.path == "/api/open-chat":
                 if self.headers.get("Content-Length") not in ("0", None):
                     return self._json(400, {"code": "OPERATION_NOT_ALLOWED"})
