@@ -1,5 +1,7 @@
 # AI Commerce — Roadmap A: Creative-First v1.0
 
+**Current execution overlay (2026-11-10):** [Integrated Roadmap Execution Register v2.1](ROADMAP_EXECUTION_REGISTER_V2_1.md) ([machine-readable 63-WBS crosswalk / 48 package-lane observations](ROADMAP_EXECUTION_REGISTER_V2_1.json)). Historical statuses and 2026-10-28 executor-selection rules below describe their dated decisions; current Human policy and actual Issue/PR/CI/native evidence supersede them where applicable. Retain A01–A18, six phases and independent Engineering lane unchanged.
+
 **Canonical planning · Human-approved 2026-10-28 · No dispatch / implementation implied.**
 
 Source: Work Tree v1.1 (63 WBS IDs); prior Roadmap A six phases/A01–A18 selected by Human. Governance v0.3 prevails. Work package boundaries are adjustable by Human and are not independent AIOS TASKs. This is the first repository-canonical Roadmap A artifact; phase names and IDs follow the earlier selected plan, while this file records detailed package mapping and Phase-0 EF decisions.
