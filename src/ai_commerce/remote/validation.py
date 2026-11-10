@@ -133,7 +133,8 @@ def _validate_actions(data: dict, *, registry: dict[str, list[str]],
         dfs(node)
     return data
 
-def _reviewed_intake_groups() -> tuple:
+def _reviewed_intake_groups(*, checkout: Path | None = None,
+                            source_sha: str | None = None) -> tuple:
     """Use static owners plus immutable Git-committed MT-01 onboarding owners.
 
     The CI planner already loads accepted manifests from its pinned base; EF02
@@ -142,10 +143,16 @@ def _reviewed_intake_groups() -> tuple:
     an authority to add ACs or source paths.
     """
     static = approved_groups()
-    checkout = Path(__file__).resolve().parents[3]
+    checkout = (checkout if checkout is not None else
+                Path(__file__).resolve().parents[3]).resolve()
+    if source_sha is not None and (not isinstance(source_sha, str) or
+                                   not HEX_SHA.fullmatch(source_sha)):
+        raise RemoteRequestError("INTAKE_SOURCE_PIN_INVALID")
     if not (checkout / ".git").exists():
-        # Installed wheels outside a source checkout keep known static owners.
-        # Committed dynamic owners remain unavailable, not self-certified.
+        # No checkout is permitted for static-only callers. The live pinned
+        # ingress must never replace a missing Git source with package bytes.
+        if source_sha is not None:
+            raise RemoteRequestError("INTAKE_REVIEWED_OWNER_UNVERIFIED")
         return static
     try:
         from ai_commerce.engineering.impact_v21 import (
@@ -160,6 +167,8 @@ def _reviewed_intake_groups() -> tuple:
             return raw
 
         source = head()
+        if source_sha is not None and source != source_sha:
+            raise RemoteRequestError("INTAKE_SOURCE_PIN_MISMATCH")
         reviewed = load_baseline_component_owner_records(
             root=checkout, base_sha=source, existing_groups=static)
         if head() != source:
@@ -201,7 +210,9 @@ def approved_acceptance_plan(action: dict, *, groups=None) -> dict:
             "broad_required": bool(unknown)}
 
 
-def require_preexecutor_acceptance(action: dict, *, source_closure: bool = False) -> dict:
+def require_preexecutor_acceptance(action: dict, *, source_closure: bool = False,
+                                   checkout: Path | None = None,
+                                   source_sha: str | None = None) -> dict:
     """Fail closed on malformed, missing or unregistered fingerprinted AC.
 
     Prose mentioning a marker is not a declaration. This gate never supplies
@@ -212,7 +223,7 @@ def require_preexecutor_acceptance(action: dict, *, source_closure: bool = False
                if line.lstrip().startswith(prefix)]
     if len(markers) != 1:
         raise RemoteRequestError("INTAKE_AC_MISSING_OR_AMBIGUOUS")
-    groups = _reviewed_intake_groups()
+    groups = _reviewed_intake_groups(checkout=checkout, source_sha=source_sha)
     plan = approved_acceptance_plan(action, groups=groups)
     if plan["reason"] != "EXPLICIT_FINGERPRINTED_INSTRUCTION_ACCEPTANCE":
         raise RemoteRequestError("INTAKE_AC_MALFORMED")
