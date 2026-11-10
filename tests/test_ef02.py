@@ -1530,7 +1530,7 @@ def test_wp01_recovery_restart_one_shot_owner_scope_and_ast():
     assert "codex " not in job
     assert "agy " not in job
     ast.parse(script)
-    for token in ("os.fsync(fd)", "child.kill()", "child.wait(timeout=8)",
+    for token in ("os.fsync(fd)", "os.fsync(ready_fd)", "durable.ready", "FSYNC_DONE", "child.kill()", "child.wait(timeout=8)",
                   "subprocess.run(", "HOLD_UNKNOWN_NO_REPLAY",
                   "PASS_FRESH_READER_HOLD_UNKNOWN", "HOLD_READER_UNVERIFIED",
                   'tempfile.TemporaryDirectory(prefix="epwo-wp01-restart-",dir=temp)'):
@@ -1555,6 +1555,8 @@ def test_wp01_recovery_restart_reader_is_read_only_and_no_relaunch():
     reader_text = ast.literal_eval(assignment.value)
     reader_tree = ast.parse(reader_text)
     assert "HOLD_UNKNOWN_NO_REPLAY" in reader_text
+    assert "FSYNC_DONE" in reader_text
+    assert "durable.ready" in reader_text
     assert "HOLD_READER_UNVERIFIED" in reader_text
     assert "terminal.exists()" in reader_text
     forbidden = ("subprocess", "Popen(", "os.system", "unlink(", "write_bytes(", "write_text(", "open(")

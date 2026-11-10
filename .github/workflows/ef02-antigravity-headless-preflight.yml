@@ -645,6 +645,12 @@ jobs:
               "    os.fsync(fd)\n"
               "finally:\n"
               "    os.close(fd)\n"
+              "ready_fd=os.open(sys.argv[2], os.O_CREAT|os.O_EXCL|os.O_WRONLY, 0o600)\n"
+              "try:\n"
+              "    assert os.write(ready_fd,b'FSYNC_DONE') == len(b'FSYNC_DONE')\n"
+              "    os.fsync(ready_fd)\n"
+              "finally:\n"
+              "    os.close(ready_fd)\n"
               "time.sleep(30)\n"
           )
           # A new interpreter is a read-only successor observer, NOT a new owner.
@@ -652,14 +658,19 @@ jobs:
               "import pathlib,stat,sys\n"
               "root=pathlib.Path(sys.argv[1])\n"
               "marker=root/'intent.marker'\n"
+              "ready=root/'durable.ready'\n"
               "terminal=root/'terminal.marker'\n"
               "try:\n"
               "    s=marker.lstat()\n"
+              "    rs=ready.lstat()\n"
+              "    if not stat.S_ISREG(rs.st_mode) or rs.st_nlink!=1:\n"
+              "        raise ValueError('unsafe ready marker')\n"
               "    if not stat.S_ISREG(s.st_mode) or s.st_nlink!=1:\n"
               "        raise ValueError('unsafe marker')\n"
               "    if getattr(s,'st_file_attributes',0)&stat.FILE_ATTRIBUTE_REPARSE_POINT:\n"
               "        raise ValueError('reparse')\n"
-              "    if marker.read_bytes()!=b'INTENT_ONLY' or terminal.exists() or terminal.is_symlink():\n"
+              "    if (marker.read_bytes()!=b'INTENT_ONLY' or ready.read_bytes()!=b'FSYNC_DONE'\n"
+              "            or terminal.exists() or terminal.is_symlink()):\n"
               "        raise ValueError('missing/changed intent or terminal present')\n"
               "    print('HOLD_UNKNOWN_NO_REPLAY')\n"
               "except (OSError,ValueError):\n"
@@ -689,20 +700,28 @@ jobs:
                               getattr(rootstat,"st_file_attributes",0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
                           return "HOLD_OWNED_SCRATCH"
                       marker = root / "intent.marker"
+                      ready = root / "durable.ready"
                       terminal = root / "terminal.marker"
                       child = None
                       try:
                           child = subprocess.Popen(
-                              [sys.executable,"-B","-c",WORKER,str(marker)],
+                              [sys.executable,"-B","-c",WORKER,str(marker),str(ready)],
                               cwd=str(root),stdin=subprocess.DEVNULL,
                               stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
                               creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
                           )
                           deadline=time.monotonic()+12
-                          while time.monotonic()<deadline and not marker.is_file():
+                          while time.monotonic()<deadline:
                               if child.poll() is not None:
                                   return "HOLD_WORKER_EARLY_EXIT"
+                              try:
+                                  if ready.is_file() and not ready.is_symlink() and ready.read_bytes()==b"FSYNC_DONE":
+                                      break
+                              except OSError:
+                                  pass
                               time.sleep(0.05)
+                          else:
+                              return "HOLD_DURABLE_READY_UNPROVEN"
                           if (not marker.is_file() or marker.is_symlink() or
                                   marker.read_bytes()!=b"INTENT_ONLY" or child.poll() is not None):
                               return "HOLD_DURABLE_INTENT_UNPROVEN"
