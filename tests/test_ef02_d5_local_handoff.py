@@ -901,3 +901,66 @@ def test_real_d31_d32_d2_d4_composition_uses_two_grants_and_holds_unknown(setup,
     before = len(s.source.calls)
     assert listen(s, deliver=True, delivery=options)["error_code"] == "HANDOFF_ALREADY_CONSUMED"
     assert len(s.source.calls) == before
+
+
+def test_wh07_literal_opt_in_on_handoff_requires_delivery_before_any_evidence(setup):
+    s = setup
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("fixed-check without deliver must not read or Send")
+    with pytest.raises(handoff.HandoffBlocked, match="WAKE_TEST_SCOPE_INVALID"):
+        listen(s, deliver=False, fixed_check_test=True,
+               reader_factory=forbidden, sender=forbidden)
+    with pytest.raises(handoff.HandoffBlocked, match="WAKE_TEST_SCOPE_INVALID"):
+        listen(s, deliver=False, fixed_check_test=1,
+               reader_factory=forbidden, sender=forbidden)
+    assert not s.store.state.path.exists()
+    assert not s.source.calls
+
+
+def test_wh07_registered_handoff_forwards_literal_test_only_once(
+        setup, monkeypatch):
+    # Actual GitHub/consent/route and D4 send remain independently gated in
+    # send_one; this asserts native handoff carries the explicit chosen mode.
+    s = setup
+    options = delivery(s, monkeypatch)
+    enroll(s, mode="deliver")
+    emit(s)
+    captured = []
+    def fake_sender(**kw):
+        captured.append(kw)
+        return WakeReceipt(event_id=kw["event"]["event_id"],
+            route_id="private-route", generation=1, delivery_status="UNKNOWN",
+            error_code="UI_USER_TURN_OBSERVED")
+    first = listen(s, deliver=True, delivery=options,
+                   fixed_check_test=True, sender=fake_sender)
+    assert first["status"] == "UNKNOWN"
+    assert first["chat_delivery_proven"] is False
+    assert first["brain_continuation_proven"] is False
+    assert len(captured) == 1
+    assert captured[0]["fixed_check_test"] is True
+    assert captured[0]["event"] == s.source.events[120]
+    assert captured[0]["report"] == s.source.reports[120]
+    assert captured[0]["caller_id"] == options["caller_id"]
+    assert captured[0]["workflow_id"] == WORKFLOW
+    assert read(s)["phase"] == "UNKNOWN"
+    second = listen(s, deliver=True, delivery=options,
+                    fixed_check_test=True, sender=fake_sender)
+    assert second["error_code"] == "HANDOFF_ALREADY_CONSUMED"
+    assert len(captured) == 1
+
+
+def test_wh07_registered_handoff_default_never_silently_selects_literal_test(
+        setup, monkeypatch):
+    s = setup
+    options = delivery(s, monkeypatch)
+    enroll(s, mode="deliver")
+    emit(s)
+    captured = []
+    def fake_sender(**kwargs):
+        captured.append(kwargs)
+        return WakeReceipt(event_id=kwargs["event"]["event_id"],
+            route_id="private-route", generation=1, delivery_status="UNKNOWN",
+            error_code="UI_USER_TURN_OBSERVED")
+    assert listen(s, deliver=True, delivery=options, sender=fake_sender)["status"] == "UNKNOWN"
+    assert len(captured) == 1
+    assert "fixed_check_test" not in captured[0]
