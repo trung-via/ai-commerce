@@ -16,6 +16,13 @@ jobs:
   ef02:
     if: >-
       startsWith(github.event.issue.title, '[EF02]') &&
+      !contains(github.event.issue.title, 'EPWO') &&
+      !contains(github.event.issue.title, 'WP01') &&
+      !contains(github.event.issue.title, 'WP02') &&
+      !contains(github.event.issue.title, 'WP03') &&
+      !contains(github.event.issue.title, 'WP04') &&
+      !contains(github.event.issue.title, 'WP05') &&
+      !contains(github.event.issue.title, 'WP06') &&
       (github.event.action == 'opened' || github.event.action == 'labeled')
     permissions:
       contents: write

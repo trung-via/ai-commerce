@@ -32,10 +32,9 @@
 | Roadmap A | Historical A01–A11 scoped source; A12 feed-readiness [#758](https://github.com/trung-via/ai-commerce/pull/758); A15/B3.4 [#753](https://github.com/trung-via/ai-commerce/pull/753); A18/B3.3 [#748](https://github.com/trung-via/ai-commerce/pull/748) | Reconcile each A package's **current** scope; A12 source ≠ provider entitlement; A14 ≠ proven commission/settlement |
 | PULSE B0–B4 | B0.2 [#323](https://github.com/trung-via/ai-commerce/pull/323), B0.3 [#329](https://github.com/trung-via/ai-commerce/pull/329); B1 audio [#780](https://github.com/trung-via/ai-commerce/pull/780)/[#785](https://github.com/trung-via/ai-commerce/pull/785); B3 [#732](https://github.com/trung-via/ai-commerce/pull/732)/[#748](https://github.com/trung-via/ai-commerce/pull/748) | An integrated offline journey receipt; real provider, assisted publication and authenticated B2 data separately |
 | BQ/CRI | BQ-00 [#410](https://github.com/trung-via/ai-commerce/pull/410), BQ-02 [#426](https://github.com/trung-via/ai-commerce/pull/426), BQ-03 [#480](https://github.com/trung-via/ai-commerce/pull/480), BQ-04 [#627](https://github.com/trung-via/ai-commerce/pull/627), BQ-05 [#639](https://github.com/trung-via/ai-commerce/pull/639)/[#768](https://github.com/trung-via/ai-commerce/pull/768), BQ-06 [#732](https://github.com/trung-via/ai-commerce/pull/732) | Actual human study, real provider QA, approved private custody, real behavioral learning |
-| EPWO WP01–06 | WP01 [#762](https://github.com/trung-via/ai-commerce/pull/762)/[#773](https://github.com/trung-via/ai-commerce/pull/773), WP02 [#781](https://github.com/trung-via/ai-commerce/pull/781) | WP02 current PR [#784](https://github.com/trung-via/ai-commerce/pull/784) has a **failed** [Windows run](https://github.com/trung-via/ai-commerce/actions/runs/42845647214); actual runner reboot/UNKNOWN reconciliation unproven |
 | WakeHub WH00–09 | WH03 [#734](https://github.com/trung-via/ai-commerce/pull/734), WH04–07 [#775](https://github.com/trung-via/ai-commerce/pull/775)/[#776](https://github.com/trung-via/ai-commerce/pull/776)/[#779](https://github.com/trung-via/ai-commerce/pull/779)/[#783](https://github.com/trung-via/ai-commerce/pull/783) | [WH03 private registration](https://github.com/trung-via/ai-commerce/issues/738), [WH01B logon](https://github.com/trung-via/ai-commerce/issues/499), one genuine exact-chat Send witness; WH08 plugin invocation **not authorized** |
 
-This table intentionally does **not** assign an invented percentage complete. See the JSON `package_executions` array for all **48** package/lane records and their evidence boundaries.
+This table intentionally does **not** assign an invented percentage complete. See the JSON `package_executions` array for all **42** active package/lane records and their evidence boundaries.
 
 ## Unified release gates — not a new runtime or universal dependency chain
 
@@ -50,7 +49,7 @@ This table intentionally does **not** assign an invented percentage complete. Se
 
 ### Prioritization and dependency intelligence
 
-**Immediate source reliability:** resolve the bounded PR #784 CI regression and protect scope-sensitive negative tests. This is a gate for accepting **that PR**, not permission to stop unrelated roadmap research or offline packages.
+**Retired workstream:** EPWO WP01–WP06 was retired by Human on 2026-11-11. Do not dispatch new WP actions or revive PR #784. Independent CI-only source removal must preserve functioning EF01/EF02, MT-01 and non-WP BQ/WH/Production workflows.
 
 **Highest-value missing E2E proofs:** privately enroll WH03 exact Chat A plus WH01B native lifecycle; complete WH07 one-shot Send-only proof. In a separate **parallel** lane, integrate the already merged PULSE/BQ source into one independently observed **offline** journey. Prefer reuse before expanding adapters/fixtures.
 
@@ -63,12 +62,12 @@ This table intentionally does **not** assign an invented percentage complete. Se
 1. Pin fresh `main`, target PR/head/base, actual CI, relevant Issue comments, source owner and any native receipt. Never update `source_state` from a mere PR title or archived candidate.
 2. Apply evidence-tier-specific status change. Keep `source_state` and `live_state` **independent**, with refs for both. `CURRENT_REASSESSMENT_REQUIRED` is a data-quality warning, not `NOT_IMPLEMENTED`.
 3. Recheck **63/63 unique WBS, zero dangling dependencies, zero cycles, A package mapping coverage and all 7 BQ IDs** before publishing a new version.
-4. Preserve immutable past statuses, WorkOwner UNKNOWN, old Brain HOLD and Human authorizations. Add a new versioned snapshot for a later `main` instead of rewriting history.
-5. For source code/new test implementations, follow the current **executor-first** EF01/EF02 policy (Codex `gpt-6.1-sol` xhigh; conditional fresh Antigravity `gemini-3.8-flash` high fallback). **Docs-only audit** needs no coding executor and never calls a PULSE/media provider.
+4. Preserve immutable historical Git/Issue evidence, including UNKNOWN attempt boundaries; retiring WP does not authorize replay, deletion of history, or mutation of active non-WP workflows. Add a new versioned snapshot for a later `main` instead of rewriting history.
+5. For new non-WP Engineering product work, use the separate authorized coding policies. **WP retirement source changes are explicitly CI-first / NO coding executor** under Human 2026-11-11 decision. CI and history inspection do not call PULSE/media providers.
 6. Review PR exact HEAD, CI and semantic claims independently. **Do not automatically issue Brain PASS for the new register solely because this document was written.** Trusted merge is a separate verified effect.
 
 ## Change scope and rollback
 
-This cut adds one machine-readable register and this human-readable audit; existing Markdown roadmap and Work Tree documents link here. Canonical WBS/quality JSON content and 63 historical IDs remain **byte-identical**. No Python source, tests, MT-01 registry, CI workflow, EF02 action, HostOps, Chrome 9444, PULSE effects, spend, publication or external account permissions are changed.
+This retirement revision removes EPWO WP01–WP06 from the active execution register and adds source-owned EF02 ingress denial plus a CI regression. No current EF01/EF02 provider invocation, HostOps, Chrome 9444, PULSE, spend, publication or private effect is authorized by this documentation.
 
-Rollback is to close/revert this **documentation-only PR**; historical Work Tree and operational source continue to work unchanged.
+Rollback of the staged CI retirement PR does not revive the Human-retired WP program. The remaining WorkOwner runtime migration must have independent Windows CI, Brain acceptance and an actual merged source witness.
