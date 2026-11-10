@@ -15,6 +15,7 @@ from ai_commerce.creative_quality import pulse_studio_broker_handoff as trial
 from ai_commerce.creative_quality import pulse_studio_effect_preflight as preflight
 from ai_commerce.engineering import impact_v21, minimum_test
 from ai_commerce.production_runtime.contracts import canonical_bytes
+from test_b0_4_operator import case
 from test_bq_05b_effect_preflight import journey, positive as preflight_positive
 from test_bq_05a_pulse_studio_offline_bridge import (
     snapshot, restore_test_fixture, _tamper_native_asset,
