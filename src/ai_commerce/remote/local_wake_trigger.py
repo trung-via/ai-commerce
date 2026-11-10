@@ -193,6 +193,9 @@ def main(argv=None) -> int:
     parser.add_argument("--idempotency", type=str)
     parser.add_argument("--grants", type=str)
     parser.add_argument("--caller-id", type=str)
+    # WH-07: operator-selected one-shot literal for the signed Send-only path.
+    # Never derive the outgoing text from an untrusted GitHub Issue or event.
+    parser.add_argument("--fixed-check-test", action="store_true")
     parser.add_argument("--enroll", action="store_true")
     parser.add_argument("--repository", default=_REPO)
     parser.add_argument("--registration", type=str)
@@ -215,6 +218,10 @@ def main(argv=None) -> int:
     try:
         if args.repository != _REPO:
             raise TriggerBlocked("REPOSITORY_MISMATCH")
+        # This is a SEND effect selector, not an event-observation parameter.
+        # Reject before reading GitHub artifacts or any Chrome state.
+        if args.fixed_check_test and args.command != "deliver":
+            raise TriggerBlocked("WAKE_TEST_SCOPE_INVALID")
         if args.enroll and not all((args.checkout, args.registration, args.issuer_login,
                                    args.actor, args.request_fingerprint,
                                    args.created_after, args.created_before)):
@@ -271,7 +278,8 @@ def main(argv=None) -> int:
             registry_path=Path(args.registry), idempotency_path=Path(args.idempotency),
             repository_root=checkout,
             token_provider=lambda: token, secret_provider=lambda: key,
-            principal_provider=lambda: principal, read_budget=budget)
+            principal_provider=lambda: principal, read_budget=budget,
+            **({"fixed_check_test": True} if args.fixed_check_test else {}))
         print(json.dumps({"status": receipt.delivery_status,
                           "error_code": receipt.error_code, "replayed": receipt.replayed,
                           "chat_delivery_proven": False,

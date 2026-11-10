@@ -232,3 +232,111 @@ def test_explicit_delivery_still_returns_unproven_status(monkeypatch, tmp_path, 
     output = json.loads(capsys.readouterr().out)
     assert output["chat_delivery_proven"] is False
     assert output["brain_continuation_proven"] is False
+
+
+def test_wh07_fixed_check_selector_rejected_in_observe_before_github_or_send(monkeypatch, capsys):
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("invalid observe test selector must not read GitHub or Send")
+    monkeypatch.setattr(trigger, "GitHubExactRunReader", forbidden)
+    monkeypatch.setattr(trigger, "send_one", forbidden)
+    assert trigger.main(cli_args("observe") + ["--fixed-check-test"]) == 2
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "BLOCKED"
+    assert output["chat_delivery_proven"] is False
+
+
+def test_wh07_fixed_check_selector_cannot_bypass_closed_local_send_gate(monkeypatch, capsys):
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("closed Send gate must block before provider calls")
+    monkeypatch.delenv("AI_COMMERCE_LOCAL_WAKE_SEND_ENABLED", raising=False)
+    monkeypatch.setattr(trigger, "GitHubExactRunReader", forbidden)
+    monkeypatch.setattr(trigger, "send_one", forbidden)
+    assert trigger.main(cli_args("deliver") + ["--fixed-check-test"]) == 2
+    assert json.loads(capsys.readouterr().out)["status"] == "BLOCKED"
+
+
+def test_wh07_fixed_check_selector_flows_from_exact_github_event_to_local_send_only(
+        monkeypatch, tmp_path, capsys):
+    # Source-only consumer test: no Windows process/Chrome, no real Send.
+    # The actual D5 adapter still independently verifies signed grants,
+    # private Chat A, immutable artifact, one-shot D2 and UI Send semantics.
+    event, report, _ = evidence()
+    private = tmp_path / "private"
+    private.mkdir()
+    env = {
+        "AI_COMMERCE_GITHUB_READ_TOKEN": "read-only-token",
+        "AI_COMMERCE_WAKE_HMAC_KEY_HEX": "11" * 32,
+        "AI_COMMERCE_LOCAL_WAKE_SEND_ENABLED": "true",
+    }
+    monkeypatch.setattr(trigger, "os", SimpleNamespace(name="nt", environ=env))
+    monkeypatch.setattr(trigger, "_windows_process_sid", lambda: "S-1-5-21-1")
+    checked = []
+    def candidate(target):
+        assert target == TARGET
+        checked.append("exact-event")
+        return event, report
+    monkeypatch.setattr(trigger, "GitHubExactRunReader",
+                        lambda **_kw: SimpleNamespace(candidate=candidate))
+    calls = []
+    def fake_send(**kw):
+        calls.append(kw)
+        return WakeReceipt(event_id=event["event_id"],
+                           route_id="private-route", generation=2,
+                           delivery_status="UNKNOWN",
+                           error_code="UI_USER_TURN_OBSERVED")
+    monkeypatch.setattr(trigger, "send_one", fake_send)
+    code = trigger.main(cli_args("deliver") + [
+        "--fixed-check-test",
+        "--checkout", str(tmp_path),
+        "--registry", str(private / "registry.json"),
+        "--idempotency", str(private / "idempotency.json"),
+        "--grants", str(private / "grants.json"),
+        "--caller-id", "signed-operator",
+    ])
+    assert code == 3
+    assert checked == ["exact-event"]
+    assert len(calls) == 1
+    assert calls[0]["fixed_check_test"] is True
+    assert calls[0]["event"] == event and calls[0]["report"] == report
+    assert calls[0]["workflow_id"] == TARGET.workflow_id
+    assert calls[0]["caller_id"] == "signed-operator"
+    assert calls[0]["principal_provider"]() == "S-1-5-21-1"
+    assert calls[0]["token_provider"]() == "read-only-token"
+    assert calls[0]["secret_provider"]() == bytes.fromhex("11" * 32)
+    outcome = json.loads(capsys.readouterr().out)
+    assert outcome["status"] == "UNKNOWN"
+    assert outcome["chat_delivery_proven"] is False
+    assert outcome["brain_continuation_proven"] is False
+    assert "fixed_check_test" not in outcome
+    assert "private-route" not in str(outcome)
+
+
+def test_wh07_default_delivery_does_not_enable_fixed_check_test(monkeypatch, tmp_path, capsys):
+    event, report, _ = evidence()
+    private = tmp_path / "private"
+    private.mkdir()
+    env = {
+        "AI_COMMERCE_GITHUB_READ_TOKEN": "read-only-token",
+        "AI_COMMERCE_WAKE_HMAC_KEY_HEX": "11" * 32,
+        "AI_COMMERCE_LOCAL_WAKE_SEND_ENABLED": "true",
+    }
+    monkeypatch.setattr(trigger, "os", SimpleNamespace(name="nt", environ=env))
+    monkeypatch.setattr(trigger, "_windows_process_sid", lambda: "S-1-5-21-1")
+    monkeypatch.setattr(trigger, "GitHubExactRunReader",
+                        lambda **_kw: SimpleNamespace(candidate=lambda target: (event, report)))
+    opts = []
+    def fake_send(**kwargs):
+        opts.append(kwargs)
+        return WakeReceipt(event_id=event["event_id"], route_id="private-route",
+                           generation=2, delivery_status="UNSUPPORTED",
+                           error_code="PRELOAD_ROUTE_INVALID")
+    monkeypatch.setattr(trigger, "send_one", fake_send)
+    code = trigger.main(cli_args("deliver") + [
+        "--checkout", str(tmp_path), "--registry", str(private / "registry.json"),
+        "--idempotency", str(private / "delivery.json"),
+        "--grants", str(private / "grants.json"), "--caller-id", "signed-operator",
+    ])
+    assert code == 3
+    assert len(opts) == 1
+    assert "fixed_check_test" not in opts[0]
+    assert json.loads(capsys.readouterr().out)["status"] == "UNSUPPORTED"
