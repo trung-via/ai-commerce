@@ -170,3 +170,47 @@ def test_stale_local_checkout_blocks_before_manifest_creation(fixture):
     with pytest.raises(SetupBlocked, match="CHECKOUT_SHA_NOT_CURRENT"):
         provision(**params)
     assert not (root / "wake-readiness.json").exists()
+
+
+def test_wh04_9444_private_manifest_is_distinct_from_legacy(fixture):
+    params, root, _ = fixture
+    params["target_cdp_port"] = 9444
+    params["chrome_loader"] = lambda config, source, *, local_app_data: SimpleNamespace(
+        port=9444, endpoint="http://127.0.0.1:9444")
+    params["route_loader"] = lambda **kwargs: SimpleNamespace(
+        cdp_endpoint="http://127.0.0.1:9444")
+    result = provision(**params)
+    assert result == {"status": "CONFIGURED", "wake_sent": False,
+                      "browser_launched": False}
+    dest = root / "wakehub-readiness-9444.json"
+    assert dest.is_file()
+    assert not (root / "wake-readiness.json").exists()
+    assert json.loads(dest.read_text())["route_id"] == "d5-route"
+    assert provision(**params)["status"] == "ALREADY_CONFIGURED"
+    with pytest.raises(SetupBlocked, match="MANIFEST_ALREADY_ENROLLED_DIFFERENT"):
+        provision(**dict(params, route_id="different"))
+    assert json.loads(dest.read_text())["route_id"] == "d5-route"
+
+
+def test_wh04_9444_wrong_enrollment_fails_before_manifest_write(fixture):
+    params, root, _ = fixture
+    params["target_cdp_port"] = 9444
+    with pytest.raises(SetupBlocked, match="CONFIG_NOT_EXACT_CDP_9444"):
+        provision(**params)
+    params["chrome_loader"] = lambda config, source, *, local_app_data: SimpleNamespace(
+        port=9444, endpoint="http://127.0.0.1:9444")
+    with pytest.raises(SetupBlocked, match="ENROLLED_ROUTE_NOT_9444"):
+        provision(**params)
+    assert not (root / "wakehub-readiness-9444.json").exists()
+
+
+@pytest.mark.parametrize("url", [
+    "http://localhost:9444", "http://0.0.0.0:9444",
+    "http://127.0.0.1:9333", "http://127.0.0.1:9444/?secret=x",
+    "http://127.0.0.1:9444/extra", "https://127.0.0.1:9444",
+])
+def test_wh04_9444_strict_loopback_rejects_other_ports_hosts_and_query(url):
+    from ai_commerce.remote.wake_readiness_bootstrap import _same_loopback_port
+    assert not _same_loopback_port(url, 9444)
+    assert _same_loopback_port("http://127.0.0.1:9444", 9444)
+    assert not _same_loopback_port("http://127.0.0.1:9444", True)
