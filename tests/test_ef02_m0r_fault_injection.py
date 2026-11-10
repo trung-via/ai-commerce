@@ -3256,7 +3256,7 @@ def test_epwo_656_sealed_or_forged_caller_cannot_promote_effect(fault):
         report["authority"]["replay_authorized"] = True
     if fault != "digest":
         report["record_sha256"] = hashlib.sha256(source_canonical({
-            key: val for key, val in report.items() if key != "record_sha256",
+            key: val for key, val in report.items() if key != "record_sha256"
         }).encode()).hexdigest()
     with pytest.raises(ValueError, match="EPWO_RECONCILIATION_"):
         verify_work_owner_independent_reconciliation(
