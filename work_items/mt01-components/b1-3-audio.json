@@ -1,0 +1,25 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "b1-3-audio",
+  "sources": [
+    "src/ai_commerce/creative_quality/audio_observation.py"
+  ],
+  "tests": [
+    "tests/test_b1_3_audio_observation.py"
+  ],
+  "acs": [
+    "B1.3-a.pcm-current-byte-metrics",
+    "B1.3-a.silent-valid-no-inferred-vn-quality",
+    "B1.3-a.no-provider-or-consent"
+  ],
+  "consumers": [
+    "src/ai_commerce/creative_quality/voice_intent.py",
+    "src/ai_commerce/creative_quality/acoustic_scene.py",
+    "src/ai_commerce/creative_quality/voice_compile.py",
+    "src/ai_commerce/media/files.py",
+    "src/ai_commerce/affiliate_release/inspection.py",
+    "src/ai_commerce/creative_quality/t2_sampling.py",
+    "src/ai_commerce/creative_quality/inspection_evidence.py"
+  ],
+  "contracts": []
+}

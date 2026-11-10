@@ -1,0 +1,79 @@
+{
+  "schema_version": "WorkItem.v1",
+  "work_id": "B1_3_AUDIO_OBSERVATION_001",
+  "source_sha": "feaee38ae210df539ae1c87876c58507f5596cbb",
+  "human_authorization_ref": "2026-11-10 Human @AI Commerce 'ok đồng ý' to continue Production/B-QUALITY roadmap after BQ-05b.1 source acceptance; adopts bounded offline B1.3-a from prior planning #716 without external effects.",
+  "parent_issue": 716,
+  "component": "b1-3-audio",
+  "owner": "Media & Creative",
+  "status": "SOURCE_CANDIDATE_PENDING_WINDOWS_EXACT_HEAD_CI_AND_BRAIN",
+  "objective": "Native local PCM16 WAV technical metrics with BQ-01b subjective plan kept separate; all rights, human voice consent, linguistic quality and live execution unknown/denied.",
+  "execution_route": "CI_FIRST_DIRECT_SOURCE_ONLY_NO_EF02_MODEL_OR_PROVIDER",
+  "verification_profile": "mt01-component-onboarding",
+  "verification_round_limit": 2,
+  "add_only_paths": [
+    "src/ai_commerce/creative_quality/audio_observation.py",
+    "tests/test_b1_3_audio_observation.py",
+    "work_items/mt01-components/b1-3-audio.json",
+    "work_items/B1_3_AUDIO_OBSERVATION_001.json",
+    "docs/creative/B1_3_AUDIO_OBSERVATION_PROTOCOL.md"
+  ],
+  "modified_paths": [
+    "docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md"
+  ],
+  "allowed_paths": [
+    "src/ai_commerce/creative_quality/audio_observation.py",
+    "tests/test_b1_3_audio_observation.py",
+    "work_items/mt01-components/b1-3-audio.json",
+    "work_items/B1_3_AUDIO_OBSERVATION_001.json",
+    "docs/creative/B1_3_AUDIO_OBSERVATION_PROTOCOL.md",
+    "docs/roadmap/ROADMAP_B_PA2_PRODUCTION_RUNTIME_V2_0.md"
+  ],
+  "acceptance": [
+    "B1.3-a.pcm-current-byte-metrics",
+    "B1.3-a.silent-valid-no-inferred-vn-quality",
+    "B1.3-a.no-provider-or-consent"
+  ],
+  "negative_acceptance": [
+    {
+      "ac": "B1.3-a.corrupt-or-nonpcm-denied",
+      "tests": [
+        "test_corrupt_or_unsupported_pcm_never_measures_or_infers"
+      ]
+    },
+    {
+      "ac": "B1.3-a.stale-or-wrong-ref-hold",
+      "tests": [
+        "test_missing_digest_and_mutated_native_replay_fail_closed",
+        "test_bad_or_special_reference_denied_before_media"
+      ]
+    },
+    {
+      "ac": "B1.3-a.aliases-not-trusted",
+      "tests": [
+        "test_hardlinked_input_is_not_trusted_as_private_media",
+        "test_symlink_is_not_observed_if_host_can_create_it"
+      ]
+    },
+    {
+      "ac": "B1.3-a.forged-rights-denied",
+      "tests": [
+        "test_no_provider_rights_or_inference_escape"
+      ]
+    }
+  ],
+  "source_consumers": [
+    "BQ-01b subjective Vietnamese voice/acoustic owner",
+    "A06 local media/ref provenance",
+    "A13 regular-file custody",
+    "Q4 T1/T2 technical inspection (separate, not reused as media authority)"
+  ],
+  "limits": {
+    "input": "One independently SHA-pinned local strict PCM16 RIFF WAVE; maximum 4 MiB, 300 seconds, 1-2 channels, 8-96 kHz.",
+    "output": "Canonical in-memory technical observation and explicit unobserved fields only.",
+    "consistency": "Same-handle double-read + existing media_files regular-path/fstat fence; not an authenticated or malicious race-proof Windows share lock.",
+    "grants": "No private issuer, speaker/voice consent, provider media license, publishing, spending, identity, transcriptions or generated output.",
+    "historical_issues": "Keep #646 WorkOwner UNKNOWN and #656 native custody HOLD; no replay, grant, transfer or ledger mutation."
+  },
+  "candidate_claim": "UNVERIFIED_UNTIL_EXACT_HEAD_WINDOWS_CI_MT01_AND_INDEPENDENT_BRAIN"
+}
