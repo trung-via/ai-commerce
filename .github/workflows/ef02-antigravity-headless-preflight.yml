@@ -475,3 +475,128 @@ jobs:
           '@
           & python -B -c $probe
           exit $LASTEXITCODE
+
+  wp01-native-child-crash:
+    # One-shot owner-created, no-vendor Windows child crash probe.
+    # Never touch the original #710 WorkOwner, providers, or host-wide tasks.
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.action == 'opened' &&
+      github.repository == 'trung-via/ai-commerce' &&
+      github.actor == github.repository_owner &&
+      github.event.issue.user.login == github.repository_owner &&
+      github.event.issue.title == '[EPWO WP01 NATIVE CHILD CRASH] #466' &&
+      github.run_attempt == 1
+    runs-on: [self-hosted, Windows, ai-commerce-ef02]
+    timeout-minutes: 4
+    concurrency:
+      group: epwo-wp01-native-child-crash-one-shot
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout verified main, no retained credentials
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Kill only our disposable Python child, prove UNKNOWN not replay
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $probe = @'
+          import os
+          import pathlib
+          import stat
+          import subprocess
+          import sys
+          import tempfile
+          import time
+
+          # Real Windows process lifecycle, but ONLY an owned disposable
+          # child and marker in RUNNER_TEMP. No model or GitHub API calls.
+          # It does not replay or authenticate historical WorkOwner #710.
+          def observe():
+              if os.name != "nt":
+                  return "HOLD_WINDOWS_UNPROVEN"
+              raw_temp = os.environ.get("RUNNER_TEMP")
+              raw_checkout = os.environ.get("GITHUB_WORKSPACE")
+              if not raw_temp or not raw_checkout:
+                  return "HOLD_RUNNER_CONTEXT"
+              temp = pathlib.Path(raw_temp).resolve()
+              checkout = pathlib.Path(raw_checkout).resolve()
+              if (not temp.is_dir() or temp.is_symlink()
+                      or checkout == temp or checkout in temp.parents
+                      or temp in checkout.parents):
+                  return "HOLD_TEMP_SCOPE"
+              try:
+                  t = temp.lstat()
+                  if getattr(t, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                      return "HOLD_TEMP_REPARSE"
+              except OSError:
+                  return "HOLD_TEMP_IDENTITY"
+              try:
+                  with tempfile.TemporaryDirectory(prefix="epwo-wp01-native-", dir=temp) as owned:
+                      root = pathlib.Path(owned)
+                      rst = root.lstat()
+                      if (root.resolve().parent != temp or root.is_symlink()
+                              or getattr(rst, "st_file_attributes", 0) &
+                                  stat.FILE_ATTRIBUTE_REPARSE_POINT):
+                          return "HOLD_OWNED_SCRATCH"
+                      marker = root / "intent.marker"
+                      child = None
+                      try:
+                          # No process tree kill, shell, credentials, arbitrary
+                          # workflow input, or GitHub/worktree write.
+                          command = (
+                              "import pathlib,sys,time; "
+                              "pathlib.Path(sys.argv[1]).write_bytes(b'INTENT_ONLY'); "
+                              "time.sleep(30)"
+                          )
+                          child = subprocess.Popen(
+                              [sys.executable, "-B", "-c", command, str(marker)],
+                              cwd=str(root), stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                          )
+                          deadline = time.monotonic() + 12
+                          while time.monotonic() < deadline and not marker.is_file():
+                              if child.poll() is not None:
+                                  return "HOLD_CHILD_EARLY_EXIT"
+                              time.sleep(0.05)
+                          if not marker.is_file() or marker.is_symlink():
+                              return "HOLD_INTENT_MISSING"
+                          if marker.read_bytes() != b"INTENT_ONLY":
+                              return "HOLD_INTENT_MISMATCH"
+                          if child.poll() is not None:
+                              return "HOLD_CHILD_NOT_RUNNING"
+                          child.kill()
+                          return_code = child.wait(timeout=8)
+                          if return_code == 0 or child.poll() is None:
+                              return "HOLD_KILL_UNPROVEN"
+                          # Physical child death + leftover intent with no
+                          # terminal receipt must remain UNKNOWN, never SUCCESS.
+                          return "PASS_CHILD_KILLED_INTENT_ONLY_UNKNOWN"
+                      finally:
+                          if child is not None and child.poll() is None:
+                              child.kill()
+                              child.wait(timeout=8)
+              except (OSError, ValueError, subprocess.SubprocessError):
+                  return "HOLD_NATIVE_OBSERVATION"
+
+          if __name__ == "__main__":
+              try:
+                  status = observe()
+              except Exception:
+                  status = "HOLD_NATIVE_OBSERVATION"
+              print("EPWO_WP01_NATIVE_STATUS=" + status)
+              print("EPWO_WP01_NATIVE_SCOPE=RUNNER_TEMP_CHILD_ONLY")
+              print("EPWO_WP01_NATIVE_TERMINAL=ABSENT_UNVERIFIED")
+              print("EPWO_WP01_NATIVE_HISTORICAL_710=NOT_TOUCHED")
+              print("EPWO_WP01_NATIVE_PROVIDER=NOT_INVOKED")
+              print("EPWO_WP01_NATIVE_REPLAY_AUTHORIZED=FALSE")
+              raise SystemExit(0 if status == "PASS_CHILD_KILLED_INTENT_ONLY_UNKNOWN" else 2)
+          '@
+          & python -B -c $probe
+          exit $LASTEXITCODE
+

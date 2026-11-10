@@ -1421,3 +1421,70 @@ def test_epwo_656_worker_recovery_projection_never_acquires_or_dispatches(monkey
     assert result["authority"]["provider_dispatch_authorized"] is False
     assert storage.refs == original_refs
     assert all(method == "GET" for method, *_ in storage.requests)
+
+def _wp01_native_child_probe_source():
+    """Extract only the independently gated WP01 job, not adjacent jobs."""
+    import textwrap
+    source = (Path(__file__).resolve().parents[1] /
+              ".github/workflows/ef02-antigravity-headless-preflight.yml").read_text(encoding="utf-8")
+    job = source.split("  wp01-native-child-crash:", 1)[1]
+    script = job.split("$probe = @'\n", 1)[1].split("\n          '@", 1)[0]
+    return source, job, textwrap.dedent(script)
+
+
+def test_wp01_native_child_crash_exact_owner_gate_one_shot_and_no_provider():
+    """A fresh Issue only authorizes the disposable child, never old effect replay."""
+    import ast
+    source, job, script = _wp01_native_child_probe_source()
+    for required in (
+        "github.event_name == 'issues'",
+        "github.event.action == 'opened'",
+        "github.repository == 'trung-via/ai-commerce'",
+        "github.actor == github.repository_owner",
+        "github.event.issue.user.login == github.repository_owner",
+        "github.event.issue.title == '[EPWO WP01 NATIVE CHILD CRASH] #466'",
+        "github.run_attempt == 1",
+        "runs-on: [self-hosted, Windows, ai-commerce-ef02]",
+        "timeout-minutes: 4",
+        "group: epwo-wp01-native-child-crash-one-shot",
+        "permissions:\n      contents: read",
+        "persist-credentials: false",
+        "ref: main",
+        "EPWO_WP01_NATIVE_REPLAY_AUTHORIZED=FALSE",
+        "EPWO_WP01_NATIVE_PROVIDER=NOT_INVOKED",
+        "PASS_CHILD_KILLED_INTENT_ONLY_UNKNOWN",
+    ):
+        assert required in job, required
+    ast.parse(script)
+    assert "issue.body" not in job
+    assert "github.event.issue.body" not in job
+    assert "issues: write" not in job
+    assert "GITHUB_TOKEN" not in job
+    assert "--model" not in job
+    assert "agy " not in job
+    assert "codex " not in job
+    assert "taskkill" not in job.lower()
+    assert "subprocess.Popen" in script
+    assert "child.kill()" in script
+    assert 'subprocess.CREATE_NEW_PROCESS_GROUP' in script
+    assert 'tempfile.TemporaryDirectory(prefix="epwo-wp01-native-", dir=temp)' in script
+    assert 'print("EPWO_WP01_NATIVE_HISTORICAL_710=NOT_TOUCHED")' in script
+    assert "WORKOWNER" not in script
+    assert "write_text(" not in script
+    assert "github.api" not in script
+
+
+def test_wp01_native_child_crash_deny_non_windows_before_any_process_spawn(monkeypatch):
+    """Trusted code inspection checks that its first scope gate is Windows."""
+    import ast
+    _, _, script = _wp01_native_child_probe_source()
+    module = ast.parse(script)
+    observe = next(n for n in module.body
+                   if isinstance(n, ast.FunctionDef) and n.name == "observe")
+    first = observe.body[0]
+    assert isinstance(first, ast.If)
+    assert isinstance(first.test, ast.Compare)
+    assert "os.name" in ast.unparse(first.test)
+    assert isinstance(first.body[0], ast.Return)
+    assert isinstance(first.body[0].value, ast.Constant)
+    assert first.body[0].value.value == "HOLD_WINDOWS_UNPROVEN"
