@@ -300,6 +300,19 @@ class LocalBatchWorker:
             witness_enrollment=witness_enrollment, witness_context=witness_context,
             witness_verifier=witness_verifier, source_contract_fixture=source_contract_fixture).payload()
 
+
+    def independent_reconciliation_action(
+            self, action: dict, *, read_budget=192, diagnostics=None) -> dict:
+        """EPWO #656: source-only recovery checklist; never acquire/execute."""
+        from .transport import work_owner_independent_reconciliation
+        submitted = {k: v for k, v in action.items()
+                     if k != "resolved_dependencies"}
+        source_audit = WorkOwnerAudit.run(
+            self.github, issue_number=self.issue_number, batch=self.batch,
+            action=submitted, trusted_issuer=self.issuer_login,
+            read_budget=read_budget, diagnostics=diagnostics)
+        return work_owner_independent_reconciliation(source_audit)
+
     def witness_bridge(self, action, request, *, enrollment=None, context=None,
             ssh_keygen=None, ledger=None, source_contract_fixture=False, read_budget=192):
         """Owner-configured read source; frame identifiers supply no authority."""

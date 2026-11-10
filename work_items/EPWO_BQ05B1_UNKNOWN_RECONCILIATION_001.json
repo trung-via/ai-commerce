@@ -1,0 +1,43 @@
+{
+  "schema_version": "EPWOWorkOwnerIndependentReconciliationWorkItem.v1",
+  "id": "EPWO_BQ05B1_UNKNOWN_RECONCILIATION_001",
+  "issue": 656,
+  "status": "SOURCE_CANDIDATE_UNVERIFIED",
+  "source_main_sha": "f61435a58a75c00ce486747a8a5447ccb699fda6",
+  "authorization": "2026-11-10 Human @AI Commerce đồng ý to an independent source-only reconciliation gap assessment and fix for #656",
+  "semantic_owner": "EPWO WorkOwner source audit consumer, remote transport/worker",
+  "source_reuse": "WorkOwnerAudit.run and existing WorkOwnerReadOnlyAudit.v1 from PR #607; no duplicate GitHub reader",
+  "allowed_paths": [
+    "src/ai_commerce/remote/transport.py",
+    "src/ai_commerce/remote/worker.py",
+    "tests/test_ef02_m0r_fault_injection.py",
+    "tests/test_ef02.py",
+    "docs/engineering/EPWO_BQ05B1_UNKNOWN_RECONCILIATION_V1.md",
+    "work_items/EPWO_BQ05B1_UNKNOWN_RECONCILIATION_001.json"
+  ],
+  "positive_acs": [
+    "Owner-validated bounded source audit projects HOLD classification of historical #646 UNKNOWN and #698 PROVIDER_INTENT without new claim",
+    "PUBLISHED authenticated GitHub candidate can be classified source-only, native effect never verified",
+    "Closed canonical packet with explicit native proof checklist; exact source/negative audit preserved"
+  ],
+  "negative_acs": [
+    "Caller-supplied or self-sealed forged authority/replay/no-effect cannot elevate valid packet",
+    "Worker entrypoint GET-only; no acquire/append/process or provider invocation",
+    "No old WorkOwner reference or private receipt mutation; unknown remains unknown"
+  ],
+  "provider_and_native_authority": {
+    "ef02_executor": false,
+    "workowner_write": false,
+    "owner_transfer": false,
+    "provider_replay": false,
+    "hostops_native": false,
+    "pulse": false,
+    "wake": false,
+    "provider_effect_verified": false
+  },
+  "release_gates": [
+    "Windows exact HEAD MT01 recovery and EF02 owner/consumer regression + genuine artifact",
+    "Independent Brain semantic AC with exact HEAD/base",
+    "Trusted auto-merge only if verified, #656 historical native side stays OPEN"
+  ]
+}
