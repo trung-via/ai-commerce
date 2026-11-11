@@ -2562,6 +2562,42 @@ class GitHubTransport:
                 "status": proof["status"], "review_required": proof["review_required"],
                 "candidate_evidence": proof, "candidate_evidence_sha256": evidence_digest(proof)}
 
+
+    def verify_claim_publication(self, evidence: dict) -> None:
+        """Match existing create-only claim and both spawn checkpoints.
+
+        Missing, modified or unreadable GitHub evidence denies candidate writes.
+        This is independent of the retired WorkOwner journal.
+        """
+        try:
+            source, attempt, fingerprint = (
+                evidence["source_sha"], evidence["attempt_id"], evidence["fingerprint"])
+            if not all(isinstance(x, str) for x in (source, attempt, fingerprint)):
+                raise CandidateIntegrityError("EF02_CLAIM_EVIDENCE_INVALID")
+            key = self.attempt_key(attempt)
+            claim_ref = self.api("GET", "/git/ref/heads/ef02/claims/" + key)
+            claim_sha = claim_ref["object"]["sha"]
+            claim = self.api("GET", "/git/commits/" + claim_sha)
+            message = "EF02 CLAIM\n\nfingerprint=" + fingerprint + "\nattempt_id=" + attempt
+            if (claim["message"] != message or
+                    [p["sha"] for p in claim["parents"]] != [source]):
+                raise CandidateIntegrityError("EF02_CLAIM_PUBLICATION_MISMATCH")
+            pre_ref = self.api("GET", "/git/ref/heads/ef02/pre-spawn/" + key)
+            pre_sha = pre_ref["object"]["sha"]
+            pre = self.api("GET", "/git/commits/" + pre_sha)
+            pre_msg = "EF02 PRESPAWN\n\nfingerprint=" + fingerprint + "\nattempt_id=" + attempt
+            if (pre["message"] != pre_msg or [p["sha"] for p in pre["parents"]] != [claim_sha]):
+                raise CandidateIntegrityError("EF02_PRESPAWN_PUBLICATION_MISMATCH")
+            child_ref = self.api("GET", "/git/ref/heads/ef02/spawned/" + key)
+            spawned = self.api("GET", "/git/commits/" + child_ref["object"]["sha"])
+            spawned_prefix = ("EF02 SPAWNED\n\nfingerprint=" + fingerprint +
+                              "\nattempt_id=" + attempt + "\nchild_pid=")
+            if (not spawned["message"].startswith(spawned_prefix) or
+                    [p["sha"] for p in spawned["parents"]] != [pre_sha]):
+                raise CandidateIntegrityError("EF02_SPAWN_PUBLICATION_MISMATCH")
+        except (KeyError, TypeError, IndexError, RemoteTransportError) as exc:
+            raise CandidateIntegrityError("EF02_CLAIM_PUBLICATION_UNPROVEN") from exc
+
     def _candidate_owner_fence(self, owner, proof):
         if owner is None:
             return
