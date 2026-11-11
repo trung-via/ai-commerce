@@ -169,7 +169,7 @@ def read_process_identity(pid):
         close(process)
 
 
-def _scm_process():
+def _scm_process(*, start_pending=False):
     """Query the one fixed SCM object; never open change/start/stop rights."""
     adv = ctypes.WinDLL("advapi32", use_last_error=True)
     ptr = ctypes.c_void_p
@@ -191,8 +191,10 @@ def _scm_process():
             deny()
         cfg = ctypes.cast(buffer, ctypes.POINTER(Config)).contents
         binary, account, kind = cfg.binary, cfg.account, cfg.kind
+        if cfg.start != 3 or cfg.group or cfg.dependencies:
+            deny()  # Fixed demand-start own-process service, no dependency loader.
         status = (wt.DWORD * 9)()
-        if not _api(adv, "QueryServiceStatusEx", [wt.HANDLE, ctypes.c_int, ptr, wt.DWORD, ctypes.POINTER(wt.DWORD)], wt.BOOL)(service, 0, status, ctypes.sizeof(status), ctypes.byref(needed)) or status[1] != 4 or status[0] != 0x10:
+        if not _api(adv, "QueryServiceStatusEx", [wt.HANDLE, ctypes.c_int, ptr, wt.DWORD, ctypes.POINTER(wt.DWORD)], wt.BOOL)(service, 0, status, ctypes.sizeof(status), ctypes.byref(needed)) or status[1] not in ((2,) if start_pending else (4,)) or status[0] != 0x10:
             deny()
         sid_type = wt.DWORD()
         if not _api(adv, "QueryServiceConfig2W", [wt.HANDLE, wt.DWORD, ptr, wt.DWORD, ctypes.POINTER(wt.DWORD)], wt.BOOL)(service, 5, ctypes.byref(sid_type), 4, ctypes.byref(needed)) or sid_type.value not in (1, 3):
@@ -535,3 +537,18 @@ class BrokerRequests:
             if db.execute("UPDATE requests SET state='DONE',receipt=? WHERE nonce=? AND digest=? AND state='UNKNOWN'",
                     (canonical(decode(receipt.to_json().encode())), nonce, digest)).rowcount != 1:
                 deny()
+
+    def readback(self, nonce, digest):
+        """Private exact original outcome read; never claim, dispatch or retry.
+
+        Missing, poisoned UNKNOWN, or a mismatched digest never becomes DONE.
+        No new wire operation exposes this service-only ledger to a caller.
+        """
+        if (type(nonce) is not str or str(UUID(nonce)) != nonce or type(digest) is not str
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            deny()
+        with self._transaction() as db:
+            row = db.execute("SELECT digest,state,receipt FROM requests WHERE nonce=?", (nonce,)).fetchone()
+            if row is None or row[0] != digest:
+                deny()
+            return bytes(row[2]) if row[1] == "DONE" else None

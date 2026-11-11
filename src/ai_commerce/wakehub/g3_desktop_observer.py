@@ -94,8 +94,14 @@ def _verify(raw, signers, verifier, identity, namespace):
 
 
 def read_logon_id(pid: int) -> str:
-    """Read a live primary token's AuthenticationId; never impersonate it."""
-    auth.windows_only()
+    """Read-only primary-token AuthenticationId diagnostic; no authority.
+
+    Like broker.read_process_identity this can run in Windows CI without
+    enrollment. Collectors/hosts retain their separate windows_only/custody
+    gates BEFORE using the result or opening any input desktop.
+    """
+    if os.name != "nt":
+        deny()
     if type(pid) is not int or not 0 < pid < 2**32:
         deny()
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
