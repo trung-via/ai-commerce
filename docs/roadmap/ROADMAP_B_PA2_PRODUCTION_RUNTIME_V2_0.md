@@ -1,5 +1,8 @@
 # Roadmap B v2.0 — PULSE: Production Runtime độc lập, Brain dẫn dắt (PA2)
 
+**Post-WP current execution status (2026-11-11):** [Roadmap Execution Register v2.2](ROADMAP_EXECUTION_REGISTER_V2_2.md) ([JSON v2.2](ROADMAP_EXECUTION_REGISTER_V2_2.json)). WP01–WP06/EPWO is retired; source removal merged through [#812](https://github.com/trung-via/ai-commerce/pull/812) at `main@ce78b62097d131be7cca3bcd34fc4a0c6ecf0cb4` with Windows-hosted CI. Host-native process state remains UNVERIFIED. This canonical document is dated planning history; preserve its IDs/statuses and use the new overlay for current evidence.
+
+
 **Current execution overlay (2026-11-10):** [Integrated Roadmap Execution Register v2.1](ROADMAP_EXECUTION_REGISTER_V2_1.md) ([machine-readable package evidence/gates](ROADMAP_EXECUTION_REGISTER_V2_1.json)). This document keeps dated PA2/BQ history. For current source-delivery versus private/native/live effect status, consult the overlay; offline source/Windows CI never imply provider rights, actual publishing, verified sales or a genuine WakeHub Send.
 
 **Ngày thiết kế:** 2026-11-04. **Trạng thái:** CANONICAL PROPOSED IMPLEMENTATION ROADMAP cho **PA2 đã được Human chọn** trong ChatGPT. Chấp thuận **hướng kiến trúc** không đồng nghĩa chấp thuận mọi work package, lịch chạy, provider, chi phí, tài khoản hay phát hành bên ngoài. B0.1 là lần cắt **SOURCE_ONLY_DESIGN**, không phải production runtime đã hoạt động.
