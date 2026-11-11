@@ -58,7 +58,7 @@ jobs:
             const { data } = await github.rest.issues.get({
               owner: context.repo.owner, repo: context.repo.repo, issue_number: n
             });
-            if (data.pull_request || !data.title.startsWith('[EF02]')) {
+            if (data.pull_request || data.state !== 'open' || !data.title.startsWith('[EF02]')) {
               core.setFailed('EF02_ISSUE_NOT_APPROVED');
               return;
             }
