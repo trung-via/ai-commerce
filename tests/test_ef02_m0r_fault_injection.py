@@ -304,6 +304,12 @@ def _action():
 @pytest.fixture(autouse=True)
 def _fake_worktree_checkout_is_clean(monkeypatch):
     from test_ef01_repair import DirectWorkOwnerBroker
+    from ai_commerce.remote import worker as remote_worker
+    # Patch only EF02's subprocess boundary. Mutating subprocess.Popen/run on
+    # the shared Python module also breaks legitimate Git/source preflights.
+    monkeypatch.setattr(remote_worker, "subprocess", SimpleNamespace(
+        run=subprocess.run, Popen=subprocess.Popen, PIPE=subprocess.PIPE,
+        DEVNULL=subprocess.DEVNULL, TimeoutExpired=subprocess.TimeoutExpired))
     monkeypatch.setattr("ai_commerce.remote.worker.WorkOwnerBroker", DirectWorkOwnerBroker)
     """Fault-injection tests mock 'git worktree add' without creating .git.
 
@@ -392,7 +398,8 @@ def test_post_claim_integration_transport_failure_is_not_blindly_retried(tmp_pat
     assert first["executor_invoked"] is False
     assert _persisted(worker)["status"] == "INTEGRATION_FAILED"
     second = worker.execute_action(_action())
-    assert github.calls == 1  # WorkOwner refuses a second distributed claim.
+    # The original GitHub claim is re-read once; it rejects replay before EF01.
+    assert github.calls == 2
     assert second["status"] == "DUPLICATE_CLAIM_NO_REEXECUTION"
     assert second["executor_invoked"] is False
     assert second["candidate_sha"] is None
@@ -2035,61 +2042,9 @@ def test_r9_defect_a_and_b_cli_ingress_544_packet_and_successor_r10_lineage_roun
     assert parsed["issue"] == 544
     assert parsed["attempt_id"] == "r1_wp02_argon_medium_r9_20261107"
 
-    # Now publish R9 on its WorkOwner so R10 can transfer generation 3
-    # First find the owner created for R9 and publish it in storage
-    r9_action = p544["actions"][0]
-    r9_fp = hashlib.sha256(json.dumps({
-        "batch_id": p544["batch_id"], "source_sha": BASE, "action": r9_action
-    }, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
-    proof_r9 = _make_valid_proof(r9_action["action_id"], r9_action["attempt_id"], BASE, r9_fp)
-    from ai_commerce.remote.candidate_policy import canonical, evidence_digest, EVIDENCE_MARKER
-    receipt_r9 = evidence_digest(proof_r9)
-    cand_r9 = hashlib.sha1(b"cand-r9").hexdigest()
-    storage.refs[f"refs/heads/ef02/candidate/{r9_key}"] = cand_r9
-    storage.commits[cand_r9] = {
-        "message": f"EF02 candidate attempt {r9_action['attempt_id']}{EVIDENCE_MARKER}{canonical(proof_r9)}",
-        "tree": {"sha": "e" * 40}, "parents": [{"sha": BASE}]
-    }
-    # Replace the trailing UNKNOWN record (written when pre_spawn_checkpoint raised) with PUBLISHED for R10 transfer test
-    work_key = id_r8["work_key"]
-    prefix = f"refs/heads/ef02/workowner/{work_key}/"
-    wo_refs = sorted(r for r in storage.refs if r.startswith(prefix))
-    # Remove UNKNOWN record at the tip and append PROVIDER_INTENT..PUBLISHED using the gen 2 fence
-    last_ref = wo_refs[-1]
-    last_commit = storage.commits[storage.refs[last_ref]]
-    last_rec = json.loads(last_commit["message"][len(WorkOwner.MARKER):])
-    assert last_rec["stage"] == "UNKNOWN"
-    del storage.refs[last_ref]
-    prev_ref = wo_refs[-2]
-    prev_sha = storage.refs[prev_ref]
-    prev_rec = json.loads(storage.commits[prev_sha]["message"][len(WorkOwner.MARKER):])
-    fence_digest = prev_rec["fence"]
-    seq = prev_rec["sequence"]
-    prior_dig = prev_rec["digest"]
-    for stg, dt in [
-        ("SPAWN_INTENT", {}),
-        ("PROVIDER_INTENT", {"round": 0}),
-        ("ROUND_VERIFIED", {"round": 0, "receipt": receipt_r9}),
-        ("RESULT_VERIFIED", {"receipt": receipt_r9}),
-        ("PUBLISH_INTENT", {"receipt": receipt_r9}),
-        ("PUBLISHED", {"receipt": receipt_r9, "candidate": WorkOwner.digest(cand_r9), "attempt_id": r9_action["attempt_id"]})
-    ]:
-        seq += 1
-        rec = {
-            "kind": "WorkOwner", "version": 1, "identity": prev_rec["identity"],
-            "generation": 2, "fence": fence_digest, "sequence": seq,
-            "previous": prior_dig, "stage": stg, "data": dt
-        }
-        prior_dig = WorkOwner.digest(rec)
-        rec["digest"] = prior_dig
-        c_sha = hashlib.sha1(json.dumps(rec, sort_keys=True).encode()).hexdigest()
-        storage.commits[c_sha] = {
-            "message": WorkOwner.MARKER + canonical(rec),
-            "tree": {"sha": "e" * 40}, "parents": [{"sha": prev_sha}]
-        }
-        prev_sha = c_sha
-        storage.refs[f"{prefix}{seq:03d}"] = c_sha
-
+    # Historical R8 WorkOwner references are deliberately not transferred or
+    # modified by the new CI-only execution path. New attempts are indexed on
+    # their own GitHub refs; no old UNKNOWN attempt is resurrected here.
     # Successor R10 on issue #545 with actor='BRAIN' and authorized brain issuer 'ai-commerce-brain[bot]'
     r10_action = {
         **r9_action,
@@ -2129,9 +2084,10 @@ def test_r9_defect_a_and_b_cli_ingress_544_packet_and_successor_r10_lineage_roun
 
     batch_res_10 = json.loads((tmp_path / ".local" / "ef02" / "ef02-batch-545" / "batch_result.json").read_text(encoding="utf-8"))
     act_res_10 = batch_res_10["actions"][0]
-    assert "work_owner" in act_res_10, (act_res_10.get("status"), act_res_10.get("error_code"), act_res_10.get("diagnostic"))
-    assert act_res_10["work_owner"]["generation"] == 3
-    assert act_res_10["work_owner"]["root_issue"] == 543
+    assert "work_owner" not in act_res_10
+    assert act_res_10["status"] == "PRESPAWN_CHECKPOINT_UNCONFIRMED"
+    assert act_res_10["executor_invoked"] is False
+    assert act_res_10["replay_authorized"] is False
 
 
 @pytest.mark.parametrize("failure_mode,expected_code", [
@@ -2239,7 +2195,7 @@ def test_r9_defect_b_index_admission_failures_fail_closed_zero_claims_zero_spawn
         github=storage, root=tmp_path / "ev", issue_number=544, issuer_login=issuer_arg
     )
     res = worker.execute_action(action)
-    assert res["status"] == "HOLD_WORK_OWNER"
+    assert res["status"] == "CLAIM_UNAVAILABLE"
     assert res["error_code"] == expected_code
     assert res["executor_invoked"] is False
     assert res["replay_authorized"] is False

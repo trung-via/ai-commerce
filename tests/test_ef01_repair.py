@@ -333,7 +333,7 @@ def test_workowner_mismatched_round_receipt_cannot_publish(tmp_path, monkeypatch
             return result
     monkeypatch.setattr(remote.subprocess, "Popen", Tampered)
     result = context.worker.execute_action(_action("a"))
-    assert result["status"] == "CANDIDATE_INTEGRITY_FAILED"
+    assert result["status"] == "CANDIDATE_INTEGRITY_FAILED", result
     assert result["error_code"] == "EF01_PROVIDER_RECEIPT_MISMATCH"
     assert not context.candidates and len(context.calls) == 2
 
@@ -918,7 +918,7 @@ def test_ef02_acceptance_reaches_selector_through_actual_child_cli(tmp_path, mon
     if declared:
         a["instruction"] += '\nMT01_ACCEPTANCE_JSON: ["FIXTURE.acceptance"]'
     result = context.worker.execute_action(a)
-    assert result["status"] == "CANDIDATE_READY"
+    assert result["status"] == "CANDIDATE_READY", result
     args = build_parser().parse_args(context.children[0].argv[3:])
     expected = ["FIXTURE.acceptance"] if declared else ["MT01.ACCEPTANCE_UNDECLARED"]
     assert args.acceptance == result["mt01_acceptance"]["ids"] == expected

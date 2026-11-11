@@ -420,8 +420,12 @@ class LocalBatchWorker:
                 outcome["error_code"] = claim
                 return finish()
         except Exception as exc:
-            outcome.update(status="CLAIM_UNAVAILABLE", error_code=type(exc).__name__,
-                           diagnostic=str(exc)[:160], replay_authorized=False)
+            # Preserve bounded native index/claim diagnostics without leaking
+            # arbitrary provider output. The old WP owner no longer masks failures.
+            error_code = (str(exc)[:160] if isinstance(exc, RemoteTransportError)
+                          and str(exc) else type(exc).__name__)
+            outcome.update(status="CLAIM_UNAVAILABLE", error_code=error_code,
+                           diagnostic=error_code, replay_authorized=False)
             return finish()
         effective = source
         try:
@@ -784,6 +788,20 @@ class LocalBatchWorker:
                         inv.get("verify_completed") is not True
                         for index, inv in enumerate(invocations))):
                     raise CandidateIntegrityError("EF01_PROVIDER_RECEIPT_MISMATCH")
+                # Independently compare each invocation to EF01's immutable
+                # per-round on-disk receipt. Report-only field tampering must
+                # not turn a failed or altered invocation into a candidate.
+                for index, invocation in enumerate(invocations):
+                    relative = f"invocations/{index:03d}/invocation_result.json"
+                    if invocation.get("result_file") != relative:
+                        raise CandidateIntegrityError("EF01_PROVIDER_RECEIPT_MISMATCH")
+                    try:
+                        per_round = json.loads(
+                            checked_path(efdir, relative).read_text(encoding="utf-8"))
+                    except (OSError, ValueError, TypeError, KeyError):
+                        raise CandidateIntegrityError("EF01_PROVIDER_RECEIPT_MISMATCH") from None
+                    if per_round != invocation:
+                        raise CandidateIntegrityError("EF01_PROVIDER_RECEIPT_MISMATCH")
                 self.github.verify_claim_publication(evidence)
                 candidate = self.github.candidate(
                     source_sha=effective, attempt_id=attempt_id, workspace=worktree,
