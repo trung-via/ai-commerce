@@ -24,7 +24,7 @@ BASE = "a" * 40
 
 def _workowner_fixture():
     from test_ef01_repair import WorkOwnerMemoryTransport
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     storage = WorkOwnerMemoryTransport(BASE)
     action = _action()
     packet = {"batch_id": "durable-fixture", "source_sha": BASE, "actions": [action]}
@@ -232,7 +232,7 @@ def _publishable_workowner(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("terminal", [False, True])
 def test_workowner_verified_terminal_and_lost_publish_response_reconcile_get_only(tmp_path, monkeypatch, terminal):
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     from ai_commerce.remote.candidate_policy import evidence_digest
     storage, owner, arguments = _publishable_workowner(tmp_path, monkeypatch)
     candidate = storage.candidate(**arguments)
@@ -277,7 +277,7 @@ def test_workowner_candidate_publication_race_is_create_only(tmp_path, monkeypat
 
 
 def test_workowner_mismatched_terminal_candidate_receipt_is_rejected(tmp_path, monkeypatch):
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     storage, owner, arguments = _publishable_workowner(tmp_path, monkeypatch)
     candidate = storage.candidate(**arguments)
     storage.refs[candidate["candidate_ref"]] = BASE
@@ -900,7 +900,7 @@ def test_windows_fresh_subprocess_restart_readonly_recovery(tmp_path):
     gap honestly.
     """
     from test_ef01_repair import WorkOwnerMemoryTransport
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     storage = WorkOwnerMemoryTransport(BASE)
     action = _action()
     packet = {"batch_id": "restart-obs", "source_sha": BASE, "actions": [action]}
@@ -929,7 +929,7 @@ def test_windows_fresh_subprocess_restart_readonly_recovery(tmp_path):
 import sys, json, os
 from pathlib import Path
 from test_ef01_repair import WorkOwnerMemoryTransport
-from ai_commerce.remote.transport import WorkOwner
+from test_ef01_repair import WorkOwner
 
 state_path = Path(sys.argv[1])
 state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -980,7 +980,7 @@ print(json.dumps(output))
 def test_workowner_lineage_cross_issue_hijack_or_forged_repair_of():
     """Negative tests: cross-issue hijack, non-existent issue, forged claim fingerprint, cycle."""
     from test_ef01_repair import WorkOwnerMemoryTransport
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     import hashlib
     storage = WorkOwnerMemoryTransport(BASE)
 
@@ -1056,7 +1056,7 @@ def _make_valid_proof(action_id, attempt_id, source_sha, fingerprint):
 
 
 def _publish_owner(storage, owner, action, source_sha=BASE, attempt_id=None):
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     from ai_commerce.remote.candidate_policy import canonical, evidence_digest, EVIDENCE_MARKER
     attempt_id = attempt_id or action["attempt_id"]
     issue_data = None
@@ -1096,7 +1096,7 @@ def _publish_owner(storage, owner, action, source_sha=BASE, attempt_id=None):
 def test_workowner_conflicting_successors_one_generation_winner():
     """Two concurrent successors attempt to claim generation 2; exactly one wins create-only primitive."""
     from test_ef01_repair import WorkOwnerMemoryTransport
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     import hashlib
     storage = WorkOwnerMemoryTransport(BASE)
 
@@ -1134,7 +1134,7 @@ def test_workowner_conflicting_successors_one_generation_winner():
 def test_workowner_stale_generation_rejected_at_all_fences():
     """Generation 1 attempts to append or publish after Generation 2 transferred; rejected at all fences."""
     from test_ef01_repair import WorkOwnerMemoryTransport
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     import hashlib
     storage = WorkOwnerMemoryTransport(BASE)
 
@@ -1164,7 +1164,7 @@ def test_workowner_stale_generation_rejected_at_all_fences():
 def test_workowner_unknown_or_unresolved_predecessor_blocks_transfer():
     """Unresolved predecessor (e.g. at PROVIDER_INTENT or UNKNOWN) denies generation transfer."""
     from test_ef01_repair import WorkOwnerMemoryTransport
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     import hashlib
     storage = WorkOwnerMemoryTransport(BASE)
 
@@ -1203,7 +1203,7 @@ def test_workowner_unknown_or_unresolved_predecessor_blocks_transfer():
 def test_workowner_lost_workspace_recovery_readonly_no_duplicate(tmp_path):
     """Local workspace deleted; owner reconstructed from GitHub storage; GET-only calls; no duplicate dispatch."""
     from test_ef01_repair import WorkOwnerMemoryTransport
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     import shutil
     storage = WorkOwnerMemoryTransport(BASE)
     action = _action()
@@ -1235,7 +1235,7 @@ def test_workowner_lost_workspace_recovery_readonly_no_duplicate(tmp_path):
 def test_workowner_422_or_timeout_during_transfer_holds_without_retry():
     """Transport failure during transfer record creation raises without retry."""
     from test_ef01_repair import WorkOwnerMemoryTransport
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     import hashlib
     storage = WorkOwnerMemoryTransport(BASE)
 
@@ -1273,7 +1273,7 @@ def test_workowner_422_or_timeout_during_transfer_holds_without_retry():
 def test_workowner_exact_506_508_520_523_legacy_repair_of_sequence():
     """Exact sequence: #506 -> #508 -> #520 -> #523 -> R5 with raw attempt string lookup."""
     from test_ef01_repair import WorkOwnerMemoryTransport
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     import hashlib
     storage = WorkOwnerMemoryTransport(BASE)
 
@@ -1364,7 +1364,7 @@ def test_workowner_exact_506_508_520_523_legacy_repair_of_sequence():
 def test_workowner_unknown_predecessor_strictly_denies_transfer():
     """Defect 2: UNKNOWN predecessor provider/publication/reownership strictly denied."""
     from test_ef01_repair import WorkOwnerMemoryTransport
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     import hashlib
     storage = WorkOwnerMemoryTransport(BASE)
 
@@ -1410,7 +1410,7 @@ def test_workowner_unknown_predecessor_strictly_denies_transfer():
 def test_workowner_v1_legacy_journal_reader_and_bridge():
     """Defect 3: Historic V1 journal reader and bridge with immutable hash chain and candidate verification."""
     from test_ef01_repair import WorkOwnerMemoryTransport
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     import hashlib
     storage = WorkOwnerMemoryTransport(BASE)
 
@@ -1527,7 +1527,7 @@ def test_workowner_v1_legacy_journal_reader_and_bridge():
 def test_workowner_tampered_claim_candidate_and_cycle():
     """Negative tests: missing attempt, ambiguous attempt, forged claim, candidate proof mismatch, cycle."""
     from test_ef01_repair import WorkOwnerMemoryTransport
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     import hashlib
     storage = WorkOwnerMemoryTransport(BASE)
 
@@ -1589,7 +1589,7 @@ def test_workowner_tampered_claim_candidate_and_cycle():
 def test_workowner_true_absence_zero_refs():
     """Defect 3: True absence with zero refs on GitHub reports ABSENT, never PASS."""
     from test_ef01_repair import WorkOwnerMemoryTransport
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     storage = WorkOwnerMemoryTransport(BASE)
     storage.refs.clear()
 
@@ -1613,7 +1613,7 @@ def test_workowner_true_absence_zero_refs():
 def test_workowner_lineage_index_issuer_mismatch():
     """Negative test: durable index creation and lookup detect issuer mismatch."""
     from test_ef01_repair import WorkOwnerMemoryTransport
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     storage = WorkOwnerMemoryTransport(BASE)
 
     pred_action = {"action_id": "R1-WP02-CODEX-R2", "attempt_id": "target-attempt", "executor": "codex", "model": "gpt-5", "effort": "high"}
@@ -1650,7 +1650,7 @@ def test_workowner_lineage_index_issuer_mismatch():
 def test_workowner_lineage_index_collision():
     """Negative test: index collision when re-indexing attempt with conflicting metadata."""
     from test_ef01_repair import WorkOwnerMemoryTransport
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     storage = WorkOwnerMemoryTransport(BASE)
     storage.issues[508] = {"batch_id": "b1", "source_sha": BASE, "actions": [], "user": {"login": "owner"}}
     storage.issues[510] = {"batch_id": "b2", "source_sha": BASE, "actions": [], "user": {"login": "owner"}}
@@ -1676,7 +1676,7 @@ def test_workowner_lineage_index_collision():
 def test_workowner_lineage_unindexed_pagination_150_issues_and_hidden_duplicate():
     """150+ issues: resolves attempt on page 2, and detects hidden duplicate across pages."""
     from test_ef01_repair import WorkOwnerMemoryTransport
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     storage = WorkOwnerMemoryTransport(BASE)
 
     for i in range(1, 151):
@@ -1710,7 +1710,7 @@ def test_workowner_lineage_unindexed_pagination_150_issues_and_hidden_duplicate(
 def test_workowner_lineage_page_overflow():
     """Negative test: cap expiry / page overflow prevents false global uniqueness."""
     from test_ef01_repair import WorkOwnerMemoryTransport
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     storage = WorkOwnerMemoryTransport(BASE)
 
     for i in range(1, 1101):
@@ -1732,7 +1732,7 @@ def test_workowner_lineage_page_overflow():
 def test_workowner_lineage_missing_claim_parent_fails_closed():
     """Negative test: claim with missing parent strictly rejected."""
     from test_ef01_repair import WorkOwnerMemoryTransport
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     storage = WorkOwnerMemoryTransport(BASE)
 
     pred_action = {"action_id": "R1-WP02-CODEX-R2", "attempt_id": "target-attempt", "executor": "codex", "model": "gpt-5", "effort": "high"}
@@ -1758,7 +1758,7 @@ def test_workowner_lineage_missing_claim_parent_fails_closed():
 def test_workowner_lineage_evidenceless_candidate_rejected():
     """Negative test: candidate present without non-null signed evidence marker is rejected."""
     from test_ef01_repair import WorkOwnerMemoryTransport
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     storage = WorkOwnerMemoryTransport(BASE)
 
     pred_action = {"action_id": "R1-WP02-CODEX-R2", "attempt_id": "target-attempt", "executor": "codex", "model": "gpt-5", "effort": "high"}
@@ -1792,7 +1792,7 @@ def test_workowner_lineage_evidenceless_candidate_rejected():
 def test_workowner_lineage_literal_r1_r7_repair_of():
     """Negative and positive tests for literal R1..R7 repair_of attempt IDs."""
     from test_ef01_repair import WorkOwnerMemoryTransport
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     storage = WorkOwnerMemoryTransport(BASE)
 
     action = {"action_id": "R1-WP02-AGY-R8", "attempt_id": "attempt-r8",
@@ -1827,7 +1827,7 @@ def test_workowner_lineage_literal_r1_r7_repair_of():
 def test_workowner_acquire_unknown_and_stale_generation():
     """Negative tests: UNKNOWN predecessor denied, stale/skipped generations rejected."""
     from test_ef01_repair import WorkOwnerMemoryTransport
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     storage = WorkOwnerMemoryTransport(BASE)
 
     action1 = _action()
@@ -1914,7 +1914,7 @@ def test_r9_defect_a_and_b_cli_ingress_544_packet_and_successor_r10_lineage_roun
     """
     from ai_commerce.remote import __main__ as cli
     from test_ef01_repair import WorkOwnerMemoryTransport
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
 
     storage = WorkOwnerMemoryTransport(BASE)
 
@@ -2197,7 +2197,7 @@ def test_r9_defect_b_idempotent_same_payload_and_concurrent_race(tmp_path):
 def _readonly_audit_fixture(*, published=True, unknown=False, source=BASE, storage=None,
                             issue=599, repair_of=None):
     """Fresh modeled source only. No historical artifacts, native Git or providers."""
-    from ai_commerce.remote.transport import WorkOwner
+    from test_ef01_repair import WorkOwner
     from test_ef01_repair import WorkOwnerMemoryTransport
     from ai_commerce.remote.candidate_policy import canonical, EVIDENCE_MARKER, evidence_digest
     storage = storage or WorkOwnerMemoryTransport(source)
@@ -2243,7 +2243,7 @@ def _readonly_audit_fixture(*, published=True, unknown=False, source=BASE, stora
 
 
 def _run_readonly_audit(storage, packet, action, owner, **kwargs):
-    from ai_commerce.remote.transport import WorkOwnerAudit
+    from test_ef01_repair import WorkOwnerAudit
     before = json.dumps({"refs": storage.refs, "commits": storage.commits}, sort_keys=True)
     storage.requests.clear()
     report = WorkOwnerAudit.run(storage, issue_number=owner.identity["current_issue"], batch=packet,
@@ -2329,7 +2329,7 @@ def test_readonly_audit_missing_boundary_never_means_no_effect(namespace):
 
 @pytest.mark.parametrize("unknown", [False, True])
 def test_readonly_audit_provider_quota_and_partial_scratch_cannot_complete_round(unknown):
-    from ai_commerce.remote.transport import WorkOwnerAuditDiagnostics, AuditProviderStatus
+    from test_ef01_repair import WorkOwnerAuditDiagnostics, AuditProviderStatus
     storage, packet, action, owner = _readonly_audit_fixture(published=False, unknown=unknown)
     result = _run_readonly_audit(storage, packet, action, owner, diagnostics=WorkOwnerAuditDiagnostics(
         provider_status=AuditProviderStatus.QUOTA_EXHAUSTED, scratch_dirty=True, cleanup_completed=False))
@@ -2350,7 +2350,7 @@ def test_readonly_audit_identifies_published_without_signer_or_new_authority():
 
 
 def test_r4_bridge_capture_is_explicit_and_never_enrolls_a_source_repository():
-    from ai_commerce.remote.transport import WorkOwnerAudit, WorkOwnerWitnessSource, _EffectDenied
+    from test_ef01_repair import WorkOwnerAudit, WorkOwnerWitnessSource, _EffectDenied
     storage, packet, action, owner = _readonly_audit_fixture()
     kwargs = dict(issue_number=owner.identity["current_issue"], batch=packet,
                   action=action, trusted_issuer="trung-via")
@@ -2366,14 +2366,14 @@ def test_r4_bridge_capture_is_explicit_and_never_enrolls_a_source_repository():
 
 
 def test_readonly_audit_failed_cleanup_holds_even_with_authenticated_candidate():
-    from ai_commerce.remote.transport import WorkOwnerAuditDiagnostics
+    from test_ef01_repair import WorkOwnerAuditDiagnostics
     args = _readonly_audit_fixture()
     result = _run_readonly_audit(*args, diagnostics=WorkOwnerAuditDiagnostics(cleanup_completed=False))
     assert result["source_gate"] == "UNKNOWN" and result["code"] == "CLEANUP_UNCONFIRMED"
 
 
 def test_readonly_audit_contradictory_ef01_receipt_fails_closed():
-    from ai_commerce.remote.transport import WorkOwnerAuditDiagnostics
+    from test_ef01_repair import WorkOwnerAuditDiagnostics
     result = _run_readonly_audit(*_readonly_audit_fixture(),
         diagnostics=WorkOwnerAuditDiagnostics(ef01_report_sha256="0" * 64))
     assert result["source_gate"] == "CONTRADICTED" and result["code"] == "EF01_RECEIPT_CONTRADICTED"
@@ -2502,7 +2502,7 @@ def test_readonly_audit_authentic_v1_genesis_with_different_successor_source():
 
 
 def test_readonly_audit_requires_external_trusted_issuer():
-    from ai_commerce.remote.transport import WorkOwnerAudit
+    from test_ef01_repair import WorkOwnerAudit
     storage, packet, action, owner = _readonly_audit_fixture()
     storage.requests.clear()
     result = WorkOwnerAudit.run(storage, issue_number=599, batch=packet, action=action,
@@ -2732,7 +2732,7 @@ def test_effect_witness_pins_closed_shape_and_public_sanitization(tmp_path, monk
 def _audit_effect_fixture(tmp_path, monkeypatch, *, issue=599):
     from dataclasses import replace
     from ai_commerce.remote.candidate_policy import commit_evidence
-    from ai_commerce.remote.transport import WorkOwnerAudit, WorkOwnerAuditProvenance
+    from test_ef01_repair import WorkOwnerAudit, WorkOwnerAuditProvenance
     from test_ef01_repair import WorkOwnerMemoryTransport
     storage = WorkOwnerMemoryTransport(BASE)
     storage.repo = c.SOURCE_REPOSITORY
@@ -2778,7 +2778,7 @@ def test_effect_witness_immutable_hash_join_preserves_all_owner_gates(tmp_path, 
 def test_effect_witness_join_requires_all_source_and_effect_gates(tmp_path, monkeypatch, fault):
     from dataclasses import replace
     from ai_commerce.remote import transport as effect_auth
-    from ai_commerce.remote.transport import WorkOwnerAuditDiagnostics
+    from test_ef01_repair import WorkOwnerAuditDiagnostics
     f = _audit_effect_fixture(tmp_path, monkeypatch)
     kwargs = {}
     if fault == "fixture_as_real":
@@ -2841,7 +2841,7 @@ def test_effect_witness_join_requires_all_source_and_effect_gates(tmp_path, monk
 def test_effect_witness_historical_unknown_never_replays_or_coerces_status(
         tmp_path, monkeypatch, issue, generation, run_id, artifact_id, artifact_digest):
     """Modeled historical journal states; pins are original, NOT new host proof."""
-    from ai_commerce.remote.transport import WorkOwnerAuditDiagnostics, AuditProviderStatus
+    from test_ef01_repair import WorkOwnerAuditDiagnostics, AuditProviderStatus
     if generation == 2:
         storage, *_ = _readonly_audit_fixture(issue=587)
         args = _readonly_audit_fixture(storage=storage, issue=issue, repair_of="#587", unknown=True)
@@ -3238,7 +3238,7 @@ def test_wp02_disposable_supervisor_crash_new_supervisor_readonly(fault, tmp_pat
 import json, os, sys, time
 from pathlib import Path
 from test_ef01_repair import WorkOwnerMemoryTransport
-from ai_commerce.remote.transport import WorkOwner
+from test_ef01_repair import WorkOwner
 root = Path(sys.argv[1])
 packet = json.loads(sys.argv[2])
 storage = WorkOwnerMemoryTransport("a" * 40)
@@ -3266,7 +3266,7 @@ time.sleep(30)
 import json, os, sys
 from pathlib import Path
 from test_ef01_repair import WorkOwnerMemoryTransport
-from ai_commerce.remote.transport import WorkOwner, RemoteTransportError
+from test_ef01_repair import WorkOwner, RemoteTransportError
 state = json.loads((Path(sys.argv[1]) / "journal.json").read_text(encoding="utf-8"))
 storage = WorkOwnerMemoryTransport(state["source"])
 storage.refs = state["refs"]
