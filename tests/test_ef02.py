@@ -1100,15 +1100,9 @@ def test_retired_workowner_live_writer_api_fails_before_github_network(monkeypat
     monkeypatch.setattr(transport, "urlopen", forbidden)
     identity = {"repo": live.repo, "issue": 1, "action_id": "a",
                 "work_key": "k", "source_sha": "a" * 40}
-    with pytest.raises(RemoteTransportError, match="RETIRED_WORKOWNER_WRITE_DENIED"):
-        transport.WorkOwner.index_ingress(live, 1, {}, {})
-    with pytest.raises(RemoteTransportError, match="RETIRED_WORKOWNER_WRITE_DENIED"):
-        transport.WorkOwner.acquire(live, identity)
+    for method in ("index_ingress", "acquire", "_create", "append", "assert_current"):
+        assert not hasattr(transport.WorkOwner, method)
     owner = transport.WorkOwner(live, identity, "unused")
-    with pytest.raises(RemoteTransportError, match="RETIRED_WORKOWNER_WRITE_DENIED"):
-        owner._create("OWNED", [], {})
-    with pytest.raises(RemoteTransportError, match="RETIRED_WORKOWNER_WRITE_DENIED"):
-        owner.append("CLAIMED")
     for method, path, data in (
         ("POST", "/git/commits", {"message": transport.WorkOwner.MARKER + "{}"}),
         ("POST", "/git/refs", {"ref": "refs/heads/ef02/workowner/key/000",
@@ -1323,8 +1317,8 @@ def test_epwo_656_worker_recovery_projection_never_acquires_or_dispatches(monkey
     assert not hasattr(worker, "_acquire_owner")
     for name in ("execute_action", "reconcile_action"):
         monkeypatch.setattr(worker, name, forbidden)
-    monkeypatch.setattr(WorkOwner, "acquire", forbidden)
-    monkeypatch.setattr(WorkOwner, "append", forbidden)
+    assert not hasattr(WorkOwner, "acquire")
+    assert not hasattr(WorkOwner, "append")
     original_refs = dict(storage.refs)
     storage.requests.clear()
     result = worker.independent_reconciliation_action(action)
