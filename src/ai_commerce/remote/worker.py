@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from .transport import GitHubTransport, RemoteTransportError, CandidateIntegrityError, WorkOwner, WorkOwnerAudit
-from .validation import fingerprint, check_source, approved_verification_plan, approved_acceptance_plan, require_preexecutor_acceptance, RemoteRequestError
+from .validation import fingerprint, check_source, approved_verification_plan, approved_acceptance_plan, require_preexecutor_acceptance, reject_retired_wp_identifiers, RemoteRequestError
 from .reuse import load_approved_candidates, approve_reuse
 from .candidate_policy import (
     REVIEW_STATUS, VERIFIED_STATUSES, candidate_accepted, evidence_digest, validate_candidate_evidence,
@@ -284,6 +284,7 @@ class LocalBatchWorker:
         # to claim/transport tests and cannot prove production admission.
         if getattr(self, "_dispatch_strict_ac", False):
             try:
+                reject_retired_wp_identifiers(self.batch, submitted_action)
                 preflight_acceptance = require_preexecutor_acceptance(
                     submitted_action, source_closure=True)
             except RemoteRequestError as exc:
