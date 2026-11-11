@@ -1434,7 +1434,7 @@ def _retired_wp_job_inventory():
               "ef02-antigravity-headless-preflight.yml").read_text(encoding="utf-8")
     assert "\njobs:\n" in source
     jobs_section = source.split("\njobs:\n", 1)[1]
-    jobs = tuple(re.findall(r"(?m)^  ([a-z][a-z0-9-]*):\\s*$", jobs_section))
+    jobs = tuple(re.findall(r"(?m)^  ([a-z][a-z0-9-]*):\s*$", jobs_section))
     return source, jobs
 
 
