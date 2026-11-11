@@ -51,6 +51,7 @@ Two distinct product cycles share production and learning capabilities:
 
 ## Canonical implementation planning
 
+- [Current source/evidence register v2.2 — after WP retirement](docs/roadmap/ROADMAP_EXECUTION_REGISTER_V2_2.md) / [JSON](docs/roadmap/ROADMAP_EXECUTION_REGISTER_V2_2.json) (source retirement merged #812; Windows native process inventory unverified; 63 WBS preserved)
 - [Roadmap A — Creative-First v1.0](docs/roadmap/ROADMAP_A_CREATIVE_FIRST_V1_0.md) (six phases, A01–A18; Phase 0 includes EF01/EF02)
 - [Work Tree v1.1 — Detailed](docs/roadmap/WORK_TREE_DETAILED_V1_1.md) / [JSON](docs/roadmap/WORK_TREE_V1_1.json) (63 planning IDs)
 - [Human Decision — Engineering Flow](docs/governance/HUMAN_DECISION_2026-10-28_ENGINEERING_FLOW.md) (selective AIOS component reuse; dual Codex/Antigravity; no downstream Runtime)
