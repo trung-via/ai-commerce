@@ -2243,7 +2243,7 @@ def _readonly_audit_fixture(*, published=True, unknown=False, source=BASE, stora
 
 
 def _run_readonly_audit(storage, packet, action, owner, **kwargs):
-    from test_ef01_repair import WorkOwnerAudit
+    from ai_commerce.remote.transport import WorkOwnerAudit
     before = json.dumps({"refs": storage.refs, "commits": storage.commits}, sort_keys=True)
     storage.requests.clear()
     report = WorkOwnerAudit.run(storage, issue_number=owner.identity["current_issue"], batch=packet,
@@ -2329,7 +2329,7 @@ def test_readonly_audit_missing_boundary_never_means_no_effect(namespace):
 
 @pytest.mark.parametrize("unknown", [False, True])
 def test_readonly_audit_provider_quota_and_partial_scratch_cannot_complete_round(unknown):
-    from test_ef01_repair import WorkOwnerAuditDiagnostics, AuditProviderStatus
+    from ai_commerce.remote.transport import WorkOwnerAuditDiagnostics, AuditProviderStatus
     storage, packet, action, owner = _readonly_audit_fixture(published=False, unknown=unknown)
     result = _run_readonly_audit(storage, packet, action, owner, diagnostics=WorkOwnerAuditDiagnostics(
         provider_status=AuditProviderStatus.QUOTA_EXHAUSTED, scratch_dirty=True, cleanup_completed=False))
@@ -2350,7 +2350,7 @@ def test_readonly_audit_identifies_published_without_signer_or_new_authority():
 
 
 def test_r4_bridge_capture_is_explicit_and_never_enrolls_a_source_repository():
-    from test_ef01_repair import WorkOwnerAudit, WorkOwnerWitnessSource, _EffectDenied
+    from ai_commerce.remote.transport import WorkOwnerAudit, WorkOwnerWitnessSource, _EffectDenied
     storage, packet, action, owner = _readonly_audit_fixture()
     kwargs = dict(issue_number=owner.identity["current_issue"], batch=packet,
                   action=action, trusted_issuer="trung-via")
@@ -2366,14 +2366,14 @@ def test_r4_bridge_capture_is_explicit_and_never_enrolls_a_source_repository():
 
 
 def test_readonly_audit_failed_cleanup_holds_even_with_authenticated_candidate():
-    from test_ef01_repair import WorkOwnerAuditDiagnostics
+    from ai_commerce.remote.transport import WorkOwnerAuditDiagnostics
     args = _readonly_audit_fixture()
     result = _run_readonly_audit(*args, diagnostics=WorkOwnerAuditDiagnostics(cleanup_completed=False))
     assert result["source_gate"] == "UNKNOWN" and result["code"] == "CLEANUP_UNCONFIRMED"
 
 
 def test_readonly_audit_contradictory_ef01_receipt_fails_closed():
-    from test_ef01_repair import WorkOwnerAuditDiagnostics
+    from ai_commerce.remote.transport import WorkOwnerAuditDiagnostics
     result = _run_readonly_audit(*_readonly_audit_fixture(),
         diagnostics=WorkOwnerAuditDiagnostics(ef01_report_sha256="0" * 64))
     assert result["source_gate"] == "CONTRADICTED" and result["code"] == "EF01_RECEIPT_CONTRADICTED"
@@ -2502,7 +2502,7 @@ def test_readonly_audit_authentic_v1_genesis_with_different_successor_source():
 
 
 def test_readonly_audit_requires_external_trusted_issuer():
-    from test_ef01_repair import WorkOwnerAudit
+    from ai_commerce.remote.transport import WorkOwnerAudit
     storage, packet, action, owner = _readonly_audit_fixture()
     storage.requests.clear()
     result = WorkOwnerAudit.run(storage, issue_number=599, batch=packet, action=action,
@@ -2732,7 +2732,7 @@ def test_effect_witness_pins_closed_shape_and_public_sanitization(tmp_path, monk
 def _audit_effect_fixture(tmp_path, monkeypatch, *, issue=599):
     from dataclasses import replace
     from ai_commerce.remote.candidate_policy import commit_evidence
-    from test_ef01_repair import WorkOwnerAudit, WorkOwnerAuditProvenance
+    from ai_commerce.remote.transport import WorkOwnerAudit, WorkOwnerAuditProvenance
     from test_ef01_repair import WorkOwnerMemoryTransport
     storage = WorkOwnerMemoryTransport(BASE)
     storage.repo = c.SOURCE_REPOSITORY
@@ -2778,7 +2778,7 @@ def test_effect_witness_immutable_hash_join_preserves_all_owner_gates(tmp_path, 
 def test_effect_witness_join_requires_all_source_and_effect_gates(tmp_path, monkeypatch, fault):
     from dataclasses import replace
     from ai_commerce.remote import transport as effect_auth
-    from test_ef01_repair import WorkOwnerAuditDiagnostics
+    from ai_commerce.remote.transport import WorkOwnerAuditDiagnostics
     f = _audit_effect_fixture(tmp_path, monkeypatch)
     kwargs = {}
     if fault == "fixture_as_real":
@@ -2841,7 +2841,7 @@ def test_effect_witness_join_requires_all_source_and_effect_gates(tmp_path, monk
 def test_effect_witness_historical_unknown_never_replays_or_coerces_status(
         tmp_path, monkeypatch, issue, generation, run_id, artifact_id, artifact_digest):
     """Modeled historical journal states; pins are original, NOT new host proof."""
-    from test_ef01_repair import WorkOwnerAuditDiagnostics, AuditProviderStatus
+    from ai_commerce.remote.transport import WorkOwnerAuditDiagnostics, AuditProviderStatus
     if generation == 2:
         storage, *_ = _readonly_audit_fixture(issue=587)
         args = _readonly_audit_fixture(storage=storage, issue=issue, repair_of="#587", unknown=True)
@@ -3266,7 +3266,8 @@ time.sleep(30)
 import json, os, sys
 from pathlib import Path
 from test_ef01_repair import WorkOwnerMemoryTransport
-from test_ef01_repair import WorkOwner, RemoteTransportError
+from test_ef01_repair import WorkOwner
+from ai_commerce.remote.transport import RemoteTransportError
 state = json.loads((Path(sys.argv[1]) / "journal.json").read_text(encoding="utf-8"))
 storage = WorkOwnerMemoryTransport(state["source"])
 storage.refs = state["refs"]
