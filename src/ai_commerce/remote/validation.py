@@ -15,11 +15,28 @@ from ai_commerce.engineering.minimum_test import approved_groups
 
 IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 HEX_SHA = re.compile(r"^[0-9a-f]{40}$")
+RETIRED_WP_IDENTIFIER = re.compile(r"(?:EPWO|WP0[1-6])", re.IGNORECASE)
 
 class RemoteRequestError(ValueError):
     def __init__(self, code):
         super().__init__(code)
         self.failure_diagnosis = diagnose_failure({"status": "INVALID_REQUEST", "error_code": code}).payload()
+
+def reject_retired_wp_identifiers(batch: dict, action: dict | None = None) -> None:
+    """Deny new WP/EPWO machine IDs, never historical prose or read-only evidence.
+
+    GitHub Issue and workflow_dispatch deny the same identifiers. This extra
+    source boundary protects direct CLI/content validation and native worker
+    calls before any attempt index, GitHub claim, provider or candidate effect.
+    """
+    ids = [batch.get("batch_id")]
+    actions = [action] if action is not None else batch.get("actions", [])
+    for item in actions:
+        ids.extend((item.get("action_id"), item.get("attempt_id")))
+    if any(isinstance(value, str) and RETIRED_WP_IDENTIFIER.search(value)
+           for value in ids):
+        raise RemoteRequestError("RETIRED_WP_NOT_DISPATCHABLE")
+
 
 def canonical(data: dict) -> bytes:
     return json.dumps(data, ensure_ascii=False, sort_keys=True,
@@ -85,6 +102,10 @@ def validate_batch_content(data: dict, *, schema: Path, registry: dict[str, list
 
 def _validate_actions(data: dict, *, registry: dict[str, list[str]],
                       approved_reuse: dict | None, strict_ac: bool = True) -> dict:
+    # 'reconcile' deliberately passes strict_ac=False to inspect immutable
+    # historical WP packets. No live validation/dispatch uses that route.
+    if strict_ac:
+        reject_retired_wp_identifiers(data)
     ids = [a["action_id"] for a in data["actions"]]
     attempts = [a["attempt_id"] for a in data["actions"]]
     if len(set(ids)) != len(ids) or len(set(attempts)) != len(attempts):
