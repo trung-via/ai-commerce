@@ -918,7 +918,9 @@ def test_ef02_acceptance_reaches_selector_through_actual_child_cli(tmp_path, mon
     if declared:
         a["instruction"] += '\nMT01_ACCEPTANCE_JSON: ["FIXTURE.acceptance"]'
     result = context.worker.execute_action(a)
-    assert result["status"] == "CANDIDATE_READY", result
+    assert result["status"] == "CANDIDATE_READY", (
+        result.get("status"), result.get("error_code"), result.get("diagnostic"),
+        result.get("ef01_status"), result.get("ef01_error_code"))
     args = build_parser().parse_args(context.children[0].argv[3:])
     expected = ["FIXTURE.acceptance"] if declared else ["MT01.ACCEPTANCE_UNDECLARED"]
     assert args.acceptance == result["mt01_acceptance"]["ids"] == expected
@@ -1500,7 +1502,9 @@ def test_ef02_worker_with_mt01_v21_enabled_and_registered_groups_accepts_candida
     a = _action("a")
     a["instruction"] += '\nMT01_ACCEPTANCE_JSON: ["FIXTURE.acceptance"]'
     result = context.worker.execute_action(a)
-    assert result["status"] == "CANDIDATE_READY"
+    assert result["status"] == "CANDIDATE_READY", (
+        result.get("error_code"), result.get("diagnostic"),
+        result.get("ef01_status"), result.get("ef01_error_code"))
 
 
 def test_ef02_worker_with_mt01_v21_enabled_and_unregistered_fixture_fails_closed(tmp_path, monkeypatch):
