@@ -1110,185 +1110,34 @@ def test_workowner_candidate_publication_enforces_owner_fence_and_ref_readback(t
     assert storage.requests[-1][0] == "GET" and storage.requests[-1][1].startswith("/git/ref/heads/ef02/candidate/")
 
 
-def test_ef02_710_headless_issue_preflight_has_owner_only_no_model_gate():
-    # The native read may only be initiated by an owner-created exact-title
-    # Issue; no Issue body is ever interpreted as a command, path or model prompt.
-    src = (Path(__file__).resolve().parents[1] /
-           ".github/workflows/ef02-antigravity-headless-preflight.yml").read_text(encoding="utf-8")
-    for fixed in (
-        "github.event_name == 'issues'",
-        "github.event.action == 'opened'",
-        "github.repository == 'trung-via/ai-commerce'",
-        "github.actor == github.repository_owner",
-        "github.event.issue.user.login == github.repository_owner",
-        "github.event.issue.title == '[EF02 HEADLESS READ] #710 G3'",
-        "runs-on: [self-hosted, Windows, ai-commerce-ef02]",
-        "ref: main",
-        "persist-credentials: false",
-        "EF02-Antigravity-Headless-Preflight.ps1",
-        "AGY_G3_STATIC_PREFLIGHT=PASS_NO_MODEL",
-        "EFFECTIVE_WRITE_PERMISSION=UNPROVEN_NO_MODEL",
-        "MODEL_AUTH_QUOTA=UNPROVEN_NO_MODEL",
-    ):
-        assert fixed in src
-    assert "issues: write" not in src
-    g3_read = src.split("  g3b-write:", 1)[0]
-    assert "agy --print" not in g3_read
-    assert "AGY_G3B_RESULT" not in g3_read
-    assert "issue.body" not in src
-    assert "Write-Output $resultLines" not in src
-
-
-
-def test_ef02_710_g3b_owner_one_shot_bounded_model_and_disposable_scope():
-    src = (Path(__file__).resolve().parents[1] /
-           ".github/workflows/ef02-antigravity-headless-preflight.yml").read_text(encoding="utf-8")
-    read, after_g3b = src.split("  g3b-write:", 1)
-    model = after_g3b.split("\n  g4-forensic:", 1)[0]
-    assert "\n  g4-forensic:" in after_g3b
-    assert "wp01-native-recovery-restart" not in model
-    assert "AGY_G3_STATIC_PREFLIGHT=PASS_NO_MODEL" in read
-    for contract in (
-        "github.event_name == 'issues'",
-        "github.event.action == 'opened'",
-        "github.actor == github.repository_owner",
-        "github.event.issue.user.login == github.repository_owner",
-        "github.event.issue.title == '[EF02 HEADLESS WRITE] #710 G3B'",
-        "github.run_attempt == 1",
-        "runs-on: [self-hosted, Windows, ai-commerce-ef02]",
-        "timeout-minutes: 4",
-        "ref: main",
-        "persist-credentials: false",
-        'shutil.which("agy")',
-        'os.environ["RUNNER_TEMP"]',
-        "tempfile.mkdtemp",
-        "subprocess.CREATE_NEW_PROCESS_GROUP",
-        "wait(timeout=90)",
-        '"taskkill", "/PID", str(proc.pid), "/T", "/F"',
-        '"--model", "gemini-3.8-flash"',
-        '"--effort", "high"',
-        '"--mode", "accept-edits"',
-        '"--output-format", "json"',
-        'data.rstrip(b"\\r\\n")',
-        "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL",
-        "AGY_G3B_OUTSIDE_WRITES=UNPROVEN",
-        "root_original.st_dev, root_original.st_ino",
-        "stat.FILE_ATTRIBUTE_REPARSE_POINT",
-        "group: epwo-710-g3b-owner-probe",
-        'names != ["proof.txt"]',
-        'AGY_G3B_RESULT=',
-        'AGY_G3B_EFFECTIVE_WRITE=',
-    ):
-        assert contract in model
-    assert "issues: write" not in src
-    assert "issue.body" not in src
-    assert "github.event.issue.body" not in src
-    assert "--dangerously-skip-permissions" not in src
-    assert "WORKOWNER" not in model
-
-
-def test_ef02_710_g3b_inline_python_script_syntax_and_scope_tokens():
-    import ast
-    import textwrap
-    src = (Path(__file__).resolve().parents[1] /
-           ".github/workflows/ef02-antigravity-headless-preflight.yml").read_text(encoding="utf-8")
-    g3b = src.split("  g3b-write:", 1)[1]
-    script = g3b.split("$probe = @'\n", 1)[1].split("\n          '@", 1)[0]
-    parsed = ast.parse(textwrap.dedent(script))
-    assert any(isinstance(node, ast.Call) for node in ast.walk(parsed))
-    assert "stdout=subprocess.PIPE" not in script
-    assert "stderr=subprocess.PIPE" not in script
-    assert "AGY_G3B_OUTSIDE_WRITES=UNPROVEN" in script
-    assert "stream.read(129)" in script
-    assert "handle.st_dev, handle.st_ino" in script
-    assert "itertools.islice(root.iterdir(), 2)" in script
-    assert "target.read_bytes()" not in script
-    assert "sorted(p.name for p in root.iterdir())" not in script
-
-def _epwo_710_g4_script():
-    import textwrap
-    src = (Path(__file__).resolve().parents[1] /
-           ".github/workflows/ef02-antigravity-headless-preflight.yml").read_text(encoding="utf-8")
-    _, tail = src.split("  g4-forensic:", 1)
-    job = tail.split("  wh03b-745-forensic:", 1)[0]
-    script = job.split("$probe = @'\n", 1)[1].split("\n          '@", 1)[0]
-    return src, job, textwrap.dedent(script)
-
-
-def test_epwo_710_g4_owner_exact_one_shot_readonly_contract():
-    import ast
-    src, job, script = _epwo_710_g4_script()
-    for element in (
-        "github.event_name == 'issues'",
-        "github.event.action == 'opened'",
-        "github.actor == github.repository_owner",
-        "github.event.issue.user.login == github.repository_owner",
-        "github.event.issue.title == '[EPWO 710 G4 FORENSIC READ] #710'",
-        "github.run_attempt == 1",
-        "runs-on: [self-hosted, Windows, ai-commerce-ef02]",
-        "persist-credentials: false",
-        "contents: read",
+def test_retired_710_one_shot_native_jobs_and_dispatch_physically_absent():
+    """No owner-created #710 Issue or manual workflow dispatch can revive EPWO."""
+    source, jobs = _retired_wp_job_inventory()
+    assert jobs == ("wh03b-745-forensic",)
+    assert "workflow_dispatch:" not in source
+    for forbidden in (
+        "  check:",
+        "  g3b-write:",
+        "  g4-forensic:",
+        "[EF02 HEADLESS READ] #710 G3",
+        "[EF02 HEADLESS WRITE] #710 G3B",
+        "[EPWO 710 G4 FORENSIC READ] #710",
+        "AGY_G3_STATIC_PREFLIGHT",
+        "AGY_G3B_RESULT",
         "EPWO_710_G4_",
-        "HOLD_UNKNOWN_EFFECT",
+        "epwo-710-g3b-owner-probe",
+        "epwo-710-g4-forensic-read",
+        "EF02-Antigravity-Headless-Preflight.ps1",
     ):
-        assert element in job
-    ast.parse(script)
-    assert "--print" not in job
-    assert "issues: write" not in src
-    assert "github.event.issue.body" not in job
-    assert "write_text(" not in script
-    assert "subprocess." not in script
-    assert "GITHUB_TOKEN" not in job
-
-
-def test_epwo_710_g4_historical_local_receipt_stays_unverified(tmp_path):
-    import json
-    import types
-    _, _, code = _epwo_710_g4_script()
-    scope = {"__name__": "epwo_710_g4_tests"}
-    exec(compile(code, "EPWO710_G4_REVIEWED_INLINE", "exec"), scope)
-    root = tmp_path / "batch" / "action"
-    scope["EVIDENCE_ROOT"] = root
-    result = scope["observe"]()
-    assert result["root"] == "BATCH_ABSENT"
-    assert result["status"] == "HOLD_UNKNOWN_EFFECT"
-    assert result["replay_authorized"] == "FALSE"
-    root.parent.mkdir()
-    assert scope["observe"]()["root"] == "ACTION_ABSENT"
-    ef01 = root / "ef01"
-    ef01.mkdir(parents=True)
-    valid = {"attempt_id": scope["ATTEMPT"], "stage": "EXECUTOR_SUBPROCESS_RETURNED"}
-    (ef01 / "provider_return_observed.json").write_text(json.dumps(valid), encoding="utf-8")
-    result = scope["observe"]()
-    assert result["root"] == "ACTION_PRESENT"
-    assert result["return"] == "PRESENT_UNVERIFIED"
-    assert result["provider_outcome_proven"] == "FALSE"
-    assert result["status"] == "HOLD_UNKNOWN_EFFECT"
-    valid["attempt_id"] = "unrelated-attempt"
-    (ef01 / "provider_return_observed.json").write_text(json.dumps(valid), encoding="utf-8")
-    assert scope["observe"]()["return"] == "UNSAFE"
-    (ef01 / "provider_return_observed.json").write_text("{broken", encoding="utf-8")
-    assert scope["observe"]()["return"] == "READ_UNKNOWN"
-    (ef01 / "provider_return_observed.json").unlink()
-    assert scope["observe"]()["return"] == "MISSING"
-
-
-def test_epwo_710_g4_never_trusts_synthetic_terminal(tmp_path):
-    import json
-    _, _, code = _epwo_710_g4_script()
-    scope = {"__name__": "epwo_710_g4_tests"}
-    exec(compile(code, "EPWO710_G4_REVIEWED_INLINE", "exec"), scope)
-    root = tmp_path / "batch" / "action"
-    (root / "ef01").mkdir(parents=True)
-    scope["EVIDENCE_ROOT"] = root
-    terminal = root / "ef01" / "engineering_result.json"
-    terminal.write_text(json.dumps({"attempt_id": scope["ATTEMPT"],
-                                    "work_id": scope["BATCH"] + ":" + scope["ACTION"]}), encoding="utf-8")
-    report = scope["observe"]()
-    assert report["terminal"] == "PRESENT_UNVERIFIED"
-    assert report["provider_outcome_proven"] == "FALSE"
-    terminal.write_text(json.dumps({"attempt_id": scope["ATTEMPT"],"work_id": "wrong"}), encoding="utf-8")
-    assert scope["observe"]()["terminal"] == "UNSAFE"
+        assert forbidden not in source
+    assert "github.event.issue.title == '[WH03B #745 NATIVE FORENSIC READ] exact attempt only'" in source
+    assert "  wh03b-745-forensic:" in source
+    assert "github.event.action == 'opened'" in source
+    assert "github.event.issue.user.login == github.repository_owner" in source
+    assert "persist-credentials: false" in source
+    assert "ref: main" in source
+    assert "issues: write" not in source
+    assert "github.event.issue.body" not in source
 
 
 # WH03B #745 fixed native Windows forensic read; script never adjudicates replay.
@@ -1441,7 +1290,7 @@ def _retired_wp_job_inventory():
 def test_retired_wp01_wp02_native_jobs_physically_absent():
     """Retired jobs must not be runnable even through exact owner Issue titles."""
     source, jobs = _retired_wp_job_inventory()
-    assert jobs == ("check", "g3b-write", "g4-forensic", "wh03b-745-forensic")
+    assert jobs == ("wh03b-745-forensic",)
     for name, title in (
         ("wp01-native-child-crash", "[EPWO WP01 NATIVE CHILD CRASH] #466"),
         ("wp01-native-recovery-restart", "[EPWO WP01 NATIVE RESTART RECOVERY] #466"),
@@ -1457,17 +1306,16 @@ def test_retired_wp01_wp02_native_jobs_physically_absent():
 
 
 def test_retired_wp_native_launch_not_hidden_in_remaining_jobs():
-    """Keep unrelated G3/WH diagnostics, but remove the WP subprocess trigger."""
+    """Preserve exact WH forensic read; no former EPWO executable remains."""
     source, jobs = _retired_wp_job_inventory()
-    assert jobs == ("check", "g3b-write", "g4-forensic", "wh03b-745-forensic")
+    assert jobs == ("wh03b-745-forensic",)
     assert "test_wp02_disposable_supervisor_crash_new_supervisor_readonly" not in source
-    assert "EPWO_WP01_NATIVE_STATUS" not in source
-    assert "EPWO_WP01_RESTART_STATUS" not in source
-    assert "EPWO_WP02_NATIVE_STATUS" not in source
+    for forbidden in ("EPWO_WP01_NATIVE_STATUS", "EPWO_WP01_RESTART_STATUS",
+                      "EPWO_WP02_NATIVE_STATUS", "  check:", "  g3b-write:",
+                      "  g4-forensic:", "workflow_dispatch:"):
+        assert forbidden not in source
     for required in (
-        "github.event.issue.title == '[EF02 HEADLESS READ] #710 G3'",
-        "github.event.issue.title == '[EF02 HEADLESS WRITE] #710 G3B'",
-        "  g4-forensic:",
+        "github.event.issue.title == '[WH03B #745 NATIVE FORENSIC READ] exact attempt only'",
         "  wh03b-745-forensic:",
         "persist-credentials: false",
         "ref: main",
