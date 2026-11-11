@@ -278,7 +278,7 @@ def test_retired_broker_duplicate_legacy_journal_intent_still_denied():
     owner.append("CLAIMED")
     owner.append("SPAWN_INTENT")
     owner.append("PROVIDER_INTENT", round=0)
-    with pytest.raises(RemoteTransportError, match="WORK_PROVIDER_DUPLICATE_OR_MISMATCH"):
+    with pytest.raises(RemoteTransportError, match="WORK_JOURNAL_TRANSITION_INVALID"):
         owner.append("PROVIDER_INTENT", round=0)
     assert owner.uncertain is True
 
