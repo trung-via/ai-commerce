@@ -1,5 +1,8 @@
 # AI Commerce — Roadmap A: Creative-First v1.0
 
+**Post-WP current execution status (2026-11-11):** [Roadmap Execution Register v2.2](ROADMAP_EXECUTION_REGISTER_V2_2.md) ([JSON v2.2](ROADMAP_EXECUTION_REGISTER_V2_2.json)). WP01–WP06/EPWO is retired; source removal merged through [#812](https://github.com/trung-via/ai-commerce/pull/812) at `main@ce78b62097d131be7cca3bcd34fc4a0c6ecf0cb4` with Windows-hosted CI. Host-native process state remains UNVERIFIED. This canonical document is dated planning history; preserve its IDs/statuses and use the new overlay for current evidence.
+
+
 **Current execution overlay (2026-11-10):** [Integrated Roadmap Execution Register v2.1](ROADMAP_EXECUTION_REGISTER_V2_1.md) ([machine-readable 63-WBS crosswalk / 48 package-lane observations](ROADMAP_EXECUTION_REGISTER_V2_1.json)). Historical statuses and 2026-10-28 executor-selection rules below describe their dated decisions; current Human policy and actual Issue/PR/CI/native evidence supersede them where applicable. Retain A01–A18, six phases and independent Engineering lane unchanged.
 
 **Canonical planning · Human-approved 2026-10-28 · No dispatch / implementation implied.**
