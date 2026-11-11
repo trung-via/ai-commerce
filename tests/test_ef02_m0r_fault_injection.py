@@ -303,14 +303,13 @@ def _action():
 
 @pytest.fixture(autouse=True)
 def _fake_worktree_checkout_is_clean(monkeypatch):
-    from test_ef01_repair import DirectWorkOwnerBroker
     from ai_commerce.remote import worker as remote_worker
     # Patch only EF02's subprocess boundary. Mutating subprocess.Popen/run on
     # the shared Python module also breaks legitimate Git/source preflights.
     monkeypatch.setattr(remote_worker, "subprocess", SimpleNamespace(
         run=subprocess.run, Popen=subprocess.Popen, PIPE=subprocess.PIPE,
         DEVNULL=subprocess.DEVNULL, TimeoutExpired=subprocess.TimeoutExpired))
-    monkeypatch.setattr("ai_commerce.remote.worker.WorkOwnerBroker", DirectWorkOwnerBroker)
+    assert not hasattr(remote_worker, "WorkOwnerBroker")
     """Fault-injection tests mock 'git worktree add' without creating .git.
 
     Keep checkout-preflight positive in these tests so each test can reach
