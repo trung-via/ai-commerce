@@ -868,8 +868,7 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
     worker = remote.LocalBatchWorker(checkout=repo, batch=batch,
                                     profiles={"scope": VERIFY, "project-tests": ["python", "-m", "pytest", "tests", "-q"]},
                                     github=Github(), root=tmp_path / "action-evidence")
-    storage = WorkOwnerMemoryTransport(head)
-    worker._acquire_owner = lambda action: memory_owner(action, batch, storage)
+    assert not hasattr(worker, "_acquire_owner")
     # These legacy v1 fixture tests exercise post-admission WorkOwner, child,
     # recovery and MT-01 branches with intentionally marker-less packets.
     # New production dispatch AC validation is independently regression-tested

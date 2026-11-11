@@ -280,10 +280,6 @@ class LocalBatchWorker:
                      **({"git_executable": self.git_executable} if self.git_executable is not None else {}))
         self._dispatch_strict_ac = True
 
-    def _acquire_owner(self, action):
-        identity = WorkOwner.identity(self.github, self.issue_number, self.batch, action)
-        return WorkOwner.acquire(self.github, identity)
-
     def reconcile_action(self, action: dict) -> dict:
         submitted = {k: v for k, v in action.items() if k != "resolved_dependencies"}
         identity = WorkOwner.identity(self.github, self.issue_number, self.batch, submitted)

@@ -327,7 +327,6 @@ def _fake_worktree_checkout_is_clean(monkeypatch):
 
 
 def _worker(tmp_path: Path, github):
-    from test_ef01_repair import memory_owner, WorkOwnerMemoryTransport
     worker = object.__new__(LocalBatchWorker)
     worker.checkout = tmp_path
     worker.root = tmp_path / "evidence"
@@ -336,8 +335,6 @@ def _worker(tmp_path: Path, github):
     worker.profiles = {"ef02-tests": ["python", "-m", "pytest", "tests/test_ef02.py", "-q"]}
     worker.profiles["project-tests"] = ["python", "-m", "pytest", "tests", "-q"]
     worker.github = github
-    storage = WorkOwnerMemoryTransport(BASE)
-    worker._acquire_owner = lambda action: memory_owner(action, worker.batch, storage)
     if not hasattr(github, "pre_spawn_checkpoint"):
         # This fixture exercises unrelated faults; provide the fake positive
         # remote checkpoint explicitly rather than touching GitHub.
@@ -2456,7 +2453,7 @@ def test_readonly_audit_worker_entrypoint_never_acquires_or_executes(monkeypatch
     worker.github, worker.batch, worker.issue_number, worker.issuer_login = storage, packet, 599, "trung-via"
     def forbidden(*a, **k):
         pytest.fail("audit crossed mutation boundary")
-    monkeypatch.setattr(worker, "_acquire_owner", forbidden)
+    assert not hasattr(worker, "_acquire_owner")
     monkeypatch.setattr(worker, "execute_action", forbidden)
     monkeypatch.setattr(worker, "reconcile_action", forbidden)
     monkeypatch.setattr(owner.__class__, "acquire", forbidden)
@@ -2869,7 +2866,8 @@ def test_effect_witness_worker_interface_never_acquires_or_executes(tmp_path, mo
     worker.github, worker.batch, worker.issue_number, worker.issuer_login = storage, packet, 599, "trung-via"
     def forbidden(*args, **kwargs):
         pytest.fail("source witness crossed native boundary")
-    for method in ("_acquire_owner", "execute_action", "reconcile_action"):
+    assert not hasattr(worker, "_acquire_owner")
+    for method in ("execute_action", "reconcile_action"):
         monkeypatch.setattr(worker, method, forbidden)
     for method in ("acquire", "append"):
         monkeypatch.setattr(owner.__class__, method, forbidden)
