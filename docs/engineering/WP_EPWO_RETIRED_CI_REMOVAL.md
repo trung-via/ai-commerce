@@ -19,3 +19,5 @@ Observed `main@2d2aef011af7c323fe7a05ce136961c89ee6d74a`:
 - GitHub-hosted Windows CI and exact source checks from #811 are independent of a real self-hosted Windows process inventory. Do **not** label complete live-system retirement, BQ/WH launch, PULSE external effects or a zero-process assertion without separately captured native receipts. No retired provider effect may be replayed.
 
 Acceptance for this follow-up requires exact-HEAD Windows MT-01, genuine independent Brain review and verified trusted merge. Human-retired WP remains inactive even if the source PR is pending or rejected.
+
+- Closed historical EF02 Issues (including retired #579) cannot be dispatched from a `labeled` event or explicit `workflow_dispatch`: both `issue-ingress.yml` and `ef02-batch.yml` reject closed state before native execution. This follow-up gate requires its own exact-HEAD CI acceptance.
