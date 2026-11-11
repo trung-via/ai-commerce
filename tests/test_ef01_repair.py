@@ -913,6 +913,10 @@ def test_ef02_acceptance_reaches_selector_through_actual_child_cli(tmp_path, mon
     groups = (mt.TestGroup("scope", ("tests/test_scope.py",), ("FIXTURE.acceptance",), ("impl.py", "kept.txt")),)
     monkeypatch.setattr(mt, "approved_groups", lambda: groups)
     monkeypatch.setattr(validation, "approved_groups", lambda: groups)
+    # An intentionally synthetic owner group must not be mixed with dynamic
+    # reviewed owners from the live checkout. Test the isolated fixture only;
+    # production keeps _reviewed_intake_groups() strict and source-validated.
+    monkeypatch.setattr(validation, "_reviewed_intake_groups", lambda: groups)
     context.worker.profiles["component-scope"] = ["python", "-m", "pytest", "tests/test_scope.py", "-q"]
     a = _action("a")
     if declared:
@@ -1498,6 +1502,10 @@ def test_ef02_worker_with_mt01_v21_enabled_and_registered_groups_accepts_candida
     groups = (mt.TestGroup("scope", ("tests/test_scope.py",), ("FIXTURE.acceptance",), ("impl.py", "kept.txt")),)
     monkeypatch.setattr(mt, "approved_groups", lambda: groups)
     monkeypatch.setattr(validation, "approved_groups", lambda: groups)
+    # An intentionally synthetic owner group must not be mixed with dynamic
+    # reviewed owners from the live checkout. Test the isolated fixture only;
+    # production keeps _reviewed_intake_groups() strict and source-validated.
+    monkeypatch.setattr(validation, "_reviewed_intake_groups", lambda: groups)
     context.worker.profiles["mt01-scope-tests"] = ["python", "-m", "pytest", "tests/test_scope.py", "-q"]
     a = _action("a")
     a["instruction"] += '\nMT01_ACCEPTANCE_JSON: ["FIXTURE.acceptance"]'
