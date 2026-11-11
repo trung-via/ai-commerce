@@ -1,5 +1,8 @@
 # AI COMMERCE — DETAILED WORK TREE v1.1 (CANONICAL PLAN)
 
+**Post-WP current execution status (2026-11-11):** [Roadmap Execution Register v2.2](ROADMAP_EXECUTION_REGISTER_V2_2.md) ([JSON v2.2](ROADMAP_EXECUTION_REGISTER_V2_2.json)). WP01–WP06/EPWO is retired; source removal merged through [#812](https://github.com/trung-via/ai-commerce/pull/812) at `main@ce78b62097d131be7cca3bcd34fc4a0c6ecf0cb4` with Windows-hosted CI. Host-native process state remains UNVERIFIED. This canonical document is dated planning history; preserve its IDs/statuses and use the new overlay for current evidence.
+
+
 **Current execution overlay (2026-11-10):** [Integrated Roadmap Execution Register v2.1](ROADMAP_EXECUTION_REGISTER_V2_1.md) ([machine-readable 63-WBS crosswalk](ROADMAP_EXECUTION_REGISTER_V2_1.json)). The 63 WBS IDs and historical statuses below remain immutable planning history. For current delivery/source versus native/live evidence, read the separate versioned overlay; do not interpret old `PROPOSED` labels as a proof that no source has since shipped.
 
 **Adopted:** 2026-10-28 · **Mode:** HUMAN-APPROVED CANONICAL PLANNING · **Canonical repo:** `trung-via/ai-commerce` (`main`)  

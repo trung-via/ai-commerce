@@ -1,5 +1,8 @@
 # Work Tree B-QUALITY-001 v1.0 — CIMQ + CRI R1–R8 (PA2)
 
+**Post-WP current execution status (2026-11-11):** [Roadmap Execution Register v2.2](ROADMAP_EXECUTION_REGISTER_V2_2.md) ([JSON v2.2](ROADMAP_EXECUTION_REGISTER_V2_2.json)). WP01–WP06/EPWO is retired; source removal merged through [#812](https://github.com/trung-via/ai-commerce/pull/812) at `main@ce78b62097d131be7cca3bcd34fc4a0c6ecf0cb4` with Windows-hosted CI. Host-native process state remains UNVERIFIED. This canonical document is dated planning history; preserve its IDs/statuses and use the new overlay for current evidence.
+
+
 **Current execution overlay (2026-11-10):** [Integrated Roadmap Execution Register v2.1](ROADMAP_EXECUTION_REGISTER_V2_1.md) ([machine-readable BQ-00..06 states](ROADMAP_EXECUTION_REGISTER_V2_1.json)). All seven `AUTHORIZED_PLANNING_ONLY / IMPLEMENTATION_NOT_STARTED` entries below are historical adoption-time snapshots, **not** current delivery facts: scoped BQ source has been merged. Do not infer a live Human study, PULSE provider, spend, publish or business impact from those merges.
 
 **Quyết định Human:** [Issue #373](https://github.com/trung-via/ai-commerce/issues/373), 2026-11-05. **Trạng thái:** HUMAN_SELECTED_ARCHITECTURE / AUTHORIZED_PLANNING_ONLY; BQ_IMPLEMENTATION_NOT_STARTED.
