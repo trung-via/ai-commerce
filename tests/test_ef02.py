@@ -1173,6 +1173,17 @@ def test_retired_workowner_live_writer_api_fails_before_github_network(monkeypat
     assert network == []
 
 
+def test_retired_closed_ef02_issue_cannot_reenter_through_dispatch():
+    """Close/label and manual workflow_dispatch must not revive retired Issues."""
+    ingress = (ROOT / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+    batch_workflow = (ROOT / ".github/workflows/ef02-batch.yml").read_text(encoding="utf-8")
+    assert "github.event.issue.state == 'open' &&" in ingress.split("  hostops-personal:", 1)[0]
+    assert "data.state !== 'open'" in batch_workflow
+    assert "github.event.issue.title" in ingress
+    assert "workflow_dispatch:" in batch_workflow
+    assert "RETIRED_WP_NOT_DISPATCHABLE" in batch_workflow
+
+
 def test_retired_workowner_guard_preserves_normal_claim_and_legacy_get(monkeypatch):
     """The transport blocks only retired writer routes, not EF02 claims or reads."""
     from ai_commerce.remote import transport
