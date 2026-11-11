@@ -5,8 +5,6 @@ import hashlib
 import json
 import os
 import re
-import secrets
-import threading
 import subprocess
 import sys
 import tempfile
@@ -22,7 +20,6 @@ from .candidate_policy import (
 from ai_commerce.engineering.runner import (
     DEFAULT_MAX_REPAIR_ROUNDS, DEFAULT_ACTION_TIMEOUT_SECONDS,
     validate_max_repair_rounds, _snapshot, _provider_problem, _outside_scope,
-    owner_round_receipt,
 )
 from ai_commerce.engineering.git import git_argv, resolve_git_executable
 from ai_commerce.engineering.git_byte_consistency import (GitByteConsistencyError, checkout_diagnostics as _checkout_diagnostics)
@@ -154,7 +151,8 @@ def _safe_child_env(checkout: Path) -> dict[str, str]:
     for name in tuple(env):
         if name in ("GITHUB_TOKEN", "GH_TOKEN", "ACTIONS_RUNTIME_TOKEN",
                     "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL") or (
-                    name.startswith("EF02_") and "TOKEN" in name):
+                    name.startswith("EF02_") and "TOKEN" in name or
+                    name.startswith("AI_COMMERCE_EF02_OWNER_")):
             env.pop(name, None)
     env["PYTHONPATH"] = str(checkout / "src")
     return env
@@ -183,80 +181,6 @@ def _classify_failed_executor(report: dict, evidence: Path) -> str:
     if problem and problem[0] in ("MODEL_AT_CAPACITY", "QUOTA_EXHAUSTED", "MODEL_UNSUPPORTED"):
         return problem[0]
     return "EXECUTOR_FAILED"
-
-class WorkOwnerBroker:
-    """Fence requests use existing EF01 stdin/stdout; no network or credentials.
-
-    Only the native EF01 process receives the random capability. The runner
-    consumes it before starting provider/verifier children. Requests are never
-    copied into logs. Parent loss/EOF denies further rounds.
-    """
-    PREFIX = "EF02_OWNER_FENCE_V1:"
-
-    def __init__(self, owner):
-        self.owner, self.token = owner, secrets.token_hex(32)
-        self.child = None
-        self.output, self.errors, self.threads = [], [], []
-
-    def fence(self, request):
-        stage = request.get("stage")
-        if (set(request) != ({"stage", "round", "attempt_id", "receipt", "token"}
-                if stage == "ROUND_VERIFIED" else {"stage", "round", "attempt_id", "token"}) or
-                stage not in ("PROVIDER_INTENT", "ROUND_VERIFIED") or
-                request["attempt_id"] != self.owner.identity["attempt_id"] or
-                not isinstance(request["token"], str) or
-                not secrets.compare_digest(request["token"], self.token)):
-            raise ValueError("WORK_FENCE_REQUEST_INVALID")
-        data = {"round": request["round"]}
-        if stage == "ROUND_VERIFIED":
-            data["receipt"] = request["receipt"]
-        self.owner.append(stage, **data)
-
-    def environment(self):
-        return {"AI_COMMERCE_EF02_OWNER_REQUIRED": "1",
-                "AI_COMMERCE_EF02_OWNER_ENDPOINT": "stdio-v1",
-                "AI_COMMERCE_EF02_OWNER_TOKEN": self.token}
-
-    def communicate(self, child, timeout):
-        if self.child is None:
-            self.child = child
-            def stdout():
-                while line := child.stdout.readline(2049):
-                    if line.startswith(self.PREFIX):
-                        try:
-                            if len(line) > 2048:
-                                raise ValueError("WORK_FENCE_REQUEST_INVALID")
-                            self.fence(json.loads(line[len(self.PREFIX):]))
-                            response = '{"status":"CONFIRMED"}\n'
-                        except Exception:
-                            response = '{"status":"UNKNOWN"}\n'
-                        try:
-                            child.stdin.write(response)
-                            child.stdin.flush()
-                        except OSError:
-                            break
-                    else:
-                        self.output.append(line)
-            def stderr():
-                while chunk := child.stderr.read(4096):
-                    self.errors.append(chunk)
-            self.threads = [threading.Thread(target=reader, daemon=True) for reader in (stdout, stderr)]
-            for thread in self.threads:
-                thread.start()
-        child.wait(timeout=timeout)
-        for thread in self.threads:
-            thread.join(timeout=5)
-        if any(thread.is_alive() for thread in self.threads):
-            raise RemoteTransportError("WORK_FENCE_DRAIN_UNKNOWN")
-        return "".join(self.output), "".join(self.errors)
-
-    def close(self):
-        if self.child is not None:
-            try:
-                self.child.stdin.close()
-            except OSError:
-                self.owner.uncertain = True
-
 
 class LocalBatchWorker:
     def __init__(self, *, checkout: Path, batch: dict, profiles: dict[str, list[str]],
