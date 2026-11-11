@@ -15,6 +15,7 @@ permissions:
 jobs:
   ef02:
     if: >-
+      github.event.issue.state == 'open' &&
       startsWith(github.event.issue.title, '[EF02]') &&
       !contains(github.event.issue.title, 'EPWO') &&
       !contains(github.event.issue.title, 'WP01') &&
