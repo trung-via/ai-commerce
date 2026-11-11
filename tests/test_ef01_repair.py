@@ -241,18 +241,14 @@ def _run(fixture, mode="pass-after-repair", executor="codex", **kwargs):
     return result, observations, profiles
 
 
-@pytest.mark.parametrize("deny_round", [0, 1])
-def test_workowner_fence_before_initial_provider_and_every_internal_repair(fixture, deny_round):
-    events = []
-    def fence(stage, inv):
-        events.append((stage, inv["repair_round"]))
-        if stage == "PROVIDER_INTENT" and inv["repair_round"] == deny_round:
-            raise RuntimeError("WORK_OWNER_STALE_FENCE")
-    result, calls, _ = _run(fixture, owner_fence=fence)
-    assert result["status"] == "EXECUTION_UNKNOWN" and not result["replay_authorized"]
-    assert len(calls) == deny_round
-    assert events[-1] == ("PROVIDER_INTENT", deny_round)
-    assert result["invocations"][-1]["executor_invoked"] is False
+def test_retired_owner_fence_entrypoints_absent():
+    """Old WorkOwner stdio and callback injection cannot be reactivated."""
+    import inspect
+    assert not hasattr(runner, "owner_fence_client")
+    assert not hasattr(runner, "owner_round_receipt")
+    for fn in (runner.execute_attempt, runner._run_invocation):
+        assert "owner_fence" not in inspect.signature(fn).parameters
+        assert "owner_fence" not in inspect.getsource(fn)
 
 
 def test_retired_broker_unavailable_and_no_legacy_owner_capability_leaks(monkeypatch):
@@ -283,16 +279,32 @@ def test_retired_broker_duplicate_legacy_journal_intent_still_denied():
     assert owner.uncertain is True
 
 
-def test_workowner_parent_eof_denies_provider_without_any_dispatch(monkeypatch):
-    import io
-    environment = {"AI_COMMERCE_EF02_OWNER_REQUIRED": "1",
-                   "AI_COMMERCE_EF02_OWNER_ENDPOINT": "stdio-v1",
-                   "AI_COMMERCE_EF02_OWNER_TOKEN": "f" * 64}
-    fence = runner.owner_fence_client(environment)
-    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
-    monkeypatch.setattr(sys, "stdout", io.StringIO())
-    with pytest.raises(RuntimeError, match="UNCONFIRMED"):
-        fence("PROVIDER_INTENT", {"repair_round": 0, "attempt_id": "a"})
+@pytest.mark.parametrize("legacy_key", (
+    "AI_COMMERCE_EF02_OWNER_REQUIRED",
+    "AI_COMMERCE_EF02_OWNER_ENDPOINT",
+    "AI_COMMERCE_EF02_OWNER_TOKEN",
+    "AI_COMMERCE_EF02_OWNER_UNKNOWN",
+))
+def test_retired_workowner_ipc_fails_closed_before_ef01_executor(
+        fixture, monkeypatch, legacy_key):
+    """Even valid-looking legacy owner IPC must not turn into a provider call."""
+    selection, calls, _ = _provider(fixture, mode="scope-pass")
+    monkeypatch.setenv(legacy_key, "legacy-retired")
+    output = fixture.root / "blocked-legacy-ef01"
+    with pytest.raises(ValueError, match="RETIRED_WORKOWNER_IPC_DENIED"):
+        runner.execute_attempt(
+            repo=fixture.repo, output_dir=output, work_id="retired-blocked",
+            attempt_id="retired-attempt", selection=selection,
+            instruction="Not executed", verify_argv=VERIFY,
+            allowed_prefixes=fixture.state["scope"])
+    assert not calls.exists()
+    assert not output.exists()
+
+
+def test_normal_ef01_repairs_remain_independent_of_retired_owner(fixture):
+    result, calls, _ = _run(fixture)
+    assert result["status"] in ("BUILD_VERIFIED_FOR_SCOPE", "VERIFIED_SCOPE_REVIEW_REQUIRED")
+    assert len(calls) == 2
 
 
 @pytest.mark.parametrize("field", ["attempt_id", "source_base_sha", "status"])
@@ -814,7 +826,6 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
             self.owner_environment = {k: v for k, v in kwargs["env"].items()
                                       if k.startswith("AI_COMMERCE_EF02_OWNER_")}
             assert not self.owner_environment  # Retired WP is not in new EF02 children.
-            self.owner_fence = None
             children.append(self)
 
         def communicate(self, timeout=None):
@@ -830,7 +841,7 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
                 aggregate_sources=args.aggregate_source, host_slots=args.host_slots,
                 registered_profiles=json.loads(args.registered_profiles_json.read_text())
                 if args.registered_profiles_json else None,
-                owner_fence=self.owner_fence)
+                )
             self.returncode = 0 if result["status"] in remote.VERIFIED_STATUSES else 1
             return "", ""
 
