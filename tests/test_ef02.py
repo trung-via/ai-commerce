@@ -1427,214 +1427,53 @@ def test_epwo_656_worker_recovery_projection_never_acquires_or_dispatches(monkey
     assert storage.refs == original_refs
     assert all(method == "GET" for method, *_ in storage.requests)
 
-def _wp01_native_child_probe_source():
-    """Extract only the independently gated WP01 job, not adjacent jobs."""
-    import textwrap
-    source = (Path(__file__).resolve().parents[1] /
-              ".github/workflows/ef02-antigravity-headless-preflight.yml").read_text(encoding="utf-8")
-    job = source.split("  wp01-native-child-crash:", 1)[1]
-    script = job.split("$probe = @'\n", 1)[1].split("\n          '@", 1)[0]
-    return source, job, textwrap.dedent(script)
+def _retired_wp_job_inventory():
+    """Inspect the live workflow rather than the already-removed probes."""
+    import re
+    source = (ROOT / ".github" / "workflows" /
+              "ef02-antigravity-headless-preflight.yml").read_text(encoding="utf-8")
+    assert "\njobs:\n" in source
+    jobs_section = source.split("\njobs:\n", 1)[1]
+    jobs = tuple(re.findall(r"(?m)^  ([a-z][a-z0-9-]*):\\s*$", jobs_section))
+    return source, jobs
 
 
-def test_wp01_native_child_crash_exact_owner_gate_one_shot_and_no_provider():
-    """A fresh Issue only authorizes the disposable child, never old effect replay."""
-    import ast
-    source, job, script = _wp01_native_child_probe_source()
-    for required in (
-        "github.event_name == 'issues'",
-        "github.event.action == 'opened'",
-        "github.repository == 'trung-via/ai-commerce'",
-        "github.actor == github.repository_owner",
-        "github.event.issue.user.login == github.repository_owner",
-        "github.event.issue.title == '[EPWO WP01 NATIVE CHILD CRASH] #466'",
-        "github.run_attempt == 1",
-        "runs-on: [self-hosted, Windows, ai-commerce-ef02]",
-        "timeout-minutes: 4",
-        "group: epwo-wp01-native-child-crash-one-shot",
-        "permissions:\n      contents: read",
-        "persist-credentials: false",
-        "ref: main",
-        "EPWO_WP01_NATIVE_REPLAY_AUTHORIZED=FALSE",
-        "EPWO_WP01_NATIVE_PROVIDER=NOT_INVOKED",
-        "PASS_CHILD_KILLED_INTENT_ONLY_UNKNOWN",
+def test_retired_wp01_wp02_native_jobs_physically_absent():
+    """Retired jobs must not be runnable even through exact owner Issue titles."""
+    source, jobs = _retired_wp_job_inventory()
+    assert jobs == ("check", "g3b-write", "g4-forensic", "wh03b-745-forensic")
+    for name, title in (
+        ("wp01-native-child-crash", "[EPWO WP01 NATIVE CHILD CRASH] #466"),
+        ("wp01-native-recovery-restart", "[EPWO WP01 NATIVE RESTART RECOVERY] #466"),
+        ("wp02-native-supervisor-restart", "[EPWO WP02 NATIVE SUPERVISOR RESTART] #466"),
     ):
-        assert required in job, required
-    ast.parse(script)
-    assert "issue.body" not in job
-    assert "github.event.issue.body" not in job
-    assert "issues: write" not in job
-    assert "GITHUB_TOKEN" not in job
-    assert "--model" not in job
-    assert "agy " not in job
-    assert "codex " not in job
-    assert "taskkill" not in job.lower()
-    assert "subprocess.Popen" in script
-    assert "child.kill()" in script
-    assert 'subprocess.CREATE_NEW_PROCESS_GROUP' in script
-    assert 'tempfile.TemporaryDirectory(prefix="epwo-wp01-native-", dir=temp)' in script
-    assert 'print("EPWO_WP01_NATIVE_HISTORICAL_710=NOT_TOUCHED")' in script
-    assert "WORKOWNER" not in script
-    assert "write_text(" not in script
-    assert "github.api" not in script
+        assert name not in source
+        assert title not in source
+    assert not any(name.startswith(("wp01-", "wp02-", "wp03-", "wp04-", "wp05-", "wp06-"))
+                   for name in jobs)
+    assert "epwo-wp01-native-" not in source
+    assert "epwo-wp01-restart-" not in source
+    assert "epwo-wp02-supervisor-" not in source
 
 
-def test_wp01_native_child_crash_deny_non_windows_before_any_process_spawn(monkeypatch):
-    """Trusted code inspection checks that its first scope gate is Windows."""
-    import ast
-    _, _, script = _wp01_native_child_probe_source()
-    module = ast.parse(script)
-    observe = next(n for n in module.body
-                   if isinstance(n, ast.FunctionDef) and n.name == "observe")
-    first = observe.body[0]
-    assert isinstance(first, ast.If)
-    assert isinstance(first.test, ast.Compare)
-    assert "os.name" in ast.unparse(first.test)
-    assert isinstance(first.body[0], ast.Return)
-    assert isinstance(first.body[0].value, ast.Constant)
-    assert first.body[0].value.value == "HOLD_WINDOWS_UNPROVEN"
-
-
-def _wp01_native_recovery_restart_source():
-    """Extract only the source-owned one-shot restart observer job."""
-    import textwrap
-    source = (Path(__file__).resolve().parents[1] /
-              ".github/workflows/ef02-antigravity-headless-preflight.yml").read_text(encoding="utf-8")
-    job = source.split("  wp01-native-recovery-restart:", 1)[1]
-    script = job.split("$probe = @'\n", 1)[1].split("\n          '@", 1)[0]
-    return job, textwrap.dedent(script)
-
-
-def test_wp01_recovery_restart_one_shot_owner_scope_and_ast():
-    import ast
-    job, script = _wp01_native_recovery_restart_source()
+def test_retired_wp_native_launch_not_hidden_in_remaining_jobs():
+    """Keep unrelated G3/WH diagnostics, but remove the WP subprocess trigger."""
+    source, jobs = _retired_wp_job_inventory()
+    assert jobs == ("check", "g3b-write", "g4-forensic", "wh03b-745-forensic")
+    assert "test_wp02_disposable_supervisor_crash_new_supervisor_readonly" not in source
+    assert "EPWO_WP01_NATIVE_STATUS" not in source
+    assert "EPWO_WP01_RESTART_STATUS" not in source
+    assert "EPWO_WP02_NATIVE_STATUS" not in source
     for required in (
-        "github.event_name == 'issues'",
-        "github.event.action == 'opened'",
-        "github.repository == 'trung-via/ai-commerce'",
-        "github.actor == github.repository_owner",
-        "github.event.issue.user.login == github.repository_owner",
-        "github.event.issue.title == '[EPWO WP01 NATIVE RESTART RECOVERY] #466'",
-        "github.run_attempt == 1",
-        "runs-on: [self-hosted, Windows, ai-commerce-ef02]",
-        "timeout-minutes: 4",
-        "group: epwo-wp01-native-recovery-restart-once",
-        "permissions:\n      contents: read",
+        "github.event.issue.title == '[EF02 HEADLESS READ] #710 G3'",
+        "github.event.issue.title == '[EF02 HEADLESS WRITE] #710 G3B'",
+        "  g4-forensic:",
+        "  wh03b-745-forensic:",
         "persist-credentials: false",
         "ref: main",
-        "EPWO_WP01_RESTART_RUNNER_REBOOT=NOT_TESTED",
-        "EPWO_WP01_RESTART_WORKOWNER_710=NOT_TOUCHED",
-        "EPWO_WP01_RESTART_REPLAY_AUTHORIZED=FALSE",
     ):
-        assert required in job, required
-    assert "github.event.issue.body" not in job
-    assert "issues: write" not in job
-    assert "GITHUB_TOKEN" not in job
-    assert "taskkill" not in job.lower()
-    assert "--model" not in job
-    assert "codex " not in job
-    assert "agy " not in job
-    ast.parse(script)
-    for token in ("os.fsync(fd)", "os.fsync(ready_fd)", "durable.ready", "FSYNC_DONE", "child.kill()", "child.wait(timeout=8)",
-                  "subprocess.run(", "HOLD_UNKNOWN_NO_REPLAY",
-                  "PASS_FRESH_READER_HOLD_UNKNOWN", "HOLD_READER_UNVERIFIED",
-                  'tempfile.TemporaryDirectory(prefix="epwo-wp01-restart-",dir=temp)'):
-        assert token in script, token
-    assert script.count("subprocess.Popen(") == 1
-    assert script.count("subprocess.run(") == 1
-
-
-def test_wp01_recovery_restart_reader_is_read_only_and_no_relaunch():
-    import ast
-    _, script = _wp01_native_recovery_restart_source()
-    tree = ast.parse(script)
-    observe = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "observe")
-    assert isinstance(observe.body[0], ast.If)
-    assert "os.name" in ast.unparse(observe.body[0].test)
-    assert isinstance(observe.body[0].body[0], ast.Return)
-    assert observe.body[0].body[0].value.value == "HOLD_WINDOWS_UNPROVEN"
-    assignment = next(n for n in tree.body if isinstance(n, ast.Assign) and
-                      any(isinstance(t, ast.Name) and t.id == "READER" for t in n.targets))
-    assert isinstance(assignment.value, (ast.Constant, ast.BinOp))
-    # Reconstruct the fixed reader literal from an inert AST, never invoke worker.
-    reader_text = ast.literal_eval(assignment.value)
-    reader_tree = ast.parse(reader_text)
-    assert "HOLD_UNKNOWN_NO_REPLAY" in reader_text
-    assert "FSYNC_DONE" in reader_text
-    assert "durable.ready" in reader_text
-    assert "HOLD_READER_UNVERIFIED" in reader_text
-    assert "terminal.exists()" in reader_text
-    forbidden = ("subprocess", "Popen(", "os.system", "unlink(", "write_bytes(", "write_text(", "open(")
-    assert all(term not in reader_text for term in forbidden)
-    assert not any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and
-                   n.name == "execute_action" for n in reader_tree.body)
-
-
-@pytest.mark.parametrize("mode,expected,exit_code", [
-    ("valid", "HOLD_UNKNOWN_NO_REPLAY", 0),
-    ("missing_intent", "HOLD_READER_UNVERIFIED", 2),
-    ("tampered_intent", "HOLD_READER_UNVERIFIED", 2),
-    ("missing_ready", "HOLD_READER_UNVERIFIED", 2),
-    ("tampered_ready", "HOLD_READER_UNVERIFIED", 2),
-    ("conflicting_terminal", "HOLD_READER_UNVERIFIED", 2),
-])
-def test_wp01_recovery_restart_reader_negative_cases(tmp_path, mode, expected, exit_code):
-    """Exercise the actual fresh reader in disposable pytest scratch only."""
-    import ast
-    _, script = _wp01_native_recovery_restart_source()
-    module = ast.parse(script)
-    assignment = next(n for n in module.body if isinstance(n, ast.Assign) and
-                      any(isinstance(t, ast.Name) and t.id == "READER" for t in n.targets))
-    reader_code = ast.literal_eval(assignment.value)
-    owned = tmp_path / "epwo-restart-reader"
-    owned.mkdir()
-    if mode != "missing_intent":
-        (owned / "intent.marker").write_bytes(
-            b"DIFFERENT" if mode == "tampered_intent" else b"INTENT_ONLY"
-        )
-    if mode != "missing_ready":
-        (owned / "durable.ready").write_bytes(
-            b"WRONG" if mode == "tampered_ready" else b"FSYNC_DONE"
-        )
-    if mode == "conflicting_terminal":
-        (owned / "terminal.marker").write_bytes(b"UNVERIFIED")
-    result = subprocess.run(
-        [sys.executable, "-B", "-c", reader_code, str(owned)],
-        cwd=str(owned), capture_output=True, text=True, timeout=8, check=False,
-    )
-    assert result.returncode == exit_code
-    assert result.stdout.strip() == expected
-    assert result.stderr == ""
-    assert not list(owned.glob("*.new"))
-
-
-def test_wp02_native_supervisor_owner_gate_and_no_provider():
-    src = (Path(__file__).resolve().parents[1] /
-           ".github/workflows/ef02-antigravity-headless-preflight.yml").read_text(encoding="utf-8")
-    job = src.split("  wp02-native-supervisor-restart:", 1)[1]
-    required = (
-        "github.event_name == 'issues'",
-        "github.event.action == 'opened'",
-        "github.repository == 'trung-via/ai-commerce'",
-        "github.actor == github.repository_owner",
-        "github.event.issue.user.login == github.repository_owner",
-        "github.event.issue.title == '[EPWO WP02 NATIVE SUPERVISOR RESTART] #466'",
-        "github.run_attempt == 1",
-        "runs-on: [self-hosted, Windows, ai-commerce-ef02]",
-        "timeout-minutes: 4",
-        "permissions:\n      contents: read",
-        "ref: main",
-        "persist-credentials: false",
-        "test_wp02_disposable_supervisor_crash_new_supervisor_readonly",
-        "EPWO_WP02_NATIVE_EFFECT=SIMULATED_JOURNAL_ONLY",
-        "EPWO_WP02_NATIVE_WORKOWNER_710=NOT_TOUCHED",
-        "EPWO_WP02_NATIVE_REPLAY_AUTHORIZED=FALSE",
-    )
-    assert all(token in job for token in required)
-    forbidden = ("issues: write", "github.event.issue.body", "GITHUB_TOKEN",
-                 "taskkill", "Restart-Service", "--model", "agy --print", "codex --")
-    assert all(token not in job for token in forbidden)
-
+        assert required in source
+    assert "issues: write" not in source
 
 
 def test_retired_epwo_wp_issues_fail_closed_before_ef02_executor():
