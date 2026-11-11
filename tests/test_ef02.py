@@ -138,6 +138,61 @@ def test_reject_duplicate_cycle_unknown_dependency_and_bad_path():
         validate(p)
 
 
+@pytest.mark.parametrize("field,token", [
+    ("batch_id", "epwo710-old"),
+    ("batch_id", "retired_wp06_restart"),
+    ("action_id", "WP01-claim"),
+    ("action_id", "BQ-epwo-hidden"),
+    ("attempt_id", "wh03_wp03_r2"),
+    ("attempt_id", "retry-Wp05-old"),
+])
+def test_retired_wp_machine_identifiers_rejected_by_source_validation(field, token):
+    """Both hosted validation and direct CLI content validation fail closed."""
+    from ai_commerce.remote.validation import validate_batch_content
+    packet = batch([action("a")])
+    if field == "batch_id":
+        packet[field] = token
+    else:
+        packet["actions"][0][field] = token
+    with pytest.raises(RemoteRequestError, match="RETIRED_WP_NOT_DISPATCHABLE"):
+        validate(packet)
+    with pytest.raises(RemoteRequestError, match="RETIRED_WP_NOT_DISPATCHABLE"):
+        validate_batch_content(packet, schema=SCHEMA, registry=verify_registry(REGISTRY))
+
+
+def test_retired_wp_historical_reconciliation_remains_readable_and_prose_non_authorizing():
+    """Read-only history is not dispatch; BQ/WH prose references remain valid."""
+    from ai_commerce.remote.validation import validate_batch_content
+    packet = batch([action("a")])
+    packet["batch_id"] = "epwo710-historical"
+    read = validate_batch(
+        packet, schema=SCHEMA, registry=verify_registry(REGISTRY),
+        issuer_login="trung-via", owner_login="trung-via", strict_ac=False)
+    assert read is packet  # historical reconcile never grants execution
+    normal = batch([action("a")])
+    normal["actions"][0]["instruction"] += " Historical EPWO WP06 UNKNOWN_EFFECT is read-only."
+    assert validate(normal) is normal
+    assert validate_batch_content(normal, schema=SCHEMA, registry=verify_registry(REGISTRY)) is normal
+
+
+def test_retired_wp_direct_strict_worker_never_claims_or_calls_provider(tmp_path):
+    """Real strict worker check runs before new index/claim, even bypassing CLI."""
+    from ai_commerce.remote.worker import LocalBatchWorker
+    class NoNetwork:
+        def __getattr__(self, name):
+            raise AssertionError("RETIRED_WP_NETWORK_OR_PROVIDER_CALLED:" + name)
+    worker = object.__new__(LocalBatchWorker)
+    worker.root = tmp_path
+    worker.batch = {"source_sha": "a" * 40, "batch_id": "epwo-direct-legacy"}
+    worker.github = NoNetwork()
+    worker._dispatch_strict_ac = True
+    result = worker.execute_action(action("a"))
+    assert result["status"] == "INVALID_ACTION"
+    assert result["error_code"] == "RETIRED_WP_NOT_DISPATCHABLE"
+    assert result["executor_invoked"] is False
+    assert result["replay_authorized"] is False
+
+
 def test_component_scope_accepts_nested_paths_not_unrelated_siblings():
     from ai_commerce.engineering.runner import _safe_scope
     a = action("a")
