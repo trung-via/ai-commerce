@@ -1452,7 +1452,8 @@ def test_retired_epwo_wp_issues_fail_closed_before_ef02_executor():
     assert "github.event.action == 'labeled'" in ingress
     for token in ("EPWO", "WP01", "WP02", "WP03", "WP04", "WP05", "WP06"):
         assert f"!contains(github.event.issue.title, '{token}')" in ingress
-    assert "data.pull_request || !data.title.startsWith('[EF02]')" in batch
+    assert "data.pull_request || data.state !== 'open' || !data.title.startsWith('[EF02]')" in batch
+    assert "github.event.issue.state == 'open' &&" in ingress
     assert "core.setFailed('RETIRED_WP_NOT_DISPATCHABLE')" in batch
     assert "github.event_name == 'workflow_dispatch'" in batch
 
