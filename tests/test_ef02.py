@@ -27,7 +27,8 @@ def test_r4_remote_bridge_uses_configured_source_and_never_schedules(tmp_path, m
     worker = object.__new__(LocalBatchWorker)
     worker.github, worker.batch, worker.issue_number, worker.issuer_login = f.args[0], f.args[1], 643, "trung-via"
     def forbidden(*a, **kw): pytest.fail("source bridge scheduled native execution")
-    for method in ("execute_action", "_acquire_owner", "reconcile_action"):
+    assert not hasattr(worker, "_acquire_owner")
+    for method in ("execute_action", "reconcile_action"):
         monkeypatch.setattr(worker, method, forbidden)
     with f.ledger:
         report = worker.witness_bridge(f.args[2], f.request(), enrollment=f.enrollment,
@@ -1411,7 +1412,8 @@ def test_epwo_656_worker_recovery_projection_never_acquires_or_dispatches(monkey
     worker.issuer_login = "trung-via"
     def forbidden(*args, **kwargs):
         pytest.fail("recovery review attempted effectful WorkOwner/EF02 operation")
-    for name in ("execute_action", "_acquire_owner", "reconcile_action"):
+    assert not hasattr(worker, "_acquire_owner")
+    for name in ("execute_action", "reconcile_action"):
         monkeypatch.setattr(worker, name, forbidden)
     monkeypatch.setattr(WorkOwner, "acquire", forbidden)
     monkeypatch.setattr(WorkOwner, "append", forbidden)
@@ -1662,6 +1664,7 @@ def test_retired_workowner_not_in_new_ef02_execute_path():
     import inspect
     from ai_commerce.remote.worker import LocalBatchWorker
     src = inspect.getsource(LocalBatchWorker.execute_action)
+    assert not hasattr(LocalBatchWorker, "_acquire_owner")
     assert "WorkOwner" not in src and "WorkOwnerBroker" not in src
     assert "owner.assert_current" not in src and "broker.communicate" not in src
     assert "verify_claim_publication" in src
