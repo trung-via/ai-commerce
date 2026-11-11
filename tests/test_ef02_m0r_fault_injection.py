@@ -1889,9 +1889,9 @@ def _issue_544_packet(source_sha=BASE):
         "authorization_ref": "human-approval-544",
         "max_parallel": 2,
         "actions": [{
-            "action_id": "R1-WP02-ARGON-R9",
-            "attempt_id": "r1_wp02_argon_medium_r9_20261107",
-            "repair_of": "r1_wp02_agy38_high_r8_20261107",
+            "action_id": "R1-EF02-ARGON-R9",
+            "attempt_id": "r1_ef02_argon_medium_r9_20261107",
+            "repair_of": "r1_ef02_agy38_high_r8_20261107",
             "executor": "antigravity",
             "model": "gemini-4-argon-medium",
             "effort": "medium",
@@ -1906,7 +1906,7 @@ def _issue_544_packet(source_sha=BASE):
 def test_r9_defect_a_and_b_cli_ingress_544_packet_and_successor_r10_lineage_round_trip(tmp_path, monkeypatch):
     """Real RemoteActionBatch CLI ingress -> LocalBatchWorker -> index_attempt -> successor R10 lineage.
 
-    Tests actual #544 packet semantics (actor='HUMAN', no issuer_login field in packet,
+    Tests the historical #544 packet shape using independent non-WP identifiers (actor='HUMAN', no issuer_login field in packet,
     authenticated GitHub Issue creator='trung-via'), verifies index commit records
     issuer='trung-via' (never 'HUMAN'), and verifies successor R10 resolves predecessor
     via durable index without WORK_LINEAGE_INDEX_ISSUER_MISMATCH. Also tests BRAIN actor
@@ -1920,8 +1920,8 @@ def test_r9_defect_a_and_b_cli_ingress_544_packet_and_successor_r10_lineage_roun
 
     # Predecessor R8 on issue #543
     r8_action = {
-        "action_id": "R1-WP02-AGY-R8",
-        "attempt_id": "r1_wp02_agy38_high_r8_20261107",
+        "action_id": "R1-EF02-AGY-R8",
+        "attempt_id": "r1_ef02_agy38_high_r8_20261107",
         "executor": "antigravity",
         "model": "gemini-3.8-flash",
         "effort": "high",
@@ -1993,13 +1993,13 @@ def test_r9_defect_a_and_b_cli_ingress_544_packet_and_successor_r10_lineage_roun
     assert rc == 1  # Stopped at prespawn checkpoint as designed
 
     # Check indexed commit for R9
-    r9_key = storage.attempt_key("r1_wp02_argon_medium_r9_20261107")
+    r9_key = storage.attempt_key("r1_ef02_argon_medium_r9_20261107")
     r9_index_sha = storage.refs[f"refs/heads/ef02/index/{r9_key}"]
     r9_index_commit = storage.commits[r9_index_sha]
     parsed = storage._parse_index_message(r9_index_commit["message"])
     assert parsed["issuer"] == "trung-via"
     assert parsed["issue"] == 544
-    assert parsed["attempt_id"] == "r1_wp02_argon_medium_r9_20261107"
+    assert parsed["attempt_id"] == "r1_ef02_argon_medium_r9_20261107"
 
     # Historical R8 WorkOwner references are deliberately not transferred or
     # modified by the new CI-only execution path. New attempts are indexed on
@@ -2008,9 +2008,9 @@ def test_r9_defect_a_and_b_cli_ingress_544_packet_and_successor_r10_lineage_roun
     r9_action = p544["actions"][0]
     r10_action = {
         **r9_action,
-        "action_id": "R1-WP02-ARGON-R10",
-        "attempt_id": "r1_wp02_argon_medium_r10_20261107",
-        "repair_of": "r1_wp02_argon_medium_r9_20261107"
+        "action_id": "R1-EF02-ARGON-R10",
+        "attempt_id": "r1_ef02_argon_medium_r10_20261107",
+        "repair_of": "r1_ef02_argon_medium_r9_20261107"
     }
     p545 = {
         **p544,
@@ -2036,7 +2036,7 @@ def test_r9_defect_a_and_b_cli_ingress_544_packet_and_successor_r10_lineage_roun
         "--brain-issuers", "ai-commerce-brain[bot]", "--issue-number", "545"
     ])
     assert rc10 == 1
-    r10_key = storage.attempt_key("r1_wp02_argon_medium_r10_20261107")
+    r10_key = storage.attempt_key("r1_ef02_argon_medium_r10_20261107")
     r10_index_sha = storage.refs[f"refs/heads/ef02/index/{r10_key}"]
     parsed10 = storage._parse_index_message(storage.commits[r10_index_sha]["message"])
     assert parsed10["issuer"] == "ai-commerce-brain[bot]"
