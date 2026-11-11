@@ -1504,6 +1504,8 @@ def test_retired_workowner_not_in_new_ef02_execute_path():
     from ai_commerce.remote.worker import LocalBatchWorker
     src = inspect.getsource(LocalBatchWorker.execute_action)
     assert not hasattr(LocalBatchWorker, "_acquire_owner")
+    from ai_commerce.remote import worker as remote_worker
+    assert not hasattr(remote_worker, "WorkOwnerBroker")
     assert "WorkOwner" not in src and "WorkOwnerBroker" not in src
     assert "owner.assert_current" not in src and "broker.communicate" not in src
     assert "verify_claim_publication" in src
