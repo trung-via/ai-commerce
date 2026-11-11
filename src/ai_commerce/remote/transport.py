@@ -539,8 +539,19 @@ class WorkOwner:
             "fingerprint": fp,
         }
 
+    @staticmethod
+    def _deny_live_owner_writer(github) -> None:
+        """Retired WorkOwner writer is forbidden on the live GitHub transport.
+
+        Historical in-memory test transports override api() independently.
+        Read-only identity/reconcile paths remain available on real GitHub.
+        """
+        if isinstance(github, GitHubTransport) and type(github).api is GitHubTransport.api:
+            raise RemoteTransportError("RETIRED_WORKOWNER_WRITE_DENIED")
+
     @classmethod
     def index_ingress(cls, github, issue_number: int, batch: dict, action: dict, issuer: str | None = None) -> str:
+        cls._deny_live_owner_writer(github)
         if type(issue_number) is not int or not 1 <= issue_number <= 2**53:
             raise RemoteTransportError("WORK_IDENTITY_UNKNOWN_TRUSTED_ISSUE_REQUIRED")
         fp = hashlib.sha256(json.dumps({
@@ -570,6 +581,7 @@ class WorkOwner:
 
     @classmethod
     def acquire(cls, github, identity):
+        cls._deny_live_owner_writer(github)
         owner = cls(github, identity, secrets.token_hex(32))
         chain = owner.read()
         target_gen = identity.get("generation", 1)
@@ -852,6 +864,7 @@ class WorkOwner:
         return chain
 
     def _create(self, stage, chain, data):
+        self._deny_live_owner_writer(self.github)
         if len(chain) >= self.LIMIT:
             raise RemoteTransportError("WORK_JOURNAL_BOUND_INVALID")
         self._transition(stage, chain, data)
@@ -878,6 +891,7 @@ class WorkOwner:
         return record["digest"]
 
     def append(self, stage, **data):
+        self._deny_live_owner_writer(self.github)
         with self.lock:
             try:
                 return self._create(stage, self.assert_current(), data)
@@ -2141,6 +2155,17 @@ class GitHubTransport:
         self.prefix = "https://api.github.com/repos/" + repo
 
     def api(self, method: str, path: str, data: dict | None = None) -> dict:
+        # Backstop: never write retired WP journal refs or WorkOwner commits,
+        # including direct transport calls bypassing the archived writer API.
+        if method != "GET":
+            message = data.get("message") if isinstance(data, dict) else None
+            ref_name = data.get("ref") if isinstance(data, dict) else None
+            if ((path == "/git/commits" and isinstance(message, str) and
+                 message.startswith(WorkOwner.MARKER)) or
+                (path == "/git/refs" and isinstance(ref_name, str) and
+                 ref_name.startswith("refs/heads/ef02/workowner/")) or
+                path.startswith("/git/refs/heads/ef02/workowner/")):
+                raise RemoteTransportError("RETIRED_WORKOWNER_WRITE_DENIED")
         url = self.prefix + path
         raw = json.dumps(data, sort_keys=True).encode("utf-8") if data is not None else None
         req = Request(url, data=raw, method=method,
@@ -2601,6 +2626,8 @@ class GitHubTransport:
     def _candidate_owner_fence(self, owner, proof):
         if owner is None:
             return
+        if type(self).api is GitHubTransport.api:
+            raise CandidateIntegrityError("RETIRED_WORKOWNER_PUBLICATION_DENIED")
         if owner.github is not self:
             raise CandidateIntegrityError("WORK_OWNER_PUBLICATION_FENCE_REQUIRED")
         chain = owner.assert_current()

@@ -1089,6 +1089,65 @@ def test_candidate_ref_get_verification_failure_survives_worker_batch_artifact(t
     assert _PRIVATE not in safe
 
 
+def test_retired_workowner_live_writer_api_fails_before_github_network(monkeypatch):
+    """Real GitHubTransport cannot write WorkOwner refs, commits or owner candidates."""
+    from ai_commerce.remote import transport
+    live = transport.GitHubTransport("fixture/repository", "test-only-credential")
+    network = []
+    def forbidden(*args, **kwargs):
+        network.append((args, kwargs))
+        raise AssertionError("RETIRED_WORKOWNER_MUST_NOT_CALL_NETWORK")
+    monkeypatch.setattr(transport, "urlopen", forbidden)
+    identity = {"repo": live.repo, "issue": 1, "action_id": "a",
+                "work_key": "k", "source_sha": "a" * 40}
+    with pytest.raises(RemoteTransportError, match="RETIRED_WORKOWNER_WRITE_DENIED"):
+        transport.WorkOwner.index_ingress(live, 1, {}, {})
+    with pytest.raises(RemoteTransportError, match="RETIRED_WORKOWNER_WRITE_DENIED"):
+        transport.WorkOwner.acquire(live, identity)
+    owner = transport.WorkOwner(live, identity, "unused")
+    with pytest.raises(RemoteTransportError, match="RETIRED_WORKOWNER_WRITE_DENIED"):
+        owner._create("OWNED", [], {})
+    with pytest.raises(RemoteTransportError, match="RETIRED_WORKOWNER_WRITE_DENIED"):
+        owner.append("CLAIMED")
+    for method, path, data in (
+        ("POST", "/git/commits", {"message": transport.WorkOwner.MARKER + "{}"}),
+        ("POST", "/git/refs", {"ref": "refs/heads/ef02/workowner/key/000",
+                                  "sha": "a" * 40}),
+        ("PATCH", "/git/refs/heads/ef02/workowner/key/000", {"sha": "b" * 40}),
+        ("DELETE", "/git/refs/heads/ef02/workowner/key/000", None),
+    ):
+        with pytest.raises(RemoteTransportError, match="RETIRED_WORKOWNER_WRITE_DENIED"):
+            live.api(method, path, data)
+    with pytest.raises(transport.CandidateIntegrityError,
+                       match="RETIRED_WORKOWNER_PUBLICATION_DENIED"):
+        live._candidate_owner_fence(owner, {})
+    assert network == []
+
+
+def test_retired_workowner_guard_preserves_normal_claim_and_legacy_get(monkeypatch):
+    """The transport blocks only retired writer routes, not EF02 claims or reads."""
+    from ai_commerce.remote import transport
+    live = transport.GitHubTransport("fixture/repository", "test-only-credential")
+    calls = []
+    class Response:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def read(self):
+            return b'{"status":"ok"}'
+    def observe(request, timeout):
+        calls.append((request.get_method(), request.full_url))
+        return Response()
+    monkeypatch.setattr(transport, "urlopen", observe)
+    assert live.api("GET", "/git/ref/heads/ef02/workowner/key/000") == {"status": "ok"}
+    assert live.api("POST", "/git/refs", {"ref": "refs/heads/ef02/claims/abc",
+                                         "sha": "a" * 40}) == {"status": "ok"}
+    assert live.api("POST", "/git/commits", {"message": "EF02 CLAIM\\n\\nfixture",
+                                            "tree": "a" * 40, "parents": []}) == {"status": "ok"}
+    assert [method for method, _url in calls] == ["GET", "POST", "POST"]
+
+
 def test_workowner_candidate_publication_enforces_owner_fence_and_ref_readback(tmp_path, monkeypatch):
     """Integration consumer check: WorkOwner fence + main's _publication_api ref readback."""
     from ai_commerce.remote import transport
