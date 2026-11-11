@@ -18,7 +18,13 @@ from ai_commerce.engineering.profile import ExecutorSelection
 from ai_commerce.remote import worker as remote
 from ai_commerce.remote.scheduler import run_schedule
 from ai_commerce.remote.validation import validate_batch
-from ai_commerce.remote.transport import WorkOwner, GitHubTransport, RemoteTransportError
+from ai_commerce.remote.transport import (
+    WorkOwner as ReadOnlyWorkOwner, GitHubTransport, RemoteTransportError,
+    CandidateIntegrityError, canonical, commit_evidence,
+)
+from ai_commerce.remote.candidate_policy import evidence_digest
+import re
+import secrets
 
 BASE = "a" * 40
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +42,19 @@ class WorkOwnerMemoryTransport(GitHubTransport):
         self.issue_body = None
         self.issues = {}
         self.before_write = None
+
+    def _candidate_owner_fence(self, owner, proof):
+        if owner is None:
+            return
+        if owner.github is not self:
+            raise CandidateIntegrityError("WORK_OWNER_PUBLICATION_FENCE_REQUIRED")
+        chain = owner.assert_current()
+        identity = owner.identity
+        if (chain[-1]["stage"] != "PUBLISH_INTENT" or
+                chain[-1]["data"].get("receipt") != evidence_digest(proof) or
+                identity["repo"] != self.repo or
+                any(identity[k] != proof[k] for k in ("source_sha", "attempt_id", "action_id", "fingerprint"))):
+            raise CandidateIntegrityError("WORK_OWNER_PUBLICATION_FENCE_MISMATCH")
 
     def api(self, method, path, data=None):
         with self.storage_lock:
@@ -99,6 +118,151 @@ class WorkOwnerMemoryTransport(GitHubTransport):
                 self.refs[data["ref"]] = data["sha"]
                 return {"ref": data["ref"], "object": {"sha": data["sha"], "type": "commit"}}
             raise AssertionError((method, path))
+
+
+# Historical WorkOwner mutation model: TEST-ONLY, never shipped in src/.
+# Production WorkOwner supports identity/read/reconcile, but has no writer methods.
+class WorkOwner(ReadOnlyWorkOwner):
+    @classmethod
+    def index_ingress(cls, github, issue_number: int, batch: dict, action: dict, issuer: str | None = None) -> str:
+        if type(issue_number) is not int or not 1 <= issue_number <= 2**53:
+            raise RemoteTransportError("WORK_IDENTITY_UNKNOWN_TRUSTED_ISSUE_REQUIRED")
+        fp = hashlib.sha256(json.dumps({
+            "batch_id": batch["batch_id"],
+            "source_sha": batch["source_sha"],
+            "action": {k: v for k, v in action.items() if k != "resolved_dependencies"}
+        }, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")).hexdigest()
+        return github.index_attempt(
+            issue_number=issue_number,
+            source_sha=batch["source_sha"],
+            attempt_id=action["attempt_id"],
+            fingerprint=fp,
+            issuer=issuer
+        )
+
+
+    @classmethod
+    def acquire(cls, github, identity):
+        owner = cls(github, identity, secrets.token_hex(32))
+        chain = owner.read()
+        target_gen = identity.get("generation", 1)
+
+        if target_gen == 1:
+            if chain:
+                raise RemoteTransportError("WORK_OWNER_EXISTS_RECONCILE_ONLY")
+            for namespace in ("claims", "pre-spawn", "spawned", "candidate"):
+                try:
+                    github.api("GET", "/git/ref/heads/ef02/" + namespace + "/" +
+                               github.attempt_key(identity["attempt_id"]))
+                except RemoteTransportError as exc:
+                    if str(exc) != "GITHUB_HTTP_404":
+                        raise
+                else:
+                    raise RemoteTransportError("WORK_LEGACY_BOUNDARY_RECONCILE_ONLY")
+            owner.generation = 1
+            owner._create("OWNED", [], {"attempt_id": identity["attempt_id"],
+                                        "issue": identity.get("current_issue", identity["issue"])})
+            return owner
+        else:
+            if not chain:
+                raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_JOURNAL_MISSING")
+            prior = chain[-1]
+            if prior["generation"] >= target_gen:
+                raise RemoteTransportError("WORK_OWNER_TRANSFER_CONFLICT")
+            # UNKNOWN_FAIL_CLOSED: Strictly DENY UNKNOWN predecessor provider/publication/reownership
+            if prior["stage"] != "PUBLISHED":
+                raise RemoteTransportError("WORK_OWNER_PREDECESSOR_UNRESOLVED")
+            if target_gen != prior["generation"] + 1:
+                raise RemoteTransportError("WORK_OWNER_STALE_OR_SKIPPED_GENERATION")
+
+            receipt = prior.get("data", {}).get("receipt")
+            cand_digest = prior.get("data", {}).get("candidate")
+            if not receipt or not cand_digest:
+                raise RemoteTransportError("WORK_TERMINAL_RECEIPT_MISMATCH")
+            pred_attempt = prior.get("data", {}).get("attempt_id")
+            if not pred_attempt and identity.get("lineage"):
+                pred_attempt = identity["lineage"][0].get("attempt_id")
+            if pred_attempt:
+                cand_ref = github.api("GET", f"/git/ref/heads/ef02/candidate/{github.attempt_key(pred_attempt)}")
+                cand_sha = cand_ref.get("object", {}).get("sha")
+                if cls.digest(cand_sha) != cand_digest:
+                    raise RemoteTransportError("WORK_TERMINAL_RECEIPT_MISMATCH")
+                cand_commit = github.api("GET", f"/git/commits/{cand_sha}")
+                try:
+                    proof = commit_evidence(cand_commit.get("message", ""))
+                except ValueError as exc:
+                    raise RemoteTransportError("WORK_TERMINAL_RECEIPT_MISMATCH") from exc
+                if (proof is None or evidence_digest(proof) != receipt or
+                        proof.get("attempt_id") != pred_attempt or
+                        [p.get("sha") for p in cand_commit.get("parents", [])] != [proof.get("effective_source_sha")]):
+                    raise RemoteTransportError("WORK_TERMINAL_RECEIPT_MISMATCH")
+
+            owner.generation = target_gen
+            data = {
+                "attempt_id": identity["attempt_id"],
+                "issue": identity.get("current_issue", identity["issue"]),
+                "repair_of": str(identity.get("repair_of")),
+                "predecessor_tip": prior["digest"]
+            }
+            try:
+                owner._create("OWNED", chain, data)
+            except RemoteTransportError as exc:
+                if "422" in str(exc) or "ALREADY_EXISTS" in str(exc):
+                    raise RemoteTransportError("WORK_OWNER_TRANSFER_CONFLICT") from exc
+                raise
+            return owner
+
+
+    def assert_current(self):
+        if self.uncertain:
+            raise RemoteTransportError("WORK_OWNER_STALE_FENCE")
+        chain = self.read()
+        if self.uncertain or not chain:
+            raise RemoteTransportError("WORK_OWNER_STALE_FENCE")
+        gen_records = [r for r in chain if r["generation"] == self.generation]
+        if (not gen_records or
+                gen_records[0]["fence"] != self.digest(self.fence) or
+                any(r["fence"] != self.digest(self.fence) for r in gen_records) or
+                (self.tip is not None and chain[-1]["digest"] != self.tip) or
+                chain[-1]["generation"] > self.generation or
+                chain[-1]["stage"] in ("UNKNOWN", "PUBLISHED")):
+            raise RemoteTransportError("WORK_OWNER_STALE_FENCE")
+        return chain
+
+    def _create(self, stage, chain, data):
+        if len(chain) >= self.LIMIT:
+            raise RemoteTransportError("WORK_JOURNAL_BOUND_INVALID")
+        self._transition(stage, chain, data)
+        record = {"kind": "WorkOwner", "version": 1, "identity": self.base_identity,
+                  "generation": self.generation, "fence": self.digest(self.fence), "sequence": len(chain),
+                  "previous": chain[-1]["digest"] if chain else None, "stage": stage, "data": data}
+        record["digest"] = self.digest(record)
+        tree_sha = None
+        if chain:
+            first_commit = self.github.api("GET", "/git/commits/" + chain[0]["sha"])
+            tree_sha = first_commit.get("tree", {}).get("sha")
+        if not tree_sha:
+            source = self.github.api("GET", "/git/commits/" + self.identity["source_sha"])
+            tree_sha = source["tree"]["sha"]
+        commit = self.github.api("POST", "/git/commits", {
+            "message": self.MARKER + canonical(record), "tree": tree_sha,
+            "parents": [chain[-1]["sha"] if chain else self.identity["source_sha"]]})
+        # No retry for 422, timeout or transport failure. A ref may exist.
+        self.github._create_ref(self.prefix + f"{len(chain):03d}", commit["sha"])
+        confirmed = self.read()
+        if not confirmed or confirmed[-1]["sha"] != commit["sha"]:
+            raise RemoteTransportError("WORK_JOURNAL_WRITE_UNKNOWN")
+        self.tip = record["digest"]
+        return record["digest"]
+
+    def append(self, stage, **data):
+        with self.lock:
+            try:
+                return self._create(stage, self.assert_current(), data)
+            except Exception:
+                self.uncertain = True
+                raise
+
 
 
 def memory_owner(action, batch, storage=None):
