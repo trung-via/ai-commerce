@@ -110,19 +110,6 @@ def memory_owner(action, batch, storage=None):
     return WorkOwner.acquire(storage, identity)
 
 
-class DirectWorkOwnerBroker(remote.WorkOwnerBroker):
-    """Fake only child stdio for in-process EF01 fixtures; real journal/fences."""
-    def communicate(self, child, timeout):
-        def fence(stage, inv):
-            request = {"stage": stage, "round": inv["repair_round"],
-                       "attempt_id": inv["attempt_id"], "token": self.token}
-            if stage == "ROUND_VERIFIED":
-                request["receipt"] = runner.owner_round_receipt(inv)
-            self.fence(request)
-        child.owner_fence = fence
-        return child.communicate(timeout=timeout)
-
-
 @pytest.mark.parametrize("native,kind,owner", [
     ({"status": "INVALID_REQUEST", "error_code": "ISSUER_NOT_AUTHORIZED_FOR_ACTOR"}, "INTAKE_AUTH", "INTAKE_OWNER"),
     ({"status": "QUOTA_EXHAUSTED", "error_code": "QUOTA_EXHAUSTED"}, "PROVIDER_QUOTA", "PROVIDER_OWNER"),
@@ -268,42 +255,32 @@ def test_workowner_fence_before_initial_provider_and_every_internal_repair(fixtu
     assert result["invocations"][-1]["executor_invoked"] is False
 
 
-def test_workowner_broker_duplicate_request_and_parent_loss_fail_closed():
-    from ai_commerce.remote.worker import WorkOwnerBroker
+def test_retired_broker_unavailable_and_no_legacy_owner_capability_leaks(monkeypatch):
+    """EF02 must not inherit retired WorkOwner IPC into a new child."""
+    assert not hasattr(remote, "WorkOwnerBroker")
+    for name, value in (
+        ("AI_COMMERCE_EF02_OWNER_REQUIRED", "1"),
+        ("AI_COMMERCE_EF02_OWNER_ENDPOINT", "stdio-v1"),
+        ("AI_COMMERCE_EF02_OWNER_TOKEN", "f" * 64),
+    ):
+        monkeypatch.setenv(name, value)
+    child_env = remote._safe_child_env(ROOT)
+    assert not any(name.startswith("AI_COMMERCE_EF02_OWNER_") for name in child_env)
+    assert "AI_COMMERCE_EF02_OWNER_TOKEN" in os.environ
+    import inspect
+    assert "WorkOwnerBroker" not in inspect.getsource(remote.LocalBatchWorker.execute_action)
+
+
+def test_retired_broker_duplicate_legacy_journal_intent_still_denied():
+    """Keep the historical journal duplicate-fence negative independently."""
     owner = memory_owner({"action_id": "a", "attempt_id": "a-1"},
                          {"batch_id": "b", "source_sha": BASE})
     owner.append("CLAIMED")
     owner.append("SPAWN_INTENT")
-    broker = WorkOwnerBroker(owner)
-    # Standalone children do not inherit pytest's worktree-local sys.path.
-    environment = {**remote._safe_child_env(ROOT), **broker.environment()}
-    script = """import os, sys
-from pathlib import Path
-from ai_commerce.engineering import runner
-assert Path(runner.__file__).resolve() == Path(sys.argv[1]).resolve()
-fence = runner.owner_fence_client(os.environ)
-assert not any(k.startswith('AI_COMMERCE_EF02_OWNER_') for k in os.environ)
-inv = {'repair_round': 0, 'attempt_id': 'a-1'}
-fence('PROVIDER_INTENT', inv)
-try:
-    fence('PROVIDER_INTENT', inv)
-except RuntimeError:
-    print('DUPLICATE_DENIED')
-else:
-    raise AssertionError('duplicate admitted')
-"""
-    child = subprocess.Popen([sys.executable, "-c", script, str(Path(runner.__file__).resolve())],
-                             env=environment,
-                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                             text=True, encoding="utf-8")
-    try:
-        output, errors = broker.communicate(child, timeout=20)
-        assert child.returncode == 0, errors
-        assert output.strip() == "DUPLICATE_DENIED" and broker.token not in output
-    finally:
-        broker.close()
-    with pytest.raises(RemoteTransportError):
-        owner.append("PROVIDER_INTENT", round=1)
+    owner.append("PROVIDER_INTENT", round=0)
+    with pytest.raises(RemoteTransportError, match="WORK_PROVIDER_DUPLICATE_OR_MISMATCH"):
+        owner.append("PROVIDER_INTENT", round=0)
+    assert owner.uncertain is True
 
 
 def test_workowner_parent_eof_denies_provider_without_any_dispatch(monkeypatch):
@@ -725,7 +702,6 @@ def _git_repo(tmp_path, real_git=True):
 
 def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, checkpoint_error=False, real_git=True,
                     drift=None, mt01_v21=False):
-    monkeypatch.setattr(remote, "WorkOwnerBroker", DirectWorkOwnerBroker)
     if not mt01_v21:
         monkeypatch.delenv("MT01_V21_ENABLED", raising=False)
     else:
