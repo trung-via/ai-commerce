@@ -68,7 +68,7 @@ test('issue-ingress reusable EF02 failed jobs are reported once by scheduled bac
     {nowMs:Date.parse('2026-10-28T09:10:00Z')}), 1);
   assert.equal(x.posted.length, 1, 'both workflow listings must not duplicate a run');
   assert.match(x.posted[0].body, /WORKFLOW_NONPASS_UNRECONCILED/);
-  assert.match(x.posted[0].body, /side effects/);
+  assert.match(x.posted[0].body, /does not run executors/);
 });
 
 test('wrapped EF02 queued execution stays UNKNOWN rather than falsely OFFLINE', () => {
