@@ -251,6 +251,12 @@ def test_short_agy_input_directory_is_not_nested_under_evidence_root(tmp_path):
         assert deep not in mirror.parents
         assert mirror.parent == Path(tempfile.gettempdir()).resolve()
         assert len(str(mirror).encode("utf-16-le")) // 2 <= 180 or sys.platform != "win32"
+        # This must actually work as a Windows subprocess working directory:
+        # #837's 248-unit cwd failed BEFORE shell/tool launch (WinError 267).
+        probe = subprocess.run([sys.executable, "-c", "import os; print(os.getcwd())"],
+                               cwd=mirror, capture_output=True, text=True, timeout=10)
+        assert probe.returncode == 0
+        assert Path(probe.stdout.strip()).resolve() == mirror
     finally:
         shutil.rmtree(mirror)
 
@@ -266,3 +272,46 @@ def test_git_source_unavailable_emits_safe_specific_cause(tmp_path, monkeypatch)
     with pytest.raises(RuntimeError, match="GIT_SOURCE_UNAVAILABLE:GIT_ENTRY_MISSING") as error:
         runner._snapshot(tmp_path, [], time.monotonic() + 10)
     assert secret not in str(error.value)
+
+def test_503_observation_survives_lost_git_snapshot_without_provider_replay(tmp_path, monkeypatch):
+    """#837: a post-call Git failure must not erase the provider 503 forensics."""
+    from ai_commerce.engineering import runner
+    repo = tmp_path / "source"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    head = "a" * 40
+    baseline = {
+        "git_head_after": head, "git_dir": str(repo / ".git"),
+        "changed_files": [], "candidate_file_sha256": {}, "tracked_diff_sha256": "0" * 64,
+        "scope_valid": True,
+    }
+    counter = {"snapshot": 0, "provider": 0}
+    def snap(*args, **kwargs):
+        counter["snapshot"] += 1
+        if counter["snapshot"] >= 3:
+            raise RuntimeError("GIT_SOURCE_UNAVAILABLE:WORKTREE_MISSING")
+        return dict(baseline), b""
+    monkeypatch.setattr(runner, "_snapshot", snap)
+    monkeypatch.setattr(runner, "command_for", lambda *a, **k: (["fixture-provider"], None))
+    original_run = subprocess.run
+    def run(argv, **kwargs):
+        if argv[0] == "fixture-provider":
+            counter["provider"] += 1
+            return subprocess.CompletedProcess(argv, 0, json.dumps({
+                "status": "ERROR", "error": "No capacity available for model gemini-3.8-flash-high",
+            }), "")
+        return original_run(argv, **kwargs)
+    monkeypatch.setattr(runner.subprocess, "run", run)
+    result = runner.execute_attempt(
+        repo=repo, output_dir=tmp_path / "evidence", work_id="ef01-837",
+        attempt_id="distinct-one-shot", selection=ExecutorSelection("antigravity", "model", "high"),
+        instruction="offline fixture", verify_argv=[sys.executable, "-m", "pytest", "tests/test_ef01.py", "-q"],
+        allowed_prefixes=["changed.txt"], max_repair_rounds=0,
+    )
+    invocation = result["invocations"][0]
+    assert counter["provider"] == 1
+    assert invocation["provider_failure_observed"] == "MODEL_AT_CAPACITY"
+    assert invocation["status"] == "EXECUTION_UNKNOWN"
+    assert invocation["error_code"] == "RUNNER_ERROR"
+    assert invocation["verify_exit_code"] is None
+    assert invocation["replay_authorized"] is False
