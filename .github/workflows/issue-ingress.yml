@@ -1980,6 +1980,7 @@ jobs:
           $code = 'PRECHECK_UNKNOWN'
           $verified = $false
           $launched = $false
+          $effectState = 'NOT_ATTEMPTED'
           try {
             if ($env:GITHUB_ACTIONS -cne 'true' -or $env:OS -cne 'Windows_NT' -or
                 $env:GITHUB_REPOSITORY -cne 'trung-via/ai-commerce') { throw 'INVALID_ENVIRONMENT' }
@@ -2040,6 +2041,7 @@ jobs:
           except Exception:
               print(json.dumps({"kind":"HOLD","code":"NATIVE_RESULT_UNKNOWN"},separators=(",",":")))
           '@
+            $effectState = 'UNKNOWN_EFFECT'
             try {
               $native = @(& $cmd.Source -B -c $script 2>$null | ForEach-Object { [string]$_ })
               $exit = $LASTEXITCODE
@@ -2055,6 +2057,7 @@ jobs:
               $status = 'OBSERVED'
               $verified = $true
               $launched = [bool]$record.launched
+              $effectState = if ($launched) { 'VERIFIED_LAUNCHED' } else { 'VERIFIED_REUSED' }
               $code = if ($launched) { 'CDP_9444_LAUNCHED' } else { 'CDP_9444_REUSED' }
             } elseif ($record.kind -ceq 'HOLD' -and
                 [string]$record.code -cmatch '^[A-Z][A-Z0-9_]{2,69}$') {
@@ -2069,7 +2072,7 @@ jobs:
           }
           $receipt = [ordered]@{status=$status; code=$code; source_sha=$env:GITHUB_SHA;
             cdp_port=9444; protocol_verified=$verified; launched=$launched;
-            browser_mutated=$launched; wake_sent=$false}
+            effect_state=$effectState; wake_sent=$false}
           try {
             $bytes = [Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $receipt -Compress))
             $stream = [IO.File]::Open($out,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
@@ -2087,23 +2090,26 @@ jobs:
               'd5-ensure-'+process.env.GITHUB_RUN_ID+'-'+process.env.GITHUB_RUN_ATTEMPT+'.json');
             let result={status:'BLOCKED',code:'RECEIPT_UNAVAILABLE',
               source_sha:context.sha,cdp_port:9444,protocol_verified:false,
-              launched:false,browser_mutated:false,wake_sent:false};
+              launched:false,effect_state:'UNKNOWN_EFFECT',wake_sent:false};
             try {
               if(fs.statSync(target).size>1024) throw Error();
               const r=JSON.parse(fs.readFileSync(target,'utf8'));
               const fields=['status','code','source_sha','cdp_port','protocol_verified',
-                'launched','browser_mutated','wake_sent'];
+                'launched','effect_state','wake_sent'];
               if(!r||Array.isArray(r)||Object.keys(r).sort().join()!=fields.sort().join()||
                  !['OBSERVED','BLOCKED'].includes(r.status)||
                  !/^[A-Z][A-Z0-9_]{2,69}$/.test(r.code)||r.source_sha!==context.sha||
                  r.cdp_port!==9444||typeof r.protocol_verified!=='boolean'||
-                 typeof r.launched!=='boolean'||r.browser_mutated!==r.launched||
+                 typeof r.launched!=='boolean'||
+                 !['NOT_ATTEMPTED','UNKNOWN_EFFECT','VERIFIED_REUSED','VERIFIED_LAUNCHED'].includes(r.effect_state)||
                  r.wake_sent!==false||
                  (r.status==='OBSERVED' &&
                    (!['CDP_9444_LAUNCHED','CDP_9444_REUSED'].includes(r.code)||
                     r.protocol_verified!==true||
-                    r.launched!==(r.code==='CDP_9444_LAUNCHED')))||
-                 (r.status==='BLOCKED'&&(r.protocol_verified!==false||r.launched!==false)))throw Error();
+                    r.launched!==(r.code==='CDP_9444_LAUNCHED')||
+                    r.effect_state!==(r.launched?'VERIFIED_LAUNCHED':'VERIFIED_REUSED')))||
+                 (r.status==='BLOCKED'&&(r.protocol_verified!==false||r.launched!==false||
+                  !['NOT_ATTEMPTED','UNKNOWN_EFFECT'].includes(r.effect_state))))throw Error();
               result=r;
             }catch(_){}
             await github.rest.issues.createComment({...context.repo,
