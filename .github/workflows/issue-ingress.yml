@@ -1397,6 +1397,105 @@ jobs:
               issue_number:context.issue.number,
               body:'AI_COMMERCE_WH03_TEST_SIGNAL_READONLY_V1\n'+JSON.stringify(result)});
 
+  # #815 forensic: independent pinned READ of the previously UNKNOWN AGY attempt.
+  # Only an owner-created, exact-form Issue may invoke this; it cannot retry,
+  # cancel, authorize, mutate EF02/WorkOwner, or access unrelated host paths.
+  hostops-ef02-815-forensic-readonly:
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.action == 'opened' &&
+      github.event.repository.full_name == 'trung-via/ai-commerce' &&
+      github.actor == github.repository_owner &&
+      github.event.issue.user.login == github.repository_owner &&
+      github.event.issue.title == '[HOSTOPS EF02 FORENSIC] #815 attempt-only'
+    runs-on: [self-hosted, Windows, ai-commerce-hostops]
+    timeout-minutes: 5
+    concurrency:
+      group: personal-hostops-workspace
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Validate fixed owner-sourced forensic event
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw -Encoding UTF8 | ConvertFrom-Json
+          $expected = '{"schema":"ai-commerce.hostops.ef02-815-forensic.v1","operation":"EF02_815_FORENSIC_READONLY","target_issue":815,"parameters":{}}'
+          if ($event.action -cne 'opened' -or
+              $event.issue.title -cne '[HOSTOPS EF02 FORENSIC] #815 attempt-only' -or
+              $event.issue.body -cne $expected -or
+              $event.issue.user.login -cne 'trung-via') {
+            throw 'HOSTOPS_EF02_815_FORENSIC_EVENT_REJECTED'
+          }
+      - name: Read only pinned #815 EF02 process and receipts
+        shell: pwsh
+        env:
+          HOSTOPS_EF02_815_RECEIPT: ${{ runner.temp }}\ef02-815-forensic.json
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PYTHONPATH = Join-Path $env:GITHUB_WORKSPACE 'src'
+          python -B -m ai_commerce.hostops_v3.ef02_815_forensic_readonly --output "$env:HOSTOPS_EF02_815_RECEIPT"
+          if ($LASTEXITCODE -ne 0) { throw 'HOSTOPS_EF02_815_READER_FAILED' }
+      - name: Publish strictly sanitized no-replay observation to invoking Issue
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          HOSTOPS_EF02_815_RECEIPT: ${{ runner.temp }}\ef02-815-forensic.json
+        with:
+          script: |
+            const fs = require('fs');
+            const schema = 'ai-commerce.hostops.ef02-815-forensic.v1';
+            const operation = 'EF02_815_FORENSIC_READONLY';
+            const source_sha = '9ecb1b72bc43c8eb38e6d5ca70ff99dab9c4154b';
+            const attempt_id = 'production_q1q3_bq01a_agy38_9ecb1b72_20261112_fresh01';
+            const expected = ['schema','operation','target_issue','source_sha','attempt_id',
+              'status','process','evidence_root','provider_boundary','provider_return',
+              'terminal_receipt','worktree','replay_authorized','provider_outcome_proven',
+              'write_attempted'].sort().join(',');
+            const allowed = {
+              process: ['PID_ABSENT','PID_MATCHED_ACTIVE','PID_REUSED_OR_UNRELATED','PROCESS_READ_UNKNOWN'],
+              evidence_root: ['ACTION_ABSENT','ACTION_PRESENT','ROOT_UNSAFE','ROOT_READ_UNKNOWN'],
+              provider_boundary: ['ROOT_ABSENT','MISSING','UNSAFE','READ_UNKNOWN','PRESENT_UNVERIFIED'],
+              provider_return: ['ROOT_ABSENT','MISSING','UNSAFE','READ_UNKNOWN','PRESENT_UNVERIFIED'],
+              terminal_receipt: ['ROOT_ABSENT','MISSING','UNSAFE','READ_UNKNOWN','PRESENT_UNVERIFIED'],
+              worktree: ['WORKTREE_ABSENT','WORKTREE_SINGLE_UNVERIFIED','WORKTREE_AMBIGUOUS',
+                'WORKTREE_UNSAFE','WORKTREE_READ_UNKNOWN']
+            };
+            let result = null;
+            try {
+              const path = process.env.HOSTOPS_EF02_815_RECEIPT;
+              if (fs.statSync(path).size > 2300) throw Error('RECEIPT_OVERSIZE');
+              const row = JSON.parse(fs.readFileSync(path,'utf8'));
+              if (!row || Array.isArray(row) ||
+                  Object.keys(row).sort().join(',') !== expected ||
+                  row.schema !== schema || row.operation !== operation ||
+                  row.target_issue !== 815 || row.source_sha !== source_sha ||
+                  row.attempt_id !== attempt_id || row.status !== 'HOLD_UNKNOWN_EFFECT' ||
+                  row.replay_authorized !== false || row.provider_outcome_proven !== false ||
+                  row.write_attempted !== false ||
+                  Object.entries(allowed).some(([k,vals]) => !vals.includes(row[k]))) {
+                throw Error('INVALID_RECEIPT');
+              }
+              result = row;
+            } catch (_) {
+              result = {schema, operation, target_issue:815, source_sha, attempt_id,
+                status:'HOLD_UNKNOWN_EFFECT',process:'PROCESS_READ_UNKNOWN',
+                evidence_root:'ROOT_READ_UNKNOWN',provider_boundary:'READ_UNKNOWN',
+                provider_return:'READ_UNKNOWN',terminal_receipt:'READ_UNKNOWN',
+                worktree:'WORKTREE_READ_UNKNOWN',replay_authorized:false,
+                provider_outcome_proven:false,write_attempted:false};
+            }
+            await github.rest.issues.createComment({
+              ...context.repo, issue_number:context.issue.number,
+              body:'AI_COMMERCE_HOSTOPS_EF02_815_FORENSIC_V1\n'+JSON.stringify(result)
+            });
+
   # Human-approved one-shot EF02 #698 read. Separate from standing public READ
   # and all other D5/HostOps operations. Never runs an executor or mutates a claim.
   hostops-ef02-attempt-698-readonly:
