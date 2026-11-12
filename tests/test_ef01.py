@@ -602,3 +602,20 @@ def test_new_crlf_txt_normalized_before_actual_verify(tmp_path):
     assert result["candidate_file_sha256"]["consumer-tests.txt"] == hashlib.sha256(normalized).hexdigest()
     assert "git_filter_preverify" in result["evidence_files"]
     assert (tmp_path / "evidence" / "git_filter.preverify.json").is_file()
+
+
+def test_agy_explicit_smoke_model_arguments(tmp_path):
+    argv, stdin = command_for(
+        ExecutorSelection("antigravity", "gemini-3.8-flash", "high"),
+        tmp_path,
+        "smoke",
+    )
+    assert argv[argv.index("--model") + 1] == "gemini-3.8-flash"
+    assert argv[argv.index("--effort") + 1] == "high"
+    assert "--print" in argv
+    assert argv[argv.index("--mode") + 1] == "accept-edits"
+    assert argv[argv.index("--output-format") + 1] == "json"
+    assert "windows.sandbox=mxc" not in argv
+    assert not any("windows.sandbox=mxc" in arg for arg in argv)
+    assert stdin is None
+
