@@ -1397,6 +1397,90 @@ jobs:
               issue_number:context.issue.number,
               body:'AI_COMMERCE_WH03_TEST_SIGNAL_READONLY_V1\n'+JSON.stringify(result)});
 
+  # #815 source-only salvage: upload only two pinned candidate files as a
+  # review-required artifact. This never edits the old worktree or dispatches AGY.
+  hostops-ef02-815-source-snapshot:
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.action == 'opened' &&
+      github.event.repository.full_name == 'trung-via/ai-commerce' &&
+      github.actor == github.repository_owner &&
+      github.event.issue.user.login == github.repository_owner &&
+      github.event.issue.title == '[HOSTOPS EF02 SNAPSHOT] #815 source-only'
+    runs-on: [self-hosted, Windows, ai-commerce-hostops]
+    timeout-minutes: 5
+    concurrency:
+      group: personal-hostops-workspace
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Verify owner-authenticated fixed source-snapshot event
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw -Encoding UTF8 | ConvertFrom-Json
+          $expected = '{"schema":"ai-commerce.hostops.ef02-815-snapshot.v1","operation":"EF02_815_SOURCE_SNAPSHOT_READONLY","target_issue":815,"parameters":{}}'
+          if ($event.action -cne 'opened' -or
+              $event.issue.title -cne '[HOSTOPS EF02 SNAPSHOT] #815 source-only' -or
+              $event.issue.body -cne $expected -or
+              $event.issue.user.login -cne 'trung-via') {
+            throw 'EF02_815_SOURCE_SNAPSHOT_EVENT_REJECTED'
+          }
+      - name: Package exactly two pinned changed files without worktree writes
+        id: snapshot
+        shell: pwsh
+        env:
+          EF02_815_SNAPSHOT: ${{ runner.temp }}\ef02-815-candidate-snapshot.zip
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PYTHONPATH = Join-Path $env:GITHUB_WORKSPACE 'src'
+          python -B -m ai_commerce.hostops_v3.ef02_815_snapshot --output "$env:EF02_815_SNAPSHOT"
+          if ($LASTEXITCODE -ne 0) { throw 'EF02_815_SOURCE_SNAPSHOT_DENIED' }
+      - name: Upload unverified source-only candidate snapshot for independent review
+        id: upload
+        if: steps.snapshot.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ef02-815-source-snapshot-${{ github.run_id }}
+          path: ${{ runner.temp }}\ef02-815-candidate-snapshot.zip
+          retention-days: 7
+          if-no-files-found: error
+      - name: Publish strictly bounded artifact status to invoking Issue
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          SNAPSHOT_STATE: ${{ steps.snapshot.outcome }}
+          UPLOAD_STATE: ${{ steps.upload.outcome }}
+          SNAPSHOT_ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+        with:
+          script: |
+            const candidate = Number(process.env.SNAPSHOT_ARTIFACT_ID);
+            const ok = process.env.SNAPSHOT_STATE === 'success' &&
+              process.env.UPLOAD_STATE === 'success' &&
+              Number.isSafeInteger(candidate) && candidate > 0;
+            const receipt = {
+              schema:'ai-commerce.hostops.ef02-815-snapshot.v1',
+              operation:'EF02_815_SOURCE_SNAPSHOT_READONLY',
+              target_issue:815,
+              source_sha:'9ecb1b72bc43c8eb38e6d5ca70ff99dab9c4154b',
+              status:ok ? 'UNVERIFIED_SOURCE_ARTIFACT' : 'HOLD_SOURCE_EXPORT_UNPROVEN',
+              artifact_id:ok ? candidate : null,
+              candidate_verified:false,
+              provider_outcome_proven:false,
+              replay_authorized:false,
+              source_worktree_modified:false
+            };
+            await github.rest.issues.createComment({
+              ...context.repo, issue_number:context.issue.number,
+              body:'AI_COMMERCE_EF02_815_SOURCE_SNAPSHOT_V1\n'+JSON.stringify(receipt)
+            });
+
   # #815 R0.2: strictly scoped forensic read of return code and two source paths.
   # Only an owner-created, exact-form Issue may invoke this; it cannot retry,
   # cancel, authorize, mutate EF02/WorkOwner, or access unrelated host paths.
