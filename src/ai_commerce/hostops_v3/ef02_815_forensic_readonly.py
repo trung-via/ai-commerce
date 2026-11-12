@@ -179,17 +179,153 @@ def inspect() -> dict:
     }
 
 
+# R0.2 only: deterministic classification of existing, pinned local evidence.
+# This does not return provider logs, output, source bytes or host paths.
+SOURCE_PATHS = (
+    "src/ai_commerce/creative_quality/causality.py",
+    "tests/test_bq_01a_brief_causality.py",
+)
+R02_SCHEMA = "ai-commerce.hostops.ef02-815-forensic-r02.v1"
+R02_OPERATION = "EF02_815_FORENSIC_READONLY_R02"
+
+
+def _provider_return_exit() -> str:
+    file = EVIDENCE / "ef01" / "invocations" / "000" / "provider_return_observed.json"
+    if _read_stage(file, "EXECUTOR_SUBPROCESS_RETURNED") != "PRESENT_UNVERIFIED":
+        return "RETURN_UNPROVEN"
+    try:
+        # The source-owned receipt says a subprocess returned, not that the
+        # provider actually executed a model or that any output is correct.
+        with file.open("rb") as handle:
+            raw = handle.read(MAX_BYTES + 1)
+        if len(raw) > MAX_BYTES or not _safe(file):
+            return "RETURN_UNPROVEN"
+        data = json.loads(raw.decode("utf-8-sig"))
+        if (type(data) is not dict or data.get("attempt_id") != ATTEMPT or
+                data.get("stage") != "EXECUTOR_SUBPROCESS_RETURNED" or
+                data.get("executor_process_return_observed") is not True or
+                data.get("replay_authorized") is not False or
+                data.get("provider_effects_reconciled") is not False or
+                data.get("provider_invocation_proven") is not False or
+                data.get("work_id") != BATCH + ":" + ACTION):
+            return "RETURN_UNPROVEN"
+        exit_code = data.get("executor_exit_code")
+        if type(exit_code) is not int or not -65535 <= exit_code <= 65535:
+            return "RETURN_UNPROVEN"
+        return "RETURN_ZERO_OBSERVED" if exit_code == 0 else "RETURN_NONZERO_OBSERVED"
+    except (OSError, ValueError, TypeError, UnicodeError):
+        return "RETURN_UNPROVEN"
+
+
+def _source_worktree() -> Path | None:
+    if not HOST_IS_WINDOWS:
+        return None
+    try:
+        base = Path(tempfile.gettempdir())
+        if not _safe(base, directory=True):
+            return None
+        paths = list(base.glob("ai-commerce-ef02-" + ACTION + "-*"))
+        if len(paths) != 1 or not _safe(paths[0], directory=True):
+            return None
+        return paths[0]
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def _read_git(root: Path, command: str, relative: str | None = None) -> bytes | None:
+    """Only three hardcoded local Git read commands. No user-supplied argv."""
+    if command == "head":
+        args = ["rev-parse", "HEAD"]
+    elif command == "status":
+        args = ["status", "--porcelain=v1", "-z", "--untracked-files=all"]
+    elif command == "blob" and relative in SOURCE_PATHS:
+        args = ["show", SOURCE_SHA + ":" + relative]
+    else:
+        return None
+    env = dict(os.environ)
+    env.update({
+        "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0",
+        "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+    })
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), *args], cwd=root, shell=False,
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=15,
+            check=False, env=env)
+        if result.returncode != 0 or len(result.stdout) > MAX_BYTES:
+            return None
+        return bytes(result.stdout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _source_scope_state() -> tuple[str, int | None]:
+    """Verify fixed source files against exact original Git blobs; no output."""
+    root = _source_worktree()
+    if root is None:
+        return "SOURCE_READ_UNKNOWN", None
+    observed_head = _read_git(root, "head")
+    if observed_head is None or observed_head.strip() != SOURCE_SHA.encode():
+        return "BASELINE_UNVERIFIED", None
+    raw_status = _read_git(root, "status")
+    if raw_status is None:
+        return "SOURCE_READ_UNKNOWN", None
+    try:
+        entries = raw_status.decode("utf-8", "strict").split("\0")
+        for entry in filter(None, entries):
+            # For any rename or unrecognized status format, fail closed;
+            # only directly changed single paths are eligible to compare.
+            if (len(entry) < 4 or entry[:2].strip() in ("R", "C") or
+                    entry[2] != " " or entry[3:] not in SOURCE_PATHS):
+                return "OUTSIDE_SCOPE_OR_UNVERIFIED", None
+        changed = 0
+        for relative in SOURCE_PATHS:
+            file = root.joinpath(*relative.split("/"))
+            if not _safe(file):
+                return "SOURCE_UNSAFE", None
+            if file.stat().st_size > MAX_BYTES:
+                return "SOURCE_UNSAFE", None
+            original = _read_git(root, "blob", relative)
+            if original is None:
+                return "BASELINE_UNVERIFIED", None
+            with file.open("rb") as handle:
+                current = handle.read(MAX_BYTES + 1)
+            if not _safe(file) or len(current) > MAX_BYTES:
+                return "SOURCE_UNSAFE", None
+            changed += current != original
+        return ("SOURCE_CHANGED_IN_SCOPE" if changed else "SOURCE_UNCHANGED"), changed
+    except (OSError, ValueError, UnicodeError, RuntimeError):
+        return "SOURCE_READ_UNKNOWN", None
+
+
+def inspect_r02() -> dict:
+    prior = inspect()
+    state, count = _source_scope_state()
+    return {
+        "schema": R02_SCHEMA, "operation": R02_OPERATION,
+        "target_issue": TARGET_ISSUE, "source_sha": SOURCE_SHA,
+        "attempt_id": ATTEMPT, "status": "HOLD_UNKNOWN_EFFECT",
+        "process": prior["process"], "terminal_receipt": prior["terminal_receipt"],
+        "provider_return_exit": _provider_return_exit(),
+        "source_state": state, "source_changed_count": count,
+        "replay_authorized": False, "provider_outcome_proven": False,
+        "write_attempted": False,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--r02", action="store_true")
     args = parser.parse_args(argv)
-    # No caller-selected read target or arbitrary output write. Only the exact
-    # CI runner's owned receipt path is valid.
+    # Never accept arbitrary output paths, even for diagnostic-only operation.
     tmp = os.environ.get("RUNNER_TEMP")
-    expected = Path(tmp) / "ef02-815-forensic.json" if tmp else None
+    filename = "ef02-815-forensic-r02.json" if args.r02 else "ef02-815-forensic.json"
+    expected = Path(tmp) / filename if tmp else None
     if expected is None or args.output != expected or args.output.exists():
         parser.error("HOSTOPS_EF02_815_OUTPUT_NOT_RUNNER_TEMP")
-    args.output.write_text(json.dumps(inspect(), separators=(",", ":")), encoding="utf-8")
+    report = inspect_r02() if args.r02 else inspect()
+    args.output.write_text(json.dumps(report, separators=(",", ":")), encoding="utf-8")
     return 0
 
 
