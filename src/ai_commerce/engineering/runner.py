@@ -5,17 +5,12 @@ Local CLI only. Not a remote wake, provider permission check, or AIOS lifecycle.
 from __future__ import annotations
 
 import hashlib
-from contextlib import ExitStack, contextmanager
 import json
 import ntpath
 import os
 import posixpath
 import re
-import shlex
-import shutil
 import subprocess
-import sys
-import tempfile
 import threading
 import time
 from subprocess import list2cmdline
@@ -23,30 +18,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
-from .adapters import (command_for, agy_directory, agy_data_directory,
-                       agy_input_manifest, agy_read_regular, agy_remove_owned_tree)
+from .adapters import command_for
 from .git_write_guard import GIT_GUARD_INSTRUCTION, git_write_guard_env
-from .profile import ExecutorSelection, diagnose_failure
+from .profile import ExecutorSelection
 from .git import git_argv, resolve_git_executable
 from .git_byte_consistency import GitByteConsistencyError, stabilize_candidate_newlines_before_verify
 from .minimum_test import file_hashes
 from .source_safety import checked_path, protected_change, is_link
-from .verification import execute_plan, pytest_execution_env, observed_xdist_workers, git_hook_environment_failure
+from .verification import execute_plan, pytest_observation_env, observed_xdist_workers
 from .pytest_profile import host_capacity, profile_command, worker_decision, xdist_available, require_managed_parallelism
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def _deny_retired_workowner_ipc(environment: dict) -> None:
-    """Fail closed on obsolete owner stdio credentials before any provider call.
-
-    The retired WorkOwnerBroker has no authoritative parent left. Do not silently
-    treat inherited legacy tokens as a manual EF01 attempt or emit their values.
-    """
-    if any(name.startswith("AI_COMMERCE_EF02_OWNER_") for name in environment):
-        raise ValueError("RETIRED_WORKOWNER_IPC_DENIED")
 
 
 def _sha(data: bytes) -> str:
@@ -154,57 +138,6 @@ def _write(path: Path, data: bytes) -> None:
     # One attempt identity per folder; never silently overwrite prior evidence.
     with path.open("xb") as f:
         f.write(data)
-
-
-def _quarantine_source(repo: Path, snapshot: dict, allowed: Sequence[str], save) -> None:
-    """Failure evidence only, including ADD bytes absent from git diff.
-
-    Never import, execute or reuse these copies as a candidate. Restrict copies
-    to ordinary allowlisted UTF-8 source text and bind each to the failed snapshot.
-    """
-    manifest = {"kind": "EF01_QUARANTINED_SOURCE", "candidate": False,
-                "replay_authorized": False, "files": [],
-                "limits": {"files": 32, "file_bytes": 128 * 1024, "total_bytes": 1024 * 1024}}
-    total = 0
-    suffixes = {".py", ".pyi", ".js", ".cjs", ".mjs", ".ts", ".tsx", ".jsx",
-                ".md", ".rst", ".txt", ".json", ".yaml", ".yml", ".toml", ".html", ".css"}
-    for index, relative in enumerate(snapshot.get("changed_files", [])[:128]):
-        item = {"path": relative, "status": "REJECTED", "reason": None}
-        manifest["files"].append(item)
-        try:
-            if index >= 32 or total >= 1024 * 1024:
-                raise ValueError("QUARANTINE_COUNT_OR_TOTAL_LIMIT")
-            if not allowed or not _safe_scope([relative], allowed):
-                raise ValueError("QUARANTINE_OUTSIDE_ALLOWLIST")
-            path = checked_path(repo, relative)
-            if path.suffix.lower() not in suffixes:
-                raise ValueError("QUARANTINE_NON_TEXT_FAMILY")
-            if (any(word in path.name.lower() for word in ("secret", "credential", "password", "token", "private_key"))
-                    or any(part.lower() in (".gemini", ".config", ".antigravity", "node_modules")
-                           for part in Path(relative).parts)):
-                raise ValueError("QUARANTINE_PRIVATE_NAME")
-            data, identity = agy_read_regular(path, min(128 * 1024, 1024 * 1024 - total))
-            text = data.decode("utf-8")
-            if any(ord(c) < 32 and c not in "\n\r\t" for c in text):
-                raise ValueError("QUARANTINE_BINARY")
-            if re.search(r"-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:gh[pousr]_[A-Za-z0-9]{20,}|"
-                         r"AKIA[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{30,})|"
-                         r"(?i:(?:api[_-]?key|access[_-]?token|password|client[_-]?secret)\s*[:=]\s*['\"])[^'\"\r\n]{8,}", text):
-                raise ValueError("QUARANTINE_POSSIBLE_SECRET")
-            digest = _sha(data)
-            if digest != snapshot.get("candidate_file_sha256", {}).get(relative):
-                raise ValueError("QUARANTINE_SNAPSHOT_MISMATCH")
-            name = f"quarantine/source-{index:03d}.txt"
-            save(f"quarantine_source_{index:03d}", name, data)
-            total += len(data)
-            item.update(status="QUARANTINED", reason=None, sha256=digest,
-                        size=len(data), mode=identity[2], evidence_name=name)
-        except (OSError, ValueError) as exc:
-            code = str(exc)
-            item["reason"] = code if re.fullmatch(r"[A-Z_]+", code) else "QUARANTINE_READ_UNPROVEN"
-    manifest["total_bytes"] = total
-    manifest["omitted_paths"] = max(0, len(snapshot.get("changed_files", [])) - 128)
-    save("quarantine_manifest", "quarantine/manifest.json", _json_bytes(manifest))
 
 
 def _observe_usage(data: bytes, executor: str) -> dict[str, int] | None:
@@ -327,9 +260,6 @@ def _failure_provenance(inv: dict, *, precondition_instruction_sha256: str,
         tool = tools[0] if len(tools) == 1 else "MULTIPLE_OR_UNKNOWN"
     elif inv.get("status") in ("MODEL_AT_CAPACITY", "QUOTA_EXHAUSTED"):
         phase = "PROVIDER_CAPACITY" if inv["status"] == "MODEL_AT_CAPACITY" else "PROVIDER_QUOTA"
-    elif inv.get("error_code", "").startswith(("AGY_PROCESS_", "AGY_DESCENDANTS_", "AGY_SCRATCH_")):
-        phase = "AGY_SCRATCH_TEARDOWN" if inv["error_code"].startswith("AGY_SCRATCH_") else "AGY_PROCESS_RECONCILIATION"
-        tool = "windows-host"
     elif inv.get("verify_started_at") or inv.get("verify_completed"):
         phase = "EF01_REGISTERED_VERIFY" if inv.get("verification_origin") == "REGISTERED_EF01" else "EF01_VERIFY"
         tool = "pytest" if _is_pytest(inv.get("verify_argv", [])) else "local-verifier"
@@ -436,7 +366,7 @@ MAX_TIMEOUT_SECONDS = 86400
 # Stay below cmd.exe's limit too: AGY may be installed as a Windows .cmd shim.
 AGY_COMMANDLINE_MAX_UNITS = 8000
 AGY_INPUT_CONTEXT = (
-    "Use the current isolated source worktree, this invocation's prepared agy_input and named scratch only. "
+    "Use the current isolated source worktree and this invocation's prepared agy_input only. "
     "External archived artifacts are OPTIONAL, including prior GitHub artifacts, sibling worktrees "
     "and runner-owned .local records. Do not read user profiles, credentials or authoritative runner logs. "
     "Use current source and the disposable instruction/repair_feedback.json copies. "
@@ -508,150 +438,6 @@ def _source_problem(snapshot: dict, initial: dict, *,
     return None
 
 
-def _parse_reconnect_warning(event: dict) -> tuple[int, int] | None:
-    """Parse a Codex top-level reconnect diagnostic warning with bounded N/M."""
-    if not isinstance(event, dict):
-        return None
-    # Reject non-top-level or item events (like tool call results or user/assistant turns)
-    event_type = event.get("type")
-    if event_type in ("item.completed", "item.started", "turn.started", "turn.completed", "turn.failed"):
-        return None
-    # Must be an error or warning level event or contain an error/warning field
-    msg = None
-    if isinstance(event.get("error"), str):
-        msg = event["error"]
-    elif isinstance(event.get("error"), dict) and isinstance(event["error"].get("message"), str):
-        msg = event["error"]["message"]
-    elif isinstance(event.get("message"), str):
-        msg = event["message"]
-    elif isinstance(event.get("detail"), str):
-        msg = event["detail"]
-    elif isinstance(event.get("warning"), str):
-        msg = event["warning"]
-    if not isinstance(msg, str):
-        return None
-    # Reject fatal / quota / permission phrases inside warning
-    msg_lower = msg.lower()
-    for phrase in (
-        "model is at capacity", "no capacity available",
-        "resource_exhausted", "quota exceeded", "quota reached", "429 too many requests",
-        "model_not_found", "model is not supported", "unknown model",
-        "model unavailable", "service unavailable",
-        "permission denied", "permissionerror", "approval denied", "approval required",
-        "requires approval", "auto-denied", "operation not permitted",
-    ):
-        if phrase in msg_lower:
-            return None
-    match = re.search(r"(?i)\breconnect(?:ing)?\b.*?(?<![\w-])([1-9]\d*)\s*(?:/|of)\s*([1-9]\d*)\b", msg)
-    if not match:
-        return None
-    n, m = int(match.group(1)), int(match.group(2))
-    if 1 <= n <= m <= 100:
-        return (n, m)
-    return None
-
-
-def _is_real_completed_command(event: dict) -> str | None:
-    """Identify a genuine completed command_execution item with exit 0 and valid id."""
-    if not isinstance(event, dict):
-        return None
-    if event.get("type") != "item.completed":
-        return None
-    item = event.get("item")
-    if not isinstance(item, dict):
-        return None
-    if item.get("type") != "command_execution":
-        return None
-    if str(item.get("status", "")).lower() != "completed":
-        return None
-    exit_code = item.get("exit_code")
-    if exit_code is None:
-        exit_code = item.get("exit_status")
-    if exit_code is None:
-        exit_code = item.get("returncode")
-    if exit_code != 0:
-        return None
-    item_id = item.get("id") or item.get("call_id")
-    if isinstance(item_id, str) and item_id.strip():
-        return item_id.strip()
-    return None
-
-
-def _codex_reconnect_recovery(stdout: bytes, stderr: bytes = b"", exit_code: int = 0) -> bool:
-    """Validate strict Codex reconnect recovery: valid JSONL, bounded N/M, subsequent command, single final turn.completed."""
-    if exit_code != 0:
-        return False
-    if stderr.strip():
-        return False
-    try:
-        text = stdout.decode("utf-8")
-    except UnicodeDecodeError:
-        return False
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if not lines:
-        return False
-    events = []
-    for line in lines:
-        try:
-            obj = json.loads(line)
-        except ValueError:
-            return False
-        if not isinstance(obj, dict):
-            return False
-        events.append(obj)
-
-    warnings: list[tuple[int, tuple[int, int]]] = []
-    for idx, ev in enumerate(events):
-        parsed = _parse_reconnect_warning(ev)
-        if parsed is not None:
-            warnings.append((idx, parsed))
-    if not warnings:
-        return False
-
-    # Check for genuine later command_execution with distinct valid ids
-    used_cmd_ids: set[str] = set()
-    for w_idx, _ in warnings:
-        matched = False
-        for c_idx in range(w_idx + 1, len(events)):
-            cmd_id = _is_real_completed_command(events[c_idx])
-            if cmd_id is not None and cmd_id not in used_cmd_ids:
-                used_cmd_ids.add(cmd_id)
-                matched = True
-                break
-        if not matched:
-            return False
-
-    # Exactly one final turn.completed
-    turn_completed_indices = [i for i, ev in enumerate(events) if ev.get("type") == "turn.completed"]
-    if len(turn_completed_indices) != 1:
-        return False
-    if turn_completed_indices[0] != len(events) - 1:
-        return False
-
-    # No fatal/turn.failed/quota/permission/extra object/error-after-done
-    for idx, ev in enumerate(events):
-        if ev.get("type") == "turn.failed":
-            return False
-        flat_text = json.dumps(ev).lower()
-        for phrase in (
-            "model is at capacity", "no capacity available",
-            "resource_exhausted", "quota exceeded", "quota reached", "429 too many requests",
-            "model_not_found", "model is not supported", "unknown model",
-            "model unavailable", "service unavailable",
-            "permission denied", "permissionerror", "approval denied", "approval required",
-            "requires approval", "auto-denied", "operation not permitted",
-        ):
-            if phrase in flat_text:
-                return False
-        failed = (ev.get("type") in ("error",) or
-                  str(ev.get("status", "")).lower() in ("error", "failed", "failure") or
-                  bool(ev.get("error")))
-        if failed and idx not in {w[0] for w in warnings}:
-            return False
-
-    return True
-
-
 def _provider_problem(data: bytes) -> tuple[str, str] | None:
     """Classify provider-level errors, not arbitrary GitHub/tool results in JSONL.
 
@@ -664,34 +450,25 @@ def _provider_problem(data: bytes) -> tuple[str, str] | None:
     if events is None:
         messages.append(data.decode("utf-8", "replace").lower())
     else:
-        # Normalize only trusted failed provider fields, never a serialized
-        # item/tool/command transcript or the raw JSONL stream.
-        quotes = str.maketrans({c: "'" for c in "\u2018\u2019\u201b\u02bc\uff07"})
-        def normalized(message: str) -> str:
-            return message.translate(quotes).lower()
         for event in events:
-            if str(event.get("type", "")).startswith("item."):
-                continue
-            failed = (event.get("type") in ("turn.failed", "error", "warning") or
-                      str(event.get("status", "")).lower() in ("error", "failed", "failure", "warning") or
-                      bool(event.get("error")) or
-                      _parse_reconnect_warning(event) is not None)
+            failed = (event.get("type") in ("turn.failed", "error") or
+                      str(event.get("status", "")).lower() in ("error", "failed", "failure") or
+                      bool(event.get("error")))
             if not failed:
                 continue
             failed_events.append(event)
             error = event.get("error")
             if isinstance(error, str):
-                messages.append(normalized(error))
+                messages.append(error.lower())
             elif isinstance(error, dict):
-                messages.extend(normalized(error[key]) for key in ("message", "code", "type")
+                messages.extend(error[key].lower() for key in ("message", "code", "type")
                                 if isinstance(error.get(key), str))
             for key in ("message", "detail"):
                 if isinstance(event.get(key), str):
-                    messages.append(normalized(event[key]))
+                    messages.append(event[key].lower())
     for phrases, status in (
         (("model is at capacity", "no capacity available"), "MODEL_AT_CAPACITY"),
-        (("resource_exhausted", "quota exceeded", "quota reached", "429 too many requests",
-          "you've hit your usage limit", "you have hit your usage limit"), "QUOTA_EXHAUSTED"),
+        (("resource_exhausted", "quota exceeded", "quota reached", "429 too many requests"), "QUOTA_EXHAUSTED"),
         (("model_not_found", "model is not supported", "unknown model"), "MODEL_UNSUPPORTED"),
         (("model unavailable", "service unavailable"), "EXECUTOR_UNAVAILABLE"),
         (("permission denied", "permissionerror", "approval denied", "approval required",
@@ -700,8 +477,6 @@ def _provider_problem(data: bytes) -> tuple[str, str] | None:
         if any(phrase in message for message in messages for phrase in phrases):
             return status, status
     if failed_events:
-        if _codex_reconnect_recovery(data):
-            return None
         return "EXECUTION_UNKNOWN", "EXECUTOR_OUTCOME_UNCONFIRMED"
     return None
 
@@ -746,12 +521,10 @@ def _provider_completed(data: bytes, executor: str) -> bool:
 
 def _verify_infrastructure_failure(stdout: bytes, stderr: bytes) -> bool:
     messages = (stdout + b"\n" + stderr).decode("utf-8", "replace").lower()
-    return bool(git_hook_environment_failure(stdout, stderr) or _provider_problem(stdout + b"\n" + stderr) or any(
+    return bool(_provider_problem(stdout + b"\n" + stderr) or any(
         text in messages for text in (
             "no module named pytest", "0xc0000142", "3221225794", "-1073741502",
             "[winerror 1920]", "subprocess.timeoutexpired", "worker crashed", "workers crashed",
-            "[winerror 1314]", "[winerror 5]", "a required privilege is not held",
-            "git_write_guard_blocked", "ef01_git_write_denied",
             "memoryerror", "cannot allocate memory", "can't start new thread",
             "failed to start worker", "could not start worker", "error while receiving from worker")))
 
@@ -759,307 +532,6 @@ def _verify_infrastructure_failure(stdout: bytes, stderr: bytes) -> bool:
 def _windows_command_units(command: Sequence[str]) -> int:
     # Count quoted argv in Windows UTF-16 code units, including the terminating NUL.
     return len(list2cmdline(command).encode("utf-16-le")) // 2 + 1
-
-
-@contextmanager
-def _agy_temp_tree(repo: Path, prefix: str, *, cleanup_receipts=None, reconciliation=None):
-    # Reject poisoned TEMP (including primary .local/ef02) before allocation.
-    parent = agy_data_directory(Path(tempfile.gettempdir()))
-    if parent == repo or repo in parent.parents:
-        raise ValueError("AGY_INPUT_SOURCE_OVERLAP")
-    directory = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
-    identity = (directory.stat().st_dev, directory.stat().st_ino)
-    parent_identity = (parent.stat().st_dev, parent.stat().st_ino)
-    try:
-        agy_data_directory(directory)
-        yield directory
-    finally:
-        if reconciliation is not None and not reconciliation.get("tree_empty"):
-            receipt = {"status": "HOLD", "reason": "AGY_PROCESS_RECONCILIATION_UNPROVEN",
-                       "root_token_sha256": _sha(str(directory).encode())}
-        else:
-            receipt = agy_remove_owned_tree(directory, parent, identity, parent_identity,
-                **({"scratch_internal_links": True} if prefix == "agy_scratch-" else {}))
-        receipt["role"] = "INPUT" if prefix == "agy_input-" else "SCRATCH"
-        if cleanup_receipts is not None:
-            cleanup_receipts.append(receipt)
-        if receipt["status"] != "CLEAN":
-            raise _AgyScratchCleanupError(receipt["reason"])
-
-
-class _AgyScratchCleanupError(ValueError):
-    pass
-
-
-class _AgyProcessUnproven(ValueError):
-    pass
-
-
-@contextmanager
-def _agy_input_mirror(repo: Path, prompt: str, feedback: dict | None, **cleanup):
-    with _agy_temp_tree(repo, "agy_input-", **cleanup) as directory:
-        _write(directory / "instruction.txt", prompt.encode("utf-8"))
-        if feedback is not None:
-            _write(directory / "repair_feedback.json", _json_bytes(feedback))
-        yield directory
-
-
-def _agy_child_env(environment: dict[str, str], scratch: Path, *, repo: Path) -> dict[str, str]:
-    """Prevent incidental Python/pytest cache writes in the instruction mirror.
-
-    TEMP alone does not contain pytest's root-relative .pytest_cache. Replace
-    inherited addopts for provider children only: caller options must not undo
-    the transport default or send caches/basetemp into immutable input. EF01's
-    independent verifier keeps its own environment and registered command.
-    Rebind the EF01 pytest runtime plugin too: its inherited scratch setting
-    otherwise overrides TEMP for nested pytest fixtures and JUnit artifacts.
-    Package caches also belong to this scratch; uv must copy instead of
-    importing hardlinks from an inherited shared cache (owner PR #664).
-
-    These are subprocess-inherited defaults, not a security sandbox. Explicit
-    child overrides/direct writes still require the mandatory input manifest
-    and native process reconciliation before verification/publication.
-    """
-    root = agy_data_directory(scratch)
-    # Windows environment keys are case-insensitive even in a plain dict.
-    # Remove hostile case variants before creating the child's environment.
-    # EF01's host verifier loads a pytest runtime plugin which overwrites the
-    # explicitly owned basetemp in pytest_configure. It must NEVER be inherited
-    # by AGY's provider-side pytest; this is an executor/verification boundary.
-    # Preserve every other inherited provider plugin unchanged.
-    inherited_pytest_plugins = next((v for k, v in environment.items()
-        if k.upper() == "PYTEST_PLUGINS"), "")
-    provider_pytest_plugins = ",".join(p for item in inherited_pytest_plugins.split(",")
-        if (p := item.strip()) and p != "ai_commerce.engineering.profile")
-    controlled = {"TEMP", "TMP", "TMPDIR", "PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTHONDONTWRITEBYTECODE",
-                  "PYTHONPYCACHEPREFIX", "XDG_CACHE_HOME", "UV_CACHE_DIR", "UV_LINK_MODE",
-                  "PIP_CACHE_DIR", "NPM_CONFIG_CACHE", "AI_COMMERCE_PYTEST_SCRATCH",
-                  "AI_COMMERCE_PYTEST_REPO"}
-    inherited = {key: value for key, value in environment.items() if key.upper() not in controlled}
-    return {**inherited, **{key: str(root) for key in ("TEMP", "TMP", "TMPDIR")},
-            # Force nested pytest to use an owned deterministic basetemp. The
-            # implicit tempfile mode creates `*-current` reparse/symlink aliases
-            # that our fail-closed native SCRATCH cleanup intentionally rejects.
-            # shlex quoting protects paths containing spaces/apostrophes.
-            "PYTEST_PLUGINS": provider_pytest_plugins,
-            "PYTEST_ADDOPTS": "-p no:cacheprovider -p no:ai_commerce.engineering.profile --basetemp=" +
-                             shlex.quote(str(root / "pytest-basetemp")),
-            "PYTHONDONTWRITEBYTECODE": "1",
-            "PYTHONPYCACHEPREFIX": str(root / "pycache"),
-            "XDG_CACHE_HOME": str(root / "user-cache"),
-            "UV_CACHE_DIR": str(root / "uv-cache"),
-            "UV_LINK_MODE": "copy",
-            "PIP_CACHE_DIR": str(root / "pip-cache"),
-            "npm_config_cache": str(root / "npm-cache"),
-            "AI_COMMERCE_PYTEST_SCRATCH": str(root),
-            "AI_COMMERCE_PYTEST_REPO": str(repo)}
-
-
-# An isolated Python gate blocks on stdin. No provider code runs until the host
-# has assigned the gate to a non-breakaway, kill-on-close Windows job. The job
-# handle stays exclusively in the host; descendants cannot keep it alive.
-_AGY_PROCESS_GATE = """import json,subprocess,sys
-payload = json.loads(sys.stdin.buffer.readline())
-result = subprocess.run(payload['argv'], input=payload['stdin'], text=True,
-                        encoding='utf-8', errors='replace', check=False)
-sys.exit(result.returncode)
-"""
-
-
-class _WindowsAgyJob:
-    def __init__(self):
-        import ctypes
-        from ctypes import wintypes as w
-        self.ctypes, self.w = ctypes, w
-        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel = self.kernel
-        for name, args, result in (
-            ("CreateJobObjectW", [w.LPVOID, w.LPCWSTR], w.HANDLE),
-            ("SetInformationJobObject", [w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD], w.BOOL),
-            ("QueryInformationJobObject", [w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD, w.LPVOID], w.BOOL),
-            ("AssignProcessToJobObject", [w.HANDLE, w.HANDLE], w.BOOL),
-            ("IsProcessInJob", [w.HANDLE, w.HANDLE, ctypes.POINTER(w.BOOL)], w.BOOL),
-            ("GetProcessTimes", [w.HANDLE, w.LPVOID, w.LPVOID, w.LPVOID, w.LPVOID], w.BOOL),
-            ("TerminateJobObject", [w.HANDLE, w.UINT], w.BOOL),
-            ("CloseHandle", [w.HANDLE], w.BOOL),
-        ):
-            fn = getattr(kernel, name)
-            fn.argtypes, fn.restype = args, result
-        class BasicLimit(ctypes.Structure):
-            _fields_ = [("process_time", ctypes.c_longlong), ("job_time", ctypes.c_longlong),
-                        ("flags", w.DWORD), ("min_working", ctypes.c_size_t), ("max_working", ctypes.c_size_t),
-                        ("active_limit", w.DWORD), ("affinity", ctypes.c_size_t), ("priority", w.DWORD), ("scheduling", w.DWORD)]
-        class ExtendedLimit(ctypes.Structure):
-            _fields_ = [("basic", BasicLimit), ("io", ctypes.c_ulonglong * 6),
-                        ("process_memory", ctypes.c_size_t), ("job_memory", ctypes.c_size_t),
-                        ("peak_process", ctypes.c_size_t), ("peak_job", ctypes.c_size_t)]
-        self.handle = kernel.CreateJobObjectW(None, None)
-        if not self.handle:
-            raise ctypes.WinError(ctypes.get_last_error())
-        limits = ExtendedLimit()
-        limits.basic.flags = 0x2000  # KILL_ON_JOB_CLOSE; no BREAKAWAY flags.
-        if not kernel.SetInformationJobObject(self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
-            error = ctypes.get_last_error()
-            self.close()
-            raise ctypes.WinError(error)
-
-    def assign(self, process):
-        ctypes, w = self.ctypes, self.w
-        member = w.BOOL()
-        if (not self.kernel.AssignProcessToJobObject(self.handle, int(process._handle))
-                or not self.kernel.IsProcessInJob(int(process._handle), self.handle, ctypes.byref(member)) or not member):
-            raise ctypes.WinError(ctypes.get_last_error())
-        creation, exit_time, kernel_time, user_time = (ctypes.c_ulonglong() for _ in range(4))
-        if not self.kernel.GetProcessTimes(int(process._handle), *(ctypes.byref(v) for v in
-                (creation, exit_time, kernel_time, user_time))):
-            raise ctypes.WinError(ctypes.get_last_error())
-        return {"pid": process.pid, "creation_filetime": creation.value}
-
-    def observe(self):
-        ctypes, w = self.ctypes, self.w
-        class Accounting(ctypes.Structure):
-            _fields_ = [("times", ctypes.c_longlong * 4), ("faults", w.DWORD),
-                        ("total", w.DWORD), ("active", w.DWORD), ("terminated", w.DWORD)]
-        class ProcessIds(ctypes.Structure):
-            _fields_ = [("assigned", w.DWORD), ("count", w.DWORD), ("ids", ctypes.c_size_t * 1024)]
-        accounting, processes = Accounting(), ProcessIds()
-        for kind, value in ((1, accounting), (3, processes)):
-            if not self.kernel.QueryInformationJobObject(self.handle, kind, ctypes.byref(value), ctypes.sizeof(value), None):
-                raise ctypes.WinError(ctypes.get_last_error())
-        return {"active": accounting.active, "total": accounting.total,
-                "pids": [int(v) for v in processes.ids[:min(processes.count, 64)]],
-                "pid_count": processes.count}
-
-    def terminate(self):
-        if not self.kernel.TerminateJobObject(self.handle, 1):
-            raise self.ctypes.WinError(self.ctypes.get_last_error())
-
-    def close(self):
-        if self.handle:
-            self.kernel.CloseHandle(self.handle)
-            self.handle = None
-
-
-def _run_agy_owned(command, *, lifecycle, **kwargs):
-    """Native containment proof before verification, independent of model prose.
-
-    Timeout/interruption/forced child termination never become source PASS.
-    Unavailable native detection does not launch a provider or assume success.
-    """
-    lifecycle.update(status="HOLD", reason="AGY_PROCESS_RECONCILIATION_UNPROVEN",
-                     tree_empty=False, containment_proven=False, forced_termination=False,
-                     provider_launch_released=False,
-                     authority="WINDOWS_JOB_OBJECT" if os.name == "nt" else "UNAVAILABLE")
-    if os.name != "nt":
-        # No child has been launched; scratch can still be safely reclaimed.
-        lifecycle.update(tree_empty=True, reason="AGY_PROCESS_TRACKING_UNAVAILABLE")
-        raise _AgyProcessUnproven("AGY_PROCESS_TRACKING_UNAVAILABLE")
-    job, process = None, None
-    try:
-        job = _WindowsAgyJob()
-        process = subprocess.Popen([sys.executable, "-I", "-S", "-c", _AGY_PROCESS_GATE],
-            cwd=kwargs["cwd"], env=kwargs["env"], stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW)
-        lifecycle["gate_identity"] = job.assign(process)
-        lifecycle["containment_proven"] = True
-        wire = (json.dumps({"argv": list(command), "stdin": kwargs.get("input")}) + "\n").encode("utf-8")
-        lifecycle["provider_launch_released"] = True
-        stdout, stderr = process.communicate(wire, timeout=kwargs["timeout"])
-        lifecycle["root_exit_code"] = process.returncode
-        observed = job.observe()
-        lifecycle["at_return"] = observed
-        grace = time.monotonic() + 0.75
-        while (observed["active"] or observed["pid_count"]) and time.monotonic() < grace:
-            time.sleep(0.05)
-            observed = job.observe()
-        lifecycle["after_grace"] = observed
-        if observed["active"] or observed["pid_count"]:
-            lifecycle["reason"] = "AGY_DESCENDANTS_STILL_ACTIVE"
-        else:
-            lifecycle.update(status="RECONCILED", reason=None, tree_empty=True)
-        return subprocess.CompletedProcess(command, process.returncode,
-            stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace"))
-    except OSError as exc:
-        lifecycle["native_error"] = getattr(exc, "winerror", None)
-        raise _AgyProcessUnproven("AGY_PROCESS_TRACKING_UNAVAILABLE") from None
-    finally:
-        try:
-            if job is not None and lifecycle["containment_proven"]:
-                if not lifecycle["tree_empty"]:
-                    lifecycle["forced_termination"] = True
-                    job.terminate()
-                    end = time.monotonic() + 2.0
-                    while True:
-                        observed = job.observe()
-                        lifecycle["after_reconcile"] = observed
-                        if not observed["active"] and not observed["pid_count"]:
-                            lifecycle["tree_empty"] = True
-                            break
-                        if time.monotonic() >= end:
-                            break
-                        time.sleep(0.05)
-            elif process is not None:
-                # Only our blocked gate exists; no provider input was released.
-                process.kill()
-            else:
-                lifecycle["tree_empty"] = True  # launch did not occur
-            if process is not None:
-                try:
-                    process.communicate(timeout=1.0)
-                except subprocess.TimeoutExpired:
-                    lifecycle.update(status="HOLD", tree_empty=False,
-                                     reason="AGY_PROCESS_RECONCILIATION_UNPROVEN")
-        except OSError:
-            lifecycle.update(status="HOLD", tree_empty=False,
-                             reason="AGY_PROCESS_RECONCILIATION_UNPROVEN")
-        finally:
-            if job is not None:
-                job.close()
-            if process is not None:
-                for stream in (process.stdin, process.stdout, process.stderr):
-                    if stream is not None:
-                        stream.close()
-
-
-def _agy_source_binding(repo: Path, expected: dict, deadline: float,
-                        git_executable: str | None = None) -> dict:
-    """Host-observed exact source identity, independent of AGY's selected cwd."""
-    source = agy_directory(repo)
-    values = []
-    for option in ("--show-toplevel", "--absolute-git-dir", "HEAD"):
-        result = _git(source, "rev-parse", option, timeout_seconds=_remaining(deadline),
-                      git_executable=git_executable)
-        if result.returncode or not result.stdout.strip():
-            raise ValueError("AGY_SOURCE_IDENTITY_UNPROVEN")
-        values.append(result.stdout.strip())
-    top, git_dir, head = values
-    if (agy_directory(Path(top)) != source or
-            Path(git_dir).resolve(strict=True) != Path(expected["git_dir"]).resolve(strict=True) or
-            head != expected["git_head_after"]):
-        raise ValueError("AGY_SOURCE_IDENTITY_CHANGED")
-    return {"source_root": str(source), "source_sha": head, "git_dir": git_dir}
-
-
-def _agy_source_context(binding: dict, mirror: Path, instruction_sha: str,
-                        git_executable: str | None, scratch: Path | None = None) -> str:
-    source = binding["source_root"]
-    probes = [list2cmdline([git_executable or "git", "-C", source, "rev-parse", option])
-              for option in ("--show-toplevel", "--absolute-git-dir")]
-    return (AGY_INPUT_CONTEXT + "\nCODE WRITE ROOT (unique, exact bound path): "
-            + json.dumps(source, ensure_ascii=False) + ".\nREAD ONLY INPUT (data only; never code or Git root): "
-            + json.dumps(str(mirror), ensure_ascii=False) + ".\n"
-            + ("WRITABLE SCRATCH (disposable tests/FFmpeg/cache; never instructions or source): "
-               + json.dumps(str(scratch), ensure_ascii=False)
-               + ". Direct all temporary output here, never into READ ONLY INPUT. "
-               "Wait for every child command to finish before returning; do not leave background writers.\n"
-               if scratch is not None else "")
-            + "Source HEAD: " + binding["source_sha"] + "; absolute Git dir: "
-            + json.dumps(binding["git_dir"], ensure_ascii=False) + ".\n"
-            + "Full instruction SHA256: " + instruction_sha + ".\n"
-            + "Validate source identity using exactly " + " and ".join(probes)
-            + ". Compare to the bound root and Git dir above; stop on mismatch. "
-            + "Never use unqualified git rev-parse from an input directory. "
-            + "Make every code read/write target absolute under CODE WRITE ROOT.\n")
 
 
 def _pytest_failure(argv: Sequence[str], code: int | None, stdout: bytes, stderr: bytes) -> bool:
@@ -1077,7 +549,6 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
                     timeout_seconds: int, verify_timeout_seconds: int,
                     codex_bin: str, antigravity_bin: str,
                     codex_windows_sandbox: str | None,
-                    input_runtime: ExitStack,
                     git_executable: str | None = None, mt_context: dict | None = None,
                     pytest_profile: str = "windows-12", pytest_isolation_approved: bool = False,
                     pytest_known_flaky: bool = False, host_slots: int = 1,
@@ -1101,9 +572,15 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     save("instruction", "instruction.txt", prompt.encode("utf-8"))
     if feedback is not None:
         save("repair_feedback", "repair_feedback.json", _json_bytes(feedback))
+    # Grant AGY only a disposable input mirror, never the authoritative logs,
+    # hashes, provider boundary, or feedback evidence owned by the runner.
     agy_input_dir = None
-    agy_scratch_dir = None
-    input_baseline = None
+    if selection.executor == "antigravity":
+        agy_input_dir = directory / "agy_input"
+        agy_input_dir.mkdir(parents=True, exist_ok=False)
+        _write(agy_input_dir / "instruction.txt", prompt.encode("utf-8"))
+        if feedback is not None:
+            _write(agy_input_dir / "repair_feedback.json", _json_bytes(feedback))
     before, _ = snapshot()
     inv["input_snapshot"] = before
     save("source_before", "source.before.json", _json_bytes(before))
@@ -1113,48 +590,19 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         inv.update(status=status, error_code=error)
         return
     # Preserve the original instruction evidence; guard only the provider wire prompt.
-    context = ""
-    mirrored_files = None
-    if selection.executor == "antigravity":
-        binding = _agy_source_binding(repo, before, deadline, git_executable)
-        reconciliation = {"status": "NOT_LAUNCHED", "tree_empty": True}
-        inv["process_lifecycle"] = reconciliation
-        inv["scratch_teardown"] = {"status": "PENDING", "roots": []}
-        cleanup = {"cleanup_receipts": inv["scratch_teardown"]["roots"], "reconciliation": reconciliation}
-        agy_input_dir = input_runtime.enter_context(_agy_input_mirror(repo, prompt, feedback, **cleanup))
-        agy_scratch_dir = input_runtime.enter_context(_agy_temp_tree(repo, "agy_scratch-", **cleanup))
-        scratch_identity = (agy_scratch_dir.stat().st_dev, agy_scratch_dir.stat().st_ino)
-        # Authority comes from the host-owned prompt/feedback, never a mutable
-        # mirror reread that could adopt an already replaced instruction.
-        mirrored_files = {"instruction.txt": prompt.encode("utf-8")}
-        if feedback is not None:
-            mirrored_files["repair_feedback.json"] = _json_bytes(feedback)
-        input_baseline = agy_input_manifest(repo, agy_input_dir, mirrored_files)
-        if input_baseline["status"] != "INTACT":
-            inv.update(status="SOURCE_DRIFT", error_code="AGY_INPUT_INTEGRITY_FAILED",
-                       input_integrity_reason=input_baseline["reason"])
-            save("agy_input_before", "agy_input.before.json", _json_bytes(input_baseline))
-            return
-        save("agy_input_before", "agy_input.before.json", _json_bytes(input_baseline))
-        context = _agy_source_context(binding, agy_input_dir, _sha(prompt.encode("utf-8")),
-                                      git_executable, agy_scratch_dir)
-        save("agy_source_binding", "agy_source_binding.json", _json_bytes({
-            **binding, "input_mirror": str(agy_input_dir), "input_role": "READ_ONLY_INPUT",
-            "scratch_root": str(agy_scratch_dir), "scratch_role": "DISPOSABLE_SCRATCH",
-            "source_role": "CODE_WRITE_ROOT", "instruction_sha256": _sha(prompt.encode("utf-8"))}))
+    context = AGY_INPUT_CONTEXT if selection.executor == "antigravity" else ""
     guarded_prompt = GIT_GUARD_INSTRUCTION + "\n\n" + context + prompt
     command, stdin = command_for(selection, repo, guarded_prompt, codex_bin=codex_bin,
                                  antigravity_bin=antigravity_bin,
                                  codex_windows_sandbox=codex_windows_sandbox,
-                                 antigravity_evidence_dir=agy_input_dir,
-                                 **({"antigravity_scratch_dir": agy_scratch_dir} if agy_scratch_dir else {}))
+                                 antigravity_evidence_dir=agy_input_dir)
     if selection.executor == "antigravity" and _windows_command_units(command) > AGY_COMMANDLINE_MAX_UNITS:
         # Preserve the complete original instruction/feedback on disk. Shorten only
         # the transported --print argument; never truncate recorded diagnostics.
         compact = (
-            GIT_GUARD_INSTRUCTION + " " + context +
+            GIT_GUARD_INSTRUCTION + " " + AGY_INPUT_CONTEXT +
             "Read and follow the complete authorized instruction file "
-            + json.dumps(str(agy_input_dir / "instruction.txt"), ensure_ascii=False) + " (UTF-8; SHA256 "
+            + str((agy_input_dir or directory) / "instruction.txt") + " (UTF-8; SHA256 "
             + _sha(prompt.encode("utf-8")) + "). "
             "Keep the same worktree, source HEAD, executor/model/effort and allowed scope. "
             "This file contains the full original request and any repair evidence references."
@@ -1168,8 +616,6 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         save("transport_instruction", "transport_instruction.txt", compact.encode("utf-8"))
     # Hook configuration applies only to the executor; EF02 owns publication.
     child_env = git_write_guard_env(directory, repo=repo, git_executable=git_executable or "git")
-    if agy_scratch_dir is not None:
-        child_env = _agy_child_env(child_env, agy_scratch_dir, repo=repo)
     budget = _remaining(deadline, timeout_seconds)
     boundary = {
         "kind": "AI_COMMERCE_EF01_PROVIDER_BOUNDARY", "version": 1,
@@ -1190,11 +636,6 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
             process = _run_codex_with_live_event_mirror(
                 command, repo=repo, stdin_text=stdin, timeout_seconds=budget,
                 live_path=live, env=child_env)
-        elif selection.executor == "antigravity":
-            process = _run_agy_owned(command, lifecycle=inv["process_lifecycle"],
-                                     cwd=repo, input=stdin, capture_output=True,
-                                     text=True, encoding="utf-8", errors="replace",
-                                     timeout=budget, check=False, env=child_env)
         else:
             process = subprocess.run(command, cwd=repo, input=stdin, capture_output=True,
                                      text=True, encoding="utf-8", errors="replace",
@@ -1223,15 +664,10 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     except PermissionError as exc:
         err = str(exc).encode("utf-8")
         inv.update(status="EXECUTOR_PERMISSION_DENIED", error_code="EXECUTOR_PERMISSION_DENIED")
-    except _AgyProcessUnproven as exc:
-        inv.update(status="UNPROVEN", error_code=str(exc), repair_eligible=False,
-                   executor_invoked=inv["process_lifecycle"].get("provider_launch_released", False))
     finally:
         inv["executor_finished_at"] = _now()
         save("executor_stdout", "executor.stdout.log", out)
         save("executor_stderr", "executor.stderr.log", err)
-        if selection.executor == "antigravity":
-            save("process_lifecycle", "agy.process_lifecycle.json", _json_bytes(inv["process_lifecycle"]))
         if live is not None and live.exists():
             data = live.read_bytes()
             if live.parent != directory:
@@ -1256,40 +692,8 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     # Even a provider failure gets a scoped snapshot and cumulative diff.
     save("tracked_diff", "git.tracked.diff.patch", diff)
     problem = _source_problem(after, initial, verify_first_scope=verify_first_scope)
-    def check_input(phase: str):
-        nonlocal input_baseline
-        manifest = agy_input_manifest(repo, agy_input_dir, mirrored_files, input_baseline)
-        if manifest["status"] == "INTACT" and phase == "after_verify" and (
-                manifest["directory_state"] != input_baseline["directory_state"] or
-                any(f["role"] == "AUXILIARY" and f["change"] != "UNCHANGED" for f in manifest["files"])):
-            manifest.update(status="HOLD", reason="AGY_INPUT_LATE_WRITE")
-        save("agy_input_" + phase, "agy_input." + phase + ".json", _json_bytes(manifest))
-        if manifest["status"] != "INTACT":
-            inv["input_integrity_reason"] = manifest["reason"]
-            return "SOURCE_DRIFT", "AGY_INPUT_INTEGRITY_FAILED"
-        try:
-            info = agy_scratch_dir.lstat()
-            if (agy_data_directory(agy_scratch_dir) != agy_scratch_dir or
-                    (info.st_dev, info.st_ino) != scratch_identity):
-                raise ValueError("AGY_SCRATCH_ROOT_CHANGED")
-        except (OSError, ValueError):
-            inv["input_integrity_reason"] = "AGY_SCRATCH_ROOT_CHANGED"
-            return "SOURCE_DRIFT", "AGY_INPUT_INTEGRITY_FAILED"
-        # Original contract bytes/identity have already matched the host-owned
-        # baseline. Freeze the observed auxiliary state when the provider ends;
-        # subsequent writes are late effects, never verifier-approved progress.
-        input_baseline = manifest
-        return None
-
-    if agy_input_dir is not None:
-        input_problem = check_input("after_executor")
-        problem = problem or input_problem
     if problem is None and inv["denied_actions"]:
         problem = ("EXECUTOR_PERMISSION_DENIED", "HEADLESS_TOOL_PERMISSION_DENIED")
-    if (problem is None and selection.executor == "antigravity"
-            and inv["process_lifecycle"].get("status") != "RECONCILED"
-            and inv["status"] == "EXECUTOR_RETURNED_UNVERIFIED"):
-        problem = ("UNPROVEN", inv["process_lifecycle"].get("reason") or "AGY_PROCESS_RECONCILIATION_UNPROVEN")
     # Interrupted/abnormal exits are UNKNOWN effects even if a partial provider
     # event or stderr mentions a determinate-looking quota/capacity error.
     # Never overwrite EXECUTOR_INTERRUPTED with a recoverable provider status.
@@ -1336,9 +740,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
 
     inv.update(status="EXECUTION_UNKNOWN", verify_started_at=_now())
     vout, verr = b"", b""
-    runtime = ExitStack()
     try:
-        verify_env = runtime.enter_context(pytest_execution_env(repo)) if _is_pytest(verify_argv) else None
         inv["verify_timeout_seconds"] = _remaining(deadline, verify_timeout_seconds)
         registered = bool(mt_context and mt_context["registered_only"])
         inv["verification_origin"] = "REGISTERED_EF01" if registered else "LOCAL_EF01"
@@ -1360,8 +762,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
                     xdist_available=xdist_available(), windows=(os.name == "nt"),
                     registered_only=True, registered_argv=argv)
                 inv["pytest_profile"] = decision
-            temp_dir = Path(verify_env["AI_COMMERCE_PYTEST_SCRATCH"]) / group
-            return profile_command(argv, decision=decision, temp_dir=temp_dir), decision
+            return profile_command(argv, decision=decision, temp_dir=output_dir / "pytest-temp" / group), decision
         if mt_context is not None:
             # Publishing scope drift requires a fresh full registered run even
             # when a companion narrow group or prior group PASS is available.
@@ -1386,11 +787,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
             check = subprocess.run(actual_argv, cwd=repo, capture_output=True,
                                    text=True, encoding="utf-8", errors="replace",
                                    timeout=inv["verify_timeout_seconds"], check=False,
-                                   env=verify_env)
-            if verify_env is not None:
-                junit = Path(verify_env["AI_COMMERCE_PYTEST_SCRATCH"]) / "junit.xml"
-                if junit.is_file():
-                    save("verify_junit", "verify.junit.xml", junit.read_bytes())
+                                   env=pytest_observation_env() if _is_pytest(actual_argv) else None)
         inv.update(verify_exit_code=check.returncode, verify_completed=True)
         vout, verr = check.stdout.encode("utf-8"), check.stderr.encode("utf-8")
         if mt_context is None:
@@ -1437,13 +834,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     except PermissionError as exc:
         inv.update(status="VERIFICATION_FAILED", error_code="VERIFY_PERMISSION_DENIED",
                    verify_diagnostic=str(exc))
-    except ValueError as exc:
-        code = str(exc).split(":", 1)[0]
-        if not re.fullmatch(r"(?:MT01|PYTEST|XDIST|REGISTERED)_[A-Z0-9_]{1,100}", code):
-            raise
-        inv.update(status="UNPROVEN", error_code=code, repair_eligible=False)
     finally:
-        runtime.close()
         inv["verify_finished_at"] = _now()
         save("verify_stdout", "verify.stdout.log", vout)
         save("verify_stderr", "verify.stderr.log", verr)
@@ -1488,52 +879,10 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         else:
             inv["repair_eligible"] = _pytest_failure(
                 list(verify_argv), inv["verify_exit_code"], vout, verr)
-    if agy_input_dir is not None:
-        input_problem = check_input("after_verify")
-        if input_problem:
-            inv.update(status=input_problem[0], error_code=input_problem[1], repair_eligible=False)
 
 
 def _stream_bytes(value: bytes | str | None) -> bytes:
     return value if isinstance(value, bytes) else (value or "").encode("utf-8")
-
-
-def _seal_agy_teardown(repo, inv, output_dir, allowed, deadline, git_executable):
-    """Seal independent build/lifecycle/teardown receipts before candidate status."""
-    if "scratch_teardown" not in inv:
-        return
-    inv.setdefault("source_build_status", inv["status"])
-    inv.setdefault("source_build_error_code", inv.get("error_code"))
-    teardown = inv["scratch_teardown"]
-    roots = teardown["roots"]
-    teardown["status"] = "CLEAN" if (len(roots) == 2 and all(r["status"] == "CLEAN" for r in roots)) else "HOLD"
-    accepted = ("BUILD_VERIFIED_FOR_SCOPE", "VERIFIED_SCOPE_REVIEW_REQUIRED")
-    if teardown["status"] != "CLEAN":
-        inv["repair_eligible"] = False
-        if inv["status"] in accepted:
-            inv.update(status="UNPROVEN", error_code="AGY_SCRATCH_CLEANUP_UNPROVEN")
-    def save(key, name, data):
-        target = output_dir / inv["evidence_dir"] / name
-        _write(target, data)
-        inv["evidence_files"][key] = target.relative_to(output_dir).as_posix()
-        inv["evidence_sha256"][key] = _sha(data)
-    # The final diff must match the verified snapshot even after teardown. A
-    # late mutation remains SOURCE_DRIFT; clean scratch cannot bless it.
-    if teardown["status"] == "CLEAN" and inv["status"] in accepted:
-        options = {"git_executable": git_executable} if git_executable is not None else {}
-        final, diff = _snapshot(repo, allowed, deadline, **options)
-        save("source_after_teardown", "source.after_teardown.json", _json_bytes(final))
-        if final != inv.get("final_snapshot"):
-            inv.update(status="SOURCE_DRIFT", error_code="AGY_SOURCE_CHANGED_AFTER_TEARDOWN", repair_eligible=False)
-            inv.update(final)
-            inv["final_snapshot"] = final
-            save("teardown_diff", "git.after_teardown.diff.patch", diff)
-    save("scratch_teardown", "agy.scratch_teardown.json", _json_bytes(teardown))
-    save("source_build", "source.build_result.json", _json_bytes({
-        "status": inv["source_build_status"], "error_code": inv["source_build_error_code"],
-        "verify_completed": inv["verify_completed"], "verify_exit_code": inv["verify_exit_code"],
-        "source_after_verify_sha256": inv["evidence_sha256"].get("source_after_verify"),
-        "candidate": False, "requires_clean_teardown": True}))
 
 
 def _is_pytest(argv: Sequence[str]) -> bool:
@@ -1605,7 +954,6 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
     independent; no vendor session continuation is assumed. No commits or push.
     """
     validate_max_repair_rounds(max_repair_rounds)
-    _deny_retired_workowner_ipc(os.environ)
     # Validate bad explicit Git/profile configuration before any provider call.
     configured_git = git_executable if git_executable is not None else os.environ.get("AI_COMMERCE_GIT_EXECUTABLE")
     git_executable = resolve_git_executable(configured_git) if configured_git is not None else None
@@ -1616,14 +964,11 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
             not _is_pytest(argv)
             for name, argv in registered_profiles.items())):
         raise ValueError("MT01_INVALID_REGISTERED_PROFILES")
-    if registered_only and registered_profiles is not None and list(verify_argv) not in registered_profiles.values():
-        raise ValueError("MT01_REQUESTED_PROFILE_ARGV_UNREGISTERED")
     for value in (timeout_seconds, verify_timeout_seconds, action_timeout_seconds):
         if type(value) is not int or not 1 <= value <= MAX_TIMEOUT_SECONDS:
             raise ValueError(f"Timeouts must be integers from 1 to {MAX_TIMEOUT_SECONDS}")
     deadline = time.monotonic() + action_timeout_seconds
-    repo = agy_directory(repo) if selection.executor == "antigravity" else repo.resolve()
-    output_dir = output_dir.resolve()
+    repo, output_dir = repo.resolve(), output_dir.resolve()
     if not work_id.strip() or not attempt_id.strip():
         raise ValueError("work_id and attempt_id must be nonempty")
     if not instruction.strip() or not verify_argv or not all(isinstance(x, str) and x for x in verify_argv):
@@ -1683,8 +1028,6 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
         "verify_first_scope": verify_first_scope,
         "out_of_scope_files": [], "scope_review_required": False, "review_required": False,
         "invocations": [], "repair_rounds_used": 0, "stop_reason": None,
-        "hypothesis_trail": [],
-        "preflight": {"state": "READY", "source_sha": initial["git_head_after"], "proves_pass": False},
     }
     output_dir.mkdir(parents=True, exist_ok=False)
     expected = initial
@@ -1705,7 +1048,6 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                 "scope_valid": None, "git_head_after": None, "denied_actions": [],
                 "denied_action_diagnostics": [], "provider_test_observations": [],
                 "out_of_scope_files": [], "scope_review_required": False, "review_required": False,
-                "verify_first_scope": verify_first_scope,
                 "usage": None, "usage_status": "UNKNOWN", "cost": None, "cost_status": "UNKNOWN",
                 "evidence_files": {}, "evidence_sha256": {}, "repair_eligible": False,
                 "replay_authorized": False, "provider_return_determinate": False,
@@ -1719,7 +1061,6 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                     "max_repair_rounds": max_repair_rounds, "allowed_prefixes": list(allowed_prefixes),
                     "verify_argv": list(verify_argv), "evidence_root": str(output_dir),
                     "previous_invocations": report["invocations"],
-                    "hypothesis_trail": report["hypothesis_trail"],
                 }
                 # Freeze prior rounds before appending the current mutable record.
                 feedback = json.loads(json.dumps(feedback))
@@ -1728,91 +1069,35 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
             inv["instruction_sha256"] = _sha(prompt.encode("utf-8"))
             report["invocations"].append(inv)
             try:
-                with ExitStack() as input_runtime:
-                    _run_invocation(
-                        repo=repo, output_dir=output_dir, invocation=inv, initial=initial, expected=expected,
-                        selection=selection, prompt=prompt, feedback=feedback, verify_argv=verify_argv,
-                        allowed_prefixes=allowed_prefixes, deadline=deadline, timeout_seconds=timeout_seconds,
-                        verify_timeout_seconds=verify_timeout_seconds, codex_bin=codex_bin,
-                        antigravity_bin=antigravity_bin, codex_windows_sandbox=codex_windows_sandbox,
-                        git_executable=git_executable, mt_context=mt_context,
-                        pytest_profile=pytest_profile, pytest_isolation_approved=pytest_isolation_approved,
-                        pytest_known_flaky=pytest_known_flaky, host_slots=host_slots,
-                        verify_first_scope=verify_first_scope, input_runtime=input_runtime)
-                    inv["source_build_status"] = inv["status"]
-                    inv["source_build_error_code"] = inv["error_code"]
+                _run_invocation(
+                    repo=repo, output_dir=output_dir, invocation=inv, initial=initial, expected=expected,
+                    selection=selection, prompt=prompt, feedback=feedback, verify_argv=verify_argv,
+                    allowed_prefixes=allowed_prefixes, deadline=deadline, timeout_seconds=timeout_seconds,
+                    verify_timeout_seconds=verify_timeout_seconds, codex_bin=codex_bin,
+                    antigravity_bin=antigravity_bin, codex_windows_sandbox=codex_windows_sandbox,
+                    git_executable=git_executable, mt_context=mt_context,
+                    pytest_profile=pytest_profile, pytest_isolation_approved=pytest_isolation_approved,
+                    pytest_known_flaky=pytest_known_flaky, host_slots=host_slots,
+                    verify_first_scope=verify_first_scope)
             except Exception as exc:
-                code = str(exc)
-                inv.setdefault("source_build_status", inv["status"])
-                inv.setdefault("source_build_error_code", inv.get("error_code"))
-                # ExitStack cleanup can itself fail after a precise native
-                # failure. Keep the original cause and record the secondary
-                # failure without promoting any source or permitting a retry.
-                if isinstance(exc, _AgyScratchCleanupError):
-                    inv.update(runtime_cleanup_error=code, repair_eligible=False)
-                    if inv["status"] in ("BUILD_VERIFIED_FOR_SCOPE", "VERIFIED_SCOPE_REVIEW_REQUIRED") or not inv.get("error_code"):
-                        inv.update(status="UNPROVEN", error_code="AGY_SCRATCH_CLEANUP_UNPROVEN")
-                elif inv.get("error_code"):
-                    inv.update(runtime_cleanup_error=code if re.fullmatch(r"AGY_[A-Z_]+", code)
-                               else "RUNTIME_CLEANUP_UNPROVEN", repair_eligible=False)
-                elif re.fullmatch(r"AGY_[A-Z_]+", code):
-                    inv.update(status="SOURCE_DRIFT", error_code="AGY_INPUT_INTEGRITY_FAILED",
-                               input_integrity_reason=code, repair_eligible=False)
-                else:
-                    inv.update(status="EXECUTION_UNKNOWN",
-                               error_code="ACTION_TIMEOUT" if isinstance(exc, TimeoutError) else "RUNNER_ERROR",
-                               diagnostic=f"{type(exc).__name__}: {exc}", repair_eligible=False)
+                inv.update(status="EXECUTION_UNKNOWN",
+                           error_code="ACTION_TIMEOUT" if isinstance(exc, TimeoutError) else "RUNNER_ERROR",
+                           diagnostic=f"{type(exc).__name__}: {exc}", repair_eligible=False)
             except BaseException:
                 inv.update(status="EXECUTION_UNKNOWN", error_code="RUNNER_INTERRUPTED", repair_eligible=False)
                 raise
             finally:
-                if selection.executor == "antigravity":
-                    _seal_agy_teardown(repo, inv, output_dir, allowed_prefixes, deadline, git_executable)
-                if (selection.executor == "antigravity" and inv.get("changed_files") and
-                        inv["status"] not in ("BUILD_VERIFIED_FOR_SCOPE", "VERIFIED_SCOPE_REVIEW_REQUIRED")):
-                    # The existing EF02 .local/ef02/** upload includes these
-                    # invocation-local evidence files, including failed attempts.
-                    def quarantine_save(key, name, data):
-                        target = output_dir / inv["evidence_dir"] / name
-                        _write(target, data)
-                        inv["evidence_files"][key] = target.relative_to(output_dir).as_posix()
-                        inv["evidence_sha256"][key] = _sha(data)
-                    try:
-                        _quarantine_source(repo, inv.get("final_snapshot", inv), allowed_prefixes, quarantine_save)
-                    except (OSError, ValueError):
-                        inv["quarantine_diagnostic"] = "QUARANTINE_STORAGE_UNPROVEN"
                 inv["finished_at"] = _now()
                 inv["result_file"] = inv["evidence_dir"] + "/invocation_result.json"
                 provenance = _failure_provenance(inv,
                     precondition_instruction_sha256=report["instruction_sha256"],
                     sandbox_backend=report["sandbox_backend"])
                 inv["failure_provenance"] = provenance
-                diagnosis = diagnose_failure(inv)
-                inv["failure_diagnosis"] = diagnosis.payload() if diagnosis else None
-                # repair_eligible is derived only by the native verifier above.
-                # Advisory UNKNOWN gaps cannot short-circuit the existing
-                # unchanged-precondition sentinel for a determinate round.
-                if (diagnosis and diagnosis.disposition == "OWNER_ESCALATION" and
-                        not (inv["repair_eligible"] and diagnosis.failure_class.value == "UNKNOWN")):
-                    inv.update(repair_eligible=False, repair_stop_reason="OWNER_ESCALATION")
                 if provenance:
                     signature = provenance["fingerprint"]
                     if inv["repair_eligible"] and signature in seen_failure_fingerprints:
                         inv.update(repair_eligible=False, repair_stop_reason="UNCHANGED_FAILURE_PRECONDITION")
                     seen_failure_fingerprints.add(signature)
-                # Only bounded native codes and hashes are shared as hypotheses.
-                # Full private diagnostic logs remain separate evidence artifacts.
-                if diagnosis:
-                    report["hypothesis_trail"] = (report["hypothesis_trail"] + [{
-                        "round": round_index, "diagnosis": diagnosis.payload(),
-                        "precondition_sha256": provenance["precondition_sha256"] if provenance else None,
-                        "source_changed": inv.get("input_snapshot", {}).get("candidate_file_sha256") != inv.get("candidate_file_sha256"),
-                        "hypothesis": "SCOPED_ASSERTION_REPAIR" if inv["repair_eligible"] else "OWNER_RECONCILIATION_REQUIRED",
-                        "rejected_hypothesis": ("NO_SOURCE_CHANGE" if inv.get("error_code") == "REPAIR_NO_CODE_CHANGE" else
-                            "UNCHANGED_FAILURE_PRECONDITION" if inv.get("repair_stop_reason") == "UNCHANGED_FAILURE_PRECONDITION" else None),
-                        "next_experiment": "TARGETED_PYTEST_ON_CHANGED_SOURCE" if inv["repair_eligible"] else "STOP_AND_RECONCILE_NATIVE_EVIDENCE",
-                    }])[-4:]
-                report["failure_diagnosis"] = inv["failure_diagnosis"]
                 for key in ("status", "error_code", "executor_exit_code", "verify_exit_code",
                             "changed_files", "candidate_file_sha256", "tracked_diff_sha256",
                             "scope_valid", "git_head_after", "denied_actions", "evidence_files",
@@ -1820,13 +1105,10 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                             "provider_test_observations", "failure_provenance", "review_required",
                             "evidence_sha256", "verify_completed", "provider_return_determinate"):
                     report[key] = inv[key]
-                if inv.get("input_integrity_reason"):
-                    report["input_integrity_reason"] = inv["input_integrity_reason"]
                 report["git_dir"] = inv.get("git_dir", initial["git_dir"])
                 for key in ("minimum_test", "pytest_profile", "pytest_profiles",
                             "observed_pytest_workers", "workers_actual",
-                            "workers_actual_by_group", "worker_count_provenance", "source_build_status",
-                            "source_build_error_code", "process_lifecycle", "scratch_teardown"):
+                            "workers_actual_by_group", "worker_count_provenance"):
                     if key in inv:
                         report[key] = inv[key]
                 _write(output_dir / inv["result_file"], _json_bytes(inv))

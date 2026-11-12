@@ -16,12 +16,6 @@ CONTROL_TESTS = {
     ".github/scripts/ef02-pr-ci-tests.py": (
         "tests/test_minimum_test.py", "tests/test_ef02_mt01_registry.py",
     ),
-    # #710 G3: owner-only, no-model AGY static runner observation remains an
-    # explicitly reviewed CI control, never a generic permission to edit YAML.
-    ".github/workflows/ef02-antigravity-headless-preflight.yml": (
-        "tests/test_ef02.py", "tests/test_ef02_scope_main_integration.py",
-        "tests/test_mt01_v21.py",
-    ),
     ".github/workflows/ef02-batch.yml": ("tests/test_ef02.py", "tests/test_minimum_test.py"),
     ".github/workflows/ef02-tests.yml": (
         "tests/test_minimum_test.py", "tests/test_pr_merge_gate.py",
@@ -699,7 +693,7 @@ def load_baseline_component_owner_records(
         if not target.is_file() or target.is_symlink():
             raise ValueError("ONBOARD_BASELINE_MANIFEST_MISSING")
         actual = target.read_bytes()
-        if raw != actual:
+        if raw != actual and actual.replace(bytes([13, 10]), bytes([10])) != raw:
             raise ValueError("ONBOARD_BASELINE_MANIFEST_DRIFT")
         try:
             data = json.loads(raw.decode("utf-8-sig"))
@@ -781,23 +775,14 @@ def registered_action_plan(
         profiles.get("mt01-component-onboarding") == list(fallback_argv)
         and bool(allowed_paths)
     )
-    admission, onboarding_error, baseline_error = None, None, None
-    # Committed owners are trusted base data for EVERY source action. Only
-    # candidate-supplied new owners require the explicit onboarding ingress.
-    # Never substitute candidate bytes or an empty owner map on a bad base.
-    persisted_records = ()
-    if (repo / ".git").exists():
-        try:
-            persisted_records = load_baseline_component_owner_records(
-                root=repo, base_sha=base_sha, existing_groups=groups)
-        except (ValueError, OSError, UnicodeError, TypeError) as exc:
-            baseline_error = "ONBOARD_INVALID_BASELINE:" + str(exc)[:128]
+    admission, onboarding_error = None, None
+    persisted_records = (
+        load_baseline_component_owner_records(
+            root=repo, base_sha=base_sha, existing_groups=groups)
+        if onboarding and (repo / ".git").exists() else ())
     persisted_by_name = {item["group"].name: item for item in persisted_records}
     if persisted_records:
         groups = (*groups, *(item["group"] for item in persisted_records))
-    if not onboarding and any(p.startswith("work_items/mt01-components/")
-                              for p in changed_paths):
-        onboarding_error = "ONBOARD_EXPLICIT_INGRESS_REQUIRED"
     if onboarding:
         candidates = sorted(p for p in changed_paths
                             if p.startswith("work_items/mt01-components/") and p.endswith(".json"))
@@ -825,33 +810,6 @@ def registered_action_plan(
     by_name = {g.name: g for g in groups}
     entries = []
     problems = list(impact.missing_mapping)
-    # #750: the one-file diff remains the independent changed-path oracle.
-    # Complete separately required registered ACs only against existing,
-    # issuer-authorized, source-owned paths in the immutable baseline.
-    # The source diff does NOT gain new files, owners or test argv.
-    trusted_allowed = set(allowed_paths) & set(base_files)
-    required_registered = set(required_acs) & {ac for g in groups for ac in g.acs}
-    required_scope_groups = []
-    if (impact.runnable and impact.selected_groups and not impact.missing_mapping
-            and baseline_error is None and onboarding_error is None):
-        for group in groups:
-            if (group.name in impact.selected_groups or group.name in persisted_by_name
-                    or (admission is not None and group.name == admission["name"])
-                    or not (set(group.acs) & required_registered)):
-                continue
-            reviewed_owner_paths = (set(group.tests) | set(group.paths)
-                                    | set(group.consumers) | set(group.contracts))
-            if not trusted_allowed.intersection(reviewed_owner_paths):
-                continue
-            # New manifest owners remain subject to independent onboarding.
-            required_scope_groups.append(group.name)
-            for test in group.tests:
-                target = repo / test
-                if test not in base_files or not target.is_file() or target.is_symlink():
-                    problems.append("AC_SCOPE_REQUIRED_TEST_MISSING_OR_UNSAFE:" + test)
-    selected_groups = tuple(sorted(set(impact.selected_groups) | set(required_scope_groups)))
-    if baseline_error:
-        problems.append(baseline_error)
     if onboarding_error:
         problems.append(onboarding_error)
     if admission is not None and aggregate_sources:
@@ -862,14 +820,10 @@ def registered_action_plan(
     # A globally known AC is NOT verified unless its owning group is selected.
     # Do not expand silently: an unrelated action requirement needs a new
     # explicit impact plan or a precise HOLD_COVERAGE witness.
-    selected_acs = {ac for name in selected_groups for ac in by_name[name].acs}
+    selected_acs = {ac for name in impact.selected_groups for ac in by_name[name].acs}
     required = set(required_acs)
     unknown_acs = sorted(required - known_acs)
     unselected_acs = sorted((required & known_acs) - selected_acs)
-    if unknown_acs and (admission is not None or
-                        set(impact.selected_groups) & persisted_by_name.keys()):
-        # The data-only manifest capability cannot attest an undeclared AC.
-        problems.extend("ONBOARD_UNKNOWN_AC:" + ac for ac in unknown_acs)
     # A previously unregistered AC is a product-review question, not a
     # reason to skip independently selected and registered source tests.
     # Retain its exact identity in the immutable verification receipt; Brain
@@ -879,32 +833,26 @@ def registered_action_plan(
     if unselected_acs:
         problems.extend("AC_REQUIRED_GROUP_NOT_SELECTED:" + ac for ac in unselected_acs)
     select_parallel = list(fallback_argv[-2:]) == ["-n", "12"]
-    for name in selected_groups:
+    for name in impact.selected_groups:
         group = by_name[name]
-        manifest_owner = bool((admission is not None and name == admission["name"])
-                              or name in persisted_by_name)
         expected = ["python", "-m", "pytest", *group.tests, "-q"]
-        # A committed data-only owner may use the verified parallel onboarding
-        # capability, but a serial WorkItem must never be upgraded to -n 12.
-        # Until an independently registered serial manifest-owner binding exists,
-        # fail closed instead of silently changing the authorized execution mode.
-        if manifest_owner and not select_parallel:
-            problems.append(name + ":SERIAL_MANIFEST_OWNER_PROFILE_UNPROVEN")
         if select_parallel:
             expected.extend(["-n", "12"])
+        new_owner = bool((admission is not None and name == admission["name"])
+                         or (onboarding and name in persisted_by_name))
         verified_owner = (admission if admission is not None and name == admission["name"]
                           else persisted_by_name.get(name))
         matched = canonical_registered_profile(
-            profiles, expected, group_name=name, onboarding=manifest_owner)
+            profiles, expected, group_name=name, onboarding=new_owner)
         if matched is None:
             problems.append(name + ":REGISTERED_PROFILE_REQUIRED")
         # The only dynamic command is generated from a VALIDATED bounded
         # manifest; all original components still use exact registry argv.
-        argv = expected if manifest_owner else list(profiles[matched]) if matched is not None else list(fallback_argv)
+        argv = expected if new_owner else list(profiles[matched]) if matched is not None else list(fallback_argv)
         executable = shutil.which(argv[0]) if argv else None
         paths = (set(group.tests) | set(group.paths) | set(group.consumers) |
                  set(group.contracts) | (set(changed_paths) & set(impact.affected_paths)))
-        if manifest_owner:
+        if new_owner:
             # Nonexecutable review documents and work-item records are still
             # changed candidate bytes: include them in immutable evidence so
             # EF02's all-changed-files coverage check cannot be bypassed.
@@ -931,7 +879,7 @@ def registered_action_plan(
             "selected_impact_tests": list(impact.selected_tests),
             **({"onboarding_manifest_path": verified_owner["manifest_path"],
                 "onboarding_manifest_sha256": verified_owner["manifest_sha256"],
-                "onboarding_data_only": True} if manifest_owner else {}),
+                "onboarding_data_only": True} if new_owner else {}),
         }
         executable_scope = bool(impact.runnable and matched)
         entries.append({
@@ -969,10 +917,11 @@ def registered_action_plan(
             },
         })
     impact_receipt = impact.as_dict()
-    if problems and (impact.runnable or unselected_acs):
+    if unselected_acs:
         impact_receipt["mode"] = "HOLD_COVERAGE"
         impact_receipt["missing_mapping"] = sorted(
-            set(impact_receipt["missing_mapping"]) | set(problems))
+            set(impact_receipt["missing_mapping"]) |
+            {"AC_REQUIRED_GROUP_NOT_SELECTED:" + ac for ac in unselected_acs})
     return {
         "kind": "AI_COMMERCE_MT01_PLAN", "version": 2,
         "required_acs": sorted(set(required_acs)),
@@ -983,15 +932,11 @@ def registered_action_plan(
         "ac_adoption_state": "PENDING_BRAIN_REVIEW" if pending_brain_acs else "REGISTERED",
         "unknown_tests": [p for p in impact.missing_mapping if "TEST" in p],
         "unknown_consumers": [p for p in impact.missing_mapping if "SOURCE" in p or "IMPORT" in p],
-        "reason_codes": list(impact.reason_codes) + [
-            "REVIEWED_ALLOWED_SCOPE_AC_GROUP:" + name for name in required_scope_groups
-        ] + list(problems) + [
-            "AC_PENDING_BRAIN_REVIEW:" + ac for ac in pending_brain_acs
-        ],
+        "reason_codes": list(impact.reason_codes) + list(problems) +
+                        ["AC_PENDING_BRAIN_REVIEW:" + ac for ac in pending_brain_acs],
         "unsupported_paths": [],
-        "consumer_map": {g.name: g.mapping() for g in groups if g.name in selected_groups},
-        "selected_groups": list(selected_groups),
-        "required_ac_group_closure": sorted(set(required_scope_groups)),
+        "consumer_map": {g.name: g.mapping() for g in groups if g.name in impact.selected_groups},
+        "selected_groups": list(impact.selected_groups),
         "selected_profiles": [e["selected_profile"] for e in entries if e["selected_profile"]],
         "fallback_profile": None, "fallback_argv": list(fallback_argv),
         "narrow_execution_observed": False, "fallback": False,

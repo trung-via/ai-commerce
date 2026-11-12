@@ -24,10 +24,6 @@ CONTROL_TESTS = {
     ".github/scripts/mt01_v21_oracle.py": {"tests/test_mt01_v21.py"},
     ".github/scripts/ef02-pr-ci-tests.py": {"tests/test_minimum_test.py"},
     ".github/workflows/ef02-tests.yml": {"tests/test_minimum_test.py", "tests/test_pr_merge_gate.py"},
-    # #710 G3 independently protected baseline oracle. Not a wildcard.
-    ".github/workflows/ef02-antigravity-headless-preflight.yml": {
-        "tests/test_ef02.py", "tests/test_ef02_scope_main_integration.py",
-        "tests/test_mt01_v21.py"},
     ".github/workflows/ef02-batch.yml": {"tests/test_ef02.py"},
     "src/ai_commerce/engineering/impact_v21.py": {"tests/test_mt01_v21.py"},
     # Reviewed exact operator-attended D5 script; no generic .ps1 admission.

@@ -21,7 +21,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -108,11 +107,6 @@ REVIEWED_CONTROL_TESTS = {
         "tests/test_hostops_request.py", "tests/test_mt01_v21.py"),
     ".github/workflows/hostops-v2.yml": (
         "tests/test_hostops_v2.py", "tests/test_hostops_ef02_202_recovery.py",
-        "tests/test_mt01_v21.py"),
-    # #710 G3 no-model static probe: exactly this trusted workflow in main,
-    # with reviewed Python consumers. All unlisted controls continue HOLD.
-    ".github/workflows/ef02-antigravity-headless-preflight.yml": (
-        "tests/test_ef02.py", "tests/test_ef02_scope_main_integration.py",
         "tests/test_mt01_v21.py"),
     ".github/workflows/ef02-batch.yml": (
         "tests/test_ef02.py", "tests/test_minimum_test.py"),
@@ -681,41 +675,6 @@ def verified_v21_artifacts(value: object, run_id: int, expected_head: str) -> bo
     return True
 
 
-def _github_utc_epoch(value: object) -> float | None:
-    """Parse independently returned UTC GitHub timestamps; fail closed."""
-    if type(value) is not str or not value.endswith("Z"):
-        return None
-    try:
-        value = datetime.fromisoformat(value[:-1] + "+00:00")
-        return value.timestamp()
-    except (ValueError, OverflowError):
-        return None
-
-
-def _artifacts_in_attempt(proof: object, *, started: str,
-                          finished: str) -> dict | None:
-    """Discard previous attempts' identically named uploaded artifacts.
-
-    The API proves the attempt's start/end, and GitHub owns artifact creation
-    timestamps. Normal per-run provenance and receipt ZIP validation still apply.
-    """
-    if not isinstance(proof, dict) or not isinstance(proof.get("artifacts"), list):
-        return None
-    start, end = _github_utc_epoch(started), _github_utc_epoch(finished)
-    if start is None or end is None or start > end:
-        return None
-    selected = []
-    for record in proof["artifacts"]:
-        if not isinstance(record, dict):
-            return None
-        created = _github_utc_epoch(record.get("created_at"))
-        if created is None:
-            return None
-        if start <= created <= end:
-            selected.append(record)
-    return {"artifacts": selected}
-
-
 def verify_one(api: Callable[[str], Any], repository: str, number: int,
                *, event_head: str | None = None) -> Verdict:
     """Read-only preflight. All missing or stale evidence holds the merge."""
@@ -763,43 +722,12 @@ def verify_one(api: Callable[[str], Any], repository: str, number: int,
         return Verdict("WAIT_CI", "EXACT_HEAD_CI_STILL_RUNNING", number, head, latest["id"])
     if latest.get("conclusion") != "success":
         return Verdict("WAIT_FIX", "EXACT_HEAD_CI_NOT_SUCCESS", number, head, latest["id"])
-    # GitHub's generic /runs/{id}/jobs can serve stale per-step snapshots even
-    # AFTER a job is completed SUCCESS. The run-attempt-scoped jobs endpoint
-    # provides the actual immutable steps for that specific execution.
-    attempt = latest.get("run_attempt")
-    jobs_path = f"{base}/actions/runs/{latest['id']}/jobs?per_page=100"
-    attempt_bounds = None
-    if attempt is not None:
-        if type(attempt) is not int or not 1 <= attempt <= 100:
-            return Verdict("HOLD", "CI_RUN_ATTEMPT_INVALID", number, head, latest["id"])
-        attempt_info = api(f"{base}/actions/runs/{latest['id']}/attempts/{attempt}")
-        if (not isinstance(attempt_info, dict) or
-                attempt_info.get("id") != latest["id"] or
-                attempt_info.get("run_attempt") != attempt or
-                attempt_info.get("head_sha") != head or
-                attempt_info.get("status") != "completed" or
-                attempt_info.get("conclusion") != "success"):
-            return Verdict("WAIT_EVIDENCE", "CI_ATTEMPT_IDENTITY_UNPROVEN",
-                           number, head, latest["id"])
-        started, finished = (attempt_info.get("run_started_at"),
-                             attempt_info.get("updated_at"))
-        if (_github_utc_epoch(started) is None or
-                _github_utc_epoch(finished) is None or
-                _github_utc_epoch(started) > _github_utc_epoch(finished)):
-            return Verdict("WAIT_EVIDENCE", "CI_ATTEMPT_TIME_UNPROVEN",
-                           number, head, latest["id"])
-        attempt_bounds = (started, finished)
-        jobs_path = (f"{base}/actions/runs/{latest['id']}"
-                     f"/attempts/{attempt}/jobs?per_page=100")
-    jobs = api(jobs_path)
+    jobs = api(f"{base}/actions/runs/{latest['id']}/jobs?per_page=100")
     if not isinstance(jobs, dict) or not isinstance(jobs.get("jobs"), list) or len(jobs["jobs"]) == 100:
         return Verdict("HOLD", "CI_JOBS_UNPROVEN", number, head, latest["id"])
     if not verified_jobs(jobs["jobs"]):
         return Verdict("WAIT_EVIDENCE", "WINDOWS_PYTEST_NODE_PROOF_MISSING", number, head, latest["id"])
     artifact_proof = api(f"{base}/actions/runs/{latest['id']}/artifacts?per_page=100")
-    if attempt_bounds is not None:
-        artifact_proof = _artifacts_in_attempt(
-            artifact_proof, started=attempt_bounds[0], finished=attempt_bounds[1])
     if not verified_v21_artifacts(artifact_proof, latest["id"], head):
         return Verdict("WAIT_EVIDENCE", "V21_EXACT_RUN_WINDOWS_ARTIFACT_PROOF_MISSING", number, head, latest["id"])
     # The GitHub diff is an external, exact-PR source independent of the

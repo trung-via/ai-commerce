@@ -7,7 +7,7 @@ import re
 import subprocess
 from pathlib import Path, PurePosixPath
 from jsonschema import Draft202012Validator
-from ai_commerce.engineering.profile import ExecutorSelection, diagnose_failure
+from ai_commerce.engineering.profile import ExecutorSelection
 from ai_commerce.engineering.runner import validate_max_repair_rounds, DEFAULT_MAX_REPAIR_ROUNDS
 from ai_commerce.engineering.git import git_argv
 from ai_commerce.engineering.pytest_profile import registered_workers
@@ -15,28 +15,9 @@ from ai_commerce.engineering.minimum_test import approved_groups
 
 IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 HEX_SHA = re.compile(r"^[0-9a-f]{40}$")
-RETIRED_WP_IDENTIFIER = re.compile(r"(?:EPWO|WP0[1-6])", re.IGNORECASE)
 
 class RemoteRequestError(ValueError):
-    def __init__(self, code):
-        super().__init__(code)
-        self.failure_diagnosis = diagnose_failure({"status": "INVALID_REQUEST", "error_code": code}).payload()
-
-def reject_retired_wp_identifiers(batch: dict, action: dict | None = None) -> None:
-    """Deny new WP/EPWO machine IDs, never historical prose or read-only evidence.
-
-    GitHub Issue and workflow_dispatch deny the same identifiers. This extra
-    source boundary protects direct CLI/content validation and native worker
-    calls before any attempt index, GitHub claim, provider or candidate effect.
-    """
-    ids = [batch.get("batch_id")]
-    actions = [action] if action is not None else batch.get("actions", [])
-    for item in actions:
-        ids.extend((item.get("action_id"), item.get("attempt_id")))
-    if any(isinstance(value, str) and RETIRED_WP_IDENTIFIER.search(value)
-           for value in ids):
-        raise RemoteRequestError("RETIRED_WP_NOT_DISPATCHABLE")
-
+    pass
 
 def canonical(data: dict) -> bytes:
     return json.dumps(data, ensure_ascii=False, sort_keys=True,
@@ -78,16 +59,14 @@ def verify_registry(path: Path) -> dict[str, list[str]]:
 def validate_batch(data: dict, *, schema: Path, registry: dict[str, list[str]],
                    issuer_login: str, owner_login: str,
                    brain_issuers: tuple[str, ...] = (),
-                   approved_reuse: dict | None = None,
-                   strict_ac: bool = True) -> dict:
+                   approved_reuse: dict | None = None) -> dict:
     Draft202012Validator(json.loads(schema.read_text(encoding="utf-8"))).validate(data)
     owner = issuer_login.casefold() == owner_login.casefold()
     brain = issuer_login.casefold() in {v.casefold() for v in brain_issuers if v}
     if not ((data["actor"] == "HUMAN" and owner) or
             (data["actor"] == "BRAIN" and brain)):
         raise RemoteRequestError("ISSUER_NOT_AUTHORIZED_FOR_ACTOR")
-    return _validate_actions(data, registry=registry, approved_reuse=approved_reuse,
-                             strict_ac=strict_ac)
+    return _validate_actions(data, registry=registry, approved_reuse=approved_reuse)
 
 
 def validate_batch_content(data: dict, *, schema: Path, registry: dict[str, list[str]],
@@ -101,11 +80,7 @@ def validate_batch_content(data: dict, *, schema: Path, registry: dict[str, list
 
 
 def _validate_actions(data: dict, *, registry: dict[str, list[str]],
-                      approved_reuse: dict | None, strict_ac: bool = True) -> dict:
-    # 'reconcile' deliberately passes strict_ac=False to inspect immutable
-    # historical WP packets. No live validation/dispatch uses that route.
-    if strict_ac:
-        reject_retired_wp_identifiers(data)
+                      approved_reuse: dict | None) -> dict:
     ids = [a["action_id"] for a in data["actions"]]
     attempts = [a["attempt_id"] for a in data["actions"]]
     if len(set(ids)) != len(ids) or len(set(attempts)) != len(attempts):
@@ -125,11 +100,6 @@ def _validate_actions(data: dict, *, registry: dict[str, list[str]],
             approve_reuse(data, action, approved_reuse)
         for path in action["allowed_paths"]:
             safe_path(path)
-        # Validate explicit machine-readable AC even during offline v1 checks.
-        # Marker-less history remains readable only; live CLI/worker run strict.
-        if strict_ac and any(line.lstrip().startswith("MT01_ACCEPTANCE_JSON:")
-               for line in action["instruction"].splitlines()):
-            require_preexecutor_acceptance(action)
         if action["verification_profile"] not in registry:
             raise RemoteRequestError("VERIFICATION_PROFILE_UNREGISTERED")
         if action.get("verification_intent", "AUTO") == "HUMAN_FULL":
@@ -154,44 +124,7 @@ def _validate_actions(data: dict, *, registry: dict[str, list[str]],
         dfs(node)
     return data
 
-def _reviewed_intake_groups() -> tuple:
-    """Use static owners plus immutable Git-committed MT-01 onboarding owners.
-
-    The CI planner already loads accepted manifests from its pinned base; EF02
-    intake must use the same reviewed path, not register those owners a second
-    time in approved_groups(). A mutable Issue or uncommitted manifest is never
-    an authority to add ACs or source paths.
-    """
-    static = approved_groups()
-    checkout = Path(__file__).resolve().parents[3]
-    if not (checkout / ".git").exists():
-        # Installed wheels outside a source checkout keep known static owners.
-        # Committed dynamic owners remain unavailable, not self-certified.
-        return static
-    try:
-        from ai_commerce.engineering.impact_v21 import (
-            load_baseline_component_owner_records,
-        )
-        def head():
-            raw = subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=checkout,
-                stderr=subprocess.DEVNULL, timeout=20).decode("ascii").strip()
-            if not HEX_SHA.fullmatch(raw):
-                raise ValueError("INTAKE_SOURCE_HEAD_INVALID")
-            return raw
-
-        source = head()
-        reviewed = load_baseline_component_owner_records(
-            root=checkout, base_sha=source, existing_groups=static)
-        if head() != source:
-            raise ValueError("INTAKE_SOURCE_HEAD_DRIFT")
-    except (OSError, ValueError, UnicodeError, subprocess.CalledProcessError,
-            subprocess.TimeoutExpired):
-        raise RemoteRequestError("INTAKE_REVIEWED_OWNER_UNVERIFIED") from None
-    return (*static, *(row["group"] for row in reviewed))
-
-
-def approved_acceptance_plan(action: dict, *, groups=None) -> dict:
+def approved_acceptance_plan(action: dict) -> dict:
     """Read a bounded declaration from the issuer's fingerprinted v1 instruction.
 
     No prose inference, new schema fields, executor file, or test argv is trusted.
@@ -199,8 +132,7 @@ def approved_acceptance_plan(action: dict, *, groups=None) -> dict:
     describe the reviewed test families; arbitrary issue ACs remain unknown.
     """
     prefix = "MT01_ACCEPTANCE_JSON:"
-    lines = [line.lstrip() for line in action["instruction"].splitlines()
-             if line.lstrip().startswith(prefix)]
+    lines = [line.strip() for line in action["instruction"].splitlines() if prefix in line]
     reason = "EXPLICIT_FINGERPRINTED_INSTRUCTION_ACCEPTANCE"
     try:
         if len(lines) != 1 or not lines[0].startswith(prefix):
@@ -213,60 +145,12 @@ def approved_acceptance_plan(action: dict, *, groups=None) -> dict:
     except (ValueError, TypeError):
         ids = ["MT01.ACCEPTANCE_UNDECLARED"]
         reason = "AC_DECLARATION_MISSING_OR_INVALID_REQUIRES_BROAD_SCOPE"
-    groups = _reviewed_intake_groups() if groups is None else groups
-    mapping = {ac: {"group": g.name, "tests": list(g.tests)} for g in groups for ac in g.acs}
+    mapping = {ac: {"group": g.name, "tests": list(g.tests)} for g in approved_groups() for ac in g.acs}
     unknown = sorted(set(ids) - mapping.keys())
     return {"ids": sorted(ids), "unknown_ids": unknown,
             "consumer_map": {ac: mapping[ac] for ac in sorted(ids) if ac in mapping},
             "source": "ISSUER_FINGERPRINTED_V1_INSTRUCTION", "reason": reason,
             "broad_required": bool(unknown)}
-
-
-def require_preexecutor_acceptance(action: dict, *, source_closure: bool = False) -> dict:
-    """Fail closed on malformed, missing or unregistered fingerprinted AC.
-
-    Prose mentioning a marker is not a declaration. This gate never supplies
-    authority to change registry mappings or skip MT-01 consumer tests.
-    """
-    prefix = "MT01_ACCEPTANCE_JSON:"
-    markers = [line.lstrip() for line in action["instruction"].splitlines()
-               if line.lstrip().startswith(prefix)]
-    if len(markers) != 1:
-        raise RemoteRequestError("INTAKE_AC_MISSING_OR_AMBIGUOUS")
-    groups = _reviewed_intake_groups()
-    plan = approved_acceptance_plan(action, groups=groups)
-    if plan["reason"] != "EXPLICIT_FINGERPRINTED_INSTRUCTION_ACCEPTANCE":
-        raise RemoteRequestError("INTAKE_AC_MALFORMED")
-    if plan["unknown_ids"]:
-        raise RemoteRequestError("INTAKE_AC_UNREGISTERED")
-    if not source_closure:
-        return plan
-
-    # All map entries come from source-reviewed registered groups in the
-    # pinned checkout. Issuer-declared ACs can expand, but cannot narrow
-    # registered owner/consumer coverage or invent new test argv.
-    required: set[str] = set()
-    for allowed in action["allowed_paths"]:
-        registered = [
-            group for group in groups
-            if any(path == allowed or path.startswith(allowed.rstrip("/") + "/")
-                   for path in (*group.paths, *group.consumers,
-                                *group.contracts, *group.tests))
-        ]
-        if not registered:
-            raise RemoteRequestError("INTAKE_SOURCE_OWNER_UNMAPPED")
-        for group in registered:
-            required.update(group.acs)
-    if not set(plan["ids"]).intersection(required):
-        raise RemoteRequestError("INTAKE_AC_NOT_OWNING_ALLOWED_PATH")
-    expanded = sorted(set(plan["ids"]) | required)
-    if len(expanded) > 128:
-        raise RemoteRequestError("INTAKE_AC_CLOSURE_TOO_BROAD")
-    known = {ac: {"group": g.name, "tests": list(g.tests)}
-             for g in groups for ac in g.acs}
-    return {**plan, "ids": expanded,
-            "owner_derived_ids": sorted(required),
-            "consumer_map": {ac: known[ac] for ac in expanded}}
 
 
 def approved_verification_plan(action: dict, registry: dict[str, list[str]]) -> dict:

@@ -1,182 +1,20 @@
-name: WakeHub WH03B #745 fixed forensic read-only
-# The historical filename remains for evidence continuity. All #710 G3/G3B/G4
-# runtime entries are retired; only exact owner-created WakeHub #745 reads survive.
+name: EF02 Antigravity headless access preflight (no model)
 on:
-  issues:
-    types: [opened]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  wh03b-745-forensic:
-    # Exact, owner-created one-shot source-locked Windows READ only for #745.
-    # Never accept an Issue body / arbitrary user-selected attempt, PID or path.
-    if: >-
-      github.event_name == 'issues' &&
-      github.event.action == 'opened' &&
-      github.repository == 'trung-via/ai-commerce' &&
-      github.actor == github.repository_owner &&
-      github.event.issue.user.login == github.repository_owner &&
-      github.event.issue.title == '[WH03B #745 NATIVE FORENSIC READ] exact attempt only' &&
-      github.run_attempt == 1
+  check:
     runs-on: [self-hosted, Windows, ai-commerce-ef02]
-    timeout-minutes: 5
-    concurrency:
-      group: wh03b-745-native-forensic-read
-      cancel-in-progress: false
-    permissions:
-      contents: read
+    timeout-minutes: 10
     steps:
-      - name: Checkout protected main, no GitHub credentials
+      - name: Checkout trusted repository
         uses: actions/checkout@v4
         with:
-          ref: main
           persist-credentials: false
-      - name: Observe exact historical PID/time boundary, emit enums only
+      - name: Inspect same-session AGY and read policy without invoking model
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          try {
-            $proc = Get-CimInstance Win32_Process -Filter 'ProcessId=25736' -ErrorAction Stop
-            if ($null -eq $proc) {
-              Write-Output 'WH03B_745_PID=PID_ABSENT_ON_THIS_RUNNER'
-            } else {
-              $created = ([datetime]$proc.CreationDate).ToUniversalTime()
-              if ($created -ge [datetime]'2026-11-09T19:21:00Z' -and
-                  $created -le [datetime]'2026-11-09T19:43:12Z') {
-                Write-Output 'WH03B_745_PID=PID_WINDOW_MATCH_UNATTESTED'
-              } else {
-                Write-Output 'WH03B_745_PID=PID_REUSED_OR_UNRELATED'
-              }
-            }
-          } catch {
-            Write-Output 'WH03B_745_PID=PROCESS_READ_UNKNOWN'
-          }
-          # No process command line, credentials, exact local path or PID creation date printed.
-      - name: Observe fixed on-disk EF01 receipts and detached worktree, without writes
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $env:PYTHONPATH = Join-Path $env:GITHUB_WORKSPACE 'src'
-          $probe = @'
-          import itertools
-          import json
-          import os
-          from pathlib import Path
-          import tempfile
-          from ai_commerce.hostops_v3 import ef02_attempt_r02_readonly as safe
-
-          BATCH = "wh03b-native-fallback-agy38flashhigh-20261110-r2b"
-          ACTION = "WH03B-NATIVE-REGISTRATION-ADAPTER-AGY38FLASH-HIGH-R2B-001"
-          ATTEMPT = "wh03b_native_adapter_agy38flashhigh_5e8503b0_20261110_r2b"
-          SOURCE = "5e8503b09f5100a38dfb5ae5e08e3020b9b05790"
-          ISSUE = 745
-          WORK_KEY = "fff53e26ab6677786836d09f10b798c9ebcdfe1d0e872dab5130a97cb83be351"
-          JOURNAL_TIP = "29527952859fb8421709345c34fb476a38a81707"
-          EVIDENCE_ROOT = safe.EVIDENCE_ROOT.parents[1] / BATCH / (ACTION + "-" + ATTEMPT)
-          EXPECTED = (
-              ("ef01/provider_boundary.json", "BEFORE_EXECUTOR_SUBPROCESS"),
-              ("ef01/provider_return_observed.json", "EXECUTOR_SUBPROCESS_RETURNED"),
-              ("ef01/engineering_result.json", None),
-          )
-          MAX_BYTES = 4 * 1024 * 1024
-
-          def _file_state(rel, expected_stage):
-              target = EVIDENCE_ROOT.joinpath(*rel.split("/"))
-              try:
-                  if target.is_symlink():
-                      return "UNSAFE"
-                  if not target.exists():
-                      return "MISSING"
-                  if not safe._safe_absolute(target):
-                      return "UNSAFE"
-                  before = target.lstat()
-                  if before.st_size < 2 or before.st_size > MAX_BYTES:
-                      return "UNSAFE"
-                  with target.open("rb") as stream:
-                      opened = os.fstat(stream.fileno())
-                      raw = stream.read(MAX_BYTES + 1)
-                      closed = os.fstat(stream.fileno())
-                  identity = lambda st: (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_nlink)
-                  if (len(raw) > MAX_BYTES or identity(before) != identity(opened)
-                          or identity(opened) != identity(closed)
-                          or not safe._safe_absolute(target)):
-                      return "UNSAFE"
-                  record = json.loads(raw.decode("utf-8-sig"))
-                  if (type(record) is not dict or record.get("attempt_id") != ATTEMPT
-                          or (expected_stage is not None and record.get("stage") != expected_stage)
-                          or (rel == EXPECTED[2][0] and
-                              record.get("work_id") != BATCH + ":" + ACTION)):
-                      return "MISMATCH"
-                  # A locally readable JSON is NOT an authenticated provider receipt.
-                  return "PRESENT_UNVERIFIED"
-              except (OSError, ValueError, TypeError, UnicodeError):
-                  return "READ_UNKNOWN"
-
-          def _evidence():
-              batch = EVIDENCE_ROOT.parent
-              try:
-                  if batch.is_symlink():
-                      return "ROOT_UNSAFE", ("UNOBSERVED_HERE",) * 3
-                  if not batch.exists():
-                      return "BATCH_ABSENT_HERE", ("UNOBSERVED_HERE",) * 3
-                  if not safe._safe_absolute(batch, directory=True):
-                      return "ROOT_UNSAFE", ("UNOBSERVED_HERE",) * 3
-                  if EVIDENCE_ROOT.is_symlink():
-                      return "ROOT_UNSAFE", ("UNOBSERVED_HERE",) * 3
-                  if not EVIDENCE_ROOT.exists():
-                      return "ACTION_ABSENT_HERE", ("UNOBSERVED_HERE",) * 3
-                  if not safe._safe_absolute(EVIDENCE_ROOT, directory=True):
-                      return "ROOT_UNSAFE", ("UNOBSERVED_HERE",) * 3
-                  return "ACTION_PRESENT_UNVERIFIED", tuple(
-                      _file_state(rel, stage) for rel, stage in EXPECTED)
-              except (OSError, ValueError, RuntimeError):
-                  return "ROOT_READ_UNKNOWN", ("READ_UNKNOWN",) * 3
-
-          def _worktree():
-              try:
-                  base = Path(tempfile.gettempdir())
-                  if not safe._safe_absolute(base, directory=True):
-                      return "WORKTREE_READ_UNKNOWN"
-                  matches = list(itertools.islice(
-                      base.glob("ai-commerce-ef02-" + ACTION + "-*"), 2))
-                  if not matches:
-                      return "WORKTREE_ABSENT_HERE"
-                  if len(matches) > 1:
-                      return "WORKTREE_AMBIGUOUS"
-                  if not safe._safe_absolute(matches[0], directory=True):
-                      return "WORKTREE_UNSAFE"
-                  return "WORKTREE_SINGLE_UNVERIFIED"
-              except (OSError, RuntimeError, ValueError):
-                  return "WORKTREE_READ_UNKNOWN"
-
-          def observe():
-              root, (before, returned, terminal) = _evidence()
-              return {
-                  "status": "HOLD_UNKNOWN_EFFECT",
-                  "root": root,
-                  "boundary": before,
-                  "return": returned,
-                  "terminal": terminal,
-                  "worktree": _worktree(),
-                  "journal": "PUBLIC_TIP_READ_SEPARATELY_NOT_MUTATED",
-                  "replay_authorized": "FALSE",
-                  "provider_effect_proven": "FALSE",
-                  "native_identity_proven": "FALSE",
-              }
-
-          if __name__ == "__main__":
-              try:
-                  result = observe()
-                  for key in ("status", "root", "boundary", "return", "terminal",
-                              "worktree", "journal", "replay_authorized",
-                              "provider_effect_proven", "native_identity_proven"):
-                      print("WH03B_745_" + key.upper() + "=" + result[key])
-              except Exception:
-                  print("WH03B_745_STATUS=HOLD_UNKNOWN_EFFECT")
-                  print("WH03B_745_OBSERVER=READ_UNKNOWN")
-                  print("WH03B_745_REPLAY_AUTHORIZED=FALSE")
-          '@
-          & python -B -c $probe
-          exit $LASTEXITCODE
+          ./scripts/EF02-Antigravity-Headless-Preflight.ps1 -Workspace "$env:GITHUB_WORKSPACE"
