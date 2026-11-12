@@ -43,6 +43,54 @@ test('bind only a numbered EF02 run in the expected repository', () => {
   assert.equal(observe.issueNumber(run({display_title: 'EF02 Issue #0'}), 'trung-via/ai-commerce'), null);
 });
 
+test('issue-ingress titles bind the exact EF02 issue, not neighboring workflows', () => {
+  const wrapped = '[EF02][Production Q1-Q3][AGY fallback] after #814 quota (#815, opened)';
+  assert.equal(observe.issueNumber(run({display_title:wrapped}), 'trung-via/ai-commerce'), 815);
+  assert.equal(observe.issueNumber(run({display_title:wrapped.replace('opened', 'labeled')}),
+    'trung-via/ai-commerce'), 815);
+  assert.equal(observe.issueNumber(run({display_title:wrapped.replace('opened', 'created')}),
+    'trung-via/ai-commerce'), null);
+  assert.equal(observe.issueNumber(run({display_title:'[HOSTOPS READ] Probe (#815, opened)'}),
+    'trung-via/ai-commerce'), null);
+  assert.equal(observe.issueNumber(run({display_title:wrapped,
+    head_repository:{full_name:'other/repo'}}), 'trung-via/ai-commerce'), null);
+});
+
+test('issue-ingress reusable EF02 failed jobs are reported once by scheduled backfill', async () => {
+  const failed = run({id:815,
+    display_title:'[EF02][Production Q1-Q3] shot trace (#815, opened)',
+    status:'completed', conclusion:'failure', updated_at:'2026-10-28T08:55:00Z'});
+  const x = fake({event:'schedule', workflowRuns:[failed], jobs:[
+    {name:'ef02 / validate', conclusion:'success'},
+    {name:'ef02 / execute', status:'completed', conclusion:'failure'}
+  ]});
+  assert.equal(await observe({github:x.api, context:x.context, core:x.core},
+    {nowMs:Date.parse('2026-10-28T09:10:00Z')}), 1);
+  assert.equal(x.posted.length, 1, 'both workflow listings must not duplicate a run');
+  assert.match(x.posted[0].body, /WORKFLOW_NONPASS_UNRECONCILED/);
+  assert.match(x.posted[0].body, /side effects/);
+});
+
+test('wrapped EF02 queued execution stays UNKNOWN rather than falsely OFFLINE', () => {
+  const wrapped = run({display_title:'[EF02] shot trace (#815, labeled)',
+    status:'in_progress', conclusion:null});
+  const status = observe.classifyQueued(wrapped, [
+    {name:'ef02 / validate', conclusion:'success'},
+    {name:'ef02 / execute', status:'queued'}
+  ], Date.parse('2026-10-28T09:10:00Z'));
+  assert.equal(status.code, 'WINDOWS_JOB_WAITING_UNCONFIRMED');
+  assert.match(status.detail, /Runner offline is NOT established/);
+});
+
+test('observer watches both direct EF02 and issue-ingress parent workflows', () => {
+  const fs = require('node:fs'), path = require('node:path');
+  const yml = fs.readFileSync(path.join(__dirname, '../.github/workflows/ef02-watch.yml'), 'utf8');
+  assert.match(yml, /EF02 Multi-Action remote engineering/);
+  assert.match(yml, /AI Commerce Issue ingress \(EF02 \/ HostOps Personal\)/);
+  const script = fs.readFileSync(path.join(__dirname, '../.github/scripts/ef02-watch.cjs'), 'utf8');
+  assert.match(script, /'issue-ingress.yml'/);
+});
+
 test('cancelled after possible execution is UNCERTAIN, never PASS', async () => {
   const x = fake({jobs: [{name: 'validate', conclusion: 'success'},
                          {name: 'execute', status: 'completed', conclusion: 'cancelled'}]});
