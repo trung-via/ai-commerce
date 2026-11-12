@@ -4,15 +4,14 @@ import base64
 import hashlib
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
 
-from .transport import GitHubTransport, RemoteTransportError, CandidateIntegrityError, WorkOwner, WorkOwnerAudit
-from .validation import fingerprint, check_source, approved_verification_plan, approved_acceptance_plan, require_preexecutor_acceptance, reject_retired_wp_identifiers, RemoteRequestError
+from .transport import GitHubTransport, RemoteTransportError, CandidateIntegrityError
+from .validation import fingerprint, check_source, approved_verification_plan, approved_acceptance_plan, reject_retired_wp_identifiers, RemoteRequestError
 from .reuse import load_approved_candidates, approve_reuse
 from .candidate_policy import (
     REVIEW_STATUS, VERIFIED_STATUSES, candidate_accepted, evidence_digest, validate_candidate_evidence,
@@ -22,22 +21,9 @@ from ai_commerce.engineering.runner import (
     validate_max_repair_rounds, _snapshot, _provider_problem, _outside_scope,
 )
 from ai_commerce.engineering.git import git_argv, resolve_git_executable
-from ai_commerce.engineering.git_byte_consistency import (GitByteConsistencyError, checkout_diagnostics as _checkout_diagnostics)
+from ai_commerce.engineering.git_byte_consistency import (GitByteConsistencyError, checkout_diagnostics)
 from ai_commerce.engineering.minimum_test import Evidence, file_hashes
-from ai_commerce.engineering.profile import diagnose_failure
 from ai_commerce.engineering.source_safety import checked_path, protected_change, ordinary_scope_drift
-
-
-def checkout_diagnostics(repo: Path, *, refresh_index=False, git_executable=None) -> dict:
-    """Keep source identity inside the existing native checkout boundary."""
-    details = _checkout_diagnostics(repo, refresh_index=refresh_index, git_executable=git_executable)
-    if details["clean"]:
-        head = subprocess.run(git_argv(repo, "rev-parse", "HEAD", executable=git_executable),
-            capture_output=True, text=True, encoding="utf-8", errors="strict", check=False, timeout=30)
-        if head.returncode or not re.fullmatch(r"[0-9a-f]{40}", head.stdout.strip()):
-            raise GitByteConsistencyError("GIT_SOURCE_IDENTITY_UNPROVEN")
-        details["git_head_after"] = head.stdout.strip()
-    return details
 
 
 def _verified_receipt_evidence(report: dict, *, root: Path, workspace: Path,
@@ -108,9 +94,6 @@ def _verified_receipt_evidence(report: dict, *, root: Path, workspace: Path,
         return rejected("RECEIPT_EVIDENCE_UNAVAILABLE")
 
 
-_verified_ef01_proof = _verified_receipt_evidence
-
-
 def _fresh_aggregate_evidence(report: dict, *, root: Path, workspace: Path,
                               source_sha: str, sources: list[str], argv: list[str]) -> bool:
     """Validate immutable executed proof against the actual combined worktree."""
@@ -151,8 +134,7 @@ def _safe_child_env(checkout: Path) -> dict[str, str]:
     for name in tuple(env):
         if name in ("GITHUB_TOKEN", "GH_TOKEN", "ACTIONS_RUNTIME_TOKEN",
                     "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL") or (
-                    name.startswith("EF02_") and "TOKEN" in name or
-                    name.startswith("AI_COMMERCE_EF02_OWNER_")):
+                    name.startswith("EF02_") and "TOKEN" in name):
             env.pop(name, None)
     env["PYTHONPATH"] = str(checkout / "src")
     return env
@@ -184,16 +166,11 @@ def _classify_failed_executor(report: dict, evidence: Path) -> str:
 
 class LocalBatchWorker:
     def __init__(self, *, checkout: Path, batch: dict, profiles: dict[str, list[str]],
-                 github: GitHubTransport, root: Path | None = None, git_executable: str | None = None,
-                 issue_number: int = 0, issuer_login: str | None = None):
+                 github: GitHubTransport, root: Path | None = None, git_executable: str | None = None):
         self.checkout = checkout.resolve()
         self.batch = batch
         self.profiles = profiles
         self.github = github
-        self.issue_number = issue_number
-        if issuer_login is not None and not GitHubTransport._valid_issuer_login(issuer_login):
-            raise RemoteTransportError("WORK_INDEX_ISSUER_INVALID")
-        self.issuer_login = issuer_login
         configured_git = git_executable if git_executable is not None else os.environ.get("AI_COMMERCE_GIT_EXECUTABLE")
         self.git_executable = resolve_git_executable(configured_git) if configured_git is not None else None
         self.root = (root or (self.checkout / ".local" / "ef02" / batch["batch_id"])).resolve()
@@ -202,47 +179,6 @@ class LocalBatchWorker:
             self.checkout / ".github" / "ef02" / "approved-candidates.v1.json")
         check_source(self.checkout, batch["source_sha"],
                      **({"git_executable": self.git_executable} if self.git_executable is not None else {}))
-        self._dispatch_strict_ac = True
-
-    def reconcile_action(self, action: dict) -> dict:
-        submitted = {k: v for k, v in action.items() if k != "resolved_dependencies"}
-        identity = WorkOwner.identity(self.github, self.issue_number, self.batch, submitted)
-        return WorkOwner(self.github, identity, "").reconcile()
-
-    def audit_action(self, action: dict, *, read_budget=192, diagnostics=None,
-            effect_witness=None, witness_enrollment=None, witness_context=None,
-            witness_verifier=None, source_contract_fixture=False) -> dict:
-        """Explicit source-only entrypoint; never routes through execute/claim."""
-        submitted = {k: v for k, v in action.items() if k != "resolved_dependencies"}
-        return WorkOwnerAudit.run(self.github, issue_number=self.issue_number,
-            batch=self.batch, action=submitted, trusted_issuer=self.issuer_login,
-            read_budget=read_budget, diagnostics=diagnostics, effect_witness=effect_witness,
-            witness_enrollment=witness_enrollment, witness_context=witness_context,
-            witness_verifier=witness_verifier, source_contract_fixture=source_contract_fixture).payload()
-
-
-    def independent_reconciliation_action(
-            self, action: dict, *, read_budget=192, diagnostics=None) -> dict:
-        """EPWO #656: source-only recovery checklist; never acquire/execute."""
-        from .transport import work_owner_independent_reconciliation
-        submitted = {k: v for k, v in action.items()
-                     if k != "resolved_dependencies"}
-        source_audit = WorkOwnerAudit.run(
-            self.github, issue_number=self.issue_number, batch=self.batch,
-            action=submitted, trusted_issuer=self.issuer_login,
-            read_budget=read_budget, diagnostics=diagnostics)
-        return work_owner_independent_reconciliation(source_audit)
-
-    def witness_bridge(self, action, request, *, enrollment=None, context=None,
-            ssh_keygen=None, ledger=None, source_contract_fixture=False, read_budget=192):
-        """Owner-configured read source; frame identifiers supply no authority."""
-        from .transport import WorkOwnerWitnessSource, work_owner_witness_bridge
-        submitted = {k: v for k, v in action.items() if k != "resolved_dependencies"}
-        source = WorkOwnerWitnessSource(self.github, self.issue_number, self.batch,
-                                       submitted, self.issuer_login, read_budget)
-        return work_owner_witness_bridge(request, source=source, enrollment=enrollment,
-            context=context, ssh_keygen=ssh_keygen, ledger=ledger,
-            source_contract_fixture=source_contract_fixture)
 
     def execute_action(self, action: dict) -> dict:
         """One independent action; claim precedes any executor invocation."""
@@ -265,9 +201,6 @@ class LocalBatchWorker:
                    "dependency_semantics": "PINNED_DEPENDENCY_TREE_COMPOSITION",
                    "evidence_path": str(path), "executor_invoked": False}
         def finish():
-            outcome["replay_authorized"] = False
-            diagnosis = diagnose_failure(outcome)
-            outcome["failure_diagnosis"] = diagnosis.payload() if diagnosis else None
             _write_json(path / "action_result.json", outcome)
             return outcome
         try:
@@ -278,19 +211,13 @@ class LocalBatchWorker:
                            diagnostic=str(exc))
             return finish()
         outcome["max_repair_rounds"] = repair_limit
-        preflight_acceptance = None
-        # Direct real worker calls enforce the same gate before GitHub index or
-        # Create-only claim. Unit-only object.__new__ fault fixtures remain scoped
-        # to claim/transport tests and cannot prove production admission.
-        if getattr(self, "_dispatch_strict_ac", False):
-            try:
-                reject_retired_wp_identifiers(self.batch, submitted_action)
-                preflight_acceptance = require_preexecutor_acceptance(
-                    submitted_action, source_closure=True)
-            except RemoteRequestError as exc:
-                outcome.update(status="INVALID_ACTION", error_code=str(exc),
-                               executor_invoked=False)
-                return finish()
+        # Security retirement gate only: prevents old WP IDs reaching GitHub claim/provider.
+        try:
+            reject_retired_wp_identifiers(self.batch, submitted_action)
+        except RemoteRequestError as exc:
+            outcome.update(status="INVALID_ACTION", error_code=str(exc),
+                           executor_invoked=False)
+            return finish()
         if action.get("reuse_candidate") is not None:
             if action["depends_on"]:
                 outcome.update(status="UNPROVEN", error_code="AGGREGATE_REQUIRES_FRESH_VERIFICATION",
@@ -323,17 +250,6 @@ class LocalBatchWorker:
                                reused=True, reused_verified=False)
             return finish()
         try:
-            explicit_issuer = getattr(self, "issuer_login", None)
-            if explicit_issuer is not None and not GitHubTransport._valid_issuer_login(explicit_issuer):
-                raise RemoteTransportError("WORK_INDEX_ISSUER_INVALID")
-            issue_num = getattr(self, "issue_number", 0)
-            if issue_num > 0:
-                if not hasattr(self.github, "index_attempt"):
-                    raise RemoteTransportError("WORK_INDEX_TRANSPORT_UNAVAILABLE")
-                outcome["attempt_index_ref"] = self.github.index_attempt(
-                    issue_number=issue_num, source_sha=source, attempt_id=attempt_id,
-                    fingerprint=fp, issuer=explicit_issuer)
-            # The existing GitHub create-only claim is the sole fresh attempt key.
             claim = self.github.claim(source_sha=source, attempt_id=attempt_id, fingerprint=fp)
             outcome["claim_status"] = claim
             if claim != "CLAIMED":
@@ -341,12 +257,8 @@ class LocalBatchWorker:
                 outcome["error_code"] = claim
                 return finish()
         except Exception as exc:
-            # Preserve bounded native index/claim diagnostics without leaking
-            # arbitrary provider output. The old WP owner no longer masks failures.
-            error_code = (str(exc)[:160] if isinstance(exc, RemoteTransportError)
-                          and str(exc) else type(exc).__name__)
-            outcome.update(status="CLAIM_UNAVAILABLE", error_code=error_code,
-                           diagnostic=error_code, replay_authorized=False)
+            outcome.update(status="CLAIM_UNAVAILABLE", error_code=type(exc).__name__,
+                           diagnostic=str(exc))
             return finish()
         effective = source
         try:
@@ -412,17 +324,11 @@ class LocalBatchWorker:
                                 "index_refresh_exit": checkout["index_refresh_exit"]},
                     provider_invocation_proven=False)
                 return finish()
-            outcome["source_preflight"] = {"expected_source_sha": effective,
-                "observed_source_sha": checkout.get("git_head_after"), "proves_pass": False}
-            if "git_head_after" in checkout and checkout["git_head_after"] != effective:
-                outcome.update(status="SOURCE_WORKTREE_FAILED", error_code="SOURCE_PREFLIGHT_MISMATCH",
-                               provider_invocation_proven=False)
-                return finish()
             if action.get("verification_intent") == "HUMAN_FULL" and self.batch.get("actor") != "HUMAN":
                 outcome.update(status="INVALID_ACTION", error_code="UNAUTHORIZED_HUMAN_FULL")
                 return finish()
             plan = approved_verification_plan(action, self.profiles)
-            acceptance = preflight_acceptance or approved_acceptance_plan(submitted_action)
+            acceptance = approved_acceptance_plan(submitted_action)
             plan["acceptance"] = acceptance
             outcome["mt01_acceptance"] = acceptance
             outcome["verification_plan"] = plan
@@ -504,10 +410,8 @@ class LocalBatchWorker:
                          "pre_spawn_remote_ref": remote_stage,
                          "remote_confirmation_observed_at": time.time()})
             # Never pass GitHub credentials into untrusted model/verification process.
-            child_env = _safe_child_env(self.checkout)
-            child = subprocess.Popen(argv, cwd=self.checkout, env=child_env,
-                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                     encoding="utf-8", errors="replace")
+            child = subprocess.Popen(argv, cwd=self.checkout, env=_safe_child_env(self.checkout),
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             outcome.update(executor_invoked=True, process_id=child.pid,
                            process_started_at=started)
             # This records an EF01 process PID, not proof that EF01 launched or
@@ -541,7 +445,7 @@ class LocalBatchWorker:
                 stdout, stderr = child.communicate(timeout=7500)
             except subprocess.TimeoutExpired:
                 child.kill()
-                stdout, stderr = child.communicate(timeout=30)
+                stdout, stderr = child.communicate()
                 timed_out = True
                 outcome.update(status="EXECUTION_UNKNOWN",
                                error_code="EF01_PROCESS_TIMEOUT")
@@ -584,8 +488,6 @@ class LocalBatchWorker:
             outcome["workers_actual_by_group"] = report.get("workers_actual_by_group")
             outcome["worker_count_provenance"] = report.get("worker_count_provenance")
             outcome["minimum_test"] = report.get("minimum_test")
-            outcome["hypothesis_trail"] = report.get("hypothesis_trail", [])[-4:]
-            outcome["ef01_failure_diagnosis"] = report.get("failure_diagnosis")
             # Trust neither a success-shaped receipt after a nonzero process
             # exit nor an EF01 PASS receipt contradicted by verification.
             # Both cases can arise when the EF01 process dies after writing
@@ -698,35 +600,9 @@ class LocalBatchWorker:
             })
             outcome.update(candidate_evidence=evidence, candidate_evidence_sha256=evidence_digest(evidence))
             try:
-                invocations = report.get("invocations", [])
-                if (not invocations or any(
-                        inv.get("work_id") != self.batch["batch_id"] + ":" + aid or
-                        inv.get("attempt_id") != attempt_id or
-                        inv.get("source_base_sha") != effective or
-                        inv.get("invocation_id") != f"{attempt_id}:invocation-{index:03d}" or
-                        inv.get("repair_round") != index or
-                        inv.get("provider_return_determinate") is not True or
-                        inv.get("verify_completed") is not True
-                        for index, inv in enumerate(invocations))):
-                    raise CandidateIntegrityError("EF01_PROVIDER_RECEIPT_MISMATCH")
-                # Independently compare each invocation to EF01's immutable
-                # per-round on-disk receipt. Report-only field tampering must
-                # not turn a failed or altered invocation into a candidate.
-                for index, invocation in enumerate(invocations):
-                    relative = f"invocations/{index:03d}/invocation_result.json"
-                    if invocation.get("result_file") != relative:
-                        raise CandidateIntegrityError("EF01_PROVIDER_RECEIPT_MISMATCH")
-                    try:
-                        per_round = json.loads(
-                            checked_path(efdir, relative).read_text(encoding="utf-8"))
-                    except (OSError, ValueError, TypeError, KeyError):
-                        raise CandidateIntegrityError("EF01_PROVIDER_RECEIPT_MISMATCH") from None
-                    if per_round != invocation:
-                        raise CandidateIntegrityError("EF01_PROVIDER_RECEIPT_MISMATCH")
-                self.github.verify_claim_publication(evidence)
-                candidate = self.github.candidate(
-                    source_sha=effective, attempt_id=attempt_id, workspace=worktree,
-                    paths=changed, expected_hashes=hashes, evidence=evidence)
+                candidate = self.github.candidate(source_sha=effective, attempt_id=attempt_id,
+                                                  workspace=worktree, paths=changed,
+                                                  expected_hashes=hashes, evidence=evidence)
             except GitByteConsistencyError as exc:
                 outcome.update(status="CANDIDATE_INTEGRITY_FAILED",
                                error_code=str(exc).split(":", 1)[0], diagnostic=str(exc))

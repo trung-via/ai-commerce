@@ -58,19 +58,14 @@ jobs:
             const { data } = await github.rest.issues.get({
               owner: context.repo.owner, repo: context.repo.repo, issue_number: n
             });
-            if (data.pull_request || data.state !== 'open' || !data.title.startsWith('[EF02]')) {
+            if (data.pull_request || data.state !== 'open' ||
+                !data.title.startsWith('[EF02]') ||
+                /\b(?:EPWO|WP0[1-6])\b/i.test(data.title)) {
               core.setFailed('EF02_ISSUE_NOT_APPROVED');
               return;
             }
             if (!data.body) {
               core.setFailed('EF02_ISSUE_BODY_EMPTY');
-              return;
-            }
-            // Human 2026-11-11: WP/EPWO program retired, block issue and dispatch entrypoints.
-            // Detect source-registered program IDs only; unrelated EF02/BQ/WH continue normally.
-            if (/\b(?:EPWO|WP0[1-6])\b/i.test(data.title) ||
-                /"(?:batch_id|action_id|attempt_id)"\s*:\s*"[^"]*(?:EPWO|WP0[1-6])[^"]*"/i.test(data.body)) {
-              core.setFailed('RETIRED_WP_NOT_DISPATCHABLE');
               return;
             }
             fs.writeFileSync('request.json', data.body, { encoding: 'utf8', flag: 'wx' });

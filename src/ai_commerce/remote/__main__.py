@@ -7,8 +7,8 @@ import sys
 import time
 from pathlib import Path
 from .validation import (RemoteRequestError, validate_batch, verify_registry,
-                         check_source, require_preexecutor_acceptance)
-from .transport import GitHubTransport, WorkOwner
+                         check_source)
+from .transport import GitHubTransport
 from .worker import LocalBatchWorker, _write_json
 from .reuse import load_approved_candidates
 from .scheduler import run_schedule
@@ -18,7 +18,7 @@ from .local_completion_handoff import start_worker_signal
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m ai_commerce.remote")
-    parser.add_argument("command", choices=["validate", "run", "reconcile"])
+    parser.add_argument("command", choices=["validate", "run"])
     parser.add_argument("--request-file", type=Path, required=True)
     parser.add_argument("--checkout", type=Path, default=Path("."))
     parser.add_argument("--issuer-login", required=True)
@@ -39,15 +39,9 @@ def main(argv: list[str] | None = None) -> int:
                                registry=profiles, issuer_login=args.issuer_login,
                                owner_login=args.owner_login,
                                brain_issuers=tuple(v.strip() for v in
-                                                   args.brain_issuers.split(",") if v.strip()),
-                               strict_ac=args.command != "reconcile")
+                                                   args.brain_issuers.split(",") if v.strip()))
         check_source(checkout, batch["source_sha"],
                      **({"git_executable": args.git_bin} if args.git_bin is not None else {}))
-        # Hosted validation and self-host execution must agree before claim.
-        # Historical read-only reconciliation must remain available.
-        if args.command != "reconcile":
-            for action in batch["actions"]:
-                require_preexecutor_acceptance(action, source_closure=True)
     except Exception as exc:
         print("EF02_REQUEST_REJECTED: " + type(exc).__name__ + ": " + str(exc),
               file=sys.stderr)
@@ -60,17 +54,8 @@ def main(argv: list[str] | None = None) -> int:
         token = os.environ.get("GITHUB_TOKEN", "")
         repo = os.environ.get("GITHUB_REPOSITORY", "")
         github = GitHubTransport(repo, token)
-        if args.command == "reconcile":
-            actions = []
-            for action in batch["actions"]:
-                identity = WorkOwner.identity(github, args.issue_number, batch, action)
-                actions.append(WorkOwner(github, identity, "").reconcile())
-            print(json.dumps({"batch_id": batch["batch_id"], "read_only": True, "actions": actions}))
-            return 0
         worker = LocalBatchWorker(checkout=checkout, batch=batch, profiles=profiles,
-                                  github=github, issue_number=args.issue_number,
-                                  issuer_login=args.issuer_login,
-                                  **({"git_executable": args.git_bin} if args.git_bin is not None else {}))
+                                  github=github, **({"git_executable": args.git_bin} if args.git_bin is not None else {}))
         host_slots = int(os.environ.get("EF02_HOST_SLOTS", "2"))
         if host_slots < 1 or host_slots > 128:
             raise ValueError("EF02_HOST_SLOTS must be in 1..128")

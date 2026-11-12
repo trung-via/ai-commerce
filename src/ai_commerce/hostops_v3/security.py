@@ -11,18 +11,6 @@ import time
 from .contract import CONTROL_REPOSITORY, SOURCE_REPOSITORY, decode, deny, digest, ident, sha, shape, text
 
 
-def admit_work_owner_ledger_path(path, *, private_root=None):
-    """Fail before SQLite opens any native pathname.
-
-    Python's SQLite VFS opens the database and its journal/WAL/SHM by name.
-    A leaf lstat, SID match or directory ACL check cannot bind those opens to
-    inspected handles. No reviewed native VFS/custody policy exists here.
-    This gate deliberately performs NO open, mkdir, ACL change or link walk.
-    Even an apparently owned new path must HOLD until that gap is closed.
-    """
-    deny("SOURCE_ONLY_HOLD_LEDGER_CUSTODY_UNPROVEN")
-
-
 def prefer_readable_pwsh_path():
     """Resolve pwsh only when explicitly called; never modify process PATH.
 

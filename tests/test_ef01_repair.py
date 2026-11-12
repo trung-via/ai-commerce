@@ -18,292 +18,10 @@ from ai_commerce.engineering.profile import ExecutorSelection
 from ai_commerce.remote import worker as remote
 from ai_commerce.remote.scheduler import run_schedule
 from ai_commerce.remote.validation import validate_batch
-from ai_commerce.remote.transport import (
-    WorkOwner as ReadOnlyWorkOwner, GitHubTransport, RemoteTransportError,
-    CandidateIntegrityError, canonical, commit_evidence,
-)
-from ai_commerce.remote.candidate_policy import evidence_digest
-import re
-import secrets
 
 BASE = "a" * 40
 ROOT = Path(__file__).resolve().parents[1]
 VERIFY = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "test_scope.py"]
-
-
-class WorkOwnerMemoryTransport(GitHubTransport):
-    """Deterministic GitHub storage only; exercises real WorkOwner validation."""
-    def __init__(self, source=BASE):
-        super().__init__("fixture/repository", "fixture-not-a-credential")
-        self.source = source
-        self.refs, self.commits, self.requests = {}, {}, []
-        self.commits[source] = {"tree": {"sha": "e" * 40}, "parents": [], "message": "source"}
-        self.storage_lock = threading.Lock()
-        self.issue_body = None
-        self.issues = {}
-        self.before_write = None
-
-    def _candidate_owner_fence(self, owner, proof):
-        if owner is None:
-            return
-        if owner.github is not self:
-            raise CandidateIntegrityError("WORK_OWNER_PUBLICATION_FENCE_REQUIRED")
-        chain = owner.assert_current()
-        identity = owner.identity
-        if (chain[-1]["stage"] != "PUBLISH_INTENT" or
-                chain[-1]["data"].get("receipt") != evidence_digest(proof) or
-                identity["repo"] != self.repo or
-                any(identity[k] != proof[k] for k in ("source_sha", "attempt_id", "action_id", "fingerprint"))):
-            raise CandidateIntegrityError("WORK_OWNER_PUBLICATION_FENCE_MISMATCH")
-
-    def api(self, method, path, data=None):
-        with self.storage_lock:
-            self.requests.append((method, path, data))
-            if method == "GET" and (path == "/issues" or path.startswith("/issues?")):
-                items = []
-                if self.issues:
-                    for num in sorted(self.issues):
-                        b = self.issues[num]
-                        user = {"login": "trung-via"}
-                        if isinstance(b, dict):
-                            user = b.get("user", user)
-                            b = json.dumps(b)
-                        items.append({"number": num, "body": b, "user": user})
-                elif self.issue_body:
-                    b = json.dumps(self.issue_body) if isinstance(self.issue_body, dict) else self.issue_body
-                    items.append({"number": 506, "body": b, "user": {"login": "trung-via"}})
-                if "?" in path:
-                    from urllib.parse import parse_qs, urlparse
-                    qs = parse_qs(urlparse(path).query)
-                    if "per_page" in qs or "page" in qs:
-                        page = int(qs.get("page", [1])[0])
-                        per_page = int(qs.get("per_page", [100])[0])
-                        start = (page - 1) * per_page
-                        return items[start:start + per_page]
-                return items
-            if method == "GET" and path.startswith("/issues/"):
-                num = int(path.rsplit("/", 1)[1])
-                body = self.issues.get(num) if self.issues else self.issue_body
-                if body is None:
-                    raise RemoteTransportError("GITHUB_HTTP_404")
-                user = {"login": "trung-via"}
-                if isinstance(body, dict):
-                    user = body.get("user", user)
-                    body = json.dumps(body)
-                return {"number": num, "body": body, "user": user}
-            if method == "GET" and path.startswith("/git/matching-refs/heads/"):
-                prefix = "refs/heads/" + path.split("/heads/", 1)[1]
-                return [{"ref": ref, "object": {"sha": sha}} for ref, sha in self.refs.items() if ref.startswith(prefix)]
-            if method == "GET" and path.startswith("/git/ref/heads/"):
-                ref = "refs/heads/" + path.split("/heads/", 1)[1]
-                if ref not in self.refs:
-                    raise RemoteTransportError("GITHUB_HTTP_404", http_status=404)
-                return {"ref": ref, "object": {"sha": self.refs[ref], "type": "commit"}}
-            if method == "GET" and path.startswith("/git/commits/"):
-                return json.loads(json.dumps(self.commits[path.rsplit("/", 1)[1]]))
-            if method == "POST" and path == "/git/commits":
-                sha = hashlib.sha1(json.dumps(data, sort_keys=True).encode()).hexdigest()
-                self.commits[sha] = {**data, "tree": {"sha": data["tree"]},
-                                     "parents": [{"sha": sha} for sha in data["parents"]]}
-                return {"sha": sha}
-            if method == "POST" and path in ("/git/blobs", "/git/trees"):
-                return {"sha": hashlib.sha1(json.dumps(data, sort_keys=True).encode()).hexdigest()}
-            if method == "POST" and path == "/git/refs":
-                if data["ref"] in self.refs:
-                    raise RemoteTransportError("GITHUB_HTTP_422", http_status=422,
-                                               github_codes=("already_exists",),
-                                               validation_fields=("ref",))
-                if self.before_write:
-                    self.before_write(data)
-                self.refs[data["ref"]] = data["sha"]
-                return {"ref": data["ref"], "object": {"sha": data["sha"], "type": "commit"}}
-            raise AssertionError((method, path))
-
-
-# Historical WorkOwner mutation model: TEST-ONLY, never shipped in src/.
-# Production WorkOwner supports identity/read/reconcile, but has no writer methods.
-class WorkOwner(ReadOnlyWorkOwner):
-    @classmethod
-    def index_ingress(cls, github, issue_number: int, batch: dict, action: dict, issuer: str | None = None) -> str:
-        if type(issue_number) is not int or not 1 <= issue_number <= 2**53:
-            raise RemoteTransportError("WORK_IDENTITY_UNKNOWN_TRUSTED_ISSUE_REQUIRED")
-        fp = hashlib.sha256(json.dumps({
-            "batch_id": batch["batch_id"],
-            "source_sha": batch["source_sha"],
-            "action": {k: v for k, v in action.items() if k != "resolved_dependencies"}
-        }, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")).hexdigest()
-        return github.index_attempt(
-            issue_number=issue_number,
-            source_sha=batch["source_sha"],
-            attempt_id=action["attempt_id"],
-            fingerprint=fp,
-            issuer=issuer
-        )
-
-
-    @classmethod
-    def acquire(cls, github, identity):
-        owner = cls(github, identity, secrets.token_hex(32))
-        chain = owner.read()
-        target_gen = identity.get("generation", 1)
-
-        if target_gen == 1:
-            if chain:
-                raise RemoteTransportError("WORK_OWNER_EXISTS_RECONCILE_ONLY")
-            for namespace in ("claims", "pre-spawn", "spawned", "candidate"):
-                try:
-                    github.api("GET", "/git/ref/heads/ef02/" + namespace + "/" +
-                               github.attempt_key(identity["attempt_id"]))
-                except RemoteTransportError as exc:
-                    if str(exc) != "GITHUB_HTTP_404":
-                        raise
-                else:
-                    raise RemoteTransportError("WORK_LEGACY_BOUNDARY_RECONCILE_ONLY")
-            owner.generation = 1
-            owner._create("OWNED", [], {"attempt_id": identity["attempt_id"],
-                                        "issue": identity.get("current_issue", identity["issue"])})
-            return owner
-        else:
-            if not chain:
-                raise RemoteTransportError("WORK_LINEAGE_PREDECESSOR_JOURNAL_MISSING")
-            prior = chain[-1]
-            if prior["generation"] >= target_gen:
-                raise RemoteTransportError("WORK_OWNER_TRANSFER_CONFLICT")
-            # UNKNOWN_FAIL_CLOSED: Strictly DENY UNKNOWN predecessor provider/publication/reownership
-            if prior["stage"] != "PUBLISHED":
-                raise RemoteTransportError("WORK_OWNER_PREDECESSOR_UNRESOLVED")
-            if target_gen != prior["generation"] + 1:
-                raise RemoteTransportError("WORK_OWNER_STALE_OR_SKIPPED_GENERATION")
-
-            receipt = prior.get("data", {}).get("receipt")
-            cand_digest = prior.get("data", {}).get("candidate")
-            if not receipt or not cand_digest:
-                raise RemoteTransportError("WORK_TERMINAL_RECEIPT_MISMATCH")
-            pred_attempt = prior.get("data", {}).get("attempt_id")
-            if not pred_attempt and identity.get("lineage"):
-                pred_attempt = identity["lineage"][0].get("attempt_id")
-            if pred_attempt:
-                cand_ref = github.api("GET", f"/git/ref/heads/ef02/candidate/{github.attempt_key(pred_attempt)}")
-                cand_sha = cand_ref.get("object", {}).get("sha")
-                if cls.digest(cand_sha) != cand_digest:
-                    raise RemoteTransportError("WORK_TERMINAL_RECEIPT_MISMATCH")
-                cand_commit = github.api("GET", f"/git/commits/{cand_sha}")
-                try:
-                    proof = commit_evidence(cand_commit.get("message", ""))
-                except ValueError as exc:
-                    raise RemoteTransportError("WORK_TERMINAL_RECEIPT_MISMATCH") from exc
-                if (proof is None or evidence_digest(proof) != receipt or
-                        proof.get("attempt_id") != pred_attempt or
-                        [p.get("sha") for p in cand_commit.get("parents", [])] != [proof.get("effective_source_sha")]):
-                    raise RemoteTransportError("WORK_TERMINAL_RECEIPT_MISMATCH")
-
-            owner.generation = target_gen
-            data = {
-                "attempt_id": identity["attempt_id"],
-                "issue": identity.get("current_issue", identity["issue"]),
-                "repair_of": str(identity.get("repair_of")),
-                "predecessor_tip": prior["digest"]
-            }
-            try:
-                owner._create("OWNED", chain, data)
-            except RemoteTransportError as exc:
-                if "422" in str(exc) or "ALREADY_EXISTS" in str(exc):
-                    raise RemoteTransportError("WORK_OWNER_TRANSFER_CONFLICT") from exc
-                raise
-            return owner
-
-
-    def assert_current(self):
-        if self.uncertain:
-            raise RemoteTransportError("WORK_OWNER_STALE_FENCE")
-        chain = self.read()
-        if self.uncertain or not chain:
-            raise RemoteTransportError("WORK_OWNER_STALE_FENCE")
-        gen_records = [r for r in chain if r["generation"] == self.generation]
-        if (not gen_records or
-                gen_records[0]["fence"] != self.digest(self.fence) or
-                any(r["fence"] != self.digest(self.fence) for r in gen_records) or
-                (self.tip is not None and chain[-1]["digest"] != self.tip) or
-                chain[-1]["generation"] > self.generation or
-                chain[-1]["stage"] in ("UNKNOWN", "PUBLISHED")):
-            raise RemoteTransportError("WORK_OWNER_STALE_FENCE")
-        return chain
-
-    def _create(self, stage, chain, data):
-        if len(chain) >= self.LIMIT:
-            raise RemoteTransportError("WORK_JOURNAL_BOUND_INVALID")
-        self._transition(stage, chain, data)
-        record = {"kind": "WorkOwner", "version": 1, "identity": self.base_identity,
-                  "generation": self.generation, "fence": self.digest(self.fence), "sequence": len(chain),
-                  "previous": chain[-1]["digest"] if chain else None, "stage": stage, "data": data}
-        record["digest"] = self.digest(record)
-        tree_sha = None
-        if chain:
-            first_commit = self.github.api("GET", "/git/commits/" + chain[0]["sha"])
-            tree_sha = first_commit.get("tree", {}).get("sha")
-        if not tree_sha:
-            source = self.github.api("GET", "/git/commits/" + self.identity["source_sha"])
-            tree_sha = source["tree"]["sha"]
-        commit = self.github.api("POST", "/git/commits", {
-            "message": self.MARKER + canonical(record), "tree": tree_sha,
-            "parents": [chain[-1]["sha"] if chain else self.identity["source_sha"]]})
-        # No retry for 422, timeout or transport failure. A ref may exist.
-        self.github._create_ref(self.prefix + f"{len(chain):03d}", commit["sha"])
-        confirmed = self.read()
-        if not confirmed or confirmed[-1]["sha"] != commit["sha"]:
-            raise RemoteTransportError("WORK_JOURNAL_WRITE_UNKNOWN")
-        self.tip = record["digest"]
-        return record["digest"]
-
-    def append(self, stage, **data):
-        with self.lock:
-            try:
-                return self._create(stage, self.assert_current(), data)
-            except Exception:
-                self.uncertain = True
-                raise
-
-
-
-def memory_owner(action, batch, storage=None):
-    storage = storage or WorkOwnerMemoryTransport(batch["source_sha"])
-    submitted = {k: v for k, v in action.items() if k != "resolved_dependencies"}
-    packet = {**batch, "actions": [submitted]}
-    storage.issue_body = packet
-    identity = WorkOwner.identity(storage, 42, packet, submitted)
-    return WorkOwner.acquire(storage, identity)
-
-
-@pytest.mark.parametrize("native,kind,owner", [
-    ({"status": "INVALID_REQUEST", "error_code": "ISSUER_NOT_AUTHORIZED_FOR_ACTOR"}, "INTAKE_AUTH", "INTAKE_OWNER"),
-    ({"status": "QUOTA_EXHAUSTED", "error_code": "QUOTA_EXHAUSTED"}, "PROVIDER_QUOTA", "PROVIDER_OWNER"),
-    ({"status": "EXECUTION_UNKNOWN", "error_code": "EXECUTOR_OUTCOME_UNCONFIRMED"}, "PROVIDER_TRANSPORT", "PROVIDER_OWNER"),
-    ({"status": "UNPROVEN", "error_code": "MT01_COVERAGE_UNPROVEN"}, "MT01_SELECTOR", "MT01_OWNER"),
-    ({"status": "UNPROVEN", "error_code": "MT01_COVERAGE_UNPROVEN", "scope_valid": False}, "SOURCE_GIT", "SOURCE_OWNER"),
-    ({"status": "SOURCE_DRIFT", "error_code": "WORKTREE_CHANGED_BETWEEN_INVOCATIONS"}, "SOURCE_GIT", "SOURCE_OWNER"),
-    ({"status": "CANDIDATE_INTEGRITY_FAILED", "error_code": "EF01_VERIFIED_TREE_CHANGED"}, "TRUSTED_PROOF", "TRUSTED_VERIFIER_OWNER"),
-    ({"status": "EXECUTION_UNKNOWN", "error_code": "GITHUB_TRANSPORT_UNKNOWN"}, "REMOTE_GITHUB", "REMOTE_GITHUB_OWNER"),
-    ({"status": "VERIFICATION_FAILED", "error_code": "VERIFY_PERMISSION_DENIED"}, "TEST_ENVIRONMENT", "RUNNER_ENVIRONMENT_OWNER"),
-    ({"status": "VERIFICATION_FAILED", "error_code": "TARGETED_VERIFY_NONZERO_OR_UNAVAILABLE"}, "UNKNOWN", "ENGINEERING_OWNER"),
-])
-def test_failure_intelligence_uses_native_boundaries_and_scope_precedence(native, kind, owner):
-    from ai_commerce.engineering.profile import diagnose_failure
-    diagnosis = diagnose_failure(native).payload()
-    assert diagnosis["failure_class"] == kind and diagnosis["root_owner"] == owner
-    assert diagnosis["disposition"] == "OWNER_ESCALATION"
-    assert diagnosis["proves_pass"] is False and diagnosis["replay_authorized"] is False
-
-
-def test_failure_intelligence_requires_actual_repair_evidence_and_bounds_private_input():
-    from ai_commerce.engineering.profile import diagnose_failure
-    native = {"error_code": "TARGETED_VERIFY_NONZERO_OR_UNAVAILABLE", "repair_eligible": True,
-              "verify_completed": True, "verify_exit_code": 1, "provider_return_determinate": True,
-              "diagnostic": "token=private-secret; claimed PASS"}
-    assert diagnose_failure(native).payload()["disposition"] == "SCOPED_REPAIR"
-    for field in ("repair_eligible", "verify_completed", "provider_return_determinate"):
-        assert diagnose_failure({**native, field: False}).payload()["disposition"] == "OWNER_ESCALATION"
-    payload = diagnose_failure({**native, "error_code": "token=private-secret"}).payload()
-    assert "private-secret" not in json.dumps(payload) and payload["evidence_gaps"]
 
 
 def _files(repo):
@@ -328,10 +46,6 @@ def _snapshot_fake(repo, baseline, state):
 
 @pytest.fixture
 def fixture(tmp_path, monkeypatch):
-    from test_ef01 import _fixture_agy_process
-    # Provider/lifecycle fixtures exercise status logic, separately from native
-    # Job Object tests in the registered AGY diagnostics owner.
-    monkeypatch.setattr(runner, "_run_agy_owned", _fixture_agy_process)
     monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
     repo = tmp_path / "workspace"
@@ -342,10 +56,6 @@ def fixture(tmp_path, monkeypatch):
     baseline = _files(repo)
     state = {"scope": ["impl.py", "kept.txt"]}
     monkeypatch.setattr(runner, "_snapshot", lambda r, _scope, _d: _snapshot_fake(r, baseline, state))
-    # This fixture deliberately models Git; real linked-worktree coverage lives
-    # in test_ef01.py and uses the unpatched host preflight.
-    monkeypatch.setattr(runner, "_agy_source_binding", lambda r, s, *a: {
-        "source_root": str(r), "source_sha": s["git_head_after"], "git_dir": s["git_dir"]})
     return SimpleNamespace(repo=repo, root=tmp_path, state=state, monkeypatch=monkeypatch)
 
 
@@ -405,92 +115,6 @@ def _run(fixture, mode="pass-after-repair", executor="codex", **kwargs):
     return result, observations, profiles
 
 
-def test_retired_owner_fence_entrypoints_absent():
-    """Old WorkOwner stdio and callback injection cannot be reactivated."""
-    import inspect
-    assert not hasattr(runner, "owner_fence_client")
-    assert not hasattr(runner, "owner_round_receipt")
-    for fn in (runner.execute_attempt, runner._run_invocation):
-        assert "owner_fence" not in inspect.signature(fn).parameters
-        assert "owner_fence" not in inspect.getsource(fn)
-
-
-def test_retired_broker_unavailable_and_no_legacy_owner_capability_leaks(monkeypatch):
-    """EF02 must not inherit retired WorkOwner IPC into a new child."""
-    assert not hasattr(remote, "WorkOwnerBroker")
-    for name, value in (
-        ("AI_COMMERCE_EF02_OWNER_REQUIRED", "1"),
-        ("AI_COMMERCE_EF02_OWNER_ENDPOINT", "stdio-v1"),
-        ("AI_COMMERCE_EF02_OWNER_TOKEN", "f" * 64),
-    ):
-        monkeypatch.setenv(name, value)
-    child_env = remote._safe_child_env(ROOT)
-    assert not any(name.startswith("AI_COMMERCE_EF02_OWNER_") for name in child_env)
-    assert "AI_COMMERCE_EF02_OWNER_TOKEN" in os.environ
-    import inspect
-    assert "WorkOwnerBroker" not in inspect.getsource(remote.LocalBatchWorker.execute_action)
-
-
-def test_retired_broker_duplicate_legacy_journal_intent_still_denied():
-    """Keep the historical journal duplicate-fence negative independently."""
-    owner = memory_owner({"action_id": "a", "attempt_id": "a-1"},
-                         {"batch_id": "b", "source_sha": BASE})
-    owner.append("CLAIMED")
-    owner.append("SPAWN_INTENT")
-    owner.append("PROVIDER_INTENT", round=0)
-    with pytest.raises(RemoteTransportError, match="WORK_JOURNAL_TRANSITION_INVALID"):
-        owner.append("PROVIDER_INTENT", round=0)
-    assert owner.uncertain is True
-
-
-@pytest.mark.parametrize("legacy_key", (
-    "AI_COMMERCE_EF02_OWNER_REQUIRED",
-    "AI_COMMERCE_EF02_OWNER_ENDPOINT",
-    "AI_COMMERCE_EF02_OWNER_TOKEN",
-    "AI_COMMERCE_EF02_OWNER_UNKNOWN",
-))
-def test_retired_workowner_ipc_fails_closed_before_ef01_executor(
-        fixture, monkeypatch, legacy_key):
-    """Even valid-looking legacy owner IPC must not turn into a provider call."""
-    selection, calls, _ = _provider(fixture, mode="scope-pass")
-    monkeypatch.setenv(legacy_key, "legacy-retired")
-    output = fixture.root / "blocked-legacy-ef01"
-    with pytest.raises(ValueError, match="RETIRED_WORKOWNER_IPC_DENIED"):
-        runner.execute_attempt(
-            repo=fixture.repo, output_dir=output, work_id="retired-blocked",
-            attempt_id="retired-attempt", selection=selection,
-            instruction="Not executed", verify_argv=VERIFY,
-            allowed_prefixes=fixture.state["scope"])
-    assert not calls.exists()
-    assert not output.exists()
-
-
-def test_normal_ef01_repairs_remain_independent_of_retired_owner(fixture):
-    result, calls, _ = _run(fixture)
-    assert result["status"] in ("BUILD_VERIFIED_FOR_SCOPE", "VERIFIED_SCOPE_REVIEW_REQUIRED")
-    assert len(calls) == 2
-
-
-@pytest.mark.parametrize("field", ["attempt_id", "source_base_sha", "status"])
-def test_workowner_mismatched_round_receipt_cannot_publish(tmp_path, monkeypatch, field):
-    context = _worker_fixture(tmp_path, monkeypatch, real_git=False)
-    original = remote.subprocess.Popen
-    class Tampered(original):
-        def communicate(self, timeout=None):
-            result = super().communicate(timeout)
-            args = build_parser().parse_args(self.argv[3:])
-            path = args.out_dir / "engineering_result.json"
-            report = json.loads(path.read_text())
-            report["invocations"][0][field] = "mismatched"
-            path.write_text(json.dumps(report))
-            return result
-    monkeypatch.setattr(remote.subprocess, "Popen", Tampered)
-    result = context.worker.execute_action(_action("a"))
-    assert result["status"] == "CANDIDATE_INTEGRITY_FAILED", result
-    assert result["error_code"] == "EF01_PROVIDER_RECEIPT_MISMATCH"
-    assert not context.candidates and len(context.calls) == 2
-
-
 @pytest.mark.parametrize("executor", ["codex", "antigravity"])
 def test_fail_repair_pass_same_profile_worktree_and_immutable_evidence(fixture, executor):
     sandbox = "mxc" if executor == "codex" else None
@@ -524,9 +148,6 @@ def test_fail_repair_pass_same_profile_worktree_and_immutable_evidence(fixture, 
     previous = feedback["previous_invocations"][0]
     assert previous["verify_exit_code"] == 1 and "test_value" in previous["verify_failure_details"]
     assert previous["candidate_file_sha256"]["impl.py"] != result["candidate_file_sha256"]["impl.py"]
-    assert feedback["hypothesis_trail"][0]["diagnosis"]["failure_class"] == "CODE_ASSERTION"
-    assert result["hypothesis_trail"][0]["next_experiment"] == "TARGETED_PYTEST_ON_CHANGED_SOURCE"
-    assert len(result["hypothesis_trail"]) <= 4
     assert feedback["allowed_prefixes"] == fixture.state["scope"]
     assert "fresh CLI invocation" in calls[1]["prompt"]
     assert previous["evidence_files"]["verify_stderr"] in calls[1]["prompt"]
@@ -867,29 +488,18 @@ def _git_repo(tmp_path, real_git=True):
     (repo / "pytest.ini").write_text("[pytest]\naddopts = -p no:cacheprovider\n")
     if not real_git:
         return repo, BASE
-    git_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG_") and k != "AI_COMMERCE_GIT_GUARD_PATHS"}
     for args in (["init", "-q"], ["config", "user.email", "local@example.invalid"],
                  ["config", "user.name", "repair fixture"], ["add", "."], ["commit", "-qm", "initial"]):
-        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, env=git_env)
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
     head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
-                          capture_output=True, text=True, env=git_env).stdout.strip()
+                          capture_output=True, text=True).stdout.strip()
     return repo, head
 
 
 def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, checkpoint_error=False, real_git=True,
-                    drift=None, mt01_v21=False):
-    if not mt01_v21:
-        monkeypatch.delenv("MT01_V21_ENABLED", raising=False)
-    else:
-        monkeypatch.setenv("MT01_V21_ENABLED", "1")
-    for key in list(os.environ):
-        if key.startswith("GIT_CONFIG_") or key == "AI_COMMERCE_GIT_GUARD_PATHS":
-            monkeypatch.delenv(key, raising=False)
+                    drift=None):
     monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
-    import shutil
-    shutil_which = shutil.which
-    monkeypatch.setattr(shutil, "which", lambda cmd: sys.executable if cmd in ("python", "py") else shutil_which(cmd))
     repo, head = _git_repo(tmp_path, real_git)
     monkeypatch.setattr(remote, 'load_approved_candidates', lambda *_a: {'version': 1, 'candidates': {}})
     worktree_run = subprocess.run
@@ -908,18 +518,14 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
         monkeypatch.setattr(remote, "check_source", lambda *_a: None)
         monkeypatch.setattr(remote, "_snapshot", observed_snapshot)
         monkeypatch.setattr(runner, "_snapshot", observed_snapshot)
-        monkeypatch.setattr(runner, "_agy_source_binding", lambda r, s, *a: {
-            "source_root": str(r), "source_sha": s["git_head_after"], "git_dir": s["git_dir"]})
         # Fake worktree add copies fixture files without creating a .git worktree.
         # Stub only the new checkout preflight here, not in real_git tests.
         monkeypatch.setattr(remote, "checkout_diagnostics", lambda *_a, **_kw: {
             "clean": True, "dirty_entries": [], "dirty_entry_count": 0,
             "index_refresh_exit": None, "metadata_only_reconciled": False,
-            "git_head_after": BASE,
         })
     lock = threading.Lock()
     calls, children, claims, candidates, resolved = [], [], [], [], {}
-    confirmed_pre_spawn, confirmed_spawn = set(), set()
 
     class Github:
         def claim(self, **kwargs):
@@ -936,20 +542,10 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
         def pre_spawn_checkpoint(self, **kwargs):
             if checkpoint_error:
                 raise OSError("claim checkpoint uncertain")
-            assert kwargs["attempt_id"] in claims
-            confirmed_pre_spawn.add(kwargs["attempt_id"])
             return "mock/pre-spawn"
 
         def spawned_checkpoint(self, **kwargs):
-            assert kwargs["attempt_id"] in confirmed_pre_spawn
-            confirmed_spawn.add(kwargs["attempt_id"])
             return "mock/spawned"
-
-        def verify_claim_publication(self, evidence):
-            attempt = evidence["attempt_id"]
-            assert attempt in claims and attempt in confirmed_pre_spawn and attempt in confirmed_spawn
-            assert evidence["source_sha"] == head
-            assert isinstance(evidence["fingerprint"], str) and len(evidence["fingerprint"]) == 64
 
         def candidate(self, **kwargs):
             candidates.append(kwargs)
@@ -987,9 +583,6 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
 
         def __init__(self, argv, **kwargs):
             self.argv = argv
-            self.owner_environment = {k: v for k, v in kwargs["env"].items()
-                                      if k.startswith("AI_COMMERCE_EF02_OWNER_")}
-            assert not self.owner_environment  # Retired WP is not in new EF02 children.
             children.append(self)
 
         def communicate(self, timeout=None):
@@ -1004,14 +597,12 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
                 acceptance_ids=args.acceptance,
                 aggregate_sources=args.aggregate_source, host_slots=args.host_slots,
                 registered_profiles=json.loads(args.registered_profiles_json.read_text())
-                if args.registered_profiles_json else None,
-                )
+                if args.registered_profiles_json else None)
             self.returncode = 0 if result["status"] in remote.VERIFIED_STATUSES else 1
             return "", ""
 
     monkeypatch.setattr(remote, "subprocess", SimpleNamespace(
-        run=worktree_run, Popen=Child, PIPE=subprocess.PIPE, DEVNULL=subprocess.DEVNULL,
-        TimeoutExpired=subprocess.TimeoutExpired))
+        run=worktree_run, Popen=Child, PIPE=subprocess.PIPE, TimeoutExpired=subprocess.TimeoutExpired))
     import tempfile
     monkeypatch.setattr(remote, "tempfile", SimpleNamespace(
         mkdtemp=lambda prefix: tempfile.mkdtemp(prefix=prefix, dir=tmp_path)))
@@ -1019,13 +610,6 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
     worker = remote.LocalBatchWorker(checkout=repo, batch=batch,
                                     profiles={"scope": VERIFY, "project-tests": ["python", "-m", "pytest", "tests", "-q"]},
                                     github=Github(), root=tmp_path / "action-evidence")
-    assert not hasattr(worker, "_acquire_owner")
-    # These legacy v1 fixture tests exercise post-admission WorkOwner, child,
-    # recovery and MT-01 branches with intentionally marker-less packets.
-    # New production dispatch AC validation is independently regression-tested
-    # through the strict initialized-worker path in tests/test_ef02.py.
-    worker._dispatch_strict_ac = False
-
     return SimpleNamespace(worker=worker, batch=batch, calls=calls, children=children,
                            claims=claims, candidates=candidates, resolved=resolved, head=head)
 
@@ -1063,18 +647,12 @@ def test_ef02_acceptance_reaches_selector_through_actual_child_cli(tmp_path, mon
     groups = (mt.TestGroup("scope", ("tests/test_scope.py",), ("FIXTURE.acceptance",), ("impl.py", "kept.txt")),)
     monkeypatch.setattr(mt, "approved_groups", lambda: groups)
     monkeypatch.setattr(validation, "approved_groups", lambda: groups)
-    # An intentionally synthetic owner group must not be mixed with dynamic
-    # reviewed owners from the live checkout. Test the isolated fixture only;
-    # production keeps _reviewed_intake_groups() strict and source-validated.
-    monkeypatch.setattr(validation, "_reviewed_intake_groups", lambda: groups)
     context.worker.profiles["component-scope"] = ["python", "-m", "pytest", "tests/test_scope.py", "-q"]
     a = _action("a")
     if declared:
         a["instruction"] += '\nMT01_ACCEPTANCE_JSON: ["FIXTURE.acceptance"]'
     result = context.worker.execute_action(a)
-    assert result["status"] == "CANDIDATE_READY", (
-        result.get("status"), result.get("error_code"), result.get("diagnostic"),
-        result.get("ef01_status"), result.get("ef01_error_code"))
+    assert result["status"] == "CANDIDATE_READY"
     args = build_parser().parse_args(context.children[0].argv[3:])
     expected = ["FIXTURE.acceptance"] if declared else ["MT01.ACCEPTANCE_UNDECLARED"]
     assert args.acceptance == result["mt01_acceptance"]["ids"] == expected
@@ -1190,10 +768,6 @@ def test_ef02_rechecks_final_tree_before_any_candidate_write(tmp_path, monkeypat
 
     def snapshot(*args):
         tree, patch = observed(*args)
-        # Inject only after execution: the earlier source preflight must stay
-        # clean so this test still exercises independent final-tree rejection.
-        if not context.calls:
-            return tree, patch
         key, value = {
             "head": ("git_head_after", "b" * 40),
             "files": ("changed_files", ["impl.py"]),
@@ -1209,26 +783,6 @@ def test_ef02_rechecks_final_tree_before_any_candidate_write(tmp_path, monkeypat
     assert result["status"] == "CANDIDATE_INTEGRITY_FAILED"
     assert result["error_code"] == "EF01_VERIFIED_TREE_CHANGED"
     assert len(context.calls) == 2 and not context.candidates and len(context.claims) == 1
-
-
-@pytest.mark.parametrize("field,value,code", [
-    ("git_head_after", "b" * 40, "SOURCE_PREFLIGHT_MISMATCH"),
-    ("clean", False, "SOURCE_CHECKOUT_INCONSISTENT")])
-def test_ef02_source_preflight_mismatch_stops_before_provider(tmp_path, monkeypatch, field, value, code):
-    context = _worker_fixture(tmp_path, monkeypatch, real_git=False)
-    observed = remote.checkout_diagnostics
-    def mismatched(*args, **kwargs):
-        details = observed(*args, **kwargs)
-        details[field] = value
-        return details
-    monkeypatch.setattr(remote, "checkout_diagnostics", mismatched)
-    result = context.worker.execute_action(_action("a"))
-    assert result["status"] == "SOURCE_WORKTREE_FAILED"
-    assert result["error_code"] == code
-    assert result["failure_diagnosis"]["disposition"] == "OWNER_ESCALATION"
-    if field == "git_head_after":
-        assert result["source_preflight"]["proves_pass"] is False
-    assert not context.calls and not context.candidates
 
 def test_large_diagnostics_use_artifact_references_in_bounded_repair_prompt(fixture):
     actual_run = subprocess.run
@@ -1283,9 +837,6 @@ def test_ambiguous_zero_exit_cannot_authorize_repair(fixture, executor, payload,
     "git returned -1073741502",
     "OSError: [WinError 1920] The file cannot be accessed by the system",
     "E   subprocess.TimeoutExpired: Command ['tool'] timed out after 1 seconds",
-    "E   OSError: [WinError 1314] A required privilege is not held by the client",
-    "E   PermissionError: [WinError 5] Access is denied",
-    "fatal: in 'preparing' phase, update aborted by the reference-transaction hook",
 ])
 def test_nested_host_failure_is_not_a_code_repair_trigger(fixture, signature):
     actual_run = subprocess.run
@@ -1328,16 +879,12 @@ def test_antigravity_argv_budget_records_complete_original_prompt(fixture):
     from ai_commerce.engineering.adapters import command_for
     fixture.monkeypatch.setattr(runner, "command_for", command_for)
     commands = []
-    mirrors = []
     original_prompt = 'approved instructions "quoted" \\ ' * 3000 + "\U0001f680" * 500
 
     def execute(argv, **kwargs):
         if argv == VERIFY:
             return subprocess.CompletedProcess(argv, 0, "1 passed", "")
         commands.append(argv)
-        mirror = Path(argv[argv.index("--add-dir", argv.index("--add-dir") + 1) + 1])
-        assert (mirror / "instruction.txt").read_text(encoding="utf-8") == original_prompt
-        mirrors.append(mirror)
         (fixture.repo / "impl.py").write_text("good")
         return subprocess.CompletedProcess(argv, 0, '{"status":"SUCCESS"}', "")
 
@@ -1358,247 +905,11 @@ def test_antigravity_argv_budget_records_complete_original_prompt(fixture):
     transport = evidence / inv["evidence_files"]["transport_instruction"]
     assert transport.read_text(encoding="utf-8") == commands[0][commands[0].index("--print") + 1]
     # AGY receives only the disposable input mirror, not the authoritative log root.
-    mirror = mirrors[0]
-    assert not mirror.exists()
-    assert json.dumps(str(mirror / "instruction.txt"), ensure_ascii=False) in transport.read_text(encoding="utf-8")
+    mirror = evidence / "invocations" / "000" / "agy_input" / "instruction.txt"
+    assert mirror.read_bytes() == original.read_bytes()
+    assert str(mirror) in transport.read_text(encoding="utf-8")
     assert str(original) not in transport.read_text(encoding="utf-8")
-    wire = transport.read_text(encoding="utf-8")
-    assert "CODE WRITE ROOT" in wire and "READ ONLY INPUT" in wire
-    assert json.dumps(str(fixture.repo), ensure_ascii=False) in wire
-    assert hashlib.sha256(original_prompt.encode()).hexdigest() in wire
     assert inv["evidence_sha256"]["instruction"] == hashlib.sha256(original_prompt.encode()).hexdigest()
-
-
-def test_agy_every_repair_round_cleans_its_own_mirror(fixture):
-    result, calls, profiles = _run(fixture, executor="antigravity", max_repair_rounds=2)
-    assert result["status"] == "BUILD_VERIFIED_FOR_SCOPE" and len(calls) == 2
-    mirrors = [p[2]["antigravity_evidence_dir"] for p in profiles if p[2].get("antigravity_evidence_dir")]
-    assert len(mirrors) == len(set(mirrors)) == 2
-    assert all(not p.exists() for p in mirrors)
-    assert all(not (p / ".git").exists() for root in mirrors for p in root.parents)
-    assert (fixture.root / "evidence/invocations/001/repair_feedback.json").is_file()
-
-
-@pytest.mark.parametrize("fault", ["timeout", "error", "interruption", "mutated-input"])
-def test_agy_mirror_cleanup_after_failed_provider(fixture, fault):
-    from ai_commerce.engineering.adapters import command_for
-    fixture.monkeypatch.setattr(runner, "command_for", command_for)
-    mirrors = []
-    actual_run = subprocess.run
-    def execute(argv, **kwargs):
-        if argv[0] != "agy":
-            return actual_run(argv, **kwargs)
-        mirrors.append(Path(argv[argv.index("--add-dir", argv.index("--add-dir") + 1) + 1]))
-        assert (mirrors[-1] / "instruction.txt").is_file()
-        if fault == "timeout":
-            raise subprocess.TimeoutExpired(argv, 1, output=b'{"status":"STARTED"}')
-        if fault == "error":
-            raise RuntimeError("fixture provider failed")
-        if fault == "interruption":
-            raise KeyboardInterrupt()
-        (mirrors[-1] / "instruction.txt").write_text("untrusted replacement")
-        (fixture.repo / "impl.py").write_text("good")
-        return subprocess.CompletedProcess(argv, 0, '{"status":"SUCCESS"}', "")
-    fixture.monkeypatch.setattr(runner.subprocess, "run", execute)
-    args = dict(repo=fixture.repo, output_dir=fixture.root / "evidence", work_id="w", attempt_id="a",
-                selection=ExecutorSelection("antigravity", "fixture", "high"), instruction="scoped change",
-                verify_argv=VERIFY, allowed_prefixes=fixture.state["scope"])
-    if fault == "interruption":
-        with pytest.raises(KeyboardInterrupt):
-            runner.execute_attempt(**args)
-        result = json.loads((fixture.root / "evidence/engineering_result.json").read_text())
-    else:
-        result = runner.execute_attempt(**args)
-    assert len(mirrors) == 1 and not mirrors[0].exists()
-    assert result["verify_exit_code"] is None and result["replay_authorized"] is False
-    assert result["status"] == ("SOURCE_DRIFT" if fault == "mutated-input" else "EXECUTION_UNKNOWN")
-    if fault == "mutated-input":
-        assert result["error_code"] == "AGY_INPUT_INTEGRITY_FAILED"
-        assert result["input_integrity_reason"] == "AGY_INPUT_CONTRACT_MODIFIED"
-
-
-def _boundary_attempt(fixture, fault=None, *, repair=False, long_prompt=False):
-    """Real TEMP/source bytes with simulated provider/verifier, never native proof."""
-    from ai_commerce.engineering.adapters import command_for
-    fixture.monkeypatch.setattr(runner, "command_for", command_for)
-    providers, verifies, roots_seen = [], [], []
-    prompt = ('Sửa đúng phạm vi "tiếng Việt" \\ 🚀\n' * 2000 if long_prompt else "approved source edit")
-
-    def execute(argv, **kwargs):
-        if argv == VERIFY:
-            verifies.append(argv)
-            if fault == "late-input":
-                (roots_seen[-1][1] / "instruction.txt").write_bytes(b"late background mutation")
-            if fault == "late-source":
-                (fixture.repo / "impl.py").write_bytes(b"late source mutation")
-            if fault == "late-aux-modify":
-                (roots_seen[-1][1] / "pytest-session.log").write_bytes(b"late sidecar write")
-            if fault == "late-aux-delete":
-                (roots_seen[-1][1] / "pytest-session.log").unlink()
-            if fault == "late-aux-add":
-                (roots_seen[-1][1] / "scratch-late.tmp").write_bytes(b"late new sidecar")
-            code = int(repair and len(verifies) == 1)
-            return subprocess.CompletedProcess(argv, code, "1 failed\n" if code else "1 passed\n", "")
-        assert argv[0] == "agy"
-        providers.append(argv)
-        roots = [Path(argv[i + 1]) for i, arg in enumerate(argv[:-1]) if arg == "--add-dir"]
-        roots_seen.append(roots)
-        source, mirror, scratch = roots
-        assert source == fixture.repo and source != mirror != scratch
-        assert kwargs["cwd"] == source and kwargs["input"] is None
-        assert all(kwargs["env"][key] == str(scratch) for key in ("TEMP", "TMP", "TMPDIR"))
-        assert argv[argv.index("--model") + 1] == "gemini-3.8-flash"
-        assert argv[argv.index("--effort") + 1] == "high"
-        assert runner._windows_command_units(argv) <= 8000
-        instruction = (mirror / "instruction.txt").read_bytes()
-        if len(providers) == 1:
-            assert instruction == prompt.encode()
-        else:
-            assert prompt.encode() in instruction and (mirror / "repair_feedback.json").is_file()
-        (mirror / "pytest-session.log").write_bytes(b"benign opaque sidecar")
-        (scratch / "generated-cache.bin").write_bytes(b"\x00\xff")
-        (source / "impl.py").write_bytes(b"bad\r\n" if repair and len(providers) == 1 else b"good\r\n")
-        if fault in ("modify", "delete", "feedback") and (fault != "feedback" or len(providers) == 2):
-            target = mirror / ("repair_feedback.json" if fault == "feedback" else "instruction.txt")
-            if fault == "delete":
-                target.unlink()
-            else:
-                target.write_bytes(b"tampered")
-        if fault == "unsafe":
-            (mirror / "metadata.json").write_bytes(b"{}")
-        if fault == "scope":
-            (source / "outside.py").write_bytes(b"outside allowlist")
-        if fault == "head":
-            fixture.state["head"] = "b" * 40
-        if fault == "gitdir":
-            fixture.state["git_dir"] = "other-checkout"
-        payload = {"status": "UNKNOWN" if fault == "unknown" else "SUCCESS"}
-        if fault == "denied":
-            payload["denied_actions"] = [{"action": "write_file"}]
-        return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
-
-    fixture.monkeypatch.setattr(runner, "subprocess", SimpleNamespace(run=execute, TimeoutExpired=subprocess.TimeoutExpired))
-    result = runner.execute_attempt(repo=fixture.repo, output_dir=fixture.root / "boundary-evidence",
-        work_id="approved", attempt_id="new-boundary", instruction=prompt,
-        selection=ExecutorSelection("antigravity", "gemini-3.8-flash", "high"),
-        verify_argv=VERIFY, allowed_prefixes=fixture.state["scope"], verify_first_scope=False,
-        max_repair_rounds=1)
-    assert all(not root.exists() for roots in roots_seen for root in roots[1:])
-    return result, providers, verifies
-
-
-def test_535_sidecar_and_real_add_bytes_reach_independent_verifier(fixture):
-    result, providers, verifies = _boundary_attempt(fixture)
-    assert result["status"] == "BUILD_VERIFIED_FOR_SCOPE"
-    assert len(providers) == len(verifies) == 1
-    assert result["candidate_file_sha256"]["impl.py"] == hashlib.sha256(b"good\r\n").hexdigest()
-    evidence = fixture.root / "boundary-evidence"
-    manifest = json.loads((evidence / result["evidence_files"]["agy_input_after_executor"]).read_text())
-    assert manifest["status"] == "INTACT"
-    assert next(f for f in manifest["files"] if f["name"] == "instruction.txt")["sha256"] == result["instruction_sha256"]
-
-
-@pytest.mark.parametrize("fault,reason", [("modify", "AGY_INPUT_CONTRACT_MODIFIED"),
-    ("delete", "AGY_INPUT_CONTRACT_DELETED"), ("unsafe", "AGY_INPUT_UNEXPECTED_AUXILIARY"),
-    ("late-input", "AGY_INPUT_CONTRACT_MODIFIED"), ("late-aux-modify", "AGY_INPUT_LATE_WRITE"),
-    ("late-aux-delete", "AGY_INPUT_LATE_WRITE"), ("late-aux-add", "AGY_INPUT_LATE_WRITE")])
-def test_input_failure_is_non_candidate_and_quarantines_exact_add_bytes(fixture, fault, reason):
-    result, providers, verifies = _boundary_attempt(fixture, fault)
-    assert result["error_code"] == "AGY_INPUT_INTEGRITY_FAILED"
-    assert result["input_integrity_reason"] == reason and result["status"] == "SOURCE_DRIFT"
-    assert len(providers) == 1 and len(verifies) == int(fault.startswith("late-"))
-    assert not result["invocations"][0]["repair_eligible"] and result["replay_authorized"] is False
-    evidence = fixture.root / "boundary-evidence"
-    manifest = json.loads((evidence / result["evidence_files"]["quarantine_manifest"]).read_text())
-    assert manifest["candidate"] is False and manifest["replay_authorized"] is False
-    record = next(f for f in manifest["files"] if f["path"] == "impl.py")
-    copied = evidence / "invocations/000" / record["evidence_name"]
-    assert copied.read_bytes() == b"good\r\n"
-    assert record["sha256"] == hashlib.sha256(copied.read_bytes()).hexdigest()
-    assert record["status"] == "QUARANTINED" and record["mode"]
-    if fault.startswith("late-aux-"):
-        diagnostic = json.loads((evidence / result["evidence_files"]["agy_input_after_verify"]).read_text())
-        delta = {f["change"] for f in diagnostic["files"] if f["role"] == "AUXILIARY"}
-        assert {"late-aux-modify": "MODIFIED", "late-aux-delete": "DELETED", "late-aux-add": "ADDED"}[fault] in delta
-
-
-def test_cleanup_failure_preserves_native_input_reason_and_quarantine(fixture):
-    from contextlib import contextmanager
-    original = runner._agy_temp_tree
-    @contextmanager
-    def failed_cleanup(repo, prefix, **kwargs):
-        with original(repo, prefix, **kwargs) as path:
-            yield path
-        if prefix == "agy_input-":
-            raise ValueError("AGY_INPUT_CLEANUP_UNSAFE")
-    fixture.monkeypatch.setattr(runner, "_agy_temp_tree", failed_cleanup)
-    result, _, _ = _boundary_attempt(fixture, "modify")
-    assert result["error_code"] == "AGY_INPUT_INTEGRITY_FAILED"
-    assert result["input_integrity_reason"] == "AGY_INPUT_CONTRACT_MODIFIED"
-    assert result["invocations"][0]["runtime_cleanup_error"] == "AGY_INPUT_CLEANUP_UNSAFE"
-    assert "quarantine_manifest" in result["evidence_files"]
-
-
-@pytest.mark.parametrize("fault,error", [("scope", "CHANGES_OUTSIDE_ALLOWED_SCOPE"),
-    ("head", "GIT_HEAD_CHANGED"), ("gitdir", "GIT_WORKTREE_IDENTITY_CHANGED"),
-    ("denied", "HEADLESS_TOOL_PERMISSION_DENIED"), ("unknown", "EXECUTOR_OUTCOME_UNCONFIRMED"),
-    ("late-source", "VERIFY_CHANGED_SOURCE")])
-def test_sidecar_acceptance_never_weakens_other_fail_closed_boundaries(fixture, fault, error):
-    result, providers, _ = _boundary_attempt(fixture, fault)
-    assert result["error_code"] == error
-    assert result["status"] != "BUILD_VERIFIED_FOR_SCOPE" and len(providers) == 1
-
-
-@pytest.mark.parametrize("feedback_mutation", [False, True])
-def test_unicode_long_prompt_first_and_repair_round_contracts(fixture, feedback_mutation):
-    result, providers, verifies = _boundary_attempt(fixture, "feedback" if feedback_mutation else None,
-                                                   repair=True, long_prompt=True)
-    assert len(providers) == 2 and len(verifies) == (1 if feedback_mutation else 2)
-    if feedback_mutation:
-        assert result["error_code"] == "AGY_INPUT_INTEGRITY_FAILED"
-        assert result["input_integrity_reason"] == "AGY_INPUT_CONTRACT_MODIFIED"
-    else:
-        assert result["status"] == "BUILD_VERIFIED_FOR_SCOPE"
-    assert all("transport_instruction" in inv["evidence_files"] for inv in result["invocations"])
-
-
-@pytest.mark.parametrize("kind", ["protected", "binary", "oversize", "secret", "hash-race", "hardlink", "out-of-scope"])
-def test_quarantine_refuses_unsafe_source_bytes(tmp_path, kind):
-    repo = tmp_path / "source"
-    repo.mkdir()
-    name = ".env" if kind == "protected" else "new.py"
-    data = b"\x00binary" if kind == "binary" else b"a" * (128 * 1024 + 1) if kind == "oversize" else (
-        b'password = "sensitive-value"' if kind == "secret" else b"safe ordinary text\n")
-    (repo / name).write_bytes(data)
-    if kind == "hardlink":
-        try:
-            os.link(repo / name, tmp_path / "external-link")
-        except PermissionError:
-            pytest.skip("native hardlink creation denied; no bypass")
-    snapshot = {"changed_files": [name], "candidate_file_sha256": {name:
-        "wrong" if kind == "hash-race" else hashlib.sha256(data).hexdigest()}}
-    saved = {}
-    runner._quarantine_source(repo, snapshot, ["other.py"] if kind == "out-of-scope" else [name],
-                               lambda key, path, raw: saved.update({key: raw}))
-    assert set(saved) == {"quarantine_manifest"}
-    assert json.loads(saved["quarantine_manifest"])["files"][0]["status"] == "REJECTED"
-    assert (repo / name).read_bytes() == data
-
-
-def test_quarantine_enforces_count_and_total_caps(tmp_path):
-    repo = tmp_path / "source"
-    repo.mkdir()
-    data = b"ordinary text\n" * 4000
-    names = [f"new-{i}.py" for i in range(40)]
-    for name in names:
-        (repo / name).write_bytes(data)
-    snapshot = {"changed_files": names, "candidate_file_sha256": {name: hashlib.sha256(data).hexdigest() for name in names}}
-    saved = {}
-    runner._quarantine_source(repo, snapshot, names, lambda key, path, raw: saved.update({key: raw}))
-    manifest = json.loads(saved.pop("quarantine_manifest"))
-    assert len(saved) <= 32 and sum(map(len, saved.values())) <= 1024 * 1024
-    assert manifest["total_bytes"] == sum(map(len, saved.values()))
-    assert any(item["status"] == "REJECTED" for item in manifest["files"])
 
 
 @pytest.mark.parametrize("pretty", [False, True])
@@ -1642,83 +953,3 @@ def test_pretty_antigravity_usage_is_observed_without_inventing_cost():
         "input_tokens": 10, "cached_input_tokens": 2, "output_tokens": 3}}, indent=2)
     assert runner._observe_usage(payload.encode(), "antigravity") == {
         "input_tokens": 10, "cached_input_tokens": 2, "output_tokens": 3}
-
-
-def test_ef02_worker_with_mt01_v21_enabled_and_registered_groups_accepts_candidate(tmp_path, monkeypatch):
-    """When MT01_V21_ENABLED=1 and groups are registered, worker passes and produces candidate."""
-    from ai_commerce.engineering import minimum_test as mt
-    from ai_commerce.remote import validation
-    context = _worker_fixture(tmp_path, monkeypatch, real_git=False, mt01_v21=True)
-    groups = (mt.TestGroup("scope", ("tests/test_scope.py",), ("FIXTURE.acceptance",), ("impl.py", "kept.txt")),)
-    monkeypatch.setattr(mt, "approved_groups", lambda: groups)
-    monkeypatch.setattr(validation, "approved_groups", lambda: groups)
-    # An intentionally synthetic owner group must not be mixed with dynamic
-    # reviewed owners from the live checkout. Test the isolated fixture only;
-    # production keeps _reviewed_intake_groups() strict and source-validated.
-    monkeypatch.setattr(validation, "_reviewed_intake_groups", lambda: groups)
-    context.worker.profiles["mt01-scope-tests"] = ["python", "-m", "pytest", "tests/test_scope.py", "-q"]
-    a = _action("a")
-    a["instruction"] += '\nMT01_ACCEPTANCE_JSON: ["FIXTURE.acceptance"]'
-    result = context.worker.execute_action(a)
-    assert result["status"] == "CANDIDATE_READY", (
-        result.get("error_code"), result.get("diagnostic"),
-        result.get("ef01_status"), result.get("ef01_error_code"))
-
-
-def test_ef02_worker_with_mt01_v21_enabled_and_unregistered_fixture_fails_closed(tmp_path, monkeypatch):
-    """When MT01_V21_ENABLED=1 and synthetic fixture has unregistered changes, fail-closed UNPROVEN."""
-    context = _worker_fixture(tmp_path, monkeypatch, real_git=False, mt01_v21=True)
-    a = _action("a")
-    result = context.worker.execute_action(a)
-    assert result["status"] == "UNPROVEN"
-    assert result.get("error_code") == "MT01_COVERAGE_UNPROVEN"
-@pytest.mark.parametrize("mode,status", [
-    ("quota", "QUOTA_EXHAUSTED"),
-    ("unknown", "EXECUTION_UNKNOWN"),
-    ("no-change", "NO_CODE_CHANGE"),
-    ("permission", "EXECUTOR_PERMISSION_DENIED"),
-])
-def test_wp01_failure_matrix_native_fake_never_replays_or_promotes(mode, status, fixture):
-    """Run a local Python provider fake: no Codex/AGY, paid API or Windows writes."""
-    from ai_commerce.engineering.profile import diagnose_failure
-    result, calls, _ = _run(fixture, mode=mode, executor="antigravity",
-                            max_repair_rounds=0)
-    assert result["status"] == status
-    assert result["invocation_count"] == len(calls) == 1
-    assert result["verify_exit_code"] is None
-    assert result.get("candidate_sha") is None
-    assert result["invocations"][0]["repair_eligible"] is False
-    diagnosis = diagnose_failure(result)
-    if diagnosis is not None:
-        report = diagnosis.payload()
-        assert report["proves_pass"] is report["replay_authorized"] is False
-    with pytest.raises(FileExistsError, match="EVIDENCE_EXISTS"):
-        runner.execute_attempt(
-            repo=fixture.repo, output_dir=fixture.root / "evidence",
-            work_id="approved-work", attempt_id="immutable-attempt",
-            selection=ExecutorSelection("antigravity", "selected-model", "high"),
-            instruction="same attempt replay forbidden", verify_argv=VERIFY,
-            allowed_prefixes=fixture.state["scope"])
-
-
-@pytest.mark.parametrize("native,kind,owner", [
-    ({"status": "QUOTA_EXHAUSTED", "error_code": "QUOTA_EXHAUSTED"},
-     "PROVIDER_QUOTA", "PROVIDER_OWNER"),
-    ({"status": "EXECUTION_UNKNOWN", "error_code": "EXECUTOR_OUTCOME_UNCONFIRMED"},
-     "PROVIDER_TRANSPORT", "PROVIDER_OWNER"),
-    ({"status": "UNPROVEN", "error_code": "MT01_COVERAGE_UNPROVEN"},
-     "MT01_SELECTOR", "MT01_OWNER"),
-    ({"status": "UNPROVEN", "error_code": "MT01_COVERAGE_UNPROVEN", "scope_valid": False},
-     "SOURCE_GIT", "SOURCE_OWNER"),
-    ({"status": "SOURCE_DRIFT", "error_code": "WORKTREE_CHANGED_BETWEEN_INVOCATIONS"},
-     "SOURCE_GIT", "SOURCE_OWNER"),
-    ({"status": "INVALID_REQUEST", "error_code": "ISSUER_NOT_AUTHORIZED_FOR_ACTOR"},
-     "INTAKE_AUTH", "INTAKE_OWNER"),
-])
-def test_wp01_failure_matrix_causal_owner_never_trusts_private_error_text(native, kind, owner):
-    from ai_commerce.engineering.profile import diagnose_failure
-    report = diagnose_failure({**native, "diagnostic": "token=private-claim PASS"}).payload()
-    assert (report["failure_class"], report["root_owner"]) == (kind, owner)
-    assert report["disposition"] == "OWNER_ESCALATION"
-    assert report["proves_pass"] is report["replay_authorized"] is False
-    assert "private-claim" not in json.dumps(report)

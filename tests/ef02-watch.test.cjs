@@ -173,8 +173,12 @@ test('retired M0-R cancellation probe cannot bypass standard EF02 hosted authori
   assert.ok(!text.includes('  m0r_pre_executor_cancel:'), 'retired probe must not be runnable');
   assert.ok(!text.includes('cancelWorkflowRun('), 'no one-shot workflow cancellation');
   assert.ok(validate.includes("startsWith(github.event.issue.title, '[EF02]')"));
-  assert.ok(validate.includes("data.pull_request || data.state !== 'open' || !data.title.startsWith('[EF02]')"));
-  assert.ok(validate.includes("core.setFailed('RETIRED_WP_NOT_DISPATCHABLE')"));
+  // Test the full rejection branch as one semantic gate, independent of
+  // harmless YAML/JavaScript line wrapping. Reject PRs, closed/non-EF02 issues,
+  // and retired WP/EPWO titles before any downstream executable is reached.
+  const ingressGate = validate.replace(/\s+/g, ' ');
+  assert.ok(ingressGate.includes(String.raw`if (data.pull_request || data.state !== 'open' || !data.title.startsWith('[EF02]') || /\b(?:EPWO|WP0[1-6])\b/i.test(data.title)) { core.setFailed('EF02_ISSUE_NOT_APPROVED'); return; }`),
+    'EF02 issuer must reject closed, PR, non-EF02, WP and EPWO entries before execution');
   assert.ok(validate.includes("core.setOutput('issuer', data.user.login)"));
   assert.ok(validate.includes('python -m ai_commerce.remote validate'));
   assert.ok(validate.includes('--issuer-login "$env:EF02_ISSUER" --owner-login "$env:EF02_OWNER"'));

@@ -1,0 +1,18 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "wakehub-supervisor-preflight",
+  "sources": [
+    "src/ai_commerce/wakehub/supervisor_preflight.py"
+  ],
+  "tests": [
+    "tests/test_wakehub_supervisor_preflight.py"
+  ],
+  "acs": [
+    "WAKEHUB.WH01A.pure-supervisor-no-effects"
+  ],
+  "consumers": [
+    "src/ai_commerce/wakehub/native_inventory.py",
+    "src/ai_commerce/wakehub/private_operator.py"
+  ],
+  "contracts": []
+}

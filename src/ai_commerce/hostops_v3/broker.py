@@ -28,18 +28,6 @@ IPC_LIMIT = 262144
 IPC_TIMEOUT = 45  # Greater than the 30s operation + 8s startup watchdog budget.
 
 
-def ipc_request_owner_witness(payload):
-    """Parse a bounded READ_ONLY frame; no dispatch or provider scheduling."""
-    message = decode(payload)
-    shape(message, "schema mode operation envelope")
-    if (message["schema"] != "hostops.owner_witness.v1" or
-            message["mode"] != "READ_ONLY" or
-            message["operation"] not in ("bridge", "verify") or
-            type(message["envelope"]) is not dict):
-        deny("BAD_IPC_MODE")
-    return message["operation"], canonical(message["envelope"])
-
-
 def mac(key, role, nonce, data=b""):
     return hmac.new(key, role + nonce + data, hashlib.sha256).hexdigest()
 

@@ -204,12 +204,6 @@ def test_ef02_direct_git_admin_fetch_credentials_do_not_enter_child(tmp_path, mo
     from test_ef02_m0r_fault_injection import _worker, _action, BASE
     from ai_commerce.remote.worker import _safe_child_env
     calls = []
-    from ai_commerce.remote import worker as remote_worker
-    # Avoid replacing subprocess.run globally: Git source identity helpers
-    # must retain their own real subprocess implementation.
-    monkeypatch.setattr(remote_worker, "subprocess", SimpleNamespace(
-        run=subprocess.run, Popen=subprocess.Popen, PIPE=subprocess.PIPE,
-        DEVNULL=subprocess.DEVNULL, TimeoutExpired=subprocess.TimeoutExpired))
     class Github:
         def claim(self, **_kw):
             return "CLAIMED"

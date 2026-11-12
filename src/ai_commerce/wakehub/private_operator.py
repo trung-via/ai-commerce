@@ -23,7 +23,7 @@ import time
 from typing import Callable, Protocol
 from uuid import UUID
 
-from ai_commerce.engineering.three_runner_topology import WakeHubPreflight
+from .supervisor_preflight import WakeHubPreflight
 from ai_commerce.wakehub.native_inventory import (
     PrivateAttestation, PrivateEnrollment, PrivateSnapshot, ProcessIdentity,
     PublicInventory, normalize_private_inventory,
