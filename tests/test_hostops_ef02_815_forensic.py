@@ -64,7 +64,7 @@ def test_wrong_or_forged_boundary_does_not_prove_safe_replay(tmp_path, monkeypat
     _write(root, rel, bad)
     out = f.inspect()
     if bad.get("replay_authorized"):
-        assert out["provider_boundary"] == "PRESENT_UNVERIFIED"
+        assert out["provider_boundary"] == "UNSAFE"
     else:
         assert out["provider_boundary"] == "UNSAFE"
     assert out["replay_authorized"] is False
@@ -96,8 +96,9 @@ def test_symlinked_receipt_denied(tmp_path, monkeypatch):
 
 
 def test_non_windows_process_is_unverified_not_no_model(monkeypatch):
-    monkeypatch.setattr(f.os, "name", "posix", raising=False)
+    monkeypatch.setattr(f, "HOST_IS_WINDOWS", False)
     assert f._process() == "PROCESS_READ_UNKNOWN"
+    assert f._worktree() == "WORKTREE_READ_UNKNOWN"
 
 
 def test_cli_never_accepts_read_target_argument(tmp_path, monkeypatch):
@@ -105,3 +106,18 @@ def test_cli_never_accepts_read_target_argument(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         f.main(["--output", str(tmp_path / "receipt.json"), "--read-root", str(tmp_path)])
     assert not (tmp_path / "receipt.json").exists()
+
+
+def test_cli_writes_only_exact_runner_temp_and_never_alternative(tmp_path, monkeypatch):
+    _fixture(tmp_path, monkeypatch)
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
+    wrong = tmp_path / "other-receipt.json"
+    with pytest.raises(SystemExit):
+        f.main(["--output", str(wrong)])
+    assert not wrong.exists()
+    expected = tmp_path / "ef02-815-forensic.json"
+    assert f.main(["--output", str(expected)]) == 0
+    result = json.loads(expected.read_text(encoding="utf-8"))
+    assert result["status"] == "HOLD_UNKNOWN_EFFECT"
+    with pytest.raises(SystemExit):
+        f.main(["--output", str(expected)])

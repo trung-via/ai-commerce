@@ -2,7 +2,8 @@
 
 This is not a recovery/replay interface. GitHub Issue content cannot select a
 path, PID, command, source, provider or operation. Unknown remains UNKNOWN.
-No import-time effects; no writes, shell, network, Git mutations or model calls.
+No import-time effects; no writes to observed targets, shell, network,
+Git mutations or model calls. Only an allowlisted runner-temp receipt is written.
 """
 from __future__ import annotations
 
@@ -29,6 +30,7 @@ START_EARLIEST = dt.datetime(2026, 11, 11, 18, 10, tzinfo=dt.timezone.utc)
 START_LATEST = dt.datetime(2026, 11, 11, 18, 14, tzinfo=dt.timezone.utc)
 MAX_BYTES = 4 * 1024 * 1024
 MAX_GLOB = 4
+HOST_IS_WINDOWS = os.name == "nt"
 RELS = (
     ("ef01/invocations/000/provider_boundary.json", "BEFORE_EXECUTOR_SUBPROCESS"),
     ("ef01/invocations/000/provider_return_observed.json", "EXECUTOR_SUBPROCESS_RETURNED"),
@@ -65,7 +67,7 @@ def _safe(path: Path, *, directory: bool = False) -> bool:
 
 
 def _process() -> str:
-    if os.name != "nt":
+    if not HOST_IS_WINDOWS:
         return "PROCESS_READ_UNKNOWN"
     try:
         p = subprocess.run(
@@ -116,6 +118,8 @@ def _read_stage(path: Path, stage: str | None) -> str:
         data = json.loads(raw.decode("utf-8-sig"))
         if type(data) is not dict or data.get("attempt_id") != ATTEMPT:
             return "UNSAFE"
+        if data.get("replay_authorized") is True or data.get("provider_effects_reconciled") is True:
+            return "UNSAFE"
         if stage is not None and data.get("stage") != stage:
             return "UNSAFE"
         if stage is None and data.get("work_id") != BATCH + ":" + ACTION:
@@ -144,7 +148,7 @@ def _evidence() -> tuple[str, list[str]]:
 
 
 def _worktree() -> str:
-    if os.name != "nt":
+    if not HOST_IS_WINDOWS:
         return "WORKTREE_READ_UNKNOWN"
     try:
         temp = Path(tempfile.gettempdir())
@@ -179,8 +183,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
-    # Caller supplies only output location inside its own runner.temp; there
-    # is no caller-selected read target. No stdout from private inspection.
+    # No caller-selected read target or arbitrary output write. Only the exact
+    # CI runner's owned receipt path is valid.
+    tmp = os.environ.get("RUNNER_TEMP")
+    expected = Path(tmp) / "ef02-815-forensic.json" if tmp else None
+    if expected is None or args.output != expected or args.output.exists():
+        parser.error("HOSTOPS_EF02_815_OUTPUT_NOT_RUNNER_TEMP")
     args.output.write_text(json.dumps(inspect(), separators=(",", ":")), encoding="utf-8")
     return 0
 
