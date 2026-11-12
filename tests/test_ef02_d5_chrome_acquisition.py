@@ -611,5 +611,7 @@ def test_wh01b_9444_ensure_is_exact_closed_one_shot_no_send():
     assert "ca.run(env, launch=True, opt_in=True)" in ensure
     assert "CDP_9444_LAUNCHED" in ensure and "CDP_9444_REUSED" in ensure
     assert "wake_sent=$false" in ensure
+    assert "effect_state=$effectState" in ensure
+    assert "UNKNOWN_EFFECT" in ensure
     assert "NoProfile" not in ensure  # no arbitrary PowerShell dispatch
     assert "--user-data-dir=" not in ensure  # source-owned private config only
