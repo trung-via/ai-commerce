@@ -26,9 +26,8 @@ import subprocess
 import time
 from typing import Protocol
 
-from ai_commerce.engineering.three_runner_topology import (
-    WakeHubPreflight, assess_wakehub_preflight, planned_topology,
-)
+from ai_commerce.engineering.three_runner_topology import planned_topology
+from .supervisor_preflight import WakeHubPreflight, assess_wakehub_preflight
 
 
 SOURCE_EPOCH = "81cdb3ae95c4af695c9b021bab2010a6d9ee81c1"
