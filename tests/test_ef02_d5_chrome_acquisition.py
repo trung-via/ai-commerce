@@ -585,3 +585,73 @@ def test_attended_d5_cdp_wrapper_powershell_parser_on_hosted_windows():
         capture_output=True, text=True, check=False, timeout=30
     )
     assert run.returncode == 0, run.stdout + run.stderr
+
+
+def test_wh01b_9444_ensure_is_exact_closed_one_shot_no_send():
+    """The protected Issue ingress uses the existing verified Chrome acquisition.
+
+    This test is a static policy preflight. Live interactive launch and ownership
+    require a separate real Windows host receipt, never a source-only CI PASS.
+    """
+    from pathlib import Path
+    workflow = (Path(__file__).resolve().parents[1] /
+                ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+    assert workflow.count("  hostops-d5-9444-ensure:") == 1
+    ensure = workflow.split("  hostops-d5-9444-ensure:", 1)[1].split("\n# Personal-mode D5 bootstrap only.", 1)[0]
+    assert "[HOSTOPS D5 9444 ENSURE] " in ensure
+    assert '{"schema":"ai-commerce.d5.ensure9444.v1","operation":"ENSURE_OWNED_9444","parameters":{}}' in ensure
+    assert "github.event_name == 'issues' && github.event.action == 'opened'" in ensure
+    assert "github.event.issue.user.login == github.repository_owner" in ensure
+    assert "ai-commerce-hostops" in ensure
+    assert "cancel-in-progress: false" in ensure
+    assert "NO_INTERACTIVE_SESSION" in ensure
+    assert "DEDICATED_CONFIG_NOT_ENROLLED" in ensure
+    assert "ELEVATED" in ensure
+    assert 'env.port != 9444 or env.endpoint != "http://127.0.0.1:9444"' in ensure
+    assert "ca.run(env, launch=True, opt_in=True)" in ensure
+    assert "CDP_9444_LAUNCHED" in ensure and "CDP_9444_REUSED" in ensure
+    assert "wake_sent=$false" in ensure
+    assert "effect_state=$effectState" in ensure
+    assert "UNKNOWN_EFFECT" in ensure
+    assert "NoProfile" not in ensure  # no arbitrary PowerShell dispatch
+    assert "--user-data-dir=" not in ensure  # source-owned private config only
+
+
+@pytest.mark.parametrize("states, expected_started, count", [
+    ([("OWNED", 123)], False, 0),
+    ([("ABSENT", None), ("OWNED", 500)], True, 1),
+])
+def test_wh01b_real_port_9444_reuse_or_launch_once(
+        monkeypatch, tmp_path, states, expected_started, count):
+    """The EXISTING production acquisition implements the fixed 9444 ensure.
+
+    Synthetic Windows inventory: existing owned browser -> reuse with no
+    process; independently absent browser -> exactly one launch; no UI/Send.
+    """
+    config, repo, home, data = fixture(tmp_path)
+    data["cdp_endpoint"] = "http://127.0.0.1:9444"
+    config.write_text(json.dumps(data), encoding="utf-8")
+    env = read(config, repo, home)
+    assert env.port == 9444
+    spawns, handshake = _fake_windows_run(monkeypatch, states=states)
+    receipt = ca.run(env, launch=True, opt_in=True)
+    assert receipt == {
+        "status": "READY_ATTACH", "cdp_verified": True,
+        "browser_accessed": True, "launched": expected_started
+    }
+    assert handshake == [9444]
+    assert len(spawns) == count
+
+
+def test_wh01b_9444_profile_lock_disallows_second_browser(
+        monkeypatch, tmp_path):
+    config, repo, home, data = fixture(tmp_path)
+    data["cdp_endpoint"] = "http://127.0.0.1:9444"
+    config.write_text(json.dumps(data), encoding="utf-8")
+    env = read(config, repo, home)
+    spawns, handshake = _fake_windows_run(
+        monkeypatch, states=[("ABSENT", None)])
+    (env.user_data_dir / "SingletonLock").write_text("owned")
+    with pytest.raises(ca.AcquisitionBlocked, match="PROFILE_LOCKED"):
+        ca.run(env, launch=True, opt_in=True)
+    assert not spawns and not handshake
