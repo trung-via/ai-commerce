@@ -156,8 +156,13 @@ class HostOriginAssessment:
     """Never authorizes real Wake; all outputs remain source-only HOLD."""
     reason: str
     structural_match: bool = False
-    authorization: str = "NOT_VERIFIED"
-    effect: str = "NOT_ATTEMPTED"
+    @property
+    def authorization(self) -> str:
+        return "NOT_VERIFIED"
+
+    @property
+    def effect(self) -> str:
+        return "NOT_ATTEMPTED"
 
 
 def _host_hints_valid(value: object) -> bool:
