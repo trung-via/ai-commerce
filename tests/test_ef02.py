@@ -694,3 +694,29 @@ def test_direct_worker_no_claim_no_provider_on_retired_id(tmp_path):
     assert outcome["status"] == "INVALID_ACTION"
     assert outcome["error_code"] == "RETIRED_WP_NOT_DISPATCHABLE"
     assert outcome["executor_invoked"] is False
+
+def test_new_worktree_path_is_short_stable_and_unique(tmp_path):
+    """Windows EF02 must never derive a tool cwd from a long action_id."""
+    from ai_commerce.remote.worker import _new_worktree_path
+    import subprocess
+    checkout = tmp_path / "runner" / "checkout"
+    checkout.mkdir(parents=True)
+    first = _new_worktree_path(checkout)
+    second = _new_worktree_path(checkout)
+    assert first != second
+    assert first.parent == checkout.parent / "_ef02_worktrees"
+    assert not first.exists() and not second.exists()
+    assert first.name.startswith("wt-")
+    # A real Git worktree at this location remains available to rev-parse.
+    subprocess.run(["git", "-C", str(checkout), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(checkout), "config", "user.name", "Fixture"], check=True)
+    subprocess.run(["git", "-C", str(checkout), "config", "user.email", "fixture@example.invalid"], check=True)
+    (checkout / "README.md").write_text("base\\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(checkout), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(checkout), "commit", "-qm", "base"], check=True)
+    subprocess.run(["git", "-C", str(checkout), "worktree", "add", "--detach", str(first), "HEAD"],
+                   check=True, capture_output=True)
+    head = subprocess.run(["git", "-C", str(first), "rev-parse", "HEAD"],
+                          check=True, text=True, capture_output=True).stdout.strip()
+    assert len(head) == 40
+    assert (first / ".git").is_file()
