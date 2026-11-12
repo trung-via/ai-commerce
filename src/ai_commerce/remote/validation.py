@@ -19,6 +19,19 @@ HEX_SHA = re.compile(r"^[0-9a-f]{40}$")
 class RemoteRequestError(ValueError):
     pass
 
+# Human-retired WP01..WP06/EPWO must never be dispatched, even from old batch JSON.
+# This narrow deny-only control is external to the restored pre-WP Engineering logic.
+_RETIRED_PROGRAM_ID = re.compile(r"(?:EPWO|WP0[1-6])", re.IGNORECASE)
+
+def reject_retired_wp_identifiers(batch: dict, action: dict | None = None) -> None:
+    identifiers = [batch.get("batch_id")]
+    actions = [action] if action is not None else batch.get("actions", [])
+    for item in actions:
+        if isinstance(item, dict):
+            identifiers.extend((item.get("action_id"), item.get("attempt_id")))
+    if any(isinstance(v, str) and _RETIRED_PROGRAM_ID.search(v) for v in identifiers):
+        raise RemoteRequestError("RETIRED_WP_NOT_DISPATCHABLE")
+
 def canonical(data: dict) -> bytes:
     return json.dumps(data, ensure_ascii=False, sort_keys=True,
                       separators=(",", ":"), allow_nan=False).encode("utf-8")
@@ -81,6 +94,7 @@ def validate_batch_content(data: dict, *, schema: Path, registry: dict[str, list
 
 def _validate_actions(data: dict, *, registry: dict[str, list[str]],
                       approved_reuse: dict | None) -> dict:
+    reject_retired_wp_identifiers(data)
     ids = [a["action_id"] for a in data["actions"]]
     attempts = [a["attempt_id"] for a in data["actions"]]
     if len(set(ids)) != len(ids) or len(set(attempts)) != len(attempts):
