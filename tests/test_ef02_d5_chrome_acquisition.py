@@ -585,3 +585,31 @@ def test_attended_d5_cdp_wrapper_powershell_parser_on_hosted_windows():
         capture_output=True, text=True, check=False, timeout=30
     )
     assert run.returncode == 0, run.stdout + run.stderr
+
+
+def test_wh01b_9444_ensure_is_exact_closed_one_shot_no_send():
+    """The protected Issue ingress uses the existing verified Chrome acquisition.
+
+    This test is a static policy preflight. Live interactive launch and ownership
+    require a separate real Windows host receipt, never a source-only CI PASS.
+    """
+    from pathlib import Path
+    workflow = (Path(__file__).resolve().parents[1] /
+                ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+    assert workflow.count("  hostops-d5-9444-ensure:") == 1
+    ensure = workflow.split("  hostops-d5-9444-ensure:", 1)[1]
+    assert "[HOSTOPS D5 9444 ENSURE] " in ensure
+    assert '{"schema":"ai-commerce.d5.ensure9444.v1","operation":"ENSURE_OWNED_9444","parameters":{}}' in ensure
+    assert "github.event_name == 'issues' && github.event.action == 'opened'" in ensure
+    assert "github.event.issue.user.login == github.repository_owner" in ensure
+    assert "ai-commerce-hostops" in ensure
+    assert "cancel-in-progress: false" in ensure
+    assert "NO_INTERACTIVE_SESSION" in ensure
+    assert "DEDICATED_CONFIG_NOT_ENROLLED" in ensure
+    assert "ELEVATED" in ensure
+    assert 'env.port != 9444 or env.endpoint != "http://127.0.0.1:9444"' in ensure
+    assert "ca.run(env, launch=True, opt_in=True)" in ensure
+    assert "CDP_9444_LAUNCHED" in ensure and "CDP_9444_REUSED" in ensure
+    assert "wake_sent=$false" in ensure
+    assert "NoProfile" not in ensure  # no arbitrary PowerShell dispatch
+    assert "--user-data-dir=" not in ensure  # source-owned private config only
