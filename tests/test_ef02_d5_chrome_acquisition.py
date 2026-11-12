@@ -597,7 +597,7 @@ def test_wh01b_9444_ensure_is_exact_closed_one_shot_no_send():
     workflow = (Path(__file__).resolve().parents[1] /
                 ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
     assert workflow.count("  hostops-d5-9444-ensure:") == 1
-    ensure = workflow.split("  hostops-d5-9444-ensure:", 1)[1].split("\n  ef02:", 1)[0]
+    ensure = workflow.split("  hostops-d5-9444-ensure:", 1)[1].split("\n# Personal-mode D5 bootstrap only.", 1)[0]
     assert "[HOSTOPS D5 9444 ENSURE] " in ensure
     assert '{"schema":"ai-commerce.d5.ensure9444.v1","operation":"ENSURE_OWNED_9444","parameters":{}}' in ensure
     assert "github.event_name == 'issues' && github.event.action == 'opened'" in ensure
