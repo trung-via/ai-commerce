@@ -237,3 +237,32 @@ def test_interrupted_provider_exit_preserves_unknown_effects_despite_quota(tmp_p
     assert result["verify_exit_code"] is None
     assert result["replay_authorized"] is False
     assert calls == ["provider"]
+
+def test_short_agy_input_directory_is_not_nested_under_evidence_root(tmp_path):
+    """Regression for #837: deep evidence paths caused WinError 267."""
+    import shutil
+    import tempfile
+    from ai_commerce.engineering.runner import _new_agy_input_dir
+    deep = tmp_path / ("batch-" + "b" * 80) / ("action-" + "a" * 80) / "ef01" / "invocations" / "000"
+    mirror = _new_agy_input_dir()
+    try:
+        assert mirror.is_dir()
+        assert mirror.name.startswith("agy-ef01-")
+        assert deep not in mirror.parents
+        assert mirror.parent == Path(tempfile.gettempdir()).resolve()
+        assert len(str(mirror).encode("utf-16-le")) // 2 <= 180 or sys.platform != "win32"
+    finally:
+        shutil.rmtree(mirror)
+
+
+def test_git_source_unavailable_emits_safe_specific_cause(tmp_path, monkeypatch):
+    """Provider failures and worktree loss must remain distinguishable."""
+    import time
+    from ai_commerce.engineering import runner
+    secret = "SECRET-TOKEN-WITH-PRIVATE-PATH"
+    def failing_git(repo, *args, **kwargs):
+        return subprocess.CompletedProcess(["git"], 128, "", secret)
+    monkeypatch.setattr(runner, "_git", failing_git)
+    with pytest.raises(RuntimeError, match="GIT_SOURCE_UNAVAILABLE:GIT_ENTRY_MISSING") as error:
+        runner._snapshot(tmp_path, [], time.monotonic() + 10)
+    assert secret not in str(error.value)
