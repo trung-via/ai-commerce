@@ -368,7 +368,8 @@ MAX_TIMEOUT_SECONDS = 86400
 # Stay below cmd.exe's limit too: AGY may be installed as a Windows .cmd shim.
 AGY_COMMANDLINE_MAX_UNITS = 8000
 AGY_INPUT_CONTEXT = (
-    "Use the current isolated source worktree and this invocation's prepared agy_input only. "
+    "Execute shell/file edit tools from the isolated source worktree, NOT agy_input; "
+    "the prepared agy_input contains read-only instructions/feedback only. "
     "External archived artifacts are OPTIONAL, including prior GitHub artifacts, sibling worktrees "
     "and runner-owned .local records. Do not read user profiles, credentials or authoritative runner logs. "
     "Use current source and the disposable instruction/repair_feedback.json copies. "
