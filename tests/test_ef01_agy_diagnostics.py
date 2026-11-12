@@ -244,12 +244,15 @@ def test_short_agy_input_directory_is_not_nested_under_evidence_root(tmp_path):
     import tempfile
     from ai_commerce.engineering.runner import _new_agy_input_dir
     deep = tmp_path / ("batch-" + "b" * 80) / ("action-" + "a" * 80) / "ef01" / "invocations" / "000"
-    mirror = _new_agy_input_dir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    mirror = _new_agy_input_dir(repo)
     try:
         assert mirror.is_dir()
-        assert mirror.name.startswith("agy-ef01-")
+        assert mirror.name.startswith("agy-")
         assert deep not in mirror.parents
-        assert mirror.parent == Path(tempfile.gettempdir()).resolve()
+        assert mirror.parent == repo.parent / "_ef01_agy_inputs"
+        assert mirror.parent != Path(tempfile.gettempdir()).resolve()
         assert len(str(mirror).encode("utf-16-le")) // 2 <= 180 or sys.platform != "win32"
         # This must actually work as a Windows subprocess working directory:
         # #837's 248-unit cwd failed BEFORE shell/tool launch (WinError 267).
