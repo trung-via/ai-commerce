@@ -207,3 +207,12 @@ def test_origin_carrier_call_has_no_network_process_or_browser_effect(monkeypatc
     monkeypatch.setattr(subprocess, "Popen", forbidden)
     host, native = _carrier_fixture()
     assert _hold_reason(host=host, native=native).structural_match is True
+
+
+def test_origin_assessment_cannot_be_instantiated_with_a_fake_grant():
+    with pytest.raises(TypeError):
+        HostOriginAssessment("FAKE", authorization="VERIFIED")
+    with pytest.raises(TypeError):
+        HostOriginAssessment("FAKE", effect="USER_TURN_OBSERVED")
+    assert HostOriginAssessment("HOLD", structural_match=True).authorization == "NOT_VERIFIED"
+    assert HostOriginAssessment("HOLD", structural_match=True).effect == "NOT_ATTEMPTED"
