@@ -602,3 +602,20 @@ def test_new_crlf_txt_normalized_before_actual_verify(tmp_path):
     assert result["candidate_file_sha256"]["consumer-tests.txt"] == hashlib.sha256(normalized).hexdigest()
     assert "git_filter_preverify" in result["evidence_files"]
     assert (tmp_path / "evidence" / "git_filter.preverify.json").is_file()
+
+
+def test_agy_argon_medium_smoke_model_arguments_20261112(tmp_path):
+    argv, stdin = command_for(
+        ExecutorSelection("antigravity", "gemini-4-argon-medium", "medium"),
+        tmp_path,
+        "argon smoke",
+    )
+    assert stdin is None
+    assert "--print" in argv
+    assert argv[argv.index("--model") + 1] == "gemini-4-argon-medium"
+    assert argv[argv.index("--effort") + 1] == "medium"
+    assert argv[argv.index("--mode") + 1] == "accept-edits"
+    assert argv[argv.index("--output-format") + 1] == "json"
+    assert argv[argv.index("--add-dir") + 1] == str(tmp_path)
+    assert "windows.sandbox=mxc" not in argv
+
