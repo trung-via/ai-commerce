@@ -394,14 +394,21 @@ def _remaining(deadline: float, limit: float = 30) -> float:
     return min(limit, remaining)
 
 
-def _new_agy_input_dir() -> Path:
-    """Prepare a small, private workspace root outside long EF02 evidence paths.
+def _new_agy_input_dir(repo: Path) -> Path:
+    """Create short, durable, private AGY input outside the repo and Windows TEMP.
 
-    This is the only extra AGY --add-dir. A deep batch/action/attempt/invocation
-    evidence path reached 248 UTF-16 units on Windows and caused tool WinError 267.
-    Do not expose the authoritative evidence directory to the model.
+    #837's batch/action/invocation evidence directory reached 248 code units and
+    AGY's tool cwd failed with WinError 267. The mirror is a sibling of the
+    source worktree under a runner-owned root, independent of TEMP cleaners and
+    GitHub checkout cleanup. Only this mirror is exposed via an extra --add-dir.
     """
-    root = Path(tempfile.mkdtemp(prefix="agy-ef01-")).resolve(strict=True)
+    base = repo.resolve().parent / "_ef01_agy_inputs"
+    if base.is_symlink():
+        raise ValueError("AGY_INPUT_ROOT_SYMLINK")
+    base.mkdir(mode=0o700, exist_ok=True)
+    if not base.is_dir() or base.is_symlink():
+        raise ValueError("AGY_INPUT_ROOT_UNAVAILABLE")
+    root = Path(tempfile.mkdtemp(prefix="agy-", dir=str(base))).resolve(strict=True)
     if os.name == "nt" and len(str(root).encode("utf-16-le")) // 2 > 180:
         root.rmdir()
         raise ValueError("AGY_INPUT_DIRECTORY_TOO_LONG")
@@ -607,7 +614,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         return
     if selection.executor == "antigravity":
         try:
-            agy_input_dir = _new_agy_input_dir()
+            agy_input_dir = _new_agy_input_dir(repo)
             _write(agy_input_dir / "instruction.txt", prompt.encode("utf-8"))
             if feedback is not None:
                 _write(agy_input_dir / "repair_feedback.json", _json_bytes(feedback))
