@@ -115,6 +115,63 @@ def _run(fixture, mode="pass-after-repair", executor="codex", **kwargs):
     return result, observations, profiles
 
 
+
+def test_focused_brief_is_deterministic_and_never_expands_edit_scope(tmp_path):
+    """EF01's validated paths and registered plan are explicit from the first token."""
+    brief = runner.focused_execution_brief(
+        repo=tmp_path / "worktree",
+        allowed_prefixes=["src\\mod.py", "tests/test_mod.py", "src\\mod.py"],
+        verify_argv=["python", "-m", "pytest", "tests/test_mod.py", "-q"],
+        acceptance_ids=["EF01.execution"])
+    assert brief == runner.focused_execution_brief(
+        repo=tmp_path / "worktree",
+        allowed_prefixes=["src\\mod.py", "tests/test_mod.py", "src\\mod.py"],
+        verify_argv=["python", "-m", "pytest", "tests/test_mod.py", "-q"],
+        acceptance_ids=["EF01.execution"])
+    assert "SOURCE_WORKTREE: " + str(tmp_path / "worktree") in brief
+    assert brief.count("- src/mod.py\n") == 1
+    assert brief.index("- src/mod.py") < brief.index("- tests/test_mod.py")
+    assert "EF01.execution" in brief
+    assert "pytest" in brief and "DO NOT invoke pytest" in brief
+    assert "GIT_CONFIG_*" in brief and "NEVER clear/override" in brief
+    assert "forbidden.py" not in brief
+    broad = runner.focused_execution_brief(
+        repo=tmp_path / "worktree", allowed_prefixes=(),
+        verify_argv=["python", "-m", "pytest", "-q"])
+    assert "UNSPECIFIED" in broad and "scope is narrowed" in broad
+    assert "AUTHORIZED_EDIT_START_TARGETS (priority order" not in broad
+
+
+@pytest.mark.parametrize("executor", ["codex", "antigravity"])
+def test_focused_brief_reaches_both_models_and_repair_without_child_pytest(fixture, executor):
+    """One bounded fake provider per repair round, real registered EF01 verifier."""
+    result, calls, _ = _run(
+        fixture, executor=executor, mode="pass-after-repair",
+        max_repair_rounds=1, acceptance_ids=["EF01.execution"])
+    assert result["status"] == "BUILD_VERIFIED_FOR_SCOPE"
+    assert result["repair_rounds_used"] == 1
+    assert len(calls) == 2
+    for item in calls:
+        sent = item["prompt"]
+        assert sent.index("AI COMMERCE FOCUSED EXECUTION BRIEF V1") < sent.index(
+            "Make the scoped change") if item["index"] == 0 else (
+                "AI COMMERCE FOCUSED EXECUTION BRIEF V1" in sent)
+        assert "SOURCE_WORKTREE: " + str(fixture.repo) in sent
+        assert "- impl.py" in sent and "- kept.txt" in sent
+        assert "EF01.execution" in sent
+        assert "DO NOT invoke pytest" in sent
+        assert "NEVER clear/override GIT_CONFIG_*" in sent
+        assert "GIT WRITE GUARD" in sent
+        assert "forbidden.txt" not in sent
+    evidence = fixture.root / "evidence"
+    for invocation in result["invocations"]:
+        path = evidence / invocation["evidence_files"]["focus_brief"]
+        assert path.is_file()
+        assert "AUTHORIZED_EDIT_START_TARGETS" in path.read_text(encoding="utf-8")
+        assert invocation["evidence_sha256"]["focus_brief"] == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+
 @pytest.mark.parametrize("executor", ["codex", "antigravity"])
 def test_fail_repair_pass_same_profile_worktree_and_immutable_evidence(fixture, executor):
     sandbox = "mxc" if executor == "codex" else None
@@ -896,6 +953,8 @@ def test_antigravity_argv_budget_records_complete_original_prompt(fixture):
         assert len(roots) == 2 and roots[-1] == fixture.repo
         mirror = roots[0] / "instruction.txt"
         assert mirror.is_file()
+        focused = roots[0] / "focus.brief.txt"
+        assert focused.is_file() and "AI COMMERCE FOCUSED EXECUTION BRIEF V1" in focused.read_text()
         observed_mirrors.append((mirror, mirror.read_bytes(),
                                  (roots[0] / "provider_boundary.json").exists()))
         (fixture.repo / "impl.py").write_text("good")
@@ -925,6 +984,9 @@ def test_antigravity_argv_budget_records_complete_original_prompt(fixture):
     assert exposed_boundary is False
     assert evidence not in mirror.parents
     assert str(mirror) in transport.read_text(encoding="utf-8")
+    assert str(mirror.parent / "focus.brief.txt") in transport.read_text(encoding="utf-8")
+    assert "SOURCE_WORKTREE: " + str(fixture.repo) in transport.read_text(encoding="utf-8")
+    assert "FIRST read the focused execution brief" in transport.read_text(encoding="utf-8")
     assert str(original) not in transport.read_text(encoding="utf-8")
     assert not mirror.exists()
     assert inv["agy_input_cleanup"] == "CLEANED"

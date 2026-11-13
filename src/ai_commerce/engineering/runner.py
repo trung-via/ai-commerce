@@ -382,6 +382,58 @@ AGY_INPUT_CONTEXT = (
 )
 
 
+
+def focused_execution_brief(*, repo: Path, allowed_prefixes: Sequence[str],
+                            verify_argv: Sequence[str],
+                            acceptance_ids: Sequence[str] = ()) -> str:
+    """Authoritative per-attempt *guidance*, derived only from EF01-validated inputs.
+
+    Not a new edit grant, tool sandbox, or test result. The entire authorized
+    target list remains available even when AGY needs compact transport.
+    """
+    targets = list(dict.fromkeys(
+        path.replace(chr(92), "/").strip()
+        for path in allowed_prefixes if isinstance(path, str) and path.strip()
+    ))
+    lines = [
+        "AI COMMERCE FOCUSED EXECUTION BRIEF V1",
+        "SOURCE_WORKTREE: " + str(repo),
+        "BEGIN IMMEDIATELY: inspect the first authorized target below, then "
+        "only the direct owners/consumers required by the Human change.",
+        "Run all shell/edit tools from SOURCE_WORKTREE, not agy_input, GitHub "
+        "artifact locations, a sibling worktree, or a temporary debug folder.",
+        "Do the requested scoped source edit and return a concise result. "
+        "Do not add general investigations, alternative solutions, or unrelated fixes.",
+    ]
+    if targets:
+        lines.extend(["AUTHORIZED_EDIT_START_TARGETS (priority order; not new permissions):",
+                      *("- " + name for name in targets)])
+    else:
+        lines.append("AUTHORIZED_EDIT_START_TARGETS: UNSPECIFIED. Do not "
+                     "pretend the scope is narrowed; use the original Human "
+                     "instruction and EF01's unchanged scope guards.")
+    if acceptance_ids:
+        lines.append("REGISTERED_ACCEPTANCE_IDS: " +
+                     json.dumps(list(acceptance_ids), ensure_ascii=False))
+    lines.extend([
+        "REGISTERED_VERIFICATION (EF01/MT-01 runs AFTER the model returns): " +
+        json.dumps(list(verify_argv), ensure_ascii=False),
+        "EXECUTOR RULE: DO NOT invoke pytest, pytest-xdist, a broad test suite, "
+        "the registered verification command, or a bespoke nested Git-test "
+        "harness. You may inspect/edit only needed source and add focused "
+        "offline tests; EF01 independently executes verification.",
+        "GIT GUARD RULE: NEVER clear/override GIT_CONFIG_* or "
+        "AI_COMMERCE_GIT_GUARD_* variables, disable Git hooks, change Git "
+        "HEAD/refs/config, or retry a blocked Git operation. Tests that "
+        "require git init/commit belong to trusted EF01 verification, not "
+        "the executor child environment.",
+        "If a tool is denied or source context is insufficient, report the "
+        "specific blocker and stop; no workaround, duplicate searches, "
+        "provider retry, or hidden side effects.",
+    ])
+    return "\n".join(lines) + "\n"
+
+
 def validate_max_repair_rounds(value: int) -> int:
     if type(value) is not int or not 0 <= value <= MAX_REPAIR_ROUNDS:
         raise ValueError(f"max_repair_rounds must be an integer from 0 to {MAX_REPAIR_ROUNDS}")
@@ -606,7 +658,8 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
                     git_executable: str | None = None, mt_context: dict | None = None,
                     pytest_profile: str = "windows-12", pytest_isolation_approved: bool = False,
                     pytest_known_flaky: bool = False, host_slots: int = 1,
-                    verify_first_scope: bool = True) -> None:
+                    verify_first_scope: bool = True,
+                    acceptance_ids: Sequence[str] = ()) -> None:
     inv = invocation
     invocation_started = time.monotonic()
     directory = output_dir / inv["evidence_dir"]
@@ -651,9 +704,17 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
             inv.update(status="EXECUTOR_UNAVAILABLE", error_code="AGY_INPUT_PRECHECK_FAILED",
                        executor_invoked=False)
             return
-    # Preserve the original instruction evidence; guard only the provider wire prompt.
-    context = AGY_INPUT_CONTEXT if selection.executor == "antigravity" else ""
-    guarded_prompt = GIT_GUARD_INSTRUCTION + "\n\n" + context + prompt
+    # Source/verification context is derived from already-authorized EF01 args.
+    # Original Human/repair instruction bytes and hashes remain unchanged.
+    focus_brief = focused_execution_brief(
+        repo=repo, allowed_prefixes=allowed_prefixes, verify_argv=verify_argv,
+        acceptance_ids=(acceptance_ids or (mt_context.get("required_acs", ()) if mt_context else ())))
+    save("focus_brief", "focus.brief.txt", focus_brief.encode("utf-8"))
+    if agy_input_dir is not None:
+        _write(agy_input_dir / "focus.brief.txt", focus_brief.encode("utf-8"))
+    context = AGY_INPUT_CONTEXT + "\n\n" if selection.executor == "antigravity" else ""
+    guarded_prompt = (GIT_GUARD_INSTRUCTION + "\n\n" +
+                      context + focus_brief + "\n" + prompt)
     command, stdin = command_for(selection, repo, guarded_prompt, codex_bin=codex_bin,
                                  antigravity_bin=antigravity_bin,
                                  codex_windows_sandbox=codex_windows_sandbox,
@@ -661,13 +722,23 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     if selection.executor == "antigravity" and _windows_command_units(command) > AGY_COMMANDLINE_MAX_UNITS:
         # Preserve the complete original instruction/feedback on disk. Shorten only
         # the transported --print argument; never truncate recorded diagnostics.
+        # The full scope-specific brief travels via a read-only sidecar, not
+        # via a truncated Windows command argument. The first target is also
+        # visible in the compact prompt so the executor can start immediately.
+        starting = next((p.strip().replace(chr(92), "/") for p in allowed_prefixes
+                         if isinstance(p, str) and p.strip()), "")
+        preview = ("Start with: " + starting[:160] + ". ") if starting else ""
         compact = (
             GIT_GUARD_INSTRUCTION + " " + AGY_INPUT_CONTEXT +
-            "Read and follow the complete authorized instruction file "
-            + str((agy_input_dir or directory) / "instruction.txt") + " (UTF-8; SHA256 "
+            "SOURCE_WORKTREE: " + str(repo) + ". " + preview +
+            "FIRST read the focused execution brief " +
+            str((agy_input_dir or directory) / "focus.brief.txt") +
+            " (SHA256 " + _sha(focus_brief.encode("utf-8")) + "), then " +
+            "read the complete original authorized instruction file " +
+            str((agy_input_dir or directory) / "instruction.txt") + " (UTF-8; SHA256 "
             + _sha(prompt.encode("utf-8")) + "). "
-            "Keep the same worktree, source HEAD, executor/model/effort and allowed scope. "
-            "This file contains the full original request and any repair evidence references."
+            "Do the scoped edit; EF01 performs registered pytest after your return. "
+            "Never disable Git guards, rerun pytest, change refs, or start broad debugging."
         )
         command = list(command)
         if "--print" not in command:
@@ -1244,7 +1315,7 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                     git_executable=git_executable, mt_context=mt_context,
                     pytest_profile=pytest_profile, pytest_isolation_approved=pytest_isolation_approved,
                     pytest_known_flaky=pytest_known_flaky, host_slots=host_slots,
-                    verify_first_scope=verify_first_scope)
+                    verify_first_scope=verify_first_scope, acceptance_ids=acceptance_ids)
             except Exception as exc:
                 inv.update(status="EXECUTION_UNKNOWN",
                            error_code="ACTION_TIMEOUT" if isinstance(exc, TimeoutError) else "RUNNER_ERROR",
