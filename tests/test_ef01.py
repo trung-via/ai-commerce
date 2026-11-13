@@ -153,7 +153,7 @@ def test_agy_timeout_preserves_boundary_and_readonly_reconciliation(
     assert invocation["verify_completed"] is False
     assert result["repair_rounds_used"] == 0
     assert (evidence / "provider_timeout.json").is_file()
-    artifact = evidence / "invocations" / "000" / "source.after_timeout_untrusted.json"
+    artifact = evidence / "invocations" / "000" / "timeout.snap.json"
     if post_timeout_snapshot_fails:
         assert invocation["post_timeout_snapshot_status"] == "UNVERIFIED"
         assert invocation["post_timeout_snapshot_error_type"] == "RuntimeError"
