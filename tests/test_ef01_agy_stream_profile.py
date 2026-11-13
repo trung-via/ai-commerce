@@ -221,3 +221,11 @@ def test_stream_safe_tool_kinds_count_provider_internal_pytest_without_command_l
     assert "SECRET" not in json.dumps(profile)
     assert "PRIVATE" not in json.dumps(profile)
     assert "SECRET" not in result.stdout
+
+
+def test_agy_stream_profile_rejects_nonstream_output_mode(tmp_path):
+    with pytest.raises(ValueError, match="AGY_STREAM_PROFILE_COMMAND_INVALID"):
+        run_agy_stream_profile(
+            ["agy", "--print", "probe", "--output-format", "json"],
+            repo=tmp_path, timeout_seconds=1, env={}, profile={})
+
