@@ -46,13 +46,13 @@ def _valid_events(*, tool_info=None, status="SUCCESS"):
     return steps
 
 
-def _run(tmp_path, events, *, delay_seconds=0, timeout_seconds=10):
+def _run(tmp_path, events, *, delay_seconds=0, timeout_seconds=10, progress_path=None):
     binary = _script(tmp_path, events, delay_seconds=delay_seconds)
     profile = {}
     cmd = [binary, "--print", "task", "--output-format", "stream-json"]
     result = run_agy_stream_profile(
         cmd, repo=tmp_path, timeout_seconds=timeout_seconds,
-        env=os.environ.copy(), profile=profile)
+        env=os.environ.copy(), profile=profile, progress_path=progress_path)
     return result, profile
 
 
@@ -221,6 +221,80 @@ def test_stream_safe_tool_kinds_count_provider_internal_pytest_without_command_l
     assert "SECRET" not in json.dumps(profile)
     assert "PRIVATE" not in json.dumps(profile)
     assert "SECRET" not in result.stdout
+
+
+
+def test_safe_checkpoint_preserves_active_tool_category_without_private_payload(tmp_path):
+    """A hanging provider leaves a bounded, untrusted diagnostic, not a PASS."""
+    events = [
+        {"event": "init", "init": {"cwd": "PRIVATE-DIR"}},
+        {"event": "step_update", "step_update": {
+            "step_index": 1, "state": "ACTIVE", "step_type": "tool",
+            "tool_name": "read_file",
+            "tool_info": {"parameters": {"path": "SECRET-USER-PATH"},
+                          "output": "SECRET-CONTENT"}}},
+    ]
+    binary = _script(tmp_path, events, delay_seconds=5)
+    progress = tmp_path / "agy.safe-progress.json"
+    profile = {}
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_agy_stream_profile(
+            [binary, "--print", "task", "--output-format", "stream-json"],
+            repo=tmp_path, timeout_seconds=0.8, env=os.environ.copy(),
+            profile=profile, progress_path=progress)
+    safe = json.loads(progress.read_text(encoding="utf-8"))
+    assert safe["schema"] == "AI_COMMERCE_AGY_SAFE_PROGRESS_V1"
+    assert safe["stage"] == "TIMED_OUT"
+    assert safe["last_step_kind"] == "tool"
+    assert safe["last_step_state"] == "ACTIVE"
+    assert safe["last_tool_kind"] == "read"
+    assert safe["events_observed"] == 2
+    assert safe["provisional"] is True and safe["terminal_proven"] is False
+    assert safe["replay_authorized"] is False
+    assert isinstance(safe["process_pid_observed"], int)
+    assert profile["timed_out"] is True
+    assert profile["safe_checkpoint_status"] == "RECORDED"
+    assert all(word not in json.dumps(safe) for word in (
+        "SECRET", "PRIVATE", "CommandLine", "tool_info", "response"))
+
+
+def test_safe_checkpoint_success_remains_provisional_and_sanitized(tmp_path):
+    progress = tmp_path / "agy.safe-progress.json"
+    result, profile = _run(tmp_path, _valid_events(), progress_path=progress)
+    safe = json.loads(progress.read_text(encoding="utf-8"))
+    assert result.returncode == 0 and profile["stream_valid"] is True
+    assert profile["safe_checkpoint_status"] == "RECORDED"
+    assert safe["stage"] == "FINISHED"
+    assert safe["events_observed"] == len(_valid_events())
+    assert safe["terminal_proven"] is False
+    assert "PRIVATE" not in json.dumps(safe)
+    assert "SECRET" not in json.dumps(safe)
+
+
+def test_checkpoint_write_failure_cannot_overwrite_provider_result(tmp_path):
+    missing = tmp_path / "missing-directory" / "agy.progress.json"
+    result, profile = _run(tmp_path, _valid_events(), progress_path=missing)
+    assert result.returncode == 0
+    assert profile["stream_valid"] is True
+    assert profile["safe_checkpoint_status"] == "UNAVAILABLE"
+    assert not missing.exists()
+
+
+def test_p1a_stream_diagnostics_use_existing_strict_owner_issue_gate():
+    from pathlib import Path
+    workflow = (Path(__file__).resolve().parents[1] /
+                ".github" / "workflows" / "ef02-batch.yml").read_text(encoding="utf-8")
+    line = next(line for line in workflow.splitlines()
+                if "AI_COMMERCE_EF01_AGY_STREAM_PROFILE:" in line)
+    for condition in (
+        "github.event.action == 'opened'",
+        "github.actor == github.repository_owner",
+        "github.event.issue.user.login == github.repository_owner",
+        "startsWith(github.event.issue.title, '[EF02][P1A-AGY-DIAG] ')",
+        "startsWith(github.event.issue.title, '[EF02][P0B-AGY-STREAM-SMOKE] ')",
+        "&& '1' || '0'",
+    ):
+        assert condition in line
 
 
 def test_agy_stream_profile_rejects_nonstream_output_mode(tmp_path):
