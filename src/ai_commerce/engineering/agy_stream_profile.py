@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import subprocess
 import threading
@@ -36,6 +37,7 @@ _PYTEST_PREFIX = re.compile(
 def run_agy_stream_profile(
     command: Sequence[str], *, repo: Path, timeout_seconds: float,
     env: dict[str, str], profile: dict[str, Any],
+    progress_path: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run ONE AGY process; consume NDJSON without storing untrusted step data.
 
@@ -67,11 +69,51 @@ def run_agy_stream_profile(
     durations = {category: 0.0 for category in _CATEGORIES}
     tool_kinds = {kind: 0 for kind in _TOOL_BUCKETS}
     pytest_tool_commands = 0
+    checkpoint_error: str | None = None
+    last_checkpoint_at = started
+    last_event_at: float | None = None
+    last_step_kind = "none"
+    last_step_state = "none"
+    last_tool_kind = "none"
+
+    def persist_checkpoint(stage: str) -> None:
+        """Persist only fixed enums, counts and relative times, never NDJSON text."""
+        nonlocal checkpoint_error, last_checkpoint_at
+        if progress_path is None or checkpoint_error is not None:
+            return
+        safe = {
+            "schema": "AI_COMMERCE_AGY_SAFE_PROGRESS_V1",
+            "provisional": True,
+            "terminal_proven": False,
+            "replay_authorized": False,
+            "stage": stage,
+            "process_pid_observed": proc.pid,
+            "elapsed_seconds": round(time.monotonic() - started, 4),
+            "last_event_elapsed_seconds": (
+                round(last_event_at - started, 4) if last_event_at is not None else None),
+            "events_observed": min(event_count, _MAX_EVENTS),
+            "step_events_observed": min(step_events, _MAX_EVENTS),
+            "last_step_kind": last_step_kind,
+            "last_step_state": last_step_state,
+            "last_tool_kind": last_tool_kind,
+            "steps_done_by_category": dict(counts),
+            "tool_calls_by_safe_kind": dict(tool_kinds),
+            "permission_gate_observed": bool(permission_gate),
+            "tool_error_observed": bool(tool_error),
+        }
+        try:
+            temporary = progress_path.with_name(progress_path.name + ".tmp")
+            temporary.write_text(json.dumps(safe, sort_keys=True) + "\n", encoding="utf-8")
+            os.replace(temporary, progress_path)
+            last_checkpoint_at = time.monotonic()
+        except (OSError, ValueError, UnicodeError) as exc:
+            checkpoint_error = type(exc).__name__
 
     def drain_stdout(stream) -> None:
         nonlocal first_event, first_step, terminal_time, terminal
         nonlocal seen_init, seen_result, invalid, tool_error, permission_gate
         nonlocal event_count, step_events, pytest_tool_commands
+        nonlocal last_event_at, last_step_kind, last_step_state, last_tool_kind
         try:
             while True:
                 raw = stream.readline(_MAX_LINE_CHARS + 1)
@@ -89,6 +131,7 @@ def run_agy_stream_profile(
                     invalid = True
                     continue
                 now = time.monotonic()
+                last_event_at = now
                 try:
                     item = json.loads(raw)
                 except (ValueError, TypeError):
@@ -104,6 +147,7 @@ def run_agy_stream_profile(
                     else:
                         seen_init = True
                         first_event = now
+                        persist_checkpoint("INIT")
                 elif kind == "step_update":
                     if not seen_init or seen_result:
                         invalid = True
@@ -121,7 +165,12 @@ def run_agy_stream_profile(
                     if first_step is None:
                         first_step = now
                     step_events += 1
+                    last_step_kind = step_type if step_type in _CATEGORIES else "other"
+                    last_step_state = state
                     if step_type == "tool":
+                        name = value.get("tool_name")
+                        last_tool_kind = _TOOL_KINDS.get(name, "other") if isinstance(name, str) else "other"
+
                         info = value.get("tool_info")
                         if info is not None and not isinstance(info, dict):
                             invalid = True
@@ -162,6 +211,8 @@ def run_agy_stream_profile(
                                 invalid = True
                             else:
                                 durations[category] += float(duration)
+                    if step_type == "tool" or now - last_checkpoint_at >= 15 or first_step == now:
+                        persist_checkpoint("STEP_ACTIVE" if state == "ACTIVE" else "STEP_DONE")
                 elif kind == "result":
                     if not seen_init or seen_result or not isinstance(item.get("result"), dict):
                         invalid = True
@@ -171,6 +222,7 @@ def run_agy_stream_profile(
                     terminal = item["result"]
                     if not isinstance(terminal.get("status"), str) or not terminal["status"]:
                         invalid = True
+                    persist_checkpoint("RESULT_EVENT")
                 else:
                     invalid = True
         except Exception as exc:
@@ -197,6 +249,7 @@ def run_agy_stream_profile(
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding="utf-8", errors="replace", bufsize=1, env=env,
     )
+    persist_checkpoint("SPAWNED")
     out_thread = threading.Thread(target=drain_stdout, args=(proc.stdout,), daemon=True)
     err_thread = threading.Thread(target=drain_stderr, args=(proc.stderr,), daemon=True)
     out_thread.start()
@@ -217,9 +270,12 @@ def run_agy_stream_profile(
         valid = (not invalid and not timed_out and seen_init and seen_result and
                  terminal is not None and event_count <= _MAX_EVENTS and
                  not (proc.returncode != 0 and terminal.get("status") == "SUCCESS"))
+        persist_checkpoint("TIMED_OUT" if timed_out else "FINISHED")
         profile.clear()
         profile.update({
             "schema": "AI_COMMERCE_AGY_STREAM_PROFILE_V1",
+            "safe_checkpoint_status": ("DISABLED" if progress_path is None else
+                                       "RECORDED" if checkpoint_error is None else "UNAVAILABLE"),
             "stream_valid": bool(valid),
             "timed_out": timed_out,
             "wall_seconds": round(elapsed, 4),
