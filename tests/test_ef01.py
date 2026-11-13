@@ -110,6 +110,63 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'cached_inp
     assert invocation["git_guard_cleanup"] == "RETAINED_UNTIL_QUIESCENT"
 
 
+@pytest.mark.parametrize("post_timeout_snapshot_fails", [False, True])
+def test_agy_timeout_preserves_boundary_and_readonly_reconciliation(
+        tmp_path, monkeypatch, post_timeout_snapshot_fails):
+    """A hung provider cannot erase the original timeout or authorize its replay."""
+    import time
+    from ai_commerce.engineering import runner as runner_module
+
+    repo = _repo(tmp_path)
+    monkeypatch.setenv("AI_COMMERCE_EF01_AGY_STREAM_PROFILE", "1")
+
+    def blocked_agy(command, *, repo, timeout_seconds, env, profile):
+        (repo / "partial.txt").write_text("untrusted\\n", encoding="utf-8")
+        time.sleep(timeout_seconds + 0.15)
+        raise subprocess.TimeoutExpired(command, timeout_seconds)
+
+    monkeypatch.setattr(runner_module, "run_agy_stream_profile", blocked_agy)
+    original_snapshot = runner_module._snapshot
+    calls = [0]
+
+    def read_only_snapshot(*args, **kwargs):
+        calls[0] += 1
+        if post_timeout_snapshot_fails and calls[0] >= 3:
+            raise RuntimeError("SYNTHETIC_POST_TIMEOUT_SNAPSHOT_FAILED")
+        return original_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(runner_module, "_snapshot", read_only_snapshot)
+    evidence = tmp_path / "timeout-evidence"
+    result = execute_attempt(
+        repo=repo, output_dir=evidence, work_id="AGY-timeout-fixture",
+        attempt_id="single-invocation", selection=ExecutorSelection(
+            "antigravity", "synthetic-model", "high"),
+        instruction="No live provider in this fixture",
+        verify_argv=[sys.executable, "-c", "assert False"],
+        allowed_prefixes=["partial.txt"], timeout_seconds=1,
+        action_timeout_seconds=1, max_repair_rounds=0)
+    invocation = result["invocations"][0]
+    assert result["status"] == "EXECUTION_UNKNOWN"
+    assert result["error_code"] == "EXECUTOR_TIMEOUT"
+    assert invocation["error_code"] == "EXECUTOR_TIMEOUT"
+    assert invocation["replay_authorized"] is False
+    assert invocation["verify_completed"] is False
+    assert result["repair_rounds_used"] == 0
+    assert (evidence / "provider_timeout.json").is_file()
+    artifact = evidence / "invocations" / "000" / "source.after_timeout_untrusted.json"
+    if post_timeout_snapshot_fails:
+        assert invocation["post_timeout_snapshot_status"] == "UNVERIFIED"
+        assert invocation["post_timeout_snapshot_error_type"] == "RuntimeError"
+        assert not artifact.exists()
+    else:
+        assert invocation["post_timeout_snapshot_status"] == "OBSERVED_UNTRUSTED"
+        observed = json.loads(artifact.read_text(encoding="utf-8"))
+        assert observed["quiescence_proven"] is False
+        assert observed["changed_files"] == ["partial.txt"]
+        assert "untrusted" not in json.dumps(observed)
+        assert result["candidate_file_sha256"] == {}
+
+
 def test_missing_binary_returns_non_pass_and_no_verification(tmp_path):
     repo = _repo(tmp_path)
     o = execute_attempt(repo=repo, output_dir=tmp_path / "evidence", work_id="w", attempt_id="a",
