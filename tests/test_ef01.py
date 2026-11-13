@@ -120,7 +120,7 @@ def test_agy_timeout_preserves_boundary_and_readonly_reconciliation(
     repo = _repo(tmp_path)
     monkeypatch.setenv("AI_COMMERCE_EF01_AGY_STREAM_PROFILE", "1")
 
-    def blocked_agy(command, *, repo, timeout_seconds, env, profile):
+    def blocked_agy(command, *, repo, timeout_seconds, env, profile, progress_path=None):
         (repo / "partial.txt").write_text("untrusted\\n", encoding="utf-8")
         time.sleep(timeout_seconds + 0.15)
         raise subprocess.TimeoutExpired(command, timeout_seconds)
