@@ -724,7 +724,8 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         if agy_stream_enabled:
             process = run_agy_stream_profile(
                 command, repo=repo, timeout_seconds=budget,
-                env=child_env, profile=agy_stream_profile)
+                env=child_env, profile=agy_stream_profile,
+                progress_path=directory / "agy.safe-progress.json")
         elif selection.executor == "codex" and os.environ.get("AI_COMMERCE_EF01_CODEX_STREAM_EVENTS") == "1":
             live = (output_dir if inv["repair_round"] == 0 else directory) / "executor.stdout.live.jsonl"
             process = _run_codex_with_live_event_mirror(
