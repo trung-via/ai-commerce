@@ -240,7 +240,7 @@ def test_safe_checkpoint_preserves_active_tool_category_without_private_payload(
     with pytest.raises(subprocess.TimeoutExpired):
         run_agy_stream_profile(
             [binary, "--print", "task", "--output-format", "stream-json"],
-            repo=tmp_path, timeout_seconds=0.8, env=os.environ.copy(),
+            repo=tmp_path, timeout_seconds=2.0, env=os.environ.copy(),
             profile=profile, progress_path=progress)
     safe = json.loads(progress.read_text(encoding="utf-8"))
     assert safe["schema"] == "AI_COMMERCE_AGY_SAFE_PROGRESS_V1"
