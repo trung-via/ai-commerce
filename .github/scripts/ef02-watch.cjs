@@ -10,22 +10,31 @@ const RUNNING_ADVISORY_MS = 2 * 60 * 60 * 1000;
 // failures. A grace period lets normal event delivery and worker comments win.
 const TERMINAL_GRACE_MS = 5 * 60 * 1000;
 const TERMINAL_LOOKBACK_MS = 24 * 60 * 60 * 1000;
-const TARGET_FILE = 'ef02-batch.yml';
+const TARGET_FILES = ['ef02-batch.yml', 'issue-ingress.yml'];
 const reconcile = require('./ef02-reconcile.cjs');
 
 function issueNumber(run, repoFullName) {
-  // GitHub overrides run.name with run-name; watcher workflow/event already scopes the workflow.
   if (!run || run.head_repository?.full_name !== repoFullName) return null;
-  const match = /^EF02 Issue #(\d+)$/.exec(run.display_title || '');
+  const title = run.display_title || '';
+  // Direct workflow_dispatch runs use the reusable workflow's run-name.
+  // Issue-triggered reusable jobs belong to the outer issue-ingress run,
+  // whose title is the original EF02 Issue title plus (#N, opened/labeled).
+  const match = /^EF02 Issue #(\d+)$/.exec(title) ||
+    /^\[EF02\][^\r\n]* \(#(\d+), (?:opened|labeled)\)$/.exec(title);
   if (!match) return null;
   const id = Number(match[1]);
   return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
+function jobByName(jobs, name) {
+  // Reusable workflow jobs appear as "ef02 / validate" under issue-ingress.
+  return jobs.find(job => job.name === name || job.name === 'ef02 / ' + name);
+}
+
 function classifyTerminal(run, jobs) {
   if (run.status !== 'completed' || run.conclusion === 'success') return null;
-  const validate = jobs.find(j => j.name === 'validate');
-  const execute = jobs.find(j => j.name === 'execute');
+  const validate = jobByName(jobs, 'validate');
+  const execute = jobByName(jobs, 'execute');
   if (validate?.conclusion === 'failure' && execute?.conclusion === 'skipped') {
     return {code: 'HOSTED_INGRESS_REJECTED', detail:
       'Hosted validation/ingress failed and Windows execution was skipped. ' +
@@ -59,9 +68,10 @@ function classifyQueued(run, jobs, nowMs) {
   if (run.status !== 'queued' && run.status !== 'in_progress') return null;
   const age = nowMs - Date.parse(run.created_at || '');
   if (!Number.isFinite(age) || age < AGE_MS) return null;
-  const validated = jobs.some(j => j.name === 'validate' && j.conclusion === 'success');
+  const validated = jobByName(jobs, 'validate')?.conclusion === 'success';
   if (!validated) return null;
-  if (jobs.some(j => j.name === 'execute' && j.status === 'queued')) {
+  const execute = jobByName(jobs, 'execute');
+  if (execute?.status === 'queued') {
     return {code: 'WINDOWS_JOB_WAITING_UNCONFIRMED', detail:
       'Windows execute job has remained QUEUED after hosted validation. ' +
       'Runner offline is NOT established; possible causes include busy runner or capacity. ' +
@@ -71,7 +81,6 @@ function classifyQueued(run, jobs, nowMs) {
   // unreachable. GitHub's job status alone cannot prove the host is online.
   // Use the EXECUTE job start timestamp, never overall workflow creation
   // time, so slow hosted validation does not count as Windows runtime.
-  const execute = jobs.find(j => j.name === 'execute');
   if (run.status !== 'in_progress' || execute?.status !== 'in_progress') return null;
   const runningAgeMs = nowMs - Date.parse(execute.started_at || '');
   if (!Number.isFinite(runningAgeMs) || runningAgeMs < RUNNING_ADVISORY_MS) return null;
@@ -162,12 +171,18 @@ async function observe({github, context, core}, {nowMs = Date.now()} = {}) {
     return (await notify({github, context, core}, run, status, issue)) ? 1 : 0;
   }
   if (event !== 'schedule') return 0;
-  const {data} = await github.rest.actions.listWorkflowRuns({
-    owner: context.repo.owner, repo: context.repo.repo,
-    workflow_id: TARGET_FILE, per_page: 100
-  });
+  // GitHub reports reusable EF02 jobs on issue-ingress's top-level run.
+  // Observe both entrypoints and dedupe by run ID before posting status.
+  const runsById = new Map();
+  for (const workflow_id of TARGET_FILES) {
+    const {data} = await github.rest.actions.listWorkflowRuns({
+      owner: context.repo.owner, repo: context.repo.repo,
+      workflow_id, per_page: 100
+    });
+    for (const run of data.workflow_runs || []) runsById.set(run.id, run);
+  }
   let reported = 0;
-  for (const run of data.workflow_runs || []) {
+  for (const run of runsById.values()) {
     const issue = issueNumber(run, repoFullName);
     if (!issue) continue;
     let status;

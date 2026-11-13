@@ -1,7 +1,7 @@
 name: EF02 read-only outcome observer
 on:
   workflow_run:
-    workflows: ["EF02 Multi-Action remote engineering"]
+    workflows: ["EF02 Multi-Action remote engineering", "AI Commerce Issue ingress (EF02 / HostOps Personal)"]
     types: [completed]
   schedule:
     - cron: "17,47 * * * *"
