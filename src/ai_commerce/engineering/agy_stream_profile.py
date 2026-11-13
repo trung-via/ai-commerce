@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import subprocess
 import threading
 import time
@@ -19,6 +20,17 @@ _MAX_LINE_CHARS = 524288
 _MAX_STDERR_CHARS = 262144
 _MAX_DURATION_SECONDS = 86400.0
 _CATEGORIES = ("agent_response", "tool", "other")
+_TOOL_KINDS = {
+    "read_file": "read", "list_directory": "search", "search": "search",
+    "grep_search": "search", "find_files": "search",
+    "write_to_file": "write", "edit_file": "write",
+    "run_command": "command", "execute_command": "command",
+}
+_TOOL_BUCKETS = ("read", "search", "write", "command", "other")
+_PYTEST_PREFIX = re.compile(
+    r"^\s*(?:(?:python(?:\.exe)?|py(?:\.exe)?)\s+-m\s+pytest\b|pytest(?:\.exe)?\b)",
+    re.IGNORECASE,
+)
 
 
 def run_agy_stream_profile(
@@ -53,11 +65,13 @@ def run_agy_stream_profile(
     seen_done: set[int] = set()
     counts = {category: 0 for category in _CATEGORIES}
     durations = {category: 0.0 for category in _CATEGORIES}
+    tool_kinds = {kind: 0 for kind in _TOOL_BUCKETS}
+    pytest_tool_commands = 0
 
     def drain_stdout(stream) -> None:
         nonlocal first_event, first_step, terminal_time, terminal
         nonlocal seen_init, seen_result, invalid, tool_error, permission_gate
-        nonlocal event_count, step_events
+        nonlocal event_count, step_events, pytest_tool_commands
         try:
             while True:
                 raw = stream.readline(_MAX_LINE_CHARS + 1)
@@ -128,6 +142,18 @@ def run_agy_stream_profile(
                         seen_done.add(index)
                         category = step_type if step_type in ("agent_response", "tool") else "other"
                         counts[category] += 1
+                        if step_type == "tool":
+                            name = value.get("tool_name")
+                            bucket = _TOOL_KINDS.get(name, "other") if isinstance(name, str) else "other"
+                            tool_kinds[bucket] += 1
+                            info = value.get("tool_info")
+                            parameters = info.get("parameters") if isinstance(info, dict) else None
+                            cmd = parameters.get("CommandLine") if isinstance(parameters, dict) else None
+                            # Only the count is retained. Never persist command
+                            # text, argv, tool output, paths or account details.
+                            if (bucket == "command" and isinstance(cmd, str) and
+                                    _PYTEST_PREFIX.match(cmd[:512])):
+                                pytest_tool_commands += 1
                         duration = value.get("duration_seconds")
                         if duration is not None:
                             if (type(duration) not in (int, float) or
@@ -203,6 +229,8 @@ def run_agy_stream_profile(
             "events_observed": min(event_count, _MAX_EVENTS),
             "step_events_observed": min(step_events, _MAX_EVENTS),
             "steps_done_by_category": counts,
+            "tool_calls_by_safe_kind": tool_kinds,
+            "provider_reported_pytest_tool_commands": min(pytest_tool_commands, _MAX_EVENTS),
             "provider_reported_step_seconds_by_category": {
                 key: round(durations[key], 4) for key in _CATEGORIES},
             "tool_error_observed": tool_error,
