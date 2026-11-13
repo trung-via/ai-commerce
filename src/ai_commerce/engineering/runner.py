@@ -800,6 +800,30 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     usage = _observe_usage(out, selection.executor)
     if usage is not None:
         inv.update(usage=usage, usage_status="PROVIDER_REPORTED")
+    # A provider that uses the whole action budget must not erase the original
+    # EXECUTOR_TIMEOUT while taking the read-only source reconciliation snapshot.
+    # This is an observation of possibly still-moving source, NOT quiescence,
+    # permission to retry, verified code, or a candidate for publication.
+    if inv["status"] == "EXECUTION_UNKNOWN" and inv["error_code"] == "EXECUTOR_TIMEOUT":
+        try:
+            fallback_deadline = time.monotonic() + 30
+            options = {"git_executable": git_executable} if git_executable is not None else {}
+            after_timeout, _ = _snapshot(repo, allowed_prefixes, fallback_deadline, **options)
+        except Exception as exc:
+            inv["post_timeout_snapshot_status"] = "UNVERIFIED"
+            inv["post_timeout_snapshot_error_type"] = type(exc).__name__
+        else:
+            inv["post_timeout_snapshot_status"] = "OBSERVED_UNTRUSTED"
+            inv["post_timeout_changed_files"] = after_timeout["changed_files"]
+            save("source_after_timeout_untrusted", "timeout.snap.json",
+                 _json_bytes({
+                     "status": "OBSERVED_UNTRUSTED", "quiescence_proven": False,
+                     "source_base_sha": initial["git_head_after"],
+                     "git_head_after": after_timeout["git_head_after"],
+                     "changed_files": after_timeout["changed_files"],
+                     "tracked_diff_sha256": after_timeout["tracked_diff_sha256"],
+                 }))
+        return
     post_executor_snapshot_clock = time.monotonic()
     after, diff = snapshot()
     inv["post_executor_snapshot_seconds"] = round(
@@ -1254,7 +1278,11 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                         report[key] = inv[key]
                 _write(output_dir / inv["result_file"], _json_bytes(inv))
             if deadline <= time.monotonic():
-                report.update(status="EXECUTION_UNKNOWN", error_code="ACTION_TIMEOUT")
+                report["status"] = "EXECUTION_UNKNOWN"
+                # Preserve the witnessed provider timeout instead of masking it
+                # as an undifferentiated action deadline error.
+                if report.get("error_code") != "EXECUTOR_TIMEOUT":
+                    report["error_code"] = "ACTION_TIMEOUT"
                 break
             if not inv["repair_eligible"]:
                 report["stop_reason"] = inv.get("repair_stop_reason") or inv["error_code"] or inv["status"]
