@@ -392,7 +392,7 @@ def focused_execution_brief(*, repo: Path, allowed_prefixes: Sequence[str],
     target list remains available even when AGY needs compact transport.
     """
     targets = list(dict.fromkeys(
-        path.replace("\\\\", "/").strip()
+        path.replace(chr(92), "/").strip()
         for path in allowed_prefixes if isinstance(path, str) and path.strip()
     ))
     lines = [
@@ -658,7 +658,8 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
                     git_executable: str | None = None, mt_context: dict | None = None,
                     pytest_profile: str = "windows-12", pytest_isolation_approved: bool = False,
                     pytest_known_flaky: bool = False, host_slots: int = 1,
-                    verify_first_scope: bool = True) -> None:
+                    verify_first_scope: bool = True,
+                    acceptance_ids: Sequence[str] = ()) -> None:
     inv = invocation
     invocation_started = time.monotonic()
     directory = output_dir / inv["evidence_dir"]
@@ -707,7 +708,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     # Original Human/repair instruction bytes and hashes remain unchanged.
     focus_brief = focused_execution_brief(
         repo=repo, allowed_prefixes=allowed_prefixes, verify_argv=verify_argv,
-        acceptance_ids=(mt_context.get("required_acs", ()) if mt_context else ()))
+        acceptance_ids=(acceptance_ids or (mt_context.get("required_acs", ()) if mt_context else ())))
     save("focus_brief", "focus.brief.txt", focus_brief.encode("utf-8"))
     if agy_input_dir is not None:
         _write(agy_input_dir / "focus.brief.txt", focus_brief.encode("utf-8"))
@@ -724,7 +725,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         # The full scope-specific brief travels via a read-only sidecar, not
         # via a truncated Windows command argument. The first target is also
         # visible in the compact prompt so the executor can start immediately.
-        starting = next((p.strip().replace("\\\\", "/") for p in allowed_prefixes
+        starting = next((p.strip().replace(chr(92), "/") for p in allowed_prefixes
                          if isinstance(p, str) and p.strip()), "")
         preview = ("Start with: " + starting[:160] + ". ") if starting else ""
         compact = (
@@ -1314,7 +1315,7 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
                     git_executable=git_executable, mt_context=mt_context,
                     pytest_profile=pytest_profile, pytest_isolation_approved=pytest_isolation_approved,
                     pytest_known_flaky=pytest_known_flaky, host_slots=host_slots,
-                    verify_first_scope=verify_first_scope)
+                    verify_first_scope=verify_first_scope, acceptance_ids=acceptance_ids)
             except Exception as exc:
                 inv.update(status="EXECUTION_UNKNOWN",
                            error_code="ACTION_TIMEOUT" if isinstance(exc, TimeoutError) else "RUNNER_ERROR",
