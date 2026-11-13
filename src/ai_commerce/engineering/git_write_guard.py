@@ -116,6 +116,7 @@ def _check_hook(manifest: Path) -> int:
 def git_write_guard_env(
     evidence_dir: Path, *, parent_env: Mapping[str, str] | None = None,
     repo: Path | None = None, git_executable: str = "git",
+    guard_dir: Path | None = None,
 ) -> dict[str, str]:
     """Install per-invocation hooks and return *child-only* Git configuration.
 
@@ -131,8 +132,21 @@ def git_write_guard_env(
     if count > 64:
         raise RuntimeError("GIT_WRITE_GUARD_ENV_INVALID")
 
-    guard_dir = (Path(evidence_dir) / "git-write-guard-hooks").resolve()
-    guard_dir.mkdir(parents=True, exist_ok=False)
+    if guard_dir is None:
+        # Standalone EF01 retains the original evidence-bound hook directory.
+        guard_dir = (Path(evidence_dir) / "git-write-guard-hooks").resolve()
+        guard_dir.mkdir(parents=True, exist_ok=False)
+    else:
+        # Remote EF02 can supply a short, uniquely allocated runner-owned
+        # directory. Never let an override land inside the editable source.
+        guard_dir = Path(guard_dir)
+        if (guard_dir.is_symlink() or not guard_dir.is_dir() or
+                (repo is not None and
+                 (guard_dir.resolve() == repo.resolve() or repo.resolve() in guard_dir.resolve().parents))):
+            raise RuntimeError("GIT_WRITE_GUARD_DIRECTORY_UNSAFE")
+        if any(guard_dir.iterdir()):
+            raise RuntimeError("GIT_WRITE_GUARD_DIRECTORY_NOT_EMPTY")
+        guard_dir = guard_dir.resolve(strict=True)
     protected = _guard_paths(repo, env, git_executable)
     env[_PROTECTED_PATHS_ENV] = json.dumps(
         [str(path) for path in protected] if protected else None)
