@@ -753,11 +753,11 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
             except OSError:
                 inv["agy_input_cleanup"] = "UNCONFIRMED"
         if git_guard_dir is not None:
-            try:
-                shutil.rmtree(git_guard_dir)
-                inv["git_guard_cleanup"] = "CLEANED"
-            except OSError:
-                inv["git_guard_cleanup"] = "UNCONFIRMED"
+            # Keep hooks intact after the CLI exits: a provider may have left a
+            # Git child process alive. Deleting hooks could silently lift the
+            # per-attempt ref-write guard for that child. Safe pruning requires
+            # independently proving the process tree and worktree are quiescent.
+            inv["git_guard_cleanup"] = "RETAINED_UNTIL_QUIESCENT"
         if live is not None and live.exists():
             data = live.read_bytes()
             if live.parent != directory:
