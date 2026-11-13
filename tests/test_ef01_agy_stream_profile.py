@@ -254,8 +254,23 @@ def test_safe_checkpoint_preserves_active_tool_category_without_private_payload(
     assert isinstance(safe["process_pid_observed"], int)
     assert profile["timed_out"] is True
     assert profile["safe_checkpoint_status"] == "RECORDED"
+    # Exact key exclusion: "agent_response" is a permitted fixed count key.
+    assert set(safe) == {
+        "schema", "provisional", "terminal_proven", "replay_authorized",
+        "stage", "process_pid_observed", "elapsed_seconds",
+        "last_event_elapsed_seconds", "events_observed",
+        "step_events_observed", "last_step_kind", "last_step_state",
+        "last_tool_kind", "steps_done_by_category",
+        "tool_calls_by_safe_kind", "permission_gate_observed",
+        "tool_error_observed",
+    }
+    assert "response" not in safe
+    assert set(safe["steps_done_by_category"]) == {"agent_response", "tool", "other"}
+    assert set(safe["tool_calls_by_safe_kind"]) == {
+        "read", "search", "write", "command", "other",
+    }
     assert all(word not in json.dumps(safe) for word in (
-        "SECRET", "PRIVATE", "CommandLine", "tool_info", "response"))
+        "SECRET", "PRIVATE", "CommandLine", "tool_info"))
 
 
 def test_safe_checkpoint_success_remains_provisional_and_sanitized(tmp_path):
