@@ -174,6 +174,75 @@ def test_scoped_hooks_allow_independent_fixture_but_protect_linked_worktree(tmp_
     assert _git(disposable, "commit", "--allow-empty", "-qm", "fixture", env=child).returncode == 0
 
 
+
+def test_short_git_guard_isolated_from_deep_evidence_and_still_blocks_git(tmp_path):
+    """#837/#844 regression: hook paths must not depend on long evidence names."""
+    import shutil
+    from ai_commerce.engineering.runner import _new_git_guard_dir
+
+    repo = _repo(tmp_path)
+    base_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    deep = tmp_path / ("batch-" + "b" * 80) / ("action-" + "a" * 80) / "ef01" / "invocations" / "000"
+    hooks = _new_git_guard_dir(repo)
+    try:
+        env = git_write_guard_env(deep, repo=repo, guard_dir=hooks)
+        registered = Path(env[f"GIT_CONFIG_VALUE_{int(env['GIT_CONFIG_COUNT']) - 1}"])
+        assert registered.resolve() == hooks.resolve()
+        assert deep not in registered.parents
+        assert (registered / "reference-transaction").is_file()
+        assert os.name != "nt" or len(str(registered).encode("utf-16-le")) // 2 <= 180
+        denied = _git(repo, "commit", "--allow-empty", "-m", "blocked", env=env)
+        assert denied.returncode != 0
+        assert "AI_COMMERCE_GIT_WRITE_BLOCKED" in (denied.stderr + denied.stdout)
+        assert _git(repo, "rev-parse", "HEAD").stdout.strip() == base_sha
+    finally:
+        shutil.rmtree(hooks)
+
+
+def test_git_guard_override_rejects_source_and_nonempty_directory(tmp_path):
+    from ai_commerce.engineering.runner import _new_git_guard_dir
+    import shutil
+
+    repo = _repo(tmp_path)
+    inside = repo / "unsafe-hooks"
+    inside.mkdir()
+    with pytest.raises(RuntimeError, match="GIT_WRITE_GUARD_DIRECTORY_UNSAFE"):
+        git_write_guard_env(tmp_path / "evidence", repo=repo, guard_dir=inside)
+    assert not list(inside.iterdir())
+
+    hooks = _new_git_guard_dir(repo)
+    try:
+        (hooks / "sentinel").write_text("preserve", encoding="utf-8")
+        with pytest.raises(RuntimeError, match="GIT_WRITE_GUARD_DIRECTORY_NOT_EMPTY"):
+            git_write_guard_env(tmp_path / "evidence", repo=repo, guard_dir=hooks)
+        assert (hooks / "sentinel").read_text(encoding="utf-8") == "preserve"
+    finally:
+        shutil.rmtree(hooks)
+
+
+def test_git_guard_preflight_failure_never_invokes_executor(tmp_path, monkeypatch):
+    from ai_commerce.engineering import runner
+
+    repo = _repo(tmp_path)
+    def bad_guard(_repo):
+        raise ValueError("GIT_GUARD_DIRECTORY_TOO_LONG")
+
+    monkeypatch.setattr(runner, "_new_git_guard_dir", bad_guard)
+    result = execute_attempt(
+        repo=repo, output_dir=tmp_path / "evidence",
+        work_id="guard-preflight", attempt_id="guard-preflight-a",
+        selection=ExecutorSelection("codex", "model-x", "high"),
+        instruction="edit data.txt",
+        verify_argv=[sys.executable, "-c", "raise AssertionError('not reached')"],
+        codex_bin="nonexistent-codex-preflight-999",
+    )
+    assert result["status"] == "EXECUTOR_UNAVAILABLE"
+    assert result["error_code"] == "GIT_WRITE_GUARD_PRECHECK_FAILED"
+    assert result["executor_invoked"] is False
+    assert result["verify_exit_code"] is None
+    assert not (tmp_path / "evidence" / "provider_boundary.json").exists()
+
+
 def _fake_cli(tmp_path: Path):
     script = tmp_path / "fake_provider.py"
     script.write_text(
