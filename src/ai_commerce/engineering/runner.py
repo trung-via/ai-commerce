@@ -815,7 +815,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         else:
             inv["post_timeout_snapshot_status"] = "OBSERVED_UNTRUSTED"
             inv["post_timeout_changed_files"] = after_timeout["changed_files"]
-            save("source_after_timeout_untrusted", "source.after_timeout_untrusted.json",
+            save("source_after_timeout_untrusted", "timeout.snap.json",
                  _json_bytes({
                      "status": "OBSERVED_UNTRUSTED", "quiescence_proven": False,
                      "source_base_sha": initial["git_head_after"],
