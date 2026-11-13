@@ -97,6 +97,18 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'cached_inp
     assert returned["executor_exit_code"] == 0
     assert returned["provider_effects_reconciled"] is False
 
+    # Numeric-only first-party phase timing; no extra model or provider call.
+    invocation = out["invocations"][0]
+    for phase in (
+        "source_preflight_seconds", "prelaunch_seconds", "executor_wall_seconds",
+        "post_executor_snapshot_seconds", "git_filter_seconds",
+        "verify_wall_seconds", "post_verify_snapshot_seconds",
+    ):
+        assert isinstance(invocation[phase], (int, float))
+        assert invocation[phase] >= 0
+    assert invocation["prelaunch_seconds"] >= invocation["source_preflight_seconds"]
+    assert invocation["git_guard_cleanup"] == "RETAINED_UNTIL_QUIESCENT"
+
 
 def test_missing_binary_returns_non_pass_and_no_verification(tmp_path):
     repo = _repo(tmp_path)

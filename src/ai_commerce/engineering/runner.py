@@ -373,6 +373,10 @@ AGY_INPUT_CONTEXT = (
     "External archived artifacts are OPTIONAL, including prior GitHub artifacts, sibling worktrees "
     "and runner-owned .local records. Do not read user profiles, credentials or authoritative runner logs. "
     "Use current source and the disposable instruction/repair_feedback.json copies. "
+    "Begin with the exact authorized target files and their direct owners/consumers; "
+    "avoid repo-wide scans, repeated context reads and redundant broad test runs. "
+    "EF01 performs registered MT-01 verification after your edit; perform only focused "
+    "local checks needed to implement the change. "
     "If these inputs are insufficient, report UNPROVEN; if a tool is denied, stop without a bypass. "
 )
 
@@ -412,6 +416,26 @@ def _new_agy_input_dir(repo: Path) -> Path:
     if os.name == "nt" and len(str(root).encode("utf-16-le")) // 2 > 180:
         root.rmdir()
         raise ValueError("AGY_INPUT_DIRECTORY_TOO_LONG")
+    return root
+
+
+def _new_git_guard_dir(repo: Path) -> Path:
+    """Allocate short, disposable Git hooks outside deep EF02 evidence paths.
+
+    #837's evidence tree triggered Windows checkout/cleanup path warnings. Git
+    hook scripts/policy must be reachable before any model is invoked. Keep the
+    guard isolated per invocation without granting the executor Git ref writes.
+    """
+    base = repo.resolve().parent / "_ef01_git_guards"
+    if base.is_symlink():
+        raise ValueError("GIT_GUARD_ROOT_SYMLINK")
+    base.mkdir(mode=0o700, exist_ok=True)
+    if not base.is_dir() or base.is_symlink():
+        raise ValueError("GIT_GUARD_ROOT_UNAVAILABLE")
+    root = Path(tempfile.mkdtemp(prefix="guard-", dir=str(base))).resolve(strict=True)
+    if os.name == "nt" and len(str(root).encode("utf-16-le")) // 2 > 180:
+        root.rmdir()
+        raise ValueError("GIT_GUARD_DIRECTORY_TOO_LONG")
     return root
 
 
@@ -583,6 +607,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
                     pytest_known_flaky: bool = False, host_slots: int = 1,
                     verify_first_scope: bool = True) -> None:
     inv = invocation
+    invocation_started = time.monotonic()
     directory = output_dir / inv["evidence_dir"]
     directory.mkdir(parents=True, exist_ok=False)
     def snapshot():
@@ -605,6 +630,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     # Unlike historical EF02, it must not live under the very deep evidence dir.
     agy_input_dir = None
     before, _ = snapshot()
+    inv["source_preflight_seconds"] = round(time.monotonic() - invocation_started, 4)
     inv["input_snapshot"] = before
     save("source_before", "source.before.json", _json_bytes(before))
     problem = _source_problem(before, initial, verify_first_scope=verify_first_scope)
@@ -650,7 +676,22 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
             raise ValueError("AGY_COMMANDLINE_LIMIT_EXCEEDED")
         save("transport_instruction", "transport_instruction.txt", compact.encode("utf-8"))
     # Hook configuration applies only to the executor; EF02 owns publication.
-    child_env = git_write_guard_env(directory, repo=repo, git_executable=git_executable or "git")
+    # Do not create executable hook paths beneath the deep evidence tree.
+    git_guard_dir = None
+    try:
+        git_guard_dir = _new_git_guard_dir(repo)
+        child_env = git_write_guard_env(
+            directory, repo=repo, git_executable=git_executable or "git",
+            guard_dir=git_guard_dir)
+    except (OSError, ValueError, RuntimeError):
+        if git_guard_dir is not None:
+            shutil.rmtree(git_guard_dir, ignore_errors=True)
+        if agy_input_dir is not None:
+            shutil.rmtree(agy_input_dir, ignore_errors=True)
+        inv.update(status="EXECUTOR_UNAVAILABLE",
+                   error_code="GIT_WRITE_GUARD_PRECHECK_FAILED", executor_invoked=False)
+        return
+    inv["prelaunch_seconds"] = round(time.monotonic() - invocation_started, 4)
     budget = _remaining(deadline, timeout_seconds)
     boundary = {
         "kind": "AI_COMMERCE_EF01_PROVIDER_BOUNDARY", "version": 1,
@@ -665,6 +706,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
                executor_timeout_seconds=budget)
     out, err = b"", b""
     live = None
+    executor_clock = time.monotonic()
     try:
         if selection.executor == "codex" and os.environ.get("AI_COMMERCE_EF01_CODEX_STREAM_EVENTS") == "1":
             live = (output_dir if inv["repair_round"] == 0 else directory) / "executor.stdout.live.jsonl"
@@ -701,6 +743,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         inv.update(status="EXECUTOR_PERMISSION_DENIED", error_code="EXECUTOR_PERMISSION_DENIED")
     finally:
         inv["executor_finished_at"] = _now()
+        inv["executor_wall_seconds"] = round(time.monotonic() - executor_clock, 4)
         save("executor_stdout", "executor.stdout.log", out)
         save("executor_stderr", "executor.stderr.log", err)
         if agy_input_dir is not None:
@@ -709,6 +752,12 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
                 inv["agy_input_cleanup"] = "CLEANED"
             except OSError:
                 inv["agy_input_cleanup"] = "UNCONFIRMED"
+        if git_guard_dir is not None:
+            # Keep hooks intact after the CLI exits: a provider may have left a
+            # Git child process alive. Deleting hooks could silently lift the
+            # per-attempt ref-write guard for that child. Safe pruning requires
+            # independently proving the process tree and worktree are quiescent.
+            inv["git_guard_cleanup"] = "RETAINED_UNTIL_QUIESCENT"
         if live is not None and live.exists():
             data = live.read_bytes()
             if live.parent != directory:
@@ -729,7 +778,10 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     usage = _observe_usage(out, selection.executor)
     if usage is not None:
         inv.update(usage=usage, usage_status="PROVIDER_REPORTED")
+    post_executor_snapshot_clock = time.monotonic()
     after, diff = snapshot()
+    inv["post_executor_snapshot_seconds"] = round(
+        time.monotonic() - post_executor_snapshot_clock, 4)
     inv.update(after)
     inv["out_of_scope_files"] = _outside_scope(after["changed_files"], allowed_prefixes)
     inv["final_snapshot"] = after
@@ -761,6 +813,7 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     # Normalize only a proven CRLF-only transform, and do so BEFORE pytest
     # and candidate-file SHA256 are sealed. Retain independent publication
     # checks; an unknown filter never triggers an automatic rewrite.
+    git_filter_clock = time.monotonic()
     if (repo / ".git").exists():
         try:
             canonicalized = stabilize_candidate_newlines_before_verify(
@@ -784,6 +837,8 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
                 inv.update(status=problem[0], error_code=problem[1])
                 return
 
+    inv["git_filter_seconds"] = round(time.monotonic() - git_filter_clock, 4)
+    verify_clock = time.monotonic()
     inv.update(status="EXECUTION_UNKNOWN", verify_started_at=_now())
     vout, verr = b"", b""
     try:
@@ -882,11 +937,15 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
                    verify_diagnostic=str(exc))
     finally:
         inv["verify_finished_at"] = _now()
+        inv["verify_wall_seconds"] = round(time.monotonic() - verify_clock, 4)
         save("verify_stdout", "verify.stdout.log", vout)
         save("verify_stderr", "verify.stderr.log", verr)
     # Available traceback/summary excerpts are inline; full logs and hashes remain referenced.
     inv["verify_failure_details"] = (vout + b"\n" + verr).decode("utf-8", "replace")[-24000:]
+    post_verify_snapshot_clock = time.monotonic()
     final, diff = snapshot()
+    inv["post_verify_snapshot_seconds"] = round(
+        time.monotonic() - post_verify_snapshot_clock, 4)
     inv.update(final)
     inv["final_snapshot"] = final
     save("source_after_verify", "source.after_verify.json", _json_bytes(final))
