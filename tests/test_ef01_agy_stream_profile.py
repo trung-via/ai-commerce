@@ -67,6 +67,8 @@ def test_stream_profile_records_only_sanitized_finite_progress(tmp_path):
     assert profile["provider_reported_step_seconds_by_category"] == {
         "agent_response": 1.25, "tool": 0.5, "other": 0.0}
     assert profile["step_events_observed"] == 3
+    assert profile["tool_calls_by_safe_kind"]["read"] == 1
+    assert profile["provider_reported_pytest_tool_commands"] == 0
     assert profile["time_to_first_event_seconds"] is not None
     assert profile["time_to_first_step_seconds"] is not None
     safe = json.dumps(profile, ensure_ascii=False)
@@ -202,3 +204,20 @@ def test_stream_error_envelope_keeps_determinate_capacity_code(tmp_path):
     assert profile["terminal_status"] == "ERROR"
     assert _provider_problem(result.stdout.encode()) == (
         "MODEL_AT_CAPACITY", "MODEL_AT_CAPACITY")
+
+
+
+def test_stream_safe_tool_kinds_count_provider_internal_pytest_without_command_leak(tmp_path):
+    events = _valid_events(tool_info={
+        "name": "run_command",
+        "parameters": {"CommandLine": "python -m pytest tests -q --token SECRET-NEVER-LOG"},
+        "output": "PRIVATE-STANDARD-OUTPUT"})
+    events[3]["step_update"]["tool_name"] = "run_command"
+    result, profile = _run(tmp_path, events)
+    assert profile["stream_valid"] is True
+    assert profile["tool_calls_by_safe_kind"]["command"] == 1
+    assert profile["provider_reported_pytest_tool_commands"] == 1
+    assert profile["steps_done_by_category"]["tool"] == 1
+    assert "SECRET" not in json.dumps(profile)
+    assert "PRIVATE" not in json.dumps(profile)
+    assert "SECRET" not in result.stdout
