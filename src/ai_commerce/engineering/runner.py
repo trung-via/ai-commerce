@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .adapters import command_for
+from .agy_stream_profile import run_agy_stream_profile
 from .git_write_guard import GIT_GUARD_INSTRUCTION, git_write_guard_env
 from .profile import ExecutorSelection
 from .git import git_argv, resolve_git_executable
@@ -675,6 +676,17 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         if _windows_command_units(command) > AGY_COMMANDLINE_MAX_UNITS:
             raise ValueError("AGY_COMMANDLINE_LIMIT_EXCEEDED")
         save("transport_instruction", "transport_instruction.txt", compact.encode("utf-8"))
+    # Local trusted opt-in only. Default AGY JSON behavior is not changed.
+    agy_stream_enabled = (selection.executor == "antigravity" and
+                          os.environ.get("AI_COMMERCE_EF01_AGY_STREAM_PROFILE") == "1")
+    if agy_stream_enabled:
+        command = list(command)
+        if "--output-format" not in command:
+            raise ValueError("AGY_STREAM_PROFILE_COMMAND_INVALID")
+        format_index = command.index("--output-format") + 1
+        if format_index >= len(command) or command[format_index] != "json":
+            raise ValueError("AGY_STREAM_PROFILE_COMMAND_INVALID")
+        command[format_index] = "stream-json"
     # Hook configuration applies only to the executor; EF02 owns publication.
     # Do not create executable hook paths beneath the deep evidence tree.
     git_guard_dir = None
@@ -706,9 +718,14 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
                executor_timeout_seconds=budget)
     out, err = b"", b""
     live = None
+    agy_stream_profile: dict[str, Any] = {}
     executor_clock = time.monotonic()
     try:
-        if selection.executor == "codex" and os.environ.get("AI_COMMERCE_EF01_CODEX_STREAM_EVENTS") == "1":
+        if agy_stream_enabled:
+            process = run_agy_stream_profile(
+                command, repo=repo, timeout_seconds=budget,
+                env=child_env, profile=agy_stream_profile)
+        elif selection.executor == "codex" and os.environ.get("AI_COMMERCE_EF01_CODEX_STREAM_EVENTS") == "1":
             live = (output_dir if inv["repair_round"] == 0 else directory) / "executor.stdout.live.jsonl"
             process = _run_codex_with_live_event_mirror(
                 command, repo=repo, stdin_text=stdin, timeout_seconds=budget,
@@ -744,6 +761,11 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     finally:
         inv["executor_finished_at"] = _now()
         inv["executor_wall_seconds"] = round(time.monotonic() - executor_clock, 4)
+        if agy_stream_enabled:
+            inv["agy_stream_profile"] = agy_stream_profile
+            if agy_stream_profile:
+                save("agy_stream_profile", "agy.stream-profile.json",
+                     _json_bytes(agy_stream_profile))
         save("executor_stdout", "executor.stdout.log", out)
         save("executor_stderr", "executor.stderr.log", err)
         if agy_input_dir is not None:
@@ -790,6 +812,20 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     # Even a provider failure gets a scoped snapshot and cumulative diff.
     save("tracked_diff", "git.tracked.diff.patch", diff)
     problem = _source_problem(after, initial, verify_first_scope=verify_first_scope)
+    # A failed launch, OS permission error, timeout or interrupted child has
+    # its own stronger boundary evidence. Stream parsing must not overwrite it.
+    if (problem is None and agy_stream_enabled and inv["status"] not in (
+            "EXECUTOR_UNAVAILABLE", "EXECUTOR_PERMISSION_DENIED", "EXECUTION_UNKNOWN")):
+        if not agy_stream_profile.get("stream_valid", False):
+            problem = ("EXECUTION_UNKNOWN", "AGY_STREAM_UNPROVEN")
+        elif agy_stream_profile.get("permission_gate_observed"):
+            inv["denied_action_diagnostics"] = [{
+                "tool": "UNKNOWN_TOOL", "target_status": "DENIED_TARGET_UNKNOWN",
+                "target_scope": "UNKNOWN"}]
+            inv["denied_actions"] = ["UNKNOWN_TOOL"]
+            problem = ("EXECUTOR_PERMISSION_DENIED", "HEADLESS_TOOL_PERMISSION_DENIED")
+        elif agy_stream_profile.get("tool_error_observed"):
+            problem = ("EXECUTION_UNKNOWN", "AGY_STREAM_TOOL_ERROR_UNPROVEN")
     if problem is None and inv["denied_actions"]:
         problem = ("EXECUTOR_PERMISSION_DENIED", "HEADLESS_TOOL_PERMISSION_DENIED")
     # Interrupted/abnormal exits are UNKNOWN effects even if a partial provider

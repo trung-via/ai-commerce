@@ -343,6 +343,14 @@ def approved_groups() -> tuple[TestGroup, ...]:
                   ("HOSTOPS.three-runner-topology",),
                   ("src/ai_commerce/engineering/three_runner_topology.py",),
                   contracts=("scripts/AI-Commerce-Three-Runners.ps1",)),
+        # Independent additive owner: main's protected merge gate can review
+        # the exact new source/test and existing EF01 consumer as static data.
+        # Do not mutate the existing EF01 registration for a new component.
+        TestGroup("ef01-agy-stream",
+                  ("tests/test_ef01_agy_stream_profile.py",),
+                  ("EF01.agy-stream-observation",),
+                  sources("engineering", "agy_stream_profile"),
+                  consumers=("src/ai_commerce/engineering/runner.py",)),
     )
 
 
