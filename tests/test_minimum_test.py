@@ -483,15 +483,20 @@ def test_targeted_requested_profile_falls_back_only_when_required_for_ac_coverag
         {"ef02-tests": registry["ef02-tests"]})["state"] == "UNPROVEN"
 
 
-def test_registered_known_group_selects_exact_minimal_command_and_invalidates_registry_edit(mapped):
+def test_registered_known_group_selects_exact_minimal_command_and_invalidates_registry_edit(mapped, monkeypatch):
     command = ["python", "-m", "pytest", "tests/test_a.py", "-q", "-n", "12"]
     parallel_full = [*FULL, "-n", "12"]
     registry = {"project-tests": parallel_full, "component-a": command}
+    # Pin "python" resolution to the active verified interpreter so host PATH
+    # differences (e.g. Windows venv vs base python) do not mask registry REUSE.
+    monkeypatch.setattr(mt.shutil, "which", lambda cmd: sys.executable if cmd == "python" else None)
     selected = plan(mapped, registered_only=True, registered_profiles=registry,
                     fallback_argv=parallel_full)
     assert not selected["fallback"] and [g["group"] for g in selected["groups"]] == ["a"]
     assert selected["groups"][0]["binding"]["argv"] == command
     assert selected["groups"][0]["binding"]["registered_profile"] == "component-a"
+    assert selected["groups"][0]["binding"]["environment_proven"] is True
+    assert selected["groups"][0]["binding"]["executable_sha256"] == mt.digest(Path(sys.executable).read_bytes())
     previous = evidence(mapped, selected["groups"][0])
     current = plan(mapped, registered_only=True, registered_profiles=registry,
                    fallback_argv=parallel_full)
@@ -502,6 +507,17 @@ def test_registered_known_group_selects_exact_minimal_command_and_invalidates_re
                    fallback_argv=parallel_full)
     mt.apply_evidence(renamed, {"a": previous}, mapped.evidence)
     assert renamed["groups"][0]["state"] == "INVALIDATED"
+    # Unproven interpreter resolution must still invalidate reuse even when
+    # prior evidence exists, and forged unproven evidence cannot grant REUSE.
+    monkeypatch.setattr(mt.shutil, "which", lambda _cmd: None)
+    unproven = plan(mapped, registered_only=True, registered_profiles=registry,
+                    fallback_argv=parallel_full)
+    assert unproven["groups"][0]["binding"]["environment_proven"] is False
+    mt.apply_evidence(unproven, {"a": previous}, mapped.evidence)
+    assert unproven["groups"][0]["state"] == "INVALIDATED"
+    forged = evidence(mapped, unproven["groups"][0], name="forged-unproven")
+    mt.apply_evidence(unproven, {"a": forged}, mapped.evidence)
+    assert unproven["groups"][0]["state"] == "INVALIDATED"
 
 
 @pytest.mark.parametrize("has_serial_group", [False, True])
@@ -1685,3 +1701,472 @@ def test_live_twelve_workers_self_host_only(tmp_path):
     stdout = run.stdout.encode()
     assert run.returncode == 0, run.stdout + run.stderr
     assert verification.observed_xdist_workers(stdout) == 12, run.stdout
+
+
+# MT-01 JUnit- and AST-backed WinError 1314 native skip verification (non-bypass).
+_MT01_NATIVE_SKIP = "NATIVE_SYMLINK_CREATION_UNPROVEN: WinError 1314"
+_R02_TEST_PATH = "tests/test_hostops_ef02_attempt_r02_readonly.py"
+_R02_SKIP_CLASS = "tests.test_hostops_ef02_attempt_r02_readonly.EF02ForensicR02Tests"
+_R02_SKIP_NAME = "test_symlink_scope_path_is_unsafe"
+_RECONCILE_TEST_PATH = "tests/test_hostops_ef02_attempt_reconcile_readonly.py"
+_RECONCILE_SKIP_CLASS = "tests.test_hostops_ef02_attempt_reconcile_readonly.EF02Attempt698ReadOnlyTests"
+
+
+def _build_native_skip_repo(tmp_path: Path, *, test_path: str, class_name: str | None,
+                            skip_func: str, pass_count: int, use_unittest: bool = True):
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "feature_a.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repo / "feature_b.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repo / "tests/test_b.py").write_text(
+        "import feature_b\ndef test_b_ok():\n    assert feature_b.VALUE == 1\n",
+        encoding="utf-8",
+    )
+    lines = ["import feature_a"]
+    if use_unittest:
+        lines.append("import unittest")
+    else:
+        lines.append("import pytest")
+    lines.append("")
+    if class_name:
+        base_cls = "(unittest.TestCase)" if use_unittest else ""
+        lines.append(f"class {class_name}{base_cls}:")
+        indent = "    "
+    else:
+        indent = ""
+    for i in range(pass_count):
+        lines.append(f"{indent}def test_pass_{i}(self):" if class_name else f"def test_pass_{i}():")
+        lines.append(f"{indent}    assert feature_a.VALUE == 1")
+    lines.append(f"{indent}def {skip_func}(self):" if class_name else f"def {skip_func}():")
+    skip_line_no = len(lines) + 1
+    if use_unittest:
+        lines.append(f'{indent}    self.skipTest("{_MT01_NATIVE_SKIP}")')
+    else:
+        lines.append(f'{indent}    pytest.skip("{_MT01_NATIVE_SKIP}")')
+    target = repo / test_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    base = mt.file_hashes(repo)
+    (repo / "feature_a.py").write_text("VALUE = 2\n", encoding="utf-8")
+    groups = (
+        mt.TestGroup("a", (test_path,), ("AC-A",), ("feature_a.py",)),
+        mt.TestGroup("b", ("tests/test_b.py",), ("AC-B",), ("feature_b.py",)),
+    )
+    return SimpleNamespace(
+        repo=repo, base=base, groups=groups,
+        evidence=tmp_path / "evidence", skip_line=skip_line_no,
+    )
+
+
+def _make_win_junit(*, classname: str, name: str, pass_count: int = 7,
+                    skip_type: str = "pytest.skip", message: str = _MT01_NATIVE_SKIP,
+                    skip_text: str = "", tests: int | None = None,
+                    errors: int = 0, failures: int = 0, skipped: int = 1,
+                    extra_skips: tuple[tuple[str, str, str, str], ...] = ()) -> bytes:
+    total = (pass_count + 1 + len(extra_skips)) if tests is None else tests
+    mod = classname.rsplit(".", 1)[0] if "." in classname else classname
+    cases = "".join(f'<testcase classname="{mod}" name="test_pass_{i}"/>' for i in range(pass_count))
+    inner = skip_text
+    cases += (f'<testcase classname="{classname}" name="{name}">'
+              f'<skipped type="{skip_type}" message="{message}">{inner}</skipped>'
+              f'</testcase>')
+    for e_cls, e_name, e_type, e_msg in extra_skips:
+        cases += (f'<testcase classname="{e_cls}" name="{e_name}">'
+                  f'<skipped type="{e_type}" message="{e_msg}"/>'
+                  f'</testcase>')
+    return (f'<testsuites><testsuite tests="{total}" errors="{errors}" '
+            f'failures="{failures}" skipped="{skipped}">{cases}'
+            f'</testsuite></testsuites>').encode()
+
+
+def _win_skip_stdout(*, test_path: str, lineno: int, slash: str = "\\",
+                     workers: int = 12, pass_count: int = 7, skip_count: int = 1,
+                     reason: str = _MT01_NATIVE_SKIP, extra: str = "",
+                     extra_skip_lines: str = "") -> bytes:
+    display_path = test_path.replace("/", slash)
+    return (
+        f"bringing up nodes...\n"
+        f"MT01_XDIST_WORKERS_COLLECTED={workers}\n"
+        f"================ short test summary info ==================\n"
+        f"SKIPPED [1] {display_path}:{lineno}: {reason}\n"
+        f"{extra_skip_lines}{extra}"
+        f"{pass_count} passed, {skip_count} skipped in 1.83s\n"
+    ).encode()
+
+
+@pytest.mark.parametrize("slash", ["\\", "/"])
+def test_mt01_r02_winerror1314_junit_skip_runs_subsequent_group(tmp_path, monkeypatch, slash):
+    fix = _build_native_skip_repo(
+        tmp_path, test_path=_R02_TEST_PATH, class_name="EF02ForensicR02Tests",
+        skip_func=_R02_SKIP_NAME, pass_count=7, use_unittest=True,
+    )
+    stdout_r02 = _win_skip_stdout(
+        test_path=_R02_TEST_PATH, lineno=fix.skip_line, slash=slash, pass_count=7,
+    )
+    junit_r02 = _make_win_junit(
+        classname=_R02_SKIP_CLASS, name=_R02_SKIP_NAME, pass_count=7,
+        skip_text=f"{_R02_TEST_PATH.replace('/', slash)}:{fix.skip_line}: {_MT01_NATIVE_SKIP}",
+    )
+    junit_b = b'<testsuites><testsuite tests="1" errors="0" failures="0" skipped="0"><testcase classname="tests.test_b" name="test_b_ok"/></testsuite></testsuites>'
+    argv_a = ["python", "-m", "pytest", _R02_TEST_PATH, "-q", "-n", "12"]
+    argv_b = ["python", "-m", "pytest", "tests/test_b.py", "-q", "-n", "12"]
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((list(argv), dict(kwargs.get("env") or {})))
+        junit_target = Path(kwargs["env"]["AI_COMMERCE_MT01_JUNIT_PATH"])
+        assert fix.repo.resolve() not in junit_target.resolve().parents
+        if _R02_TEST_PATH in argv:
+            junit_target.write_bytes(junit_r02)
+            return subprocess.CompletedProcess(argv, 0, stdout_r02.decode(), "")
+        junit_target.write_bytes(junit_b)
+        return subprocess.CompletedProcess(argv, 0, "MT01_XDIST_WORKERS_COLLECTED=12\n1 passed in 0.02s\n", "")
+
+    monkeypatch.setattr(verification, "subprocess", SimpleNamespace(
+        run=run, CompletedProcess=subprocess.CompletedProcess, TimeoutExpired=subprocess.TimeoutExpired,
+    ))
+    result, selected, prior = _execute(
+        fix, acs=("AC-A", "AC-B"), registered_only=True,
+        fallback_argv=[*FULL, "-n", "12"],
+        registered_profiles={"project-tests": [*FULL, "-n", "12"], "mt01-a-tests": argv_a, "mt01-b-tests": argv_b},
+    )
+    assert result.returncode == 0
+    assert [c[0] for c in calls] == [argv_a, argv_b]
+    assert [g["result"] for g in selected["groups"]] == ["PASS", "PASS"]
+    assert selected["groups"][0]["workers_actual"] == 12
+    assert selected["groups"][0]["tests_executed"]["passed"] == 7
+    assert selected["groups"][0]["tests_executed"]["skipped"] == 1
+    assert set(prior) == {"a", "b"}
+    assert (fix.evidence / "round-0/mt01.0.stdout.log").read_bytes() == stdout_r02
+    assert b"WinError 1314" in (fix.evidence / "round-0/mt01.0.stdout.log").read_bytes()
+    assert (fix.evidence / "round-0/mt01.0.junit.xml").read_bytes() == junit_r02
+    ev_payload = json.loads((fix.evidence / "round-0/mt01.0.evidence.json").read_text())
+    assert ev_payload["artifacts"]["junit"]["sha256"] == mt.digest(junit_r02)
+
+
+@pytest.mark.parametrize("skip_func", [
+    "test_symlink_or_junction_is_never_read_as_source",
+    "test_fixed_ef02_root_does_not_follow_reparse",
+])
+def test_mt01_reconcile_winerror1314_junit_skips_pass_with_unmodified_evidence(tmp_path, monkeypatch, skip_func):
+    fix = _build_native_skip_repo(
+        tmp_path, test_path=_RECONCILE_TEST_PATH, class_name="EF02Attempt698ReadOnlyTests",
+        skip_func=skip_func, pass_count=5, use_unittest=True,
+    )
+    stdout = _win_skip_stdout(test_path=_RECONCILE_TEST_PATH, lineno=fix.skip_line, pass_count=5)
+    junit = _make_win_junit(classname=_RECONCILE_SKIP_CLASS, name=skip_func, pass_count=5)
+    argv = ["python", "-m", "pytest", _RECONCILE_TEST_PATH, "-q", "-n", "12"]
+
+    def run(cmd, **kwargs):
+        Path(kwargs["env"]["AI_COMMERCE_MT01_JUNIT_PATH"]).write_bytes(junit)
+        return subprocess.CompletedProcess(cmd, 0, stdout.decode(), "")
+
+    monkeypatch.setattr(verification, "subprocess", SimpleNamespace(
+        run=run, CompletedProcess=subprocess.CompletedProcess, TimeoutExpired=subprocess.TimeoutExpired,
+    ))
+    result, selected, prior = _execute(
+        fix, acs=("AC-A",), registered_only=True,
+        fallback_argv=[*FULL, "-n", "12"],
+        registered_profiles={"project-tests": [*FULL, "-n", "12"], "mt01-a-tests": argv},
+    )
+    assert result.returncode == 0
+    assert selected["groups"][0]["result"] == "PASS"
+    assert selected["groups"][0]["tests_executed"]["passed"] == 5
+    assert selected["groups"][0]["tests_executed"]["skipped"] == 1
+    assert "a" in prior
+    assert (fix.evidence / "round-0/mt01.0.stdout.log").read_bytes() == stdout
+
+
+def test_mt01_other_optional_native_skip_with_matching_junit_and_coexisting_skip(tmp_path, monkeypatch):
+    test_path = "tests/test_native_optional_symlink.py"
+    fix = _build_native_skip_repo(
+        tmp_path, test_path=test_path, class_name=None,
+        skip_func="test_optional_native_symlink", pass_count=2, use_unittest=False,
+    )
+    stdout = _win_skip_stdout(
+        test_path=test_path, lineno=fix.skip_line, slash="/", pass_count=2, skip_count=2,
+        extra_skip_lines="SKIPPED [1] tests/test_other_skip.py:12: requires optional device\n",
+    )
+    junit = _make_win_junit(
+        classname="tests.test_native_optional_symlink", name="test_optional_native_symlink",
+        pass_count=2, skipped=2, tests=4,
+        extra_skips=(("tests.test_other_skip", "test_dev", "pytest.skip", "requires optional device"),),
+    )
+    argv = ["python", "-m", "pytest", test_path, "-q", "-n", "12"]
+
+    def run(cmd, **kwargs):
+        Path(kwargs["env"]["AI_COMMERCE_MT01_JUNIT_PATH"]).write_bytes(junit)
+        return subprocess.CompletedProcess(cmd, 0, stdout.decode(), "")
+
+    monkeypatch.setattr(verification, "subprocess", SimpleNamespace(
+        run=run, CompletedProcess=subprocess.CompletedProcess, TimeoutExpired=subprocess.TimeoutExpired,
+    ))
+    result, selected, prior = _execute(
+        fix, acs=("AC-A",), registered_only=True,
+        fallback_argv=[*FULL, "-n", "12"],
+        registered_profiles={"project-tests": [*FULL, "-n", "12"], "mt01-a-tests": argv},
+    )
+    assert result.returncode == 0
+    assert selected["groups"][0]["result"] == "PASS"
+    assert selected["groups"][0]["tests_executed"]["passed"] == 2
+    assert selected["groups"][0]["tests_executed"]["skipped"] == 2
+    assert "a" in prior
+
+
+@pytest.mark.parametrize("case", [
+    "false_fake_skip", "junit_class_mismatch", "junit_name_mismatch",
+    "junit_type_mismatch", "junit_message_mismatch", "junit_path_mismatch",
+    "junit_text_path_mismatch", "duplicate_skip_lines", "extra_unbacked_skip_line",
+    "stderr_winerror", "malformed_xml", "doctype_xml", "oversized_junit",
+    "missing_junit", "actual_worker_11", "no_valid_worker_receipt",
+    "raw_error_outside_skip", "nonzero_exit", "missing_fixture",
+    "permission_denied", "no_selected_tests",
+])
+def test_mt01_winerror1314_negative_matrix_holds(tmp_path, monkeypatch, case):
+    fix = _build_native_skip_repo(
+        tmp_path, test_path=_R02_TEST_PATH, class_name="EF02ForensicR02Tests",
+        skip_func=_R02_SKIP_NAME, pass_count=7, use_unittest=True,
+    )
+    stdout = _win_skip_stdout(test_path=_R02_TEST_PATH, lineno=fix.skip_line, pass_count=7)
+    stderr = b""
+    code = 0
+    junit: bytes | None = _make_win_junit(classname=_R02_SKIP_CLASS, name=_R02_SKIP_NAME, pass_count=7)
+
+    if case == "false_fake_skip":
+        stdout = _win_skip_stdout(
+            test_path=_R02_TEST_PATH, lineno=fix.skip_line, pass_count=7,
+            reason="NATIVE_SYMLINK_CREATION_UNPROVEN: WinError 5",
+        )
+    elif case == "junit_class_mismatch":
+        junit = _make_win_junit(classname="tests.test_hostops_ef02_attempt_r02_readonly.FakeR02Tests", name=_R02_SKIP_NAME, pass_count=7)
+    elif case == "junit_name_mismatch":
+        junit = _make_win_junit(classname=_R02_SKIP_CLASS, name="test_pass_0", pass_count=7)
+    elif case == "junit_type_mismatch":
+        junit = _make_win_junit(classname=_R02_SKIP_CLASS, name=_R02_SKIP_NAME, pass_count=7, skip_type="other")
+    elif case == "junit_message_mismatch":
+        junit = _make_win_junit(classname=_R02_SKIP_CLASS, name=_R02_SKIP_NAME, pass_count=7, message="NATIVE_SYMLINK_CREATION_UNPROVEN: [WinError 1314]")
+    elif case == "junit_path_mismatch":
+        stdout = _win_skip_stdout(test_path="tests/test_b.py", lineno=2, pass_count=7)
+    elif case == "junit_text_path_mismatch":
+        junit = _make_win_junit(
+            classname=_R02_SKIP_CLASS, name=_R02_SKIP_NAME, pass_count=7,
+            skip_text=f"tests/test_other.py:{fix.skip_line}: {_MT01_NATIVE_SKIP}",
+        )
+    elif case == "duplicate_skip_lines":
+        dup = f"SKIPPED [1] tests\\test_hostops_ef02_attempt_r02_readonly.py:{fix.skip_line}: {_MT01_NATIVE_SKIP}\n"
+        stdout = _win_skip_stdout(test_path=_R02_TEST_PATH, lineno=fix.skip_line, pass_count=7, extra_skip_lines=dup)
+    elif case == "extra_unbacked_skip_line":
+        stdout = _win_skip_stdout(
+            test_path=_R02_TEST_PATH, lineno=fix.skip_line, pass_count=7,
+            extra_skip_lines="SKIPPED [1] tests/other.py:1: other\n",
+        )
+    elif case == "stderr_winerror":
+        stderr = b"OSError: WinError 1314"
+    elif case == "malformed_xml":
+        junit = b"<testsuites><testsuite"
+    elif case == "doctype_xml":
+        junit = b"<!DOCTYPE malicious>" + junit
+    elif case == "oversized_junit":
+        junit = b"x" * (8 * 1024 * 1024 + 1)
+    elif case == "missing_junit":
+        junit = None
+    elif case == "actual_worker_11":
+        stdout = _win_skip_stdout(test_path=_R02_TEST_PATH, lineno=fix.skip_line, pass_count=7, workers=11)
+    elif case == "no_valid_worker_receipt":
+        stdout = stdout.replace(b"MT01_XDIST_WORKERS_COLLECTED=12\n", b"12 workers [8 items]\n")
+    elif case == "raw_error_outside_skip":
+        stdout = _win_skip_stdout(test_path=_R02_TEST_PATH, lineno=fix.skip_line, pass_count=7, extra="Traceback: WinError 1314\n")
+    elif case == "nonzero_exit":
+        code = 1
+    elif case == "missing_fixture":
+        code = 1
+        stdout = b"MT01_XDIST_WORKERS_COLLECTED=12\n1 error in 0.05s\nfixture 'missing_dep' not found\n"
+    elif case == "permission_denied":
+        stderr = b"PermissionError: [WinError 5] Access is denied"
+    elif case == "no_selected_tests":
+        code = 5
+        stdout = b"MT01_XDIST_WORKERS_COLLECTED=12\nno tests ran in 0.01s\n"
+
+    argv = ["python", "-m", "pytest", _R02_TEST_PATH, "-q", "-n", "12"]
+
+    def run(cmd, **kwargs):
+        if junit is not None:
+            Path(kwargs["env"]["AI_COMMERCE_MT01_JUNIT_PATH"]).write_bytes(junit)
+        return subprocess.CompletedProcess(cmd, code, stdout.decode(), stderr.decode())
+
+    monkeypatch.setattr(verification, "subprocess", SimpleNamespace(
+        run=run, CompletedProcess=subprocess.CompletedProcess, TimeoutExpired=subprocess.TimeoutExpired,
+    ))
+    result, selected, prior = _execute(
+        fix, acs=("AC-A", "AC-B"), registered_only=True,
+        fallback_argv=[*FULL, "-n", "12"],
+        registered_profiles={"project-tests": [*FULL, "-n", "12"], "mt01-a-tests": argv,
+                             "mt01-b-tests": ["python", "-m", "pytest", "tests/test_b.py", "-q", "-n", "12"]},
+    )
+    assert result.returncode != 0
+    assert not prior
+    assert selected["groups"][0]["result"] == "UNPROVEN"
+    assert selected["groups"][1]["result"] == "UNPROVEN"
+    assert selected["groups"][1]["reason"] == "NOT_EXECUTED_AFTER_UNPROVEN_GROUP"
+    assert not list(fix.evidence.rglob("*.evidence.json"))
+
+
+def test_mt01_explicit_serial_mismatch_holds(tmp_path, monkeypatch):
+    fix = _build_native_skip_repo(
+        tmp_path, test_path=_R02_TEST_PATH, class_name="EF02ForensicR02Tests",
+        skip_func=_R02_SKIP_NAME, pass_count=7, use_unittest=True,
+    )
+    serial_argv = ["python", "-m", "pytest", _R02_TEST_PATH, "-q"]
+    stdout = _win_skip_stdout(test_path=_R02_TEST_PATH, lineno=fix.skip_line, pass_count=7, workers=12)
+    junit = _make_win_junit(classname=_R02_SKIP_CLASS, name=_R02_SKIP_NAME, pass_count=7)
+
+    def run(cmd, **kwargs):
+        Path(kwargs["env"]["AI_COMMERCE_MT01_JUNIT_PATH"]).write_bytes(junit)
+        return subprocess.CompletedProcess(cmd, 0, stdout.decode(), "")
+
+    monkeypatch.setattr(verification, "subprocess", SimpleNamespace(
+        run=run, CompletedProcess=subprocess.CompletedProcess, TimeoutExpired=subprocess.TimeoutExpired,
+    ))
+    result, selected, prior = _execute(
+        fix, acs=("AC-A",), registered_only=True,
+        fallback_argv=FULL,
+        registered_profiles={"project-tests-serial": FULL, "mt01-a-tests": serial_argv},
+    )
+    assert result.returncode != 0
+    assert not prior
+    assert selected["groups"][0]["result"] == "UNPROVEN"
+    assert selected["groups"][0]["reason"] == "PYTEST_WORKER_COUNT_MISMATCH"
+
+
+def test_mt01_winerror1314_source_drift_discards_evidence(tmp_path, monkeypatch):
+    fix = _build_native_skip_repo(
+        tmp_path, test_path=_R02_TEST_PATH, class_name="EF02ForensicR02Tests",
+        skip_func=_R02_SKIP_NAME, pass_count=7, use_unittest=True,
+    )
+    stdout = _win_skip_stdout(test_path=_R02_TEST_PATH, lineno=fix.skip_line, pass_count=7)
+    junit = _make_win_junit(classname=_R02_SKIP_CLASS, name=_R02_SKIP_NAME, pass_count=7)
+    argv = ["python", "-m", "pytest", _R02_TEST_PATH, "-q", "-n", "12"]
+
+    def mutate(cmd, **kwargs):
+        Path(kwargs["env"]["AI_COMMERCE_MT01_JUNIT_PATH"]).write_bytes(junit)
+        (fix.repo / "feature_a.py").write_text("VALUE = 999\n", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout.decode(), "")
+
+    monkeypatch.setattr(verification, "subprocess", SimpleNamespace(
+        run=mutate, CompletedProcess=subprocess.CompletedProcess, TimeoutExpired=subprocess.TimeoutExpired,
+    ))
+    with pytest.raises(RuntimeError, match="SOURCE_DRIFT"):
+        _execute(
+            fix, acs=("AC-A",), registered_only=True,
+            fallback_argv=[*FULL, "-n", "12"],
+            registered_profiles={"project-tests": [*FULL, "-n", "12"], "mt01-a-tests": argv},
+        )
+    assert not list(fix.evidence.rglob("*.evidence.json"))
+
+
+def test_mt01_unsafe_junit_scratch_inside_workspace_holds(tmp_path, monkeypatch):
+    fix = _build_native_skip_repo(
+        tmp_path, test_path=_R02_TEST_PATH, class_name="EF02ForensicR02Tests",
+        skip_func=_R02_SKIP_NAME, pass_count=7, use_unittest=True,
+    )
+    inside = fix.repo / ".unsafe-tmp"
+    inside.mkdir()
+    monkeypatch.setattr(verification.tempfile, "gettempdir", lambda: str(inside))
+    argv = ["python", "-m", "pytest", _R02_TEST_PATH, "-q", "-n", "12"]
+    result, selected, prior = _execute(
+        fix, acs=("AC-A",), registered_only=True,
+        fallback_argv=[*FULL, "-n", "12"],
+        registered_profiles={"project-tests": [*FULL, "-n", "12"], "mt01-a-tests": argv},
+    )
+    assert result.returncode != 0
+    assert not prior
+    assert selected["groups"][0]["result"] == "UNPROVEN"
+    assert selected["groups"][0]["reason"] == "PYTEST_JUNIT_SCRATCH_INSIDE_WORKSPACE"
+
+
+def test_mt01_winerror1314_junit_accepts_absolute_test_file_path(tmp_path, monkeypatch):
+    fix = _build_native_skip_repo(
+        tmp_path, test_path=_R02_TEST_PATH, class_name="EF02ForensicR02Tests",
+        skip_func=_R02_SKIP_NAME, pass_count=7, use_unittest=True,
+    )
+    abs_test_path = str((fix.repo / _R02_TEST_PATH).resolve())
+    stdout = _win_skip_stdout(test_path=_R02_TEST_PATH, lineno=fix.skip_line, pass_count=7)
+    junit = _make_win_junit(
+        classname=_R02_SKIP_CLASS, name=_R02_SKIP_NAME, pass_count=7,
+        skip_text=f"{abs_test_path}:{fix.skip_line}: {_MT01_NATIVE_SKIP}",
+    )
+    argv = ["python", "-m", "pytest", _R02_TEST_PATH, "-q", "-n", "12"]
+
+    def run(cmd, **kwargs):
+        Path(kwargs["env"]["AI_COMMERCE_MT01_JUNIT_PATH"]).write_bytes(junit)
+        return subprocess.CompletedProcess(cmd, 0, stdout.decode(), "")
+
+    monkeypatch.setattr(verification, "subprocess", SimpleNamespace(
+        run=run, CompletedProcess=subprocess.CompletedProcess, TimeoutExpired=subprocess.TimeoutExpired,
+    ))
+    result, selected, prior = _execute(
+        fix, acs=("AC-A",), registered_only=True,
+        fallback_argv=[*FULL, "-n", "12"],
+        registered_profiles={"project-tests": [*FULL, "-n", "12"], "mt01-a-tests": argv},
+    )
+    assert result.returncode == 0
+    assert selected["groups"][0]["result"] == "PASS"
+    assert "a" in prior
+
+
+def test_pytest_observation_env_strips_outer_junit_capture(tmp_path, monkeypatch):
+    monkeypatch.setenv("AI_COMMERCE_MT01_JUNIT_PATH", str(tmp_path / "outer.junit.xml"))
+    monkeypatch.setenv(
+        "PYTEST_PLUGINS",
+        "existing.plugin, _ai_commerce_mt01_junit_plugin , another.plugin",
+    )
+    obs_env = verification.pytest_observation_env()
+    assert "AI_COMMERCE_MT01_JUNIT_PATH" not in obs_env
+    obs_plugins = [p.strip() for p in obs_env["PYTEST_PLUGINS"].split(",") if p.strip()]
+    assert "_ai_commerce_mt01_junit_plugin" not in obs_plugins
+    assert "existing.plugin" in obs_plugins
+    assert "another.plugin" in obs_plugins
+    assert verification._OBSERVER_PLUGIN in obs_plugins
+
+    with verification._junit_capture_env(tmp_path) as (cap_env, junit_path, _scratch):
+        assert cap_env["AI_COMMERCE_MT01_JUNIT_PATH"] == str(junit_path)
+        cap_plugins = [p.strip() for p in cap_env["PYTEST_PLUGINS"].split(",") if p.strip()]
+        assert "_ai_commerce_mt01_junit_plugin" in cap_plugins
+        assert verification._OBSERVER_PLUGIN in cap_plugins
+
+
+@pytest.mark.parametrize(
+    ("junit_payload", "expected_reason"),
+    [
+        (None, "JUNIT_XML_ABSENT"),
+        (b"<testsuites><testsuite", "JUNIT_XML_MALFORMED_OR_UNSAFE"),
+    ],
+)
+def test_mt01_winerror1314_junit_reason_recorded_when_absent_or_malformed(
+    tmp_path, monkeypatch, junit_payload, expected_reason,
+):
+    fix = _build_native_skip_repo(
+        tmp_path, test_path=_R02_TEST_PATH, class_name="EF02ForensicR02Tests",
+        skip_func=_R02_SKIP_NAME, pass_count=7, use_unittest=True,
+    )
+    stdout = _win_skip_stdout(test_path=_R02_TEST_PATH, lineno=fix.skip_line, pass_count=7)
+    argv = ["python", "-m", "pytest", _R02_TEST_PATH, "-q", "-n", "12"]
+
+    def run(cmd, **kwargs):
+        if junit_payload is not None:
+            Path(kwargs["env"]["AI_COMMERCE_MT01_JUNIT_PATH"]).write_bytes(junit_payload)
+        return subprocess.CompletedProcess(cmd, 0, stdout.decode(), "")
+
+    monkeypatch.setattr(verification, "subprocess", SimpleNamespace(
+        run=run, CompletedProcess=subprocess.CompletedProcess, TimeoutExpired=subprocess.TimeoutExpired,
+    ))
+    result, selected, prior = _execute(
+        fix, acs=("AC-A",), registered_only=True,
+        fallback_argv=[*FULL, "-n", "12"],
+        registered_profiles={"project-tests": [*FULL, "-n", "12"], "mt01-a-tests": argv},
+    )
+    assert result.returncode != 0
+    assert not prior
+    assert selected["groups"][0]["result"] == "UNPROVEN"
+    assert selected["groups"][0]["junit_error"] == expected_reason
+    assert selected["groups"][0]["reason"] == expected_reason

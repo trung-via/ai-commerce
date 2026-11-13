@@ -1,25 +1,55 @@
 """Execute MT-01 groups inside EF01's existing action budget; no provider calls."""
 from __future__ import annotations
 
+import ast
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 import os
 import re
 import subprocess
+import tempfile
 import time
 from typing import Callable, Mapping
+import xml.etree.ElementTree as ET
 
 from .minimum_test import Evidence, apply_evidence, canonical, file_hashes, select_plan, pytest_counts, select_provisional_tests
 from .pytest_profile import require_managed_parallelism, registered_workers
 
 
 _OBSERVER_PLUGIN = "ai_commerce.engineering.pytest_profile"
+_JUNIT_PLUGIN_NAME = "_ai_commerce_mt01_junit_plugin"
+_JUNIT_ENV_VAR = "AI_COMMERCE_MT01_JUNIT_PATH"
+_MAX_JUNIT_BYTES = 8 * 1024 * 1024
+_NATIVE_SYMLINK_SKIP_REASON = "NATIVE_SYMLINK_CREATION_UNPROVEN: WinError 1314"
+_INFRASTRUCTURE_MARKERS = (
+    "permission denied", "permissionerror", "no module named pytest", "internalerror",
+    "worker crashed", "workers crashed", "winerror", "subprocess.timeoutexpired",
+    "memoryerror", "cannot allocate memory", "can't start new thread",
+    "failed to start worker", "could not start worker", "error while receiving from worker",
+)
+_SKIPPED_LINE_RE = re.compile(rb"SKIPPED \[([1-9][0-9]*)\] ([^:\r\n]+):([1-9][0-9]*): (.+)")
+_JUNIT_PLUGIN_SOURCE = (
+    "import os\n"
+    "import pytest\n\n"
+    "@pytest.hookimpl(tryfirst=True)\n"
+    "def pytest_configure(config):\n"
+    "    if hasattr(config, 'workerinput'):\n"
+    "        return\n"
+    "    target = os.environ.get('AI_COMMERCE_MT01_JUNIT_PATH')\n"
+    "    if target and not getattr(config.option, 'xmlpath', None):\n"
+    "        config.option.xmlpath = target\n"
+)
 
 
 def pytest_observation_env() -> dict[str, str]:
     """Instrument the pytest controller without modifying registered argv."""
     env = os.environ.copy()
-    plugins = [item.strip() for item in env.get("PYTEST_PLUGINS", "").split(",") if item.strip()]
+    env.pop(_JUNIT_ENV_VAR, None)
+    plugins = [
+        item.strip() for item in env.get("PYTEST_PLUGINS", "").split(",")
+        if item.strip() and item.strip() != _JUNIT_PLUGIN_NAME
+    ]
     if _OBSERVER_PLUGIN not in plugins:
         plugins.append(_OBSERVER_PLUGIN)
     env["PYTEST_PLUGINS"] = ",".join(plugins)
@@ -36,6 +66,330 @@ def observed_console_workers(out: bytes) -> int | None:
     """Diagnostic only; startup/progress text cannot establish workers_actual."""
     match = re.search(rb"\b([0-9]+) workers \[|created:\s*([0-9]+)/[0-9]+ workers", out)
     return int(match[1] or match[2]) if match else None
+
+
+@contextmanager
+def _junit_capture_env(repo: Path):
+    """Capture JUnit XML in a private scratch dir outside repo without mutating argv."""
+    root = repo.resolve()
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    if temp_root == root or root in temp_root.parents:
+        raise ValueError("PYTEST_JUNIT_SCRATCH_INSIDE_WORKSPACE")
+    with tempfile.TemporaryDirectory(
+        prefix="mt01j_", dir=temp_root, ignore_cleanup_errors=True
+    ) as scratch_dir:
+        scratch = Path(scratch_dir)
+        (scratch / f"{_JUNIT_PLUGIN_NAME}.py").write_text(_JUNIT_PLUGIN_SOURCE, encoding="utf-8")
+        junit_path = scratch / "junit.xml"
+        env = pytest_observation_env()
+        plugins = [item.strip() for item in env.get("PYTEST_PLUGINS", "").split(",") if item.strip()]
+        if _JUNIT_PLUGIN_NAME not in plugins:
+            plugins.append(_JUNIT_PLUGIN_NAME)
+        env["PYTEST_PLUGINS"] = ",".join(plugins)
+        existing_pp = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = f"{scratch}{os.pathsep}{existing_pp}" if existing_pp else str(scratch)
+        env[_JUNIT_ENV_VAR] = str(junit_path)
+        yield env, junit_path, scratch
+
+
+def _read_captured_junit(junit_path: Path, scratch: Path) -> tuple[bytes | None, str | None]:
+    """Read captured JUnit XML strictly within the private scratch directory and size cap."""
+    if junit_path.is_symlink():
+        return None, "JUNIT_SYMLINK_UNSAFE"
+    if not junit_path.exists():
+        return None, None
+    if not junit_path.is_file():
+        return None, "JUNIT_NOT_REGULAR_FILE"
+    if junit_path.resolve().parent != scratch.resolve():
+        return None, "JUNIT_PATH_ESCAPE"
+    if junit_path.stat().st_size > _MAX_JUNIT_BYTES:
+        return None, "JUNIT_OVERSIZED"
+    return junit_path.read_bytes(), None
+
+
+def _run_pytest_with_junit(argv: list[str], *, repo: Path, timeout: float):
+    """Execute pytest via verification.subprocess.run with bounded JUnit capture."""
+    with _junit_capture_env(repo) as (env, junit_path, scratch):
+        result = subprocess.run(
+            argv, cwd=repo, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout,
+            check=False, env=env,
+        )
+        out = result.stdout.encode() if isinstance(result.stdout, str) else (result.stdout or b"")
+        err = result.stderr.encode() if isinstance(result.stderr, str) else (result.stderr or b"")
+        junit_bytes, junit_error = _read_captured_junit(junit_path, scratch)
+        return result, out, err, junit_bytes, junit_error
+
+
+def _parse_safe_junit(junit: bytes | None) -> ET.Element | None:
+    """Parse bounded JUnit XML while rejecting DOCTYPE/ENTITY and oversized payloads."""
+    if not junit or not isinstance(junit, (bytes, bytearray)) or len(junit) > _MAX_JUNIT_BYTES:
+        return None
+    upper = junit.upper()
+    if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
+        return None
+    try:
+        return ET.fromstring(junit)
+    except (ET.ParseError, ValueError, TypeError):
+        return None
+
+
+def _is_skip_call(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Attribute):
+        return func.attr in ("skipTest", "skip", "skipIf", "skipUnless")
+    if isinstance(func, ast.Name):
+        return func.id in ("skipTest", "skip", "skipIf", "skipUnless")
+    return False
+
+
+def _ast_matches_skip_case(
+    file_path: Path,
+    *,
+    module_variants: tuple[str, ...],
+    classname: str,
+    case_name: str,
+    lineno: int,
+) -> bool:
+    """Verify JUnit (classname, name) matches an actual skip call at lineno in file_path."""
+    matched_mod = next(
+        (m for m in module_variants if classname == m or classname.startswith(m + ".")),
+        None,
+    )
+    if matched_mod is None:
+        return False
+    class_parts = [] if classname == matched_mod else classname[len(matched_mod) + 1:].split(".")
+    if any(not part or not part.isidentifier() for part in class_parts):
+        return False
+    func_name = case_name.split("[", 1)[0]
+    if not func_name or not func_name.isidentifier():
+        return False
+    try:
+        tree = ast.parse(file_path.read_text(encoding="utf-8-sig"))
+    except (OSError, SyntaxError, UnicodeError):
+        return False
+    scope_body = tree.body
+    for cls_name in class_parts:
+        cls_node = next(
+            (n for n in scope_body if isinstance(n, ast.ClassDef) and n.name == cls_name),
+            None,
+        )
+        if cls_node is None:
+            return False
+        scope_body = cls_node.body
+    func_node = next(
+        (
+            n for n in scope_body
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == func_name
+        ),
+        None,
+    )
+    if func_node is None or func_node.end_lineno is None:
+        return False
+    start_line = min([func_node.lineno, *(d.lineno for d in func_node.decorator_list)])
+    if not (start_line <= lineno <= func_node.end_lineno):
+        return False
+    for sub in ast.walk(func_node):
+        if _is_skip_call(sub):
+            end = getattr(sub, "end_lineno", sub.lineno)
+            if sub.lineno <= lineno <= end:
+                return True
+    return False
+
+
+def _strip_verified_symlink_skip(
+    stdout: bytes,
+    stderr: bytes,
+    exit_code: int,
+    junit: bytes | None,
+    *,
+    repo: Path | None = None,
+    candidate_files: Mapping[str, str] | None = None,
+) -> bytes:
+    """Exclude JUnit- and AST-verified WinError 1314 SKIP lines from infra classification only.
+
+    Original stdout, stderr, JUnit XML, and skipped counts are preserved intact.
+    Any unverified WinError, JUnit mismatch, ambiguous skip summary, or invalid
+    XML leaves stdout unchanged so infrastructure classification fails closed.
+    """
+    if b"winerror" not in stdout.lower():
+        return stdout
+    if exit_code != 0 or b"winerror" in stderr.lower() or repo is None:
+        return stdout
+    root = _parse_safe_junit(junit)
+    if root is None:
+        return stdout
+    suites = (
+        [root] if root.tag == "testsuite"
+        else list(root) if root.tag == "testsuites"
+        else []
+    )
+    if len(suites) != 1 or suites[0].tag != "testsuite":
+        return stdout
+    suite = suites[0]
+    cases = list(suite.findall("testcase"))
+    if not cases:
+        return stdout
+    try:
+        suite_tests = int(suite.get("tests", "-1"))
+        suite_errors = int(suite.get("errors", "-1"))
+        suite_failures = int(suite.get("failures", "-1"))
+        suite_skipped = int(suite.get("skipped", "-1"))
+    except (ValueError, TypeError):
+        return stdout
+    if (suite_tests != len(cases) or suite_errors != 0
+            or suite_failures != 0 or suite_skipped < 1):
+        return stdout
+    if any(c.find("failure") is not None or c.find("error") is not None for c in cases):
+        return stdout
+    skipped_cases: list[tuple[ET.Element, ET.Element]] = []
+    for case in cases:
+        skips = case.findall("skipped")
+        if len(skips) > 1:
+            return stdout
+        if len(skips) == 1:
+            skipped_cases.append((case, skips[0]))
+    if len(skipped_cases) != suite_skipped:
+        return stdout
+
+    skip_xml = 0
+    xfail_xml = 0
+    for _, skip in skipped_cases:
+        stype = skip.get("type")
+        if stype == "pytest.skip":
+            skip_xml += 1
+        elif stype == "pytest.xfail":
+            xfail_xml += 1
+        else:
+            return stdout
+    if skip_xml < 1:
+        return stdout
+
+    counts = pytest_counts(stdout)
+    if (counts["passed"] < 1
+            or counts["failed"] != 0
+            or counts["errors"] != 0
+            or counts["skipped"] != skip_xml
+            or counts["xfailed"] != xfail_xml
+            or (counts["passed"] + counts["skipped"] + counts["xfailed"] + counts["xpassed"]) != len(cases)):
+        return stdout
+
+    lines = stdout.splitlines(keepends=True)
+    skip_indices = {i for i, line in enumerate(lines) if line.rstrip(b"\r\n").startswith(b"SKIPPED [")}
+    marked_indices = [i for i, line in enumerate(lines) if b"winerror" in line.lower()]
+    if not marked_indices or any(i not in skip_indices for i in marked_indices):
+        return stdout
+
+    parsed_skips: list[tuple[int, int, str, int, str]] = []
+    seen_locations: set[tuple[str, int, str]] = set()
+    total_stdout_skips = 0
+    for idx in sorted(skip_indices):
+        match = _SKIPPED_LINE_RE.fullmatch(lines[idx].rstrip(b"\r\n"))
+        if match is None:
+            return stdout
+        try:
+            count = int(match.group(1))
+            raw_path = match.group(2).decode("utf-8", "strict")
+            lineno = int(match.group(3))
+            reason = match.group(4).decode("utf-8", "strict").strip()
+        except (UnicodeDecodeError, ValueError):
+            return stdout
+        norm_path = raw_path.replace("\\", "/")
+        if not norm_path or norm_path.startswith("/") or ".." in Path(norm_path).parts:
+            return stdout
+        loc_key = (norm_path, lineno, reason)
+        if loc_key in seen_locations:
+            return stdout
+        seen_locations.add(loc_key)
+        total_stdout_skips += count
+        parsed_skips.append((idx, count, norm_path, lineno, reason))
+    if total_stdout_skips != skip_xml:
+        return stdout
+
+    repo_root = repo.resolve()
+    claimed_junit: set[int] = set()
+    marked_set = set(marked_indices)
+    for idx, count, norm_path, lineno, reason in parsed_skips:
+        if idx not in marked_set:
+            continue
+        if reason != _NATIVE_SYMLINK_SKIP_REASON or not norm_path.endswith(".py"):
+            return stdout
+        if candidate_files is not None:
+            digest_or_link = candidate_files.get(norm_path)
+            if not digest_or_link or str(digest_or_link).startswith("SYMLINK:"):
+                return stdout
+        file_path = repo / norm_path
+        if file_path.is_symlink() or not file_path.is_file():
+            return stdout
+        if repo_root not in file_path.resolve().parents:
+            return stdout
+        mod = norm_path.removesuffix(".py").replace("/", ".")
+        module_variants = (mod, mod.removeprefix("src.")) if mod.startswith("src.") else (mod,)
+        matched_for_line: list[int] = []
+        for j_idx, (case, skip) in enumerate(skipped_cases):
+            if j_idx in claimed_junit or skip.get("type") != "pytest.skip":
+                continue
+            if (skip.get("message") or "").strip() != _NATIVE_SYMLINK_SKIP_REASON:
+                continue
+            if skip.text:
+                match_text = re.fullmatch(r"(.+):([1-9][0-9]*): (.+)", skip.text.strip())
+                if match_text is None:
+                    continue
+                raw_file, raw_line, raw_reason = match_text.groups()
+                same_file = raw_file.replace("\\", "/") == norm_path
+                if not same_file and Path(raw_file).is_absolute():
+                    try:
+                        same_file = Path(raw_file).resolve() == file_path.resolve()
+                    except OSError:
+                        same_file = False
+                if not same_file or raw_line != str(lineno) or raw_reason.strip() != reason:
+                    continue
+            if _ast_matches_skip_case(
+                file_path,
+                module_variants=module_variants,
+                classname=case.get("classname") or "",
+                case_name=case.get("name") or "",
+                lineno=lineno,
+            ):
+                matched_for_line.append(j_idx)
+        if len(matched_for_line) != count:
+            return stdout
+        claimed_junit.update(matched_for_line)
+
+    for j_idx, (_, skip) in enumerate(skipped_cases):
+        if j_idx in claimed_junit:
+            continue
+        if ("winerror" in (skip.get("message") or "").lower()
+                or "winerror" in (skip.text or "").lower()):
+            return stdout
+
+    return b"".join(line for i, line in enumerate(lines) if i not in marked_set)
+
+
+def _diagnose_junit_and_infra(
+    out: bytes,
+    err: bytes,
+    returncode: int,
+    junit_bytes: bytes | None,
+    junit_error: str | None,
+    *,
+    repo: Path,
+    candidate_files: Mapping[str, str],
+) -> tuple[str, str | None]:
+    """Evaluate verified WinError symlink skips alongside bounded JUnit integrity."""
+    diag_out = _strip_verified_symlink_skip(
+        out, err, returncode, junit_bytes,
+        repo=repo, candidate_files=candidate_files,
+    )
+    diagnostics = (diag_out + b"\n" + err).decode("utf-8", "replace").lower()
+    junit_issue = junit_error
+    if junit_issue is None and junit_bytes is not None and _parse_safe_junit(junit_bytes) is None:
+        junit_issue = "JUNIT_XML_MALFORMED_OR_UNSAFE"
+    elif junit_issue is None and junit_bytes is None and _NATIVE_SYMLINK_SKIP_REASON.lower() in diagnostics:
+        junit_issue = "JUNIT_XML_ABSENT"
+    return diagnostics, junit_issue
 
 
 def registered_binding_problems(plan: dict, profiles: Mapping[str, list[str]]) -> list[str]:
@@ -156,11 +510,13 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
             remaining = verify_deadline - started
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(argv, timeout_seconds)
-            response = subprocess.run(argv, cwd=repo, capture_output=True,
-                                      text=True, encoding="utf-8", errors="replace",
-                                      timeout=remaining, check=False,
-                                      env=pytest_observation_env())
-            out, err = response.stdout.encode(), response.stderr.encode()
+            response, out, err, junit_bytes, junit_error = _run_pytest_with_junit(
+                argv, repo=repo, timeout=remaining,
+            )
+        except ValueError as exc:
+            provisional.update(result="UNPROVEN", reason=str(exc), actual_exit_code=None)
+            finish()
+            return subprocess.CompletedProcess(fallback_argv, 3, "", str(exc)), plan
         except subprocess.TimeoutExpired as exc:
             out = exc.stdout if isinstance(exc.stdout, bytes) else (exc.stdout or "").encode()
             err = exc.stderr if isinstance(exc.stderr, bytes) else (exc.stderr or "").encode()
@@ -177,6 +533,8 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
             raise
         save("mt01_provisional_stdout", "mt01.provisional.stdout.log", out)
         save("mt01_provisional_stderr", "mt01.provisional.stderr.log", err)
+        if junit_bytes is not None:
+            save("mt01_provisional_junit", "mt01.provisional.junit.xml", junit_bytes)
         current = file_hashes(repo)
         workers = observed_xdist_workers(out)
         provisional.update(worker_count_provenance=(
@@ -190,12 +548,15 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
             provisional.update(result="UNPROVEN", reason="PROVISIONAL_SOURCE_DRIFT")
             finish()
             raise RuntimeError("MT01_SOURCE_DRIFT_DURING_VERIFICATION")
-        diag = (out + b"\n" + err).decode("utf-8", "replace").lower()
-        if workers not in (None, 12) or any(s in diag for s in (
-                "internalerror", "worker crashed", "workers crashed",
-                "permission denied", "memoryerror", "can't start new thread",
-                "failed to start worker", "error while receiving from worker")):
-            provisional.update(result="UNPROVEN", reason="PROVISIONAL_INFRASTRUCTURE_ERROR")
+        diag, junit_issue = _diagnose_junit_and_infra(
+            out, err, response.returncode, junit_bytes, junit_error,
+            repo=repo, candidate_files=before,
+        )
+        if junit_issue is not None or workers not in (None, 12) or any(s in diag for s in _INFRASTRUCTURE_MARKERS):
+            reason = f"PROVISIONAL_{junit_issue}" if junit_issue is not None else "PROVISIONAL_INFRASTRUCTURE_ERROR"
+            provisional.update(result="UNPROVEN", reason=reason)
+            if junit_issue is not None:
+                provisional["junit_error"] = junit_issue
             finish()
             return subprocess.CompletedProcess(fallback_argv, 3, out.decode("utf-8","replace"),
                                                err.decode("utf-8","replace")), plan
@@ -211,6 +572,8 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
             return subprocess.CompletedProcess(fallback_argv, 3, out.decode("utf-8","replace"),
                                                err.decode("utf-8","replace")), plan
         provisional["result"] = "PASS_PREFLIGHT_ONLY"
+    if not plan.get("groups"):
+        code = 5
     # Shared verify budget, not a fresh timeout per test group.
     for index, entry in enumerate(plan["groups"]):
         if entry["state"] == "REUSE":
@@ -227,10 +590,13 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
             if remaining <= 0:
                 entry["actual_argv"] = None
                 raise subprocess.TimeoutExpired(argv, timeout_seconds)
-            result = subprocess.run(argv, cwd=repo, capture_output=True, text=True,
-                                    encoding="utf-8", errors="replace", timeout=remaining,
-                                    check=False, env=pytest_observation_env())
-            out, err = result.stdout.encode(), result.stderr.encode()
+            result, out, err, junit_bytes, junit_error = _run_pytest_with_junit(
+                argv, repo=repo, timeout=remaining,
+            )
+        except ValueError as exc:
+            unproven(entry, str(exc), started)
+            code = 3
+            break
         except subprocess.TimeoutExpired as exc:
             out = exc.stdout if isinstance(exc.stdout, bytes) else (exc.stdout or "").encode()
             err = exc.stderr if isinstance(exc.stderr, bytes) else (exc.stderr or "").encode()
@@ -254,6 +620,10 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
             key = f"mt01_{index}_{kind}"
             save(key, f"mt01.{index}.{kind}.log", data)
             refs[kind] = evidence_files[key]
+        if junit_bytes is not None:
+            junit_key = f"mt01_{index}_junit"
+            save(junit_key, f"mt01.{index}.junit.xml", junit_bytes)
+            refs["junit"] = evidence_files[junit_key]
         entry.update(actual_exit_code=result.returncode, wall_seconds=time.monotonic() - started,
                      finished_at=datetime.now(timezone.utc).isoformat(), tests_executed=pytest_counts(out),
                      artifacts=refs)
@@ -267,19 +637,32 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
             unproven(entry, "MT01_SOURCE_DRIFT_DURING_VERIFICATION", started)
             finish()
             raise RuntimeError("MT01_SOURCE_DRIFT_DURING_VERIFICATION")
-        diagnostics = (out + b"\n" + err).decode("utf-8", "replace").lower()
+        diagnostics, junit_issue = _diagnose_junit_and_infra(
+            out, err, result.returncode, junit_bytes, junit_error,
+            repo=repo, candidate_files=before,
+        )
+        if junit_issue is not None:
+            entry["junit_error"] = junit_issue
         # A successful -n12 command without a controller receipt is UNPROVEN,
         # even when the quiet console or command line claims twelve workers.
-        # A determinate test failure may still enter Verify-Fix when worker
-        # startup could not complete, but it cannot become a candidate PASS.
-        worker_mismatch = (entry["workers_requested"] == 12 and (
-            entry["workers_actual"] not in (None, 12) or
-            (result.returncode == 0 and entry["workers_actual"] is None)))
-        infrastructure = worker_mismatch or any(s in diagnostics for s in (
-            "permission denied", "permissionerror", "no module named pytest", "internalerror",
-            "worker crashed", "workers crashed", "winerror", "subprocess.timeoutexpired",
-            "memoryerror", "cannot allocate memory", "can't start new thread",
-            "failed to start worker", "could not start worker", "error while receiving from worker"))
+        # Serial profiles must also remain serial (never silently run xdist).
+        if entry["workers_requested"] == 12:
+            worker_mismatch = (
+                entry["workers_actual"] not in (None, 12)
+                or (result.returncode == 0 and entry["workers_actual"] is None)
+            )
+        elif entry["workers_requested"] == 0:
+            worker_mismatch = (
+                entry["workers_actual"] not in (None, 0)
+                or entry.get("workers_console_reported") not in (None, 0)
+            )
+        else:
+            worker_mismatch = True
+        infrastructure = (
+            worker_mismatch
+            or junit_issue is not None
+            or any(s in diagnostics for s in _INFRASTRUCTURE_MARKERS)
+        )
         passed = bool(re.search(rb"\b[1-9][0-9]* passed\b", out))
         if result.returncode == 0 and passed and not infrastructure:
             evidence = Evidence.from_success(entry["binding"], exit_code=0, stdout=out,
@@ -293,9 +676,13 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
                 rb"(?m)^FAILED\s|^=+ FAILURES =+|\b[1-9][0-9]* failed\b", out + b"\n" + err))
             entry["result"] = "FAIL" if determinate else "UNPROVEN"
             if not determinate:
-                entry.update(state="UNPROVEN", reason="PYTEST_WORKER_COUNT_MISMATCH" if worker_mismatch
-                             else "VERIFY_INFRASTRUCTURE_ERROR" if infrastructure
-                             else "NO_SUCCESSFUL_NONEMPTY_PYTEST_RESULT")
+                reason = (
+                    "PYTEST_WORKER_COUNT_MISMATCH" if worker_mismatch
+                    else junit_issue if junit_issue is not None
+                    else "VERIFY_INFRASTRUCTURE_ERROR" if infrastructure
+                    else "NO_SUCCESSFUL_NONEMPTY_PYTEST_RESULT"
+                )
+                entry.update(state="UNPROVEN", reason=reason)
             # Only a known code failure permits collecting other groups, then repair.
             code = 1 if determinate else (result.returncode if result.returncode not in (0, 1) else 3)
             if not determinate:
