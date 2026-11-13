@@ -170,3 +170,35 @@ def test_ef01_denied_stream_does_not_verify_or_retry(tmp_path, monkeypatch):
     assert result["verify_exit_code"] is None
     assert result["invocation_count"] == 1
     assert "SECRET" not in json.dumps(result["invocations"][0]["agy_stream_profile"])
+
+
+def test_ef01_optin_missing_binary_preserves_prelaunch_failure(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    monkeypatch.setenv("AI_COMMERCE_EF01_AGY_STREAM_PROFILE", "1")
+    monkeypatch.setattr(runner, "command_for",
+        lambda *args, **kwargs: (
+            ["nonexistent-agy-stream-999", "--print", "task",
+             "--output-format", "json"], None))
+    result = runner.execute_attempt(
+        repo=repo, output_dir=tmp_path / "evidence",
+        work_id="stream-no-binary", attempt_id="stream-no-binary-a",
+        selection=ExecutorSelection("antigravity", "fixture-model", "high"),
+        instruction="modify changed.txt", allowed_prefixes=["changed.txt"],
+        verify_argv=[sys.executable, "-c", "raise AssertionError('MUST_NOT_VERIFY')"],
+        max_repair_rounds=2)
+    assert result["status"] == "EXECUTOR_UNAVAILABLE"
+    assert result["error_code"] == "EXECUTOR_BINARY_MISSING"
+    assert result["executor_invoked"] is False
+    assert result["verify_exit_code"] is None
+    assert result["replay_authorized"] is False
+
+
+def test_stream_error_envelope_keeps_determinate_capacity_code(tmp_path):
+    from ai_commerce.engineering.runner import _provider_problem
+    events = _valid_events(status="ERROR")
+    events[-1]["result"]["error"] = {"message": "Selected model is at capacity"}
+    result, profile = _run(tmp_path, events)
+    assert profile["stream_valid"] is True
+    assert profile["terminal_status"] == "ERROR"
+    assert _provider_problem(result.stdout.encode()) == (
+        "MODEL_AT_CAPACITY", "MODEL_AT_CAPACITY")
