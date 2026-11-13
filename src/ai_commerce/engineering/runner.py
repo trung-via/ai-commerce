@@ -812,7 +812,10 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     # Even a provider failure gets a scoped snapshot and cumulative diff.
     save("tracked_diff", "git.tracked.diff.patch", diff)
     problem = _source_problem(after, initial, verify_first_scope=verify_first_scope)
-    if problem is None and agy_stream_enabled:
+    # A failed launch, OS permission error, timeout or interrupted child has
+    # its own stronger boundary evidence. Stream parsing must not overwrite it.
+    if (problem is None and agy_stream_enabled and inv["status"] not in (
+            "EXECUTOR_UNAVAILABLE", "EXECUTOR_PERMISSION_DENIED", "EXECUTION_UNKNOWN")):
         if not agy_stream_profile.get("stream_valid", False):
             problem = ("EXECUTION_UNKNOWN", "AGY_STREAM_UNPROVEN")
         elif agy_stream_profile.get("permission_gate_observed"):
