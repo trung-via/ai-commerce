@@ -177,7 +177,6 @@
     "-m",
     "pytest",
     "tests/test_ef01.py",
-    "tests/test_ef01_agy_stream_profile.py",
     "-q",
     "-n",
     "12"
@@ -418,6 +417,15 @@
     "-m",
     "pytest",
     "tests/test_mt01_v21.py",
+    "-q",
+    "-n",
+    "12"
+  ],
+  "mt01-ef01-agy-stream-tests": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_ef01_agy_stream_profile.py",
     "-q",
     "-n",
     "12"
