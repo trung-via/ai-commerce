@@ -247,8 +247,8 @@ def approved_groups() -> tuple[TestGroup, ...]:
         TestGroup("cli", ("tests/test_cli.py", "tests/test_isolation.py"), ("A01.cli-and-isolation",),
                   ("src/ai_commerce/cli.py", "src/ai_commerce/__init__.py", "src/ai_commerce/__main__.py")
                   + sources("core", "__init__ identity provenance")),
-        TestGroup("ef01", ("tests/test_ef01.py",), ("EF01.execution",),
-                  (eng + "runner.py", eng + "adapters.py", eng + "profile.py", eng + "cli.py", eng + "__main__.py", eng + "__init__.py", eng + "model_defaults.py"),
+        TestGroup("ef01", ("tests/test_ef01.py", "tests/test_ef01_agy_stream_profile.py"), ("EF01.execution",),
+                  (eng + "runner.py", eng + "adapters.py", eng + "agy_stream_profile.py", eng + "profile.py", eng + "cli.py", eng + "__main__.py", eng + "__init__.py", eng + "model_defaults.py"),
                   (rem + "worker.py",),
                   ("config/engineering/model-defaults.v1.json",
                    "docs/governance/HUMAN_DECISION_2026-11-02_SOFT_MODEL_DEFAULTS.md")),
