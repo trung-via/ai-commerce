@@ -154,6 +154,10 @@ jobs:
           EF02_ISSUE_NUMBER: ${{ needs.validate.outputs.issue_number }}
           MT01_V21_ENABLED: '1'
           EF02_HOST_SLOTS: ${{ vars.EF02_HOST_SLOTS || '2' }}
+          # One owner-authored, explicitly titled EF02 P0-B probe only.
+          # No arbitrary Issue value becomes an env setting. All ordinary
+          # batches keep the original JSON result mode (disabled).
+          AI_COMMERCE_EF01_AGY_STREAM_PROFILE: ${{ github.event_name == 'issues' && github.event.action == 'opened' && github.repository == 'trung-via/ai-commerce' && github.actor == github.repository_owner && github.event.issue.user.login == github.repository_owner && startsWith(github.event.issue.title, '[EF02][P0B-AGY-STREAM-SMOKE] ') && '1' || '0' }}
         run: |
           if (-not $env:VIRTUAL_ENV) { throw 'EF02_ISOLATED_PYTHON_NOT_SET' }
           $venvPython = Join-Path $env:VIRTUAL_ENV 'Scripts\python.exe'
