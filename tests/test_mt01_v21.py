@@ -558,6 +558,13 @@ def test_v21_offline_ef02_two_action_fanin_real_git_pytest_verify_fix(tmp_path, 
         assert selected
         def verify():
             env = dict(os.environ)
+            # Isolate the synthetic sandbox pytest from outer MT-01 runner plugins
+            # (e.g. PYTEST_PLUGINS / JUnit capture) since PYTHONPATH points only
+            # at the sandbox's src/ tree.
+            for key in ("PYTEST_PLUGINS", "AI_COMMERCE_MT01_JUNIT_PATH", "PYTEST_ADDOPTS",
+                        "COV_CORE_SOURCE", "COV_CORE_CONFIG", "COV_CORE_DATAFILE"):
+                env.pop(key, None)
+            env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
             env["PYTHONPATH"] = str(root / "src")
             return subprocess.run([sys.executable, "-m", "pytest", *selected,
                                    "-q", "-p", "no:cacheprovider"],
@@ -595,7 +602,14 @@ def test_v21_offline_ef02_two_action_fanin_real_git_pytest_verify_fix(tmp_path, 
     result = run_schedule({"batch_id": "mt01-v21-offline-fanin",
                            "source_sha": source, "max_parallel": 1,
                            "actions": actions}, work, max_workers=1)
-    assert result["status"] == "COMPLETE", result
+    if result["status"] != "COMPLETE":
+        import pytest
+        details = [
+            f"{item.get('action_id')}: status={item.get('status')} "
+            f"error={item.get('error_code')} diag={(item.get('diagnostic') or '')[-1200:]}"
+            for item in result.get("actions", [])
+        ]
+        pytest.fail(f"expected COMPLETE, got {result['status']}: " + " | ".join(details))
     assert result["succeeded"] == 2
     assert len(trace) == 2
     assert trace[0]["attempt_exits"] == [0]
@@ -638,6 +652,34 @@ def test_v21_offline_ef02_scope_review_blocks_downstream_without_provider(tmp_pa
     assert result["status"] == "PARTIAL_OR_FAILED"
     assert result["actions"][0]["status"] == "CANDIDATE_READY_SCOPE_REVIEW"
     assert result["actions"][1]["status"] == "BLOCKED_DEPENDENCY"
+
+
+def test_v21_offline_ef02_failed_dependency_blocks_downstream():
+    """Verification failure in prerequisite blocks fan-in dependent without invoking it."""
+    from ai_commerce.remote.scheduler import run_schedule
+    attempted = []
+    actions = [
+        {"action_id": "a", "attempt_id": "offline-fail-001",
+         "depends_on": [], "resources": [],
+         "allowed_paths": ["src/ai_commerce/product/alpha.py"]},
+        {"action_id": "b", "attempt_id": "offline-blocked-001",
+         "depends_on": ["a"], "resources": [],
+         "allowed_paths": ["src/ai_commerce/product/beta.py"]},
+    ]
+    def work(action):
+        attempted.append(action["action_id"])
+        assert action["action_id"] == "a"
+        return {"status": "VERIFICATION_FAILED", "error_code": "TARGETED_VERIFY_NONZERO_OR_UNAVAILABLE",
+                "candidate_sha": None}
+    result = run_schedule({"batch_id": "mt01-v21-offline-fail-dep",
+                           "source_sha": "a" * 40, "max_parallel": 1,
+                           "actions": actions}, work, max_workers=1)
+    assert attempted == ["a"]
+    assert result["status"] == "PARTIAL_OR_FAILED"
+    assert result["succeeded"] == 0
+    assert result["actions"][0]["status"] == "VERIFICATION_FAILED"
+    assert result["actions"][1]["status"] == "BLOCKED_DEPENDENCY"
+    assert result["actions"][1]["error_code"] == "PREREQUISITE_NOT_SUCCESSFUL"
 
 
 
@@ -777,14 +819,44 @@ def test_v22_manifest_rejects_owner_theft_and_unsafe_changes(tmp_path):
             validator(candidate, **args)
 
 
-def test_v22_manifest_rejects_missing_or_linked_source(tmp_path):
+def test_v22_manifest_rejects_missing_or_linked_source(tmp_path, monkeypatch):
     import pytest
     validator, values, ctx = _v22_manifest_fixture(tmp_path)
     source = tmp_path / values["sources"][0]
     source.unlink()
     with pytest.raises(ValueError, match="ONBOARD_FILE_MISSING_OR_LINK"):
         validator(values, **ctx)
-    source.symlink_to(tmp_path / "tests/test_prior.py")
+    # Cross-platform privilege-independent symlink check (no SeCreateSymbolicLink needed).
+    mk(tmp_path, values["sources"][0])
+    resolved_source = tmp_path.resolve() / values["sources"][0]
+    original_is_symlink = Path.is_symlink
+    monkeypatch.setattr(
+        Path, "is_symlink",
+        lambda p: p in (source, resolved_source) or original_is_symlink(p),
+    )
+    with pytest.raises(ValueError, match="ONBOARD_FILE_MISSING_OR_LINK"):
+        validator(values, **ctx)
+    monkeypatch.setattr(
+        Path, "is_symlink",
+        lambda p: p in (source.parent, resolved_source.parent) or original_is_symlink(p),
+    )
+    with pytest.raises(ValueError, match="ONBOARD_UNSAFE_PARENT_LINK"):
+        validator(values, **ctx)
+
+
+def test_v22_manifest_rejects_native_symlink_when_supported(tmp_path, record_property):
+    import os
+    import pytest
+    validator, values, ctx = _v22_manifest_fixture(tmp_path)
+    source = tmp_path / values["sources"][0]
+    source.unlink()
+    try:
+        source.symlink_to(tmp_path / "tests/test_prior.py")
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+            record_property("NATIVE_SYMLINK_CREATION_UNPROVEN", True)
+            pytest.skip("NATIVE_SYMLINK_CREATION_UNPROVEN")
+        raise
     with pytest.raises(ValueError, match="ONBOARD_FILE_MISSING_OR_LINK"):
         validator(values, **ctx)
 
@@ -1156,6 +1228,8 @@ def test_v22_cold_component_one_pr_offline_canary(tmp_path, monkeypatch):
     # Real collection and execution of both product and legacy consumer
     # tests, separate from the registry binding's fixed 12-worker request.
     env = dict(os.environ, PYTEST_DISABLE_PLUGIN_AUTOLOAD="1")
+    for key in ("PYTEST_PLUGINS", "AI_COMMERCE_MT01_JUNIT_PATH", "PYTEST_ADDOPTS"):
+        env.pop(key, None)
     execution = subprocess.run(
         [sys.executable, "-m", "pytest", new_test, old_test, "-q"],
         cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60)

@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -44,10 +45,24 @@ def _snapshot_fake(repo, baseline, state):
     }, diff
 
 
-@pytest.fixture
-def fixture(tmp_path, monkeypatch):
+def _isolate_mt01_env(monkeypatch):
+    """Isolate nested pytest fixtures from outer MT-01 JUnit/observer injection."""
     monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+    monkeypatch.delenv("AI_COMMERCE_MT01_JUNIT_PATH", raising=False)
+    plugins = [
+        item.strip() for item in os.environ.get("PYTEST_PLUGINS", "").split(",")
+        if item.strip() and item.strip() != "_ai_commerce_mt01_junit_plugin"
+    ]
+    if plugins:
+        monkeypatch.setenv("PYTEST_PLUGINS", ",".join(plugins))
+    else:
+        monkeypatch.delenv("PYTEST_PLUGINS", raising=False)
+
+
+@pytest.fixture
+def fixture(tmp_path, monkeypatch):
+    _isolate_mt01_env(monkeypatch)
     repo = tmp_path / "workspace"
     repo.mkdir()
     (repo / "test_scope.py").write_text(
@@ -554,14 +569,22 @@ def _git_repo(tmp_path, real_git=True):
 
 
 def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, checkpoint_error=False, real_git=True,
-                    drift=None):
-    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
-    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+                    drift=None, legacy_selector=True):
+    if legacy_selector:
+        # Legacy mock worker tests use synthetic unowned files (impl.py, kept.txt);
+        # isolate them from an inherited MT01_V21_ENABLED=1 runner environment.
+        monkeypatch.delenv("MT01_V21_ENABLED", raising=False)
+    _isolate_mt01_env(monkeypatch)
+    real_which = shutil.which
+    # Windows venv xdist workers report sys._base_executable while which('python') returns the venv wrapper.
+    monkeypatch.setattr(
+        shutil, "which",
+        lambda cmd, *a, **kw: sys.executable if cmd == "python" and real_which("python", *a, **kw) else real_which(cmd, *a, **kw),
+    )
     repo, head = _git_repo(tmp_path, real_git)
     monkeypatch.setattr(remote, 'load_approved_candidates', lambda *_a: {'version': 1, 'candidates': {}})
     worktree_run = subprocess.run
     if not real_git:
-        import shutil
         baseline = _files(repo)
 
         def observed_snapshot(workspace, prefixes, _deadline):
