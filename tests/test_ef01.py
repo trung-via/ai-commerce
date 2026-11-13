@@ -107,7 +107,7 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'cached_inp
         assert isinstance(invocation[phase], (int, float))
         assert invocation[phase] >= 0
     assert invocation["prelaunch_seconds"] >= invocation["source_preflight_seconds"]
-    assert invocation["git_guard_cleanup"] == "CLEANED"
+    assert invocation["git_guard_cleanup"] == "RETAINED_UNTIL_QUIESCENT"
 
 
 def test_missing_binary_returns_non_pass_and_no_verification(tmp_path):
