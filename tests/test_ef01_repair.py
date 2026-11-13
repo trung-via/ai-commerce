@@ -953,6 +953,8 @@ def test_antigravity_argv_budget_records_complete_original_prompt(fixture):
         assert len(roots) == 2 and roots[-1] == fixture.repo
         mirror = roots[0] / "instruction.txt"
         assert mirror.is_file()
+        focused = roots[0] / "focus.brief.txt"
+        assert focused.is_file() and "AI COMMERCE FOCUSED EXECUTION BRIEF V1" in focused.read_text()
         observed_mirrors.append((mirror, mirror.read_bytes(),
                                  (roots[0] / "provider_boundary.json").exists()))
         (fixture.repo / "impl.py").write_text("good")
@@ -982,6 +984,9 @@ def test_antigravity_argv_budget_records_complete_original_prompt(fixture):
     assert exposed_boundary is False
     assert evidence not in mirror.parents
     assert str(mirror) in transport.read_text(encoding="utf-8")
+    assert str(mirror.parent / "focus.brief.txt") in transport.read_text(encoding="utf-8")
+    assert "SOURCE_WORKTREE: " + str(fixture.repo) in transport.read_text(encoding="utf-8")
+    assert "FIRST read the focused execution brief" in transport.read_text(encoding="utf-8")
     assert str(original) not in transport.read_text(encoding="utf-8")
     assert not mirror.exists()
     assert inv["agy_input_cleanup"] == "CLEANED"
