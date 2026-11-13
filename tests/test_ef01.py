@@ -360,7 +360,7 @@ def test_agy_headless_evidence_scope_registers_only_prepared_directory(tmp_path)
                               antigravity_evidence_dir=evidence)
     roots = [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "--add-dir"]
     assert stdin is None
-    assert roots == [str(repo), str(evidence.resolve())]
+    assert roots == [str(evidence.resolve()), str(repo)]
     assert "--mode" in argv and argv[argv.index("--mode") + 1] == "accept-edits"
     assert "--dangerously-skip-permissions" not in argv
     assert "--yolo" not in argv
@@ -387,7 +387,10 @@ print(json.dumps({'status': 'SUCCESS', 'denied_actions': []}))
     seen = []
 
     def capture(selection, path, instruction, **kwargs):
-        seen.append((selection.executor, kwargs.get("antigravity_evidence_dir")))
+        mirror = kwargs.get("antigravity_evidence_dir")
+        seen.append((selection.executor, mirror, mirror.is_dir() if mirror else None,
+                     (mirror / "instruction.txt").is_file() if mirror else None,
+                     (mirror / "provider_boundary.json").exists() if mirror else None))
         return real(selection, path, instruction, **kwargs)
 
     monkeypatch.setattr(runner_module, "command_for", capture)
@@ -400,9 +403,11 @@ print(json.dumps({'status': 'SUCCESS', 'denied_actions': []}))
     )
     assert result["status"] == "BUILD_VERIFIED_FOR_SCOPE"
     assert (outdir / "invocations" / "000" / "instruction.txt").is_file()
-    assert seen[-1] == ("antigravity", outdir / "invocations" / "000" / "agy_input")
-    assert (outdir / "invocations" / "000" / "agy_input" / "instruction.txt").is_file()
-    assert not (outdir / "invocations" / "000" / "agy_input" / "provider_boundary.json").exists()
+    assert seen[-1][0] == "antigravity"
+    assert seen[-1][2:] == (True, True, False)
+    assert outdir not in seen[-1][1].parents
+    assert not seen[-1][1].exists()  # disposable mirror removed after CLI return
+    assert result["invocations"][0]["agy_input_cleanup"] == "CLEANED"
     assert result["denied_actions"] == []
 
 

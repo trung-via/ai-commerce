@@ -10,7 +10,9 @@ import ntpath
 import os
 import posixpath
 import re
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from subprocess import list2cmdline
@@ -366,7 +368,8 @@ MAX_TIMEOUT_SECONDS = 86400
 # Stay below cmd.exe's limit too: AGY may be installed as a Windows .cmd shim.
 AGY_COMMANDLINE_MAX_UNITS = 8000
 AGY_INPUT_CONTEXT = (
-    "Use the current isolated source worktree and this invocation's prepared agy_input only. "
+    "Execute shell/file edit tools from the isolated source worktree, NOT agy_input; "
+    "the prepared agy_input contains read-only instructions/feedback only. "
     "External archived artifacts are OPTIONAL, including prior GitHub artifacts, sibling worktrees "
     "and runner-owned .local records. Do not read user profiles, credentials or authoritative runner logs. "
     "Use current source and the disposable instruction/repair_feedback.json copies. "
@@ -391,12 +394,38 @@ def _remaining(deadline: float, limit: float = 30) -> float:
     return min(limit, remaining)
 
 
+def _new_agy_input_dir(repo: Path) -> Path:
+    """Create short, durable, private AGY input outside the repo and Windows TEMP.
+
+    #837's batch/action/invocation evidence directory reached 248 code units and
+    AGY's tool cwd failed with WinError 267. The mirror is a sibling of the
+    source worktree under a runner-owned root, independent of TEMP cleaners and
+    GitHub checkout cleanup. Only this mirror is exposed via an extra --add-dir.
+    """
+    base = repo.resolve().parent / "_ef01_agy_inputs"
+    if base.is_symlink():
+        raise ValueError("AGY_INPUT_ROOT_SYMLINK")
+    base.mkdir(mode=0o700, exist_ok=True)
+    if not base.is_dir() or base.is_symlink():
+        raise ValueError("AGY_INPUT_ROOT_UNAVAILABLE")
+    root = Path(tempfile.mkdtemp(prefix="agy-", dir=str(base))).resolve(strict=True)
+    if os.name == "nt" and len(str(root).encode("utf-16-le")) // 2 > 180:
+        root.rmdir()
+        raise ValueError("AGY_INPUT_DIRECTORY_TOO_LONG")
+    return root
+
+
 def _snapshot(repo: Path, prefixes: Sequence[str], deadline: float,
               git_executable: str | None = None) -> tuple[dict, bytes]:
     head = _git(repo, "rev-parse", "HEAD", timeout_seconds=_remaining(deadline), git_executable=git_executable)
     identity = _git(repo, "rev-parse", "--absolute-git-dir", timeout_seconds=_remaining(deadline), git_executable=git_executable)
     if head.returncode or identity.returncode:
-        raise RuntimeError("GIT_SOURCE_UNAVAILABLE")
+        # Never expose Git stderr (which can include private paths/config). The
+        # reason distinguishes missing checkout/.git from an executable error.
+        reason = ("WORKTREE_MISSING" if not repo.is_dir() else
+                  "GIT_ENTRY_MISSING" if not (repo / ".git").exists() else
+                  "HEAD_REV_PARSE_FAILED" if head.returncode else "GIT_DIR_REV_PARSE_FAILED")
+        raise RuntimeError("GIT_SOURCE_UNAVAILABLE:" + reason)
     changed = _changes(repo, timeout_seconds=_remaining(deadline), git_executable=git_executable)
     diff = subprocess.run(git_argv(repo, "diff", "--binary", head.stdout.strip(), executable=git_executable),
                           capture_output=True, check=False, timeout=_remaining(deadline))
@@ -572,15 +601,9 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     save("instruction", "instruction.txt", prompt.encode("utf-8"))
     if feedback is not None:
         save("repair_feedback", "repair_feedback.json", _json_bytes(feedback))
-    # Grant AGY only a disposable input mirror, never the authoritative logs,
-    # hashes, provider boundary, or feedback evidence owned by the runner.
+    # Do not allocate the AGY input mirror until source preflight is proven.
+    # Unlike historical EF02, it must not live under the very deep evidence dir.
     agy_input_dir = None
-    if selection.executor == "antigravity":
-        agy_input_dir = directory / "agy_input"
-        agy_input_dir.mkdir(parents=True, exist_ok=False)
-        _write(agy_input_dir / "instruction.txt", prompt.encode("utf-8"))
-        if feedback is not None:
-            _write(agy_input_dir / "repair_feedback.json", _json_bytes(feedback))
     before, _ = snapshot()
     inv["input_snapshot"] = before
     save("source_before", "source.before.json", _json_bytes(before))
@@ -589,6 +612,18 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         status, error = problem or ("SOURCE_DRIFT", "WORKTREE_CHANGED_BETWEEN_INVOCATIONS")
         inv.update(status=status, error_code=error)
         return
+    if selection.executor == "antigravity":
+        try:
+            agy_input_dir = _new_agy_input_dir(repo)
+            _write(agy_input_dir / "instruction.txt", prompt.encode("utf-8"))
+            if feedback is not None:
+                _write(agy_input_dir / "repair_feedback.json", _json_bytes(feedback))
+        except (OSError, ValueError):
+            if agy_input_dir is not None:
+                shutil.rmtree(agy_input_dir, ignore_errors=True)
+            inv.update(status="EXECUTOR_UNAVAILABLE", error_code="AGY_INPUT_PRECHECK_FAILED",
+                       executor_invoked=False)
+            return
     # Preserve the original instruction evidence; guard only the provider wire prompt.
     context = AGY_INPUT_CONTEXT if selection.executor == "antigravity" else ""
     guarded_prompt = GIT_GUARD_INSTRUCTION + "\n\n" + context + prompt
@@ -668,6 +703,12 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
         inv["executor_finished_at"] = _now()
         save("executor_stdout", "executor.stdout.log", out)
         save("executor_stderr", "executor.stderr.log", err)
+        if agy_input_dir is not None:
+            try:
+                shutil.rmtree(agy_input_dir)
+                inv["agy_input_cleanup"] = "CLEANED"
+            except OSError:
+                inv["agy_input_cleanup"] = "UNCONFIRMED"
         if live is not None and live.exists():
             data = live.read_bytes()
             if live.parent != directory:
@@ -680,6 +721,11 @@ def _run_invocation(*, repo: Path, output_dir: Path, invocation: dict,
     inv["denied_actions"] = sorted({d["tool"] for d in inv["denied_action_diagnostics"]})
     inv["provider_test_observations"] = _provider_test_observations(out)
     inv["provider_return_determinate"] = _provider_completed(out, selection.executor)
+    # A later Git snapshot failure must not erase separately observed provider
+    # diagnostics. This is NOT proof that partial source effects are safe.
+    observed_provider_problem = _provider_problem(out) or _provider_problem(err)
+    if observed_provider_problem:
+        inv["provider_failure_observed"] = observed_provider_problem[0]
     usage = _observe_usage(out, selection.executor)
     if usage is not None:
         inv.update(usage=usage, usage_status="PROVIDER_REPORTED")

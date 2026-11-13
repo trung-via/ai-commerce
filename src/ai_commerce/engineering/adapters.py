@@ -42,8 +42,11 @@ def command_for(selection: ExecutorSelection, repo: Path, instruction: str,
         if not evidence.is_dir() or not (evidence / "instruction.txt").is_file():
             raise ValueError("AGY_EVIDENCE_DIR_NOT_PREPARED")
         evidence_args = ["--add-dir", str(evidence)]
+    # Put the source repo LAST among workspace roots. In #837 AGY used the
+    # final (agy_input) root as its command cwd, outside the Git worktree.
+    # The input mirror remains accessible but must not be the working tree.
     return [
-        antigravity_bin, "--print", instruction, "--add-dir", str(repo),
-        *evidence_args, "--model", selection.model, "--effort", selection.effort,
+        antigravity_bin, "--print", instruction, *evidence_args,
+        "--add-dir", str(repo), "--model", selection.model, "--effort", selection.effort,
         "--mode", "accept-edits", "--disable-slash-commands", "--output-format", "json",
     ], None

@@ -604,8 +604,12 @@ def _worker_fixture(tmp_path, monkeypatch, fail=(), publication_error=False, che
     monkeypatch.setattr(remote, "subprocess", SimpleNamespace(
         run=worktree_run, Popen=Child, PIPE=subprocess.PIPE, TimeoutExpired=subprocess.TimeoutExpired))
     import tempfile
+    # EF02 now explicitly allocates a durable worktree under the runner-owned
+    # sibling directory. Keep the fixture's isolated temp override, but accept
+    # and honor the caller's requested root instead of rejecting dir=.
     monkeypatch.setattr(remote, "tempfile", SimpleNamespace(
-        mkdtemp=lambda prefix: tempfile.mkdtemp(prefix=prefix, dir=tmp_path)))
+        mkdtemp=lambda prefix, dir=None: tempfile.mkdtemp(
+            prefix=prefix, dir=dir if dir is not None else tmp_path)))
     batch = dict(batch_id="repair-integration", source_sha=head, max_parallel=2, actions=[])
     worker = remote.LocalBatchWorker(checkout=repo, batch=batch,
                                     profiles={"scope": VERIFY, "project-tests": ["python", "-m", "pytest", "tests", "-q"]},
@@ -879,12 +883,21 @@ def test_antigravity_argv_budget_records_complete_original_prompt(fixture):
     from ai_commerce.engineering.adapters import command_for
     fixture.monkeypatch.setattr(runner, "command_for", command_for)
     commands = []
+    observed_mirrors = []
     original_prompt = 'approved instructions "quoted" \\ ' * 3000 + "\U0001f680" * 500
 
     def execute(argv, **kwargs):
         if argv == VERIFY:
             return subprocess.CompletedProcess(argv, 0, "1 passed", "")
         commands.append(argv)
+        # Verify the disposable transport input while the executor process is
+        # alive; it is intentionally removed after the provider returns.
+        roots = [Path(argv[i + 1]) for i, arg in enumerate(argv[:-1]) if arg == "--add-dir"]
+        assert len(roots) == 2 and roots[-1] == fixture.repo
+        mirror = roots[0] / "instruction.txt"
+        assert mirror.is_file()
+        observed_mirrors.append((mirror, mirror.read_bytes(),
+                                 (roots[0] / "provider_boundary.json").exists()))
         (fixture.repo / "impl.py").write_text("good")
         return subprocess.CompletedProcess(argv, 0, '{"status":"SUCCESS"}', "")
 
@@ -904,11 +917,17 @@ def test_antigravity_argv_budget_records_complete_original_prompt(fixture):
     assert original.read_text(encoding="utf-8") == original_prompt
     transport = evidence / inv["evidence_files"]["transport_instruction"]
     assert transport.read_text(encoding="utf-8") == commands[0][commands[0].index("--print") + 1]
-    # AGY receives only the disposable input mirror, not the authoritative log root.
-    mirror = evidence / "invocations" / "000" / "agy_input" / "instruction.txt"
-    assert mirror.read_bytes() == original.read_bytes()
+    # The mirror is a short, private, attempt-local input root outside evidence.
+    # Its contents are observed at invocation time, before safe cleanup.
+    assert len(observed_mirrors) == 1
+    mirror, mirrored_bytes, exposed_boundary = observed_mirrors[0]
+    assert mirrored_bytes == original.read_bytes()
+    assert exposed_boundary is False
+    assert evidence not in mirror.parents
     assert str(mirror) in transport.read_text(encoding="utf-8")
     assert str(original) not in transport.read_text(encoding="utf-8")
+    assert not mirror.exists()
+    assert inv["agy_input_cleanup"] == "CLEANED"
     assert inv["evidence_sha256"]["instruction"] == hashlib.sha256(original_prompt.encode()).hexdigest()
 
 

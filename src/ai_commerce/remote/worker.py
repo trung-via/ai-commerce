@@ -26,6 +26,31 @@ from ai_commerce.engineering.minimum_test import Evidence, file_hashes
 from ai_commerce.engineering.source_safety import checked_path, protected_change, ordinary_scope_drift
 
 
+def _new_worktree_path(checkout: Path) -> Path:
+    """Allocate a short, durable worktree outside Windows TEMP and the checkout.
+
+    EF02 once put the entire action_id into a TEMP worktree name. Long agent
+    sessions could then depend on deep paths and an externally cleaned TEMP
+    location. A random, bounded name in the runner-owned sibling directory
+    avoids both failure modes without reusing an old worktree or Git claim.
+    """
+    root = checkout.resolve().parent / "_ef02_worktrees"
+    if root.is_symlink():
+        raise ValueError("EF02_WORKTREE_ROOT_SYMLINK")
+    root.mkdir(mode=0o700, exist_ok=True)
+    if not root.is_dir() or root.is_symlink():
+        raise ValueError("EF02_WORKTREE_ROOT_UNAVAILABLE")
+    candidate = Path(tempfile.mkdtemp(prefix="wt-", dir=str(root)))
+    try:
+        if os.name == "nt" and len(str(candidate).encode("utf-16-le")) // 2 > 180:
+            raise ValueError("EF02_WORKTREE_PATH_TOO_LONG")
+    finally:
+        # git worktree add requires an absent target; mkdtemp provides a fresh,
+        # unpredictable name without reusing a previous attempt's directory.
+        candidate.rmdir()
+    return candidate
+
+
 def _verified_receipt_evidence(report: dict, *, root: Path, workspace: Path,
                                source_sha: str, sources: list[str], profiles: dict,
                                allowed_paths: list[str] | None = None,
@@ -289,9 +314,13 @@ class LocalBatchWorker:
             outcome.update(status="INTEGRATION_FAILED", error_code=type(exc).__name__,
                            diagnostic=str(exc))
             return finish()
-        worktree = Path(tempfile.mkdtemp(prefix="ai-commerce-ef02-" + aid + "-"))
-        # Use a new empty directory as parent; git worktree add requires absent target.
-        worktree.rmdir()
+        try:
+            worktree = _new_worktree_path(self.checkout)
+        except (OSError, ValueError) as exc:
+            outcome.update(status="SOURCE_WORKTREE_FAILED",
+                           error_code="EF02_WORKTREE_ALLOCATION_FAILED",
+                           diagnostic=type(exc).__name__, provider_invocation_proven=False)
+            return finish()
         outcome["worktree"] = str(worktree)
         try:
             p = subprocess.run(git_argv(self.checkout, "worktree", "add", "--detach", str(worktree), effective,
