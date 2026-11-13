@@ -720,3 +720,27 @@ def test_new_worktree_path_is_short_stable_and_unique(tmp_path):
                           check=True, text=True, capture_output=True).stdout.strip()
     assert len(head) == 40
     assert (first / ".git").is_file()
+
+
+def test_agy_stream_p0b_opt_in_is_owner_only_and_does_not_affect_regular_ef02():
+    """Only an owner-created opened P0-B Issue can enable opt-in profiling.
+
+    This checks the protected workflow's exact source contract, not a claimed
+    native/provider execution. Regular and workflow_dispatch batches stay off.
+    """
+    workflow = (ROOT / ".github/workflows/ef02-batch.yml").read_text(encoding="utf-8")
+    marker = "AI_COMMERCE_EF01_AGY_STREAM_PROFILE:"
+    assert workflow.count(marker) == 1
+    execute = workflow.split("- name: Execute bounded concurrent EF01 jobs", 1)[1]
+    assert marker in execute
+    expression = next(line.strip() for line in execute.splitlines()
+                      if line.strip().startswith(marker))
+    assert "github.event_name == 'issues'" in expression
+    assert "github.event.action == 'opened'" in expression
+    assert "github.repository == 'trung-via/ai-commerce'" in expression
+    assert "github.actor == github.repository_owner" in expression
+    assert "github.event.issue.user.login == github.repository_owner" in expression
+    assert "startsWith(github.event.issue.title, '[EF02][P0B-AGY-STREAM-SMOKE] ')" in expression
+    assert "&& '1' || '0' }}" in expression
+    assert "vars.EF02_AGY_STREAM_PROFILE" not in workflow
+    assert "dangerously-skip-permissions" not in workflow
