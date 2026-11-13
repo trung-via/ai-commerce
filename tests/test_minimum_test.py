@@ -19,48 +19,6 @@ FULL = ["python", "-m", "pytest", "tests", "-q"]
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _reviewed_ef01_agy_test_extension(historical_argv, live_argv):
-    """Only the explicitly reviewed AGY regression may extend EF01's old argv.
-
-    The dated MT-01 report remains immutable. Do not weaken source ownership,
-    old test selection/order, Python/pytest entrypoint or -n 12 guarantees.
-    """
-    baseline = ["python", "-m", "pytest", "tests/test_ef01.py", "-q", "-n", "12"]
-    return (
-        historical_argv == baseline
-        and live_argv == [
-            "python", "-m", "pytest", "tests/test_ef01.py",
-            "tests/test_ef01_agy_stream_profile.py", "-q", "-n", "12",
-        ]
-    )
-
-
-@pytest.mark.parametrize("invalid_live", [
-    ["python", "-m", "pytest", "tests/test_ef01.py", "-q", "-n", "12"],
-    ["python", "-m", "pytest", "tests/test_ef01_agy_stream_profile.py", "-q", "-n", "12"],
-    ["python", "-m", "pytest", "tests/test_ef01_agy_stream_profile.py", "tests/test_ef01.py", "-q", "-n", "12"],
-    ["python", "-m", "pytest", "tests/test_ef01.py", "tests/test_ef01_agy_stream_profile.py", "tests/test_ef01_agy_stream_profile.py", "-q", "-n", "12"],
-    ["python", "-m", "pytest", "tests/test_ef01.py", "tests/test_ef01_agy_stream_profile.py", "tests/test_unreviewed.py", "-q", "-n", "12"],
-    ["python", "-m", "pytest", "tests/test_ef01.py", "tests/test_ef01_agy_stream_profile.py", "-q", "-n", "4"],
-    ["python", "-m", "pytest", "tests/test_ef01.py", "tests/test_ef01_agy_stream_profile.py", "-q"],
-    ["python", "-m", "pytest", "tests/test_ef01.py", "tests/test_ef01_agy_stream_profile.py", "-x", "-n", "12"],
-    ["python", "-m", "pytest", "tests/test_ef01.py", "tests/test_ef01_agy_stream_profile.py", "-q", "-n", "12", "--disable-warnings"],
-])
-def test_ef01_agy_historical_profile_extension_rejects_unreviewed_argv(invalid_live):
-    historical = ["python", "-m", "pytest", "tests/test_ef01.py", "-q", "-n", "12"]
-    assert not _reviewed_ef01_agy_test_extension(historical, invalid_live)
-
-
-def test_ef01_agy_historical_profile_extension_accepts_exact_reviewed_argv():
-    historical = ["python", "-m", "pytest", "tests/test_ef01.py", "-q", "-n", "12"]
-    live = ["python", "-m", "pytest", "tests/test_ef01.py",
-            "tests/test_ef01_agy_stream_profile.py", "-q", "-n", "12"]
-    assert _reviewed_ef01_agy_test_extension(historical, live)
-    assert not _reviewed_ef01_agy_test_extension(
-        ["python", "-m", "pytest", "tests/test_else.py", "-q", "-n", "12"], live)
-
-
-
 @pytest.fixture(autouse=True)
 def _isolate_legacy_selector_mode(monkeypatch):
     """Legacy MT-01 contracts must not inherit the EF01 V2.1 selector toggle.
@@ -212,11 +170,6 @@ def test_companion_report_has_exact_reviewed_parallel_commands(real_tree):
                 "tests/test_ef02_d5_wake_readiness_bootstrap.py",
             ]
             assert len(live_tests) == len(set(live_tests))
-        elif key == "mt01-ef01-tests":
-            # #846 adds one owner-registered deterministic AGY stream regression.
-            # Keep the historical report intact, require an exact additive
-            # test list, original test order and immutable Python/worker argv.
-            assert _reviewed_ef01_agy_test_extension(historical_argv, current[key])
         elif key == "mt01-ef02-recovery-tests":
             # Preserve the dated MT-01 report; only deleted M0-R probe-only
             # tests may disappear from its historical recovery selection.
