@@ -177,6 +177,7 @@
     "-m",
     "pytest",
     "tests/test_ef01.py",
+    "tests/test_ef01_agy_stream_profile.py",
     "-q",
     "-n",
     "12"
