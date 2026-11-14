@@ -716,12 +716,164 @@ def test_collection_validator_is_deterministic_private_and_has_no_effects(monkey
 
 def _bounded_collection_case():
     """Declared serial mapping only; no native sandbox or process evidence."""
+    import copy
     actual = _collection_case()
     serial = _collection_case(serial=True)
+    profile = "mt01-atb01-collect-serial"
+    serial["expected_binding"].update(
+        registered_profile=profile, profile_mode="COLLECTION_ONLY",
+        registry_sha256=mt.COLLECTION_ONLY_REGISTRY_SHA256)
+    serial["observation"]["binding"] = copy.deepcopy(serial["expected_binding"])
     return dict(enabled=True, expected_binding=actual["expected_binding"],
+                collection_profile=profile,
                 collection_binding=serial["expected_binding"],
-                registered_profiles={**actual["registered_profiles"], **serial["registered_profiles"]},
+                registered_profiles=actual["registered_profiles"],
                 observation=serial["observation"])
+
+
+def test_collection_only_registry_is_immutable_exact_and_separate_from_ef02():
+    profile = "mt01-atb01-collect-serial"
+    argv = ("python", "-m", "pytest", "tests/test_minimum_test.py", "-q")
+    assert dict(mt.COLLECTION_ONLY_PROFILES) == {profile: argv}
+    assert mt.select_collection_only_profile(profile, mode="COLLECTION_ONLY") == argv
+    with pytest.raises(TypeError):
+        mt.COLLECTION_ONLY_PROFILES[profile] = ()
+    with pytest.raises(TypeError):
+        mt.COLLECTION_ONLY_PROFILES[profile][0] = "py"
+    expected = dict(version=1, mode="COLLECTION_ONLY", scope=("tests/test_minimum_test.py",),
+                    workers_requested=0, scheduler="serial", profiles={profile: argv})
+    assert mt.COLLECTION_ONLY_REGISTRY_SHA256 == mt.digest(mt.canonical(expected).encode())
+    registry = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_text(encoding="utf-8"))
+    assert set(mt.COLLECTION_ONLY_PROFILES).isdisjoint(registry)
+    assert registry["mt01-mt01-tests"] == [
+        "python", "-m", "pytest", "tests/test_minimum_test.py", "-q", "-n", "12"]
+    assert registry["project-tests"] == ["python", "-m", "pytest", "tests", "-q", "-n", "12"]
+
+
+@pytest.mark.parametrize("mode", [None, "AUTO", "HUMAN_FULL", "SERIAL", "collection_only", True])
+def test_collection_only_selector_requires_explicit_mode(mode):
+    with pytest.raises(ValueError, match="COLLECTION_ONLY_PROFILE_SELECTION_REQUIRED"):
+        mt.select_collection_only_profile("mt01-atb01-collect-serial", mode=mode)
+
+
+@pytest.mark.parametrize("profile", [None, [], "mt01-mt01-tests", "synthetic-serial",
+                                          "mt01-atb01-collect-serial --collect-only"])
+def test_collection_only_selector_never_infers_or_accepts_arbitrary_profiles(profile):
+    with pytest.raises(ValueError, match="COLLECTION_ONLY_PROFILE_SELECTION_REQUIRED"):
+        mt.select_collection_only_profile(profile, mode="COLLECTION_ONLY")
+
+
+@pytest.mark.parametrize("intent", ["AUTO", "HUMAN_FULL"])
+@pytest.mark.parametrize("v21", [False, True])
+def test_collection_only_profile_is_rejected_by_ordinary_ef02_and_mt01(
+        tmp_path, monkeypatch, intent, v21):
+    from ai_commerce.remote.validation import RemoteRequestError
+    profile = "mt01-atb01-collect-serial"
+    monkeypatch.setenv("MT01_V21_ENABLED", "1" if v21 else "0")
+    registry = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_text(encoding="utf-8"))
+    with pytest.raises(RemoteRequestError, match="VERIFICATION_PROFILE_UNREGISTERED"):
+        approved_verification_plan(dict(verification_profile=profile, verification_intent=intent,
+                                        depends_on=[]), registry)
+    # Even accidental merging of collection identities into run profiles must
+    # stop before legacy, V2 AUTO or HUMAN_FULL planning can select anything.
+    registry[profile] = list(mt.COLLECTION_ONLY_PROFILES[profile])
+    with pytest.raises(ValueError, match="COLLECTION_ONLY_PROFILE_NOT_EXECUTION"):
+        mt.select_plan(repo=tmp_path, base_sha="a" * 40, base_files={}, candidate_files={},
+                       changed_paths=[], required_acs=[], fallback_argv=registry[profile],
+                       registered_only=True, registered_profiles=registry, env={},
+                       human_full_suite_authorized=intent == "HUMAN_FULL")
+
+
+def test_collection_only_binding_reaches_public_hooks_with_registry_digest():
+    inputs = _bounded_collection_case()
+    binding = inputs["collection_binding"]
+    plugin = mt.collection_observer(binding=binding, registered_profiles=mt.COLLECTION_ONLY_PROFILES)
+    plugin.pytest_configure(SimpleNamespace(args=["tests/test_minimum_test.py"], getoption=lambda key,
+        default=None: True if key == "collectonly" else 0 if key == "numprocesses" else default))
+    plugin.pytest_collection_finish(SimpleNamespace(items=[SimpleNamespace(nodeid=n)
+        for n in inputs["observation"]["serial_nodeids"]]))
+    plugin.pytest_sessionfinish(SimpleNamespace(), 0)
+    observation = plugin.snapshot(outcome=inputs["observation"]["outcome"])
+    receipt = mt.validate_collection_observation(expected_binding=binding,
+        registered_profiles=mt.COLLECTION_ONLY_PROFILES, observation=observation)
+    assert receipt["profile_mode"] == "COLLECTION_ONLY"
+    assert receipt["registry_sha256"] == mt.COLLECTION_ONLY_REGISTRY_SHA256
+    assert receipt["workers_requested"] == receipt["workers_observed"] == 0
+    assert receipt["worker_consistency"] == "SERIAL"
+    assert receipt["collected_count"] == 10
+    assert receipt["collection_status"] == "OBSERVED_UNTRUSTED"
+    _assert_collection_hold(receipt, valid=True)
+
+
+@pytest.mark.parametrize("field,value,reason", [
+    ("registry_sha256", "f" * 64, "COLLECTION_REGISTRY_DIGEST_MISMATCH"),
+    ("registry_sha256", None, "COLLECTION_REGISTRY_DIGEST_MISMATCH"),
+    ("profile_mode", "AUTO", "COLLECTION_ONLY_PROFILE_SELECTION_REQUIRED"),
+    ("profile_mode", "HUMAN_FULL", "COLLECTION_ONLY_PROFILE_SELECTION_REQUIRED"),
+    ("workers_requested", 12, "COLLECTION_PROFILE_BINDING_MISMATCH"),
+    ("scheduler", "load", "COLLECTION_PROFILE_BINDING_MISMATCH"),
+])
+def test_bounded_collection_registry_mode_and_serial_binding_cannot_be_forged(field, value, reason):
+    inputs = _bounded_collection_case()
+    inputs["collection_binding"][field] = value
+    receipt = mt.bounded_windows_collection(**inputs)
+    assert reason in receipt["reason_codes"]
+    assert receipt["request_sha256"] is None
+    _assert_bounded_collection_not_started(receipt)
+
+
+@pytest.mark.parametrize("argv,scope,workers", [
+    (["py", "-m", "pytest", "tests/test_minimum_test.py", "-q"],
+     ["tests/test_minimum_test.py"], 0),
+    (["python", "-m", "pytest", "tests", "-q"], ["tests"], 0),
+    (["python", "-m", "pytest", "tests/test_minimum_test.py", "-q", "-n", "12"],
+     ["tests/test_minimum_test.py"], 12),
+])
+def test_source_collection_identity_rejects_forged_registry_even_with_matching_digests(
+        argv, scope, workers):
+    binding = _bounded_collection_case()["collection_binding"]
+    binding.update(profile_argv=argv, argv_sha256=mt.digest(mt.canonical(argv).encode()),
+                   collection_scope=scope, workers_requested=workers,
+                   scheduler="load" if workers else "serial")
+    # P1-A may receive caller data, but a reserved source identity must still
+    # match the reviewed constant, regardless of the supplied registry values.
+    receipt = mt.validate_collection_observation(expected_binding=binding,
+        registered_profiles={binding["registered_profile"]: argv}, observation={})
+    assert "COLLECTION_ONLY_PROFILE_MISMATCH" in receipt["reason_codes"]
+    _assert_collection_hold(receipt)
+
+
+@pytest.mark.parametrize("field,value", [("candidate_sha", "f" * 40),
+    ("source_sha256", "f" * 64), ("environment_sha256", "f" * 64),
+    ("python_sha256", "f" * 64)])
+def test_bounded_collection_request_digest_pins_candidate_source_and_environment(field, value):
+    inputs = _bounded_collection_case()
+    before = mt.bounded_windows_collection(**inputs)
+    for binding in (inputs["expected_binding"], inputs["collection_binding"],
+                    inputs["observation"]["binding"]):
+        binding[field] = value
+    after = mt.bounded_windows_collection(**inputs)
+    assert before["request_sha256"] is not None
+    assert after["request_sha256"] is not None
+    assert before["request_sha256"] != after["request_sha256"]
+    _assert_bounded_collection_not_started(before)
+    _assert_bounded_collection_not_started(after)
+
+
+def test_bounded_serial_collection_cannot_report_twelve_worker_proof():
+    inputs = _bounded_collection_case()
+    observation = inputs["observation"]
+    observation["workers_started"] = [f"gw{i}" for i in range(12)]
+    observation["workers_finished"] = observation["workers_started"].copy()
+    receipt = mt.bounded_windows_collection(**inputs)
+    observed = receipt["observation_receipt"]
+    assert "COLLECTION_WORKERS_INCOMPLETE" in observed["reason_codes"]
+    assert observed["workers_requested"] == 0
+    assert observed["workers_observed"] is None
+    assert receipt["workers_requested"] == 12  # Execution request only, never observed proof.
+    assert receipt["collection_workers_requested"] == 0
+    _assert_collection_hold(observed)
+    _assert_bounded_collection_not_started(receipt)
 
 
 def _assert_bounded_collection_not_started(receipt):
@@ -766,6 +918,15 @@ def test_bounded_windows_collection_defaults_to_no_launch():
     _assert_bounded_collection_not_started(receipt)
 
 
+def test_bounded_windows_collection_requires_explicit_source_profile_selection():
+    inputs = _bounded_collection_case()
+    del inputs["collection_profile"]
+    receipt = mt.bounded_windows_collection(**inputs)
+    assert "COLLECTION_ONLY_PROFILE_SELECTION_REQUIRED" in receipt["reason_codes"]
+    assert receipt["request_sha256"] is None
+    _assert_bounded_collection_not_started(receipt)
+
+
 def test_bounded_windows_collection_requires_distinct_exact_serial_mapping():
     inputs = _bounded_collection_case()
     inputs["collection_binding"] = None
@@ -798,18 +959,20 @@ def test_bounded_windows_collection_rejects_source_environment_or_scope_drift(fi
     serial = inputs["collection_binding"]
     serial[field] = value
     if field == "collection_scope":
-        serial["profile_argv"] = ["python", "-m", "pytest", "tests", "-q"]
-        serial["argv_sha256"] = mt.digest(mt.canonical(serial["profile_argv"]).encode())
-        inputs["registered_profiles"][serial["registered_profile"]] = serial["profile_argv"].copy()
+        # The immutable registration rejects scope drift even with a correct
+        # execution binding and unchanged source-owned argv.
+        reason = "UNSAFE_COLLECTION_ARGV"
+    else:
+        reason = "COLLECTION_SERIAL_BINDING_MISMATCH"
     receipt = mt.bounded_windows_collection(**inputs)
-    assert "COLLECTION_SERIAL_BINDING_MISMATCH" in receipt["reason_codes"]
+    assert reason in receipt["reason_codes"]
     assert receipt["request_sha256"] is None
     _assert_bounded_collection_not_started(receipt)
 
 
 @pytest.mark.parametrize("case,reason", [
-    ("registry", "UNREGISTERED_COLLECTION_ARGV"),
-    ("filtered", "UNSAFE_COLLECTION_ARGV"),
+    ("registry", "COLLECTION_ONLY_PROFILE_NOT_EXECUTION"),
+    ("filtered", "UNREGISTERED_COLLECTION_ARGV"),
     ("digest", "COLLECTION_ARGV_DIGEST_MISMATCH"),
     ("traversal", "UNSUPPORTED_COLLECTION_SCOPE"),
     ("device", "UNSUPPORTED_COLLECTION_SCOPE"),
@@ -818,10 +981,9 @@ def test_bounded_windows_collection_rejects_unsafe_declarations(case, reason):
     inputs = _bounded_collection_case()
     serial = inputs["collection_binding"]
     if case == "registry":
-        del inputs["registered_profiles"][serial["registered_profile"]]
+        inputs["registered_profiles"][serial["registered_profile"]] = serial["profile_argv"].copy()
     elif case == "filtered":
         serial["profile_argv"] += ["-k", "selected"]
-        inputs["registered_profiles"][serial["registered_profile"]] = serial["profile_argv"].copy()
     elif case == "digest":
         serial["argv_sha256"] = "f" * 64
     else:
@@ -841,6 +1003,10 @@ def test_bounded_windows_collection_keeps_synthetic_hooks_private_and_untrusted(
     assert observed["provenance"] == observed["collection_status"] == "SYNTHETIC"
     assert observed["collected_count"] == 10
     assert observed["workers_observed"] == 0
+    assert observed["registry_sha256"] == receipt["collection_registry_sha256"]
+    assert receipt["collection_registry_sha256"] == mt.COLLECTION_ONLY_REGISTRY_SHA256
+    assert receipt["collection_mode"] == "COLLECTION_ONLY"
+    assert receipt["collection_workers_requested"] == 0
     assert receipt["workers_requested"] == 12
     assert receipt["execution_profile"] != receipt["collection_profile"]
     assert len(receipt["request_sha256"]) == 64
@@ -849,9 +1015,12 @@ def test_bounded_windows_collection_keeps_synthetic_hooks_private_and_untrusted(
     _assert_bounded_collection_not_started(receipt)
     # Public receipt edits cannot alter the request, raw IDs, or another result.
     receipt["limits"]["deadline_seconds"] = 999
+    receipt["native_provider_contract"]["requirements"].clear()
     observed["selected_test_paths"].clear()
     again = mt.bounded_windows_collection(**inputs)
     assert again["limits"]["deadline_seconds"] == 60
+    assert again["native_provider_contract"]["status"] == "REQUIRED_NOT_AVAILABLE"
+    assert again["native_provider_contract"]["requirements"]
     assert inputs == before
     assert again["request_sha256"] == receipt["request_sha256"]
 
@@ -878,11 +1047,13 @@ def test_bounded_windows_collection_reuses_p1a_failure_admission(case):
     _assert_bounded_collection_not_started(receipt)
 
 
-def test_bounded_windows_collection_cannot_accept_caller_isolation_flags():
+@pytest.mark.parametrize("override", ["scratch_safe", "native_attested", "launcher", "argv",
+                                     "verification_profile", "verification_intent"])
+def test_bounded_windows_collection_cannot_accept_caller_isolation_flags(override):
     # No scratch_safe, Job handle or arbitrary launcher argument can authorize
     # imports. A reviewed companion owner must first provide native proof.
     with pytest.raises(TypeError):
-        mt.bounded_windows_collection(**_bounded_collection_case(), scratch_safe=True)
+        mt.bounded_windows_collection(**_bounded_collection_case(), **{override: True})
 
 
 @pytest.fixture(autouse=True)
