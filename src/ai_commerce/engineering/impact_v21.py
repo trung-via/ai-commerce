@@ -72,6 +72,11 @@ CONTROL_TESTS = {
     "src/ai_commerce/engineering/impact_v21.py": (
         "tests/test_mt01_v21.py", "tests/test_minimum_test.py",
     ),
+    # Exact planned native collection source; bytes must be recovered separately
+    # before it can join the static owner inventory. Other new modules HOLD.
+    "src/ai_commerce/engineering/windows_collection_sandbox.py": (
+        "tests/test_minimum_test.py", "tests/test_mt01_v21.py",
+    ),
     # Approved exact D5 operator PowerShell source, narrow reviewed test
     # closure only; unexpected script paths remain unowned and HOLD.
     "scripts/AI-Commerce-D5-Attended-CDP.ps1": (

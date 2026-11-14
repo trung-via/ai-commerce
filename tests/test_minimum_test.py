@@ -2865,6 +2865,51 @@ def test_shadow_owner_change_preserves_auto_selection_and_registered_argv(monkey
         assert entry["binding"]["argv"][-2:] == ["-n", "12"]
 
 
+@pytest.mark.parametrize("owner_test_changed", [False, True])
+def test_v21_windows_collection_control_preserves_registered_mt01_evidence(
+        tmp_path, monkeypatch, owner_test_changed):
+    """Offline planning only: no native module bytes, Git setup or test launch."""
+    monkeypatch.setenv("MT01_V21_ENABLED", "1")
+    source = "src/ai_commerce/engineering/windows_collection_sandbox.py"
+    tests = ["tests/test_minimum_test.py", "tests/test_mt01_v21.py"]
+    for path in tests:
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# synthetic test inventory\n", encoding="utf-8")
+    files = mt.file_hashes(tmp_path)
+    assert source not in files
+    command = ["python", "-m", "pytest", tests[0], "-q", "-n", "12"]
+    changed = [source, tests[0]] if owner_test_changed else [source]
+    plan = mt.select_plan(
+        repo=tmp_path, base_sha="a" * 40, base_files=files, candidate_files=files,
+        changed_paths=changed, required_acs=("MT01.selection-and-evidence",),
+        fallback_argv=command, groups=mt.approved_groups(), registered_only=True,
+        registered_profiles={"mt01-mt01-tests": command}, env={})
+
+    assert plan["impact_v21"]["selected_tests"] == tuple(tests)
+    assert plan["fallback"] is False
+    assert not plan["unknown_acs"] and not plan["pending_brain_acs"]
+    assert not any("SOURCE_OWNERSHIP_REQUIRED" in p
+                   for p in plan["impact_v21"]["missing_mapping"])
+    if owner_test_changed:
+        assert plan["impact_v21"]["mode"] == "TARGETED"
+        assert not plan["impact_v21"]["missing_mapping"]
+        assert plan["selected_groups"] == ["mt01"]
+        assert plan["selected_profiles"] == ["mt01-mt01-tests"]
+        entry, = plan["groups"]
+        assert entry["execute"] and entry["state"] == "EXECUTE"
+        assert entry["acs"] == ["MT01.selection-and-evidence"]
+        assert entry["binding"]["argv"] == command
+        assert entry["binding"]["selected_impact_tests"] == tests
+    else:
+        # CONTROL_TESTS alone cannot assert the absent module's semantic AC.
+        assert plan["impact_v21"]["mode"] == "HOLD_COVERAGE"
+        assert not plan["selected_groups"] and not plan["selected_profiles"]
+        assert "AC_REQUIRED_GROUP_NOT_SELECTED:MT01.selection-and-evidence" in plan["reason_codes"]
+        assert all(not entry["execute"] and entry["state"] == "UNPROVEN"
+                   for entry in plan["groups"])
+
+
 def test_human_full_cannot_auto_approve_unmapped_acceptance(monkeypatch, real_tree):
     """Full pytest tests/ does not prove an AC without a reviewed owner."""
     from ai_commerce.engineering.minimum_test import select_plan
