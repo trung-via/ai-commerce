@@ -2288,7 +2288,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ef02-904-origin-source-${{ github.run_id }}
-          path: ${{ runner.temp }}\\ef02-904-source-snapshot.zip
+          path: ${{ runner.temp }}\ef02-904-source-snapshot.zip
           retention-days: 7
           if-no-files-found: error
       - name: Publish bounded source artifact receipt to invoking Issue
