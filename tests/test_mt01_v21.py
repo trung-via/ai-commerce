@@ -1494,6 +1494,42 @@ def test_mt01_impact_control_only_selects_reviewed_self_tests():
     assert selected.selected_tests == ("tests/test_minimum_test.py", "tests/test_mt01_v21.py")
 
 
+def test_windows_collection_sandbox_control_selects_exact_tests_before_recovery(tmp_path):
+    from ai_commerce.engineering.impact_v21 import CONTROL_TESTS
+    from ai_commerce.engineering.minimum_test import approved_groups
+
+    source = "src/ai_commerce/engineering/windows_collection_sandbox.py"
+    tests = ("tests/test_minimum_test.py", "tests/test_mt01_v21.py")
+    assert CONTROL_TESTS[source] == tests
+    for path in tests:
+        mk(tmp_path, path)
+    assert not (tmp_path / source).exists()
+
+    plan = select_impact(root=tmp_path, changed_paths=(source,), groups=approved_groups())
+    assert plan.mode == "TARGETED" and plan.runnable
+    assert plan.selected_tests == tests
+    assert plan.reason_codes == ("REVIEWED_CONTROL_CLOSURE",)
+    assert not plan.missing_mapping
+    # Reviewed test selection does not invent a static source owner or AC.
+    assert not plan.selected_groups
+
+
+def test_windows_collection_sandbox_control_does_not_admit_unknown_engineering_source(tmp_path):
+    from ai_commerce.engineering.minimum_test import approved_groups
+
+    source = "src/ai_commerce/engineering/windows_collection_sandbox.py"
+    unknown = "src/ai_commerce/engineering/unreviewed_collection.py"
+    tests = ("tests/test_minimum_test.py", "tests/test_mt01_v21.py")
+    for path in tests:
+        mk(tmp_path, path)
+    for changed in ((unknown,), (source, unknown)):
+        plan = select_impact(root=tmp_path, changed_paths=changed, groups=approved_groups())
+        assert plan.mode == "HOLD_MAPPING" and not plan.runnable
+        assert plan.missing_mapping == (unknown + ":SOURCE_OWNERSHIP_REQUIRED",)
+        assert plan.selected_tests == (tests if source in changed else ())
+        assert not plan.selected_groups
+
+
 def test_d5_operator_bridge_pr_ci_covers_independent_hostops_personal_consumer(tmp_path):
     """The trusted merge gate's mandatory D5 script tests must be selected by CI.
 
