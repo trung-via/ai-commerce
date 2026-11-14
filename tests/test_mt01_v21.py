@@ -2180,7 +2180,7 @@ def test_ef02_904_origin_snapshot_ingress_is_fixed_and_non_replaying():
         "native_sandbox_proven:false", "replay_authorized:false",
     ):
         assert fixed in scoped
-    source = scoped.split("          @'\n", 1)[1].split("\n          '@ | python -B -", 1)[0]
+    source = scoped.split("          $script = @'\n", 1)[1].split("\n          '@\n          $script | python -B -", 1)[0]
     py = textwrap.dedent(source)
     tree = ast.parse(py)
     assert "subprocess.run" in py and "shell=False" in py
