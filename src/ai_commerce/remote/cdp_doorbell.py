@@ -427,6 +427,7 @@ def probe_chat_a_candidate(*, endpoint: str = "http://127.0.0.1:9444",
                            inventory=None) -> str:
     """Bounded native read of one open ChatGPT tab, NOT authenticated Chat A.
 
+    This generic singleton probe has no precommitted exact-URL selector.
     No Send, navigation, page creation, private URL output or live-origin grant.
     """
     if not _is_windows() or type(endpoint) is not str or endpoint != "http://127.0.0.1:9444":
@@ -503,6 +504,7 @@ def probe_wh03_test_registration_signal(*, endpoint: str = "http://127.0.0.1:944
     This DOES NOT prove freshness, private account, complete search domain,
     authenticated Chat A or native Send authority. Registration remains pending
     until a separately approved private owner binds the origin.
+    This generic singleton probe is not the precommitted exact-URL reader.
     """
     if not _is_windows() or type(endpoint) is not str or endpoint != "http://127.0.0.1:9444":
         return "NATIVE_DESKTOP_UNPROVEN"
@@ -744,7 +746,8 @@ class WH03TestRegistrationLedger:
         """Requires independently enrolled native exact-chat proof verifier.
 
         The browser text matcher alone never returns TEST_REGISTERED. The
-        authority must independently verify origin and caller custody; a public
+        authority must independently verify exact account/profile/session,
+        complete private search domain, origin and caller custody; a public
         Issue/marker/boolean cannot implement this native decision.
         """
         self._authorized(attestation, "test_registration_complete",
@@ -828,6 +831,8 @@ def probe_wh03_committed_registration_signal(
 
     Caller-provided commitments do not prove issuer, account, full search
     domain, fresh user consent, private custody or a registered origin.
+    URL selection is syntactic only: it cannot rule out a copied marker in
+    another tab or a closed/unloaded chat, or attest account/profile/session.
     This read never sends, enrolls, or exports marker/chat/session data.
     The fixed GitHub operator must HOLD until an authenticated private owner
     supplies and consumes an independently issued, one-shot commitment.
@@ -847,20 +852,33 @@ def probe_wh03_committed_registration_signal(
             pages = list(contexts[0].pages)
             if len(pages) > 32:
                 return "CONTEXT_UNPROVEN"
-            candidates = [p for p in pages
-                          if type(getattr(p, "url", None)) is str
-                          and _CHAT.fullmatch(p.url.rstrip("/")) is not None]
-            if len(candidates) != 1:
-                return ("MULTIPLE_CHAT_CANDIDATES" if candidates
+            # Inventory URL strings only. Other ChatGPT tabs are outside this
+            # attempt's DOM read scope, regardless of tab order or foreground.
+            candidates = []
+            has_chat = False
+            for page in pages:
+                url = getattr(page, "url", None)
+                if type(url) is str and _CHAT.fullmatch(url.rstrip("/")) is not None:
+                    has_chat = True
+                    if url == commitment.chat_url:
+                        candidates.append(page)
+            if not candidates:
+                return ("TEST_CHAT_ROUTE_MISMATCH" if has_chat
                         else "CHAT_A_CANDIDATE_NOT_FOUND")
+            if len(candidates) > 1:
+                return "MULTIPLE_CHAT_CANDIDATES"
             page = candidates[0]
-            if page.url.rstrip("/") != commitment.chat_url:
+            if page.url != commitment.chat_url:
                 return "TEST_CHAT_ROUTE_MISMATCH"
             guard = page.evaluate(_CHAT_A_READ_ONLY_SURFACE)
+            if page.url != commitment.chat_url:
+                return "TEST_CHAT_ROUTE_MISMATCH"
             if guard != "CANDIDATE_READY":
                 return "DRAFT_PRESENT" if guard == "DRAFT_PRESENT" else "SURFACE_UNPROVEN"
             observed = page.evaluate(
                 _WH03_COMMITTED_SIGNAL_DOM, {"digest": commitment.marker_digest})
+            if page.url != commitment.chat_url:
+                return "TEST_CHAT_ROUTE_MISMATCH"
             if observed in ("TEST_SIGNAL_NOT_FOUND", "TEST_SIGNAL_AMBIGUOUS",
                             "TEST_SIGNAL_SCOPE_UNPROVEN",
                             "TEST_SIGNAL_MATCH_UNATTESTED"):
