@@ -19,6 +19,365 @@ FULL = ["python", "-m", "pytest", "tests", "-q"]
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _shadow_workload(count=10, *, history_count=None):
+    """Bounded synthetic observations; no pytest collection or execution."""
+    import copy
+    binding = dict(candidate_sha="a" * 40, source_sha256="b" * 64,
+                   environment_sha256="c" * 64, argv_sha256=mt.digest(mt.canonical(
+                       ["python", "-m", "pytest", "tests", "-q", "-n", "12"]).encode()),
+                   registered_profile="project-tests", platform="Windows",
+                   workers_requested=12, scheduler="load", collection_scope=["tests"])
+    nodeids = [f"tests/test_family_{i // 10}.py::test_case[variant-{i}]" for i in range(count)]
+    collection = dict(schema_version=verification.WORKLOAD_SCHEMA_VERSION,
+                      provenance="SYNTHETIC", evidence_sha256="d" * 64,
+                      binding=copy.deepcopy(binding), test_count=count, nodeids=nodeids,
+                      nodeids_sha256=verification.workload_nodeids_digest(nodeids))
+    known = count if history_count is None else history_count
+    history = dict(schema_version=verification.WORKLOAD_SCHEMA_VERSION,
+                   provenance="SYNTHETIC", evidence_sha256="e" * 64,
+                   binding=copy.deepcopy(binding), test_count=known,
+                   duration_semantics="setup_call_teardown", age_seconds=0,
+                   durations=[dict(nodeid=n, seconds=1.0) for n in nodeids[:known]],
+                   startup_seconds=2.0, overhead_seconds=3.0, fixture_seconds=4.0,
+                   serial_seconds=0.0, workers_observed=12,
+                   wall_seconds=9.0 + known / 2)
+    return dict(binding=binding, selected_test_count=count, collection=collection, history=history)
+
+
+def _assert_shadow_only(receipt):
+    assert receipt["status"] == "SHADOW_ONLY"
+    assert receipt["execution_status"] == "NOT_EXECUTED"
+    assert receipt["state"] == "UNPROVEN"
+    assert receipt["acceptance_pass"] is False
+    assert receipt["tests_executed"] is None
+    assert receipt["soft_deadline_seconds"] is None
+    assert receipt["hard_deadline_seconds"] is None
+    assert receipt["confidence"] in ("PARTIAL", "UNCALIBRATED")
+    assert "PASS" not in receipt.values()
+    mt.canonical(receipt)  # Every output must be finite, sanitized JSON data.
+
+
+def test_shadow_workload_ten_vs_ten_thousand_parameterized_identities_scale():
+    small = verification.estimate_workload(**_shadow_workload(10))
+    large = verification.estimate_workload(**_shadow_workload(10_000))
+    assert small["selected_test_count"] == small["input_nodeid_count"] == 10
+    assert large["selected_test_count"] == large["input_nodeid_count"] == 10_000
+    assert large["estimated_seconds"] > small["estimated_seconds"] * 100
+    assert large["historical_coverage_count"] == 10_000
+    assert large["coverage_fraction"] == 1.0
+    assert large["nodeids_sha256"] != small["nodeids_sha256"]
+    assert len(set(large["nodeid_hashes"])) == 10_000
+    for receipt in (small, large):
+        _assert_shadow_only(receipt)
+        assert receipt["tests_collected"] is None  # Synthetic identities are not collection proof.
+
+
+def test_shadow_nodeid_normalization_retains_parameters_and_rejects_duplicates():
+    digest = verification.workload_nodeids_digest
+    first = "tests/test_family.py::test_case[a\\b]"
+    second = "tests/test_family.py::test_case[a/b]"
+    assert digest([first, second]) == digest([second, first])
+    assert digest([first]) != digest([second])
+    assert digest([first]) == digest(["./tests\\test_family.py::test_case[a\\b]"])
+    with pytest.raises(ValueError, match="DUPLICATE_NODEID"):
+        digest([first, "./tests\\test_family.py::test_case[a\\b]"])
+    inputs = _shadow_workload()
+    inputs["collection"]["nodeids"][1] = inputs["collection"]["nodeids"][0]
+    receipt = verification.estimate_workload(**inputs)
+    assert "DUPLICATE_NODEID" in receipt["reason_codes"]
+    assert receipt["estimated_seconds"] is None
+    _assert_shadow_only(receipt)
+
+
+def test_shadow_workload_heavy_test_and_slow_file_increase_estimate():
+    inputs = _shadow_workload(120)
+    baseline = verification.estimate_workload(**inputs)
+    inputs["history"]["durations"][0]["seconds"] = 200.0
+    inputs["history"]["wall_seconds"] = 209.0  # Matching synthetic elapsed, including shared costs.
+    heavy = verification.estimate_workload(**inputs)
+    assert heavy["estimated_seconds"] > baseline["estimated_seconds"]
+    assert heavy["components"]["slow_file_seconds"] == 209.0
+    assert heavy["estimated_seconds"] >= 218.0
+    spread = _shadow_workload(120)
+    concentrated = _shadow_workload(120)
+    # Equal count, durations, throughput and wall time; only the file tail differs.
+    for record in (concentrated["collection"]["nodeids"], concentrated["history"]["durations"]):
+        for i, item in enumerate(record):
+            nodeid = f"tests/test_slow_file.py::test_case[variant-{i}]"
+            if isinstance(item, dict):
+                item["nodeid"] = nodeid
+            else:
+                record[i] = nodeid
+    concentrated["collection"]["nodeids_sha256"] = verification.workload_nodeids_digest(
+        concentrated["collection"]["nodeids"])
+    assert verification.estimate_workload(**concentrated)["estimated_seconds"] > verification.estimate_workload(
+        **spread)["estimated_seconds"]
+    _assert_shadow_only(heavy)
+
+
+@pytest.mark.parametrize("missing", ["workers_observed", "wall_seconds", "startup_seconds"])
+def test_shadow_requested_twelve_workers_require_effective_throughput(missing):
+    inputs = _shadow_workload(120)
+    observed = verification.estimate_workload(**inputs)
+    assert observed["effective_workers"] == 2.0
+    assert observed["throughput_tests_per_second"] == 2.0
+    del inputs["history"][missing]
+    receipt = verification.estimate_workload(**inputs)
+    assert receipt["workers_requested"] == 12
+    assert receipt["effective_workers"] == 1.0
+    assert receipt["throughput_tests_per_second"] is None
+    assert receipt["estimated_seconds"] > observed["estimated_seconds"]
+    assert "EFFECTIVE_THROUGHPUT_UNPROVEN_SERIAL_ASSUMED" in receipt["reason_codes"]
+    _assert_shadow_only(receipt)
+
+
+def test_shadow_throughput_requires_matching_elapsed_and_serial_profile():
+    inputs = _shadow_workload(120)
+    inputs["history"]["wall_seconds"] = 19.0
+    parallel = verification.estimate_workload(**inputs)
+    assert parallel["effective_workers"] == parallel["throughput_tests_per_second"] == 12.0
+    for binding in (inputs["binding"], inputs["collection"]["binding"], inputs["history"]["binding"]):
+        binding.update(workers_requested=0, scheduler="serial", registered_profile="project-tests-serial",
+                       argv_sha256=mt.digest(mt.canonical(FULL).encode()))
+    inputs["history"].update(workers_observed=0, wall_seconds=129.0)
+    serial = verification.estimate_workload(**inputs)
+    assert serial["effective_workers"] == serial["throughput_tests_per_second"] == 1.0
+    assert serial["estimated_seconds"] > parallel["estimated_seconds"]
+    _assert_shadow_only(parallel)
+    _assert_shadow_only(serial)
+
+
+def test_shadow_no_history_and_half_unknown_use_explicit_conservative_assumptions():
+    inputs = _shadow_workload(20)
+    inputs["history"] = None
+    cold = verification.estimate_workload(**inputs)
+    partial = verification.estimate_workload(**_shadow_workload(20, history_count=10))
+    for receipt in (cold, partial):
+        _assert_shadow_only(receipt)
+        low, high = receipt["estimate_envelope_seconds"]
+        assert 0 < low <= high <= verification._MAX_WORKLOAD_SECONDS
+        assert "COLD_TESTS_UNCALIBRATED" in receipt["reason_codes"]
+        assert receipt["uncertainty_kind"] == "ASSUMPTION_ENVELOPE_NOT_PREDICTION_INTERVAL"
+    assert cold["confidence"] == "UNCALIBRATED"
+    assert cold["coverage_fraction"] == cold["historical_coverage_count"] == 0
+    assert cold["effective_workers"] == 1.0
+    assert partial["confidence"] == "PARTIAL"
+    assert partial["coverage_fraction"] == 0.5
+    assert partial["historical_coverage_count"] == 10
+    assert partial["estimated_seconds"] >= 10 * partial["cold_test_assumptions_seconds"][0] / 2
+
+
+@pytest.mark.parametrize("seconds", [float("nan"), float("inf"), -float("inf"), -1, 0,
+                                     10**1000, 86401, True, "1", None])
+def test_shadow_corrupt_duration_rejects_entire_history(seconds):
+    inputs = _shadow_workload()
+    inputs["history"]["durations"][0]["seconds"] = seconds
+    receipt = verification.estimate_workload(**inputs)
+    assert "INVALID_DURATION" in receipt["reason_codes"]
+    assert receipt["confidence"] == "UNCALIBRATED"
+    assert receipt["historical_coverage_count"] == 0
+    assert receipt["estimated_seconds"] >= 10 * 60
+    _assert_shadow_only(receipt)
+
+
+@pytest.mark.parametrize("key,value", [
+    ("candidate_sha", "f" * 40), ("source_sha256", "f" * 64),
+    ("environment_sha256", "f" * 64), ("argv_sha256", "f" * 64),
+    ("registered_profile", "mt01-mt01-tests"), ("scheduler", "loadfile"),
+    ("collection_scope", ["src/package/tests"]),
+])
+@pytest.mark.parametrize("record", ["collection", "history"])
+def test_shadow_source_environment_argv_profile_or_scope_drift_cannot_prove(record, key, value):
+    inputs = _shadow_workload()
+    inputs[record]["binding"][key] = value
+    receipt = verification.estimate_workload(**inputs)
+    assert "OBSERVATION_IDENTITY_MISMATCH" in receipt["reason_codes"]
+    assert receipt["confidence"] == "UNCALIBRATED"
+    assert receipt["historical_coverage_count"] == 0
+    if record == "collection":
+        assert receipt["estimated_seconds"] is None
+        assert receipt["tests_collected"] is None
+    _assert_shadow_only(receipt)
+
+
+@pytest.mark.parametrize("case,reason", [
+    ("missing_collection", "OBSERVATION_MISSING"),
+    ("missing_evidence", "OBSERVATION_EVIDENCE_MISSING"),
+    ("unknown_provenance", "OBSERVATION_PROVENANCE_MISSING"),
+    ("bad_schema", "OBSERVATION_SCHEMA_UNSUPPORTED"),
+    ("missing_environment", "BINDING_IDENTITY_UNPROVEN"),
+    ("unknown_platform", "ENVIRONMENT_UNPROVEN"),
+    ("unsupported_scope", "UNSUPPORTED_COLLECTION_SCOPE"),
+    ("missing_nested_scope", "COLLECTION_SCOPE_INCOMPLETE"),
+    ("out_of_scope", "COLLECTION_SCOPE_INCOMPLETE"),
+    ("missing_id", "COLLECTION_COUNT_MISMATCH"),
+    ("changed_id", "COLLECTION_DIGEST_MISMATCH"),
+    ("digest", "COLLECTION_DIGEST_MISMATCH"),
+    ("oversized_count", "INVALID_NODEID_COUNT"),
+    ("malformed_id", "UNSUPPORTED_COLLECTION_SCOPE"),
+    ("invalid_unicode", "INVALID_NODEID_ENCODING"),
+    ("selected_count", "SELECTED_TEST_COUNT_UNPROVEN"),
+])
+def test_shadow_collection_validation_fails_closed(case, reason):
+    inputs = _shadow_workload()
+    collection = inputs["collection"]
+    if case == "missing_collection":
+        inputs["collection"] = None
+    elif case == "missing_evidence":
+        del collection["evidence_sha256"]
+    elif case == "unknown_provenance":
+        collection["provenance"] = "console_guess"
+    elif case == "bad_schema":
+        collection["schema_version"] = True
+    elif case == "missing_environment":
+        del inputs["binding"]["environment_sha256"]
+    elif case == "unknown_platform":
+        inputs["binding"]["platform"] = "unknown"
+    elif case == "unsupported_scope":
+        inputs["binding"]["collection_scope"] = ["../private"]
+    elif case == "missing_nested_scope":
+        for binding in (inputs["binding"], collection["binding"]):
+            binding["collection_scope"].append("src/package/tests")
+    elif case == "out_of_scope":
+        collection["nodeids"][0] = "src/package/tests/test_nested.py::test_a"
+        collection["nodeids_sha256"] = verification.workload_nodeids_digest(collection["nodeids"])
+    elif case == "missing_id":
+        collection["nodeids"].pop()
+    elif case == "changed_id":
+        collection["nodeids"][0] += "changed"
+    elif case == "digest":
+        collection["nodeids_sha256"] = "f" * 64
+    elif case == "oversized_count":
+        collection["nodeids"] = [collection["nodeids"][0]] * 100_001
+    elif case == "malformed_id":
+        collection["nodeids"][0] = "tests/../secret.py::test_a"
+    elif case == "invalid_unicode":
+        collection["nodeids"][0] = "tests/test_a.py::test_a[\ud800]"
+    else:
+        inputs["selected_test_count"] = True
+    receipt = verification.estimate_workload(**inputs)
+    assert reason in receipt["reason_codes"]
+    assert receipt["estimated_seconds"] is None
+    assert receipt["estimate_envelope_seconds"] is None
+    assert receipt["tests_collected"] is None
+    _assert_shadow_only(receipt)
+
+
+@pytest.mark.parametrize("case,reason", [
+    ("duplicate", "DUPLICATE_NODEID"), ("count", "HISTORY_IDENTITIES_MISMATCH"),
+    ("unknown_id", "HISTORY_IDENTITIES_MISMATCH"), ("oversized", "HISTORY_COUNT_INVALID"),
+    ("stale", "INVALID_DURATION"), ("semantics", "HISTORY_DURATION_SEMANTICS_UNPROVEN"),
+    ("missing_evidence", "OBSERVATION_EVIDENCE_MISSING"),
+    ("startup_nan", "INVALID_DURATION"), ("fixture_negative", "INVALID_DURATION"),
+    ("wall_inconsistent", "HISTORY_WALL_INCONSISTENT"),
+    ("workers_mismatch", "HISTORY_WORKERS_MISMATCH"),
+])
+def test_shadow_invalid_history_uses_uncalibrated_fallback(case, reason):
+    inputs = _shadow_workload()
+    history = inputs["history"]
+    if case == "duplicate":
+        history["durations"][1]["nodeid"] = history["durations"][0]["nodeid"]
+    elif case == "count":
+        history["test_count"] += 1
+    elif case == "unknown_id":
+        history["durations"][0]["nodeid"] = "tests/test_other.py::test_case"
+    elif case == "oversized":
+        history["durations"] *= 2
+    elif case == "stale":
+        history["age_seconds"] = 31 * 24 * 60 * 60
+    elif case == "semantics":
+        history["duration_semantics"] = "call_only"
+    elif case == "missing_evidence":
+        del history["evidence_sha256"]
+    elif case == "startup_nan":
+        history["startup_seconds"] = float("nan")
+    elif case == "fixture_negative":
+        history["fixture_seconds"] = -1
+    elif case == "wall_inconsistent":
+        history["wall_seconds"] = 1
+    else:
+        history["workers_observed"] = 4
+    receipt = verification.estimate_workload(**inputs)
+    assert reason in receipt["reason_codes"]
+    assert receipt["confidence"] == "UNCALIBRATED"
+    assert receipt["historical_coverage_count"] == 0
+    assert receipt["effective_workers"] == 1.0
+    _assert_shadow_only(receipt)
+
+
+def test_shadow_startup_fixture_serial_overhead_and_wall_scaling_are_visible():
+    inputs = _shadow_workload(120)
+    baseline = verification.estimate_workload(**inputs)
+    inputs["history"].update(startup_seconds=20, overhead_seconds=30, fixture_seconds=40,
+                              serial_seconds=300, wall_seconds=390)
+    receipt = verification.estimate_workload(**inputs)
+    assert receipt["estimated_seconds"] > baseline["estimated_seconds"]
+    assert receipt["estimated_seconds"] >= 390
+    assert receipt["components"] == dict(test_effort_seconds=120.0, slow_file_seconds=10.0,
+                                         startup_seconds=20.0, fixture_seconds=40.0,
+                                         overhead_seconds=30.0, serial_seconds=300.0,
+                                         historical_wall_scaled_seconds=300.0)
+    _assert_shadow_only(receipt)
+
+
+def test_shadow_reporting_bound_does_not_become_a_clamped_deadline():
+    inputs = _shadow_workload(10_000)
+    inputs["history"] = None
+    receipt = verification.estimate_workload(**inputs)
+    assert "ESTIMATE_OUTSIDE_REPORTING_BOUND" in receipt["reason_codes"]
+    assert receipt["estimated_seconds"] is None
+    assert receipt["estimate_envelope_seconds"] is None
+    _assert_shadow_only(receipt)
+
+
+def test_shadow_receipt_is_deterministic_private_and_has_no_effects(monkeypatch):
+    import copy
+    inputs = _shadow_workload()
+    private = "tests/test_family_0.py::test_case[private-token-value]"
+    inputs["collection"]["nodeids"][0] = private
+    inputs["collection"]["nodeids_sha256"] = verification.workload_nodeids_digest(inputs["collection"]["nodeids"])
+    inputs["history"]["durations"][0]["nodeid"] = private
+    before = copy.deepcopy(inputs)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Shadow estimator performed an external effect")
+    monkeypatch.setattr(verification, "subprocess", SimpleNamespace(run=forbidden))
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+    monkeypatch.setattr(Path, "write_bytes", forbidden)
+    monkeypatch.setattr(verification, "time", SimpleNamespace(monotonic=forbidden))
+    receipt = verification.estimate_workload(**inputs)
+    assert receipt == verification.estimate_workload(**inputs)
+    assert inputs == before
+    serialized = mt.canonical(receipt)
+    assert "private-token-value" not in serialized
+    assert "tests/test_family" not in serialized
+    assert receipt["schema_version"] == 1
+    assert receipt["confidence"] == "PARTIAL"
+    _assert_shadow_only(receipt)
+    for record in (inputs["collection"], inputs["history"]):
+        record["provenance"] = "TRUSTED_OBSERVATION"
+    trusted = verification.estimate_workload(**inputs)
+    assert trusted["tests_collected"] == 10
+    assert trusted["collection_evidence_sha256"] == "d" * 64
+    assert trusted["tests_executed"] is None
+    _assert_shadow_only(trusted)
+
+
+def test_shadow_foundation_preserves_timeout_defaults_and_registered_mt01_argv():
+    import inspect
+    from ai_commerce.engineering.cli import build_parser
+    from ai_commerce.engineering.runner import execute_attempt, DEFAULT_ACTION_TIMEOUT_SECONDS
+    parser = build_parser()
+    assert parser.get_default("verify_timeout_seconds") == 1800
+    assert parser.get_default("timeout_seconds") == parser.get_default("action_timeout_seconds") == 7200
+    assert DEFAULT_ACTION_TIMEOUT_SECONDS == 7200
+    defaults = inspect.signature(execute_attempt).parameters
+    assert defaults["verify_timeout_seconds"].default == 1800
+    assert defaults["action_timeout_seconds"].default == 7200
+    registry = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_text(encoding="utf-8"))
+    assert registry["mt01-mt01-tests"] == ["python", "-m", "pytest", "tests/test_minimum_test.py", "-q", "-n", "12"]
+    assert registry["project-tests"] == ["python", "-m", "pytest", "tests", "-q", "-n", "12"]
+
+
 @pytest.fixture(autouse=True)
 def _isolate_legacy_selector_mode(monkeypatch):
     """Legacy MT-01 contracts must not inherit the EF01 V2.1 selector toggle.
@@ -1553,7 +1912,8 @@ def test_v21_authenticated_full_runs_entire_registered_scope_not_affected_subset
                     human_full_suite_authorized=True)
 
 
-def test_human_full_preserves_owner_ac_mapping_for_minimum_test_source(monkeypatch, real_tree):
+@pytest.mark.parametrize("owner", ["minimum_test.py", "verification.py"])
+def test_human_full_preserves_owner_ac_mapping_for_minimum_test_source(monkeypatch, real_tree, owner):
     """An owner source ending in _test.py must not be mistaken for a pytest file."""
     from ai_commerce.engineering.minimum_test import select_plan
 
@@ -1562,7 +1922,7 @@ def test_human_full_preserves_owner_ac_mapping_for_minimum_test_source(monkeypat
     registry = real_tree.registry
     planned = select_plan(
         repo=ROOT, base_sha=real_tree.sha, base_files=files, candidate_files=files,
-        changed_paths=["src/ai_commerce/engineering/minimum_test.py"],
+        changed_paths=["src/ai_commerce/engineering/" + owner],
         required_acs=("MT01.selection-and-evidence",),
         fallback_argv=registry["project-tests"], groups=real_tree.groups,
         registered_only=True, registered_profiles=registry,
@@ -1571,10 +1931,23 @@ def test_human_full_preserves_owner_ac_mapping_for_minimum_test_source(monkeypat
     assert planned["fallback"] is True
     assert "mt01" in planned["selected_groups"]
     assert "MT01.selection-and-evidence" in planned["required_acs"]
-    assert "src/ai_commerce/engineering/minimum_test.py" not in planned["unknown_tests"]
+    assert "src/ai_commerce/engineering/" + owner not in planned["unknown_tests"]
     assert planned["groups"][0]["state"] == "EXECUTE"
     assert planned["groups"][0]["binding"]["argv"] == registry["project-tests"]
     assert "tests/test_minimum_test.py" in planned["groups"][0]["binding"]["candidate_files"]
+
+
+@pytest.mark.parametrize("owner", ["minimum_test.py", "verification.py"])
+def test_shadow_owner_change_preserves_auto_selection_and_registered_argv(monkeypatch, real_tree, owner):
+    planned = real_plan(real_tree, monkeypatch, "src/ai_commerce/engineering/" + owner,
+                        acs=("MT01.selection-and-evidence",))
+    assert "mt01" in planned["selected_groups"]
+    assert "MT01.selection-and-evidence" in planned["required_acs"]
+    assert planned["narrow_execution_observed"] is False
+    assert "tests/test_minimum_test.py" in planned["consumer_map"]["mt01"]["tests"]
+    for entry in planned["groups"]:
+        assert entry["binding"]["argv"] == real_tree.registry[entry["selected_profile"]]
+        assert entry["binding"]["argv"][-2:] == ["-n", "12"]
 
 
 def test_human_full_cannot_auto_approve_unmapped_acceptance(monkeypatch, real_tree):

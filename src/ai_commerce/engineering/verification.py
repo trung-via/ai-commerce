@@ -4,6 +4,8 @@ from __future__ import annotations
 import ast
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import hashlib
+import math
 from pathlib import Path
 import os
 import re
@@ -15,6 +17,261 @@ import xml.etree.ElementTree as ET
 
 from .minimum_test import Evidence, apply_evidence, canonical, file_hashes, select_plan, pytest_counts, select_provisional_tests
 from .pytest_profile import require_managed_parallelism, registered_workers
+
+
+WORKLOAD_SCHEMA_VERSION = 1
+_MAX_WORKLOAD_TESTS = 100_000
+_MAX_WORKLOAD_ID_BYTES = 8 * 1024 * 1024
+# Input/reporting limits only. execute_plan never consumes these constants.
+_MAX_WORKLOAD_SECONDS = 7 * 24 * 60 * 60
+_MAX_TEST_SECONDS = 24 * 60 * 60
+# Reporting assumptions, not measured priors, prediction intervals or timeouts.
+_COLD_TEST_SECONDS = (60.0, 600.0)
+_COLD_STARTUP_SECONDS = 60.0
+_COLD_OVERHEAD_SECONDS = 60.0
+
+
+def _workload_hash(value: object) -> str:
+    return hashlib.sha256(canonical(value).encode()).hexdigest()
+
+
+def _workload_path(value: object) -> str:
+    if not isinstance(value, str) or not 1 <= len(value) <= 1024:
+        raise ValueError("UNSUPPORTED_COLLECTION_SCOPE")
+    path = value.replace("\\", "/")
+    if (path.startswith("/") or ":" in path or ".." in path.split("/")
+            or any(ord(c) < 32 or ord(c) == 127 for c in path)):
+        raise ValueError("UNSUPPORTED_COLLECTION_SCOPE")
+    parts = [p for p in path.split("/") if p and p != "."]
+    if not parts or not (parts[0] == "tests" or (parts[0] == "src" and "tests" in parts)):
+        raise ValueError("UNSUPPORTED_COLLECTION_SCOPE")
+    return "/".join(parts)
+
+
+def _workload_nodeid(value: object) -> str:
+    if (not isinstance(value, str) or not 1 <= len(value) <= 2048
+            or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+        raise ValueError("INVALID_NODEID")
+    path, sep, case = value.partition("::")
+    path = _workload_path(path)
+    if not sep or not case or not path.endswith(".py"):
+        raise ValueError("INVALID_NODEID")
+    # Normalize only the path: parameter IDs (including backslashes) are identity.
+    return path + sep + case
+
+
+def workload_nodeids_digest(nodeids: object) -> str:
+    """Hash bounded unique pytest identities; never collect or import test modules."""
+    return _workload_hash(_workload_nodeids(nodeids))
+
+
+def _workload_nodeids(values: object) -> list[str]:
+    if not isinstance(values, (list, tuple)) or not 1 <= len(values) <= _MAX_WORKLOAD_TESTS:
+        raise ValueError("INVALID_NODEID_COUNT")
+    result = []
+    size = 0
+    for value in values:
+        nodeid = _workload_nodeid(value)
+        size += len(nodeid.encode("utf-8"))
+        if size > _MAX_WORKLOAD_ID_BYTES:
+            raise ValueError("NODEIDS_OVERSIZED")
+        result.append(nodeid)
+    if len(set(result)) != len(result):
+        raise ValueError("DUPLICATE_NODEID")
+    return sorted(result)
+
+
+def _workload_binding(value: object) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError("BINDING_MISSING")
+    result = {}
+    for key, pattern in (("candidate_sha", r"[0-9a-f]{40}"),
+                         ("source_sha256", r"[0-9a-f]{64}"),
+                         ("environment_sha256", r"[0-9a-f]{64}"),
+                         ("argv_sha256", r"[0-9a-f]{64}"),
+                         ("registered_profile", r"[a-z0-9][a-z0-9_.-]{0,79}")):
+        item = value.get(key)
+        if not isinstance(item, str) or re.fullmatch(pattern, item) is None:
+            raise ValueError("BINDING_IDENTITY_UNPROVEN")
+        result[key] = item
+    if value.get("platform") != "Windows":
+        raise ValueError("ENVIRONMENT_UNPROVEN")
+    workers = value.get("workers_requested")
+    scheduler = value.get("scheduler")
+    if (type(workers) is not int or workers not in (0, 12)
+            or scheduler not in ("serial", "load", "loadfile", "worksteal")
+            or (workers == 0) != (scheduler == "serial")):
+        raise ValueError("PROFILE_UNPROVEN")
+    scope = value.get("collection_scope")
+    if not isinstance(scope, (list, tuple)) or not 1 <= len(scope) <= 256:
+        raise ValueError("UNSUPPORTED_COLLECTION_SCOPE")
+    roots = sorted({_workload_path(p) for p in scope})
+    if len(roots) != len(scope):
+        raise ValueError("UNSUPPORTED_COLLECTION_SCOPE")
+    result.update(platform="Windows", workers_requested=workers, scheduler=scheduler,
+                  collection_scope=roots)
+    return result
+
+
+def _workload_record(record: object, binding: dict) -> dict:
+    if not isinstance(record, dict):
+        raise ValueError("OBSERVATION_MISSING")
+    if type(record.get("schema_version")) is not int or record["schema_version"] != WORKLOAD_SCHEMA_VERSION:
+        raise ValueError("OBSERVATION_SCHEMA_UNSUPPORTED")
+    if record.get("provenance") not in ("SYNTHETIC", "TRUSTED_OBSERVATION"):
+        raise ValueError("OBSERVATION_PROVENANCE_MISSING")
+    evidence = record.get("evidence_sha256")
+    if not isinstance(evidence, str) or re.fullmatch(r"[0-9a-f]{64}", evidence) is None:
+        raise ValueError("OBSERVATION_EVIDENCE_MISSING")
+    if _workload_binding(record.get("binding")) != binding:
+        raise ValueError("OBSERVATION_IDENTITY_MISMATCH")
+    return record
+
+
+def _workload_seconds(value: object, *, positive: bool = False, maximum: float = _MAX_WORKLOAD_SECONDS) -> float:
+    # Compare before conversion: huge integers, NaN, bool and Inf fail closed.
+    if (type(value) not in (int, float) or not 0 <= value <= maximum
+            or (positive and value < 1e-9)):
+        raise ValueError("INVALID_DURATION")
+    return float(value)
+
+
+def estimate_workload(*, binding: object, selected_test_count: object,
+                      collection: object = None, history: object = None) -> dict:
+    """ATB-01 P0 data-only estimate; never authorizes collection, execution or PASS.
+
+    The caller must authenticate immutable observations *before* passing data;
+    provenance labels/digests are not an admission gate. Binding fingerprints
+    cover exact candidate/test/fixture definitions, Python/deps/plugins, reviewed
+    argv, scheduler and owner scope. No shell strings, files or environment are
+    read here. History durations include setup/call/teardown; fixture_seconds is
+    additional shared cost excluded from those durations. age_seconds is trusted
+    receipt age supplied by the caller, keeping this function deterministic.
+    """
+    receipt = dict(schema_version=WORKLOAD_SCHEMA_VERSION, model_version="ATB01-P0-v1",
+                   status="SHADOW_ONLY", state="UNPROVEN", execution_status="NOT_EXECUTED",
+                   confidence="UNCALIBRATED", acceptance_pass=False,
+                   selected_test_count=None, input_nodeid_count=None, tests_collected=None,
+                   tests_executed=None, nodeids_sha256=None, nodeid_hashes=[],
+                   historical_coverage_count=0, coverage_fraction=0.0,
+                   effective_workers=1.0, workers_observed=None, throughput_tests_per_second=None,
+                   estimated_seconds=None, estimate_envelope_seconds=None,
+                   soft_deadline_seconds=None, hard_deadline_seconds=None,
+                   uncertainty_kind="ASSUMPTION_ENVELOPE_NOT_PREDICTION_INTERVAL",
+                   reason_codes=[])
+    reasons = receipt["reason_codes"]
+    try:
+        identity = _workload_binding(binding)
+        if type(selected_test_count) is not int or not 1 <= selected_test_count <= _MAX_WORKLOAD_TESTS:
+            raise ValueError("SELECTED_TEST_COUNT_UNPROVEN")
+        receipt.update(selected_test_count=selected_test_count, candidate_sha=identity["candidate_sha"],
+                       binding_sha256=_workload_hash(identity), workers_requested=identity["workers_requested"])
+        observed = _workload_record(collection, identity)
+        nodeids = _workload_nodeids(observed.get("nodeids"))
+        if (type(observed.get("test_count")) is not int or observed["test_count"] != len(nodeids)
+                or selected_test_count != len(nodeids)):
+            raise ValueError("COLLECTION_COUNT_MISMATCH")
+        node_digest = _workload_hash(nodeids)
+        if observed.get("nodeids_sha256") != node_digest:
+            raise ValueError("COLLECTION_DIGEST_MISMATCH")
+        paths = {n.partition("::")[0] for n in nodeids}
+        def within(path, root):
+            return path == root or path.startswith(root + "/")
+        roots = identity["collection_scope"]
+        if (any(not any(within(p, root) for root in roots) for p in paths)
+                or any(not any(within(p, root) for p in paths) for root in roots)):
+            raise ValueError("COLLECTION_SCOPE_INCOMPLETE")
+    except UnicodeError:
+        reasons.append("INVALID_NODEID_ENCODING")
+        return receipt
+    except ValueError as exc:
+        reasons.append(str(exc))
+        return receipt
+    receipt.update(input_nodeid_count=len(nodeids), nodeids_sha256=node_digest,
+                   nodeid_hashes=[hashlib.sha256(n.encode()).hexdigest() for n in nodeids],
+                   collection_provenance=observed["provenance"],
+                   collection_evidence_sha256=observed["evidence_sha256"],
+                   tests_collected=len(nodeids) if observed["provenance"] == "TRUSTED_OBSERVATION" else None)
+    durations = {}
+    startup, overhead, fixture, serial = _COLD_STARTUP_SECONDS, _COLD_OVERHEAD_SECONDS, 0.0, 0.0
+    effective, wall, workers, throughput = 1.0, None, None, None
+    try:
+        if history is None:
+            raise ValueError("NO_HISTORY")
+        hist = _workload_record(history, identity)
+        if hist.get("duration_semantics") != "setup_call_teardown":
+            raise ValueError("HISTORY_DURATION_SEMANTICS_UNPROVEN")
+        _workload_seconds(hist.get("age_seconds"), maximum=30 * 24 * 60 * 60)
+        records = hist.get("durations")
+        if not isinstance(records, (list, tuple)) or not 1 <= len(records) <= len(nodeids):
+            raise ValueError("HISTORY_COUNT_INVALID")
+        ids = _workload_nodeids([r.get("nodeid") if isinstance(r, dict) else None for r in records])
+        if (type(hist.get("test_count")) is not int or hist["test_count"] != len(ids)
+                or not set(ids) <= set(nodeids)):
+            raise ValueError("HISTORY_IDENTITIES_MISMATCH")
+        durations = {_workload_nodeid(r["nodeid"]): _workload_seconds(
+            r.get("seconds"), positive=True, maximum=_MAX_TEST_SECONDS) for r in records}
+        metadata = ("startup_seconds", "overhead_seconds", "fixture_seconds", "serial_seconds")
+        startup, overhead, fixture, serial = (
+            _workload_seconds(hist.get(k, default)) for k, default in zip(
+                metadata, (_COLD_STARTUP_SECONDS, _COLD_OVERHEAD_SECONDS, 0.0, 0.0)))
+        if not all(k in hist for k in metadata):
+            reasons.append("HISTORY_METADATA_INCOMPLETE")
+        workers = hist.get("workers_observed")
+        if workers is not None and (type(workers) is not int or workers != identity["workers_requested"]):
+            raise ValueError("HISTORY_WORKERS_MISMATCH")
+        if hist.get("wall_seconds") is not None:
+            wall = _workload_seconds(hist["wall_seconds"], positive=True)
+            compute = wall - startup - overhead - fixture
+            if compute <= 0 or serial > compute:
+                raise ValueError("HISTORY_WALL_INCONSISTENT")
+            if workers is not None and all(k in hist for k in metadata):
+                measured = math.fsum(durations.values()) / compute
+                if measured > max(1, workers) + 1e-6:
+                    raise ValueError("HISTORY_WALL_INCONSISTENT")
+                effective = min(float(max(1, workers)), measured)
+                throughput = len(durations) / compute
+        if workers is None or wall is None or not all(k in hist for k in metadata):
+            reasons.append("EFFECTIVE_THROUGHPUT_UNPROVEN_SERIAL_ASSUMED")
+        receipt.update(history_provenance=hist["provenance"], history_evidence_sha256=hist["evidence_sha256"])
+    except ValueError as exc:
+        reasons.append("INVALID_NODEID_ENCODING" if isinstance(exc, UnicodeError) else str(exc))
+        durations = {}
+        startup, overhead, fixture, serial = _COLD_STARTUP_SECONDS, _COLD_OVERHEAD_SECONDS, 0.0, 0.0
+        effective, wall, workers, throughput = 1.0, None, None, None
+    known = len(durations)
+    unknown = len(nodeids) - known
+    cold_low = max(_COLD_TEST_SECONDS[0], max(durations.values(), default=0.0))
+    cold_high = max(_COLD_TEST_SECONDS[1], cold_low)
+    effort = math.fsum(durations.get(n, cold_low) for n in nodeids)
+    files = {}
+    for n in nodeids:
+        path = n.partition("::")[0]
+        files[path] = files.get(path, 0.0) + durations.get(n, cold_low)
+    tail = max(files.values())  # Conservative file tail even for load/worksteal.
+    wall_scaled = ((wall - startup - overhead - fixture) * len(nodeids) / known
+                   if wall is not None and known else 0.0)
+    estimate = startup + fixture + max(effort / effective, tail, serial, wall_scaled) + overhead
+    # Upper scenario assumes serial work, cold upper cost, plus known shared cost.
+    upper = max(estimate, startup + overhead + fixture + serial
+                + math.fsum(durations.values()) + unknown * cold_high)
+    receipt.update(historical_coverage_count=known, coverage_fraction=known / len(nodeids),
+                   effective_workers=effective, workers_observed=workers,
+                   throughput_tests_per_second=throughput,
+                   confidence="PARTIAL" if known else "UNCALIBRATED",
+                   components=dict(test_effort_seconds=effort, slow_file_seconds=tail,
+                                   startup_seconds=startup, fixture_seconds=fixture,
+                                   overhead_seconds=overhead, serial_seconds=serial,
+                                   historical_wall_scaled_seconds=wall_scaled),
+                   cold_test_assumptions_seconds=[cold_low, cold_high] if unknown else None)
+    if unknown:
+        reasons.append("COLD_TESTS_UNCALIBRATED")
+    reasons.append("PREDICTION_INTERVAL_UNCALIBRATED")
+    if not math.isfinite(upper) or upper > _MAX_WORKLOAD_SECONDS:
+        reasons.append("ESTIMATE_OUTSIDE_REPORTING_BOUND")
+    else:
+        receipt.update(estimated_seconds=estimate, estimate_envelope_seconds=[estimate, upper])
+    return receipt
 
 
 _OBSERVER_PLUGIN = "ai_commerce.engineering.pytest_profile"
