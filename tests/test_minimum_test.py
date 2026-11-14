@@ -53,7 +53,7 @@ def real_tree():
     registry = {"mt01-" + g.name + "-tests": ["python", "-m", "pytest", *g.tests, "-q", "-n", "12"]
                 for g in groups}
     registry["project-tests"] = [*FULL, "-n", "12"]
-    return SimpleNamespace(files=files, groups=groups, registry=registry,
+    return SimpleNamespace(files=files, groups=groups, registry=registry, sha=sha,
                            persisted_names=frozenset(r["group"].name for r in records),
                            graph=mt.import_graph(ROOT, files))
 
@@ -1534,7 +1534,7 @@ def test_v21_authenticated_full_runs_entire_registered_scope_not_affected_subset
     files = real_tree.files
     broad = real_tree.registry["project-tests"]
     registry = real_tree.registry
-    kwargs = dict(repo=ROOT, base_sha="a"*40, base_files=files,
+    kwargs = dict(repo=ROOT, base_sha=real_tree.sha, base_files=files,
                   candidate_files=files, changed_paths=["src/ai_commerce/product/identity.py"],
                   required_acs=(), fallback_argv=broad, groups=groups,
                   registered_only=True, registered_profiles=registry)
@@ -1561,7 +1561,7 @@ def test_human_full_preserves_owner_ac_mapping_for_minimum_test_source(monkeypat
     files = real_tree.files
     registry = real_tree.registry
     planned = select_plan(
-        repo=ROOT, base_sha="a" * 40, base_files=files, candidate_files=files,
+        repo=ROOT, base_sha=real_tree.sha, base_files=files, candidate_files=files,
         changed_paths=["src/ai_commerce/engineering/minimum_test.py"],
         required_acs=("MT01.selection-and-evidence",),
         fallback_argv=registry["project-tests"], groups=real_tree.groups,
@@ -1585,7 +1585,7 @@ def test_human_full_cannot_auto_approve_unmapped_acceptance(monkeypatch, real_tr
     files = real_tree.files
     registry = real_tree.registry
     planned = select_plan(
-        repo=ROOT, base_sha="a" * 40, base_files=files, candidate_files=files,
+        repo=ROOT, base_sha=real_tree.sha, base_files=files, candidate_files=files,
         changed_paths=["src/ai_commerce/engineering/minimum_test.py"],
         required_acs=("MT01.NOT_REGISTERED_R7",),
         fallback_argv=registry["project-tests"], groups=real_tree.groups,
@@ -1595,6 +1595,51 @@ def test_human_full_cannot_auto_approve_unmapped_acceptance(monkeypatch, real_tr
     assert "HUMAN_FULL_AC_MAPPING_UNPROVEN" in planned["reason_codes"]
     assert planned["groups"][0]["state"] == "UNPROVEN"
     assert planned["groups"][0]["execute"] is False
+
+
+def test_human_full_loads_existing_trusted_personal_hostops_ac(monkeypatch, real_tree):
+    """An existing V2.2 baseline owner is valid in the HUMAN_FULL route."""
+    from ai_commerce.engineering.minimum_test import select_plan
+
+    monkeypatch.setenv("MT01_V21_ENABLED", "1")
+    ac = "HOSTOPS.PERSONAL.chat-approved-public-read-owner-comment-new-scratch-write"
+    assert "hostops-personal" in real_tree.persisted_names
+    plan = select_plan(
+        repo=ROOT, base_sha=real_tree.sha, base_files=real_tree.files,
+        candidate_files=real_tree.files,
+        changed_paths=["src/ai_commerce/hostops_v3/personal.py"],
+        required_acs=(ac,), fallback_argv=real_tree.registry["project-tests"],
+        groups=mt.approved_groups(), registered_only=True,
+        registered_profiles=real_tree.registry, human_full_suite_authorized=True,
+    )
+    assert "hostops-personal" in plan["selected_groups"]
+    assert ac in plan["required_acs"]
+    assert ac not in plan["unknown_acs"]
+    assert "HUMAN_FULL_AC_MAPPING_UNPROVEN" not in plan["reason_codes"]
+    assert plan["groups"][0]["state"] == "EXECUTE"
+    assert plan["groups"][0]["binding"]["argv"] == real_tree.registry["project-tests"]
+    assert "tests/test_hostops_personal.py" in plan["groups"][0]["binding"]["candidate_files"]
+
+
+def test_human_full_rejects_conflicting_caller_owner_mapping(monkeypatch, real_tree):
+    """Mutable caller metadata cannot impersonate an immutable baseline owner."""
+    from ai_commerce.engineering.minimum_test import select_plan, TestGroup
+
+    monkeypatch.setenv("MT01_V21_ENABLED", "1")
+    trusted = next(g for g in real_tree.groups if g.name == "hostops-personal")
+    forged = TestGroup(trusted.name, trusted.tests, ("HOSTOPS.PERSONAL.FORGED",),
+                       trusted.paths, trusted.consumers, trusted.contracts)
+    groups = (*mt.approved_groups(), forged)
+    with pytest.raises(ValueError, match="MT01_HUMAN_FULL_BASELINE_OWNER_CONFLICT"):
+        select_plan(
+            repo=ROOT, base_sha=real_tree.sha, base_files=real_tree.files,
+            candidate_files=real_tree.files,
+            changed_paths=["src/ai_commerce/hostops_v3/personal.py"],
+            required_acs=("HOSTOPS.PERSONAL.FORGED",),
+            fallback_argv=real_tree.registry["project-tests"], groups=groups,
+            registered_only=True, registered_profiles=real_tree.registry,
+            human_full_suite_authorized=True,
+        )
 
 
 def test_hostops_v3_existing_28_and_v4_plan_files_are_registered(real_tree):
