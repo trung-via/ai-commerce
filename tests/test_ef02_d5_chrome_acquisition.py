@@ -655,3 +655,358 @@ def test_wh01b_9444_profile_lock_disallows_second_browser(
     with pytest.raises(ca.AcquisitionBlocked, match="PROFILE_LOCKED"):
         ca.run(env, launch=True, opt_in=True)
     assert not spawns and not handshake
+
+
+# WH-01B enrollment tests are SOURCE ONLY. All Windows identities, signatures,
+# inventories and ACLs below are synthetic; no native custody is established.
+_OPERATOR_SID = "S-1-5-21-1-2-3-1001"
+
+
+def enrollment_fixture(monkeypatch, tmp_path):
+    import types
+    from ai_commerce.remote import local_completion_handoff, local_wake_entry
+    config, repo, home, data = fixture(tmp_path)
+    config.unlink()
+    config = home / "AI-Commerce" / "Chrome-Acquisition" / "config.json"
+    data.update(cdp_endpoint="http://127.0.0.1:9444", allow_launch=False)
+    env = ca._environment_from_value(data, config, repo, local_app_data=home)
+    snapshot = read_inventory(env)
+    snapshot["listeners"][0]["LocalPort"] = 9444
+    snapshot["processes"][0].update(
+        OwnerSid=_OPERATOR_SID, CreationDate="2026-11-14T01:00:00Z",
+        CommandLine=json.dumps(env.command()))
+    events = []
+    monkeypatch.setattr(ca, "os", types.SimpleNamespace(name="nt", environ={}))
+    monkeypatch.setattr(ca, "sys", types.SimpleNamespace(
+        stdin=types.SimpleNamespace(isatty=lambda: True)))
+    monkeypatch.setattr(ca, "_native_local_app_data", lambda: home)
+    monkeypatch.setattr(ca, "_interactive_session", lambda: 1)
+    monkeypatch.setattr(local_wake_entry, "_windows_process_sid", lambda: _OPERATOR_SID)
+    monkeypatch.setattr(local_completion_handoff, "_private_identity", lambda path: _OPERATOR_SID)
+    monkeypatch.setattr(ca, "_commandline_argv", json.loads)
+    def query(port):
+        assert port == 9444
+        events.append("inventory")
+        return snapshot
+    monkeypatch.setattr(ca, "_query_windows", query)
+    monkeypatch.setattr(ca, "_verify_google_chrome", lambda env: events.append("signature"))
+    def forbidden(*args, **kwargs):
+        pytest.fail("Enrollment must not launch, attach, read HTTP/CDP or run real subprocesses")
+    for name in ("run", "_probe_cdp", "verify_playwright_attach", "build_opener"):
+        monkeypatch.setattr(ca, name, forbidden)
+    monkeypatch.setattr(ca.subprocess, "run", forbidden)
+    monkeypatch.setattr(ca.subprocess, "Popen", forbidden)
+    return env, repo, home, snapshot, events
+
+
+def assert_enrollment_hold(result, code, *, assessed=False):
+    assert result == {"status": "HOLD", "code": code, "candidate_assessed": assessed,
+                      "enrolled": False, "allow_launch": False, "browser_accessed": False,
+                      "launched": False, "chat_identity_proven": False, "send_authorized": False}
+
+
+def test_wh01b_enrollment_assesses_private_candidate_but_never_writes(monkeypatch, tmp_path, capsys):
+    env, repo, home, snapshot, events = enrollment_fixture(monkeypatch, tmp_path)
+    before = set(home.rglob("*"))
+    def no_open(*args, **kwargs):
+        pytest.fail("Enrollment assessment must not open or create files")
+    monkeypatch.setattr(Path, "open", no_open)
+    for _ in range(2):  # Idempotent assessment never enrolls or changes launch policy.
+        result = ca.enroll_existing_9444(repo, opt_in=True)
+        assert_enrollment_hold(result, "NATIVE_ATOMIC_ENROLLMENT_REQUIRED", assessed=True)
+    assert events == ["inventory", "signature", "inventory", "signature"] * 2
+    assert not env.config_path.exists() and set(home.rglob("*")) == before
+    assert capsys.readouterr().out == ""
+    public = json.dumps(result)
+    assert str(home) not in public and _OPERATOR_SID not in public
+    assert "CreationDate" not in public and "ProcessId" not in public
+
+
+def test_wh01b_enrollment_candidate_reuses_ensure_closed_schema(monkeypatch, tmp_path):
+    env, repo, home, snapshot, _ = enrollment_fixture(monkeypatch, tmp_path)
+    values = []
+    original = ca._environment_from_value
+    def validate(value, *args, **kwargs):
+        values.append(value)
+        return original(value, *args, **kwargs)
+    monkeypatch.setattr(ca, "_environment_from_value", validate)
+    assert_enrollment_hold(ca.assess_existing_9444(repo), "NATIVE_ATOMIC_ENROLLMENT_REQUIRED", assessed=True)
+    expected = {"version": 1, "executable": str(env.executable),
+                "user_data_dir": str(env.user_data_dir), "profile_directory": "Default",
+                "cdp_endpoint": "http://127.0.0.1:9444", "exclusive_user_data": True,
+                "allow_launch": False}
+    assert values == [expected, expected]
+    assert env.config_path == home / "AI-Commerce" / "Chrome-Acquisition" / "config.json"
+    # Only a synthetic test writes a config; the production assessment never does.
+    env.config_path.parent.mkdir()
+    env.config_path.write_text(json.dumps(expected), encoding="utf-8")
+    loaded = ca.load_environment(env.config_path, repo, local_app_data=home)
+    assert loaded == env and loaded.allow_launch is False
+    assert ca.evaluate(loaded, snapshot, session_id=1, expected_sid=_OPERATOR_SID,
+                       parse=json.loads) == ("OWNED", 123)
+    assert_enrollment_hold(ca.enroll_existing_9444(repo, opt_in=True), "ENROLLMENT_CONFIG_EXISTS")
+
+
+@pytest.mark.parametrize("opt_in", [False, None, 1, "true"])
+def test_wh01b_enrollment_disabled_by_default(monkeypatch, tmp_path, opt_in):
+    _, repo, _, _, events = enrollment_fixture(monkeypatch, tmp_path)
+    assert_enrollment_hold(ca.enroll_existing_9444(repo), "ENROLLMENT_OPT_IN_REQUIRED")
+    assert_enrollment_hold(ca.enroll_existing_9444(repo, opt_in=opt_in), "ENROLLMENT_OPT_IN_REQUIRED")
+    assert events == []
+
+
+@pytest.mark.parametrize("gate", ["non_windows", "non_interactive", "session_zero", "elevated",
+                                  "wrong_token", "github_actions", "github_event", "github_run"])
+def test_wh01b_enrollment_requires_independent_local_operator(monkeypatch, tmp_path, gate):
+    from ai_commerce.remote import local_wake_entry
+    _, repo, _, _, events = enrollment_fixture(monkeypatch, tmp_path)
+    expected = "WINDOWS_INTERACTIVE_REQUIRED"
+    if gate == "non_windows":
+        ca.os.name = "posix"
+    elif gate == "non_interactive":
+        ca.sys.stdin.isatty = lambda: False
+    elif gate == "session_zero":
+        monkeypatch.setattr(ca, "_interactive_session", lambda: 0)
+        expected = "ENROLLMENT_IDENTITY_UNPROVEN"
+    elif gate == "elevated":
+        def elevated():
+            raise ca.AcquisitionBlocked("ELEVATED_CHROME_DISALLOWED")
+        monkeypatch.setattr(ca, "_interactive_session", elevated)
+        expected = "ELEVATED_CHROME_DISALLOWED"
+    elif gate == "wrong_token":
+        monkeypatch.setattr(local_wake_entry, "_windows_process_sid", lambda: "uid:1000")
+        expected = "ENROLLMENT_IDENTITY_UNPROVEN"
+    else:
+        key = {"github_actions": "GITHUB_ACTIONS", "github_event": "GITHUB_EVENT_PATH",
+               "github_run": "GITHUB_RUN_ID"}[gate]
+        ca.os.environ[key] = "private-runner-value"
+        expected = "LOCAL_OPERATOR_ONLY"
+    assert_enrollment_hold(ca.enroll_existing_9444(repo, opt_in=True), expected)
+    assert not events
+
+
+@pytest.mark.parametrize("case,code", [
+    ("off", "FIRST_SUPERVISED_ENROLLMENT_REQUIRED"),
+    ("no_chrome", "ENROLLMENT_CANDIDATE_UNPROVEN"),
+    ("other_process", "ENROLLMENT_CANDIDATE_UNPROVEN"),
+    ("duplicate_listener", "ENROLLMENT_CANDIDATE_UNPROVEN"),
+    ("not_loopback", "ENROLLMENT_CANDIDATE_UNPROVEN"),
+    ("listener_9333", "ENROLLMENT_CANDIDATE_UNPROVEN"),
+    ("listener_9222", "ENROLLMENT_CANDIDATE_UNPROVEN"),
+    ("command_9333", "ENROLLMENT_CANDIDATE_UNPROVEN"),
+    ("command_9222", "ENROLLMENT_CANDIDATE_UNPROVEN"),
+    ("duplicate_port", "ENROLLMENT_CANDIDATE_UNPROVEN"),
+    ("split_port", "ENROLLMENT_CANDIDATE_UNPROVEN"),
+    ("duplicate_profile_switch", "ENROLLMENT_CANDIDATE_UNPROVEN"),
+    ("duplicate_pid", "ENROLLMENT_CANDIDATE_UNPROVEN"),
+    ("another_9444_profile", "ENROLLMENT_CANDIDATE_UNPROVEN"),
+    ("duplicate_profile", "BROWSER_OWNERSHIP_UNPROVEN"),
+    ("wrong_sid", "ENROLLMENT_IDENTITY_UNPROVEN"),
+    ("wrong_session", "ENROLLMENT_IDENTITY_UNPROVEN"),
+    ("missing_creation", "ENROLLMENT_IDENTITY_UNPROVEN"),
+    ("forged_executable", "BROWSER_OWNERSHIP_UNPROVEN"),
+])
+def test_wh01b_enrollment_rejects_ambiguous_or_foreign_browser(monkeypatch, tmp_path, case, code):
+    env, repo, _, snapshot, events = enrollment_fixture(monkeypatch, tmp_path)
+    proc, row = snapshot["processes"][0], snapshot["listeners"][0]
+    command = env.command()
+    if case == "off":
+        snapshot.update(listeners=[], processes=[])
+    elif case == "no_chrome":
+        snapshot["processes"] = []
+    elif case == "other_process":
+        row["OwningProcess"] = 999
+    elif case == "duplicate_listener":
+        snapshot["listeners"].append(dict(row))
+    elif case == "not_loopback":
+        row["LocalAddress"] = "0.0.0.0"
+    elif case.startswith("listener_"):
+        row["LocalPort"] = int(case.split("_")[1])
+    elif case.startswith("command_"):
+        command = [a.replace("--remote-debugging-port=9444", "--remote-debugging-port=" +
+                             case.split("_")[1]) for a in command]
+    elif case == "duplicate_port":
+        command += ["--remote-debugging-port=9444"]
+    elif case == "split_port":
+        command += ["--remote-debugging-port", "9444"]
+    elif case == "duplicate_profile_switch":
+        command += ["--profile-directory=Default"]
+    elif case == "duplicate_pid":
+        snapshot["processes"].append(dict(proc))
+    elif case in {"another_9444_profile", "duplicate_profile"}:
+        other = command.copy()
+        if case == "another_9444_profile":
+            other = [a.replace(str(env.user_data_dir), str(env.user_data_dir.parent / "Other")) for a in other]
+        else:
+            other = [a.replace("--remote-debugging-port=9444", "--remote-debugging-port=9333") for a in other]
+        snapshot["processes"].append({**proc, "ProcessId": 456, "CommandLine": json.dumps(other)})
+    elif case == "wrong_sid":
+        proc["OwnerSid"] = "S-1-5-21-1-2-3-1002"
+    elif case == "wrong_session":
+        proc["SessionId"] = 2
+    elif case == "missing_creation":
+        proc["CreationDate"] = None
+    elif case == "forged_executable":
+        fake = tmp_path / "forged" / "chrome.exe"
+        fake.parent.mkdir()
+        fake.write_bytes(b"forged")
+        proc["ExecutablePath"] = str(fake)
+    proc["CommandLine"] = json.dumps(command)
+    assert_enrollment_hold(ca.enroll_existing_9444(repo, opt_in=True), code)
+    assert events == ["inventory"]
+
+
+@pytest.mark.parametrize("relative", ["Chrome-Acquisition/config.json", "chrome.json", "chrome-acquisition.json"])
+def test_wh01b_enrollment_refuses_any_existing_candidate(monkeypatch, tmp_path, relative):
+    _, repo, home, _, events = enrollment_fixture(monkeypatch, tmp_path)
+    existing = home / "AI-Commerce" / relative
+    existing.parent.mkdir(exist_ok=True)
+    existing.write_bytes(b"existing private content")
+    assert_enrollment_hold(ca.enroll_existing_9444(repo, opt_in=True), "ENROLLMENT_CONFIG_EXISTS")
+    assert existing.read_bytes() == b"existing private content" and events == []
+
+
+def test_wh01b_enrollment_refuses_old_config_duplicates(monkeypatch, tmp_path):
+    _, repo, home, _, events = enrollment_fixture(monkeypatch, tmp_path)
+    for name in ("chrome.json", "chrome-acquisition.json"):
+        (home / "AI-Commerce" / name).write_bytes(b"old config")
+    assert_enrollment_hold(ca.assess_existing_9444(repo), "ENROLLMENT_CONFIG_EXISTS")
+    assert not events
+
+
+@pytest.mark.parametrize("location", ["config", "private_root", "profile", "executable"])
+@pytest.mark.parametrize("link", ["symlink", "junction"])
+def test_wh01b_enrollment_refuses_symlink_or_junction_paths(monkeypatch, tmp_path, location, link):
+    import stat
+    import types
+    env, repo, home, _, _ = enrollment_fixture(monkeypatch, tmp_path)
+    target = {"config": env.config_path, "private_root": home / "AI-Commerce",
+              "profile": env.user_data_dir, "executable": env.executable}[location]
+    original = Path.lstat
+    def lstat(path, *args, **kwargs):
+        if path == target:
+            return types.SimpleNamespace(st_file_attributes=0x400,
+                st_mode=stat.S_IFLNK if link == "symlink" else stat.S_IFDIR)
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "lstat", lstat)
+    result = ca.assess_existing_9444(repo)
+    assert result["candidate_assessed"] is False and result["enrolled"] is False
+    assert result["code"] in {"ENROLLMENT_PATH_UNSAFE", "CHROME_PATH_INVALID"}
+
+
+def test_wh01b_enrollment_does_not_select_another_chrome_port(monkeypatch, tmp_path):
+    env, repo, home, snapshot, _ = enrollment_fixture(monkeypatch, tmp_path)
+    other_directory = home / "Google" / "Chrome" / "User Data"
+    other_directory.mkdir(parents=True)
+    other_command = [a.replace(str(env.user_data_dir), str(other_directory)).replace(
+        "--remote-debugging-port=9444", "--remote-debugging-port=9222") for a in env.command()]
+    snapshot["processes"].append({**snapshot["processes"][0], "ProcessId": 456,
+                                  "CommandLine": json.dumps(other_command)})
+    assert_enrollment_hold(ca.assess_existing_9444(repo), "NATIVE_ATOMIC_ENROLLMENT_REQUIRED", assessed=True)
+
+
+def test_wh01b_enrollment_environment_cannot_supply_operator_or_private_root(monkeypatch, tmp_path):
+    _, repo, _, _, _ = enrollment_fixture(monkeypatch, tmp_path)
+    ca.os.environ.update(LOCALAPPDATA=str(tmp_path / "foreign"), USERNAME="forged-owner",
+                         AI_COMMERCE_OPERATOR_SID="S-1-5-21-1-2-3-1002")
+    assert_enrollment_hold(ca.assess_existing_9444(repo), "NATIVE_ATOMIC_ENROLLMENT_REQUIRED", assessed=True)
+
+
+@pytest.mark.parametrize("project", ["Google/Chrome/User Data", "Other-Project/Profile"])
+def test_wh01b_enrollment_refuses_default_google_and_foreign_project(monkeypatch, tmp_path, project):
+    env, repo, home, snapshot, _ = enrollment_fixture(monkeypatch, tmp_path)
+    directory = home / project
+    (directory / "Default").mkdir(parents=True)
+    snapshot["processes"][0]["CommandLine"] = json.dumps(
+        [a.replace(str(env.user_data_dir), str(directory)) for a in env.command()])
+    assert_enrollment_hold(ca.assess_existing_9444(repo), "PROFILE_NOT_DEDICATED")
+
+
+@pytest.mark.parametrize("guard", ["unsigned", "inaccessible", "unsafe_acl", "profile_lock", "unknown"])
+def test_wh01b_enrollment_stops_on_signature_custody_or_unknown(monkeypatch, tmp_path, guard):
+    from ai_commerce.remote import local_completion_handoff
+    env, repo, _, _, events = enrollment_fixture(monkeypatch, tmp_path)
+    expected = "CHROME_EXECUTABLE_UNTRUSTED"
+    if guard in {"unsigned", "inaccessible"}:
+        def unsigned(env):
+            raise ca.AcquisitionBlocked("CHROME_EXECUTABLE_UNTRUSTED")
+        monkeypatch.setattr(ca, "_verify_google_chrome", unsigned)
+    elif guard == "unsafe_acl":
+        def acl(path):
+            raise local_completion_handoff.HandoffBlocked("PRIVATE_SID_OR_PATH_MUST_NOT_ESCAPE")
+        monkeypatch.setattr(local_completion_handoff, "_private_identity", acl)
+        expected = "OPERATOR_OWNERSHIP_UNPROVEN"
+    elif guard == "profile_lock":
+        (env.user_data_dir / "SingletonLock").write_bytes(b"unproven owner")
+        expected = "ENROLLMENT_PROFILE_LOCK_UNPROVEN"
+    else:
+        def unknown(port):
+            raise RuntimeError("PRIVATE_PATH_SESSION_SID")
+        monkeypatch.setattr(ca, "_query_windows", unknown)
+        expected = "ENROLLMENT_ASSESSMENT_UNKNOWN"
+    assert_enrollment_hold(ca.enroll_existing_9444(repo, opt_in=True), expected)
+    assert len(events) <= 1  # No retry of an unavailable or unknown observation.
+
+
+@pytest.mark.parametrize("change", ["pid_reuse", "new_pid", "stale_listener", "new_config", "dropped_permissions", "token"])
+def test_wh01b_enrollment_rechecks_without_replay(monkeypatch, tmp_path, change):
+    from copy import deepcopy
+    from ai_commerce.remote import local_completion_handoff, local_wake_entry
+    env, repo, _, snapshot, events = enrollment_fixture(monkeypatch, tmp_path)
+    current = deepcopy(snapshot)
+    expected = "ENROLLMENT_OBSERVATION_CHANGED"
+    if change == "pid_reuse":
+        current["processes"][0]["CreationDate"] = "2026-11-14T02:00:00Z"
+    elif change == "new_pid":
+        current["processes"][0]["ProcessId"] = 789
+        current["listeners"][0]["OwningProcess"] = 789
+    elif change == "stale_listener":
+        current["processes"] = []
+        expected = "ENROLLMENT_CANDIDATE_UNPROVEN"
+    def query(port):
+        assert port == 9444
+        events.append("inventory")
+        return snapshot if events.count("inventory") == 1 else current
+    monkeypatch.setattr(ca, "_query_windows", query)
+    def signature(env):
+        events.append("signature")
+        if change == "new_config":
+            env.config_path.parent.mkdir()
+            env.config_path.write_bytes(b"concurrent private config")
+        elif change == "dropped_permissions":
+            def dropped(path):
+                raise local_completion_handoff.HandoffBlocked("PERMISSIONS_DROPPED")
+            monkeypatch.setattr(local_completion_handoff, "_private_identity", dropped)
+        elif change == "token":
+            monkeypatch.setattr(local_wake_entry, "_windows_process_sid", lambda: "S-1-5-21-1-2-3-1002")
+    monkeypatch.setattr(ca, "_verify_google_chrome", signature)
+    if change == "new_config":
+        expected = "ENROLLMENT_CONFIG_EXISTS"
+    elif change == "dropped_permissions":
+        expected = "OPERATOR_OWNERSHIP_UNPROVEN"
+    assert_enrollment_hold(ca.assess_existing_9444(repo), expected)
+    assert events.count("inventory") <= 2
+    if change == "new_config":
+        assert env.config_path.read_bytes() == b"concurrent private config"
+
+
+def test_wh01b_enrollment_sanitizes_untrusted_diagnostic(monkeypatch, tmp_path, capsys):
+    _, repo, _, _, _ = enrollment_fixture(monkeypatch, tmp_path)
+    def unknown(port):
+        raise ca.AcquisitionBlocked("PRIVATE_PATH_SESSION_SID")
+    monkeypatch.setattr(ca, "_query_windows", unknown)
+    assert_enrollment_hold(ca.assess_existing_9444(repo), "ENROLLMENT_ASSESSMENT_UNKNOWN")
+    assert capsys.readouterr().out == ""
+
+
+def test_wh01b_enrollment_cli_no_input_selected_config_and_no_launch(monkeypatch, tmp_path, capsys):
+    env, repo, _, _, events = enrollment_fixture(monkeypatch, tmp_path)
+    assert ca.main(["enroll-existing-9444", "--checkout", str(repo)]) == 2
+    assert_enrollment_hold(json.loads(capsys.readouterr().out), "ENROLLMENT_OPT_IN_REQUIRED")
+    assert not events
+    assert ca.main(["assess-existing-9444", "--checkout", str(repo)]) == 2
+    assert_enrollment_hold(json.loads(capsys.readouterr().out), "NATIVE_ATOMIC_ENROLLMENT_REQUIRED", assessed=True)
+    events.clear()
+    with pytest.raises(SystemExit) as error:
+        ca.main(["enroll-existing-9444", "--checkout", str(repo), "--config", str(env.config_path), "--opt-in"])
+    assert error.value.code == 2 and events == []
