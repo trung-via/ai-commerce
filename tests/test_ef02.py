@@ -123,6 +123,298 @@ def test_acceptance_declaration_is_v1_compatible_authorized_and_fingerprinted():
         validate(packet, issuer="untrusted-executor")
 
 
+PERSONAL_SOURCE = "src/ai_commerce/hostops_v3/personal.py"
+PERSONAL_TEST = "tests/test_hostops_personal.py"
+PERSONAL_AC = "HOSTOPS.PERSONAL.chat-approved-public-read-owner-comment-new-scratch-write"
+PERSONAL_MANIFEST = "work_items/mt01-components/hostops-personal.json"
+A12_SOURCE = "src/ai_commerce/product/identity.py"
+A14_SOURCE = "src/ai_commerce/affiliate_attribution/evidence.py"
+WAKE_SOURCE = "src/ai_commerce/remote/completion_event.py"
+
+
+def scope_action(name, paths, acs, depends=()):
+    item = action(name, depends=depends)
+    item["allowed_paths"] = list(paths)
+    if acs is not None:
+        item["instruction"] += "\nMT01_ACCEPTANCE_JSON:" + json.dumps(acs)
+    return item
+
+
+def make_scope_repo(tmp_path, monkeypatch, *, contents=None):
+    """Offline immutable Git responses; no git init/commit or executor calls.
+
+    Use representative real reviewed static owners and a real persisted owner
+    manifest, exercising the production loader rather than a caller owner map.
+    """
+    from ai_commerce.engineering.minimum_test import approved_groups
+    from ai_commerce.remote import validation
+
+    groups = tuple(g for g in approved_groups()
+                   if g.name in {"a12", "a14", "ef02-wake", "hostops-v3", "ef02"})
+    monkeypatch.setattr(validation, "approved_groups", lambda: groups)
+    files = {p: b"# pinned fixture\n" for g in groups for p in
+             (*g.paths, *g.tests, *g.consumers, *g.contracts)}
+    files.update({PERSONAL_MANIFEST: (ROOT / PERSONAL_MANIFEST).read_bytes(),
+                  PERSONAL_SOURCE: b"# personal\n", PERSONAL_TEST: b"# test personal\n",
+                  "contracts/RemoteActionBatch.v1.schema.json": SCHEMA.read_bytes(),
+                  ".github/ef02/verify-profiles.json": REGISTRY.read_bytes(),
+                  ".github/ef02/approved-candidates.v1.json":
+                      (ROOT / ".github/ef02/approved-candidates.v1.json").read_bytes()})
+    files.update(contents or {})
+    (tmp_path / ".git").mkdir()
+    for path, raw in files.items():
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(raw)
+    objects = {hashlib.sha1(b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw
+                           ).hexdigest().encode("ascii"): raw for raw in files.values()}
+    entries = b"".join(b"100644 blob " + hashlib.sha1(
+        b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw).hexdigest().encode("ascii")
+        + b"\t" + path.encode("utf-8") + b"\0" for path, raw in sorted(files.items()))
+    calls = []
+
+    def git_read(argv, **kwargs):
+        calls.append(argv)
+        # argv[0] may be an explicitly selected Git executable.
+        args = argv[3:] if argv[1:2] == ["-C"] else argv[1:]
+        if args == ["rev-parse", "HEAD"]:
+            output = "a" * 40 + "\n"
+        elif args == ["cat-file", "-t", "a" * 40]:
+            output = "commit\n"
+        elif args == ["ls-tree", "-r", "--name-only", "-z", "a" * 40]:
+            output = b"\0".join(p.encode("utf-8") for p in sorted(files)) + b"\0"
+        elif args == ["ls-tree", "-r", "-z", "a" * 40]:
+            output = entries
+        elif args[:1] == ["show"] and args[1].startswith("a" * 40 + ":"):
+            output = files[args[1].split(":", 1)[1]]
+        elif args == ["cat-file", "--batch"]:
+            output = b""
+            for oid in kwargs["input"].splitlines():
+                raw = objects[oid]
+                output += oid + b" blob " + str(len(raw)).encode("ascii") + b"\n" + raw + b"\n"
+        else:
+            pytest.fail("Unexpected effect in scope preflight: " + repr(args))
+        return subprocess.CompletedProcess(argv, 0, output, "" if isinstance(output, str) else b"")
+
+    monkeypatch.setattr(subprocess, "run", git_read)
+    return files, calls
+
+
+@pytest.mark.parametrize("paths,acs,compatible", [
+    ([PERSONAL_SOURCE, PERSONAL_TEST], ["EF02.wake-boundaries"], False),
+    ([PERSONAL_SOURCE, PERSONAL_TEST], [PERSONAL_AC], True),
+    ([PERSONAL_SOURCE, WAKE_SOURCE], [PERSONAL_AC, "EF02.wake-boundaries"], True),
+    ([A14_SOURCE], ["A12.product-evidence"], False),
+    ([A14_SOURCE], ["A14.L04.offline-attribution-evidence"], True),
+])
+def test_pre_executor_scope_uses_pinned_real_owner_mapping(tmp_path, monkeypatch, paths, acs, compatible):
+    from ai_commerce.remote.validation import validate_acceptance_scope
+    make_scope_repo(tmp_path, monkeypatch)
+    packet = batch([scope_action("a", paths, acs)])
+    original = copy.deepcopy(packet)
+    if compatible:
+        result = validate_acceptance_scope(packet, repo=tmp_path)
+        assert result["status"] == "PRE_EXECUTOR_COMPATIBLE"
+        assert result["next_gate"] == "POST_EDIT_MT01_REQUIRED"
+    else:
+        with pytest.raises(RemoteRequestError, match="^AC_SCOPE_MISMATCH_PRE_EXECUTOR$"):
+            validate_acceptance_scope(packet, repo=tmp_path)
+    assert packet == original and fingerprint(packet) == fingerprint(original)
+
+
+@pytest.mark.parametrize("paths,acs", [
+    (["src/ai_commerce/new_component.py"], ["EF02.wake-boundaries"]),
+    (["work_items/mt01-components/new-component.json"], ["EF02.wake-boundaries"]),
+    ([PERSONAL_MANIFEST], ["EF02.wake-boundaries"]),
+    (["src/ai_commerce/hostops_v3"], ["EF02.wake-boundaries"]),
+    ([PERSONAL_SOURCE], None),
+    ([PERSONAL_SOURCE], ["UNKNOWN.new-owner"]),
+    ([PERSONAL_SOURCE], [PERSONAL_AC, "UNKNOWN.new-owner"]),
+])
+def test_pre_executor_uncertain_scope_defers_without_guessing(tmp_path, monkeypatch, paths, acs):
+    from ai_commerce.remote.validation import validate_acceptance_scope
+    make_scope_repo(tmp_path, monkeypatch)
+    result = validate_acceptance_scope(batch([scope_action("a", paths, acs)]), repo=tmp_path)
+    assert result["status"] == "PRE_EXECUTOR_UNDETERMINED"
+    assert result["next_gate"] == "DEFER_TO_POST_EDIT_MT01"
+
+
+def test_pre_executor_missing_instruction_defers_but_schema_still_rejects(tmp_path, monkeypatch):
+    from jsonschema import ValidationError
+    from ai_commerce.remote.validation import validate_acceptance_scope
+    packet = batch([scope_action("a", [PERSONAL_SOURCE], None)])
+    del packet["actions"][0]["instruction"]
+    def forbidden(*args, **kwargs):
+        pytest.fail("Undeclared acceptance must not inspect a repository")
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    result = validate_acceptance_scope(packet, repo=tmp_path)
+    assert result["status"] == "PRE_EXECUTOR_UNDETERMINED"
+    assert result["actions"][0]["reason"] == "AC_DECLARATION_UNDETERMINED"
+    with pytest.raises(ValidationError):
+        validate(packet)
+
+
+@pytest.mark.parametrize("acs", [[PERSONAL_AC], ["EF02.wake-boundaries"]])
+def test_pre_executor_reads_raw_python_blobs_without_archive_attributes(tmp_path, monkeypatch, acs):
+    from ai_commerce.remote.validation import validate_acceptance_scope
+    files, _ = make_scope_repo(tmp_path, monkeypatch, contents={
+        PERSONAL_SOURCE: b"# pinned CRLF source\r\n",
+        "src/ai_commerce/hostops_v3/README.md": b"unrelated text\r\n",
+    })
+    original_run = subprocess.run
+    reads = []
+    def run(argv, **kwargs):
+        if argv[-2:] == ["cat-file", "--batch"]:
+            reads.append(kwargs["input"].splitlines())
+        return original_run(argv, **kwargs)
+    monkeypatch.setattr(subprocess, "run", run)
+    packet = batch([scope_action("a", [PERSONAL_SOURCE, PERSONAL_TEST], acs)])
+    if acs == [PERSONAL_AC]:
+        result = validate_acceptance_scope(packet, repo=tmp_path)
+        assert result["status"] == "PRE_EXECUTOR_COMPATIBLE"
+    else:
+        with pytest.raises(RemoteRequestError, match="^AC_SCOPE_MISMATCH_PRE_EXECUTOR$"):
+            validate_acceptance_scope(packet, repo=tmp_path)
+    expected = [hashlib.sha1(b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw
+                             ).hexdigest().encode("ascii") for path, raw in sorted(files.items())
+                if path.endswith(".py") and path.startswith(("src/ai_commerce/", "tests/"))]
+    assert reads == [expected]
+
+
+def test_pre_executor_import_consumer_and_dag_fanin_are_real_scope(tmp_path, monkeypatch):
+    from ai_commerce.remote.validation import validate_acceptance_scope
+    make_scope_repo(tmp_path, monkeypatch, contents={
+        A14_SOURCE: b"from ai_commerce.product import identity\n"})
+    # A12 source affects its A14 consumer without an A14 edit.
+    packet = batch([scope_action("a", [A12_SOURCE], ["A14.L04.offline-attribution-evidence"])])
+    assert validate_acceptance_scope(packet, repo=tmp_path)["status"] == "PRE_EXECUTOR_COMPATIBLE"
+    packet = batch([
+        scope_action("a", [WAKE_SOURCE], ["EF02.wake-boundaries"]),
+        scope_action("b", [PERSONAL_SOURCE], ["EF02.wake-boundaries"], depends=("a",)),
+    ])
+    assert validate_acceptance_scope(packet, repo=tmp_path)["status"] == "PRE_EXECUTOR_COMPATIBLE"
+    packet["actions"][1]["depends_on"] = []
+    with pytest.raises(RemoteRequestError, match="AC_SCOPE_MISMATCH_PRE_EXECUTOR"):
+        validate_acceptance_scope(packet, repo=tmp_path)
+
+
+def test_pre_executor_uses_pinned_consumers_not_forged_checkout_imports(tmp_path, monkeypatch):
+    from ai_commerce.remote.validation import validate_acceptance_scope
+    make_scope_repo(tmp_path, monkeypatch)
+    (tmp_path / WAKE_SOURCE).write_text("from ai_commerce.hostops_v3 import personal\n", encoding="utf-8")
+    packet = batch([scope_action("a", [PERSONAL_SOURCE], ["EF02.wake-boundaries"])])
+    with pytest.raises(RemoteRequestError, match="AC_SCOPE_MISMATCH_PRE_EXECUTOR"):
+        validate_acceptance_scope(packet, repo=tmp_path)
+
+
+@pytest.mark.parametrize("problem", ["dynamic-import", "unknown-source", "manifest-drift",
+                                     "unknown-consumer", "forged-owner", "snapshot-empty",
+                                     "snapshot-content", "snapshot-header", "snapshot-trailing",
+                                     "git-unavailable"])
+def test_pre_executor_unproven_graph_never_claims_compatibility(tmp_path, monkeypatch, problem):
+    from ai_commerce.remote.validation import validate_acceptance_scope
+    source = PERSONAL_SOURCE
+    contents = {}
+    if problem == "dynamic-import":
+        contents[source] = b"import importlib\nimportlib.import_module(name)\n"
+    elif problem == "unknown-source":
+        source = "src/ai_commerce/unowned.py"
+        contents[source] = b"# committed but not registered\n"
+    elif problem == "unknown-consumer":
+        contents["src/ai_commerce/unowned.py"] = b"from ai_commerce.hostops_v3 import personal\n"
+    elif problem == "forged-owner":
+        manifest = json.loads((ROOT / PERSONAL_MANIFEST).read_text(encoding="utf-8"))
+        manifest["acs"] = ["EF02.wake-boundaries"]  # Cannot re-own an existing AC.
+        contents[PERSONAL_MANIFEST] = json.dumps(manifest).encode("utf-8")
+    _, calls = make_scope_repo(tmp_path, monkeypatch, contents=contents)
+    if problem == "manifest-drift":
+        (tmp_path / PERSONAL_MANIFEST).write_text("{}", encoding="utf-8")
+    if problem.startswith("snapshot-") or problem == "git-unavailable":
+        original_run = subprocess.run
+        def run(argv, **kwargs):
+            if argv[-2:] == ["cat-file", "--batch"]:
+                if problem == "git-unavailable":
+                    return subprocess.CompletedProcess(argv, 1, b"", b"SECRET Git error")
+                output = original_run(argv, **kwargs).stdout
+                if problem == "snapshot-empty":
+                    output = b""
+                elif problem == "snapshot-content":
+                    header, raw = output.split(b"\n", 1)
+                    output = header + b"\n" + bytes([raw[0] ^ 1]) + raw[1:]
+                elif problem == "snapshot-header":
+                    output = output.replace(b" blob ", b" tree ", 1)
+                else:
+                    output += b"unexpected trailing object\n"
+                return subprocess.CompletedProcess(argv, 0, output, b"")
+            return original_run(argv, **kwargs)
+        monkeypatch.setattr(subprocess, "run", run)
+    result = validate_acceptance_scope(batch([
+        scope_action("a", [source], ["EF02.wake-boundaries"])]), repo=tmp_path)
+    assert result["status"] == "PRE_EXECUTOR_UNDETERMINED"
+    assert result["next_gate"] == "DEFER_TO_POST_EDIT_MT01"
+    if problem.startswith("snapshot-") or problem == "git-unavailable":
+        assert result["actions"][0]["reason"] == "PINNED_BASELINE_UNPROVEN"
+    assert "SECRET" not in json.dumps(result)
+    assert calls
+
+
+@pytest.mark.parametrize("command", ["validate", "run"])
+@pytest.mark.parametrize("full", [False, True])
+def test_cli_scope_mismatch_blocks_entire_batch_before_any_claim_or_model(
+        tmp_path, monkeypatch, capsys, command, full):
+    from ai_commerce.remote import __main__ as cli
+    _, calls = make_scope_repo(tmp_path, monkeypatch)
+    packet = batch([
+        scope_action("a", [WAKE_SOURCE], ["EF02.wake-boundaries"]),
+        scope_action("b", [PERSONAL_SOURCE, PERSONAL_TEST], ["EF02.wake-boundaries"]),
+    ])
+    if full:
+        packet["actions"][1]["verification_intent"] = "HUMAN_FULL"
+    else:
+        packet["actions"][1]["verification_profile"] = "mt01-ef02-wake-tests"
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps(packet), encoding="utf-8")
+    effects = []
+    def forbidden(*args, **kwargs):
+        effects.append(True)
+        raise AssertionError("No claim, worker, provider or schedule permitted")
+    for name in ("GitHubTransport", "LocalBatchWorker", "run_schedule"):
+        monkeypatch.setattr(cli, name, forbidden)
+    assert cli.main([command, "--request-file", str(request), "--checkout", str(tmp_path),
+                     "--issuer-login", "owner", "--owner-login", "owner"]) == 2
+    assert effects == []
+    assert "AC_SCOPE_MISMATCH_PRE_EXECUTOR" in capsys.readouterr().err
+    source_check = next(i for i, argv in enumerate(calls) if "cat-file" in argv)
+    baseline_check = next(i for i, argv in enumerate(calls) if "ls-tree" in argv)
+    assert source_check < baseline_check
+
+
+def test_cli_scope_gate_preserves_authentication_replay_and_source_checks(tmp_path, monkeypatch, capsys):
+    from ai_commerce.remote import __main__ as cli
+    _, calls = make_scope_repo(tmp_path, monkeypatch)
+    request = tmp_path / "request.json"
+    packet = batch([scope_action("a", [PERSONAL_SOURCE], [PERSONAL_AC])])
+    request.write_text(json.dumps(packet), encoding="utf-8")
+    argv = ["validate", "--request-file", str(request), "--checkout", str(tmp_path),
+            "--issuer-login", "owner", "--owner-login", "owner"]
+    assert cli.main(argv[:-3] + ["attacker", "--owner-login", "owner"]) == 2
+    assert "ISSUER_NOT_AUTHORIZED" in capsys.readouterr().err
+    assert calls == []
+    packet["actions"][0]["reuse_candidate"] = {"candidate_sha": "b" * 40, "verified_run_id": 123}
+    request.write_text(json.dumps(packet), encoding="utf-8")
+    assert cli.main(argv) == 2
+    assert "REUSE_" in capsys.readouterr().err
+    assert calls == []
+    del packet["actions"][0]["reuse_candidate"]
+    request.write_text(json.dumps(packet), encoding="utf-8")
+    def unavailable(*args, **kwargs):
+        raise RemoteRequestError("SOURCE_COMMIT_UNAVAILABLE")
+    monkeypatch.setattr(cli, "check_source", unavailable)
+    assert cli.main(argv) == 2
+    assert "SOURCE_COMMIT_UNAVAILABLE" in capsys.readouterr().err
+    assert calls == []
+
+
 @pytest.mark.parametrize("declaration", [
     "", "MT01_ACCEPTANCE_JSON: []", "MT01_ACCEPTANCE_JSON: not-json",
     'MT01_ACCEPTANCE_JSON: ["A12.product-evidence"]\nMT01_ACCEPTANCE_JSON: ["EF01.repair"]',

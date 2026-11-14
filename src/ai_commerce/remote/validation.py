@@ -5,6 +5,7 @@ import os
 import json
 import re
 import subprocess
+import tempfile
 from pathlib import Path, PurePosixPath
 from jsonschema import Draft202012Validator
 from ai_commerce.engineering.profile import ExecutorSelection
@@ -146,7 +147,7 @@ def approved_acceptance_plan(action: dict) -> dict:
     describe the reviewed test families; arbitrary issue ACs remain unknown.
     """
     prefix = "MT01_ACCEPTANCE_JSON:"
-    lines = [line.strip() for line in action["instruction"].splitlines() if prefix in line]
+    lines = [line.strip() for line in action.get("instruction", "").splitlines() if prefix in line]
     reason = "EXPLICIT_FINGERPRINTED_INSTRUCTION_ACCEPTANCE"
     try:
         if len(lines) != 1 or not lines[0].startswith(prefix):
@@ -165,6 +166,143 @@ def approved_acceptance_plan(action: dict) -> dict:
             "consumer_map": {ac: mapping[ac] for ac in sorted(ids) if ac in mapping},
             "source": "ISSUER_FINGERPRINTED_V1_INSTRUCTION", "reason": reason,
             "broad_required": bool(unknown)}
+
+
+def validate_acceptance_scope(batch: dict, *, repo: Path,
+                              git_executable: str | None = None) -> dict:
+    """Reject only proven AC/owner mismatches before any batch action starts.
+
+    Call after authenticated/content validation and the source commit check.
+    This is a potential-scope check, never post-edit verification or authority.
+    A dependency's allowed scope participates in fan-in; independent siblings
+    cannot lend each other coverage. Unknown/new scope defers to MT-01.
+    """
+    # Lazy: minimum_test's post-edit planner also consumes remote validation.
+    from ai_commerce.engineering.impact_v21 import (
+        load_baseline_component_owner_records, select_impact,
+    )
+
+    actions = {a["action_id"]: a for a in batch["actions"]}
+    declarations = {key: approved_acceptance_plan(a) for key, a in actions.items()}
+
+    def deferred(key: str, reason: str) -> dict:
+        return {"action_id": key, "status": "PRE_EXECUTOR_UNDETERMINED",
+                "reason": reason, "next_gate": "DEFER_TO_POST_EDIT_MT01"}
+
+    def report(results: list[dict]) -> dict:
+        complete = all(r["status"] == "PRE_EXECUTOR_COMPATIBLE" for r in results)
+        return {"status": "PRE_EXECUTOR_COMPATIBLE" if complete else "PRE_EXECUTOR_UNDETERMINED",
+                "source_sha": batch["source_sha"], "actions": results,
+                "next_gate": "POST_EDIT_MT01_REQUIRED" if complete else "DEFER_TO_POST_EDIT_MT01"}
+
+    explicit = "EXPLICIT_FINGERPRINTED_INSTRUCTION_ACCEPTANCE"
+    if not any(d["reason"] == explicit for d in declarations.values()):
+        return report([deferred(key, "AC_DECLARATION_UNDETERMINED") for key in actions])
+
+    scopes: dict[str, set[str]] = {}
+
+    def potential_paths(key: str) -> set[str]:
+        if key in scopes:
+            return scopes[key]
+        scope = set(actions[key]["allowed_paths"])
+        for parent in actions[key]["depends_on"]:
+            scope.update(potential_paths(parent))
+        scopes[key] = scope
+        return scope
+
+    source_sha = batch["source_sha"]
+    try:
+        if not HEX_SHA.fullmatch(source_sha) or not (repo / ".git").exists():
+            raise ValueError("BASELINE_UNAVAILABLE")
+        groups = approved_groups()
+        records = load_baseline_component_owner_records(
+            root=repo, base_sha=source_sha, existing_groups=groups)
+        groups = (*groups, *(record["group"] for record in records))
+        known = {ac for group in groups for ac in group.acs}
+        reviewed_paths = {p for g in groups for p in
+                          (*g.paths, *g.tests, *g.consumers, *g.contracts)}
+        inventory = subprocess.run(
+            git_argv(repo, "ls-tree", "-r", "-z", source_sha, executable=git_executable),
+            capture_output=True, check=False, timeout=30)
+        if inventory.returncode:
+            raise ValueError("BASELINE_UNAVAILABLE")
+        blobs = {}
+        for entry in inventory.stdout.split(b"\0"):
+            if entry:
+                metadata, name = entry.split(b"\t", 1)
+                mode, kind, oid = metadata.split()
+                path = name.decode("utf-8")
+                if (path.startswith(("src/ai_commerce/", "tests/"))
+                        and (mode not in (b"100644", b"100755") or kind != b"blob")):
+                    raise ValueError("BASELINE_GRAPH_UNSAFE")
+                if mode in (b"100644", b"100755") and kind == b"blob":
+                    blobs[path] = oid.decode("ascii")
+        # select_impact reads only Python imports and test inventory from disk.
+        # Read raw pinned blobs: archive can apply attributes/EOL conversions,
+        # including to unrelated non-Python files, invalidating blob hashes.
+        # cat-file is read-only; no worktree, index, HEAD or source mutation.
+        graph_paths = sorted(p for p in blobs if p.endswith(".py")
+                             and p.startswith(("src/ai_commerce/", "tests/")))
+        snapshot = subprocess.run(
+            git_argv(repo, "cat-file", "--batch", executable=git_executable),
+            input=b"".join(blobs[p].encode("ascii") + b"\n" for p in graph_paths),
+            capture_output=True, check=False, timeout=30)
+        if snapshot.returncode:
+            raise ValueError("BASELINE_UNAVAILABLE")
+        with tempfile.TemporaryDirectory(prefix="ef02-ac-scope-") as directory:
+            root = Path(directory)
+            offset = 0
+            for path in graph_paths:
+                try:
+                    safe_path(path)
+                except RemoteRequestError as exc:
+                    raise ValueError("BASELINE_GRAPH_UNSAFE") from exc
+                end = snapshot.stdout.index(b"\n", offset)
+                oid, kind, size = snapshot.stdout[offset:end].split()
+                length = int(size)
+                start = end + 1
+                raw = snapshot.stdout[start:start + length]
+                if (oid.decode("ascii") != blobs[path] or kind != b"blob" or length < 0
+                        or len(raw) != length
+                        or snapshot.stdout[start + length:start + length + 1] != b"\n"
+                        or hashlib.sha1(b"blob " + str(length).encode("ascii") + b"\0" + raw
+                                        ).hexdigest() != blobs[path]):
+                    raise ValueError("BASELINE_SNAPSHOT_UNPROVEN")
+                target = root / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(raw)
+                offset = start + length + 1
+            if offset != len(snapshot.stdout):
+                raise ValueError("BASELINE_SNAPSHOT_UNPROVEN")
+            results = []
+            for key, declaration in declarations.items():
+                if declaration["reason"] != explicit or set(declaration["ids"]) - known:
+                    results.append(deferred(key, "AC_DECLARATION_UNDETERMINED"))
+                    continue
+                paths = potential_paths(key)
+                if (not paths or not paths <= blobs.keys() or any(
+                        p.startswith("work_items/mt01-components/") for p in paths)):
+                    results.append(deferred(key, "ALLOWED_SCOPE_NOT_EXACT_EXISTING_FILES"))
+                    continue
+                impact = select_impact(root=root, changed_paths=sorted(paths), groups=groups,
+                                       base_sha=source_sha, candidate_sha=source_sha)
+                if (not impact.runnable or impact.missing_mapping
+                        or set(impact.affected_paths) - reviewed_paths):
+                    results.append(deferred(key, "IMPACT_CLOSURE_UNPROVEN"))
+                    continue
+                selected_acs = {ac for g in groups if g.name in impact.selected_groups for ac in g.acs}
+                if set(declaration["ids"]) - selected_acs:
+                    # Do not echo action instructions, arbitrary IDs or Git errors.
+                    raise RemoteRequestError("AC_SCOPE_MISMATCH_PRE_EXECUTOR")
+                results.append({"action_id": key, "status": "PRE_EXECUTOR_COMPATIBLE",
+                                "selected_groups": list(impact.selected_groups),
+                                "next_gate": "POST_EDIT_MT01_REQUIRED"})
+            return report(results)
+    except RemoteRequestError:
+        raise
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError,
+            subprocess.SubprocessError):
+        return report([deferred(key, "PINNED_BASELINE_UNPROVEN") for key in actions])
 
 
 def approved_verification_plan(action: dict, registry: dict[str, list[str]]) -> dict:

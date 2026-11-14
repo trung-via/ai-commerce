@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from test_ef02 import action, batch, ROOT, SCHEMA, REGISTRY
+from test_ef02 import (make_scope_repo, scope_action, PERSONAL_SOURCE, PERSONAL_TEST,
+                       PERSONAL_AC, WAKE_SOURCE)
 from ai_commerce.remote import authoring_preflight as preflight
 from ai_commerce.remote.validation import RemoteRequestError, validate_batch, verify_registry
 
@@ -110,6 +112,58 @@ def test_optional_source_check_is_exact_read_only_head(tmp_path, monkeypatch):
     packet["source_sha"] = "b" * 40
     assert check(packet, source_repo=tmp_path)["error_code"] == "SOURCE_SHA_MISMATCH"
     assert all(argv[-2:] == ["rev-parse", "HEAD"] for argv in seen)
+
+
+def test_content_only_preflight_does_not_guess_scope_or_read_repo(monkeypatch):
+    packet = batch([scope_action("a", [PERSONAL_SOURCE], ["EF02.wake-boundaries"])])
+    original = copy.deepcopy(packet)
+    def forbidden(*args, **kwargs):
+        pytest.fail("Content-only authoring must not inspect a repository or dispatch")
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    result = check(packet)
+    assert result["status"] == "PREFLIGHT_PASS"
+    assert result["acceptance_scope"]["status"] == "PRE_EXECUTOR_UNDETERMINED"
+    assert result["acceptance_scope"]["next_gate"] == "DEFER_TO_POST_EDIT_MT01"
+    assert result["request_fingerprint"] == preflight.fingerprint(original)
+    assert packet == original
+
+
+def test_exact_source_authoring_rejects_scope_mismatch_with_sanitized_provenance(tmp_path, monkeypatch):
+    make_scope_repo(tmp_path, monkeypatch)
+    packet = batch([scope_action("a", [PERSONAL_SOURCE, PERSONAL_TEST], ["EF02.wake-boundaries"])])
+    packet["actions"][0]["instruction"] = "SECRET credential instructions\n" + packet["actions"][0]["instruction"]
+    original = copy.deepcopy(packet)
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    result = check(packet, source_repo=tmp_path)
+    assert result["status"] == "PREFLIGHT_REJECTED"
+    assert result["error_code"] == "AC_SCOPE_MISMATCH_PRE_EXECUTOR"
+    assert result["authorization"] == "UNPROVEN" and result["dispatch_performed"] is False
+    provenance = result["failure_provenance"]
+    assert provenance["source_sha"] == packet["source_sha"]
+    assert provenance["attempt_id"] == "a-001" and provenance["replay_authorized"] is False
+    assert provenance["fingerprint"] == preflight.fingerprint({
+        "phase": "REQUEST_VALIDATION", "error_code": "AC_SCOPE_MISMATCH_PRE_EXECUTOR",
+        "request_fingerprint": preflight.fingerprint(packet)})
+    assert "SECRET" not in json.dumps(result)
+    assert packet == original
+    assert before == {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+
+def test_verified_authoring_positive_preserves_source_and_fingerprint(tmp_path, monkeypatch):
+    _, calls = make_scope_repo(tmp_path, monkeypatch)
+    packet = batch([scope_action("a", [PERSONAL_SOURCE, WAKE_SOURCE],
+                                [PERSONAL_AC, "EF02.wake-boundaries"])])
+    original = copy.deepcopy(packet)
+    result = check(packet, source_repo=tmp_path)
+    assert result["status"] == "PREFLIGHT_PASS" and result["source_check"] == "EXACT_HEAD_MATCH"
+    assert result["acceptance_scope"]["status"] == "PRE_EXECUTOR_COMPATIBLE"
+    assert result["authorization"] == "UNPROVEN" and result["dispatch_performed"] is False
+    assert result["request_fingerprint"] == preflight.fingerprint(original) and packet == original
+    assert calls[0][-2:] == ["rev-parse", "HEAD"]
+    packet["source_sha"] = "b" * 40
+    calls.clear()
+    assert check(packet, source_repo=tmp_path)["error_code"] == "SOURCE_SHA_MISMATCH"
+    assert len(calls) == 1  # No owner lookup before exact source verification.
 
 
 def test_documented_cli_from_unrelated_cwd_and_sanitized_invalid_json(tmp_path):

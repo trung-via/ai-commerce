@@ -12,7 +12,7 @@ from ai_commerce.engineering.git import git_argv
 from ai_commerce.engineering.runner import _protected_change, _safe_scope
 from .reuse import load_approved_candidates
 from .validation import (HEX_SHA, IDENTITY, RemoteRequestError, fingerprint, safe_path,
-                         validate_batch_content, verify_registry)
+                         validate_acceptance_scope, validate_batch_content, verify_registry)
 
 
 def _ordinary_path(value: str) -> str:
@@ -75,6 +75,9 @@ def preflight_batch(data: dict, *, schema: Path, registry: dict[str, list[str]],
                     if not _safe_scope([path], actions[action_id]["allowed_paths"]):
                         raise RemoteRequestError("EXPECTED_PATH_OUTSIDE_SCOPE")
         source_check = "NOT_REQUESTED"
+        acceptance_scope = {"status": "PRE_EXECUTOR_UNDETERMINED",
+                            "next_gate": "DEFER_TO_POST_EDIT_MT01",
+                            "reason": "VERIFIED_SOURCE_REPO_REQUIRED"}
         if source_repo is not None:
             observed = subprocess.run(git_argv(source_repo, "rev-parse", "HEAD"),
                 capture_output=True, text=True, encoding="utf-8", errors="strict", check=False, timeout=30)
@@ -83,8 +86,10 @@ def preflight_batch(data: dict, *, schema: Path, registry: dict[str, list[str]],
             if observed.stdout.strip() != data["source_sha"]:
                 raise RemoteRequestError("SOURCE_SHA_MISMATCH")
             source_check = "EXACT_HEAD_MATCH"
+            acceptance_scope = validate_acceptance_scope(data, repo=source_repo)
         return {"status": "PREFLIGHT_PASS", "error_code": None, "authorization": "UNPROVEN",
                 "dispatch_performed": False, "source_check": source_check,
+                "acceptance_scope": acceptance_scope,
                 "request_fingerprint": fingerprint(data), "action_count": len(actions),
                 "reuse_check": "LOCAL_REGISTRY_MATCH_ONLY" if any(
                     a.get("reuse_candidate") for a in actions.values()) else "NOT_REQUESTED"}

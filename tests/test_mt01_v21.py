@@ -6,6 +6,63 @@ from ai_commerce.engineering.impact_v21 import registered_action_plan
 from ai_commerce.engineering.impact_v21 import select_impact
 
 
+def test_global_pre_executor_scope_and_post_edit_hold_use_real_pinned_owners(monkeypatch):
+    """#909 RCA: read-only real baseline, no provider or nested Git writes."""
+    import json
+    import subprocess
+    import pytest
+    from ai_commerce.engineering import impact_v21
+    from ai_commerce.engineering.minimum_test import approved_groups
+    from ai_commerce.remote.validation import RemoteRequestError, validate_acceptance_scope
+    from test_ef02 import (batch, scope_action, PERSONAL_SOURCE, PERSONAL_TEST,
+                           PERSONAL_AC)
+
+    root = Path(__file__).resolve().parents[1]
+    source = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    static = approved_groups()
+    records = impact_v21.load_baseline_component_owner_records(
+        root=root, base_sha=source, existing_groups=static)
+    owners = {r["group"].name: r["group"] for r in records}
+    assert {"hostops-personal", "wakehub-g2-native", "b0-1"} <= owners.keys()
+    # Reuse the already validated immutable records across these independent
+    # source-only decisions; still exercise the real shared selector each time.
+    def baseline(**kwargs):
+        assert kwargs == {"root": root, "base_sha": source, "existing_groups": static}
+        return records
+    monkeypatch.setattr(impact_v21, "load_baseline_component_owner_records", baseline)
+
+    packet = batch([scope_action("a", [PERSONAL_SOURCE, PERSONAL_TEST], ["EF02.wake-boundaries"])])
+    packet["source_sha"] = source
+    with pytest.raises(RemoteRequestError, match="^AC_SCOPE_MISMATCH_PRE_EXECUTOR$"):
+        validate_acceptance_scope(packet, repo=root)
+    packet["actions"][0]["instruction"] = "MT01_ACCEPTANCE_JSON:" + json.dumps([PERSONAL_AC])
+    positive = validate_acceptance_scope(packet, repo=root)
+    assert positive["status"] == "PRE_EXECUTOR_COMPATIBLE"
+    assert {"hostops-personal", "hostops-v3"} <= set(positive["actions"][0]["selected_groups"])
+
+    # The same global rule covers static Engineering and persisted WakeHub
+    # and Production owners without lane-specific profiles or registries.
+    for path, ac in [
+        ("src/ai_commerce/engineering/__main__.py", "EF01.execution"),
+        ("src/ai_commerce/wakehub/native_runtime.py", owners["wakehub-g2-native"].acs[0]),
+        ("src/ai_commerce/production_runtime/state_machine.py", owners["b0-1"].acs[0]),
+    ]:
+        lane = batch([scope_action("a", [path], [ac])])
+        lane["source_sha"] = source
+        assert validate_acceptance_scope(lane, repo=root)["status"] == "PRE_EXECUTOR_COMPATIBLE"
+
+    # Bypassing pre-executor admission still cannot weaken the post-edit gate.
+    profiles = json.loads((root / ".github/ef02/verify-profiles.json").read_text(encoding="utf-8"))
+    plan = registered_action_plan(
+        repo=root, base_sha=source, base_files={}, candidate_files={},
+        changed_paths=[PERSONAL_SOURCE, PERSONAL_TEST], required_acs=["EF02.wake-boundaries"],
+        fallback_argv=profiles["project-tests"], groups=static, registered_profiles=profiles,
+        allowed_paths=[PERSONAL_SOURCE, PERSONAL_TEST], env={})
+    assert "AC_REQUIRED_GROUP_NOT_SELECTED:EF02.wake-boundaries" in plan["reason_codes"]
+    assert plan["impact_v21"]["mode"] == "HOLD_COVERAGE"
+    assert all(g["state"] == "UNPROVEN" and not g["execute"] for g in plan["groups"])
+
+
 def mk(repo: Path, path: str, data: str = "# test\n"):
     f = repo / path
     f.parent.mkdir(parents=True, exist_ok=True)

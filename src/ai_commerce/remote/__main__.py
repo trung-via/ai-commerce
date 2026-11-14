@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 from .validation import (RemoteRequestError, validate_batch, verify_registry,
-                         check_source)
+                         check_source, validate_acceptance_scope)
 from .transport import GitHubTransport
 from .worker import LocalBatchWorker, _write_json
 from .reuse import load_approved_candidates
@@ -42,13 +42,15 @@ def main(argv: list[str] | None = None) -> int:
                                                    args.brain_issuers.split(",") if v.strip()))
         check_source(checkout, batch["source_sha"],
                      **({"git_executable": args.git_bin} if args.git_bin is not None else {}))
+        acceptance_scope = validate_acceptance_scope(batch, repo=checkout,
+            **({"git_executable": args.git_bin} if args.git_bin is not None else {}))
     except Exception as exc:
         print("EF02_REQUEST_REJECTED: " + type(exc).__name__ + ": " + str(exc),
               file=sys.stderr)
         return 2
     if args.command == "validate":
         print(json.dumps({"status": "VALIDATED", "batch_id": batch["batch_id"],
-                          "count": len(batch["actions"])}))
+                          "count": len(batch["actions"]), "acceptance_scope": acceptance_scope}))
         return 0
     try:
         token = os.environ.get("GITHUB_TOKEN", "")
@@ -64,6 +66,7 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("INVALID_MAX_PARALLEL")
         report = run_schedule(batch, worker.execute_action,
                               max_workers=min(host_slots, requested))
+        report["acceptance_scope"] = acceptance_scope
         report["host_parallel_slots"] = host_slots
         report["github_workflow_run_id"] = os.environ.get("GITHUB_RUN_ID")
         report["github_issue_number"] = args.issue_number or None
@@ -118,7 +121,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"batch_id": report["batch_id"], "status": report["status"],
                           "succeeded": report["succeeded"], "total": report["total"],
                           "feedback_status": report["feedback_status"],
-                          "wake_event_status": report["wake_event_status"]}))
+                          "wake_event_status": report["wake_event_status"],
+                          "acceptance_scope": acceptance_scope}))
         return 0 if report["status"] == "COMPLETE" and report["feedback_status"] != "FEEDBACK_PUBLICATION_FAILED" else 1
     except Exception as exc:
         print("EF02_EXECUTION_ERROR: " + type(exc).__name__ + ": " + str(exc),
