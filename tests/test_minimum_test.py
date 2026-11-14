@@ -714,6 +714,177 @@ def test_collection_validator_is_deterministic_private_and_has_no_effects(monkey
     _assert_collection_hold(receipt, valid=True)
 
 
+def _bounded_collection_case():
+    """Declared serial mapping only; no native sandbox or process evidence."""
+    actual = _collection_case()
+    serial = _collection_case(serial=True)
+    return dict(enabled=True, expected_binding=actual["expected_binding"],
+                collection_binding=serial["expected_binding"],
+                registered_profiles={**actual["registered_profiles"], **serial["registered_profiles"]},
+                observation=serial["observation"])
+
+
+def _assert_bounded_collection_not_started(receipt):
+    assert receipt["status"] == "HOLD"
+    assert receipt["collection_status"] == receipt["provenance"] == "UNPROVEN"
+    assert receipt["execution_status"] == "NOT_STARTED"
+    assert receipt["acceptance_pass"] is receipt["trusted_windows_proof"] is False
+    assert receipt["tests_collected"] is receipt["workers_observed"] is None
+    assert receipt["tests_executed"] == 0
+    assert receipt["elapsed_seconds"] is None
+    assert receipt["cleanup_complete"] is False
+    assert "PASS" not in receipt.values()
+    assert "private-variant" not in mt.canonical(receipt)
+    assert len(mt.canonical(receipt)) < 8192
+
+
+@pytest.mark.parametrize("enabled", [False, None, 0, 1, "true"])
+def test_bounded_windows_collection_is_strictly_opt_in_and_has_no_effects(monkeypatch, enabled):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Source-only HOLD must not access the host or launch collection")
+    monkeypatch.setattr(mt, "subprocess", SimpleNamespace(run=forbidden, Popen=forbidden))
+    monkeypatch.setattr(mt, "collection_observer", forbidden)
+    monkeypatch.setattr(mt, "environment", forbidden)
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+    monkeypatch.setattr(Path, "write_bytes", forbidden)
+    monkeypatch.setattr(Path, "resolve", forbidden)
+    # Disabled requests do not inspect invalid inputs or dereference paths.
+    receipt = mt.bounded_windows_collection(enabled=enabled, expected_binding=object(),
+                                           registered_profiles=object(), observation=object())
+    assert receipt["reason_codes"] == ["COLLECTION_OPT_IN_REQUIRED"]
+    _assert_bounded_collection_not_started(receipt)
+    # Even an otherwise valid opt-in request cannot launch or attest isolation.
+    active = mt.bounded_windows_collection(**_bounded_collection_case())
+    assert active["reason_codes"] == [mt._WINDOWS_COLLECTION_HOLD]
+    _assert_bounded_collection_not_started(active)
+
+
+def test_bounded_windows_collection_defaults_to_no_launch():
+    receipt = mt.bounded_windows_collection()
+    assert receipt["hold_reason"] == "COLLECTION_OPT_IN_REQUIRED"
+    assert receipt["request_sha256"] is receipt["observation_receipt"] is None
+    _assert_bounded_collection_not_started(receipt)
+
+
+def test_bounded_windows_collection_requires_distinct_exact_serial_mapping():
+    inputs = _bounded_collection_case()
+    inputs["collection_binding"] = None
+    receipt = mt.bounded_windows_collection(**inputs)
+    assert "COLLECTION_SERIAL_PROFILE_MAPPING_REQUIRED" in receipt["reason_codes"]
+    assert receipt["workers_requested"] == 12
+    assert receipt["execution_argv_sha256"] == inputs["expected_binding"]["argv_sha256"]
+    assert receipt["collection_profile"] is receipt["request_sha256"] is None
+    _assert_bounded_collection_not_started(receipt)
+    # Neither the parallel profile itself nor a renamed parallel profile is
+    # serial evidence; no synthetic gateway events are manufactured.
+    import copy
+    for renamed in (False, True):
+        inputs["collection_binding"] = copy.deepcopy(inputs["expected_binding"])
+        if renamed:
+            inputs["collection_binding"]["registered_profile"] = "renamed-parallel"
+            inputs["registered_profiles"]["renamed-parallel"] = inputs["expected_binding"]["profile_argv"].copy()
+        receipt = mt.bounded_windows_collection(**inputs)
+        assert "COLLECTION_SERIAL_PROFILE_MAPPING_REQUIRED" in receipt["reason_codes"]
+        _assert_bounded_collection_not_started(receipt)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("candidate_sha", "f" * 40), ("source_sha256", "f" * 64),
+    ("python_sha256", "f" * 64), ("environment_sha256", "f" * 64),
+    ("collection_scope", ["tests"]),
+])
+def test_bounded_windows_collection_rejects_source_environment_or_scope_drift(field, value):
+    inputs = _bounded_collection_case()
+    serial = inputs["collection_binding"]
+    serial[field] = value
+    if field == "collection_scope":
+        serial["profile_argv"] = ["python", "-m", "pytest", "tests", "-q"]
+        serial["argv_sha256"] = mt.digest(mt.canonical(serial["profile_argv"]).encode())
+        inputs["registered_profiles"][serial["registered_profile"]] = serial["profile_argv"].copy()
+    receipt = mt.bounded_windows_collection(**inputs)
+    assert "COLLECTION_SERIAL_BINDING_MISMATCH" in receipt["reason_codes"]
+    assert receipt["request_sha256"] is None
+    _assert_bounded_collection_not_started(receipt)
+
+
+@pytest.mark.parametrize("case,reason", [
+    ("registry", "UNREGISTERED_COLLECTION_ARGV"),
+    ("filtered", "UNSAFE_COLLECTION_ARGV"),
+    ("digest", "COLLECTION_ARGV_DIGEST_MISMATCH"),
+    ("traversal", "UNSUPPORTED_COLLECTION_SCOPE"),
+    ("device", "UNSUPPORTED_COLLECTION_SCOPE"),
+])
+def test_bounded_windows_collection_rejects_unsafe_declarations(case, reason):
+    inputs = _bounded_collection_case()
+    serial = inputs["collection_binding"]
+    if case == "registry":
+        del inputs["registered_profiles"][serial["registered_profile"]]
+    elif case == "filtered":
+        serial["profile_argv"] += ["-k", "selected"]
+        inputs["registered_profiles"][serial["registered_profile"]] = serial["profile_argv"].copy()
+    elif case == "digest":
+        serial["argv_sha256"] = "f" * 64
+    else:
+        serial["collection_scope"] = ["tests/../private" if case == "traversal" else "tests/NUL.py"]
+    receipt = mt.bounded_windows_collection(**inputs)
+    assert reason in receipt["reason_codes"]
+    _assert_bounded_collection_not_started(receipt)
+
+
+def test_bounded_windows_collection_keeps_synthetic_hooks_private_and_untrusted():
+    import copy
+    inputs = _bounded_collection_case()
+    before = copy.deepcopy(inputs)
+    receipt = mt.bounded_windows_collection(**inputs)
+    observed = receipt["observation_receipt"]
+    _assert_collection_hold(observed, valid=True)
+    assert observed["provenance"] == observed["collection_status"] == "SYNTHETIC"
+    assert observed["collected_count"] == 10
+    assert observed["workers_observed"] == 0
+    assert receipt["workers_requested"] == 12
+    assert receipt["execution_profile"] != receipt["collection_profile"]
+    assert len(receipt["request_sha256"]) == 64
+    assert inputs == before
+    assert receipt == mt.bounded_windows_collection(**inputs)
+    _assert_bounded_collection_not_started(receipt)
+    # Public receipt edits cannot alter the request, raw IDs, or another result.
+    receipt["limits"]["deadline_seconds"] = 999
+    observed["selected_test_paths"].clear()
+    again = mt.bounded_windows_collection(**inputs)
+    assert again["limits"]["deadline_seconds"] == 60
+    assert inputs == before
+    assert again["request_sha256"] == receipt["request_sha256"]
+
+
+@pytest.mark.parametrize("case", ["claimed_native", "timeout", "partial", "oversized", "nonzero", "duplicate"])
+def test_bounded_windows_collection_reuses_p1a_failure_admission(case):
+    inputs = _bounded_collection_case()
+    observation = inputs["observation"]
+    if case == "claimed_native":
+        observation["provenance"] = "TRUSTED_WINDOWS"
+    elif case == "timeout":
+        observation["outcome"]["timed_out"] = True
+    elif case == "partial":
+        observation["session_exit_code"] = None
+    elif case == "oversized":
+        observation["outcome"]["output_bytes"] = mt._COLLECTION_MAX_OUTPUT + 1
+    elif case == "nonzero":
+        observation["outcome"]["exit_code"] = 2
+    else:
+        observation["serial_nodeids"][1] = observation["serial_nodeids"][0]
+    receipt = mt.bounded_windows_collection(**inputs)
+    assert receipt["observation_receipt"]["collection_status"] == "INVALID"
+    _assert_collection_hold(receipt["observation_receipt"])
+    _assert_bounded_collection_not_started(receipt)
+
+
+def test_bounded_windows_collection_cannot_accept_caller_isolation_flags():
+    # No scratch_safe, Job handle or arbitrary launcher argument can authorize
+    # imports. A reviewed companion owner must first provide native proof.
+    with pytest.raises(TypeError):
+        mt.bounded_windows_collection(**_bounded_collection_case(), scratch_safe=True)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_legacy_selector_mode(monkeypatch):
     """Legacy MT-01 contracts must not inherit the EF01 V2.1 selector toggle.

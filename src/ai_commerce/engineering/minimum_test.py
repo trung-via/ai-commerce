@@ -388,6 +388,107 @@ def collection_observer(*, binding: dict, registered_profiles: Mapping[str, Sequ
     return Observer()
 
 
+_WINDOWS_COLLECTION_HOLD = "P1B_WINDOWS_IMPORT_ISOLATION_AND_JOB_ATTESTATION_REQUIRED"
+
+
+def bounded_windows_collection(*, enabled: bool = False, expected_binding: object = None,
+                               collection_binding: object = None,
+                               registered_profiles: Mapping[str, Sequence[str]] | None = None,
+                               observation: object = None) -> dict:
+    """Opt-in, source-only P1-B1 HOLD contract; deliberately no subprocess.
+
+    Collection imports arbitrary candidate code. Environment filtering and a
+    timeout (even taskkill /T) cannot attest filesystem/network isolation or
+    race-free descendant termination. This two-file owner has no reviewed
+    native isolation provider, so enabling this API MUST NOT launch Python.
+    Caller flags, hook events and source hashes cannot supply that authority.
+
+    Companion PR contract, before any launcher can be enabled:
+    * Register a distinct exact-scope serial collection identity/contract in
+      the protected profile owner. Preserve the actual registered run argv.
+    * Supply independently verified Windows import isolation (read-only exact
+      source, action-local scratch, no credential/network access), handle-based
+      rejection of reparse points, and a suspended child assigned to a Job
+      before imports, with bounded drain and proven whole-job termination.
+    * Attest immutable selected SHA/tree/files, interpreter, registry and
+      allowlisted child-environment snapshots before/after collection. Strip
+      auth/provider/GitHub secrets and unsafe pytest/Python overrides. Bound
+      output/artifact/nodeid bytes and the entire lifecycle to at most 60s;
+      report cleanup only after handles, descendants and scratch are gone.
+    * Use collection_observer's real sessionfinish/identities privately and
+      validate_collection_observation publicly. Import/config/selection drift,
+      truncation, crashes or missing native proof must HOLD. Serial collection
+      never attests twelve workers; actual execution is a P1-B2 deliverable.
+
+    Bindings/registry are expected trusted-candidate inputs to the pure P1-A
+    validator, NOT native attestations. Optional raw observations stay private
+    caller input; only the sanitized validator receipt is returned. This API
+    creates no scratch, reads no source/environment, installs no hook, and is
+    not called by ordinary MT01/EF01/EF02 verification. No runtime budget is
+    activated. A future host/registry change requires its own reviewed scope.
+    """
+    receipt = dict(
+        schema_version=COLLECTION_SCHEMA_VERSION, kind="MT01_BOUNDED_WINDOWS_COLLECTION",
+        status="HOLD", hold_reason="COLLECTION_OPT_IN_REQUIRED", collection_status="UNPROVEN",
+        execution_status="NOT_STARTED", provenance="UNPROVEN", trusted_windows_proof=False,
+        acceptance_pass=False, tests_collected=None, tests_executed=0,
+        candidate_sha=None, source_sha256=None, environment_binding_sha256=None,
+        execution_profile=None, execution_argv_sha256=None, execution_binding_sha256=None,
+        workers_requested=None, workers_observed=None, collection_profile=None,
+        collection_argv_sha256=None, collection_binding_sha256=None, request_sha256=None,
+        observation_receipt=None, elapsed_seconds=None, cleanup_complete=False,
+        limits=dict(deadline_seconds=COLLECTION_TIMEOUT_SECONDS, nodeids=_COLLECTION_MAX_IDS,
+                    output_bytes=_COLLECTION_MAX_OUTPUT, artifact_bytes=_COLLECTION_MAX_BYTES),
+        reason_codes=[])
+    # Exact bool, so strings/integers cannot accidentally enable even preflight.
+    if enabled is not True:
+        receipt["reason_codes"] = ["COLLECTION_OPT_IN_REQUIRED"]
+        return receipt
+    receipt["hold_reason"] = _WINDOWS_COLLECTION_HOLD
+    try:
+        actual = _collection_binding(expected_binding, registered_profiles)
+        receipt.update(
+            candidate_sha=actual["candidate_sha"], source_sha256=actual["source_sha256"],
+            execution_profile=actual["registered_profile"],
+            execution_argv_sha256=actual["argv_sha256"],
+            execution_binding_sha256=digest(canonical(actual).encode()),
+            workers_requested=actual["workers_requested"],
+            environment_binding_sha256=digest(canonical({k: actual[k] for k in
+                ("platform", "python_sha256", "environment_sha256")}).encode()))
+        if collection_binding is None:
+            raise ValueError("COLLECTION_SERIAL_PROFILE_MAPPING_REQUIRED")
+        serial = _collection_binding(collection_binding, registered_profiles)
+        # Never derive a serial profile by dropping -n12 or changing workers.
+        # A separately registered name is necessary but is not an attestation.
+        if (serial["workers_requested"] != 0
+                or serial["registered_profile"] == actual["registered_profile"]):
+            raise ValueError("COLLECTION_SERIAL_PROFILE_MAPPING_REQUIRED")
+        if any(serial[k] != actual[k] for k in (
+                "candidate_sha", "source_sha256", "environment_sha256", "python_sha256",
+                "platform", "collection_scope")):
+            raise ValueError("COLLECTION_SERIAL_BINDING_MISMATCH")
+        receipt.update(
+            collection_profile=serial["registered_profile"],
+            collection_argv_sha256=serial["argv_sha256"],
+            collection_binding_sha256=digest(canonical(serial).encode()),
+            request_sha256=digest(canonical(dict(
+                execution_binding=actual, collection_binding=serial,
+                mode="SERIAL_COLLECT_ONLY", limits=receipt["limits"])).encode()))
+        # No observation can turn this request into native proof or a launch.
+        # In particular, caller-supplied scratch_safe/cleanup claims retain
+        # P1-A's SYNTHETIC/OBSERVED_UNTRUSTED HOLD, even with valid hook records.
+        if observation is not None:
+            receipt["observation_receipt"] = validate_collection_observation(
+                expected_binding=serial, registered_profiles=registered_profiles,
+                observation=observation)
+        else:
+            receipt["reason_codes"].append("COLLECTION_OBSERVATION_NOT_STARTED")
+    except ValueError as exc:
+        receipt["reason_codes"].append(str(exc))
+    receipt["reason_codes"].append(_WINDOWS_COLLECTION_HOLD)
+    return receipt
+
+
 def pytest_counts(stdout: bytes) -> dict[str, int]:
     """Observed summary counts, never an estimate from selected filenames."""
     counts = {name: 0 for name in ("passed", "failed", "skipped", "errors", "xfailed", "xpassed")}
