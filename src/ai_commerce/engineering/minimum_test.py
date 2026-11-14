@@ -426,8 +426,8 @@ def collection_observer(*, binding: dict, registered_profiles: Mapping[str, Sequ
 
 _WINDOWS_COLLECTION_HOLD = "P1B_WINDOWS_IMPORT_ISOLATION_AND_JOB_ATTESTATION_REQUIRED"
 _WINDOWS_COLLECTION_PROVIDER_REQUIREMENTS = (
-    "Independently reviewed native restricted token/AppContainer or equivalent sandbox; "
-    "actual Windows tests must observe denial of credential/outside-source reads and network access.",
+    "Independently reviewed AppContainer with no network capabilities; actual hosted Windows "
+    "tests must observe Win32 denial codes for disposable outside-source reads, writes and loopback.",
     "Pin immutable candidate SHA/tree/files, interpreter, collection registry digest and "
     "allowlisted environment; deny source writes and unsafe Python/pytest/auth overrides.",
     "Read-only candidate and action-local scratch; use handle-based junction/reparse checks "
@@ -439,6 +439,235 @@ _WINDOWS_COLLECTION_PROVIDER_REQUIREMENTS = (
     "Pin actual Windows denial/cleanup test artifacts to provider and candidate; synthetic "
     "fixtures, caller flags, Job/timeouts or environment scrubbing alone never attest isolation.",
 )
+
+
+_WINDOWS_NATIVE_APIS = MappingProxyType({
+    "userenv.dll": ("CreateAppContainerProfile", "DeleteAppContainerProfile",
+                    "DeriveAppContainerSidFromAppContainerName"),
+    "advapi32.dll": ("OpenProcessToken", "GetTokenInformation", "SetSecurityInfo"),
+    "kernel32.dll": (
+        "CreateProcessW", "InitializeProcThreadAttributeList", "UpdateProcThreadAttribute",
+        "DeleteProcThreadAttributeList", "CreateJobObjectW", "SetInformationJobObject",
+        "AssignProcessToJobObject", "IsProcessInJob", "QueryInformationJobObject",
+        "ResumeThread", "TerminateJobObject", "WaitForSingleObject", "CloseHandle",
+        "CreateFileW", "GetFileInformationByHandleEx", "GetFinalPathNameByHandleW"),
+    "ws2_32.dll": ("WSAStartup", "socket", "connect", "WSAGetLastError", "closesocket"),
+})
+_WINDOWS_PROVIDER_BLOCKERS = (
+    "HOSTED_WINDOWS_RUNNER_PROVENANCE_UNVERIFIED",
+    "NATIVE_APPCONTAINER_LAUNCHER_NOT_IMPLEMENTED",
+    "HANDLE_BASED_READONLY_SNAPSHOT_UNPROVEN",
+    "NATIVE_DENIAL_AND_JOB_CLEANUP_UNPROVEN",
+    "SANDBOX_COLLECTION_ADAPTER_NOT_CONNECTED",
+)
+_WINDOWS_PROVIDER_ENV = MappingProxyType({
+    "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PYTHONNOUSERSITE": "1",
+    "PYTHONDONTWRITEBYTECODE": "1", "PYTHONIOENCODING": "utf-8",
+})
+
+
+def windows_collection_native_support(*, enabled: bool = False) -> dict:
+    """Read-only export inventory, NOT a sandbox probe or runner attestation.
+
+    No exported function is invoked, profile/ACL/job is created, or child is
+    started. Even present exports cannot establish effective OS containment.
+    DLLs are loaded from System32 only. Never use CI environment flags as
+    evidence that a runner is hosted, disposable, or safe for native probes.
+    """
+    receipt = dict(status="NOT_INSPECTED", native_isolation="UNPROVEN",
+                   trusted_windows_proof=False, acceptance_pass=False,
+                   api_surface_sha256=digest(canonical(dict(_WINDOWS_NATIVE_APIS)).encode()),
+                   missing_apis=[], reason_codes=[])
+    if enabled is not True:
+        receipt["reason_codes"] = ["COLLECTION_OPT_IN_REQUIRED"]
+        return receipt
+    if os.name != "nt":
+        receipt.update(status="UNAVAILABLE", reason_codes=["WINDOWS_OS_REQUIRED"])
+        return receipt
+    import ctypes
+
+    missing = []
+    for library, names in _WINDOWS_NATIVE_APIS.items():
+        try:
+            dll = ctypes.WinDLL(library, winmode=0x800, use_last_error=True)  # SYSTEM32
+        except (OSError, AttributeError):
+            missing.extend(library + ":" + name for name in names)
+            continue
+        missing.extend(library + ":" + name for name in names if not hasattr(dll, name))
+    receipt.update(status="UNAVAILABLE" if missing else "EXPORTS_PRESENT_UNPROVEN",
+                   missing_apis=missing,
+                   reason_codes=["WINDOWS_NATIVE_API_UNAVAILABLE"] if missing else
+                   ["EXPORT_PRESENCE_IS_NOT_ISOLATION_PROOF"])
+    return receipt
+
+
+def _windows_provider_path(value: object, *, absolute: bool) -> str:
+    """Lexical admission only. No resolve/stat/open; junction safety stays HOLD."""
+    if not isinstance(value, str) or not 1 <= len(value) <= 240:
+        raise ValueError("WINDOWS_PROVIDER_UNSAFE_PATH")
+    path = value.replace("\\", "/")
+    if absolute:
+        if re.fullmatch(r"[A-Za-z]:/[A-Za-z0-9_./ -]+", path) is None:
+            raise ValueError("WINDOWS_PROVIDER_UNSAFE_PATH")
+        path = path[0].upper() + path[1:]
+        parts = path[3:].split("/")
+    else:
+        if path != value or re.fullmatch(r"[A-Za-z0-9_./-]+", path) is None:
+            raise ValueError("WINDOWS_PROVIDER_UNSAFE_PATH")
+        parts = path.split("/")
+    if any(not part or part.startswith(".") or part.endswith((".", " "))
+           or re.fullmatch(r"(?i:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\..*)?", part)
+           for part in parts):
+        raise ValueError("WINDOWS_PROVIDER_UNSAFE_PATH")
+    return path
+
+
+def windows_collection_provider_preflight(*, enabled: bool = False, binding: object = None,
+                                         request: object = None, probe: object = None) -> dict:
+    """Bounded, offline P1-B2b provider admission; it has NO execution path.
+
+    Request/probe data is untrusted, including Win32 error codes and hashes.
+    This API neither authenticates a hosted runner nor verifies file handles,
+    ACLs, token capabilities, a Job, elapsed time or cleanup. It deliberately
+    accepts no launcher, runner flags, credentials or command overrides.
+    There is no native probe until independent hosted-runner authorization is
+    available. Future probes may run only generated inert fixtures, and must
+    create an AppContainer with zero network capabilities, create a suspended
+    child, assign/confirm its no-breakaway kill-on-close Job BEFORE resume,
+    and retain handles to reject source/scratch reparse replacement races.
+    Real denial, process-tree death and cleanup must precede candidate imports.
+
+    Manifest SHA = sha256(canonical(relative-file -> sha256)); environment SHA
+    = sha256(canonical(exact child environment)). Both are declarations here,
+    never observations. Native denial codes must come from CreateFileW and
+    Winsock against disposable outside-scratch/source/loopback fixtures, never
+    real secrets or network endpoints. SYNTHETIC fixtures cannot become proof.
+    Only sanitized statuses and digests leave this API; even valid probe data
+    retains every blocker and never connects collection_observer to a process.
+    The 55s declaration ceiling reserves time below 60s, but is not a runtime
+    deadline or a change to MT01 AUTO/HUMAN_FULL budgets.
+    """
+    receipt = dict(kind="MT01_WINDOWS_NATIVE_PROVIDER_PREFLIGHT", schema_version=1,
+                   status="HOLD", scope_verdict="SOURCE_ONLY_PARTIAL",
+                   hold_reason=_WINDOWS_COLLECTION_HOLD, execution_status="NOT_STARTED",
+                   native_isolation="UNPROVEN", trusted_windows_proof=False,
+                   acceptance_pass=False, tests_executed=0, tests_collected=None,
+                   cleanup_complete=False, request_status="INVALID", probe_status="NOT_OBSERVED",
+                   binding_sha256=None, request_sha256=None, probe_sha256=None,
+                   limits=dict(lifecycle_seconds=55, output_bytes=_COLLECTION_MAX_OUTPUT,
+                               artifact_bytes=_COLLECTION_MAX_BYTES, nodeids=_COLLECTION_MAX_IDS),
+                   blockers=list(_WINDOWS_PROVIDER_BLOCKERS), reason_codes=[])
+    if enabled is not True:
+        receipt["reason_codes"] = ["COLLECTION_OPT_IN_REQUIRED"]
+        return receipt
+    try:
+        bound = _collection_binding(binding, COLLECTION_ONLY_PROFILES)
+        if bound.get("profile_mode") != COLLECTION_ONLY_MODE:
+            raise ValueError("COLLECTION_ONLY_PROFILE_SELECTION_REQUIRED")
+        if not isinstance(request, dict) or len(request) != 5 or set(request) != {
+                "security_capability", "source_root", "scratch_root", "source_files", "environment"}:
+            raise ValueError("WINDOWS_PROVIDER_REQUEST_REQUIRED")
+        if request["security_capability"] != "APPCONTAINER_NO_CAPABILITIES":
+            raise ValueError("WINDOWS_SECURITY_CAPABILITY_UNSUPPORTED")
+        source = _windows_provider_path(request["source_root"], absolute=True).casefold()
+        scratch = _windows_provider_path(request["scratch_root"], absolute=True).casefold()
+        if (source == scratch or source.startswith(scratch + "/")
+                or scratch.startswith(source + "/")):
+            raise ValueError("WINDOWS_PROVIDER_ROOTS_OVERLAP")
+        files = request["source_files"]
+        if not isinstance(files, dict) or not 1 <= len(files) <= 4096:
+            raise ValueError("WINDOWS_PROVIDER_MANIFEST_INVALID")
+        paths = set()
+        for path, sha in files.items():
+            normalized = _windows_provider_path(path, absolute=False).casefold()
+            if (normalized in paths or not isinstance(sha, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", sha) is None):
+                raise ValueError("WINDOWS_PROVIDER_MANIFEST_INVALID")
+            paths.add(normalized)
+        if not set(bound["collection_scope"]).issubset(files):
+            raise ValueError("WINDOWS_PROVIDER_MANIFEST_SCOPE_MISSING")
+        if digest(canonical(files).encode()) != bound["source_sha256"]:
+            raise ValueError("WINDOWS_PROVIDER_SOURCE_DIGEST_MISMATCH")
+        env = request["environment"]
+        expected_env = dict(_WINDOWS_PROVIDER_ENV, TEMP=request["scratch_root"],
+                            TMP=request["scratch_root"])
+        if not isinstance(env, dict) or env != expected_env:
+            raise ValueError("WINDOWS_PROVIDER_UNSAFE_ENVIRONMENT")
+        if digest(canonical(env).encode()) != bound["environment_sha256"]:
+            raise ValueError("WINDOWS_PROVIDER_ENVIRONMENT_DIGEST_MISMATCH")
+        receipt.update(request_status="DECLARED_UNTRUSTED",
+                       binding_sha256=digest(canonical(bound).encode()),
+                       request_sha256=digest(canonical(dict(binding=bound, request=request,
+                                                           limits=receipt["limits"])).encode()))
+        if probe is not None:
+            _windows_collection_probe_declaration(probe, bound, receipt)
+    except ValueError as exc:
+        # Only fixed source-owned error codes; never echo paths/env/nodeids.
+        receipt["reason_codes"].append(str(exc))
+    receipt["reason_codes"].append(_WINDOWS_COLLECTION_HOLD)
+    return receipt
+
+
+def _windows_collection_probe_declaration(probe: object, bound: dict, receipt: dict) -> None:
+    """Reject incomplete/negative declarations; this function cannot attest them."""
+    receipt["probe_status"] = "INVALID"
+    required = {"provenance", "binding_sha256", "request_sha256", "source_after_sha256",
+                "environment_after_sha256", "python_sha256", "security_capability",
+                "capabilities", "job_limit_flags", "events", "denials", "exit_code",
+                "timed_out", "orphan_count", "cleanup_complete", "elapsed_seconds",
+                "output_bytes", "artifact_bytes"}
+    if (not isinstance(probe, dict) or len(probe) != len(required) or set(probe) != required
+            or probe["provenance"] not in ("SYNTHETIC", "WINDOWS_NATIVE_UNVERIFIED")):
+        raise ValueError("WINDOWS_NATIVE_PROBE_DECLARATION_REQUIRED")
+    if (probe["binding_sha256"] != receipt["binding_sha256"]
+            or probe["request_sha256"] != receipt["request_sha256"]
+            or probe["python_sha256"] != bound["python_sha256"]):
+        raise ValueError("WINDOWS_NATIVE_PROBE_BINDING_MISMATCH")
+    if probe["source_after_sha256"] != bound["source_sha256"]:
+        raise ValueError("WINDOWS_NATIVE_SOURCE_MUTATED")
+    if probe["environment_after_sha256"] != bound["environment_sha256"]:
+        raise ValueError("WINDOWS_NATIVE_ENVIRONMENT_DRIFT")
+    if (probe["security_capability"] != "APPCONTAINER_NO_CAPABILITIES"
+            or probe["capabilities"] != []):
+        raise ValueError("WINDOWS_SECURITY_CAPABILITY_UNSUPPORTED")
+    # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE only; neither breakaway flag allowed.
+    if type(probe["job_limit_flags"]) is not int or probe["job_limit_flags"] != 0x2000:
+        raise ValueError("WINDOWS_NATIVE_JOB_UNPROVEN")
+    if probe["events"] != ["CREATE_SUSPENDED", "ASSIGN_JOB", "CONFIRM_JOB",
+                           "RESUME", "CHILD_AND_DESCENDANT_READY", "CLOSE_LAST_JOB_HANDLE",
+                           "WAIT_CHILD_SIGNALED", "WAIT_DESCENDANT_SIGNALED", "CLEANUP_COMPLETE"]:
+        raise ValueError("WINDOWS_NATIVE_JOB_SEQUENCE_UNPROVEN")
+    denials = probe["denials"]
+    # ERROR_ACCESS_DENIED and WSAEACCES, with successful positive controls.
+    codes = {"outside_scratch_read": 5, "readonly_source_write": 5,
+             "junction_escape_read": 5, "loopback_connect": 10013}
+    if not isinstance(denials, dict) or len(denials) != len(codes) or set(denials) != set(codes):
+        raise ValueError("WINDOWS_NATIVE_DENIAL_UNPROVEN")
+    for name, code in codes.items():
+        record = denials[name]
+        if (not isinstance(record, dict) or len(record) != 3
+                or set(record) != {"api", "error", "control_succeeded"}
+                or record["api"] != ("connect/WSAGetLastError" if name == "loopback_connect"
+                                     else "CreateFileW/GetLastError")
+                or type(record["error"]) is not int or record["error"] != code
+                or record["control_succeeded"] is not True):
+            raise ValueError("WINDOWS_NATIVE_DENIAL_UNPROVEN")
+    if probe["timed_out"] is not False:
+        raise ValueError("WINDOWS_NATIVE_TIMEOUT")
+    if type(probe["exit_code"]) is not int or probe["exit_code"] != 0:
+        raise ValueError("WINDOWS_NATIVE_PROCESS_FAILED")
+    if (type(probe["orphan_count"]) is not int or probe["orphan_count"] != 0
+            or probe["cleanup_complete"] is not True):
+        raise ValueError("WINDOWS_NATIVE_CLEANUP_UNPROVEN")
+    elapsed = probe["elapsed_seconds"]
+    if type(elapsed) not in (int, float) or not 0 < elapsed <= receipt["limits"]["lifecycle_seconds"]:
+        raise ValueError("WINDOWS_NATIVE_DEADLINE_EXCEEDED")
+    for key in ("output_bytes", "artifact_bytes"):
+        if type(probe[key]) is not int or not 0 <= probe[key] <= receipt["limits"][key]:
+            raise ValueError("WINDOWS_NATIVE_OUTPUT_OVERSIZED")
+    receipt.update(probe_status="SYNTHETIC" if probe["provenance"] == "SYNTHETIC"
+                   else "DECLARED_UNTRUSTED", probe_sha256=digest(canonical(probe).encode()))
+    receipt["reason_codes"].append("WINDOWS_NATIVE_PROOF_NOT_INDEPENDENTLY_ATTESTED")
 
 
 def bounded_windows_collection(*, enabled: bool = False, expected_binding: object = None,
@@ -483,6 +712,7 @@ def bounded_windows_collection(*, enabled: bool = False, expected_binding: objec
     receipt = dict(
         schema_version=COLLECTION_SCHEMA_VERSION, kind="MT01_BOUNDED_WINDOWS_COLLECTION",
         status="HOLD", hold_reason="COLLECTION_OPT_IN_REQUIRED", collection_status="UNPROVEN",
+        scope_verdict="SOURCE_ONLY_PARTIAL", native_isolation="UNPROVEN",
         execution_status="NOT_STARTED", provenance="UNPROVEN", trusted_windows_proof=False,
         acceptance_pass=False, tests_collected=None, tests_executed=0,
         candidate_sha=None, source_sha256=None, environment_binding_sha256=None,
@@ -492,6 +722,7 @@ def bounded_windows_collection(*, enabled: bool = False, expected_binding: objec
         collection_argv_sha256=None, collection_binding_sha256=None, request_sha256=None,
         observation_receipt=None, elapsed_seconds=None, cleanup_complete=False,
         native_provider_contract=dict(version=1, status="REQUIRED_NOT_AVAILABLE",
+                                      blockers=list(_WINDOWS_PROVIDER_BLOCKERS),
                                       requirements=list(_WINDOWS_COLLECTION_PROVIDER_REQUIREMENTS)),
         limits=dict(deadline_seconds=COLLECTION_TIMEOUT_SECONDS, nodeids=_COLLECTION_MAX_IDS,
                     output_bytes=_COLLECTION_MAX_OUTPUT, artifact_bytes=_COLLECTION_MAX_BYTES),
