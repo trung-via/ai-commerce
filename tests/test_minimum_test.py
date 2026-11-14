@@ -1553,6 +1553,50 @@ def test_v21_authenticated_full_runs_entire_registered_scope_not_affected_subset
                     human_full_suite_authorized=True)
 
 
+def test_human_full_preserves_owner_ac_mapping_for_minimum_test_source(monkeypatch, real_tree):
+    """An owner source ending in _test.py must not be mistaken for a pytest file."""
+    from ai_commerce.engineering.minimum_test import select_plan
+
+    monkeypatch.setenv("MT01_V21_ENABLED", "1")
+    files = real_tree.files
+    registry = real_tree.registry
+    planned = select_plan(
+        repo=ROOT, base_sha="a" * 40, base_files=files, candidate_files=files,
+        changed_paths=["src/ai_commerce/engineering/minimum_test.py"],
+        required_acs=("MT01.selection-and-evidence",),
+        fallback_argv=registry["project-tests"], groups=real_tree.groups,
+        registered_only=True, registered_profiles=registry,
+        human_full_suite_authorized=True,
+    )
+    assert planned["fallback"] is True
+    assert "mt01" in planned["selected_groups"]
+    assert "MT01.selection-and-evidence" in planned["required_acs"]
+    assert "src/ai_commerce/engineering/minimum_test.py" not in planned["unknown_tests"]
+    assert planned["groups"][0]["state"] == "EXECUTE"
+    assert planned["groups"][0]["binding"]["argv"] == registry["project-tests"]
+    assert "tests/test_minimum_test.py" in planned["groups"][0]["binding"]["candidate_files"]
+
+
+def test_human_full_cannot_auto_approve_unmapped_acceptance(monkeypatch, real_tree):
+    """Full pytest tests/ does not prove an AC without a reviewed owner."""
+    from ai_commerce.engineering.minimum_test import select_plan
+
+    monkeypatch.setenv("MT01_V21_ENABLED", "1")
+    files = real_tree.files
+    registry = real_tree.registry
+    planned = select_plan(
+        repo=ROOT, base_sha="a" * 40, base_files=files, candidate_files=files,
+        changed_paths=["src/ai_commerce/engineering/minimum_test.py"],
+        required_acs=("MT01.NOT_REGISTERED_R7",),
+        fallback_argv=registry["project-tests"], groups=real_tree.groups,
+        registered_only=True, registered_profiles=registry,
+        human_full_suite_authorized=True,
+    )
+    assert "HUMAN_FULL_AC_MAPPING_UNPROVEN" in planned["reason_codes"]
+    assert planned["groups"][0]["state"] == "UNPROVEN"
+    assert planned["groups"][0]["execute"] is False
+
+
 def test_hostops_v3_existing_28_and_v4_plan_files_are_registered(real_tree):
     """HostOps v3 bootstrap is reviewed, not an unknown-component full-suite bypass."""
     group = next(g for g in real_tree.groups if g.name == "hostops-v3")
