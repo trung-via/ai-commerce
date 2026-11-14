@@ -492,11 +492,29 @@ def select_plan(*, repo: Path, base_sha: str, base_files: Mapping[str, str],
                 list(fallback_argv) not in [list(v) for v in registered_profiles.values()]):
             raise ValueError("UNTRUSTED_OR_UNREGISTERED_HUMAN_FULL_PROFILE")
         # Keep reviewed owner/consumer groups and AC mappings even when the
-        # HUMAN chooses the registered full-suite command. Clearing groups
-        # here made every required AC unknown and hid the source owner, so
-        # the old planner rejected a valid tests/-n 12 profile before pytest.
-        # The explicit full profile still forces a single broad execution
-        # below; selected groups remain evidence of why it was required.
+        # HUMAN chooses the registered full-suite command. Full scope is
+        # execution authorization, not permission to invent missing owners.
+        #
+        # V2.1 already loads reviewed component manifests from immutable HEAD,
+        # but this legacy full route previously saw only static approved_groups.
+        # Reconstruct the SAME trusted baseline owner graph, and reject any
+        # conflicting caller-provided mapping instead of silently replacing it.
+        if (repo / ".git").exists():
+            from .impact_v21 import load_baseline_component_owner_records
+            persisted = load_baseline_component_owner_records(
+                root=repo, base_sha=base_sha, existing_groups=approved_groups())
+            seen = {group.name: group for group in groups}
+            extra = []
+            for record in persisted:
+                owner = record["group"]
+                previous = seen.get(owner.name)
+                if previous is not None:
+                    if previous.mapping() != owner.mapping():
+                        raise ValueError("MT01_HUMAN_FULL_BASELINE_OWNER_CONFLICT")
+                else:
+                    extra.append(owner)
+                    seen[owner.name] = owner
+            groups = (*groups, *extra)
     # V2.1 chooses from *actual post-executor changed paths*, not the incoming
     # packet's profile. A broad authoring default is never itself full
     # regression approval. Preserve explicit release/full via separately
