@@ -167,7 +167,7 @@ def parse_event(event, mode):
     params = _dict(request["parameters"])
     operation = request["operation"]
     if mode == "read":
-        if operation in ("inventory", "runner_runtime_inventory", "cdp_9333_status",
+        if operation in ("inventory", "runner_runtime_inventory", "cdp_9333_status", "cdp_9444_topology",
                          "standing_read_diagnostics"):
             # Runtime inventory has fixed, compiled-in three-runner targets.
             # The public Issue cannot choose a task, executable or command.
@@ -558,6 +558,186 @@ foreach ($item in $items) {
         "exact_chat_verified": False, "wake_sent": False,
         "arbitrary_shell_enabled": False,
     }
+
+
+def _cdp_9444_private_context(acquisition):
+    """Attest an existing fixed private config against native token/session reads.
+
+    No Issue/environment identity, manifest-selected path, enrollment or launch.
+    Failure to attest is UNKNOWN, never evidence that the listener is absent.
+    """
+    from ai_commerce.remote.local_completion_handoff import _private_identity
+    from ai_commerce.remote.local_wake_entry import _windows_process_sid
+
+    local = acquisition._native_local_app_data()
+    session, sid = acquisition._interactive_session(), _windows_process_sid()
+    if (type(session) is not int or session <= 0 or type(sid) is not str
+            or not re.fullmatch(r"S-1-(?:\d+-){1,14}\d+", sid)
+            or sid in {"S-1-5-18", "S-1-5-19", "S-1-5-20"}):
+        deny("OWNER_SESSION_UNATTESTED")
+    root = local / "AI-Commerce"
+    if (not local.is_absolute() or _fixed_private_metadata_kind(root, directory=True) != "PRESENT"
+            or _private_identity(root) != sid):
+        deny("OWNER_SESSION_UNATTESTED")
+    candidates = (root / "Chrome-Acquisition" / "config.json",
+                  root / "chrome.json", root / "chrome-acquisition.json")
+    states = [_fixed_private_metadata_kind(path) for path in candidates]
+    if "UNAVAILABLE" in states or states.count("PRESENT") != 1:
+        deny("OWNER_SESSION_UNATTESTED")
+    config = candidates[states.index("PRESENT")]
+    # Check custody BEFORE reading even the bounded private config bytes.
+    for path in (config.parent, config):
+        if _private_identity(path) != sid:
+            deny("OWNER_SESSION_UNATTESTED")
+    env = acquisition.load_environment(config, Path(__file__).resolve().parents[3], local_app_data=local)
+    if env.port != 9444 or env.endpoint.rstrip("/") != "http://127.0.0.1:9444":
+        deny("OWNER_SESSION_UNATTESTED")
+    for path in (env.user_data_dir, *env.user_data_dir.parents, env.user_data_dir / env.profile_directory):
+        if (path == root or root in path.parents) and _private_identity(path) != sid:
+            deny("OWNER_SESSION_UNATTESTED")
+    return env, session, sid
+
+
+def _cdp_9444_inventory(acquisition, value):
+    """Validate the native snapshot without converting missing data to zero."""
+    if (type(value) is not dict or set(value) != {"listeners", "processes"}
+            or type(value["listeners"]) is not list or len(value["listeners"]) > 16
+            or type(value["processes"]) is not list or len(value["processes"]) > 256):
+        raise ValueError("INVALID_TOPOLOGY")
+    listeners, processes = value["listeners"], value["processes"]
+    for row in listeners:
+        if (type(row) is not dict or set(row) != {"LocalAddress", "LocalPort", "OwningProcess"}
+                or type(row["LocalAddress"]) is not str or not 0 < len(row["LocalAddress"]) <= 64
+                or type(row["LocalPort"]) is not int or row["LocalPort"] != 9444
+                or type(row["OwningProcess"]) is not int or row["OwningProcess"] <= 0):
+            raise ValueError("INVALID_TOPOLOGY")
+    owners, claimants = {}, []
+    for proc in processes:
+        if (type(proc) is not dict or set(proc) != {
+                "ProcessId", "ExecutablePath", "CommandLine", "SessionId", "OwnerSid", "CreationDate"}
+                or type(proc["ProcessId"]) is not int or proc["ProcessId"] <= 0
+                or proc["ProcessId"] in owners
+                or type(proc["SessionId"]) is not int or proc["SessionId"] < 0
+                or any(type(proc[key]) is not str or not 0 < len(proc[key]) <= limit for key, limit in (
+                    ("ExecutablePath", 32768), ("CommandLine", 32768), ("OwnerSid", 192), ("CreationDate", 80)))):
+            raise ValueError("INVALID_TOPOLOGY")
+        if (re.fullmatch(r"S-1-(?:\d+-){1,14}\d+", proc["OwnerSid"]) is None
+                or re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,7})?(?:Z|[+-]\d\d:\d\d)",
+                                proc["CreationDate"]) is None):
+            raise ValueError("INVALID_TOPOLOGY")
+        datetime.fromisoformat(proc["CreationDate"].replace("Z", "+00:00"))
+        argv = acquisition._commandline_argv(proc["CommandLine"])
+        if (type(argv) is not list or not 0 < len(argv) <= 256
+                or any(type(arg) is not str for arg in argv)):
+            raise ValueError("INVALID_TOPOLOGY")
+        owners[proc["ProcessId"]] = (proc, argv)
+        if any(arg.lower() == "--type" or arg.lower().startswith("--type=") for arg in argv):
+            continue
+        ports = [arg for arg in argv if arg.lower() == "--remote-debugging-port"
+                 or arg.lower().startswith("--remote-debugging-port=")]
+        if ports:
+            if (len(ports) != 1 or not ports[0].startswith("--remote-debugging-port=")
+                    or re.fullmatch(r"[0-9]{1,5}", ports[0].split("=", 1)[1]) is None
+                    or not 0 < int(ports[0].split("=", 1)[1]) <= 65535):
+                raise ValueError("INVALID_TOPOLOGY")
+            if int(ports[0].split("=", 1)[1]) == 9444:
+                claimants.append(proc["ProcessId"])
+    return listeners, owners, claimants
+
+
+def _cdp_9444_topology():
+    """Fixed read-only topology; public output contains counts and closed codes.
+
+    A signed Chrome, private config custody, native SID and interactive session
+    must independently agree before the strict version GET. This proves neither
+    enrollment nor Chat A, and never attaches a websocket or sends anything.
+    """
+    fields = {"status", "code", "operation", "cdp_port", "listener_count", "loopback_count",
+              "unexpected_binding_count", "chrome_owned_loopback_count", "same_session_chrome_count",
+              "devtools_protocol_ok", "infrastructure_ready", "exact_chat_verified", "wake_sent",
+              "arbitrary_shell_enabled"}
+    if not fields <= PERSONAL_PUBLIC_FIELDS:
+        deny("PUBLIC_TRANSPORT_GAP")
+    if os.name != "nt":
+        deny("CDP_TOPOLOGY_WINDOWS_ONLY")
+    result = {
+        "status": "UNKNOWN", "code": "NATIVE_READ_UNKNOWN", "operation": "cdp_9444_topology",
+        "cdp_port": 9444, "listener_count": None, "loopback_count": None,
+        "unexpected_binding_count": None, "chrome_owned_loopback_count": None,
+        "same_session_chrome_count": None, "devtools_protocol_ok": None,
+        "infrastructure_ready": False, "exact_chat_verified": False,
+        "wake_sent": False, "arbitrary_shell_enabled": False,
+    }
+    try:
+        from ai_commerce.remote import chrome_acquisition as acquisition
+        listeners, owners, claimants = _cdp_9444_inventory(acquisition, acquisition._query_windows(9444))
+    except Exception:
+        return result
+    result.update(listener_count=len(listeners),
+                  loopback_count=sum(row["LocalAddress"] == "127.0.0.1" for row in listeners),
+                  unexpected_binding_count=sum(row["LocalAddress"] != "127.0.0.1" for row in listeners))
+    if not listeners:
+        result.update(status="OBSERVED", code="CLAIMANT_WITHOUT_LISTENER" if claimants else "NO_LISTENER",
+                      chrome_owned_loopback_count=0, same_session_chrome_count=0)
+        return result
+    if len(listeners) != 1 or result["unexpected_binding_count"]:
+        result.update(status="OBSERVED", code="UNTRUSTED_BIND")
+        return result
+    pid = listeners[0]["OwningProcess"]
+    if pid not in owners or claimants != [pid]:
+        result.update(status="OBSERVED", code="UNTRUSTED_OWNER")
+        return result
+    proc, argv = owners[pid]
+    for name in ("--user-data-dir", "--profile-directory", "--remote-debugging-address",
+                 "--remote-debugging-port"):
+        switches = [arg for arg in argv if arg.lower() == name or arg.lower().startswith(name + "=")]
+        if len(switches) != 1 or not switches[0].startswith(name + "="):
+            result.update(status="OBSERVED", code="UNTRUSTED_OWNER")
+            return result
+    try:
+        env, session, sid = _cdp_9444_private_context(acquisition)
+    except Exception:
+        result["code"] = "OWNER_SESSION_UNATTESTED"
+        return result
+    try:
+        state, owned_pid = acquisition.evaluate(env, {"listeners": listeners,
+            "processes": [row for row, _ in owners.values()]}, session_id=session,
+            expected_sid=sid, parse=acquisition._commandline_argv)
+        if state != "OWNED" or owned_pid != pid:
+            raise ValueError("UNTRUSTED_OWNER")
+        acquisition._verify_google_chrome(env)
+    except acquisition.AcquisitionBlocked:
+        result.update(status="OBSERVED", code="UNTRUSTED_OWNER")
+        return result
+    except Exception:
+        result["code"] = "OWNER_SESSION_UNATTESTED"
+        return result
+    # One independent re-observation, never a retry or launch on drift/failure.
+    try:
+        current = _cdp_9444_inventory(acquisition, acquisition._query_windows(9444))
+        if (current[0] != listeners or current[2] != claimants
+                or current[1].get(pid) != (proc, argv)
+                or _cdp_9444_private_context(acquisition) != (env, session, sid)):
+            result["code"] = "TOPOLOGY_CHANGED"
+            return result
+        if acquisition.evaluate(env, {"listeners": current[0],
+                "processes": [row for row, _ in current[1].values()]}, session_id=session,
+                expected_sid=sid, parse=acquisition._commandline_argv) != ("OWNED", pid):
+            result["code"] = "TOPOLOGY_CHANGED"
+            return result
+    except Exception:
+        result["code"] = "NATIVE_READ_UNKNOWN"
+        return result
+    result.update(chrome_owned_loopback_count=1, same_session_chrome_count=1)
+    try:
+        acquisition._probe_cdp(env)
+    except Exception:
+        # The strict helper deliberately hides HTTP/timeout/JSON details.
+        result.update(code="CDP_PROTOCOL_FAILED", devtools_protocol_ok=False)
+        return result
+    result.update(status="OBSERVED", code="CDP_PROTOCOL_HEALTHY", devtools_protocol_ok=True,
+                  infrastructure_ready=True)
+    return result
 
 
 def _validate_standing_snapshot(snapshot):
@@ -1337,6 +1517,10 @@ class ExecutorHealthPrivateBridge:
 def perform(request):
     op = request["operation"]
     params = request["parameters"]
+    if op == "cdp_9444_topology":
+        if type(params) is not dict or params:
+            deny("INVALID_PARAMETERS")
+        return _cdp_9444_topology()
     if op == "standing_read_diagnostics":
         if type(params) is not dict or params:
             deny("INVALID_PARAMETERS")
