@@ -30,7 +30,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $base = (& git rev-parse 'HEAD^').Trim()
+          $base = (& git merge-base HEAD origin/main).Trim()
           if ($LASTEXITCODE -ne 0 -or $base -ne 'fe7b82cb6ca1e57c38edba37c1df431d788ceb34') { throw "UNTRUSTED_BASE_SHA:$base" }
           $patches = @(Get-ChildItem .local/atb01-recovery -Filter git.after_executor.diff.patch -Recurse -File | Where-Object { $_.FullName -match '[\\/]ef01[\\/]git\.after_executor\.diff\.patch$' })
           if ($patches.Count -ne 1) { throw "FORENSIC_PATCH_COUNT_MISMATCH:$($patches.Count)" }
