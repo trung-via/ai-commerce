@@ -491,9 +491,12 @@ def select_plan(*, repo: Path, base_sha: str, base_files: Mapping[str, str],
                 list(fallback_argv) not in full_commands or
                 list(fallback_argv) not in [list(v) for v in registered_profiles.values()]):
             raise ValueError("UNTRUSTED_OR_UNREGISTERED_HUMAN_FULL_PROFILE")
-        # Reuse legacy full-tree binding so every tracked candidate file
-        # is included in the verification provenance, not just selected nodes.
-        groups = ()
+        # Keep reviewed owner/consumer groups and AC mappings even when the
+        # HUMAN chooses the registered full-suite command. Clearing groups
+        # here made every required AC unknown and hid the source owner, so
+        # the old planner rejected a valid tests/-n 12 profile before pytest.
+        # The explicit full profile still forces a single broad execution
+        # below; selected groups remain evidence of why it was required.
     # V2.1 chooses from *actual post-executor changed paths*, not the incoming
     # packet's profile. A broad authoring default is never itself full
     # regression approval. Preserve explicit release/full via separately
@@ -526,7 +529,14 @@ def select_plan(*, repo: Path, base_sha: str, base_files: Mapping[str, str],
     known = set().union(*(closures[g.name] for g in selected)) if selected else set()
     affected = _closure(changed_paths, {p: {c for c, deps in graph.items() if p in deps} for p in graph})
     covered_tests = {t for g in selected for t in g.tests}
-    affected_tests = {p for p in affected if Path(p).name.startswith("test_") or Path(p).name.endswith("_test.py")}
+    # Production sources such as engineering/minimum_test.py may end in
+    # "_test.py" without being pytest modules. Respect reviewed source-owner
+    # paths while retaining fail-closed detection for unowned test-like files.
+    reviewed_tests = {t for g in groups for t in g.tests}
+    reviewed_sources = {p for g in groups for p in g.paths}
+    affected_tests = {p for p in affected
+                      if (Path(p).name.startswith("test_") or Path(p).name.endswith("_test.py"))
+                      and (p not in reviewed_sources or p in reviewed_tests)}
     unknown_tests = affected_tests - covered_tests
     unknown_consumers = {p for p in affected if p.endswith(".py") and p not in affected_tests} - known
     unsupported_paths = {p for p in changed_paths if Path(p).suffix in (
@@ -587,6 +597,12 @@ def select_plan(*, repo: Path, base_sha: str, base_files: Mapping[str, str],
         (scope_args[0] == "." or all(t.startswith("tests/") for t in required_tests)))
     if human_full_suite_authorized:
         reasons.append("AUTHENTICATED_HUMAN_EXPLICIT_FULL_SUITE")
+        # A full test run cannot establish an AC with no reviewed owner.
+        # Do not let the broader command silently turn an unknown contract
+        # into a passing acceptance receipt.
+        if set(required_acs) - {ac for g in groups for ac in g.acs}:
+            reasons.append("HUMAN_FULL_AC_MAPPING_UNPROVEN")
+            fallback_proven_scope = False
     if reasons:
         # An approved full profile is a conservative proof for all applicable ACs.
         # Caller must supply the broader approved scope; no command is synthesized.
