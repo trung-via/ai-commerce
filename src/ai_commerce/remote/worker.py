@@ -26,6 +26,16 @@ from ai_commerce.engineering.minimum_test import Evidence, file_hashes
 from ai_commerce.engineering.source_safety import checked_path, protected_change, ordinary_scope_drift
 
 
+# Human-authorized temporary full-regression budget until ATB-01 is accepted.
+# Ordinary AUTO/owner tests retain all preexisting caps. EF02 Windows job is 360m.
+def _temporary_verification_budget(*, human_full_suite_authorized: bool) -> tuple[int | None, int, int]:
+    if human_full_suite_authorized:
+        # 180m test budget plus at most 120m EF01 executor time. The external
+        # child watchdog exceeds the combined action by only five minutes.
+        return (180 * 60, 300 * 60, 305 * 60)
+    return (None, DEFAULT_ACTION_TIMEOUT_SECONDS, 7500)
+
+
 def _new_worktree_path(checkout: Path) -> Path:
     """Allocate a short, durable worktree outside Windows TEMP and the checkout.
 
@@ -383,13 +393,17 @@ class LocalBatchWorker:
             registry_file = path / "verification_registry.json"
             _write_json(registry_file, self.profiles)
             efdir = path / "ef01"
+            verify_budget, action_budget, child_wait_timeout = _temporary_verification_budget(
+                human_full_suite_authorized=bool(plan.get("human_full_suite_authorized")))
             argv = [sys.executable, "-m", "ai_commerce.engineering",
                     "--repo", str(worktree), "--work-id", self.batch["batch_id"] + ":" + aid,
                     "--attempt-id", attempt_id, "--executor", action["executor"],
                     "--model", action["model"], "--effort", action["effort"],
                     "--instruction-file", str(instruction_file), "--verify-json", str(verify_file),
                     "--out-dir", str(efdir), "--max-repair-rounds", str(repair_limit),
-                    "--action-timeout-seconds", str(DEFAULT_ACTION_TIMEOUT_SECONDS)]
+                    "--action-timeout-seconds", str(action_budget)]
+            if verify_budget is not None:
+                argv.extend(["--verify-timeout-seconds", str(verify_budget)])
             argv.extend(["--minimum-test", "--registered-only", "--host-slots",
                          str(max(int(os.environ.get("EF02_HOST_SLOTS", "2")), self.batch.get("max_parallel", 2)))])
             argv.extend(["--registered-profiles-json", str(registry_file)])
@@ -476,7 +490,7 @@ class LocalBatchWorker:
                 outcome["spawned_remote_error_type"] = type(exc).__name__
             timed_out = False
             try:
-                stdout, stderr = child.communicate(timeout=7500)
+                stdout, stderr = child.communicate(timeout=child_wait_timeout)
             except subprocess.TimeoutExpired:
                 child.kill()
                 stdout, stderr = child.communicate()
