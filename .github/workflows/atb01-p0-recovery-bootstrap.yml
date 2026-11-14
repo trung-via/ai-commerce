@@ -1,0 +1,79 @@
+name: TEMP CI-only ATB-01 P0 recovery (delete self before PR)
+on:
+  push:
+    branches:
+      - ci/atb01-p0-recover-881-20261114
+permissions:
+  actions: read
+  contents: write
+jobs:
+  recover:
+    name: Restore exact #881 patch without coding provider
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Recover trusted prior-run artifact
+        uses: actions/download-artifact@v4
+        with:
+          run-id: 43577614437
+          name: ef02-results-43577614437-1
+          github-token: ${{ github.token }}
+          path: .local/atb01-recovery
+      - name: Verify provenance and apply bounded #881 patch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = (& git rev-parse 'HEAD^').Trim()
+          if ($LASTEXITCODE -ne 0 -or $base -ne 'fe7b82cb6ca1e57c38edba37c1df431d788ceb34') { throw "UNTRUSTED_BASE_SHA:$base" }
+          $patches = @(Get-ChildItem .local/atb01-recovery -Filter git.after_executor.diff.patch -Recurse -File)
+          if ($patches.Count -ne 1) { throw "FORENSIC_PATCH_COUNT_MISMATCH:$($patches.Count)" }
+          $patch = $patches[0].FullName
+          $hash = (Get-FileHash -Algorithm SHA256 $patch).Hash.ToLowerInvariant()
+          if ($hash -ne 'dbc453e5197bd84d0c9727a6c938f75e53ab3b98313b6b16faf0584ac701a3a6') { throw "PATCH_HASH_MISMATCH:$hash" }
+          $headers = @(Get-Content -LiteralPath $patch | Where-Object { $_ -like 'diff --git *' })
+          $expected = @(
+            'diff --git a/src/ai_commerce/engineering/verification.py b/src/ai_commerce/engineering/verification.py',
+            'diff --git a/tests/test_minimum_test.py b/tests/test_minimum_test.py'
+          )
+          if ($headers.Count -ne 2 -or $headers[0] -ne $expected[0] -or $headers[1] -ne $expected[1]) { throw "PATCH_PATH_SCOPE_MISMATCH" }
+          & git apply --check -- $patch
+          if ($LASTEXITCODE -ne 0) { throw "FORENSIC_PATCH_BASE_INCOMPATIBLE" }
+          & git apply -- $patch
+          if ($LASTEXITCODE -ne 0) { throw "PATCH_APPLICATION_FAILED" }
+          $changed = @(& git diff --name-only)
+          if ($changed.Count -ne 2 -or $changed[0] -ne 'src/ai_commerce/engineering/verification.py' -or $changed[1] -ne 'tests/test_minimum_test.py') { throw "UNEXPECTED_CHANGED_PATHS:$($changed -join ',')" }
+      - name: Install project and pytest-xdist
+        shell: pwsh
+        run: python -m pip install -e ".[dev]" Pillow
+      - name: Focused MT-01 owner tests (hosted Windows CI)
+        shell: pwsh
+        run: python -m pytest tests/test_minimum_test.py -q -n 4 --dist loadfile
+      - name: Commit only verified recovery and drop temporary workflow
+        shell: pwsh
+        env:
+          TARGET_BRANCH: ci/atb01-p0-recover-881-20261114
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Remove-Item .github/workflows/atb01-p0-recovery-bootstrap.yml
+          & git add -- src/ai_commerce/engineering/verification.py tests/test_minimum_test.py .github/workflows/atb01-p0-recovery-bootstrap.yml
+          if ($LASTEXITCODE -ne 0) { throw "GIT_STAGE_FAILED" }
+          $paths = @(& git diff --cached --name-only)
+          $expected = @(
+            '.github/workflows/atb01-p0-recovery-bootstrap.yml',
+            'src/ai_commerce/engineering/verification.py',
+            'tests/test_minimum_test.py'
+          )
+          if ($paths.Count -ne 3 -or (Compare-Object $paths $expected)) { throw "COMMIT_PATH_SCOPE_MISMATCH:$($paths -join ',')" }
+          & git config user.name 'github-actions[bot]'
+          & git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          & git commit -m 'feat(ATB-01 P0): recover verified #881 shadow estimator source'
+          if ($LASTEXITCODE -ne 0) { throw "GIT_COMMIT_FAILED" }
+          & git push origin "HEAD:refs/heads/$env:TARGET_BRANCH"
+          if ($LASTEXITCODE -ne 0) { throw "GIT_PUSH_FAILED" }
