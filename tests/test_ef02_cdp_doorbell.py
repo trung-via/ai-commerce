@@ -1294,19 +1294,28 @@ class ProbePage:
 
     def click(self, *args, **kwargs):
         self.mutations += 1
-        raise AssertionError("read-only operator must never click")
+        raise AssertionError("read-only operator must never mutate a page")
+
+    goto = reload = go_back = go_forward = bring_to_front = click
+    fill = press = type = submit = close = click
 
 
 class ProbeContexts:
     def __init__(self, *contexts):
         self._contexts = contexts
         self.calls = []
+        self.mutations = 0
+
+    def new_page(self, *args, **kwargs):
+        self.mutations += 1
+        raise AssertionError("read-only operator must never open a page")
 
     @contextmanager
     def contexts(self, endpoint):
         assert endpoint == "http://127.0.0.1:9444"
         self.calls.append(endpoint)
-        yield [SimpleNamespace(pages=list(pages)) for pages in self._contexts]
+        yield [SimpleNamespace(pages=list(pages), new_page=self.new_page)
+               for pages in self._contexts]
 
 
 def test_wh03_chat_a_candidate_read_only_positive(monkeypatch):
@@ -1563,6 +1572,11 @@ class CommittedSignalPage(TestRegistrationPage):
         self.received_digest = None
 
     def evaluate(self, script, args=None):
+        assert not any(token in script for token in (
+            "button.click", "document.cookie", "localStorage", "fetch(",
+            "new_page", ".goto(", ".submit(", ".focus(", "execCommand(",
+            "dispatchEvent(", "window.open(", "location.assign(", "location.replace(",
+        ))
         if "_SIGNAL" in script or "args.digest" in script:
             assert type(args) is dict and set(args) == {"digest"}
             assert len(args["digest"]) == 64
@@ -1572,6 +1586,171 @@ class CommittedSignalPage(TestRegistrationPage):
                 raise RuntimeError("private browser path must never leak")
             return self.signal
         return super().evaluate(script)
+
+
+@pytest.fixture
+def wh03_now(monkeypatch):
+    from ai_commerce.remote import cdp_doorbell as d
+    now_ms = 1_800_000_000_000
+    monkeypatch.setattr(d, "_is_windows", lambda: True)
+    monkeypatch.setattr(d.time, "time_ns", lambda: now_ms * 1_000_000)
+    return now_ms
+
+
+@pytest.mark.parametrize("routes", [
+    (URL, OTHER),
+    (OTHER, URL),
+    (URL, "https://chatgpt.com/c/00000000-0000-0000-0000-000000000003", OTHER),
+    ("https://chatgpt.com/c/00000000-0000-0000-0000-000000000003", URL, OTHER),
+    (OTHER, URL, "https://chatgpt.com/c/00000000-0000-0000-0000-000000000003"),
+    (OTHER, "https://chatgpt.com/c/00000000-0000-0000-0000-000000000003", URL),
+])
+def test_wh03_committed_signal_selects_only_exact_url_among_chat_tabs(wh03_now, routes):
+    from ai_commerce.remote import cdp_doorbell as d
+    pages = [CommittedSignalPage(url=url, raises=url != URL) for url in routes]
+    for page in pages:
+        page.foreground = page.url == OTHER  # Chat B may be foreground and last.
+    unrelated = [CommittedSignalPage(url=url, raises=True) for url in (
+        "about:blank", "https://example.com/private", "https://chatgpt.com/",
+        None, "https://evil.example/c/00000000-0000-0000-0000-000000000001",
+    )]
+    inv = ProbeContexts(tuple(unrelated + pages))
+    commitment = _wh03_committed_fixture()
+    assert d.probe_wh03_committed_registration_signal(
+        commitment=commitment, inventory=inv) == "TEST_SIGNAL_MATCH_UNATTESTED"
+    assert inv.calls == ["http://127.0.0.1:9444"] and inv.mutations == 0
+    for page in unrelated + pages:
+        assert page.evaluations == (2 if page.url == URL else 0)
+        assert page.received_digest == (commitment.marker_digest if page.url == URL else None)
+        assert page.mutations == 0
+
+
+@pytest.mark.parametrize("routes,expected", [
+    ((), "CHAT_A_CANDIDATE_NOT_FOUND"),
+    (("about:blank", "https://example.com", "https://chatgpt.com/"),
+     "CHAT_A_CANDIDATE_NOT_FOUND"),
+    ((OTHER,), "TEST_CHAT_ROUTE_MISMATCH"),
+    ((OTHER, "https://chatgpt.com/c/00000000-0000-0000-0000-000000000003"),
+     "TEST_CHAT_ROUTE_MISMATCH"),
+    ((URL + "/", OTHER), "TEST_CHAT_ROUTE_MISMATCH"),
+    ((URL + "?copy=1", URL + "#copy", OTHER), "TEST_CHAT_ROUTE_MISMATCH"),
+    ((URL, URL), "MULTIPLE_CHAT_CANDIDATES"),
+    ((URL, OTHER, URL), "MULTIPLE_CHAT_CANDIDATES"),
+])
+def test_wh03_committed_signal_missing_or_duplicate_target_reads_no_dom(
+        wh03_now, routes, expected):
+    from ai_commerce.remote import cdp_doorbell as d
+    pages = [CommittedSignalPage(url=url, raises=True) for url in routes]
+    inv = ProbeContexts(tuple(pages))
+    assert d.probe_wh03_committed_registration_signal(
+        commitment=_wh03_committed_fixture(), inventory=inv) == expected
+    assert inv.mutations == 0
+    assert all(page.evaluations == page.mutations == 0 for page in pages)
+
+
+@pytest.mark.parametrize("context_count", [0, 2])
+def test_wh03_committed_signal_requires_one_context_before_page_read(
+        wh03_now, context_count):
+    from ai_commerce.remote import cdp_doorbell as d
+    pages = [CommittedSignalPage(raises=True) for _ in range(context_count)]
+    inv = ProbeContexts(*[(page,) for page in pages])
+    assert d.probe_wh03_committed_registration_signal(
+        commitment=_wh03_committed_fixture(), inventory=inv) == "CONTEXT_UNPROVEN"
+    assert inv.mutations == 0
+    assert all(page.evaluations == page.mutations == 0 for page in pages)
+
+
+@pytest.mark.parametrize("count,expected", [
+    (32, "TEST_SIGNAL_MATCH_UNATTESTED"), (33, "CONTEXT_UNPROVEN"),
+])
+def test_wh03_committed_signal_page_bound_includes_other_chat_tabs(
+        wh03_now, count, expected):
+    from ai_commerce.remote import cdp_doorbell as d
+    page = CommittedSignalPage()
+    other = [CommittedSignalPage(url=OTHER, raises=True) for _ in range(count - 1)]
+    inv = ProbeContexts(tuple([page] + other))
+    assert d.probe_wh03_committed_registration_signal(
+        commitment=_wh03_committed_fixture(), inventory=inv) == expected
+    assert page.evaluations == (2 if count == 32 else 0)
+    assert inv.mutations == page.mutations == 0
+    assert all(p.evaluations == p.mutations == 0 for p in other)
+
+
+@pytest.mark.parametrize("case,expected,evaluations", [
+    ("draft", "DRAFT_PRESENT", 1),
+    ("surface", "SURFACE_UNPROVEN", 1),
+    ("exception", "CDP_READ_UNAVAILABLE", 1),
+    ("duplicate", "TEST_SIGNAL_AMBIGUOUS", 2),
+    ("absent", "TEST_SIGNAL_NOT_FOUND", 2),
+    ("forged_registered", "TEST_SIGNAL_SCOPE_UNPROVEN", 2),
+    ("forged_authority", "TEST_SIGNAL_SCOPE_UNPROVEN", 2),
+])
+def test_wh03_committed_signal_target_guards_with_chat_b_present(
+        wh03_now, case, expected, evaluations):
+    from ai_commerce.remote import cdp_doorbell as d
+    page = CommittedSignalPage()
+    if case == "draft": page.surface = "DRAFT_PRESENT"
+    elif case == "surface": page.surface = "SURFACE_UNPROVEN"
+    elif case == "exception": page.raises = True
+    elif case == "duplicate": page.signal = "TEST_SIGNAL_AMBIGUOUS"
+    elif case == "absent": page.signal = "TEST_SIGNAL_NOT_FOUND"
+    elif case == "forged_registered": page.signal = "TEST_REGISTERED"
+    elif case == "forged_authority": page.signal = {"origin_attested": True}
+    other = CommittedSignalPage(url=OTHER, raises=True)
+    inv = ProbeContexts((page, other))
+    assert d.probe_wh03_committed_registration_signal(
+        commitment=_wh03_committed_fixture(), inventory=inv) == expected
+    assert page.evaluations == evaluations and other.evaluations == 0
+    assert inv.mutations == page.mutations == other.mutations == 0
+
+
+@pytest.mark.parametrize("change_after", [1, 2])
+def test_wh03_committed_signal_holds_if_target_route_changes_during_read(
+        wh03_now, change_after):
+    from ai_commerce.remote import cdp_doorbell as d
+
+    class ChangingPage(CommittedSignalPage):
+        def evaluate(self, script, args=None):
+            result = super().evaluate(script, args)
+            if self.evaluations == change_after:
+                self.url = OTHER
+            return result
+
+    page = ChangingPage()
+    other = CommittedSignalPage(url=OTHER, raises=True)
+    inv = ProbeContexts((page, other))
+    assert d.probe_wh03_committed_registration_signal(
+        commitment=_wh03_committed_fixture(), inventory=inv) == "TEST_CHAT_ROUTE_MISMATCH"
+    assert page.evaluations == change_after and other.evaluations == 0
+    assert inv.mutations == page.mutations == other.mutations == 0
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("generation_zero", "TEST_COMMITMENT_INVALID"),
+    ("generation_bool", "TEST_COMMITMENT_INVALID"),
+    ("consumed_type", "TEST_COMMITMENT_INVALID"),
+    ("route_invalid", "TEST_COMMITMENT_INVALID"),
+    ("future", "TEST_COMMITMENT_NOT_ACTIVE"),
+    ("expiry_boundary", "TEST_COMMITMENT_EXPIRED"),
+])
+def test_wh03_committed_signal_validates_original_precommit_before_cdp(
+        wh03_now, case, expected):
+    from ai_commerce.remote import cdp_doorbell as d
+    commitment = _wh03_committed_fixture()
+    changes = {
+        "generation_zero": {"generation": 0},
+        "generation_bool": {"generation": True},
+        "consumed_type": {"consumed": "false"},
+        "route_invalid": {"chat_url": "https://evil.example/c/private"},
+        "future": {"issued_ms": wh03_now + 1},
+        "expiry_boundary": {"expires_ms": wh03_now},
+    }
+    pages = [CommittedSignalPage(raises=True), CommittedSignalPage(url=OTHER, raises=True)]
+    inv = ProbeContexts(tuple(pages))
+    assert d.probe_wh03_committed_registration_signal(
+        commitment=replace(commitment, **changes[case]), inventory=inv) == expected
+    assert inv.calls == [] and inv.mutations == 0
+    assert all(page.evaluations == page.mutations == 0 for page in pages)
 
 
 def test_wh03_committed_signal_ignores_old_marker_and_pins_current_chat(monkeypatch):
@@ -1593,7 +1772,7 @@ def test_wh03_committed_signal_ignores_old_marker_and_pins_current_chat(monkeypa
     ("expired", "TEST_COMMITMENT_EXPIRED"),
     ("reused", "TEST_COMMITMENT_REPLAY"),
     ("wrong_chat", "TEST_CHAT_ROUTE_MISMATCH"),
-    ("extra_chat", "MULTIPLE_CHAT_CANDIDATES"),
+    ("duplicate_route", "MULTIPLE_CHAT_CANDIDATES"),
     ("duplicate", "TEST_SIGNAL_AMBIGUOUS"),
     ("not_found", "TEST_SIGNAL_NOT_FOUND"),
     ("assistant_copy", "TEST_SIGNAL_AMBIGUOUS"),
@@ -1613,7 +1792,7 @@ def test_wh03_committed_signal_fail_closed(monkeypatch, case, code):
     elif case == "duplicate": page.signal = "TEST_SIGNAL_AMBIGUOUS"
     elif case == "not_found": page.signal = "TEST_SIGNAL_NOT_FOUND"
     elif case == "assistant_copy": page.signal = "TEST_SIGNAL_AMBIGUOUS"
-    inv = ProbeContexts((page, CommittedSignalPage(url=OTHER))) if case == "extra_chat" else ProbeContexts((page,))
+    inv = ProbeContexts((page, CommittedSignalPage())) if case == "duplicate_route" else ProbeContexts((page,))
     assert d.probe_wh03_committed_registration_signal(
         commitment=commit, inventory=inv) == code
     assert page.mutations == 0
@@ -1784,6 +1963,41 @@ def test_wh03_test_registration_requires_actual_source_verifier(tmp_path, monkey
     wrong = replace(_wh03_test_origin(), chat_url=OTHER)
     assert ledger.complete(registration_id=prepared.registration_id,
                            origin=wrong, attestation=attest) == "TEST_CHAT_ROUTE_MISMATCH"
+
+
+@pytest.mark.parametrize("other_state", ["copied_marker", "closed", "unloaded"])
+def test_wh03_exact_url_read_cannot_authenticate_complete_private_domain(
+        tmp_path, wh03_now, other_state):
+    import json
+    from ai_commerce.remote import cdp_doorbell as d
+    ledger, attest = _wh03_ledger(tmp_path, origin_proven=False)
+    prepared = ledger.prepare(chat_url=URL, generation=3, attestation=attest)
+    page = CommittedSignalPage()
+    others = []
+    if other_state != "closed":
+        other = CommittedSignalPage(
+            url=OTHER if other_state == "copied_marker" else "about:blank",
+            raises=True)
+        # A mock may contain the same signal elsewhere. URL selection cannot
+        # establish its absence, and must never inspect that other tab's DOM.
+        other.copied_marker = prepared.marker
+        others.append(other)
+    inv = ProbeContexts(tuple([page] + others))
+    assert ledger.observe(registration_id=prepared.registration_id,
+                          attestation=attest, inventory=inv) == "TEST_SIGNAL_MATCH_UNATTESTED"
+    assert page.received_digest == hashlib.sha256(prepared.marker.encode()).hexdigest()
+    assert page.evaluations == 2
+    assert all(other.evaluations == other.mutations == 0 for other in others)
+    assert inv.mutations == page.mutations == 0
+    assert ledger.complete(registration_id=prepared.registration_id,
+                           origin=_wh03_test_origin(),
+                           attestation=attest) == "TEST_CHAT_ORIGIN_UNATTESTED"
+    # A copied/unloaded/closed chat has not been ruled out by the observer.
+    state = json.loads((tmp_path / "private" / "wh03.json").read_text())
+    assert state["registrations"][prepared.registration_id]["phase"] == "SIGNAL_OBSERVED"
+    assert ledger.observe(registration_id=prepared.registration_id,
+                          attestation=attest, inventory=inv) == "TEST_REGISTRATION_REPLAY"
+    assert inv.calls == ["http://127.0.0.1:9444"]
 
 
 def test_wh03_test_registration_prepare_without_native_authority_fails(tmp_path):
