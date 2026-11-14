@@ -111,6 +111,11 @@ def _verified_receipt_evidence(report: dict, *, root: Path, workspace: Path,
                              group["evidence_sha256"])
             if not proof.valid_for(binding, root):
                 return rejected(f"MT01_GROUP_{index}_EVIDENCE_INVALID")
+            if binding.get("argv", [])[-2:] == ["-n", "12"]:
+                from ai_commerce.engineering.verification import observed_xdist_workers
+                stdout_ref = json.loads(proof.payload)["artifacts"]["stdout"]["path"]
+                if observed_xdist_workers(checked_path(root, stdout_ref).read_bytes()) != 12:
+                    return rejected(f"MT01_GROUP_{index}_XDIST_UNPROVEN")
             covered.update(binding["candidate_files"])
         if not set(report["changed_files"]) <= covered:
             return rejected("MT01_CHANGED_FILES_UNCOVERED")

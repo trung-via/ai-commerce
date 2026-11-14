@@ -412,14 +412,18 @@ def validate_component_onboarding_manifest(
         raise ValueError("ONBOARD_UNSAFE_CONSUMER_FAMILY")
     existing_owned = set()
     existing_tests = set()
+    existing_acs = set()
     for group in existing_groups:
         existing_owned.update((*group.paths, *group.tests, *group.consumers, *group.contracts))
         existing_tests.update(group.tests)
+        existing_acs.update(group.acs)
     fresh = set(sources) | set(tests)
     if fresh & (existing_owned | base) or not fresh <= changed or not all(in_scope(p) for p in fresh):
         raise ValueError("ONBOARD_REOWN_OR_NOT_ADDED")
     if set(tests) & existing_tests:
         raise ValueError("ONBOARD_EXISTING_TEST")
+    if set(acs) & existing_acs:
+        raise ValueError("ONBOARD_DUPLICATE_AC")
     if any(p not in existing_owned and p not in sources for p in consumers):
         raise ValueError("ONBOARD_CONSUMER_UNPROVEN")
     if any(p not in existing_owned and (p not in changed or p in base or not in_scope(p))
@@ -463,15 +467,24 @@ def verified_onboarding_binding(
     The EF02 worker invokes this after EF01 exits, not on self-reported PASS
     alone. All existing group commands remain byte-identical to the registry.
     """
+    import hashlib
     import json
     import subprocess
     from .minimum_test import TestGroup, approved_groups
 
     try:
-        if (registered_profiles.get("mt01-component-onboarding") is None
+        capability = registered_profiles.get("mt01-component-onboarding")
+        if (not isinstance(capability, list) or len(capability) < 5
+                or capability[:3] not in (["python", "-m", "pytest"], ["py", "-m", "pytest"])
+                or capability[-2:] != ["-n", "12"]
                 or binding.get("registered_profile") != "mt01-component-onboarding"
                 or binding.get("onboarding_data_only") is not True
                 or binding.get("base_sha") != base_sha):
+            return False
+        if (not changed_paths or not allowed_paths
+                or not all(any(p == prefix or p.startswith(prefix.rstrip("/") + "/")
+                               for prefix in allowed_paths)
+                           for p in changed_paths)):
             return False
         path = binding["onboarding_manifest_path"]
         if (not isinstance(path, str)
@@ -488,27 +501,6 @@ def verified_onboarding_binding(
         baseline_records = load_baseline_component_owner_records(
             root=workspace, base_sha=base_sha, existing_groups=old_groups)
         baseline_by_path = {item["manifest_path"]: item for item in baseline_records}
-        if path in baseline_by_path:
-            if path in changed_paths:
-                return False
-            record = baseline_by_path[path]
-            group = record["group"]
-            digest = record["manifest_sha256"]
-        else:
-            candidate = json.loads((workspace / path).read_text(encoding="utf-8"))
-            admission = validate_component_onboarding_manifest(
-                candidate, manifest_path=path,
-                changed_paths=changed_paths, base_paths=base_paths,
-                existing_groups=(*old_groups, *(item["group"] for item in baseline_records)),
-                allowed_paths=allowed_paths, root=workspace)
-            digest = admission["manifest_sha256"]
-            group = TestGroup(
-                admission["name"], admission["tests"], admission["acs"], admission["paths"],
-                admission["consumers"], (*admission["contracts"], path))
-        if binding["onboarding_manifest_sha256"] != digest:
-            return False
-        if expected_group is not None and expected_group != group.name:
-            return False
         baseline_groups = tuple(item["group"] for item in baseline_records)
         # Replay the SAME post-executor owner graph used by the trusted MT-01
         # planner, even when verifying a previously committed owner. Otherwise
@@ -516,10 +508,10 @@ def verified_onboarding_binding(
         # fails its selected_impact_tests comparison on the same tested bytes.
         # The candidate manifest remains data-only, independently validated
         # against the immutable base and Human-authorized changed paths.
-        new_manifests = sorted(p for p in changed_paths if
-                               p.startswith("work_items/mt01-components/")
-                               and p.endswith(".json"))
-        if len(new_manifests) > 1:
+        changed_manifests = sorted(p for p in changed_paths
+                                   if p.startswith("work_items/mt01-components/"))
+        new_manifests = [p for p in changed_manifests if p.endswith(".json")]
+        if len(changed_manifests) > 1 or len(new_manifests) != len(changed_manifests):
             return False
         new_groups = candidate_onboarding_groups(
             root=workspace, changed_paths=changed_paths,
@@ -542,10 +534,26 @@ def verified_onboarding_binding(
                 existing_groups=(*old_groups, *baseline_groups),
                 allowed_paths=allowed_paths, root=workspace)
             digest = admission["manifest_sha256"]
-        if binding["onboarding_manifest_sha256"] != digest:
+        if binding.get("onboarding_manifest_sha256") != digest:
             return False
         if expected_group is not None and expected_group != group.name:
             return False
+        root = workspace.resolve()
+        candidate_hashes = binding.get("candidate_files")
+        if not isinstance(candidate_hashes, dict):
+            return False
+        for member in (*group.paths, *group.tests):
+            target = root / member
+            if (not target.is_file() or target.is_symlink()
+                    or root not in target.resolve().parents):
+                return False
+            ancestor = target.parent
+            while ancestor != root:
+                if ancestor.is_symlink():
+                    return False
+                ancestor = ancestor.parent
+            if candidate_hashes.get(member) != hashlib.sha256(target.read_bytes()).hexdigest():
+                return False
         groups = (*old_groups, *baseline_groups, *new_groups)
         plan = select_impact(
             root=workspace, changed_paths=changed_paths, groups=groups,
@@ -690,10 +698,16 @@ def load_baseline_component_owner_records(
         if len(raw) > 32768:
             raise ValueError("ONBOARD_BASELINE_MANIFEST_TOO_LARGE")
         target = root / path
-        if not target.is_file() or target.is_symlink():
+        if (not target.is_file() or target.is_symlink()
+                or root not in target.resolve().parents):
             raise ValueError("ONBOARD_BASELINE_MANIFEST_MISSING")
+        ancestor = target.parent
+        while ancestor != root:
+            if ancestor.is_symlink():
+                raise ValueError("ONBOARD_UNSAFE_PARENT_LINK")
+            ancestor = ancestor.parent
         actual = target.read_bytes()
-        if raw != actual and actual.replace(bytes([13, 10]), bytes([10])) != raw:
+        if raw != actual:
             raise ValueError("ONBOARD_BASELINE_MANIFEST_DRIFT")
         try:
             data = json.loads(raw.decode("utf-8-sig"))
@@ -775,19 +789,23 @@ def registered_action_plan(
         profiles.get("mt01-component-onboarding") == list(fallback_argv)
         and bool(allowed_paths)
     )
-    admission, onboarding_error = None, None
-    persisted_records = (
-        load_baseline_component_owner_records(
-            root=repo, base_sha=base_sha, existing_groups=groups)
-        if onboarding and (repo / ".git").exists() else ())
+    admission, onboarding_error, baseline_error = None, None, None
+    persisted_records = ()
+    if (repo / ".git").exists():
+        try:
+            persisted_records = load_baseline_component_owner_records(
+                root=repo, base_sha=base_sha, existing_groups=groups)
+        except (ValueError, OSError, UnicodeError, TypeError) as exc:
+            baseline_error = "ONBOARD_INVALID_BASELINE:" + str(exc)[:128]
     persisted_by_name = {item["group"].name: item for item in persisted_records}
     if persisted_records:
         groups = (*groups, *(item["group"] for item in persisted_records))
+    changed_manifests = [p for p in changed_paths
+                         if p.startswith("work_items/mt01-components/")]
     if onboarding:
-        candidates = sorted(p for p in changed_paths
-                            if p.startswith("work_items/mt01-components/") and p.endswith(".json"))
-        if len(candidates) != 1:
-            if candidates or not persisted_records:
+        candidates = sorted(p for p in changed_manifests if p.endswith(".json"))
+        if len(candidates) != 1 or len(changed_manifests) != 1:
+            if changed_manifests or not persisted_records:
                 onboarding_error = "ONBOARD_EXACTLY_ONE_NEW_MANIFEST_REQUIRED"
         else:
             try:
@@ -803,19 +821,25 @@ def registered_action_plan(
                 admission["name"], admission["tests"], admission["acs"],
                 admission["paths"], admission["consumers"],
                 (*admission["contracts"], admission["manifest_path"])))
+    elif changed_manifests:
+        onboarding_error = "ONBOARD_EXPLICIT_INGRESS_REQUIRED"
     impact = select_impact(
         root=repo, changed_paths=changed_paths, groups=groups,
         base_sha=base_sha,
     )
     by_name = {g.name: g for g in groups}
     entries = []
-    problems = list(impact.missing_mapping)
+    # Keep impact.missing_mapping separate from planner-level coverage holds
+    # so unmapped sources/tests preserve their canonical HOLD_MAPPING mode.
+    extra_problems: list[str] = []
+    if baseline_error:
+        extra_problems.append(baseline_error)
     if onboarding_error:
-        problems.append(onboarding_error)
+        extra_problems.append(onboarding_error)
     if admission is not None and aggregate_sources:
         # A candidate manifest can prove one new owner, but it cannot
         # silently inherit sibling verification from a different tree.
-        problems.append("ONBOARD_AGGREGATE_NEEDS_INDEPENDENT_FANIN_PROOF")
+        extra_problems.append("ONBOARD_AGGREGATE_NEEDS_INDEPENDENT_FANIN_PROOF")
     known_acs = {ac for group in groups for ac in group.acs}
     # A globally known AC is NOT verified unless its owning group is selected.
     # Do not expand silently: an unrelated action requirement needs a new
@@ -824,35 +848,49 @@ def registered_action_plan(
     required = set(required_acs)
     unknown_acs = sorted(required - known_acs)
     unselected_acs = sorted((required & known_acs) - selected_acs)
-    # A previously unregistered AC is a product-review question, not a
-    # reason to skip independently selected and registered source tests.
-    # Retain its exact identity in the immutable verification receipt; Brain
-    # may adopt it at review without replaying a determinate executor result.
-    # An already-known AC owned by an unselected group remains a hard HOLD.
-    pending_brain_acs = list(unknown_acs)
+    manifest_selected = (
+        admission is not None
+        or bool(set(impact.selected_groups) & persisted_by_name.keys())
+    )
+    # A previously unregistered AC is a product-review question for static
+    # components only; data-only manifest owners cannot waive unexpected ACs.
+    pending_brain_acs = [] if manifest_selected else list(unknown_acs)
+    if unknown_acs and manifest_selected:
+        extra_problems.extend("ONBOARD_UNKNOWN_AC:" + ac for ac in unknown_acs)
     if unselected_acs:
-        problems.extend("AC_REQUIRED_GROUP_NOT_SELECTED:" + ac for ac in unselected_acs)
+        extra_problems.extend("AC_REQUIRED_GROUP_NOT_SELECTED:" + ac for ac in unselected_acs)
     select_parallel = list(fallback_argv[-2:]) == ["-n", "12"]
     for name in impact.selected_groups:
         group = by_name[name]
         expected = ["python", "-m", "pytest", *group.tests, "-q"]
         if select_parallel:
             expected.extend(["-n", "12"])
-        new_owner = bool((admission is not None and name == admission["name"])
-                         or (onboarding and name in persisted_by_name))
+        manifest_owner = bool((admission is not None and name == admission["name"])
+                              or name in persisted_by_name)
         verified_owner = (admission if admission is not None and name == admission["name"]
                           else persisted_by_name.get(name))
+        if manifest_owner and not select_parallel:
+            extra_problems.append(name + ":SERIAL_MANIFEST_OWNER_PROFILE_UNPROVEN")
         matched = canonical_registered_profile(
-            profiles, expected, group_name=name, onboarding=new_owner)
+            profiles, expected, group_name=name, onboarding=manifest_owner)
         if matched is None:
-            problems.append(name + ":REGISTERED_PROFILE_REQUIRED")
+            extra_problems.append(name + ":REGISTERED_PROFILE_REQUIRED")
+        capability = profiles.get("mt01-component-onboarding")
+        if manifest_owner and (
+            not isinstance(capability, list) or len(capability) < 5
+            or capability[:3] not in (["python", "-m", "pytest"], ["py", "-m", "pytest"])
+            or capability[-2:] != ["-n", "12"]
+        ):
+            if name + ":REGISTERED_PROFILE_REQUIRED" not in extra_problems:
+                extra_problems.append(name + ":ONBOARD_CAPABILITY_INVALID")
+            matched = None
         # The only dynamic command is generated from a VALIDATED bounded
         # manifest; all original components still use exact registry argv.
-        argv = expected if new_owner else list(profiles[matched]) if matched is not None else list(fallback_argv)
+        argv = expected if manifest_owner else list(profiles[matched]) if matched is not None else list(fallback_argv)
         executable = shutil.which(argv[0]) if argv else None
         paths = (set(group.tests) | set(group.paths) | set(group.consumers) |
                  set(group.contracts) | (set(changed_paths) & set(impact.affected_paths)))
-        if new_owner:
+        if manifest_owner:
             # Nonexecutable review documents and work-item records are still
             # changed candidate bytes: include them in immutable evidence so
             # EF02's all-changed-files coverage check cannot be bypassed.
@@ -879,9 +917,9 @@ def registered_action_plan(
             "selected_impact_tests": list(impact.selected_tests),
             **({"onboarding_manifest_path": verified_owner["manifest_path"],
                 "onboarding_manifest_sha256": verified_owner["manifest_sha256"],
-                "onboarding_data_only": True} if new_owner else {}),
+                "onboarding_data_only": True} if manifest_owner else {}),
         }
-        executable_scope = bool(impact.runnable and matched)
+        executable_scope = bool(impact.runnable and matched and not impact.missing_mapping and not extra_problems)
         entries.append({
             "group": name, "state": "EXECUTE" if executable_scope else "UNPROVEN",
             "execute": executable_scope, "acs": list(group.acs),
@@ -891,6 +929,7 @@ def registered_action_plan(
             "explanation": ["MT01_V21_SCOPED_ACTUAL_CHANGED_PATHS"] if executable_scope else
                            ["MT01_V21_HOLD_MISSING_VERIFICATION_PROOF"],
         })
+    problems = [*impact.missing_mapping, *extra_problems]
     if problems:
         # No partial green subset when a mandatory AC or profile is unproven.
         # The whole action is HOLD, not a sequence of successful groups plus
@@ -917,11 +956,11 @@ def registered_action_plan(
             },
         })
     impact_receipt = impact.as_dict()
-    if unselected_acs:
-        impact_receipt["mode"] = "HOLD_COVERAGE"
+    if extra_problems:
+        if impact_receipt["mode"] != "HOLD_PROOF":
+            impact_receipt["mode"] = "HOLD_COVERAGE"
         impact_receipt["missing_mapping"] = sorted(
-            set(impact_receipt["missing_mapping"]) |
-            {"AC_REQUIRED_GROUP_NOT_SELECTED:" + ac for ac in unselected_acs})
+            set(impact_receipt["missing_mapping"]) | set(extra_problems))
     return {
         "kind": "AI_COMMERCE_MT01_PLAN", "version": 2,
         "required_acs": sorted(set(required_acs)),
