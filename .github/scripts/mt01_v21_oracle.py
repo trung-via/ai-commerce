@@ -306,6 +306,84 @@ def trusted_baseline_manifest_groups(*, repo: Path, base_sha: str,
     return tuple(accepted)
 
 
+def verify_committed_owner_runtime_canary(
+    *, repo: Path, base_sha: str, manifest_groups: tuple, candidate_groups: tuple,
+) -> None:
+    """Protected CI canary: ordinary runtime actions must see trusted base owners.
+
+    This checks the CANDIDATE runtime against independently reviewed Git-base
+    manifests. Restoring impact_v21.py and its companion tests together cannot
+    suppress this check: the CI oracle invokes it before accepting test scope.
+    No provider, host effect, or candidate-supplied manifest command is run.
+    """
+    if not manifest_groups:
+        return  # No committed component owners to preserve.
+    samples = {
+        "hostops-personal": "src/ai_commerce/hostops_v3/personal.py",
+        "b0-1": "src/ai_commerce/production_runtime/state_machine.py",
+        "wakehub-g2-native": "src/ai_commerce/wakehub/native_runtime.py",
+    }
+    by_name = {group.name: group for group in manifest_groups}
+    if any(name not in by_name or source not in by_name[name].paths
+           for name, source in samples.items()):
+        raise ValueError("BASELINE_RUNTIME_REQUIRED_OWNER_MISSING")
+    profiles = json.loads(
+        (repo / ".github/ef02/verify-profiles.json").read_text(encoding="utf-8"))
+    if type(profiles) is not dict:
+        raise ValueError("BASELINE_RUNTIME_REGISTERED_PROFILES_UNPROVEN")
+    fallback = profiles.get("project-tests")
+    if (type(fallback) is not list
+            or fallback[:3] != ["python", "-m", "pytest"]
+            or fallback[-2:] != ["-n", "12"]):
+        raise ValueError("BASELINE_RUNTIME_NORMAL_PROFILE_UNPROVEN")
+
+    from ai_commerce.engineering.impact_v21 import (
+        registered_action_plan, verified_onboarding_binding,
+    )
+    from ai_commerce.engineering.minimum_test import file_hashes
+
+    current_files = file_hashes(repo)
+    for name, source in samples.items():
+        owner = by_name[name]
+        result = registered_action_plan(
+            repo=repo, base_sha=base_sha,
+            base_files=current_files, candidate_files=current_files,
+            changed_paths=[source], required_acs=(),
+            fallback_argv=fallback, groups=candidate_groups,
+            registered_profiles=profiles, allowed_paths=[source],
+        )
+        if (type(result) is not dict
+                or name not in result.get("selected_groups", ())
+                or not isinstance(result.get("groups"), list)):
+            raise ValueError("BASELINE_RUNTIME_OWNER_GRAPH_MISSING")
+        entries = [entry for entry in result["groups"]
+                   if type(entry) is dict and entry.get("group") == name]
+        if len(entries) != 1:
+            raise ValueError("BASELINE_RUNTIME_OWNER_GRAPH_MISSING")
+        entry = entries[0]
+        binding = entry.get("binding")
+        expected_argv = ["python", "-m", "pytest", *owner.tests, "-q", "-n", "12"]
+        if (type(binding) is not dict
+                or entry.get("state") != "EXECUTE"
+                or entry.get("execute") is not True
+                or entry.get("selected_profile") != "mt01-component-onboarding"
+                or binding.get("registered_profile") != "mt01-component-onboarding"
+                or binding.get("argv") != expected_argv
+                or binding.get("mapping", {}).get("tests") != list(owner.tests)
+                or binding.get("onboarding_manifest_path")
+                    != f"work_items/mt01-components/{name}.json"
+                or binding.get("onboarding_data_only") is not True
+                or any(group.get("execute") is not True
+                       for group in result["groups"])):
+            raise ValueError("BASELINE_RUNTIME_OWNER_BINDING_UNPROVEN")
+        if not verified_onboarding_binding(
+            workspace=repo, binding=binding, changed_paths=[source],
+            allowed_paths=[source], base_sha=base_sha,
+            registered_profiles=profiles, expected_group=name,
+        ):
+            raise ValueError("BASELINE_RUNTIME_OWNER_TRUST_UNPROVEN")
+
+
 def resolve_base(repo: Path, requested: str) -> str:
     """Use trusted GitHub push context for postmerge, never candidate testimony."""
     if requested:
@@ -329,10 +407,10 @@ def main() -> int:
             print("MT01_ORACLE_STATUS=HOLD_PROOF_INVALID_BASE", flush=True)
             return 3
         base_text = _git(repo, "show", f"{base}:{BASE_MAP}").decode("utf-8")
-        groups_base = (*baseline_groups(base_text),
-                       *trusted_baseline_manifest_groups(
-                           repo=repo, base_sha=base,
-                           base_groups=baseline_groups(base_text)))
+        static_baseline_groups = baseline_groups(base_text)
+        persisted_baseline_groups = trusted_baseline_manifest_groups(
+            repo=repo, base_sha=base, base_groups=static_baseline_groups)
+        groups_base = (*static_baseline_groups, *persisted_baseline_groups)
         # The candidate registry may add new groups; it cannot remove the
         # baseline's test obligations for a changed path.
         sys.path.insert(0, str(repo / "src"))
@@ -343,6 +421,12 @@ def main() -> int:
         if head != plan.get("candidate_sha") or plan.get("base_sha") != base:
             print("MT01_ORACLE_STATUS=HOLD_PROOF_SHA_MISMATCH", flush=True)
             return 3
+        # Protected semantic canary, independent of candidate-authored tests.
+        verify_committed_owner_runtime_canary(
+            repo=repo, base_sha=base,
+            manifest_groups=persisted_baseline_groups,
+            candidate_groups=groups_candidate,
+        )
         changed = _git(repo, "diff", "--name-only", "-z", base, head)
         changed_paths = {n.decode("utf-8") for n in changed.split(b"\0") if n}
         # Capture rename/deletion sources from name-status to avoid silently

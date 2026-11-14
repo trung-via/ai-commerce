@@ -2013,3 +2013,62 @@ def test_r2_negatives_unowned_edit_missing_capability_and_binding_tampering(tmp_
         bad = copy.deepcopy(binding)
         mut(bad)
         assert verified_onboarding_binding(**{**kw, "binding": bad}) is False
+
+def test_protected_runtime_owner_canary_survives_companion_test_restore(monkeypatch):
+    """The protected oracle rejects a runtime owner regression, independent of tests."""
+    import importlib.util
+    import subprocess
+    import sys
+
+    import pytest
+    from ai_commerce.engineering import impact_v21
+    from ai_commerce.engineering.minimum_test import approved_groups
+
+    root = Path(__file__).resolve().parents[1]
+    script = root / ".github/scripts/mt01_v21_oracle.py"
+    spec = importlib.util.spec_from_file_location("mt01_protected_owner_canary", script)
+    oracle = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = oracle
+    spec.loader.exec_module(oracle)
+
+    base = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    static = approved_groups()
+    trusted = oracle.trusted_baseline_manifest_groups(
+        repo=root, base_sha=base, base_groups=static)
+    assert len(trusted) >= 47
+
+    kw = dict(repo=root, base_sha=base, manifest_groups=trusted,
+              candidate_groups=static)
+    # Current runtime must pass the independent normal-action canary.
+    oracle.verify_committed_owner_runtime_canary(**kw)
+
+    original = impact_v21.registered_action_plan
+
+    # Both candidate source AND its companion tests could be restored; this
+    # protected oracle must still reject missing committed owner mappings.
+    def restored_without_committed_owner(*args, **kwargs):
+        result = original(*args, **kwargs)
+        result["selected_groups"] = [
+            n for n in result["selected_groups"] if n != "hostops-personal"]
+        result["groups"] = [
+            g for g in result["groups"] if g.get("group") != "hostops-personal"]
+        return result
+
+    monkeypatch.setattr(
+        impact_v21, "registered_action_plan", restored_without_committed_owner)
+    with pytest.raises(ValueError, match="BASELINE_RUNTIME_OWNER_GRAPH_MISSING"):
+        oracle.verify_committed_owner_runtime_canary(**kw)
+
+    # Restore the genuine planner and falsify only the runtime binding.
+    def restored_invalid_owner_binding(*args, **kwargs):
+        result = original(*args, **kwargs)
+        for entry in result["groups"]:
+            if entry.get("group") == "hostops-personal":
+                entry["binding"]["onboarding_manifest_sha256"] = "0" * 64
+        return result
+
+    monkeypatch.setattr(
+        impact_v21, "registered_action_plan", restored_invalid_owner_binding)
+    with pytest.raises(ValueError, match="BASELINE_RUNTIME_OWNER_TRUST_UNPROVEN"):
+        oracle.verify_committed_owner_runtime_canary(**kw)
