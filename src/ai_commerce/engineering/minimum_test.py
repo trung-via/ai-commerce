@@ -29,6 +29,365 @@ def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+COLLECTION_SCHEMA_VERSION = 1
+# Input/reporting bounds only; no runtime deadline or subprocess is activated.
+COLLECTION_TIMEOUT_SECONDS = 60
+_COLLECTION_MAX_IDS = 100_000
+_COLLECTION_MAX_BYTES = 16 * 1024 * 1024
+_COLLECTION_MAX_OUTPUT = 256 * 1024
+_COLLECTION_HOLD = "P1B_BOUNDED_WINDOWS_COLLECTION_EXECUTOR_REQUIRED"
+
+
+def _collection_path(value: object) -> str:
+    # P0 path semantics. Only the path part of a nodeid is normalized.
+    if not isinstance(value, str) or not 1 <= len(value) <= 1024:
+        raise ValueError("UNSUPPORTED_COLLECTION_SCOPE")
+    path = value.replace("\\", "/")
+    if (path.startswith("/") or ":" in path or ".." in path.split("/")
+            or any(ord(c) < 32 or ord(c) == 127 for c in path)):
+        raise ValueError("UNSUPPORTED_COLLECTION_SCOPE")
+    parts = [p for p in path.split("/") if p and p != "."]
+    if not parts or not (parts[0] == "tests" or (parts[0] == "src" and "tests" in parts)):
+        raise ValueError("UNSUPPORTED_COLLECTION_SCOPE")
+    return "/".join(parts)
+
+
+def _collection_nodeids(values: object) -> list[str]:
+    """P0-compatible identities, retaining order for worker reconciliation.
+
+    P0 imports this module: do not import verification back here. A later P1-B
+    companion adapter can share these primitives with P0. Parity tests pin its
+    existing sorted digest, path normalization and parameter identity semantics.
+    """
+    if not isinstance(values, (list, tuple)) or not 1 <= len(values) <= _COLLECTION_MAX_IDS:
+        raise ValueError("INVALID_NODEID_COUNT")
+    result = []
+    size = 0
+    for value in values:
+        if (not isinstance(value, str) or not 1 <= len(value) <= 2048
+                or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+            raise ValueError("INVALID_NODEID")
+        path, sep, case = value.partition("::")
+        path = _collection_path(path)
+        if not sep or not case or not path.endswith(".py"):
+            raise ValueError("INVALID_NODEID")
+        nodeid = path + sep + case
+        try:
+            size += len(nodeid.encode("utf-8"))
+        except UnicodeEncodeError as exc:
+            raise ValueError("INVALID_NODEID_ENCODING") from exc
+        if size > 8 * 1024 * 1024:
+            raise ValueError("NODEIDS_OVERSIZED")
+        result.append(nodeid)
+    if len(set(result)) != len(result):
+        raise ValueError("DUPLICATE_NODEID")
+    return result
+
+
+def collection_nodeids_digest(nodeids: object) -> str:
+    """Canonical P0 identity digest; worker order is checked separately."""
+    return digest(canonical(sorted(_collection_nodeids(nodeids))).encode())
+
+
+def _collection_binding(value: object, registered_profiles: Mapping[str, Sequence[str]]) -> dict:
+    if not isinstance(value, dict) or not isinstance(registered_profiles, Mapping):
+        raise ValueError("COLLECTION_BINDING_REQUIRED")
+    result = {}
+    for key, pattern in (("candidate_sha", r"[0-9a-f]{40}"),
+                         ("source_sha256", r"[0-9a-f]{64}"),
+                         ("environment_sha256", r"[0-9a-f]{64}"),
+                         ("python_sha256", r"[0-9a-f]{64}"),
+                         ("argv_sha256", r"[0-9a-f]{64}"),
+                         ("registered_profile", r"[a-z0-9][a-z0-9_.-]{0,79}")):
+        item = value.get(key)
+        if not isinstance(item, str) or re.fullmatch(pattern, item) is None:
+            raise ValueError("COLLECTION_BINDING_REQUIRED")
+        result[key] = item
+    scope = value.get("collection_scope")
+    if not isinstance(scope, (list, tuple)) or not 1 <= len(scope) <= 256:
+        raise ValueError("UNSUPPORTED_COLLECTION_SCOPE")
+    roots = [_collection_path(p) for p in scope]
+    # Registered argv use exact canonical relative paths, never node selectors,
+    # options, shell strings, Windows device paths, wildcards or traversal.
+    if (list(scope) != roots or len(set(roots)) != len(roots)
+            or any(not re.fullmatch(r"[A-Za-z0-9_./-]+", p) for p in roots)
+            or any(part.endswith(".") or re.fullmatch(
+                r"(?i:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\..*)?", part)
+                   for p in roots for part in p.split("/"))):
+        raise ValueError("UNSUPPORTED_COLLECTION_SCOPE")
+    argv = value.get("profile_argv")
+    registered = registered_profiles.get(result["registered_profile"])
+    if (not isinstance(argv, (list, tuple)) or not isinstance(registered, (list, tuple))
+            or list(argv) != list(registered)):
+        raise ValueError("UNREGISTERED_COLLECTION_ARGV")
+    parallel = list(argv[-2:]) == ["-n", "12"]
+    expected = ["-m", "pytest", *roots, "-q", *(["-n", "12"] if parallel else [])]
+    if not argv or argv[0] not in ("python", "py") or list(argv[1:]) != expected:
+        raise ValueError("UNSAFE_COLLECTION_ARGV")
+    if result["argv_sha256"] != digest(canonical(list(argv)).encode()):
+        raise ValueError("COLLECTION_ARGV_DIGEST_MISMATCH")
+    workers = 12 if parallel else 0
+    if (value.get("platform") != "Windows" or type(value.get("workers_requested")) is not int
+            or value["workers_requested"] != workers
+            or value.get("scheduler") != ("load" if parallel else "serial")):
+        raise ValueError("COLLECTION_PROFILE_BINDING_MISMATCH")
+    result.update(profile_argv=list(argv), collection_scope=roots, platform="Windows",
+                  workers_requested=workers, scheduler=value["scheduler"])
+    if set(value) != set(result):
+        raise ValueError("COLLECTION_BINDING_REQUIRED")
+    return result
+
+
+def validate_collection_observation(*, expected_binding: object,
+                                    registered_profiles: Mapping[str, Sequence[str]],
+                                    observation: object) -> dict:
+    """Pure, bounded admission checks; never execute pytest or establish PASS.
+
+    The caller must obtain the registry and expected binding from an immutable
+    trusted candidate, not from this observation. These checks cannot attest
+    that caller-supplied source/environment/scratch claims are true. P1-A has
+    NO subprocess launcher, scratch creation, artifact writer or trusted-proof
+    promotion. Every result holds for the separately reviewed P1-B Windows
+    process containment/source-snapshot adapter, then independent verification.
+    Raw parameterized identities remain private input, never public receipts.
+    """
+    receipt = dict(schema_version=COLLECTION_SCHEMA_VERSION, kind="MT01_COLLECTION_OBSERVATION",
+                   status="HOLD", hold_reason=_COLLECTION_HOLD, collection_status="INVALID",
+                   provenance="UNPROVEN", trusted_windows_proof=False, tests_collected=None,
+                   tests_executed=None, acceptance_pass=False, candidate_sha=None,
+                   source_sha256=None, argv_sha256=None, environment_binding_sha256=None,
+                   binding_sha256=None, registered_profile=None, selected_test_paths=[],
+                   collected_count=None, nodeids_sha256=None, ordered_nodeids_sha256=None,
+                   workers_requested=None, workers_observed=None, worker_consistency="UNPROVEN",
+                   elapsed_seconds=None, reason_codes=[])
+    try:
+        binding = _collection_binding(expected_binding, registered_profiles)
+        receipt.update(candidate_sha=binding["candidate_sha"], source_sha256=binding["source_sha256"],
+                       argv_sha256=binding["argv_sha256"], registered_profile=binding["registered_profile"],
+                       selected_test_paths=binding["collection_scope"],
+                       workers_requested=binding["workers_requested"],
+                       binding_sha256=digest(canonical(binding).encode()),
+                       environment_binding_sha256=digest(canonical({k: binding[k] for k in
+                           ("platform", "python_sha256", "environment_sha256")}).encode()))
+        if not isinstance(observation, dict):
+            raise ValueError("COLLECTION_OBSERVATION_REQUIRED")
+        if (type(observation.get("schema_version")) is not int
+                or observation["schema_version"] != COLLECTION_SCHEMA_VERSION):
+            raise ValueError("COLLECTION_SCHEMA_UNSUPPORTED")
+        provenance = observation.get("provenance")
+        if provenance not in ("SYNTHETIC", "PYTEST_CONTROLLER"):
+            raise ValueError("COLLECTION_PROVENANCE_UNPROVEN")
+        receipt["provenance"] = provenance
+        if _collection_binding(observation.get("binding"), registered_profiles) != binding:
+            raise ValueError("COLLECTION_IDENTITY_MISMATCH")
+        if observation.get("collect_only") is not True or observation.get("errors") != []:
+            raise ValueError("COLLECTION_CONTROLLER_INCOMPLETE")
+        outcome = observation.get("outcome")
+        if not isinstance(outcome, dict):
+            raise ValueError("COLLECTION_OUTCOME_REQUIRED")
+        if outcome.get("timed_out") is not False:
+            raise ValueError("COLLECTION_TIMEOUT")
+        elapsed = outcome.get("elapsed_seconds")
+        if type(elapsed) not in (int, float) or not 0 <= elapsed <= COLLECTION_TIMEOUT_SECONDS:
+            raise ValueError("COLLECTION_ELAPSED_INVALID")
+        receipt["elapsed_seconds"] = float(elapsed)
+        if type(outcome.get("exit_code")) is not int or outcome["exit_code"] != 0:
+            raise ValueError("COLLECTION_PROCESS_FAILED")
+        if (type(observation.get("session_exit_code")) is not int
+                or observation["session_exit_code"] != outcome["exit_code"]):
+            raise ValueError("COLLECTION_SESSION_INCOMPLETE")
+        if any(outcome.get(k) != binding["source_sha256"] for k in
+               ("source_before_sha256", "source_after_sha256")):
+            raise ValueError("COLLECTION_SOURCE_MUTATED")
+        if (outcome.get("scratch_safe") is not True or outcome.get("outputs_safe") is not True
+                or outcome.get("cleanup_complete") is not True):
+            raise ValueError("COLLECTION_CONTAINMENT_UNPROVEN")
+        for key, maximum in (("output_bytes", _COLLECTION_MAX_OUTPUT),
+                             ("artifact_bytes", _COLLECTION_MAX_BYTES)):
+            if type(outcome.get(key)) is not int or not 0 <= outcome[key] <= maximum:
+                raise ValueError("COLLECTION_OUTPUT_OVERSIZED")
+        workers = binding["workers_requested"]
+        started, finished = observation.get("workers_started"), observation.get("workers_finished")
+        records = observation.get("worker_collections")
+        if not all(isinstance(v, (list, tuple)) for v in (started, finished, records)):
+            raise ValueError("COLLECTION_WORKERS_INCOMPLETE")
+        required = [f"gw{i}" for i in range(workers)]
+        if (len(started) != workers or len(finished) != workers
+                or any(not isinstance(w, str) for w in (*started, *finished))
+                or set(started) != set(required) or set(finished) != set(required)):
+            raise ValueError("COLLECTION_WORKERS_INCOMPLETE")
+        if workers:
+            if observation.get("serial_nodeids") is not None or len(records) != workers:
+                raise ValueError("COLLECTION_MODE_MISMATCH")
+            if any(not isinstance(r, dict) or r.get("worker_id") not in required for r in records):
+                raise ValueError("COLLECTION_WORKERS_INCOMPLETE")
+            if len({r["worker_id"] for r in records}) != workers:
+                raise ValueError("COLLECTION_WORKERS_INCOMPLETE")
+            lists = [r.get("nodeids") for r in records]
+        else:
+            if records:
+                raise ValueError("COLLECTION_MODE_MISMATCH")
+            lists = [observation.get("serial_nodeids")]
+        reference = None
+        total = 0
+        for values in lists:
+            ids = _collection_nodeids(values)
+            total += sum(len(n.encode()) for n in ids)
+            if total > _COLLECTION_MAX_BYTES:
+                raise ValueError("COLLECTION_ARTIFACT_OVERSIZED")
+            if reference is not None and ids != reference:
+                raise ValueError("COLLECTION_WORKER_ORDER_MISMATCH")
+            reference = ids
+        paths = {n.partition("::")[0] for n in reference}
+        roots = binding["collection_scope"]
+        if (any(not any(p == root or p.startswith(root + "/") for root in roots) for p in paths)
+                or any(not any(p == root or p.startswith(root + "/") for p in paths) for root in roots)):
+            raise ValueError("COLLECTION_SCOPE_INCOMPLETE")
+        node_digest = collection_nodeids_digest(reference)
+        if observation.get("nodeids_sha256") != node_digest:
+            raise ValueError("COLLECTION_DIGEST_MISMATCH")
+        receipt.update(collection_status="SYNTHETIC" if provenance == "SYNTHETIC" else "OBSERVED_UNTRUSTED",
+                       collected_count=len(reference), nodeids_sha256=node_digest,
+                       ordered_nodeids_sha256=digest(canonical(reference).encode()),
+                       workers_observed=workers, worker_consistency="CONSISTENT" if workers else "SERIAL",
+                       tests_executed=0)
+    except ValueError as exc:
+        receipt["reason_codes"].append(str(exc))
+    receipt["reason_codes"].append(_COLLECTION_HOLD)
+    return receipt
+
+
+def collection_observer(*, binding: dict, registered_profiles: Mapping[str, Sequence[str]]):
+    """Create an opt-in public-hook plugin, without installing or running it.
+
+    Controller only. Native xdist --collect-only may collect serially; that is
+    NOT twelve-worker evidence and fails closed here. P1-B must separately
+    review worker collection mechanics and containment before launching it.
+    The snapshot is private; publish only validate_collection_observation's
+    sanitized HOLD receipt. No path/env/provider/shell operations occur here.
+    """
+    bound = _collection_binding(binding, registered_profiles)
+    import pytest  # Optional test dependency, loaded only on explicit construction.
+
+    class Observer:
+        def __init__(self):
+            self.collect_only = False
+            self.started = []
+            self.finished = []
+            self.records = []
+            self.serial = None
+            self.errors = []
+            self.exit_code = None
+            self.size = 0
+
+        def fail(self, code):
+            if code not in self.errors and len(self.errors) < 16:
+                self.errors.append(code)
+
+        def worker_id(self, node):
+            name = getattr(getattr(node, "gateway", None), "id", None)
+            if (not isinstance(name, str)
+                    or name not in [f"gw{i}" for i in range(bound["workers_requested"])]):
+                self.fail("COLLECTION_WORKERS_INCOMPLETE")
+                return None
+            return name
+
+        def identities(self, values):
+            try:
+                ids = _collection_nodeids(values)
+                self.size += sum(len(n.encode()) for n in ids)
+                if self.size > _COLLECTION_MAX_BYTES:
+                    raise ValueError("COLLECTION_ARTIFACT_OVERSIZED")
+                return ids
+            except ValueError:
+                self.fail("COLLECTION_IDENTITIES_INVALID")
+                return None
+
+        def pytest_configure(self, config):
+            self.collect_only = config.getoption("collectonly", False) is True
+            requested = config.getoption("numprocesses", 0)
+            if (not self.collect_only or hasattr(config, "workerinput")
+                    or (requested or 0) != bound["workers_requested"]
+                    or list(config.args) != bound["collection_scope"]
+                    or any(config.getoption(key, None) for key in (
+                        "keyword", "markexpr", "deselect", "ignore", "ignore_glob", "lf", "stepwise"))):
+                self.fail("COLLECTION_CONFIG_UNPROVEN")
+                raise ValueError("COLLECTION_CONTROLLER_COLLECT_ONLY_REQUIRED")
+
+        @pytest.hookimpl(optionalhook=True)
+        def pytest_testnodeready(self, node):
+            name = self.worker_id(node)
+            if name is not None:
+                if name in self.started:
+                    self.fail("COLLECTION_DUPLICATE_WORKER")
+                elif len(self.started) < 12:
+                    self.started.append(name)
+
+        @pytest.hookimpl(optionalhook=True)
+        def pytest_xdist_node_collection_finished(self, node, ids):
+            name = self.worker_id(node)
+            if name is None:
+                return
+            if (name not in self.started or name in self.finished
+                    or any(r["worker_id"] == name for r in self.records)):
+                self.fail("COLLECTION_DUPLICATE_OR_UNSTARTED_WORKER")
+                return
+            values = self.identities(ids)
+            if values is not None and len(self.records) < 12:
+                self.records.append(dict(worker_id=name, nodeids=values))
+
+        @pytest.hookimpl(optionalhook=True)
+        def pytest_testnodedown(self, node, error):
+            name = self.worker_id(node)
+            if error is not None or name not in self.started or name in self.finished:
+                self.fail("COLLECTION_WORKER_FAILED")
+            if name is not None and name not in self.finished and len(self.finished) < 12:
+                self.finished.append(name)
+
+        def pytest_collection_finish(self, session):
+            if not bound["workers_requested"]:
+                if self.serial is not None:
+                    self.fail("COLLECTION_DUPLICATE_SERIAL")
+                    return
+                # Bound iteration before constructing a potentially huge list.
+                if len(session.items) > _COLLECTION_MAX_IDS:
+                    self.fail("COLLECTION_IDENTITIES_INVALID")
+                    return
+                self.serial = self.identities([item.nodeid for item in session.items])
+
+        def pytest_runtest_logreport(self, report):
+            self.fail("COLLECTION_TEST_EXECUTION_OBSERVED")
+
+        def pytest_collectreport(self, report):
+            if report.failed:
+                self.fail("COLLECTION_IMPORT_FAILED")
+
+        def pytest_deselected(self, items):
+            if items:
+                self.fail("COLLECTION_FILTERED_SCOPE")
+
+        def pytest_sessionfinish(self, session, exitstatus):
+            if self.exit_code is not None:
+                self.fail("COLLECTION_DUPLICATE_SESSION_FINISH")
+            self.exit_code = int(exitstatus)
+
+        def snapshot(self, *, outcome: dict) -> dict:
+            reference = self.serial if self.serial is not None else (
+                self.records[0]["nodeids"] if self.records else None)
+            payload = canonical(dict(
+                schema_version=COLLECTION_SCHEMA_VERSION, provenance="PYTEST_CONTROLLER",
+                binding=bound, collect_only=self.collect_only, errors=self.errors,
+                session_exit_code=self.exit_code, workers_started=self.started,
+                workers_finished=self.finished, worker_collections=self.records,
+                serial_nodeids=self.serial, outcome=outcome,
+                nodeids_sha256=collection_nodeids_digest(reference) if reference else None))
+            if len(payload.encode()) > _COLLECTION_MAX_BYTES:
+                raise ValueError("COLLECTION_ARTIFACT_OVERSIZED")
+            return json.loads(payload)
+
+    return Observer()
+
+
 def pytest_counts(stdout: bytes) -> dict[str, int]:
     """Observed summary counts, never an estimate from selected filenames."""
     counts = {name: 0 for name in ("passed", "failed", "skipped", "errors", "xfailed", "xpassed")}

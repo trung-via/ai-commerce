@@ -378,6 +378,342 @@ def test_shadow_foundation_preserves_timeout_defaults_and_registered_mt01_argv()
     assert registry["project-tests"] == ["python", "-m", "pytest", "tests", "-q", "-n", "12"]
 
 
+def _collection_case(count=10, *, serial=False):
+    """Synthetic hook inputs only; never Windows worker/process proof."""
+    import copy
+    argv = ["python", "-m", "pytest", "tests/test_minimum_test.py", "-q"]
+    if not serial:
+        argv += ["-n", "12"]
+    profile = "synthetic-serial" if serial else "mt01-mt01-tests"
+    binding = dict(candidate_sha="a" * 40, source_sha256="b" * 64,
+                   environment_sha256="c" * 64, python_sha256="d" * 64,
+                   argv_sha256=mt.digest(mt.canonical(argv).encode()),
+                   registered_profile=profile, profile_argv=argv, platform="Windows",
+                   workers_requested=0 if serial else 12, scheduler="serial" if serial else "load",
+                   collection_scope=["tests/test_minimum_test.py"])
+    ids = [f"tests/test_minimum_test.py::test_observed[private-variant-{i}]" for i in range(count)]
+    workers = [f"gw{i}" for i in range(binding["workers_requested"])]
+    observation = dict(schema_version=mt.COLLECTION_SCHEMA_VERSION, provenance="SYNTHETIC",
+                       binding=copy.deepcopy(binding), collect_only=True, errors=[], session_exit_code=0,
+                       workers_started=workers.copy(), workers_finished=workers.copy(),
+                       worker_collections=[dict(worker_id=w, nodeids=ids.copy()) for w in workers],
+                       serial_nodeids=ids if serial else None,
+                       nodeids_sha256=mt.collection_nodeids_digest(ids),
+                       outcome=dict(exit_code=0, elapsed_seconds=1.25, timed_out=False,
+                                    source_before_sha256="b" * 64, source_after_sha256="b" * 64,
+                                    scratch_safe=True, outputs_safe=True, cleanup_complete=True,
+                                    output_bytes=0, artifact_bytes=0))
+    return dict(expected_binding=binding, registered_profiles={profile: argv.copy()}, observation=observation)
+
+
+def _assert_collection_hold(receipt, *, valid=False):
+    assert receipt["status"] == "HOLD"
+    assert receipt["hold_reason"] == "P1B_BOUNDED_WINDOWS_COLLECTION_EXECUTOR_REQUIRED"
+    assert receipt["acceptance_pass"] is False
+    assert receipt["trusted_windows_proof"] is False
+    assert receipt["tests_collected"] is None
+    assert receipt["tests_executed"] == (0 if valid else None)
+    assert "PASS" not in receipt.values()
+    assert "private-variant" not in mt.canonical(receipt)
+    assert len(mt.canonical(receipt)) < 4096
+
+
+def test_collection_ten_vs_ten_thousand_counts_parameterized_hook_identities():
+    small = mt.validate_collection_observation(**_collection_case(10))
+    large = mt.validate_collection_observation(**_collection_case(10_000))
+    assert small["collected_count"] == 10
+    assert large["collected_count"] == 10_000
+    assert small["nodeids_sha256"] != large["nodeids_sha256"]
+    for receipt in (small, large):
+        assert receipt["collection_status"] == "SYNTHETIC"
+        assert receipt["workers_observed"] == 12
+        assert receipt["worker_consistency"] == "CONSISTENT"
+        assert receipt["selected_test_paths"] == ["tests/test_minimum_test.py"]
+        assert len(receipt["environment_binding_sha256"]) == 64
+        _assert_collection_hold(receipt, valid=True)
+
+
+def test_collection_digest_matches_p0_but_worker_order_is_separate():
+    ids = ["tests/test_a.py::test_a[a\\b]", "./tests\\test_a.py::test_a[a/b]"]
+    assert mt.collection_nodeids_digest(ids) == verification.workload_nodeids_digest(ids)
+    assert mt.collection_nodeids_digest(ids) == mt.collection_nodeids_digest(ids[::-1])
+    assert mt.collection_nodeids_digest(ids[:1]) != mt.collection_nodeids_digest(ids[1:])
+    with pytest.raises(ValueError, match="DUPLICATE_NODEID"):
+        mt.collection_nodeids_digest([ids[0], "./tests\\test_a.py::test_a[a\\b]"])
+    inputs = _collection_case()
+    inputs["observation"]["worker_collections"][1]["nodeids"].reverse()
+    receipt = mt.validate_collection_observation(**inputs)
+    assert "COLLECTION_WORKER_ORDER_MISMATCH" in receipt["reason_codes"]
+    _assert_collection_hold(receipt)
+
+
+@pytest.mark.parametrize("case,reason", [
+    ("duplicate_id", "DUPLICATE_NODEID"),
+    ("empty_ids", "INVALID_NODEID_COUNT"),
+    ("oversized_ids", "INVALID_NODEID_COUNT"),
+    ("invalid_unicode", "INVALID_NODEID_ENCODING"),
+    ("missing_collection", "COLLECTION_MODE_MISMATCH"),
+    ("missing_started_worker", "COLLECTION_WORKERS_INCOMPLETE"),
+    ("missing_finished_worker", "COLLECTION_WORKERS_INCOMPLETE"),
+    ("duplicate_worker", "COLLECTION_WORKERS_INCOMPLETE"),
+    ("crash", "COLLECTION_PROCESS_FAILED"),
+    ("nonzero", "COLLECTION_PROCESS_FAILED"),
+    ("unfinished_session", "COLLECTION_SESSION_INCOMPLETE"),
+    ("serial_for_xdist", "COLLECTION_MODE_MISMATCH"),
+    ("digest", "COLLECTION_DIGEST_MISMATCH"),
+    ("scope", "COLLECTION_SCOPE_INCOMPLETE"),
+    ("traversal", "UNSUPPORTED_COLLECTION_SCOPE"),
+    ("source_mutation", "COLLECTION_SOURCE_MUTATED"),
+    ("source_before", "COLLECTION_SOURCE_MUTATED"),
+    ("timeout", "COLLECTION_TIMEOUT"),
+    ("elapsed", "COLLECTION_ELAPSED_INVALID"),
+    ("unsafe_temp", "COLLECTION_CONTAINMENT_UNPROVEN"),
+    ("unsafe_outputs", "COLLECTION_CONTAINMENT_UNPROVEN"),
+    ("incomplete_cleanup", "COLLECTION_CONTAINMENT_UNPROVEN"),
+    ("oversized_output", "COLLECTION_OUTPUT_OVERSIZED"),
+    ("oversized_artifact", "COLLECTION_OUTPUT_OVERSIZED"),
+    ("missing_outcome", "COLLECTION_OUTCOME_REQUIRED"),
+    ("runtime", "COLLECTION_CONTROLLER_INCOMPLETE"),
+    ("schema", "COLLECTION_SCHEMA_UNSUPPORTED"),
+    ("claimed_trust", "COLLECTION_PROVENANCE_UNPROVEN"),
+])
+def test_collection_negative_receipts_fail_closed_at_exit_zero(case, reason):
+    inputs = _collection_case()
+    record = inputs["observation"]
+    outcome = record["outcome"]
+    ids = record["worker_collections"][0]["nodeids"]
+    if case == "duplicate_id":
+        ids[1] = ids[0]
+    elif case == "empty_ids":
+        ids.clear()
+    elif case == "oversized_ids":
+        record["worker_collections"][0]["nodeids"] = [ids[0]] * 100_001
+    elif case == "invalid_unicode":
+        ids[0] = "tests/test_minimum_test.py::test_a[\ud800]"
+    elif case == "missing_collection":
+        record["worker_collections"].pop()
+    elif case == "missing_started_worker":
+        record["workers_started"].pop()
+    elif case == "missing_finished_worker":
+        record["workers_finished"].pop()
+    elif case == "duplicate_worker":
+        record["worker_collections"][-1]["worker_id"] = "gw0"
+    elif case in ("crash", "nonzero"):
+        outcome["exit_code"] = -1 if case == "crash" else 2
+    elif case == "unfinished_session":
+        record["session_exit_code"] = None
+    elif case == "serial_for_xdist":
+        record["serial_nodeids"] = ids.copy()
+    elif case == "digest":
+        record["nodeids_sha256"] = "f" * 64
+    elif case in ("scope", "traversal"):
+        for worker in record["worker_collections"]:
+            worker["nodeids"][0] = ("tests/test_other.py::test_a" if case == "scope"
+                                    else "tests/../secret.py::test_a")
+    elif case in ("source_mutation", "source_before"):
+        outcome["source_after_sha256" if case == "source_mutation" else "source_before_sha256"] = "f" * 64
+    elif case == "timeout":
+        outcome["timed_out"] = True
+    elif case == "elapsed":
+        outcome["elapsed_seconds"] = mt.COLLECTION_TIMEOUT_SECONDS + 1
+    elif case in ("unsafe_temp", "unsafe_outputs", "incomplete_cleanup"):
+        outcome[{"unsafe_temp": "scratch_safe", "unsafe_outputs": "outputs_safe",
+                 "incomplete_cleanup": "cleanup_complete"}[case]] = False
+    elif case in ("oversized_output", "oversized_artifact"):
+        outcome["output_bytes" if case == "oversized_output" else "artifact_bytes"] = 17 * 1024 * 1024
+    elif case == "missing_outcome":
+        del record["outcome"]
+    elif case == "runtime":
+        record["errors"] = ["COLLECTION_TEST_EXECUTION_OBSERVED"]
+    elif case == "schema":
+        record["schema_version"] = True
+    else:
+        record["provenance"] = "TRUSTED_OBSERVATION"
+    receipt = mt.validate_collection_observation(**inputs)
+    assert receipt["collection_status"] == "INVALID"
+    assert receipt["collected_count"] is None
+    assert reason in receipt["reason_codes"]
+    _assert_collection_hold(receipt)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("candidate_sha", "main"), ("source_sha256", "unknown"), ("python_sha256", None),
+    ("environment_sha256", None), ("argv_sha256", "f" * 64),
+    ("registered_profile", "unregistered"), ("platform", "Linux"),
+    ("workers_requested", True), ("scheduler", "worksteal"),
+    ("collection_scope", ["../tests"]), ("collection_scope", ["C:/tests"]),
+    ("collection_scope", ["tests/NUL.py"]), ("collection_scope", ["tests/test_a.py::test_a"]),
+    ("collection_scope", ["tests/test_minimum_test.py", "tests/test_minimum_test.py"]),
+])
+def test_collection_binding_rejects_missing_identity_unsafe_scope_or_drift(field, value):
+    inputs = _collection_case()
+    inputs["expected_binding"][field] = value
+    receipt = mt.validate_collection_observation(**inputs)
+    assert receipt["collection_status"] == "INVALID"
+    _assert_collection_hold(receipt)
+
+
+@pytest.mark.parametrize("field", ["candidate_sha", "source_sha256", "environment_sha256", "python_sha256"])
+def test_collection_observed_binding_must_match_separate_trusted_expectation(field):
+    inputs = _collection_case()
+    inputs["observation"]["binding"][field] = "f" * (40 if field == "candidate_sha" else 64)
+    receipt = mt.validate_collection_observation(**inputs)
+    assert "COLLECTION_IDENTITY_MISMATCH" in receipt["reason_codes"]
+    _assert_collection_hold(receipt)
+
+
+@pytest.mark.parametrize("argv", [
+    ["powershell", "-Command", "anything"],
+    ["python", "-m", "pytest", "tests/test_minimum_test.py", "-q", "-k", "case"],
+    ["python", "-m", "pytest", "tests/test_minimum_test.py", "-q", "-n", "auto"],
+    ["python", "-m", "pytest", "tests/test_minimum_test.py", "-q", "--collect-only"],
+])
+def test_collection_even_registered_arbitrary_argv_is_rejected(argv):
+    inputs = _collection_case()
+    binding = inputs["expected_binding"]
+    binding.update(profile_argv=argv, argv_sha256=mt.digest(mt.canonical(argv).encode()))
+    inputs["registered_profiles"][binding["registered_profile"]] = argv
+    receipt = mt.validate_collection_observation(**inputs)
+    assert "UNSAFE_COLLECTION_ARGV" in receipt["reason_codes"]
+    _assert_collection_hold(receipt)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -1, True, "1", 10**1000])
+def test_collection_elapsed_is_finite_bounded_and_typed(value):
+    inputs = _collection_case()
+    inputs["observation"]["outcome"]["elapsed_seconds"] = value
+    receipt = mt.validate_collection_observation(**inputs)
+    assert "COLLECTION_ELAPSED_INVALID" in receipt["reason_codes"]
+    _assert_collection_hold(receipt)
+
+
+def test_collection_serial_and_twelve_worker_observations_are_distinct():
+    inputs = _collection_case(serial=True)
+    receipt = mt.validate_collection_observation(**inputs)
+    assert receipt["workers_observed"] == 0
+    assert receipt["worker_consistency"] == "SERIAL"
+    _assert_collection_hold(receipt, valid=True)
+    inputs["observation"]["worker_collections"] = [dict(worker_id="gw0", nodeids=[])]
+    assert "COLLECTION_MODE_MISMATCH" in mt.validate_collection_observation(**inputs)["reason_codes"]
+
+
+def _collection_hook_snapshot(*, serial=False, missing=False, error=None):
+    inputs = _collection_case(serial=serial)
+    plugin = mt.collection_observer(binding=inputs["expected_binding"],
+                                    registered_profiles=inputs["registered_profiles"])
+    options = dict(collectonly=True, numprocesses=0 if serial else 12)
+    plugin.pytest_configure(SimpleNamespace(args=inputs["expected_binding"]["collection_scope"],
+                                            getoption=lambda key, default=None: options.get(key, default)))
+    record = inputs["observation"]
+    if serial:
+        plugin.pytest_collection_finish(SimpleNamespace(items=[SimpleNamespace(nodeid=n)
+                                        for n in record["serial_nodeids"]]))
+    else:
+        for worker in record["worker_collections"][:11 if missing else 12]:
+            node = SimpleNamespace(gateway=SimpleNamespace(id=worker["worker_id"]))
+            plugin.pytest_testnodeready(node)
+            plugin.pytest_xdist_node_collection_finished(node, worker["nodeids"])
+            plugin.pytest_testnodedown(node, error)
+    plugin.pytest_sessionfinish(None, 0)
+    inputs["observation"] = plugin.snapshot(outcome=record["outcome"])
+    return inputs, plugin
+
+
+@pytest.mark.parametrize("serial", [False, True])
+def test_collection_public_hooks_remain_untrusted_without_windows_executor(serial):
+    inputs, _ = _collection_hook_snapshot(serial=serial)
+    receipt = mt.validate_collection_observation(**inputs)
+    assert receipt["collection_status"] == "OBSERVED_UNTRUSTED"
+    assert receipt["provenance"] == "PYTEST_CONTROLLER"
+    assert receipt["collected_count"] == 10
+    _assert_collection_hold(receipt, valid=True)
+
+
+@pytest.mark.parametrize("case", ["missing", "crash", "duplicate", "runtime"])
+def test_collection_hook_worker_gaps_crashes_duplicates_and_execution_cannot_prove(case):
+    inputs, plugin = _collection_hook_snapshot(missing=case == "missing", error="crashed" if case == "crash" else None)
+    if case == "duplicate":
+        plugin.pytest_testnodeready(SimpleNamespace(gateway=SimpleNamespace(id="gw0")))
+    elif case == "runtime":
+        plugin.pytest_runtest_logreport(SimpleNamespace())
+    inputs["observation"] = plugin.snapshot(outcome=inputs["observation"]["outcome"])
+    receipt = mt.validate_collection_observation(**inputs)
+    assert receipt["collection_status"] == "INVALID"
+    _assert_collection_hold(receipt)
+
+
+def test_collection_observer_refuses_runtime_or_worker_installation():
+    inputs = _collection_case()
+    for collectonly, worker in ((False, False), (True, True)):
+        plugin = mt.collection_observer(binding=inputs["expected_binding"],
+                                        registered_profiles=inputs["registered_profiles"])
+        config = SimpleNamespace(args=inputs["expected_binding"]["collection_scope"],
+                                 getoption=lambda key, default=None: collectonly if key == "collectonly" else 12)
+        if worker:
+            config.workerinput = {}
+        with pytest.raises(ValueError, match="COLLECTION_CONTROLLER_COLLECT_ONLY_REQUIRED"):
+            plugin.pytest_configure(config)
+
+
+def test_collection_optional_hooks_register_without_xdist():
+    inputs = _collection_case(serial=True)
+    plugin = mt.collection_observer(binding=inputs["expected_binding"],
+                                    registered_profiles=inputs["registered_profiles"])
+    manager = pytest.PytestPluginManager()
+    manager.register(plugin)
+    manager.check_pending()
+
+
+@pytest.mark.parametrize("case", ["import_failure", "deselection", "duplicate_collection", "bad_ids"])
+def test_collection_hook_failures_are_not_hidden_by_exit_zero(case):
+    inputs, plugin = _collection_hook_snapshot()
+    if case == "import_failure":
+        plugin.pytest_collectreport(SimpleNamespace(failed=True))
+    elif case == "deselection":
+        plugin.pytest_deselected([SimpleNamespace()])
+    else:
+        worker = inputs["observation"]["worker_collections"][0]
+        node = SimpleNamespace(gateway=SimpleNamespace(id="gw0"))
+        if case == "bad_ids":
+            plugin.records.clear()
+            plugin.finished.clear()
+            worker["nodeids"][1] = worker["nodeids"][0]
+        plugin.pytest_xdist_node_collection_finished(node, worker["nodeids"])
+    inputs["observation"] = plugin.snapshot(outcome=inputs["observation"]["outcome"])
+    receipt = mt.validate_collection_observation(**inputs)
+    assert receipt["collection_status"] == "INVALID"
+    _assert_collection_hold(receipt)
+
+
+def test_collection_observer_caps_private_artifacts_and_keeps_snapshots_detached(monkeypatch):
+    inputs, plugin = _collection_hook_snapshot()
+    snapshot = plugin.snapshot(outcome=inputs["observation"]["outcome"])
+    snapshot["worker_collections"][0]["nodeids"].clear()
+    assert len(plugin.snapshot(outcome=inputs["observation"]["outcome"])["worker_collections"][0]["nodeids"]) == 10
+    monkeypatch.setattr(mt, "_COLLECTION_MAX_BYTES", 1)
+    receipt = mt.validate_collection_observation(**inputs)
+    assert "COLLECTION_ARTIFACT_OVERSIZED" in receipt["reason_codes"]
+    _assert_collection_hold(receipt)
+    with pytest.raises(ValueError, match="COLLECTION_ARTIFACT_OVERSIZED"):
+        plugin.snapshot(outcome=inputs["observation"]["outcome"])
+
+
+def test_collection_validator_is_deterministic_private_and_has_no_effects(monkeypatch):
+    import copy
+    inputs = _collection_case()
+    before = copy.deepcopy(inputs)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Collection validator performed an external effect")
+    monkeypatch.setattr(mt, "subprocess", SimpleNamespace(run=forbidden, Popen=forbidden))
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+    monkeypatch.setattr(Path, "write_bytes", forbidden)
+    receipt = mt.validate_collection_observation(**inputs)
+    assert receipt == mt.validate_collection_observation(**inputs)
+    assert inputs == before
+    assert receipt["argv_sha256"] == inputs["expected_binding"]["argv_sha256"]
+    _assert_collection_hold(receipt, valid=True)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_legacy_selector_mode(monkeypatch):
     """Legacy MT-01 contracts must not inherit the EF01 V2.1 selector toggle.
