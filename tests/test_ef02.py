@@ -611,11 +611,11 @@ def test_ef02_independent_receipt_accepts_correct_profile_and_rejects_alias(tmp_
         refs[key] = filename
         hashes[key] = hashlib.sha256(data).hexdigest()
 
-    store("tracked_diff", "tracked.patch", b"diff --git a/impl.py b/impl.py\\n")
+    store("tracked_diff", "tracked.patch", b"diff --git a/impl.py b/impl.py\n")
     store("source_after_verify", "source.after.json", b'{"clean": true}')
-    store("verify_stdout", "verify.stdout.log", b"1 passed\\n")
+    store("verify_stdout", "verify.stdout.log", b"1 passed\n")
     store("provider_return_observed", "provider-return.json", b'{"observed": true}')
-    passed = b"1 passed in 0.01s\\nMT01_XDIST_WORKERS_COLLECTED=12\\n"
+    passed = b"1 passed in 0.01s\nMT01_XDIST_WORKERS_COLLECTED=12\n"
     store("mt01_0_stdout", "mt01.stdout.log", passed)
     proof = Evidence.from_success(binding, exit_code=0, stdout=passed,
                                   artifacts={"stdout": refs["mt01_0_stdout"]},
@@ -645,6 +645,23 @@ def test_ef02_independent_receipt_accepts_correct_profile_and_rejects_alias(tmp_
     tampered = copy.deepcopy(report)
     tampered["evidence_sha256"]["tracked_diff"] = "0" * 64
     assert _verified_receipt_evidence(tampered, **args) is False
+    for bad_stdout in (
+        b"1 passed in 0.01s\n",
+        b"1 passed in 0.01s\nMT01_XDIST_WORKERS_COLLECTED=4\n",
+        b"1 passed in 0.01s\\nMT01_XDIST_WORKERS_COLLECTED=12\\n",
+    ):
+        bad_xdist = copy.deepcopy(report)
+        (root / "mt01.stdout.log").write_bytes(bad_stdout)
+        bad_xdist["evidence_sha256"]["mt01_0_stdout"] = hashlib.sha256(bad_stdout).hexdigest()
+        bad_proof = Evidence.from_success(
+            binding, exit_code=0, stdout=bad_stdout,
+            artifacts={"stdout": refs["mt01_0_stdout"]}, evidence_root=root)
+        (root / "mt01.evidence.json").write_bytes(bad_proof.payload.encode("utf-8"))
+        bad_xdist["evidence_sha256"]["mt01_0_evidence"] = bad_proof.sha256
+        bad_xdist["minimum_test"]["groups"][0]["evidence_sha256"] = bad_proof.sha256
+        diagnostics = []
+        assert _verified_receipt_evidence(bad_xdist, **args, diagnostics=diagnostics) is False
+        assert diagnostics == ["MT01_GROUP_0_XDIST_UNPROVEN"]
 
 # Minimal immutable retirement security regression; no WorkOwner runtime.
 import pytest
@@ -744,3 +761,120 @@ def test_agy_stream_p0b_opt_in_is_owner_only_and_does_not_affect_regular_ef02():
     assert "&& '1' || '0' }}" in expression
     assert "vars.EF02_AGY_STREAM_PROFILE" not in workflow
     assert "dangerously-skip-permissions" not in workflow
+
+
+def test_ef02_verified_receipt_accepts_committed_manifest_and_rejects_xdist_or_hash_tamper(tmp_path):
+    """EF02 independently verifies committed manifest bindings and -n 12 evidence."""
+    import copy
+    import subprocess
+    import sys
+    from ai_commerce.engineering.impact_v21 import registered_action_plan
+    from ai_commerce.engineering.minimum_test import (
+        Evidence, TestGroup, digest, file_hashes,
+    )
+    from ai_commerce.remote.worker import _verified_receipt_evidence
+
+    workspace = tmp_path / "worktree"
+    ev_root = tmp_path / "evidence"
+    workspace.mkdir()
+    ev_root.mkdir()
+
+    def git(*args):
+        return subprocess.run(
+            ["git", *args], cwd=workspace, check=True,
+            capture_output=True, text=True).stdout.strip()
+
+    def write(rel, content):
+        target = workspace / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8", newline="\n")
+
+    git("init", "-q")
+    git("config", "user.name", "MT01")
+    git("config", "user.email", "mt01@example.invalid")
+    git("config", "core.autocrlf", "false")
+    src = "src/ai_commerce/alpha/mod.py"
+    test_file = "tests/test_alpha.py"
+    write(src, "def val():\n    return 1\n")
+    write(test_file, "def test_alpha():\n    assert True\n")
+    manifest = {
+        "schema_version": "MT01ComponentOwner.v1", "component": "alpha",
+        "sources": [src], "tests": [test_file], "acs": ["ALPHA.offline"],
+        "consumers": [], "contracts": [],
+    }
+    write("work_items/mt01-components/alpha.json", json.dumps(manifest) + "\n")
+    git("add", ".")
+    git("commit", "-qm", "baseline")
+    base_sha = git("rev-parse", "HEAD")
+    base_files = file_hashes(workspace)
+
+    # Candidate edits only the owned source (manifest remains unchanged baseline).
+    write(src, "def val():\n    return 2\n")
+    profiles = {
+        "project-tests": ["python", "-m", "pytest", "tests", "-q", "-n", "12"],
+        "mt01-component-onboarding": [
+            "python", "-m", "pytest", "tests/test_mt01_v21.py", "-q", "-n", "12"],
+    }
+    plan = registered_action_plan(
+        repo=workspace, base_sha=base_sha, base_files=base_files,
+        candidate_files=file_hashes(workspace), changed_paths=[src],
+        required_acs=("ALPHA.offline",), fallback_argv=profiles["project-tests"],
+        groups=(), registered_profiles=profiles, allowed_paths=[src])
+    assert plan["selected_groups"] == ["alpha"]
+    binding = copy.deepcopy(plan["groups"][0]["binding"])
+    # Anchor python provenance deterministically for offline receipt creation.
+    binding["executable_sha256"] = digest(Path(sys.executable).read_bytes())
+    binding["environment_proven"] = True
+
+    refs, hashes = {}, {}
+
+    def store(key, filename, data):
+        (ev_root / filename).write_bytes(data)
+        refs[key] = filename
+        hashes[key] = hashlib.sha256(data).hexdigest()
+
+    store("tracked_diff", "tracked.patch", b"diff --git a/x b/x\n")
+    store("source_after_verify", "source.after.json", b'{"clean": true}')
+    store("verify_stdout", "verify.stdout.log", b"1 passed\n")
+    store("provider_return_observed", "provider-return.json", b'{"observed": true}')
+    passed = b"1 passed in 0.01s\nMT01_XDIST_WORKERS_COLLECTED=12\n"
+    store("mt01_0_stdout", "mt01.stdout.log", passed)
+    proof = Evidence.from_success(
+        binding, exit_code=0, stdout=passed,
+        artifacts={"stdout": refs["mt01_0_stdout"]}, evidence_root=ev_root)
+    store("mt01_0_evidence", "mt01.evidence.json", proof.payload.encode("utf-8"))
+
+    report = {
+        "verify_completed": True, "provider_return_determinate": True,
+        "evidence_files": refs, "evidence_sha256": hashes,
+        "tracked_diff_sha256": hashes["tracked_diff"],
+        "minimum_test_enabled": True, "changed_files": [src],
+        "minimum_test": {"groups": [
+            {"group": "alpha", "binding": binding, "evidence_sha256": proof.sha256},
+        ]},
+    }
+    args = dict(root=ev_root, workspace=workspace, source_sha=base_sha,
+                sources=[], profiles=profiles, allowed_paths=[src])
+    assert _verified_receipt_evidence(report, **args) is True
+
+    # Missing -n 12 worker collection marker -> rejected.
+    bad_xdist = copy.deepcopy(report)
+    bad_stdout = b"1 passed in 0.01s\nMT01_XDIST_WORKERS_COLLECTED=4\n"
+    (ev_root / "mt01.stdout.log").write_bytes(bad_stdout)
+    bad_xdist["evidence_sha256"]["mt01_0_stdout"] = hashlib.sha256(bad_stdout).hexdigest()
+    bad_proof = Evidence.from_success(
+        binding, exit_code=0, stdout=bad_stdout,
+        artifacts={"stdout": refs["mt01_0_stdout"]}, evidence_root=ev_root)
+    (ev_root / "mt01.evidence.json").write_bytes(bad_proof.payload.encode("utf-8"))
+    bad_xdist["evidence_sha256"]["mt01_0_evidence"] = bad_proof.sha256
+    bad_xdist["minimum_test"]["groups"][0]["evidence_sha256"] = bad_proof.sha256
+    diagnostics = []
+    assert _verified_receipt_evidence(bad_xdist, **args, diagnostics=diagnostics) is False
+    assert diagnostics == ["MT01_GROUP_0_XDIST_UNPROVEN"]
+
+    # Out-of-scope allowed_paths -> rejected.
+    diagnostics = []
+    assert _verified_receipt_evidence(
+        bad_xdist, **{**args, "allowed_paths": ["src/ai_commerce/other"]},
+        diagnostics=diagnostics) is False
+    assert diagnostics == ["MT01_GROUP_0_REGISTERED_BINDING_REJECTED"]

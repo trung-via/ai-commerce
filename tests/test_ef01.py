@@ -144,7 +144,7 @@ def test_agy_timeout_preserves_boundary_and_readonly_reconciliation(
         instruction="No live provider in this fixture",
         verify_argv=[sys.executable, "-c", "assert False"],
         allowed_prefixes=["partial.txt"], timeout_seconds=1,
-        action_timeout_seconds=1, max_repair_rounds=0)
+        action_timeout_seconds=30, max_repair_rounds=0)
     invocation = result["invocations"][0]
     assert result["status"] == "EXECUTION_UNKNOWN"
     assert result["error_code"] == "EXECUTOR_TIMEOUT"

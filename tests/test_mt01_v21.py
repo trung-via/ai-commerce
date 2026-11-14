@@ -1602,3 +1602,414 @@ def test_mt01_preflight_refuses_bad_profile_before_running_any_pytest():
     }}]}
     assert registered_binding_problems(valid_owner, profiles) == []
     # Still only a preflight; private manifest/evidence validation happens in EF02.
+
+
+def test_r2_committed_manifest_owners_resolve_under_ordinary_registered_actions():
+    """Committed manifests belong to the trusted owner graph on ordinary runs."""
+    import json
+    import subprocess
+    from ai_commerce.engineering.impact_v21 import (
+        load_baseline_component_owner_records, registered_action_plan,
+        verified_onboarding_binding,
+    )
+    from ai_commerce.engineering.minimum_test import approved_groups, file_hashes
+
+    root = Path(__file__).resolve().parents[1]
+    base_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    profiles = json.loads(
+        (root / ".github/ef02/verify-profiles.json").read_text(encoding="utf-8"))
+    static_groups = approved_groups()
+    baseline = load_baseline_component_owner_records(
+        root=root, base_sha=base_sha, existing_groups=static_groups)
+    names = {item["group"].name for item in baseline}
+    assert len(baseline) >= 47
+    assert {"hostops-personal", "b0-1", "wakehub-g2-native"} <= names
+    files = file_hashes(root)
+
+    # #859 regression: ordinary project-tests & mt01-ef01-tests see hostops-personal + closure.
+    personal_src = "src/ai_commerce/hostops_v3/personal.py"
+    for profile_name in ("project-tests", "mt01-ef01-tests"):
+        plan = registered_action_plan(
+            repo=root, base_sha=base_sha, base_files=files, candidate_files=files,
+            changed_paths=[personal_src], required_acs=(),
+            fallback_argv=profiles[profile_name], groups=static_groups,
+            registered_profiles=profiles, allowed_paths=[personal_src])
+        assert {"hostops-personal", "hostops-v3"} <= set(plan["selected_groups"])
+        assert plan["impact_v21"]["mode"] in ("TARGETED", "AFFECTED")
+        assert all(g["execute"] and g["state"] == "EXECUTE" for g in plan["groups"])
+        owned = next(g for g in plan["groups"] if g["group"] == "hostops-personal")
+        consumer = next(g for g in plan["groups"] if g["group"] == "hostops-v3")
+        assert owned["selected_profile"] == "mt01-component-onboarding"
+        assert owned["binding"]["onboarding_data_only"] is True
+        assert owned["binding"]["argv"] == [
+            "python", "-m", "pytest", "tests/test_hostops_personal.py", "-q", "-n", "12"]
+        assert verified_onboarding_binding(
+            workspace=root, binding=owned["binding"],
+            changed_paths=[personal_src], allowed_paths=[personal_src],
+            base_sha=base_sha, registered_profiles=profiles,
+            expected_group="hostops-personal")
+        assert consumer["selected_profile"] == "mt01-hostops-v3-tests"
+        assert consumer["binding"]["argv"] == profiles["mt01-hostops-v3-tests"]
+        assert "onboarding_data_only" not in consumer["binding"]
+
+    # Other committed manifests (b0-1, wakehub-g2-native) and static groups (ef01).
+    for src, expected_group in (
+        ("src/ai_commerce/production_runtime/state_machine.py", "b0-1"),
+        ("src/ai_commerce/wakehub/native_runtime.py", "wakehub-g2-native"),
+    ):
+        plan = registered_action_plan(
+            repo=root, base_sha=base_sha, base_files=files, candidate_files=files,
+            changed_paths=[src], required_acs=(),
+            fallback_argv=profiles["project-tests"], groups=static_groups,
+            registered_profiles=profiles)
+        assert expected_group in plan["selected_groups"]
+        assert all(g["execute"] for g in plan["groups"])
+
+    import runpy
+    from ai_commerce.engineering.impact_v21 import select_impact
+
+    oracle = runpy.run_path(str(root / ".github/scripts/mt01_v21_oracle.py"))
+    all_groups = (*static_groups, *(item["group"] for item in baseline))
+
+    # Minimal-scope static group positive check: engineering/__main__.py owns only ef01.
+    ef01_main = "src/ai_commerce/engineering/__main__.py"
+    ef01_min_plan = registered_action_plan(
+        repo=root, base_sha=base_sha, base_files=files, candidate_files=files,
+        changed_paths=[ef01_main], required_acs=(),
+        fallback_argv=profiles["project-tests"], groups=static_groups,
+        registered_profiles=profiles)
+    assert ef01_min_plan["selected_groups"] == ["ef01"]
+    assert ef01_min_plan["groups"][0]["execute"] is True
+    assert ef01_min_plan["groups"][0]["selected_profile"] == "mt01-ef01-tests"
+    assert "onboarding_data_only" not in ef01_min_plan["groups"][0]["binding"]
+    ok, reasons = oracle["check_selection"](
+        {
+            "version": 2,
+            "changed_paths": ef01_min_plan["changed_paths"],
+            "selected_tests": sorted({t for g in ef01_min_plan["groups"] for t in g["binding"]["mapping"]["tests"]}),
+            "selected_groups": ef01_min_plan["selected_groups"],
+        },
+        base_groups=all_groups, candidate_groups=(),
+        changed_paths={ef01_main}, present_paths=set(files))
+    assert ok, reasons
+
+    # engineering/runner.py is imported by engineering/__init__.py and listed across
+    # multiple static groups: verify its deterministic owner+consumer closure and oracle match.
+    runner_src = "src/ai_commerce/engineering/runner.py"
+    expected_runner_impact = select_impact(
+        root=root, changed_paths=[runner_src], groups=all_groups, base_sha=base_sha)
+    ef01_plan = registered_action_plan(
+        repo=root, base_sha=base_sha, base_files=files, candidate_files=files,
+        changed_paths=[runner_src], required_acs=(),
+        fallback_argv=profiles["project-tests"], groups=static_groups,
+        registered_profiles=profiles)
+    assert ef01_plan["impact_v21"]["mode"] == "AFFECTED"
+    assert ef01_plan["selected_groups"] == list(expected_runner_impact.selected_groups)
+    assert {
+        "ef01", "repair", "integrity", "provider", "ef02-scope",
+        "mt01", "ef01p", "diagnostics", "ef01-agy-stream",
+    } <= set(ef01_plan["selected_groups"])
+    assert all(g["execute"] and g["state"] == "EXECUTE" for g in ef01_plan["groups"])
+    ef01_entry = next(g for g in ef01_plan["groups"] if g["group"] == "ef01")
+    assert ef01_entry["selected_profile"] == "mt01-ef01-tests"
+    assert "onboarding_data_only" not in ef01_entry["binding"]
+    ok, reasons = oracle["check_selection"](
+        {
+            "version": 2,
+            "changed_paths": ef01_plan["changed_paths"],
+            "selected_tests": sorted({t for g in ef01_plan["groups"] for t in g["binding"]["mapping"]["tests"]}),
+            "selected_groups": ef01_plan["selected_groups"],
+        },
+        base_groups=all_groups, candidate_groups=(),
+        changed_paths={runner_src}, present_paths=set(files))
+    assert ok, reasons
+
+    # Serial profile on a manifest-owned component MUST HOLD (never silently upgrade to -n 12).
+    serial_plan = registered_action_plan(
+        repo=root, base_sha=base_sha, base_files=files, candidate_files=files,
+        changed_paths=[personal_src], required_acs=(),
+        fallback_argv=profiles["project-tests-serial"], groups=static_groups,
+        registered_profiles=profiles, allowed_paths=[personal_src])
+    assert all(not g["execute"] and g["state"] == "UNPROVEN" for g in serial_plan["groups"])
+    assert serial_plan["impact_v21"]["mode"] == "HOLD_COVERAGE"
+    assert "hostops-personal:SERIAL_MANIFEST_OWNER_PROFILE_UNPROVEN" in serial_plan["reason_codes"]
+
+    # Unexpected AC on a manifest-owned component MUST HOLD.
+    bad_ac = registered_action_plan(
+        repo=root, base_sha=base_sha, base_files=files, candidate_files=files,
+        changed_paths=[personal_src], required_acs=("HOSTOPS.unexpected",),
+        fallback_argv=profiles["project-tests"], groups=static_groups,
+        registered_profiles=profiles, allowed_paths=[personal_src])
+    assert all(not g["execute"] and g["state"] == "UNPROVEN" for g in bad_ac["groups"])
+    assert bad_ac["pending_brain_acs"] == []
+    assert bad_ac["impact_v21"]["mode"] == "HOLD_COVERAGE"
+    assert "ONBOARD_UNKNOWN_AC:HOSTOPS.unexpected" in bad_ac["reason_codes"]
+
+
+def _r2_git_repo(tmp_path):
+    import json
+    import subprocess
+    from ai_commerce.engineering.minimum_test import TestGroup, file_hashes
+
+    def git(*args):
+        return subprocess.run(
+            ["git", *args], cwd=tmp_path, check=True,
+            capture_output=True, text=True).stdout.strip()
+
+    def write(rel, content="def ok():\n    return True\n"):
+        target = tmp_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8", newline="\n")
+
+    git("init", "-q")
+    git("config", "user.name", "MT01")
+    git("config", "user.email", "mt01@example.invalid")
+    git("config", "core.autocrlf", "false")
+    write("src/ai_commerce/prior/mod.py")
+    write("tests/test_prior.py", "def test_prior():\n    assert True\n")
+    write("src/ai_commerce/alpha/mod.py")
+    write("tests/test_alpha.py", "def test_alpha():\n    assert True\n")
+    write("contracts/Alpha.v1.schema.json", "{}\n")
+    alpha = {
+        "schema_version": "MT01ComponentOwner.v1",
+        "component": "alpha",
+        "sources": ["src/ai_commerce/alpha/mod.py"],
+        "tests": ["tests/test_alpha.py"],
+        "acs": ["ALPHA.offline"],
+        "consumers": ["src/ai_commerce/prior/mod.py"],
+        "contracts": ["contracts/Alpha.v1.schema.json"],
+    }
+    write("work_items/mt01-components/alpha.json", json.dumps(alpha, indent=2) + "\n")
+    git("add", ".")
+    git("commit", "-qm", "baseline")
+    base_sha = git("rev-parse", "HEAD")
+    prior = TestGroup(
+        "prior", ("tests/test_prior.py",), ("PRIOR.offline",),
+        ("src/ai_commerce/prior/mod.py",), (), ())
+    profiles = {
+        "project-tests": ["python", "-m", "pytest", "tests", "-q", "-n", "12"],
+        "project-tests-serial": ["python", "-m", "pytest", "tests", "-q"],
+        "mt01-prior-tests": ["python", "-m", "pytest", "tests/test_prior.py", "-q", "-n", "12"],
+        "mt01-component-onboarding": [
+            "python", "-m", "pytest", "tests/test_mt01_v21.py", "-k", "onboarding", "-q", "-n", "12"],
+    }
+    return {
+        "git": git, "write": write, "base_sha": base_sha, "alpha": alpha,
+        "groups": (prior,), "profiles": profiles,
+        "base_files": file_hashes(tmp_path),
+    }
+
+
+def test_r2_baseline_manifest_rejects_crlf_tamper_missing_link_cycle_and_duplicates(tmp_path, monkeypatch):
+    import json
+    from ai_commerce.engineering.impact_v21 import (
+        load_baseline_component_owner_records, registered_action_plan,
+    )
+    from ai_commerce.engineering.minimum_test import file_hashes
+
+    ctx = _r2_git_repo(tmp_path)
+    src = "src/ai_commerce/alpha/mod.py"
+    ctx["write"](src, "def ok():\n    return 2\n")
+
+    def run_plan(base_sha=ctx["base_sha"]):
+        return registered_action_plan(
+            repo=tmp_path, base_sha=base_sha, base_files=ctx["base_files"],
+            candidate_files=file_hashes(tmp_path), changed_paths=[src],
+            required_acs=("ALPHA.offline",),
+            fallback_argv=ctx["profiles"]["project-tests"],
+            groups=ctx["groups"], registered_profiles=ctx["profiles"],
+            allowed_paths=[src])
+
+    ok = run_plan()
+    assert ok["selected_groups"] == ["alpha", "prior"]
+    assert all(g["execute"] for g in ok["groups"])
+
+    # Wrong base SHA -> fail closed.
+    bad_base = run_plan(base_sha="0" * 40)
+    assert all(not g["execute"] for g in bad_base["groups"])
+    assert any("ONBOARD_INVALID_BASELINE:ONBOARD_BASE_TREE_UNAVAILABLE" in c for c in bad_base["reason_codes"])
+
+    # CRLF drift in committed manifest -> strict byte check rejects it.
+    manifest_file = tmp_path / "work_items/mt01-components/alpha.json"
+    orig_bytes = manifest_file.read_bytes()
+    manifest_file.write_bytes(orig_bytes.replace(b"\n", b"\r\n"))
+    crlf = run_plan()
+    assert all(not g["execute"] for g in crlf["groups"])
+    assert crlf["impact_v21"]["mode"] == "HOLD_COVERAGE"
+    assert any("ONBOARD_INVALID_BASELINE:ONBOARD_BASELINE_MANIFEST_DRIFT" in c for c in crlf["reason_codes"])
+
+    # Byte tamper -> rejected.
+    manifest_file.write_text(json.dumps({**ctx["alpha"], "acs": ["TAMPERED"]}), encoding="utf-8")
+    tamper = run_plan()
+    assert all(not g["execute"] for g in tamper["groups"])
+    assert any("ONBOARD_INVALID_BASELINE:ONBOARD_BASELINE_MANIFEST_DRIFT" in c for c in tamper["reason_codes"])
+
+    # Missing manifest -> rejected.
+    manifest_file.unlink()
+    missing = run_plan()
+    assert all(not g["execute"] for g in missing["groups"])
+    assert any("ONBOARD_INVALID_BASELINE:ONBOARD_BASELINE_MANIFEST_MISSING" in c for c in missing["reason_codes"])
+    manifest_file.write_bytes(orig_bytes)
+
+    # Ancestor symlink guard -> rejected before reading bytes.
+    cand_files = file_hashes(tmp_path)
+    components_dir = tmp_path / "work_items/mt01-components"
+    components_resolved = components_dir.resolve()
+    orig_is_symlink = Path.is_symlink
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            Path, "is_symlink",
+            lambda self: self in (components_dir, components_resolved) or orig_is_symlink(self))
+        linked = registered_action_plan(
+            repo=tmp_path, base_sha=ctx["base_sha"], base_files=ctx["base_files"],
+            candidate_files=cand_files, changed_paths=[src],
+            required_acs=("ALPHA.offline",),
+            fallback_argv=ctx["profiles"]["project-tests"],
+            groups=ctx["groups"], registered_profiles=ctx["profiles"],
+            allowed_paths=[src])
+    assert all(not g["execute"] for g in linked["groups"])
+    assert any("ONBOARD_INVALID_BASELINE:ONBOARD_UNSAFE_PARENT_LINK" in c for c in linked["reason_codes"])
+
+    # Duplicate AC across committed manifests -> rejected.
+    ctx["write"]("src/ai_commerce/beta/mod.py")
+    ctx["write"]("tests/test_beta.py", "def test_beta():\n    assert True\n")
+    beta_base = {
+        "schema_version": "MT01ComponentOwner.v1", "component": "beta",
+        "sources": ["src/ai_commerce/beta/mod.py"], "tests": ["tests/test_beta.py"],
+        "acs": ["ALPHA.offline"], "consumers": [], "contracts": [],
+    }
+    ctx["write"]("work_items/mt01-components/beta.json", json.dumps(beta_base) + "\n")
+    ctx["git"]("add", ".")
+    ctx["git"]("commit", "-qm", "dup-ac")
+    dup_ac_sha = ctx["git"]("rev-parse", "HEAD")
+    dup_ac = run_plan(base_sha=dup_ac_sha)
+    assert all(not g["execute"] for g in dup_ac["groups"])
+    assert any("ONBOARD_INVALID_BASELINE:ONBOARD_DUPLICATE_AC" in c for c in dup_ac["reason_codes"])
+
+    # Duplicate source ownership across committed manifests -> rejected.
+    beta_dup_src = {**beta_base, "acs": ["BETA.offline"],
+                    "sources": ["src/ai_commerce/beta/mod.py", "src/ai_commerce/alpha/mod.py"]}
+    ctx["write"]("work_items/mt01-components/beta.json", json.dumps(beta_dup_src) + "\n")
+    ctx["git"]("add", "work_items/mt01-components/beta.json")
+    ctx["git"]("commit", "-qm", "dup-src")
+    dup_src = run_plan(base_sha=ctx["git"]("rev-parse", "HEAD"))
+    assert all(not g["execute"] for g in dup_src["groups"])
+    assert any("ONBOARD_BASELINE_DUPLICATE_SOURCE_OWNER" in c for c in dup_src["reason_codes"])
+
+    # Dependency cycle across committed manifests -> rejected.
+    ctx["write"]("work_items/mt01-components/beta.json", json.dumps({
+        **beta_base, "acs": ["BETA.offline"],
+        "consumers": ["src/ai_commerce/alpha/mod.py"],
+    }) + "\n")
+    ctx["write"]("work_items/mt01-components/alpha.json", json.dumps({
+        **ctx["alpha"], "consumers": ["src/ai_commerce/beta/mod.py"],
+    }) + "\n")
+    ctx["git"]("add", "work_items/mt01-components/")
+    ctx["git"]("commit", "-qm", "cycle")
+    cycle_sha = ctx["git"]("rev-parse", "HEAD")
+    cycle = run_plan(base_sha=cycle_sha)
+    assert all(not g["execute"] for g in cycle["groups"])
+    assert any("ONBOARD_BASELINE_DEPENDENCY_CYCLE" in c for c in cycle["reason_codes"])
+    import pytest
+    with pytest.raises(ValueError, match="ONBOARD_BASELINE_DEPENDENCY_CYCLE"):
+        load_baseline_component_owner_records(
+            root=tmp_path, base_sha=cycle_sha, existing_groups=ctx["groups"])
+
+
+def test_r2_negatives_unowned_edit_missing_capability_and_binding_tampering(tmp_path, monkeypatch):
+    import copy
+    import json
+    from ai_commerce.engineering import minimum_test as mt
+    from ai_commerce.engineering.impact_v21 import (
+        registered_action_plan, verified_onboarding_binding,
+    )
+    from ai_commerce.engineering.minimum_test import file_hashes
+
+    ctx = _r2_git_repo(tmp_path)
+    monkeypatch.setattr(mt, "approved_groups", lambda: ctx["groups"])
+    src = "src/ai_commerce/alpha/mod.py"
+    ctx["write"](src, "def ok():\n    return 3\n")
+    files = file_hashes(tmp_path)
+
+    # Non-onboarding action touching work_items/mt01-components/* -> ONBOARD_EXPLICIT_INGRESS_REQUIRED.
+    ctx["write"]("work_items/mt01-components/rogue.json", "{}")
+    rogue = registered_action_plan(
+        repo=tmp_path, base_sha=ctx["base_sha"], base_files=ctx["base_files"],
+        candidate_files=file_hashes(tmp_path),
+        changed_paths=[src, "work_items/mt01-components/rogue.json"],
+        required_acs=(), fallback_argv=ctx["profiles"]["project-tests"],
+        groups=ctx["groups"], registered_profiles=ctx["profiles"],
+        allowed_paths=[src, "work_items/mt01-components/rogue.json"])
+    assert all(not g["execute"] for g in rogue["groups"])
+    assert "ONBOARD_EXPLICIT_INGRESS_REQUIRED" in rogue["reason_codes"]
+    (tmp_path / "work_items/mt01-components/rogue.json").unlink()
+
+    # Missing onboarding capability -> HOLD (never falls back to project-tests).
+    no_cap = registered_action_plan(
+        repo=tmp_path, base_sha=ctx["base_sha"], base_files=ctx["base_files"],
+        candidate_files=files, changed_paths=[src], required_acs=(),
+        fallback_argv=ctx["profiles"]["project-tests"], groups=ctx["groups"],
+        registered_profiles={k: v for k, v in ctx["profiles"].items()
+                             if k != "mt01-component-onboarding"},
+        allowed_paths=[src])
+    assert all(not g["execute"] for g in no_cap["groups"])
+    assert "alpha:REGISTERED_PROFILE_REQUIRED" in no_cap["reason_codes"]
+
+    # Non-parallel onboarding capability -> HOLD.
+    serial_cap = registered_action_plan(
+        repo=tmp_path, base_sha=ctx["base_sha"], base_files=ctx["base_files"],
+        candidate_files=files, changed_paths=[src], required_acs=(),
+        fallback_argv=ctx["profiles"]["project-tests"], groups=ctx["groups"],
+        registered_profiles={**ctx["profiles"],
+                             "mt01-component-onboarding": ["python", "-m", "pytest", "tests", "-q"]},
+        allowed_paths=[src])
+    assert all(not g["execute"] for g in serial_cap["groups"])
+    assert "alpha:ONBOARD_CAPABILITY_INVALID" in serial_cap["reason_codes"]
+
+    # Unowned source / unregistered test -> HOLD.
+    ctx["write"]("src/ai_commerce/unowned/mod.py", "x = 1\n")
+    unowned = registered_action_plan(
+        repo=tmp_path, base_sha=ctx["base_sha"], base_files=ctx["base_files"],
+        candidate_files=file_hashes(tmp_path),
+        changed_paths=["src/ai_commerce/unowned/mod.py"], required_acs=(),
+        fallback_argv=ctx["profiles"]["project-tests"], groups=ctx["groups"],
+        registered_profiles=ctx["profiles"])
+    assert all(not g["execute"] for g in unowned["groups"])
+    assert unowned["impact_v21"]["mode"] == "HOLD_MAPPING"
+    assert "src/ai_commerce/unowned/mod.py:SOURCE_OWNERSHIP_REQUIRED" in unowned["impact_v21"]["missing_mapping"]
+    unreg_test = registered_action_plan(
+        repo=tmp_path, base_sha=ctx["base_sha"], base_files=ctx["base_files"],
+        candidate_files=files, changed_paths=["tests/test_unregistered.py"],
+        required_acs=(), fallback_argv=ctx["profiles"]["project-tests"],
+        groups=ctx["groups"], registered_profiles=ctx["profiles"])
+    assert all(not g["execute"] for g in unreg_test["groups"])
+
+    # Valid binding passes verified_onboarding_binding; tampered variants return False.
+    ok_plan = registered_action_plan(
+        repo=tmp_path, base_sha=ctx["base_sha"], base_files=ctx["base_files"],
+        candidate_files=files, changed_paths=[src], required_acs=("ALPHA.offline",),
+        fallback_argv=ctx["profiles"]["project-tests"], groups=ctx["groups"],
+        registered_profiles=ctx["profiles"], allowed_paths=[src])
+    binding = next(g["binding"] for g in ok_plan["groups"] if g["group"] == "alpha")
+    kw = dict(workspace=tmp_path, binding=binding, changed_paths=[src],
+              allowed_paths=[src], base_sha=ctx["base_sha"],
+              registered_profiles=ctx["profiles"], expected_group="alpha")
+    assert verified_onboarding_binding(**kw) is True
+    assert verified_onboarding_binding(**{**kw, "allowed_paths": []}) is False
+    assert verified_onboarding_binding(**{**kw, "allowed_paths": ["src/ai_commerce/other"]}) is False
+    assert verified_onboarding_binding(**{**kw, "base_sha": "0" * 40}) is False
+    assert verified_onboarding_binding(**{
+        **kw, "registered_profiles": {**ctx["profiles"],
+                                      "mt01-component-onboarding": ["python", "-m", "pytest", "tests", "-q"]},
+    }) is False
+    for mut in (
+        lambda b: b.update(argv=["python", "-m", "pytest", "tests/test_alpha.py", "-q"]),
+        lambda b: b.update(selected_impact_tests=["tests/test_alpha.py"]),
+        lambda b: b["mapping"].update(tests=[]),
+        lambda b: b["candidate_files"].update({src: "0" * 64}),
+        lambda b: b.update(registered_profile="project-tests"),
+    ):
+        bad = copy.deepcopy(binding)
+        mut(bad)
+        assert verified_onboarding_binding(**{**kw, "binding": bad}) is False
