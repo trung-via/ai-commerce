@@ -2579,3 +2579,24 @@ def test_mt01_windows_real_subprocess_xdist_junit_winerror1314_and_replay_holds(
         assert replay_plan["groups"][1]["result"] == "UNPROVEN", (case_name, replay_plan["groups"][1])
         assert replay_plan["groups"][1]["reason"] == "NOT_EXECUTED_AFTER_UNPROVEN_GROUP", case_name
         assert not list((fix.evidence / f"replay-{case_name}").glob("*.evidence.json")), case_name
+
+
+def test_v21_select_plan_loads_committed_manifests_under_project_tests(monkeypatch, real_tree):
+    """V2.1 select_plan honors committed manifest owners even for non-onboarding project-tests."""
+    monkeypatch.setenv("MT01_V21_ENABLED", "1")
+    profiles = json.loads(
+        (ROOT / ".github/ef02/verify-profiles.json").read_text(encoding="utf-8"))
+    head_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    changed = "src/ai_commerce/hostops_v3/personal.py"
+    plan = mt.select_plan(
+        repo=ROOT, base_sha=head_sha,
+        base_files=real_tree.files, candidate_files=real_tree.files,
+        changed_paths=[changed], required_acs=(),
+        fallback_argv=profiles["project-tests"],
+        groups=mt.approved_groups(),
+        registered_only=True, registered_profiles=profiles,
+        allowed_paths=[changed])
+    assert plan["version"] == 2 and not plan["fallback"]
+    assert {"hostops-personal", "hostops-v3"} <= set(plan["selected_groups"])
+    assert all(g["execute"] and g["state"] == "EXECUTE" for g in plan["groups"])
