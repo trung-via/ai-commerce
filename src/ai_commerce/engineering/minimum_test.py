@@ -597,6 +597,12 @@ def select_plan(*, repo: Path, base_sha: str, base_files: Mapping[str, str],
         (scope_args[0] == "." or all(t.startswith("tests/") for t in required_tests)))
     if human_full_suite_authorized:
         reasons.append("AUTHENTICATED_HUMAN_EXPLICIT_FULL_SUITE")
+        # A full test run cannot establish an AC with no reviewed owner.
+        # Do not let the broader command silently turn an unknown contract
+        # into a passing acceptance receipt.
+        if set(required_acs) - {ac for g in groups for ac in g.acs}:
+            reasons.append("HUMAN_FULL_AC_MAPPING_UNPROVEN")
+            fallback_proven_scope = False
     if reasons:
         # An approved full profile is a conservative proof for all applicable ACs.
         # Caller must supply the broader approved scope; no command is synthesized.
