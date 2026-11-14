@@ -1056,6 +1056,243 @@ def test_bounded_windows_collection_cannot_accept_caller_isolation_flags(overrid
         mt.bounded_windows_collection(**_bounded_collection_case(), **{override: True})
 
 
+# P1-B2b: every fixture/mock below is SYNTHETIC, never native Windows proof.
+def _synthetic_windows_provider_case():
+    """SYNTHETIC declarations only; no source reads, native probes or children."""
+    binding = _bounded_collection_case()["collection_binding"]
+    scratch = "C:/mt01-private-probe/scratch"
+    files = {"tests/test_minimum_test.py": "e" * 64,
+             "src/ai_commerce/engineering/minimum_test.py": "f" * 64}
+    env = dict(mt._WINDOWS_PROVIDER_ENV, TEMP=scratch, TMP=scratch)
+    binding.update(source_sha256=mt.digest(mt.canonical(files).encode()),
+                   environment_sha256=mt.digest(mt.canonical(env).encode()))
+    request = dict(security_capability="APPCONTAINER_NO_CAPABILITIES",
+                   source_root="C:/mt01-private-probe/source", scratch_root=scratch,
+                   source_files=files, environment=env)
+    inputs = dict(enabled=True, binding=binding, request=request)
+    receipt = mt.windows_collection_provider_preflight(**inputs)
+    inputs["probe"] = dict(
+        provenance="SYNTHETIC", binding_sha256=receipt["binding_sha256"],
+        request_sha256=receipt["request_sha256"], source_after_sha256=binding["source_sha256"],
+        environment_after_sha256=binding["environment_sha256"], python_sha256=binding["python_sha256"],
+        security_capability="APPCONTAINER_NO_CAPABILITIES", capabilities=[], job_limit_flags=0x2000,
+        events=["CREATE_SUSPENDED", "ASSIGN_JOB", "CONFIRM_JOB", "RESUME",
+                "CHILD_AND_DESCENDANT_READY", "CLOSE_LAST_JOB_HANDLE", "WAIT_CHILD_SIGNALED",
+                "WAIT_DESCENDANT_SIGNALED", "CLEANUP_COMPLETE"],
+        denials={name: dict(api="connect/WSAGetLastError" if name == "loopback_connect"
+                           else "CreateFileW/GetLastError", error=code, control_succeeded=True)
+                 for name, code in (("outside_scratch_read", 5), ("readonly_source_write", 5),
+                                    ("junction_escape_read", 5), ("loopback_connect", 10013))},
+        exit_code=0, timed_out=False, orphan_count=0, cleanup_complete=True,
+        elapsed_seconds=1.0, output_bytes=0, artifact_bytes=0)
+    return inputs
+
+
+def _assert_windows_provider_unproven(receipt):
+    assert receipt["status"] == "HOLD"
+    assert receipt["scope_verdict"] == "SOURCE_ONLY_PARTIAL"
+    assert receipt["native_isolation"] == "UNPROVEN"
+    assert receipt["hold_reason"] == mt._WINDOWS_COLLECTION_HOLD
+    assert receipt["execution_status"] == "NOT_STARTED"
+    assert receipt["trusted_windows_proof"] is receipt["acceptance_pass"] is False
+    assert receipt["cleanup_complete"] is False
+    assert receipt["tests_executed"] == 0
+    assert receipt["tests_collected"] is None
+    assert receipt["blockers"] == list(mt._WINDOWS_PROVIDER_BLOCKERS)
+    public = mt.canonical(receipt)
+    assert "mt01-private-probe" not in public
+    assert "private-secret" not in public
+    assert len(public) < 4096
+    assert "PASS" not in receipt.values()
+
+
+@pytest.mark.parametrize("enabled", [False, None, 0, 1, "true"])
+def test_windows_provider_synthetic_disabled_never_inspects_inputs_or_host(monkeypatch, enabled):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("SYNTHETIC preflight cannot access the host")
+    monkeypatch.setattr(mt, "subprocess", SimpleNamespace(run=forbidden, Popen=forbidden))
+    monkeypatch.setattr(mt, "collection_observer", forbidden)
+    monkeypatch.setattr(mt, "windows_collection_native_support", forbidden)
+    monkeypatch.setattr(mt, "environment", forbidden)
+    monkeypatch.setattr(Path, "resolve", forbidden)
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+    monkeypatch.setattr(Path, "write_bytes", forbidden)
+    receipt = mt.windows_collection_provider_preflight(enabled=enabled, binding=object(),
+                                                      request=object(), probe=object())
+    assert receipt["reason_codes"] == ["COLLECTION_OPT_IN_REQUIRED"]
+    _assert_windows_provider_unproven(receipt)
+    active = mt.windows_collection_provider_preflight(**_synthetic_windows_provider_case())
+    assert active["probe_status"] == "SYNTHETIC"
+    _assert_windows_provider_unproven(active)
+
+
+@pytest.mark.parametrize("provenance", ["SYNTHETIC", "WINDOWS_NATIVE_UNVERIFIED"])
+def test_windows_provider_synthetic_complete_claims_never_promote_acceptance(provenance):
+    import copy
+    inputs = _synthetic_windows_provider_case()
+    inputs["probe"]["provenance"] = provenance
+    before = copy.deepcopy(inputs)
+    receipt = mt.windows_collection_provider_preflight(**inputs)
+    assert receipt["request_status"] == "DECLARED_UNTRUSTED"
+    assert receipt["probe_status"] == ("SYNTHETIC" if provenance == "SYNTHETIC"
+                                       else "DECLARED_UNTRUSTED")
+    assert len(receipt["probe_sha256"]) == 64
+    assert "WINDOWS_NATIVE_PROOF_NOT_INDEPENDENTLY_ATTESTED" in receipt["reason_codes"]
+    assert inputs == before
+    _assert_windows_provider_unproven(receipt)
+    receipt["blockers"].clear()
+    assert mt.windows_collection_provider_preflight(**inputs)["blockers"]
+
+
+@pytest.mark.parametrize("case,reason", [
+    ("mode", "COLLECTION_ONLY_PROFILE_SELECTION_REQUIRED"),
+    ("profile", "UNREGISTERED_COLLECTION_ARGV"),
+    ("flags", "UNREGISTERED_COLLECTION_ARGV"),
+    ("registry", "COLLECTION_REGISTRY_DIGEST_MISMATCH"),
+    ("capability", "WINDOWS_SECURITY_CAPABILITY_UNSUPPORTED"),
+    ("source_digest", "WINDOWS_PROVIDER_SOURCE_DIGEST_MISMATCH"),
+    ("env_digest", "WINDOWS_PROVIDER_ENVIRONMENT_DIGEST_MISMATCH"),
+    ("overlap", "WINDOWS_PROVIDER_ROOTS_OVERLAP"),
+    ("case_alias", "WINDOWS_PROVIDER_MANIFEST_INVALID"),
+    ("scope", "WINDOWS_PROVIDER_MANIFEST_SCOPE_MISSING"),
+    ("oversized", "WINDOWS_PROVIDER_MANIFEST_INVALID"),
+])
+def test_windows_provider_synthetic_wrong_profile_capability_or_fingerprints(case, reason):
+    inputs = _synthetic_windows_provider_case()
+    binding, request = inputs["binding"], inputs["request"]
+    if case == "mode":
+        binding["profile_mode"] = "AUTO"
+    elif case == "profile":
+        binding["registered_profile"] = "mt01-mt01-tests"
+    elif case == "flags":
+        binding["profile_argv"] += ["-p", "private-secret"]
+    elif case == "registry":
+        binding["registry_sha256"] = "0" * 64
+    elif case == "capability":
+        request["security_capability"] = "RESTRICTED_TOKEN"
+    elif case in ("source_digest", "env_digest"):
+        binding["source_sha256" if case == "source_digest" else "environment_sha256"] = "0" * 64
+    elif case == "overlap":
+        request["scratch_root"] = request["source_root"].upper() + "/child"
+    elif case == "case_alias":
+        request["source_files"]["TESTS/TEST_MINIMUM_TEST.PY"] = "e" * 64
+    elif case == "scope":
+        del request["source_files"]["tests/test_minimum_test.py"]
+    else:
+        request["source_files"] = {f"src/f{i}.py": "e" * 64 for i in range(4097)}
+    receipt = mt.windows_collection_provider_preflight(**inputs)
+    assert reason in receipt["reason_codes"]
+    assert receipt["request_sha256"] is None
+    _assert_windows_provider_unproven(receipt)
+
+
+@pytest.mark.parametrize("path", ["../private-secret", "C:/source/../private-secret",
+    "//server/share", "//?/C:/source", "C:relative", "C:/source:stream", "C:/source/NUL.py",
+    "C:/source./child", "C:/source /child", "C:/source//child", "C:/source\nprivate-secret"])
+def test_windows_provider_synthetic_unsafe_windows_paths_fail_closed(path):
+    inputs = _synthetic_windows_provider_case()
+    inputs["request"]["source_root"] = path
+    receipt = mt.windows_collection_provider_preflight(**inputs)
+    assert "WINDOWS_PROVIDER_UNSAFE_PATH" in receipt["reason_codes"]
+    _assert_windows_provider_unproven(receipt)
+
+
+@pytest.mark.parametrize("key", ["GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "PYTHONPATH", "PATH",
+                                  "PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTHONSTARTUP", "TEMP"])
+def test_windows_provider_synthetic_secret_and_unsafe_environment_is_rejected(key):
+    inputs = _synthetic_windows_provider_case()
+    inputs["request"]["environment"][key] = "private-secret"
+    # A matching digest cannot authorize a secret or pytest/Python override.
+    inputs["binding"]["environment_sha256"] = mt.digest(
+        mt.canonical(inputs["request"]["environment"]).encode())
+    receipt = mt.windows_collection_provider_preflight(**inputs)
+    assert "WINDOWS_PROVIDER_UNSAFE_ENVIRONMENT" in receipt["reason_codes"]
+    _assert_windows_provider_unproven(receipt)
+
+
+@pytest.mark.parametrize("field,value,reason", [
+    ("provenance", "TRUSTED_WINDOWS", "WINDOWS_NATIVE_PROBE_DECLARATION_REQUIRED"),
+    ("binding_sha256", "0" * 64, "WINDOWS_NATIVE_PROBE_BINDING_MISMATCH"),
+    ("request_sha256", "0" * 64, "WINDOWS_NATIVE_PROBE_BINDING_MISMATCH"),
+    ("python_sha256", "0" * 64, "WINDOWS_NATIVE_PROBE_BINDING_MISMATCH"),
+    ("source_after_sha256", "0" * 64, "WINDOWS_NATIVE_SOURCE_MUTATED"),
+    ("environment_after_sha256", "0" * 64, "WINDOWS_NATIVE_ENVIRONMENT_DRIFT"),
+    ("security_capability", "UNKNOWN", "WINDOWS_SECURITY_CAPABILITY_UNSUPPORTED"),
+    ("capabilities", ["internetClient"], "WINDOWS_SECURITY_CAPABILITY_UNSUPPORTED"),
+    ("job_limit_flags", 0, "WINDOWS_NATIVE_JOB_UNPROVEN"),
+    ("job_limit_flags", 0x2800, "WINDOWS_NATIVE_JOB_UNPROVEN"),
+    ("job_limit_flags", 0x3000, "WINDOWS_NATIVE_JOB_UNPROVEN"),
+    ("job_limit_flags", True, "WINDOWS_NATIVE_JOB_UNPROVEN"),
+    ("events", ["CREATE_SUSPENDED", "RESUME", "ASSIGN_JOB"], "WINDOWS_NATIVE_JOB_SEQUENCE_UNPROVEN"),
+    ("timed_out", True, "WINDOWS_NATIVE_TIMEOUT"),
+    ("exit_code", 1, "WINDOWS_NATIVE_PROCESS_FAILED"),
+    ("exit_code", True, "WINDOWS_NATIVE_PROCESS_FAILED"),
+    ("orphan_count", 1, "WINDOWS_NATIVE_CLEANUP_UNPROVEN"),
+    ("orphan_count", False, "WINDOWS_NATIVE_CLEANUP_UNPROVEN"),
+    ("cleanup_complete", False, "WINDOWS_NATIVE_CLEANUP_UNPROVEN"),
+    ("elapsed_seconds", 60, "WINDOWS_NATIVE_DEADLINE_EXCEEDED"),
+    ("elapsed_seconds", float("nan"), "WINDOWS_NATIVE_DEADLINE_EXCEEDED"),
+    ("elapsed_seconds", float("inf"), "WINDOWS_NATIVE_DEADLINE_EXCEEDED"),
+    ("elapsed_seconds", True, "WINDOWS_NATIVE_DEADLINE_EXCEEDED"),
+    ("output_bytes", 256 * 1024 + 1, "WINDOWS_NATIVE_OUTPUT_OVERSIZED"),
+    ("artifact_bytes", 16 * 1024 * 1024 + 1, "WINDOWS_NATIVE_OUTPUT_OVERSIZED"),
+])
+def test_windows_provider_synthetic_negative_probe_declarations(field, value, reason):
+    inputs = _synthetic_windows_provider_case()
+    inputs["probe"][field] = value
+    receipt = mt.windows_collection_provider_preflight(**inputs)
+    assert reason in receipt["reason_codes"]
+    assert receipt["probe_status"] == "INVALID"
+    assert receipt["probe_sha256"] is None
+    _assert_windows_provider_unproven(receipt)
+
+
+@pytest.mark.parametrize("fixture", ["outside_scratch_read", "readonly_source_write",
+                                     "junction_escape_read", "loopback_connect"])
+@pytest.mark.parametrize("field,value", [("error", 0), ("error", 2), ("error", True),
+                                         ("api", "mocked"), ("control_succeeded", False)])
+def test_windows_provider_synthetic_denial_needs_exact_api_code_and_positive_control(fixture, field, value):
+    inputs = _synthetic_windows_provider_case()
+    inputs["probe"]["denials"][fixture][field] = value
+    receipt = mt.windows_collection_provider_preflight(**inputs)
+    assert "WINDOWS_NATIVE_DENIAL_UNPROVEN" in receipt["reason_codes"]
+    _assert_windows_provider_unproven(receipt)
+
+
+@pytest.mark.parametrize("override", ["native_attested", "runner_environment", "launcher", "argv"])
+def test_windows_provider_synthetic_isolation_flags_cannot_authorize_launch(override):
+    with pytest.raises(TypeError):
+        mt.windows_collection_provider_preflight(**_synthetic_windows_provider_case(), **{override: True})
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_windows_provider_synthetic_export_inventory_is_never_os_proof(monkeypatch, missing):
+    import ctypes
+    def forbidden(*args, **kwargs):
+        raise AssertionError("SYNTHETIC inventory must never call a native API")
+    def load(library, *, winmode, use_last_error):
+        assert winmode == 0x800 and use_last_error is True
+        if missing and library == "userenv.dll":
+            raise OSError("private-secret")
+        return SimpleNamespace(**{name: forbidden for name in mt._WINDOWS_NATIVE_APIS[library]})
+    monkeypatch.setattr(mt, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(ctypes, "WinDLL", load, raising=False)
+    receipt = mt.windows_collection_native_support(enabled=True)
+    assert receipt["status"] == ("UNAVAILABLE" if missing else "EXPORTS_PRESENT_UNPROVEN")
+    assert bool(receipt["missing_apis"]) is missing
+    assert receipt["native_isolation"] == "UNPROVEN"
+    assert receipt["trusted_windows_proof"] is receipt["acceptance_pass"] is False
+    assert "private-secret" not in mt.canonical(receipt)
+
+
+def test_windows_provider_synthetic_inventory_disabled_or_nonwindows_has_no_native_calls(monkeypatch):
+    monkeypatch.setattr(mt, "os", SimpleNamespace(name="posix"))
+    assert mt.windows_collection_native_support()["status"] == "NOT_INSPECTED"
+    receipt = mt.windows_collection_native_support(enabled=True)
+    assert receipt["status"] == "UNAVAILABLE"
+    assert receipt["reason_codes"] == ["WINDOWS_OS_REQUIRED"]
+
+
 @pytest.fixture(autouse=True)
 def _isolate_legacy_selector_mode(monkeypatch):
     """Legacy MT-01 contracts must not inherit the EF01 V2.1 selector toggle.
