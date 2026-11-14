@@ -2185,6 +2185,15 @@ def test_ef02_904_origin_snapshot_ingress_is_fixed_and_non_replaying():
     tree = ast.parse(py)
     assert "subprocess.run" in py and "shell=False" in py
     assert "source_file_sha256" in py and "safe(path" in py
+    # Two bounded scheduling slots cover the existing identical-label EF02
+    # runners; only the exact origin runner may read private source bytes.
+    for required in (
+        "fail-fast: false", "max-parallel: 2", "slot: [one, two]",
+        "group: ef02-904-source-snapshot-${{ matrix.slot }}",
+        "ef02-904-origin-source-${{ github.run_id }}-${{ matrix.slot }}",
+        "actual_runner:",
+    ):
+        assert required in scoped
     assert not any(isinstance(n, (ast.ImportFrom, ast.Import)) and (
         any(alias.name.startswith(("requests", "socket", "urllib", "http")) for alias in n.names)
         if isinstance(n, ast.Import) else (n.module or "").startswith(("requests", "socket", "urllib", "http"))
