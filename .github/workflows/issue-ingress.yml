@@ -2116,3 +2116,204 @@ jobs:
             await github.rest.issues.createComment({...context.repo,
               issue_number:context.issue.number,
               body:'AI_COMMERCE_HOSTOPS_EF02_698_R02_FORENSIC_V1\n'+JSON.stringify(result)});
+
+  # One-shot fixed #904 source salvage, WITHOUT running #904 code or touching #897.
+  # A submitted issue is not authorization to choose paths, commands or runner.
+  hostops-ef02-904-origin-snapshot:
+    if: >-
+      github.repository == 'trung-via/ai-commerce' &&
+      github.actor == github.repository_owner &&
+      github.event_name == 'issues' && github.event.action == 'opened' &&
+      github.event.issue.user.login == github.repository_owner &&
+      github.event.issue.title == '[HOSTOPS EF02 SNAPSHOT] #904 source-only'
+    runs-on: [self-hosted, Windows, ai-commerce-ef02]
+    timeout-minutes: 6
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: ef02-904-source-snapshot
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Verify fixed origin + preserve five exact #904 source bytes (read-only)
+        id: snapshot
+        shell: pwsh
+        run: |
+          $script = @'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import stat
+          import subprocess
+          import zipfile
+          
+          SOURCE_SHA = "ae1b7e7db03ddd564b8f6c7a5d5bc1979aaa96e7"
+          ATTEMPT = "atb01-899-ef02-01-pinned-snapshot-source-20261114"
+          WORKTREE = "wt-npcel0mt"
+          OUTNAME = "ef02-904-source-snapshot.zip"
+          EXPECTED = {
+              "src/ai_commerce/engineering/impact_v21.py": "44f9f77db471751220d6060f5aab3128e02f15cc4479e9515429e42cb6fccc01",
+              "src/ai_commerce/hostops_v3/ef02_897_snapshot.py": "6a00669e1d266633d2f59c9b3d52a0584fc82f50cc41b00a8c8136de688c7b4e",
+              "tests/test_hostops_personal.py": "85c031915565d5f80f1989d0976d09e229ec5e7aba1a2081c0f9bc2aefecc423",
+              "tests/test_minimum_test.py": "442084a562e1298cab9c26f33385eb2fdd7b15eac5df3c15d126ab2cf484de02",
+              "tests/test_mt01_v21.py": "70b2402d513917cd4d2d0af6837ea054ee1066643df4297e276f6c9b48e59d07",
+          }
+          UNTRACKED = "src/ai_commerce/hostops_v3/ef02_897_snapshot.py"
+          BODY = '{"schema":"ai-commerce.hostops.ef02-904-snapshot.v1","operation":"EF02_904_SOURCE_SNAPSHOT_READONLY","target_issue":904,"parameters":{}}'
+          MAX_BYTES = 2 * 1024 * 1024
+          
+          class Denied(Exception):
+              pass
+          
+          def safe(path, file=False):
+              path = Path(path)
+              if not path.is_absolute():
+                  raise Denied()
+              for part in (path, *path.parents):
+                  metadata = part.lstat()
+                  if stat.S_ISLNK(metadata.st_mode) or getattr(metadata, "st_file_attributes", 0) & 0x400:
+                      raise Denied()
+                  if part == path and file:
+                      if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                          raise Denied()
+                  elif not stat.S_ISDIR(metadata.st_mode):
+                      raise Denied()
+          
+          def git(root, *arguments):
+              env = dict(os.environ)
+              env.update({"GIT_OPTIONAL_LOCKS":"0", "GIT_TERMINAL_PROMPT":"0",
+                          "GIT_CONFIG_NOSYSTEM":"1", "GIT_CONFIG_GLOBAL":os.devnull})
+              done = subprocess.run(["git", "-C", str(root), *arguments], cwd=root,
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL, timeout=15, shell=False, env=env)
+              if done.returncode or len(done.stdout) > 131072:
+                  raise Denied()
+              return done.stdout
+          
+          def read_fixed(path):
+              safe(path, file=True)
+              if path.stat().st_size > MAX_BYTES:
+                  raise Denied()
+              with path.open("rb") as source:
+                  before = os.fstat(source.fileno())
+                  data = source.read(MAX_BYTES + 1)
+                  after = os.fstat(source.fileno())
+              identity = lambda v: (v.st_dev, v.st_ino, v.st_size, v.st_mtime_ns, v.st_nlink)
+              if len(data) > MAX_BYTES or identity(before) != identity(after):
+                  raise Denied()
+              safe(path, file=True)
+              return data
+          
+          def run():
+              if os.name != "nt" or os.environ.get("RUNNER_NAME") != "AI-COMMERCE-EF02-01":
+                  raise Denied()
+              if os.environ.get("GITHUB_REPOSITORY") != "trung-via/ai-commerce" or os.environ.get("GITHUB_ACTOR") != "trung-via":
+                  raise Denied()
+              event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
+              if (event.get("action") != "opened" or event.get("sender", {}).get("login") != "trung-via"
+                  or event.get("issue", {}).get("user", {}).get("login") != "trung-via"
+                  or event.get("issue", {}).get("title") != "[HOSTOPS EF02 SNAPSHOT] #904 source-only"
+                  or event.get("issue", {}).get("body") != BODY):
+                  raise Denied()
+              workspace = Path(os.environ["GITHUB_WORKSPACE"])
+              if workspace.name != "ai-commerce":
+                  raise Denied()
+              safe(workspace)
+              root = workspace.parent / "_ef02_worktrees" / WORKTREE
+              safe(root)
+              if git(root, "rev-parse", "HEAD").decode("ascii").strip() != SOURCE_SHA:
+                  raise Denied()
+              rows = [row for row in git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all").decode("utf-8", "strict").split("\x00") if row]
+              if len(rows) != len(EXPECTED):
+                  raise Denied()
+              found = set()
+              for row in rows:
+                  if len(row) < 4 or row[2] != " ":
+                      raise Denied()
+                  status, relative = row[:2], row[3:]
+                  if relative not in EXPECTED or relative in found:
+                      raise Denied()
+                  if status != ("??" if relative == UNTRACKED else " M"):
+                      raise Denied()
+                  found.add(relative)
+              if found != set(EXPECTED):
+                  raise Denied()
+              collected = {}
+              for relative, expected in EXPECTED.items():
+                  data = read_fixed(root.joinpath(*relative.split("/")))
+                  if hashlib.sha256(data).hexdigest() != expected:
+                      raise Denied()
+                  collected[relative] = data
+              if git(root, "rev-parse", "HEAD").decode("ascii").strip() != SOURCE_SHA:
+                  raise Denied()
+              temp = Path(os.environ["RUNNER_TEMP"])
+              safe(temp)
+              output = temp / OUTNAME
+              if output.exists() or output.is_symlink():
+                  raise Denied()
+              manifest = {"schema":"ai-commerce.hostops.ef02-904-snapshot.v1",
+                          "operation":"EF02_904_SOURCE_SNAPSHOT_READONLY",
+                          "target_issue":904, "origin_runner":"AI-COMMERCE-EF02-01",
+                          "source_sha":SOURCE_SHA, "attempt_id":ATTEMPT,
+                          "source_file_sha256":EXPECTED, "source_only":True,
+                          "candidate_verified":False, "replay_authorized":False,
+                          "native_sandbox_proven":False}
+              with zipfile.ZipFile(output, "x", compression=zipfile.ZIP_DEFLATED, allowZip64=False) as archive:
+                  archive.writestr("manifest.json", json.dumps(manifest, sort_keys=True, separators=(",", ":")))
+                  for relative, data in sorted(collected.items()):
+                      archive.writestr("source/" + relative, data)
+              with zipfile.ZipFile(output) as archive:
+                  if set(archive.namelist()) != {"manifest.json", *(("source/" + p) for p in EXPECTED)}:
+                      raise Denied()
+                  for relative, expected in EXPECTED.items():
+                      if hashlib.sha256(archive.read("source/" + relative)).hexdigest() != expected:
+                          raise Denied()
+              print("EF02_904_SOURCE_SNAPSHOT_UNVERIFIED_ARTIFACT")
+          
+          try:
+              run()
+          except Exception:
+              print("EF02_904_SOURCE_RECOVERY_UNVERIFIED")
+              raise SystemExit(2)
+          '@
+          $script | python -B -
+          if ($LASTEXITCODE -ne 0) { throw 'EF02_904_SOURCE_SNAPSHOT_DENIED' }
+      - name: Upload private unverified source-only snapshot for independent review
+        if: steps.snapshot.outcome == 'success'
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ef02-904-origin-source-${{ github.run_id }}
+          path: ${{ runner.temp }}\ef02-904-source-snapshot.zip
+          retention-days: 7
+          if-no-files-found: error
+      - name: Publish bounded source artifact receipt to invoking Issue
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          SNAPSHOT_STATE: ${{ steps.snapshot.outcome }}
+          UPLOAD_STATE: ${{ steps.upload.outcome }}
+          SNAPSHOT_ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+        with:
+          script: |
+            const id = Number(process.env.SNAPSHOT_ARTIFACT_ID);
+            const ok = process.env.SNAPSHOT_STATE === 'success' &&
+                       process.env.UPLOAD_STATE === 'success' &&
+                       Number.isSafeInteger(id) && id > 0;
+            const receipt = {
+              schema:'ai-commerce.hostops.ef02-904-snapshot.v1',
+              operation:'EF02_904_SOURCE_SNAPSHOT_READONLY', target_issue:904,
+              origin_runner:'AI-COMMERCE-EF02-01', source_sha:'ae1b7e7db03ddd564b8f6c7a5d5bc1979aaa96e7',
+              status:ok ? 'UNVERIFIED_SOURCE_ARTIFACT' : 'HOLD_SOURCE_RECOVERY_UNVERIFIED',
+              artifact_id:ok ? id : null, source_only:true,
+              candidate_verified:false, native_sandbox_proven:false,
+              write_attempted:false, replay_authorized:false
+            };
+            await github.rest.issues.createComment({...context.repo,
+              issue_number:context.issue.number,
+              body:'AI_COMMERCE_EF02_904_SOURCE_SNAPSHOT_V1\n'+JSON.stringify(receipt)});

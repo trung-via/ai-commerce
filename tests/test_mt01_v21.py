@@ -2154,3 +2154,42 @@ def test_protected_runtime_owner_canary_survives_companion_test_restore(monkeypa
         impact_v21, "registered_action_plan", restored_invalid_owner_binding)
     with pytest.raises(ValueError, match="BASELINE_RUNTIME_OWNER_TRUST_UNPROVEN"):
         oracle.verify_committed_owner_runtime_canary(**kw)
+
+
+def test_ef02_904_origin_snapshot_ingress_is_fixed_and_non_replaying():
+    """Only the exact owner event can reach a read-only pinned source snapshot."""
+    import ast
+    import textwrap
+    from pathlib import Path
+
+    ingress = (Path(__file__).resolve().parents[1] /
+               ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+    job = ingress.split("  hostops-ef02-904-origin-snapshot:\n", 1)
+    assert len(job) == 2
+    scoped = job[1]
+    for fixed in (
+        "github.actor == github.repository_owner",
+        "github.event.action == 'opened'",
+        "github.event.issue.title == '[HOSTOPS EF02 SNAPSHOT] #904 source-only'",
+        "runs-on: [self-hosted, Windows, ai-commerce-ef02]",
+        "RUNNER_NAME", "AI-COMMERCE-EF02-01", "wt-npcel0mt",
+        "GIT_OPTIONAL_LOCKS", "src/ai_commerce/hostops_v3/ef02_897_snapshot.py",
+        "6a00669e1d266633d2f59c9b3d52a0584fc82f50cc41b00a8c8136de688c7b4e",
+        "SOURCE_RECOVERY_UNVERIFIED", "ZipFile", "hashlib.sha256",
+        "artifact_id:ok ? id : null", "candidate_verified:false",
+        "native_sandbox_proven:false", "replay_authorized:false",
+    ):
+        assert fixed in scoped
+    source = scoped.split("          $script = @'\n", 1)[1].split("\n          '@\n          $script | python -B -", 1)[0]
+    py = textwrap.dedent(source)
+    tree = ast.parse(py)
+    assert "subprocess.run" in py and "shell=False" in py
+    assert "source_file_sha256" in py and "safe(path" in py
+    assert not any(isinstance(n, (ast.ImportFrom, ast.Import)) and (
+        any(alias.name.startswith(("requests", "socket", "urllib", "http")) for alias in n.names)
+        if isinstance(n, ast.Import) else (n.module or "").startswith(("requests", "socket", "urllib", "http"))
+    ) for n in ast.walk(tree))
+    for forbidden in ("shell=True", "git reset", "git clean", "git checkout",
+                      "git worktree prune", "os.system(", "eval(", "exec("):
+        assert forbidden not in py
+    assert "SOURCE_RECOVERY_UNVERIFIED" in py

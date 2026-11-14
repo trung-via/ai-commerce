@@ -1064,7 +1064,10 @@ const script = fs.readFileSync(process.argv[2],'utf8');
         """Bypass failing Windows CIM to prove local CDP protocol directly, read-only."""
         workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
         assert workflow.count("  hostops-d5-9444-cdp-protocol:") == 1
+        import re
+        # Scope negative checks to this job, not unrelated later HostOps jobs.
         job = workflow.split("  hostops-d5-9444-cdp-protocol:", 1)[1]
+        job = re.split(r"(?m)^  [a-z][a-z0-9-]*:\s*$", job, maxsplit=1)[0]
         assert "github.actor == github.repository_owner" in job
         assert "github.event.issue.user.login == github.repository_owner" in job
         assert "github.event_name == 'issues' && github.event.action == 'opened'" in job
