@@ -384,3 +384,29 @@ def test_completion_cannot_turn_review_candidate_into_success(tmp_path, monkeypa
               "source_sha": result["source_sha"], "status": "COMPLETE", "actions": [result], "total": 1, "succeeded": 1}
     with pytest.raises(CompletionEventError, match="CANDIDATE_SCOPE_REVIEW_LAUNDERED"):
         build_completion_event(report, repository="owner/repo", run_id=42, run_attempt=1, issue_number=12)
+
+
+@pytest.mark.parametrize("drift", [None, "src/ordinary.py"])
+def test_v21_strict_mode_holds_unowned_worker_fixture_without_candidate(tmp_path, monkeypatch, drift):
+    context = _worker_fixture(tmp_path, monkeypatch, real_git=False, drift=drift, legacy_selector=False)
+    monkeypatch.setenv("MT01_V21_ENABLED", "1")
+    result = context.worker.execute_action(_action("a"))
+    assert result["status"] == "UNPROVEN"
+    assert result["candidate_sha"] is None and not context.candidates
+    assert not candidate_accepted(result)
+    assert result["ef01_invocations"][-1]["minimum_test"]["impact_v21"]["mode"] == "HOLD_MAPPING"
+
+
+def test_worker_fixture_pins_python_executable_under_xdist_base_interpreter(tmp_path, monkeypatch):
+    import shutil
+    import sys
+
+    wrapper = tmp_path / ("python_wrapper.exe" if sys.platform == "win32" else "python_wrapper")
+    wrapper.write_bytes(b"wrapper")
+    monkeypatch.setattr(shutil, "which", lambda cmd, *_a, **_kw: str(wrapper) if cmd == "python" else None)
+    monkeypatch.setattr(sys, "executable", getattr(sys, "_base_executable", sys.executable))
+    context = _worker_fixture(tmp_path, monkeypatch, real_git=False)
+    assert Path(shutil.which("python")).resolve() == Path(sys.executable).resolve()
+    result = context.worker.execute_action(_action("a"))
+    assert result["status"] == "CANDIDATE_READY"
+    assert result["ef01_invocations"][-1]["minimum_test"]["groups"][0]["binding"]["environment_proven"] is True
