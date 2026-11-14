@@ -2143,7 +2143,7 @@ jobs:
         id: snapshot
         shell: pwsh
         run: |
-          @'
+          $script = @'
           import hashlib
           import json
           import os
@@ -2280,7 +2280,8 @@ jobs:
           except Exception:
               print("EF02_904_SOURCE_RECOVERY_UNVERIFIED")
               raise SystemExit(2)
-          '@ | python -B -
+          '@
+          $script | python -B -
           if ($LASTEXITCODE -ne 0) { throw 'EF02_904_SOURCE_SNAPSHOT_DENIED' }
       - name: Upload private unverified source-only snapshot for independent review
         if: steps.snapshot.outcome == 'success'
