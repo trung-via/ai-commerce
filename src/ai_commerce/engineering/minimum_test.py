@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
+from types import MappingProxyType
 from typing import Iterable, Mapping, Sequence
 
 
@@ -36,6 +37,28 @@ _COLLECTION_MAX_IDS = 100_000
 _COLLECTION_MAX_BYTES = 16 * 1024 * 1024
 _COLLECTION_MAX_OUTPUT = 256 * 1024
 _COLLECTION_HOLD = "P1B_BOUNDED_WINDOWS_COLLECTION_EXECUTOR_REQUIRED"
+
+
+# Reviewed MT01 source registry, deliberately separate from EF02 run profiles.
+# This argv is an identity for the collect-only observer, never a run command.
+COLLECTION_ONLY_MODE = "COLLECTION_ONLY"
+COLLECTION_ONLY_SCOPE = ("tests/test_minimum_test.py",)
+COLLECTION_ONLY_PROFILES = MappingProxyType({
+    "mt01-atb01-collect-serial": (
+        "python", "-m", "pytest", "tests/test_minimum_test.py", "-q"),
+})
+COLLECTION_ONLY_REGISTRY_SHA256 = digest(canonical(dict(
+    version=1, mode=COLLECTION_ONLY_MODE, scope=COLLECTION_ONLY_SCOPE,
+    workers_requested=0, scheduler="serial", profiles=dict(COLLECTION_ONLY_PROFILES),
+)).encode())
+
+
+def select_collection_only_profile(profile: str, *, mode: str) -> tuple[str, ...]:
+    """Explicit collection identity only; no CLI, environment or run fallback."""
+    if (mode != COLLECTION_ONLY_MODE or not isinstance(profile, str)
+            or profile not in COLLECTION_ONLY_PROFILES):
+        raise ValueError("COLLECTION_ONLY_PROFILE_SELECTION_REQUIRED")
+    return COLLECTION_ONLY_PROFILES[profile]
 
 
 def _collection_path(value: object) -> str:
@@ -131,6 +154,16 @@ def _collection_binding(value: object, registered_profiles: Mapping[str, Sequenc
             or value["workers_requested"] != workers
             or value.get("scheduler") != ("load" if parallel else "serial")):
         raise ValueError("COLLECTION_PROFILE_BINDING_MISMATCH")
+    if result["registered_profile"] in COLLECTION_ONLY_PROFILES:
+        exact = select_collection_only_profile(
+            result["registered_profile"], mode=value.get("profile_mode"))
+        if (list(argv) != list(exact) or roots != list(COLLECTION_ONLY_SCOPE)
+                or workers != 0):
+            raise ValueError("COLLECTION_ONLY_PROFILE_MISMATCH")
+        if value.get("registry_sha256") != COLLECTION_ONLY_REGISTRY_SHA256:
+            raise ValueError("COLLECTION_REGISTRY_DIGEST_MISMATCH")
+        result.update(profile_mode=COLLECTION_ONLY_MODE,
+                      registry_sha256=COLLECTION_ONLY_REGISTRY_SHA256)
     result.update(profile_argv=list(argv), collection_scope=roots, platform="Windows",
                   workers_requested=workers, scheduler=value["scheduler"])
     if set(value) != set(result):
@@ -157,6 +190,7 @@ def validate_collection_observation(*, expected_binding: object,
                    tests_executed=None, acceptance_pass=False, candidate_sha=None,
                    source_sha256=None, argv_sha256=None, environment_binding_sha256=None,
                    binding_sha256=None, registered_profile=None, selected_test_paths=[],
+                   profile_mode=None, registry_sha256=None,
                    collected_count=None, nodeids_sha256=None, ordered_nodeids_sha256=None,
                    workers_requested=None, workers_observed=None, worker_consistency="UNPROVEN",
                    elapsed_seconds=None, reason_codes=[])
@@ -165,6 +199,8 @@ def validate_collection_observation(*, expected_binding: object,
         receipt.update(candidate_sha=binding["candidate_sha"], source_sha256=binding["source_sha256"],
                        argv_sha256=binding["argv_sha256"], registered_profile=binding["registered_profile"],
                        selected_test_paths=binding["collection_scope"],
+                       profile_mode=binding.get("profile_mode"),
+                       registry_sha256=binding.get("registry_sha256"),
                        workers_requested=binding["workers_requested"],
                        binding_sha256=digest(canonical(binding).encode()),
                        environment_binding_sha256=digest(canonical({k: binding[k] for k in
@@ -389,13 +425,28 @@ def collection_observer(*, binding: dict, registered_profiles: Mapping[str, Sequ
 
 
 _WINDOWS_COLLECTION_HOLD = "P1B_WINDOWS_IMPORT_ISOLATION_AND_JOB_ATTESTATION_REQUIRED"
+_WINDOWS_COLLECTION_PROVIDER_REQUIREMENTS = (
+    "Independently reviewed native restricted token/AppContainer or equivalent sandbox; "
+    "actual Windows tests must observe denial of credential/outside-source reads and network access.",
+    "Pin immutable candidate SHA/tree/files, interpreter, collection registry digest and "
+    "allowlisted environment; deny source writes and unsafe Python/pytest/auth overrides.",
+    "Read-only candidate and action-local scratch; use handle-based junction/reparse checks "
+    "and observe denied escapes, including replacement races.",
+    "Create child suspended, assign to a kill-on-close Job before resume/imports; prove "
+    "bounded whole-descendant termination and drain on completion, timeout and cancellation.",
+    "Entire lifecycle below 60s with bounded output/private nodeids, exact serial profile, "
+    "public pytest hooks, source/environment before/after and confirmed handle/scratch cleanup.",
+    "Pin actual Windows denial/cleanup test artifacts to provider and candidate; synthetic "
+    "fixtures, caller flags, Job/timeouts or environment scrubbing alone never attest isolation.",
+)
 
 
 def bounded_windows_collection(*, enabled: bool = False, expected_binding: object = None,
+                               collection_profile: str | None = None,
                                collection_binding: object = None,
                                registered_profiles: Mapping[str, Sequence[str]] | None = None,
                                observation: object = None) -> dict:
-    """Opt-in, source-only P1-B1 HOLD contract; deliberately no subprocess.
+    """Opt-in, source-only P1-B2 registration/HOLD; deliberately no subprocess.
 
     Collection imports arbitrary candidate code. Environment filtering and a
     timeout (even taskkill /T) cannot attest filesystem/network isolation or
@@ -404,10 +455,11 @@ def bounded_windows_collection(*, enabled: bool = False, expected_binding: objec
     Caller flags, hook events and source hashes cannot supply that authority.
 
     Companion PR contract, before any launcher can be enabled:
-    * Register a distinct exact-scope serial collection identity/contract in
-      the protected profile owner. Preserve the actual registered run argv.
+    * Use the explicit COLLECTION_ONLY source registry identity, separate from
+      EF02 verification_profile. Preserve the actual registered run argv.
     * Supply independently verified Windows import isolation (read-only exact
-      source, action-local scratch, no credential/network access), handle-based
+      source, action-local scratch, no credential/network access), an actual OS
+      restricted token/AppContainer or equivalent verified native sandbox, handle-based
       rejection of reparse points, and a suspended child assigned to a Job
       before imports, with bounded drain and proven whole-job termination.
     * Attest immutable selected SHA/tree/files, interpreter, registry and
@@ -418,7 +470,8 @@ def bounded_windows_collection(*, enabled: bool = False, expected_binding: objec
     * Use collection_observer's real sessionfinish/identities privately and
       validate_collection_observation publicly. Import/config/selection drift,
       truncation, crashes or missing native proof must HOLD. Serial collection
-      never attests twelve workers; actual execution is a P1-B2 deliverable.
+      never attests twelve workers. Actual Windows denial/cleanup observations
+      and independent provider review are required in a separate scoped PR.
 
     Bindings/registry are expected trusted-candidate inputs to the pure P1-A
     validator, NOT native attestations. Optional raw observations stay private
@@ -435,8 +488,11 @@ def bounded_windows_collection(*, enabled: bool = False, expected_binding: objec
         candidate_sha=None, source_sha256=None, environment_binding_sha256=None,
         execution_profile=None, execution_argv_sha256=None, execution_binding_sha256=None,
         workers_requested=None, workers_observed=None, collection_profile=None,
+        collection_mode=None, collection_workers_requested=None, collection_registry_sha256=None,
         collection_argv_sha256=None, collection_binding_sha256=None, request_sha256=None,
         observation_receipt=None, elapsed_seconds=None, cleanup_complete=False,
+        native_provider_contract=dict(version=1, status="REQUIRED_NOT_AVAILABLE",
+                                      requirements=list(_WINDOWS_COLLECTION_PROVIDER_REQUIREMENTS)),
         limits=dict(deadline_seconds=COLLECTION_TIMEOUT_SECONDS, nodeids=_COLLECTION_MAX_IDS,
                     output_bytes=_COLLECTION_MAX_OUTPUT, artifact_bytes=_COLLECTION_MAX_BYTES),
         reason_codes=[])
@@ -446,6 +502,9 @@ def bounded_windows_collection(*, enabled: bool = False, expected_binding: objec
         return receipt
     receipt["hold_reason"] = _WINDOWS_COLLECTION_HOLD
     try:
+        if isinstance(registered_profiles, Mapping) and any(
+                name in registered_profiles for name in COLLECTION_ONLY_PROFILES):
+            raise ValueError("COLLECTION_ONLY_PROFILE_NOT_EXECUTION")
         actual = _collection_binding(expected_binding, registered_profiles)
         receipt.update(
             candidate_sha=actual["candidate_sha"], source_sha256=actual["source_sha256"],
@@ -455,9 +514,12 @@ def bounded_windows_collection(*, enabled: bool = False, expected_binding: objec
             workers_requested=actual["workers_requested"],
             environment_binding_sha256=digest(canonical({k: actual[k] for k in
                 ("platform", "python_sha256", "environment_sha256")}).encode()))
-        if collection_binding is None:
+        selected_argv = select_collection_only_profile(collection_profile, mode=COLLECTION_ONLY_MODE)
+        collection_registry = {collection_profile: selected_argv}
+        if (not isinstance(collection_binding, dict)
+                or collection_binding.get("registered_profile") != collection_profile):
             raise ValueError("COLLECTION_SERIAL_PROFILE_MAPPING_REQUIRED")
-        serial = _collection_binding(collection_binding, registered_profiles)
+        serial = _collection_binding(collection_binding, collection_registry)
         # Never derive a serial profile by dropping -n12 or changing workers.
         # A separately registered name is necessary but is not an attestation.
         if (serial["workers_requested"] != 0
@@ -469,17 +531,19 @@ def bounded_windows_collection(*, enabled: bool = False, expected_binding: objec
             raise ValueError("COLLECTION_SERIAL_BINDING_MISMATCH")
         receipt.update(
             collection_profile=serial["registered_profile"],
+            collection_mode=serial["profile_mode"], collection_workers_requested=0,
+            collection_registry_sha256=serial["registry_sha256"],
             collection_argv_sha256=serial["argv_sha256"],
             collection_binding_sha256=digest(canonical(serial).encode()),
             request_sha256=digest(canonical(dict(
                 execution_binding=actual, collection_binding=serial,
-                mode="SERIAL_COLLECT_ONLY", limits=receipt["limits"])).encode()))
+                mode=COLLECTION_ONLY_MODE, limits=receipt["limits"])).encode()))
         # No observation can turn this request into native proof or a launch.
         # In particular, caller-supplied scratch_safe/cleanup claims retain
         # P1-A's SYNTHETIC/OBSERVED_UNTRUSTED HOLD, even with valid hook records.
         if observation is not None:
             receipt["observation_receipt"] = validate_collection_observation(
-                expected_binding=serial, registered_profiles=registered_profiles,
+                expected_binding=serial, registered_profiles=collection_registry,
                 observation=observation)
         else:
             receipt["reason_codes"].append("COLLECTION_OBSERVATION_NOT_STARTED")
@@ -943,6 +1007,11 @@ def select_plan(*, repo: Path, base_sha: str, base_files: Mapping[str, str],
                 registered_profiles: Mapping[str, Sequence[str]] | None = None,
                 human_full_suite_authorized: bool = False,
                 allowed_paths: Sequence[str] = ()) -> dict:
+    # Collection identities must never enter AUTO/HUMAN_FULL run selection,
+    # including V2 delegation or a caller merging the two separate registries.
+    if registered_profiles is not None and any(
+            name in registered_profiles for name in COLLECTION_ONLY_PROFILES):
+        raise ValueError("COLLECTION_ONLY_PROFILE_NOT_EXECUTION")
     groups = tuple(approved_groups() if groups is None else groups)
     if human_full_suite_authorized:
         full_commands = (["python", "-m", "pytest", "tests", "-q"],
