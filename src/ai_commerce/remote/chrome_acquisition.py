@@ -6,7 +6,7 @@ activates a worker, or imports the AIOS-Renew runtime.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -25,7 +25,7 @@ $ErrorActionPreference = 'Stop'
 $portNumber = [int]$env:AI_COMMERCE_ACQ_PROBE_PORT
 $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction Stop |
     Where-Object { $_.LocalPort -eq $portNumber } |
-    Select-Object LocalAddress, OwningProcess)
+    Select-Object LocalAddress, LocalPort, OwningProcess)
 $processes = @(Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction Stop |
     ForEach-Object {
         $owner = Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -ErrorAction Stop
@@ -105,6 +105,22 @@ def load_environment(config_path: Path, checkout: Path, *, local_app_data: Path)
                 obj[key] = value
             return obj
         value = json.loads(raw, object_pairs_hook=unique)
+        return _environment_from_value(value, config_path, checkout, local_app_data=local_app_data)
+    except AcquisitionBlocked:
+        raise
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+        raise AcquisitionBlocked("CONFIG_INVALID") from None
+
+
+def _environment_from_value(value, config_path: Path, checkout: Path, *,
+                            local_app_data: Path) -> ChromeEnvironment:
+    """Shared closed schema/path validation; this helper never creates a config.
+
+    load_environment additionally requires an existing private config. An
+    enrollment assessment can validate an in-memory candidate with these same
+    profile rules without weakening that existing-file requirement.
+    """
+    try:
         if (not isinstance(value, dict) or set(value) != {
                 "version", "executable", "user_data_dir", "profile_directory",
                 "cdp_endpoint", "allow_launch", "exclusive_user_data"}
@@ -477,13 +493,250 @@ def verify_playwright_attach(env: ChromeEnvironment) -> None:
             raise AcquisitionBlocked("CDP_PROTOCOL_UNAVAILABLE")
 
 
+class _EnrollmentHold(ValueError):
+    """Assessment diagnostics are separate from the legacy acquisition CLI."""
+
+
+_ENROLLMENT_CODES = frozenset({
+    "ENROLLMENT_OPT_IN_REQUIRED", "LOCAL_OPERATOR_ONLY", "WINDOWS_INTERACTIVE_REQUIRED",
+    "WINDOWS_TOKEN_UNAVAILABLE", "ELEVATED_CHROME_DISALLOWED",
+    "ENROLLMENT_IDENTITY_UNPROVEN", "ENROLLMENT_PRIVATE_ROOT_UNAVAILABLE",
+    "ENROLLMENT_PATH_UNSAFE", "ENROLLMENT_CONFIG_EXISTS", "CONFIG_PATH_INVALID",
+    "CONFIG_IN_REPOSITORY", "CONFIG_INVALID", "CHROME_PATH_INVALID",
+    "PROFILE_NOT_DEDICATED", "PROFILE_UNAVAILABLE", "CONFIG_IN_CHROME_PROFILE",
+    "FIRST_SUPERVISED_ENROLLMENT_REQUIRED", "ENROLLMENT_CANDIDATE_UNPROVEN",
+    "BROWSER_OWNERSHIP_UNPROVEN", "CDP_NOT_LOOPBACK_OWNED", "WINDOWS_PROBE_INVALID",
+    "PROCESS_IDENTITY_UNKNOWN", "OPERATOR_OWNERSHIP_UNPROVEN",
+    "CHROME_EXECUTABLE_UNTRUSTED", "WINDOWS_PROBE_UNAVAILABLE", "POWERSHELL_UNAVAILABLE",
+    "ENROLLMENT_PROFILE_LOCK_UNPROVEN", "ENROLLMENT_OBSERVATION_CHANGED",
+    "NATIVE_ATOMIC_ENROLLMENT_REQUIRED", "ENROLLMENT_ASSESSMENT_UNKNOWN",
+})
+
+
+def _enrollment_hold(code: str, *, assessed: bool = False) -> dict:
+    # No private candidate, paths, PID, session, SID or subprocess output escapes.
+    return {"status": "HOLD", "code": code if code in _ENROLLMENT_CODES else
+            "ENROLLMENT_ASSESSMENT_UNKNOWN", "candidate_assessed": assessed,
+            "enrolled": False, "allow_launch": False, "browser_accessed": False,
+            "launched": False, "chat_identity_proven": False, "send_authorized": False}
+
+
+def _native_local_app_data() -> Path:
+    """Use the current token's Windows known folder, not an input-selected path."""
+    import ctypes
+    from ctypes import wintypes
+    from uuid import UUID
+    shell = ctypes.WinDLL("shell32", use_last_error=True)
+    ole = ctypes.WinDLL("ole32", use_last_error=True)
+    shell.SHGetKnownFolderPath.argtypes = [ctypes.c_void_p, wintypes.DWORD,
+                                          wintypes.HANDLE, ctypes.POINTER(ctypes.c_wchar_p)]
+    shell.SHGetKnownFolderPath.restype = ctypes.c_long
+    ole.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+    ole.CoTaskMemFree.restype = None
+    folder = (ctypes.c_ubyte * 16).from_buffer_copy(
+        UUID("F1B32785-6FBA-4FCF-9D55-7B8E7F157091").bytes_le)
+    value = ctypes.c_wchar_p()
+    if shell.SHGetKnownFolderPath(ctypes.byref(folder), 0, None, ctypes.byref(value)) != 0:
+        raise _EnrollmentHold("ENROLLMENT_IDENTITY_UNPROVEN")
+    try:
+        if not value.value:
+            raise _EnrollmentHold("ENROLLMENT_IDENTITY_UNPROVEN")
+        return Path(value.value)
+    finally:
+        ole.CoTaskMemFree(ctypes.cast(value, ctypes.c_void_p))
+
+
+def _enrollment_operator() -> tuple[Path, int, str]:
+    # Nothing at this entrypoint can turn an Issue/runner request into enrollment.
+    if os.name != "nt":
+        raise _EnrollmentHold("WINDOWS_INTERACTIVE_REQUIRED")
+    if any(os.environ.get(key) for key in ("GITHUB_ACTIONS", "GITHUB_EVENT_PATH", "GITHUB_RUN_ID")):
+        raise _EnrollmentHold("LOCAL_OPERATOR_ONLY")
+    if sys.stdin is None or not sys.stdin.isatty():
+        raise _EnrollmentHold("WINDOWS_INTERACTIVE_REQUIRED")
+    session = _interactive_session()
+    from .local_wake_entry import _windows_process_sid
+    sid = _windows_process_sid()
+    if (type(session) is not int or session <= 0 or not isinstance(sid, str)
+            or not re.fullmatch(r"S-1-(?:\d+-){1,14}\d+", sid)
+            or sid in {"S-1-5-18", "S-1-5-19", "S-1-5-20"}):
+        raise _EnrollmentHold("ENROLLMENT_IDENTITY_UNPROVEN")
+    return _native_local_app_data(), session, sid
+
+
+def _enrollment_location(local: Path, checkout: Path) -> Path:
+    """One fixed future destination; refuse every recognized old config as well."""
+    if (not local.is_absolute() or not local.is_dir() or not checkout.is_absolute()
+            or not checkout.is_dir() or not _no_links(local) or not _no_links(checkout)):
+        raise _EnrollmentHold("CONFIG_PATH_INVALID")
+    root = local / "AI-Commerce"
+    candidates = (root / "Chrome-Acquisition" / "config.json",
+                  root / "chrome.json", root / "chrome-acquisition.json")
+    if not all(_no_links(path) for path in candidates):
+        raise _EnrollmentHold("ENROLLMENT_PATH_UNSAFE")
+    if not root.is_dir():
+        raise _EnrollmentHold("ENROLLMENT_PRIVATE_ROOT_UNAVAILABLE")
+    if _inside(candidates[0].resolve(), checkout.resolve(strict=True)):
+        raise _EnrollmentHold("CONFIG_IN_REPOSITORY")
+    for path in candidates:
+        try:
+            path.lstat()  # Includes directories and dangling links; never overwrite.
+        except FileNotFoundError:
+            continue
+        raise _EnrollmentHold("ENROLLMENT_CONFIG_EXISTS")
+    return candidates[0]
+
+
+def _existing_9444_candidate(inventory: dict, *, local: Path, checkout: Path,
+                             config: Path, session: int, sid: str) -> tuple[ChromeEnvironment, tuple]:
+    listeners, processes = _rows(inventory["listeners"]), _rows(inventory["processes"])
+    if not listeners:
+        # OFF is not evidence of a previous executable/profile/owner enrollment.
+        raise _EnrollmentHold("FIRST_SUPERVISED_ENROLLMENT_REQUIRED")
+    if len(listeners) != 1 or len(processes) > 256:
+        raise _EnrollmentHold("ENROLLMENT_CANDIDATE_UNPROVEN")
+    row = listeners[0]
+    pid = row.get("OwningProcess")
+    pids = [p.get("ProcessId") for p in processes]
+    if (row.get("LocalAddress") != "127.0.0.1" or type(row.get("LocalPort")) is not int
+            or row["LocalPort"] != 9444 or type(pid) is not int or pid <= 0
+            or any(type(p) is not int or p <= 0 for p in pids) or len(set(pids)) != len(pids)):
+        raise _EnrollmentHold("ENROLLMENT_CANDIDATE_UNPROVEN")
+    owners = [p for p in processes if p["ProcessId"] == pid]
+    if len(owners) != 1:
+        raise _EnrollmentHold("ENROLLMENT_CANDIDATE_UNPROVEN")
+    proc = owners[0]
+    created = proc.get("CreationDate")
+    if (proc.get("OwnerSid") != sid or type(proc.get("SessionId")) is not int
+            or proc["SessionId"] != session or not isinstance(created, str)
+            or not 15 <= len(created) <= 80):
+        raise _EnrollmentHold("ENROLLMENT_IDENTITY_UNPROVEN")
+    argv = _commandline_argv(proc.get("CommandLine"))
+    for name in ("--user-data-dir", "--profile-directory", "--remote-debugging-address",
+                 "--remote-debugging-port"):
+        switches = [a for a in argv if a.lower() == name or a.lower().startswith(name + "=")]
+        if len(switches) != 1 or not switches[0].startswith(name + "="):
+            raise _EnrollmentHold("ENROLLMENT_CANDIDATE_UNPROVEN")
+    if (_switch(argv, "--remote-debugging-port") != "9444"
+            or _switch(argv, "--remote-debugging-address") != "127.0.0.1"
+            or any(a.lower() == "--type" or a.lower().startswith("--type=") for a in argv)):
+        raise _EnrollmentHold("ENROLLMENT_CANDIDATE_UNPROVEN")
+    port_claimants = []
+    for process in processes:
+        process_argv = _commandline_argv(process.get("CommandLine"))
+        if any(a.lower().startswith("--type=") for a in process_argv):
+            continue
+        ports = [a for a in process_argv if a.lower() == "--remote-debugging-port"
+                 or a.lower().startswith("--remote-debugging-port=")]
+        if ports and (len(ports) != 1 or not ports[0].startswith("--remote-debugging-port=")):
+            raise _EnrollmentHold("ENROLLMENT_CANDIDATE_UNPROVEN")
+        port = _switch(process_argv, "--remote-debugging-port")
+        if ports and (port is None or re.fullmatch(r"[0-9]{1,5}", port) is None):
+            raise _EnrollmentHold("ENROLLMENT_CANDIDATE_UNPROVEN")
+        if port is not None and int(port) == 9444:
+            port_claimants.append(process["ProcessId"])
+    if port_claimants != [pid]:
+        raise _EnrollmentHold("ENROLLMENT_CANDIDATE_UNPROVEN")
+    value = {"version": 1, "executable": proc.get("ExecutablePath"),
+             "user_data_dir": _switch(argv, "--user-data-dir"),
+             "profile_directory": _switch(argv, "--profile-directory"),
+             "cdp_endpoint": "http://127.0.0.1:9444", "exclusive_user_data": True,
+             "allow_launch": False}
+    env = _environment_from_value(value, config, checkout.resolve(strict=True), local_app_data=local)
+    # Reuse ENSURE's exact process/profile/session/SID rules, with no absent launch.
+    state, owned_pid = evaluate(env, inventory, session_id=session, expected_sid=sid,
+                                parse=_commandline_argv)
+    if state != "OWNED" or owned_pid != pid:
+        raise _EnrollmentHold("ENROLLMENT_CANDIDATE_UNPROVEN")
+    identity = tuple(proc.get(k) for k in (
+        "ProcessId", "ExecutablePath", "CommandLine", "SessionId", "OwnerSid", "CreationDate"))
+    return env, identity
+
+
+def _check_enrollment_custody(env: ChromeEnvironment, local: Path, sid: str) -> None:
+    from .local_completion_handoff import _private_identity
+    root = (local / "AI-Commerce").resolve(strict=True)
+    # No config exists. Check the existing private root in its place, without
+    # pretending this proves custody of a future file or authorizes its creation.
+    _require_operator_control(replace(env, config_path=root))
+    paths = {root, *env.user_data_dir.parents}
+    paths = {p for p in paths if p == root or _inside(p, root)}
+    if env.config_path.parent.exists():
+        paths.add(env.config_path.parent)
+    if any(not _no_links(p) or _private_identity(p) != sid for p in paths):
+        raise _EnrollmentHold("OPERATOR_OWNERSHIP_UNPROVEN")
+    for name in _MARKERS:
+        try:
+            (env.user_data_dir / name).lstat()
+        except FileNotFoundError:
+            continue
+        # An opaque existing lock is not proof of this process's custody.
+        raise _EnrollmentHold("ENROLLMENT_PROFILE_LOCK_UNPROVEN")
+    _verify_google_chrome(env)
+
+
+def assess_existing_9444(checkout: Path) -> dict:
+    """Local read-only assessment, never account/chat proof or write permission.
+
+    Path-based ACL checks cannot securely create a new Windows config under
+    atomic, handle-based custody. Within this bounded module the best outcome
+    is a private in-memory candidate and HOLD for a separate native owner task.
+    No HTTP/CDP attach, prompt, file creation, Chrome start or retry occurs here.
+    """
+    try:
+        local, session, sid = _enrollment_operator()
+        config = _enrollment_location(local, checkout)
+        env, identity = _existing_9444_candidate(_query_windows(9444), local=local,
+            checkout=checkout, config=config, session=session, sid=sid)
+        _check_enrollment_custody(env, local, sid)
+        # Independently re-observe PID creation time, ownership, listener, token,
+        # paths and permissions once. A changed observation is a HOLD, no replay.
+        if _enrollment_operator() != (local, session, sid):
+            raise _EnrollmentHold("ENROLLMENT_OBSERVATION_CHANGED")
+        if _enrollment_location(local, checkout) != config:
+            raise _EnrollmentHold("ENROLLMENT_OBSERVATION_CHANGED")
+        current, current_identity = _existing_9444_candidate(_query_windows(9444), local=local,
+            checkout=checkout, config=config, session=session, sid=sid)
+        if current != env or current_identity != identity:
+            raise _EnrollmentHold("ENROLLMENT_OBSERVATION_CHANGED")
+        _check_enrollment_custody(current, local, sid)
+        return _enrollment_hold("NATIVE_ATOMIC_ENROLLMENT_REQUIRED", assessed=True)
+    except (_EnrollmentHold, AcquisitionBlocked) as exc:
+        return _enrollment_hold(str(exc))
+    except Exception:
+        return _enrollment_hold("ENROLLMENT_ASSESSMENT_UNKNOWN")
+
+
+def enroll_existing_9444(checkout: Path, *, opt_in: bool = False) -> dict:
+    """Explicit local-only enrollment gate, disabled by default and write-held.
+
+    Even an opted-in assessed candidate requires a distinct trusted native task
+    implementing atomic create-new private custody. Never persist a candidate,
+    grant launch, infer an operator identity or enroll from a GitHub Issue.
+    """
+    if opt_in is not True:
+        return _enrollment_hold("ENROLLMENT_OPT_IN_REQUIRED")
+    return assess_existing_9444(checkout)
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m ai_commerce.remote.chrome_acquisition")
-    parser.add_argument("command", choices=("probe", "launch"))
-    parser.add_argument("--config", type=Path, required=True)
+    parser = argparse.ArgumentParser(prog="python -m ai_commerce.remote.chrome_acquisition",
+        epilog="Enrollment commands only assess and return HOLD; atomic native enrollment is a separate task.")
+    parser.add_argument("command", choices=("probe", "launch", "assess-existing-9444",
+                                          "enroll-existing-9444"))
+    parser.add_argument("--config", type=Path)
     parser.add_argument("--checkout", type=Path, required=True)
     parser.add_argument("--opt-in", action="store_true")
     args = parser.parse_args(argv)
+    if args.command in {"assess-existing-9444", "enroll-existing-9444"}:
+        if args.config is not None:
+            parser.error("enrollment uses only the fixed private config location")
+        result = (assess_existing_9444(args.checkout) if args.command == "assess-existing-9444"
+                  else enroll_existing_9444(args.checkout, opt_in=args.opt_in))
+        print(json.dumps(result, sort_keys=True))
+        return 2  # Assessment is never native enrollment acceptance.
+    if args.config is None:
+        parser.error("--config is required for probe/launch")
     try:
         local = os.environ.get("LOCALAPPDATA")
         if not local:
