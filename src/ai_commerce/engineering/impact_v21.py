@@ -77,6 +77,12 @@ CONTROL_TESTS = {
     "src/ai_commerce/engineering/windows_collection_sandbox.py": (
         "tests/test_minimum_test.py", "tests/test_mt01_v21.py",
     ),
+    # #904 fixed-origin #897 source snapshot operator: source/test closure ONLY.
+    # No EF02-01 worktree read, HostOps grant, untracked bytes or native receipt.
+    "src/ai_commerce/hostops_v3/ef02_897_snapshot.py": (
+        "tests/test_hostops_personal.py", "tests/test_minimum_test.py",
+        "tests/test_mt01_v21.py",
+    ),
     # Approved exact D5 operator PowerShell source, narrow reviewed test
     # closure only; unexpected script paths remain unowned and HOLD.
     "scripts/AI-Commerce-D5-Attended-CDP.ps1": (

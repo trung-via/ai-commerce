@@ -1530,6 +1530,52 @@ def test_windows_collection_sandbox_control_does_not_admit_unknown_engineering_s
         assert not plan.selected_groups
 
 
+def test_ef02_897_snapshot_control_selects_pinned_owner_and_consumers(tmp_path):
+    """#904: exact new HostOps source is reviewed before its bytes exist."""
+    from ai_commerce.engineering.impact_v21 import CONTROL_TESTS, select_impact
+    from ai_commerce.engineering.minimum_test import approved_groups
+
+    source = "src/ai_commerce/hostops_v3/ef02_897_snapshot.py"
+    tests = ("tests/test_hostops_personal.py", "tests/test_minimum_test.py",
+             "tests/test_mt01_v21.py")
+    assert CONTROL_TESTS[source] == tests
+    for path in tests:
+        mk(tmp_path, path)
+    assert not (tmp_path / source).exists()
+
+    selection = select_impact(root=tmp_path, changed_paths=(source,),
+                              groups=approved_groups())
+    assert selection.runnable and selection.mode == "TARGETED"
+    assert selection.selected_tests == tests
+    assert selection.reason_codes == ("REVIEWED_CONTROL_CLOSURE",)
+    assert not selection.selected_groups
+    assert not selection.missing_mapping  # control mapping != native proof
+
+
+def test_ef02_897_snapshot_control_does_not_waive_other_hostops_sources(tmp_path):
+    """#904: unknown modules and missing required consumers remain fail-closed."""
+    from ai_commerce.engineering.impact_v21 import select_impact
+    from ai_commerce.engineering.minimum_test import approved_groups
+
+    source = "src/ai_commerce/hostops_v3/ef02_897_snapshot.py"
+    unknown = "src/ai_commerce/hostops_v3/unregistered_snapshot.py"
+    tests = ("tests/test_hostops_personal.py", "tests/test_minimum_test.py",
+             "tests/test_mt01_v21.py")
+    for path in tests:
+        mk(tmp_path, path)
+    for paths in ((unknown,), (source, unknown)):
+        held = select_impact(root=tmp_path, changed_paths=paths,
+                             groups=approved_groups())
+        assert held.mode == "HOLD_MAPPING" and not held.runnable
+        assert held.missing_mapping == (unknown + ":SOURCE_OWNERSHIP_REQUIRED",)
+        assert held.selected_tests == (tests if source in paths else ())
+    (tmp_path / "tests/test_hostops_personal.py").unlink()
+    incomplete = select_impact(root=tmp_path, changed_paths=(source,),
+                               groups=approved_groups())
+    assert incomplete.mode == "HOLD_MAPPING" and not incomplete.runnable
+    assert "tests/test_hostops_personal.py:REQUIRED_TEST_MISSING_OR_UNSAFE" in incomplete.missing_mapping
+
+
 def test_d5_operator_bridge_pr_ci_covers_independent_hostops_personal_consumer(tmp_path):
     """The trusted merge gate's mandatory D5 script tests must be selected by CI.
 
@@ -2108,3 +2154,51 @@ def test_protected_runtime_owner_canary_survives_companion_test_restore(monkeypa
         impact_v21, "registered_action_plan", restored_invalid_owner_binding)
     with pytest.raises(ValueError, match="BASELINE_RUNTIME_OWNER_TRUST_UNPROVEN"):
         oracle.verify_committed_owner_runtime_canary(**kw)
+
+
+def test_ef02_904_origin_snapshot_ingress_is_fixed_and_non_replaying():
+    """Only the exact owner event can reach a read-only pinned source snapshot."""
+    import ast
+    import textwrap
+    from pathlib import Path
+
+    ingress = (Path(__file__).resolve().parents[1] /
+               ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+    job = ingress.split("  hostops-ef02-904-origin-snapshot:\n", 1)
+    assert len(job) == 2
+    scoped = job[1]
+    for fixed in (
+        "github.actor == github.repository_owner",
+        "github.event.action == 'opened'",
+        "github.event.issue.title == '[HOSTOPS EF02 SNAPSHOT] #904 source-only'",
+        "runs-on: [self-hosted, Windows, ai-commerce-ef02]",
+        "RUNNER_NAME", "AI-COMMERCE-EF02-01", "wt-npcel0mt",
+        "GIT_OPTIONAL_LOCKS", "src/ai_commerce/hostops_v3/ef02_897_snapshot.py",
+        "6a00669e1d266633d2f59c9b3d52a0584fc82f50cc41b00a8c8136de688c7b4e",
+        "SOURCE_RECOVERY_UNVERIFIED", "ZipFile", "hashlib.sha256",
+        "artifact_id:ok ? id : null", "candidate_verified:false",
+        "native_sandbox_proven:false", "replay_authorized:false",
+    ):
+        assert fixed in scoped
+    source = scoped.split("          $script = @'\n", 1)[1].split("\n          '@\n          $script | python -B -", 1)[0]
+    py = textwrap.dedent(source)
+    tree = ast.parse(py)
+    assert "subprocess.run" in py and "shell=False" in py
+    assert "source_file_sha256" in py and "safe(path" in py
+    # Two bounded scheduling slots cover the existing identical-label EF02
+    # runners; only the exact origin runner may read private source bytes.
+    for required in (
+        "fail-fast: false", "max-parallel: 2", "slot: [one, two]",
+        "group: ef02-904-source-snapshot-${{ matrix.slot }}",
+        "ef02-904-origin-source-${{ github.run_id }}-${{ matrix.slot }}",
+        "actual_runner:",
+    ):
+        assert required in scoped
+    assert not any(isinstance(n, (ast.ImportFrom, ast.Import)) and (
+        any(alias.name.startswith(("requests", "socket", "urllib", "http")) for alias in n.names)
+        if isinstance(n, ast.Import) else (n.module or "").startswith(("requests", "socket", "urllib", "http"))
+    ) for n in ast.walk(tree))
+    for forbidden in ("shell=True", "git reset", "git clean", "git checkout",
+                      "git worktree prune", "os.system(", "eval(", "exec("):
+        assert forbidden not in py
+    assert "SOURCE_RECOVERY_UNVERIFIED" in py
