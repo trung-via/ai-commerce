@@ -1530,6 +1530,52 @@ def test_windows_collection_sandbox_control_does_not_admit_unknown_engineering_s
         assert not plan.selected_groups
 
 
+def test_ef02_897_snapshot_control_selects_pinned_owner_and_consumers(tmp_path):
+    """#904: exact new HostOps source is reviewed before its bytes exist."""
+    from ai_commerce.engineering.impact_v21 import CONTROL_TESTS, select_impact
+    from ai_commerce.engineering.minimum_test import approved_groups
+
+    source = "src/ai_commerce/hostops_v3/ef02_897_snapshot.py"
+    tests = ("tests/test_hostops_personal.py", "tests/test_minimum_test.py",
+             "tests/test_mt01_v21.py")
+    assert CONTROL_TESTS[source] == tests
+    for path in tests:
+        mk(tmp_path, path)
+    assert not (tmp_path / source).exists()
+
+    selection = select_impact(root=tmp_path, changed_paths=(source,),
+                              groups=approved_groups())
+    assert selection.runnable and selection.mode == "TARGETED"
+    assert selection.selected_tests == tests
+    assert selection.reason_codes == ("REVIEWED_CONTROL_CLOSURE",)
+    assert not selection.selected_groups
+    assert not selection.missing_mapping  # control mapping != native proof
+
+
+def test_ef02_897_snapshot_control_does_not_waive_other_hostops_sources(tmp_path):
+    """#904: unknown modules and missing required consumers remain fail-closed."""
+    from ai_commerce.engineering.impact_v21 import select_impact
+    from ai_commerce.engineering.minimum_test import approved_groups
+
+    source = "src/ai_commerce/hostops_v3/ef02_897_snapshot.py"
+    unknown = "src/ai_commerce/hostops_v3/unregistered_snapshot.py"
+    tests = ("tests/test_hostops_personal.py", "tests/test_minimum_test.py",
+             "tests/test_mt01_v21.py")
+    for path in tests:
+        mk(tmp_path, path)
+    for paths in ((unknown,), (source, unknown)):
+        held = select_impact(root=tmp_path, changed_paths=paths,
+                             groups=approved_groups())
+        assert held.mode == "HOLD_MAPPING" and not held.runnable
+        assert held.missing_mapping == (unknown + ":SOURCE_OWNERSHIP_REQUIRED",)
+        assert held.selected_tests == (tests if source in paths else ())
+    (tmp_path / "tests/test_hostops_personal.py").unlink()
+    incomplete = select_impact(root=tmp_path, changed_paths=(source,),
+                               groups=approved_groups())
+    assert incomplete.mode == "HOLD_MAPPING" and not incomplete.runnable
+    assert "tests/test_hostops_personal.py:REQUIRED_TEST_MISSING_OR_UNSAFE" in incomplete.missing_mapping
+
+
 def test_d5_operator_bridge_pr_ci_covers_independent_hostops_personal_consumer(tmp_path):
     """The trusted merge gate's mandatory D5 script tests must be selected by CI.
 
