@@ -2300,11 +2300,18 @@ def test_ef02_897_fixed_source_restore_ingress_is_owner_and_source_pinned():
     # Native failure may expose only bounded stage codes, never host details.
     for diagnostic_stage in (
         "RUNNER_AUTH", "EVENT_AUTH", "CHECKOUT_PIN", "WORKTREE_PIN",
-        "ORIGIN_HEAD", "ORIGIN_STATUS", "EVIDENCE_FILES", "EVIDENCE_BIND",
+        "ORIGIN_HEAD", "ORIGIN_STATUS",
         "SOURCE_HASHES", "FINAL_RECHECK", "ARCHIVE",
     ):
         assert 'STAGE = "' + diagnostic_stage + '"' in job
     assert 'print("EF02_897_SOURCE_RECOVERY_HOLD:" + STAGE)' in job
+    # Source-only snapshots MUST NOT perform an implicit destructive checkout.
+    assert "actions/checkout@v4" not in job
+    assert "git clean" not in job
+    assert 'checkout / ".local" / "ef02"' not in job
+    assert 'evidence_origin": "ARCHIVED_ARTIFACT_14117091201' in job
+    assert '"local_evidence_reread": False' in job
+    assert 'hashlib.sha256(data).hexdigest() == checksum' in job
     assert 'print(type(' not in job and 'traceback.print_exc' not in job
     assert "native_sandbox_proven:false" in job
     source = job.split("          $script = @'\n", 1)[1].split("\n          '@\n          $script | python -B -", 1)[0]
