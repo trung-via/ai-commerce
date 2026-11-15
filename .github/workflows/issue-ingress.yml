@@ -2127,12 +2127,17 @@ jobs:
       github.event.issue.user.login == github.repository_owner &&
       github.event.issue.title == '[HOSTOPS EF02 SNAPSHOT] #904 source-only'
     runs-on: [self-hosted, Windows, ai-commerce-ef02]
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        slot: [one, two]
     timeout-minutes: 6
     permissions:
       contents: read
       issues: write
     concurrency:
-      group: ef02-904-source-snapshot
+      group: ef02-904-source-snapshot-${{ matrix.slot }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
@@ -2288,7 +2293,7 @@ jobs:
         id: upload
         uses: actions/upload-artifact@v4
         with:
-          name: ef02-904-origin-source-${{ github.run_id }}
+          name: ef02-904-origin-source-${{ github.run_id }}-${{ matrix.slot }}
           path: ${{ runner.temp }}\ef02-904-source-snapshot.zip
           retention-days: 7
           if-no-files-found: error
@@ -2308,7 +2313,10 @@ jobs:
             const receipt = {
               schema:'ai-commerce.hostops.ef02-904-snapshot.v1',
               operation:'EF02_904_SOURCE_SNAPSHOT_READONLY', target_issue:904,
-              origin_runner:'AI-COMMERCE-EF02-01', source_sha:'ae1b7e7db03ddd564b8f6c7a5d5bc1979aaa96e7',
+              origin_runner:'AI-COMMERCE-EF02-01',
+              actual_runner:['AI-COMMERCE-EF02-01','AI-COMMERCE-EF02-02'].includes(process.env.RUNNER_NAME)
+                ? process.env.RUNNER_NAME : 'UNKNOWN',
+              source_sha:'ae1b7e7db03ddd564b8f6c7a5d5bc1979aaa96e7',
               status:ok ? 'UNVERIFIED_SOURCE_ARTIFACT' : 'HOLD_SOURCE_RECOVERY_UNVERIFIED',
               artifact_id:ok ? id : null, source_only:true,
               candidate_verified:false, native_sandbox_proven:false,
