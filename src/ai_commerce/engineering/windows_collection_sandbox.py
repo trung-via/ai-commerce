@@ -62,7 +62,7 @@ _ENVIRONMENT = {"SystemRoot": r"C:\Windows"}  # Compiler's minimal inert environ
 # inherit the entire runner environment or expose LOCALAPPDATA in receipts.
 _APP_CONTAINER_ENV_TEMPLATE = {"LOCALAPPDATA": "WIN32_VERIFIED_LOCALAPPDATA",
                                "SystemRoot": r"C:\Windows",
-                               "TEMP": "WIN32_PINNED_SCRATCH", "TMP": "WIN32_PINNED_SCRATCH"}
+                               "TEMP": "WIN32_PINNED_SCRATCH_OS_REDIRECT", "TMP": "WIN32_PINNED_SCRATCH_OS_REDIRECT"}
 ENVIRONMENT_SHA256 = _sha(_json(_APP_CONTAINER_ENV_TEMPLATE))
 OPT_IN_VARIABLE = "AI_COMMERCE_WINDOWS_NATIVE_PROOF"
 _AUDIENCE = "urn:ai-commerce:mt01:inert-windows:"
@@ -345,7 +345,7 @@ static DWORD file_error(const wchar_t *p, DWORD access) {
 }
 int wmain(int argc, wchar_t **argv) {
     if (argc == 2 && wcscmp(argv[1], L"grandchild") == 0) { Sleep(INFINITE); return 0; }
-    if (argc != 9 || wcscmp(argv[1], L"probe") != 0) return 81;
+    if (argc != 10 || wcscmp(argv[1], L"probe") != 0) return 81;
     DWORD r[16] = {0}; r[0] = 0x4d543031;
     HANDLE token = NULL; DWORD length = 0, ac = 0;
     BYTE buffer[4096];
@@ -367,30 +367,31 @@ int wmain(int argc, wchar_t **argv) {
     if (!ConvertSidToStringSidW(((TOKEN_APPCONTAINER_INFORMATION*)buffer)->TokenAppContainer, &sid_string)) return 97;
     r[13] = wcscmp(sid_string, argv[8]) == 0; LocalFree(sid_string);
     CloseHandle(token);
-    // The hosted OS supplied TEMP/TMP; pin both explicitly to the bounded
-    // per-probe scratch directory, compare exact values against the source-
-    // supplied report path, and reject duplicates or any other environment.
+    // Windows redirects LOCALAPPDATA to the AppContainer profile, and both
+    // TEMP/TMP to its Temp subdirectory. argv[9] is the independently verified
+    // GetAppContainerFolderPath from the parent, never a caller override.
+    // Reject every other value, duplicate key or unexpected inherited entry.
+    wchar_t expected_temp[32768];
+    if (!argv[9][0] || wcslen(argv[9]) > 32756 ||
+        swprintf_s(expected_temp, 32768, L"%s\\Temp", argv[9]) < 0) return 98;
     LPWCH env = GetEnvironmentStringsW();
     r[12] = 0;
     if (env) {
-        const wchar_t *scratch_end = wcsrchr(argv[7], L'\\');
-        size_t scratch_length = scratch_end ? (size_t)(scratch_end - argv[7]) : 0;
         DWORD count = 0, matches = 0, drives = 0, profile = 0, other = 0;
         for (LPWCH item = env; *item; item += wcslen(item) + 1) {
             if (++count > 32) { other = 15; break; }
-            if (wcsncmp(item, L"LOCALAPPDATA=", 13) == 0 && item[13] && !(matches & 1)) {
-                matches |= 1;
+            if (wcsncmp(item, L"LOCALAPPDATA=", 13) == 0) {
+                if ((matches & 1) || wcscmp(item + 13, argv[9]) != 0) other++;
+                else matches |= 1;
             } else if (wcscmp(item, L"SystemRoot=C:\\Windows") == 0 && !(matches & 2)) {
                 matches |= 2;
             } else if (wcsncmp(item, L"TEMP=", 5) == 0) {
                 const wchar_t *value = item + 5;
-                if ((profile & 2) || !scratch_length || wcslen(value) != scratch_length
-                    || wcsncmp(value, argv[7], scratch_length) != 0) other++;
+                if ((profile & 2) || wcscmp(value, expected_temp) != 0) other++;
                 else profile |= 2;
             } else if (wcsncmp(item, L"TMP=", 4) == 0) {
                 const wchar_t *value = item + 4;
-                if ((profile & 4) || !scratch_length || wcslen(value) != scratch_length
-                    || wcsncmp(value, argv[7], scratch_length) != 0) other++;
+                if ((profile & 4) || wcscmp(value, expected_temp) != 0) other++;
                 else profile |= 4;
             } else if (item[0] == L'=' && ((item[1] >= L'A' && item[1] <= L'Z')
                         || (item[1] >= L'a' && item[1] <= L'z'))
@@ -966,7 +967,9 @@ def run_inert_probe(*, enabled=False, repository=None, candidate_sha=None, sourc
         native.acl(snapshot, owner, sid_string, inherit="OICI")
         native.acl(private, owner)
         native.acl(scratch, owner, sid_string, rights="FA", inherit="OICI", low=True)
-        # TEMP/TMP are explicit source-owned paths, never inherited from the runner.
+        # Pass only four source-owned inputs. Windows will redirect TEMP/TMP
+        # and LOCALAPPDATA into the OS-created disposable AppContainer profile.
+        # The native child verifies exact OS profile paths before acceptance.
         runtime_environment = dict(_ENVIRONMENT, LOCALAPPDATA=host_localappdata,
                                    TEMP=str(scratch), TMP=str(scratch))
         result["runtime_environment_sha256"] = _sha(_json(runtime_environment))
@@ -1017,7 +1020,8 @@ def run_inert_probe(*, enabled=False, repository=None, candidate_sha=None, sourc
             connection, _ = listener.accept(); connection.close()
         result["positive_controls"]["loopback_connect"] = 0
         report = scratch / "report.bin"
-        args = ["probe", sentinel, source, escape, snapshot / "missing.txt", str(port), report, sid_string]
+        args = ["probe", sentinel, source, escape, snapshot / "missing.txt", str(port),
+                report, sid_string, profile_folder]
         deadline.remaining()
         try:
             job, child, pid, events = native.launch(exe, args, scratch, runtime_environment, sid=sid, fault=fault)
