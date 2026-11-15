@@ -1385,6 +1385,20 @@ def test_windows_native_synthetic_host_localappdata_is_exact_os_profile_parent(t
     assert sandbox.ENVIRONMENT_SHA256 == sandbox._sha(sandbox._json(sandbox._APP_CONTAINER_ENV_TEMPLATE))
 
 
+def test_windows_native_synthetic_appcontainer_redirect_checks_exact_os_profile():
+    """The native fixture must prove Windows' AppContainer environment mapping."""
+    from ai_commerce.engineering import windows_collection_sandbox as sandbox
+
+    fixture = sandbox._FIXTURE_C
+    assert "argc != 10" in fixture
+    assert "swprintf_s(expected_temp, 32768" in fixture
+    assert 'wcscmp(item + 13, argv[9]) != 0' in fixture
+    assert fixture.count('wcscmp(value, expected_temp) != 0') == 2
+    assert "count == 4 && matches == 3 && profile == 6 && drives == 0 && other == 0" in fixture
+    assert sandbox._APP_CONTAINER_ENV_TEMPLATE["TEMP"] == "WIN32_PINNED_SCRATCH_OS_REDIRECT"
+    assert sandbox._APP_CONTAINER_ENV_TEMPLATE["TMP"] == "WIN32_PINNED_SCRATCH_OS_REDIRECT"
+
+
 @pytest.mark.parametrize("case", [
     "valid_distinct_merge_and_head", "wrong_job_head", "wrong_pr_head",
     "wrong_repository", "forked_head", "wrong_base", "wrong_pr_number",
