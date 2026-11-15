@@ -1572,6 +1572,19 @@ def test_windows_native_synthetic_environment_fail_closed_with_sanitized_mask(ma
     assert error.value.native_error == mask
 
 
+def test_windows_native_synthetic_extra_environment_category_is_only_bounded_counts():
+    """No environment name, value or path is present in the failure diagnostic."""
+    import struct
+    from ai_commerce.engineering import windows_collection_sandbox as sandbox
+
+    # Two required keys present but 3 total entries; one extra classified unknown.
+    encoded = 3 | (1 << 12)
+    report = [0x4d543031, 1, 0, 0, 5, 5, 5, 0, 2, 10013, 456, 123, 0, 1, 3, encoded]
+    with pytest.raises(sandbox.Unproven, match="NATIVE_CHILD_ENVIRONMENT_UNPROVEN") as error:
+        sandbox._decode_fixture_report(struct.pack("<16I", *report), 123)
+    assert error.value.native_error == (encoded << 3) | 3
+
+
 @pytest.mark.parametrize("index,value", [(4, 2), (5, 32), (6, 3), (7, 5), (8, 5), (9, 10061)])
 def test_windows_native_synthetic_missing_files_and_closed_ports_are_not_denials(index, value):
     import struct
