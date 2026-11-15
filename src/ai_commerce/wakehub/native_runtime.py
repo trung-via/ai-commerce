@@ -14,9 +14,13 @@ existing HostOps/D5 keys or native bridge may be repurposed for this.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 import json
+import ntpath
+from pathlib import Path
 
+from ai_commerce.remote import chrome_acquisition as acquisition
 from ai_commerce.wakehub import private_operator as op
 from ai_commerce.wakehub.native_authority import WindowsGrantVerifier, windows_only
 from ai_commerce.wakehub.native_journal import SQLitePrivateJournal, deny
@@ -28,12 +32,69 @@ class NativeCode(Enum):
     OPERATOR = "SOURCE_OPERATOR_RESULT"
 
 
+class Native9444Code(Enum):
+    OWNER_REQUIRED = "OWNER_ESCALATION_N3B2_PROTECTED_DESKTOP_EXECUTOR_REQUIRED"
+    DESKTOP_TRANSPORT_REQUIRED = "OWNER_ESCALATION_N3B2_AUTHENTICATED_DESKTOP_TRANSPORT_REQUIRED"
+    AUTHORITY_REQUIRED = "HOLD_G2_SIGNED_AUTHORITY_REQUIRED"
+    INVALID_REQUEST = "HOLD_INVALID_9444_PREFLIGHT"
+    EVIDENCE_GAP = "HOLD_INDEPENDENT_9444_EVIDENCE_REQUIRED"
+    ADVISORY_HOLD = "HOLD_N3A_9444_ADVISORY"
+    TARGET_MISMATCH = "HOLD_EXACT_CONFIG_OWNER_MISMATCH"
+    RECONCILE_ONLY = "HOLD_DURABLE_LANE_RECONCILE_ONLY"
+    DUPLICATE = "HOLD_CONSUMED_9444_GRANT"
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class Native9444Contract:
+    """Private SOURCE_VERIFIED routing description, never a native capability.
+
+    Selectors come only from verified G2 enrollment and the current fixed N3-A
+    config. A future N3-B2 owner must reserve this grant in the EXISTING journal,
+    authenticate the returned PrivateLease, and atomically recheck revocation,
+    pause/receiver, complete absence (START) or exact process (REUSE), config
+    custody, signed executable and non-elevated unlocked owner token/session.
+    That owner needs an independently enrolled protected desktop transport and
+    independent durable outcome collection. Session0 cannot execute the route.
+    No caller-constructed contract/lease, matching SID or test attestation can
+    establish that enrollment. This object is not accepted by any effect path.
+    """
+    grant: op.PrivateGrant
+    environment: acquisition.ChromeEnvironment
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class Native9444Preflight:
+    operation: op.Operation
+    code: Native9444Code
+    reason: op.Reason
+    advisory: str = "ABSENCE_UNPROVEN"
+    contract: Native9444Contract | None = None
+
+    def to_json(self):
+        # Deliberately omit the private contract, PID, SID, config and proof.
+        if (type(self.code) is not Native9444Code
+                or (self.contract is not None and type(self.contract) is not Native9444Contract)):
+            raise ValueError("WAKEHUB_9444_PUBLIC_INPUT_INVALID")
+        advisory = acquisition._logon_result(self.advisory)["code"]
+        receipt = op.PublicReceipt(self.operation, op.Decision.UNKNOWN_EFFECT
+            if self.code is Native9444Code.RECONCILE_ONLY or advisory == "UNKNOWN_EFFECT"
+            else op.Decision.HOLD, self.reason)
+        return json.dumps({"schema_version": "WakeHubN3B9444PreflightPublic.v1",
+            "code": self.code.value, "receipt": json.loads(receipt.to_json()),
+            "advisory": advisory,
+            "source_validation": "SOURCE_VERIFIED" if self.contract is not None else "NOT_VERIFIED",
+            "signer_enrollment": "NOT_PROVEN_BY_SOURCE_OR_OFFLINE_TESTS",
+            "desktop_executor": "NOT_ENROLLED_BY_SOURCE",
+            "lease": "NOT_RESERVED_BY_PREFLIGHT", "native_effect": "NOT_ATTEMPTED"},
+            sort_keys=True, separators=(",", ":"))
+
+
 class WindowsExecutor:
     """Fail closed even if somebody directly calls an executor method."""
-    def start_dedicated(self, lease):
+    def start_dedicated(self, lease: op.PrivateLease):
         deny()
 
-    def reuse_owned(self, lease):
+    def reuse_owned(self, lease: op.PrivateLease):
         deny()
 
 
@@ -131,6 +192,99 @@ class WindowsPrivateRuntime:
             return op.PublicReceipt(operation if type(operation) is op.Operation else op.Operation.STATUS,
                 op.Decision.HOLD, op.Reason.AUTHORITY_REQUIRED)
         return self._run_authenticated(operation, proof)
+
+    def preflight_9444(self, checkout: Path, operation: op.Operation,
+                       proof: op.PrivateGrantProof | None = None) -> Native9444Preflight:
+        """Private read-only N3-B1 contract; never dispatch or reserve an effect.
+
+        This is separate from run/service requests and the hard-denied N3-A seam.
+        Reuse G2 signature/consent/release/revocation, journal and attestation
+        checks without substituting public advisory dictionaries for authority.
+        Even a fully checked route returns HOLD until the N3-B2 owner exists.
+        PENDING/UNKNOWN, including a valid old lease, require reconciliation;
+        this method cannot adopt, retry, steal or create a lease.
+        """
+        if (type(operation) is not op.Operation or operation not in
+                (op.Operation.REUSE, op.Operation.START_IF_INDEPENDENTLY_VERIFIED_ABSENT)):
+            return Native9444Preflight(op.Operation.STATUS, Native9444Code.INVALID_REQUEST,
+                op.Reason.INVALID_REQUEST)
+
+        def hold(code, reason=op.Reason.EVIDENCE_GAP, advisory="ABSENCE_UNPROVEN"):
+            return Native9444Preflight(operation, code, reason, advisory)
+
+        if self._unresolved:
+            return hold(Native9444Code.RECONCILE_ONLY, op.Reason.RECONCILE_ONLY)
+        # Service authentication does not provide a GUI executor. In particular
+        # never run N3-A's local desktop reads as the service/runner identity.
+        if hasattr(self, "_broker"):
+            return hold(Native9444Code.DESKTOP_TRANSPORT_REQUIRED, op.Reason.AUTHORITY_REQUIRED)
+        authority, operator = self._authority, self._operator
+        if (not isinstance(authority, WindowsGrantVerifier) or operator is None
+                or operator._verifier is not authority or operator._journal is not authority.journal
+                or type(proof) is not op.PrivateGrantProof):
+            return hold(Native9444Code.AUTHORITY_REQUIRED, op.Reason.AUTHORITY_REQUIRED)
+        try:
+            now = operator._now()
+            grant = operator._grant(proof, operation, now)
+            if grant is None:
+                return hold(Native9444Code.AUTHORITY_REQUIRED, op.Reason.AUTHORITY_REQUIRED)
+            record = operator._record(grant, now)
+            if record.state in (op.JournalState.PENDING, op.JournalState.UNKNOWN):
+                return hold(Native9444Code.RECONCILE_ONLY, op.Reason.RECONCILE_ONLY)
+            # The existing journal selects consumed keys across ALL key roles;
+            # an OBSERVED record is still consumed, including NO_EFFECT.
+            if record.lease is not None:
+                return hold(Native9444Code.DUPLICATE, op.Reason.DUPLICATE)
+            if Path(checkout).resolve(strict=True) != Path(authority.enrolled["release_root"]).resolve(strict=True):
+                return hold(Native9444Code.TARGET_MISMATCH, op.Reason.OWNERSHIP_REQUIRED)
+            evidence, public, now = operator._read(grant, now)
+            reason = operator._gate(grant, evidence, public)
+            if reason is not None:
+                return hold(Native9444Code.EVIDENCE_GAP, reason)
+            advisory = acquisition._assess_logon_9444_private(checkout)
+            if type(advisory) is not acquisition._Logon9444Assessment:
+                return hold(Native9444Code.EVIDENCE_GAP)
+            required = ("REUSE_ONLY" if operation is op.Operation.REUSE else "BLOCKED_NOT_DEPLOYED")
+            if advisory.code != required or advisory.observation is None:
+                return hold(Native9444Code.ADVISORY_HOLD, advisory=advisory.code)
+            (local, session, sid), env, (listeners, processes) = advisory.observation
+            target = grant.target
+            same_path = lambda a, b: ntpath.normcase(str(a)) == ntpath.normcase(str(b))
+            if (type(env) is not acquisition.ChromeEnvironment
+                    or (sid, session) != (target.user_sid, target.session_id)
+                    or not same_path(env.executable, target.chrome_executable)
+                    or not same_path(env.user_data_dir, target.dedicated_profile)
+                    or env.endpoint != "http://127.0.0.1:9444" or env.port != 9444
+                    or env.config_path != local / "AI-Commerce" / "Chrome-Acquisition" / "config.json"
+                    or (operation is not op.Operation.REUSE and env.allow_launch is not True)):
+                return hold(Native9444Code.TARGET_MISMATCH, op.Reason.OWNERSHIP_REQUIRED, advisory.code)
+            if operation is op.Operation.REUSE:
+                expected = grant.expected_process
+                owners = [p for p in processes if p[0] == expected.pid]
+                if (listeners != (("127.0.0.1", 9444, expected.pid),) or len(owners) != 1
+                        or not same_path(owners[0][1], expected.executable)
+                        or owners[0][3:5] != (expected.session_id, expected.user_sid)
+                        # G2's fixed READ uses Unix milliseconds. N3-A also pins
+                        # the full 100ns CreationDate across its two reads.
+                        or (acquisition._creation_ticks(owners[0][5]) - 116444736000000000)
+                            // 10000 / 1000 != expected.created_at):
+                    return hold(Native9444Code.TARGET_MISMATCH, op.Reason.OWNERSHIP_REQUIRED, advisory.code)
+            elif listeners or processes:
+                return hold(Native9444Code.EVIDENCE_GAP, op.Reason.ABSENCE_REQUIRED, advisory.code)
+            fresh, fresh_public, now = operator._read(grant, now)
+            if (fresh.snapshot.observed_at <= evidence.snapshot.observed_at
+                    or operator._gate(grant, fresh, fresh_public) is not None):
+                return hold(Native9444Code.EVIDENCE_GAP, advisory=advisory.code)
+            now = operator._now(now)
+            if operator._grant(proof, operation, now) != grant:
+                return hold(Native9444Code.AUTHORITY_REQUIRED, op.Reason.AUTHORITY_REQUIRED, advisory.code)
+            # A concurrent logon/reservation or lost ACK can never be adopted.
+            if operator._record(grant, now) != record:
+                return hold(Native9444Code.RECONCILE_ONLY, op.Reason.RECONCILE_ONLY, advisory.code)
+            return Native9444Preflight(operation, Native9444Code.OWNER_REQUIRED,
+                op.Reason.AUTHORITY_REQUIRED, advisory.code, Native9444Contract(grant, env))
+        except Exception:
+            return hold(Native9444Code.EVIDENCE_GAP)
 
     def _run_authenticated(self, operation, proof=None):
         if type(operation) is not op.Operation:
