@@ -1362,6 +1362,28 @@ def test_windows_native_synthetic_forged_host_flags_and_stale_source_never_launc
 
 
 
+
+def test_windows_native_synthetic_host_localappdata_is_exact_os_profile_parent(tmp_path):
+    """Only this attested directory may enter the inert child, not host secrets."""
+    from ai_commerce.engineering import windows_collection_sandbox as sandbox
+
+    localappdata = tmp_path / "Local"
+    folder = localappdata / "Packages" / "sandbox-profile"
+    assert sandbox._verified_host_localappdata(folder, str(localappdata)) == str(localappdata)
+    for bad_folder, value in (
+        (folder, ""),
+        (folder, None),
+        (folder, str(tmp_path / "Other")),
+        (localappdata / "Foreign" / "sandbox-profile", str(localappdata)),
+        (tmp_path / "Packages" / "sandbox-profile", str(localappdata)),
+    ):
+        with pytest.raises(sandbox.Unproven, match="NATIVE_HOST_LOCALAPPDATA_UNPROVEN"):
+            sandbox._verified_host_localappdata(bad_folder, value)
+    assert "LOCALAPPDATA" not in sandbox._ENVIRONMENT
+    assert sandbox._APP_CONTAINER_ENV_TEMPLATE["LOCALAPPDATA"] == "WIN32_VERIFIED_LOCALAPPDATA"
+    assert sandbox.ENVIRONMENT_SHA256 == sandbox._sha(sandbox._json(sandbox._APP_CONTAINER_ENV_TEMPLATE))
+
+
 @pytest.mark.parametrize("case", [
     "valid_distinct_merge_and_head", "wrong_job_head", "wrong_pr_head",
     "wrong_repository", "forked_head", "wrong_base", "wrong_pr_number",
