@@ -56,8 +56,13 @@ _PROFILE = dict(version=1, kind="INERT_NATIVE_ONLY", capabilities=[],
 PROFILE_SHA256 = _sha(_json(_PROFILE))
 # The native fixture uses absolute paths and Win32 APIs, and needs no PATH,
 # user profile, Python configuration, auth variables or inherited handles.
-_ENVIRONMENT = {"SystemRoot": r"C:\Windows"}
-ENVIRONMENT_SHA256 = _sha(_json(_ENVIRONMENT))
+_ENVIRONMENT = {"SystemRoot": r"C:\Windows"}  # Compiler's minimal inert environment.
+# The AppContainer process API requires its authenticated host profile location.
+# Bind the *kind* of dynamic input in this source-owned, path-free digest; never
+# inherit the entire runner environment or expose LOCALAPPDATA in receipts.
+_APP_CONTAINER_ENV_TEMPLATE = {"LOCALAPPDATA": "WIN32_VERIFIED_LOCALAPPDATA",
+                               "SystemRoot": r"C:\Windows"}
+ENVIRONMENT_SHA256 = _sha(_json(_APP_CONTAINER_ENV_TEMPLATE))
 OPT_IN_VARIABLE = "AI_COMMERCE_WINDOWS_NATIVE_PROOF"
 _AUDIENCE = "urn:ai-commerce:mt01:inert-windows:"
 
@@ -362,7 +367,12 @@ int wmain(int argc, wchar_t **argv) {
     r[13] = wcscmp(sid_string, argv[8]) == 0; LocalFree(sid_string);
     CloseHandle(token);
     LPWCH env = GetEnvironmentStringsW();
-    r[12] = env && wcscmp(env, L"SystemRoot=C:\\Windows") == 0 && env[wcslen(env)+1] == 0;
+    r[12] = 0;
+    if (env && wcsncmp(env, L"LOCALAPPDATA=", 13) == 0 && env[13]) {
+        LPWCH second = env + wcslen(env) + 1;
+        r[12] = wcscmp(second, L"SystemRoot=C:\\Windows") == 0
+                && second[wcslen(second)+1] == 0;
+    }
     if (env) FreeEnvironmentStringsW(env);
     r[4] = file_error(argv[2], GENERIC_READ);
     r[5] = file_error(argv[3], GENERIC_WRITE);
@@ -797,6 +807,23 @@ def _decode_fixture_report(raw, pid):
     return values
 
 
+
+def _verified_host_localappdata(profile_folder, reported_localappdata):
+    """Bind the necessary Win32 profile variable to an OS-reported folder.
+
+    Derive the parent of <LOCALAPPDATA>/Packages/<AppContainer> and require an
+    exact match to the hosted process's value. The value never goes to receipt.
+    """
+    folder = Path(profile_folder)
+    if (folder.parent.name.casefold() != "packages"
+            or not isinstance(reported_localappdata, str)
+            or not reported_localappdata
+            or os.path.normcase(os.path.abspath(reported_localappdata))
+               != os.path.normcase(str(folder.parent.parent))):
+        raise Unproven("NATIVE_HOST_LOCALAPPDATA_UNPROVEN")
+    return str(folder.parent.parent)
+
+
 def run_inert_probe(*, enabled=False, repository=None, candidate_sha=None, source_sha256=None,
                     profile_sha256=None, environment_sha256=None, fault="none"):
     """Launch ONLY the embedded inert fixture and always return a sanitized receipt.
@@ -827,7 +854,7 @@ def run_inert_probe(*, enabled=False, repository=None, candidate_sha=None, sourc
         if enabled is not True or os.environ.get(OPT_IN_VARIABLE) != PROFILE_SHA256:
             raise Unproven("HOSTED_NATIVE_SOURCE_OPT_IN_REQUIRED")
         _validate_binding(candidate_sha, source_sha256, profile_sha256, environment_sha256, fault)
-        if _sha(_json(_PROFILE)) != profile_sha256 or _sha(_json(_ENVIRONMENT)) != environment_sha256:
+        if _sha(_json(_PROFILE)) != profile_sha256 or _sha(_json(_APP_CONTAINER_ENV_TEMPLATE)) != environment_sha256:
             raise Unproven("NATIVE_PROFILE_OR_ENVIRONMENT_DRIFT")
         if os.name != "nt" or C.sizeof(C.c_void_p) != 8:
             raise Unproven("HOSTED_WINDOWS_X64_REQUIRED")
@@ -880,6 +907,10 @@ def run_inert_probe(*, enabled=False, repository=None, candidate_sha=None, sourc
             profile_folder = Path(folder.value)
         finally:
             native.ole.CoTaskMemFree(C.cast(folder, C.c_void_p))
+        host_localappdata = _verified_host_localappdata(
+            profile_folder, os.environ.get("LOCALAPPDATA"))
+        runtime_environment = dict(_ENVIRONMENT, LOCALAPPDATA=host_localappdata)
+        result["runtime_environment_sha256"] = _sha(_json(runtime_environment))
         native.acl(root, owner, sid_string)
         exe = root / "fixture.exe"
         native.acl(exe, owner, sid_string)
@@ -939,7 +970,7 @@ def run_inert_probe(*, enabled=False, repository=None, candidate_sha=None, sourc
         args = ["probe", sentinel, source, escape, snapshot / "missing.txt", str(port), report, sid_string]
         deadline.remaining()
         try:
-            job, child, pid, events = native.launch(exe, args, scratch, dict(_ENVIRONMENT), sid=sid, fault=fault)
+            job, child, pid, events = native.launch(exe, args, scratch, runtime_environment, sid=sid, fault=fault)
             result["events"] = events
         except Unproven as exc:
             result["events"] = getattr(exc, "events", [])
@@ -972,7 +1003,7 @@ def run_inert_probe(*, enabled=False, repository=None, candidate_sha=None, sourc
         if (_sha(source.read_bytes()) != source_hash or source_digest(repository) != source_sha256
                 or _sha(exe.read_bytes()) != result["fixture_sha256"]):
             raise Unproven("NATIVE_SOURCE_MUTATED")
-        if _sha(_json(_ENVIRONMENT)) != environment_sha256 or _sha(_json(_PROFILE)) != profile_sha256:
+        if _sha(_json(_APP_CONTAINER_ENV_TEMPLATE)) != environment_sha256 or _sha(_json(_PROFILE)) != profile_sha256:
             raise Unproven("NATIVE_PROFILE_OR_ENVIRONMENT_DRIFT")
         result["artifact_bytes"] = _artifact_size(root)
         if fault == "timeout":
