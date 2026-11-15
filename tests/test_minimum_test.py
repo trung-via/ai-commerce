@@ -1613,7 +1613,10 @@ def test_windows_native_synthetic_denial_failure_codes_are_bounded(index, code, 
     with pytest.raises(sandbox.Unproven, match="NATIVE_ACCESS_DENIAL_UNPROVEN") as error:
         sandbox._decode_fixture_report(struct.pack("<16I", *report), 123)
     slot = index - 4
-    assert error.value.native_error == (1 << slot) | (category << (6 + 4 * slot))
+    expected = (1 << slot) | (category << (6 + 4 * slot))
+    if slot == 5:
+        expected |= (min(code, 65535) + 1) << 30
+    assert error.value.native_error == expected
 
 
 @pytest.mark.parametrize("index,value", [(4, 2), (5, 32), (6, 3), (7, 5), (8, 5), (9, 10061)])
