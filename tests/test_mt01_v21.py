@@ -2202,3 +2202,46 @@ def test_ef02_904_origin_snapshot_ingress_is_fixed_and_non_replaying():
                       "git worktree prune", "os.system(", "eval(", "exec("):
         assert forbidden not in py
     assert "SOURCE_RECOVERY_UNVERIFIED" in py
+
+
+def test_ef02_897_fixed_source_restore_ingress_is_owner_and_source_pinned():
+    """Only pre-authorized original three files can be snapshotted, no host mutation."""
+    import ast
+    import textwrap
+    from pathlib import Path
+    ingress = (Path(__file__).resolve().parents[1] /
+               ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+    boundary = ingress.split("  hostops-ef02-897-source-restore:\n", 1)
+    assert len(boundary) == 2
+    job = boundary[1]
+    assert "github.actor == github.repository_owner" in job
+    assert "github.event.action == 'opened'" in job
+    assert "runs-on: [self-hosted, Windows, ai-commerce-ef02]" in job
+    assert "max-parallel: 2" in job and "fail-fast: false" in job
+    assert "cancel-in-progress: false" in job
+    assert "persist-credentials: false" in job
+    assert "EF02_897_SOURCE_RECOVERY_HOLD" in job
+    assert "native_sandbox_proven:false" in job
+    source = job.split("          $script = @'\n", 1)[1].split("\n          '@\n          $script | python -B -", 1)[0]
+    py = textwrap.dedent(source)
+    tree = ast.parse(py)
+    assert "30cc5cb9866efa615c22eb09cd01cd875b9f08d5" in py
+    assert "wt-scdr9irs" in py
+    assert "AI-COMMERCE-EF02-01" in py
+    for checksum in (
+        "2d34cc5bf36960d9553cf104d2498e871e2dd2768a9feefb3fe78e4b5d929f14",
+        "a7e2590a456a59bcd08726c06d4efa5360a71b7aa5f51db66743a8597b8f401c",
+        "0cc298649669425099a9c2c8600b81d8ba2b86a03d6fb18dcb1ad0ed0894d883",
+        "322f177e0b3a34db30fe59ab2b726779f73859a34d887d4c93184a08606589a0",
+        "abca06633037f10f5a16610c0c02d84ebaa8da88665550d35a44fbca343025d5",
+    ):
+        assert checksum in py
+    for forbidden in ("shell=True", "git reset", "git clean", "git checkout",
+                      "git worktree prune", "os.system(", "eval(", "exec(",
+                      "Stop-Process", "Remove-Item", "Invoke-Expression"):
+        assert forbidden not in py
+    assert "GIT_OPTIONAL_LOCKS" in py and "core.fsmonitor=false" in py
+    assert "OUT = \"ef02-897-recovered-source.zip\"" in py
+    assert "replay_authorized" in py
+    assert not any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                   and n.func.id in {"eval", "exec"} for n in ast.walk(tree))
