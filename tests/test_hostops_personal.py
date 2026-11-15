@@ -1761,5 +1761,355 @@ class ExecutorHealthPrivateBridgeTests(unittest.TestCase):
         self.assertEqual(profiles["mt01-hostops-v3-tests"][-2:], ["-n", "12"])
 
 
+class PersonalCdp9444TopologyTests(unittest.TestCase):
+    """Offline fixtures only: no real CIM, token, signature, browser or sends."""
+
+    def setUp(self):
+        from ai_commerce.remote import chrome_acquisition, local_completion_handoff, local_wake_entry
+        self.acquisition = chrome_acquisition
+        self.strict_probe = chrome_acquisition._probe_cdp
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.local = Path(temp.name) / "PRIVATE_LOCAL"
+        self.root = self.local / "AI-Commerce"
+        self.config = self.root / "Chrome-Acquisition" / "config.json"
+        self.config.parent.mkdir(parents=True)
+        self.directory = self.root / "PRIVATE_PROFILE"
+        (self.directory / "Default").mkdir(parents=True)
+        self.executable = Path(temp.name) / "chrome.exe"
+        self.executable.write_bytes(b"offline fixture, signature mocked")
+        self.sid, self.session = "S-1-5-21-101-202-303-1001", 7
+        self.config_value = {
+            "version": 1, "executable": str(self.executable), "user_data_dir": str(self.directory),
+            "profile_directory": "Default", "cdp_endpoint": "http://127.0.0.1:9444",
+            "allow_launch": False, "exclusive_user_data": True,
+        }
+        self.config.write_text(json.dumps(self.config_value), encoding="utf-8")
+        self.argv = [str(self.executable), "--user-data-dir=" + str(self.directory),
+                     "--profile-directory=Default", "--remote-debugging-address=127.0.0.1",
+                     "--remote-debugging-port=9444"]
+        self.proc = {"ProcessId": 4100, "ExecutablePath": str(self.executable),
+                     "CommandLine": json.dumps(self.argv), "SessionId": self.session, "OwnerSid": self.sid,
+                     "CreationDate": "2026-11-15T08:00:00.0000000Z"}
+        self.listener = {"LocalAddress": "127.0.0.1", "LocalPort": 9444, "OwningProcess": 4100}
+        self.inventory = {"listeners": [self.listener], "processes": [self.proc]}
+
+        def mocked(obj, name, **kwargs):
+            pending = patch.object(obj, name, **kwargs)
+            result = pending.start()
+            self.addCleanup(pending.stop)
+            return result
+
+        # Patch this module's OS reference, leaving pathlib and other modules intact.
+        mocked(hostops, "os", new=SimpleNamespace(name="nt"))
+        self.native = mocked(chrome_acquisition, "_query_windows", return_value=self.inventory)
+        mocked(chrome_acquisition, "_commandline_argv", side_effect=json.loads)
+        self.local_identity = mocked(chrome_acquisition, "_native_local_app_data", return_value=self.local)
+        self.session_identity = mocked(chrome_acquisition, "_interactive_session", return_value=self.session)
+        self.token_identity = mocked(local_wake_entry, "_windows_process_sid", return_value=self.sid)
+        self.private_identity = mocked(local_completion_handoff, "_private_identity", return_value=self.sid)
+        self.signature = mocked(chrome_acquisition, "_verify_google_chrome")
+        self.protocol = mocked(chrome_acquisition, "_probe_cdp")
+
+    def observe(self, inventory=None):
+        if inventory is not None:
+            self.native.return_value = inventory
+        request = hostops.parse_event(event("read", "cdp_9444_topology", {}), "read")
+        return hostops.perform(request)
+
+    def assert_public(self, result):
+        self.assertLessEqual(set(result), hostops.PERSONAL_PUBLIC_FIELDS)
+        self.assertFalse(result["exact_chat_verified"])
+        self.assertFalse(result["wake_sent"])
+        self.assertFalse(result["arbitrary_shell_enabled"])
+        raw = json.dumps(result)
+        for private in (self.sid, str(self.local), str(self.executable), "PRIVATE", "4100",
+                        "CommandLine", "ProcessId", "OwnerSid", "SessionId", "webSocketDebuggerUrl",
+                        "enrolled", "profile_directory"):
+            self.assertNotIn(private, raw)
+
+    def test_exact_owner_open_read_and_empty_parameters_only(self):
+        value = event("read", "cdp_9444_topology", {})
+        self.assertEqual(hostops.parse_event(value, "read")["operation"], "cdp_9444_topology")
+        mutations = (
+            lambda v: v["issue"]["user"].update(login="forged"),
+            lambda v: v["sender"].update(login="forged"),
+            lambda v: v["repository"]["owner"].update(login="forged"),
+            lambda v: v["repository"].update(private=True),
+            lambda v: v["issue"].update(title="[HOSTOPS WRITE] cdp_9444_topology"),
+            lambda v: v["issue"].update(title="cdp_9444_topology"),
+            lambda v: v["issue"].update(state="closed"),
+            lambda v: v["issue"].update(pull_request={}),
+            lambda v: v.update(action="edited"),
+        )
+        for mutate in mutations:
+            bad = copy.deepcopy(value)
+            mutate(bad)
+            with self.subTest(event=bad), self.assertRaises(hostops.Denied):
+                hostops.parse_event(bad, "read")
+        for params in ({"port": 9444}, {"pid": 4100}, {"owner_sid": self.sid},
+                       {"session_id": self.session}, {"config": str(self.config)},
+                       {"command": "Get-Process"}, {"chat_url": "PRIVATE"}, [], None):
+            with self.subTest(params=params), self.assertRaises(hostops.Denied):
+                hostops.parse_event(event("read", "cdp_9444_topology", params), "read")
+            with self.assertRaises(hostops.Denied):
+                hostops.perform({"operation": "cdp_9444_topology", "parameters": params})
+        for operation in ("CDP_9444_TOPOLOGY", "cdp_9444_topology ", "cdp_9444_launch", "cdp_9444_enroll"):
+            with self.assertRaises(hostops.Denied):
+                hostops.parse_event(event("read", operation, {}), "read")
+        with self.assertRaises(hostops.Denied):
+            hostops.parse_event(event("write", "cdp_9444_topology", {}), "write")
+        self.native.assert_not_called()
+
+    def test_absent_and_unrelated_chrome_are_observed_zero_without_http(self):
+        unrelated = {**self.proc, "CommandLine": json.dumps([str(self.executable)])}
+        for processes in ([], [unrelated]):
+            result = self.observe({"listeners": [], "processes": processes})
+            self.assertEqual((result["status"], result["code"]), ("OBSERVED", "NO_LISTENER"))
+            for name in ("listener_count", "loopback_count", "unexpected_binding_count",
+                         "chrome_owned_loopback_count", "same_session_chrome_count"):
+                self.assertEqual(result[name], 0)
+            self.assertIsNone(result["devtools_protocol_ok"])
+            self.assert_public(result)
+        self.protocol.assert_not_called()
+        self.private_identity.assert_not_called()
+
+    def test_commandline_9444_without_listener_is_a_claim_only(self):
+        result = self.observe({"listeners": [], "processes": [self.proc]})
+        self.assertEqual(result["code"], "CLAIMANT_WITHOUT_LISTENER")
+        self.assertEqual(result["listener_count"], 0)
+        self.assertFalse(result["infrastructure_ready"])
+        self.protocol.assert_not_called()
+        self.assert_public(result)
+
+    def test_child_chrome_is_neither_claimant_nor_listener_owner(self):
+        child = {**self.proc, "CommandLine": json.dumps(self.argv + ["--type=renderer"])}
+        result = self.observe({"listeners": [], "processes": [child]})
+        self.assertEqual(result["code"], "NO_LISTENER")
+        result = self.observe({"listeners": [self.listener], "processes": [child]})
+        self.assertEqual(result["code"], "UNTRUSTED_OWNER")
+        # An ordinary child alongside the owning browser does not add a claimant.
+        result = self.observe({"listeners": [self.listener], "processes": [self.proc, {**child, "ProcessId": 4101}]})
+        self.assertEqual(result["code"], "CDP_PROTOCOL_HEALTHY")
+
+    def test_unsafe_or_multiple_bindings_never_probe(self):
+        for address in ("0.0.0.0", "::", "::1", "127.0.0.2", "localhost"):
+            result = self.observe({"listeners": [{**self.listener, "LocalAddress": address}], "processes": [self.proc]})
+            self.assertEqual((result["status"], result["code"]), ("OBSERVED", "UNTRUSTED_BIND"))
+            self.assertEqual(result["unexpected_binding_count"], 1)
+            self.assert_public(result)
+        result = self.observe({"listeners": [self.listener, self.listener], "processes": [self.proc]})
+        self.assertEqual(result["code"], "UNTRUSTED_BIND")
+        self.protocol.assert_not_called()
+        self.private_identity.assert_not_called()
+
+    def test_listener_pid_and_competing_claimants_fail_closed(self):
+        for processes in ([], [{**self.proc, "ProcessId": 4101}],
+                          [self.proc, {**self.proc, "ProcessId": 4101}]):
+            result = self.observe({"listeners": [self.listener], "processes": processes})
+            self.assertEqual(result["code"], "UNTRUSTED_OWNER")
+            self.assertFalse(result["infrastructure_ready"])
+        self.protocol.assert_not_called()
+
+    def test_wrong_native_owner_or_session_never_probes(self):
+        for changes in ({"OwnerSid": "S-1-5-21-999-1001"}, {"SessionId": 0}, {"SessionId": 8}):
+            result = self.observe({"listeners": [self.listener], "processes": [{**self.proc, **changes}]})
+            self.assertEqual(result["code"], "UNTRUSTED_OWNER")
+            self.assert_public(result)
+        self.protocol.assert_not_called()
+        self.signature.assert_not_called()
+
+    def test_wrong_executable_profile_or_debug_switches_never_probe(self):
+        variants = [self.argv + ["--user-data-dir=" + str(self.directory)],
+                    self.argv + ["--remote-debugging-port=9444"],
+                    [*self.argv[:2], "--profile-directory=Other", *self.argv[3:]],
+                    [*self.argv[:3], "--remote-debugging-address=0.0.0.0", self.argv[4]],
+                    [*self.argv[:4], "--remote-debugging-port=9333"],
+                    [str(self.executable.parent / "other.exe"), *self.argv[1:]],
+                    [self.argv[0], "--user-data-dir=" + str(self.root), *self.argv[2:]]]
+        for argv in variants:
+            result = self.observe({"listeners": [self.listener],
+                                   "processes": [{**self.proc, "CommandLine": json.dumps(argv)}]})
+            self.assertIn(result["code"], ("UNTRUSTED_OWNER", "NATIVE_READ_UNKNOWN"))
+            self.assertFalse(result["infrastructure_ready"])
+        result = self.observe({"listeners": [self.listener],
+                               "processes": [{**self.proc, "ExecutablePath": str(self.executable.parent / "other.exe")}]})
+        self.assertEqual(result["code"], "UNTRUSTED_OWNER")
+        self.protocol.assert_not_called()
+
+    def test_cim_timeouts_json_errors_and_native_failures_are_unknown_not_zero(self):
+        errors = [self.acquisition.AcquisitionBlocked("CIM PRIVATE"), OSError("PRIVATE"),
+                  subprocess.TimeoutExpired("PRIVATE", 8), json.JSONDecodeError("PRIVATE", "x", 0),
+                  UnicodeError("PRIVATE")]
+        for error in errors:
+            self.native.side_effect = error
+            result = self.observe()
+            self.assertEqual((result["status"], result["code"]), ("UNKNOWN", "NATIVE_READ_UNKNOWN"))
+            for field in ("listener_count", "loopback_count", "unexpected_binding_count",
+                          "chrome_owned_loopback_count", "same_session_chrome_count", "devtools_protocol_ok"):
+                self.assertIsNone(result[field])
+            self.assert_public(result)
+        self.protocol.assert_not_called()
+
+    def test_malformed_inventory_never_becomes_observed_absence(self):
+        invalid = [None, {}, {"listeners": None, "processes": []}, {"listeners": [], "processes": None},
+                   {"listeners": {}, "processes": []}, {**self.inventory, "PRIVATE": "secret"},
+                   {"listeners": [self.listener] * 17, "processes": []},
+                   {"listeners": [], "processes": [self.proc] * 257}]
+        for field, value in (("LocalPort", 9333), ("LocalPort", True), ("OwningProcess", 0),
+                             ("OwningProcess", True), ("LocalAddress", None)):
+            invalid.append({"listeners": [{**self.listener, field: value}], "processes": [self.proc]})
+        for field, value in (("ProcessId", True), ("SessionId", True), ("CommandLine", None),
+                             ("CommandLine", "not JSON fixture argv"), ("OwnerSid", None), ("OwnerSid", "PRIVATE"),
+                             ("CreationDate", ""), ("CreationDate", "PRIVATE"), ("CreationDate", "2026-99-99T00:00:00Z")):
+            invalid.append({"listeners": [], "processes": [{**self.proc, field: value}]})
+        invalid.extend([{"listeners": [], "processes": [self.proc, self.proc]},
+                        {"listeners": [], "processes": [{**self.proc, "PRIVATE": "raw"}]}])
+        for value in invalid:
+            self.native.return_value = value
+            result = self.observe()
+            self.assertEqual((result["status"], result["code"]), ("UNKNOWN", "NATIVE_READ_UNKNOWN"))
+            self.assertIsNone(result["listener_count"])
+            self.assert_public(result)
+        self.protocol.assert_not_called()
+
+    def test_unavailable_or_service_identity_cannot_attest_owner(self):
+        for mock, values in ((self.session_identity, (None, True, 0)),
+                             (self.token_identity, (None, "", "forged", "S-1-5-18")),
+                             (self.private_identity, (None, "S-1-5-21-999-1001"))):
+            original = mock.return_value
+            for value in values:
+                mock.return_value = value
+                result = self.observe()
+                self.assertEqual((result["status"], result["code"]), ("UNKNOWN", "OWNER_SESSION_UNATTESTED"))
+                self.assertEqual(result["listener_count"], 1)
+                self.assertIsNone(result["same_session_chrome_count"])
+                self.assert_public(result)
+            mock.return_value = original
+        self.private_identity.side_effect = OSError("PRIVATE ACL")
+        with patch.object(self.acquisition, "load_environment") as load:
+            self.assertEqual(self.observe()["code"], "OWNER_SESSION_UNATTESTED")
+            load.assert_not_called()
+        self.protocol.assert_not_called()
+
+    def test_missing_ambiguous_or_wrong_config_is_not_enrollment(self):
+        self.config.unlink()
+        self.assertEqual(self.observe()["code"], "OWNER_SESSION_UNATTESTED")
+        self.config.write_text(json.dumps(self.config_value), encoding="utf-8")
+        second = self.root / "chrome.json"
+        second.write_text(json.dumps(self.config_value), encoding="utf-8")
+        self.assertEqual(self.observe()["code"], "OWNER_SESSION_UNATTESTED")
+        second.unlink()
+        for changes in ({"cdp_endpoint": "http://127.0.0.1:9333"}, {"profile_directory": "Missing"},
+                        {"exclusive_user_data": False}, {"user_data_dir": str(self.local)},
+                        {"executable": "PRIVATE"}):
+            self.config.write_text(json.dumps({**self.config_value, **changes}), encoding="utf-8")
+            result = self.observe()
+            self.assertEqual((result["status"], result["code"]), ("UNKNOWN", "OWNER_SESSION_UNATTESTED"))
+            self.assert_public(result)
+        for raw in ('PRIVATE invalid JSON', '{"version":1,"version":1}'):
+            self.config.write_text(raw, encoding="utf-8")
+            self.assertEqual(self.observe()["code"], "OWNER_SESSION_UNATTESTED")
+        self.protocol.assert_not_called()
+
+    def test_unsigned_chrome_never_reaches_protocol_read(self):
+        self.signature.side_effect = self.acquisition.AcquisitionBlocked("PRIVATE signature")
+        result = self.observe()
+        self.assertEqual(result["code"], "UNTRUSTED_OWNER")
+        self.assertIsNone(result["chrome_owned_loopback_count"])
+        self.protocol.assert_not_called()
+        self.assert_public(result)
+
+    def test_verified_protocol_is_not_chat_a_or_send_proof(self):
+        result = self.observe()
+        self.assertEqual((result["status"], result["code"]), ("OBSERVED", "CDP_PROTOCOL_HEALTHY"))
+        self.assertTrue(result["devtools_protocol_ok"])
+        self.assertTrue(result["infrastructure_ready"])
+        self.assertEqual(result["chrome_owned_loopback_count"], 1)
+        self.assertEqual(result["same_session_chrome_count"], 1)
+        self.assertEqual(self.native.call_count, 2)
+        self.assertTrue(all(call.args == (9444,) for call in self.native.call_args_list))
+        self.signature.assert_called_once()
+        self.protocol.assert_called_once_with(self.signature.call_args.args[0])
+        self.assert_public(result)
+
+    def test_real_strict_protocol_checks_browser_protocol_and_websocket_without_attaching(self):
+        valid = {"Browser": "Chrome/153.0", "Protocol-Version": "1.3",
+                 "webSocketDebuggerUrl": "ws://127.0.0.1:9444/devtools/browser/PRIVATE"}
+        self.protocol.side_effect = self.strict_probe
+        invalid = [{}, {**valid, "Browser": "Other/1"}, {**valid, "Protocol-Version": "PRIVATE"},
+                   {**valid, "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/browser/PRIVATE"},
+                   {**valid, "webSocketDebuggerUrl": "ws://evil.invalid:9444/devtools/browser/PRIVATE"}]
+        with patch.object(self.acquisition, "build_opener") as opener:
+            reply = opener.return_value.open.return_value.__enter__.return_value
+            reply.status = 200
+            for value in [valid, *invalid]:
+                reply.read.return_value = json.dumps(value).encode()
+                result = self.observe()
+                self.assertEqual(result["code"], "CDP_PROTOCOL_HEALTHY" if value == valid else "CDP_PROTOCOL_FAILED")
+                self.assert_public(result)
+            for body in (b"bad JSON PRIVATE", b"x" * 8193):
+                reply.read.return_value = body
+                self.assertEqual(self.observe()["status"], "UNKNOWN")
+            self.assertEqual(opener.return_value.open.call_args.args[0].full_url,
+                             "http://127.0.0.1:9444/json/version")
+            self.assertEqual(opener.return_value.open.call_args.kwargs["timeout"], 2)
+            self.assertEqual(opener.call_args.args[0].proxies, {})
+            self.assertIsInstance(opener.call_args.args[1], self.acquisition._NoRedirect)
+
+    def test_protocol_failure_timeout_or_exception_is_unknown_without_retry(self):
+        for error in (self.acquisition.AcquisitionBlocked("PRIVATE WS"), OSError("PRIVATE"),
+                      subprocess.TimeoutExpired("PRIVATE", 2), ValueError("PRIVATE JSON")):
+            self.protocol.reset_mock()
+            self.protocol.side_effect = error
+            result = self.observe()
+            self.assertEqual((result["status"], result["code"]), ("UNKNOWN", "CDP_PROTOCOL_FAILED"))
+            self.assertFalse(result["devtools_protocol_ok"])
+            self.assertFalse(result["infrastructure_ready"])
+            self.protocol.assert_called_once()
+            self.assert_public(result)
+
+    def test_observation_drift_and_second_cim_failure_prevent_http(self):
+        same_profile = {**self.proc, "ProcessId": 4101, "CommandLine": json.dumps(self.argv[:3])}
+        changed = [
+            {"listeners": [], "processes": []},
+            {"listeners": [self.listener], "processes": [{**self.proc, "CreationDate": "2026-11-15T09:00:00Z"}]},
+            {"listeners": [self.listener], "processes": [self.proc, same_profile]},
+            self.acquisition.AcquisitionBlocked("PRIVATE CIM"),
+        ]
+        for current in changed:
+            self.native.side_effect = [self.inventory, current]
+            result = self.observe()
+            self.assertEqual(result["status"], "UNKNOWN")
+            self.assertIn(result["code"], ("TOPOLOGY_CHANGED", "NATIVE_READ_UNKNOWN"))
+            self.assertFalse(result["infrastructure_ready"])
+            self.assert_public(result)
+        self.protocol.assert_not_called()
+
+    def test_source_public_field_tamper_and_non_windows_fail_before_reads(self):
+        for field in ("code", "listener_count", "devtools_protocol_ok", "exact_chat_verified", "wake_sent"):
+            with patch.object(hostops, "PERSONAL_PUBLIC_FIELDS", hostops.PERSONAL_PUBLIC_FIELDS - {field}):
+                with self.assertRaisesRegex(hostops.Denied, "PUBLIC_TRANSPORT_GAP"):
+                    self.observe()
+        with patch.object(hostops, "os", SimpleNamespace(name="posix")):
+            with self.assertRaisesRegex(hostops.Denied, "CDP_TOPOLOGY_WINDOWS_ONLY"):
+                self.observe()
+        self.native.assert_not_called()
+        self.protocol.assert_not_called()
+
+    def test_read_never_calls_native_writes_launch_enrollment_or_send(self):
+        from ai_commerce.remote import local_wake_entry
+        with patch.object(hostops.subprocess, "run") as run, patch.object(hostops.subprocess, "Popen") as launch, \
+                patch.object(hostops, "_git_write") as git_write, patch.object(hostops, "_git") as git_read, \
+                patch.object(hostops.Path, "write_text") as write_text, patch.object(hostops.Path, "write_bytes") as write_bytes, \
+                patch.object(self.acquisition, "run") as acquire, \
+                patch.object(self.acquisition, "enroll_existing_9444") as enroll, \
+                patch.object(self.acquisition, "verify_playwright_attach") as attach, \
+                patch.object(local_wake_entry, "send_one") as send:
+            self.assertEqual(self.observe()["code"], "CDP_PROTOCOL_HEALTHY")
+            for forbidden in (run, launch, git_write, git_read, write_text, write_bytes, acquire, enroll, attach, send):
+                forbidden.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
