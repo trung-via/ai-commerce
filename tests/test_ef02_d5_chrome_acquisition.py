@@ -660,6 +660,7 @@ def test_wh01b_9444_profile_lock_disallows_second_browser(
 # WH-01B enrollment tests are SOURCE ONLY. All Windows identities, signatures,
 # inventories and ACLs below are synthetic; no native custody is established.
 _OPERATOR_SID = "S-1-5-21-1-2-3-1001"
+_REAL_NATIVE_ENROLLMENT = ca._NativeEnrollment
 
 
 def enrollment_fixture(monkeypatch, tmp_path):
@@ -696,6 +697,39 @@ def enrollment_fixture(monkeypatch, tmp_path):
         monkeypatch.setattr(ca, name, forbidden)
     monkeypatch.setattr(ca.subprocess, "run", forbidden)
     monkeypatch.setattr(ca.subprocess, "Popen", forbidden)
+
+    class SyntheticNative:
+        """Offline transaction double; deliberately establishes no native custody."""
+        instances = []
+        def __init__(self, env, local, session, sid, identity):
+            assert (local, session, sid) == (home, 1, _OPERATOR_SID)
+            self.env, self.identity = env, identity
+            self.effect_possible = False
+            self.operations = []
+            self.instances.append(self)
+        def __enter__(self):
+            self.operations.append("pin")
+            if self.env.config_path.parent.exists():
+                raise ca._EnrollmentHold("ENROLLMENT_RESERVATION_EXISTS")
+            return self
+        def validate(self):
+            self.operations.append("validate")
+        def prove_marker(self, path):
+            return False
+        def create_and_flush(self, payload):
+            assert 1 <= len(payload) <= 8192
+            self.operations.append("create")
+            self.effect_possible = True
+            self.env.config_path.parent.mkdir()
+            with self.env.config_path.open("xb") as stream:
+                stream.write(payload)
+            self.operations.append("flush")
+        def readback(self, payload):
+            self.operations.append("readback")
+            assert self.env.config_path.read_bytes() == payload
+        def __exit__(self, *args):
+            self.operations.append("close")
+    monkeypatch.setattr(ca, "_NativeEnrollment", SyntheticNative)
     return env, repo, home, snapshot, events
 
 
@@ -712,7 +746,7 @@ def test_wh01b_enrollment_assesses_private_candidate_but_never_writes(monkeypatc
         pytest.fail("Enrollment assessment must not open or create files")
     monkeypatch.setattr(Path, "open", no_open)
     for _ in range(2):  # Idempotent assessment never enrolls or changes launch policy.
-        result = ca.enroll_existing_9444(repo, opt_in=True)
+        result = ca.assess_existing_9444(repo)
         assert_enrollment_hold(result, "NATIVE_ATOMIC_ENROLLMENT_REQUIRED", assessed=True)
     assert events == ["inventory", "signature", "inventory", "signature"] * 2
     assert not env.config_path.exists() and set(home.rglob("*")) == before
@@ -854,6 +888,7 @@ def test_wh01b_enrollment_rejects_ambiguous_or_foreign_browser(monkeypatch, tmp_
     proc["CommandLine"] = json.dumps(command)
     assert_enrollment_hold(ca.enroll_existing_9444(repo, opt_in=True), code)
     assert events == ["inventory"]
+    assert not ca._NativeEnrollment.instances and not env.config_path.parent.exists()
 
 
 @pytest.mark.parametrize("relative", ["Chrome-Acquisition/config.json", "chrome.json", "chrome-acquisition.json"])
@@ -949,7 +984,8 @@ def test_wh01b_enrollment_stops_on_signature_custody_or_unknown(monkeypatch, tmp
 
 
 @pytest.mark.parametrize("change", ["pid_reuse", "new_pid", "stale_listener", "new_config", "dropped_permissions", "token"])
-def test_wh01b_enrollment_rechecks_without_replay(monkeypatch, tmp_path, change):
+@pytest.mark.parametrize("enroll", [False, True])
+def test_wh01b_enrollment_rechecks_without_replay(monkeypatch, tmp_path, change, enroll):
     from copy import deepcopy
     from ai_commerce.remote import local_completion_handoff, local_wake_entry
     env, repo, _, snapshot, events = enrollment_fixture(monkeypatch, tmp_path)
@@ -984,7 +1020,8 @@ def test_wh01b_enrollment_rechecks_without_replay(monkeypatch, tmp_path, change)
         expected = "ENROLLMENT_CONFIG_EXISTS"
     elif change == "dropped_permissions":
         expected = "OPERATOR_OWNERSHIP_UNPROVEN"
-    assert_enrollment_hold(ca.assess_existing_9444(repo), expected)
+    result = ca.enroll_existing_9444(repo, opt_in=True) if enroll else ca.assess_existing_9444(repo)
+    assert_enrollment_hold(result, expected)
     assert events.count("inventory") <= 2
     if change == "new_config":
         assert env.config_path.read_bytes() == b"concurrent private config"
@@ -1010,3 +1047,416 @@ def test_wh01b_enrollment_cli_no_input_selected_config_and_no_launch(monkeypatch
     with pytest.raises(SystemExit) as error:
         ca.main(["enroll-existing-9444", "--checkout", str(repo), "--config", str(env.config_path), "--opt-in"])
     assert error.value.code == 2 and events == []
+
+
+def assert_enrollment_unknown(result):
+    expected = ca._enrollment_hold("ENROLLMENT_ASSESSMENT_UNKNOWN", assessed=True)
+    expected.update(status="UNKNOWN_EFFECT", code="UNKNOWN_EFFECT")
+    assert result == expected
+
+
+def test_wh01b_atomic_enrollment_source_only_positive(monkeypatch, tmp_path, capsys):
+    env, repo, home, _, events = enrollment_fixture(monkeypatch, tmp_path)
+    result = ca.enroll_existing_9444(repo, opt_in=True)
+    expected = ca._enrollment_hold("NATIVE_ATOMIC_ENROLLMENT_REQUIRED", assessed=True)
+    expected.update(status="ENROLLED", code="CONFIG_VERIFIED_CREATED", enrolled=True)
+    assert result == expected
+    assert events == ["inventory", "signature"] * 3
+    transaction, = ca._NativeEnrollment.instances
+    assert transaction.operations == ["pin", "validate", "create", "flush", "readback",
+                                       "validate", "readback", "close"]
+    payload = json.loads(env.config_path.read_bytes())
+    assert payload == {"version": 1, "executable": str(env.executable),
+        "user_data_dir": str(env.user_data_dir), "profile_directory": "Default",
+        "cdp_endpoint": "http://127.0.0.1:9444", "exclusive_user_data": True, "allow_launch": False}
+    assert ca.load_environment(env.config_path, repo, local_app_data=home) == env
+    public = json.dumps(result)
+    for private in (str(home), str(env.executable), _OPERATOR_SID, "123", "webSocket", "account"):
+        assert private not in public
+    assert capsys.readouterr().out == ""
+    before = env.config_path.read_bytes()
+    assert_enrollment_hold(ca.enroll_existing_9444(repo, opt_in=True), "ENROLLMENT_CONFIG_EXISTS")
+    assert len(ca._NativeEnrollment.instances) == 1 and env.config_path.read_bytes() == before
+
+
+def test_wh01b_atomic_enrollment_cli_success_is_explicit(monkeypatch, tmp_path, capsys):
+    _, repo, _, _, _ = enrollment_fixture(monkeypatch, tmp_path)
+    assert ca.main(["enroll-existing-9444", "--checkout", str(repo), "--opt-in"]) == 0
+    assert json.loads(capsys.readouterr().out)["code"] == "CONFIG_VERIFIED_CREATED"
+
+
+def test_wh01b_atomic_enrollment_unavailable_native_api_holds(monkeypatch, tmp_path):
+    env, repo, _, _, _ = enrollment_fixture(monkeypatch, tmp_path)
+    def unavailable(*args):
+        raise ca._EnrollmentHold("NATIVE_HANDLE_RELATIVE_UNAVAILABLE")
+    monkeypatch.setattr(ca, "_NativeEnrollment", unavailable)
+    assert_enrollment_hold(ca.enroll_existing_9444(repo, opt_in=True), "NATIVE_HANDLE_RELATIVE_UNAVAILABLE")
+    assert not env.config_path.parent.exists()
+
+
+@pytest.mark.parametrize("marker", ca._MARKERS)
+@pytest.mark.parametrize("holder", ["same", "none", "foreign", "shared", "stale"])
+def test_wh01b_atomic_enrollment_requires_positive_live_marker_holder(monkeypatch, tmp_path, marker, holder):
+    env, repo, _, _, _ = enrollment_fixture(monkeypatch, tmp_path)
+    lock = env.user_data_dir / marker
+    lock.write_bytes(b"opaque; never parsed for PID")
+    observations = []
+    def prove(self, path):
+        observations.append(path)
+        return holder == "same"  # Native RM/token/creation-time seam, not marker contents.
+    monkeypatch.setattr(ca._NativeEnrollment, "prove_marker", prove)
+    result = ca.enroll_existing_9444(repo, opt_in=True)
+    if holder == "same":
+        assert result["code"] == "CONFIG_VERIFIED_CREATED" and observations == [lock] * 3
+    else:
+        assert_enrollment_hold(result, "ENROLLMENT_PROFILE_LOCK_UNPROVEN")
+        assert observations == [lock] and not env.config_path.parent.exists()
+    assert lock.read_bytes() == b"opaque; never parsed for PID"
+
+
+@pytest.mark.parametrize("stage", ["reservation", "write", "flush", "readback", "acl", "close", "interrupted"])
+def test_wh01b_atomic_enrollment_uncertain_storage_never_retries_or_cleans(monkeypatch, tmp_path, stage):
+    env, repo, _, _, _ = enrollment_fixture(monkeypatch, tmp_path)
+    native = ca._NativeEnrollment
+    create = native.create_and_flush
+    readback = native.readback
+    def fail(self, payload):
+        if stage == "reservation":
+            self.effect_possible = True
+            env.config_path.parent.mkdir()
+            raise OSError("private reservation error")
+        create(self, payload)
+        if stage in {"write", "flush"}:
+            raise OSError("private storage error")
+        if stage == "interrupted":
+            raise KeyboardInterrupt
+    def fail_readback(self, payload):
+        if stage in {"readback", "acl"}:
+            raise OSError("private readback/ACL error")
+        readback(self, payload)
+    monkeypatch.setattr(native, "create_and_flush", fail)
+    monkeypatch.setattr(native, "readback", fail_readback)
+    if stage == "close":
+        def close(self, *args):
+            raise OSError("private close error")
+        monkeypatch.setattr(native, "__exit__", close)
+    assert_enrollment_unknown(ca.enroll_existing_9444(repo, opt_in=True))
+    assert env.config_path.parent.is_dir()
+    before = env.config_path.read_bytes() if env.config_path.exists() else None
+    again = ca.enroll_existing_9444(repo, opt_in=True)
+    assert again["status"] == "HOLD" and again["code"] in {
+        "ENROLLMENT_CONFIG_EXISTS", "ENROLLMENT_RESERVATION_EXISTS"}
+    assert before == (env.config_path.read_bytes() if env.config_path.exists() else None)
+    assert sum(tx.operations.count("create") for tx in native.instances) <= 1
+
+
+@pytest.mark.parametrize("change", ["pid_reuse", "pid", "listener", "sid", "session", "command", "token", "signature"])
+def test_wh01b_atomic_enrollment_post_write_divergence_is_unknown(monkeypatch, tmp_path, change):
+    from copy import deepcopy
+    from ai_commerce.remote import local_wake_entry
+    env, repo, _, snapshot, events = enrollment_fixture(monkeypatch, tmp_path)
+    original = ca._NativeEnrollment.create_and_flush
+    def mutate(self, payload):
+        original(self, payload)
+        other = deepcopy(snapshot)
+        proc = other["processes"][0]
+        if change == "pid_reuse":
+            proc["CreationDate"] = "2026-11-14T02:00:00Z"
+        elif change == "pid":
+            proc["ProcessId"] = other["listeners"][0]["OwningProcess"] = 456
+        elif change == "listener":
+            other["listeners"] = []
+        elif change == "sid":
+            proc["OwnerSid"] = "S-1-5-21-1-2-3-1002"
+        elif change == "session":
+            proc["SessionId"] = 2
+        elif change == "command":
+            proc["CommandLine"] = json.dumps(env.command() + ["--no-sandbox"])
+        elif change == "token":
+            monkeypatch.setattr(local_wake_entry, "_windows_process_sid", lambda: "S-1-5-21-1-2-3-1002")
+        elif change == "signature":
+            def unsigned(env):
+                raise ca.AcquisitionBlocked("CHROME_EXECUTABLE_UNTRUSTED")
+            monkeypatch.setattr(ca, "_verify_google_chrome", unsigned)
+        def query(port):
+            assert port == 9444
+            events.append("inventory")
+            return other
+        monkeypatch.setattr(ca, "_query_windows", query)
+    monkeypatch.setattr(ca._NativeEnrollment, "create_and_flush", mutate)
+    assert_enrollment_unknown(ca.enroll_existing_9444(repo, opt_in=True))
+    assert env.config_path.is_file()
+    assert_enrollment_hold(ca.enroll_existing_9444(repo, opt_in=True), "ENROLLMENT_CONFIG_EXISTS")
+
+
+@pytest.mark.parametrize("switch", ["--no-sandbox", "--remote-allow-origins=*", "https://chatgpt.com/",
+                                   "--remote-debugging-pipe", "--profile-directory=Other"])
+def test_wh01b_atomic_enrollment_disallows_unregistered_switches(monkeypatch, tmp_path, switch):
+    env, repo, _, snapshot, _ = enrollment_fixture(monkeypatch, tmp_path)
+    snapshot["processes"][0]["CommandLine"] = json.dumps(env.command() + [switch])
+    assert_enrollment_hold(ca.enroll_existing_9444(repo, opt_in=True), "ENROLLMENT_CANDIDATE_UNPROVEN")
+    assert not ca._NativeEnrollment.instances and not env.config_path.parent.exists()
+
+
+def test_wh01b_atomic_enrollment_native_prewrite_guard_has_no_effect(monkeypatch, tmp_path):
+    env, repo, _, _, _ = enrollment_fixture(monkeypatch, tmp_path)
+    def validate(self):
+        raise ca._EnrollmentHold("ENROLLMENT_NATIVE_CUSTODY_UNPROVEN")
+    monkeypatch.setattr(ca._NativeEnrollment, "validate", validate)
+    assert_enrollment_hold(ca.enroll_existing_9444(repo, opt_in=True), "ENROLLMENT_NATIVE_CUSTODY_UNPROVEN")
+    assert not env.config_path.parent.exists()
+
+
+def test_wh01b_atomic_enrollment_reservation_race_is_create_new(monkeypatch, tmp_path):
+    env, repo, _, _, _ = enrollment_fixture(monkeypatch, tmp_path)
+    def race(self, payload):
+        env.config_path.parent.mkdir()
+        env.config_path.write_bytes(b"other writer")
+        raise ca._EnrollmentHold("ENROLLMENT_CONFIG_EXISTS")
+    monkeypatch.setattr(ca._NativeEnrollment, "create_and_flush", race)
+    assert_enrollment_hold(ca.enroll_existing_9444(repo, opt_in=True), "ENROLLMENT_CONFIG_EXISTS")
+    assert env.config_path.read_bytes() == b"other writer"
+
+
+def test_wh01b_native_timestamp_preserves_100ns_and_offset():
+    assert ca._creation_ticks("1601-01-01T00:00:00.0000001Z") == 1
+    assert ca._creation_ticks("2026-11-14T01:00:00.1234567Z") == ca._creation_ticks("2026-11-14T08:00:00.1234567+07:00")
+    with pytest.raises(ca._EnrollmentHold, match="ENROLLMENT_IDENTITY_UNPROVEN"):
+        ca._creation_ticks("unproven timestamp")
+
+
+def offline_native(monkeypatch):
+    """Bind real ctypes structures exclusively to offline function doubles."""
+    import ctypes as c
+    class Function:
+        def __init__(self): self.handler = lambda *args: 1
+        def __call__(self, *args):
+            return self.handler(*args)
+    class Library:
+        def __getattr__(self, name):
+            value = Function()
+            setattr(self, name, value)
+            return value
+    monkeypatch.setattr(c, "WinDLL", lambda *a, **k: Library(), raising=False)
+    return _REAL_NATIVE_ENROLLMENT(None, None, 1, _OPERATOR_SID, None)
+
+
+def test_wh01b_native_create_uses_relative_no_reparse_protected_create_new(monkeypatch):
+    """Inspect the real syscall boundary with fake DLLs; no Windows effects in CI."""
+    tx = offline_native(monkeypatch)
+    c = tx.c
+    calls = []
+    def create(*args):
+        attrs = args[2]._obj
+        calls.append((attrs.RootDirectory, attrs.SecurityDescriptor, attrs.Attributes,
+                      attrs.ObjectName.contents.Length, args[6:9]))
+        args[0]._obj.value = 101
+        args[3]._obj.Information = 2
+        return 0
+    tx.n.NtCreateFile.handler = create
+    tx.descriptor = c.c_void_p(321)
+    tx._info = lambda *args: (1, 0, 2, 0, 0)
+    handle = tx._relative(99, "config.json", directory=False, create=True, write=True)
+    assert handle.value == 101 and tx.effect_possible is True
+    assert calls == [(99, 321, 0x1040, len("config.json") * 2, (1, 2, 0x200060))]
+
+
+@pytest.mark.parametrize("kind", ["reparse", "hardlink", "wrong_type", "non_disk", "unavailable"])
+def test_wh01b_native_handle_rejects_unsafe_file_identity(monkeypatch, kind):
+    tx = offline_native(monkeypatch)
+    def info(handle, pointer):
+        value = pointer._obj
+        value.Attributes = 0x400 if kind == "reparse" else 0x10 if kind == "wrong_type" else 0
+        value.Links = 2 if kind == "hardlink" else 1
+        return kind != "unavailable"
+    tx.k.GetFileInformationByHandle.handler = info
+    tx.k.GetFileType.handler = lambda handle: 2 if kind == "non_disk" else 1
+    with pytest.raises(ca._EnrollmentHold, match="ENROLLMENT_NATIVE_CUSTODY_UNPROVEN"):
+        tx._info(99, False)
+
+
+@pytest.mark.parametrize("kind", ["valid", "null_dacl", "foreign_owner", "inherited", "unprotected", "mask"])
+def test_wh01b_native_private_acl_requires_exact_protected_owner(monkeypatch, kind):
+    tx = offline_native(monkeypatch)
+    c = tx.c
+    def security(handle, object_type, requested, owner, group, dacl, sacl, descriptor):
+        owner._obj.value, dacl._obj.value, descriptor._obj.value = 11, None if kind == "null_dacl" else 12, 13
+        return 0
+    def control(sd, flags, revision):
+        flags._obj.value = 0 if kind == "unprotected" else 0x1000
+        return 1
+    def acl_info(acl, info, size, kind):
+        info[0] = 1
+        return 1
+    header = bytes([0, 0x10 if kind == "inherited" else 0, 20, 0])
+    ace = c.create_string_buffer(header + (0x120089 if kind == "mask" else 0x1F01FF).to_bytes(4, "little") + b"s" * 12)
+    def get_ace(acl, index, pointer):
+        pointer._obj.value = c.addressof(ace)
+        return 1
+    def sid(pointer):
+        if pointer.value == 11 and kind == "foreign_owner":
+            return "S-1-5-21-1-2-3-1002"
+        return _OPERATOR_SID
+    tx.a.GetSecurityInfo.handler = security
+    tx.a.GetSecurityDescriptorControl.handler = control
+    tx.a.GetAclInformation.handler = acl_info
+    tx.a.GetAce.handler = get_ace
+    tx.a.GetLengthSid.handler = lambda pointer: 12
+    tx._sid_text = sid
+    if kind == "valid":
+        tx._acl(99, exact=True)
+    else:
+        with pytest.raises(ValueError):
+            tx._acl(99, exact=True)
+
+
+@pytest.mark.parametrize("kind", ["valid", "foreign_pid", "pid_reuse", "session", "shared", "none", "unavailable"])
+def test_wh01b_native_marker_restart_manager_is_exact_process_proof(monkeypatch, kind):
+    tx = offline_native(monkeypatch)
+    tx.identity = (123, None, None, 1, _OPERATOR_SID, "2026-11-14T01:00:00Z")
+    tx.process_ticks = ca._creation_ticks(tx.identity[5])
+    tx._pin_path = lambda *args, **kwargs: None
+    tx._process = lambda: None
+    def start(session, flags, key):
+        session._obj.value = 7
+        return 0
+    def listing(session, needed, count, rows, reasons):
+        count._obj.value = 0 if kind == "none" else 2 if kind == "shared" else 1
+        rows[0].process.pid = 456 if kind == "foreign_pid" else 123
+        ticks = ca._creation_ticks(tx.identity[5]) + (1 if kind == "pid_reuse" else 0)
+        rows[0].process.start.dwHighDateTime = ticks >> 32
+        rows[0].process.start.dwLowDateTime = ticks & 0xFFFFFFFF
+        rows[0].session = 2 if kind == "session" else 1
+        return 5 if kind == "unavailable" else 0
+    tx.rm.RmStartSession.handler = start
+    tx.rm.RmRegisterResources.handler = lambda *args: 0
+    tx.rm.RmGetList.handler = listing
+    assert tx.prove_marker(Path("synthetic-marker")) is (kind == "valid")
+
+
+@pytest.mark.parametrize("kind", ["valid", "short_write", "write_error", "flush_error"])
+def test_wh01b_native_write_flush_is_bounded_and_private_at_create(monkeypatch, kind):
+    tx = offline_native(monkeypatch)
+    payload = b'{"private":"synthetic"}\n'
+    tx.root = 9
+    tx.absent = lambda: None
+    tx._info = lambda *args: (1, 0, 2, 0, 0)
+    tx._acl = lambda handle, exact: None
+    def descriptor(text, version, result, size):
+        assert text == f"O:{_OPERATOR_SID}D:P(A;;FA;;;{_OPERATOR_SID})"
+        result._obj.value = 77
+        return 1
+    def relative(parent, name, *, directory, create, write=False):
+        assert create is True and tx.descriptor.value == 77
+        assert (parent, name, directory, write) in {
+            (9, "Chrome-Acquisition", True, False), (10, "config.json", False, True)}
+        tx.effect_possible = True
+        return 10 if directory else 11
+    def write(handle, data, size, count, overlapped):
+        assert handle == 11 and data == payload and size == len(payload)
+        count._obj.value = len(payload) - (1 if kind == "short_write" else 0)
+        return kind != "write_error"
+    tx._relative = relative
+    tx.a.ConvertStringSecurityDescriptorToSecurityDescriptorW.handler = descriptor
+    tx.k.WriteFile.handler = write
+    tx.k.FlushFileBuffers.handler = lambda handle: kind != "flush_error"
+    if kind == "valid":
+        tx.create_and_flush(payload)
+    else:
+        with pytest.raises(ca._EnrollmentHold):
+            tx.create_and_flush(payload)
+    assert tx.effect_possible
+
+
+@pytest.mark.parametrize("kind", ["valid", "bytes", "file_id", "size", "read_error", "other_config"])
+def test_wh01b_native_readback_independently_matches_exact_file(monkeypatch, kind):
+    tx = offline_native(monkeypatch)
+    payload = b"synthetic private bytes"
+    tx.root, tx.directory, tx.file_identity = 9, 10, (1, 0, 2)
+    tx._acl = lambda handle, exact: None
+    tx._relative = lambda parent, name, **kwargs: 11 if name == "config.json" else 12 if kind == "other_config" else None
+    tx._info = lambda *args: (1, 0, 3 if kind == "file_id" else 2, 0, len(payload) + (1 if kind == "size" else 0))
+    def read(handle, buffer, size, count, overlapped):
+        assert handle == 11 and size == 8193
+        tx.c.memmove(buffer, b"x" * len(payload) if kind == "bytes" else payload, len(payload))
+        count._obj.value = len(payload)
+        return kind != "read_error"
+    tx.k.ReadFile.handler = read
+    if kind == "valid":
+        tx.readback(payload)
+    else:
+        with pytest.raises(ca._EnrollmentHold):
+            tx.readback(payload)
+
+
+@pytest.mark.parametrize("kind", ["valid", "sid", "session", "elevated", "noninteractive", "unauthenticated", "deny_only"])
+def test_wh01b_native_token_requires_authenticated_non_elevated_exact_owner(monkeypatch, kind):
+    tx = offline_native(monkeypatch)
+    c, w = tx.c, tx.w
+    class Group(c.Structure):
+        _fields_ = [("sid", c.c_void_p), ("flags", w.DWORD)]
+    class Groups(c.Structure):
+        _fields_ = [("count", w.DWORD), ("groups", Group * 2)]
+    user = Group(100, 0)
+    groups = Groups(2, (Group * 2)(
+        Group(999 if kind == "noninteractive" else 4, 0x10 if kind == "deny_only" else 4),
+        Group(999 if kind == "unauthenticated" else 11, 4)))
+    values = {1: user, 2: groups, 12: w.DWORD(2 if kind == "session" else 1),
+              20: w.DWORD(1 if kind == "elevated" else 0)}
+    def open_token(process, access, handle):
+        assert access == 8
+        handle._obj.value = 99
+        return 1
+    def information(token, code, buffer, size, needed):
+        value = values[code]
+        needed._obj.value = c.sizeof(value)
+        if buffer is None:
+            return 0
+        c.memmove(buffer, c.byref(value), c.sizeof(value))
+        return 1
+    tx.a.OpenProcessToken.handler = open_token
+    tx.a.GetTokenInformation.handler = information
+    tx._sid_text = lambda pointer: ("S-1-5-21-1-2-3-1002" if kind == "sid" else _OPERATOR_SID) if pointer == 100 else f"S-1-5-{pointer}"
+    if kind == "valid":
+        tx._token(33)
+    else:
+        with pytest.raises(ca._EnrollmentHold):
+            tx._token(33)
+
+
+@pytest.mark.parametrize("kind", ["valid", "exited", "pid_reuse", "image", "impersonation", "unknown_thread"])
+def test_wh01b_native_process_handle_pins_live_immutable_identity(monkeypatch, tmp_path, kind):
+    import types
+    tx = offline_native(monkeypatch)
+    c = tx.c
+    last_error = [0]
+    monkeypatch.setattr(c, "set_last_error", lambda value: last_error.__setitem__(0, value), raising=False)
+    monkeypatch.setattr(c, "get_last_error", lambda: last_error[0], raising=False)
+    tx.process = 33
+    tx.env = types.SimpleNamespace(executable=tmp_path / "chrome.exe")
+    tx.identity = (123, str(tx.env.executable), None, 1, _OPERATOR_SID, "2026-11-14T01:00:00Z")
+    tx.process_ticks = ca._creation_ticks(tx.identity[5])
+    checked = []
+    tx._token = checked.append
+    def thread_token(thread, access, as_self, handle):
+        handle._obj.value = 44
+        last_error[0] = 5 if kind == "unknown_thread" else 1008
+        return kind == "impersonation"
+    def times(process, created, exited, kernel, user):
+        ticks = ca._creation_ticks(tx.identity[5]) + (1 if kind == "pid_reuse" else 0)
+        created._obj.dwHighDateTime, created._obj.dwLowDateTime = ticks >> 32, ticks & 0xFFFFFFFF
+        return 1
+    def image(process, flags, value, size):
+        value.value = str(tmp_path / "other.exe" if kind == "image" else tx.env.executable)
+        return 1
+    tx.a.OpenThreadToken.handler = thread_token
+    tx.k.WaitForSingleObject.handler = lambda *args: 0 if kind == "exited" else 258
+    tx.k.GetProcessTimes.handler = times
+    tx.k.QueryFullProcessImageNameW.handler = image
+    if kind == "valid":
+        tx._process()
+        assert checked == [33, 1]
+    else:
+        with pytest.raises(ca._EnrollmentHold):
+            tx._process()
+        assert not checked
