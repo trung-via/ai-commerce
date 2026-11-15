@@ -1189,6 +1189,191 @@ def enroll_existing_9444(checkout: Path, *, opt_in: bool = False) -> dict:
                                 else "ENROLLMENT_ASSESSMENT_UNKNOWN")
 
 
+_LOGON_CODES = frozenset({
+    "FIRST_SUPERVISED_ENROLLMENT_REQUIRED", "LAUNCH_GRANT_REQUIRED",
+    "WAIT_INTERACTIVE_OWNER", "UNTRUSTED_OWNER", "PROFILE_LOCK_HOLD",
+    "CONFIG_UNTRUSTED", "ABSENCE_UNPROVEN", "REUSE_ONLY",
+    "BLOCKED_NOT_DEPLOYED", "UNKNOWN_EFFECT",
+})
+
+
+def _logon_result(code: str) -> dict:
+    # Fixed diagnostics only: never return config, inventory, grant or request bytes.
+    code = code if code in _LOGON_CODES else "ABSENCE_UNPROVEN"
+    return {"status": "UNKNOWN_EFFECT" if code == "UNKNOWN_EFFECT" else "HOLD",
+            "code": code, "scope": "SOURCE_ONLY_ADVISORY",
+            "native_adapter": "BLOCKED_NOT_DEPLOYED", "launch_authorized": False,
+            "launched": False, "browser_accessed": False,
+            "chat_identity_proven": False, "send_authorized": False}
+
+
+def _logon_environment(local: Path, checkout: Path, sid: str) -> ChromeEnvironment | None:
+    """Read only N2's fixed enrolled config; OFF never creates a candidate.
+
+    Old names, duplicate/partial enrollment, unsafe custody and links HOLD.
+    In particular, never rewrite N2's allow_launch=False to enable startup.
+    """
+    if (not local.is_absolute() or not local.is_dir() or not checkout.is_absolute()
+            or not checkout.is_dir() or not _no_links(local) or not _no_links(checkout)):
+        raise _EnrollmentHold("CONFIG_UNTRUSTED")
+    root = local / "AI-Commerce"
+    directory = root / "Chrome-Acquisition"
+    config = directory / "config.json"
+    for path in (root, directory, config, root / "chrome.json", root / "chrome-acquisition.json"):
+        if not _no_links(path):
+            raise _EnrollmentHold("CONFIG_UNTRUSTED")
+    for path in (root / "chrome.json", root / "chrome-acquisition.json"):
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            continue
+        raise _EnrollmentHold("CONFIG_UNTRUSTED")
+    try:
+        config.lstat()
+    except FileNotFoundError:
+        # An incomplete native reservation cannot be adopted or repaired here.
+        if directory.exists():
+            raise _EnrollmentHold("CONFIG_UNTRUSTED")
+        return None
+    from .local_completion_handoff import _private_identity
+    if any(_private_identity(path) != sid for path in (root, directory, config)):
+        raise _EnrollmentHold("CONFIG_UNTRUSTED")
+    env = load_environment(config, checkout, local_app_data=local)
+    if env.port != 9444 or env.endpoint != "http://127.0.0.1:9444":
+        raise _EnrollmentHold("CONFIG_UNTRUSTED")
+    return env
+
+
+def _logon_inventory(inventory: dict) -> tuple[list[dict], tuple]:
+    """Pin only exact 9444 observations; a failed/partial query is never ABSENT."""
+    if type(inventory) is not dict or set(inventory) != {"listeners", "processes"}:
+        raise _EnrollmentHold("ABSENCE_UNPROVEN")
+    listeners, processes = _rows(inventory["listeners"]), _rows(inventory["processes"])
+    pids = [p.get("ProcessId") for p in processes]
+    if (len(listeners) > 1 or len(processes) > 256
+            or any(type(pid) is not int or pid <= 0 for pid in pids)
+            or len(set(pids)) != len(pids)):
+        raise _EnrollmentHold("UNTRUSTED_OWNER")
+    for row in listeners:
+        if (row.get("LocalAddress") != "127.0.0.1" or type(row.get("LocalPort")) is not int
+                or row["LocalPort"] != 9444 or type(row.get("OwningProcess")) is not int
+                or row["OwningProcess"] not in pids):
+            raise _EnrollmentHold("UNTRUSTED_OWNER")
+    claimants = []
+    for proc in processes:
+        try:
+            argv = _commandline_argv(proc.get("CommandLine"))
+            if (not isinstance(argv, list) or not 1 <= len(argv) <= 256
+                    or any(not isinstance(arg, str) for arg in argv)):
+                raise ValueError
+        except Exception:
+            raise _EnrollmentHold("UNTRUSTED_OWNER") from None
+        if any(a.lower().startswith("--type=") for a in argv):
+            continue
+        ports = [a for a in argv if a.lower() == "--remote-debugging-port"
+                 or a.lower().startswith("--remote-debugging-port=")]
+        port = _switch(argv, "--remote-debugging-port")
+        if ports and (len(ports) != 1 or not ports[0].startswith("--remote-debugging-port=")
+                      or port is None or re.fullmatch(r"[0-9]{1,5}", port) is None):
+            raise _EnrollmentHold("UNTRUSTED_OWNER")
+        if port is not None and int(port) == 9444:
+            claimants.append(proc["ProcessId"])
+    if claimants != [row["OwningProcess"] for row in listeners]:
+        raise _EnrollmentHold("UNTRUSTED_OWNER")
+    # Copy immutable fields before a second independent query; never publish them.
+    identity = tuple(tuple(p.get(k) for k in (
+        "ProcessId", "ExecutablePath", "CommandLine", "SessionId", "OwnerSid", "CreationDate"))
+        for p in sorted(processes, key=lambda p: p["ProcessId"]))
+    return listeners, (tuple((r["LocalAddress"], r["LocalPort"], r["OwningProcess"])
+                             for r in listeners), identity)
+
+
+def _logon_observation(checkout: Path) -> tuple[str, tuple]:
+    try:
+        local, session, sid = _enrollment_operator()
+    except Exception:
+        raise _EnrollmentHold("WAIT_INTERACTIVE_OWNER") from None
+    try:
+        env = _logon_environment(local, checkout, sid)
+    except Exception:
+        raise _EnrollmentHold("CONFIG_UNTRUSTED") from None
+    try:
+        inventory = _query_windows(9444)
+    except Exception:
+        raise _EnrollmentHold("ABSENCE_UNPROVEN") from None
+    listeners, identity = _logon_inventory(inventory)
+    pinned = ((local, session, sid), env, identity)
+    if env is None:
+        return ("UNTRUSTED_OWNER" if listeners else "FIRST_SUPERVISED_ENROLLMENT_REQUIRED"), pinned
+    try:
+        # Same exact SID/ACL, signature, dedicated profile and marker guards as N2.
+        _require_operator_control(env)
+        _check_enrollment_custody(env, local, sid)
+    except _EnrollmentHold as exc:
+        raise _EnrollmentHold("PROFILE_LOCK_HOLD" if str(exc) ==
+                              "ENROLLMENT_PROFILE_LOCK_UNPROVEN" else "UNTRUSTED_OWNER") from None
+    except AcquisitionBlocked:
+        raise _EnrollmentHold("UNTRUSTED_OWNER") from None
+    if listeners:
+        current, _ = _existing_9444_candidate(inventory, local=local, checkout=checkout,
+            config=env.config_path, session=session, sid=sid)
+        if current != replace(env, allow_launch=False):
+            raise _EnrollmentHold("UNTRUSTED_OWNER")
+        return "REUSE_ONLY", pinned
+    state, _ = evaluate(env, inventory, session_id=session, expected_sid=sid,
+                        parse=_commandline_argv)
+    if state != "ABSENT":
+        raise _EnrollmentHold("ABSENCE_UNPROVEN")
+    # A launch-enabled config is also not a private, effect-specific grant.
+    return ("BLOCKED_NOT_DEPLOYED" if env.allow_launch else "LAUNCH_GRANT_REQUIRED"), pinned
+
+
+def assess_logon_9444(checkout: Path) -> dict:
+    """Source-only logon/startup decision, with two fresh independent reads.
+
+    No HTTP success, SID, config, Issue, runner or opt-in grants launch authority.
+    REUSE_ONLY describes an enrolled owned listener, not protocol/account proof.
+    START_ONCE_READY is unreachable: SignedOriginConsentAuthority authorizes only
+    route/Wake operations, and the native origin interfaces enroll no Chrome
+    launch owner. A future N3-B needs a separately authenticated one-shot grant,
+    interactive owner, pinned ABSENT observation and durable replay custody.
+    This policy never calls run(), attaches, creates config or mutates a profile.
+    """
+    observed = False
+    try:
+        before = _logon_observation(checkout)
+        observed = True
+        if _logon_observation(checkout) != before:
+            return _logon_result("UNKNOWN_EFFECT")
+        return _logon_result(before[0])
+    except (_EnrollmentHold, AcquisitionBlocked) as exc:
+        code = str(exc)
+        if observed:
+            code = "UNKNOWN_EFFECT"
+        elif code == "PROFILE_ALREADY_ACTIVE_NO_CDP":
+            code = "PROFILE_LOCK_HOLD"
+        elif code in _ENROLLMENT_CODES and code not in _LOGON_CODES:
+            code = "UNTRUSTED_OWNER"
+        return _logon_result(code)
+    except Exception:
+        return _logon_result("UNKNOWN_EFFECT" if observed else "ABSENCE_UNPROVEN")
+
+
+def _start_or_reuse_9444(checkout: Path, *, request_id: str, grant: object = None) -> dict:
+    """Private N3-A seam, deliberately absent from CLI/public remote routes.
+
+    No authenticated native launch/replay owner is deployed. Neither request IDs
+    nor caller-supplied grant objects may supply that owner (or callbacks). Do
+    not inspect/consume them, flip allow_launch, or invoke run(launch=True).
+    Repeated logon/requests, revoked/expired/synthetic grants and uncertain
+    observations therefore cannot trigger even a first start, much less retry.
+    Call assess_logon_9444 separately for advisory readiness. With no native
+    backend this boundary returns before even launching diagnostic subprocesses.
+    A future effect implementation requires separate local approval/enrollment.
+    """
+    return _logon_result("BLOCKED_NOT_DEPLOYED")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m ai_commerce.remote.chrome_acquisition",
         epilog="Native enrollment requires explicit local --opt-in; launch remains disabled.")

@@ -1460,3 +1460,307 @@ def test_wh01b_native_process_handle_pins_live_immutable_identity(monkeypatch, t
         with pytest.raises(ca._EnrollmentHold):
             tx._process()
         assert not checked
+
+
+# N3-A is SOURCE ONLY. These fixtures do not establish native logon readiness,
+# issue launch grants, start browsers, install tasks or read any Chat content.
+def logon_fixture(monkeypatch, tmp_path, *, enrolled=True, allow_launch=False, running=False):
+    env, repo, home, snapshot, events = enrollment_fixture(monkeypatch, tmp_path)
+    env = ca.replace(env, allow_launch=allow_launch)
+    if enrolled:
+        env.config_path.parent.mkdir()
+        env.config_path.write_text(json.dumps({
+            "version": 1, "executable": str(env.executable),
+            "user_data_dir": str(env.user_data_dir), "profile_directory": env.profile_directory,
+            "cdp_endpoint": env.endpoint, "exclusive_user_data": True,
+            "allow_launch": allow_launch,
+        }), encoding="utf-8")
+    if not running:
+        snapshot.update(listeners=[], processes=[])
+    return env, repo, home, snapshot, events
+
+
+def assert_logon_hold(result, code):
+    assert result == {
+        "status": "UNKNOWN_EFFECT" if code == "UNKNOWN_EFFECT" else "HOLD",
+        "code": code, "scope": "SOURCE_ONLY_ADVISORY",
+        "native_adapter": "BLOCKED_NOT_DEPLOYED", "launch_authorized": False,
+        "launched": False, "browser_accessed": False,
+        "chat_identity_proven": False, "send_authorized": False,
+    }
+
+
+@pytest.mark.parametrize("enrolled,allow_launch,running,code", [
+    (False, False, False, "FIRST_SUPERVISED_ENROLLMENT_REQUIRED"),
+    (False, False, True, "UNTRUSTED_OWNER"),
+    (True, False, False, "LAUNCH_GRANT_REQUIRED"),
+    (True, True, False, "BLOCKED_NOT_DEPLOYED"),
+    (True, False, True, "REUSE_ONLY"),
+    (True, True, True, "REUSE_ONLY"),
+])
+def test_n3a_logon_decisions_are_advisory_without_mutation(
+        monkeypatch, tmp_path, capsys, enrolled, allow_launch, running, code):
+    env, repo, home, _, events = logon_fixture(monkeypatch, tmp_path,
+        enrolled=enrolled, allow_launch=allow_launch, running=running)
+    before = {p: p.read_bytes() for p in home.rglob("*") if p.is_file()}
+    for _ in range(2):  # Repeated logon never repairs, enrolls, starts or attaches.
+        assert_logon_hold(ca.assess_logon_9444(repo), code)
+    assert events.count("inventory") == 4
+    assert {p: p.read_bytes() for p in home.rglob("*") if p.is_file()} == before
+    assert not ca._NativeEnrollment.instances
+    if enrolled:
+        assert json.loads(env.config_path.read_text())["allow_launch"] is allow_launch
+    else:
+        assert not env.config_path.parent.exists()
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("gate", ["non_windows", "noninteractive_runner", "session_zero",
+    "missing_token", "wrong_token", "elevated", "github_actions", "github_event", "github_run"])
+def test_n3a_logon_requires_current_interactive_owner(monkeypatch, tmp_path, gate):
+    from ai_commerce.remote import local_wake_entry
+    _, repo, _, _, events = logon_fixture(monkeypatch, tmp_path)
+    if gate == "non_windows":
+        ca.os.name = "posix"
+    elif gate == "noninteractive_runner":
+        ca.sys.stdin.isatty = lambda: False
+    elif gate == "session_zero":
+        monkeypatch.setattr(ca, "_interactive_session", lambda: 0)
+    elif gate == "wrong_token":
+        monkeypatch.setattr(local_wake_entry, "_windows_process_sid", lambda: "S-1-5-18")
+    elif gate in {"missing_token", "elevated"}:
+        def unavailable():
+            raise ca.AcquisitionBlocked("WINDOWS_TOKEN_UNAVAILABLE" if gate == "missing_token"
+                                        else "ELEVATED_CHROME_DISALLOWED")
+        monkeypatch.setattr(ca, "_interactive_session", unavailable)
+    else:
+        ca.os.environ[{"github_actions": "GITHUB_ACTIONS", "github_event": "GITHUB_EVENT_PATH",
+                       "github_run": "GITHUB_RUN_ID"}[gate]] = "private-runner-value"
+    assert_logon_hold(ca.assess_logon_9444(repo), "WAIT_INTERACTIVE_OWNER")
+    assert events == []
+
+
+@pytest.mark.parametrize("case", ["partial", "duplicate_config", "legacy_only", "directory",
+    "duplicate_key", "invalid_json", "wrong_port", "unsafe_acl", "foreign_config_sid",
+    "config_reparse", "profile_reparse", "executable_reparse"])
+def test_n3a_logon_refuses_unsafe_or_incomplete_config(monkeypatch, tmp_path, case):
+    from ai_commerce.remote import local_completion_handoff
+    env, repo, home, _, events = logon_fixture(monkeypatch, tmp_path)
+    config = env.config_path
+    if case in {"partial", "legacy_only", "directory"}:
+        config.unlink()
+        if case == "legacy_only":
+            config.parent.rmdir()
+        elif case == "directory":
+            config.mkdir()
+    if case in {"legacy_only", "duplicate_config"}:
+        (home / "AI-Commerce" / "chrome.json").write_text("{}")
+    elif case == "duplicate_key":
+        config.write_text(config.read_text()[:-1] + ', "allow_launch": true}')
+    elif case == "invalid_json":
+        config.write_text("private invalid bytes")
+    elif case == "wrong_port":
+        config.write_text(config.read_text().replace(":9444", ":9333"))
+    elif case == "unsafe_acl":
+        def unsafe(path):
+            raise local_completion_handoff.HandoffBlocked("private path/SID/token")
+        monkeypatch.setattr(local_completion_handoff, "_private_identity", unsafe)
+    elif case == "foreign_config_sid":
+        monkeypatch.setattr(local_completion_handoff, "_private_identity",
+            lambda path: "S-1-5-21-1-2-3-1002" if path == config else _OPERATOR_SID)
+    elif case.endswith("_reparse"):
+        unsafe_path = {"config_reparse": config,
+                       "profile_reparse": env.user_data_dir / env.profile_directory,
+                       "executable_reparse": env.executable}[case]
+        original = ca._no_links
+        monkeypatch.setattr(ca, "_no_links", lambda path: path != unsafe_path and original(path))
+    assert_logon_hold(ca.assess_logon_9444(repo), "CONFIG_UNTRUSTED")
+    assert events == []
+
+
+@pytest.mark.parametrize("case", ["wrong_port", "foreign_pid", "duplicate_pid", "foreign_sid",
+    "wrong_session", "foreign_executable", "foreign_argv", "foreign_profile", "foreign_address",
+    "duplicate_listener", "unsigned", "missing_creation", "extra_switch"])
+def test_n3a_logon_never_reuses_foreign_or_ambiguous_listener(monkeypatch, tmp_path, case):
+    env, repo, _, snapshot, _ = logon_fixture(monkeypatch, tmp_path, running=True)
+    proc, row = snapshot["processes"][0], snapshot["listeners"][0]
+    command = env.command()
+    if case == "wrong_port":
+        row["LocalPort"] = 9333
+    elif case == "foreign_pid":
+        row["OwningProcess"] = 999
+    elif case == "duplicate_pid":
+        snapshot["processes"].append(dict(proc))
+    elif case == "foreign_sid":
+        proc["OwnerSid"] = "S-1-5-21-1-2-3-1002"
+    elif case == "wrong_session":
+        proc["SessionId"] = 2
+    elif case == "foreign_executable":
+        proc["ExecutablePath"] = str(tmp_path / "foreign.exe")
+    elif case == "foreign_argv":
+        command[0] = str(tmp_path / "foreign.exe")
+    elif case == "foreign_profile":
+        command = [a.replace("--profile-directory=Default", "--profile-directory=Other") for a in command]
+    elif case == "foreign_address":
+        row["LocalAddress"] = "0.0.0.0"
+    elif case == "duplicate_listener":
+        snapshot["listeners"].append(dict(row))
+    elif case == "missing_creation":
+        proc["CreationDate"] = None
+    elif case == "extra_switch":
+        command.append("--unregistered-switch")
+    else:
+        def unsigned(env):
+            raise ca.AcquisitionBlocked("CHROME_EXECUTABLE_UNTRUSTED")
+        monkeypatch.setattr(ca, "_verify_google_chrome", unsigned)
+    proc["CommandLine"] = json.dumps(command)
+    assert_logon_hold(ca.assess_logon_9444(repo), "UNTRUSTED_OWNER")
+
+
+@pytest.mark.parametrize("marker", ca._MARKERS)
+@pytest.mark.parametrize("symlink", [False, True])
+def test_n3a_logon_holds_profile_markers_without_removing_them(monkeypatch, tmp_path, marker, symlink):
+    env, repo, _, _, _ = logon_fixture(monkeypatch, tmp_path)
+    path = env.user_data_dir / marker
+    if symlink:
+        # Synthetic dangling link lstat evidence; no Windows link privilege needed.
+        original = Path.lstat
+        def lstat(current, *args, **kwargs):
+            if current == path:
+                return env.user_data_dir.stat()
+            return original(current, *args, **kwargs)
+        monkeypatch.setattr(Path, "lstat", lstat)
+    else:
+        path.write_bytes(b"private marker; do not interpret or delete")
+    assert_logon_hold(ca.assess_logon_9444(repo), "PROFILE_LOCK_HOLD")
+    if not symlink:
+        assert path.read_bytes() == b"private marker; do not interpret or delete"
+
+
+def test_n3a_9333_only_is_not_a_9444_enrollment(monkeypatch, tmp_path):
+    env, repo, _, snapshot, _ = logon_fixture(monkeypatch, tmp_path, enrolled=False, running=True)
+    snapshot["listeners"] = []  # The 9444 query has no listener; leave 9333 alone.
+    snapshot["processes"][0]["CommandLine"] = json.dumps([
+        a.replace("--remote-debugging-port=9444", "--remote-debugging-port=9333") for a in env.command()])
+    assert_logon_hold(ca.assess_logon_9444(repo), "FIRST_SUPERVISED_ENROLLMENT_REQUIRED")
+    assert not env.config_path.parent.exists()
+
+
+def test_n3a_exact_9444_off_without_config_never_invents_private_inputs(monkeypatch, tmp_path):
+    _, repo, home, _, _ = logon_fixture(monkeypatch, tmp_path, enrolled=False)
+    def forbidden(*args, **kwargs):
+        pytest.fail("OFF without enrollment must not invent executable/profile candidates")
+    for name in ("_environment_from_value", "_existing_9444_candidate", "_enrollment_location"):
+        monkeypatch.setattr(ca, name, forbidden)
+    before = set(home.rglob("*"))
+    assert_logon_hold(ca.assess_logon_9444(repo), "FIRST_SUPERVISED_ENROLLMENT_REQUIRED")
+    assert set(home.rglob("*")) == before
+
+
+@pytest.mark.parametrize("case", ["timeout", "exception", "partial", "unparseable",
+                                   "concurrent_9444", "active_profile"])
+def test_n3a_absence_requires_independent_complete_evidence(monkeypatch, tmp_path, case):
+    env, repo, _, snapshot, events = logon_fixture(monkeypatch, tmp_path)
+    expected = "ABSENCE_UNPROVEN"
+    if case in {"timeout", "exception"}:
+        def unavailable(port):
+            events.append("failed inventory")
+            raise TimeoutError("private arguments/WS/token") if case == "timeout" else RuntimeError("private")
+        monkeypatch.setattr(ca, "_query_windows", unavailable)
+    elif case == "partial":
+        snapshot.pop("processes")
+    else:
+        command = env.command()
+        if case == "active_profile":
+            command = [a.replace("--remote-debugging-port=9444", "--remote-debugging-port=9333") for a in command]
+            expected = "PROFILE_LOCK_HOLD"
+        else:
+            expected = "UNTRUSTED_OWNER"
+        snapshot["processes"] = [{**owner(env), "CommandLine": None if case == "unparseable"
+                                  else json.dumps(command)}]
+    assert_logon_hold(ca.assess_logon_9444(repo), expected)
+    assert len(events) <= 2  # One inventory and, where applicable, one signature; no retry.
+
+
+@pytest.mark.parametrize("change", ["session", "sid", "config", "concurrent_start", "pid_reuse", "timeout"])
+def test_n3a_logon_drift_is_unknown_with_no_second_start(monkeypatch, tmp_path, change):
+    import copy
+    from ai_commerce.remote import local_wake_entry
+    env, repo, _, snapshot, _ = logon_fixture(monkeypatch, tmp_path, running=change == "pid_reuse")
+    original = ca._logon_observation
+    observations = []
+    def observe(checkout):
+        observations.append("read")
+        if len(observations) == 2:
+            if change == "session":
+                monkeypatch.setattr(ca, "_interactive_session", lambda: 2)
+            elif change == "sid":
+                monkeypatch.setattr(local_wake_entry, "_windows_process_sid", lambda: "S-1-5-21-1-2-3-1002")
+            elif change == "config":
+                env.config_path.write_text(env.config_path.read_text().replace('"allow_launch": false', '"allow_launch": true'))
+            elif change == "timeout":
+                raise TimeoutError("private WS/token/arguments")
+            elif change == "pid_reuse":
+                snapshot["processes"][0]["CreationDate"] = "2026-11-14T02:00:00Z"
+            else:
+                snapshot.update(listeners=[{"LocalAddress": "127.0.0.1", "LocalPort": 9444, "OwningProcess": 123}],
+                    processes=[{**owner(env), "OwnerSid": _OPERATOR_SID,
+                        "CreationDate": "2026-11-14T01:00:00Z", "CommandLine": json.dumps(env.command())}])
+        return original(checkout)
+    monkeypatch.setattr(ca, "_logon_observation", observe)
+    before = copy.deepcopy(snapshot)
+    assert_logon_hold(ca.assess_logon_9444(repo), "UNKNOWN_EFFECT")
+    assert observations == ["read", "read"]
+    if change in {"session", "sid", "config", "timeout"}:
+        assert snapshot == before
+
+
+@pytest.mark.parametrize("grant", [None, False, True, {},
+    {"operation": "deliver_wake", "human_consent": True},
+    {"operation": "start_chrome", "signature": "synthetic", "valid_until": 9999999999999},
+    {"operation": "start_chrome", "revoked": True},
+    {"operation": "start_chrome", "valid_until": 0},
+    {"status": "START_ONCE_READY", "allow_launch": True},
+    {"status": "UNKNOWN_EFFECT"},
+])
+def test_n3a_private_effect_seam_never_accepts_unverified_grants(monkeypatch, tmp_path, grant):
+    def forbidden(*args, **kwargs):
+        pytest.fail("Undeployed effect seam must return before all reads and effects")
+    for name in ("assess_logon_9444", "_enrollment_operator", "_query_windows", "run",
+                 "_probe_cdp", "verify_playwright_attach"):
+        monkeypatch.setattr(ca, name, forbidden)
+    monkeypatch.setattr(ca.subprocess, "Popen", forbidden)
+    monkeypatch.setattr(ca.subprocess, "run", forbidden)
+    class UntrustedGrant:
+        def __getattribute__(self, name):
+            pytest.fail("Grant callbacks/attributes are not a native authority")
+    for supplied in (grant, UntrustedGrant()):
+        for request_id in ("same-logon", "same-logon", "new-logon"):
+            assert_logon_hold(ca._start_or_reuse_9444(tmp_path, request_id=request_id,
+                                                   grant=supplied), "BLOCKED_NOT_DEPLOYED")
+
+
+def test_n3a_public_diagnostics_sanitize_private_values(monkeypatch, tmp_path, capsys):
+    env, repo, home, _, _ = logon_fixture(monkeypatch, tmp_path)
+    def unknown(port):
+        raise RuntimeError(f"{home} {_OPERATOR_SID} PID=123 --private ws://private token=secret")
+    monkeypatch.setattr(ca, "_query_windows", unknown)
+    results = [ca.assess_logon_9444(repo),
+               ca._start_or_reuse_9444(repo, request_id="private request", grant={"token": "secret"})]
+    for result in results:
+        public = json.dumps(result)
+        assert all(value not in public for value in (str(home), str(env.executable), _OPERATOR_SID,
+                   "PID=", "--private", "ws://", "secret", "private request"))
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("command", ["assess-logon-9444", "start-or-reuse-9444"])
+def test_n3a_policy_and_private_adapter_are_not_cli_operations(monkeypatch, tmp_path, command, capsys):
+    def forbidden(*args, **kwargs):
+        pytest.fail("Public CLI must not dispatch logon policy/effects")
+    monkeypatch.setattr(ca, "assess_logon_9444", forbidden)
+    monkeypatch.setattr(ca, "_start_or_reuse_9444", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        ca.main([command, "--checkout", str(tmp_path), "--opt-in"])
+    assert exc.value.code == 2
+    assert capsys.readouterr().out == ""
