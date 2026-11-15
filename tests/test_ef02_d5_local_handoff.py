@@ -804,9 +804,14 @@ def test_worker_final_boundary_and_signal_failure_preserve_result(setup, monkeyp
     monkeypatch.setattr(worker_cli, "load_approved_candidates", lambda p: {})
     monkeypatch.setattr(worker_cli, "validate_batch", lambda x, **kw: s.source.request)
     monkeypatch.setattr(worker_cli, "check_source", lambda *a, **kw: None)
-    # This fixture tests post-execution completion/signal behavior only.
-    # Pre-WP EF02 has no require_preexecutor_acceptance runtime hook.
-    # Issuer and action admission are exercised by the dedicated EF02 tests.
+    # This test isolates post-execution Wake/feedback behavior. Its synthetic
+    # checkout cannot establish a pinned AC owner graph; grant the fixture's
+    # source admission explicitly here, not in production validator code.
+    scope_calls = []
+    def admitted_fixture_scope(*_args, **_kwargs):
+        scope_calls.append(True)
+        return {"status": "PRE_EXECUTOR_COMPATIBLE", "next_gate": "POST_EDIT_MT01_REQUIRED"}
+    monkeypatch.setattr(worker_cli, "validate_acceptance_scope", admitted_fixture_scope)
     monkeypatch.setattr(worker_cli, "GitHubTransport", lambda *a: SimpleNamespace(comment=lambda *a: None))
     monkeypatch.setattr(worker_cli, "LocalBatchWorker",
                         lambda **kw: SimpleNamespace(root=root, execute_action=lambda *a: None))
@@ -836,6 +841,7 @@ def test_worker_final_boundary_and_signal_failure_preserve_result(setup, monkeyp
     monkeypatch.setattr(worker_cli, "build_completion_event", failed_event)
     assert worker_cli.main(args) == 1
     assert len(calls) == 1  # No hint when event emission failed.
+    assert scope_calls == [True, True]
 
 
 @pytest.mark.parametrize("gate", ["valid", "missing_resolve", "missing_deliver", "wrong_sid",
