@@ -1344,3 +1344,25 @@ def test_710_g3_no_model_workflow_has_exact_protected_merge_review(gate):
           "status": "added"}]) is None
 
 
+
+def test_mcp_gateway_one_time_preflight_protected_control_is_explicit(gate):
+    """Trusted main must know the new owner-only control before its source PR."""
+    path = ".github/workflows/mcp-gateway-bootstrap-preflight-once.yml"
+    required = {
+        "tests/test_hostops_personal.py",
+        "tests/test_mt01_v21.py",
+        "tests/test_pr_merge_gate.py",
+    }
+    assert set(gate.REVIEWED_CONTROL_TESTS[path]) == required
+    reviewed = gate.reviewed_coverage_for_changed_files(
+        [{"filename": path, "status": "added"}]
+    )
+    assert reviewed is not None
+    changed, witness = reviewed
+    assert changed == (path,)
+    assert required <= set(witness)
+    assert gate.reviewed_coverage_for_changed_files(
+        [{"filename": ".github/workflows/mcp-gateway-arbitrary-shell.yml",
+          "status": "added"}]
+    ) is None
+
