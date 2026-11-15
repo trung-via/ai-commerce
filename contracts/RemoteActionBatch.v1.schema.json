@@ -57,6 +57,25 @@
   },
   "$defs": {
     "action": {
+      "description": "Select by diagnostic_mode presence so source validation retains leaf errors for existing preflight consumers.",
+      "if": {"required": ["diagnostic_mode"]},
+      "then": {"$ref": "#/$defs/diagnostic_action"},
+      "else": {"$ref": "#/$defs/source_action"}
+    },
+    "diagnostic_action": {
+      "type": "object",
+      "required": ["action_id", "attempt_id", "diagnostic_mode", "delivery"],
+      "properties": {
+        "action_id": {"$ref": "#/$defs/source_action/properties/action_id"},
+        "attempt_id": {"$ref": "#/$defs/source_action/properties/attempt_id"},
+        "diagnostic_mode": {"const": "WINDOWS_B03_SERIAL_XDIST_V1"},
+        "delivery": {"const": "DIAGNOSTIC_ONLY"},
+        "depends_on": {"const": []},
+        "resources": {"const": []}
+      },
+      "additionalProperties": false
+    },
+    "source_action": {
       "type": "object",
       "required": [
         "action_id",
@@ -103,6 +122,11 @@
         "instruction": {
           "type": "string",
           "minLength": 1
+        },
+        "executor_test_policy": {
+          "enum": ["EF01_POST_MODEL_ONLY", "EXECUTOR_PYTEST_REQUIRED"],
+          "default": "EF01_POST_MODEL_ONLY",
+          "description": "SOURCE_BUILD never authorizes executor-run tests. EXECUTOR_PYTEST_REQUIRED is an incompatible capability declaration rejected before claim or provider invocation."
         },
         "allowed_paths": {
           "type": "array",

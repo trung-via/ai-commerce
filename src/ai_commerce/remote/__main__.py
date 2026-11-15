@@ -7,13 +7,45 @@ import sys
 import time
 from pathlib import Path
 from .validation import (RemoteRequestError, validate_batch, verify_registry,
-                         check_source, validate_acceptance_scope)
+                         check_source, validate_acceptance_scope, is_diagnostic_batch)
 from .transport import GitHubTransport
-from .worker import LocalBatchWorker, _write_json
+from .worker import LocalBatchWorker, _write_json, execute_diagnostic_batch, _diagnostic_root
 from .reuse import load_approved_candidates
 from .scheduler import run_schedule
 from .completion_event import build_completion_event
 from .local_completion_handoff import start_worker_signal
+
+
+def _run_diagnostic(args, checkout: Path, batch: dict) -> int:
+    """Separate result/feedback tier; no scheduler, claim, model or wake path."""
+    report = execute_diagnostic_batch(
+        checkout=checkout, batch=batch, issuer_login=args.issuer_login,
+        owner_login=args.owner_login, issue_number=args.issue_number,
+        git_executable=args.git_bin)
+    report.update(github_issue_number=args.issue_number or None,
+                  github_workflow_run_id=os.environ.get("GITHUB_RUN_ID"),
+                  feedback_status="NOT_ATTEMPTED")
+    if args.issue_number > 0:
+        try:
+            github = GitHubTransport(os.environ.get("GITHUB_REPOSITORY", ""),
+                                     os.environ.get("GITHUB_TOKEN", ""))
+            summary = ["EF02 diagnostic batch " + batch["batch_id"] + ": " + report["status"],
+                       "Native proof: " + report["native_proof"],
+                       "Workflow run: " + str(report["github_workflow_run_id"] or "UNKNOWN"),
+                       "Reason: " + (report["error_code"] or "NONE"),
+                       "Serial and xdist receipts are in this workflow's ef02-results artifact."]
+            github.comment(args.issue_number, "\n".join(summary))
+            report["feedback_status"] = "GITHUB_ISSUE_COMMENT_PUBLISHED"
+        except Exception:
+            report["feedback_status"] = "FEEDBACK_PUBLICATION_FAILED"
+    try:
+        _write_json(_diagnostic_root(checkout) / "batch_result.json", report)
+    except Exception:
+        print("EF02_DIAGNOSTIC_FAILED: DIAGNOSTIC_RESULT_UNAVAILABLE", file=sys.stderr)
+        return 1
+    print(json.dumps(report))
+    return 0 if (report["status"] == "DIAGNOSTIC_COMPLETE" and
+                 report["feedback_status"] == "GITHUB_ISSUE_COMMENT_PUBLISHED") else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -42,13 +74,15 @@ def main(argv: list[str] | None = None) -> int:
                                                    args.brain_issuers.split(",") if v.strip()))
         check_source(checkout, batch["source_sha"],
                      **({"git_executable": args.git_bin} if args.git_bin is not None else {}))
-        acceptance_scope = validate_acceptance_scope(
-            batch, repo=checkout,
-            **({"git_executable": args.git_bin} if args.git_bin is not None else {}))
+        diagnostic = is_diagnostic_batch(batch)
+        if not diagnostic:
+            acceptance_scope = validate_acceptance_scope(
+                batch, repo=checkout,
+                **({"git_executable": args.git_bin} if args.git_bin is not None else {}))
     except RemoteRequestError as exc:
         # Fixed source-owned codes only; never echo instruction/schema/Git bytes.
         code = str(exc).split(":", 1)[0]
-        if not code or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for c in code):
+        if not code or len(code) > 80 or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for c in code):
             code = "REQUEST_VALIDATION_FAILED"
         label = "EF02_REQUEST_HELD" if code == "SOURCE_COMMIT_UNAVAILABLE" else "EF02_REQUEST_REJECTED"
         print(label + ": " + code, file=sys.stderr)
@@ -56,6 +90,13 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:
         print("EF02_REQUEST_REJECTED: REQUEST_VALIDATION_FAILED", file=sys.stderr)
         return 2
+    if diagnostic:
+        if args.command == "validate":
+            print(json.dumps({"status": "VALIDATED", "batch_id": batch["batch_id"],
+                              "count": 1, "delivery": "DIAGNOSTIC_ONLY",
+                              "native_proof": "NOT_YET_RUN"}))
+            return 0
+        return _run_diagnostic(args, checkout, batch)
     if acceptance_scope["status"] != "PRE_EXECUTOR_COMPATIBLE":
         print(json.dumps({"status": "EF02_REQUEST_HELD",
                           "error_code": "AC_SCOPE_UNDETERMINED_PRE_EXECUTOR",
