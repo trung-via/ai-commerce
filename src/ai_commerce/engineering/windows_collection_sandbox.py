@@ -849,7 +849,18 @@ def _decode_fixture_report(raw, pid):
         if not allowed:
             raise Unproven(reason, ((values[15] & 0xffff) << 3) | (values[14] & 7) if reason == "NATIVE_CHILD_ENVIRONMENT_UNPROVEN" else None)
     if values[4:10] != (5, 5, 5, 0, 2, 10013):
-        raise Unproven("NATIVE_ACCESS_DENIAL_UNPROVEN")
+        # Six fixed native result slots, no paths or raw environment values.
+        # Lower six bits identify divergent slots; following four-bit nibbles
+        # classify only known Win32/WSA result codes (15 means unrecognized).
+        codebook = {0: 1, 2: 2, 3: 3, 5: 4, 32: 5, 65: 6, 10013: 7, 10061: 8}
+        expected = (5, 5, 5, 0, 2, 10013)
+        mismatches = 0
+        classes = 0
+        for index, (actual, required) in enumerate(zip(values[4:10], expected)):
+            if actual != required:
+                mismatches |= 1 << index
+                classes |= codebook.get(actual, 15) << (4 * index)
+        raise Unproven("NATIVE_ACCESS_DENIAL_UNPROVEN", mismatches | (classes << 6))
     return values
 
 
