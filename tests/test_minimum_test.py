@@ -1560,6 +1560,18 @@ def test_windows_native_synthetic_fixed_report_field_reason_is_specific(index, v
         sandbox._decode_fixture_report(struct.pack("<16I", *report), 123)
 
 
+@pytest.mark.parametrize("mask", range(8))
+def test_windows_native_synthetic_environment_fail_closed_with_sanitized_mask(mask):
+    """A failed OS environment predicate reports only a bounded 3-bit mask."""
+    import struct
+    from ai_commerce.engineering import windows_collection_sandbox as sandbox
+
+    report = [0x4d543031, 1, 0, 0, 5, 5, 5, 0, 2, 10013, 456, 123, 0, 1, mask, 0]
+    with pytest.raises(sandbox.Unproven, match="NATIVE_CHILD_ENVIRONMENT_UNPROVEN") as error:
+        sandbox._decode_fixture_report(struct.pack("<16I", *report), 123)
+    assert error.value.native_error == mask
+
+
 @pytest.mark.parametrize("index,value", [(4, 2), (5, 32), (6, 3), (7, 5), (8, 5), (9, 10061)])
 def test_windows_native_synthetic_missing_files_and_closed_ports_are_not_denials(index, value):
     import struct
