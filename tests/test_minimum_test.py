@@ -1637,6 +1637,23 @@ def test_windows_native_synthetic_job_membership_mask_is_bounded_and_fail_closed
         assert sandbox._job_membership_mask(inside, members, child, grandchild) != proven
 
 
+def test_windows_native_synthetic_fixture_is_detached_from_console_host():
+    """No console attachment in either fixed AppContainer fixture process."""
+    from ai_commerce.engineering import windows_collection_sandbox as sandbox
+
+    sandboxed = sandbox._creation_flags(True)
+    compiler = sandbox._creation_flags(False)
+    assert sandboxed & 0x4  # CREATE_SUSPENDED; assign before resume
+    assert sandboxed & 0x400  # CREATE_UNICODE_ENVIRONMENT
+    assert sandboxed & 0x80000  # EXTENDED_STARTUPINFO_PRESENT / AppContainer
+    assert sandboxed & 0x8  # DETACHED_PROCESS
+    assert not sandboxed & 0x08000000  # CREATE_NO_WINDOW is ignored if detached
+    assert compiler & 0x08000000
+    assert not compiler & 0x8
+    assert "FALSE, DETACHED_PROCESS, NULL, NULL, &si, &pi" in sandbox._FIXTURE_C
+    assert "FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi" not in sandbox._FIXTURE_C
+
+
 def test_windows_native_synthetic_extra_job_member_categories_are_bounded():
     """Extra Job members remain a hard failure; diagnostics disclose counts only."""
     from ai_commerce.engineering import windows_collection_sandbox as sandbox
