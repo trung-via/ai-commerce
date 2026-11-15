@@ -56,7 +56,16 @@ def legacy_source_digest(root):
     return digest.hexdigest()
 
 
-@pytest.mark.parametrize("size", [0, 131072, 131073, 3 * 65536 + 17, 8 * 1024 * 1024])
+# B1.5 must likewise use explicit bounded IDs (or fixture-internal payloads):
+# never put the raw ~65/131 KiB malformed or oversized payload in a nodeid.
+# PYTEST_CURRENT_TEST inherits that nodeid and Windows limits it to 32,767 chars.
+@pytest.mark.parametrize("size", [
+    pytest.param(0, id="empty"),
+    pytest.param(worker.MAX_BYTES, id="document-cap"),
+    pytest.param(worker.MAX_BYTES + 1, id="over-document-cap"),
+    pytest.param(3 * 65536 + 17, id="multiple-chunks"),
+    pytest.param(8 * 1024 * 1024, id="source-cap"),
+])
 def test_runtime_hash_streams_full_source_with_legacy_delimiter(source_tree, monkeypatch, size):
     root, _ = source_tree
     path = root / "large.py"
@@ -86,7 +95,9 @@ def test_runtime_hash_streams_full_source_with_legacy_delimiter(source_tree, mon
 def test_runtime_hash_current_sources_match_legacy_digest(record_property):
     root = Path(worker.__file__).parent.parent
     files = sorted(root.rglob("*.py"))
-    assert (root / "remote" / "transport.py").stat().st_size > worker.MAX_BYTES
+    # Current shipped bytes prove compatibility regardless of module sizes;
+    # the independent sparse fixture above proves the >MAX_BYTES stream path.
+    assert files
     expected = legacy_source_digest(root)
     assert worker._runtime_hash() == expected
     record_property("shipped_python_modules", len(files))
@@ -330,7 +341,7 @@ def png(red):
 
 
 SITE = '''
-import os,sys,json,socket,subprocess
+import os,sys,json,socket,subprocess,time
 from pathlib import Path
 audit=Path(os.environ["B03_TEST_AUDIT"])
 def record(value):
@@ -352,8 +363,18 @@ class CheckedPopen(real_popen):
                 str(Path(kwargs["executable"]).resolve()).lower()!=str(Path(argv[0]).resolve()).lower())):
             record({"denied_process":True}); raise RuntimeError("TEST_PROCESS_DENIED")
         approved.append((subprocess.list2cmdline(argv),list(argv)))
-        record({"media_process":Path(argv[0]).stem.lower(),"decode":"-xerror" in argv})
+        self.b03_started=time.monotonic()
+        self.b03_reported=False
         super().__init__(argv,*args,**kwargs)
+        record({"media_process":Path(argv[0]).stem.lower(),"decode":"-xerror" in argv,
+                "media_pid":self.pid,"media_event":"started","parent_pid":os.getpid()})
+    def wait(self,*args,**kwargs):
+        code=super().wait(*args,**kwargs)
+        if not self.b03_reported:
+            self.b03_reported=True
+            record({"media_pid":self.pid,"media_event":"exited","returncode":code,
+                    "elapsed_seconds":round(time.monotonic()-self.b03_started,3)})
+        return code
 subprocess.Popen=CheckedPopen
 def audit_event(name,args):
     if name.startswith("socket.") and name not in {"socket.__new__"}: deny()
@@ -385,7 +406,7 @@ record({"python_pid":os.getpid()})
 
 
 @pytest.fixture
-def case(tmp_path):
+def case(tmp_path, request, record_property):
     asset_dir, private, exports, hooks = (tmp_path / x for x in ("assets", "private", "export", "hooks"))
     for path in (asset_dir, private, exports, hooks):
         path.mkdir()
@@ -418,8 +439,12 @@ def case(tmp_path):
     env.pop("B03_TEST_CUT", None)
     args = {"directive_path": str(directive), "assets": tuple(selections), "rights": (),
         "asset_root": str(asset_dir), "source_sha": worker.SOURCE_SHA, "human_attended": True}
+    worker_input = getattr(request.config, "workerinput", {})
+    record_property("pytest_worker", worker_input.get("workerid", "serial"))
+    record_property("pytest_workers", worker_input.get("workercount", 1))
     return {"root": tmp_path, "private": private, "exports": exports, "body": body,
-            "args": args, "env": env, "audit": audit}
+            "args": args, "env": env, "audit": audit,
+            "record_property": record_property, "cli_calls": 0}
 
 
 def arguments(case, command, extra=()):
@@ -437,16 +462,97 @@ def arguments(case, command, extra=()):
 
 
 def cli(case, command, extra=(), expected=0):
-    response = subprocess.run([*CLI, *arguments(case, command, extra)], env=case["env"],
-        cwd=case["root"], capture_output=True, text=True, encoding="utf-8", timeout=60)
-    assert response.returncode == expected, (response.returncode, response.stdout, response.stderr)
-    assert PRIVATE_TEXT not in response.stdout + response.stderr
-    assert str(case["root"]) not in response.stdout + response.stderr
+    first_event = len(audit(case)) if case["audit"].exists() else 0
+    started = time.monotonic()
+    try:
+        response = subprocess.run([*CLI, *arguments(case, command, extra)], env=case["env"],
+            cwd=case["root"], capture_output=True, text=True, encoding="utf-8", timeout=60)
+    except subprocess.TimeoutExpired as exc:
+        details = cli_diagnostics(case, command, started, first_event, exc.stderr, timed_out=True)
+        # TimeoutExpired includes the full private argv in its default message.
+        pytest.fail(json.dumps(details, sort_keys=True), pytrace=False)
+    details = cli_diagnostics(case, command, started, first_event, response.stderr,
+                              returncode=response.returncode)
+    if response.returncode != expected:
+        pytest.fail(json.dumps(details, sort_keys=True), pytrace=False)
+    if PRIVATE_TEXT in response.stdout + response.stderr or str(case["root"]) in response.stdout + response.stderr:
+        pytest.fail("CLI_PRIVATE_OUTPUT", pytrace=False)
     return response
+
+
+def cli_diagnostics(case, command, started, first_event, stderr, *, returncode=None, timed_out=False):
+    raw = stderr.encode("utf-8") if isinstance(stderr, str) else (stderr or b"")
+    # Retain only the CLI's bounded machine code, never arbitrary decoder text,
+    # tracebacks, argv, private paths or prompt contents in console/JUnit output.
+    try:
+        code = json.loads(raw).get("code")
+    except (ValueError, AttributeError):
+        code = None
+    if not (isinstance(code, str) and 0 < len(code) <= 80
+            and all(c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789" for c in code)):
+        code = None
+    events, audit_incomplete = [], False
+    if case["audit"].exists():
+        # A killed Python may leave its final audit line unfinished. Diagnose
+        # that explicitly without replacing the original timeout with JSONError.
+        for line in case["audit"].read_text(encoding="utf-8").splitlines()[first_event:]:
+            try:
+                events.append(json.loads(line))
+            except ValueError:
+                audit_incomplete = True
+    media = [row for row in events if row.get("media_event") == "started"]
+    exits = {row["media_pid"]: row for row in events if row.get("media_event") == "exited"}
+    details = {"command": command, "elapsed_seconds": round(time.monotonic() - started, 3),
+        "returncode": returncode, "timed_out": timed_out, "stderr_code": code,
+        "stderr_bytes": len(raw), "stderr_sha256": sha256(raw).hexdigest(),
+        "audit_incomplete": audit_incomplete,
+        "media_started": len(media), "media_exited": len(exits),
+        "media_unreaped": sum(row["media_pid"] not in exits for row in media),
+        "media_status": [{"tool": row["media_process"], "decode": row["decode"],
+            "returncode": exits.get(row["media_pid"], {}).get("returncode"),
+            "elapsed_seconds": exits.get(row["media_pid"], {}).get("elapsed_seconds")} for row in media]}
+    case["cli_calls"] += 1
+    case["record_property"]("cli_" + str(case["cli_calls"]), json.dumps(details, sort_keys=True))
+    return details
 
 
 def audit(case):
     return [json.loads(line) for line in case["audit"].read_text().splitlines()]
+
+
+@pytest.mark.parametrize("failure", ["timeout", "unexpected-exit"], ids=["timeout", "unexpected-exit"])
+def test_cli_failures_keep_large_private_stderr_out_of_diagnostics(case, monkeypatch, request, failure):
+    """Diagnostic-only fault injection; native render proofs still run separately."""
+    # Large malformed bytes stay inside the fixture, never in the pytest ID.
+    raw = (PRIVATE_TEXT + str(case["root"])).encode("utf-8") + b"!" * (worker.MAX_BYTES + 1)
+    def fail_command(argv, **kwargs):
+        assert kwargs["timeout"] == 60
+        events = [
+            {"media_event": "started", "media_process": "ffmpeg", "decode": True, "media_pid": 1},
+            {"media_event": "exited", "media_pid": 1, "returncode": 0, "elapsed_seconds": 0.125},
+            {"media_event": "started", "media_process": "ffprobe", "decode": False, "media_pid": 2},
+        ]
+        case["audit"].write_text("".join(json.dumps(row) + "\n" for row in events) + '{"unfinished":',
+                                 encoding="utf-8")
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(argv, 60, stderr=raw)
+        return subprocess.CompletedProcess(argv, 99, stdout="", stderr=raw.decode("utf-8"))
+    monkeypatch.setattr(subprocess, "run", fail_command)
+    with pytest.raises(pytest.fail.Exception) as caught:
+        cli(case, "run")
+    message = str(caught.value)
+    if PRIVATE_TEXT in message or str(case["root"]) in message:
+        pytest.fail("CLI_DIAGNOSTICS_PRIVATE_OUTPUT", pytrace=False)
+    assert len(message) < 2048 and len(request.node.nodeid) < 256
+    details = json.loads(message)
+    assert details["timed_out"] == (failure == "timeout")
+    assert details["returncode"] == (None if failure == "timeout" else 99)
+    assert details["stderr_code"] is None and details["stderr_bytes"] == len(raw)
+    assert details["stderr_sha256"] == sha256(raw).hexdigest()
+    assert details["audit_incomplete"] is True
+    assert (details["media_started"], details["media_exited"], details["media_unreaped"]) == (2, 1, 1)
+    assert details["media_status"][0]["returncode"] == 0
+    assert details["media_status"][0]["elapsed_seconds"] == 0.125
 
 
 def render_count(case):
