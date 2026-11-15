@@ -193,3 +193,60 @@ def test_unavailable_local_source_is_sanitized_hold(tmp_path, monkeypatch, timeo
     assert result["authorization"] == "UNPROVEN" and result["dispatch_performed"] is False
     assert result["acceptance_scope"]["status"] == "PRE_EXECUTOR_UNDETERMINED"
     assert "PRIVATE_INSTRUCTIONS" not in json.dumps(result)
+
+
+def test_witnessed_preflight_preserves_contract_status_and_authorization_boundary(tmp_path, monkeypatch):
+    from test_ef02 import make_acceptance_repo, wakehub_scope_action
+    make_acceptance_repo(tmp_path, monkeypatch)
+    packet = batch([wakehub_scope_action(witnessed=True)])
+    result = check(packet, source_repo=tmp_path)
+    assert result["status"] == "PREFLIGHT_PASS"
+    assert result["acceptance_scope"]["coverage_status"] == "PRE_EXECUTOR_CONTRACTED_NOT_PROVEN"
+    assert result["acceptance_scope"]["actions"][0]["status"] == "PRE_EXECUTOR_CONTRACTED_NOT_PROVEN"
+    assert result["authorization"] == "UNPROVEN" and result["dispatch_performed"] is False
+    with pytest.raises(RemoteRequestError, match="^ISSUER_NOT_AUTHORIZED_FOR_ACTOR$"):
+        validate_batch(packet, schema=SCHEMA, registry=verify_registry(REGISTRY),
+                       issuer_login="untrusted-executor", owner_login="owner")
+
+
+def test_witnessed_packet_cannot_rebind_approved_source_pin_in_same_git_repo(tmp_path, monkeypatch):
+    from test_ef02 import make_acceptance_repo, wakehub_scope_action
+    _, calls = make_acceptance_repo(tmp_path, monkeypatch)
+    packet = batch([wakehub_scope_action(witnessed=True)])
+    assert check(packet, source_repo=tmp_path)["status"] == "PREFLIGHT_PASS"
+    calls.clear()
+    packet["source_sha"] = "b" * 40
+    result = check(packet, source_repo=tmp_path)
+    assert result["error_code"] == "SOURCE_SHA_MISMATCH"
+    assert result["status"] == "PREFLIGHT_REJECTED"
+    assert result["authorization"] == "UNPROVEN" and result["dispatch_performed"] is False
+    assert calls == [["rev-parse", "HEAD"]]
+    assert "PRIVATE_INSTRUCTIONS" not in json.dumps(result)
+
+
+def test_real_issuer_gate_precedes_witness_scope_or_source_reads(tmp_path, monkeypatch, capsys):
+    from test_ef02 import make_acceptance_repo, wakehub_scope_action
+    from ai_commerce.remote import __main__ as cli
+    _, calls = make_acceptance_repo(tmp_path, monkeypatch)
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps(batch([wakehub_scope_action(witnessed=True)])), encoding="utf-8")
+    assert cli.main(["validate", "--request-file", str(request), "--checkout", str(tmp_path),
+                     "--issuer-login", "untrusted-executor", "--owner-login", "owner"]) == 2
+    assert capsys.readouterr().err.strip() == "EF02_REQUEST_REJECTED: ISSUER_NOT_AUTHORIZED_FOR_ACTOR"
+    assert calls == []
+
+
+@pytest.mark.parametrize("witnessed,code", [
+    (False, "AC_IMPACT_WITNESS_REQUIRED_PRE_EXECUTOR"),
+    (True, "AC_IMPACT_WITNESS_MALFORMED_PRE_EXECUTOR"),
+])
+def test_optional_scope_preflight_reports_only_public_reason(tmp_path, monkeypatch, witnessed, code):
+    from test_ef02 import make_acceptance_repo, wakehub_scope_action, WITNESS_MARKER
+    make_acceptance_repo(tmp_path, monkeypatch)
+    item = wakehub_scope_action()
+    if witnessed:
+        item["instruction"] += "\n" + WITNESS_MARKER + '{"PRIVATE_SECRET":invalid}'
+    result = check(batch([item]), source_repo=tmp_path)
+    assert result["status"] == "PREFLIGHT_REJECTED" and result["error_code"] == code
+    assert result["authorization"] == "UNPROVEN" and result["dispatch_performed"] is False
+    assert "PRIVATE" not in json.dumps(result)

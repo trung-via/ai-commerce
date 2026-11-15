@@ -156,6 +156,54 @@ def _declared_acceptance_ids(action: dict) -> list[str] | None:
         return None
 
 
+def _declared_impact_witnesses(action: dict) -> dict[str, list[str]] | None:
+    """Optional owner-impact prediction in the SAME signed instruction.
+
+    Exactly one standalone line: MT01_IMPACT_WITNESSES_JSON: followed by
+    canonical JSON (sorted keys and path lists, no whitespace/duplicate keys).
+    This declares mandatory owner impact, never changed bytes or test evidence.
+    """
+    prefix = "MT01_IMPACT_WITNESSES_JSON:"
+    instruction = action["instruction"]
+    count = instruction.count(prefix)
+    if not count:
+        return None
+    if count != 1:
+        raise RemoteRequestError("AC_IMPACT_WITNESS_DUPLICATE_PRE_EXECUTOR")
+    line = next(line for line in instruction.splitlines() if prefix in line)
+    payload = line[len(prefix):]
+    if not line.startswith(prefix) or len(payload) > 32768:
+        raise RemoteRequestError("AC_IMPACT_WITNESS_MALFORMED_PRE_EXECUTOR")
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate key")
+            result[key] = value
+        return result
+
+    def invalid_constant(value):
+        raise ValueError("non-JSON constant")
+
+    try:
+        witnesses = json.loads(payload, object_pairs_hook=unique_object,
+                               parse_constant=invalid_constant)
+        if (not isinstance(witnesses, dict) or not 1 <= len(witnesses) <= 128
+                or any(not isinstance(paths, list) or not 1 <= len(paths) <= 32
+                       or any(not isinstance(p, str) or not 1 <= len(p) <= 512 for p in paths)
+                       or paths != sorted(set(paths)) for paths in witnesses.values())
+                or sum(map(len, witnesses.values())) > 256
+                or len(payload.encode("utf-8")) > 32768):
+            raise ValueError("invalid shape or limit")
+        encoded = canonical(witnesses).decode("utf-8")
+    except (ValueError, TypeError, RecursionError, UnicodeError) as exc:
+        raise RemoteRequestError("AC_IMPACT_WITNESS_MALFORMED_PRE_EXECUTOR") from exc
+    if payload != encoded:
+        raise RemoteRequestError("AC_IMPACT_WITNESS_NONCANONICAL_PRE_EXECUTOR")
+    return witnesses
+
+
 def approved_acceptance_plan(action: dict) -> dict:
     """Read a bounded declaration from the issuer's fingerprinted v1 instruction.
 
@@ -301,11 +349,14 @@ def _pinned_source_tree(repo: Path, source_sha: str, *, git_executable: str | No
 
 def validate_acceptance_scope(batch: dict, *, repo: Path | None,
                               git_executable: str | None = None) -> dict:
-    """Potential compatibility only, AFTER issuer validation and source pinning.
+    """Owner-impact compatibility/contract AFTER issuer validation and pinning.
 
     Definitive declaration/owner contradictions reject the ENTIRE batch. New
     owners, directory scopes and incomplete graphs HOLD; they never authorize
-    an executor. Post-edit MT-01 must still prove the actual candidate diff.
+    an executor. Allowed paths are a maximum, not promised edits. An optional
+    scope needs explicit signed witnesses unless EVERY admissible nonempty
+    selection (including predecessor contributions) hits the required owners.
+    Post-edit MT-01 must still prove the actual candidate diff and real tests.
     """
     from ai_commerce.engineering.impact_v21 import (
         load_baseline_component_owner_records, select_impact,
@@ -317,8 +368,14 @@ def validate_acceptance_scope(batch: dict, *, repo: Path | None,
         return {"action_id": key, "status": "PRE_EXECUTOR_UNDETERMINED", "reason": reason}
 
     def report(results):
-        compatible = all(r["status"] == "PRE_EXECUTOR_COMPATIBLE" for r in results)
+        contracted = "PRE_EXECUTOR_CONTRACTED_NOT_PROVEN"
+        compatible = all(r["status"] in ("PRE_EXECUTOR_COMPATIBLE", contracted) for r in results)
+        # Existing CLI/host consumers use status as the dispatch compatibility
+        # gate. Keep that wire value; expose the provisional contract status on
+        # each action and the batch coverage_status, never as coverage proof.
         return {"status": "PRE_EXECUTOR_COMPATIBLE" if compatible else "PRE_EXECUTOR_UNDETERMINED",
+                "coverage_status": (contracted if compatible and any(r["status"] == contracted for r in results)
+                                    else "PRE_EXECUTOR_COMPATIBLE" if compatible else "PRE_EXECUTOR_UNDETERMINED"),
                 "source_sha": batch["source_sha"], "actions": results,
                 "next_gate": "POST_EDIT_MT01_REQUIRED" if compatible else "HOLD_NO_EXECUTOR"}
 
@@ -345,28 +402,108 @@ def validate_acceptance_scope(batch: dict, *, repo: Path | None,
         groups = (*groups, *(record["group"] for record in records))
         known = {ac for group in groups for ac in group.acs}
         reviewed = {p for g in groups for p in (*g.paths, *g.tests, *g.consumers, *g.contracts)}
-        results = []
-        for key, action in actions.items():
+        acs_by_group = {g.name: set(g.acs) for g in groups}
+        impacts = {}
+
+        def impact_for(paths):
+            key = tuple(sorted(paths))
+            if key not in impacts:
+                impacts[key] = select_impact(root=root, changed_paths=key, groups=groups,
+                                            base_sha=source_sha, candidate_sha=source_sha)
+            return impacts[key]
+
+        def impact_acs(impact):
+            return {ac for name in impact.selected_groups for ac in acs_by_group[name]}
+
+        def proven_closure(paths, impact):
+            return (set(paths) <= reviewed and impact.runnable and not impact.missing_mapping
+                    and not (set(impact.affected_paths) - reviewed))
+
+        results, minimum_acs = {}, {}
+
+        def evaluate(key):
+            if key in results:
+                return
+            action = actions[key]
+            for parent in action["depends_on"]:
+                evaluate(parent)
+            minimum_acs[key] = set().union(*(minimum_acs[p] for p in action["depends_on"]))
+            witnesses = _declared_impact_witnesses(action)
+            ids = _declared_acceptance_ids(action)
+            if witnesses is not None:
+                if ids is None or set(ids) - known:
+                    raise RemoteRequestError("AC_DECLARATION_UNPROVEN_PRE_EXECUTOR")
+                if set(witnesses) - known:
+                    raise RemoteRequestError("AC_IMPACT_WITNESS_UNKNOWN_AC_PRE_EXECUTOR")
+                if set(witnesses) != set(ids):
+                    raise RemoteRequestError("AC_IMPACT_WITNESS_AC_MISMATCH_PRE_EXECUTOR")
+                for paths in witnesses.values():
+                    for path in paths:
+                        try:
+                            safe_path(path)
+                            if any(ord(c) < 32 or ord(c) == 127 for c in path):
+                                raise RemoteRequestError("INVALID_PATH")
+                        except RemoteRequestError as exc:
+                            raise RemoteRequestError("AC_IMPACT_WITNESS_PATH_INVALID_PRE_EXECUTOR") from exc
+                        # Predecessor maxima are NOT this issuer's mandatory
+                        # edits for this action. Never widen the signed scope.
+                        if path not in action["allowed_paths"]:
+                            raise RemoteRequestError("AC_IMPACT_WITNESS_OUTSIDE_SCOPE_PRE_EXECUTOR")
+                        if (not (root / path).is_file() or (root / path).is_symlink()
+                                or path.startswith("work_items/mt01-components/")):
+                            raise RemoteRequestError("AC_IMPACT_WITNESS_PATH_UNESTABLISHED_PRE_EXECUTOR")
             paths = potential_paths(key)
             if (not paths or any(not (root / p).is_file() for p in paths)
                     or any(p.startswith("work_items/mt01-components/") for p in paths)):
-                results.append(deferred(key, "ALLOWED_SCOPE_NOT_EXACT_ESTABLISHED_FILES"))
-                continue
-            impact = select_impact(root=root, changed_paths=sorted(paths), groups=groups,
-                                   base_sha=source_sha, candidate_sha=source_sha)
-            if (not paths <= reviewed or not impact.runnable or impact.missing_mapping
-                    or set(impact.affected_paths) - reviewed):
-                results.append(deferred(key, "IMPACT_CLOSURE_UNPROVEN"))
-                continue
-            ids = _declared_acceptance_ids(action)
+                results[key] = deferred(key, "ALLOWED_SCOPE_NOT_EXACT_ESTABLISHED_FILES")
+                return
+            impact = impact_for(paths)
+            if not proven_closure(paths, impact):
+                results[key] = deferred(key, "IMPACT_CLOSURE_UNPROVEN")
+                return
             if ids is None or set(ids) - known:
                 raise RemoteRequestError("AC_DECLARATION_UNPROVEN_PRE_EXECUTOR")
-            selected_acs = {ac for g in groups if g.name in impact.selected_groups for ac in g.acs}
-            if set(ids) - selected_acs:
+            if set(ids) - impact_acs(impact):
                 raise RemoteRequestError("AC_SCOPE_MISMATCH_PRE_EXECUTOR")
-            results.append({"action_id": key, "status": "PRE_EXECUTOR_COMPATIBLE",
-                            "selected_groups": list(impact.selected_groups)})
-        return report(results)
+            if witnesses is not None:
+                for ac, witness_paths in witnesses.items():
+                    for path in witness_paths:
+                        single = impact_for([path])
+                        if ac not in impact_acs(single):
+                            raise RemoteRequestError("AC_IMPACT_WITNESS_OWNER_MISMATCH_PRE_EXECUTOR")
+                        if not proven_closure([path], single):
+                            raise RemoteRequestError("AC_IMPACT_WITNESS_CLOSURE_UNPROVEN_PRE_EXECUTOR")
+                        minimum_acs[key].update(impact_acs(single))
+            else:
+                # Impact selection is monotone on this immutable graph: the
+                # intersection of singleton selections proves all nonempty
+                # subsets. Successful predecessors each contribute a nonempty
+                # diff, so their independently established minima survive fan-in.
+                inherent = None
+                for path in action["allowed_paths"]:
+                    single = impact_for([path])
+                    if not proven_closure([path], single):
+                        results[key] = deferred(key, "IMPACT_CLOSURE_UNPROVEN")
+                        return
+                    selected = impact_acs(single)
+                    inherent = selected if inherent is None else inherent & selected
+                    if set(ids) - (minimum_acs[key] | inherent):
+                        raise RemoteRequestError("AC_IMPACT_WITNESS_REQUIRED_PRE_EXECUTOR")
+                minimum_acs[key].update(inherent or ())
+            contracted = witnesses is not None or any(
+                results[p]["status"] == "PRE_EXECUTOR_CONTRACTED_NOT_PROVEN" for p in action["depends_on"])
+            results[key] = {"action_id": key,
+                            "status": "PRE_EXECUTOR_CONTRACTED_NOT_PROVEN" if contracted else "PRE_EXECUTOR_COMPATIBLE",
+                            "selected_groups": list(impact.selected_groups)}
+            if witnesses is not None:
+                results[key]["impact_contract"] = {
+                    "source_sha": source_sha, "request_fingerprint": fingerprint(batch),
+                    "witnesses": witnesses, "coverage_proven": False,
+                }
+
+        for key in actions:
+            evaluate(key)
+        return report([results[key] for key in actions])
     except RemoteRequestError:
         raise
     except (OSError, ValueError, TypeError, KeyError, UnicodeError, subprocess.SubprocessError):
