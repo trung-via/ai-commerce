@@ -2297,6 +2297,15 @@ def test_ef02_897_fixed_source_restore_ingress_is_owner_and_source_pinned():
     assert "cancel-in-progress: false" in job
     assert "persist-credentials: false" in job
     assert "EF02_897_SOURCE_RECOVERY_HOLD" in job
+    # Native failure may expose only bounded stage codes, never host details.
+    for diagnostic_stage in (
+        "RUNNER_AUTH", "EVENT_AUTH", "CHECKOUT_PIN", "WORKTREE_PIN",
+        "ORIGIN_HEAD", "ORIGIN_STATUS", "EVIDENCE_FILES", "EVIDENCE_BIND",
+        "SOURCE_HASHES", "FINAL_RECHECK", "ARCHIVE",
+    ):
+        assert 'STAGE = "' + diagnostic_stage + '"' in job
+    assert 'print("EF02_897_SOURCE_RECOVERY_HOLD:" + STAGE)' in job
+    assert 'print(type(' not in job and 'traceback.print_exc' not in job
     assert "native_sandbox_proven:false" in job
     source = job.split("          $script = @'\n", 1)[1].split("\n          '@\n          $script | python -B -", 1)[0]
     py = textwrap.dedent(source)
