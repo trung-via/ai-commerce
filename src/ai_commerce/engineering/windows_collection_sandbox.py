@@ -799,9 +799,20 @@ def _decode_fixture_report(raw, pid):
     if len(raw) != 64:
         raise Unproven("NATIVE_FIXTURE_OUTPUT_INVALID")
     values = struct.unpack("<16I", raw)
-    if (values[0] != 0x4d543031 or values[1:4] != (1, 0, 0)
-            or values[11] != pid or values[12:14] != (1, 1)):
-        raise Unproven("NATIVE_TOKEN_CAPABILITIES_UNPROVEN")
+    # Keep all original fail-closed requirements, but identify which *fixed*
+    # native predicate failed without disclosing paths, SIDs or raw report data.
+    checks = (
+        (values[0] == 0x4d543031, "NATIVE_FIXTURE_MAGIC_UNPROVEN"),
+        (values[1] == 1, "NATIVE_APPCONTAINER_TOKEN_UNPROVEN"),
+        (values[2] == 0, "NATIVE_TOKEN_CAPABILITIES_UNPROVEN"),
+        (values[3] == 0, "NATIVE_TOKEN_PRIVILEGES_UNPROVEN"),
+        (values[11] == pid, "NATIVE_CHILD_PID_UNPROVEN"),
+        (values[12] == 1, "NATIVE_CHILD_ENVIRONMENT_UNPROVEN"),
+        (values[13] == 1, "NATIVE_CHILD_SID_UNPROVEN"),
+    )
+    for allowed, reason in checks:
+        if not allowed:
+            raise Unproven(reason)
     if values[4:10] != (5, 5, 5, 0, 2, 10013):
         raise Unproven("NATIVE_ACCESS_DENIAL_UNPROVEN")
     return values
