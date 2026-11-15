@@ -102,6 +102,11 @@ REVIEWED_CONTROL_TESTS = {
     ".github/workflows/issue-ingress.yml": (
         "tests/test_ef02.py", "tests/test_hostops_personal.py",
         "tests/test_mt01_v21.py"),
+    # Owner-only, one-time MCP Gateway bootstrap *read-only* control.
+    # This first protected-main mapping can be reviewed before workflow exists.
+    ".github/workflows/mcp-gateway-bootstrap-preflight-once.yml": (
+        "tests/test_hostops_personal.py", "tests/test_mt01_v21.py",
+        "tests/test_pr_merge_gate.py"),
     ".github/workflows/actions-skipped-cleanup.yml": (
         "tests/test_mt01_v21.py", "tests/test_pr_merge_gate.py"),
     ".github/workflows/hostops-readonly.yml": (
