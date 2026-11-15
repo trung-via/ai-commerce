@@ -2295,7 +2295,8 @@ def test_ef02_897_fixed_source_restore_ingress_is_owner_and_source_pinned():
     assert "runs-on: [self-hosted, Windows, ai-commerce-ef02]" in job
     assert "max-parallel: 2" in job and "fail-fast: false" in job
     assert "cancel-in-progress: false" in job
-    assert "persist-credentials: false" in job
+    # No checkout credential persistence because no checkout step exists.
+    assert "persist-credentials:" not in job
     assert "EF02_897_SOURCE_RECOVERY_HOLD" in job
     # Native failure may expose only bounded stage codes, never host details.
     for diagnostic_stage in (
