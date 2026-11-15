@@ -301,8 +301,14 @@ def test_cli_records_event_without_changing_ef02_result(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "verify_registry", lambda p: {"project-tests": ["python", "-m", "pytest", "tests", "-q"]})
     monkeypatch.setattr(cli, "load_approved_candidates", lambda p: {})
     monkeypatch.setattr(cli, "check_source", lambda *a, **kw: None)
-    # Completion/signal fixture only. The pre-WP CLI does not expose
-    # post-WP require_preexecutor_acceptance; issuer and intake tests are separate.
+    # This test isolates post-execution Wake/feedback behavior. Its synthetic
+    # checkout cannot establish a pinned AC owner graph; grant the fixture's
+    # source admission explicitly here, not in production validator code.
+    scope_calls = []
+    def admitted_fixture_scope(*_args, **_kwargs):
+        scope_calls.append(True)
+        return {"status": "PRE_EXECUTOR_COMPATIBLE", "next_gate": "POST_EDIT_MT01_REQUIRED"}
+    monkeypatch.setattr(cli, "validate_acceptance_scope", admitted_fixture_scope)
     called = []
     def fake_schedule(batch, worker, *, max_workers):
         called.append(max_workers)
@@ -341,3 +347,4 @@ def test_cli_records_event_without_changing_ef02_result(monkeypatch, tmp_path):
     assert r2["status"] == "COMPLETE" and r2["succeeded"] == 1
     assert not (root / "completion_event.json").exists()
     assert called == [2, 2]  # two explicitly distinct simulated CLI runs; no wake retry
+    assert scope_calls == [True, True]

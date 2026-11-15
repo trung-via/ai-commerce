@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 from .validation import (RemoteRequestError, validate_batch, verify_registry,
-                         check_source)
+                         check_source, validate_acceptance_scope)
 from .transport import GitHubTransport
 from .worker import LocalBatchWorker, _write_json
 from .reuse import load_approved_candidates
@@ -42,13 +42,28 @@ def main(argv: list[str] | None = None) -> int:
                                                    args.brain_issuers.split(",") if v.strip()))
         check_source(checkout, batch["source_sha"],
                      **({"git_executable": args.git_bin} if args.git_bin is not None else {}))
-    except Exception as exc:
-        print("EF02_REQUEST_REJECTED: " + type(exc).__name__ + ": " + str(exc),
-              file=sys.stderr)
+        acceptance_scope = validate_acceptance_scope(
+            batch, repo=checkout,
+            **({"git_executable": args.git_bin} if args.git_bin is not None else {}))
+    except RemoteRequestError as exc:
+        # Fixed source-owned codes only; never echo instruction/schema/Git bytes.
+        code = str(exc).split(":", 1)[0]
+        if not code or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for c in code):
+            code = "REQUEST_VALIDATION_FAILED"
+        label = "EF02_REQUEST_HELD" if code == "SOURCE_COMMIT_UNAVAILABLE" else "EF02_REQUEST_REJECTED"
+        print(label + ": " + code, file=sys.stderr)
+        return 2
+    except Exception:
+        print("EF02_REQUEST_REJECTED: REQUEST_VALIDATION_FAILED", file=sys.stderr)
+        return 2
+    if acceptance_scope["status"] != "PRE_EXECUTOR_COMPATIBLE":
+        print(json.dumps({"status": "EF02_REQUEST_HELD",
+                          "error_code": "AC_SCOPE_UNDETERMINED_PRE_EXECUTOR",
+                          "acceptance_scope": acceptance_scope}))
         return 2
     if args.command == "validate":
         print(json.dumps({"status": "VALIDATED", "batch_id": batch["batch_id"],
-                          "count": len(batch["actions"])}))
+                          "count": len(batch["actions"]), "acceptance_scope": acceptance_scope}))
         return 0
     try:
         token = os.environ.get("GITHUB_TOKEN", "")
