@@ -61,7 +61,8 @@ _ENVIRONMENT = {"SystemRoot": r"C:\Windows"}  # Compiler's minimal inert environ
 # Bind the *kind* of dynamic input in this source-owned, path-free digest; never
 # inherit the entire runner environment or expose LOCALAPPDATA in receipts.
 _APP_CONTAINER_ENV_TEMPLATE = {"LOCALAPPDATA": "WIN32_VERIFIED_LOCALAPPDATA",
-                               "SystemRoot": r"C:\Windows"}
+                               "SystemRoot": r"C:\Windows",
+                               "TEMP": "WIN32_PINNED_SCRATCH", "TMP": "WIN32_PINNED_SCRATCH"}
 ENVIRONMENT_SHA256 = _sha(_json(_APP_CONTAINER_ENV_TEMPLATE))
 OPT_IN_VARIABLE = "AI_COMMERCE_WINDOWS_NATIVE_PROOF"
 _AUDIENCE = "urn:ai-commerce:mt01:inert-windows:"
@@ -366,12 +367,14 @@ int wmain(int argc, wchar_t **argv) {
     if (!ConvertSidToStringSidW(((TOKEN_APPCONTAINER_INFORMATION*)buffer)->TokenAppContainer, &sid_string)) return 97;
     r[13] = wcscmp(sid_string, argv[8]) == 0; LocalFree(sid_string);
     CloseHandle(token);
-    // Fail closed on every extra environment entry. Also classify unexpected
-    // entries by bounded type/count, never retaining names, values or paths.
-    // Real native CI, not this source, decides whether any OS entry is safe.
+    // The hosted OS supplied TEMP/TMP; pin both explicitly to the bounded
+    // per-probe scratch directory, compare exact values against the source-
+    // supplied report path, and reject duplicates or any other environment.
     LPWCH env = GetEnvironmentStringsW();
     r[12] = 0;
     if (env) {
+        const wchar_t *scratch_end = wcsrchr(argv[7], L'\\');
+        size_t scratch_length = scratch_end ? (size_t)(scratch_end - argv[7]) : 0;
         DWORD count = 0, matches = 0, drives = 0, profile = 0, other = 0;
         for (LPWCH item = env; *item; item += wcslen(item) + 1) {
             if (++count > 32) { other = 15; break; }
@@ -379,28 +382,30 @@ int wmain(int argc, wchar_t **argv) {
                 matches |= 1;
             } else if (wcscmp(item, L"SystemRoot=C:\\Windows") == 0 && !(matches & 2)) {
                 matches |= 2;
+            } else if (wcsncmp(item, L"TEMP=", 5) == 0) {
+                const wchar_t *value = item + 5;
+                if ((profile & 2) || !scratch_length || wcslen(value) != scratch_length
+                    || wcsncmp(value, argv[7], scratch_length) != 0) other++;
+                else profile |= 2;
+            } else if (wcsncmp(item, L"TMP=", 4) == 0) {
+                const wchar_t *value = item + 4;
+                if ((profile & 4) || !scratch_length || wcslen(value) != scratch_length
+                    || wcsncmp(value, argv[7], scratch_length) != 0) other++;
+                else profile |= 4;
             } else if (item[0] == L'=' && ((item[1] >= L'A' && item[1] <= L'Z')
                         || (item[1] >= L'a' && item[1] <= L'z'))
                         && item[2] == L':' && item[3] == L'=') {
                 drives++;
-            } else if (wcsncmp(item, L"APPDATA=", 8) == 0) {
-                if (profile & 1) other++; else profile |= 1;
-            } else if (wcsncmp(item, L"TEMP=", 5) == 0) {
-                if (profile & 2) other++; else profile |= 2;
-            } else if (wcsncmp(item, L"TMP=", 4) == 0) {
-                if (profile & 4) other++; else profile |= 4;
-            } else if (wcsncmp(item, L"USERPROFILE=", 12) == 0) {
-                if (profile & 8) other++; else profile |= 8;
             } else {
                 other++;
             }
         }
-        r[14] = matches | (count == 2 ? 4 : 0);
+        r[14] = matches | (count == 4 ? 4 : 0);
         r[15] = (count > 15 ? 15 : count)
               | ((drives > 15 ? 15 : drives) << 4)
               | ((profile & 15) << 8)
               | ((other > 15 ? 15 : other) << 12);
-        r[12] = count == 2 && matches == 3 && drives == 0 && profile == 0 && other == 0;
+        r[12] = count == 4 && matches == 3 && profile == 6 && drives == 0 && other == 0;
     }
     if (env) FreeEnvironmentStringsW(env);
     r[4] = file_error(argv[2], GENERIC_READ);
@@ -952,8 +957,6 @@ def run_inert_probe(*, enabled=False, repository=None, candidate_sha=None, sourc
             native.ole.CoTaskMemFree(C.cast(folder, C.c_void_p))
         host_localappdata = _verified_host_localappdata(
             profile_folder, os.environ.get("LOCALAPPDATA"))
-        runtime_environment = dict(_ENVIRONMENT, LOCALAPPDATA=host_localappdata)
-        result["runtime_environment_sha256"] = _sha(_json(runtime_environment))
         native.acl(root, owner, sid_string)
         exe = root / "fixture.exe"
         native.acl(exe, owner, sid_string)
@@ -963,6 +966,10 @@ def run_inert_probe(*, enabled=False, repository=None, candidate_sha=None, sourc
         native.acl(snapshot, owner, sid_string, inherit="OICI")
         native.acl(private, owner)
         native.acl(scratch, owner, sid_string, rights="FA", inherit="OICI", low=True)
+        # TEMP/TMP are explicit source-owned paths, never inherited from the runner.
+        runtime_environment = dict(_ENVIRONMENT, LOCALAPPDATA=host_localappdata,
+                                   TEMP=str(scratch), TMP=str(scratch))
+        result["runtime_environment_sha256"] = _sha(_json(runtime_environment))
         source = snapshot / "fixture.c"; sentinel = private / "sentinel.txt"
         source.write_bytes(_FIXTURE_C.encode("ascii")); sentinel.write_bytes(b"INERT_SENTINEL")
         native.acl(source, owner, sid_string, rights="GR")
