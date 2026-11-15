@@ -1637,6 +1637,23 @@ def test_windows_native_synthetic_job_membership_mask_is_bounded_and_fail_closed
         assert sandbox._job_membership_mask(inside, members, child, grandchild) != proven
 
 
+def test_windows_native_synthetic_extra_job_member_categories_are_bounded():
+    """Extra Job members remain a hard failure; diagnostics disclose counts only."""
+    from ai_commerce.engineering import windows_collection_sandbox as sandbox
+
+    mask = sandbox._job_membership_mask(True, [101, 202, 303, 404], 101, 202)
+    assert mask == 0x287  # both named members present, but two extras
+    categories = dict(fixture=0, conhost=2, broker=0, other=0,
+                      same_container=0, query_failed=0)
+    packed = sandbox._pack_job_member_categories(mask, categories)
+    assert packed & 0x3ff == mask
+    assert (packed >> 14) & 15 == 2
+    assert (packed >> 10) & 15 == 0
+    categories["other"] = 200
+    assert (sandbox._pack_job_member_categories(mask, categories) >> 22) & 15 == 15
+    assert packed != 0x25f
+
+
 @pytest.mark.parametrize("loopback_error", [10013, 10060])
 def test_windows_native_synthetic_documented_loopback_drop_requires_strict_file_denials(loopback_error):
     """Only two observed Windows loopback failures are eligible for host recheck."""
