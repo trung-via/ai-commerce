@@ -830,6 +830,18 @@ def _artifact_size(root):
     return total
 
 
+def _job_membership_mask(inside, members, child_pid, grandchild_pid):
+    """Bounded booleans/count only; never emit the process identifiers."""
+    present = set(members)
+    return (int(bool(inside))
+            | (int(child_pid in present) << 1)
+            | (int(grandchild_pid in present) << 2)
+            | (int(len(members) == 2) << 3)
+            | (int(present == {child_pid, grandchild_pid}) << 4)
+            | (min(len(members), 15) << 5)
+            | (int(child_pid != grandchild_pid) << 9))
+
+
 def _decode_fixture_report(raw, pid):
     """Native codes are necessary, never sufficient without launch/provenance."""
     if len(raw) != 64:
@@ -1077,8 +1089,11 @@ def run_inert_probe(*, enabled=False, repository=None, candidate_sha=None, sourc
         native.check(grandchild, "NATIVE_DESCENDANT_HANDLE_FAILED")
         inside = W.BOOL()
         native.check(native.k.IsProcessInJob(grandchild, job, C.byref(inside)), "NATIVE_DESCENDANT_JOB_QUERY_FAILED")
-        if not inside.value or set(native.members(job)) != {pid, values[10]}:
-            raise Unproven("NATIVE_DESCENDANT_JOB_UNPROVEN")
+        job_mask = _job_membership_mask(inside.value, native.members(job), pid, values[10])
+        # 0x25f means inside=True, both distinct PIDs present, exactly two
+        # enumerated and no unexpected member. No actual PID leaves the host.
+        if job_mask != 0x25f:
+            raise Unproven("NATIVE_DESCENDANT_JOB_UNPROVEN", job_mask)
         native.container_token(grandchild, sid_string)
         if native.k.WaitForSingleObject(grandchild, 0) != 0x102:
             raise Unproven("NATIVE_DESCENDANT_NOT_LIVE")
