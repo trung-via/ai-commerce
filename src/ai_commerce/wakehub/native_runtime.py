@@ -21,6 +21,7 @@ import ntpath
 from pathlib import Path
 
 from ai_commerce.remote import chrome_acquisition as acquisition
+from ai_commerce.wakehub import g3_enrollment as enrollment
 from ai_commerce.wakehub import private_operator as op
 from ai_commerce.wakehub.native_authority import WindowsGrantVerifier, windows_only
 from ai_commerce.wakehub.native_journal import SQLitePrivateJournal, deny
@@ -86,6 +87,36 @@ class Native9444Preflight:
             "signer_enrollment": "NOT_PROVEN_BY_SOURCE_OR_OFFLINE_TESTS",
             "desktop_executor": "NOT_ENROLLED_BY_SOURCE",
             "lease": "NOT_RESERVED_BY_PREFLIGHT", "native_effect": "NOT_ATTEMPTED"},
+            sort_keys=True, separators=(",", ":"))
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class Native9444Bootstrap:
+    """Source readiness only; never accepted by an executor or service request."""
+    preflight: Native9444Preflight
+    plan: enrollment.DesktopBootstrapPlan | None = None
+
+    @property
+    def source_ready(self):
+        return (self.preflight.code is Native9444Code.OWNER_REQUIRED
+                and type(self.preflight.contract) is Native9444Contract
+                and type(self.plan) is enrollment.DesktopBootstrapPlan and self.plan.source_ready)
+
+    def to_json(self):
+        if (type(self.preflight) is not Native9444Preflight
+                or (self.plan is not None and type(self.plan) is not enrollment.DesktopBootstrapPlan)):
+            deny()
+        preflight = json.loads(self.preflight.to_json())
+        unknown = (preflight["receipt"]["decision"] == "UNKNOWN_EFFECT"
+                   or (self.plan is not None
+                       and self.plan.state is enrollment.DesktopBootstrapState.RECONCILE_ONLY))
+        return json.dumps(dict(schema_version="WakeHubN3B2SourceReadinessPublic.v1",
+            code="SOURCE_READY_FOR_ENROLLMENT" if self.source_ready else "HOLD",
+            decision="UNKNOWN_EFFECT" if unknown else "HOLD",
+            next_operation="RECONCILE_ONLY" if unknown else "NONE",
+            preflight=preflight, bootstrap=None if self.plan is None else json.loads(self.plan.to_json()),
+            missing_owners=enrollment.DESKTOP_MISSING_OWNERS,
+            native_effect="NOT_ATTEMPTED", start="DENY", reuse="DENY"),
             sort_keys=True, separators=(",", ":"))
 
 
@@ -240,7 +271,8 @@ class WindowsPrivateRuntime:
             evidence, public, now = operator._read(grant, now)
             reason = operator._gate(grant, evidence, public)
             if reason is not None:
-                return hold(Native9444Code.EVIDENCE_GAP, reason)
+                return hold(Native9444Code.RECONCILE_ONLY if reason is op.Reason.RECONCILE_ONLY
+                            else Native9444Code.EVIDENCE_GAP, reason)
             advisory = acquisition._assess_logon_9444_private(checkout)
             if type(advisory) is not acquisition._Logon9444Assessment:
                 return hold(Native9444Code.EVIDENCE_GAP)
@@ -286,12 +318,66 @@ class WindowsPrivateRuntime:
         except Exception:
             return hold(Native9444Code.EVIDENCE_GAP)
 
+    def source_bootstrap_9444(self, checkout: Path, operation: op.Operation,
+                              proof: op.PrivateGrantProof | None = None, *,
+                              pins: enrollment.DesktopBootstrapPins,
+                              readback: tuple[enrollment.Readback, ...],
+                              previous_plan: enrollment.DesktopBootstrapPlan | None = None
+                              ) -> Native9444Bootstrap:
+        """Join existing signed G2/N3-B1 checks to exact offline G3 requirements.
+
+        Supplied readbacks are NOT native custody evidence. In particular this
+        does not authenticate a new peer, G3 generation, private start handoff,
+        lease or receipt. All such owners remain missing even on a source-ready
+        result. No reservation, provisioning, spawn, attach or retry is provided.
+        A previous plan selects postflight: ABSENT can never mean 'start again'.
+        """
+        def held(code, reason=op.Reason.EVIDENCE_GAP):
+            selected = operation if type(operation) is op.Operation else op.Operation.STATUS
+            return Native9444Bootstrap(Native9444Preflight(selected, code, reason))
+
+        if (type(pins) is not enrollment.DesktopBootstrapPins
+                or (previous_plan is not None and type(previous_plan) is not enrollment.DesktopBootstrapPlan)):
+            return held(Native9444Code.INVALID_REQUEST, op.Reason.INVALID_REQUEST)
+        preflight = self.preflight_9444(checkout, operation, proof)
+        if preflight.contract is None:
+            return Native9444Bootstrap(preflight)
+        grant, env = preflight.contract.grant, preflight.contract.environment
+        try:
+            same_path = lambda a, b: ntpath.normcase(str(a)) == ntpath.normcase(str(b))
+            if (pins.enrollment.source != grant.source or pins.target != grant.target
+                    or pins.enrollment.journal_id != self._authority.enrolled["journal_id"]
+                    or not same_path(pins.config_path, env.config_path)
+                    or pins.profile_directory != env.profile_directory
+                    or pins.allow_launch is not env.allow_launch):
+                return held(Native9444Code.TARGET_MISMATCH, op.Reason.OWNERSHIP_REQUIRED)
+            plan = (enrollment.desktop_bootstrap_plan(pins, readback) if previous_plan is None
+                    else enrollment.desktop_bootstrap_postflight(previous_plan, pins, readback))
+            # Recheck the actual durable G2 lane after computing the offline
+            # plan. Matching supplied EMPTY bytes cannot override a reservation,
+            # lost ACK, consumed key or uncertainty in the protected journal.
+            operator = self._operator
+            now = operator._now()
+            if operator._grant(proof, operation, now) != grant:
+                return held(Native9444Code.AUTHORITY_REQUIRED, op.Reason.AUTHORITY_REQUIRED)
+            record = operator._record(grant, operator._now(now))
+            if self._unresolved or record.state in (op.JournalState.PENDING, op.JournalState.UNKNOWN):
+                return held(Native9444Code.RECONCILE_ONLY, op.Reason.RECONCILE_ONLY)
+            if record.lease is not None:
+                return held(Native9444Code.DUPLICATE, op.Reason.DUPLICATE)
+            if pins.peer.created_at > now:
+                return held(Native9444Code.TARGET_MISMATCH, op.Reason.OWNERSHIP_REQUIRED)
+            return Native9444Bootstrap(preflight, plan)
+        except Exception:
+            # A failed final protected readback is never fresh first-boot proof.
+            return held(Native9444Code.RECONCILE_ONLY, op.Reason.RECONCILE_ONLY)
+
     def _run_authenticated(self, operation, proof=None):
         if type(operation) is not op.Operation:
             return op.PublicReceipt(op.Operation.STATUS, op.Decision.HOLD, op.Reason.INVALID_REQUEST)
+        if self._unresolved:
+            return op.PublicReceipt(operation, op.Decision.UNKNOWN_EFFECT, op.Reason.RECONCILE_ONLY)
         if self._operator is None:
-            if self._unresolved:
-                return op.PublicReceipt(operation, op.Decision.UNKNOWN_EFFECT, op.Reason.RECONCILE_ONLY)
             return op.PublicReceipt(operation, op.Decision.HOLD, op.Reason.AUTHORITY_REQUIRED)
         if operation in (op.Operation.REUSE, op.Operation.START_IF_INDEPENDENTLY_VERIFIED_ABSENT):
             return op.PublicReceipt(operation, op.Decision.HOLD, op.Reason.AUTHORITY_REQUIRED)
