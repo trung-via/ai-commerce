@@ -1,12 +1,13 @@
 """Explicit, operator-owned Chrome CDP acquisition for AI Commerce EF02-D5.
 
-Standalone preflight/launch. Never reads chats, copies profiles, sends Doorbells,
+Standalone preflight/enrollment/launch. Never reads chats, copies profiles, sends Doorbells,
 activates a worker, or imports the AIOS-Renew runtime.
 """
 from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -392,6 +393,8 @@ def _interactive_session() -> int:
     import ctypes
     from ctypes import wintypes
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetCurrentProcess.argtypes = []
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
     kernel.GetCurrentProcessId.restype = wintypes.DWORD
     kernel.ProcessIdToSessionId.argtypes = (wintypes.DWORD, ctypes.POINTER(wintypes.DWORD))
     kernel.ProcessIdToSessionId.restype = wintypes.BOOL
@@ -510,6 +513,8 @@ _ENROLLMENT_CODES = frozenset({
     "CHROME_EXECUTABLE_UNTRUSTED", "WINDOWS_PROBE_UNAVAILABLE", "POWERSHELL_UNAVAILABLE",
     "ENROLLMENT_PROFILE_LOCK_UNPROVEN", "ENROLLMENT_OBSERVATION_CHANGED",
     "NATIVE_ATOMIC_ENROLLMENT_REQUIRED", "ENROLLMENT_ASSESSMENT_UNKNOWN",
+    "NATIVE_HANDLE_RELATIVE_UNAVAILABLE", "ENROLLMENT_NATIVE_CUSTODY_UNPROVEN",
+    "ENROLLMENT_RESERVATION_EXISTS",
 })
 
 
@@ -611,6 +616,8 @@ def _existing_9444_candidate(inventory: dict, *, local: Path, checkout: Path,
             or proc["SessionId"] != session or not isinstance(created, str)
             or not 15 <= len(created) <= 80):
         raise _EnrollmentHold("ENROLLMENT_IDENTITY_UNPROVEN")
+    if _creation_ticks(created) <= 0:
+        raise _EnrollmentHold("ENROLLMENT_IDENTITY_UNPROVEN")
     argv = _commandline_argv(proc.get("CommandLine"))
     for name in ("--user-data-dir", "--profile-directory", "--remote-debugging-address",
                  "--remote-debugging-port"):
@@ -643,6 +650,8 @@ def _existing_9444_candidate(inventory: dict, *, local: Path, checkout: Path,
              "cdp_endpoint": "http://127.0.0.1:9444", "exclusive_user_data": True,
              "allow_launch": False}
     env = _environment_from_value(value, config, checkout.resolve(strict=True), local_app_data=local)
+    if sorted(argv[1:]) != sorted(env.command()[1:]):
+        raise _EnrollmentHold("ENROLLMENT_CANDIDATE_UNPROVEN")
     # Reuse ENSURE's exact process/profile/session/SID rules, with no absent launch.
     state, owned_pid = evaluate(env, inventory, session_id=session, expected_sid=sid,
                                 parse=_commandline_argv)
@@ -653,34 +662,446 @@ def _existing_9444_candidate(inventory: dict, *, local: Path, checkout: Path,
     return env, identity
 
 
-def _check_enrollment_custody(env: ChromeEnvironment, local: Path, sid: str) -> None:
-    from .local_completion_handoff import _private_identity
+def _check_enrollment_custody(env: ChromeEnvironment, local: Path, sid: str, *,
+                              marker_proof=None) -> None:
+    from .local_completion_handoff import HandoffBlocked, _private_identity
     root = (local / "AI-Commerce").resolve(strict=True)
     # No config exists. Check the existing private root in its place, without
     # pretending this proves custody of a future file or authorizes its creation.
     _require_operator_control(replace(env, config_path=root))
-    paths = {root, *env.user_data_dir.parents}
+    paths = {root, env.user_data_dir, env.user_data_dir / env.profile_directory,
+             *env.user_data_dir.parents}
     paths = {p for p in paths if p == root or _inside(p, root)}
     if env.config_path.parent.exists():
         paths.add(env.config_path.parent)
-    if any(not _no_links(p) or _private_identity(p) != sid for p in paths):
+    try:
+        unsafe = any(not _no_links(p) or _private_identity(p) != sid for p in paths)
+    except (HandoffBlocked, OSError, ValueError):
+        raise _EnrollmentHold("OPERATOR_OWNERSHIP_UNPROVEN") from None
+    if unsafe:
         raise _EnrollmentHold("OPERATOR_OWNERSHIP_UNPROVEN")
     for name in _MARKERS:
         try:
             (env.user_data_dir / name).lstat()
         except FileNotFoundError:
             continue
-        # An opaque existing lock is not proof of this process's custody.
-        raise _EnrollmentHold("ENROLLMENT_PROFILE_LOCK_UNPROVEN")
+        # Ownership of the directory or a PID written in a marker is insufficient.
+        # Only the native transaction may independently prove the live holder.
+        if marker_proof is None or marker_proof(env.user_data_dir / name) is not True:
+            raise _EnrollmentHold("ENROLLMENT_PROFILE_LOCK_UNPROVEN")
     _verify_google_chrome(env)
+
+
+def _creation_ticks(value: str) -> int:
+    """CIM's ISO timestamp -> exact Windows FILETIME, including its seventh digit."""
+    match = re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:[.](\d{1,7}))?(?:Z|[+-]\d\d:\d\d)", value)
+    if match is None:
+        raise _EnrollmentHold("ENROLLMENT_IDENTITY_UNPROVEN")
+    try:
+        date = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        delta = date.astimezone(timezone.utc) - datetime(1601, 1, 1, tzinfo=timezone.utc)
+    except (ValueError, OverflowError):
+        raise _EnrollmentHold("ENROLLMENT_IDENTITY_UNPROVEN") from None
+    fraction = (match[1] or "").ljust(7, "0")
+    return (delta.days * 86400 + delta.seconds) * 10_000_000 + delta.microseconds * 10 + int(fraction[6])
+
+
+class _NativeEnrollment:
+    """One native transaction. No path-based opens, inherited creation ACL or retry.
+
+    NtCreateFile FILE_CREATE is CREATE_NEW with RootDirectory custody. Every
+    component is opened with OBJ_DONT_REPARSE and pinned without delete sharing.
+    A fresh protected directory is the durable one-time reservation. An existing
+    directory is never adopted, including an empty remnant of an uncertain call.
+    This backend is never invoked by the read-only assessment or legacy run().
+    """
+
+    def __init__(self, env, local, session, sid, identity):
+        self.env, self.local, self.session, self.sid, self.identity = env, local, session, sid, identity
+        self.effect_possible = False
+        self.handles = []
+        self.descriptor = None
+        try:
+            self._bind()
+        except Exception:
+            raise _EnrollmentHold("NATIVE_HANDLE_RELATIVE_UNAVAILABLE") from None
+
+    def _bind(self):
+        import ctypes as c
+        from ctypes import wintypes as w
+        self.c, self.w = c, w
+        self.k = c.WinDLL("kernel32", use_last_error=True)
+        self.a = c.WinDLL("advapi32", use_last_error=True)
+        self.n = c.WinDLL("ntdll", use_last_error=True)
+        self.rm = c.WinDLL("rstrtmgr", use_last_error=True)
+        p = c.c_void_p
+
+        class Unicode(c.Structure):
+            _fields_ = [("Length", w.USHORT), ("MaximumLength", w.USHORT), ("Buffer", w.LPWSTR)]
+        class Attributes(c.Structure):
+            _fields_ = [("Length", w.ULONG), ("RootDirectory", w.HANDLE),
+                        ("ObjectName", c.POINTER(Unicode)), ("Attributes", w.ULONG),
+                        ("SecurityDescriptor", p), ("SecurityQualityOfService", p)]
+        class IoStatus(c.Structure):
+            _fields_ = [("Status", p), ("Information", c.c_size_t)]
+        class FileInfo(c.Structure):
+            _fields_ = [("Attributes", w.DWORD), ("Creation", w.FILETIME),
+                        ("Access", w.FILETIME), ("Write", w.FILETIME),
+                        ("Volume", w.DWORD), ("SizeHigh", w.DWORD), ("SizeLow", w.DWORD),
+                        ("Links", w.DWORD), ("IndexHigh", w.DWORD), ("IndexLow", w.DWORD)]
+        class UniqueProcess(c.Structure):
+            _fields_ = [("pid", w.DWORD), ("start", w.FILETIME)]
+        class RmInfo(c.Structure):
+            _fields_ = [("process", UniqueProcess), ("app", w.WCHAR * 256),
+                        ("service", w.WCHAR * 64), ("kind", c.c_int),
+                        ("status", w.ULONG), ("session", w.DWORD), ("restartable", w.BOOL)]
+        self.Unicode, self.Attributes, self.IoStatus = Unicode, Attributes, IoStatus
+        self.FileInfo, self.RmInfo = FileInfo, RmInfo
+        bindings = [
+            (self.n, "NtCreateFile", c.c_long, [c.POINTER(w.HANDLE), w.DWORD, c.POINTER(Attributes),
+                c.POINTER(IoStatus), p, w.ULONG, w.ULONG, w.ULONG, w.ULONG, p, w.ULONG]),
+            (self.k, "CreateFileW", w.HANDLE, [w.LPCWSTR, w.DWORD, w.DWORD, p, w.DWORD, w.DWORD, w.HANDLE]),
+            (self.k, "GetFileInformationByHandle", w.BOOL, [w.HANDLE, c.POINTER(FileInfo)]),
+            (self.k, "GetFileType", w.DWORD, [w.HANDLE]),
+            (self.k, "GetDriveTypeW", w.UINT, [w.LPCWSTR]),
+            (self.k, "CloseHandle", w.BOOL, [w.HANDLE]),
+            (self.k, "LocalFree", p, [p]),
+            (self.k, "WriteFile", w.BOOL, [w.HANDLE, p, w.DWORD, c.POINTER(w.DWORD), p]),
+            (self.k, "ReadFile", w.BOOL, [w.HANDLE, p, w.DWORD, c.POINTER(w.DWORD), p]),
+            (self.k, "FlushFileBuffers", w.BOOL, [w.HANDLE]),
+            (self.k, "OpenProcess", w.HANDLE, [w.DWORD, w.BOOL, w.DWORD]),
+            (self.k, "GetCurrentProcess", w.HANDLE, []),
+            (self.k, "GetCurrentThread", w.HANDLE, []),
+            (self.k, "WaitForSingleObject", w.DWORD, [w.HANDLE, w.DWORD]),
+            (self.k, "GetProcessTimes", w.BOOL, [w.HANDLE, p, p, p, p]),
+            (self.k, "QueryFullProcessImageNameW", w.BOOL, [w.HANDLE, w.DWORD, w.LPWSTR, c.POINTER(w.DWORD)]),
+            (self.a, "OpenProcessToken", w.BOOL, [w.HANDLE, w.DWORD, c.POINTER(w.HANDLE)]),
+            (self.a, "OpenThreadToken", w.BOOL, [w.HANDLE, w.DWORD, w.BOOL, c.POINTER(w.HANDLE)]),
+            (self.a, "GetTokenInformation", w.BOOL, [w.HANDLE, c.c_int, p, w.DWORD, c.POINTER(w.DWORD)]),
+            (self.a, "ConvertSidToStringSidW", w.BOOL, [p, c.POINTER(w.LPWSTR)]),
+            (self.a, "IsValidSid", w.BOOL, [p]),
+            (self.a, "GetLengthSid", w.DWORD, [p]),
+            (self.a, "ConvertStringSecurityDescriptorToSecurityDescriptorW", w.BOOL,
+                [w.LPCWSTR, w.DWORD, c.POINTER(p), p]),
+            (self.a, "GetSecurityInfo", w.DWORD, [w.HANDLE, c.c_int, w.DWORD,
+                c.POINTER(p), p, c.POINTER(p), p, c.POINTER(p)]),
+            (self.a, "GetSecurityDescriptorControl", w.BOOL, [p, c.POINTER(w.WORD), c.POINTER(w.DWORD)]),
+            (self.a, "GetAclInformation", w.BOOL, [p, p, w.DWORD, c.c_int]),
+            (self.a, "GetAce", w.BOOL, [p, w.DWORD, c.POINTER(p)]),
+            (self.rm, "RmStartSession", w.DWORD, [c.POINTER(w.DWORD), w.DWORD, w.LPWSTR]),
+            (self.rm, "RmRegisterResources", w.DWORD, [w.DWORD, w.UINT, c.POINTER(w.LPCWSTR),
+                w.UINT, p, w.UINT, p]),
+            (self.rm, "RmGetList", w.DWORD, [w.DWORD, c.POINTER(w.UINT), c.POINTER(w.UINT),
+                c.POINTER(RmInfo), c.POINTER(w.DWORD)]),
+            (self.rm, "RmEndSession", w.DWORD, [w.DWORD]),
+        ]
+        for library, name, result, args in bindings:
+            function = getattr(library, name)
+            function.restype, function.argtypes = result, args
+
+    def _blocked(self):
+        raise _EnrollmentHold("ENROLLMENT_NATIVE_CUSTODY_UNPROVEN")
+
+    def _keep(self, handle):
+        self.handles.append(handle)
+        return handle
+
+    def _sid_text(self, pointer):
+        c, w = self.c, self.w
+        text = w.LPWSTR()
+        if not pointer or not self.a.IsValidSid(pointer) or not self.a.ConvertSidToStringSidW(pointer, c.byref(text)):
+            self._blocked()
+        try:
+            return text.value
+        finally:
+            self.k.LocalFree(c.cast(text, c.c_void_p))
+
+    def _acl(self, handle, *, exact=False):
+        from .local_completion_handoff import HandoffBlocked, _check_windows_acl
+        c, w = self.c, self.w
+        owner, dacl, sd = c.c_void_p(), c.c_void_p(), c.c_void_p()
+        if self.a.GetSecurityInfo(handle, 1, 5, c.byref(owner), None, c.byref(dacl), None, c.byref(sd)):
+            self._blocked()
+        try:
+            control, revision = w.WORD(), w.DWORD()
+            info = (w.DWORD * 3)()
+            if (not dacl or not self.a.GetSecurityDescriptorControl(sd, c.byref(control), c.byref(revision))
+                    or not self.a.GetAclInformation(dacl, info, c.sizeof(info), 2)
+                    or not 1 <= info[0] <= 128):
+                self._blocked()
+            aces = []
+            for index in range(info[0]):
+                ace = c.c_void_p()
+                if not self.a.GetAce(dacl, index, c.byref(ace)):
+                    self._blocked()
+                header = c.string_at(ace, 8)
+                size = int.from_bytes(header[2:4], "little")
+                sid = c.c_void_p(ace.value + 8)
+                if (header[0] not in (0, 1) or size < 16 or not self.a.IsValidSid(sid)
+                        or self.a.GetLengthSid(sid) > size - 8):
+                    self._blocked()
+                aces.append(("allow" if header[0] == 0 else "deny", self._sid_text(sid)))
+                if exact and (header[0:2] != b"\x00\x00" or int.from_bytes(header[4:8], "little") != 0x1F01FF):
+                    self._blocked()
+            try:
+                _check_windows_acl(self._sid_text(owner), aces, self.sid)
+            except HandoffBlocked:
+                self._blocked()
+            if exact and (not control.value & 0x1000 or aces != [("allow", self.sid)]):
+                self._blocked()
+        finally:
+            self.k.LocalFree(sd)
+
+    def _info(self, handle, directory):
+        info = self.FileInfo()
+        if (self.k.GetFileType(handle) != 1 or not self.k.GetFileInformationByHandle(handle, self.c.byref(info))
+                or info.Attributes & 0x400 or bool(info.Attributes & 0x10) != directory
+                or (not directory and info.Links != 1)):
+            self._blocked()
+        return (info.Volume, info.IndexHigh, info.IndexLow, info.SizeHigh, info.SizeLow)
+
+    def _relative(self, parent, name, *, directory, create=False, write=False, optional=False, readback=False):
+        c, w = self.c, self.w
+        if not name or name in {".", ".."} or any(ch in name for ch in "\\/:\x00"):
+            self._blocked()
+        buffer = c.create_unicode_buffer(name)
+        length = len(name.encode("utf-16-le"))
+        if length > 65532:
+            self._blocked()
+        string = self.Unicode(length, length + 2, c.cast(buffer, w.LPWSTR))
+        attrs = self.Attributes(c.sizeof(self.Attributes), parent, c.pointer(string),
+                                0x40 | 0x1000, self.descriptor if create else None, None)
+        io, handle = self.IoStatus(), w.HANDLE()
+        access = 0x120089 | (0x116 if write else 0)  # read/control/synchronize; optional write
+        previous = self.effect_possible
+        if create:
+            self.effect_possible = True  # Set BEFORE crossing the mutation boundary.
+        status = self.n.NtCreateFile(c.byref(handle), access, c.byref(attrs), c.byref(io), None,
+            0x80, 3 if readback else 1, 2 if create else 1,
+            0x20 | 0x200000 | (1 if directory else 0x40), None, 0)
+        unsigned = status & 0xFFFFFFFF
+        if unsigned in {0xC0000034, 0xC000003A} and optional and not create:
+            return None
+        if unsigned == 0xC0000035 and create:
+            self.effect_possible = previous  # FILE_CREATE collision has no effect.
+            raise _EnrollmentHold("ENROLLMENT_RESERVATION_EXISTS" if directory else "ENROLLMENT_CONFIG_EXISTS")
+        if status < 0:
+            # Native failure is definitive; an exception during the syscall is not.
+            self.effect_possible = previous
+            self._blocked()
+        self._keep(handle)
+        if create and io.Information != 2:  # FILE_CREATED only
+            self._blocked()
+        self._info(handle, directory)
+        return handle
+
+    def _pin_path(self, path, *, directory=True, private=False):
+        # Only a native local drive: no UNC/device paths or reparse mount points.
+        if (not re.fullmatch(r"[A-Za-z]:\\", path.anchor)
+                or self.k.GetDriveTypeW(path.anchor) != 3
+                or any(p in {".", ".."} for p in path.parts)):
+            self._blocked()
+        root = self.k.CreateFileW(path.anchor, 0x120089, 1, None, 3, 0x02200000, None)
+        if root in (None, self.c.c_void_p(-1).value):
+            self._blocked()
+        handle = self._keep(root)
+        self._info(handle, True)
+        for index, name in enumerate(path.parts[1:]):
+            last = index == len(path.parts) - 2
+            handle = self._relative(handle, name, directory=directory if last else True)
+        if private:
+            self._acl(handle)
+        self.pinned.append((path, handle, directory, self._info(handle, directory), private))
+        return handle
+
+    def _token(self, process):
+        c, w = self.c, self.w
+        token = w.HANDLE()
+        if not self.a.OpenProcessToken(process, 8, c.byref(token)):
+            self._blocked()
+        self._keep(token)
+        def data(kind):
+            needed = w.DWORD()
+            self.a.GetTokenInformation(token, kind, None, 0, c.byref(needed))
+            if not 4 <= needed.value <= 65536:
+                self._blocked()
+            value = c.create_string_buffer(needed.value)
+            if not self.a.GetTokenInformation(token, kind, value, needed, c.byref(needed)):
+                self._blocked()
+            return value
+        user = data(1)
+        if (self._sid_text(c.cast(user, c.POINTER(c.c_void_p))[0]) != self.sid
+                or c.cast(data(12), c.POINTER(w.DWORD))[0] != self.session
+                or c.cast(data(20), c.POINTER(w.DWORD))[0] != 0):
+            self._blocked()
+        # Enabled INTERACTIVE token group is positive logon evidence, in addition
+        # to the input desktop/session checks. Deny-only groups cannot qualify.
+        class Group(c.Structure):
+            _fields_ = [("sid", c.c_void_p), ("flags", w.DWORD)]
+        class Groups(c.Structure):
+            _fields_ = [("count", w.DWORD), ("first", Group)]
+        groups = data(2)
+        count = c.cast(groups, c.POINTER(w.DWORD))[0]
+        offset = Groups.first.offset
+        if not 1 <= count <= 2048 or offset + count * c.sizeof(Group) > c.sizeof(groups):
+            self._blocked()
+        found = set()
+        for index in range(count):
+            group = Group.from_buffer(groups, offset + index * c.sizeof(Group))
+            if group.flags & 4 and not group.flags & 0x10:
+                found.add(self._sid_text(group.sid))
+        if not {"S-1-5-4", "S-1-5-11"} <= found:
+            self._blocked()
+
+    def _process(self):
+        c, w = self.c, self.w
+        # Never create under a thread identity different from the process token
+        # used by the SID, known-folder and interactive-session observations.
+        thread_token = w.HANDLE()
+        c.set_last_error(0)
+        if self.a.OpenThreadToken(self.k.GetCurrentThread(), 8, True, c.byref(thread_token)):
+            self._keep(thread_token)
+            self._blocked()
+        if c.get_last_error() != 1008:  # ERROR_NO_TOKEN, positive no-impersonation evidence
+            self._blocked()
+        if self.k.WaitForSingleObject(self.process, 0) != 258:
+            self._blocked()
+        times = [w.FILETIME() for _ in range(4)]
+        image, size = c.create_unicode_buffer(32768), w.DWORD(32768)
+        if (not self.k.GetProcessTimes(self.process, *(c.byref(t) for t in times))
+                or not self.k.QueryFullProcessImageNameW(self.process, 0, image, c.byref(size))
+                or Path(image.value) != self.env.executable):
+            self._blocked()
+        ticks = times[0].dwHighDateTime << 32 | times[0].dwLowDateTime
+        # CIM datetime has microsecond precision. Pin the full native 100ns value
+        # once and require its exact equality on every subsequent observation.
+        if (ticks // 10 != _creation_ticks(self.identity[5]) // 10
+                or (hasattr(self, "process_ticks") and ticks != self.process_ticks)):
+            self._blocked()
+        self.process_ticks = ticks
+        self._token(self.process)
+        self._token(self.k.GetCurrentProcess())
+
+    def __enter__(self):
+        try:
+            self.pinned = []
+            self.process = self._keep(self.k.OpenProcess(0x101000, False, self.identity[0]))
+            if not self.process:
+                self._blocked()
+            self._process()
+            self._pin_path(self.local)
+            self.root = self._pin_path(self.local / "AI-Commerce", private=True)
+            # Verify every dedicated-profile ancestor by handle, not only the leaf.
+            for path in reversed((self.env.user_data_dir, *self.env.user_data_dir.parents)):
+                if _inside(path, self.local / "AI-Commerce"):
+                    self._pin_path(path, private=True)
+            self._pin_path(self.env.user_data_dir / self.env.profile_directory, private=True)
+            self._pin_path(self.env.executable, directory=False)
+            self.absent()
+            return self
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+
+    def absent(self):
+        for name in ("chrome.json", "chrome-acquisition.json"):
+            if self._relative(self.root, name, directory=False, optional=True) is not None:
+                raise _EnrollmentHold("ENROLLMENT_CONFIG_EXISTS")
+        # Do not adopt any prior reservation, including one with no config yet.
+        if self._relative(self.root, "Chrome-Acquisition", directory=True, optional=True) is not None:
+            raise _EnrollmentHold("ENROLLMENT_RESERVATION_EXISTS")
+
+    def validate(self):
+        self._process()
+        for path, handle, directory, identity, private in self.pinned:
+            if self._info(handle, directory)[:3] != identity[:3]:
+                self._blocked()
+            if private:
+                self._acl(handle)
+
+    def prove_marker(self, path):
+        """Restart Manager must name exactly the pinned browser as live holder.
+
+        Never interpret lock contents, remove a marker or accept an owner ACL as
+        process proof. Unsupported, stale, shared or inaccessible markers HOLD.
+        """
+        c, w = self.c, self.w
+        self._pin_path(path, directory=False, private=True)
+        session, key = w.DWORD(), c.create_unicode_buffer(33)
+        if self.rm.RmStartSession(c.byref(session), 0, key):
+            return False
+        try:
+            files = (w.LPCWSTR * 1)(str(path))
+            if self.rm.RmRegisterResources(session, 1, files, 0, None, 0, None):
+                return False
+            needed, count, reasons = w.UINT(), w.UINT(2), w.DWORD()
+            rows = (self.RmInfo * 2)()
+            if self.rm.RmGetList(session, c.byref(needed), c.byref(count), rows, c.byref(reasons)) or count.value != 1:
+                return False
+            proc = rows[0].process
+            self._process()
+            return (proc.pid == self.identity[0] and rows[0].session == self.session
+                    and (proc.start.dwHighDateTime << 32 | proc.start.dwLowDateTime) == self.process_ticks)
+        finally:
+            self.rm.RmEndSession(session)
+
+    def create_and_flush(self, payload):
+        c, w = self.c, self.w
+        if not isinstance(payload, bytes) or not 1 <= len(payload) <= 8192:
+            self._blocked()
+        self.absent()
+        sd = c.c_void_p()
+        if not self.a.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                f"O:{self.sid}D:P(A;;FA;;;{self.sid})", 1, c.byref(sd), None):
+            self._blocked()
+        self.descriptor = sd
+        self.directory = self._relative(self.root, "Chrome-Acquisition", directory=True, create=True)
+        self._acl(self.directory, exact=True)
+        self.file = self._relative(self.directory, "config.json", directory=False, create=True, write=True)
+        self.file_identity = self._info(self.file, False)[:3]
+        self._acl(self.file, exact=True)
+        written = w.DWORD()
+        if (not self.k.WriteFile(self.file, payload, len(payload), c.byref(written), None)
+                or written.value != len(payload) or not self.k.FlushFileBuffers(self.file)):
+            self._blocked()
+
+    def readback(self, payload):
+        c, w = self.c, self.w
+        # A new handle independently reads the fixed name while the writer denies
+        # all other writers/deletion. Verify both handle IDs and owner-only DACL.
+        handle = self._relative(self.directory, "config.json", directory=False, readback=True)
+        info = self._info(handle, False)
+        self._acl(self.directory, exact=True)
+        self._acl(handle, exact=True)
+        if info[:3] != self.file_identity or info[3:] != (0, len(payload)):
+            self._blocked()
+        buffer, count = c.create_string_buffer(8193), w.DWORD()
+        if (not self.k.ReadFile(handle, buffer, 8193, c.byref(count), None)
+                or count.value != len(payload) or buffer.raw[:count.value] != payload):
+            self._blocked()
+        for name in ("chrome.json", "chrome-acquisition.json"):
+            if self._relative(self.root, name, directory=False, optional=True) is not None:
+                self._blocked()
+
+    def __exit__(self, *unused):
+        failed = False
+        for handle in reversed(self.handles):
+            if handle and not self.k.CloseHandle(handle):
+                failed = True
+        self.handles.clear()
+        if self.descriptor:
+            self.k.LocalFree(self.descriptor)
+            self.descriptor = None
+        if failed:
+            self._blocked()
 
 
 def assess_existing_9444(checkout: Path) -> dict:
     """Local read-only assessment, never account/chat proof or write permission.
 
     Path-based ACL checks cannot securely create a new Windows config under
-    atomic, handle-based custody. Within this bounded module the best outcome
-    is a private in-memory candidate and HOLD for a separate native owner task.
+    atomic, handle-based custody. This read-only entrypoint produces only a
+    private in-memory candidate and HOLD for explicit local native enrollment.
     No HTTP/CDP attach, prompt, file creation, Chrome start or retry occurs here.
     """
     try:
@@ -708,20 +1129,69 @@ def assess_existing_9444(checkout: Path) -> dict:
 
 
 def enroll_existing_9444(checkout: Path, *, opt_in: bool = False) -> dict:
-    """Explicit local-only enrollment gate, disabled by default and write-held.
+    """Explicit one-time local native enrollment; never launch, HTTP or attach.
 
-    Even an opted-in assessed candidate requires a distinct trusted native task
-    implementing atomic create-new private custody. Never persist a candidate,
-    grant launch, infer an operator identity or enroll from a GitHub Issue.
+    Source tests cannot establish native effects. A successful local receipt
+    proves only private config creation for the independently owned browser.
+    No launch, account, chat, logon autostart or delivery authority is granted.
     """
     if opt_in is not True:
         return _enrollment_hold("ENROLLMENT_OPT_IN_REQUIRED")
-    return assess_existing_9444(checkout)
+    native = None
+    try:
+        local, session, sid = _enrollment_operator()
+        config = _enrollment_location(local, checkout)
+        env, identity = _existing_9444_candidate(_query_windows(9444), local=local,
+            checkout=checkout, config=config, session=session, sid=sid)
+        native = _NativeEnrollment(env, local, session, sid, identity)
+        with native:
+            _check_enrollment_custody(env, local, sid, marker_proof=native.prove_marker)
+            if (_enrollment_operator() != (local, session, sid)
+                    or _enrollment_location(local, checkout) != config):
+                raise _EnrollmentHold("ENROLLMENT_OBSERVATION_CHANGED")
+            current, current_identity = _existing_9444_candidate(_query_windows(9444), local=local,
+                checkout=checkout, config=config, session=session, sid=sid)
+            if current != env or current_identity != identity:
+                raise _EnrollmentHold("ENROLLMENT_OBSERVATION_CHANGED")
+            _check_enrollment_custody(current, local, sid, marker_proof=native.prove_marker)
+            native.validate()
+            value = {"version": 1, "executable": str(env.executable),
+                     "user_data_dir": str(env.user_data_dir), "profile_directory": env.profile_directory,
+                     "cdp_endpoint": "http://127.0.0.1:9444", "exclusive_user_data": True,
+                     "allow_launch": False}
+            if _environment_from_value(value, config, checkout, local_app_data=local) != env:
+                raise _EnrollmentHold("ENROLLMENT_OBSERVATION_CHANGED")
+            payload = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+            native.create_and_flush(payload)
+            native.readback(payload)
+            # Independent post-write token, process, listener, command, signature,
+            # marker-holder and custody observations; any failure is UNKNOWN.
+            if _enrollment_operator() != (local, session, sid):
+                raise _EnrollmentHold("ENROLLMENT_OBSERVATION_CHANGED")
+            current, current_identity = _existing_9444_candidate(_query_windows(9444), local=local,
+                checkout=checkout, config=config, session=session, sid=sid)
+            if current != env or current_identity != identity:
+                raise _EnrollmentHold("ENROLLMENT_OBSERVATION_CHANGED")
+            _check_enrollment_custody(current, local, sid, marker_proof=native.prove_marker)
+            native.validate()
+            native.readback(payload)
+        result = _enrollment_hold("NATIVE_ATOMIC_ENROLLMENT_REQUIRED", assessed=True)
+        result.update(status="ENROLLED", code="CONFIG_VERIFIED_CREATED", enrolled=True)
+        return result
+    except BaseException as exc:
+        if native is not None and native.effect_possible:
+            result = _enrollment_hold("ENROLLMENT_ASSESSMENT_UNKNOWN", assessed=True)
+            result.update(status="UNKNOWN_EFFECT", code="UNKNOWN_EFFECT")
+            return result
+        if not isinstance(exc, Exception):
+            raise
+        return _enrollment_hold(str(exc) if isinstance(exc, (_EnrollmentHold, AcquisitionBlocked))
+                                else "ENROLLMENT_ASSESSMENT_UNKNOWN")
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m ai_commerce.remote.chrome_acquisition",
-        epilog="Enrollment commands only assess and return HOLD; atomic native enrollment is a separate task.")
+        epilog="Native enrollment requires explicit local --opt-in; launch remains disabled.")
     parser.add_argument("command", choices=("probe", "launch", "assess-existing-9444",
                                           "enroll-existing-9444"))
     parser.add_argument("--config", type=Path)
@@ -734,7 +1204,7 @@ def main(argv: list[str] | None = None) -> int:
         result = (assess_existing_9444(args.checkout) if args.command == "assess-existing-9444"
                   else enroll_existing_9444(args.checkout, opt_in=args.opt_in))
         print(json.dumps(result, sort_keys=True))
-        return 2  # Assessment is never native enrollment acceptance.
+        return 0 if result["status"] == "ENROLLED" else 2
     if args.config is None:
         parser.error("--config is required for probe/launch")
     try:
