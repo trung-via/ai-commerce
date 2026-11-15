@@ -1599,6 +1599,23 @@ def test_windows_native_synthetic_extra_environment_category_is_only_bounded_cou
     assert error.value.native_error == (encoded << 3) | 3
 
 
+@pytest.mark.parametrize("index,code,category", [
+    (4, 0, 1), (5, 2, 2), (6, 32, 5), (7, 5, 4),
+    (8, 5, 4), (9, 10061, 8), (9, 99999, 15),
+])
+def test_windows_native_synthetic_denial_failure_codes_are_bounded(index, code, category):
+    """Only the mismatched result slot and a whitelisted code class are emitted."""
+    import struct
+    from ai_commerce.engineering import windows_collection_sandbox as sandbox
+
+    report = [0x4d543031, 1, 0, 0, 5, 5, 5, 0, 2, 10013, 456, 123, 1, 1, 0, 0]
+    report[index] = code
+    with pytest.raises(sandbox.Unproven, match="NATIVE_ACCESS_DENIAL_UNPROVEN") as error:
+        sandbox._decode_fixture_report(struct.pack("<16I", *report), 123)
+    slot = index - 4
+    assert error.value.native_error == (1 << slot) | (category << (6 + 4 * slot))
+
+
 @pytest.mark.parametrize("index,value", [(4, 2), (5, 32), (6, 3), (7, 5), (8, 5), (9, 10061)])
 def test_windows_native_synthetic_missing_files_and_closed_ports_are_not_denials(index, value):
     import struct
