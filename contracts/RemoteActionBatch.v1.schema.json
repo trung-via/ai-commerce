@@ -104,6 +104,10 @@
           "type": "string",
           "minLength": 1
         },
+        "executor_test_policy": {
+          "enum": ["EF01_POST_MODEL_ONLY", "EXECUTOR_PYTEST_REQUIRED"],
+          "description": "Fingerprint-bound capability declaration. SOURCE_BUILD executors cannot run pytest/xdist. EXECUTOR_PYTEST_REQUIRED is rejected before provider checkpoints. Freeform admission is deny-only, not a complete natural-language classifier."
+        },
         "allowed_paths": {
           "type": "array",
           "minItems": 1,

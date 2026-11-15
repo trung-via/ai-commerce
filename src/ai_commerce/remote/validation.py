@@ -19,6 +19,71 @@ HEX_SHA = re.compile(r"^[0-9a-f]{40}$")
 class RemoteRequestError(ValueError):
     pass
 
+
+def validate_executor_capability(action: dict) -> None:
+    """Deny clearly incompatible imperatives, never infer a capability grant.
+
+    Quoted examples/negative instructions and post-model EF01 verification are
+    ordinary source text. This bounded English grammar is NOT an NLP firewall:
+    euphemisms, other languages or a dishonest typed declaration can bypass prose
+    detection. The focused executor prohibition still applies in every case.
+    Imperative pytest diagnostics outside this grammar require an explicit typed
+    EF01_POST_MODEL_ONLY declaration; EXECUTOR_PYTEST_REQUIRED always fails closed.
+    """
+    forbidden = "EXECUTOR_PYTEST_FORBIDDEN_PRESPAWN"
+    policy = action.get("executor_test_policy")
+    if policy not in (None, "EF01_POST_MODEL_ONLY", "EXECUTOR_PYTEST_REQUIRED"):
+        raise RemoteRequestError("EXECUTOR_TEST_CAPABILITY_INVALID_PRESPAWN")
+    if policy == "EXECUTOR_PYTEST_REQUIRED":
+        raise RemoteRequestError(forbidden)
+    subject = r"\b(?:(?:coding\s+)?executor|coding\s+agent|model|you)\b"
+    operation = r"\b(?:run|execute|invoke|launch)\b"
+    negative = r"\b(?:do\s+not|don['’]t|must\s+not|shall\s+not|never|forbid(?:den)?|cannot)\b"
+    def quoted(match):
+        body = match.group(0)[1:-1]
+        # A quoted instruction is an example, but quoting just the command
+        # must not hide an imperative outside it: executor must run `pytest`.
+        if re.search(subject, body, re.I) or re.search(negative, body, re.I):
+            return ""
+        return body
+    lines, fenced = [], False
+    for line in action["instruction"].splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith(("```", "~~~")):
+            fenced = not fenced
+            continue
+        if not fenced and not stripped.startswith(">"):
+            lines.append(re.sub(r'"[^"\n]*"|`[^`\n]*`|(?<!\w)\'[^\'\n]*\'(?!\w)', quoted, line))
+    prose = "\n".join(lines)
+    test_word = r"\b(?:pytest|xdist)\b"
+    for clause in re.split(r"[\n;,!?]|\.(?=\s|$)", prose):
+        if not re.search(test_word, clause, re.I):
+            continue
+        # Negation is local to an operation, so an unrelated negative sentence
+        # cannot mask a subsequent demand. This also preserves negative quotes.
+        positive = re.sub(negative + r"\s+(?:(?:ever|personally|directly|itself|yourself|to)\s+){0,3}"
+                          + operation + r"[^\n]*?(?=\band\b|$)", "", clause, flags=re.I)
+        positive = re.sub(negative + r"\s+(?:let|allow|require|instruct)\s+(?:the\s+)?"
+                          + subject + r"\s+(?:to\s+)?" + operation
+                          + r"[^\n]*?(?=\band\b|$)", "", positive, flags=re.I)
+        direct = (subject + r"\s+(?:(?:itself|yourself)\s+)?"
+                  r"(?:(?:must|shall|should|will|needs?\s+to|is\s+required\s+to|has\s+to|to)\s+)?"
+                  r"(?:(?:personally|directly|itself)\s+)?" + operation + r".{0,120}" + test_word)
+        passive = (test_word + r".{0,60}\b(?:must|shall|should|needs?\s+to)\s+be\s+"
+                   r"(?:run|executed|invoked|launched)\s+by\s+(?:the\s+)?" + subject)
+        if re.search(direct, positive, re.I) or re.search(passive, positive, re.I):
+            raise RemoteRequestError(forbidden)
+        imperative = re.search(r"^\s*(?:[-*]\s*)?(?:must\s+)?" + operation + r".{0,120}" + test_word, positive, re.I)
+        trusted_post_model = re.search(r"\b(?:EF01|MT01)\b", positive, re.I) and re.search(
+            r"\b(?:post[- ]model|after\s+(?:the\s+)?(?:coding\s+)?(?:model|executor)\s+(?:returns|finishes))\b", positive, re.I)
+        if imperative and not trusted_post_model:
+            raise RemoteRequestError(forbidden)
+        if (re.search(r"^\s*(?:diagnose|reproduce|investigate|measure)\b", clause, re.I)
+                and not re.search(negative, clause, re.I)
+                and not trusted_post_model and policy != "EF01_POST_MODEL_ONLY"):
+            raise RemoteRequestError("EXECUTOR_TEST_CAPABILITY_REQUIRED_PRESPAWN")
+
+
 # Human-retired WP01..WP06/EPWO must never be dispatched, even from old batch JSON.
 # This narrow deny-only control is external to the restored pre-WP Engineering logic.
 _RETIRED_PROGRAM_ID = re.compile(r"(?:EPWO|WP0[1-6])", re.IGNORECASE)
@@ -102,6 +167,7 @@ def _validate_actions(data: dict, *, registry: dict[str, list[str]],
     known = set(ids)
     graph: dict[str, list[str]] = {}
     for action in data["actions"]:
+        validate_executor_capability(action)
         ExecutorSelection(action["executor"], action["model"], action["effort"])
         try:
             validate_max_repair_rounds(action.get("max_repair_rounds", DEFAULT_MAX_REPAIR_ROUNDS))

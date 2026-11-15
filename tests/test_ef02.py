@@ -46,6 +46,169 @@ def batch(actions):
     }
 
 
+@pytest.mark.parametrize("instruction", [
+    "executor must run pytest -n0",
+    "The coding executor itself must run pytest -n 0 before returning.",
+    "The executor must itself run pytest -n0.",
+    "You must run python -m pytest tests/test_b0_3_attended_worker.py -n0.",
+    "Run pytest -n0 before returning.",
+    "Run `python -m pytest` -n0 before returning.",
+    "The executor must run `pytest -n0`.",
+    "Do not edit .github, executor must run pytest -n0.",
+    "Do not run pytest and executor must run pytest -n0.",
+    "The executor must run pytest -n0 and EF01 must run pytest -n12.",
+    "The coding agent must invoke xdist before returning.",
+    "Pytest must be run by the executor before returning.",
+])
+@pytest.mark.parametrize("policy", [None, "EF01_POST_MODEL_ONLY"])
+def test_executor_pytest_contradiction_is_rejected_before_dispatch(instruction, policy):
+    item = action("a")
+    item["instruction"] = instruction
+    if policy is not None:
+        item["executor_test_policy"] = policy
+    with pytest.raises(RemoteRequestError, match="^EXECUTOR_PYTEST_FORBIDDEN_PRESPAWN$"):
+        validate(batch([item]))
+
+
+@pytest.mark.parametrize("instruction", [
+    "Make one scoped source change.",
+    "EF01 runs pytest -n12 after the model returns.",
+    "Run pytest -n12 through EF01 after the model returns.",
+    "The executor must not run pytest; trusted EF01 runs pytest after the model returns.",
+    "Do not run pytest or xdist from the coding executor.",
+    "Do not let the executor run pytest -n0.",
+    "Do not require the executor to run pytest -n0.",
+    "Never execute pytest in the executor.",
+    'The rejected request said "executor must run pytest -n0". Add admission tests.',
+    "Historical example: `executor must run pytest -n0`. Reject that demand.",
+    'Quoted prohibition: "Do not run pytest -n0".',
+    "> executor must run pytest -n0\nImplement the rejection of that historical request.",
+    "```text\nexecutor must run pytest -n0\n```\nReject that historical request.",
+    "Implement a trusted diagnostic mode for pytest only after merged source registers it.",
+])
+@pytest.mark.parametrize("policy", [None, "EF01_POST_MODEL_ONLY"])
+def test_executor_capability_preserves_ordinary_source_and_quoted_instructions(instruction, policy):
+    item = action("a")
+    item["instruction"] = instruction
+    if policy is not None:
+        item["executor_test_policy"] = policy
+    packet = batch([item])
+    original = copy.deepcopy(packet)
+    assert validate(packet) == original
+    assert packet == original
+
+
+def test_typed_executor_test_requirement_always_fails_closed_and_is_fingerprinted():
+    item = action("a")
+    original = batch([item])
+    declared = copy.deepcopy(original)
+    declared["actions"][0]["executor_test_policy"] = "EXECUTOR_PYTEST_REQUIRED"
+    assert fingerprint(original) != fingerprint(declared)
+    with pytest.raises(RemoteRequestError, match="^EXECUTOR_PYTEST_FORBIDDEN_PRESPAWN$"):
+        validate(declared)
+    with pytest.raises(RemoteRequestError, match="^ISSUER_NOT_AUTHORIZED_FOR_ACTOR$"):
+        validate(declared, issuer="impersonated-owner")
+
+
+@pytest.mark.parametrize("instruction", [
+    "Investigate serial versus xdist contention with native runs.",
+    "Diagnose pytest serial versus parallel contention.",
+    "Reproduce the pytest failure under native Windows.",
+])
+def test_imperative_diagnostic_requires_typed_capability_when_prose_is_ambiguous(instruction):
+    item = action("a")
+    item["instruction"] = instruction
+    with pytest.raises(RemoteRequestError, match="^EXECUTOR_TEST_CAPABILITY_REQUIRED_PRESPAWN$"):
+        validate(batch([item]))
+    item["executor_test_policy"] = "EF01_POST_MODEL_ONLY"
+    assert validate(batch([item]))["actions"][0] == item
+
+
+def test_freeform_capability_admission_documents_residual_language_bypass():
+    # This wording has no pytest/xdist identity. Admission is a bounded deny-only
+    # grammar, not proof that arbitrary prose is compatible. A false declaration
+    # cannot grant permission: the focused executor no-pytest rule still applies.
+    item = action("a")
+    item.update(instruction="Obtain local test-runner results before returning.",
+                executor_test_policy="EF01_POST_MODEL_ONLY")
+    assert validate(batch([item]))
+
+
+@pytest.mark.parametrize("value", ["ARBITRARY_SHELL", "", None, {"argv": ["pytest", "-n0"]}])
+def test_capability_contract_is_a_finite_enum(value):
+    from jsonschema import ValidationError
+    item = action("a")
+    item["executor_test_policy"] = value
+    with pytest.raises(ValidationError):
+        validate(batch([item]))
+
+
+@pytest.mark.parametrize("command", ["validate", "run"])
+@pytest.mark.parametrize("instruction,policy,code", [
+    ("executor must run pytest -n0", None, "EXECUTOR_PYTEST_FORBIDDEN_PRESPAWN"),
+    ("Make one scoped source change", "EXECUTOR_PYTEST_REQUIRED", "EXECUTOR_PYTEST_FORBIDDEN_PRESPAWN"),
+    ("Diagnose pytest serial contention", None, "EXECUTOR_TEST_CAPABILITY_REQUIRED_PRESPAWN"),
+])
+def test_incompatible_request_rejected_before_source_claim_checkpoint_or_provider(
+        tmp_path, monkeypatch, capsys, command, instruction, policy, code):
+    from ai_commerce.remote import __main__ as cli
+    from ai_commerce.engineering import adapters
+    item = action("a")
+    item["instruction"] = instruction + "\nPRIVATE_REQUEST_TEXT"
+    if policy is not None:
+        item["executor_test_policy"] = policy
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps(batch([item])), encoding="utf-8")
+    def forbidden(*args, **kwargs):
+        pytest.fail("Admission must precede all dispatch effects")
+    for name in ("check_source", "validate_acceptance_scope", "GitHubTransport", "LocalBatchWorker", "run_schedule"):
+        monkeypatch.setattr(cli, name, forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(adapters, "command_for", forbidden)
+    assert cli.main([command, "--request-file", str(request), "--checkout", str(ROOT),
+                     "--issuer-login", "owner", "--owner-login", "owner"]) == 2
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "EF02_REQUEST_REJECTED: " + code
+    assert not captured.out and "PRIVATE_REQUEST_TEXT" not in captured.err
+
+
+@pytest.mark.parametrize("policy", [None, "EXECUTOR_PYTEST_REQUIRED", "UNRECOGNIZED"])
+def test_worker_repeats_capability_admission_before_claim_or_checkpoint(tmp_path, monkeypatch, policy):
+    from ai_commerce.remote import worker
+    item = action("a")
+    item["instruction"] = "executor must run pytest -n0"
+    if policy is not None:
+        item["executor_test_policy"] = policy
+    instance = worker.LocalBatchWorker.__new__(worker.LocalBatchWorker)
+    instance.root = tmp_path
+    instance.batch = batch([item])
+    class NoTransport:
+        def __getattr__(self, name):
+            pytest.fail("No transport effect allowed: " + name)
+    instance.github = NoTransport()
+    def forbidden(*args, **kwargs):
+        pytest.fail("No child or worktree allowed")
+    monkeypatch.setattr(worker, "_new_worktree_path", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    outcome = instance.execute_action(item)
+    expected = ("EXECUTOR_TEST_CAPABILITY_INVALID_PRESPAWN" if policy == "UNRECOGNIZED"
+                else "EXECUTOR_PYTEST_FORBIDDEN_PRESPAWN")
+    assert outcome["status"] == "INVALID_ACTION" and outcome["error_code"] == expected
+    assert outcome["executor_invoked"] is False and outcome["candidate_ref"] is None
+    assert "claim_status" not in outcome and "pre_spawn_remote_ref" not in outcome
+
+
+def test_unregistered_diagnostic_mode_cannot_be_smuggled_into_source_build():
+    from jsonschema import ValidationError
+    item = action("a")
+    item["diagnostic_mode"] = "WINDOWS_B03_SERIAL_XDIST_V1"
+    # HOLD: no no-commit distributed diagnostic claim exists in the current
+    # transport owner. Do not expose an executable half-registered mode.
+    with pytest.raises(ValidationError):
+        validate(batch([item]))
+
+
 def validate(packet, issuer="trung-via", owner="trung-via", brain=()):
     return validate_batch(packet, schema=SCHEMA, registry=verify_registry(REGISTRY),
                           issuer_login=issuer, owner_login=owner, brain_issuers=brain)

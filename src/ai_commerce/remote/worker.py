@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from .transport import GitHubTransport, RemoteTransportError, CandidateIntegrityError
-from .validation import fingerprint, check_source, approved_verification_plan, approved_acceptance_plan, reject_retired_wp_identifiers, RemoteRequestError
+from .validation import fingerprint, check_source, approved_verification_plan, approved_acceptance_plan, reject_retired_wp_identifiers, RemoteRequestError, validate_executor_capability
 from .reuse import load_approved_candidates, approve_reuse
 from .candidate_policy import (
     REVIEW_STATUS, VERIFIED_STATUSES, candidate_accepted, evidence_digest, validate_candidate_evidence,
@@ -251,9 +251,10 @@ class LocalBatchWorker:
                            diagnostic=str(exc))
             return finish()
         outcome["max_repair_rounds"] = repair_limit
-        # Security retirement gate only: prevents old WP IDs reaching GitHub claim/provider.
+        # Repeat admission at the execution boundary before any claim/checkpoint.
         try:
             reject_retired_wp_identifiers(self.batch, submitted_action)
+            validate_executor_capability(submitted_action)
         except RemoteRequestError as exc:
             outcome.update(status="INVALID_ACTION", error_code=str(exc),
                            executor_invoked=False)

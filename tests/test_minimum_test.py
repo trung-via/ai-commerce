@@ -19,6 +19,29 @@ FULL = ["python", "-m", "pytest", "tests", "-q"]
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("profile,workers", [
+    ("ef02-tests", 12), ("project-tests", 12), ("project-tests-serial", 0),
+])
+def test_executor_capability_declaration_preserves_registered_mt01_profile(monkeypatch, enabled, profile, workers):
+    if enabled:
+        monkeypatch.setenv("MT01_V21_ENABLED", "1")
+    else:
+        monkeypatch.delenv("MT01_V21_ENABLED", raising=False)
+    profiles = {
+        "ef02-tests": ["python", "-m", "pytest", "tests/test_ef02.py", "-q", "-n", "12"],
+        "project-tests": [*FULL, "-n", "12"],
+        "project-tests-serial": list(FULL),
+    }
+    ordinary = {"verification_profile": profile, "depends_on": []}
+    declared = {**ordinary, "executor_test_policy": "EF01_POST_MODEL_ONLY"}
+    plan = approved_verification_plan(declared, profiles)
+    assert plan == approved_verification_plan(ordinary, profiles)
+    assert plan["state"] == "EXECUTE" and plan["registered_workers"] == workers
+    assert plan["workers_requested"] == workers
+    assert plan["argv"] == profiles[plan["profile"]]
+
+
 def _shadow_workload(count=10, *, history_count=None):
     """Bounded synthetic observations; no pytest collection or execution."""
     import copy
