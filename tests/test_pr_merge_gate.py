@@ -834,16 +834,23 @@ def _existing_owner_addition_fixture():
     new_ef01 = 'eng + "model_defaults.py", eng + "gate_fixture.py"),'
     old_repair = '(eng + "runner.py",), (rem + "worker.py", rem + "scheduler.py")),'
     new_repair = '(eng + "runner.py", eng + "gate_fixture.py"), (rem + "worker.py", rem + "scheduler.py")),'
-    # Match the current independently reviewed MT-01 consumer closure, not
-    # the historical single-line tuple. Only the new fixture source may change.
-    consumers = ('(eng + "runner.py", rem + "worker.py", "scripts/HostOps-V4-InstallPlan.ps1",\n'
-                 '                   "config/hostops-v3/config-v4.example.json"))')
-    old_mt01 = '(eng + "minimum_test.py", eng + "verification.py"),\n                  ' + consumers
-    new_mt01 = '(eng + "minimum_test.py", eng + "verification.py", eng + "gate_mt01_probe.py"),\n                  ' + consumers
+    # Derive the MT-01 source tuple from the actual reviewed owner block,
+    # instead of freezing an old literal. The protected gate still evaluates
+    # whether the requested addition preserves every existing owner/consumer.
     candidate = main
-    for old, new in ((old_ef01, new_ef01), (old_repair, new_repair), (old_mt01, new_mt01)):
+    for old, new in ((old_ef01, new_ef01), (old_repair, new_repair)):
         assert candidate.count(old) == 1
         candidate = candidate.replace(old, new, 1)
+    owner_start = candidate.index('TestGroup("mt01",')
+    owner_end = candidate.index('TestGroup("ef01p",', owner_start)
+    source_start = candidate.index('(eng + "minimum_test.py", eng + "verification.py"', owner_start, owner_end)
+    consumer_start = candidate.index('(eng + "runner.py", rem + "worker.py"', source_start, owner_end)
+    old_owner = candidate[source_start:consumer_start]
+    assert old_owner.rstrip().endswith("),")
+    assert 'eng + "gate_mt01_probe.py"' not in old_owner
+    insertion = old_owner.rfind("),")
+    new_owner = old_owner[:insertion] + ', eng + "gate_mt01_probe.py"' + old_owner[insertion:]
+    candidate = candidate[:source_start] + new_owner + candidate[consumer_start:]
     files = [
         {"filename": "src/ai_commerce/engineering/minimum_test.py", "status": "modified"},
         {"filename": "src/ai_commerce/engineering/gate_fixture.py", "status": "added"},
