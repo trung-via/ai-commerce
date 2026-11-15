@@ -20,6 +20,7 @@ from uuid import uuid4
 
 import pytest
 
+from ai_commerce.hostops_v3.contract import Denied
 from ai_commerce.wakehub import g3_enrollment as en
 from ai_commerce.wakehub import g3_desktop_observer as ob
 from ai_commerce.wakehub import g3_service_host as host
@@ -682,3 +683,394 @@ def test_desktop_bootstrap_launch_false_is_preserved_and_public_state_is_closed(
     assert config["allow_launch"] is False
     assert json.loads(plan.to_json())["start"] == "DENY"
     with pytest.raises(ValueError): replace(plan, state=SimpleNamespace(value="private SID/path")).to_json()
+
+
+@pytest.fixture
+def status_exchange(g3, monkeypatch):
+    """Real role signatures/ledgers, explicitly synthetic HANDLE/desktop custody.
+
+    Only scratch OpenSSH sign/verify subprocesses are allowed. Every other
+    process, Win32 API, socket/listener, START and REUSE boundary fails the test.
+    This fixture never installs a component or proves native readiness.
+    """
+    import socket
+    original_run, original_popen = subprocess.run, subprocess.Popen
+    commands = []
+    def check_command(argv, kwargs):
+        assert type(argv) is list and len(argv) >= 3 and not kwargs.get("shell")
+        assert Path(argv[0]) == Path(g3.broker.f.crypto.exe)
+        assert argv[1:3] in (["-Y", "sign"], ["-Y", "verify"])
+        commands.append(tuple(argv[:3]))
+    def checked_run(argv, *args, **kwargs):
+        check_command(argv, kwargs)
+        return original_run(argv, *args, **kwargs)
+    def checked_popen(argv, *args, **kwargs):
+        check_command(argv, kwargs)
+        return original_popen(argv, *args, **kwargs)
+    def forbidden(*args, **kwargs): pytest.fail("source STATUS crossed a native effect boundary")
+    monkeypatch.setattr(subprocess, "run", checked_run)
+    monkeypatch.setattr(subprocess, "Popen", checked_popen)
+    monkeypatch.setattr(ctypes, "WinDLL", forbidden)
+    monkeypatch.setattr(socket, "socket", forbidden)
+    monkeypatch.setattr(rt.WindowsExecutor, "start_dedicated", forbidden)
+    monkeypatch.setattr(rt.WindowsExecutor, "reuse_owned", forbidden)
+    monkeypatch.setattr(b, "read_process_identity", lambda pid: g3.broker.client)
+    g = grant(op.Operation.STATUS)
+    monkeypatch.setattr(b.WindowsServiceAuthority, "__init__",
+        lambda self, handle: _SERVICE_INITIALIZE(self, handle, clock=lambda: T))
+    _, proof = signed_read(g3.broker, monkeypatch, g)
+    monkeypatch.setattr(b.WindowsServiceAuthority, "__init__", _SERVICE_INITIALIZE)
+    return SimpleNamespace(g3=g3, exchange=host.ConnectedStatusExchange(clock=lambda: g3.clock[0]),
+        request=g3.broker.request(g, proof=proof), grant=g, proof=proof, commands=commands)
+
+
+def offered_exchange(x):
+    challenge = x.exchange.begin(123, x.request)
+    offer = x.exchange.offer(123, x.g3.broker_crypto.signed(challenge.body()))
+    return challenge, offer
+
+
+def status_reply(x, challenge, *, payload=None, role=ob.StatusRole.OBSERVER):
+    return ob.StatusFrame(role, payload if payload is not None else x.g3.status(challenge)).to_bytes()
+
+
+def test_bounded_peer_owner_and_desktop_consumer_signed_status_positive(status_exchange):
+    x = status_exchange
+    challenge, offer = offered_exchange(x)
+    assert challenge.request_sha256 == auth._digest(x.request)
+    assert x.g3.rows()[0][1:] == ("UNKNOWN", None)
+    transcript = ob.collect_status_frame_transcript(offer, expected=challenge,
+        broker_signers=x.g3.broker_crypto.signers, verifier=Path(x.g3.broker.f.crypto.exe),
+        source=SOURCE, generation=1, clock=lambda: T)
+    signed_status = x.g3.status(challenge)
+    assert transcript == auth.signing_bytes(jn.decode(signed_status)["body"])
+    receipt = x.exchange.complete(123, status_reply(x, challenge, payload=signed_status))
+    assert receipt.operation is op.Operation.STATUS and receipt.decision is op.Decision.STATUS_OBSERVED
+    assert receipt.effect is op.EffectAttempt.NOT_ATTEMPTED
+    assert x.g3.rows()[0][1] == "DONE"
+    with closing(sqlite3.connect(x.g3.broker.requests)) as db:
+        assert db.execute("SELECT state FROM requests").fetchall() == [("DONE",)]
+    assert x.commands and any(command[-1] == "verify" for command in x.commands)
+    for secret in (SID, JID, challenge.nonce, challenge.logon_id, challenge.server.executable,
+                   TARGET.dedicated_profile, challenge.request_sha256):
+        assert secret not in receipt.to_json()
+    assert "NOT_PROVEN_BY_SOURCE_OR_TEST_ADAPTER" in receipt.to_json()
+    assert x.exchange.complete(123, status_reply(x, challenge)).reason is op.Reason.DUPLICATE
+
+
+@pytest.mark.parametrize("fault", ["unsigned", "forged", "observer_role", "wrong_namespace",
+    "start", "reuse", "source", "release", "server", "client", "journal", "extra",
+    "noncanonical", "oversized", "untyped", "bad_handle"])
+def test_peer_request_preflight_never_reserves_untrusted_or_effect_request(status_exchange, fault):
+    x = status_exchange
+    value = jn.decode(x.request); body = value["body"]
+    if fault == "source": body["source"]["source_epoch"] += 1
+    elif fault == "release": body["source"]["release_sha"] = "f" * 40
+    elif fault in ("server", "client"): body[fault]["created_at"] += 1
+    elif fault == "journal": body["journal_id"] = "b" * 32
+    elif fault == "extra": body["command"] = "forbidden"
+    elif fault in ("start", "reuse"): body["operation"] = (START if fault == "start" else op.Operation.REUSE).value
+    raw = x.g3.broker.f.crypto.signed(body, "observer" if fault == "observer_role" else "issuer", "grant",
+        namespace="wrong-role" if fault == "wrong_namespace" else b.NAMESPACE.format("request"))
+    if fault == "unsigned": raw = jn.canonical(body)
+    elif fault == "forged": raw = jn.canonical({**value, "signature": "forged"})
+    elif fault == "noncanonical": raw += b"\n"
+    elif fault == "oversized": raw = b"x" * (en.STATUS_FRAME_BODY_LIMIT + 1)
+    elif fault == "untyped": raw = value
+    with pytest.raises(ValueError): x.exchange.begin(True if fault == "bad_handle" else 123, raw)
+    assert x.g3.rows() == []
+    with pytest.raises(ValueError): x.exchange.begin(123, x.request)
+
+
+@pytest.mark.parametrize("fault", ["unsigned", "forged", "issuer_role", "nonce", "request",
+    "source", "generation", "luid", "sid", "session0", "image", "starttime", "port9333",
+    "profile", "desktop", "expired", "noncanonical"])
+def test_broker_offer_requires_independent_signature_and_exact_challenge(status_exchange, fault):
+    x = status_exchange
+    challenge = x.exchange.begin(123, x.request); body = challenge.body()
+    if fault == "nonce": body["nonce"] = str(uuid4())
+    elif fault == "request": body["request_sha256"] = "0" * 64
+    elif fault == "source": body["source"]["release_epoch"] += 1
+    elif fault == "generation": body["generation"] += 1
+    elif fault == "luid": body["logon_id"] = "0000000000099999"
+    elif fault == "sid": body["client"]["user_sid"] = OBSERVER
+    elif fault == "session0": body["client"]["session_id"] = 0
+    elif fault == "image": body["client"]["executable"] = en.DESKTOP_IMAGE
+    elif fault == "starttime": body["client"]["created_at"] += 1
+    elif fault == "port9333": body["target"]["port"] = 9333
+    elif fault == "profile": body["target"]["dedicated_profile"] += "-foreign"
+    elif fault == "desktop": body["target"]["desktop"] = r"WinSta0\Winlogon"
+    raw = x.g3.broker_crypto.signed(body)
+    if fault == "unsigned": raw = jn.canonical(body)
+    elif fault == "forged": raw = jn.canonical({"body": body, "signature": "forged"})
+    elif fault == "issuer_role":
+        raw = x.g3.broker.f.crypto.signed(body, "issuer", "grant", namespace=ob.CHALLENGE_NAMESPACE)
+    elif fault == "noncanonical": raw += b" "
+    elif fault == "expired": x.g3.clock[0] = T + 5
+    with pytest.raises(ValueError): x.exchange.offer(123, raw)
+    assert x.g3.rows()[0][1:] == ("UNKNOWN", None)
+    assert x.exchange.complete(123, b"{}").reason is op.Reason.DUPLICATE
+
+
+@pytest.mark.parametrize("fault", ["empty", "partial_header", "partial_body", "length", "oversized",
+    "trailing", "two_frames", "noncanonical", "duplicate_key", "extra", "role", "operation", "untyped"])
+def test_peer_framing_denies_malformed_in_both_directions(status_exchange, fault):
+    x = status_exchange
+    challenge, offer = offered_exchange(x)
+    reply = status_reply(x, challenge)
+    def damage(raw):
+        if fault == "empty": return b""
+        if fault == "partial_header": return raw[:3]
+        if fault == "partial_body": return raw[:-1]
+        if fault == "length": return (len(raw) + 99).to_bytes(4, "big") + raw[4:]
+        if fault == "oversized": return b"x" * (en.STATUS_FRAME_BODY_LIMIT + 5)
+        if fault == "trailing": return raw + b" "
+        if fault == "two_frames": return raw + raw
+        if fault == "untyped": return bytearray(raw)
+        body = jn.decode(raw[4:])
+        if fault == "extra": body["pipe"] = "caller-selected"
+        elif fault == "role": body["role"] = "wakehub-g2-issuer"
+        elif fault == "operation": body["operation"] = START.value
+        payload = jn.canonical(body)
+        if fault == "noncanonical": payload += b"\n"
+        elif fault == "duplicate_key": payload = b'{"operation":"STATUS",' + payload[1:]
+        return len(payload).to_bytes(4, "big") + payload
+    with pytest.raises(ValueError):
+        ob.collect_status_frame_transcript(damage(offer), expected=challenge,
+            broker_signers=x.g3.broker_crypto.signers, verifier=Path(x.g3.broker.f.crypto.exe),
+            source=SOURCE, generation=1, clock=lambda: T)
+    receipt = x.exchange.complete(123, damage(reply))
+    assert receipt.decision is op.Decision.UNKNOWN_EFFECT and receipt.effect is op.EffectAttempt.NOT_ATTEMPTED
+    assert x.g3.rows()[0][1:] == ("UNKNOWN", None)
+    assert x.exchange.complete(123, reply).reason is op.Reason.DUPLICATE
+
+
+@pytest.mark.parametrize("fault", ["unsigned", "forged", "issuer_role", "broker_role", "namespace",
+    "nonce", "request", "source", "generation", "luid", "sid", "session0", "pid", "image",
+    "starttime", "desktop", "port9333", "profile", "locked", "future", "stale"])
+def test_desktop_reply_signature_role_and_full_binding_are_independent(status_exchange, fault):
+    x = status_exchange
+    challenge, _ = offered_exchange(x)
+    body = jn.decode(x.g3.status(challenge))["body"]
+    if fault == "nonce": body["challenge"]["nonce"] = str(uuid4())
+    elif fault == "request": body["challenge"]["request_sha256"] = "0" * 64
+    elif fault == "source": body["challenge"]["source"]["source_epoch"] += 1
+    elif fault == "generation": body["challenge"]["generation"] += 1
+    elif fault == "luid": body["logon_id"] = "0000000000099999"
+    elif fault in ("sid", "session0", "pid", "image", "starttime"):
+        key, wrong = {"sid": ("user_sid", OBSERVER), "session0": ("session_id", 0),
+            "pid": ("pid", 42), "image": ("executable", en.DESKTOP_IMAGE),
+            "starttime": ("created_at", T)}[fault]
+        body["process"][key] = wrong
+    elif fault == "desktop": body["challenge"]["target"]["desktop"] = r"WinSta0\Winlogon"
+    elif fault == "port9333": body["challenge"]["target"]["port"] = 9333
+    elif fault == "profile": body["challenge"]["target"]["dedicated_profile"] += "-foreign"
+    elif fault == "locked": body["state"] = "LOCKED"
+    elif fault == "future": body["observed_at"] = T + 1
+    elif fault == "stale": body["observed_at"] = T - 1
+    payload = x.g3.broker.f.crypto.signed(body, "issuer" if fault == "issuer_role" else "observer",
+        "inventory", namespace="wrong-role" if fault == "namespace" else ob.STATUS_NAMESPACE)
+    if fault == "forged": payload = jn.canonical({"body": body, "signature": "forged"})
+    if fault == "unsigned":
+        raw = jn.canonical(dict(schema="WakeHubG3StatusFrame.v1", operation="STATUS",
+            role=ob.StatusRole.OBSERVER.value, payload=body))
+        raw = len(raw).to_bytes(4, "big") + raw
+    else:
+        raw = status_reply(x, challenge, payload=payload,
+            role=ob.StatusRole.BROKER if fault == "broker_role" else ob.StatusRole.OBSERVER)
+    receipt = x.exchange.complete(123, raw)
+    assert receipt.decision is op.Decision.UNKNOWN_EFFECT and receipt.effect is op.EffectAttempt.NOT_ATTEMPTED
+    assert x.g3.rows()[0][1:] == ("UNKNOWN", None)
+
+
+@pytest.mark.parametrize("fault", ["handle", "pipe_acl", "service_acl", "scm", "sid", "session0",
+    "image", "starttime", "luid", "generation", "release", "port9333", "profile", "expired", "clock_back"])
+def test_peer_reauthenticates_protected_context_after_offer(status_exchange, monkeypatch, fault):
+    x = status_exchange
+    challenge, _ = offered_exchange(x); reply = status_reply(x, challenge)
+    if fault == "pipe_acl": monkeypatch.setattr(b, "observe_connection", lambda handle: jn.deny())
+    elif fault == "service_acl": monkeypatch.setattr(b.ServiceCustody, "check", lambda *a, **kw: jn.deny())
+    elif fault == "scm": x.g3.broker.facts["scm"]["pid"] += 1
+    elif fault in ("sid", "session0", "image", "starttime"):
+        key, wrong = {"sid": ("user_sid", OBSERVER), "session0": ("session_id", 0),
+            "image": ("executable", en.DESKTOP_IMAGE), "starttime": ("created_at", T)}[fault]
+        x.g3.broker.facts["client"][key] = wrong
+    elif fault == "luid": monkeypatch.setattr(ob, "read_logon_id", lambda pid: "0000000000099999")
+    elif fault == "generation": x.g3.config["generation"] += 1
+    elif fault == "release": x.g3.config["source"]["release_epoch"] += 1
+    elif fault == "port9333": x.g3.config["target"]["port"] = 9333
+    elif fault == "profile": x.g3.config["target"]["dedicated_profile"] += "-foreign"
+    elif fault == "expired": x.g3.clock[0] = T + 5
+    elif fault == "clock_back": x.g3.clock[0] = T - 1
+    receipt = x.exchange.complete(999 if fault == "handle" else 123, reply)
+    assert receipt.decision is op.Decision.UNKNOWN_EFFECT and receipt.effect is op.EffectAttempt.NOT_ATTEMPTED
+    assert x.g3.rows()[0][1:] == ("UNKNOWN", None)
+
+
+@pytest.mark.parametrize("fault", ["revoked", "expired_grant", "expired_consent", "wrong_human", "unproven_pause"])
+def test_peer_status_still_requires_current_g2_issuer_human_and_revocation(status_exchange, fault):
+    x = status_exchange
+    if fault != "revoked":
+        proof = x.proof
+        if fault == "expired_grant":
+            old = replace(x.grant, issued_at=T - 10, expires_at=T - 1)
+            proof = x.g3.broker.f.proof(old, pause="PAUSED")
+            x.request = x.g3.broker.request(old, proof=proof)
+        else:
+            consent = jn.decode(proof.consent)["body"]
+            if fault == "expired_consent": consent["expires_at"] = T - 0.5
+            elif fault == "unproven_pause": consent["pause"] = "UNPROVEN"
+            raw = x.g3.broker.f.crypto.signed(consent, "issuer" if fault == "wrong_human" else "human",
+                "consent", namespace=auth.NAMESPACES["consent"])
+            x.request = x.g3.broker.request(x.grant, proof=op.PrivateGrantProof(proof.signature, raw))
+    challenge, _ = offered_exchange(x)
+    if fault == "revoked":
+        x.g3.broker.f.rev["epoch"] += 1
+        x.g3.broker.f.rev["revoked"] = [str(x.grant.key.action_id)]
+        x.g3.broker.f.save()
+    receipt = x.exchange.complete(123, status_reply(x, challenge))
+    assert receipt.decision is op.Decision.HOLD and receipt.effect is op.EffectAttempt.NOT_ATTEMPTED
+    with closing(sqlite3.connect(x.g3.broker.requests)) as db:
+        assert db.execute("SELECT count(*) FROM requests").fetchone() == (0,)
+    assert x.exchange.complete(123, status_reply(x, challenge)).reason is op.Reason.DUPLICATE
+
+
+@pytest.mark.parametrize("phase", ["reserved", "offered", "partial_reply", "lost_ack"])
+def test_peer_disconnect_crash_and_partial_readback_preserve_unknown(status_exchange, monkeypatch, phase):
+    x = status_exchange
+    challenge = x.exchange.begin(123, x.request)
+    if phase != "reserved": x.exchange.offer(123, x.g3.broker_crypto.signed(challenge.body()))
+    if phase == "partial_reply":
+        result = x.exchange.complete(123, status_reply(x, challenge)[:-1])
+    elif phase == "lost_ack":
+        finish = b.BrokerRequests.finish
+        def lost_ack(self, *args):
+            if self.path == x.g3.path: raise TimeoutError("synthetic challenge journal readback loss")
+            return finish(self, *args)
+        monkeypatch.setattr(b.BrokerRequests, "finish", lost_ack)
+        result = x.exchange.complete(123, status_reply(x, challenge))
+    else: result = x.exchange.abandon()
+    assert result.decision is op.Decision.UNKNOWN_EFFECT and result.effect is op.EffectAttempt.NOT_ATTEMPTED
+    assert x.g3.rows()[0][1:] == ("UNKNOWN", None)
+    assert x.exchange.complete(123, status_reply(x, challenge)).reason is op.Reason.DUPLICATE
+    with pytest.raises(ValueError): x.exchange.begin(123, x.request)
+    monkeypatch.setattr(host, "uuid4", lambda: challenge.nonce)
+    reopened = host.ConnectedStatusExchange(clock=lambda: T)
+    with pytest.raises(ValueError): reopened.begin(123, x.request)
+    assert len(x.g3.rows()) == 1
+
+
+def test_peer_concurrent_completion_and_request_replay_are_first_wins(status_exchange, monkeypatch):
+    x = status_exchange
+    challenge, _ = offered_exchange(x); reply = status_reply(x, challenge)
+    calls = []
+    original = host._connected_runtime
+    def counted(*args): calls.append(1); return original(*args)
+    monkeypatch.setattr(host, "_connected_runtime", counted)
+    with ThreadPoolExecutor(2) as pool:
+        receipts = list(pool.map(lambda _: x.exchange.complete(123, reply), range(2)))
+    assert len(calls) == 1
+    assert {r.decision for r in receipts} == {op.Decision.STATUS_OBSERVED, op.Decision.HOLD}
+    assert all(r.effect is op.EffectAttempt.NOT_ATTEMPTED for r in receipts)
+    # A fresh challenge cannot replay the already consumed issuer request.
+    x.exchange = host.ConnectedStatusExchange(clock=lambda: T)
+    fresh, _ = offered_exchange(x)
+    assert fresh.nonce != challenge.nonce
+    result = x.exchange.complete(123, status_reply(x, fresh))
+    assert result.decision is op.Decision.HOLD and result.reason is op.Reason.DUPLICATE
+    with closing(sqlite3.connect(x.g3.broker.requests)) as db:
+        assert db.execute("SELECT count(*) FROM requests").fetchone() == (1,)
+
+
+@pytest.mark.parametrize("fault", ["issuer_role", "namespace", "forged", "session0", "source", "generation", "locked"])
+def test_desktop_consumer_authenticates_even_when_service_offer_is_bypassed(status_exchange, monkeypatch, fault):
+    x = status_exchange
+    challenge = x.exchange.begin(123, x.request)
+    desktop_checks = []
+    def desktop(target):
+        desktop_checks.append(target)
+        if fault == "locked": jn.deny()
+    monkeypatch.setattr(auth, "_desktop_identity", desktop)
+    raw = x.g3.broker_crypto.signed(challenge.body())
+    if fault in ("issuer_role", "namespace"):
+        raw = x.g3.broker.f.crypto.signed(challenge.body(), "issuer", "grant",
+            namespace=ob.CHALLENGE_NAMESPACE if fault == "issuer_role" else "wrong-namespace")
+    elif fault == "forged": raw = jn.canonical({"body": challenge.body(), "signature": "forged"})
+    elif fault == "session0": monkeypatch.setattr(b, "read_process_identity", lambda pid: x.g3.broker.server)
+    frame = ob.StatusFrame(ob.StatusRole.BROKER, raw).to_bytes()
+    signature_errors = {"issuer_role": "SIGNATURE_INVALID", "namespace": "SIGNATURE_INVALID",
+                        "forged": "SIGNATURE_UNAVAILABLE"}
+    # Crypto denials retain the shared verifier's fixed-code exception type.
+    expected_error = Denied if fault in signature_errors else jn.NativeDenied
+    with pytest.raises(expected_error) as denied:
+        ob.collect_status_frame_transcript(frame, expected=challenge,
+            broker_signers=x.g3.broker_crypto.signers, verifier=Path(x.g3.broker.f.crypto.exe),
+            source=replace(SOURCE, release_epoch=2) if fault == "source" else SOURCE,
+            generation=2 if fault == "generation" else 1, clock=lambda: T)
+    assert denied.value.args == (signature_errors.get(fault, "WAKEHUB_NATIVE_CUSTODY_HOLD"),)
+    assert desktop_checks == ([] if fault in signature_errors or fault == "session0" else [TARGET])
+    assert x.g3.rows()[0][1:] == ("UNKNOWN", None)
+
+
+def test_bound_request_cannot_be_substituted_at_underlying_host(status_exchange, monkeypatch):
+    x = status_exchange
+    challenge, _ = offered_exchange(x)
+    monkeypatch.setattr(host, "_connected_runtime", lambda *args: pytest.fail("substituted request reached runtime"))
+    different = x.g3.broker.request(x.grant, proof=x.proof)
+    assert different != x.request
+    receipt = x.exchange._host.complete(123, x.g3.status(challenge), different)
+    assert receipt.decision is op.Decision.UNKNOWN_EFFECT and receipt.effect is op.EffectAttempt.NOT_ATTEMPTED
+    assert x.g3.rows()[0][1:] == ("UNKNOWN", None)
+
+
+def test_peer_clock_rollback_within_live_challenge_is_unknown(status_exchange):
+    x = status_exchange
+    challenge = x.exchange.begin(123, x.request)
+    x.g3.clock[0] = T + 1
+    x.exchange.offer(123, x.g3.broker_crypto.signed(challenge.body()))
+    x.g3.clock[0] = T + 0.5
+    receipt = x.exchange.complete(123, status_reply(x, challenge))
+    assert receipt.decision is op.Decision.UNKNOWN_EFFECT and receipt.effect is op.EffectAttempt.NOT_ATTEMPTED
+    assert x.g3.rows()[0][1:] == ("UNKNOWN", None)
+
+
+def test_peer_unknown_g2_request_readback_cannot_finish_or_retry_challenge(status_exchange, monkeypatch):
+    x = status_exchange
+    challenge, _ = offered_exchange(x)
+    finish = b.BrokerRequests.finish
+    def unavailable(self, *args):
+        if self.path == x.g3.broker.requests: raise TimeoutError("synthetic G2 readback loss")
+        return finish(self, *args)
+    monkeypatch.setattr(b.BrokerRequests, "finish", unavailable)
+    receipt = x.exchange.complete(123, status_reply(x, challenge))
+    assert receipt.decision is op.Decision.UNKNOWN_EFFECT and receipt.effect is op.EffectAttempt.NOT_ATTEMPTED
+    assert x.g3.rows()[0][1:] == ("UNKNOWN", None)
+    with closing(sqlite3.connect(x.g3.broker.requests)) as db:
+        assert db.execute("SELECT state,receipt FROM requests").fetchall() == [("UNKNOWN", None)]
+    assert x.exchange.complete(123, status_reply(x, challenge)).reason is op.Reason.DUPLICATE
+
+
+def test_status_transport_contract_is_fixed_source_only_and_effect_guards_remain(monkeypatch):
+    def forbidden(*a, **kw): pytest.fail("offline contract reached native code")
+    monkeypatch.setattr(ctypes, "WinDLL", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(sqlite3, "connect", forbidden)
+    contract = jn.decode(en.status_transport_contract().value)
+    assert contract["service"] == b.SERVICE and contract["pipe"] == b.PIPE
+    assert contract["operation"] == "STATUS" and contract["body_limit"] == en.STATUS_FRAME_BODY_LIMIT
+    public = en.status_transport_preflight()
+    assert public["status"] == "SOURCE_READY_FOR_ENROLLMENT" and public["native_transport"] == "HOLD"
+    assert public["start"] == public["reuse"] == "DENY" and public["native_effect"] == "NOT_ATTEMPTED"
+    assert tuple(public["missing_owners"]) == en.STATUS_TRANSPORT_MISSING_OWNERS
+    for secret in (SID, JID, TARGET.dedicated_profile, en.SERVICE_IMAGE, b.PIPE):
+        assert secret not in str(public)
+    with pytest.raises(TypeError): en.status_transport_preflight(service_state="RUNNING")
+    for operation in (START, op.Operation.REUSE):
+        native = rt.WindowsPrivateRuntime()
+        native._operator = object()
+        receipt = native._run_authenticated(operation)
+        assert receipt.decision is op.Decision.HOLD and receipt.effect is op.EffectAttempt.NOT_ATTEMPTED
+    executor = rt.WindowsExecutor()
+    with pytest.raises(ValueError): executor.start_dedicated(None)
+    with pytest.raises(ValueError): executor.reuse_owned(None)
