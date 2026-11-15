@@ -860,7 +860,14 @@ def _decode_fixture_report(raw, pid):
             if actual != required:
                 mismatches |= 1 << index
                 classes |= codebook.get(actual, 15) << (4 * index)
-        raise Unproven("NATIVE_ACCESS_DENIAL_UNPROVEN", mismatches | (classes << 6))
+        detail = mismatches | (classes << 6)
+        if mismatches & (1 << 5):
+            # A WSA error code is a bounded public integer, not a network
+            # address or payload. Expose 0..65534 exactly; clamp anything
+            # else to the reserved 65535 category, so one run distinguishes
+            # OS error families without logging any socket/path secrets.
+            detail |= (min(values[9], 65535) + 1) << 30
+        raise Unproven("NATIVE_ACCESS_DENIAL_UNPROVEN", detail)
     return values
 
 
