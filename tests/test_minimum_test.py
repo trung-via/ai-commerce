@@ -1293,6 +1293,274 @@ def test_windows_provider_synthetic_inventory_disabled_or_nonwindows_has_no_nati
     assert receipt["reason_codes"] == ["WINDOWS_OS_REQUIRED"]
 
 
+# P1-B2c: offline SYNTHETIC checks and explicitly distinct hosted OS tests.
+def _native_inert_request(sandbox):
+    return dict(enabled=True, repository=ROOT, candidate_sha="a" * 40,
+                source_sha256="b" * 64, profile_sha256=sandbox.PROFILE_SHA256,
+                environment_sha256=sandbox.ENVIRONMENT_SHA256)
+
+
+def test_windows_native_synthetic_owner_and_consumer_keep_registered_command(monkeypatch):
+    from ai_commerce.engineering import windows_collection_sandbox as sandbox
+
+    owner = next(g for g in mt.approved_groups() if g.name == "mt01")
+    assert "src/ai_commerce/engineering/windows_collection_sandbox.py" in owner.paths
+    assert owner.tests == ("tests/test_minimum_test.py",)
+    calls = []
+    monkeypatch.setattr(sandbox, "run_inert_probe", lambda **kw: calls.append(kw) or {"status": "UNPROVEN"})
+    request = _native_inert_request(sandbox)
+    assert mt.windows_collection_native_probe(**request) == {"status": "UNPROVEN"}
+    assert calls == [dict(request, fault="none")]
+    assert "SANDBOX_COLLECTION_ADAPTER_NOT_CONNECTED" in mt._WINDOWS_PROVIDER_BLOCKERS
+    receipt = mt.bounded_windows_collection(**_bounded_collection_case())
+    _assert_bounded_collection_not_started(receipt)
+
+
+@pytest.mark.parametrize("field,value,reason", [
+    ("profile_sha256", "0" * 64, "NATIVE_PROFILE_MISMATCH"),
+    ("environment_sha256", "0" * 64, "NATIVE_ENVIRONMENT_MISMATCH"),
+    ("source_sha256", None, "NATIVE_SOURCE_BINDING_REQUIRED"),
+    ("candidate_sha", "main", "NATIVE_EXACT_HEAD_REQUIRED"),
+    ("fault", "shell", "NATIVE_FAULT_NOT_REGISTERED"),
+])
+def test_windows_native_synthetic_binding_faults_have_no_effects(monkeypatch, field, value, reason):
+    from ai_commerce.engineering import windows_collection_sandbox as sandbox
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("SYNTHETIC binding checks must have no host effects")
+
+    monkeypatch.setenv(sandbox.OPT_IN_VARIABLE, sandbox.PROFILE_SHA256)
+    monkeypatch.setattr(sandbox, "_hosted_identity", forbidden)
+    monkeypatch.setattr(sandbox, "_Win32", forbidden)
+    request = _native_inert_request(sandbox)
+    request[field] = value
+    receipt = sandbox.run_inert_probe(**request)
+    assert receipt["reason_codes"] == [reason]
+    assert receipt["status"] == "UNPROVEN" and receipt["events"] == []
+    assert receipt["candidate_imports_authorized"] is receipt["acceptance_pass"] is False
+
+
+def test_windows_native_synthetic_forged_host_flags_and_stale_source_never_launch(monkeypatch):
+    from ai_commerce.engineering import windows_collection_sandbox as sandbox
+
+    env = {sandbox.OPT_IN_VARIABLE: sandbox.PROFILE_SHA256, "RUNNER_ENVIRONMENT": "github-hosted",
+           "RUNNER_OS": "Windows", "GITHUB_ACTIONS": "true"}
+    monkeypatch.setattr(sandbox, "os", SimpleNamespace(name="nt", environ=env))
+    monkeypatch.setattr(sandbox, "source_digest", lambda _: "b" * 64)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("SYNTHETIC forged runner cannot touch native APIs/scratch")
+
+    monkeypatch.setattr(sandbox, "_Win32", forbidden)
+    monkeypatch.setattr(sandbox, "_http_json", forbidden)
+    receipt = sandbox.run_inert_probe(**_native_inert_request(sandbox))
+    assert receipt["reason_codes"] == ["HOSTED_SIGNED_PROVENANCE_REQUIRED"]
+    monkeypatch.setattr(sandbox, "source_digest", lambda _: "c" * 64)
+    receipt = sandbox.run_inert_probe(**_native_inert_request(sandbox))
+    assert receipt["reason_codes"] == ["NATIVE_SOURCE_DIGEST_MISMATCH"]
+    assert receipt["events"] == [] and receipt["identity"] is None
+
+
+def _synthetic_native_oidc(*, change=None):
+    """Public deterministic TEST KEY. Synthetic signatures are never OS proof."""
+    import base64
+    import hashlib
+
+    modulus = int(
+        "b14df439c58fb2bc448692c9fc3682ac9b2fbc9ce49309e3e3b7b5d00bfaba35e"
+        "51f21cdcff10d1c57b2c559f7da4b0880aee3d9d546c5d2ffbb57bc243327f0b9"
+        "52fecd785c0ef63f8fc55503380d81c7d817bfa478d8ed95ace26a80225b0739d16"
+        "9f401bb6c3c8183fe1df8c0a39fcde2207d39ee8bbf8fd2e521d33e205b489ca97"
+        "6a3d306ee7f05138a20f3996d200bfe9de552b31b240c77d63cffdac4d228493c9e"
+        "f500cd0127b7b48a74cac5d3485d02a92e8436b9391cec8e36389b01d46c3886365"
+        "cece72c0faf5118656dfab974f75821a5d5706fd05afa873af1b89340e345437757d"
+        "d73529735bcd668e998674365935ef5b9315fac68901347", 16)
+    private = int(
+        "36f318e8bab0c14d15d3bb347c450c949ff7d875ab6562a04d17c77235f43bb7ae4"
+        "dcab53567d88f5b229d85378a60ccbeccf4f2b2e59f33b86c0051dfca36eba513f"
+        "2c20d3642b0d09c272524bd3f7a644c3578006a2f98da555d4a7271b35276f9cee"
+        "37f91ed868701384563ad9848538f6c50431f0a12916963f7eab70b619a02bc4939"
+        "0711de1620ca6d6d3ead6d675fbaa79e55941d28558a94474aa356982245f6aa12fb"
+        "b197bc82a89409c4f04ce0bb5cf70b00a5372c072f4d1417efa0f64fd138e5b3479"
+        "054adb1d1f75ac679159e37f890111aabadd7deeee5facd2e1c4e021fd5134d7f45"
+        "8fca9183c38c79b235922f5a07ada6097c9581d76249", 16)
+
+    def encode(data):
+        return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+    claims = dict(iss="https://token.actions.githubusercontent.com", aud="synthetic-audience",
+                  runner_environment="github-hosted", sha="a" * 40, repository="example/repo",
+                  run_id="42", run_attempt="1", iat=990, nbf=990, exp=1200,
+                  workflow_ref="example/repo/.github/workflows/native.yml@refs/heads/candidate")
+    header = dict(alg="RS256", typ="JWT", kid="SYNTHETIC", x5t="SYNTHETIC")
+    if change:
+        change(header, claims)
+    message = ".".join(encode(mt.canonical(part).encode()) for part in (header, claims))
+    tail = bytes.fromhex("3031300d060960864801650304020105000420") + hashlib.sha256(message.encode()).digest()
+    encoded = b"\0\1" + b"\xff" * (256 - len(tail) - 3) + b"\0" + tail
+    signature = pow(int.from_bytes(encoded, "big"), private, modulus).to_bytes(256, "big")
+    jwks = {"keys": [dict(kty="RSA", use="sig", alg="RS256", kid="SYNTHETIC",
+                          n=encode(modulus.to_bytes(256, "big")), e=encode(b"\1\0\1"))]}
+    return message + "." + encode(signature), jwks
+
+
+@pytest.mark.parametrize("case", ["valid", "self_hosted", "signature", "expired", "future",
+                                  "wrong_head", "wrong_audience", "wrong_attempt", "algorithm",
+                                  "key_url", "duplicate_key"])
+def test_windows_native_synthetic_oidc_requires_signature_host_and_exact_identity(case):
+    from ai_commerce.engineering import windows_collection_sandbox as sandbox
+
+    def change(header, claims):
+        if case == "self_hosted":
+            claims["runner_environment"] = "self-hosted"
+        elif case == "expired":
+            claims["exp"] = 999
+        elif case == "future":
+            claims["iat"] = 1100
+        elif case == "wrong_head":
+            claims["sha"] = "c" * 40
+        elif case == "wrong_audience":
+            claims["aud"] = "forged"
+        elif case == "wrong_attempt":
+            claims["run_attempt"] = "2"
+        elif case == "algorithm":
+            header["alg"] = "HS256"
+        elif case == "key_url":
+            header["jku"] = "https://example.invalid/forged"
+
+    token, jwks = _synthetic_native_oidc(change=change)
+    if case == "signature":
+        parts = token.split("."); parts[2] = ("A" if parts[2][0] != "A" else "B") + parts[2][1:]
+        token = ".".join(parts)
+    if case == "duplicate_key":
+        jwks["keys"] *= 2
+    kwargs = dict(audience="synthetic-audience", candidate_sha="a" * 40,
+                  repository="example/repo", run_id="42", attempt="1", now=1000)
+    if case == "valid":
+        assert sandbox._verify_oidc(token, jwks, **kwargs)["runner_environment"] == "github-hosted"
+    else:
+        with pytest.raises(sandbox.Unproven, match="HOSTED_OIDC_VERIFICATION_FAILED"):
+            sandbox._verify_oidc(token, jwks, **kwargs)
+
+
+@pytest.mark.parametrize("index,value", [(4, 2), (5, 32), (6, 3), (7, 5), (8, 5), (9, 10061)])
+def test_windows_native_synthetic_missing_files_and_closed_ports_are_not_denials(index, value):
+    import struct
+    from ai_commerce.engineering import windows_collection_sandbox as sandbox
+
+    values = [0x4d543031, 1, 0, 0, 5, 5, 5, 0, 2, 10013, 456, 123, 1, 1, 0, 0]
+    assert sandbox._decode_fixture_report(struct.pack("<16I", *values), 123)[9] == 10013
+    values[index] = value
+    with pytest.raises(sandbox.Unproven, match="NATIVE_ACCESS_DENIAL_UNPROVEN"):
+        sandbox._decode_fixture_report(struct.pack("<16I", *values), 123)
+
+
+@pytest.mark.parametrize("fault", ["none", "assignment", "confirmation"])
+def test_windows_native_synthetic_launcher_assigns_and_confirms_before_resume(monkeypatch, fault):
+    import ctypes
+    from ai_commerce.engineering import windows_collection_sandbox as sandbox
+
+    calls = []
+    def query(job, kind, pointer, size, returned):
+        ctypes.cast(pointer, ctypes.POINTER(sandbox._EXTENDED_LIMIT)).contents.basic.flags = 0x2000
+        return True
+    def initialize(pointer, count, flags, size):
+        ctypes.cast(size, ctypes.POINTER(ctypes.c_size_t)).contents.value = 64
+        return pointer is not None
+    def capabilities(pointer, flags, kind, value, size, previous, returned):
+        caps = ctypes.cast(value, ctypes.POINTER(sandbox._CAPABILITIES)).contents
+        assert kind == 0x20009 and caps.count == 0 and caps.capabilities is None
+        return True
+    def create(exe, command, ps, ts, inherit, flags, environment, cwd, startup, output):
+        assert exe == "fixture.exe" and inherit is False and flags & 4 and flags & 0x80000
+        process = ctypes.cast(output, ctypes.POINTER(sandbox._PROCESS)).contents
+        process.process, process.thread, process.pid = 200, 201, 222
+        calls.append("CREATE_SUSPENDED")
+        return True
+    def assign(job, process):
+        calls.append("ASSIGN_JOB")
+        return fault != "assignment"
+    def confirm(process, job, inside):
+        calls.append("CONFIRM_JOB")
+        ctypes.cast(inside, ctypes.POINTER(sandbox.W.BOOL)).contents.value = fault != "confirmation"
+        return True
+    def resume(thread):
+        calls.append("RESUME")
+        return 1
+    def terminate(process, code):
+        calls.append("TERMINATE_SUSPENDED")
+        return True
+    fake = SimpleNamespace(CreateJobObjectW=lambda *a: 100, SetInformationJobObject=lambda *a: True,
+                           QueryInformationJobObject=query, InitializeProcThreadAttributeList=initialize,
+                           UpdateProcThreadAttribute=capabilities, CreateProcessW=create,
+                           AssignProcessToJobObject=assign, IsProcessInJob=confirm, ResumeThread=resume,
+                           TerminateProcess=terminate, WaitForSingleObject=lambda *a: 0,
+                           CloseHandle=lambda h: calls.append(("CLOSE", h)) or True,
+                           DeleteProcThreadAttributeList=lambda *a: None)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 6, raising=False)
+    native = sandbox._Win32.__new__(sandbox._Win32)
+    native.k, native.deadline = fake, sandbox._Deadline()
+    kwargs = dict(sid=ctypes.c_void_p(99), fault="assignment" if fault == "assignment" else "none")
+    if fault == "none":
+        job, process, pid, events = native.launch("fixture.exe", ["probe"], "scratch", {}, **kwargs)
+        assert (job, process, pid) == (100, 200, 222)
+        assert events == ["CREATE_SUSPENDED", "ASSIGN_JOB", "CONFIRM_JOB", "RESUME"]
+        assert calls[:4] == events
+    else:
+        reason = "NATIVE_ASSIGN_JOB_FAILED" if fault == "assignment" else "NATIVE_JOB_MEMBERSHIP_FAILED"
+        with pytest.raises(sandbox.Unproven, match=reason):
+            native.launch("fixture.exe", ["probe"], "scratch", {}, **kwargs)
+        assert "RESUME" not in calls and "TERMINATE_SUSPENDED" in calls
+        assert {entry[1] for entry in calls if isinstance(entry, tuple) and entry[0] == "CLOSE"} == {100, 200, 201}
+
+
+@pytest.mark.parametrize("fault", ["none", "timeout", "assignment"])
+def test_windows_native_inert_provider(request, fault):
+    """REAL OS proof only on independently authenticated ephemeral hosted Windows.
+
+    Exact registered selection includes all three cases. Each executed case
+    puts its sanitized native API/Job/cleanup receipt into JUnit user properties.
+    A skip is an explicit proof gap; it cannot establish native acceptance.
+    """
+    from ai_commerce.engineering import windows_collection_sandbox as sandbox
+
+    request.node.user_properties.append(("mt01_native_kind", "REAL_HOSTED_WINDOWS_REQUIRED"))
+    if os.name != "nt" or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted":
+        pytest.skip("UNPROVEN: ephemeral GitHub-hosted Windows required; self-host/laptop native probe forbidden")
+    if os.environ.get(sandbox.OPT_IN_VARIABLE) != sandbox.PROFILE_SHA256:
+        pytest.skip("UNPROVEN: source-pinned hosted native opt-in absent; native fixture NOT EXECUTED")
+    receipt = mt.windows_collection_native_probe(
+        enabled=True, repository=ROOT, candidate_sha=os.environ.get("GITHUB_SHA"),
+        source_sha256=sandbox.source_digest(ROOT), profile_sha256=sandbox.PROFILE_SHA256,
+        environment_sha256=sandbox.ENVIRONMENT_SHA256, fault=fault)
+    request.node.user_properties.append(("mt01_native_receipt", mt.canonical(receipt)))
+    assert receipt["status"] == ("NEGATIVE_OBSERVED" if fault == "assignment" else "OBSERVED"), mt.canonical(receipt)
+    assert receipt["cleanup_complete"] is receipt["profile_deleted"] is receipt["child_terminated"] is True
+    assert receipt["orphan_count"] == 0 and receipt["elapsed_seconds"] <= 55
+    assert receipt["artifact_bytes"] <= 4 * 1024 * 1024 and receipt["output_bytes"] <= 4096
+    assert receipt["create_profile_hresult"] == receipt["derive_profile_hresult"] == receipt["delete_profile_hresult"] == 0
+    assert receipt["identity"]["runner_environment"] == "github-hosted"
+    assert receipt["identity"]["candidate_sha"] == os.environ["GITHUB_SHA"]
+    assert receipt["reparse_guard"] == dict(handle_rejected=True, replacement_win32_error=32)
+    assert receipt["candidate_imports_authorized"] is receipt["trusted_windows_proof"] is receipt["acceptance_pass"] is False
+    if fault == "assignment":
+        assert receipt["native_error"] == 6 and receipt["reason_codes"] == ["NATIVE_ASSIGN_JOB_FAILED"]
+        assert receipt["events"] == ["CREATE_SUSPENDED", "CLEANUP_COMPLETE"]
+        assert receipt["native_isolation"] == "UNPROVEN"
+    else:
+        assert receipt["events"] == ["CREATE_SUSPENDED", "ASSIGN_JOB", "CONFIRM_JOB", "RESUME",
+                                     "CHILD_AND_DESCENDANT_READY", "CLOSE_LAST_JOB_HANDLE",
+                                     "WAIT_CHILD_SIGNALED", "WAIT_DESCENDANT_SIGNALED", "CLEANUP_COMPLETE"]
+        assert receipt["denials"] == dict(outside_source_read=5, readonly_source_write=5,
+                                          junction_escape_read=5, source_read_control=0,
+                                          missing_file_control=2, loopback_connect=10013)
+        assert receipt["positive_controls"] == dict(outside_source_read=0, readonly_source_write=0,
+                                                    junction_escape_read=0, loopback_connect=0)
+        assert receipt["grandchild_terminated"] is True
+        assert receipt["timed_out"] is (fault == "timeout")
+        assert receipt["reason_codes"] == []
+
+
 @pytest.fixture(autouse=True)
 def _isolate_legacy_selector_mode(monkeypatch):
     """Legacy MT-01 contracts must not inherit the EF01 V2.1 selector toggle.
