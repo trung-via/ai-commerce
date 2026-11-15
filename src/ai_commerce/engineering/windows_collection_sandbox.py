@@ -366,25 +366,38 @@ int wmain(int argc, wchar_t **argv) {
     if (!ConvertSidToStringSidW(((TOKEN_APPCONTAINER_INFORMATION*)buffer)->TokenAppContainer, &sid_string)) return 97;
     r[13] = wcscmp(sid_string, argv[8]) == 0; LocalFree(sid_string);
     CloseHandle(token);
-    // Verify the exact two source-owned variables regardless of OS ordering.
-    // Never accept an inherited, duplicate or unexpected environment entry.
-    // The two-bit presence plus cardinality mask is safe to expose on failure.
+    // Fail closed on every extra environment entry. Also classify unexpected
+    // entries by bounded type/count, never retaining names, values or paths.
+    // Real native CI, not this source, decides whether any OS entry is safe.
     LPWCH env = GetEnvironmentStringsW();
     r[12] = 0;
     if (env) {
-        DWORD count = 0, matches = 0;
+        DWORD count = 0, matches = 0, drives = 0, profile = 0, other = 0;
         for (LPWCH item = env; *item; item += wcslen(item) + 1) {
-            if (++count > 2) break;
-            if (wcsncmp(item, L"LOCALAPPDATA=", 13) == 0 && item[13]) {
-                if (matches & 1) break;
+            if (++count > 32) { other = 15; break; }
+            if (wcsncmp(item, L"LOCALAPPDATA=", 13) == 0 && item[13] && !(matches & 1)) {
                 matches |= 1;
-            } else if (wcscmp(item, L"SystemRoot=C:\\Windows") == 0) {
-                if (matches & 2) break;
+            } else if (wcscmp(item, L"SystemRoot=C:\\Windows") == 0 && !(matches & 2)) {
                 matches |= 2;
-            } else break;
+            } else if (item[0] == L'=' && ((item[1] >= L'A' && item[1] <= L'Z')
+                        || (item[1] >= L'a' && item[1] <= L'z'))
+                        && item[2] == L':' && item[3] == L'=') {
+                drives++;
+            } else if (wcsncmp(item, L"APPDATA=", 8) == 0
+                       || wcsncmp(item, L"TEMP=", 5) == 0
+                       || wcsncmp(item, L"TMP=", 4) == 0
+                       || wcsncmp(item, L"USERPROFILE=", 12) == 0) {
+                profile++;
+            } else {
+                other++;
+            }
         }
         r[14] = matches | (count == 2 ? 4 : 0);
-        r[12] = count == 2 && matches == 3;
+        r[15] = (count > 15 ? 15 : count)
+              | ((drives > 15 ? 15 : drives) << 4)
+              | ((profile > 15 ? 15 : profile) << 8)
+              | ((other > 15 ? 15 : other) << 12);
+        r[12] = count == 2 && matches == 3 && drives == 0 && profile == 0 && other == 0;
     }
     if (env) FreeEnvironmentStringsW(env);
     r[4] = file_error(argv[2], GENERIC_READ);
@@ -770,7 +783,7 @@ def _compile(native, root):
     try:
         job, process, _, _ = native.launch(exe, args, root, env)
         # No stdout/stderr inheritance: compiler paths/diagnostics stay private.
-        milliseconds = int(native.deadline.remaining(maximum=10) * 1000)
+        milliseconds = int(native.deadline.remaining(maximum=15) * 1000)
         if native.k.WaitForSingleObject(process, milliseconds) != 0:
             raise Unproven("HOSTED_NATIVE_COMPILER_TIMEOUT")
         code = W.DWORD()
@@ -825,7 +838,7 @@ def _decode_fixture_report(raw, pid):
     )
     for allowed, reason in checks:
         if not allowed:
-            raise Unproven(reason, values[14] if reason == "NATIVE_CHILD_ENVIRONMENT_UNPROVEN" else None)
+            raise Unproven(reason, ((values[15] & 0xffff) << 3) | (values[14] & 7) if reason == "NATIVE_CHILD_ENVIRONMENT_UNPROVEN" else None)
     if values[4:10] != (5, 5, 5, 0, 2, 10013):
         raise Unproven("NATIVE_ACCESS_DENIAL_UNPROVEN")
     return values
