@@ -1219,3 +1219,347 @@ def test_definite_bad_action_rejects_even_when_an_independent_scope_is_undetermi
     ])
     with pytest.raises(RemoteRequestError, match="^AC_DECLARATION_UNPROVEN_PRE_EXECUTOR$"):
         validate_acceptance_scope(packet, repo=tmp_path)
+
+
+WITNESS_MARKER = "MT01_IMPACT_WITNESSES_JSON:"
+WAKE_AC = "EF02.wake-boundaries"
+G2_AC = "WAKEHUB.G2.native-source-custody"
+G3_AC = "WAKEHUB.G3.signed-desktop-nonce-source-generation"
+CHROME_SOURCE = "src/ai_commerce/remote/chrome_acquisition.py"
+G2_SOURCE = "src/ai_commerce/wakehub/native_runtime.py"
+G3_SOURCE = "src/ai_commerce/wakehub/g3_enrollment.py"
+# #938's failure shape: seven optional files, three disjoint required owners,
+# then a successful executor that changes only four G2/G3 files.
+WAKEHUB_SCOPE = [CHROME_SOURCE, "tests/test_ef02_d5_chrome_acquisition.py",
+                 G2_SOURCE, "tests/test_wakehub_g2_native.py", G3_SOURCE,
+                 "src/ai_commerce/wakehub/g3_desktop_observer.py",
+                 "tests/test_wakehub_g3_native_enrollment.py"]
+WAKEHUB_WITNESSES = {WAKE_AC: [CHROME_SOURCE], G2_AC: [G2_SOURCE], G3_AC: [G3_SOURCE]}
+
+
+def with_impact_witnesses(item, witnesses):
+    item["instruction"] += "\n" + WITNESS_MARKER + json.dumps(
+        witnesses, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return item
+
+
+def wakehub_scope_action(*, witnessed=False):
+    item = scoped_action("a", list(WAKEHUB_SCOPE), [WAKE_AC, G2_AC, G3_AC])
+    return with_impact_witnesses(item, WAKEHUB_WITNESSES) if witnessed else item
+
+
+def make_current_acceptance_repo(tmp_path, monkeypatch):
+    """Pinned, hash-verified transport with CURRENT source/import/test bytes.
+
+    Uses the real owner loader and selector, including manifest dependencies;
+    no Git repository is created and no tests or provider children are run.
+    """
+    contents = {path.relative_to(ROOT).as_posix(): path.read_bytes()
+                for branch in (ROOT / "src/ai_commerce", ROOT / "tests")
+                for path in branch.rglob("*.py")}
+    return make_acceptance_repo(tmp_path, monkeypatch, contents=contents)
+
+
+@pytest.mark.parametrize("command", ["validate", "run"])
+@pytest.mark.parametrize("full", [False, True])
+def test_938_optional_owner_union_requires_witness_before_any_executor(
+        tmp_path, monkeypatch, capsys, command, full):
+    from ai_commerce.remote import __main__ as cli
+    from ai_commerce.remote.validation import _pinned_source_tree
+    from ai_commerce.engineering.impact_v21 import load_baseline_component_owner_records, select_impact
+    from ai_commerce.engineering.minimum_test import approved_groups
+
+    make_acceptance_repo(tmp_path, monkeypatch)
+    item = wakehub_scope_action()
+    if full:
+        item.update(verification_intent="HUMAN_FULL", verification_profile="project-tests")
+    packet = batch([item])
+    root = _pinned_source_tree(tmp_path, packet["source_sha"], git_executable=None)
+    groups = approved_groups()
+    groups = (*groups, *(r["group"] for r in load_baseline_component_owner_records(
+        root=root, base_sha=packet["source_sha"], existing_groups=groups)))
+    union = select_impact(root=root, changed_paths=item["allowed_paths"], groups=groups)
+    # This is the old potential-coverage test, which is insufficient.
+    assert union.runnable and {"ef02-wake", "wakehub-g2-native", "wakehub-g3-native-enrollment"} <= set(union.selected_groups)
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps(packet), encoding="utf-8")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Ambiguous AC scope must stop before any model/transport/schedule")
+
+    for name in ("GitHubTransport", "LocalBatchWorker", "run_schedule"):
+        monkeypatch.setattr(cli, name, forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    assert cli.main([command, "--request-file", str(request), "--checkout", str(tmp_path),
+                     "--issuer-login", "owner", "--owner-login", "owner"]) == 2
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "EF02_REQUEST_REJECTED: AC_IMPACT_WITNESS_REQUIRED_PRE_EXECUTOR"
+    assert "PRIVATE_INSTRUCTIONS" not in captured.out + captured.err
+
+
+def test_938_exact_witness_is_fingerprinted_contract_not_coverage(tmp_path, monkeypatch, capsys):
+    from ai_commerce.remote import __main__ as cli
+    from ai_commerce.remote.validation import validate_acceptance_scope
+
+    make_current_acceptance_repo(tmp_path, monkeypatch)
+    packet = batch([wakehub_scope_action(witnessed=True)])
+    original = copy.deepcopy(packet)
+    with pytest.raises(RemoteRequestError, match="^ISSUER_NOT_AUTHORIZED_FOR_ACTOR$"):
+        validate(packet, issuer="untrusted-executor", owner="owner")
+    assert validate(packet, issuer="owner", owner="owner") == packet
+    result = validate_acceptance_scope(packet, repo=tmp_path)
+    assert result["status"] == "PRE_EXECUTOR_COMPATIBLE"  # Existing host dispatch wire contract.
+    assert result["coverage_status"] == "PRE_EXECUTOR_CONTRACTED_NOT_PROVEN"
+    assert result["actions"][0]["status"] == "PRE_EXECUTOR_CONTRACTED_NOT_PROVEN"
+    assert result["next_gate"] == "POST_EDIT_MT01_REQUIRED"
+    assert result["actions"][0]["impact_contract"] == {
+        "source_sha": packet["source_sha"], "request_fingerprint": fingerprint(packet),
+        "witnesses": WAKEHUB_WITNESSES, "coverage_proven": False}
+    assert packet == original
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps(packet), encoding="utf-8")
+    assert cli.main(["validate", "--request-file", str(request), "--checkout", str(tmp_path),
+                     "--issuer-login", "owner", "--owner-login", "owner"]) == 0
+    assert json.loads(capsys.readouterr().out)["acceptance_scope"] == result
+    # Neither an executor's invented declaration nor a different pin can reuse
+    # the issuer's dispatch fingerprint. No output file is an authority source.
+    for field in ("instruction", "allowed_paths", "source_sha"):
+        forged = copy.deepcopy(packet)
+        if field == "source_sha":
+            forged[field] = "b" * 40
+        elif field == "instruction":
+            forged["actions"][0][field] = forged["actions"][0][field].replace(CHROME_SOURCE, G2_SOURCE)
+        else:
+            forged["actions"][0][field].remove(CHROME_SOURCE)
+        assert fingerprint(forged) != fingerprint(packet)
+
+
+@pytest.mark.parametrize("problem,code", [
+    ("wrong-owner", "OWNER_MISMATCH"), ("disjoint-known-owner", "OWNER_MISMATCH"),
+    ("outside-allowlist", "OUTSIDE_SCOPE"), ("missing-ac", "AC_MISMATCH"),
+    ("extra-known-ac", "AC_MISMATCH"), ("unknown-ac", "UNKNOWN_AC"),
+    ("malformed", "MALFORMED"), ("empty", "MALFORMED"), ("empty-paths", "MALFORMED"),
+    ("non-string-path", "MALFORMED"), ("duplicate-key", "MALFORMED"),
+    ("duplicate-path", "MALFORMED"), ("too-many-paths", "MALFORMED"),
+    ("too-many-acs", "MALFORMED"), ("too-many-total-paths", "MALFORMED"),
+    ("path-too-long", "MALFORMED"),
+    ("oversized", "MALFORMED"), ("non-json-constant", "MALFORMED"),
+    ("duplicate-marker", "DUPLICATE"), ("quoted-marker", "MALFORMED"),
+    ("noncanonical", "NONCANONICAL"), ("unsorted-paths", "MALFORMED"),
+    ("manifest", "PATH_UNESTABLISHED"), ("new-file", "PATH_UNESTABLISHED"),
+    ("directory", "PATH_UNESTABLISHED"), ("unsafe-path", "PATH_INVALID"),
+])
+def test_impact_witness_rejects_untrusted_declarations_with_bounded_codes(
+        tmp_path, monkeypatch, problem, code):
+    from ai_commerce.remote.validation import validate_acceptance_scope
+
+    make_acceptance_repo(tmp_path, monkeypatch)
+    item = wakehub_scope_action()
+    witnesses = copy.deepcopy(WAKEHUB_WITNESSES)
+    raw, prefix = None, WITNESS_MARKER
+    if problem == "wrong-owner":
+        witnesses[WAKE_AC] = [G3_SOURCE]
+    elif problem == "disjoint-known-owner":
+        item["allowed_paths"].append(PERSONAL_SOURCE)
+        witnesses[G2_AC] = [PERSONAL_SOURCE]
+    elif problem == "outside-allowlist":
+        witnesses[WAKE_AC] = [WAKE_SOURCE]
+    elif problem == "missing-ac":
+        del witnesses[WAKE_AC]
+    elif problem == "extra-known-ac":
+        witnesses[PERSONAL_AC] = [PERSONAL_SOURCE]
+    elif problem == "unknown-ac":
+        witnesses["PRIVATE_UNKNOWN_AC"] = [CHROME_SOURCE]
+    elif problem == "malformed":
+        raw = '{"PRIVATE_SECRET":bad JSON}'
+    elif problem == "empty":
+        raw = "{}"
+    elif problem == "empty-paths":
+        witnesses[WAKE_AC] = []
+    elif problem == "non-string-path":
+        witnesses[WAKE_AC] = [123]
+    elif problem == "duplicate-key":
+        raw = '{"EF02.wake-boundaries":[],"EF02.wake-boundaries":[]}'
+    elif problem == "duplicate-path":
+        witnesses[WAKE_AC] *= 2
+    elif problem == "too-many-paths":
+        witnesses[WAKE_AC] = [f"src/PRIVATE_{i:02d}.py" for i in range(33)]
+    elif problem == "too-many-acs":
+        witnesses = {f"PRIVATE_AC_{i}": [CHROME_SOURCE] for i in range(129)}
+    elif problem == "too-many-total-paths":
+        witnesses = {f"PRIVATE_AC_{i}": [f"src/PRIVATE_{n:02d}.py" for n in range(32)] for i in range(9)}
+    elif problem == "path-too-long":
+        witnesses[WAKE_AC] = ["s" * 513]
+    elif problem == "oversized":
+        raw = " " * 32769
+    elif problem == "non-json-constant":
+        raw = '{"EF02.wake-boundaries":NaN}'
+    elif problem == "duplicate-marker":
+        with_impact_witnesses(item, witnesses)
+    elif problem == "quoted-marker":
+        prefix = "Historical declaration: " + prefix
+    elif problem == "noncanonical":
+        raw = json.dumps(witnesses, sort_keys=True)
+    elif problem == "unsorted-paths":
+        witnesses[WAKE_AC] = sorted([CHROME_SOURCE, WAKE_SOURCE], reverse=True)
+    elif problem in ("manifest", "new-file", "directory", "unsafe-path"):
+        path = {"manifest": "work_items/mt01-components/wakehub-g2-native.json",
+                "new-file": "src/ai_commerce/wakehub/PRIVATE_new.py",
+                "directory": "src/ai_commerce/wakehub",
+                "unsafe-path": "../PRIVATE_SECRET"}[problem]
+        if problem != "unsafe-path":
+            item["allowed_paths"].append(path)
+        witnesses[WAKE_AC] = [path]
+    if raw is None:
+        raw = json.dumps(witnesses, sort_keys=True, separators=(",", ":"))
+    item["instruction"] += "\n" + prefix + raw
+    original = copy.deepcopy(item)
+    with pytest.raises(RemoteRequestError) as rejected:
+        validate_acceptance_scope(batch([item]), repo=tmp_path)
+    assert str(rejected.value) == f"AC_IMPACT_WITNESS_{code}_PRE_EXECUTOR"
+    assert "PRIVATE" not in str(rejected.value) and item == original
+
+
+def test_impact_witness_cannot_borrow_a_hidden_dependency_owner(tmp_path, monkeypatch):
+    from ai_commerce.remote.validation import validate_acceptance_scope
+    make_acceptance_repo(tmp_path, monkeypatch)
+    predecessor = scoped_action("a", [CHROME_SOURCE], [WAKE_AC])
+    child = with_impact_witnesses(scoped_action("b", [G2_SOURCE], [WAKE_AC, G2_AC], depends=("a",)),
+                                  {WAKE_AC: [CHROME_SOURCE], G2_AC: [G2_SOURCE]})
+    with pytest.raises(RemoteRequestError, match="^AC_IMPACT_WITNESS_OUTSIDE_SCOPE_PRE_EXECUTOR$"):
+        validate_acceptance_scope(batch([child, predecessor]), repo=tmp_path)
+
+
+def test_impact_witness_uses_pinned_import_closure_not_forged_checkout(tmp_path, monkeypatch):
+    from ai_commerce.remote.validation import validate_acceptance_scope
+    product = "src/ai_commerce/product/identity.py"
+    attribution = "src/ai_commerce/affiliate_attribution/evidence.py"
+    ac = "A14.L04.offline-attribution-evidence"
+    make_acceptance_repo(tmp_path, monkeypatch, contents={
+        attribution: b"from ai_commerce.product import identity\n"})
+    item = with_impact_witnesses(scoped_action("a", [product], [ac]), {ac: [product]})
+    result = validate_acceptance_scope(batch([item]), repo=tmp_path)
+    assert result["actions"][0]["status"] == "PRE_EXECUTOR_CONTRACTED_NOT_PROVEN"
+    # A known but unrelated owner cannot masquerade as this dependency.
+    target = tmp_path / attribution
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("from ai_commerce.hostops_v3 import personal\n", encoding="utf-8")
+    item = with_impact_witnesses(scoped_action("a", [PERSONAL_SOURCE, attribution], [ac]), {ac: [PERSONAL_SOURCE]})
+    with pytest.raises(RemoteRequestError, match="^AC_IMPACT_WITNESS_OWNER_MISMATCH_PRE_EXECUTOR$"):
+        validate_acceptance_scope(batch([item]), repo=tmp_path)
+
+
+def test_impact_witness_cannot_survive_changed_pinned_bytes(tmp_path, monkeypatch):
+    from ai_commerce.remote.validation import validate_acceptance_scope
+    make_acceptance_repo(tmp_path, monkeypatch)
+    packet = batch([wakehub_scope_action(witnessed=True)])
+    assert validate_acceptance_scope(packet, repo=tmp_path)["coverage_status"] == "PRE_EXECUTOR_CONTRACTED_NOT_PROVEN"
+    original_run = subprocess.run
+
+    def changed_blob(argv, **kwargs):
+        result = original_run(argv, **kwargs)
+        if argv[-2:] == ["cat-file", "--batch"]:
+            header, contents = result.stdout.split(b"\n", 1)
+            # Same repo, pin and blob IDs cannot authenticate different bytes.
+            result.stdout = header + b"\n" + bytes([contents[0] ^ 1]) + contents[1:]
+        return result
+
+    monkeypatch.setattr(subprocess, "run", changed_blob)
+    held = validate_acceptance_scope(packet, repo=tmp_path)
+    assert held["status"] == "PRE_EXECUTOR_UNDETERMINED"
+    assert held["actions"][0]["reason"] == "PINNED_BASELINE_UNPROVEN"
+    assert held["next_gate"] == "HOLD_NO_EXECUTOR"
+
+
+def test_ordinary_two_file_single_owner_needs_no_impact_marker(tmp_path, monkeypatch):
+    from ai_commerce.remote.validation import validate_acceptance_scope
+    make_acceptance_repo(tmp_path, monkeypatch)
+    item = scoped_action("a", [VALIDATION_SOURCE, "tests/test_ef02.py"], ["EF02.action-and-fanin"])
+    result = validate_acceptance_scope(batch([item]), repo=tmp_path)
+    assert result["status"] == result["actions"][0]["status"] == "PRE_EXECUTOR_COMPATIBLE"
+    assert "impact_contract" not in result["actions"][0]
+    # Multiple ACs on the same owner are equally unambiguous.
+    item = scoped_action("a", [G2_SOURCE, "tests/test_wakehub_g2_native.py"],
+                         [G2_AC, "WAKEHUB.G2.native-durable-first-wins"])
+    assert validate_acceptance_scope(batch([item]), repo=tmp_path)["coverage_status"] == "PRE_EXECUTOR_COMPATIBLE"
+
+
+def test_single_ac_optional_scope_still_needs_witness_and_cross_owner_action_is_possible(tmp_path, monkeypatch):
+    from ai_commerce.remote.validation import validate_acceptance_scope
+    make_acceptance_repo(tmp_path, monkeypatch)
+    item = scoped_action("a", [CHROME_SOURCE, G2_SOURCE], [WAKE_AC])
+    with pytest.raises(RemoteRequestError, match="^AC_IMPACT_WITNESS_REQUIRED_PRE_EXECUTOR$"):
+        validate_acceptance_scope(batch([item]), repo=tmp_path)
+    item = with_impact_witnesses(scoped_action("a", [CHROME_SOURCE, G2_SOURCE], [WAKE_AC, G2_AC]),
+                                 {WAKE_AC: [CHROME_SOURCE], G2_AC: [G2_SOURCE]})
+    result = validate_acceptance_scope(batch([item]), repo=tmp_path)
+    assert result["status"] == "PRE_EXECUTOR_COMPATIBLE"
+    assert result["coverage_status"] == "PRE_EXECUTOR_CONTRACTED_NOT_PROVEN"
+
+
+def test_938_post_change_missing_wake_owner_remains_mt01_coverage_unproven(tmp_path, monkeypatch):
+    from ai_commerce.engineering import verification
+    from ai_commerce.engineering.minimum_test import approved_groups
+    from ai_commerce.engineering.impact_v21 import registered_action_plan
+    from ai_commerce.remote.validation import validate_acceptance_scope
+
+    files, _ = make_current_acceptance_repo(tmp_path, monkeypatch)
+    packet = batch([wakehub_scope_action(witnessed=True)])
+    assert validate_acceptance_scope(packet, repo=tmp_path)["coverage_status"] == "PRE_EXECUTOR_CONTRACTED_NOT_PROVEN"
+    for path, raw in files.items():
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(raw)
+    base = {p: hashlib.sha256(raw).hexdigest() for p, raw in files.items()}
+    changed = [G2_SOURCE, "tests/test_wakehub_g2_native.py", G3_SOURCE,
+               "tests/test_wakehub_g3_native_enrollment.py"]
+    candidate = dict(base)
+    for path in changed:
+        raw = files[path] + b"\nSCOPED_FIXTURE_VALUE = 1\n"
+        (tmp_path / path).write_bytes(raw)
+        candidate[path] = hashlib.sha256(raw).hexdigest()
+    registry = verify_registry(REGISTRY)
+    argv = registry["ef02-tests"]
+    monkeypatch.setenv("MT01_V21_ENABLED", "1")
+    # The simulated diff has real fixture bytes. The owner loader, selector,
+    # AC check, registered-binding check and no-execution refusal path are real.
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Missing mandatory owner must never launch pytest")
+
+    monkeypatch.setattr(verification, "_run_pytest_with_junit", forbidden)
+    saved = {}
+    response, plan = verification.execute_plan(
+        repo=tmp_path, output_dir=tmp_path, base_sha=packet["source_sha"], base_files=base,
+        changed_paths=changed, required_acs=tuple(approved_acceptance_plan(packet["actions"][0])["ids"]),
+        fallback_argv=argv, prior={}, save=lambda key, name, raw: saved.update({key: raw}),
+        evidence_files={}, deadline=time.monotonic() + 60, timeout_seconds=60,
+        registered_only=True, groups=approved_groups(), registered_profiles=registry,
+        allowed_paths=tuple(WAKEHUB_SCOPE))
+    # The trusted runner maps this exact verifier code to MT01_COVERAGE_UNPROVEN.
+    assert response.returncode == 5 and not response.stdout
+    assert "ef02-wake" not in plan["selected_groups"]
+    assert {"wakehub-g2-native", "wakehub-g3-native-enrollment"} <= set(plan["selected_groups"])
+    assert "AC_REQUIRED_GROUP_NOT_SELECTED:" + WAKE_AC in plan["reason_codes"]
+    assert all(g["state"] == "UNPROVEN" and not g["execute"] for g in plan["groups"])
+    assert all(g["actual_argv"] is None and not any(g["tests_executed"].values()) for g in plan["groups"])
+    assert plan["narrow_execution_observed"] is False and "mt01_results" in saved
+
+    # Adding the required owner to a simulated ACTUAL diff restores exact
+    # owner/consumer selection, only making real verification eligible to run.
+    changed.append(CHROME_SOURCE)
+    raw = files[CHROME_SOURCE] + b"\nSCOPED_FIXTURE_VALUE = 1\n"
+    (tmp_path / CHROME_SOURCE).write_bytes(raw)
+    candidate[CHROME_SOURCE] = hashlib.sha256(raw).hexdigest()
+    complete = registered_action_plan(
+        repo=tmp_path, base_sha=packet["source_sha"], base_files=base, candidate_files=candidate,
+        changed_paths=changed, required_acs=[WAKE_AC, G2_AC, G3_AC], fallback_argv=argv,
+        groups=approved_groups(), registered_profiles=registry, allowed_paths=WAKEHUB_SCOPE)
+    assert not complete["impact_v21"]["missing_mapping"]
+    assert {"ef02-wake", "wakehub-g2-native", "wakehub-g3-native-enrollment"} <= set(complete["selected_groups"])
+    assert all(g["state"] == "EXECUTE" and "result" not in g for g in complete["groups"])
+    assert verification.registered_binding_problems(complete, registry) == []
+    for entry in complete["groups"]:
+        mapping, binding = complete["consumer_map"][entry["group"]], entry["binding"]
+        assert set((*mapping["paths"], *mapping["tests"], *mapping["consumers"], *mapping["contracts"])) <= binding["candidate_files"].keys()
+        assert all(binding["candidate_files"][p] == candidate[p] for p in binding["candidate_files"])
