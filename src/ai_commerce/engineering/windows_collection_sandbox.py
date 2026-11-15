@@ -501,6 +501,7 @@ class _Win32:
             "WaitForSingleObject": ([W.HANDLE, W.DWORD], W.DWORD),
             "OpenProcess": ([W.DWORD, W.BOOL, W.DWORD], W.HANDLE),
             "GetExitCodeProcess": ([W.HANDLE, C.POINTER(W.DWORD)], W.BOOL),
+            "QueryFullProcessImageNameW": ([W.HANDLE, W.DWORD, W.LPWSTR, C.POINTER(W.DWORD)], W.BOOL),
             "InitializeProcThreadAttributeList": ([C.c_void_p, W.DWORD, W.DWORD, C.POINTER(C.c_size_t)], W.BOOL),
             "UpdateProcThreadAttribute": ([C.c_void_p, W.DWORD, C.c_size_t, C.c_void_p, C.c_size_t, C.c_void_p, C.c_void_p], W.BOOL),
             "DeleteProcThreadAttributeList": ([C.c_void_p], None),
@@ -729,6 +730,43 @@ class _Win32:
             raise Unproven("NATIVE_JOB_MEMBERS_OVERSIZED")
         return list((C.c_size_t * present).from_buffer(data, 8))
 
+    def extra_member_categories(self, members, known, fixture, sid_string):
+        """Inspect only active Job members; emit categorical counts, never PID/path/SID."""
+        counts = dict(fixture=0, conhost=0, broker=0, other=0, same_container=0, query_failed=0)
+        expected = os.path.normcase(str(fixture))
+        for member_pid in members:
+            if member_pid in known:
+                continue
+            process = self.k.OpenProcess(0x1000, False, member_pid)
+            if not process:
+                counts["query_failed"] += 1
+                continue
+            try:
+                name = C.create_unicode_buffer(32768)
+                size = W.DWORD(len(name))
+                if not self.k.QueryFullProcessImageNameW(process, 0, name, C.byref(size)):
+                    counts["query_failed"] += 1
+                else:
+                    actual = os.path.normcase(name.value)
+                    basename = os.path.basename(actual).casefold()
+                    if actual == expected:
+                        counts["fixture"] += 1
+                    elif basename == "conhost.exe":
+                        counts["conhost"] += 1
+                    elif basename == "runtimebroker.exe":
+                        counts["broker"] += 1
+                    else:
+                        counts["other"] += 1
+                try:
+                    self.container_token(process, sid_string)
+                except Unproven:
+                    pass
+                else:
+                    counts["same_container"] += 1
+            finally:
+                self.close(process)
+        return counts
+
     def stop_job(self, job):
         self.check(self.k.TerminateJobObject(job, 98), "NATIVE_JOB_TERMINATION_FAILED")
         while self.members(job):
@@ -840,6 +878,13 @@ def _job_membership_mask(inside, members, child_pid, grandchild_pid):
             | (int(present == {child_pid, grandchild_pid}) << 4)
             | (min(len(members), 15) << 5)
             | (int(child_pid != grandchild_pid) << 9))
+
+
+def _pack_job_member_categories(mask, categories):
+    """Six 4-bit buckets; fixed category order; never include process identifiers."""
+    for shift, name in enumerate(("fixture", "conhost", "broker", "other", "same_container", "query_failed"), start=0):
+        mask |= min(max(int(categories[name]), 0), 15) << (10 + 4 * shift)
+    return mask
 
 
 def _decode_fixture_report(raw, pid):
@@ -1089,11 +1134,15 @@ def run_inert_probe(*, enabled=False, repository=None, candidate_sha=None, sourc
         native.check(grandchild, "NATIVE_DESCENDANT_HANDLE_FAILED")
         inside = W.BOOL()
         native.check(native.k.IsProcessInJob(grandchild, job, C.byref(inside)), "NATIVE_DESCENDANT_JOB_QUERY_FAILED")
-        job_mask = _job_membership_mask(inside.value, native.members(job), pid, values[10])
-        # 0x25f means inside=True, both distinct PIDs present, exactly two
-        # enumerated and no unexpected member. No actual PID leaves the host.
+        members = native.members(job)
+        job_mask = _job_membership_mask(inside.value, members, pid, values[10])
+        # 0x25f means inside=True, both distinct PIDs present, exactly two.
+        # Anything else stays UNPROVEN. Classify extra member images/tokens
+        # on the disposable host without emitting a PID, path or SID.
         if job_mask != 0x25f:
-            raise Unproven("NATIVE_DESCENDANT_JOB_UNPROVEN", job_mask)
+            categories = native.extra_member_categories(members, {pid, values[10]}, exe, sid_string)
+            raise Unproven("NATIVE_DESCENDANT_JOB_UNPROVEN",
+                           _pack_job_member_categories(job_mask, categories))
         native.container_token(grandchild, sid_string)
         if native.k.WaitForSingleObject(grandchild, 0) != 0x102:
             raise Unproven("NATIVE_DESCENDANT_NOT_LIVE")
