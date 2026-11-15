@@ -1328,6 +1328,39 @@ def _logon_observation(checkout: Path) -> tuple[str, tuple]:
     return ("BLOCKED_NOT_DEPLOYED" if env.allow_launch else "LAUNCH_GRANT_REQUIRED"), pinned
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class _Logon9444Assessment:
+    """Private N3-A observations, never desktop authority or an effect grant.
+
+    Retain the exact config and immutable owner/process observations for G2's
+    source contract. Only _logon_result(code) may leave private custody.
+    """
+    code: str
+    observation: tuple | None = None
+
+
+def _assess_logon_9444_private(checkout: Path) -> _Logon9444Assessment:
+    """Two fresh reads using the same guards as the public N3-A advisory."""
+    observed = False
+    try:
+        before = _logon_observation(checkout)
+        observed = True
+        if _logon_observation(checkout) != before:
+            return _Logon9444Assessment("UNKNOWN_EFFECT")
+        return _Logon9444Assessment(before[0], before[1])
+    except (_EnrollmentHold, AcquisitionBlocked) as exc:
+        code = str(exc)
+        if observed:
+            code = "UNKNOWN_EFFECT"
+        elif code == "PROFILE_ALREADY_ACTIVE_NO_CDP":
+            code = "PROFILE_LOCK_HOLD"
+        elif code in _ENROLLMENT_CODES and code not in _LOGON_CODES:
+            code = "UNTRUSTED_OWNER"
+        return _Logon9444Assessment(_logon_result(code)["code"])
+    except Exception:
+        return _Logon9444Assessment("UNKNOWN_EFFECT" if observed else "ABSENCE_UNPROVEN")
+
+
 def assess_logon_9444(checkout: Path) -> dict:
     """Source-only logon/startup decision, with two fresh independent reads.
 
@@ -1339,24 +1372,7 @@ def assess_logon_9444(checkout: Path) -> dict:
     interactive owner, pinned ABSENT observation and durable replay custody.
     This policy never calls run(), attaches, creates config or mutates a profile.
     """
-    observed = False
-    try:
-        before = _logon_observation(checkout)
-        observed = True
-        if _logon_observation(checkout) != before:
-            return _logon_result("UNKNOWN_EFFECT")
-        return _logon_result(before[0])
-    except (_EnrollmentHold, AcquisitionBlocked) as exc:
-        code = str(exc)
-        if observed:
-            code = "UNKNOWN_EFFECT"
-        elif code == "PROFILE_ALREADY_ACTIVE_NO_CDP":
-            code = "PROFILE_LOCK_HOLD"
-        elif code in _ENROLLMENT_CODES and code not in _LOGON_CODES:
-            code = "UNTRUSTED_OWNER"
-        return _logon_result(code)
-    except Exception:
-        return _logon_result("UNKNOWN_EFFECT" if observed else "ABSENCE_UNPROVEN")
+    return _logon_result(_assess_logon_9444_private(checkout).code)
 
 
 def _start_or_reuse_9444(checkout: Path, *, request_id: str, grant: object = None) -> dict:
@@ -1367,6 +1383,8 @@ def _start_or_reuse_9444(checkout: Path, *, request_id: str, grant: object = Non
     not inspect/consume them, flip allow_launch, or invoke run(launch=True).
     Repeated logon/requests, revoked/expired/synthetic grants and uncertain
     observations therefore cannot trigger even a first start, much less retry.
+    G2 WindowsPrivateRuntime.preflight_9444 binds signed consent and the exact
+    private N3-A observations into a source contract, never an effect capability.
     Call assess_logon_9444 separately for advisory readiness. With no native
     backend this boundary returns before even launching diagnostic subprocesses.
     A future effect implementation requires separate local approval/enrollment.

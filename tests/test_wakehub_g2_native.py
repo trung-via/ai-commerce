@@ -11,10 +11,11 @@ import base64
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import asdict, replace
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import shutil
 import sqlite3
 import subprocess
@@ -701,3 +702,259 @@ def test_owner_admission_and_existing_consumer_closure():
         assert impact_v21.verified_onboarding_binding(workspace=ROOT, binding=selected["binding"],
             changed_paths=changed, allowed_paths=changed, base_sha=auth.TASK_PARENT,
             registered_profiles=profiles, expected_group=selected["group"])
+
+
+def n3b_fixture(enrolled, monkeypatch, operation=START):
+    """Real G2 signatures/durable store; ALL desktop and inventory seams offline.
+
+    The positive result proves SOURCE_VERIFIED routing only. Neither these
+    synthetic desktop observations nor the source contract enroll a native peer.
+    """
+    ca = rt.acquisition
+    snap = read_fixture(enrolled, owned=operation is op.Operation.REUSE).snapshot
+    g = grant(operation)
+    proof = enrolled.proof(g)
+    runtime = fixture_runtime(enrolled)
+    reads, observations = [], []
+
+    def read():
+        reads.append("signed inventory")
+        current = replace(snap, observed_at=T - .5 + len(reads) * .125)
+        body = dict(schema="WakeHubG2Inventory.v1", journal_id=JID,
+            grant_sha256=auth._digest(jn.canonical(jn.grant_data(g))), snapshot=asdict(current),
+            enrollment=asdict(enrolled.verifier.authorize_read()), desktop=TARGET.desktop,
+            pause="RELEASED_INDEPENDENTLY", receiver="ONLINE", verified_at=T)
+        (enrolled.storage.root / "inventory.json").write_bytes(
+            enrolled.crypto.signed(body, "observer", "inventory"))
+        return current
+
+    enrolled.verifier.backend = SimpleNamespace(read_fixed_inventory=read)
+    local = PureWindowsPath(r"C:\Private-Fixture\Local")
+    env = ca.ChromeEnvironment(PureWindowsPath(TARGET.chrome_executable),
+        PureWindowsPath(TARGET.dedicated_profile), "Default", "http://127.0.0.1:9444", 9444,
+        operation is START, local / "AI-Commerce" / "Chrome-Acquisition" / "config.json")
+    process = (200, TARGET.chrome_executable, "offline exact command", 7, SID,
+               datetime.fromtimestamp(T - 60, timezone.utc).isoformat())
+    observation = ((local, 7, SID), env,
+        ((("127.0.0.1", 9444, 200),), (process,)) if operation is op.Operation.REUSE else ((), ()))
+    f = SimpleNamespace(runtime=runtime, grant=g, proof=proof, env=env,
+        observation=observation, code="REUSE_ONLY" if operation is op.Operation.REUSE else "BLOCKED_NOT_DEPLOYED",
+        reads=reads, observations=observations)
+
+    def observe(checkout):
+        assert checkout == ROOT
+        observations.append("N3-A read")
+        return f.code, f.observation
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Source preflight must not invoke native effects, provisioning or browser access")
+
+    monkeypatch.setattr(ca, "_logon_observation", observe)
+    for name in ("run", "_query_windows", "_NativeEnrollment", "_probe_cdp", "verify_playwright_attach", "build_opener"):
+        monkeypatch.setattr(ca, name, forbidden)
+    # Guard acquisition's process calls without mutating the shared module:
+    # G2 and these offline fixtures still need real OpenSSH signing/verification.
+    monkeypatch.setattr(ca, "subprocess", SimpleNamespace(
+        Popen=forbidden, run=forbidden, PIPE=subprocess.PIPE, DEVNULL=subprocess.DEVNULL,
+        TimeoutExpired=subprocess.TimeoutExpired))
+    runtime._operator._executor = SimpleNamespace(start_dedicated=forbidden, reuse_owned=forbidden)
+    return f
+
+
+@pytest.mark.parametrize("operation", [START, op.Operation.REUSE])
+def test_n3b_signed_exact_route_and_durable_lease_still_require_native_owner(enrolled, monkeypatch, operation):
+    f = n3b_fixture(enrolled, monkeypatch, operation)
+    result = f.runtime.preflight_9444(ROOT, operation, f.proof)
+    assert result.code is rt.Native9444Code.OWNER_REQUIRED
+    assert result.contract.grant == f.grant
+    assert result.contract.environment == f.env  # Includes exact profile-directory/config.
+    assert f.reads == ["signed inventory"] * 2
+    assert f.observations == ["N3-A read"] * 2
+    assert enrolled.storage.journal.read(f.grant).state is op.JournalState.EMPTY
+    public = json.loads(result.to_json())
+    assert public["source_validation"] == "SOURCE_VERIFIED"
+    assert public["receipt"]["decision"] == "HOLD"
+    assert public["native_effect"] == "NOT_ATTEMPTED"
+    assert public["desktop_executor"] == "NOT_ENROLLED_BY_SOURCE"
+    assert public["lease"] == "NOT_RESERVED_BY_PREFLIGHT"
+    # Existing G2 reservation and verifier, never a second ownership ledger.
+    lease = enrolled.storage.journal.reserve(op.PrivateIntent(result.contract.grant), T)
+    assert type(lease) is op.PrivateLease
+    assert enrolled.verifier.verify_lease(lease, T)
+    for supplied in (lease, replace(lease, lease_id=uuid4()), result.contract):
+        with pytest.raises(jn.NativeDenied):
+            rt.WindowsExecutor().start_dedicated(supplied)
+        with pytest.raises(jn.NativeDenied):
+            rt.WindowsExecutor().reuse_owned(supplied)
+        assert rt.acquisition._start_or_reuse_9444(ROOT, request_id="same-logon", grant=supplied)["code"] == "BLOCKED_NOT_DEPLOYED"
+    assert f.runtime.run(operation, f.proof).effect is op.EffectAttempt.NOT_ATTEMPTED
+    # Even a legitimate durable lease is not a fresh authenticated handoff.
+    for state in (op.JournalState.PENDING, op.JournalState.UNKNOWN):
+        if state is op.JournalState.UNKNOWN:
+            enrolled.storage.journal.mark_unknown(op.PrivateIntent(f.grant))
+        held = f.runtime.preflight_9444(ROOT, operation, f.proof)
+        assert held.code is rt.Native9444Code.RECONCILE_ONLY
+        assert held.contract is None
+        assert json.loads(held.to_json())["receipt"]["next_operation"] == "RECONCILE_ONLY"
+    assert len(f.reads) == len(f.observations) == 2
+    for private in (SID, TARGET.user_name, TARGET.chrome_executable, TARGET.dedicated_profile,
+                    str(f.env.config_path), str(f.grant.key.action_id), "offline exact command"):
+        assert private not in result.to_json()
+
+
+@pytest.mark.parametrize("invalid", ["synthetic", "typed_text", "forged_signature", "expired", "revoked",
+    "source", "release_epoch", "sid", "session", "paused", "receiver_offline", "locked_desktop"])
+def test_n3b_preflight_never_downgrades_g2_signed_authority(enrolled, monkeypatch, invalid):
+    f = n3b_fixture(enrolled, monkeypatch)
+    proof = f.proof
+    changes = {"expired": dict(issued_at=T - 20, expires_at=T - 1),
+        "source": dict(source=replace(SOURCE, source_sha="f" * 40)),
+        "release_epoch": dict(source=replace(SOURCE, release_epoch=2)),
+        "sid": dict(target=replace(TARGET, user_sid=RUNNER)),
+        "session": dict(target=replace(TARGET, session_id=8))}
+    if invalid in changes:
+        proof = enrolled.proof(replace(f.grant, **changes[invalid]))
+    elif invalid == "synthetic":
+        proof = f.grant
+    elif invalid == "typed_text":
+        proof = op.PrivateGrantProof(b"Human approved in GitHub", b"same SID")
+    elif invalid == "forged_signature":
+        proof = op.PrivateGrantProof(b'{"signed":true}', f.proof.consent)
+    elif invalid == "revoked":
+        enrolled.rev["revoked"] = [str(f.grant.key.action_id)]
+        enrolled.save()
+    elif invalid == "paused":
+        proof = enrolled.proof(f.grant, pause="PAUSED")
+    elif invalid == "receiver_offline":
+        proof = enrolled.proof(f.grant, receiver="OFFLINE")
+    else:
+        monkeypatch.setattr(auth, "_desktop_identity", lambda target: jn.deny())
+    result = f.runtime.preflight_9444(ROOT, START, proof)
+    assert result.code is rt.Native9444Code.AUTHORITY_REQUIRED
+    assert result.contract is None
+    assert f.reads == f.observations == []
+    assert enrolled.storage.journal.read(f.grant).state is op.JournalState.EMPTY
+
+
+@pytest.mark.parametrize("invalid", ["no_config", "allow_launch_false", "unknown", "sid", "session_zero",
+    "session", "executable", "profile", "config", "endpoint", "port", "launch_flag", "presence", "drift"])
+def test_n3b_exact_advisory_cannot_select_another_target(enrolled, monkeypatch, invalid):
+    f = n3b_fixture(enrolled, monkeypatch)
+    (local, session, sid), env, identity = f.observation
+    if invalid in ("no_config", "allow_launch_false", "unknown"):
+        f.code = {"no_config": "FIRST_SUPERVISED_ENROLLMENT_REQUIRED",
+                  "allow_launch_false": "LAUNCH_GRANT_REQUIRED", "unknown": "UNKNOWN_EFFECT"}[invalid]
+    elif invalid == "sid":
+        sid = RUNNER
+    elif invalid in ("session_zero", "session"):
+        session = 0 if invalid == "session_zero" else 8
+    elif invalid == "presence":
+        identity = ((), ((999, "unproven", "unproven", 7, SID, "unproven"),))
+    elif invalid == "drift":
+        def observe(checkout):
+            f.observations.append("N3-A read")
+            return f.code, (f.observation if len(f.observations) == 1 else (None, None, None))
+        monkeypatch.setattr(rt.acquisition, "_logon_observation", observe)
+    else:
+        env = replace(env, **{
+            "executable": dict(executable=PureWindowsPath(r"C:\Other\chrome.exe")),
+            "profile": dict(user_data_dir=PureWindowsPath(r"C:\Other\Profile")),
+            "config": dict(config_path=local / "chrome.json"),
+            "endpoint": dict(endpoint="http://localhost:9444"), "port": dict(port=9333),
+            "launch_flag": dict(allow_launch=False),
+        }[invalid])
+    f.observation = ((local, session, sid), env, identity)
+    result = f.runtime.preflight_9444(ROOT, START, f.proof)
+    assert result.contract is None
+    assert result.code in (rt.Native9444Code.ADVISORY_HOLD, rt.Native9444Code.TARGET_MISMATCH,
+                           rt.Native9444Code.EVIDENCE_GAP)
+    assert len(f.reads) == 1
+    assert enrolled.storage.journal.read(f.grant).state is op.JournalState.EMPTY
+
+
+@pytest.mark.parametrize("invalid", ["stale_read", "read_timeout", "concurrent_logon", "revoked_after_read"])
+def test_n3b_freshness_and_last_moment_journal_veto(enrolled, monkeypatch, invalid):
+    f = n3b_fixture(enrolled, monkeypatch)
+    original = enrolled.verifier.backend.read_fixed_inventory
+    calls = []
+    def read():
+        calls.append("read")
+        if len(calls) == 2:
+            if invalid == "read_timeout":
+                raise TimeoutError("private token/path")
+            if invalid == "stale_read":
+                # A signed but repeated observation is not a second fresh read.
+                f.reads.pop()
+        current = original()
+        if len(calls) == 2 and invalid == "concurrent_logon":
+            enrolled.storage.journal.reserve(op.PrivateIntent(f.grant), T)
+        if len(calls) == 2 and invalid == "revoked_after_read":
+            enrolled.rev["revoked"] = [str(f.grant.key.effect_id)]
+            enrolled.save()
+        return current
+    enrolled.verifier.backend = SimpleNamespace(read_fixed_inventory=read)
+    result = f.runtime.preflight_9444(ROOT, START, f.proof)
+    assert result.contract is None
+    assert len(calls) == 2  # No retry/third read after timeout, crash or a veto.
+    assert result.code in (rt.Native9444Code.EVIDENCE_GAP, rt.Native9444Code.RECONCILE_ONLY,
+                           rt.Native9444Code.AUTHORITY_REQUIRED)
+
+
+def test_n3b_service_only_and_arbitrary_modes_have_no_desktop_fallback(enrolled, monkeypatch):
+    f = n3b_fixture(enrolled, monkeypatch)
+    f.runtime._broker = object()  # A service connection is not a GUI owner.
+    result = f.runtime.preflight_9444(ROOT, START, f.proof)
+    assert result.code is rt.Native9444Code.DESKTOP_TRANSPORT_REQUIRED
+    for mode in (None, "START", {"issue": "start"}, op.Operation.STATUS, op.Operation.RECONCILE_ONLY):
+        assert f.runtime.preflight_9444(ROOT, mode, f.proof).code is rt.Native9444Code.INVALID_REQUEST
+    assert f.reads == f.observations == []
+
+
+@pytest.mark.parametrize("drift", ["pid", "creation", "exe", "sid", "session", "binding", "duplicate"])
+def test_n3b_reuse_requires_same_g2_and_n3a_process_never_starts(enrolled, monkeypatch, drift):
+    f = n3b_fixture(enrolled, monkeypatch, op.Operation.REUSE)
+    desktop, env, (listeners, processes) = f.observation
+    process = list(processes[0])
+    if drift == "pid":
+        process[0] += 1
+    elif drift == "creation":
+        process[5] = datetime.fromtimestamp(T - 59, timezone.utc).isoformat()
+    elif drift == "exe":
+        process[1] = r"C:\Other\chrome.exe"
+    elif drift == "sid":
+        process[4] = RUNNER
+    elif drift == "session":
+        process[3] = 8
+    elif drift == "binding":
+        listeners = (("0.0.0.0", 9444, 200),)
+    processes = (tuple(process),) * (2 if drift == "duplicate" else 1)
+    f.observation = (desktop, env, (listeners, processes))
+    result = f.runtime.preflight_9444(ROOT, op.Operation.REUSE, f.proof)
+    assert result.code is rt.Native9444Code.TARGET_MISMATCH
+    assert result.contract is None
+    assert len(f.reads) == 1
+    assert enrolled.storage.journal.read(f.grant).state is op.JournalState.EMPTY
+
+
+@pytest.mark.parametrize("cross_role", [False, True])
+def test_n3b_independently_reconciled_no_effect_still_consumes_grant(enrolled, monkeypatch, cross_role):
+    f = n3b_fixture(enrolled, monkeypatch)
+    lease = enrolled.storage.journal.reserve(op.PrivateIntent(f.grant), T)
+    observation, raw = original_outcome(enrolled, lease)
+    assert enrolled.storage.journal.resolve_verified(enrolled.storage.journal.read(f.grant),
+                                                    observation, raw, enrolled.verifier)
+    repeated = (replace(f.grant, key=replace(effect_key(), effect_id=f.grant.key.action_id))
+                if cross_role else f.grant)
+    result = f.runtime.preflight_9444(ROOT, START, enrolled.proof(repeated))
+    assert result.code is rt.Native9444Code.DUPLICATE
+    assert result.contract is None
+    assert f.reads == f.observations == []
+
+
+def test_n3b_public_contract_serializer_has_closed_code_allowlist():
+    result = rt.Native9444Preflight(START, rt.Native9444Code.ADVISORY_HOLD,
+        op.Reason.EVIDENCE_GAP, advisory=r"private SID/path/token")
+    assert "private SID/path/token" not in result.to_json()
+    assert json.loads(result.to_json())["advisory"] == "ABSENCE_UNPROVEN"
+    with pytest.raises(ValueError, match="^WAKEHUB_9444_PUBLIC_INPUT_INVALID$"):
+        replace(result, code=SimpleNamespace(value="private SID/path/token")).to_json()
