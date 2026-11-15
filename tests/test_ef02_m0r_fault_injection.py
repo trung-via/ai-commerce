@@ -318,10 +318,21 @@ def test_candidate_publication_failure_preserves_verified_result_but_not_pass(tm
 def test_issue_feedback_publication_failure_marks_batch_nonpass(tmp_path, monkeypatch):
     from ai_commerce.remote import __main__ as cli
 
+    # Exercise the feedback fault after a *real* pinned known-owner AC has passed
+    # the source-aware pre-executor gate. Do not disable or mock that gate:
+    # #920's new guard must use this committed Git tree and must remain fail-closed.
+    checkout = Path(__file__).resolve().parents[1]
+    source_sha = subprocess.check_output(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True
+    ).strip()
+    assert len(source_sha) == 40
     action = _action()
+    action["allowed_paths"] = ["src/ai_commerce/remote/validation.py"]
+    action["instruction"] = ('MT01_ACCEPTANCE_JSON:["EF02.action-and-fanin"]\n'
+                             "synthetic feedback publication failure; no provider call")
     request = tmp_path / "request.json"
     request.write_text(json.dumps({
-        "batch_id": "m0r-comment-failure", "source_sha": BASE,
+        "batch_id": "m0r-comment-failure", "source_sha": source_sha,
         "actions": [action]
     }), encoding="utf-8")
     monkeypatch.setattr(cli, "verify_registry", lambda *_a: {"ef02-tests": ["python", "-m", "pytest", "tests/test_ef02.py", "-q"]})
@@ -345,7 +356,7 @@ def test_issue_feedback_publication_failure_marks_batch_nonpass(tmp_path, monkey
     monkeypatch.setenv("GITHUB_REPOSITORY", "trung-via/ai-commerce")
     monkeypatch.setenv("GITHUB_TOKEN", "synthetic-fixture-only")
     exit_code = cli.main([
-        "run", "--request-file", str(request), "--checkout", str(tmp_path),
+        "run", "--request-file", str(request), "--checkout", str(checkout),
         "--issuer-login", "trung-via", "--owner-login", "trung-via",
         "--issue-number", "13",
     ])
