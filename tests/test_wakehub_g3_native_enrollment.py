@@ -25,6 +25,7 @@ from ai_commerce.wakehub import g3_desktop_observer as ob
 from ai_commerce.wakehub import g3_service_host as host
 from ai_commerce.wakehub import native_authority as auth
 from ai_commerce.wakehub import native_broker as b
+from ai_commerce.wakehub import native_inventory as inv
 from ai_commerce.wakehub import native_journal as jn
 from ai_commerce.wakehub import native_runtime as rt
 from ai_commerce.wakehub import private_operator as op
@@ -521,3 +522,163 @@ def test_status_all_positive_caller_strings_are_advisory_not_native_authority():
     assert public["origin_attested"] is False
     assert not any(secret in str(public) for secret in
                    ("secret_nonce", "private_logon", "S-1-5-21-PRIVATE", "123"))
+
+
+@pytest.fixture
+def desktop_pins(pins):
+    # All readbacks below are OFFLINE claims. Equality cannot enroll a service,
+    # establish native ACLs, or attest an interactive desktop on this runner.
+    return en.DesktopBootstrapPins(pins, TARGET,
+        inv.ProcessIdentity(333, T - 60, en.DESKTOP_IMAGE, SID, 7), "0000000000012345",
+        "7" * 64, "8" * 64, r"C:\Private-Fixture\Local\AI-Commerce\Chrome-Acquisition\config.json",
+        "9" * 64, "Default", True)
+
+
+def desktop_readback(pins, *, first_boot=False):
+    new = {"desktop_transport", "desktop_outcome"} if first_boot else set()
+    return tuple(en.Readback(r.name, "ABSENT") if r.name in new else en.Readback(r.name, "PRESENT", r.value)
+                 for r in en.desktop_bootstrap_resources(pins))
+
+
+@pytest.mark.parametrize("first_boot", [True, False])
+def test_desktop_bootstrap_positive_source_requirements_never_native_ready(desktop_pins, monkeypatch, first_boot):
+    def forbidden(*a, **kw): pytest.fail("offline bootstrap crossed a native boundary")
+    for name in ("run", "Popen"):
+        monkeypatch.setattr(subprocess, name, forbidden)
+    monkeypatch.setattr(sqlite3, "connect", forbidden)
+    monkeypatch.setattr(ctypes, "WinDLL", forbidden)
+    rows = desktop_readback(desktop_pins, first_boot=first_boot)
+    result = en.desktop_bootstrap_plan(desktop_pins, rows)
+    assert result == en.desktop_bootstrap_plan(desktop_pins, rows, previous_digest=result.digest)
+    assert result.source_ready
+    assert result.state is (en.DesktopBootstrapState.FIRST_BOOT if first_boot else en.DesktopBootstrapState.READBACK_MATCH)
+    public = json.loads(result.to_json())
+    assert public["status"] == "SOURCE_READY_FOR_ENROLLMENT"
+    assert public["first_boot_eligible"] is first_boot
+    assert public["start"] == public["reuse"] == "DENY"
+    assert public["native_effect"] == "NOT_ATTEMPTED"
+    assert tuple(public["missing_owners"]) == en.DESKTOP_MISSING_OWNERS
+    resources = {r.name: jn.decode(r.value) for r in result.resources}
+    assert resources["pipe_policy"]["operations"] == ["STATUS", "RECONCILE_ONLY"]
+    assert resources["desktop_transport"]["status_pipe_effects"] == "FORBIDDEN"
+    assert resources["desktop_transport"]["desktop_challenge"] == "EXISTING_G3_SIGNED_NONCE_SOURCE_GENERATION_AND_LOGON_LUID"
+    assert resources["desktop_transport"]["status_grants_allow_effects"] is False
+    assert resources["desktop_transport"]["reuse"] == "EXACT_OWNED_PROCESS_NEVER_SPAWN"
+    assert resources["desktop_outcome"]["unknown"] == "RECONCILE_ONLY_NO_SECOND_START"
+    assert resources["chrome_config"]["endpoint"] == "http://127.0.0.1:9444"
+    assert resources["effect_lane"]["ledger"] == "EXISTING_G2_DURABLE_FIRST_WINS"
+    for secret in (SID, desktop_pins.logon_id, desktop_pins.config_path, TARGET.dedicated_profile,
+                   en.DESKTOP_IMAGE, JID, result.digest, "http://127.0.0.1:9444"):
+        assert secret not in result.to_json()
+
+
+@pytest.mark.parametrize("resource,field,value", [
+    ("chrome_config", "port", 9333), ("chrome_config", "endpoint", "http://127.0.0.1:9333"),
+    ("chrome_config", "executable", r"C:\Foreign\chrome.exe"),
+    ("chrome_config", "user_data_dir", r"C:\Foreign\Profile"),
+    ("chrome_config", "image_sha256", "0" * 64), ("chrome_config", "sha256", "0" * 64),
+    ("chrome_config", "owner", "FOREIGN"), ("chrome_config", "writers", "EVERYONE"),
+    ("chrome_config", "protected", False), ("chrome_config", "reparse_points", True),
+    ("chrome_config", "hardlinks", True), ("chrome_config", "profile_owner", "FOREIGN"),
+    ("chrome_config", "foreign_profile_access", True),
+    ("chrome_config", "enrollment", "UNENROLLED"), ("chrome_config", "allow_launch", False),
+    ("desktop_identity", "peer", dict(pid=999, created_at=T, executable=en.DESKTOP_IMAGE, user_sid=SID, session_id=7)),
+    ("desktop_identity", "logon_id", "0000000000099999"),
+    ("desktop_identity", "desktop", r"WinSta0\Winlogon"),
+    ("desktop_identity", "token", "IMPERSONATION"), ("desktop_identity", "elevated", True),
+    ("desktop_identity", "interactive", False), ("desktop_identity", "unlocked", False),
+    ("desktop_identity", "connected", False), ("desktop_identity", "session_zero", True),
+    ("desktop_identity", "image_sha256", "0" * 64),
+    ("effect_lane", "state", "PENDING"), ("effect_lane", "state", "UNKNOWN"),
+    ("effect_lane", "consumed_keys", ["already-consumed"]),
+    ("desktop_transport", "generation", 2), ("desktop_transport", "status_pipe_effects", "START"),
+    ("desktop_transport", "desktop_challenge", "UNSIGNED"),
+    ("desktop_transport", "status_grants_allow_effects", True),
+    ("desktop_outcome", "retry", True),
+])
+def test_desktop_bootstrap_rejects_mismatched_private_readback(desktop_pins, resource, field, value):
+    rows = list(desktop_readback(desktop_pins))
+    i = next(i for i, row in enumerate(rows) if row.name == resource)
+    body = jn.decode(rows[i].value); body[field] = value
+    rows[i] = en.Readback(resource, "PRESENT", jn.canonical(body))
+    result = en.desktop_bootstrap_plan(desktop_pins, tuple(rows))
+    assert result.state is en.DesktopBootstrapState.RECONCILE_ONLY
+    assert not result.source_ready
+
+
+@pytest.mark.parametrize("name", ["release", "service", "anchors", "public_signers", "broker_custody",
+    "observer_custody", "pipe_policy", "chrome_config", "desktop_identity", "effect_lane",
+    "desktop_transport", "desktop_outcome"])
+@pytest.mark.parametrize("state", ["ABSENT", "UNKNOWN"])
+def test_desktop_bootstrap_each_missing_or_unknown_resource_is_hold(desktop_pins, name, state):
+    rows = tuple(en.Readback(row.name, state) if row.name == name else row
+                 for row in desktop_readback(desktop_pins))
+    assert en.desktop_bootstrap_plan(desktop_pins, rows).state is en.DesktopBootstrapState.RECONCILE_ONLY
+
+
+@pytest.mark.parametrize("fault", ["all_absent", "missing", "duplicate", "extra", "untyped", "bad_name", "bad_state"])
+def test_desktop_bootstrap_no_unenrolled_or_incomplete_first_boot(desktop_pins, fault):
+    rows = desktop_readback(desktop_pins, first_boot=True)
+    if fault == "all_absent": rows = tuple(en.Readback(r.name, "ABSENT") for r in rows)
+    elif fault == "missing": rows = rows[:-1]
+    elif fault == "duplicate": rows = (*rows[:-1], rows[0])
+    elif fault == "extra": rows = (*rows, en.Readback("arbitrary_route", "ABSENT"))
+    elif fault == "untyped": rows = [*rows]
+    elif fault == "bad_name": rows = (en.Readback([], "PRESENT", b"{}"), *rows[1:])
+    elif fault == "bad_state": rows = (replace(rows[0], state=True), *rows[1:])
+    result = en.desktop_bootstrap_plan(desktop_pins, rows)
+    assert not result.source_ready
+    assert not json.loads(result.to_json())["first_boot_eligible"]
+
+
+@pytest.mark.parametrize("facet", ["source", "generation", "hash", "logon", "pid_creation", "config", "launch"])
+def test_desktop_bootstrap_stale_pins_cannot_reuse_first_boot_digest(desktop_pins, facet):
+    old = en.desktop_bootstrap_plan(desktop_pins, desktop_readback(desktop_pins, first_boot=True))
+    changes = {
+        "source": dict(enrollment=replace(desktop_pins.enrollment, source=replace(SOURCE, release_epoch=2))),
+        "generation": dict(enrollment=replace(desktop_pins.enrollment, generation=2)),
+        "hash": dict(executor_sha256="0" * 64), "logon": dict(logon_id="0000000000023456"),
+        "pid_creation": dict(peer=replace(desktop_pins.peer, created_at=T - 1)),
+        "config": dict(config_sha256="0" * 64), "launch": dict(allow_launch=False),
+    }
+    changed = replace(desktop_pins, **changes[facet])
+    result = en.desktop_bootstrap_plan(changed, desktop_readback(changed), previous_digest=old.digest)
+    assert result.state is en.DesktopBootstrapState.RECONCILE_ONLY
+    assert en.desktop_bootstrap_postflight(old, changed, desktop_readback(changed)).state is en.DesktopBootstrapState.RECONCILE_ONLY
+
+
+@pytest.mark.parametrize("fault", ["reservation_error", "spawn_ambiguity", "timeout", "lost_ack", "partially_applied"])
+def test_desktop_bootstrap_postflight_unknown_never_becomes_second_first_boot(desktop_pins, fault):
+    first = en.desktop_bootstrap_plan(desktop_pins, desktop_readback(desktop_pins, first_boot=True))
+    rows = desktop_readback(desktop_pins, first_boot=fault != "partially_applied")
+    if fault == "partially_applied": rows = (*rows[:-1], en.Readback(rows[-1].name, "UNKNOWN"))
+    # Still-absent resources after ANY prior attempt are not first-boot evidence.
+    unknown = en.desktop_bootstrap_postflight(first, desktop_pins, rows)
+    assert unknown.state is en.DesktopBootstrapState.RECONCILE_ONLY
+    assert not unknown.source_ready
+    assert en.desktop_bootstrap_postflight(unknown, desktop_pins, desktop_readback(desktop_pins)).state is en.DesktopBootstrapState.RECONCILE_ONLY
+    matching = en.desktop_bootstrap_postflight(first, desktop_pins, desktop_readback(desktop_pins))
+    assert matching.state is en.DesktopBootstrapState.READBACK_MATCH
+    assert not json.loads(matching.to_json())["first_boot_eligible"]
+
+
+@pytest.mark.parametrize("fault", ["sid", "session0", "session", "executable", "luid", "hash", "launch_flag"])
+def test_desktop_bootstrap_pin_identity_is_exact(desktop_pins, fault):
+    changes = {
+        "sid": dict(peer=replace(desktop_pins.peer, user_sid=OBSERVER)),
+        "session0": dict(peer=replace(desktop_pins.peer, session_id=0)),
+        "session": dict(peer=replace(desktop_pins.peer, session_id=8)),
+        "executable": dict(peer=replace(desktop_pins.peer, executable=r"C:\Foreign\peer.exe")),
+        "luid": dict(logon_id="0" * 16), "hash": dict(chrome_sha256="a" * 40),
+        "launch_flag": dict(allow_launch=1),
+    }
+    with pytest.raises(ValueError): replace(desktop_pins, **changes[fault])
+
+
+def test_desktop_bootstrap_launch_false_is_preserved_and_public_state_is_closed(desktop_pins):
+    pins = replace(desktop_pins, allow_launch=False)
+    plan = en.desktop_bootstrap_plan(pins, desktop_readback(pins, first_boot=True))
+    config = jn.decode(next(r.value for r in plan.resources if r.name == "chrome_config"))
+    assert config["allow_launch"] is False
+    assert json.loads(plan.to_json())["start"] == "DENY"
+    with pytest.raises(ValueError): replace(plan, state=SimpleNamespace(value="private SID/path")).to_json()

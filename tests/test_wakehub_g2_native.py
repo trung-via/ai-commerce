@@ -958,3 +958,228 @@ def test_n3b_public_contract_serializer_has_closed_code_allowlist():
     assert json.loads(result.to_json())["advisory"] == "ABSENCE_UNPROVEN"
     with pytest.raises(ValueError, match="^WAKEHUB_9444_PUBLIC_INPUT_INVALID$"):
         replace(result, code=SimpleNamespace(value="private SID/path/token")).to_json()
+
+
+def n3b2_fixture(enrolled, monkeypatch, operation=START, *, matching=False):
+    f = n3b_fixture(enrolled, monkeypatch, operation)
+    en = rt.enrollment
+    enrollment = en.EnrollmentPins(SOURCE, 1, SID, OBSERVER, (RUNNER,), "1" * 64, "2" * 64,
+        "3" * 64, "4" * 64, "5" * 64, "6" * 64, JID)
+    f.pins = en.DesktopBootstrapPins(enrollment, TARGET,
+        inv.ProcessIdentity(333, T - 60, en.DESKTOP_IMAGE, SID, 7), "0000000000012345",
+        "7" * 64, "8" * 64, str(f.env.config_path), "9" * 64, "Default", f.env.allow_launch)
+    new = set() if matching else {"desktop_transport", "desktop_outcome"}
+    f.rows = tuple(en.Readback(r.name, "ABSENT") if r.name in new else en.Readback(r.name, "PRESENT", r.value)
+                   for r in en.desktop_bootstrap_resources(f.pins))
+    return f
+
+
+def source_bootstrap(f, *, proof=None, pins=None, rows=None, previous_plan=None):
+    return f.runtime.source_bootstrap_9444(ROOT, f.grant.operation, f.proof if proof is None else proof,
+        pins=f.pins if pins is None else pins, readback=f.rows if rows is None else rows,
+        previous_plan=previous_plan)
+
+
+@pytest.mark.parametrize("operation", [START, op.Operation.REUSE])
+@pytest.mark.parametrize("matching", [False, True])
+def test_n3b2_signed_bootstrap_is_source_ready_only_and_all_effect_paths_deny(enrolled, monkeypatch, operation, matching):
+    f = n3b2_fixture(enrolled, monkeypatch, operation, matching=matching)
+    result = source_bootstrap(f)
+    assert result.source_ready
+    public = json.loads(result.to_json())
+    assert public["code"] == "SOURCE_READY_FOR_ENROLLMENT"
+    assert public["decision"] == "HOLD"
+    assert public["start"] == public["reuse"] == "DENY"
+    assert public["bootstrap"]["first_boot_eligible"] is not matching
+    assert public["native_effect"] == "NOT_ATTEMPTED"
+    assert tuple(public["missing_owners"]) == rt.enrollment.DESKTOP_MISSING_OWNERS
+    assert len(f.reads) == len(f.observations) == 2
+    assert enrolled.storage.journal.read(f.grant).state is op.JournalState.EMPTY
+    assert f.pins.allow_launch is f.env.allow_launch  # REUSE accepts false, never changes it.
+    for supplied in (result, result.plan, f.pins, result.preflight.contract):
+        with pytest.raises(jn.NativeDenied): rt.WindowsExecutor().start_dedicated(supplied)
+        with pytest.raises(jn.NativeDenied): rt.WindowsExecutor().reuse_owned(supplied)
+    assert f.runtime.run(operation, f.proof).effect is op.EffectAttempt.NOT_ATTEMPTED
+    for secret in (SID, TARGET.user_name, TARGET.chrome_executable, TARGET.dedicated_profile,
+                   f.pins.logon_id, str(f.env.config_path), str(f.grant.key.action_id), result.plan.digest):
+        assert secret not in result.to_json()
+
+
+@pytest.mark.parametrize("fault", ["forged", "expired", "revoked", "locked", "stale_source", "stale_release"])
+def test_n3b2_offline_ready_bytes_never_override_signed_authority(enrolled, monkeypatch, fault):
+    f = n3b2_fixture(enrolled, monkeypatch, matching=True)
+    proof = f.proof
+    if fault == "forged": proof = op.PrivateGrantProof(b'{"signed":true}', proof.consent)
+    elif fault == "expired": proof = enrolled.proof(replace(f.grant, issued_at=T - 20, expires_at=T - 1))
+    elif fault == "revoked":
+        enrolled.rev["revoked"] = [str(f.grant.key.one_shot_key)]; enrolled.save()
+    elif fault == "locked": monkeypatch.setattr(auth, "_desktop_identity", lambda target: jn.deny())
+    elif fault == "stale_source":
+        enrolled.value["files"]["src/ai_commerce/wakehub/native_runtime.py"] = "0" * 64; enrolled.save()
+    elif fault == "stale_release": proof = enrolled.proof(replace(f.grant, source=replace(SOURCE, release_epoch=2)))
+    result = source_bootstrap(f, proof=proof)
+    assert result.preflight.code is rt.Native9444Code.AUTHORITY_REQUIRED
+    assert not result.source_ready and result.plan is None
+    assert f.reads == f.observations == []
+    assert enrolled.storage.journal.read(f.grant).state is op.JournalState.EMPTY
+
+
+@pytest.mark.parametrize("fault", ["no_config", "allow_launch_false", "port9333", "sid", "session0", "profile", "foreign_pid"])
+def test_n3b2_exact_chrome_and_desktop_boundary_is_not_overridden(enrolled, monkeypatch, fault):
+    f = n3b2_fixture(enrolled, monkeypatch)
+    (local, session, sid), env, identities = f.observation
+    if fault == "no_config": f.code = "FIRST_SUPERVISED_ENROLLMENT_REQUIRED"
+    elif fault == "allow_launch_false": f.code = "LAUNCH_GRANT_REQUIRED"
+    elif fault == "port9333": env = replace(env, port=9333, endpoint="http://127.0.0.1:9333")
+    elif fault == "sid": sid = RUNNER
+    elif fault == "session0": session = 0
+    elif fault == "profile": env = replace(env, user_data_dir=PureWindowsPath(r"C:\Foreign\Profile"))
+    elif fault == "foreign_pid": identities = ((("127.0.0.1", 9444, 999),), ())
+    f.observation = ((local, session, sid), env, identities)
+    result = source_bootstrap(f)
+    assert not result.source_ready and result.plan is None
+    assert result.preflight.code in (rt.Native9444Code.ADVISORY_HOLD, rt.Native9444Code.TARGET_MISMATCH,
+                                     rt.Native9444Code.EVIDENCE_GAP)
+    assert enrolled.storage.journal.read(f.grant).state is op.JournalState.EMPTY
+
+
+@pytest.mark.parametrize("fault", ["source", "target", "journal", "config_path", "profile_directory", "launch", "future_peer"])
+def test_n3b2_bootstrap_pins_must_match_independently_verified_g2_route(enrolled, monkeypatch, fault):
+    f = n3b2_fixture(enrolled, monkeypatch)
+    changes = {
+        "source": dict(enrollment=replace(f.pins.enrollment, source=replace(SOURCE, release_epoch=2))),
+        "target": dict(target=replace(TARGET, dedicated_profile=r"C:\Foreign\Profile")),
+        "journal": dict(enrollment=replace(f.pins.enrollment, journal_id="b" * 32)),
+        "config_path": dict(config_path=r"C:\Foreign\AI-Commerce\Chrome-Acquisition\config.json"),
+        "profile_directory": dict(profile_directory="Other"), "launch": dict(allow_launch=False),
+        "future_peer": dict(peer=replace(f.pins.peer, created_at=T + 1)),
+    }
+    result = source_bootstrap(f, pins=replace(f.pins, **changes[fault]))
+    assert result.preflight.code is rt.Native9444Code.TARGET_MISMATCH
+    assert not result.source_ready
+    assert enrolled.storage.journal.read(f.grant).state is op.JournalState.EMPTY
+
+
+@pytest.mark.parametrize("fault", ["absent_config", "unknown_readback", "bad_hash", "foreign_acl", "symlink"])
+def test_n3b2_signed_preflight_does_not_make_bad_bootstrap_readback_ready(enrolled, monkeypatch, fault):
+    f = n3b2_fixture(enrolled, monkeypatch)
+    rows = list(f.rows); i = next(i for i, r in enumerate(rows) if r.name == "chrome_config")
+    if fault == "absent_config": rows[i] = rt.enrollment.Readback("chrome_config", "ABSENT")
+    elif fault == "unknown_readback": rows[i] = rt.enrollment.Readback("chrome_config", "UNKNOWN")
+    else:
+        body = jn.decode(rows[i].value)
+        key, value = {"bad_hash": ("image_sha256", "0" * 64), "foreign_acl": ("writers", "FOREIGN"),
+                      "symlink": ("reparse_points", True)}[fault]
+        body[key] = value; rows[i] = replace(rows[i], value=jn.canonical(body))
+    result = source_bootstrap(f, rows=tuple(rows))
+    assert result.preflight.code is rt.Native9444Code.OWNER_REQUIRED
+    assert not result.source_ready
+    assert json.loads(result.to_json())["next_operation"] == "RECONCILE_ONLY"
+    assert enrolled.storage.journal.read(f.grant).state is op.JournalState.EMPTY
+
+
+def test_n3b2_concurrent_reservation_vetoes_matching_offline_lane(enrolled, monkeypatch):
+    f = n3b2_fixture(enrolled, monkeypatch)
+    original = rt.enrollment.desktop_bootstrap_plan
+    def competing_start(*args, **kwargs):
+        # A different real SQLite connection wins while this source plan is
+        # being computed. No verifier or journal ownership gate is replaced.
+        with ThreadPoolExecutor(1) as pool:
+            lease = pool.submit(enrolled.storage.reopen().reserve, op.PrivateIntent(f.grant), T).result()
+        assert type(lease) is op.PrivateLease
+        return original(*args, **kwargs)
+    monkeypatch.setattr(rt.enrollment, "desktop_bootstrap_plan", competing_start)
+    result = source_bootstrap(f)
+    assert result.preflight.code is rt.Native9444Code.RECONCILE_ONLY
+    assert json.loads(result.to_json())["decision"] == "UNKNOWN_EFFECT"
+    assert enrolled.storage.journal.read(f.grant).state is op.JournalState.PENDING
+    assert enrolled.storage.reopen().reserve(op.PrivateIntent(grant()), T) is None
+
+
+@pytest.mark.parametrize("fault", ["reservation_error", "spawn_ambiguity", "timeout", "lost_ack"])
+def test_n3b2_durable_external_unknown_has_exactly_no_second_start(enrolled, monkeypatch, fault):
+    f = n3b2_fixture(enrolled, monkeypatch, matching=True)
+    def forbidden(*args, **kwargs): pytest.fail("UNKNOWN reached a second native start/attach")
+    monkeypatch.setattr(rt.WindowsExecutor, "start_dedicated", forbidden)
+    monkeypatch.setattr(rt.WindowsExecutor, "reuse_owned", forbidden)
+    # Offline state representing an external owner's possible effect. No native
+    # executor exists here, and no successful spawn is invented or performed.
+    enrolled.storage.journal.reserve(op.PrivateIntent(f.grant), T)
+    if fault != "lost_ack": enrolled.storage.journal.mark_unknown(op.PrivateIntent(f.grant))
+    for _ in range(2):
+        f.runtime = fixture_runtime(enrolled)
+        result = source_bootstrap(f)
+        assert result.preflight.code is rt.Native9444Code.RECONCILE_ONLY
+        assert json.loads(result.to_json())["decision"] == "UNKNOWN_EFFECT"
+        assert json.loads(result.to_json())["next_operation"] == "RECONCILE_ONLY"
+        assert result.plan is None
+        assert f.runtime.run(START, f.proof).effect is op.EffectAttempt.NOT_ATTEMPTED
+        assert enrolled.storage.reopen().reserve(op.PrivateIntent(grant()), T) is None
+    assert f.reads == f.observations == []
+    with closing(sqlite3.connect(enrolled.storage.path)) as db:
+        assert db.execute("SELECT count(*) FROM intents").fetchone() == (1,)
+        assert db.execute("SELECT count(*) FROM consumed").fetchone() == (3,)
+
+
+def test_n3b2_consumed_grant_stays_consumed_after_signed_no_effect(enrolled, monkeypatch):
+    f = n3b2_fixture(enrolled, monkeypatch, matching=True)
+    lease = enrolled.storage.journal.reserve(op.PrivateIntent(f.grant), T)
+    observation, raw = original_outcome(enrolled, lease)
+    assert enrolled.storage.journal.resolve_verified(enrolled.storage.journal.read(f.grant),
+                                                    observation, raw, enrolled.verifier)
+    result = source_bootstrap(f)
+    assert result.preflight.code is rt.Native9444Code.DUPLICATE
+    assert not result.source_ready and f.reads == []
+
+
+@pytest.mark.parametrize("fault", ["revoked_during_plan", "final_read_timeout"])
+def test_n3b2_final_authority_and_journal_readback_cannot_be_skipped(enrolled, monkeypatch, fault):
+    f = n3b2_fixture(enrolled, monkeypatch)
+    if fault == "revoked_during_plan":
+        original = rt.enrollment.desktop_bootstrap_plan
+        def revoke(*args, **kwargs):
+            result = original(*args, **kwargs)
+            enrolled.rev["revoked"] = [str(f.grant.key.action_id)]; enrolled.save()
+            return result
+        monkeypatch.setattr(rt.enrollment, "desktop_bootstrap_plan", revoke)
+    else:
+        original = f.runtime._operator._record
+        calls = []
+        def record(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 3: raise TimeoutError("private path/token must not escape")
+            return original(*args, **kwargs)
+        monkeypatch.setattr(f.runtime._operator, "_record", record)
+    result = source_bootstrap(f)
+    assert not result.source_ready
+    assert result.preflight.code is (rt.Native9444Code.AUTHORITY_REQUIRED if fault == "revoked_during_plan"
+                                     else rt.Native9444Code.RECONCILE_ONLY)
+    assert "private path/token" not in result.to_json()
+    assert enrolled.storage.journal.read(f.grant).state is op.JournalState.EMPTY
+
+
+def test_n3b2_postflight_never_turns_absent_or_unknown_into_another_first_boot(enrolled, monkeypatch):
+    f = n3b2_fixture(enrolled, monkeypatch)
+    first = source_bootstrap(f)
+    assert first.source_ready
+    after_lost_ack = source_bootstrap(f, previous_plan=first.plan)
+    assert not after_lost_ack.source_ready
+    assert json.loads(after_lost_ack.to_json())["decision"] == "UNKNOWN_EFFECT"
+    assert json.loads(after_lost_ack.to_json())["bootstrap"]["first_boot_eligible"] is False
+    assert enrolled.storage.journal.read(f.grant).state is op.JournalState.EMPTY
+
+
+@pytest.mark.parametrize("boundary", ["unenrolled", "service_session0", "unresolved", "invalid_pins"])
+def test_n3b2_no_runner_or_partial_factory_desktop_fallback(enrolled, monkeypatch, boundary):
+    f = n3b2_fixture(enrolled, monkeypatch)
+    pins = f.pins
+    if boundary == "unenrolled": f.runtime = rt.WindowsPrivateRuntime()
+    elif boundary == "service_session0": f.runtime._broker = object()
+    elif boundary == "unresolved": f.runtime._unresolved = True
+    elif boundary == "invalid_pins": pins = SimpleNamespace(**asdict(f.pins))
+    result = source_bootstrap(f, pins=pins)
+    assert not result.source_ready and result.plan is None
+    assert f.reads == f.observations == []
+    if boundary == "unresolved":
+        assert f.runtime._run_authenticated(START, f.proof).decision is op.Decision.UNKNOWN_EFFECT
+    assert f.runtime.run(START, f.proof).effect is op.EffectAttempt.NOT_ATTEMPTED
