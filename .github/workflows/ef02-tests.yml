@@ -77,3 +77,81 @@ jobs:
         with:
           node-version: '22'
       - run: node --test tests/ef02-watch.test.cjs tests/ef02-reconcile.test.cjs
+
+  atb-native-proof:
+    name: ATB-01 original inert Windows native proof (PR 940 only)
+    # Separate privileged identity: never give OIDC to the normal PR test job.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.number == 940 &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'ci/atb-897-recovered-appcontainer-job-source-20261115'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install only the registered test dependencies
+        run: python -m pip install -e ".[dev]" Pillow
+      - name: Source-pin native opt-in (no native effects)
+        shell: pwsh
+        run: |
+          $profile = python -c "from ai_commerce.engineering.windows_collection_sandbox import PROFILE_SHA256; print(PROFILE_SHA256)"
+          if ($LASTEXITCODE -ne 0 -or $profile -notmatch '^[0-9a-f]{64}$') { throw "ATB_NATIVE_PROFILE_UNPROVEN" }
+          "AI_COMMERCE_WINDOWS_NATIVE_PROOF=$profile" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Execute the three actual hosted Windows inert probes
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python -m pytest tests/test_minimum_test.py::test_windows_native_inert_provider -q -rA --junitxml=.local/atb-native-proof/junit.xml
+      - name: Require 3 real native observations (zero skip/failure)
+        shell: pwsh
+        run: |
+          @'
+          import json
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          path = Path(".local/atb-native-proof/junit.xml")
+          if not path.is_file():
+              raise SystemExit("ATB_NATIVE_JUNIT_MISSING")
+          cases = ET.parse(path).getroot().findall(".//testcase")
+          if len(cases) != 3 or any(c.find(t) is not None for c in cases for t in ("skipped", "failure", "error")):
+              raise SystemExit("ATB_NATIVE_EXECUTION_NOT_PROVEN")
+          seen = set()
+          for case in cases:
+              props = case.find("properties")
+              if props is None:
+                  raise SystemExit("ATB_NATIVE_RECEIPT_MISSING")
+              fields = {p.get("name"): p.get("value") for p in props.findall("property")}
+              if "mt01_native_receipt" not in fields:
+                  raise SystemExit("ATB_NATIVE_RECEIPT_MISSING")
+              receipt = json.loads(fields["mt01_native_receipt"])
+              fault = receipt.get("fault")
+              if fault in seen or fault not in {"none", "timeout", "assignment"}:
+                  raise SystemExit("ATB_NATIVE_RECEIPT_DUPLICATE")
+              seen.add(fault)
+              if receipt.get("status") != ("NEGATIVE_OBSERVED" if fault == "assignment" else "OBSERVED"):
+                  raise SystemExit("ATB_NATIVE_DENIAL_UNPROVEN")
+              if not receipt.get("cleanup_complete") or receipt.get("orphan_count") != 0:
+                  raise SystemExit("ATB_NATIVE_CLEANUP_UNPROVEN")
+              if receipt.get("identity", {}).get("runner_environment") != "github-hosted":
+                  raise SystemExit("ATB_NATIVE_ORIGIN_UNPROVEN")
+          if seen != {"none", "timeout", "assignment"}:
+              raise SystemExit("ATB_NATIVE_CASES_INCOMPLETE")
+          print("ATB_NATIVE_HOSTED_WINDOWS_OBSERVED=3/3")
+          '@ | python -
+      - name: Preserve JUnit-only native receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: atb-native-proof-PR940-${{ github.run_id }}
+          path: .local/atb-native-proof/junit.xml
+          if-no-files-found: warn
+          retention-days: 14
