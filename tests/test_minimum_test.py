@@ -1540,6 +1540,26 @@ def test_windows_native_synthetic_oidc_requires_signature_host_and_exact_identit
             sandbox._verify_oidc(token, jwks, **kwargs)
 
 
+
+@pytest.mark.parametrize("index,value,reason", [
+    (0, 0, "NATIVE_FIXTURE_MAGIC_UNPROVEN"),
+    (1, 0, "NATIVE_APPCONTAINER_TOKEN_UNPROVEN"),
+    (2, 1, "NATIVE_TOKEN_CAPABILITIES_UNPROVEN"),
+    (3, 1, "NATIVE_TOKEN_PRIVILEGES_UNPROVEN"),
+    (11, 321, "NATIVE_CHILD_PID_UNPROVEN"),
+    (12, 0, "NATIVE_CHILD_ENVIRONMENT_UNPROVEN"),
+    (13, 0, "NATIVE_CHILD_SID_UNPROVEN"),
+])
+def test_windows_native_synthetic_fixed_report_field_reason_is_specific(index, value, reason):
+    import struct
+    from ai_commerce.engineering import windows_collection_sandbox as sandbox
+
+    report = [0x4d543031, 1, 0, 0, 5, 5, 5, 0, 2, 10013, 456, 123, 1, 1, 0, 0]
+    report[index] = value
+    with pytest.raises(sandbox.Unproven, match=reason):
+        sandbox._decode_fixture_report(struct.pack("<16I", *report), 123)
+
+
 @pytest.mark.parametrize("index,value", [(4, 2), (5, 32), (6, 3), (7, 5), (8, 5), (9, 10061)])
 def test_windows_native_synthetic_missing_files_and_closed_ports_are_not_denials(index, value):
     import struct
