@@ -1619,6 +1619,24 @@ def test_windows_native_synthetic_denial_failure_codes_are_bounded(index, code, 
     assert error.value.native_error == expected
 
 
+def test_windows_native_synthetic_job_membership_mask_is_bounded_and_fail_closed():
+    """Only membership predicates/count, never synthetic PID values, leave host."""
+    from ai_commerce.engineering import windows_collection_sandbox as sandbox
+
+    proven = sandbox._job_membership_mask(True, [101, 202], 101, 202)
+    assert proven == 0x25f
+    assert sandbox._job_membership_mask(True, [40001, 50002], 40001, 50002) == proven
+    for inside, members, child, grandchild in (
+        (False, [101, 202], 101, 202),
+        (True, [101], 101, 202),
+        (True, [202], 101, 202),
+        (True, [101, 202, 303], 101, 202),
+        (True, [101, 303], 101, 202),
+        (True, [101, 101], 101, 101),
+    ):
+        assert sandbox._job_membership_mask(inside, members, child, grandchild) != proven
+
+
 @pytest.mark.parametrize("loopback_error", [10013, 10060])
 def test_windows_native_synthetic_documented_loopback_drop_requires_strict_file_denials(loopback_error):
     """Only two observed Windows loopback failures are eligible for host recheck."""
