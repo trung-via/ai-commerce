@@ -25,6 +25,7 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import shutil
 import socket
 import struct
@@ -848,12 +849,15 @@ def _decode_fixture_report(raw, pid):
     for allowed, reason in checks:
         if not allowed:
             raise Unproven(reason, ((values[15] & 0xffff) << 3) | (values[14] & 7) if reason == "NATIVE_CHILD_ENVIRONMENT_UNPROVEN" else None)
-    if values[4:10] != (5, 5, 5, 0, 2, 10013):
+    # WFP may drop a capability-less AppContainer loopback attempt until
+    # WSAETIMEDOUT (10060), rather than returning WSAEACCES (10013).
+    # The caller MUST also prove the host listener remains live and empty.
+    expected = (5, 5, 5, 0, 2, 10060 if values[9] == 10060 else 10013)
+    if values[4:10] != expected:
         # Six fixed native result slots, no paths or raw environment values.
         # Lower six bits identify divergent slots; following four-bit nibbles
         # classify only known Win32/WSA result codes (15 means unrecognized).
         codebook = {0: 1, 2: 2, 3: 3, 5: 4, 32: 5, 65: 6, 10013: 7, 10061: 8}
-        expected = (5, 5, 5, 0, 2, 10013)
         mismatches = 0
         classes = 0
         for index, (actual, required) in enumerate(zip(values[4:10], expected)):
@@ -1059,6 +1063,16 @@ def run_inert_probe(*, enabled=False, repository=None, candidate_sha=None, sourc
             raw = stream.read(_PROFILE["output_bytes"] + 1)
         result["output_bytes"] = len(raw)
         values = _decode_fixture_report(raw, pid)
+        # The child must not have reached the listener. Re-prove host loopback
+        # while that exact listener remains open, especially for WSA 10060:
+        # a dead host endpoint must never masquerade as a sandbox denial.
+        if select.select([listener], [], [], 0)[0]:
+            raise Unproven("NATIVE_LOOPBACK_UNEXPECTED_ARRIVAL")
+        listener.settimeout(deadline.remaining(maximum=2))
+        with socket.create_connection(("127.0.0.1", port), timeout=deadline.remaining(maximum=2)):
+            post_connection, _ = listener.accept()
+            post_connection.close()
+        result["positive_controls"]["loopback_connect_after"] = 0
         grandchild = native.k.OpenProcess(0x100000 | 0x1000, False, values[10])
         native.check(grandchild, "NATIVE_DESCENDANT_HANDLE_FAILED")
         inside = W.BOOL()
