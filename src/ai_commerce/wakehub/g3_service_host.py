@@ -160,14 +160,14 @@ class ConnectedStatusHost:
         self._pending = None
         self._lock = threading.Lock()
 
-    def begin(self, handle) -> observer.Challenge:
+    def begin(self, handle, *, request_sha256=None) -> observer.Challenge:
         with self._lock:
             if self._pending is not None:
                 deny()
             anchor, config, server, client, source, target = _context(handle)
             now = self.clock()
             challenge = observer.Challenge(str(uuid4()), source, config["generation"], config["journal_id"],
-                server, client, target, config["logon_id"], now, now + 5)
+                server, client, target, config["logon_id"], now, now + 5, request_sha256)
             journal = broker.BrokerRequests(config["challenges_path"], owner_sid=broker.service_sid(),
                                             journal_id=config["journal_id"])
             digest = auth._digest(canonical(challenge.body()))
@@ -190,6 +190,9 @@ class ConnectedStatusHost:
         try:
             if type(handle) is not int or handle != original_handle:
                 deny()
+            if (challenge.request_sha256 is not None and (type(signed_request) is not bytes
+                    or auth._digest(signed_request) != challenge.request_sha256)):
+                deny()
             challenge.fresh(self.clock())
             # Reopen native custody, SCM, token, source, desktop and both
             # journals. A changed pipe/token/anchor never inherits old trust.
@@ -197,10 +200,132 @@ class ConnectedStatusHost:
             receipt = native.run_service_request(signed_request)
             if receipt.effect is not op.EffectAttempt.NOT_ATTEMPTED:
                 deny()
+            if receipt.decision is op.Decision.UNKNOWN_EFFECT:
+                return receipt  # Keep the challenge UNKNOWN as well as consumed.
             journal.finish(challenge.nonce, digest, receipt)
             return receipt
         except Exception:
             return _unknown()
+
+
+class ConnectedStatusExchange:
+    """One bounded source-only exchange on an independently owned server HANDLE.
+
+    No listener, SCM loop, signer, I/O callback or substitute native readiness.
+    begin -> external broker signature -> offer -> external observer signature
+    -> complete. A reserved attempt is terminal on ANY loss/failure; callers
+    must abandon on partial I/O or timeout. All durable claims remain in the
+    existing G3 challenge and G2 request/effect ledgers.
+    """
+    def __init__(self, *, clock=time.time):
+        self.clock = clock
+        self._host = ConnectedStatusHost(clock=clock)
+        self._lock = threading.Lock()
+        self._state = "NEW"
+
+    def _recheck(self, handle):
+        if type(handle) is not int or handle != self._handle:
+            deny()
+        now = self.clock()
+        self._challenge.fresh(now)
+        if now < self._last_time:
+            deny()
+        context = _context(handle)
+        anchor, config, server, client, source, target = context
+        if (auth._digest(canonical([anchor, config])) != self._pins_digest
+                or (server, client, source, target) != (self._challenge.server,
+                    self._challenge.client, self._challenge.source, self._challenge.target)
+                or config["logon_id"] != self._challenge.logon_id):
+            deny()
+        self._last_time = now
+        return anchor, config
+
+    def begin(self, handle, signed_request: bytes) -> observer.Challenge:
+        with self._lock:
+            if self._state != "NEW":
+                deny()
+            self._state = "CLOSED"
+            try:
+                if type(handle) is not int or handle <= 0:
+                    deny()
+                value = decode(signed_request, observer.STATUS_FRAME_BODY_LIMIT)
+                if canonical(value) != signed_request:
+                    deny()
+                anchor, config, server, client, source, target = _context(handle)
+                body = broker._signed(signed_request, "issuer", "request", anchor["authority"])
+                shape(body, "schema task_parent journal_id source server client operation proof nonce issued_at expires_at")
+                auth._fresh(body, self.clock())
+                if (body["schema"] != "WakeHubBrokerRequest.v1" or body["task_parent"] != auth.TASK_PARENT
+                        or body["operation"] != "STATUS" or body["journal_id"] != config["journal_id"]
+                        or canonical(body["source"]) != canonical(asdict(source))
+                        or canonical(body["server"]) != canonical(asdict(server))
+                        or canonical(body["client"]) != canonical(asdict(client))):
+                    deny()
+                self._pins_digest = auth._digest(canonical([anchor, config]))
+                self._handle, self._request = handle, signed_request
+                self._challenge = self._host.begin(handle, request_sha256=auth._digest(signed_request))
+                self._last_time = self._challenge.issued_at
+                self._recheck(handle)
+                self._state = "RESERVED"
+                return self._challenge
+            except Exception:
+                self._host.abandon()
+                deny()
+
+    def offer(self, handle, signed_challenge: bytes) -> bytes:
+        with self._lock:
+            if self._state != "RESERVED":
+                deny()
+            self._state = "CLOSED"
+            try:
+                anchor, config = self._recheck(handle)
+                frame = observer.StatusFrame(observer.StatusRole.BROKER, signed_challenge)
+                frame.check_binding(self._challenge)
+                observer._verify(signed_challenge, config["broker_signers"]["path"],
+                    anchor["authority"]["verifier"]["path"], observer.BROKER_IDENTITY,
+                    observer.CHALLENGE_NAMESPACE)
+                self._recheck(handle)
+                raw = frame.to_bytes()
+                self._state = "OFFERED"
+                return raw
+            except Exception:
+                self._host.abandon()
+                deny()
+
+    def complete(self, handle, raw: bytes) -> op.PublicReceipt:
+        # Never queue a competing completion behind verification/I/O latency.
+        if not self._lock.acquire(blocking=False):
+            return op.PublicReceipt(op.Operation.STATUS, op.Decision.HOLD, op.Reason.DUPLICATE)
+        try:
+            if self._state != "OFFERED":
+                reserved = self._state == "RESERVED"
+                self._state = "CLOSED"
+                self._host.abandon()
+                return _unknown() if reserved else op.PublicReceipt(
+                    op.Operation.STATUS, op.Decision.HOLD, op.Reason.DUPLICATE)
+            self._state = "CLOSED"  # First wins before decoding or verification.
+            try:
+                self._recheck(handle)
+                frame = observer.StatusFrame.from_bytes(raw, expected=self._challenge,
+                    role=observer.StatusRole.OBSERVER)
+                receipt = self._host.complete(handle, frame.signed_payload, self._request)
+                if (type(receipt) is not op.PublicReceipt or receipt.operation is not op.Operation.STATUS
+                        or receipt.effect is not op.EffectAttempt.NOT_ATTEMPTED):
+                    deny()
+                return receipt
+            except Exception:
+                self._host.abandon()
+                return _unknown()
+        finally:
+            self._lock.release()
+
+    def abandon(self) -> op.PublicReceipt:
+        with self._lock:
+            reserved = self._state in ("RESERVED", "OFFERED")
+            self._state = "CLOSED"
+            self._host.abandon()
+            return _unknown() if reserved else op.PublicReceipt(
+                op.Operation.STATUS, op.Decision.HOLD, op.Reason.DUPLICATE)
 
 
 def staged_scm_entrypoint():
