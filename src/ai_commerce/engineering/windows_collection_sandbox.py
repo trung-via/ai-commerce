@@ -710,9 +710,19 @@ class _Win32:
 
 def _compiler(root):
     """Use only the hosted image's fixed VS/SDK installation, no PATH lookup."""
-    vs = Path(r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC")
+    # GitHub windows-latest switched from VS 2022 to VS 2026 (18/Enterprise).
+    # Source-owned, exact trusted-install allowlist; never search PATH or accept
+    # an issue/env-supplied compiler. Unknown or ambiguous image layouts HOLD.
+    allowed_vs = (
+        Path(r"C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC"),
+        Path(r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC"),
+    )
     kits = Path(r"C:\Program Files (x86)\Windows Kits\10")
-    tools = sorted(vs.glob("*/bin/Hostx64/x64/cl.exe"))
+    found = [sorted(vs.glob("*/bin/Hostx64/x64/cl.exe")) for vs in allowed_vs]
+    active = [paths for paths in found if paths]
+    if len(active) != 1:
+        raise Unproven("HOSTED_NATIVE_COMPILER_UNAVAILABLE")
+    tools = active[0]
     sdks = sorted((kits / "Include").glob("10.*"))
     if not tools or not sdks:
         raise Unproven("HOSTED_NATIVE_COMPILER_UNAVAILABLE")
