@@ -383,11 +383,14 @@ int wmain(int argc, wchar_t **argv) {
                         || (item[1] >= L'a' && item[1] <= L'z'))
                         && item[2] == L':' && item[3] == L'=') {
                 drives++;
-            } else if (wcsncmp(item, L"APPDATA=", 8) == 0
-                       || wcsncmp(item, L"TEMP=", 5) == 0
-                       || wcsncmp(item, L"TMP=", 4) == 0
-                       || wcsncmp(item, L"USERPROFILE=", 12) == 0) {
-                profile++;
+            } else if (wcsncmp(item, L"APPDATA=", 8) == 0) {
+                if (profile & 1) other++; else profile |= 1;
+            } else if (wcsncmp(item, L"TEMP=", 5) == 0) {
+                if (profile & 2) other++; else profile |= 2;
+            } else if (wcsncmp(item, L"TMP=", 4) == 0) {
+                if (profile & 4) other++; else profile |= 4;
+            } else if (wcsncmp(item, L"USERPROFILE=", 12) == 0) {
+                if (profile & 8) other++; else profile |= 8;
             } else {
                 other++;
             }
@@ -395,7 +398,7 @@ int wmain(int argc, wchar_t **argv) {
         r[14] = matches | (count == 2 ? 4 : 0);
         r[15] = (count > 15 ? 15 : count)
               | ((drives > 15 ? 15 : drives) << 4)
-              | ((profile > 15 ? 15 : profile) << 8)
+              | ((profile & 15) << 8)
               | ((other > 15 ? 15 : other) << 12);
         r[12] = count == 2 && matches == 3 && drives == 0 && profile == 0 && other == 0;
     }
