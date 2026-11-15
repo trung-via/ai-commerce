@@ -426,7 +426,7 @@ int wmain(int argc, wchar_t **argv) {
     if (!GetModuleFileNameW(NULL, exe, 32768)) return 89;
     if (swprintf_s(cmd, 32768, L"\"%s\" grandchild", exe) < 0) return 90;
     STARTUPINFOW si = {0}; si.cb = sizeof(si); PROCESS_INFORMATION pi = {0};
-    if (!CreateProcessW(exe, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) return 91;
+    if (!CreateProcessW(exe, cmd, NULL, NULL, FALSE, DETACHED_PROCESS, NULL, NULL, &si, &pi)) return 91;
     r[10] = pi.dwProcessId; CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
     r[11] = GetCurrentProcessId();
     wchar_t report_tmp[32768];
@@ -476,6 +476,11 @@ class _PROCESS(C.Structure):
 class _CAPABILITIES(C.Structure):
     _fields_ = [("sid", C.c_void_p), ("capabilities", C.c_void_p),
                 ("count", W.DWORD), ("reserved", W.DWORD)]
+
+
+def _creation_flags(app_container):
+    """Source-owned CreateProcess flags; no inherited console for inert AC."""
+    return 0x4 | 0x400 | (0x8 if app_container else 0x08000000) | (0x80000 if app_container else 0)
 
 
 class _Win32:
@@ -664,7 +669,10 @@ class _Win32:
             # Explicit application, generated argv, fresh environment, no handles/shell.
             command = C.create_unicode_buffer(subprocess.list2cmdline([str(exe), *map(str, args)]))
             block = C.create_unicode_buffer("\0".join(k + "=" + v for k, v in sorted(environment.items())) + "\0\0")
-            flags = 0x4 | 0x400 | 0x08000000 | (0x80000 if sid else 0)
+            # Inert AppContainer executables have no console contract.
+            # DETACHED_PROCESS prevents Windows console-host peers; the
+            # compiler remains CREATE_NO_WINDOW under its own Job.
+            flags = _creation_flags(bool(sid))
             self.check(self.k.CreateProcessW(str(exe), command, None, None, False, flags,
                 block, str(cwd), C.byref(startup), C.byref(process)), "NATIVE_CREATE_PROCESS_FAILED")
             events.append("CREATE_SUSPENDED")
