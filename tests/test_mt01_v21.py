@@ -1494,7 +1494,7 @@ def test_mt01_impact_control_only_selects_reviewed_self_tests():
     assert selected.selected_tests == ("tests/test_minimum_test.py", "tests/test_mt01_v21.py")
 
 
-def test_windows_collection_sandbox_control_selects_exact_tests_before_recovery(tmp_path):
+def test_windows_collection_sandbox_control_selects_registered_owner_after_recovery(tmp_path):
     from ai_commerce.engineering.impact_v21 import CONTROL_TESTS
     from ai_commerce.engineering.minimum_test import approved_groups
 
@@ -1510,8 +1510,9 @@ def test_windows_collection_sandbox_control_selects_exact_tests_before_recovery(
     assert plan.selected_tests == tests
     assert plan.reason_codes == ("REVIEWED_CONTROL_CLOSURE",)
     assert not plan.missing_mapping
-    # Reviewed test selection does not invent a static source owner or AC.
-    assert not plan.selected_groups
+    # #900 registered the native sandbox path as a reviewed MT-01 owner.
+    # Even with absent fixture bytes, source-only impact selects its known group.
+    assert plan.selected_groups == ("mt01",)
 
 
 def test_windows_collection_sandbox_control_does_not_admit_unknown_engineering_source(tmp_path):
@@ -1527,7 +1528,9 @@ def test_windows_collection_sandbox_control_does_not_admit_unknown_engineering_s
         assert plan.mode == "HOLD_MAPPING" and not plan.runnable
         assert plan.missing_mapping == (unknown + ":SOURCE_OWNERSHIP_REQUIRED",)
         assert plan.selected_tests == (tests if source in changed else ())
-        assert not plan.selected_groups
+        # Unknown engineering paths remain HOLD_MAPPING even when an
+        # independently registered native sandbox source also selects MT-01.
+        assert plan.selected_groups == (("mt01",) if source in changed else ())
 
 
 def test_ef02_897_snapshot_control_selects_pinned_owner_and_consumers(tmp_path):
