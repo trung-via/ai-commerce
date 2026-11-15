@@ -366,12 +366,25 @@ int wmain(int argc, wchar_t **argv) {
     if (!ConvertSidToStringSidW(((TOKEN_APPCONTAINER_INFORMATION*)buffer)->TokenAppContainer, &sid_string)) return 97;
     r[13] = wcscmp(sid_string, argv[8]) == 0; LocalFree(sid_string);
     CloseHandle(token);
+    // Verify the exact two source-owned variables regardless of OS ordering.
+    // Never accept an inherited, duplicate or unexpected environment entry.
+    // The two-bit presence plus cardinality mask is safe to expose on failure.
     LPWCH env = GetEnvironmentStringsW();
     r[12] = 0;
-    if (env && wcsncmp(env, L"LOCALAPPDATA=", 13) == 0 && env[13]) {
-        LPWCH second = env + wcslen(env) + 1;
-        r[12] = wcscmp(second, L"SystemRoot=C:\\Windows") == 0
-                && second[wcslen(second)+1] == 0;
+    if (env) {
+        DWORD count = 0, matches = 0;
+        for (LPWCH item = env; *item; item += wcslen(item) + 1) {
+            if (++count > 2) break;
+            if (wcsncmp(item, L"LOCALAPPDATA=", 13) == 0 && item[13]) {
+                if (matches & 1) break;
+                matches |= 1;
+            } else if (wcscmp(item, L"SystemRoot=C:\\Windows") == 0) {
+                if (matches & 2) break;
+                matches |= 2;
+            } else break;
+        }
+        r[14] = matches | (count == 2 ? 4 : 0);
+        r[12] = count == 2 && matches == 3;
     }
     if (env) FreeEnvironmentStringsW(env);
     r[4] = file_error(argv[2], GENERIC_READ);
@@ -812,7 +825,7 @@ def _decode_fixture_report(raw, pid):
     )
     for allowed, reason in checks:
         if not allowed:
-            raise Unproven(reason)
+            raise Unproven(reason, values[14] if reason == "NATIVE_CHILD_ENVIRONMENT_UNPROVEN" else None)
     if values[4:10] != (5, 5, 5, 0, 2, 10013):
         raise Unproven("NATIVE_ACCESS_DENIAL_UNPROVEN")
     return values
