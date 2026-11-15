@@ -212,6 +212,71 @@ def _verify_oidc(token, jwks, *, audience, candidate_sha, repository, run_id, at
         raise Unproven("HOSTED_OIDC_VERIFICATION_FAILED") from None
 
 
+
+def _verified_hosted_job_metadata(run, jobs, *, repo, run_id, attempt,
+                                  runner_name, github_ref, head_ref):
+    """Match GitHub's authenticated PR-head job SHA, not the PR merge checkout SHA.
+
+    The signed OIDC sha remains the exact checked-out synthetic merge commit.
+    GitHub Actions job/run head_sha is the immutable PR head commit instead.
+    These distinct identities are linked only by the authenticated run's PR
+    event snapshot, with same-repository origin and a single main-base PR.
+    """
+    fail = "HOSTED_WINDOWS_JOB_METADATA_UNPROVEN"
+    match = re.fullmatch(r"refs/pull/([1-9][0-9]*)/merge", github_ref or "")
+    if not match or not isinstance(run, dict) or not isinstance(jobs, dict):
+        raise Unproven(fail)
+    origin = run.get("repository")
+    head_origin = run.get("head_repository")
+    pr_list = run.get("pull_requests")
+    if (not isinstance(origin, dict) or not isinstance(head_origin, dict)
+            or origin.get("full_name") != repo
+            or head_origin.get("id") != origin.get("id")
+            or type(run.get("id")) is not int or run["id"] != int(run_id)
+            or type(run.get("run_attempt")) is not int or run["run_attempt"] != int(attempt)
+            or run.get("event") != "pull_request"
+            or run.get("status") != "in_progress"
+            or not isinstance(pr_list, list) or len(pr_list) != 1
+            or not isinstance(pr_list[0], dict)):
+        raise Unproven(fail)
+    pr = pr_list[0]
+    head, base = pr.get("head"), pr.get("base")
+    if not isinstance(head, dict) or not isinstance(base, dict):
+        raise Unproven(fail)
+    expected_head = run.get("head_sha")
+    if (not isinstance(expected_head, str)
+            or not re.fullmatch(r"[0-9a-f]{40}", expected_head)
+            or pr.get("number") != int(match.group(1))
+            or head.get("sha") != expected_head
+            or not isinstance(head_ref, str) or not head_ref
+            or head.get("ref") != head_ref
+            or run.get("head_branch") != head_ref
+            or not isinstance(head.get("repo"), dict)
+            or head["repo"].get("id") != origin["id"]
+            or not isinstance(base.get("repo"), dict)
+            or base["repo"].get("id") != origin["id"]
+            or base.get("ref") != "main"):
+        raise Unproven(fail)
+    all_jobs = jobs.get("jobs")
+    if (type(jobs.get("total_count")) is not int
+            or not 0 < jobs["total_count"] <= 100
+            or not isinstance(all_jobs, list)
+            or len(all_jobs) != jobs["total_count"]):
+        raise Unproven(fail)
+    matches = [j for j in all_jobs if isinstance(j, dict)
+               and j.get("runner_name") == runner_name
+               and j.get("status") == "in_progress"
+               and j.get("head_sha") == expected_head
+               and j.get("run_id") == int(run_id)
+               and j.get("runner_group_name") == "GitHub Actions"
+               and isinstance(j.get("labels"), list)
+               and set(j["labels"]) & {"windows-2022", "windows-2025", "windows-latest"}
+               and "self-hosted" not in j["labels"]]
+    if len(matches) != 1 or type(matches[0].get("id")) is not int:
+        raise Unproven(fail)
+    return matches[0]["id"], expected_head
+
+
 def _hosted_identity(repository, candidate_sha, deadline):
     """Authenticate before native effects, even if RUNNER_ENVIRONMENT was forged."""
     env = os.environ
@@ -238,15 +303,11 @@ def _hosted_identity(repository, candidate_sha, deadline):
     api = "https://api.github.com/repos/" + repo
     jobs = _http_json(api + f"/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100",
                       deadline, bearer=env["GITHUB_TOKEN"])
-    matches = [j for j in jobs.get("jobs", []) if isinstance(j, dict)
-               and j.get("runner_name") == env.get("RUNNER_NAME")
-               and j.get("status") == "in_progress" and j.get("head_sha") == candidate_sha
-               and j.get("run_id") == int(run_id)
-               and j.get("runner_group_name") == "GitHub Actions"
-               and set(j.get("labels", [])) & {"windows-2022", "windows-2025", "windows-latest"}
-               and "self-hosted" not in j.get("labels", [])]
-    if len(matches) != 1 or jobs.get("total_count", 101) > 100:
-        raise Unproven("HOSTED_WINDOWS_JOB_METADATA_UNPROVEN")
+    run = _http_json(api + f"/actions/runs/{run_id}", deadline, bearer=env["GITHUB_TOKEN"])
+    job_id, job_head_sha = _verified_hosted_job_metadata(
+        run, jobs, repo=repo, run_id=run_id, attempt=attempt,
+        runner_name=env.get("RUNNER_NAME"), github_ref=env.get("GITHUB_REF"),
+        head_ref=env.get("GITHUB_HEAD_REF"))
     # Compare exact GitHub source blobs as well as caller's local source digest.
     for relative in SOURCE_PATHS:
         data = (Path(repository) / relative).read_bytes()
@@ -256,7 +317,7 @@ def _hosted_identity(repository, candidate_sha, deadline):
         if item.get("type") != "file" or item.get("sha") != blob:
             raise Unproven("HOSTED_EXACT_HEAD_SOURCE_MISMATCH")
     return dict(repository=repo, candidate_sha=candidate_sha, run_id=int(run_id),
-                run_attempt=int(attempt), job_id=matches[0]["id"],
+                run_attempt=int(attempt), job_id=job_id, pr_head_sha=job_head_sha,
                 runner_environment=claims["runner_environment"],
                 workflow_sha256=_sha(claims["workflow_ref"].encode()))
 
