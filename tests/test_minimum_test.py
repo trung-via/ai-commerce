@@ -1619,6 +1619,21 @@ def test_windows_native_synthetic_denial_failure_codes_are_bounded(index, code, 
     assert error.value.native_error == expected
 
 
+@pytest.mark.parametrize("loopback_error", [10013, 10060])
+def test_windows_native_synthetic_documented_loopback_drop_requires_strict_file_denials(loopback_error):
+    """Only two observed Windows loopback failures are eligible for host recheck."""
+    import struct
+    from ai_commerce.engineering import windows_collection_sandbox as sandbox
+
+    report = [0x4d543031, 1, 0, 0, 5, 5, 5, 0, 2, loopback_error, 456, 123, 1, 1, 0, 0]
+    assert sandbox._decode_fixture_report(struct.pack("<16I", *report), 123)[9] == loopback_error
+    # Even with a permitted loopback failure, a successful private file read
+    # is a real isolation violation and must still fail closed.
+    report[4] = 0
+    with pytest.raises(sandbox.Unproven, match="NATIVE_ACCESS_DENIAL_UNPROVEN"):
+        sandbox._decode_fixture_report(struct.pack("<16I", *report), 123)
+
+
 @pytest.mark.parametrize("index,value", [(4, 2), (5, 32), (6, 3), (7, 5), (8, 5), (9, 10061)])
 def test_windows_native_synthetic_missing_files_and_closed_ports_are_not_denials(index, value):
     import struct
