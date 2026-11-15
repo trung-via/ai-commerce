@@ -4022,3 +4022,27 @@ def test_v21_select_plan_loads_committed_manifests_under_project_tests(monkeypat
     assert plan["version"] == 2 and not plan["fallback"]
     assert {"hostops-personal", "hostops-v3"} <= set(plan["selected_groups"])
     assert all(g["execute"] and g["state"] == "EXECUTE" for g in plan["groups"])
+
+
+def test_diagnostic_evidence_never_satisfies_mt01_or_candidate_fanin(tmp_path):
+    """Diagnostic completion has no source verification or candidate authority."""
+    from ai_commerce.remote.candidate_policy import candidate_accepted, validate_candidate_evidence
+    from ai_commerce.remote.worker import _verified_receipt_evidence
+    diagnostic = {"status": "DIAGNOSTIC_COMPLETE", "executor_invoked": False,
+                  "native_proof": "WINDOWS_NATIVE_OBSERVED", "cases": [], "succeeded": 2, "total": 2}
+    assert not candidate_accepted(diagnostic)
+    assert not _verified_receipt_evidence(diagnostic, root=tmp_path, workspace=tmp_path,
+                                          source_sha="a" * 40, sources=[], profiles={})
+    with pytest.raises(ValueError, match="CANDIDATE_EVIDENCE_INVALID"):
+        validate_candidate_evidence(diagnostic)
+    packet = {"batch_id": "diag-consumer", "source_sha": "a" * 40, "max_parallel": 1,
+              "actions": [{"action_id": "diag", "attempt_id": "d-1", "depends_on": []},
+                          {"action_id": "source", "attempt_id": "s-1", "depends_on": ["diag"]}]}
+    called = []
+    def result(item):
+        called.append(item["action_id"])
+        return dict(diagnostic)
+    report = run_schedule(packet, result)
+    assert called == ["diag"]
+    assert report["status"] == "PARTIAL_OR_FAILED" and report["succeeded"] == 0
+    assert report["actions"][1]["status"] == "BLOCKED_DEPENDENCY"

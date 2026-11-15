@@ -15,9 +15,77 @@ from ai_commerce.engineering.minimum_test import approved_groups
 
 IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 HEX_SHA = re.compile(r"^[0-9a-f]{40}$")
+DIAGNOSTIC_MODE = "WINDOWS_B03_SERIAL_XDIST_V1"
 
 class RemoteRequestError(ValueError):
     pass
+
+
+def reject_executor_test_conflict(action: dict) -> None:
+    """Finite capability admission plus a deliberately narrow legacy grammar.
+
+    Prose is not a capability grant. Recognize clear executor imperatives, not
+    every mention of tests, historical incidents, quotations or prohibitions.
+    This is not a general natural-language classifier; the focused executor
+    prohibition remains mandatory even for prose outside this grammar.
+    """
+    policy = action.get("executor_test_policy", "EF01_POST_MODEL_ONLY")
+    if policy == "EXECUTOR_PYTEST_REQUIRED":
+        raise RemoteRequestError("EXECUTOR_PYTEST_FORBIDDEN_PRESPAWN")
+    if policy != "EF01_POST_MODEL_ONLY":
+        raise RemoteRequestError("EXECUTOR_TEST_POLICY_INVALID")
+    instruction = action.get("instruction", "")
+    instruction = re.sub(r"(?ms)^\s*(```|~~~).*?^\s*\1[^\n]*", "", instruction)
+    # Preserve quoted command names, but exclude quoted examples of mandates.
+    instruction = re.sub(
+        r"(?<!\w)([\"'`])([^\n]*?)\1",
+        lambda m: " " if re.search(r"\b(run|execute|invoke|must|shall)\b", m[2], re.I) else m[2],
+        instruction)
+    subject = r"(?:the\s+)?(?:coding\s+)?(?:executor|model|agent|you)(?:\s+(?:itself|yourself))?"
+    verb = r"(?:run|execute|invoke)"
+    command = r"(?:`|\"|')?(?:(?:python|py)(?:\.exe)?\s+-m\s+)?(?:pytest|pytest-xdist|xdist)\b"
+    mandate = re.compile(
+        rf"\b{subject}\s+(?:(?:must|shall|should|needs?\s+to|is\s+required\s+to|are\s+required\s+to)\s+)?"
+        rf"(?:itself\s+)?(?:directly\s+)?{verb}\s+{command}", re.I)
+    direct = re.compile(rf"^\s*(?:[-*]\s*)?(?:please\s+)?{verb}\s+{command}", re.I)
+    for clause in re.split(r"[\n;]+|[.!?](?:\s|$)", instruction):
+        if clause.lstrip().startswith(">"):
+            continue
+        match = mandate.search(clause) or direct.search(clause)
+        if not match:
+            continue
+        prefix = clause[:match.start()]
+        # Meta-requirements to reject such requests are not executor mandates.
+        if re.search(r"\b(?:reject|deny|forbid|prohibit)\b[^;\n]*\b(?:requests?|mandates?|instructions?|demanding|requiring)\b", prefix, re.I):
+            continue
+        if re.search(r"\b(?:not|never|no)\s+(?:require|demand|instruct|ask|let|allow)\b[^;\n]*$", prefix, re.I):
+            continue
+        # Only standalone imperatives or a finite instructional preamble are
+        # decisive. Unquoted descriptions of another request are not orders.
+        if prefix.strip() and not re.fullmatch(
+                r"\s*(?:[-*]\s*)?(?:(?:important|mandatory|requirement|task|verification|tests?)\s*:\s*|"
+                r"(?:before (?:returning|delivery)|for verification|then)\s*[:,]?\s*)",
+                prefix, re.I):
+            continue
+        raise RemoteRequestError("EXECUTOR_PYTEST_FORBIDDEN_PRESPAWN")
+
+
+def is_diagnostic_batch(data: dict) -> bool:
+    return any("diagnostic_mode" in a or a.get("delivery") == "DIAGNOSTIC_ONLY"
+               for a in data["actions"])
+
+
+def _validate_diagnostic_shape(data: dict) -> None:
+    if data["actor"] != "HUMAN":
+        raise RemoteRequestError("DIAGNOSTIC_OWNER_HUMAN_REQUIRED")
+    if len(data["actions"]) != 1 or data.get("max_parallel", 1) != 1:
+        raise RemoteRequestError("DIAGNOSTIC_SINGLE_ACTION_REQUIRED")
+    action = data["actions"][0]
+    if (action.get("diagnostic_mode") != DIAGNOSTIC_MODE or
+            action.get("delivery") != "DIAGNOSTIC_ONLY" or
+            set(action) - {"action_id", "attempt_id", "diagnostic_mode", "delivery", "depends_on", "resources"} or
+            action.get("depends_on", []) != [] or action.get("resources", []) != []):
+        raise RemoteRequestError("DIAGNOSTIC_SHAPE_INVALID")
 
 # Human-retired WP01..WP06/EPWO must never be dispatched, even from old batch JSON.
 # This narrow deny-only control is external to the restored pre-WP Engineering logic.
@@ -74,7 +142,7 @@ def validate_batch(data: dict, *, schema: Path, registry: dict[str, list[str]],
                    brain_issuers: tuple[str, ...] = (),
                    approved_reuse: dict | None = None) -> dict:
     Draft202012Validator(json.loads(schema.read_text(encoding="utf-8"))).validate(data)
-    owner = issuer_login.casefold() == owner_login.casefold()
+    owner = bool(issuer_login and owner_login) and issuer_login.casefold() == owner_login.casefold()
     brain = issuer_login.casefold() in {v.casefold() for v in brain_issuers if v}
     if not ((data["actor"] == "HUMAN" and owner) or
             (data["actor"] == "BRAIN" and brain)):
@@ -95,6 +163,9 @@ def validate_batch_content(data: dict, *, schema: Path, registry: dict[str, list
 def _validate_actions(data: dict, *, registry: dict[str, list[str]],
                       approved_reuse: dict | None) -> dict:
     reject_retired_wp_identifiers(data)
+    if is_diagnostic_batch(data):
+        _validate_diagnostic_shape(data)
+        return data
     ids = [a["action_id"] for a in data["actions"]]
     attempts = [a["attempt_id"] for a in data["actions"]]
     if len(set(ids)) != len(ids) or len(set(attempts)) != len(attempts):
@@ -102,6 +173,7 @@ def _validate_actions(data: dict, *, registry: dict[str, list[str]],
     known = set(ids)
     graph: dict[str, list[str]] = {}
     for action in data["actions"]:
+        reject_executor_test_conflict(action)
         ExecutorSelection(action["executor"], action["model"], action["effort"])
         try:
             validate_max_repair_rounds(action.get("max_repair_rounds", DEFAULT_MAX_REPAIR_ROUNDS))
