@@ -2325,3 +2325,212 @@ jobs:
             await github.rest.issues.createComment({...context.repo,
               issue_number:context.issue.number,
               body:'AI_COMMERCE_EF02_904_SOURCE_SNAPSHOT_V1\n'+JSON.stringify(receipt)});
+
+  # Fixed legacy #897 original-source salvage; no native sandbox execution.
+  hostops-ef02-897-source-restore:
+    if: >-
+      github.repository == 'trung-via/ai-commerce' &&
+      github.actor == github.repository_owner &&
+      github.event_name == 'issues' && github.event.action == 'opened' &&
+      github.event.issue.user.login == github.repository_owner &&
+      github.event.issue.title == '[HOSTOPS EF02 SNAPSHOT] #897 source-only'
+    runs-on: [self-hosted, Windows, ai-commerce-ef02]
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        slot: [one, two]
+    timeout-minutes: 6
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: ef02-897-source-snapshot-${{ matrix.slot }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Verify fixed legacy #897 worktree and preserve 3 exact source bytes only
+        id: snapshot
+        shell: pwsh
+        run: |
+          $script = @'
+          import hashlib, json, os, stat, subprocess, zipfile
+          from pathlib import Path
+          
+          SOURCE_SHA = "30cc5cb9866efa615c22eb09cd01cd875b9f08d5"
+          WORKTREE = "wt-scdr9irs"
+          BATCH = "atb01-p1b2c-native-windows-provider-20261114"
+          ACTION = "ATB01_P1B2C_NATIVE_WIN32_PROVIDER"
+          RUN_ID = 43600516244
+          OUT = "ef02-897-recovered-source.zip"
+          BODY = '{"schema":"ai-commerce.hostops.ef02-897-snapshot.v1","operation":"EF02_897_SOURCE_SNAPSHOT_READONLY","target_issue":897,"parameters":{}}'
+          EXPECTED = {
+              "src/ai_commerce/engineering/minimum_test.py": "2d34cc5bf36960d9553cf104d2498e871e2dd2768a9feefb3fe78e4b5d929f14",
+              "src/ai_commerce/engineering/windows_collection_sandbox.py": "a7e2590a456a59bcd08726c06d4efa5360a71b7aa5f51db66743a8597b8f401c",
+              "tests/test_minimum_test.py": "0cc298649669425099a9c2c8600b81d8ba2b86a03d6fb18dcb1ad0ed0894d883",
+          }
+          UNTRACKED = "src/ai_commerce/engineering/windows_collection_sandbox.py"
+          ACTION_SHA = "322f177e0b3a34db30fe59ab2b726779f73859a34d887d4c93184a08606589a0"
+          REPORT_SHA = "abca06633037f10f5a16610c0c02d84ebaa8da88665550d35a44fbca343025d5"
+          MAX_SOURCE = 4 * 1024 * 1024
+          MAX_EVIDENCE = 2 * 1024 * 1024
+          
+          class Hold(Exception):
+              pass
+          
+          def fail(condition):
+              if not condition:
+                  raise Hold()
+          
+          def safe(path, is_file=False):
+              path = Path(path)
+              fail(path.is_absolute() and not str(path).startswith("\\"))
+              for part in (path, *path.parents):
+                  info = part.lstat()
+                  fail(not stat.S_ISLNK(info.st_mode) and not getattr(info, "st_file_attributes", 0) & 0x400)
+                  if is_file and part == path:
+                      fail(stat.S_ISREG(info.st_mode) and info.st_nlink == 1)
+                  else:
+                      fail(stat.S_ISDIR(info.st_mode))
+          
+          def checked_read(path, limit):
+              safe(path, is_file=True)
+              fail(path.stat().st_size <= limit)
+              with path.open("rb") as reader:
+                  before = os.fstat(reader.fileno())
+                  data = reader.read(limit + 1)
+                  after = os.fstat(reader.fileno())
+              ident = lambda a: (a.st_dev, a.st_ino, a.st_size, a.st_mtime_ns, a.st_nlink)
+              fail(len(data) <= limit and len(data) == before.st_size and ident(before) == ident(after))
+              safe(path, is_file=True)
+              fail(ident(path.stat()) == ident(after))
+              return data
+          
+          def git(root, *args):
+              fail(not any(os.environ.get(k) for k in (
+                  "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+                  "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE")))
+              env = dict(os.environ)
+              env.update({"GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0",
+                          "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
+              result = subprocess.run(["git", "--no-optional-locks", "-c", "core.fsmonitor=false",
+                                       "-C", str(root), *args],
+                                      shell=False, cwd=root, stdin=subprocess.DEVNULL,
+                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                      timeout=15, env=env)
+              fail(result.returncode == 0 and len(result.stdout) <= 8192)
+              return result.stdout
+          
+          def run():
+              fail(os.name == "nt" and os.environ.get("RUNNER_NAME") == "AI-COMMERCE-EF02-01")
+              fail(os.environ.get("GITHUB_REPOSITORY") == "trung-via/ai-commerce"
+                   and os.environ.get("GITHUB_ACTOR") == "trung-via")
+              event = json.loads(checked_read(Path(os.environ["GITHUB_EVENT_PATH"]), MAX_EVIDENCE))
+              fail(event.get("action") == "opened"
+                   and event.get("sender", {}).get("login") == "trung-via"
+                   and event.get("issue", {}).get("user", {}).get("login") == "trung-via"
+                   and event.get("issue", {}).get("title") == "[HOSTOPS EF02 SNAPSHOT] #897 source-only"
+                   and event.get("issue", {}).get("body") == BODY)
+              checkout = Path(os.environ["GITHUB_WORKSPACE"])
+              fail(checkout.name == "ai-commerce")
+              safe(checkout)
+              root = checkout.parent / "_ef02_worktrees" / WORKTREE
+              safe(root)
+              fail(git(root, "rev-parse", "--verify", "HEAD").strip().decode("ascii") == SOURCE_SHA)
+              fail(Path(git(root, "rev-parse", "--show-toplevel").decode().strip()) == root)
+              status = [s for s in git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all").decode("utf-8").split("\0") if s]
+              fail(len(status) == len(EXPECTED))
+              seen = set()
+              for line in status:
+                  fail(len(line) >= 4 and line[2] == " ")
+                  kind, rel = line[:2], line[3:]
+                  fail(rel in EXPECTED and rel not in seen)
+                  fail(kind == ("??" if rel == UNTRACKED else " M"))
+                  seen.add(rel)
+              fail(seen == set(EXPECTED))
+              evidence_root = checkout / ".local" / "ef02" / BATCH / (ACTION + "-" + BATCH)
+              action_raw = checked_read(evidence_root / "action_result.json", MAX_EVIDENCE)
+              report_raw = checked_read(evidence_root / "ef01" / "engineering_result.json", MAX_EVIDENCE)
+              fail(hashlib.sha256(action_raw).hexdigest() == ACTION_SHA)
+              fail(hashlib.sha256(report_raw).hexdigest() == REPORT_SHA)
+              action, report = json.loads(action_raw), json.loads(report_raw)
+              fail(action.get("attempt_id") == BATCH and action.get("action_id") == ACTION
+                   and action.get("source_sha") == SOURCE_SHA and action.get("worktree") == str(root))
+              fail(report.get("repo") == str(root) and report.get("source_base_sha") == SOURCE_SHA
+                   and report.get("candidate_file_sha256") == EXPECTED
+                   and report.get("error_code") == "MT01_COVERAGE_UNPROVEN")
+              contents = {}
+              for path, checksum in EXPECTED.items():
+                  data = checked_read(root.joinpath(*path.split("/")), MAX_SOURCE)
+                  fail(hashlib.sha256(data).hexdigest() == checksum)
+                  contents[path] = data
+              fail(git(root, "rev-parse", "--verify", "HEAD").strip().decode("ascii") == SOURCE_SHA)
+              confirm = [s for s in git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all").decode("utf-8").split("\0") if s]
+              fail(set(confirm) == set(status) and len(confirm) == len(status))
+              temp = Path(os.environ["RUNNER_TEMP"])
+              safe(temp)
+              dest = temp / OUT
+              fail(not dest.exists() and not dest.is_symlink())
+              manifest = {"schema": "ai-commerce.hostops.ef02-897-snapshot.v1", "target_issue": 897,
+                  "origin_runner": "AI-COMMERCE-EF02-01", "original_run": RUN_ID,
+                  "source_sha": SOURCE_SHA, "attempt_id": BATCH, "sha256": EXPECTED,
+                  "action_evidence_sha256": ACTION_SHA, "report_evidence_sha256": REPORT_SHA,
+                  "source_only": True, "candidate_verified": False, "native_sandbox_proven": False,
+                  "replay_authorized": False}
+              with zipfile.ZipFile(dest, "x", compression=zipfile.ZIP_DEFLATED, allowZip64=False) as archive:
+                  archive.writestr("manifest.json", json.dumps(manifest, sort_keys=True, separators=(",", ":")))
+                  for path, data in sorted(contents.items()):
+                      archive.writestr("source/" + path, data)
+              with zipfile.ZipFile(dest) as archive:
+                  fail(set(archive.namelist()) == {"manifest.json", *("source/" + p for p in EXPECTED)})
+                  fail(all(hashlib.sha256(archive.read("source/" + p)).hexdigest() == EXPECTED[p] for p in EXPECTED))
+              print("EF02_897_SOURCE_SNAPSHOT_UNVERIFIED_ARTIFACT")
+          
+          try:
+              run()
+          except Exception:
+              print("EF02_897_SOURCE_RECOVERY_HOLD")
+              raise SystemExit(2)
+          '@
+          $script | python -B -
+          if ($LASTEXITCODE -ne 0) { throw 'EF02_897_SOURCE_SNAPSHOT_DENIED' }
+      - name: Upload private read-only source archive
+        if: steps.snapshot.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        id: upload
+        with:
+          name: ef02-897-origin-source-${{ github.run_id }}-${{ matrix.slot }}
+          path: ${{ runner.temp }}\ef02-897-recovered-source.zip
+          retention-days: 7
+          if-no-files-found: error
+      - name: Publish sanitized snapshot result
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          SNAPSHOT_STATE: ${{ steps.snapshot.outcome }}
+          UPLOAD_STATE: ${{ steps.upload.outcome }}
+          SNAPSHOT_ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+        with:
+          script: |
+            const id = Number(process.env.SNAPSHOT_ARTIFACT_ID);
+            const ok = process.env.SNAPSHOT_STATE === 'success' &&
+                       process.env.UPLOAD_STATE === 'success' &&
+                       Number.isSafeInteger(id) && id > 0;
+            const actual = ['AI-COMMERCE-EF02-01', 'AI-COMMERCE-EF02-02'].includes(process.env.RUNNER_NAME)
+              ? process.env.RUNNER_NAME : 'UNKNOWN';
+            const receipt = {
+              schema:'ai-commerce.hostops.ef02-897-snapshot.v1',
+              operation:'EF02_897_SOURCE_SNAPSHOT_READONLY', target_issue:897,
+              origin_runner:'AI-COMMERCE-EF02-01', actual_runner:actual,
+              source_sha:'30cc5cb9866efa615c22eb09cd01cd875b9f08d5',
+              status:ok ? 'UNVERIFIED_SOURCE_ARTIFACT' : 'HOLD_SOURCE_RECOVERY_UNVERIFIED',
+              artifact_id:ok ? id : null, source_only:true,
+              candidate_verified:false, native_sandbox_proven:false,
+              write_attempted:false, replay_authorized:false
+            };
+            await github.rest.issues.createComment({...context.repo,
+              issue_number:context.issue.number,
+              body:'AI_COMMERCE_EF02_897_SOURCE_SNAPSHOT_V1\n'+JSON.stringify(receipt)});
