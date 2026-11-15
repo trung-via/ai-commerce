@@ -3159,23 +3159,19 @@ def test_v21_windows_collection_control_preserves_registered_mt01_evidence(
     assert not plan["unknown_acs"] and not plan["pending_brain_acs"]
     assert not any("SOURCE_OWNERSHIP_REQUIRED" in p
                    for p in plan["impact_v21"]["missing_mapping"])
-    if owner_test_changed:
-        assert plan["impact_v21"]["mode"] == "TARGETED"
-        assert not plan["impact_v21"]["missing_mapping"]
-        assert plan["selected_groups"] == ["mt01"]
-        assert plan["selected_profiles"] == ["mt01-mt01-tests"]
-        entry, = plan["groups"]
-        assert entry["execute"] and entry["state"] == "EXECUTE"
-        assert entry["acs"] == ["MT01.selection-and-evidence"]
-        assert entry["binding"]["argv"] == command
-        assert entry["binding"]["selected_impact_tests"] == tests
-    else:
-        # CONTROL_TESTS alone cannot assert the absent module's semantic AC.
-        assert plan["impact_v21"]["mode"] == "HOLD_COVERAGE"
-        assert not plan["selected_groups"] and not plan["selected_profiles"]
-        assert "AC_REQUIRED_GROUP_NOT_SELECTED:MT01.selection-and-evidence" in plan["reason_codes"]
-        assert all(not entry["execute"] and entry["state"] == "UNPROVEN"
-                   for entry in plan["groups"])
+    # After exact #897 source recovery and #900 registered owner mapping, both
+    # source-only and source+test edits select the established MT-01 owner.
+    # Missing local fixture source bytes do not erase the trusted static owner.
+    assert plan["impact_v21"]["mode"] == "TARGETED"
+    assert not plan["impact_v21"]["missing_mapping"]
+    assert plan["selected_groups"] == ["mt01"]
+    assert plan["selected_profiles"] == ["mt01-mt01-tests"]
+    entry, = plan["groups"]
+    assert entry["execute"] and entry["state"] == "EXECUTE"
+    assert entry["acs"] == ["MT01.selection-and-evidence"]
+    assert entry["binding"]["argv"] == command
+    assert entry["binding"]["selected_impact_tests"] == tests
+    assert "AC_REQUIRED_GROUP_NOT_SELECTED:MT01.selection-and-evidence" not in plan["reason_codes"]
 
 
 def test_human_full_cannot_auto_approve_unmapped_acceptance(monkeypatch, real_tree):
