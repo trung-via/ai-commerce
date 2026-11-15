@@ -1915,6 +1915,26 @@ def test_diagnostic_fixed_pair_and_evidence_control_only(tmp_path, monkeypatch):
     # All subprocesses above were fakes. This test supplies NO Windows native proof.
 
 
+def test_diagnostic_elapsed_receipt_uses_high_resolution_clock_on_windows(tmp_path, monkeypatch):
+    """A coarse Windows monotonic tick must not zero genuine short intervals."""
+    module, calls = _offline_diagnostic(tmp_path, monkeypatch)
+    # Deliberately simulate a Windows monotonic clock that does not advance
+    # during either synthetic child; the high-resolution clock is independent.
+    with monkeypatch.context() as clock_patch:
+        clock_patch.setattr(module.time, "monotonic", lambda: 1234.0)
+        report = module.execute_diagnostic_batch(
+            checkout=tmp_path, batch=diagnostic_packet(),
+            issuer_login="owner", owner_login="owner", issue_number=957)
+    assert report["status"] == "DIAGNOSTIC_COMPLETE" and len(calls) == 2
+    assert all(case["elapsed_seconds"] > 0 for case in report["cases"])
+    root = tmp_path / module.B03_DIAGNOSTIC_ROOT
+    for phase in ("serial", "xdist"):
+        receipt = json.loads((root / (phase + ".result.json")).read_text())
+        assert module._verify_diagnostic_receipt(root, receipt)
+        receipt["elapsed_seconds"] = 0.0
+        assert module._verify_diagnostic_receipt(root, receipt) is False
+
+
 @pytest.mark.parametrize("phase", ["serial", "xdist"])
 @pytest.mark.parametrize("damage", ["missing-junit", "fake-junit-only", "unexpected-node", "skipped-node",
     "zero-nodes", "extra-node", "missing-collection", "malformed-receipt", "wrong-nonce", "duplicate-stage",

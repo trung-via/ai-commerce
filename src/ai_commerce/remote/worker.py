@@ -621,7 +621,10 @@ def execute_diagnostic_batch(*, checkout: Path, batch: dict, issuer_login: str,
             (root / phase).mkdir()
             nonce = secrets.token_hex(32)
             child_env = {**env, "AI_COMMERCE_B03_PHASE": phase, "AI_COMMERCE_B03_NONCE": nonce}
-            started, clock_start = time.time(), time.monotonic()
+            # Windows monotonic() can tick more coarsely than a fast synthetic
+            # child. A genuine sub-tick interval must not become an invented
+            # zero-duration receipt that fails the positive-time proof gate.
+            started, clock_start_ns = time.time(), time.perf_counter_ns()
             case = {"phase": phase, "status": "DIAGNOSTIC_FAILED", "error_code": None,
                     "nonce": nonce, "started_at": started,
                     "source_sha": batch["source_sha"], "request_fingerprint": report["request_fingerprint"],
@@ -629,7 +632,8 @@ def execute_diagnostic_batch(*, checkout: Path, batch: dict, issuer_login: str,
                     "workers_requested": 0 if phase == "serial" else 12}
             report["cases"].append(case)
             code, raw, problem = _run_diagnostic_child(argv, checkout=checkout, env=child_env)
-            case.update(ended_at=time.time(), elapsed_seconds=time.monotonic() - clock_start,
+            case.update(ended_at=time.time(),
+                        elapsed_seconds=(time.perf_counter_ns() - clock_start_ns) / 1_000_000_000,
                         child_status="EXIT_ZERO" if code == 0 and not problem else "CHILD_FAILED",
                         child_exit_code=code if type(code) is int and 0 <= code <= 5 else None)
             (root / (phase + ".output.log")).write_bytes(_sanitized_diagnostic_output(raw))
@@ -671,7 +675,8 @@ def execute_diagnostic_batch(*, checkout: Path, batch: dict, issuer_login: str,
     if (report["error_code"] and report["cases"] and
             report["cases"][-1]["status"] == "DIAGNOSTIC_FAILED" and report["cases"][-1]["error_code"] is None):
         report["cases"][-1].update(status="DIAGNOSTIC_FAILED", error_code=report["error_code"],
-                                     ended_at=time.time(), elapsed_seconds=time.monotonic() - clock_start)
+                                     ended_at=time.time(),
+                                     elapsed_seconds=(time.perf_counter_ns() - clock_start_ns) / 1_000_000_000)
     report["succeeded"] = sum(c["status"] == "DIAGNOSTIC_COMPLETE" for c in report["cases"])
     if report["status"] != "DIAGNOSTIC_COMPLETE" and report["cases"]:
         report["native_proof"] = "WINDOWS_NATIVE_UNPROVEN"
