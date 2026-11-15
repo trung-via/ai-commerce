@@ -1764,3 +1764,57 @@ def test_n3a_policy_and_private_adapter_are_not_cli_operations(monkeypatch, tmp_
         ca.main([command, "--checkout", str(tmp_path), "--opt-in"])
     assert exc.value.code == 2
     assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("enrolled,allow_launch,running,code", [
+    (False, False, False, "FIRST_SUPERVISED_ENROLLMENT_REQUIRED"),
+    (True, False, False, "LAUNCH_GRANT_REQUIRED"),
+    (True, True, False, "BLOCKED_NOT_DEPLOYED"),
+    (True, False, True, "REUSE_ONLY"),
+])
+def test_n3b_private_assessment_retains_exact_n3a_inputs_without_authority(
+        monkeypatch, tmp_path, enrolled, allow_launch, running, code):
+    env, repo, home, snapshot, events = logon_fixture(monkeypatch, tmp_path,
+        enrolled=enrolled, allow_launch=allow_launch, running=running)
+    before = {p: p.read_bytes() for p in home.rglob("*") if p.is_file()}
+    result = ca._assess_logon_9444_private(repo)
+    assert type(result) is ca._Logon9444Assessment
+    assert result.code == code
+    (local, session, sid), current, identity = result.observation
+    assert (local, session, sid) == (home, 1, _OPERATOR_SID)
+    assert current == (env if enrolled else None)
+    assert identity == ca._logon_inventory(snapshot)[1]
+    assert events.count("inventory") == 2
+    assert {p: p.read_bytes() for p in home.rglob("*") if p.is_file()} == before
+    assert not ca._NativeEnrollment.instances
+    assert_logon_hold(ca._logon_result(result.code), code)
+    for secret in (str(env.config_path), str(env.executable), _OPERATOR_SID, "CreationDate"):
+        assert secret not in repr(result)
+        assert secret not in json.dumps(ca._logon_result(result.code))
+
+
+def test_n3b_changed_private_assessment_discards_all_target_inputs(monkeypatch, tmp_path):
+    env, repo, _, _, events = logon_fixture(monkeypatch, tmp_path, allow_launch=True)
+    original = ca._logon_observation
+    calls = []
+    def observe(checkout):
+        calls.append("read")
+        if len(calls) == 2:
+            env.config_path.write_text(env.config_path.read_text().replace('"allow_launch": true',
+                                                                          '"allow_launch": false'))
+        return original(checkout)
+    monkeypatch.setattr(ca, "_logon_observation", observe)
+    result = ca._assess_logon_9444_private(repo)
+    assert result.code == "UNKNOWN_EFFECT"
+    assert result.observation is None
+    assert calls == ["read", "read"]
+    assert events.count("inventory") == 2
+    assert not ca._NativeEnrollment.instances
+
+
+@pytest.mark.parametrize("command", ["preflight-9444", "preflight_9444", "native-9444"])
+def test_n3b_contract_is_not_a_public_cli_mode(tmp_path, command, capsys):
+    with pytest.raises(SystemExit) as exc:
+        ca.main([command, "--checkout", str(tmp_path), "--opt-in"])
+    assert exc.value.code == 2
+    assert capsys.readouterr().out == ""
