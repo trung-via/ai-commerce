@@ -1,0 +1,83 @@
+name: MCP Gateway one-time HostOps bootstrap preflight
+run-name: MCP Gateway bootstrap preflight (#${{ github.event.issue.number }})
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+
+jobs:
+  mcp-preflight:
+    if: >-
+      github.repository == 'trung-via/ai-commerce' &&
+      github.actor == github.repository_owner &&
+      github.event.issue.user.login == github.repository_owner &&
+      github.event.issue.state == 'open' &&
+      github.event.issue.title == '[MCP GATEWAY BOOTSTRAP PREFLIGHT] once' &&
+      github.event.issue.body == '{"schema":"mcp.gateway.bootstrap.preflight.v1","mode":"READ_ONLY","parameters":{}}'
+    runs-on: [self-hosted, Windows, X64, ai-commerce-hostops]
+    timeout-minutes: 5
+    concurrency:
+      group: mcp-gateway-hostops-one-time-preflight
+      cancel-in-progress: false
+    steps:
+      - name: Verify exact owner request and Windows bootstrap prerequisites without changes
+        shell: pwsh
+        env:
+          TARGET_REPOSITORY: trung-via/mcp-gateway-hostops
+          SOURCE_REPOSITORY: trung-via/ai-commerce
+          EXPECTED_TITLE: "[MCP GATEWAY BOOTSTRAP PREFLIGHT] once"
+          EXPECTED_BODY: '{"schema":"mcp.gateway.bootstrap.preflight.v1","mode":"READ_ONLY","parameters":{}}'
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw -Encoding utf8 | ConvertFrom-Json
+          if ($env:GITHUB_REPOSITORY -cne $env:SOURCE_REPOSITORY -or
+              $env:GITHUB_ACTOR -cne 'trung-via' -or
+              [string]$event.action -cne 'opened' -or
+              [string]$event.issue.user.login -cne 'trung-via' -or
+              [string]$event.issue.title -cne $env:EXPECTED_TITLE -or
+              [string]$event.issue.body -cne $env:EXPECTED_BODY) {
+            throw 'MCP_GATEWAY_BOOTSTRAP_EVENT_DENY'
+          }
+          if ($env:OS -cne 'Windows_NT') { throw 'MCP_GATEWAY_WINDOWS_REQUIRED' }
+          $isAdmin = $false
+          try {
+            $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+            $principal = [Security.Principal.WindowsPrincipal]::new($id)
+            $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          } catch {
+            $isAdmin = $false
+          }
+          $ghAvailable = $null -ne (Get-Command gh -ErrorAction SilentlyContinue)
+          $ghAuthenticated = $false
+          $targetRunnerListReadable = $false
+          if ($ghAvailable) {
+            & gh auth status --hostname github.com 1>$null 2>$null
+            $ghAuthenticated = ($LASTEXITCODE -eq 0)
+            if ($ghAuthenticated) {
+              & gh api 'repos/trung-via/mcp-gateway-hostops/actions/runners' --silent 1>$null 2>$null
+              $targetRunnerListReadable = ($LASTEXITCODE -eq 0)
+            }
+          }
+          $root = 'C:\TOOL\mcp-gateway-runner'
+          $runnerRootAlreadyExists = Test-Path -LiteralPath $root
+          $service = @(Get-Service -Name 'actions.runner.trung-via-mcp-gateway-hostops.*' -ErrorAction SilentlyContinue)
+          $receipt = [ordered]@{
+            schema = 'mcp.gateway.bootstrap.preflight.receipt.v1'
+            stage = 'WINDOWS_READ_ONLY_NO_INSTALL'
+            target_repo = 'trung-via/mcp-gateway-hostops'
+            source_transport = 'AI_COMMERCE_HOSTOPS_ONE_TIME'
+            os_windows = $true
+            runner_process_admin = [bool]$isAdmin
+            gh_cli_present = [bool]$ghAvailable
+            gh_authenticated = [bool]$ghAuthenticated
+            target_runner_list_readable = [bool]$targetRunnerListReadable
+            target_root_already_present = [bool]$runnerRootAlreadyExists
+            dedicated_service_present = [bool]($service.Count -gt 0)
+            dedicated_service_running = [bool](@($service | Where-Object Status -eq 'Running').Count -gt 0)
+            operation = 'READ_ONLY_PREFLIGHT'
+            installed = $false
+          }
+          Write-Output ('MCP_GATEWAY_BOOTSTRAP_PREFLIGHT_RECEIPT_V1 ' + ($receipt | ConvertTo-Json -Compress))
