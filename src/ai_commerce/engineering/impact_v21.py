@@ -45,6 +45,11 @@ CONTROL_TESTS = {
         "tests/test_ef02.py", "tests/test_hostops_personal.py",
         "tests/test_mt01_v21.py",
     ),
+    # Owner-only one-time MCP runner bootstrap preflight; no Windows write.
+    ".github/workflows/mcp-gateway-bootstrap-preflight-once.yml": (
+        "tests/test_hostops_personal.py", "tests/test_mt01_v21.py",
+        "tests/test_pr_merge_gate.py",
+    ),
     ".github/workflows/actions-skipped-cleanup.yml": (
         "tests/test_mt01_v21.py", "tests/test_pr_merge_gate.py",
     ),
