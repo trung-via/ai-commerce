@@ -1361,6 +1361,80 @@ def test_windows_native_synthetic_forged_host_flags_and_stale_source_never_launc
     assert receipt["events"] == [] and receipt["identity"] is None
 
 
+
+@pytest.mark.parametrize("case", [
+    "valid_distinct_merge_and_head", "wrong_job_head", "wrong_pr_head",
+    "wrong_repository", "forked_head", "wrong_base", "wrong_pr_number",
+    "wrong_branch", "wrong_run_id", "wrong_run_attempt", "wrong_run_event",
+    "wrong_job_runner", "self_hosted", "duplicate_jobs", "closed_run",
+])
+def test_windows_native_synthetic_hosted_job_pr_head_binding_fail_closed(case):
+    """API job head is PR head; OIDC GITHUB_SHA is a distinct PR merge SHA.
+
+    Pure sanitized metadata: no token, filesystem, AppContainer or network.
+    The OIDC signature and checked-out source are independently tested elsewhere.
+    """
+    import copy
+    from ai_commerce.engineering import windows_collection_sandbox as sandbox
+
+    head_sha, merge_sha = "a" * 40, "b" * 40
+    assert head_sha != merge_sha
+    run = {
+        "id": 42, "run_attempt": 1, "event": "pull_request",
+        "status": "in_progress", "repository": {"id": 9, "full_name": "example/repo"},
+        "head_repository": {"id": 9, "full_name": "example/repo"},
+        "head_sha": head_sha, "head_branch": "ci/candidate",
+        "pull_requests": [{"number": 940,
+                           "head": {"sha": head_sha, "ref": "ci/candidate", "repo": {"id": 9}},
+                           "base": {"ref": "main", "repo": {"id": 9}}}],
+    }
+    jobs = {"total_count": 1, "jobs": [{
+        "id": 123, "runner_name": "GitHub Actions 123", "status": "in_progress",
+        "head_sha": head_sha, "run_id": 42,
+        "runner_group_name": "GitHub Actions", "labels": ["windows-latest"],
+    }]}
+    request = dict(repo="example/repo", run_id="42", attempt="1",
+                   runner_name="GitHub Actions 123",
+                   github_ref="refs/pull/940/merge", head_ref="ci/candidate")
+    run, jobs, request = copy.deepcopy(run), copy.deepcopy(jobs), copy.deepcopy(request)
+    if case == "wrong_job_head":
+        jobs["jobs"][0]["head_sha"] = merge_sha
+    elif case == "wrong_pr_head":
+        run["pull_requests"][0]["head"]["sha"] = merge_sha
+    elif case == "wrong_repository":
+        run["repository"]["full_name"] = "attacker/repo"
+    elif case == "forked_head":
+        run["pull_requests"][0]["head"]["repo"]["id"] = 88
+    elif case == "wrong_base":
+        run["pull_requests"][0]["base"]["ref"] = "attacker"
+    elif case == "wrong_pr_number":
+        request["github_ref"] = "refs/pull/941/merge"
+    elif case == "wrong_branch":
+        request["head_ref"] = "attacker"
+    elif case == "wrong_run_id":
+        jobs["jobs"][0]["run_id"] = 99
+    elif case == "wrong_run_attempt":
+        run["run_attempt"] = 2
+    elif case == "wrong_run_event":
+        run["event"] = "push"
+    elif case == "wrong_job_runner":
+        jobs["jobs"][0]["runner_name"] = "rogue"
+    elif case == "self_hosted":
+        jobs["jobs"][0]["labels"] = ["windows-latest", "self-hosted"]
+    elif case == "duplicate_jobs":
+        jobs["jobs"].append(copy.deepcopy(jobs["jobs"][0]))
+        jobs["total_count"] = 2
+    elif case == "closed_run":
+        run["status"] = "completed"
+    if case == "valid_distinct_merge_and_head":
+        job_id, returned_sha = sandbox._verified_hosted_job_metadata(run, jobs, **request)
+        assert (job_id, returned_sha) == (123, head_sha)
+        assert returned_sha != merge_sha
+    else:
+        with pytest.raises(sandbox.Unproven, match="HOSTED_WINDOWS_JOB_METADATA_UNPROVEN"):
+            sandbox._verified_hosted_job_metadata(run, jobs, **request)
+
+
 def _synthetic_native_oidc(*, change=None):
     """Public deterministic TEST KEY. Synthetic signatures are never OS proof."""
     import base64
