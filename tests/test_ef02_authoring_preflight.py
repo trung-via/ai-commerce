@@ -19,8 +19,10 @@ def check(packet, **kwargs):
 
 def test_clean_packet_is_structurally_valid_but_actor_authority_unproven():
     result = check(batch([action("a")]))
-    assert result["status"] == "PREFLIGHT_PASS"
+    assert result["status"] == "PREFLIGHT_HOLD" and result["content_check"] == "PASS"
     assert result["authorization"] == "UNPROVEN"
+    assert result["acceptance_scope"]["status"] == "PRE_EXECUTOR_UNDETERMINED"
+    assert result["acceptance_scope"]["actions"][0]["reason"] == "SOURCE_REPO_NOT_VERIFIED"
     assert result["source_check"] == "NOT_REQUESTED"
     assert result["dispatch_performed"] is False
     with pytest.raises(RemoteRequestError, match="ISSUER_NOT_AUTHORIZED"):
@@ -32,7 +34,7 @@ def test_default_offline_check_does_not_start_any_child(monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail("Offline content check must not start a child process")
     monkeypatch.setattr(preflight.subprocess, "run", forbidden)
-    assert check(batch([action("a")]))["status"] == "PREFLIGHT_PASS"
+    assert check(batch([action("a")]))["status"] == "PREFLIGHT_HOLD"
 
 
 def test_143_duplicate_paths_is_schema_rejection_without_echoing_packet():
@@ -59,7 +61,7 @@ def test_unsafe_paths_rejected(path):
 def test_explicit_expected_files_use_segment_scope_and_remain_outside_packet():
     packet = batch([action("a")])
     original = copy.deepcopy(packet)
-    assert check(packet, expected_files={"a": ["src/ai_commerce/feature_a/core.py"]})["status"] == "PREFLIGHT_PASS"
+    assert check(packet, expected_files={"a": ["src/ai_commerce/feature_a/core.py"]})["content_check"] == "PASS"
     assert check(packet, expected_files={"a": ["src/ai_commerce/feature_a.py"]})["error_code"] == "EXPECTED_PATH_OUTSIDE_SCOPE"
     assert check(packet, expected_files={"missing": ["src/x.py"]})["error_code"] == "EXPECTED_ACTION_UNKNOWN"
     assert check(packet, expected_files={"a": [".local/log"]})["status"] == "PREFLIGHT_REJECTED"
@@ -94,22 +96,28 @@ def test_142_reuse_requires_actual_matching_registry_entry():
         "verification_status": "BUILD_VERIFIED_FOR_SCOPE", "verify_exit_code": 0, "scope_valid": True}
     registry = {"version": 1, "approved_source_sha": packet["source_sha"], "candidates": {a["attempt_id"]: entry}}
     result = check(packet, approved_reuse=registry)
-    assert result["status"] == "PREFLIGHT_PASS" and result["authorization"] == "UNPROVEN"
+    assert result["status"] == "PREFLIGHT_HOLD" and result["content_check"] == "PASS"
+    assert result["authorization"] == "UNPROVEN" and result["reuse_check"] == "LOCAL_REGISTRY_MATCH_ONLY"
     entry["scope_valid"] = False
     assert check(packet, approved_reuse=registry)["error_code"] == "REUSE_UNAPPROVED"
 
 
 def test_optional_source_check_is_exact_read_only_head(tmp_path, monkeypatch):
-    seen = []
+    seen, scopes = [], []
     def run(argv, **kwargs):
         seen.append(argv)
         return subprocess.CompletedProcess(argv, 0, "a" * 40 + "\n", "")
     monkeypatch.setattr(preflight.subprocess, "run", run)
+    def scope(packet, *, repo):
+        scopes.append(repo)
+        return {"status": "PRE_EXECUTOR_UNDETERMINED"}
+    monkeypatch.setattr(preflight, "validate_acceptance_scope", scope)
     assert check(batch([action("a")]), source_repo=tmp_path)["source_check"] == "EXACT_HEAD_MATCH"
     packet = batch([action("a")])
     packet["source_sha"] = "b" * 40
     assert check(packet, source_repo=tmp_path)["error_code"] == "SOURCE_SHA_MISMATCH"
     assert all(argv[-2:] == ["rev-parse", "HEAD"] for argv in seen)
+    assert scopes == [tmp_path]
 
 
 def test_documented_cli_from_unrelated_cwd_and_sanitized_invalid_json(tmp_path):
@@ -118,10 +126,70 @@ def test_documented_cli_from_unrelated_cwd_and_sanitized_invalid_json(tmp_path):
     command = [sys.executable, str(ROOT / "scripts/EF02-Authoring-Preflight.py"),
         "--request-file", str(packet), "--checkout", str(ROOT)]
     valid = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True)
-    assert valid.returncode == 0, valid.stderr
-    assert json.loads(valid.stdout)["authorization"] == "UNPROVEN"
+    assert valid.returncode == 2, valid.stderr
+    result = json.loads(valid.stdout)
+    assert result["authorization"] == "UNPROVEN" and result["content_check"] == "PASS"
+    assert result["status"] == "PREFLIGHT_HOLD"
     packet.write_text('{"SECRET": invalid}', encoding="utf-8")
     invalid = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True)
     assert invalid.returncode == 2
     assert json.loads(invalid.stdout)["error_code"] == "LOCAL_INPUT_INVALID"
     assert "SECRET" not in invalid.stdout + invalid.stderr
+
+
+@pytest.mark.parametrize("problem", ["missing", "malformed", "duplicate-ids", "historical-duplicate", "unknown", "owner"])
+def test_verified_preflight_uses_real_scope_parser_and_sanitized_provenance(tmp_path, monkeypatch, problem):
+    from test_ef02 import make_acceptance_repo, malformed_scope_action
+    make_acceptance_repo(tmp_path, monkeypatch)
+    packet = batch([malformed_scope_action(problem)])
+    original = copy.deepcopy(packet)
+    result = check(packet, source_repo=tmp_path)
+    code = "AC_SCOPE_MISMATCH_PRE_EXECUTOR" if problem == "owner" else "AC_DECLARATION_UNPROVEN_PRE_EXECUTOR"
+    assert result["status"] == "PREFLIGHT_REJECTED" and result["error_code"] == code
+    assert result["authorization"] == "UNPROVEN" and result["dispatch_performed"] is False
+    assert result["failure_provenance"]["source_sha"] == packet["source_sha"]
+    assert result["failure_provenance"]["attempt_id"] == "b-001"
+    assert result["failure_provenance"]["replay_authorized"] is False
+    assert "PRIVATE_INSTRUCTIONS" not in json.dumps(result)
+    assert result == check(packet, source_repo=tmp_path) and packet == original
+
+
+def test_verified_preflight_compatibility_cannot_grant_owner_authority(tmp_path, monkeypatch):
+    from test_ef02 import make_acceptance_repo, scoped_action, VALIDATION_SOURCE
+    make_acceptance_repo(tmp_path, monkeypatch)
+    packet = batch([scoped_action("a", [VALIDATION_SOURCE], ["EF02.action-and-fanin"])])
+    result = check(packet, source_repo=tmp_path)
+    assert result["status"] == "PREFLIGHT_PASS"
+    assert result["acceptance_scope"]["status"] == "PRE_EXECUTOR_COMPATIBLE"
+    assert result["source_check"] == "EXACT_HEAD_MATCH"
+    assert result["authorization"] == "UNPROVEN" and result["dispatch_performed"] is False
+    with pytest.raises(RemoteRequestError, match="ISSUER_NOT_AUTHORIZED_FOR_ACTOR"):
+        validate_batch(packet, schema=SCHEMA, registry=verify_registry(REGISTRY),
+                       issuer_login="attacker", owner_login="owner")
+
+
+def test_content_only_preflight_never_infers_registered_owner_from_ac_or_expected_files(monkeypatch):
+    from test_ef02 import scoped_action, VALIDATION_SOURCE
+    def forbidden(*args, **kwargs):
+        pytest.fail("Unverified authoring must remain offline")
+    monkeypatch.setattr(preflight.subprocess, "run", forbidden)
+    packet = batch([scoped_action("a", [VALIDATION_SOURCE], ["EF02.action-and-fanin"])])
+    result = check(packet, expected_files={"a": [VALIDATION_SOURCE]})
+    assert result["status"] == "PREFLIGHT_HOLD"
+    assert result["authorization"] == "UNPROVEN" and result["content_check"] == "PASS"
+    assert result["acceptance_scope"]["next_gate"] == "HOLD_NO_EXECUTOR"
+
+
+@pytest.mark.parametrize("timeout", [False, True])
+def test_unavailable_local_source_is_sanitized_hold(tmp_path, monkeypatch, timeout):
+    def unavailable(argv, **kwargs):
+        if timeout:
+            raise subprocess.TimeoutExpired(argv, 30, stderr="PRIVATE_INSTRUCTIONS")
+        return subprocess.CompletedProcess(argv, 1, "", "PRIVATE_INSTRUCTIONS")
+    monkeypatch.setattr(preflight.subprocess, "run", unavailable)
+    result = check(batch([action("a")]), source_repo=tmp_path)
+    assert result["status"] == "PREFLIGHT_HOLD" and result["error_code"] == "SOURCE_HEAD_UNAVAILABLE"
+    assert result["failure_provenance"]["status"] == "HOLD"
+    assert result["authorization"] == "UNPROVEN" and result["dispatch_performed"] is False
+    assert result["acceptance_scope"]["status"] == "PRE_EXECUTOR_UNDETERMINED"
+    assert "PRIVATE_INSTRUCTIONS" not in json.dumps(result)

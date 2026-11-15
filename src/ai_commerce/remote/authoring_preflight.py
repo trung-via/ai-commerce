@@ -12,7 +12,7 @@ from ai_commerce.engineering.git import git_argv
 from ai_commerce.engineering.runner import _protected_change, _safe_scope
 from .reuse import load_approved_candidates
 from .validation import (HEX_SHA, IDENTITY, RemoteRequestError, fingerprint, safe_path,
-                         validate_batch_content, verify_registry)
+                         validate_batch_content, verify_registry, validate_acceptance_scope)
 
 
 def _ordinary_path(value: str) -> str:
@@ -76,14 +76,26 @@ def preflight_batch(data: dict, *, schema: Path, registry: dict[str, list[str]],
                         raise RemoteRequestError("EXPECTED_PATH_OUTSIDE_SCOPE")
         source_check = "NOT_REQUESTED"
         if source_repo is not None:
-            observed = subprocess.run(git_argv(source_repo, "rev-parse", "HEAD"),
-                capture_output=True, text=True, encoding="utf-8", errors="strict", check=False, timeout=30)
-            if observed.returncode:
-                raise RemoteRequestError("SOURCE_HEAD_UNAVAILABLE")
+            try:
+                observed = subprocess.run(git_argv(source_repo, "rev-parse", "HEAD"),
+                    capture_output=True, text=True, encoding="utf-8", errors="strict", check=False, timeout=30)
+            except (OSError, subprocess.SubprocessError):
+                observed = None
+            if observed is None or observed.returncode:
+                result = _rejected("SOURCE_HEAD_UNAVAILABLE", data)
+                result.update(status="PREFLIGHT_HOLD", content_check="PASS", source_check="UNPROVEN",
+                              acceptance_scope=validate_acceptance_scope(data, repo=None))
+                result["failure_provenance"]["status"] = "HOLD"
+                return result
             if observed.stdout.strip() != data["source_sha"]:
                 raise RemoteRequestError("SOURCE_SHA_MISMATCH")
             source_check = "EXACT_HEAD_MATCH"
-        return {"status": "PREFLIGHT_PASS", "error_code": None, "authorization": "UNPROVEN",
+        acceptance_scope = validate_acceptance_scope(data, repo=source_repo)
+        compatible = acceptance_scope["status"] == "PRE_EXECUTOR_COMPATIBLE"
+        return {"status": "PREFLIGHT_PASS" if compatible else "PREFLIGHT_HOLD",
+                "error_code": None if compatible else "AC_SCOPE_UNDETERMINED_PRE_EXECUTOR",
+                "content_check": "PASS", "authorization": "UNPROVEN",
+                "acceptance_scope": acceptance_scope,
                 "dispatch_performed": False, "source_check": source_check,
                 "request_fingerprint": fingerprint(data), "action_count": len(actions),
                 "reuse_check": "LOCAL_REGISTRY_MATCH_ONLY" if any(
