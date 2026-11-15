@@ -811,17 +811,20 @@ def _decode_fixture_report(raw, pid):
 def _verified_host_localappdata(profile_folder, reported_localappdata):
     """Bind the necessary Win32 profile variable to an OS-reported folder.
 
-    Derive the parent of <LOCALAPPDATA>/Packages/<AppContainer> and require an
-    exact match to the hosted process's value. The value never goes to receipt.
+    Windows GetAppContainerFolderPath yields
+    <LOCALAPPDATA>/Packages/<AppContainer>/AC, not the package root itself.
+    Require this exact OS-documented structure, then match the host's value.
+    Never include the value in the sanitized receipt.
     """
     folder = Path(profile_folder)
-    if (folder.parent.name.casefold() != "packages"
+    if (folder.name.casefold() != "ac"
+            or folder.parent.parent.name.casefold() != "packages"
             or not isinstance(reported_localappdata, str)
             or not reported_localappdata
             or os.path.normcase(os.path.abspath(reported_localappdata))
-               != os.path.normcase(str(folder.parent.parent))):
+               != os.path.normcase(str(folder.parents[2]))):
         raise Unproven("NATIVE_HOST_LOCALAPPDATA_UNPROVEN")
-    return str(folder.parent.parent)
+    return str(folder.parents[2])
 
 
 def run_inert_probe(*, enabled=False, repository=None, candidate_sha=None, source_sha256=None,
