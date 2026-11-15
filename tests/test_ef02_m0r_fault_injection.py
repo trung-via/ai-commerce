@@ -352,6 +352,15 @@ def test_issue_feedback_publication_failure_marks_batch_nonpass(tmp_path, monkey
         def comment(self, *_a, **_kw):
             raise RemoteTransportError("GITHUB_TRANSPORT_UNKNOWN")
     monkeypatch.setattr(cli, "LocalBatchWorker", FakeWorker)
+    # Verify that the recovered source-aware guard is reached by CLI.run
+    # before the unrelated GitHub feedback-publication fault is injected.
+    observed_scope = []
+    real_scope = cli.validate_acceptance_scope
+    def recorded_scope(*args, **kwargs):
+        scope = real_scope(*args, **kwargs)
+        observed_scope.append((scope["status"], scope["next_gate"]))
+        return scope
+    monkeypatch.setattr(cli, "validate_acceptance_scope", recorded_scope)
     monkeypatch.setattr(cli, "GitHubTransport", FailingComment)
     monkeypatch.setenv("GITHUB_REPOSITORY", "trung-via/ai-commerce")
     monkeypatch.setenv("GITHUB_TOKEN", "synthetic-fixture-only")
@@ -362,6 +371,7 @@ def test_issue_feedback_publication_failure_marks_batch_nonpass(tmp_path, monkey
     ])
     record = json.loads((tmp_path / "batch-output" / "batch_result.json").read_text())
     assert exit_code == 1
+    assert observed_scope == [("PRE_EXECUTOR_COMPATIBLE", "POST_EDIT_MT01_REQUIRED")]
     assert record["status"] == "COMPLETE"  # actions finished, delivery failed
     assert record["feedback_status"] == "FEEDBACK_PUBLICATION_FAILED"
     assert record["feedback_error_code"] == "RemoteTransportError"

@@ -2204,6 +2204,82 @@ def test_ef02_904_origin_snapshot_ingress_is_fixed_and_non_replaying():
     assert "SOURCE_RECOVERY_UNVERIFIED" in py
 
 
+def test_pre_executor_uses_current_pinned_static_and_committed_owner_graph():
+    """Read-only real Git bytes; no model, worktree, collection or test child."""
+    import subprocess
+    from test_ef02 import (batch, scoped_action, PERSONAL_SOURCE, PERSONAL_AC,
+                          VALIDATION_SOURCE)
+    from ai_commerce.remote.validation import validate_acceptance_scope
+
+    root = Path(__file__).resolve().parents[1]
+    source = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    packet = batch([
+        scoped_action("personal", [PERSONAL_SOURCE], [PERSONAL_AC]),
+        scoped_action("wake", ["src/ai_commerce/wakehub/native_runtime.py"], ["WAKEHUB.G2.native-source-custody"]),
+        scoped_action("production", ["src/ai_commerce/production_runtime/state_machine.py"],
+                      ["B0.1.pa2-independent-runtime-contract-and-roadmap"]),
+        scoped_action("engineering", ["src/ai_commerce/engineering/__main__.py"], ["EF01.execution"]),
+        scoped_action("ef02", [VALIDATION_SOURCE], ["EF02.action-and-fanin"]),
+    ])
+    packet["source_sha"] = source
+    result = validate_acceptance_scope(packet, repo=root)
+    assert result["status"] == "PRE_EXECUTOR_COMPATIBLE"
+    owners = {a["action_id"]: set(a["selected_groups"]) for a in result["actions"]}
+    assert {"hostops-personal", "hostops-v3"} <= owners["personal"]
+    assert "wakehub-g2-native" in owners["wake"]
+    assert "b0-1" in owners["production"]
+    assert owners["engineering"] == {"ef01"}
+    assert "ef02" in owners["ef02"]
+    assert result["next_gate"] == "POST_EDIT_MT01_REQUIRED"
+
+
+def test_pre_executor_pass_cannot_cover_wrong_actual_diff_or_smuggle_candidate_owner(tmp_path, monkeypatch):
+    import json
+    from test_ef02 import (make_acceptance_repo, batch, scoped_action,
+                          PERSONAL_SOURCE, VALIDATION_SOURCE)
+    from ai_commerce.remote.validation import validate_acceptance_scope, approved_acceptance_plan
+    from ai_commerce.engineering.minimum_test import approved_groups
+
+    files, _ = make_acceptance_repo(tmp_path, monkeypatch)
+    for path, raw in files.items():
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(raw)
+    item = scoped_action("a", [VALIDATION_SOURCE], ["EF02.action-and-fanin"])
+    assert validate_acceptance_scope(batch([item]), repo=tmp_path)["status"] == "PRE_EXECUTOR_COMPATIBLE"
+    baseline = file_hashes(tmp_path)
+    profiles = json.loads((tmp_path / ".github/ef02/verify-profiles.json").read_bytes())
+    ids = approved_acceptance_plan(item)["ids"]
+    assert ids == ["EF02.action-and-fanin"]
+    mk(tmp_path, PERSONAL_SOURCE, "# actual candidate changed the wrong owner\n")
+    kwargs = dict(repo=tmp_path, base_sha="a" * 40, base_files=baseline,
+                  required_acs=ids, fallback_argv=profiles["mt01-mt01-tests"],
+                  groups=approved_groups(), registered_profiles=profiles,
+                  allowed_paths=item["allowed_paths"])
+    wrong_diff = registered_action_plan(candidate_files=file_hashes(tmp_path),
+        changed_paths=[PERSONAL_SOURCE], **kwargs)
+    assert "AC_REQUIRED_GROUP_NOT_SELECTED:EF02.action-and-fanin" in wrong_diff["reason_codes"]
+    assert all(g["state"] == "UNPROVEN" and not g["execute"] for g in wrong_diff["groups"])
+    assert wrong_diff["fallback"] is False
+
+    # A new candidate manifest cannot change the immutable baseline owner map.
+    source, test = "src/ai_commerce/smuggled/mod.py", "tests/test_smuggled.py"
+    manifest_path = "work_items/mt01-components/smuggled.json"
+    mk(tmp_path, source)
+    mk(tmp_path, test)
+    mk(tmp_path, manifest_path, json.dumps({
+        "schema_version": "MT01ComponentOwner.v1", "component": "smuggled",
+        "sources": [source], "tests": [test], "acs": ["EF02.action-and-fanin"],
+        "consumers": [], "contracts": [],
+    }))
+    smuggled = registered_action_plan(candidate_files=file_hashes(tmp_path),
+        changed_paths=[source, test, manifest_path], **kwargs)
+    assert "ONBOARD_EXPLICIT_INGRESS_REQUIRED" in smuggled["reason_codes"]
+    assert "smuggled" not in smuggled["selected_groups"]
+    assert all(g["state"] == "UNPROVEN" and not g["execute"] for g in smuggled["groups"])
+    assert smuggled["fallback"] is False
+
+
 def test_ef02_897_fixed_source_restore_ingress_is_owner_and_source_pinned():
     """Only pre-authorized original three files can be snapshotted, no host mutation."""
     import ast
@@ -2221,6 +2297,15 @@ def test_ef02_897_fixed_source_restore_ingress_is_owner_and_source_pinned():
     assert "cancel-in-progress: false" in job
     assert "persist-credentials: false" in job
     assert "EF02_897_SOURCE_RECOVERY_HOLD" in job
+    # Native failure may expose only bounded stage codes, never host details.
+    for diagnostic_stage in (
+        "RUNNER_AUTH", "EVENT_AUTH", "CHECKOUT_PIN", "WORKTREE_PIN",
+        "ORIGIN_HEAD", "ORIGIN_STATUS", "EVIDENCE_FILES", "EVIDENCE_BIND",
+        "SOURCE_HASHES", "FINAL_RECHECK", "ARCHIVE",
+    ):
+        assert 'STAGE = "' + diagnostic_stage + '"' in job
+    assert 'print("EF02_897_SOURCE_RECOVERY_HOLD:" + STAGE)' in job
+    assert 'print(type(' not in job and 'traceback.print_exc' not in job
     assert "native_sandbox_proven:false" in job
     source = job.split("          $script = @'\n", 1)[1].split("\n          '@\n          $script | python -B -", 1)[0]
     py = textwrap.dedent(source)

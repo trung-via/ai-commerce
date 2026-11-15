@@ -138,6 +138,24 @@ def _validate_actions(data: dict, *, registry: dict[str, list[str]],
         dfs(node)
     return data
 
+def _declared_acceptance_ids(action: dict) -> list[str] | None:
+    """Parse the machine declaration once; quoted historical markers count too."""
+    prefix = "MT01_ACCEPTANCE_JSON:"
+    instruction = action["instruction"]
+    lines = [line.strip() for line in instruction.splitlines() if prefix in line]
+    try:
+        if instruction.count(prefix) != 1 or len(lines) != 1 or not lines[0].startswith(prefix):
+            return None
+        ids = json.loads(lines[0][len(prefix):])
+        if (not isinstance(ids, list) or not 1 <= len(ids) <= 128 or
+                any(not isinstance(ac, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", ac) for ac in ids)
+                or len(set(ids)) != len(ids)):
+            return None
+        return ids
+    except (ValueError, TypeError):
+        return None
+
+
 def approved_acceptance_plan(action: dict) -> dict:
     """Read a bounded declaration from the issuer's fingerprinted v1 instruction.
 
@@ -145,18 +163,9 @@ def approved_acceptance_plan(action: dict) -> dict:
     Absence/ambiguity is an unknown AC, forcing broad verification. Named IDs
     describe the reviewed test families; arbitrary issue ACs remain unknown.
     """
-    prefix = "MT01_ACCEPTANCE_JSON:"
-    lines = [line.strip() for line in action["instruction"].splitlines() if prefix in line]
+    ids = _declared_acceptance_ids(action)
     reason = "EXPLICIT_FINGERPRINTED_INSTRUCTION_ACCEPTANCE"
-    try:
-        if len(lines) != 1 or not lines[0].startswith(prefix):
-            raise ValueError("missing or ambiguous declaration")
-        ids = json.loads(lines[0][len(prefix):])
-        if (not isinstance(ids, list) or not 1 <= len(ids) <= 128 or
-                any(not isinstance(ac, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", ac) for ac in ids)
-                or len(set(ids)) != len(ids)):
-            raise ValueError("invalid acceptance IDs")
-    except (ValueError, TypeError):
+    if ids is None:
         ids = ["MT01.ACCEPTANCE_UNDECLARED"]
         reason = "AC_DECLARATION_MISSING_OR_INVALID_REQUIRES_BROAD_SCOPE"
     mapping = {ac: {"group": g.name, "tests": list(g.tests)} for g in approved_groups() for ac in g.acs}
@@ -165,6 +174,203 @@ def approved_acceptance_plan(action: dict) -> dict:
             "consumer_map": {ac: mapping[ac] for ac in sorted(ids) if ac in mapping},
             "source": "ISSUER_FINGERPRINTED_V1_INSTRUCTION", "reason": reason,
             "broad_required": bool(unknown)}
+
+
+class _PinnedTreePath:
+    """Read-only Path view for the SAME MT-01 owner loader and impact planner.
+
+    Only the root can be used as a subprocess cwd. File reads use verified Git
+    blobs in memory, including owner manifests; no checkout or temp files exist.
+    """
+    def __init__(self, repo: Path, entries: dict, contents: dict, path: str = ""):
+        self._repo, self._entries, self._contents, self._path = repo, entries, contents, path
+
+    def _at(self, path: str):
+        return _PinnedTreePath(self._repo, self._entries, self._contents, path)
+
+    def __truediv__(self, path: str):
+        return self._at(self._path + "/" + path if self._path else path)
+
+    def __fspath__(self):
+        if self._path:
+            raise TypeError("PINNED_TREE_HAS_NO_DISK_FILES")
+        return str(self._repo)
+
+    def __eq__(self, other):
+        return (isinstance(other, _PinnedTreePath) and self._entries is other._entries
+                and self._path == other._path)
+
+    def resolve(self):
+        return self
+
+    @property
+    def parent(self):
+        return self._at(self._path.rpartition("/")[0])
+
+    @property
+    def parents(self):
+        result, path = [], self
+        while path._path:
+            path = path.parent
+            result.append(path)
+        return tuple(result)
+
+    def relative_to(self, other):
+        return PurePosixPath(self._path).relative_to(other._path or ".")
+
+    def is_file(self):
+        return self._entries.get(self._path, (None,))[0] in (b"100644", b"100755")
+
+    def is_symlink(self):
+        return self._entries.get(self._path, (None,))[0] == b"120000"
+
+    def is_dir(self):
+        prefix = self._path + "/" if self._path else ""
+        return any(path.startswith(prefix) for path in self._entries)
+
+    def exists(self):
+        return self._path == ".git" or self.is_file() or self.is_dir()
+
+    def rglob(self, pattern):
+        prefix = self._path + "/" if self._path else ""
+        return (self._at(path) for path in sorted(self._entries)
+                if path.startswith(prefix) and PurePosixPath(path).match(pattern))
+
+    def glob(self, pattern):
+        return (path for path in self.rglob(pattern) if path.parent == self)
+
+    def read_bytes(self):
+        return self._contents[self._path]
+
+    def read_text(self, encoding="utf-8", errors="strict"):
+        return self.read_bytes().decode(encoding, errors)
+
+
+def _pinned_source_tree(repo: Path, source_sha: str, *, git_executable: str | None):
+    """Bound and authenticate the import/manifest snapshot without following links."""
+    def git(*args, **kwargs):
+        result = subprocess.run(git_argv(repo, *args, executable=git_executable),
+                                capture_output=True, check=False, timeout=30, **kwargs)
+        if result.returncode:
+            raise ValueError("PINNED_BASELINE_UNPROVEN")
+        return result.stdout
+
+    inventory = git("ls-tree", "-r", "-l", "-z", source_sha)
+    if len(inventory) > 16 * 1024 * 1024:
+        raise ValueError("PINNED_BASELINE_LIMIT")
+    entries = {}
+    for entry in inventory.split(b"\0"):
+        if not entry:
+            continue
+        metadata, name = entry.split(b"\t", 1)
+        mode, kind, oid, size = metadata.split()
+        path = name.decode("utf-8")
+        if (not path or "\\" in path or ":" in path or path.startswith("/")
+                or any(p in ("", ".", "..") for p in path.split("/"))
+                or any(ord(c) < 32 or ord(c) == 127 for c in path)
+                or path in entries or not HEX_SHA.fullmatch(oid.decode("ascii"))):
+            raise ValueError("PINNED_BASELINE_UNSAFE")
+        entries[path] = (mode, kind, oid, int(size) if kind == b"blob" else 0)
+    if not entries or len(entries) > 100_000:
+        raise ValueError("PINNED_BASELINE_LIMIT")
+    paths = sorted(p for p in entries if (
+        p.startswith(("src/ai_commerce/", "tests/")) and p.endswith(".py")
+        or p.startswith("work_items/mt01-components/")))
+    if (any(entries[p][0] not in (b"100644", b"100755") or entries[p][1] != b"blob"
+            or not 0 <= entries[p][3] <= 4 * 1024 * 1024 for p in paths)
+            or sum(entries[p][3] for p in paths) > 64 * 1024 * 1024):
+        raise ValueError("PINNED_BASELINE_UNSAFE_OR_LIMIT")
+    snapshot = git("cat-file", "--batch", input=b"".join(entries[p][2] + b"\n" for p in paths))
+    contents, offset = {}, 0
+    for path in paths:
+        end = snapshot.index(b"\n", offset)
+        oid, kind, size = snapshot[offset:end].split()
+        length, start = int(size), end + 1
+        raw = snapshot[start:start + length]
+        if (oid != entries[path][2] or kind != b"blob" or length != entries[path][3]
+                or len(raw) != length or snapshot[start + length:start + length + 1] != b"\n"
+                or hashlib.sha1(b"blob " + str(length).encode("ascii") + b"\0" + raw
+                               ).hexdigest() != oid.decode("ascii")):
+            raise ValueError("PINNED_BASELINE_BYTES_UNPROVEN")
+        contents[path] = raw
+        offset = start + length + 1
+    if offset != len(snapshot):
+        raise ValueError("PINNED_BASELINE_BYTES_UNPROVEN")
+    return _PinnedTreePath(repo, entries, contents)
+
+
+def validate_acceptance_scope(batch: dict, *, repo: Path | None,
+                              git_executable: str | None = None) -> dict:
+    """Potential compatibility only, AFTER issuer validation and source pinning.
+
+    Definitive declaration/owner contradictions reject the ENTIRE batch. New
+    owners, directory scopes and incomplete graphs HOLD; they never authorize
+    an executor. Post-edit MT-01 must still prove the actual candidate diff.
+    """
+    from ai_commerce.engineering.impact_v21 import (
+        load_baseline_component_owner_records, select_impact,
+    )
+
+    actions = {a["action_id"]: a for a in batch["actions"]}
+
+    def deferred(key, reason):
+        return {"action_id": key, "status": "PRE_EXECUTOR_UNDETERMINED", "reason": reason}
+
+    def report(results):
+        compatible = all(r["status"] == "PRE_EXECUTOR_COMPATIBLE" for r in results)
+        return {"status": "PRE_EXECUTOR_COMPATIBLE" if compatible else "PRE_EXECUTOR_UNDETERMINED",
+                "source_sha": batch["source_sha"], "actions": results,
+                "next_gate": "POST_EDIT_MT01_REQUIRED" if compatible else "HOLD_NO_EXECUTOR"}
+
+    if repo is None:
+        return report([deferred(key, "SOURCE_REPO_NOT_VERIFIED") for key in actions])
+    scopes = {}
+
+    def potential_paths(key):
+        if key not in scopes:
+            paths = set(actions[key]["allowed_paths"])
+            for parent in actions[key]["depends_on"]:
+                paths.update(potential_paths(parent))
+            scopes[key] = paths
+        return scopes[key]
+
+    try:
+        source_sha = batch["source_sha"]
+        if not HEX_SHA.fullmatch(source_sha) or not (repo / ".git").exists():
+            raise ValueError("PINNED_BASELINE_UNPROVEN")
+        root = _pinned_source_tree(repo, source_sha, git_executable=git_executable)
+        groups = approved_groups()
+        records = load_baseline_component_owner_records(
+            root=root, base_sha=source_sha, existing_groups=groups)
+        groups = (*groups, *(record["group"] for record in records))
+        known = {ac for group in groups for ac in group.acs}
+        reviewed = {p for g in groups for p in (*g.paths, *g.tests, *g.consumers, *g.contracts)}
+        results = []
+        for key, action in actions.items():
+            paths = potential_paths(key)
+            if (not paths or any(not (root / p).is_file() for p in paths)
+                    or any(p.startswith("work_items/mt01-components/") for p in paths)):
+                results.append(deferred(key, "ALLOWED_SCOPE_NOT_EXACT_ESTABLISHED_FILES"))
+                continue
+            impact = select_impact(root=root, changed_paths=sorted(paths), groups=groups,
+                                   base_sha=source_sha, candidate_sha=source_sha)
+            if (not paths <= reviewed or not impact.runnable or impact.missing_mapping
+                    or set(impact.affected_paths) - reviewed):
+                results.append(deferred(key, "IMPACT_CLOSURE_UNPROVEN"))
+                continue
+            ids = _declared_acceptance_ids(action)
+            if ids is None or set(ids) - known:
+                raise RemoteRequestError("AC_DECLARATION_UNPROVEN_PRE_EXECUTOR")
+            selected_acs = {ac for g in groups if g.name in impact.selected_groups for ac in g.acs}
+            if set(ids) - selected_acs:
+                raise RemoteRequestError("AC_SCOPE_MISMATCH_PRE_EXECUTOR")
+            results.append({"action_id": key, "status": "PRE_EXECUTOR_COMPATIBLE",
+                            "selected_groups": list(impact.selected_groups)})
+        return report(results)
+    except RemoteRequestError:
+        raise
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError, subprocess.SubprocessError):
+        return report([deferred(key, "PINNED_BASELINE_UNPROVEN") for key in actions])
 
 
 def approved_verification_plan(action: dict, registry: dict[str, list[str]]) -> dict:
