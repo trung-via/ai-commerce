@@ -899,6 +899,31 @@ def test_existing_owner_additive_source_is_admitted_without_candidate_import(gat
     assert "tests/test_hostops_v3.py" not in required
 
 
+def test_existing_owner_addition_allows_modified_trusted_owner_test(gate):
+    """An already-registered MT-01 test can evolve with a new owned source."""
+    main, candidate, files, groups = _existing_owner_addition_fixture()
+    files.append({"filename": "tests/test_minimum_test.py", "status": "modified"})
+    admitted = gate.review_existing_owner_source_additions(main, candidate, files, groups)
+    assert gate.reviewed_coverage_for_changed_files(files) is None
+    paths, required = gate.reviewed_coverage_for_changed_files(
+        files, onboarded_groups=admitted)
+    assert "tests/test_minimum_test.py" in paths
+    assert {"tests/test_minimum_test.py", "tests/test_ef01.py",
+            "tests/test_ef01_repair.py"} <= set(required)
+
+
+def test_unregistered_new_test_must_still_be_added(gate):
+    """A fake modified test is not admitted as a new component test."""
+    main, candidate, files, groups = _existing_owner_addition_fixture()
+    admitted = gate.review_existing_owner_source_additions(main, candidate, files, groups)
+    files.append({"filename": "tests/test_unregistered_new.py", "status": "modified"})
+    injected = (*admitted, {"name": "unregistered", "paths": (),
+                           "tests": ("tests/test_unregistered_new.py",),
+                           "contracts": ()})
+    assert gate.reviewed_coverage_for_changed_files(
+        files, onboarded_groups=injected) is None
+
+
 @pytest.mark.parametrize("corruption", [
     "removed_source", "modified_source", "replaced_old_owner_test",
     "modified_old_ac", "renamed_old_owner", "new_keyword",
