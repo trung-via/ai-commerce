@@ -1878,8 +1878,8 @@ def _offline_diagnostic(tmp_path, monkeypatch, *, damage=None, damaged_phase="se
                     (root / phase / "gw11.collection.json").unlink()
             elif damage == "timeout":
                 return 0, raw, "DIAGNOSTIC_TIMEOUT"
-            elif damage == "memory":
-                raise module.RemoteRequestError("DIAGNOSTIC_MEMORY_BUDGET_UNAVAILABLE")
+            elif damage == "job-unavailable":
+                raise module.RemoteRequestError("DIAGNOSTIC_JOB_UNAVAILABLE")
             elif damage == "nonzero-exit":
                 return 1, raw, ""
             elif damage == "tamper-prior" and phase == "xdist":
@@ -1898,6 +1898,10 @@ def test_diagnostic_fixed_pair_and_evidence_control_only(tmp_path, monkeypatch):
     report = module.execute_diagnostic_batch(checkout=tmp_path, batch=diagnostic_packet(),
         issuer_login="owner", owner_login="owner", issue_number=957)
     assert report["status"] == "DIAGNOSTIC_COMPLETE" and report["executor_invoked"] is False
+    assert report["memory_policy"] == "NO_JOB_MEMORY_LIMIT" and report["memory_limit_bytes"] is None
+    assert report["authorization"] == "AUTHENTICATED_OWNER_HUMAN" and report["github_issue_number"] == 957
+    assert report["source_sha"] == diagnostic_packet()["source_sha"]
+    assert report["request_fingerprint"] == fingerprint(diagnostic_packet())
     assert len(calls) == 2 and all(isinstance(argv, tuple) for argv in calls)
     assert [argv[:3] for argv in calls] == [(sys.executable, "-m", "pytest")] * 2
     assert "-n" not in calls[0] and calls[1][calls[1].index("-n") + 1] == "12"
@@ -1908,6 +1912,9 @@ def test_diagnostic_fixed_pair_and_evidence_control_only(tmp_path, monkeypatch):
     for phase in ("serial", "xdist"):
         root = tmp_path / module.B03_DIAGNOSTIC_ROOT
         receipt = json.loads((root / (phase + ".result.json")).read_text())
+        assert receipt["memory_policy"] == "NO_JOB_MEMORY_LIMIT" and receipt["memory_limit_bytes"] is None
+        assert receipt["source_sha"] == report["source_sha"]
+        assert receipt["request_fingerprint"] == report["request_fingerprint"]
         assert module._verify_diagnostic_receipt(root, receipt)
         assert b"SECRET_TOKEN" not in (root / (phase + ".output.log")).read_bytes()
         for ref, digest in receipt["artifacts"].items():
@@ -1938,7 +1945,7 @@ def test_diagnostic_elapsed_receipt_uses_high_resolution_clock_on_windows(tmp_pa
 @pytest.mark.parametrize("phase", ["serial", "xdist"])
 @pytest.mark.parametrize("damage", ["missing-junit", "fake-junit-only", "unexpected-node", "skipped-node",
     "zero-nodes", "extra-node", "missing-collection", "malformed-receipt", "wrong-nonce", "duplicate-stage",
-    "worker-mismatch", "spoofed-workers", "timeout", "memory", "nonzero-exit"])
+    "worker-mismatch", "spoofed-workers", "timeout", "job-unavailable", "nonzero-exit"])
 def test_diagnostic_fails_closed_on_unproven_native_evidence(tmp_path, monkeypatch, phase, damage):
     module, calls = _offline_diagnostic(tmp_path, monkeypatch, damage=damage, damaged_phase=phase)
     report = module.execute_diagnostic_batch(checkout=tmp_path, batch=diagnostic_packet(),
@@ -1956,7 +1963,9 @@ def test_diagnostic_rechecks_prior_artifact_hashes_after_pair(tmp_path, monkeypa
     assert report["status"] == "DIAGNOSTIC_FAILED"
 
 
-@pytest.mark.parametrize("mutation", ["artifact", "malformed", "exit", "workers", "clock"])
+@pytest.mark.parametrize("mutation", ["artifact", "malformed", "exit", "workers", "clock",
+    "missing-memory-policy", "unknown-memory-policy", "legacy-memory-policy", "legacy-memory-cap",
+    "missing-memory-limit", "false-memory-limit", "extra-field"])
 def test_diagnostic_receipt_cannot_authorize_tampered_or_malformed_evidence(tmp_path, monkeypatch, mutation):
     module, _ = _offline_diagnostic(tmp_path, monkeypatch)
     report = module.execute_diagnostic_batch(checkout=tmp_path, batch=diagnostic_packet(),
@@ -1972,8 +1981,22 @@ def test_diagnostic_receipt_cannot_authorize_tampered_or_malformed_evidence(tmp_
         receipt["child_exit_code"] = 1
     elif mutation == "workers":
         receipt["workers_observed"] = 12
-    else:
+    elif mutation == "clock":
         receipt["elapsed_seconds"] = float("nan")
+    elif mutation == "missing-memory-policy":
+        del receipt["memory_policy"]
+    elif mutation == "unknown-memory-policy":
+        receipt["memory_policy"] = "ISSUE_SUPPLIED_POLICY"
+    elif mutation == "legacy-memory-policy":
+        receipt["memory_policy"] = "JOB_MEMORY_LIMIT"
+    elif mutation == "legacy-memory-cap":
+        receipt["memory_limit_bytes"] = 6 * 1024 ** 3
+    elif mutation == "missing-memory-limit":
+        del receipt["memory_limit_bytes"]
+    elif mutation == "false-memory-limit":
+        receipt["memory_limit_bytes"] = False
+    else:
+        receipt["extra_field"] = True
     assert module._verify_diagnostic_receipt(root, receipt) is False
 
 
@@ -2070,16 +2093,146 @@ def test_diagnostic_child_timeout_kills_job_before_returning(tmp_path, monkeypat
     assert events == ["attach", "stop", "close"]
 
 
-def test_diagnostic_memory_gate_precedes_child_creation(tmp_path, monkeypatch):
+def _offline_windows_diagnostic_job(monkeypatch, *, failure=None):
+    """Exercise the real Job helper with API/process fakes, never native runs."""
+    import ctypes
+    from types import SimpleNamespace
     from ai_commerce.remote import worker as module
-    def no_memory():
-        raise RemoteRequestError("DIAGNOSTIC_MEMORY_BUDGET_UNAVAILABLE")
-    def forbidden(*args, **kwargs):
-        pytest.fail("Memory budget failure must prevent process creation")
-    monkeypatch.setattr(module, "_windows_diagnostic_job", no_memory)
-    monkeypatch.setattr(module.subprocess, "Popen", forbidden)
-    with pytest.raises(RemoteRequestError, match="^DIAGNOSTIC_MEMORY_BUDGET_UNAVAILABLE$"):
-        module._run_diagnostic_child(module._B03_COMMANDS[0], checkout=tmp_path, env={})
+    events, configured = [], []
+    state = {"child": None, "assigned": False, "queries": 0}
+
+    class Function:
+        def __init__(self, name, callback):
+            self.name, self.callback = name, callback
+        def __call__(self, *args):
+            events.append(self.name)
+            return self.callback(*args)
+
+    class Child:
+        _handle = 456
+        returncode = None
+        def poll(self):
+            return self.returncode
+        def kill(self):
+            events.append("child-kill")
+            self.returncode = 1
+        def wait(self, timeout):
+            assert self.returncode is not None and timeout == 10
+            events.append("child-wait")
+            return self.returncode
+
+    def configure(handle, kind, pointer, size):
+        limits = pointer._obj
+        assert handle == 123 and kind == 9 and size == ctypes.sizeof(limits)
+        configured.append((limits.basic.flags, limits.process_memory, limits.job_memory))
+        return failure != "configure"
+
+    def assign(handle, child_handle):
+        assert handle == 123 and child_handle.value == Child._handle
+        if failure == "attach-exception":
+            raise OSError("synthetic assignment exception")
+        if failure == "attach":
+            return 0
+        state["assigned"] = True
+        return 1
+
+    def resume(child_handle):
+        assert state["assigned"] and child_handle.value == Child._handle
+        if failure == "resume":
+            return 1
+        state["child"].returncode = 0
+        return 0
+
+    def terminate_child():
+        if state["assigned"] and state["child"].returncode is None:
+            state["child"].returncode = 1
+
+    def terminate(handle, code):
+        assert handle == 123 and code == 1
+        if failure == "terminate":
+            return 0
+        terminate_child()
+        return 1
+
+    def query(handle, kind, pointer, size, returned):
+        assert handle == 123 and kind == 1 and size == ctypes.sizeof(pointer._obj) and returned is None
+        if failure == "query":
+            return 0
+        state["queries"] += 1
+        # A descendant outlives the direct child until the second observation.
+        pointer._obj.active = int(state["assigned"] and state["queries"] == 1)
+        return 1
+
+    def close(handle):
+        assert handle == 123
+        terminate_child()
+        return 1
+
+    # No GlobalMemoryStatusEx symbol: even querying minimum RAM fails this fixture.
+    kernel = SimpleNamespace(**{name: Function(name, callback) for name, callback in {
+        "CreateJobObjectW": lambda *args: 0 if failure == "create" else 123,
+        "SetInformationJobObject": configure, "AssignProcessToJobObject": assign,
+        "TerminateJobObject": terminate, "QueryInformationJobObject": query, "CloseHandle": close,
+    }.items()})
+    native = SimpleNamespace(NtResumeProcess=Function("NtResumeProcess", resume))
+    monkeypatch.setattr(ctypes, "WinDLL", lambda name, **kwargs: {"kernel32": kernel, "ntdll": native}[name],
+                        raising=False)
+
+    def spawn(argv, **kwargs):
+        assert argv in module._B03_COMMANDS and kwargs["creationflags"] == 0x08000004
+        events.append("spawn-suspended")
+        state["child"] = Child()
+        return state["child"]
+    monkeypatch.setattr(module.subprocess, "Popen", spawn)
+    monkeypatch.setattr(module, "time", SimpleNamespace(time=time.time, perf_counter_ns=time.perf_counter_ns,
+        monotonic=lambda: 0.0,
+        sleep=lambda seconds: events.append("wait-descendants")))
+    return module, events, configured
+
+
+def test_diagnostic_job_has_no_ram_admission_or_memory_cap_and_retains_containment(tmp_path, monkeypatch):
+    module, events, configured = _offline_windows_diagnostic_job(monkeypatch)
+    assert module._B03_MEMORY_POLICY == "NO_JOB_MEMORY_LIMIT"
+    assert module._B03_TIMEOUT == 600 and module._B03_OUTPUT_LIMIT == 8 * 1024 ** 2
+    assert module._run_diagnostic_child(module._B03_COMMANDS[0], checkout=tmp_path, env={}) == (0, b"", "")
+    # Only KILL_ON_JOB_CLOSE; neither JOB_MEMORY (0x200) nor PROCESS_MEMORY (0x100).
+    assert configured == [(0x2000, 0, 0)]
+    assert events == ["CreateJobObjectW", "SetInformationJobObject", "spawn-suspended",
+        "AssignProcessToJobObject", "NtResumeProcess", "child-wait", "TerminateJobObject",
+        "QueryInformationJobObject", "wait-descendants", "QueryInformationJobObject", "CloseHandle"]
+
+
+@pytest.mark.parametrize("failure,error_code", [
+    ("create", "DIAGNOSTIC_JOB_UNAVAILABLE"), ("configure", "DIAGNOSTIC_JOB_CONFIGURATION_FAILED"),
+    ("attach", "DIAGNOSTIC_JOB_ASSIGN_FAILED"), ("attach-exception", "DIAGNOSTIC_EXECUTION_UNPROVEN"),
+    ("resume", "DIAGNOSTIC_CHILD_RESUME_FAILED"),
+    ("terminate", "DIAGNOSTIC_CHILD_TERMINATION_UNPROVEN"),
+    ("query", "DIAGNOSTIC_CHILD_TERMINATION_UNPROVEN"),
+])
+def test_diagnostic_job_failures_reject_before_spawn_or_native_success(tmp_path, monkeypatch, failure, error_code):
+    from ai_commerce.remote import worker as module
+    run_child = module._run_diagnostic_child
+    _offline_diagnostic(tmp_path, monkeypatch)
+    monkeypatch.setattr(module, "_run_diagnostic_child", run_child)
+    module, events, _ = _offline_windows_diagnostic_job(monkeypatch, failure=failure)
+    report = module.execute_diagnostic_batch(checkout=tmp_path, batch=diagnostic_packet(),
+        issuer_login="owner", owner_login="owner", issue_number=957)
+    assert report["status"] == "DIAGNOSTIC_FAILED" and report["error_code"] == error_code
+    assert report["native_proof"] == "WINDOWS_NATIVE_UNPROVEN" and report["succeeded"] == 0
+    assert report["executor_invoked"] is False and len(report["cases"]) == 1
+    assert report["cases"][0]["status"] == "DIAGNOSTIC_FAILED"
+    assert report["memory_policy"] == "NO_JOB_MEMORY_LIMIT" and report["memory_limit_bytes"] is None
+    if failure == "create":
+        assert events == ["CreateJobObjectW"]
+    elif failure == "configure":
+        assert events == ["CreateJobObjectW", "SetInformationJobObject", "CloseHandle"]
+    else:
+        assert events.count("spawn-suspended") == 1 and events.count("CloseHandle") == 1
+        if failure in ("attach", "attach-exception"):
+            assert "NtResumeProcess" not in events
+            assert "child-kill" in events and "child-wait" in events
+        if failure in ("terminate", "query"):
+            assert "NtResumeProcess" in events  # Even a zero-exit child cannot bypass cleanup proof.
 
 
 @pytest.mark.parametrize("feedback_fails", [False, True])

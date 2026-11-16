@@ -230,7 +230,7 @@ _B03_COMMANDS = (
      "--junitxml=.local/ef02/windows-b03-serial-xdist-v1/xdist.junit.xml"),
 )
 _B03_TIMEOUT = 600
-_B03_MEMORY = 6 * 1024 ** 3
+_B03_MEMORY_POLICY = "NO_JOB_MEMORY_LIMIT"
 _B03_OUTPUT_LIMIT = 8 * 1024 ** 2
 
 
@@ -283,15 +283,9 @@ def _diagnostic_environment(checkout: Path) -> dict[str, str]:
 
 
 def _windows_diagnostic_job():
-    """A kill-on-close Windows Job bounds the whole pytest/media process tree."""
+    """Contain the pytest/media tree in a kill-on-close Job without a memory cap."""
     import ctypes
     from ctypes import wintypes as wt
-
-    class MemoryStatus(ctypes.Structure):
-        _fields_ = [("length", wt.DWORD), ("load", wt.DWORD),
-                    *[(n, ctypes.c_ulonglong) for n in
-                      ("total", "available", "page_total", "page_available", "virtual_total",
-                       "virtual_available", "extended")]]
 
     class BasicLimits(ctypes.Structure):
         _fields_ = [("process_time", ctypes.c_longlong), ("job_time", ctypes.c_longlong),
@@ -313,7 +307,6 @@ def _windows_diagnostic_job():
             (n, wt.DWORD) for n in ("faults", "total", "active", "terminated")]
 
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(MemoryStatus)]
     kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, wt.LPCWSTR]
     kernel.CreateJobObjectW.restype = wt.HANDLE
     kernel.SetInformationJobObject.argtypes = [wt.HANDLE, ctypes.c_int, ctypes.c_void_p, wt.DWORD]
@@ -322,19 +315,14 @@ def _windows_diagnostic_job():
     kernel.QueryInformationJobObject.argtypes = [wt.HANDLE, ctypes.c_int, ctypes.c_void_p,
                                                 wt.DWORD, ctypes.c_void_p]
     kernel.CloseHandle.argtypes = [wt.HANDLE]
-    memory = MemoryStatus()
-    memory.length = ctypes.sizeof(memory)
-    if not kernel.GlobalMemoryStatusEx(ctypes.byref(memory)) or memory.available < _B03_MEMORY + 512 * 1024 ** 2:
-        raise RemoteRequestError("DIAGNOSTIC_MEMORY_BUDGET_UNAVAILABLE")
     handle = kernel.CreateJobObjectW(None, None)
     limits = Limits()
-    limits.basic.flags = 0x2000 | 0x200  # KILL_ON_JOB_CLOSE | JOB_MEMORY
-    limits.job_memory = _B03_MEMORY
+    limits.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
     if not handle:
         raise RemoteRequestError("DIAGNOSTIC_JOB_UNAVAILABLE")
     if not kernel.SetInformationJobObject(handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
         kernel.CloseHandle(handle)
-        raise RemoteRequestError("DIAGNOSTIC_MEMORY_LIMIT_UNAVAILABLE")
+        raise RemoteRequestError("DIAGNOSTIC_JOB_CONFIGURATION_FAILED")
 
     class Job:
         def attach(self, child):
@@ -403,9 +391,13 @@ def _run_diagnostic_child(argv: tuple[str, ...], *, checkout: Path, env: dict) -
                 problem = "DIAGNOSTIC_OUTPUT_LIMIT"
             return child.returncode, raw[:_B03_OUTPUT_LIMIT], problem
     finally:
-        job.close()
-        if child is not None and child.poll() is None:
-            child.wait(timeout=10)
+        try:
+            job.close()
+        finally:
+            # An attach exception can leave the suspended child outside the Job.
+            if child is not None and child.poll() is None:
+                child.kill()
+                child.wait(timeout=10)
 
 
 def _diagnostic_json(path: Path) -> dict:
@@ -560,7 +552,8 @@ def _diagnostic_artifacts(root: Path, phase: str) -> dict:
 def _verify_diagnostic_receipt(root: Path, receipt: dict) -> bool:
     try:
         if set(receipt) != {"phase", "status", "error_code", "nonce", "started_at", "ended_at", "elapsed_seconds",
-                            "child_status", "child_exit_code", "memory_limit_bytes", "workers_requested", "workers_observed",
+                            "child_status", "child_exit_code", "memory_policy", "memory_limit_bytes",
+                            "workers_requested", "workers_observed",
                             "source_sha", "request_fingerprint", "selected_nodeids", "selected_count", "collected_count",
                             "executed_count", "junit_nodeids", "collection_nodeids", "execution_nodeids", "execution_workers", "artifacts"}:
             return False
@@ -573,7 +566,7 @@ def _verify_diagnostic_receipt(root: Path, receipt: dict) -> bool:
                 or type(receipt["workers_observed"]) is not int
                 or not isinstance(receipt["nonce"], str) or len(receipt["nonce"]) != 64
                 or any(c not in "0123456789abcdef" for c in receipt["nonce"])
-                or type(receipt["memory_limit_bytes"]) is not int or receipt["memory_limit_bytes"] != _B03_MEMORY
+                or receipt["memory_policy"] != _B03_MEMORY_POLICY or receipt["memory_limit_bytes"] is not None
                 or any(type(receipt[k]) is not int or receipt[k] != 3
                        for k in ("selected_count", "collected_count", "executed_count"))
                 or any(not isinstance(receipt[k], str) or len(receipt[k]) != length
@@ -602,6 +595,7 @@ def execute_diagnostic_batch(*, checkout: Path, batch: dict, issuer_login: str,
     report = {"kind": "AI_COMMERCE_REMOTE_DIAGNOSTIC_RESULT", "version": 1,
               "delivery": "DIAGNOSTIC_ONLY", "batch_id": batch["batch_id"], "source_sha": batch["source_sha"],
               "diagnostic_mode": DIAGNOSTIC_MODE, "status": "DIAGNOSTIC_FAILED",
+              "memory_policy": _B03_MEMORY_POLICY, "memory_limit_bytes": None,
               "executor_invoked": False, "native_proof": "NOT_YET_RUN", "cases": [],
               "error_code": None, "succeeded": 0, "total": 2}
     try:
@@ -628,7 +622,7 @@ def execute_diagnostic_batch(*, checkout: Path, batch: dict, issuer_login: str,
             case = {"phase": phase, "status": "DIAGNOSTIC_FAILED", "error_code": None,
                     "nonce": nonce, "started_at": started,
                     "source_sha": batch["source_sha"], "request_fingerprint": report["request_fingerprint"],
-                    "child_status": "NOT_STARTED", "memory_limit_bytes": _B03_MEMORY,
+                    "child_status": "NOT_STARTED", "memory_policy": _B03_MEMORY_POLICY, "memory_limit_bytes": None,
                     "workers_requested": 0 if phase == "serial" else 12}
             report["cases"].append(case)
             code, raw, problem = _run_diagnostic_child(argv, checkout=checkout, env=child_env)
