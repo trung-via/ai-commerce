@@ -30,6 +30,28 @@ MAPPED_GITHUB_CONTROLS = frozenset()  # Candidate/approval controls always requi
 MT01_REPORT = "docs/engineering/MT01_COMPONENT_AWARE_IMPLEMENTATION_REPORT.md"
 REVIEWED_REGISTRY_REGRESSIONS = ("tests/test_ef02_mt01_registry.py", "tests/test_minimum_test.py")
 HOSTED_WORKERS = (0, 2, 4)
+FFMPEG_FREE_GROUPS = frozenset({
+    "diagnostics", "ef01", "ef01p", "ef02", "ef02-recovery",
+    "ef02-scope", "ef02-wake", "git-integrity", "integrity",
+    "mt01", "mt01-v21", "provider", "repair", "merge-queue",
+    "hostops-v1", "hostops-v2",
+    "a02", "a03", "a07", "a08", "a09", "a10", "a10-m02",
+    "a11", "a12", "a14", "foundation", "cli",
+})
+
+
+def _needs_ffmpeg_for_plan(plan) -> bool:
+    """Keep MT-01 CI's media provisioning and the B0.4 consumer in sync.
+
+    The group-based selector remains authoritative. An explicitly selected
+    native B0.4 test also needs real ffmpeg, even if the plan exposes only
+    test paths (the historical independent test/CI contract).
+    """
+    selected_tests = getattr(plan, "selected_tests", ()) or ()
+    if "tests/test_b0_4_operator.py" in selected_tests:
+        return True
+    selected_groups = getattr(plan, "selected_groups", ()) or ()
+    return bool(set(selected_groups) - FFMPEG_FREE_GROUPS)
 
 
 def additive_registry_tests(before: object, after: object, groups: tuple) -> tuple[str, ...] | None:
@@ -435,15 +457,7 @@ def main() -> int:
     print("MT01_V21_MISSING_MAPPING=" + json.dumps(plan.missing_mapping), flush=True)
     print("MT01_V21_INVENTORY_WARNINGS=" + json.dumps(plan.inventory_warnings), flush=True)
     print("MT01_V21_PLAN=" + json.dumps(plan.as_dict(), sort_keys=True), flush=True)
-    no_media_groups = {
-        "diagnostics", "ef01", "ef01p", "ef02", "ef02-recovery",
-        "ef02-scope", "ef02-wake", "git-integrity", "integrity",
-        "mt01", "mt01-v21", "provider", "repair", "merge-queue",
-        "hostops-v1", "hostops-v2",
-        "a02", "a03", "a07", "a08", "a09", "a10", "a10-m02",
-        "a11", "a12", "a14", "foundation", "cli",
-    }
-    need_ffmpeg = bool(set(plan.selected_groups) - no_media_groups)
+    need_ffmpeg = _needs_ffmpeg_for_plan(plan)
     if sys.argv[1:] == ["--v21-plan-only"]:
         # A separate baseline comparison step must inspect the exact plan
         # *before* running the candidate-selected test subset.
