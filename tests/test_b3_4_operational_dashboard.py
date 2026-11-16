@@ -179,3 +179,5 @@ def test_b04_native_selected_path_provisions_real_ffmpeg_without_global_install(
     assert checker(SimpleNamespace(selected_tests=[
         "tests/test_b3_4_operational_dashboard.py", "tests/test_b0_4_operator.py"])) is True
     assert checker(SimpleNamespace(selected_tests=["tests/test_a15_operations.py"])) is False
+    assert checker(SimpleNamespace(selected_groups=["b0-4"], selected_tests=[])) is True
+    assert checker(SimpleNamespace(selected_groups=["a14"], selected_tests=[])) is False
