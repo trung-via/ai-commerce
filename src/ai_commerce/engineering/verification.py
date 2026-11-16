@@ -786,8 +786,18 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
     changed_tests = sorted(p for p in set(changed_paths)
                            if p.startswith("tests/test_") and p.endswith(".py")
                            and p in base_files  # New tests have their existing provisional route.
-                           and (repo / p).is_file() and not (repo / p).is_symlink())
-    if changed_tests and registered_only:
+                           and (repo / p).is_file() and not (repo / p).is_symlink()
+                           # A static non-parametrized fixture cannot introduce
+                           # an oversized pytest parameter ID. Real registered
+                           # pytest still has the collection guard for all tests.
+                           and any(marker in (repo / p).read_bytes() for marker in
+                                   (b"parametrize", b"pytest_generate_tests")))
+    # The preflight must never launch pytest when owner/consumer coverage was
+    # already rejected. In particular it must not bypass the hard code-5
+    # MT01_COVERAGE_UNPROVEN contract for an absent mandatory owner.
+    coverage_unproven = any(not entry["execute"] and entry["state"] != "REUSE"
+                            for entry in plan["groups"])
+    if changed_tests and registered_only and not coverage_unproven:
         preflight_argv = [sys.executable, "-m", "pytest", *changed_tests,
                           "--collect-only", "-q"]
         remaining = verify_deadline - time.monotonic()
