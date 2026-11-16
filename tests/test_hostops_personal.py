@@ -1,4 +1,5 @@
 """Portable source tests; live effect requires existing AI Commerce Windows runner."""
+import builtins
 import importlib.util
 import copy
 from datetime import datetime, timedelta, timezone
@@ -7,7 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import tempfile
 import unittest
 
@@ -165,6 +166,27 @@ class PersonalHostOpsContractTests(unittest.TestCase):
                       "body": encode({"status": "OBSERVED", "operation": "inventory",
                                      "diagnostics": [{"private_path": "PRIVATE_SECRET"}]}),
                       "status": "OBSERVED", "code": None, "no_diagnostics": True})
+        # Exercise the existing protected transport with an independent oracle
+        # for every new topology stage code; no new public field is required.
+        for code in sorted(PersonalCdp9444TopologyTests.NATIVE_FAILURE_CODES):
+            topology = {
+                "status": "UNKNOWN", "code": code, "operation": "cdp_9444_topology",
+                "cdp_port": 9444, "listener_count": None, "loopback_count": None,
+                "unexpected_binding_count": None, "chrome_owned_loopback_count": None,
+                "same_session_chrome_count": None, "devtools_protocol_ok": None,
+                "infrastructure_ready": False, "exact_chat_verified": False,
+                "wake_sent": False, "arbitrary_shell_enabled": False,
+                "issue_number": 17, "approval_channel": "CHATGPT_TO_AI_COMMERCE_ISSUE",
+                "remote_shell_enabled": False, "source_sha": "f" * 40,
+            }
+            self.assertLessEqual(len(encode(topology).encode("utf-8")), 8192)
+            cases.append({"name": code, "body": encode(topology), "status": "UNKNOWN", "code": code,
+                          "no_diagnostics": True, "expected": topology})
+            cases.append({"name": code + "_no_nested_leak",
+                          "body": encode({**topology, "raw_native": {"path": "PRIVATE_SECRET"},
+                                          "diagnostics": [{"message": "PRIVATE_SECRET"}]}),
+                          "status": "UNKNOWN", "code": code,
+                          "no_diagnostics": True, "expected": topology})
         harness = r"""
 const fs = require('fs'), path = require('path'), vm = require('vm');
 const cases = JSON.parse(fs.readFileSync(process.argv[1],'utf8'));
@@ -188,6 +210,7 @@ const script = fs.readFileSync(process.argv[2],'utf8');
       throw new Error(item.name+': diagnostics missing');
     if (item.no_diagnostics && Object.prototype.hasOwnProperty.call(result,'diagnostics'))
       throw new Error(item.name+': leaked legacy diagnostics');
+    if (item.expected) require('assert').deepStrictEqual(result,item.expected,item.name+': changed receipt');
     if (JSON.stringify(result).includes('PRIVATE_SECRET'))
       throw new Error(item.name+': private data leak');
   }
@@ -1764,9 +1787,21 @@ class ExecutorHealthPrivateBridgeTests(unittest.TestCase):
 class PersonalCdp9444TopologyTests(unittest.TestCase):
     """Offline fixtures only: no real CIM, token, signature, browser or sends."""
 
+    NATIVE_FAILURE_CODES = frozenset({
+        "NATIVE_IMPORT_FAILED", "NATIVE_QUERY_FAILED", "NATIVE_NORMALIZATION_FAILED",
+        "NATIVE_RECHECK_QUERY_FAILED", "NATIVE_RECHECK_NORMALIZATION_FAILED", "NATIVE_RECHECK_FAILED",
+    })
+    PUBLIC_CODES = NATIVE_FAILURE_CODES | {
+        "NO_LISTENER", "CLAIMANT_WITHOUT_LISTENER", "UNTRUSTED_BIND", "UNTRUSTED_OWNER",
+        "OWNER_SESSION_UNATTESTED", "TOPOLOGY_CHANGED", "CDP_PROTOCOL_FAILED", "CDP_PROTOCOL_HEALTHY",
+    }
+    COUNT_FIELDS = ("listener_count", "loopback_count", "unexpected_binding_count",
+                    "chrome_owned_loopback_count", "same_session_chrome_count")
+
     def setUp(self):
         from ai_commerce.remote import chrome_acquisition, local_completion_handoff, local_wake_entry
         self.acquisition = chrome_acquisition
+        self.native_query = chrome_acquisition._query_windows
         self.strict_probe = chrome_acquisition._probe_cdp
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -1818,15 +1853,56 @@ class PersonalCdp9444TopologyTests(unittest.TestCase):
         return hostops.perform(request)
 
     def assert_public(self, result):
+        self.assertEqual(set(result), {
+            "status", "code", "operation", "cdp_port", *self.COUNT_FIELDS,
+            "devtools_protocol_ok", "infrastructure_ready", "exact_chat_verified", "wake_sent",
+            "arbitrary_shell_enabled",
+        })
         self.assertLessEqual(set(result), hostops.PERSONAL_PUBLIC_FIELDS)
+        self.assertIn(result["code"], self.PUBLIC_CODES)
+        self.assertRegex(result["code"], r"^[A-Z_]{2,64}$")
+        self.assertIn(result["status"], ("UNKNOWN", "OBSERVED"))
+        self.assertEqual(result["operation"], "cdp_9444_topology")
+        self.assertEqual(result["cdp_port"], 9444)
+        for field in self.COUNT_FIELDS:
+            self.assertTrue(result[field] is None or
+                            type(result[field]) is int and 0 <= result[field] <= 16)
+        self.assertEqual(result["infrastructure_ready"], result["code"] == "CDP_PROTOCOL_HEALTHY")
         self.assertFalse(result["exact_chat_verified"])
         self.assertFalse(result["wake_sent"])
         self.assertFalse(result["arbitrary_shell_enabled"])
         raw = json.dumps(result)
+        self.assertLessEqual(len(raw.encode("utf-8")), 8192)
         for private in (self.sid, str(self.local), str(self.executable), "PRIVATE", "4100",
                         "CommandLine", "ProcessId", "OwnerSid", "SessionId", "webSocketDebuggerUrl",
-                        "enrolled", "profile_directory"):
+                        "enrolled", "profile_directory", "S-1-", "ws://", "http://", "token", "argv"):
             self.assertNotIn(private, raw)
+
+    def assert_native_unknown(self, result, code):
+        self.assertEqual((result["status"], result["code"]), ("UNKNOWN", code))
+        for field in (*self.COUNT_FIELDS, "devtools_protocol_ok"):
+            self.assertIsNone(result[field])
+        self.assertFalse(result["infrastructure_ready"])
+        self.assert_public(result)
+
+    def test_import_failure_is_independent_of_native_query_and_normalization(self):
+        original_import = builtins.__import__
+        for error in (ImportError("PRIVATE import"), OSError("PRIVATE dependency"),
+                      RuntimeError("PRIVATE initialization")):
+            def unavailable(name, globals=None, locals=None, fromlist=(), level=0):
+                if name == "ai_commerce.remote" and "chrome_acquisition" in fromlist:
+                    raise error
+                return original_import(name, globals, locals, fromlist, level)
+
+            with self.subTest(error=type(error).__name__), \
+                    patch("builtins.__import__", side_effect=unavailable), \
+                    patch.object(hostops, "_cdp_9444_inventory") as normalize:
+                result = self.observe()
+            self.assert_native_unknown(result, "NATIVE_IMPORT_FAILED")
+            normalize.assert_not_called()
+        self.native.assert_not_called()
+        self.private_identity.assert_not_called()
+        self.protocol.assert_not_called()
 
     def test_exact_owner_open_read_and_empty_parameters_only(self):
         value = event("read", "cdp_9444_topology", {})
@@ -1930,7 +2006,7 @@ class PersonalCdp9444TopologyTests(unittest.TestCase):
         for argv in variants:
             result = self.observe({"listeners": [self.listener],
                                    "processes": [{**self.proc, "CommandLine": json.dumps(argv)}]})
-            self.assertIn(result["code"], ("UNTRUSTED_OWNER", "NATIVE_READ_UNKNOWN"))
+            self.assertIn(result["code"], ("UNTRUSTED_OWNER", "NATIVE_NORMALIZATION_FAILED"))
             self.assertFalse(result["infrastructure_ready"])
         result = self.observe({"listeners": [self.listener],
                                "processes": [{**self.proc, "ExecutablePath": str(self.executable.parent / "other.exe")}]})
@@ -1942,17 +2018,58 @@ class PersonalCdp9444TopologyTests(unittest.TestCase):
                   subprocess.TimeoutExpired("PRIVATE", 8), json.JSONDecodeError("PRIVATE", "x", 0),
                   UnicodeError("PRIVATE")]
         for error in errors:
+            self.native.reset_mock()
             self.native.side_effect = error
-            result = self.observe()
-            self.assertEqual((result["status"], result["code"]), ("UNKNOWN", "NATIVE_READ_UNKNOWN"))
-            for field in ("listener_count", "loopback_count", "unexpected_binding_count",
-                          "chrome_owned_loopback_count", "same_session_chrome_count", "devtools_protocol_ok"):
-                self.assertIsNone(result[field])
-            self.assert_public(result)
+            with patch.object(hostops, "_cdp_9444_inventory") as normalize:
+                result = self.observe()
+            self.assert_native_unknown(result, "NATIVE_QUERY_FAILED")
+            self.native.assert_called_once_with(9444)
+            normalize.assert_not_called()
+        self.private_identity.assert_not_called()
+        self.protocol.assert_not_called()
+
+    def test_real_query_with_offline_subprocess_distinguishes_raw_failure_from_inventory(self):
+        self.native.side_effect = self.native_query
+        # Run the real query/parser with all process I/O replaced. A malformed
+        # outer response fails in the query; returned row data fails normalization.
+        cases = [
+            (SimpleNamespace(returncode=1, stdout=b"PRIVATE CIM"), "NATIVE_QUERY_FAILED"),
+            (OSError("PRIVATE process"), "NATIVE_QUERY_FAILED"),
+            (subprocess.TimeoutExpired("PRIVATE", 8), "NATIVE_QUERY_FAILED"),
+            (SimpleNamespace(returncode=0, stdout=b"PRIVATE invalid JSON"), "NATIVE_QUERY_FAILED"),
+            (SimpleNamespace(returncode=0, stdout=b"\xff"), "NATIVE_QUERY_FAILED"),
+            (SimpleNamespace(returncode=0, stdout=b"x" * 262145), "NATIVE_QUERY_FAILED"),
+            (SimpleNamespace(returncode=0, stdout=b"{}"), "NATIVE_QUERY_FAILED"),
+            (SimpleNamespace(returncode=0, stdout=b'{"listeners":null,"processes":[]}'),
+             "NATIVE_NORMALIZATION_FAILED"),
+            (SimpleNamespace(returncode=0, stdout=b'{"listeners":[],"processes":[]}'), "NO_LISTENER"),
+        ]
+        with patch.object(self.acquisition, "_powershell", return_value=Path("PRIVATE_POWERSHELL")), \
+                patch.object(self.acquisition, "_child_environment", return_value={}):
+            for response, code in cases:
+                self.native.reset_mock()
+                with patch.object(self.acquisition.subprocess, "run") as run:
+                    if isinstance(response, Exception):
+                        run.side_effect = response
+                    else:
+                        run.return_value = response
+                    result = self.observe()
+                if code == "NO_LISTENER":
+                    self.assertEqual((result["status"], result["code"]), ("OBSERVED", code))
+                    self.assertTrue(all(result[field] == 0 for field in self.COUNT_FIELDS))
+                    self.assert_public(result)
+                else:
+                    self.assert_native_unknown(result, code)
+                self.native.assert_called_once_with(9444)
+                run.assert_called_once()
+                self.assertEqual(run.call_args.kwargs["timeout"], 8)
+                self.assertEqual(run.call_args.kwargs["env"]["AI_COMMERCE_ACQ_PROBE_PORT"], "9444")
+        self.private_identity.assert_not_called()
         self.protocol.assert_not_called()
 
     def test_malformed_inventory_never_becomes_observed_absence(self):
-        invalid = [None, {}, {"listeners": None, "processes": []}, {"listeners": [], "processes": None},
+        invalid = [None, {}, Mock(), {"listeners": Mock(), "processes": []},
+                   {"listeners": None, "processes": []}, {"listeners": [], "processes": None},
                    {"listeners": {}, "processes": []}, {**self.inventory, "PRIVATE": "secret"},
                    {"listeners": [self.listener] * 17, "processes": []},
                    {"listeners": [], "processes": [self.proc] * 257}]
@@ -1966,11 +2083,24 @@ class PersonalCdp9444TopologyTests(unittest.TestCase):
         invalid.extend([{"listeners": [], "processes": [self.proc, self.proc]},
                         {"listeners": [], "processes": [{**self.proc, "PRIVATE": "raw"}]}])
         for value in invalid:
+            self.native.reset_mock()
             self.native.return_value = value
             result = self.observe()
-            self.assertEqual((result["status"], result["code"]), ("UNKNOWN", "NATIVE_READ_UNKNOWN"))
-            self.assertIsNone(result["listener_count"])
-            self.assert_public(result)
+            self.assert_native_unknown(result, "NATIVE_NORMALIZATION_FAILED")
+            self.native.assert_called_once_with(9444)
+        self.private_identity.assert_not_called()
+        self.protocol.assert_not_called()
+
+    def test_normalizer_exceptions_are_distinct_from_raw_query_failure(self):
+        for error in (ValueError("PRIVATE argv"), OSError("PRIVATE normalization"),
+                      RuntimeError("PRIVATE " * 8192)):
+            self.native.reset_mock()
+            with patch.object(hostops, "_cdp_9444_inventory", side_effect=error) as normalize:
+                result = self.observe()
+            self.assert_native_unknown(result, "NATIVE_NORMALIZATION_FAILED")
+            self.native.assert_called_once_with(9444)
+            normalize.assert_called_once_with(self.acquisition, self.inventory)
+        self.private_identity.assert_not_called()
         self.protocol.assert_not_called()
 
     def test_unavailable_or_service_identity_cannot_attest_owner(self):
@@ -2053,6 +2183,7 @@ class PersonalCdp9444TopologyTests(unittest.TestCase):
                 self.assertEqual(self.observe()["status"], "UNKNOWN")
             self.assertEqual(opener.return_value.open.call_args.args[0].full_url,
                              "http://127.0.0.1:9444/json/version")
+            self.assertEqual(opener.return_value.open.call_args.args[0].get_method(), "GET")
             self.assertEqual(opener.return_value.open.call_args.kwargs["timeout"], 2)
             self.assertEqual(opener.call_args.args[0].proxies, {})
             self.assertIsInstance(opener.call_args.args[1], self.acquisition._NoRedirect)
@@ -2069,21 +2200,85 @@ class PersonalCdp9444TopologyTests(unittest.TestCase):
             self.protocol.assert_called_once()
             self.assert_public(result)
 
-    def test_observation_drift_and_second_cim_failure_prevent_http(self):
+    def test_observation_drift_prevents_http(self):
         same_profile = {**self.proc, "ProcessId": 4101, "CommandLine": json.dumps(self.argv[:3])}
         changed = [
             {"listeners": [], "processes": []},
             {"listeners": [self.listener], "processes": [{**self.proc, "CreationDate": "2026-11-15T09:00:00Z"}]},
             {"listeners": [self.listener], "processes": [self.proc, same_profile]},
-            self.acquisition.AcquisitionBlocked("PRIVATE CIM"),
         ]
-        for current in changed:
+        for case, current in enumerate(changed):
+            self.native.reset_mock()
             self.native.side_effect = [self.inventory, current]
+            with self.subTest(case=case), \
+                    patch.object(self.acquisition, "evaluate", wraps=self.acquisition.evaluate) as evaluate:
+                result = self.observe()
+                self.assertEqual(result["status"], "UNKNOWN")
+                self.assertEqual(result["code"], "TOPOLOGY_CHANGED")
+                self.assertFalse(result["infrastructure_ready"])
+                self.assert_public(result)
+                self.assertEqual(self.native.call_count, 2)
+                evaluate.assert_called_once()
+        self.protocol.assert_not_called()
+
+    def test_recheck_query_failure_is_unknown_without_stale_counts_or_retry(self):
+        for error in (self.acquisition.AcquisitionBlocked("PRIVATE CIM"), OSError("PRIVATE"),
+                      subprocess.TimeoutExpired("PRIVATE", 8), json.JSONDecodeError("PRIVATE", "x", 0),
+                      UnicodeError("PRIVATE")):
+            self.native.reset_mock()
+            self.native.side_effect = [self.inventory, error]
             result = self.observe()
-            self.assertEqual(result["status"], "UNKNOWN")
-            self.assertIn(result["code"], ("TOPOLOGY_CHANGED", "NATIVE_READ_UNKNOWN"))
-            self.assertFalse(result["infrastructure_ready"])
-            self.assert_public(result)
+            self.assert_native_unknown(result, "NATIVE_RECHECK_QUERY_FAILED")
+            self.assertEqual([call.args for call in self.native.call_args_list], [(9444,), (9444,)])
+        self.protocol.assert_not_called()
+
+    def test_recheck_malformed_inventory_is_distinct_from_query_failure(self):
+        invalid = [None, {}, Mock(), {"listeners": [], "processes": None},
+                   {"listeners": [{**self.listener, "LocalPort": 9333}], "processes": [self.proc]},
+                   {"listeners": [], "processes": [{**self.proc, "CommandLine": "PRIVATE invalid JSON"}]},
+                   {"listeners": [], "processes": [self.proc, self.proc]}]
+        for value in invalid:
+            self.native.reset_mock()
+            self.native.side_effect = [self.inventory, value]
+            result = self.observe()
+            self.assert_native_unknown(result, "NATIVE_RECHECK_NORMALIZATION_FAILED")
+            self.assertEqual([call.args for call in self.native.call_args_list], [(9444,), (9444,)])
+        self.protocol.assert_not_called()
+
+    def test_recheck_normalizer_failure_does_not_reuse_first_observation(self):
+        normalize = hostops._cdp_9444_inventory
+        initial = normalize(self.acquisition, self.inventory)
+        with patch.object(hostops, "_cdp_9444_inventory",
+                          side_effect=[initial, RuntimeError("PRIVATE " * 8192)]):
+            result = self.observe()
+        self.assert_native_unknown(result, "NATIVE_RECHECK_NORMALIZATION_FAILED")
+        self.assertEqual(self.native.call_count, 2)
+        self.protocol.assert_not_called()
+
+    def test_recheck_identity_or_evaluation_failure_is_stage_only(self):
+        context = hostops._cdp_9444_private_context(self.acquisition)
+        for target, name, initial in (
+            (hostops, "_cdp_9444_private_context", context),
+            (self.acquisition, "evaluate", ("OWNED", self.proc["ProcessId"])),
+        ):
+            for error in (OSError("PRIVATE SID/path/token"), self.acquisition.AcquisitionBlocked("PRIVATE")):
+                self.native.reset_mock()
+                with patch.object(target, name, side_effect=[initial, error]) as recheck:
+                    result = self.observe()
+                self.assert_native_unknown(result, "NATIVE_RECHECK_FAILED")
+                self.assertEqual(recheck.call_count, 2)
+                self.assertEqual(self.native.call_count, 2)
+        self.protocol.assert_not_called()
+
+    def test_recheck_session_or_ownership_drift_retains_topology_changed(self):
+        with patch.object(self.acquisition, "_interactive_session", side_effect=[self.session, self.session + 1]):
+            result = self.observe()
+        self.assertEqual((result["status"], result["code"]), ("UNKNOWN", "TOPOLOGY_CHANGED"))
+        self.assert_public(result)
+        with patch.object(self.acquisition, "evaluate", side_effect=[("OWNED", 4100), ("ABSENT", None)]):
+            result = self.observe()
+        self.assertEqual((result["status"], result["code"]), ("UNKNOWN", "TOPOLOGY_CHANGED"))
+        self.assert_public(result)
         self.protocol.assert_not_called()
 
     def test_source_public_field_tamper_and_non_windows_fail_before_reads(self):

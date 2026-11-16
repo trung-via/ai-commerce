@@ -660,19 +660,30 @@ def _cdp_9444_topology():
         deny("PUBLIC_TRANSPORT_GAP")
     if os.name != "nt":
         deny("CDP_TOPOLOGY_WINDOWS_ONLY")
-    result = {
-        "status": "UNKNOWN", "code": "NATIVE_READ_UNKNOWN", "operation": "cdp_9444_topology",
+    unknown = {
+        "status": "UNKNOWN", "code": "NATIVE_IMPORT_FAILED", "operation": "cdp_9444_topology",
         "cdp_port": 9444, "listener_count": None, "loopback_count": None,
         "unexpected_binding_count": None, "chrome_owned_loopback_count": None,
         "same_session_chrome_count": None, "devtools_protocol_ok": None,
         "infrastructure_ready": False, "exact_chat_verified": False,
         "wake_sent": False, "arbitrary_shell_enabled": False,
     }
+    # Diagnose only the observer stage, never an exception's type or contents.
+    # Each failure retains unproven counts; a failed recheck cannot reuse stale
+    # counts from the first snapshot as a current Windows observation.
     try:
         from ai_commerce.remote import chrome_acquisition as acquisition
-        listeners, owners, claimants = _cdp_9444_inventory(acquisition, acquisition._query_windows(9444))
     except Exception:
-        return result
+        return unknown
+    try:
+        native = acquisition._query_windows(9444)
+    except Exception:
+        return {**unknown, "code": "NATIVE_QUERY_FAILED"}
+    try:
+        listeners, owners, claimants = _cdp_9444_inventory(acquisition, native)
+    except Exception:
+        return {**unknown, "code": "NATIVE_NORMALIZATION_FAILED"}
+    result = unknown.copy()
     result.update(listener_count=len(listeners),
                   loopback_count=sum(row["LocalAddress"] == "127.0.0.1" for row in listeners),
                   unexpected_binding_count=sum(row["LocalAddress"] != "127.0.0.1" for row in listeners))
@@ -714,9 +725,18 @@ def _cdp_9444_topology():
         return result
     # One independent re-observation, never a retry or launch on drift/failure.
     try:
-        current = _cdp_9444_inventory(acquisition, acquisition._query_windows(9444))
+        native = acquisition._query_windows(9444)
+    except Exception:
+        return {**unknown, "code": "NATIVE_RECHECK_QUERY_FAILED"}
+    try:
+        current = _cdp_9444_inventory(acquisition, native)
+    except Exception:
+        return {**unknown, "code": "NATIVE_RECHECK_NORMALIZATION_FAILED"}
+    try:
+        # A new same-profile process need not claim 9444; compare all processes
+        # before evaluating ownership so known drift stays TOPOLOGY_CHANGED.
         if (current[0] != listeners or current[2] != claimants
-                or current[1].get(pid) != (proc, argv)
+                or current[1] != owners
                 or _cdp_9444_private_context(acquisition) != (env, session, sid)):
             result["code"] = "TOPOLOGY_CHANGED"
             return result
@@ -726,8 +746,7 @@ def _cdp_9444_topology():
             result["code"] = "TOPOLOGY_CHANGED"
             return result
     except Exception:
-        result["code"] = "NATIVE_READ_UNKNOWN"
-        return result
+        return {**unknown, "code": "NATIVE_RECHECK_FAILED"}
     result.update(chrome_owned_loopback_count=1, same_session_chrome_count=1)
     try:
         acquisition._probe_cdp(env)
