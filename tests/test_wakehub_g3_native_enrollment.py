@@ -1229,14 +1229,16 @@ def test_native_read_never_assembles_or_retries_invalid_single_message(pipe_kern
     assert x.calls.count("ReadFile") == 1 and "WriteFile" not in x.calls
 
 
-def test_native_io_realistic_short_latency_uses_remaining_monotonic_wait(pipe_kernel):
-    x = pipe_kernel; x.delay = 0.03
-    pipe = ob._StatusPipeIO(123, ob._PipeSide.SERVER, ob._StatusDeadline(time.monotonic))
+def test_native_io_modeled_short_latency_uses_remaining_monotonic_wait(pipe_kernel):
+    # Model two 30ms native completions. Never assert a wall-clock minimum:
+    # Windows timer resolution/scheduling can complete an actual sleep early.
+    x = pipe_kernel; x.step = 0.03
+    pipe = ob._StatusPipeIO(123, ob._PipeSide.SERVER, x.deadline())
     x.raw = offline_wire(ob.StatusRole.OBSERVER)
-    started = time.monotonic()
     pipe.write_frame(offline_wire(ob.StatusRole.BROKER)); pipe.read_frame(); pipe.close()
-    assert 0.05 <= time.monotonic() - started < 5
-    assert 0 < x.waits[1] < x.waits[0] <= 5000
+    assert x.now[0] == pytest.approx(100.06)
+    assert x.waits[0] == 5000
+    assert 4960 <= x.waits[1] < x.waits[0]
 
 
 def test_connected_native_service_keeps_independent_unknown_before_offer(status_exchange, pipe_kernel):
