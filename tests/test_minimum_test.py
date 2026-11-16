@@ -1794,11 +1794,21 @@ def test_windows_native_inert_provider(request, fault):
         assert receipt["events"] == ["CREATE_SUSPENDED", "ASSIGN_JOB", "CONFIRM_JOB", "RESUME",
                                      "CHILD_AND_DESCENDANT_READY", "CLOSE_LAST_JOB_HANDLE",
                                      "WAIT_CHILD_SIGNALED", "WAIT_DESCENDANT_SIGNALED", "CLEANUP_COMPLETE"]
-        assert receipt["denials"] == dict(outside_source_read=5, readonly_source_write=5,
-                                          junction_escape_read=5, source_read_control=0,
-                                          missing_file_control=2, loopback_connect=10013)
-        assert receipt["positive_controls"] == dict(outside_source_read=0, readonly_source_write=0,
-                                                    junction_escape_read=0, loopback_connect=0)
+        # Native WFP can reject a capability-less AppContainer by WSAEACCES
+        # (10013) or silently drop until WSAETIMEDOUT (10060). The fixed
+        # provider independently requires an empty live listener, exact denied
+        # file operations and a successful unsandboxed connection both before
+        # AND after the child attempt. Never accept a refused/dead endpoint.
+        assert {key: value for key, value in receipt["denials"].items()
+                if key != "loopback_connect"} == dict(
+                    outside_source_read=5, readonly_source_write=5,
+                    junction_escape_read=5, source_read_control=0,
+                    missing_file_control=2)
+        assert receipt["denials"]["loopback_connect"] in (10013, 10060)
+        assert receipt["positive_controls"] == dict(
+            outside_source_read=0, readonly_source_write=0,
+            junction_escape_read=0, loopback_connect=0,
+            loopback_connect_after=0)
         assert receipt["grandchild_terminated"] is True
         assert receipt["timed_out"] is (fault == "timeout")
         assert receipt["reason_codes"] == []
