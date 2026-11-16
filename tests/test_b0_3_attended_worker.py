@@ -88,7 +88,9 @@ def test_runtime_hash_streams_full_source_with_legacy_delimiter(source_tree, mon
 def test_runtime_hash_current_sources_match_legacy_digest(record_property):
     root = Path(worker.__file__).parent.parent
     files = sorted(root.rglob("*.py"))
-    assert (root / "remote" / "transport.py").stat().st_size > worker.MAX_BYTES
+    # The checked-in module sizes are not an invariant: transport.py may
+    # legitimately shrink below MAX_BYTES. Oversized streaming is exercised
+    # independently with explicit 128 KiB/8 MiB fixtures above.
     expected = legacy_source_digest(root)
     assert worker._runtime_hash() == expected
     record_property("shipped_python_modules", len(files))

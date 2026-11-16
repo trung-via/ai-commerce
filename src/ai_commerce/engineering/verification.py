@@ -10,6 +10,7 @@ from pathlib import Path
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Callable, Mapping
@@ -296,6 +297,14 @@ _JUNIT_PLUGIN_SOURCE = (
     "    target = os.environ.get('AI_COMMERCE_MT01_JUNIT_PATH')\n"
     "    if target and not getattr(config.option, 'xmlpath', None):\n"
     "        config.option.xmlpath = target\n"
+    "\n"
+    "@pytest.hookimpl(tryfirst=True)\n"
+    "def pytest_collection_modifyitems(items):\n"
+    "    for item in items:\n"
+    "        # Windows PYTEST_CURRENT_TEST adds a phase suffix to this node ID.\n"
+    "        # Reject the test definition, never the oversized test payload.\n"
+    "        if len((item.nodeid + ' (teardown)').encode('utf-16-le')) // 2 > 30000:\n"
+    "            pytest.exit('MT01_PYTEST_NODEID_TOO_LONG', returncode=1)\n"
 )
 
 
@@ -737,11 +746,11 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
     save("mt01_plan", "mt01.plan.json", (canonical(plan) + "\n").encode())
     stdout, stderr = [], []
     code = 0
-    def finish():
+    def finish(pending_reason: str = "NOT_EXECUTED_AFTER_UNPROVEN_GROUP"):
         for group in plan["groups"]:
             if group["state"] not in ("REUSE", "UNPROVEN") and "result" not in group:
                 group.update(state="UNPROVEN", execute=False, result="UNPROVEN",
-                             reason="NOT_EXECUTED_AFTER_UNPROVEN_GROUP")
+                             reason=pending_reason)
         plan["finished_at"] = datetime.now(timezone.utc).isoformat()
         plan["wall_seconds"] = time.monotonic() - started_plan
         plan["narrow_execution_observed"] = not plan["fallback"] and any(
@@ -768,6 +777,56 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
                 execution_status="12_WORKERS_EXECUTED" if actual == 12 and entry["workers_requested"] == 12
                 else "SERIAL_PYTEST_EXECUTED" if actual == 0 and entry["workers_requested"] == 0
                 else "WORKER_COUNT_UNPROVEN")
+    # A candidate may edit an existing parameterized test without creating a
+    # new component. Its raw data can become an enormous pytest node ID and
+    # overflow PYTEST_CURRENT_TEST on Windows before any assertion is reached.
+    # Collect only the changed, already-scoped test definitions in a bounded
+    # diagnostic command. This is not registered verification and cannot PASS
+    # a group; the exact registered owner/consumer closure still runs below.
+    changed_tests = sorted(p for p in set(changed_paths)
+                           if p.startswith("tests/test_") and p.endswith(".py")
+                           and p in base_files  # New tests have their existing provisional route.
+                           and (repo / p).is_file() and not (repo / p).is_symlink()
+                           # A static non-parametrized fixture cannot introduce
+                           # an oversized pytest parameter ID. Real registered
+                           # pytest still has the collection guard for all tests.
+                           and any(marker in (repo / p).read_bytes() for marker in
+                                   (b"parametrize", b"pytest_generate_tests")))
+    # The preflight must never launch pytest when owner/consumer coverage was
+    # already rejected. In particular it must not bypass the hard code-5
+    # MT01_COVERAGE_UNPROVEN contract for an absent mandatory owner.
+    coverage_unproven = any(not entry["execute"] and entry["state"] != "REUSE"
+                            for entry in plan["groups"])
+    if changed_tests and registered_only and not coverage_unproven:
+        preflight_argv = [sys.executable, "-m", "pytest", *changed_tests,
+                          "--collect-only", "-q"]
+        remaining = verify_deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(preflight_argv, timeout_seconds)
+        response, pre_out, pre_err, _, _ = _run_pytest_with_junit(
+            preflight_argv, repo=repo, timeout=min(90.0, remaining))
+        marker = b"MT01_PYTEST_NODEID_TOO_LONG"
+        preflight = {"kind": "MT01_CHANGED_TEST_NODEID_PREFLIGHT", "authoritative": False,
+                     "test_files": changed_tests, "result": "PASS_PREFLIGHT_ONLY"}
+        if marker in pre_out + pre_err and response.returncode == 1:
+            preflight.update(result="REJECTED_TEST_DEFINITION", reason="PYTEST_NODEID_TOO_LONG")
+            plan["test_id_preflight"] = preflight
+            save("mt01_nodeid_preflight", "mt01.nodeid-preflight.json",
+                 (canonical(preflight) + "\n").encode())
+            finish("NOT_EXECUTED_AFTER_TEST_ID_PREFLIGHT_REJECTED")
+            return subprocess.CompletedProcess(fallback_argv, 1,
+                "FAILED MT01_PYTEST_NODEID_TOO_LONG: changed test definition; no tests executed\n", ""), plan
+        if response.returncode != 0:
+            preflight.update(result="UNPROVEN", reason="CHANGED_TEST_COLLECTION_UNPROVEN")
+            plan["test_id_preflight"] = preflight
+            save("mt01_nodeid_preflight", "mt01.nodeid-preflight.json",
+                 (canonical(preflight) + "\n").encode())
+            finish()
+            return subprocess.CompletedProcess(fallback_argv, 3, "",
+                "CHANGED_TEST_COLLECTION_UNPROVEN"), plan
+        plan["test_id_preflight"] = preflight
+        save("mt01_nodeid_preflight", "mt01.nodeid-preflight.json",
+             (canonical(preflight) + "\n").encode())
     # Run provisional tests BEFORE expensive broad regression. A nonzero
     # determinate result must lead to bounded Verify-Fix without falsely
     # claiming a failed/successful registered verification. Unproven
@@ -954,9 +1013,12 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
                 entry.update(state="UNPROVEN", reason=reason)
             # Only a known code failure permits collecting other groups, then repair.
             code = 1 if determinate else (result.returncode if result.returncode not in (0, 1) else 3)
-            if not determinate:
-                break
-    finish()
+            # Return the first determinate test failure to EF01's bounded
+            # Verify-Fix loop. Running every remaining group first can consume
+            # the whole shared budget and turn repairable red tests into UNKNOWN.
+            break
+    finish("NOT_EXECUTED_AFTER_DETERMINATE_FAILURE" if code == 1
+           else "NOT_EXECUTED_AFTER_UNPROVEN_GROUP")
     if not stdout and all(e["state"] == "REUSE" for e in plan["groups"]):
         stdout = [b"MT01: all applicable groups have strict prior successful evidence\n"]
     return subprocess.CompletedProcess(fallback_argv, code, b"\n".join(stdout).decode(),
