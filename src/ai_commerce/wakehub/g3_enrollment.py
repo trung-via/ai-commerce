@@ -28,7 +28,6 @@ STATUS_FRAME_BODY_LIMIT = 65536
 STATUS_TRANSPORT_MISSING_OWNERS = (
     "INSTALLED_SCM_OWNED_FIXED_PIPE_SERVER",
     "ENROLLED_INTERACTIVE_PEER_AND_CLIENT_HANDLE_AUTHENTICATION",
-    "BOUNDED_DEADLINE_IO_CANCELLATION_AND_DISCONNECT",
     "SEPARATE_PROTECTED_BROKER_AND_OBSERVER_SIGNING_HANDOFFS",
     "ATTENDED_NATIVE_INSTALLATION_AND_PROTECTED_READBACK",
 )
@@ -42,23 +41,27 @@ NOT_ENROLLED = (
 def status_transport_contract() -> Resource:
     """Missing native owner's exact private contract, never an installer input.
 
-    The executable exchange consumes complete frames on an ALREADY authenticated
-    server HANDLE. No I/O callbacks or caller-reported readiness are authority.
-    The native owner must authenticate the client end independently, assemble
-    exactly one bounded frame under the challenge deadline, cancel on timeout,
-    and abandon on EOF, partial read/write, crash or ambiguous delivery. It must
-    never reconnect/retry a reserved exchange or create/reset either G2 ledger.
+    Source adapters consume existing, independently authenticated server/client
+    HANDLEs. They require overlapped message mode, one message per direction,
+    and a monotonic budget that never exceeds the five-second challenge. No I/O
+    callbacks or caller-reported readiness are authority. Unfinished cancellation
+    retains kernel-owned memory and blocks further adapters for reconciliation.
+    The installed owner supplies sole HANDLE custody and separate signing roles;
+    it must never reconnect/retry or create/reset either existing G2 ledger.
     """
     return Resource("status_transport", canonical(dict(
         service=broker.SERVICE, pipe=broker.PIPE, schema="WakeHubG3StatusFrame.v1",
         operation="STATUS", framing="UINT32_BIG_ENDIAN_CANONICAL_JSON_EXACT_SINGLE_FRAME",
         body_limit=STATUS_FRAME_BODY_LIMIT, deadline="EXISTING_FIVE_SECOND_G3_CHALLENGE",
+        io="OVERLAPPED_MESSAGE_MODE_MONOTONIC_DEADLINE_SINGLE_READ_SINGLE_WRITE",
+        cancellation="CANCEL_IO_EX_NO_RETRY_RETAIN_UNTIL_COMPLETED",
+        handle_custody="SOLE_OWNERSHIP_TRANSFER_NO_CONCURRENT_HANDLER_OR_HANDLE_READOPTION",
         server_identity="EXISTING_G2_KERNEL_HANDLE_SCM_PRIMARY_TOKEN_IMAGE_AND_PROTECTED_ACL",
         client_identity="INDEPENDENT_CLIENT_HANDLE_CHECK_AGAINST_PROTECTED_ENROLLMENT",
         roles=("BROKER_CHALLENGE_ONLY", "INDEPENDENT_OBSERVER_STATUS_ONLY"),
         binding="EXACT_SOURCE_RELEASE_GENERATION_LOGON_PROCESS_AND_SIGNED_REQUEST_SHA256",
         nonce_custody="EXISTING_G3_CHALLENGES_SQLITE_FIRST_WINS_UNKNOWN_BEFORE_OFFER",
-        request_custody="EXISTING_G2_REQUESTS_AND_EFFECT_JOURNAL_NO_NEW_LEDGER",
+        request_custody="EXISTING_G2_REQUEST_UNKNOWN_BEFORE_OFFER_AND_EFFECT_JOURNAL_NO_NEW_LEDGER",
         grant="EXISTING_G2_ISSUER_HUMAN_PAUSE_EXPIRY_AND_REVOCATION_RECHECK",
         ambiguous_delivery="PERMANENT_UNKNOWN_RECONCILE_ONLY_NO_RETRY",
         missing_owners=STATUS_TRANSPORT_MISSING_OWNERS, start="DENY", reuse="DENY")))
@@ -68,6 +71,7 @@ def status_transport_preflight() -> dict:
     """Fixed public source disposition; accepts no 'all green' attestations."""
     return dict(schema_version="WakeHubG3StatusTransportPublic.v1",
         status="SOURCE_READY_FOR_ENROLLMENT", native_transport="HOLD",
+        dependency="HOLD_DEPENDENCY",
         authority="SOURCE_ONLY", missing_owners=STATUS_TRANSPORT_MISSING_OWNERS,
         native_effect="NOT_ATTEMPTED", start="DENY", reuse="DENY")
 

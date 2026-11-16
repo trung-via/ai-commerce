@@ -16,7 +16,7 @@ from pathlib import Path
 import re
 import threading
 import time
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from ai_commerce.wakehub import native_authority as auth
 from ai_commerce.wakehub import native_broker as broker
@@ -71,12 +71,10 @@ def _validate_config(config, anchor):
     return source, target
 
 
-def _context(handle):
-    # Kernel pipe/server/client/SCM authenticity and public release material are
-    # checked before a nonce is offered. No identity dict from the wire is used.
-    auth.windows_only()
+def _peer_context(facts):
+    """Shared protected pins; facts come ONLY from the appropriate kernel end."""
     anchor = broker._read_broker_anchor()
-    server, client = broker.validate_peer(anchor, broker.observe_connection(handle))
+    server, client = broker.validate_peer(anchor, facts)
     auth._validate_anchor_material(anchor["authority"])
     for pin in (anchor["service"], anchor["desktop_peer"]):
         path = WindowsPathCustody().check(pin["process"]["executable"])
@@ -90,13 +88,21 @@ def _context(handle):
             or broker.service_sid() in (client.user_sid, *anchor["authority"]["runner_sids"])
             or set(anchor["authority"]["runner_sids"]) & OS_TRUSTED_SIDS):
         deny()
+    return anchor, config, server, client, source, target
+
+
+def _context(handle):
+    # The desktop end uses the public checks above, never service-private files.
+    auth.windows_only()
+    context = _peer_context(broker.observe_connection(handle))
+    anchor, config, *_ = context
     private = (anchor["authority"]["journal_path"], anchor["requests_path"],
                anchor["private_key_path"], anchor["desktop_path"], config["challenges_path"])
     if len(set(private)) != len(private):
         deny()
     for path in private:
         broker.ServiceCustody().check(path)
-    return anchor, config, server, client, source, target
+    return context
 
 
 class G3ServiceAuthority(broker.WindowsServiceAuthority):
@@ -159,6 +165,7 @@ class ConnectedStatusHost:
         self.clock = clock
         self._pending = None
         self._lock = threading.Lock()
+        self._request_reservation = None
 
     def begin(self, handle, *, request_sha256=None) -> observer.Challenge:
         with self._lock:
@@ -194,18 +201,72 @@ class ConnectedStatusHost:
                     or auth._digest(signed_request) != challenge.request_sha256)):
                 deny()
             challenge.fresh(self.clock())
+            request = decode(signed_request, observer.STATUS_FRAME_BODY_LIMIT)
+            shape(request, "body signature")
+            if type(request["body"]) is not dict or canonical(request) != signed_request:
+                deny()
+            # Preserve signed G2 reconciliation on the existing unbound
+            # handoff. Request-bound frame exchanges remain strictly STATUS.
+            allowed = ("STATUS",) if challenge.request_sha256 is not None else ("STATUS", "RECONCILE_ONLY")
+            operation = request["body"].get("operation")
+            if operation not in allowed:
+                return op.PublicReceipt(op.Operation.STATUS, op.Decision.HOLD, op.Reason.INVALID_REQUEST)
+            operation = op.Operation(operation)
             # Reopen native custody, SCM, token, source, desktop and both
             # journals. A changed pipe/token/anchor never inherits old trust.
             native = _connected_runtime(handle, challenge, signed_status, config_digest, self.clock)
-            receipt = native.run_service_request(signed_request)
-            if receipt.effect is not op.EffectAttempt.NOT_ATTEMPTED:
+            receipt = (native.run_service_request(signed_request) if self._request_reservation is None
+                       else self._request_reservation.complete(native, signed_request))
+            challenge.fresh(self.clock())  # A late verification/ACK cannot finish the nonce.
+            if (type(receipt) is not op.PublicReceipt or receipt.operation is not operation
+                    or receipt.effect is not op.EffectAttempt.NOT_ATTEMPTED):
                 deny()
             if receipt.decision is op.Decision.UNKNOWN_EFFECT:
                 return receipt  # Keep the challenge UNKNOWN as well as consumed.
             journal.finish(challenge.nonce, digest, receipt)
+            challenge.fresh(self.clock())
             return receipt
         except Exception:
             return _unknown()
+
+
+class _StatusRequestReservation:
+    """Existing G2 request ledger, independently UNKNOWN before the G3 offer."""
+    def __init__(self, anchor, body):
+        nonce = body["nonce"]
+        if type(nonce) is not str or str(UUID(nonce)) != nonce:
+            deny()
+        self.nonce, self.digest = nonce, auth._digest(canonical(body))
+        self.requests = broker.BrokerRequests(anchor["requests_path"], owner_sid=broker.service_sid(),
+                                              journal_id=body["journal_id"])
+        if not self.requests.claim(self.nonce, self.digest):
+            deny()
+        self._entered = False
+
+    def complete(self, native, raw):
+        # Keep G2's verifier, Human consent/pause and revocation rechecks. Only
+        # its second claim is omitted: this exact request is already consumed.
+        if self._entered:
+            deny()
+        self._entered = True
+        operation, proof, nonce, digest = native._authority.verify_request(raw)
+        if (operation is not op.Operation.STATUS or (nonce, digest) != (self.nonce, self.digest)
+                or native._broker.path != self.requests.path
+                or native._broker.journal_id != self.requests.journal_id):
+            deny()
+        with self.requests._transaction() as db:
+            if db.execute("SELECT digest,state,receipt FROM requests WHERE nonce=?", (nonce,)).fetchall() != [
+                    (digest, "UNKNOWN", None)]:
+                deny()
+        native._authority._load(native._authority.clock())
+        result = native._run_authenticated(op.Operation.STATUS, proof)
+        native._authority.clock()  # Includes the connected monotonic deadline.
+        if (type(result) is not op.PublicReceipt or result.operation is not op.Operation.STATUS
+                or result.effect is not op.EffectAttempt.NOT_ATTEMPTED):
+            deny()
+        if result.decision is not op.Decision.UNKNOWN_EFFECT:
+            self.requests.finish(nonce, digest, result)
+        return result
 
 
 class ConnectedStatusExchange:
@@ -217,11 +278,18 @@ class ConnectedStatusExchange:
     must abandon on partial I/O or timeout. All durable claims remain in the
     existing G3 challenge and G2 request/effect ledgers.
     """
-    def __init__(self, *, clock=time.time):
-        self.clock = clock
-        self._host = ConnectedStatusHost(clock=clock)
+    def __init__(self, *, clock=time.time, monotonic=time.monotonic):
+        self._wall_clock, self._monotonic = clock, monotonic
+        self._deadline = None
+        self.clock = self._now
+        self._host = ConnectedStatusHost(clock=self.clock)
         self._lock = threading.Lock()
         self._state = "NEW"
+
+    def _now(self):
+        if self._deadline is not None:
+            self._deadline.check()
+        return self._wall_clock()
 
     def _recheck(self, handle):
         if type(handle) is not int or handle != self._handle:
@@ -246,6 +314,7 @@ class ConnectedStatusExchange:
                 deny()
             self._state = "CLOSED"
             try:
+                self._deadline = observer._StatusDeadline(self._monotonic)
                 if type(handle) is not int or handle <= 0:
                     deny()
                 value = decode(signed_request, observer.STATUS_FRAME_BODY_LIMIT)
@@ -264,6 +333,7 @@ class ConnectedStatusExchange:
                 self._pins_digest = auth._digest(canonical([anchor, config]))
                 self._handle, self._request = handle, signed_request
                 self._challenge = self._host.begin(handle, request_sha256=auth._digest(signed_request))
+                self._host._request_reservation = _StatusRequestReservation(anchor, body)
                 self._last_time = self._challenge.issued_at
                 self._recheck(handle)
                 self._state = "RESERVED"
@@ -326,6 +396,71 @@ class ConnectedStatusExchange:
             self._host.abandon()
             return _unknown() if reserved else op.PublicReceipt(
                 op.Operation.STATUS, op.Decision.HOLD, op.Reason.DUPLICATE)
+
+
+class ConnectedStatusIO:
+    """Private, one-shot service adapter; consumes an existing server HANDLE.
+
+    begin returns the transcript for the separately enrolled broker signer.
+    exchange accepts its signature, writes ONE offer and reads ONE reply. No
+    callback, listener, native open, signer, retry or readiness assertion exists.
+    The installed owner must transfer sole ownership of an overlapped,
+    message-mode HANDLE; a competing adapter is rejected before any I/O.
+    """
+    def __init__(self, *, clock=time.time, monotonic=time.monotonic):
+        self._exchange = ConnectedStatusExchange(clock=clock, monotonic=monotonic)
+        self._pipe = None
+        self._lock = threading.Lock()
+        self._used = False
+
+    def begin(self, handle, signed_request: bytes) -> observer.Challenge:
+        with self._lock:
+            if self._used:
+                deny()
+            self._used = True
+            try:
+                # Authenticate before taking ownership or touching pipe data.
+                _context(handle)
+                deadline = observer._StatusDeadline(self._exchange._monotonic)
+                self._pipe = observer._StatusPipeIO(handle, observer._PipeSide.SERVER, deadline)
+                challenge = self._exchange.begin(handle, signed_request)
+                self._exchange._deadline = deadline  # Never restart the budget.
+                deadline.check()
+                return challenge
+            except Exception:
+                self._exchange.abandon()
+                if self._pipe is not None:
+                    self._pipe.close()
+                deny()
+
+    def exchange(self, signed_challenge: bytes) -> op.PublicReceipt:
+        if not self._lock.acquire(blocking=False):
+            return op.PublicReceipt(op.Operation.STATUS, op.Decision.HOLD, op.Reason.DUPLICATE)
+        try:
+            if self._pipe is None or self._pipe.closed:
+                return op.PublicReceipt(op.Operation.STATUS, op.Decision.HOLD, op.Reason.DUPLICATE)
+            pipe = self._pipe
+            try:
+                raw = self._exchange.offer(pipe.handle, signed_challenge)
+                pipe.write_frame(raw)
+                self._exchange._recheck(pipe.handle)
+                reply = pipe.read_frame()
+                self._exchange._recheck(pipe.handle)
+                return self._exchange.complete(pipe.handle, reply)
+            except Exception:
+                self._exchange.abandon()
+                return _unknown()
+            finally:
+                pipe.close()
+        finally:
+            self._lock.release()
+
+    def abandon(self) -> op.PublicReceipt:
+        with self._lock:
+            result = self._exchange.abandon()
+            if self._pipe is not None:
+                self._pipe.close()
+            return result
 
 
 def staged_scm_entrypoint():

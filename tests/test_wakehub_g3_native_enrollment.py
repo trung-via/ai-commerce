@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import sqlite3
 import subprocess
+import time
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -254,23 +255,31 @@ def test_crash_lost_ack_and_reopen_leave_durable_unknown(g3):
 
 def test_concurrent_completion_first_wins(g3, monkeypatch):
     challenge = g3.host.begin(123)
+    request = g3.broker.request(grant(op.Operation.STATUS))
     calls = []
     def fail(*args): calls.append(1); raise RuntimeError("synthetic lost reply")
     monkeypatch.setattr(host, "_connected_runtime", fail)
     with ThreadPoolExecutor(2) as pool:
-        results = list(pool.map(lambda _: g3.host.complete(123, g3.status(challenge), b"{}"), range(2)))
+        results = list(pool.map(lambda _: g3.host.complete(123, g3.status(challenge), request), range(2)))
     assert len(calls) == 1
     assert {r.decision for r in results} == {op.Decision.UNKNOWN_EFFECT, op.Decision.HOLD}
     assert g3.rows()[0][1:] == ("UNKNOWN", None)
 
 
-@pytest.mark.parametrize("operation", [START, op.Operation.REUSE])
-def test_host_never_reaches_native_effect_boundary(g3, monkeypatch, operation):
+@pytest.mark.parametrize("operation,request_bound", [
+    (START, False), (op.Operation.REUSE, False), (START, True), (op.Operation.REUSE, True),
+    (op.Operation.RECONCILE_ONLY, True)])
+def test_host_never_reaches_native_effect_boundary(g3, monkeypatch, operation, request_bound):
     monkeypatch.setattr(rt.WindowsExecutor, "start_dedicated", lambda *a: pytest.fail("START invoked"))
     monkeypatch.setattr(rt.WindowsExecutor, "reuse_owned", lambda *a: pytest.fail("ATTACH invoked"))
-    challenge = g3.host.begin(123)
-    result = g3.host.complete(123, g3.status(challenge), g3.broker.request(grant(operation)))
+    monkeypatch.setattr(host, "_connected_runtime", lambda *a: pytest.fail("disallowed request reached runtime"))
+    request = g3.broker.request(grant(operation))
+    challenge = g3.host.begin(123, request_sha256=auth._digest(request) if request_bound else None)
+    result = g3.host.complete(123, g3.status(challenge), request)
+    assert result.operation is op.Operation.STATUS
     assert result.decision is op.Decision.HOLD and result.effect is op.EffectAttempt.NOT_ATTEMPTED
+    assert result.reason is op.Reason.INVALID_REQUEST
+    assert g3.rows()[0][1:] == ("UNKNOWN", None)
 
 
 @pytest.mark.parametrize("fault", ["session0", "wrong_process", "wrong_signed_challenge", "locked", "logon_race", "wrong_source", "wrong_generation"])
@@ -333,12 +342,14 @@ def test_g3_original_outcome_reconciliation_preserves_first_wins_keys(g3):
     reconcile = grant(op.Operation.RECONCILE_ONLY, reconciles=original.key)
     challenge = g3.host.begin(123)
     missing = g3.host.complete(123, g3.status(challenge), g3.broker.request(reconcile))
+    assert missing.operation is op.Operation.RECONCILE_ONLY
     assert missing.reason is op.Reason.RECONCILE_ONLY
     assert journal.read(original).state is op.JournalState.UNKNOWN
     observation, _ = original_outcome(g3.broker.f, lease)
     for _ in range(2):
         challenge = g3.host.begin(123)
         result = g3.host.complete(123, g3.status(challenge), g3.broker.request(reconcile))
+        assert result.operation is op.Operation.RECONCILE_ONLY
         assert result.decision is op.Decision.RECONCILED
         assert result.effect is op.EffectAttempt.NOT_ATTEMPTED
         assert g3.broker.f.storage.reopen().read(original).observation == observation
@@ -357,6 +368,7 @@ def test_g3_unknown_effect_never_resolves_from_new_presence_or_wrong_proof(g3, f
     reconcile = grant(op.Operation.RECONCILE_ONLY, reconciles=original.key)
     challenge = g3.host.begin(123)
     result = g3.host.complete(123, g3.status(challenge), g3.broker.request(reconcile))
+    assert result.operation is op.Operation.RECONCILE_ONLY
     assert result.reason is op.Reason.RECONCILE_ONLY
     assert result.effect is op.EffectAttempt.NOT_ATTEMPTED
     assert journal.read(original).state is op.JournalState.UNKNOWN
@@ -720,7 +732,9 @@ def status_exchange(g3, monkeypatch):
         lambda self, handle: _SERVICE_INITIALIZE(self, handle, clock=lambda: T))
     _, proof = signed_read(g3.broker, monkeypatch, g)
     monkeypatch.setattr(b.WindowsServiceAuthority, "__init__", _SERVICE_INITIALIZE)
-    return SimpleNamespace(g3=g3, exchange=host.ConnectedStatusExchange(clock=lambda: g3.clock[0]),
+    monotonic = [100.0]
+    return SimpleNamespace(g3=g3, exchange=host.ConnectedStatusExchange(
+        clock=lambda: g3.clock[0], monotonic=lambda: monotonic[0]), monotonic=monotonic,
         request=g3.broker.request(g, proof=proof), grant=g, proof=proof, commands=commands)
 
 
@@ -759,7 +773,7 @@ def test_bounded_peer_owner_and_desktop_consumer_signed_status_positive(status_e
 
 
 @pytest.mark.parametrize("fault", ["unsigned", "forged", "observer_role", "wrong_namespace",
-    "start", "reuse", "source", "release", "server", "client", "journal", "extra",
+    "start", "reuse", "reconcile", "source", "release", "server", "client", "journal", "extra",
     "noncanonical", "oversized", "untyped", "bad_handle"])
 def test_peer_request_preflight_never_reserves_untrusted_or_effect_request(status_exchange, fault):
     x = status_exchange
@@ -769,7 +783,9 @@ def test_peer_request_preflight_never_reserves_untrusted_or_effect_request(statu
     elif fault in ("server", "client"): body[fault]["created_at"] += 1
     elif fault == "journal": body["journal_id"] = "b" * 32
     elif fault == "extra": body["command"] = "forbidden"
-    elif fault in ("start", "reuse"): body["operation"] = (START if fault == "start" else op.Operation.REUSE).value
+    elif fault in ("start", "reuse", "reconcile"):
+        body["operation"] = {"start": START, "reuse": op.Operation.REUSE,
+                             "reconcile": op.Operation.RECONCILE_ONLY}[fault].value
     raw = x.g3.broker.f.crypto.signed(body, "observer" if fault == "observer_role" else "issuer", "grant",
         namespace="wrong-role" if fault == "wrong_namespace" else b.NAMESPACE.format("request"))
     if fault == "unsigned": raw = jn.canonical(body)
@@ -929,9 +945,9 @@ def test_peer_status_still_requires_current_g2_issuer_human_and_revocation(statu
         x.g3.broker.f.rev["revoked"] = [str(x.grant.key.action_id)]
         x.g3.broker.f.save()
     receipt = x.exchange.complete(123, status_reply(x, challenge))
-    assert receipt.decision is op.Decision.HOLD and receipt.effect is op.EffectAttempt.NOT_ATTEMPTED
+    assert receipt.decision is op.Decision.UNKNOWN_EFFECT and receipt.effect is op.EffectAttempt.NOT_ATTEMPTED
     with closing(sqlite3.connect(x.g3.broker.requests)) as db:
-        assert db.execute("SELECT count(*) FROM requests").fetchone() == (0,)
+        assert db.execute("SELECT state,receipt FROM requests").fetchall() == [("UNKNOWN", None)]
     assert x.exchange.complete(123, status_reply(x, challenge)).reason is op.Reason.DUPLICATE
 
 
@@ -955,7 +971,7 @@ def test_peer_disconnect_crash_and_partial_readback_preserve_unknown(status_exch
     assert x.exchange.complete(123, status_reply(x, challenge)).reason is op.Reason.DUPLICATE
     with pytest.raises(ValueError): x.exchange.begin(123, x.request)
     monkeypatch.setattr(host, "uuid4", lambda: challenge.nonce)
-    reopened = host.ConnectedStatusExchange(clock=lambda: T)
+    reopened = host.ConnectedStatusExchange(clock=lambda: T, monotonic=lambda: 100.0)
     with pytest.raises(ValueError): reopened.begin(123, x.request)
     assert len(x.g3.rows()) == 1
 
@@ -972,12 +988,9 @@ def test_peer_concurrent_completion_and_request_replay_are_first_wins(status_exc
     assert len(calls) == 1
     assert {r.decision for r in receipts} == {op.Decision.STATUS_OBSERVED, op.Decision.HOLD}
     assert all(r.effect is op.EffectAttempt.NOT_ATTEMPTED for r in receipts)
-    # A fresh challenge cannot replay the already consumed issuer request.
-    x.exchange = host.ConnectedStatusExchange(clock=lambda: T)
-    fresh, _ = offered_exchange(x)
-    assert fresh.nonce != challenge.nonce
-    result = x.exchange.complete(123, status_reply(x, fresh))
-    assert result.decision is op.Decision.HOLD and result.reason is op.Reason.DUPLICATE
+    # Reject a consumed request before another offer, even with a fresh nonce.
+    x.exchange = host.ConnectedStatusExchange(clock=lambda: T, monotonic=lambda: 100.0)
+    with pytest.raises(ValueError): x.exchange.begin(123, x.request)
     with closing(sqlite3.connect(x.g3.broker.requests)) as db:
         assert db.execute("SELECT count(*) FROM requests").fetchone() == (1,)
 
@@ -1061,6 +1074,7 @@ def test_status_transport_contract_is_fixed_source_only_and_effect_guards_remain
     assert contract["operation"] == "STATUS" and contract["body_limit"] == en.STATUS_FRAME_BODY_LIMIT
     public = en.status_transport_preflight()
     assert public["status"] == "SOURCE_READY_FOR_ENROLLMENT" and public["native_transport"] == "HOLD"
+    assert public["dependency"] == "HOLD_DEPENDENCY"
     assert public["start"] == public["reuse"] == "DENY" and public["native_effect"] == "NOT_ATTEMPTED"
     assert tuple(public["missing_owners"]) == en.STATUS_TRANSPORT_MISSING_OWNERS
     for secret in (SID, JID, TARGET.dedicated_profile, en.SERVICE_IMAGE, b.PIPE):
@@ -1074,3 +1088,332 @@ def test_status_transport_contract_is_fixed_source_only_and_effect_guards_remain
     executor = rt.WindowsExecutor()
     with pytest.raises(ValueError): executor.start_dedicated(None)
     with pytest.raises(ValueError): executor.reuse_owned(None)
+
+
+@pytest.fixture
+def pipe_kernel(monkeypatch):
+    """Deterministic Win32 ABI seam; never open a real pipe/event/process."""
+    x = SimpleNamespace(now=[100.0], side=ob._PipeSide.SERVER, fault=None, raw=b"",
+        writes=[], calls=[], waits=[], closed=[], cancel=False, pending=False,
+        count=0, error=0, step=0.0, delay=0.0, immediate=False)
+    monkeypatch.setattr(auth, "windows_only", lambda: None)
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **kw: object())
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: x.error)
+    monkeypatch.setattr(ob, "_SPENT_HANDLES", set())
+    monkeypatch.setattr(ob, "_UNFINISHED_IO", [])
+    def api(dll, name, args, result):
+        def call(*values):
+            x.calls.append(name)
+            if name == "GetNamedPipeInfo":
+                values[1]._obj.value = (1 if x.side is ob._PipeSide.SERVER else 0) | (0 if x.fault == "byte_pipe" else 4)
+                return True
+            if name == "GetNamedPipeHandleStateW":
+                values[1]._obj.value = 0 if x.fault == "byte_read" else 3 if x.fault == "nowait" else 2
+                return True
+            if name == "NtQueryInformationFile":
+                assert values[4] == 16
+                values[2]._obj.value = 0x20 if x.fault == "synchronous" else 0
+                return 259 if x.fault == "query_pending" else 0
+            if name == "CreateEventW":
+                assert values == (None, True, False, None)
+                return 222
+            if name == "CloseHandle":
+                x.closed.append(values[0]); return True
+            if name in ("ReadFile", "WriteFile"):
+                assert values[3] is None and values[4]._obj.event == 223
+                x.direction = "read" if name == "ReadFile" else "write"
+                if x.fault == x.direction + "_disconnect":
+                    x.error = 109; return False
+                if name == "WriteFile":
+                    x.writes.append(bytes(values[1].raw[:values[2]]))
+                    x.count = values[2] - (1 if x.fault == "short_write" else 0)
+                else:
+                    assert values[2] == en.STATUS_FRAME_BODY_LIMIT + 5
+                    count = min(len(x.raw), values[2])
+                    ctypes.memmove(values[1], x.raw, count)
+                    x.count = count
+                    if len(x.raw) > values[2]:
+                        x.error = 234; return False
+                x.pending = True
+                x.error = 997
+                return x.immediate
+            if name == "GetOverlappedResultEx":
+                assert values[4] is False and 0 <= values[3] <= 5000
+                x.waits.append(values[3])
+                if x.cancel:
+                    x.error = 996 if x.fault == "cancel_pending" else 995
+                    return False
+                if x.fault in (x.direction + "_timeout", "cancel_pending"):
+                    x.now[0] += values[3] / 1000
+                    x.error = 258; return False
+                if x.delay: time.sleep(x.delay)
+                x.now[0] += x.step
+                if x.fault == "late": x.now[0] = 105.0
+                if x.fault == "rollback": x.now[0] = 99.0
+                values[2]._obj.value = x.count
+                x.pending = False
+                return True
+            if name == "CancelIoEx":
+                x.cancel = True
+                assert values[1]._obj.event == 223
+                return True
+            if name == "PeekNamedPipe":
+                values[4]._obj.value = 8 if x.fault == "second_message" else 0
+                return True
+            pytest.fail("unexpected native API " + name)
+        return call
+    monkeypatch.setattr(b, "_api", api)
+    x.deadline = lambda: ob._StatusDeadline(lambda: x.now[0])
+    return x
+
+
+def offline_wire(role):
+    # Only framing tests use this unsigned synthetic body; host/desktop tests
+    # below independently verify real, separate scratch role signatures.
+    return ob.StatusFrame(role, jn.canonical(dict(body={}, signature="OFFLINE_NOT_AUTHENTIC"))).to_bytes()
+
+
+@pytest.mark.parametrize("immediate", [False, True])
+def test_native_message_io_exact_uint32_frame_and_decreasing_budget(pipe_kernel, immediate):
+    x = pipe_kernel; x.immediate = immediate; x.step = 1.25
+    pipe = ob._StatusPipeIO(123, ob._PipeSide.SERVER, x.deadline())
+    offer = offline_wire(ob.StatusRole.BROKER)
+    x.raw = offline_wire(ob.StatusRole.OBSERVER)
+    pipe.write_frame(offer)
+    assert pipe.read_frame() == x.raw
+    assert x.writes == [offer] and int.from_bytes(offer[:4], "big") == len(offer) - 4
+    assert x.waits == ([0, 0] if immediate else [5000, 3750])
+    with pytest.raises(ValueError): pipe.read_frame()
+    with pytest.raises(ValueError): pipe.write_frame(offer)
+    pipe.close(); pipe.close()
+    assert x.closed == [222, 222, 123]
+    assert x.calls.count("ReadFile") == x.calls.count("WriteFile") == 1
+    with pytest.raises(ValueError): ob._StatusPipeIO(123, ob._PipeSide.SERVER, x.deadline())
+
+
+@pytest.mark.parametrize("fault", ["byte_pipe", "byte_read", "nowait", "synchronous", "query_pending"])
+def test_native_io_requires_kernel_overlapped_message_mode_before_data(pipe_kernel, fault):
+    x = pipe_kernel; x.fault = fault
+    with pytest.raises(jn.NativeDenied): ob._StatusPipeIO(123, ob._PipeSide.SERVER, x.deadline())
+    assert "ReadFile" not in x.calls and "WriteFile" not in x.calls
+    assert x.closed == ([] if fault == "query_pending" else [123])
+    assert bool(ob._UNFINISHED_IO) == (fault == "query_pending")
+
+
+@pytest.mark.parametrize("fault", ["read_timeout", "read_disconnect", "cancel_pending", "late", "rollback"])
+def test_native_read_timeout_disconnect_late_ack_and_cancel_are_terminal(pipe_kernel, fault):
+    x = pipe_kernel; x.fault = fault; x.raw = offline_wire(ob.StatusRole.OBSERVER)
+    pipe = ob._StatusPipeIO(123, ob._PipeSide.SERVER, x.deadline())
+    with pytest.raises(jn.NativeDenied): pipe.read_frame()
+    with pytest.raises(jn.NativeDenied): pipe.read_frame()
+    pipe.close()
+    assert x.calls.count("ReadFile") == 1
+    assert ("CancelIoEx" in x.calls) == (fault in ("read_timeout", "cancel_pending"))
+    if fault == "cancel_pending":
+        assert ob._UNFINISHED_IO == [pipe] and x.closed == []
+        assert pipe._pending[0].raw[:len(x.raw)] == x.raw
+        with pytest.raises(jn.NativeDenied): ob._StatusPipeIO(124, ob._PipeSide.SERVER, x.deadline())
+    else:
+        assert not ob._UNFINISHED_IO and x.closed == [222, 123]
+
+
+@pytest.mark.parametrize("fault", ["partial_header", "partial_body", "trailing", "oversize", "second_message"])
+def test_native_read_never_assembles_or_retries_invalid_single_message(pipe_kernel, fault):
+    x = pipe_kernel; x.fault = fault
+    raw = offline_wire(ob.StatusRole.OBSERVER)
+    x.raw = {"partial_header": raw[:3], "partial_body": raw[:-1], "trailing": raw + b" ",
+        "oversize": b"x" * (en.STATUS_FRAME_BODY_LIMIT + 6), "second_message": raw}[fault]
+    pipe = ob._StatusPipeIO(123, ob._PipeSide.SERVER, x.deadline())
+    with pytest.raises(jn.NativeDenied): pipe.read_frame()
+    pipe.close()
+    assert x.calls.count("ReadFile") == 1 and "WriteFile" not in x.calls
+
+
+def test_native_io_modeled_short_latency_uses_remaining_monotonic_wait(pipe_kernel):
+    # Model two 30ms native completions. Never assert a wall-clock minimum:
+    # Windows timer resolution/scheduling can complete an actual sleep early.
+    x = pipe_kernel; x.step = 0.03
+    pipe = ob._StatusPipeIO(123, ob._PipeSide.SERVER, x.deadline())
+    x.raw = offline_wire(ob.StatusRole.OBSERVER)
+    pipe.write_frame(offline_wire(ob.StatusRole.BROKER)); pipe.read_frame(); pipe.close()
+    assert x.now[0] == pytest.approx(100.06)
+    assert x.waits[0] == 5000
+    assert 4960 <= x.waits[1] < x.waits[0]
+
+
+def test_connected_native_service_keeps_independent_unknown_before_offer(status_exchange, pipe_kernel):
+    x, kernel = status_exchange, pipe_kernel
+    kernel.step = 1.5  # 3 seconds of modeled transport latency, no wallclock fixture.
+    owner = host.ConnectedStatusIO(clock=lambda: T, monotonic=lambda: kernel.now[0])
+    challenge = owner.begin(123, x.request)
+    assert x.g3.rows()[0][1:] == ("UNKNOWN", None)
+    with closing(sqlite3.connect(x.g3.broker.requests)) as db:
+        assert db.execute("SELECT state,receipt FROM requests").fetchall() == [("UNKNOWN", None)]
+    assert not kernel.writes
+    kernel.raw = status_reply(x, challenge)
+    receipt = owner.exchange(x.g3.broker_crypto.signed(challenge.body()))
+    assert receipt.decision is op.Decision.STATUS_OBSERVED and receipt.effect is op.EffectAttempt.NOT_ATTEMPTED
+    assert kernel.waits == [5000, 3500] and kernel.closed[-1] == 123
+    assert x.g3.rows()[0][1] == "DONE"
+    assert owner.exchange(b"{}").reason is op.Reason.DUPLICATE
+    for secret in (challenge.nonce, SID, JID, TARGET.dedicated_profile, b.PIPE):
+        assert secret not in receipt.to_json()
+
+
+@pytest.mark.parametrize("fault", ["write_disconnect", "read_disconnect", "write_timeout", "read_timeout",
+    "short_write", "late", "second_message"])
+def test_connected_native_service_failures_poison_request_without_reconnect(status_exchange, pipe_kernel, fault):
+    x, kernel = status_exchange, pipe_kernel
+    owner = host.ConnectedStatusIO(clock=lambda: T, monotonic=lambda: kernel.now[0])
+    challenge = owner.begin(123, x.request)
+    kernel.raw = status_reply(x, challenge); kernel.fault = fault
+    receipt = owner.exchange(x.g3.broker_crypto.signed(challenge.body()))
+    assert receipt.decision is op.Decision.UNKNOWN_EFFECT and receipt.effect is op.EffectAttempt.NOT_ATTEMPTED
+    assert x.g3.rows()[0][1:] == ("UNKNOWN", None)
+    with closing(sqlite3.connect(x.g3.broker.requests)) as db:
+        assert db.execute("SELECT state,receipt FROM requests").fetchall() == [("UNKNOWN", None)]
+    assert kernel.calls.count("WriteFile") == 1 and kernel.calls.count("ReadFile") <= 1
+    assert owner.exchange(b"{}").reason is op.Reason.DUPLICATE
+    # A different HANDLE/exchange cannot replay the issuer request after loss.
+    kernel.now[0] = 100.0
+    with pytest.raises(ValueError):
+        host.ConnectedStatusExchange(clock=lambda: T, monotonic=lambda: 100.0).begin(124, x.request)
+
+
+def test_connected_native_service_duplicate_owner_cannot_reserve_twice(status_exchange, pipe_kernel):
+    x, kernel = status_exchange, pipe_kernel
+    first = host.ConnectedStatusIO(clock=lambda: T, monotonic=lambda: kernel.now[0])
+    second = host.ConnectedStatusIO(clock=lambda: T, monotonic=lambda: kernel.now[0])
+    def begin(owner):
+        try:
+            owner.begin(123, x.request)
+            return owner
+        except jn.NativeDenied:
+            return None
+    with ThreadPoolExecutor(2) as pool:
+        winners = [owner for owner in pool.map(begin, (first, second)) if owner is not None]
+    assert len(winners) == 1
+    assert len(x.g3.rows()) == 1 and not kernel.writes
+    assert winners[0].abandon().decision is op.Decision.UNKNOWN_EFFECT
+
+
+def test_connected_desktop_derives_expectations_from_kernel_and_protected_config(status_exchange, pipe_kernel, monkeypatch):
+    x, kernel = status_exchange, pipe_kernel
+    challenge, offer = offered_exchange(x)
+    kernel.side = ob._PipeSide.CLIENT; kernel.raw = offer
+    monkeypatch.setattr(ob, "_observe_client_connection", lambda handle: x.g3.broker.facts)
+    peer = ob.ConnectedDesktopStatusIO(clock=lambda: T, monotonic=lambda: kernel.now[0])
+    transcript = peer.receive(124)
+    signed = x.g3.status(challenge)
+    assert transcript == auth.signing_bytes(jn.decode(signed)["body"])
+    assert peer.respond(signed) is ob.DesktopStatusOutcome.RESPONSE_WRITTEN
+    # Keep the client HANDLE alive until the service's final identity recheck.
+    assert 124 not in kernel.closed and len(kernel.writes) == 1
+    assert x.exchange.complete(123, kernel.writes[0]).decision is op.Decision.STATUS_OBSERVED
+    assert peer.respond(signed) is ob.DesktopStatusOutcome.DUPLICATE
+    assert peer.abandon() is ob.DesktopStatusOutcome.UNKNOWN and kernel.closed[-1] == 124
+
+
+@pytest.mark.parametrize("fault", ["generation", "source", "scm", "luid", "locked", "signature", "timeout"])
+def test_connected_desktop_rechecks_after_separate_observer_signing(status_exchange, pipe_kernel, monkeypatch, fault):
+    x, kernel = status_exchange, pipe_kernel
+    challenge, offer = offered_exchange(x)
+    kernel.side = ob._PipeSide.CLIENT; kernel.raw = offer
+    monkeypatch.setattr(ob, "_observe_client_connection", lambda handle: x.g3.broker.facts)
+    peer = ob.ConnectedDesktopStatusIO(clock=lambda: T, monotonic=lambda: kernel.now[0])
+    peer.receive(124)
+    signed = x.g3.status(challenge)
+    if fault == "generation": x.g3.config["generation"] += 1
+    elif fault == "source": x.g3.config["source"]["release_epoch"] += 1
+    elif fault == "scm": x.g3.broker.facts["scm"]["pid"] += 1
+    elif fault == "luid": monkeypatch.setattr(ob, "read_logon_id", lambda pid: "0000000000099999")
+    elif fault == "locked": monkeypatch.setattr(auth, "_desktop_identity", lambda target: jn.deny())
+    elif fault == "signature": signed = x.g3.broker_crypto.signed(jn.decode(signed)["body"])
+    elif fault == "timeout": kernel.now[0] = 105.0
+    assert peer.respond(signed) is ob.DesktopStatusOutcome.UNKNOWN
+    assert not kernel.writes and kernel.closed[-1] == 124
+    assert peer.respond(signed) is ob.DesktopStatusOutcome.DUPLICATE
+    assert x.g3.rows()[0][1:] == ("UNKNOWN", None)
+
+
+def test_exchange_monotonic_expiry_cannot_be_extended_by_wallclock_or_signer(status_exchange):
+    x = status_exchange
+    challenge, _ = offered_exchange(x)
+    reply = status_reply(x, challenge)
+    x.monotonic[0] += 5  # Wall clock is still T, not rolled forward to fake expiry.
+    assert x.exchange.complete(123, reply).decision is op.Decision.UNKNOWN_EFFECT
+    assert x.g3.rows()[0][1:] == ("UNKNOWN", None)
+
+
+def test_late_durable_ack_is_unknown_and_cannot_reoffer_request(status_exchange, monkeypatch):
+    x = status_exchange
+    challenge, _ = offered_exchange(x)
+    finish = b.BrokerRequests.finish
+    def delayed(self, *args):
+        result = finish(self, *args)
+        if self.path == x.g3.path: x.monotonic[0] += 5
+        return result
+    monkeypatch.setattr(b.BrokerRequests, "finish", delayed)
+    assert x.exchange.complete(123, status_reply(x, challenge)).decision is op.Decision.UNKNOWN_EFFECT
+    assert x.exchange.complete(123, status_reply(x, challenge)).reason is op.Reason.DUPLICATE
+    with pytest.raises(ValueError):
+        host.ConnectedStatusExchange(clock=lambda: T, monotonic=lambda: 100.0).begin(123, x.request)
+
+
+def test_unknown_reservation_request_is_consumed_even_with_a_new_challenge(status_exchange):
+    x = status_exchange
+    x.exchange.begin(123, x.request)
+    assert x.exchange.abandon().decision is op.Decision.UNKNOWN_EFFECT
+    fresh = host.ConnectedStatusExchange(clock=lambda: T, monotonic=lambda: 100.0)
+    with pytest.raises(ValueError): fresh.begin(123, x.request)
+    with closing(sqlite3.connect(x.g3.broker.requests)) as db:
+        assert db.execute("SELECT state,receipt FROM requests").fetchall() == [("UNKNOWN", None)]
+
+
+@pytest.mark.parametrize("fault", [None, "impersonation", "server_end", "wrong_pipe", "wrong_client_pid",
+    "session0", "wrong_session", "acl", "scm"])
+def test_client_handle_authentication_uses_kernel_endpoint_and_scm_facts(g3, monkeypatch, fault):
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **kw: object())
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 1008)
+    monkeypatch.setattr(os, "getpid", lambda: g3.broker.client.pid)
+    name = ctypes.create_unicode_buffer(b.PIPE + ("-foreign" if fault == "wrong_pipe" else ""))
+    closed = []
+    def api(dll, method, args, result):
+        def call(*values):
+            if method == "GetCurrentThread": return 777
+            if method == "OpenThreadToken":
+                if fault == "impersonation": values[3]._obj.value = 888
+                return fault == "impersonation"
+            if method == "CloseHandle": closed.append(values[0].value); return True
+            if method == "GetNamedPipeInfo":
+                values[1]._obj.value = 5 if fault == "server_end" else 4
+                return True
+            if method == "NtQueryObject":
+                class UnicodeString(ctypes.Structure):
+                    _fields_ = [("length", ob.wt.USHORT), ("maximum", ob.wt.USHORT), ("buffer", ctypes.c_void_p)]
+                out = ctypes.cast(values[2], ctypes.POINTER(UnicodeString)).contents
+                out.length = len(name.value) * 2; out.maximum = out.length + 2
+                out.buffer = ctypes.addressof(name)
+                return 0
+            side = "Client" if "Client" in method else "Server"
+            process = g3.broker.client if side == "Client" else g3.broker.server
+            if method.endswith("ProcessId"):
+                values[1]._obj.value = process.pid + (1 if fault == "wrong_client_pid" and side == "Client" else 0)
+            elif method.endswith("SessionId"):
+                values[1]._obj.value = process.session_id + (1 if fault == "wrong_session" and side == "Client" else 0)
+            else: pytest.fail("unexpected client authentication API " + method)
+            return True
+        return call
+    monkeypatch.setattr(b, "_api", api)
+    monkeypatch.setattr(b, "read_process_identity", lambda pid: (
+        replace(g3.broker.client, session_id=0) if fault == "session0" else g3.broker.client
+        ) if pid == g3.broker.client.pid else g3.broker.server)
+    monkeypatch.setattr(b, "_check_pipe_acl", lambda handle: jn.deny() if fault == "acl" else None)
+    monkeypatch.setattr(b, "_scm_process", lambda: dict(g3.broker.facts["scm"],
+        pid=g3.broker.server.pid + (1 if fault == "scm" else 0)))
+    if fault:
+        with pytest.raises(jn.NativeDenied): ob._desktop_context(124)
+    else:
+        context = ob._desktop_context(124)
+        assert context[2:4] == (g3.broker.server, g3.broker.client)
+    assert closed == ([888] if fault == "impersonation" else [])
