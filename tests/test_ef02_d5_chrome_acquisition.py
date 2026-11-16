@@ -891,7 +891,10 @@ def test_wh01b_enrollment_rejects_ambiguous_or_foreign_browser(monkeypatch, tmp_
     assert not ca._NativeEnrollment.instances and not env.config_path.parent.exists()
 
 
-@pytest.mark.parametrize("relative", ["Chrome-Acquisition/config.json", "chrome.json", "chrome-acquisition.json"])
+@pytest.mark.parametrize("relative", [
+    "Chrome-Acquisition/config.json", "D5-Isolated-9444-Trial/config.json",
+    "WakeHub/config.json", "WakeHub-9444/config.json", "chrome.json", "chrome-acquisition.json",
+])
 def test_wh01b_enrollment_refuses_any_existing_candidate(monkeypatch, tmp_path, relative):
     _, repo, home, _, events = enrollment_fixture(monkeypatch, tmp_path)
     existing = home / "AI-Commerce" / relative
@@ -1818,3 +1821,293 @@ def test_n3b_contract_is_not_a_public_cli_mode(tmp_path, command, capsys):
         ca.main([command, "--checkout", str(tmp_path), "--opt-in"])
     assert exc.value.code == 2
     assert capsys.readouterr().out == ""
+
+
+# WH01B L1A: offline lifecycle evidence only. These tests neither execute a
+# Windows inventory nor establish native custody, launch or deployment proof.
+_PRIOR_9444_CONFIGS = (
+    "Chrome-Acquisition/config.json", "D5-Isolated-9444-Trial/config.json",
+    "WakeHub/config.json", "WakeHub-9444/config.json", "chrome.json", "chrome-acquisition.json",
+)
+
+
+@pytest.mark.parametrize("case,code", [
+    ("wrong_port", "WINDOWS_PROBE_INVALID"),
+    ("duplicate_listener", "BROWSER_OWNERSHIP_UNPROVEN"),
+    ("unknown_owner", "PROCESS_IDENTITY_UNKNOWN"),
+    ("foreign_pid", "FOREIGN_PORT_OWNER"),
+])
+def test_l1a_inventory_diagnostics_stay_out_of_legacy_cli(monkeypatch, tmp_path, case, code):
+    env, _, _, snapshot, _ = logon_fixture(monkeypatch, tmp_path, running=True)
+    if case == "wrong_port":
+        snapshot["listeners"][0]["LocalPort"] = 9333
+    elif case == "duplicate_listener":
+        snapshot["listeners"].append(dict(snapshot["listeners"][0]))
+    elif case == "unknown_owner":
+        snapshot["processes"][0]["OwnerSid"] = None
+    else:
+        snapshot["listeners"][0]["OwningProcess"] = 999
+    with pytest.raises(ca._Lifecycle9444Hold, match=f"^{code}$") as exc:
+        ca._lifecycle_inventory(env, snapshot, session=1, sid=_OPERATOR_SID)
+    assert not isinstance(exc.value, ca.AcquisitionBlocked)
+
+
+@pytest.mark.parametrize("relative", _PRIOR_9444_CONFIGS)
+def test_l1a_each_finite_config_is_recognized_without_adoption(monkeypatch, tmp_path, relative):
+    env, repo, home, _, _ = logon_fixture(monkeypatch, tmp_path, allow_launch=True)
+    target = home / "AI-Commerce" / relative
+    if target != env.config_path:
+        target.parent.mkdir(exist_ok=True)
+        env.config_path.rename(target)
+    before = {p: p.read_bytes() for p in home.rglob("*") if p.is_file()}
+    registry = ca._config_9444_registry(home, repo)
+    assert registry.selected == target and registry.present == (target,)
+    result = ca._assess_lifecycle_9444(repo)
+    assert result.state == ("OFF_CLEAN_ENROLLED" if target == registry.canonical else "LEGACY_CANDIDATE")
+    assert result.status == "HOLD" and result.native_adapter == "BLOCKED_NOT_DEPLOYED"
+    if target != registry.canonical:
+        assert result.dependency == "ATTENDED_LEGACY_RECONCILIATION_REQUIRED"
+        assert_logon_hold(ca.assess_logon_9444(repo), "CONFIG_UNTRUSTED")
+    assert {p: p.read_bytes() for p in home.rglob("*") if p.is_file()} == before
+    assert json.loads(target.read_text())["allow_launch"] is True
+    assert not ca._NativeEnrollment.instances
+
+
+@pytest.mark.parametrize("relative", _PRIOR_9444_CONFIGS[1:])
+def test_l1a_canonical_precedence_never_accepts_duplicate_config(monkeypatch, tmp_path, relative):
+    env, repo, home, _, events = logon_fixture(monkeypatch, tmp_path)
+    duplicate = home / "AI-Commerce" / relative
+    duplicate.parent.mkdir(exist_ok=True)
+    duplicate.write_bytes(env.config_path.read_bytes())  # Identical bytes are still ambiguous.
+    registry = ca._config_9444_registry(home, repo)
+    assert registry.selected == env.config_path and len(registry.present) == 2
+    result = ca._assess_lifecycle_9444(repo)
+    assert (result.state, result.code) == ("CONFIG_NOT_ENROLLED", "CONFIG_AMBIGUOUS")
+    assert result.observation is None
+    assert_logon_hold(ca.assess_logon_9444(repo), "CONFIG_UNTRUSTED")
+    assert_enrollment_hold(ca.assess_existing_9444(repo), "ENROLLMENT_CONFIG_EXISTS")
+    assert events == []
+
+
+def test_l1a_registry_is_finite_and_legacy_duplicates_hold(monkeypatch, tmp_path):
+    _, repo, home, _, events = logon_fixture(monkeypatch, tmp_path, enrolled=False)
+    root = home / "AI-Commerce"
+    unrelated = root / "arbitrary" / "deep" / "config.json"
+    unrelated.parent.mkdir(parents=True)
+    unrelated.write_text("unregistered content")
+    assert ca._config_9444_registry(home, repo).present == ()
+    assert ca._assess_lifecycle_9444(repo).state == "CONFIG_NOT_ENROLLED"
+    for relative in ("WakeHub/config.json", "D5-Isolated-9444-Trial/config.json"):
+        path = root / relative
+        path.parent.mkdir()
+        path.write_text("untrusted prior config")
+    assert ca._assess_lifecycle_9444(repo).code == "CONFIG_AMBIGUOUS"
+    assert events == []
+
+
+@pytest.mark.parametrize("running,listener,cdp_ok,state,code", [
+    (False, False, False, "OFF_CLEAN_ENROLLED", "PROCESS_AND_LOCK_ABSENT"),
+    (True, False, False, "RUNNING_CDP_FAULT", "CDP_LISTENER_MISSING"),
+    (True, True, False, "RUNNING_CDP_FAULT", "CDP_PROTOCOL_UNAVAILABLE"),
+    (True, True, True, "RUNNING_HEALTHY", "CDP_VERIFIED"),
+])
+def test_l1a_off_fault_and_healthy_require_independent_evidence(
+        monkeypatch, tmp_path, running, listener, cdp_ok, state, code):
+    env, repo, home, snapshot, events = logon_fixture(monkeypatch, tmp_path, running=running)
+    if not listener:
+        snapshot["listeners"] = []
+    def cdp(current):
+        assert current == env and listener and running
+        events.append("cdp")
+        if not cdp_ok:
+            raise ca.AcquisitionBlocked("CDP_PROTOCOL_UNAVAILABLE")
+    monkeypatch.setattr(ca, "_probe_cdp", cdp)
+    before_paths = set(home.rglob("*"))
+    before = {p: p.read_bytes() for p in home.rglob("*") if p.is_file()}
+    for _ in range(2):
+        result = ca._assess_lifecycle_9444(repo)
+        assert (result.state, result.code, result.status) == (state, code, "HOLD")
+        assert result.native_adapter == "BLOCKED_NOT_DEPLOYED"
+    assert events.count("inventory") == 4
+    assert events.count("cdp") == (4 if listener else 0)
+    assert set(home.rglob("*")) == before_paths
+    assert {p: p.read_bytes() for p in home.rglob("*") if p.is_file()} == before
+    assert json.loads(env.config_path.read_text())["allow_launch"] is False
+    assert not ca._NativeEnrollment.instances
+
+
+@pytest.mark.parametrize("profile_switch", [False, True])
+@pytest.mark.parametrize("browser", [False, True])
+def test_l1a_children_do_not_hide_active_profile_or_duplicate_browser(
+        monkeypatch, tmp_path, profile_switch, browser):
+    env, repo, _, snapshot, events = logon_fixture(monkeypatch, tmp_path, running=browser)
+    command = [str(env.executable), "--type=renderer"]
+    if profile_switch:
+        command.append(f"--user-data-dir={env.user_data_dir}")
+    snapshot["processes"].append({**owner(env, pid=456), "OwnerSid": _OPERATOR_SID,
+        "CreationDate": "2026-11-14T01:00:00Z", "CommandLine": json.dumps(command)})
+    monkeypatch.setattr(ca, "_probe_cdp", lambda current: events.append("cdp"))
+    result = ca._assess_lifecycle_9444(repo)
+    assert result.state == ("RUNNING_HEALTHY" if browser else "PROFILE_LOCK_OR_IDENTITY_UNPROVEN")
+    assert events.count("cdp") == (2 if browser else 0)
+
+
+@pytest.mark.parametrize("marker", ca._MARKERS)
+@pytest.mark.parametrize("location", ["root", "profile"])
+def test_l1a_lock_at_either_profile_location_requires_native_holder(
+        monkeypatch, tmp_path, marker, location):
+    env, repo, _, _, events = logon_fixture(monkeypatch, tmp_path)
+    directory = env.user_data_dir if location == "root" else env.user_data_dir / env.profile_directory
+    path = directory / marker
+    path.write_bytes(b"private lock; never remove or parse")
+    result = ca._assess_lifecycle_9444(repo)
+    assert (result.state, result.code) == ("PROFILE_LOCK_OR_IDENTITY_UNPROVEN", "PROFILE_LOCK_HOLD")
+    assert result.dependency == "WINDOWS_PROFILE_LOCK_HOLDER_REQUIRED"
+    assert path.read_bytes() == b"private lock; never remove or parse"
+    assert "inventory" not in events
+
+
+@pytest.mark.parametrize("case,state", [
+    ("foreign_pid", "FOREIGN_PORT_OWNER"), ("foreign_address", "FOREIGN_PORT_OWNER"),
+    ("foreign_profile", "FOREIGN_PORT_OWNER"), ("wrong_port", "INVENTORY_UNAVAILABLE"),
+    ("unknown_sid", "PROFILE_LOCK_OR_IDENTITY_UNPROVEN"),
+    ("unknown_session", "PROFILE_LOCK_OR_IDENTITY_UNPROVEN"),
+    ("wrong_session", "PROFILE_LOCK_OR_IDENTITY_UNPROVEN"),
+    ("unknown_creation", "PROFILE_LOCK_OR_IDENTITY_UNPROVEN"),
+    ("duplicate_pid", "PROFILE_LOCK_OR_IDENTITY_UNPROVEN"),
+    ("duplicate_listener", "PROFILE_LOCK_OR_IDENTITY_UNPROVEN"),
+    ("same_profile_9333", "PROFILE_LOCK_OR_IDENTITY_UNPROVEN"),
+    ("unparseable", "PROFILE_LOCK_OR_IDENTITY_UNPROVEN"),
+])
+def test_l1a_foreign_unknown_or_9333_evidence_never_proves_health_or_off(
+        monkeypatch, tmp_path, case, state):
+    env, repo, home, snapshot, events = logon_fixture(monkeypatch, tmp_path, running=True)
+    proc, row = snapshot["processes"][0], snapshot["listeners"][0]
+    if case == "foreign_pid":
+        row["OwningProcess"] = 999
+    elif case == "foreign_address":
+        row["LocalAddress"] = "0.0.0.0"
+    elif case == "foreign_profile":
+        other = home / "AI-Commerce" / "Other-Profile"
+        other.mkdir()
+        proc["CommandLine"] = json.dumps([a.replace(str(env.user_data_dir), str(other)) for a in env.command()])
+    elif case == "wrong_port":
+        row["LocalPort"] = 9333
+    elif case in {"unknown_sid", "unknown_session", "unknown_creation"}:
+        proc[{"unknown_sid": "OwnerSid", "unknown_session": "SessionId",
+              "unknown_creation": "CreationDate"}[case]] = None
+    elif case == "wrong_session":
+        proc["SessionId"] = 2
+    elif case == "duplicate_pid":
+        snapshot["processes"].append(dict(proc))
+    elif case == "duplicate_listener":
+        snapshot["listeners"].append(dict(row))
+    elif case == "same_profile_9333":
+        snapshot["listeners"] = []
+        proc["CommandLine"] = json.dumps([
+            a.replace("--remote-debugging-port=9444", "--remote-debugging-port=9333") for a in env.command()])
+    else:
+        proc["CommandLine"] = "unparseable private arguments"
+    result = ca._assess_lifecycle_9444(repo)
+    assert result.state == state and result.status == "HOLD"
+    assert result.observation is None and result.dependency
+    assert events.count("inventory") == 1  # No CDP access or retry on unknown ownership.
+
+
+@pytest.mark.parametrize("case", ["timeout", "partial", "null_rows", "non_windows", "ci"])
+def test_l1a_unavailable_inventory_never_proves_off(monkeypatch, tmp_path, case):
+    _, repo, _, snapshot, events = logon_fixture(monkeypatch, tmp_path)
+    if case == "timeout":
+        def unavailable(port):
+            raise TimeoutError("private arguments/token")
+        monkeypatch.setattr(ca, "_query_windows", unavailable)
+    elif case == "partial":
+        snapshot.pop("processes")
+    elif case == "null_rows":
+        snapshot.update(processes=None, listeners=None)
+    elif case == "non_windows":
+        ca.os.name = "posix"
+    else:
+        ca.os.environ["GITHUB_ACTIONS"] = "true"
+    result = ca._assess_lifecycle_9444(repo)
+    assert result.state == "INVENTORY_UNAVAILABLE" and result.dependency
+    assert result.status == "HOLD" and result.observation is None
+    assert events.count("inventory") <= 1
+
+
+@pytest.mark.parametrize("relative", _PRIOR_9444_CONFIGS)
+@pytest.mark.parametrize("link", ["symlink", "reparse"])
+def test_l1a_every_registry_path_refuses_links(monkeypatch, tmp_path, relative, link):
+    import stat
+    import types
+    _, repo, home, _, events = logon_fixture(monkeypatch, tmp_path, enrolled=False)
+    target = home / "AI-Commerce" / relative
+    original = Path.lstat
+    def lstat(path, *args, **kwargs):
+        if path == target:
+            return types.SimpleNamespace(st_file_attributes=0x400,
+                st_mode=stat.S_IFLNK if link == "symlink" else stat.S_IFREG)
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "lstat", lstat)
+    assert ca._assess_lifecycle_9444(repo).state == "CONFIG_NOT_ENROLLED"
+    assert_logon_hold(ca.assess_logon_9444(repo), "CONFIG_UNTRUSTED")
+    assert_enrollment_hold(ca.assess_existing_9444(repo), "ENROLLMENT_PATH_UNSAFE")
+    assert events == []
+
+
+@pytest.mark.parametrize("case", ["missing", "bad_json", "wrong_port", "unsigned", "owner_acl", "lock"])
+def test_l1a_invalid_config_or_unproven_custody_is_typed_hold(monkeypatch, tmp_path, case):
+    from ai_commerce.remote import local_completion_handoff
+    env, repo, home, _, events = logon_fixture(monkeypatch, tmp_path)
+    if case == "missing":
+        env.config_path.unlink()
+    elif case == "bad_json":
+        env.config_path.write_text("invalid private config")
+    elif case == "wrong_port":
+        env.config_path.write_text(env.config_path.read_text().replace(":9444", ":9333"))
+    elif case == "unsigned":
+        def unsigned(current):
+            raise ca.AcquisitionBlocked("CHROME_EXECUTABLE_UNTRUSTED")
+        monkeypatch.setattr(ca, "_verify_google_chrome", unsigned)
+    elif case == "owner_acl":
+        def unproven(path):
+            raise local_completion_handoff.HandoffBlocked("private identity/ACL")
+        monkeypatch.setattr(local_completion_handoff, "_private_identity", unproven)
+    else:
+        (env.user_data_dir / "SingletonLock").write_bytes(b"do not remove")
+    before = {p: p.read_bytes() for p in home.rglob("*") if p.is_file()}
+    result = ca._assess_lifecycle_9444(repo)
+    assert result.state in {"CONFIG_NOT_ENROLLED", "PROFILE_LOCK_OR_IDENTITY_UNPROVEN"}
+    assert result.status == "HOLD" and result.dependency and result.observation is None
+    assert {p: p.read_bytes() for p in home.rglob("*") if p.is_file()} == before
+    assert "inventory" not in events
+    assert str(home) not in repr(result) and _OPERATOR_SID not in repr(result)
+
+
+@pytest.mark.parametrize("change", ["process", "lock", "config", "inventory_failure", "cdp"])
+def test_l1a_changed_lifecycle_evidence_discards_private_observation(monkeypatch, tmp_path, change):
+    env, repo, _, snapshot, _ = logon_fixture(monkeypatch, tmp_path, running=change == "cdp")
+    monkeypatch.setattr(ca, "_probe_cdp", lambda current: None)
+    original = ca._lifecycle_9444_observation
+    calls = []
+    def observe(checkout):
+        calls.append("read")
+        if len(calls) == 2:
+            if change == "process":
+                snapshot["processes"] = [{**owner(env), "OwnerSid": _OPERATOR_SID,
+                    "CreationDate": "2026-11-14T01:00:00Z", "CommandLine": json.dumps(env.command())}]
+            elif change == "lock":
+                (env.user_data_dir / "SingletonLock").write_bytes(b"new lock")
+            elif change == "config":
+                env.config_path.write_text(env.config_path.read_text().replace('"allow_launch": false',
+                                                                              '"allow_launch": true'))
+            else:
+                def unavailable(*args):
+                    raise TimeoutError("private evidence")
+                monkeypatch.setattr(ca, "_probe_cdp" if change == "cdp" else "_query_windows", unavailable)
+        return original(checkout)
+    monkeypatch.setattr(ca, "_lifecycle_9444_observation", observe)
+    result = ca._assess_lifecycle_9444(repo)
+    assert (result.state, result.code, result.status) == ("UNKNOWN_EFFECT", "OBSERVATION_CHANGED", "HOLD")
+    assert result.observation is None and calls == ["read", "read"]
+    assert not ca._NativeEnrollment.instances
