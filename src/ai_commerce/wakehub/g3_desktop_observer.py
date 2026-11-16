@@ -14,6 +14,7 @@ import math
 import os
 from pathlib import Path
 import re
+import threading
 import time
 from uuid import UUID
 
@@ -101,8 +102,8 @@ class StatusRole(Enum):
 class StatusFrame:
     """Bounded typed wire data, NEVER authentication or an effect capability.
 
-    Only complete single frames are accepted. Streaming, timeout/cancellation,
-    native client HANDLE authentication and signing remain separate owners.
+    Only complete single frames are accepted. Native I/O below requires a
+    message-mode overlapped pipe; signing remains a separate enrolled owner.
     The consumer independently verifies the existing role signature; outer
     framing can never change its role, nonce, source or request binding.
     """
@@ -143,7 +144,7 @@ class StatusFrame:
         return len(raw).to_bytes(4, "big") + raw
 
     @classmethod
-    def from_bytes(cls, raw: bytes, *, expected: Challenge, role: StatusRole) -> StatusFrame:
+    def _parse(cls, raw: bytes, role: StatusRole) -> StatusFrame:
         if (type(raw) is not bytes or not 4 < len(raw) <= STATUS_FRAME_BODY_LIMIT + 4
                 or int.from_bytes(raw[:4], "big") != len(raw) - 4 or type(role) is not StatusRole):
             deny()
@@ -153,8 +154,188 @@ class StatusFrame:
                 or value["operation"] != "STATUS" or value["role"] != role.value):
             deny()
         frame = cls(role, canonical(value["payload"]))
+        frame._body()
+        return frame
+
+    @classmethod
+    def from_bytes(cls, raw: bytes, *, expected: Challenge, role: StatusRole) -> StatusFrame:
+        frame = cls._parse(raw, role)
         frame.check_binding(expected)
         return frame
+
+
+class _StatusDeadline:
+    """One local monotonic five-second budget, including external signing."""
+    def __init__(self, monotonic=time.monotonic):
+        self._clock = monotonic
+        self._last = monotonic()
+        if not _number(self._last):
+            deny()
+        self._end = self._last + 5
+
+    def check(self):
+        now = self._clock()
+        if not _number(now) or not self._last <= now < self._end:
+            deny()
+        self._last = now
+        return self._end - now
+
+    def constrain(self, challenge, now):
+        challenge.fresh(now)
+        self.check()
+        self._end = min(self._end, self._last + challenge.expires_at - now)
+        self.check()
+
+    def milliseconds(self):
+        # Round down; there is never an extra millisecond or infinite wait.
+        return max(0, min(5000, int(self.check() * 1000)))
+
+
+class _PipeSide(Enum):
+    SERVER = "SERVER"
+    CLIENT = "CLIENT"
+
+
+_PIPE_LOCK = threading.Lock()
+_SPENT_HANDLES = set()
+_UNFINISHED_IO = []
+
+
+class _Overlapped(ctypes.Structure):
+    _fields_ = [("internal", ctypes.c_size_t), ("internal_high", ctypes.c_size_t),
+                ("offset", wt.DWORD), ("offset_high", wt.DWORD), ("event", wt.HANDLE)]
+
+
+class _StatusPipeIO:
+    """Owned connected HANDLE, ONE message per direction; no open or reconnect.
+
+    Message mode supplies the exact frame boundary, including partial/trailing
+    data rejection. Synchronous handles are denied before ReadFile/WriteFile.
+    CancelIoEx never proves completion. If cancellation is still outstanding,
+    retain the HANDLE/event/OVERLAPPED/buffer and refuse further adapters in this
+    process. Never free kernel-owned memory, wait indefinitely, or retry I/O.
+    """
+    def __init__(self, handle: int, side: _PipeSide, deadline: _StatusDeadline):
+        auth.windows_only()
+        if (type(handle) is not int or handle <= 0 or type(side) is not _PipeSide
+                or type(deadline) is not _StatusDeadline):
+            deny()
+        with _PIPE_LOCK:
+            if handle in _SPENT_HANDLES or _UNFINISHED_IO:
+                deny()
+            _SPENT_HANDLES.add(handle)  # Never readopt a consumed HANDLE value.
+        self.handle, self.side, self.deadline = handle, side, deadline
+        self.closed, self._pending = False, None
+        self._read_done = self._write_done = False
+        self._kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        try:
+            deadline.check()
+            flags, state = wt.DWORD(), wt.DWORD()
+            if (not self._api("GetNamedPipeInfo", [wt.HANDLE, ctypes.POINTER(wt.DWORD),
+                    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p], wt.BOOL)(
+                    handle, ctypes.byref(flags), None, None, None)
+                    or bool(flags.value & 1) != (side is _PipeSide.SERVER) or not flags.value & 4):
+                deny()
+            if (not self._api("GetNamedPipeHandleStateW", [wt.HANDLE, ctypes.POINTER(wt.DWORD),
+                    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, wt.LPWSTR, wt.DWORD], wt.BOOL)(
+                    handle, ctypes.byref(state), None, None, None, None, 0)
+                    or not state.value & 2 or state.value & 1):
+                deny()  # PIPE_READMODE_MESSAGE, PIPE_WAIT; never PIPE_NOWAIT.
+            class IoStatus(ctypes.Structure):
+                _fields_ = [("status", ctypes.c_void_p), ("information", ctypes.c_size_t)]
+            iosb, mode = IoStatus(), wt.ULONG()
+            status = broker._api(ctypes.WinDLL("ntdll"), "NtQueryInformationFile",
+                [wt.HANDLE, ctypes.c_void_p, ctypes.c_void_p, wt.ULONG, wt.ULONG], wt.LONG)(
+                handle, ctypes.byref(iosb), ctypes.byref(mode), ctypes.sizeof(mode), 16)
+            if status == 259:  # STATUS_PENDING: keep query output alive too.
+                self._retain((iosb, mode))
+                deny()
+            if status != 0 or mode.value & 0x30:
+                deny()  # FILE_SYNCHRONOUS_IO_ALERT / NONALERT cannot be bounded.
+            deadline.check()
+        except Exception:
+            self.close()
+            deny()
+
+    def _api(self, name, args, result):
+        return broker._api(self._kernel, name, args, result)
+
+    def _retain(self, packet):
+        self._pending = packet
+        with _PIPE_LOCK:
+            _UNFINISHED_IO.append(self)
+
+    def _transfer(self, raw=None):
+        self.deadline.check()
+        if self.closed or self._pending is not None:
+            deny()
+        size = STATUS_FRAME_BODY_LIMIT + 5 if raw is None else len(raw)
+        buffer = ctypes.create_string_buffer(size) if raw is None else ctypes.create_string_buffer(raw, size)
+        event = self._api("CreateEventW", [ctypes.c_void_p, wt.BOOL, wt.BOOL, wt.LPCWSTR], wt.HANDLE)(
+            None, True, False, None)
+        if not event:
+            deny()
+        # Low event bit suppresses an IOCP packet owned by an external host.
+        overlapped = _Overlapped(event=event | 1)
+        count, pending = wt.DWORD(), False
+        result = self._api("GetOverlappedResultEx", [wt.HANDLE, ctypes.POINTER(_Overlapped),
+            ctypes.POINTER(wt.DWORD), wt.DWORD, wt.BOOL], wt.BOOL)
+        try:
+            self.deadline.check()
+            pending = True
+            ok = self._api("ReadFile" if raw is None else "WriteFile", [wt.HANDLE, ctypes.c_void_p,
+                wt.DWORD, ctypes.c_void_p, ctypes.POINTER(_Overlapped)], wt.BOOL)(
+                self.handle, buffer, size, None, ctypes.byref(overlapped))
+            if not ok and ctypes.get_last_error() != 997:
+                pending = False
+                deny()  # EOF, broken pipe, MORE_DATA or any other finite failure.
+            ok = result(self.handle, ctypes.byref(overlapped), ctypes.byref(count),
+                        self.deadline.milliseconds() if not ok else 0, False)
+            if not ok:
+                pending = ctypes.get_last_error() not in (38, 109, 232, 234, 995)
+                deny()
+            pending = False
+            self.deadline.check()  # Late success is UNKNOWN, never an ACK.
+            if not 0 < count.value <= size or (raw is not None and count.value != size):
+                deny()
+            return bytes(buffer.raw[:count.value]) if raw is None else None
+        finally:
+            if pending:
+                self._api("CancelIoEx", [wt.HANDLE, ctypes.POINTER(_Overlapped)], wt.BOOL)(
+                    self.handle, ctypes.byref(overlapped))
+                done = result(self.handle, ctypes.byref(overlapped), ctypes.byref(count), 0, False)
+                if not done and ctypes.get_last_error() not in (38, 109, 232, 234, 995):
+                    self._retain((buffer, overlapped, event, count))
+            if self._pending is None:
+                self._api("CloseHandle", [wt.HANDLE], wt.BOOL)(event)
+
+    def read_frame(self):
+        if self._read_done:
+            deny()
+        self._read_done = True
+        raw = self._transfer()
+        StatusFrame._parse(raw, StatusRole.OBSERVER if self.side is _PipeSide.SERVER else StatusRole.BROKER)
+        # Reject already queued second messages without starting another read.
+        available = wt.DWORD()
+        if (not self._api("PeekNamedPipe", [wt.HANDLE, ctypes.c_void_p, wt.DWORD, ctypes.c_void_p,
+                ctypes.POINTER(wt.DWORD), ctypes.c_void_p], wt.BOOL)(
+                self.handle, None, 0, None, ctypes.byref(available), None) or available.value):
+            deny()
+        self.deadline.check()
+        return raw
+
+    def write_frame(self, raw: bytes):
+        if self._write_done:
+            deny()
+        self._write_done = True
+        StatusFrame._parse(raw, StatusRole.BROKER if self.side is _PipeSide.SERVER else StatusRole.OBSERVER)
+        self._transfer(raw)
+
+    def close(self):
+        if not self.closed:
+            self.closed = True
+            if self._pending is None:
+                self._api("CloseHandle", [wt.HANDLE], wt.BOOL)(self.handle)
 
 
 def _verify(raw, signers, verifier, identity, namespace):
@@ -258,6 +439,172 @@ def collect_status_frame_transcript(raw: bytes, *, expected: Challenge,
     return collect_status_transcript(frame.signed_payload, expected=expected,
         broker_signers=broker_signers, verifier=verifier, source=source,
         generation=generation, clock=clock)
+
+
+def _observe_client_connection(handle):
+    """Independent client-end kernel observation; no wire PID or SID facts."""
+    auth.windows_only()
+    if type(handle) is not int or handle <= 0:
+        deny()
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    thread = broker._api(kernel, "GetCurrentThread", [], wt.HANDLE)()
+    token = wt.HANDLE()
+    if broker._api(adv, "OpenThreadToken", [wt.HANDLE, wt.DWORD, wt.BOOL,
+            ctypes.POINTER(wt.HANDLE)], wt.BOOL)(thread, 8, True, ctypes.byref(token)):
+        broker._api(kernel, "CloseHandle", [wt.HANDLE], wt.BOOL)(token)
+        deny()
+    if ctypes.get_last_error() != 1008:
+        deny()
+    flags = wt.DWORD()
+    if (not broker._api(kernel, "GetNamedPipeInfo", [wt.HANDLE, ctypes.POINTER(wt.DWORD),
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p], wt.BOOL)(
+            handle, ctypes.byref(flags), None, None, None) or flags.value & 1):
+        deny()
+    class UnicodeString(ctypes.Structure):
+        _fields_ = [("length", wt.USHORT), ("maximum", wt.USHORT), ("buffer", ctypes.c_void_p)]
+    buffer, needed = ctypes.create_string_buffer(4096), wt.ULONG()
+    if broker._api(ctypes.WinDLL("ntdll"), "NtQueryObject", [wt.HANDLE, wt.ULONG, ctypes.c_void_p,
+            wt.ULONG, ctypes.POINTER(wt.ULONG)], wt.LONG)(handle, 1, buffer, len(buffer), ctypes.byref(needed)) != 0:
+        deny()
+    name = ctypes.cast(buffer, ctypes.POINTER(UnicodeString)).contents
+    if not name.buffer or ctypes.wstring_at(name.buffer, name.length // 2) != broker.PIPE:
+        deny()
+    facts = {}
+    for side in ("Client", "Server"):
+        for facet in ("ProcessId", "SessionId"):
+            value = wt.ULONG()
+            if not broker._api(kernel, "GetNamedPipe" + side + facet, [wt.HANDLE,
+                    ctypes.POINTER(wt.ULONG)], wt.BOOL)(handle, ctypes.byref(value)):
+                deny()
+            facts[side + facet] = value.value
+    if facts["ClientProcessId"] != os.getpid():
+        deny()
+    broker._check_pipe_acl(handle)
+    server = broker.read_process_identity(facts["ServerProcessId"])
+    client = broker.read_process_identity(facts["ClientProcessId"])
+    if (server.session_id != facts["ServerSessionId"] or client.session_id != facts["ClientSessionId"]
+            or client.session_id <= 0):
+        deny()
+    return dict(server=asdict(server), client=asdict(client), scm=broker._scm_process())
+
+
+def _desktop_context(handle):
+    # Reuse the protected G2/G3 pins, without reading the service-private ledgers.
+    from ai_commerce.wakehub.g3_service_host import _peer_context
+    return _peer_context(_observe_client_connection(handle))
+
+
+class DesktopStatusOutcome(Enum):
+    RESPONSE_WRITTEN = "RESPONSE_WRITTEN"  # Never an assertion of a service ACK.
+    UNKNOWN = "UNKNOWN_RECONCILE_ONLY"
+    DUPLICATE = "HOLD_DUPLICATE"
+    HOLD_DEPENDENCY = "HOLD_DEPENDENCY"
+
+
+class ConnectedDesktopStatusIO:
+    """Separately enrolled interactive peer; consumes an existing client HANDLE.
+
+    receive authenticates native endpoints/protected pins before decoding, then
+    verifies the broker signature before adopting its challenge. Only a private
+    transcript leaves for the external observer signer. respond independently
+    verifies that role's signature and the exact transcript before one write.
+    No caller selects pins, process facts, signer, path or callback. A successful
+    write retains the HANDLE for the enrolled owner to close via abandon after
+    the service outcome; closing immediately would race server authentication.
+    """
+    def __init__(self, *, clock=time.time, monotonic=time.monotonic):
+        self._clock, self._monotonic = clock, monotonic
+        self._pipe = None
+        self._lock = threading.Lock()
+        self._state = "NEW"
+
+    def _recheck(self):
+        self._deadline.check()
+        context = _desktop_context(self._pipe.handle)
+        if auth._digest(canonical(context[:2])) != self._pins_digest:
+            deny()
+        _, config, server, client, source, target = context
+        if ((server, client, source, target, config["generation"], config["journal_id"], config["logon_id"])
+                != (self._challenge.server, self._challenge.client, self._challenge.source,
+                    self._challenge.target, self._challenge.generation, self._challenge.journal_id,
+                    self._challenge.logon_id) or read_logon_id(client.pid) != self._challenge.logon_id):
+            deny()
+        now = self._clock()
+        self._challenge.fresh(now)
+        if now < self._last_time:
+            deny()
+        self._last_time = now
+        self._deadline.check()
+        return context
+
+    def receive(self, handle: int) -> bytes:
+        with self._lock:
+            if self._state != "NEW":
+                deny()
+            self._state = "CLOSED"
+            try:
+                self._deadline = _StatusDeadline(self._monotonic)
+                context = _desktop_context(handle)
+                anchor, config, server, client, source, target = context
+                self._pins_digest = auth._digest(canonical(context[:2]))
+                self._pipe = _StatusPipeIO(handle, _PipeSide.CLIENT, self._deadline)
+                frame = StatusFrame._parse(self._pipe.read_frame(), StatusRole.BROKER)
+                body = _verify(frame.signed_payload, config["broker_signers"]["path"],
+                    anchor["authority"]["verifier"]["path"], BROKER_IDENTITY, CHALLENGE_NAMESPACE)
+                self._challenge = challenge_from(body)
+                frame.check_binding(self._challenge)
+                self._last_time = self._clock()
+                self._deadline.constrain(self._challenge, self._last_time)
+                self._recheck()
+                self._transcript = collect_status_transcript(frame.signed_payload, expected=self._challenge,
+                    broker_signers=Path(config["broker_signers"]["path"]),
+                    verifier=Path(anchor["authority"]["verifier"]["path"]), source=source,
+                    generation=config["generation"], clock=self._clock)
+                self._recheck()
+                self._state = "OBSERVED"
+                return self._transcript
+            except Exception:
+                if self._pipe is not None:
+                    self._pipe.close()
+                deny()
+
+    def respond(self, signed_status: bytes) -> DesktopStatusOutcome:
+        if not self._lock.acquire(blocking=False):
+            return DesktopStatusOutcome.DUPLICATE
+        try:
+            if self._state != "OBSERVED":
+                return DesktopStatusOutcome.DUPLICATE
+            self._state = "CLOSED"
+            try:
+                anchor, *_ = self._recheck()
+                frame = StatusFrame(StatusRole.OBSERVER, signed_status)
+                frame.check_binding(self._challenge)
+                body = verify_status(signed_status, expected=self._challenge,
+                    anchor=anchor["authority"], now=self._clock())
+                if auth.signing_bytes(body) != self._transcript:
+                    deny()
+                auth._desktop_identity(self._challenge.target)
+                self._recheck()
+                self._pipe.write_frame(frame.to_bytes())
+                self._recheck()
+                self._state = "WRITTEN"
+                return DesktopStatusOutcome.RESPONSE_WRITTEN
+            except Exception:
+                return DesktopStatusOutcome.UNKNOWN
+            finally:
+                if self._state != "WRITTEN":
+                    self._pipe.close()
+        finally:
+            self._lock.release()
+
+    def abandon(self) -> DesktopStatusOutcome:
+        with self._lock:
+            pending = self._state in ("OBSERVED", "WRITTEN")
+            self._state = "CLOSED"
+            if self._pipe is not None:
+                self._pipe.close()
+            return DesktopStatusOutcome.UNKNOWN if pending else DesktopStatusOutcome.DUPLICATE
 
 
 def verify_status(raw: bytes, *, expected: Challenge, anchor: dict, now: float) -> dict:
