@@ -25,7 +25,9 @@ import zlib
 
 import pytest
 
+from ai_commerce.media.base import MediaValidationError
 from ai_commerce.production_runtime import attended_worker as worker
+from ai_commerce.production_runtime import receipt as receipt_owner
 from ai_commerce.production_runtime.contracts import canonical_bytes, draft_authorization, parse_contract, seal_contract
 from ai_commerce.production_runtime.journal import EffectTarget, Journal, JournalHold, Lease
 from ai_commerce.production_runtime.recovery import recover
@@ -86,7 +88,9 @@ def test_runtime_hash_streams_full_source_with_legacy_delimiter(source_tree, mon
 def test_runtime_hash_current_sources_match_legacy_digest(record_property):
     root = Path(worker.__file__).parent.parent
     files = sorted(root.rglob("*.py"))
-    assert (root / "remote" / "transport.py").stat().st_size > worker.MAX_BYTES
+    # The checked-in module sizes are not an invariant: transport.py may
+    # legitimately shrink below MAX_BYTES. Oversized streaming is exercised
+    # independently with explicit 128 KiB/8 MiB fixtures above.
     expected = legacy_source_digest(root)
     assert worker._runtime_hash() == expected
     record_property("shipped_python_modules", len(files))
@@ -384,8 +388,7 @@ record({"python_pid":os.getpid()})
 '''
 
 
-@pytest.fixture
-def case(tmp_path):
+def make_case(tmp_path):
     asset_dir, private, exports, hooks = (tmp_path / x for x in ("assets", "private", "export", "hooks"))
     for path in (asset_dir, private, exports, hooks):
         path.mkdir()
@@ -420,6 +423,11 @@ def case(tmp_path):
         "asset_root": str(asset_dir), "source_sha": worker.SOURCE_SHA, "human_attended": True}
     return {"root": tmp_path, "private": private, "exports": exports, "body": body,
             "args": args, "env": env, "audit": audit}
+
+
+@pytest.fixture
+def case(tmp_path):
+    return make_case(tmp_path)
 
 
 def arguments(case, command, extra=()):
@@ -851,8 +859,354 @@ def test_finite_literal_dependencies_and_no_dynamic_dispatch_or_authority_contex
             if isinstance(node, ast.Name):
                 assert node.id not in {"eval", "exec", "compile", "AuthorityReceipt", "VerificationContext"}
             if isinstance(node, ast.ImportFrom) and node.level:
-                assert node.module in {"e2e", "contracts", "journal", "recovery", "state_machine", "receipt", None}
+                if node.module in {"media", "creative_quality"}:
+                    assert name == "receipt.py" and node.level == 2
+                    allowed = {"files"} if node.module == "media" else {"audio_observation", "subtitle_clock_observation"}
+                    assert {alias.name for alias in node.names} <= allowed
+                else:
+                    assert node.module in {"e2e", "contracts", "journal", "recovery", "state_machine", "receipt", None}
         assert actual == permitted
     source = (ROOT / "src/ai_commerce/production_runtime/attended_worker.py").read_text(encoding="utf-8")
     assert source.count("service.run(") == 1
     assert "reserve_intent(" not in source and "BRAIN_ACCEPTED" not in source
+
+
+@pytest.fixture(scope="module")
+def b15_native_seed(tmp_path_factory):
+    """One genuine B0.3 subprocess/A06 render; each test gets a private copy."""
+    require_media()
+    seed = make_case(tmp_path_factory.mktemp("b15-native"))
+    cli(seed, "run")
+    cli(seed, "export")
+    assert render_count(seed) == 1
+    assert any(row.get("media_process") == "ffmpeg" and row.get("decode") for row in audit(seed))
+    return seed
+
+
+@pytest.fixture
+def b15_case(b15_native_seed, tmp_path, monkeypatch):
+    seed = b15_native_seed
+    root = tmp_path / "current"
+    shutil.copytree(seed["root"], root)
+    args = dict(seed["args"])
+    for key in ("directive_path", "asset_root"):
+        args[key] = str(root / Path(args[key]).relative_to(seed["root"]))
+    args["assets"] = tuple(ref + "=" + str(root / Path(path).relative_to(seed["root"]))
+                           for ref, path in (item.split("=", 1) for item in args["assets"]))
+    inputs = {**args, "private_dir": str(root / "private"),
+              "receipt_path": str(root / "export" / "ProductJourneyReceipt.v1.json"),
+              "evidence_path": str(root / "export" / "attended-evidence.json")}
+
+    def deny(*args, **kwargs):
+        pytest.fail("B1.5 attempted generation, network or journal mutation")
+    monkeypatch.setattr(worker.service, "run", deny)
+    monkeypatch.setattr(socket, "create_connection", deny)
+    monkeypatch.setattr(socket, "getaddrinfo", deny)
+    for name in ("connect", "connect_ex", "sendto"):
+        monkeypatch.setattr(socket.socket, name, deny)
+    for name in ("create", "acquire", "release", "append_event", "reserve_intent"):
+        monkeypatch.setattr(Journal, name, deny)
+    return root, inputs
+
+
+def b15_snapshot(root):
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+def b15_reseal(value, field="packet_sha256"):
+    body = {k: v for k, v in value.items() if k != field}
+    return canonical_bytes({**body, field: sha256(canonical_bytes(body)).hexdigest()})
+
+
+def b15_text(value):
+    if type(value) is dict:
+        return " ".join(b15_text(part) for pair in value.items() for part in pair)
+    if type(value) is list:
+        return " ".join(b15_text(part) for part in value)
+    return value if type(value) is str else ""
+
+
+def b15_observation(root, *, level="activity", silent=False, subtitles=True):
+    from ai_commerce.creative_quality import audio_observation as pcm
+    from ai_commerce.creative_quality import subtitle_clock_observation as srt
+
+    root.mkdir()
+    samples = (0,) * 8000 if silent else (0, 100, -200, 32767) * 2000
+    data = struct.pack("<" + "h" * len(samples), *samples)
+    raw = (b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVEfmt "
+           + struct.pack("<IHHIIHH", 16, 1, 1, 8000, 16000, 2, 16)
+           + b"data" + struct.pack("<I", len(data)) + data)
+    (root / "PRIVATE_PCM_REF.wav").write_bytes(raw)
+    digest = sha256(raw).hexdigest()
+    observation = {"root": root, "wav_ref": "PRIVATE_PCM_REF.wav", "wav_sha256": digest,
+                   "audio_packet": pcm.inspect_local_pcm_wav(root, "PRIVATE_PCM_REF.wav", digest).raw,
+                   "srt_ref": None, "srt_sha256": None}
+    if subtitles:
+        text = ("1\n00:00:00,000 --> 00:00:00,100\n" + PRIVATE_TEXT + "\n\n"
+                "2\n00:00:00,200 --> 00:00:00,400\nTiếng Việt\n").encode("utf-8")
+        (root / "PRIVATE_SRT_REF.srt").write_bytes(text)
+        observation.update(srt_ref="PRIVATE_SRT_REF.srt", srt_sha256=sha256(text).hexdigest())
+    kwargs = {k: v for k, v in observation.items() if k != "root"}
+    if level in {"clock", "activity"}:
+        observation["clock_packet"] = srt.inspect_local_srt_clock(root, **kwargs).raw
+    if level == "activity":
+        observation["activity_packet"] = srt.inspect_local_srt_pcm_activity(
+            root, **kwargs, clock_packet=observation["clock_packet"]).raw
+    return observation
+
+
+def test_b15_current_native_pair_is_canonical_stable_and_keeps_b03_bytes(b15_case, record_property):
+    root, inputs = b15_case
+    before = b15_snapshot(root)
+    raw = receipt_owner.inspect_wait_brain_handoff(**inputs)
+    value = json.loads(raw)
+    assert raw == canonical_bytes(value) == b15_reseal(value)
+    assert receipt_owner.recheck_wait_brain_handoff(raw, **inputs) == raw
+    assert receipt_owner.inspect_wait_brain_handoff(**inputs) == raw
+    assert b15_snapshot(root) == before
+    assert value["schema_version"] == "B15OfflineWaitBrainEvidence.v1"
+    assert value["state"] == "WAIT_BRAIN_DRAFT_ONLY"
+    assert value["observation"] is None and value["original"]["product_ref"] is None
+    assert value["original"]["provenance_class"] == "SYNTHETIC_FIXTURE"
+    assert value["audio_link"] == "AUDIO_LINK_UNVERIFIED"
+    assert value["authorization"] == draft_authorization()
+    assert value["brain_decision"] is None and value["brain_identity_authenticated"] is False
+    assert value["generation_performed"] is False
+    assert value["provider_network_calls"] == value["paid_generation_calls"] == value["publish_calls"] == 0
+    assert value["unproven"] == receipt_owner.B15_UNPROVEN
+    packet_raw = Path(inputs["evidence_path"]).read_bytes()
+    packet = parse_packet(packet_raw)
+    original = value["original"]
+    assert original["attended_evidence_file_sha256"] == sha256(packet_raw).hexdigest()
+    assert original["attended_evidence_sha256"] == packet["packet_sha256"]
+    assert original["receipt_file_sha256"] == packet["receipt_file_sha256"]
+    assert original["directive_file_sha256"] == sha256(Path(inputs["directive_path"]).read_bytes()).hexdigest()
+    assert original["runtime_sha256"] == worker._runtime_hash()
+    assert original["journal_checkpoint"] == packet["journal_checkpoint"]
+    assert original["local_artifact"] == packet["local_artifact"]
+    for secret in (str(root), PRIVATE_TEXT, "PRIVATE_PCM_REF", "PRIVATE_SRT_REF"):
+        assert secret not in b15_text(value)
+    record_property("b15_packet_sha256", value["packet_sha256"])
+    record_property("a06_mp4_sha256", original["local_artifact"]["artifact_sha256"])
+    record_property("b03_receipts_unchanged", True)
+
+
+@pytest.mark.parametrize("level,silent,subtitles", [
+    ("pcm", False, False), ("clock", False, True), ("activity", False, True),
+    ("activity", True, False), ("activity", True, True),
+])
+def test_b15_optional_public_observers_measure_separate_sources_without_track_claim(
+        b15_case, level, silent, subtitles, record_property):
+    root, inputs = b15_case
+    observation = b15_observation(root / "optional", level=level, silent=silent, subtitles=subtitles)
+    before = b15_snapshot(root)
+    raw = receipt_owner.inspect_wait_brain_handoff(**inputs, observation=observation)
+    assert receipt_owner.recheck_wait_brain_handoff(raw, **inputs, observation=observation) == raw
+    value = json.loads(raw)
+    measured = value["observation"]
+    assert measured["pcm"]["observed"]["sample_count"] == 8000
+    assert measured["pcm"]["observed"]["all_samples_zero"] is silent
+    assert measured["subtitle_state"] == ("LOCAL_CLOCK_BOUNDS_ONLY" if subtitles else "NO_SUBTITLE_SUPPLIED")
+    if measured["subtitles"] is not None:
+        assert measured["subtitles"]["timing"]["cue_count"] == (2 if subtitles else 0)
+    else:
+        assert level == "pcm" and not subtitles
+    if level == "activity":
+        activity = measured["activity"]["measurement"]
+        assert activity["covered_frame_count"] == (2400 if subtitles else 0)
+        assert activity["uncovered_frame_count"] == (5600 if subtitles else 8000)
+        assert activity["pcm_state"] == ("MEASURED_SILENCE" if silent else "MEASURED_NONZERO_PCM_NOT_SPEECH")
+        if subtitles:
+            assert activity["windows"][0]["nonzero_sample_count"] == (0 if silent else 600)
+        else:
+            assert not activity["windows"]
+    else:
+        assert measured["activity"] is None
+    assert value["audio_link"] == "AUDIO_LINK_UNVERIFIED"
+    assert value["unproven"] == receipt_owner.B15_UNPROVEN
+    for secret in (str(root), PRIVATE_TEXT, "PRIVATE_PCM_REF", "PRIVATE_SRT_REF", "Tiếng Việt"):
+        assert secret not in b15_text(value)
+    assert b15_snapshot(root) == before
+    record_property("optional_b13_level", level)
+    record_property("embedded_audio_link", value["audio_link"])
+
+
+def test_b15_forged_b03_pair_with_matching_self_seals_cannot_replace_current_sources(b15_case):
+    _, inputs = b15_case
+    receipt = json.loads(Path(inputs["receipt_path"]).read_bytes())
+    receipt.pop("receipt_sha256")
+    receipt["provenance"]["actor_ref"] = "fixture:forged"
+    forged = seal_contract("ProductJourneyReceipt", receipt)
+    packet = parse_packet(Path(inputs["evidence_path"]).read_bytes())
+    packet.update(receipt_file_sha256=sha256(forged.raw).hexdigest(),
+                  receipt_sha256=forged.to_dict()["receipt_sha256"])
+    Path(inputs["receipt_path"]).write_bytes(forged.raw)
+    Path(inputs["evidence_path"]).write_bytes(b15_reseal(packet))
+    assert parse_packet(Path(inputs["evidence_path"]).read_bytes())["receipt_file_sha256"] == sha256(forged.raw).hexdigest()
+    with pytest.raises(ReceiptHold, match="^B15_CURRENT_SOURCE_HOLD$"):
+        receipt_owner.inspect_wait_brain_handoff(**inputs)
+
+
+@pytest.mark.parametrize("target", ["asset", "directive", "source", "intent", "checkpoint", "mp4", "receipt", "packet", "journal"])
+def test_b15_recheck_invalidates_changed_original_bytes(b15_case, monkeypatch, target):
+    root, inputs = b15_case
+    raw = receipt_owner.inspect_wait_brain_handoff(**inputs)
+    if target == "source":
+        monkeypatch.setattr(worker, "_runtime_hash", lambda: "0" * 64)
+    else:
+        path = {
+            "asset": Path(inputs["assets"][0].split("=", 1)[1]),
+            "directive": Path(inputs["directive_path"]),
+            "intent": root / "private" / "intent.json",
+            "checkpoint": sorted((root / "private").glob("checkpoint-*.json"))[-1],
+            "mp4": next((root / "private").glob("e01-*/video.mp4")),
+            "receipt": Path(inputs["receipt_path"]), "packet": Path(inputs["evidence_path"]),
+            "journal": root / "private" / "journal.sqlite",
+        }[target]
+        path.write_bytes(b"foreign journal" if target == "journal" else path.read_bytes() + b"\n")
+    with pytest.raises(ReceiptHold, match="^B15_CURRENT_SOURCE_HOLD$") as held:
+        receipt_owner.recheck_wait_brain_handoff(raw, **inputs)
+    assert str(root) not in str(held.value)
+
+
+@pytest.mark.parametrize("field", ["runtime_sha256", "directive_file_sha256", "artifact_sha256", "generation"])
+def test_b15_self_resealed_attended_evidence_must_match_native_checkpoint_and_output(b15_case, field):
+    _, inputs = b15_case
+    path = Path(inputs["evidence_path"])
+    value = parse_packet(path.read_bytes())
+    if field == "artifact_sha256":
+        value["local_artifact"][field] = "0" * 64
+    elif field == "generation":
+        value["journal_checkpoint"][field] += 1
+    else:
+        value[field] = "0" * 64
+    path.write_bytes(b15_reseal(value))
+    parse_packet(path.read_bytes())  # Digest validity alone is deliberately insufficient.
+    with pytest.raises(ReceiptHold, match="^B15_CURRENT_SOURCE_HOLD$"):
+        receipt_owner.inspect_wait_brain_handoff(**inputs)
+
+
+@pytest.mark.parametrize("target", ["wav", "srt", "audio_packet", "clock_packet", "activity_packet", "fake-consent", "embedded-claim"])
+def test_b15_optional_stale_or_self_resealed_measurements_hold(b15_case, target):
+    root, inputs = b15_case
+    observation = b15_observation(root / "optional")
+    raw = receipt_owner.inspect_wait_brain_handoff(**inputs, observation=observation)
+    if target in {"wav", "srt"}:
+        path = observation["root"] / observation["wav_ref" if target == "wav" else "srt_ref"]
+        path.write_bytes(path.read_bytes() + b"x")
+    elif target == "embedded-claim":
+        observation["embedded_audio_verified"] = True
+    else:
+        key = "audio_packet" if target == "fake-consent" else target
+        value = json.loads(observation[key])
+        if target == "audio_packet":
+            value["observed"]["peak_absolute_pcm"] -= 1
+        elif target == "clock_packet":
+            value["timing"]["cues"][0]["text_sha256"] = "0" * 64
+        elif target == "activity_packet":
+            value["measurement"]["windows"][0]["sum_squared_pcm"] += 1
+        else:
+            value["unobserved"]["voice_consent"] = "GRANTED"
+        observation[key] = b15_reseal(value, "record_sha256")
+    with pytest.raises(ReceiptHold, match="^B15_CURRENT_SOURCE_HOLD$"):
+        receipt_owner.recheck_wait_brain_handoff(raw, **inputs, observation=observation)
+
+
+@pytest.mark.parametrize("caption", [
+    b"1\n00:00:00,900 --> 00:00:01,001\nOutside measured PCM\n",
+    b"1\n00:00:00,000 --> 00:00:00,200\nA\n\n2\n00:00:00,100 --> 00:00:00,300\nB\n",
+    b"foreign non-SRT",
+])
+def test_b15_native_srt_rejects_out_of_range_overlap_and_foreign_bytes(b15_case, caption):
+    root, inputs = b15_case
+    observation = b15_observation(root / "optional", level="pcm")
+    (observation["root"] / observation["srt_ref"]).write_bytes(caption)
+    observation["srt_sha256"] = sha256(caption).hexdigest()
+    with pytest.raises(ReceiptHold, match="^B15_CURRENT_SOURCE_HOLD$"):
+        receipt_owner.inspect_wait_brain_handoff(**inputs, observation=observation)
+
+
+@pytest.mark.parametrize("change", ["audio-link", "grant", "rights", "approve", "generation", "spend", "private-path", "extra"])
+def test_b15_self_resealed_handoff_never_grants_authority_or_claims_track_equivalence(b15_case, change):
+    root, inputs = b15_case
+    raw = receipt_owner.inspect_wait_brain_handoff(**inputs)
+    value = json.loads(raw)
+    if change == "audio-link":
+        value["audio_link"] = "EMBEDDED_AUDIO_VERIFIED"
+    elif change in {"grant", "rights"}:
+        value["unproven"]["release_authority" if change == "grant" else "licensing"] = "GRANTED"
+    elif change == "approve":
+        value["brain_decision"] = {"decision": "APPROVE"}
+    elif change == "generation":
+        value["generation_performed"] = True
+    elif change == "spend":
+        value["paid_generation_calls"] = 1
+    elif change == "private-path":
+        value["original"]["product_ref"] = str(root)
+    else:
+        value["extra"] = True
+    with pytest.raises(ReceiptHold, match="^B15_CURRENT_REPLAY_REQUIRED$"):
+        receipt_owner.recheck_wait_brain_handoff(b15_reseal(value), **inputs)
+
+
+@pytest.mark.parametrize("raw", [b"", b"[]", b'{"a":1,"a":1}', b"{" * 2000,
+                                    b"x" * (receipt_owner.B15_MAX_BYTES + 1)],
+                         ids=["empty", "array", "duplicate-key", "deep-json", "oversized-bytes"])
+def test_b15_malformed_or_oversized_packet_is_bounded_before_source_access(raw, monkeypatch):
+    monkeypatch.setattr(receipt_owner, "inspect_wait_brain_handoff", lambda **kw: pytest.fail("invalid packet reached sources"))
+    with pytest.raises(ReceiptHold, match="^B15_PACKET_INVALID$"):
+        receipt_owner.recheck_wait_brain_handoff(raw)
+
+
+@pytest.mark.parametrize("kind", ["hardlink", "reparse", "alias", "private-error", "oversized"])
+def test_b15_unsafe_original_paths_and_errors_hold_without_private_path_leak(b15_case, monkeypatch, kind):
+    root, inputs = b15_case
+    path = Path(inputs["receipt_path"])
+    if kind == "hardlink":
+        os.link(path, root / "hardlink.json")
+    elif kind == "reparse":
+        original = Path.lstat
+        class ReparseStat:
+            st_file_attributes = 0x400
+            def __init__(self, info):
+                self.info = info
+            def __getattr__(self, name):
+                return getattr(self.info, name)
+        monkeypatch.setattr(Path, "lstat", lambda p, **kw:
+                            ReparseStat(original(p, **kw)) if p == path else original(p, **kw))
+    elif kind == "alias":
+        inputs["receipt_path"] = str(path.parent) + "/./" + path.name
+    elif kind == "private-error":
+        def denied(*args, **kwargs):
+            raise PermissionError(str(root) + PRIVATE_TEXT)
+        monkeypatch.setattr(receipt_owner, "_b15_file", denied)
+    else:
+        path.write_bytes(b"x" * (worker.MAX_BYTES + 1))
+    with pytest.raises(ReceiptHold, match="^B15_CURRENT_SOURCE_HOLD$") as held:
+        receipt_owner.inspect_wait_brain_handoff(**inputs)
+    assert str(root) not in str(held.value) and PRIVATE_TEXT not in str(held.value)
+    assert held.value.__suppress_context__
+
+
+def test_b15_reopens_sources_after_optional_observation(b15_case, monkeypatch):
+    _, inputs = b15_case
+    original = receipt_owner._b15_observation
+    def raced(supplied):
+        measured = original(supplied)
+        path = Path(inputs["directive_path"])
+        path.write_bytes(path.read_bytes() + b"\n")
+        return measured
+    monkeypatch.setattr(receipt_owner, "_b15_observation", raced)
+    with pytest.raises(ReceiptHold, match="^B15_CURRENT_SOURCE_HOLD$"):
+        receipt_owner.inspect_wait_brain_handoff(**inputs)
+
+
+def test_b15_source_inventory_reopens_actual_bytes_and_denies_hardlinks(source_tree, tmp_path):
+    root, module = source_tree
+    first = receipt_owner._b15_tree(root, sources=True)
+    assert first == legacy_source_digest(root)
+    module.write_bytes(module.read_bytes() + b"# changed source\n")
+    assert receipt_owner._b15_tree(root, sources=True) != first
+    os.link(module, tmp_path / "source-alias.py")
+    with pytest.raises(MediaValidationError, match="unlinked regular file"):
+        receipt_owner._b15_tree(root, sources=True)
