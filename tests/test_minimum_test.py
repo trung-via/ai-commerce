@@ -2428,6 +2428,83 @@ def test_group_timeout_preserves_partial_logs_and_cannot_repair(mapped, monkeypa
     assert not list(mapped.evidence.rglob("*.evidence.json"))
 
 
+def test_mt01_determinate_group_failure_stops_before_slow_consumer_and_preserves_pending(mapped, monkeypatch):
+    (mapped.repo / "feature_b.py").write_text("VALUE = 1\n")
+    calls = []
+    def run(argv, **_kwargs):
+        calls.append(list(argv))
+        if "tests/test_b.py" in argv:
+            raise AssertionError("slow mandatory consumer must wait for the repair round")
+        return subprocess.CompletedProcess(argv, 1,
+            "FAILED tests/test_a.py::test_value\n1 failed in 0.01s\n", "")
+    monkeypatch.setattr(verification, "subprocess", SimpleNamespace(
+        run=run, CompletedProcess=subprocess.CompletedProcess,
+        TimeoutExpired=subprocess.TimeoutExpired))
+    result, selected, prior = _execute(mapped, acs=("AC-A", "AC-B"),
+                                      changed=("feature_a.py", "feature_b.py"))
+    assert result.returncode == 1 and not prior
+    assert len(calls) == 1 and "tests/test_a.py" in calls[0]
+    assert [group["group"] for group in selected["groups"]] == ["a", "b"]
+    assert selected["groups"][0]["result"] == "FAIL"
+    assert selected["groups"][1]["state"] == "UNPROVEN"
+    assert selected["groups"][1]["reason"] == "NOT_EXECUTED_AFTER_DETERMINATE_FAILURE"
+    assert selected["groups"][1].get("actual_exit_code") is None
+
+
+def test_mt01_pytest_nodeid_guard_preserves_oversized_payload_and_short_id(tmp_path):
+    repo = tmp_path / "repo"
+    tests = repo / "tests"
+    tests.mkdir(parents=True)
+    oversized = "x" * 65536
+    case = tests / "test_large_payload.py"
+    def source(*, short_id):
+        return ("import pytest\n"
+                + "@pytest.mark.parametrize('payload', [" + repr(oversized) + "]"
+                + (", ids=['payload-64k']" if short_id
+                   else ", ids=[" + repr(oversized) + "]") + ")\n"
+                + "def test_preserve_payload(payload):\n"
+                + "    assert len(payload) == 65536\n")
+    case.write_text(source(short_id=False), encoding="utf-8")
+    argv = [sys.executable, "-m", "pytest", "tests/test_large_payload.py", "--collect-only", "-q"]
+    response, out, err, _junit, _issue = verification._run_pytest_with_junit(
+        argv, repo=repo, timeout=45)
+    assert response.returncode == 1
+    assert b"MT01_PYTEST_NODEID_TOO_LONG" in out + err
+    # Raw pytest collection output is intentionally NOT persisted by the
+    # trusted preflight; validate its redacted EF01 result below.
+    base = mt.file_hashes(repo)
+    groups = (mt.TestGroup("large", ("tests/test_large_payload.py",),
+                           ("MT01.large-id",), ("tests/test_large_payload.py",)),)
+    profiles = {"project-tests": [*FULL, "-n", "12"],
+                "mt01-large-tests": ["python", "-m", "pytest",
+                                     "tests/test_large_payload.py", "-q", "-n", "12"]}
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    refs = {}
+    def save(key, filename, content):
+        (evidence_root / filename).write_bytes(content)
+        refs[key] = filename
+    report, plan_data = verification.execute_plan(
+        repo=repo, output_dir=evidence_root, base_sha="a" * 40,
+        base_files=base, changed_paths=["tests/test_large_payload.py"],
+        required_acs=("MT01.large-id",),
+        fallback_argv=profiles["project-tests"], prior={}, save=save,
+        evidence_files=refs, deadline=time.monotonic() + 80,
+        timeout_seconds=65, registered_only=True,
+        registered_profiles=profiles, groups=groups)
+    assert report.returncode == 1
+    assert "MT01_PYTEST_NODEID_TOO_LONG" in report.stdout
+    assert "x" * 1000 not in report.stdout
+    assert plan_data["test_id_preflight"]["result"] == "REJECTED_TEST_DEFINITION"
+    assert plan_data["groups"][0]["result"] == "UNPROVEN"
+    assert b"x" * 1000 not in b"".join(p.read_bytes() for p in evidence_root.iterdir())
+    case.write_text(source(short_id=True), encoding="utf-8")
+    response, out, err, _junit, _issue = verification._run_pytest_with_junit(
+        [sys.executable, "-m", "pytest", "tests/test_large_payload.py", "-q"],
+        repo=repo, timeout=45)
+    assert response.returncode == 0, (out + err)[-1200:]
+    assert b"1 passed" in out and b"MT01_PYTEST_NODEID_TOO_LONG" not in out + err
+
 @pytest.mark.parametrize("expression", ["__import__(name)", "builtins.__import__(name)",
     "importlib.import_module(name)", "load(name)"])
 def test_dynamic_import_aliases_never_establish_narrow_coverage(mapped, expression):
