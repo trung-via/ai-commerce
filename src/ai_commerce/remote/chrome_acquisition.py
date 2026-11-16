@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import time
+from typing import Literal
 from urllib.parse import urlsplit
 from urllib.request import Request, ProxyHandler, HTTPRedirectHandler, build_opener
 
@@ -569,27 +570,58 @@ def _enrollment_operator() -> tuple[Path, int, str]:
     return _native_local_app_data(), session, sid
 
 
-def _enrollment_location(local: Path, checkout: Path) -> Path:
-    """One fixed future destination; refuse every recognized old config as well."""
+# HostOps may reuse this exact finite registry in a separately scoped change.
+# Canonical enrollment takes precedence for diagnostics only: any second entry
+# still HOLDs. Never recursively discover, migrate or trust a legacy launcher.
+_CONFIG_9444_RELATIVE_PATHS = (
+    "Chrome-Acquisition/config.json",
+    "D5-Isolated-9444-Trial/config.json",
+    "WakeHub/config.json",
+    "WakeHub-9444/config.json",
+    "chrome.json",
+    "chrome-acquisition.json",
+)
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class _Config9444Registry:
+    canonical: Path
+    present: tuple[Path, ...]
+
+    @property
+    def selected(self) -> Path | None:
+        return self.present[0] if self.present else None
+
+
+def _config_9444_registry(local: Path, checkout: Path) -> _Config9444Registry:
+    """Bounded read-only path recognition, including invalid files/reservations."""
     if (not local.is_absolute() or not local.is_dir() or not checkout.is_absolute()
             or not checkout.is_dir() or not _no_links(local) or not _no_links(checkout)):
         raise _EnrollmentHold("CONFIG_PATH_INVALID")
     root = local / "AI-Commerce"
-    candidates = (root / "Chrome-Acquisition" / "config.json",
-                  root / "chrome.json", root / "chrome-acquisition.json")
+    candidates = tuple(root / name for name in _CONFIG_9444_RELATIVE_PATHS)
     if not all(_no_links(path) for path in candidates):
         raise _EnrollmentHold("ENROLLMENT_PATH_UNSAFE")
-    if not root.is_dir():
-        raise _EnrollmentHold("ENROLLMENT_PRIVATE_ROOT_UNAVAILABLE")
-    if _inside(candidates[0].resolve(), checkout.resolve(strict=True)):
+    if any(_inside(path.resolve(), checkout.resolve(strict=True)) for path in candidates):
         raise _EnrollmentHold("CONFIG_IN_REPOSITORY")
+    present = []
     for path in candidates:
         try:
             path.lstat()  # Includes directories and dangling links; never overwrite.
         except FileNotFoundError:
             continue
+        present.append(path)
+    return _Config9444Registry(candidates[0], tuple(present))
+
+
+def _enrollment_location(local: Path, checkout: Path) -> Path:
+    """One fixed future destination; refuse all six recognized existing configs."""
+    registry = _config_9444_registry(local, checkout)
+    if not (local / "AI-Commerce").is_dir():
+        raise _EnrollmentHold("ENROLLMENT_PRIVATE_ROOT_UNAVAILABLE")
+    if registry.present:
         raise _EnrollmentHold("ENROLLMENT_CONFIG_EXISTS")
-    return candidates[0]
+    return registry.canonical
 
 
 def _existing_9444_candidate(inventory: dict, *, local: Path, checkout: Path,
@@ -1207,41 +1239,38 @@ def _logon_result(code: str) -> dict:
             "chat_identity_proven": False, "send_authorized": False}
 
 
-def _logon_environment(local: Path, checkout: Path, sid: str) -> ChromeEnvironment | None:
-    """Read only N2's fixed enrolled config; OFF never creates a candidate.
-
-    Old names, duplicate/partial enrollment, unsafe custody and links HOLD.
-    In particular, never rewrite N2's allow_launch=False to enable startup.
-    """
-    if (not local.is_absolute() or not local.is_dir() or not checkout.is_absolute()
-            or not checkout.is_dir() or not _no_links(local) or not _no_links(checkout)):
-        raise _EnrollmentHold("CONFIG_UNTRUSTED")
+def _read_9444_config(config: Path, local: Path, checkout: Path, sid: str) -> ChromeEnvironment:
+    """Validate existing private inputs without enrolling or changing launch policy."""
     root = local / "AI-Commerce"
-    directory = root / "Chrome-Acquisition"
-    config = directory / "config.json"
-    for path in (root, directory, config, root / "chrome.json", root / "chrome-acquisition.json"):
-        if not _no_links(path):
-            raise _EnrollmentHold("CONFIG_UNTRUSTED")
-    for path in (root / "chrome.json", root / "chrome-acquisition.json"):
-        try:
-            path.lstat()
-        except FileNotFoundError:
-            continue
-        raise _EnrollmentHold("CONFIG_UNTRUSTED")
-    try:
-        config.lstat()
-    except FileNotFoundError:
-        # An incomplete native reservation cannot be adopted or repaired here.
-        if directory.exists():
-            raise _EnrollmentHold("CONFIG_UNTRUSTED")
-        return None
     from .local_completion_handoff import _private_identity
-    if any(_private_identity(path) != sid for path in (root, directory, config)):
+    if any(not _no_links(path) or _private_identity(path) != sid
+           for path in (root, config.parent, config)):
         raise _EnrollmentHold("CONFIG_UNTRUSTED")
     env = load_environment(config, checkout, local_app_data=local)
     if env.port != 9444 or env.endpoint != "http://127.0.0.1:9444":
         raise _EnrollmentHold("CONFIG_UNTRUSTED")
     return env
+
+
+def _logon_environment(local: Path, checkout: Path, sid: str) -> ChromeEnvironment | None:
+    """Read only canonical enrollment using the shared six-name registry.
+
+    Legacy candidates require attended reconciliation. Keep the established
+    public CONFIG_UNTRUSTED advisory for them and duplicate/partial enrollment.
+    Never rewrite N2's allow_launch=False to enable startup.
+    """
+    registry = _config_9444_registry(local, checkout)
+    config = registry.canonical
+    if registry.present and registry.present != (config,):
+        raise _EnrollmentHold("CONFIG_UNTRUSTED")
+    try:
+        config.lstat()
+    except FileNotFoundError:
+        # An incomplete native reservation cannot be adopted or repaired here.
+        if config.parent.exists():
+            raise _EnrollmentHold("CONFIG_UNTRUSTED")
+        return None
+    return _read_9444_config(config, local, checkout, sid)
 
 
 def _logon_inventory(inventory: dict) -> tuple[list[dict], tuple]:
@@ -1373,6 +1402,222 @@ def assess_logon_9444(checkout: Path) -> dict:
     This policy never calls run(), attaches, creates config or mutates a profile.
     """
     return _logon_result(_assess_logon_9444_private(checkout).code)
+
+
+class _Lifecycle9444Hold(ValueError):
+    """Private lifecycle diagnostics, separate from the legacy probe/launch CLI."""
+
+
+_Lifecycle9444State = Literal[
+    "OFF_CLEAN_ENROLLED", "RUNNING_HEALTHY", "RUNNING_CDP_FAULT",
+    "FOREIGN_PORT_OWNER", "PROFILE_LOCK_OR_IDENTITY_UNPROVEN",
+    "CONFIG_NOT_ENROLLED", "LEGACY_CANDIDATE", "INVENTORY_UNAVAILABLE", "UNKNOWN_EFFECT",
+]
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class _Lifecycle9444Assessment:
+    """Private source-only evidence, always HOLD; never a native W1 capability.
+
+    Missing Windows owner/ACL/signature/lock evidence is a typed dependency.
+    Observations stay private and are discarded on drift. No public API or
+    fixed HostOps row schema is extended by this downstream integration seam.
+    """
+    state: _Lifecycle9444State
+    code: str
+    dependency: str | None = None
+    observation: tuple | None = None
+    status: Literal["HOLD"] = "HOLD"
+    native_adapter: Literal["BLOCKED_NOT_DEPLOYED"] = "BLOCKED_NOT_DEPLOYED"
+
+
+def _lifecycle_inventory(env: ChromeEnvironment, inventory: dict, *,
+                         session: int, sid: str) -> tuple[str, tuple]:
+    """Separate process presence from listener health; never infer OFF from HTTP."""
+    if (type(inventory) is not dict or set(inventory) != {"listeners", "processes"}
+            or any(type(inventory[k]) not in (list, dict) for k in inventory)):
+        raise _Lifecycle9444Hold("WINDOWS_PROBE_INVALID")
+    listeners, processes = _rows(inventory["listeners"]), _rows(inventory["processes"])
+    pids = [p.get("ProcessId") for p in processes]
+    if (len(processes) > 256 or any(type(pid) is not int or pid <= 0 for pid in pids)
+            or len(set(pids)) != len(pids) or len(listeners) > 1):
+        raise _Lifecycle9444Hold("BROWSER_OWNERSHIP_UNPROVEN")
+    for row in listeners:
+        if type(row.get("LocalPort")) is not int or row["LocalPort"] != 9444:
+            raise _Lifecycle9444Hold("WINDOWS_PROBE_INVALID")
+        if (row.get("LocalAddress") != "127.0.0.1"
+                or type(row.get("OwningProcess")) is not int or row["OwningProcess"] <= 0
+                or row["OwningProcess"] not in pids):
+            raise _Lifecycle9444Hold("FOREIGN_PORT_OWNER")
+    profile_processes, port_claimants, profile_children = [], [], False
+    for proc in processes:
+        command = proc.get("CommandLine")
+        owner_sid, created = proc.get("OwnerSid"), proc.get("CreationDate")
+        if (not isinstance(command, str) or not 1 <= len(command) <= 32768
+                or not isinstance(proc.get("ExecutablePath"), str)
+                or type(proc.get("SessionId")) is not int or proc["SessionId"] < 0
+                or not isinstance(owner_sid, str)
+                or re.fullmatch(r"S-1-(?:\d+-){1,14}\d+", owner_sid) is None
+                or not isinstance(created, str) or not 15 <= len(created) <= 80):
+            raise _Lifecycle9444Hold("PROCESS_IDENTITY_UNKNOWN")
+        try:
+            if _creation_ticks(created) <= 0:
+                raise ValueError
+            argv = _commandline_argv(command)
+            if (not isinstance(argv, list) or not 1 <= len(argv) <= 256
+                    or any(not isinstance(arg, str) or not arg for arg in argv)):
+                raise ValueError
+            for name in ("--user-data-dir", "--profile-directory", "--remote-debugging-address",
+                         "--remote-debugging-port", "--type"):
+                switches = [a for a in argv if a.lower() == name or a.lower().startswith(name + "=")]
+                if switches and (len(switches) != 1 or not switches[0].startswith(name + "=")
+                                 or not switches[0][len(name) + 1:]):
+                    raise ValueError
+            directory = _switch(argv, "--user-data-dir")
+            child = _switch(argv, "--type") is not None
+            # Chrome children may omit their inherited profile switch. They do
+            # not constitute a second browser, but cannot prove clean absence.
+            if directory is None and child:
+                same_profile = None
+            elif directory is None or not Path(directory).is_absolute():
+                raise ValueError
+            else:
+                same_profile = Path(directory).resolve(strict=True) == env.user_data_dir
+            port = _switch(argv, "--remote-debugging-port")
+            if port is not None and (re.fullmatch(r"[0-9]{1,5}", port) is None
+                                     or not 1 <= int(port) <= 65535):
+                raise ValueError
+        except Exception:
+            raise _Lifecycle9444Hold("PROCESS_IDENTITY_UNKNOWN") from None
+        if child:
+            profile_children |= same_profile is not False
+            continue
+        if same_profile:
+            profile_processes.append((proc, argv))
+        if port is not None and int(port) == 9444:
+            port_claimants.append(proc["ProcessId"])
+    identity = (tuple((r["LocalAddress"], r["LocalPort"], r["OwningProcess"]) for r in listeners),
+                tuple(tuple(p.get(k) for k in (
+                    "ProcessId", "ExecutablePath", "CommandLine", "SessionId", "OwnerSid", "CreationDate"))
+                    for p in sorted(processes, key=lambda p: p["ProcessId"])))
+    if not profile_processes:
+        if listeners:
+            raise _Lifecycle9444Hold("FOREIGN_PORT_OWNER")
+        if port_claimants or profile_children:
+            raise _Lifecycle9444Hold("BROWSER_OWNERSHIP_UNPROVEN")
+        return "ABSENT", identity
+    if len(profile_processes) != 1:
+        raise _Lifecycle9444Hold("BROWSER_OWNERSHIP_UNPROVEN")
+    proc, argv = profile_processes[0]
+    if (proc["OwnerSid"] != sid or proc["SessionId"] != session
+            or not _identity_matches(env, proc["ExecutablePath"], argv)
+            or sorted(argv[1:]) != sorted(env.command()[1:])
+            or port_claimants != [proc["ProcessId"]]):
+        raise _Lifecycle9444Hold("PROCESS_IDENTITY_UNKNOWN")
+    if listeners and listeners[0]["OwningProcess"] != proc["ProcessId"]:
+        raise _Lifecycle9444Hold("FOREIGN_PORT_OWNER")
+    return ("OWNED" if listeners else "NO_LISTENER"), identity
+
+
+def _lifecycle_9444_observation(checkout: Path) -> _Lifecycle9444Assessment:
+    try:
+        local, session, sid = _enrollment_operator()
+    except Exception:
+        return _Lifecycle9444Assessment("INVENTORY_UNAVAILABLE", "WAIT_INTERACTIVE_OWNER",
+                                       "WINDOWS_INTERACTIVE_INVENTORY_REQUIRED")
+    try:
+        registry = _config_9444_registry(local, checkout)
+        if len(registry.present) > 1:
+            return _Lifecycle9444Assessment("CONFIG_NOT_ENROLLED", "CONFIG_AMBIGUOUS",
+                                           "ATTENDED_CONFIG_RECONCILIATION_REQUIRED")
+        if registry.selected is None:
+            code = "CONFIG_UNTRUSTED" if registry.canonical.parent.exists() else "CONFIG_MISSING"
+            return _Lifecycle9444Assessment("CONFIG_NOT_ENROLLED", code,
+                                           "FIRST_SUPERVISED_ENROLLMENT_REQUIRED")
+        env = _read_9444_config(registry.selected, local, checkout, sid)
+        legacy = registry.selected != registry.canonical
+        if legacy and not env.allow_launch:
+            raise _EnrollmentHold("CONFIG_UNTRUSTED")
+    except Exception:
+        return _Lifecycle9444Assessment("CONFIG_NOT_ENROLLED", "CONFIG_UNTRUSTED",
+                                       "WINDOWS_CONFIG_CUSTODY_REQUIRED")
+    try:
+        _require_operator_control(env)
+        # Existing enrollment checks markers at the user-data root. Also refuse
+        # markers inside the selected profile; never read/delete/adopt a lock.
+        for name in _MARKERS:
+            try:
+                (env.user_data_dir / env.profile_directory / name).lstat()
+            except FileNotFoundError:
+                continue
+            raise _EnrollmentHold("ENROLLMENT_PROFILE_LOCK_UNPROVEN")
+        _check_enrollment_custody(env, local, sid)
+    except _EnrollmentHold as exc:
+        marker = str(exc) == "ENROLLMENT_PROFILE_LOCK_UNPROVEN"
+        return _Lifecycle9444Assessment("PROFILE_LOCK_OR_IDENTITY_UNPROVEN",
+            "PROFILE_LOCK_HOLD" if marker else "OPERATOR_OWNERSHIP_UNPROVEN",
+            "WINDOWS_PROFILE_LOCK_HOLDER_REQUIRED" if marker else "WINDOWS_CUSTODY_REQUIRED")
+    except Exception:
+        return _Lifecycle9444Assessment("PROFILE_LOCK_OR_IDENTITY_UNPROVEN", "IDENTITY_UNPROVEN",
+                                       "WINDOWS_OWNER_ACL_SIGNATURE_REQUIRED")
+    pinned = ((local, session, sid), registry, env)
+    if legacy:
+        # Even a valid signed, private prior config is not canonical enrollment.
+        return _Lifecycle9444Assessment("LEGACY_CANDIDATE", "ATTENDED_RECONCILIATION_REQUIRED",
+                                       "ATTENDED_LEGACY_RECONCILIATION_REQUIRED", pinned)
+    try:
+        inventory = _query_windows(9444)
+    except Exception:
+        return _Lifecycle9444Assessment("INVENTORY_UNAVAILABLE", "WINDOWS_PROBE_UNAVAILABLE",
+                                       "WINDOWS_PROCESS_PORT_INVENTORY_REQUIRED")
+    try:
+        state, identity = _lifecycle_inventory(env, inventory, session=session, sid=sid)
+    except (AcquisitionBlocked, _Lifecycle9444Hold) as exc:
+        if str(exc) == "FOREIGN_PORT_OWNER":
+            return _Lifecycle9444Assessment("FOREIGN_PORT_OWNER", "FOREIGN_PORT_OWNER",
+                                           "ATTENDED_PORT_RECONCILIATION_REQUIRED")
+        if str(exc) == "WINDOWS_PROBE_INVALID":
+            return _Lifecycle9444Assessment("INVENTORY_UNAVAILABLE", "WINDOWS_PROBE_INVALID",
+                                           "WINDOWS_PROCESS_PORT_INVENTORY_REQUIRED")
+        return _Lifecycle9444Assessment("PROFILE_LOCK_OR_IDENTITY_UNPROVEN", "PROCESS_IDENTITY_UNKNOWN",
+                                       "WINDOWS_PROCESS_IDENTITY_REQUIRED")
+    pinned += (identity,)
+    if state == "ABSENT":
+        return _Lifecycle9444Assessment("OFF_CLEAN_ENROLLED", "PROCESS_AND_LOCK_ABSENT",
+                                       observation=pinned)
+    if state == "NO_LISTENER":
+        return _Lifecycle9444Assessment("RUNNING_CDP_FAULT", "CDP_LISTENER_MISSING",
+                                       observation=pinned)
+    try:
+        _probe_cdp(env)  # Only after exact unique owned loopback/process proof.
+    except Exception:
+        return _Lifecycle9444Assessment("RUNNING_CDP_FAULT", "CDP_PROTOCOL_UNAVAILABLE",
+                                       observation=pinned)
+    return _Lifecycle9444Assessment("RUNNING_HEALTHY", "CDP_VERIFIED", observation=pinned)
+
+
+def _assess_lifecycle_9444(checkout: Path) -> _Lifecycle9444Assessment:
+    """Two bounded read-only observations, no launch/config write/attach/Send.
+
+    A no-listener HTTP result is never identity or OFF evidence. CI and callers
+    without trustworthy interactive Windows inventory HOLD. Future signed W1
+    integration must independently verify custody and grant/replay authority.
+    The existing public logon advisory and its consumers retain their schema.
+    """
+    observed = False
+    try:
+        before = _lifecycle_9444_observation(checkout)
+        if before.observation is None:
+            return before
+        observed = True
+        if _lifecycle_9444_observation(checkout) == before:
+            return before
+    except Exception:
+        if not observed:
+            return _Lifecycle9444Assessment("INVENTORY_UNAVAILABLE", "EVIDENCE_UNAVAILABLE",
+                                           "WINDOWS_EVIDENCE_REQUIRED")
+    return _Lifecycle9444Assessment("UNKNOWN_EFFECT", "OBSERVATION_CHANGED",
+                                   "ATTENDED_RECONCILIATION_REQUIRED")
 
 
 def _start_or_reuse_9444(checkout: Path, *, request_id: str, grant: object = None) -> dict:
