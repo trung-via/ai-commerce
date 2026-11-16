@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 
@@ -92,12 +93,17 @@ def test_release_digest_one_time_token_and_private_local_tasks():
 def test_dedicated_hostops_route_after_operator_reports_both_runners_online():
     ingress = INGRESS.read_text(encoding="utf-8")
     ef02 = EF02.read_text(encoding="utf-8")
-    assert "  hostops-personal:" in ingress
-    assert "group: personal-hostops-workspace" in ingress
-    assert "github.event.comment.body == format('APPROVE WRITE #{0}', github.event.issue.number)" in ingress
-    # HostOps must not compete for the EF02 runner label any more.
-    assert "runs-on: [self-hosted, Windows, ai-commerce-hostops]" in ingress
-    assert "runs-on: [self-hosted, Windows, ai-commerce-ef02]" not in ingress
+    # Match the *job* boundary. Other legitimate, independently authorized
+    # EF02 jobs may coexist in issue-ingress.yml on an EF02 runner.
+    hostops_match = re.search(
+        r"(?ms)^  hostops-personal:\n.*?(?=^  [A-Za-z][A-Za-z0-9_-]*:\n|\Z)", ingress
+    )
+    assert hostops_match is not None
+    hostops_job = hostops_match.group()
+    assert "group: personal-hostops-workspace" in hostops_job
+    assert "github.event.comment.body == format('APPROVE WRITE #{0}', github.event.issue.number)" in hostops_job
+    assert "runs-on: [self-hosted, Windows, ai-commerce-hostops]" in hostops_job
+    assert "runs-on: [self-hosted, Windows, ai-commerce-ef02]" not in hostops_job
     assert "  execute:" in ef02
     assert "runs-on: [self-hosted, Windows, ai-commerce-ef02]" in ef02
     assert "runs-on: [self-hosted, Windows, ai-commerce-hostops]" not in ef02
