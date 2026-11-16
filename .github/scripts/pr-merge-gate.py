@@ -544,6 +544,7 @@ def reviewed_coverage_for_changed_files(files: object, *, onboarded_groups=()):
     # The merge gate's main-tree owner map is independent of candidate plans.
     # Existing components inherit full reviewed owner/consumer obligations.
     groups = protected_owner_groups()
+    trusted_test_paths = {test for group in groups for test in group.tests}
     newly_owned = {}
     for admission in onboarded_groups:
         for consumer in admission.get("consumers", ()):
@@ -555,7 +556,13 @@ def reviewed_coverage_for_changed_files(files: object, *, onboarded_groups=()):
             for owner in owners:
                 required.update(owner.tests)
     for group in onboarded_groups:
-        for path in (*group["paths"], *group["tests"], *group["contracts"]):
+        # An additive source in an existing owner reuses its already-registered
+        # tests. Those test files may be MODIFIED by the same PR; only truly
+        # new tests and source/contract paths must have GitHub status ADDED.
+        # The onboarding oracle independently rejects replacing old owner tests.
+        required.update(group["tests"])
+        fresh_tests = (test for test in group["tests"] if test not in trusted_test_paths)
+        for path in (*group["paths"], *fresh_tests, *group["contracts"]):
             newly_owned.setdefault(path, set()).update(group["tests"])
     for path in changed:
         owning = [g for g in groups if path in
