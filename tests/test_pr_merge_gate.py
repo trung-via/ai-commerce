@@ -461,6 +461,32 @@ def test_brain_pass_gate_workflow_replaces_old_queue():
     assert "python .github/scripts/pr-merge-gate.py" in text
 
 
+def test_brain_pass_concurrency_is_isolated_per_exact_pr_head():
+    """Prevent GitHub's one-pending-run replacement from dropping other PRs.
+
+    The review wake and completed EF02 CI run must share the SAME head lane.
+    A different PR's CI must not replace the pending wake for this head.
+    This asserts the actual trusted workflow expression, not a mock runner.
+    """
+    workflow = (ROOT / ".github" / "workflows" /
+                "brain-pass-auto-merge.yml").read_text(encoding="utf-8")
+    groups = [line.strip() for line in workflow.splitlines()
+              if line.strip().startswith("group: ai-commerce-brain-pass-merge-")]
+    assert groups == [
+        "group: ai-commerce-brain-pass-merge-${{ github.repository }}-"
+        "${{ github.event.workflow_run.head_sha || "
+        "github.event.pull_request.head.sha || github.run_id }}"
+    ]
+    assert "  cancel-in-progress: false" in workflow.splitlines()
+    assert ("group: ai-commerce-brain-pass-merge-${{ github.repository }}"
+            not in [line.strip() for line in workflow.splitlines()])
+    # Other event families and the protected review/CI proof gate are intact.
+    assert "  pull_request_review:" in workflow
+    assert "  workflow_run:" in workflow
+    assert "ref: main" in workflow
+    assert "python .github/scripts/pr-merge-gate.py" in workflow
+
+
 def test_brain_pass_exact_identity_and_revision(gate):
     g = FakeGitHub(gate, ci="completed")
     event = _approval_event(gate)
@@ -1324,4 +1350,26 @@ def test_710_g3_no_model_workflow_has_exact_protected_merge_review(gate):
         [{"filename": ".github/workflows/ef02-headless-unsafe.yml",
           "status": "added"}]) is None
 
+
+
+def test_mcp_gateway_one_time_preflight_protected_control_is_explicit(gate):
+    """Trusted main must know the new owner-only control before its source PR."""
+    path = ".github/workflows/mcp-gateway-bootstrap-preflight-once.yml"
+    required = {
+        "tests/test_hostops_personal.py",
+        "tests/test_mt01_v21.py",
+        "tests/test_pr_merge_gate.py",
+    }
+    assert set(gate.REVIEWED_CONTROL_TESTS[path]) == required
+    reviewed = gate.reviewed_coverage_for_changed_files(
+        [{"filename": path, "status": "added"}]
+    )
+    assert reviewed is not None
+    changed, witness = reviewed
+    assert changed == (path,)
+    assert required <= set(witness)
+    assert gate.reviewed_coverage_for_changed_files(
+        [{"filename": ".github/workflows/mcp-gateway-arbitrary-shell.yml",
+          "status": "added"}]
+    ) is None
 

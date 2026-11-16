@@ -7,11 +7,14 @@ reconciliation, including when an earlier installer ACK was lost.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from enum import Enum
 import hashlib
+import ntpath
 import re
 
 from ai_commerce.wakehub import native_broker as broker
 from ai_commerce.wakehub import private_operator as op
+from ai_commerce.wakehub.native_inventory import ProcessIdentity
 from ai_commerce.wakehub.native_journal import canonical, deny, OS_TRUSTED_SIDS
 
 
@@ -21,11 +24,56 @@ G3_ANCHOR = r"SOFTWARE\AI-Commerce\WakeHubG3"
 SERVICE_IMAGE = r"C:\Program Files\AI-Commerce\WakeHubG3\WakeHubBroker.exe"
 PRIVATE_ROOT = r"C:\ProgramData\AI-Commerce\WakeHubG3\Broker"
 OBSERVER_ROOT = r"C:\ProgramData\AI-Commerce\WakeHubG3\Observer"
+STATUS_FRAME_BODY_LIMIT = 65536
+STATUS_TRANSPORT_MISSING_OWNERS = (
+    "INSTALLED_SCM_OWNED_FIXED_PIPE_SERVER",
+    "ENROLLED_INTERACTIVE_PEER_AND_CLIENT_HANDLE_AUTHENTICATION",
+    "SEPARATE_PROTECTED_BROKER_AND_OBSERVER_SIGNING_HANDOFFS",
+    "ATTENDED_NATIVE_INSTALLATION_AND_PROTECTED_READBACK",
+)
 NOT_ENROLLED = (
     "SOURCE_ONLY", "NATIVE_SERVICE_NOT_INSTALLED", "SIGNER_NOT_ENROLLED",
     "DESKTOP_OBSERVER_NOT_ENROLLED", "CDP_9444_NOT_STARTED",
     "LOGON_TASK_NOT_INSTALLED", "WAKE_NOT_SENT",
 )
+
+
+def status_transport_contract() -> Resource:
+    """Missing native owner's exact private contract, never an installer input.
+
+    Source adapters consume existing, independently authenticated server/client
+    HANDLEs. They require overlapped message mode, one message per direction,
+    and a monotonic budget that never exceeds the five-second challenge. No I/O
+    callbacks or caller-reported readiness are authority. Unfinished cancellation
+    retains kernel-owned memory and blocks further adapters for reconciliation.
+    The installed owner supplies sole HANDLE custody and separate signing roles;
+    it must never reconnect/retry or create/reset either existing G2 ledger.
+    """
+    return Resource("status_transport", canonical(dict(
+        service=broker.SERVICE, pipe=broker.PIPE, schema="WakeHubG3StatusFrame.v1",
+        operation="STATUS", framing="UINT32_BIG_ENDIAN_CANONICAL_JSON_EXACT_SINGLE_FRAME",
+        body_limit=STATUS_FRAME_BODY_LIMIT, deadline="EXISTING_FIVE_SECOND_G3_CHALLENGE",
+        io="OVERLAPPED_MESSAGE_MODE_MONOTONIC_DEADLINE_SINGLE_READ_SINGLE_WRITE",
+        cancellation="CANCEL_IO_EX_NO_RETRY_RETAIN_UNTIL_COMPLETED",
+        handle_custody="SOLE_OWNERSHIP_TRANSFER_NO_CONCURRENT_HANDLER_OR_HANDLE_READOPTION",
+        server_identity="EXISTING_G2_KERNEL_HANDLE_SCM_PRIMARY_TOKEN_IMAGE_AND_PROTECTED_ACL",
+        client_identity="INDEPENDENT_CLIENT_HANDLE_CHECK_AGAINST_PROTECTED_ENROLLMENT",
+        roles=("BROKER_CHALLENGE_ONLY", "INDEPENDENT_OBSERVER_STATUS_ONLY"),
+        binding="EXACT_SOURCE_RELEASE_GENERATION_LOGON_PROCESS_AND_SIGNED_REQUEST_SHA256",
+        nonce_custody="EXISTING_G3_CHALLENGES_SQLITE_FIRST_WINS_UNKNOWN_BEFORE_OFFER",
+        request_custody="EXISTING_G2_REQUEST_UNKNOWN_BEFORE_OFFER_AND_EFFECT_JOURNAL_NO_NEW_LEDGER",
+        grant="EXISTING_G2_ISSUER_HUMAN_PAUSE_EXPIRY_AND_REVOCATION_RECHECK",
+        ambiguous_delivery="PERMANENT_UNKNOWN_RECONCILE_ONLY_NO_RETRY",
+        missing_owners=STATUS_TRANSPORT_MISSING_OWNERS, start="DENY", reuse="DENY")))
+
+
+def status_transport_preflight() -> dict:
+    """Fixed public source disposition; accepts no 'all green' attestations."""
+    return dict(schema_version="WakeHubG3StatusTransportPublic.v1",
+        status="SOURCE_READY_FOR_ENROLLMENT", native_transport="HOLD",
+        dependency="HOLD_DEPENDENCY",
+        authority="SOURCE_ONLY", missing_owners=STATUS_TRANSPORT_MISSING_OWNERS,
+        native_effect="NOT_ATTEMPTED", start="DENY", reuse="DENY")
 
 
 @dataclass(frozen=True)
@@ -155,4 +203,187 @@ def postflight(plan: AttendedPlan, pins: EnrollmentPins, readback: tuple[Readbac
     checked = attended_plan(pins, readback, previous_digest=plan.digest)
     if checked.state != "READBACK_MATCH_SOURCE_ONLY":
         return AttendedPlan(checked.digest, checked.resources, "HOLD_RECONCILE_ONLY", ())
+    return checked
+
+
+DESKTOP_IMAGE = r"C:\Program Files\AI-Commerce\WakeHubG3\WakeHubDesktopExecutor.exe"
+DESKTOP_MISSING_OWNERS = (
+    "PROTECTED_DESKTOP_SERVICE_AND_PRIVATE_PEER_TRANSPORT",
+    "ATTESTED_INTERACTIVE_PRIMARY_TOKEN_AND_IMAGE",
+    "SIGNED_ONE_SHOT_START_GRANT_HANDOFF",
+    "ATOMIC_G2_FIRST_WINS_LEASE_AND_LIVE_RECHECK",
+    "INDEPENDENT_DURABLE_ORIGINAL_OPERATION_OUTCOME",
+    "NATIVE_DEPLOYMENT_AND_PROTECTED_READBACK",
+)
+
+
+class DesktopBootstrapState(Enum):
+    PREREQUISITES_REQUIRED = "HOLD_PRE_ENROLLED_PREREQUISITES_REQUIRED"
+    RECONCILE_ONLY = "HOLD_RECONCILE_ONLY"
+    FIRST_BOOT = "FIRST_BOOT_ELIGIBLE_SOURCE_ONLY"
+    READBACK_MATCH = "RECONCILED_READBACK_MATCH_SOURCE_ONLY"
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class DesktopBootstrapPins:
+    """Expected private readback, NOT an attested peer or executable capability.
+
+    The dedicated Chrome/config must already be enrolled separately. A future
+    native owner must obtain these identities from protected custody and recheck
+    the ACTUAL primary token, logon LUID, desktop, image hashes, PID creation time
+    and every path component immediately before an effect. Offline equality
+    proves none of those native facts and cannot enroll that owner.
+    """
+    enrollment: EnrollmentPins
+    target: op.PrivateTarget
+    peer: ProcessIdentity
+    logon_id: str
+    executor_sha256: str
+    chrome_sha256: str
+    config_path: str
+    config_sha256: str
+    profile_directory: str
+    allow_launch: bool
+
+    def __post_init__(self):
+        if (type(self.enrollment) is not EnrollmentPins or type(self.target) is not op.PrivateTarget
+                or type(self.peer) is not ProcessIdentity
+                or self.target.user_sid != self.enrollment.operator_sid
+                or (self.peer.user_sid, self.peer.session_id) !=
+                   (self.target.user_sid, self.target.session_id)
+                or ntpath.normcase(self.peer.executable) != ntpath.normcase(DESKTOP_IMAGE)
+                or type(self.logon_id) is not str or not re.fullmatch(r"[0-9a-f]{16}", self.logon_id)
+                or self.logon_id == "0" * 16
+                or any(type(v) is not str or not re.fullmatch(r"[0-9a-f]{64}", v)
+                       for v in (self.executor_sha256, self.chrome_sha256, self.config_sha256))
+                or not op._path(self.config_path)
+                or not self.config_path.casefold().endswith(
+                    r"\ai-commerce\chrome-acquisition\config.json")
+                or type(self.profile_directory) is not str or not 0 < len(self.profile_directory) <= 128
+                or self.profile_directory in (".", "..")
+                or any(c in self.profile_directory for c in '\\/:*?"<>|')
+                or any(ord(c) < 32 for c in self.profile_directory)
+                or type(self.allow_launch) is not bool):
+            deny()
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class DesktopBootstrapPlan:
+    digest: str
+    resources: tuple[Resource, ...]
+    state: DesktopBootstrapState
+
+    @property
+    def source_ready(self):
+        return self.state in (DesktopBootstrapState.FIRST_BOOT, DesktopBootstrapState.READBACK_MATCH)
+
+    def to_json(self):
+        # Never serialize desired bytes/digests: they contain private identities,
+        # file locations and durable lane selectors. Missing owners are fixed.
+        if type(self.state) is not DesktopBootstrapState:
+            deny()
+        return canonical(dict(schema_version="WakeHubN3B2DesktopBootstrapPublic.v1",
+            status="SOURCE_READY_FOR_ENROLLMENT" if self.source_ready else "HOLD",
+            readback=self.state.value, first_boot_eligible=self.state is DesktopBootstrapState.FIRST_BOOT,
+            authority="SOURCE_ONLY", missing_owners=DESKTOP_MISSING_OWNERS,
+            native_effect="NOT_ATTEMPTED", start="DENY", reuse="DENY",
+            signer_enrollment="NOT_PROVEN_BY_SOURCE_OR_OFFLINE_TESTS")).decode("ascii")
+
+
+def desktop_bootstrap_resources(pins: DesktopBootstrapPins) -> tuple[Resource, ...]:
+    """Exact offline requirements; there is deliberately no apply/install route.
+
+    The STATUS-only G3 pipe remains STATUS-only. The missing effect transport
+    must authenticate both enrolled endpoints and a separate one-shot start
+    grant; neither this specification nor an existing challenge grants START.
+    """
+    if type(pins) is not DesktopBootstrapPins:
+        deny()
+    target = pins.target
+    specifications = (
+        ("chrome_config", dict(path=pins.config_path, sha256=pins.config_sha256,
+            executable=target.chrome_executable, image_sha256=pins.chrome_sha256,
+            user_data_dir=target.dedicated_profile, profile_directory=pins.profile_directory,
+            endpoint="http://127.0.0.1:9444", address="127.0.0.1", port=9444,
+            allow_launch=pins.allow_launch, enrollment="SEPARATE_PRE_ENROLLED_DEDICATED_CHROME",
+            owner="ADMIN", writers="ADMIN", protected=True, reparse_points=False, hardlinks=False,
+            profile_owner=target.user_sid, foreign_profile_access=False)),
+        ("desktop_identity", dict(peer=asdict(pins.peer), image_sha256=pins.executor_sha256,
+            logon_id=pins.logon_id, desktop=target.desktop, token="PRIMARY", elevated=False,
+            interactive=True, unlocked=True, connected=True, session_zero=False,
+            owner="ADMIN", writers="ADMIN", protected=True, reparse_points=False, hardlinks=False,
+            live_recheck="REQUIRED_BY_EXTERNAL_NATIVE_OWNER")),
+        ("effect_lane", dict(journal_id=pins.enrollment.journal_id, state="EMPTY",
+            target_sid=target.user_sid, profile=ntpath.normcase(target.dedicated_profile),
+            ledger="EXISTING_G2_DURABLE_FIRST_WINS", consumed_keys=(),
+            reservation="NOT_RESERVED", create_reset_migrate=False)),
+        ("desktop_transport", dict(service=broker.SERVICE, image=DESKTOP_IMAGE,
+            image_sha256=pins.executor_sha256, source=asdict(pins.enrollment.source),
+            generation=pins.enrollment.generation, status_pipe_effects="FORBIDDEN",
+            peer_authentication="PROTECTED_SERVICE_AND_EXACT_INTERACTIVE_PEER",
+            desktop_challenge="EXISTING_G3_SIGNED_NONCE_SOURCE_GENERATION_AND_LOGON_LUID",
+            nonce_custody="EXISTING_G3_DURABLE_CHALLENGE_FIRST_WINS", status_grants_allow_effects=False,
+            grant="G2_SIGNED_ISSUER_AND_INDEPENDENT_HUMAN_CONSENT",
+            start_handoff="SEPARATE_PROTECTED_SIGNED_ONE_SHOT_START_GRANT",
+            reuse_handoff="G2_REUSE_SCOPE_NO_START_GRANT_SUBSTITUTION",
+            freshness="RECHECK_REVOCATION_SOURCE_CONFIG_TOKEN_DESKTOP_HASH_AND_PID_CREATION",
+            start="COMPLETE_ABSENT_AND_EXCLUSIVE_UNCONSUMED_LANE_AND_ALLOW_LAUNCH_TRUE",
+            reuse="EXACT_OWNED_PROCESS_NEVER_SPAWN", lease="AUTHENTICATE_EXISTING_G2_PRIVATE_LEASE",
+            arbitrary_commands=False, shell=False, url_dispatch=False, profile_changes=False)),
+        ("desktop_outcome", dict(journal_id=pins.enrollment.journal_id,
+            receipt="INDEPENDENT_SIGNED_DURABLE_ORIGINAL_OPERATION_AND_LEASE",
+            before_dispatch="DURABLE_FIRST_WINS_RESERVATION",
+            reservation_or_spawn_error="UNKNOWN_EFFECT", timeout_or_lost_ack="UNKNOWN_EFFECT",
+            unknown="RECONCILE_ONLY_NO_SECOND_START", observed_no_effect="KEYS_REMAIN_CONSUMED",
+            presence_or_local_ack_is_outcome=False, retry=False)),
+    )
+    return (*desired_resources(pins.enrollment),
+            *(Resource(name, canonical(value)) for name, value in specifications))
+
+
+def desktop_bootstrap_plan(pins: DesktopBootstrapPins, readback: tuple[Readback, ...], *,
+                           previous_digest: str | None = None) -> DesktopBootstrapPlan:
+    """Deterministic source eligibility, never native authorization.
+
+    First boot requires exact PRESENT G3, Chrome, desktop identity and EMPTY G2
+    lane readbacks, with BOTH new transport/outcome resources proven ABSENT.
+    Partial/unknown state cannot bootstrap, replace custody, or reset a lane.
+    These supplied offline readbacks still need independent native collection.
+    """
+    resources = desktop_bootstrap_resources(pins)
+    digest = hashlib.sha256(canonical({r.name: r.value.decode("ascii") for r in resources})).hexdigest()
+    def result(state):
+        return DesktopBootstrapPlan(digest, resources, state)
+    hold = result(DesktopBootstrapState.RECONCILE_ONLY)
+    if previous_digest is not None and (type(previous_digest) is not str or previous_digest != digest):
+        return hold
+    if (type(readback) is not tuple or any(type(r) is not Readback for r in readback)
+            or len(readback) != len(resources) or any(type(r.name) is not str for r in readback)
+            or len({r.name for r in readback}) != len(readback)
+            or {r.name for r in readback} != {r.name for r in resources}):
+        return hold
+    if all(type(r.state) is str and r.state == "ABSENT" and r.value is None for r in readback):
+        return result(DesktopBootstrapState.PREREQUISITES_REQUIRED)
+    expected = {r.name: r.value for r in resources}
+    matching = {r.name for r in readback if type(r.state) is str and r.state == "PRESENT"
+                and type(r.value) is bytes and r.value == expected[r.name]}
+    if matching == set(expected):
+        return result(DesktopBootstrapState.READBACK_MATCH)
+    new = {"desktop_transport", "desktop_outcome"}
+    if (matching == set(expected) - new
+            and all(type(r.state) is str and r.state == "ABSENT" and r.value is None
+                    for r in readback if r.name in new)):
+        return result(DesktopBootstrapState.FIRST_BOOT)
+    return hold
+
+
+def desktop_bootstrap_postflight(plan: DesktopBootstrapPlan, pins: DesktopBootstrapPins,
+                                readback: tuple[Readback, ...]) -> DesktopBootstrapPlan:
+    """After any attempted provisioning, absence/timeout/lost ACK is NOT retryable."""
+    if type(plan) is not DesktopBootstrapPlan:
+        deny()
+    checked = desktop_bootstrap_plan(pins, readback, previous_digest=plan.digest)
+    if (plan.resources != checked.resources or not plan.source_ready
+            or checked.state is not DesktopBootstrapState.READBACK_MATCH):
+        return DesktopBootstrapPlan(checked.digest, checked.resources, DesktopBootstrapState.RECONCILE_ONLY)
     return checked

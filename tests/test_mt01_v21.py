@@ -2341,3 +2341,36 @@ def test_ef02_897_fixed_source_restore_ingress_is_owner_and_source_pinned():
     assert "replay_authorized" in py
     assert not any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
                    and n.func.id in {"eval", "exec"} for n in ast.walk(tree))
+
+
+def test_mcp_gateway_once_preflight_control_is_bounded_and_readonly():
+    """One-time cross-project bootstrap diagnostic cannot enroll, install, or mutate."""
+    from ai_commerce.engineering.impact_v21 import CONTROL_TESTS
+
+    path = ".github/workflows/mcp-gateway-bootstrap-preflight-once.yml"
+    assert set(CONTROL_TESTS[path]) == {
+        "tests/test_hostops_personal.py",
+        "tests/test_mt01_v21.py",
+        "tests/test_pr_merge_gate.py",
+    }
+    workflow = (Path(__file__).resolve().parents[1] / path).read_text(
+        encoding="utf-8"
+    )
+    assert "types: [opened]" in workflow
+    assert "github.repository == 'trung-via/ai-commerce'" in workflow
+    assert "github.actor == github.repository_owner" in workflow
+    assert "github.event.issue.user.login == github.repository_owner" in workflow
+    assert "[MCP GATEWAY BOOTSTRAP PREFLIGHT] once" in workflow
+    assert '"mode":"READ_ONLY"' in workflow
+    assert "runs-on: [self-hosted, Windows, X64, ai-commerce-hostops]" in workflow
+    assert "permissions:\n  contents: read" in workflow
+    assert "MCP_GATEWAY_BOOTSTRAP_EVENT_DENY" in workflow
+    assert "MCP_GATEWAY_BOOTSTRAP_PREFLIGHT_RECEIPT_V1" in workflow
+    assert "installed = $false" in workflow
+    for forbidden in (
+        "actions/checkout", "config.cmd", "--runasservice", "run.cmd",
+        "Register-ScheduledTask", "New-ScheduledTask", "Start-Service",
+        "New-Service", "Set-ItemProperty", "Remove-Item", "Start-Process",
+        "gh auth token", "Invoke-WebRequest", "workflow_dispatch",
+    ):
+        assert forbidden not in workflow

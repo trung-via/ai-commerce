@@ -62,7 +62,8 @@ def _digest(value: bytes) -> str:
     return sha256(value).hexdigest()
 
 
-def _measure_pcm16(raw: bytes) -> dict:
+def _parse_pcm16(raw: bytes) -> tuple[dict, memoryview]:
+    """One owner parser for V1 statistics and bounded cue sample inspection."""
     _need(len(raw) >= 44 and raw[:4] == b"RIFF" and raw[8:12] == b"WAVE",
           "AUDIO_WAVE_CONTAINER_INVALID")
     _need(struct.unpack_from("<I", raw, 4)[0] == len(raw) - 8,
@@ -79,7 +80,7 @@ def _measure_pcm16(raw: bytes) -> dict:
             fmt = struct.unpack_from("<HHIIHH", raw, offset)
         elif tag == b"data":
             _need(pcm is None, "AUDIO_WAVE_DUPLICATE_DATA")
-            pcm = raw[offset:end]
+            pcm = memoryview(raw)[offset:end]
         offset = end + (size & 1)
     _need(fmt is not None and pcm is not None, "AUDIO_WAVE_MISSING_PCM")
     format_id, channels, sample_rate, byte_rate, align, bits = fmt
@@ -112,7 +113,11 @@ def _measure_pcm16(raw: bytes) -> dict:
         "technical_comment": "ZERO_FRAME_PCM" if frames == 0 else
             ("SILENCE_IS_NOT_A_DEFECT" if not any_nonzero else
              "PCM_LEVELS_NOT_PERCEPTUAL_QUALITY"),
-    }
+    }, pcm
+
+
+def _measure_pcm16(raw: bytes) -> dict:
+    return _parse_pcm16(raw)[0]
 
 
 def _intent(acoustic_intent):
@@ -168,10 +173,9 @@ class PcmAudioObservation:
         return json.loads(self.raw)
 
 
-def inspect_local_pcm_wav(root: Path, asset_ref: str, expected_sha256: str,
-                          *, acoustic_intent: AcousticSceneDraft | None = None
-                          ) -> PcmAudioObservation:
-    """Read the exact local WAV twice within one safe regular-file handle.
+def _read_local_pcm_wav(root: Path, asset_ref: str, expected_sha256: str
+                        ) -> tuple[dict, memoryview]:
+    """Return measured facts and samples from the same SHA-checked bytes.
 
     A caller must pin SHA independently. A reread plus stat fence detects
     ordinary races; this is NOT an independently attested Windows share lock.
@@ -183,7 +187,6 @@ def inspect_local_pcm_wav(root: Path, asset_ref: str, expected_sha256: str,
         relative = a13._relative(asset_ref)
     except Exception:
         raise AudioObservationHold("AUDIO_ASSET_REF_INVALID") from None
-    intent = _intent(acoustic_intent)
     try:
         path = root.joinpath(*relative.parts)
         with media_files.open_regular(path) as source:
@@ -193,7 +196,7 @@ def inspect_local_pcm_wav(root: Path, asset_ref: str, expected_sha256: str,
             _need(0 < len(raw) <= MAX_BYTES, "AUDIO_SIZE_LIMIT")
             _need(_digest(raw) == expected_sha256,
                   "AUDIO_EXPECTED_DIGEST_MISMATCH")
-            measurements = _measure_pcm16(raw)
+            measurements, samples = _parse_pcm16(raw)
             source.seek(0)
             _need(source.read(MAX_BYTES + 1) == raw,
                   "AUDIO_SOURCE_CHANGED_DURING_READ")
@@ -201,6 +204,15 @@ def inspect_local_pcm_wav(root: Path, asset_ref: str, expected_sha256: str,
         raise
     except Exception:
         raise AudioObservationHold("AUDIO_SOURCE_UNAVAILABLE_OR_UNSAFE") from None
+    return measurements, samples
+
+
+def inspect_local_pcm_wav(root: Path, asset_ref: str, expected_sha256: str,
+                          *, acoustic_intent: AcousticSceneDraft | None = None
+                          ) -> PcmAudioObservation:
+    """Observe native bytes without changing the sealed B1.3-a V1 contract."""
+    intent = _intent(acoustic_intent)
+    measurements, _ = _read_local_pcm_wav(root, asset_ref, expected_sha256)
     body = {
         "schema_version": SCHEMA,
         "status": "LOCAL_TECHNICAL_OBSERVATION_ONLY",

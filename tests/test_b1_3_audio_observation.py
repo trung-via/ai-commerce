@@ -210,3 +210,56 @@ def test_self_resealed_pcm_measurement_requires_current_native_replay(tmp_path):
     parsed = obs.PcmAudioObservation(obs.canonical_bytes(forged))
     with pytest.raises(obs.AudioObservationHold, match="AUDIO_CURRENT_SOURCE_REPLAY_REQUIRED"):
         obs.recheck_local_pcm_wav(parsed.raw, tmp_path, path.name, digest)
+
+
+def test_v1_sealed_bytes_remain_identical_with_shared_sample_reader(tmp_path, record_property):
+    record, digest, _ = inspect(tmp_path, wav())
+    # Explicit pre-B1.3-c wire contract, independent of the current constants.
+    body = {
+        "schema_version": "B13PcmAudioObservation.v1",
+        "status": "LOCAL_TECHNICAL_OBSERVATION_ONLY",
+        "asset_ref": "sound.wav", "asset_sha256": digest,
+        "intent": {"binding": "NOT_SUPPLIED", "schema_version": None,
+                   "intent_sha256": None, "sound_mode": None,
+                   "comparison": "NO_INTENT_COMPARISON"},
+        "observed": {
+            "format": "RIFF_WAVE_PCM16_LE", "channels": 1,
+            "sample_rate_hz": 8000, "bits_per_sample": 16,
+            "frame_count": 3, "sample_count": 3,
+            "duration_fraction_seconds": "3/8000",
+            "peak_absolute_pcm": 32768, "clipped_sample_count": 2,
+            "all_samples_zero": False,
+            "technical_comment": "PCM_LEVELS_NOT_PERCEPTUAL_QUALITY",
+        },
+        "unobserved": {
+            "vietnamese_pronunciation": "NOT_MEASURED", "dialect": "NOT_MEASURED",
+            "transcript": "NOT_MEASURED", "lip_sync": "NOT_MEASURED",
+            "speaker_identity": "NOT_MEASURED", "voice_naturalness": "NOT_MEASURED",
+            "subtitle_timing": "NOT_MEASURED", "ffprobe_streams": "NOT_INSPECTED",
+            "voice_consent": "UNPROVEN", "copyright_rights": "UNPROVEN",
+            "provider_license": "UNPROVEN", "external_effect_authority": "NONE",
+        },
+        "authority": "NO_EXTERNAL_EFFECT_OR_CONSENT",
+    }
+    def encode(value):
+        return json.dumps(value, ensure_ascii=True, sort_keys=True,
+                          separators=(",", ":")).encode("ascii")
+    expected = encode({**body, "record_sha256": sha256(encode(body)).hexdigest()})
+    assert record.raw == expected
+    observed, samples = obs._read_local_pcm_wav(tmp_path, "sound.wav", digest)
+    assert observed == body["observed"]
+    assert samples.readonly
+    assert tuple(struct.iter_unpack("<h", samples)) == ((0,), (32767,), (-32768,))
+    assert obs.recheck_local_pcm_wav(expected, tmp_path, "sound.wav", digest).raw == expected
+    record_property("ac", "B1.3-a.pcm-current-byte-metrics")
+
+
+def test_shared_pcm_reader_checks_truncated_frames_and_bounded_io(tmp_path):
+    # RIFF and data lengths are self-consistent but a stereo frame is truncated.
+    with pytest.raises(obs.AudioObservationHold, match="AUDIO_WAVE_FRAME_TRUNCATED"):
+        inspect(tmp_path, wav((1,), channels=2))
+    # A valid header cannot turn an oversized source into trusted samples.
+    oversized = wav(()) + b"\0" * obs.MAX_BYTES
+    digest, _ = put(tmp_path, oversized)
+    with pytest.raises(obs.AudioObservationHold, match="AUDIO_SIZE_LIMIT"):
+        obs._read_local_pcm_wav(tmp_path, "sound.wav", digest)

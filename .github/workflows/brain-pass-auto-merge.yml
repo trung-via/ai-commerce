@@ -22,8 +22,15 @@ permissions:
   issues: read
   pull-requests: write
 
+# GitHub concurrency retains at most one pending run per group. A repo-wide
+# group silently drops older accepted PR wakes when unrelated PR CI finishes.
+# Use the exact event source HEAD as the merge lane: a Brain review and the
+# matching CI completion share one lane; distinct PR heads never evict each
+# other. A source-less event gets its own run ID (still fail-closed by gate).
+# The trusted merge script independently checks current main, PR HEAD/base,
+# canonical Brain PASS and exact Windows CI before any write.
 concurrency:
-  group: ai-commerce-brain-pass-merge-${{ github.repository }}
+  group: ai-commerce-brain-pass-merge-${{ github.repository }}-${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha || github.run_id }}
   cancel-in-progress: false
 
 jobs:

@@ -3,15 +3,22 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import os
+import platform
+import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from .transport import GitHubTransport, RemoteTransportError, CandidateIntegrityError
-from .validation import fingerprint, check_source, approved_verification_plan, approved_acceptance_plan, reject_retired_wp_identifiers, RemoteRequestError
+from .validation import (fingerprint, check_source, approved_verification_plan, approved_acceptance_plan,
+                         reject_retired_wp_identifiers, reject_executor_test_conflict,
+                         validate_batch, is_diagnostic_batch, DIAGNOSTIC_MODE, RemoteRequestError)
 from .reuse import load_approved_candidates, approve_reuse
 from .candidate_policy import (
     REVIEW_STATUS, VERIFIED_STATUSES, candidate_accepted, evidence_digest, validate_candidate_evidence,
@@ -23,7 +30,7 @@ from ai_commerce.engineering.runner import (
 from ai_commerce.engineering.git import git_argv, resolve_git_executable
 from ai_commerce.engineering.git_byte_consistency import (GitByteConsistencyError, checkout_diagnostics)
 from ai_commerce.engineering.minimum_test import Evidence, file_hashes
-from ai_commerce.engineering.source_safety import checked_path, protected_change, ordinary_scope_drift
+from ai_commerce.engineering.source_safety import checked_path, protected_change, ordinary_scope_drift, is_link
 
 
 # Human-authorized temporary full-regression budget until ATB-01 is accepted.
@@ -204,6 +211,512 @@ def _classify_failed_executor(report: dict, evidence: Path) -> str:
         return problem[0]
     return "EXECUTOR_FAILED"
 
+
+# A separate, finite operator. Neither Issue values nor SOURCE_BUILD profiles
+# participate in argv, environment controls, selectors or artifact paths.
+B03_DIAGNOSTIC_ROOT = Path(".local/ef02/windows-b03-serial-xdist-v1")
+B03_DIAGNOSTIC_NODEIDS = (
+    "tests/test_b0_3_attended_worker.py::test_post_run_tamper_or_rollback_holds_without_rerender[output-foreign]",
+    "tests/test_b0_3_attended_worker.py::test_post_run_tamper_or_rollback_holds_without_rerender[output-partial]",
+    "tests/test_b0_3_attended_worker.py::test_post_run_tamper_or_rollback_holds_without_rerender[journal-rollback]",
+)
+_B03_COMMON = ("-m", "pytest", *B03_DIAGNOSTIC_NODEIDS, "-vv", "-rA",
+               "-o", "addopts=", "-p", "no:cacheprovider", "--noconftest",
+               "-p", "ai_commerce.remote.worker")
+_B03_COMMANDS = (
+    (sys.executable, *_B03_COMMON,
+     "--junitxml=.local/ef02/windows-b03-serial-xdist-v1/serial.junit.xml"),
+    (sys.executable, *_B03_COMMON, "-n", "12",
+     "--junitxml=.local/ef02/windows-b03-serial-xdist-v1/xdist.junit.xml"),
+)
+_B03_TIMEOUT = 600
+_B03_MEMORY_POLICY = "NO_JOB_MEMORY_LIMIT"
+_B03_OUTPUT_LIMIT = 8 * 1024 ** 2
+
+
+def _diagnostic_root(checkout: Path) -> Path:
+    # This is a source-owned artifact location, not an allowed edit scope.
+    # Do not feed .local through (or weaken) source safe_path/checked_path.
+    path = checkout.resolve()
+    for part in B03_DIAGNOSTIC_ROOT.parts:
+        path /= part
+        if is_link(path):
+            raise RemoteRequestError("DIAGNOSTIC_ARTIFACT_LINK_DENIED")
+    return path
+
+
+def _diagnostic_source(checkout: Path, source_sha: str, git_executable=None) -> None:
+    """Read-only pin/clean gates before and after each child; never reconcile."""
+    check_source(checkout, source_sha, git_executable=git_executable)
+    head = subprocess.run(git_argv(checkout, "rev-parse", "HEAD", executable=git_executable),
+                          capture_output=True, text=True, check=False, timeout=30)
+    if head.returncode or head.stdout.strip() != source_sha:
+        raise RemoteRequestError("DIAGNOSTIC_STALE_SOURCE")
+    if not checkout_diagnostics(checkout, git_executable=git_executable)["clean"]:
+        raise RemoteRequestError("DIAGNOSTIC_DIRTY_SOURCE")
+    if Path(__file__).resolve() != (checkout / "src/ai_commerce/remote/worker.py").resolve():
+        raise RemoteRequestError("DIAGNOSTIC_UNPINNED_OPERATOR")
+
+
+def _diagnostic_environment(checkout: Path) -> dict[str, str]:
+    if os.name != "nt" or sys.platform != "win32" or platform.system() != "Windows":
+        raise RemoteRequestError("DIAGNOSTIC_WINDOWS_REQUIRED")
+    # The existing execute job sets both VIRTUAL_ENV and sys.executable. A
+    # machine-wide Python, even with pytest installed, is not that environment.
+    venv = os.environ.get("VIRTUAL_ENV", "")
+    expected = Path(venv) / "Scripts/python.exe"
+    if (not venv or sys.prefix == sys.base_prefix or Path(sys.prefix).resolve() != Path(venv).resolve()
+            or Path(sys.executable).resolve() != expected.resolve()):
+        raise RemoteRequestError("DIAGNOSTIC_ISOLATED_PYTHON_REQUIRED")
+    if any(not shutil.which(name) for name in ("ffmpeg", "ffprobe")):
+        raise RemoteRequestError("DIAGNOSTIC_MEDIA_BINARY_MISSING")
+    env = _safe_child_env(checkout)
+    for name in tuple(env):
+        if name.startswith(("PYTEST_", "AI_COMMERCE_B03_", "B03_")):
+            env.pop(name)
+    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    # xdist is explicit because plugin autoload and inherited pytest options
+    # are disabled. Git guard variables are preserved unchanged.
+    env["PYTEST_PLUGINS"] = "xdist.plugin"
+    env["PYTHONNOUSERSITE"] = "1"
+    return env
+
+
+def _windows_diagnostic_job():
+    """Contain the pytest/media tree in a kill-on-close Job without a memory cap."""
+    import ctypes
+    from ctypes import wintypes as wt
+
+    class BasicLimits(ctypes.Structure):
+        _fields_ = [("process_time", ctypes.c_longlong), ("job_time", ctypes.c_longlong),
+                    ("flags", wt.DWORD), ("working_min", ctypes.c_size_t),
+                    ("working_max", ctypes.c_size_t), ("active", wt.DWORD),
+                    ("affinity", ctypes.c_size_t), ("priority", wt.DWORD), ("scheduling", wt.DWORD)]
+
+    class IO(ctypes.Structure):
+        _fields_ = [(n, ctypes.c_ulonglong) for n in
+                    ("reads", "writes", "other", "read_bytes", "write_bytes", "other_bytes")]
+
+    class Limits(ctypes.Structure):
+        _fields_ = [("basic", BasicLimits), ("io", IO), ("process_memory", ctypes.c_size_t),
+                    ("job_memory", ctypes.c_size_t), ("peak_process", ctypes.c_size_t),
+                    ("peak_job", ctypes.c_size_t)]
+
+    class Accounting(ctypes.Structure):
+        _fields_ = [(n, ctypes.c_longlong) for n in ("user", "kernel", "period_user", "period_kernel")] + [
+            (n, wt.DWORD) for n in ("faults", "total", "active", "terminated")]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, wt.LPCWSTR]
+    kernel.CreateJobObjectW.restype = wt.HANDLE
+    kernel.SetInformationJobObject.argtypes = [wt.HANDLE, ctypes.c_int, ctypes.c_void_p, wt.DWORD]
+    kernel.AssignProcessToJobObject.argtypes = [wt.HANDLE, wt.HANDLE]
+    kernel.TerminateJobObject.argtypes = [wt.HANDLE, wt.UINT]
+    kernel.QueryInformationJobObject.argtypes = [wt.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                                wt.DWORD, ctypes.c_void_p]
+    kernel.CloseHandle.argtypes = [wt.HANDLE]
+    handle = kernel.CreateJobObjectW(None, None)
+    limits = Limits()
+    limits.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not handle:
+        raise RemoteRequestError("DIAGNOSTIC_JOB_UNAVAILABLE")
+    if not kernel.SetInformationJobObject(handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+        kernel.CloseHandle(handle)
+        raise RemoteRequestError("DIAGNOSTIC_JOB_CONFIGURATION_FAILED")
+
+    class Job:
+        def attach(self, child):
+            # Child starts suspended: no worker/media spawn before containment.
+            if not kernel.AssignProcessToJobObject(handle, wt.HANDLE(int(child._handle))):
+                child.kill()
+                child.wait(timeout=10)
+                raise RemoteRequestError("DIAGNOSTIC_JOB_ASSIGN_FAILED")
+            native = ctypes.WinDLL("ntdll")
+            native.NtResumeProcess.argtypes = [wt.HANDLE]
+            native.NtResumeProcess.restype = ctypes.c_long
+            if native.NtResumeProcess(wt.HANDLE(int(child._handle))) != 0:
+                self.stop()
+                raise RemoteRequestError("DIAGNOSTIC_CHILD_RESUME_FAILED")
+
+        def stop(self):
+            if not kernel.TerminateJobObject(handle, 1):
+                raise RemoteRequestError("DIAGNOSTIC_CHILD_TERMINATION_UNPROVEN")
+
+        def close(self):
+            try:
+                self.stop()
+                deadline = time.monotonic() + 10
+                while True:
+                    accounting = Accounting()
+                    if not kernel.QueryInformationJobObject(handle, 1, ctypes.byref(accounting),
+                                                             ctypes.sizeof(accounting), None):
+                        raise RemoteRequestError("DIAGNOSTIC_CHILD_TERMINATION_UNPROVEN")
+                    if accounting.active == 0:
+                        break
+                    if time.monotonic() >= deadline:
+                        raise RemoteRequestError("DIAGNOSTIC_CHILD_TERMINATION_UNPROVEN")
+                    time.sleep(0.1)
+            finally:
+                kernel.CloseHandle(handle)
+
+    return Job()
+
+
+def _run_diagnostic_child(argv: tuple[str, ...], *, checkout: Path, env: dict) -> tuple[int, bytes, str]:
+    job = _windows_diagnostic_job()
+    child = None
+    try:
+        # Raw output is bounded and ephemeral. Only an allowlisted projection
+        # is persisted; assertion tracebacks can contain private fixture paths.
+        with tempfile.TemporaryFile() as output:
+            child = subprocess.Popen(argv, cwd=checkout, env=env, stdout=output,
+                                     stderr=subprocess.STDOUT, creationflags=0x08000004)
+            job.attach(child)
+            deadline = time.monotonic() + _B03_TIMEOUT
+            problem = ""
+            while child.poll() is None:
+                if time.monotonic() >= deadline:
+                    problem = "DIAGNOSTIC_TIMEOUT"
+                elif os.fstat(output.fileno()).st_size > _B03_OUTPUT_LIMIT:
+                    problem = "DIAGNOSTIC_OUTPUT_LIMIT"
+                if problem:
+                    job.stop()
+                    break
+                time.sleep(0.1)
+            child.wait(timeout=10)
+            # Closing the Job kills residual children before the next phase.
+            output.seek(0)
+            raw = output.read(_B03_OUTPUT_LIMIT + 1)
+            if len(raw) > _B03_OUTPUT_LIMIT:
+                problem = "DIAGNOSTIC_OUTPUT_LIMIT"
+            return child.returncode, raw[:_B03_OUTPUT_LIMIT], problem
+    finally:
+        try:
+            job.close()
+        finally:
+            # An attach exception can leave the suspended child outside the Job.
+            if child is not None and child.poll() is None:
+                child.kill()
+                child.wait(timeout=10)
+
+
+def _diagnostic_json(path: Path) -> dict:
+    if is_link(path) or not path.is_file() or path.stat().st_size > 65536:
+        raise ValueError("receipt")
+    def unique(pairs):
+        obj = {}
+        for k, v in pairs:
+            if k in obj:
+                raise ValueError("duplicate")
+            obj[k] = v
+        return obj
+    return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique,
+                      parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite")))
+
+
+def _diagnostic_junit(raw: bytes) -> list[str]:
+    if not raw or len(raw) > 2 * 1024 ** 2 or b"<!" in raw:
+        raise ValueError("junit")
+    root = ET.fromstring(raw.decode("utf-8"))
+    suites = [root] if root.tag == "testsuite" else list(root)
+    if root.tag not in ("testsuite", "testsuites") or len(suites) != 1:
+        raise ValueError("suite")
+    suite = suites[0]
+    if (suite.tag != "testsuite" or suite.get("tests") != "3" or
+            any(suite.get(k) != "0" for k in ("failures", "errors", "skipped")) or
+            len(list(suite)) != 3):
+        raise ValueError("counts")
+    nodes = []
+    for case in suite:
+        if (case.tag != "testcase" or list(case) or
+                case.get("classname") != "tests.test_b0_3_attended_worker" or
+                not math.isfinite(float(case.attrib["time"])) or float(case.attrib["time"]) < 0):
+            raise ValueError("case")
+        nodes.append("tests/test_b0_3_attended_worker.py::" + case.attrib["name"])
+    if sorted(nodes) != sorted(B03_DIAGNOSTIC_NODEIDS):
+        raise ValueError("nodes")
+    return nodes
+
+
+def _diagnostic_proof(root: Path, phase: str, nonce: str, raw: bytes) -> dict:
+    """Cross-check JUnit against per-process collection and stage receipts.
+
+    Worker counts are observations of distinct processes, never the requested
+    -n argument or a printed marker alone. No JUnit-only success path exists.
+    """
+    import re
+    workers = ["serial"] if phase == "serial" else [f"gw{i}" for i in range(12)]
+    directory = root / phase
+    junit = root / (phase + ".junit.xml")
+    if (is_link(root) or is_link(directory) or is_link(junit)
+            or not junit.is_file() or junit.stat().st_size > 2 * 1024 ** 2):
+        raise ValueError("artifact link")
+    nodes = _diagnostic_junit(junit.read_bytes())
+    expected_files = {f"{w}.{kind}.json" for w in workers for kind in ("collection", "session")}
+    if phase == "xdist":
+        expected_files.add("controller.session.json")
+    expected_files.update(f"{w}.events.json" for w in workers if (directory / f"{w}.events.json").exists())
+    if {p.name for p in directory.iterdir()} != expected_files:
+        raise ValueError("receipt set")
+    pids, executions, collections, execution_workers = set(), {}, {}, {}
+    for worker in workers:
+        collection = _diagnostic_json(directory / f"{worker}.collection.json")
+        session = _diagnostic_json(directory / f"{worker}.session.json")
+        if (set(collection) != {"version", "nonce", "worker", "pid", "nodeids"} or
+                set(session) != {"version", "nonce", "worker", "pid", "workers_requested", "start", "end", "exitstatus"}):
+            raise ValueError("receipt shape")
+        for receipt in (collection, session):
+            if (type(receipt["version"]) is not int or receipt["version"] != 1
+                    or receipt["nonce"] != nonce or receipt["worker"] != worker):
+                raise ValueError("binding")
+        pid = collection["pid"]
+        if type(pid) is not int or pid <= 0 or pid in pids or session["pid"] != pid:
+            raise ValueError("pid")
+        pids.add(pid)
+        if (sorted(collection["nodeids"]) != sorted(nodes) or type(session["exitstatus"]) is not int
+                or session["exitstatus"] != 0 or
+                phase == "serial" and session["workers_requested"] != 0):
+            raise ValueError("collection")
+        if (not all(type(session[k]) in (int, float) and math.isfinite(session[k]) for k in ("start", "end"))
+                or not 0 < session["start"] <= session["end"]):
+            raise ValueError("clock")
+        collections[worker] = collection["nodeids"]
+        event_path = directory / f"{worker}.events.json"
+        events = _diagnostic_json(event_path) if event_path.exists() else {"events": []}
+        if set(events) != {"events"} or not isinstance(events["events"], list):
+            raise ValueError("event shape")
+        for event in events["events"]:
+            if set(event) != {"version", "nonce", "worker", "pid", "nodeid", "when", "outcome", "duration", "at"}:
+                raise ValueError("event shape")
+            node = event["nodeid"]
+            if (type(event["version"]) is not int or event["version"] != 1
+                    or event["nonce"] != nonce or event["worker"] != worker or event["pid"] != pid
+                    or node not in nodes or event["outcome"] != "passed"
+                    or event["when"] not in ("setup", "call", "teardown")
+                    or type(event["duration"]) not in (int, float)
+                    or not math.isfinite(event["duration"]) or event["duration"] < 0
+                    or type(event["at"]) not in (int, float)
+                    or not session["start"] <= event["at"] <= session["end"]):
+                raise ValueError("execution")
+            if node in execution_workers and execution_workers[node] != worker:
+                raise ValueError("duplicate worker")
+            execution_workers[node] = worker
+            executions.setdefault(node, []).append(event["when"])
+    if set(executions) != set(nodes) or any(sorted(v) != ["call", "setup", "teardown"] for v in executions.values()):
+        raise ValueError("stages")
+    if phase == "serial":
+        if re.search(rb"\d+ workers|\[gw\d+\]", raw) or not re.search(rb"collected 3 items\b", raw):
+            raise ValueError("serial workers")
+    else:
+        controller = _diagnostic_json(directory / "controller.session.json")
+        if (set(controller) != {"version", "nonce", "worker", "pid", "workers_requested", "start", "end", "exitstatus"}
+                or controller["nonce"] != nonce or controller["worker"] != "controller"
+                or type(controller["version"]) is not int or controller["version"] != 1
+                or type(controller["exitstatus"]) is not int or controller["exitstatus"] != 0
+                or type(controller["pid"]) is not int or controller["pid"] <= 0
+                or controller["pid"] in pids or controller["workers_requested"] != 12
+                or not all(type(controller[k]) in (int, float) and math.isfinite(controller[k]) for k in ("start", "end"))
+                or not 0 < controller["start"] <= controller["end"]
+                or re.findall(rb"created: (\d+)/(\d+) workers\b", raw) != [(b"12", b"12")]
+                or re.findall(rb"(\d+) workers \[(\d+) items\]", raw) != [(b"12", b"3")]):
+            raise ValueError("xdist workers")
+    return {"selected_nodeids": list(B03_DIAGNOSTIC_NODEIDS), "selected_count": 3,
+            "collected_count": len(nodes), "executed_count": len(executions),
+            "junit_nodeids": nodes, "collection_nodeids": collections,
+            "execution_nodeids": sorted(executions), "execution_workers": execution_workers,
+            "workers_observed": 0 if phase == "serial" else len(pids)}
+
+
+def _sanitized_diagnostic_output(raw: bytes) -> bytes:
+    import re
+    allowed = []
+    for line in raw.decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if re.fullmatch(r"(?:created: 12/12 workers|12 workers \[3 items\]|(?:collecting \.\.\. )?collected 3 items|=+ 3 passed in [0-9.]+s(?: \([0-9:]+\))? =+)", line):
+            allowed.append(line)
+    return ("\n".join(allowed) + "\n[OTHER_CHILD_OUTPUT_REDACTED]\n").encode("utf-8")
+
+
+def _diagnostic_artifacts(root: Path, phase: str) -> dict:
+    paths = [root / (phase + ".junit.xml"), root / (phase + ".output.log")]
+    paths.extend(sorted((root / phase).glob("*.json")))
+    artifacts = {}
+    for path in paths:
+        if is_link(path) or not path.is_file() or path.stat().st_size > 2 * 1024 ** 2:
+            raise ValueError("artifact")
+        relative = path.relative_to(root).as_posix()
+        artifacts[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return artifacts
+
+
+def _verify_diagnostic_receipt(root: Path, receipt: dict) -> bool:
+    try:
+        if set(receipt) != {"phase", "status", "error_code", "nonce", "started_at", "ended_at", "elapsed_seconds",
+                            "child_status", "child_exit_code", "memory_policy", "memory_limit_bytes",
+                            "workers_requested", "workers_observed",
+                            "source_sha", "request_fingerprint", "selected_nodeids", "selected_count", "collected_count",
+                            "executed_count", "junit_nodeids", "collection_nodeids", "execution_nodeids", "execution_workers", "artifacts"}:
+            return False
+        phase = receipt["phase"]
+        if (phase not in ("serial", "xdist") or receipt["status"] != "DIAGNOSTIC_COMPLETE"
+                or receipt["error_code"] is not None or receipt["child_status"] != "EXIT_ZERO"
+                or type(receipt["child_exit_code"]) is not int or receipt["child_exit_code"] != 0
+                or type(receipt["workers_requested"]) is not int
+                or receipt["workers_requested"] != (0 if phase == "serial" else 12)
+                or type(receipt["workers_observed"]) is not int
+                or not isinstance(receipt["nonce"], str) or len(receipt["nonce"]) != 64
+                or any(c not in "0123456789abcdef" for c in receipt["nonce"])
+                or receipt["memory_policy"] != _B03_MEMORY_POLICY or receipt["memory_limit_bytes"] is not None
+                or any(type(receipt[k]) is not int or receipt[k] != 3
+                       for k in ("selected_count", "collected_count", "executed_count"))
+                or any(not isinstance(receipt[k], str) or len(receipt[k]) != length
+                       or any(c not in "0123456789abcdef" for c in receipt[k])
+                       for k, length in (("source_sha", 40), ("request_fingerprint", 64)))
+                or not all(type(receipt[k]) in (int, float) and math.isfinite(receipt[k])
+                           for k in ("started_at", "ended_at", "elapsed_seconds"))
+                or not 0 < receipt["elapsed_seconds"] <= _B03_TIMEOUT + 30
+                or not 0 < receipt["started_at"] <= receipt["ended_at"]):
+            return False
+        proof = _diagnostic_proof(root, phase, receipt["nonce"], (root / (phase + ".output.log")).read_bytes())
+        return (all(receipt[k] == v for k, v in proof.items()) and
+                receipt["artifacts"] == _diagnostic_artifacts(root, phase))
+    except (KeyError, TypeError, ValueError, OSError, ET.ParseError):
+        return False
+
+
+def execute_diagnostic_batch(*, checkout: Path, batch: dict, issuer_login: str,
+                             owner_login: str, issue_number: int, git_executable=None) -> dict:
+    """Authenticated no-model route. Native proof exists only after real runs.
+
+    Offline fake-subprocess tests establish control logic only: Windows native
+    proof for this source change is NOT_YET_RUN.
+    """
+    checkout = checkout.resolve()
+    report = {"kind": "AI_COMMERCE_REMOTE_DIAGNOSTIC_RESULT", "version": 1,
+              "delivery": "DIAGNOSTIC_ONLY", "batch_id": batch["batch_id"], "source_sha": batch["source_sha"],
+              "diagnostic_mode": DIAGNOSTIC_MODE, "status": "DIAGNOSTIC_FAILED",
+              "memory_policy": _B03_MEMORY_POLICY, "memory_limit_bytes": None,
+              "executor_invoked": False, "native_proof": "NOT_YET_RUN", "cases": [],
+              "error_code": None, "succeeded": 0, "total": 2}
+    try:
+        validate_batch(batch, schema=checkout / "contracts/RemoteActionBatch.v1.schema.json",
+                       registry={}, issuer_login=issuer_login, owner_login=owner_login)
+        if not is_diagnostic_batch(batch) or type(issue_number) is not int or issue_number <= 0:
+            raise RemoteRequestError("DIAGNOSTIC_AUTHENTICATED_ISSUE_REQUIRED")
+        report.update(authorization="AUTHENTICATED_OWNER_HUMAN", github_issue_number=issue_number,
+                      request_fingerprint=fingerprint(batch))
+        env = _diagnostic_environment(checkout)
+        _diagnostic_source(checkout, batch["source_sha"], git_executable)
+        root = _diagnostic_root(checkout)
+        # No reuse of logs/receipts, including those left by an interrupted run.
+        root.mkdir(parents=True, exist_ok=False)
+        for phase, argv in zip(("serial", "xdist"), _B03_COMMANDS):
+            _diagnostic_source(checkout, batch["source_sha"], git_executable)
+            (root / phase).mkdir()
+            nonce = secrets.token_hex(32)
+            child_env = {**env, "AI_COMMERCE_B03_PHASE": phase, "AI_COMMERCE_B03_NONCE": nonce}
+            # Windows monotonic() can tick more coarsely than a fast synthetic
+            # child. A genuine sub-tick interval must not become an invented
+            # zero-duration receipt that fails the positive-time proof gate.
+            started, clock_start_ns = time.time(), time.perf_counter_ns()
+            case = {"phase": phase, "status": "DIAGNOSTIC_FAILED", "error_code": None,
+                    "nonce": nonce, "started_at": started,
+                    "source_sha": batch["source_sha"], "request_fingerprint": report["request_fingerprint"],
+                    "child_status": "NOT_STARTED", "memory_policy": _B03_MEMORY_POLICY, "memory_limit_bytes": None,
+                    "workers_requested": 0 if phase == "serial" else 12}
+            report["cases"].append(case)
+            code, raw, problem = _run_diagnostic_child(argv, checkout=checkout, env=child_env)
+            case.update(ended_at=time.time(),
+                        elapsed_seconds=(time.perf_counter_ns() - clock_start_ns) / 1_000_000_000,
+                        child_status="EXIT_ZERO" if code == 0 and not problem else "CHILD_FAILED",
+                        child_exit_code=code if type(code) is int and 0 <= code <= 5 else None)
+            (root / (phase + ".output.log")).write_bytes(_sanitized_diagnostic_output(raw))
+            _diagnostic_source(checkout, batch["source_sha"], git_executable)
+            if problem:
+                raise RemoteRequestError(problem)
+            try:
+                case.update(_diagnostic_proof(root, phase, nonce, raw))
+                case["artifacts"] = _diagnostic_artifacts(root, phase)
+                if code != 0:
+                    raise ValueError("exit")
+                case["status"] = "DIAGNOSTIC_COMPLETE"
+                _write_json(root / (phase + ".result.json"), case)
+                persisted = _diagnostic_json(root / (phase + ".result.json"))
+                if persisted != case or not _verify_diagnostic_receipt(root, persisted):
+                    raise ValueError("receipt")
+            except (KeyError, TypeError, ValueError, OSError, ET.ParseError):
+                case.update(status="DIAGNOSTIC_FAILED", error_code="DIAGNOSTIC_EVIDENCE_UNPROVEN")
+            _write_json(root / (phase + ".result.json"), case)
+        # Re-read both actual artifact bindings after the pair finishes. A
+        # failed phase never changes a different phase's observed test result.
+        proven = True
+        for case in report["cases"]:
+            result_path = root / (case["phase"] + ".result.json")
+            persisted = _diagnostic_json(result_path)
+            if persisted != case or not _verify_diagnostic_receipt(root, persisted):
+                case.update(status="DIAGNOSTIC_FAILED", error_code="DIAGNOSTIC_EVIDENCE_UNPROVEN")
+                _write_json(result_path, case)
+                proven = False
+        if proven:
+            _diagnostic_source(checkout, batch["source_sha"], git_executable)
+            report.update(status="DIAGNOSTIC_COMPLETE", native_proof="WINDOWS_NATIVE_OBSERVED")
+        else:
+            report["error_code"] = "DIAGNOSTIC_EVIDENCE_UNPROVEN"
+    except RemoteRequestError as exc:
+        report["error_code"] = str(exc)
+    except Exception:
+        report["error_code"] = "DIAGNOSTIC_EXECUTION_UNPROVEN"
+    if (report["error_code"] and report["cases"] and
+            report["cases"][-1]["status"] == "DIAGNOSTIC_FAILED" and report["cases"][-1]["error_code"] is None):
+        report["cases"][-1].update(status="DIAGNOSTIC_FAILED", error_code=report["error_code"],
+                                     ended_at=time.time(),
+                                     elapsed_seconds=(time.perf_counter_ns() - clock_start_ns) / 1_000_000_000)
+    report["succeeded"] = sum(c["status"] == "DIAGNOSTIC_COMPLETE" for c in report["cases"])
+    if report["status"] != "DIAGNOSTIC_COMPLETE" and report["cases"]:
+        report["native_proof"] = "WINDOWS_NATIVE_UNPROVEN"
+    return report
+
+
+class _B03DiagnosticPlugin:
+    """Loaded only by the fixed operator's -p option, inert in ordinary tests."""
+    def __init__(self, config, phase, nonce):
+        self.phase, self.nonce = phase, nonce
+        self.worker = (getattr(config, "workerinput", {}).get("workerid", "controller")
+                       if phase == "xdist" else "serial")
+        self.workers_requested = getattr(config.option, "numprocesses", 0) or 0
+        self.directory = Path.cwd() / B03_DIAGNOSTIC_ROOT / phase
+        self.start = time.monotonic()
+        self.events = []
+
+    def _base(self):
+        return {"version": 1, "nonce": self.nonce, "worker": self.worker, "pid": os.getpid()}
+
+    def pytest_collection_finish(self, session):
+        if self.worker != "controller":
+            _write_json(self.directory / (self.worker + ".collection.json"),
+                        {**self._base(), "nodeids": [item.nodeid for item in session.items]})
+
+    def pytest_runtest_logreport(self, report):
+        if self.worker == "controller":
+            return
+        self.events.append({**self._base(), "nodeid": report.nodeid, "when": report.when,
+                            "outcome": report.outcome, "duration": report.duration, "at": time.monotonic()})
+        if len(self.events) > 9:
+            raise ValueError("DIAGNOSTIC_EXTRA_EXECUTION")
+        _write_json(self.directory / (self.worker + ".events.json"), {"events": self.events})
+
+    def pytest_sessionfinish(self, session, exitstatus):
+        _write_json(self.directory / (self.worker + ".session.json"),
+                    {**self._base(), "workers_requested": self.workers_requested,
+                     "start": self.start, "end": time.monotonic(), "exitstatus": int(exitstatus)})
+
+
+def pytest_configure(config):
+    phase, nonce = os.environ.get("AI_COMMERCE_B03_PHASE"), os.environ.get("AI_COMMERCE_B03_NONCE", "")
+    if phase in ("serial", "xdist") and len(nonce) == 64:
+        config.pluginmanager.register(_B03DiagnosticPlugin(config, phase, nonce), "b03-diagnostic-proof")
+
+
 class LocalBatchWorker:
     def __init__(self, *, checkout: Path, batch: dict, profiles: dict[str, list[str]],
                  github: GitHubTransport, root: Path | None = None, git_executable: str | None = None):
@@ -222,6 +735,8 @@ class LocalBatchWorker:
 
     def execute_action(self, action: dict) -> dict:
         """One independent action; claim precedes any executor invocation."""
+        if is_diagnostic_batch({"actions": [action]}):
+            raise RemoteRequestError("DIAGNOSTIC_SEPARATE_ROUTE_REQUIRED")
         attempt_id = action["attempt_id"]
         aid = action["action_id"]
         path = self.root / (aid + "-" + attempt_id)
@@ -254,6 +769,7 @@ class LocalBatchWorker:
         # Security retirement gate only: prevents old WP IDs reaching GitHub claim/provider.
         try:
             reject_retired_wp_identifiers(self.batch, submitted_action)
+            reject_executor_test_conflict(submitted_action)
         except RemoteRequestError as exc:
             outcome.update(status="INVALID_ACTION", error_code=str(exc),
                            executor_invoked=False)

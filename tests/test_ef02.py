@@ -23,6 +23,42 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = ROOT / "contracts" / "RemoteActionBatch.v1.schema.json"
 REGISTRY = ROOT / ".github" / "ef02" / "verify-profiles.json"
 
+# Full owner-issued #957 r2 body: preserve quotations, negative requirements,
+# historical failures and registered post-model tests in the regression.
+# https://github.com/trung-via/ai-commerce/issues/957
+ISSUE_957_R2 = json.loads(r'''{
+  "kind": "AI_COMMERCE_REMOTE_ACTION_BATCH",
+  "version": 1,
+  "batch_id": "ef02_mt01_trusted_diag_955_db7dc81e_20261115_r2",
+  "source_sha": "db7dc81e7547cc89a1e0cc420e27d4d4d94ac274",
+  "actor": "HUMAN",
+  "authorization_ref": "Human ChatGPT 2026-11-15 approved Engineering/MT01 #955; 2026-11-15 'kiểm tra, fix #957' authorizes r2 corrective scope; SOURCE_ONLY, no Windows WRITE/provider/unsafe retry.",
+  "max_parallel": 1,
+  "actions": [
+    {
+      "action_id": "EF02_MT01_TRUSTED_SERIAL_DIAG_POLICY_955_01_R2",
+      "attempt_id": "ef02_mt01_diag_policy_955_db7dc81e_codex_xhigh_20261115_r2",
+      "executor": "codex",
+      "model": "gpt-6.1-sol",
+      "effort": "xhigh",
+      "priority": 95,
+      "instruction": "MT01_ACCEPTANCE_JSON:[\"EF02.action-and-fanin\"]\nMT01_IMPACT_WITNESSES_JSON:{\"EF02.action-and-fanin\":[\"src/ai_commerce/remote/validation.py\",\"src/ai_commerce/remote/worker.py\"]}\n\nOWNER-APPROVED EF02/MT01 INFRA ROOT REPAIR — Human ChatGPT 2026-11-15 \"ok đồng ý đề xuất\", approving expansion beyond #952 test-file scope after issue #955; #957 r1 pre-executor rejection was IMPACT_CLOSURE_UNPROVEN, and this r2 is a new fingerprinted admission-safe scope (no coding-model invocation occurred for r1). This is a NEW non-WP source-only Coding Engineering action on pinned main db7dc81e7547cc89a1e0cc420e27d4d4d94ac274. Make code changes only. IMPORTANT: EF01 focus brief forbids the model directly invoking pytest; DO NOT run pytest, xdist, shell test suites or custom Git-test harness as executor. Trusted EF01/MT01 independently runs registered Windows tests AFTER you return.\n\nCONFIRMED INCIDENT: #955 run 43682564342, artifact 14149136075, Codex gpt-6.1-sol XHigh invoked and returned code 0 but NO_CODE_CHANGE; agent correctly held because issue required executor-run pytest -n0, while src/ai_commerce/engineering/runner.py focused brief forbids ALL direct executor pytest. EF02 validate still PASS, wasting invocation (provider-reported 39699 input/812 output tokens) without diagnostic. Original #952 candidate 4035a20a3a9b8e8bffefca2603829035808e97cb (ONE file test; 236 passed, 3 environment-symlink skips at -n12) remains Brain HOLD due missing native serial/root diagnosis, not to be replayed/merged now. #948 EXECUTION_UNKNOWN is forensic and never replayed.\n\nOBJECTIVE A — PRE-EXECUTOR CAPABILITY ADMISSION: Extend the authenticated EF02 v1 semantic validator to reject clearly incompatible SOURCE_BUILD requests demanding the coding executor itself run pytest/xdist, before any model pre-spawn checkpoint or provider invocation. Add deterministic negative and ordinary-positive cases: e.g. #955 explicit \"executor must run pytest -n0\" rejected with bounded code EXECUTOR_PYTEST_FORBIDDEN_PRESPAWN; descriptions mentioning pytest for normal post-model EF01 verification and quoted negative instructions still allowed. Prefer a typed capability contract over broad keyword filtering; do not disable the focused executor no-pytest rule or Git guards. If semantic freeform cannot be classified safely, use an explicit typed request whose absence fails closed for imperative diagnostic jobs; document the residual bypass risk and test it.\n\nOBJECTIVE B — TRUSTED WINDOWS B0.3 SERIAL-vs-XDIST DIAGNOSTIC, NO CODING MODEL: Implement one narrow source-registered, Human-owner-only, no-model execution mode reachable through the EXISTING authenticated EF02 Issue ingress and existing Windows self-host run step; do not add/edit .github paths (current allowed_paths rejects .github). An optional backward-compatible action field / finite enum e.g. diagnostic_mode=WINDOWS_B03_SERIAL_XDIST_V1 can be added to contracts/RemoteActionBatch.v1.schema.json, validated in remote/validation.py and implemented in remote/worker.py. Fixed code-defined test selection ONLY: three exact tests/test_b0_3_attended_worker.py::test_post_run_tamper_or_rollback_holds_without_rerender nodes [output-foreign],[output-partial],[journal-rollback]; run once trusted serial (no -n, workers=0) and once -n12 on Windows under comparable load. If the original 12-worker contention requires full B0.3 -n12, label extra run as different load and preserve existing 3 pre-existing symlink permission skips separately. DO NOT interpolate Issue-supplied text, filenames, shell, argv, credentials, env, parameters, or test selectors into commands; all commands are repository-coded finite tuples. Use existing isolated per-job Python and registered pytest infrastructure. Strict source SHA/worktree/actor binding; authorized owner HUMAN only, no arbitrary BRAIN dispatch. No model spawn, no provider checkpoint, no candidate branch when diagnostic_only; evidence state DIAGNOSTIC_COMPLETE/DIAGNOSTIC_FAILED distinct from SOURCE_VERIFIED/PR PASS. Capture real Windows serial-vs-xdist elapsed, selected/collected/executed counts, JUnit SHA256/refs, worker_count observed and redacted child process status; never fabricate a JUnit or use exit 0 as proof. Fail closed on missing pytest/FFmpeg, timeout, missing JUnit, zero selected, unexpected test nodeids, stale source, or runner memory limits. Do not silently alter regular EF02 source-build or its -n12 profile.\n\nCRITICAL SCOPE/POLICY: .github/** is explicitly RESTRICTED by remote/validation.safe_path (not an obstacle to bypass). Keep all .github/workflows, .github/ef02/verify-profiles.json and src/ai_commerce/engineering/runner.py READ ONLY. Do NOT weaken safe_path, remove .github restriction or add dynamic arbitrary shell capability. Do NOT change source B0.3 worker tests or runtime. If immutable .github registry change is truly necessary, return a precise HOLD/dependency instead of silently implementing a partial unsafe profile. Prefer finite, strongly typed diagnostic registered in source-owned code and hardcoded guarded operation, compatible with existing registered profile as a separate diagnostic evidence tier.\n\nALLOWED TRACKED PATHS ONLY: contracts/RemoteActionBatch.v1.schema.json; src/ai_commerce/remote/validation.py; src/ai_commerce/remote/worker.py; tests/test_ef02.py; tests/test_minimum_test.py. src/ai_commerce/engineering/verification.py is READ ONLY: pinned owner-consumer closure check for #957 r1 proved that adding it as an editable path makes admission hold. If its modification is unavoidable, HOLD and report the exact owner contract dependency; do not silently widen this action. No new paths; if additional semantic owner paths required, HOLD and report exact dependency. Existing work_items/EF02-MULTI-ACTION-001.json is historical and must not be rewritten.\n\nPOSITIVE AC: (1) #955 contradictory request and impersonated non-owner diagnostic are denied BEFORE provider invocation with deterministic sanitized reason; (2) ordinary source-build instructions and valid v1 schema/EF02 actions still work; (3) typed owner-only fixed diagnostic runner invokes no coding executor, no Git push/commit, no host write or provider, but actually invokes a known finite Windows pytest serial and -n12 pair only once, captures JUnit/worker proof and returns honest result; (4) unknown mode, arbitrary nodeid, forged source, dependency/fan-in, missing binary, fake JUnit and malicious payload all HOLD; (5) Windows EF02 owner tests and affected MT01 consumer tests execute with normal 12 workers after source change; (6) scope unchanged for WakeHub/BQ/PULSE, prior #952 candidate and #948 unknown preserved.\n\nNEGATIVE AC: no weakening focused executor pytest prohibition, GIT Write Guard, Git SHA/claim, .github restricted path, model auth or protected test policy; no blanket timeout increase, skip/xfail, arbitrary shell, new provider/spend/publish/HostOps, Chrome or native Windows WRITE grant; no auto-merge without exact PR CI + independent Brain PASS. No treating code-only simulated tests as genuine Windows diagnostic; actual three native cases must run only AFTER merged source has registered the trusted mode. At most 2 evidence-led Verify-Fix rounds, deliver CANDIDATE_BRANCH after legitimate MT01.\n\nREVIEW HANDOFF: after source candidate pass, Brain opens PR automatically under 2026-11-15 Human standing decision. After trusted CI/Brain PASS/merge, dispatch a separate exact bounded diagnostic Issue with the new mode; only use its genuine native evidence for subsequent B0.3 RCA and eventual #952 promotion. Do NOT produce such diagnostic effects from this coding-executor attempt.",
+      "allowed_paths": [
+        "contracts/RemoteActionBatch.v1.schema.json",
+        "src/ai_commerce/remote/validation.py",
+        "src/ai_commerce/remote/worker.py",
+        "tests/test_ef02.py",
+        "tests/test_minimum_test.py"
+      ],
+      "verification_profile": "ef02-tests",
+      "verification_intent": "AUTO",
+      "depends_on": [],
+      "delivery": "CANDIDATE_BRANCH",
+      "max_repair_rounds": 2
+    }
+  ]
+}''')
+
 
 def action(name, depends=(), resources=()):
     return {
@@ -146,6 +182,46 @@ def test_mt01_does_not_relax_v1_additional_properties(key, value):
     a[key] = value
     with pytest.raises(ValidationError):
         validate(batch([a]))
+
+
+@pytest.mark.parametrize("field,value", [
+    ("allowed_paths", "src/ai_commerce/feature_a"),
+    ("depends_on", "b"),
+    ("resources", "fixed-resource"),
+])
+def test_source_schema_preserves_unique_item_leaf_errors(field, value):
+    from jsonschema import ValidationError
+    from ai_commerce.remote.validation import validate_batch_content
+
+    packet = batch([action("a"), action("b")])
+    packet["actions"][0][field] = [value, value]
+    for check in (validate, lambda data: validate_batch_content(
+            data, schema=SCHEMA, registry=verify_registry(REGISTRY))):
+        with pytest.raises(ValidationError) as error:
+            check(packet)
+        assert error.value.validator == "uniqueItems"
+        assert list(error.value.absolute_path) == ["actions", 0, field]
+
+
+def test_source_duplicate_paths_preflight_keeps_redacted_error_code(monkeypatch):
+    from ai_commerce.remote.authoring_preflight import preflight_batch
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Offline schema rejection must not spawn a child")
+
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    packet = batch([action("a")])
+    packet["actions"][0].update(
+        allowed_paths=["src/ai_commerce/feature_a"] * 2,
+        instruction="SECRET_REQUEST_INSTRUCTION")
+    result = preflight_batch(packet, schema=SCHEMA, registry=verify_registry(REGISTRY))
+    assert result["status"] == "PREFLIGHT_REJECTED"
+    assert result["error_code"] == "DUPLICATE_ALLOWED_PATHS"
+    assert result["failure_provenance"]["phase"] == "REQUEST_VALIDATION"
+    assert result["failure_provenance"]["source_sha"] == packet["source_sha"]
+    assert result["failure_provenance"]["attempt_id"] == "a-001"
+    assert result["dispatch_performed"] is False
+    assert "SECRET_REQUEST_INSTRUCTION" not in json.dumps(result)
 
 
 def test_two_real_child_processes_overlap_in_one_batch():
@@ -1219,3 +1295,972 @@ def test_definite_bad_action_rejects_even_when_an_independent_scope_is_undetermi
     ])
     with pytest.raises(RemoteRequestError, match="^AC_DECLARATION_UNPROVEN_PRE_EXECUTOR$"):
         validate_acceptance_scope(packet, repo=tmp_path)
+
+
+WITNESS_MARKER = "MT01_IMPACT_WITNESSES_JSON:"
+WAKE_AC = "EF02.wake-boundaries"
+G2_AC = "WAKEHUB.G2.native-source-custody"
+G3_AC = "WAKEHUB.G3.signed-desktop-nonce-source-generation"
+CHROME_SOURCE = "src/ai_commerce/remote/chrome_acquisition.py"
+G2_SOURCE = "src/ai_commerce/wakehub/native_runtime.py"
+G3_SOURCE = "src/ai_commerce/wakehub/g3_enrollment.py"
+# #938's failure shape: seven optional files, three disjoint required owners,
+# then a successful executor that changes only four G2/G3 files.
+WAKEHUB_SCOPE = [CHROME_SOURCE, "tests/test_ef02_d5_chrome_acquisition.py",
+                 G2_SOURCE, "tests/test_wakehub_g2_native.py", G3_SOURCE,
+                 "src/ai_commerce/wakehub/g3_desktop_observer.py",
+                 "tests/test_wakehub_g3_native_enrollment.py"]
+WAKEHUB_WITNESSES = {WAKE_AC: [CHROME_SOURCE], G2_AC: [G2_SOURCE], G3_AC: [G3_SOURCE]}
+
+
+def with_impact_witnesses(item, witnesses):
+    item["instruction"] += "\n" + WITNESS_MARKER + json.dumps(
+        witnesses, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return item
+
+
+def wakehub_scope_action(*, witnessed=False):
+    item = scoped_action("a", list(WAKEHUB_SCOPE), [WAKE_AC, G2_AC, G3_AC])
+    return with_impact_witnesses(item, WAKEHUB_WITNESSES) if witnessed else item
+
+
+def make_current_acceptance_repo(tmp_path, monkeypatch):
+    """Pinned, hash-verified transport with CURRENT source/import/test bytes.
+
+    Uses the real owner loader and selector, including manifest dependencies;
+    no Git repository is created and no tests or provider children are run.
+    """
+    contents = {path.relative_to(ROOT).as_posix(): path.read_bytes()
+                for branch in (ROOT / "src/ai_commerce", ROOT / "tests")
+                for path in branch.rglob("*.py")}
+    return make_acceptance_repo(tmp_path, monkeypatch, contents=contents)
+
+
+@pytest.mark.parametrize("command", ["validate", "run"])
+@pytest.mark.parametrize("full", [False, True])
+def test_938_optional_owner_union_requires_witness_before_any_executor(
+        tmp_path, monkeypatch, capsys, command, full):
+    from ai_commerce.remote import __main__ as cli
+    from ai_commerce.remote.validation import _pinned_source_tree
+    from ai_commerce.engineering.impact_v21 import load_baseline_component_owner_records, select_impact
+    from ai_commerce.engineering.minimum_test import approved_groups
+
+    make_acceptance_repo(tmp_path, monkeypatch)
+    item = wakehub_scope_action()
+    if full:
+        item.update(verification_intent="HUMAN_FULL", verification_profile="project-tests")
+    packet = batch([item])
+    root = _pinned_source_tree(tmp_path, packet["source_sha"], git_executable=None)
+    groups = approved_groups()
+    groups = (*groups, *(r["group"] for r in load_baseline_component_owner_records(
+        root=root, base_sha=packet["source_sha"], existing_groups=groups)))
+    union = select_impact(root=root, changed_paths=item["allowed_paths"], groups=groups)
+    # This is the old potential-coverage test, which is insufficient.
+    assert union.runnable and {"ef02-wake", "wakehub-g2-native", "wakehub-g3-native-enrollment"} <= set(union.selected_groups)
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps(packet), encoding="utf-8")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Ambiguous AC scope must stop before any model/transport/schedule")
+
+    for name in ("GitHubTransport", "LocalBatchWorker", "run_schedule"):
+        monkeypatch.setattr(cli, name, forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    assert cli.main([command, "--request-file", str(request), "--checkout", str(tmp_path),
+                     "--issuer-login", "owner", "--owner-login", "owner"]) == 2
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "EF02_REQUEST_REJECTED: AC_IMPACT_WITNESS_REQUIRED_PRE_EXECUTOR"
+    assert "PRIVATE_INSTRUCTIONS" not in captured.out + captured.err
+
+
+def test_938_exact_witness_is_fingerprinted_contract_not_coverage(tmp_path, monkeypatch, capsys):
+    from ai_commerce.remote import __main__ as cli
+    from ai_commerce.remote.validation import validate_acceptance_scope
+
+    make_current_acceptance_repo(tmp_path, monkeypatch)
+    packet = batch([wakehub_scope_action(witnessed=True)])
+    original = copy.deepcopy(packet)
+    with pytest.raises(RemoteRequestError, match="^ISSUER_NOT_AUTHORIZED_FOR_ACTOR$"):
+        validate(packet, issuer="untrusted-executor", owner="owner")
+    assert validate(packet, issuer="owner", owner="owner") == packet
+    result = validate_acceptance_scope(packet, repo=tmp_path)
+    assert result["status"] == "PRE_EXECUTOR_COMPATIBLE"  # Existing host dispatch wire contract.
+    assert result["coverage_status"] == "PRE_EXECUTOR_CONTRACTED_NOT_PROVEN"
+    assert result["actions"][0]["status"] == "PRE_EXECUTOR_CONTRACTED_NOT_PROVEN"
+    assert result["next_gate"] == "POST_EDIT_MT01_REQUIRED"
+    assert result["actions"][0]["impact_contract"] == {
+        "source_sha": packet["source_sha"], "request_fingerprint": fingerprint(packet),
+        "witnesses": WAKEHUB_WITNESSES, "coverage_proven": False}
+    assert packet == original
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps(packet), encoding="utf-8")
+    assert cli.main(["validate", "--request-file", str(request), "--checkout", str(tmp_path),
+                     "--issuer-login", "owner", "--owner-login", "owner"]) == 0
+    assert json.loads(capsys.readouterr().out)["acceptance_scope"] == result
+    # Neither an executor's invented declaration nor a different pin can reuse
+    # the issuer's dispatch fingerprint. No output file is an authority source.
+    for field in ("instruction", "allowed_paths", "source_sha"):
+        forged = copy.deepcopy(packet)
+        if field == "source_sha":
+            forged[field] = "b" * 40
+        elif field == "instruction":
+            forged["actions"][0][field] = forged["actions"][0][field].replace(CHROME_SOURCE, G2_SOURCE)
+        else:
+            forged["actions"][0][field].remove(CHROME_SOURCE)
+        assert fingerprint(forged) != fingerprint(packet)
+
+
+@pytest.mark.parametrize("problem,code", [
+    ("wrong-owner", "OWNER_MISMATCH"), ("disjoint-known-owner", "OWNER_MISMATCH"),
+    ("outside-allowlist", "OUTSIDE_SCOPE"), ("missing-ac", "AC_MISMATCH"),
+    ("extra-known-ac", "AC_MISMATCH"), ("unknown-ac", "UNKNOWN_AC"),
+    ("malformed", "MALFORMED"), ("empty", "MALFORMED"), ("empty-paths", "MALFORMED"),
+    ("non-string-path", "MALFORMED"), ("duplicate-key", "MALFORMED"),
+    ("duplicate-path", "MALFORMED"), ("too-many-paths", "MALFORMED"),
+    ("too-many-acs", "MALFORMED"), ("too-many-total-paths", "MALFORMED"),
+    ("path-too-long", "MALFORMED"),
+    ("oversized", "MALFORMED"), ("non-json-constant", "MALFORMED"),
+    ("duplicate-marker", "DUPLICATE"), ("quoted-marker", "MALFORMED"),
+    ("noncanonical", "NONCANONICAL"), ("unsorted-paths", "MALFORMED"),
+    ("manifest", "PATH_UNESTABLISHED"), ("new-file", "PATH_UNESTABLISHED"),
+    ("directory", "PATH_UNESTABLISHED"), ("unsafe-path", "PATH_INVALID"),
+])
+def test_impact_witness_rejects_untrusted_declarations_with_bounded_codes(
+        tmp_path, monkeypatch, problem, code):
+    from ai_commerce.remote.validation import validate_acceptance_scope
+
+    make_acceptance_repo(tmp_path, monkeypatch)
+    item = wakehub_scope_action()
+    witnesses = copy.deepcopy(WAKEHUB_WITNESSES)
+    raw, prefix = None, WITNESS_MARKER
+    if problem == "wrong-owner":
+        witnesses[WAKE_AC] = [G3_SOURCE]
+    elif problem == "disjoint-known-owner":
+        item["allowed_paths"].append(PERSONAL_SOURCE)
+        witnesses[G2_AC] = [PERSONAL_SOURCE]
+    elif problem == "outside-allowlist":
+        witnesses[WAKE_AC] = [WAKE_SOURCE]
+    elif problem == "missing-ac":
+        del witnesses[WAKE_AC]
+    elif problem == "extra-known-ac":
+        witnesses[PERSONAL_AC] = [PERSONAL_SOURCE]
+    elif problem == "unknown-ac":
+        witnesses["PRIVATE_UNKNOWN_AC"] = [CHROME_SOURCE]
+    elif problem == "malformed":
+        raw = '{"PRIVATE_SECRET":bad JSON}'
+    elif problem == "empty":
+        raw = "{}"
+    elif problem == "empty-paths":
+        witnesses[WAKE_AC] = []
+    elif problem == "non-string-path":
+        witnesses[WAKE_AC] = [123]
+    elif problem == "duplicate-key":
+        raw = '{"EF02.wake-boundaries":[],"EF02.wake-boundaries":[]}'
+    elif problem == "duplicate-path":
+        witnesses[WAKE_AC] *= 2
+    elif problem == "too-many-paths":
+        witnesses[WAKE_AC] = [f"src/PRIVATE_{i:02d}.py" for i in range(33)]
+    elif problem == "too-many-acs":
+        witnesses = {f"PRIVATE_AC_{i}": [CHROME_SOURCE] for i in range(129)}
+    elif problem == "too-many-total-paths":
+        witnesses = {f"PRIVATE_AC_{i}": [f"src/PRIVATE_{n:02d}.py" for n in range(32)] for i in range(9)}
+    elif problem == "path-too-long":
+        witnesses[WAKE_AC] = ["s" * 513]
+    elif problem == "oversized":
+        raw = " " * 32769
+    elif problem == "non-json-constant":
+        raw = '{"EF02.wake-boundaries":NaN}'
+    elif problem == "duplicate-marker":
+        with_impact_witnesses(item, witnesses)
+    elif problem == "quoted-marker":
+        prefix = "Historical declaration: " + prefix
+    elif problem == "noncanonical":
+        raw = json.dumps(witnesses, sort_keys=True)
+    elif problem == "unsorted-paths":
+        witnesses[WAKE_AC] = sorted([CHROME_SOURCE, WAKE_SOURCE], reverse=True)
+    elif problem in ("manifest", "new-file", "directory", "unsafe-path"):
+        path = {"manifest": "work_items/mt01-components/wakehub-g2-native.json",
+                "new-file": "src/ai_commerce/wakehub/PRIVATE_new.py",
+                "directory": "src/ai_commerce/wakehub",
+                "unsafe-path": "../PRIVATE_SECRET"}[problem]
+        if problem != "unsafe-path":
+            item["allowed_paths"].append(path)
+        witnesses[WAKE_AC] = [path]
+    if raw is None:
+        raw = json.dumps(witnesses, sort_keys=True, separators=(",", ":"))
+    item["instruction"] += "\n" + prefix + raw
+    original = copy.deepcopy(item)
+    with pytest.raises(RemoteRequestError) as rejected:
+        validate_acceptance_scope(batch([item]), repo=tmp_path)
+    assert str(rejected.value) == f"AC_IMPACT_WITNESS_{code}_PRE_EXECUTOR"
+    assert "PRIVATE" not in str(rejected.value) and item == original
+
+
+def test_impact_witness_cannot_borrow_a_hidden_dependency_owner(tmp_path, monkeypatch):
+    from ai_commerce.remote.validation import validate_acceptance_scope
+    make_acceptance_repo(tmp_path, monkeypatch)
+    predecessor = scoped_action("a", [CHROME_SOURCE], [WAKE_AC])
+    child = with_impact_witnesses(scoped_action("b", [G2_SOURCE], [WAKE_AC, G2_AC], depends=("a",)),
+                                  {WAKE_AC: [CHROME_SOURCE], G2_AC: [G2_SOURCE]})
+    with pytest.raises(RemoteRequestError, match="^AC_IMPACT_WITNESS_OUTSIDE_SCOPE_PRE_EXECUTOR$"):
+        validate_acceptance_scope(batch([child, predecessor]), repo=tmp_path)
+
+
+def test_impact_witness_uses_pinned_import_closure_not_forged_checkout(tmp_path, monkeypatch):
+    from ai_commerce.remote.validation import validate_acceptance_scope
+    product = "src/ai_commerce/product/identity.py"
+    attribution = "src/ai_commerce/affiliate_attribution/evidence.py"
+    ac = "A14.L04.offline-attribution-evidence"
+    make_acceptance_repo(tmp_path, monkeypatch, contents={
+        attribution: b"from ai_commerce.product import identity\n"})
+    item = with_impact_witnesses(scoped_action("a", [product], [ac]), {ac: [product]})
+    result = validate_acceptance_scope(batch([item]), repo=tmp_path)
+    assert result["actions"][0]["status"] == "PRE_EXECUTOR_CONTRACTED_NOT_PROVEN"
+    # A known but unrelated owner cannot masquerade as this dependency.
+    target = tmp_path / attribution
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("from ai_commerce.hostops_v3 import personal\n", encoding="utf-8")
+    item = with_impact_witnesses(scoped_action("a", [PERSONAL_SOURCE, attribution], [ac]), {ac: [PERSONAL_SOURCE]})
+    with pytest.raises(RemoteRequestError, match="^AC_IMPACT_WITNESS_OWNER_MISMATCH_PRE_EXECUTOR$"):
+        validate_acceptance_scope(batch([item]), repo=tmp_path)
+
+
+def test_impact_witness_cannot_survive_changed_pinned_bytes(tmp_path, monkeypatch):
+    from ai_commerce.remote.validation import validate_acceptance_scope
+    make_acceptance_repo(tmp_path, monkeypatch)
+    packet = batch([wakehub_scope_action(witnessed=True)])
+    assert validate_acceptance_scope(packet, repo=tmp_path)["coverage_status"] == "PRE_EXECUTOR_CONTRACTED_NOT_PROVEN"
+    original_run = subprocess.run
+
+    def changed_blob(argv, **kwargs):
+        result = original_run(argv, **kwargs)
+        if argv[-2:] == ["cat-file", "--batch"]:
+            header, contents = result.stdout.split(b"\n", 1)
+            # Same repo, pin and blob IDs cannot authenticate different bytes.
+            result.stdout = header + b"\n" + bytes([contents[0] ^ 1]) + contents[1:]
+        return result
+
+    monkeypatch.setattr(subprocess, "run", changed_blob)
+    held = validate_acceptance_scope(packet, repo=tmp_path)
+    assert held["status"] == "PRE_EXECUTOR_UNDETERMINED"
+    assert held["actions"][0]["reason"] == "PINNED_BASELINE_UNPROVEN"
+    assert held["next_gate"] == "HOLD_NO_EXECUTOR"
+
+
+def test_ordinary_two_file_single_owner_needs_no_impact_marker(tmp_path, monkeypatch):
+    from ai_commerce.remote.validation import validate_acceptance_scope
+    make_acceptance_repo(tmp_path, monkeypatch)
+    item = scoped_action("a", [VALIDATION_SOURCE, "tests/test_ef02.py"], ["EF02.action-and-fanin"])
+    result = validate_acceptance_scope(batch([item]), repo=tmp_path)
+    assert result["status"] == result["actions"][0]["status"] == "PRE_EXECUTOR_COMPATIBLE"
+    assert "impact_contract" not in result["actions"][0]
+    # Multiple ACs on the same owner are equally unambiguous.
+    item = scoped_action("a", [G2_SOURCE, "tests/test_wakehub_g2_native.py"],
+                         [G2_AC, "WAKEHUB.G2.native-durable-first-wins"])
+    assert validate_acceptance_scope(batch([item]), repo=tmp_path)["coverage_status"] == "PRE_EXECUTOR_COMPATIBLE"
+
+
+def test_single_ac_optional_scope_still_needs_witness_and_cross_owner_action_is_possible(tmp_path, monkeypatch):
+    from ai_commerce.remote.validation import validate_acceptance_scope
+    make_acceptance_repo(tmp_path, monkeypatch)
+    item = scoped_action("a", [CHROME_SOURCE, G2_SOURCE], [WAKE_AC])
+    with pytest.raises(RemoteRequestError, match="^AC_IMPACT_WITNESS_REQUIRED_PRE_EXECUTOR$"):
+        validate_acceptance_scope(batch([item]), repo=tmp_path)
+    item = with_impact_witnesses(scoped_action("a", [CHROME_SOURCE, G2_SOURCE], [WAKE_AC, G2_AC]),
+                                 {WAKE_AC: [CHROME_SOURCE], G2_AC: [G2_SOURCE]})
+    result = validate_acceptance_scope(batch([item]), repo=tmp_path)
+    assert result["status"] == "PRE_EXECUTOR_COMPATIBLE"
+    assert result["coverage_status"] == "PRE_EXECUTOR_CONTRACTED_NOT_PROVEN"
+
+
+def test_938_post_change_missing_wake_owner_remains_mt01_coverage_unproven(tmp_path, monkeypatch):
+    from ai_commerce.engineering import verification
+    from ai_commerce.engineering.minimum_test import approved_groups
+    from ai_commerce.engineering.impact_v21 import registered_action_plan
+    from ai_commerce.remote.validation import validate_acceptance_scope
+
+    files, _ = make_current_acceptance_repo(tmp_path, monkeypatch)
+    packet = batch([wakehub_scope_action(witnessed=True)])
+    assert validate_acceptance_scope(packet, repo=tmp_path)["coverage_status"] == "PRE_EXECUTOR_CONTRACTED_NOT_PROVEN"
+    for path, raw in files.items():
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(raw)
+    base = {p: hashlib.sha256(raw).hexdigest() for p, raw in files.items()}
+    changed = [G2_SOURCE, "tests/test_wakehub_g2_native.py", G3_SOURCE,
+               "tests/test_wakehub_g3_native_enrollment.py"]
+    candidate = dict(base)
+    for path in changed:
+        raw = files[path] + b"\nSCOPED_FIXTURE_VALUE = 1\n"
+        (tmp_path / path).write_bytes(raw)
+        candidate[path] = hashlib.sha256(raw).hexdigest()
+    registry = verify_registry(REGISTRY)
+    argv = registry["ef02-tests"]
+    monkeypatch.setenv("MT01_V21_ENABLED", "1")
+    # The simulated diff has real fixture bytes. The owner loader, selector,
+    # AC check, registered-binding check and no-execution refusal path are real.
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Missing mandatory owner must never launch pytest")
+
+    monkeypatch.setattr(verification, "_run_pytest_with_junit", forbidden)
+    saved = {}
+    response, plan = verification.execute_plan(
+        repo=tmp_path, output_dir=tmp_path, base_sha=packet["source_sha"], base_files=base,
+        changed_paths=changed, required_acs=tuple(approved_acceptance_plan(packet["actions"][0])["ids"]),
+        fallback_argv=argv, prior={}, save=lambda key, name, raw: saved.update({key: raw}),
+        evidence_files={}, deadline=time.monotonic() + 60, timeout_seconds=60,
+        registered_only=True, groups=approved_groups(), registered_profiles=registry,
+        allowed_paths=tuple(WAKEHUB_SCOPE))
+    # The trusted runner maps this exact verifier code to MT01_COVERAGE_UNPROVEN.
+    assert response.returncode == 5 and not response.stdout
+    assert "ef02-wake" not in plan["selected_groups"]
+    assert {"wakehub-g2-native", "wakehub-g3-native-enrollment"} <= set(plan["selected_groups"])
+    assert "AC_REQUIRED_GROUP_NOT_SELECTED:" + WAKE_AC in plan["reason_codes"]
+    assert all(g["state"] == "UNPROVEN" and not g["execute"] for g in plan["groups"])
+    assert all(g["actual_argv"] is None and not any(g["tests_executed"].values()) for g in plan["groups"])
+    assert plan["narrow_execution_observed"] is False and "mt01_results" in saved
+
+    # Adding the required owner to a simulated ACTUAL diff restores exact
+    # owner/consumer selection, only making real verification eligible to run.
+    changed.append(CHROME_SOURCE)
+    raw = files[CHROME_SOURCE] + b"\nSCOPED_FIXTURE_VALUE = 1\n"
+    (tmp_path / CHROME_SOURCE).write_bytes(raw)
+    candidate[CHROME_SOURCE] = hashlib.sha256(raw).hexdigest()
+    complete = registered_action_plan(
+        repo=tmp_path, base_sha=packet["source_sha"], base_files=base, candidate_files=candidate,
+        changed_paths=changed, required_acs=[WAKE_AC, G2_AC, G3_AC], fallback_argv=argv,
+        groups=approved_groups(), registered_profiles=registry, allowed_paths=WAKEHUB_SCOPE)
+    assert not complete["impact_v21"]["missing_mapping"]
+    assert {"ef02-wake", "wakehub-g2-native", "wakehub-g3-native-enrollment"} <= set(complete["selected_groups"])
+    assert all(g["state"] == "EXECUTE" and "result" not in g for g in complete["groups"])
+    assert verification.registered_binding_problems(complete, registry) == []
+    for entry in complete["groups"]:
+        mapping, binding = complete["consumer_map"][entry["group"]], entry["binding"]
+        assert set((*mapping["paths"], *mapping["tests"], *mapping["consumers"], *mapping["contracts"])) <= binding["candidate_files"].keys()
+        assert all(binding["candidate_files"][p] == candidate[p] for p in binding["candidate_files"])
+
+
+@pytest.mark.parametrize("policy", [None, "EF01_POST_MODEL_ONLY"])
+@pytest.mark.parametrize("instruction", [
+    "Make one scoped source change. EF01 runs registered pytest -n 12 after the model returns.",
+    "DO NOT run pytest, xdist, shell test suites or custom Git-test harness as executor.",
+    "Reject requests demanding the coding executor itself run pytest/xdist.",
+    'Quoted example: "executor must run pytest -n0" must reject before claim.',
+    "Example: `executor must run pytest -n0` is prohibited; EF01 verifies after return.",
+    "The executor must not run pytest. Never run xdist as the coding model.",
+    "The historical issue said executor must run pytest -n0. Implement a preflight rejection.",
+    "```text\nexecutor must run pytest -n0\n```\nImplement the pre-spawn rejection.",
+])
+def test_executor_policy_preserves_negative_quoted_and_post_model_instructions(policy, instruction):
+    item = action("a")
+    item["instruction"] = instruction
+    if policy:
+        item["executor_test_policy"] = policy
+    assert validate(batch([item]))["actions"][0] == item
+
+
+def test_full_957_r2_wording_is_not_an_executor_test_mandate():
+    assert validate(copy.deepcopy(ISSUE_957_R2)) == ISSUE_957_R2
+    typed = copy.deepcopy(ISSUE_957_R2)
+    typed["actions"][0]["executor_test_policy"] = "EF01_POST_MODEL_ONLY"
+    assert validate(typed) == typed
+
+
+@pytest.mark.parametrize("instruction", [
+    "executor must run pytest -n0",
+    "The coding executor itself must run pytest -n 0 before returning.",
+    "You shall execute python -m pytest tests/test_ef02.py -n 12.",
+    "Run pytest -n0 as the coding executor.",
+    "Please invoke xdist before returning.",
+    "The model must directly run `pytest -n0`.",
+])
+@pytest.mark.parametrize("policy", [None, "EF01_POST_MODEL_ONLY"])
+def test_clear_executor_test_imperatives_are_rejected_even_with_typed_default(instruction, policy):
+    item = action("a")
+    item["instruction"] = instruction
+    if policy:
+        item["executor_test_policy"] = policy
+    with pytest.raises(RemoteRequestError, match="^EXECUTOR_PYTEST_FORBIDDEN_PRESPAWN$"):
+        validate(batch([item]))
+
+
+@pytest.mark.parametrize("policy", ["EXECUTOR_PYTEST_REQUIRED", "unknown", None, True, []])
+def test_executor_test_policy_is_finite_and_required_capability_is_incompatible(policy):
+    from jsonschema import ValidationError
+    item = action("a")
+    item["executor_test_policy"] = policy
+    if policy == "EXECUTOR_PYTEST_REQUIRED":
+        with pytest.raises(RemoteRequestError, match="^EXECUTOR_PYTEST_FORBIDDEN_PRESPAWN$"):
+            validate(batch([item]))
+    else:
+        with pytest.raises(ValidationError):
+            validate(batch([item]))
+
+
+def _copy_remote_contracts(checkout):
+    for relative in ("contracts/RemoteActionBatch.v1.schema.json", ".github/ef02/verify-profiles.json",
+                     ".github/ef02/approved-candidates.v1.json"):
+        target = checkout / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((ROOT / relative).read_bytes())
+
+
+@pytest.mark.parametrize("command", ["validate", "run"])
+@pytest.mark.parametrize("typed", [False, True])
+def test_executor_conflict_cli_stops_before_source_scope_transport_or_claim(tmp_path, monkeypatch, capsys, command, typed):
+    from ai_commerce.remote import __main__ as cli
+    _copy_remote_contracts(tmp_path)
+    item = action("a")
+    item["instruction"] = "executor must run pytest -n0 PRIVATE_DATA"
+    if typed:
+        item["instruction"] = "PRIVATE_DATA"
+        item["executor_test_policy"] = "EXECUTOR_PYTEST_REQUIRED"
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps(batch([item])), encoding="utf-8")
+    def forbidden(*args, **kwargs):
+        pytest.fail("Incompatible capability must reject before any dispatch effect")
+    for name in ("check_source", "validate_acceptance_scope", "GitHubTransport", "LocalBatchWorker", "run_schedule"):
+        monkeypatch.setattr(cli, name, forbidden)
+    assert cli.main([command, "--request-file", str(request), "--checkout", str(tmp_path),
+                     "--issuer-login", "owner", "--owner-login", "owner"]) == 2
+    output = capsys.readouterr()
+    assert output.err == "EF02_REQUEST_REJECTED: EXECUTOR_PYTEST_FORBIDDEN_PRESPAWN\n"
+    assert "PRIVATE_DATA" not in output.err + output.out
+
+
+@pytest.mark.parametrize("typed", [False, True])
+def test_worker_defends_preclaim_policy_for_direct_callers(tmp_path, monkeypatch, typed):
+    from types import SimpleNamespace
+    from ai_commerce.remote import worker as module
+    item = action("a")
+    if typed:
+        item["executor_test_policy"] = "EXECUTOR_PYTEST_REQUIRED"
+    else:
+        item["instruction"] = "executor must run pytest -n0"
+    def forbidden(*args, **kwargs):
+        pytest.fail("No claim, worktree, checkpoint, provider or child allowed")
+    worker = module.LocalBatchWorker.__new__(module.LocalBatchWorker)
+    worker.root, worker.checkout, worker.batch = tmp_path, tmp_path, batch([item])
+    worker.github = SimpleNamespace(claim=forbidden)
+    monkeypatch.setattr(module.subprocess, "Popen", forbidden)
+    monkeypatch.setattr(module, "_new_worktree_path", forbidden)
+    result = worker.execute_action(item)
+    assert result["status"] == "INVALID_ACTION" and result["executor_invoked"] is False
+    assert result["error_code"] == "EXECUTOR_PYTEST_FORBIDDEN_PRESPAWN"
+
+
+def diagnostic_packet():
+    packet = batch([{"action_id": "diag", "attempt_id": "diag-001", "depends_on": [],
+                     "diagnostic_mode": "WINDOWS_B03_SERIAL_XDIST_V1", "delivery": "DIAGNOSTIC_ONLY"}])
+    packet["max_parallel"] = 1
+    return packet
+
+
+def test_diagnostic_contract_is_owner_only_and_distinct_from_source_build():
+    assert validate(diagnostic_packet()) == diagnostic_packet()
+    with pytest.raises(RemoteRequestError, match="^ISSUER_NOT_AUTHORIZED_FOR_ACTOR$"):
+        validate(diagnostic_packet(), issuer="impersonator")
+    with pytest.raises(RemoteRequestError, match="^ISSUER_NOT_AUTHORIZED_FOR_ACTOR$"):
+        validate(diagnostic_packet(), issuer="", owner="")
+    packet = diagnostic_packet()
+    packet["actor"] = "BRAIN"
+    with pytest.raises(RemoteRequestError, match="^DIAGNOSTIC_OWNER_HUMAN_REQUIRED$"):
+        validate(packet, issuer="brain", brain=("brain",))
+
+
+@pytest.mark.parametrize("field,value", [
+    ("diagnostic_mode", "UNKNOWN"), ("diagnostic_mode", None),
+    ("delivery", "CANDIDATE_BRANCH"), ("nodeids", ["tests/other.py::test_other"]),
+    ("argv", ["python", "-c", "unsafe"]), ("env", {"PYTEST_ADDOPTS": "-n0"}),
+    ("path", "C:/arbitrary"), ("resources", ["arbitrary"]),
+    ("allowed_paths", ["tests/test_b0_3_attended_worker.py"]),
+    ("instruction", "run arbitrary test"), ("executor", "codex"),
+    ("reuse_candidate", {"candidate_sha": "a" * 40, "verified_run_id": 1}),
+    ("depends_on", ["other"]), ("resolved_dependencies", []),
+])
+def test_diagnostic_rejects_unknown_mode_and_request_command_surfaces(field, value):
+    from jsonschema import ValidationError
+    packet = diagnostic_packet()
+    packet["actions"][0][field] = value
+    with pytest.raises(ValidationError):
+        validate(packet)
+
+
+@pytest.mark.parametrize("problem", ["duplicate", "mixed", "parallel", "fanin"])
+def test_diagnostic_rejects_multiple_actions_and_fanin(problem):
+    packet = diagnostic_packet()
+    if problem == "parallel":
+        packet["max_parallel"] = 2
+    elif problem == "mixed":
+        packet["actions"].append(action("source"))
+    else:
+        other = copy.deepcopy(packet["actions"][0])
+        if problem == "fanin":
+            other.update(action_id="other", attempt_id="other-001")
+        packet["actions"].append(other)
+    with pytest.raises(RemoteRequestError, match="^DIAGNOSTIC_SINGLE_ACTION_REQUIRED$"):
+        validate(packet)
+
+
+def _synthetic_diagnostic_artifacts(module, checkout, phase, nonce):
+    """SYNTHETIC control fixture; Windows native proof remains NOT_YET_RUN."""
+    root = checkout / module.B03_DIAGNOSTIC_ROOT
+    directory = root / phase
+    nodes = module.B03_DIAGNOSTIC_NODEIDS
+    cases = "".join('<testcase classname="tests.test_b0_3_attended_worker" name="' + n.split("::")[1] + '" time="0.01" />' for n in nodes)
+    (root / (phase + ".junit.xml")).write_text(
+        '<testsuites><testsuite tests="3" failures="0" errors="0" skipped="0">' + cases + '</testsuite></testsuites>', encoding="utf-8")
+    workers = ["serial"] if phase == "serial" else [f"gw{i}" for i in range(12)]
+    for index, worker in enumerate(workers):
+        base = {"version": 1, "nonce": nonce, "worker": worker, "pid": 100 + index}
+        module._write_json(directory / (worker + ".collection.json"), {**base, "nodeids": list(nodes)})
+        module._write_json(directory / (worker + ".session.json"),
+                           {**base, "workers_requested": 0, "start": 100.0, "end": 200.0, "exitstatus": 0})
+        selected = nodes if phase == "serial" else nodes[index:index + 1]
+        if selected:
+            events = [{**base, "nodeid": node, "when": when, "outcome": "passed", "at": 150.0, "duration": 0.01}
+                      for node in selected for when in ("setup", "call", "teardown")]
+            module._write_json(directory / (worker + ".events.json"), {"events": events})
+    if phase == "xdist":
+        module._write_json(directory / "controller.session.json", {"version": 1, "nonce": nonce,
+            "worker": "controller", "pid": 99, "workers_requested": 12, "exitstatus": 0, "start": 90.0, "end": 210.0})
+    return b"collecting ... collected 3 items\n" if phase == "serial" else b"created: 12/12 workers\n12 workers [3 items]\n"
+
+
+def _offline_diagnostic(tmp_path, monkeypatch, *, damage=None, damaged_phase="serial"):
+    from ai_commerce.remote import worker as module
+    _copy_remote_contracts(tmp_path)
+    monkeypatch.setattr(module, "_diagnostic_environment", lambda checkout: {})
+    monkeypatch.setattr(module, "_diagnostic_source", lambda *args: None)
+    calls = []
+    def child(argv, *, checkout, env):
+        calls.append(argv)
+        phase, nonce = env["AI_COMMERCE_B03_PHASE"], env["AI_COMMERCE_B03_NONCE"]
+        raw = _synthetic_diagnostic_artifacts(module, checkout, phase, nonce)
+        root = checkout / module.B03_DIAGNOSTIC_ROOT
+        if phase == damaged_phase:
+            junit = root / (phase + ".junit.xml")
+            collection = root / phase / ("serial" if phase == "serial" else "gw0")
+            if damage == "missing-junit":
+                junit.unlink()
+            elif damage == "fake-junit-only":
+                for path in (root / phase).iterdir():
+                    path.unlink()
+            elif damage == "unexpected-node":
+                junit.write_bytes(junit.read_bytes().replace(b"output-foreign", b"foreign-extra"))
+            elif damage == "skipped-node":
+                junit.write_bytes(junit.read_bytes().replace(b'skipped="0"', b'skipped="1"'))
+            elif damage == "zero-nodes":
+                junit.write_bytes(b'<testsuites><testsuite tests="0" /></testsuites>')
+            elif damage == "extra-node":
+                junit.write_bytes(junit.read_bytes().replace(b"</testsuite>", b'<testcase name="extra" /></testsuite>'))
+            elif damage == "missing-collection":
+                collection.with_suffix(".collection.json").unlink()
+            elif damage == "malformed-receipt":
+                collection.with_suffix(".session.json").write_bytes(b"{")
+            elif damage == "wrong-nonce":
+                path = collection.with_suffix(".collection.json")
+                receipt = json.loads(path.read_text())
+                receipt["nonce"] = "0" * 64
+                path.write_text(json.dumps(receipt))
+            elif damage == "duplicate-stage":
+                path = collection.with_suffix(".events.json")
+                receipt = json.loads(path.read_text())
+                receipt["events"].append(receipt["events"][0])
+                path.write_text(json.dumps(receipt))
+            elif damage == "worker-mismatch":
+                raw = b"created: 11/11 workers\n11 workers [3 items]\n"
+            elif damage == "spoofed-workers":
+                if phase == "serial":
+                    raw += b"created: 12/12 workers\n"
+                else:
+                    (root / phase / "gw11.collection.json").unlink()
+            elif damage == "timeout":
+                return 0, raw, "DIAGNOSTIC_TIMEOUT"
+            elif damage == "job-unavailable":
+                raise module.RemoteRequestError("DIAGNOSTIC_JOB_UNAVAILABLE")
+            elif damage == "nonzero-exit":
+                return 1, raw, ""
+            elif damage == "tamper-prior" and phase == "xdist":
+                (root / "serial.output.log").write_bytes(b"tampered")
+        return 0, raw + b"SECRET_TOKEN=C:/private/fixture\n", ""
+    monkeypatch.setattr(module, "_run_diagnostic_child", child)
+    def forbidden(*args, **kwargs):
+        pytest.fail("Offline control tests must never spawn or invoke Git/provider")
+    monkeypatch.setattr(module.subprocess, "Popen", forbidden)
+    monkeypatch.setattr(module.subprocess, "run", forbidden)
+    return module, calls
+
+
+def test_diagnostic_fixed_pair_and_evidence_control_only(tmp_path, monkeypatch):
+    module, calls = _offline_diagnostic(tmp_path, monkeypatch)
+    report = module.execute_diagnostic_batch(checkout=tmp_path, batch=diagnostic_packet(),
+        issuer_login="owner", owner_login="owner", issue_number=957)
+    assert report["status"] == "DIAGNOSTIC_COMPLETE" and report["executor_invoked"] is False
+    assert report["memory_policy"] == "NO_JOB_MEMORY_LIMIT" and report["memory_limit_bytes"] is None
+    assert report["authorization"] == "AUTHENTICATED_OWNER_HUMAN" and report["github_issue_number"] == 957
+    assert report["source_sha"] == diagnostic_packet()["source_sha"]
+    assert report["request_fingerprint"] == fingerprint(diagnostic_packet())
+    assert len(calls) == 2 and all(isinstance(argv, tuple) for argv in calls)
+    assert [argv[:3] for argv in calls] == [(sys.executable, "-m", "pytest")] * 2
+    assert "-n" not in calls[0] and calls[1][calls[1].index("-n") + 1] == "12"
+    assert all(tuple(a for a in argv if a.startswith("tests/")) == module.B03_DIAGNOSTIC_NODEIDS for argv in calls)
+    assert [c["workers_observed"] for c in report["cases"]] == [0, 12]
+    assert all(c["junit_nodeids"] == list(module.B03_DIAGNOSTIC_NODEIDS) for c in report["cases"])
+    assert all(c["elapsed_seconds"] > 0 and c["ended_at"] >= c["started_at"] for c in report["cases"])
+    for phase in ("serial", "xdist"):
+        root = tmp_path / module.B03_DIAGNOSTIC_ROOT
+        receipt = json.loads((root / (phase + ".result.json")).read_text())
+        assert receipt["memory_policy"] == "NO_JOB_MEMORY_LIMIT" and receipt["memory_limit_bytes"] is None
+        assert receipt["source_sha"] == report["source_sha"]
+        assert receipt["request_fingerprint"] == report["request_fingerprint"]
+        assert module._verify_diagnostic_receipt(root, receipt)
+        assert b"SECRET_TOKEN" not in (root / (phase + ".output.log")).read_bytes()
+        for ref, digest in receipt["artifacts"].items():
+            assert hashlib.sha256((root / ref).read_bytes()).hexdigest() == digest
+    # All subprocesses above were fakes. This test supplies NO Windows native proof.
+
+
+def test_diagnostic_elapsed_receipt_uses_high_resolution_clock_on_windows(tmp_path, monkeypatch):
+    """A coarse Windows monotonic tick must not zero genuine short intervals."""
+    module, calls = _offline_diagnostic(tmp_path, monkeypatch)
+    # Deliberately simulate a Windows monotonic clock that does not advance
+    # during either synthetic child; the high-resolution clock is independent.
+    with monkeypatch.context() as clock_patch:
+        clock_patch.setattr(module.time, "monotonic", lambda: 1234.0)
+        report = module.execute_diagnostic_batch(
+            checkout=tmp_path, batch=diagnostic_packet(),
+            issuer_login="owner", owner_login="owner", issue_number=957)
+    assert report["status"] == "DIAGNOSTIC_COMPLETE" and len(calls) == 2
+    assert all(case["elapsed_seconds"] > 0 for case in report["cases"])
+    root = tmp_path / module.B03_DIAGNOSTIC_ROOT
+    for phase in ("serial", "xdist"):
+        receipt = json.loads((root / (phase + ".result.json")).read_text())
+        assert module._verify_diagnostic_receipt(root, receipt)
+        receipt["elapsed_seconds"] = 0.0
+        assert module._verify_diagnostic_receipt(root, receipt) is False
+
+
+@pytest.mark.parametrize("phase", ["serial", "xdist"])
+@pytest.mark.parametrize("damage", ["missing-junit", "fake-junit-only", "unexpected-node", "skipped-node",
+    "zero-nodes", "extra-node", "missing-collection", "malformed-receipt", "wrong-nonce", "duplicate-stage",
+    "worker-mismatch", "spoofed-workers", "timeout", "job-unavailable", "nonzero-exit"])
+def test_diagnostic_fails_closed_on_unproven_native_evidence(tmp_path, monkeypatch, phase, damage):
+    module, calls = _offline_diagnostic(tmp_path, monkeypatch, damage=damage, damaged_phase=phase)
+    report = module.execute_diagnostic_batch(checkout=tmp_path, batch=diagnostic_packet(),
+        issuer_login="owner", owner_login="owner", issue_number=957)
+    assert report["status"] == "DIAGNOSTIC_FAILED" and report["error_code"]
+    assert report["native_proof"] == "WINDOWS_NATIVE_UNPROVEN"
+    assert report["executor_invoked"] is False and len(calls) <= 2
+    assert "SECRET_TOKEN" not in json.dumps(report)
+
+
+def test_diagnostic_rechecks_prior_artifact_hashes_after_pair(tmp_path, monkeypatch):
+    module, _ = _offline_diagnostic(tmp_path, monkeypatch, damage="tamper-prior", damaged_phase="xdist")
+    report = module.execute_diagnostic_batch(checkout=tmp_path, batch=diagnostic_packet(),
+        issuer_login="owner", owner_login="owner", issue_number=957)
+    assert report["status"] == "DIAGNOSTIC_FAILED"
+
+
+@pytest.mark.parametrize("mutation", ["artifact", "malformed", "exit", "workers", "clock",
+    "missing-memory-policy", "unknown-memory-policy", "legacy-memory-policy", "legacy-memory-cap",
+    "missing-memory-limit", "false-memory-limit", "extra-field"])
+def test_diagnostic_receipt_cannot_authorize_tampered_or_malformed_evidence(tmp_path, monkeypatch, mutation):
+    module, _ = _offline_diagnostic(tmp_path, monkeypatch)
+    report = module.execute_diagnostic_batch(checkout=tmp_path, batch=diagnostic_packet(),
+        issuer_login="owner", owner_login="owner", issue_number=957)
+    assert report["status"] == "DIAGNOSTIC_COMPLETE"
+    root = tmp_path / module.B03_DIAGNOSTIC_ROOT
+    receipt = json.loads((root / "serial.result.json").read_text())
+    if mutation == "artifact":
+        (root / "serial.junit.xml").write_bytes(b"tampered")
+    elif mutation == "malformed":
+        receipt = {"phase": "serial", "status": "DIAGNOSTIC_COMPLETE", "artifacts": receipt["artifacts"]}
+    elif mutation == "exit":
+        receipt["child_exit_code"] = 1
+    elif mutation == "workers":
+        receipt["workers_observed"] = 12
+    elif mutation == "clock":
+        receipt["elapsed_seconds"] = float("nan")
+    elif mutation == "missing-memory-policy":
+        del receipt["memory_policy"]
+    elif mutation == "unknown-memory-policy":
+        receipt["memory_policy"] = "ISSUE_SUPPLIED_POLICY"
+    elif mutation == "legacy-memory-policy":
+        receipt["memory_policy"] = "JOB_MEMORY_LIMIT"
+    elif mutation == "legacy-memory-cap":
+        receipt["memory_limit_bytes"] = 6 * 1024 ** 3
+    elif mutation == "missing-memory-limit":
+        del receipt["memory_limit_bytes"]
+    elif mutation == "false-memory-limit":
+        receipt["memory_limit_bytes"] = False
+    else:
+        receipt["extra_field"] = True
+    assert module._verify_diagnostic_receipt(root, receipt) is False
+
+
+@pytest.mark.parametrize("problem", ["issuer", "brain", "issue", "reuse"])
+def test_diagnostic_direct_route_reauthenticates_before_any_child(tmp_path, monkeypatch, problem):
+    module, calls = _offline_diagnostic(tmp_path, monkeypatch)
+    packet, issuer, issue_number = diagnostic_packet(), "owner", 957
+    if problem == "issuer":
+        issuer = "impersonator"
+    elif problem == "brain":
+        packet["actor"] = "BRAIN"
+    elif problem == "issue":
+        issue_number = 0
+    else:
+        (tmp_path / module.B03_DIAGNOSTIC_ROOT).mkdir(parents=True)
+    report = module.execute_diagnostic_batch(checkout=tmp_path, batch=packet,
+        issuer_login=issuer, owner_login="owner", issue_number=issue_number)
+    assert report["status"] == "DIAGNOSTIC_FAILED" and not calls
+
+
+@pytest.mark.parametrize("problem", ["source", "dirty", "operator"])
+def test_diagnostic_checks_exact_head_clean_source_and_loaded_operator(tmp_path, monkeypatch, problem):
+    from ai_commerce.remote import worker as module
+    monkeypatch.setattr(module, "check_source", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.subprocess, "run", lambda argv, **kw:
+                        subprocess.CompletedProcess(argv, 0, ("b" if problem == "source" else "a") * 40 + "\n", ""))
+    monkeypatch.setattr(module, "checkout_diagnostics", lambda *args, **kw: {"clean": problem != "dirty"})
+    monkeypatch.setattr(module, "__file__", str(tmp_path / ("wrong.py" if problem == "operator" else "src/ai_commerce/remote/worker.py")))
+    with pytest.raises(RemoteRequestError, match="^DIAGNOSTIC_(STALE_SOURCE|DIRTY_SOURCE|UNPINNED_OPERATOR)$"):
+        module._diagnostic_source(tmp_path, "a" * 40)
+
+
+@pytest.mark.parametrize("problem", ["windows", "venv", "binary"])
+def test_diagnostic_requires_real_windows_job_venv_and_both_media_tools(tmp_path, monkeypatch, problem):
+    from types import SimpleNamespace
+    from ai_commerce.remote import worker as module
+    import os
+    venv = tmp_path / "venv"
+    monkeypatch.setattr(module, "os", SimpleNamespace(name="posix" if problem == "windows" else "nt",
+                                                      environ={**os.environ, "VIRTUAL_ENV": str(venv)}))
+    monkeypatch.setattr(module, "sys", SimpleNamespace(platform="win32", prefix=str(venv),
+        base_prefix=str(tmp_path / "base"),
+        executable=str(tmp_path / "wrong.exe" if problem == "venv" else venv / "Scripts/python.exe")))
+    monkeypatch.setattr(module, "platform", SimpleNamespace(system=lambda: "Windows"))
+    monkeypatch.setattr(module, "shutil", SimpleNamespace(
+        which=lambda name: None if problem == "binary" and name == "ffprobe" else name + ".exe"))
+    with pytest.raises(RemoteRequestError, match="^DIAGNOSTIC_(WINDOWS_REQUIRED|ISOLATED_PYTHON_REQUIRED|MEDIA_BINARY_MISSING)$"):
+        module._diagnostic_environment(tmp_path)
+
+
+def test_diagnostic_environment_clears_pytest_injection_and_preserves_git_guards(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from ai_commerce.remote import worker as module
+    import os
+    venv = tmp_path / "venv"
+    environment = {**os.environ, "VIRTUAL_ENV": str(venv), "PYTEST_ADDOPTS": "--arbitrary",
+                   "PYTEST_PLUGINS": "untrusted", "AI_COMMERCE_B03_NONCE": "forged",
+                   "GITHUB_TOKEN": "SECRET", "AI_COMMERCE_GIT_GUARD_SENTINEL": "keep",
+                   "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "test.guard", "GIT_CONFIG_VALUE_0": "keep"}
+    monkeypatch.setattr(module, "os", SimpleNamespace(name="nt", environ=environment))
+    monkeypatch.setattr(module, "sys", SimpleNamespace(platform="win32", prefix=str(venv),
+        base_prefix=str(tmp_path / "base"), executable=str(venv / "Scripts/python.exe")))
+    monkeypatch.setattr(module, "platform", SimpleNamespace(system=lambda: "Windows"))
+    monkeypatch.setattr(module, "shutil", SimpleNamespace(which=lambda name: name + ".exe"))
+    env = module._diagnostic_environment(tmp_path)
+    assert "PYTEST_ADDOPTS" not in env and "GITHUB_TOKEN" not in env and "AI_COMMERCE_B03_NONCE" not in env
+    assert env["PYTEST_PLUGINS"] == "xdist.plugin" and env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
+    for key in ("AI_COMMERCE_GIT_GUARD_SENTINEL", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"):
+        assert env[key] == environment[key]
+
+
+def test_diagnostic_child_timeout_kills_job_before_returning(tmp_path, monkeypatch):
+    """Fake process and Job only; no native B0.3 commands are executed."""
+    from types import SimpleNamespace
+    from ai_commerce.remote import worker as module
+    events, state = [], {"done": False}
+    class Child:
+        returncode = 1
+        def poll(self):
+            return 1 if state["done"] else None
+        def wait(self, timeout):
+            return 1
+    def stop():
+        events.append("stop")
+        state["done"] = True
+    job = SimpleNamespace(attach=lambda child: events.append("attach"), stop=stop,
+                          close=lambda: events.append("close"))
+    monkeypatch.setattr(module, "_windows_diagnostic_job", lambda: job)
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *args, **kwargs: Child())
+    clock = iter((0.0, 601.0))
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    result = module._run_diagnostic_child(module._B03_COMMANDS[0], checkout=tmp_path, env={})
+    assert result == (1, b"", "DIAGNOSTIC_TIMEOUT")
+    assert events == ["attach", "stop", "close"]
+
+
+def _offline_windows_diagnostic_job(monkeypatch, *, failure=None):
+    """Exercise the real Job helper with API/process fakes, never native runs."""
+    import ctypes
+    from types import SimpleNamespace
+    from ai_commerce.remote import worker as module
+    events, configured = [], []
+    state = {"child": None, "assigned": False, "queries": 0}
+
+    class Function:
+        def __init__(self, name, callback):
+            self.name, self.callback = name, callback
+        def __call__(self, *args):
+            events.append(self.name)
+            return self.callback(*args)
+
+    class Child:
+        _handle = 456
+        returncode = None
+        def poll(self):
+            return self.returncode
+        def kill(self):
+            events.append("child-kill")
+            self.returncode = 1
+        def wait(self, timeout):
+            assert self.returncode is not None and timeout == 10
+            events.append("child-wait")
+            return self.returncode
+
+    def configure(handle, kind, pointer, size):
+        limits = pointer._obj
+        assert handle == 123 and kind == 9 and size == ctypes.sizeof(limits)
+        configured.append((limits.basic.flags, limits.process_memory, limits.job_memory))
+        return failure != "configure"
+
+    def assign(handle, child_handle):
+        assert handle == 123 and child_handle.value == Child._handle
+        if failure == "attach-exception":
+            raise OSError("synthetic assignment exception")
+        if failure == "attach":
+            return 0
+        state["assigned"] = True
+        return 1
+
+    def resume(child_handle):
+        assert state["assigned"] and child_handle.value == Child._handle
+        if failure == "resume":
+            return 1
+        state["child"].returncode = 0
+        return 0
+
+    def terminate_child():
+        if state["assigned"] and state["child"].returncode is None:
+            state["child"].returncode = 1
+
+    def terminate(handle, code):
+        assert handle == 123 and code == 1
+        if failure == "terminate":
+            return 0
+        terminate_child()
+        return 1
+
+    def query(handle, kind, pointer, size, returned):
+        assert handle == 123 and kind == 1 and size == ctypes.sizeof(pointer._obj) and returned is None
+        if failure == "query":
+            return 0
+        state["queries"] += 1
+        # A descendant outlives the direct child until the second observation.
+        pointer._obj.active = int(state["assigned"] and state["queries"] == 1)
+        return 1
+
+    def close(handle):
+        assert handle == 123
+        terminate_child()
+        return 1
+
+    # No GlobalMemoryStatusEx symbol: even querying minimum RAM fails this fixture.
+    kernel = SimpleNamespace(**{name: Function(name, callback) for name, callback in {
+        "CreateJobObjectW": lambda *args: 0 if failure == "create" else 123,
+        "SetInformationJobObject": configure, "AssignProcessToJobObject": assign,
+        "TerminateJobObject": terminate, "QueryInformationJobObject": query, "CloseHandle": close,
+    }.items()})
+    native = SimpleNamespace(NtResumeProcess=Function("NtResumeProcess", resume))
+    monkeypatch.setattr(ctypes, "WinDLL", lambda name, **kwargs: {"kernel32": kernel, "ntdll": native}[name],
+                        raising=False)
+
+    def spawn(argv, **kwargs):
+        assert argv in module._B03_COMMANDS and kwargs["creationflags"] == 0x08000004
+        events.append("spawn-suspended")
+        state["child"] = Child()
+        return state["child"]
+    monkeypatch.setattr(module.subprocess, "Popen", spawn)
+    monkeypatch.setattr(module, "time", SimpleNamespace(time=time.time, perf_counter_ns=time.perf_counter_ns,
+        monotonic=lambda: 0.0,
+        sleep=lambda seconds: events.append("wait-descendants")))
+    return module, events, configured
+
+
+def test_diagnostic_job_has_no_ram_admission_or_memory_cap_and_retains_containment(tmp_path, monkeypatch):
+    module, events, configured = _offline_windows_diagnostic_job(monkeypatch)
+    assert module._B03_MEMORY_POLICY == "NO_JOB_MEMORY_LIMIT"
+    assert module._B03_TIMEOUT == 600 and module._B03_OUTPUT_LIMIT == 8 * 1024 ** 2
+    assert module._run_diagnostic_child(module._B03_COMMANDS[0], checkout=tmp_path, env={}) == (0, b"", "")
+    # Only KILL_ON_JOB_CLOSE; neither JOB_MEMORY (0x200) nor PROCESS_MEMORY (0x100).
+    assert configured == [(0x2000, 0, 0)]
+    assert events == ["CreateJobObjectW", "SetInformationJobObject", "spawn-suspended",
+        "AssignProcessToJobObject", "NtResumeProcess", "child-wait", "TerminateJobObject",
+        "QueryInformationJobObject", "wait-descendants", "QueryInformationJobObject", "CloseHandle"]
+
+
+@pytest.mark.parametrize("failure,error_code", [
+    ("create", "DIAGNOSTIC_JOB_UNAVAILABLE"), ("configure", "DIAGNOSTIC_JOB_CONFIGURATION_FAILED"),
+    ("attach", "DIAGNOSTIC_JOB_ASSIGN_FAILED"), ("attach-exception", "DIAGNOSTIC_EXECUTION_UNPROVEN"),
+    ("resume", "DIAGNOSTIC_CHILD_RESUME_FAILED"),
+    ("terminate", "DIAGNOSTIC_CHILD_TERMINATION_UNPROVEN"),
+    ("query", "DIAGNOSTIC_CHILD_TERMINATION_UNPROVEN"),
+])
+def test_diagnostic_job_failures_reject_before_spawn_or_native_success(tmp_path, monkeypatch, failure, error_code):
+    from ai_commerce.remote import worker as module
+    run_child = module._run_diagnostic_child
+    _offline_diagnostic(tmp_path, monkeypatch)
+    monkeypatch.setattr(module, "_run_diagnostic_child", run_child)
+    module, events, _ = _offline_windows_diagnostic_job(monkeypatch, failure=failure)
+    report = module.execute_diagnostic_batch(checkout=tmp_path, batch=diagnostic_packet(),
+        issuer_login="owner", owner_login="owner", issue_number=957)
+    assert report["status"] == "DIAGNOSTIC_FAILED" and report["error_code"] == error_code
+    assert report["native_proof"] == "WINDOWS_NATIVE_UNPROVEN" and report["succeeded"] == 0
+    assert report["executor_invoked"] is False and len(report["cases"]) == 1
+    assert report["cases"][0]["status"] == "DIAGNOSTIC_FAILED"
+    assert report["memory_policy"] == "NO_JOB_MEMORY_LIMIT" and report["memory_limit_bytes"] is None
+    if failure == "create":
+        assert events == ["CreateJobObjectW"]
+    elif failure == "configure":
+        assert events == ["CreateJobObjectW", "SetInformationJobObject", "CloseHandle"]
+    else:
+        assert events.count("spawn-suspended") == 1 and events.count("CloseHandle") == 1
+        if failure in ("attach", "attach-exception"):
+            assert "NtResumeProcess" not in events
+            assert "child-kill" in events and "child-wait" in events
+        if failure in ("terminate", "query"):
+            assert "NtResumeProcess" in events  # Even a zero-exit child cannot bypass cleanup proof.
+
+
+@pytest.mark.parametrize("feedback_fails", [False, True])
+def test_diagnostic_cli_routes_before_schedule_and_never_emits_wake(tmp_path, monkeypatch, capsys, feedback_fails):
+    from types import SimpleNamespace
+    from ai_commerce.remote import __main__ as cli
+    module, calls = _offline_diagnostic(tmp_path, monkeypatch)
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps(diagnostic_packet()), encoding="utf-8")
+    monkeypatch.setattr(cli, "check_source", lambda *args, **kwargs: None)
+    def forbidden(*args, **kwargs):
+        pytest.fail("No source scheduler/worker, acceptance, provider, candidate or wake permitted")
+    for name in ("validate_acceptance_scope", "LocalBatchWorker", "run_schedule", "build_completion_event", "start_worker_signal"):
+        monkeypatch.setattr(cli, name, forbidden)
+    comments = []
+    def comment(issue, body):
+        comments.append((issue, body))
+        if feedback_fails:
+            raise RuntimeError("SECRET_FEEDBACK")
+    monkeypatch.setattr(cli, "GitHubTransport", lambda *args: SimpleNamespace(comment=comment))
+    arguments = ["--request-file", str(request), "--checkout", str(tmp_path),
+                 "--issuer-login", "owner", "--owner-login", "owner", "--issue-number", "957"]
+    assert cli.main(["validate", *arguments]) == 0
+    assert not calls
+    assert json.loads(capsys.readouterr().out)["native_proof"] == "NOT_YET_RUN"
+    assert cli.main(["run", *arguments]) == (1 if feedback_fails else 0)
+    result = json.loads((tmp_path / module.B03_DIAGNOSTIC_ROOT / "batch_result.json").read_text())
+    assert result["status"] == "DIAGNOSTIC_COMPLETE" and len(calls) == 2
+    assert result["feedback_status"] == ("FEEDBACK_PUBLICATION_FAILED" if feedback_fails else "GITHUB_ISSUE_COMMENT_PUBLISHED")
+    assert len(comments) == 1 and "SECRET_FEEDBACK" not in json.dumps(result)
+    assert not (tmp_path / module.B03_DIAGNOSTIC_ROOT / "completion_event.json").exists()
