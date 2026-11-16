@@ -455,7 +455,7 @@ _WINDOWS_NATIVE_APIS = MappingProxyType({
 })
 _WINDOWS_PROVIDER_BLOCKERS = (
     "HOSTED_WINDOWS_RUNNER_PROVENANCE_UNVERIFIED",
-    "NATIVE_APPCONTAINER_LAUNCHER_NOT_IMPLEMENTED",
+    "NATIVE_APPCONTAINER_LAUNCHER_NOT_INDEPENDENTLY_PROVEN",
     "HANDLE_BASED_READONLY_SNAPSHOT_UNPROVEN",
     "NATIVE_DENIAL_AND_JOB_CLEANUP_UNPROVEN",
     "SANDBOX_COLLECTION_ADAPTER_NOT_CONNECTED",
@@ -501,6 +501,25 @@ def windows_collection_native_support(*, enabled: bool = False) -> dict:
     return receipt
 
 
+def windows_collection_native_probe(*, enabled: bool = False, repository: Path | None = None,
+                                    candidate_sha: str | None = None,
+                                    source_sha256: str | None = None,
+                                    profile_sha256: str | None = None,
+                                    environment_sha256: str | None = None,
+                                    fault: str = "none") -> dict:
+    """Explicit inert-only provider; never connected to collection or run profiles.
+
+    The provider authenticates signed hosted provenance and exact-head source
+    before native effects. An observed fixture receipt still cannot lift the
+    P1-A/P1-B1/P1-B2/P1-B2b barriers or authorize candidate imports.
+    """
+    from .windows_collection_sandbox import run_inert_probe
+
+    return run_inert_probe(enabled=enabled, repository=repository, candidate_sha=candidate_sha,
+                           source_sha256=source_sha256, profile_sha256=profile_sha256,
+                           environment_sha256=environment_sha256, fault=fault)
+
+
 def _windows_provider_path(value: object, *, absolute: bool) -> str:
     """Lexical admission only. No resolve/stat/open; junction safety stays HOLD."""
     if not isinstance(value, str) or not 1 <= len(value) <= 240:
@@ -530,8 +549,9 @@ def windows_collection_provider_preflight(*, enabled: bool = False, binding: obj
     This API neither authenticates a hosted runner nor verifies file handles,
     ACLs, token capabilities, a Job, elapsed time or cleanup. It deliberately
     accepts no launcher, runner flags, credentials or command overrides.
-    There is no native probe until independent hosted-runner authorization is
-    available. Future probes may run only generated inert fixtures, and must
+    The separate native provider authenticates hosted-runner authorization;
+    this offline preflight cannot consume its receipts as authority. Probes
+    may run only generated inert fixtures, and must
     create an AppContainer with zero network capabilities, create a suspended
     child, assign/confirm its no-breakaway kill-on-close Job BEFORE resume,
     and retain handles to reject source/scratch reparse replacement races.
@@ -679,8 +699,8 @@ def bounded_windows_collection(*, enabled: bool = False, expected_binding: objec
 
     Collection imports arbitrary candidate code. Environment filtering and a
     timeout (even taskkill /T) cannot attest filesystem/network isolation or
-    race-free descendant termination. This two-file owner has no reviewed
-    native isolation provider, so enabling this API MUST NOT launch Python.
+    race-free descendant termination. The separate inert native provider has
+    no reviewed collection adapter, so enabling this API MUST NOT launch Python.
     Caller flags, hook events and source hashes cannot supply that authority.
 
     Companion PR contract, before any launcher can be enabled:
@@ -1034,7 +1054,8 @@ def approved_groups() -> tuple[TestGroup, ...]:
         # requires tests/test_minimum_test.py for this exact script path.
         # This is a CONSUMER-only addition: keep registered test argv unchanged.
         TestGroup("mt01", ("tests/test_minimum_test.py",), ("MT01.selection-and-evidence",),
-                  (eng + "minimum_test.py", eng + "verification.py"),
+                  (eng + "minimum_test.py", eng + "verification.py",
+                   eng + "windows_collection_sandbox.py"),
                   (eng + "runner.py", rem + "worker.py", "scripts/HostOps-V4-InstallPlan.ps1",
                    "config/hostops-v3/config-v4.example.json")),
         TestGroup("ef01p", ("tests/test_ef01_performance.py",), ("EF01P.git-and-host-budget",),
