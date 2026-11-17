@@ -1,4 +1,4 @@
-"""WAKEHUB.runtime-r0: R1 source closure, never Windows native host proof.
+"""WAKEHUB.runtime-r0: R0/R1/R2 source closure, never Windows native host proof.
 
 Only custody observation is stubbed for deterministic cross-OS temporary files.
 Windows fixture files inherit an explicit process-SID grant, rather than relying
@@ -6,6 +6,7 @@ on the temporary directory's potentially non-inheritable OWNER RIGHTS grant.
 Private SQLite durability, provenance checks, actual A03 consumer and P0
 receipt validation execute normally. No Git, browser, login or external writes.
 """
+from contextlib import contextmanager
 from dataclasses import FrozenInstanceError, asdict, replace
 import hashlib
 import hmac
@@ -15,6 +16,7 @@ import os
 import socket
 import sqlite3
 import subprocess
+from types import SimpleNamespace
 import zipfile
 
 import pytest
@@ -662,6 +664,13 @@ def ingress(composition, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(local))
     monkeypatch.setenv("AI_COMMERCE_GITHUB_READ_TOKEN", "fixture-read-only-token")
     monkeypatch.setenv("AI_COMMERCE_WAKE_HMAC_KEY_HEX", key.hex())
+
+    def no_native_operator():
+        raise r.chrome_acquisition._EnrollmentHold("WINDOWS_INTERACTIVE_REQUIRED")
+
+    # All native identity/desktop reads require an explicit offline adapter in
+    # these tests, including when EF01 executes them on a Windows CI host.
+    monkeypatch.setattr(r.chrome_acquisition, "_enrollment_operator", no_native_operator)
     calls = []
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, "w") as zipped:
@@ -698,13 +707,13 @@ def test_cli_composes_actual_exact_run_reader_and_independent_d5_authority(ingre
     i = ingress
     assert main(["run", "--config", str(i["config_path"]), "--repository-root", str(i["root"])]) == 2
     result = json.loads(capsys.readouterr().out)
-    assert result == asdict(r.Result("HOLD", "SOURCE_READY_NATIVE_UNKNOWN", "GITHUB_AUTHENTICATED"))
+    assert result == asdict(r.Result("HOLD", "WINDOWS_INTERACTIVE_REQUIRED", "GITHUB_AUTHENTICATED"))
     assert len(i["calls"]) == 6  # Reader AND independently authenticated artifact verifier.
     path = r.Path(i["config"]["journal"])
     assert record(path, r.Event(i["event"]["event_id"], "a" * 40, 1, digest(i["event"]),
                                "GITHUB_AUTHENTICATED"), i["registration"])["history"] == ["PENDING"]
     again = r.run_read_only(i["config_path"], i["root"])
-    assert again.code == "SOURCE_READY_NATIVE_UNKNOWN"
+    assert again.code == "WINDOWS_INTERACTIVE_REQUIRED"
 
 
 @pytest.mark.parametrize("drift,code", [
@@ -803,3 +812,356 @@ def test_typed_consumer_receipt_from_another_event_cannot_ack(composition):
     runner = make(brain=r.SyntheticBrain(r.synthetic_handoff(other, registration)))
     assert runner.run_once().code == "HANDOFF_EVENT_MISMATCH"
     assert runner.orchestrator._completed == {}
+
+
+class ReadOnlyPage:
+    def __init__(self, url, surface="CANDIDATE_READY"):
+        self.url, self.surface = url, surface
+        self.reads = 0
+
+    def evaluate(self, script):
+        assert script == r.cdp_doorbell._CHAT_A_READ_ONLY_SURFACE
+        self.reads += 1
+        return self.surface
+
+
+class ReadOnlyBrowser:
+    def __init__(self, pages):
+        self.items = [SimpleNamespace(pages=pages)]
+        self.reads = 0
+
+    @contextmanager
+    def contexts(self, endpoint):
+        assert endpoint == "http://127.0.0.1:9444"
+        self.reads += 1
+        yield self.items
+
+    def preload(self, *args, **kwargs):
+        pytest.fail("R2 has no native preload capability")
+
+
+@pytest.fixture
+def native_ingress(ingress, monkeypatch):
+    """Mock native adapters; execute the actual Chrome identity/surface policy.
+
+    A successful mocked owner observation remains source-only and cannot attest
+    an account, authorize navigation, or produce a native success receipt.
+    """
+    i = ingress
+    acq = r.chrome_acquisition
+    env = acq.load_environment(r.Path(i["config"]["chrome_config"]), i["root"],
+                               local_app_data=r.Path(os.environ["LOCALAPPDATA"]))
+    sid = "S-1-5-21-111-222-333-1001"
+    process = {"ProcessId": 13, "ExecutablePath": str(env.executable),
+               "CommandLine": json.dumps(env.command()), "SessionId": 7,
+               "OwnerSid": sid, "CreationDate": "2026-11-17T00:00:00.0000000Z"}
+    inventory = {"listeners": [{"LocalAddress": "127.0.0.1", "LocalPort": 9444,
+                                 "OwningProcess": 13}], "processes": [process]}
+    page = ReadOnlyPage(i["registration"].binding.chat_url)
+    browser = ReadOnlyBrowser([page])
+    native_calls = []
+    monkeypatch.setattr(acq, "_enrollment_operator",
+                        lambda: (r.Path(os.environ["LOCALAPPDATA"]), 7, sid))
+    # These three operations require actual Windows custody/signature evidence.
+    monkeypatch.setattr(acq, "_read_9444_config", lambda *a: env)
+    monkeypatch.setattr(acq, "_require_operator_control", lambda *a: None)
+    monkeypatch.setattr(acq, "_check_enrollment_custody", lambda *a: None)
+    monkeypatch.setattr(acq, "_commandline_argv", json.loads)
+
+    def query(port):
+        assert port == 9444
+        native_calls.append("inventory")
+        return json.loads(json.dumps(inventory))
+
+    def probe(current):
+        assert current == env
+        native_calls.append("protocol")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("R2 crossed a native effect or Send boundary")
+
+    monkeypatch.setattr(acq, "_query_windows", query)
+    monkeypatch.setattr(acq, "_probe_cdp", probe)
+    monkeypatch.setattr(acq, "run", forbidden)
+    monkeypatch.setattr(acq, "_start_or_reuse_9444", forbidden)
+    monkeypatch.setattr(r.NativeChrome9444, "send", forbidden)
+    monkeypatch.setattr(r.LocalChromeDoorbellAdapter, "send_wake", forbidden)
+    monkeypatch.setattr(r.cdp_doorbell, "_PlaywrightInventory", lambda: browser)
+    return {**i, "environment": env, "inventory": inventory, "process": process,
+            "page": page, "browser": browser, "native_calls": native_calls}
+
+
+def assert_read_only_pending(i):
+    path = r.Path(i["config"]["journal"])
+    event = r.Event(i["event"]["event_id"], "a" * 40, 1, digest(i["event"]), "GITHUB_AUTHENTICATED")
+    saved = record(path, event, i["registration"])
+    assert saved["history"] == ["PENDING"] and saved["code"] == "EVENT_PENDING"
+    assert saved["evidence"] == {}
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+    return saved
+
+
+def test_r2_owned_reuse_reads_exact_surface_and_never_reserves_or_duplicates(native_ingress):
+    i = native_ingress
+    runner = r.compose_read_only(i["config_path"], i["root"])
+    assert runner.sender.adapter.allow_submit is False
+    for _ in range(2):
+        assert runner.run_once() == r.Result(
+            "HOLD", "EXACT_CHAT_CANDIDATE_ACCOUNT_MARKER_UNATTESTED", "GITHUB_AUTHENTICATED")
+        assert_read_only_pending(i)
+        assert runner.orchestrator._completed == {}
+    assert i["native_calls"] == ["inventory", "protocol"] * 6
+    assert i["page"].reads == i["browser"].reads == 2
+
+
+@pytest.mark.parametrize("allow_launch", [False, True])
+def test_r2_clean_absence_never_launches_even_with_launch_config(native_ingress, monkeypatch, allow_launch):
+    i = native_ingress
+    i["inventory"].update(listeners=[], processes=[])
+    i["chrome"]["allow_launch"] = allow_launch
+    i["save"](r.Path(i["config"]["chrome_config"]), i["chrome"])
+    env = replace(i["environment"], allow_launch=allow_launch)
+    monkeypatch.setattr(r.chrome_acquisition, "_read_9444_config", lambda *a: env)
+    result = r.run_read_only(i["config_path"], i["root"])
+    assert result == r.Result("HOLD", "CHROME_NOT_RUNNING_NATIVE_LAUNCH_CAPABILITY_REQUIRED",
+                              "GITHUB_AUTHENTICATED")
+    assert i["native_calls"] == ["inventory", "inventory"] and i["browser"].reads == 0
+    assert_read_only_pending(i)
+
+
+@pytest.mark.parametrize("fault,code", [
+    ("dirty", "PROFILE_ALREADY_ACTIVE_NO_CDP"),
+    ("session", "BROWSER_OWNERSHIP_UNPROVEN"),
+    ("sid", "BROWSER_OWNERSHIP_UNPROVEN"),
+    ("profile", "BROWSER_OWNERSHIP_UNPROVEN"),
+    ("foreign", "BROWSER_OWNERSHIP_UNPROVEN"),
+    ("two_listeners", "BROWSER_OWNERSHIP_UNPROVEN"),
+    ("two_owners", "BROWSER_OWNERSHIP_UNPROVEN"),
+    ("orphan_child", "BROWSER_OWNERSHIP_UNPROVEN"),
+    ("wrong_port", "WINDOWS_PROBE_INVALID"),
+    ("wildcard", "CDP_NOT_LOOPBACK_OWNED"),
+    ("boolean", "WINDOWS_PROBE_INVALID"),
+])
+def test_r2_rejects_native_identity_failures_before_browser_read(native_ingress, monkeypatch, fault, code):
+    i = native_ingress
+    if fault == "dirty":
+        i["inventory"]["listeners"] = []
+    elif fault in ("session", "sid", "foreign"):
+        field, value = {"session": ("SessionId", 0), "sid": ("OwnerSid", "S-1-5-18"),
+                        "foreign": ("ExecutablePath", "foreign.exe")}[fault]
+        i["process"][field] = value
+    elif fault == "profile":
+        argv = i["environment"].command()
+        argv[2] = "--profile-directory=Other"
+        i["process"]["CommandLine"] = json.dumps(argv)
+    elif fault == "two_listeners":
+        i["inventory"]["listeners"] *= 2
+    elif fault == "two_owners":
+        i["inventory"]["processes"].append({**i["process"], "ProcessId": 14})
+    elif fault == "orphan_child":
+        i["inventory"]["listeners"] = []
+        i["process"]["CommandLine"] = json.dumps([str(i["environment"].executable), "--type=renderer"])
+    elif fault in ("wrong_port", "wildcard"):
+        i["inventory"]["listeners"][0]["LocalPort" if fault == "wrong_port" else "LocalAddress"] = (
+            9333 if fault == "wrong_port" else "0.0.0.0")
+    else:
+        monkeypatch.setattr(r.chrome_acquisition, "_query_windows", lambda *a: True)
+    result = r.run_read_only(i["config_path"], i["root"])
+    assert result.status == "HOLD" and result.code == code
+    assert i["browser"].reads == 0 and "protocol" not in i["native_calls"]
+    assert_read_only_pending(i)
+
+
+@pytest.mark.parametrize("fault,code", [
+    ("cdp", "CDP_PROTOCOL_UNAVAILABLE"),
+    ("inventory", "WINDOWS_PROBE_UNAVAILABLE"),
+    ("lock", "ENROLLMENT_PROFILE_LOCK_UNPROVEN"),
+    ("profile_lock", "PROFILE_LOCK_HOLD"),
+    ("config", "CHROME_ENROLLMENT_DRIFT"),
+])
+def test_r2_owner_dependencies_return_typed_holds(native_ingress, monkeypatch, fault, code):
+    i = native_ingress
+
+    def blocked(*args):
+        raise r.chrome_acquisition.AcquisitionBlocked(code)
+
+    if fault == "config":
+        monkeypatch.setattr(r.chrome_acquisition, "_read_9444_config",
+                            lambda *a: replace(i["environment"], profile_directory="Other"))
+    elif fault == "profile_lock":
+        (i["environment"].user_data_dir / i["environment"].profile_directory /
+         r.chrome_acquisition._MARKERS[0]).touch()
+    else:
+        method = {"cdp": "_probe_cdp", "inventory": "_query_windows",
+                  "lock": "_check_enrollment_custody"}[fault]
+        monkeypatch.setattr(r.chrome_acquisition, method, blocked)
+    result = r.run_read_only(i["config_path"], i["root"])
+    assert result.status == "HOLD" and result.code == code
+    assert i["browser"].reads == 0
+    assert_read_only_pending(i)
+
+
+@pytest.mark.parametrize("fault,code", [
+    ("wrong_chat", "EXACT_CHAT_ABSENT_NATIVE_PRELOAD_CAPABILITY_REQUIRED"),
+    ("two_contexts", "EXACT_CHAT_CONTEXT_AMBIGUOUS"),
+    ("two_exact_tabs", "EXACT_CHAT_TAB_AMBIGUOUS"),
+    ("draft", "PRELOAD_DRAFT_PRESENT"),
+    ("login", "PRELOAD_SURFACE_UNPROVEN"),
+    ("wrong_account", "EXACT_CHAT_CANDIDATE_ACCOUNT_MARKER_UNATTESTED"),
+    ("unattested_marker", "EXACT_CHAT_CANDIDATE_ACCOUNT_MARKER_UNATTESTED"),
+    ("boolean_surface", "PRELOAD_SURFACE_UNPROVEN"),
+])
+def test_r2_exact_chat_candidate_is_not_native_attestation(native_ingress, fault, code):
+    i = native_ingress
+    browser, page = i["browser"], i["page"]
+    if fault == "wrong_chat":
+        page.url = page.url[:-1] + "2"
+    elif fault == "two_contexts":
+        browser.items.append(SimpleNamespace(pages=[]))
+    elif fault == "two_exact_tabs":
+        browser.items[0].pages.append(ReadOnlyPage(page.url))
+    elif fault in ("draft", "login", "boolean_surface"):
+        page.surface = {"draft": "DRAFT_PRESENT", "login": "SURFACE_UNPROVEN",
+                        "boolean_surface": True}[fault]
+    elif fault == "wrong_account":
+        page.account = "another-account"  # A URL/surface does not verify this.
+    else:
+        page.marker = i["registration"].marker  # Nor can copied marker text do so.
+    original_url, original_surface = page.url, page.surface
+    result = r.run_read_only(i["config_path"], i["root"])
+    assert result.status == "HOLD" and result.code == code
+    assert (page.url, page.surface) == (original_url, original_surface)
+    assert_read_only_pending(i)
+
+
+def test_r2_preserves_unrelated_tabs_and_drafts(native_ingress):
+    i = native_ingress
+    unrelated = ReadOnlyPage("https://chatgpt.com/c/00000000-0000-0000-0000-000000000002", "DRAFT_PRESENT")
+    i["browser"].items[0].pages.append(unrelated)
+    result = r.run_read_only(i["config_path"], i["root"])
+    assert result.code == "EXACT_CHAT_CANDIDATE_ACCOUNT_MARKER_UNATTESTED"
+    assert unrelated.reads == 0 and unrelated.surface == "DRAFT_PRESENT"
+    assert_read_only_pending(i)
+
+
+def test_r2_no_preload_capability_even_with_launch_enabled_config(native_ingress, monkeypatch):
+    i = native_ingress
+    i["browser"].items[0].pages.clear()
+    i["chrome"]["allow_launch"] = True
+    i["save"](r.Path(i["config"]["chrome_config"]), i["chrome"])
+    env = replace(i["environment"], allow_launch=True)
+    monkeypatch.setattr(r.chrome_acquisition, "_read_9444_config", lambda *a: env)
+    # The protocol mock checks the original fixture environment by design.
+    monkeypatch.setattr(r.chrome_acquisition, "_probe_cdp", lambda *a: None)
+    assert r.run_read_only(i["config_path"], i["root"]).code == (
+        "EXACT_CHAT_ABSENT_NATIVE_PRELOAD_CAPABILITY_REQUIRED")
+    assert i["browser"].items[0].pages == []
+    assert_read_only_pending(i)
+
+
+def test_r2_missing_origin_grant_prevents_all_native_reads(native_ingress):
+    i = native_ingress
+    i["grants"]["grants"][0]["signature"] = "f" * 64
+    i["save"](r.Path(i["config"]["grants"]), i["grants"])
+    assert r.run_read_only(i["config_path"], i["root"]).code == "MISSING_GRANT"
+    assert i["native_calls"] == [] and i["browser"].reads == 0
+    assert_read_only_pending(i)
+
+
+def test_r2_lost_native_evidence_is_unknown_and_stays_pending(native_ingress, monkeypatch):
+    i = native_ingress
+    calls = []
+
+    def query(port):
+        assert port == 9444
+        calls.append(port)
+        if len(calls) > 1:
+            raise r.chrome_acquisition.AcquisitionBlocked("WINDOWS_PROBE_UNAVAILABLE")
+        return json.loads(json.dumps(i["inventory"]))
+
+    monkeypatch.setattr(r.chrome_acquisition, "_query_windows", query)
+    assert r.run_read_only(i["config_path"], i["root"]).code == "CHROME_OBSERVATION_UNKNOWN"
+    assert i["browser"].reads == 0
+    assert_read_only_pending(i)
+
+
+@pytest.mark.parametrize("drift", ["generation", "marker", "source", "chat", "grant", "profile"])
+def test_r2_rechecks_immutable_authority_after_browser_read(native_ingress, monkeypatch, drift):
+    i = native_ingress
+    original = i["page"].evaluate
+
+    def change(script):
+        code = original(script)
+        if drift in ("generation", "chat"):
+            i["registry"]["routes"][0]["generation" if drift == "generation" else "chat_url"] = (
+                2 if drift == "generation" else i["registration"].binding.chat_url[:-1] + "2")
+            i["save"](r.Path(i["config"]["registry"]), i["registry"])
+        elif drift == "source":
+            i["registered"]["intent"]["source_sha"] = "f" * 40
+            i["save"](r.Path(i["config"]["registered_source"]), i["registered"])
+        elif drift == "grant":
+            i["grants"]["grants"][0]["signature"] = "f" * 64
+            i["save"](r.Path(i["config"]["grants"]), i["grants"])
+        elif drift == "profile":
+            i["chrome"]["profile_directory"] = "Other"
+            i["save"](r.Path(i["config"]["chrome_config"]), i["chrome"])
+        else:
+            i["config"]["marker"] = "stale"
+            i["save"](i["config_path"], i["config"])
+        return code
+
+    monkeypatch.setattr(i["page"], "evaluate", change)
+    assert r.run_read_only(i["config_path"], i["root"]).code == "LOCAL_AUTHORITY_DRIFT"
+    assert_read_only_pending(i)
+
+
+@pytest.mark.parametrize("fault", ["restart", "crash", "url"])
+def test_r2_native_drift_or_crash_during_surface_read_never_replays(native_ingress, monkeypatch, fault):
+    i = native_ingress
+    original = i["page"].evaluate
+
+    def change(script):
+        code = original(script)
+        if fault == "restart":
+            i["process"]["CreationDate"] = "2026-11-17T00:01:00.0000000Z"
+        elif fault == "crash":
+            i["inventory"].update(listeners=[], processes=[])
+        else:
+            i["page"].url = i["page"].url[:-1] + "2"
+        return code
+
+    monkeypatch.setattr(i["page"], "evaluate", change)
+    runner = r.compose_read_only(i["config_path"], i["root"])
+    assert runner.run_once().code == ("EXACT_CHAT_URL_DRIFT" if fault == "url" else "CHROME_OBSERVATION_CHANGED")
+    assert_read_only_pending(i)
+    assert runner.orchestrator._completed == {}
+
+
+def test_r2_unknown_effect_does_not_even_repeat_readiness(native_ingress):
+    i = native_ingress
+    runner = r.compose_read_only(i["config_path"], i["root"])
+    assert runner.run_once().status == "HOLD"
+    path = r.Path(i["config"]["journal"])
+    with sqlite3.connect(path) as db:
+        saved = json.loads(db.execute("SELECT record FROM events").fetchone()[0])
+        saved.update(status="RESERVED", code="SEND_RESERVED", history=["PENDING", "RESERVED"])
+        db.execute("UPDATE events SET record=?", (json.dumps(saved),))
+    calls = list(i["native_calls"])
+    for _ in range(2):
+        reopened = r.compose_read_only(i["config_path"], i["root"])
+        assert reopened.run_once() == r.Result("UNKNOWN_EFFECT", "INTERRUPTED_NO_REPLAY",
+                                               "GITHUB_AUTHENTICATED", True)
+    assert i["native_calls"] == calls and i["browser"].reads == 1
+    assert runner.orchestrator._completed == {}
+
+
+@pytest.mark.parametrize("value", [True, None, {"status": "READY_ATTACH"}, "ACK"])
+def test_r2_preflight_result_cannot_escape_read_only_hold(native_ingress, monkeypatch, value):
+    i = native_ingress
+    monkeypatch.setattr(r.NativeChrome9444, "preflight", lambda *a: value)
+    result = r.run_read_only(i["config_path"], i["root"])
+    assert result.status == "HOLD"
+    assert result.code == ("ACK" if value == "ACK" else "PREFLIGHT_RESULT_INVALID")
+    assert_read_only_pending(i)

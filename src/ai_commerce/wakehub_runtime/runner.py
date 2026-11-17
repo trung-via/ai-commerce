@@ -1,4 +1,4 @@
-"""Bounded R1 composition with one private SQLite event/attempt journal.
+"""Bounded R2 source-only composition with one private SQLite event/attempt journal.
 
 Adapters are trusted application inputs, never loaded from event payloads. The
 native path has no effect authority. Synthetic ACK proves only offline wiring.
@@ -23,7 +23,7 @@ from ai_commerce.production_orchestration.contracts import (
     Provenance, RouteAuthorization, StageSpec, bytes_digest, digest,
 )
 from ai_commerce.production_orchestration.orchestrator import ProductionPipelineOrchestrator
-from ai_commerce.remote import chrome_acquisition
+from ai_commerce.remote import cdp_doorbell, chrome_acquisition
 from ai_commerce.remote._private_state import (
     PrivateStateError, _Transaction, _linked, _regular, _windows_handle,
 )
@@ -174,15 +174,111 @@ class Sender(Protocol):
 
 
 class NativeChrome9444:
-    """Future native seam; R1 never starts Chrome, attaches CDP or sends."""
+    """Read-only reuse of the enrolled 9444 owner, never launch/preload/Send.
+
+    The existing Chrome owner supplies Windows inventory, custody, signature,
+    session/SID and protocol checks. The existing doorbell inventory supplies
+    the attach and surface read. Neither a URL nor an empty composer attests
+    the originating account/marker. R3/HostOps must supply that missing native
+    capability and a separate effect grant before any new tab or launch.
+    """
     evidence_type = "GITHUB_AUTHENTICATED"
 
-    def __init__(self, repository_root: Path):
+    def __init__(self, repository_root: Path,
+                 environment: chrome_acquisition.ChromeEnvironment | None = None):
         self.repository_root = repository_root
+        self.environment = environment
         self.adapter = LocalChromeDoorbellAdapter(allow_submit=False)
 
+    def _owner_snapshot(self) -> tuple:
+        env = self.environment
+        _require(type(env) is chrome_acquisition.ChromeEnvironment
+                 and env.port == 9444 and env.endpoint == "http://127.0.0.1:9444",
+                 "CDP_OWNER_MISMATCH")
+        local, session, sid = chrome_acquisition._enrollment_operator()
+        current = chrome_acquisition._read_9444_config(
+            env.config_path, local, self.repository_root, sid)
+        _require(current == env, "CHROME_ENROLLMENT_DRIFT")
+        inventory = chrome_acquisition._query_windows(9444)
+        # Evaluate first so a live profile without CDP remains a distinct HOLD,
+        # rather than treating a missing listener or HTTP failure as clean OFF.
+        state, _ = chrome_acquisition.evaluate(
+            env, inventory, session_id=session, expected_sid=sid,
+            parse=chrome_acquisition._commandline_argv)
+        lifecycle_state, identity = chrome_acquisition._lifecycle_inventory(
+            env, inventory, session=session, sid=sid)
+        _require(lifecycle_state == state, "CHROME_OWNER_UNPROVEN")
+        chrome_acquisition._require_operator_control(env)
+        chrome_acquisition._check_enrollment_custody(env, local, sid)
+        # The enrollment helper checks root markers; a selected-profile marker
+        # also needs an independently proven holder, which R2 cannot supply.
+        for name in chrome_acquisition._MARKERS:
+            try:
+                (env.user_data_dir / env.profile_directory / name).lstat()
+            except FileNotFoundError:
+                continue
+            raise RuntimeHold("PROFILE_LOCK_HOLD")
+        if state == "OWNED":
+            chrome_acquisition._probe_cdp(env)
+        _require(state in ("ABSENT", "OWNED"), "CHROME_OWNER_UNPROVEN")
+        return state, (local, session, sid, env, identity)
+
+    def _exact_chat_candidate(self, registration: Registration) -> str:
+        inventory = self.adapter.inventory
+        if not callable(getattr(inventory, "contexts", None)):
+            return "EXACT_CHAT_CONTEXT_UNPROVEN"
+        binding = registration.binding
+        try:
+            with inventory.contexts(binding.cdp_endpoint) as contexts:
+                if len(contexts) != 1:
+                    return "EXACT_CHAT_CONTEXT_AMBIGUOUS"
+                pages = list(contexts[0].pages)
+                if len(pages) > 32:
+                    return "EXACT_CHAT_INVENTORY_UNBOUNDED"
+                matches = [p for p in pages if type(getattr(p, "url", None)) is str
+                           and p.url.rstrip("/") == binding.chat_url]
+                if len(matches) > 1:
+                    return "EXACT_CHAT_TAB_AMBIGUOUS"
+                if not matches:
+                    # resolve_claim_route is not a native navigation grant.
+                    # Never call preload(), even if allow_launch is configured.
+                    return "EXACT_CHAT_ABSENT_NATIVE_PRELOAD_CAPABILITY_REQUIRED"
+                page = matches[0]
+                code = cdp_doorbell._preload_surface_code(page)
+                if page.url.rstrip("/") != binding.chat_url:
+                    return "EXACT_CHAT_URL_DRIFT"
+                if code != "CANDIDATE_READY":
+                    return code
+                return "EXACT_CHAT_CANDIDATE_ACCOUNT_MARKER_UNATTESTED"
+        except Exception:
+            return "CDP_READ_UNAVAILABLE"
+
     def preflight(self, registration: Registration) -> str:
-        return "UNSUPPORTED_NATIVE_OWNER"
+        if self.environment is None:
+            return "UNSUPPORTED_NATIVE_OWNER"
+        observed = False
+        try:
+            _require(registration.evidence_type == self.evidence_type
+                     and registration.binding.cdp_endpoint == self.environment.endpoint,
+                     "CDP_OWNER_MISMATCH")
+            before = self._owner_snapshot()
+            observed = True
+            # Two identical native observations are needed even for clean OFF.
+            if self._owner_snapshot() != before:
+                return "CHROME_OBSERVATION_CHANGED"
+            if before[0] == "ABSENT":
+                return "CHROME_NOT_RUNNING_NATIVE_LAUNCH_CAPABILITY_REQUIRED"
+            code = self._exact_chat_candidate(registration)
+            if self._owner_snapshot() != before:
+                return "CHROME_OBSERVATION_CHANGED"
+            return code
+        except (chrome_acquisition.AcquisitionBlocked, chrome_acquisition._EnrollmentHold,
+                chrome_acquisition._Lifecycle9444Hold,
+                RuntimeHold, HandoffBlocked) as exc:
+            return ("CHROME_OBSERVATION_UNKNOWN" if observed
+                    else _safe_code(exc, "CHROME_OWNER_UNPROVEN"))
+        except Exception:
+            return "CHROME_OBSERVATION_UNKNOWN" if observed else "CHROME_OWNER_UNPROVEN"
 
     def send(self, event: Event, registration: Registration) -> Observation:
         raise RuntimeHold("UNSUPPORTED_NATIVE_OWNER")
@@ -530,7 +626,7 @@ class Runner:
                     return self._finish(txn, data, record, "BLOCKED_EXTERNAL", "SOURCE_DRIFT")
                 if event.evidence_type != evidence or self.sender.evidence_type != evidence:
                     return self._finish(txn, data, record, "BLOCKED_EXTERNAL", "EVIDENCE_MODE_MISMATCH")
-                # R1 has exactly one native owner and it cannot send. A generic
+                # R2 has exactly one native owner and it cannot send. A generic
                 # injected sender or a readiness boolean cannot bypass that seam.
                 if evidence == "GITHUB_AUTHENTICATED" and type(self.sender) is not NativeChrome9444:
                     return self._finish(txn, data, record, "BLOCKED_EXTERNAL", "UNSUPPORTED_NATIVE_OWNER")
@@ -540,9 +636,14 @@ class Runner:
                         _require(evidence == "GITHUB_AUTHENTICATED"
                                  and type(self.source) is GitHubEventSource
                                  and type(self.sender) is NativeChrome9444, "READ_ONLY_COMPOSITION_INVALID")
-                        if granted:
-                            # Durable PENDING is safe for a future separately authorized R2/R3.
-                            return Result("HOLD", "SOURCE_READY_NATIVE_UNKNOWN", evidence)
+                        _require(granted, "MISSING_GRANT")
+                        code = self.sender.preflight(self.registration)
+                        _require(type(code) is str and
+                                 re.fullmatch(r"[A-Z][A-Z0-9_]{0,95}", code) is not None,
+                                 "PREFLIGHT_RESULT_INVALID")
+                        _require(self.grant_verifier(event, self.registration) is True, "MISSING_GRANT")
+                        # A read-only result is never a reservation or native receipt.
+                        return Result("HOLD", code, evidence)
                     code = self.sender.preflight(self.registration) if granted else "MISSING_GRANT"
                     _require(code is None or (type(code) is str and
                              re.fullmatch(r"[A-Z][A-Z0-9_]{0,95}", code) is not None),
@@ -550,6 +651,8 @@ class Runner:
                 except (RuntimeHold, BindingError, HandoffBlocked) as exc:
                     return Result("HOLD", _safe_code(exc, "PREFLIGHT_UNPROVEN"), evidence)
                 except Exception:
+                    if self.read_only:
+                        return Result("HOLD", "PREFLIGHT_UNPROVEN", evidence)
                     code = "PREFLIGHT_UNPROVEN"
                 if code is not None:
                     return self._finish(txn, data, record, "BLOCKED_EXTERNAL", code)
@@ -729,12 +832,13 @@ class _NoNativeBrain:
 
 
 def compose_read_only(config_path: Path, repository_root: Path) -> Runner:
-    """One real R1 ingress, using existing D5 registered source/config contracts.
+    """One R1 ingress plus R2 read-only Chrome/exact-chat readiness.
 
     All paths/selectors come from an existing private local operator file. No
     Issue/event may provide credentials, URLs, profile selection or authority.
     A resolve-claim grant is required; it does not authorize Send. P0 has no real
-    receipt pins in R1, so neither native Brain nor consumer success is possible.
+    receipt pins, so neither native Brain nor consumer success is possible.
+    Retain the R1 private config and journal schemas without implicit migration.
     """
     config = _read_owned_json(config_path, repository_root)
     _require(set(config) == {"schema", "registration", "marker", "registered_source",
@@ -814,7 +918,7 @@ def compose_read_only(config_path: Path, repository_root: Path) -> Runner:
 
     return Runner(source=source, registration=registration,
                   journal=Journal(paths["journal"], repository_root),
-                  sender=NativeChrome9444(repository_root), brain=_NoNativeBrain(),
+                  sender=NativeChrome9444(repository_root, environment), brain=_NoNativeBrain(),
                   orchestrator=ProductionPipelineOrchestrator(), grant_verifier=verify_local_authority,
                   read_only=True)
 

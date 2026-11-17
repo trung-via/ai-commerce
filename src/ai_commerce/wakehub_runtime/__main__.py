@@ -9,10 +9,11 @@ from .runner import Result, RuntimeHold, _CODE_ROOT, diagnostic, run_read_only
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Source-only WakeHub R1 read-only ingress. No Chrome launch, UI Send, "
+        description="Source-only WakeHub R2 ingress and owned Chrome 9444/exact-chat preflight. "
+                    "No Chrome launch, tab preload, UI Send, "
                     "login, scheduler, HostOps or GitHub writes.")
     sub = parser.add_subparsers(dest="command", required=True)
-    run = sub.add_parser("run", help="Verify one registered GitHub event; native execution HOLDs.")
+    run = sub.add_parser("run", help="Verify one registered event and read-only readiness; exits HOLD.")
     mode = run.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true",
                       help="Report wiring without reading events or creating state; exits HOLD (2).")
