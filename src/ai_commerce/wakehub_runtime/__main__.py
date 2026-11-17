@@ -1,17 +1,18 @@
 """One bounded interactive-session iteration; no installation or external writes."""
 import argparse
 import json
+import os
 from pathlib import Path
 
-from .runner import Result, RuntimeHold, diagnostic
+from .runner import Result, RuntimeHold, _CODE_ROOT, diagnostic, run_read_only
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Source-only replacement WakeHub R0. No Chrome launch, UI Send, "
+        description="Source-only WakeHub R1 read-only ingress. No Chrome launch, UI Send, "
                     "login, scheduler, HostOps or GitHub writes.")
     sub = parser.add_subparsers(dest="command", required=True)
-    run = sub.add_parser("run", help="Run one bounded iteration; native execution currently HOLDs.")
+    run = sub.add_parser("run", help="Verify one registered GitHub event; native execution HOLDs.")
     mode = run.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true",
                       help="Report wiring without reading events or creating state; exits HOLD (2).")
@@ -20,8 +21,12 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--journal", type=Path,
                      help="Diagnostic-only private file in an existing operator-owned directory, outside checkout.")
     run.add_argument("--repository-root", type=Path, help="Checkout excluded from private journal storage.")
+    run.add_argument("--config", type=Path,
+                     help="Existing private WakeHubRuntimeR1.v1 local config; never an Issue payload.")
     args = parser.parse_args(argv)
     if args.diagnostic:
+        if args.config is not None:
+            run.error("--config cannot be combined with --diagnostic")
         if args.journal is None or args.repository_root is None:
             run.error("--diagnostic requires --journal and --repository-root")
         try:
@@ -31,11 +36,14 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError):
             result = Result("HOLD", "DIAGNOSTIC_JOURNAL_UNAVAILABLE", "SYNTHETIC_FIXTURE")
     else:
-        result = Result("HOLD" if args.dry_run else "BLOCKED_EXTERNAL",
-                        "DRY_RUN_NO_EFFECTS" if args.dry_run else "UNSUPPORTED_NATIVE_OWNER",
-                        "SOURCE_ONLY")
+        if args.journal is not None and not args.dry_run:
+            run.error("--journal is diagnostic-only; R1 uses the private local config")
+        configured = os.environ.get("AI_COMMERCE_WAKEHUB_CONFIG")
+        config = args.config if args.config is not None else Path(configured) if configured else None
+        result = run_read_only(config, args.repository_root or _CODE_ROOT, dry_run=args.dry_run)
     print(json.dumps(result.to_dict(), sort_keys=True))
-    return 0 if result.status == "ACK" and result.evidence_type == "SYNTHETIC_FIXTURE" else 2
+    return 0 if (result.status == "ACK" and result.code == "CONSUMER_RECEIPT_RECORDED"
+                 and result.evidence_type in ("GITHUB_AUTHENTICATED", "SYNTHETIC_FIXTURE")) else 2
 
 
 if __name__ == "__main__":
