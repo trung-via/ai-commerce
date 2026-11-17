@@ -10,11 +10,23 @@ import hashlib
 import io
 import json
 import posixpath
+import re
 import xml.etree.ElementTree as ET
 import zipfile
 
 MAX_ZIP_BYTES = 24 * 1024 * 1024
 MAX_UNCOMPRESSED_BYTES = 80 * 1024 * 1024
+
+# MT-01 has registered tests in both root tests/ and package-local src/**/tests/.
+# Strict canonical paths are required; the protected main owner oracle separately
+# proves that every required test is registered and genuinely executed.
+_PYTEST_FILE = re.compile(
+    r"(?:tests/test_[A-Za-z0-9_]+|src/(?:[A-Za-z0-9_]+/)+tests/test_[A-Za-z0-9_]+)\.py\Z"
+)
+
+
+def _valid_pytest_file(path: object) -> bool:
+    return type(path) is str and _PYTEST_FILE.fullmatch(path) is not None
 
 
 def _sha(value: bytes) -> str:
@@ -71,8 +83,7 @@ def validate_receipt_zip(
         tests = receipt.get("selected_test_files")
         if (not isinstance(tests, list) or tests != plan.get("selected_tests") or
             len(tests) != len(set(tests)) or
-            any(not isinstance(t, str) or not t.startswith("tests/test_") or
-                not t.endswith(".py") for t in tests)):
+            any(not _valid_pytest_file(t) for t in tests)):
             return False
         changed = plan.get("changed_paths")
         if (not isinstance(changed, list) or not changed or
