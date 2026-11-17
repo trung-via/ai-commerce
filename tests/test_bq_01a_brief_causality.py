@@ -627,7 +627,7 @@ def test_pure_sources_have_no_external_import_or_effect_seam(filename):
 
 def test_real_mt01_onboarding_and_a03_registered_closure():
     from ai_commerce.engineering.impact_v21 import registered_action_plan
-    from ai_commerce.engineering.minimum_test import approved_groups, file_hashes
+    from ai_commerce.engineering.minimum_test import approved_groups, file_hashes, import_graph
     work = json.loads((ROOT / "work_items/BQ-01A_OFFLINE_BEHAVIOR_CRI_001.json").read_bytes())
     manifest = json.loads((ROOT / "work_items/mt01-components/bq-01a.json").read_bytes())
     profiles = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_bytes())
@@ -641,11 +641,38 @@ def test_real_mt01_onboarding_and_a03_registered_closure():
     assert manifest["sources"] == ["src/ai_commerce/creative_quality/" + n + ".py" for n in ("__init__", "behavioral", "causality", "capability")]
     assert manifest["consumers"] == ["src/ai_commerce/creative/" + n + ".py" for n in ("briefs", "intent", "reasoner", "sidecars")]
     assert manifest["contracts"] == [] and manifest["acs"] == work["acceptance"]
-    assert selected["selected_groups"] == ["a03", "bq-01a"]
+    # Replay the original onboarding against today's source and the owners
+    # already registered at BASE. Receipt's B1.5 imports now depend on the
+    # creative_quality package; its reviewed B0 owners must remain selected.
+    b0_owners = ["b0-3", "b0-4", "b0-s", "b0-s3", "b0-s3b"]
+    assert selected["selected_groups"] == ["a03", *b0_owners, "bq-01a"]
     assert not selected["fallback"] and not selected["unknown_acs"] and not selected["unknown_consumers"]
+    assert not selected["unknown_tests"]
     assert not selected["impact_v21"]["missing_mapping"]
+    assert selected["impact_v21"]["mode"] == "AFFECTED"
+    assert selected["reason_codes"] == ["ONBOARD_CONSUMER_OWNER_CLOSURE"]
     assert all(g["execute"] and g["state"] == "EXECUTE" for g in selected["groups"])
+    package = "src/ai_commerce/creative_quality/__init__.py"
+    receipt = "src/ai_commerce/production_runtime/receipt.py"
+    worker = "src/ai_commerce/production_runtime/attended_worker.py"
+    graph, complete = import_graph(ROOT, {p: files[p] for p in (package, receipt, worker)})
+    assert complete and package in graph[receipt] and receipt in graph[worker]
+    assert {package, receipt, worker} <= set(selected["affected_paths"])
+    for name in b0_owners:
+        mapping = selected["consumer_map"][name]
+        assert receipt in mapping["paths"] + mapping["consumers"]
+        entry = next(g for g in selected["groups"] if g["group"] == name)
+        binding = entry["binding"]
+        assert entry["selected_profile"] == "mt01-component-onboarding"
+        assert binding["onboarding_data_only"]
+        assert binding["onboarding_manifest_path"] == f"work_items/mt01-components/{name}.json"
+        assert binding["onboarding_manifest_sha256"] == files[binding["onboarding_manifest_path"]]
+        assert binding["argv"] == ["python", "-m", "pytest", *mapping["tests"], "-q", "-n", "12"]
+    assert list(selected["impact_v21"]["selected_tests"]) == sorted({
+        path for mapping in selected["consumer_map"].values() for path in mapping["tests"]
+    })
     own, old = (next(g for g in selected["groups"] if g["group"] == n) for n in ("bq-01a", "a03"))
+    assert set(manifest["consumers"]) <= set(old["binding"]["mapping"]["paths"])
     assert own["selected_profile"] == "mt01-component-onboarding" and own["binding"]["onboarding_data_only"]
     assert own["binding"]["argv"] == ["python", "-m", "pytest", "tests/test_bq_01a_brief_causality.py", "-q", "-n", "12"]
     assert old["binding"]["argv"] == profiles["mt01-a03-tests"]
