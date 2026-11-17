@@ -656,27 +656,84 @@ print("PURE_IMPORT_OK")
 
 
 def test_registered_new_owner_and_actual_readonly_consumer_closure():
-    from ai_commerce.engineering.impact_v21 import registered_action_plan
-    from ai_commerce.engineering.minimum_test import approved_groups, file_hashes
+    from ai_commerce.engineering.impact_v21 import load_baseline_component_owner_records, registered_action_plan
+    from ai_commerce.engineering.minimum_test import TestGroup, approved_groups, file_hashes, import_graph
     work = json.loads((ROOT / ADDITIONS[5]).read_bytes())
     manifest = json.loads((ROOT / ADDITIONS[4]).read_bytes())
     profiles = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_bytes())
     files = file_hashes(ROOT)
+    static = approved_groups()
     selected = registered_action_plan(repo=ROOT, base_sha=BASE,
         base_files={p: h for p, h in files.items() if p not in ADDITIONS}, candidate_files=files,
         changed_paths=ADDITIONS, required_acs=work["acceptance"], fallback_argv=profiles["mt01-component-onboarding"],
-        groups=approved_groups(), registered_profiles=profiles, allowed_paths=ADDITIONS)
+        groups=static, registered_profiles=profiles, allowed_paths=ADDITIONS)
     assert manifest["sources"] == ADDITIONS[:3] and manifest["tests"] == ADDITIONS[3:4]
     assert manifest["consumers"] == ["src/ai_commerce/creative_quality/" + name + ".py" for name in ("causality", "capability", "behavioral")] + ["src/ai_commerce/creative/briefs.py"]
     assert manifest["contracts"] == [] and manifest["acs"] == work["acceptance"]
     assert work["allowed_paths"] == ADDITIONS and work["source_sha"] == BASE
-    assert selected["selected_groups"] == ["a03", "bq-01a", "bq-01b"]
+    # Reconstruct the consumer closure from forward imports and immutable
+    # baseline owners, independently of the selector's reverse-graph result.
+    baseline = load_baseline_component_owner_records(root=ROOT, base_sha=BASE, existing_groups=static)
+    registered = (*static, *(record["group"] for record in baseline), TestGroup(
+        manifest["component"], tuple(manifest["tests"]), tuple(manifest["acs"]),
+        tuple(manifest["sources"]), tuple(manifest["consumers"]),
+        (*manifest["contracts"], ADDITIONS[4])))
+    by_name = {group.name: group for group in registered}
+    coverage = {group.name: set((*group.paths, *group.tests, *group.consumers, *group.contracts))
+                for group in registered}
+    graph, _ = import_graph(ROOT, {p: h for p, h in files.items()
+        if p.endswith(".py") and p.startswith(("src/ai_commerce/", "tests/"))})
+    affected = set(ADDITIONS)
+    while True:
+        consumers = {path for path, dependencies in graph.items() if dependencies & affected}
+        if consumers <= affected:
+            break
+        affected.update(consumers)
+    _, complete = import_graph(ROOT, {p: files[p] for p in affected if p in graph})
+    assert complete
+    assert set(selected["affected_paths"]) == affected
+    scene = ADDITIONS[1]
+    observation = "src/ai_commerce/creative_quality/audio_observation.py"
+    receipt = "src/ai_commerce/production_runtime/receipt.py"
+    worker = "src/ai_commerce/production_runtime/attended_worker.py"
+    assert scene in graph[observation] and observation in graph[receipt] and receipt in graph[worker]
+    assert {scene, observation, receipt, worker} <= affected
+    expected = {name for name, paths in coverage.items() if paths & affected}
+    expected.update(group.name for group in registered
+        if set(manifest["consumers"]) & set(group.paths))
+    b0_owners = {name for name in expected if name.startswith("b0-")}
+    assert b0_owners
+    assert expected == {"a03", "bq-01a", "bq-01b"} | b0_owners
+    assert selected["selected_groups"] == sorted(expected)
+    assert selected["consumer_map"] == {name: by_name[name].mapping() for name in expected}
+    assert list(selected["impact_v21"]["selected_tests"]) == sorted({
+        path for name in expected for path in by_name[name].tests})
+    # A registered but unrelated component must not join this onboarding.
+    assert not coverage["a02"] & affected
+    assert not set(manifest["consumers"]) & set(by_name["a02"].paths)
+    assert "a02" not in selected["selected_groups"]
+    assert not set(by_name["a02"].tests) & set(selected["impact_v21"]["selected_tests"])
     assert not selected["impact_v21"]["missing_mapping"] and not selected["fallback"]
     assert not selected["unknown_acs"] and not selected["unknown_consumers"]
+    assert not selected["unknown_tests"]
+    assert selected["impact_v21"]["mode"] == "AFFECTED"
+    assert selected["reason_codes"] == ["ONBOARD_CONSUMER_OWNER_CLOSURE"]
     assert all(g["state"] == "EXECUTE" and g["execute"] for g in selected["groups"])
+    for name in sorted(b0_owners):
+        assert {receipt, worker} & coverage[name]
+        entry = next(g for g in selected["groups"] if g["group"] == name)
+        binding = entry["binding"]
+        assert entry["selected_profile"] == "mt01-component-onboarding"
+        assert binding["onboarding_data_only"]
+        assert binding["onboarding_manifest_path"] == f"work_items/mt01-components/{name}.json"
+        assert binding["onboarding_manifest_sha256"] == files[binding["onboarding_manifest_path"]]
+        assert binding["argv"] == ["python", "-m", "pytest", *by_name[name].tests, "-q", "-n", "12"]
     owner = next(g for g in selected["groups"] if g["group"] == "bq-01b")
     assert owner["binding"]["argv"] == ["python", "-m", "pytest", ADDITIONS[3], "-q", "-n", "12"]
     assert owner["binding"]["onboarding_data_only"]
+    assert owner["selected_profile"] == "mt01-component-onboarding"
+    assert owner["binding"]["onboarding_manifest_path"] == ADDITIONS[4]
+    assert owner["binding"]["onboarding_manifest_sha256"] == files[ADDITIONS[4]]
 
 
 @pytest.mark.parametrize("mutate", ["reown", "unregistered_consumer", "outside_scope", "duplicate_source", "extra_argv", "wrong_ac_type"])
