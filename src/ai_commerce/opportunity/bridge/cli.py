@@ -27,7 +27,9 @@ next_step and exact provenance. Resume with identical job bytes/semantic manifes
 job_id, source pin, execution mode and state directory. Default decision_mode is
 autonomous: offline uses A10EligibleFallback.v1, execute requires an authenticated
 structured model chooser. No selection file, Human observation or review is
-required. Completion is READY_FOR_A03_DISPATCH; A03 dispatch is not performed.
+required. Completion is READY_FOR_A03_DISPATCH. The callable's optional trusted
+production owner can persist and dispatch that success to local A03; ordinary
+CLI invocations retain their existing producer-only behavior.
 Optional decision_mode:"manual" accepts a separate A10OpportunitySelection.v1
 using selection_template and a trusted runner --human-identity attestation
 {actor:"HUMAN",subject,selection_sha256}. Identity must come from an actual user
@@ -358,6 +360,35 @@ def _write_job_record(path: Path, value: dict) -> bool:
 def run_automation(manifest: dict, *, base_dir: Path, source_sha: str, state_dir: Path,
                    mode: str, permissions=(), selection: dict | None = None,
                    capability: dict | None = None, runner=None,
+                   attended_output: bytes | None = None, human_identity: dict | None = None,
+                   production=None) -> dict:
+    """Run genuine M01-M05, then optionally hand its committed result to P1.
+
+    ``production`` is a caller-owned ProductionPipelineOrchestrator with an
+    independent source pin and local grant, never a job/model-supplied field.
+    Its typed ``last_result`` reports downstream state separately from the
+    immutable A10 result. A downstream failure cannot rewrite producer success.
+    No completion event is offered on WAIT/FAIL/no-suitable/provider uncertainty.
+    """
+    if production is not None:
+        from ai_commerce.production_orchestration import ProductionPipelineOrchestrator
+        if type(production) is not ProductionPipelineOrchestrator:
+            raise CreativeBridgeError("JOB_PRODUCTION_OWNER_REQUIRED")
+        production.last_result = None
+    result = _run_automation(manifest, base_dir=base_dir, source_sha=source_sha, state_dir=state_dir,
+        mode=mode, permissions=permissions, selection=selection, capability=capability, runner=runner,
+        attended_output=attended_output, human_identity=human_identity)
+    if production is not None and (result["status"], result["reason"], result["next_step"]) == (
+            "COMPLETE", "A03_BRIEF_CREATED", "READY_FOR_A03_DISPATCH"):
+        job_dir = local_path(state_dir) / result["job_id"]
+        production.complete_a10(result, result_ref=job_dir / (result["event_id"] + ".json"),
+                                brief_ref=job_dir / "brief.json")
+    return result
+
+
+def _run_automation(manifest: dict, *, base_dir: Path, source_sha: str, state_dir: Path,
+                   mode: str, permissions=(), selection: dict | None = None,
+                   capability: dict | None = None, runner=None,
                    attended_output: bytes | None = None, human_identity: dict | None = None) -> dict:
     """Public scheduler seam; reads pinned local inputs and returns a bounded event.
 
@@ -375,7 +406,8 @@ def run_automation(manifest: dict, *, base_dir: Path, source_sha: str, state_dir
               "proposals": [], "ai_task": None, "assessment": None, "handoff": None, "brief": None,
               "selection_template": None, "decision": None, "decision_sha256": None, "brief_sha256": None,
               "metrics": {"time_seconds": "UNKNOWN", "tokens": "UNKNOWN", "human_actions": "UNKNOWN"},
-              "publication_status": "NOT_ATTEMPTED", "dispatch_status": "NOT_ATTEMPTED"}
+              "publication_status": "NOT_ATTEMPTED", "dispatch_status": "NOT_ATTEMPTED",
+              "brief_ref": None, "brief_bytes_sha256": None}
     job_dir, bound = None, False
 
     def finish(status, reason, next_step):
@@ -558,7 +590,11 @@ def run_automation(manifest: dict, *, base_dir: Path, source_sha: str, state_dir
         if actor == "HUMAN":
             _write_job_record(job_dir / "selection.json", selection)
         _write_job_record(job_dir / "brief.json", brief)
-        result.update(brief=brief, brief_sha256=digest(brief))
+        brief_path = local_path(job_dir / "brief.json")
+        brief_raw = read_local(brief_path, limit=MAX_RECORD_BYTES)
+        require(brief_raw == canonical_bytes(brief) + b"\n", "JOB_BRIEF_BYTES_MISMATCH")
+        result.update(brief=brief, brief_sha256=digest(brief), brief_ref=str(brief_path),
+                      brief_bytes_sha256=sha256_bytes(brief_raw))
         return finish("COMPLETE", "A03_BRIEF_CREATED", "READY_FOR_A03_DISPATCH")
     except OpportunityError as exc:
         # A race after invocation reservation is unresolved, never permission to
@@ -574,6 +610,8 @@ def run_automation(manifest: dict, *, base_dir: Path, source_sha: str, state_dir
     # Error results cannot contain a fabricated success or a half-built brief.
     result["brief"] = None
     result["brief_sha256"] = None
+    result["brief_ref"] = None
+    result["brief_bytes_sha256"] = None
     result["next_state"] = result["next_step"]
     result["event_id"] = "a10event-" + digest({k: v for k, v in result.items() if k != "event_id"})
     if len(canonical_bytes(result)) >= MAX_JOB_RESULT_BYTES:

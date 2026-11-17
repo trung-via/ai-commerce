@@ -1,8 +1,10 @@
 """Offline contract/owner evidence; no live dispatch or publication proof."""
 from dataclasses import FrozenInstanceError, replace
+import importlib.util
 import json
 from pathlib import Path
 import socket
+import sqlite3
 
 import pytest
 
@@ -10,7 +12,7 @@ from ai_commerce.creative.briefs import brief_digest, intake_brief
 from ai_commerce.opportunity.bridge.briefs import opportunity_to_brief
 from ai_commerce.opportunity.proposals import propose_opportunities
 from ai_commerce.production_orchestration import (
-    CONSUMER_ROUTES, OrchestrationError, ProductionPipelineOrchestrator,
+    CONSUMER_ROUTES, LocalAuthorization, OrchestrationError, ProductionPipelineOrchestrator,
     ProductionStageCompleted, ProductionStageDispatched, ProductionStageReceipt,
     Provenance, RouteAuthorization, StageSpec, bytes_digest, canonical_bytes, digest,
 )
@@ -315,8 +317,289 @@ def test_manifest_uses_real_registered_source_owners_and_test_closure():
                           contracts=(manifest_path,))
     plan = select_impact(root=ROOT, changed_paths=changed, groups=(*groups, new_owner))
     assert plan.runnable, plan.missing_mapping
-    assert set(plan.selected_groups) == {"production-orchestration", "a03", "a10"}
+    # P1's A10 import of this owner reaches A10's transitive consumers through
+    # the static import graph, beyond the two direct manifest consumers. Keep
+    # both the full registered group closure and its required tests exact.
+    expected_groups = {
+        "production-orchestration", "a03", "a04", "a05", "a06", "a07", "a08",
+        "a09", "a10", "a10-m02", "a11", "a12", "cli",
+    }
+    assert set(plan.selected_groups) == expected_groups
     assert set(plan.selected_tests) == {
-        *manifest["tests"], *(test for group in owners.values() for test in group.tests),
+        test for group in (*groups, new_owner) if group.name in expected_groups
+        for test in group.tests
     }
     assert "ONBOARD_CONSUMER_OWNER_CLOSURE" in plan.reason_codes
+
+
+@pytest.fixture
+def local_case(tmp_path):
+    """Real synthetic M01-M05 producer; no model or alternate domain store."""
+    from ai_commerce.opportunity import run_automation
+    module = importlib.util.spec_from_file_location("production_synthetic_demo", ROOT / "scripts/a10_demo.py")
+    demo = importlib.util.module_from_spec(module)
+    module.loader.exec_module(demo)
+    raw = canonical_bytes({"schema_version": "ManualSignalRows.v1", "rows": [
+        demo._row(demo.JSON_TOPIC, day, count) for day, count in ((27, 0), (28, 0), (29, 4))]})
+    (tmp_path / "signals.json").write_bytes(raw)
+    manifest = {"schema_version": "A10AutomationJob.v1", "job_id": "synthetic-production",
+        "source_sha": "b" * 40, "topic": demo.JSON_TOPIC, "as_of": demo.AS_OF,
+        "provider": None, "ai_assessment": False, "sources": [{"file": "signals.json", "format": "json",
+        "sha256": bytes_digest(raw), "snapshot": demo._snapshot(raw, "production"),
+        "comparison_context": demo._comparison()}], "allowed_effects": ["IMPORT_SIGNALS", "CREATE_BRIEF"]}
+    result = run_automation(manifest, base_dir=tmp_path, source_sha=manifest["source_sha"],
+        state_dir=tmp_path / "a10", mode="offline", permissions=manifest["allowed_effects"])
+    assert result["status"] == "COMPLETE" and result["reason"] == "A03_BRIEF_CREATED"
+    grant = LocalAuthorization(journey_id="synthetic:journey", cycle_id="cycle:1", job_id=manifest["job_id"],
+        source_sha=manifest["source_sha"], authorization_ref="fixture:local-grant")
+    def make_owner(**changes):
+        return ProductionPipelineOrchestrator(**{ "state_dir": tmp_path / "production",
+            "source_sha": grant.source_sha, "local_authorization": grant, **changes})
+    refs = {"result_ref": tmp_path / "a10" / manifest["job_id"] / (result["event_id"] + ".json"),
+            "brief_ref": Path(result["brief_ref"])}
+    return result, refs, make_owner
+
+
+def invocation_rows(owner, kind):
+    with sqlite3.connect(owner._state_dir / "production.sqlite") as db:
+        return [json.loads(row[0]) for row in db.execute("SELECT body FROM journal WHERE kind=?", (kind,))]
+
+
+def test_local_p1_true_receiver_receipt_and_durable_duplicate(local_case, monkeypatch):
+    result, refs, make_owner = local_case
+    from ai_commerce.creative import briefs
+    real, calls = briefs.intake_brief, []
+    def observe(raw):
+        # CreativeStore also revalidates mappings; count the exact text handoff.
+        if isinstance(raw, str):
+            calls.append(raw.encode("utf-8"))
+        return real(raw)
+    monkeypatch.setattr(briefs, "intake_brief", observe)
+    owner = make_owner()
+    actual = owner.complete_a10(result, **refs)
+    assert actual.status == "SUCCESS" and actual.event.receipt.outcome == "SUCCESS"
+    assert calls == [refs["brief_ref"].read_bytes()]
+    assert actual.event.receipt.execution_ref.startswith("local:a03:")
+    assert actual.event.receipt.output_sha256 == result["brief_sha256"]
+    assert actual.completed.spec.local_handoff.source_sha == result["source_sha"]
+    from ai_commerce.creative import CreativeStore
+    assert CreativeStore(owner._state_dir / "creative").load_brief(result["brief_sha256"]) == result["brief"]
+    assert all(result["brief"][k] is None for k in ("audience", "product_ref", "cta"))
+    reopened = make_owner()
+    assert reopened.complete_a10(result, **refs) == actual
+    assert reopened.resume_local() == (actual,)
+    assert len(calls) == 1
+    for kind in ("ProductionStageCompleted.v1", "ProductionDispatchAttempt.v1", "A03LocalInvocation.v1",
+                 "ProductionStageReceipt.v1", "ProductionStageDispatched.v1"):
+        assert len(invocation_rows(owner, kind)) == 1
+    request = ProductionStageDispatched.from_dict(invocation_rows(owner, "ProductionStageDispatched.v1")[0])
+    assert request.phase == "DISPATCHED" and request.receipt is None and request.receipt_sha256 is None
+    assert request.completed_sha256 == actual.completed.sha256
+    with sqlite3.connect(owner._state_dir / "production.sqlite") as db:
+        kinds = [row[0] for row in db.execute("SELECT kind FROM journal ORDER BY seq")]
+    assert kinds.index("ProductionStageCompleted.v1") < kinds.index("ProductionStageDispatched.v1")
+    assert kinds.index("ProductionStageDispatched.v1") < kinds.index("A03LocalInvocation.v1")
+    assert kinds.index("A03LocalInvocation.v1") < kinds.index("ProductionStageReceipt.v1")
+    # Wire receipts cannot insert/attest a durable P1 invocation.
+    with pytest.raises(OrchestrationError, match="COMPLETED_NOT_FOUND"):
+        reopened.record_receipt(actual.event.receipt)
+
+
+def test_local_outbox_commit_survives_crash_before_dispatch(local_case, monkeypatch):
+    result, refs, make_owner = local_case
+    first = make_owner()
+    pending = first.complete_a10(result, **refs, dispatch=False)
+    assert pending.status == "PENDING" and pending.event is None
+    assert invocation_rows(first, "ProductionStageCompleted.v1") == [pending.completed.to_dict()]
+    assert not invocation_rows(first, "A03LocalInvocation.v1")
+    assert not invocation_rows(first, "ProductionStageDispatched.v1")
+    resumed = make_owner().resume_local()
+    assert len(resumed) == 1 and resumed[0].status == "SUCCESS"
+
+
+class LocalCrash(BaseException):
+    pass
+
+
+@pytest.mark.parametrize("window", ["after-intake", "after-witness"])
+def test_local_crash_windows_never_blindly_reinvoke(local_case, monkeypatch, window):
+    result, refs, make_owner = local_case
+    from ai_commerce.creative import briefs
+    first, calls = make_owner(), []
+    real_intake = briefs.intake_brief
+    def observe(raw):
+        if isinstance(raw, str):
+            calls.append(raw)
+        return real_intake(raw)
+    monkeypatch.setattr(briefs, "intake_brief", observe)
+    real = first._invoke_a03
+    def invoke(completed, raw):
+        witness = real(completed, raw)
+        if window == "after-intake":
+            raise LocalCrash()
+        return witness
+    monkeypatch.setattr(first, "_invoke_a03", invoke)
+    if window == "after-witness":
+        def crash(*args):
+            raise LocalCrash()
+        monkeypatch.setattr(first, "_finish_local", crash)
+    with pytest.raises(LocalCrash):
+        first.complete_a10(result, **refs)
+    assert not invocation_rows(first, "ProductionStageReceipt.v1")
+    monkeypatch.setattr("ai_commerce.production_orchestration.orchestrator.time.time", lambda: 10**12)
+    second = make_owner()
+    recovered = second.resume_local()[0]
+    assert recovered.status == ("UNKNOWN" if window == "after-intake" else "SUCCESS")
+    assert second.resume_local() == (recovered,)
+    assert len(calls) == 1
+    assert len(invocation_rows(first, "A03LocalInvocation.v1")) == (window == "after-witness")
+    assert len(invocation_rows(first, "ProductionStageReceipt.v1")) == (window == "after-witness")
+
+
+def test_local_active_lease_and_reordered_delivery(local_case, monkeypatch):
+    result, refs, make_owner = local_case
+    first, second = make_owner(), make_owner()
+    pending = first.complete_a10(result, **refs, dispatch=False)
+    key = pending.completed.spec.idempotency_key
+    with pytest.raises(OrchestrationError, match="COMPLETED_NOT_FOUND"):
+        second.dispatch_local("reordered:missing-completion")
+    real = first._invoke_a03
+    observations = []
+    def invoke(completed, raw):
+        observations.append(second.dispatch_local(key))
+        return real(completed, raw)
+    monkeypatch.setattr(first, "_invoke_a03", invoke)
+    actual = first.dispatch_local(key)
+    assert observations[0].status == "RUNNING" and observations[0].event is None
+    assert actual.status == "SUCCESS" and second.dispatch_local(key) == actual
+    assert len(invocation_rows(first, "ProductionDispatchAttempt.v1")) == 1
+
+
+@pytest.mark.parametrize("failure,expected", [("reject", "FAILED"), ("alter", "FAILED"), ("unknown", "UNKNOWN")])
+def test_local_receiver_failure_never_mints_success(local_case, monkeypatch, failure, expected):
+    result, refs, make_owner = local_case
+    from ai_commerce.creative import briefs
+    real, calls = briefs.intake_brief, []
+    def fail(raw):
+        calls.append(raw)
+        if failure == "reject":
+            raise ValueError("synthetic rejection")
+        if failure == "unknown":
+            raise RuntimeError("synthetic unknown receiver failure")
+        return {**real(raw), "objective": "altered receiver output"}
+    monkeypatch.setattr(briefs, "intake_brief", fail)
+    first = make_owner()
+    actual = first.complete_a10(result, **refs)
+    assert actual.status == expected and actual.event is None and actual.accepted_consumer is None
+    assert make_owner().resume_local() == (actual,)
+    assert len(calls) == 1
+    assert not invocation_rows(first, "ProductionStageReceipt.v1")
+
+
+@pytest.mark.parametrize("target", ["brief_ref", "result_ref"])
+def test_local_altered_immutable_bytes_fail_closed(local_case, monkeypatch, target):
+    result, refs, make_owner = local_case
+    first = make_owner()
+    first.complete_a10(result, **refs, dispatch=False)
+    refs[target].write_bytes(refs[target].read_bytes() + b" ")
+    actual = make_owner().resume_local()[0]
+    assert actual.status == "FAILED" and actual.event is None
+    assert not invocation_rows(first, "ProductionDispatchAttempt.v1")
+
+
+@pytest.mark.parametrize("field,value", [("schema_version", "StageSpec.v2"),
+    ("consumer_id", "wrong:consumer"), ("route_id", "a10-m05-content-brief")])
+def test_local_wrong_schema_consumer_route_rejected(local_case, field, value):
+    result, refs, make_owner = local_case
+    first = make_owner()
+    pending = first.complete_a10(result, **refs, dispatch=False)
+    wire = pending.completed.to_dict()
+    wire["spec"][field] = value
+    with sqlite3.connect(first._state_dir / "production.sqlite") as db:
+        db.execute("UPDATE outbox SET completed=?", (json.dumps(wire),))
+    with pytest.raises(OrchestrationError):
+        make_owner().resume_local()
+    assert not invocation_rows(first, "ProductionDispatchAttempt.v1")
+
+
+def test_local_caller_source_and_revoked_authorization(local_case):
+    result, refs, make_owner = local_case
+    with pytest.raises(OrchestrationError, match="SOURCE_SHA_MISMATCH"):
+        make_owner(source_sha="c" * 40).complete_a10(result, **refs)
+    with pytest.raises(OrchestrationError, match="LOCAL_AUTHORIZATION_REQUIRED"):
+        make_owner(local_authorization=None).complete_a10(result, **refs)
+    first = make_owner()
+    first.complete_a10(result, **refs, dispatch=False)
+    first.revoke_local_authorization()
+    with pytest.raises(OrchestrationError, match="LOCAL_AUTHORIZATION_REQUIRED"):
+        first.resume_local()
+    wrong = replace(make_owner()._local_authorization, authorization_ref="revoked-and-replaced")
+    with pytest.raises(OrchestrationError, match="ROUTE_NOT_AUTHORIZED"):
+        make_owner(local_authorization=wrong).resume_local()
+    assert not invocation_rows(first, "ProductionDispatchAttempt.v1")
+
+
+@pytest.mark.parametrize("restore", [True, False])
+def test_local_only_preinvocation_missing_input_has_bounded_safe_retry(local_case, restore):
+    result, refs, make_owner = local_case
+    first = make_owner(max_attempts=2)
+    first.complete_a10(result, **refs, dispatch=False)
+    raw = refs["brief_ref"].read_bytes()
+    refs["brief_ref"].unlink()
+    actual = first.resume_local()[0]
+    assert actual.status == "RETRY_SAFE" and actual.event is None
+    assert not invocation_rows(first, "ProductionDispatchAttempt.v1")
+    if restore:
+        refs["brief_ref"].write_bytes(raw)
+    second = make_owner(max_attempts=2)
+    terminal = second.resume_local()[0]
+    assert terminal.status == ("SUCCESS" if restore else "FAILED")
+    assert second.resume_local() == (terminal,)
+
+
+def test_original_p0_wire_records_remain_readable():
+    completed, input_value, _ = stage()
+    receipt = receipt_after_offline_execution(completed, input_value)
+    wire = completed.to_dict()
+    assert "local_handoff" not in wire["spec"]
+    assert ProductionStageCompleted.from_dict(wire) == completed
+    wire = receipt.to_dict()
+    assert not {"outcome", "artifact_ref"} & wire.keys()
+    assert "local_handoff" not in wire["spec"]
+    assert ProductionStageReceipt.from_dict(wire) == receipt
+
+
+@pytest.mark.parametrize("change", [{"schema_version": "A10AutomationResult.v2"}, {"status": "WAIT"},
+    {"reason": "NO_SUITABLE_OPPORTUNITY"}, {"next_step": "UNKNOWN"}, {"source_sha": "c" * 40},
+    {"brief_sha256": "0" * 64}, {"event_id": "a10event-" + "0" * 64}])
+def test_local_untrusted_or_nonterminal_producer_cannot_self_authorize(local_case, change):
+    result, refs, make_owner = local_case
+    owner = make_owner()
+    with pytest.raises(OrchestrationError):
+        owner.complete_a10({**result, **change}, **refs)
+    assert not owner._state_dir.exists()
+
+
+@pytest.mark.parametrize("failure", ["revoked", "artifact", "journal-version"])
+def test_local_witness_reconciliation_rechecks_authority_output_and_schema(local_case, monkeypatch, failure):
+    result, refs, make_owner = local_case
+    first = make_owner()
+    def crash(*args):
+        raise LocalCrash()
+    monkeypatch.setattr(first, "_finish_local", crash)
+    with pytest.raises(LocalCrash):
+        first.complete_a10(result, **refs)
+    assert len(invocation_rows(first, "A03LocalInvocation.v1")) == 1
+    if failure == "revoked":
+        second = make_owner(local_authorization=None)
+    elif failure == "artifact":
+        witness = invocation_rows(first, "A03LocalInvocation.v1")[0]
+        Path(witness["artifact_ref"]).write_bytes(b"altered output")
+        second = make_owner()
+    else:
+        with sqlite3.connect(first._state_dir / "production.sqlite") as db:
+            db.execute("PRAGMA user_version=2")
+        second = make_owner()
+    with pytest.raises(OrchestrationError):
+        second.resume_local()
+    assert not invocation_rows(first, "ProductionStageReceipt.v1")

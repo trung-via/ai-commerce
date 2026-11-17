@@ -846,3 +846,85 @@ def test_automation_self_report_cannot_forge_brain_authority(automation_job):
             manifest_sha256=digest(manifest), source_sha=manifest["source_sha"], actor="BRAIN",
             assessment=forged, assessment_task=result["ai_task"])
     assert result["brief"] is None and result["decision"] is None
+
+
+def local_production_owner(manifest, kwargs):
+    from ai_commerce.production_orchestration import LocalAuthorization, ProductionPipelineOrchestrator
+    return ProductionPipelineOrchestrator(state_dir=kwargs["state_dir"].parent / "production",
+        source_sha=kwargs["source_sha"], local_authorization=LocalAuthorization(
+            journey_id="synthetic:a10-a03", cycle_id="cycle:1", job_id=manifest["job_id"],
+            source_sha=kwargs["source_sha"], authorization_ref="fixture:local-only"))
+
+
+@pytest.mark.parametrize("mode", ["offline", "mock-execute"])
+def test_automation_committed_m05_dispatches_real_local_a03_without_clicks(automation_job, mode):
+    from types import SimpleNamespace
+    from ai_commerce.opportunity import run_automation
+    manifest, kwargs = automation_job
+    manifest.pop("audience")
+    calls = []
+    def mock_provider(argv, **kw):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout=automation_output(json.loads(kw["input"])["task"]))
+    if mode == "mock-execute":
+        manifest.update(provider="codex-cli", ai_assessment=True)
+        kwargs = {**kwargs, "mode": "execute", "capability": automation_capability(), "runner": mock_provider}
+    owner = local_production_owner(manifest, kwargs)
+    result = run_automation(manifest, **kwargs, production=owner)
+    downstream = owner.last_result
+    assert result["status"] == "COMPLETE" and downstream.status == "SUCCESS"
+    assert result["selection_template"] is None
+    assert result["brief_ref"] == downstream.completed.spec.local_handoff.brief_ref
+    assert sha256_bytes(Path(result["brief_ref"]).read_bytes()) == result["brief_bytes_sha256"]
+    assert downstream.completed.spec.local_handoff.producer_event_id == result["event_id"]
+    assert downstream.event.receipt.consumer_id == "ai_commerce.creative.briefs:intake_brief"
+    assert downstream.event.receipt.outcome == "SUCCESS"
+    assert downstream.event.receipt.output_sha256 == result["brief_sha256"]
+    store = CreativeStore(owner._state_dir / "creative")
+    assert store.load_brief(result["brief_sha256"]) == result["brief"]
+    if mode == "mock-execute":
+        assert result["assessment"]["execution"]["kind"] == "MOCK_AUTHENTICATED_RUNNER"
+    assert len(calls) == (mode == "mock-execute")
+    replay_owner = local_production_owner(manifest, kwargs)
+    assert run_automation(manifest, **kwargs, production=replay_owner) == result
+    assert replay_owner.last_result == downstream and len(calls) == (mode == "mock-execute")
+
+
+@pytest.mark.parametrize("scenario", ["no-suitable", "permission", "unavailable", "unknown", "fail"])
+def test_automation_non_success_never_offers_production_event(automation_job, scenario):
+    from ai_commerce.opportunity import run_automation
+    manifest, kwargs = automation_job
+    if scenario == "no-suitable":
+        manifest["topic"] = "SYNTHETIC absent topic"
+    elif scenario == "permission":
+        kwargs = {**kwargs, "permissions": ()}
+    elif scenario == "fail":
+        manifest["schema_version"] = "A10AutomationJob.v2"
+    else:
+        manifest.update(provider="codex-cli", ai_assessment=True)
+        kwargs = {**kwargs, "mode": "execute"}
+        if scenario == "unknown":
+            def unknown(*args, **kw):
+                raise TimeoutError("SYNTHETIC unknown provider completion")
+            kwargs.update(capability=automation_capability(), runner=unknown)
+    owner = local_production_owner(manifest, kwargs)
+    result = run_automation(manifest, **kwargs, production=owner)
+    assert result["brief"] is None and result["brief_ref"] is None and result["brief_bytes_sha256"] is None
+    assert owner.last_result is None
+    assert not owner._state_dir.exists()
+    assert result["status"] in ("COMPLETE", "WAIT", "FAIL")
+    if scenario == "unknown":
+        assert result["reason"] == "UNKNOWN_EFFECT"
+
+
+def test_a10_success_is_not_rewritten_by_a03_failure(automation_job, monkeypatch):
+    from ai_commerce.opportunity import run_automation
+    manifest, kwargs = automation_job
+    owner = local_production_owner(manifest, kwargs)
+    def reject(*args):
+        raise ValueError("SYNTHETIC downstream rejection")
+    monkeypatch.setattr(owner, "_invoke_a03", reject)
+    result = run_automation(manifest, **kwargs, production=owner)
+    assert result["status"] == "COMPLETE" and owner.last_result.status == "FAILED"
+    assert owner.last_result.event is None and owner.last_result.accepted_consumer is None
+    assert json.loads(Path(owner.last_result.completed.completion_ref).read_bytes()) == result
