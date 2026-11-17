@@ -902,7 +902,9 @@ def approved_groups() -> tuple[TestGroup, ...]:
                                   for name in ("ContentBrief", "EvidenceRef", "JobResult", "MediaArtifact", "SourceSnapshot"))
                   + ("tests/fixtures/creative_only_brief.json", "tests/fixtures/invalid_brief.json")),
         TestGroup("a03", ("tests/test_a03_creative.py", "tests/test_a03_upgrade_v11.py"),
-                  ("A03.creative",), sources("creative", "__init__ _validation briefs decisions intent live models reasoner sidecars store v2")),
+                  ("A03.creative",), sources("creative", "__init__ _validation briefs decisions intent live models reasoner sidecars store v2"),
+                  # M05 calls A03 intake_brief; retain A10 source ownership.
+                  consumers=("src/ai_commerce/opportunity/bridge/briefs.py",)),
         TestGroup("a04", ("tests/test_a04_media_operations.py", "tests/test_a04_upgrade_v11.py", "tests/test_a03_a04_integration.py"),
                   ("A04.media-and-operations",),
                   sources("media", "__init__ base fake_generation files generation local provenance")
