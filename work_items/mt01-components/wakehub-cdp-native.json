@@ -1,0 +1,15 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "wakehub-cdp-native",
+  "sources": [
+    "src/ai_commerce/wakehub_cdp/__init__.py",
+    "src/ai_commerce/wakehub_cdp/authenticated_turn.py"
+  ],
+  "tests": ["tests/test_wakehub_cdp_authenticated_turn.py"],
+  "acs": ["WAKEHUB.cdp-verified-turn-seam"],
+  "consumers": [
+    "src/ai_commerce/wakehub_runtime/runner.py",
+    "src/ai_commerce/remote/cdp_doorbell.py"
+  ],
+  "contracts": []
+}
