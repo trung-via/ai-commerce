@@ -1,4 +1,4 @@
-"""Bounded R2/R3A source-only composition with one private SQLite journal.
+"""Bounded R2/R3B1 source-only composition with one private SQLite journal.
 
 Adapters are trusted application inputs, never loaded from event payloads. The
 native Sender seam holds for missing enrolled authority. R2 stays read-only.
@@ -39,7 +39,7 @@ from ai_commerce.remote.github_read_retry import GitHubReadBlocked, GitHubReadBu
 from ai_commerce.remote.local_run_registration import (
     RegistrationBlocked, RegistrationIntent, _record_valid,
 )
-from ai_commerce.remote.signed_origin_consent import SignedOriginConsentAuthority
+from ai_commerce.remote.signed_origin_consent import SignedOriginConsentAuthority, registry_sha256
 from ai_commerce.remote.trusted_origin import LocalCallerAttestation
 from ai_commerce.remote.wake_adapter import (
     ArtifactAuthority, GitHubArtifactProvenance, ProvenanceError, WakeReceipt, verify_provenance,
@@ -73,6 +73,11 @@ def _require(condition: bool, code: str) -> None:
 def _safe_code(error: Exception, fallback: str) -> str:
     code = str(error)
     return code if re.fullmatch(r"[A-Z][A-Z0-9_]{0,95}", code) else fallback
+
+
+def _reference(value: object) -> bool:
+    return (type(value) is str and 0 < len(value) <= 1024
+            and not any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in value))
 
 
 @dataclass(frozen=True, repr=False)
@@ -164,11 +169,149 @@ class GitHubEventSource:
 
 
 @dataclass(frozen=True, repr=False)
+class NativeOriginPins:
+    """Private expected pins, NOT proof merely because this value is typed.
+
+    A future independently enrolled owner must authenticate all pins together.
+    Profile, account, session and composer references must be stable identities,
+    never DOM labels, flags, WH03 markers or hashes invented by this runner.
+    """
+    windows_sid: str
+    windows_session_id: int
+    windows_logon_id: str
+    desktop: str
+    chrome_profile_id: str
+    chrome_custody_ref: str
+    account_id: str
+    account_session_ref: str
+    binding: ResolvedBinding
+    marker: str
+    context_ref: str
+    tab_ref: str
+    composer_ref: str
+    provenance_ref: str
+
+    def __post_init__(self) -> None:
+        _require(type(self.windows_session_id) is int and self.windows_session_id > 0
+                 and self.desktop == r"WinSta0\Default"
+                 and type(self.binding) is ResolvedBinding
+                 and self.binding.cdp_endpoint == "http://127.0.0.1:9444"
+                 and all(_reference(getattr(self, name)) for name in
+                         ("windows_sid", "windows_logon_id", "chrome_profile_id", "chrome_custody_ref",
+                          "account_id", "account_session_ref", "marker", "context_ref", "tab_ref",
+                          "composer_ref", "provenance_ref")), "NATIVE_ORIGIN_PINS_INVALID")
+
+
+@dataclass(frozen=True, repr=False)
+class SignedWakeAuthorization:
+    """Detached scope after existing signed-origin checks; not native identity."""
+    event: Event
+    registration: Registration
+    registry_sha256: str
+    principal: str
+    caller_id: str
+    operations: tuple[Literal["resolve_claim_route", "deliver_wake"], ...]
+
+    def __post_init__(self) -> None:
+        _require(type(self.event) is Event and type(self.registration) is Registration
+                 and type(self.registry_sha256) is str
+                 and re.fullmatch(r"[0-9a-f]{64}", self.registry_sha256) is not None
+                 and _reference(self.principal) and _reference(self.caller_id)
+                 and type(self.operations) is tuple and self.operations in
+                 (("resolve_claim_route",), ("resolve_claim_route", "deliver_wake")),
+                 "SIGNED_WAKE_AUTHORIZATION_INVALID")
+
+
+@dataclass(frozen=True, repr=False)
+class DoorbellRequest:
+    event_id: str
+    event_key: str
+    binding: ResolvedBinding
+    marker: str
+    canonical_bytes: bytes
+
+    def __post_init__(self) -> None:
+        _require(type(self.event_id) is str
+                 and re.fullmatch(r"ef02-completion-v1:[0-9a-f]{64}", self.event_id) is not None
+                 and type(self.event_key) is str and re.fullmatch(r"[0-9a-f]{64}", self.event_key) is not None
+                 and type(self.binding) is ResolvedBinding
+                 and self.binding.cdp_endpoint == "http://127.0.0.1:9444" and _reference(self.marker)
+                 and type(self.canonical_bytes) is bytes
+                 and self.canonical_bytes == cdp_doorbell._doorbell_text(
+                     self.event_id, "trung-via/ai-commerce", send_only=True).encode("utf-8"),
+                 "DOORBELL_REQUEST_INVALID")
+
+    @classmethod
+    def for_event(cls, event: Event, registration: Registration) -> DoorbellRequest:
+        _require(event.source_sha == registration.source_sha
+                 and event.evidence_type == registration.evidence_type, "DOORBELL_REQUEST_DRIFT")
+        return cls(event.event_id, event.key(registration), registration.binding, registration.marker,
+                   cdp_doorbell._doorbell_text(event.event_id, "trung-via/ai-commerce",
+                                               send_only=True).encode("utf-8"))
+
+
+@dataclass(frozen=True, repr=False)
+class AuthenticatedUserTurn:
+    """Required remote-owner output shape; construction supplies NO authentication."""
+    request: DoorbellRequest
+    user_turn_id: str
+    message_ref: str
+    provenance_ref: str
+    role: Literal["USER"]
+
+    def __post_init__(self) -> None:
+        _require(type(self.request) is DoorbellRequest and self.role == "USER"
+                 and all(_reference(value) for value in
+                         (self.user_turn_id, self.message_ref, self.provenance_ref)),
+                 "AUTHENTICATED_USER_TURN_INVALID")
+
+
+@dataclass(frozen=True, repr=False)
 class Observation:
     receipt: WakeReceipt
     chat_url: str
     marker: str
     user_turn_ref: str
+    native_turn: AuthenticatedUserTurn | None = None
+
+
+@dataclass(frozen=True)
+class NativeOriginAuthority:
+    """Closed source-owned boundary, with no injectable authentication callback.
+
+    trusted_origin.VerifiedNativeOriginEvidenceConsumer explicitly cannot attest
+    a native ChatGPT account/session. Chrome custody and signed consent remain
+    necessary independent checks, but neither can fill this missing owner.
+    """
+    def authenticate(self, registration: Registration,
+                     candidate: NativeOriginPins | None = None) -> NativeOriginPins:
+        raise DependencyHold("NATIVE_ORIGIN_AUTHORITY_UNAVAILABLE")
+
+
+@dataclass(frozen=True)
+class NativeTurnAuthority:
+    """The current remote owner has no authenticated USER-turn evidence API.
+
+    Next separately owned remote.cdp_doorbell API proposal:
+      preflight_authenticated_turn_ref(*, request: DoorbellRequest,
+        origin: NativeOriginPins, authorization: SignedWakeAuthorization) -> None
+      send_wake_authenticated(*, request: DoorbellRequest, origin: NativeOriginPins,
+        authorization: SignedWakeAuthorization, reservation_ref: str) -> AuthenticatedUserTurn
+    The remote owner must independently authenticate these inputs, recheck the
+    exclusive stable composer/owner/route after durable reservation, and return
+    exactly one real USER ID/message reference with provenance and request pins.
+    Preflight must prove this capability before reservation/staging. Send must
+    retain UNKNOWN on ambiguity and never synthesize IDs from text/time/hash.
+    Remote must own its API types; this module only describes the consumer pins.
+    No duck-typed method, callback or legacy WakeReceipt enables this boundary.
+    """
+    def preflight(self, request: DoorbellRequest) -> None:
+        raise DependencyHold("DOORBELL_AUTHENTICATED_TURN_REF_UNAVAILABLE")
+
+    def authenticate(self, request: DoorbellRequest,
+                     candidate: AuthenticatedUserTurn | None) -> AuthenticatedUserTurn:
+        # Even a perfectly matching typed fixture is not an authenticated source.
+        raise DependencyHold("DOORBELL_AUTHENTICATED_TURN_REF_UNAVAILABLE")
 
 
 class Sender(Protocol):
@@ -299,7 +442,7 @@ class NativeChrome9444:
 
 
 class NativeSender:
-    """R3A gate for the existing opt-in doorbell; deliberately no native effects.
+    """R3B1 typed gates for the existing doorbell; deliberately no native effects.
 
     LocalChromeObserverAdapter.capture_origin only reads caller-enrolled identity;
     VerifiedNativeOriginEvidenceConsumer.is_complete_origin_attested is always
@@ -318,15 +461,47 @@ class NativeSender:
         _require(registration.evidence_type == self.evidence_type, "EVIDENCE_MODE_MISMATCH")
         self.registration = registration
         self.owner = NativeChrome9444(repository_root, environment)
+        self.origin_authority = NativeOriginAuthority()
+        self.turn_authority = NativeTurnAuthority()
+
+    def _origin(self, registration: Registration) -> NativeOriginPins:
+        if type(self.origin_authority) is not NativeOriginAuthority:
+            raise DependencyHold("NATIVE_ORIGIN_AUTHORITY_UNAVAILABLE")
+        return NativeOriginAuthority.authenticate(self.origin_authority, registration)
 
     def preflight(self, registration: Registration) -> str:
         _require(registration == self.registration, "REGISTRATION_DRIFT")
         code = self.owner.preflight(registration, exclusive=True)
         if code != "EXACT_CHAT_CANDIDATE_ACCOUNT_MARKER_UNATTESTED":
             return code
-        # There is no trusted enrollment/provider API in this source revision.
-        # This cannot be enabled by JSON, an injected callback or a UI marker.
-        raise DependencyHold("NATIVE_ORIGIN_AUTHORITY_UNAVAILABLE")
+        self._origin(registration)
+        raise DependencyHold("DOORBELL_AUTHENTICATED_TURN_REF_UNAVAILABLE")
+
+    def require_dependencies(self, event: Event, registration: Registration,
+                             authorization: SignedWakeAuthorization) -> None:
+        """Runner gate before RESERVED, independent of a sender readiness flag."""
+        _require(registration == self.registration, "REGISTRATION_DRIFT")
+        if (type(authorization) is not SignedWakeAuthorization
+                or authorization.event != event or authorization.registration != registration
+                or authorization.operations != ("resolve_claim_route", "deliver_wake")):
+            raise DependencyHold("SIGNED_WAKE_AUTHORITY_UNAVAILABLE")
+        self._origin(registration)
+        self.require_turn_reference(DoorbellRequest.for_event(event, registration))
+
+    def require_turn_reference(self, request: DoorbellRequest) -> None:
+        if type(self.turn_authority) is not NativeTurnAuthority:
+            raise DependencyHold("DOORBELL_AUTHENTICATED_TURN_REF_UNAVAILABLE")
+        NativeTurnAuthority.preflight(self.turn_authority, request)
+
+    def authenticate_observation(self, event: Event, registration: Registration,
+                                 observation: Observation) -> AuthenticatedUserTurn:
+        if type(self.turn_authority) is not NativeTurnAuthority:
+            raise DependencyHold("DOORBELL_AUTHENTICATED_TURN_REF_UNAVAILABLE")
+        request = DoorbellRequest.for_event(event, registration)
+        turn = NativeTurnAuthority.authenticate(self.turn_authority, request, observation.native_turn)
+        _require(type(turn) is AuthenticatedUserTurn and turn.request == request
+                 and turn.message_ref == observation.user_turn_ref, "AUTHENTICATED_USER_TURN_MISMATCH")
+        return turn
 
     def send(self, event: Event, registration: Registration) -> Observation:
         # A source-only seam must fail closed even if preflight is bypassed.
@@ -343,6 +518,31 @@ class ProductionHandoff:
 
 
 @dataclass(frozen=True, repr=False)
+class AuthenticatedBrainReceipt:
+    """Required independent transport pins, never authority from caller hashes."""
+    event_id: str
+    event_key: str
+    marker: str
+    user_turn_id: str
+    user_turn_ref: str
+    route_generation: int
+    provenance_ref: str
+    authorization_ref: str
+    completed_sha256: str
+    consumer_id: str
+    receipt_sha256: str
+
+    def __post_init__(self) -> None:
+        _require(type(self.route_generation) is int and self.route_generation > 0
+                 and all(_reference(getattr(self, name)) for name in
+                         ("event_id", "event_key", "marker", "user_turn_id", "user_turn_ref",
+                          "provenance_ref", "authorization_ref", "consumer_id"))
+                 and all(type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+                         for value in (self.completed_sha256, self.receipt_sha256)),
+                 "AUTHENTICATED_BRAIN_RECEIPT_INVALID")
+
+
+@dataclass(frozen=True, repr=False)
 class BrainCorrelation:
     event_key: str
     marker: str
@@ -350,6 +550,7 @@ class BrainCorrelation:
     correlation_ref: str
     evidence_type: Evidence
     handoff: ProductionHandoff
+    authenticated_receipt: AuthenticatedBrainReceipt | None = None
 
 
 class BrainAdapter(Protocol):
@@ -363,6 +564,7 @@ class BrainAdapter(Protocol):
                   observation: Observation) -> BrainCorrelation | None: ...
 
 
+@dataclass(frozen=True)
 class NativeBrainAdapter:
     """Closed boundary until an independent authenticated Brain transport exists.
 
@@ -374,6 +576,13 @@ class NativeBrainAdapter:
     def correlate(self, event: Event, registration: Registration,
                   observation: Observation) -> None:
         return None  # Runner reports BRAIN_RECEIPT_UNAVAILABLE, never ACK.
+
+    def authenticate_receipt(self, event: Event, registration: Registration,
+                             observation: Observation,
+                             candidate: AuthenticatedBrainReceipt | None) -> AuthenticatedBrainReceipt:
+        # A typed receipt or orchestrator pin supplied by a caller is not an
+        # independent Brain/consumer transport, even if all hashes match.
+        raise DependencyHold("BRAIN_RECEIPT_UNAVAILABLE")
 
 
 @dataclass(frozen=True)
@@ -446,7 +655,7 @@ _APP_ID = 0x57485231
 
 def _validate_records(data: dict, registration: Registration) -> None:
     _require(type(data["events"]) is dict and len(data["events"]) <= 128, "JOURNAL_INVALID")
-    seen = set()
+    seen, seen_turns = set(), set()
     for key, record in data["events"].items():
         _require(type(record) is dict and set(record) == {"event", "status", "code", "history", "evidence"}
                  and type(record["event"]) is dict, "JOURNAL_INVALID")
@@ -466,8 +675,10 @@ def _validate_records(data: dict, registration: Registration) -> None:
         proof = record["evidence"]
         if "UI_TURN_OBSERVED" in record["history"]:
             _require(proof.get("marker") == registration.marker
-                     and type(proof.get("user_turn_ref")) is str and bool(proof["user_turn_ref"]),
+                     and _reference(proof.get("user_turn_ref")),
                      "JOURNAL_PROOF_MISSING")
+            _require(proof["user_turn_ref"] not in seen_turns, "USER_TURN_REFERENCE_REUSED")
+            seen_turns.add(proof["user_turn_ref"])
         if "BRAIN_CORRELATED" in record["history"]:
             _require(all(type(proof.get(k)) is str and bool(proof[k]) for k in
                          ("correlation_ref", "consumer_id", "receipt_sha256", "completed_sha256")),
@@ -692,15 +903,26 @@ class Runner:
                     return self._finish(txn, data, record, "BLOCKED_EXTERNAL", "SOURCE_DRIFT")
                 if event.evidence_type != evidence or self.sender.evidence_type != evidence:
                     return self._finish(txn, data, record, "BLOCKED_EXTERNAL", "EVIDENCE_MODE_MISMATCH")
-                # R2 cannot become an effect owner by clearing read_only. R3A
+                # R2 cannot become an effect owner by clearing read_only. R3B1
                 # admits only its closed seam, never arbitrary native adapters.
                 native_owner = NativeChrome9444 if self.read_only else NativeSender
                 if evidence == "GITHUB_AUTHENTICATED" and type(self.sender) is not native_owner:
-                    return self._finish(txn, data, record, "BLOCKED_EXTERNAL", "UNSUPPORTED_NATIVE_OWNER")
+                    return Result("HOLD_DEPENDENCY", "UNSUPPORTED_NATIVE_OWNER", evidence)
+                if evidence == "GITHUB_AUTHENTICATED" and type(self.source) is not GitHubEventSource:
+                    return Result("HOLD", "AUTHENTICATED_SOURCE_REQUIRED", evidence)
+                native = evidence == "GITHUB_AUTHENTICATED" and not self.read_only
+                if native and (type(self.grant_verifier) is not _RegisteredWakeAuthority
+                               or self.grant_verifier.native_source_only is not True):
+                    return Result("HOLD_DEPENDENCY", "SIGNED_WAKE_AUTHORITY_UNAVAILABLE", evidence)
+                if native and type(self.brain) is not NativeBrainAdapter:
+                    return Result("HOLD_DEPENDENCY", "BRAIN_RECEIPT_UNAVAILABLE", evidence)
                 try:
-                    if evidence == "GITHUB_AUTHENTICATED":
-                        _require(type(self.source) is GitHubEventSource, "AUTHENTICATED_SOURCE_REQUIRED")
-                    granted = self.grant_verifier(event, self.registration) is True
+                    authorization = (self.grant_verifier.authorize(event, self.registration)
+                                     if native else None)
+                    granted = (authorization is not None if native else
+                               self.grant_verifier(event, self.registration) is True)
+                    if native and not granted:
+                        return Result("HOLD_DEPENDENCY", "MISSING_GRANT", evidence)
                     if self.read_only:
                         _require(evidence == "GITHUB_AUTHENTICATED"
                                  and type(self.source) is GitHubEventSource
@@ -717,13 +939,20 @@ class Runner:
                     _require(code is None or (type(code) is str and
                              re.fullmatch(r"[A-Z][A-Z0-9_]{0,95}", code) is not None),
                              "PREFLIGHT_RESULT_INVALID")
+                    if native and code is None:
+                        NativeSender.require_dependencies(self.sender, event, self.registration, authorization)
                 except DependencyHold as exc:
                     # Even a dependency HOLD must not hide private authority
                     # drift during the preceding read-only browser observations.
-                    _require(self.grant_verifier(event, self.registration) is True, "MISSING_GRANT")
+                    if self.grant_verifier(event, self.registration) is not True:
+                        raise DependencyHold("MISSING_GRANT")
                     return Result("HOLD_DEPENDENCY", _safe_code(exc, "NATIVE_DEPENDENCY_UNAVAILABLE"), evidence)
                 except (RuntimeHold, BindingError, HandoffBlocked) as exc:
-                    return Result("HOLD", _safe_code(exc, "PREFLIGHT_UNPROVEN"), evidence)
+                    code = _safe_code(exc, "PREFLIGHT_UNPROVEN")
+                    status = ("HOLD_DEPENDENCY" if native and code in
+                              ("MISSING_GRANT", "DELIVER_WAKE_GRANT_REQUIRED",
+                               "SIGNED_WAKE_AUTHORITY_UNAVAILABLE") else "HOLD")
+                    return Result(status, code, evidence)
                 except Exception:
                     if self.read_only:
                         return Result("HOLD", "PREFLIGHT_UNPROVEN", evidence)
@@ -753,30 +982,71 @@ class Runner:
                              (event.event_id, b.route_id, b.generation)
                              and observation.chat_url == b.chat_url
                              and observation.marker == self.registration.marker
-                             and type(observation.user_turn_ref) is str and bool(observation.user_turn_ref)
+                             and _reference(observation.user_turn_ref)
                              and receipt.delivery_status == "UNKNOWN"
                              and receipt.error_code == "UI_USER_TURN_OBSERVED"
                              and receipt.chat_delivery_proven is False
                              and receipt.brain_continuation_proven is False
                              and receipt.replayed is False, "UI_OBSERVATION_UNPROVEN")
-                    self._move(txn, data, record, "UI_TURN_OBSERVED", "UI_USER_TURN_OBSERVED",
-                               proof={"user_turn_ref": observation.user_turn_ref,
-                                      "marker": observation.marker})
+                    native_turn = None
+                    if native:
+                        # A legacy receipt, DOM user label or typed fixture can
+                        # never manufacture an independently authenticated turn.
+                        native_turn = NativeSender.authenticate_observation(
+                            self.sender, event, self.registration, observation)
+                        _require(not any(other is not record and other["evidence"].get("user_turn_id")
+                                         == native_turn.user_turn_id for other in records.values()),
+                                 "USER_TURN_REFERENCE_REUSED")
+                    else:
+                        _require(observation.native_turn is None, "SYNTHETIC_NATIVE_PROOF_FORBIDDEN")
+                    _require(not any(other is not record and
+                                     other["evidence"].get("user_turn_ref") == observation.user_turn_ref
+                                     for other in records.values()), "USER_TURN_REFERENCE_REUSED")
+                    turn_proof: dict[str, str | int] = {
+                        "user_turn_ref": observation.user_turn_ref, "marker": observation.marker}
+                    if native_turn is not None:
+                        turn_proof.update(user_turn_id=native_turn.user_turn_id,
+                                          route_generation=native_turn.request.binding.generation,
+                                          doorbell_sha256=bytes_digest(native_turn.request.canonical_bytes),
+                                          turn_provenance_ref=native_turn.provenance_ref)
+                    self._move(txn, data, record, "UI_TURN_OBSERVED", "UI_USER_TURN_OBSERVED", proof=turn_proof)
                     if evidence == "GITHUB_AUTHENTICATED" and type(self.brain) is not NativeBrainAdapter:
                         return self._finish(txn, data, record, "BLOCKED_EXTERNAL", "BRAIN_RECEIPT_UNAVAILABLE")
                     correlation = self.brain.correlate(event, self.registration, observation)
                     if correlation is None:
                         return self._finish(txn, data, record, "BLOCKED_EXTERNAL", "BRAIN_RECEIPT_UNAVAILABLE")
+                    brain_proof = None
+                    if native:
+                        try:
+                            brain_proof = NativeBrainAdapter.authenticate_receipt(
+                                self.brain, event, self.registration, observation,
+                                correlation.authenticated_receipt if type(correlation) is BrainCorrelation else None)
+                        except DependencyHold:
+                            return self._finish(txn, data, record, "BLOCKED_EXTERNAL", "BRAIN_RECEIPT_UNAVAILABLE")
                     _require(type(correlation) is BrainCorrelation
                              and (correlation.event_key, correlation.marker, correlation.user_turn_ref,
                                   correlation.evidence_type) ==
                              (key, self.registration.marker, observation.user_turn_ref, evidence)
                              and type(correlation.correlation_ref) is str and bool(correlation.correlation_ref),
                              "BRAIN_CORRELATION_MISMATCH")
+                    if not native:
+                        _require(correlation.authenticated_receipt is None, "SYNTHETIC_NATIVE_PROOF_FORBIDDEN")
                     handoff = correlation.handoff
                     _require(type(handoff) is ProductionHandoff
                              and type(handoff.completed) is ProductionStageCompleted
                              and type(handoff.receipt) is ProductionStageReceipt, "CONSUMER_RECEIPT_REQUIRED")
+                    if native:
+                        _require(type(brain_proof) is AuthenticatedBrainReceipt
+                                 and (brain_proof.event_id, brain_proof.event_key, brain_proof.marker,
+                                      brain_proof.user_turn_id, brain_proof.user_turn_ref,
+                                      brain_proof.route_generation, brain_proof.authorization_ref,
+                                      brain_proof.completed_sha256, brain_proof.consumer_id,
+                                      brain_proof.receipt_sha256) ==
+                                 (event.event_id, key, self.registration.marker, native_turn.user_turn_id,
+                                  observation.user_turn_ref, b.generation,
+                                  handoff.completed.spec.authorization.authorization_ref,
+                                  handoff.completed.sha256, handoff.receipt.consumer_id, handoff.receipt.sha256),
+                                 "BRAIN_CORRELATION_MISMATCH")
                     expected_kind = "SYNTHETIC_FIXTURE" if evidence == "SYNTHETIC_FIXTURE" else "HUMAN_SUPPLIED"
                     _require(handoff.receipt.provenance.evidence_type == expected_kind
                              and handoff.completed.spec.provenance.evidence_type == expected_kind
@@ -812,6 +1082,8 @@ class Runner:
                                         _safe_code(exc, "ATTEMPT_UNPROVEN_NO_REPLAY"))
                 except Exception:
                     return self._finish(txn, data, record, "UNKNOWN_EFFECT", "ATTEMPT_UNPROVEN_NO_REPLAY")
+        except DependencyHold as exc:
+            return Result("HOLD_DEPENDENCY", _safe_code(exc, "NATIVE_DEPENDENCY_UNAVAILABLE"), evidence)
         except RuntimeHold as exc:
             return Result("HOLD", str(exc), evidence)
         except (ProvenanceError, TriggerBlocked, PrivateStateError, HandoffBlocked,
@@ -925,6 +1197,60 @@ def _read_owned_json(path: Path, repository_root: Path, *, limit: int = 131072) 
         return value
 
 
+@dataclass(frozen=True, repr=False)
+class _RegisteredWakeAuthority:
+    """Existing signed-origin composition, not a caller readiness callback.
+
+    Snapshot JSON is detached and immutable. This authenticates only signed
+    operation scope and private file custody, never interactive native origin.
+    """
+    source: GitHubEventSource
+    registration: Registration
+    repository_root: Path
+    config_path: Path
+    registry_path: Path
+    snapshots: tuple[tuple[Path, str], ...]
+    registry_json: str
+    origin: SignedOriginConsentAuthority
+    caller: LocalCallerAttestation
+    principal: str
+    native_source_only: bool
+
+    def authorize(self, event: Event, current: Registration) -> SignedWakeAuthorization | None:
+        _require(current == self.registration, "REGISTRATION_DRIFT")
+        full_event = self.source.verified_event
+        _require(full_event is not None and digest(full_event) == event.payload_sha256,
+                 "SOURCE_PROOF_MISSING")
+        for path, snapshot_json in self.snapshots:
+            _require(_read_owned_json(path, self.repository_root) == json.loads(snapshot_json),
+                     "LOCAL_AUTHORITY_DRIFT")
+        _require(_private_identity(self.config_path) == self.principal, "JOURNAL_OWNER_DRIFT")
+        binding = resolve_binding(full_event, route_id=current.binding.route_id,
+                                  registry_path=self.registry_path, repository_root=self.repository_root)
+        _require(binding == current.binding, "REGISTRATION_DRIFT")
+        registry = json.loads(self.registry_json)
+        _require(_read_owned_json(self.registry_path, self.repository_root) == registry,
+                 "LOCAL_AUTHORITY_DRIFT")
+        _require(type(self.origin) is SignedOriginConsentAuthority, "SIGNED_WAKE_AUTHORITY_UNAVAILABLE")
+        context = {k: full_event[k] for k in ("repository", "batch_id", "source_sha", "issue_number")}
+        if not SignedOriginConsentAuthority.authorize_origin(
+                self.origin, self.caller, operation="resolve_claim_route",
+                context={**context, "registry": registry}):
+            return None
+        operations = ("resolve_claim_route",)
+        if self.native_source_only:
+            if not SignedOriginConsentAuthority.authorize_origin(
+                self.origin, self.caller, operation="deliver_wake",
+                context={"event": full_event, "registry": registry}):
+                raise DependencyHold("DELIVER_WAKE_GRANT_REQUIRED")
+            operations += ("deliver_wake",)
+        return SignedWakeAuthorization(event, current, registry_sha256(registry),
+                                       self.principal, self.caller.caller_id, operations)
+
+    def __call__(self, event: Event, current: Registration) -> bool:
+        return self.authorize(event, current) is not None
+
+
 def compose_read_only(config_path: Path, repository_root: Path) -> Runner:
     """One R1 ingress plus R2 read-only Chrome/exact-chat readiness.
 
@@ -938,7 +1264,7 @@ def compose_read_only(config_path: Path, repository_root: Path) -> Runner:
 
 
 def compose_native_source_only(config_path: Path, repository_root: Path) -> Runner:
-    """R3A dependency evaluation, not enrollment or permission to perform effects.
+    """R3B1 dependency evaluation, not enrollment or permission to perform effects.
 
     Reuse the existing private R1 schema and signed-origin operator. Require both
     resolve_claim_route and exact-event deliver_wake grants. There is no native
@@ -1006,30 +1332,13 @@ def _compose_registered(config_path: Path, repository_root: Path, *, native_sour
                                              token_provider=lambda: token, read_budget=budget)
     source = GitHubEventSource(reader, target, authority, expected_event_id=registered["event_id"])
 
-    def verify_local_authority(event: Event, current: Registration) -> bool:
-        full_event = source.verified_event
-        _require(full_event is not None and digest(full_event) == event.payload_sha256,
-                 "SOURCE_PROOF_MISSING")
-        # Recheck the existing immutable local inputs at the admission boundary.
-        for path, snapshot in ((config_path, config), (paths["registered_source"], registered),
-                               (paths["registry"], registry), (paths["grants"], grants),
-                               (paths["chrome_config"], chrome_config)):
-            _require(_read_owned_json(path, repository_root) == snapshot, "LOCAL_AUTHORITY_DRIFT")
-        _require(_private_identity(config_path) == owner, "JOURNAL_OWNER_DRIFT")
-        binding = resolve_binding(full_event, route_id=current.binding.route_id,
-                                  registry_path=paths["registry"], repository_root=repository_root)
-        _require(binding == current.binding, "REGISTRATION_DRIFT")
-        _require(_read_owned_json(paths["registry"], repository_root) == registry,
-                 "LOCAL_AUTHORITY_DRIFT")
-        context = {k: full_event[k] for k in ("repository", "batch_id", "source_sha", "issue_number")}
-        allowed = origin.authorize_origin(caller, operation="resolve_claim_route",
-                                          context={**context, "registry": registry})
-        if not allowed or not native_source_only:
-            return allowed
-        _require(origin.authorize_origin(caller, operation="deliver_wake",
-                                         context={"event": full_event, "registry": registry}),
-                 "DELIVER_WAKE_GRANT_REQUIRED")
-        return True
+    snapshots = tuple((path, json.dumps(snapshot, sort_keys=True)) for path, snapshot in
+                      ((config_path, config), (paths["registered_source"], registered),
+                       (paths["registry"], registry), (paths["grants"], grants),
+                       (paths["chrome_config"], chrome_config)))
+    verify_local_authority = _RegisteredWakeAuthority(
+        source, registration, repository_root, config_path, paths["registry"], snapshots,
+        json.dumps(registry, sort_keys=True), origin, caller, owner, native_source_only)
 
     return Runner(source=source, registration=registration,
                   journal=Journal(paths["journal"], repository_root),
