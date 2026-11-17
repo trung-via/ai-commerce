@@ -46,7 +46,7 @@ class FakeGitHub:
                  changed_base=False, jobs_ok=True, approval=True,
                  revoked=False, latest_failed=False, receipt_ok=True,
                  tampered_artifact=False, forged_collected_case=False,
-                 extra_changed_path=None):
+                 extra_changed_path=None, source_test_path=None):
         self.g = g
         self.ci = ci
         self.changed_head = changed_head
@@ -59,6 +59,7 @@ class FakeGitHub:
         self.tampered_artifact = tampered_artifact
         self.forged_collected_case = forged_collected_case
         self.extra_changed_path = extra_changed_path
+        self.source_test_path = source_test_path
         self.writes = []
 
     def read_artifact(self, artifact_id):
@@ -69,13 +70,16 @@ class FakeGitHub:
         if artifact_id not in (1000, 1001):
             raise ValueError("UNKNOWN_TEST_ARTIFACT")
         os_name = "windows-latest"
+        test_path = self.source_test_path or "tests/test_minimum_test.py"
+        test_module = test_path.removesuffix(".py").replace("/", ".")
         plan = {
             "version": 2, "base_sha": self.base, "candidate_sha": "c" * 40,
             "mode": "TARGETED", "changed_paths": ["src/ai_commerce/product/identity.py"],
-            "selected_tests": ["tests/test_minimum_test.py"],
+            "selected_tests": [test_path],
         }
         plan_bytes = json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()
-        xml = b'<testsuites><testsuite><testcase classname="tests.test_minimum_test" name="test_ok"/></testsuite></testsuites>'
+        xml = (f'<testsuites><testsuite><testcase classname="{test_module}" '
+               'name="test_ok"/></testsuite></testsuites>').encode()
         if self.forged_collected_case:
             xml = b'<testsuites><testsuite><testcase classname="tests.test_unrelated" name="test_ok"/></testsuite></testsuites>'
         receipt = {
@@ -83,16 +87,16 @@ class FakeGitHub:
             "base_sha": self.base, "pr_head_sha": self.head,
             "platform": "Windows",
             "selection_mode": "TARGETED",
-            "selected_test_files": ["tests/test_minimum_test.py"],
+            "selected_test_files": [test_path],
             "plan_sha256": hashlib.sha256(plan_bytes).hexdigest(),
             "selector_sha256": "a" * 64, "registry_sha256": "b" * 64,
             "chunks": [{
-                "test_files": ["tests/test_minimum_test.py"], "exit_code": 0,
+                "test_files": [test_path], "exit_code": 0,
                 "junit_sha256": hashlib.sha256(xml).hexdigest(),
                 "testcases": 1, "counts": {"passed": 1, "skipped": 0, "failed": 0, "errors": 0},
                 "observed_cases": [
                     "tests.test_unrelated::test_ok" if self.forged_collected_case
-                    else "tests.test_minimum_test::test_ok"],
+                    else test_module + "::test_ok"],
             }],
             "collected_count": 1, "executed_count": 1, "passed_count": 1,
             "skipped_count": 0, "failed_count": 0, "error_count": 0,
@@ -174,6 +178,38 @@ class FakeGitHub:
             return [{"number": self.pr, "head": {"sha": self.head}}]
         raise AssertionError(f"Unexpected {method} {path}")
 
+
+@pytest.mark.parametrize(
+    ("test_path", "expected"),
+    [
+        ("tests/test_minimum_test.py", True),
+        ("src/ai_commerce/opportunity/trends/tests/test_m02.py", True),
+        ("src/ai_commerce/opportunity/trends/tests/../test_m02.py", False),
+        ("src/ai_commerce/opportunity/trends/tests/test_m02.py/evil", False),
+        ("src/.github/anything/tests/test_evil.py", False),
+        ("tests/subdir/test_unregistered.py", False),
+    ],
+)
+def test_v21_artifact_test_paths_accept_registered_package_local_files(gate, test_path, expected):
+    fake = FakeGitHub(gate, source_test_path=test_path)
+    data = fake.read_artifact(1000)
+    assert gate.validate_receipt_zip(
+        data, expected_head=fake.head, expected_base=fake.base,
+        os_name="windows-latest",
+        expected_changed_paths=("src/ai_commerce/product/identity.py",),
+        required_test_files=(test_path,),
+    ) is expected
+
+
+def test_v21_package_local_junit_module_impostor_rejected(gate):
+    nested = "src/ai_commerce/opportunity/trends/tests/test_m02.py"
+    fake = FakeGitHub(gate, source_test_path=nested, forged_collected_case=True)
+    assert not gate.validate_receipt_zip(
+        fake.read_artifact(1000), expected_head=fake.head, expected_base=fake.base,
+        os_name="windows-latest",
+        expected_changed_paths=("src/ai_commerce/product/identity.py",),
+        required_test_files=(nested,),
+    )
 
 def _approval_event(g, owner=True):
     """Only a pinned COMMENT review wakes gate; PR Conversation is authority."""
