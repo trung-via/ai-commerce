@@ -9,7 +9,7 @@ from .runner import Result, RuntimeHold, _CODE_ROOT, diagnostic, run_native_sour
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Source-only WakeHub R2 ingress and R3A dependency gates for Chrome 9444. "
+        description="Source-only WakeHub R2 ingress and R3B1 typed dependency gates for Chrome 9444. "
                     "No Chrome launch, tab preload, UI Send, "
                     "login, scheduler, HostOps or GitHub writes.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -20,7 +20,8 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--diagnostic", action="store_true",
                       help="Run labeled offline synthetic adapters and real journal; no host proof.")
     run.add_argument("--native-source-only", action="store_true",
-                     help="Check R3A exact deliver_wake grant and dependency gates; no UI Send. "
+                     help="Check signed resolve/deliver grants and R3B1 authenticated origin, "
+                          "USER-turn and Brain dependency gates; no UI Send. "
                           "Default remains R2 read-only; missing enrolled authority yields HOLD_DEPENDENCY.")
     run.add_argument("--journal", type=Path,
                      help="Diagnostic-only private file in an existing operator-owned directory, outside checkout.")
