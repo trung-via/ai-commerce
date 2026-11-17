@@ -1,0 +1,16 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "production-orchestration",
+  "sources": [
+    "src/ai_commerce/production_orchestration/__init__.py",
+    "src/ai_commerce/production_orchestration/contracts.py",
+    "src/ai_commerce/production_orchestration/orchestrator.py"
+  ],
+  "tests": ["tests/test_production_orchestration.py"],
+  "acs": ["PRODUCTION.orchestration-p0"],
+  "consumers": [
+    "src/ai_commerce/opportunity/bridge/briefs.py",
+    "src/ai_commerce/creative/briefs.py"
+  ],
+  "contracts": []
+}
