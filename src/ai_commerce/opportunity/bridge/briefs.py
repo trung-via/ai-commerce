@@ -14,7 +14,7 @@ from ai_commerce.contracts.schema import _format_checker, validate_record
 from ai_commerce.core.provenance import canonical_bytes, sha256_bytes
 from ai_commerce.creative.briefs import intake_brief
 
-from ..core.models import OpportunityError, digest
+from ..core.models import OpportunityError, digest, validate_opportunity_decision
 from ..core.schemas import SOURCE_STATUS
 from ..proposals import validate_proposal
 from .schemas import EDITS, MAX_RECORD_BYTES, MAX_TEXT_BYTES, schema
@@ -156,6 +156,34 @@ def opportunity_to_brief(proposal: dict, *, edits: Mapping | None = None,
     creative["prompt"] = proposal["manual_input"]["text"] if proposal["manual_input"] else creative["objective"]
     receipt = _receipt(proposal=proposal, human_input=None, edits=_edits(edits), synthetic=synthetic)
     return _finish(creative, receipt, brief_id)
+
+
+def selected_opportunity_to_brief(proposals: list[dict], decision: dict, *, job_id: str,
+                                   manifest_sha256: str, source_sha: str, assessment: dict | None = None,
+                                   assessment_task: dict | None = None, selection: dict | None = None,
+                                   human_identity: dict | None = None) -> dict:
+    """Transfer a validated immutable decision through the existing M05/A03 intake.
+
+    AI choice/rationale remains in its decision receipt, never manual_idea, Human
+    edits, observations or mutations of the deterministic M04 proposal. This
+    prepares an A03 brief; dispatch belongs to the future orchestrator consumer.
+    """
+    validate_opportunity_decision(decision, proposals=proposals, job_id=job_id,
+        manifest_sha256=manifest_sha256, source_sha=source_sha, assessment=assessment,
+        assessment_task=assessment_task, selection=selection, human_identity=human_identity)
+    _check(decision["outcome"] == "SELECT", "JOB_SELECT_EXACT_PROPOSAL")
+    choices = [p for p in proposals if p["proposal_id"] == decision["selected_proposal_id"]]
+    _check(len(choices) == 1 and digest(choices[0]) == decision["selected_proposal_sha256"], "JOB_SELECT_EXACT_PROPOSAL")
+    brief = opportunity_to_brief(choices[0])
+    receipt = {"schema_version": "A10AutomationDecisionReceipt.v1", "job_id": job_id,
+        "manifest_sha256": manifest_sha256, "source_sha": source_sha, "decision": deepcopy(decision),
+        "decision_sha256": digest(decision), "assessment_receipt_id": decision["assessment_receipt_id"],
+        "next_state": "READY_FOR_A03_DISPATCH", "dispatch_status": "NOT_ATTEMPTED"}
+    brief["brief_id"] = "brief:a10:" + digest({"brief": brief, "decision": decision})
+    brief["opportunity_automation"] = {"receipt_id": "a10briefreceipt-" + digest(receipt), **receipt}
+    _bounded(brief)
+    validate_record("ContentBrief", brief)
+    return intake_brief(brief)
 
 
 def freeform_brief(text: str, *, edits: Mapping | None = None, brief_id: str | None = None,
