@@ -1,0 +1,13 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "wakehub-runtime",
+  "sources": [
+    "src/ai_commerce/wakehub_runtime/__init__.py",
+    "src/ai_commerce/wakehub_runtime/__main__.py",
+    "src/ai_commerce/wakehub_runtime/runner.py"
+  ],
+  "tests": ["tests/test_wakehub_runtime.py"],
+  "acs": ["WAKEHUB.runtime-r0"],
+  "consumers": ["src/ai_commerce/production_orchestration/orchestrator.py"],
+  "contracts": []
+}
