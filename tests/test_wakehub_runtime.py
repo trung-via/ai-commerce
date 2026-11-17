@@ -1,4 +1,4 @@
-"""WAKEHUB.runtime-r0: R0/R1/R2/R3A/R3B1 source closure, never native host proof.
+"""WAKEHUB.runtime-r0: R0/R1/R2/R3A/R3B2B source closure, never native host proof.
 
 Only custody observation is stubbed for deterministic cross-OS temporary files.
 Windows fixture files inherit an explicit process-SID grant, rather than relying
@@ -1790,3 +1790,290 @@ def test_r3b1_changing_composer_labels_do_not_supply_stable_native_identity(r3a_
         "HOLD_DEPENDENCY", "NATIVE_ORIGIN_AUTHORITY_UNAVAILABLE", "GITHUB_AUTHENTICATED")
     assert i["page"].reads == 2
     assert_read_only_pending(i)
+
+
+@pytest.fixture
+def r3b2_claims(r3b1_pins):
+    """Unverified source-only envelopes; no private provider or grant is issued."""
+    p = r3b1_pins
+    c = r.cdp_turn
+    request = r._turn_request(p.registration, p.event, p.request, p.origin)
+    scope = request.scope
+    observation = c.BrowserObservation(scope, "fixture:observation", 1, 1, True, True)
+    grant = c.SignedWakeGrant(scope, "fixture:grant", "fixture:issuer", "fixture:key",
+                              b"unverified-signature", 100, 200)
+    reservation = c.DurableReservation(scope, "fixture:reservation", grant.grant_ref,
+                                       "fixture:claimed-durability", 110)
+    attestation = c.NativeAttestation(
+        scope, c.AttestationPhase.PRE_SEND, c.EvidenceSource.NATIVE_PRIVATE_PROVIDER,
+        "fixture:attestation", "fixture:issuer", "fixture:key", b"unverified-signature",
+        grant.grant_ref, reservation.reservation_ref, observation.observation_ref, 115, 180)
+    evidence = c.TurnEvidence(observation, grant, reservation, attestation)
+    user_turn = c.ChatGPTUserTurnRef(
+        scope, "native-looking-opaque-id", "native-looking-message-ref", attestation.attestation_ref,
+        grant.grant_ref, reservation.reservation_ref, c.EvidenceSource.NATIVE_PRIVATE_PROVIDER)
+    return SimpleNamespace(p=p, request=request, evidence=evidence, user_turn=user_turn, now=120)
+
+
+def test_r3b2_bridge_preserves_exact_message_and_detached_scope(r3b2_claims):
+    f = r3b2_claims
+    p, mapped = f.p, f.request
+    assert type(mapped) is r.cdp_turn.WakeRequest
+    assert mapped.message_bytes == p.request.canonical_bytes
+    assert mapped.scope.event_id == p.event.event_id
+    assert mapped.scope.message_sha256 == hashlib.sha256(p.request.canonical_bytes).hexdigest()
+    assert asdict(mapped.scope.origin) == {
+        "account_id": p.origin.account_id,
+        "conversation_id": p.registration.binding.chat_url.rsplit("/", 1)[1],
+        "session_ref": p.origin.account_session_ref,
+        "route_generation": p.registration.binding.generation,
+        "registration_marker": p.registration.marker,
+        "browser_custody_ref": p.origin.chrome_custody_ref,
+        "chrome_profile_id": p.origin.chrome_profile_id,
+        "context_ref": p.origin.context_ref, "tab_ref": p.origin.tab_ref,
+        "composer_ref": p.origin.composer_ref, "cdp_endpoint": "http://127.0.0.1:9444"}
+    with pytest.raises(FrozenInstanceError):
+        mapped.scope.event_id = "changed"
+    assert "native-looking" not in repr(mapped) and "fixture:" not in repr(mapped)
+    with pytest.raises(r.DependencyHold, match="^NATIVE_ORIGIN_AUTHORITY_UNAVAILABLE$"):
+        r.NativeOriginAuthority().authenticate(p.registration, p.origin)
+
+
+@pytest.mark.parametrize("fault,code", [
+    ("event", "NATIVE_TURN_REQUEST_MISMATCH"),
+    ("event_key", "NATIVE_TURN_REQUEST_MISMATCH"),
+    ("request_marker", "NATIVE_TURN_REQUEST_MISMATCH"),
+    ("request_generation", "NATIVE_TURN_REQUEST_MISMATCH"),
+    ("origin_generation", "NATIVE_TURN_ORIGIN_MISMATCH"),
+    ("origin_marker", "NATIVE_TURN_ORIGIN_MISMATCH"),
+    ("origin_chat", "NATIVE_TURN_ORIGIN_MISMATCH"),
+    ("origin_missing", "NATIVE_ORIGIN_AUTHORITY_UNAVAILABLE"),
+    ("origin_duck", "NATIVE_ORIGIN_AUTHORITY_UNAVAILABLE"),
+    ("synthetic", "NATIVE_TURN_SCOPE_UNAVAILABLE"),
+    ("source_sha", "NATIVE_TURN_SCOPE_UNAVAILABLE"),
+])
+def test_r3b2_bridge_rejects_scope_drift_and_synthetic_inputs(r3b1_pins, fault, code):
+    p = r3b1_pins
+    event, registration, request, origin = p.event, p.registration, p.request, p.origin
+    if fault == "event":
+        event = replace(event, event_id="ef02-completion-v1:" + "f" * 64)
+    elif fault == "event_key":
+        request = replace(request, event_key="f" * 64)
+    elif fault == "request_marker":
+        request = replace(request, marker="fixture:old-marker")
+    elif fault == "request_generation":
+        request = replace(request, binding=replace(request.binding, generation=2))
+    elif fault == "origin_generation":
+        origin = replace(origin, binding=replace(origin.binding, generation=2))
+    elif fault == "origin_marker":
+        origin = replace(origin, marker="fixture:old-marker")
+    elif fault == "origin_chat":
+        origin = replace(origin, binding=replace(origin.binding,
+            chat_url="https://chatgpt.com/c/00000000-0000-0000-0000-000000000002"))
+    elif fault == "origin_missing":
+        origin = None
+    elif fault == "origin_duck":
+        origin = SimpleNamespace(**asdict(origin))
+    elif fault == "synthetic":
+        event = replace(event, evidence_type="SYNTHETIC_FIXTURE")
+        registration = replace(registration, evidence_type="SYNTHETIC_FIXTURE")
+    else:
+        event = replace(event, source_sha="f" * 40)
+    with pytest.raises(r.DependencyHold, match="^" + code + "$"):
+        r._turn_request(registration, event, request, origin)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("account_id", None), ("account_id", "other-account"),
+    ("session_ref", None), ("session_ref", "other-session"),
+    ("conversation_id", "other-chat"), ("route_generation", None), ("route_generation", 2),
+    ("registration_marker", None), ("registration_marker", "old-marker"),
+    ("browser_custody_ref", "other-custody"), ("chrome_profile_id", "other-profile"),
+    ("context_ref", "other-context"), ("tab_ref", "other-tab"),
+    ("composer_ref", "other-composer"), ("cdp_endpoint", "http://127.0.0.1:9222"),
+])
+def test_r3b2_observed_identity_never_overrides_expected_pins(r3b2_claims, field, value):
+    f = r3b2_claims
+    wrong = replace(f.request.scope, origin=replace(f.request.scope.origin, **{field: value}))
+    evidence = replace(f.evidence, observation=replace(f.evidence.observation, scope=wrong))
+    sender = r.NativeSender(f.p.root, f.p.registration)
+    with pytest.raises(r.DependencyHold, match="^DOORBELL_SCOPE_MISMATCH$"):
+        sender.require_turn_reference(f.p.request, event=f.p.event, origin=f.p.origin,
+                                      evidence=evidence, now=f.now)
+    assert sender.owner.adapter.allow_submit is False
+
+
+@pytest.mark.parametrize("part,changes,code", [
+    ("observation", None, "OBSERVATION_MISSING"),
+    ("observation", {"context_count": 2}, "SURFACE_NOT_EXCLUSIVE"),
+    ("observation", {"tab_count": 2}, "SURFACE_NOT_EXCLUSIVE"),
+    ("observation", {"composer_clean": False}, "COMPOSER_DIRTY"),
+    ("observation", {"surface_stable": False}, "SURFACE_UNSTABLE"),
+    ("grant", None, "GRANT_MISSING"),
+    ("grant", {"signature": b""}, "GRANT_INVALID"),
+    ("grant", {"expires_at": 120}, "GRANT_NOT_FRESH"),
+    ("grant", {"use_count": 1}, "GRANT_REUSED"),
+    ("reservation", None, "RESERVATION_MISSING"),
+    ("reservation", {"grant_ref": "other-grant"}, "RESERVATION_SCOPE_MISMATCH"),
+    ("reservation", {"state": "PENDING"}, "RESERVATION_NOT_DURABLE_RESERVED"),
+    ("reservation", {"durable_receipt_ref": ""}, "RESERVATION_NOT_DURABLE_RESERVED"),
+    ("attestation", None, "NATIVE_ATTESTATION_MISSING"),
+    ("attestation", {"source": r.cdp_turn.EvidenceSource.SYNTHETIC_FIXTURE}, "WRONG_AUTHORITY_SOURCE"),
+    ("attestation", {"reservation_ref": "other-reservation"}, "ATTESTATION_SCOPE_MISMATCH"),
+])
+def test_r3b2_pre_send_dependencies_are_rejection_only(r3b2_claims, part, changes, code):
+    f = r3b2_claims
+    changed = replace(getattr(f.evidence, part), **changes) if changes is not None else None
+    evidence = replace(f.evidence, **{part: changed})
+    with pytest.raises(r.DependencyHold, match="^DOORBELL_" + code + "$"):
+        r.NativeTurnAuthority().preflight(f.p.request, registration=f.p.registration,
+            event=f.p.event, origin=f.p.origin, evidence=evidence, now=f.now)
+
+
+@pytest.mark.parametrize("part", ["observation", "grant", "reservation", "attestation"])
+def test_r3b2_claimed_digest_must_match_canonical_message(r3b2_claims, part):
+    f = r3b2_claims
+    changed = replace(getattr(f.evidence, part),
+                      scope=replace(f.request.scope, message_sha256="0" * 64))
+    evidence = replace(f.evidence, **{part: changed})
+    with pytest.raises(r.DependencyHold):
+        r.NativeTurnAuthority().preflight(f.p.request, registration=f.p.registration,
+            event=f.p.event, origin=f.p.origin, evidence=evidence, now=f.now)
+    with pytest.raises(r.RuntimeHold, match="^DOORBELL_REQUEST_INVALID$"):
+        replace(f.p.request, canonical_bytes=f.p.request.canonical_bytes + b"\n")
+
+
+@pytest.mark.parametrize("boundary", ["readiness", "authenticate"])
+def test_r3b2_complete_native_looking_claims_still_lack_private_provider(r3b2_claims,
+                                                                     monkeypatch, boundary):
+    f = r3b2_claims
+    calls = []
+    original = r.cdp_turn.pre_send
+
+    def observe(*args, **kwargs):
+        gate = original(*args, **kwargs)
+        calls.append(gate)
+        return gate
+
+    monkeypatch.setattr(r.cdp_turn, "pre_send", observe)
+    with pytest.raises(r.DependencyHold, match="^DOORBELL_AUTHENTICATED_TURN_REF_UNAVAILABLE$"):
+        if boundary == "readiness":
+            r.NativeSender(f.p.root, f.p.registration).require_turn_reference(f.p.request,
+                event=f.p.event, origin=f.p.origin, evidence=f.evidence, now=f.now)
+        else:
+            r.NativeTurnAuthority().authenticate(f.p.request, f.p.turn,
+                registration=f.p.registration, event=f.p.event, origin=f.p.origin,
+                evidence=f.evidence, now=f.now)
+    assert len(calls) == 1
+    assert calls[0].code is r.cdp_turn.GateCode.NATIVE_PRIVATE_PROVIDER_UNAVAILABLE
+    assert calls[0].status is r.cdp_turn.GateStatus.UNAVAILABLE
+    assert calls[0].send_allowed is False and calls[0].authenticated_user_turn is None
+
+
+@pytest.mark.parametrize("fake", [None, True, SimpleNamespace(send_allowed=True,
+    status="READY", authenticated_user_turn="forged", retry_allowed=True)])
+def test_r3b2_provider_shaped_gate_result_cannot_enable_send(r3b2_claims, monkeypatch, fake):
+    f = r3b2_claims
+    monkeypatch.setattr(r.cdp_turn, "pre_send", lambda *a, **k: fake)
+    with pytest.raises(r.DependencyHold, match="^DOORBELL_AUTHENTICATED_TURN_REF_UNAVAILABLE$"):
+        r.NativeTurnAuthority().preflight(f.p.request, registration=f.p.registration,
+            event=f.p.event, origin=f.p.origin, evidence=f.evidence, now=f.now)
+
+
+def test_r3b2_pre_send_rejection_stays_pending_in_existing_runner(r3a_ingress, r3b1_pins,
+                                                               monkeypatch):
+    i = r3a_ingress
+    runner = r.compose_native_source_only(i["config_path"], i["root"])
+    event = r.Event(i["event"]["event_id"], i["event"]["source_sha"],
+                    i["event"]["run_attempt"], digest(i["event"]), "GITHUB_AUTHENTICATED")
+    origin = replace(r3b1_pins.origin, binding=i["registration"].binding,
+                     marker=i["registration"].marker)
+    calls = []
+
+    def reject(sender, registration):
+        # Fault injection reaches only a rejection gate, never native readiness.
+        calls.append("rejection")
+        r.NativeSender.require_turn_reference(sender, r.DoorbellRequest.for_event(event, registration),
+            event=event, origin=origin, evidence=r.cdp_turn.TurnEvidence(), now=120)
+
+    monkeypatch.setattr(r.NativeSender, "preflight", reject)
+    assert runner.run_once() == r.Result("HOLD_DEPENDENCY", "DOORBELL_OBSERVATION_MISSING",
+                                       "GITHUB_AUTHENTICATED")
+    assert calls == ["rejection"]
+    assert_read_only_pending(i)
+    assert runner.sender.owner.adapter.allow_submit is False
+    assert runner.orchestrator._completed == {} and runner.orchestrator._receipts == {}
+
+
+@pytest.mark.parametrize("fault,code", [
+    ("ambiguous", "DOORBELL_CLICK_AMBIGUOUS_NO_REPLAY"),
+    ("timeout", "DOORBELL_TRANSPORT_TIMEOUT_NO_REPLAY"),
+    ("missing_turn", "DOORBELL_USER_TURN_MISSING"),
+    ("wrong_turn", "DOORBELL_USER_TURN_SCOPE_MISMATCH"),
+    ("forged_turn", "DOORBELL_NATIVE_PRIVATE_PROVIDER_UNAVAILABLE"),
+    ("digest", "DOORBELL_MESSAGE_DIGEST_MISMATCH"),
+    ("not_attempted", "ATTEMPT_UNPROVEN_NO_REPLAY"),
+    ("invalid_outcome", "DOORBELL_INVALID_SEND_OUTCOME_NO_REPLAY"),
+])
+def test_r3b2_source_post_send_classification_is_unknown_without_replay(composition, r3b2_claims,
+                                                                    monkeypatch, fault, code):
+    """TEST_ONLY_MOCK: persist source rejection via the existing SQLite runner."""
+    make, event, registration, _, path, _ = composition
+    f, c = r3b2_claims, r.cdp_turn
+    evidence = replace(f.evidence, attestation=replace(f.evidence.attestation,
+                                                      phase=c.AttestationPhase.POST_SEND))
+    request, user_turn, outcome = f.request, f.user_turn, c.SendOutcome.CLICK_REPORTED
+    if fault == "ambiguous":
+        outcome = c.SendOutcome.CLICK_AMBIGUOUS
+    elif fault == "timeout":
+        outcome = c.SendOutcome.TRANSPORT_TIMEOUT
+    elif fault == "missing_turn":
+        user_turn = None
+    elif fault == "wrong_turn":
+        user_turn = replace(user_turn, scope=replace(request.scope,
+            origin=replace(request.scope.origin, account_id="other-account")))
+    elif fault == "digest":
+        request = replace(request, scope=replace(request.scope, message_sha256="0" * 64))
+    elif fault == "not_attempted":
+        outcome = c.SendOutcome.NOT_ATTEMPTED
+    elif fault == "invalid_outcome":
+        outcome = "CLICK_AMBIGUOUS"
+    runner = make()
+    calls = []
+
+    def rejected_effect(*args):
+        assert record(path, event, registration)["status"] == "RESERVED"
+        calls.append("source-rejection")
+        mapped_code = r.NativeTurnAuthority().post_reservation_code(
+            outcome=outcome, request=request, evidence=evidence, user_turn=user_turn, now=f.now)
+        assert mapped_code == code
+        raise r.RuntimeHold(mapped_code)
+
+    monkeypatch.setattr(runner.sender, "send", rejected_effect)
+    assert runner.run_once() == r.Result("UNKNOWN_EFFECT", code, "SYNTHETIC_FIXTURE")
+    assert record(path, event, registration)["history"] == ["PENDING", "RESERVED", "UNKNOWN_EFFECT"]
+    assert runner.run_once().replayed and calls == ["source-rejection"]
+    reopened = make()
+    assert reopened.run_once() == r.Result("UNKNOWN_EFFECT", code, "SYNTHETIC_FIXTURE", True)
+    assert reopened.sender.calls == 0 and reopened.orchestrator._completed == {}
+
+
+def test_r3b2_fixed_turn_authority_rejects_subclasses_and_unavailable_post_gate(r3b2_claims,
+                                                                          monkeypatch):
+    f = r3b2_claims
+
+    class Unregistered(r.NativeTurnAuthority):
+        def preflight(self, *args, **kwargs):
+            pytest.fail("Unregistered owner invoked")
+
+    sender = r.NativeSender(f.p.root, f.p.registration)
+    sender.turn_authority = Unregistered()
+    with pytest.raises(r.DependencyHold, match="^DOORBELL_AUTHENTICATED_TURN_REF_UNAVAILABLE$"):
+        sender.require_turn_reference(f.p.request, event=f.p.event, origin=f.p.origin,
+                                      evidence=f.evidence, now=f.now)
+    assert r.NativeTurnAuthority.post_reservation_code(sender.turn_authority,
+        outcome=r.cdp_turn.SendOutcome.CLICK_AMBIGUOUS) == "ATTEMPT_UNPROVEN_NO_REPLAY"
+    monkeypatch.setattr(r.cdp_turn, "post_send", lambda *a, **k: SimpleNamespace(
+        status="HOLD", send_allowed=True, retry_allowed=True))
+    assert r.NativeTurnAuthority().post_reservation_code(
+        outcome=r.cdp_turn.SendOutcome.CLICK_AMBIGUOUS) == "ATTEMPT_UNPROVEN_NO_REPLAY"
