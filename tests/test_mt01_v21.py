@@ -1494,6 +1494,62 @@ def test_mt01_impact_control_only_selects_reviewed_self_tests():
     assert selected.selected_tests == ("tests/test_minimum_test.py", "tests/test_mt01_v21.py")
 
 
+def test_bq01a_current_owner_closure_keeps_b0_imports_but_not_test_only_fanout():
+    """A package edit reaches receipt; editing its test cannot reach B0."""
+    import subprocess
+    from ai_commerce.engineering.impact_v21 import load_baseline_component_owner_records
+    from ai_commerce.engineering.minimum_test import approved_groups, digest, import_graph
+
+    root = Path(__file__).resolve().parents[1]
+    base = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    static = approved_groups()
+    baseline = load_baseline_component_owner_records(
+        root=root, base_sha=base, existing_groups=static)
+    groups = (*static, *(record["group"] for record in baseline))
+    by_name = {g.name: g for g in groups}
+    package = "src/ai_commerce/creative_quality/__init__.py"
+    receipt = "src/ai_commerce/production_runtime/receipt.py"
+    worker = "src/ai_commerce/production_runtime/attended_worker.py"
+    sources = {p: digest((root / p).read_bytes()) for p in (package, receipt, worker)}
+    graph, complete = import_graph(root, sources)
+    assert complete and package in graph[receipt] and receipt in graph[worker]
+
+    affected = select_impact(root=root, changed_paths=[package], groups=groups)
+    # HEAD also contains later quality owners, unlike the historical BQ-01A
+    # onboarding base. Keep their genuine package consumers in this control.
+    expected = (
+        "a03", "b0-3", "b0-4", "b0-s", "b0-s3", "b0-s3b",
+        "b1-3-audio", "b1-3-subtitle", "b3-next-brief", "b3-operations-dashboard",
+        "b3-portfolio", "bq-01a", "bq-01b", "bq-02a", "bq-02b", "bq-03a",
+        "bq-03b", "bq-04a", "bq-04b", "bq-05a", "bq-05b0", "bq-05b1",
+        "bq-06a", "bq-06b",
+    )
+    assert affected.runnable and not affected.missing_mapping
+    assert affected.selected_groups == expected
+    assert {package, receipt, worker} <= set(affected.affected_paths)
+    for name in ("b0-3", "b0-4", "b0-s", "b0-s3", "b0-s3b"):
+        assert receipt in (*by_name[name].paths, *by_name[name].consumers)
+    for name in expected[1:]:
+        owner = by_name[name]
+        assert set(affected.affected_paths) & set(
+            (*owner.paths, *owner.tests, *owner.consumers, *owner.contracts))
+    assert affected.selected_tests == tuple(sorted({
+        path for name in expected for path in by_name[name].tests
+    }))
+
+    # This is the unchanged-source control at current HEAD, not a frozen
+    # historical owner list or a blanket subset permitting arbitrary groups.
+    test_only = select_impact(
+        root=root, changed_paths=["tests/test_bq_01a_brief_causality.py"], groups=groups)
+    assert test_only.runnable and not test_only.missing_mapping
+    assert test_only.selected_groups == ("a03", "bq-01a")
+    assert test_only.selected_tests == tuple(sorted({
+        path for name in ("a03", "bq-01a") for path in by_name[name].tests
+    }))
+    assert receipt not in test_only.affected_paths and worker not in test_only.affected_paths
+
+
 def test_windows_collection_sandbox_control_selects_registered_owner_after_recovery(tmp_path):
     from ai_commerce.engineering.impact_v21 import CONTROL_TESTS
     from ai_commerce.engineering.minimum_test import approved_groups
