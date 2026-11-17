@@ -424,8 +424,8 @@ def validate_acceptance_scope(batch: dict, *, repo: Path | None,
     """Owner-impact compatibility/contract AFTER issuer validation and pinning.
 
     Definitive declaration/owner contradictions reject the ENTIRE batch. New
-    owners, directory scopes and incomplete graphs HOLD; they never authorize
-    an executor. Allowed paths are a maximum, not promised edits. An optional
+    owners require the narrow onboarding contract below; directory scopes and
+    incomplete graphs HOLD. Allowed paths are a maximum, not promised edits. An optional
     scope needs explicit signed witnesses unless EVERY admissible nonempty
     selection (including predecessor contributions) hits the required owners.
     Post-edit MT-01 must still prove the actual candidate diff and real tests.
@@ -493,10 +493,89 @@ def validate_acceptance_scope(batch: dict, *, repo: Path | None,
 
         results, minimum_acs = {}, {}
 
+        def onboarding_scope(action):
+            # Ingress contracts only a finite, fresh layout. There are no
+            # candidate manifest bytes or executed consumers to prove yet.
+            if (len(actions) != 1 or action["depends_on"]
+                    or action.get("reuse_candidate") is not None):
+                return "ONBOARD_SINGLE_NEW_ACTION_REQUIRED_PRE_EXECUTOR"
+            if "MT01_IMPACT_WITNESSES_JSON:" in action["instruction"]:
+                return "ONBOARD_BASELINE_IMPACT_FORBIDDEN_PRE_EXECUTOR"
+            ids = _declared_acceptance_ids(action)
+            if ids is None or len(ids) != 1:
+                return "ONBOARD_AC_DECLARATION_INVALID_PRE_EXECUTOR"
+            fence = None
+            for line in action["instruction"].splitlines():
+                stripped = line.strip()
+                if stripped.startswith(("```", "~~~")):
+                    marker = stripped[:3]
+                    fence = None if fence == marker else marker if fence is None else fence
+                if "MT01_ACCEPTANCE_JSON:" in line and fence is not None:
+                    return "ONBOARD_AC_DECLARATION_INVALID_PRE_EXECUTOR"
+            if set(ids) & known:
+                return "ONBOARD_AC_ALREADY_OWNED_PRE_EXECUTOR"
+            paths = action["allowed_paths"]
+            if (not 3 <= len(paths) <= 81 or len(set(paths)) != len(paths)
+                    or len({p.casefold() for p in paths}) != len(paths)):
+                return "ONBOARD_EXACT_NEW_OWNER_LAYOUT_REQUIRED_PRE_EXECUTOR"
+            reserved = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(10)),
+                        *(f"lpt{i}" for i in range(10))}
+            for path in paths:
+                try:
+                    safe_path(path)
+                except RemoteRequestError:
+                    return "ONBOARD_UNSAFE_PATH_PRE_EXECUTOR"
+                if (len(path) > 240 or any(ord(c) < 32 or ord(c) == 127 for c in path)
+                        or any(part.split(".")[0].casefold() in reserved
+                               for part in path.split("/"))):
+                    return "ONBOARD_UNSAFE_PATH_PRE_EXECUTOR"
+            manifests = [p for p in paths if p.startswith("work_items/mt01-components/")]
+            if (len(manifests) != 1 or not re.fullmatch(
+                    r"work_items/mt01-components/[a-z][a-z0-9_-]{1,63}\.json", manifests[0])):
+                return "ONBOARD_EXACTLY_ONE_NEW_MANIFEST_REQUIRED_PRE_EXECUTOR"
+            name = PurePosixPath(manifests[0]).stem
+            sources = [p for p in paths if re.fullmatch(
+                r"src/ai_commerce/[a-z][a-z0-9_]{0,63}/[A-Za-z_][A-Za-z0-9_]*\.py", p)]
+            tests = [p for p in paths if re.fullmatch(r"tests/test_[A-Za-z0-9_]+\.py", p)]
+            packages = {str(PurePosixPath(p).parent) for p in sources}
+            if (not 1 <= len(sources) <= 40 or not 1 <= len(tests) <= 40
+                    or len(packages) != 1 or len(paths) != 1 + len(sources) + len(tests)
+                    or packages & {"src/ai_commerce/remote", "src/ai_commerce/engineering"}):
+                return "ONBOARD_EXACT_NEW_OWNER_LAYOUT_REQUIRED_PRE_EXECUTOR"
+            if name.casefold() in {g.name.casefold() for g in groups}:
+                return "ONBOARD_BASELINE_OWNER_EXISTS_PRE_EXECUTOR"
+            baseline = {p.relative_to(root).as_posix().casefold() for p in root.rglob("*")}
+            package = next(iter(packages)).casefold()
+            if (any(p == package or p.startswith(package + "/") for p in baseline)
+                    or {p.casefold() for p in paths} & (baseline | {p.casefold() for p in reviewed})):
+                return "ONBOARD_REOWN_OR_EXISTING_PATH_PRE_EXECUTOR"
+            for path in paths:
+                target = root / path
+                # Check every prefix, including symlinks that do not appear
+                # as files/directories in the immutable Path view, and their
+                # Windows case aliases. Inventory entries are leaves, not dirs.
+                while target != root:
+                    if target.relative_to(root).as_posix().casefold() in baseline:
+                        return "ONBOARD_UNSAFE_PATH_PRE_EXECUTOR"
+                    target = target.parent
+            return None
+
         def evaluate(key):
             if key in results:
                 return
             action = actions[key]
+            if action["verification_profile"] == "mt01-component-onboarding":
+                minimum_acs[key] = set()  # A new AC never becomes baseline impact proof.
+                reason = onboarding_scope(action)
+                results[key] = (deferred(key, reason) if reason else {
+                    "action_id": key, "status": "PRE_EXECUTOR_CONTRACTED_NOT_PROVEN",
+                    "onboarding_contract": {
+                        "source_sha": source_sha, "request_fingerprint": fingerprint(batch),
+                        "allowed_paths": list(action["allowed_paths"]),
+                        "acceptance_ids": _declared_acceptance_ids(action), "coverage_proven": False,
+                    },
+                })
+                return
             for parent in action["depends_on"]:
                 evaluate(parent)
             minimum_acs[key] = set().union(*(minimum_acs[p] for p in action["depends_on"]))

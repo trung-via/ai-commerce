@@ -971,6 +971,41 @@ def test_temporary_human_full_verification_budget_is_bounded_and_opt_in():
     assert verify < action < child < 360 * 60
 
 
+# Exact read-only #1006 request; regressions below replay it offline only.
+ISSUE_1006 = json.loads(r'''{
+  "kind": "AI_COMMERCE_REMOTE_ACTION_BATCH",
+  "version": 1,
+  "batch_id": "production_p0_atomic_mt01_owner_dcc76de_20261117",
+  "source_sha": "dcc76de4b17871762f4e5de063f0f66251d5c118",
+  "actor": "HUMAN",
+  "authorization_ref": "Trung approved autonomous Production Pipeline Orchestrator architecture under #993/#994 and continued implementation on 2026-11-17; bounded P0 MT01 owner onboarding.",
+  "max_parallel": 1,
+  "actions": [
+    {
+      "action_id": "PRODUCTION_P0_ATOMIC_ORCHESTRATOR_OWNER_CONTRACTS",
+      "attempt_id": "production_p0_atomic_codex_xhigh_dcc76de_v1",
+      "executor": "codex",
+      "model": "gpt-6.1-sol",
+      "effort": "xhigh",
+      "priority": 95,
+      "instruction": "P0 approved #994/#995: atomic MT01 V2.2 onboarding of a shared ProductionPipelineOrchestrator owner from exact main@dcc76de4b17871762f4e5de063f0f66251d5c118; only allowed files, no protected .github modification. MT01_ACCEPTANCE_JSON: [\"PRODUCTION.orchestration-p0\"]. Read docs/engineering/MT01_V22_ATOMIC_ONBOARDING_REPORT.md and work_items/mt01-components/b0-2.json and bq-01a.json as read-only examples of valid owner manifests. Add new manifest work_items/mt01-components/production-orchestration.json with valid MT01ComponentOwner.v1 schema; component id production-orchestration, sources exactly new three Python paths, owned tests tests/test_production_orchestration.py, AC PRODUCTION.orchestration-p0 and real existing downstream consumer groups A10 M05 bridge briefs and A03 creative briefs per actual repo selectors (do not invent test filenames). New src/ai_commerce/production_orchestration/{__init__,contracts,orchestrator}.py implements typed strictly versioned StageSpec, ProductionStageCompleted, ProductionStageDispatched, ProductionStageReceipt data contracts and validations for schema version, source/hash provenance, event/route, consumer binding, duplicate idempotence, malformed/missing receipts and NOT_DISPATCHED when no genuine downstream execution. P0 is CONTRACT+OWNER ONLY; no fake durable outbox, no PULSE stage state machine, no claim of live A03 dispatch, no external effects. Tests exercise happy and negative cases; actual atomic onboarding profile is mt01-component-onboarding, 12 workers only when self-host evidence. Preserve existing src policies; if registration fails, report exact blockers in EF02 receipt instead of security bypass. Deliver isolated CANDIDATE_BRANCH and exact tests with real CLI model invocation provenance; no source main mutations, no Human approval gate internal.",
+      "allowed_paths": [
+        "work_items/mt01-components/production-orchestration.json",
+        "src/ai_commerce/production_orchestration/__init__.py",
+        "src/ai_commerce/production_orchestration/contracts.py",
+        "src/ai_commerce/production_orchestration/orchestrator.py",
+        "tests/test_production_orchestration.py"
+      ],
+      "verification_profile": "mt01-component-onboarding",
+      "verification_intent": "AUTO",
+      "depends_on": [],
+      "delivery": "CANDIDATE_BRANCH",
+      "max_repair_rounds": 2
+    }
+  ]
+}''')
+
+
 AC_MARKER = "MT01_ACCEPTANCE_JSON:"
 PERSONAL_SOURCE = "src/ai_commerce/hostops_v3/personal.py"
 PERSONAL_AC = "HOSTOPS.PERSONAL.chat-approved-public-read-owner-comment-new-scratch-write"
@@ -1157,6 +1192,199 @@ def test_pre_executor_new_owner_or_directory_is_hold_even_with_invalid_declarati
     assert result["status"] == "PRE_EXECUTOR_UNDETERMINED"
     assert result["next_gate"] == "HOLD_NO_EXECUTOR"
     assert result["actions"][0]["reason"] == "ALLOWED_SCOPE_NOT_EXACT_ESTABLISHED_FILES"
+
+
+def onboarding_packet():
+    packet = copy.deepcopy(ISSUE_1006)
+    # A fresh signed request is required; never mutate/re-dispatch issue #1006.
+    packet["source_sha"] = "a" * 40  # Offline immutable fixture only.
+    packet["batch_id"] += "_corrected_ingress"
+    item = packet["actions"][0]
+    item["attempt_id"] += "_corrected_ingress"
+    inline = 'MT01_ACCEPTANCE_JSON: ["PRODUCTION.orchestration-p0"]. '
+    item["instruction"] = (AC_MARKER + '["PRODUCTION.orchestration-p0"]\n'
+                           + item["instruction"].replace(inline, ""))
+    return packet
+
+
+def test_onboarding_1006_corrected_standalone_ac_contracts_without_claiming_proof(
+        tmp_path, monkeypatch, capsys):
+    from ai_commerce.remote import __main__ as cli
+    from ai_commerce.remote.validation import validate_acceptance_scope
+    from ai_commerce.engineering import adapters
+    from ai_commerce.engineering.impact_v21 import validate_component_onboarding_manifest
+    from ai_commerce.engineering.minimum_test import approved_groups
+
+    files, calls = make_acceptance_repo(tmp_path, monkeypatch)
+    packet = onboarding_packet()
+    item = packet["actions"][0]
+    original = copy.deepcopy(packet)
+    assert validate(packet) == packet
+    def forbidden(*args, **kwargs):
+        pytest.fail("Ingress cannot invoke model, tests, transport or candidate worker")
+    for name in ("GitHubTransport", "LocalBatchWorker", "run_schedule"):
+        monkeypatch.setattr(cli, name, forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(adapters, "command_for", forbidden)
+
+    result = validate_acceptance_scope(packet, repo=tmp_path)
+    assert result["status"] == "PRE_EXECUTOR_COMPATIBLE"
+    assert result["coverage_status"] == "PRE_EXECUTOR_CONTRACTED_NOT_PROVEN"
+    assert result["next_gate"] == "POST_EDIT_MT01_REQUIRED"
+    assert result["actions"] == [{
+        "action_id": item["action_id"], "status": "PRE_EXECUTOR_CONTRACTED_NOT_PROVEN",
+        "onboarding_contract": {
+            "source_sha": packet["source_sha"], "request_fingerprint": fingerprint(packet),
+            "allowed_paths": item["allowed_paths"],
+            "acceptance_ids": ["PRODUCTION.orchestration-p0"], "coverage_proven": False,
+        },
+    }]
+    assert packet == original
+    assert not any((tmp_path / p).exists() for p in item["allowed_paths"])
+    acceptance = approved_acceptance_plan(item)
+    assert acceptance["consumer_map"] == {} and acceptance["broad_required"] is True
+    assert acceptance["unknown_ids"] == ["PRODUCTION.orchestration-p0"]
+
+    # Admission is no substitute for the existing verifier's actual bytes.
+    data = {"schema_version": "MT01ComponentOwner.v1", "component": "production-orchestration",
+            "sources": item["allowed_paths"][1:4], "tests": item["allowed_paths"][4:],
+            "acs": acceptance["ids"], "consumers": [VALIDATION_SOURCE], "contracts": []}
+    with pytest.raises(ValueError, match="^ONBOARD_FILE_MISSING_OR_LINK$"):
+        validate_component_onboarding_manifest(data, manifest_path=item["allowed_paths"][0],
+            changed_paths=item["allowed_paths"], base_paths=tuple(files),
+            existing_groups=approved_groups(), allowed_paths=item["allowed_paths"], root=tmp_path)
+
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps(packet), encoding="utf-8")
+    assert cli.main(["validate", "--request-file", str(request), "--checkout", str(tmp_path),
+                     "--issuer-login", "owner", "--owner-login", "owner"]) == 0
+    assert json.loads(capsys.readouterr().out)["acceptance_scope"] == result
+    assert calls and all(args[0] in {"ls-tree", "cat-file", "show"} for args in calls)
+    for field in ("instruction", "allowed_paths", "source_sha"):
+        changed = copy.deepcopy(packet)
+        if field == "source_sha":
+            changed[field] = "b" * 40
+        elif field == "instruction":
+            changed["actions"][0][field] += " "
+        else:
+            changed["actions"][0][field].pop()
+        assert fingerprint(changed) != fingerprint(packet)
+
+
+@pytest.mark.parametrize("problem", [
+    "second-manifest", "unsafe-manifest", "remote", "engineering", "existing-package",
+    "existing-source", "existing-test", "existing-manifest", "existing-component",
+    "protected", "directory", "wildcard", "nested-source", "two-packages", "no-source", "no-test",
+    "duplicate-path", "case-alias", "reserved-name", "control-character", "ordinary-profile",
+    "baseline-ac", "mixed-ac", "unknown-extra-ac", "bad-ac", "duplicate-ac", "missing-ac",
+    "inline-ac-1006", "quoted-ac", "fenced-ac", "duplicate-marker", "bad-json", "fake-impact",
+    "second-action", "dependency", "reuse",
+])
+def test_onboarding_invalid_or_ambiguous_contract_holds_without_effects(
+        tmp_path, monkeypatch, capsys, problem):
+    from ai_commerce.remote import __main__ as cli
+    from ai_commerce.remote.validation import validate_acceptance_scope
+    from ai_commerce.engineering import adapters
+
+    make_acceptance_repo(tmp_path, monkeypatch)
+    packet = onboarding_packet()
+    item = packet["actions"][0]
+    paths = item["allowed_paths"]
+    if problem == "second-manifest":
+        paths.append("work_items/mt01-components/second-owner.json")
+    elif problem == "unsafe-manifest":
+        paths[0] = "work_items/mt01-components/../outside.json"
+    elif problem in {"remote", "engineering", "existing-package"}:
+        package = "hostops_v3" if problem == "existing-package" else problem
+        paths[1:4] = [p.replace("production_orchestration", package) for p in paths[1:4]]
+    elif problem in {"existing-source", "existing-test", "existing-manifest", "protected"}:
+        paths.append({"existing-source": VALIDATION_SOURCE, "existing-test": "tests/test_ef02.py",
+                      "existing-manifest": "work_items/mt01-components/hostops-personal.json",
+                      "protected": ".github/workflows/ef02-batch.yml"}[problem])
+    elif problem == "existing-component":
+        paths[0] = "work_items/mt01-components/ef02.json"
+    elif problem in {"directory", "wildcard", "nested-source", "two-packages"}:
+        paths[1] = {"directory": "src/ai_commerce/production_orchestration",
+                    "wildcard": "src/ai_commerce/production_orchestration/*.py",
+                    "nested-source": "src/ai_commerce/production_orchestration/nested/owner.py",
+                    "two-packages": "src/ai_commerce/another_package/owner.py"}[problem]
+    elif problem == "no-source":
+        del paths[1:4]
+    elif problem == "no-test":
+        paths.pop()
+    elif problem == "duplicate-path":
+        paths.append(paths[-1])
+    elif problem == "case-alias":
+        paths.append("src/ai_commerce/production_orchestration/CONTRACTS.py")
+    elif problem == "reserved-name":
+        paths[1] = "src/ai_commerce/production_orchestration/CON.py"
+    elif problem == "control-character":
+        paths[0] = "work_items/mt01-components/new\nowner.json"
+    elif problem == "ordinary-profile":
+        item["verification_profile"] = "ef02-tests"
+    elif problem in {"baseline-ac", "mixed-ac", "unknown-extra-ac", "bad-ac", "duplicate-ac"}:
+        ids = {"baseline-ac": ["EF02.action-and-fanin"],
+               "mixed-ac": ["PRODUCTION.orchestration-p0", "EF02.action-and-fanin"],
+               "unknown-extra-ac": ["PRODUCTION.orchestration-p0", "UNKNOWN.unbound"],
+               "bad-ac": ["--arbitrary"],
+               "duplicate-ac": ["PRODUCTION.orchestration-p0"] * 2}[problem]
+        item["instruction"] = AC_MARKER + json.dumps(ids)
+    elif problem == "missing-ac":
+        item["instruction"] = "PRIVATE_INSTRUCTIONS"
+    elif problem == "inline-ac-1006":
+        item["instruction"] = ISSUE_1006["actions"][0]["instruction"]
+    elif problem == "quoted-ac":
+        item["instruction"] = "> " + item["instruction"]
+    elif problem == "fenced-ac":
+        item["instruction"] = "```text\n" + item["instruction"] + "\n```"
+    elif problem == "duplicate-marker":
+        item["instruction"] += "\n" + AC_MARKER + '["PRODUCTION.orchestration-p0"]'
+    elif problem == "bad-json":
+        item["instruction"] = AC_MARKER + '{"acs": []}'
+    elif problem == "fake-impact":
+        item["instruction"] += '\nMT01_IMPACT_WITNESSES_JSON:{"PRODUCTION.orchestration-p0":["' + VALIDATION_SOURCE + '"]}'
+    elif problem == "second-action":
+        packet["actions"].append(scoped_action("b", [VALIDATION_SOURCE], ["EF02.action-and-fanin"]))
+    elif problem == "dependency":
+        item["depends_on"] = ["missing"]
+    elif problem == "reuse":
+        item["reuse_candidate"] = {"candidate_sha": "b" * 40, "verified_run_id": 123}
+    original = copy.deepcopy(packet)
+    result = validate_acceptance_scope(packet, repo=tmp_path)
+    assert result["status"] == result["coverage_status"] == "PRE_EXECUTOR_UNDETERMINED"
+    assert result["next_gate"] == "HOLD_NO_EXECUTOR"
+    assert result["actions"][0]["status"] == "PRE_EXECUTOR_UNDETERMINED"
+    assert result["actions"][0]["reason"].startswith(("ONBOARD_", "ALLOWED_SCOPE_"))
+    assert packet == original
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("HOLD/REJECT must precede model, verification, claim and transport")
+    for name in ("GitHubTransport", "LocalBatchWorker", "run_schedule"):
+        monkeypatch.setattr(cli, name, forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(adapters, "command_for", forbidden)
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps(packet), encoding="utf-8")
+    assert cli.main(["run", "--request-file", str(request), "--checkout", str(tmp_path),
+                     "--issuer-login", "owner", "--owner-login", "owner"]) == 2
+    captured = capsys.readouterr()
+    assert "PRIVATE_INSTRUCTIONS" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("problem", ["baseline-file", "baseline-case-alias", "package-link", "manifest-parent-link"])
+def test_onboarding_uses_pinned_inventory_for_freshness_and_parent_safety(tmp_path, monkeypatch, problem):
+    from ai_commerce.remote.validation import validate_acceptance_scope
+    packet = onboarding_packet()
+    item = packet["actions"][0]
+    path = {"baseline-file": item["allowed_paths"][-1],
+            "baseline-case-alias": item["allowed_paths"][-1].upper(),
+            "package-link": "src/ai_commerce/production_orchestration",
+            "manifest-parent-link": "work_items"}[problem]
+    make_acceptance_repo(tmp_path, monkeypatch, contents={path: b"elsewhere"},
+                         modes={path: b"120000"} if problem.endswith("link") else {})
+    result = validate_acceptance_scope(packet, repo=tmp_path)
+    assert result["status"] == "PRE_EXECUTOR_UNDETERMINED"
+    assert result["next_gate"] == "HOLD_NO_EXECUTOR"
 
 
 @pytest.mark.parametrize("problem", ["dynamic", "unknown-consumer", "unowned", "forged-owner",
