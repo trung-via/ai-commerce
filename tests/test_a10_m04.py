@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import socket
 import sqlite3
+import subprocess
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,6 +24,216 @@ from ai_commerce.opportunity.signals import SignalLedger
 from ai_commerce.opportunity.trends import TrendRule, build_series, evaluate_trend, validate_series
 
 AS_OF = "2026-10-29T12:00:00Z"
+
+
+def research_task(profile="codex-cli", stage="OPPORTUNITY_ASSESSMENT"):
+    from ai_commerce.opportunity import make_ai_research_task
+    return make_ai_research_task(stage=stage, sources=[{"ref": "sha256:" + "a" * 64, "sha256": "a" * 64}],
+                                source_sha="b" * 40, provider=profile, context={"synthetic": True})
+
+
+def research_capability(task):
+    selector = task["provider"]
+    executable = "codex" if selector["profile"] == "codex-cli" else "antigravity"
+    return {"argv": [executable, "exec", "--model", selector["model"], "--effort", selector["effort"]],
+            "model": selector["model"], "effort": selector["effort"],
+            "structured_json_stdio": True, "read_only": True, "no_tools": True}
+
+
+def research_output(task, **changes):
+    value = {"schema_version": "A10AIResearchOutput.v1", "task_id": task["task_id"], "task_sha256": digest(task),
+             "provider": task["provider"], "reported_model": task["provider"]["model"],
+             "reported_effort": task["provider"]["effort"], "status": "OK", "effects": [],
+             "claims": [{"kind": "MODEL_INFERENCE", "origin": "MODEL", "text": "SYNTHETIC creative interpretation.",
+                         "citations": task["sources"]}]}
+    value.update(changes)
+    return canonical_bytes(value)
+
+
+@pytest.mark.parametrize("profile,model", [("codex-cli", "gpt-6.1-sol"), ("antigravity-cli", "gemini-4-hydrogen-xhigh")])
+def test_ai_provider_exact_selection_uses_only_fake_subprocess(profile, model):
+    from types import SimpleNamespace
+    from ai_commerce.opportunity import run_ai_research, validate_ai_research_receipt
+    task = research_task(profile)
+    seen = []
+
+    def fake(argv, **kwargs):
+        seen.append((argv, kwargs))
+        packet = json.loads(kwargs["input"])
+        assert packet["task"] == task and packet["send_performed"] is False
+        return SimpleNamespace(stdout=research_output(task), returncode=0)
+
+    receipt = run_ai_research(task, permissions=["AI_RESEARCH"], capability=research_capability(task), runner=fake)
+    assert len(seen) == 1 and model in seen[0][0]
+    assert seen[0][1]["shell"] is False and seen[0][1]["timeout"] == 60
+    assert receipt["status"] == "OK" and receipt["reported_model"] == model and receipt["reported_effort"] == "xhigh"
+    assert [c["kind"] for c in receipt["claims"]] == ["OBSERVED_EVIDENCE", "MODEL_INFERENCE"]
+    assert validate_ai_research_receipt(receipt, task) == receipt
+
+
+def test_ai_permissions_capabilities_and_attended_handoff_never_fallback():
+    from ai_commerce.opportunity import ai_handoff_packet, ai_provider_profile, run_ai_research
+    from ai_commerce.opportunity.core.models import OpportunityError
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Unexpected provider process")
+    task = research_task()
+    assert run_ai_research(task, runner=forbidden)["reason"] == "PERMISSION_DENIED"
+    assert run_ai_research(task, permissions=["AI_RESEARCH"], runner=forbidden)["status"] == "UNSUPPORTED"
+    bad = research_capability(task)
+    bad["model"] = "another-model"
+    assert run_ai_research(task, permissions=["AI_RESEARCH"], capability=bad, runner=forbidden)["status"] == "UNSUPPORTED"
+    attended = research_task("chatgpt-attended")
+    assert run_ai_research(attended, permissions=["AI_RESEARCH"], runner=forbidden)["status"] == "NEEDS_HUMAN"
+    assert ai_handoff_packet(attended)["send_performed"] is False
+    with pytest.raises(OpportunityError, match="AI_PROVIDER_UNSUPPORTED"):
+        ai_provider_profile("implicit-default")
+
+
+@pytest.mark.parametrize("change", ["observation", "rights", "effect", "citation", "model", "effort", "quota-with-claims", "duplicate-json"])
+def test_ai_output_cannot_promote_provenance_or_authorize_effects(change):
+    from ai_commerce.opportunity import parse_ai_research_output
+    task = research_task()
+    value = json.loads(research_output(task))
+    if change == "observation":
+        value["claims"][0]["kind"] = "OBSERVED_EVIDENCE"
+    elif change == "rights":
+        value["rights_status"] = "VERIFIED"
+    elif change == "effect":
+        value["effects"] = ["PUBLISH"]
+    elif change == "citation":
+        value["claims"][0]["citations"][0]["sha256"] = "c" * 64
+    elif change == "model":
+        value["reported_model"] = "fallback-model"
+    elif change == "effort":
+        value["reported_effort"] = "medium"
+    elif change == "quota-with-claims":
+        value["status"] = "QUOTA"
+    raw = canonical_bytes(value) if change != "duplicate-json" else b'{"task_id":"one","task_id":"two"}'
+    receipt = parse_ai_research_output(task, raw, effect="PROCESS_INVOKED")
+    assert receipt["status"] == "UNKNOWN_EFFECT" and receipt["effect"] == "UNKNOWN"
+    assert all(c["origin"] == "LOCAL_SNAPSHOT" for c in receipt["claims"])
+    assert receipt["raw_output_sha256"] == sha256_bytes(raw)
+
+
+@pytest.mark.parametrize("status", ["UNSUPPORTED", "NEEDS_HUMAN", "QUOTA", "FAILED", "UNKNOWN_EFFECT"])
+def test_ai_non_success_is_typed_and_has_no_machine_claims(status):
+    from ai_commerce.opportunity import parse_ai_research_output
+    task = research_task()
+    receipt = parse_ai_research_output(task, research_output(task, status=status, claims=[]), effect="PROCESS_INVOKED")
+    assert receipt["status"] == status and len(receipt["claims"]) == len(task["sources"])
+
+
+def test_ai_ambiguous_process_returns_once_without_retry():
+    import subprocess
+    from ai_commerce.opportunity import run_ai_research
+    task, calls = research_task(), []
+    def fake(argv, **kwargs):
+        calls.append(argv)
+        raise subprocess.TimeoutExpired(argv, 60)
+    receipt = run_ai_research(task, permissions=["AI_RESEARCH"], capability=research_capability(task), runner=fake)
+    assert len(calls) == 1 and receipt["status"] == "UNKNOWN_EFFECT"
+
+
+@pytest.mark.parametrize("stage", ["SIGNAL_RESEARCH", "AUDIENCE_DRAFT", "OPPORTUNITY_ASSESSMENT"])
+def test_ai_task_version_effects_identity_and_receipt_are_strict(stage):
+    from ai_commerce.opportunity import run_ai_research, validate_ai_research_task, validate_ai_research_receipt
+    from ai_commerce.opportunity.core.models import OpportunityError
+    task = research_task(stage=stage)
+    original = deepcopy(task)
+    receipt = run_ai_research(task)
+    assert task == original and validate_ai_research_task(task) == task
+    bad = deepcopy(task)
+    bad["allowed_effects"] = ["PUBLISH"]
+    bad["task_id"] = "aitask-" + digest({k: v for k, v in bad.items() if k != "task_id"})
+    with pytest.raises(OpportunityError, match="AI_EFFECT_NOT_ALLOWED"):
+        validate_ai_research_task(bad)
+    bad_receipt = deepcopy(receipt)
+    bad_receipt["source_sha"] = "c" * 40
+    with pytest.raises(OpportunityError, match="AI_RECEIPT_BINDING_MISMATCH"):
+        validate_ai_research_receipt(bad_receipt, task)
+
+
+@pytest.mark.parametrize("failure,status", [("missing", "UNSUPPORTED"), ("denied", "FAILED"), ("nonzero", "UNKNOWN_EFFECT")])
+def test_ai_process_failures_do_not_fallback(failure, status):
+    from types import SimpleNamespace
+    from ai_commerce.opportunity import run_ai_research
+    task, calls = research_task(), []
+    def fake(argv, **kwargs):
+        calls.append(argv)
+        if failure == "missing":
+            raise FileNotFoundError
+        if failure == "denied":
+            raise PermissionError
+        return SimpleNamespace(returncode=1, stdout=research_output(task))
+    receipt = run_ai_research(task, permissions=["AI_RESEARCH"], capability=research_capability(task), runner=fake)
+    assert receipt["status"] == status and len(calls) == 1
+
+
+def test_real_ai_process_requires_exact_installed_authentication_probe(monkeypatch):
+    from ai_commerce.opportunity import run_ai_research
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Unprobed CLI must not start")
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    task = research_task()
+    receipt = run_ai_research(task, permissions=["AI_RESEARCH"], capability=research_capability(task))
+    assert receipt["status"] == "UNSUPPORTED"
+    assert receipt["reason"] == "INSTALLED_CAPABILITY_OR_AUTHENTICATION_UNAVAILABLE"
+    assert receipt["effect"] == "NOT_ATTEMPTED" and receipt["execution"] is None
+
+
+@pytest.mark.parametrize("failure", [None, "binary", "capability", "authentication"])
+def test_installed_probe_matches_exact_bytes_before_model_process(tmp_path, monkeypatch, failure):
+    from types import SimpleNamespace
+    from ai_commerce.opportunity import run_ai_research
+    from ai_commerce.opportunity.core import models
+    task = research_task()
+    executable = tmp_path / "synthetic-codex.exe"
+    executable.write_bytes(b"SYNTHETIC binary, never executed")
+    capability = research_capability(task)
+    capability["installed_probe"] = {
+        "executable_sha256": sha256_bytes(executable.read_bytes()),
+        "capability": {"argv": ["codex", "--synthetic-capabilities"], "stdout_sha256": sha256_bytes(b"exact-capability")},
+        "authentication": {"argv": ["codex", "--synthetic-auth-status"], "stdout_sha256": sha256_bytes(b"authenticated")}}
+    if failure == "binary":
+        capability["installed_probe"]["executable_sha256"] = "f" * 64
+    monkeypatch.setattr(models.shutil, "which", lambda _: str(executable))
+    calls = []
+    def fake(argv, **kwargs):
+        calls.append(argv)
+        assert argv[0] == str(executable) and kwargs["shell"] is False
+        if "--synthetic-capabilities" in argv:
+            raw = b"changed-version" if failure == "capability" else b"exact-capability"
+        elif "--synthetic-auth-status" in argv:
+            raw = b"signed-out" if failure == "authentication" else b"authenticated"
+        else:
+            assert json.loads(kwargs["input"])["task"] == task
+            raw = research_output(task)
+        return SimpleNamespace(returncode=0, stdout=raw)
+    monkeypatch.setattr(subprocess, "run", fake)
+    reserved = []
+    receipt = run_ai_research(task, permissions=["AI_RESEARCH"], capability=capability, before_invoke=reserved.append)
+    if failure is None:
+        assert receipt["status"] == "OK" and len(calls) == 3
+        assert reserved == [receipt["execution"]]
+        assert receipt["execution"]["kind"] == "AUTHENTICATED_CLI_PROBE"
+        assert receipt["execution"]["capability_sha256"] == digest(capability)
+    else:
+        assert receipt["status"] == "UNSUPPORTED" and receipt["effect"] == "NOT_ATTEMPTED"
+        assert not reserved and len(calls) == {"binary": 0, "capability": 1, "authentication": 2}[failure]
+
+
+def test_model_identity_text_cannot_authenticate_an_attended_or_parsed_receipt():
+    from ai_commerce.opportunity import parse_ai_research_output
+    task = research_task()
+    receipt = parse_ai_research_output(task, research_output(task), effect="PROCESS_INVOKED")
+    assert receipt["status"] == "OK" and receipt["execution"] is None
+    forged = deepcopy(receipt)
+    forged["execution"] = {"kind": "MODEL_SELF_REPORTED", "capability_sha256": "a" * 64, "probe_sha256": "b" * 64}
+    forged["receipt_id"] = "aireceipt-" + digest({k: v for k, v in forged.items() if k != "receipt_id"})
+    from ai_commerce.opportunity import validate_ai_research_receipt
+    from ai_commerce.opportunity.core.models import OpportunityError
+    with pytest.raises(OpportunityError, match="AI_EXECUTION_INVALID"):
+        validate_ai_research_receipt(forged, task)
 
 
 @pytest.fixture(autouse=True)

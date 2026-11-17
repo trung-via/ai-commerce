@@ -70,6 +70,20 @@ def reference(source, index=0):
     return signal_evidence_ref(ledger, imported["import"]["import_id"], imported["signals"][index]["signal_id"])
 
 
+def test_automation_human_origin_boundary_rejects_ai_audience_drafts(notes):
+    from ai_commerce.opportunity import make_ai_research_task, prepare_human_audience, run_ai_research
+    human = prepare_human_audience(encoded(notes), origin="HUMAN")
+    assert human.record == prepare_bytes(encoded(notes)).record
+    with pytest.raises(AudienceError, match="AUDIENCE_HUMAN_ORIGIN_REQUIRED"):
+        prepare_human_audience(encoded(notes), origin="MODEL")
+    task = make_ai_research_task(stage="AUDIENCE_DRAFT", sources=[{"ref": "sha256:" + "a" * 64, "sha256": "a" * 64}],
+                                source_sha="b" * 40, provider="chatgpt-attended", context={})
+    draft = run_ai_research(task, permissions=["AI_RESEARCH"])
+    assert draft["status"] == "NEEDS_HUMAN"
+    with pytest.raises(AudienceError, match="INVALID_AUDIENCE_NOTES"):
+        prepare_human_audience(encoded(draft), origin="HUMAN")
+
+
 def test_exact_bytes_text_and_deterministic_identity(tmp_path, notes):
     raw = encoded(notes, bom=True)
     first = prepare_bytes(raw).record

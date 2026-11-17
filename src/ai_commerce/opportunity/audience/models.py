@@ -131,6 +131,18 @@ class PreparedAudienceInsight:
     record: dict
 
 
+def prepare_human_audience(raw: bytes, *, origin: str,
+                           signal_ledger: SignalLedger | None = None) -> PreparedAudienceInsight:
+    """Automation trusts an explicit Human origin attestation, then M03's schema.
+
+    A10AIResearchReceipt/AUDIENCE_DRAFT is a separate sidecar contract and cannot
+    enter USER_SUPPLIED_QUALITATIVE through this boundary. No AI-to-notes coercion.
+    Origin is caller attestation; a hash cannot prove authorship.
+    """
+    check(origin == "HUMAN", "AUDIENCE_HUMAN_ORIGIN_REQUIRED")
+    return prepare_bytes(raw, signal_ledger=signal_ledger)
+
+
 def prepare_bytes(raw: bytes, *, signal_ledger: SignalLedger | None = None,
                   parent: dict | None = None) -> PreparedAudienceInsight:
     """Preview only: no writes, timestamps, generated claims, or external calls.
