@@ -1938,19 +1938,47 @@ def test_a10_m05_selects_a03_consumer_with_only_reviewed_closure(real_tree, monk
     expected = {
         "a03", "a04", "a05", "a06", "a07", "a08", "a09", "a10", "a10-m02",
         "a11", "a12", "a18-1", "a18-2", "a18-3", "b0-1", "b3-portfolio",
-        "bq-02b", "bq-04a", "cli",
+        "bq-02b", "bq-04a", "cli", "production-orchestration", "wakehub-runtime",
     }
     assert set(selected["selected_groups"]) == expected
     assert not selected["fallback"]
     assert selected["reason_codes"] == (["SCOPED_CONSUMER_CLOSURE"] if v21 else [])
+    assert selected["unknown_tests"] == selected["unknown_acs"] == selected["unknown_consumers"] == []
     assert all(entry["state"] == "EXECUTE" for entry in selected["groups"])
-    # A05 already depends on M05 through the shared CLI. Keep that real edge;
-    # the new A03 consumer must add no other owner, including PULSE or EF02.
+    # A05 depends on M05 through the shared CLI; the registered production and
+    # wakehub consumers also belong to the closure before adding A03's edge.
     producer = "src/ai_commerce/opportunity/bridge/briefs.py"
-    previous = select(tuple(
+    without_a03_consumer = tuple(
         replace(g, consumers=tuple(p for p in g.consumers if p != producer))
-        if g.name == "a03" else g for g in groups))
+        if g.name == "a03" else g for g in groups)
+    # A03's local-adapter regression also imports the orchestrator, so current
+    # imports still select A03 without its declared bridge consumer.
+    assert set(select(without_a03_consumer)["selected_groups"]) == expected
+    # Isolate the declared edge's negative control from that test-only import.
+    # All production imports and the production/wakehub owner chain stay real.
+    a03_test = "tests/test_a03_creative.py"
+    orchestration_init = "src/ai_commerce/production_orchestration/__init__.py"
+    with monkeypatch.context() as control:
+        if v21:
+            from ai_commerce.engineering import impact_v21
+            reverse_import_graph = impact_v21._reverse_import_graph
+
+            def previous_import_graph(root, paths):
+                reverse, uncertain = reverse_import_graph(root, paths)
+                reverse[orchestration_init].remove(a03_test)
+                return reverse, uncertain
+
+            control.setattr(impact_v21, "_reverse_import_graph", previous_import_graph)
+        else:
+            graph, complete = real_tree.graph
+            previous_graph = {p: set(deps) for p, deps in graph.items()}
+            previous_graph[a03_test].remove(orchestration_init)
+            control.setattr(mt, "import_graph", lambda *_: (previous_graph, complete))
+        assert set(select(groups)["selected_groups"]) == expected
+        previous = select(without_a03_consumer)
     assert set(previous["selected_groups"]) == expected - {"a03"}
+    assert not previous["fallback"]
+    assert previous["unknown_tests"] == previous["unknown_acs"] == previous["unknown_consumers"] == []
     assert "src/ai_commerce/cli.py" in selected["affected_paths"]
     unrelated = {"bq-05a", "bq-05b0", "bq-05b1", "ef02", "ef02-wake"}
     assert unrelated <= {g.name for g in real_tree.groups}
@@ -1971,6 +1999,23 @@ def test_a10_m05_selects_a03_consumer_with_only_reviewed_closure(real_tree, monk
         "tests/test_a03_creative.py", "tests/test_a03_upgrade_v11.py",
     ]
     assert "tests/test_a10_m05.py" in selected["consumer_map"]["a10"]["tests"]
+    orchestrator = "src/ai_commerce/production_orchestration/orchestrator.py"
+    assert orchestrator in selected["consumer_map"]["production-orchestration"]["paths"]
+    for owner, consumer, test_path in (
+        ("production-orchestration", producer, "tests/test_production_orchestration.py"),
+        ("wakehub-runtime", orchestrator, "tests/test_wakehub_runtime.py"),
+    ):
+        mapping = selected["consumer_map"][owner]
+        assert consumer in mapping["consumers"]
+        assert mapping["tests"] == [test_path]
+        entry = next(e for e in selected["groups"] if e["group"] == owner)
+        profile = "mt01-component-onboarding" if v21 else f"mt01-{owner}-tests"
+        assert profile in registry
+        assert entry["selected_profile"] == entry["binding"]["registered_profile"] == profile
+        assert entry["binding"]["argv"] == ["python", "-m", "pytest", test_path, "-q", "-n", "12"]
+        assert entry["binding"]["mapping"]["consumers"] == mapping["consumers"]
+        assert entry["binding"]["candidate_files"][consumer] == real_tree.files[consumer]
+        assert entry["binding"]["candidate_files"][path] == real_tree.files[path]
     assert not selected["narrow_execution_observed"]  # Selection is not a test result.
 
 
