@@ -43,6 +43,18 @@ from ai_commerce.opportunity.signals.profiles import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_automation_pins_exact_source_bytes_without_changing_manual_import(snapshot):
+    from ai_commerce.opportunity import prepare_pinned_source
+    raw = csv_raw(bom=True)
+    pinned = {**snapshot, "sha256": sha256(raw).hexdigest()}
+    prepared = prepare_pinned_source(raw, expected_sha256=pinned["sha256"], source_snapshot=pinned)
+    assert prepared.raw == raw and prepared.record["raw_sha256"] == pinned["sha256"]
+    with pytest.raises(SignalValidationError, match="JOB_SOURCE_HASH_MISMATCH"):
+        prepare_pinned_source(raw + b"\n", expected_sha256=pinned["sha256"], source_snapshot=pinned)
+    with pytest.raises(SignalValidationError, match="JOB_SOURCE_HASH_MISMATCH"):
+        prepare_pinned_source(raw, expected_sha256=pinned["sha256"], source_snapshot=snapshot)
+
+
 @pytest.fixture
 def snapshot():
     return {
