@@ -398,6 +398,57 @@ def test_conflicting_revisions_never_silently_overwrite(brief, concept, tmp_path
     assert store.load_concept(concept.concept_id, 1) == concept
 
 
+@pytest.mark.parametrize("optional", [
+    {"audience": None, "product_ref": None, "cta": None},
+    {"audience": "SYNTHETIC quiet creative break", "product_ref": "synthetic:optional-product", "cta": None},
+])
+def test_production_local_adapter_executes_exact_contentbrief_and_existing_store(tmp_path, monkeypatch, optional):
+    """Consumer regression: actual A03, no model/rights/publish effects or click."""
+    import socket
+    from ai_commerce.creative import briefs
+    from ai_commerce.production_orchestration import (
+        CONSUMER_ROUTES, LocalAuthorization, LocalHandoff, ProductionPipelineOrchestrator,
+        ProductionStageCompleted, Provenance, RouteAuthorization, StageSpec, bytes_digest, digest,
+    )
+    def deny(*args, **kwargs):
+        raise AssertionError("Network attempted")
+    monkeypatch.setattr(socket, "socket", deny)
+    monkeypatch.setattr(socket, "create_connection", deny)
+    brief = {**intake_brief(REQUEST), **optional}
+    raw = canonical_bytes(brief) + b"\n"
+    grant = LocalAuthorization(journey_id="synthetic:consumer", cycle_id="cycle:1", job_id="synthetic-job",
+        source_sha="b" * 40, authorization_ref="fixture:local-only")
+    consumer, path = CONSUMER_ROUTES["a03-creative-brief"]
+    spec = StageSpec(stage_id="A10.M05", route_id="a03-creative-brief", consumer_id=consumer,
+        consumer_path=path, source_sha256=bytes_digest(b"synthetic-source"), input_sha256=digest({}),
+        output_sha256=digest(brief), idempotency_key="synthetic-consumer-invocation",
+        provenance=Provenance(actor_ref="fixture:a10", source_ref="fixture:source",
+            source_sha256=bytes_digest(b"synthetic-source"), evidence_type="SYNTHETIC_FIXTURE"),
+        authorization=RouteAuthorization(route_id="a03-creative-brief", consumer_id=consumer,
+            consumer_path=path, authorization_ref=grant.authorization_ref, scope="SOURCE_ONLY_LOCAL"),
+        local_handoff=LocalHandoff(journey_id=grant.journey_id, cycle_id=grant.cycle_id, job_id=grant.job_id,
+            source_sha=grant.source_sha, producer_event_id="fixture:completed", producer_result_ref="fixture:result",
+            producer_result_sha256=bytes_digest(b"synthetic-source"), brief_ref="fixture:brief",
+            brief_bytes_sha256=bytes_digest(raw)))
+    completed = ProductionStageCompleted(spec=spec, completion_ref="fixture:completed",
+        source_sha256=spec.source_sha256, input_sha256=spec.input_sha256, output_sha256=spec.output_sha256)
+    real, calls = briefs.intake_brief, []
+    def observe(request):
+        # CreativeStore also revalidates mappings; count the exact text handoff.
+        if isinstance(request, str):
+            calls.append(request.encode("utf-8"))
+        return real(request)
+    monkeypatch.setattr(briefs, "intake_brief", observe)
+    owner = ProductionPipelineOrchestrator(state_dir=tmp_path, source_sha=grant.source_sha,
+        local_authorization=grant)
+    witness = owner._invoke_a03(completed, raw)
+    assert calls == [raw] and witness["consumer_id"] == consumer
+    assert witness["input_bytes_sha256"] == bytes_digest(raw)
+    assert witness["output_sha256"] == brief_digest(brief) and witness["outcome"] == "SUCCESS"
+    assert CreativeStore(tmp_path / "creative").load_brief(witness["output_sha256"]) == brief
+    assert sha256_bytes(Path(witness["artifact_ref"]).read_bytes()) == witness["output_sha256"]
+
+
 def test_unsaved_brief_or_parent_cannot_form_dangling_lineage(brief, concept, tmp_path):
     store = CreativeStore(tmp_path)
     with pytest.raises(FileNotFoundError):
