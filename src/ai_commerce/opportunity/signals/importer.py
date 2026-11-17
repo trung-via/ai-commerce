@@ -52,6 +52,20 @@ def load_mapping(path: str) -> dict[str, Any]:
     return validate_mapping(parse_json(read_local(path, limit=MAX_SNAPSHOT_BYTES)))
 
 
+def prepare_pinned_source(raw: bytes, *, expected_sha256: str,
+                          source_snapshot: dict[str, Any], **kwargs) -> PreparedSignalImport:
+    """Automation preflight: exact raw bytes, manifest pin and snapshot must agree.
+
+    This stronger caller boundary preserves legacy manual-import semantics. A
+    local hash authenticates retained bytes, never Google/TikTok facts or rights.
+    """
+    require(isinstance(raw, bytes) and isinstance(source_snapshot, dict), "JOB_SOURCE_INVALID")
+    require(isinstance(expected_sha256, str) and re.fullmatch(r"[a-f0-9]{64}", expected_sha256) is not None,
+            "JOB_SOURCE_HASH_INVALID")
+    require(sha256_bytes(raw) == expected_sha256 == source_snapshot.get("sha256"), "JOB_SOURCE_HASH_MISMATCH")
+    return prepare_bytes(raw, source_snapshot=source_snapshot, **kwargs)
+
+
 def _csv_rows(raw: bytes, mapping: dict[str, Any], dialect: str, snapshot: dict[str, Any]):
     require(dialect in DELIMITERS, "UNKNOWN_CSV_DIALECT")
     try:

@@ -14,7 +14,7 @@ from ai_commerce.contracts.schema import _format_checker, validate_record
 from ai_commerce.core.provenance import canonical_bytes, sha256_bytes
 from ai_commerce.creative.briefs import intake_brief
 
-from ..core.models import OpportunityError, digest
+from ..core.models import OpportunityError, digest, validate_ai_research_receipt
 from ..core.schemas import SOURCE_STATUS
 from ..proposals import validate_proposal
 from .schemas import EDITS, MAX_RECORD_BYTES, MAX_TEXT_BYTES, schema
@@ -156,6 +156,43 @@ def opportunity_to_brief(proposal: dict, *, edits: Mapping | None = None,
     creative["prompt"] = proposal["manual_input"]["text"] if proposal["manual_input"] else creative["objective"]
     receipt = _receipt(proposal=proposal, human_input=None, edits=_edits(edits), synthetic=synthetic)
     return _finish(creative, receipt, brief_id)
+
+
+def selected_opportunity_to_brief(proposals: list[dict], selection: dict, *, job_id: str,
+                                   manifest_sha256: str, assessment: dict | None = None,
+                                   assessment_task: dict | None = None) -> dict:
+    """Automation's explicit Brain/Human selection gate before the existing M05.
+
+    Machine advice may inform selection only. It never becomes manual_idea,
+    Human edits, observed evidence or a mutation of a deterministic M04 proposal.
+    The caller must validate/replay an assessment against its exact research task.
+    """
+    _check(isinstance(selection, dict) and set(selection) == {
+        "schema_version", "job_id", "manifest_sha256", "proposal_id", "proposal_sha256",
+        "actor", "decision", "use_ai_assessment", "assessment_receipt_id"}, "JOB_SELECTION_INVALID")
+    _check(selection["schema_version"] == "A10OpportunitySelection.v1" and selection["job_id"] == job_id
+           and selection["manifest_sha256"] == manifest_sha256, "JOB_SELECTION_BINDING_MISMATCH")
+    _check(selection["actor"] in ("HUMAN", "BRAIN") and selection["decision"] == "SELECT"
+           and type(selection["use_ai_assessment"]) is bool, "JOB_SELECTION_AUTHORITY_REQUIRED")
+    if selection["use_ai_assessment"]:
+        _check(isinstance(assessment, dict) and assessment.get("status") == "OK"
+               and selection["assessment_receipt_id"] == assessment.get("receipt_id"), "JOB_ASSESSMENT_SELECTION_MISMATCH")
+        _check(isinstance(assessment_task, dict), "JOB_ASSESSMENT_TASK_REQUIRED")
+        validate_ai_research_receipt(assessment, assessment_task)
+        _check(assessment_task["stage"] == "OPPORTUNITY_ASSESSMENT"
+               and assessment_task["context"].get("job_id") == job_id
+               and assessment_task["context"].get("manifest_sha256") == manifest_sha256
+               and assessment_task["context"].get("proposals") == proposals, "JOB_ASSESSMENT_CONTEXT_MISMATCH")
+    else:
+        _check(selection["assessment_receipt_id"] is None, "JOB_UNAPPLIED_ASSESSMENT_REFERENCE")
+    choices = [p for p in proposals if p["proposal_id"] == selection["proposal_id"]]
+    _check(len(choices) == 1 and digest(choices[0]) == selection["proposal_sha256"], "JOB_SELECT_EXACT_PROPOSAL")
+    brief = opportunity_to_brief(choices[0])
+    brief["opportunity_automation"] = {"schema_version": "A10AutomationSelectionReceipt.v1",
+        "job_id": job_id, "manifest_sha256": manifest_sha256, "selection": deepcopy(selection),
+        "selection_sha256": digest(selection), "assessment_receipt_id": selection["assessment_receipt_id"]}
+    _bounded(brief)
+    return intake_brief(brief)
 
 
 def freeform_brief(text: str, *, edits: Mapping | None = None, brief_id: str | None = None,
