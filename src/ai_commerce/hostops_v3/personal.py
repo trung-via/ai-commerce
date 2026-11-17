@@ -572,6 +572,36 @@ def _known_chrome_config_candidates(acquisition, root: Path):
     return tuple(root / name for name in names)
 
 
+def _private_chrome_profile_custody(acquisition, root: Path, env, principal: str) -> bool:
+    """Check every private profile path within the canonical acquisition root."""
+    from ai_commerce.remote.local_completion_handoff import _private_identity
+
+    canonical_root = root.resolve(strict=True)
+    directory = env.user_data_dir
+    profile = directory / env.profile_directory
+    if (directory.resolve(strict=True) != directory
+            or profile.resolve(strict=True) != profile
+            or not acquisition._inside(directory, canonical_root)
+            or not acquisition._inside(profile, directory)
+            or _fixed_private_metadata_kind(directory, directory=True) != "PRESENT"
+            or _fixed_private_metadata_kind(profile, directory=True) != "PRESENT"):
+        return False
+    # Boundary validation above makes this a complete, bounded ancestor walk.
+    # Never filter out the profile paths by comparing them with an unresolved
+    # root: Windows short/long aliases can differ after acquisition resolves it.
+    private_paths = [directory, profile]
+    parent = directory.parent
+    while parent != canonical_root:
+        private_paths.append(parent)
+        parent = parent.parent
+    private_paths.append(canonical_root)
+    # Verify both the acquisition paths and their original-root spellings.
+    # An alias must never hide a failed custody check in either representation.
+    private_paths.extend(root / path.relative_to(canonical_root)
+                         for path in tuple(private_paths))
+    return all(_private_identity(path) == principal for path in dict.fromkeys(private_paths))
+
+
 def _cdp_9444_private_context(acquisition):
     """Attest an existing fixed private config against native token/session reads.
 
@@ -605,9 +635,8 @@ def _cdp_9444_private_context(acquisition):
     env = acquisition.load_environment(config, Path(__file__).resolve().parents[3], local_app_data=local)
     if env.port != 9444 or env.endpoint.rstrip("/") != "http://127.0.0.1:9444":
         deny("OWNER_SESSION_UNATTESTED")
-    for path in (env.user_data_dir, *env.user_data_dir.parents, env.user_data_dir / env.profile_directory):
-        if (path == root or root in path.parents) and _private_identity(path) != sid:
-            deny("OWNER_SESSION_UNATTESTED")
+    if not _private_chrome_profile_custody(acquisition, root, env, sid):
+        deny("OWNER_SESSION_UNATTESTED")
     return env, session, sid
 
 
@@ -885,13 +914,7 @@ def _private_d5_metadata_codes():
             found[0], checkout, local_app_data=local)
         # A valid acquisition contract is not proof of a signed Chrome
         # executable or an authenticated exact ChatGPT tab.
-        private_paths = (env.user_data_dir, *env.user_data_dir.parents,
-                         env.user_data_dir / env.profile_directory)
-        if (any(_private_identity(path) != principal for path in private_paths
-                if path == private_root or private_root in path.parents)
-                or _fixed_private_metadata_kind(env.user_data_dir, directory=True) != "PRESENT"
-                or _fixed_private_metadata_kind(
-                    env.user_data_dir / env.profile_directory, directory=True) != "PRESENT"):
+        if not _private_chrome_profile_custody(chrome_acquisition, private_root, env, principal):
             codes["chrome_config"] = "KNOWN_CONFIG_NOT_VERIFIED"
             return codes
         codes["chrome_config"] = (

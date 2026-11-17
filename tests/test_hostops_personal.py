@@ -2346,6 +2346,49 @@ class PersonalCdp9444TopologyTests(unittest.TestCase):
                             load.assert_not_called()
         self.protocol.assert_not_called()
 
+    def test_canonical_local_alias_cannot_skip_private_profile_custody(self):
+        # Force the unresolved-root/canonical-profile mismatch on every OS,
+        # including Windows where temporary paths may use short/long aliases.
+        alias = self.local / ".." / self.local.name
+        self.assertNotEqual(alias / "AI-Commerce", self.root.resolve(strict=True))
+        self.assertEqual(alias.resolve(strict=True), self.local.resolve(strict=True))
+        hostops.os.environ["LOCALAPPDATA"] = str(alias)
+        self.local_identity.return_value = alias
+        directory = self.directory.resolve(strict=True)
+        profile = directory / "Default"
+        for relative in self.CONFIG_PATHS:
+            self.place_config(relative)
+            self.private_identity.side_effect = None
+            self.private_identity.reset_mock()
+            with self.subTest(relative=relative, custody="private"):
+                self.assert_metadata(hostops._private_d5_metadata_codes(),
+                                     "KNOWN_CONFIG_OTHER_PORT", verified=True)
+                for path in (self.root.resolve(strict=True), directory, profile):
+                    self.private_identity.assert_any_call(path)
+                self.assertEqual(self.observe()["code"], "CDP_PROTOCOL_HEALTHY")
+            for target in (directory, profile, alias / "AI-Commerce" / "PRIVATE_PROFILE",
+                           alias / "AI-Commerce" / "PRIVATE_PROFILE" / "Default"):
+                for failure in (None, "S-1-5-21-999-1001", OSError("PRIVATE ACL/token")):
+                    def identity(path):
+                        if path == target:
+                            if isinstance(failure, Exception):
+                                raise failure
+                            return failure
+                        return self.sid
+
+                    self.private_identity.side_effect = identity
+                    self.private_identity.reset_mock()
+                    self.protocol.reset_mock()
+                    with self.subTest(relative=relative, target=target, failure=failure):
+                        self.assert_metadata(hostops._private_d5_metadata_codes(),
+                                             "KNOWN_CONFIG_NOT_VERIFIED")
+                        self.private_identity.assert_any_call(target)
+                        result = self.observe()
+                        self.assertEqual((result["status"], result["code"]),
+                                         ("UNKNOWN", "OWNER_SESSION_UNATTESTED"))
+                        self.assert_public(result)
+                        self.protocol.assert_not_called()
+
     def test_reparse_candidates_and_missing_leaf_under_reparse_parent_hold(self):
         original = hostops.Path.lstat
         for relative in self.CONFIG_PATHS:
