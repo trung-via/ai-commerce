@@ -1,4 +1,4 @@
-"""WAKEHUB.runtime-r0: R0/R1/R2 source closure, never Windows native host proof.
+"""WAKEHUB.runtime-r0: R0/R1/R2/R3A source closure, never native host proof.
 
 Only custody observation is stubbed for deterministic cross-OS temporary files.
 Windows fixture files inherit an explicit process-SID grant, rather than relying
@@ -172,7 +172,8 @@ def test_crash_recovery_never_replays_ambiguous_effect(composition, phase, monke
     elif phase == "UI_TURN_OBSERVED":
         monkeypatch.setattr(runner.brain, "correlate", crash)
     else:
-        monkeypatch.setattr(runner.orchestrator, "record_completed", crash)
+        # Correlation is now journaled only after P0 verifies both pins.
+        monkeypatch.setattr(runner, "_finish", crash)
     with pytest.raises(Crash):
         runner.run_once()
     recovered = make()
@@ -255,12 +256,13 @@ def test_wake_receipt_cannot_substitute_for_consumer_receipt(composition):
 
 
 def test_unverified_consumer_receipt_cannot_ack(composition):
-    make, _, _, handoff, _, _ = composition
+    make, event, registration, handoff, path, _ = composition
     spec = handoff.completed.spec
     runner = make(orchestrator=ProductionPipelineOrchestrator(
         authorized_specs=((spec.authorization.authorization_ref, spec.sha256),)))
     assert runner.run_once().status == "UNKNOWN_EFFECT"
     assert runner.orchestrator.dispatch(spec.idempotency_key).status == "NOT_DISPATCHED"
+    assert "BRAIN_CORRELATED" not in record(path, event, registration)["history"]
 
 
 def test_missing_grant_is_durable_without_sender_call(composition):
@@ -1164,4 +1166,276 @@ def test_r2_preflight_result_cannot_escape_read_only_hold(native_ingress, monkey
     result = r.run_read_only(i["config_path"], i["root"])
     assert result.status == "HOLD"
     assert result.code == ("ACK" if value == "ACK" else "PREFLIGHT_RESULT_INVALID")
+    assert_read_only_pending(i)
+
+
+@pytest.fixture
+def r3a_ingress(native_ingress):
+    """TEST_ONLY_MOCK Windows owner and signed fixture grants; no native authority."""
+    i = native_ingress
+
+    def sign(body):
+        raw = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+                         allow_nan=False).encode()
+        key = bytes.fromhex(os.environ["AI_COMMERCE_WAKE_HMAC_KEY_HEX"])
+        return {**body, "signature": hmac.new(key, raw, hashlib.sha256).hexdigest()}
+
+    body = {k: v for k, v in i["grants"]["grants"][0].items() if k != "signature"}
+    body.update(operation="deliver_wake", scope={"event": json.loads(json.dumps(i["event"]))})
+    i["grants"]["grants"].append(sign(body))
+    i["save"](r.Path(i["config"]["grants"]), i["grants"])
+    return {**i, "deliver_body": body, "sign": sign}
+
+
+def test_r3a_requires_separate_deliver_wake_grant_before_native_reads(native_ingress):
+    i = native_ingress
+    result = r.run_native_source_only(i["config_path"], i["root"])
+    assert result == r.Result("HOLD", "DELIVER_WAKE_GRANT_REQUIRED", "GITHUB_AUTHENTICATED")
+    assert i["native_calls"] == [] and i["browser"].reads == 0
+    assert_read_only_pending(i)
+
+
+@pytest.mark.parametrize("fault", ["signature", "event", "registry", "principal", "caller", "expired"])
+def test_r3a_signed_effect_grant_is_exact_and_current(r3a_ingress, fault):
+    i = r3a_ingress
+    body = i["deliver_body"]
+    if fault == "event":
+        body["scope"]["event"]["event_id"] = "ef02-completion-v1:" + "f" * 64
+    elif fault == "registry":
+        body["registry_sha256"] = "f" * 64
+    elif fault in ("principal", "caller"):
+        body["principal" if fault == "principal" else "caller_id"] = "other-operator"
+    elif fault == "expired":
+        body["valid_until"] = 1
+    grant = i["sign"](body)
+    if fault == "signature":
+        grant["signature"] = "f" * 64
+    i["grants"]["grants"][1] = grant
+    i["save"](r.Path(i["config"]["grants"]), i["grants"])
+    assert r.run_native_source_only(i["config_path"], i["root"]).code == "DELIVER_WAKE_GRANT_REQUIRED"
+    assert i["native_calls"] == [] and i["browser"].reads == 0
+    assert_read_only_pending(i)
+
+
+def test_r3a_candidate_holds_dependency_without_reserving_or_enabling_send(r3a_ingress):
+    i = r3a_ingress
+    runner = r.compose_native_source_only(i["config_path"], i["root"])
+    for _ in range(2):
+        result = runner.run_once()
+        assert result == r.Result("HOLD_DEPENDENCY", "NATIVE_ORIGIN_AUTHORITY_UNAVAILABLE",
+                                  "GITHUB_AUTHENTICATED")
+        assert_read_only_pending(i)
+    assert i["page"].reads == 4  # Two empty observations per read-only iteration.
+    assert runner.sender.owner.adapter.allow_submit is False
+    assert runner.orchestrator._completed == {} and runner.orchestrator._receipts == {}
+    with pytest.raises(r.DependencyHold, match="^DOORBELL_AUTHENTICATED_TURN_REF_UNAVAILABLE$"):
+        runner.sender.send(None, i["registration"])
+
+
+@pytest.mark.parametrize("hint", ["account", "profile", "session", "marker", "wh03", "native_authority"])
+def test_r3a_caller_or_ui_identity_hints_never_attest_origin(r3a_ingress, hint):
+    i = r3a_ingress
+    value = {"account": "wrong-account", "profile": "wrong-profile", "session": "old-session",
+             "marker": i["registration"].marker, "wh03": "wh03." + "f" * 64,
+             "native_authority": True}[hint]
+    setattr(i["page"], hint, value)
+    result = r.run_native_source_only(i["config_path"], i["root"])
+    assert result.status == "HOLD_DEPENDENCY" and result.code == "NATIVE_ORIGIN_AUTHORITY_UNAVAILABLE"
+    assert_read_only_pending(i)
+
+
+@pytest.mark.parametrize("fault,code", [
+    ("chat", "EXACT_CHAT_ABSENT_NATIVE_PRELOAD_CAPABILITY_REQUIRED"),
+    ("tab", "EXACT_CHAT_SINGLE_TAB_REQUIRED"),
+    ("context", "EXACT_CHAT_CONTEXT_AMBIGUOUS"),
+    ("draft", "PRELOAD_DRAFT_PRESENT"),
+    ("profile", "BROWSER_OWNERSHIP_UNPROVEN"),
+    ("owner", "BROWSER_OWNERSHIP_UNPROVEN"),
+])
+def test_r3a_keeps_strict_owner_and_single_empty_tab_gates(r3a_ingress, fault, code):
+    i = r3a_ingress
+    if fault == "chat":
+        i["page"].url = i["page"].url[:-1] + "2"
+    elif fault == "tab":
+        i["browser"].items[0].pages.append(ReadOnlyPage("https://example.invalid"))
+    elif fault == "context":
+        i["browser"].items.append(SimpleNamespace(pages=[]))
+    elif fault == "draft":
+        i["page"].surface = "DRAFT_PRESENT"
+    elif fault == "profile":
+        argv = i["environment"].command()
+        argv[2] = "--profile-directory=Other"
+        i["process"]["CommandLine"] = json.dumps(argv)
+    else:
+        i["inventory"]["listeners"] *= 2
+    assert r.run_native_source_only(i["config_path"], i["root"]) == r.Result("HOLD", code, "GITHUB_AUTHENTICATED")
+    assert_read_only_pending(i)
+
+
+def test_r3a_composer_must_remain_empty_on_second_observation(r3a_ingress, monkeypatch):
+    i = r3a_ingress
+    original = i["page"].evaluate
+
+    def changed(script):
+        result = original(script)
+        i["page"].surface = "DRAFT_PRESENT"
+        return result
+
+    monkeypatch.setattr(i["page"], "evaluate", changed)
+    assert r.run_native_source_only(i["config_path"], i["root"]).code == "PRELOAD_DRAFT_PRESENT"
+    assert i["page"].reads == 2
+    assert_read_only_pending(i)
+
+
+@pytest.mark.parametrize("change", [{"generation": 2}, {"chat_url":
+    "https://chatgpt.com/c/00000000-0000-0000-0000-000000000002"}])
+def test_r3a_sender_registration_cannot_change_generation_or_chat(r3a_ingress, change):
+    i = r3a_ingress
+    runner = r.compose_native_source_only(i["config_path"], i["root"])
+    changed = replace(i["registration"], binding=replace(i["registration"].binding, **change))
+    with pytest.raises(r.RuntimeHold, match="^REGISTRATION_DRIFT$"):
+        runner.sender.preflight(changed)
+    assert i["native_calls"] == []
+
+
+def test_r3a_old_marker_cannot_enter_native_preflight(r3a_ingress):
+    i = r3a_ingress
+    i["config"]["marker"] = replace(i["registration"], binding=replace(
+        i["registration"].binding, generation=2)).marker
+    i["save"](i["config_path"], i["config"])
+    assert r.run_native_source_only(i["config_path"], i["root"]).code == "REGISTRATION_MARKER_DRIFT"
+    assert i["native_calls"] == [] and not r.Path(i["config"]["journal"]).exists()
+
+
+def test_r3a_json_native_authority_flag_cannot_enroll_a_provider(r3a_ingress):
+    i = r3a_ingress
+    i["config"]["native_authority"] = True
+    i["save"](i["config_path"], i["config"])
+    assert r.run_native_source_only(i["config_path"], i["root"]).code == "LOCAL_CONFIG_INVALID"
+    assert i["calls"] == [] and i["native_calls"] == []
+
+
+@pytest.mark.parametrize("name", ["grants", "registered_source", "registry", "chrome_config"])
+def test_r3a_dependency_does_not_hide_authority_drift_during_reads(r3a_ingress, monkeypatch, name):
+    i = r3a_ingress
+    original = i["page"].evaluate
+
+    def changed(script):
+        result = original(script)
+        i["save"](r.Path(i["config"][name]), {"changed": True})
+        return result
+
+    monkeypatch.setattr(i["page"], "evaluate", changed)
+    assert r.run_native_source_only(i["config_path"], i["root"]).code == "LOCAL_AUTHORITY_DRIFT"
+    assert_read_only_pending(i)
+
+
+@pytest.mark.parametrize("fault", ["revoke", "drift", "transport"])
+def test_r3a_final_authority_is_revalidated_after_durable_reservation(composition, fault):
+    make, event, registration, _, path, _ = composition
+    calls = []
+
+    def grant(*args):
+        calls.append(1)
+        if len(calls) == 1:
+            return True
+        assert record(path, event, registration)["status"] == "RESERVED"
+        if fault == "drift":
+            raise r.RuntimeHold("LOCAL_AUTHORITY_DRIFT")
+        if fault == "transport":
+            raise TimeoutError("private details")
+        return False
+
+    runner = make(grant_verifier=grant)
+    result = runner.run_once()
+    assert result == r.Result("BLOCKED_EXTERNAL", {"revoke": "MISSING_GRANT",
+        "drift": "LOCAL_AUTHORITY_DRIFT", "transport": "FINAL_AUTHORITY_UNPROVEN"}[fault], "SYNTHETIC_FIXTURE")
+    assert runner.sender.calls == 0 and len(calls) == 2
+    assert record(path, event, registration)["history"] == ["PENDING", "RESERVED", "BLOCKED_EXTERNAL"]
+    assert runner.run_once().replayed and len(calls) == 2
+
+
+@pytest.mark.parametrize("phase", ["stage", "click", "transport"])
+def test_r3a_test_only_mock_ambiguous_attempt_never_retries(composition, monkeypatch, phase):
+    make, event, registration, _, path, _ = composition
+    runner = make()
+    calls = []
+
+    def ambiguous(*args):
+        assert record(path, event, registration)["status"] == "RESERVED"
+        calls.append(phase)
+        raise TimeoutError("TEST_ONLY_MOCK " + phase)
+
+    monkeypatch.setattr(runner.sender, "send", ambiguous)
+    assert runner.run_once().status == "UNKNOWN_EFFECT"
+    assert runner.run_once().replayed and calls == [phase]
+    reopened = make()
+    assert reopened.run_once().status == "UNKNOWN_EFFECT" and reopened.sender.calls == 0
+    assert reopened.orchestrator._completed == {}
+
+
+def test_r3a_missing_native_brain_transport_never_accepts_ui_as_brain(composition):
+    make, event, registration, _, path, _ = composition
+    runner = make(brain=r.NativeBrainAdapter())
+    assert runner.run_once() == r.Result("BLOCKED_EXTERNAL", "BRAIN_RECEIPT_UNAVAILABLE", "SYNTHETIC_FIXTURE")
+    assert record(path, event, registration)["history"] == [
+        "PENDING", "RESERVED", "UI_TURN_OBSERVED", "BLOCKED_EXTERNAL"]
+    assert runner.orchestrator._completed == {}
+
+
+def test_r3a_r2_sender_cannot_acquire_effect_authority_by_clearing_read_only(native_ingress):
+    i = native_ingress
+    runner = r.compose_read_only(i["config_path"], i["root"])
+    runner.read_only = False
+    assert runner.run_once().code == "UNSUPPORTED_NATIVE_OWNER"
+    assert i["native_calls"] == [] and runner.orchestrator._completed == {}
+
+
+def test_r3a_synthetic_adapters_cannot_produce_authenticated_evidence(composition):
+    make, event, registration, _, _, root = composition
+    real_event = replace(event, evidence_type="GITHUB_AUTHENTICATED")
+    real_registration = replace(registration, evidence_type="GITHUB_AUTHENTICATED")
+    runner = make()
+    observation = runner.sender.send(event, registration)
+    for action in (lambda: runner.sender.send(real_event, real_registration),
+                   lambda: runner.brain.correlate(real_event, real_registration, observation)):
+        with pytest.raises(r.RuntimeHold, match="^SYNTHETIC_ONLY$"):
+            action()
+    native = make(source=r.SyntheticSource(real_event), registration=real_registration,
+                  sender=r.NativeSender(root, real_registration))
+    assert native.run_once().code == "AUTHENTICATED_SOURCE_REQUIRED"
+    assert native.orchestrator._completed == {}
+
+
+def test_r3a_test_only_mock_hands_off_to_exactly_one_existing_orchestrator(composition, monkeypatch):
+    """TEST_ONLY_MOCK: real A03/P0 offline contracts, synthetic evidence only."""
+    make, _, _, _, _, _ = composition
+    runner = make()
+    calls = []
+    for name in ("record_completed", "record_receipt"):
+        original = getattr(runner.orchestrator, name)
+
+        def counted(*args, _name=name, _original=original, **kwargs):
+            calls.append((_name, id(runner.orchestrator)))
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(runner.orchestrator, name, counted)
+    assert runner.run_once() == r.Result("ACK", "CONSUMER_RECEIPT_RECORDED", "SYNTHETIC_FIXTURE")
+    assert runner.run_once().replayed
+    assert calls == [("record_completed", id(runner.orchestrator)), ("record_receipt", id(runner.orchestrator))]
+
+
+def test_r3a_cli_is_opt_in_dry_run_and_synthetic_modes_stay_separate(r3a_ingress, monkeypatch, capsys):
+    i = r3a_ingress
+    args = ["run", "--config", str(i["config_path"]), "--repository-root", str(i["root"])]
+    assert main(args + ["--native-source-only", "--dry-run"]) == 2
+    assert json.loads(capsys.readouterr().out)["code"] == "DRY_RUN_NO_EFFECTS"
+    assert i["calls"] == [] and i["native_calls"] == []
+    assert main(args + ["--native-source-only"]) == 2
+    assert json.loads(capsys.readouterr().out)["status"] == "HOLD_DEPENDENCY"
+    assert main(args) == 2
+    assert json.loads(capsys.readouterr().out)["code"] == "EXACT_CHAT_CANDIDATE_ACCOUNT_MARKER_UNATTESTED"
+    with pytest.raises(SystemExit) as error:
+        main(["run", "--diagnostic", "--native-source-only"])
+    assert error.value.code == 2
     assert_read_only_pending(i)
