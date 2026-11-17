@@ -1,5 +1,5 @@
 """MT-01 deterministic selection/evidence and real local verification; no vendors."""
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 import json
 import os
 from pathlib import Path
@@ -1909,6 +1909,69 @@ def test_real_source_and_schema_preserve_cli_and_import_consumers(real_tree, mon
     assert {"a12", "a11", "a04", "cli"} <= set(selected["selected_groups"])
     assert "tests/test_a12_registry.py" in selected["consumer_map"]["a12"]["tests"]
     assert "contracts/ProductClaimEvidence.v1.schema.json" in selected["consumer_map"]["cli"]["closure"]
+
+
+@pytest.mark.parametrize("v21", [False, True], ids=["legacy", "v21"])
+@pytest.mark.parametrize("path", [
+    "src/ai_commerce/opportunity/bridge/briefs.py",
+    "src/ai_commerce/opportunity/bridge/schemas.py",
+])
+def test_a10_m05_selects_a03_consumer_with_only_reviewed_closure(real_tree, monkeypatch, path, v21):
+    current = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_text())
+    if v21:
+        monkeypatch.setenv("MT01_V21_ENABLED", "1")
+        groups = mt.approved_groups()  # V2 loads persisted owners from the trusted base.
+        registry = current
+    else:
+        monkeypatch.setattr(mt, "import_graph", lambda *_: real_tree.graph)
+        groups = real_tree.groups
+        registry = real_tree.registry
+
+    def select(owners):
+        return mt.select_plan(
+            repo=ROOT, base_sha=real_tree.sha, base_files=real_tree.files,
+            candidate_files=real_tree.files, changed_paths=[path], required_acs=(),
+            fallback_argv=current["project-tests"], groups=owners,
+            registered_only=True, registered_profiles=registry, env={})
+
+    selected = select(groups)
+    expected = {
+        "a03", "a04", "a05", "a06", "a07", "a08", "a09", "a10", "a10-m02",
+        "a11", "a12", "a18-1", "a18-2", "a18-3", "b0-1", "b3-portfolio",
+        "bq-02b", "bq-04a", "cli",
+    }
+    assert set(selected["selected_groups"]) == expected
+    assert not selected["fallback"]
+    assert selected["reason_codes"] == (["SCOPED_CONSUMER_CLOSURE"] if v21 else [])
+    assert all(entry["state"] == "EXECUTE" for entry in selected["groups"])
+    # A05 already depends on M05 through the shared CLI. Keep that real edge;
+    # the new A03 consumer must add no other owner, including PULSE or EF02.
+    producer = "src/ai_commerce/opportunity/bridge/briefs.py"
+    previous = select(tuple(
+        replace(g, consumers=tuple(p for p in g.consumers if p != producer))
+        if g.name == "a03" else g for g in groups))
+    assert set(previous["selected_groups"]) == expected - {"a03"}
+    assert "src/ai_commerce/cli.py" in selected["affected_paths"]
+    unrelated = {"bq-05a", "bq-05b0", "bq-05b1", "ef02", "ef02-wake"}
+    assert unrelated <= {g.name for g in real_tree.groups}
+    assert not unrelated & set(selected["selected_groups"])
+
+    by_name = {g.name: g for g in groups}
+    assert by_name["a03"].consumers == (producer,)
+    assert producer not in by_name["a03"].paths
+    assert by_name["a10"].paths.count(producer) == 1
+    for owner in ("a03", "a10"):
+        entry = next(e for e in selected["groups"] if e["group"] == owner)
+        profile = f"mt01-{owner}-tests"
+        assert entry["selected_profile"] == profile
+        assert entry["binding"]["argv"] == current[profile]
+        assert current[profile] == ["python", "-m", "pytest", *by_name[owner].tests, "-q", "-n", "12"]
+        assert entry["binding"]["candidate_files"][path] == real_tree.files[path]
+    assert selected["consumer_map"]["a03"]["tests"] == [
+        "tests/test_a03_creative.py", "tests/test_a03_upgrade_v11.py",
+    ]
+    assert "tests/test_a10_m05.py" in selected["consumer_map"]["a10"]["tests"]
+    assert not selected["narrow_execution_observed"]  # Selection is not a test result.
 
 
 @pytest.mark.parametrize("path,acs,aggregate,reason", [
