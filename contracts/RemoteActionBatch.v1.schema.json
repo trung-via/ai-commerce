@@ -39,7 +39,7 @@
     "authorization_ref": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 256
+      "maxLength": 512
     },
     "max_parallel": {
       "type": "integer",

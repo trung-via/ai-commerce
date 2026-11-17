@@ -98,6 +98,41 @@ def test_schema_and_authentication_are_not_just_actor_strings():
         validate(p, issuer="trung-via")
 
 
+@pytest.mark.parametrize("length", [256, 257, 512, 513])
+def test_authorization_ref_length_has_shared_bounded_validation(length):
+    from ai_commerce.remote.validation import validate_batch_content
+
+    packet = batch([action("a")])
+    packet["authorization_ref"] = "x" * length
+    original = copy.deepcopy(packet)
+    for check in (validate, lambda data: validate_batch_content(
+            data, schema=SCHEMA, registry=verify_registry(REGISTRY))):
+        if length <= 512:
+            assert check(packet) == original
+        else:
+            with pytest.raises(RemoteRequestError, match="^AUTHORIZATION_REF_TOO_LONG$") as error:
+                check(packet)
+            assert error.value.args == ("AUTHORIZATION_REF_TOO_LONG",)
+            assert error.value.__context__ is None
+    assert packet == original
+    if length <= 512:
+        with pytest.raises(RemoteRequestError, match="^ISSUER_NOT_AUTHORIZED_FOR_ACTOR$"):
+            validate(packet, issuer="attacker")
+
+
+@pytest.mark.parametrize("field", ["source_sha", "actor"])
+def test_overlong_authorization_ref_code_is_independent_of_schema_error_order(field):
+    from ai_commerce.remote.validation import validate_batch_content
+
+    packet = batch([action("a")])
+    packet["authorization_ref"] = "PRIVATE_AUTHORIZATION_" + "x" * 513
+    packet[field] = "PRIVATE_INVALID_FIELD"
+    for check in (validate, lambda data: validate_batch_content(
+            data, schema=SCHEMA, registry=verify_registry(REGISTRY))):
+        with pytest.raises(RemoteRequestError, match="^AUTHORIZATION_REF_TOO_LONG$"):
+            check(packet)
+
+
 def test_reject_duplicate_cycle_unknown_dependency_and_bad_path():
     cases = [
         [action("a"), action("a")],
@@ -1194,7 +1229,7 @@ def test_pre_executor_new_owner_or_directory_is_hold_even_with_invalid_declarati
     assert result["actions"][0]["reason"] == "ALLOWED_SCOPE_NOT_EXACT_ESTABLISHED_FILES"
 
 
-def onboarding_packet():
+def onboarding_packet(*, fresh_owner=True):
     packet = copy.deepcopy(ISSUE_1006)
     # A fresh signed request is required; never mutate/re-dispatch issue #1006.
     packet["source_sha"] = "a" * 40  # Offline immutable fixture only.
@@ -1204,7 +1239,29 @@ def onboarding_packet():
     inline = 'MT01_ACCEPTANCE_JSON: ["PRODUCTION.orchestration-p0"]. '
     item["instruction"] = (AC_MARKER + '["PRODUCTION.orchestration-p0"]\n'
                            + item["instruction"].replace(inline, ""))
+    if fresh_owner:
+        # The real #1006 owner is now adopted, including downstream consumers.
+        # Exercise new-owner admission without removing any baseline ownership.
+        for old, new in (
+                ("production-orchestration", "ef02-onboarding-fixture"),
+                ("production_orchestration", "ef02_onboarding_fixture"),
+                ("PRODUCTION.orchestration-p0", "EF02.onboarding-fixture")):
+            item["allowed_paths"] = [path.replace(old, new) for path in item["allowed_paths"]]
+            item["instruction"] = item["instruction"].replace(old, new)
     return packet
+
+
+def test_onboarding_1006_adopted_owner_still_holds_on_current_baseline(tmp_path, monkeypatch):
+    from ai_commerce.remote.validation import validate_acceptance_scope
+
+    make_acceptance_repo(tmp_path, monkeypatch)
+    packet = onboarding_packet(fresh_owner=False)
+    original = copy.deepcopy(packet)
+    result = validate_acceptance_scope(packet, repo=tmp_path)
+    assert result["status"] == "PRE_EXECUTOR_UNDETERMINED"
+    assert result["next_gate"] == "HOLD_NO_EXECUTOR"
+    assert result["actions"][0]["reason"] == "ONBOARD_AC_ALREADY_OWNED_PRE_EXECUTOR"
+    assert packet == original
 
 
 def test_onboarding_1006_corrected_standalone_ac_contracts_without_claiming_proof(
@@ -1236,17 +1293,17 @@ def test_onboarding_1006_corrected_standalone_ac_contracts_without_claiming_proo
         "onboarding_contract": {
             "source_sha": packet["source_sha"], "request_fingerprint": fingerprint(packet),
             "allowed_paths": item["allowed_paths"],
-            "acceptance_ids": ["PRODUCTION.orchestration-p0"], "coverage_proven": False,
+            "acceptance_ids": ["EF02.onboarding-fixture"], "coverage_proven": False,
         },
     }]
     assert packet == original
     assert not any((tmp_path / p).exists() for p in item["allowed_paths"])
     acceptance = approved_acceptance_plan(item)
     assert acceptance["consumer_map"] == {} and acceptance["broad_required"] is True
-    assert acceptance["unknown_ids"] == ["PRODUCTION.orchestration-p0"]
+    assert acceptance["unknown_ids"] == ["EF02.onboarding-fixture"]
 
     # Admission is no substitute for the existing verifier's actual bytes.
-    data = {"schema_version": "MT01ComponentOwner.v1", "component": "production-orchestration",
+    data = {"schema_version": "MT01ComponentOwner.v1", "component": "ef02-onboarding-fixture",
             "sources": item["allowed_paths"][1:4], "tests": item["allowed_paths"][4:],
             "acs": acceptance["ids"], "consumers": [VALIDATION_SOURCE], "contracts": []}
     with pytest.raises(ValueError, match="^ONBOARD_FILE_MISSING_OR_LINK$"):
@@ -1296,7 +1353,7 @@ def test_onboarding_invalid_or_ambiguous_contract_holds_without_effects(
         paths[0] = "work_items/mt01-components/../outside.json"
     elif problem in {"remote", "engineering", "existing-package"}:
         package = "hostops_v3" if problem == "existing-package" else problem
-        paths[1:4] = [p.replace("production_orchestration", package) for p in paths[1:4]]
+        paths[1:4] = [p.replace("ef02_onboarding_fixture", package) for p in paths[1:4]]
     elif problem in {"existing-source", "existing-test", "existing-manifest", "protected"}:
         paths.append({"existing-source": VALIDATION_SOURCE, "existing-test": "tests/test_ef02.py",
                       "existing-manifest": "work_items/mt01-components/hostops-personal.json",
@@ -1304,9 +1361,9 @@ def test_onboarding_invalid_or_ambiguous_contract_holds_without_effects(
     elif problem == "existing-component":
         paths[0] = "work_items/mt01-components/ef02.json"
     elif problem in {"directory", "wildcard", "nested-source", "two-packages"}:
-        paths[1] = {"directory": "src/ai_commerce/production_orchestration",
-                    "wildcard": "src/ai_commerce/production_orchestration/*.py",
-                    "nested-source": "src/ai_commerce/production_orchestration/nested/owner.py",
+        paths[1] = {"directory": "src/ai_commerce/ef02_onboarding_fixture",
+                    "wildcard": "src/ai_commerce/ef02_onboarding_fixture/*.py",
+                    "nested-source": "src/ai_commerce/ef02_onboarding_fixture/nested/owner.py",
                     "two-packages": "src/ai_commerce/another_package/owner.py"}[problem]
     elif problem == "no-source":
         del paths[1:4]
@@ -1315,19 +1372,19 @@ def test_onboarding_invalid_or_ambiguous_contract_holds_without_effects(
     elif problem == "duplicate-path":
         paths.append(paths[-1])
     elif problem == "case-alias":
-        paths.append("src/ai_commerce/production_orchestration/CONTRACTS.py")
+        paths.append("src/ai_commerce/ef02_onboarding_fixture/CONTRACTS.py")
     elif problem == "reserved-name":
-        paths[1] = "src/ai_commerce/production_orchestration/CON.py"
+        paths[1] = "src/ai_commerce/ef02_onboarding_fixture/CON.py"
     elif problem == "control-character":
         paths[0] = "work_items/mt01-components/new\nowner.json"
     elif problem == "ordinary-profile":
         item["verification_profile"] = "ef02-tests"
     elif problem in {"baseline-ac", "mixed-ac", "unknown-extra-ac", "bad-ac", "duplicate-ac"}:
         ids = {"baseline-ac": ["EF02.action-and-fanin"],
-               "mixed-ac": ["PRODUCTION.orchestration-p0", "EF02.action-and-fanin"],
-               "unknown-extra-ac": ["PRODUCTION.orchestration-p0", "UNKNOWN.unbound"],
+               "mixed-ac": ["EF02.onboarding-fixture", "EF02.action-and-fanin"],
+               "unknown-extra-ac": ["EF02.onboarding-fixture", "UNKNOWN.unbound"],
                "bad-ac": ["--arbitrary"],
-               "duplicate-ac": ["PRODUCTION.orchestration-p0"] * 2}[problem]
+               "duplicate-ac": ["EF02.onboarding-fixture"] * 2}[problem]
         item["instruction"] = AC_MARKER + json.dumps(ids)
     elif problem == "missing-ac":
         item["instruction"] = "PRIVATE_INSTRUCTIONS"
@@ -1338,11 +1395,11 @@ def test_onboarding_invalid_or_ambiguous_contract_holds_without_effects(
     elif problem == "fenced-ac":
         item["instruction"] = "```text\n" + item["instruction"] + "\n```"
     elif problem == "duplicate-marker":
-        item["instruction"] += "\n" + AC_MARKER + '["PRODUCTION.orchestration-p0"]'
+        item["instruction"] += "\n" + AC_MARKER + '["EF02.onboarding-fixture"]'
     elif problem == "bad-json":
         item["instruction"] = AC_MARKER + '{"acs": []}'
     elif problem == "fake-impact":
-        item["instruction"] += '\nMT01_IMPACT_WITNESSES_JSON:{"PRODUCTION.orchestration-p0":["' + VALIDATION_SOURCE + '"]}'
+        item["instruction"] += '\nMT01_IMPACT_WITNESSES_JSON:{"EF02.onboarding-fixture":["' + VALIDATION_SOURCE + '"]}'
     elif problem == "second-action":
         packet["actions"].append(scoped_action("b", [VALIDATION_SOURCE], ["EF02.action-and-fanin"]))
     elif problem == "dependency":
@@ -1378,7 +1435,7 @@ def test_onboarding_uses_pinned_inventory_for_freshness_and_parent_safety(tmp_pa
     item = packet["actions"][0]
     path = {"baseline-file": item["allowed_paths"][-1],
             "baseline-case-alias": item["allowed_paths"][-1].upper(),
-            "package-link": "src/ai_commerce/production_orchestration",
+            "package-link": "src/ai_commerce/ef02_onboarding_fixture",
             "manifest-parent-link": "work_items"}[problem]
     make_acceptance_repo(tmp_path, monkeypatch, contents={path: b"elsewhere"},
                          modes={path: b"120000"} if problem.endswith("link") else {})
@@ -1932,6 +1989,76 @@ def _copy_remote_contracts(checkout):
         target = checkout / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes((ROOT / relative).read_bytes())
+
+
+@pytest.mark.parametrize("length", [256, 257, 512, 513])
+def test_authorization_ref_hosted_validate_boundary_is_safe_and_preflight_optional(
+        tmp_path, monkeypatch, capsys, length):
+    from ai_commerce.remote import __main__ as cli, authoring_preflight
+
+    _copy_remote_contracts(tmp_path)
+    packet = batch([action("a")])
+    marker = "PRIVATE_AUTHORIZATION_"
+    packet["authorization_ref"] = marker + "ế" * (length - len(marker))
+    packet["actions"][0]["instruction"] = "PRIVATE_INSTRUCTION"
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps(packet), encoding="utf-8")
+    seen = []
+    def source(checkout, sha):
+        assert checkout == tmp_path and sha == packet["source_sha"]
+        seen.append("source")
+    def scope(data, *, repo):
+        assert data == packet and repo == tmp_path
+        seen.append("scope")
+        return {"status": "PRE_EXECUTOR_COMPATIBLE"}
+    def forbidden(*args, **kwargs):
+        pytest.fail("Hosted validate must not dispatch, spawn children or require local preflight")
+    monkeypatch.setattr(cli, "check_source", source)
+    monkeypatch.setattr(cli, "validate_acceptance_scope", scope)
+    monkeypatch.setattr(authoring_preflight, "preflight_batch", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    for name in ("GitHubTransport", "LocalBatchWorker", "run_schedule"):
+        monkeypatch.setattr(cli, name, forbidden)
+    status = cli.main(["validate", "--request-file", str(request), "--checkout", str(tmp_path),
+                       "--issuer-login", "owner", "--owner-login", "owner"])
+    output = capsys.readouterr()
+    assert "PRIVATE" not in output.out + output.err and packet["authorization_ref"] not in output.out + output.err
+    if length <= 512:
+        assert status == 0 and output.err == ""
+        assert json.loads(output.out)["status"] == "VALIDATED"
+        assert seen == ["source", "scope"]
+    else:
+        assert status == 2 and output.out == "" and seen == []
+        assert output.err == "EF02_REQUEST_REJECTED: AUTHORIZATION_REF_TOO_LONG\n"
+
+
+@pytest.mark.parametrize("present,value", [
+    (False, None), (True, ""), (True, None), (True, 512),
+    (True, False), (True, []), (True, {}),
+])
+def test_authorization_ref_hosted_validate_preserves_other_schema_rejections(
+        tmp_path, monkeypatch, capsys, present, value):
+    from ai_commerce.remote import __main__ as cli
+
+    _copy_remote_contracts(tmp_path)
+    packet = batch([action("a")])
+    packet["actions"][0]["instruction"] = "PRIVATE_INSTRUCTION"
+    if present:
+        packet["authorization_ref"] = value
+    else:
+        del packet["authorization_ref"]
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps(packet), encoding="utf-8")
+    def forbidden(*args, **kwargs):
+        pytest.fail("Invalid schema must reject before any source, scope or dispatch effect")
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    for name in ("check_source", "validate_acceptance_scope", "GitHubTransport", "LocalBatchWorker", "run_schedule"):
+        monkeypatch.setattr(cli, name, forbidden)
+    assert cli.main(["validate", "--request-file", str(request), "--checkout", str(tmp_path),
+                     "--issuer-login", "owner", "--owner-login", "owner"]) == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "EF02_REQUEST_REJECTED: REQUEST_VALIDATION_FAILED\n"
 
 
 @pytest.mark.parametrize("command", ["validate", "run"])
