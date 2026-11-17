@@ -373,3 +373,259 @@ def test_real_module_cli_prints_portable_json_and_bom_text_provenance(tmp_path):
     brief = json.loads(result.stdout.decode("ascii"))
     assert brief["prompt"] == TEXT and path.read_bytes() == raw
     assert brief["opportunity_bridge"]["human_input"]["raw_sha256"] == sha256_bytes(raw)
+
+
+@pytest.fixture
+def automation_job(tmp_path):
+    from ai_commerce.opportunity import prepare_pinned_source
+    raw = b"\xef\xbb\xbf" + canonical_bytes({"schema_version": "ManualSignalRows.v1", "rows": [
+        demo._row(demo.JSON_TOPIC, day, value) for day, value in ((27, 0), (28, 0), (29, 4))]}) + b"\r\n"
+    snapshot = demo._snapshot(raw, "automation")
+    prepared = prepare_pinned_source(raw, expected_sha256=sha256_bytes(raw), source_snapshot=snapshot, file_format="json")
+    reference = {"import_id": prepared.record["import_id"], "signal_id": prepared.signals[0]["signal_id"],
+                 "raw_sha256": sha256_bytes(raw), "evidence_ref": "sha256:" + sha256_bytes(raw)}
+    notes = {"schema_version": "AudienceNotes.v1", "data_kind": "SYNTHETIC_FIXTURE",
+             "source_note": "SYNTHETIC Human-authored fixture; no real participants.", "noted_at": AS_OF,
+             "statements": [{"kind": "JOB_TO_BE_DONE", "status": "OBSERVED_USER_SUPPLIED",
+                             "text": "SYNTHETIC quiet creative break.", "evidence_refs": [reference]}]}
+    raw_notes = b"\xef\xbb\xbf" + canonical_bytes(notes) + b"\r\n"
+    (tmp_path / "signals.json").write_bytes(raw)
+    (tmp_path / "notes.json").write_bytes(raw_notes)
+    manifest = {"schema_version": "A10AutomationJob.v1", "job_id": "synthetic-job-1", "source_sha": "b" * 40,
+                "topic": demo.JSON_TOPIC, "as_of": AS_OF, "provider": None, "ai_assessment": False,
+                "sources": [{"file": "signals.json", "format": "json", "sha256": sha256_bytes(raw),
+                             "snapshot": snapshot, "comparison_context": demo._comparison()}],
+                "audience": {"file": "notes.json", "sha256": sha256_bytes(raw_notes), "origin": "HUMAN"},
+                "allowed_effects": ["IMPORT_SIGNALS", "APPEND_HUMAN_AUDIENCE", "CREATE_BRIEF", "AI_RESEARCH"]}
+    return manifest, {"base_dir": tmp_path, "source_sha": manifest["source_sha"], "state_dir": tmp_path / "state",
+                      "mode": "offline", "permissions": manifest["allowed_effects"]}
+
+
+def automation_selection(result, *, use_ai=False):
+    proposal = result["proposals"][0]
+    return {**result["selection_template"], "proposal_id": proposal["proposal_id"], "proposal_sha256": digest(proposal),
+            "use_ai_assessment": use_ai,
+            "assessment_receipt_id": result["assessment"]["receipt_id"] if use_ai else None}
+
+
+def automation_capability(profile="codex-cli"):
+    from ai_commerce.opportunity import ai_provider_profile
+    provider = ai_provider_profile(profile)
+    command = "codex" if profile == "codex-cli" else "antigravity"
+    return {"argv": [command, "exec", "--model", provider["model"], "--effort", provider["effort"]],
+            "model": provider["model"], "effort": provider["effort"], "structured_json_stdio": True,
+            "read_only": True, "no_tools": True}
+
+
+def automation_output(task):
+    return canonical_bytes({"schema_version": "A10AIResearchOutput.v1", "task_id": task["task_id"],
+        "task_sha256": digest(task), "provider": task["provider"], "status": "OK", "effects": [],
+        "reported_model": "gpt-6.1-sol", "reported_effort": "xhigh", "claims": [
+            {"kind": "MODEL_INFERENCE", "origin": "MODEL", "text": "SYNTHETIC optional machine assessment.",
+             "citations": [task["sources"][0]]}]})
+
+
+def test_automation_plan_and_offline_full_pipeline_replay_without_provider(automation_job):
+    from ai_commerce.opportunity import run_automation
+    manifest, kwargs = automation_job
+    def forbidden(*args, **kw):
+        raise AssertionError("Offline automation attempted a provider")
+    plan = run_automation(manifest, **{**kwargs, "mode": "plan"}, runner=forbidden)
+    assert plan["status"] == "PLAN" and not kwargs["state_dir"].exists()
+    assert plan == run_automation(manifest, **{**kwargs, "mode": "plan"}, runner=forbidden)
+    wait = run_automation(manifest, **kwargs, runner=forbidden)
+    assert wait["status"] == "WAIT" and wait["reason"] == "SELECTION_REQUIRED" and wait["brief"] is None
+    assert wait["assessment"] is None and wait["hypotheses"][0]["status"] == "GROWING"
+    selection = automation_selection(wait)
+    completed = run_automation(manifest, **kwargs, selection=selection, runner=forbidden)
+    assert completed["status"] == "COMPLETE" and completed["publication_status"] == "NOT_ATTEMPTED"
+    brief = completed["brief"]
+    assert intake_brief(brief) == brief and validate_record("ContentBrief", brief) == brief
+    assert all(brief[k] is None for k in ("product_ref", "cta", "media_hint", "audience"))
+    assert brief["opportunity_bridge"]["proposal"] == wait["proposals"][0]
+    assert brief["opportunity_automation"]["selection"] == selection
+    job_dir = kwargs["state_dir"] / manifest["job_id"]
+    before = {p.name: p.read_bytes() for p in job_dir.iterdir() if p.is_file()}
+    assert completed == run_automation(manifest, **kwargs, selection=selection, runner=forbidden)
+    assert before == {p.name: p.read_bytes() for p in job_dir.iterdir() if p.is_file()}
+    from ai_commerce.opportunity.audience import AudienceLedger
+    from ai_commerce.opportunity import SignalLedger
+    assert AudienceLedger(job_dir / "audience.sqlite").raw_bytes(completed["insight_ids"][0],
+        signal_ledger=SignalLedger(job_dir / "signals.sqlite")) == (kwargs["base_dir"] / "notes.json").read_bytes()
+
+
+@pytest.mark.parametrize("change,reason,status", [
+    ("code-pin", "JOB_SOURCE_SHA_MISMATCH", "FAIL"),
+    ("raw-pin", "JOB_SOURCE_HASH_MISMATCH", "FAIL"),
+    ("snapshot-pin", "JOB_SOURCE_HASH_MISMATCH", "FAIL"),
+    ("no-data", "NO_SIGNAL_DATA", "WAIT"),
+    ("no-provider", "PROVIDER_REQUIRED", "WAIT"),
+    ("permissions", "PERMISSION_DENIED", "WAIT"),
+    ("model-audience", "AUDIENCE_HUMAN_ORIGIN_REQUIRED", "FAIL"),
+    ("unknown-field", "JOB_MANIFEST_INVALID", "FAIL"),
+    ("outside-input", "JOB_INPUT_OUTSIDE_ROOT", "FAIL"),
+])
+def test_automation_preflight_fails_closed_without_journal_writes(automation_job, change, reason, status):
+    from ai_commerce.opportunity import run_automation
+    manifest, kwargs = automation_job
+    manifest, kwargs = deepcopy(manifest), dict(kwargs)
+    if change == "code-pin":
+        kwargs["source_sha"] = "c" * 40
+    elif change == "raw-pin":
+        (kwargs["base_dir"] / "signals.json").write_bytes(b"changed")
+    elif change == "snapshot-pin":
+        manifest["sources"][0]["snapshot"]["sha256"] = "c" * 64
+    elif change == "no-data":
+        manifest["sources"] = []
+    elif change == "no-provider":
+        manifest["ai_assessment"] = True
+    elif change == "permissions":
+        kwargs["permissions"] = []
+    elif change == "model-audience":
+        manifest["audience"]["origin"] = "MODEL"
+    elif change == "unknown-field":
+        manifest["manual_idea"] = "AI text may not become a manual idea"
+    elif change == "outside-input":
+        manifest["sources"][0]["file"] = "/outside.json"
+    result = run_automation(manifest, **kwargs)
+    assert (result["status"], result["reason"]) == (status, reason)
+    assert result["brief"] is None and not kwargs["state_dir"].exists()
+
+
+@pytest.mark.parametrize("change", ["proposal-hash", "manifest-hash", "actor", "machine-without-receipt", "ai-human-edits"])
+def test_automation_selection_binds_operator_proposal_and_sidecar(automation_job, change):
+    from ai_commerce.opportunity import run_automation
+    manifest, kwargs = automation_job
+    wait = run_automation(manifest, **kwargs)
+    selection = automation_selection(wait)
+    if change == "proposal-hash":
+        selection["proposal_sha256"] = "a" * 64
+    elif change == "manifest-hash":
+        selection["manifest_sha256"] = "a" * 64
+    elif change == "actor":
+        selection["actor"] = "MODEL"
+    elif change == "machine-without-receipt":
+        selection["use_ai_assessment"] = True
+        selection["assessment_receipt_id"] = "fake"
+    elif change == "ai-human-edits":
+        selection["human_edits"] = {"objective": "AI generated text"}
+    job_dir = kwargs["state_dir"] / manifest["job_id"]
+    before = {p.name: p.read_bytes() for p in job_dir.glob("*.sqlite")}
+    result = run_automation(manifest, **kwargs, selection=selection)
+    assert result["status"] == "FAIL" and result["brief"] is None
+    assert not (job_dir / "brief.json").exists()
+    assert before == {p.name: p.read_bytes() for p in job_dir.glob("*.sqlite")}
+
+
+def test_automation_fake_provider_sidecar_preserves_m04_and_runs_once(automation_job):
+    from types import SimpleNamespace
+    from ai_commerce.opportunity import run_automation
+    manifest, kwargs = automation_job
+    manifest.update(provider="codex-cli", ai_assessment=True)
+    kwargs = {**kwargs, "mode": "execute", "capability": automation_capability()}
+    calls = []
+    def fake(argv, **kw):
+        task = json.loads(kw["input"])["task"]
+        calls.append(task)
+        assert task["stage"] == "OPPORTUNITY_ASSESSMENT" and task["context"]["proposals"]
+        assert (kwargs["state_dir"] / manifest["job_id"] / "invocation.json").exists()
+        return SimpleNamespace(returncode=0, stdout=automation_output(task))
+    wait = run_automation(manifest, **kwargs, runner=fake)
+    assert wait["reason"] == "SELECTION_REQUIRED" and len(calls) == 1
+    assert wait["proposals"] == calls[0]["context"]["proposals"]
+    assert all(p["manual_input"] is None and p["creative_overrides"] == {} for p in wait["proposals"])
+    selection = automation_selection(wait, use_ai=True)
+    selection["actor"] = "BRAIN"
+    completed = run_automation(manifest, **kwargs, runner=fake, selection=selection)
+    assert completed["status"] == "COMPLETE" and len(calls) == 1
+    assert completed["proposals"] == wait["proposals"]
+    assert completed["brief"]["opportunity_bridge"]["human_edits"] == {}
+    assert completed == run_automation(manifest, **kwargs, runner=fake, selection=selection)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("failure", ["timeout", "invalid-output", "lost-receipt"])
+def test_automation_ambiguous_invocation_is_never_replayed(automation_job, failure):
+    from types import SimpleNamespace
+    from ai_commerce.opportunity import run_automation
+    manifest, kwargs = automation_job
+    manifest.update(provider="codex-cli", ai_assessment=True)
+    kwargs = {**kwargs, "mode": "execute", "capability": automation_capability()}
+    calls = []
+    def fake(argv, **kw):
+        calls.append(argv)
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(argv, 60)
+        raw = b'{"effects":["publish"]}' if failure == "invalid-output" else automation_output(json.loads(kw["input"])["task"])
+        return SimpleNamespace(returncode=0, stdout=raw)
+    first = run_automation(manifest, **kwargs, runner=fake)
+    if failure == "lost-receipt":
+        (kwargs["state_dir"] / manifest["job_id"] / "assessment.json").unlink()
+    else:
+        assert first["assessment"]["status"] == "UNKNOWN_EFFECT"
+    resumed = run_automation(manifest, **kwargs, runner=fake)
+    assert resumed["status"] == "WAIT" and resumed["reason"] == "UNKNOWN_EFFECT"
+    assert resumed["next_step"] == "RECONCILE_WITH_OPERATOR_NO_RETRY" and resumed["brief"] is None
+    assert len(calls) == 1
+
+
+def test_automation_attended_handoff_resumes_only_with_explicit_output(automation_job):
+    from ai_commerce.opportunity import run_automation
+    manifest, kwargs = automation_job
+    manifest.update(provider="chatgpt-attended", ai_assessment=True)
+    kwargs = {**kwargs, "mode": "execute"}
+    def forbidden(*args, **kw):
+        raise AssertionError("Attended handoff attempted a process or Send")
+    handoff = run_automation(manifest, **kwargs, runner=forbidden)
+    assert handoff["status"] == "WAIT" and handoff["assessment"]["status"] == "NEEDS_HUMAN"
+    assert handoff["handoff"]["send_performed"] is False
+    response = automation_output(handoff["ai_task"])
+    assessed = run_automation(manifest, **kwargs, runner=forbidden, attended_output=response)
+    assert assessed["reason"] == "SELECTION_REQUIRED" and assessed["assessment"]["status"] == "OK"
+    completed = run_automation(manifest, **kwargs, runner=forbidden, selection=automation_selection(assessed, use_ai=True))
+    assert completed["status"] == "COMPLETE"
+    assert completed == run_automation(manifest, **kwargs, runner=forbidden, selection=automation_selection(assessed, use_ai=True))
+
+
+def test_automation_cli_transport_writes_bounded_event_and_preserves_old_commands(automation_job, capsys):
+    manifest, kwargs = automation_job
+    path = write(kwargs["base_dir"] / "job.json", manifest)
+    event_path = kwargs["base_dir"] / "event.json"
+    args = ["opportunity", "automate", "--manifest", str(path), "--source-sha", kwargs["source_sha"],
+            "--state-dir", str(kwargs["state_dir"]), "--result", str(event_path), "--mode", "plan"]
+    assert main(args) == 0
+    captured = capsys.readouterr()
+    event = json.loads(captured.out)
+    assert not captured.err and read(event_path) == event and event["status"] == "PLAN"
+    assert not kwargs["state_dir"].exists()
+    wait_path = kwargs["base_dir"] / "wait.json"
+    wait_args = list(args)
+    wait_args[wait_args.index(str(event_path))] = str(wait_path)
+    wait_args[-1] = "offline"
+    assert main(wait_args) == 3
+    waiting = capsys.readouterr()
+    assert not waiting.err and json.loads(waiting.out)["reason"] == "PERMISSION_DENIED"
+    assert main([*args[:-1], "offline"]) == 2
+    failed = json.loads(capsys.readouterr().err)
+    # A changed event cannot overwrite an immutable transport result filename.
+    assert failed["error"] == "JOB_STATE_CONFLICT" and read(event_path) == event
+
+
+def test_automation_cli_offline_requires_then_consumes_explicit_selection(automation_job, capsys):
+    manifest, kwargs = automation_job
+    job_path = write(kwargs["base_dir"] / "job.json", manifest)
+    common = ["opportunity", "automate", "--manifest", str(job_path), "--mode", "offline",
+              "--source-sha", kwargs["source_sha"], "--state-dir", str(kwargs["state_dir"])]
+    for effect in manifest["allowed_effects"]:
+        common += ["--allow-effect", effect]
+    assert main([*common, "--result", str(kwargs["base_dir"] / "wait.json")]) == 3
+    captured = capsys.readouterr()
+    assert not captured.err
+    wait = json.loads(captured.out)
+    assert wait["reason"] == "SELECTION_REQUIRED"
+    selected = write(kwargs["base_dir"] / "selected.json", automation_selection(wait))
+    assert main([*common, "--selection", str(selected), "--result", str(kwargs["base_dir"] / "complete.json")]) == 0
+    captured = capsys.readouterr()
+    assert not captured.err
+    completed = json.loads(captured.out)
+    assert completed["status"] == "COMPLETE" and intake_brief(completed["brief"]) == completed["brief"]
