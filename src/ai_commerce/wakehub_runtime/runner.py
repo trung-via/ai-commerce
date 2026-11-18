@@ -1,4 +1,4 @@
-"""Bounded R2/R3B1 source-only composition with one private SQLite journal.
+"""Bounded R2/R3B2B source-only composition with one private SQLite journal.
 
 Adapters are trusted application inputs, never loaded from event payloads. The
 native Sender seam holds for missing enrolled authority. R2 stays read-only.
@@ -44,6 +44,7 @@ from ai_commerce.remote.trusted_origin import LocalCallerAttestation
 from ai_commerce.remote.wake_adapter import (
     ArtifactAuthority, GitHubArtifactProvenance, ProvenanceError, WakeReceipt, verify_provenance,
 )
+from ai_commerce.wakehub_cdp import authenticated_turn as cdp_turn
 
 Evidence = Literal["GITHUB_AUTHENTICATED", "SYNTHETIC_FIXTURE"]
 Status = Literal["PENDING", "RESERVED", "UI_TURN_OBSERVED", "BRAIN_CORRELATED", "ACK",
@@ -250,6 +251,42 @@ class DoorbellRequest:
                                                send_only=True).encode("utf-8"))
 
 
+def _turn_request(registration: Registration, event: Event, request: DoorbellRequest,
+                  origin: NativeOriginPins | None) -> cdp_turn.WakeRequest:
+    """Map exact frozen runner pins into unverified R3B2A claims, never proof.
+
+    Account/session/custody references must come from the separate native owner;
+    none can be inferred from registration, URL, DOM or signed operation scope.
+    This mapper also accepts offline negative fixtures, but cannot enroll them.
+    The conversation ID is only an expected route selector, not authentication.
+    """
+    if (type(registration) is not Registration or type(event) is not Event
+            or registration.evidence_type != "GITHUB_AUTHENTICATED"
+            or event.evidence_type != "GITHUB_AUTHENTICATED"
+            or event.source_sha != registration.source_sha):
+        raise DependencyHold("NATIVE_TURN_SCOPE_UNAVAILABLE")
+    if (type(request) is not DoorbellRequest
+            or request != DoorbellRequest.for_event(event, registration)):
+        raise DependencyHold("NATIVE_TURN_REQUEST_MISMATCH")
+    if type(origin) is not NativeOriginPins:
+        raise DependencyHold("NATIVE_ORIGIN_AUTHORITY_UNAVAILABLE")
+    if origin.binding != registration.binding or origin.marker != registration.marker:
+        raise DependencyHold("NATIVE_TURN_ORIGIN_MISMATCH")
+    pins = cdp_turn.OriginPins(
+        account_id=origin.account_id,
+        conversation_id=_CHAT.fullmatch(registration.binding.chat_url).group(1),
+        session_ref=origin.account_session_ref,
+        route_generation=registration.binding.generation,
+        registration_marker=registration.marker,
+        browser_custody_ref=origin.chrome_custody_ref,
+        chrome_profile_id=origin.chrome_profile_id,
+        context_ref=origin.context_ref, tab_ref=origin.tab_ref,
+        composer_ref=origin.composer_ref, cdp_endpoint=registration.binding.cdp_endpoint)
+    return cdp_turn.WakeRequest(
+        cdp_turn.TurnScope(pins, event.event_id, bytes_digest(request.canonical_bytes)),
+        request.canonical_bytes)
+
+
 @dataclass(frozen=True, repr=False)
 class AuthenticatedUserTurn:
     """Required remote-owner output shape; construction supplies NO authentication."""
@@ -290,28 +327,67 @@ class NativeOriginAuthority:
 
 @dataclass(frozen=True)
 class NativeTurnAuthority:
-    """The current remote owner has no authenticated USER-turn evidence API.
+    """Consume R3B2A rejection gates, with no enrolled private turn authority.
 
-    Next separately owned remote.cdp_doorbell API proposal:
-      preflight_authenticated_turn_ref(*, request: DoorbellRequest,
-        origin: NativeOriginPins, authorization: SignedWakeAuthorization) -> None
-      send_wake_authenticated(*, request: DoorbellRequest, origin: NativeOriginPins,
-        authorization: SignedWakeAuthorization, reservation_ref: str) -> AuthenticatedUserTurn
-    The remote owner must independently authenticate these inputs, recheck the
-    exclusive stable composer/owner/route after durable reservation, and return
-    exactly one real USER ID/message reference with provenance and request pins.
-    Preflight must prove this capability before reservation/staging. Send must
-    retain UNKNOWN on ambiguity and never synthesize IDs from text/time/hash.
-    Remote must own its API types; this module only describes the consumer pins.
-    No duck-typed method, callback or legacy WakeReceipt enables this boundary.
+    Complete claims still terminate in UNAVAILABLE. Missing durable reservation
+    evidence is a dependency before RESERVED, never a reason to create one to
+    satisfy the gate. No caller callback, token or typed fixture permits Send.
+    The remote adapter and actual private provider remain separate owner work.
     """
-    def preflight(self, request: DoorbellRequest) -> None:
+    def preflight(self, request: DoorbellRequest, *, registration: Registration | None = None,
+                  event: Event | None = None, origin: NativeOriginPins | None = None,
+                  evidence: cdp_turn.TurnEvidence | None = None, now: int | None = None) -> None:
+        if (type(self) is not NativeTurnAuthority or registration is None or event is None):
+            raise DependencyHold("DOORBELL_AUTHENTICATED_TURN_REF_UNAVAILABLE")
+        mapped = _turn_request(registration, event, request, origin)
+        try:
+            gate = cdp_turn.pre_send(mapped, evidence, now=now)
+        except Exception:
+            raise DependencyHold("DOORBELL_AUTHENTICATED_TURN_REF_UNAVAILABLE") from None
+        if (type(gate) is cdp_turn.GateResult
+                and gate.phase is cdp_turn.AttestationPhase.PRE_SEND
+                and gate.status is cdp_turn.GateStatus.HOLD
+                and type(gate.code) is cdp_turn.GateCode):
+            raise DependencyHold("DOORBELL_" + gate.code.value)
+        # UNAVAILABLE is not readiness, even with a native-looking signature.
+        # An unexpected/duck-typed result also cannot open this fixed boundary.
         raise DependencyHold("DOORBELL_AUTHENTICATED_TURN_REF_UNAVAILABLE")
 
     def authenticate(self, request: DoorbellRequest,
-                     candidate: AuthenticatedUserTurn | None) -> AuthenticatedUserTurn:
-        # Even a perfectly matching typed fixture is not an authenticated source.
+                     candidate: AuthenticatedUserTurn | None, *,
+                     registration: Registration | None = None, event: Event | None = None,
+                     origin: NativeOriginPins | None = None,
+                     evidence: cdp_turn.TurnEvidence | None = None,
+                     now: int | None = None) -> AuthenticatedUserTurn:
+        # A matching legacy receipt supplies none of the missing private proof.
+        NativeTurnAuthority.preflight(self, request, registration=registration, event=event,
+                                      origin=origin, evidence=evidence, now=now)
         raise DependencyHold("DOORBELL_AUTHENTICATED_TURN_REF_UNAVAILABLE")
+
+    def post_reservation_code(self, *, outcome: cdp_turn.SendOutcome,
+                              request: cdp_turn.WakeRequest | None = None,
+                              evidence: cdp_turn.TurnEvidence | None = None,
+                              user_turn: cdp_turn.ChatGPTUserTurnRef | None = None,
+                              now: int | None = None) -> str:
+        """Diagnostic for the existing RESERVED -> UNKNOWN_EFFECT transition only.
+
+        Absent claims stay absent; never invent account/turn/reservation proof.
+        R3B2A rejects an absent request for CLICK_REPORTED and independently
+        classifies ambiguity/timeout. Even NOT_ATTEMPTED cannot undo a durable
+        runner reservation or authorize replay through this post-effect path.
+        """
+        if type(self) is NativeTurnAuthority:
+            try:
+                gate = cdp_turn.post_send(request, evidence, outcome=outcome,
+                                          user_turn=user_turn, now=now)
+            except Exception:
+                return "ATTEMPT_UNPROVEN_NO_REPLAY"
+            if (type(gate) is cdp_turn.GateResult
+                    and gate.phase is cdp_turn.AttestationPhase.POST_SEND
+                    and gate.status is cdp_turn.GateStatus.UNKNOWN_EFFECT
+                    and type(gate.code) is cdp_turn.GateCode):
+                return "DOORBELL_" + gate.code.value
+        return "ATTEMPT_UNPROVEN_NO_REPLAY"
 
 
 class Sender(Protocol):
@@ -442,7 +518,7 @@ class NativeChrome9444:
 
 
 class NativeSender:
-    """R3B1 typed gates for the existing doorbell; deliberately no native effects.
+    """R3B2B rejection gates for the existing doorbell; no native effects.
 
     LocalChromeObserverAdapter.capture_origin only reads caller-enrolled identity;
     VerifiedNativeOriginEvidenceConsumer.is_complete_origin_attested is always
@@ -485,13 +561,19 @@ class NativeSender:
                 or authorization.event != event or authorization.registration != registration
                 or authorization.operations != ("resolve_claim_route", "deliver_wake")):
             raise DependencyHold("SIGNED_WAKE_AUTHORITY_UNAVAILABLE")
-        self._origin(registration)
-        self.require_turn_reference(DoorbellRequest.for_event(event, registration))
+        origin = NativeSender._origin(self, registration)
+        NativeSender.require_turn_reference(self, DoorbellRequest.for_event(event, registration),
+                                            event=event, origin=origin)
 
-    def require_turn_reference(self, request: DoorbellRequest) -> None:
+    def require_turn_reference(self, request: DoorbellRequest, *, event: Event | None = None,
+                               origin: NativeOriginPins | None = None,
+                               evidence: cdp_turn.TurnEvidence | None = None,
+                               now: int | None = None) -> None:
         if type(self.turn_authority) is not NativeTurnAuthority:
             raise DependencyHold("DOORBELL_AUTHENTICATED_TURN_REF_UNAVAILABLE")
-        NativeTurnAuthority.preflight(self.turn_authority, request)
+        NativeTurnAuthority.preflight(self.turn_authority, request,
+                                      registration=self.registration, event=event,
+                                      origin=origin, evidence=evidence, now=now)
 
     def authenticate_observation(self, event: Event, registration: Registration,
                                  observation: Observation) -> AuthenticatedUserTurn:
@@ -1077,11 +1159,22 @@ class Runner:
                     return self._finish(txn, data, record, "ACK", "CONSUMER_RECEIPT_RECORDED",
                                         proof={"consumer_receipt": handoff.receipt.to_dict(),
                                                "completed": handoff.completed.to_dict()})
+                except TimeoutError:
+                    code = (NativeTurnAuthority.post_reservation_code(self.sender.turn_authority,
+                            outcome=cdp_turn.SendOutcome.TRANSPORT_TIMEOUT) if native
+                            else "ATTEMPT_UNPROVEN_NO_REPLAY")
+                    return self._finish(txn, data, record, "UNKNOWN_EFFECT", code)
                 except (RuntimeHold, OrchestrationError) as exc:
+                    code = (NativeTurnAuthority.post_reservation_code(self.sender.turn_authority,
+                            outcome=cdp_turn.SendOutcome.CLICK_REPORTED) if native
+                            else _safe_code(exc, "ATTEMPT_UNPROVEN_NO_REPLAY"))
                     return self._finish(txn, data, record, "UNKNOWN_EFFECT",
-                                        _safe_code(exc, "ATTEMPT_UNPROVEN_NO_REPLAY"))
+                                        code)
                 except Exception:
-                    return self._finish(txn, data, record, "UNKNOWN_EFFECT", "ATTEMPT_UNPROVEN_NO_REPLAY")
+                    code = (NativeTurnAuthority.post_reservation_code(self.sender.turn_authority,
+                            outcome=cdp_turn.SendOutcome.CLICK_AMBIGUOUS) if native
+                            else "ATTEMPT_UNPROVEN_NO_REPLAY")
+                    return self._finish(txn, data, record, "UNKNOWN_EFFECT", code)
         except DependencyHold as exc:
             return Result("HOLD_DEPENDENCY", _safe_code(exc, "NATIVE_DEPENDENCY_UNAVAILABLE"), evidence)
         except RuntimeHold as exc:
