@@ -346,6 +346,14 @@ def test_mt01_fast_contract_preflight_prioritizes_affected_tests_without_replaci
         module.contract_preflight_targets(plan)
 
 
+def test_mt01_windows_ci_does_not_rerun_selected_files_in_preflight():
+    """V2's attested run is the sole broad selection; no duplicate pytest pass."""
+    workflow = (ROOT / ".github/workflows/ef02-tests.yml").read_text(encoding="utf-8")
+    assert "run: python .github/scripts/ef02-pr-ci-tests.py --fast-contract-preflight" not in workflow
+    assert workflow.count("name: MT-01 PR CI selective tests (full fallback)") == 1
+    assert "run: python .github/scripts/ef02-pr-ci-tests.py" in workflow
+
+
 def test_merge_queue_retains_same_approval_until_ci_finishes(gate):
     api = FakeGitHub(gate, ci="in_progress")
     first = gate.process(api, api.repo, _approval_event(gate))

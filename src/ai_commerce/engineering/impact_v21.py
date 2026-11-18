@@ -7,6 +7,7 @@ retain Human approval / immutable candidate provenance.
 from __future__ import annotations
 
 import ast
+from collections import deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -217,14 +218,20 @@ def _reverse_import_graph(root: Path, paths: Iterable[str]) -> tuple[dict[str, s
     return reverse, uncertain
 
 
-def _consumers(paths: Iterable[str], reverse: dict[str, set[str]]) -> set[str]:
+def _consumers(paths: Iterable[str], reverse: dict[str, set[str]],
+               *, max_depth: int | None = None) -> set[str]:
     result = set(paths)
-    pending = list(result)
+    # Breadth-first traversal is essential when a module is reachable by both
+    # short and long import routes: only its shortest depth can bound callers.
+    pending = deque((path, 0) for path in sorted(result))
     while pending:
-        for child in reverse.get(pending.pop(), ()):
+        path, depth = pending.popleft()
+        if max_depth is not None and depth >= max_depth:
+            continue
+        for child in sorted(reverse.get(path, ())):
             if child not in result:
                 result.add(child)
-                pending.append(child)
+                pending.append((child, depth + 1))
     return result
 
 
@@ -259,7 +266,18 @@ def select_impact(
     # Control files have finite reviewed test closure; do not fan out through
     # transitive Python imports of the verification infrastructure itself.
     component_changed = tuple(p for p in changed if p not in extra_controls)
-    affected = _consumers(component_changed, reverse)
+    # Two import edges cover the owner, its direct callers, and a caller's
+    # immediate integration contract. Further transitive imports are recorded
+    # for review, not silently promoted into mandatory test groups. Previously
+    # changes to creative/v2.py selected 50 unrelated A/BQ/WakeHub groups via
+    # generic CLI and test harnesses, timing out A03 R2 Issue #1075.
+    affected = _consumers(component_changed, reverse, max_depth=2)
+    deferred = _consumers(component_changed, reverse) - affected
+    changed_tests = {p for p in changed if p.startswith("tests/test_")}
+    direct_test_consumers = changed_tests | {
+        p for source in component_changed for p in reverse.get(source, ())
+        if p.startswith("tests/test_")
+    }
     group_tests = {t for g in groups for t in g.tests}
     registered = set(group_tests) | LEGACY_UNMAPPED
     selected_tests: set[str] = set()
@@ -269,7 +287,18 @@ def select_impact(
     related: set[str] = set()
     for group in groups:
         coverage = set(group.paths) | set(group.tests) | set(group.consumers) | set(group.contracts)
-        if affected & coverage or changed and set(changed) & coverage:
+        # A test importing a generic CLI/orchestrator is not by itself proof
+        # that this test's entire owner profile consumes the changed feature.
+        # Direct source/test changes and explicit test imports remain covered.
+        source_coverage = set(group.paths) | set(group.consumers) | set(group.contracts)
+        # Changed source explicitly named in a reviewed consumer map is still
+        # selected at any import depth via `changed & coverage` below. An
+        # indirect importer several hops away needs that explicit declaration
+        # before it becomes a mandatory suite; generic shared packages do not
+        # grant transitive verification authority to every downstream owner.
+        if (affected & source_coverage or
+                affected & set(group.tests) & direct_test_consumers or
+                set(changed) & coverage):
             selected_groups.add(group.name)
             selected_tests.update(group.tests)
             related.update(coverage)
@@ -320,6 +349,8 @@ def select_impact(
         p + ":UNRELATED_UNMAPPED_TEST" for p in pending
         if p not in changed_test_paths
     }
+    if deferred:
+        warnings.add(f"DEFERRED_TRANSITIVE_IMPORT_PATHS:{len(deferred)}")
     previous = set(previous_tests)
     for path in changed_test_paths & previous:
         if path not in registered:

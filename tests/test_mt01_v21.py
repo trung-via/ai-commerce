@@ -45,6 +45,82 @@ def test_a12_narrow_unaffected_by_unrelated_new_e04_test(tmp_path):
     assert "tests/test_a14_e04.py:UNRELATED_UNMAPPED_TEST" in polluted.inventory_warnings
 
 
+def test_indirect_test_harness_import_does_not_fan_out(tmp_path):
+    """A03 R2: a CLI test for another product must not select its whole suite."""
+    v2 = "src/ai_commerce/creative/v2.py"
+    init = "src/ai_commerce/creative/__init__.py"
+    cli = "src/ai_commerce/cli.py"
+    ui = "src/ai_commerce/ui/workflow.py"
+    product_test = "tests/test_product_cli.py"
+    mk(tmp_path, v2, "def new_export(): return 1\n")
+    mk(tmp_path, init, "from .v2 import new_export\n")
+    mk(tmp_path, cli, "from ai_commerce.creative import new_export\n")
+    mk(tmp_path, ui, "from ai_commerce.cli import main\n")
+    mk(tmp_path, "tests/test_creative.py")
+    mk(tmp_path, "tests/test_cli.py")
+    mk(tmp_path, product_test, "from ai_commerce.ui.workflow import main\n")
+    groups = (
+        group("creative", ("tests/test_creative.py",), (v2, init)),
+        group("cli", ("tests/test_cli.py",), (cli,)),
+        group("product", (product_test,), ("src/ai_commerce/product/demo.py",)),
+    )
+    impact = select_impact(root=tmp_path, changed_paths=(v2, init), groups=groups)
+    assert impact.mode == "AFFECTED"
+    assert impact.selected_groups == ("cli", "creative")
+    assert product_test not in impact.selected_tests
+    assert "DEFERRED_TRANSITIVE_IMPORT_PATHS:1" in impact.inventory_warnings
+
+
+def test_explicit_package_import_keeps_real_consumer_and_multihop(tmp_path):
+    """Narrowing implicit ancestor edges must retain genuine package users."""
+    init = "src/ai_commerce/creative/__init__.py"
+    bridge = "src/ai_commerce/bridge/store.py"
+    consumer = "src/ai_commerce/commerce/service.py"
+    mk(tmp_path, init, "class CreativeStore: pass\n")
+    mk(tmp_path, bridge, "from ai_commerce.creative import CreativeStore\n")
+    mk(tmp_path, consumer, "from ai_commerce.bridge.store import CreativeStore\n")
+    for p in ("tests/test_creative.py", "tests/test_bridge.py", "tests/test_commerce.py"):
+        mk(tmp_path, p)
+    groups = (
+        group("creative", ("tests/test_creative.py",), (init,)),
+        group("bridge", ("tests/test_bridge.py",), (bridge,)),
+        group("commerce", ("tests/test_commerce.py",), (consumer,)),
+    )
+    impact = select_impact(root=tmp_path, changed_paths=(init,), groups=groups)
+    assert impact.mode == "AFFECTED"
+    assert impact.selected_groups == ("bridge", "commerce", "creative")
+
+
+def test_distant_consumer_requires_explicit_changed_source_contract(tmp_path):
+    """Deep import reach alone is not proof; an exact source contract is."""
+    producer = "src/ai_commerce/opportunity/bridge/briefs.py"
+    middle_a = "src/ai_commerce/production_orchestration/orchestrator.py"
+    middle_b = "src/ai_commerce/wakehub_runtime/runner.py"
+    middle_c = "src/ai_commerce/wakehub_runtime/native_bridge.py"
+    distant = "src/ai_commerce/wakehub/cdp_native.py"
+    mk(tmp_path, producer, "class Brief: pass\n")
+    mk(tmp_path, middle_a, "from ai_commerce.opportunity.bridge.briefs import Brief\n")
+    mk(tmp_path, middle_b, "from ai_commerce.production_orchestration.orchestrator import Brief\n")
+    mk(tmp_path, middle_c, "from ai_commerce.wakehub_runtime.runner import Brief\n")
+    mk(tmp_path, distant, "from ai_commerce.wakehub_runtime.native_bridge import Brief\n")
+    for test in ("tests/test_brief.py", "tests/test_native.py"):
+        mk(tmp_path, test)
+    groups = (
+        group("brief", ("tests/test_brief.py",), (producer,)),
+        group("native", ("tests/test_native.py",), (distant,), consumers=(middle_c,)),
+    )
+    impact = select_impact(root=tmp_path, changed_paths=(producer,), groups=groups)
+    assert impact.selected_groups == ("brief",)
+    assert middle_c not in impact.affected_paths
+    assert "DEFERRED_TRANSITIVE_IMPORT_PATHS:2" in impact.inventory_warnings
+    # The owner can opt in to this exact upstream source dependency in the
+    # reviewed map; a generic transitive import cannot do so on its behalf.
+    reviewed = (groups[0], group("native", ("tests/test_native.py",), (distant,),
+                                 consumers=(middle_c, producer)))
+    explicit = select_impact(root=tmp_path, changed_paths=(producer,), groups=reviewed)
+    assert explicit.selected_groups == ("brief", "native")
+
+
 def test_new_e04_test_is_held_but_always_in_selected_plan(tmp_path):
     groups, _, _ = fixture(tmp_path)
     mk(tmp_path, "tests/test_a14_e04.py")
