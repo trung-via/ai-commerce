@@ -20,6 +20,7 @@ from .models import (
 from .reasoner import reframe_concept, revise_concept
 
 if TYPE_CHECKING:
+    from .live import InvocationAuthorization
     from .sidecars import CreativeSidecarStore
     from .store import CreativeStore
 
@@ -80,6 +81,57 @@ class UsageObservation:
 
     @classmethod
     def from_dict(cls, data: object) -> UsageObservation:
+        return cls(**exact_fields(data, {f.name for f in fields(cls)}))
+
+
+@dataclass(frozen=True, slots=True)
+class CLIExecutionObservation:
+    """Local process evidence, never supplied by the generated creative JSON.
+
+    Injected process runners are always TEST_ONLY_MOCK. Digests bind evidence
+    within the trusted operator/storage boundary; they are not signatures.
+    """
+
+    kind: Literal["AUTHENTICATED_CLI_PROBE", "TEST_ONLY_MOCK"]
+    executable_sha256: str
+    version: str
+    argv_sha256: str
+    probe_sha256: str
+    request_digest: str
+    configuration_digest: str
+    stdin_sha256: str
+    schema_sha256: str
+    effect: Literal["PROCESS_INVOKED", "UNKNOWN"]
+    stdout_sha256: str | None = None
+    stderr_sha256: str | None = None
+    session_sha256: str | None = None
+    observed_model: str = "UNKNOWN"
+    observed_effort: str = "UNKNOWN"
+    cli_thread_id: str | None = None
+    authorization_ref: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in ("AUTHENTICATED_CLI_PROBE", "TEST_ONLY_MOCK"):
+            raise CreativeValidationError("invalid CLI evidence kind")
+        if self.effect not in ("PROCESS_INVOKED", "UNKNOWN"):
+            raise CreativeValidationError("invalid CLI effect")
+        for name in ("executable_sha256", "argv_sha256", "probe_sha256", "request_digest",
+                     "configuration_digest", "stdin_sha256", "schema_sha256"):
+            require_digest(getattr(self, name))
+        for name in ("stdout_sha256", "stderr_sha256", "session_sha256"):
+            if getattr(self, name) is not None:
+                require_digest(getattr(self, name))
+        for name in ("version", "observed_model", "observed_effort"):
+            require_text(getattr(self, name), name)
+        for name in ("cli_thread_id", "authorization_ref"):
+            if getattr(self, name) is not None:
+                require_text(getattr(self, name), name)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {f.name: getattr(self, f.name) for f in fields(self)}
+
+    @classmethod
+    def from_dict(cls, data: object) -> CLIExecutionObservation:
         return cls(**exact_fields(data, {f.name for f in fields(cls)}))
 
 
@@ -177,6 +229,7 @@ class ReasoningResult:
     error_code: str | None = None
     message: str | None = None
     schema_version: str = "a03.reasoning-result.v2"
+    execution: CLIExecutionObservation | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.request, ReasoningRequest):
@@ -194,6 +247,23 @@ class ReasoningResult:
                 raise CreativeValidationError("expected typed model configuration")
             ModelConfiguration(**self.configuration.to_dict())
         UsageObservation.from_dict(self.usage.to_dict())
+        if self.execution is not None:
+            if not isinstance(self.execution, CLIExecutionObservation):
+                raise CreativeValidationError("expected typed CLI evidence")
+            CLIExecutionObservation.from_dict(self.execution.to_dict())
+            if (self.execution.request_digest != self.request.digest or self.configuration is None
+                    or self.execution.configuration_digest != sha256_bytes(canonical_bytes(self.configuration.to_dict()))):
+                raise CreativeValidationError("CLI evidence request/configuration mismatch")
+            if self.state == "OK":
+                expected_mode = "MODEL" if self.execution.kind == "AUTHENTICATED_CLI_PROBE" else "TEST_ONLY_MOCK"
+                if (self.execution.effect != "PROCESS_INVOKED" or self.observation.mode != expected_mode
+                        or self.execution.session_sha256 is None or self.execution.stdout_sha256 is None
+                        or self.execution.cli_thread_id is None or self.execution.authorization_ref is None
+                        or self.execution.observed_model != self.configuration.model
+                        or self.execution.observed_effort != self.configuration.effort):
+                    raise CreativeValidationError("unbound CLI completion")
+                if expected_mode == "MODEL" and self.observation.model != self.execution.observed_model:
+                    raise CreativeValidationError("CLI observation identity mismatch")
         for name, expected in (("drafts", ConceptDraft), ("edits", ConceptChange)):
             value = getattr(self, name)
             if not isinstance(value, (list, tuple)) or any(not isinstance(v, expected) for v in value):
@@ -256,6 +326,7 @@ class ReasoningResult:
             "critique": self.critique, "observation": self.observation.to_dict(), "usage": self.usage.to_dict(),
             "configuration": self.configuration.to_dict() if self.configuration else None,
             "provider_request_id": self.provider_request_id, "error_code": self.error_code, "message": self.message,
+            **({"execution": self.execution.to_dict()} if self.execution is not None else {}),
         }
 
     @property
@@ -264,7 +335,7 @@ class ReasoningResult:
 
     @classmethod
     def from_dict(cls, data: object) -> ReasoningResult:
-        value = exact_fields(data, {f.name for f in fields(cls)})
+        value = exact_fields(data, {f.name for f in fields(cls)} - {"execution"}, {"execution"})
         value["request"] = ReasoningRequest.from_dict(value["request"])
         for name, expected in (("drafts", ConceptDraft), ("edits", ConceptChange)):
             if not isinstance(value[name], list):
@@ -274,6 +345,8 @@ class ReasoningResult:
         value["usage"] = UsageObservation.from_dict(value["usage"])
         if value["configuration"] is not None:
             value["configuration"] = ModelConfiguration.from_dict(value["configuration"])
+        if value.get("execution") is not None:
+            value["execution"] = CLIExecutionObservation.from_dict(value["execution"])
         return cls(**value)
 
     def concepts(self) -> tuple[ConceptRecord, ...]:
@@ -451,7 +524,10 @@ def inference_failure(result: ReasoningResult) -> str | None:
     config, observed = result.configuration, result.observation
     if config is None or "UNKNOWN" in (config.provider, config.model):
         return "NO_MODEL_CONFIGURED"
-    if observed.mode == "UNKNOWN" or observed.provider == "UNKNOWN" or result.provider_request_id is None:
+    cli_bound = (result.execution is not None and result.execution.effect == "PROCESS_INVOKED"
+                 and result.execution.cli_thread_id is not None and result.execution.session_sha256 is not None)
+    if (observed.mode == "UNKNOWN" or observed.provider == "UNKNOWN"
+            or (result.provider_request_id is None and not cli_bound)):
         return "UNBOUND_PROVIDER"
     if observed.mode == "TEST_ONLY_MOCK":
         return None if observed.model == "UNKNOWN" else "INVALID_MOCK_IDENTITY"
@@ -459,6 +535,8 @@ def inference_failure(result: ReasoningResult) -> str | None:
         return "UNBOUND_PROVIDER"
     if (observed.provider, observed.model) != (config.provider, config.model):
         return "PROVIDER_IDENTITY_MISMATCH"
+    if config.effort is not None and (result.execution is None or result.execution.observed_effort != config.effort):
+        return "CONFIGURATION_MISMATCH"
     return None
 
 
@@ -571,14 +649,13 @@ class A03CreativeStageResult:
 
 
 def run_creative_stage(job: A03CreativeJob, store: CreativeStore | CreativeSidecarStore,
-                       reasoner: CreativeReasonerV2 | None = None) -> A03CreativeStageResult:
+                       reasoner: CreativeReasonerV2 | None = None, *,
+                       authorization: InvocationAuthorization | None = None) -> A03CreativeStageResult:
     """Invoke once, commit native artifacts, then return their verified receipt.
 
-    R0 supplies no transport and never authorizes network/spend. An injected
-    LiveCreativeReasoner is snapshotted with offline authorization; other injected
-    reasoners are trusted caller code. R1 can extend that existing adapter's
-    authorization boundary without adding a connector or changing these wire
-    contracts. R2 may orchestrate explicit attempts outside this bounded owner.
+    Only an explicit trusted runner-side authorization reaches the live adapter.
+    It cannot come from the serialized job or be borrowed from the adapter's own
+    grant. Other injected reasoners remain trusted caller code.
     Existing A10 -> A03 intake/store remains INTAKE_COMPLETE, not model invocation.
 
     Completed attempts are idempotent. A reserved attempt without a terminal
@@ -590,6 +667,11 @@ def run_creative_stage(job: A03CreativeJob, store: CreativeStore | CreativeSidec
 
     if not isinstance(job, A03CreativeJob):
         raise CreativeValidationError("expected A03CreativeJob")
+    if authorization is not None:
+        if not isinstance(authorization, InvocationAuthorization):
+            raise CreativeValidationError("expected runner-side InvocationAuthorization")
+        authorization = InvocationAuthorization(authorization.allow_network, authorization.allow_spend,
+                                                authorization.authorization_ref)
     job = A03CreativeJob.from_dict(job.to_dict())
     sidecars = store if isinstance(store, CreativeSidecarStore) else CreativeSidecarStore(store)
     sidecars.creative.save_brief(job.request.brief)
@@ -603,9 +685,9 @@ def run_creative_stage(job: A03CreativeJob, store: CreativeStore | CreativeSidec
         result = ReasoningResult(job.request, "ERROR", error_code="CONFIGURATION_MISMATCH",
                                  message="Injected adapter does not match requested job configuration")
     elif isinstance(reasoner, LiveCreativeReasoner):
-        # Capture the existing adapter before any client callback. R0 cannot
-        # adopt an authorization supplied for a different, live call path.
-        reasoner = LiveCreativeReasoner(reasoner.config, reasoner.client, authorization=InvocationAuthorization())
+        # Snapshot the explicit runner grant before any client callback.
+        reasoner = LiveCreativeReasoner(reasoner.config, reasoner.client,
+                                       authorization=authorization or InvocationAuthorization())
         result = reason_v2(job.request, reasoner)
     else:
         result = reason_v2(job.request, reasoner)
