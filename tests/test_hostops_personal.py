@@ -2,6 +2,7 @@
 import builtins
 import importlib.util
 import copy
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path, PureWindowsPath
@@ -9,7 +10,7 @@ import re
 import stat
 import subprocess
 from types import SimpleNamespace
-from unittest.mock import Mock, mock_open, patch
+from unittest.mock import Mock, call, mock_open, patch
 import tempfile
 import unittest
 
@@ -2100,6 +2101,273 @@ const assert = require('assert');
         self.native.assert_not_called()
 
 
+class PersonalClean9444AutostartTests(unittest.TestCase):
+    def setUp(self):
+        from ai_commerce.remote import chrome_acquisition, local_completion_handoff, local_wake_entry
+
+        self.acq = chrome_acquisition
+        self.handoff = local_completion_handoff
+        self.wake = local_wake_entry
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.local = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        self.sid = "S-1-5-21-101-202-303-1001"
+        self.op = "install_clean_9444_autostart"
+        self.event = event("write", self.op, {})
+        self.sha = "a" * 40
+        self.env = {
+            "CI": "true", "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "issue_comment",
+            "GITHUB_REPOSITORY": hostops.REPO, "GITHUB_REPOSITORY_OWNER": hostops.OWNER,
+            "GITHUB_ACTOR": hostops.OWNER, "GITHUB_TRIGGERING_ACTOR": hostops.OWNER,
+            "GITHUB_RUN_ATTEMPT": "1", "GITHUB_REF": "refs/heads/main",
+            "GITHUB_WORKFLOW_REF": hostops.REPO + "/.github/workflows/issue-ingress.yml@refs/heads/main",
+            "RUNNER_ENVIRONMENT": "self-hosted", "RUNNER_NAME": "AI-COMMERCE-HOSTOPS-01",
+            "GITHUB_SHA": self.sha, "GITHUB_WORKFLOW_SHA": self.sha,
+            "GITHUB_WORKSPACE": str(self.local / "runner" / "_work"),
+            "GITHUB_EVENT_PATH": str(self.local / "event.json"),
+        }
+        self.mock(hostops, "os", new=SimpleNamespace(name="nt", environ=self.env, walk=hostops.os.walk))
+        self.session = self.mock(self.acq, "_interactive_session", return_value=7)
+        self.mock(self.wake, "_windows_process_sid", return_value=self.sid)
+        self.mock(self.acq, "_native_local_app_data", return_value=self.local)
+        self.real_source = hostops._persistent_clean_source
+        self.source = self.mock(hostops, "_persistent_clean_source", return_value=self.local / "stable.py")
+        self.runtime = (self.local / "pythonw.exe", self.source.return_value)
+        self.real_runtime = self.acq._managed_clean_runtime
+        self.real_task = self.acq._clean_task
+        self.mock(self.acq, "_managed_clean_runtime", return_value=self.runtime)
+        self.target = self.acq._ChromeTarget(self.local / "chrome.exe", self.local / "WakeHub-9444-Clean",
+                                            "Default", "http://127.0.0.1:9444", 9444)
+        self.mock(self.acq, "_clean_target", return_value=(self.target, (self.target.executable,)))
+        self.inventory = self.mock(self.acq, "_clean_inventory", return_value=("ABSENT", None))
+        self.mock(self.acq, "_verify_google_chrome")
+        self.mock(self.acq, "_clean_require_unlocked")
+        self.launch_pending = self.mock(self.acq, "_clean_launch_pending", return_value=False)
+        self.pending = set()
+        self.mock(self.acq, "_clean_pending", side_effect=self.pending.__contains__)
+        self.record = self.mock(self.acq, "_clean_record_pending", side_effect=self.record_pending)
+        self.task = self.mock(self.acq, "_clean_task", return_value="ALREADY_ENROLLED")
+        self.probe = self.mock(self.acq, "_probe_cdp")
+        self.spawn = self.mock(self.acq.subprocess, "Popen", side_effect=AssertionError("direct spawn"))
+        self.native_run = self.mock(self.acq.subprocess, "run", side_effect=AssertionError("native subprocess"))
+        self.slot = False
+        self.mock(self.acq, "_clean_supervisor_slot", new=self.supervisor_slot)
+
+    def mock(self, obj, name, **kwargs):
+        return self.stack.enter_context(patch.object(obj, name, **kwargs))
+
+    @contextmanager
+    def supervisor_slot(self):
+        self.assertFalse(self.slot)
+        self.slot = True
+        try:
+            yield
+        finally:
+            self.slot = False
+
+    def record_pending(self, name, pending):
+        (self.pending.add if pending else self.pending.remove)(name)
+
+    def invoke(self, payload=None):
+        event_file = Path(self.env["GITHUB_EVENT_PATH"])
+        event_file.write_text(json.dumps(payload or self.event), encoding="utf-8")
+        output = self.local / "receipt.json"
+        with patch.object(hostops.sys, "argv", ["personal", "--mode", "write", "--output", str(output)]):
+            code = hostops.main()
+        result = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(code, 0 if result["status"] == "OBSERVED" else 2)
+        self.assertLessEqual(result.keys(), hostops.PERSONAL_PUBLIC_FIELDS)
+        for private in (str(self.local), self.sid, "CommandLine", "RunEx", "PRIVATE"):
+            self.assertNotIn(private, json.dumps(result))
+        self.spawn.assert_not_called()
+        self.native_run.assert_not_called()
+        return result
+
+    def test_exact_grant_and_parameters_required_before_any_native_call(self):
+        read = event("read", self.op, {})
+        with self.assertRaisesRegex(hostops.Denied, "READ_OPERATION_DENIED"):
+            hostops.parse_event(read, "read")
+        request = hostops.parse_event(self.event, "write")
+        self.assertEqual(hostops.perform(request)["code"], "PROTECTED_HOSTOPS_ONLY")
+        for payload, expected in (
+            (event("write", self.op, {}, comment="APPROVE WRITE #17 "), "EXACT_WRITE_APPROVAL_REQUIRED"),
+            (event("write", self.op, {"port": 9444}), "INVALID_PARAMETERS"),
+            (event("write", self.op, None), "INVALID_REQUEST"),
+        ):
+            self.assertEqual(self.invoke(payload)["code"], expected)
+        for section in ("issue", "comment", "sender"):
+            payload = copy.deepcopy(self.event)
+            user = payload[section] if section == "sender" else payload[section]["user"]
+            user["login"] = "another-account"
+            self.assertEqual(self.invoke(payload)["status"], "BLOCKED")
+        self.session.assert_not_called()
+        self.task.assert_not_called()
+
+    def test_source_executor_and_unprotected_or_replayed_events_have_no_effect(self):
+        for name, value in (("RUNNER_NAME", "AI-COMMERCE-EF02-01"), ("GITHUB_EVENT_NAME", "pull_request"),
+                            ("GITHUB_RUN_ATTEMPT", "2"), ("GITHUB_WORKFLOW_SHA", "b" * 40),
+                            ("AI_COMMERCE_GIT_GUARD_ACTIVE", "1")):
+            with patch.dict(self.env, {name: value}):
+                self.assertEqual(self.invoke()["code"], "PROTECTED_HOSTOPS_ONLY")
+        self.session.assert_not_called()
+        self.task.assert_not_called()
+
+    def test_session_owner_profile_and_transient_runtime_fail_before_task_access(self):
+        for owner, name, result in (
+            (self.acq, "_interactive_session", 0),
+            (self.wake, "_windows_process_sid", "S-1-5-18"),
+        ):
+            with patch.object(owner, name, return_value=result):
+                self.assertEqual(self.invoke()["code"], "ENROLLMENT_IDENTITY_UNPROVEN")
+        for owner, name, error, expected in (
+            (self.acq, "_interactive_session", self.acq.AcquisitionBlocked, "ELEVATED_CHROME_DISALLOWED"),
+            (self.acq, "_interactive_session", self.acq.AcquisitionBlocked, "WINDOWS_INTERACTIVE_REQUIRED"),
+            (hostops, "_persistent_clean_source", hostops.Denied, "LOCAL_MAIN_SYNC_REQUIRED"),
+            (self.acq, "_managed_clean_runtime", self.acq._Clean9444Hold, "AUTOSTART_RUNTIME_UNAVAILABLE"),
+            (self.acq, "_clean_target", self.acq._Clean9444Hold, "OPERATOR_OWNERSHIP_UNPROVEN"),
+            (self.acq, "_clean_inventory", self.acq._Clean9444Hold, "FOREIGN_PORT_OWNER"),
+            (self.acq, "_clean_inventory", self.acq._Clean9444Hold, "BROWSER_OWNERSHIP_UNPROVEN"),
+        ):
+            with patch.object(owner, name, side_effect=error(expected)):
+                self.assertEqual(self.invoke()["code"], expected)
+        self.task.assert_not_called()
+        self.record.assert_not_called()
+        self.probe.assert_not_called()
+
+    def test_pending_already_conflict_and_unavailable_are_no_op(self):
+        for code, expected in (("ALREADY_ENROLLED", "INSTALLED_BUT_NOT_RUNNING"),
+                               ("AUTOSTART_CONFLICT", "AUTOSTART_CONFLICT"),
+                               ("AUTOSTART_RUNTIME_UNAVAILABLE", "AUTOSTART_RUNTIME_UNAVAILABLE"),
+                               ("PRIVATE path and SID", "AUTOSTART_RUNTIME_UNAVAILABLE")):
+            self.task.return_value = code
+            self.task.reset_mock()
+            self.assertEqual(self.invoke()["code"], expected)
+            self.task.assert_called_once_with(self.sid, install=False, runtime=self.runtime)
+        self.pending.add("AutostartPending")
+        self.task.reset_mock()
+        self.assertEqual(self.invoke()["code"], "UNKNOWN_EFFECT")
+        self.task.assert_not_called()
+        self.record.assert_not_called()
+
+    def test_create_then_independent_readback_before_one_owner_session_start(self):
+        responses = iter(("AUTOSTART_NOT_ENROLLED", "ENROLLED", "ALREADY_ENROLLED", "START_REQUESTED"))
+
+        def scheduler(sid, *, install, runtime, start_session=None):
+            if start_session is None:
+                self.assertEqual(self.slot, self.task.call_count != 1)
+            else:
+                self.assertFalse(self.slot)
+                self.assertEqual((sid, start_session, runtime), (self.sid, 7, self.runtime))
+                self.assertIn("AutostartPending", self.pending)
+                self.inventory.return_value = ("OWNED", (5, self.target.executable, "created", "PRIVATE"))
+            return next(responses)
+
+        self.task.side_effect = scheduler
+        receipt = self.invoke()
+        self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", "CDP_VERIFIED"))
+        self.assertIs(receipt["devtools_protocol_ok"], True)
+        for key in ("exact_chat_verified", "wake_sent", "arbitrary_shell_enabled"):
+            self.assertIs(receipt[key], False)
+        self.assertEqual(self.task.call_args_list, [
+            call(self.sid, install=False, runtime=self.runtime), call(self.sid, install=True, runtime=self.runtime),
+            call(self.sid, install=False, runtime=self.runtime),
+            call(self.sid, install=False, runtime=self.runtime, start_session=7),
+        ])
+        self.probe.assert_called_once_with(self.target)
+        self.assertFalse(self.pending)
+
+    def test_uncertain_registration_or_first_start_persists_and_never_replays(self):
+        for responses in (("AUTOSTART_NOT_ENROLLED", "UNKNOWN_EFFECT"),
+                          ("AUTOSTART_NOT_ENROLLED", "ENROLLED", "AUTOSTART_CONFLICT"),
+                          ("AUTOSTART_NOT_ENROLLED", "ENROLLED", "ALREADY_ENROLLED", "UNKNOWN_EFFECT")):
+            self.pending.clear()
+            self.task.reset_mock()
+            self.task.side_effect = responses
+            self.assertEqual(self.invoke()["code"], "UNKNOWN_EFFECT")
+            self.assertEqual(self.task.call_count, len(responses))
+            self.assertEqual(self.pending, {"AutostartPending"})
+            self.assertEqual(self.invoke()["code"], "UNKNOWN_EFFECT")
+            self.assertEqual(self.task.call_count, len(responses))
+        self.probe.assert_not_called()
+
+    def test_persistent_source_refuses_stale_dirty_reparse_and_byte_mismatch(self):
+        root = self.local / "persistent"
+        (root / ".git").mkdir(parents=True)
+        workflow = Path(self.env["GITHUB_WORKSPACE"])
+        source, peer = (checkout / hostops._ACQUISITION_SOURCE for checkout in (root, workflow))
+        for path in (source, peer):
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b"same reviewed source")
+        git = {
+            ("rev-parse", "--show-toplevel"): str(root),
+            ("rev-parse", "--abbrev-ref", "HEAD"): "main",
+            ("config", "--get", "remote.origin.url"): "https://github.com/trung-via/ai-commerce.git",
+            ("rev-parse", "HEAD", "refs/remotes/origin/main"): f"{self.sha}\n{self.sha}\n",
+            ("status", "--porcelain=v1", "--untracked-files=all"): "",
+            ("ls-files", "-v", "-z", "--", "src"): "H " + hostops._ACQUISITION_SOURCE.as_posix() + "\0",
+        }
+        real_source = self.real_source
+        with patch.dict(hostops.ROOTS, workspace=root), \
+                patch.object(hostops, "__file__", workflow / "src/ai_commerce/hostops_v3/personal.py"), \
+                patch.object(self.acq, "__file__", peer), \
+                patch.object(self.handoff, "_private_identity", return_value=self.sid), \
+                patch.object(hostops, "_git", side_effect=lambda *args: git[args]):
+            self.assertEqual(real_source(self.acq, self.sha, self.sid), source)
+            for args, bad in ((("rev-parse", "--abbrev-ref", "HEAD"), "other"),
+                              (("rev-parse", "HEAD", "refs/remotes/origin/main"), "old\nold\n"),
+                              (("status", "--porcelain=v1", "--untracked-files=all"), " M README.md")):
+                with patch.dict(git, {args: bad}), self.assertRaisesRegex(hostops.Denied, "LOCAL_MAIN_SYNC_REQUIRED"):
+                    real_source(self.acq, self.sha, self.sid)
+            with patch.object(hostops, "_is_reparse", side_effect=lambda path: path == source):
+                with self.assertRaisesRegex(hostops.Denied, "LOCAL_MAIN_SYNC_REQUIRED"):
+                    real_source(self.acq, self.sha, self.sid)
+            source.write_bytes(b"index-hidden edit")
+            with self.assertRaisesRegex(hostops.Denied, "LOCAL_MAIN_SYNC_REQUIRED"):
+                real_source(self.acq, self.sha, self.sid)
+
+    def test_runtime_rejects_runner_python_and_uses_only_signed_owner_install(self):
+        base = self.local / "Programs" / "Python" / "Python312"
+        site = base / "Lib" / "site-packages"
+        site.mkdir(parents=True)
+        python, pythonw, dll = (base / name for name in ("python.exe", "pythonw.exe", "python312.dll"))
+        source = self.local / "persistent" / hostops._ACQUISITION_SOURCE
+        source.parent.mkdir(parents=True)
+        for path in (python, pythonw, dll, source):
+            path.touch()
+        runtime = SimpleNamespace(executable=str(self.local / "runner" / "python.exe"), base_prefix=str(base),
+                                  version_info=SimpleNamespace(major=3, minor=12))
+        with patch.object(self.acq, "sys", runtime), \
+                patch.object(self.handoff, "_private_identity", return_value=self.sid), \
+                patch.object(self.acq, "_powershell", return_value=self.local / "powershell.exe"):
+            with self.assertRaisesRegex(self.acq._Clean9444Hold, "AUTOSTART_RUNTIME_UNAVAILABLE"):
+                self.real_runtime(self.local, self.sid, source)
+            self.native_run.assert_not_called()
+            runtime.executable = str(python)
+            self.native_run.side_effect = [
+                SimpleNamespace(returncode=0, stdout=b"SIGNED_CPYTHON"), SimpleNamespace(returncode=0),
+            ]
+            self.assertEqual(self.real_runtime(self.local, self.sid, source), (pythonw, source))
+            signed, smoke = self.native_run.call_args_list
+            self.assertEqual(signed.kwargs["env"]["AI_COMMERCE_PYTHONW"], str(pythonw))
+            self.assertEqual(smoke.args[0][:5], [str(python), "-I", "-B", "-S", "-c"])
+            self.assertEqual(smoke.args[0][-1], "check")
+            self.assertEqual(smoke.kwargs["cwd"], source.parents[2])
+
+            self.native_run.side_effect = None
+            self.native_run.return_value = SimpleNamespace(returncode=0, stdout=b"START_REQUESTED")
+            self.assertEqual(self.real_task(self.sid, install=False, runtime=(pythonw, source),
+                                            start_session=7), "START_REQUESTED")
+            task_call = self.native_run.call_args
+            script, env = task_call.args[0][-1], task_call.kwargs["env"]
+            self.assertEqual(env["AI_COMMERCE_TASK_PYTHON"], str(pythonw))
+            self.assertEqual(env["AI_COMMERCE_TASK_DIRECTORY"], str(source.parents[2]))
+            self.assertEqual(env["AI_COMMERCE_TASK_START_SESSION"], "7")
+            self.assertEqual(env["AI_COMMERCE_TASK_INSTALL"], "0")
+            self.assertIn(".RunEx($null, 12, $session, $sid)", script)
+            self.assertIn(".RegisterTaskDefinition($name, $expected, 34, $sid, $null, 3, $sddl)", script)
+            self.assertNotRegex(script, r"Stop-Process|\.Stop\(|DeleteTask|TerminateProcess")
+
+
 class PersonalCdp9444TopologyTests(unittest.TestCase):
     """Offline fixtures only: no real CIM, token, signature, browser or sends."""
 
@@ -2478,6 +2746,28 @@ class PersonalCdp9444TopologyTests(unittest.TestCase):
         self.signature.assert_called_once()
         self.protocol.assert_called_once_with(self.signature.call_args.args[0])
         self.assert_public(result)
+
+    def test_fixed_clean_profile_is_attested_without_legacy_config(self):
+        self.config.unlink()
+        clean = self.root / "WakeHub-9444-Clean"
+        (clean / "Default").mkdir(parents=True)
+        binary = self.local / "Google" / "Chrome" / "Application" / "chrome.exe"
+        binary.parent.mkdir(parents=True)
+        binary.touch()
+        self.proc.update(ExecutablePath=str(binary), CommandLine=json.dumps([
+            str(binary), "--user-data-dir=" + str(clean), "--remote-debugging-port=9444",
+        ]))
+        with patch.object(self.acquisition, "_native_known_folder", return_value=self.local), \
+                patch.object(self.acquisition, "load_environment") as legacy:
+            receipt = self.observe()
+            self.assertEqual(receipt["code"], "CDP_PROTOCOL_HEALTHY")
+            self.assert_public(receipt)
+            legacy.assert_not_called()
+            self.assertEqual(self.protocol.call_args.args[0].user_data_dir, clean)
+            self.protocol.reset_mock()
+            self.proc["SessionId"] += 1
+            self.assertEqual(self.observe()["code"], "UNTRUSTED_OWNER")
+            self.protocol.assert_not_called()
 
     def test_real_strict_protocol_checks_browser_protocol_and_websocket_without_attaching(self):
         valid = {"Browser": "Chrome/153.0", "Protocol-Version": "1.3",
