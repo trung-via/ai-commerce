@@ -2749,6 +2749,11 @@ class PersonalCdp9444TopologyTests(unittest.TestCase):
 
     def test_fixed_clean_profile_is_attested_without_legacy_config(self):
         self.config.unlink()
+        # Windows temp aliases must not split the attested known-folder root
+        # from the canonical profile and browser paths in this test fixture.
+        self.local = self.local.resolve(strict=True)
+        self.local_identity.return_value = self.local
+        self.root = self.local / "AI-Commerce"
         clean = self.root / "WakeHub-9444-Clean"
         (clean / "Default").mkdir(parents=True)
         # Windows realpaths may differ from the spelling used to create a fixture.
