@@ -175,7 +175,8 @@ class FakeGitHub:
             ]
             return {"artifacts": artifacts if self.receipt_ok else []}
         if path == f"/repos/{self.repo}/pulls?state=open&per_page=100":
-            return [{"number": self.pr, "head": {"sha": self.head}}]
+            return [{"number": self.pr, "state": "open",
+                     "base": {"ref": "main"}, "head": {"sha": self.head}}]
         raise AssertionError(f"Unexpected {method} {path}")
 
 
@@ -283,6 +284,47 @@ def _two_independent_owner_groups(gate, monkeypatch, *, shared_tests=False):
                   ("src/ai_commerce/creative/independent.py",)),
     ))
 
+
+
+def test_main_push_automatically_merges_prior_brain_pass_with_reusable_windows_ci(gate, monkeypatch):
+    """A prior PASS is not retested just because an independent PR merged."""
+    _two_independent_owner_groups(gate, monkeypatch)
+    api = _MainAdvanceGitHub(gate, drift_path="src/ai_commerce/creative/independent.py")
+    event = {"ref": "refs/heads/main", "after": api.live_main}
+    result = gate.process(api, api.repo, event)
+    assert result[0]["status"] == "MERGED"
+    assert result[0]["ci_run"] == 200
+    assert api.writes == [{"sha": api.head, "merge_method": "merge"}]
+
+
+def test_main_push_never_bypasses_failed_ci_or_overlapping_main_change(gate, monkeypatch):
+    _two_independent_owner_groups(gate, monkeypatch)
+    event = {"ref": "refs/heads/main", "after": _MainAdvanceGitHub.live_main}
+    failed = _MainAdvanceGitHub(gate, drift_path="src/ai_commerce/creative/independent.py")
+    failed.latest_failed = True
+    assert gate.process(failed, failed.repo, event)[0]["status"] == "WAIT_FIX"
+    assert failed.writes == []
+    overlapping = _MainAdvanceGitHub(gate, drift_path="src/ai_commerce/product/identity.py")
+    assert gate.process(overlapping, overlapping.repo, event)[0]["status"] == "WAIT_REBASE"
+    assert overlapping.writes == []
+
+
+def test_main_push_ignores_stale_or_unrelated_events(gate):
+    api = FakeGitHub(gate, ci="completed")
+    for event in (
+        {"ref": "refs/heads/dev", "after": api.base},
+        {"ref": "refs/heads/main", "after": "f" * 40},
+        {"ref": "refs/heads/main", "after": "invalid"},
+    ):
+        assert gate.candidates(api, api.repo, event) == []
+    assert api.writes == []
+
+
+def test_brain_pass_workflow_wakes_on_main_push_without_new_ci():
+    workflow = (ROOT / ".github/workflows/brain-pass-auto-merge.yml").read_text(encoding="utf-8")
+    assert "push:\\n    branches: [main]".replace("\\n", "\n") in workflow
+    assert "github.event_name == 'push' && github.ref == 'refs/heads/main'" in workflow
+    assert "Verify pinned Brain PASS and exact-head independent CI before merge" in workflow
 
 def test_gate_reuses_old_ci_for_proven_noninterfering_base_advance(gate, monkeypatch):
     _two_independent_owner_groups(gate, monkeypatch)
