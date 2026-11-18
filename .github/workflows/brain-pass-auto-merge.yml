@@ -35,7 +35,7 @@ permissions:
 # The trusted merge script independently checks current main, PR HEAD/base,
 # canonical Brain PASS and exact Windows CI before any write.
 concurrency:
-  group: ai-commerce-brain-pass-merge-${{ github.repository }}-${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha || github.sha || github.run_id }}
+  group: ai-commerce-brain-pass-merge-${{ github.repository }}-${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha || github.run_id }}
   cancel-in-progress: false
 
 jobs:
