@@ -24,6 +24,19 @@ def _repo(tmp_path):
     return repo
 
 
+def test_default_verification_budget_is_90_minutes_and_cli_matches_runner():
+    from ai_commerce.engineering.cli import build_parser
+    from ai_commerce.engineering.runner import (DEFAULT_ACTION_TIMEOUT_SECONDS,
+                                                 DEFAULT_VERIFY_TIMEOUT_SECONDS)
+
+    assert DEFAULT_VERIFY_TIMEOUT_SECONDS == 5400
+    assert DEFAULT_ACTION_TIMEOUT_SECONDS == 7200 + DEFAULT_VERIFY_TIMEOUT_SECONDS
+    parser = build_parser()
+    assert parser.get_default("timeout_seconds") == 7200
+    assert parser.get_default("verify_timeout_seconds") == DEFAULT_VERIFY_TIMEOUT_SECONDS
+    assert parser.get_default("action_timeout_seconds") == DEFAULT_ACTION_TIMEOUT_SECONDS
+
+
 def _fake_binary(tmp_path, name, code):
     """Create a test-only CLI runnable through subprocess on Windows and POSIX.
 
