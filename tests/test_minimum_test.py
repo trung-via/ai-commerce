@@ -1878,6 +1878,68 @@ def test_reviewed_map_contains_exact_real_paths_and_all_current_python_test_fami
     assert "a13" in {g.name for g in real_tree.groups}
 
 
+@pytest.mark.parametrize("include_test", [False, True], ids=["source", "source-and-test"])
+def test_ef02_wake_remote_package_owner_proves_real_doorbell_impact(real_tree, include_test):
+    from ai_commerce.engineering.impact_v21 import select_impact
+
+    package_init = "src/ai_commerce/remote/__init__.py"
+    owners = [g for g in real_tree.groups
+              if package_init in (*g.paths, *g.tests, *g.consumers, *g.contracts)]
+    assert [g.name for g in owners] == ["ef02-wake"]
+    assert owners[0].paths.count(package_init) == 1
+    changed = ["src/ai_commerce/remote/cdp_doorbell.py"]
+    if include_test:
+        changed.append("tests/test_ef02_cdp_doorbell.py")
+    assert set(changed) <= real_tree.files.keys()
+    impact = select_impact(root=ROOT, changed_paths=changed, groups=real_tree.groups,
+                           base_sha=real_tree.sha)
+    assert impact.runnable, impact.as_dict()
+    assert not impact.missing_mapping, impact.missing_mapping
+    assert "ef02-wake" in impact.selected_groups
+    assert package_init in impact.affected_paths
+    assert set(changed) <= set(impact.affected_paths)
+    # Include the fixture's validated persisted owners, not just approved_groups().
+    assert set(impact.selected_groups) & real_tree.persisted_names
+    reviewed = {p for g in real_tree.groups
+                for p in (*g.paths, *g.tests, *g.consumers, *g.contracts)}
+    unowned = set(impact.affected_paths) - reviewed
+    assert not unowned, sorted(unowned)
+
+
+@pytest.mark.parametrize("missing_init_owner", [False, True], ids=["reviewed", "unregistered-consumer"])
+def test_ef02_doorbell_acceptance_requires_remote_package_owner(
+        real_tree, monkeypatch, missing_init_owner):
+    from ai_commerce.engineering import impact_v21
+    from ai_commerce.remote import validation
+
+    package_init = "src/ai_commerce/remote/__init__.py"
+    groups = real_tree.groups
+    if missing_init_owner:
+        groups = tuple(replace(g, paths=tuple(p for p in g.paths if p != package_init))
+                       if g.name == "ef02-wake" else g for g in groups)
+    # Use the complete checked-out tree and already validated baseline owners;
+    # keep the real import graph and acceptance closure gate for both controls.
+    monkeypatch.setattr(validation, "_pinned_source_tree", lambda *args, **kwargs: ROOT)
+    monkeypatch.setattr(validation, "approved_groups", lambda: groups)
+    monkeypatch.setattr(impact_v21, "load_baseline_component_owner_records", lambda **kwargs: ())
+    batch = {"source_sha": real_tree.sha, "actions": [{
+        "action_id": "wake", "depends_on": [],
+        "allowed_paths": ["src/ai_commerce/remote/cdp_doorbell.py", "tests/test_ef02_cdp_doorbell.py"],
+        "verification_profile": "mt01-ef02-wake-tests",
+        "instruction": 'MT01_ACCEPTANCE_JSON:["EF02.wake-boundaries"]',
+    }]}
+    report = validation.validate_acceptance_scope(batch, repo=ROOT)
+    if missing_init_owner:
+        assert report["status"] == "PRE_EXECUTOR_UNDETERMINED"
+        assert report["next_gate"] == "HOLD_NO_EXECUTOR"
+        assert report["actions"] == [{"action_id": "wake", "status": "PRE_EXECUTOR_UNDETERMINED",
+                                      "reason": "IMPACT_CLOSURE_UNPROVEN"}]
+    else:
+        assert report["status"] == "PRE_EXECUTOR_COMPATIBLE", report
+        assert report["next_gate"] == "POST_EDIT_MT01_REQUIRED"
+        assert "ef02-wake" in report["actions"][0]["selected_groups"]
+
+
 @pytest.mark.parametrize("path,expected", [
     ("tests/test_a13_evidence_pack.py", "a13"),
     ("tests/test_a12_claims.py", "a12"),
@@ -1939,6 +2001,7 @@ def test_a10_m05_selects_a03_consumer_with_only_reviewed_closure(real_tree, monk
         "a03", "a04", "a05", "a06", "a07", "a08", "a09", "a10", "a10-m02",
         "a11", "a12", "a18-1", "a18-2", "a18-3", "b0-1", "b3-portfolio",
         "bq-02b", "bq-04a", "cli", "production-orchestration", "wakehub-runtime",
+        "wakehub-cdp-native",
     }
     assert set(selected["selected_groups"]) == expected
     assert not selected["fallback"]
@@ -1947,6 +2010,8 @@ def test_a10_m05_selects_a03_consumer_with_only_reviewed_closure(real_tree, monk
     assert all(entry["state"] == "EXECUTE" for entry in selected["groups"])
     # A05 depends on M05 through the shared CLI; the registered production and
     # wakehub consumers also belong to the closure before adding A03's edge.
+    # The persisted CDP owner declares the affected WakeHub runtime runner as
+    # a consumer, so its registered tests belong to that exact closure too.
     producer = "src/ai_commerce/opportunity/bridge/briefs.py"
     without_a03_consumer = tuple(
         replace(g, consumers=tuple(p for p in g.consumers if p != producer))
@@ -2004,6 +2069,8 @@ def test_a10_m05_selects_a03_consumer_with_only_reviewed_closure(real_tree, monk
     for owner, consumer, test_path in (
         ("production-orchestration", producer, "tests/test_production_orchestration.py"),
         ("wakehub-runtime", orchestrator, "tests/test_wakehub_runtime.py"),
+        ("wakehub-cdp-native", "src/ai_commerce/wakehub_runtime/runner.py",
+         "tests/test_wakehub_cdp_authenticated_turn.py"),
     ):
         mapping = selected["consumer_map"][owner]
         assert consumer in mapping["consumers"]
