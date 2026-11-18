@@ -1009,6 +1009,9 @@ ISSUE_1006 = json.loads(r'''{
 
 
 AC_MARKER = "MT01_ACCEPTANCE_JSON:"
+FRESH_ONBOARD_COMPONENT = "production-orchestration-ingress-probe"
+FRESH_ONBOARD_PACKAGE = "production_orchestration_ingress_probe"
+FRESH_ONBOARD_AC = "PRODUCTION.orchestration-ingress-probe"
 PERSONAL_SOURCE = "src/ai_commerce/hostops_v3/personal.py"
 PERSONAL_AC = "HOSTOPS.PERSONAL.chat-approved-public-read-owner-comment-new-scratch-write"
 WAKE_SOURCE = "src/ai_commerce/remote/completion_event.py"
@@ -1196,27 +1199,51 @@ def test_pre_executor_new_owner_or_directory_is_hold_even_with_invalid_declarati
     assert result["actions"][0]["reason"] == "ALLOWED_SCOPE_NOT_EXACT_ESTABLISHED_FILES"
 
 
-def onboarding_packet():
+def corrected_1006_packet():
     packet = copy.deepcopy(ISSUE_1006)
-    # Preserve #1006 as historical provenance. A merged owner cannot be
-    # re-admitted as new: use a new offline-only owner/AC for positive tests.
+    # A fresh signed request is required; never mutate/re-dispatch issue #1006.
     packet["source_sha"] = "a" * 40  # Offline immutable fixture only.
-    packet["batch_id"] += "_fresh_owner_ingress"
+    packet["batch_id"] += "_corrected_ingress"
     item = packet["actions"][0]
-    item["attempt_id"] += "_fresh_owner_ingress"
-    item["allowed_paths"] = [
-        "work_items/mt01-components/atb-onboarding-smoke.json",
-        "src/ai_commerce/atb_onboarding_smoke/__init__.py",
-        "src/ai_commerce/atb_onboarding_smoke/contracts.py",
-        "src/ai_commerce/atb_onboarding_smoke/orchestrator.py",
-        "tests/test_atb_onboarding_smoke.py",
-    ]
-    item["instruction"] = (AC_MARKER + '["ATB01.onboarding-smoke"]\n'
-                           + "PRIVATE_INSTRUCTIONS: offline new owner contract only")
+    item["attempt_id"] += "_corrected_ingress"
+    inline = 'MT01_ACCEPTANCE_JSON: ["PRODUCTION.orchestration-p0"]. '
+    item["instruction"] = (AC_MARKER + '["PRODUCTION.orchestration-p0"]\n'
+                           + item["instruction"].replace(inline, ""))
     return packet
 
 
-def test_onboarding_1006_corrected_standalone_ac_contracts_without_claiming_proof(
+def onboarding_packet():
+    """Fresh synthetic owner, distinct from the now-committed historical #1006."""
+    packet = corrected_1006_packet()
+    packet["batch_id"] += "_fresh_owner_fixture"
+    item = packet["actions"][0]
+    item["attempt_id"] += "_fresh_owner_fixture"
+    item["allowed_paths"] = [
+        path.replace("production-orchestration", FRESH_ONBOARD_COMPONENT)
+            .replace("production_orchestration", FRESH_ONBOARD_PACKAGE)
+        for path in item["allowed_paths"]
+    ]
+    item["instruction"] = (item["instruction"]
+                           .replace("PRODUCTION.orchestration-p0", FRESH_ONBOARD_AC)
+                           .replace("production-orchestration", FRESH_ONBOARD_COMPONENT)
+                           .replace("production_orchestration", FRESH_ONBOARD_PACKAGE))
+    return packet
+
+
+def test_onboarding_1006_already_committed_owner_stays_rejected(tmp_path, monkeypatch):
+    from ai_commerce.remote.validation import validate_acceptance_scope
+
+    make_acceptance_repo(tmp_path, monkeypatch)
+    packet = corrected_1006_packet()
+    original = copy.deepcopy(packet)
+    result = validate_acceptance_scope(packet, repo=tmp_path)
+    assert result["status"] == result["coverage_status"] == "PRE_EXECUTOR_UNDETERMINED"
+    assert result["next_gate"] == "HOLD_NO_EXECUTOR"
+    assert result["actions"][0]["reason"] == "ONBOARD_AC_ALREADY_OWNED_PRE_EXECUTOR"
+    assert packet == original
+
+
+def test_onboarding_fresh_standalone_ac_contracts_without_claiming_proof(
         tmp_path, monkeypatch, capsys):
     from ai_commerce.remote import __main__ as cli
     from ai_commerce.remote.validation import validate_acceptance_scope
@@ -1245,17 +1272,17 @@ def test_onboarding_1006_corrected_standalone_ac_contracts_without_claiming_proo
         "onboarding_contract": {
             "source_sha": packet["source_sha"], "request_fingerprint": fingerprint(packet),
             "allowed_paths": item["allowed_paths"],
-            "acceptance_ids": ["ATB01.onboarding-smoke"], "coverage_proven": False,
+            "acceptance_ids": [FRESH_ONBOARD_AC], "coverage_proven": False,
         },
     }]
     assert packet == original
     assert not any((tmp_path / p).exists() for p in item["allowed_paths"])
     acceptance = approved_acceptance_plan(item)
     assert acceptance["consumer_map"] == {} and acceptance["broad_required"] is True
-    assert acceptance["unknown_ids"] == ["ATB01.onboarding-smoke"]
+    assert acceptance["unknown_ids"] == [FRESH_ONBOARD_AC]
 
     # Admission is no substitute for the existing verifier's actual bytes.
-    data = {"schema_version": "MT01ComponentOwner.v1", "component": "atb-onboarding-smoke",
+    data = {"schema_version": "MT01ComponentOwner.v1", "component": FRESH_ONBOARD_COMPONENT,
             "sources": item["allowed_paths"][1:4], "tests": item["allowed_paths"][4:],
             "acs": acceptance["ids"], "consumers": [VALIDATION_SOURCE], "contracts": []}
     with pytest.raises(ValueError, match="^ONBOARD_FILE_MISSING_OR_LINK$"):
@@ -1305,7 +1332,7 @@ def test_onboarding_invalid_or_ambiguous_contract_holds_without_effects(
         paths[0] = "work_items/mt01-components/../outside.json"
     elif problem in {"remote", "engineering", "existing-package"}:
         package = "hostops_v3" if problem == "existing-package" else problem
-        paths[1:4] = [p.replace("atb_onboarding_smoke", package) for p in paths[1:4]]
+        paths[1:4] = [p.replace(FRESH_ONBOARD_PACKAGE, package) for p in paths[1:4]]
     elif problem in {"existing-source", "existing-test", "existing-manifest", "protected"}:
         paths.append({"existing-source": VALIDATION_SOURCE, "existing-test": "tests/test_ef02.py",
                       "existing-manifest": "work_items/mt01-components/hostops-personal.json",
@@ -1313,9 +1340,9 @@ def test_onboarding_invalid_or_ambiguous_contract_holds_without_effects(
     elif problem == "existing-component":
         paths[0] = "work_items/mt01-components/ef02.json"
     elif problem in {"directory", "wildcard", "nested-source", "two-packages"}:
-        paths[1] = {"directory": "src/ai_commerce/atb_onboarding_smoke",
-                    "wildcard": "src/ai_commerce/atb_onboarding_smoke/*.py",
-                    "nested-source": "src/ai_commerce/atb_onboarding_smoke/nested/owner.py",
+        paths[1] = {"directory": f"src/ai_commerce/{FRESH_ONBOARD_PACKAGE}",
+                    "wildcard": f"src/ai_commerce/{FRESH_ONBOARD_PACKAGE}/*.py",
+                    "nested-source": f"src/ai_commerce/{FRESH_ONBOARD_PACKAGE}/nested/owner.py",
                     "two-packages": "src/ai_commerce/another_package/owner.py"}[problem]
     elif problem == "no-source":
         del paths[1:4]
@@ -1324,19 +1351,19 @@ def test_onboarding_invalid_or_ambiguous_contract_holds_without_effects(
     elif problem == "duplicate-path":
         paths.append(paths[-1])
     elif problem == "case-alias":
-        paths.append("src/ai_commerce/atb_onboarding_smoke/CONTRACTS.py")
+        paths.append(f"src/ai_commerce/{FRESH_ONBOARD_PACKAGE}/CONTRACTS.py")
     elif problem == "reserved-name":
-        paths[1] = "src/ai_commerce/atb_onboarding_smoke/CON.py"
+        paths[1] = f"src/ai_commerce/{FRESH_ONBOARD_PACKAGE}/CON.py"
     elif problem == "control-character":
         paths[0] = "work_items/mt01-components/new\nowner.json"
     elif problem == "ordinary-profile":
         item["verification_profile"] = "ef02-tests"
     elif problem in {"baseline-ac", "mixed-ac", "unknown-extra-ac", "bad-ac", "duplicate-ac"}:
         ids = {"baseline-ac": ["EF02.action-and-fanin"],
-               "mixed-ac": ["ATB01.onboarding-smoke", "EF02.action-and-fanin"],
-               "unknown-extra-ac": ["ATB01.onboarding-smoke", "UNKNOWN.unbound"],
+               "mixed-ac": [FRESH_ONBOARD_AC, "EF02.action-and-fanin"],
+               "unknown-extra-ac": [FRESH_ONBOARD_AC, "UNKNOWN.unbound"],
                "bad-ac": ["--arbitrary"],
-               "duplicate-ac": ["ATB01.onboarding-smoke"] * 2}[problem]
+               "duplicate-ac": [FRESH_ONBOARD_AC] * 2}[problem]
         item["instruction"] = AC_MARKER + json.dumps(ids)
     elif problem == "missing-ac":
         item["instruction"] = "PRIVATE_INSTRUCTIONS"
@@ -1347,11 +1374,11 @@ def test_onboarding_invalid_or_ambiguous_contract_holds_without_effects(
     elif problem == "fenced-ac":
         item["instruction"] = "```text\n" + item["instruction"] + "\n```"
     elif problem == "duplicate-marker":
-        item["instruction"] += "\n" + AC_MARKER + '["ATB01.onboarding-smoke"]'
+        item["instruction"] += "\n" + AC_MARKER + json.dumps([FRESH_ONBOARD_AC])
     elif problem == "bad-json":
         item["instruction"] = AC_MARKER + '{"acs": []}'
     elif problem == "fake-impact":
-        item["instruction"] += '\nMT01_IMPACT_WITNESSES_JSON:{"ATB01.onboarding-smoke":["' + VALIDATION_SOURCE + '"]}'
+        item["instruction"] += '\nMT01_IMPACT_WITNESSES_JSON:' + json.dumps({FRESH_ONBOARD_AC: [VALIDATION_SOURCE]})
     elif problem == "second-action":
         packet["actions"].append(scoped_action("b", [VALIDATION_SOURCE], ["EF02.action-and-fanin"]))
     elif problem == "dependency":
@@ -1387,7 +1414,7 @@ def test_onboarding_uses_pinned_inventory_for_freshness_and_parent_safety(tmp_pa
     item = packet["actions"][0]
     path = {"baseline-file": item["allowed_paths"][-1],
             "baseline-case-alias": item["allowed_paths"][-1].upper(),
-            "package-link": "src/ai_commerce/atb_onboarding_smoke",
+            "package-link": f"src/ai_commerce/{FRESH_ONBOARD_PACKAGE}",
             "manifest-parent-link": "work_items"}[problem]
     make_acceptance_repo(tmp_path, monkeypatch, contents={path: b"elsewhere"},
                          modes={path: b"120000"} if problem.endswith("link") else {})
