@@ -1,20 +1,26 @@
 """A03 v1.1 contract tests. All structured-client responses are explicit fakes."""
 
 from dataclasses import FrozenInstanceError, replace
+from datetime import datetime
+import io
 import json
 from pathlib import Path
+import subprocess
+import threading
+import uuid
 
 import pytest
 
-from ai_commerce.core.provenance import canonical_bytes
+from ai_commerce.core.provenance import canonical_bytes, sha256_bytes
 from ai_commerce.creative import (
     A03CreativeJob, A03CreativeStageResult, AIInferenceBinding,
-    ActorDecision, ActorRef, ConceptDraft, ConceptRecord, ConceptSelection, CreativeJobProvenance,
+    ActorDecision, ActorRef, CodexCliCapability, CodexCliCreativeClient,
+    ConceptDraft, ConceptRecord, ConceptSelection, CreativeJobProvenance,
     CreativeIntent, CreativeSidecarStore, CreativeStore, CreativeValidationError,
     HumanSelectionEvent, IntentField, InvocationAuthorization, LiveCreativeReasoner,
     MockCreativeReasoner, ModelConfiguration, ProviderObservation, ReasoningRequest,
     ReasoningResult, StructuredModelRequest, StructuredModelResponse, UsageObservation,
-    VersionConflict, brief_digest, capture_intent, generate_concepts, intake_brief,
+    VersionConflict, brief_digest, capture_intent, codex_creative_argv, generate_concepts, intake_brief,
     reason_v2, revise_brief, revise_concept, run_creative_stage,
 )
 from ai_commerce.providers.base import ProviderCapabilities, ProviderError
@@ -1008,3 +1014,364 @@ def test_requested_effort_is_optional_and_old_v2_configuration_bytes_stay_stable
     assert ModelConfiguration.from_dict(configured.to_dict()) == configured
     with pytest.raises(CreativeValidationError):
         ModelConfiguration.from_dict({**configured.to_dict(), "observed_effort": "invented"})
+
+
+class FakeInstalledCreativeCLI:
+    """Offline fixture for probes, Codex JSONL and native session metadata.
+
+    Even the native Popen path below is simulated. Nothing here proves a real
+    provider, subscription, inference or spend; no CLI executable is launched.
+    """
+
+    def __init__(self, root):
+        root.mkdir()
+        self.executable = root / "codex.exe"
+        self.executable.write_bytes(b"SYNTHETIC CLI, NOT AN EXECUTABLE")
+        self.config = ModelConfiguration("codex-cli", "fixture-model", "fixture-effort")
+        self.version = "fixture-installed-version"
+        self.help = (" ".join(codex_creative_argv(str(self.executable), self.config))).encode()
+        self.catalog = root / "models_cache.json"
+        self.catalog.write_bytes(canonical_bytes({"client_version": self.version, "models": [{
+            "slug": self.config.model, "supported_reasoning_levels": [{"effort": self.config.effort}]}]}))
+        self.sessions = root / "sessions"
+        self.sessions.mkdir()
+        self.calls, self.packets, self.schemas = [], [], []
+        self.fault = None
+        self.creative_output = None
+
+    def capability(self, **options):
+        return CodexCliCapability(**{
+            "executable": str(self.executable), "executable_sha256": sha256_bytes(self.executable.read_bytes()),
+            "version": self.version, "help_sha256": sha256_bytes(self.help), "model_catalog": str(self.catalog),
+            "model_catalog_sha256": sha256_bytes(self.catalog.read_bytes()), "sessions_dir": str(self.sessions),
+            "argv": codex_creative_argv(str(self.executable), self.config), **options})
+
+    def __call__(self, argv, *, input, cwd, timeout, max_bytes):
+        self.calls.append(argv)
+        assert isinstance(argv, list) and argv[0] == str(self.executable)
+        assert isinstance(input, bytes) and 0 < timeout <= 120 and max_bytes == 1024 * 1024
+        if argv[1:] == ["--version"]:
+            return subprocess.CompletedProcess(argv, 0, b"codex-cli " + (
+                b"wrong-version" if self.fault == "version" else self.version.encode()), b"")
+        if argv[1:] == ["exec", "--help"]:
+            return subprocess.CompletedProcess(argv, 0, b"untrusted help" if self.fault == "probe" else self.help, b"")
+        if argv[1:] == ["login", "status"]:
+            auth = b"Logged in using API key" if self.fault == "auth" else b"Logged in using ChatGPT"
+            return subprocess.CompletedProcess(argv, 0, b"", auth)
+        packet = json.loads(input)
+        self.packets.append(packet)
+        self.schemas.append(json.loads(Path(argv[argv.index("--output-schema") + 1]).read_bytes()))
+        assert Path(cwd).is_dir() and argv[-1] == "-"
+        if self.fault == "timeout":
+            raise subprocess.TimeoutExpired(argv, timeout, stderr=b"SECRET_SHOULD_NOT_BE_ECHOED")
+        if self.fault == "oversize":
+            return subprocess.CompletedProcess(argv, 0, b"x" * (max_bytes + 1), b"")
+        thread_id = str(uuid.uuid4())
+        context = {"model": "spoofed-model" if self.fault == "model" else self.config.model,
+                   "effort": "spoofed-effort" if self.fault == "effort" else self.config.effort}
+        if self.fault == "missing-model":
+            context.pop("model")
+        if self.fault == "missing-effort":
+            context.pop("effort")
+        records = [
+            {"type": "session_meta", "payload": {"id": thread_id, "cli_version": self.version,
+                                                   "model_provider": "openai"}},
+            {"type": "turn_context", "payload": context},
+            {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": "rebound" if self.fault == "session-binding" else input.decode()}]}},
+        ]
+        path = self.sessions / datetime.now().strftime("%Y/%m/%d") / ("rollout-fixture-" + thread_id + ".jsonl")
+        if self.fault != "missing-session":
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"\n".join(canonical_bytes(r) for r in records) + b"\n")
+        output = {"request_sha256": "0" * 64 if self.fault == "binding" else packet["request_sha256"],
+                  "output": self.creative_output or json.loads(payload(variants()))}
+        if self.fault == "spoofed-identity":
+            output["observation"] = {"provider": "codex-cli", "model": self.config.model, "mode": "MODEL"}
+        message = canonical_bytes(output).decode()
+        if self.fault == "malformed":
+            message = "{"
+        if self.fault == "extra-json":
+            message += "{}"
+        if self.fault == "duplicate-json":
+            message = message[:-1] + ',"request_sha256":"duplicate"}'
+        events = [{"type": "thread.started", "thread_id": thread_id}, {"type": "turn.started"},
+                  {"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": message}}]
+        if self.fault == "duplicate-output":
+            events.append({"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": message}})
+        if self.fault == "partial-output":
+            events[2]["type"] = "item.updated"
+        if self.fault == "tool-event":
+            events.insert(2, {"type": "item.completed", "item": {"id": "tool", "type": "command_execution",
+                                                                  "command": "unapproved"}})
+        end = {"type": "turn.completed"}
+        if self.fault != "missing-usage":
+            end["usage"] = {"input_tokens": 11, "cached_input_tokens": 2, "output_tokens": 7}
+        events.append(end)
+        return subprocess.CompletedProcess(argv, 1 if self.fault == "nonzero" else 0,
+            b"\n".join(canonical_bytes(e) for e in events) + b"\n",
+            b"x" * (max_bytes + 1) if self.fault == "stderr-oversize" else b"SECRET_SHOULD_NOT_BE_ECHOED")
+
+
+@pytest.fixture
+def installed_cli(tmp_path, monkeypatch):
+    import socket
+
+    def denied(*args, **kwargs):
+        raise AssertionError("Offline CLI fixture attempted network")
+
+    monkeypatch.setattr(socket, "socket", denied)
+    monkeypatch.setattr(socket, "create_connection", denied)
+    return FakeInstalledCreativeCLI(tmp_path / "synthetic-host")
+
+
+def cli_stage(cli, root, *, capability=None, native=False, authorization=InvocationAuthorization(True, True, "fixture:grant"),
+              purpose="TEST_ONLY_MOCK", request=None):
+    client = CodexCliCreativeClient(capability or cli.capability(), runner=None if native else cli)
+    job = creative_job(request, configuration=cli.config, purpose=purpose)
+    return run_creative_stage(job, CreativeStore(root), LiveCreativeReasoner(cli.config, client), authorization=authorization)
+
+
+def test_cli_probed_injected_runner_persists_mock_receipt_and_exact_binding(installed_cli, tmp_path):
+    cli = installed_cli
+    stage = cli_stage(cli, tmp_path / "creative")
+    assert stage.status == "TEST_ONLY_MOCK" and stage.reasoning.observation.model == "UNKNOWN"
+    evidence = stage.reasoning.execution
+    assert evidence.kind == "TEST_ONLY_MOCK" and evidence.effect == "PROCESS_INVOKED"
+    assert evidence.observed_model == cli.config.model and evidence.observed_effort == cli.config.effort
+    assert evidence.authorization_ref == "fixture:grant"
+    assert evidence.request_digest == stage.job.request_digest
+    assert evidence.configuration_digest == sha256_bytes(canonical_bytes(cli.config.to_dict()))
+    assert evidence.stdin_sha256 == sha256_bytes(canonical_bytes(cli.packets[0]))
+    assert evidence.schema_sha256 == sha256_bytes(canonical_bytes(cli.schemas[0]))
+    assert stage.reasoning.provider_request_id is None  # A CLI thread is not a provider request ID.
+    assert evidence.cli_thread_id and stage.reasoning.usage == UsageObservation("OBSERVED", 11, 7)
+    assert stage.reasoning.usage.cost_amount is None
+    assert len(cli.calls) == 4 and len(cli.packets) == 1 and len(stage.outputs) == 3
+    schema = cli.schemas[0]
+    assert schema["properties"]["request_sha256"]["enum"] == [cli.packets[0]["request_sha256"]]
+    sidecars = CreativeSidecarStore(tmp_path / "creative")
+    assert sidecars.load_stage(stage.job) == stage
+    assert sidecars.verify_inference_decision(stage.decision) == stage.reasoning
+    assert run_creative_stage(stage.job, sidecars) == stage and len(cli.calls) == 4
+    assert "SECRET_SHOULD_NOT_BE_ECHOED" not in json.dumps(stage.to_dict())
+
+
+def install_fake_popen(monkeypatch, cli):
+    """Exercise production bounded-pipe code, replacing only the OS process."""
+    class Process:
+        def __init__(self, argv, *, stdin, stdout, stderr, shell, cwd):
+            assert shell is False and stdin == stdout == stderr == subprocess.PIPE
+            self.ready = threading.Event()
+            self.returncode = None
+            self.killed = False
+            self.is_model = argv[-1] == "-"
+            owner = self
+
+            class Input:
+                def write(self, packet):
+                    response = cli(argv, input=packet, cwd=cwd, timeout=120, max_bytes=1024 * 1024)
+                    owner.output = [io.BytesIO(response.stdout), io.BytesIO(response.stderr)]
+                    owner.returncode = response.returncode
+                    owner.ready.set()
+                    return len(packet)
+
+                def close(self):
+                    pass
+
+            class Pipe:
+                def __init__(self, index):
+                    self.index = index
+
+                def read(self, size):
+                    assert owner.ready.wait(5)
+                    return owner.output[self.index].read(size)
+
+                def close(self):
+                    pass
+
+            self.stdin, self.stdout, self.stderr = Input(), Pipe(0), Pipe(1)
+
+        def wait(self, timeout):
+            if self.is_model and cli.fault == "native-timeout" and not self.killed:
+                raise subprocess.TimeoutExpired("synthetic", timeout)
+            if not self.ready.wait(timeout):
+                raise subprocess.TimeoutExpired("synthetic", timeout)
+            return self.returncode
+
+        def kill(self):
+            self.killed = True
+
+    monkeypatch.setattr(subprocess, "Popen", Process)
+
+
+def test_cli_native_process_branch_is_simulated_not_live_provider_proof(installed_cli, tmp_path, monkeypatch):
+    cli = installed_cli
+    install_fake_popen(monkeypatch, cli)
+    stage = cli_stage(cli, tmp_path / "creative", native=True, purpose="PRODUCTION")
+    assert stage.status == "CREATIVE_COMPLETE"  # Synthetic coverage of native branch only.
+    assert stage.reasoning.execution.kind == "AUTHENTICATED_CLI_PROBE"
+    assert stage.reasoning.observation == ProviderObservation("codex-cli", cli.config.model, "MODEL")
+    assert stage.reasoning.provider_request_id is None and stage.reasoning.execution.cli_thread_id
+    assert stage.decision.inference.mode == "MODEL"
+    assert len(cli.calls) == 4 and CreativeSidecarStore(tmp_path / "creative").load_stage(stage.job) == stage
+    assert run_creative_stage(stage.job, CreativeStore(tmp_path / "creative")) == stage
+    assert len(cli.calls) == 4
+
+
+@pytest.mark.parametrize("fault", ["oversize", "stderr-oversize", "native-timeout"])
+def test_cli_native_pipe_bounds_and_timeout_never_retry(installed_cli, tmp_path, monkeypatch, fault):
+    cli = installed_cli
+    cli.fault = fault
+    install_fake_popen(monkeypatch, cli)
+    stage = cli_stage(cli, tmp_path / "creative", native=True, purpose="PRODUCTION")
+    assert stage.status == "FAILED" and stage.failure == "UNKNOWN_EFFECT"
+    assert stage.reasoning.usage == UsageObservation() and stage.reasoning.observation == ProviderObservation()
+    assert not stage.outputs and stage.reasoning.execution.effect == "UNKNOWN"
+    assert run_creative_stage(stage.job, CreativeStore(tmp_path / "creative")) == stage
+    assert len(cli.calls) == 4
+
+
+@pytest.mark.parametrize("fault,expected,invoked", [
+    ("version", "PROVIDER_UNAVAILABLE", False), ("probe", "PROVIDER_UNAVAILABLE", False),
+    ("auth", "UNAUTHORIZED", False), ("model", "CONFIGURATION_MISMATCH", True),
+    ("missing-model", "CONFIGURATION_MISMATCH", True), ("missing-effort", "CONFIGURATION_MISMATCH", True),
+    ("effort", "CONFIGURATION_MISMATCH", True), ("missing-session", "CONFIGURATION_MISMATCH", True),
+    ("session-binding", "CONFIGURATION_MISMATCH", True), ("binding", "CONFIGURATION_MISMATCH", True),
+    ("spoofed-identity", "UNKNOWN_EFFECT", True), ("malformed", "UNKNOWN_EFFECT", True),
+    ("extra-json", "UNKNOWN_EFFECT", True), ("duplicate-json", "UNKNOWN_EFFECT", True),
+    ("duplicate-output", "UNKNOWN_EFFECT", True), ("partial-output", "UNKNOWN_EFFECT", True),
+    ("tool-event", "UNKNOWN_EFFECT", True), ("nonzero", "UNKNOWN_EFFECT", True),
+    ("timeout", "UNKNOWN_EFFECT", True), ("oversize", "UNKNOWN_EFFECT", True),
+])
+def test_cli_failure_is_saved_no_retry_output_or_secret_echo(installed_cli, tmp_path, fault, expected, invoked):
+    cli = installed_cli
+    cli.fault = fault
+    stage = cli_stage(cli, tmp_path / "creative")
+    assert stage.status == "FAILED" and stage.failure == expected
+    assert stage.reasoning.usage == UsageObservation() and stage.reasoning.observation == ProviderObservation()
+    assert not stage.outputs and stage.decision is None
+    assert len(cli.packets) == int(invoked)
+    if fault == "model":
+        assert stage.reasoning.execution.observed_model == "spoofed-model"
+    if fault == "effort":
+        assert stage.reasoning.execution.observed_effort == "spoofed-effort"
+    before = len(cli.calls)
+    assert run_creative_stage(stage.job, CreativeStore(tmp_path / "creative")) == stage
+    assert len(cli.calls) == before
+    assert "SECRET_SHOULD_NOT_BE_ECHOED" not in json.dumps(stage.to_dict())
+
+
+@pytest.mark.parametrize("fault", ["missing-executable", "binary-hash", "catalog-hash", "catalog-model",
+                                   "unsupported-flags", "unsupported-help-flag", "untrusted-capability"])
+def test_cli_rejects_missing_or_untrusted_installed_capability_before_inference(installed_cli, tmp_path, fault):
+    cli = installed_cli
+    cap = cli.capability()
+    if fault == "missing-executable":
+        cap = replace(cap, executable=str(cli.executable.parent / "absent" / "codex.exe"))
+    elif fault == "binary-hash":
+        cap = replace(cap, executable_sha256="0" * 64)
+    elif fault == "catalog-hash":
+        cap = replace(cap, model_catalog_sha256="0" * 64)
+    elif fault == "catalog-model":
+        cli.catalog.write_bytes(canonical_bytes({"client_version": cli.version, "models": []}))
+        cap = replace(cap, model_catalog_sha256=sha256_bytes(cli.catalog.read_bytes()))
+    elif fault == "unsupported-flags":
+        cap = replace(cap, argv=(*cap.argv[:-1], "--unreviewed", "-"))
+    elif fault == "unsupported-help-flag":
+        cli.help = cli.help.replace(b"--ignore-user-config", b"unavailable")
+        cap = replace(cap, help_sha256=sha256_bytes(cli.help))
+    else:
+        with pytest.raises(CreativeValidationError, match="trusted CodexCliCapability"):
+            CodexCliCreativeClient({"argv": list(cap.argv), "authenticated": True})
+        assert cli.calls == []
+        return
+    stage = cli_stage(cli, tmp_path / "creative", capability=cap)
+    assert stage.status == "FAILED" and stage.failure in ("PROVIDER_UNAVAILABLE", "CONFIGURATION_MISMATCH")
+    assert cli.packets == []
+
+
+@pytest.mark.parametrize("grant", [None, InvocationAuthorization(), InvocationAuthorization(True, False, "fixture:network"),
+                                  InvocationAuthorization(False, True, "fixture:spend")])
+def test_cli_stage_requires_explicit_runner_grant_not_adapter_or_job(installed_cli, tmp_path, grant):
+    cli = installed_cli
+    client = CodexCliCreativeClient(cli.capability(), runner=cli)
+    reasoner = LiveCreativeReasoner(cli.config, client, authorization=InvocationAuthorization(True, True, "fixture:other-path"))
+    job = creative_job(configuration=cli.config)
+    data = job.to_dict()
+    data["authorization"] = {"allow_network": True, "allow_spend": True}
+    with pytest.raises(CreativeValidationError):
+        A03CreativeJob.from_dict(data)
+    stage = run_creative_stage(job, CreativeStore(tmp_path / "creative"), reasoner, authorization=grant)
+    assert stage.failure == "UNAUTHORIZED" and cli.calls == []
+
+
+def test_cli_fake_cannot_complete_production_or_assert_model_mode(installed_cli, tmp_path):
+    cli = installed_cli
+    stage = cli_stage(cli, tmp_path / "creative", purpose="PRODUCTION")
+    assert stage.status == "FAILED" and stage.failure == "MOCK_NOT_PRODUCTION"
+    assert stage.reasoning.execution.kind == "TEST_ONLY_MOCK" and stage.reasoning.observation.model == "UNKNOWN"
+    data = stage.reasoning.to_dict()
+    data["observation"] = {"provider": "codex-cli", "model": cli.config.model, "mode": "MODEL"}
+    with pytest.raises(CreativeValidationError, match="unbound CLI"):
+        ReasoningResult.from_dict(data)
+
+
+def test_cli_missing_usage_remains_unknown(installed_cli, tmp_path):
+    installed_cli.fault = "missing-usage"
+    stage = cli_stage(installed_cli, tmp_path / "creative")
+    assert stage.status == "TEST_ONLY_MOCK" and stage.reasoning.usage == UsageObservation()
+
+
+def test_cli_unicode_line_separator_is_content_in_jsonl_not_an_event_boundary(installed_cli, tmp_path):
+    cli = installed_cli
+    cli.creative_output = json.loads(payload(variants()))
+    cli.creative_output["drafts"][0]["title"] += "\u2028mưa"
+    request = ReasoningRequest.create(TEXT + "\u2028", mode="controlled_variants", count=3)
+    stage = cli_stage(cli, tmp_path / "creative", request=request)
+    assert stage.status == "TEST_ONLY_MOCK" and stage.reasoning.drafts[0].title.endswith("\u2028mưa")
+
+
+@pytest.mark.parametrize("field", ["request_digest", "configuration_digest", "observed_effort", "observed_model"])
+def test_cli_receipt_rejects_metadata_tamper(installed_cli, tmp_path, field):
+    stage = cli_stage(installed_cli, tmp_path / "creative")
+    value = stage.reasoning.to_dict()
+    value["execution"][field] = "0" * 64 if field.endswith("digest") else "spoofed"
+    with pytest.raises(CreativeValidationError):
+        ReasoningResult.from_dict(value)
+    sidecars = CreativeSidecarStore(tmp_path / "creative")
+    sidecars._path("reasoning", stage.reasoning.digest).write_bytes(canonical_bytes(value))
+    before = len(installed_cli.calls)
+    with pytest.raises(CreativeValidationError):
+        run_creative_stage(stage.job, sidecars)
+    assert len(installed_cli.calls) == before
+
+
+@pytest.mark.parametrize("operation", ["DEVELOP", "REFRAME", "CRITIQUE"])
+def test_cli_existing_optional_operations_use_strict_schema_and_original_lineage(installed_cli, saved, operation):
+    store, sidecars, brief, source, _ = saved
+    cli = installed_cli
+    options = {"operation": operation, "source": source}
+    if operation == "REFRAME":
+        options["lens"] = "sound"
+    request = ReasoningRequest.create(brief, **options)
+    if operation == "CRITIQUE":
+        cli.creative_output = {"drafts": [], "edits": {}, "critique": "Optional quiet observation"}
+    else:
+        cli.creative_output = {"drafts": [], "edits": {"family": None, "title": None, "visual_direction": None,
+                                                      "premise": "A new quiet rain mechanism"}, "critique": None}
+    client = CodexCliCreativeClient(cli.capability(), runner=cli)
+    job = creative_job(request, configuration=cli.config, selection_index=None if operation == "CRITIQUE" else 0)
+    stage = run_creative_stage(job, sidecars, LiveCreativeReasoner(cli.config, client),
+                               authorization=InvocationAuthorization(True, True, "fixture:operations"))
+    assert stage.status == "TEST_ONLY_MOCK" and store.load_concept(source.concept_id, 1) == source
+    assert (stage.decision is None) == (operation == "CRITIQUE")
+    if operation != "CRITIQUE":
+        assert store.load_concept(source.concept_id, 2).parent.digest == source.digest
+
+
+def test_cli_addition_preserves_original_v2_wire_bytes_without_execution_metadata():
+    result = reason_v2(explore(), adapter())
+    assert "execution" not in result.to_dict()
+    assert "execution" not in FakeClient().response.to_dict()
+    assert ReasoningResult.from_dict(result.to_dict()) == result
