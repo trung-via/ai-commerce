@@ -958,12 +958,14 @@ def test_ef02_verified_receipt_accepts_committed_manifest_and_rejects_xdist_or_h
 
 def test_temporary_human_full_verification_budget_is_bounded_and_opt_in():
     from ai_commerce.remote.worker import _temporary_verification_budget
-    from ai_commerce.engineering.runner import DEFAULT_ACTION_TIMEOUT_SECONDS
+    from ai_commerce.engineering.runner import DEFAULT_ACTION_TIMEOUT_SECONDS, DEFAULT_VERIFY_TIMEOUT_SECONDS
 
-    # Normal AUTO/owner-first actions are NOT granted the long-test budget.
-    assert _temporary_verification_budget(human_full_suite_authorized=False) == (
-        None, DEFAULT_ACTION_TIMEOUT_SECONDS, 7500,
-    )
+    # AUTO uses the Human-authorized 90m test cap with finite full action and watchdog.
+    auto_verify, auto_action, auto_child = _temporary_verification_budget(human_full_suite_authorized=False)
+    assert (auto_verify, auto_action, auto_child) == (5400, 12600, 12900)
+    assert auto_verify == DEFAULT_VERIFY_TIMEOUT_SECONDS
+    assert auto_action == DEFAULT_ACTION_TIMEOUT_SECONDS
+    assert auto_verify < auto_action < auto_child < 360 * 60
     # An already-authorized HUMAN_FULL profile receives 180m of pytest inside
     # a finite 300m action and a 305m EF02 child-process watchdog.
     verify, action, child = _temporary_verification_budget(human_full_suite_authorized=True)
