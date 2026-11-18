@@ -1920,19 +1920,170 @@ class PersonalCdp9444ConfigRegistryTests(unittest.TestCase):
         self.assert_receipt(self.observe(), unavailable, code="OWNER_KNOWN_FOLDER_UNAVAILABLE")
         self.assertNotIn(self.local, [call.args[0] for call in self.probe.call_args_list])
 
-    def test_public_issue_entrypoint_holds_before_collecting(self):
+    def test_public_issue_entrypoint_collects_only_metadata_after_protected_integration(self):
         args = SimpleNamespace(mode="read", output="receipt.json")
         payload = json.dumps(event("read", self.OPERATION, {}))
-        with (patch.object(hostops, "os", new=SimpleNamespace(name="nt", environ={"GITHUB_EVENT_PATH": "event.json"})),
+        with (patch.object(hostops, "os", new=SimpleNamespace(name="nt", environ={
+                  "GITHUB_EVENT_PATH": "event.json", "GITHUB_SHA": "f" * 40})),
               patch.object(hostops.argparse.ArgumentParser, "parse_args", return_value=args),
               patch.object(builtins, "open", mock_open(read_data=payload)),
               patch.object(hostops, "Path") as output):
-            self.assertEqual(hostops.main(), 2)
-        self.assertEqual(json.loads(output.return_value.write_text.call_args.args[0]), {
-            "status": "BLOCKED", "code": "PUBLIC_RECEIPT_INTEGRATION_PENDING", "remote_shell_enabled": False,
-        })
-        self.native.assert_not_called()
-        self.probe.assert_not_called()
+            self.assertEqual(hostops.main(), 0)
+        record = json.loads(output.return_value.write_text.call_args.args[0])
+        self.assertEqual(record["status"], "OBSERVED")
+        self.assertEqual(record["code"], "METADATA_ONLY")
+        self.assertEqual(record["issue_number"], 17)
+        self.assertEqual(record["source_sha"], "f" * 40)
+        self.assertEqual(record["approval_channel"], "CHATGPT_TO_AI_COMMERCE_ISSUE")
+        self.assertFalse(record["remote_shell_enabled"])
+        self.assertEqual(record["slots"], [
+            {"slot_id": slot, "status": "ABSENT"} for slot in self.SLOT_IDS])
+        self.native.assert_called_once_with()
+        self.probe.assert_called()
+
+    def test_protected_registry_transport_matches_closed_source_contract(self):
+        workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+        ids = re.search(r"const registrySlotIds = (\[[^\n]+\]);", workflow)
+        states = re.search(r"const registryStates = (\[[^\n]+\]);", workflow)
+        self.assertIsNotNone(ids)
+        self.assertIsNotNone(states)
+        self.assertEqual(tuple(re.findall(r"'([^']+)'", ids.group(1))), self.SLOT_IDS)
+        self.assertEqual(tuple(re.findall(r"'([^']+)'", states.group(1))), self.STATES)
+        self.assertIn("INVALID_PUBLIC_CDP_REGISTRY_RECEIPT", workflow)
+        self.assertIn("rawNativeText.trim() === JSON.stringify(record)", workflow)
+        self.assertIn("record.issue_number === context.issue.number", workflow)
+        self.assertIn("record.source_sha === context.sha", workflow)
+        self.assertIn("registryRequested || record.operation === 'cdp_9444_config_registry'", workflow)
+        self.assertNotIn("PUBLIC_RECEIPT_INTEGRATION_PENDING", MODULE.read_text(encoding="utf-8"))
+
+    def test_protected_registry_sanitizer_runtime_positive_and_negative(self):
+        """Execute the actual protected JavaScript against synthetic receipts; no host effects."""
+        import os
+        import shutil
+        node = shutil.which("node") or shutil.which("node.exe")
+        if not node and os.name == "nt" and os.environ.get("RUNNER_TEMP"):
+            runner_root = Path(os.environ["RUNNER_TEMP"]).parents[1]
+            for version in ("node24", "node20"):
+                candidate = runner_root / "externals" / version / "bin" / "node.exe"
+                if candidate.is_file():
+                    node = str(candidate)
+                    break
+        if not node:
+            self.skipTest("Node CLI unavailable: hosted Windows JS sanitizer verification required")
+        workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+        workflow = workflow.split("  hostops-d5-carrier:", 1)[0]
+        self.assertEqual(workflow.count("          script: |"), 1)
+        script = "\n".join(line[12:] if line.startswith("            ") else line
+                           for line in workflow.split("          script: |\n", 1)[1].splitlines())
+        source = {**self.observe(), "issue_number": 17,
+                  "approval_channel": "CHATGPT_TO_AI_COMMERCE_ISSUE",
+                  "remote_shell_enabled": False, "source_sha": "f" * 40}
+        encode = lambda value: json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+        blocked = {"status": "BLOCKED", "operation": self.OPERATION,
+                   "code": "INVALID_PUBLIC_CDP_REGISTRY_RECEIPT"}
+        request = json.dumps({"schema": hostops.SCHEMA, "operation": self.OPERATION,
+                              "parameters": {}}, separators=(",", ":"))
+        cases = [{"name": "observed", "body": encode(source), "expected": source}]
+        unknown = copy.deepcopy(source)
+        unknown.update(status="UNKNOWN", code="CONFIG_CUSTODY_UNAVAILABLE")
+        unknown["slots"][0]["status"] = "UNAVAILABLE_OR_REPARSE"
+        unknown["counts"].update(ABSENT=5, UNAVAILABLE_OR_REPARSE=1)
+        cases.append({"name": "partial_custody_unknown", "body": encode(unknown), "expected": unknown})
+        all_unknown = copy.deepcopy(source)
+        all_unknown.update(status="UNKNOWN", code="OWNER_KNOWN_FOLDER_UNAVAILABLE")
+        for row in all_unknown["slots"]:
+            row["status"] = "UNAVAILABLE_OR_REPARSE"
+        all_unknown["counts"].update(ABSENT=0, UNAVAILABLE_OR_REPARSE=6)
+        cases.append({"name": "known_folder_unknown", "body": encode(all_unknown),
+                      "expected": all_unknown})
+        source_unknown = {**all_unknown, "code": "REGISTRY_SOURCE_UNAVAILABLE"}
+        cases.append({"name": "registry_source_unknown", "body": encode(source_unknown),
+                      "expected": source_unknown})
+        mutations = {
+            "unexpected_private_path": {**source, "private_path": "PRIVATE_SECRET"},
+            "nested_private_metadata": {**source, "config": {"token": "PRIVATE_SECRET"}},
+            "wrong_source_sha": {**source, "source_sha": "0" * 40},
+            "wrong_issue": {**source, "issue_number": 123},
+            "wrong_approval": {**source, "approval_channel": "PRIVATE"},
+            "wrong_port": {**source, "cdp_port": 9333},
+            "wrong_no_shell": {**source, "no_shell_command_executed": False},
+            "unsafe_browser_effect": {**source, "chrome_launched": True},
+            "unsafe_send_effect": {**source, "send_performed": True},
+            "unsafe_remote_shell": {**source, "remote_shell_enabled": True},
+            "extra_slot": {**source, "slots": source["slots"] + [source["slots"][0]]},
+            "missing_slot": {**source, "slots": source["slots"][:-1]},
+            "reordered_slot": {**source, "slots": list(reversed(source["slots"]))},
+            "duplicate_slot": {**source, "slots": [source["slots"][0]] * 6},
+            "private_row": {**source, "slots": [
+                {**source["slots"][0], "path": "PRIVATE_SECRET"}, *source["slots"][1:]]},
+            "invalid_state": {**source, "slots": [
+                {**source["slots"][0], "status": "PRIVATE_SECRET"}, *source["slots"][1:]]},
+            "count_mismatch": {**source, "counts": {**source["counts"], "ABSENT": 5}},
+            "count_extra": {**source, "counts": {**source["counts"], "PRIVATE": 0}},
+            "count_type": {**source, "counts": {**source["counts"], "ABSENT": 6.5}},
+            "unknown_code": {**source, "status": "UNKNOWN", "code": "PRIVATE_SECRET"},
+            "false_observed": {**unknown, "status": "OBSERVED"},
+            "false_unknown": {**source, "status": "UNKNOWN", "code": "CONFIG_CUSTODY_UNAVAILABLE"},
+            "false_owner_unknown": {**unknown, "code": "OWNER_KNOWN_FOLDER_UNAVAILABLE"},
+            "missing_field": {key: value for key, value in source.items() if key != "counts"},
+        }
+        cases.extend({"name": name, "body": encode(value), "expected": blocked}
+                     for name, value in mutations.items())
+        duplicate_raw = encode(source).replace('"status":"OBSERVED"',
+                                               '"status":"OBSERVED","status":"OBSERVED"', 1)
+        cases.extend([
+            {"name": "duplicate_raw_json_key", "body": duplicate_raw, "expected": blocked},
+            {"name": "malformed_json", "body": "{", "expected": blocked},
+            {"name": "missing_receipt", "body": None, "expected": blocked},
+            {"name": "oversize_receipt", "body": encode({**source, "padding": "P" * 8192}),
+             "expected": blocked},
+            {"name": "wrong_issue_body", "body": encode(source), "expected": blocked,
+             "request": encode({"schema": hostops.SCHEMA, "operation": "inventory", "parameters": {}})},
+        ])
+        legacy = {"status": "OBSERVED", "operation": "inventory",
+                  "slots": [{"path": "PRIVATE_SECRET"}], "counts": {"PRIVATE": 1}}
+        cases.append({"name": "legacy_projection_isolation", "body": encode(legacy),
+                      "request": encode({"schema": hostops.SCHEMA, "operation": "inventory", "parameters": {}}),
+                      "expected": {"status": "OBSERVED", "operation": "inventory"}})
+        harness = r"""
+const fs = require('fs'), path = require('path'), vm = require('vm');
+const cases = JSON.parse(fs.readFileSync(process.argv[1],'utf8'));
+const script = fs.readFileSync(process.argv[2],'utf8');
+const assert = require('assert');
+(async () => {
+  for (const item of cases) {
+    const receiptPath = path.join(process.env.RUNNER_TEMP,'personal-hostops-result.json');
+    if (item.body === null) {
+      try { fs.unlinkSync(receiptPath); } catch (_) {}
+    } else {
+      fs.writeFileSync(receiptPath,item.body,'utf8');
+    }
+    const comments = [];
+    const context = {repo:{owner:'trung-via',repo:'ai-commerce'},issue:{number:17},
+      sha:'f'.repeat(40),payload:{issue:{body:item.request || process.env.REGISTRY_REQUEST}}};
+    const github = {rest:{issues:{createComment:async args => { comments.push(args.body); }}}};
+    await vm.runInNewContext('(async () => {\n'+script+'\n})()',
+      {require,process,context,github,Buffer});
+    assert.strictEqual(comments.length,1,item.name+': missing result');
+    assert.ok(comments[0].startsWith('AI_COMMERCE_PERSONAL_HOSTOPS_RESULT_V1\n'),item.name);
+    const actual = JSON.parse(comments[0].split('\n').slice(1).join('\n'));
+    assert.deepStrictEqual(actual,item.expected,item.name+': invalid projection');
+    assert.ok(!JSON.stringify(actual).includes('PRIVATE_SECRET'),item.name+': private leak');
+  }
+  process.stdout.write('VERIFIED_REGISTRY_CASES='+cases.length);
+})().catch(error => { console.error(error); process.exitCode=1; });
+"""
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            (directory / "cases.json").write_text(encode(cases), encoding="utf-8")
+            (directory / "workflow.js").write_text(script, encoding="utf-8")
+            completed = subprocess.run(
+                [node, "-e", harness, str(directory / "cases.json"), str(directory / "workflow.js")],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=30, env={**os.environ, "RUNNER_TEMP": str(directory),
+                                 "REGISTRY_REQUEST": request}, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr[-3000:])
+        self.assertIn("VERIFIED_REGISTRY_CASES=" + str(len(cases)), completed.stdout)
 
     def test_existing_reads_keep_their_dispatch_and_standing_rows(self):
         standing = PersonalHostOpsContractTests._standing_snapshot()
