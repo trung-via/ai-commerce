@@ -2755,7 +2755,8 @@ class PersonalCdp9444TopologyTests(unittest.TestCase):
         binary.parent.mkdir(parents=True)
         binary.touch()
         self.proc.update(ExecutablePath=str(binary), CommandLine=json.dumps([
-            str(binary), "--user-data-dir=" + str(clean), "--remote-debugging-port=9444",
+            str(binary), "--user-data-dir=" + str(clean), "--profile-directory=Default",
+            "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=9444",
         ]))
         with patch.object(self.acquisition, "_native_known_folder", return_value=self.local), \
                 patch.object(self.acquisition, "load_environment") as legacy:
