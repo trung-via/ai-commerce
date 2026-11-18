@@ -8,9 +8,58 @@ from typing import Any, Literal
 
 from ai_commerce.core.provenance import canonical_bytes, sha256_bytes
 
-from ._validation import CreativeValidationError, exact_fields, require_text
+from ._validation import CreativeValidationError, exact_fields, require_text, text_tuple
 from .intent import ActorRef
-from .models import require_digest
+from .models import ConceptSelection, require_digest
+
+
+@dataclass(frozen=True, slots=True)
+class CreativeModelSelection:
+    """R2 model output, never inferred from scores or critique prose.
+
+    The request and sidecar verifier resolve these exact critic receipts and
+    candidate pins. Text is creative reasoning, not verified external evidence.
+    """
+
+    action: Literal["SELECT", "REVISE", "STOP"]
+    selection: ConceptSelection | None
+    critique_receipts: tuple[str, ...]
+    rationale: str
+    revision_instruction: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.action not in ("SELECT", "REVISE", "STOP"):
+            raise CreativeValidationError("invalid model selection action")
+        require_text(self.rationale, "selection rationale")
+        refs = text_tuple(self.critique_receipts, "critique receipts")
+        for ref in refs:
+            require_digest(ref)
+        if not refs or len(set(refs)) != len(refs):
+            raise CreativeValidationError("selection requires distinct critic receipts")
+        object.__setattr__(self, "critique_receipts", refs)
+        if self.action == "STOP":
+            if self.selection is not None:
+                raise CreativeValidationError("STOP cannot select a concept")
+        elif not isinstance(self.selection, ConceptSelection):
+            raise CreativeValidationError("selection requires an immutable concept pin")
+        else:
+            ConceptSelection.from_dict(self.selection.to_dict())
+        if self.action == "REVISE":
+            require_text(self.revision_instruction, "revision instruction")
+        elif self.revision_instruction is not None:
+            raise CreativeValidationError("revision instruction belongs to REVISE")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"action": self.action, "selection": self.selection.to_dict() if self.selection else None,
+                "critique_receipts": list(self.critique_receipts), "rationale": self.rationale,
+                "revision_instruction": self.revision_instruction}
+
+    @classmethod
+    def from_dict(cls, data: object) -> CreativeModelSelection:
+        value = exact_fields(data, {f.name for f in fields(cls)})
+        if value["selection"] is not None:
+            value["selection"] = ConceptSelection.from_dict(value["selection"])
+        return cls(**value)
 
 
 def require_selection_id(value: object) -> str:

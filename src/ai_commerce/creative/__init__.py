@@ -16,10 +16,12 @@ __all__ = [
 
 # V1.1 is opt-in; importing these symbols creates no provider or storage.
 from .intent import ActorRef, CreativeIntent, IntentField, capture_intent
-from .decisions import AIInferenceBinding, ActorDecision, HumanSelectionEvent
+from .decisions import AIInferenceBinding, ActorDecision, CreativeModelSelection, HumanSelectionEvent
 from .v2 import (
     A03CreativeJob, A03CreativeStageResult, CLIExecutionObservation, CreativeJobProvenance, CreativeReasonerV2,
     ReasoningRequest, ReasoningResult, UsageObservation, reason_v2, run_creative_stage,
+    A03CreativeCycleJob, A03CreativeCycleResult, CreativeCycleContext,
+    CreativeCriticEvidence, CreativeEvidenceSource, run_creative_cycle,
 )
 from .live import (
     CodexCliCapability, CodexCliCreativeClient, InvocationAuthorization, LiveCreativeReasoner, ModelConfiguration,
@@ -36,4 +38,6 @@ __all__ += [
     "StructuredModelRequest", "StructuredModelResponse", "UsageObservation", "capture_intent", "reason_v2",
     "run_creative_stage",
     "CLIExecutionObservation", "CodexCliCapability", "CodexCliCreativeClient", "codex_creative_argv",
+    "A03CreativeCycleJob", "A03CreativeCycleResult", "CreativeCycleContext",
+    "CreativeCriticEvidence", "CreativeEvidenceSource", "CreativeModelSelection", "run_creative_cycle",
 ]

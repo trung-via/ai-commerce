@@ -22,6 +22,8 @@ from ai_commerce.creative import (
     ReasoningResult, StructuredModelRequest, StructuredModelResponse, UsageObservation,
     VersionConflict, brief_digest, capture_intent, codex_creative_argv, generate_concepts, intake_brief,
     reason_v2, revise_brief, revise_concept, run_creative_stage,
+    A03CreativeCycleJob, A03CreativeCycleResult, CreativeCycleContext,
+    CreativeEvidenceSource, CreativeModelSelection, run_creative_cycle,
 )
 from ai_commerce.providers.base import ProviderCapabilities, ProviderError
 
@@ -1084,8 +1086,9 @@ class FakeInstalledCreativeCLI:
         if self.fault != "missing-session":
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"\n".join(canonical_bytes(r) for r in records) + b"\n")
+        creative_output = self.creative_output(packet) if callable(self.creative_output) else self.creative_output
         output = {"request_sha256": "0" * 64 if self.fault == "binding" else packet["request_sha256"],
-                  "output": self.creative_output or json.loads(payload(variants()))}
+                  "output": creative_output or json.loads(payload(variants()))}
         if self.fault == "spoofed-identity":
             output["observation"] = {"provider": "codex-cli", "model": self.config.model, "mode": "MODEL"}
         message = canonical_bytes(output).decode()
@@ -1375,3 +1378,440 @@ def test_cli_addition_preserves_original_v2_wire_bytes_without_execution_metadat
     assert "execution" not in result.to_dict()
     assert "execution" not in FakeClient().response.to_dict()
     assert ReasoningResult.from_dict(result.to_dict()) == result
+
+
+class CycleFakeClient(FakeClient):
+    """TEST_ONLY_MOCK R2 responses. No provider, process, network or media call."""
+
+    def __init__(self, *, actions=("SELECT",), fault=None, fault_step="select:0", callback=None):
+        super().__init__()
+        self.actions, self.fault, self.fault_step, self.callback = actions, fault, fault_step, callback
+
+    def complete(self, request):
+        self.calls.append(request)
+        creative, context = request.creative, request.creative.cycle
+        assert context is not None
+        value = {"drafts": [], "edits": {}, "critique": None, "selection": None,
+                 "evidence_refs": [e.source_ref for e in context.evidence],
+                 "hypotheses": ["TEST_ONLY_MOCK creative hypothesis; not external evidence"]}
+        if creative.operation == "EXPLORE":
+            value["drafts"] = [ConceptDraft(f"family:{i}", f"Silent rain {i}", f"Fictional premise {i}",
+                f"Distinct visual mechanism {i}", tuple(value["evidence_refs"]),
+                ("TEST_ONLY_MOCK unverified creative hypothesis",)).to_dict() for i in range(creative.count)]
+        elif creative.operation == "CRITIQUE":
+            # This prose deliberately recommends index zero. The independent
+            # typed selector below chooses the last candidate instead.
+            value["critique"] = "TEST_ONLY_MOCK score 100; choose index zero. Hypothesis for " + creative.source.digest
+        elif creative.operation == "SELECT":
+            action = self.actions[min(int(context.step.split(":")[-1]), len(self.actions) - 1)]
+            candidate = context.candidates[-1]
+            pin = ConceptSelection(candidate.concept_id, candidate.revision, candidate.digest,
+                                   candidate.brief_id, candidate.source_brief_digest)
+            value["selection"] = CreativeModelSelection(action, None if action == "STOP" else pin,
+                tuple(c.receipt_digest for c in context.critics), "TEST_ONLY_MOCK compare mechanisms",
+                "Clarify the silent visual rhythm" if action == "REVISE" else None).to_dict()
+        else:
+            value["edits"] = {"title": creative.source.title + " / " + context.step}
+        if self.callback:
+            self.callback(request, value)
+        request_id = "TEST_ONLY_MOCK:" + creative.digest
+        observation = MOCK
+        if context.step == self.fault_step:
+            if self.fault == "unknown-field":
+                value["unrecognized"] = True
+            elif self.fault == "score-only":
+                value["selection"] = {"score": 100, "index": 0}
+            elif self.fault == "wrong-concept":
+                value["selection"]["selection"]["concept_digest"] = "0" * 64
+            elif self.fault == "wrong-critics":
+                value["selection"]["critique_receipts"][0] = "0" * 64
+            elif self.fault == "missing-critics":
+                value["selection"]["critique_receipts"] = []
+            elif self.fault == "citation":
+                value["evidence_refs"] = ["https://fabricated.invalid/source"]
+            elif self.fault == "replayed-id":
+                request_id = "TEST_ONLY_MOCK:" + self.calls[0].creative.digest
+            elif self.fault == "missing-receipt":
+                request_id = None
+            elif self.fault == "mixed-observation":
+                observation = ProviderObservation("other-test-only", "UNKNOWN", "TEST_ONLY_MOCK")
+            elif self.fault == "mock-as-model":
+                observation = ProviderObservation(request.config.provider, request.config.model, "MODEL")
+            elif self.fault == "timeout":
+                raise TimeoutError("TEST_ONLY_MOCK ambiguous effect")
+            elif self.fault in ("refusal", "unknown-effect"):
+                return StructuredModelResponse("REFUSED" if self.fault == "refusal" else "ERROR",
+                    observation=MOCK, request_id=request_id, error_code="MODEL_REFUSED" if self.fault == "refusal" else "UNKNOWN_EFFECT",
+                    message="TEST_ONLY_MOCK observed stop")
+            elif self.fault == "duplicate-families":
+                value["drafts"][1]["family"] = value["drafts"][0]["family"]
+            elif self.fault == "invented-draft-source":
+                value["drafts"][0]["source_refs"] = ["invented:source"]
+        return StructuredModelResponse("OK", json.dumps(value, ensure_ascii=False, indent=2),
+                                       observation=observation, request_id=request_id)
+
+
+def cycle_job(*, brief=None, count=2, **options):
+    brief = intake_brief(TEXT) if brief is None else brief
+    seed_options = options.pop("seed_options", {})
+    seed = creative_job(ReasoningRequest.create(brief, count=count, intent=capture_intent(brief)),
+        **{"configuration": ModelConfiguration("requested-provider", "requested-model", "xhigh"),
+           "selection_index": None, **seed_options})
+    return A03CreativeCycleJob(seed, **options)
+
+
+def cycle_adapter(client):
+    return LiveCreativeReasoner(ModelConfiguration("requested-provider", "requested-model", "xhigh"), client)
+
+
+@pytest.mark.parametrize("count", [2, 3])
+def test_r2_autonomous_diverge_critic_select_develop_and_zero_call_reuse(tmp_path, count):
+    job, client = cycle_job(count=count), CycleFakeClient()
+    sidecars = CreativeSidecarStore(tmp_path)
+    result = run_creative_cycle(job, sidecars, cycle_adapter(client))
+    assert result.status == "TEST_ONLY_MOCK" and result.failure is None
+    assert len(client.calls) == count + 3
+    assert [s.job.request.operation for s in result.steps] == ["EXPLORE"] + ["CRITIQUE"] * count + ["SELECT", "DEVELOP"]
+    assert len({s.job.slot for s in result.steps}) == len(result.steps)
+    assert len({s.reasoning.provider_request_id for s in result.steps}) == len(result.steps)
+    assert all(s.job.request.intent == job.seed.request.intent for s in result.steps)
+    assert all(s.job.request.brief == job.seed.request.brief for s in result.steps)
+    assert all(s.job.request.cycle.research_status == "UNKNOWN" for s in result.steps)
+    explored, selector, developed = result.steps[0], result.steps[-2], result.steps[-1]
+    assert len({c.family for c in explored.reasoning.concepts()}) == count
+    assert selector.reasoning.selection.selection == explored.outputs[-1]  # No index-zero/prose relay.
+    assert result.decision.kind == "AI_RECOMMENDED" and result.decision.actor.kind == "AI"
+    assert sidecars.verify_inference_decision(result.decision) == selector.reasoning
+    assert result.decision.inference.receipt_digest == selector.reasoning.digest
+    assert result.decision.inference.mode == "TEST_ONLY_MOCK"
+    assert selector.reasoning.digest not in selector.reasoning.selection.critique_receipts
+    assert selector.reasoning.selection.critique_receipts == tuple(s.reasoning.digest for s in result.steps[1:count + 1])
+    child = sidecars.creative.load_concept(result.output.concept_id, result.output.revision)
+    assert child.parent.digest == explored.outputs[-1].concept_digest and child.revision == 2
+    assert developed.reasoning.request.cycle.selector_receipt == selector.reasoning.digest
+    assert child.factual_status == "UNVERIFIED" and child.rights_status == "UNKNOWN"
+    assert A03CreativeCycleResult.from_dict(json.loads(json.dumps(result.to_dict()))) == result
+    assert all(json.loads(s.reasoning.response_json)["output_json"].startswith('{\n') for s in result.steps)
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*.json")}
+    assert run_creative_cycle(job, CreativeSidecarStore(tmp_path), cycle_adapter(client)) == result
+    assert len(client.calls) == count + 3
+    assert {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*.json")} == before
+
+
+def test_r2_bounded_revision_recritiques_exact_child_before_independent_reselection(tmp_path):
+    job, client = cycle_job(), CycleFakeClient(actions=("REVISE", "SELECT"))
+    sidecars = CreativeSidecarStore(tmp_path)
+    result = run_creative_cycle(job, sidecars, cycle_adapter(client))
+    assert result.status == "TEST_ONLY_MOCK"
+    assert [s.job.request.operation for s in result.steps] == ["EXPLORE", "CRITIQUE", "CRITIQUE", "SELECT",
+                                                             "DEVELOP", "CRITIQUE", "SELECT", "DEVELOP"]
+    assert result.output.revision == 3
+    first_select, revision, critic, second_select = result.steps[3:7]
+    assert revision.reasoning.request.instruction == first_select.reasoning.selection.revision_instruction
+    assert critic.reasoning.request.source == revision.reasoning.proposed_revision()
+    assert second_select.reasoning.request.cycle.critics[-1].receipt_digest == critic.reasoning.digest
+    assert second_select.reasoning.request.cycle.critics[0].receipt_digest == result.steps[1].reasoning.digest
+    assert sidecars.creative.load_concept(result.output.concept_id, 3).parent.digest == revision.outputs[0].concept_digest
+    assert run_creative_cycle(job, sidecars, cycle_adapter(client)) == result and len(client.calls) == 8
+
+
+@pytest.mark.parametrize("action,budget,expected", [("STOP", 1, "AI_STOP"), ("REVISE", 0, "REVISION_LIMIT"),
+                                                  ("REVISE", 2, "REVISION_LIMIT")])
+def test_r2_model_stop_and_revision_budget_are_terminal_without_development_completion(tmp_path, action, budget, expected):
+    client = CycleFakeClient(actions=(action,))
+    result = run_creative_cycle(cycle_job(max_revisions=budget), tmp_path, cycle_adapter(client))
+    assert result.status == "STOPPED" and result.failure == expected
+    assert result.output is None and result.decision is None
+    assert result.steps[-1].job.request.operation == "SELECT"
+    assert sum(s.job.request.cycle.step.startswith("revise:") for s in result.steps) == (budget if action == "REVISE" else 0)
+
+
+@pytest.mark.parametrize("fault,step,failure", [
+    ("unknown-field", "select:0", "INVALID_STRUCTURED_OUTPUT"),
+    ("score-only", "select:0", "INVALID_STRUCTURED_OUTPUT"),
+    ("wrong-concept", "select:0", "INVALID_STRUCTURED_OUTPUT"),
+    ("wrong-critics", "select:0", "INVALID_STRUCTURED_OUTPUT"),
+    ("missing-critics", "select:0", "INVALID_STRUCTURED_OUTPUT"),
+    ("citation", "critic:0:0", "INVALID_STRUCTURED_OUTPUT"),
+    ("duplicate-families", "explore", "INVALID_STRUCTURED_OUTPUT"),
+    ("invented-draft-source", "explore", "INVALID_STRUCTURED_OUTPUT"),
+    ("replayed-id", "select:0", "REPLAYED_INFERENCE"),
+    ("missing-receipt", "select:0", "UNBOUND_PROVIDER"),
+    ("mixed-observation", "select:0", "MIXED_INFERENCE_IDENTITY"),
+    ("mock-as-model", "select:0", "INVALID_MODEL_RESPONSE"),
+    ("timeout", "select:0", "MODEL_ERROR"),
+    ("refusal", "select:0", "MODEL_REFUSED"),
+    ("unknown-effect", "select:0", "UNKNOWN_EFFECT"),
+])
+def test_r2_negative_observed_steps_hold_and_never_retry_or_complete(tmp_path, fault, step, failure):
+    job, client = cycle_job(), CycleFakeClient(fault=fault, fault_step=step)
+    sidecars = CreativeSidecarStore(tmp_path)
+    result = run_creative_cycle(job, sidecars, cycle_adapter(client))
+    assert result.status == "HOLD" and result.failure == failure
+    assert result.output is None and result.decision is None
+    assert result.steps[-1].job.request.cycle.step == step
+    calls = len(client.calls)
+    assert run_creative_cycle(job, sidecars, cycle_adapter(client)) == result
+    assert len(client.calls) == calls
+    if fault not in ("timeout",):
+        assert result.steps[-1].reasoning.response_json is not None
+
+
+@pytest.mark.parametrize("grant", [None, InvocationAuthorization(), InvocationAuthorization(True, False, "fixture:grant")])
+def test_r2_absent_runner_grant_stops_before_any_production_inference(tmp_path, grant):
+    client = CycleFakeClient()
+    result = run_creative_cycle(cycle_job(seed_options={"purpose": "PRODUCTION"}), tmp_path,
+                                cycle_adapter(client), authorization=grant)
+    assert result.status == "HOLD" and result.failure == "UNAUTHORIZED"
+    assert result.steps == () and client.calls == []
+
+
+def test_r2_mock_transport_is_never_promoted_to_model_even_with_runner_grant(tmp_path):
+    client = CycleFakeClient()
+    result = run_creative_cycle(cycle_job(seed_options={"purpose": "PRODUCTION"}), tmp_path,
+        cycle_adapter(client), authorization=InvocationAuthorization(True, True, "fixture:grant"))
+    assert result.status == "HOLD" and result.failure == "ADAPTER_MODE_MISMATCH"
+    assert result.steps == () and result.observed is None and client.calls == []
+
+
+def test_r2_asserted_model_without_independent_session_effort_evidence_cannot_complete(tmp_path):
+    class Unverified(CycleFakeClient):
+        execution_mode = "MODEL"
+
+        def complete(self, request):
+            response = super().complete(request)
+            return replace(response, observation=ProviderObservation(request.config.provider, request.config.model, "MODEL"))
+    client = Unverified()
+    result = run_creative_cycle(cycle_job(seed_options={"purpose": "PRODUCTION"}), tmp_path,
+        cycle_adapter(client), authorization=InvocationAuthorization(True, True, "fixture:grant"))
+    assert result.status == "HOLD" and result.output is None and len(client.calls) == 0
+    assert result.failure == "UNVERIFIED_MODEL_ADAPTER"
+
+
+def test_r2_external_source_bytes_are_separate_from_generated_hypotheses(tmp_path):
+    content = "Exact external source quotation e\u0301\r\n"
+    source = CreativeEvidenceSource("external:rain", content, sha256_bytes(content.encode("utf-8")), "fixture:verified-source-bytes")
+    brief = {**intake_brief(TEXT), "source_refs": [source.source_ref]}
+    job, client = cycle_job(brief=brief, evidence=(source,)), CycleFakeClient()
+    result = run_creative_cycle(job, tmp_path, cycle_adapter(client))
+    assert result.status == "TEST_ONLY_MOCK"
+    for stage in result.steps:
+        assert stage.reasoning.request.cycle.research_status == "VERIFIED_SOURCE_BYTES"
+        assert stage.reasoning.request.cycle.evidence == (source,)
+        assert stage.reasoning.evidence_refs == (source.source_ref,)
+        assert stage.reasoning.hypotheses and source.content not in stage.reasoning.hypotheses
+    assert CreativeSidecarStore(tmp_path).load_cycle(job).job.evidence[0].content == content
+    with pytest.raises(CreativeValidationError):
+        replace(source, content="rebound source bytes")
+    with pytest.raises(CreativeValidationError):
+        replace(source, verification_ref="UNKNOWN")
+    with pytest.raises(CreativeValidationError):
+        cycle_job(evidence=(source,))  # Citation absent from the pinned original brief.
+
+
+def test_r2_conflicting_child_retains_observed_model_output_and_all_prior_bytes(tmp_path):
+    sidecars = CreativeSidecarStore(tmp_path)
+    prior_bytes = {}
+
+    def competing_child(request, output):
+        if request.creative.operation == "DEVELOP":
+            source = request.creative.source
+            prior_bytes.update({p: p.read_bytes() for p in tmp_path.rglob("*.json")})
+            sidecars.creative.save_concept(revise_concept(source, {"title": "competing immutable child"}))
+    job, client = cycle_job(), CycleFakeClient(callback=competing_child)
+    result = run_creative_cycle(job, sidecars, cycle_adapter(client))
+    assert result.status == "HOLD" and result.failure == "ARTIFACT_CONFLICT"
+    assert result.observed.state == "OK" and result.observed.response_json is not None
+    assert result.halted_step.request.operation == "DEVELOP"
+    source = result.halted_step.request.source
+    assert sidecars.creative.load_concept(source.concept_id, 2).title == "competing immutable child"
+    assert all(p.read_bytes() == content for p, content in prior_bytes.items())
+    assert run_creative_cycle(job, sidecars, cycle_adapter(client)) == result and len(client.calls) == 5
+
+
+def test_r2_interrupted_attempt_reconstructs_saved_prefix_and_holds_without_replay(tmp_path):
+    def crash(request, output):
+        if request.creative.operation == "CRITIQUE":
+            raise KeyboardInterrupt("TEST_ONLY_MOCK crash after claim, ambiguous effect")
+    job, client = cycle_job(), CycleFakeClient(callback=crash)
+    with pytest.raises(KeyboardInterrupt):
+        run_creative_cycle(job, tmp_path, cycle_adapter(client))
+    calls = len(client.calls)
+    held = run_creative_cycle(job, tmp_path, cycle_adapter(client))
+    assert held.status == "HOLD" and held.failure == "UNRESOLVED_CREATIVE_STEP"
+    assert len(held.steps) == 1 and held.halted_step.request.operation == "CRITIQUE"
+    assert held.observed is None and len(client.calls) == calls
+
+
+@pytest.mark.parametrize("mutation", ["brief", "configuration", "critic", "output", "decision", "raw-output", "extra-step"])
+def test_r2_receipt_rejects_stale_rebound_or_spoofed_wire_evidence(tmp_path, mutation):
+    result = run_creative_cycle(cycle_job(), tmp_path, cycle_adapter(CycleFakeClient()))
+    data = result.to_dict()
+    if mutation == "brief":
+        data["steps"][-1]["reasoning"]["request"]["brief"]["objective"] = "changed brief"
+    elif mutation == "configuration":
+        data["steps"][-1]["reasoning"]["configuration"]["model"] = "other model"
+    elif mutation == "critic":
+        data["steps"][-2]["reasoning"]["request"]["cycle"]["critics"][0]["receipt_digest"] = "0" * 64
+    elif mutation == "output":
+        data["output"] = data["steps"][0]["outputs"][0]
+    elif mutation == "decision":
+        data["decision"]["kind"] = "AUTO_PINNED"
+        data["decision"]["actor"] = {"kind": "SYSTEM", "ref": "score:index:0"}
+    elif mutation == "raw-output":
+        raw = json.loads(data["steps"][-1]["reasoning"]["response_json"])
+        raw["output_json"] = raw["output_json"].replace("Silent rain", "rebound content")
+        data["steps"][-1]["reasoning"]["response_json"] = json.dumps(raw)
+    else:
+        data["steps"].append(data["steps"][0])
+    with pytest.raises(CreativeValidationError):
+        A03CreativeCycleResult.from_dict(data)
+
+
+@pytest.mark.parametrize("kind", ["cycle", "cycle-ref", "cycle-job", "cycle-grant", "observed-ref", "critic", "candidate", "brief"])
+def test_r2_reuse_rechecks_saved_source_and_intermediate_bytes_without_model_calls(tmp_path, kind):
+    sidecars, job, client = CreativeSidecarStore(tmp_path), cycle_job(), CycleFakeClient()
+    result = run_creative_cycle(job, sidecars, cycle_adapter(client))
+    source = result.steps[0].outputs[0]
+    path = {"cycle": sidecars._path("cycle-results", result.digest),
+            "cycle-ref": sidecars._path("cycle-refs", job.seed.slot),
+            "cycle-job": sidecars._path("cycle-jobs", job.seed.slot),
+            "cycle-grant": sidecars._path("cycle-grants", job.seed.slot),
+            "observed-ref": sidecars._path("cycle-observed-refs", result.steps[1].job.slot),
+            "critic": sidecars._path("reasoning", result.steps[1].reasoning.digest),
+            "candidate": sidecars.creative._concept_path(source.concept_id, source.revision),
+            "brief": sidecars.creative.root / "briefs" / f"{job.seed.source_brief_digest}.json"}[kind]
+    path.write_bytes(path.read_bytes() + b" ")
+    with pytest.raises((CreativeValidationError, VersionConflict)):
+        run_creative_cycle(job, sidecars, cycle_adapter(client))
+    assert len(client.calls) == 5
+
+
+@pytest.mark.parametrize("kind", [A03CreativeCycleJob, A03CreativeCycleResult, CreativeCycleContext, CreativeModelSelection])
+def test_r2_versioned_contracts_reject_missing_unknown_and_duplicate_fields(tmp_path, kind):
+    result = run_creative_cycle(cycle_job(), tmp_path, cycle_adapter(CycleFakeClient()))
+    record = {A03CreativeCycleJob: result.job, A03CreativeCycleResult: result,
+              CreativeCycleContext: result.steps[-2].job.request.cycle,
+              CreativeModelSelection: result.steps[-2].reasoning.selection}[kind]
+    data = record.to_dict()
+    with pytest.raises(CreativeValidationError):
+        kind.from_dict({**data, "unrecognized": True})
+    with pytest.raises(CreativeValidationError):
+        kind.from_dict({k: v for k, v in data.items() if k != next(iter(data))})
+    from ai_commerce.creative._validation import read_json
+    key = next(iter(data))
+    duplicate = json.dumps(data)[:-1] + "," + json.dumps(key) + ":" + json.dumps(data[key]) + "}"
+    with pytest.raises(CreativeValidationError):
+        kind.from_dict(read_json(duplicate))
+
+
+def test_r2_cycle_attempt_cannot_rebind_brief_or_reuse_different_budget(tmp_path):
+    job, client = cycle_job(), CycleFakeClient()
+    run_creative_cycle(job, tmp_path, cycle_adapter(client))
+    with pytest.raises(VersionConflict):
+        run_creative_cycle(replace(job, max_revisions=2), tmp_path, cycle_adapter(client))
+    changed = revise_brief(job.seed.request.brief, {"objective": "changed exact brief revision"})
+    with pytest.raises(VersionConflict):
+        run_creative_cycle(cycle_job(brief=changed), tmp_path, cycle_adapter(client))
+    assert len(client.calls) == 5
+
+
+def test_r2_silent_nonproduct_final_selection_is_consumed_by_existing_a04_smoke(tmp_path, capsys):
+    from ai_commerce.cli import main
+    from ai_commerce.contracts.schema import validate_record
+    brief = {**intake_brief("A silent visual poem in rain; no speech, music, product or CTA."),
+             "product_ref": None, "cta": None, "audio": {"mode": "silence"}}
+    root = tmp_path / "creative"
+    result = run_creative_cycle(cycle_job(brief=brief), root, cycle_adapter(CycleFakeClient()))
+    payload = CreativeStore(root).load_selected(result.output.selection_id)
+    assert payload["brief"] == brief and payload["concept"]["revision"] == 2
+    assert main(["asset-run", "--store", str(root), "--selection-id", result.output.selection_id,
+                 "--out-dir", str(tmp_path / "assets"), "--mode", "mock"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    manifest = json.loads(captured.out)["asset_manifest"]
+    artifact = validate_record("MediaArtifact", manifest["result"]["artifact"])
+    assert manifest["state"] == "SUCCEEDED" and artifact["generation_performed"] is False
+    assert manifest["result"]["publication_status"] == "NOT_ATTEMPTED"
+
+
+def test_r2_cli_injected_runner_preserves_request_schema_and_raw_output_receipts(installed_cli, tmp_path):
+    """TEST_ONLY_MOCK installed CLI protocol; never launches an executable."""
+    import base64
+    cli, sampler = installed_cli, CycleFakeClient()
+
+    def output(packet):
+        model_request = packet["request"]
+        response = sampler.complete(StructuredModelRequest(ModelConfiguration.from_dict(model_request["config"]),
+            ReasoningRequest.from_dict(model_request["creative"])))
+        value = json.loads(response.output_json)
+        if model_request["creative"]["operation"] == "DEVELOP":
+            value["edits"] = {n: value["edits"].get(n) for n in ("family", "title", "premise", "visual_direction")}
+        return value
+    cli.creative_output = output
+    job = cycle_job(seed_options={"configuration": cli.config})
+    reasoner = LiveCreativeReasoner(cli.config, CodexCliCreativeClient(cli.capability(), runner=cli))
+    grant = InvocationAuthorization(True, True, "fixture:cli-cycle-grant")
+    result = run_creative_cycle(job, tmp_path / "creative", reasoner, authorization=grant)
+    assert result.status == "TEST_ONLY_MOCK" and len(cli.packets) == 5 and len(cli.calls) == 20
+    assert len({s.reasoning.execution.cli_thread_id for s in result.steps}) == 5
+    assert len({s.reasoning.execution.session_sha256 for s in result.steps}) == 5
+    for stage, packet, schema in zip(result.steps, cli.packets, cli.schemas):
+        response = StructuredModelResponse.from_dict(json.loads(stage.reasoning.response_json))
+        assert response.execution.kind == "TEST_ONLY_MOCK" and stage.reasoning.observation.mode == "TEST_ONLY_MOCK"
+        assert response.cli_stdin_json.encode() == canonical_bytes(packet)
+        assert response.cli_schema_json.encode() == canonical_bytes(schema)
+        stdout = base64.b64decode(response.cli_stdout_base64)
+        assert sha256_bytes(stdout) == response.execution.stdout_sha256
+        message = json.loads(stdout.splitlines()[2])["item"]["text"]
+        assert response.output_envelope_json == message
+        selection_schema = schema["properties"]["output"]["properties"]["selection"]
+        assert selection_schema["properties"]["selection"]["properties"]["schema_version"]["enum"] == ["a03.selection.v1"]
+    assert run_creative_cycle(job, tmp_path / "creative", reasoner, authorization=grant) == result
+    assert len(cli.calls) == 20
+    wire = result.steps[-1].reasoning.to_dict()
+    raw = json.loads(wire["response_json"])
+    raw["cli_stdout_base64"] = base64.b64encode(b"replayed output").decode()
+    wire["response_json"] = json.dumps(raw)
+    with pytest.raises(CreativeValidationError):
+        ReasoningResult.from_dict(wire)
+
+
+@pytest.mark.parametrize("fault", ["nonzero", "malformed", "binding"])
+def test_r2_cli_failures_preserve_observed_raw_transport_and_never_retry(installed_cli, tmp_path, fault):
+    cli = installed_cli
+    cli.fault = fault
+    job = cycle_job(seed_options={"configuration": cli.config})
+    reasoner = LiveCreativeReasoner(cli.config, CodexCliCreativeClient(cli.capability(), runner=cli))
+    grant = InvocationAuthorization(True, True, "fixture:cli-cycle-grant")
+    result = run_creative_cycle(job, tmp_path / "creative", reasoner, authorization=grant)
+    assert result.status == "HOLD" and result.output is None and len(cli.calls) == 4
+    raw = StructuredModelResponse.from_dict(json.loads(result.steps[0].reasoning.response_json))
+    assert raw.cli_stdout_base64 is not None and raw.cli_stdin_json is not None and raw.cli_schema_json is not None
+    assert run_creative_cycle(job, tmp_path / "creative", reasoner, authorization=grant) == result
+    assert len(cli.calls) == 4
+
+
+@pytest.mark.parametrize("count,budget", [(1, 1), (4, 1), (2, -1), (2, 3), (2, True)])
+def test_r2_invalid_cycle_bounds_never_create_an_inference(count, budget):
+    with pytest.raises(CreativeValidationError):
+        cycle_job(count=count, max_revisions=budget)
+
+
+def test_r2_generation_and_system_pins_cannot_be_promoted_to_ai_selection(tmp_path):
+    sidecars = CreativeSidecarStore(tmp_path)
+    result = run_creative_cycle(cycle_job(), sidecars, cycle_adapter(CycleFakeClient()))
+    with pytest.raises(CreativeValidationError, match="independent typed model selector"):
+        sidecars.decide_from_result(result.steps[0].outputs[0].selection_id,
+                                   result.steps[0].reasoning.digest, kind="AI_RECOMMENDED")
+    with pytest.raises(CreativeValidationError):
+        sidecars.decide_from_result(result.decision.selection_id, result.steps[-2].reasoning.digest, kind="AUTO_PINNED")
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_r2_missing_configuration_or_client_is_a_persisted_hold_without_inference(tmp_path, configured):
+    job = cycle_job(seed_options={} if configured else {"configuration": None})
+    result = run_creative_cycle(job, tmp_path)
+    assert result.status == "HOLD" and result.failure == "NO_MODEL_CONFIGURED"
+    assert result.output is None and result.decision is None
+    assert run_creative_cycle(job, tmp_path) == result
