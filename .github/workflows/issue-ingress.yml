@@ -225,6 +225,93 @@ jobs:
                 });
               }
             }
+            // Protected, independent six-slot 9444 metadata sanitizer. A
+            // malformed/missing native record must also fail closed when the
+            // authenticated Issue requested this exact registered READ.
+            let registryRequested = false;
+            try {
+              const request = JSON.parse(context.payload?.issue?.body || '');
+              registryRequested = request && typeof request === 'object' &&
+                !Array.isArray(request) && Object.keys(request).length === 3 &&
+                Object.keys(request).every(k => ['schema','operation','parameters'].includes(k)) &&
+                request.schema === 'ai-commerce.personal-hostops.v1' &&
+                request.operation === 'cdp_9444_config_registry' &&
+                request.parameters && typeof request.parameters === 'object' &&
+                !Array.isArray(request.parameters) && Object.keys(request.parameters).length === 0;
+            } catch (_) { /* An invalid Issue cannot authorize a metadata READ. */ }
+            const registrySlotIds = ['SLOT_01','SLOT_02','SLOT_03','SLOT_04','SLOT_05','SLOT_06'];
+            const registryStates = ['ABSENT','PRESENT_FILE','PRESENT_NONFILE','UNAVAILABLE_OR_REPARSE'];
+            if (registryRequested || record.operation === 'cdp_9444_config_registry') {
+              const keys = new Set([
+                'status','code','operation','cdp_port','slots','counts',
+                'no_shell_command_executed','browser_attached','chrome_launched',
+                'config_written','enrollment_performed','send_performed','grant_issued',
+                'issue_number','approval_channel','remote_shell_enabled','source_sha',
+              ]);
+              const noEffects = [
+                'browser_attached','chrome_launched','config_written',
+                'enrollment_performed','send_performed','grant_issued',
+              ];
+              const rows = record.slots;
+              const totals = record.counts;
+              const canonical = typeof rawNativeText === 'string' &&
+                rawNativeText.trim() === JSON.stringify(record) &&
+                Buffer.byteLength(rawNativeText,'utf8') <= 8192;
+              const rowsValid = Array.isArray(rows) && rows.length === registrySlotIds.length &&
+                rows.every((row, i) => row && typeof row === 'object' &&
+                  !Array.isArray(row) && Object.keys(row).length === 2 &&
+                  Object.prototype.hasOwnProperty.call(row,'slot_id') &&
+                  Object.prototype.hasOwnProperty.call(row,'status') &&
+                  row.slot_id === registrySlotIds[i] && registryStates.includes(row.status));
+              const countsValid = rowsValid && totals && typeof totals === 'object' &&
+                !Array.isArray(totals) && Object.keys(totals).length === registryStates.length &&
+                registryStates.every(state => Object.prototype.hasOwnProperty.call(totals,state) &&
+                  Number.isInteger(totals[state]) && totals[state] >= 0 && totals[state] <= 6 &&
+                  totals[state] === rows.filter(row => row.status === state).length);
+              const unknownOnly = rowsValid && (
+                (['OWNER_KNOWN_FOLDER_UNAVAILABLE','REGISTRY_SOURCE_UNAVAILABLE'].includes(record.code) &&
+                  rows.every(row => row.status === 'UNAVAILABLE_OR_REPARSE')) ||
+                (record.code === 'CONFIG_CUSTODY_UNAVAILABLE' &&
+                  rows.some(row => row.status === 'UNAVAILABLE_OR_REPARSE'))
+              );
+              const stateValid = (record.status === 'OBSERVED' && record.code === 'METADATA_ONLY' &&
+                rowsValid && rows.every(row => row.status !== 'UNAVAILABLE_OR_REPARSE')) ||
+                (record.status === 'UNKNOWN' && unknownOnly);
+              const valid = registryRequested && canonical &&
+                Object.keys(record).length === keys.size &&
+                Object.keys(record).every(k => keys.has(k)) &&
+                record.operation === 'cdp_9444_config_registry' &&
+                record.cdp_port === 9444 && stateValid && countsValid &&
+                record.no_shell_command_executed === true &&
+                noEffects.every(k => record[k] === false) &&
+                record.remote_shell_enabled === false &&
+                record.issue_number === context.issue.number &&
+                record.approval_channel === 'CHATGPT_TO_AI_COMMERCE_ISSUE' &&
+                typeof record.source_sha === 'string' &&
+                /^[0-9a-f]{40}$/.test(record.source_sha) &&
+                record.source_sha === context.sha;
+              // Never inherit the generic projection on either path.
+              for (const key of Object.keys(sanitized)) delete sanitized[key];
+              if (!valid) {
+                Object.assign(sanitized, {status:'BLOCKED',
+                  operation:'cdp_9444_config_registry',
+                  code:'INVALID_PUBLIC_CDP_REGISTRY_RECEIPT'});
+              } else {
+                Object.assign(sanitized, {
+                  status:record.status,code:record.code,
+                  operation:'cdp_9444_config_registry',cdp_port:9444,
+                  issue_number:context.issue.number,
+                  slots:rows.map(row => ({slot_id:row.slot_id,status:row.status})),
+                  counts:Object.fromEntries(registryStates.map(state => [state,totals[state]])),
+                  no_shell_command_executed:true,
+                  browser_attached:false,chrome_launched:false,config_written:false,
+                  enrollment_performed:false,send_performed:false,grant_issued:false,
+                  remote_shell_enabled:false,
+                  approval_channel:'CHATGPT_TO_AI_COMMERCE_ISSUE',
+                  source_sha:record.source_sha,
+                });
+              }
+            }
             const result = 'AI_COMMERCE_PERSONAL_HOSTOPS_RESULT_V1\n' + JSON.stringify(sanitized);
             await github.rest.issues.createComment({
               owner: context.repo.owner, repo: context.repo.repo,
