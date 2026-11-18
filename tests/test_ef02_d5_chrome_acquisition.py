@@ -2111,3 +2111,285 @@ def test_l1a_changed_lifecycle_evidence_discards_private_observation(monkeypatch
     assert (result.state, result.code, result.status) == ("UNKNOWN_EFFECT", "OBSERVATION_CHANGED", "HOLD")
     assert result.observation is None and calls == ["read", "read"]
     assert not ca._NativeEnrollment.instances
+
+
+@pytest.fixture
+def clean_9444(monkeypatch, tmp_path):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    from ai_commerce.remote import local_completion_handoff, local_wake_entry
+
+    local = tmp_path / "Local App Data"
+    directory = local / "AI-Commerce" / "WakeHub-9444-Clean"
+    (directory / "Default").mkdir(parents=True)
+    legacy = local / "AI-Commerce" / "D5-Isolated-9444-Trial" / "config.json"
+    legacy.parent.mkdir()
+    legacy.write_bytes(b"independent legacy config")
+    files = tmp_path / "Program Files"
+    exe = files / "Google" / "Chrome" / "Application" / "chrome.exe"
+    exe.parent.mkdir(parents=True)
+    exe.touch()
+    target = ca._ChromeTarget(exe.resolve(), directory.resolve(), "Default", "http://127.0.0.1:9444", 9444)
+    running = {"listeners": [{"LocalAddress": "127.0.0.1", "LocalPort": 9444, "OwningProcess": 500}],
+               "processes": [{"ProcessId": 500, "ExecutablePath": str(target.executable), "SessionId": 1,
+                              "OwnerSid": _OPERATOR_SID, "CreationDate": "2026-11-18T01:00:00Z",
+                              "CommandLine": json.dumps(target.command())}]}
+    absent = {"listeners": [], "processes": []}
+    state = SimpleNamespace(inventory=absent, pending=False, running=running, absent=absent,
+                            target=target, legacy=legacy, events=[], launches=[], probes=[])
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Unexpected native process, task, legacy config or browser operation")
+
+    def query(port):
+        assert port == 9444
+        return state.inventory
+
+    def record(pending):
+        state.pending = pending
+        state.events.append(("pending", pending))
+
+    def launch(command, **kwargs):
+        assert state.pending and command == target.command()
+        assert kwargs["close_fds"] and not kwargs.get("shell")
+        assert "GITHUB_TOKEN" not in kwargs["env"]
+        state.launches.append(command)
+        state.inventory = state.running
+        return SimpleNamespace(pid=500, poll=lambda: None)
+
+    monkeypatch.setattr(ca, "os", SimpleNamespace(name="nt", environ={"GITHUB_TOKEN": "private"}))
+    monkeypatch.setattr(ca.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr(ca, "_interactive_session", lambda: 1)
+    monkeypatch.setattr(ca, "_native_local_app_data", lambda: local)
+    monkeypatch.setattr(ca, "_native_known_folder", lambda folder: files)
+    monkeypatch.setattr(local_wake_entry, "_windows_process_sid", lambda: _OPERATOR_SID)
+    monkeypatch.setattr(local_completion_handoff, "_private_identity", lambda path: _OPERATOR_SID)
+    monkeypatch.setattr(ca, "_clean_supervisor_slot", nullcontext)
+    monkeypatch.setattr(ca, "_clean_launch_pending", lambda: state.pending)
+    monkeypatch.setattr(ca, "_clean_record_launch", record)
+    monkeypatch.setattr(ca, "_query_windows", query)
+    monkeypatch.setattr(ca, "_commandline_argv", json.loads)
+    monkeypatch.setattr(ca, "_verify_google_chrome", lambda current: state.events.append("signature"))
+    monkeypatch.setattr(ca, "_probe_cdp", lambda current: state.probes.append(current.endpoint))
+    monkeypatch.setattr(ca.subprocess, "Popen", launch)
+    for name in ("_clean_task", "load_environment", "_config_9444_registry", "verify_playwright_attach"):
+        monkeypatch.setattr(ca, name, forbidden)
+    monkeypatch.setattr(ca.subprocess, "run", forbidden)
+    monkeypatch.setattr(local_wake_entry, "send_one", forbidden)
+    return state
+
+
+def test_clean_9444_absent_launches_once_and_reuses_healthy_chrome(clean_9444, tmp_path):
+    state = clean_9444
+    assert ca.ensure_clean_9444(opt_in=True) == {"status": "STARTED", "code": "CDP_VERIFIED"}
+    assert state.events == ["signature", ("pending", True), ("pending", False)]
+    assert ca.ensure_clean_9444(opt_in=True) == {"status": "REUSE", "code": "CDP_VERIFIED"}
+    assert state.launches == [state.target.command()]
+    assert state.probes == ["http://127.0.0.1:9444"] * 2
+    assert list(tmp_path.rglob("config.json")) == [state.legacy]
+    assert state.legacy.read_bytes() == b"independent legacy config"
+
+
+def test_clean_9444_reuses_manual_browser_with_chrome_helpers(clean_9444):
+    state = clean_9444
+    browser = state.running["processes"][0]
+    browser["CommandLine"] = json.dumps([str(state.target.executable),
+        f"--user-data-dir={state.target.user_data_dir}", "--remote-debugging-port=9444"])
+    helper = dict(browser, ProcessId=501, CommandLine=json.dumps([str(state.target.executable),
+        "--type=renderer", f"--user-data-dir={state.target.user_data_dir}"]))
+    other = dict(browser, ProcessId=502, CommandLine=json.dumps([str(state.target.executable),
+        "--remote-debugging-port=9333"]))
+    state.running["processes"].extend([helper, other])
+    (state.target.user_data_dir / "lockfile").touch()
+    state.inventory = state.running
+    assert ca.ensure_clean_9444(opt_in=True)["status"] == "REUSE"
+    assert not state.launches and len(state.probes) == 1
+
+
+@pytest.mark.parametrize("case,code", [
+    ("mixed", "BROWSER_OWNERSHIP_UNPROVEN"), ("duplicate", "BROWSER_OWNERSHIP_UNPROVEN"),
+    ("foreign", "FOREIGN_PORT_OWNER"), ("wrong_profile", "BROWSER_OWNERSHIP_UNPROVEN"),
+    ("wrong_binary", "BROWSER_OWNERSHIP_UNPROVEN"), ("wrong_sid", "BROWSER_OWNERSHIP_UNPROVEN"),
+    ("no_listener", "PROFILE_ALREADY_ACTIVE_NO_CDP"), ("stale_lock", "PROFILE_LOCKED"),
+    ("unsigned", "CHROME_EXECUTABLE_UNTRUSTED"),
+])
+def test_clean_9444_conflicts_hold_without_probe_or_spawn(clean_9444, monkeypatch, case, code):
+    state = clean_9444
+    state.inventory = state.running
+    listener = state.running["listeners"][0]
+    browser = state.running["processes"][0]
+    if case == "mixed":
+        state.running["listeners"].append(dict(listener, LocalAddress="::1"))
+    elif case == "duplicate":
+        state.running["processes"].append(dict(browser, ProcessId=501))
+    elif case == "foreign":
+        listener["OwningProcess"] = 501
+    elif case == "wrong_profile":
+        argv = [arg.replace("--profile-directory=Default", "--profile-directory=Profile 1")
+                for arg in state.target.command()]
+        browser["CommandLine"] = json.dumps(argv)
+    elif case == "wrong_binary":
+        browser["ExecutablePath"] = str(state.legacy.parent / "chrome.exe")
+    elif case == "wrong_sid":
+        browser["OwnerSid"] += "1"
+    elif case == "no_listener":
+        state.running["listeners"].clear()
+    elif case == "stale_lock":
+        state.inventory = state.absent
+        (state.target.user_data_dir / "Default" / "SingletonLock").write_bytes(b"stale")
+    else:
+        def unsigned(current):
+            raise ca.AcquisitionBlocked("CHROME_EXECUTABLE_UNTRUSTED")
+        monkeypatch.setattr(ca, "_verify_google_chrome", unsigned)
+    assert ca.ensure_clean_9444(opt_in=True) == {"status": "HOLD", "code": code}
+    assert not state.launches and not state.probes and not state.pending
+    if case == "stale_lock":
+        assert (state.target.user_data_dir / "Default" / "SingletonLock").read_bytes() == b"stale"
+
+
+@pytest.mark.parametrize("failure", ["spawn", "probe", "different_owner"])
+def test_clean_9444_retains_unknown_across_new_ensure_calls(clean_9444, monkeypatch, failure):
+    state = clean_9444
+    real_mock_launch = ca.subprocess.Popen
+
+    def launch(*args, **kwargs):
+        child = real_mock_launch(*args, **kwargs)
+        if failure == "spawn":
+            raise OSError("private launch detail")
+        if failure == "different_owner":
+            child.pid = 501
+        return child
+
+    def bad_probe(current):
+        state.probes.append(current.endpoint)
+        raise ca.AcquisitionBlocked("CDP_PROTOCOL_UNAVAILABLE")
+
+    monkeypatch.setattr(ca.subprocess, "Popen", launch)
+    monkeypatch.setattr(ca, "_probe_cdp", bad_probe)
+    expected = {"status": "HOLD", "code": "UNKNOWN_EFFECT"}
+    assert ca.ensure_clean_9444(opt_in=True) == expected
+    assert len(state.probes) == (1 if failure == "probe" else 0)
+    state.inventory = state.absent
+    assert ca.ensure_clean_9444(opt_in=True) == expected
+    assert len(state.launches) == 1 and state.pending
+
+
+def test_clean_9444_owned_probe_failure_does_not_launch_or_retry(clean_9444, monkeypatch):
+    state = clean_9444
+    state.inventory = state.running
+
+    def probe_failure(current):
+        state.probes.append(current.port)
+        raise ca.AcquisitionBlocked("CDP_PROTOCOL_UNAVAILABLE")
+
+    monkeypatch.setattr(ca, "_probe_cdp", probe_failure)
+    assert ca.ensure_clean_9444(opt_in=True) == {"status": "HOLD", "code": "CDP_PROTOCOL_UNAVAILABLE"}
+    assert state.probes == [9444] and not state.launches and not state.pending
+
+
+def test_clean_9444_supervisor_slot_blocks_a_second_monitor_and_one_shot(clean_9444, monkeypatch):
+    def occupied():
+        raise ca._Clean9444Hold("SUPERVISOR_ACTIVE")
+
+    monkeypatch.setattr(ca, "_clean_supervisor_slot", occupied)
+    assert ca.supervise_clean_9444()["code"] == "SUPERVISOR_ACTIVE"
+    assert ca.ensure_clean_9444(opt_in=True)["code"] == "SUPERVISOR_ACTIVE"
+    assert not clean_9444.events and not clean_9444.launches
+
+
+@pytest.mark.parametrize("operation", [ca.ensure_clean_9444, ca.install_clean_9444_autostart])
+def test_clean_9444_native_gates_precede_process_and_task_access(clean_9444, monkeypatch, operation):
+    assert operation()["code"] == "OPT_IN_REQUIRED"
+    assert operation(opt_in=1)["code"] == "OPT_IN_REQUIRED"
+    monkeypatch.setattr(ca, "_interactive_session", lambda: 0)
+    assert operation(opt_in=True)["code"] == "ENROLLMENT_IDENTITY_UNPROVEN"
+
+    def elevated():
+        raise ca.AcquisitionBlocked("ELEVATED_CHROME_DISALLOWED")
+
+    monkeypatch.setattr(ca, "_interactive_session", elevated)
+    assert operation(opt_in=True)["code"] == "ELEVATED_CHROME_DISALLOWED"
+    ca.os.environ["CI"] = "true"
+    assert operation(opt_in=True)["code"] == "LOCAL_OPERATOR_ONLY"
+    assert not clean_9444.events and not clean_9444.launches
+
+
+@pytest.mark.parametrize("responses,status", [
+    (["ENROLLED", "ALREADY_ENROLLED"], "ENROLLED"),
+    (["AUTOSTART_CONFLICT"], "HOLD"), (["UNKNOWN_EFFECT"], "HOLD"),
+])
+def test_clean_9444_scheduler_install_reports_exact_private_status(clean_9444, monkeypatch, responses, status):
+    calls = []
+    remaining = iter(responses)
+
+    def task(sid, *, install):
+        calls.append((sid, install))
+        return next(remaining)
+
+    monkeypatch.setattr(ca, "_clean_task", task)
+    for code in responses:
+        assert ca.install_clean_9444_autostart(opt_in=True) == {"status": status, "code": code}
+    assert calls == [(_OPERATOR_SID, True)] * len(responses)
+    assert not clean_9444.launches and not clean_9444.probes
+    script = ca._CLEAN_9444_TASK_SCRIPT
+    assert script.index("$registered = Read-Registration") < script.index(".RegisterTaskDefinition(")
+    assert "$expected, 34, $sid, $null, 3, $sddl" in script  # Create only, interactive token.
+    assert script.count(".RegisterTaskDefinition(") == 1
+
+
+def test_clean_9444_registered_supervisor_recovers_after_browser_closes(clean_9444, monkeypatch, capsys):
+    state = clean_9444
+    state.inventory = state.running
+    monkeypatch.setattr(ca.sys, "stdin", None)
+    monkeypatch.setattr(ca, "_clean_task", lambda sid, *, install: "AUTOSTART_NOT_ENROLLED")
+    assert ca.supervise_clean_9444()["code"] == "AUTOSTART_NOT_ENROLLED"
+    assert not state.probes and not state.launches
+    reads, sleeps = [], []
+
+    def enrolled(sid, *, install):
+        reads.append((sid, install))
+        return "ALREADY_ENROLLED"
+
+    def sleep(seconds):
+        assert seconds == 60
+        sleeps.append(seconds)
+        if len(sleeps) == 2:
+            raise KeyboardInterrupt
+        state.inventory = state.absent
+
+    monkeypatch.setattr(ca, "_clean_task", enrolled)
+    monkeypatch.setattr(ca.time, "sleep", sleep)
+    with pytest.raises(KeyboardInterrupt):
+        ca.supervise_clean_9444()
+    assert reads == [(_OPERATOR_SID, False)] and sleeps == [60, 60]
+    assert len(state.launches) == 1 and len(state.probes) == 2
+    assert [json.loads(line)["status"] for line in capsys.readouterr().out.splitlines()] == ["REUSE", "STARTED"]
+
+
+def test_clean_9444_cli_refuses_caller_selected_native_inputs(clean_9444, capsys, monkeypatch):
+    assert ca.main(["ensure-clean-9444"]) == 2
+    assert json.loads(capsys.readouterr().out)["code"] == "OPT_IN_REQUIRED"
+    monkeypatch.setitem(ca.os.environ, "CI", "true")
+    assert ca.main(["ensure-clean-9444", "--opt-in"]) == 2
+    output = capsys.readouterr()
+    assert json.loads(output.out) == {"status": "HOLD", "code": "LOCAL_OPERATOR_ONLY"}
+    assert output.err == ""
+    for option in ("--config", "--checkout", "--port", "--executable", "--url", "--command"):
+        with pytest.raises(SystemExit) as exit_info:
+            ca.main(["install-clean-9444-autostart", "--opt-in", option, "untrusted"])
+        assert exit_info.value.code == 2
+    assert not clean_9444.events and not clean_9444.launches
+
+
+def test_clean_9444_import_is_inert(monkeypatch):
+    import runpy
+    import sys
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Import triggered a native effect")
+
+    monkeypatch.setitem(sys.modules, "winreg", None)
+    monkeypatch.setattr(ca.subprocess, "Popen", unexpected)
+    monkeypatch.setattr(ca.subprocess, "run", unexpected)
+    loaded = runpy.run_path(ca.__file__)
+    assert callable(loaded["install_clean_9444_autostart"])
