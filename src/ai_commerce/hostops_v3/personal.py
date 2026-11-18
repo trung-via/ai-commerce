@@ -1746,9 +1746,8 @@ def main():
         with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as stream:
             event = json.load(stream)
         request = parse_event(event, args.mode)
-        if request["operation"] == "cdp_9444_config_registry":
-            # Public Issue transport needs an independent closed sanitizer.
-            deny("PUBLIC_RECEIPT_INTEGRATION_PENDING")
+        # The protected Issue ingress independently validates and reconstructs
+        # the closed six-slot public receipt before posting any result.
         outcome = perform(request)
         result = {
             **outcome,
