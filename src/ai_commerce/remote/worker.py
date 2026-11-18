@@ -24,7 +24,7 @@ from .candidate_policy import (
     REVIEW_STATUS, VERIFIED_STATUSES, candidate_accepted, evidence_digest, validate_candidate_evidence,
 )
 from ai_commerce.engineering.runner import (
-    DEFAULT_MAX_REPAIR_ROUNDS, DEFAULT_ACTION_TIMEOUT_SECONDS,
+    DEFAULT_MAX_REPAIR_ROUNDS, DEFAULT_ACTION_TIMEOUT_SECONDS, DEFAULT_VERIFY_TIMEOUT_SECONDS,
     validate_max_repair_rounds, _snapshot, _provider_problem, _outside_scope,
 )
 from ai_commerce.engineering.git import git_argv, resolve_git_executable
@@ -34,13 +34,16 @@ from ai_commerce.engineering.source_safety import checked_path, protected_change
 
 
 # Human-authorized temporary full-regression budget until ATB-01 is accepted.
-# Ordinary AUTO/owner tests retain all preexisting caps. EF02 Windows job is 360m.
+# AUTO now gets the Human-approved 90m verification window. EF02 Windows job is 360m.
 def _temporary_verification_budget(*, human_full_suite_authorized: bool) -> tuple[int | None, int, int]:
     if human_full_suite_authorized:
         # 180m test budget plus at most 120m EF01 executor time. The external
         # child watchdog exceeds the combined action by only five minutes.
         return (180 * 60, 300 * 60, 305 * 60)
-    return (None, DEFAULT_ACTION_TIMEOUT_SECONDS, 7500)
+    # Keep a 120m executor window + 90m verification window, then a 5m
+    # child cleanup margin. The parent watchdog must not truncate pytest.
+    return (DEFAULT_VERIFY_TIMEOUT_SECONDS, DEFAULT_ACTION_TIMEOUT_SECONDS,
+            DEFAULT_ACTION_TIMEOUT_SECONDS + 300)
 
 
 def _new_worktree_path(checkout: Path) -> Path:
