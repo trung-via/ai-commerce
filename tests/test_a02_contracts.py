@@ -24,6 +24,32 @@ def test_content_brief_can_be_noncommercial_and_freeform() -> None:
     validate_record("ContentBrief", {**brief, "unusual_custom_field": {"abstract": True}})
 
 
+def test_repeated_validation_reuses_verified_schema_graph_without_mutating_public_loader(monkeypatch):
+    import ai_commerce.contracts.schema as contracts
+
+    contracts._validation_bundle.cache_clear()
+    original = contracts.load_schema
+    seen = []
+
+    def tracked(name):
+        seen.append(name)
+        return original(name)
+
+    monkeypatch.setattr(contracts, "load_schema", tracked)
+    brief = json.loads((ROOT / "fixtures/creative_only_brief.json").read_text(encoding="utf-8"))
+    try:
+        for _ in range(3):
+            assert contracts.validate_record("ContentBrief", brief) is brief
+        assert sorted(seen) == sorted(SCHEMAS)
+        assert contracts._validation_bundle.cache_info().hits == 2
+        # External users of load_schema still get a fresh mutable mapping.
+        exposed = contracts.load_schema("ContentBrief")
+        exposed["title"] = "changed by consumer"
+        assert contracts.load_schema("ContentBrief")["title"] == "ContentBrief"
+    finally:
+        contracts._validation_bundle.cache_clear()
+
+
 def test_invalid_brief_reports_precise_error() -> None:
     invalid = json.loads((ROOT / "fixtures/invalid_brief.json").read_text(encoding="utf-8"))
     with pytest.raises(ContractValidationError, match="INVALID_ContentBrief"):

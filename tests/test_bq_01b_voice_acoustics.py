@@ -671,8 +671,8 @@ def test_registered_new_owner_and_actual_readonly_consumer_closure():
     assert manifest["consumers"] == ["src/ai_commerce/creative_quality/" + name + ".py" for name in ("causality", "capability", "behavioral")] + ["src/ai_commerce/creative/briefs.py"]
     assert manifest["contracts"] == [] and manifest["acs"] == work["acceptance"]
     assert work["allowed_paths"] == ADDITIONS and work["source_sha"] == BASE
-    # Reconstruct the consumer closure from forward imports and immutable
-    # baseline owners, independently of the selector's reverse-graph result.
+    # Reconstruct the reviewed two-hop consumer closure from forward imports
+    # and immutable baseline owners, independently of the selector's graph.
     baseline = load_baseline_component_owner_records(root=ROOT, base_sha=BASE, existing_groups=static)
     registered = (*static, *(record["group"] for record in baseline), TestGroup(
         manifest["component"], tuple(manifest["tests"]), tuple(manifest["acs"]),
@@ -684,10 +684,8 @@ def test_registered_new_owner_and_actual_readonly_consumer_closure():
     graph, _ = import_graph(ROOT, {p: h for p, h in files.items()
         if p.endswith(".py") and p.startswith(("src/ai_commerce/", "tests/"))})
     affected = set(ADDITIONS)
-    while True:
+    for _ in range(2):
         consumers = {path for path, dependencies in graph.items() if dependencies & affected}
-        if consumers <= affected:
-            break
         affected.update(consumers)
     _, complete = import_graph(ROOT, {p: files[p] for p in affected if p in graph})
     assert complete
@@ -697,7 +695,10 @@ def test_registered_new_owner_and_actual_readonly_consumer_closure():
     receipt = "src/ai_commerce/production_runtime/receipt.py"
     worker = "src/ai_commerce/production_runtime/attended_worker.py"
     assert scene in graph[observation] and observation in graph[receipt] and receipt in graph[worker]
-    assert {scene, observation, receipt, worker} <= affected
+    assert {scene, observation, receipt} <= affected
+    # A third-hop consumer remains visible in the import graph but cannot
+    # silently expand the mandatory MT-01 scope beyond the two-hop contract.
+    assert worker not in affected
     expected = {name for name, paths in coverage.items() if paths & affected}
     expected.update(group.name for group in registered
         if set(manifest["consumers"]) & set(group.paths))
