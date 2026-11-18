@@ -728,6 +728,60 @@ def _artifacts_in_attempt(proof: object, *, started: str,
     return {"artifacts": selected}
 
 
+def noninterfering_main_advance(api: Callable[[str], Any], base: str,
+                                  pinned_base: str, current_main: str,
+                                  pr_files: object) -> bool:
+    """Reuse trusted CI only when current main has no affected owner/consumer drift.
+
+    Changed tests, CI controls, dependencies, shared consumer tests, unowned
+    source, divergent history and incomplete compare pages all require a new
+    exact-tree Windows run. This never substitutes a passing CI run or artifact.
+    """
+    if (not SHA.fullmatch(pinned_base) or not SHA.fullmatch(current_main) or
+            pinned_base == current_main):
+        return False
+    original = reviewed_coverage_for_changed_files(pr_files)
+    if original is None:
+        return False
+    compare = api(f"{base}/compare/{pinned_base}...{current_main}")
+    if not isinstance(compare, dict):
+        return False
+    merge_base = compare.get("merge_base_commit")
+    if (compare.get("status") != "ahead" or
+            not isinstance(merge_base, dict) or
+            merge_base.get("sha") != pinned_base or
+            type(compare.get("ahead_by")) is not int or
+            not 1 <= compare["ahead_by"] <= 20 or
+            compare.get("behind_by") != 0 or
+            type(compare.get("total_commits")) is not int or
+            compare["total_commits"] != compare["ahead_by"]):
+        return False
+    drift_files = compare.get("files")
+    if not isinstance(drift_files, list) or not drift_files or len(drift_files) >= 100:
+        return False
+    for item in drift_files:
+        if not isinstance(item, dict) or item.get("status") not in ("added", "modified", "removed"):
+            return False
+        path = item.get("filename")
+        if not isinstance(path, str):
+            return False
+        # Even an unrelated new test can change the required suite.
+        if (path.startswith(("tests/", ".github/", "config/", "contracts/",
+                             "scripts/")) or "/tests/" in path or
+                path.endswith((".test.cjs", ".spec.ts", ".spec.js")) or path in
+                ("pyproject.toml", "requirements.txt", "setup.py", "setup.cfg",
+                 "tox.ini", "pytest.ini") or
+                path.startswith(("src/ai_commerce/engineering/",
+                                 "src/ai_commerce/remote/"))):
+            return False
+    advanced = reviewed_coverage_for_changed_files(drift_files)
+    if advanced is None:
+        return False
+    old_paths, old_tests = map(set, original)
+    other_paths, other_tests = map(set, advanced)
+    return not (old_paths & other_paths or old_tests & other_tests)
+
+
 def verify_one(api: Callable[[str], Any], repository: str, number: int,
                *, event_head: str | None = None) -> Verdict:
     """Read-only preflight. All missing or stale evidence holds the merge."""
@@ -759,8 +813,12 @@ def verify_one(api: Callable[[str], Any], repository: str, number: int,
         return Verdict("HOLD", "BRAIN_PASS_BOUND_TO_DIFFERENT_REVISION", number, head)
 
     live = api(f"{base}/branches/main")
-    if live.get("commit", {}).get("sha") != base_sha:
-        return Verdict("WAIT_REBASE", "BASE_MAIN_CHANGED", number, head)
+    live_sha = live.get("commit", {}).get("sha")
+    if live_sha != base_sha:
+        changed_for_drift = api(f"{base}/pulls/{number}/files?per_page=100")
+        if not noninterfering_main_advance(
+                api, base, base_sha, live_sha, changed_for_drift):
+            return Verdict("WAIT_REBASE", "BASE_MAIN_CHANGED", number, head)
     if pr.get("mergeable") is not True:
         return Verdict("WAIT_MERGEABILITY", "PR_NOT_MERGEABLE", number, head)
 
@@ -991,8 +1049,15 @@ def process(api: GitHubAPI, repository: str, event: dict) -> list[dict]:
                 # persists through WAIT_CI -> PASS only for unchanged HEAD/base.
                 fresh = api(f"/repos/{repository}/pulls/{number}")
                 current_main = api(f"/repos/{repository}/branches/main")
+                fresh_base = fresh.get("base", {}).get("sha")
+                current_main_sha = current_main.get("commit", {}).get("sha")
+                safe_main = fresh_base == current_main_sha
+                if not safe_main:
+                    safe_main = noninterfering_main_advance(
+                        api, f"/repos/{repository}", fresh_base, current_main_sha,
+                        api(f"/repos/{repository}/pulls/{number}/files?per_page=100"))
                 if (fresh.get("head", {}).get("sha") != decision.head or
-                    fresh.get("base", {}).get("sha") != current_main.get("commit", {}).get("sha") or
+                    not safe_main or
                     fresh.get("mergeable") is not True or fresh.get("draft") or
                     fresh.get("state") != "open"):
                     outcome["status"] = "WAIT_RECHECK"
