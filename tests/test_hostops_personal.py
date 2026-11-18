@@ -2751,15 +2751,26 @@ class PersonalCdp9444TopologyTests(unittest.TestCase):
         self.config.unlink()
         clean = self.root / "WakeHub-9444-Clean"
         (clean / "Default").mkdir(parents=True)
+        # Windows realpaths may differ from the spelling used to create a fixture.
+        # CDP identity compares the native target against exact canonical paths.
+        clean = clean.resolve(strict=True)
         binary = self.local / "Google" / "Chrome" / "Application" / "chrome.exe"
         binary.parent.mkdir(parents=True)
         binary.touch()
+        binary = binary.resolve(strict=True)
         self.proc.update(ExecutablePath=str(binary), CommandLine=json.dumps([
             str(binary), "--user-data-dir=" + str(clean), "--profile-directory=Default",
             "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=9444",
         ]))
         with patch.object(self.acquisition, "_native_known_folder", return_value=self.local), \
                 patch.object(self.acquisition, "load_environment") as legacy:
+            context = hostops._cdp_9444_private_context(
+                self.acquisition, json.loads(self.proc["CommandLine"]))
+            self.assertIsInstance(context[0], tuple)
+            state, identity = self.acquisition._clean_inventory(
+                *context[0], self.session, self.sid, inventory=self.inventory)
+            self.assertEqual(state, "OWNED")
+            self.assertEqual(identity[0], self.proc["ProcessId"])
             receipt = self.observe()
             self.assertEqual(receipt["code"], "CDP_PROTOCOL_HEALTHY")
             self.assert_public(receipt)
