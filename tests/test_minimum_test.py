@@ -365,14 +365,20 @@ def test_shadow_receipt_is_deterministic_private_and_has_no_effects(monkeypatch)
 def test_shadow_foundation_preserves_timeout_defaults_and_registered_mt01_argv():
     import inspect
     from ai_commerce.engineering.cli import build_parser
-    from ai_commerce.engineering.runner import execute_attempt, DEFAULT_ACTION_TIMEOUT_SECONDS
+    from ai_commerce.engineering.runner import (
+        execute_attempt, DEFAULT_ACTION_TIMEOUT_SECONDS, DEFAULT_VERIFY_TIMEOUT_SECONDS,
+    )
     parser = build_parser()
-    assert parser.get_default("verify_timeout_seconds") == 1800
-    assert parser.get_default("timeout_seconds") == parser.get_default("action_timeout_seconds") == 7200
-    assert DEFAULT_ACTION_TIMEOUT_SECONDS == 7200
+    # The executor cap and registered MT-01 argv are unchanged. The 90m
+    # verification cap intentionally extends the enclosing EF01 action budget.
+    assert parser.get_default("timeout_seconds") == 7200
+    assert parser.get_default("verify_timeout_seconds") == DEFAULT_VERIFY_TIMEOUT_SECONDS == 5400
+    assert parser.get_default("action_timeout_seconds") == DEFAULT_ACTION_TIMEOUT_SECONDS == 12600
+    assert DEFAULT_ACTION_TIMEOUT_SECONDS == 7200 + DEFAULT_VERIFY_TIMEOUT_SECONDS
     defaults = inspect.signature(execute_attempt).parameters
-    assert defaults["verify_timeout_seconds"].default == 1800
-    assert defaults["action_timeout_seconds"].default == 7200
+    assert defaults["timeout_seconds"].default == 7200
+    assert defaults["verify_timeout_seconds"].default == DEFAULT_VERIFY_TIMEOUT_SECONDS
+    assert defaults["action_timeout_seconds"].default == DEFAULT_ACTION_TIMEOUT_SECONDS
     registry = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_text(encoding="utf-8"))
     assert registry["mt01-mt01-tests"] == ["python", "-m", "pytest", "tests/test_minimum_test.py", "-q", "-n", "12"]
     assert registry["project-tests"] == ["python", "-m", "pytest", "tests", "-q", "-n", "12"]
