@@ -18,12 +18,13 @@ __all__ = [
 from .intent import ActorRef, CreativeIntent, IntentField, capture_intent
 from .decisions import AIInferenceBinding, ActorDecision, HumanSelectionEvent
 from .v2 import (
-    A03CreativeJob, A03CreativeStageResult, CreativeJobProvenance, CreativeReasonerV2,
+    A03CreativeJob, A03CreativeStageResult, CLIExecutionObservation, CreativeJobProvenance, CreativeReasonerV2,
     ReasoningRequest, ReasoningResult, UsageObservation, reason_v2, run_creative_stage,
 )
 from .live import (
-    InvocationAuthorization, LiveCreativeReasoner, ModelConfiguration,
+    CodexCliCapability, CodexCliCreativeClient, InvocationAuthorization, LiveCreativeReasoner, ModelConfiguration,
     StructuredCreativeClient, StructuredModelRequest, StructuredModelResponse,
+    codex_creative_argv,
 )
 from .sidecars import CreativeSidecarStore
 
@@ -34,4 +35,5 @@ __all__ += [
     "ModelConfiguration", "ReasoningRequest", "ReasoningResult", "StructuredCreativeClient",
     "StructuredModelRequest", "StructuredModelResponse", "UsageObservation", "capture_intent", "reason_v2",
     "run_creative_stage",
+    "CLIExecutionObservation", "CodexCliCapability", "CodexCliCreativeClient", "codex_creative_argv",
 ]
