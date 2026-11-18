@@ -247,6 +247,105 @@ def test_merge_gate_canonical_approval_and_owner_authentication(gate):
     assert gate.candidates(FakeGitHub(gate), FakeGitHub.repo, _approval_event(gate)) == [(219, FakeGitHub.head)]
 
 
+class _MainAdvanceGitHub(FakeGitHub):
+    """A real GitHub ahead compare, preserving immutable old PR CI proof."""
+    live_main = "d" * 40
+
+    def __init__(self, gate, *, drift_path, comparison_ok=True):
+        super().__init__(gate, ci="completed")
+        self.drift_path = drift_path
+        self.comparison_ok = comparison_ok
+
+    def __call__(self, path, method="GET", body=None):
+        base = f"/repos/{self.repo}"
+        if path == f"{base}/branches/main":
+            return {"commit": {"sha": self.live_main}}
+        if path == f"{base}/compare/{self.base}...{self.live_main}":
+            if not self.comparison_ok:
+                return {"status": "diverged", "files": []}
+            return {
+                "status": "ahead", "ahead_by": 1, "behind_by": 0,
+                "total_commits": 1,
+                "merge_base_commit": {"sha": self.base},
+                "files": [{"filename": self.drift_path, "status": "modified"}],
+            }
+        return super().__call__(path, method, body)
+
+
+def _two_independent_owner_groups(gate, monkeypatch, *, shared_tests=False):
+    from ai_commerce.engineering.minimum_test import TestGroup
+
+    other_test = "tests/test_minimum_test.py" if shared_tests else "tests/test_creative_owner.py"
+    monkeypatch.setattr(gate, "approved_groups", lambda: (
+        TestGroup("fixture", ("tests/test_minimum_test.py",), ("fixture.ac",),
+                  ("src/ai_commerce/product/identity.py",)),
+        TestGroup("other", (other_test,), ("other.ac",),
+                  ("src/ai_commerce/creative/independent.py",)),
+    ))
+
+
+def test_gate_reuses_old_ci_for_proven_noninterfering_base_advance(gate, monkeypatch):
+    _two_independent_owner_groups(gate, monkeypatch)
+    api = _MainAdvanceGitHub(gate, drift_path="src/ai_commerce/creative/independent.py")
+    result = gate.process(api, api.repo, _approval_event(gate))
+    assert result[0]["status"] == "MERGED"
+    assert result[0]["ci_run"] == 200
+    assert api.writes == [{"sha": api.head, "merge_method": "merge"}]
+
+
+@pytest.mark.parametrize("drift", (
+    "tests/test_creative_owner.py",
+    ".github/workflows/ef02-tests.yml",
+    "src/ai_commerce/remote/cdp_doorbell.py",
+    "src/ai_commerce/product/identity.py",
+    "src/ai_commerce/unregistered/new.py",
+    "pyproject.toml",
+))
+def test_gate_rejects_unproven_or_impactful_base_advance(gate, monkeypatch, drift):
+    _two_independent_owner_groups(gate, monkeypatch)
+    api = _MainAdvanceGitHub(gate, drift_path=drift)
+    result = gate.process(api, api.repo, _approval_event(gate))
+    assert result[0]["status"] == "WAIT_REBASE"
+    assert result[0]["reason"] == "BASE_MAIN_CHANGED"
+    assert api.writes == []
+
+
+def test_gate_rejects_shared_consumer_tests_and_divergent_main(gate, monkeypatch):
+    _two_independent_owner_groups(gate, monkeypatch, shared_tests=True)
+    api = _MainAdvanceGitHub(gate, drift_path="src/ai_commerce/creative/independent.py")
+    assert gate.process(api, api.repo, _approval_event(gate))[0]["status"] == "WAIT_REBASE"
+    api.comparison_ok = False
+    assert gate.process(api, api.repo, _approval_event(gate))[0]["status"] == "WAIT_REBASE"
+    assert api.writes == []
+
+
+def test_mt01_fast_contract_preflight_prioritizes_affected_tests_without_replacing_suite():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "ci_contract_preflight", ROOT / ".github/scripts/ef02-pr-ci-tests.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    plan = {
+        "selected_tests": [
+            "tests/test_bq_01a_brief_causality.py",
+            "tests/test_minimum_test.py", "tests/test_ef02.py",
+            "tests/test_ef01_repair.py", "tests/test_ef01.py",
+        ],
+        "changed_paths": ["src/ai_commerce/engineering/runner.py"],
+    }
+    assert module.contract_preflight_targets(plan) == (
+        "tests/test_ef01.py", "tests/test_ef01_repair.py",
+        "tests/test_ef02.py", "tests/test_minimum_test.py",
+    )
+    plan["changed_paths"] = ["src/ai_commerce/bq/critic.py"]
+    assert module.contract_preflight_targets(plan) == tuple(plan["selected_tests"][:4])
+    plan["selected_tests"] = ["src/ai_commerce/opportunity/trends/tests/test_m02.py"]
+    assert module.contract_preflight_targets(plan) == tuple(plan["selected_tests"])
+    plan["selected_tests"] = ["tests/../escape.py"]
+    with pytest.raises(ValueError, match="MT01_PREFLIGHT_SELECTED_PATH_INVALID"):
+        module.contract_preflight_targets(plan)
+
+
 def test_merge_queue_retains_same_approval_until_ci_finishes(gate):
     api = FakeGitHub(gate, ci="in_progress")
     first = gate.process(api, api.repo, _approval_event(gate))

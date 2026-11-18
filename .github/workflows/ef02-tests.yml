@@ -54,6 +54,12 @@ jobs:
       - name: Whole-repository Windows-only policy audit
         if: steps.reuse.outputs.skip_pytest != 'true'
         run: python -m pytest tests/test_pr_merge_gate.py::test_repository_wide_windows_only_audit -q -s
+      # Cheap negative gate before the costly suite; does not generate or
+      # replace the official MT-01 V2.1 acceptance artifact.
+      - name: MT-01 fast contract preflight
+        if: steps.reuse.outputs.skip_pytest != 'true'
+        timeout-minutes: 15
+        run: python .github/scripts/ef02-pr-ci-tests.py --fast-contract-preflight
       - name: MT-01 PR CI selective tests (full fallback)
         if: steps.reuse.outputs.skip_pytest != 'true'
         run: python .github/scripts/ef02-pr-ci-tests.py
