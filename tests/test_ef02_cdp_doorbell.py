@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from ai_commerce.remote import cdp_doorbell as doorbell
 from ai_commerce.remote.cdp_doorbell import (
     LocalChromeDoorbellAdapter, LocalChromeObserverAdapter, LocalChromeBrowserObserver,
     _OBSERVER_CHECK, _SEARCH_MARKER,
@@ -17,6 +18,7 @@ from ai_commerce.remote.trusted_origin import (
     OriginError, PrivateOriginSnapshot, RendezvousEmission,
     RendezvousHit, RendezvousObservation,
 )
+from ai_commerce.wakehub_cdp import authenticated_turn as cdp_turn
 
 URL = "https://chatgpt.com/c/00000000-0000-0000-0000-000000000001"
 OTHER = "https://chatgpt.com/c/00000000-0000-0000-0000-000000000002"
@@ -2013,3 +2015,392 @@ def test_wh03_test_registration_prepare_without_native_authority_fails(tmp_path)
     with pytest.raises(OriginError, match="TEST_REGISTRATION_AUTHORITY_REQUIRED"):
         ledger.prepare(chat_url=URL, generation=3, attestation=untrusted)
     assert not (private / "state.json").exists()
+
+
+# R3B2C1 source-only claims. All signatures, keys, native labels and receipt
+# references below are FORGED fixtures, never private authority or native proof.
+_TURN_NOW = 100
+
+
+@pytest.fixture
+def doorbell_turn_claims(monkeypatch):
+    import socket
+    import subprocess
+
+    effects = []
+
+    def deny_effect(*args, **kwargs):
+        effects.append("unexpected effect")
+        raise AssertionError("Source-only turn gate attempted a browser/process/network effect")
+
+    monkeypatch.setattr(doorbell, "_PlaywrightInventory", deny_effect)
+    monkeypatch.setattr(doorbell.LocalChromeDoorbellAdapter, "send_wake", deny_effect)
+    monkeypatch.setattr(FakePage, "evaluate", deny_effect)
+    monkeypatch.setattr(FakePage, "wait_for_function", deny_effect)
+    monkeypatch.setattr(socket, "socket", deny_effect)
+    monkeypatch.setattr(socket, "create_connection", deny_effect)
+    monkeypatch.setattr(subprocess, "Popen", deny_effect)
+    pins = cdp_turn.OriginPins(
+        account_id="forged-account-a", conversation_id=URL,
+        session_ref="forged-session-a", route_generation=3,
+        registration_marker="forged-marker", browser_custody_ref="forged-custody",
+        chrome_profile_id="forged-profile", context_ref="forged-context",
+        tab_ref="forged-tab", composer_ref="forged-composer")
+    message = "exact wake\r\nTiếng Việt\n".encode("utf-8")
+    scope = cdp_turn.TurnScope(pins, EVENT, hashlib.sha256(message).hexdigest())
+    request = cdp_turn.WakeRequest(scope, message)
+    observation = cdp_turn.BrowserObservation(scope, "forged-observation", 1, 1, True, True)
+    grant = cdp_turn.SignedWakeGrant(
+        scope, "forged-grant", "forged-issuer", "FAKE-KEY", b"FAKE-SIGNATURE", 80, 120)
+    reservation = cdp_turn.DurableReservation(
+        scope, "forged-reservation", grant.grant_ref, "NOT-A-DURABLE-RECEIPT", 90)
+    attestation = cdp_turn.NativeAttestation(
+        scope, cdp_turn.AttestationPhase.PRE_SEND, cdp_turn.EvidenceSource.NATIVE_PRIVATE_PROVIDER,
+        "forged-attestation", "forged-issuer", "FAKE-KEY", b"FAKE-ATTESTATION",
+        grant.grant_ref, reservation.reservation_ref, observation.observation_ref, 95, 115)
+    evidence = cdp_turn.TurnEvidence(observation, grant, reservation, attestation)
+    turn = cdp_turn.ChatGPTUserTurnRef(
+        scope, "opaque-native-looking-user-turn", "forged-message", attestation.attestation_ref,
+        grant.grant_ref, reservation.reservation_ref, cdp_turn.EvidenceSource.NATIVE_PRIVATE_PROVIDER)
+    yield request, evidence, turn
+    assert effects == [], "New gate must never attach, stage, click or call legacy Send"
+
+
+def _assert_doorbell_turn_gate(result, status, code, phase=cdp_turn.AttestationPhase.PRE_SEND):
+    assert type(result) is cdp_turn.GateResult
+    assert result.phase is phase
+    assert result.status is status
+    assert result.code is code
+    assert result.send_allowed is False
+    assert result.retry_allowed is False
+    assert result.authenticated_user_turn is None
+
+
+def _doorbell_post_evidence(evidence):
+    if type(evidence) is cdp_turn.TurnEvidence and type(evidence.attestation) is cdp_turn.NativeAttestation:
+        return replace(evidence, attestation=replace(
+            evidence.attestation, phase=cdp_turn.AttestationPhase.POST_SEND))
+    return evidence
+
+
+@pytest.mark.parametrize("with_candidate", [False, True])
+def test_authenticated_gate_forwards_exact_claims_but_missing_provider_holds_dependency(
+        doorbell_turn_claims, monkeypatch, with_candidate):
+    request, evidence, _ = doorbell_turn_claims
+    original_pre_send = cdp_turn.pre_send
+    calls = []
+
+    def record(request_arg, evidence_arg, *, now):
+        calls.append((request_arg, evidence_arg, now))
+        return original_pre_send(request_arg, evidence_arg, now=now)
+
+    monkeypatch.setattr(cdp_turn, "pre_send", record)
+    candidate = evidence.observation if with_candidate else None
+    result = doorbell.pre_send_authenticated_wake(
+        request, evidence, now=_TURN_NOW, browser_candidate=candidate)
+    _assert_doorbell_turn_gate(result, cdp_turn.GateStatus.UNAVAILABLE,
+                               cdp_turn.GateCode.NATIVE_PRIVATE_PROVIDER_UNAVAILABLE)
+    assert len(calls) == (2 if with_candidate else 1)
+    assert calls[0][1] is evidence
+    for request_arg, evidence_arg, now in calls:
+        assert request_arg is request
+        assert request_arg.message_bytes is request.message_bytes
+        assert evidence_arg.grant is evidence.grant
+        assert evidence_arg.reservation is evidence.reservation
+        assert evidence_arg.attestation is evidence.attestation
+        assert now == _TURN_NOW
+    assert request.message_bytes == "exact wake\r\nTiếng Việt\n".encode("utf-8")
+
+
+@pytest.mark.parametrize("case,code", [
+    ("request_dict", cdp_turn.GateCode.INVALID_REQUEST),
+    ("request_subclass", cdp_turn.GateCode.INVALID_REQUEST),
+    ("evidence_dict", cdp_turn.GateCode.INVALID_EVIDENCE),
+    ("evidence_subclass", cdp_turn.GateCode.INVALID_EVIDENCE),
+    ("provider_callback", cdp_turn.GateCode.INVALID_EVIDENCE),
+    ("native_flag", cdp_turn.GateCode.INVALID_EVIDENCE),
+])
+def test_authenticated_gate_requires_exact_request_and_evidence_types(
+        doorbell_turn_claims, case, code):
+    request, evidence, _ = doorbell_turn_claims
+
+    class RequestSubclass(cdp_turn.WakeRequest):
+        pass
+
+    class EvidenceSubclass(cdp_turn.TurnEvidence):
+        pass
+
+    def fake_provider(*args, **kwargs):
+        pytest.fail("Caller-shaped provider must never be invoked")
+
+    if case == "request_dict":
+        request = {"scope": request.scope, "message_bytes": request.message_bytes}
+    elif case == "request_subclass":
+        request = RequestSubclass(request.scope, request.message_bytes)
+    elif case == "evidence_dict":
+        evidence = {"verified": True, "native_authority": True}
+    elif case == "evidence_subclass":
+        evidence = EvidenceSubclass(evidence.observation, evidence.grant,
+                                    evidence.reservation, evidence.attestation)
+    elif case == "provider_callback":
+        evidence = fake_provider
+    else:
+        evidence = True
+    _assert_doorbell_turn_gate(doorbell.pre_send_authenticated_wake(request, evidence, now=_TURN_NOW),
+                               cdp_turn.GateStatus.HOLD, code)
+
+
+@pytest.mark.parametrize("message,code", [
+    (b"", cdp_turn.GateCode.INVALID_REQUEST),
+    ("exact wake", cdp_turn.GateCode.INVALID_REQUEST),
+    (bytearray(b"exact wake"), cdp_turn.GateCode.INVALID_REQUEST),
+    ("exact wake\nTiếng Việt\n".encode("utf-8"), cdp_turn.GateCode.MESSAGE_DIGEST_MISMATCH),
+    ("exact wake\r\nTieng Viet\n".encode("utf-8"), cdp_turn.GateCode.MESSAGE_DIGEST_MISMATCH),
+    ("exact wake\r\nTiếng Việt\n ".encode("utf-8"), cdp_turn.GateCode.MESSAGE_DIGEST_MISMATCH),
+])
+def test_authenticated_gate_preserves_exact_message_bytes(doorbell_turn_claims, message, code):
+    request, evidence, _ = doorbell_turn_claims
+    _assert_doorbell_turn_gate(doorbell.pre_send_authenticated_wake(
+        replace(request, message_bytes=message), evidence, now=_TURN_NOW), cdp_turn.GateStatus.HOLD, code)
+
+
+@pytest.mark.parametrize("owner,code", [
+    ("observation", cdp_turn.GateCode.SCOPE_MISMATCH),
+    ("grant", cdp_turn.GateCode.GRANT_SCOPE_MISMATCH),
+    ("reservation", cdp_turn.GateCode.RESERVATION_SCOPE_MISMATCH),
+    ("attestation", cdp_turn.GateCode.ATTESTATION_SCOPE_MISMATCH),
+    ("user_turn", cdp_turn.GateCode.USER_TURN_SCOPE_MISMATCH),
+])
+@pytest.mark.parametrize("field,value", [
+    ("account_id", "wrong-account-b"), ("conversation_id", OTHER),
+    ("session_ref", "wrong-session"), ("route_generation", 4),
+    ("registration_marker", "wrong-marker"), ("chrome_profile_id", "wrong-profile"),
+    ("browser_custody_ref", "wrong-custody"), ("context_ref", "wrong-context"),
+    ("tab_ref", "wrong-tab"), ("composer_ref", "wrong-composer"),
+    ("cdp_endpoint", "http://127.0.0.1:9222"),
+    ("event_id", "ef02-completion-v1:" + "b" * 64), ("message_sha256", "c" * 64),
+])
+def test_authenticated_gate_keeps_every_chat_a_event_and_browser_pin_bound(
+        doorbell_turn_claims, owner, code, field, value):
+    request, evidence, turn = doorbell_turn_claims
+    if field in ("event_id", "message_sha256"):
+        wrong_scope = replace(request.scope, **{field: value})
+    else:
+        wrong_scope = replace(request.scope, origin=replace(request.scope.origin, **{field: value}))
+    if owner == "user_turn":
+        turn = replace(turn, scope=wrong_scope)
+    else:
+        evidence = replace(evidence, **{owner: replace(getattr(evidence, owner), scope=wrong_scope)})
+        _assert_doorbell_turn_gate(doorbell.pre_send_authenticated_wake(request, evidence, now=_TURN_NOW),
+                                   cdp_turn.GateStatus.HOLD, code)
+    _assert_doorbell_turn_gate(doorbell.diagnose_authenticated_wake(
+        request, _doorbell_post_evidence(evidence), outcome=cdp_turn.SendOutcome.CLICK_REPORTED,
+        user_turn=turn, now=_TURN_NOW), cdp_turn.GateStatus.UNKNOWN_EFFECT, code,
+        cdp_turn.AttestationPhase.POST_SEND)
+
+
+@pytest.mark.parametrize("field,code", [
+    ("observation", cdp_turn.GateCode.OBSERVATION_MISSING),
+    ("grant", cdp_turn.GateCode.GRANT_MISSING),
+    ("reservation", cdp_turn.GateCode.RESERVATION_MISSING),
+    ("attestation", cdp_turn.GateCode.NATIVE_ATTESTATION_MISSING),
+])
+def test_authenticated_candidate_cannot_supply_missing_original_evidence(
+        doorbell_turn_claims, field, code):
+    request, evidence, _ = doorbell_turn_claims
+    _assert_doorbell_turn_gate(doorbell.pre_send_authenticated_wake(
+        request, replace(evidence, **{field: None}), now=_TURN_NOW,
+        browser_candidate=evidence.observation), cdp_turn.GateStatus.HOLD, code)
+
+
+@pytest.mark.parametrize("field,value,code", [
+    ("context_count", 0, cdp_turn.GateCode.SURFACE_NOT_EXCLUSIVE),
+    ("context_count", 2, cdp_turn.GateCode.SURFACE_NOT_EXCLUSIVE),
+    ("tab_count", 2, cdp_turn.GateCode.SURFACE_NOT_EXCLUSIVE),
+    ("tab_count", True, cdp_turn.GateCode.SURFACE_NOT_EXCLUSIVE),
+    ("composer_clean", False, cdp_turn.GateCode.COMPOSER_DIRTY),
+    ("composer_clean", 1, cdp_turn.GateCode.COMPOSER_DIRTY),
+    ("surface_stable", False, cdp_turn.GateCode.SURFACE_UNSTABLE),
+    ("observation_ref", "", cdp_turn.GateCode.SURFACE_UNSTABLE),
+    ("observation_ref", "wrong-observation", cdp_turn.GateCode.ATTESTATION_SCOPE_MISMATCH),
+])
+@pytest.mark.parametrize("as_candidate", [False, True])
+def test_authenticated_gate_rejects_unsafe_evidence_and_optional_candidate(
+        doorbell_turn_claims, field, value, code, as_candidate):
+    request, evidence, _ = doorbell_turn_claims
+    unsafe = replace(evidence.observation, **{field: value})
+    candidate = unsafe if as_candidate else None
+    original = evidence if as_candidate else replace(evidence, observation=unsafe)
+    _assert_doorbell_turn_gate(doorbell.pre_send_authenticated_wake(
+        request, original, now=_TURN_NOW, browser_candidate=candidate), cdp_turn.GateStatus.HOLD, code)
+    assert evidence.observation.composer_clean is evidence.observation.surface_stable is True
+
+
+@pytest.mark.parametrize("case,code", [
+    ("chat_b", cdp_turn.GateCode.SCOPE_MISMATCH),
+    ("native_flag", cdp_turn.GateCode.OBSERVATION_MISSING),
+    ("page", cdp_turn.GateCode.OBSERVATION_MISSING),
+    ("callback", cdp_turn.GateCode.OBSERVATION_MISSING),
+])
+def test_authenticated_browser_candidate_is_only_a_typed_read_only_veto(
+        doorbell_turn_claims, case, code):
+    request, evidence, _ = doorbell_turn_claims
+    if case == "chat_b":
+        candidate = replace(evidence.observation, scope=replace(
+            request.scope, origin=replace(request.scope.origin, conversation_id=OTHER)))
+    elif case == "native_flag":
+        candidate = SimpleNamespace(native_authority=True, verified=True)
+    elif case == "page":
+        candidate = FakePage()
+    else:
+        def candidate(*args, **kwargs):
+            pytest.fail("Read-only candidate must never be invoked")
+    _assert_doorbell_turn_gate(doorbell.pre_send_authenticated_wake(
+        request, evidence, now=_TURN_NOW, browser_candidate=candidate), cdp_turn.GateStatus.HOLD, code)
+
+
+@pytest.mark.parametrize("owner,field,value,code", [
+    ("grant", "operation", "observe", cdp_turn.GateCode.GRANT_INVALID),
+    ("grant", "one_shot", False, cdp_turn.GateCode.GRANT_INVALID),
+    ("grant", "use_count", 1, cdp_turn.GateCode.GRANT_REUSED),
+    ("grant", "use_count", False, cdp_turn.GateCode.GRANT_REUSED),
+    ("grant", "expires_at", _TURN_NOW, cdp_turn.GateCode.GRANT_NOT_FRESH),
+    ("grant", "issued_at", _TURN_NOW + 1, cdp_turn.GateCode.GRANT_NOT_FRESH),
+    ("grant", "signature", b"", cdp_turn.GateCode.GRANT_INVALID),
+    ("reservation", "grant_ref", "wrong-grant", cdp_turn.GateCode.RESERVATION_SCOPE_MISMATCH),
+    ("reservation", "state", "PREPARED", cdp_turn.GateCode.RESERVATION_NOT_DURABLE_RESERVED),
+    ("reservation", "durable_receipt_ref", "", cdp_turn.GateCode.RESERVATION_NOT_DURABLE_RESERVED),
+    ("reservation", "reserved_at", _TURN_NOW + 1, cdp_turn.GateCode.RESERVATION_NOT_DURABLE_RESERVED),
+    ("attestation", "grant_ref", "wrong-grant", cdp_turn.GateCode.ATTESTATION_SCOPE_MISMATCH),
+    ("attestation", "reservation_ref", "wrong-reservation", cdp_turn.GateCode.ATTESTATION_SCOPE_MISMATCH),
+    ("attestation", "signature", b"", cdp_turn.GateCode.ATTESTATION_INVALID),
+    ("attestation", "expires_at", _TURN_NOW, cdp_turn.GateCode.ATTESTATION_NOT_FRESH),
+    ("attestation", "phase", cdp_turn.AttestationPhase.POST_SEND, cdp_turn.GateCode.ATTESTATION_PHASE_MISMATCH),
+])
+def test_authenticated_gate_rejects_invalid_grant_reservation_and_attestation_correspondence(
+        doorbell_turn_claims, owner, field, value, code):
+    request, evidence, _ = doorbell_turn_claims
+    changed = replace(evidence, **{owner: replace(getattr(evidence, owner), **{field: value})})
+    _assert_doorbell_turn_gate(doorbell.pre_send_authenticated_wake(request, changed, now=_TURN_NOW),
+                               cdp_turn.GateStatus.HOLD, code)
+
+
+@pytest.mark.parametrize("source", [
+    source for source in cdp_turn.EvidenceSource
+    if source is not cdp_turn.EvidenceSource.NATIVE_PRIVATE_PROVIDER
+] + ["NATIVE_PRIVATE_PROVIDER", True])
+def test_authenticated_gate_never_promotes_dom_url_hash_time_or_callback_authority(
+        doorbell_turn_claims, source):
+    request, evidence, turn = doorbell_turn_claims
+    changed = replace(evidence, attestation=replace(evidence.attestation, source=source))
+    _assert_doorbell_turn_gate(doorbell.pre_send_authenticated_wake(request, changed, now=_TURN_NOW),
+                               cdp_turn.GateStatus.HOLD, cdp_turn.GateCode.WRONG_AUTHORITY_SOURCE)
+    _assert_doorbell_turn_gate(doorbell.diagnose_authenticated_wake(
+        request, _doorbell_post_evidence(evidence), outcome=cdp_turn.SendOutcome.CLICK_REPORTED,
+        user_turn=replace(turn, source=source), now=_TURN_NOW), cdp_turn.GateStatus.UNKNOWN_EFFECT,
+        cdp_turn.GateCode.WRONG_AUTHORITY_SOURCE, cdp_turn.AttestationPhase.POST_SEND)
+
+
+@pytest.mark.parametrize("user_turn_id", ["ui-user-bubble-123", str(_TURN_NOW), "a" * 64])
+def test_authenticated_diagnostic_never_authenticates_native_looking_ui_time_or_digest_ids(
+        doorbell_turn_claims, user_turn_id):
+    request, evidence, turn = doorbell_turn_claims
+    _assert_doorbell_turn_gate(doorbell.diagnose_authenticated_wake(
+        request, _doorbell_post_evidence(evidence), outcome=cdp_turn.SendOutcome.CLICK_REPORTED,
+        user_turn=replace(turn, user_turn_id=user_turn_id), now=_TURN_NOW),
+        cdp_turn.GateStatus.UNKNOWN_EFFECT, cdp_turn.GateCode.NATIVE_PRIVATE_PROVIDER_UNAVAILABLE,
+        cdp_turn.AttestationPhase.POST_SEND)
+
+
+@pytest.mark.parametrize("outcome,status,code", [
+    (cdp_turn.SendOutcome.NOT_ATTEMPTED, cdp_turn.GateStatus.HOLD, cdp_turn.GateCode.SEND_NOT_ATTEMPTED),
+    (cdp_turn.SendOutcome.CLICK_REPORTED, cdp_turn.GateStatus.UNKNOWN_EFFECT,
+     cdp_turn.GateCode.NATIVE_PRIVATE_PROVIDER_UNAVAILABLE),
+    (cdp_turn.SendOutcome.CLICK_AMBIGUOUS, cdp_turn.GateStatus.UNKNOWN_EFFECT,
+     cdp_turn.GateCode.CLICK_AMBIGUOUS_NO_REPLAY),
+    (cdp_turn.SendOutcome.TRANSPORT_TIMEOUT, cdp_turn.GateStatus.UNKNOWN_EFFECT,
+     cdp_turn.GateCode.TRANSPORT_TIMEOUT_NO_REPLAY),
+    ("NOT_ATTEMPTED", cdp_turn.GateStatus.UNKNOWN_EFFECT, cdp_turn.GateCode.INVALID_SEND_OUTCOME_NO_REPLAY),
+    (None, cdp_turn.GateStatus.UNKNOWN_EFFECT, cdp_turn.GateCode.INVALID_SEND_OUTCOME_NO_REPLAY),
+])
+def test_authenticated_post_effect_classification_is_bounded_and_never_retries(
+        doorbell_turn_claims, monkeypatch, outcome, status, code):
+    request, evidence, turn = doorbell_turn_claims
+    evidence = _doorbell_post_evidence(evidence)
+    original_post_send = cdp_turn.post_send
+    calls = []
+
+    def record(request_arg, evidence_arg, *, outcome, user_turn, now):
+        calls.append((request_arg, evidence_arg, outcome, user_turn, now))
+        return original_post_send(request_arg, evidence_arg, outcome=outcome, user_turn=user_turn, now=now)
+
+    monkeypatch.setattr(cdp_turn, "post_send", record)
+    result = doorbell.diagnose_authenticated_wake(
+        request, evidence, outcome=outcome, user_turn=turn, now=_TURN_NOW)
+    _assert_doorbell_turn_gate(result, status, code, cdp_turn.AttestationPhase.POST_SEND)
+    assert len(calls) == 1
+    assert calls[0][0] is request and calls[0][1] is evidence
+    assert calls[0][2] is outcome and calls[0][3] is turn
+    assert calls[0][4] == _TURN_NOW
+
+
+@pytest.mark.parametrize("case,code", [
+    ("invalid_request", cdp_turn.GateCode.INVALID_REQUEST),
+    ("missing_grant", cdp_turn.GateCode.GRANT_MISSING),
+    ("expired_grant", cdp_turn.GateCode.GRANT_NOT_FRESH),
+    ("missing_turn", cdp_turn.GateCode.USER_TURN_MISSING),
+    ("provider_shaped_turn", cdp_turn.GateCode.USER_TURN_MISSING),
+])
+def test_authenticated_post_click_rejections_never_downgrade_unknown_to_pre_send_hold(
+        doorbell_turn_claims, case, code):
+    request, evidence, turn = doorbell_turn_claims
+    evidence = _doorbell_post_evidence(evidence)
+    if case == "invalid_request":
+        request = None
+    elif case == "missing_grant":
+        evidence = replace(evidence, grant=None)
+    elif case == "expired_grant":
+        evidence = replace(evidence, grant=replace(evidence.grant, expires_at=_TURN_NOW))
+    elif case == "missing_turn":
+        turn = None
+    else:
+        def fake_provider(*args, **kwargs):
+            pytest.fail("Provider-shaped USER turn must never be invoked")
+        turn = SimpleNamespace(authenticated=True, user_turn_id="server-looking-id", provider=fake_provider)
+    _assert_doorbell_turn_gate(doorbell.diagnose_authenticated_wake(
+        request, evidence, outcome=cdp_turn.SendOutcome.CLICK_REPORTED, user_turn=turn, now=_TURN_NOW),
+        cdp_turn.GateStatus.UNKNOWN_EFFECT, code, cdp_turn.AttestationPhase.POST_SEND)
+
+
+@pytest.mark.parametrize("case", ["duck", "subclass", "wrong_phase", "string_status", "string_code", "wrong_status"])
+@pytest.mark.parametrize("post_effect", [False, True])
+def test_authenticated_bridge_returns_only_concrete_phase_correct_rejections(
+        doorbell_turn_claims, monkeypatch, case, post_effect):
+    request, evidence, turn = doorbell_turn_claims
+    phase = cdp_turn.AttestationPhase.POST_SEND if post_effect else cdp_turn.AttestationPhase.PRE_SEND
+    status = cdp_turn.GateStatus.UNKNOWN_EFFECT if post_effect else cdp_turn.GateStatus.UNAVAILABLE
+    result = cdp_turn.GateResult(phase, status, cdp_turn.GateCode.NATIVE_PRIVATE_PROVIDER_UNAVAILABLE)
+    if case == "duck":
+        result = SimpleNamespace(phase=phase, status=status, send_allowed=True, authenticated_user_turn=turn)
+    elif case == "subclass":
+        class ResultSubclass(cdp_turn.GateResult):
+            pass
+        result = ResultSubclass(result.phase, result.status, result.code)
+    elif case == "wrong_phase":
+        result = replace(result, phase=phase.value)
+    elif case == "string_status":
+        result = replace(result, status=status.value)
+    elif case == "string_code":
+        result = replace(result, code=result.code.value)
+    else:
+        result = replace(result, status=cdp_turn.GateStatus.HOLD if post_effect else cdp_turn.GateStatus.UNKNOWN_EFFECT)
+    if post_effect:
+        monkeypatch.setattr(cdp_turn, "post_send", lambda *args, **kwargs: result)
+        actual = doorbell.diagnose_authenticated_wake(
+            request, evidence, outcome=cdp_turn.SendOutcome.CLICK_REPORTED, user_turn=turn, now=_TURN_NOW)
+        _assert_doorbell_turn_gate(actual, cdp_turn.GateStatus.UNKNOWN_EFFECT,
+                                   cdp_turn.GateCode.INVALID_SEND_OUTCOME_NO_REPLAY, phase)
+    else:
+        monkeypatch.setattr(cdp_turn, "pre_send", lambda *args, **kwargs: result)
+        actual = doorbell.pre_send_authenticated_wake(request, evidence, now=_TURN_NOW)
+        _assert_doorbell_turn_gate(actual, cdp_turn.GateStatus.HOLD, cdp_turn.GateCode.INVALID_EVIDENCE, phase)
