@@ -618,6 +618,52 @@ def test_corrupted_policy_state_fails_closed(tmp_path):
     assert resolve_model(repo, override=explicit).selection == explicit
 
 
+def test_project_policy_prefers_codex_62_and_hydrogen_extra():
+    policy_path = (Path(__file__).resolve().parents[1]
+                   / "config" / "engineering" / "model-defaults.v1.json")
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    assert policy["hard_default"] is False
+    assert policy["preferred"] == {
+        "executor": "codex", "model": "gpt-6.2-sol", "effort": "high"}
+    assert policy["fallback"] == {
+        "executor": "antigravity", "model": "gemini-4-hydrogen", "effort": "xhigh"}
+
+
+def test_new_preferred_model_ignores_legacy_or_previous_quota(tmp_path):
+    repo = _soft_default_repo(tmp_path)
+    now = datetime(2026, 11, 18, tzinfo=timezone.utc)
+    observe_result(repo, _soft_default_report(now, status="QUOTA_EXHAUSTED"), now=now)
+    assert resolve_model(repo, now=now + timedelta(minutes=1)).selection.executor == "antigravity"
+
+    path = repo / "config" / "engineering" / "model-defaults.v1.json"
+    policy = json.loads(path.read_text(encoding="utf-8"))
+    policy["preferred"] = {
+        "executor": "codex", "model": "gpt-6.2-sol", "effort": "high"}
+    policy["fallback"] = {
+        "executor": "antigravity", "model": "gemini-4-hydrogen", "effort": "xhigh"}
+    path.write_text(json.dumps(policy), encoding="utf-8")
+    updated = resolve_model(repo, now=now + timedelta(minutes=2))
+    assert updated.selection == ExecutorSelection("codex", "gpt-6.2-sol", "high")
+    assert updated.source == "PROJECT_SOFT_DEFAULT"
+
+    # A real quota result for the NEW exact profile is needed to select Extra.
+    quota_report = _soft_default_report(
+        now + timedelta(minutes=3), status="QUOTA_EXHAUSTED")
+    quota_report["model"] = "gpt-6.2-sol"
+    quota_report["reasoning_effort"] = "high"
+    assert observe_result(repo, quota_report, now=now + timedelta(minutes=3)) == (
+        "QUOTA_FALLBACK_RECORDED")
+    assert resolve_model(repo, now=now + timedelta(minutes=4)).selection == (
+        ExecutorSelection("antigravity", "gemini-4-hydrogen", "xhigh"))
+
+    # Legacy pre-binding quota state cannot demote the new model either.
+    legacy = {
+        "version": 1, "mode": "QUOTA_FALLBACK",
+        "retry_after": (now + timedelta(hours=2)).isoformat()}
+    (repo / STATE_PATH).write_text(json.dumps(legacy), encoding="utf-8")
+    assert resolve_model(repo, now=now + timedelta(minutes=5)).selection.executor == "codex"
+
+
 def test_project_default_resolver_cli_does_not_call_executor(tmp_path):
     repo = _soft_default_repo(tmp_path)
     env = dict(os.environ)
