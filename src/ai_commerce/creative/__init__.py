@@ -16,8 +16,11 @@ __all__ = [
 
 # V1.1 is opt-in; importing these symbols creates no provider or storage.
 from .intent import ActorRef, CreativeIntent, IntentField, capture_intent
-from .decisions import ActorDecision, HumanSelectionEvent
-from .v2 import CreativeReasonerV2, ReasoningRequest, ReasoningResult, UsageObservation, reason_v2
+from .decisions import AIInferenceBinding, ActorDecision, HumanSelectionEvent
+from .v2 import (
+    A03CreativeJob, A03CreativeStageResult, CreativeJobProvenance, CreativeReasonerV2,
+    ReasoningRequest, ReasoningResult, UsageObservation, reason_v2, run_creative_stage,
+)
 from .live import (
     InvocationAuthorization, LiveCreativeReasoner, ModelConfiguration,
     StructuredCreativeClient, StructuredModelRequest, StructuredModelResponse,
@@ -25,8 +28,10 @@ from .live import (
 from .sidecars import CreativeSidecarStore
 
 __all__ += [
+    "A03CreativeJob", "A03CreativeStageResult", "AIInferenceBinding", "CreativeJobProvenance",
     "ActorDecision", "ActorRef", "CreativeIntent", "CreativeReasonerV2", "CreativeSidecarStore",
     "HumanSelectionEvent", "IntentField", "InvocationAuthorization", "LiveCreativeReasoner",
     "ModelConfiguration", "ReasoningRequest", "ReasoningResult", "StructuredCreativeClient",
     "StructuredModelRequest", "StructuredModelResponse", "UsageObservation", "capture_intent", "reason_v2",
+    "run_creative_stage",
 ]
