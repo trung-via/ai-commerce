@@ -8,13 +8,14 @@ import pytest
 
 from ai_commerce.core.provenance import canonical_bytes
 from ai_commerce.creative import (
-    ActorDecision, ActorRef, ConceptDraft, ConceptRecord, ConceptSelection,
+    A03CreativeJob, A03CreativeStageResult, AIInferenceBinding,
+    ActorDecision, ActorRef, ConceptDraft, ConceptRecord, ConceptSelection, CreativeJobProvenance,
     CreativeIntent, CreativeSidecarStore, CreativeStore, CreativeValidationError,
     HumanSelectionEvent, IntentField, InvocationAuthorization, LiveCreativeReasoner,
     MockCreativeReasoner, ModelConfiguration, ProviderObservation, ReasoningRequest,
     ReasoningResult, StructuredModelRequest, StructuredModelResponse, UsageObservation,
     VersionConflict, brief_digest, capture_intent, generate_concepts, intake_brief,
-    reason_v2, revise_brief, revise_concept,
+    reason_v2, revise_brief, revise_concept, run_creative_stage,
 )
 from ai_commerce.providers.base import ProviderCapabilities, ProviderError
 
@@ -69,6 +70,17 @@ def saved(tmp_path):
     store.save_concept(concept)
     selection = store.select(concept.concept_id, 1)
     return store, CreativeSidecarStore(store), brief, concept, selection
+
+
+def save_fake_inference(sidecars, concept):
+    """Execute an injected fake matching this fixture; never real-model proof."""
+    draft = ConceptDraft(concept.family, concept.title, concept.premise, concept.visual_direction,
+                         concept.source_refs, concept.assumptions)
+    request = ReasoningRequest.create(sidecars.creative.load_brief(concept.source_brief_digest), count=1)
+    result = reason_v2(request, adapter(FakeClient(StructuredModelResponse(
+        "OK", payload((draft,)), observation=MOCK, request_id="fake:fixture-inference"))))
+    assert result.concepts() == (concept,)
+    return sidecars.save_result(result)
 
 
 def test_historical_v1_digest_golden_values_and_mock_labels(tmp_path):
@@ -411,10 +423,10 @@ def test_request_detaches_custom_json_and_cannot_be_rebound_by_reasoner():
 def test_auto_ai_and_human_decisions_are_distinct_immutable_sidecars(saved):
     store, sidecars, _, concept, selection = saved
     selection_bytes = canonical_bytes(selection.to_dict())
-    auto = ActorDecision(selection.selection_id, "AUTO_PINNED", ActorRef("SYSTEM", "cli:pin"),
-                         "event:pin-1")
-    ai = ActorDecision(selection.selection_id, "AI_RECOMMENDED", ActorRef("AI", "test:reasoner"),
-                       "fake:recommendation-response")
+    receipt = save_fake_inference(sidecars, concept)
+    auto = sidecars.decide_from_result(selection.selection_id, receipt)
+    ai = sidecars.decide_from_result(selection.selection_id, receipt, kind="AI_RECOMMENDED")
+    assert auto.inference.mode == ai.inference.mode == "TEST_ONLY_MOCK"
     event = HumanSelectionEvent("human:event-1", "human:tester", selection.selection_id,
                                 "2026-10-29T12:00:00+07:00")
     human = ActorDecision(selection.selection_id, "HUMAN_SELECTED", ActorRef("HUMAN", "human:tester"),
@@ -454,14 +466,15 @@ def test_human_event_actor_selection_and_reference_must_match(saved):
 
 @pytest.mark.parametrize("kind", ["intent", "decision", "result"])
 def test_sidecar_tamper_and_conflicting_bytes_are_detected(saved, kind):
-    _, sidecars, _, _, selected = saved
+    _, sidecars, _, concept, selected = saved
     if kind == "intent":
         record = capture_intent(TEXT)
         identifier = sidecars.save_intent(record)
         target = sidecars._path("intents", identifier)
         load, save = sidecars.load_intent, sidecars.save_intent
     elif kind == "decision":
-        record = ActorDecision(selected.selection_id, "AUTO_PINNED", ActorRef("SYSTEM", "cli:p"), "event:p")
+        receipt = save_fake_inference(sidecars, concept)
+        record = sidecars.decide_from_result(selected.selection_id, receipt)
         identifier = sidecars.save_decision(record)
         target = sidecars._path("decisions", identifier[9:])
         load, save = sidecars.load_decision, sidecars.save_decision
@@ -647,3 +660,351 @@ def test_invocation_snapshot_does_not_adopt_authorization_from_callback():
     reasoner = adapter(client)
     result = reason_v2(explore(), reasoner)
     assert result.state == "UNAUTHORIZED" and client.calls == []
+
+
+def creative_job(request=None, **options):
+    request = explore(count=3) if request is None else request
+    return A03CreativeJob.create(request, **{
+        "journey_id": "test:journey", "cycle_id": "test:cycle", "job_id": "test:creative",
+        "attempt": 1, "correlation_id": "test:correlation",
+        "provenance": CreativeJobProvenance("test:caller", "test:brief", brief_digest(request.brief),
+                                            "SYNTHETIC_FIXTURE"),
+        "configuration": ModelConfiguration("requested-provider", "requested-model"),
+        "purpose": "TEST_ONLY_MOCK", "selection_index": 1, **options,
+    })
+
+
+def test_stage_invokes_fake_saves_exact_lineage_without_human_or_product(tmp_path):
+    usage = UsageObservation("OBSERVED", input_tokens=21, output_tokens=13)
+    client = FakeClient(StructuredModelResponse("OK", payload(variants()), observation=MOCK,
+                                                usage=usage, request_id="fake:stage-call"))
+    config = ModelConfiguration("requested-provider", "requested-model", effort="requested-high")
+    job = creative_job(configuration=config)
+    stage = run_creative_stage(job, CreativeStore(tmp_path), LiveCreativeReasoner(config, client))
+    assert stage.status == "TEST_ONLY_MOCK" and stage.failure is None
+    assert len(client.calls) == 1 and client.calls[0].creative == job.request
+    assert client.calls[0].config == job.configuration == config
+    assert client.calls[0].to_dict()["config"]["effort"] == "requested-high"
+    assert stage.reasoning.configuration == config
+    assert stage.reasoning.observation == MOCK and stage.reasoning.usage == usage
+    assert stage.reasoning.provider_request_id == "fake:stage-call"
+    assert stage.job.request.brief["product_ref"] is None
+    assert A03CreativeJob.from_dict(job.to_dict()) == job
+    assert A03CreativeStageResult.from_dict(stage.to_dict()) == stage
+    sidecars = CreativeSidecarStore(tmp_path)
+    assert sidecars.load_stage(job) == stage
+    assert sidecars.load_result(stage.reasoning_ref.removeprefix("reasoning:")) == stage.reasoning
+    assert stage.reasoning_ref == "reasoning:" + stage.reasoning.digest
+    assert job.source_brief_digest == brief_digest(job.request.brief)
+    assert job.request_digest == stage.reasoning.request.digest
+    assert len(stage.outputs) == 3 and len({s.concept_digest for s in stage.outputs}) == 3
+    for output, concept in zip(stage.outputs, stage.reasoning.concepts(), strict=True):
+        assert output.concept_digest == concept.digest
+        assert output.source_brief_digest == job.source_brief_digest
+        assert sidecars.creative.load_concept(output.concept_id, output.revision) == concept
+        assert sidecars.creative.load_selection(output.selection_id) == output
+    decision = stage.decision
+    assert decision.kind == "AUTO_PINNED" and decision.human_event is None
+    assert decision.selection_id == stage.outputs[1].selection_id
+    assert decision.evidence_ref == stage.reasoning_ref
+    assert decision.inference == AIInferenceBinding(stage.reasoning.digest, job.request_digest,
+        job.source_brief_digest, stage.outputs[1].concept_digest, "TEST_ONLY_MOCK")
+    assert sidecars.verify_inference_decision(decision) == stage.reasoning
+    recommended = sidecars.decide_from_result(decision.selection_id, stage.reasoning.digest, kind="AI_RECOMMENDED")
+    assert recommended.actor == ActorRef("AI", stage.reasoning_ref)
+    assert recommended.inference.mode == "TEST_ONLY_MOCK"  # Never live model proof.
+    assert sidecars.load_decision(recommended.decision_id) == recommended
+    assert not list(tmp_path.rglob("*human*"))
+
+
+def test_stage_completed_job_is_idempotent_and_rebinding_requires_new_attempt(tmp_path):
+    job, client = creative_job(), FakeClient()
+    store = CreativeSidecarStore(tmp_path)
+    first = run_creative_stage(job, store, adapter(client))
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*.json")}
+    # A completed receipt is independently verified; no provider is needed again.
+    assert run_creative_stage(job, CreativeStore(tmp_path)) == first
+    assert len(client.calls) == 1 and before == {p: p.read_bytes() for p in tmp_path.rglob("*.json")}
+    for rebound in (replace(job, correlation_id="other"), replace(job, purpose="PRODUCTION"),
+                    replace(job, configuration=ModelConfiguration("other", "model"))):
+        with pytest.raises(VersionConflict, match="already bound"):
+            run_creative_stage(rebound, store, adapter(client))
+    assert len(client.calls) == 1
+    second = run_creative_stage(replace(job, attempt=2), store, adapter(client))
+    assert second.job.attempt == 2 and second.job.slot != first.job.slot and len(client.calls) == 2
+
+
+def test_reserved_job_without_terminal_receipt_never_replays(tmp_path):
+    job = creative_job()
+    store, client = CreativeSidecarStore(tmp_path), FakeClient()
+    store.creative.save_brief(job.request.brief)
+    assert store.claim_job(job)
+    with pytest.raises(CreativeValidationError, match="UNRESOLVED_CREATIVE_JOB"):
+        run_creative_stage(job, store, adapter(client))
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("reasoner", [None, LiveCreativeReasoner(),
+    LiveCreativeReasoner(ModelConfiguration("requested-provider", "requested-model"))])
+def test_stage_brief_only_is_intake_complete_never_creative_complete(tmp_path, reasoner):
+    stage = run_creative_stage(creative_job(), CreativeStore(tmp_path), reasoner)
+    assert stage.status == "INTAKE_COMPLETE" and stage.failure == "NO_MODEL_CONFIGURED"
+    assert stage.outputs == () and stage.decision is None
+    assert stage.reasoning.observation == ProviderObservation()
+    assert stage.reasoning.usage == UsageObservation()
+    assert CreativeSidecarStore(tmp_path).load_stage(stage.job) == stage
+
+
+def test_stage_mock_cannot_be_production_completion_or_relabelled(tmp_path):
+    client = FakeClient()
+    stage = run_creative_stage(creative_job(purpose="PRODUCTION"), CreativeStore(tmp_path), adapter(client))
+    assert stage.status == "FAILED" and stage.failure == "MOCK_NOT_PRODUCTION"
+    assert stage.reasoning.state == "OK" and stage.reasoning.observation.mode == "TEST_ONLY_MOCK"
+    assert not stage.outputs and not list((tmp_path / "concepts").rglob("*.json"))
+    data = stage.to_dict()
+    data.update(status="CREATIVE_COMPLETE", failure=None)
+    with pytest.raises(CreativeValidationError, match="status/failure"):
+        A03CreativeStageResult.from_dict(data)
+
+
+@pytest.mark.parametrize("state", ["REFUSED", "ERROR"])
+def test_stage_refusal_and_error_are_saved_without_fallback_or_retry(tmp_path, state):
+    client = FakeClient(StructuredModelResponse(state, observation=MOCK, request_id="fake:refused",
+                        usage=UsageObservation("OBSERVED", input_tokens=8, output_tokens=0)))
+    stage = run_creative_stage(creative_job(), CreativeStore(tmp_path), adapter(client))
+    assert stage.status == "FAILED" and stage.reasoning.state == state
+    assert stage.failure == ("MODEL_REFUSED" if state == "REFUSED" else "MODEL_ERROR")
+    assert stage.reasoning.usage.input_tokens == 8 and stage.outputs == () and stage.decision is None
+    assert len(client.calls) == 1
+    assert run_creative_stage(stage.job, CreativeStore(tmp_path), adapter(client)) == stage
+    assert len(client.calls) == 1
+
+
+def test_stage_does_not_authorize_live_network_or_spend_even_with_adapter_grant(tmp_path):
+    client = FakeClient()
+    client.capabilities = ProviderCapabilities("fake-live-capabilities", ("concept",), True, True)
+    reasoner = adapter(client, authorization=InvocationAuthorization(True, True, "test:live-path-only"))
+    stage = run_creative_stage(creative_job(), CreativeStore(tmp_path), reasoner)
+    assert stage.status == "FAILED" and stage.failure == "UNAUTHORIZED" and client.calls == []
+
+
+def test_stage_validates_requested_configuration_before_adapter_invocation(tmp_path):
+    client = FakeClient()
+    mismatched = LiveCreativeReasoner(ModelConfiguration("unrequested-provider", "unrequested-model"), client)
+    stage = run_creative_stage(creative_job(), CreativeStore(tmp_path), mismatched)
+    assert stage.status == "FAILED" and stage.failure == "CONFIGURATION_MISMATCH" and client.calls == []
+    # Missing job configuration also cannot borrow a model from the adapter.
+    job = creative_job(job_id="unconfigured", configuration=None)
+    stage = run_creative_stage(job, CreativeStore(tmp_path), adapter(client))
+    assert stage.status == "INTAKE_COMPLETE" and stage.failure == "NO_MODEL_CONFIGURED" and client.calls == []
+
+
+def test_stage_accepts_injected_v2_reasoner_and_rejects_unbound_identity(tmp_path):
+    class FakeReasonerV2:
+        calls = 0
+
+        def reason(self, request):
+            self.calls += 1
+            return ReasoningResult(request, "OK", variants(), observation=MOCK,
+                configuration=ModelConfiguration("requested-provider", "requested-model"),
+                provider_request_id="fake:direct-v2")
+
+    fake = FakeReasonerV2()
+    stage = run_creative_stage(creative_job(selection_index=None), CreativeStore(tmp_path), fake)
+    assert stage.status == "TEST_ONLY_MOCK" and stage.decision is None and fake.calls == 1
+
+
+@pytest.mark.parametrize("observation,config,request_id,expected", [
+    (ProviderObservation(), ModelConfiguration("requested-provider", "requested-model"), "fake:id", "UNBOUND_PROVIDER"),
+    (MOCK, None, "fake:id", "NO_MODEL_CONFIGURED"),
+    (MOCK, ModelConfiguration("other", "model"), "fake:id", "CONFIGURATION_MISMATCH"),
+    (MOCK, ModelConfiguration("requested-provider", "requested-model"), None, "UNBOUND_PROVIDER"),
+    (ProviderObservation("different-provider", "different-model", "MODEL"),
+        ModelConfiguration("requested-provider", "requested-model"), "fake:forged-model", "PROVIDER_IDENTITY_MISMATCH"),
+])
+def test_stage_invalid_identity_never_commits_creative_outputs(tmp_path, observation, config, request_id, expected):
+    class ForgedIdentityFake:
+        """Negative fixture only: MODEL labels here are forged, never real-model proof."""
+        calls = 0
+
+        def reason(self, request):
+            self.calls += 1
+            return ReasoningResult(request, "OK", variants(), observation=observation,
+                                   configuration=config, provider_request_id=request_id)
+
+    fake = ForgedIdentityFake()
+    stage = run_creative_stage(creative_job(), CreativeStore(tmp_path), fake)
+    assert stage.status == "FAILED" and stage.failure == expected and fake.calls == 1
+    assert stage.outputs == () and stage.decision is None
+    assert not list((tmp_path / "concepts").rglob("*.json"))
+
+
+@pytest.mark.parametrize("changes", [
+    {"schema_version": "A03CreativeJob.v99"}, {"attempt": True}, {"attempt": 0}, {"job_id": " "},
+    {"source_brief_digest": "0" * 64}, {"brief_id": "wrong"}, {"request_digest": "0" * 64},
+    {"purpose": "AUTO_APPROVED"}, {"selection_index": True}, {"selection_index": -1}, {"selection_index": 3},
+])
+def test_invalid_stage_job_rejected_before_invocation(changes):
+    with pytest.raises(CreativeValidationError):
+        replace(creative_job(), **changes)
+
+
+@pytest.mark.parametrize("record_type", [A03CreativeJob, A03CreativeStageResult])
+def test_stage_wire_records_reject_unknown_missing_and_duplicate_json_fields(tmp_path, record_type):
+    stage = run_creative_stage(creative_job(), CreativeStore(tmp_path), adapter())
+    data = stage.job.to_dict() if record_type is A03CreativeJob else stage.to_dict()
+    for bad in ({**data, "unknown": True}, {k: v for k, v in data.items() if k != "schema_version"}):
+        with pytest.raises(CreativeValidationError):
+            record_type.from_dict(bad)
+    from ai_commerce.creative._validation import read_json
+    raw = canonical_bytes(data).decode("utf-8")
+    with pytest.raises(CreativeValidationError, match="INVALID_JSON"):
+        record_type.from_dict(read_json('{"schema_version":"duplicate",' + raw[1:]))
+
+
+@pytest.mark.parametrize("mutation", ["duplicate", "unknown", "wrong-digest", "wrong-selection", "wrong-request"])
+def test_stage_receipt_rejects_rebound_output_and_reasoning_references(tmp_path, mutation):
+    stage = run_creative_stage(creative_job(), CreativeStore(tmp_path), adapter())
+    data = stage.to_dict()
+    if mutation == "duplicate":
+        data["outputs"][1] = data["outputs"][0]
+    elif mutation == "unknown":
+        data["outputs"][0]["concept_id"] = "concept:" + "0" * 64
+    elif mutation == "wrong-digest":
+        data["outputs"][0]["concept_digest"] = "0" * 64
+    elif mutation == "wrong-selection":
+        data["decision"]["selection_id"] = data["outputs"][0]["concept_id"].replace("concept:", "selection:")
+    else:
+        data["reasoning"]["request"]["instruction"] = "rebound instruction"
+    with pytest.raises(CreativeValidationError):
+        A03CreativeStageResult.from_dict(data)
+
+
+def test_stage_unknown_output_selection_and_rebound_request_fail_closed(tmp_path):
+    request = explore()  # No count means the output bound is checked after inference.
+    client = FakeClient()
+    stage = run_creative_stage(creative_job(request, selection_index=7), CreativeStore(tmp_path), adapter(client))
+    assert stage.status == "FAILED" and stage.failure == "UNKNOWN_CONCEPT_SELECTION"
+    assert stage.outputs == () and len(client.calls) == 1
+
+    class ReboundFake:
+        def reason(self, request):
+            return reason_v2(ReasoningRequest.create("different source", mode="controlled_variants"), adapter())
+
+    stage = run_creative_stage(creative_job(job_id="rebound"), CreativeStore(tmp_path), ReboundFake())
+    assert stage.status == "FAILED" and stage.failure == "INVALID_REASONER_RESULT"
+
+
+@pytest.mark.parametrize("kind", ["AUTO_PINNED", "AI_RECOMMENDED"])
+def test_historical_arbitrary_ai_evidence_decodes_but_cannot_be_saved_as_inference(saved, kind):
+    _, sidecars, _, _, selection = saved
+    legacy = ActorDecision(selection.selection_id, kind,
+        ActorRef("AI", "pretend:authenticated-ai") if kind == "AI_RECOMMENDED" else ActorRef("SYSTEM", "cli:pin"),
+        "arbitrary:evidence")
+    raw = legacy.to_dict()
+    assert "inference" not in raw and ActorDecision.from_dict(raw) == legacy
+    # Existing V1 bytes remain readable for history, with no inference authority.
+    sidecars._save("decisions", legacy.decision_id[9:], raw)
+    assert sidecars.load_decision(legacy.decision_id) == legacy
+    with pytest.raises(CreativeValidationError, match="saved inference binding"):
+        sidecars.save_decision(legacy)
+    with pytest.raises(CreativeValidationError, match="saved inference binding"):
+        sidecars.verify_inference_decision(legacy)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("receipt_digest", "0" * 64), ("request_digest", "0" * 64),
+    ("source_brief_digest", "0" * 64), ("concept_digest", "0" * 64), ("mode", "MODEL"),
+])
+def test_forged_ai_binding_requires_actual_saved_matching_receipt(tmp_path, field, value):
+    store = CreativeSidecarStore(tmp_path)
+    stage = run_creative_stage(creative_job(), store, adapter())
+    binding = replace(stage.decision.inference, **{field: value})
+    forged = replace(stage.decision, inference=binding, evidence_ref="reasoning:" + binding.receipt_digest)
+    with pytest.raises((CreativeValidationError, FileNotFoundError)):
+        store.save_decision(forged)
+
+
+def test_ai_receipt_cannot_select_another_output_or_brief(tmp_path):
+    store = CreativeSidecarStore(tmp_path)
+    first = run_creative_stage(creative_job(), store, adapter())
+    other_drafts = (ConceptDraft("other", "Other", "Other premise", "Other visual"),)
+    client = FakeClient(StructuredModelResponse("OK", payload(other_drafts), observation=MOCK, request_id="fake:other"))
+    request = ReasoningRequest.create(TEXT, count=1)
+    other = run_creative_stage(creative_job(request, job_id="other", selection_index=0), store, adapter(client))
+    with pytest.raises(CreativeValidationError, match="selected concept mismatch"):
+        store.decide_from_result(other.outputs[0].selection_id, first.reasoning.digest)
+    # An equal draft against a different brief is also a different exact output.
+    request = ReasoningRequest.create("another brief", mode="controlled_variants", count=3)
+    third = run_creative_stage(creative_job(request, job_id="third"), store, adapter())
+    with pytest.raises(CreativeValidationError, match="selected concept mismatch"):
+        store.decide_from_result(third.outputs[1].selection_id, first.reasoning.digest)
+    with pytest.raises(CreativeValidationError, match="AI actor reference"):
+        replace(store.decide_from_result(first.decision.selection_id, first.reasoning.digest, kind="AI_RECOMMENDED"),
+                actor=ActorRef("AI", "pretend:authenticated-ai"))
+
+
+def test_failed_unknown_and_critique_receipts_cannot_authorize_ai_selection(saved):
+    _, sidecars, brief, concept, selection = saved
+    refused = reason_v2(explore(), adapter(FakeClient(StructuredModelResponse(
+        "REFUSED", observation=MOCK, request_id="fake:refusal"))))
+    no_model = reason_v2(explore())
+    unbound = ReasoningResult(explore(), "OK", variants())
+    critique_request = ReasoningRequest.create(brief, operation="CRITIQUE", source=concept)
+    critique = reason_v2(critique_request, adapter(FakeClient(StructuredModelResponse(
+        "OK", payload(critique="Optional critique"), observation=MOCK, request_id="fake:critique"))))
+    for result in (refused, no_model, unbound, critique):
+        receipt = sidecars.save_result(result)
+        with pytest.raises(CreativeValidationError):
+            sidecars.decide_from_result(selection.selection_id, receipt)
+
+
+@pytest.mark.parametrize("kind", ["brief", "concept", "selection", "reasoning", "decision", "stage", "job", "stage-ref"])
+def test_stage_replay_verifies_all_stored_bytes_and_never_calls_after_tamper(tmp_path, kind):
+    store, client = CreativeSidecarStore(tmp_path), FakeClient()
+    stage = run_creative_stage(creative_job(), store, adapter(client))
+    paths = {
+        "brief": store.creative.root / "briefs" / f"{stage.job.source_brief_digest}.json",
+        "concept": store.creative._concept_path(stage.outputs[0].concept_id, 1),
+        "selection": store.creative._selection_path(stage.outputs[0].selection_id),
+        "reasoning": store._path("reasoning", stage.reasoning.digest),
+        "decision": store._path("decisions", stage.decision.decision_id[9:]),
+        "stage": store._path("stages", stage.digest), "job": store._path("jobs", stage.job.slot),
+        "stage-ref": store._path("stage-refs", stage.job.slot),
+    }
+    target = paths[kind]
+    target.write_bytes(target.read_bytes() + b"\n")  # Semantic JSON stays equal; exact bytes do not.
+    with pytest.raises((CreativeValidationError, VersionConflict)):
+        run_creative_stage(stage.job, store, adapter(client))
+    assert len(client.calls) == 1
+
+
+@pytest.mark.parametrize("operation", ["DEVELOP", "REFRAME", "CRITIQUE"])
+def test_stage_existing_operations_commit_only_actual_inference_outputs(saved, operation):
+    store, sidecars, brief, original, _ = saved
+    request = ReasoningRequest.create(brief, operation=operation, source=original,
+        **({"lens": "test:lens"} if operation == "REFRAME" else {}))
+    response = StructuredModelResponse("OK", payload(critique="Optional critique") if operation == "CRITIQUE"
+        else payload(edits={"title": "Inferred title"}), observation=MOCK, request_id="fake:operation")
+    job = creative_job(request, selection_index=None if operation == "CRITIQUE" else 0)
+    stage = run_creative_stage(job, sidecars, adapter(FakeClient(response)))
+    assert stage.status == "TEST_ONLY_MOCK" and store.load_concept(original.concept_id, 1) == original
+    if operation == "CRITIQUE":
+        assert stage.outputs == () and stage.decision is None
+        assert stage.reasoning.critique == "Optional critique"
+        assert not store._concept_path(original.concept_id, 2).exists()
+    else:
+        child = store.load_concept(original.concept_id, 2)
+        assert stage.outputs[0].concept_digest == child.digest
+        assert child.parent.digest == original.digest and child.observation == original.observation
+        assert sidecars.verify_inference_decision(stage.decision) == stage.reasoning
+
+
+def test_requested_effort_is_optional_and_old_v2_configuration_bytes_stay_stable():
+    original = ModelConfiguration("provider", "model")
+    assert original.to_dict() == {"provider": "provider", "model": "model"}
+    assert ModelConfiguration.from_dict(original.to_dict()) == original
+    configured = ModelConfiguration("provider", "model", effort="requested-high")
+    assert ModelConfiguration.from_dict(configured.to_dict()) == configured
+    with pytest.raises(CreativeValidationError):
+        ModelConfiguration.from_dict({**configured.to_dict(), "observed_effort": "invented"})
