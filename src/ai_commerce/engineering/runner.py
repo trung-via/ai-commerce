@@ -364,7 +364,10 @@ def _run_codex_with_live_event_mirror(command: list[str], *,
 
 DEFAULT_MAX_REPAIR_ROUNDS = 2
 MAX_REPAIR_ROUNDS = 5
-DEFAULT_ACTION_TIMEOUT_SECONDS = 7200
+DEFAULT_VERIFY_TIMEOUT_SECONDS = 5400
+# The 120-minute executor window and 90-minute verification window are
+# individually bounded; the total action must accommodate both.
+DEFAULT_ACTION_TIMEOUT_SECONDS = 7200 + DEFAULT_VERIFY_TIMEOUT_SECONDS
 MAX_TIMEOUT_SECONDS = 86400
 # Stay below cmd.exe's limit too: AGY may be installed as a Windows .cmd shim.
 AGY_COMMANDLINE_MAX_UNITS = 8000
@@ -1172,7 +1175,7 @@ def _repair_prompt(instruction: str, feedback: dict, feedback_file: str, *,
 def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: str,
                     selection: ExecutorSelection, instruction: str,
                     verify_argv: Sequence[str], allowed_prefixes: Sequence[str] = (),
-                    timeout_seconds: int = 7200, verify_timeout_seconds: int = 1800,
+                    timeout_seconds: int = 7200, verify_timeout_seconds: int = DEFAULT_VERIFY_TIMEOUT_SECONDS,
                     max_repair_rounds: int = DEFAULT_MAX_REPAIR_ROUNDS,
                     action_timeout_seconds: int = DEFAULT_ACTION_TIMEOUT_SECONDS,
                     codex_bin: str = "codex", antigravity_bin: str = "agy",
