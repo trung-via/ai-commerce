@@ -2003,6 +2003,28 @@ def test_a10_m05_selects_a03_consumer_with_only_reviewed_closure(real_tree, monk
             registered_only=True, registered_profiles=registry, env={})
 
     selected = select(groups)
+    if v21:
+        # MT-01 V2.1 no longer treats every indirect CLI/test import as a
+        # mandatory owner suite. It keeps M05's actual owner, its declared A03
+        # consumer and the reviewed production/WakeHub consumer chain.
+        expected_v21 = {
+            "a03", "a10", "cli", "production-orchestration", "wakehub-runtime",
+        }
+        if path.endswith("/briefs.py"):
+            expected_v21.update({
+                "a10-m02", "a18-1", "a18-2", "a18-3", "b0-1",
+                "b3-portfolio", "wakehub-cdp-native",
+            })
+        assert set(selected["selected_groups"]) == expected_v21
+        assert not selected["fallback"]
+        assert selected["reason_codes"] == ["SCOPED_CONSUMER_CLOSURE"]
+        assert selected["unknown_tests"] == selected["unknown_acs"] == selected["unknown_consumers"] == []
+        assert all(entry["state"] == "EXECUTE" for entry in selected["groups"])
+        assert not {"a05", "a06", "a07", "a08", "a09", "a11", "a12", "bq-04a"} & expected_v21
+        for owner in ("a03", "a10", "production-orchestration", "wakehub-runtime"):
+            entry = next(e for e in selected["groups"] if e["group"] == owner)
+            assert entry["binding"]["candidate_files"][path] == real_tree.files[path]
+        return
     expected = {
         "a03", "a04", "a05", "a06", "a07", "a08", "a09", "a10", "a10-m02",
         "a11", "a12", "a18-1", "a18-2", "a18-3", "b0-1", "b3-portfolio",
