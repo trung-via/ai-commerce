@@ -4,11 +4,12 @@ import importlib.util
 import copy
 from datetime import datetime, timedelta, timezone
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
+import stat
 import subprocess
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, mock_open, patch
 import tempfile
 import unittest
 
@@ -1782,6 +1783,170 @@ class ExecutorHealthPrivateBridgeTests(unittest.TestCase):
         profiles = json.loads((root / ".github/ef02/verify-profiles.json").read_text(encoding="utf-8"))
         self.assertIn("mt01-component-onboarding", profiles)
         self.assertEqual(profiles["mt01-hostops-v3-tests"][-2:], ["-n", "12"])
+
+
+class PersonalCdp9444ConfigRegistryTests(unittest.TestCase):
+    """Mocked Windows metadata fixtures for the source-only operation."""
+
+    OPERATION = "cdp_9444_config_registry"
+    SLOT_IDS = ("SLOT_01", "SLOT_02", "SLOT_03", "SLOT_04", "SLOT_05", "SLOT_06")
+    STATES = ("ABSENT", "PRESENT_FILE", "PRESENT_NONFILE", "UNAVAILABLE_OR_REPARSE")
+
+    def setUp(self):
+        from ai_commerce.remote import chrome_acquisition
+
+        self.acquisition = chrome_acquisition
+        self.local = PureWindowsPath("C:/Users/PRIVATE_OWNER/AppData/Local")
+        self.root = self.local / "AI-Commerce"
+        self.candidates = tuple(self.root / name for name in chrome_acquisition._CONFIG_9444_RELATIVE_PATHS)
+        self.metadata = {path: self.info(stat.S_IFDIR) for path in (self.root, self.local, *self.local.parents)}
+        self.native = self.enterContext(patch.object(chrome_acquisition, "_native_local_app_data", return_value=self.local))
+        self.enterContext(patch.object(hostops, "os", new=SimpleNamespace(name="nt")))
+        self.probe = Mock(side_effect=self.lstat)
+        self.enterContext(patch.object(PureWindowsPath, "lstat", lambda path: self.probe(path), create=True))
+
+    @staticmethod
+    def info(mode, attributes=0):
+        return SimpleNamespace(st_mode=mode, st_file_attributes=attributes)
+
+    def lstat(self, path):
+        value = self.metadata.get(path, FileNotFoundError(str(path)))
+        if isinstance(value, OSError):
+            raise value
+        return value
+
+    def observe(self):
+        return hostops.perform(hostops.parse_event(event("read", self.OPERATION, {}), "read"))
+
+    def assert_receipt(self, receipt, states, *, code="METADATA_ONLY"):
+        self.assertEqual(receipt, {
+            "status": "OBSERVED" if code == "METADATA_ONLY" else "UNKNOWN",
+            "code": code, "operation": self.OPERATION, "cdp_port": 9444,
+            "slots": [{"slot_id": slot, "status": state} for slot, state in zip(self.SLOT_IDS, states)],
+            "counts": {state: states.count(state) for state in self.STATES},
+            "no_shell_command_executed": True, "browser_attached": False, "chrome_launched": False,
+            "config_written": False, "enrollment_performed": False, "send_performed": False, "grant_issued": False,
+        })
+        self.assertEqual(len(receipt["slots"]), 6)
+        self.assertTrue(all(type(count) is int and 0 <= count <= 6 for count in receipt["counts"].values()))
+        self.assertLess(len(json.dumps(receipt).encode("ascii")), 1024)
+
+    def test_exact_parameterless_read_registration(self):
+        self.assertEqual(hostops.parse_event(event("read", self.OPERATION, {}), "read"), {
+            "issue_number": 17, "operation": self.OPERATION, "parameters": {},
+        })
+        for params in ({"port": 9444}, {"LOCALAPPDATA": str(self.local)}, {"command": "Get-Item"}):
+            with self.subTest(params=params), self.assertRaisesRegex(hostops.Denied, "INVALID_PARAMETERS"):
+                hostops.parse_event(event("read", self.OPERATION, params), "read")
+            with self.assertRaisesRegex(hostops.Denied, "INVALID_PARAMETERS"):
+                hostops.perform({"operation": self.OPERATION, "parameters": params})
+        for params in (None, [], ""):
+            with self.assertRaisesRegex(hostops.Denied, "INVALID_REQUEST"):
+                hostops.parse_event(event("read", self.OPERATION, params), "read")
+            with self.assertRaisesRegex(hostops.Denied, "INVALID_PARAMETERS"):
+                hostops.perform({"operation": self.OPERATION, "parameters": params})
+        for operation in (self.OPERATION.upper(), self.OPERATION + " "):
+            with self.assertRaisesRegex(hostops.Denied, "READ_OPERATION_DENIED"):
+                hostops.parse_event(event("read", operation, {}), "read")
+        with self.assertRaisesRegex(hostops.Denied, "WRITE_SCOPE_DENIED"):
+            hostops.parse_event(event("write", self.OPERATION, {}), "write")
+        self.native.assert_not_called()
+
+    def test_present_files_and_directory_stay_separate_with_no_effects(self):
+        for index in (0, 1, 3):
+            self.metadata[self.candidates[index].parent] = self.info(stat.S_IFDIR)
+        self.metadata[self.candidates[0]] = self.info(stat.S_IFREG)
+        self.metadata[self.candidates[3]] = self.info(stat.S_IFDIR)
+        self.metadata[self.candidates[4]] = self.info(stat.S_IFREG)
+
+        with (patch("sys.stdin", None), patch.object(builtins, "open") as open_file,
+              patch.object(Path, "open") as path_open, patch.object(subprocess, "Popen") as popen,
+              patch.object(self.acquisition, "load_environment") as load,
+              patch.object(self.acquisition, "_interactive_session") as session,
+              patch.object(self.acquisition, "_probe_cdp") as probe):
+            result = self.observe()
+            for effect in (open_file, path_open, popen, load, session, probe):
+                effect.assert_not_called()
+        self.native.assert_called_once_with()
+        self.assert_receipt(result, ("PRESENT_FILE", "ABSENT", "ABSENT", "PRESENT_NONFILE", "PRESENT_FILE", "ABSENT"))
+        self.assertEqual(result, self.observe())
+
+    def test_unsafe_components_are_unavailable_and_their_children_are_unprobed(self):
+        junction, symlink, nondirectory, unreadable, reparse, _ = self.candidates
+        self.metadata[junction.parent] = self.info(stat.S_IFDIR, stat.FILE_ATTRIBUTE_REPARSE_POINT)
+        self.metadata[symlink.parent] = self.info(stat.S_IFDIR)
+        self.metadata[symlink] = self.info(stat.S_IFLNK)
+        self.metadata[nondirectory.parent] = self.info(stat.S_IFREG)
+        self.metadata[unreadable.parent] = self.info(stat.S_IFDIR)
+        self.metadata[unreadable] = PermissionError("C:/PRIVATE_PATH credential=PRIVATE_TOKEN")
+        self.metadata[reparse] = self.info(stat.S_IFREG, stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+        self.assert_receipt(self.observe(), ("UNAVAILABLE_OR_REPARSE",) * 5 + ("ABSENT",),
+                            code="CONFIG_CUSTODY_UNAVAILABLE")
+        paths = [call.args[0] for call in self.probe.call_args_list]
+        self.assertEqual(paths[:len(self.local.parts)], [*reversed(self.local.parents), self.local])
+        self.assertNotIn(junction, paths)
+        self.assertNotIn(nondirectory, paths)
+
+    def test_missing_root_reports_six_absent_without_probing_slots(self):
+        del self.metadata[self.root]
+        self.assert_receipt(self.observe(), ("ABSENT",) * 6)
+        self.assertEqual([call.args[0] for call in self.probe.call_args_list],
+                         [*reversed(self.local.parents), self.local, self.root])
+
+    def test_registry_drift_cannot_expand_the_metadata_probe(self):
+        paths = self.acquisition._CONFIG_9444_RELATIVE_PATHS
+        for registry in (paths + ("extra.json",), paths[:-1] + (paths[0].upper(),),
+                         paths[:-1] + ("../private.json",), paths[:-1] + ("extra/subdir/config.json",)):
+            with self.subTest(registry=registry), patch.object(self.acquisition, "_CONFIG_9444_RELATIVE_PATHS", registry):
+                self.assert_receipt(self.observe(), ("UNAVAILABLE_OR_REPARSE",) * 6,
+                                    code="REGISTRY_SOURCE_UNAVAILABLE")
+        self.native.assert_not_called()
+        self.probe.assert_not_called()
+
+    def test_unavailable_known_folder_holds_without_falling_back(self):
+        unavailable = ("UNAVAILABLE_OR_REPARSE",) * 6
+        self.native.side_effect = self.acquisition._EnrollmentHold("PRIVATE_KNOWN_FOLDER_FAILURE")
+        self.assert_receipt(self.observe(), unavailable, code="OWNER_KNOWN_FOLDER_UNAVAILABLE")
+        self.probe.assert_not_called()
+        self.native.side_effect = None
+        for path in (None, PureWindowsPath("//PRIVATE_SERVER/share/Local")):
+            with self.subTest(path=path):
+                self.native.return_value = path
+                self.assert_receipt(self.observe(), unavailable, code="OWNER_KNOWN_FOLDER_UNAVAILABLE")
+        self.probe.assert_not_called()
+        self.native.return_value = self.local
+        self.metadata[self.local.parent] = PermissionError("PRIVATE_OWNER")
+        self.assert_receipt(self.observe(), unavailable, code="OWNER_KNOWN_FOLDER_UNAVAILABLE")
+        self.assertNotIn(self.local, [call.args[0] for call in self.probe.call_args_list])
+
+    def test_public_issue_entrypoint_holds_before_collecting(self):
+        args = SimpleNamespace(mode="read", output="receipt.json")
+        payload = json.dumps(event("read", self.OPERATION, {}))
+        with (patch.object(hostops, "os", new=SimpleNamespace(name="nt", environ={"GITHUB_EVENT_PATH": "event.json"})),
+              patch.object(hostops.argparse.ArgumentParser, "parse_args", return_value=args),
+              patch.object(builtins, "open", mock_open(read_data=payload)),
+              patch.object(hostops, "Path") as output):
+            self.assertEqual(hostops.main(), 2)
+        self.assertEqual(json.loads(output.return_value.write_text.call_args.args[0]), {
+            "status": "BLOCKED", "code": "PUBLIC_RECEIPT_INTEGRATION_PENDING", "remote_shell_enabled": False,
+        })
+        self.native.assert_not_called()
+        self.probe.assert_not_called()
+
+    def test_existing_reads_keep_their_dispatch_and_standing_rows(self):
+        standing = PersonalHostOpsContractTests._standing_snapshot()
+        topology = {"operation": "cdp_9444_topology", "cdp_port": 9444}
+        with (patch.object(hostops, "_standing_read_snapshot", return_value=standing) as standing_read,
+              patch.object(hostops, "_cdp_9444_topology", return_value=topology) as topology_read):
+            for expected in (standing, topology):
+                request = hostops.parse_event(event("read", expected["operation"], {}), "read")
+                self.assertEqual(hostops.perform(request), expected)
+        self.assertEqual(len(standing["diagnostics"]), 16)
+        self.assertNotIn("slots", hostops.PERSONAL_PUBLIC_FIELDS)
+        standing_read.assert_called_once_with()
+        topology_read.assert_called_once_with()
+        self.native.assert_not_called()
 
 
 class PersonalCdp9444TopologyTests(unittest.TestCase):

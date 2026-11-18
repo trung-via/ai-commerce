@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import platform
 import re
 import shutil
@@ -168,7 +168,7 @@ def parse_event(event, mode):
     operation = request["operation"]
     if mode == "read":
         if operation in ("inventory", "runner_runtime_inventory", "cdp_9333_status", "cdp_9444_topology",
-                         "standing_read_diagnostics"):
+                         "cdp_9444_config_registry", "standing_read_diagnostics"):
             # Runtime inventory has fixed, compiled-in three-runner targets.
             # The public Issue cannot choose a task, executable or command.
             if params:
@@ -757,6 +757,87 @@ def _cdp_9444_topology():
     result.update(status="OBSERVED", code="CDP_PROTOCOL_HEALTHY", devtools_protocol_ok=True,
                   infrastructure_ready=True)
     return result
+
+
+_CONFIG_9444_SLOT_IDS = ("SLOT_01", "SLOT_02", "SLOT_03", "SLOT_04", "SLOT_05", "SLOT_06")
+_CONFIG_9444_SLOT_STATES = ("ABSENT", "PRESENT_FILE", "PRESENT_NONFILE", "UNAVAILABLE_OR_REPARSE")
+
+
+def _config_registry_path_state(path: Path, *, directory: bool = False) -> str:
+    """Inspect one component after its parents have passed the metadata check."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError as exc:
+        return "ABSENT" if getattr(exc, "winerror", None) in (None, 2, 3) else "UNAVAILABLE_OR_REPARSE"
+    except (OSError, ValueError):
+        return "UNAVAILABLE_OR_REPARSE"
+    if (stat.S_ISLNK(info.st_mode) or
+            getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+        return "UNAVAILABLE_OR_REPARSE"
+    if directory and not stat.S_ISDIR(info.st_mode):
+        return "UNAVAILABLE_OR_REPARSE"
+    return "PRESENT_FILE" if stat.S_ISREG(info.st_mode) else "PRESENT_NONFILE"
+
+
+def _cdp_9444_config_registry():
+    """Report fixed-slot metadata from the current Windows token's known folder."""
+    unavailable = "UNAVAILABLE_OR_REPARSE"
+
+    def receipt(code, states=(unavailable,) * len(_CONFIG_9444_SLOT_IDS)):
+        return {
+            "status": "OBSERVED" if code == "METADATA_ONLY" else "UNKNOWN",
+            "code": code,
+            "operation": "cdp_9444_config_registry",
+            "cdp_port": 9444,
+            "slots": [{"slot_id": slot, "status": state}
+                      for slot, state in zip(_CONFIG_9444_SLOT_IDS, states)],
+            "counts": {state: states.count(state) for state in _CONFIG_9444_SLOT_STATES},
+            "no_shell_command_executed": True,
+            "browser_attached": False,
+            "chrome_launched": False,
+            "config_written": False,
+            "enrollment_performed": False,
+            "send_performed": False,
+            "grant_issued": False,
+        }
+
+    if os.name != "nt":
+        return receipt("OWNER_KNOWN_FOLDER_UNAVAILABLE")
+    try:
+        from ai_commerce.remote import chrome_acquisition as acquisition
+        relatives = acquisition._CONFIG_9444_RELATIVE_PATHS
+        if len(relatives) != len(_CONFIG_9444_SLOT_IDS):
+            return receipt("REGISTRY_SOURCE_UNAVAILABLE")
+        candidates = tuple(tuple(_relative_path(relative)) for relative in relatives)
+    except (ImportError, AttributeError, Denied):
+        return receipt("REGISTRY_SOURCE_UNAVAILABLE")
+    if (len({relative.lower() for relative in relatives}) != len(candidates)
+            or any(len(parts) > 2 for parts in candidates)):
+        return receipt("REGISTRY_SOURCE_UNAVAILABLE")
+
+    try:
+        local = acquisition._native_local_app_data()
+    except (OSError, ValueError, AttributeError, ImportError):
+        return receipt("OWNER_KNOWN_FOLDER_UNAVAILABLE")
+    if (not isinstance(local, PureWindowsPath) or not local.is_absolute()
+            or not re.fullmatch(r"[A-Za-z]:", local.drive)
+            or len(str(local)) > 4096 or len(local.parts) > 32 or ".." in local.parts):
+        return receipt("OWNER_KNOWN_FOLDER_UNAVAILABLE")
+    for part in (*reversed(local.parents), local):
+        if _config_registry_path_state(part, directory=True) != "PRESENT_NONFILE":
+            return receipt("OWNER_KNOWN_FOLDER_UNAVAILABLE")
+
+    root = local / "AI-Commerce"
+    root_state = _config_registry_path_state(root, directory=True)
+    states = []
+    for parts in candidates:
+        state = root_state
+        if state == "PRESENT_NONFILE" and len(parts) == 2:
+            state = _config_registry_path_state(root / parts[0], directory=True)
+        if state == "PRESENT_NONFILE":
+            state = _config_registry_path_state(root.joinpath(*parts))
+        states.append(state)
+    return receipt("CONFIG_CUSTODY_UNAVAILABLE" if unavailable in states else "METADATA_ONLY", states)
 
 
 def _validate_standing_snapshot(snapshot):
@@ -1536,6 +1617,10 @@ class ExecutorHealthPrivateBridge:
 def perform(request):
     op = request["operation"]
     params = request["parameters"]
+    if op == "cdp_9444_config_registry":
+        if type(params) is not dict or params:
+            deny("INVALID_PARAMETERS")
+        return _cdp_9444_config_registry()
     if op == "cdp_9444_topology":
         if type(params) is not dict or params:
             deny("INVALID_PARAMETERS")
@@ -1661,6 +1746,9 @@ def main():
         with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as stream:
             event = json.load(stream)
         request = parse_event(event, args.mode)
+        if request["operation"] == "cdp_9444_config_registry":
+            # Public Issue transport needs an independent closed sanitizer.
+            deny("PUBLIC_RECEIPT_INTEGRATION_PENDING")
         outcome = perform(request)
         result = {
             **outcome,
