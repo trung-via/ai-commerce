@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ai_commerce.core.provenance import canonical_bytes, sha256_bytes
 
@@ -14,9 +14,12 @@ from .intent import CreativeIntent
 from .models import ConceptRecord, require_digest
 from .store import CreativeStore, _put
 from .v2 import (
-    A03CreativeJob, A03CreativeStageResult, ReasoningRequest, ReasoningResult,
-    _output_pin, _stage_concepts, inference_decision, inference_failure,
+    A03CreativeCycleJob, A03CreativeCycleResult, A03CreativeJob, A03CreativeStageResult, ReasoningRequest, ReasoningResult,
+    _cycle_stage_job, _output_pin, _stage_concepts, inference_decision, inference_failure,
 )
+
+if TYPE_CHECKING:
+    from .live import InvocationAuthorization
 
 
 class CreativeSidecarStore:
@@ -109,16 +112,25 @@ class CreativeSidecarStore:
         result = self.load_result(binding.receipt_digest)
         if inference_failure(result) is not None:
             raise CreativeValidationError("decision receipt is not bound successful inference")
+        if result.request.cycle is not None and (result.request.operation != "SELECT" or valid.kind != "AI_RECOMMENDED"):
+            raise CreativeValidationError("R2 AI decisions require an independent typed model selector")
         selection = self.creative.load_selection(valid.selection_id)
         self._check_bytes(self.creative._selection_path(valid.selection_id), selection.to_dict())
         concept = self.creative.load_concept(selection.concept_id, selection.revision)
         self._check_bytes(self.creative._concept_path(concept.concept_id, concept.revision), concept.to_dict())
+        if result.request.operation == "SELECT":
+            if (valid.kind != "AI_RECOMMENDED" or result.selection.action != "SELECT"
+                    or result.selection.selection != selection):
+                raise CreativeValidationError("R2 AI choice requires explicit model SELECT evidence")
+            permitted = (result.selection.selection,)
+        else:
+            permitted = tuple(_output_pin(c) for c in _stage_concepts(result))
         if (binding.request_digest != result.request.digest
                 or binding.source_brief_digest != brief_digest(result.request.brief)
                 or binding.source_brief_digest != selection.source_brief_digest
                 or binding.concept_digest != selection.concept_digest
                 or binding.mode != result.observation.mode
-                or selection not in tuple(_output_pin(c) for c in _stage_concepts(result))):
+                or selection not in permitted):
             raise CreativeValidationError("decision inference/source/selected concept mismatch")
         return result
 
@@ -151,6 +163,44 @@ class CreativeSidecarStore:
             if saved != request.source:
                 raise CreativeValidationError("proposal source revision mismatch")
             self._check_bytes(self.creative._concept_path(saved.concept_id, saved.revision), saved.to_dict())
+        if request.cycle is not None:
+            context = request.cycle
+            cycle = A03CreativeCycleJob.from_dict(self._read("cycle-requests", context.cycle_digest))
+            self._check_bytes(self._path("cycle-jobs", cycle.seed.slot), cycle.to_dict())
+            if (cycle.digest != context.cycle_digest or request.brief != cycle.seed.request.brief
+                    or request.intent != cycle.seed.request.intent or context.evidence != cycle.evidence):
+                raise CreativeValidationError("cycle request rebound its brief, intent or evidence")
+            for candidate in context.candidates:
+                saved = self.creative.load_concept(candidate.concept_id, candidate.revision)
+                if saved != candidate:
+                    raise CreativeValidationError("cycle candidate snapshot mismatch")
+                self._check_bytes(self.creative._concept_path(saved.concept_id, saved.revision), saved.to_dict())
+                pin = _output_pin(saved)
+                if self.creative.load_selection(pin.selection_id) != pin:
+                    raise CreativeValidationError("cycle candidate pin mismatch")
+                self._check_bytes(self.creative._selection_path(pin.selection_id), pin.to_dict())
+            for critic in context.critics:
+                result = self.load_result(critic.receipt_digest)
+                if (result.state != "OK" or inference_failure(result) is not None
+                        or result.request.operation != "CRITIQUE" or result.request.cycle is None
+                        or result.request.cycle.cycle_digest != context.cycle_digest
+                        or result.request.digest != critic.request_digest or result.critique != critic.critique
+                        or _output_pin(result.request.source) != critic.selection):
+                    raise CreativeValidationError("selector critic evidence/source mismatch")
+                stage = self.load_stage(_cycle_stage_job(cycle, result.request))
+                if stage.reasoning != result or stage.status not in ("TEST_ONLY_MOCK", "CREATIVE_COMPLETE"):
+                    raise CreativeValidationError("selector needs independent claimed critic attempts")
+            if context.selector_receipt is not None:
+                selector = self.load_result(context.selector_receipt)
+                if (selector.state != "OK" or inference_failure(selector) is not None
+                        or selector.request.operation != "SELECT" or selector.request.cycle is None
+                        or selector.request.cycle.cycle_digest != context.cycle_digest
+                        or selector.selection.action not in ("SELECT", "REVISE")
+                        or selector.selection.selection != _output_pin(request.source)):
+                    raise CreativeValidationError("development source does not match model selection")
+                stage = self.load_stage(_cycle_stage_job(cycle, selector.request))
+                if stage.reasoning != selector or stage.status not in ("TEST_ONLY_MOCK", "CREATIVE_COMPLETE"):
+                    raise CreativeValidationError("development needs a claimed independent selector attempt")
 
     def save_result(self, result: ReasoningResult) -> str:
         if not isinstance(result, ReasoningResult):
@@ -190,6 +240,9 @@ class CreativeSidecarStore:
         self._check_bytes(self._path("jobs", stage.job.slot), stage.job.to_dict())
         if self.load_result(stage.reasoning.digest) != stage.reasoning:
             raise CreativeValidationError("stage reasoning receipt mismatch")
+        if stage.job.request.cycle is not None:
+            self._check_bytes(self._path("cycle-observed-refs", stage.job.slot),
+                              {"reasoning_digest": stage.reasoning.digest})
         for output in stage.outputs:
             saved = self.creative.load_selection(output.selection_id)
             if saved != output:
@@ -236,3 +289,103 @@ class CreativeSidecarStore:
         proposal = valid.proposed_revision()
         self.save_result(valid)
         return self.creative.save_concept(proposal)
+
+    def claim_cycle(self, job: A03CreativeCycleJob, authorization: InvocationAuthorization) -> bool:
+        from .live import InvocationAuthorization
+        if not isinstance(authorization, InvocationAuthorization):
+            raise CreativeValidationError("expected runner-side cycle authorization")
+        valid = A03CreativeCycleJob.from_dict(job.to_dict())
+        self.creative.save_brief(valid.seed.request.brief)
+        self.validate_request(valid.seed.request)
+        if valid.seed.request.intent is not None:
+            self.save_intent(valid.seed.request.intent)
+        path = self._path("cycle-jobs", valid.seed.slot)
+        content = canonical_bytes(valid.to_dict())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with path.open("xb") as target:
+                target.write(content)
+        except FileExistsError:
+            if path.read_bytes() != content:
+                raise VersionConflict("VERSION_CONFLICT: creative cycle attempt already bound") from None
+            self._check_bytes(self._path("cycle-requests", valid.digest), valid.to_dict())
+            return False
+        self._save("cycle-requests", valid.digest, valid.to_dict())
+        self._save("cycle-grants", valid.seed.slot, {"cycle_digest": valid.digest,
+            "allow_network": authorization.allow_network, "allow_spend": authorization.allow_spend,
+            "authorization_ref": authorization.authorization_ref})
+        return True
+
+    def cycle_authorization(self, job: A03CreativeCycleJob) -> InvocationAuthorization:
+        """Read the original runner snapshot only for verification/reconstruction."""
+        from .live import InvocationAuthorization
+        path = self._path("cycle-grants", job.seed.slot)
+        value = exact_fields(read_json(path.read_text(encoding="utf-8")),
+                             {"cycle_digest", "allow_network", "allow_spend", "authorization_ref"})
+        self._check_bytes(path, value)
+        if value.pop("cycle_digest") != job.digest:
+            raise CreativeValidationError("cycle grant rebound its original job")
+        return InvocationAuthorization(**value)
+
+    def save_observed_step(self, job: A03CreativeJob, result: ReasoningResult) -> None:
+        self._check_bytes(self._path("jobs", job.slot), job.to_dict())
+        if result.request != job.request or self.load_result(result.digest) != result:
+            raise CreativeValidationError("observed step request mismatch")
+        self._save("cycle-observed-refs", job.slot, {"reasoning_digest": result.digest})
+
+    def observed_step(self, job: A03CreativeJob) -> ReasoningResult | None:
+        path = self._path("cycle-observed-refs", job.slot)
+        if not path.exists():
+            return None
+        self._check_bytes(self._path("jobs", job.slot), job.to_dict())
+        ref = exact_fields(read_json(path.read_text(encoding="utf-8")), {"reasoning_digest"})
+        self._check_bytes(path, ref)
+        result = self.load_result(ref["reasoning_digest"])
+        if result.request != job.request:
+            raise CreativeValidationError("observed step rebound its request")
+        return result
+
+    def has_cycle_result(self, job: A03CreativeCycleJob) -> bool:
+        return self._path("cycle-refs", job.seed.slot).exists()
+
+    def _validate_cycle(self, result: A03CreativeCycleResult) -> None:
+        self._check_bytes(self._path("cycle-jobs", result.job.seed.slot), result.job.to_dict())
+        self._check_bytes(self._path("cycle-requests", result.job.digest), result.job.to_dict())
+        if self.cycle_authorization(result.job) != result.authorization:
+            raise CreativeValidationError("cycle receipt rebound its original runner grant")
+        for step in result.steps:
+            if self.load_stage(step.job) != step:
+                raise CreativeValidationError("cycle stage receipt mismatch")
+        if result.halted_step is not None and self.observed_step(result.halted_step) != result.observed:
+            raise CreativeValidationError("cycle lost or rebound its halted observation")
+        if result.decision is not None:
+            self.verify_inference_decision(result.decision)
+        if result.output is not None:
+            saved = self.creative.load_selection(result.output.selection_id)
+            if saved != result.output:
+                raise CreativeValidationError("cycle production source pin mismatch")
+
+    def save_cycle(self, result: A03CreativeCycleResult) -> str:
+        valid = A03CreativeCycleResult.from_dict(result.to_dict())
+        self._validate_cycle(valid)
+        if valid.decision is not None:
+            self.save_decision(valid.decision)
+        self._save("cycle-results", valid.digest, valid.to_dict())
+        self._save("cycle-refs", valid.job.seed.slot, {"cycle_digest": valid.digest})
+        return valid.digest
+
+    def load_cycle(self, job: A03CreativeCycleJob) -> A03CreativeCycleResult:
+        valid = A03CreativeCycleJob.from_dict(job.to_dict())
+        self._check_bytes(self._path("cycle-jobs", valid.seed.slot), valid.to_dict())
+        path = self._path("cycle-refs", valid.seed.slot)
+        if not path.exists():
+            raise CreativeValidationError("UNRESOLVED_CREATIVE_CYCLE: no terminal receipt; never auto retry")
+        ref = exact_fields(read_json(path.read_text(encoding="utf-8")), {"cycle_digest"})
+        self._check_bytes(path, ref)
+        result = A03CreativeCycleResult.from_dict(self._read("cycle-results", ref["cycle_digest"]))
+        if result.job != valid:
+            raise CreativeValidationError("cycle receipt job mismatch")
+        self._validate_cycle(result)
+        if result.decision is not None and self.load_decision(result.decision.decision_id) != result.decision:
+            raise CreativeValidationError("cycle decision bytes mismatch")
+        return result
