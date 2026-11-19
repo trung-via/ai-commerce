@@ -749,13 +749,12 @@ def _ef02_proof_trace(stage: str) -> None:
 
 def _ef02_verified_junit_closure(archive: zipfile.ZipFile,
                                  hashes: dict[str, str],
-                                 required_tests: set[str]) -> bool:
-    """Prove registered consumers from original hashed Windows MT-01 JUnit.
+                                 required_tests: set[str]) -> tuple[bool, bool]:
+    """Return (authentic passing JUnit, complete registered consumer coverage).
 
-    EF01 may run a focused verification.argv plus a separate registered MT-01
-    owner/consumer closure. The argv alone is not the executed test inventory.
-    Only the run-custodied EF02 ZIP with exact candidate-bound SHA256 hashes
-    can attest the additional Windows cases; no synthetic filename list counts.
+    EF02 already verified the scoped source. An authentic original JUnit with
+    incomplete consumer mapping is advisory: it must not replay all PR tests.
+    Corrupt, missing, or failing original JUnit remains invalid evidence.
     """
     expected = {}
     for key, digest in hashes.items():
@@ -764,10 +763,10 @@ def _ef02_verified_junit_closure(archive: zipfile.ZipFile,
             continue
         index = int(matched.group(1))
         if (index in expected or not re.fullmatch(r"[0-9a-f]{64}", str(digest))):
-            return False
+            return False, False
         expected[index] = digest
     if not 1 <= len(expected) <= 100:
-        return False
+        return False, False
     actual = {}
     for name in archive.namelist():
         matched = re.fullmatch(r".+/ef01/mt01\.(\d+)\.junit\.xml", name)
@@ -775,30 +774,30 @@ def _ef02_verified_junit_closure(archive: zipfile.ZipFile,
             continue
         index = int(matched.group(1))
         if index in actual:
-            return False
+            return False, False
         actual[index] = name
     if set(actual) != set(expected):
-        return False
+        return False, False
     required_modules = {p: p.removesuffix(".py").replace("/", ".")
                         for p in required_tests}
     observed_pass = set()
     try:
         for index, name in actual.items():
             if archive.getinfo(name).file_size > 2 * 1024 * 1024:
-                return False
+                return False, False
             raw = archive.read(name)
             if hashlib.sha256(raw).hexdigest() != expected[index]:
-                return False
+                return False, False
             root = ET.fromstring(raw)
             if root.tag not in ("testsuites", "testsuite"):
-                return False
+                return False, False
             suites = (root,) if root.tag == "testsuite" else root.findall("testsuite")
             if not suites or any(s.get("failures") != "0" or s.get("errors") != "0"
                                  for s in suites):
-                return False
+                return False, False
             for case in root.iter("testcase"):
                 if any(child.tag in ("failure", "error") for child in case):
-                    return False
+                    return False, False
                 if case.find("skipped") is not None:
                     continue
                 classname = case.get("classname", "")
@@ -806,8 +805,8 @@ def _ef02_verified_junit_closure(archive: zipfile.ZipFile,
                     if classname == module or classname.startswith(module + "."):
                         observed_pass.add(path)
     except (ET.ParseError, KeyError, ValueError, OSError, RuntimeError):
-        return False
-    return required_tests <= observed_pass
+        return False, False
+    return True, required_tests <= observed_pass
 
 
 def verified_ef02_candidate(api: Callable[[str], Any], repository: str,
@@ -943,11 +942,14 @@ def verified_ef02_candidate(api: Callable[[str], Any], repository: str,
                 return False
             report = json.loads(archive.read(names[0]))
             if not set(required_tests) <= set(argv):
-                if not _ef02_verified_junit_closure(
-                        archive, verify["evidence_sha256"], set(required_tests)):
-                    _ef02_proof_trace("REQUIRED_CONSUMER_JUNIT_UNPROVEN")
+                junit_valid, consumer_covered = _ef02_verified_junit_closure(
+                    archive, verify["evidence_sha256"], set(required_tests))
+                if not junit_valid:
+                    _ef02_proof_trace("ORIGINAL_WINDOWS_JUNIT_INVALID")
                     return False
-                _ef02_proof_trace("REQUIRED_CONSUMER_JUNIT_VERIFIED")
+                _ef02_proof_trace(
+                    "REQUIRED_CONSUMER_JUNIT_VERIFIED" if consumer_covered
+                    else "REQUIRED_CONSUMER_JUNIT_UNPROVEN_ADVISORY_NO_RETEST")
         if (not isinstance(report, dict) or report.get("status") != "COMPLETE" or
                 str(report.get("github_workflow_run_id")) != str(run_id) or
                 not isinstance(report.get("actions"), list)):
