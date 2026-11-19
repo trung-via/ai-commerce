@@ -1021,6 +1021,28 @@ def candidates(api: Callable, repo: str, event: dict) -> list[tuple[int, str | N
                     (number, head, base)):
             return []
         return [(number, head)]
+    # Main advancement can leave an already-accepted PR waiting indefinitely:
+    # the original CI did not change and no PR review/CI event will fire again.
+    # Wake it without changing the candidate HEAD. verify_one() checks the
+    # authenticated Brain PASS, original completed Windows JUnit/Node/MT01
+    # receipt, exact source, and disjoint owner+consumer paths on updated main.
+    # A failed CI, shared test change or overlapping fix still cannot merge.
+    if event.get("ref") == "refs/heads/main" and isinstance(event.get("after"), str):
+        after = event["after"]
+        if not SHA.fullmatch(after):
+            return []
+        live = api(f"/repos/{repo}/branches/main")
+        if not isinstance(live, dict) or live.get("commit", {}).get("sha") != after:
+            return []
+        prs = api(f"/repos/{repo}/pulls?state=open&per_page=100")
+        if not isinstance(prs, list) or len(prs) == 100:
+            return []
+        return [(p["number"], p["head"]["sha"]) for p in prs if (
+            isinstance(p, dict) and type(p.get("number")) is int and
+            p.get("state") == "open" and
+            isinstance(p.get("head"), dict) and
+            isinstance(p["head"].get("sha"), str) and SHA.fullmatch(p["head"]["sha"]) and
+            isinstance(p.get("base"), dict) and p["base"].get("ref") == "main")]
     # Ordinary Issue comments are intentionally NOT a trigger. GitHub would
     # otherwise create one Skipped workflow run per EF02/HostOps comment.
     run = event.get("workflow_run")
