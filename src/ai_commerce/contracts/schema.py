@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
+from functools import lru_cache
 from importlib.resources import files
 from typing import Any
 
@@ -62,15 +63,32 @@ def load_schema(name: str) -> dict[str, Any]:
     return schema
 
 
+@lru_cache(maxsize=1)
+def _validation_bundle() -> tuple[dict[str, dict[str, Any]], Registry, FormatChecker]:
+    """Verify packaged schemas once; keep public ``load_schema`` uncached.
+
+    A03 may validate the same ContentBrief for every immutable stage and
+    receipt. Re-checking all five JSON Schemas on each record grows into a
+    multi-minute CI bottleneck, even though packaged schema bytes do not
+    change inside a process. Construct a new record validator per call while
+    sharing only the read-only verified schema graph and format checker.
+    """
+    schemas = {name: load_schema(name) for name in sorted(SCHEMAS)}
+    registry = Registry().with_resources(
+        (schema["$id"], Resource.from_contents(schema))
+        for schema in schemas.values()
+    )
+    return schemas, registry, _format_checker()
+
+
 def validate_record(name: str, record: Any) -> dict[str, Any]:
     """Return validated mapping; report validation path, not fabricated PASS."""
     if not isinstance(record, dict):
         raise ContractValidationError(f"INVALID_{name}: expected JSON object")
-    registry = Registry().with_resources(
-        (schema["$id"], Resource.from_contents(schema))
-        for schema in (load_schema(item) for item in sorted(SCHEMAS))
-    )
-    validator = Draft202012Validator(load_schema(name), registry=registry, format_checker=_format_checker())
+    if name not in SCHEMAS:
+        raise ContractValidationError(f"UNKNOWN_CONTRACT: {name}")
+    schemas, registry, checker = _validation_bundle()
+    validator = Draft202012Validator(schemas[name], registry=registry, format_checker=checker)
     errors = sorted(validator.iter_errors(record), key=lambda e: (list(map(str, e.path)), e.message))
     if errors:
         first = errors[0]

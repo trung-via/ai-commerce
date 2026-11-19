@@ -317,14 +317,14 @@ def test_manifest_uses_real_registered_source_owners_and_test_closure():
                           contracts=(manifest_path,))
     plan = select_impact(root=ROOT, changed_paths=changed, groups=(*groups, new_owner))
     assert plan.runnable, plan.missing_mapping
-    # P1's A10 import of this owner reaches A10's transitive consumers through
-    # the static import graph, beyond the two direct manifest consumers. Keep
-    # both the full registered group closure and its required tests exact.
+    # MT-01 selects only the owner, its immediate/two-hop consumers and the
+    # explicitly registered onboarding owners. Deeper transitive imports are
+    # reported for review; they must not balloon the mandatory CI test set.
     expected_groups = {
-        "production-orchestration", "a03", "a04", "a05", "a06", "a07", "a08",
-        "a09", "a10", "a10-m02", "a11", "a12", "cli",
+        "production-orchestration", "a03", "a10", "cli",
     }
     assert set(plan.selected_groups) == expected_groups
+    assert any(w.startswith("DEFERRED_TRANSITIVE_IMPORT_PATHS:") for w in plan.inventory_warnings)
     assert set(plan.selected_tests) == {
         test for group in (*groups, new_owner) if group.name in expected_groups
         for test in group.tests
