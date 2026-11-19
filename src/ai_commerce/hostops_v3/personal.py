@@ -38,9 +38,9 @@ MAX_WRITE = 2048
 
 # Source-owned PUBLIC vocabulary. Private config is locally validated by the
 # existing acquisition contract and reduced to fixed enums; path/name/JSON
-# contents never leave the runner. Only three known fixed config candidates and
-# the fixed D5 manifest name are considered. Manifest-provided config paths
-# and private browser state remain outside this operation.
+# contents never leave the runner. Only the acquisition module's six fixed
+# config candidates and the fixed D5 manifest name are considered.
+# Manifest-provided config paths and private browser state remain outside this operation.
 _STANDING_CATEGORY_CODES = {
     "chrome_profile": ("UNVERIFIED", "DEDICATED_DIR_PRESENT", "UNAVAILABLE"),
     "chrome_config": ("UNAVAILABLE", "KNOWN_CANDIDATES_ABSENT", "KNOWN_CANDIDATES_AMBIGUOUS",
@@ -560,6 +560,18 @@ foreach ($item in $items) {
     }
 
 
+def _known_chrome_config_candidates(acquisition, root: Path):
+    """Consume the source-owned six-name registry; never guess on version drift."""
+    names = getattr(acquisition, "_CONFIG_9444_RELATIVE_PATHS", None)
+    if (type(names) is not tuple or len(names) != 6
+            or any(type(name) is not str or re.fullmatch(
+                r"(?:[A-Za-z0-9_-]+/config\.json|chrome(?:-acquisition)?\.json)", name) is None
+                for name in names)
+            or len(set(names)) != 6):
+        raise ValueError("CONFIG_REGISTRY_UNAVAILABLE")
+    return tuple(root / name for name in names)
+
+
 def _cdp_9444_private_context(acquisition):
     """Attest an existing fixed private config against native token/session reads.
 
@@ -579,8 +591,7 @@ def _cdp_9444_private_context(acquisition):
     if (not local.is_absolute() or _fixed_private_metadata_kind(root, directory=True) != "PRESENT"
             or _private_identity(root) != sid):
         deny("OWNER_SESSION_UNATTESTED")
-    candidates = (root / "Chrome-Acquisition" / "config.json",
-                  root / "chrome.json", root / "chrome-acquisition.json")
+    candidates = _known_chrome_config_candidates(acquisition, root)
     states = [_fixed_private_metadata_kind(path) for path in candidates]
     if "UNAVAILABLE" in states or states.count("PRESENT") != 1:
         deny("OWNER_SESSION_UNATTESTED")
@@ -589,6 +600,8 @@ def _cdp_9444_private_context(acquisition):
     for path in (config.parent, config):
         if _private_identity(path) != sid:
             deny("OWNER_SESSION_UNATTESTED")
+    # Legacy location recognition permits only this read proof. It does not
+    # enroll, adopt a launcher, or change the config's allow_launch policy.
     env = acquisition.load_environment(config, Path(__file__).resolve().parents[3], local_app_data=local)
     if env.port != 9444 or env.endpoint.rstrip("/") != "http://127.0.0.1:9444":
         deny("OWNER_SESSION_UNATTESTED")
@@ -876,7 +889,7 @@ def _fixed_private_metadata_kind(path: Path, *, directory: bool = False) -> str:
     metadata, not ownership, signature, active session or D5 readiness proof.
     """
     try:
-        for item in (path, *path.parents):
+        for item in (*reversed(path.parents), path):
             info = item.lstat()
             if (stat.S_ISLNK(info.st_mode) or
                     getattr(info, "st_file_attributes", 0) &
@@ -895,8 +908,8 @@ def _fixed_private_metadata_kind(path: Path, *, directory: bool = False) -> str:
 def _private_d5_metadata_codes():
     """Bounded local-only metadata preflight; emits four fixed public enums.
 
-    Reuse the real Chrome acquisition *validator* for one of three literal
-    config locations. It may read that single <=8KiB private config locally,
+    Reuse the real Chrome acquisition *validator* and its six-name registry.
+    It may read that single <=8KiB private config locally after custody checks,
     but returns no values, file names, paths, exceptions or raw content.
     No profile contents, Chrome tabs, tokens, D5 ledger or external calls.
     A manifest-selected alternative config is deliberately NOT followed.
@@ -914,6 +927,12 @@ def _private_d5_metadata_codes():
     if not local.is_absolute():
         return codes
     private_root = local / "AI-Commerce"
+    try:
+        from ai_commerce.remote import chrome_acquisition
+        candidates = _known_chrome_config_candidates(chrome_acquisition, private_root)
+    except Exception:
+        # An unavailable/incompatible registry cannot prove candidate absence.
+        return codes
     root_kind = _fixed_private_metadata_kind(private_root, directory=True)
     if root_kind == "ABSENT":
         codes["chrome_config"] = "KNOWN_CANDIDATES_ABSENT"
@@ -925,11 +944,6 @@ def _private_d5_metadata_codes():
     codes["d5_metadata"] = (
         "MANIFEST_PRESENT" if manifest == "PRESENT" else
         "MANIFEST_ABSENT" if manifest == "ABSENT" else "UNAVAILABLE")
-    candidates = (
-        private_root / "Chrome-Acquisition" / "config.json",
-        private_root / "chrome.json",
-        private_root / "chrome-acquisition.json",
-    )
     checks = tuple(_fixed_private_metadata_kind(candidate) for candidate in candidates)
     if "UNAVAILABLE" in checks:
         return codes
@@ -942,13 +956,21 @@ def _private_d5_metadata_codes():
         codes["chrome_config"] = "KNOWN_CANDIDATES_AMBIGUOUS"
         return codes
     try:
-        from ai_commerce.remote import chrome_acquisition
+        from ai_commerce.remote.local_completion_handoff import _private_identity
+        principal = _private_identity(private_root)
+        if (type(principal) is not str or not principal
+                or any(_private_identity(path) != principal for path in (found[0].parent, found[0]))):
+            return codes
         checkout = Path(__file__).resolve().parents[3]
         env = chrome_acquisition.load_environment(
             found[0], checkout, local_app_data=local)
         # A valid acquisition contract is not proof of a signed Chrome
         # executable or an authenticated exact ChatGPT tab.
-        if (_fixed_private_metadata_kind(env.user_data_dir, directory=True) != "PRESENT"
+        private_paths = (env.user_data_dir, *env.user_data_dir.parents,
+                         env.user_data_dir / env.profile_directory)
+        if (any(_private_identity(path) != principal for path in private_paths
+                if path == private_root or private_root in path.parents)
+                or _fixed_private_metadata_kind(env.user_data_dir, directory=True) != "PRESENT"
                 or _fixed_private_metadata_kind(
                     env.user_data_dir / env.profile_directory, directory=True) != "PRESENT"):
             codes["chrome_config"] = "KNOWN_CONFIG_NOT_VERIFIED"
@@ -963,7 +985,8 @@ def _private_d5_metadata_codes():
             "UNAVAILABLE" if "UNAVAILABLE" in marker_states else
             "LOCK_MARKER_PRESENT" if "PRESENT" in marker_states else
             "LOCK_MARKERS_ABSENT")
-    except (OSError, ValueError, TypeError, KeyError, UnicodeError, ImportError):
+    except Exception:
+        # Native ACL/validator failures must never export private exception text.
         codes["chrome_config"] = "KNOWN_CONFIG_NOT_VERIFIED"
     return codes
 

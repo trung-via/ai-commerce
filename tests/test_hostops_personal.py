@@ -269,7 +269,7 @@ const script = fs.readFileSync(process.argv[2],'utf8');
 
     def test_fixed_private_metadata_without_content_or_manifest_following(self):
         # No manifest bytes are parsed and its chrome_config field is never
-        # followed: the three reviewed literal Chrome config names are the
+        # followed: the six source-owned Chrome config names are the
         # only candidates. No raw names/path/contents enter the public result.
         with tempfile.TemporaryDirectory() as temp:
             local = Path(temp)
@@ -292,6 +292,7 @@ const script = fs.readFileSync(process.argv[2],'utf8');
                 self.assertNotIn("SECRET", json.dumps(result))
 
     def test_private_d5_config_profile_markers_locally_reduced_to_enums(self):
+        from ai_commerce.remote import local_completion_handoff
         # Existing real Chrome validator is used, but neither the input config
         # nor the manifest, profile paths, and lock-marker bytes are published.
         with tempfile.TemporaryDirectory() as temp:
@@ -310,7 +311,8 @@ const script = fs.readFileSync(process.argv[2],'utf8');
                 "cdp_endpoint": "http://127.0.0.1:9333",
                 "allow_launch": False, "exclusive_user_data": True,
             }
-            with patch.dict(hostops.os.environ, {"LOCALAPPDATA": str(local)}):
+            with patch.dict(hostops.os.environ, {"LOCALAPPDATA": str(local)}), patch.object(
+                    local_completion_handoff, "_private_identity", return_value="offline-private-owner"):
                 config.write_text(json.dumps(record), encoding="utf-8")
                 result = hostops._private_d5_metadata_codes()
                 self.assertEqual(result["chrome_config"], "KNOWN_CONFIG_EXACT_9333")
@@ -2103,6 +2105,10 @@ const assert = require('assert');
 class PersonalCdp9444TopologyTests(unittest.TestCase):
     """Offline fixtures only: no real CIM, token, signature, browser or sends."""
 
+    CONFIG_PATHS = (
+        "Chrome-Acquisition/config.json", "D5-Isolated-9444-Trial/config.json",
+        "WakeHub/config.json", "WakeHub-9444/config.json", "chrome.json", "chrome-acquisition.json",
+    )
     NATIVE_FAILURE_CODES = frozenset({
         "NATIVE_IMPORT_FAILED", "NATIVE_QUERY_FAILED", "NATIVE_NORMALIZATION_FAILED",
         "NATIVE_RECHECK_QUERY_FAILED", "NATIVE_RECHECK_NORMALIZATION_FAILED", "NATIVE_RECHECK_FAILED",
@@ -2152,7 +2158,7 @@ class PersonalCdp9444TopologyTests(unittest.TestCase):
             return result
 
         # Patch this module's OS reference, leaving pathlib and other modules intact.
-        mocked(hostops, "os", new=SimpleNamespace(name="nt"))
+        mocked(hostops, "os", new=SimpleNamespace(name="nt", environ={"LOCALAPPDATA": str(self.local)}))
         self.native = mocked(chrome_acquisition, "_query_windows", return_value=self.inventory)
         mocked(chrome_acquisition, "_commandline_argv", side_effect=json.loads)
         self.local_identity = mocked(chrome_acquisition, "_native_local_app_data", return_value=self.local)
@@ -2167,6 +2173,21 @@ class PersonalCdp9444TopologyTests(unittest.TestCase):
             self.native.return_value = inventory
         request = hostops.parse_event(event("read", "cdp_9444_topology", {}), "read")
         return hostops.perform(request)
+
+    def place_config(self, relative, *, changes=None, raw=None):
+        self.config.unlink(missing_ok=True)
+        self.config = self.root / relative
+        self.config.parent.mkdir(parents=True, exist_ok=True)
+        self.config.write_text(raw if raw is not None else json.dumps(
+            {**self.config_value, **(changes or {})}), encoding="utf-8")
+
+    def assert_metadata(self, result, config_code, *, verified=False, manifest_code="MANIFEST_ABSENT"):
+        self.assertEqual(result, {
+            "chrome_profile": "DEDICATED_DIR_PRESENT" if verified else "UNVERIFIED",
+            "chrome_config": config_code,
+            "chrome_markers": "LOCK_MARKERS_ABSENT" if verified else "UNVERIFIED",
+            "d5_metadata": manifest_code,
+        })
 
     def assert_public(self, result):
         self.assertEqual(set(result), {
@@ -2458,6 +2479,218 @@ class PersonalCdp9444TopologyTests(unittest.TestCase):
             self.assertEqual(self.observe()["code"], "OWNER_SESSION_UNATTESTED")
         self.protocol.assert_not_called()
 
+    def test_six_source_registry_locations_allow_only_attested_reads(self):
+        self.assertEqual(self.acquisition._CONFIG_9444_RELATIVE_PATHS, self.CONFIG_PATHS)
+        self.assertEqual(hostops._known_chrome_config_candidates(self.acquisition, self.root),
+                         tuple(self.root / name for name in self.CONFIG_PATHS))
+        for relative in self.CONFIG_PATHS:
+            for allow_launch in (False, True):
+                with self.subTest(relative=relative, allow_launch=allow_launch):
+                    self.place_config(relative, changes={"allow_launch": allow_launch})
+                    before = self.config.read_bytes()
+                    self.assert_metadata(hostops._private_d5_metadata_codes(),
+                                         "KNOWN_CONFIG_OTHER_PORT", verified=True)
+                    env, session, sid = hostops._cdp_9444_private_context(self.acquisition)
+                    self.assertEqual((env.config_path, env.port, env.allow_launch, session, sid),
+                                     (self.config.resolve(), 9444, allow_launch, self.session, self.sid))
+                    result = self.observe()
+                    self.assertEqual(result["code"], "CDP_PROTOCOL_HEALTHY")
+                    self.assert_public(result)
+                    self.assertEqual(self.config.read_bytes(), before)
+
+    def test_six_locations_keep_exact_sixteen_public_rows_without_private_content(self):
+        expected = [
+            ("chrome_profile", "DEDICATED_DIR_PRESENT"), ("chrome_config", "KNOWN_CONFIG_OTHER_PORT"),
+            ("chrome_markers", "LOCK_MARKERS_ABSENT"), ("cdp_9333_listener", "ABSENT"),
+            ("chrome_process", "UNVERIFIED"), ("chrome_session", "UNVERIFIED"),
+            ("cdp_protocol", "UNVERIFIED"), ("ef02_01_task", "UNAVAILABLE"),
+            ("ef02_01_listener", "UNAVAILABLE"), ("ef02_02_task", "UNAVAILABLE"),
+            ("ef02_02_listener", "UNAVAILABLE"), ("hostops_01_task", "UNAVAILABLE"),
+            ("hostops_01_listener", "UNAVAILABLE"), ("repo_git", "CLEAN"),
+            ("python_runtime", "SUPPORTED"), ("d5_metadata", "MANIFEST_PRESENT"),
+        ]
+        manifest = self.root / "wake-readiness.json"
+        manifest.write_text(json.dumps({"chrome_config": "C:/PRIVATE/token.json",
+                                        "sid": self.sid, "token": "PRIVATE_SECRET"}), encoding="utf-8")
+        absent = {"listener_count": 0, "loopback_count": 0, "unexpected_binding_count": 0,
+                  "chrome_owned_loopback_count": 0, "same_session_chrome_count": 0,
+                  "devtools_protocol_ok": False}
+        for relative in self.CONFIG_PATHS:
+            self.place_config(relative)
+            with self.subTest(relative=relative), patch.object(hostops, "_cdp_9333_status", return_value=absent), \
+                    patch.object(hostops, "_runner_runtime_inventory", side_effect=hostops.Denied("PRIVATE")), \
+                    patch.object(hostops, "_git", side_effect=["a" * 40, ""]), \
+                    patch.object(hostops.platform, "python_version_tuple", return_value=("3", "11", "0")), \
+                    patch.object(self.acquisition, "load_environment", wraps=self.acquisition.load_environment) as load:
+                result = hostops.perform({"operation": "standing_read_diagnostics", "parameters": {}})
+            self.assertEqual(result["diagnostics"], [{"category": key, "code": code} for key, code in expected])
+            self.assertEqual(len(result["diagnostics"]), 16)
+            self.assertEqual(result, hostops._validate_standing_snapshot(result))
+            load.assert_called_once()
+            self.assertEqual(load.call_args.args[0], self.config)
+            raw = json.dumps(result)
+            for private in (str(self.local), self.sid, relative, "PRIVATE", "4100", "token", "CommandLine"):
+                self.assertNotIn(private, raw)
+            for field in ("arbitrary_shell_enabled", "exact_chat_verified", "wake_sent"):
+                self.assertIs(result[field], False)
+        self.native.assert_not_called()
+        self.protocol.assert_not_called()
+
+    def test_all_registry_ambiguity_pairs_hold_before_private_config_read(self):
+        for index, first in enumerate(self.CONFIG_PATHS):
+            for second in self.CONFIG_PATHS[index + 1:]:
+                self.place_config(first)
+                other = self.root / second
+                other.parent.mkdir(parents=True, exist_ok=True)
+                other.write_text("PRIVATE invalid config still counts as a candidate", encoding="utf-8")
+                with self.subTest(first=first, second=second), \
+                        patch.object(self.acquisition, "load_environment") as load:
+                    self.assert_metadata(hostops._private_d5_metadata_codes(), "KNOWN_CANDIDATES_AMBIGUOUS")
+                    result = self.observe()
+                    self.assertEqual((result["status"], result["code"]), ("UNKNOWN", "OWNER_SESSION_UNATTESTED"))
+                    self.assert_public(result)
+                    load.assert_not_called()
+                other.unlink()
+        self.protocol.assert_not_called()
+
+    def test_missing_or_incompatible_registry_never_falls_back_or_claims_absence(self):
+        invalid = [None, list(self.CONFIG_PATHS), self.CONFIG_PATHS[:3], self.CONFIG_PATHS + ("extra.json",),
+                   (self.CONFIG_PATHS[0],) * 6, (None, *self.CONFIG_PATHS[1:]),
+                   ("../PRIVATE/config.json", *self.CONFIG_PATHS[1:]),
+                   ("C:/PRIVATE/config.json", *self.CONFIG_PATHS[1:]),
+                   ("WakeHub\\config.json", *self.CONFIG_PATHS[1:])]
+        for value in invalid:
+            with self.subTest(registry=value), patch.object(self.acquisition, "_CONFIG_9444_RELATIVE_PATHS", value), \
+                    patch.object(self.acquisition, "load_environment") as load:
+                self.assertEqual(hostops._private_d5_metadata_codes()["chrome_config"], "UNAVAILABLE")
+                result = self.observe()
+                self.assertEqual((result["status"], result["code"]), ("UNKNOWN", "OWNER_SESSION_UNATTESTED"))
+                self.assert_public(result)
+                load.assert_not_called()
+        with patch.dict(self.acquisition.__dict__):
+            del self.acquisition._CONFIG_9444_RELATIVE_PATHS
+            self.config.unlink()
+            self.assertEqual(hostops._private_d5_metadata_codes()["chrome_config"], "UNAVAILABLE")
+            self.assertEqual(self.observe()["code"], "OWNER_SESSION_UNATTESTED")
+        self.protocol.assert_not_called()
+
+    def test_each_location_rejects_invalid_config_and_wrong_profile(self):
+        invalid = ["PRIVATE invalid JSON", '{"version":1,"version":1}',
+                   json.dumps({**self.config_value, "token": "PRIVATE_SECRET"}),
+                   json.dumps({**self.config_value, "profile_directory": "PRIVATE_MISSING"}),
+                   json.dumps({**self.config_value, "user_data_dir": str(self.local)}),
+                   json.dumps({**self.config_value, "exclusive_user_data": False})]
+        for relative in self.CONFIG_PATHS:
+            for raw in invalid:
+                self.place_config(relative, raw=raw)
+                with self.subTest(relative=relative, raw=raw):
+                    self.assert_metadata(hostops._private_d5_metadata_codes(), "KNOWN_CONFIG_NOT_VERIFIED")
+                    result = self.observe()
+                    self.assertEqual(result["code"], "OWNER_SESSION_UNATTESTED")
+                    self.assert_public(result)
+        self.protocol.assert_not_called()
+
+    def test_9333_config_remains_metadata_only_for_9444_topology(self):
+        for relative in self.CONFIG_PATHS:
+            self.place_config(relative, changes={"cdp_endpoint": "http://127.0.0.1:9333"})
+            with self.subTest(relative=relative):
+                self.assert_metadata(hostops._private_d5_metadata_codes(), "KNOWN_CONFIG_EXACT_9333", verified=True)
+                result = self.observe()
+                self.assertEqual(result["code"], "OWNER_SESSION_UNATTESTED")
+                self.assert_public(result)
+        self.protocol.assert_not_called()
+
+    def test_config_identity_is_independent_of_absence_and_broken_live_cdp(self):
+        for relative in self.CONFIG_PATHS:
+            self.place_config(relative)
+            with self.subTest(relative=relative):
+                result = self.observe({"listeners": [], "processes": []})
+                self.assertEqual((result["status"], result["code"]), ("OBSERVED", "NO_LISTENER"))
+                self.assert_metadata(hostops._private_d5_metadata_codes(), "KNOWN_CONFIG_OTHER_PORT", verified=True)
+                self.protocol.side_effect = OSError("PRIVATE running CDP is broken")
+                result = self.observe(self.inventory)
+                self.assertEqual((result["status"], result["code"]), ("UNKNOWN", "CDP_PROTOCOL_FAILED"))
+                self.assert_public(result)
+                self.assert_metadata(hostops._private_d5_metadata_codes(), "KNOWN_CONFIG_OTHER_PORT", verified=True)
+        self.config.unlink()
+        self.assert_metadata(hostops._private_d5_metadata_codes(), "KNOWN_CANDIDATES_ABSENT")
+        result = self.observe(self.inventory)
+        self.assertEqual(result["code"], "OWNER_SESSION_UNATTESTED")
+        self.assert_public(result)
+
+    def test_each_location_keeps_metadata_separate_from_unknown_native_identity(self):
+        for relative in self.CONFIG_PATHS:
+            self.place_config(relative)
+            for identity, values in ((self.session_identity, (None, True, 0)),
+                                     (self.token_identity, (None, "PRIVATE forged SID", "S-1-5-18"))):
+                original = identity.return_value
+                for value in values:
+                    identity.return_value = value
+                    with self.subTest(relative=relative, identity=value):
+                        self.assert_metadata(hostops._private_d5_metadata_codes(),
+                                             "KNOWN_CONFIG_OTHER_PORT", verified=True)
+                        result = self.observe()
+                        self.assertEqual((result["status"], result["code"]), ("UNKNOWN", "OWNER_SESSION_UNATTESTED"))
+                        self.assertEqual(result["listener_count"], 1)
+                        self.assertIsNone(result["same_session_chrome_count"])
+                        self.assert_public(result)
+                identity.return_value = original
+        self.protocol.assert_not_called()
+
+    def test_each_location_requires_private_custody_before_config_bytes(self):
+        for relative in self.CONFIG_PATHS:
+            self.place_config(relative)
+            for target in (self.root, self.config.parent, self.config,
+                           self.directory, self.directory / "Default"):
+                for failure in (None, "S-1-5-21-999-1001", OSError("PRIVATE ACL/token")):
+                    def identity(path):
+                        if path == target:
+                            if isinstance(failure, Exception):
+                                raise failure
+                            return failure
+                        return self.sid
+                    self.private_identity.side_effect = identity
+                    with self.subTest(relative=relative, target=target, failure=failure), patch.object(
+                            self.acquisition, "load_environment", wraps=self.acquisition.load_environment) as load:
+                        codes = hostops._private_d5_metadata_codes()
+                        self.assertIn(codes["chrome_config"], ("UNAVAILABLE", "KNOWN_CONFIG_NOT_VERIFIED"))
+                        self.assertEqual(codes["chrome_profile"], "UNVERIFIED")
+                        result = self.observe()
+                        self.assertEqual((result["status"], result["code"]), ("UNKNOWN", "OWNER_SESSION_UNATTESTED"))
+                        self.assert_public(result)
+                        if target in (self.root, self.config.parent, self.config):
+                            load.assert_not_called()
+        self.protocol.assert_not_called()
+
+    def test_reparse_candidates_and_missing_leaf_under_reparse_parent_hold(self):
+        original = hostops.Path.lstat
+        for relative in self.CONFIG_PATHS:
+            self.place_config(relative)
+            for target in (self.config, self.config.parent):
+                for linked in (True, False):
+                    def lstat(path, *args, **kwargs):
+                        info = original(path, *args, **kwargs)
+                        if path == target:
+                            return SimpleNamespace(
+                                st_mode=hostops.stat.S_IFLNK if linked else info.st_mode,
+                                st_file_attributes=0 if linked else hostops.stat.FILE_ATTRIBUTE_REPARSE_POINT)
+                        return info
+                    with self.subTest(relative=relative, target=target, linked=linked), \
+                            patch.object(hostops.Path, "lstat", autospec=True, side_effect=lstat), \
+                            patch.object(self.acquisition, "load_environment") as load:
+                        self.assert_metadata(hostops._private_d5_metadata_codes(), "UNAVAILABLE",
+                                             manifest_code="UNAVAILABLE" if target == self.root else "MANIFEST_ABSENT")
+                        result = self.observe()
+                        self.assertEqual(result["code"], "OWNER_SESSION_UNATTESTED")
+                        self.assert_public(result)
+                        load.assert_not_called()
+        self.config.unlink()
+        target = self.root / "WakeHub-9444"
+        with patch.object(hostops.Path, "lstat", autospec=True, side_effect=lstat):
+            self.assert_metadata(hostops._private_d5_metadata_codes(), "UNAVAILABLE")
+            self.assertEqual(self.observe()["code"], "OWNER_SESSION_UNATTESTED")
+        self.protocol.assert_not_called()
+
     def test_unsigned_chrome_never_reaches_protocol_read(self):
         self.signature.side_effect = self.acquisition.AcquisitionBlocked("PRIVATE signature")
         result = self.observe()
@@ -2610,16 +2843,27 @@ class PersonalCdp9444TopologyTests(unittest.TestCase):
 
     def test_read_never_calls_native_writes_launch_enrollment_or_send(self):
         from ai_commerce.remote import local_wake_entry
-        with patch.object(hostops.subprocess, "run") as run, patch.object(hostops.subprocess, "Popen") as launch, \
-                patch.object(hostops, "_git_write") as git_write, patch.object(hostops, "_git") as git_read, \
-                patch.object(hostops.Path, "write_text") as write_text, patch.object(hostops.Path, "write_bytes") as write_bytes, \
-                patch.object(self.acquisition, "run") as acquire, \
-                patch.object(self.acquisition, "enroll_existing_9444") as enroll, \
-                patch.object(self.acquisition, "verify_playwright_attach") as attach, \
-                patch.object(local_wake_entry, "send_one") as send:
-            self.assertEqual(self.observe()["code"], "CDP_PROTOCOL_HEALTHY")
-            for forbidden in (run, launch, git_write, git_read, write_text, write_bytes, acquire, enroll, attach, send):
-                forbidden.assert_not_called()
+        for relative in self.CONFIG_PATHS:
+            self.place_config(relative, changes={"allow_launch": True})
+            before = self.config.read_bytes()
+            with self.subTest(relative=relative), \
+                    patch.object(hostops.subprocess, "run") as run, patch.object(hostops.subprocess, "Popen") as launch, \
+                    patch.object(hostops, "_git_write") as git_write, patch.object(hostops, "_git") as git_read, \
+                    patch.object(hostops.Path, "write_text") as write_text, \
+                    patch.object(hostops.Path, "write_bytes") as write_bytes, \
+                    patch.object(hostops.Path, "mkdir") as mkdir, patch.object(hostops.Path, "touch") as touch, \
+                    patch.object(hostops.Path, "unlink") as unlink, patch.object(hostops.Path, "rename") as rename, \
+                    patch.object(self.acquisition, "run") as acquire, \
+                    patch.object(self.acquisition, "enroll_existing_9444") as enroll, \
+                    patch.object(self.acquisition, "_start_or_reuse_9444") as lifecycle, \
+                    patch.object(self.acquisition, "verify_playwright_attach") as attach, \
+                    patch.object(local_wake_entry, "send_one") as send:
+                self.assert_metadata(hostops._private_d5_metadata_codes(), "KNOWN_CONFIG_OTHER_PORT", verified=True)
+                self.assertEqual(self.observe()["code"], "CDP_PROTOCOL_HEALTHY")
+                for forbidden in (run, launch, git_write, git_read, write_text, write_bytes,
+                                  mkdir, touch, unlink, rename, acquire, enroll, lifecycle, attach, send):
+                    forbidden.assert_not_called()
+            self.assertEqual(self.config.read_bytes(), before)
 
 
 if __name__ == "__main__":
