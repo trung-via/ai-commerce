@@ -215,6 +215,34 @@ def test_untrusted_partial_usage_not_fabricated():
     assert _observe_usage(b'not json', "antigravity") is None
 
 
+def test_antigravity_headless_usage_preserves_real_provider_counters():
+    # Exact shape observed in #1114: AGY uses cache_read_tokens, not cached_input_tokens.
+    usage = {"input_tokens": 6733358, "output_tokens": 113246,
+             "thinking_tokens": 54541, "cache_read_tokens": 4359716,
+             "total_tokens": 6846604}
+    payload = json.dumps({"status": "SUCCESS", "usage": usage}).encode()
+    assert _observe_usage(payload, "antigravity") == {
+        "input_tokens": 6733358, "cached_input_tokens": 4359716,
+        "cache_read_tokens": 4359716, "output_tokens": 113246,
+        "thinking_tokens": 54541, "total_tokens": 6846604}
+
+
+@pytest.mark.parametrize("alter", [
+    {"cache_read_tokens": 11},
+    {"cache_read_tokens": True},
+    {"thinking_tokens": -1},
+    {"thinking_tokens": 4},
+    {"total_tokens": 20},
+    {"cached_input_tokens": 1},
+])
+def test_antigravity_usage_rejects_contradictory_or_untrusted_counters(alter):
+    usage = {"input_tokens": 10, "output_tokens": 3, "thinking_tokens": 2,
+             "cache_read_tokens": 4, "total_tokens": 13}
+    usage.update(alter)
+    payload = json.dumps({"status": "SUCCESS", "usage": usage}).encode()
+    assert _observe_usage(payload, "antigravity") is None
+
+
 def test_cli_help_and_missing_parameters(tmp_path):
     env = dict(os.environ)
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
