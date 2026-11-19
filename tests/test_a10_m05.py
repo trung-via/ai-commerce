@@ -917,7 +917,7 @@ def test_automation_non_success_never_offers_production_event(automation_job, sc
         assert result["reason"] == "UNKNOWN_EFFECT"
 
 
-def test_a10_success_is_not_rewritten_by_a03_failure(automation_job, monkeypatch):
+def test_a10_success_is_not_rewritten_by_a03_ambiguous_outcome(automation_job, monkeypatch):
     from ai_commerce.opportunity import run_automation
     manifest, kwargs = automation_job
     owner = local_production_owner(manifest, kwargs)
@@ -925,6 +925,7 @@ def test_a10_success_is_not_rewritten_by_a03_failure(automation_job, monkeypatch
         raise ValueError("SYNTHETIC downstream rejection")
     monkeypatch.setattr(owner, "_invoke_a03", reject)
     result = run_automation(manifest, **kwargs, production=owner)
-    assert result["status"] == "COMPLETE" and owner.last_result.status == "FAILED"
+    assert result["status"] == "COMPLETE" and owner.last_result.status == "UNKNOWN"
+    assert owner.last_result.reason == "RECEIVER_UNRESOLVED"
     assert owner.last_result.event is None and owner.last_result.accepted_consumer is None
     assert json.loads(Path(owner.last_result.completed.completion_ref).read_bytes()) == result
