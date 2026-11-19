@@ -1,8 +1,9 @@
 name: AI Commerce Brain PASS auto-merge
 
 # Runs trusted main source; GitHub validates an exact, authenticated Brain PASS
-# receipt on the PR, exact HEAD/base, independent Windows CI and artifacts.
-# An ordinary CI PASS without Brain review does not authorize merging.
+# receipt on the PR, exact HEAD/base and either independently checked original
+# EF02 Windows PASS evidence or Windows PR CI/artifacts if the candidate changed.
+# An EF02/CI PASS without independent Brain review does not authorize merging.
 # PR review comments act only as an event-level wake after a genuine Brain
 # PASS receipt has been published in the PR Conversation. Listening to
 # issue_comment would create a Skipped Actions run for EVERY EF02 Issue comment.
@@ -58,7 +59,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Verify pinned Brain PASS and exact-head independent CI before merge
+      - name: Verify pinned Brain PASS and reusable EF02 or exact-head CI before merge
         env:
           GH_TOKEN: ${{ github.token }}
         run: python .github/scripts/pr-merge-gate.py

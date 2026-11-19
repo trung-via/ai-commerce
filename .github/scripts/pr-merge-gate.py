@@ -13,6 +13,7 @@ import ast
 import base64
 import binascii
 import hashlib
+import io
 import json
 import os
 import re
@@ -20,6 +21,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -728,6 +730,152 @@ def _artifacts_in_attempt(proof: object, *, started: str,
     return {"artifacts": selected}
 
 
+EF02_MARKER = "\n\nEF02-CANDIDATE-EVIDENCE-V1\n"
+EF02_SOURCE_WORKFLOWS = {
+    ".github/workflows/issue-ingress.yml",
+    ".github/workflows/ef02-batch.yml",
+}
+
+
+def verified_ef02_candidate(api: Callable[[str], Any], repository: str,
+                            head: str, changed_files: object) -> bool:
+    """Reuse a genuine EF02 Windows PASS on unchanged candidate bytes.
+
+    This is independent of candidate-supplied CI flags. A later edited or
+    rebased candidate, missing owner/consumer coverage, failed/expired run or
+    incomplete artifact MUST go through regular PR CI. Only protected-main
+    code calls this function. A canonical independent Brain PASS is separate.
+    """
+    if (not SHA.fullmatch(head) or not isinstance(changed_files, list)
+            or not 1 <= len(changed_files) < 100
+            or not callable(getattr(api, "read_artifact", None))):
+        return False
+    base = f"/repos/{repository}"
+    try:
+        paths = [item["filename"] for item in changed_files]
+        if (any(not isinstance(item, dict) or item.get("status") not in
+                ("added", "modified") for item in changed_files)
+                or len(paths) != len(set(paths))
+                or any(not isinstance(p, str) or p.startswith(".github/")
+                       or ".." in p.split("/") for p in paths)):
+            return False
+        coverage = reviewed_coverage_for_changed_files(changed_files)
+        if coverage is None:
+            return False
+        _, required_tests = coverage
+        commit = api(f"{base}/git/commits/{head}")
+        if not isinstance(commit, dict) or commit.get("sha") != head:
+            return False
+        message = commit.get("message")
+        if not isinstance(message, str) or message.count(EF02_MARKER) != 1:
+            return False
+        title, payload = message.split(EF02_MARKER)
+        evidence = json.loads(payload)
+        if (not isinstance(evidence, dict) or
+                title != "EF02 candidate attempt " + str(evidence.get("attempt_id")) or
+                payload != json.dumps(evidence, sort_keys=True, separators=(",", ":"),
+                                      ensure_ascii=True, allow_nan=False) or
+                evidence.get("version") != 1 or evidence.get("status") != "CANDIDATE_READY" or
+                evidence.get("scope_valid") is not True or
+                evidence.get("review_required") is not False or
+                evidence.get("out_of_scope_files") != [] or
+                evidence.get("changed_files") != sorted(paths) or
+                not set(paths) <= set(evidence.get("allowed_paths", [])) or
+                set(evidence.get("candidate_file_sha256", {})) != set(paths)):
+            return False
+        parent = evidence.get("effective_source_sha")
+        if (not isinstance(parent, str) or not SHA.fullmatch(parent)
+                or [p.get("sha") for p in commit.get("parents", [])] != [parent]):
+            return False
+        verify = evidence.get("verification")
+        origin = evidence.get("provenance")
+        if not isinstance(verify, dict) or not isinstance(origin, dict):
+            return False
+        argv = verify.get("argv")
+        if (verify.get("status") != "BUILD_VERIFIED_FOR_SCOPE" or
+                verify.get("exit_code") != 0 or
+                not isinstance(argv, list) or
+                not set(required_tests) <= set(argv) or
+                not all(isinstance(t, str) for t in argv) or
+                not isinstance(verify.get("evidence_sha256"), dict) or
+                not verify["evidence_sha256"] or
+                not isinstance(verify.get("report_sha256"), str) or
+                not re.fullmatch(r"[0-9a-f]{64}", verify["report_sha256"])):
+            return False
+        run_id = int(origin.get("run_id", ""))
+        run_attempt = int(origin.get("run_attempt", ""))
+        if not 1 <= run_id or not 1 <= run_attempt <= 100:
+            return False
+        # Verify each changed blob directly from GitHub; a no-change branch
+        # rewrite or synthetic commit-message PASS is not sufficient.
+        for path in paths:
+            item = api(f"{base}/contents/{urllib.parse.quote(path, safe='/')}?ref={head}")
+            if (not isinstance(item, dict) or item.get("encoding") != "base64"
+                    or not isinstance(item.get("content"), str)):
+                return False
+            raw = base64.b64decode(item["content"], validate=False)
+            if (len(raw) > 2 * 1024 * 1024 or
+                    hashlib.sha256(raw).hexdigest() != evidence["candidate_file_sha256"][path]):
+                return False
+        run = api(f"{base}/actions/runs/{run_id}")
+        if (not isinstance(run, dict) or run.get("id") != run_id or
+                run.get("run_attempt") != run_attempt or
+                run.get("path") not in EF02_SOURCE_WORKFLOWS or
+                run.get("event") not in ("issues", "workflow_dispatch") or
+                run.get("head_sha") != evidence.get("source_sha") or
+                run.get("actor", {}).get("login") != repository.split("/")[0] or
+                run.get("status") != "completed" or run.get("conclusion") != "success"):
+            return False
+        jobs = api(f"{base}/actions/runs/{run_id}/attempts/{run_attempt}/jobs?per_page=100")
+        if not isinstance(jobs, dict) or not isinstance(jobs.get("jobs"), list):
+            return False
+        executors = [j for j in jobs["jobs"] if isinstance(j, dict)
+                     and j.get("name") in ("ef02 / execute", "execute")]
+        if len(executors) != 1 or executors[0].get("conclusion") != "success":
+            return False
+        steps = {s.get("name"): s.get("conclusion")
+                 for s in executors[0].get("steps", []) if isinstance(s, dict)}
+        if (steps.get("Execute bounded concurrent EF01 jobs") != "success" or
+                steps.get("Preserve all attempt evidence even when actions fail") != "success"):
+            return False
+        listed = api(f"{base}/actions/runs/{run_id}/artifacts?per_page=100")
+        if not isinstance(listed, dict) or not isinstance(listed.get("artifacts"), list):
+            return False
+        matches = [a for a in listed["artifacts"] if isinstance(a, dict)
+                   and a.get("name") == f"ef02-results-{run_id}-{run_attempt}"]
+        if len(matches) != 1:
+            return False
+        artifact = matches[0]
+        custody = artifact.get("workflow_run")
+        if (artifact.get("expired") is not False or
+                type(artifact.get("id")) is not int or
+                not isinstance(custody, dict) or
+                custody.get("id") != run_id or
+                custody.get("head_sha") != evidence["source_sha"]):
+            return False
+        data = api.read_artifact(artifact["id"])
+        if not isinstance(data, bytes) or len(data) > 24 * 1024 * 1024:
+            return False
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            names = [n for n in archive.namelist() if n.endswith("/batch_result.json")]
+            if len(names) != 1 or archive.getinfo(names[0]).file_size > 2 * 1024 * 1024:
+                return False
+            report = json.loads(archive.read(names[0]))
+        if (not isinstance(report, dict) or report.get("status") != "COMPLETE" or
+                str(report.get("github_workflow_run_id")) != str(run_id) or
+                not isinstance(report.get("actions"), list)):
+            return False
+        matching = [a for a in report["actions"] if isinstance(a, dict) and
+                    a.get("attempt_id") == evidence["attempt_id"] and
+                    a.get("action_id") == evidence["action_id"]]
+        return (len(matching) == 1 and matching[0].get("status") == "CANDIDATE_READY"
+                and matching[0].get("candidate_sha") == head
+                and matching[0].get("candidate_evidence") == evidence)
+    except (KeyError, ValueError, TypeError, AttributeError, OSError, OverflowError,
+            binascii.Error, zipfile.BadZipFile, urllib.error.URLError):
+        return False
+
+
 def noninterfering_main_advance(api: Callable[[str], Any], base: str,
                                   pinned_base: str, current_main: str,
                                   pr_files: object) -> bool:
@@ -821,6 +969,15 @@ def verify_one(api: Callable[[str], Any], repository: str, number: int,
             return Verdict("WAIT_REBASE", "BASE_MAIN_CHANGED", number, head)
     if pr.get("mergeable") is not True:
         return Verdict("WAIT_MERGEABILITY", "PR_NOT_MERGEABLE", number, head)
+
+    # An exact, already-verified EF02 Windows candidate needs independent
+    # Brain review and this source/provenance oracle, NOT another pytest/Node
+    # execution. A changed candidate or inadequate owner/consumer closure
+    # simply falls through to ordinary PR CI.
+    if str(pr.get("head", {}).get("ref", "")).startswith("ef02/candidate/"):
+        candidate_files = api(f"{base}/pulls/{number}/files?per_page=100")
+        if verified_ef02_candidate(api, repository, head, candidate_files):
+            return Verdict("READY_FOR_MERGE", "EF02_EXACT_SOURCE_PROOF_REUSED", number, head)
 
     q = urllib.parse.urlencode({"event": "pull_request", "head_sha": head, "per_page": 100})
     obj = api(f"{base}/actions/runs?{q}")
@@ -1118,5 +1275,29 @@ def main() -> int:
     return 0
 
 
+def ef02_reuse_preflight() -> int:
+    """Read-only fast PR CI branch. Missing proof runs normal CI, never PASS."""
+    verified = False
+    try:
+        repo = os.environ["GITHUB_REPOSITORY"]
+        number = int(os.environ["EF02_REUSE_PR_NUMBER"])
+        api = GitHubAPI(repo, os.environ["GH_TOKEN"])
+        if number > 0:
+            pr = api(f"/repos/{repo}/pulls/{number}")
+            head = pr.get("head", {}).get("sha")
+            if str(pr.get("head", {}).get("ref", "")).startswith("ef02/candidate/"):
+                files = api(f"/repos/{repo}/pulls/{number}/files?per_page=100")
+                verified = verified_ef02_candidate(api, repo, head, files)
+    except (KeyError, ValueError, TypeError, OSError, urllib.error.URLError):
+        verified = False
+    output = os.environ.get("GITHUB_OUTPUT")
+    if output:
+        with open(output, "a", encoding="utf-8") as stream:
+            stream.write("verified=" + str(verified).lower() + "\n")
+    print("EF02_ORIGINAL_WINDOWS_PROOF_REUSED=" + str(verified).lower())
+    return 0
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(ef02_reuse_preflight() if sys.argv[1:] == ["--ef02-reuse-preflight"]
+             else main())

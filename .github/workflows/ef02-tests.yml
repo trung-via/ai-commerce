@@ -1,7 +1,8 @@
 name: EF02 source tests
 on:
   push:
-    branches: [ef02-multi-action-implementation, main]
+    # Do not rerun the same tests after an already reviewed PR merge.
+    branches: [ef02-multi-action-implementation]
   pull_request:
 permissions:
   contents: read
@@ -22,8 +23,23 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Checkout protected main for EF02 original-proof oracle
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: .local/trusted-gate
+          persist-credentials: false
+      - name: Reuse genuine exact-head EF02 Windows PASS (no pytest replay)
+        if: github.event_name == 'pull_request'
+        id: ef02_proof
+        run: python .local/trusted-gate/.github/scripts/pr-merge-gate.py --ef02-reuse-preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EF02_REUSE_PR_NUMBER: ${{ github.event.pull_request.number }}
       - name: MT-01 prove postmerge exact-tree PR CI
         id: reuse
+        if: steps.ef02_proof.outputs.verified != 'true'
         run: python .github/scripts/ef02-pr-ci-tests.py --reuse-preflight
         env:
           MT01_CI_EVENT: ${{ github.event_name }}
@@ -31,34 +47,34 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
       - name: MT-01 V2.1 scope/dependency preflight
         id: v21
-        if: steps.reuse.outputs.skip_pytest != 'true'
+        if: steps.ef02_proof.outputs.verified != 'true' && steps.reuse.outputs.skip_pytest != 'true'
         run: python .github/scripts/ef02-pr-ci-tests.py --v21-plan-only
         env:
           MT01_CI_EVENT: ${{ github.event_name }}
           MT01_CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           MT01_CI_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       - name: MT-01 baseline closure oracle
-        if: steps.reuse.outputs.skip_pytest != 'true'
+        if: steps.ef02_proof.outputs.verified != 'true' && steps.reuse.outputs.skip_pytest != 'true'
         run: python .github/scripts/mt01_v21_oracle.py --base "${{ github.event.pull_request.base.sha }}" --plan .local/mt01-v21/plan.json
       - name: Install FFmpeg on Windows hosted runner
-        if: steps.v21.outputs.need_ffmpeg == 'true'
+        if: steps.ef02_proof.outputs.verified != 'true' && steps.v21.outputs.need_ffmpeg == 'true'
         shell: pwsh
         run: |
           choco install ffmpeg --yes --no-progress
           if ($LASTEXITCODE -ne 0) { throw "FFMPEG_CHOCO_INSTALL_FAILED" }
       - name: Verify ffmpeg, ffprobe and libx264 are executable
-        if: steps.v21.outputs.need_ffmpeg == 'true'
+        if: steps.ef02_proof.outputs.verified != 'true' && steps.v21.outputs.need_ffmpeg == 'true'
         run: python -c "import shutil,subprocess; assert shutil.which('ffmpeg') and shutil.which('ffprobe'), 'FFMPEG_OR_FFPROBE_MISSING'; assert b'libx264' in subprocess.check_output(['ffmpeg','-hide_banner','-encoders']), 'LIBX264_MISSING'; subprocess.check_call(['ffprobe','-version'],stdout=subprocess.DEVNULL)"
       - run: python -m pip install -e ".[dev]" Pillow
-        if: steps.reuse.outputs.skip_pytest != 'true'
+        if: steps.ef02_proof.outputs.verified != 'true' && steps.reuse.outputs.skip_pytest != 'true'
       - name: Whole-repository Windows-only policy audit
-        if: steps.reuse.outputs.skip_pytest != 'true'
+        if: steps.ef02_proof.outputs.verified != 'true' && steps.reuse.outputs.skip_pytest != 'true'
         run: python -m pytest tests/test_pr_merge_gate.py::test_repository_wide_windows_only_audit -q -s
       # MT-01 V2.1 already executes and attests the exact selected tests below.
       # The former contract preflight ran the same *entire test files* again,
       # sometimes taking 15 minutes before the official run even started.
       - name: MT-01 PR CI selective tests (full fallback)
-        if: steps.reuse.outputs.skip_pytest != 'true'
+        if: steps.ef02_proof.outputs.verified != 'true' && steps.reuse.outputs.skip_pytest != 'true'
         run: python .github/scripts/ef02-pr-ci-tests.py
         env:
           MT01_CI_EVENT: ${{ github.event_name }}
@@ -66,7 +82,7 @@ jobs:
           MT01_CI_XDIST_WORKERS: '4'
           MT01_CI_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       - name: MT-01 V2.1 upload verification receipt
-        if: always() && steps.reuse.outputs.skip_pytest != 'true'
+        if: always() && steps.ef02_proof.outputs.verified != 'true' && steps.reuse.outputs.skip_pytest != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: mt01-v21-windows-latest-${{ github.run_id }}
@@ -74,12 +90,14 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Exact-tree PR CI reused — stdlib smoke
-        if: steps.reuse.outputs.skip_pytest == 'true'
+        if: steps.ef02_proof.outputs.verified != 'true' && steps.reuse.outputs.skip_pytest == 'true'
         run: python -m compileall -q src/ai_commerce
       - uses: actions/setup-node@v4
+        if: steps.ef02_proof.outputs.verified != 'true'
         with:
           node-version: '22'
       - run: node --test tests/ef02-watch.test.cjs tests/ef02-reconcile.test.cjs
+        if: steps.ef02_proof.outputs.verified != 'true'
 
   atb-native-proof:
     name: ATB-01 original inert Windows native proof (PR 940 only)
