@@ -669,14 +669,17 @@ def test_gate_reuses_ci_for_disjoint_registered_main_test_and_remote_owner(gate,
     from ai_commerce.engineering.minimum_test import TestGroup
 
     monkeypatch.setattr(gate, "approved_groups", lambda: (
-        TestGroup("original", ("tests/test_minimum_test.py",), ("fixture.ac",),
+        TestGroup("original", ("tests/test_fixture_owner.py",), ("fixture.ac",),
                   ("src/ai_commerce/product/identity.py",)),
         TestGroup("remote", ("tests/test_remote_owner.py",), ("remote.ac",),
                   ("src/ai_commerce/remote/independent.py",)),
+        TestGroup("mt01", ("tests/test_minimum_test.py",), ("mt01.ac",),
+                  ("src/ai_commerce/engineering/minimum_test.py",)),
     ))
     for drift in ("tests/test_remote_owner.py", "src/ai_commerce/remote/independent.py",
-                  "tests/test_pr_merge_gate.py"):
+                  "tests/test_pr_merge_gate.py", "tests/test_minimum_test.py"):
         api = _MainAdvanceGitHub(gate, drift_path=drift)
+        api.source_test_path = "tests/test_fixture_owner.py"
         result = gate.process(api, api.repo, _approval_event(gate))
         assert result[0]["status"] == "MERGED"
         assert result[0]["ci_run"] == 200

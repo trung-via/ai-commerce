@@ -1011,9 +1011,12 @@ def noninterfering_main_advance(api: Callable[[str], Any], base: str,
     registered_tests = {test for group in groups for test in group.tests}
     registered_remote = {path for group in groups for path in (*group.paths, *group.consumers)
                          if path.startswith("src/ai_commerce/remote/")}
+    # The MT-01 test module is a registered test-only change: a previously
+    # passed unrelated PR never consumed its assertions. Require owner/test
+    # disjointness below as for any other registered test. Actual selector,
+    # oracle and registry *source* still fail closed.
     protected_tests = {
-        "tests/test_minimum_test.py", "tests/test_mt01_v21.py",
-        "tests/test_ef02_mt01_registry.py",
+        "tests/test_mt01_v21.py", "tests/test_ef02_mt01_registry.py",
     }
     # An already-protected-main upgrade of this very gate and its own
     # regression tests is verified by the currently executing trusted script.
