@@ -1658,6 +1658,14 @@ class _Clean9444Hold(ValueError):
     """Diagnostics returned by the clean 9444 JSON commands."""
 
 
+class _ManagedCleanRuntimeHold(_Clean9444Hold):
+    """Keep the installer code while identifying a failed runtime check."""
+
+    def __init__(self, stage: Literal["layout", "signature", "bootstrap"]):
+        super().__init__("AUTOSTART_RUNTIME_UNAVAILABLE")
+        self.stage = stage
+
+
 _CLEAN_9444_PROFILE = "WakeHub-9444-Clean"
 _CLEAN_9444_REGISTRY = r"Software\AI-Commerce\WakeHub-9444-Clean"
 _CLEAN_9444_PORT = 9444
@@ -1938,7 +1946,7 @@ def ensure_clean_9444(*, opt_in: bool = False) -> dict:
         return _clean_hold("WINDOWS_PROBE_UNAVAILABLE")
 
 
-_CLEAN_9444_TASK_SCRIPT = r"""
+_CLEAN_9444_TASK_INSPECTION = r"""
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new()
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -2020,6 +2028,17 @@ function Test-Registration($registered) {
 }
 
 $registered = Read-Registration
+"""
+
+
+_CLEAN_9444_TASK_READ_SCRIPT = _CLEAN_9444_TASK_INSPECTION + r"""
+if (!$registered) { 'AUTOSTART_NOT_ENROLLED' }
+elseif (Test-Registration $registered) { 'ALREADY_ENROLLED' }
+else { 'AUTOSTART_CONFLICT' }
+"""
+
+
+_CLEAN_9444_TASK_SCRIPT = _CLEAN_9444_TASK_INSPECTION + r"""
 if ($env:AI_COMMERCE_TASK_START_SESSION) {
     $session = [int]$env:AI_COMMERCE_TASK_START_SESSION
     if (!$managed -or $session -le 0 -or $session -ne [Diagnostics.Process]::GetCurrentProcess().SessionId -or
@@ -2076,9 +2095,10 @@ def _clean_task(sid: str, *, install: bool, runtime: tuple[Path, Path] | None = 
                      AI_COMMERCE_TASK_MANAGED="1" if runtime is not None else "0",
                      AI_COMMERCE_TASK_START_SESSION=str(start_session or ""),
                      AI_COMMERCE_TASK_INSTALL="1" if install else "0")
+    script = _CLEAN_9444_TASK_SCRIPT if install or start_session is not None else _CLEAN_9444_TASK_READ_SCRIPT
     try:
         result = subprocess.run([str(_powershell()), "-NoProfile", "-NonInteractive", "-Command",
-                                 _CLEAN_9444_TASK_SCRIPT], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 script], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                 timeout=15, check=False, env=child_env,
                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         code = result.stdout.strip().decode("ascii")
@@ -2130,23 +2150,23 @@ if len(sys.argv) == 1:
 
 def _managed_clean_runtime(local: Path, sid: str, source: Path) -> tuple[Path, Path]:
     """Prove an installed per-user CPython and the fixed checkout can run together."""
-    from .local_completion_handoff import _private_identity
+    from .local_completion_handoff import HandoffBlocked, _private_identity
 
     version = f"{sys.version_info.major}{sys.version_info.minor}"
     base = local / "Programs" / "Python" / f"Python{version}"
     python, pythonw = base / "python.exe", base / "pythonw.exe"
     dll = base / f"python{version}.dll"
     site = base / "Lib" / "site-packages"
+    owner_paths = (base, python, pythonw, dll, base / "Lib", site)
     try:
         if (Path(sys.base_prefix) != base or Path(sys.executable) != python
-                or any(not path.is_absolute() or not _no_links(path) or _private_identity(path) != sid
-                       for path in (base, python, pythonw, dll, base / "Lib", site))
+                or any(not path.is_absolute() or not _no_links(path) for path in (*owner_paths, source))
                 or any(not path.is_file() for path in (python, pythonw, dll, source))
-                or not site.is_dir() or not _no_links(source)
+                or not site.is_dir() or any(_private_identity(path) != sid for path in owner_paths)
                 or any(re.search(r"[%\r\n]", str(path)) for path in (pythonw, source))
                 or any(os.path.lexists(base / name)
                        for name in ("pyvenv.cfg", "python._pth", f"python{version}._pth"))):
-            raise _Clean9444Hold("AUTOSTART_RUNTIME_UNAVAILABLE")
+            raise _ManagedCleanRuntimeHold("layout")
         env = _child_environment()
         env.update(AI_COMMERCE_PYTHON=str(python), AI_COMMERCE_PYTHONW=str(pythonw),
                    AI_COMMERCE_PYTHON_DLL=str(dll))
@@ -2162,13 +2182,17 @@ def _managed_clean_runtime(local: Path, sid: str, source: Path) -> tuple[Path, P
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15,
                                 check=False, env=env, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         if result.returncode or result.stdout.strip() != b"SIGNED_CPYTHON":
-            raise _Clean9444Hold("AUTOSTART_RUNTIME_UNAVAILABLE")
+            raise _ManagedCleanRuntimeHold("signature")
         result = subprocess.run([str(python), *_managed_clean_argv(pythonw, source), "check"],
                                 cwd=source.parents[2], env=_child_environment(), stdin=subprocess.DEVNULL,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False,
                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         if result.returncode:
-            raise _Clean9444Hold("AUTOSTART_RUNTIME_UNAVAILABLE")
+            raise _ManagedCleanRuntimeHold("bootstrap")
+    except HandoffBlocked:
+        raise _ManagedCleanRuntimeHold("layout") from None
+    except _ManagedCleanRuntimeHold:
+        raise
     except (OSError, ValueError, subprocess.TimeoutExpired):
         raise _Clean9444Hold("AUTOSTART_RUNTIME_UNAVAILABLE") from None
     return pythonw, source

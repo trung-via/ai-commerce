@@ -2169,11 +2169,11 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
     def record_pending(self, name, pending):
         (self.pending.add if pending else self.pending.remove)(name)
 
-    def invoke(self, payload=None):
+    def invoke(self, payload=None, *, mode="write"):
         event_file = Path(self.env["GITHUB_EVENT_PATH"])
         event_file.write_text(json.dumps(payload or self.event), encoding="utf-8")
         output = self.local / "receipt.json"
-        with patch.object(hostops.sys, "argv", ["personal", "--mode", "write", "--output", str(output)]):
+        with patch.object(hostops.sys, "argv", ["personal", "--mode", mode, "--output", str(output)]):
             code = hostops.main()
         result = json.loads(output.read_text(encoding="utf-8"))
         self.assertEqual(code, 0 if result["status"] == "OBSERVED" else 2)
@@ -2183,6 +2183,99 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         self.spawn.assert_not_called()
         self.native_run.assert_not_called()
         return result
+
+    def invoke_probe(self, payload=None):
+        with patch.dict(self.env, GITHUB_EVENT_NAME="issues"):
+            return self.invoke(payload or event("read", "clean_9444_runtime_probe", {}), mode="read")
+
+    def test_runtime_probe_rejects_unapproved_events_and_nonempty_parameters(self):
+        op = "clean_9444_runtime_probe"
+        request = hostops.parse_event(event("read", op, {}), "read")
+        with self.assertRaisesRegex(hostops.Denied, "OPERATION_DENIED"):
+            hostops.perform(request)
+        self.assertEqual(self.invoke(event("write", op, {}))["code"], "WRITE_SCOPE_DENIED")
+        payload = event("read", op, {})
+        payload["sender"]["login"] = "another-account"
+        self.assertEqual(self.invoke_probe(payload)["code"], "NON_OWNER_EVENT")
+        for params in (None, [], {"cdp_port": 9333}, {"cdp_port": 9444}, {"command": "PRIVATE"}):
+            with self.subTest(params=params):
+                self.assertEqual(self.invoke_probe(event("read", op, params))["status"], "BLOCKED")
+        self.session.assert_not_called()
+        self.task.assert_not_called()
+
+    def test_runtime_probe_checks_runner_actor_and_sha_before_native_access(self):
+        for name, value, code in (
+            ("RUNNER_NAME", "AI-COMMERCE-EF02-01", "WINDOWS_OWNER_CONTEXT_UNVERIFIED"),
+            ("GITHUB_ACTOR", "another-account", "WINDOWS_OWNER_CONTEXT_UNVERIFIED"),
+            ("GITHUB_RUN_ATTEMPT", "2", "WINDOWS_OWNER_CONTEXT_UNVERIFIED"),
+            ("AI_COMMERCE_GIT_GUARD_ACTIVE", "1", "WINDOWS_OWNER_CONTEXT_UNVERIFIED"),
+            ("GITHUB_SHA", "PRIVATE", "SOURCE_CUSTODY_UNVERIFIED"),
+            ("GITHUB_WORKFLOW_SHA", "b" * 40, "SOURCE_CUSTODY_UNVERIFIED"),
+        ):
+            with self.subTest(name=name), patch.dict(self.env, {name: value}):
+                receipt = self.invoke_probe()
+                self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", code))
+                self.assertNotIn("source_sha", receipt)
+        with patch.object(hostops, "PERSONAL_PUBLIC_FIELDS", hostops.PERSONAL_PUBLIC_FIELDS - {"source_sha"}):
+            self.assertEqual(self.invoke_probe()["code"], "PUBLIC_TRANSPORT_GAP")
+        self.session.assert_not_called()
+        self.source.assert_not_called()
+        self.task.assert_not_called()
+
+    def test_runtime_probe_reuses_source_custody_and_only_reads_task(self):
+        root, workflow, source, peer, git = self._clean_source_fixture()
+        self.source.side_effect = self.real_source
+        self.managed_runtime.return_value = runtime = (self.runtime[0], source)
+        with patch.dict(hostops.ROOTS, workspace=root), \
+                patch.object(hostops, "__file__", workflow / "src/ai_commerce/hostops_v3/personal.py"), \
+                patch.object(self.acq, "__file__", peer), \
+                patch.object(hostops, "_git", side_effect=lambda *args: git[args]):
+            for args, value in (
+                (("rev-parse", "HEAD", "refs/remotes/origin/main"), "b" * 40 + "\n" + self.sha),
+                (("status", "--porcelain=v1", "--untracked-files=all"), "?? src/PRIVATE.py"),
+            ):
+                with patch.dict(git, {args: value}):
+                    self.assertEqual(self.invoke_probe()["code"], "SOURCE_CUSTODY_UNVERIFIED")
+            with patch.object(hostops, "_is_reparse", side_effect=lambda path: path == source):
+                self.assertEqual(self.invoke_probe()["code"], "SOURCE_CUSTODY_UNVERIFIED")
+            self.managed_runtime.assert_not_called()
+            self.task.assert_not_called()
+
+            self.assertEqual(self.invoke_probe(), {
+                "status": "OBSERVED", "code": "READY", "operation": "clean_9444_runtime_probe",
+                "cdp_port": 9444, "source_sha": self.sha, "exact_chat_verified": False,
+                "wake_sent": False, "arbitrary_shell_enabled": False, "remote_shell_enabled": False,
+            })
+        self.managed_runtime.assert_called_once_with(self.local, self.sid, source)
+        self.task.assert_called_once_with(self.sid, install=False, runtime=runtime)
+        self.inventory.assert_not_called()
+        self.record.assert_not_called()
+        self.probe.assert_not_called()
+
+    def test_runtime_probe_never_reports_ready_with_ambiguous_effect_or_owner(self):
+        self.session.return_value = 0
+        self.assertEqual(self.invoke_probe()["code"], "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+        self.source.assert_not_called()
+        self.session.return_value = 7
+        self.pending.add("AutostartPending")
+        self.assertEqual(self.invoke_probe()["code"], "UNKNOWN")
+        self.pending.clear()
+        self.launch_pending.return_value = True
+        self.assertEqual(self.invoke_probe()["code"], "UNKNOWN")
+        self.launch_pending.return_value = False
+        self.task.assert_not_called()
+
+        for reply, code in (("AUTOSTART_RUNTIME_UNAVAILABLE", "TASK_READ_UNVERIFIED"),
+                            ("AUTOSTART_CONFLICT", "TASK_REGISTRATION_CONFLICT"),
+                            ("UNKNOWN_EFFECT", "UNKNOWN"), ("PRIVATE", "UNKNOWN")):
+            with self.subTest(reply=reply):
+                self.task.return_value = reply
+                self.assertEqual(self.invoke_probe()["code"], code)
+        self.task.return_value = "ALREADY_ENROLLED"
+        self.session.side_effect = (7, 7, 8)
+        self.assertEqual(self.invoke_probe()["code"], "UNKNOWN")
+        self.record.assert_not_called()
+        self.probe.assert_not_called()
 
     def test_exact_grant_and_parameters_required_before_any_native_call(self):
         read = event("read", self.op, {})

@@ -4,6 +4,7 @@ import json
 import re
 import os
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 from ai_commerce.remote import chrome_acquisition as ca
@@ -2335,6 +2336,81 @@ def test_clean_9444_scheduler_install_reports_exact_private_status(clean_9444, m
     assert script.index("$registered = Read-Registration") < script.index(".RegisterTaskDefinition(")
     assert "$expected, 34, $sid, $null, 3, $sddl" in script  # Create only, interactive token.
     assert script.count(".RegisterTaskDefinition(") == 1
+
+
+@pytest.mark.parametrize("failure, code, subprocess_count", [
+    (None, "READY", 3),
+    ("interpreter", "CPYTHON_LAYOUT_UNVERIFIED", 0),
+    ("missing_dll", "CPYTHON_LAYOUT_UNVERIFIED", 0),
+    ("owner", "CPYTHON_LAYOUT_UNVERIFIED", 0),
+    ("reparse", "CPYTHON_LAYOUT_UNVERIFIED", 0),
+    ("signature", "CPYTHON_SIGNATURE_UNVERIFIED", 1),
+    ("bootstrap", "CPYTHON_BOOTSTRAP_UNVERIFIED", 2),
+    ("task", "TASK_READ_UNVERIFIED", 3),
+    ("timeout", "UNKNOWN", 1),
+])
+def test_clean_9444_runtime_probe_runs_only_fixed_checks(tmp_path, monkeypatch, failure, code, subprocess_count):
+    from ai_commerce.hostops_v3 import personal
+    from ai_commerce.remote import local_completion_handoff
+
+    base = tmp_path / "Programs" / "Python" / "Python312"
+    (base / "Lib" / "site-packages").mkdir(parents=True)
+    python, pythonw, dll = (base / name for name in ("python.exe", "pythonw.exe", "python312.dll"))
+    source = tmp_path / personal._ACQUISITION_SOURCE
+    source.parent.mkdir(parents=True)
+    for path in (python, pythonw, source):
+        path.touch()
+    if failure != "missing_dll":
+        dll.touch()
+    powershell = tmp_path / "powershell.exe"
+    monkeypatch.setattr(ca, "sys", SimpleNamespace(
+        executable=str(python if failure != "interpreter" else tmp_path / "runner" / "python.exe"),
+        base_prefix=str(base), version_info=SimpleNamespace(major=3, minor=12),
+    ))
+    monkeypatch.setattr(local_completion_handoff, "_private_identity",
+                        lambda path: "PRIVATE foreign SID" if failure == "owner" and path == dll else _OPERATOR_SID)
+    if failure == "reparse":
+        monkeypatch.setattr(ca, "_no_links", lambda path: path != dll)
+    monkeypatch.setattr(personal, "_require_protected_clean_runner", lambda event_name: None)
+    monkeypatch.setattr(personal, "_protected_clean_workflow_sha", lambda: "a" * 40)
+    monkeypatch.setattr(personal, "_persistent_clean_source", lambda acquisition, sha: source)
+    monkeypatch.setattr(ca, "_native_operator", lambda: (tmp_path, 7, _OPERATOR_SID))
+    monkeypatch.setattr(ca, "_clean_pending", lambda name: False)
+    monkeypatch.setattr(ca, "_powershell", lambda: powershell)
+
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if len(calls) == 1:
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired("PRIVATE command", 15)
+            return SimpleNamespace(returncode=int(failure == "signature"), stdout=b"SIGNED_CPYTHON")
+        if len(calls) == 2:
+            return SimpleNamespace(returncode=int(failure == "bootstrap"))
+        if failure == "task":
+            return SimpleNamespace(returncode=1, stdout=b"PRIVATE task response")
+        return SimpleNamespace(returncode=0, stdout=b"AUTOSTART_NOT_ENROLLED")
+
+    monkeypatch.setattr(ca.subprocess, "run", run)
+    result = personal._probe_protected_clean_runtime()
+    assert (result["status"], result["code"]) == ("OBSERVED", code)
+    assert "PRIVATE" not in json.dumps(result)
+    assert len(calls) == subprocess_count
+    assert all(kwargs["timeout"] == 15 and kwargs["stderr"] == subprocess.DEVNULL for _, kwargs in calls)
+    if calls:
+        assert "Get-AuthenticodeSignature -LiteralPath" in calls[0][0][-1]
+    if len(calls) >= 2:
+        argv, kwargs = calls[1]
+        assert argv[:5] == [str(python), "-I", "-B", "-S", "-c"] and argv[-1] == "check"
+        assert kwargs["cwd"] == source.parents[2]
+    if len(calls) == 3:
+        argv, kwargs = calls[2]
+        assert argv[:4] == [str(powershell), "-NoProfile", "-NonInteractive", "-Command"]
+        assert "GetTask($name)" in argv[-1] and "Test-Registration $registered" in argv[-1]
+        assert not re.search(r"\.RegisterTaskDefinition\(|\.RunEx\(|DeleteTask|Stop-Process", argv[-1])
+        assert kwargs["env"]["AI_COMMERCE_TASK_INSTALL"] == "0"
+        assert kwargs["env"]["AI_COMMERCE_TASK_START_SESSION"] == ""
 
 
 def test_clean_9444_registered_supervisor_recovers_after_browser_closes(clean_9444, monkeypatch, capsys):
