@@ -790,7 +790,9 @@ def test_independent_siblings_repair_in_distinct_worktrees_and_block_only_failed
     assert actions["a"]["status"] == "VERIFICATION_FAILED", {
         "status": actions["a"]["status"], "error_code": actions["a"].get("error_code"),
         "diagnostic": actions["a"].get("diagnostic")}
-    assert actions["b"]["status"] == "CANDIDATE_READY"
+    assert actions["b"]["status"] == "CANDIDATE_READY", {
+        "status": actions["b"]["status"], "error_code": actions["b"].get("error_code"),
+        "diagnostic": actions["b"].get("diagnostic")}
     assert actions["c"]["status"] == "BLOCKED_DEPENDENCY"
     assert actions["a"]["worktree"] != actions["b"]["worktree"]
     assert len(context.claims) == 2 and len(context.children) == 2 and len(context.candidates) == 1
