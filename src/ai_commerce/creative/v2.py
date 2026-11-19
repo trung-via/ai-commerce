@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import math
+import re
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
+from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from ai_commerce.core.provenance import canonical_bytes, sha256_bytes
@@ -2190,3 +2193,2544 @@ def run_creative_production(
     if production is not None and loaded.status == "CREATIVE_COMPLETE" and loaded.package is not None:
         production.complete_a03(loaded, store=sidecars)
     return loaded
+
+
+# ---------------------------------------------------------------------------
+# Opt-in R5a benchmarking & evidence-led comparison foundation (SOURCE_ONLY).
+# Zero real provider/media/spend/account/rights/HostOps/Wake/Send effects.
+# ---------------------------------------------------------------------------
+
+_SOURCE_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+
+BENCHMARK_STRATEGIES: tuple[Literal["S1", "S2", "S3"], ...] = ("S1", "S2", "S3")
+BENCHMARK_STRATEGY_DESCRIPTIONS: dict[str, str] = {
+    "S1": "one generator",
+    "S2": "generator + independent critic",
+    "S3": "source-research + generator + critic + bounded developer",
+}
+BENCHMARK_BRIEF_CLASSES: tuple[Literal["VN_PRODUCT", "VN_NON_PRODUCT_FICTION", "SILENT_NO_CTA"], ...] = (
+    "VN_PRODUCT",
+    "VN_NON_PRODUCT_FICTION",
+    "SILENT_NO_CTA",
+)
+BENCHMARK_ROLES: tuple[str, ...] = (
+    "RESEARCH", "GENERATOR", "CRITIC", "SELECTOR", "DEVELOPER", "PACKAGE_PRODUCER",
+)
+_ROLE_TO_OPS: dict[str, tuple[str, ...]] = {
+    "RESEARCH": ("RESEARCH",),
+    "GENERATOR": ("EXPLORE",),
+    "CRITIC": ("CRITIQUE",),
+    "SELECTOR": ("SELECT",),
+    "DEVELOPER": ("DEVELOP",),
+    "PACKAGE_PRODUCER": ("PRODUCE_PACKAGE", "REVISE_PACKAGE"),
+}
+BENCHMARK_RUBRIC_VERSION = "a03.benchmark-rubric.v1"
+NSM_V1_VERSION = "NSM_v1"
+NSM_V1_WEIGHTS: dict[str, float] = {
+    "quality": 0.55,
+    "token_efficiency": 0.20,
+    "wall_time_efficiency": 0.15,
+    "human_time_efficiency": 0.10,
+}
+NSM_V1_RUBRIC_WEIGHTS: dict[str, float] = {
+    "brief_adherence": 0.25,
+    "originality_non_duplication": 0.20,
+    "factual_evidence_accuracy": 0.15,
+    "script_scene_s0_action_s1_consistency": 0.20,
+    "continuity_camera_audio_silence_rights_qa_readiness": 0.20,
+}
+NSM_V1_REFERENCES: dict[str, int] = {
+    "total_tokens": 20000,
+    "wall_time_ms": 60000,
+    "human_active_time_ms": 60000,
+}
+
+
+def _require_source_sha(value: object, field: str = "source_sha") -> str:
+    if type(value) is not str or not _SOURCE_SHA_RE.fullmatch(value):
+        raise CreativeValidationError(f"{field}: expected 40- or 64-char lowercase hex git SHA")
+    return value
+
+
+def _require_iso_timestamp(value: object, field: str) -> datetime:
+    text = require_text(value, field)
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise CreativeValidationError(f"{field}: expected timezone-aware ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise CreativeValidationError(f"{field}: timestamp must include timezone offset or Z")
+    return parsed
+
+
+def _nonneg_int_or_none(value: object, field: str) -> int | None:
+    if value is None:
+        return None
+    if type(value) is not int or value < 0:
+        raise CreativeValidationError(f"{field}: expected nonnegative integer or null")
+    return value
+
+
+def _nonneg_int(value: object, field: str) -> int:
+    if type(value) is not int or value < 0:
+        raise CreativeValidationError(f"{field}: expected nonnegative integer")
+    return value
+
+
+def _require_bool(value: object, field: str) -> bool:
+    if type(value) is not bool:
+        raise CreativeValidationError(f"{field}: expected boolean")
+    return value
+
+
+def _unit_score(value: object, field: str) -> float:
+    if type(value) not in (int, float) or not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        raise CreativeValidationError(f"{field}: expected finite score in [0.0, 1.0]")
+    return float(value)
+
+
+def _distinct_digests(value: object, field: str) -> tuple[str, ...]:
+    if not isinstance(value, (tuple, list)):
+        raise CreativeValidationError(f"{field}: expected list/tuple of SHA-256 digests")
+    items = tuple(require_digest(v) for v in value)
+    if len(set(items)) != len(items):
+        raise CreativeValidationError(f"{field}: duplicate digests")
+    return items
+
+
+def _distinct_texts(value: object, field: str) -> tuple[str, ...]:
+    items = text_tuple(value, field)
+    if len(set(items)) != len(items):
+        raise CreativeValidationError(f"{field}: duplicate values")
+    return items
+
+
+def _benchmark_case_slot(cohort_id: str, case_id: str) -> str:
+    return sha256_bytes(canonical_bytes({"cohort_id": cohort_id, "case_id": case_id}))
+
+
+def _benchmark_observation_slot(
+    cohort_id: str, case_id: str, strategy: str, sample_id: str, attempt: int,
+) -> str:
+    return sha256_bytes(canonical_bytes({
+        "cohort_id": cohort_id,
+        "case_id": case_id,
+        "strategy": strategy,
+        "sample_id": sample_id,
+        "attempt": attempt,
+    }))
+
+
+def _benchmark_comparison_slot(cohort_id: str, comparison_id: str) -> str:
+    return sha256_bytes(canonical_bytes({"cohort_id": cohort_id, "comparison_id": comparison_id}))
+
+
+@dataclass(frozen=True, slots=True)
+class A03BenchmarkCase:
+    """Pinned cohort benchmark case; preserves ContentBrief.v0.1 unchanged."""
+
+    case_id: str
+    cohort_id: str
+    source_sha: str
+    brief_id: str
+    source_brief_digest: str
+    brief_class: Literal["VN_PRODUCT", "VN_NON_PRODUCT_FICTION", "SILENT_NO_CTA"]
+    factual_evidence_applicable: bool
+    provenance: CreativeJobProvenance
+    created_at: str
+    language: str = "vi"
+    expected_evidence_refs: tuple[str, ...] = ()
+    rubric_version: str = BENCHMARK_RUBRIC_VERSION
+    schema_version: str = "A03BenchmarkCase.v1"
+
+    def __post_init__(self) -> None:
+        if self.schema_version != "A03BenchmarkCase.v1":
+            raise CreativeValidationError("unsupported benchmark case schema")
+        if self.rubric_version != BENCHMARK_RUBRIC_VERSION:
+            raise CreativeValidationError("unsupported benchmark rubric version")
+        for name in ("case_id", "cohort_id", "brief_id", "language"):
+            require_text(getattr(self, name), name)
+        _require_source_sha(self.source_sha, "source_sha")
+        require_digest(self.source_brief_digest)
+        if self.brief_class not in BENCHMARK_BRIEF_CLASSES:
+            raise CreativeValidationError("unsupported benchmark brief_class")
+        _require_bool(self.factual_evidence_applicable, "factual_evidence_applicable")
+        if not isinstance(self.provenance, CreativeJobProvenance):
+            raise CreativeValidationError("expected typed benchmark case provenance")
+        CreativeJobProvenance.from_dict(self.provenance.to_dict())
+        _require_iso_timestamp(self.created_at, "created_at")
+        object.__setattr__(self, "expected_evidence_refs",
+                           _distinct_texts(self.expected_evidence_refs, "expected_evidence_refs"))
+
+    @classmethod
+    def create(
+        cls,
+        brief: Any,
+        *,
+        case_id: str,
+        cohort_id: str,
+        source_sha: str,
+        brief_class: Literal["VN_PRODUCT", "VN_NON_PRODUCT_FICTION", "SILENT_NO_CTA"],
+        factual_evidence_applicable: bool,
+        provenance: CreativeJobProvenance,
+        created_at: str,
+        language: str = "vi",
+        expected_evidence_refs: tuple[str, ...] = (),
+        rubric_version: str = BENCHMARK_RUBRIC_VERSION,
+    ) -> A03BenchmarkCase:
+        valid = intake_brief(brief)
+        refs = tuple(expected_evidence_refs)
+        if not set(refs) <= set(valid.get("source_refs", [])):
+            raise CreativeValidationError("expected_evidence_refs must belong to source brief")
+        if brief_class == "VN_NON_PRODUCT_FICTION" and valid.get("product_ref") is not None:
+            raise CreativeValidationError("VN_NON_PRODUCT_FICTION brief cannot require a product_ref")
+        if brief_class == "SILENT_NO_CTA" and valid.get("cta") is not None:
+            raise CreativeValidationError("SILENT_NO_CTA brief cannot carry a non-null cta")
+        return cls(
+            case_id=case_id,
+            cohort_id=cohort_id,
+            source_sha=source_sha,
+            brief_id=valid["brief_id"],
+            source_brief_digest=brief_digest(valid),
+            brief_class=brief_class,
+            factual_evidence_applicable=factual_evidence_applicable,
+            provenance=provenance,
+            created_at=created_at,
+            language=language,
+            expected_evidence_refs=refs,
+            rubric_version=rubric_version,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "case_id": self.case_id,
+            "cohort_id": self.cohort_id,
+            "rubric_version": self.rubric_version,
+            "source_sha": self.source_sha,
+            "brief_id": self.brief_id,
+            "source_brief_digest": self.source_brief_digest,
+            "brief_class": self.brief_class,
+            "factual_evidence_applicable": self.factual_evidence_applicable,
+            "language": self.language,
+            "expected_evidence_refs": list(self.expected_evidence_refs),
+            "provenance": self.provenance.to_dict(),
+            "created_at": self.created_at,
+        }
+
+    def to_json(self) -> str:
+        return canonical_bytes(self.to_dict()).decode("utf-8")
+
+    @property
+    def digest(self) -> str:
+        return sha256_bytes(canonical_bytes(self.to_dict()))
+
+    @property
+    def slot(self) -> str:
+        return _benchmark_case_slot(self.cohort_id, self.case_id)
+
+    @classmethod
+    def from_dict(cls, data: object) -> A03BenchmarkCase:
+        value = exact_fields(data, {f.name for f in fields(cls)})
+        value["provenance"] = CreativeJobProvenance.from_dict(value["provenance"])
+        if not isinstance(value["expected_evidence_refs"], list):
+            raise CreativeValidationError("expected expected_evidence_refs array")
+        return cls(**value)
+
+    @classmethod
+    def from_json(cls, text: str) -> A03BenchmarkCase:
+        return cls.from_dict(read_json(text))
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkRoleTrace:
+    """One actually observed workflow role step or verified external research input."""
+
+    role: Literal["RESEARCH", "GENERATOR", "CRITIC", "SELECTOR", "DEVELOPER", "PACKAGE_PRODUCER"]
+    step_name: str
+    operation: Literal["RESEARCH", "EXPLORE", "CRITIQUE", "SELECT", "DEVELOP", "PRODUCE_PACKAGE", "REVISE_PACKAGE"]
+    execution_status: Literal["OK", "FAILED", "HOLD", "REFUSED", "UNKNOWN", "VERIFIED_SOURCE_BYTES"]
+    job_slot: str | None = None
+    job_digest: str | None = None
+    stage_digest: str | None = None
+    request_digest: str | None = None
+    receipt_digest: str | None = None
+    provider_request_id: str | None = None
+    requested: ModelConfiguration | None = None
+    observed: ProviderObservation = ProviderObservation()
+    observed_effort: str = "UNKNOWN"
+    usage: UsageObservation = UsageObservation()
+    wall_time_ms: int | None = None
+    retry_count: int | None = None
+    is_retry: bool = False
+    evidence_refs: tuple[str, ...] = ()
+    evidence_digests: tuple[str, ...] = ()
+    started_at: str | None = None
+    completed_at: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.role not in BENCHMARK_ROLES:
+            raise CreativeValidationError("invalid benchmark role")
+        require_text(self.step_name, "step_name")
+        if self.operation not in _ROLE_TO_OPS[self.role]:
+            raise CreativeValidationError("benchmark role disagrees with operation")
+        if self.execution_status not in ("OK", "FAILED", "HOLD", "REFUSED", "UNKNOWN", "VERIFIED_SOURCE_BYTES"):
+            raise CreativeValidationError("invalid benchmark role execution_status")
+        _require_bool(self.is_retry, "is_retry")
+        if not isinstance(self.observed, ProviderObservation) or not isinstance(self.usage, UsageObservation):
+            raise CreativeValidationError("expected typed observed provider and usage")
+        ProviderObservation.from_dict(self.observed.to_dict())
+        UsageObservation.from_dict(self.usage.to_dict())
+        if self.requested is not None:
+            if not isinstance(self.requested, ModelConfiguration):
+                raise CreativeValidationError("expected typed requested ModelConfiguration")
+            ModelConfiguration.from_dict(self.requested.to_dict())
+        require_text(self.observed_effort, "observed_effort")
+        if self.observed.mode == "TEST_ONLY_MOCK" and self.observed.model != "UNKNOWN":
+            raise CreativeValidationError("TEST_ONLY_MOCK trace cannot claim a named model")
+        _nonneg_int_or_none(self.wall_time_ms, "wall_time_ms")
+        _nonneg_int_or_none(self.retry_count, "retry_count")
+        if self.provider_request_id is not None:
+            require_text(self.provider_request_id, "provider_request_id")
+        object.__setattr__(self, "evidence_refs", _distinct_texts(self.evidence_refs, "evidence_refs"))
+        object.__setattr__(self, "evidence_digests", _distinct_digests(self.evidence_digests, "evidence_digests"))
+        if self.started_at is not None and self.completed_at is not None:
+            if _require_iso_timestamp(self.completed_at, "completed_at") < _require_iso_timestamp(self.started_at, "started_at"):
+                raise CreativeValidationError("role trace completed_at precedes started_at")
+        elif self.started_at is not None:
+            _require_iso_timestamp(self.started_at, "started_at")
+        elif self.completed_at is not None:
+            _require_iso_timestamp(self.completed_at, "completed_at")
+        for name in ("job_slot", "job_digest", "stage_digest", "request_digest", "receipt_digest"):
+            val = getattr(self, name)
+            if val is not None:
+                require_digest(val)
+        if self.role == "RESEARCH":
+            if self.execution_status != "VERIFIED_SOURCE_BYTES":
+                raise CreativeValidationError("RESEARCH trace requires VERIFIED_SOURCE_BYTES")
+            if not self.evidence_refs or len(self.evidence_refs) != len(self.evidence_digests):
+                raise CreativeValidationError("RESEARCH trace requires matched verified evidence refs and digests")
+            if self.is_retry:
+                raise CreativeValidationError("caller-supplied RESEARCH evidence cannot be marked as a retry")
+        else:
+            if self.execution_status == "VERIFIED_SOURCE_BYTES":
+                raise CreativeValidationError("only RESEARCH trace may use VERIFIED_SOURCE_BYTES")
+            for name in ("job_slot", "job_digest", "stage_digest", "request_digest", "receipt_digest"):
+                if getattr(self, name) is None:
+                    raise CreativeValidationError(f"model role trace requires exact {name}")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "role": self.role,
+            "step_name": self.step_name,
+            "operation": self.operation,
+            "execution_status": self.execution_status,
+            "job_slot": self.job_slot,
+            "job_digest": self.job_digest,
+            "stage_digest": self.stage_digest,
+            "request_digest": self.request_digest,
+            "receipt_digest": self.receipt_digest,
+            "provider_request_id": self.provider_request_id,
+            "requested": self.requested.to_dict() if self.requested else None,
+            "observed": self.observed.to_dict(),
+            "observed_effort": self.observed_effort,
+            "usage": self.usage.to_dict(),
+            "wall_time_ms": self.wall_time_ms,
+            "retry_count": self.retry_count,
+            "is_retry": self.is_retry,
+            "evidence_refs": list(self.evidence_refs),
+            "evidence_digests": list(self.evidence_digests),
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: object) -> BenchmarkRoleTrace:
+        value = exact_fields(data, {f.name for f in fields(cls)})
+        if value["requested"] is not None:
+            value["requested"] = ModelConfiguration.from_dict(value["requested"])
+        value["observed"] = ProviderObservation.from_dict(value["observed"])
+        value["usage"] = UsageObservation.from_dict(value["usage"])
+        for name in ("evidence_refs", "evidence_digests"):
+            if not isinstance(value[name], list):
+                raise CreativeValidationError(f"expected {name} array")
+        return cls(**value)
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkRoleTokenSummary:
+    """Observed per-role token and retry accounting; UNKNOWN never becomes 0."""
+
+    role: Literal["RESEARCH", "GENERATOR", "CRITIC", "SELECTOR", "DEVELOPER", "PACKAGE_PRODUCER"]
+    invocation_count: int
+    input_tokens_status: Literal["OBSERVED", "UNKNOWN"]
+    input_tokens: int | None
+    output_tokens_status: Literal["OBSERVED", "UNKNOWN"]
+    output_tokens: int | None
+    retries_status: Literal["OBSERVED", "UNKNOWN"]
+    retries_observed: int | None
+
+    def __post_init__(self) -> None:
+        if self.role not in BENCHMARK_ROLES:
+            raise CreativeValidationError("invalid role token summary role")
+        positive_int(self.invocation_count, "invocation_count")
+        for status_name, val_name in (
+            ("input_tokens_status", "input_tokens"),
+            ("output_tokens_status", "output_tokens"),
+            ("retries_status", "retries_observed"),
+        ):
+            status = getattr(self, status_name)
+            val = getattr(self, val_name)
+            if status not in ("OBSERVED", "UNKNOWN"):
+                raise CreativeValidationError(f"invalid {status_name}")
+            _nonneg_int_or_none(val, val_name)
+            if (status == "UNKNOWN") != (val is None):
+                raise CreativeValidationError(f"{status_name} disagrees with {val_name}")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {f.name: getattr(self, f.name) for f in fields(self)}
+
+    @classmethod
+    def from_dict(cls, data: object) -> BenchmarkRoleTokenSummary:
+        return cls(**exact_fields(data, {f.name for f in fields(cls)}))
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkTelemetry:
+    """Cumulative observed telemetry across linked invocations; UNKNOWN stays UNKNOWN."""
+
+    input_tokens_status: Literal["OBSERVED", "UNKNOWN"] = "UNKNOWN"
+    total_input_tokens: int | None = None
+    output_tokens_status: Literal["OBSERVED", "UNKNOWN"] = "UNKNOWN"
+    total_output_tokens: int | None = None
+    cost_status: Literal["OBSERVED", "UNKNOWN"] = "UNKNOWN"
+    total_cost_amount: float | None = None
+    currency: str | None = None
+    invocation_wall_time_ms: int | None = None
+    queue_wait_ms: int | None = None
+    retry_wall_time_ms: int | None = None
+    wall_time_status: Literal["OBSERVED", "UNKNOWN"] = "UNKNOWN"
+    total_wall_time_ms: int | None = None
+    human_active_time_status: Literal["OBSERVED", "UNKNOWN"] = "UNKNOWN"
+    human_active_time_ms: int | None = None
+    retries_status: Literal["OBSERVED", "UNKNOWN"] = "UNKNOWN"
+    total_retries: int | None = None
+    role_breakdown: tuple[BenchmarkRoleTokenSummary, ...] = ()
+
+    def __post_init__(self) -> None:
+        for status_name, val_name in (
+            ("input_tokens_status", "total_input_tokens"),
+            ("output_tokens_status", "total_output_tokens"),
+            ("wall_time_status", "total_wall_time_ms"),
+            ("human_active_time_status", "human_active_time_ms"),
+            ("retries_status", "total_retries"),
+        ):
+            status = getattr(self, status_name)
+            val = getattr(self, val_name)
+            if status not in ("OBSERVED", "UNKNOWN"):
+                raise CreativeValidationError(f"invalid {status_name}")
+            _nonneg_int_or_none(val, val_name)
+            if (status == "UNKNOWN") != (val is None):
+                raise CreativeValidationError(f"{status_name} disagrees with {val_name}")
+        for name in ("invocation_wall_time_ms", "queue_wait_ms", "retry_wall_time_ms"):
+            _nonneg_int_or_none(getattr(self, name), name)
+        if self.wall_time_status == "OBSERVED":
+            if (self.invocation_wall_time_ms is None or self.queue_wait_ms is None
+                    or self.retry_wall_time_ms is None):
+                raise CreativeValidationError("OBSERVED total_wall_time_ms requires observed invocation/queue/retry times")
+            if self.total_wall_time_ms != self.invocation_wall_time_ms + self.queue_wait_ms + self.retry_wall_time_ms:
+                raise CreativeValidationError("total_wall_time_ms disagrees with invocation + queue + retry times")
+        if self.cost_status not in ("OBSERVED", "UNKNOWN"):
+            raise CreativeValidationError("invalid cost_status")
+        if self.cost_status == "UNKNOWN":
+            if self.total_cost_amount is not None or self.currency is not None:
+                raise CreativeValidationError("UNKNOWN cost cannot carry amount or currency")
+        else:
+            if (type(self.total_cost_amount) not in (int, float)
+                    or not math.isfinite(self.total_cost_amount) or self.total_cost_amount < 0):
+                raise CreativeValidationError("invalid total_cost_amount")
+            object.__setattr__(self, "total_cost_amount", float(self.total_cost_amount))
+            require_text(self.currency, "currency")
+        if not isinstance(self.role_breakdown, (tuple, list)) or any(
+            not isinstance(item, BenchmarkRoleTokenSummary) for item in self.role_breakdown
+        ):
+            raise CreativeValidationError("expected typed role_breakdown")
+        items = tuple(BenchmarkRoleTokenSummary.from_dict(item.to_dict()) for item in self.role_breakdown)
+        if len({item.role for item in items}) != len(items):
+            raise CreativeValidationError("duplicate role in role_breakdown")
+        object.__setattr__(self, "role_breakdown", items)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **{f.name: getattr(self, f.name) for f in fields(self)},
+            "role_breakdown": [item.to_dict() for item in self.role_breakdown],
+        }
+
+    @classmethod
+    def from_dict(cls, data: object) -> BenchmarkTelemetry:
+        value = exact_fields(data, {f.name for f in fields(cls)})
+        if not isinstance(value["role_breakdown"], list):
+            raise CreativeValidationError("expected role_breakdown array")
+        value["role_breakdown"] = tuple(BenchmarkRoleTokenSummary.from_dict(item) for item in value["role_breakdown"])
+        return cls(**value)
+
+
+def aggregate_benchmark_telemetry(
+    role_traces: tuple[BenchmarkRoleTrace, ...],
+    *,
+    queue_wait_ms: int | None = None,
+    retry_wall_time_ms: int | None = None,
+    human_active_time_ms: int | None = None,
+) -> BenchmarkTelemetry:
+    """Compute exact cumulative telemetry from linked traces; UNKNOWN never becomes 0."""
+    _nonneg_int_or_none(queue_wait_ms, "queue_wait_ms")
+    _nonneg_int_or_none(retry_wall_time_ms, "retry_wall_time_ms")
+    _nonneg_int_or_none(human_active_time_ms, "human_active_time_ms")
+
+    model_traces = tuple(t for t in role_traces if t.role != "RESEARCH" or t.receipt_digest is not None)
+    by_role: dict[str, list[BenchmarkRoleTrace]] = {}
+    for trace in role_traces:
+        by_role.setdefault(trace.role, []).append(trace)
+
+    breakdown: list[BenchmarkRoleTokenSummary] = []
+    for role in BENCHMARK_ROLES:
+        traces = by_role.get(role)
+        if not traces:
+            continue
+        inv_traces = [t for t in traces if t.role != "RESEARCH" or t.receipt_digest is not None]
+        if inv_traces and all(t.usage.status == "OBSERVED" and t.usage.input_tokens is not None for t in inv_traces):
+            in_status, in_total = "OBSERVED", sum(t.usage.input_tokens for t in inv_traces)
+        else:
+            in_status, in_total = "UNKNOWN", None
+        if inv_traces and all(t.usage.status == "OBSERVED" and t.usage.output_tokens is not None for t in inv_traces):
+            out_status, out_total = "OBSERVED", sum(t.usage.output_tokens for t in inv_traces)
+        else:
+            out_status, out_total = "UNKNOWN", None
+        explicit_retries = [t for t in traces if t.is_retry]
+        if all(t.retry_count is not None for t in traces):
+            r_status = "OBSERVED"
+            r_total = sum(t.retry_count for t in traces) + len(explicit_retries)
+        elif explicit_retries:
+            r_status, r_total = "OBSERVED", len(explicit_retries)
+        else:
+            r_status, r_total = "UNKNOWN", None
+        breakdown.append(BenchmarkRoleTokenSummary(
+            role=role,
+            invocation_count=len(traces),
+            input_tokens_status=in_status,
+            input_tokens=in_total,
+            output_tokens_status=out_status,
+            output_tokens=out_total,
+            retries_status=r_status,
+            retries_observed=r_total,
+        ))
+
+    if model_traces and all(t.usage.status == "OBSERVED" and t.usage.input_tokens is not None for t in model_traces):
+        total_in_status, total_in = "OBSERVED", sum(t.usage.input_tokens for t in model_traces)
+    else:
+        total_in_status, total_in = "UNKNOWN", None
+
+    if model_traces and all(t.usage.status == "OBSERVED" and t.usage.output_tokens is not None for t in model_traces):
+        total_out_status, total_out = "OBSERVED", sum(t.usage.output_tokens for t in model_traces)
+    else:
+        total_out_status, total_out = "UNKNOWN", None
+
+    if (model_traces
+            and all(t.usage.status == "OBSERVED" and t.usage.cost_amount is not None for t in model_traces)
+            and len({t.usage.currency for t in model_traces}) == 1):
+        cost_status = "OBSERVED"
+        total_cost = round(sum(float(t.usage.cost_amount) for t in model_traces), 8)
+        currency = model_traces[0].usage.currency
+    else:
+        cost_status, total_cost, currency = "UNKNOWN", None, None
+
+    if role_traces and all(t.wall_time_ms is not None for t in role_traces):
+        inv_wall = sum(t.wall_time_ms for t in role_traces)
+    else:
+        inv_wall = None
+
+    if inv_wall is not None and queue_wait_ms is not None and retry_wall_time_ms is not None:
+        wall_status, total_wall = "OBSERVED", inv_wall + queue_wait_ms + retry_wall_time_ms
+    else:
+        wall_status, total_wall = "UNKNOWN", None
+
+    if human_active_time_ms is not None:
+        human_status = "OBSERVED"
+    else:
+        human_status = "UNKNOWN"
+
+    if role_traces and all(item.retries_status == "OBSERVED" for item in breakdown):
+        retries_status = "OBSERVED"
+        total_retries = sum(item.retries_observed for item in breakdown)
+    else:
+        retries_status, total_retries = "UNKNOWN", None
+
+    return BenchmarkTelemetry(
+        input_tokens_status=total_in_status,
+        total_input_tokens=total_in,
+        output_tokens_status=total_out_status,
+        total_output_tokens=total_out,
+        cost_status=cost_status,
+        total_cost_amount=total_cost,
+        currency=currency,
+        invocation_wall_time_ms=inv_wall,
+        queue_wait_ms=queue_wait_ms,
+        retry_wall_time_ms=retry_wall_time_ms,
+        wall_time_status=wall_status,
+        total_wall_time_ms=total_wall,
+        human_active_time_status=human_status,
+        human_active_time_ms=human_active_time_ms,
+        retries_status=retries_status,
+        total_retries=total_retries,
+        role_breakdown=tuple(breakdown),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkStructuralCheck:
+    """Deterministic schema/contract check only; NEVER asserts semantic PASS."""
+
+    status: Literal["STRUCTURAL_VALID", "STRUCTURAL_INVALID"]
+    brief_binding_valid: bool
+    non_duplication_valid: bool
+    evidence_citation_valid: bool
+    scene_s0_action_s1_valid: bool | None = None
+    continuity_camera_audio_silence_valid: bool | None = None
+    rights_qa_handoff_valid: bool | None = None
+    notes: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.status not in ("STRUCTURAL_VALID", "STRUCTURAL_INVALID"):
+            raise CreativeValidationError("structural check status must be STRUCTURAL_VALID or STRUCTURAL_INVALID")
+        for name in ("brief_binding_valid", "non_duplication_valid", "evidence_citation_valid"):
+            _require_bool(getattr(self, name), name)
+        for name in ("scene_s0_action_s1_valid", "continuity_camera_audio_silence_valid", "rights_qa_handoff_valid"):
+            val = getattr(self, name)
+            if val is not None:
+                _require_bool(val, name)
+        object.__setattr__(self, "notes", text_tuple(self.notes, "notes"))
+        checks = [
+            self.brief_binding_valid,
+            self.non_duplication_valid,
+            self.evidence_citation_valid,
+        ]
+        for opt in (self.scene_s0_action_s1_valid, self.continuity_camera_audio_silence_valid,
+                    self.rights_qa_handoff_valid):
+            if opt is not None:
+                checks.append(opt)
+        expected = "STRUCTURAL_VALID" if all(checks) else "STRUCTURAL_INVALID"
+        if self.status != expected:
+            raise CreativeValidationError("structural check status disagrees with deterministic check flags")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**{f.name: getattr(self, f.name) for f in fields(self)}, "notes": list(self.notes)}
+
+    @classmethod
+    def from_dict(cls, data: object) -> BenchmarkStructuralCheck:
+        value = exact_fields(data, {f.name for f in fields(cls)})
+        if not isinstance(value["notes"], list):
+            raise CreativeValidationError("expected structural check notes array")
+        return cls(**value)
+
+
+def evaluate_benchmark_structure(
+    case: A03BenchmarkCase,
+    brief: Mapping[str, Any],
+    *,
+    stages: tuple[A03CreativeStageResult, ...] = (),
+    package: A03CreativeProductionPackage | None = None,
+) -> BenchmarkStructuralCheck:
+    """Run deterministic contract checks; reports STRUCTURAL_VALID or STRUCTURAL_INVALID only."""
+    notes: list[str] = []
+    valid_brief = intake_brief(brief)
+    b_digest = brief_digest(valid_brief)
+    brief_ok = (valid_brief["brief_id"] == case.brief_id and b_digest == case.source_brief_digest)
+    for st in stages:
+        if brief_digest(st.job.request.brief) != b_digest or st.job.brief_id != case.brief_id:
+            brief_ok = False
+            notes.append("stage brief mismatch")
+    if package is not None and (package.brief_id != case.brief_id or package.source_brief_digest != b_digest):
+        brief_ok = False
+        notes.append("package brief mismatch")
+
+    non_dup_ok = True
+    for st in stages:
+        if st.reasoning.state == "OK" and st.reasoning.request.operation == "EXPLORE":
+            drafts = st.reasoning.drafts
+            if len(drafts) > 1:
+                families = {unicodedata.normalize("NFKC", d.family).strip().casefold() for d in drafts}
+                mechanisms = {
+                    (unicodedata.normalize("NFKC", d.premise).strip().casefold(),
+                     unicodedata.normalize("NFKC", d.visual_direction).strip().casefold())
+                    for d in drafts
+                }
+                if len(families) != len(drafts) or len(mechanisms) != len(drafts):
+                    non_dup_ok = False
+                    notes.append("duplicate draft family or mechanism")
+
+    evidence_ok = True
+    brief_refs = set(valid_brief.get("source_refs", []))
+    for st in stages:
+        supplied_refs = set(brief_refs)
+        if st.job.request.cycle is not None:
+            supplied_refs = {e.source_ref for e in st.job.request.cycle.evidence}
+        elif st.job.request.production is not None:
+            supplied_refs = {e.source_ref for e in st.job.request.production.evidence}
+        if not set(st.reasoning.evidence_refs) <= supplied_refs:
+            evidence_ok = False
+            notes.append("unverified stage evidence_refs")
+        for draft in st.reasoning.drafts:
+            if not set(draft.source_refs) <= supplied_refs:
+                evidence_ok = False
+                notes.append("unverified draft source_refs")
+
+    scene_ok: bool | None = None
+    continuity_ok: bool | None = None
+    rights_qa_ok: bool | None = None
+    if package is not None:
+        spec = package.spec
+        scene_ok = bool(spec.scenes) and all(
+            unicodedata.normalize("NFKC", s.state_s0).strip().casefold()
+            != unicodedata.normalize("NFKC", s.state_s1).strip().casefold()
+            for s in spec.scenes
+        )
+        silence_ok = True
+        if case.brief_class == "SILENT_NO_CTA":
+            if spec.audio.mode != "SILENCE" or any(s.speech_mode != "SILENCE" for s in spec.scenes):
+                silence_ok = False
+                notes.append("SILENT_NO_CTA package must preserve SILENCE audio/speech mode")
+        continuity_ok = silence_ok and bool(spec.media_targets) and bool(spec.script)
+        rights_qa_ok = (
+            package.factual_status == "UNVERIFIED"
+            and package.rights_status in ("UNKNOWN", "EVIDENCE_BOUND")
+            and all(t.generation_status == "NOT_GENERATED" for t in spec.media_targets)
+            and all(q.verification_status == "UNVERIFIED" for q in spec.qa_expectations)
+        )
+        if not rights_qa_ok:
+            notes.append("package handoff readiness failed rights/QA/media boundary check")
+
+    all_ok = all(x for x in (brief_ok, non_dup_ok, evidence_ok, scene_ok, continuity_ok, rights_qa_ok) if x is not None)
+    return BenchmarkStructuralCheck(
+        status="STRUCTURAL_VALID" if all_ok else "STRUCTURAL_INVALID",
+        brief_binding_valid=brief_ok,
+        non_duplication_valid=non_dup_ok,
+        evidence_citation_valid=evidence_ok,
+        scene_s0_action_s1_valid=scene_ok,
+        continuity_camera_audio_silence_valid=continuity_ok,
+        rights_qa_handoff_valid=rights_qa_ok,
+        notes=tuple(notes),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkRubricScores:
+    """Comparable semantic rubric scores in [0.0, 1.0]."""
+
+    brief_adherence: float
+    originality_non_duplication: float
+    factual_evidence_accuracy: float | None
+    script_scene_s0_action_s1_consistency: float
+    continuity_camera_audio_silence_rights_qa_readiness: float
+    rubric_version: str = BENCHMARK_RUBRIC_VERSION
+
+    def __post_init__(self) -> None:
+        if self.rubric_version != BENCHMARK_RUBRIC_VERSION:
+            raise CreativeValidationError("unsupported benchmark rubric version")
+        for name in (
+            "brief_adherence",
+            "originality_non_duplication",
+            "script_scene_s0_action_s1_consistency",
+            "continuity_camera_audio_silence_rights_qa_readiness",
+        ):
+            object.__setattr__(self, name, _unit_score(getattr(self, name), name))
+        if self.factual_evidence_accuracy is not None:
+            object.__setattr__(
+                self, "factual_evidence_accuracy",
+                _unit_score(self.factual_evidence_accuracy, "factual_evidence_accuracy"),
+            )
+
+    def weighted_quality(self) -> float:
+        total_weight = 0.0
+        weighted_sum = 0.0
+        for dim, weight in NSM_V1_RUBRIC_WEIGHTS.items():
+            val = getattr(self, dim)
+            if val is not None:
+                weighted_sum += val * weight
+                total_weight += weight
+        return weighted_sum / total_weight
+
+    def to_dict(self) -> dict[str, Any]:
+        return {f.name: getattr(self, f.name) for f in fields(self)}
+
+    @classmethod
+    def from_dict(cls, data: object) -> BenchmarkRubricScores:
+        return cls(**exact_fields(data, {f.name for f in fields(cls)}))
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkJudgeReceipt:
+    """Independently observed semantic judge receipt; self-reported quality is rejected."""
+
+    judge_receipt_id: str
+    judge_kind: Literal["HUMAN_REVIEWER", "INDEPENDENT_MODEL_JUDGE", "TEST_ONLY_MOCK"]
+    judge_actor_ref: str
+    case_digest: str
+    source_brief_digest: str
+    evaluated_artifact_digest: str
+    scores: BenchmarkRubricScores
+    verdict: Literal["PASS", "FAIL", "HOLD"]
+    rationale: str
+    provenance: CreativeJobProvenance
+    observed_at: str
+    evidence_refs: tuple[str, ...] = ()
+    judge_provider: ProviderObservation | None = None
+    judge_execution_ref: str | None = None
+    rubric_version: str = BENCHMARK_RUBRIC_VERSION
+    schema_version: str = "A03BenchmarkJudgeReceipt.v1"
+
+    def __post_init__(self) -> None:
+        if self.schema_version != "A03BenchmarkJudgeReceipt.v1":
+            raise CreativeValidationError("unsupported benchmark judge receipt schema")
+        if self.rubric_version != BENCHMARK_RUBRIC_VERSION:
+            raise CreativeValidationError("unsupported benchmark judge rubric version")
+        for name in ("judge_receipt_id", "judge_actor_ref", "rationale"):
+            require_text(getattr(self, name), name)
+        if self.judge_actor_ref.strip().casefold().startswith("self"):
+            raise CreativeValidationError("self-reported model quality is forbidden as judge evidence")
+        if self.judge_kind not in ("HUMAN_REVIEWER", "INDEPENDENT_MODEL_JUDGE", "TEST_ONLY_MOCK"):
+            raise CreativeValidationError("invalid judge_kind")
+        if self.verdict not in ("PASS", "FAIL", "HOLD"):
+            raise CreativeValidationError("invalid judge verdict")
+        for name in ("case_digest", "source_brief_digest", "evaluated_artifact_digest"):
+            require_digest(getattr(self, name))
+        if not isinstance(self.scores, BenchmarkRubricScores):
+            raise CreativeValidationError("expected typed BenchmarkRubricScores")
+        BenchmarkRubricScores.from_dict(self.scores.to_dict())
+        if self.scores.rubric_version != self.rubric_version:
+            raise CreativeValidationError("judge scores rubric_version mismatch")
+        if not isinstance(self.provenance, CreativeJobProvenance):
+            raise CreativeValidationError("expected typed judge provenance")
+        CreativeJobProvenance.from_dict(self.provenance.to_dict())
+        _require_iso_timestamp(self.observed_at, "observed_at")
+        object.__setattr__(self, "evidence_refs", _distinct_texts(self.evidence_refs, "evidence_refs"))
+        if self.judge_provider is not None:
+            if not isinstance(self.judge_provider, ProviderObservation):
+                raise CreativeValidationError("expected typed judge_provider")
+            ProviderObservation.from_dict(self.judge_provider.to_dict())
+        if self.judge_execution_ref is not None:
+            require_text(self.judge_execution_ref, "judge_execution_ref")
+        if self.judge_kind == "INDEPENDENT_MODEL_JUDGE":
+            if (self.judge_provider is None or self.judge_provider.mode != "MODEL"
+                    or self.judge_provider.provider == "UNKNOWN" or self.judge_provider.model == "UNKNOWN"
+                    or self.judge_execution_ref is None):
+                raise CreativeValidationError("INDEPENDENT_MODEL_JUDGE requires verified MODEL provider and execution_ref")
+            if self.provenance.evidence_type == "SYNTHETIC_FIXTURE":
+                raise CreativeValidationError("synthetic fixture cannot masquerade as INDEPENDENT_MODEL_JUDGE")
+        elif self.judge_kind == "HUMAN_REVIEWER":
+            if self.provenance.evidence_type == "SYNTHETIC_FIXTURE":
+                raise CreativeValidationError("synthetic fixture cannot masquerade as HUMAN_REVIEWER")
+        elif self.judge_kind == "TEST_ONLY_MOCK":
+            if self.judge_provider is not None and (
+                self.judge_provider.mode != "TEST_ONLY_MOCK" or self.judge_provider.model != "UNKNOWN"
+            ):
+                raise CreativeValidationError("TEST_ONLY_MOCK judge cannot claim MODEL provider")
+
+    @property
+    def digest(self) -> str:
+        return sha256_bytes(canonical_bytes(self.to_dict()))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "judge_receipt_id": self.judge_receipt_id,
+            "judge_kind": self.judge_kind,
+            "judge_actor_ref": self.judge_actor_ref,
+            "case_digest": self.case_digest,
+            "source_brief_digest": self.source_brief_digest,
+            "evaluated_artifact_digest": self.evaluated_artifact_digest,
+            "rubric_version": self.rubric_version,
+            "scores": self.scores.to_dict(),
+            "verdict": self.verdict,
+            "rationale": self.rationale,
+            "evidence_refs": list(self.evidence_refs),
+            "judge_provider": self.judge_provider.to_dict() if self.judge_provider else None,
+            "judge_execution_ref": self.judge_execution_ref,
+            "provenance": self.provenance.to_dict(),
+            "observed_at": self.observed_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: object) -> BenchmarkJudgeReceipt:
+        value = exact_fields(data, {f.name for f in fields(cls)})
+        value["scores"] = BenchmarkRubricScores.from_dict(value["scores"])
+        value["provenance"] = CreativeJobProvenance.from_dict(value["provenance"])
+        if value["judge_provider"] is not None:
+            value["judge_provider"] = ProviderObservation.from_dict(value["judge_provider"])
+        if not isinstance(value["evidence_refs"], list):
+            raise CreativeValidationError("expected judge evidence_refs array")
+        return cls(**value)
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkConsumerEvidence:
+    """Separates A04 source-handoff acceptance from media quality and commercial utility."""
+
+    source_handoff_status: Literal["NOT_AVAILABLE", "SOURCE_HANDOFF_VERIFIED"] = "NOT_AVAILABLE"
+    a04_receipt: Any | None = None
+    a04_receipt_digest: str | None = None
+    a04_receipt_ref: str | None = None
+    media_quality_status: Literal["NOT_ATTEMPTED", "UNMEASURED", "OBSERVED_PASS", "OBSERVED_FAIL"] = "NOT_ATTEMPTED"
+    media_quality_ref: str | None = None
+    commercial_utility_status: Literal[
+        "NOT_ATTEMPTED", "UNMEASURED", "OBSERVED_USEFUL", "OBSERVED_NOT_USEFUL"
+    ] = "NOT_ATTEMPTED"
+    commercial_utility_ref: str | None = None
+
+    def __post_init__(self) -> None:
+        from ai_commerce.media.generation import A04CreativeHandoffReceipt
+
+        if self.source_handoff_status not in ("NOT_AVAILABLE", "SOURCE_HANDOFF_VERIFIED"):
+            raise CreativeValidationError("invalid source_handoff_status")
+        if self.media_quality_status not in ("NOT_ATTEMPTED", "UNMEASURED", "OBSERVED_PASS", "OBSERVED_FAIL"):
+            raise CreativeValidationError("invalid media_quality_status")
+        if self.commercial_utility_status not in (
+            "NOT_ATTEMPTED", "UNMEASURED", "OBSERVED_USEFUL", "OBSERVED_NOT_USEFUL"
+        ):
+            raise CreativeValidationError("invalid commercial_utility_status")
+        if self.source_handoff_status == "SOURCE_HANDOFF_VERIFIED":
+            if not isinstance(self.a04_receipt, A04CreativeHandoffReceipt):
+                raise CreativeValidationError("SOURCE_HANDOFF_VERIFIED requires typed A04CreativeHandoffReceipt")
+            try:
+                checked = A04CreativeHandoffReceipt.from_dict(self.a04_receipt.to_dict())
+            except ValueError as exc:
+                raise CreativeValidationError("forged or invalid A04CreativeHandoffReceipt") from exc
+            require_digest(self.a04_receipt_digest)
+            if self.a04_receipt_digest != checked.digest:
+                raise CreativeValidationError("a04_receipt_digest disagrees with A04CreativeHandoffReceipt")
+            if self.a04_receipt_ref is not None:
+                require_text(self.a04_receipt_ref, "a04_receipt_ref")
+        else:
+            if (self.a04_receipt is not None or self.a04_receipt_digest is not None
+                    or self.a04_receipt_ref is not None):
+                raise CreativeValidationError("NOT_AVAILABLE handoff cannot carry A04 receipt fields")
+        handoff_ids = set()
+        if self.a04_receipt is not None:
+            handoff_ids.update({self.a04_receipt.receipt_id, self.a04_receipt.digest})
+        if self.media_quality_status in ("OBSERVED_PASS", "OBSERVED_FAIL"):
+            ref = require_text(self.media_quality_ref, "media_quality_ref")
+            if ref in handoff_ids:
+                raise CreativeValidationError("source-handoff acceptance cannot be reused as media quality evidence")
+        elif self.media_quality_ref is not None:
+            raise CreativeValidationError("unobserved media quality cannot carry media_quality_ref")
+        if self.commercial_utility_status in ("OBSERVED_USEFUL", "OBSERVED_NOT_USEFUL"):
+            ref = require_text(self.commercial_utility_ref, "commercial_utility_ref")
+            if ref in handoff_ids:
+                raise CreativeValidationError("source-handoff acceptance cannot be reused as commercial utility evidence")
+        elif self.commercial_utility_ref is not None:
+            raise CreativeValidationError("unobserved commercial utility cannot carry commercial_utility_ref")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source_handoff_status": self.source_handoff_status,
+            "a04_receipt": self.a04_receipt.to_dict() if self.a04_receipt is not None else None,
+            "a04_receipt_digest": self.a04_receipt_digest,
+            "a04_receipt_ref": self.a04_receipt_ref,
+            "media_quality_status": self.media_quality_status,
+            "media_quality_ref": self.media_quality_ref,
+            "commercial_utility_status": self.commercial_utility_status,
+            "commercial_utility_ref": self.commercial_utility_ref,
+        }
+
+    @classmethod
+    def from_dict(cls, data: object) -> BenchmarkConsumerEvidence:
+        from ai_commerce.media.generation import A04CreativeHandoffReceipt
+
+        value = exact_fields(data, {f.name for f in fields(cls)})
+        if value["a04_receipt"] is not None:
+            try:
+                value["a04_receipt"] = A04CreativeHandoffReceipt.from_dict(value["a04_receipt"])
+            except ValueError as exc:
+                raise CreativeValidationError("forged or invalid A04CreativeHandoffReceipt") from exc
+        return cls(**value)
+
+
+def calculate_nsm_v1_score(
+    scores: BenchmarkRubricScores,
+    *,
+    total_tokens: int,
+    wall_time_ms: int,
+    human_active_time_ms: int,
+) -> dict[str, Any]:
+    """Pure, deterministic, versioned NSM_v1 normalization and weighted score formula."""
+    if not isinstance(scores, BenchmarkRubricScores):
+        raise CreativeValidationError("expected BenchmarkRubricScores")
+    scores = BenchmarkRubricScores.from_dict(scores.to_dict())
+    _nonneg_int(total_tokens, "total_tokens")
+    _nonneg_int(wall_time_ms, "wall_time_ms")
+    _nonneg_int(human_active_time_ms, "human_active_time_ms")
+    q = round(scores.weighted_quality(), 6)
+    t = round(1.0 / (1.0 + (total_tokens / NSM_V1_REFERENCES["total_tokens"])), 6)
+    w = round(1.0 / (1.0 + (wall_time_ms / NSM_V1_REFERENCES["wall_time_ms"])), 6)
+    h = round(1.0 / (1.0 + (human_active_time_ms / NSM_V1_REFERENCES["human_active_time_ms"])), 6)
+    total = round(
+        NSM_V1_WEIGHTS["quality"] * q
+        + NSM_V1_WEIGHTS["token_efficiency"] * t
+        + NSM_V1_WEIGHTS["wall_time_efficiency"] * w
+        + NSM_V1_WEIGHTS["human_time_efficiency"] * h,
+        6,
+    )
+    return {
+        "version": NSM_V1_VERSION,
+        "quality_component": q,
+        "token_efficiency_component": t,
+        "wall_time_efficiency_component": w,
+        "human_time_efficiency_component": h,
+        "score": total,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkNSMScore:
+    """NSM_v1 score emitted ONLY with complete trusted data and verified useful consumer outcome."""
+
+    version: str = NSM_V1_VERSION
+    status: Literal["SCORED", "INCOMPLETE", "NOT_REAL_BENCHMARK"] = "INCOMPLETE"
+    score: float | None = None
+    quality_component: float | None = None
+    token_efficiency_component: float | None = None
+    wall_time_efficiency_component: float | None = None
+    human_time_efficiency_component: float | None = None
+    missing_coverage: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.version != NSM_V1_VERSION:
+            raise CreativeValidationError("unsupported NSM version")
+        if self.status not in ("SCORED", "INCOMPLETE", "NOT_REAL_BENCHMARK"):
+            raise CreativeValidationError("invalid NSM status")
+        object.__setattr__(self, "missing_coverage", _distinct_texts(self.missing_coverage, "missing_coverage"))
+        comp_names = (
+            "score",
+            "quality_component",
+            "token_efficiency_component",
+            "wall_time_efficiency_component",
+            "human_time_efficiency_component",
+        )
+        if self.status == "SCORED":
+            if self.missing_coverage:
+                raise CreativeValidationError("SCORED NSM cannot have missing_coverage")
+            for name in comp_names:
+                object.__setattr__(self, name, _unit_score(getattr(self, name), name))
+            expected = round(
+                NSM_V1_WEIGHTS["quality"] * self.quality_component
+                + NSM_V1_WEIGHTS["token_efficiency"] * self.token_efficiency_component
+                + NSM_V1_WEIGHTS["wall_time_efficiency"] * self.wall_time_efficiency_component
+                + NSM_V1_WEIGHTS["human_time_efficiency"] * self.human_time_efficiency_component,
+                6,
+            )
+            if abs(self.score - expected) > 1e-6:
+                raise CreativeValidationError("NSM_v1 score disagrees with versioned weights (possible inflation)")
+        else:
+            if not self.missing_coverage:
+                raise CreativeValidationError("non-SCORED NSM must list missing_coverage")
+            if any(getattr(self, name) is not None for name in comp_names):
+                raise CreativeValidationError("non-SCORED NSM cannot emit numeric scores")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**{f.name: getattr(self, f.name) for f in fields(self)},
+                "missing_coverage": list(self.missing_coverage)}
+
+    @classmethod
+    def from_dict(cls, data: object) -> BenchmarkNSMScore:
+        value = exact_fields(data, {f.name for f in fields(cls)})
+        if not isinstance(value["missing_coverage"], list):
+            raise CreativeValidationError("expected missing_coverage array")
+        return cls(**value)
+
+
+def _derive_semantic_status(
+    *,
+    judge_receipt: BenchmarkJudgeReceipt | None,
+    structural_check: BenchmarkStructuralCheck,
+    execution_mode: str,
+    provenance: CreativeJobProvenance,
+) -> Literal["UNMEASURED", "TEST_ONLY_MOCK", "MEASURED_PASS", "MEASURED_FAIL", "HOLD"]:
+    if judge_receipt is None:
+        return "UNMEASURED"
+    if judge_receipt.judge_kind == "TEST_ONLY_MOCK":
+        return "TEST_ONLY_MOCK"
+    if judge_receipt.verdict == "HOLD":
+        return "HOLD"
+    if judge_receipt.verdict == "FAIL":
+        return "MEASURED_FAIL"
+    # PASS requires non-mock execution, non-synthetic provenance, and STRUCTURAL_VALID.
+    if execution_mode != "MODEL" or provenance.evidence_type != "HUMAN_SUPPLIED":
+        return "TEST_ONLY_MOCK" if execution_mode == "TEST_ONLY_MOCK" else "HOLD"
+    if structural_check.status != "STRUCTURAL_VALID":
+        return "HOLD"
+    return "MEASURED_PASS"
+
+
+def _evaluate_observation_nsm(
+    *,
+    status: str,
+    execution_mode: str,
+    provenance: CreativeJobProvenance,
+    structural_check: BenchmarkStructuralCheck,
+    semantic_status: str,
+    judge_receipt: BenchmarkJudgeReceipt | None,
+    telemetry: BenchmarkTelemetry,
+    consumer_evidence: BenchmarkConsumerEvidence,
+    hold_reasons: tuple[str, ...],
+    errors: tuple[str, ...],
+) -> BenchmarkNSMScore:
+    missing: list[str] = []
+    if status in ("HOLD", "FAILED", "INCOMPLETE") or hold_reasons or errors:
+        missing.append("WORKFLOW_NOT_COMPLETE")
+    if execution_mode != "MODEL" or status != "REAL_MODEL_OBSERVED":
+        missing.append("REAL_MODEL_EXECUTION")
+    if provenance.evidence_type != "HUMAN_SUPPLIED":
+        missing.append("NON_SYNTHETIC_PROVENANCE")
+    if structural_check.status != "STRUCTURAL_VALID":
+        missing.append("STRUCTURAL_VALID")
+    if (judge_receipt is None or judge_receipt.judge_kind == "TEST_ONLY_MOCK"
+            or semantic_status not in ("MEASURED_PASS", "MEASURED_FAIL")):
+        missing.append("INDEPENDENT_NON_MOCK_JUDGE")
+    if telemetry.input_tokens_status != "OBSERVED":
+        missing.append("INPUT_TOKENS")
+    if telemetry.output_tokens_status != "OBSERVED":
+        missing.append("OUTPUT_TOKENS")
+    if telemetry.wall_time_status != "OBSERVED":
+        missing.append("WALL_TIME")
+    if telemetry.human_active_time_status != "OBSERVED":
+        missing.append("HUMAN_ACTIVE_TIME")
+    if consumer_evidence.source_handoff_status != "SOURCE_HANDOFF_VERIFIED":
+        missing.append("A04_SOURCE_HANDOFF")
+    if consumer_evidence.commercial_utility_status != "OBSERVED_USEFUL":
+        missing.append("VERIFIED_USEFUL_CONSUMER_OUTCOME")
+
+    if ("REAL_MODEL_EXECUTION" in missing or "NON_SYNTHETIC_PROVENANCE" in missing
+            or (judge_receipt is not None and judge_receipt.judge_kind == "TEST_ONLY_MOCK")):
+        return BenchmarkNSMScore(
+            version=NSM_V1_VERSION,
+            status="NOT_REAL_BENCHMARK",
+            missing_coverage=tuple(missing),
+        )
+    if missing:
+        return BenchmarkNSMScore(
+            version=NSM_V1_VERSION,
+            status="INCOMPLETE",
+            missing_coverage=tuple(missing),
+        )
+    computed = calculate_nsm_v1_score(
+        judge_receipt.scores,
+        total_tokens=telemetry.total_input_tokens + telemetry.total_output_tokens,
+        wall_time_ms=telemetry.total_wall_time_ms,
+        human_active_time_ms=telemetry.human_active_time_ms,
+    )
+    return BenchmarkNSMScore(
+        version=NSM_V1_VERSION,
+        status="SCORED",
+        score=computed["score"],
+        quality_component=computed["quality_component"],
+        token_efficiency_component=computed["token_efficiency_component"],
+        wall_time_efficiency_component=computed["wall_time_efficiency_component"],
+        human_time_efficiency_component=computed["human_time_efficiency_component"],
+        missing_coverage=(),
+    )
+
+
+def _strategy_hold_reasons(
+    *,
+    strategy: str,
+    role_traces: tuple[BenchmarkRoleTrace, ...],
+    cycle_result_digest: str | None,
+    research_status: str,
+    evidence_refs: tuple[str, ...],
+) -> tuple[str, ...]:
+    reasons: list[str] = []
+    non_retry = tuple(t for t in role_traces if not t.is_retry)
+    roles = {t.role for t in non_retry}
+    ok_roles = {t.role for t in non_retry if t.execution_status in ("OK", "VERIFIED_SOURCE_BYTES")}
+    if "GENERATOR" not in ok_roles:
+        reasons.append("MISSING_GENERATOR")
+    if strategy == "S1":
+        if cycle_result_digest is not None or roles & {"CRITIC", "SELECTOR", "DEVELOPER"}:
+            reasons.append("STRATEGY_WORKFLOW_MISMATCH")
+    elif strategy == "S2":
+        if "CRITIC" not in ok_roles:
+            reasons.append("MISSING_INDEPENDENT_CRITIC")
+        if cycle_result_digest is not None or "DEVELOPER" in roles:
+            reasons.append("STRATEGY_WORKFLOW_MISMATCH")
+    elif strategy == "S3":
+        if research_status != "VERIFIED_SOURCE_BYTES" or not evidence_refs or "RESEARCH" not in ok_roles:
+            reasons.append("MISSING_RESEARCH_FOR_S3")
+        if "CRITIC" not in ok_roles:
+            reasons.append("MISSING_INDEPENDENT_CRITIC")
+        if "DEVELOPER" not in ok_roles:
+            reasons.append("MISSING_BOUNDED_DEVELOPER")
+    return tuple(reasons)
+
+
+@dataclass(frozen=True, slots=True)
+class A03BenchmarkObservation:
+    """Strict, immutable sidecar observation of one actually executed A03 workflow."""
+
+    sample_id: str
+    attempt: int
+    cohort_id: str
+    case_id: str
+    case_digest: str
+    source_sha: str
+    brief_id: str
+    source_brief_digest: str
+    brief_class: Literal["VN_PRODUCT", "VN_NON_PRODUCT_FICTION", "SILENT_NO_CTA"]
+    strategy: Literal["S1", "S2", "S3"]
+    requested_configuration: ModelConfiguration | None
+    observed_provider: ProviderObservation
+    observed_effort: str
+    job_digests: tuple[str, ...]
+    stage_result_digests: tuple[str, ...]
+    consumer_evidence: BenchmarkConsumerEvidence
+    provenance: CreativeJobProvenance
+    research_status: Literal["VERIFIED_SOURCE_BYTES", "UNKNOWN"]
+    role_traces: tuple[BenchmarkRoleTrace, ...]
+    structural_check: BenchmarkStructuralCheck
+    semantic_status: Literal["UNMEASURED", "TEST_ONLY_MOCK", "MEASURED_PASS", "MEASURED_FAIL", "HOLD"]
+    telemetry: BenchmarkTelemetry
+    nsm: BenchmarkNSMScore
+    started_at: str
+    completed_at: str
+    execution_mode: Literal["TEST_ONLY_MOCK", "MODEL", "UNKNOWN"]
+    status: Literal["TEST_ONLY_MOCK", "REAL_MODEL_OBSERVED", "HOLD", "FAILED"]
+    benchmark_validity: Literal["NOT_REAL_BENCHMARK", "ELIGIBLE_REAL_BENCHMARK", "HOLD"]
+    rubric_version: str = BENCHMARK_RUBRIC_VERSION
+    cycle_job_digest: str | None = None
+    cycle_result_digest: str | None = None
+    production_job_digest: str | None = None
+    production_result_digest: str | None = None
+    package_id: str | None = None
+    package_revision: int | None = None
+    package_digest: str | None = None
+    explore_receipt_digest: str | None = None
+    critic_receipt_digests: tuple[str, ...] = ()
+    selector_receipt_digest: str | None = None
+    develop_receipt_digest: str | None = None
+    package_receipt_digest: str | None = None
+    judge_receipt: BenchmarkJudgeReceipt | None = None
+    evidence_refs: tuple[str, ...] = ()
+    evidence_digests: tuple[str, ...] = ()
+    hold_reasons: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+    side_effects: Literal["NONE"] = "NONE"
+    schema_version: str = "A03BenchmarkObservation.v1"
+
+    def __post_init__(self) -> None:
+        if self.schema_version != "A03BenchmarkObservation.v1":
+            raise CreativeValidationError("unsupported benchmark observation schema")
+        if self.rubric_version != BENCHMARK_RUBRIC_VERSION:
+            raise CreativeValidationError("unsupported benchmark rubric version")
+        if self.side_effects != "NONE":
+            raise CreativeValidationError("R5a benchmark observation forbids external/auth/spend side effects")
+        for name in ("sample_id", "cohort_id", "case_id", "brief_id", "observed_effort"):
+            require_text(getattr(self, name), name)
+        positive_int(self.attempt, "attempt")
+        _require_source_sha(self.source_sha, "source_sha")
+        for name in ("case_digest", "source_brief_digest"):
+            require_digest(getattr(self, name))
+        if self.brief_class not in BENCHMARK_BRIEF_CLASSES:
+            raise CreativeValidationError("invalid brief_class")
+        if self.strategy not in BENCHMARK_STRATEGIES:
+            raise CreativeValidationError("invalid benchmark strategy")
+        if self.research_status not in ("VERIFIED_SOURCE_BYTES", "UNKNOWN"):
+            raise CreativeValidationError("invalid research_status")
+        if self.execution_mode not in ("TEST_ONLY_MOCK", "MODEL", "UNKNOWN"):
+            raise CreativeValidationError("invalid execution_mode")
+        if self.status not in ("TEST_ONLY_MOCK", "REAL_MODEL_OBSERVED", "HOLD", "FAILED"):
+            raise CreativeValidationError("invalid observation status")
+        if self.benchmark_validity not in ("NOT_REAL_BENCHMARK", "ELIGIBLE_REAL_BENCHMARK", "HOLD"):
+            raise CreativeValidationError("invalid benchmark_validity")
+        if _require_iso_timestamp(self.completed_at, "completed_at") < _require_iso_timestamp(self.started_at, "started_at"):
+            raise CreativeValidationError("observation completed_at precedes started_at")
+        if self.requested_configuration is not None:
+            if not isinstance(self.requested_configuration, ModelConfiguration):
+                raise CreativeValidationError("expected typed requested_configuration")
+            ModelConfiguration.from_dict(self.requested_configuration.to_dict())
+        if not isinstance(self.observed_provider, ProviderObservation):
+            raise CreativeValidationError("expected typed observed_provider")
+        ProviderObservation.from_dict(self.observed_provider.to_dict())
+        if not isinstance(self.provenance, CreativeJobProvenance):
+            raise CreativeValidationError("expected typed observation provenance")
+        CreativeJobProvenance.from_dict(self.provenance.to_dict())
+        if not isinstance(self.consumer_evidence, BenchmarkConsumerEvidence):
+            raise CreativeValidationError("expected typed BenchmarkConsumerEvidence")
+        BenchmarkConsumerEvidence.from_dict(self.consumer_evidence.to_dict())
+        if not isinstance(self.structural_check, BenchmarkStructuralCheck):
+            raise CreativeValidationError("expected typed BenchmarkStructuralCheck")
+        BenchmarkStructuralCheck.from_dict(self.structural_check.to_dict())
+        if not isinstance(self.telemetry, BenchmarkTelemetry):
+            raise CreativeValidationError("expected typed BenchmarkTelemetry")
+        BenchmarkTelemetry.from_dict(self.telemetry.to_dict())
+        if not isinstance(self.nsm, BenchmarkNSMScore):
+            raise CreativeValidationError("expected typed BenchmarkNSMScore")
+        BenchmarkNSMScore.from_dict(self.nsm.to_dict())
+
+        object.__setattr__(self, "job_digests", _distinct_digests(self.job_digests, "job_digests"))
+        object.__setattr__(self, "stage_result_digests", _distinct_digests(self.stage_result_digests, "stage_result_digests"))
+        object.__setattr__(self, "critic_receipt_digests", _distinct_digests(self.critic_receipt_digests, "critic_receipt_digests"))
+        object.__setattr__(self, "evidence_refs", _distinct_texts(self.evidence_refs, "evidence_refs"))
+        object.__setattr__(self, "evidence_digests", _distinct_digests(self.evidence_digests, "evidence_digests"))
+        object.__setattr__(self, "hold_reasons", _distinct_texts(self.hold_reasons, "hold_reasons"))
+        object.__setattr__(self, "errors", _distinct_texts(self.errors, "errors"))
+
+        if self.research_status == "VERIFIED_SOURCE_BYTES":
+            if not self.evidence_refs or len(self.evidence_refs) != len(self.evidence_digests):
+                raise CreativeValidationError("VERIFIED_SOURCE_BYTES requires matched evidence refs and digests")
+        elif self.evidence_refs or self.evidence_digests:
+            raise CreativeValidationError("UNKNOWN research_status cannot assert verified external evidence")
+
+        for name in (
+            "cycle_job_digest", "cycle_result_digest", "production_job_digest", "production_result_digest",
+            "package_digest", "explore_receipt_digest", "selector_receipt_digest",
+            "develop_receipt_digest", "package_receipt_digest",
+        ):
+            val = getattr(self, name)
+            if val is not None:
+                require_digest(val)
+        if (self.cycle_job_digest is None) != (self.cycle_result_digest is None):
+            raise CreativeValidationError("cycle_job_digest and cycle_result_digest must be paired")
+        if (self.production_job_digest is None) != (self.production_result_digest is None):
+            raise CreativeValidationError("production_job_digest and production_result_digest must be paired")
+        pkg_fields = (self.package_id, self.package_revision, self.package_digest)
+        if any(v is not None for v in pkg_fields):
+            if any(v is None for v in pkg_fields):
+                raise CreativeValidationError("package_id, package_revision and package_digest must be paired")
+            require_package_id(self.package_id)
+            positive_int(self.package_revision, "package_revision")
+            if self.production_result_digest is None:
+                raise CreativeValidationError("package requires pinned production_result_digest")
+
+        if not isinstance(self.role_traces, (tuple, list)) or not self.role_traces or any(
+            not isinstance(t, BenchmarkRoleTrace) for t in self.role_traces
+        ):
+            raise CreativeValidationError("observation requires non-empty typed role_traces")
+        traces = tuple(BenchmarkRoleTrace.from_dict(t.to_dict()) for t in self.role_traces)
+        object.__setattr__(self, "role_traces", traces)
+
+        # Replay prevention within the same observation.
+        seen_receipts: set[str] = set()
+        seen_requests: set[str] = set()
+        seen_slots: set[str] = set()
+        seen_stages: set[str] = set()
+        seen_provider_ids: set[str] = set()
+        for t in traces:
+            if t.role != "RESEARCH":
+                if (t.receipt_digest in seen_receipts or t.job_slot in seen_slots
+                        or t.stage_digest in seen_stages
+                        or (not t.is_retry and t.request_digest in seen_requests)):
+                    raise CreativeValidationError("replayed receipt/request/slot within benchmark observation")
+                seen_receipts.add(t.receipt_digest)
+                seen_slots.add(t.job_slot)
+                seen_stages.add(t.stage_digest)
+                if not t.is_retry:
+                    seen_requests.add(t.request_digest)
+                if t.provider_request_id is not None:
+                    if t.provider_request_id in seen_provider_ids:
+                        raise CreativeValidationError("replayed provider_request_id within benchmark observation")
+                    seen_provider_ids.add(t.provider_request_id)
+
+        # Verify role trace receipts match pinned digests.
+        model_traces = tuple(t for t in traces if t.role != "RESEARCH")
+        if tuple(t.job_digest for t in model_traces) != self.job_digests:
+            raise CreativeValidationError("job_digests disagrees with role_traces")
+        if tuple(t.stage_digest for t in model_traces) != self.stage_result_digests:
+            raise CreativeValidationError("stage_result_digests disagrees with role_traces")
+        non_retry_traces = tuple(t for t in traces if not t.is_retry)
+        gen_receipts = tuple(t.receipt_digest for t in non_retry_traces if t.role == "GENERATOR")
+        critic_receipts = tuple(t.receipt_digest for t in non_retry_traces if t.role == "CRITIC")
+        sel_receipts = tuple(t.receipt_digest for t in non_retry_traces if t.role == "SELECTOR")
+        dev_receipts = tuple(t.receipt_digest for t in non_retry_traces if t.role == "DEVELOPER")
+        if self.explore_receipt_digest != (gen_receipts[0] if gen_receipts else None):
+            raise CreativeValidationError("explore_receipt_digest disagrees with role_traces")
+        if self.critic_receipt_digests != critic_receipts:
+            raise CreativeValidationError("critic_receipt_digests disagrees with role_traces")
+        if self.selector_receipt_digest != (sel_receipts[-1] if sel_receipts else None):
+            raise CreativeValidationError("selector_receipt_digest disagrees with role_traces")
+        if self.develop_receipt_digest != (dev_receipts[-1] if dev_receipts else None):
+            raise CreativeValidationError("develop_receipt_digest disagrees with role_traces")
+        if self.package_digest is None and self.package_receipt_digest is not None:
+            raise CreativeValidationError("package_receipt_digest requires a pinned package")
+
+        # Verify exact telemetry aggregation (no fabricated/tampered sums).
+        expected_telemetry = aggregate_benchmark_telemetry(
+            traces,
+            queue_wait_ms=self.telemetry.queue_wait_ms,
+            retry_wall_time_ms=self.telemetry.retry_wall_time_ms,
+            human_active_time_ms=self.telemetry.human_active_time_ms,
+        )
+        if self.telemetry != expected_telemetry:
+            raise CreativeValidationError("observation telemetry disagrees with linked role_traces")
+
+        # Verify judge receipt independence & binding.
+        if self.judge_receipt is not None:
+            if not isinstance(self.judge_receipt, BenchmarkJudgeReceipt):
+                raise CreativeValidationError("expected typed BenchmarkJudgeReceipt")
+            jr = BenchmarkJudgeReceipt.from_dict(self.judge_receipt.to_dict())
+            if (jr.case_digest != self.case_digest
+                    or jr.source_brief_digest != self.source_brief_digest
+                    or jr.rubric_version != self.rubric_version):
+                raise CreativeValidationError("judge receipt rebound case, brief or rubric")
+            expected_artifact = self.primary_artifact_digest
+            if jr.evaluated_artifact_digest != expected_artifact:
+                raise CreativeValidationError("judge receipt does not match evaluated artifact digest")
+            if jr.judge_actor_ref in seen_receipts or jr.judge_actor_ref in seen_provider_ids:
+                raise CreativeValidationError("judge cannot reuse workflow actor/receipt identity")
+            if jr.judge_execution_ref is not None and (
+                jr.judge_execution_ref in seen_receipts or jr.judge_execution_ref in seen_provider_ids
+            ):
+                raise CreativeValidationError("judge execution_ref cannot replay a workflow invocation")
+            if not set(jr.evidence_refs) <= set(self.evidence_refs):
+                raise CreativeValidationError("judge receipt cited unverified evidence_refs")
+
+        expected_semantic = _derive_semantic_status(
+            judge_receipt=self.judge_receipt,
+            structural_check=self.structural_check,
+            execution_mode=self.execution_mode,
+            provenance=self.provenance,
+        )
+        if self.semantic_status != expected_semantic:
+            raise CreativeValidationError("semantic_status disagrees with verified judge/structural evidence")
+
+        # Verify A04 consumer receipt correlation.
+        if self.consumer_evidence.source_handoff_status == "SOURCE_HANDOFF_VERIFIED":
+            if self.execution_mode != "MODEL" or self.status == "TEST_ONLY_MOCK":
+                raise CreativeValidationError("TEST_ONLY_MOCK/UNKNOWN observation cannot claim verified A04 handoff")
+            a04 = self.consumer_evidence.a04_receipt
+            if (self.package_digest is None or self.production_result_digest is None
+                    or a04.source_sha != self.source_sha
+                    or a04.brief_id != self.brief_id
+                    or a04.source_brief_digest != self.source_brief_digest
+                    or a04.a03_result_digest != self.production_result_digest
+                    or a04.package_id != self.package_id
+                    or a04.revision != self.package_revision
+                    or a04.package_digest != self.package_digest
+                    or a04.cycle_job_digest != self.cycle_job_digest
+                    or a04.cycle_result_digest != self.cycle_result_digest
+                    or a04.reasoning_receipt_digest != self.package_receipt_digest):
+                raise CreativeValidationError("A04 handoff receipt disagrees with benchmark observation artifacts")
+
+        # Mock-vs-real and strategy completion gates.
+        non_retry_model = tuple(t for t in model_traces if not t.is_retry)
+        strategy_holds = _strategy_hold_reasons(
+            strategy=self.strategy,
+            role_traces=traces,
+            cycle_result_digest=self.cycle_result_digest,
+            research_status=self.research_status,
+            evidence_refs=self.evidence_refs,
+        )
+        if self.status in ("TEST_ONLY_MOCK", "REAL_MODEL_OBSERVED"):
+            if self.hold_reasons or self.errors or strategy_holds:
+                raise CreativeValidationError("completed benchmark observation cannot have hold_reasons, errors or missing strategy roles")
+            if not non_retry_model or any(t.execution_status != "OK" for t in non_retry_model):
+                raise CreativeValidationError("completed benchmark observation cannot have failed or UNKNOWN workflow traces")
+        if self.status == "REAL_MODEL_OBSERVED":
+            if (self.execution_mode != "MODEL" or self.observed_provider.mode != "MODEL"
+                    or self.observed_provider.provider == "UNKNOWN"
+                    or self.observed_provider.model == "UNKNOWN"
+                    or self.requested_configuration is None
+                    or (self.observed_provider.provider, self.observed_provider.model)
+                    != (self.requested_configuration.provider, self.requested_configuration.model)
+                    or self.requested_configuration.effort in (None, "UNKNOWN")
+                    or self.observed_effort != self.requested_configuration.effort
+                    or any(t.observed.mode != "MODEL" or t.observed.model == "UNKNOWN" for t in non_retry_model)):
+                raise CreativeValidationError("REAL_MODEL_OBSERVED requires verified MODEL identity and effort across traces")
+        elif self.status == "TEST_ONLY_MOCK":
+            if (self.execution_mode != "TEST_ONLY_MOCK" or self.observed_provider.mode != "TEST_ONLY_MOCK"
+                    or self.observed_provider.model != "UNKNOWN"
+                    or any(t.observed.mode != "TEST_ONLY_MOCK" or t.observed.model != "UNKNOWN"
+                           for t in non_retry_model)):
+                raise CreativeValidationError("TEST_ONLY_MOCK observation requires mock mode and UNKNOWN model")
+        else:
+            if not self.hold_reasons and not self.errors:
+                raise CreativeValidationError("HOLD/FAILED observation must record hold_reasons or errors")
+
+        # Benchmark validity cannot promote mock/synthetic/HOLD to real benchmark.
+        if self.status in ("HOLD", "FAILED"):
+            expected_validity = "HOLD"
+        elif self.status == "TEST_ONLY_MOCK" or self.provenance.evidence_type != "HUMAN_SUPPLIED":
+            expected_validity = "NOT_REAL_BENCHMARK"
+        else:
+            expected_validity = "ELIGIBLE_REAL_BENCHMARK"
+        if self.benchmark_validity != expected_validity:
+            raise CreativeValidationError("benchmark_validity disagrees with execution mode and provenance")
+
+        expected_nsm = _evaluate_observation_nsm(
+            status=self.status,
+            execution_mode=self.execution_mode,
+            provenance=self.provenance,
+            structural_check=self.structural_check,
+            semantic_status=self.semantic_status,
+            judge_receipt=self.judge_receipt,
+            telemetry=self.telemetry,
+            consumer_evidence=self.consumer_evidence,
+            hold_reasons=self.hold_reasons,
+            errors=self.errors,
+        )
+        if self.nsm != expected_nsm:
+            raise CreativeValidationError("observation NSM_v1 score disagrees with verified trust/telemetry gates")
+
+    @property
+    def primary_artifact_digest(self) -> str:
+        if self.package_digest is not None:
+            return self.package_digest
+        if self.cycle_result_digest is not None:
+            return self.cycle_result_digest
+        if self.stage_result_digests:
+            return self.stage_result_digests[-1]
+        return self.case_digest
+
+    @property
+    def digest(self) -> str:
+        return sha256_bytes(canonical_bytes(self.to_dict()))
+
+    @property
+    def slot(self) -> str:
+        return _benchmark_observation_slot(
+            self.cohort_id, self.case_id, self.strategy, self.sample_id, self.attempt,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "sample_id": self.sample_id,
+            "attempt": self.attempt,
+            "cohort_id": self.cohort_id,
+            "case_id": self.case_id,
+            "case_digest": self.case_digest,
+            "rubric_version": self.rubric_version,
+            "source_sha": self.source_sha,
+            "brief_id": self.brief_id,
+            "source_brief_digest": self.source_brief_digest,
+            "brief_class": self.brief_class,
+            "strategy": self.strategy,
+            "requested_configuration": self.requested_configuration.to_dict() if self.requested_configuration else None,
+            "observed_provider": self.observed_provider.to_dict(),
+            "observed_effort": self.observed_effort,
+            "job_digests": list(self.job_digests),
+            "stage_result_digests": list(self.stage_result_digests),
+            "cycle_job_digest": self.cycle_job_digest,
+            "cycle_result_digest": self.cycle_result_digest,
+            "production_job_digest": self.production_job_digest,
+            "production_result_digest": self.production_result_digest,
+            "package_id": self.package_id,
+            "package_revision": self.package_revision,
+            "package_digest": self.package_digest,
+            "explore_receipt_digest": self.explore_receipt_digest,
+            "critic_receipt_digests": list(self.critic_receipt_digests),
+            "selector_receipt_digest": self.selector_receipt_digest,
+            "develop_receipt_digest": self.develop_receipt_digest,
+            "package_receipt_digest": self.package_receipt_digest,
+            "consumer_evidence": self.consumer_evidence.to_dict(),
+            "judge_receipt": self.judge_receipt.to_dict() if self.judge_receipt else None,
+            "provenance": self.provenance.to_dict(),
+            "research_status": self.research_status,
+            "evidence_refs": list(self.evidence_refs),
+            "evidence_digests": list(self.evidence_digests),
+            "role_traces": [t.to_dict() for t in self.role_traces],
+            "structural_check": self.structural_check.to_dict(),
+            "semantic_status": self.semantic_status,
+            "telemetry": self.telemetry.to_dict(),
+            "nsm": self.nsm.to_dict(),
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "execution_mode": self.execution_mode,
+            "status": self.status,
+            "hold_reasons": list(self.hold_reasons),
+            "errors": list(self.errors),
+            "benchmark_validity": self.benchmark_validity,
+            "side_effects": self.side_effects,
+        }
+
+    def to_json(self) -> str:
+        return canonical_bytes(self.to_dict()).decode("utf-8")
+
+    @classmethod
+    def from_dict(cls, data: object) -> A03BenchmarkObservation:
+        value = exact_fields(data, {f.name for f in fields(cls)})
+        if value["requested_configuration"] is not None:
+            value["requested_configuration"] = ModelConfiguration.from_dict(value["requested_configuration"])
+        value["observed_provider"] = ProviderObservation.from_dict(value["observed_provider"])
+        value["consumer_evidence"] = BenchmarkConsumerEvidence.from_dict(value["consumer_evidence"])
+        if value["judge_receipt"] is not None:
+            value["judge_receipt"] = BenchmarkJudgeReceipt.from_dict(value["judge_receipt"])
+        value["provenance"] = CreativeJobProvenance.from_dict(value["provenance"])
+        if not isinstance(value["role_traces"], list):
+            raise CreativeValidationError("expected role_traces array")
+        value["role_traces"] = tuple(BenchmarkRoleTrace.from_dict(t) for t in value["role_traces"])
+        value["structural_check"] = BenchmarkStructuralCheck.from_dict(value["structural_check"])
+        value["telemetry"] = BenchmarkTelemetry.from_dict(value["telemetry"])
+        value["nsm"] = BenchmarkNSMScore.from_dict(value["nsm"])
+        for name in ("job_digests", "stage_result_digests", "critic_receipt_digests",
+                     "evidence_refs", "evidence_digests", "hold_reasons", "errors"):
+            if not isinstance(value[name], list):
+                raise CreativeValidationError(f"expected {name} array")
+        return cls(**value)
+
+    @classmethod
+    def from_json(cls, text: str) -> A03BenchmarkObservation:
+        return cls.from_dict(read_json(text))
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkStrategySummary:
+    """Paired summary for one strategy label within a cohort comparison."""
+
+    strategy: Literal["S1", "S2", "S3"]
+    observation_digests: tuple[str, ...]
+    observed_case_ids: tuple[str, ...]
+    paired_case_ids: tuple[str, ...]
+    missing_case_ids: tuple[str, ...]
+    real_model_count: int
+    mock_count: int
+    hold_or_failed_count: int
+    structural_valid_count: int
+    measured_semantic_pass_count: int
+    a04_handoff_verified_count: int
+    useful_consumer_outcome_count: int
+    total_input_tokens: int | None = None
+    total_output_tokens: int | None = None
+    total_wall_time_ms: int | None = None
+    total_human_active_time_ms: int | None = None
+    mean_nsm_v1: float | None = None
+    missing_coverage: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.strategy not in BENCHMARK_STRATEGIES:
+            raise CreativeValidationError("invalid strategy in summary")
+        object.__setattr__(self, "observation_digests", _distinct_digests(self.observation_digests, "observation_digests"))
+        for name in ("observed_case_ids", "paired_case_ids", "missing_case_ids", "missing_coverage"):
+            object.__setattr__(self, name, _distinct_texts(getattr(self, name), name))
+        for name in (
+            "real_model_count", "mock_count", "hold_or_failed_count", "structural_valid_count",
+            "measured_semantic_pass_count", "a04_handoff_verified_count", "useful_consumer_outcome_count",
+        ):
+            _nonneg_int(getattr(self, name), name)
+        for name in ("total_input_tokens", "total_output_tokens", "total_wall_time_ms", "total_human_active_time_ms"):
+            _nonneg_int_or_none(getattr(self, name), name)
+        if self.mean_nsm_v1 is not None:
+            object.__setattr__(self, "mean_nsm_v1", _unit_score(self.mean_nsm_v1, "mean_nsm_v1"))
+            if not self.paired_case_ids or self.missing_coverage:
+                raise CreativeValidationError("mean_nsm_v1 requires complete paired coverage without missing_coverage")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **{f.name: getattr(self, f.name) for f in fields(self)},
+            "observation_digests": list(self.observation_digests),
+            "observed_case_ids": list(self.observed_case_ids),
+            "paired_case_ids": list(self.paired_case_ids),
+            "missing_case_ids": list(self.missing_case_ids),
+            "missing_coverage": list(self.missing_coverage),
+        }
+
+    @classmethod
+    def from_dict(cls, data: object) -> BenchmarkStrategySummary:
+        value = exact_fields(data, {f.name for f in fields(cls)})
+        for name in ("observation_digests", "observed_case_ids", "paired_case_ids",
+                     "missing_case_ids", "missing_coverage"):
+            if not isinstance(value[name], list):
+                raise CreativeValidationError(f"expected {name} array")
+        return cls(**value)
+
+
+@dataclass(frozen=True, slots=True)
+class A03BenchmarkComparison:
+    """Paired cohort comparison across strategy labels; never fabricates a WIN/PASS."""
+
+    comparison_id: str
+    cohort_id: str
+    source_sha: str
+    case_digests: tuple[str, ...]
+    case_ids: tuple[str, ...]
+    compared_strategies: tuple[Literal["S1", "S2", "S3"], ...]
+    observation_digests: tuple[str, ...]
+    paired_case_ids: tuple[str, ...]
+    missing_cases_by_strategy: dict[str, tuple[str, ...]]
+    strategy_summaries: tuple[BenchmarkStrategySummary, ...]
+    nsm_weights: dict[str, float]
+    outcome: Literal["NOT_REAL_BENCHMARK", "INSUFFICIENT_EVIDENCE", "INCOMPLETE", "HOLD", "COMPARED"]
+    ranking_status: Literal["UNRANKED", "PAIRED_COMPARED"]
+    provenance: CreativeJobProvenance
+    created_at: str
+    winner_strategy: Literal["S1", "S2", "S3"] | None = None
+    hold_reasons: tuple[str, ...] = ()
+    missing_coverage: tuple[str, ...] = ()
+    rubric_version: str = BENCHMARK_RUBRIC_VERSION
+    nsm_version: str = NSM_V1_VERSION
+    side_effects: Literal["NONE"] = "NONE"
+    schema_version: str = "A03BenchmarkComparison.v1"
+
+    def __post_init__(self) -> None:
+        if self.schema_version != "A03BenchmarkComparison.v1":
+            raise CreativeValidationError("unsupported benchmark comparison schema")
+        if self.rubric_version != BENCHMARK_RUBRIC_VERSION:
+            raise CreativeValidationError("unsupported benchmark comparison rubric version")
+        if self.nsm_version != NSM_V1_VERSION:
+            raise CreativeValidationError("unsupported benchmark comparison NSM version")
+        if self.side_effects != "NONE":
+            raise CreativeValidationError("benchmark comparison forbids external/auth/spend side effects")
+        for name in ("comparison_id", "cohort_id"):
+            require_text(getattr(self, name), name)
+        _require_source_sha(self.source_sha, "source_sha")
+        _require_iso_timestamp(self.created_at, "created_at")
+        if not isinstance(self.provenance, CreativeJobProvenance):
+            raise CreativeValidationError("expected typed comparison provenance")
+        CreativeJobProvenance.from_dict(self.provenance.to_dict())
+        object.__setattr__(self, "case_digests", _distinct_digests(self.case_digests, "case_digests"))
+        object.__setattr__(self, "case_ids", _distinct_texts(self.case_ids, "case_ids"))
+        if not self.case_ids or len(self.case_ids) != len(self.case_digests):
+            raise CreativeValidationError("comparison requires matched non-empty cohort cases")
+        strategies = _distinct_texts(self.compared_strategies, "compared_strategies")
+        if len(strategies) < 2 or not set(strategies) <= set(BENCHMARK_STRATEGIES):
+            raise CreativeValidationError("comparison requires at least two distinct valid strategy labels")
+        object.__setattr__(self, "compared_strategies", strategies)
+        object.__setattr__(self, "observation_digests", _distinct_digests(self.observation_digests, "observation_digests"))
+        object.__setattr__(self, "paired_case_ids", _distinct_texts(self.paired_case_ids, "paired_case_ids"))
+        if not set(self.paired_case_ids) <= set(self.case_ids):
+            raise CreativeValidationError("paired_case_ids must be subset of cohort case_ids")
+        if not isinstance(self.missing_cases_by_strategy, Mapping) or set(self.missing_cases_by_strategy) != set(strategies):
+            raise CreativeValidationError("missing_cases_by_strategy must cover exact compared_strategies")
+        norm_missing = {
+            k: _distinct_texts(v, f"missing_cases_by_strategy[{k}]")
+            for k, v in self.missing_cases_by_strategy.items()
+        }
+        object.__setattr__(self, "missing_cases_by_strategy", norm_missing)
+        if not isinstance(self.strategy_summaries, (tuple, list)) or any(
+            not isinstance(s, BenchmarkStrategySummary) for s in self.strategy_summaries
+        ):
+            raise CreativeValidationError("expected typed strategy_summaries")
+        summaries = tuple(BenchmarkStrategySummary.from_dict(s.to_dict()) for s in self.strategy_summaries)
+        if tuple(s.strategy for s in summaries) != strategies:
+            raise CreativeValidationError("strategy_summaries must match compared_strategies order")
+        object.__setattr__(self, "strategy_summaries", summaries)
+        if not isinstance(self.nsm_weights, Mapping) or dict(self.nsm_weights) != NSM_V1_WEIGHTS:
+            raise CreativeValidationError("nsm_weights must pin exact NSM_v1 weights")
+        object.__setattr__(self, "nsm_weights", dict(NSM_V1_WEIGHTS))
+        if self.outcome not in ("NOT_REAL_BENCHMARK", "INSUFFICIENT_EVIDENCE", "INCOMPLETE", "HOLD", "COMPARED"):
+            raise CreativeValidationError("invalid comparison outcome")
+        if self.ranking_status not in ("UNRANKED", "PAIRED_COMPARED"):
+            raise CreativeValidationError("invalid ranking_status")
+        object.__setattr__(self, "hold_reasons", _distinct_texts(self.hold_reasons, "hold_reasons"))
+        object.__setattr__(self, "missing_coverage", _distinct_texts(self.missing_coverage, "missing_coverage"))
+        if self.winner_strategy is not None and self.winner_strategy not in strategies:
+            raise CreativeValidationError("winner_strategy must belong to compared_strategies")
+
+        if self.outcome == "COMPARED":
+            if (self.ranking_status != "PAIRED_COMPARED" or not self.paired_case_ids
+                    or self.hold_reasons or self.missing_coverage
+                    or self.provenance.evidence_type != "HUMAN_SUPPLIED"
+                    or any(s.mean_nsm_v1 is None or s.mock_count > 0 or s.hold_or_failed_count > 0
+                           for s in summaries)):
+                raise CreativeValidationError("COMPARED outcome requires complete real paired NSM_v1 scores")
+            best = max(s.mean_nsm_v1 for s in summaries)
+            leaders = [s.strategy for s in summaries if abs(s.mean_nsm_v1 - best) <= 1e-9]
+            expected_winner = leaders[0] if len(leaders) == 1 else None
+            if self.winner_strategy != expected_winner:
+                raise CreativeValidationError("winner_strategy disagrees with paired NSM_v1 scores")
+        else:
+            if self.ranking_status != "UNRANKED" or self.winner_strategy is not None:
+                raise CreativeValidationError("non-COMPARED comparison must stay UNRANKED with no winner")
+            if self.outcome == "HOLD" and not self.hold_reasons:
+                raise CreativeValidationError("HOLD comparison requires hold_reasons")
+
+    @property
+    def digest(self) -> str:
+        return sha256_bytes(canonical_bytes(self.to_dict()))
+
+    @property
+    def slot(self) -> str:
+        return _benchmark_comparison_slot(self.cohort_id, self.comparison_id)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "comparison_id": self.comparison_id,
+            "cohort_id": self.cohort_id,
+            "rubric_version": self.rubric_version,
+            "source_sha": self.source_sha,
+            "case_digests": list(self.case_digests),
+            "case_ids": list(self.case_ids),
+            "compared_strategies": list(self.compared_strategies),
+            "observation_digests": list(self.observation_digests),
+            "paired_case_ids": list(self.paired_case_ids),
+            "missing_cases_by_strategy": {k: list(v) for k, v in self.missing_cases_by_strategy.items()},
+            "strategy_summaries": [s.to_dict() for s in self.strategy_summaries],
+            "nsm_version": self.nsm_version,
+            "nsm_weights": dict(self.nsm_weights),
+            "outcome": self.outcome,
+            "ranking_status": self.ranking_status,
+            "winner_strategy": self.winner_strategy,
+            "hold_reasons": list(self.hold_reasons),
+            "missing_coverage": list(self.missing_coverage),
+            "provenance": self.provenance.to_dict(),
+            "created_at": self.created_at,
+            "side_effects": self.side_effects,
+        }
+
+    def to_json(self) -> str:
+        return canonical_bytes(self.to_dict()).decode("utf-8")
+
+    @classmethod
+    def from_dict(cls, data: object) -> A03BenchmarkComparison:
+        value = exact_fields(data, {f.name for f in fields(cls)})
+        value["provenance"] = CreativeJobProvenance.from_dict(value["provenance"])
+        if not isinstance(value["strategy_summaries"], list):
+            raise CreativeValidationError("expected strategy_summaries array")
+        value["strategy_summaries"] = tuple(BenchmarkStrategySummary.from_dict(s) for s in value["strategy_summaries"])
+        if not isinstance(value["missing_cases_by_strategy"], dict):
+            raise CreativeValidationError("expected missing_cases_by_strategy object")
+        value["missing_cases_by_strategy"] = {
+            k: tuple(v) if isinstance(v, list) else (_ for _ in ()).throw(
+                CreativeValidationError("expected missing cases array")
+            )
+            for k, v in value["missing_cases_by_strategy"].items()
+        }
+        for name in ("case_digests", "case_ids", "compared_strategies", "observation_digests",
+                     "paired_case_ids", "hold_reasons", "missing_coverage"):
+            if not isinstance(value[name], list):
+                raise CreativeValidationError(f"expected {name} array")
+        return cls(**value)
+
+    @classmethod
+    def from_json(cls, text: str) -> A03BenchmarkComparison:
+        return cls.from_dict(read_json(text))
+
+
+def _role_for_operation(operation: str) -> Literal[
+    "GENERATOR", "CRITIC", "SELECTOR", "DEVELOPER", "PACKAGE_PRODUCER"
+]:
+    mapping = {
+        "EXPLORE": "GENERATOR",
+        "CRITIQUE": "CRITIC",
+        "SELECT": "SELECTOR",
+        "DEVELOP": "DEVELOPER",
+        "PRODUCE_PACKAGE": "PACKAGE_PRODUCER",
+        "REVISE_PACKAGE": "PACKAGE_PRODUCER",
+    }
+    if operation not in mapping:
+        raise CreativeValidationError(f"unsupported benchmark stage operation: {operation}")
+    return mapping[operation]
+
+
+def _stage_to_trace(
+    stage: A03CreativeStageResult,
+    *,
+    step_name: str,
+    is_retry: bool = False,
+    step_timings_ms: Mapping[str, int] | None = None,
+    step_retries: Mapping[str, int] | None = None,
+) -> BenchmarkRoleTrace:
+    r = stage.reasoning
+    op = r.request.operation
+    role = _role_for_operation(op)
+    if stage.status in ("CREATIVE_COMPLETE", "TEST_ONLY_MOCK") and r.state == "OK":
+        exec_status = "OK"
+    elif r.state == "REFUSED":
+        exec_status = "REFUSED"
+    elif r.observation.mode == "UNKNOWN" or (r.execution is not None and r.execution.effect == "UNKNOWN"):
+        exec_status = "UNKNOWN"
+    else:
+        exec_status = "FAILED"
+    obs_effort = r.execution.observed_effort if r.execution is not None else "UNKNOWN"
+    wall_ms = None
+    if step_timings_ms is not None:
+        if r.digest in step_timings_ms:
+            wall_ms = step_timings_ms[r.digest]
+        elif step_name in step_timings_ms:
+            wall_ms = step_timings_ms[step_name]
+    retries = None
+    if step_retries is not None:
+        if r.digest in step_retries:
+            retries = step_retries[r.digest]
+        elif step_name in step_retries:
+            retries = step_retries[step_name]
+    return BenchmarkRoleTrace(
+        role=role,
+        step_name=step_name,
+        operation=op,
+        execution_status=exec_status,
+        job_slot=stage.job.slot,
+        job_digest=stage.job.digest,
+        stage_digest=stage.digest,
+        request_digest=r.request.digest,
+        receipt_digest=r.digest,
+        provider_request_id=r.provider_request_id,
+        requested=r.configuration if r.configuration is not None else stage.job.configuration,
+        observed=r.observation,
+        observed_effort=obs_effort,
+        usage=r.usage,
+        wall_time_ms=wall_ms,
+        retry_count=retries,
+        is_retry=is_retry,
+        evidence_refs=r.evidence_refs,
+    )
+
+
+def observe_benchmark_run(
+    case: A03BenchmarkCase,
+    store: CreativeStore | CreativeSidecarStore,
+    *,
+    strategy: Literal["S1", "S2", "S3"],
+    sample_id: str,
+    attempt: int,
+    provenance: CreativeJobProvenance,
+    started_at: str,
+    completed_at: str,
+    stages: tuple[A03CreativeStageResult, ...] = (),
+    retry_stages: tuple[A03CreativeStageResult, ...] = (),
+    cycle: A03CreativeCycleResult | None = None,
+    production_result: A03CreativeProductionResult | None = None,
+    package: A03CreativeProductionPackage | None = None,
+    a04_receipt: Any | None = None,
+    a04_receipt_path: str | Path | None = None,
+    judge_receipt: BenchmarkJudgeReceipt | None = None,
+    media_quality_status: Literal["NOT_ATTEMPTED", "UNMEASURED", "OBSERVED_PASS", "OBSERVED_FAIL"] = "NOT_ATTEMPTED",
+    media_quality_ref: str | None = None,
+    commercial_utility_status: Literal[
+        "NOT_ATTEMPTED", "UNMEASURED", "OBSERVED_USEFUL", "OBSERVED_NOT_USEFUL"
+    ] = "NOT_ATTEMPTED",
+    commercial_utility_ref: str | None = None,
+    step_timings_ms: Mapping[str, int] | None = None,
+    step_retries: Mapping[str, int] | None = None,
+    queue_wait_ms: int | None = None,
+    retry_wall_time_ms: int | None = None,
+    human_active_time_ms: int | None = None,
+) -> A03BenchmarkObservation:
+    """Record an immutable A03BenchmarkObservation.v1 from actually persisted A03/R4 artifacts.
+
+    Never invokes any provider, network, spend, or orchestrator. Re-verifies every
+    referenced artifact on disk via CreativeSidecarStore.
+    """
+    from .sidecars import CreativeSidecarStore
+    from ai_commerce.media.generation import A04CreativeHandoffReceipt, load_a04_handoff_receipt
+
+    if not isinstance(case, A03BenchmarkCase):
+        raise CreativeValidationError("expected A03BenchmarkCase")
+    sidecars = store if isinstance(store, CreativeSidecarStore) else CreativeSidecarStore(store)
+    saved_case = sidecars.load_benchmark_case_by_digest(case.digest)
+    if saved_case != case:
+        raise CreativeValidationError("benchmark case disagrees with stored cohort record")
+    brief = sidecars.creative.load_brief(saved_case.source_brief_digest)
+
+    hold_reasons: list[str] = []
+    errors: list[str] = []
+    traces: list[BenchmarkRoleTrace] = []
+    all_stages: list[A03CreativeStageResult] = []
+    evidence_sources: tuple[CreativeEvidenceSource, ...] = ()
+
+    cycle_job_digest: str | None = None
+    cycle_result_digest: str | None = None
+    prod_job_digest: str | None = None
+    prod_result_digest: str | None = None
+    pkg_id: str | None = None
+    pkg_rev: int | None = None
+    pkg_digest: str | None = None
+    explore_digest: str | None = None
+    critic_digests: list[str] = []
+    selector_digest: str | None = None
+    develop_digest: str | None = None
+    package_receipt_digest: str | None = None
+    verified_pkg: A03CreativeProductionPackage | None = None
+
+    if cycle is not None:
+        if stages:
+            raise CreativeValidationError("supply either standalone stages or a verified R2 cycle, not both")
+        if not isinstance(cycle, A03CreativeCycleResult):
+            raise CreativeValidationError("expected A03CreativeCycleResult")
+        saved_cycle = sidecars.load_cycle_by_digest(cycle.job.digest, cycle.digest)
+        if saved_cycle != cycle:
+            raise CreativeValidationError("cycle disagrees with stored R2 receipt")
+        if (saved_cycle.job.seed.brief_id != saved_case.brief_id
+                or saved_cycle.job.seed.source_brief_digest != saved_case.source_brief_digest):
+            raise CreativeValidationError("cycle brief disagrees with pinned benchmark case")
+        cycle_job_digest = saved_cycle.job.digest
+        cycle_result_digest = saved_cycle.digest
+        evidence_sources = saved_cycle.job.evidence
+        if evidence_sources:
+            res_wall = step_timings_ms.get("research") if step_timings_ms is not None else None
+            res_ret = step_retries.get("research") if step_retries is not None else None
+            traces.append(BenchmarkRoleTrace(
+                role="RESEARCH",
+                step_name="research",
+                operation="RESEARCH",
+                execution_status="VERIFIED_SOURCE_BYTES",
+                wall_time_ms=res_wall,
+                retry_count=res_ret,
+                evidence_refs=tuple(e.source_ref for e in evidence_sources),
+                evidence_digests=tuple(e.content_sha256 for e in evidence_sources),
+            ))
+        if saved_cycle.status not in ("CREATIVE_COMPLETE", "TEST_ONLY_MOCK"):
+            hold_reasons.append(f"CYCLE_{saved_cycle.status}")
+            if saved_cycle.failure:
+                errors.append(saved_cycle.failure)
+        for st in saved_cycle.steps:
+            step_name = st.job.request.cycle.step if st.job.request.cycle else st.job.job_id
+            all_stages.append(st)
+            traces.append(_stage_to_trace(
+                st, step_name=step_name, step_timings_ms=step_timings_ms, step_retries=step_retries,
+            ))
+            op = st.job.request.operation
+            if op == "EXPLORE" and explore_digest is None:
+                explore_digest = st.reasoning.digest
+            elif op == "CRITIQUE":
+                critic_digests.append(st.reasoning.digest)
+            elif op == "SELECT":
+                selector_digest = st.reasoning.digest
+            elif op == "DEVELOP":
+                develop_digest = st.reasoning.digest
+    else:
+        if not stages:
+            raise CreativeValidationError("benchmark observation requires persisted stage or cycle evidence")
+        explored_concept_ids: set[tuple[str, int, str]] = set()
+        for idx, st in enumerate(stages):
+            if not isinstance(st, A03CreativeStageResult):
+                raise CreativeValidationError("expected A03CreativeStageResult")
+            saved_st = sidecars.load_stage(st.job)
+            if saved_st != st:
+                raise CreativeValidationError("stage disagrees with stored receipt")
+            if (saved_st.job.brief_id != saved_case.brief_id
+                    or saved_st.job.source_brief_digest != saved_case.source_brief_digest):
+                raise CreativeValidationError("stage brief disagrees with pinned benchmark case")
+            all_stages.append(saved_st)
+            step_name = f"{saved_st.job.request.operation.lower()}:{idx}"
+            traces.append(_stage_to_trace(
+                saved_st, step_name=step_name, step_timings_ms=step_timings_ms, step_retries=step_retries,
+            ))
+            op = saved_st.job.request.operation
+            if op == "EXPLORE":
+                if explore_digest is None:
+                    explore_digest = saved_st.reasoning.digest
+                if saved_st.reasoning.state == "OK":
+                    for c in saved_st.reasoning.concepts():
+                        explored_concept_ids.add((c.concept_id, c.revision, c.digest))
+            elif op == "CRITIQUE":
+                src = saved_st.job.request.source
+                if src is None or (src.concept_id, src.revision, src.digest) not in explored_concept_ids:
+                    hold_reasons.append("CRITIC_NOT_BOUND_TO_GENERATOR_OUTPUT")
+                critic_digests.append(saved_st.reasoning.digest)
+            elif op == "SELECT":
+                selector_digest = saved_st.reasoning.digest
+            elif op == "DEVELOP":
+                develop_digest = saved_st.reasoning.digest
+
+    # Link any observed prior retry stages (verified on disk).
+    for r_idx, r_st in enumerate(retry_stages):
+        if not isinstance(r_st, A03CreativeStageResult):
+            raise CreativeValidationError("expected A03CreativeStageResult in retry_stages")
+        saved_r = sidecars.load_stage(r_st.job)
+        if saved_r != r_st:
+            raise CreativeValidationError("retry stage disagrees with stored receipt")
+        if (saved_r.job.brief_id != saved_case.brief_id
+                or saved_r.job.source_brief_digest != saved_case.source_brief_digest):
+            raise CreativeValidationError("retry stage brief disagrees with pinned benchmark case")
+        all_stages.append(saved_r)
+        traces.append(_stage_to_trace(
+            saved_r,
+            step_name=f"retry:{saved_r.job.request.operation.lower()}:{r_idx}",
+            is_retry=True,
+            step_timings_ms=step_timings_ms,
+            step_retries=step_retries,
+        ))
+
+    if production_result is not None:
+        if not isinstance(production_result, A03CreativeProductionResult):
+            raise CreativeValidationError("expected A03CreativeProductionResult")
+        saved_prod = sidecars.load_production_result_by_digest(production_result.digest)
+        if saved_prod != production_result:
+            raise CreativeValidationError("production result disagrees with stored receipt")
+        if (saved_prod.job.brief_id != saved_case.brief_id
+                or saved_prod.job.source_brief_digest != saved_case.source_brief_digest):
+            raise CreativeValidationError("production result brief disagrees with pinned benchmark case")
+        if cycle_result_digest is not None and (
+            saved_prod.job.cycle_job_digest != cycle_job_digest
+            or saved_prod.job.cycle_result_digest != cycle_result_digest
+        ):
+            raise CreativeValidationError("production result disagrees with pinned R2 cycle")
+        prod_job_digest = saved_prod.job.digest
+        prod_result_digest = saved_prod.digest
+        if saved_prod.stage is not None:
+            all_stages.append(saved_prod.stage)
+            traces.append(_stage_to_trace(
+                saved_prod.stage,
+                step_name="produce_package" if saved_prod.job.parent_package_digest is None else "revise_package",
+                step_timings_ms=step_timings_ms,
+                step_retries=step_retries,
+            ))
+        if saved_prod.status not in ("CREATIVE_COMPLETE", "TEST_ONLY_MOCK") or saved_prod.package is None:
+            hold_reasons.append(f"PRODUCTION_{saved_prod.status}")
+            if saved_prod.failure:
+                errors.append(saved_prod.failure)
+        else:
+            target_pkg = saved_prod.package if package is None else package
+            if not isinstance(target_pkg, A03CreativeProductionPackage):
+                raise CreativeValidationError("expected A03CreativeProductionPackage")
+            origin, verified_pkg, _ = sidecars.verify_production_package_lineage(
+                target_pkg.package_id, target_pkg.revision, origin_result_digest=saved_prod.digest,
+            )
+            if origin != saved_prod or verified_pkg != target_pkg:
+                raise CreativeValidationError("production package lineage verification failed")
+            pkg_id = verified_pkg.package_id
+            pkg_rev = verified_pkg.revision
+            pkg_digest = verified_pkg.digest
+            package_receipt_digest = verified_pkg.reasoning_receipt_digest
+    elif package is not None:
+        raise CreativeValidationError("package requires pinned production_result")
+
+    # Correlate optional R4 A04CreativeHandoffReceipt strictly.
+    resolved_a04: Any | None = None
+    resolved_a04_ref: str | None = None
+    if a04_receipt_path is not None:
+        try:
+            loaded_a04 = load_a04_handoff_receipt(a04_receipt_path)
+        except ValueError as exc:
+            raise CreativeValidationError(f"invalid persisted A04 handoff receipt: {exc}") from exc
+        if a04_receipt is not None and loaded_a04 != a04_receipt:
+            raise CreativeValidationError("supplied a04_receipt disagrees with persisted file bytes")
+        resolved_a04 = loaded_a04
+        resolved_a04_ref = str(a04_receipt_path)
+    elif a04_receipt is not None:
+        if not isinstance(a04_receipt, A04CreativeHandoffReceipt):
+            raise CreativeValidationError("expected A04CreativeHandoffReceipt")
+        try:
+            resolved_a04 = A04CreativeHandoffReceipt.from_dict(a04_receipt.to_dict())
+        except ValueError as exc:
+            raise CreativeValidationError(f"invalid A04 handoff receipt: {exc}") from exc
+
+    consumer_evidence = BenchmarkConsumerEvidence(
+        source_handoff_status="SOURCE_HANDOFF_VERIFIED" if resolved_a04 is not None else "NOT_AVAILABLE",
+        a04_receipt=resolved_a04,
+        a04_receipt_digest=resolved_a04.digest if resolved_a04 is not None else None,
+        a04_receipt_ref=resolved_a04_ref,
+        media_quality_status=media_quality_status,
+        media_quality_ref=media_quality_ref,
+        commercial_utility_status=commercial_utility_status,
+        commercial_utility_ref=commercial_utility_ref,
+    )
+
+    traces_tuple = tuple(traces)
+    model_traces = tuple(t for t in traces_tuple if t.role != "RESEARCH")
+    non_retry_model = tuple(t for t in model_traces if not t.is_retry)
+    if not non_retry_model:
+        raise CreativeValidationError("benchmark observation requires at least one non-retry model trace")
+
+    # Determine requested vs observed identity and detect failed/UNKNOWN/mixed effects.
+    requested_configs = [t.requested for t in non_retry_model if t.requested is not None]
+    requested_config = requested_configs[0] if requested_configs else None
+    if any(t.requested != requested_config for t in non_retry_model):
+        hold_reasons.append("MIXED_REQUESTED_CONFIGURATION")
+
+    observed_providers = [t.observed for t in non_retry_model]
+    observed_provider = observed_providers[0]
+    if any(p != observed_provider for p in observed_providers):
+        hold_reasons.append("MIXED_OBSERVED_PROVIDER")
+
+    observed_efforts = {t.observed_effort for t in non_retry_model}
+    observed_effort = next(iter(observed_efforts)) if len(observed_efforts) == 1 else "UNKNOWN"
+
+    modes = {t.observed.mode for t in non_retry_model}
+    if modes == {"MODEL"}:
+        execution_mode: Literal["TEST_ONLY_MOCK", "MODEL", "UNKNOWN"] = "MODEL"
+    elif modes == {"TEST_ONLY_MOCK"}:
+        execution_mode = "TEST_ONLY_MOCK"
+    else:
+        execution_mode = "UNKNOWN"
+        hold_reasons.append("UNKNOWN_OR_MIXED_EXECUTION_MODE")
+
+    for st in all_stages:
+        if any(t.stage_digest == st.digest and t.is_retry for t in model_traces):
+            continue
+        if st.status not in ("CREATIVE_COMPLETE", "TEST_ONLY_MOCK") or st.reasoning.state != "OK":
+            hold_reasons.append("PROVIDER_EFFECT_FAILED_OR_UNKNOWN")
+            if st.failure:
+                errors.append(st.failure)
+            elif st.reasoning.error_code:
+                errors.append(st.reasoning.error_code)
+        elif st.reasoning.observation.mode == "MODEL":
+            e = st.reasoning.execution
+            cfg = st.job.configuration
+            if (e is None or e.kind != "AUTHENTICATED_CLI_PROBE" or e.effect != "PROCESS_INVOKED"
+                    or cfg is None or cfg.effort in (None, "UNKNOWN")
+                    or (e.observed_model, e.observed_effort) != (cfg.model, cfg.effort)):
+                hold_reasons.append("UNVERIFIED_MODEL_EXECUTION")
+
+    research_status: Literal["VERIFIED_SOURCE_BYTES", "UNKNOWN"] = (
+        "VERIFIED_SOURCE_BYTES" if evidence_sources else "UNKNOWN"
+    )
+    evidence_refs = tuple(e.source_ref for e in evidence_sources)
+    evidence_digests = tuple(e.content_sha256 for e in evidence_sources)
+
+    for reason in _strategy_hold_reasons(
+        strategy=strategy,
+        role_traces=traces_tuple,
+        cycle_result_digest=cycle_result_digest,
+        research_status=research_status,
+        evidence_refs=evidence_refs,
+    ):
+        hold_reasons.append(reason)
+
+    if judge_receipt is not None and saved_case.factual_evidence_applicable:
+        if judge_receipt.scores.factual_evidence_accuracy is None:
+            raise CreativeValidationError("factual_evidence_accuracy score is required for this benchmark case")
+
+    dedup_holds = tuple(dict.fromkeys(hold_reasons))
+    dedup_errors = tuple(dict.fromkeys(errors))
+
+    if dedup_holds or dedup_errors:
+        obs_status: Literal["TEST_ONLY_MOCK", "REAL_MODEL_OBSERVED", "HOLD", "FAILED"] = "HOLD"
+        validity: Literal["NOT_REAL_BENCHMARK", "ELIGIBLE_REAL_BENCHMARK", "HOLD"] = "HOLD"
+    elif execution_mode == "TEST_ONLY_MOCK":
+        obs_status = "TEST_ONLY_MOCK"
+        validity = "NOT_REAL_BENCHMARK"
+    else:
+        obs_status = "REAL_MODEL_OBSERVED"
+        validity = "ELIGIBLE_REAL_BENCHMARK" if provenance.evidence_type == "HUMAN_SUPPLIED" else "NOT_REAL_BENCHMARK"
+
+    structural_check = evaluate_benchmark_structure(
+        saved_case, brief, stages=tuple(all_stages), package=verified_pkg,
+    )
+    semantic_status = _derive_semantic_status(
+        judge_receipt=judge_receipt,
+        structural_check=structural_check,
+        execution_mode=execution_mode,
+        provenance=provenance,
+    )
+    telemetry = aggregate_benchmark_telemetry(
+        traces_tuple,
+        queue_wait_ms=queue_wait_ms,
+        retry_wall_time_ms=retry_wall_time_ms,
+        human_active_time_ms=human_active_time_ms,
+    )
+    nsm = _evaluate_observation_nsm(
+        status=obs_status,
+        execution_mode=execution_mode,
+        provenance=provenance,
+        structural_check=structural_check,
+        semantic_status=semantic_status,
+        judge_receipt=judge_receipt,
+        telemetry=telemetry,
+        consumer_evidence=consumer_evidence,
+        hold_reasons=dedup_holds,
+        errors=dedup_errors,
+    )
+
+    obs = A03BenchmarkObservation(
+        sample_id=sample_id,
+        attempt=attempt,
+        cohort_id=saved_case.cohort_id,
+        case_id=saved_case.case_id,
+        case_digest=saved_case.digest,
+        rubric_version=saved_case.rubric_version,
+        source_sha=saved_case.source_sha,
+        brief_id=saved_case.brief_id,
+        source_brief_digest=saved_case.source_brief_digest,
+        brief_class=saved_case.brief_class,
+        strategy=strategy,
+        requested_configuration=requested_config,
+        observed_provider=observed_provider,
+        observed_effort=observed_effort,
+        job_digests=tuple(t.job_digest for t in model_traces),
+        stage_result_digests=tuple(t.stage_digest for t in model_traces),
+        cycle_job_digest=cycle_job_digest,
+        cycle_result_digest=cycle_result_digest,
+        production_job_digest=prod_job_digest,
+        production_result_digest=prod_result_digest,
+        package_id=pkg_id,
+        package_revision=pkg_rev,
+        package_digest=pkg_digest,
+        explore_receipt_digest=explore_digest,
+        critic_receipt_digests=tuple(critic_digests),
+        selector_receipt_digest=selector_digest,
+        develop_receipt_digest=develop_digest,
+        package_receipt_digest=package_receipt_digest,
+        consumer_evidence=consumer_evidence,
+        judge_receipt=judge_receipt,
+        provenance=provenance,
+        research_status=research_status,
+        evidence_refs=evidence_refs,
+        evidence_digests=evidence_digests,
+        role_traces=traces_tuple,
+        structural_check=structural_check,
+        semantic_status=semantic_status,
+        telemetry=telemetry,
+        nsm=nsm,
+        started_at=started_at,
+        completed_at=completed_at,
+        execution_mode=execution_mode,
+        status=obs_status,
+        hold_reasons=dedup_holds,
+        errors=dedup_errors,
+        benchmark_validity=validity,
+    )
+    sidecars.save_benchmark_observation(obs)
+    return sidecars.load_benchmark_observation_by_digest(obs.digest)
+
+
+def _build_benchmark_comparison_payload(
+    *,
+    comparison_id: str,
+    cases: tuple[A03BenchmarkCase, ...],
+    observations: tuple[A03BenchmarkObservation, ...],
+    strategies: tuple[Literal["S1", "S2", "S3"], ...],
+    provenance: CreativeJobProvenance,
+    created_at: str,
+) -> A03BenchmarkComparison:
+    if not cases:
+        raise CreativeValidationError("benchmark comparison requires at least one declared cohort case")
+    strategies_norm = _distinct_texts(strategies, "strategies")
+    if len(strategies_norm) < 2 or not set(strategies_norm) <= set(BENCHMARK_STRATEGIES):
+        raise CreativeValidationError("comparison requires at least two distinct strategy labels")
+
+    cohort_id = cases[0].cohort_id
+    rubric_version = cases[0].rubric_version
+    source_sha = cases[0].source_sha
+    hold_reasons: list[str] = []
+
+    if any(c.cohort_id != cohort_id for c in cases):
+        hold_reasons.append("NONCOMPARABLE_COHORT")
+    if any(c.rubric_version != rubric_version for c in cases):
+        hold_reasons.append("NONCOMPARABLE_RUBRIC")
+    if any(c.source_sha != source_sha for c in cases):
+        hold_reasons.append("STALE_SOURCE_SHA")
+
+    case_by_id: dict[str, A03BenchmarkCase] = {}
+    for c in cases:
+        if c.case_id in case_by_id:
+            raise CreativeValidationError("duplicate case_id in declared cohort")
+        case_by_id[c.case_id] = c
+
+    seen_obs_digests: set[str] = set()
+    receipt_owner: dict[str, str] = {}
+    job_owner: dict[str, str] = {}
+    cycle_owner: dict[str, str] = {}
+    provider_id_owner: dict[str, str] = {}
+
+    for obs in observations:
+        if obs.digest in seen_obs_digests:
+            raise CreativeValidationError("duplicate observation in comparison")
+        seen_obs_digests.add(obs.digest)
+        if obs.cohort_id != cohort_id:
+            hold_reasons.append("NONCOMPARABLE_COHORT")
+        if obs.rubric_version != rubric_version:
+            hold_reasons.append("NONCOMPARABLE_RUBRIC")
+        if obs.source_sha != source_sha:
+            hold_reasons.append("STALE_SOURCE_SHA")
+        declared = case_by_id.get(obs.case_id)
+        if declared is None or declared.digest != obs.case_digest or declared.source_brief_digest != obs.source_brief_digest:
+            hold_reasons.append("UNDECLARED_COHORT_CASE")
+        # Cross-strategy replay detection: distinct strategies must come from genuinely separate workflows.
+        for t in obs.role_traces:
+            if t.receipt_digest is not None:
+                prev = receipt_owner.get(t.receipt_digest)
+                if prev is not None and prev != obs.strategy:
+                    hold_reasons.append("REPLAYED_WORKFLOW_ACROSS_STRATEGIES")
+                receipt_owner[t.receipt_digest] = obs.strategy
+            if t.job_digest is not None:
+                prev = job_owner.get(t.job_digest)
+                if prev is not None and prev != obs.strategy:
+                    hold_reasons.append("REPLAYED_WORKFLOW_ACROSS_STRATEGIES")
+                job_owner[t.job_digest] = obs.strategy
+            if t.provider_request_id is not None:
+                prev = provider_id_owner.get(t.provider_request_id)
+                if prev is not None and prev != obs.strategy:
+                    hold_reasons.append("REPLAYED_WORKFLOW_ACROSS_STRATEGIES")
+                provider_id_owner[t.provider_request_id] = obs.strategy
+        if obs.cycle_result_digest is not None:
+            prev = cycle_owner.get(obs.cycle_result_digest)
+            if prev is not None and prev != obs.strategy:
+                hold_reasons.append("REPLAYED_WORKFLOW_ACROSS_STRATEGIES")
+            cycle_owner[obs.cycle_result_digest] = obs.strategy
+
+    sorted_case_ids = tuple(sorted(case_by_id))
+    sorted_case_digests = tuple(case_by_id[cid].digest for cid in sorted_case_ids)
+
+    valid_by_strategy: dict[str, dict[str, list[A03BenchmarkObservation]]] = {s: {} for s in strategies_norm}
+    all_by_strategy: dict[str, list[A03BenchmarkObservation]] = {s: [] for s in strategies_norm}
+    for obs in observations:
+        if obs.strategy not in all_by_strategy:
+            continue
+        all_by_strategy[obs.strategy].append(obs)
+        if (obs.case_id in case_by_id
+                and obs.case_digest == case_by_id[obs.case_id].digest
+                and obs.cohort_id == cohort_id
+                and obs.rubric_version == rubric_version
+                and obs.source_sha == source_sha
+                and obs.status in ("TEST_ONLY_MOCK", "REAL_MODEL_OBSERVED")):
+            valid_by_strategy[obs.strategy].setdefault(obs.case_id, []).append(obs)
+
+    if not hold_reasons:
+        paired_ids = tuple(
+            cid for cid in sorted_case_ids
+            if all(cid in valid_by_strategy[s] for s in strategies_norm)
+        )
+    else:
+        paired_ids = ()
+
+    missing_by_strategy = {
+        s: tuple(cid for cid in sorted_case_ids if cid not in valid_by_strategy[s])
+        for s in strategies_norm
+    }
+
+    summaries: list[BenchmarkStrategySummary] = []
+    global_missing_coverage: list[str] = []
+    any_mock_or_synthetic = provenance.evidence_type != "HUMAN_SUPPLIED" or any(
+        c.provenance.evidence_type != "HUMAN_SUPPLIED" for c in cases
+    )
+    for obs in observations:
+        if (obs.status == "TEST_ONLY_MOCK" or obs.execution_mode == "TEST_ONLY_MOCK"
+                or obs.benchmark_validity == "NOT_REAL_BENCHMARK"
+                or obs.provenance.evidence_type != "HUMAN_SUPPLIED"):
+            any_mock_or_synthetic = True
+
+    for s in strategies_norm:
+        s_all = all_by_strategy[s]
+        paired_obs = [obs for cid in paired_ids for obs in valid_by_strategy[s].get(cid, ())]
+        s_missing: list[str] = []
+        if not paired_obs:
+            s_missing.append("NO_PAIRED_CASES")
+        for obs in paired_obs:
+            for item in obs.nsm.missing_coverage:
+                if item not in s_missing:
+                    s_missing.append(item)
+        if paired_obs and all(o.telemetry.input_tokens_status == "OBSERVED" for o in paired_obs):
+            sum_in = sum(o.telemetry.total_input_tokens for o in paired_obs)
+        else:
+            sum_in = None
+        if paired_obs and all(o.telemetry.output_tokens_status == "OBSERVED" for o in paired_obs):
+            sum_out = sum(o.telemetry.total_output_tokens for o in paired_obs)
+        else:
+            sum_out = None
+        if paired_obs and all(o.telemetry.wall_time_status == "OBSERVED" for o in paired_obs):
+            sum_wall = sum(o.telemetry.total_wall_time_ms for o in paired_obs)
+        else:
+            sum_wall = None
+        if paired_obs and all(o.telemetry.human_active_time_status == "OBSERVED" for o in paired_obs):
+            sum_human = sum(o.telemetry.human_active_time_ms for o in paired_obs)
+        else:
+            sum_human = None
+        if (paired_obs and not s_missing and not any_mock_or_synthetic
+                and all(o.nsm.status == "SCORED" and o.nsm.score is not None for o in paired_obs)):
+            mean_nsm = round(sum(o.nsm.score for o in paired_obs) / len(paired_obs), 6)
+        else:
+            mean_nsm = None
+        for item in s_missing:
+            if item not in global_missing_coverage:
+                global_missing_coverage.append(item)
+        summaries.append(BenchmarkStrategySummary(
+            strategy=s,
+            observation_digests=tuple(o.digest for o in paired_obs),
+            observed_case_ids=tuple(sorted({o.case_id for o in s_all if o.case_id in case_by_id})),
+            paired_case_ids=paired_ids,
+            missing_case_ids=missing_by_strategy[s],
+            real_model_count=sum(1 for o in s_all if o.status == "REAL_MODEL_OBSERVED"),
+            mock_count=sum(1 for o in s_all if o.status == "TEST_ONLY_MOCK"),
+            hold_or_failed_count=sum(1 for o in s_all if o.status in ("HOLD", "FAILED")),
+            structural_valid_count=sum(1 for o in paired_obs if o.structural_check.status == "STRUCTURAL_VALID"),
+            measured_semantic_pass_count=sum(1 for o in paired_obs if o.semantic_status == "MEASURED_PASS"),
+            a04_handoff_verified_count=sum(
+                1 for o in paired_obs if o.consumer_evidence.source_handoff_status == "SOURCE_HANDOFF_VERIFIED"
+            ),
+            useful_consumer_outcome_count=sum(
+                1 for o in paired_obs if o.consumer_evidence.commercial_utility_status == "OBSERVED_USEFUL"
+            ),
+            total_input_tokens=sum_in,
+            total_output_tokens=sum_out,
+            total_wall_time_ms=sum_wall,
+            total_human_active_time_ms=sum_human,
+            mean_nsm_v1=mean_nsm,
+            missing_coverage=tuple(s_missing),
+        ))
+
+    dedup_holds = tuple(dict.fromkeys(hold_reasons))
+    dedup_missing = tuple(dict.fromkeys(global_missing_coverage))
+
+    if dedup_holds:
+        outcome: Literal["NOT_REAL_BENCHMARK", "INSUFFICIENT_EVIDENCE", "INCOMPLETE", "HOLD", "COMPARED"] = "HOLD"
+        ranking_status: Literal["UNRANKED", "PAIRED_COMPARED"] = "UNRANKED"
+        winner: Literal["S1", "S2", "S3"] | None = None
+    elif not paired_ids:
+        outcome = "INSUFFICIENT_EVIDENCE"
+        ranking_status = "UNRANKED"
+        winner = None
+    elif any_mock_or_synthetic:
+        outcome = "NOT_REAL_BENCHMARK"
+        ranking_status = "UNRANKED"
+        winner = None
+    elif dedup_missing or any(s.mean_nsm_v1 is None for s in summaries):
+        outcome = "INCOMPLETE"
+        ranking_status = "UNRANKED"
+        winner = None
+    else:
+        outcome = "COMPARED"
+        ranking_status = "PAIRED_COMPARED"
+        best = max(s.mean_nsm_v1 for s in summaries)
+        leaders = [s.strategy for s in summaries if abs(s.mean_nsm_v1 - best) <= 1e-9]
+        winner = leaders[0] if len(leaders) == 1 else None
+
+    return A03BenchmarkComparison(
+        comparison_id=comparison_id,
+        cohort_id=cohort_id,
+        rubric_version=rubric_version,
+        source_sha=source_sha,
+        case_digests=sorted_case_digests,
+        case_ids=sorted_case_ids,
+        compared_strategies=strategies_norm,
+        observation_digests=tuple(o.digest for o in observations),
+        paired_case_ids=paired_ids,
+        missing_cases_by_strategy=missing_by_strategy,
+        strategy_summaries=tuple(summaries),
+        nsm_version=NSM_V1_VERSION,
+        nsm_weights=dict(NSM_V1_WEIGHTS),
+        outcome=outcome,
+        ranking_status=ranking_status,
+        winner_strategy=winner,
+        hold_reasons=dedup_holds,
+        missing_coverage=dedup_missing,
+        provenance=provenance,
+        created_at=created_at,
+    )
+
+
+def compare_benchmark_observations(
+    *,
+    comparison_id: str,
+    cases: tuple[A03BenchmarkCase, ...],
+    observations: tuple[A03BenchmarkObservation, ...],
+    store: CreativeStore | CreativeSidecarStore,
+    provenance: CreativeJobProvenance,
+    created_at: str,
+    strategies: tuple[Literal["S1", "S2", "S3"], ...] = BENCHMARK_STRATEGIES,
+) -> A03BenchmarkComparison:
+    """Compare persisted observations across strategy labels on a fixed cohort.
+
+    Re-verifies every case and observation from CreativeSidecarStore. Returns
+    NOT_REAL_BENCHMARK / INSUFFICIENT_EVIDENCE / INCOMPLETE / HOLD instead of
+    fabricating a winner without complete trusted real samples.
+    """
+    from .sidecars import CreativeSidecarStore
+
+    sidecars = store if isinstance(store, CreativeSidecarStore) else CreativeSidecarStore(store)
+    loaded_cases = tuple(sidecars.load_benchmark_case_by_digest(c.digest) for c in cases)
+    if loaded_cases != tuple(cases):
+        raise CreativeValidationError("comparison cases disagree with stored cohort records")
+    loaded_obs = tuple(sidecars.load_benchmark_observation_by_digest(o.digest) for o in observations)
+    if loaded_obs != tuple(observations):
+        raise CreativeValidationError("comparison observations disagree with stored observation records")
+    comp = _build_benchmark_comparison_payload(
+        comparison_id=comparison_id,
+        cases=loaded_cases,
+        observations=loaded_obs,
+        strategies=strategies,
+        provenance=provenance,
+        created_at=created_at,
+    )
+    sidecars.save_benchmark_comparison(comp)
+    return sidecars.load_benchmark_comparison_by_digest(comp.digest)

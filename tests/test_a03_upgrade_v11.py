@@ -29,6 +29,13 @@ from ai_commerce.creative import (
     MediaOutputTarget, ProductionLineage, ProductionPackageParent, ProductionPackageSpec,
     ProductionScene, QAExpectation, RightsAttribution, SceneTransition, ScriptSegment,
     revise_production_package, run_creative_production,
+    A03BenchmarkCase, A03BenchmarkComparison, A03BenchmarkObservation,
+    BENCHMARK_RUBRIC_VERSION, BENCHMARK_STRATEGIES,
+    BenchmarkConsumerEvidence, BenchmarkJudgeReceipt, BenchmarkNSMScore,
+    BenchmarkRoleTrace, BenchmarkRubricScores, BenchmarkStructuralCheck, BenchmarkTelemetry,
+    NSM_V1_VERSION, NSM_V1_WEIGHTS,
+    aggregate_benchmark_telemetry, calculate_nsm_v1_score, compare_benchmark_observations,
+    evaluate_benchmark_structure, observe_benchmark_run,
 )
 from ai_commerce.providers.base import ProviderCapabilities, ProviderError
 
@@ -2647,3 +2654,931 @@ def test_r4_sidecar_result_digest_lineage_and_opt_in_production_seam(installed_c
     assert isinstance(orch.last_result.receiver_receipt, A04CreativeHandoffReceipt)
     assert orch.last_result.receiver_receipt.media_execution == "NOT_ATTEMPTED"
     assert orch.last_result.receiver_receipt.status == "SOURCE_HANDOFF_VERIFIED"
+
+
+# ---------------------------------------------------------------------------
+# R5a benchmark foundation & evidence-led comparison tests (TEST_ONLY_MOCK).
+# Zero real provider/media/spend/account/rights/HostOps/Wake/Send effects.
+# ---------------------------------------------------------------------------
+
+R5A_SOURCE_SHA = "f5ac9f274448253bd880538840642f4e2ce97eba"
+R5A_TS_START = "2026-11-20T00:00:00Z"
+R5A_TS_END = "2026-11-20T00:01:00Z"
+
+
+def _r5a_provenance(ref="fixture:r5a-mock"):
+    return CreativeJobProvenance("test:r5a-benchmark", ref, sha256_bytes(ref.encode("utf-8")), "SYNTHETIC_FIXTURE")
+
+
+class _R5ABenchmarkMockClient(FakeClient):
+    """TEST_ONLY_MOCK client supporting standalone S1/S2 stages and R2 cycles with controlled usage."""
+
+    def __init__(self, *, usage_by_op=None, fault=None, req_prefix="r5a"):
+        super().__init__()
+        self.usage_by_op = usage_by_op or {}
+        self.fault = fault
+        self.req_prefix = req_prefix
+        self._cycle_client = CycleFakeClient()
+
+    def complete(self, request):
+        self.calls.append(request)
+        creative = request.creative
+        usage = self.usage_by_op.get(creative.operation, UsageObservation())
+        req_id = f"TEST_ONLY_MOCK:{self.req_prefix}:{len(self.calls)}:{creative.digest}"
+        if self.fault == "error":
+            return StructuredModelResponse("ERROR", observation=MOCK, usage=usage,
+                                           request_id=req_id, error_code="UNKNOWN_EFFECT",
+                                           message="TEST_ONLY_MOCK unknown provider effect")
+        if self.fault == "refusal":
+            return StructuredModelResponse("REFUSED", observation=MOCK, usage=usage,
+                                           request_id=req_id, error_code="MODEL_REFUSED",
+                                           message="TEST_ONLY_MOCK refused")
+        if creative.cycle is not None:
+            resp = self._cycle_client.complete(request)
+            return replace(resp, usage=usage, request_id=req_id)
+        if creative.operation == "EXPLORE":
+            drafts = [
+                ConceptDraft(
+                    f"family-{i}",
+                    f"Ý tưởng {i} ({creative.brief['brief_id']})",
+                    f"Cơ chế kể chuyện {i} cho {creative.brief['objective']}",
+                    f"Ngôn ngữ hình ảnh {i}",
+                    tuple(creative.brief.get("source_refs", [])),
+                    ("TEST_ONLY_MOCK unverified creative hypothesis",),
+                )
+                for i in range(creative.count or 2)
+            ]
+            return StructuredModelResponse("OK", payload(drafts=drafts), observation=MOCK, usage=usage, request_id=req_id)
+        if creative.operation == "CRITIQUE":
+            return StructuredModelResponse(
+                "OK",
+                payload(critique=f"TEST_ONLY_MOCK independent critique for {creative.source.digest}"),
+                observation=MOCK, usage=usage, request_id=req_id,
+            )
+        raise AssertionError(f"unexpected operation in _R5ABenchmarkMockClient: {creative.operation}")
+
+
+def _r5a_brief_and_evidence(brief_class):
+    if brief_class == "VN_PRODUCT":
+        text = "Giới thiệu phin cà phê gốm Bát Tràng giữ nhiệt 45 phút, hương vị đậm đà buổi sáng."
+        ev_content = "Thông số xưởng Bát Tràng: gốm nung 1280C, dung tích 180ml.\n"
+        ev = CreativeEvidenceSource("source:vn-product-spec", ev_content,
+                                    sha256_bytes(ev_content.encode("utf-8")), "fixture:verified-vn-product")
+        brief = {
+            **intake_brief(text, brief_id="brief-vn-product"),
+            "product_ref": "sku:phin-gom-bat-trang-180ml",
+            "source_refs": [ev.source_ref],
+        }
+        return brief, (ev,), True
+    if brief_class == "VN_NON_PRODUCT_FICTION":
+        text = "Truyện ngắn hư cấu về người gác đèn biển ở Cù Lao Chàm nghe tiếng sóng đêm, không sản phẩm."
+        ev_content = "Ghi chú bối cảnh văn hóa biển miền Trung (hư cấu).\n"
+        ev = CreativeEvidenceSource("source:vn-fiction-note", ev_content,
+                                    sha256_bytes(ev_content.encode("utf-8")), "fixture:verified-vn-fiction")
+        brief = {
+            **intake_brief(text, brief_id="brief-vn-fiction"),
+            "product_ref": None,
+            "source_refs": [ev.source_ref],
+        }
+        return brief, (ev,), False
+    text = "Cơn mưa đêm trên mái ngói cổ Hội An: hoàn toàn im lặng, không thoại, không nhạc, không CTA."
+    ev_content = "Ghi chú ánh sáng và nhịp mưa tĩnh lặng (không thoại, không CTA).\n"
+    ev = CreativeEvidenceSource("source:silent-mood", ev_content,
+                                sha256_bytes(ev_content.encode("utf-8")), "fixture:verified-silent-note")
+    brief = {
+        **intake_brief(text, brief_id="brief-silent-no-cta"),
+        "product_ref": None,
+        "cta": None,
+        "audio": {"mode": "silence"},
+        "source_refs": [ev.source_ref],
+    }
+    return brief, (ev,), False
+
+
+def _run_r5a_strategy_workflows(sidecars, case, brief, evidence, *, tag="run1", usage_by_op=None,
+                                include_retry_s1=False, silent_pkg=False):
+    cfg = ModelConfiguration("requested-provider", "requested-model", "xhigh")
+    prov = _r5a_provenance(f"fixture:{case.case_id}:{tag}")
+    usage_map = usage_by_op if usage_by_op is not None else {
+        "EXPLORE": UsageObservation("OBSERVED", 400, 220),
+        "CRITIQUE": UsageObservation("OBSERVED", 250, 140),
+        "SELECT": UsageObservation("OBSERVED", 300, 110),
+        "DEVELOP": UsageObservation("OBSERVED", 350, 180),
+        "PRODUCE_PACKAGE": UsageObservation("OBSERVED", 500, 420),
+    }
+
+    # S1: single generator (optionally with an observed retry stage).
+    s1_client = _R5ABenchmarkMockClient(usage_by_op=usage_map, req_prefix=f"s1-{case.case_id}-{tag}")
+    s1_reasoner = LiveCreativeReasoner(cfg, s1_client)
+    s1_job = A03CreativeJob.create(
+        ReasoningRequest.create(brief, operation="EXPLORE", count=2),
+        journey_id="r5a", cycle_id=f"{case.case_id}:{tag}", job_id="s1:explore", attempt=1,
+        correlation_id=f"corr:s1:{case.case_id}:{tag}", provenance=prov,
+        configuration=cfg, purpose="TEST_ONLY_MOCK",
+    )
+    s1_stage = run_creative_stage(s1_job, sidecars, s1_reasoner)
+    retry_stages = ()
+    if include_retry_s1:
+        err_client = _R5ABenchmarkMockClient(
+            usage_by_op={"EXPLORE": UsageObservation("OBSERVED", 120, 30)},
+            fault="error", req_prefix=f"s1-retry-{case.case_id}-{tag}",
+        )
+        retry_job = A03CreativeJob.create(
+            ReasoningRequest.create(brief, operation="EXPLORE", count=2),
+            journey_id="r5a", cycle_id=f"{case.case_id}:{tag}", job_id="s1:explore:retry", attempt=1,
+            correlation_id=f"corr:s1:retry:{case.case_id}:{tag}", provenance=prov,
+            configuration=cfg, purpose="TEST_ONLY_MOCK",
+        )
+        retry_stages = (run_creative_stage(retry_job, sidecars, LiveCreativeReasoner(cfg, err_client)),)
+
+    obs_s1 = observe_benchmark_run(
+        case, sidecars, strategy="S1", sample_id=f"sample:{case.case_id}:s1:{tag}", attempt=1,
+        provenance=prov, started_at=R5A_TS_START, completed_at=R5A_TS_END,
+        stages=(s1_stage,), retry_stages=retry_stages,
+        step_timings_ms={"explore:0": 1200, "retry:explore:0": 400},
+        step_retries={"explore:0": 0, "retry:explore:0": 0},
+        queue_wait_ms=150, retry_wall_time_ms=400 if include_retry_s1 else 0, human_active_time_ms=None,
+    )
+
+    # S2: generator + independent critic (genuinely separate workflow & receipts).
+    s2_client = _R5ABenchmarkMockClient(usage_by_op=usage_map, req_prefix=f"s2-{case.case_id}-{tag}")
+    s2_reasoner = LiveCreativeReasoner(cfg, s2_client)
+    s2_explore_job = A03CreativeJob.create(
+        ReasoningRequest.create(brief, operation="EXPLORE", count=2),
+        journey_id="r5a", cycle_id=f"{case.case_id}:{tag}", job_id="s2:explore", attempt=1,
+        correlation_id=f"corr:s2:{case.case_id}:{tag}", provenance=prov,
+        configuration=cfg, purpose="TEST_ONLY_MOCK",
+    )
+    s2_explore = run_creative_stage(s2_explore_job, sidecars, s2_reasoner)
+    explored_concept = s2_explore.reasoning.concepts()[0]
+    s2_critic_job = A03CreativeJob.create(
+        ReasoningRequest.create(brief, operation="CRITIQUE", source=explored_concept),
+        journey_id="r5a", cycle_id=f"{case.case_id}:{tag}", job_id="s2:critic", attempt=1,
+        correlation_id=f"corr:s2:critic:{case.case_id}:{tag}", provenance=prov,
+        configuration=cfg, purpose="TEST_ONLY_MOCK",
+    )
+    s2_critic = run_creative_stage(s2_critic_job, sidecars, s2_reasoner)
+    obs_s2 = observe_benchmark_run(
+        case, sidecars, strategy="S2", sample_id=f"sample:{case.case_id}:s2:{tag}", attempt=1,
+        provenance=prov, started_at=R5A_TS_START, completed_at=R5A_TS_END,
+        stages=(s2_explore, s2_critic),
+        step_timings_ms={"explore:0": 1300, "critique:1": 900},
+        step_retries={"explore:0": 0, "critique:1": 0},
+        queue_wait_ms=200, retry_wall_time_ms=0, human_active_time_ms=5000,
+    )
+
+    # S3: source-research + generator + independent critics + selector + bounded developer + R3 package.
+    s3_cycle_client = _R5ABenchmarkMockClient(usage_by_op=usage_map, req_prefix=f"s3-cycle-{case.case_id}-{tag}")
+    s3_cycle_job = cycle_job(
+        brief=brief, count=2, evidence=evidence,
+        seed_options={"journey_id": "r5a", "cycle_id": f"{case.case_id}:{tag}", "job_id": "s3:cycle",
+                      "provenance": prov, "configuration": cfg, "purpose": "TEST_ONLY_MOCK"},
+    )
+    s3_cycle = run_creative_cycle(s3_cycle_job, sidecars, LiveCreativeReasoner(cfg, s3_cycle_client))
+    s3_prod_client = ProductionFakeClient(
+        silent=silent_pkg, usage=usage_map.get("PRODUCE_PACKAGE", UsageObservation()),
+        request_id=f"TEST_ONLY_MOCK:s3-prod:{case.case_id}:{tag}",
+    )
+    s3_prod_job = production_job(
+        s3_cycle, journey_id="r5a", cycle_id=f"{case.case_id}:{tag}", job_id="s3:prod",
+        provenance=prov, configuration=cfg, purpose="TEST_ONLY_MOCK",
+    )
+    s3_prod = run_creative_production(s3_prod_job, sidecars, LiveCreativeReasoner(cfg, s3_prod_client))
+
+    mock_judge = BenchmarkJudgeReceipt(
+        judge_receipt_id=f"judge:mock:{case.case_id}:{tag}",
+        judge_kind="TEST_ONLY_MOCK",
+        judge_actor_ref="judge:test-only-mock",
+        case_digest=case.digest,
+        source_brief_digest=case.source_brief_digest,
+        evaluated_artifact_digest=s3_prod.package.digest,
+        scores=BenchmarkRubricScores(
+            brief_adherence=0.85,
+            originality_non_duplication=0.80,
+            factual_evidence_accuracy=0.90 if case.factual_evidence_applicable else None,
+            script_scene_s0_action_s1_consistency=0.88,
+            continuity_camera_audio_silence_rights_qa_readiness=0.84,
+        ),
+        verdict="PASS",
+        rationale="TEST_ONLY_MOCK judge evaluation; never promotes to real benchmark PASS.",
+        evidence_refs=tuple(e.source_ref for e in evidence),
+        judge_provider=MOCK,
+        provenance=prov,
+        observed_at=R5A_TS_END,
+    )
+    s3_timings = {
+        "research": 50,
+        "explore": 1100,
+        "critic:0:0": 600,
+        "critic:0:1": 650,
+        "select:0": 500,
+        "develop": 800,
+        "produce_package": 1500,
+    }
+    s3_retries = {k: 0 for k in s3_timings}
+    obs_s3 = observe_benchmark_run(
+        case, sidecars, strategy="S3", sample_id=f"sample:{case.case_id}:s3:{tag}", attempt=1,
+        provenance=prov, started_at=R5A_TS_START, completed_at=R5A_TS_END,
+        cycle=s3_cycle, production_result=s3_prod, judge_receipt=mock_judge,
+        step_timings_ms=s3_timings, step_retries=s3_retries,
+        queue_wait_ms=250, retry_wall_time_ms=0, human_active_time_ms=4000,
+    )
+    return obs_s1, obs_s2, obs_s3
+
+
+def test_r5a_positive_three_brief_classes_three_strategies_roundtrip_idempotency_and_comparison(tmp_path):
+    sidecars = CreativeSidecarStore(tmp_path / "creative")
+    cases = []
+    observations = []
+    for idx, brief_class in enumerate(("VN_PRODUCT", "VN_NON_PRODUCT_FICTION", "SILENT_NO_CTA")):
+        brief, evidence, factual_applicable = _r5a_brief_and_evidence(brief_class)
+        sidecars.creative.save_brief(brief)
+        case = A03BenchmarkCase.create(
+            brief,
+            case_id=f"case-{idx + 1}-{brief_class.lower()}",
+            cohort_id="cohort-vn-r5a-v1",
+            source_sha=R5A_SOURCE_SHA,
+            brief_class=brief_class,
+            factual_evidence_applicable=factual_applicable,
+            provenance=_r5a_provenance(f"fixture:case:{brief_class}"),
+            created_at=R5A_TS_START,
+            language="vi",
+            expected_evidence_refs=tuple(e.source_ref for e in evidence),
+        )
+        saved_digest = sidecars.save_benchmark_case(case)
+        assert saved_digest == case.digest
+        # Duplicate-safe idempotent save of identical case.
+        assert sidecars.save_benchmark_case(case) == case.digest
+        assert sidecars.load_benchmark_case(case.cohort_id, case.case_id) == case
+        assert A03BenchmarkCase.from_json(case.to_json()) == case
+        cases.append(case)
+        obs_s1, obs_s2, obs_s3 = _run_r5a_strategy_workflows(
+            sidecars, case, brief, evidence,
+            include_retry_s1=(brief_class == "VN_PRODUCT"),
+            silent_pkg=(brief_class == "SILENT_NO_CTA"),
+        )
+        observations.extend((obs_s1, obs_s2, obs_s3))
+
+    # Check S1 with observed retry token accounting & UNKNOWN human time (never 0).
+    vn_s1, vn_s2, vn_s3 = observations[0], observations[1], observations[2]
+    assert vn_s1.status == "TEST_ONLY_MOCK" and vn_s1.benchmark_validity == "NOT_REAL_BENCHMARK"
+    assert vn_s1.telemetry.input_tokens_status == "OBSERVED"
+    assert vn_s1.telemetry.total_input_tokens == 400 + 120  # main EXPLORE + observed retry EXPLORE
+    assert vn_s1.telemetry.total_output_tokens == 220 + 30
+    assert vn_s1.telemetry.total_retries == 1
+    assert vn_s1.telemetry.wall_time_status == "OBSERVED"
+    assert vn_s1.telemetry.total_wall_time_ms == 1200 + 400 + 150 + 400
+    assert vn_s1.telemetry.human_active_time_status == "UNKNOWN" and vn_s1.telemetry.human_active_time_ms is None
+    assert vn_s1.structural_check.status == "STRUCTURAL_VALID"
+    assert vn_s1.semantic_status == "UNMEASURED"  # No judge -> remains UNMEASURED, never auto-PASS.
+    assert vn_s1.nsm.status == "NOT_REAL_BENCHMARK" and vn_s1.nsm.score is None
+
+    # Check S2 independent critic + role token breakdown.
+    assert vn_s2.status == "TEST_ONLY_MOCK" and len(vn_s2.critic_receipt_digests) == 1
+    assert vn_s2.explore_receipt_digest != vn_s2.critic_receipt_digests[0]
+    assert vn_s2.telemetry.total_input_tokens == 400 + 250
+    assert vn_s2.telemetry.total_output_tokens == 220 + 140
+    assert vn_s2.telemetry.human_active_time_status == "OBSERVED" and vn_s2.telemetry.human_active_time_ms == 5000
+
+    # Check S3 full lineage (research + explore + 2 critics + select + develop + R3 package) + mock judge control.
+    assert vn_s3.status == "TEST_ONLY_MOCK" and vn_s3.research_status == "VERIFIED_SOURCE_BYTES"
+    assert vn_s3.package_digest is not None and vn_s3.selector_receipt_digest is not None
+    assert vn_s3.develop_receipt_digest is not None and len(vn_s3.critic_receipt_digests) == 2
+    assert vn_s3.telemetry.total_input_tokens == 400 + 250 + 250 + 300 + 350 + 500
+    assert vn_s3.telemetry.total_output_tokens == 220 + 140 + 140 + 110 + 180 + 420
+    assert vn_s3.structural_check.status == "STRUCTURAL_VALID"
+    assert vn_s3.semantic_status == "TEST_ONLY_MOCK"  # Mock judge NEVER promotes to MEASURED_PASS.
+    assert vn_s3.nsm.status == "NOT_REAL_BENCHMARK" and vn_s3.nsm.score is None
+
+    # Check silent/no-CTA S3 package structural silence check.
+    silent_s3 = observations[8]
+    assert silent_s3.brief_class == "SILENT_NO_CTA"
+    assert silent_s3.structural_check.status == "STRUCTURAL_VALID"
+    assert silent_s3.structural_check.continuity_camera_audio_silence_valid is True
+
+    # Strict schema roundtrip + duplicate-safe observation save.
+    for obs in observations:
+        assert A03BenchmarkObservation.from_json(obs.to_json()) == obs
+        assert sidecars.save_benchmark_observation(obs) == obs.digest
+        assert sidecars.load_benchmark_observation(
+            obs.cohort_id, obs.case_id, obs.strategy, obs.sample_id, obs.attempt,
+        ) == obs
+
+    # Paired comparison across all 3 strategy labels on fixed 3-case cohort.
+    comp = compare_benchmark_observations(
+        comparison_id="cmp-r5a-mock-v1",
+        cases=tuple(cases),
+        observations=tuple(observations),
+        store=sidecars,
+        provenance=_r5a_provenance("fixture:comparison"),
+        created_at=R5A_TS_END,
+        strategies=BENCHMARK_STRATEGIES,
+    )
+    assert comp.outcome == "NOT_REAL_BENCHMARK"
+    assert comp.ranking_status == "UNRANKED" and comp.winner_strategy is None
+    assert comp.nsm_version == NSM_V1_VERSION and comp.nsm_weights == NSM_V1_WEIGHTS
+    assert len(comp.paired_case_ids) == 3
+    assert all(comp.missing_cases_by_strategy[s] == () for s in BENCHMARK_STRATEGIES)
+    by_s = {s.strategy: s for s in comp.strategy_summaries}
+    assert by_s["S1"].total_input_tokens == (400 + 120) + 400 + 400
+    assert by_s["S1"].total_human_active_time_ms is None  # UNKNOWN stays None, never 0!
+    assert by_s["S2"].total_input_tokens == (400 + 250) * 3
+    assert by_s["S3"].total_input_tokens == (400 + 250 + 250 + 300 + 350 + 500) * 3
+    assert all(s.mean_nsm_v1 is None and s.measured_semantic_pass_count == 0 for s in comp.strategy_summaries)
+    assert A03BenchmarkComparison.from_json(comp.to_json()) == comp
+    assert sidecars.save_benchmark_comparison(comp) == comp.digest
+    assert sidecars.load_benchmark_comparison(comp.cohort_id, comp.comparison_id) == comp
+
+
+def test_r5a_positive_nsm_v1_formula_stability_and_renormalization():
+    assert abs(sum(NSM_V1_WEIGHTS.values()) - 1.0) < 1e-9
+    prod_scores = BenchmarkRubricScores(
+        brief_adherence=0.9,
+        originality_non_duplication=0.8,
+        factual_evidence_accuracy=0.85,
+        script_scene_s0_action_s1_consistency=0.88,
+        continuity_camera_audio_silence_rights_qa_readiness=0.82,
+    )
+    res1 = calculate_nsm_v1_score(prod_scores, total_tokens=10000, wall_time_ms=30000, human_active_time_ms=15000)
+    res2 = calculate_nsm_v1_score(prod_scores, total_tokens=10000, wall_time_ms=30000, human_active_time_ms=15000)
+    assert res1 == res2 and res1["version"] == "NSM_v1"
+    assert 0.0 < res1["score"] < 1.0
+    # Higher token / wall / human cost strictly decreases efficiency & composite score.
+    heavier = calculate_nsm_v1_score(prod_scores, total_tokens=40000, wall_time_ms=90000, human_active_time_ms=60000)
+    assert heavier["score"] < res1["score"]
+    # Non-product / silent briefs with factual_evidence_accuracy=None renormalize cleanly.
+    fiction_scores = BenchmarkRubricScores(
+        brief_adherence=0.9,
+        originality_non_duplication=0.9,
+        factual_evidence_accuracy=None,
+        script_scene_s0_action_s1_consistency=0.9,
+        continuity_camera_audio_silence_rights_qa_readiness=0.9,
+    )
+    fic_res = calculate_nsm_v1_score(fiction_scores, total_tokens=20000, wall_time_ms=60000, human_active_time_ms=60000)
+    assert fic_res["quality_component"] == 0.9
+    assert fic_res["token_efficiency_component"] == 0.5
+    assert fic_res["wall_time_efficiency_component"] == 0.5
+    assert fic_res["human_time_efficiency_component"] == 0.5
+    assert fic_res["score"] == round(0.55 * 0.9 + 0.20 * 0.5 + 0.15 * 0.5 + 0.10 * 0.5, 6)
+
+
+def test_r5a_positive_exact_r4_a04_receipt_correlation_and_consumer_separation(installed_cli, tmp_path, monkeypatch):
+    from ai_commerce.media.generation import A04CreativeHandoffReceipt, a04_handoff_receipt_path
+    from ai_commerce.production_orchestration import LocalAuthorization, ProductionPipelineOrchestrator
+
+    cli = installed_cli
+    brief, evidence, factual_applicable = _r5a_brief_and_evidence("SILENT_NO_CTA")
+    r2_sampler, r3_sampler = CycleFakeClient(), ProductionFakeClient(silent=True)
+
+    def dispatch(packet):
+        req = packet["request"]
+        creative = ReasoningRequest.from_dict(req["creative"])
+        model_req = StructuredModelRequest(ModelConfiguration.from_dict(req["config"]), creative)
+        if creative.production is not None:
+            return json.loads(r3_sampler.complete(model_req).output_json)
+        val = json.loads(r2_sampler.complete(model_req).output_json)
+        if creative.operation == "DEVELOP":
+            val["edits"] = {n: val["edits"].get(n) for n in ("family", "title", "premise", "visual_direction")}
+        return val
+
+    cli.creative_output = dispatch
+    install_fake_popen(monkeypatch, cli)
+    grant = InvocationAuthorization(True, True, "fixture:r5a-r4-grant")
+    root = tmp_path / "r5a-r4-creative"
+    sidecars = CreativeSidecarStore(root)
+    sidecars.creative.save_brief(brief)
+    prov = _r5a_provenance("fixture:r5a-r4-cli")
+    case = A03BenchmarkCase.create(
+        brief, case_id="case-r4-silent", cohort_id="cohort-r4-link", source_sha=R5A_SOURCE_SHA,
+        brief_class="SILENT_NO_CTA", factual_evidence_applicable=factual_applicable,
+        provenance=prov, created_at=R5A_TS_START, expected_evidence_refs=tuple(e.source_ref for e in evidence),
+    )
+    sidecars.save_benchmark_case(case)
+
+    reasoner = LiveCreativeReasoner(cli.config, CodexCliCreativeClient(cli.capability(), runner=None))
+    cycle = run_creative_cycle(
+        cycle_job(brief=brief, evidence=evidence, seed_options={
+            "journey_id": "r5a:r4", "cycle_id": "r5a:c1", "job_id": "r5a:p1",
+            "provenance": prov, "configuration": cli.config, "purpose": "PRODUCTION",
+        }),
+        sidecars, reasoner, authorization=grant,
+    )
+    prod_job = production_job(
+        cycle, journey_id="r5a:r4", cycle_id="r5a:c1", job_id="r5a:p1",
+        provenance=prov, configuration=cli.config, purpose="PRODUCTION",
+    )
+    local_grant = LocalAuthorization(
+        journey_id="r5a:r4", cycle_id="r5a:c1", job_id="r5a:p1",
+        source_sha=R5A_SOURCE_SHA, authorization_ref="fixture:r5a-a03-a04", route_id="a03-to-a04",
+    )
+    orch_dir = tmp_path / "orch"
+    orch = ProductionPipelineOrchestrator(state_dir=orch_dir, source_sha=R5A_SOURCE_SHA, local_authorization=local_grant)
+    prod_res = run_creative_production(prod_job, sidecars, reasoner, authorization=grant, production=orch)
+    assert prod_res.status == "CREATIVE_COMPLETE" and orch.last_result is not None
+    a04_receipt = orch.last_result.receiver_receipt
+    assert isinstance(a04_receipt, A04CreativeHandoffReceipt)
+    receipt_file = a04_handoff_receipt_path(orch_dir / "a04-handoffs", a04_receipt.receipt_id)
+    assert receipt_file.exists()
+
+    cli_calls_before = len(cli.calls)
+    obs = observe_benchmark_run(
+        case, sidecars, strategy="S3", sample_id="sample:r4-correlated", attempt=1,
+        provenance=prov, started_at=R5A_TS_START, completed_at=R5A_TS_END,
+        cycle=cycle, production_result=prod_res,
+        a04_receipt=a04_receipt, a04_receipt_path=receipt_file,
+    )
+    # Zero model/provider calls during benchmark observation.
+    assert len(cli.calls) == cli_calls_before
+    assert obs.consumer_evidence.source_handoff_status == "SOURCE_HANDOFF_VERIFIED"
+    assert obs.consumer_evidence.a04_receipt == a04_receipt
+    assert obs.consumer_evidence.a04_receipt_digest == a04_receipt.digest
+    # Source-handoff acceptance is explicitly distinguished from media quality and commercial utility.
+    assert obs.consumer_evidence.media_quality_status == "NOT_ATTEMPTED"
+    assert obs.consumer_evidence.commercial_utility_status == "NOT_ATTEMPTED"
+    # Synthetic fixture provenance keeps validity NOT_REAL_BENCHMARK and NSM unscored.
+    assert obs.benchmark_validity == "NOT_REAL_BENCHMARK"
+    assert obs.nsm.status == "NOT_REAL_BENCHMARK" and obs.nsm.score is None
+    assert "VERIFIED_USEFUL_CONSUMER_OUTCOME" in obs.nsm.missing_coverage
+    assert "NON_SYNTHETIC_PROVENANCE" in obs.nsm.missing_coverage
+    assert sidecars.load_benchmark_observation_by_digest(obs.digest) == obs
+    # Altered A04 receipt attempt or source_sha fails closed on save.
+    bad_a04_attempt = A04CreativeHandoffReceipt.create(**{
+        **{k: v for k, v in a04_receipt.to_dict().items() if k != "receipt_id"},
+        "attempt": a04_receipt.attempt + 1,
+    })
+    with pytest.raises(CreativeValidationError):
+        observe_benchmark_run(
+            case, sidecars, strategy="S3", sample_id="sample:r4-bad-attempt", attempt=1,
+            provenance=prov, started_at=R5A_TS_START, completed_at=R5A_TS_END,
+            cycle=cycle, production_result=prod_res, a04_receipt=bad_a04_attempt,
+        )
+
+
+def test_r5a_negative_forged_model_judge_and_consumer_receipts(tmp_path):
+    from ai_commerce.media.generation import A04CreativeHandoffReceipt
+
+    sidecars = CreativeSidecarStore(tmp_path / "creative")
+    brief, evidence, factual_applicable = _r5a_brief_and_evidence("VN_PRODUCT")
+    sidecars.creative.save_brief(brief)
+    prov = _r5a_provenance("fixture:neg-forged")
+    case = A03BenchmarkCase.create(
+        brief, case_id="case-forged", cohort_id="cohort-neg", source_sha=R5A_SOURCE_SHA,
+        brief_class="VN_PRODUCT", factual_evidence_applicable=factual_applicable,
+        provenance=prov, created_at=R5A_TS_START, expected_evidence_refs=tuple(e.source_ref for e in evidence),
+    )
+    sidecars.save_benchmark_case(case)
+    obs_s1, _, obs_s3 = _run_r5a_strategy_workflows(sidecars, case, brief, evidence)
+
+    # 1) Forged/unpersisted model receipt digest rejected on save.
+    forged_wire = obs_s1.to_dict()
+    forged_wire["role_traces"][0]["receipt_digest"] = "f" * 64
+    forged_wire["explore_receipt_digest"] = "f" * 64
+    forged_obs = A03BenchmarkObservation.from_dict(forged_wire)
+    with pytest.raises((CreativeValidationError, FileNotFoundError)):
+        sidecars.save_benchmark_observation(forged_obs)
+
+    # 2) Self-reported model judge & replayed execution_ref rejected.
+    base_scores = BenchmarkRubricScores(0.8, 0.8, 0.8, 0.8, 0.8)
+    real_prov = CreativeJobProvenance("human:reviewer", "review:1", sha256_bytes(b"review:1"), "HUMAN_SUPPLIED")
+    with pytest.raises(CreativeValidationError):
+        BenchmarkJudgeReceipt(
+            judge_receipt_id="j:self", judge_kind="TEST_ONLY_MOCK", judge_actor_ref="self:generator",
+            case_digest=case.digest, source_brief_digest=case.source_brief_digest,
+            evaluated_artifact_digest=obs_s3.package_digest, scores=base_scores,
+            verdict="PASS", rationale="Self reported", provenance=prov, observed_at=R5A_TS_END,
+        )
+    # Judge reusing workflow provider_request_id or receipt_digest rejected by observation.
+    replayed_judge = BenchmarkJudgeReceipt(
+        judge_receipt_id="j:replay", judge_kind="INDEPENDENT_MODEL_JUDGE", judge_actor_ref="judge:model-x",
+        case_digest=case.digest, source_brief_digest=case.source_brief_digest,
+        evaluated_artifact_digest=obs_s3.package_digest, scores=base_scores,
+        verdict="PASS", rationale="Replayed execution ref",
+        judge_provider=ProviderObservation("openai", "gpt-judge", "MODEL"),
+        judge_execution_ref=obs_s3.role_traces[1].provider_request_id,
+        provenance=real_prov, observed_at=R5A_TS_END,
+    )
+    replayed_wire = obs_s3.to_dict()
+    replayed_wire["judge_receipt"] = replayed_judge.to_dict()
+    with pytest.raises(CreativeValidationError):
+        A03BenchmarkObservation.from_dict(replayed_wire)
+
+    # Synthetic fixture masquerading as INDEPENDENT_MODEL_JUDGE or HUMAN_REVIEWER rejected.
+    with pytest.raises(CreativeValidationError):
+        BenchmarkJudgeReceipt(
+            judge_receipt_id="j:fake-model", judge_kind="INDEPENDENT_MODEL_JUDGE", judge_actor_ref="judge:m",
+            case_digest=case.digest, source_brief_digest=case.source_brief_digest,
+            evaluated_artifact_digest=obs_s3.package_digest, scores=base_scores,
+            verdict="PASS", rationale="Fake model judge",
+            judge_provider=MOCK, judge_execution_ref="exec:1", provenance=real_prov, observed_at=R5A_TS_END,
+        )
+    with pytest.raises(CreativeValidationError):
+        BenchmarkJudgeReceipt(
+            judge_receipt_id="j:fake-human", judge_kind="HUMAN_REVIEWER", judge_actor_ref="human:fake",
+            case_digest=case.digest, source_brief_digest=case.source_brief_digest,
+            evaluated_artifact_digest=obs_s3.package_digest, scores=base_scores,
+            verdict="PASS", rationale="Synthetic human", provenance=prov, observed_at=R5A_TS_END,
+        )
+
+    # Unverified judge citation & missing factual_evidence_accuracy on VN_PRODUCT rejected.
+    bad_cite_judge = BenchmarkJudgeReceipt(
+        judge_receipt_id="j:bad-cite", judge_kind="TEST_ONLY_MOCK", judge_actor_ref="judge:mock",
+        case_digest=case.digest, source_brief_digest=case.source_brief_digest,
+        evaluated_artifact_digest=obs_s3.package_digest, scores=base_scores,
+        verdict="PASS", rationale="Unverified cite", evidence_refs=("https://fabricated.invalid/doc",),
+        provenance=prov, observed_at=R5A_TS_END,
+    )
+    bad_cite_wire = obs_s3.to_dict()
+    bad_cite_wire["judge_receipt"] = bad_cite_judge.to_dict()
+    with pytest.raises(CreativeValidationError):
+        A03BenchmarkObservation.from_dict(bad_cite_wire)
+
+    missing_fact_judge = BenchmarkJudgeReceipt(
+        judge_receipt_id="j:no-fact", judge_kind="TEST_ONLY_MOCK", judge_actor_ref="judge:mock",
+        case_digest=case.digest, source_brief_digest=case.source_brief_digest,
+        evaluated_artifact_digest=obs_s3.package_digest,
+        scores=BenchmarkRubricScores(0.8, 0.8, None, 0.8, 0.8),
+        verdict="PASS", rationale="Omitted factual score", provenance=prov, observed_at=R5A_TS_END,
+    )
+    missing_fact_wire = obs_s3.to_dict()
+    missing_fact_wire["judge_receipt"] = missing_fact_judge.to_dict()
+    with pytest.raises(CreativeValidationError):
+        sidecars.save_benchmark_observation(A03BenchmarkObservation.from_dict(missing_fact_wire))
+
+    # 3) Forged consumer / A04 handoff receipt rejected.
+    fake_a04 = A04CreativeHandoffReceipt.create(
+        journey_id="r5a", cycle_id="c1", job_id="j1", attempt=1,
+        actor_ref="AI:reasoning:" + obs_s3.package_receipt_digest,
+        job_actor_ref=prov.actor_ref, source_sha=R5A_SOURCE_SHA,
+        a03_result_ref="fake/result.json", a03_result_digest=obs_s3.production_result_digest,
+        package_id=obs_s3.package_id, revision=1, parent_package_digest=None,
+        package_ref="fake/pkg.json", package_digest=obs_s3.package_digest,
+        brief_id=case.brief_id, source_brief_digest=case.source_brief_digest,
+        selection_id="selection:" + "1" * 64, concept_id="concept:" + "2" * 64,
+        concept_revision=2, concept_digest="3" * 64,
+        cycle_job_digest=obs_s3.cycle_job_digest, cycle_result_digest=obs_s3.cycle_result_digest,
+        reasoning_receipt_digest=obs_s3.package_receipt_digest,
+        audio_mode="SILENCE", scene_count=2, media_target_count=2,
+    )
+    # Cannot attach A04 handoff receipt to a TEST_ONLY_MOCK observation.
+    mock_a04_wire = obs_s3.to_dict()
+    mock_a04_wire["consumer_evidence"] = BenchmarkConsumerEvidence(
+        source_handoff_status="SOURCE_HANDOFF_VERIFIED",
+        a04_receipt=fake_a04, a04_receipt_digest=fake_a04.digest,
+    ).to_dict()
+    with pytest.raises(CreativeValidationError):
+        A03BenchmarkObservation.from_dict(mock_a04_wire)
+    # Cannot reuse A04 receipt ID as media quality or commercial utility evidence.
+    with pytest.raises(CreativeValidationError):
+        BenchmarkConsumerEvidence(
+            source_handoff_status="SOURCE_HANDOFF_VERIFIED",
+            a04_receipt=fake_a04, a04_receipt_digest=fake_a04.digest,
+            commercial_utility_status="OBSERVED_USEFUL",
+            commercial_utility_ref=fake_a04.receipt_id,
+        )
+    with pytest.raises(CreativeValidationError):
+        BenchmarkConsumerEvidence(
+            source_handoff_status="SOURCE_HANDOFF_VERIFIED",
+            a04_receipt=fake_a04, a04_receipt_digest=fake_a04.digest,
+            media_quality_status="OBSERVED_PASS",
+            media_quality_ref=fake_a04.receipt_id,
+        )
+    # Tampered A04 receipt fields (e.g. qa_status=PASS or altered package_digest) rejected.
+    bad_a04_dict = {**fake_a04.to_dict(), "qa_status": "PASS"}
+    with pytest.raises(CreativeValidationError):
+        BenchmarkConsumerEvidence.from_dict({
+            "source_handoff_status": "SOURCE_HANDOFF_VERIFIED",
+            "a04_receipt": bad_a04_dict,
+            "a04_receipt_digest": fake_a04.digest,
+            "a04_receipt_ref": None,
+            "media_quality_status": "NOT_ATTEMPTED",
+            "media_quality_ref": None,
+            "commercial_utility_status": "NOT_ATTEMPTED",
+            "commercial_utility_ref": None,
+        })
+    # Tampering persisted ReasoningResult bytes on disk fails load.
+    reason_path = sidecars._path("reasoning", obs_s1.explore_receipt_digest)
+    reason_path.write_bytes(reason_path.read_bytes() + b" ")
+    with pytest.raises(CreativeValidationError):
+        sidecars.load_benchmark_observation_by_digest(obs_s1.digest)
+
+
+def test_r5a_negative_mock_as_model_strategy_violations_and_failed_unknown_provider(tmp_path):
+    sidecars = CreativeSidecarStore(tmp_path / "creative")
+    brief, evidence, factual_applicable = _r5a_brief_and_evidence("VN_PRODUCT")
+    sidecars.creative.save_brief(brief)
+    prov = _r5a_provenance("fixture:neg-strategy")
+    case = A03BenchmarkCase.create(
+        brief, case_id="case-strat", cohort_id="cohort-strat", source_sha=R5A_SOURCE_SHA,
+        brief_class="VN_PRODUCT", factual_evidence_applicable=factual_applicable,
+        provenance=prov, created_at=R5A_TS_START, expected_evidence_refs=tuple(e.source_ref for e in evidence),
+    )
+    sidecars.save_benchmark_case(case)
+    cfg = ModelConfiguration("requested-provider", "requested-model", "xhigh")
+
+    # Single generator stage run.
+    s1_client = _R5ABenchmarkMockClient(usage_by_op={"EXPLORE": UsageObservation("OBSERVED", 300, 150)}, req_prefix="neg-s1")
+    s1_stage = run_creative_stage(
+        A03CreativeJob.create(
+            ReasoningRequest.create(brief, operation="EXPLORE", count=2),
+            journey_id="r5a", cycle_id="neg", job_id="neg:s1", attempt=1,
+            correlation_id="corr:neg:s1", provenance=prov, configuration=cfg, purpose="TEST_ONLY_MOCK",
+        ),
+        sidecars, LiveCreativeReasoner(cfg, s1_client),
+    )
+
+    # 1) Missing independent critic for S2 -> HOLD (never valid S2).
+    s2_no_critic = observe_benchmark_run(
+        case, sidecars, strategy="S2", sample_id="sample:s2-missing-critic", attempt=1,
+        provenance=prov, started_at=R5A_TS_START, completed_at=R5A_TS_END, stages=(s1_stage,),
+    )
+    assert s2_no_critic.status == "HOLD" and "MISSING_INDEPENDENT_CRITIC" in s2_no_critic.hold_reasons
+    assert s2_no_critic.benchmark_validity == "HOLD" and s2_no_critic.nsm.score is None
+    # Forging wire status="TEST_ONLY_MOCK" without critic raises CreativeValidationError.
+    forged_s2 = {**s2_no_critic.to_dict(), "status": "TEST_ONLY_MOCK", "hold_reasons": [],
+                 "benchmark_validity": "NOT_REAL_BENCHMARK"}
+    with pytest.raises(CreativeValidationError):
+        A03BenchmarkObservation.from_dict(forged_s2)
+
+    # 2) Absent research for S3 (R2 cycle without verified evidence) -> HOLD MISSING_RESEARCH_FOR_S3.
+    r2_no_ev = run_creative_cycle(
+        cycle_job(brief=brief, count=2, evidence=(), seed_options={
+            "journey_id": "r5a", "cycle_id": "neg", "job_id": "neg:r2-no-ev",
+            "provenance": prov, "configuration": cfg, "purpose": "TEST_ONLY_MOCK",
+        }),
+        sidecars, LiveCreativeReasoner(cfg, _R5ABenchmarkMockClient(req_prefix="neg-r2-no-ev")),
+    )
+    s3_no_research = observe_benchmark_run(
+        case, sidecars, strategy="S3", sample_id="sample:s3-no-research", attempt=1,
+        provenance=prov, started_at=R5A_TS_START, completed_at=R5A_TS_END, cycle=r2_no_ev,
+    )
+    assert s3_no_research.status == "HOLD" and "MISSING_RESEARCH_FOR_S3" in s3_no_research.hold_reasons
+    assert s3_no_research.nsm.score is None
+
+    # 3) Claiming hard-coded R2 cycle ran S1 or S2 -> HOLD STRATEGY_WORKFLOW_MISMATCH.
+    r2_as_s1 = observe_benchmark_run(
+        case, sidecars, strategy="S1", sample_id="sample:r2-as-s1", attempt=1,
+        provenance=prov, started_at=R5A_TS_START, completed_at=R5A_TS_END, cycle=r2_no_ev,
+    )
+    assert r2_as_s1.status == "HOLD" and "STRATEGY_WORKFLOW_MISMATCH" in r2_as_s1.hold_reasons
+    r2_as_s2 = observe_benchmark_run(
+        case, sidecars, strategy="S2", sample_id="sample:r2-as-s2", attempt=1,
+        provenance=prov, started_at=R5A_TS_START, completed_at=R5A_TS_END, cycle=r2_no_ev,
+    )
+    assert r2_as_s2.status == "HOLD" and "STRATEGY_WORKFLOW_MISMATCH" in r2_as_s2.hold_reasons
+
+    # 4) Missing independent critic for S3 (only generator stage) -> HOLD with MISSING_INDEPENDENT_CRITIC + MISSING_RESEARCH_FOR_S3.
+    s3_no_critic = observe_benchmark_run(
+        case, sidecars, strategy="S3", sample_id="sample:s3-no-critic", attempt=1,
+        provenance=prov, started_at=R5A_TS_START, completed_at=R5A_TS_END, stages=(s1_stage,),
+    )
+    assert s3_no_critic.status == "HOLD"
+    assert {"MISSING_RESEARCH_FOR_S3", "MISSING_INDEPENDENT_CRITIC", "MISSING_BOUNDED_DEVELOPER"} <= set(s3_no_critic.hold_reasons)
+
+    # 5) Mock-as-model wire promotion rejected.
+    valid_s1 = observe_benchmark_run(
+        case, sidecars, strategy="S1", sample_id="sample:valid-s1", attempt=1,
+        provenance=prov, started_at=R5A_TS_START, completed_at=R5A_TS_END, stages=(s1_stage,),
+    )
+    for bad_fields in (
+        {"status": "REAL_MODEL_OBSERVED"},
+        {"execution_mode": "MODEL"},
+        {"benchmark_validity": "ELIGIBLE_REAL_BENCHMARK"},
+        {"observed_provider": {"provider": "requested-provider", "model": "requested-model", "mode": "MODEL"}},
+    ):
+        with pytest.raises(CreativeValidationError):
+            A03BenchmarkObservation.from_dict({**valid_s1.to_dict(), **bad_fields})
+
+    # 6) Failed / refused / UNKNOWN provider effect -> HOLD, never WIN/PASS.
+    for fault_name in ("error", "refusal"):
+        bad_stage = run_creative_stage(
+            A03CreativeJob.create(
+                ReasoningRequest.create(brief, operation="EXPLORE", count=2),
+                journey_id="r5a", cycle_id="neg", job_id=f"neg:{fault_name}", attempt=1,
+                correlation_id=f"corr:neg:{fault_name}", provenance=prov, configuration=cfg, purpose="TEST_ONLY_MOCK",
+            ),
+            sidecars, LiveCreativeReasoner(cfg, _R5ABenchmarkMockClient(fault=fault_name, req_prefix=fault_name)),
+        )
+        bad_obs = observe_benchmark_run(
+            case, sidecars, strategy="S1", sample_id=f"sample:{fault_name}", attempt=1,
+            provenance=prov, started_at=R5A_TS_START, completed_at=R5A_TS_END, stages=(bad_stage,),
+        )
+        assert bad_obs.status == "HOLD" and "PROVIDER_EFFECT_FAILED_OR_UNKNOWN" in bad_obs.hold_reasons
+        assert bad_obs.errors and bad_obs.nsm.score is None
+
+
+def test_r5a_negative_altered_digests_tampering_noncomparable_cohort_stale_source_and_replays(tmp_path):
+    sidecars = CreativeSidecarStore(tmp_path / "creative")
+    brief_a, ev_a, fact_a = _r5a_brief_and_evidence("VN_PRODUCT")
+    brief_b, ev_b, fact_b = _r5a_brief_and_evidence("VN_NON_PRODUCT_FICTION")
+    sidecars.creative.save_brief(brief_a)
+    sidecars.creative.save_brief(brief_b)
+    prov = _r5a_provenance("fixture:neg-comp")
+
+    case_a = A03BenchmarkCase.create(
+        brief_a, case_id="case-a", cohort_id="cohort-1", source_sha=R5A_SOURCE_SHA,
+        brief_class="VN_PRODUCT", factual_evidence_applicable=fact_a,
+        provenance=prov, created_at=R5A_TS_START, expected_evidence_refs=tuple(e.source_ref for e in ev_a),
+    )
+    case_b = A03BenchmarkCase.create(
+        brief_b, case_id="case-b", cohort_id="cohort-1", source_sha=R5A_SOURCE_SHA,
+        brief_class="VN_NON_PRODUCT_FICTION", factual_evidence_applicable=fact_b,
+        provenance=prov, created_at=R5A_TS_START, expected_evidence_refs=tuple(e.source_ref for e in ev_b),
+    )
+    case_stale = A03BenchmarkCase.create(
+        brief_b, case_id="case-stale", cohort_id="cohort-1", source_sha="b" * 40,
+        brief_class="VN_NON_PRODUCT_FICTION", factual_evidence_applicable=fact_b,
+        provenance=prov, created_at=R5A_TS_START, expected_evidence_refs=tuple(e.source_ref for e in ev_b),
+    )
+    case_other_cohort = A03BenchmarkCase.create(
+        brief_b, case_id="case-other", cohort_id="cohort-2", source_sha=R5A_SOURCE_SHA,
+        brief_class="VN_NON_PRODUCT_FICTION", factual_evidence_applicable=fact_b,
+        provenance=prov, created_at=R5A_TS_START, expected_evidence_refs=tuple(e.source_ref for e in ev_b),
+    )
+    for c in (case_a, case_b, case_stale, case_other_cohort):
+        sidecars.save_benchmark_case(c)
+
+    obs_a_s1, obs_a_s2, obs_a_s3 = _run_r5a_strategy_workflows(sidecars, case_a, brief_a, ev_a, tag="a")
+    obs_b_s1, obs_b_s2, _ = _run_r5a_strategy_workflows(sidecars, case_b, brief_b, ev_b, tag="b")
+    obs_stale_s1, _, _ = _run_r5a_strategy_workflows(sidecars, case_stale, brief_b, ev_b, tag="stale")
+    obs_other_s1, _, _ = _run_r5a_strategy_workflows(sidecars, case_other_cohort, brief_b, ev_b, tag="other")
+
+    # 1) Noncomparable / unpaired briefs: S1 ran only on case-a, S2 ran only on case-b -> INSUFFICIENT_EVIDENCE.
+    unpaired = compare_benchmark_observations(
+        comparison_id="cmp-unpaired",
+        cases=(case_a, case_b),
+        observations=(obs_a_s1, obs_b_s2),
+        store=sidecars, provenance=prov, created_at=R5A_TS_END, strategies=("S1", "S2"),
+    )
+    assert unpaired.outcome == "INSUFFICIENT_EVIDENCE" and unpaired.paired_case_ids == ()
+    assert unpaired.winner_strategy is None
+    assert unpaired.missing_cases_by_strategy == {"S1": ("case-b",), "S2": ("case-a",)}
+
+    # 2) Stale source SHA -> HOLD STALE_SOURCE_SHA, no winner.
+    stale_cmp = compare_benchmark_observations(
+        comparison_id="cmp-stale",
+        cases=(case_a, case_stale),
+        observations=(obs_a_s1, obs_stale_s1),
+        store=sidecars, provenance=prov, created_at=R5A_TS_END, strategies=("S1", "S2"),
+    )
+    assert stale_cmp.outcome == "HOLD" and "STALE_SOURCE_SHA" in stale_cmp.hold_reasons
+    assert stale_cmp.winner_strategy is None
+
+    # 3) Noncomparable cohort -> HOLD NONCOMPARABLE_COHORT, no winner.
+    cross_cohort = compare_benchmark_observations(
+        comparison_id="cmp-cross-cohort",
+        cases=(case_a,),
+        observations=(obs_a_s1, obs_other_s1),
+        store=sidecars, provenance=prov, created_at=R5A_TS_END, strategies=("S1", "S2"),
+    )
+    assert cross_cohort.outcome == "HOLD" and "NONCOMPARABLE_COHORT" in cross_cohort.hold_reasons
+    assert cross_cohort.winner_strategy is None
+
+    # 4) Replayed workflow across two different strategies -> HOLD REPLAYED_WORKFLOW_ACROSS_STRATEGIES.
+    cfg = ModelConfiguration("requested-provider", "requested-model", "xhigh")
+    shared_stage = sidecars.load_stage(sidecars._read_job_slot(obs_a_s1.role_traces[0].job_slot))
+    replayed_s2_hold = observe_benchmark_run(
+        case_a, sidecars, strategy="S2", sample_id="sample:replayed-s2", attempt=1,
+        provenance=prov, started_at=R5A_TS_START, completed_at=R5A_TS_END, stages=(shared_stage,),
+    )
+    replay_cmp = compare_benchmark_observations(
+        comparison_id="cmp-replay",
+        cases=(case_a,),
+        observations=(obs_a_s1, replayed_s2_hold),
+        store=sidecars, provenance=prov, created_at=R5A_TS_END, strategies=("S1", "S2"),
+    )
+    assert replay_cmp.outcome == "HOLD" and "REPLAYED_WORKFLOW_ACROSS_STRATEGIES" in replay_cmp.hold_reasons
+    assert replay_cmp.winner_strategy is None
+
+    # 5) Altered package_digest / source_brief_digest / source_sha / attempt / revision rejected.
+    for mutation in ("package_digest", "source_brief_digest", "source_sha", "package_revision", "rubric_version"):
+        wire = obs_a_s3.to_dict()
+        if mutation == "package_digest":
+            wire["package_digest"] = "0" * 64
+            wire["judge_receipt"]["evaluated_artifact_digest"] = "0" * 64
+        elif mutation == "source_brief_digest":
+            wire["source_brief_digest"] = "0" * 64
+            wire["judge_receipt"]["source_brief_digest"] = "0" * 64
+        elif mutation == "source_sha":
+            wire["source_sha"] = "c" * 40
+        elif mutation == "package_revision":
+            wire["package_revision"] = 9
+        elif mutation == "rubric_version":
+            wire["rubric_version"] = "a03.benchmark-rubric.v999"
+        if mutation == "rubric_version":
+            with pytest.raises(CreativeValidationError):
+                A03BenchmarkObservation.from_dict(wire)
+        else:
+            candidate = A03BenchmarkObservation.from_dict(wire)
+            with pytest.raises((CreativeValidationError, FileNotFoundError)):
+                sidecars.save_benchmark_observation(candidate)
+
+    # 6) Duplicate observation slot with altered content -> VersionConflict.
+    conflict_wire = {**obs_a_s1.to_dict(), "completed_at": "2026-11-20T00:05:00Z"}
+    with pytest.raises(VersionConflict):
+        sidecars.save_benchmark_observation(A03BenchmarkObservation.from_dict(conflict_wire))
+
+    # 7) Disk byte tampering of saved comparison detected on load.
+    cmp_path = sidecars._path("benchmark-comparisons", unpaired.digest)
+    cmp_path.write_bytes(cmp_path.read_bytes() + b" ")
+    with pytest.raises(CreativeValidationError):
+        sidecars.load_benchmark_comparison_by_digest(unpaired.digest)
+
+
+def test_r5a_negative_unobserved_metrics_impossible_metrics_score_inflation_and_auth_spend(tmp_path):
+    from ai_commerce.creative._validation import read_json
+
+    sidecars = CreativeSidecarStore(tmp_path / "creative")
+    brief, evidence, factual_applicable = _r5a_brief_and_evidence("VN_PRODUCT")
+    sidecars.creative.save_brief(brief)
+    prov = _r5a_provenance("fixture:neg-metrics")
+    case = A03BenchmarkCase.create(
+        brief, case_id="case-metrics", cohort_id="cohort-metrics", source_sha=R5A_SOURCE_SHA,
+        brief_class="VN_PRODUCT", factual_evidence_applicable=factual_applicable,
+        provenance=prov, created_at=R5A_TS_START, expected_evidence_refs=tuple(e.source_ref for e in evidence),
+    )
+    sidecars.save_benchmark_case(case)
+
+    # 1) Unobserved tokens / wall time / human time remain UNKNOWN (None), NEVER 0.
+    obs_s1, obs_s2, _ = _run_r5a_strategy_workflows(
+        sidecars, case, brief, evidence, tag="unknown",
+        usage_by_op={"EXPLORE": UsageObservation(), "CRITIQUE": UsageObservation("OBSERVED", 200, 100)},
+    )
+    assert obs_s1.telemetry.input_tokens_status == "UNKNOWN" and obs_s1.telemetry.total_input_tokens is None
+    assert obs_s1.telemetry.output_tokens_status == "UNKNOWN" and obs_s1.telemetry.total_output_tokens is None
+    # S2 has OBSERVED critic but UNKNOWN generator -> cumulative tokens MUST remain UNKNOWN, never 200+0!
+    assert obs_s2.telemetry.input_tokens_status == "UNKNOWN" and obs_s2.telemetry.total_input_tokens is None
+    assert "INPUT_TOKENS" in obs_s2.nsm.missing_coverage and "OUTPUT_TOKENS" in obs_s2.nsm.missing_coverage
+
+    # 2) Negative, boolean, non-finite, and impossible metrics rejected.
+    with pytest.raises(CreativeValidationError):
+        BenchmarkTelemetry(input_tokens_status="UNKNOWN", total_input_tokens=0)
+    with pytest.raises(CreativeValidationError):
+        BenchmarkTelemetry(wall_time_status="OBSERVED", invocation_wall_time_ms=100,
+                           queue_wait_ms=50, retry_wall_time_ms=0, total_wall_time_ms=999)
+    with pytest.raises(CreativeValidationError):
+        BenchmarkTelemetry(human_active_time_status="OBSERVED", human_active_time_ms=-1)
+    with pytest.raises(CreativeValidationError):
+        BenchmarkTelemetry(human_active_time_status="OBSERVED", human_active_time_ms=True)
+    with pytest.raises(CreativeValidationError):
+        calculate_nsm_v1_score(BenchmarkRubricScores(0.8, 0.8, 0.8, 0.8, 0.8),
+                               total_tokens=-5, wall_time_ms=100, human_active_time_ms=100)
+    with pytest.raises(CreativeValidationError):
+        calculate_nsm_v1_score(BenchmarkRubricScores(0.8, 0.8, 0.8, 0.8, 0.8),
+                               total_tokens=100, wall_time_ms=True, human_active_time_ms=100)
+    # Inverted timestamps rejected.
+    with pytest.raises(CreativeValidationError):
+        A03BenchmarkObservation.from_dict({
+            **obs_s1.to_dict(), "started_at": R5A_TS_END, "completed_at": R5A_TS_START,
+        })
+
+    # 3) Malicious score inflation rejected.
+    for bad_score in (-0.01, 1.01, float("nan"), float("inf"), True):
+        with pytest.raises(CreativeValidationError):
+            BenchmarkRubricScores(bad_score, 0.8, 0.8, 0.8, 0.8)
+    with pytest.raises(CreativeValidationError):
+        BenchmarkNSMScore(
+            version=NSM_V1_VERSION, status="SCORED",
+            score=0.999, quality_component=0.5, token_efficiency_component=0.5,
+            wall_time_efficiency_component=0.5, human_time_efficiency_component=0.5,
+            missing_coverage=(),
+        )
+    with pytest.raises(CreativeValidationError):
+        A03BenchmarkObservation.from_dict({
+            **obs_s1.to_dict(),
+            "nsm": {
+                "version": NSM_V1_VERSION, "status": "SCORED",
+                "score": 0.9, "quality_component": 0.9, "token_efficiency_component": 0.9,
+                "wall_time_efficiency_component": 0.9, "human_time_efficiency_component": 0.9,
+                "missing_coverage": [],
+            },
+        })
+
+    # Comparison wire forgery claiming COMPARED / winner on mock data rejected.
+    comp = compare_benchmark_observations(
+        comparison_id="cmp-metrics", cases=(case,), observations=(obs_s1, obs_s2),
+        store=sidecars, provenance=prov, created_at=R5A_TS_END, strategies=("S1", "S2"),
+    )
+    with pytest.raises(CreativeValidationError):
+        A03BenchmarkComparison.from_dict({
+            **comp.to_dict(), "outcome": "COMPARED", "ranking_status": "PAIRED_COMPARED", "winner_strategy": "S2",
+        })
+
+    # 4) Auth/spend implication & unknown/missing/duplicate JSON keys rejected across all 3 records.
+    for kind, record in (
+        (A03BenchmarkCase, case),
+        (A03BenchmarkObservation, obs_s1),
+        (A03BenchmarkComparison, comp),
+    ):
+        data = record.to_dict()
+        for forbidden_key in ("allow_network", "allow_spend", "authorization", "api_key"):
+            with pytest.raises(CreativeValidationError):
+                kind.from_dict({**data, forbidden_key: True})
+        if "side_effects" in data:
+            with pytest.raises(CreativeValidationError):
+                kind.from_dict({**data, "side_effects": "SPEND"})
+        first_key = next(iter(data))
+        with pytest.raises(CreativeValidationError):
+            kind.from_dict({k: v for k, v in data.items() if k != first_key})
+        dup_json = json.dumps(data)[:-1] + "," + json.dumps(first_key) + ":" + json.dumps(data[first_key]) + "}"
+        with pytest.raises(CreativeValidationError, match="INVALID_JSON"):
+            kind.from_dict(read_json(dup_json))
