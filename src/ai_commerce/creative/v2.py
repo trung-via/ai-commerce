@@ -2034,17 +2034,27 @@ def run_creative_production(
     job: A03CreativeProductionJob, store: CreativeStore | CreativeSidecarStore,
     reasoner: LiveCreativeReasoner | None = None, *,
     authorization: InvocationAuthorization | None = None,
+    production: Any = None,
 ) -> A03CreativeProductionResult:
     """Produce or AI-revise one verified A03CreativeProductionPackage.v1.
 
     Pins exact verified R2 cycle + final ConceptSelection + source brief.
     Reuses LiveCreativeReasoner/StructuredCreativeClient/CLI seam with one
     distinct source-bound attempt. Never synthesizes from rules or retries.
+    Optional ``production`` accepts only a trusted ProductionPipelineOrchestrator
+    and triggers bounded local A03 -> A04 handoff solely for verified
+    CREATIVE_COMPLETE results; replaying a saved result resumes delivery
+    without reinference.
     """
     from .live import InvocationAuthorization, LiveCreativeReasoner
     from .sidecars import CreativeSidecarStore
     from ._validation import VersionConflict
 
+    if production is not None:
+        from ai_commerce.production_orchestration import ProductionPipelineOrchestrator
+        if type(production) is not ProductionPipelineOrchestrator:
+            raise CreativeValidationError("expected ProductionPipelineOrchestrator for production handoff")
+        production.last_result = None
     if not isinstance(job, A03CreativeProductionJob):
         raise CreativeValidationError("expected A03CreativeProductionJob")
     job = A03CreativeProductionJob.from_dict(job.to_dict())
@@ -2081,7 +2091,10 @@ def run_creative_production(
         if authorization is not None and saved_grant != grant:
             raise CreativeValidationError("AUTHORIZATION_MISMATCH: production job permission changed")
         if sidecars.has_production_result(job):
-            return sidecars.load_production_result(job)
+            loaded = sidecars.load_production_result(job)
+            if production is not None and loaded.status == "CREATIVE_COMPLETE" and loaded.package is not None:
+                production.complete_a03(loaded, store=sidecars)
+            return loaded
         # Interrupted claim recovery: never re-invoke a provider.
         request = _production_request(job, cycle, selected_record, parent_package)
         stage_job = _production_stage_job(job, request)
@@ -2173,4 +2186,7 @@ def run_creative_production(
                     job, grant, stage.status, None, stage=stage, package=saved_pkg,
                 )
     sidecars.save_production_result(result)
-    return sidecars.load_production_result(job)
+    loaded = sidecars.load_production_result(job)
+    if production is not None and loaded.status == "CREATIVE_COMPLETE" and loaded.package is not None:
+        production.complete_a03(loaded, store=sidecars)
+    return loaded

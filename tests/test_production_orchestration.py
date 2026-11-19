@@ -78,7 +78,10 @@ def receipt_after_offline_execution(completed, input_value):
                                   consumer_executed=True)
 
 
-@pytest.mark.parametrize("route", tuple(CONSUMER_ROUTES))
+P0_BRIEF_ROUTES = ("a10-m05-content-brief", "a03-creative-brief")
+
+
+@pytest.mark.parametrize("route", P0_BRIEF_ROUTES)
 def test_real_consumer_snapshots_need_separate_receipts(route):
     completed, input_value, output = stage(route)
     receipt = receipt_after_offline_execution(completed, input_value)
@@ -247,7 +250,7 @@ def test_wire_receipt_cannot_attest_its_own_execution():
         assert orchestrator.dispatch(completed.spec.idempotency_key).accepted_consumer is None
 
 
-@pytest.mark.parametrize("route", tuple(CONSUMER_ROUTES))
+@pytest.mark.parametrize("route", P0_BRIEF_ROUTES)
 def test_repinned_output_still_requires_the_selected_consumer_contract(route):
     completed, input_value, output = stage(route)
     if route == "a10-m05-content-brief":
@@ -295,14 +298,18 @@ def test_manifest_uses_real_registered_source_owners_and_test_closure():
                                    for name in ("__init__", "contracts", "orchestrator")]
     assert manifest["tests"] == ["tests/test_production_orchestration.py"]
     assert manifest["acs"] == ["PRODUCTION.orchestration-p0"]
-    assert set(manifest["consumers"]) == {path for _, path in CONSUMER_ROUTES.values()}
+    route_paths = {path for _, path in CONSUMER_ROUTES.values()}
+    assert set(manifest["consumers"]) <= route_paths
     groups = approved_groups()
     owners = {g.name: g for g in groups if set(g.paths) & set(manifest["consumers"])}
     assert set(owners) == {"a03", "a10"}
+    route_owners = {g.name: g for g in groups if set(g.paths) & route_paths}
+    assert set(route_owners) == {"a03", "a04", "a10"}
     assert "tests/test_a03_creative.py" in owners["a03"].tests
     assert "tests/test_a10_m05.py" in owners["a10"].tests
-    for path in (*manifest["sources"], *manifest["tests"], *manifest["consumers"],
-                 *(test for group in owners.values() for test in group.tests)):
+    assert "tests/test_a04_upgrade_v11.py" in route_owners["a04"].tests
+    for path in (*manifest["sources"], *manifest["tests"], *manifest["consumers"], *route_paths,
+                 *(test for group in route_owners.values() for test in group.tests)):
         assert (ROOT / path).is_file()
     changed = (*manifest["sources"], *manifest["tests"], manifest_path)
     # Static admission/selection only. EF01 independently binds the immutable
@@ -321,7 +328,7 @@ def test_manifest_uses_real_registered_source_owners_and_test_closure():
     # explicitly registered onboarding owners. Deeper transitive imports are
     # reported for review; they must not balloon the mandatory CI test set.
     expected_groups = {
-        "production-orchestration", "a03", "a10", "cli",
+        "production-orchestration", "a03", "a04", "a10", "cli",
     }
     assert set(plan.selected_groups) == expected_groups
     assert any(w.startswith("DEFERRED_TRANSITIVE_IMPORT_PATHS:") for w in plan.inventory_warnings)
@@ -603,3 +610,586 @@ def test_local_witness_reconciliation_rechecks_authority_output_and_schema(local
     with pytest.raises(OrchestrationError):
         second.resume_local()
     assert not invocation_rows(first, "ProductionStageReceipt.v1")
+
+
+_A03_HELPERS = None
+
+
+def _a03_helpers():
+    global _A03_HELPERS
+    if _A03_HELPERS is None:
+        spec = importlib.util.spec_from_file_location(
+            "a03_upgrade_v11_helpers", ROOT / "tests/test_a03_upgrade_v11.py",
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _A03_HELPERS = mod
+    return _A03_HELPERS
+
+
+@pytest.fixture
+def a03_r3_case(tmp_path, monkeypatch):
+    """Offline simulated native CLI R3 CREATIVE_COMPLETE package fixture.
+
+    Simulates only the local OS process boundary via install_fake_popen so the
+    real R2/R3 AUTHENTICATED_CLI_PROBE + MODEL verification path is exercised
+    offline without network or paid provider calls.
+    """
+    from ai_commerce.creative import (
+        CodexCliCreativeClient, CreativeSidecarStore, InvocationAuthorization,
+        LiveCreativeReasoner, ModelConfiguration, ReasoningRequest,
+        StructuredModelRequest, run_creative_cycle, run_creative_production,
+    )
+
+    h = _a03_helpers()
+    cli = h.FakeInstalledCreativeCLI(tmp_path / "synthetic-cli-host")
+    r2_sampler = h.CycleFakeClient()
+    r3_sampler = h.ProductionFakeClient(silent=True, variant="r4-v1")
+
+    def dispatch_packet(packet):
+        req = packet["request"]
+        creative = ReasoningRequest.from_dict(req["creative"])
+        model_req = StructuredModelRequest(ModelConfiguration.from_dict(req["config"]), creative)
+        if creative.production is not None:
+            return json.loads(r3_sampler.complete(model_req).output_json)
+        val = json.loads(r2_sampler.complete(model_req).output_json)
+        if creative.operation == "DEVELOP":
+            val["edits"] = {n: val["edits"].get(n) for n in ("family", "title", "premise", "visual_direction")}
+        return val
+
+    cli.creative_output = dispatch_packet
+    h.install_fake_popen(monkeypatch, cli)
+    cli_grant = InvocationAuthorization(True, True, "fixture:r4-cli-grant")
+    brief = {
+        **intake_brief("Im lặng hoàn toàn — thơ thị giác về mưa Sài Gòn, không sản phẩm hay CTA."),
+        "product_ref": None, "cta": None, "audio": {"mode": "silence"},
+    }
+    creative_root = tmp_path / "creative"
+    sidecars = CreativeSidecarStore(creative_root)
+    reasoner = LiveCreativeReasoner(cli.config, CodexCliCreativeClient(cli.capability(), runner=None))
+    cycle = run_creative_cycle(
+        h.cycle_job(brief=brief, seed_options={"configuration": cli.config, "purpose": "PRODUCTION"}),
+        sidecars, reasoner, authorization=cli_grant,
+    )
+    assert cycle.status == "CREATIVE_COMPLETE"
+    prod_job = h.production_job(
+        cycle,
+        journey_id="r4:journey", cycle_id="r4:cycle", job_id="r4:prod-1", attempt=1,
+        configuration=cli.config, purpose="PRODUCTION",
+    )
+    prod_result = run_creative_production(prod_job, sidecars, reasoner, authorization=cli_grant)
+    assert prod_result.status == "CREATIVE_COMPLETE" and prod_result.package is not None
+    source_sha = "d" * 40
+    local_grant = LocalAuthorization(
+        journey_id=prod_job.journey_id, cycle_id=prod_job.cycle_id, job_id=prod_job.job_id,
+        source_sha=source_sha, authorization_ref="fixture:r4-a04-grant", route_id="a03-to-a04",
+    )
+
+    def make_owner(**changes):
+        return ProductionPipelineOrchestrator(**{
+            "state_dir": tmp_path / "production-r4",
+            "source_sha": source_sha,
+            "local_authorization": local_grant,
+            **changes,
+        })
+
+    return {
+        "helpers": h,
+        "cli": cli,
+        "r3_sampler": r3_sampler,
+        "cli_grant": cli_grant,
+        "reasoner": reasoner,
+        "brief": brief,
+        "sidecars": sidecars,
+        "cycle": cycle,
+        "job": prod_job,
+        "result": prod_result,
+        "source_sha": source_sha,
+        "grant": local_grant,
+        "make_owner": make_owner,
+    }
+
+
+def test_r4_a03_to_a04_verified_package_handoff_receipt_and_idempotent_replay(a03_r3_case, monkeypatch):
+    from ai_commerce.media import generation as mg
+
+    real_accept, calls = mg.accept_creative_production_package, []
+
+    def spy_accept(**kwargs):
+        calls.append(kwargs)
+        return real_accept(**kwargs)
+
+    monkeypatch.setattr(mg, "accept_creative_production_package", spy_accept)
+    sidecars = a03_r3_case["sidecars"]
+    prod_result = a03_r3_case["result"]
+    pkg = prod_result.package
+    owner = a03_r3_case["make_owner"]()
+    actual = owner.complete_a03(prod_result, store=sidecars)
+    assert actual.status == "SUCCESS"
+    assert actual.accepted_consumer == mg.A04_CREATIVE_CONSUMER_ID
+    assert actual.event.receipt.outcome == "SUCCESS"
+    assert actual.event.receipt.consumer_executed is True
+    assert actual.event.receipt.execution_ref.startswith("local:a04:")
+    assert actual.event.receipt.output_sha256 == pkg.digest
+    assert actual.completed.spec.output_contract == "A03CreativeProductionPackage.v1"
+    assert actual.completed.spec.package_handoff.source_sha == a03_r3_case["source_sha"]
+    assert len(calls) == 1
+
+    receipt = actual.receiver_receipt
+    assert isinstance(receipt, mg.A04CreativeHandoffReceipt)
+    assert receipt.schema_version == "A04CreativeHandoffReceipt.v1"
+    assert receipt.status == "SOURCE_HANDOFF_VERIFIED"
+    assert receipt.media_execution == "NOT_ATTEMPTED"
+    assert receipt.factual_status == "UNVERIFIED"
+    assert receipt.semantic_approval == "NOT_ATTEMPTED"
+    assert receipt.qa_status == "UNVERIFIED"
+    assert receipt.pulse_execution == "NOT_ATTEMPTED"
+    assert receipt.rights_status == "UNKNOWN"
+    assert receipt.audio_mode == "SILENCE"
+    assert receipt.package_id == pkg.package_id
+    assert receipt.revision == 1 and receipt.parent_package_digest is None
+    assert receipt.package_digest == pkg.digest
+    assert receipt.source_sha == a03_r3_case["source_sha"]
+    assert receipt.a03_result_digest == prod_result.digest
+    assert receipt.journey_id == prod_result.job.journey_id
+    assert receipt.cycle_id == prod_result.job.cycle_id
+    assert receipt.job_id == prod_result.job.job_id
+    assert receipt.attempt == prod_result.job.attempt
+    assert receipt.actor_ref == f"AI:reasoning:{pkg.reasoning_receipt_digest}"
+    assert receipt.consumer_id == mg.A04_CREATIVE_CONSUMER_ID
+    assert receipt.brief_id == pkg.brief_id and receipt.source_brief_digest == pkg.source_brief_digest
+    assert receipt.selection_id == pkg.selected_concept.selection_id
+    assert receipt.concept_digest == pkg.selected_concept.concept_digest
+    assert receipt.cycle_result_digest == pkg.lineage.cycle_result_digest
+    assert mg.load_a04_handoff_receipt(actual.event.receipt.artifact_ref) == receipt
+
+    serialized = json.dumps(actual.event.to_dict()) + json.dumps(receipt.to_dict())
+    for forbidden in ("MEDIA_GENERATED", "RIGHTS_GRANTED", "CREATIVE_QA_PASSED", "PULSE_COMPLETE"):
+        assert forbidden not in serialized
+
+    reopened = a03_r3_case["make_owner"]()
+    assert reopened.complete_a03(prod_result, store=sidecars) == actual
+    assert reopened.resume_local() == (actual,)
+    assert len(calls) == 1
+
+    with sqlite3.connect(owner._state_dir / "production.sqlite") as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 1
+        kinds = [row[0] for row in db.execute("SELECT kind FROM journal ORDER BY seq")]
+    assert kinds.index("ProductionStageCompleted.v1") < kinds.index("ProductionStageDispatched.v1")
+    assert kinds.index("ProductionStageDispatched.v1") < kinds.index("A04LocalInvocation.v1")
+    assert kinds.index("A04LocalInvocation.v1") < kinds.index("ProductionStageReceipt.v1")
+    for kind in ("ProductionStageCompleted.v1", "ProductionDispatchAttempt.v1",
+                 "A04LocalInvocation.v1", "ProductionStageReceipt.v1", "ProductionStageDispatched.v1"):
+        assert len(invocation_rows(owner, kind)) == 1
+
+    with pytest.raises(OrchestrationError, match="COMPLETED_NOT_FOUND"):
+        reopened.record_receipt(actual.event.receipt)
+
+
+def test_r4_run_creative_production_opt_in_seam_and_no_reinference_replay(a03_r3_case, tmp_path, monkeypatch):
+    from ai_commerce.creative import CreativeValidationError, run_creative_cycle, run_creative_production
+    from ai_commerce.media import generation as mg
+
+    h = a03_r3_case["helpers"]
+    cli = a03_r3_case["cli"]
+    sidecars = a03_r3_case["sidecars"]
+    prod_job = a03_r3_case["job"]
+    prod_result = a03_r3_case["result"]
+
+    # Wrong production owner type rejected before touching store or CLI.
+    with pytest.raises(CreativeValidationError, match="ProductionPipelineOrchestrator"):
+        run_creative_production(prod_job, sidecars, production={"fake": True})
+
+    # Replaying previously saved CREATIVE_COMPLETE result resumes A04 delivery with zero CLI calls.
+    calls_before = len(cli.calls)
+    a04_calls = []
+    real_accept = mg.accept_creative_production_package
+
+    def spy_accept(**kwargs):
+        a04_calls.append(kwargs)
+        return real_accept(**kwargs)
+
+    monkeypatch.setattr(mg, "accept_creative_production_package", spy_accept)
+    owner = a03_r3_case["make_owner"]()
+    replayed = run_creative_production(prod_job, sidecars, production=owner)
+    assert replayed == prod_result
+    assert len(cli.calls) == calls_before
+    assert owner.last_result is not None and owner.last_result.status == "SUCCESS"
+    assert owner.last_result.receiver_receipt.status == "SOURCE_HANDOFF_VERIFIED"
+    assert len(a04_calls) == 1
+
+    # Second replay calls neither CLI nor A04 again.
+    reopened = a03_r3_case["make_owner"]()
+    assert run_creative_production(prod_job, sidecars, production=reopened) == prod_result
+    assert len(cli.calls) == calls_before and len(a04_calls) == 1
+    assert reopened.last_result == owner.last_result
+
+    # TEST_ONLY_MOCK / HOLD / STOPPED never dispatch through production seam.
+    mock_sidecars = h.CreativeSidecarStore(tmp_path / "mock-seam")
+    mock_cycle = run_creative_cycle(h.cycle_job(), mock_sidecars, h.cycle_adapter(h.CycleFakeClient()))
+    for label, client in (("mock", h.ProductionFakeClient()),
+                          ("hold", h.ProductionFakeClient(fault="timeout")),
+                          ("stop", h.ProductionFakeClient(fault="refusal"))):
+        mj = h.production_job(mock_cycle, journey_id="m:j", cycle_id="m:c", job_id=f"m:{label}")
+        mgrant = LocalAuthorization(journey_id="m:j", cycle_id="m:c", job_id=f"m:{label}",
+                                    source_sha=a03_r3_case["source_sha"],
+                                    authorization_ref="fixture:m-grant", route_id="a03-to-a04")
+        mowner = ProductionPipelineOrchestrator(state_dir=tmp_path / f"m-orch-{label}",
+                                                source_sha=a03_r3_case["source_sha"],
+                                                local_authorization=mgrant)
+        mres = run_creative_production(mj, mock_sidecars, h.cycle_adapter(client), production=mowner)
+        assert mres.status != "CREATIVE_COMPLETE"
+        assert mowner.last_result is None
+    assert len(a04_calls) == 1
+
+
+def test_r4_editable_package_revisions_retain_immutable_parent_and_independent_keys(a03_r3_case, monkeypatch):
+    from ai_commerce.creative import ActorRef, revise_production_package, run_creative_production
+    from ai_commerce.media import generation as mg
+
+    sidecars = a03_r3_case["sidecars"]
+    prod_result = a03_r3_case["result"]
+    pkg_r1 = prod_result.package
+    r1_bytes = sidecars.production_package_path(pkg_r1.package_id, 1).read_bytes()
+
+    real_accept, calls = mg.accept_creative_production_package, []
+
+    def spy_accept(**kwargs):
+        calls.append((kwargs["package_id"], kwargs["revision"]))
+        return real_accept(**kwargs)
+
+    monkeypatch.setattr(mg, "accept_creative_production_package", spy_accept)
+    owner = a03_r3_case["make_owner"]()
+    res_r1 = owner.complete_a03(prod_result, store=sidecars)
+    assert res_r1.status == "SUCCESS" and res_r1.receiver_receipt.revision == 1
+
+    # Direct HUMAN edit creates immutable revision 2 retaining parent r1 without new inference.
+    pkg_r2 = revise_production_package(
+        pkg_r1,
+        {"narrative_intention": "Chỉnh nhịp ánh sáng mưa tĩnh lặng hơn."},
+        edit_reason="Human refined silent visual cadence",
+        actor=ActorRef("HUMAN", "human:director"),
+    )
+    sidecars.save_production_package(pkg_r2)
+    assert sidecars.production_package_path(pkg_r1.package_id, 1).read_bytes() == r1_bytes
+
+    res_r2 = owner.complete_a03(prod_result, store=sidecars, package=pkg_r2)
+    assert res_r2.status == "SUCCESS"
+    assert res_r2.completed.spec.idempotency_key != res_r1.completed.spec.idempotency_key
+    assert res_r2.receiver_receipt.revision == 2
+    assert res_r2.receiver_receipt.parent_package_digest == pkg_r1.digest
+    assert res_r2.receiver_receipt.actor_ref == "HUMAN:human:director"
+    assert res_r2.receiver_receipt.reasoning_receipt_digest is None
+    assert res_r2.receiver_receipt.media_execution == "NOT_ATTEMPTED"
+    assert calls == [(pkg_r1.package_id, 1), (pkg_r1.package_id, 2)]
+
+    # Reopened instance resumes both revisions idempotently with zero extra A04 calls.
+    reopened = a03_r3_case["make_owner"]()
+    assert reopened.resume_local() == (res_r1, res_r2)
+    assert len(calls) == 2
+
+    # Bounded AI-assisted revision 3 retains parent r2 with its own independent production result.
+    a03_r3_case["r3_sampler"].variant = "r4-v3-ai"
+    r3_job = a03_r3_case["helpers"].production_job(
+        a03_r3_case["cycle"],
+        journey_id="r4:journey", cycle_id="r4:cycle", job_id="r4:prod-3", attempt=1,
+        configuration=a03_r3_case["cli"].config, purpose="PRODUCTION",
+        parent_package=pkg_r2, edit_reason="AI lighting continuity refinement",
+    )
+    r3_grant = LocalAuthorization(
+        journey_id="r4:journey", cycle_id="r4:cycle", job_id="r4:prod-3",
+        source_sha=a03_r3_case["source_sha"], authorization_ref="fixture:r4-a04-grant-r3",
+        route_id="a03-to-a04",
+    )
+    r3_owner = a03_r3_case["make_owner"](local_authorization=r3_grant)
+    r3_result = run_creative_production(
+        r3_job, sidecars, a03_r3_case["reasoner"],
+        authorization=a03_r3_case["cli_grant"], production=r3_owner,
+    )
+    assert r3_result.status == "CREATIVE_COMPLETE" and r3_result.package.revision == 3
+    assert r3_owner.last_result.status == "SUCCESS"
+    assert r3_owner.last_result.receiver_receipt.revision == 3
+    assert r3_owner.last_result.receiver_receipt.parent_package_digest == pkg_r2.digest
+    assert r3_owner.last_result.completed.spec.idempotency_key not in {
+        res_r1.completed.spec.idempotency_key, res_r2.completed.spec.idempotency_key,
+    }
+
+
+def test_r4_outbox_commit_before_dispatch_and_active_lease(a03_r3_case, monkeypatch):
+    sidecars = a03_r3_case["sidecars"]
+    prod_result = a03_r3_case["result"]
+    first = a03_r3_case["make_owner"]()
+    pending = first.complete_a03(prod_result, store=sidecars, dispatch=False)
+    assert pending.status == "PENDING" and pending.event is None
+    assert invocation_rows(first, "ProductionStageCompleted.v1") == [pending.completed.to_dict()]
+    assert not invocation_rows(first, "A04LocalInvocation.v1")
+    assert not invocation_rows(first, "ProductionStageDispatched.v1")
+
+    key = pending.completed.spec.idempotency_key
+    second = a03_r3_case["make_owner"]()
+    real_invoke = first._invoke_a04
+    observations = []
+
+    def observe_lease(completed, raw):
+        observations.append(second.dispatch_local(key))
+        return real_invoke(completed, raw)
+
+    monkeypatch.setattr(first, "_invoke_a04", observe_lease)
+    actual = first.dispatch_local(key)
+    assert observations[0].status == "RUNNING" and observations[0].event is None
+    assert actual.status == "SUCCESS" and second.dispatch_local(key) == actual
+    assert len(invocation_rows(first, "ProductionDispatchAttempt.v1")) == 1
+
+
+@pytest.mark.parametrize("window", ["after-accept", "after-witness"])
+def test_r4_crash_windows_never_blindly_reinvoke_a04(a03_r3_case, monkeypatch, window):
+    from ai_commerce.media import generation as mg
+
+    sidecars = a03_r3_case["sidecars"]
+    prod_result = a03_r3_case["result"]
+    first, calls = a03_r3_case["make_owner"](), []
+    real_accept = mg.accept_creative_production_package
+
+    def spy_accept(**kwargs):
+        calls.append(kwargs["package_id"])
+        return real_accept(**kwargs)
+
+    monkeypatch.setattr(mg, "accept_creative_production_package", spy_accept)
+    real_invoke = first._invoke_a04
+
+    def invoke(completed, raw):
+        witness = real_invoke(completed, raw)
+        if window == "after-accept":
+            raise LocalCrash()
+        return witness
+
+    monkeypatch.setattr(first, "_invoke_a04", invoke)
+    if window == "after-witness":
+        def crash(*args):
+            raise LocalCrash()
+        monkeypatch.setattr(first, "_finish_local", crash)
+
+    with pytest.raises(LocalCrash):
+        first.complete_a03(prod_result, store=sidecars)
+    assert not invocation_rows(first, "ProductionStageReceipt.v1")
+    monkeypatch.setattr("ai_commerce.production_orchestration.orchestrator.time.time", lambda: 10**12)
+    second = a03_r3_case["make_owner"]()
+    recovered = second.resume_local()[0]
+    assert recovered.status == ("UNKNOWN" if window == "after-accept" else "SUCCESS")
+    assert second.resume_local() == (recovered,)
+    assert len(calls) == 1
+    assert len(invocation_rows(first, "A04LocalInvocation.v1")) == (window == "after-witness")
+    assert len(invocation_rows(first, "ProductionStageReceipt.v1")) == (window == "after-witness")
+
+
+@pytest.mark.parametrize("failure,expected", [("reject", "FAILED"), ("alter", "FAILED"), ("unknown", "UNKNOWN")])
+def test_r4_receiver_failure_and_unknown_effect_never_mint_success(a03_r3_case, monkeypatch, failure, expected):
+    from ai_commerce.media import generation as mg
+
+    sidecars = a03_r3_case["sidecars"]
+    prod_result = a03_r3_case["result"]
+    real_accept, calls = mg.accept_creative_production_package, []
+
+    def broken(**kwargs):
+        calls.append(kwargs["package_id"])
+        if failure == "reject":
+            raise ValueError("synthetic A04 validation rejection")
+        if failure == "unknown":
+            raise RuntimeError("synthetic A04 ambiguous I/O error")
+        real_accept(**kwargs)
+        return {"forged": True, "status": "SOURCE_HANDOFF_VERIFIED"}
+
+    monkeypatch.setattr(mg, "accept_creative_production_package", broken)
+    first = a03_r3_case["make_owner"]()
+    actual = first.complete_a03(prod_result, store=sidecars)
+    assert actual.status == expected and actual.event is None and actual.accepted_consumer is None
+    assert a03_r3_case["make_owner"]().resume_local() == (actual,)
+    assert len(calls) == 1
+    assert not invocation_rows(first, "ProductionStageReceipt.v1")
+
+
+@pytest.mark.parametrize("restore", [True, False])
+def test_r4_preinvocation_missing_package_has_bounded_safe_retry(a03_r3_case, restore):
+    sidecars = a03_r3_case["sidecars"]
+    prod_result = a03_r3_case["result"]
+    pkg = prod_result.package
+    first = a03_r3_case["make_owner"](max_attempts=2)
+    first.complete_a03(prod_result, store=sidecars, dispatch=False)
+    pkg_path = sidecars.production_package_path(pkg.package_id, pkg.revision)
+    saved_bytes = pkg_path.read_bytes()
+    pkg_path.unlink()
+    retry = first.resume_local()[0]
+    assert retry.status == "RETRY_SAFE" and retry.event is None
+    assert not invocation_rows(first, "ProductionDispatchAttempt.v1")
+    if restore:
+        pkg_path.write_bytes(saved_bytes)
+    second = a03_r3_case["make_owner"](max_attempts=2)
+    terminal = second.resume_local()[0]
+    assert terminal.status == ("SUCCESS" if restore else "FAILED")
+    assert second.resume_local() == (terminal,)
+
+
+def test_r4_negative_rejections_intake_mock_hold_stopped_paths_pins_and_tamper(a03_r3_case, local_case, tmp_path, monkeypatch):
+    from ai_commerce.creative import ActorRef, revise_production_package, run_creative_cycle, run_creative_production
+
+    h = a03_r3_case["helpers"]
+    sidecars = a03_r3_case["sidecars"]
+    prod_result = a03_r3_case["result"]
+    pkg = prod_result.package
+    owner = a03_r3_case["make_owner"]()
+
+    # 1) Intake-only ContentBrief rejected as creative success.
+    with pytest.raises(OrchestrationError, match="PRODUCER_SCHEMA"):
+        owner.complete_a03(a03_r3_case["brief"], store=sidecars)
+
+    # 2) TEST_ONLY_MOCK, HOLD, STOPPED A03 results rejected.
+    mock_sidecars = h.CreativeSidecarStore(tmp_path / "neg-mock")
+    mock_cycle = run_creative_cycle(h.cycle_job(), mock_sidecars, h.cycle_adapter(h.CycleFakeClient()))
+    for label, client in (("mock", h.ProductionFakeClient()),
+                          ("hold", h.ProductionFakeClient(fault="timeout")),
+                          ("stop", h.ProductionFakeClient(fault="refusal"))):
+        mj = h.production_job(mock_cycle, journey_id="r4:journey", cycle_id="r4:cycle", job_id="r4:prod-1")
+        mres = run_creative_production(mj, mock_sidecars, h.cycle_adapter(client))
+        with pytest.raises(OrchestrationError, match="PRODUCER_NOT_COMPLETE"):
+            owner.complete_a03(mres, store=mock_sidecars)
+        mock_sidecars = h.CreativeSidecarStore(tmp_path / f"neg-mock-{label}")
+        mock_cycle = run_creative_cycle(h.cycle_job(), mock_sidecars, h.cycle_adapter(h.CycleFakeClient()))
+
+    # 3) External / temp path outside sidecar store (e.g. GitHub issue artifact) rejected.
+    temp_copy = tmp_path / "github-issue-artifact.json"
+    temp_copy.write_bytes(sidecars.production_result_path(prod_result.digest).read_bytes())
+    with pytest.raises(OrchestrationError, match="PRODUCER_REFERENCE_MISMATCH"):
+        owner.complete_a03(prod_result, store=sidecars, result_ref=temp_copy)
+
+    # 4) Cross-route grant mismatches fail closed.
+    a10_grant = replace(a03_r3_case["grant"], route_id="a10-m05-to-a03")
+    with pytest.raises(OrchestrationError, match="LOCAL_ROUTE_MISMATCH"):
+        a03_r3_case["make_owner"](local_authorization=a10_grant).complete_a03(prod_result, store=sidecars)
+    a10_result, a10_refs, make_a10_owner = local_case
+    wrong_a10_grant = replace(make_a10_owner()._local_authorization, route_id="a03-to-a04")
+    with pytest.raises(OrchestrationError, match="LOCAL_ROUTE_MISMATCH"):
+        make_a10_owner(local_authorization=wrong_a10_grant).complete_a10(a10_result, **a10_refs)
+
+    # 5) Mismatched source_sha or missing/revoked local authorization rejected.
+    with pytest.raises(OrchestrationError, match="SOURCE_SHA_MISMATCH"):
+        a03_r3_case["make_owner"](source_sha="e" * 40).complete_a03(prod_result, store=sidecars)
+    with pytest.raises(OrchestrationError, match="LOCAL_AUTHORIZATION_REQUIRED"):
+        a03_r3_case["make_owner"](local_authorization=None).complete_a03(prod_result, store=sidecars)
+
+    # 6) Different source pins never silently replay each other's outbox items.
+    done = owner.complete_a03(prod_result, store=sidecars)
+    assert done.status == "SUCCESS"
+    other_sha = "f" * 40
+    other_grant = replace(a03_r3_case["grant"], source_sha=other_sha)
+    other_owner = a03_r3_case["make_owner"](source_sha=other_sha, local_authorization=other_grant)
+    assert other_owner.resume_local() == ()
+    with pytest.raises(OrchestrationError, match="ROUTE_NOT_AUTHORIZED"):
+        other_owner.dispatch_local(done.completed.spec.idempotency_key)
+
+    # 7) Altered authorization_ref or revoked grant cannot resume/reconcile.
+    altered_grant = replace(a03_r3_case["grant"], authorization_ref="fixture:altered-grant")
+    with pytest.raises(OrchestrationError, match="ROUTE_NOT_AUTHORIZED"):
+        a03_r3_case["make_owner"](local_authorization=altered_grant).resume_local()
+    owner.revoke_local_authorization()
+    with pytest.raises(OrchestrationError, match="LOCAL_AUTHORIZATION_REQUIRED"):
+        owner.resume_local()
+
+    # 8) Conflicting revision content for same (grant, package_id, revision) rejected.
+    r2_a = revise_production_package(
+        pkg, {"narrative_intention": "Variant A"}, edit_reason="A", actor=ActorRef("HUMAN", "human:a"),
+    )
+    sidecars.save_production_package(r2_a)
+    r2_owner = a03_r3_case["make_owner"]()
+    r2_done = r2_owner.complete_a03(prod_result, store=sidecars, package=r2_a)
+    assert r2_done.status == "SUCCESS"
+    # An unsaved conflicting revision must fail the immutable bytes pin before dispatch.
+    r2_b = revise_production_package(
+        pkg, {"narrative_intention": "Variant B"}, edit_reason="B", actor=ActorRef("HUMAN", "human:b"),
+    )
+    with pytest.raises(OrchestrationError, match="OUTPUT_BYTES_MISMATCH"):
+        r2_owner.complete_a03(prod_result, store=sidecars, package=r2_b)
+
+    # 9) Tampered durable A04 receipt file fails witness reconciliation closed.
+    tampered_owner = a03_r3_case["make_owner"](state_dir=tmp_path / "r4-tamper-witness")
+    monkeypatch.setattr(tampered_owner, "_finish_local", lambda *args: (_ for _ in ()).throw(LocalCrash()))
+    with pytest.raises(LocalCrash):
+        tampered_owner.complete_a03(prod_result, store=sidecars)
+    witness = invocation_rows(tampered_owner, "A04LocalInvocation.v1")[0]
+    Path(witness["artifact_ref"]).write_bytes(b"{\"tampered\":true}")
+    with pytest.raises(OrchestrationError, match="INVOCATION_WITNESS_MISMATCH"):
+        a03_r3_case["make_owner"](state_dir=tmp_path / "r4-tamper-witness").resume_local()
+    assert not invocation_rows(tampered_owner, "ProductionStageReceipt.v1")
+
+    # 10) Tampered outbox route/consumer/schema rejected before any A04 call.
+    spoof_dir = tmp_path / "r4-spoof"
+    spoof_owner = a03_r3_case["make_owner"](state_dir=spoof_dir)
+    pending = spoof_owner.complete_a03(prod_result, store=sidecars, dispatch=False)
+    for field, value in (("schema_version", "StageSpec.v2"), ("consumer_id", "spoof:consumer"),
+                         ("route_id", "a03-creative-brief")):
+        wire = pending.completed.to_dict()
+        wire["spec"][field] = value
+        with sqlite3.connect(spoof_dir / "production.sqlite") as db:
+            db.execute("UPDATE outbox SET completed=?", (json.dumps(wire),))
+        with pytest.raises(OrchestrationError):
+            a03_r3_case["make_owner"](state_dir=spoof_dir).resume_local()
+    assert not invocation_rows(spoof_owner, "ProductionDispatchAttempt.v1")
+
+    # 11) Tampered package bytes after outbox commit fail closed as FAILED without invoking A04.
+    bytes_dir = tmp_path / "r4-tamper-bytes"
+    bytes_owner = a03_r3_case["make_owner"](state_dir=bytes_dir)
+    bytes_owner.complete_a03(prod_result, store=sidecars, dispatch=False)
+    pkg_path = sidecars.production_package_path(pkg.package_id, 1)
+    original_pkg_bytes = pkg_path.read_bytes()
+    try:
+        pkg_path.write_bytes(original_pkg_bytes + b" ")
+        failed = a03_r3_case["make_owner"](state_dir=bytes_dir).resume_local()[0]
+        assert failed.status == "FAILED" and failed.reason == "INPUT_REJECTED" and failed.event is None
+        assert not invocation_rows(bytes_owner, "ProductionDispatchAttempt.v1")
+    finally:
+        pkg_path.write_bytes(original_pkg_bytes)
+
+
+def test_r4_p0_detached_a04_snapshot_never_dispatches_or_self_attests(a03_r3_case, monkeypatch):
+    from ai_commerce.core.provenance import canonical_bytes as prov_bytes
+    from ai_commerce.media import generation as mg
+
+    prod_result = a03_r3_case["result"]
+    pkg = prod_result.package
+    source_bytes = prov_bytes(prod_result.to_dict())
+    consumer, path = CONSUMER_ROUTES["a04-media-preparation"]
+    spec = StageSpec(
+        stage_id="A03.creative",
+        route_id="a04-media-preparation",
+        consumer_id=consumer,
+        consumer_path=path,
+        source_sha256=bytes_digest(source_bytes),
+        input_sha256=bytes_digest(source_bytes),
+        output_sha256=pkg.digest,
+        idempotency_key="p0-a04-snapshot-1",
+        output_contract="A03CreativeProductionPackage.v1",
+        provenance=Provenance(
+            actor_ref="fixture:a03", source_ref="fixture:a03-result",
+            source_sha256=bytes_digest(source_bytes), evidence_type="SYNTHETIC_FIXTURE",
+        ),
+        authorization=RouteAuthorization(
+            route_id="a04-media-preparation", consumer_id=consumer, consumer_path=path,
+            authorization_ref="fixture:a04-p0-permit",
+        ),
+    )
+    completed = ProductionStageCompleted(
+        spec=spec, completion_ref="fixture:a04-completed",
+        source_sha256=spec.source_sha256, input_sha256=spec.input_sha256, output_sha256=spec.output_sha256,
+    )
+    monkeypatch.setattr(mg, "accept_creative_production_package",
+                        lambda **kw: (_ for _ in ()).throw(AssertionError("P0 must never execute A04")))
+    orch = ProductionPipelineOrchestrator(authorized_specs=((spec.authorization.authorization_ref, spec.sha256),))
+    res = orch.record_completed(completed, source_bytes=source_bytes,
+                                input_value=prod_result.to_dict(), output=pkg.to_dict())
+    assert res.status == "NOT_DISPATCHED" and res.accepted_consumer is None
+    untrusted_receipt = ProductionStageReceipt(
+        spec=spec, completed_sha256=completed.sha256, output_sha256=pkg.digest,
+        consumer_id=consumer, receipt_ref="fixture:a04-rec", execution_ref="fixture:a04-exec",
+        provenance=replace(spec.provenance, actor_ref=consumer), consumer_executed=True,
+    )
+    with pytest.raises(OrchestrationError, match="RECEIPT_NOT_VERIFIED"):
+        orch.record_receipt(untrusted_receipt)

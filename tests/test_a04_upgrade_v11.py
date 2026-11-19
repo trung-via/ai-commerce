@@ -775,3 +775,57 @@ def test_source_hardlink_guard_without_native_link_privilege(registry, image_fil
         with registry.capture_file(image_file):
             pytest.fail("Hardlinked input was accepted")
     no_staging(registry)
+
+
+def test_r4_a04_handoff_receipt_strict_invariants_and_tamper_rejection(tmp_path):
+    from ai_commerce.media.generation import (
+        A04CreativeHandoffReceipt, A04_CREATIVE_CONSUMER_ID,
+        a04_handoff_receipt_path, load_a04_handoff_receipt,
+    )
+
+    valid = A04CreativeHandoffReceipt.create(
+        journey_id="j1", cycle_id="c1", job_id="job1", attempt=1,
+        actor_ref="AI:reasoning:" + "1" * 64, job_actor_ref="test:caller",
+        source_sha="a" * 40, a03_result_ref="/trusted/result.json",
+        a03_result_digest="2" * 64, package_id="package:" + "3" * 64,
+        revision=1, parent_package_digest=None, package_ref="/trusted/r1.json",
+        package_digest="4" * 64, brief_id="brief:1", source_brief_digest="5" * 64,
+        selection_id="selection:" + "6" * 64, concept_id="concept:" + "7" * 64,
+        concept_revision=2, concept_digest="8" * 64, cycle_job_digest="9" * 64,
+        cycle_result_digest="a" * 64, reasoning_receipt_digest="1" * 64,
+        audio_mode="SILENCE", scene_count=2, media_target_count=1,
+    )
+    assert valid.consumer_id == A04_CREATIVE_CONSUMER_ID
+    assert valid.status == "SOURCE_HANDOFF_VERIFIED"
+    assert valid.media_execution == "NOT_ATTEMPTED"
+    assert valid.factual_status == "UNVERIFIED"
+    assert valid.semantic_approval == "NOT_ATTEMPTED"
+    assert valid.qa_status == "UNVERIFIED"
+    assert valid.pulse_execution == "NOT_ATTEMPTED"
+    assert valid.rights_status == "UNKNOWN"
+    assert A04CreativeHandoffReceipt.from_dict(valid.to_dict()) == valid
+
+    dest = a04_handoff_receipt_path(tmp_path / "receipts", valid.receipt_id)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(canonical_bytes(valid.to_dict()))
+    assert load_a04_handoff_receipt(dest) == valid
+
+    # Reject any promotion of media, rights, QA, factual, semantic approval, or PULSE.
+    for field_name, bad_val in (
+        ("status", "MEDIA_GENERATED"),
+        ("media_execution", "EXECUTED"),
+        ("rights_status", "GRANTED"),
+        ("factual_status", "VERIFIED"),
+        ("semantic_approval", "APPROVED"),
+        ("qa_status", "CREATIVE_QA_PASSED"),
+        ("pulse_execution", "PULSE_COMPLETE"),
+        ("consumer_id", "spoof:consumer"),
+        ("parent_package_digest", "b" * 64),
+    ):
+        with pytest.raises(ValueError):
+            A04CreativeHandoffReceipt.from_dict({**valid.to_dict(), field_name: bad_val})
+
+    # Tampered receipt file fails closed.
+    dest.write_bytes(dest.read_bytes() + b"\n")
+    with pytest.raises(ValueError, match="A04_RECEIPT_BYTES_MISMATCH"):
+        load_a04_handoff_receipt(dest)

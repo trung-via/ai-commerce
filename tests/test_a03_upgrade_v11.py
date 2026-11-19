@@ -2579,3 +2579,71 @@ def test_r3_negative_changed_permission_and_missing_grant(tmp_path):
         run_creative_production(ok_job, sidecars, reasoner,
                                 authorization=InvocationAuthorization(True, True, "runner:grant-changed"))
     assert len(live_fake.calls) == 1
+
+
+def test_r4_sidecar_result_digest_lineage_and_opt_in_production_seam(installed_cli, tmp_path, monkeypatch):
+    from ai_commerce.media.generation import A04CreativeHandoffReceipt, A04_CREATIVE_CONSUMER_ID
+    from ai_commerce.production_orchestration import LocalAuthorization, ProductionPipelineOrchestrator
+
+    cli, r2_sampler, r3_sampler = installed_cli, CycleFakeClient(), ProductionFakeClient(silent=True)
+
+    def dispatch(packet):
+        req = packet["request"]
+        creative = ReasoningRequest.from_dict(req["creative"])
+        model_req = StructuredModelRequest(ModelConfiguration.from_dict(req["config"]), creative)
+        if creative.production is not None:
+            return json.loads(r3_sampler.complete(model_req).output_json)
+        val = json.loads(r2_sampler.complete(model_req).output_json)
+        if creative.operation == "DEVELOP":
+            val["edits"] = {n: val["edits"].get(n) for n in ("family", "title", "premise", "visual_direction")}
+        return val
+
+    cli.creative_output = dispatch
+    install_fake_popen(monkeypatch, cli)
+    grant = InvocationAuthorization(True, True, "fixture:r4-a03-grant")
+    root = tmp_path / "r4-creative"
+    sidecars = CreativeSidecarStore(root)
+    reasoner = LiveCreativeReasoner(cli.config, CodexCliCreativeClient(cli.capability(), runner=None))
+    cycle = run_creative_cycle(
+        cycle_job(seed_options={"configuration": cli.config, "purpose": "PRODUCTION"}),
+        sidecars, reasoner, authorization=grant,
+    )
+    job = production_job(cycle, journey_id="r4:a03", cycle_id="r4:c1", job_id="r4:p1",
+                         configuration=cli.config, purpose="PRODUCTION")
+    # Default production=None performs zero downstream orchestration.
+    res = run_creative_production(job, sidecars, reasoner, authorization=grant)
+    assert res.status == "CREATIVE_COMPLETE"
+    assert sidecars.load_production_result_by_digest(res.digest) == res
+    origin, pkg, handoff = sidecars.verify_production_package_lineage(
+        res.package.package_id, 1, origin_result_digest=res.digest,
+    )
+    assert origin == res and pkg == res.package and handoff["package_digest"] == pkg.digest
+
+    # Editable HUMAN revision retains parent chain back to origin result.
+    pkg_r2 = revise_production_package(
+        pkg, {"narrative_intention": "Chỉnh nhịp hình ảnh tĩnh lặng."},
+        edit_reason="Human visual pacing refinement", actor=ActorRef("HUMAN", "human:editor"),
+    )
+    sidecars.save_production_package(pkg_r2)
+    origin2, verified_r2, _ = sidecars.verify_production_package_lineage(
+        pkg_r2.package_id, 2, origin_result_digest=res.digest,
+    )
+    assert origin2 == res and verified_r2 == pkg_r2
+
+    # Replay with opt-in ProductionPipelineOrchestrator delivers to A04 without reinference.
+    cli_calls_before = len(cli.calls)
+    source_sha = "a" * 40
+    local_grant = LocalAuthorization(
+        journey_id="r4:a03", cycle_id="r4:c1", job_id="r4:p1",
+        source_sha=source_sha, authorization_ref="fixture:a03-a04", route_id="a03-to-a04",
+    )
+    orch = ProductionPipelineOrchestrator(
+        state_dir=tmp_path / "orch", source_sha=source_sha, local_authorization=local_grant,
+    )
+    assert run_creative_production(job, sidecars, production=orch) == res
+    assert len(cli.calls) == cli_calls_before
+    assert orch.last_result is not None and orch.last_result.status == "SUCCESS"
+    assert orch.last_result.accepted_consumer == A04_CREATIVE_CONSUMER_ID
+    assert isinstance(orch.last_result.receiver_receipt, A04CreativeHandoffReceipt)
+    assert orch.last_result.receiver_receipt.media_execution == "NOT_ATTEMPTED"
+    assert orch.last_result.receiver_receipt.status == "SOURCE_HANDOFF_VERIFIED"

@@ -68,7 +68,8 @@ def digest(value: object) -> str:
 
 
 # These are existing registered source owners, not executable routing entries.
-# M05 consumes OpportunityProposal.v1; A03 consumes ContentBrief.v0.1.
+# M05 consumes OpportunityProposal.v1; A03 consumes ContentBrief.v0.1;
+# A04 consumes verified A03CreativeProductionPackage.v1 (source-only intake).
 CONSUMER_ROUTES = MappingProxyType({
     "a10-m05-content-brief": (
         "ai_commerce.opportunity.bridge.briefs:opportunity_to_brief",
@@ -78,11 +79,22 @@ CONSUMER_ROUTES = MappingProxyType({
         "ai_commerce.creative.briefs:intake_brief",
         "src/ai_commerce/creative/briefs.py",
     ),
+    "a04-media-preparation": (
+        "ai_commerce.media.generation:accept_creative_production_package",
+        "src/ai_commerce/media/generation.py",
+    ),
 })
 
-# P1 executes only this deterministic local edge. P0 routes remain snapshots.
+ROUTE_OUTPUT_CONTRACTS = MappingProxyType({
+    "a10-m05-content-brief": "ContentBrief.v0.1",
+    "a03-creative-brief": "ContentBrief.v0.1",
+    "a04-media-preparation": "A03CreativeProductionPackage.v1",
+})
+
+# P1/R4 execute only these deterministic local edges. P0 routes remain snapshots.
 LOCAL_ROUTES = MappingProxyType({
     "a10-m05-to-a03": ("A10.M05", "a03-creative-brief"),
+    "a03-to-a04": ("A03.creative", "a04-media-preparation"),
 })
 
 
@@ -91,19 +103,22 @@ class _Record:
 
     def to_dict(self) -> dict:
         value = asdict(self)
-        # Preserve original P0 wire bytes/digests, including nested records.
+        # Preserve original P0/P1 wire bytes/digests, including nested records.
         for name in ("spec", "receipt"):
             child = getattr(self, name, None)
             if isinstance(child, _Record):
                 value[name] = child.to_dict()
-        if type(self) is StageSpec and self.local_handoff is None:
-            del value["local_handoff"]
-        if type(self) is ProductionStageReceipt and self.spec.local_handoff is None:
+        if type(self) is StageSpec:
+            if self.local_handoff is None:
+                del value["local_handoff"]
+            if self.package_handoff is None:
+                del value["package_handoff"]
+        if type(self) is ProductionStageReceipt and not self.spec.has_local_handoff:
             if self.outcome == "SUCCESS":
                 del value["outcome"]
             if self.artifact_ref is None:
                 del value["artifact_ref"]
-        if type(self) is ProductionStageDispatched and self.spec.local_handoff is None:
+        if type(self) is ProductionStageDispatched and not self.spec.has_local_handoff:
             if self.phase == "RECEIPT_RECORDED":
                 del value["phase"]
             if self.dispatch_ref is None:
@@ -117,8 +132,8 @@ class _Record:
     @classmethod
     def from_dict(cls, value: object) -> Self:
         names = {f.name for f in fields(cls)}
-        # P1 extensions have defaults so original P0 detached records still load.
-        optional = names & {"local_handoff", "outcome", "artifact_ref"}
+        # P1/R4 extensions have defaults so original P0/P1 detached records still load.
+        optional = names & {"local_handoff", "package_handoff", "outcome", "artifact_ref"}
         require(type(value) is dict and names - optional <= set(value) <= names, "CONTRACT_FIELDS")
         args = dict(value)
         nested = {
@@ -126,6 +141,7 @@ class _Record:
             "authorization": RouteAuthorization,
             "spec": StageSpec,
             "local_handoff": LocalHandoff,
+            "package_handoff": A03PackageHandoff,
         }
         for key, kind in nested.items():
             if key in args and args[key] is not None:
@@ -187,10 +203,49 @@ class LocalHandoff(_Record):
     def __post_init__(self) -> None:
         LocalAuthorization(journey_id=self.journey_id, cycle_id=self.cycle_id, job_id=self.job_id,
                            source_sha=self.source_sha, authorization_ref="binding", route_id=self.route_id)
+        require(self.route_id == "a10-m05-to-a03", "LOCAL_ROUTE_MISMATCH")
         for value in (self.producer_event_id, self.producer_result_ref, self.brief_ref):
             _text(value)
         for value in (self.producer_result_sha256, self.brief_bytes_sha256):
             _hash(value)
+
+
+@dataclass(frozen=True, kw_only=True)
+class A03PackageHandoff(_Record):
+    """Exact source-pinned A03 -> A04 local handoff reference."""
+    journey_id: str
+    cycle_id: str
+    job_id: str
+    attempt: int
+    source_sha: str
+    actor_ref: str
+    creative_store_root: str
+    a03_result_ref: str
+    a03_result_digest: str
+    package_id: str
+    revision: int
+    parent_package_digest: str | None
+    package_ref: str
+    package_bytes_sha256: str
+    route_id: str = "a03-to-a04"
+
+    def __post_init__(self) -> None:
+        LocalAuthorization(journey_id=self.journey_id, cycle_id=self.cycle_id, job_id=self.job_id,
+                           source_sha=self.source_sha, authorization_ref="binding", route_id=self.route_id)
+        require(self.route_id == "a03-to-a04", "LOCAL_ROUTE_MISMATCH")
+        require(type(self.attempt) is int and self.attempt >= 1, "INVALID_ATTEMPT")
+        require(type(self.revision) is int and self.revision >= 1, "INVALID_REVISION")
+        for value in (self.actor_ref, self.creative_store_root, self.a03_result_ref, self.package_ref):
+            _text(value)
+        require(type(self.package_id) is str and re.fullmatch(r"package:[0-9a-f]{64}", self.package_id)
+                is not None, "INVALID_PACKAGE_ID")
+        for value in (self.a03_result_digest, self.package_bytes_sha256):
+            _hash(value)
+        if self.revision == 1:
+            require(self.parent_package_digest is None, "INVALID_PARENT_REVISION")
+        else:
+            _hash(self.parent_package_digest)
+
 
 @dataclass(frozen=True, kw_only=True)
 class RouteAuthorization(_Record):
@@ -221,9 +276,14 @@ class StageSpec(_Record):
     idempotency_key: str
     provenance: Provenance
     authorization: RouteAuthorization
-    output_contract: Literal["ContentBrief.v0.1"] = "ContentBrief.v0.1"
+    output_contract: Literal["ContentBrief.v0.1", "A03CreativeProductionPackage.v1"] = "ContentBrief.v0.1"
     schema_version: Literal["StageSpec.v1"] = "StageSpec.v1"
     local_handoff: LocalHandoff | None = None
+    package_handoff: A03PackageHandoff | None = None
+
+    @property
+    def has_local_handoff(self) -> bool:
+        return self.local_handoff is not None or self.package_handoff is not None
 
     def __post_init__(self) -> None:
         self._version()
@@ -238,10 +298,17 @@ class StageSpec(_Record):
         auth = self.authorization
         require((auth.route_id, auth.consumer_id, auth.consumer_path) ==
                 (self.route_id, self.consumer_id, self.consumer_path), "ROUTE_AUTHORIZATION_MISMATCH")
-        require(type(self.output_contract) is str and self.output_contract == "ContentBrief.v0.1", "OUTPUT_CONTRACT")
+        require(type(self.output_contract) is str and self.output_contract == ROUTE_OUTPUT_CONTRACTS[self.route_id],
+                "OUTPUT_CONTRACT")
+        require(not (self.local_handoff is not None and self.package_handoff is not None), "HANDOFF_CONFLICT")
         if self.local_handoff is not None:
             require(type(self.local_handoff) is LocalHandoff, "LOCAL_HANDOFF_REQUIRED")
             require((self.stage_id, self.route_id) == LOCAL_ROUTES[self.local_handoff.route_id],
+                    "LOCAL_ROUTE_MISMATCH")
+            require(auth.scope == "SOURCE_ONLY_LOCAL", "AUTHORIZATION_SCOPE")
+        if self.package_handoff is not None:
+            require(type(self.package_handoff) is A03PackageHandoff, "LOCAL_HANDOFF_REQUIRED")
+            require((self.stage_id, self.route_id) == LOCAL_ROUTES[self.package_handoff.route_id],
                     "LOCAL_ROUTE_MISMATCH")
             require(auth.scope == "SOURCE_ONLY_LOCAL", "AUTHORIZATION_SCOPE")
 
@@ -289,7 +356,7 @@ class ProductionStageReceipt(_Record):
             _text(value)
         require(self.consumer_executed is True, "CONSUMER_NOT_EXECUTED")
         require(type(self.outcome) is str and self.outcome == "SUCCESS", "RECEIPT_OUTCOME")
-        if self.spec.local_handoff is not None or self.artifact_ref is not None:
+        if self.spec.has_local_handoff or self.artifact_ref is not None:
             _text(self.artifact_ref)
         require(self.consumer_id == self.spec.consumer_id == self.provenance.actor_ref, "RECEIPT_CONSUMER_MISMATCH")
         require(self.output_sha256 == self.spec.output_sha256, "RECEIPT_OUTPUT_MISMATCH")
@@ -300,7 +367,7 @@ class ProductionStageReceipt(_Record):
 
 @dataclass(frozen=True, kw_only=True)
 class ProductionStageDispatched(_Record):
-    """P1 dispatch evidence or P0-compatible retrospective receipt linkage.
+    """P1/R4 dispatch evidence or P0-compatible retrospective receipt linkage.
 
     DISPATCHED proves only a local reservation. Only RECEIPT_RECORDED links
     receiver completion; neither wire representation grants execution authority.
@@ -327,7 +394,7 @@ class ProductionStageDispatched(_Record):
         _hash(self.completed_sha256)
         require(type(self.phase) is str and self.phase in {"DISPATCHED", "RECEIPT_RECORDED"}, "DISPATCH_PHASE")
         if self.phase == "DISPATCHED":
-            require(self.spec.local_handoff is not None and self.spec.authorization.scope == "SOURCE_ONLY_LOCAL",
+            require(self.spec.has_local_handoff and self.spec.authorization.scope == "SOURCE_ONLY_LOCAL",
                     "LOCAL_HANDOFF_REQUIRED")
             require(self.receipt is None and self.receipt_sha256 is None, "DISPATCH_NOT_COMPLETION")
             _text(self.dispatch_ref)
