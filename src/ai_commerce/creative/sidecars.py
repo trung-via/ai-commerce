@@ -7,15 +7,18 @@ from typing import TYPE_CHECKING, Any
 
 from ai_commerce.core.provenance import canonical_bytes, sha256_bytes
 
-from ._validation import CreativeValidationError, VersionConflict, exact_fields, read_json
+from ._validation import CreativeValidationError, VersionConflict, exact_fields, positive_int, read_json
 from .briefs import brief_digest
 from .decisions import ActorDecision
 from .intent import CreativeIntent
-from .models import ConceptRecord, require_digest
+from .models import EDITABLE_PACKAGE_FIELDS, ConceptRecord, require_digest, require_package_id
 from .store import CreativeStore, _put
 from .v2 import (
-    A03CreativeCycleJob, A03CreativeCycleResult, A03CreativeJob, A03CreativeStageResult, ReasoningRequest, ReasoningResult,
-    _cycle_stage_job, _output_pin, _stage_concepts, inference_decision, inference_failure,
+    A03CreativeCycleJob, A03CreativeCycleResult, A03CreativeJob,
+    A03CreativeProductionJob, A03CreativeProductionPackage, A03CreativeProductionResult,
+    A03CreativeStageResult, ReasoningRequest, ReasoningResult,
+    _cycle_lineage, _cycle_stage_job, _output_pin, _stage_concepts, _validate_spec_evidence,
+    inference_decision, inference_failure,
 )
 
 if TYPE_CHECKING:
@@ -201,6 +204,29 @@ class CreativeSidecarStore:
                 stage = self.load_stage(_cycle_stage_job(cycle, selector.request))
                 if stage.reasoning != selector or stage.status not in ("TEST_ONLY_MOCK", "CREATIVE_COMPLETE"):
                     raise CreativeValidationError("development needs a claimed independent selector attempt")
+        if request.production is not None:
+            context = request.production
+            prod_job = A03CreativeProductionJob.from_dict(
+                self._read("production-requests", context.production_job_digest)
+            )
+            self._check_bytes(self._path("production-jobs", prod_job.slot), prod_job.to_dict())
+            if prod_job.digest != context.production_job_digest:
+                raise CreativeValidationError("production request job digest mismatch")
+            cycle = self.load_cycle_by_digest(prod_job.cycle_job_digest, prod_job.cycle_result_digest)
+            if (request.brief != cycle.job.seed.request.brief
+                    or request.intent != cycle.job.seed.request.intent
+                    or context.evidence != cycle.job.evidence
+                    or context.lineage != _cycle_lineage(cycle)
+                    or request.source is None
+                    or _output_pin(request.source) != prod_job.selected_concept
+                    or prod_job.selected_concept != cycle.output):
+                raise CreativeValidationError("production request rebound brief, intent, evidence or R2 lineage")
+            if context.parent_package is not None:
+                saved_parent = self.load_production_package_by_digest(context.parent_package.digest)
+                if saved_parent != context.parent_package or prod_job.parent_package_digest != saved_parent.digest:
+                    raise CreativeValidationError("production request parent package mismatch")
+            elif prod_job.parent_package_digest is not None:
+                raise CreativeValidationError("production request missing pinned parent package")
 
     def save_result(self, result: ReasoningResult) -> str:
         if not isinstance(result, ReasoningResult):
@@ -240,7 +266,7 @@ class CreativeSidecarStore:
         self._check_bytes(self._path("jobs", stage.job.slot), stage.job.to_dict())
         if self.load_result(stage.reasoning.digest) != stage.reasoning:
             raise CreativeValidationError("stage reasoning receipt mismatch")
-        if stage.job.request.cycle is not None:
+        if stage.job.request.cycle is not None or stage.job.request.production is not None:
             self._check_bytes(self._path("cycle-observed-refs", stage.job.slot),
                               {"reasoning_digest": stage.reasoning.digest})
         for output in stage.outputs:
@@ -388,4 +414,203 @@ class CreativeSidecarStore:
         self._validate_cycle(result)
         if result.decision is not None and self.load_decision(result.decision.decision_id) != result.decision:
             raise CreativeValidationError("cycle decision bytes mismatch")
+        return result
+
+    def load_cycle_by_digest(self, cycle_job_digest: str, cycle_result_digest: str) -> A03CreativeCycleResult:
+        require_digest(cycle_job_digest)
+        require_digest(cycle_result_digest)
+        job = A03CreativeCycleJob.from_dict(self._read("cycle-requests", cycle_job_digest))
+        if job.digest != cycle_job_digest:
+            raise CreativeValidationError("cycle job digest mismatch")
+        result = self.load_cycle(job)
+        if result.digest != cycle_result_digest:
+            raise CreativeValidationError("cycle result digest mismatch")
+        return result
+
+    def _package_path(self, package_id: str, revision: int) -> Path:
+        require_package_id(package_id)
+        positive_int(revision, "revision")
+        return self.root / "production-packages" / package_id[8:] / f"r{revision}.json"
+
+    def _validate_production_package(self, package: A03CreativeProductionPackage) -> None:
+        brief = self.creative.load_brief(package.source_brief_digest)
+        if brief["brief_id"] != package.brief_id:
+            raise CreativeValidationError("production package brief mismatch")
+        self._check_bytes(self.creative.root / "briefs" / f"{package.source_brief_digest}.json", brief)
+        selection = self.creative.load_selection(package.selected_concept.selection_id)
+        if selection != package.selected_concept:
+            raise CreativeValidationError("production package selection pin mismatch")
+        self._check_bytes(self.creative._selection_path(selection.selection_id), selection.to_dict())
+        concept = self.creative.load_concept(selection.concept_id, selection.revision)
+        self._check_bytes(self.creative._concept_path(concept.concept_id, concept.revision), concept.to_dict())
+        cycle = self.load_cycle_by_digest(package.lineage.cycle_job_digest, package.lineage.cycle_result_digest)
+        if _cycle_lineage(cycle) != package.lineage or cycle.output != package.selected_concept:
+            raise CreativeValidationError("production package lineage disagrees with verified R2 cycle")
+        _validate_spec_evidence(package.spec, brief, cycle.job.evidence, package.evidence_refs)
+        if package.reasoning_receipt_digest is not None:
+            reasoning = self.load_result(package.reasoning_receipt_digest)
+            if (reasoning.state != "OK" or inference_failure(reasoning) is not None
+                    or reasoning.request.production is None
+                    or reasoning.request.production.lineage != package.lineage
+                    or reasoning.production_spec != package.spec
+                    or reasoning.observation != package.observation or reasoning.usage != package.usage
+                    or reasoning.configuration != package.configuration or reasoning.execution != package.execution
+                    or reasoning.provider_request_id != package.provider_request_id
+                    or reasoning.evidence_refs != package.evidence_refs
+                    or reasoning.hypotheses != package.hypotheses):
+                raise CreativeValidationError("production package disagrees with saved inference receipt")
+            if package.revision == 1:
+                if reasoning.request.operation != "PRODUCE_PACKAGE":
+                    raise CreativeValidationError("initial production package requires PRODUCE_PACKAGE receipt")
+            else:
+                if (reasoning.request.operation != "REVISE_PACKAGE"
+                        or reasoning.request.production.parent_package is None
+                        or reasoning.request.production.parent_package.digest != package.parent.digest):
+                    raise CreativeValidationError("AI package revision disagrees with pinned parent receipt")
+        if package.parent is not None:
+            parent = self.load_production_package(package.parent.package_id, package.parent.revision)
+            if parent.digest != package.parent.digest:
+                raise CreativeValidationError("production package parent digest mismatch")
+            retained = ("package_id", "brief_id", "source_brief_digest", "selected_concept", "lineage")
+            if any(getattr(package, name) != getattr(parent, name) for name in retained):
+                raise CreativeValidationError("production package revision cannot alter source or R2 lineage")
+            expected_sections = tuple(sorted(
+                name for name in EDITABLE_PACKAGE_FIELDS
+                if getattr(parent.spec, name) != getattr(package.spec, name)
+            ))
+            if package.changed_sections != expected_sections:
+                raise CreativeValidationError("production package changed_sections disagrees with parent spec")
+            if package.reasoning_receipt_digest is None:
+                preserved = (
+                    "configuration", "observation", "usage", "execution",
+                    "provider_request_id", "evidence_refs", "hypotheses",
+                )
+                if any(getattr(package, name) != getattr(parent, name) for name in preserved):
+                    raise CreativeValidationError("direct package edit cannot alter generation provenance")
+
+    def save_production_package(self, package: A03CreativeProductionPackage) -> A03CreativeProductionPackage:
+        if not isinstance(package, A03CreativeProductionPackage):
+            raise CreativeValidationError("expected A03CreativeProductionPackage")
+        valid = A03CreativeProductionPackage.from_dict(package.to_dict())
+        self._validate_production_package(valid)
+        _put(self._package_path(valid.package_id, valid.revision), canonical_bytes(valid.to_dict()))
+        self._save("production-package-digests", valid.digest, {
+            "package_id": valid.package_id, "revision": valid.revision, "package_digest": valid.digest,
+        })
+        return valid
+
+    def load_production_package(self, package_id: str, revision: int) -> A03CreativeProductionPackage:
+        path = self._package_path(package_id, revision)
+        raw = path.read_bytes()
+        record = A03CreativeProductionPackage.from_dict(read_json(raw.decode("utf-8")))
+        if raw != canonical_bytes(record.to_dict()):
+            raise CreativeValidationError("stored production package bytes mismatch")
+        if record.package_id != package_id or record.revision != revision:
+            raise CreativeValidationError("stored production package identity/revision mismatch")
+        self._check_bytes(self._path("production-package-digests", record.digest), {
+            "package_id": record.package_id, "revision": record.revision, "package_digest": record.digest,
+        })
+        self._validate_production_package(record)
+        return record
+
+    def load_production_package_by_digest(self, digest: str) -> A03CreativeProductionPackage:
+        require_digest(digest)
+        path = self._path("production-package-digests", digest)
+        ref = exact_fields(read_json(path.read_text(encoding="utf-8")), {"package_id", "revision", "package_digest"})
+        self._check_bytes(path, ref)
+        if ref["package_digest"] != digest:
+            raise CreativeValidationError("stored production package digest index mismatch")
+        record = self.load_production_package(ref["package_id"], ref["revision"])
+        if record.digest != digest:
+            raise CreativeValidationError("stored production package digest mismatch")
+        return record
+
+    def load_production_handoff(self, package_id: str, revision: int) -> dict[str, Any]:
+        """Return a fresh detached A04/R4 consumer payload without altering closed A04 contracts."""
+        package = self.load_production_package(package_id, revision)
+        selected = self.creative.load_selected(package.selected_concept.selection_id)
+        return {
+            "brief": selected["brief"],
+            "concept": selected["concept"],
+            "selection": selected["selection"],
+            "production_package": package.to_dict(),
+            "package_digest": package.digest,
+        }
+
+    def claim_production_job(self, job: A03CreativeProductionJob, authorization: InvocationAuthorization) -> bool:
+        from .live import InvocationAuthorization
+        if not isinstance(authorization, InvocationAuthorization):
+            raise CreativeValidationError("expected runner-side production authorization")
+        valid = A03CreativeProductionJob.from_dict(job.to_dict())
+        path = self._path("production-jobs", valid.slot)
+        content = canonical_bytes(valid.to_dict())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with path.open("xb") as target:
+                target.write(content)
+        except FileExistsError:
+            if path.read_bytes() != content:
+                raise VersionConflict("VERSION_CONFLICT: creative production job attempt already bound") from None
+            self._check_bytes(self._path("production-requests", valid.digest), valid.to_dict())
+            return False
+        self._save("production-requests", valid.digest, valid.to_dict())
+        self._save("production-grants", valid.slot, {
+            "production_job_digest": valid.digest,
+            "allow_network": authorization.allow_network,
+            "allow_spend": authorization.allow_spend,
+            "authorization_ref": authorization.authorization_ref,
+        })
+        return True
+
+    def production_authorization(self, job: A03CreativeProductionJob) -> InvocationAuthorization:
+        from .live import InvocationAuthorization
+        path = self._path("production-grants", job.slot)
+        value = exact_fields(read_json(path.read_text(encoding="utf-8")),
+                             {"production_job_digest", "allow_network", "allow_spend", "authorization_ref"})
+        self._check_bytes(path, value)
+        if value.pop("production_job_digest") != job.digest:
+            raise CreativeValidationError("production grant rebound its original job")
+        return InvocationAuthorization(**value)
+
+    def has_production_result(self, job: A03CreativeProductionJob) -> bool:
+        return self._path("production-refs", job.slot).exists()
+
+    def _validate_production_result(self, result: A03CreativeProductionResult) -> None:
+        self._check_bytes(self._path("production-jobs", result.job.slot), result.job.to_dict())
+        self._check_bytes(self._path("production-requests", result.job.digest), result.job.to_dict())
+        if self.production_authorization(result.job) != result.authorization:
+            raise CreativeValidationError("production receipt rebound its original runner grant")
+        cycle = self.load_cycle_by_digest(result.job.cycle_job_digest, result.job.cycle_result_digest)
+        if cycle.output != result.job.selected_concept:
+            raise CreativeValidationError("production receipt disagrees with saved R2 cycle output")
+        if result.stage is not None and self.load_stage(result.stage.job) != result.stage:
+            raise CreativeValidationError("production stage receipt mismatch")
+        if result.observed is not None and self.load_result(result.observed.digest) != result.observed:
+            raise CreativeValidationError("production observed reasoning mismatch")
+        if result.package is not None:
+            saved = self.load_production_package(result.package.package_id, result.package.revision)
+            if saved != result.package or self.load_production_package_by_digest(result.package.digest) != result.package:
+                raise CreativeValidationError("production package bytes mismatch")
+
+    def save_production_result(self, result: A03CreativeProductionResult) -> str:
+        valid = A03CreativeProductionResult.from_dict(result.to_dict())
+        self._validate_production_result(valid)
+        self._save("production-results", valid.digest, valid.to_dict())
+        self._save("production-refs", valid.job.slot, {"production_result_digest": valid.digest})
+        return valid.digest
+
+    def load_production_result(self, job: A03CreativeProductionJob) -> A03CreativeProductionResult:
+        valid = A03CreativeProductionJob.from_dict(job.to_dict())
+        self._check_bytes(self._path("production-jobs", valid.slot), valid.to_dict())
+        path = self._path("production-refs", valid.slot)
+        if not path.exists():
+            raise CreativeValidationError("UNRESOLVED_PRODUCTION_JOB: no terminal receipt; never auto retry")
+        ref = exact_fields(read_json(path.read_text(encoding="utf-8")), {"production_result_digest"})
+        self._check_bytes(path, ref)
+        result = A03CreativeProductionResult.from_dict(
+            self._read("production-results", ref["production_result_digest"])
+        )
+        if result.job != valid:
+            raise CreativeValidationError("production receipt job mismatch")
+        self._validate_production_result(result)
         return result

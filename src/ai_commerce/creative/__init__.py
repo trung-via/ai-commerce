@@ -2,7 +2,12 @@
 
 from ._validation import CreativeValidationError, NoReasonerConfigured, VersionConflict
 from .briefs import brief_digest, intake_brief, revise_brief
-from .models import ConceptChange, ConceptDraft, ConceptRecord, ConceptSelection, ParentRevision, ProviderObservation
+from .models import (
+    AudioPlan, CameraSpec, ConceptChange, ConceptDraft, ConceptRecord, ConceptSelection,
+    EDITABLE_PACKAGE_FIELDS, IdentityContinuity, MediaOutputTarget, ParentRevision,
+    ProductionLineage, ProductionPackageParent, ProductionPackageSpec, ProductionScene,
+    ProviderObservation, QAExpectation, RightsAttribution, SceneTransition, ScriptSegment,
+)
 from .reasoner import CreativeReasoner, MockCreativeReasoner, generate_concepts, reframe_concept, revise_concept
 from .store import CreativeStore
 
@@ -22,6 +27,8 @@ from .v2 import (
     ReasoningRequest, ReasoningResult, UsageObservation, reason_v2, run_creative_stage,
     A03CreativeCycleJob, A03CreativeCycleResult, CreativeCycleContext,
     CreativeCriticEvidence, CreativeEvidenceSource, run_creative_cycle,
+    A03CreativeProductionJob, A03CreativeProductionPackage, A03CreativeProductionResult,
+    CreativeProductionContext, package_identity, revise_production_package, run_creative_production,
 )
 from .live import (
     CodexCliCapability, CodexCliCreativeClient, InvocationAuthorization, LiveCreativeReasoner, ModelConfiguration,
@@ -40,4 +47,10 @@ __all__ += [
     "CLIExecutionObservation", "CodexCliCapability", "CodexCliCreativeClient", "codex_creative_argv",
     "A03CreativeCycleJob", "A03CreativeCycleResult", "CreativeCycleContext",
     "CreativeCriticEvidence", "CreativeEvidenceSource", "CreativeModelSelection", "run_creative_cycle",
+    "A03CreativeProductionJob", "A03CreativeProductionPackage", "A03CreativeProductionResult",
+    "AudioPlan", "CameraSpec", "CreativeProductionContext", "EDITABLE_PACKAGE_FIELDS",
+    "IdentityContinuity", "MediaOutputTarget", "ProductionLineage", "ProductionPackageParent",
+    "ProductionPackageSpec", "ProductionScene", "QAExpectation", "RightsAttribution",
+    "SceneTransition", "ScriptSegment", "package_identity", "revise_production_package",
+    "run_creative_production",
 ]
