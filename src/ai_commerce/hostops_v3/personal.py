@@ -371,6 +371,37 @@ _CHECKOUT_EGG_INFO_FILES = frozenset({
     "requires.txt", "top_level.txt", "not-zip-safe", "zip-safe",
 })
 
+_CLEAN_SOURCE_TEXT_EXTENSIONS = frozenset({
+    ".py", ".json", ".md", ".txt", ".patch", ".yml", ".yaml", ".toml",
+})
+
+
+def _normalize_crlf_text(raw: bytes) -> bytes | None:
+    if b"\x00" in raw:
+        return None
+    normalized = raw.replace(b"\r\n", b"\n")
+    if b"\r" in normalized:
+        return None
+    try:
+        normalized.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return normalized
+
+
+def _clean_source_bytes_match(path: Path, worktree_bytes: bytes, pinned_bytes: bytes) -> bool:
+    if worktree_bytes == pinned_bytes:
+        return True
+    if path.suffix.lower() not in _CLEAN_SOURCE_TEXT_EXTENSIONS:
+        return False
+    worktree_norm = _normalize_crlf_text(worktree_bytes)
+    if worktree_norm is None:
+        return False
+    pinned_norm = _normalize_crlf_text(pinned_bytes)
+    if pinned_norm is None or worktree_norm != pinned_norm:
+        return False
+    return worktree_bytes in (worktree_norm, worktree_norm.replace(b"\n", b"\r\n"))
+
 
 def _clean_autostart_receipt(code):
     if type(code) is not str or code not in _CLEAN_PUBLIC_CODES:
@@ -444,7 +475,8 @@ def _persistent_clean_source(acquisition, sha):
         if all(line.startswith("?? ") for line in status_lines):
             deny("SOURCE_UNTRACKED_FILE")
         deny("LOCAL_MAIN_SYNC_REQUIRED")
-    # Compare source bytes with the protected SHA checkout. This also
+    # Compare source bytes with the protected SHA checkout, permitting only
+    # uniform LF/CRLF conversion on reviewed UTF-8 text extensions. This also
     # catches index flags and filters that could hide worktree edits.
     try:
         raw_entries = _git("ls-files", "-v", "-z", "--", "src")
@@ -484,7 +516,8 @@ def _persistent_clean_source(acquisition, sha):
                 pinned = workflow / path.relative_to(root)
                 if not acquisition._no_links(pinned):
                     deny("SOURCE_PATH_UNTRUSTED")
-                if not pinned.is_file() or path.read_bytes() != pinned.read_bytes():
+                if not pinned.is_file() or not _clean_source_bytes_match(
+                        path, path.read_bytes(), pinned.read_bytes()):
                     deny("SOURCE_BYTES_MISMATCH")
                 tracked.remove(path)
     except Denied:
