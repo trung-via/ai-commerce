@@ -618,15 +618,15 @@ def test_corrupted_policy_state_fails_closed(tmp_path):
     assert resolve_model(repo, override=explicit).selection == explicit
 
 
-def test_project_policy_prefers_codex_62_and_hydrogen_extra():
+def test_project_policy_prefers_neon_high_and_codex_62_fallback():
     policy_path = (Path(__file__).resolve().parents[1]
                    / "config" / "engineering" / "model-defaults.v1.json")
     policy = json.loads(policy_path.read_text(encoding="utf-8"))
     assert policy["hard_default"] is False
     assert policy["preferred"] == {
-        "executor": "codex", "model": "gpt-6.2-sol", "effort": "high"}
+        "executor": "antigravity", "model": "gemini-4-neon", "effort": "high"}
     assert policy["fallback"] == {
-        "executor": "antigravity", "model": "gemini-4-hydrogen", "effort": "xhigh"}
+        "executor": "codex", "model": "gpt-6.2-sol", "effort": "high"}
 
 
 def test_new_preferred_model_ignores_legacy_or_previous_quota(tmp_path):
@@ -662,6 +662,53 @@ def test_new_preferred_model_ignores_legacy_or_previous_quota(tmp_path):
         "retry_after": (now + timedelta(hours=2)).isoformat()}
     (repo / STATE_PATH).write_text(json.dumps(legacy), encoding="utf-8")
     assert resolve_model(repo, now=now + timedelta(minutes=5)).selection.executor == "codex"
+
+
+
+def test_neon_primary_quota_fallback_and_recovery(tmp_path):
+    repo = _soft_default_repo(tmp_path)
+    path = repo / "config" / "engineering" / "model-defaults.v1.json"
+    policy = json.loads(path.read_text(encoding="utf-8"))
+    policy["preferred"] = {"executor": "antigravity", "model": "gemini-4-neon", "effort": "high"}
+    policy["fallback"] = {"executor": "codex", "model": "gpt-6.2-sol", "effort": "high"}
+    path.write_text(json.dumps(policy), encoding="utf-8")
+
+    now = datetime(2026, 11, 19, tzinfo=timezone.utc)
+    primary = ExecutorSelection("antigravity", "gemini-4-neon", "high")
+    backup = ExecutorSelection("codex", "gpt-6.2-sol", "high")
+    assert resolve_model(repo, now=now).selection == primary
+
+    quota = _soft_default_report(now, status="QUOTA_EXHAUSTED")
+    quota.update(executor="antigravity", model="gemini-4-neon", reasoning_effort="high")
+    assert observe_result(repo, quota, now=now) == "QUOTA_FALLBACK_RECORDED"
+    assert resolve_model(repo, now=now + timedelta(minutes=1)).selection == backup
+    due = resolve_model(repo, now=now + timedelta(hours=1, minutes=1))
+    assert due.selection == primary
+    assert due.source == "PROJECT_ANTIGRAVITY_RECOVERY_CHECK"
+
+    recovered_at = now + timedelta(hours=1, minutes=2)
+    recovered = _soft_default_report(recovered_at, status="VERIFICATION_FAILED",
+                                     completed=True, attempt="neon-recovered")
+    recovered.update(executor="antigravity", model="gemini-4-neon", reasoning_effort="high")
+    assert observe_result(repo, recovered, now=recovered_at) == "ANTIGRAVITY_PREFERENCE_RESTORED"
+    assert resolve_model(repo, now=recovered_at).selection == primary
+
+
+def test_neon_default_ignores_old_codex_quota_and_nonquota_failures(tmp_path):
+    repo = _soft_default_repo(tmp_path)
+    now = datetime(2026, 11, 19, tzinfo=timezone.utc)
+    observe_result(repo, _soft_default_report(now, status="QUOTA_EXHAUSTED"), now=now)
+    path = repo / "config" / "engineering" / "model-defaults.v1.json"
+    policy = json.loads(path.read_text(encoding="utf-8"))
+    policy["preferred"] = {"executor": "antigravity", "model": "gemini-4-neon", "effort": "high"}
+    policy["fallback"] = {"executor": "codex", "model": "gpt-6.2-sol", "effort": "high"}
+    path.write_text(json.dumps(policy), encoding="utf-8")
+    assert resolve_model(repo, now=now + timedelta(minutes=1)).selection.executor == "antigravity"
+    for status in ("MODEL_AT_CAPACITY", "MODEL_UNSUPPORTED", "EXECUTION_UNKNOWN"):
+        report = _soft_default_report(now + timedelta(minutes=2), status=status)
+        report.update(executor="antigravity", model="gemini-4-neon", reasoning_effort="high")
+        assert observe_result(repo, report, now=now + timedelta(minutes=2)) == "IGNORED_UNPROVEN"
+    assert resolve_model(repo, now=now + timedelta(minutes=3)).selection.executor == "antigravity"
 
 
 def test_project_default_resolver_cli_does_not_call_executor(tmp_path):
