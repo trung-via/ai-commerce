@@ -2138,6 +2138,7 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         self.mock(self.acq, "_managed_clean_runtime", return_value=self.runtime)
         self.target = self.acq._ChromeTarget(self.local / "chrome.exe", self.local / "WakeHub-9444-Clean",
                                             "Default", "http://127.0.0.1:9444", 9444)
+        self.real_target = self.acq._clean_target
         self.mock(self.acq, "_clean_target", return_value=(self.target, (self.target.executable,)))
         self.inventory = self.mock(self.acq, "_clean_inventory", return_value=("ABSENT", None))
         self.mock(self.acq, "_verify_google_chrome")
@@ -2290,13 +2291,13 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
             self.assertEqual(self.task.call_count, len(responses))
         self.probe.assert_not_called()
 
-    def test_persistent_source_refuses_stale_dirty_reparse_and_byte_mismatch(self):
+    def _clean_source_fixture(self):
         root = self.local / "persistent"
-        (root / ".git").mkdir(parents=True)
+        (root / ".git").mkdir(parents=True, exist_ok=True)
         workflow = Path(self.env["GITHUB_WORKSPACE"])
         source, peer = (checkout / hostops._ACQUISITION_SOURCE for checkout in (root, workflow))
         for path in (source, peer):
-            path.parent.mkdir(parents=True)
+            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"same reviewed source")
         git = {
             ("rev-parse", "--show-toplevel"): str(root),
@@ -2306,24 +2307,156 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
             ("status", "--porcelain=v1", "--untracked-files=all"): "",
             ("ls-files", "-v", "-z", "--", "src"): "H " + hostops._ACQUISITION_SOURCE.as_posix() + "\0",
         }
+        return root, workflow, source, peer, git
+
+    def test_persistent_source_refuses_stale_dirty_reparse_and_byte_mismatch(self):
+        root, workflow, source, peer, git = self._clean_source_fixture()
         real_source = self.real_source
+        read_acl = (self.sid, (
+            ("allow", 0x13, 0x1F01FF, "S-1-5-18"),
+            ("allow", 0x13, 0x1F01FF, "S-1-5-32-544"),
+            ("allow", 0x13, 0x1F01FF, self.sid),
+            ("allow", 0x13, 0x1200A9, "S-1-5-32-545"),
+        ))
         with patch.dict(hostops.ROOTS, workspace=root), \
                 patch.object(hostops, "__file__", workflow / "src/ai_commerce/hostops_v3/personal.py"), \
                 patch.object(self.acq, "__file__", peer), \
-                patch.object(self.handoff, "_private_identity", return_value=self.sid), \
+                patch.object(hostops, "_windows_checkout_acl", return_value=read_acl), \
                 patch.object(hostops, "_git", side_effect=lambda *args: git[args]):
             self.assertEqual(real_source(self.acq, self.sha, self.sid), source)
-            for args, bad in ((("rev-parse", "--abbrev-ref", "HEAD"), "other"),
-                              (("rev-parse", "HEAD", "refs/remotes/origin/main"), "old\nold\n"),
-                              (("status", "--porcelain=v1", "--untracked-files=all"), " M README.md")):
-                with patch.dict(git, {args: bad}), self.assertRaisesRegex(hostops.Denied, "LOCAL_MAIN_SYNC_REQUIRED"):
+            # Benign setuptools editable metadata under src/ is allowed only with fixed non-code names.
+            egg = root / "src" / "ai_commerce.egg-info"
+            egg.mkdir()
+            (egg / "PKG-INFO").write_bytes(b"Metadata-Version: 2.1\n")
+            self.assertEqual(real_source(self.acq, self.sha, self.sid), source)
+            (egg / "evil.py").write_bytes(b"print('untracked')")
+            with self.assertRaisesRegex(hostops.Denied, "^SOURCE_UNTRACKED_FILE$"):
+                real_source(self.acq, self.sha, self.sid)
+            (egg / "evil.py").unlink()
+            for args, bad, expected in (
+                (("rev-parse", "--abbrev-ref", "HEAD"), "other", "LOCAL_MAIN_SYNC_REQUIRED"),
+                (("config", "--get", "remote.origin.url"), "https://evil.invalid/repo.git", "LOCAL_MAIN_SYNC_REQUIRED"),
+                (("rev-parse", "HEAD", "refs/remotes/origin/main"), "old\nold\n", "LOCAL_MAIN_SYNC_REQUIRED"),
+                (("status", "--porcelain=v1", "--untracked-files=all"), " M README.md", "LOCAL_MAIN_SYNC_REQUIRED"),
+                (("status", "--porcelain=v1", "--untracked-files=all"), "?? src/evil.py", "SOURCE_UNTRACKED_FILE"),
+                (("ls-files", "-v", "-z", "--", "src"), "h " + hostops._ACQUISITION_SOURCE.as_posix() + "\0",
+                 "SOURCE_INDEX_UNVERIFIED"),
+            ):
+                with patch.dict(git, {args: bad}), self.assertRaisesRegex(hostops.Denied, f"^{expected}$"):
                     real_source(self.acq, self.sha, self.sid)
+            untracked_py = source.with_name("untracked.py")
+            untracked_py.write_bytes(b"untracked executable source")
+            with self.assertRaisesRegex(hostops.Denied, "^SOURCE_UNTRACKED_FILE$"):
+                real_source(self.acq, self.sha, self.sid)
+            untracked_py.unlink()
             with patch.object(hostops, "_is_reparse", side_effect=lambda path: path == source):
-                with self.assertRaisesRegex(hostops.Denied, "LOCAL_MAIN_SYNC_REQUIRED"):
+                with self.assertRaisesRegex(hostops.Denied, "^SOURCE_PATH_UNTRUSTED$"):
+                    real_source(self.acq, self.sha, self.sid)
+            with patch.object(hostops, "__file__", root / "src/ai_commerce/hostops_v3/personal.py"):
+                with self.assertRaisesRegex(hostops.Denied, "^SOURCE_WORKFLOW_PATH_MISMATCH$"):
                     real_source(self.acq, self.sha, self.sid)
             source.write_bytes(b"index-hidden edit")
-            with self.assertRaisesRegex(hostops.Denied, "LOCAL_MAIN_SYNC_REQUIRED"):
+            with self.assertRaisesRegex(hostops.Denied, "^SOURCE_BYTES_MISMATCH$"):
                 real_source(self.acq, self.sha, self.sid)
+
+    def test_public_checkout_acl_differential_vs_private_profile_acl(self):
+        # Ordinary Windows public checkout read ACLs pass checkout guard while
+        # private handoff/Chrome-profile guard still rejects non-owner read ACEs.
+        accepted_public = (
+            (self.sid, (
+                ("allow", 0x13, 0x1F01FF, "S-1-5-18"),
+                ("allow", 0x13, 0x1F01FF, "S-1-5-32-544"),
+                ("allow", 0x13, 0x1F01FF, self.sid),
+                ("allow", 0x13, 0x1200A9, "S-1-5-32-545"),
+            )),
+            (self.sid, (
+                ("allow", 0x13, 0x1F01FF, "S-1-5-18"),
+                ("allow", 0x13, 0x1F01FF, "S-1-5-32-544"),
+                ("allow", 0x13, 0x1F01FF, self.sid),
+                ("allow", 0x13, 0x120089, "S-1-5-11"),
+                ("allow", 0x1B, 0x10000000, "S-1-3-0"),
+            )),
+            (self.sid, (
+                ("allow", 0x13, 0x1F01FF, "S-1-5-18"),
+                ("allow", 0x13, 0x1F01FF, "S-1-5-32-544"),
+                ("allow", 0x13, 0x1F01FF, "S-1-3-4"),
+            )),
+            ("S-1-5-32-544", (
+                ("allow", 0x13, 0x1F01FF, "S-1-5-18"),
+                ("allow", 0x13, 0x1F01FF, "S-1-5-32-544"),
+                ("allow", 0x13, 0x1200A9, "S-1-5-32-545"),
+            )),
+        )
+        for owner, aces in accepted_public:
+            hostops._check_public_checkout_acl(owner, aces, self.sid)
+            private_aces = tuple((kind, sid) for kind, _, _, sid in aces)
+            with self.assertRaisesRegex(self.handoff.HandoffBlocked, "HANDOFF_PERMISSIONS_INVALID"):
+                self.handoff._check_windows_acl(owner, private_aces, self.sid)
+
+        # Untrusted writers, foreign owners, Everyone, non-IO CREATOR OWNER and
+        # empty/operator-missing DACLs remain rejected on the public checkout.
+        rejected_public = (
+            (self.sid, (("allow", 0x13, 0x1F01FF, self.sid), ("allow", 0x13, 0x1301BF, "S-1-5-11"))),
+            (self.sid, (("allow", 0x13, 0x1F01FF, self.sid), ("allow", 0x1B, 0x1301BF, "S-1-5-11"))),
+            (self.sid, (("allow", 0x13, 0x1F01FF, self.sid), ("allow", 0x13, 0x00000002, "S-1-5-32-545"))),
+            (self.sid, (("allow", 0x13, 0x1F01FF, self.sid), ("allow", 0x13, 0x00000004, "S-1-5-32-545"))),
+            (self.sid, (("allow", 0x13, 0x1F01FF, self.sid), ("allow", 0x13, 0x00040000, "S-1-5-32-545"))),
+            (self.sid, (("allow", 0x13, 0x1F01FF, self.sid), ("allow", 0x13, 0x40000000, "S-1-5-32-545"))),
+            (self.sid, (("allow", 0x13, 0x1F01FF, self.sid), ("allow", 0x13, 0x1200A9, "S-1-1-0"))),
+            (self.sid, (("allow", 0x13, 0x1F01FF, self.sid), ("allow", 0x03, 0x10000000, "S-1-3-0"))),
+            (self.sid, (("allow", 0x13, 0x1F01FF, self.sid), ("allow", 0x13, 0x1200A9, "S-1-5-21-999-1002"))),
+            ("S-1-5-21-999-1002", (("allow", 0x13, 0x1F01FF, self.sid),)),
+            ("S-1-5-32-544", (("allow", 0x13, 0x1F01FF, "S-1-5-18"), ("allow", 0x13, 0x1F01FF, "S-1-5-32-544"))),
+            (self.sid, ()),
+        )
+        for owner, aces in rejected_public:
+            with self.subTest(owner=owner, aces=aces), \
+                    self.assertRaisesRegex(hostops.Denied, "^SOURCE_ACL_UNTRUSTED$"):
+                hostops._check_public_checkout_acl(owner, aces, self.sid)
+
+        # Private Chrome profile custody still uses strict owner-only _private_identity.
+        profile_root = self.local / "AI-Commerce" / "WakeHub-9444-Clean" / "Default"
+        profile_root.mkdir(parents=True, exist_ok=True)
+        users_read = (self.sid, (("allow", self.sid), ("allow", "S-1-5-32-545")))
+        with patch.object(self.handoff.os, "name", "nt"), \
+                patch.object(self.handoff, "_windows_process_sid", return_value=self.sid), \
+                patch.object(self.handoff, "_windows_acl", return_value=users_read):
+            with self.assertRaisesRegex(self.acq._Clean9444Hold, "^OPERATOR_OWNERSHIP_UNPROVEN$"):
+                self.real_target(self.local, self.sid)
+
+    def test_clean_checkout_with_read_acl_reaches_managed_runtime_and_task_checks(self):
+        root, workflow, source, peer, git = self._clean_source_fixture()
+        read_acl = (self.sid, (
+            ("allow", 0x13, 0x1F01FF, "S-1-5-18"),
+            ("allow", 0x13, 0x1F01FF, "S-1-5-32-544"),
+            ("allow", 0x13, 0x1F01FF, self.sid),
+            ("allow", 0x13, 0x1200A9, "S-1-5-32-545"),
+            ("allow", 0x13, 0x1200A9, "S-1-5-11"),
+        ))
+        writable_acl = (self.sid, (
+            ("allow", 0x13, 0x1F01FF, self.sid),
+            ("allow", 0x13, 0x1301BF, "S-1-5-11"),
+        ))
+        self.source.side_effect = self.real_source
+        with patch.dict(hostops.ROOTS, workspace=root), \
+                patch.object(hostops, "__file__", workflow / "src/ai_commerce/hostops_v3/personal.py"), \
+                patch.object(self.acq, "__file__", peer), \
+                patch.object(hostops, "_git", side_effect=lambda *args: git[args]):
+            with patch.object(hostops, "_windows_checkout_acl", return_value=read_acl):
+                receipt = self.invoke()
+                self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", "INSTALLED_BUT_NOT_RUNNING"))
+                self.task.assert_called_once_with(self.sid, install=False, runtime=self.runtime)
+            self.task.reset_mock()
+            with patch.object(hostops, "_windows_checkout_acl", return_value=writable_acl):
+                receipt = self.invoke()
+                self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "SOURCE_ACL_UNTRUSTED"))
+                self.task.assert_not_called()
+            for expected in (
+                "SOURCE_WORKFLOW_PATH_MISMATCH", "SOURCE_PATH_UNTRUSTED", "SOURCE_ACL_UNTRUSTED",
+                "SOURCE_INDEX_UNVERIFIED", "SOURCE_UNTRACKED_FILE", "SOURCE_BYTES_MISMATCH",
+            ):
+                self.assertIn(expected, hostops._CLEAN_PUBLIC_CODES)
+                self.assertEqual(hostops._clean_autostart_receipt(expected)["code"], expected)
 
     def test_runtime_rejects_runner_python_and_uses_only_signed_owner_install(self):
         base = self.local / "Programs" / "Python" / "Python312"
