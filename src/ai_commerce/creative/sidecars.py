@@ -614,3 +614,72 @@ class CreativeSidecarStore:
             raise CreativeValidationError("production receipt job mismatch")
         self._validate_production_result(result)
         return result
+
+    def production_result_path(self, result_digest: str) -> Path:
+        """Exact canonical path for one immutable saved A03CreativeProductionResult.v1."""
+        return self._path("production-results", result_digest)
+
+    def production_package_path(self, package_id: str, revision: int) -> Path:
+        """Exact canonical path for one immutable saved A03CreativeProductionPackage.v1."""
+        return self._package_path(package_id, revision)
+
+    def production_package_digest_path(self, package_digest: str) -> Path:
+        """Exact canonical path for one production-package digest index entry."""
+        return self._path("production-package-digests", package_digest)
+
+    def load_production_result_by_digest(self, result_digest: str) -> A03CreativeProductionResult:
+        """Resolve and strictly verify a saved A03CreativeProductionResult.v1 by exact digest."""
+        require_digest(result_digest)
+        path = self._path("production-results", result_digest)
+        raw = path.read_bytes()
+        if sha256_bytes(raw) != result_digest:
+            raise CreativeValidationError("stored production result digest mismatch")
+        record = A03CreativeProductionResult.from_dict(read_json(raw.decode("utf-8")))
+        if raw != canonical_bytes(record.to_dict()) or record.digest != result_digest:
+            raise CreativeValidationError("stored production result bytes mismatch")
+        loaded = self.load_production_result(record.job)
+        if loaded != record or loaded.digest != result_digest:
+            raise CreativeValidationError("stored production result ref mismatch")
+        return loaded
+
+    def verify_production_package_lineage(
+        self, package_id: str, revision: int, *, origin_result_digest: str,
+    ) -> tuple[A03CreativeProductionResult, A03CreativeProductionPackage, dict[str, Any]]:
+        """Verify saved package bytes, digest index, parent chain and origin production result.
+
+        Editable HUMAN/SYSTEM revisions retain an immutable parent chain back to
+        the verified origin A03CreativeProductionResult.v1. AI revisions must
+        bind to their own saved A03CreativeProductionResult.v1.
+        """
+        origin = self.load_production_result_by_digest(origin_result_digest)
+        if origin.package is None:
+            raise CreativeValidationError("origin production result has no committed package")
+        package = self.load_production_package(package_id, revision)
+        if self.load_production_package_by_digest(package.digest) != package:
+            raise CreativeValidationError("stored production package digest index mismatch")
+        if package.package_id != origin.package.package_id:
+            raise CreativeValidationError("production package identity disagrees with origin result")
+        if package.revision < origin.package.revision:
+            raise CreativeValidationError("stale production package revision predates origin result")
+        if package.revision == origin.package.revision:
+            if package != origin.package:
+                raise CreativeValidationError("production package disagrees with origin result")
+        else:
+            current = package
+            while current.revision > origin.package.revision:
+                if (current.reasoning_receipt_digest is not None
+                        or current.edit_actor.kind not in ("HUMAN", "SYSTEM")
+                        or current.parent is None):
+                    raise CreativeValidationError("AI package revision must bind its own production result")
+                parent = self.load_production_package(current.parent.package_id, current.parent.revision)
+                if (parent.digest != current.parent.digest
+                        or self.load_production_package_by_digest(parent.digest) != parent):
+                    raise CreativeValidationError("production package parent lineage mismatch")
+                current = parent
+            if current != origin.package:
+                raise CreativeValidationError("production package parent chain disagrees with origin result")
+        handoff = self.load_production_handoff(package.package_id, package.revision)
+        if (handoff["package_digest"] != package.digest
+                or handoff["production_package"] != package.to_dict()):
+            raise CreativeValidationError("production handoff payload mismatch")
+        return origin, package, handoff

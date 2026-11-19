@@ -333,3 +333,69 @@ def test_unknown_selection_cannot_start_an_asset_job(tmp_path, capsys):
     captured = capsys.readouterr()
     assert captured.out == "" and "FileNotFoundError" in captured.err
     assert not out.exists()
+
+
+def test_r4_a03_to_a04_source_handoff_preserves_closed_a04_contracts(tmp_path, monkeypatch):
+    import importlib.util
+    from ai_commerce.creative import (
+        CodexCliCreativeClient, CreativeSidecarStore, InvocationAuthorization,
+        LiveCreativeReasoner, ModelConfiguration, ReasoningRequest,
+        StructuredModelRequest, intake_brief, run_creative_cycle, run_creative_production,
+    )
+    from ai_commerce.media.generation import A04_CREATIVE_CONSUMER_ID, load_a04_handoff_receipt
+    from ai_commerce.production_orchestration import LocalAuthorization, ProductionPipelineOrchestrator
+
+    spec = importlib.util.spec_from_file_location("a03_v11_int_helpers", ROOT / "tests/test_a03_upgrade_v11.py")
+    h = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(h)
+
+    cli = h.FakeInstalledCreativeCLI(tmp_path / "cli-host")
+    r2_sampler, r3_sampler = h.CycleFakeClient(), h.ProductionFakeClient(silent=True)
+
+    def dispatch(packet):
+        req = packet["request"]
+        creative = ReasoningRequest.from_dict(req["creative"])
+        model_req = StructuredModelRequest(ModelConfiguration.from_dict(req["config"]), creative)
+        if creative.production is not None:
+            return json.loads(r3_sampler.complete(model_req).output_json)
+        val = json.loads(r2_sampler.complete(model_req).output_json)
+        if creative.operation == "DEVELOP":
+            val["edits"] = {n: val["edits"].get(n) for n in ("family", "title", "premise", "visual_direction")}
+        return val
+
+    cli.creative_output = dispatch
+    h.install_fake_popen(monkeypatch, cli)
+    cli_grant = InvocationAuthorization(True, True, "fixture:int-r4-cli")
+    brief = {**intake_brief(REQUEST), "product_ref": None, "cta": None, "audio": {"mode": "silence"}}
+    creative_root = tmp_path / "creative"
+    sidecars = CreativeSidecarStore(creative_root)
+    reasoner = LiveCreativeReasoner(cli.config, CodexCliCreativeClient(cli.capability(), runner=None))
+    cycle = run_creative_cycle(
+        h.cycle_job(brief=brief, seed_options={"configuration": cli.config, "purpose": "PRODUCTION"}),
+        sidecars, reasoner, authorization=cli_grant,
+    )
+    prod_job = h.production_job(
+        cycle, journey_id="int:j1", cycle_id="int:c1", job_id="int:p1",
+        configuration=cli.config, purpose="PRODUCTION",
+    )
+    source_sha = "e" * 40
+    local_grant = LocalAuthorization(
+        journey_id="int:j1", cycle_id="int:c1", job_id="int:p1",
+        source_sha=source_sha, authorization_ref="fixture:int-r4-a04", route_id="a03-to-a04",
+    )
+    orch = ProductionPipelineOrchestrator(
+        state_dir=tmp_path / "production", source_sha=source_sha, local_authorization=local_grant,
+    )
+    prod_res = run_creative_production(prod_job, sidecars, reasoner, authorization=cli_grant, production=orch)
+    assert prod_res.status == "CREATIVE_COMPLETE"
+    assert orch.last_result is not None and orch.last_result.status == "SUCCESS"
+    assert orch.last_result.accepted_consumer == A04_CREATIVE_CONSUMER_ID
+    receipt = load_a04_handoff_receipt(orch.last_result.event.receipt.artifact_ref)
+    assert receipt == orch.last_result.receiver_receipt
+    assert receipt.status == "SOURCE_HANDOFF_VERIFIED"
+    assert receipt.media_execution == "NOT_ATTEMPTED"
+    assert receipt.audio_mode == "SILENCE"
+    assert receipt.rights_status == "UNKNOWN"
+    assert receipt.factual_status == "UNVERIFIED"
+    assert not (tmp_path / "production" / "objects").exists()
+    assert not (tmp_path / "production" / "generation-jobs").exists()
