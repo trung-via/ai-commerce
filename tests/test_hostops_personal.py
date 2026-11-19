@@ -2,13 +2,15 @@
 import builtins
 import importlib.util
 import copy
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
+import stat
 import subprocess
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, mock_open, patch
 import tempfile
 import unittest
 
@@ -1784,6 +1786,721 @@ class ExecutorHealthPrivateBridgeTests(unittest.TestCase):
         self.assertEqual(profiles["mt01-hostops-v3-tests"][-2:], ["-n", "12"])
 
 
+class PersonalCdp9444ConfigRegistryTests(unittest.TestCase):
+    """Mocked Windows metadata fixtures for the source-only operation."""
+
+    OPERATION = "cdp_9444_config_registry"
+    SLOT_IDS = ("SLOT_01", "SLOT_02", "SLOT_03", "SLOT_04", "SLOT_05", "SLOT_06")
+    STATES = ("ABSENT", "PRESENT_FILE", "PRESENT_NONFILE", "UNAVAILABLE_OR_REPARSE")
+
+    def setUp(self):
+        from ai_commerce.remote import chrome_acquisition
+
+        self.acquisition = chrome_acquisition
+        self.local = PureWindowsPath("C:/Users/PRIVATE_OWNER/AppData/Local")
+        self.root = self.local / "AI-Commerce"
+        self.candidates = tuple(self.root / name for name in chrome_acquisition._CONFIG_9444_RELATIVE_PATHS)
+        self.metadata = {path: self.info(stat.S_IFDIR) for path in (self.root, self.local, *self.local.parents)}
+        self.native = self.enterContext(patch.object(chrome_acquisition, "_native_local_app_data", return_value=self.local))
+        self.enterContext(patch.object(hostops, "os", new=SimpleNamespace(name="nt")))
+        self.probe = Mock(side_effect=self.lstat)
+        self.enterContext(patch.object(PureWindowsPath, "lstat", lambda path: self.probe(path), create=True))
+
+    @staticmethod
+    def info(mode, attributes=0):
+        return SimpleNamespace(st_mode=mode, st_file_attributes=attributes)
+
+    def lstat(self, path):
+        value = self.metadata.get(path, FileNotFoundError(str(path)))
+        if isinstance(value, OSError):
+            raise value
+        return value
+
+    def observe(self):
+        return hostops.perform(hostops.parse_event(event("read", self.OPERATION, {}), "read"))
+
+    def assert_receipt(self, receipt, states, *, code="METADATA_ONLY"):
+        self.assertEqual(receipt, {
+            "status": "OBSERVED" if code == "METADATA_ONLY" else "UNKNOWN",
+            "code": code, "operation": self.OPERATION, "cdp_port": 9444,
+            "slots": [{"slot_id": slot, "status": state} for slot, state in zip(self.SLOT_IDS, states)],
+            "counts": {state: states.count(state) for state in self.STATES},
+            "no_shell_command_executed": True, "browser_attached": False, "chrome_launched": False,
+            "config_written": False, "enrollment_performed": False, "send_performed": False, "grant_issued": False,
+        })
+        self.assertEqual(len(receipt["slots"]), 6)
+        self.assertTrue(all(type(count) is int and 0 <= count <= 6 for count in receipt["counts"].values()))
+        self.assertLess(len(json.dumps(receipt).encode("ascii")), 1024)
+
+    def test_exact_parameterless_read_registration(self):
+        self.assertEqual(hostops.parse_event(event("read", self.OPERATION, {}), "read"), {
+            "issue_number": 17, "operation": self.OPERATION, "parameters": {},
+        })
+        for params in ({"port": 9444}, {"LOCALAPPDATA": str(self.local)}, {"command": "Get-Item"}):
+            with self.subTest(params=params), self.assertRaisesRegex(hostops.Denied, "INVALID_PARAMETERS"):
+                hostops.parse_event(event("read", self.OPERATION, params), "read")
+            with self.assertRaisesRegex(hostops.Denied, "INVALID_PARAMETERS"):
+                hostops.perform({"operation": self.OPERATION, "parameters": params})
+        for params in (None, [], ""):
+            with self.assertRaisesRegex(hostops.Denied, "INVALID_REQUEST"):
+                hostops.parse_event(event("read", self.OPERATION, params), "read")
+            with self.assertRaisesRegex(hostops.Denied, "INVALID_PARAMETERS"):
+                hostops.perform({"operation": self.OPERATION, "parameters": params})
+        for operation in (self.OPERATION.upper(), self.OPERATION + " "):
+            with self.assertRaisesRegex(hostops.Denied, "READ_OPERATION_DENIED"):
+                hostops.parse_event(event("read", operation, {}), "read")
+        with self.assertRaisesRegex(hostops.Denied, "WRITE_SCOPE_DENIED"):
+            hostops.parse_event(event("write", self.OPERATION, {}), "write")
+        self.native.assert_not_called()
+
+    def test_present_files_and_directory_stay_separate_with_no_effects(self):
+        for index in (0, 1, 3):
+            self.metadata[self.candidates[index].parent] = self.info(stat.S_IFDIR)
+        self.metadata[self.candidates[0]] = self.info(stat.S_IFREG)
+        self.metadata[self.candidates[3]] = self.info(stat.S_IFDIR)
+        self.metadata[self.candidates[4]] = self.info(stat.S_IFREG)
+
+        with (patch("sys.stdin", None), patch.object(builtins, "open") as open_file,
+              patch.object(Path, "open") as path_open, patch.object(subprocess, "Popen") as popen,
+              patch.object(self.acquisition, "load_environment") as load,
+              patch.object(self.acquisition, "_interactive_session") as session,
+              patch.object(self.acquisition, "_probe_cdp") as probe):
+            result = self.observe()
+            for effect in (open_file, path_open, popen, load, session, probe):
+                effect.assert_not_called()
+        self.native.assert_called_once_with()
+        self.assert_receipt(result, ("PRESENT_FILE", "ABSENT", "ABSENT", "PRESENT_NONFILE", "PRESENT_FILE", "ABSENT"))
+        self.assertEqual(result, self.observe())
+
+    def test_unsafe_components_are_unavailable_and_their_children_are_unprobed(self):
+        junction, symlink, nondirectory, unreadable, reparse, _ = self.candidates
+        self.metadata[junction.parent] = self.info(stat.S_IFDIR, stat.FILE_ATTRIBUTE_REPARSE_POINT)
+        self.metadata[symlink.parent] = self.info(stat.S_IFDIR)
+        self.metadata[symlink] = self.info(stat.S_IFLNK)
+        self.metadata[nondirectory.parent] = self.info(stat.S_IFREG)
+        self.metadata[unreadable.parent] = self.info(stat.S_IFDIR)
+        self.metadata[unreadable] = PermissionError("C:/PRIVATE_PATH credential=PRIVATE_TOKEN")
+        self.metadata[reparse] = self.info(stat.S_IFREG, stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+        self.assert_receipt(self.observe(), ("UNAVAILABLE_OR_REPARSE",) * 5 + ("ABSENT",),
+                            code="CONFIG_CUSTODY_UNAVAILABLE")
+        paths = [call.args[0] for call in self.probe.call_args_list]
+        self.assertEqual(paths[:len(self.local.parts)], [*reversed(self.local.parents), self.local])
+        self.assertNotIn(junction, paths)
+        self.assertNotIn(nondirectory, paths)
+
+    def test_missing_root_reports_six_absent_without_probing_slots(self):
+        del self.metadata[self.root]
+        self.assert_receipt(self.observe(), ("ABSENT",) * 6)
+        self.assertEqual([call.args[0] for call in self.probe.call_args_list],
+                         [*reversed(self.local.parents), self.local, self.root])
+
+    def test_registry_drift_cannot_expand_the_metadata_probe(self):
+        paths = self.acquisition._CONFIG_9444_RELATIVE_PATHS
+        for registry in (paths + ("extra.json",), paths[:-1] + (paths[0].upper(),),
+                         paths[:-1] + ("../private.json",), paths[:-1] + ("extra/subdir/config.json",)):
+            with self.subTest(registry=registry), patch.object(self.acquisition, "_CONFIG_9444_RELATIVE_PATHS", registry):
+                self.assert_receipt(self.observe(), ("UNAVAILABLE_OR_REPARSE",) * 6,
+                                    code="REGISTRY_SOURCE_UNAVAILABLE")
+        self.native.assert_not_called()
+        self.probe.assert_not_called()
+
+    def test_unavailable_known_folder_holds_without_falling_back(self):
+        unavailable = ("UNAVAILABLE_OR_REPARSE",) * 6
+        self.native.side_effect = self.acquisition._EnrollmentHold("PRIVATE_KNOWN_FOLDER_FAILURE")
+        self.assert_receipt(self.observe(), unavailable, code="OWNER_KNOWN_FOLDER_UNAVAILABLE")
+        self.probe.assert_not_called()
+        self.native.side_effect = None
+        for path in (None, PureWindowsPath("//PRIVATE_SERVER/share/Local")):
+            with self.subTest(path=path):
+                self.native.return_value = path
+                self.assert_receipt(self.observe(), unavailable, code="OWNER_KNOWN_FOLDER_UNAVAILABLE")
+        self.probe.assert_not_called()
+        self.native.return_value = self.local
+        self.metadata[self.local.parent] = PermissionError("PRIVATE_OWNER")
+        self.assert_receipt(self.observe(), unavailable, code="OWNER_KNOWN_FOLDER_UNAVAILABLE")
+        self.assertNotIn(self.local, [call.args[0] for call in self.probe.call_args_list])
+
+    def test_public_issue_entrypoint_collects_only_metadata_after_protected_integration(self):
+        args = SimpleNamespace(mode="read", output="receipt.json")
+        payload = json.dumps(event("read", self.OPERATION, {}))
+        with (patch.object(hostops, "os", new=SimpleNamespace(name="nt", environ={
+                  "GITHUB_EVENT_PATH": "event.json", "GITHUB_SHA": "f" * 40})),
+              patch.object(hostops.argparse.ArgumentParser, "parse_args", return_value=args),
+              patch.object(builtins, "open", mock_open(read_data=payload)),
+              patch.object(hostops, "Path") as output):
+            self.assertEqual(hostops.main(), 0)
+        record = json.loads(output.return_value.write_text.call_args.args[0])
+        self.assertEqual(record["status"], "OBSERVED")
+        self.assertEqual(record["code"], "METADATA_ONLY")
+        self.assertEqual(record["issue_number"], 17)
+        self.assertEqual(record["source_sha"], "f" * 40)
+        self.assertEqual(record["approval_channel"], "CHATGPT_TO_AI_COMMERCE_ISSUE")
+        self.assertFalse(record["remote_shell_enabled"])
+        self.assertEqual(record["slots"], [
+            {"slot_id": slot, "status": "ABSENT"} for slot in self.SLOT_IDS])
+        self.native.assert_called_once_with()
+        self.probe.assert_called()
+
+    def test_protected_registry_transport_matches_closed_source_contract(self):
+        workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+        ids = re.search(r"const registrySlotIds = (\[[^\n]+\]);", workflow)
+        states = re.search(r"const registryStates = (\[[^\n]+\]);", workflow)
+        self.assertIsNotNone(ids)
+        self.assertIsNotNone(states)
+        self.assertEqual(tuple(re.findall(r"'([^']+)'", ids.group(1))), self.SLOT_IDS)
+        self.assertEqual(tuple(re.findall(r"'([^']+)'", states.group(1))), self.STATES)
+        self.assertIn("INVALID_PUBLIC_CDP_REGISTRY_RECEIPT", workflow)
+        self.assertIn("rawNativeText.trim() === JSON.stringify(record)", workflow)
+        self.assertIn("record.issue_number === context.issue.number", workflow)
+        self.assertIn("record.source_sha === context.sha", workflow)
+        self.assertIn("registryRequested || record.operation === 'cdp_9444_config_registry'", workflow)
+        self.assertNotIn("PUBLIC_RECEIPT_INTEGRATION_PENDING", MODULE.read_text(encoding="utf-8"))
+
+    def test_protected_registry_sanitizer_runtime_positive_and_negative(self):
+        """Execute the actual protected JavaScript against synthetic receipts; no host effects."""
+        import os
+        import shutil
+        node = shutil.which("node") or shutil.which("node.exe")
+        if not node and os.name == "nt" and os.environ.get("RUNNER_TEMP"):
+            runner_root = Path(os.environ["RUNNER_TEMP"]).parents[1]
+            for version in ("node24", "node20"):
+                candidate = runner_root / "externals" / version / "bin" / "node.exe"
+                if candidate.is_file():
+                    node = str(candidate)
+                    break
+        if not node:
+            self.skipTest("Node CLI unavailable: hosted Windows JS sanitizer verification required")
+        workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+        workflow = workflow.split("  hostops-d5-carrier:", 1)[0]
+        self.assertEqual(workflow.count("          script: |"), 1)
+        script = "\n".join(line[12:] if line.startswith("            ") else line
+                           for line in workflow.split("          script: |\n", 1)[1].splitlines())
+        source = {**self.observe(), "issue_number": 17,
+                  "approval_channel": "CHATGPT_TO_AI_COMMERCE_ISSUE",
+                  "remote_shell_enabled": False, "source_sha": "f" * 40}
+        encode = lambda value: json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+        blocked = {"status": "BLOCKED", "operation": self.OPERATION,
+                   "code": "INVALID_PUBLIC_CDP_REGISTRY_RECEIPT"}
+        request = json.dumps({"schema": hostops.SCHEMA, "operation": self.OPERATION,
+                              "parameters": {}}, separators=(",", ":"))
+        cases = [{"name": "observed", "body": encode(source), "expected": source}]
+        unknown = copy.deepcopy(source)
+        unknown.update(status="UNKNOWN", code="CONFIG_CUSTODY_UNAVAILABLE")
+        unknown["slots"][0]["status"] = "UNAVAILABLE_OR_REPARSE"
+        unknown["counts"].update(ABSENT=5, UNAVAILABLE_OR_REPARSE=1)
+        cases.append({"name": "partial_custody_unknown", "body": encode(unknown), "expected": unknown})
+        all_unknown = copy.deepcopy(source)
+        all_unknown.update(status="UNKNOWN", code="OWNER_KNOWN_FOLDER_UNAVAILABLE")
+        for row in all_unknown["slots"]:
+            row["status"] = "UNAVAILABLE_OR_REPARSE"
+        all_unknown["counts"].update(ABSENT=0, UNAVAILABLE_OR_REPARSE=6)
+        cases.append({"name": "known_folder_unknown", "body": encode(all_unknown),
+                      "expected": all_unknown})
+        source_unknown = {**all_unknown, "code": "REGISTRY_SOURCE_UNAVAILABLE"}
+        cases.append({"name": "registry_source_unknown", "body": encode(source_unknown),
+                      "expected": source_unknown})
+        mutations = {
+            "unexpected_private_path": {**source, "private_path": "PRIVATE_SECRET"},
+            "nested_private_metadata": {**source, "config": {"token": "PRIVATE_SECRET"}},
+            "wrong_source_sha": {**source, "source_sha": "0" * 40},
+            "wrong_issue": {**source, "issue_number": 123},
+            "wrong_approval": {**source, "approval_channel": "PRIVATE"},
+            "wrong_port": {**source, "cdp_port": 9333},
+            "wrong_no_shell": {**source, "no_shell_command_executed": False},
+            "unsafe_browser_effect": {**source, "chrome_launched": True},
+            "unsafe_send_effect": {**source, "send_performed": True},
+            "unsafe_remote_shell": {**source, "remote_shell_enabled": True},
+            "extra_slot": {**source, "slots": source["slots"] + [source["slots"][0]]},
+            "missing_slot": {**source, "slots": source["slots"][:-1]},
+            "reordered_slot": {**source, "slots": list(reversed(source["slots"]))},
+            "duplicate_slot": {**source, "slots": [source["slots"][0]] * 6},
+            "private_row": {**source, "slots": [
+                {**source["slots"][0], "path": "PRIVATE_SECRET"}, *source["slots"][1:]]},
+            "invalid_state": {**source, "slots": [
+                {**source["slots"][0], "status": "PRIVATE_SECRET"}, *source["slots"][1:]]},
+            "count_mismatch": {**source, "counts": {**source["counts"], "ABSENT": 5}},
+            "count_extra": {**source, "counts": {**source["counts"], "PRIVATE": 0}},
+            "count_type": {**source, "counts": {**source["counts"], "ABSENT": 6.5}},
+            "unknown_code": {**source, "status": "UNKNOWN", "code": "PRIVATE_SECRET"},
+            "false_observed": {**unknown, "status": "OBSERVED"},
+            "false_unknown": {**source, "status": "UNKNOWN", "code": "CONFIG_CUSTODY_UNAVAILABLE"},
+            "false_owner_unknown": {**unknown, "code": "OWNER_KNOWN_FOLDER_UNAVAILABLE"},
+            "missing_field": {key: value for key, value in source.items() if key != "counts"},
+        }
+        cases.extend({"name": name, "body": encode(value), "expected": blocked}
+                     for name, value in mutations.items())
+        duplicate_raw = encode(source).replace('"status":"OBSERVED"',
+                                               '"status":"OBSERVED","status":"OBSERVED"', 1)
+        cases.extend([
+            {"name": "duplicate_raw_json_key", "body": duplicate_raw, "expected": blocked},
+            {"name": "malformed_json", "body": "{", "expected": blocked},
+            {"name": "missing_receipt", "body": None, "expected": blocked},
+            {"name": "oversize_receipt", "body": encode({**source, "padding": "P" * 8192}),
+             "expected": blocked},
+            {"name": "wrong_issue_body", "body": encode(source), "expected": blocked,
+             "request": encode({"schema": hostops.SCHEMA, "operation": "inventory", "parameters": {}})},
+        ])
+        legacy = {"status": "OBSERVED", "operation": "inventory",
+                  "slots": [{"path": "PRIVATE_SECRET"}], "counts": {"PRIVATE": 1}}
+        cases.append({"name": "legacy_projection_isolation", "body": encode(legacy),
+                      "request": encode({"schema": hostops.SCHEMA, "operation": "inventory", "parameters": {}}),
+                      "expected": {"status": "OBSERVED", "operation": "inventory"}})
+        harness = r"""
+const fs = require('fs'), path = require('path'), vm = require('vm');
+const cases = JSON.parse(fs.readFileSync(process.argv[1],'utf8'));
+const script = fs.readFileSync(process.argv[2],'utf8');
+const assert = require('assert');
+(async () => {
+  for (const item of cases) {
+    const receiptPath = path.join(process.env.RUNNER_TEMP,'personal-hostops-result.json');
+    if (item.body === null) {
+      try { fs.unlinkSync(receiptPath); } catch (_) {}
+    } else {
+      fs.writeFileSync(receiptPath,item.body,'utf8');
+    }
+    const comments = [];
+    const context = {repo:{owner:'trung-via',repo:'ai-commerce'},issue:{number:17},
+      sha:'f'.repeat(40),payload:{issue:{body:item.request || process.env.REGISTRY_REQUEST}}};
+    const github = {rest:{issues:{createComment:async args => { comments.push(args.body); }}}};
+    await vm.runInNewContext('(async () => {\n'+script+'\n})()',
+      {require,process,context,github,Buffer});
+    assert.strictEqual(comments.length,1,item.name+': missing result');
+    assert.ok(comments[0].startsWith('AI_COMMERCE_PERSONAL_HOSTOPS_RESULT_V1\n'),item.name);
+    const actual = JSON.parse(comments[0].split('\n').slice(1).join('\n'));
+    assert.deepStrictEqual(actual,item.expected,item.name+': invalid projection');
+    assert.ok(!JSON.stringify(actual).includes('PRIVATE_SECRET'),item.name+': private leak');
+  }
+  process.stdout.write('VERIFIED_REGISTRY_CASES='+cases.length);
+})().catch(error => { console.error(error); process.exitCode=1; });
+"""
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            (directory / "cases.json").write_text(encode(cases), encoding="utf-8")
+            (directory / "workflow.js").write_text(script, encoding="utf-8")
+            completed = subprocess.run(
+                [node, "-e", harness, str(directory / "cases.json"), str(directory / "workflow.js")],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=30, env={**os.environ, "RUNNER_TEMP": str(directory),
+                                 "REGISTRY_REQUEST": request}, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr[-3000:])
+        self.assertIn("VERIFIED_REGISTRY_CASES=" + str(len(cases)), completed.stdout)
+
+    def test_existing_reads_keep_their_dispatch_and_standing_rows(self):
+        standing = PersonalHostOpsContractTests._standing_snapshot()
+        topology = {"operation": "cdp_9444_topology", "cdp_port": 9444}
+        with (patch.object(hostops, "_standing_read_snapshot", return_value=standing) as standing_read,
+              patch.object(hostops, "_cdp_9444_topology", return_value=topology) as topology_read):
+            for expected in (standing, topology):
+                request = hostops.parse_event(event("read", expected["operation"], {}), "read")
+                self.assertEqual(hostops.perform(request), expected)
+        self.assertEqual(len(standing["diagnostics"]), 16)
+        self.assertNotIn("slots", hostops.PERSONAL_PUBLIC_FIELDS)
+        standing_read.assert_called_once_with()
+        topology_read.assert_called_once_with()
+        self.native.assert_not_called()
+
+
+class PersonalClean9444AutostartTests(unittest.TestCase):
+    def setUp(self):
+        from ai_commerce.remote import chrome_acquisition, local_completion_handoff, local_wake_entry
+
+        self.acq = chrome_acquisition
+        self.handoff = local_completion_handoff
+        self.wake = local_wake_entry
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.local = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        self.sid = "S-1-5-21-101-202-303-1001"
+        self.op = "install_clean_9444_autostart"
+        self.event = event("write", self.op, {})
+        self.sha = "a" * 40
+        self.env = {
+            "CI": "true", "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "issue_comment",
+            "GITHUB_REPOSITORY": hostops.REPO, "GITHUB_REPOSITORY_OWNER": hostops.OWNER,
+            "GITHUB_ACTOR": hostops.OWNER, "GITHUB_TRIGGERING_ACTOR": hostops.OWNER,
+            "GITHUB_RUN_ATTEMPT": "1", "GITHUB_REF": "refs/heads/main",
+            "GITHUB_WORKFLOW_REF": hostops.REPO + "/.github/workflows/issue-ingress.yml@refs/heads/main",
+            "RUNNER_ENVIRONMENT": "self-hosted", "RUNNER_NAME": "AI-COMMERCE-HOSTOPS-01",
+            "GITHUB_SHA": self.sha, "GITHUB_WORKFLOW_SHA": self.sha,
+            "GITHUB_WORKSPACE": str(self.local / "runner" / "_work"),
+            "GITHUB_EVENT_PATH": str(self.local / "event.json"),
+        }
+        self.mock(hostops, "os", new=SimpleNamespace(name="nt", environ=self.env, walk=hostops.os.walk))
+        self.session = self.mock(self.acq, "_interactive_session", return_value=7)
+        self.mock(self.wake, "_windows_process_sid", return_value=self.sid)
+        self.mock(self.acq, "_native_local_app_data", return_value=self.local)
+        self.real_source = hostops._persistent_clean_source
+        self.source = self.mock(hostops, "_persistent_clean_source", return_value=self.local / "stable.py")
+        self.runtime = (self.local / "pythonw.exe", self.source.return_value)
+        self.real_runtime = self.acq._managed_clean_runtime
+        self.real_task = self.acq._clean_task
+        self.mock(self.acq, "_managed_clean_runtime", return_value=self.runtime)
+        self.target = self.acq._ChromeTarget(self.local / "chrome.exe", self.local / "WakeHub-9444-Clean",
+                                            "Default", "http://127.0.0.1:9444", 9444)
+        self.real_target = self.acq._clean_target
+        self.mock(self.acq, "_clean_target", return_value=(self.target, (self.target.executable,)))
+        self.inventory = self.mock(self.acq, "_clean_inventory", return_value=("ABSENT", None))
+        self.mock(self.acq, "_verify_google_chrome")
+        self.mock(self.acq, "_clean_require_unlocked")
+        self.launch_pending = self.mock(self.acq, "_clean_launch_pending", return_value=False)
+        self.pending = set()
+        self.mock(self.acq, "_clean_pending", side_effect=self.pending.__contains__)
+        self.record = self.mock(self.acq, "_clean_record_pending", side_effect=self.record_pending)
+        self.task = self.mock(self.acq, "_clean_task", return_value="ALREADY_ENROLLED")
+        self.probe = self.mock(self.acq, "_probe_cdp")
+        self.spawn = self.mock(self.acq.subprocess, "Popen", side_effect=AssertionError("direct spawn"))
+        self.native_run = self.mock(self.acq.subprocess, "run", side_effect=AssertionError("native subprocess"))
+        self.slot = False
+        self.mock(self.acq, "_clean_supervisor_slot", new=self.supervisor_slot)
+
+    def mock(self, obj, name, **kwargs):
+        return self.stack.enter_context(patch.object(obj, name, **kwargs))
+
+    @contextmanager
+    def supervisor_slot(self):
+        self.assertFalse(self.slot)
+        self.slot = True
+        try:
+            yield
+        finally:
+            self.slot = False
+
+    def record_pending(self, name, pending):
+        (self.pending.add if pending else self.pending.remove)(name)
+
+    def invoke(self, payload=None):
+        event_file = Path(self.env["GITHUB_EVENT_PATH"])
+        event_file.write_text(json.dumps(payload or self.event), encoding="utf-8")
+        output = self.local / "receipt.json"
+        with patch.object(hostops.sys, "argv", ["personal", "--mode", "write", "--output", str(output)]):
+            code = hostops.main()
+        result = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(code, 0 if result["status"] == "OBSERVED" else 2)
+        self.assertLessEqual(result.keys(), hostops.PERSONAL_PUBLIC_FIELDS)
+        for private in (str(self.local), self.sid, "CommandLine", "RunEx", "PRIVATE"):
+            self.assertNotIn(private, json.dumps(result))
+        self.spawn.assert_not_called()
+        self.native_run.assert_not_called()
+        return result
+
+    def test_exact_grant_and_parameters_required_before_any_native_call(self):
+        read = event("read", self.op, {})
+        with self.assertRaisesRegex(hostops.Denied, "READ_OPERATION_DENIED"):
+            hostops.parse_event(read, "read")
+        request = hostops.parse_event(self.event, "write")
+        self.assertEqual(hostops.perform(request)["code"], "PROTECTED_HOSTOPS_ONLY")
+        for payload, expected in (
+            (event("write", self.op, {}, comment="APPROVE WRITE #17 "), "EXACT_WRITE_APPROVAL_REQUIRED"),
+            (event("write", self.op, {"port": 9444}), "INVALID_PARAMETERS"),
+            (event("write", self.op, None), "INVALID_REQUEST"),
+        ):
+            self.assertEqual(self.invoke(payload)["code"], expected)
+        for section in ("issue", "comment", "sender"):
+            payload = copy.deepcopy(self.event)
+            user = payload[section] if section == "sender" else payload[section]["user"]
+            user["login"] = "another-account"
+            self.assertEqual(self.invoke(payload)["status"], "BLOCKED")
+        self.session.assert_not_called()
+        self.task.assert_not_called()
+
+    def test_source_executor_and_unprotected_or_replayed_events_have_no_effect(self):
+        for name, value in (("RUNNER_NAME", "AI-COMMERCE-EF02-01"), ("GITHUB_EVENT_NAME", "pull_request"),
+                            ("GITHUB_RUN_ATTEMPT", "2"), ("GITHUB_WORKFLOW_SHA", "b" * 40),
+                            ("AI_COMMERCE_GIT_GUARD_ACTIVE", "1")):
+            with patch.dict(self.env, {name: value}):
+                self.assertEqual(self.invoke()["code"], "PROTECTED_HOSTOPS_ONLY")
+        self.session.assert_not_called()
+        self.task.assert_not_called()
+
+    def test_session_owner_profile_and_transient_runtime_fail_before_task_access(self):
+        for owner, name, result in (
+            (self.acq, "_interactive_session", 0),
+            (self.wake, "_windows_process_sid", "S-1-5-18"),
+        ):
+            with patch.object(owner, name, return_value=result):
+                self.assertEqual(self.invoke()["code"], "ENROLLMENT_IDENTITY_UNPROVEN")
+        for owner, name, error, expected in (
+            (self.acq, "_interactive_session", self.acq.AcquisitionBlocked, "ELEVATED_CHROME_DISALLOWED"),
+            (self.acq, "_interactive_session", self.acq.AcquisitionBlocked, "WINDOWS_INTERACTIVE_REQUIRED"),
+            (hostops, "_persistent_clean_source", hostops.Denied, "LOCAL_MAIN_SYNC_REQUIRED"),
+            (self.acq, "_managed_clean_runtime", self.acq._Clean9444Hold, "AUTOSTART_RUNTIME_UNAVAILABLE"),
+            (self.acq, "_clean_target", self.acq._Clean9444Hold, "OPERATOR_OWNERSHIP_UNPROVEN"),
+            (self.acq, "_clean_inventory", self.acq._Clean9444Hold, "FOREIGN_PORT_OWNER"),
+            (self.acq, "_clean_inventory", self.acq._Clean9444Hold, "BROWSER_OWNERSHIP_UNPROVEN"),
+        ):
+            with patch.object(owner, name, side_effect=error(expected)):
+                self.assertEqual(self.invoke()["code"], expected)
+        self.task.assert_not_called()
+        self.record.assert_not_called()
+        self.probe.assert_not_called()
+
+    def test_pending_already_conflict_and_unavailable_are_no_op(self):
+        for code, expected in (("ALREADY_ENROLLED", "INSTALLED_BUT_NOT_RUNNING"),
+                               ("AUTOSTART_CONFLICT", "AUTOSTART_CONFLICT"),
+                               ("AUTOSTART_RUNTIME_UNAVAILABLE", "AUTOSTART_RUNTIME_UNAVAILABLE"),
+                               ("PRIVATE path and SID", "AUTOSTART_RUNTIME_UNAVAILABLE")):
+            self.task.return_value = code
+            self.task.reset_mock()
+            self.assertEqual(self.invoke()["code"], expected)
+            self.task.assert_called_once_with(self.sid, install=False, runtime=self.runtime)
+        self.pending.add("AutostartPending")
+        self.task.reset_mock()
+        self.assertEqual(self.invoke()["code"], "UNKNOWN_EFFECT")
+        self.task.assert_not_called()
+        self.record.assert_not_called()
+
+    def test_create_then_independent_readback_before_one_owner_session_start(self):
+        responses = iter(("AUTOSTART_NOT_ENROLLED", "ENROLLED", "ALREADY_ENROLLED", "START_REQUESTED"))
+
+        def scheduler(sid, *, install, runtime, start_session=None):
+            if start_session is None:
+                self.assertEqual(self.slot, self.task.call_count != 1)
+            else:
+                self.assertFalse(self.slot)
+                self.assertEqual((sid, start_session, runtime), (self.sid, 7, self.runtime))
+                self.assertIn("AutostartPending", self.pending)
+                self.inventory.return_value = ("OWNED", (5, self.target.executable, "created", "PRIVATE"))
+            return next(responses)
+
+        self.task.side_effect = scheduler
+        receipt = self.invoke()
+        self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", "CDP_VERIFIED"))
+        self.assertIs(receipt["devtools_protocol_ok"], True)
+        for key in ("exact_chat_verified", "wake_sent", "arbitrary_shell_enabled"):
+            self.assertIs(receipt[key], False)
+        self.assertEqual(self.task.call_args_list, [
+            call(self.sid, install=False, runtime=self.runtime), call(self.sid, install=True, runtime=self.runtime),
+            call(self.sid, install=False, runtime=self.runtime),
+            call(self.sid, install=False, runtime=self.runtime, start_session=7),
+        ])
+        self.probe.assert_called_once_with(self.target)
+        self.assertFalse(self.pending)
+
+    def test_uncertain_registration_or_first_start_persists_and_never_replays(self):
+        for responses in (("AUTOSTART_NOT_ENROLLED", "UNKNOWN_EFFECT"),
+                          ("AUTOSTART_NOT_ENROLLED", "ENROLLED", "AUTOSTART_CONFLICT"),
+                          ("AUTOSTART_NOT_ENROLLED", "ENROLLED", "ALREADY_ENROLLED", "UNKNOWN_EFFECT")):
+            self.pending.clear()
+            self.task.reset_mock()
+            self.task.side_effect = responses
+            self.assertEqual(self.invoke()["code"], "UNKNOWN_EFFECT")
+            self.assertEqual(self.task.call_count, len(responses))
+            self.assertEqual(self.pending, {"AutostartPending"})
+            self.assertEqual(self.invoke()["code"], "UNKNOWN_EFFECT")
+            self.assertEqual(self.task.call_count, len(responses))
+        self.probe.assert_not_called()
+
+    def _clean_source_fixture(self):
+        root = self.local / "persistent"
+        (root / ".git").mkdir(parents=True, exist_ok=True)
+        workflow = Path(self.env["GITHUB_WORKSPACE"])
+        source, peer = (checkout / hostops._ACQUISITION_SOURCE for checkout in (root, workflow))
+        for path in (source, peer):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"same reviewed source")
+        git = {
+            ("rev-parse", "--show-toplevel"): str(root),
+            ("rev-parse", "--abbrev-ref", "HEAD"): "main",
+            ("config", "--get", "remote.origin.url"): "https://github.com/trung-via/ai-commerce.git",
+            ("rev-parse", "HEAD", "refs/remotes/origin/main"): f"{self.sha}\n{self.sha}\n",
+            ("status", "--porcelain=v1", "--untracked-files=all"): "",
+            ("ls-files", "-v", "-z", "--", "src"): "H " + hostops._ACQUISITION_SOURCE.as_posix() + "\0",
+        }
+        return root, workflow, source, peer, git
+
+    def test_persistent_source_refuses_stale_dirty_reparse_and_byte_mismatch(self):
+        root, workflow, source, peer, git = self._clean_source_fixture()
+        real_source = self.real_source
+        read_acl = (self.sid, (
+            ("allow", 0x13, 0x1F01FF, "S-1-5-18"),
+            ("allow", 0x13, 0x1F01FF, "S-1-5-32-544"),
+            ("allow", 0x13, 0x1F01FF, self.sid),
+            ("allow", 0x13, 0x1200A9, "S-1-5-32-545"),
+        ))
+        with patch.dict(hostops.ROOTS, workspace=root), \
+                patch.object(hostops, "__file__", workflow / "src/ai_commerce/hostops_v3/personal.py"), \
+                patch.object(self.acq, "__file__", peer), \
+                patch.object(hostops, "_windows_checkout_acl", return_value=read_acl), \
+                patch.object(hostops, "_git", side_effect=lambda *args: git[args]):
+            self.assertEqual(real_source(self.acq, self.sha, self.sid), source)
+            # Benign setuptools editable metadata under src/ is allowed only with fixed non-code names.
+            egg = root / "src" / "ai_commerce.egg-info"
+            egg.mkdir()
+            (egg / "PKG-INFO").write_bytes(b"Metadata-Version: 2.1\n")
+            self.assertEqual(real_source(self.acq, self.sha, self.sid), source)
+            (egg / "evil.py").write_bytes(b"print('untracked')")
+            with self.assertRaisesRegex(hostops.Denied, "^SOURCE_UNTRACKED_FILE$"):
+                real_source(self.acq, self.sha, self.sid)
+            (egg / "evil.py").unlink()
+            for args, bad, expected in (
+                (("rev-parse", "--abbrev-ref", "HEAD"), "other", "LOCAL_MAIN_SYNC_REQUIRED"),
+                (("config", "--get", "remote.origin.url"), "https://evil.invalid/repo.git", "LOCAL_MAIN_SYNC_REQUIRED"),
+                (("rev-parse", "HEAD", "refs/remotes/origin/main"), "old\nold\n", "LOCAL_MAIN_SYNC_REQUIRED"),
+                (("status", "--porcelain=v1", "--untracked-files=all"), " M README.md", "LOCAL_MAIN_SYNC_REQUIRED"),
+                (("status", "--porcelain=v1", "--untracked-files=all"), "?? src/evil.py", "SOURCE_UNTRACKED_FILE"),
+                (("ls-files", "-v", "-z", "--", "src"), "h " + hostops._ACQUISITION_SOURCE.as_posix() + "\0",
+                 "SOURCE_INDEX_UNVERIFIED"),
+            ):
+                with patch.dict(git, {args: bad}), self.assertRaisesRegex(hostops.Denied, f"^{expected}$"):
+                    real_source(self.acq, self.sha, self.sid)
+            untracked_py = source.with_name("untracked.py")
+            untracked_py.write_bytes(b"untracked executable source")
+            with self.assertRaisesRegex(hostops.Denied, "^SOURCE_UNTRACKED_FILE$"):
+                real_source(self.acq, self.sha, self.sid)
+            untracked_py.unlink()
+            with patch.object(hostops, "_is_reparse", side_effect=lambda path: path == source):
+                with self.assertRaisesRegex(hostops.Denied, "^SOURCE_PATH_UNTRUSTED$"):
+                    real_source(self.acq, self.sha, self.sid)
+            with patch.object(hostops, "__file__", root / "src/ai_commerce/hostops_v3/personal.py"):
+                with self.assertRaisesRegex(hostops.Denied, "^SOURCE_WORKFLOW_PATH_MISMATCH$"):
+                    real_source(self.acq, self.sha, self.sid)
+            source.write_bytes(b"index-hidden edit")
+            with self.assertRaisesRegex(hostops.Denied, "^SOURCE_BYTES_MISMATCH$"):
+                real_source(self.acq, self.sha, self.sid)
+
+    def test_public_checkout_acl_differential_vs_private_profile_acl(self):
+        # Ordinary Windows public checkout read ACLs pass checkout guard while
+        # private handoff/Chrome-profile guard still rejects non-owner read ACEs.
+        accepted_public = (
+            (self.sid, (
+                ("allow", 0x13, 0x1F01FF, "S-1-5-18"),
+                ("allow", 0x13, 0x1F01FF, "S-1-5-32-544"),
+                ("allow", 0x13, 0x1F01FF, self.sid),
+                ("allow", 0x13, 0x1200A9, "S-1-5-32-545"),
+            )),
+            (self.sid, (
+                ("allow", 0x13, 0x1F01FF, "S-1-5-18"),
+                ("allow", 0x13, 0x1F01FF, "S-1-5-32-544"),
+                ("allow", 0x13, 0x1F01FF, self.sid),
+                ("allow", 0x13, 0x120089, "S-1-5-11"),
+                ("allow", 0x1B, 0x10000000, "S-1-3-0"),
+            )),
+            (self.sid, (
+                ("allow", 0x13, 0x1F01FF, "S-1-5-18"),
+                ("allow", 0x13, 0x1F01FF, "S-1-5-32-544"),
+                ("allow", 0x13, 0x1F01FF, "S-1-3-4"),
+            )),
+            ("S-1-5-32-544", (
+                ("allow", 0x13, 0x1F01FF, "S-1-5-18"),
+                ("allow", 0x13, 0x1F01FF, "S-1-5-32-544"),
+                ("allow", 0x13, 0x1200A9, "S-1-5-32-545"),
+            )),
+        )
+        for owner, aces in accepted_public:
+            hostops._check_public_checkout_acl(owner, aces, self.sid)
+            private_aces = tuple((kind, sid) for kind, _, _, sid in aces)
+            with self.assertRaisesRegex(self.handoff.HandoffBlocked, "HANDOFF_PERMISSIONS_INVALID"):
+                self.handoff._check_windows_acl(owner, private_aces, self.sid)
+
+        # Untrusted writers, foreign owners, Everyone, non-IO CREATOR OWNER and
+        # empty/operator-missing DACLs remain rejected on the public checkout.
+        rejected_public = (
+            (self.sid, (("allow", 0x13, 0x1F01FF, self.sid), ("allow", 0x13, 0x1301BF, "S-1-5-11"))),
+            (self.sid, (("allow", 0x13, 0x1F01FF, self.sid), ("allow", 0x1B, 0x1301BF, "S-1-5-11"))),
+            (self.sid, (("allow", 0x13, 0x1F01FF, self.sid), ("allow", 0x13, 0x00000002, "S-1-5-32-545"))),
+            (self.sid, (("allow", 0x13, 0x1F01FF, self.sid), ("allow", 0x13, 0x00000004, "S-1-5-32-545"))),
+            (self.sid, (("allow", 0x13, 0x1F01FF, self.sid), ("allow", 0x13, 0x00040000, "S-1-5-32-545"))),
+            (self.sid, (("allow", 0x13, 0x1F01FF, self.sid), ("allow", 0x13, 0x40000000, "S-1-5-32-545"))),
+            (self.sid, (("allow", 0x13, 0x1F01FF, self.sid), ("allow", 0x13, 0x1200A9, "S-1-1-0"))),
+            (self.sid, (("allow", 0x13, 0x1F01FF, self.sid), ("allow", 0x03, 0x10000000, "S-1-3-0"))),
+            (self.sid, (("allow", 0x13, 0x1F01FF, self.sid), ("allow", 0x13, 0x1200A9, "S-1-5-21-999-1002"))),
+            ("S-1-5-21-999-1002", (("allow", 0x13, 0x1F01FF, self.sid),)),
+            ("S-1-5-32-544", (("allow", 0x13, 0x1F01FF, "S-1-5-18"), ("allow", 0x13, 0x1F01FF, "S-1-5-32-544"))),
+            (self.sid, ()),
+        )
+        for owner, aces in rejected_public:
+            with self.subTest(owner=owner, aces=aces), \
+                    self.assertRaisesRegex(hostops.Denied, "^SOURCE_ACL_UNTRUSTED$"):
+                hostops._check_public_checkout_acl(owner, aces, self.sid)
+
+        # Private Chrome profile custody still uses strict owner-only _private_identity.
+        profile_root = self.local / "AI-Commerce" / "WakeHub-9444-Clean" / "Default"
+        profile_root.mkdir(parents=True, exist_ok=True)
+        users_read = (self.sid, (("allow", self.sid), ("allow", "S-1-5-32-545")))
+        with patch.object(self.handoff.os, "name", "nt"), \
+                patch.object(self.handoff, "_windows_process_sid", return_value=self.sid), \
+                patch.object(self.handoff, "_windows_acl", return_value=users_read):
+            with self.assertRaisesRegex(self.acq._Clean9444Hold, "^OPERATOR_OWNERSHIP_UNPROVEN$"):
+                self.real_target(self.local, self.sid)
+
+    def test_clean_checkout_with_read_acl_reaches_managed_runtime_and_task_checks(self):
+        root, workflow, source, peer, git = self._clean_source_fixture()
+        read_acl = (self.sid, (
+            ("allow", 0x13, 0x1F01FF, "S-1-5-18"),
+            ("allow", 0x13, 0x1F01FF, "S-1-5-32-544"),
+            ("allow", 0x13, 0x1F01FF, self.sid),
+            ("allow", 0x13, 0x1200A9, "S-1-5-32-545"),
+            ("allow", 0x13, 0x1200A9, "S-1-5-11"),
+        ))
+        writable_acl = (self.sid, (
+            ("allow", 0x13, 0x1F01FF, self.sid),
+            ("allow", 0x13, 0x1301BF, "S-1-5-11"),
+        ))
+        self.source.side_effect = self.real_source
+        with patch.dict(hostops.ROOTS, workspace=root), \
+                patch.object(hostops, "__file__", workflow / "src/ai_commerce/hostops_v3/personal.py"), \
+                patch.object(self.acq, "__file__", peer), \
+                patch.object(hostops, "_git", side_effect=lambda *args: git[args]):
+            with patch.object(hostops, "_windows_checkout_acl", return_value=read_acl):
+                receipt = self.invoke()
+                self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", "INSTALLED_BUT_NOT_RUNNING"))
+                self.task.assert_called_once_with(self.sid, install=False, runtime=self.runtime)
+            self.task.reset_mock()
+            with patch.object(hostops, "_windows_checkout_acl", return_value=writable_acl):
+                receipt = self.invoke()
+                self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "SOURCE_ACL_UNTRUSTED"))
+                self.task.assert_not_called()
+            for expected in (
+                "SOURCE_WORKFLOW_PATH_MISMATCH", "SOURCE_PATH_UNTRUSTED", "SOURCE_ACL_UNTRUSTED",
+                "SOURCE_INDEX_UNVERIFIED", "SOURCE_UNTRACKED_FILE", "SOURCE_BYTES_MISMATCH",
+            ):
+                self.assertIn(expected, hostops._CLEAN_PUBLIC_CODES)
+                self.assertEqual(hostops._clean_autostart_receipt(expected)["code"], expected)
+
+    def test_runtime_rejects_runner_python_and_uses_only_signed_owner_install(self):
+        base = self.local / "Programs" / "Python" / "Python312"
+        site = base / "Lib" / "site-packages"
+        site.mkdir(parents=True)
+        python, pythonw, dll = (base / name for name in ("python.exe", "pythonw.exe", "python312.dll"))
+        source = self.local / "persistent" / hostops._ACQUISITION_SOURCE
+        source.parent.mkdir(parents=True)
+        for path in (python, pythonw, dll, source):
+            path.touch()
+        runtime = SimpleNamespace(executable=str(self.local / "runner" / "python.exe"), base_prefix=str(base),
+                                  version_info=SimpleNamespace(major=3, minor=12))
+        with patch.object(self.acq, "sys", runtime), \
+                patch.object(self.handoff, "_private_identity", return_value=self.sid), \
+                patch.object(self.acq, "_powershell", return_value=self.local / "powershell.exe"):
+            with self.assertRaisesRegex(self.acq._Clean9444Hold, "AUTOSTART_RUNTIME_UNAVAILABLE"):
+                self.real_runtime(self.local, self.sid, source)
+            self.native_run.assert_not_called()
+            runtime.executable = str(python)
+            self.native_run.side_effect = [
+                SimpleNamespace(returncode=0, stdout=b"SIGNED_CPYTHON"), SimpleNamespace(returncode=0),
+            ]
+            self.assertEqual(self.real_runtime(self.local, self.sid, source), (pythonw, source))
+            signed, smoke = self.native_run.call_args_list
+            self.assertEqual(signed.kwargs["env"]["AI_COMMERCE_PYTHONW"], str(pythonw))
+            self.assertEqual(smoke.args[0][:5], [str(python), "-I", "-B", "-S", "-c"])
+            self.assertEqual(smoke.args[0][-1], "check")
+            self.assertEqual(smoke.kwargs["cwd"], source.parents[2])
+
+            self.native_run.side_effect = None
+            self.native_run.return_value = SimpleNamespace(returncode=0, stdout=b"START_REQUESTED")
+            self.assertEqual(self.real_task(self.sid, install=False, runtime=(pythonw, source),
+                                            start_session=7), "START_REQUESTED")
+            task_call = self.native_run.call_args
+            script, env = task_call.args[0][-1], task_call.kwargs["env"]
+            self.assertEqual(env["AI_COMMERCE_TASK_PYTHON"], str(pythonw))
+            self.assertEqual(env["AI_COMMERCE_TASK_DIRECTORY"], str(source.parents[2]))
+            self.assertEqual(env["AI_COMMERCE_TASK_START_SESSION"], "7")
+            self.assertEqual(env["AI_COMMERCE_TASK_INSTALL"], "0")
+            self.assertIn(".RunEx($null, 12, $session, $sid)", script)
+            self.assertIn(".RegisterTaskDefinition($name, $expected, 34, $sid, $null, 3, $sddl)", script)
+            self.assertNotRegex(script, r"Stop-Process|\.Stop\(|DeleteTask|TerminateProcess")
+
+
 class PersonalCdp9444TopologyTests(unittest.TestCase):
     """Offline fixtures only: no real CIM, token, signature, browser or sends."""
 
@@ -2162,6 +2879,45 @@ class PersonalCdp9444TopologyTests(unittest.TestCase):
         self.signature.assert_called_once()
         self.protocol.assert_called_once_with(self.signature.call_args.args[0])
         self.assert_public(result)
+
+    def test_fixed_clean_profile_is_attested_without_legacy_config(self):
+        self.config.unlink()
+        # Windows temp aliases must not split the attested known-folder root
+        # from the canonical profile and browser paths in this test fixture.
+        self.local = self.local.resolve(strict=True)
+        self.local_identity.return_value = self.local
+        self.root = self.local / "AI-Commerce"
+        clean = self.root / "WakeHub-9444-Clean"
+        (clean / "Default").mkdir(parents=True)
+        # Windows realpaths may differ from the spelling used to create a fixture.
+        # CDP identity compares the native target against exact canonical paths.
+        clean = clean.resolve(strict=True)
+        binary = self.local / "Google" / "Chrome" / "Application" / "chrome.exe"
+        binary.parent.mkdir(parents=True)
+        binary.touch()
+        binary = binary.resolve(strict=True)
+        self.proc.update(ExecutablePath=str(binary), CommandLine=json.dumps([
+            str(binary), "--user-data-dir=" + str(clean), "--profile-directory=Default",
+            "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=9444",
+        ]))
+        with patch.object(self.acquisition, "_native_known_folder", return_value=self.local), \
+                patch.object(self.acquisition, "load_environment") as legacy:
+            context = hostops._cdp_9444_private_context(
+                self.acquisition, json.loads(self.proc["CommandLine"]))
+            self.assertIsInstance(context[0], tuple)
+            state, identity = self.acquisition._clean_inventory(
+                *context[0], self.session, self.sid, inventory=self.inventory)
+            self.assertEqual(state, "OWNED")
+            self.assertEqual(identity[0], self.proc["ProcessId"])
+            receipt = self.observe()
+            self.assertEqual(receipt["code"], "CDP_PROTOCOL_HEALTHY")
+            self.assert_public(receipt)
+            legacy.assert_not_called()
+            self.assertEqual(self.protocol.call_args.args[0].user_data_dir, clean)
+            self.protocol.reset_mock()
+            self.proc["SessionId"] += 1
+            self.assertEqual(self.observe()["code"], "UNTRUSTED_OWNER")
+            self.protocol.assert_not_called()
 
     def test_real_strict_protocol_checks_browser_protocol_and_websocket_without_attaching(self):
         valid = {"Browser": "Chrome/153.0", "Protocol-Version": "1.3",

@@ -7,9 +7,12 @@ retain Human approval / immutable candidate provenance.
 from __future__ import annotations
 
 import ast
+from collections import deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
+import re
+import subprocess
 
 
 CONTROL_TESTS = {
@@ -158,7 +161,140 @@ def _python_paths(root: Path) -> tuple[str, ...]:
     ))
 
 
-def _reverse_import_graph(root: Path, paths: Iterable[str]) -> tuple[dict[str, set[str]], set[str]]:
+def _package_facade(tree: ast.Module) -> tuple[tuple, tuple[str, ...]] | None:
+    """Static re-export facade signature; executable package code is NOT benign."""
+    imports: list[tuple] = []
+    exports: list[str] = []
+    structure: list[tuple] = []
+    for node in tree.body:
+        if (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            structure.append(("docstring", node.value.value))
+        elif isinstance(node, ast.ImportFrom) and all(n.name != "*" for n in node.names):
+            structure.append(("import", node.level, node.module))
+            imports.append(tuple((n.name, n.asname) for n in node.names))
+        elif (isinstance(node, ast.Assign) and len(node.targets) == 1
+              and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "__all__"):
+            values = node.value
+            if not isinstance(values, (ast.List, ast.Tuple)) or any(
+                    not isinstance(v, ast.Constant) or type(v.value) is not str for v in values.elts):
+                return None
+            exports.extend(v.value for v in values.elts)
+            structure.append(("all",))
+        elif (isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name)
+              and node.target.id == "__all__" and isinstance(node.op, ast.Add)):
+            values = node.value
+            if not isinstance(values, (ast.List, ast.Tuple)) or any(
+                    not isinstance(v, ast.Constant) or type(v.value) is not str for v in values.elts):
+                return None
+            exports.extend(v.value for v in values.elts)
+            structure.append(("all-add",))
+        else:
+            return None
+    return (tuple(structure), tuple(imports)), tuple(exports)
+
+
+def _additive_package_exports(root: Path, path: str, base_sha: str) -> bool:
+    """Ignore only proven additions to existing exports on an immutable base.
+
+    Never infer safety from the candidate's code alone: removed/rebound exports,
+    a new import target, runtime package statements or an unavailable Git base
+    retain the conservative consumer scope.
+    """
+    if (not path.endswith("/__init__.py") or
+            not re.fullmatch(r"[0-9a-f]{40}", base_sha) or
+            not (root / ".git").exists()):
+        return False
+    try:
+        base = subprocess.run(["git", "show", f"{base_sha}:{path}"], cwd=root,
+                              capture_output=True, check=False, timeout=10)
+        if base.returncode:
+            return False
+        previous = _package_facade(ast.parse(base.stdout.decode("utf-8-sig")))
+        current = _package_facade(ast.parse((root / path).read_text(encoding="utf-8-sig")))
+    except (OSError, UnicodeError, SyntaxError, KeyError, subprocess.TimeoutExpired):
+        return False
+    if previous is None or current is None:
+        return False
+    (old_structure, old_imports), old_exports = previous
+    (new_structure, new_imports), new_exports = current
+    if old_structure != new_structure or len(old_imports) != len(new_imports):
+        return False
+    # Preserve every old binding, including aliases and order. A newly added
+    # name must not shadow any existing import or advertised __all__ entry.
+    existing = {alias or name for clause in old_imports for name, alias in clause}
+    for old, new in zip(old_imports, new_imports):
+        added = [v for v in new if v not in old]
+        if any((alias or name) in existing for name, alias in added):
+            return False
+        seq = iter(new)
+        if any(not any(value == candidate for candidate in seq) for value in old):
+            return False
+    seq = iter(new_exports)
+    if any(not any(value == candidate for candidate in seq) for value in old_exports):
+        return False
+    return any(old != new for old, new in zip(old_imports, new_imports)) or old_exports != new_exports
+
+
+def _changed_module_symbols(root: Path, path: str, base_sha: str) -> set[str] | None:
+    """Compare immutable top-level bindings, or return None to stay conservative.
+
+    Purely additive classes/functions need not invalidate consumers importing
+    unchanged public symbols. A changed existing class includes *all* of its
+    methods; we never guess that a method change is harmless.
+    """
+    if not re.fullmatch(r"[0-9a-f]{40}", base_sha) or not (root / ".git").exists():
+        return None
+    try:
+        base = subprocess.run(["git", "show", f"{base_sha}:{path}"], cwd=root,
+                              capture_output=True, check=False, timeout=10)
+        if base.returncode:
+            return None
+        before = ast.parse(base.stdout.decode("utf-8-sig"))
+        after = ast.parse((root / path).read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, SyntaxError, KeyError, subprocess.TimeoutExpired):
+        return None
+
+    def bindings(tree: ast.Module) -> tuple[dict[str, str], tuple[str, ...]] | None:
+        named: dict[str, str] = {}
+        controls: list[str] = []
+        for node in tree.body:
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                named[node.name] = ast.dump(node, include_attributes=False)
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    named[alias.asname or alias.name] = repr((node.module, node.level, alias.name))
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    named[alias.asname or alias.name.split(".")[0]] = repr(alias.name)
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                if any(not isinstance(t, ast.Name) for t in targets):
+                    return None
+                for target in targets:
+                    named[target.id] = ast.dump(node, include_attributes=False)
+            elif (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+                  and type(node.value.value) is str):
+                controls.append(ast.dump(node, include_attributes=False))
+            elif isinstance(node, ast.If):
+                # A module-level conditional may have live side effects. Its
+                # exact AST must remain identical before symbol narrowing.
+                controls.append(ast.dump(node, include_attributes=False))
+            else:
+                return None
+        return named, tuple(controls)
+
+    old, new = bindings(before), bindings(after)
+    if old is None or new is None or old[1] != new[1]:
+        return None
+    return {name for name in old[0].keys() | new[0].keys()
+            if old[0].get(name) != new[0].get(name)}
+
+
+def _reverse_import_graph(root: Path, paths: Iterable[str],
+                          *, changed_symbols: Mapping[str, set[str]] | None = None,
+                          wildcard_packages: set[str] | None = None,
+                          ) -> tuple[dict[str, set[str]], set[str]]:
     """Static local-import edges; unresolved dynamic imports are tracked per file."""
     paths = tuple(paths)
     lookup = {}
@@ -170,13 +306,39 @@ def _reverse_import_graph(root: Path, paths: Iterable[str]) -> tuple[dict[str, s
             lookup[Path(path).stem] = path
     reverse: dict[str, set[str]] = {}
     uncertain: set[str] = set()
+    changed_symbols = changed_symbols or {}
+    parsed: dict[str, ast.Module] = {}
     for path in paths:
         try:
             contents = (root / path).read_text(encoding="utf-8-sig")
-            tree = ast.parse(contents)
+            parsed[path] = ast.parse(contents)
         except (OSError, UnicodeError, SyntaxError):
             uncertain.add(path)
+    # Map a package's explicit re-exported names back to their real owners.
+    # Importing CreativeStore must not imply dependence on every unrelated
+    # class later added to the creative/__init__.py facade.
+    reexports: dict[str, dict[str, str]] = {}
+    facades: set[str] = set()
+    for path, tree in parsed.items():
+        if not path.endswith("/__init__.py") or _package_facade(tree) is None:
             continue
+        facades.add(path)
+        package = path.removeprefix("src/").removesuffix("/__init__.py").replace("/", ".")
+        symbols: dict[str, str] = {}
+        for node in tree.body:
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if node.level:
+                parts = package.split(".")
+                prefix = ".".join(parts[:len(parts) - node.level + 1] +
+                                  ([node.module] if node.module else []))
+            else:
+                prefix = node.module or ""
+            target = lookup.get(prefix)
+            if target:
+                symbols.update({n.asname or n.name: target for n in node.names})
+        reexports[path] = symbols
+    for path, tree in parsed.items():
         module = path.removeprefix("src/").removesuffix(".py").replace("/", ".")
         package = module.removesuffix(".__init__") if path.endswith("/__init__.py") else module.rpartition(".")[0]
         aliases = {"__import__"}
@@ -197,6 +359,9 @@ def _reverse_import_graph(root: Path, paths: Iterable[str]) -> tuple[dict[str, s
                     parts = package.split(".")
                     prefix = ".".join(parts[:len(parts) - node.level + 1] + ([prefix] if prefix else []))
                 names = [prefix] + [prefix + "." + a.name for a in node.names]
+                if (wildcard_packages is not None and
+                        any(a.name == "*" for a in node.names) and prefix in lookup):
+                    wildcard_packages.add(lookup[prefix])
             elif isinstance(node, ast.Call) and (
                 isinstance(node.func, ast.Name) and node.func.id in aliases
                 or isinstance(node.func, ast.Attribute) and node.func.attr in ("import_module", "__import__")
@@ -208,23 +373,61 @@ def _reverse_import_graph(root: Path, paths: Iterable[str]) -> tuple[dict[str, s
                 else:
                     uncertain.add(path)
             for name in names:
+                # Python executes ancestor package initializers for submodule
+                # imports. Retain those paths unless their individual export
+                # delta is independently proven additive below.
                 while name:
+                    # An explicit from-import names the symbols used. If the
+                    # immutable base proves they have not changed, the import
+                    # is not a regression dependency for this source delta.
+                    if (isinstance(node, ast.ImportFrom) and name == names[0]
+                            and name in lookup
+                            and changed_symbols.get(lookup[name]) and
+                            all(a.name != "*" for a in node.names) and
+                            not any(a.name in changed_symbols[lookup[name]]
+                                    for a in node.names)):
+                        name = name.rpartition(".")[0]
+                        continue
                     if name in lookup:
                         deps.add(lookup[name])
                     name = name.rpartition(".")[0]
+            if isinstance(node, ast.ImportFrom) and names:
+                # A consumer of a public re-export also depends directly on
+                # its source. The facade is not a transitive fan-out hub.
+                package_file = lookup.get(names[0])
+                if package_file in reexports:
+                    for alias in node.names:
+                        origin = reexports[package_file].get(alias.name)
+                        if origin and (origin not in changed_symbols or
+                                       alias.name in changed_symbols[origin]):
+                            deps.add(origin)
+        if path in facades:
+            # Only narrow a facade's source dependencies when the immutable
+            # base proves which symbols changed. Unproven modules must retain
+            # their normal package/consumer closure (e.g. remote Doorbell).
+            # Named consumers of proven changed symbols already have direct
+            # source edges above, avoiding unrelated facade fan-out.
+            deps.difference_update(origin for origin in reexports[path].values()
+                                   if changed_symbols.get(origin))
         for dep in deps:
             reverse.setdefault(dep, set()).add(path)
     return reverse, uncertain
 
 
-def _consumers(paths: Iterable[str], reverse: dict[str, set[str]]) -> set[str]:
+def _consumers(paths: Iterable[str], reverse: dict[str, set[str]],
+               *, max_depth: int | None = None) -> set[str]:
     result = set(paths)
-    pending = list(result)
+    # Breadth-first traversal is essential when a module is reachable by both
+    # short and long import routes: only its shortest depth can bound callers.
+    pending = deque((path, 0) for path in sorted(result))
     while pending:
-        for child in reverse.get(pending.pop(), ()):
+        path, depth = pending.popleft()
+        if max_depth is not None and depth >= max_depth:
+            continue
+        for child in sorted(reverse.get(path, ())):
             if child not in result:
                 result.add(child)
-                pending.append(child)
+                pending.append((child, depth + 1))
     return result
 
 
@@ -252,14 +455,40 @@ def select_impact(
     current_tests = {p.relative_to(root).as_posix() for p in (root / "tests").glob("test_*.py")} \
         if (root / "tests").is_dir() else set()
     python = _python_paths(root)
-    reverse, uncertain = _reverse_import_graph(root, python)
+    changed_symbols: dict[str, set[str]] = {}
+    for path in changed:
+        if (path.startswith("src/ai_commerce/") and path.endswith(".py") and
+                not path.endswith("/__init__.py") and (root / path).is_file()):
+            symbols = _changed_module_symbols(root, path, base_sha)
+            if symbols is not None:
+                changed_symbols[path] = symbols
+    wildcard_packages: set[str] = set()
+    reverse, uncertain = _reverse_import_graph(
+        root, python, changed_symbols=changed_symbols,
+        wildcard_packages=wildcard_packages)
     extra_controls = dict(CONTROL_TESTS)
     if additional_control_tests:
         extra_controls.update(additional_control_tests)
     # Control files have finite reviewed test closure; do not fan out through
     # transitive Python imports of the verification infrastructure itself.
-    component_changed = tuple(p for p in changed if p not in extra_controls)
-    affected = _consumers(component_changed, reverse)
+    export_additions = {
+        p for p in changed if p not in wildcard_packages
+        and _additive_package_exports(root, p, base_sha)
+    }
+    component_changed = tuple(p for p in changed
+                              if p not in extra_controls and p not in export_additions)
+    # Two import edges cover the owner, its direct callers, and a caller's
+    # immediate integration contract. Further transitive imports are recorded
+    # for review, not silently promoted into mandatory test groups. Previously
+    # changes to creative/v2.py selected 50 unrelated A/BQ/WakeHub groups via
+    # generic CLI and test harnesses, timing out A03 R2 Issue #1075.
+    affected = _consumers(component_changed, reverse, max_depth=2)
+    deferred = _consumers(component_changed, reverse) - affected
+    changed_tests = {p for p in changed if p.startswith("tests/test_")}
+    direct_test_consumers = changed_tests | {
+        p for source in component_changed for p in reverse.get(source, ())
+        if p.startswith("tests/test_")
+    }
     group_tests = {t for g in groups for t in g.tests}
     registered = set(group_tests) | LEGACY_UNMAPPED
     selected_tests: set[str] = set()
@@ -269,7 +498,18 @@ def select_impact(
     related: set[str] = set()
     for group in groups:
         coverage = set(group.paths) | set(group.tests) | set(group.consumers) | set(group.contracts)
-        if affected & coverage or changed and set(changed) & coverage:
+        # A test importing a generic CLI/orchestrator is not by itself proof
+        # that this test's entire owner profile consumes the changed feature.
+        # Direct source/test changes and explicit test imports remain covered.
+        source_coverage = set(group.paths) | set(group.consumers) | set(group.contracts)
+        # Changed source explicitly named in a reviewed consumer map is still
+        # selected at any import depth via `changed & coverage` below. An
+        # indirect importer several hops away needs that explicit declaration
+        # before it becomes a mandatory suite; generic shared packages do not
+        # grant transitive verification authority to every downstream owner.
+        if (affected & source_coverage or
+                affected & set(group.tests) & direct_test_consumers or
+                set(changed) & coverage):
             selected_groups.add(group.name)
             selected_tests.update(group.tests)
             related.update(coverage)
@@ -320,6 +560,10 @@ def select_impact(
         p + ":UNRELATED_UNMAPPED_TEST" for p in pending
         if p not in changed_test_paths
     }
+    if deferred:
+        warnings.add(f"DEFERRED_TRANSITIVE_IMPORT_PATHS:{len(deferred)}")
+    if export_additions:
+        warnings.add(f"ADDITIVE_PACKAGE_EXPORTS:{len(export_additions)}")
     previous = set(previous_tests)
     for path in changed_test_paths & previous:
         if path not in registered:

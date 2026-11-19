@@ -539,7 +539,11 @@ def test_optional_contract_bounds_fingerprint_and_cli_compatibility():
     parser = build_parser()
     assert parser.parse_args(argv).max_repair_rounds == 2
     assert parser.parse_args(argv + ["--max-repair-rounds", "0"]).max_repair_rounds == 0
-    assert parser.parse_args(argv).action_timeout_seconds == 7200
+    from ai_commerce.engineering.runner import (
+        DEFAULT_ACTION_TIMEOUT_SECONDS, DEFAULT_VERIFY_TIMEOUT_SECONDS,
+    )
+    assert parser.parse_args(argv).verify_timeout_seconds == DEFAULT_VERIFY_TIMEOUT_SECONDS == 5400
+    assert parser.parse_args(argv).action_timeout_seconds == DEFAULT_ACTION_TIMEOUT_SECONDS == 12600
     with pytest.raises(SystemExit):
         parser.parse_args(argv + ["--max-repair-rounds", "6"])
 

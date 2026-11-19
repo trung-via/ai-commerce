@@ -2,7 +2,12 @@
 
 from ._validation import CreativeValidationError, NoReasonerConfigured, VersionConflict
 from .briefs import brief_digest, intake_brief, revise_brief
-from .models import ConceptChange, ConceptDraft, ConceptRecord, ConceptSelection, ParentRevision, ProviderObservation
+from .models import (
+    AudioPlan, CameraSpec, ConceptChange, ConceptDraft, ConceptRecord, ConceptSelection,
+    EDITABLE_PACKAGE_FIELDS, IdentityContinuity, MediaOutputTarget, ParentRevision,
+    ProductionLineage, ProductionPackageParent, ProductionPackageSpec, ProductionScene,
+    ProviderObservation, QAExpectation, RightsAttribution, SceneTransition, ScriptSegment,
+)
 from .reasoner import CreativeReasoner, MockCreativeReasoner, generate_concepts, reframe_concept, revise_concept
 from .store import CreativeStore
 
@@ -16,17 +21,36 @@ __all__ = [
 
 # V1.1 is opt-in; importing these symbols creates no provider or storage.
 from .intent import ActorRef, CreativeIntent, IntentField, capture_intent
-from .decisions import ActorDecision, HumanSelectionEvent
-from .v2 import CreativeReasonerV2, ReasoningRequest, ReasoningResult, UsageObservation, reason_v2
+from .decisions import AIInferenceBinding, ActorDecision, CreativeModelSelection, HumanSelectionEvent
+from .v2 import (
+    A03CreativeJob, A03CreativeStageResult, CLIExecutionObservation, CreativeJobProvenance, CreativeReasonerV2,
+    ReasoningRequest, ReasoningResult, UsageObservation, reason_v2, run_creative_stage,
+    A03CreativeCycleJob, A03CreativeCycleResult, CreativeCycleContext,
+    CreativeCriticEvidence, CreativeEvidenceSource, run_creative_cycle,
+    A03CreativeProductionJob, A03CreativeProductionPackage, A03CreativeProductionResult,
+    CreativeProductionContext, package_identity, revise_production_package, run_creative_production,
+)
 from .live import (
-    InvocationAuthorization, LiveCreativeReasoner, ModelConfiguration,
+    CodexCliCapability, CodexCliCreativeClient, InvocationAuthorization, LiveCreativeReasoner, ModelConfiguration,
     StructuredCreativeClient, StructuredModelRequest, StructuredModelResponse,
+    codex_creative_argv,
 )
 from .sidecars import CreativeSidecarStore
 
 __all__ += [
+    "A03CreativeJob", "A03CreativeStageResult", "AIInferenceBinding", "CreativeJobProvenance",
     "ActorDecision", "ActorRef", "CreativeIntent", "CreativeReasonerV2", "CreativeSidecarStore",
     "HumanSelectionEvent", "IntentField", "InvocationAuthorization", "LiveCreativeReasoner",
     "ModelConfiguration", "ReasoningRequest", "ReasoningResult", "StructuredCreativeClient",
     "StructuredModelRequest", "StructuredModelResponse", "UsageObservation", "capture_intent", "reason_v2",
+    "run_creative_stage",
+    "CLIExecutionObservation", "CodexCliCapability", "CodexCliCreativeClient", "codex_creative_argv",
+    "A03CreativeCycleJob", "A03CreativeCycleResult", "CreativeCycleContext",
+    "CreativeCriticEvidence", "CreativeEvidenceSource", "CreativeModelSelection", "run_creative_cycle",
+    "A03CreativeProductionJob", "A03CreativeProductionPackage", "A03CreativeProductionResult",
+    "AudioPlan", "CameraSpec", "CreativeProductionContext", "EDITABLE_PACKAGE_FIELDS",
+    "IdentityContinuity", "MediaOutputTarget", "ProductionLineage", "ProductionPackageParent",
+    "ProductionPackageSpec", "ProductionScene", "QAExpectation", "RightsAttribution",
+    "SceneTransition", "ScriptSegment", "package_identity", "revise_production_package",
+    "run_creative_production",
 ]

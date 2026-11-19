@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .profile import ExecutorSelection, SelectionError
 from .model_defaults import resolve_model, observe_result
-from .runner import execute_attempt, DEFAULT_MAX_REPAIR_ROUNDS, MAX_REPAIR_ROUNDS, DEFAULT_ACTION_TIMEOUT_SECONDS
+from .runner import execute_attempt, DEFAULT_MAX_REPAIR_ROUNDS, MAX_REPAIR_ROUNDS, DEFAULT_ACTION_TIMEOUT_SECONDS, DEFAULT_VERIFY_TIMEOUT_SECONDS
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -29,12 +29,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-path", action="append", default=[],
                         help="Allow this file or directory path (repeatable; repository-relative)")
     parser.add_argument("--timeout-seconds", type=int, default=7200)
-    parser.add_argument("--verify-timeout-seconds", type=int, default=1800)
+    parser.add_argument("--verify-timeout-seconds", type=int, default=DEFAULT_VERIFY_TIMEOUT_SECONDS)
     parser.add_argument("--max-repair-rounds", type=int, choices=range(MAX_REPAIR_ROUNDS + 1),
                         default=DEFAULT_MAX_REPAIR_ROUNDS,
                         help="Same-profile repairs after determinate pytest failure (0 disables; default: 2)")
     parser.add_argument("--action-timeout-seconds", type=int, default=DEFAULT_ACTION_TIMEOUT_SECONDS,
-                        help="Total EF01 budget shared by all invocations and verifies (default: 7200)")
+                        help="Total EF01 budget shared by all invocations and verifies (default: 12600)")
     parser.add_argument("--codex-bin", default="codex")
     parser.add_argument("--antigravity-bin", default="agy")
     parser.add_argument("--git-bin", default=None, help="Direct Git executable; default: git on PATH")

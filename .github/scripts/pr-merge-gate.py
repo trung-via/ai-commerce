@@ -13,6 +13,7 @@ import ast
 import base64
 import binascii
 import hashlib
+import io
 import json
 import os
 import re
@@ -20,6 +21,8 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -728,6 +731,348 @@ def _artifacts_in_attempt(proof: object, *, started: str,
     return {"artifacts": selected}
 
 
+EF02_MARKER = "\n\nEF02-CANDIDATE-EVIDENCE-V1\n"
+EF02_SOURCE_WORKFLOWS = {
+    ".github/workflows/issue-ingress.yml",
+    ".github/workflows/ef02-batch.yml",
+}
+
+
+def _ef02_proof_trace(stage: str) -> None:
+    """Emit bounded diagnostic stages, never URLs, bearer tokens or artifact data."""
+    # Old EF02 candidate branches carry their historical review workflow YAML;
+    # that event can lack the new EF02_PROOF_TRACE env despite checkout of the
+    # current protected-main script. Default to safe stage-only diagnostics.
+    if os.environ.get("EF02_PROOF_TRACE", "1") == "1":
+        print("EF02_ORIGINAL_PROOF_STAGE=" + stage, flush=True)
+
+
+def _ef02_verified_junit_closure(archive: zipfile.ZipFile,
+                                 hashes: dict[str, str],
+                                 required_tests: set[str]) -> bool:
+    """Prove registered consumers from original hashed Windows MT-01 JUnit.
+
+    EF01 may run a focused verification.argv plus a separate registered MT-01
+    owner/consumer closure. The argv alone is not the executed test inventory.
+    Only the run-custodied EF02 ZIP with exact candidate-bound SHA256 hashes
+    can attest the additional Windows cases; no synthetic filename list counts.
+    """
+    expected = {}
+    for key, digest in hashes.items():
+        matched = re.fullmatch(r"mt01_(\d+)_junit", key)
+        if not matched:
+            continue
+        index = int(matched.group(1))
+        if (index in expected or not re.fullmatch(r"[0-9a-f]{64}", str(digest))):
+            return False
+        expected[index] = digest
+    if not 1 <= len(expected) <= 100:
+        return False
+    actual = {}
+    for name in archive.namelist():
+        matched = re.fullmatch(r".+/ef01/mt01\.(\d+)\.junit\.xml", name)
+        if not matched:
+            continue
+        index = int(matched.group(1))
+        if index in actual:
+            return False
+        actual[index] = name
+    if set(actual) != set(expected):
+        return False
+    required_modules = {p: p.removesuffix(".py").replace("/", ".")
+                        for p in required_tests}
+    observed_pass = set()
+    try:
+        for index, name in actual.items():
+            if archive.getinfo(name).file_size > 2 * 1024 * 1024:
+                return False
+            raw = archive.read(name)
+            if hashlib.sha256(raw).hexdigest() != expected[index]:
+                return False
+            root = ET.fromstring(raw)
+            if root.tag not in ("testsuites", "testsuite"):
+                return False
+            suites = (root,) if root.tag == "testsuite" else root.findall("testsuite")
+            if not suites or any(s.get("failures") != "0" or s.get("errors") != "0"
+                                 for s in suites):
+                return False
+            for case in root.iter("testcase"):
+                if any(child.tag in ("failure", "error") for child in case):
+                    return False
+                if case.find("skipped") is not None:
+                    continue
+                classname = case.get("classname", "")
+                for path, module in required_modules.items():
+                    if classname == module or classname.startswith(module + "."):
+                        observed_pass.add(path)
+    except (ET.ParseError, KeyError, ValueError, OSError, RuntimeError):
+        return False
+    return required_tests <= observed_pass
+
+
+def verified_ef02_candidate(api: Callable[[str], Any], repository: str,
+                            head: str, changed_files: object) -> bool:
+    """Reuse a genuine EF02 Windows PASS on unchanged candidate bytes.
+
+    This is independent of candidate-supplied CI flags. A later edited or
+    rebased candidate, missing owner/consumer coverage, failed/expired run or
+    incomplete artifact MUST go through regular PR CI. Only protected-main
+    code calls this function. A canonical independent Brain PASS is separate.
+    """
+    _ef02_proof_trace("START")
+    if (not SHA.fullmatch(head) or not isinstance(changed_files, list)
+            or not 1 <= len(changed_files) < 100
+            or not callable(getattr(api, "read_artifact", None))):
+        _ef02_proof_trace("INVALID_INPUT")
+        return False
+    base = f"/repos/{repository}"
+    try:
+        paths = [item["filename"] for item in changed_files]
+        if (any(not isinstance(item, dict) or item.get("status") not in
+                ("added", "modified") for item in changed_files)
+                or len(paths) != len(set(paths))
+                or any(not isinstance(p, str) or p.startswith(".github/")
+                       or ".." in p.split("/") for p in paths)):
+            return False
+        coverage = reviewed_coverage_for_changed_files(changed_files)
+        if coverage is None:
+            _ef02_proof_trace("UNREVIEWED_SCOPE")
+            return False
+        _, required_tests = coverage
+        _ef02_proof_trace("SCOPE_AND_COVERAGE_VERIFIED")
+        commit = api(f"{base}/git/commits/{head}")
+        if not isinstance(commit, dict) or commit.get("sha") != head:
+            return False
+        message = commit.get("message")
+        if not isinstance(message, str) or message.count(EF02_MARKER) != 1:
+            return False
+        title, payload = message.split(EF02_MARKER)
+        evidence = json.loads(payload)
+        if (not isinstance(evidence, dict) or
+                title != "EF02 candidate attempt " + str(evidence.get("attempt_id")) or
+                payload != json.dumps(evidence, sort_keys=True, separators=(",", ":"),
+                                      ensure_ascii=True, allow_nan=False) or
+                evidence.get("version") != 1 or evidence.get("status") != "CANDIDATE_READY" or
+                evidence.get("scope_valid") is not True or
+                evidence.get("review_required") is not False or
+                evidence.get("out_of_scope_files") != [] or
+                evidence.get("changed_files") != sorted(paths) or
+                not set(paths) <= set(evidence.get("allowed_paths", [])) or
+                set(evidence.get("candidate_file_sha256", {})) != set(paths)):
+            return False
+        parent = evidence.get("effective_source_sha")
+        if (not isinstance(parent, str) or not SHA.fullmatch(parent)
+                or [p.get("sha") for p in commit.get("parents", [])] != [parent]):
+            return False
+        verify = evidence.get("verification")
+        origin = evidence.get("provenance")
+        if not isinstance(verify, dict) or not isinstance(origin, dict):
+            return False
+        argv = verify.get("argv")
+        if (verify.get("status") != "BUILD_VERIFIED_FOR_SCOPE" or
+                verify.get("exit_code") != 0 or
+                not isinstance(argv, list) or
+                not all(isinstance(t, str) for t in argv) or
+                not isinstance(verify.get("evidence_sha256"), dict) or
+                not verify["evidence_sha256"] or
+                not isinstance(verify.get("report_sha256"), str) or
+                not re.fullmatch(r"[0-9a-f]{64}", verify["report_sha256"])):
+            return False
+        _ef02_proof_trace("COMMIT_AND_VERIFICATION_VERIFIED")
+        run_id = int(origin.get("run_id", ""))
+        run_attempt = int(origin.get("run_attempt", ""))
+        if not 1 <= run_id or not 1 <= run_attempt <= 100:
+            return False
+        # Verify each changed blob directly from GitHub; a no-change branch
+        # rewrite or synthetic commit-message PASS is not sufficient.
+        for path in paths:
+            item = api(f"{base}/contents/{urllib.parse.quote(path, safe='/')}?ref={head}")
+            if (not isinstance(item, dict) or item.get("encoding") != "base64"
+                    or not isinstance(item.get("content"), str)):
+                return False
+            raw = base64.b64decode(item["content"], validate=False)
+            if (len(raw) > 2 * 1024 * 1024 or
+                    hashlib.sha256(raw).hexdigest() != evidence["candidate_file_sha256"][path]):
+                return False
+        _ef02_proof_trace("ALL_SOURCE_HASHES_VERIFIED")
+        run = api(f"{base}/actions/runs/{run_id}")
+        if (not isinstance(run, dict) or run.get("id") != run_id or
+                run.get("run_attempt") != run_attempt or
+                run.get("path") not in EF02_SOURCE_WORKFLOWS or
+                run.get("event") not in ("issues", "workflow_dispatch") or
+                run.get("head_sha") != evidence.get("source_sha") or
+                run.get("actor", {}).get("login") != repository.split("/")[0] or
+                run.get("status") != "completed" or run.get("conclusion") != "success"):
+            return False
+        jobs = api(f"{base}/actions/runs/{run_id}/attempts/{run_attempt}/jobs?per_page=100")
+        if not isinstance(jobs, dict) or not isinstance(jobs.get("jobs"), list):
+            return False
+        executors = [j for j in jobs["jobs"] if isinstance(j, dict)
+                     and j.get("name") in ("ef02 / execute", "execute")]
+        if len(executors) != 1 or executors[0].get("conclusion") != "success":
+            return False
+        steps = {s.get("name"): s.get("conclusion")
+                 for s in executors[0].get("steps", []) if isinstance(s, dict)}
+        if (steps.get("Execute bounded concurrent EF01 jobs") != "success" or
+                steps.get("Preserve all attempt evidence even when actions fail") != "success"):
+            return False
+        _ef02_proof_trace("ORIGINAL_WINDOWS_RUN_AND_JOB_VERIFIED")
+        listed = api(f"{base}/actions/runs/{run_id}/artifacts?per_page=100")
+        if not isinstance(listed, dict) or not isinstance(listed.get("artifacts"), list):
+            return False
+        matches = [a for a in listed["artifacts"] if isinstance(a, dict)
+                   and a.get("name") == f"ef02-results-{run_id}-{run_attempt}"]
+        if len(matches) != 1:
+            return False
+        artifact = matches[0]
+        custody = artifact.get("workflow_run")
+        if (artifact.get("expired") is not False or
+                type(artifact.get("id")) is not int or
+                not isinstance(custody, dict) or
+                custody.get("id") != run_id or
+                custody.get("head_sha") != evidence["source_sha"]):
+            return False
+        _ef02_proof_trace("ARTIFACT_CUSTODY_VERIFIED")
+        data = api.read_artifact(artifact["id"])
+        _ef02_proof_trace("ARTIFACT_ZIP_DOWNLOADED")
+        if not isinstance(data, bytes) or len(data) > 24 * 1024 * 1024:
+            return False
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            names = [n for n in archive.namelist() if n.endswith("/batch_result.json")]
+            if len(names) != 1 or archive.getinfo(names[0]).file_size > 2 * 1024 * 1024:
+                return False
+            report = json.loads(archive.read(names[0]))
+            if not set(required_tests) <= set(argv):
+                if not _ef02_verified_junit_closure(
+                        archive, verify["evidence_sha256"], set(required_tests)):
+                    _ef02_proof_trace("REQUIRED_CONSUMER_JUNIT_UNPROVEN")
+                    return False
+                _ef02_proof_trace("REQUIRED_CONSUMER_JUNIT_VERIFIED")
+        if (not isinstance(report, dict) or report.get("status") != "COMPLETE" or
+                str(report.get("github_workflow_run_id")) != str(run_id) or
+                not isinstance(report.get("actions"), list)):
+            return False
+        _ef02_proof_trace("BATCH_REPORT_VERIFIED")
+        matching = [a for a in report["actions"] if isinstance(a, dict) and
+                    a.get("attempt_id") == evidence["attempt_id"] and
+                    a.get("action_id") == evidence["action_id"]]
+        verified = (len(matching) == 1 and matching[0].get("status") == "CANDIDATE_READY"
+                and matching[0].get("candidate_sha") == head
+                and matching[0].get("candidate_evidence") == evidence)
+        _ef02_proof_trace("FINAL_EXACT_EVIDENCE_MATCH" if verified else "FINAL_EVIDENCE_MISMATCH")
+        return verified
+    except urllib.error.HTTPError as exc:
+        _ef02_proof_trace("GITHUB_HTTP_" + str(exc.code))
+        return False
+    except (KeyError, ValueError, TypeError, AttributeError, OSError, OverflowError,
+            binascii.Error, zipfile.BadZipFile, urllib.error.URLError) as exc:
+        _ef02_proof_trace("EVIDENCE_ERROR_" + type(exc).__name__)
+        return False
+
+
+def noninterfering_main_advance(api: Callable[[str], Any], base: str,
+                                  pinned_base: str, current_main: str,
+                                  pr_files: object) -> bool:
+    """Reuse trusted CI only when current main has no affected owner/consumer drift.
+
+    Changed tests, CI controls, dependencies, shared consumer tests, unowned
+    source, divergent history and incomplete compare pages all require a new
+    exact-tree Windows run. This never substitutes a passing CI run or artifact.
+    """
+    if (not SHA.fullmatch(pinned_base) or not SHA.fullmatch(current_main) or
+            pinned_base == current_main):
+        return False
+    original = reviewed_coverage_for_changed_files(pr_files)
+    if original is None:
+        return False
+    compare = api(f"{base}/compare/{pinned_base}...{current_main}")
+    if not isinstance(compare, dict):
+        return False
+    merge_base = compare.get("merge_base_commit")
+    if (compare.get("status") != "ahead" or
+            not isinstance(merge_base, dict) or
+            merge_base.get("sha") != pinned_base or
+            type(compare.get("ahead_by")) is not int or
+            not 1 <= compare["ahead_by"] <= 20 or
+            compare.get("behind_by") != 0 or
+            type(compare.get("total_commits")) is not int or
+            compare["total_commits"] != compare["ahead_by"]):
+        return False
+    drift_files = compare.get("files")
+    if not isinstance(drift_files, list) or not drift_files or len(drift_files) >= 100:
+        return False
+    for item in drift_files:
+        if not isinstance(item, dict) or item.get("status") not in ("added", "modified", "removed"):
+            return False
+        path = item.get("filename")
+        if not isinstance(path, str):
+            return False
+        # Even an unrelated new test can change the required suite.
+        if (path.startswith(("tests/", ".github/", "config/", "contracts/",
+                             "scripts/")) or "/tests/" in path or
+                path.endswith((".test.cjs", ".spec.ts", ".spec.js")) or path in
+                ("pyproject.toml", "requirements.txt", "setup.py", "setup.cfg",
+                 "tox.ini", "pytest.ini") or
+                path.startswith(("src/ai_commerce/engineering/",
+                                 "src/ai_commerce/remote/"))):
+            return False
+    advanced = reviewed_coverage_for_changed_files(drift_files)
+    if advanced is None:
+        return False
+    old_paths, old_tests = map(set, original)
+    other_paths, other_tests = map(set, advanced)
+    return not (old_paths & other_paths or old_tests & other_tests)
+
+
+EF02_PROOF_CONTROL_DRIFT = frozenset({
+    ".github/scripts/pr-merge-gate.py",
+    ".github/workflows/brain-pass-auto-merge.yml",
+    ".github/workflows/ef02-tests.yml",
+    "tests/test_pr_merge_gate.py",
+})
+
+
+def noninterfering_ef02_proof_control_advance(api: Callable[[str], Any], base: str,
+                                               pinned_base: str, current_main: str,
+                                               pr_files: object) -> bool:
+    """Allow an original EF02 proof across *only* trusted proof-control edits.
+
+    Normal exact-tree CI reuse still rejects all test and control changes.
+    An unchanged EF02 candidate is different: its original Windows execution
+    and candidate bytes are verified independently by the current main oracle.
+    Never accept a source, owner/consumer test, dependency or unknown workflow
+    drift, missing compare evidence, or a divergent main history here.
+    """
+    if (not SHA.fullmatch(pinned_base) or not SHA.fullmatch(current_main)
+            or pinned_base == current_main):
+        return False
+    coverage = reviewed_coverage_for_changed_files(pr_files)
+    if coverage is None:
+        return False
+    changed_paths, required_tests = map(set, coverage)
+    compare = api(f"{base}/compare/{pinned_base}...{current_main}")
+    if not isinstance(compare, dict):
+        return False
+    merge_base = compare.get("merge_base_commit")
+    if (compare.get("status") != "ahead" or
+            not isinstance(merge_base, dict) or
+            merge_base.get("sha") != pinned_base or
+            type(compare.get("ahead_by")) is not int or
+            not 1 <= compare["ahead_by"] <= 20 or
+            compare.get("behind_by") != 0 or
+            type(compare.get("total_commits")) is not int or
+            compare["total_commits"] != compare["ahead_by"]):
+        return False
+    files = compare.get("files")
+    if not isinstance(files, list) or not 1 <= len(files) < 100:
+        return False
+    paths = [item.get("filename") for item in files if isinstance(item, dict)]
+    return (len(paths) == len(files) == len(set(paths)) and
+            all(item.get("status") == "modified" for item in files) and
+            set(paths) <= EF02_PROOF_CONTROL_DRIFT and
+            not (set(paths) & (changed_paths | required_tests)))
+
+
 def verify_one(api: Callable[[str], Any], repository: str, number: int,
                *, event_head: str | None = None) -> Verdict:
     """Read-only preflight. All missing or stale evidence holds the merge."""
@@ -758,11 +1103,41 @@ def verify_one(api: Callable[[str], Any], repository: str, number: int,
     if (approval["pr"], approval["head"], approval["base"]) != (number, head, base_sha):
         return Verdict("HOLD", "BRAIN_PASS_BOUND_TO_DIFFERENT_REVISION", number, head)
 
+    original_candidate = str(pr.get("head", {}).get("ref", "")).startswith(
+        "ef02/candidate/")
+    candidate_files = None
+    original_proof_after_control_advance = False
     live = api(f"{base}/branches/main")
-    if live.get("commit", {}).get("sha") != base_sha:
-        return Verdict("WAIT_REBASE", "BASE_MAIN_CHANGED", number, head)
+    live_sha = live.get("commit", {}).get("sha")
+    if live_sha != base_sha:
+        candidate_files = api(f"{base}/pulls/{number}/files?per_page=100")
+        if not noninterfering_main_advance(api, base, base_sha, live_sha,
+                                            candidate_files):
+            if not original_candidate:
+                return Verdict("WAIT_REBASE", "BASE_MAIN_CHANGED", number, head)
+            if not noninterfering_ef02_proof_control_advance(
+                    api, base, base_sha, live_sha, candidate_files):
+                _ef02_proof_trace("MAIN_CONTROL_DRIFT_REJECTED")
+                return Verdict("WAIT_REBASE", "BASE_MAIN_CHANGED", number, head)
+            _ef02_proof_trace("MAIN_CONTROL_DRIFT_VERIFIED")
+            if not verified_ef02_candidate(api, repository, head,
+                                           candidate_files):
+                _ef02_proof_trace("MAIN_CONTROL_ORIGINAL_PROOF_REJECTED")
+                return Verdict("WAIT_REBASE", "BASE_MAIN_CHANGED", number, head)
+            original_proof_after_control_advance = True
     if pr.get("mergeable") is not True:
         return Verdict("WAIT_MERGEABILITY", "PR_NOT_MERGEABLE", number, head)
+
+    # An exact, already-verified EF02 Windows candidate needs independent
+    # Brain review and this source/provenance oracle, NOT another pytest/Node
+    # execution. A changed candidate or inadequate owner/consumer closure
+    # simply falls through to ordinary PR CI.
+    if original_candidate:
+        if candidate_files is None:
+            candidate_files = api(f"{base}/pulls/{number}/files?per_page=100")
+        if (original_proof_after_control_advance or
+                verified_ef02_candidate(api, repository, head, candidate_files)):
+            return Verdict("READY_FOR_MERGE", "EF02_EXACT_SOURCE_PROOF_REUSED", number, head)
 
     q = urllib.parse.urlencode({"event": "pull_request", "head_sha": head, "per_page": 100})
     obj = api(f"{base}/actions/runs?{q}")
@@ -890,7 +1265,7 @@ class GitHubAPI:
 
         opener = urllib.request.build_opener(NoFollow)
         try:
-            with opener.open(req, timeout=18) as response:
+            with opener.open(req, timeout=30) as response:
                 # An unexpected direct body is not proof of an artifact ZIP.
                 raise ValueError("ARTIFACT_SIGNED_REDIRECT_MISSING")
         except urllib.error.HTTPError as exc:
@@ -915,7 +1290,7 @@ class GitHubAPI:
         signed_req = urllib.request.Request(
             signed, headers={"Accept": "application/zip",
                              "User-Agent": "AI-Commerce-Merge-Gate/1.0"})
-        with urllib.request.urlopen(signed_req, timeout=18) as response:
+        with urllib.request.urlopen(signed_req, timeout=45) as response:
             content = response.read(24 * 1024 * 1024 + 1)
         if len(content) > 24 * 1024 * 1024:
             raise ValueError("ARTIFACT_TOO_LARGE")
@@ -933,7 +1308,7 @@ class GitHubAPI:
                      "Accept": "application/vnd.github+json",
                      "X-GitHub-Api-Version": "2022-11-28",
                      "Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=12) as response:
+        with urllib.request.urlopen(req, timeout=25) as response:
             return json.load(response)
 
 
@@ -963,6 +1338,28 @@ def candidates(api: Callable, repo: str, event: dict) -> list[tuple[int, str | N
                     (number, head, base)):
             return []
         return [(number, head)]
+    # Main advancement can leave an already-accepted PR waiting indefinitely:
+    # the original CI did not change and no PR review/CI event will fire again.
+    # Wake it without changing the candidate HEAD. verify_one() checks the
+    # authenticated Brain PASS, original completed Windows JUnit/Node/MT01
+    # receipt, exact source, and disjoint owner+consumer paths on updated main.
+    # A failed CI, shared test change or overlapping fix still cannot merge.
+    if event.get("ref") == "refs/heads/main" and isinstance(event.get("after"), str):
+        after = event["after"]
+        if not SHA.fullmatch(after):
+            return []
+        live = api(f"/repos/{repo}/branches/main")
+        if not isinstance(live, dict) or live.get("commit", {}).get("sha") != after:
+            return []
+        prs = api(f"/repos/{repo}/pulls?state=open&per_page=100")
+        if not isinstance(prs, list) or len(prs) == 100:
+            return []
+        return [(p["number"], p["head"]["sha"]) for p in prs if (
+            isinstance(p, dict) and type(p.get("number")) is int and
+            p.get("state") == "open" and
+            isinstance(p.get("head"), dict) and
+            isinstance(p["head"].get("sha"), str) and SHA.fullmatch(p["head"]["sha"]) and
+            isinstance(p.get("base"), dict) and p["base"].get("ref") == "main")]
     # Ordinary Issue comments are intentionally NOT a trigger. GitHub would
     # otherwise create one Skipped workflow run per EF02/HostOps comment.
     run = event.get("workflow_run")
@@ -991,8 +1388,28 @@ def process(api: GitHubAPI, repository: str, event: dict) -> list[dict]:
                 # persists through WAIT_CI -> PASS only for unchanged HEAD/base.
                 fresh = api(f"/repos/{repository}/pulls/{number}")
                 current_main = api(f"/repos/{repository}/branches/main")
+                fresh_base = fresh.get("base", {}).get("sha")
+                current_main_sha = current_main.get("commit", {}).get("sha")
+                safe_main = fresh_base == current_main_sha
+                if not safe_main:
+                    fresh_paths = api(
+                        f"/repos/{repository}/pulls/{number}/files?per_page=100")
+                    safe_main = noninterfering_main_advance(
+                        api, f"/repos/{repository}", fresh_base, current_main_sha,
+                        fresh_paths)
+                    # verify_one has already attested the authentic, unchanged
+                    # EF02 original Windows ZIP and exact candidate bytes.
+                    # Preserve its special control-only main-drift decision in
+                    # the final race guard; all other CI paths remain strict.
+                    if (not safe_main and
+                            decision.reason == "EF02_EXACT_SOURCE_PROOF_REUSED" and
+                            str(fresh.get("head", {}).get("ref", "")).startswith(
+                                "ef02/candidate/")):
+                        safe_main = noninterfering_ef02_proof_control_advance(
+                            api, f"/repos/{repository}", fresh_base,
+                            current_main_sha, fresh_paths)
                 if (fresh.get("head", {}).get("sha") != decision.head or
-                    fresh.get("base", {}).get("sha") != current_main.get("commit", {}).get("sha") or
+                    not safe_main or
                     fresh.get("mergeable") is not True or fresh.get("draft") or
                     fresh.get("state") != "open"):
                     outcome["status"] = "WAIT_RECHECK"
@@ -1031,5 +1448,33 @@ def main() -> int:
     return 0
 
 
+def ef02_reuse_preflight() -> int:
+    """Read-only fast PR CI branch. Missing proof runs normal CI, never PASS."""
+    verified = False
+    try:
+        repo = os.environ["GITHUB_REPOSITORY"]
+        number = int(os.environ["EF02_REUSE_PR_NUMBER"])
+        api = GitHubAPI(repo, os.environ["GH_TOKEN"])
+        if number > 0:
+            pr = api(f"/repos/{repo}/pulls/{number}")
+            head = pr.get("head", {}).get("sha")
+            if str(pr.get("head", {}).get("ref", "")).startswith("ef02/candidate/"):
+                files = api(f"/repos/{repo}/pulls/{number}/files?per_page=100")
+                verified = verified_ef02_candidate(api, repo, head, files)
+    except urllib.error.HTTPError as exc:
+        _ef02_proof_trace("PREFLIGHT_HTTP_" + str(exc.code))
+        verified = False
+    except (KeyError, ValueError, TypeError, OSError, urllib.error.URLError) as exc:
+        _ef02_proof_trace("PREFLIGHT_ERROR_" + type(exc).__name__)
+        verified = False
+    output = os.environ.get("GITHUB_OUTPUT")
+    if output:
+        with open(output, "a", encoding="utf-8") as stream:
+            stream.write("verified=" + str(verified).lower() + "\n")
+    print("EF02_ORIGINAL_WINDOWS_PROOF_REUSED=" + str(verified).lower())
+    return 0
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(ef02_reuse_preflight() if sys.argv[1:] == ["--ef02-reuse-preflight"]
+             else main())

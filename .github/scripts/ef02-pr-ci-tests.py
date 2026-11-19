@@ -376,6 +376,67 @@ def postmerge_preflight() -> int:
     return 0
 
 
+# A fast negative gate for high-fanout foundation changes. The official
+# selected MT-01 suite and its attested JUnit artifact always run after PASS.
+CONTRACT_PREFLIGHT_TESTS = (
+    "tests/test_ef01.py",
+    "tests/test_ef01_repair.py",
+    "tests/test_ef02.py",
+    "tests/test_minimum_test.py",
+)
+CONTRACT_PREFLIGHT_OWNERS = (
+    "src/ai_commerce/engineering/",
+    "src/ai_commerce/remote/worker.py",
+    "src/ai_commerce/remote/validation.py",
+    ".github/scripts/pr-merge-gate.py",
+)
+
+
+def contract_preflight_targets(plan: dict) -> tuple[str, ...]:
+    """Run affected contracts early, before the costly fan-out verification."""
+    if not isinstance(plan, dict):
+        raise ValueError("MT01_PREFLIGHT_PLAN_INVALID")
+    selected, changed = plan.get("selected_tests"), plan.get("changed_paths")
+    if not isinstance(selected, list) or not isinstance(changed, list):
+        raise ValueError("MT01_PREFLIGHT_PLAN_PATHS_INVALID")
+    if any(not isinstance(p, str) or not (
+               p.startswith("tests/") or
+               (p.startswith("src/ai_commerce/") and "/tests/" in p)) or
+           not p.endswith(".py") or ".." in p.split("/") or "\\" in p
+           for p in selected):
+        raise ValueError("MT01_PREFLIGHT_SELECTED_PATH_INVALID")
+    if any(not isinstance(p, str) or p.startswith("/") or ".." in p.split("/")
+           for p in changed):
+        raise ValueError("MT01_PREFLIGHT_CHANGED_PATH_INVALID")
+    available = set(selected)
+    touched = set(changed)
+    focus = []
+    if any(p.startswith(CONTRACT_PREFLIGHT_OWNERS) for p in touched):
+        focus.extend(p for p in CONTRACT_PREFLIGHT_TESTS if p in available)
+    focus.extend(p for p in selected if p in touched and p not in focus)
+    if not focus:
+        focus.extend(selected[:4])
+    return tuple(focus[:8])
+
+
+def fast_contract_preflight() -> int:
+    """Fail early on broken contracts; never replace MT-01 full proof."""
+    path = ROOT / ".local" / "mt01-v21" / "plan.json"
+    try:
+        plan = json.loads(path.read_text(encoding="utf-8"))
+        targets = contract_preflight_targets(plan)
+    except (OSError, ValueError, TypeError) as exc:
+        print("MT01_PREFLIGHT_HOLD=" + type(exc).__name__, flush=True)
+        return 3
+    if not targets:
+        print("MT01_PREFLIGHT_HOLD=NO_SELECTED_TEST", flush=True)
+        return 3
+    print("MT01_PREFLIGHT_TARGETS=" + json.dumps(targets), flush=True)
+    argv = [sys.executable, "-m", "pytest", *targets, "-q", "-n", "4",
+            "--dist", "loadfile"]
+    return subprocess.call(argv, cwd=ROOT)
+
+
 def main_v1() -> int:
     files, mode, reasons, groups = choose(
         ROOT, event=os.environ.get("MT01_CI_EVENT", ""),
@@ -562,4 +623,8 @@ def main() -> int:
     return 0
 
 if __name__ == "__main__":
-    raise SystemExit(postmerge_preflight() if sys.argv[1:] == ["--reuse-preflight"] else main())
+    raise SystemExit(
+        postmerge_preflight() if sys.argv[1:] == ["--reuse-preflight"] else
+        fast_contract_preflight() if sys.argv[1:] == ["--fast-contract-preflight"] else
+        main()
+    )

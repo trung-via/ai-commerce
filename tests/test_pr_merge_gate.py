@@ -175,8 +175,338 @@ class FakeGitHub:
             ]
             return {"artifacts": artifacts if self.receipt_ok else []}
         if path == f"/repos/{self.repo}/pulls?state=open&per_page=100":
-            return [{"number": self.pr, "head": {"sha": self.head}}]
+            return [{"number": self.pr, "state": "open",
+                     "base": {"ref": "main"}, "head": {"sha": self.head}}]
         raise AssertionError(f"Unexpected {method} {path}")
+
+
+class EF02OriginalProofGitHub(FakeGitHub):
+    """A source-bound, owner-authenticated, real-run-shaped EF02 fixture."""
+
+    def __init__(self, gate, *, altered_bytes=False, bad_artifact=False):
+        super().__init__(gate, ci="in_progress")
+        import hashlib
+        self.contents = b"source already tested by EF02"
+        self.altered_bytes = altered_bytes
+        self.bad_artifact = bad_artifact
+        self.ci_hits = 0
+        self.evidence = {
+            "version": 1, "status": "CANDIDATE_READY",
+            "scope_valid": True, "review_required": False,
+            "out_of_scope_files": [],
+            "changed_files": ["src/ai_commerce/product/identity.py"],
+            "allowed_paths": ["src/ai_commerce/product/identity.py"],
+            "candidate_file_sha256": {
+                "src/ai_commerce/product/identity.py":
+                    hashlib.sha256(self.contents).hexdigest()},
+            "effective_source_sha": self.base, "source_sha": self.base,
+            "action_id": "EXACT_SOURCE", "attempt_id": "exact-01",
+            "verification": {
+                "status": "BUILD_VERIFIED_FOR_SCOPE", "exit_code": 0,
+                "argv": ["python", "-m", "pytest", "tests/test_minimum_test.py", "-q"],
+                "evidence_sha256": {"mt01_0_evidence": "f" * 64},
+                "report_sha256": "e" * 64,
+            },
+            "provenance": {"run_id": "401", "run_attempt": "1"},
+        }
+
+    def read_artifact(self, artifact_id):
+        import io
+        import json
+        import zipfile
+        if artifact_id != 501 or self.bad_artifact:
+            return b"broken proof"
+        report = {
+            "status": "COMPLETE", "github_workflow_run_id": "401",
+            "actions": [{
+                "action_id": "EXACT_SOURCE", "attempt_id": "exact-01",
+                "status": "CANDIDATE_READY", "candidate_sha": self.head,
+                "candidate_evidence": self.evidence,
+            }],
+        }
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("batch-id/batch_result.json", json.dumps(report))
+        return buf.getvalue()
+
+    def __call__(self, path, method="GET", body=None):
+        import base64
+        import json
+        prefix = f"/repos/{self.repo}"
+        if path == f"{prefix}/pulls/{self.pr}":
+            obj = super().__call__(path, method, body)
+            obj["head"]["ref"] = "ef02/candidate/exact-01"
+            return obj
+        if path == f"{prefix}/git/commits/{self.head}":
+            return {
+                "sha": self.head, "parents": [{"sha": self.base}],
+                "message": "EF02 candidate attempt exact-01" + self.g.EF02_MARKER
+                           + json.dumps(self.evidence, sort_keys=True,
+                                        separators=(",", ":")),
+            }
+        if path == f"{prefix}/contents/src/ai_commerce/product/identity.py?ref={self.head}":
+            raw = self.contents + (b" extra" if self.altered_bytes else b"")
+            return {"encoding": "base64", "content": base64.b64encode(raw).decode()}
+        if path == f"{prefix}/actions/runs/401":
+            return {
+                "id": 401, "run_attempt": 1,
+                "path": ".github/workflows/issue-ingress.yml",
+                "event": "issues", "head_sha": self.base,
+                "actor": {"login": "trung-via"},
+                "status": "completed", "conclusion": "success",
+            }
+        if path == f"{prefix}/actions/runs/401/attempts/1/jobs?per_page=100":
+            return {"jobs": [{
+                "name": "ef02 / execute", "conclusion": "success",
+                "steps": [
+                    {"name": "Execute bounded concurrent EF01 jobs",
+                     "conclusion": "success"},
+                    {"name": "Preserve all attempt evidence even when actions fail",
+                     "conclusion": "success"},
+                ],
+            }]}
+        if path == f"{prefix}/actions/runs/401/artifacts?per_page=100":
+            return {"artifacts": [{
+                "id": 501, "name": "ef02-results-401-1",
+                "expired": False,
+                "workflow_run": {"id": 401, "head_sha": self.base},
+            }]}
+        if path.startswith(f"{prefix}/actions/runs?"):
+            self.ci_hits += 1
+        return super().__call__(path, method, body)
+
+
+class EF02OriginalProofMainAdvance(EF02OriginalProofGitHub):
+    """Original EF02 receipt with independently observed protected-main drift."""
+    live_main = "d" * 40
+
+    def __init__(self, gate, *, drift_paths, comparison_ok=True,
+                 altered_bytes=False):
+        super().__init__(gate, altered_bytes=altered_bytes)
+        self.drift_paths = drift_paths
+        self.comparison_ok = comparison_ok
+
+    def __call__(self, path, method="GET", body=None):
+        prefix = f"/repos/{self.repo}"
+        if path == f"{prefix}/branches/main":
+            return {"commit": {"sha": self.live_main}}
+        if path == f"{prefix}/compare/{self.base}...{self.live_main}":
+            if not self.comparison_ok:
+                return {"status": "diverged", "files": []}
+            return {
+                # A GitHub merge commit typically advances by two commits:
+                # the PR head and its merge commit.
+                "status": "ahead", "ahead_by": 2, "behind_by": 0,
+                "total_commits": 2,
+                "merge_base_commit": {"sha": self.base},
+                "files": [{"filename": filename, "status": "modified"}
+                          for filename in self.drift_paths],
+            }
+        return super().__call__(path, method, body)
+
+
+def test_ef02_original_proof_merges_across_disjoint_trusted_control_update(gate):
+    """Main's proof-gate repair cannot force a second EF02 Windows execution."""
+    api = EF02OriginalProofMainAdvance(gate, drift_paths=[
+        ".github/scripts/pr-merge-gate.py",
+        ".github/workflows/brain-pass-auto-merge.yml",
+        ".github/workflows/ef02-tests.yml",
+        "tests/test_pr_merge_gate.py",
+    ])
+    verdict = gate.verify_one(api, api.repo, api.pr)
+    assert verdict.status == "READY_FOR_MERGE"
+    assert verdict.reason == "EF02_EXACT_SOURCE_PROOF_REUSED"
+    assert api.ci_hits == 0
+    assert gate.process(api, api.repo, _approval_event(gate))[0]["status"] == "MERGED"
+    assert api.writes == [{"sha": api.head, "merge_method": "merge"}]
+
+
+def test_ef02_proof_stage_trace_survives_historical_workflow_env(
+    gate, monkeypatch, capsys,
+):
+    # The pull_request_review workflow is read from the old candidate ref,
+    # which cannot be assumed to define EF02_PROOF_TRACE in its step env.
+    monkeypatch.delenv("EF02_PROOF_TRACE", raising=False)
+    api = EF02OriginalProofMainAdvance(
+        gate, drift_paths=[".github/scripts/pr-merge-gate.py"])
+    assert gate.verify_one(api, api.repo, api.pr).status == "READY_FOR_MERGE"
+    output = capsys.readouterr().out
+    assert "EF02_ORIGINAL_PROOF_STAGE=MAIN_CONTROL_DRIFT_VERIFIED" in output
+    assert "EF02_ORIGINAL_PROOF_STAGE=FINAL_EXACT_EVIDENCE_MATCH" in output
+    assert "Bearer " not in output
+    monkeypatch.setenv("EF02_PROOF_TRACE", "0")
+    gate.verify_one(api, api.repo, api.pr)
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("unsafe_drift", [
+    ["tests/test_minimum_test.py"],
+    ["src/ai_commerce/product/identity.py"],
+    [".github/workflows/issue-ingress.yml"],
+    ["pyproject.toml"],
+    [".github/scripts/pr-merge-gate.py", "tests/test_minimum_test.py"],
+])
+def test_ef02_proof_main_advance_refuses_source_and_consumer_drift(
+    gate, unsafe_drift,
+):
+    api = EF02OriginalProofMainAdvance(gate, drift_paths=unsafe_drift)
+    verdict = gate.verify_one(api, api.repo, api.pr)
+    assert (verdict.status, verdict.reason) == ("WAIT_REBASE", "BASE_MAIN_CHANGED")
+    assert api.ci_hits == 0
+    assert api.writes == []
+
+
+def test_ef02_proof_main_advance_refuses_invalid_bytes_or_divergent_history(gate):
+    control = [".github/workflows/ef02-tests.yml"]
+    bad_bytes = EF02OriginalProofMainAdvance(
+        gate, drift_paths=control, altered_bytes=True)
+    assert gate.verify_one(bad_bytes, bad_bytes.repo, bad_bytes.pr).status == "WAIT_REBASE"
+    assert bad_bytes.ci_hits == 0
+    divergent = EF02OriginalProofMainAdvance(
+        gate, drift_paths=control, comparison_ok=False)
+    assert gate.verify_one(divergent, divergent.repo, divergent.pr).status == "WAIT_REBASE"
+    assert divergent.writes == []
+
+
+class EF02JunitConsumerProof(EF02OriginalProofGitHub):
+    """Focused argv omits consumers, but real hashed Windows JUnit covers them."""
+
+    def __init__(self, gate, *, mutation=None):
+        super().__init__(gate)
+        import hashlib
+        cases = ['<testcase classname="tests.test_minimum_test" name="test_owner"/>']
+        if mutation != "missing_consumer":
+            ending = '<failure message="bad"/>' if mutation == "failed_consumer" else ""
+            cases.append('<testcase classname="tests.test_consumer" name="test_consumer">'
+                         + ending + '</testcase>')
+        failures = 1 if mutation == "failed_consumer" else 0
+        self.junit = (f'<testsuites><testsuite tests="{len(cases)}" failures="{failures}" '
+                      f'errors="0">{"".join(cases)}</testsuite></testsuites>').encode()
+        digest = hashlib.sha256(self.junit).hexdigest()
+        self.evidence["verification"]["evidence_sha256"]["mt01_0_junit"] = (
+            "a" * 64 if mutation == "bad_hash" else digest)
+        self.mutation = mutation
+
+    def read_artifact(self, artifact_id):
+        import io
+        import zipfile
+        original = super().read_artifact(artifact_id)
+        output = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(original)) as old:
+            with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as new:
+                for name in old.namelist():
+                    new.writestr(name, old.read(name))
+                if self.mutation != "missing_xml":
+                    new.writestr("batch/ef01/mt01.0.junit.xml", self.junit)
+        return output.getvalue()
+
+
+@pytest.mark.parametrize(("mutation", "expected"), [
+    (None, "READY_FOR_MERGE"),
+    ("bad_hash", "WAIT_CI"),
+    ("missing_consumer", "WAIT_CI"),
+    ("failed_consumer", "WAIT_CI"),
+    ("missing_xml", "WAIT_CI"),
+])
+def test_ef02_hashed_original_junit_closes_consumer_tests_missing_from_argv(
+    gate, monkeypatch, mutation, expected,
+):
+    monkeypatch.setattr(gate, "reviewed_coverage_for_changed_files",
+                        lambda files: (
+                            ("src/ai_commerce/product/identity.py",),
+                            ("tests/test_minimum_test.py", "tests/test_consumer.py")))
+    api = EF02JunitConsumerProof(gate, mutation=mutation)
+    verdict = gate.verify_one(api, api.repo, api.pr)
+    assert verdict.status == expected
+    assert api.ci_hits == (0 if expected == "READY_FOR_MERGE" else 1)
+    assert api.writes == []
+
+
+def test_ef02_exact_proof_brain_merges_without_second_ci(gate):
+    api = EF02OriginalProofGitHub(gate)
+    decision = gate.verify_one(api, api.repo, api.pr)
+    assert decision.status == "READY_FOR_MERGE"
+    assert decision.reason == "EF02_EXACT_SOURCE_PROOF_REUSED"
+    assert api.ci_hits == 0
+    outcome = gate.process(api, api.repo, {
+        "pull_request": {
+            "number": api.pr, "head": {"sha": api.head},
+            "base": {"sha": api.base}, "state": "open",
+        },
+        "action": "submitted",
+        "review": {
+            "state": "commented", "user": {"login": "trung-via"},
+            "author_association": "OWNER", "commit_id": api.head,
+            "body": gate.approval_text(api.pr, api.head, api.base),
+        },
+    })
+    assert outcome[0]["status"] == "MERGED"
+    assert api.ci_hits == 0
+
+
+@pytest.mark.parametrize("failure", ("bytes", "artifact", "coverage"))
+def test_ef02_changed_or_incomplete_proof_falls_back_to_ci(gate, monkeypatch, failure):
+    api = EF02OriginalProofGitHub(
+        gate, altered_bytes=failure == "bytes", bad_artifact=failure == "artifact")
+    if failure == "coverage":
+        monkeypatch.setattr(gate, "reviewed_coverage_for_changed_files",
+                            lambda files: (
+                                ("src/ai_commerce/product/identity.py",),
+                                ("tests/test_minimum_test.py", "tests/test_consumer.py")))
+    decision = gate.verify_one(api, api.repo, api.pr)
+    assert decision.status == "WAIT_CI"
+    assert api.ci_hits == 1
+    assert not api.writes
+
+
+def test_ef02_original_proof_private_pr_permissions_and_trace_wiring():
+    workflow = (ROOT / ".github/workflows/ef02-tests.yml").read_text(encoding="utf-8")
+    permissions = workflow.split("permissions:\n", 1)[1].split("concurrency:\n", 1)[0]
+    assert "  contents: read" in permissions
+    assert "  actions: read" in permissions
+    # GitHub's private PR changed-files REST endpoint requires Pull requests: read.
+    assert "  pull-requests: read" in permissions
+    assert "EF02_PROOF_TRACE: '1'" in workflow
+    trusted = (ROOT / ".github/workflows/brain-pass-auto-merge.yml").read_text(encoding="utf-8")
+    assert "EF02_PROOF_TRACE: '1'" in trusted
+
+
+def test_ef02_original_proof_trace_records_real_stage_without_secret(
+    gate, monkeypatch, capsys,
+):
+    monkeypatch.setenv("EF02_PROOF_TRACE", "1")
+    api = EF02OriginalProofGitHub(gate)
+    verdict = gate.verify_one(api, api.repo, api.pr)
+    assert verdict.status == "READY_FOR_MERGE"
+    output = capsys.readouterr().out
+    assert "EF02_ORIGINAL_PROOF_STAGE=ALL_SOURCE_HASHES_VERIFIED" in output
+    assert "EF02_ORIGINAL_PROOF_STAGE=ARTIFACT_ZIP_DOWNLOADED" in output
+    assert "EF02_ORIGINAL_PROOF_STAGE=FINAL_EXACT_EVIDENCE_MATCH" in output
+    assert "Bearer " not in output
+
+
+def test_ef02_original_proof_trace_fails_closed_with_sanitized_http_code(
+    gate, monkeypatch, capsys,
+):
+    import urllib.error
+
+    class DeniedArtifactMetadata(EF02OriginalProofGitHub):
+        def __call__(self, path, method="GET", body=None):
+            if "/actions/runs/401/artifacts?" in path:
+                raise urllib.error.HTTPError(
+                    "https://api.github.com/secret", 403, "TOKEN_SHOULD_NOT_LEAK",
+                    None, None,
+                )
+            return super().__call__(path, method, body)
+
+    monkeypatch.setenv("EF02_PROOF_TRACE", "1")
+    api = DeniedArtifactMetadata(gate)
+    verdict = gate.verify_one(api, api.repo, api.pr)
+    assert verdict.status == "WAIT_CI"
+    output = capsys.readouterr().out
+    assert "EF02_ORIGINAL_PROOF_STAGE=GITHUB_HTTP_403" in output
+    assert "TOKEN_SHOULD_NOT_LEAK" not in output
+    assert "secret" not in output
 
 
 @pytest.mark.parametrize(
@@ -245,6 +575,154 @@ def test_merge_gate_canonical_approval_and_owner_authentication(gate):
     assert gate.parse_approval("AI_COMMERCE_BRAIN_REVIEW_PASS_V1\npr=219") is None
     assert gate.candidates(FakeGitHub(gate), FakeGitHub.repo, _approval_event(gate, False)) == []
     assert gate.candidates(FakeGitHub(gate), FakeGitHub.repo, _approval_event(gate)) == [(219, FakeGitHub.head)]
+
+
+class _MainAdvanceGitHub(FakeGitHub):
+    """A real GitHub ahead compare, preserving immutable old PR CI proof."""
+    live_main = "d" * 40
+
+    def __init__(self, gate, *, drift_path, comparison_ok=True):
+        super().__init__(gate, ci="completed")
+        self.drift_path = drift_path
+        self.comparison_ok = comparison_ok
+
+    def __call__(self, path, method="GET", body=None):
+        base = f"/repos/{self.repo}"
+        if path == f"{base}/branches/main":
+            return {"commit": {"sha": self.live_main}}
+        if path == f"{base}/compare/{self.base}...{self.live_main}":
+            if not self.comparison_ok:
+                return {"status": "diverged", "files": []}
+            return {
+                "status": "ahead", "ahead_by": 1, "behind_by": 0,
+                "total_commits": 1,
+                "merge_base_commit": {"sha": self.base},
+                "files": [{"filename": self.drift_path, "status": "modified"}],
+            }
+        return super().__call__(path, method, body)
+
+
+def _two_independent_owner_groups(gate, monkeypatch, *, shared_tests=False):
+    from ai_commerce.engineering.minimum_test import TestGroup
+
+    other_test = "tests/test_minimum_test.py" if shared_tests else "tests/test_creative_owner.py"
+    monkeypatch.setattr(gate, "approved_groups", lambda: (
+        TestGroup("fixture", ("tests/test_minimum_test.py",), ("fixture.ac",),
+                  ("src/ai_commerce/product/identity.py",)),
+        TestGroup("other", (other_test,), ("other.ac",),
+                  ("src/ai_commerce/creative/independent.py",)),
+    ))
+
+
+
+def test_main_push_automatically_merges_prior_brain_pass_with_reusable_windows_ci(gate, monkeypatch):
+    """A prior PASS is not retested just because an independent PR merged."""
+    _two_independent_owner_groups(gate, monkeypatch)
+    api = _MainAdvanceGitHub(gate, drift_path="src/ai_commerce/creative/independent.py")
+    event = {"ref": "refs/heads/main", "after": api.live_main}
+    result = gate.process(api, api.repo, event)
+    assert result[0]["status"] == "MERGED"
+    assert result[0]["ci_run"] == 200
+    assert api.writes == [{"sha": api.head, "merge_method": "merge"}]
+
+
+def test_main_push_never_bypasses_failed_ci_or_overlapping_main_change(gate, monkeypatch):
+    _two_independent_owner_groups(gate, monkeypatch)
+    event = {"ref": "refs/heads/main", "after": _MainAdvanceGitHub.live_main}
+    failed = _MainAdvanceGitHub(gate, drift_path="src/ai_commerce/creative/independent.py")
+    failed.latest_failed = True
+    assert gate.process(failed, failed.repo, event)[0]["status"] == "WAIT_FIX"
+    assert failed.writes == []
+    overlapping = _MainAdvanceGitHub(gate, drift_path="src/ai_commerce/product/identity.py")
+    assert gate.process(overlapping, overlapping.repo, event)[0]["status"] == "WAIT_REBASE"
+    assert overlapping.writes == []
+
+
+def test_main_push_ignores_stale_or_unrelated_events(gate):
+    api = FakeGitHub(gate, ci="completed")
+    for event in (
+        {"ref": "refs/heads/dev", "after": api.base},
+        {"ref": "refs/heads/main", "after": "f" * 40},
+        {"ref": "refs/heads/main", "after": "invalid"},
+    ):
+        assert gate.candidates(api, api.repo, event) == []
+    assert api.writes == []
+
+
+def test_brain_pass_workflow_wakes_on_main_push_without_new_ci():
+    workflow = (ROOT / ".github/workflows/brain-pass-auto-merge.yml").read_text(encoding="utf-8")
+    assert "push:\\n    branches: [main]".replace("\\n", "\n") in workflow
+    assert "github.event_name == 'push' && github.ref == 'refs/heads/main'" in workflow
+    assert "Verify pinned Brain PASS and reusable EF02 or exact-head CI before merge" in workflow
+
+def test_gate_reuses_old_ci_for_proven_noninterfering_base_advance(gate, monkeypatch):
+    _two_independent_owner_groups(gate, monkeypatch)
+    api = _MainAdvanceGitHub(gate, drift_path="src/ai_commerce/creative/independent.py")
+    result = gate.process(api, api.repo, _approval_event(gate))
+    assert result[0]["status"] == "MERGED"
+    assert result[0]["ci_run"] == 200
+    assert api.writes == [{"sha": api.head, "merge_method": "merge"}]
+
+
+@pytest.mark.parametrize("drift", (
+    "tests/test_creative_owner.py",
+    ".github/workflows/ef02-tests.yml",
+    "src/ai_commerce/remote/cdp_doorbell.py",
+    "src/ai_commerce/product/identity.py",
+    "src/ai_commerce/unregistered/new.py",
+    "pyproject.toml",
+))
+def test_gate_rejects_unproven_or_impactful_base_advance(gate, monkeypatch, drift):
+    _two_independent_owner_groups(gate, monkeypatch)
+    api = _MainAdvanceGitHub(gate, drift_path=drift)
+    result = gate.process(api, api.repo, _approval_event(gate))
+    assert result[0]["status"] == "WAIT_REBASE"
+    assert result[0]["reason"] == "BASE_MAIN_CHANGED"
+    assert api.writes == []
+
+
+def test_gate_rejects_shared_consumer_tests_and_divergent_main(gate, monkeypatch):
+    _two_independent_owner_groups(gate, monkeypatch, shared_tests=True)
+    api = _MainAdvanceGitHub(gate, drift_path="src/ai_commerce/creative/independent.py")
+    assert gate.process(api, api.repo, _approval_event(gate))[0]["status"] == "WAIT_REBASE"
+    api.comparison_ok = False
+    assert gate.process(api, api.repo, _approval_event(gate))[0]["status"] == "WAIT_REBASE"
+    assert api.writes == []
+
+
+def test_mt01_fast_contract_preflight_prioritizes_affected_tests_without_replacing_suite():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "ci_contract_preflight", ROOT / ".github/scripts/ef02-pr-ci-tests.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    plan = {
+        "selected_tests": [
+            "tests/test_bq_01a_brief_causality.py",
+            "tests/test_minimum_test.py", "tests/test_ef02.py",
+            "tests/test_ef01_repair.py", "tests/test_ef01.py",
+        ],
+        "changed_paths": ["src/ai_commerce/engineering/runner.py"],
+    }
+    assert module.contract_preflight_targets(plan) == (
+        "tests/test_ef01.py", "tests/test_ef01_repair.py",
+        "tests/test_ef02.py", "tests/test_minimum_test.py",
+    )
+    plan["changed_paths"] = ["src/ai_commerce/bq/critic.py"]
+    assert module.contract_preflight_targets(plan) == tuple(plan["selected_tests"][:4])
+    plan["selected_tests"] = ["src/ai_commerce/opportunity/trends/tests/test_m02.py"]
+    assert module.contract_preflight_targets(plan) == tuple(plan["selected_tests"])
+    plan["selected_tests"] = ["tests/../escape.py"]
+    with pytest.raises(ValueError, match="MT01_PREFLIGHT_SELECTED_PATH_INVALID"):
+        module.contract_preflight_targets(plan)
+
+
+def test_mt01_windows_ci_does_not_rerun_selected_files_in_preflight():
+    """V2's attested run is the sole broad selection; no duplicate pytest pass."""
+    workflow = (ROOT / ".github/workflows/ef02-tests.yml").read_text(encoding="utf-8")
+    assert "run: python .github/scripts/ef02-pr-ci-tests.py --fast-contract-preflight" not in workflow
+    assert workflow.count("name: MT-01 PR CI selective tests (full fallback)") == 1
+    assert "run: python .github/scripts/ef02-pr-ci-tests.py" in workflow
 
 
 def test_merge_queue_retains_same_approval_until_ci_finishes(gate):

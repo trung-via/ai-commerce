@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 from typing import Callable, Protocol
 from pathlib import Path
 
+from ..wakehub_cdp import authenticated_turn as cdp_turn
 from .conversation_binding import ResolvedBinding, _CHAT, _REPOSITORY, _endpoint
 from .trusted_origin import (
     CompleteSearchDomainWitness, OriginError, PrivateOriginSnapshot,
@@ -888,6 +889,65 @@ def probe_wh03_committed_registration_signal(
         # Browser exception messages might include private paths/chat URLs.
         return "CDP_READ_UNAVAILABLE"
 
+
+
+def _exact_turn_rejection(result: object, *, phase: cdp_turn.AttestationPhase,
+                          statuses: tuple[cdp_turn.GateStatus, ...]) -> bool:
+    return (type(result) is cdp_turn.GateResult and result.phase is phase
+            and type(result.status) is cdp_turn.GateStatus and result.status in statuses
+            and type(result.code) is cdp_turn.GateCode)
+
+
+def pre_send_authenticated_wake(
+        request: cdp_turn.WakeRequest, evidence: cdp_turn.TurnEvidence, *, now: int,
+        browser_candidate: cdp_turn.BrowserObservation | None = None,
+) -> cdp_turn.GateResult:
+    """Source-only rejection bridge, with no browser or native provider effects.
+
+    Forward the exact immutable request/bytes and evidence to their owner.
+    An optional read-only candidate is an additional veto, never a replacement
+    for missing evidence or native authentication. No callback, key, signature,
+    DOM observation or caller flag can enroll the unavailable private provider.
+    This gate cannot stage, click, reserve or call the legacy send_wake path.
+    """
+    phase = cdp_turn.AttestationPhase.PRE_SEND
+    statuses = (cdp_turn.GateStatus.HOLD, cdp_turn.GateStatus.UNAVAILABLE)
+    invalid = cdp_turn.GateResult(phase, cdp_turn.GateStatus.HOLD,
+                                  cdp_turn.GateCode.INVALID_EVIDENCE)
+    result = cdp_turn.pre_send(request, evidence, now=now)
+    if not _exact_turn_rejection(result, phase=phase, statuses=statuses):
+        return invalid
+    if result.status is cdp_turn.GateStatus.HOLD or browser_candidate is None:
+        return result
+    # Only otherwise consistent claims reach the additional candidate check.
+    # It cannot repair/upgrade the original evidence, and remains untrusted.
+    if type(evidence) is not cdp_turn.TurnEvidence:
+        return invalid
+    result = cdp_turn.pre_send(
+        request, replace(evidence, observation=browser_candidate), now=now)
+    return result if _exact_turn_rejection(result, phase=phase, statuses=statuses) else invalid
+
+
+def diagnose_authenticated_wake(
+        request: cdp_turn.WakeRequest, evidence: cdp_turn.TurnEvidence, *,
+        outcome: cdp_turn.SendOutcome, now: int,
+        user_turn: cdp_turn.ChatGPTUserTurnRef | None = None,
+) -> cdp_turn.GateResult:
+    """Bounded post-effect diagnostic only; never perform or replay a Send.
+
+    A reported/ambiguous click or timeout stays UNKNOWN_EFFECT even for invalid
+    claims. A DOM/UI user bubble or native-looking caller reference is never
+    returned as an authenticated ChatGPT server USER-turn receipt.
+    """
+    phase = cdp_turn.AttestationPhase.POST_SEND
+    status = (cdp_turn.GateStatus.HOLD if outcome is cdp_turn.SendOutcome.NOT_ATTEMPTED
+              else cdp_turn.GateStatus.UNKNOWN_EFFECT)
+    result = cdp_turn.post_send(request, evidence, outcome=outcome, user_turn=user_turn, now=now)
+    if _exact_turn_rejection(result, phase=phase, statuses=(status,)):
+        return result
+    code = (cdp_turn.GateCode.SEND_NOT_ATTEMPTED if outcome is cdp_turn.SendOutcome.NOT_ATTEMPTED
+            else cdp_turn.GateCode.INVALID_SEND_OUTCOME_NO_REPLAY)
+    return cdp_turn.GateResult(phase, status, code)
 
 
 class LocalChromeDoorbellAdapter:

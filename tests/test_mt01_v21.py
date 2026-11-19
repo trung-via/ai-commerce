@@ -45,6 +45,160 @@ def test_a12_narrow_unaffected_by_unrelated_new_e04_test(tmp_path):
     assert "tests/test_a14_e04.py:UNRELATED_UNMAPPED_TEST" in polluted.inventory_warnings
 
 
+def test_indirect_test_harness_import_does_not_fan_out(tmp_path):
+    """A03 R2: a CLI test for another product must not select its whole suite."""
+    v2 = "src/ai_commerce/creative/v2.py"
+    init = "src/ai_commerce/creative/__init__.py"
+    cli = "src/ai_commerce/cli.py"
+    ui = "src/ai_commerce/ui/workflow.py"
+    product_test = "tests/test_product_cli.py"
+    mk(tmp_path, v2, "def new_export(): return 1\n")
+    mk(tmp_path, init, "from .v2 import new_export\n")
+    mk(tmp_path, cli, "from ai_commerce.creative import new_export\n")
+    mk(tmp_path, ui, "from ai_commerce.cli import main\n")
+    mk(tmp_path, "tests/test_creative.py")
+    mk(tmp_path, "tests/test_cli.py")
+    mk(tmp_path, product_test, "from ai_commerce.ui.workflow import main\n")
+    groups = (
+        group("creative", ("tests/test_creative.py",), (v2, init)),
+        group("cli", ("tests/test_cli.py",), (cli,)),
+        group("product", (product_test,), ("src/ai_commerce/product/demo.py",)),
+    )
+    impact = select_impact(root=tmp_path, changed_paths=(v2, init), groups=groups)
+    assert impact.mode == "AFFECTED"
+    assert impact.selected_groups == ("cli", "creative")
+    assert product_test not in impact.selected_tests
+    assert "DEFERRED_TRANSITIVE_IMPORT_PATHS:1" in impact.inventory_warnings
+
+
+def test_explicit_package_import_keeps_real_consumer_and_multihop(tmp_path):
+    """Narrowing implicit ancestor edges must retain genuine package users."""
+    init = "src/ai_commerce/creative/__init__.py"
+    bridge = "src/ai_commerce/bridge/store.py"
+    consumer = "src/ai_commerce/commerce/service.py"
+    mk(tmp_path, init, "class CreativeStore: pass\n")
+    mk(tmp_path, bridge, "from ai_commerce.creative import CreativeStore\n")
+    mk(tmp_path, consumer, "from ai_commerce.bridge.store import CreativeStore\n")
+    for p in ("tests/test_creative.py", "tests/test_bridge.py", "tests/test_commerce.py"):
+        mk(tmp_path, p)
+    groups = (
+        group("creative", ("tests/test_creative.py",), (init,)),
+        group("bridge", ("tests/test_bridge.py",), (bridge,)),
+        group("commerce", ("tests/test_commerce.py",), (consumer,)),
+    )
+    impact = select_impact(root=tmp_path, changed_paths=(init,), groups=groups)
+    assert impact.mode == "AFFECTED"
+    assert impact.selected_groups == ("bridge", "commerce", "creative")
+
+
+def test_r3_additive_facade_selects_changed_symbols_not_unchanged_importers(tmp_path):
+    """#1096 regression: A03/A04 remain covered without unrelated WakeHub/BQ."""
+    import subprocess
+
+    init = "src/ai_commerce/creative/__init__.py"
+    v2 = "src/ai_commerce/creative/v2.py"
+    media = "src/ai_commerce/media/consumer.py"
+    wake = "src/ai_commerce/wakehub_runtime/runner.py"
+    bq = "src/ai_commerce/creative_quality/brief.py"
+    mk(tmp_path, v2, "class Existing:\n    def value(self): return 1\nclass Stable: pass\n")
+    mk(tmp_path, init, "from .v2 import Existing, Stable\n__all__ = ['Existing', 'Stable']\n")
+    mk(tmp_path, media, "from ai_commerce.creative import Existing\n")
+    mk(tmp_path, wake, "from ai_commerce.creative import Stable\n")
+    mk(tmp_path, bq, "from ai_commerce.creative import Stable\n")
+    for p in ("tests/test_creative.py", "tests/test_media.py", "tests/test_wake.py", "tests/test_bq.py"):
+        mk(tmp_path, p)
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "-c", "user.name=MT01 Test", "-c", "user.email=mt01@test.invalid",
+                    "commit", "-qm", "baseline"], cwd=tmp_path, check=True)
+    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True,
+                          capture_output=True, text=True).stdout.strip()
+    # New R3 API and a change to Existing: the A04 consumer still runs.
+    mk(tmp_path, v2, "class Existing:\n    def value(self): return 2\nclass Stable: pass\n"
+                     "class NewProductionPackage: pass\n")
+    mk(tmp_path, init, "from .v2 import Existing, Stable, NewProductionPackage\n"
+                       "__all__ = ['Existing', 'Stable', 'NewProductionPackage']\n")
+    groups = (
+        group("creative", ("tests/test_creative.py",), (v2, init)),
+        group("a04", ("tests/test_media.py",), (media,)),
+        group("wakehub", ("tests/test_wake.py",), (wake,)),
+        group("bq", ("tests/test_bq.py",), (bq,)),
+    )
+    result = select_impact(root=tmp_path, changed_paths=(v2, init),
+                           base_sha=base, groups=groups)
+    assert result.mode == "AFFECTED"
+    assert result.selected_groups == ("a04", "creative")
+    assert result.selected_tests == ("tests/test_creative.py", "tests/test_media.py")
+    assert "ADDITIVE_PACKAGE_EXPORTS:1" in result.inventory_warnings
+
+    # A changed binding (or package startup side effect) is not an additive
+    # export and MUST retain its conservative direct-import consumer closure.
+    mk(tmp_path, init, "from .v2 import Existing, NewProductionPackage\n"
+                       "__all__ = ['Existing', 'NewProductionPackage']\n")
+    unsafe = select_impact(root=tmp_path, changed_paths=(init,), base_sha=base, groups=groups)
+    assert "wakehub" in unsafe.selected_groups and "bq" in unsafe.selected_groups
+    assert "ADDITIVE_PACKAGE_EXPORTS:1" not in unsafe.inventory_warnings
+
+    # ``from package import *`` consumes __all__ itself: an additive export
+    # is not safe to discard while a wildcard reader remains registered.
+    wildcard = "src/ai_commerce/consumer/wildcard.py"
+    mk(tmp_path, wildcard, "from ai_commerce.creative import *\n")
+    mk(tmp_path, "tests/test_wildcard.py")
+    mk(tmp_path, init, "from .v2 import Existing, Stable, NewProductionPackage\n"
+                       "__all__ = ['Existing', 'Stable', 'NewProductionPackage']\n")
+    with_wildcard = select_impact(
+        root=tmp_path, changed_paths=(init,), base_sha=base,
+        groups=(*groups, group("wildcard", ("tests/test_wildcard.py",), (wildcard,))))
+    assert "wildcard" in with_wildcard.selected_groups
+    assert "ADDITIVE_PACKAGE_EXPORTS:1" not in with_wildcard.inventory_warnings
+
+
+def test_r3_unproven_base_never_claims_safe_export_delta(tmp_path):
+    """Without an immutable baseline, MT-01 must not silently narrow scope."""
+    init = "src/ai_commerce/creative/__init__.py"
+    reader = "src/ai_commerce/consumer/reader.py"
+    mk(tmp_path, init, "from .v2 import Symbol\n__all__ = ['Symbol']\n")
+    mk(tmp_path, reader, "from ai_commerce.creative import Symbol\n")
+    mk(tmp_path, "src/ai_commerce/creative/v2.py", "class Symbol: pass\n")
+    mk(tmp_path, "tests/test_creative.py")
+    mk(tmp_path, "tests/test_consumer.py")
+    impact = select_impact(root=tmp_path, changed_paths=(init,), groups=(
+        group("creative", ("tests/test_creative.py",), (init,)),
+        group("consumer", ("tests/test_consumer.py",), (reader,)),
+    ))
+    assert impact.selected_groups == ("consumer", "creative")
+
+
+def test_distant_consumer_requires_explicit_changed_source_contract(tmp_path):
+    """Deep import reach alone is not proof; an exact source contract is."""
+    producer = "src/ai_commerce/opportunity/bridge/briefs.py"
+    middle_a = "src/ai_commerce/production_orchestration/orchestrator.py"
+    middle_b = "src/ai_commerce/wakehub_runtime/runner.py"
+    middle_c = "src/ai_commerce/wakehub_runtime/native_bridge.py"
+    distant = "src/ai_commerce/wakehub/cdp_native.py"
+    mk(tmp_path, producer, "class Brief: pass\n")
+    mk(tmp_path, middle_a, "from ai_commerce.opportunity.bridge.briefs import Brief\n")
+    mk(tmp_path, middle_b, "from ai_commerce.production_orchestration.orchestrator import Brief\n")
+    mk(tmp_path, middle_c, "from ai_commerce.wakehub_runtime.runner import Brief\n")
+    mk(tmp_path, distant, "from ai_commerce.wakehub_runtime.native_bridge import Brief\n")
+    for test in ("tests/test_brief.py", "tests/test_native.py"):
+        mk(tmp_path, test)
+    groups = (
+        group("brief", ("tests/test_brief.py",), (producer,)),
+        group("native", ("tests/test_native.py",), (distant,), consumers=(middle_c,)),
+    )
+    impact = select_impact(root=tmp_path, changed_paths=(producer,), groups=groups)
+    assert impact.selected_groups == ("brief",)
+    assert middle_c not in impact.affected_paths
+    assert "DEFERRED_TRANSITIVE_IMPORT_PATHS:2" in impact.inventory_warnings
+    # The owner can opt in to this exact upstream source dependency in the
+    # reviewed map; a generic transitive import cannot do so on its behalf.
+    reviewed = (groups[0], group("native", ("tests/test_native.py",), (distant,),
+                                 consumers=(middle_c, producer)))
+    explicit = select_impact(root=tmp_path, changed_paths=(producer,), groups=reviewed)
+    assert explicit.selected_groups == ("brief", "native")
+
+
 def test_new_e04_test_is_held_but_always_in_selected_plan(tmp_path):
     groups, _, _ = fixture(tmp_path)
     mk(tmp_path, "tests/test_a14_e04.py")
@@ -714,13 +868,14 @@ def test_oracle_postmerge_resolves_real_github_push_context_only(monkeypatch, tm
 
 
 
-def test_postmerge_v21_workflow_runs_on_every_main_push():
-    # A changed-only path filter can silently suppress the postmerge baseline
-    # oracle after a PR changes an unlisted control or introduces a new owner.
+def test_postmerge_v21_workflow_does_not_repeat_pr_verification_on_main():
+    # The verified source artifact is already accepted before merge; the
+    # postmerge main push must not rerun the same long MT-01/pytest suite.
     workflow = (Path(__file__).resolve().parents[1] /
                 ".github/workflows/ef02-tests.yml").read_text(encoding="utf-8")
     push = workflow.split("  push:\n", 1)[1].split("  pull_request:\n", 1)[0]
-    assert "branches: [ef02-multi-action-implementation, main]" in push
+    assert "branches: [ef02-multi-action-implementation]" in push
+    assert "main]" not in push
     assert "paths:" not in push
 
 
@@ -1126,7 +1281,8 @@ def test_v22_pr_ci_cancels_only_superseded_pull_requests():
     assert "concurrency:" in workflow
     assert "github.event.pull_request.number || github.ref" in workflow
     assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in workflow
-    assert "branches: [ef02-multi-action-implementation, main]" in workflow
+    assert "branches: [ef02-multi-action-implementation]" in workflow
+    assert "steps.ef02_proof.outputs.verified != 'true'" in workflow
 
 
 def test_v22_cold_component_one_pr_offline_canary(tmp_path, monkeypatch):
@@ -1516,8 +1672,8 @@ def test_bq01a_current_owner_closure_keeps_b0_imports_but_not_test_only_fanout()
     assert complete and package in graph[receipt] and receipt in graph[worker]
 
     affected = select_impact(root=root, changed_paths=[package], groups=groups)
-    # HEAD also contains later quality owners, unlike the historical BQ-01A
-    # onboarding base. Keep their genuine package consumers in this control.
+    # Without immutable proof of an additive facade-only change, preserve
+    # the conservative package-initializer consumer closure.
     expected = (
         "a03", "b0-3", "b0-4", "b0-s", "b0-s3", "b0-s3b",
         "b1-3-audio", "b1-3-subtitle", "b3-next-brief", "b3-operations-dashboard",

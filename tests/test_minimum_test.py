@@ -365,14 +365,20 @@ def test_shadow_receipt_is_deterministic_private_and_has_no_effects(monkeypatch)
 def test_shadow_foundation_preserves_timeout_defaults_and_registered_mt01_argv():
     import inspect
     from ai_commerce.engineering.cli import build_parser
-    from ai_commerce.engineering.runner import execute_attempt, DEFAULT_ACTION_TIMEOUT_SECONDS
+    from ai_commerce.engineering.runner import (
+        execute_attempt, DEFAULT_ACTION_TIMEOUT_SECONDS, DEFAULT_VERIFY_TIMEOUT_SECONDS,
+    )
     parser = build_parser()
-    assert parser.get_default("verify_timeout_seconds") == 1800
-    assert parser.get_default("timeout_seconds") == parser.get_default("action_timeout_seconds") == 7200
-    assert DEFAULT_ACTION_TIMEOUT_SECONDS == 7200
+    # The executor cap and registered MT-01 argv are unchanged. The 90m
+    # verification cap intentionally extends the enclosing EF01 action budget.
+    assert parser.get_default("timeout_seconds") == 7200
+    assert parser.get_default("verify_timeout_seconds") == DEFAULT_VERIFY_TIMEOUT_SECONDS == 5400
+    assert parser.get_default("action_timeout_seconds") == DEFAULT_ACTION_TIMEOUT_SECONDS == 12600
+    assert DEFAULT_ACTION_TIMEOUT_SECONDS == 7200 + DEFAULT_VERIFY_TIMEOUT_SECONDS
     defaults = inspect.signature(execute_attempt).parameters
-    assert defaults["verify_timeout_seconds"].default == 1800
-    assert defaults["action_timeout_seconds"].default == 7200
+    assert defaults["timeout_seconds"].default == 7200
+    assert defaults["verify_timeout_seconds"].default == DEFAULT_VERIFY_TIMEOUT_SECONDS
+    assert defaults["action_timeout_seconds"].default == DEFAULT_ACTION_TIMEOUT_SECONDS
     registry = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_text(encoding="utf-8"))
     assert registry["mt01-mt01-tests"] == ["python", "-m", "pytest", "tests/test_minimum_test.py", "-q", "-n", "12"]
     assert registry["project-tests"] == ["python", "-m", "pytest", "tests", "-q", "-n", "12"]
@@ -1878,6 +1884,68 @@ def test_reviewed_map_contains_exact_real_paths_and_all_current_python_test_fami
     assert "a13" in {g.name for g in real_tree.groups}
 
 
+@pytest.mark.parametrize("include_test", [False, True], ids=["source", "source-and-test"])
+def test_ef02_wake_remote_package_owner_proves_real_doorbell_impact(real_tree, include_test):
+    from ai_commerce.engineering.impact_v21 import select_impact
+
+    package_init = "src/ai_commerce/remote/__init__.py"
+    owners = [g for g in real_tree.groups
+              if package_init in (*g.paths, *g.tests, *g.consumers, *g.contracts)]
+    assert [g.name for g in owners] == ["ef02-wake"]
+    assert owners[0].paths.count(package_init) == 1
+    changed = ["src/ai_commerce/remote/cdp_doorbell.py"]
+    if include_test:
+        changed.append("tests/test_ef02_cdp_doorbell.py")
+    assert set(changed) <= real_tree.files.keys()
+    impact = select_impact(root=ROOT, changed_paths=changed, groups=real_tree.groups,
+                           base_sha=real_tree.sha)
+    assert impact.runnable, impact.as_dict()
+    assert not impact.missing_mapping, impact.missing_mapping
+    assert "ef02-wake" in impact.selected_groups
+    assert package_init in impact.affected_paths
+    assert set(changed) <= set(impact.affected_paths)
+    # Include the fixture's validated persisted owners, not just approved_groups().
+    assert set(impact.selected_groups) & real_tree.persisted_names
+    reviewed = {p for g in real_tree.groups
+                for p in (*g.paths, *g.tests, *g.consumers, *g.contracts)}
+    unowned = set(impact.affected_paths) - reviewed
+    assert not unowned, sorted(unowned)
+
+
+@pytest.mark.parametrize("missing_init_owner", [False, True], ids=["reviewed", "unregistered-consumer"])
+def test_ef02_doorbell_acceptance_requires_remote_package_owner(
+        real_tree, monkeypatch, missing_init_owner):
+    from ai_commerce.engineering import impact_v21
+    from ai_commerce.remote import validation
+
+    package_init = "src/ai_commerce/remote/__init__.py"
+    groups = real_tree.groups
+    if missing_init_owner:
+        groups = tuple(replace(g, paths=tuple(p for p in g.paths if p != package_init))
+                       if g.name == "ef02-wake" else g for g in groups)
+    # Use the complete checked-out tree and already validated baseline owners;
+    # keep the real import graph and acceptance closure gate for both controls.
+    monkeypatch.setattr(validation, "_pinned_source_tree", lambda *args, **kwargs: ROOT)
+    monkeypatch.setattr(validation, "approved_groups", lambda: groups)
+    monkeypatch.setattr(impact_v21, "load_baseline_component_owner_records", lambda **kwargs: ())
+    batch = {"source_sha": real_tree.sha, "actions": [{
+        "action_id": "wake", "depends_on": [],
+        "allowed_paths": ["src/ai_commerce/remote/cdp_doorbell.py", "tests/test_ef02_cdp_doorbell.py"],
+        "verification_profile": "mt01-ef02-wake-tests",
+        "instruction": 'MT01_ACCEPTANCE_JSON:["EF02.wake-boundaries"]',
+    }]}
+    report = validation.validate_acceptance_scope(batch, repo=ROOT)
+    if missing_init_owner:
+        assert report["status"] == "PRE_EXECUTOR_UNDETERMINED"
+        assert report["next_gate"] == "HOLD_NO_EXECUTOR"
+        assert report["actions"] == [{"action_id": "wake", "status": "PRE_EXECUTOR_UNDETERMINED",
+                                      "reason": "IMPACT_CLOSURE_UNPROVEN"}]
+    else:
+        assert report["status"] == "PRE_EXECUTOR_COMPATIBLE", report
+        assert report["next_gate"] == "POST_EDIT_MT01_REQUIRED"
+        assert "ef02-wake" in report["actions"][0]["selected_groups"]
+
+
 @pytest.mark.parametrize("path,expected", [
     ("tests/test_a13_evidence_pack.py", "a13"),
     ("tests/test_a12_claims.py", "a12"),
@@ -1935,10 +2003,33 @@ def test_a10_m05_selects_a03_consumer_with_only_reviewed_closure(real_tree, monk
             registered_only=True, registered_profiles=registry, env={})
 
     selected = select(groups)
+    if v21:
+        # MT-01 V2.1 no longer treats every indirect CLI/test import as a
+        # mandatory owner suite. It keeps M05's actual owner, its declared A03
+        # consumer and the reviewed production/WakeHub consumer chain.
+        expected_v21 = {
+            "a03", "a10", "cli", "production-orchestration", "wakehub-runtime",
+        }
+        if path.endswith("/briefs.py"):
+            expected_v21.update({
+                "a10-m02", "a18-1", "a18-2", "a18-3", "b0-1",
+                "b3-portfolio", "wakehub-cdp-native",
+            })
+        assert set(selected["selected_groups"]) == expected_v21
+        assert not selected["fallback"]
+        assert selected["reason_codes"] == ["SCOPED_CONSUMER_CLOSURE"]
+        assert selected["unknown_tests"] == selected["unknown_acs"] == selected["unknown_consumers"] == []
+        assert all(entry["state"] == "EXECUTE" for entry in selected["groups"])
+        assert not {"a05", "a06", "a07", "a08", "a09", "a11", "a12", "bq-04a"} & expected_v21
+        for owner in ("a03", "a10", "production-orchestration", "wakehub-runtime"):
+            entry = next(e for e in selected["groups"] if e["group"] == owner)
+            assert entry["binding"]["candidate_files"][path] == real_tree.files[path]
+        return
     expected = {
         "a03", "a04", "a05", "a06", "a07", "a08", "a09", "a10", "a10-m02",
         "a11", "a12", "a18-1", "a18-2", "a18-3", "b0-1", "b3-portfolio",
         "bq-02b", "bq-04a", "cli", "production-orchestration", "wakehub-runtime",
+        "wakehub-cdp-native",
     }
     assert set(selected["selected_groups"]) == expected
     assert not selected["fallback"]
@@ -1947,17 +2038,23 @@ def test_a10_m05_selects_a03_consumer_with_only_reviewed_closure(real_tree, monk
     assert all(entry["state"] == "EXECUTE" for entry in selected["groups"])
     # A05 depends on M05 through the shared CLI; the registered production and
     # wakehub consumers also belong to the closure before adding A03's edge.
+    # The persisted CDP owner declares the affected WakeHub runtime runner as
+    # a consumer, so its registered tests belong to that exact closure too.
     producer = "src/ai_commerce/opportunity/bridge/briefs.py"
     without_a03_consumer = tuple(
         replace(g, consumers=tuple(p for p in g.consumers if p != producer))
         if g.name == "a03" else g for g in groups)
-    # A03's local-adapter regression also imports the orchestrator, so current
-    # imports still select A03 without its declared bridge consumer.
+    # Two independent A03 test-only imports now select the bridge even without
+    # its declared consumer edge: the creative test imports the orchestrator,
+    # and the upgrade CLI smoke imports ai_commerce.cli. Preserve both real
+    # positive paths; isolate both ONLY for the declared-edge negative control.
     assert set(select(without_a03_consumer)["selected_groups"]) == expected
     # Isolate the declared edge's negative control from that test-only import.
     # All production imports and the production/wakehub owner chain stay real.
     a03_test = "tests/test_a03_creative.py"
     orchestration_init = "src/ai_commerce/production_orchestration/__init__.py"
+    a03_cli_test = "tests/test_a03_upgrade_v11.py"
+    cli_source = "src/ai_commerce/cli.py"
     with monkeypatch.context() as control:
         if v21:
             from ai_commerce.engineering import impact_v21
@@ -1973,6 +2070,7 @@ def test_a10_m05_selects_a03_consumer_with_only_reviewed_closure(real_tree, monk
             graph, complete = real_tree.graph
             previous_graph = {p: set(deps) for p, deps in graph.items()}
             previous_graph[a03_test].remove(orchestration_init)
+            previous_graph[a03_cli_test].remove(cli_source)
             control.setattr(mt, "import_graph", lambda *_: (previous_graph, complete))
         assert set(select(groups)["selected_groups"]) == expected
         previous = select(without_a03_consumer)
@@ -2004,6 +2102,8 @@ def test_a10_m05_selects_a03_consumer_with_only_reviewed_closure(real_tree, monk
     for owner, consumer, test_path in (
         ("production-orchestration", producer, "tests/test_production_orchestration.py"),
         ("wakehub-runtime", orchestrator, "tests/test_wakehub_runtime.py"),
+        ("wakehub-cdp-native", "src/ai_commerce/wakehub_runtime/runner.py",
+         "tests/test_wakehub_cdp_authenticated_turn.py"),
     ):
         mapping = selected["consumer_map"][owner]
         assert consumer in mapping["consumers"]

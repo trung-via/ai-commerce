@@ -1,4 +1,4 @@
-"""Personal HostOps v3: bounded reads, new-file writes and attended git-main fast-forward.
+"""Personal HostOps v3: bounded reads and individually approved fixed writes.
 
 ChatGPT-approved READ sends only public committed source, safe git metadata or
 file hashes to public Issues. A Human GitHub comment authorizes each WRITE.
@@ -7,17 +7,21 @@ No arbitrary shell, secret file access, force update, delete or provider effect.
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
+from os.path import normpath
+from pathlib import Path, PureWindowsPath
 import platform
 import re
 import shutil
 import stat
 import subprocess
+import sys
 from threading import Lock
+import time
 from typing import Callable, Literal, TypedDict
 from urllib.request import Request, ProxyHandler, HTTPRedirectHandler, build_opener
 
@@ -35,6 +39,9 @@ PUBLIC_PREFIXES = ("docs/", "src/ai_commerce/", "tests/", "work_items/", ".githu
 PUBLIC_EXTENSIONS = {".md", ".py", ".json", ".yml", ".yaml", ".toml", ".cjs", ".txt"}
 MAX_READ = 8192
 MAX_WRITE = 2048
+_CLEAN_AUTOSTART = "install_clean_9444_autostart"
+_CLEAN_TASK_PENDING = "AutostartPending"
+_ACQUISITION_SOURCE = Path("src/ai_commerce/remote/chrome_acquisition.py")
 
 # Source-owned PUBLIC vocabulary. Private config is locally validated by the
 # existing acquisition contract and reduced to fixed enums; path/name/JSON
@@ -149,7 +156,8 @@ def parse_event(event, mode):
         if event.get("action") != "created" or not title.startswith(WRITE_TITLE):
             deny("WRITE_EVENT_DENIED")
         comment = _dict(event.get("comment"))
-        if (comment.get("user", {}).get("login") != OWNER or
+        comment_user = comment.get("user")
+        if (type(comment_user) is not dict or comment_user.get("login") != OWNER or
                 comment.get("body") != "APPROVE WRITE #" + str(number)):
             deny("EXACT_WRITE_APPROVAL_REQUIRED")
     else:
@@ -168,7 +176,7 @@ def parse_event(event, mode):
     operation = request["operation"]
     if mode == "read":
         if operation in ("inventory", "runner_runtime_inventory", "cdp_9333_status", "cdp_9444_topology",
-                         "standing_read_diagnostics"):
+                         "cdp_9444_config_registry", "standing_read_diagnostics"):
             # Runtime inventory has fixed, compiled-in three-runner targets.
             # The public Issue cannot choose a task, executable or command.
             if params:
@@ -198,7 +206,10 @@ def parse_event(event, mode):
         else:
             deny("READ_OPERATION_DENIED")
     else:
-        if operation == "git_sync_main":
+        if operation == _CLEAN_AUTOSTART:
+            if params:
+                deny("INVALID_PARAMETERS")
+        elif operation == "git_sync_main":
             if set(params) != {"expected_local_sha", "target_sha"} or any(
                 type(params.get(key)) is not str or
                 not re.fullmatch(r"[0-9a-f]{40}", params[key])
@@ -340,6 +351,366 @@ def _sync_main(params):
         "sync_result": "ALREADY_AT_TARGET" if before == remote else "FAST_FORWARDED",
         "branch": "main",
     }
+
+
+_CLEAN_PUBLIC_CODES = frozenset({
+    "PROTECTED_HOSTOPS_ONLY", "WINDOWS_INTERACTIVE_REQUIRED", "WINDOWS_TOKEN_UNAVAILABLE",
+    "ELEVATED_CHROME_DISALLOWED", "ENROLLMENT_IDENTITY_UNPROVEN",
+    "OPERATOR_OWNERSHIP_UNPROVEN", "PROFILE_UNAVAILABLE", "PROFILE_LOCKED",
+    "PROFILE_ALREADY_ACTIVE_NO_CDP", "FOREIGN_PORT_OWNER", "BROWSER_OWNERSHIP_UNPROVEN",
+    "CHROME_PATH_INVALID", "CHROME_EXECUTABLE_UNTRUSTED", "CDP_PROTOCOL_UNAVAILABLE",
+    "SUPERVISOR_ACTIVE", "AUTOSTART_CONFLICT", "AUTOSTART_RUNTIME_UNAVAILABLE",
+    "LOCAL_MAIN_SYNC_REQUIRED", "SOURCE_WORKFLOW_PATH_MISMATCH", "SOURCE_PATH_UNTRUSTED",
+    "SOURCE_ACL_UNTRUSTED", "SOURCE_INDEX_UNVERIFIED", "SOURCE_UNTRACKED_FILE",
+    "SOURCE_BYTES_MISMATCH", "WINDOWS_PROBE_INVALID", "WINDOWS_PROBE_UNAVAILABLE",
+    "UNKNOWN_EFFECT", "CDP_VERIFIED", "INSTALLED_BUT_NOT_RUNNING",
+})
+
+# Public Git working-tree ACL guard: unlike private handoff/Chrome profile
+# state, non-secret committed source under C:\TOOL\ai-commerce may grant
+# read/execute to Users or Authenticated Users, provided only the operator,
+# SYSTEM or local Administrators own or can modify it.
+_CHECKOUT_READ_ONLY_MASK = (
+    0x00000001  # FILE_READ_DATA / FILE_LIST_DIRECTORY
+    | 0x00000008  # FILE_READ_EA
+    | 0x00000020  # FILE_EXECUTE / FILE_TRAVERSE
+    | 0x00000080  # FILE_READ_ATTRIBUTES
+    | 0x00020000  # READ_CONTROL
+    | 0x00100000  # SYNCHRONIZE
+    | 0x20000000  # GENERIC_EXECUTE
+    | 0x80000000  # GENERIC_READ
+)
+_INHERIT_ONLY_ACE = 0x08
+_CHECKOUT_PUBLIC_READERS = frozenset({"S-1-5-32-545", "S-1-5-11"})
+_CHECKOUT_EGG_INFO_FILES = frozenset({
+    "PKG-INFO", "SOURCES.txt", "dependency_links.txt", "entry_points.txt",
+    "requires.txt", "top_level.txt", "not-zip-safe", "zip-safe",
+})
+
+
+def _clean_autostart_receipt(code):
+    if type(code) is not str or code not in _CLEAN_PUBLIC_CODES:
+        code = "AUTOSTART_RUNTIME_UNAVAILABLE"
+    result = {
+        "status": "OBSERVED" if code in {"CDP_VERIFIED", "INSTALLED_BUT_NOT_RUNNING"} else "HOLD",
+        "code": code, "operation": _CLEAN_AUTOSTART, "cdp_port": 9444,
+        "devtools_protocol_ok": code == "CDP_VERIFIED", "exact_chat_verified": False,
+        "wake_sent": False, "arbitrary_shell_enabled": False,
+    }
+    if not result.keys() <= PERSONAL_PUBLIC_FIELDS:
+        deny("PUBLIC_TRANSPORT_GAP")
+    return result
+
+
+def _protected_clean_autostart_source() -> str:
+    # main() has already validated the exact authenticated event. This narrows
+    # the non-TTY bridge to the protected main workflow's dedicated runner.
+    expected = {
+        "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "issue_comment",
+        "GITHUB_REPOSITORY": REPO, "GITHUB_REPOSITORY_OWNER": OWNER,
+        "GITHUB_ACTOR": OWNER, "GITHUB_TRIGGERING_ACTOR": OWNER,
+        "GITHUB_REF": "refs/heads/main", "GITHUB_RUN_ATTEMPT": "1",
+        "GITHUB_WORKFLOW_REF": REPO + "/.github/workflows/issue-ingress.yml@refs/heads/main",
+        "RUNNER_ENVIRONMENT": "self-hosted", "RUNNER_NAME": "AI-COMMERCE-HOSTOPS-01",
+    }
+    sha = os.environ.get("GITHUB_SHA", "")
+    if (os.name != "nt" or any(os.environ.get(key) != value for key, value in expected.items())
+            or any(key.startswith("AI_COMMERCE_GIT_GUARD_") for key in os.environ)
+            or not re.fullmatch(r"[a-f0-9]{40}", sha)
+            or os.environ.get("GITHUB_WORKFLOW_SHA") != sha):
+        deny("PROTECTED_HOSTOPS_ONLY")
+    return sha
+
+
+def _windows_checkout_acl(path: Path):
+    """Read native Windows owner SID and (kind, flags, mask, sid) DACL tuples."""
+    import ctypes
+    from ctypes import wintypes as w
+
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    ptr = ctypes.c_void_p
+    adv.GetNamedSecurityInfoW.argtypes = [w.LPWSTR, w.DWORD, w.DWORD,
+                                          ctypes.POINTER(ptr), ptr, ctypes.POINTER(ptr),
+                                          ptr, ctypes.POINTER(ptr)]
+    adv.GetNamedSecurityInfoW.restype = w.DWORD
+    adv.ConvertSidToStringSidW.argtypes = [ptr, ctypes.POINTER(w.LPWSTR)]
+    adv.ConvertSidToStringSidW.restype = w.BOOL
+    adv.GetAclInformation.argtypes = [ptr, ptr, w.DWORD, ctypes.c_int]
+    adv.GetAclInformation.restype = w.BOOL
+    adv.GetAce.argtypes = [ptr, w.DWORD, ctypes.POINTER(ptr)]
+    adv.GetAce.restype = w.BOOL
+    adv.IsValidSid.argtypes = [ptr]
+    adv.IsValidSid.restype = w.BOOL
+    adv.GetLengthSid.argtypes = [ptr]
+    adv.GetLengthSid.restype = w.DWORD
+    kernel.LocalFree.argtypes = [ptr]
+    kernel.LocalFree.restype = ptr
+
+    def sid_text(sid):
+        text = w.LPWSTR()
+        if not sid or not adv.IsValidSid(sid) or not adv.ConvertSidToStringSidW(sid, ctypes.byref(text)):
+            deny("SOURCE_ACL_UNTRUSTED")
+        try:
+            return text.value
+        finally:
+            kernel.LocalFree(ctypes.cast(text, ptr))
+
+    owner, dacl, descriptor = ptr(), ptr(), ptr()
+    if adv.GetNamedSecurityInfoW(str(path), 1, 5, ctypes.byref(owner), None,
+                                 ctypes.byref(dacl), None, ctypes.byref(descriptor)):
+        deny("SOURCE_ACL_UNTRUSTED")
+    try:
+        if not dacl:
+            deny("SOURCE_ACL_UNTRUSTED")
+        info = (w.DWORD * 3)()
+        if not adv.GetAclInformation(dacl, info, ctypes.sizeof(info), 2) or not 1 <= info[0] <= 128:
+            deny("SOURCE_ACL_UNTRUSTED")
+        aces = []
+        for index in range(info[0]):
+            ace = ptr()
+            if not adv.GetAce(dacl, index, ctypes.byref(ace)):
+                deny("SOURCE_ACL_UNTRUSTED")
+            header = ctypes.string_at(ace, 8)
+            ace_type, ace_flags = header[0], header[1]
+            size = int.from_bytes(header[2:4], "little")
+            mask = int.from_bytes(header[4:8], "little")
+            if ace_type not in (0, 1) or size < 16:
+                deny("SOURCE_ACL_UNTRUSTED")
+            sid = ptr(ace.value + 8)
+            if not adv.IsValidSid(sid) or adv.GetLengthSid(sid) > size - 8:
+                deny("SOURCE_ACL_UNTRUSTED")
+            aces.append(("allow" if ace_type == 0 else "deny", ace_flags, mask, sid_text(sid)))
+        return sid_text(owner), tuple(aces)
+    finally:
+        kernel.LocalFree(descriptor)
+
+
+def _check_public_checkout_acl(owner, aces, principal):
+    """Allow ordinary read-only checkout ACLs while refusing untrusted writers."""
+    trusted_owners = {principal, "S-1-5-18", "S-1-5-32-544"}
+    trusted_writers = trusted_owners | {"S-1-3-4"}
+    if owner not in trusted_owners or not aces or len(aces) > 128:
+        deny("SOURCE_ACL_UNTRUSTED")
+    operator_allowed = False
+    for entry in aces:
+        if type(entry) is not tuple or len(entry) != 4:
+            deny("SOURCE_ACL_UNTRUSTED")
+        kind, flags, mask, sid = entry
+        if (kind not in {"allow", "deny"} or type(flags) is not int
+                or type(mask) is not int or type(sid) is not str):
+            deny("SOURCE_ACL_UNTRUSTED")
+        if kind != "allow":
+            continue
+        inherit_only = bool(flags & _INHERIT_ONLY_ACE)
+        if sid in trusted_writers:
+            if (not inherit_only and (sid == principal or (sid == "S-1-3-4" and owner == principal))
+                    and (mask & 0x90000001)):
+                operator_allowed = True
+            continue
+        if sid == "S-1-3-0" and inherit_only:
+            continue
+        if sid in _CHECKOUT_PUBLIC_READERS and (mask & ~_CHECKOUT_READ_ONLY_MASK) == 0:
+            if not inherit_only and (mask & 0x80000001):
+                operator_allowed = True
+            continue
+        deny("SOURCE_ACL_UNTRUSTED")
+    if not operator_allowed:
+        deny("SOURCE_ACL_UNTRUSTED")
+
+
+def _verify_checkout_acl(path: Path, sid: str):
+    """Verify non-link checkout custody without requiring private-only read ACL."""
+    try:
+        info = path.lstat()
+    except OSError:
+        deny("SOURCE_PATH_UNTRUSTED")
+    if (stat.S_ISLNK(info.st_mode)
+            or getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            or not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))):
+        deny("SOURCE_PATH_UNTRUSTED")
+    if os.name != "nt":
+        deny("SOURCE_ACL_UNTRUSTED")
+    try:
+        owner, aces = _windows_checkout_acl(path)
+    except Denied:
+        raise
+    except (OSError, ValueError):
+        deny("SOURCE_ACL_UNTRUSTED")
+    _check_public_checkout_acl(owner, aces, sid)
+
+
+def _persistent_clean_source(acquisition, sha, sid):
+    root = ROOTS["workspace"]
+    raw_workflow = os.environ.get("GITHUB_WORKSPACE", "")
+    if type(raw_workflow) is not str or not raw_workflow:
+        deny("SOURCE_WORKFLOW_PATH_MISMATCH")
+    workflow = Path(raw_workflow)
+    source = root / _ACQUISITION_SOURCE
+    try:
+        if (not root.is_absolute() or not workflow.is_absolute()
+                or Path(normpath(Path(__file__).absolute())) != Path(normpath(workflow / "src/ai_commerce/hostops_v3/personal.py"))
+                or Path(normpath(Path(acquisition.__file__).absolute())) != Path(normpath(workflow / _ACQUISITION_SOURCE))):
+            deny("SOURCE_WORKFLOW_PATH_MISMATCH")
+    except (OSError, ValueError, TypeError, AttributeError):
+        deny("SOURCE_WORKFLOW_PATH_MISMATCH")
+    for path in (root, root / ".git", root / "src"):
+        if not path.is_dir() or not acquisition._no_links(path):
+            deny("SOURCE_PATH_UNTRUSTED")
+        _verify_checkout_acl(path, sid)
+    try:
+        top = Path(_git("rev-parse", "--show-toplevel").strip())
+        if not top.is_absolute() or not acquisition._no_links(top) or top.resolve(strict=True) != root.resolve(strict=True):
+            deny("LOCAL_MAIN_SYNC_REQUIRED")
+        if (_git("rev-parse", "--abbrev-ref", "HEAD").strip() != "main"
+                or _git("config", "--get", "remote.origin.url").strip() not in TRUSTED_ORIGIN_URLS
+                or _git("rev-parse", "HEAD", "refs/remotes/origin/main").splitlines() != [sha, sha]):
+            deny("LOCAL_MAIN_SYNC_REQUIRED")
+        status_lines = [line for line in _git("status", "--porcelain=v1", "--untracked-files=all").splitlines()
+                        if line.strip()]
+    except (OSError, ValueError, Denied):
+        deny("LOCAL_MAIN_SYNC_REQUIRED")
+    if status_lines:
+        if all(line.startswith("?? ") for line in status_lines):
+            deny("SOURCE_UNTRACKED_FILE")
+        deny("LOCAL_MAIN_SYNC_REQUIRED")
+    # Compare source bytes with the protected SHA checkout. This also
+    # catches index flags and filters that could hide worktree edits.
+    try:
+        raw_entries = _git("ls-files", "-v", "-z", "--", "src")
+    except (OSError, ValueError, Denied):
+        deny("LOCAL_MAIN_SYNC_REQUIRED")
+    entries = raw_entries.rstrip("\0").split("\0")
+    if not entries or len(entries) > 4096 or any(not item.startswith("H src/") for item in entries):
+        deny("SOURCE_INDEX_UNVERIFIED")
+    tracked = {root / item[2:] for item in entries}
+    if source not in tracked:
+        deny("SOURCE_INDEX_UNVERIFIED")
+
+    def walk_error(_error):
+        deny("SOURCE_PATH_UNTRUSTED")
+
+    src_root = root / "src"
+    egg_info = src_root / "ai_commerce.egg-info"
+    try:
+        for folder, dirs, files in os.walk(src_root, onerror=walk_error):
+            parent = Path(folder)
+            for name in (*dirs, *files):
+                path = parent / name
+                if _is_reparse(path):
+                    deny("SOURCE_PATH_UNTRUSTED")
+                _verify_checkout_acl(path, sid)
+            if parent == egg_info:
+                if dirs or any(name not in _CHECKOUT_EGG_INFO_FILES for name in files):
+                    deny("SOURCE_UNTRACKED_FILE")
+                continue
+            dirs[:] = [name for name in dirs if name != "__pycache__"]
+            for name in files:
+                path = parent / name
+                if path not in tracked:
+                    deny("SOURCE_UNTRACKED_FILE")
+                pinned = workflow / path.relative_to(root)
+                if not acquisition._no_links(pinned):
+                    deny("SOURCE_PATH_UNTRUSTED")
+                if not pinned.is_file() or path.read_bytes() != pinned.read_bytes():
+                    deny("SOURCE_BYTES_MISMATCH")
+                tracked.remove(path)
+    except Denied:
+        raise
+    except (OSError, ValueError):
+        deny("SOURCE_PATH_UNTRUSTED")
+    if tracked:
+        deny("SOURCE_UNTRACKED_FILE")
+    return source
+
+
+def _install_protected_clean_autostart(event):
+    # Check the public contract before any native call, even on a HOLD.
+    _clean_autostart_receipt("PROTECTED_HOSTOPS_ONLY")
+    reserved = False
+    try:
+        sha = _protected_clean_autostart_source()
+        if parse_event(event, "write")["operation"] != _CLEAN_AUTOSTART:
+            deny("PROTECTED_HOSTOPS_ONLY")
+        from ai_commerce.remote import chrome_acquisition as acquisition
+        owner = acquisition._native_operator()
+        local, session, sid = owner
+        source = _persistent_clean_source(acquisition, sha, sid)
+        runtime = acquisition._managed_clean_runtime(local, sid, source)
+
+        def inspect_target():
+            if acquisition._native_operator() != owner:
+                deny("OPERATOR_OWNERSHIP_UNPROVEN")
+            target, candidates = acquisition._clean_target(local, sid)
+            state, identity = acquisition._clean_inventory(target, candidates, session, sid)
+            if state == "STARTING":
+                deny("PROFILE_ALREADY_ACTIVE_NO_CDP")
+            if acquisition._clean_launch_pending():
+                deny("UNKNOWN_EFFECT")
+            if state == "ABSENT":
+                acquisition._clean_require_unlocked(target)
+            acquisition._verify_google_chrome(target if identity is None else
+                                              replace(target, executable=identity[1]))
+
+        if acquisition._clean_pending(_CLEAN_TASK_PENDING):
+            deny("UNKNOWN_EFFECT")
+        inspect_target()
+        task = acquisition._clean_task(sid, install=False, runtime=runtime)
+        if task not in {"ALREADY_ENROLLED", "AUTOSTART_NOT_ENROLLED"}:
+            return _clean_autostart_receipt(task)
+        created = None
+        if task == "AUTOSTART_NOT_ENROLLED":
+            with acquisition._clean_supervisor_slot():
+                if acquisition._clean_pending(_CLEAN_TASK_PENDING):
+                    deny("UNKNOWN_EFFECT")
+                inspect_target()
+                reserved = True
+                acquisition._clean_record_pending(_CLEAN_TASK_PENDING, True)
+                created = acquisition._clean_task(sid, install=True, runtime=runtime)
+                if created not in {"ENROLLED", "ALREADY_ENROLLED"}:
+                    if created == "AUTOSTART_CONFLICT":
+                        acquisition._clean_record_pending(_CLEAN_TASK_PENDING, False)
+                        return _clean_autostart_receipt(created)
+                    return _clean_autostart_receipt("UNKNOWN_EFFECT")
+                if acquisition._clean_task(sid, install=False, runtime=runtime) != "ALREADY_ENROLLED":
+                    return _clean_autostart_receipt("UNKNOWN_EFFECT")
+                inspect_target()
+        # Release the shared slot before Task Scheduler starts the same monitor.
+        # The monitor must independently acquire it and use LaunchPending.
+        started = False
+        if reserved:
+            if created == "ENROLLED":
+                if acquisition._native_operator() != owner:
+                    return _clean_autostart_receipt("UNKNOWN_EFFECT")
+                start = acquisition._clean_task(sid, install=False, runtime=runtime, start_session=session)
+                if start not in {"START_REQUESTED", "START_NOT_ATTEMPTED"}:
+                    return _clean_autostart_receipt("UNKNOWN_EFFECT")
+                started = start == "START_REQUESTED"
+            acquisition._clean_record_pending(_CLEAN_TASK_PENDING, False)
+            reserved = False
+        target, candidates = acquisition._clean_target(local, sid)
+        deadline = time.monotonic() + (20 if started else 0)
+        while True:
+            state, identity = acquisition._clean_inventory(target, candidates, session, sid)
+            if state == "OWNED":
+                if acquisition._clean_launch_pending():
+                    return _clean_autostart_receipt("UNKNOWN_EFFECT")
+                observed = replace(target, executable=identity[1])
+                acquisition._verify_google_chrome(observed)
+                acquisition._probe_cdp(observed)
+                if (acquisition._clean_inventory(target, candidates, session, sid) != (state, identity)
+                        or acquisition._native_operator() != owner):
+                    return _clean_autostart_receipt("UNKNOWN_EFFECT")
+                return _clean_autostart_receipt("CDP_VERIFIED")
+            if time.monotonic() >= deadline:
+                return _clean_autostart_receipt("UNKNOWN_EFFECT" if state != "ABSENT"
+                                               or acquisition._clean_launch_pending()
+                                               else "INSTALLED_BUT_NOT_RUNNING")
+            time.sleep(0.5)
+    except (ValueError, Denied) as exc:
+        return _clean_autostart_receipt("UNKNOWN_EFFECT" if reserved else str(exc))
+    except Exception:
+        return _clean_autostart_receipt("UNKNOWN_EFFECT" if reserved else "AUTOSTART_RUNTIME_UNAVAILABLE")
 
 
 def _runner_runtime_inventory():
@@ -560,8 +931,8 @@ foreach ($item in $items) {
     }
 
 
-def _cdp_9444_private_context(acquisition):
-    """Attest an existing fixed private config against native token/session reads.
+def _cdp_9444_private_context(acquisition, argv=()):
+    """Attest the fixed clean profile or an independent legacy config.
 
     No Issue/environment identity, manifest-selected path, enrollment or launch.
     Failure to attest is UNKNOWN, never evidence that the listener is absent.
@@ -579,6 +950,10 @@ def _cdp_9444_private_context(acquisition):
     if (not local.is_absolute() or _fixed_private_metadata_kind(root, directory=True) != "PRESENT"
             or _private_identity(root) != sid):
         deny("OWNER_SESSION_UNATTESTED")
+    directory = acquisition._clean_switch(argv, "--user-data-dir")
+    clean = root / acquisition._CLEAN_9444_PROFILE
+    if directory is not None and Path(normpath(directory)) == clean:
+        return acquisition._clean_target(local, sid), session, sid
     candidates = (root / "Chrome-Acquisition" / "config.json",
                   root / "chrome.json", root / "chrome-acquisition.json")
     states = [_fixed_private_metadata_kind(path) for path in candidates]
@@ -596,6 +971,28 @@ def _cdp_9444_private_context(acquisition):
         if (path == root or root in path.parents) and _private_identity(path) != sid:
             deny("OWNER_SESSION_UNATTESTED")
     return env, session, sid
+
+
+def _cdp_9444_owned_target(acquisition, context, listeners, owners, pid):
+    target, session, sid = context
+    inventory = {"listeners": listeners, "processes": [row for row, _ in owners.values()]}
+    if isinstance(target, tuple):
+        clean, candidates = target
+        try:
+            state, identity = acquisition._clean_inventory(clean, candidates, session, sid, inventory=inventory)
+        except acquisition._Clean9444Hold:
+            raise acquisition.AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN") from None
+        if state == "OWNED" and identity[0] == pid:
+            return replace(clean, executable=identity[1])
+    else:
+        # The legacy config continues to require both explicit switches.
+        argv = owners[pid][1]
+        if (acquisition._clean_switch(argv, "--profile-directory") is not None
+                and acquisition._clean_switch(argv, "--remote-debugging-address") is not None
+                and acquisition.evaluate(target, inventory, session_id=session, expected_sid=sid,
+                                         parse=acquisition._commandline_argv) == ("OWNED", pid)):
+            return target
+    return None
 
 
 def _cdp_9444_inventory(acquisition, value):
@@ -648,7 +1045,7 @@ def _cdp_9444_inventory(acquisition, value):
 def _cdp_9444_topology():
     """Fixed read-only topology; public output contains counts and closed codes.
 
-    A signed Chrome, private config custody, native SID and interactive session
+    Signed Chrome, profile custody, native SID and interactive session
     must independently agree before the strict version GET. This proves neither
     enrollment nor Chat A, and never attaches a websocket or sends anything.
     """
@@ -702,20 +1099,20 @@ def _cdp_9444_topology():
     for name in ("--user-data-dir", "--profile-directory", "--remote-debugging-address",
                  "--remote-debugging-port"):
         switches = [arg for arg in argv if arg.lower() == name or arg.lower().startswith(name + "=")]
-        if len(switches) != 1 or not switches[0].startswith(name + "="):
+        optional = name in ("--profile-directory", "--remote-debugging-address")
+        if (not switches and not optional
+                or switches and (len(switches) != 1 or not switches[0].startswith(name + "="))):
             result.update(status="OBSERVED", code="UNTRUSTED_OWNER")
             return result
     try:
-        env, session, sid = _cdp_9444_private_context(acquisition)
+        context = _cdp_9444_private_context(acquisition, argv)
     except Exception:
         result["code"] = "OWNER_SESSION_UNATTESTED"
         return result
     try:
-        state, owned_pid = acquisition.evaluate(env, {"listeners": listeners,
-            "processes": [row for row, _ in owners.values()]}, session_id=session,
-            expected_sid=sid, parse=acquisition._commandline_argv)
-        if state != "OWNED" or owned_pid != pid:
-            raise ValueError("UNTRUSTED_OWNER")
+        env = _cdp_9444_owned_target(acquisition, context, listeners, owners, pid)
+        if env is None:
+            raise acquisition.AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
         acquisition._verify_google_chrome(env)
     except acquisition.AcquisitionBlocked:
         result.update(status="OBSERVED", code="UNTRUSTED_OWNER")
@@ -737,12 +1134,10 @@ def _cdp_9444_topology():
         # before evaluating ownership so known drift stays TOPOLOGY_CHANGED.
         if (current[0] != listeners or current[2] != claimants
                 or current[1] != owners
-                or _cdp_9444_private_context(acquisition) != (env, session, sid)):
+                or _cdp_9444_private_context(acquisition, argv) != context):
             result["code"] = "TOPOLOGY_CHANGED"
             return result
-        if acquisition.evaluate(env, {"listeners": current[0],
-                "processes": [row for row, _ in current[1].values()]}, session_id=session,
-                expected_sid=sid, parse=acquisition._commandline_argv) != ("OWNED", pid):
+        if _cdp_9444_owned_target(acquisition, context, current[0], current[1], pid) != env:
             result["code"] = "TOPOLOGY_CHANGED"
             return result
     except Exception:
@@ -757,6 +1152,87 @@ def _cdp_9444_topology():
     result.update(status="OBSERVED", code="CDP_PROTOCOL_HEALTHY", devtools_protocol_ok=True,
                   infrastructure_ready=True)
     return result
+
+
+_CONFIG_9444_SLOT_IDS = ("SLOT_01", "SLOT_02", "SLOT_03", "SLOT_04", "SLOT_05", "SLOT_06")
+_CONFIG_9444_SLOT_STATES = ("ABSENT", "PRESENT_FILE", "PRESENT_NONFILE", "UNAVAILABLE_OR_REPARSE")
+
+
+def _config_registry_path_state(path: Path, *, directory: bool = False) -> str:
+    """Inspect one component after its parents have passed the metadata check."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError as exc:
+        return "ABSENT" if getattr(exc, "winerror", None) in (None, 2, 3) else "UNAVAILABLE_OR_REPARSE"
+    except (OSError, ValueError):
+        return "UNAVAILABLE_OR_REPARSE"
+    if (stat.S_ISLNK(info.st_mode) or
+            getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+        return "UNAVAILABLE_OR_REPARSE"
+    if directory and not stat.S_ISDIR(info.st_mode):
+        return "UNAVAILABLE_OR_REPARSE"
+    return "PRESENT_FILE" if stat.S_ISREG(info.st_mode) else "PRESENT_NONFILE"
+
+
+def _cdp_9444_config_registry():
+    """Report fixed-slot metadata from the current Windows token's known folder."""
+    unavailable = "UNAVAILABLE_OR_REPARSE"
+
+    def receipt(code, states=(unavailable,) * len(_CONFIG_9444_SLOT_IDS)):
+        return {
+            "status": "OBSERVED" if code == "METADATA_ONLY" else "UNKNOWN",
+            "code": code,
+            "operation": "cdp_9444_config_registry",
+            "cdp_port": 9444,
+            "slots": [{"slot_id": slot, "status": state}
+                      for slot, state in zip(_CONFIG_9444_SLOT_IDS, states)],
+            "counts": {state: states.count(state) for state in _CONFIG_9444_SLOT_STATES},
+            "no_shell_command_executed": True,
+            "browser_attached": False,
+            "chrome_launched": False,
+            "config_written": False,
+            "enrollment_performed": False,
+            "send_performed": False,
+            "grant_issued": False,
+        }
+
+    if os.name != "nt":
+        return receipt("OWNER_KNOWN_FOLDER_UNAVAILABLE")
+    try:
+        from ai_commerce.remote import chrome_acquisition as acquisition
+        relatives = acquisition._CONFIG_9444_RELATIVE_PATHS
+        if len(relatives) != len(_CONFIG_9444_SLOT_IDS):
+            return receipt("REGISTRY_SOURCE_UNAVAILABLE")
+        candidates = tuple(tuple(_relative_path(relative)) for relative in relatives)
+    except (ImportError, AttributeError, Denied):
+        return receipt("REGISTRY_SOURCE_UNAVAILABLE")
+    if (len({relative.lower() for relative in relatives}) != len(candidates)
+            or any(len(parts) > 2 for parts in candidates)):
+        return receipt("REGISTRY_SOURCE_UNAVAILABLE")
+
+    try:
+        local = acquisition._native_local_app_data()
+    except (OSError, ValueError, AttributeError, ImportError):
+        return receipt("OWNER_KNOWN_FOLDER_UNAVAILABLE")
+    if (not isinstance(local, PureWindowsPath) or not local.is_absolute()
+            or not re.fullmatch(r"[A-Za-z]:", local.drive)
+            or len(str(local)) > 4096 or len(local.parts) > 32 or ".." in local.parts):
+        return receipt("OWNER_KNOWN_FOLDER_UNAVAILABLE")
+    for part in (*reversed(local.parents), local):
+        if _config_registry_path_state(part, directory=True) != "PRESENT_NONFILE":
+            return receipt("OWNER_KNOWN_FOLDER_UNAVAILABLE")
+
+    root = local / "AI-Commerce"
+    root_state = _config_registry_path_state(root, directory=True)
+    states = []
+    for parts in candidates:
+        state = root_state
+        if state == "PRESENT_NONFILE" and len(parts) == 2:
+            state = _config_registry_path_state(root / parts[0], directory=True)
+        if state == "PRESENT_NONFILE":
+            state = _config_registry_path_state(root.joinpath(*parts))
+        states.append(state)
+    return receipt("CONFIG_CUSTODY_UNAVAILABLE" if unavailable in states else "METADATA_ONLY", states)
 
 
 def _validate_standing_snapshot(snapshot):
@@ -1536,6 +2012,14 @@ class ExecutorHealthPrivateBridge:
 def perform(request):
     op = request["operation"]
     params = request["parameters"]
+    if op == _CLEAN_AUTOSTART:
+        if type(params) is not dict or params:
+            deny("INVALID_PARAMETERS")
+        return _clean_autostart_receipt("PROTECTED_HOSTOPS_ONLY")
+    if op == "cdp_9444_config_registry":
+        if type(params) is not dict or params:
+            deny("INVALID_PARAMETERS")
+        return _cdp_9444_config_registry()
     if op == "cdp_9444_topology":
         if type(params) is not dict or params:
             deny("INVALID_PARAMETERS")
@@ -1661,7 +2145,10 @@ def main():
         with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as stream:
             event = json.load(stream)
         request = parse_event(event, args.mode)
-        outcome = perform(request)
+        # The protected Issue ingress independently validates and reconstructs
+        # the closed six-slot public receipt before posting any result.
+        outcome = (_install_protected_clean_autostart(event) if request["operation"] == _CLEAN_AUTOSTART
+                   else perform(request))
         result = {
             **outcome,
             "issue_number": request["issue_number"],
@@ -1670,6 +2157,8 @@ def main():
             "remote_shell_enabled": False,
             "source_sha": os.environ.get("GITHUB_SHA", ""),
         }
+        if request["operation"] == _CLEAN_AUTOSTART and not re.fullmatch(r"[a-f0-9]{40}", result["source_sha"]):
+            del result["source_sha"]
     except Denied as exc:
         result["code"] = str(exc)
     except (OSError, ValueError, KeyError, TypeError, UnicodeError):

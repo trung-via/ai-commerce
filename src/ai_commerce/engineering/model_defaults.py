@@ -65,7 +65,7 @@ def _policy(repo: Path) -> tuple[ExecutorSelection, ExecutorSelection, int]:
         raise SelectionError("MODEL_DEFAULTS_POLICY_INVALID") from exc
 
 
-def _state(repo: Path) -> dict:
+def _state(repo: Path, *, preferred: ExecutorSelection | None = None) -> dict:
     file = repo / STATE_PATH
     if not file.is_file():
         return {"version": 1, "mode": "PREFERRED"}
@@ -77,6 +77,13 @@ def _state(repo: Path) -> dict:
             _parse(obj["retry_after"])
         if obj.get("last_attempt_started_at"):
             _parse(obj["last_attempt_started_at"])
+        # Quota evidence for a previous model/effort must not demote a new
+        # Human-selected preferred profile (including legacy unbound state).
+        if preferred is not None and obj.get("quota_for") != {
+            "executor": preferred.executor, "model": preferred.model,
+            "effort": preferred.effort,
+        }:
+            return {"version": 1, "mode": "PREFERRED"}
         return obj
     except (OSError, ValueError, KeyError, TypeError, SelectionError) as exc:
         raise SelectionError("MODEL_DEFAULTS_STATE_INVALID") from exc
@@ -88,7 +95,7 @@ def resolve_model(repo: Path, *, override: ExecutorSelection | None = None,
     if override is not None:
         return ModelDecision(override, "HUMAN_EXPLICIT", "OVERRIDE")
     preferred, fallback, _ = _policy(Path(repo))
-    state = _state(Path(repo))
+    state = _state(Path(repo), preferred=preferred)
     if state["mode"] == "QUOTA_FALLBACK":
         retry_after = state["retry_after"]
         if _utc(now) < _parse(retry_after):
@@ -143,11 +150,13 @@ def observe_result(repo: Path, report: dict, *, now: datetime | None = None) -> 
     if not isinstance(started, str):
         return "IGNORED_NO_ATTEMPT_TIME"
     start = _parse(started)
-    old = _state(Path(repo))
+    old = _state(Path(repo), preferred=preferred)
     if old.get("last_attempt_started_at") and start < _parse(old["last_attempt_started_at"]):
         return "IGNORED_STALE_ATTEMPT"
     timestamp = _utc(now)
     next_state = {"version": 1, "mode": "QUOTA_FALLBACK" if quota else "PREFERRED",
+                  "quota_for": {"executor": preferred.executor, "model": preferred.model,
+                                "effort": preferred.effort},
                   "last_attempt_started_at": start.isoformat(),
                   "last_attempt_id": str(report.get("attempt_id", "")),
                   "observed_at": timestamp.isoformat(),

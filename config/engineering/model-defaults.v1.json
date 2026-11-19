@@ -3,13 +3,13 @@
   "hard_default": false,
   "preferred": {
     "executor": "codex",
-    "model": "gpt-6.1-sol",
-    "effort": "xhigh"
+    "model": "gpt-6.2-sol",
+    "effort": "high"
   },
   "fallback": {
     "executor": "antigravity",
-    "model": "gemini-3.8-flash",
-    "effort": "high"
+    "model": "gemini-4-hydrogen",
+    "effort": "xhigh"
   },
   "recovery_probe_cooldown_seconds": 3600
 }
