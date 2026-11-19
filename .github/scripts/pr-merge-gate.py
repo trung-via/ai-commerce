@@ -22,6 +22,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -746,6 +747,69 @@ def _ef02_proof_trace(stage: str) -> None:
         print("EF02_ORIGINAL_PROOF_STAGE=" + stage, flush=True)
 
 
+def _ef02_verified_junit_closure(archive: zipfile.ZipFile,
+                                 hashes: dict[str, str],
+                                 required_tests: set[str]) -> bool:
+    """Prove registered consumers from original hashed Windows MT-01 JUnit.
+
+    EF01 may run a focused verification.argv plus a separate registered MT-01
+    owner/consumer closure. The argv alone is not the executed test inventory.
+    Only the run-custodied EF02 ZIP with exact candidate-bound SHA256 hashes
+    can attest the additional Windows cases; no synthetic filename list counts.
+    """
+    expected = {}
+    for key, digest in hashes.items():
+        matched = re.fullmatch(r"mt01_(\d+)_junit", key)
+        if not matched:
+            continue
+        index = int(matched.group(1))
+        if (index in expected or not re.fullmatch(r"[0-9a-f]{64}", str(digest))):
+            return False
+        expected[index] = digest
+    if not 1 <= len(expected) <= 100:
+        return False
+    actual = {}
+    for name in archive.namelist():
+        matched = re.fullmatch(r".+/ef01/mt01\.(\d+)\.junit\.xml", name)
+        if not matched:
+            continue
+        index = int(matched.group(1))
+        if index in actual:
+            return False
+        actual[index] = name
+    if set(actual) != set(expected):
+        return False
+    required_modules = {p: p.removesuffix(".py").replace("/", ".")
+                        for p in required_tests}
+    observed_pass = set()
+    try:
+        for index, name in actual.items():
+            if archive.getinfo(name).file_size > 2 * 1024 * 1024:
+                return False
+            raw = archive.read(name)
+            if hashlib.sha256(raw).hexdigest() != expected[index]:
+                return False
+            root = ET.fromstring(raw)
+            if root.tag not in ("testsuites", "testsuite"):
+                return False
+            suites = (root,) if root.tag == "testsuite" else root.findall("testsuite")
+            if not suites or any(s.get("failures") != "0" or s.get("errors") != "0"
+                                 for s in suites):
+                return False
+            for case in root.iter("testcase"):
+                if any(child.tag in ("failure", "error") for child in case):
+                    return False
+                if case.find("skipped") is not None:
+                    continue
+                classname = case.get("classname", "")
+                for path, module in required_modules.items():
+                    if classname == module or classname.startswith(module + "."):
+                        observed_pass.add(path)
+    except (ET.ParseError, KeyError, ValueError, OSError, RuntimeError):
+        return False
+    return required_tests <= observed_pass
+
+
 def verified_ef02_candidate(api: Callable[[str], Any], repository: str,
                             head: str, changed_files: object) -> bool:
     """Reuse a genuine EF02 Windows PASS on unchanged candidate bytes.
@@ -808,7 +872,6 @@ def verified_ef02_candidate(api: Callable[[str], Any], repository: str,
         if (verify.get("status") != "BUILD_VERIFIED_FOR_SCOPE" or
                 verify.get("exit_code") != 0 or
                 not isinstance(argv, list) or
-                not set(required_tests) <= set(argv) or
                 not all(isinstance(t, str) for t in argv) or
                 not isinstance(verify.get("evidence_sha256"), dict) or
                 not verify["evidence_sha256"] or
@@ -879,6 +942,12 @@ def verified_ef02_candidate(api: Callable[[str], Any], repository: str,
             if len(names) != 1 or archive.getinfo(names[0]).file_size > 2 * 1024 * 1024:
                 return False
             report = json.loads(archive.read(names[0]))
+            if not set(required_tests) <= set(argv):
+                if not _ef02_verified_junit_closure(
+                        archive, verify["evidence_sha256"], set(required_tests)):
+                    _ef02_proof_trace("REQUIRED_CONSUMER_JUNIT_UNPROVEN")
+                    return False
+                _ef02_proof_trace("REQUIRED_CONSUMER_JUNIT_VERIFIED")
         if (not isinstance(report, dict) or report.get("status") != "COMPLETE" or
                 str(report.get("github_workflow_run_id")) != str(run_id) or
                 not isinstance(report.get("actions"), list)):

@@ -368,6 +368,60 @@ def test_ef02_proof_main_advance_refuses_invalid_bytes_or_divergent_history(gate
     assert divergent.writes == []
 
 
+class EF02JunitConsumerProof(EF02OriginalProofGitHub):
+    """Focused argv omits consumers, but real hashed Windows JUnit covers them."""
+
+    def __init__(self, gate, *, mutation=None):
+        super().__init__(gate)
+        import hashlib
+        cases = ['<testcase classname="tests.test_minimum_test" name="test_owner"/>']
+        if mutation != "missing_consumer":
+            ending = '<failure message="bad"/>' if mutation == "failed_consumer" else ""
+            cases.append('<testcase classname="tests.test_consumer" name="test_consumer">'
+                         + ending + '</testcase>')
+        failures = 1 if mutation == "failed_consumer" else 0
+        self.junit = (f'<testsuites><testsuite tests="{len(cases)}" failures="{failures}" '
+                      f'errors="0">{"".join(cases)}</testsuite></testsuites>').encode()
+        digest = hashlib.sha256(self.junit).hexdigest()
+        self.evidence["verification"]["evidence_sha256"]["mt01_0_junit"] = (
+            "a" * 64 if mutation == "bad_hash" else digest)
+        self.mutation = mutation
+
+    def read_artifact(self, artifact_id):
+        import io
+        import zipfile
+        original = super().read_artifact(artifact_id)
+        output = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(original)) as old:
+            with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as new:
+                for name in old.namelist():
+                    new.writestr(name, old.read(name))
+                if self.mutation != "missing_xml":
+                    new.writestr("batch/ef01/mt01.0.junit.xml", self.junit)
+        return output.getvalue()
+
+
+@pytest.mark.parametrize(("mutation", "expected"), [
+    (None, "READY_FOR_MERGE"),
+    ("bad_hash", "WAIT_CI"),
+    ("missing_consumer", "WAIT_CI"),
+    ("failed_consumer", "WAIT_CI"),
+    ("missing_xml", "WAIT_CI"),
+])
+def test_ef02_hashed_original_junit_closes_consumer_tests_missing_from_argv(
+    gate, monkeypatch, mutation, expected,
+):
+    monkeypatch.setattr(gate, "reviewed_coverage_for_changed_files",
+                        lambda files: (
+                            ("src/ai_commerce/product/identity.py",),
+                            ("tests/test_minimum_test.py", "tests/test_consumer.py")))
+    api = EF02JunitConsumerProof(gate, mutation=mutation)
+    verdict = gate.verify_one(api, api.repo, api.pr)
+    assert verdict.status == expected
+    assert api.ci_hits == (0 if expected == "READY_FOR_MERGE" else 1)
+    assert api.writes == []
+
+
 def test_ef02_exact_proof_brain_merges_without_second_ci(gate):
     api = EF02OriginalProofGitHub(gate)
     decision = gate.verify_one(api, api.repo, api.pr)
