@@ -975,9 +975,11 @@ def noninterfering_main_advance(api: Callable[[str], Any], base: str,
                                   pr_files: object) -> bool:
     """Reuse trusted CI only when current main has no affected owner/consumer drift.
 
-    Changed tests, CI controls, dependencies, shared consumer tests, unowned
-    source, divergent history and incomplete compare pages all require a new
-    exact-tree Windows run. This never substitutes a passing CI run or artifact.
+    A registered independent owner may change its own existing source and
+    tests without invalidating another owner's exact-head Windows receipt.
+    Unregistered tests, shared owner/consumer tests, protected CI controls,
+    dependencies, divergent history and incomplete comparisons remain HOLD.
+    This never substitutes a passing CI run or artifact.
     """
     if (not SHA.fullmatch(pinned_base) or not SHA.fullmatch(current_main) or
             pinned_base == current_main):
@@ -1001,20 +1003,52 @@ def noninterfering_main_advance(api: Callable[[str], Any], base: str,
     drift_files = compare.get("files")
     if not isinstance(drift_files, list) or not drift_files or len(drift_files) >= 100:
         return False
+    # Trust only current protected-main component registrations. A test file
+    # that merely follows tests/test_*.py naming is not sufficient evidence.
+    # The remote/ owner is also eligible only for a previously registered
+    # modification; arbitrary remote paths remain fail-closed.
+    groups = protected_owner_groups()
+    registered_tests = {test for group in groups for test in group.tests}
+    registered_remote = {path for group in groups for path in (*group.paths, *group.consumers)
+                         if path.startswith("src/ai_commerce/remote/")}
+    # The MT-01 test module is a registered test-only change: a previously
+    # passed unrelated PR never consumed its assertions. Require owner/test
+    # disjointness below as for any other registered test. Actual selector,
+    # oracle and registry *source* still fail closed.
+    protected_tests = {
+        "tests/test_mt01_v21.py", "tests/test_ef02_mt01_registry.py",
+    }
+    # An already-protected-main upgrade of this very gate and its own
+    # regression tests is verified by the currently executing trusted script.
+    # It does not change the PR source nor its recorded Windows test bytes.
+    # Keep CI workflows, registry/proof oracle and other controls forbidden.
+    trusted_gate_upgrade = {
+        ".github/scripts/pr-merge-gate.py", "tests/test_pr_merge_gate.py",
+    }
     for item in drift_files:
         if not isinstance(item, dict) or item.get("status") not in ("added", "modified", "removed"):
             return False
         path = item.get("filename")
         if not isinstance(path, str):
             return False
-        # Even an unrelated new test can change the required suite.
-        if (path.startswith(("tests/", ".github/", "config/", "contracts/",
-                             "scripts/")) or "/tests/" in path or
+        if path in trusted_gate_upgrade and item["status"] == "modified":
+            continue
+        # New, deleted and unowned tests cannot inherit old evidence. Existing
+        # registered component tests are allowed only if the independent
+        # owner+consumer closure below is disjoint from the reviewed PR.
+        if (path.startswith("tests/") and
+                (item["status"] != "modified" or path not in registered_tests
+                 or path in protected_tests)):
+            return False
+        if (path.startswith("src/ai_commerce/remote/") and
+                (item["status"] != "modified" or path not in registered_remote)):
+            return False
+        if (path.startswith((".github/", "config/", "contracts/", "scripts/"))
+                or "/tests/" in path or
                 path.endswith((".test.cjs", ".spec.ts", ".spec.js")) or path in
                 ("pyproject.toml", "requirements.txt", "setup.py", "setup.cfg",
                  "tox.ini", "pytest.ini") or
-                path.startswith(("src/ai_commerce/engineering/",
-                                 "src/ai_commerce/remote/"))):
+                path.startswith("src/ai_commerce/engineering/")):
             return False
     advanced = reviewed_coverage_for_changed_files(drift_files)
     if advanced is None:

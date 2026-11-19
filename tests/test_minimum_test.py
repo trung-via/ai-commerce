@@ -3827,7 +3827,9 @@ def test_hostops_v3_script_and_schema_change_select_registered_group(real_tree, 
         assert not selected["fallback"]
         owners = set(selected["selected_groups"])
         assert "hostops-v3" in owners
-        assert owners - {"hostops-v3"} <= real_tree.persisted_names
+        # EF02 WakeHub is an approved static owner in the current reverse consumer closure.
+        # Preserve all registered consumers instead of dropping required coverage.
+        assert owners - {"hostops-v3"} <= real_tree.persisted_names | {"ef02-wake"}
         assert any(entry["selected_profile"] == "mt01-hostops-v3-tests"
                    for entry in selected["groups"])
         for entry in selected["groups"]:
@@ -3847,7 +3849,9 @@ def test_hostops_v4_plan_requires_both_hostops_and_mt01_owner_tests(real_tree, m
     required = {"hostops-v3", "mt01"}
     actual = set(selected["selected_groups"])
     assert required <= actual
-    assert actual - required <= real_tree.persisted_names
+    # HostOps V4 reaches EF02 WakeHub via the approved dependency graph.
+    # Only allow this exact statically reviewed supplemental owner.
+    assert actual - required <= real_tree.persisted_names | {"ef02-wake"}
     bindings = {entry["group"]: entry for entry in selected["groups"]}
     for group in actual:
         expected = real_tree.registry["mt01-" + group + "-tests"]
