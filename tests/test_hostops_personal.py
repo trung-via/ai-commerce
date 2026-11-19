@@ -2232,6 +2232,7 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
                 patch.object(hostops, "_git", side_effect=lambda *args: git[args]):
             for args, value in (
                 (("rev-parse", "HEAD", "refs/remotes/origin/main"), "b" * 40 + "\n" + self.sha),
+                (("status", "--porcelain=v1", "--untracked-files=all"), " M src/PRIVATE.py"),
                 (("status", "--porcelain=v1", "--untracked-files=all"), "?? src/PRIVATE.py"),
             ):
                 with patch.dict(git, {args: value}):
@@ -2324,6 +2325,17 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         ):
             with patch.object(owner, name, side_effect=error(expected)):
                 self.assertEqual(self.invoke()["code"], expected)
+        self.task.assert_not_called()
+        self.record.assert_not_called()
+        self.probe.assert_not_called()
+
+    def test_runtime_layout_holds_keep_generic_install_receipt(self):
+        for stage in ("interpreter", "missing_paths", "unsafe_path", "owner_identity", "shadow_policy"):
+            with self.subTest(stage=stage):
+                self.managed_runtime.side_effect = self.acq._ManagedCleanRuntimeHold(stage)
+                receipt = self.invoke()
+                self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "AUTOSTART_RUNTIME_UNAVAILABLE"))
+        self.inventory.assert_not_called()
         self.task.assert_not_called()
         self.record.assert_not_called()
         self.probe.assert_not_called()

@@ -2340,10 +2340,25 @@ def test_clean_9444_scheduler_install_reports_exact_private_status(clean_9444, m
 
 @pytest.mark.parametrize("failure, code, subprocess_count", [
     (None, "READY", 3),
-    ("interpreter", "CPYTHON_LAYOUT_UNVERIFIED", 0),
-    ("missing_dll", "CPYTHON_LAYOUT_UNVERIFIED", 0),
-    ("owner", "CPYTHON_LAYOUT_UNVERIFIED", 0),
-    ("reparse", "CPYTHON_LAYOUT_UNVERIFIED", 0),
+    ("executable", "CPYTHON_INTERPRETER_MISMATCH", 0),
+    ("base_prefix_and_missing_dll", "CPYTHON_INTERPRETER_MISMATCH", 0),
+    ("python.exe", "CPYTHON_LAYOUT_PATH_MISSING", 0),
+    ("pythonw.exe", "CPYTHON_LAYOUT_PATH_MISSING", 0),
+    ("python312.dll", "CPYTHON_LAYOUT_PATH_MISSING", 0),
+    ("site-packages", "CPYTHON_LAYOUT_PATH_MISSING", 0),
+    ("source", "CPYTHON_LAYOUT_PATH_MISSING", 0),
+    ("relative_source", "CPYTHON_LAYOUT_PATH_UNSAFE", 0),
+    ("special_character", "CPYTHON_LAYOUT_PATH_UNSAFE", 0),
+    ("reparse", "CPYTHON_LAYOUT_PATH_UNSAFE", 0),
+    ("symlink", "CPYTHON_LAYOUT_PATH_UNSAFE", 0),
+    ("owner_path_unsafe", "CPYTHON_LAYOUT_PATH_UNSAFE", 0),
+    ("owner_mismatch", "CPYTHON_OWNER_IDENTITY_UNVERIFIED", 0),
+    ("owner_acl", "CPYTHON_OWNER_IDENTITY_UNVERIFIED", 0),
+    ("owner_token", "CPYTHON_OWNER_IDENTITY_UNVERIFIED", 0),
+    ("pyvenv.cfg", "CPYTHON_SHADOW_FILE_PRESENT", 0),
+    ("python._pth", "CPYTHON_SHADOW_FILE_PRESENT", 0),
+    ("python312._pth", "CPYTHON_SHADOW_FILE_PRESENT", 0),
+    ("unexpected", "UNKNOWN", 0),
     ("signature", "CPYTHON_SIGNATURE_UNVERIFIED", 1),
     ("bootstrap", "CPYTHON_BOOTSTRAP_UNVERIFIED", 2),
     ("task", "TASK_READ_UNVERIFIED", 3),
@@ -2351,32 +2366,74 @@ def test_clean_9444_scheduler_install_reports_exact_private_status(clean_9444, m
 ])
 def test_clean_9444_runtime_probe_runs_only_fixed_checks(tmp_path, monkeypatch, failure, code, subprocess_count):
     from ai_commerce.hostops_v3 import personal
-    from ai_commerce.remote import local_completion_handoff
+    from ai_commerce.remote import local_completion_handoff, local_wake_entry
 
     base = tmp_path / "Programs" / "Python" / "Python312"
-    (base / "Lib" / "site-packages").mkdir(parents=True)
+    site = base / "Lib" / "site-packages"
+    site.mkdir(parents=True)
     python, pythonw, dll = (base / name for name in ("python.exe", "pythonw.exe", "python312.dll"))
     source = tmp_path / personal._ACQUISITION_SOURCE
+    if failure == "special_character":
+        source = source.with_name("PRIVATE%source.py")
     source.parent.mkdir(parents=True)
-    for path in (python, pythonw, source):
-        path.touch()
-    if failure != "missing_dll":
-        dll.touch()
+    for name, path in (("python.exe", python), ("pythonw.exe", pythonw),
+                       ("python312.dll", dll), ("source", source)):
+        if failure != name:
+            path.touch()
+    if failure == "base_prefix_and_missing_dll":
+        dll.unlink()
+    if failure == "site-packages":
+        site.rmdir()
+    if failure == "relative_source":
+        source = Path("PRIVATE-relative.py")
+    if failure in ("pyvenv.cfg", "python._pth", "python312._pth"):
+        (base / failure).write_bytes(b"PRIVATE shadow contents")
+
     powershell = tmp_path / "powershell.exe"
     monkeypatch.setattr(ca, "sys", SimpleNamespace(
-        executable=str(python if failure != "interpreter" else tmp_path / "runner" / "python.exe"),
-        base_prefix=str(base), version_info=SimpleNamespace(major=3, minor=12),
+        executable=str(tmp_path / "runner" / "python.exe" if failure == "executable" else python),
+        base_prefix=str(tmp_path / "runner" if failure == "base_prefix_and_missing_dll" else base),
+        version_info=SimpleNamespace(major=3, minor=12),
     ))
-    monkeypatch.setattr(local_completion_handoff, "_private_identity",
-                        lambda path: "PRIVATE foreign SID" if failure == "owner" and path == dll else _OPERATOR_SID)
-    if failure == "reparse":
-        monkeypatch.setattr(ca, "_no_links", lambda path: path != dll)
+    identity_errors = {
+        "owner_path_unsafe": local_completion_handoff.HandoffBlocked("HANDOFF_PATH_UNSAFE"),
+        "owner_acl": local_completion_handoff.HandoffBlocked("HANDOFF_PERMISSIONS_UNAVAILABLE"),
+        "owner_token": local_wake_entry.LocalWakeConfigError("PROCESS_IDENTITY_UNAVAILABLE"),
+        "unexpected": RuntimeError("PRIVATE probe details"),
+    }
+
+    def private_identity(path):
+        if path == dll:
+            if failure in identity_errors:
+                raise identity_errors[failure]
+            if failure == "owner_mismatch":
+                return "PRIVATE foreign SID"
+        return _OPERATOR_SID
+
+    monkeypatch.setattr(local_completion_handoff, "_private_identity", private_identity)
+    if failure in ("reparse", "symlink"):
+        # Model a broken link in the layout without requiring Windows symlink privileges.
+        dll.unlink()
+        original_lstat = Path.lstat
+        original_is_symlink = Path.is_symlink
+
+        def lstat(path):
+            if path == dll:
+                return SimpleNamespace(st_file_attributes=0x400 if failure == "reparse" else 0)
+            return original_lstat(path)
+
+        def is_symlink(path):
+            return failure == "symlink" if path == dll else original_is_symlink(path)
+
+        monkeypatch.setattr(Path, "lstat", lstat)
+        monkeypatch.setattr(Path, "is_symlink", is_symlink)
     monkeypatch.setattr(personal, "_require_protected_clean_runner", lambda event_name: None)
     monkeypatch.setattr(personal, "_protected_clean_workflow_sha", lambda: "a" * 40)
     monkeypatch.setattr(personal, "_persistent_clean_source", lambda acquisition, sha: source)
     monkeypatch.setattr(ca, "_native_operator", lambda: (tmp_path, 7, _OPERATOR_SID))
     monkeypatch.setattr(ca, "_clean_pending", lambda name: False)
     monkeypatch.setattr(ca, "_powershell", lambda: powershell)
+    monkeypatch.setattr(ca.subprocess, "Popen", lambda *args, **kwargs: pytest.fail("Chrome launch forbidden"))
 
     calls = []
 
@@ -2395,7 +2452,9 @@ def test_clean_9444_runtime_probe_runs_only_fixed_checks(tmp_path, monkeypatch, 
     monkeypatch.setattr(ca.subprocess, "run", run)
     result = personal._probe_protected_clean_runtime()
     assert (result["status"], result["code"]) == ("OBSERVED", code)
-    assert "PRIVATE" not in json.dumps(result)
+    serialized = json.dumps(result)
+    for private in ("PRIVATE", str(tmp_path), _OPERATOR_SID, "SIGNED_CPYTHON", "HANDOFF_"):
+        assert json.dumps(private)[1:-1] not in serialized
     assert len(calls) == subprocess_count
     assert all(kwargs["timeout"] == 15 and kwargs["stderr"] == subprocess.DEVNULL for _, kwargs in calls)
     if calls:

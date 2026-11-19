@@ -550,7 +550,11 @@ def _observe_clean_runtime(sha: str) -> str:
         runtime = acquisition._managed_clean_runtime(local, sid, source)
     except acquisition._ManagedCleanRuntimeHold as exc:
         return {
-            "layout": "CPYTHON_LAYOUT_UNVERIFIED",
+            "interpreter": "CPYTHON_INTERPRETER_MISMATCH",
+            "missing_paths": "CPYTHON_LAYOUT_PATH_MISSING",
+            "unsafe_path": "CPYTHON_LAYOUT_PATH_UNSAFE",
+            "owner_identity": "CPYTHON_OWNER_IDENTITY_UNVERIFIED",
+            "shadow_policy": "CPYTHON_SHADOW_FILE_PRESENT",
             "signature": "CPYTHON_SIGNATURE_UNVERIFIED",
             "bootstrap": "CPYTHON_BOOTSTRAP_UNVERIFIED",
         }.get(exc.stage, "UNKNOWN")

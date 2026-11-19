@@ -1661,7 +1661,10 @@ class _Clean9444Hold(ValueError):
 class _ManagedCleanRuntimeHold(_Clean9444Hold):
     """Keep the installer code while identifying a failed runtime check."""
 
-    def __init__(self, stage: Literal["layout", "signature", "bootstrap"]):
+    def __init__(self, stage: Literal[
+        "interpreter", "missing_paths", "unsafe_path", "owner_identity", "shadow_policy",
+        "signature", "bootstrap",
+    ]):
         super().__init__("AUTOSTART_RUNTIME_UNAVAILABLE")
         self.stage = stage
 
@@ -2151,6 +2154,7 @@ if len(sys.argv) == 1:
 def _managed_clean_runtime(local: Path, sid: str, source: Path) -> tuple[Path, Path]:
     """Prove an installed per-user CPython and the fixed checkout can run together."""
     from .local_completion_handoff import HandoffBlocked, _private_identity
+    from .local_wake_entry import LocalWakeConfigError
 
     version = f"{sys.version_info.major}{sys.version_info.minor}"
     base = local / "Programs" / "Python" / f"Python{version}"
@@ -2159,14 +2163,27 @@ def _managed_clean_runtime(local: Path, sid: str, source: Path) -> tuple[Path, P
     site = base / "Lib" / "site-packages"
     owner_paths = (base, python, pythonw, dll, base / "Lib", site)
     try:
-        if (Path(sys.base_prefix) != base or Path(sys.executable) != python
-                or any(not path.is_absolute() or not _no_links(path) for path in (*owner_paths, source))
-                or any(not path.is_file() for path in (python, pythonw, dll, source))
-                or not site.is_dir() or any(_private_identity(path) != sid for path in owner_paths)
-                or any(re.search(r"[%\r\n]", str(path)) for path in (pythonw, source))
-                or any(os.path.lexists(base / name)
-                       for name in ("pyvenv.cfg", "python._pth", f"python{version}._pth"))):
-            raise _ManagedCleanRuntimeHold("layout")
+        if Path(sys.base_prefix) != base or Path(sys.executable) != python:
+            raise _ManagedCleanRuntimeHold("interpreter")
+        # Detect unsafe paths before checking presence so broken links are classified as unsafe.
+        if (any(re.search(r"[%\r\n]", str(path)) for path in (pythonw, source))
+                or any(not path.is_absolute() or not _no_links(path) for path in (*owner_paths, source))):
+            raise _ManagedCleanRuntimeHold("unsafe_path")
+        if any(not path.is_file() for path in (python, pythonw, dll, source)) or not site.is_dir():
+            raise _ManagedCleanRuntimeHold("missing_paths")
+        try:
+            if any(_private_identity(path) != sid for path in owner_paths):
+                raise _ManagedCleanRuntimeHold("owner_identity")
+        except HandoffBlocked as exc:
+            if str(exc) == "HANDOFF_PATH_UNSAFE":
+                raise _ManagedCleanRuntimeHold("unsafe_path") from None
+            if str(exc) in ("HANDOFF_PERMISSIONS_INVALID", "HANDOFF_PERMISSIONS_UNAVAILABLE"):
+                raise _ManagedCleanRuntimeHold("owner_identity") from None
+            raise
+        except (LocalWakeConfigError, OSError):
+            raise _ManagedCleanRuntimeHold("owner_identity") from None
+        if any(os.path.lexists(base / name) for name in ("pyvenv.cfg", "python._pth", f"python{version}._pth")):
+            raise _ManagedCleanRuntimeHold("shadow_policy")
         env = _child_environment()
         env.update(AI_COMMERCE_PYTHON=str(python), AI_COMMERCE_PYTHONW=str(pythonw),
                    AI_COMMERCE_PYTHON_DLL=str(dll))
@@ -2189,8 +2206,6 @@ def _managed_clean_runtime(local: Path, sid: str, source: Path) -> tuple[Path, P
                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         if result.returncode:
             raise _ManagedCleanRuntimeHold("bootstrap")
-    except HandoffBlocked:
-        raise _ManagedCleanRuntimeHold("layout") from None
     except _ManagedCleanRuntimeHold:
         raise
     except (OSError, ValueError, subprocess.TimeoutExpired):
