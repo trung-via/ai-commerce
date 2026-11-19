@@ -23,7 +23,7 @@ from ai_commerce.core.provenance import canonical_bytes, sha256_bytes
 from ai_commerce.providers.base import ProviderCapabilities
 
 from ._validation import CreativeValidationError, exact_fields, json_object, read_json, require_text
-from .models import EDITABLE_FIELDS, ConceptChange, ConceptDraft, ProviderObservation, require_digest
+from .models import EDITABLE_FIELDS, ConceptChange, ConceptDraft, ProductionPackageSpec, ProviderObservation, require_digest
 from .decisions import CreativeModelSelection
 from .v2 import CLIExecutionObservation, ModelConfiguration, ReasoningRequest, ReasoningResult, UsageObservation, _result_schema
 
@@ -43,10 +43,150 @@ class InvocationAuthorization:
             raise CreativeValidationError("live authorization needs an explicit reference")
 
 
-def structured_output_schema(*, r2: bool = False) -> dict[str, Any]:
+def structured_output_schema(*, r2: bool = False, r3: bool = False) -> dict[str, Any]:
     """Fresh provider-neutral JSON Schema; semantic checks remain local."""
+    if r2 and r3:
+        raise CreativeValidationError("structured schema cannot combine R2 and R3")
     text = {"type": "string", "minLength": 1}
+    opt_text = {"type": ["string", "null"]}
     texts = {"type": "array", "items": {"type": "string", "minLength": 1}}
+    if r3:
+        nonempty_texts = {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+        camera = {
+            "type": "object", "additionalProperties": False,
+            "required": ["framing", "lens", "movement"],
+            "properties": {"framing": dict(text), "lens": dict(text), "movement": dict(text)},
+        }
+        identity = {
+            "type": "object", "additionalProperties": False,
+            "required": ["identity_id", "kind", "description", "continuity_invariants"],
+            "properties": {
+                "identity_id": dict(text),
+                "kind": {"type": "string", "enum": ["CHARACTER", "OBJECT", "ENVIRONMENT", "ABSTRACT"]},
+                "description": dict(text),
+                "continuity_invariants": dict(nonempty_texts),
+            },
+        }
+        scene = {
+            "type": "object", "additionalProperties": False,
+            "required": [
+                "scene_id", "order", "duration_seconds", "state_s0", "action", "state_s1",
+                "camera", "lighting", "visual_style", "speech_mode", "identity_refs", "sound_cue",
+            ],
+            "properties": {
+                "scene_id": dict(text),
+                "order": {"type": "integer", "minimum": 1},
+                "duration_seconds": {"type": "number", "exclusiveMinimum": 0},
+                "state_s0": dict(text),
+                "action": dict(text),
+                "state_s1": dict(text),
+                "camera": camera,
+                "lighting": dict(text),
+                "visual_style": dict(text),
+                "speech_mode": {"type": "string", "enum": ["SPOKEN", "SILENCE"]},
+                "identity_refs": dict(texts),
+                "sound_cue": dict(opt_text),
+            },
+        }
+        segment = {
+            "type": "object", "additionalProperties": False,
+            "required": ["segment_id", "scene_id", "speech_mode", "spoken_text", "language", "delivery_notes"],
+            "properties": {
+                "segment_id": dict(text),
+                "scene_id": dict(text),
+                "speech_mode": {"type": "string", "enum": ["SPOKEN", "SILENCE"]},
+                "spoken_text": dict(opt_text),
+                "language": dict(opt_text),
+                "delivery_notes": dict(opt_text),
+            },
+        }
+        transition = {
+            "type": "object", "additionalProperties": False,
+            "required": ["from_scene_id", "to_scene_id", "kind", "notes"],
+            "properties": {
+                "from_scene_id": dict(text), "to_scene_id": dict(text),
+                "kind": dict(text), "notes": dict(opt_text),
+            },
+        }
+        audio = {
+            "type": "object", "additionalProperties": False,
+            "required": ["mode", "sound_design", "voiceover", "music"],
+            "properties": {
+                "mode": {"type": "string", "enum": ["SILENCE", "SOUND_DESIGN", "VOICEOVER", "MUSIC", "MIXED"]},
+                "sound_design": dict(opt_text), "voiceover": dict(opt_text), "music": dict(opt_text),
+            },
+        }
+        media_target = {
+            "type": "object", "additionalProperties": False,
+            "required": [
+                "target_id", "media_kind", "aspect_ratio", "format_hint",
+                "scene_refs", "delivery_note", "generation_status",
+            ],
+            "properties": {
+                "target_id": dict(text),
+                "media_kind": {"type": "string", "enum": ["image", "video", "audio", "storyboard_frame"]},
+                "aspect_ratio": dict(text),
+                "format_hint": dict(text),
+                "scene_refs": dict(nonempty_texts),
+                "delivery_note": dict(opt_text),
+                "generation_status": {"type": "string", "enum": ["NOT_GENERATED"]},
+            },
+        }
+        qa = {
+            "type": "object", "additionalProperties": False,
+            "required": [
+                "check_id", "target", "criterion", "verification_method",
+                "claim_authority", "verification_status",
+            ],
+            "properties": {
+                "check_id": dict(text), "target": dict(text), "criterion": dict(text),
+                "verification_method": dict(text),
+                "claim_authority": {"type": "string", "enum": ["GENERATED_CLAIM", "HYPOTHESIS"]},
+                "verification_status": {"type": "string", "enum": ["UNVERIFIED"]},
+            },
+        }
+        attribution = {
+            "type": "object", "additionalProperties": False,
+            "required": ["source_ref", "attribution", "rights_status", "evidence_sha256", "verification_ref"],
+            "properties": {
+                "source_ref": dict(text), "attribution": dict(text),
+                "rights_status": {"type": "string", "enum": ["UNKNOWN", "EVIDENCE_BOUND"]},
+                "evidence_sha256": dict(opt_text), "verification_ref": dict(opt_text),
+            },
+        }
+        spec = {
+            "type": "object", "additionalProperties": False,
+            "required": [
+                "narrative_intention", "visual_style", "lighting_direction", "identities",
+                "physics_invariants", "temporal_invariants", "creative_freedoms", "scenes",
+                "script", "transitions", "audio", "media_targets", "qa_expectations", "attributions",
+            ],
+            "properties": {
+                "narrative_intention": dict(text),
+                "visual_style": dict(text),
+                "lighting_direction": dict(text),
+                "identities": {"type": "array", "items": identity},
+                "physics_invariants": dict(texts),
+                "temporal_invariants": dict(texts),
+                "creative_freedoms": dict(texts),
+                "scenes": {"type": "array", "minItems": 1, "items": scene},
+                "script": {"type": "array", "minItems": 1, "items": segment},
+                "transitions": {"type": "array", "items": transition},
+                "audio": audio,
+                "media_targets": {"type": "array", "minItems": 1, "items": media_target},
+                "qa_expectations": {"type": "array", "minItems": 1, "items": qa},
+                "attributions": {"type": "array", "items": attribution},
+            },
+        }
+        return {
+            "type": "object", "additionalProperties": False,
+            "required": ["production_spec", "evidence_refs", "hypotheses"],
+            "properties": {
+                "production_spec": spec,
+                "evidence_refs": dict(texts),
+                "hypotheses": dict(texts),
+            },
+        }
     draft = {
         "type": "object", "additionalProperties": False,
         "required": ["family", "title", "premise", "visual_direction", "source_refs", "assumptions"],
@@ -83,7 +223,16 @@ def structured_output_schema(*, r2: bool = False) -> dict[str, Any]:
 
 
 def parse_creative_output(request: ReasoningRequest, output_json: str) -> dict[str, Any]:
-    """Strict shared parser for the adapter and immutable R2 response verifier."""
+    """Strict shared parser for the adapter and immutable R2/R3 response verifier."""
+    if request.production is not None:
+        from ._validation import text_tuple
+        output = exact_fields(read_json(output_json), {"production_spec", "evidence_refs", "hypotheses"})
+        return {
+            "drafts": (), "edits": (), "critique": None,
+            "production_spec": ProductionPackageSpec.from_dict(output["production_spec"]),
+            "evidence_refs": text_tuple(output["evidence_refs"], "evidence_refs"),
+            "hypotheses": text_tuple(output["hypotheses"], "hypotheses"),
+        }
     r2 = request.cycle is not None
     output = exact_fields(read_json(output_json), {"drafts", "edits", "critique"} |
                           ({"selection", "evidence_refs", "hypotheses"} if r2 else set()))
@@ -118,7 +267,7 @@ class StructuredModelRequest:
 
     @property
     def output_schema(self) -> dict[str, Any]:
-        return structured_output_schema(r2=self.creative.cycle is not None)
+        return structured_output_schema(r2=self.creative.cycle is not None, r3=self.creative.production is not None)
 
     def to_dict(self) -> dict[str, Any]:
         return {"config": self.config.to_dict(), "creative": self.creative.to_dict(),
@@ -126,14 +275,15 @@ class StructuredModelRequest:
 
 
 def _cli_request(request: StructuredModelRequest) -> tuple[str, dict[str, Any], bytes]:
-    """Canonical transport contract, also checked when reading R2 receipts."""
+    """Canonical transport contract, also checked when reading R2/R3 receipts."""
     output_schema = request.output_schema
-    edits = output_schema["properties"]["edits"]
-    if request.creative.operation in ("REFRAME", "DEVELOP"):
-        edits["required"] = sorted(EDITABLE_FIELDS)
-        edits["properties"] = {n: {"type": ["string", "null"]} for n in sorted(EDITABLE_FIELDS)}
-    else:
-        edits["properties"], edits["required"] = {}, []
+    if request.creative.production is None:
+        edits = output_schema["properties"]["edits"]
+        if request.creative.operation in ("REFRAME", "DEVELOP"):
+            edits["required"] = sorted(EDITABLE_FIELDS)
+            edits["properties"] = {n: {"type": ["string", "null"]} for n in sorted(EDITABLE_FIELDS)}
+        else:
+            edits["properties"], edits["required"] = {}, []
     request_hash = sha256_bytes(canonical_bytes(request.to_dict()))
     schema = {"type": "object", "additionalProperties": False,
               "required": ["request_sha256", "output"], "properties": {
@@ -512,10 +662,12 @@ class CodexCliCreativeClient:
 
     def complete(self, request: StructuredModelRequest) -> StructuredModelResponse:
         evidence, native_output, packet, schema_bytes, stdout = None, None, None, None, None
-        r2 = isinstance(request, StructuredModelRequest) and request.creative.cycle is not None
+        strict_transport = isinstance(request, StructuredModelRequest) and (
+            request.creative.cycle is not None or request.creative.production is not None
+        )
 
         def transport():
-            if not r2 or evidence is None:
+            if not strict_transport or evidence is None:
                 return {}
             return {"output_envelope_json": native_output, "cli_stdin_json": packet.decode("utf-8"),
                     "cli_schema_json": schema_bytes.decode("utf-8"),
@@ -649,12 +801,13 @@ class LiveCreativeReasoner:
                 or (caps.external_spend_possible and not authorization.allow_spend)):
             return outcome("UNAUTHORIZED", error_code="UNAUTHORIZED",
                                    message="Client network/spend capabilities require explicit authorization")
-        if request.cycle is not None and mode == "MODEL" and type(client) is not CodexCliCreativeClient:
-            # R2 MODEL evidence must originate at the native, probed transport.
+        strict_provenance = request.cycle is not None or request.production is not None
+        if strict_provenance and mode == "MODEL" and type(client) is not CodexCliCreativeClient:
+            # R2/R3 MODEL evidence must originate at the native, probed transport.
             # A generic injected client's self-reported CLI/session JSON cannot
             # manufacture legitimate process provenance. R1 stays compatible.
             return outcome("ERROR", error_code="UNVERIFIED_MODEL_ADAPTER",
-                           message="R2 model execution requires the native verified CLI transport")
+                           message="R2/R3 model execution requires the native verified CLI transport")
         try:
             response = client.complete(StructuredModelRequest(config, request))
         except Exception:
@@ -673,13 +826,13 @@ class LiveCreativeReasoner:
                 raise CreativeValidationError("fake client cannot assert real-model inference")
         except (CreativeValidationError, TypeError, ValueError):
             rejected = {}
-            if request.cycle is not None and isinstance(response, StructuredModelResponse):
+            if strict_provenance and isinstance(response, StructuredModelResponse):
                 rejected["response_json"] = canonical_bytes(response.to_dict()).decode("utf-8")
             return outcome("ERROR", error_code="INVALID_MODEL_RESPONSE",
                                    message="Invalid model response or provenance", **rejected)
         metadata = dict(observation=response.observation, usage=response.usage,
                         provider_request_id=response.request_id, execution=response.execution)
-        if request.cycle is not None:
+        if strict_provenance:
             metadata["response_json"] = canonical_bytes(response.to_dict()).decode("utf-8")
         if response.state != "OK":
             return outcome(

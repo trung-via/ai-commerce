@@ -24,6 +24,11 @@ from ai_commerce.creative import (
     reason_v2, revise_brief, revise_concept, run_creative_stage,
     A03CreativeCycleJob, A03CreativeCycleResult, CreativeCycleContext,
     CreativeEvidenceSource, CreativeModelSelection, run_creative_cycle,
+    A03CreativeProductionJob, A03CreativeProductionPackage, A03CreativeProductionResult,
+    AudioPlan, CameraSpec, CreativeProductionContext, IdentityContinuity,
+    MediaOutputTarget, ProductionLineage, ProductionPackageParent, ProductionPackageSpec,
+    ProductionScene, QAExpectation, RightsAttribution, SceneTransition, ScriptSegment,
+    revise_production_package, run_creative_production,
 )
 from ai_commerce.providers.base import ProviderCapabilities, ProviderError
 
@@ -1815,3 +1820,762 @@ def test_r2_missing_configuration_or_client_is_a_persisted_hold_without_inferenc
     assert result.status == "HOLD" and result.failure == "NO_MODEL_CONFIGURED"
     assert result.output is None and result.decision is None
     assert run_creative_cycle(job, tmp_path) == result
+
+
+# --- R3 Creative Production Package tests (all client responses are TEST_ONLY_MOCK) ---
+
+def production_spec_payload(*, silent=False, evidence=(), variant="v1", attributions=None):
+    identities = () if silent else (
+        IdentityContinuity(
+            "obj:umbrella", "OBJECT", "Chiếc ô trong suốt phủ hạt mưa Sài Gòn.",
+            ("Khung nhôm mảnh không biến dạng", "Mặt dù trong suốt phản chiếu ánh đèn vàng"),
+        ),
+    )
+    scenes = (
+        ProductionScene(
+            scene_id="s1", order=1, duration_seconds=4.5,
+            state_s0="Mặt đường nhựa khô mờ dưới ánh đèn vàng trước cơn mưa.",
+            action="Hạt mưa đầu tiên rơi xuống tạo vòng nước lan rộng dần.",
+            state_s1="Mặt đường ướt loang bóng đèn với nhiều vòng gợn nước nối tiếp.",
+            camera=CameraSpec("extreme close-up", "85mm macro", "static tripod"),
+            lighting="Đèn đường natri ấm phản chiếu trên nhựa ẩm",
+            visual_style="Thơ thị giác tối giản, độ tương phản dịu",
+            speech_mode="SILENCE",
+            identity_refs=() if silent else ("obj:umbrella",),
+            sound_cue=None if silent else "Tiếng giọt mưa chạm nhựa đường khẽ và thưa",
+        ),
+        ProductionScene(
+            scene_id="s2", order=2, duration_seconds=6.0,
+            state_s0="Hàng hiên vắng có ánh đèn hắt xuống vũng nước rung nhẹ.",
+            action="Gió lùa màn mưa nghiêng qua khung hình rồi lắng nhịp.",
+            state_s1="Màn mưa dịu lại để lộ bóng đèn tròn tĩnh lặng trên mặt nước.",
+            camera=CameraSpec("medium wide", "35mm prime", "slow horizontal pan"),
+            lighting="Ánh sáng ẩm mượt dịu lạnh xen ánh đèn hiên ấm",
+            visual_style=f"Nhịp ảnh trầm lắng, bố cục cân bằng ({variant})",
+            speech_mode="SILENCE" if silent else "SPOKEN",
+            identity_refs=() if silent else ("obj:umbrella",),
+            sound_cue=None if silent else "Tiếng mưa đều xa dần theo gió",
+        ),
+    )
+    script = (
+        ScriptSegment("seg1", "s1", "SILENCE", None, None, "Giữ khoảng lặng mở đầu"),
+        ScriptSegment(
+            "seg2", "s2", "SILENCE" if silent else "SPOKEN",
+            None if silent else f"Mưa Sài Gòn rơi chậm qua hàng hiên, chẳng vội giữ điều gì ({variant}).",
+            None if silent else "vi",
+            None if silent else "Giọng đọc trầm, chậm rãi",
+        ),
+    )
+    transitions = (SceneTransition("s1", "s2", "dissolve", "Chuyển nhịp mượt theo ánh đèn"),)
+    audio = (
+        AudioPlan("SILENCE") if silent
+        else AudioPlan("MIXED", sound_design="Mưa rơi trên mái tôn và mặt đường",
+                       voiceover="Lời thoại tiếng Việt tối giản ở cảnh 2", music=None)
+    )
+    media_targets = (
+        MediaOutputTarget("t1", "storyboard_frame", "9:16", "image/png", ("s1", "s2"),
+                          "Khung storyboard nguồn cho R4, chưa sinh media"),
+        MediaOutputTarget("t2", "video", "9:16", "video/mp4", ("s1", "s2"), None),
+    )
+    qa_expectations = (
+        QAExpectation("qa1", "scene:s1", "Vòng nước lan từ trạng thái khô sang ướt theo đúng nhân quả",
+                      "Kiểm tra chuỗi khung hình s1 ở R4", "GENERATED_CLAIM", "UNVERIFIED"),
+        QAExpectation("qa2", "audio", "Khớp chế độ âm thanh hoặc im lặng tuyệt đối theo kịch bản",
+                      "Đối chiếu track âm thanh R4 với spec.audio", "HYPOTHESIS", "UNVERIFIED"),
+    )
+    if attributions is None:
+        attributions = tuple(
+            RightsAttribution(e.source_ref, "Tham chiếu từ nguồn đầu vào đã cung cấp", "EVIDENCE_BOUND",
+                              e.content_sha256, e.verification_ref)
+            for e in evidence
+        )
+    return ProductionPackageSpec(
+        narrative_intention=f"Kể một khoảnh khắc mưa Sài Gòn thuần thị giác, không thương mại ({variant}).",
+        visual_style="Điện ảnh tối giản, lấy ánh sáng nước làm nhịp dẫn",
+        lighting_direction="Tương phản dịu giữa đèn đường ấm và mưa đêm mát",
+        identities=identities,
+        physics_invariants=("Hạt mưa rơi theo trọng lực và tạo gợn đồng tâm khi chạm nước",),
+        temporal_invariants=("Trình tự liên tục từ trước cơn mưa sang cơn mưa dịu dần",),
+        creative_freedoms=("Tự do tiết tấu lia máy chậm và sắc độ phản chiếu",),
+        scenes=scenes,
+        script=script,
+        transitions=transitions,
+        audio=audio,
+        media_targets=media_targets,
+        qa_expectations=qa_expectations,
+        attributions=attributions,
+    )
+
+
+class ProductionFakeClient(FakeClient):
+    """TEST_ONLY_MOCK R3 structured client. Never calls external models or media."""
+
+    def __init__(self, *, silent=False, variant="v1", fault=None, callback=None,
+                 usage=None, request_id=None, spec_override=None):
+        super().__init__()
+        self.silent, self.variant, self.fault, self.callback = silent, variant, fault, callback
+        self.usage = usage if usage is not None else UsageObservation()
+        self.custom_request_id = request_id
+        self.spec_override = spec_override
+
+    def complete(self, request):
+        self.calls.append(request)
+        creative = request.creative
+        assert creative.production is not None
+        evidence = creative.production.evidence
+        spec = self.spec_override if self.spec_override is not None else production_spec_payload(
+            silent=self.silent, evidence=evidence, variant=self.variant,
+        )
+        value = {
+            "production_spec": spec.to_dict() if isinstance(spec, ProductionPackageSpec) else spec,
+            "evidence_refs": [e.source_ref for e in evidence],
+            "hypotheses": ["TEST_ONLY_MOCK production storyboard hypothesis; UNVERIFIED"],
+        }
+        if self.callback:
+            self.callback(request, value)
+        req_id = self.custom_request_id or ("TEST_ONLY_MOCK:r3:" + creative.digest)
+        observation = MOCK
+        if self.fault == "timeout":
+            raise TimeoutError("TEST_ONLY_MOCK ambiguous R3 effect")
+        if self.fault == "refusal":
+            return StructuredModelResponse("REFUSED", observation=MOCK, usage=self.usage,
+                                           request_id=req_id, error_code="MODEL_REFUSED",
+                                           message="TEST_ONLY_MOCK refused package generation")
+        if self.fault == "unknown-effect":
+            return StructuredModelResponse("ERROR", observation=MOCK, usage=UsageObservation(),
+                                           request_id=req_id, error_code="UNKNOWN_EFFECT",
+                                           message="TEST_ONLY_MOCK unknown effect")
+        if self.fault == "mock-as-model":
+            observation = ProviderObservation(request.config.provider, request.config.model, "MODEL")
+        elif self.fault == "fabricated-evidence":
+            value["evidence_refs"] = ["https://hallucinated.invalid/research"]
+        elif self.fault == "fabricated-attribution":
+            value["production_spec"]["attributions"] = [{
+                "source_ref": "https://invented.invalid/brand", "attribution": "Invented brand license",
+                "rights_status": "UNKNOWN", "evidence_sha256": None, "verification_ref": None,
+            }]
+        elif self.fault == "fabricated-rights":
+            value["production_spec"]["attributions"] = [{
+                "source_ref": "note:unverified", "attribution": "Claimed clearance",
+                "rights_status": "GRANTED", "evidence_sha256": None, "verification_ref": None,
+            }]
+        elif self.fault == "fabricated-qa":
+            value["production_spec"]["qa_expectations"][0]["verification_status"] = "PASSED"
+        elif self.fault == "premature-media":
+            value["production_spec"]["media_targets"][0]["generation_status"] = "GENERATED"
+        elif self.fault == "unknown-field":
+            value["extra_unapproved"] = True
+        elif self.fault == "unchanged-revision":
+            value["production_spec"] = creative.production.parent_package.spec.to_dict()
+        return StructuredModelResponse("OK", json.dumps(value, ensure_ascii=False, indent=2),
+                                       observation=observation, usage=self.usage, request_id=req_id)
+
+
+def production_job(cycle, **options):
+    return A03CreativeProductionJob.from_cycle(cycle, **{
+        "journey_id": "test:journey", "cycle_id": "test:cycle", "job_id": "test:r3-package",
+        "attempt": 1, "correlation_id": "test:r3-correlation",
+        "provenance": CreativeJobProvenance("test:caller", "test:r2-cycle", cycle.digest, "SYNTHETIC_FIXTURE"),
+        "configuration": ModelConfiguration("requested-provider", "requested-model", "xhigh"),
+        "purpose": "TEST_ONLY_MOCK", **options,
+    })
+
+
+@pytest.mark.parametrize("count", [2, 3])
+def test_r3_lineage_2_to_3_concepts_feeds_coherent_production_package(tmp_path, count):
+    from jsonschema import Draft202012Validator
+
+    sidecars = CreativeSidecarStore(tmp_path)
+    cycle = run_creative_cycle(cycle_job(count=count), sidecars, cycle_adapter(CycleFakeClient()))
+    assert cycle.status == "TEST_ONLY_MOCK"
+    client = ProductionFakeClient()
+    job = production_job(cycle)
+    result = run_creative_production(job, sidecars, cycle_adapter(client))
+    assert result.status == "TEST_ONLY_MOCK" and result.failure is None and result.observed is None
+    assert len(client.calls) == 1
+    schema = client.calls[0].output_schema
+    Draft202012Validator.check_schema(schema)
+    Draft202012Validator(schema).validate(
+        json.loads(json.loads(result.stage.reasoning.response_json)["output_json"])
+    )
+    pkg = result.package
+    assert pkg.schema_version == "A03CreativeProductionPackage.v1"
+    assert pkg.revision == 1 and pkg.parent is None and pkg.changed_sections == ()
+    assert pkg.brief_id == cycle.job.seed.brief_id
+    assert pkg.source_brief_digest == cycle.job.seed.source_brief_digest
+    assert pkg.selected_concept == cycle.output
+    assert pkg.lineage.cycle_job_digest == cycle.job.digest
+    assert pkg.lineage.cycle_result_digest == cycle.digest
+    assert len(pkg.lineage.candidate_pins) == count
+    assert len(pkg.lineage.critic_receipts) == count
+    assert pkg.lineage.selector_receipt_digest == cycle.steps[-2].reasoning.digest
+    assert pkg.lineage.develop_receipt_digest == cycle.steps[-1].reasoning.digest
+    assert pkg.lineage.decision_id == cycle.decision.decision_id
+    assert pkg.observation == MOCK and pkg.observation.model == "UNKNOWN"
+    assert pkg.usage == UsageObservation() and pkg.usage.status == "UNKNOWN"
+    assert pkg.configuration == job.configuration
+    assert pkg.claim_authority == "GENERATED_CLAIM"
+    assert pkg.factual_status == "UNVERIFIED" and pkg.rights_status == "UNKNOWN"
+    assert pkg.spec.script[1].speech_mode == "SPOKEN" and pkg.spec.script[1].language == "vi"
+    assert pkg.spec.script[0].speech_mode == "SILENCE" and pkg.spec.script[0].spoken_text is None
+    assert all(m.generation_status == "NOT_GENERATED" for m in pkg.spec.media_targets)
+    assert all(q.verification_status == "UNVERIFIED" for q in pkg.spec.qa_expectations)
+    assert A03CreativeProductionPackage.from_json(pkg.to_json()) == pkg
+    assert A03CreativeProductionResult.from_dict(json.loads(json.dumps(result.to_dict()))) == result
+    # Idempotent reopen without new inference and exact immutable bytes.
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*.json")}
+    reopened = run_creative_production(job, CreativeSidecarStore(tmp_path), cycle_adapter(client))
+    assert reopened == result and len(client.calls) == 1
+    assert CreativeSidecarStore(tmp_path).load_production_package(pkg.package_id, 1) == pkg
+    assert CreativeSidecarStore(tmp_path).load_production_package_by_digest(pkg.digest) == pkg
+    assert {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*.json")} == before
+
+
+def test_r3_zero_product_cta_and_silent_vietnamese_optional_package(tmp_path):
+    brief = {
+        **intake_brief("A purely fictional, silent visual rain study; zero product, SKU, CTA, speech, music or humans."),
+        "product_ref": None, "cta": None, "audio": {"mode": "silence"},
+    }
+    sidecars = CreativeSidecarStore(tmp_path)
+    cycle = run_creative_cycle(cycle_job(brief=brief), sidecars, cycle_adapter(CycleFakeClient()))
+    client = ProductionFakeClient(silent=True)
+    result = run_creative_production(production_job(cycle), sidecars, cycle_adapter(client))
+    assert result.status == "TEST_ONLY_MOCK"
+    pkg = result.package
+    assert pkg.spec.audio == AudioPlan("SILENCE")
+    assert pkg.spec.identities == ()
+    assert all(s.speech_mode == "SILENCE" and s.sound_cue is None for s in pkg.spec.scenes)
+    assert all(seg.speech_mode == "SILENCE" and seg.spoken_text is None and seg.language is None
+               for seg in pkg.spec.script)
+    assert not {"product_ref", "sku", "cta"} & pkg.to_dict().keys()
+    assert sidecars.creative.load_brief(pkg.source_brief_digest)["product_ref"] is None
+
+
+def test_r3_bounded_editable_revision_retains_immutable_parent_without_new_inference(tmp_path):
+    sidecars = CreativeSidecarStore(tmp_path)
+    cycle = run_creative_cycle(cycle_job(), sidecars, cycle_adapter(CycleFakeClient()))
+    client = ProductionFakeClient(variant="r1")
+    r1_result = run_creative_production(production_job(cycle), sidecars, cycle_adapter(client))
+    pkg_r1 = r1_result.package
+    r1_bytes = sidecars._package_path(pkg_r1.package_id, 1).read_bytes()
+
+    # Direct Human editable revision of script & narrative_intention: zero new model inference.
+    new_script = (
+        pkg_r1.spec.script[0],
+        replace(pkg_r1.spec.script[1], spoken_text="Mưa Sài Gòn chạm mái hiên, nhịp thở lắng lại."),
+    )
+    pkg_r2 = revise_production_package(
+        pkg_r1,
+        {"narrative_intention": "Tinh chỉnh nhịp thơ thị giác ngắn gọn hơn.", "script": new_script},
+        edit_reason="Human tightened Vietnamese spoken line",
+        actor=ActorRef("HUMAN", "human:director"),
+    )
+    assert pkg_r2.package_id == pkg_r1.package_id and pkg_r2.revision == 2
+    assert pkg_r2.parent == ProductionPackageParent(pkg_r1.package_id, 1, pkg_r1.digest)
+    assert pkg_r2.changed_sections == ("narrative_intention", "script")
+    assert pkg_r2.reasoning_receipt_digest is None and pkg_r2.edit_actor == ActorRef("HUMAN", "human:director")
+    assert pkg_r2.observation == pkg_r1.observation and pkg_r2.lineage == pkg_r1.lineage
+    assert sidecars.save_production_package(pkg_r2) == pkg_r2
+    assert sidecars.save_production_package(pkg_r2) == pkg_r2  # Idempotent save.
+    assert len(client.calls) == 1
+    assert sidecars._package_path(pkg_r1.package_id, 1).read_bytes() == r1_bytes
+    assert CreativeSidecarStore(tmp_path).load_production_package(pkg_r1.package_id, 1) == pkg_r1
+    assert CreativeSidecarStore(tmp_path).load_production_package(pkg_r1.package_id, 2) == pkg_r2
+
+    # Bounded AI-assisted revision creating revision 3 with its own distinct inference receipt.
+    ai_client = ProductionFakeClient(variant="r3-ai")
+    r3_job = production_job(cycle, job_id="test:r3-revise", parent_package=pkg_r2,
+                            edit_reason="AI visual pacing refinement")
+    r3_result = run_creative_production(r3_job, sidecars, cycle_adapter(ai_client))
+    assert r3_result.status == "TEST_ONLY_MOCK" and len(ai_client.calls) == 1
+    pkg_r3 = r3_result.package
+    assert pkg_r3.package_id == pkg_r1.package_id and pkg_r3.revision == 3
+    assert pkg_r3.parent == ProductionPackageParent(pkg_r2.package_id, 2, pkg_r2.digest)
+    assert pkg_r3.reasoning_receipt_digest == r3_result.stage.reasoning.digest
+    assert pkg_r3.reasoning_receipt_digest != pkg_r1.reasoning_receipt_digest
+    assert sidecars.load_production_package(pkg_r1.package_id, 1) == pkg_r1
+    assert sidecars.load_production_package(pkg_r1.package_id, 2) == pkg_r2
+    assert sidecars.load_production_package(pkg_r1.package_id, 3) == pkg_r3
+    assert run_creative_production(r3_job, sidecars, cycle_adapter(ai_client)) == r3_result
+    assert len(ai_client.calls) == 1
+
+
+def test_r3_evidence_bound_rights_and_unknown_default_attributions(tmp_path):
+    content = "Caller-supplied street rain field note; rights scope documented in caller record."
+    source = CreativeEvidenceSource("note:rain-field", content, sha256_bytes(content.encode()),
+                                    "verified:caller-sha256")
+    brief = {**intake_brief(TEXT), "source_refs": [source.source_ref]}
+    sidecars = CreativeSidecarStore(tmp_path)
+    cycle = run_creative_cycle(cycle_job(brief=brief, evidence=(source,)), sidecars, cycle_adapter(CycleFakeClient()))
+    res = run_creative_production(production_job(cycle), sidecars, cycle_adapter(ProductionFakeClient()))
+    assert res.status == "TEST_ONLY_MOCK"
+    assert res.package.evidence_refs == (source.source_ref,)
+    assert res.package.rights_status == "EVIDENCE_BOUND"
+    assert res.package.spec.attributions[0].evidence_sha256 == source.content_sha256
+    assert res.package.factual_status == "UNVERIFIED"
+
+
+def test_r3_a03_to_a04_production_consumer_read_smoke_preserves_closed_contracts(tmp_path, capsys):
+    from ai_commerce.cli import main
+    from ai_commerce.contracts.schema import validate_record
+
+    brief = {**intake_brief("Im lặng hoàn toàn — thơ thị giác về mưa Sài Gòn, không sản phẩm hay CTA."),
+             "product_ref": None, "cta": None, "audio": {"mode": "silence"}}
+    root = tmp_path / "creative"
+    sidecars = CreativeSidecarStore(root)
+    cycle = run_creative_cycle(cycle_job(brief=brief), sidecars, cycle_adapter(CycleFakeClient()))
+    prod = run_creative_production(production_job(cycle), sidecars, cycle_adapter(ProductionFakeClient(silent=True)))
+    assert prod.status == "TEST_ONLY_MOCK"
+    handoff = sidecars.load_production_handoff(prod.package.package_id, 1)
+    assert handoff["brief"] == brief
+    assert handoff["selection"]["selection_id"] == prod.package.selected_concept.selection_id
+    assert handoff["package_digest"] == prod.package.digest
+    assert A03CreativeProductionPackage.from_dict(handoff["production_package"]) == prod.package
+    # Downstream A04 consumes the pinned selection with unchanged closed schemas.
+    out_dir = tmp_path / "assets"
+    assert main(["asset-run", "--store", str(root), "--selection-id", handoff["selection"]["selection_id"],
+                 "--out-dir", str(out_dir), "--mode", "mock"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    output = json.loads(captured.out)
+    manifest = output["asset_manifest"]
+    result = validate_record("JobResult", manifest["result"])
+    artifact = validate_record("MediaArtifact", result["artifact"])
+    assert manifest["state"] == "SUCCEEDED" and artifact["generation_performed"] is False
+    assert result["publication_status"] == "NOT_ATTEMPTED" and artifact["rights_status"] == "UNKNOWN"
+    assert main(["asset-inspect", "--store", str(root), "--out-dir", str(out_dir),
+                 "--handoff", output["handoff_ref"]]) == 0
+    assert json.loads(capsys.readouterr().out) == output
+
+
+def test_r3_cli_injected_runner_and_simulated_native_model_branch(installed_cli, tmp_path, monkeypatch):
+    import base64
+
+    cli, r2_sampler, r3_sampler = installed_cli, CycleFakeClient(), ProductionFakeClient()
+
+    def dispatch(packet):
+        req = packet["request"]
+        creative = ReasoningRequest.from_dict(req["creative"])
+        model_req = StructuredModelRequest(ModelConfiguration.from_dict(req["config"]), creative)
+        if creative.production is not None:
+            return json.loads(r3_sampler.complete(model_req).output_json)
+        val = json.loads(r2_sampler.complete(model_req).output_json)
+        if creative.operation == "DEVELOP":
+            val["edits"] = {n: val["edits"].get(n) for n in ("family", "title", "premise", "visual_direction")}
+        return val
+
+    cli.creative_output = dispatch
+    grant = InvocationAuthorization(True, True, "fixture:r3-cli-grant")
+    # 1) Injected runner -> always TEST_ONLY_MOCK, preserving exact native transport bytes.
+    mock_root = tmp_path / "mock-cli"
+    mock_reasoner = LiveCreativeReasoner(cli.config, CodexCliCreativeClient(cli.capability(), runner=cli))
+    mock_cycle = run_creative_cycle(cycle_job(seed_options={"configuration": cli.config}), mock_root,
+                                    mock_reasoner, authorization=grant)
+    mock_job = production_job(mock_cycle, configuration=cli.config, purpose="TEST_ONLY_MOCK")
+    mock_res = run_creative_production(mock_job, mock_root, mock_reasoner, authorization=grant)
+    assert mock_res.status == "TEST_ONLY_MOCK"
+    assert mock_res.package.observation.mode == "TEST_ONLY_MOCK" and mock_res.package.observation.model == "UNKNOWN"
+    assert mock_res.package.execution.kind == "TEST_ONLY_MOCK"
+    assert mock_res.package.execution.observed_model == cli.config.model
+    assert mock_res.package.execution.observed_effort == cli.config.effort
+    raw = StructuredModelResponse.from_dict(json.loads(mock_res.stage.reasoning.response_json))
+    assert sha256_bytes(base64.b64decode(raw.cli_stdout_base64)) == raw.execution.stdout_sha256
+    assert raw.cli_stdin_json is not None and raw.cli_schema_json is not None and raw.output_envelope_json is not None
+
+    # 2) Simulated native Popen branch -> synthetic coverage of MODEL / CREATIVE_COMPLETE path.
+    install_fake_popen(monkeypatch, cli)
+    native_root = tmp_path / "native-cli"
+    native_reasoner = LiveCreativeReasoner(cli.config, CodexCliCreativeClient(cli.capability(), runner=None))
+    native_cycle = run_creative_cycle(
+        cycle_job(seed_options={"configuration": cli.config, "purpose": "PRODUCTION"}),
+        native_root, native_reasoner, authorization=grant,
+    )
+    assert native_cycle.status == "CREATIVE_COMPLETE"
+    native_job = production_job(native_cycle, configuration=cli.config, purpose="PRODUCTION")
+    native_res = run_creative_production(native_job, native_root, native_reasoner, authorization=grant)
+    assert native_res.status == "CREATIVE_COMPLETE"
+    assert native_res.package.observation == ProviderObservation("codex-cli", cli.config.model, "MODEL")
+    assert native_res.package.execution.kind == "AUTHENTICATED_CLI_PROBE"
+    assert native_res.package.usage == UsageObservation("OBSERVED", 11, 7)
+    before_calls = len(cli.calls)
+    assert run_creative_production(native_job, native_root) == native_res
+    assert len(cli.calls) == before_calls
+
+
+@pytest.mark.parametrize("fault", [
+    "fabricated-evidence", "fabricated-attribution", "fabricated-rights",
+    "fabricated-qa", "premature-media", "unknown-field",
+])
+def test_r3_negative_hallucinated_evidence_rights_qa_and_premature_media(tmp_path, fault):
+    sidecars = CreativeSidecarStore(tmp_path)
+    cycle = run_creative_cycle(cycle_job(), sidecars, cycle_adapter(CycleFakeClient()))
+    client = ProductionFakeClient(fault=fault)
+    res = run_creative_production(production_job(cycle), sidecars, cycle_adapter(client))
+    assert res.status == "HOLD" and res.failure == "INVALID_STRUCTURED_OUTPUT"
+    assert res.package is None and len(client.calls) == 1
+    assert not list((tmp_path / "sidecars" / "a03-v11" / "production-packages").rglob("*.json"))
+
+
+def test_r3_negative_unbound_evidence_rights_and_wrong_sha_rejected(tmp_path):
+    brief = {**intake_brief(TEXT), "source_refs": ["note:unverified"]}
+    sidecars = CreativeSidecarStore(tmp_path)
+    cycle = run_creative_cycle(cycle_job(brief=brief), sidecars, cycle_adapter(CycleFakeClient()))
+    # Claiming EVIDENCE_BOUND when no CreativeEvidenceSource was supplied fails closed.
+    bad_attr = (RightsAttribution("note:unverified", "Unverified claim", "EVIDENCE_BOUND", "a" * 64, "ref:fake"),)
+    client = ProductionFakeClient(spec_override=production_spec_payload(attributions=bad_attr))
+    res = run_creative_production(production_job(cycle), sidecars, cycle_adapter(client))
+    assert res.status == "HOLD" and res.failure == "INVALID_STRUCTURED_OUTPUT" and res.package is None
+    with pytest.raises(CreativeValidationError):
+        RightsAttribution("note:x", "note", "EVIDENCE_BOUND", "a" * 64, "UNKNOWN")
+    with pytest.raises(CreativeValidationError):
+        RightsAttribution("note:x", "note", "UNKNOWN", "a" * 64, None)
+    with pytest.raises(CreativeValidationError):
+        RightsAttribution("note:x", "note", "CLEARED")
+
+
+def test_r3_negative_wrong_source_pin_and_stale_revision(tmp_path):
+    sidecars = CreativeSidecarStore(tmp_path)
+    cycle = run_creative_cycle(cycle_job(), sidecars, cycle_adapter(CycleFakeClient()))
+    # Wrong selection pin (unselected revision 1 from explore instead of developed revision 2).
+    wrong_job = replace(production_job(cycle), selected_concept=cycle.steps[0].outputs[0])
+    with pytest.raises(CreativeValidationError, match="does not match verified saved R2 cycle"):
+        run_creative_production(wrong_job, sidecars, cycle_adapter(ProductionFakeClient()))
+    # Wrong cycle_result_digest.
+    with pytest.raises(CreativeValidationError, match="cycle result digest mismatch"):
+        run_creative_production(replace(production_job(cycle), cycle_result_digest="0" * 64),
+                                sidecars, cycle_adapter(ProductionFakeClient()))
+    # HOLD/STOPPED R2 cycle cannot authorize a production job.
+    stopped = run_creative_cycle(cycle_job(seed_options={"job_id": "stopped"}), sidecars,
+                                 cycle_adapter(CycleFakeClient(actions=("STOP",))))
+    assert stopped.status == "STOPPED"
+    with pytest.raises(CreativeValidationError, match="completed verified R2 cycle"):
+        production_job(stopped)
+    # Stale critic receipt in package wire JSON fails verification.
+    res = run_creative_production(production_job(cycle), sidecars, cycle_adapter(ProductionFakeClient()))
+    tampered = res.package.to_dict()
+    tampered["lineage"]["critic_receipts"][0] = "0" * 64
+    with pytest.raises(CreativeValidationError):
+        sidecars.save_production_package(A03CreativeProductionPackage.from_dict(tampered))
+
+
+@pytest.mark.parametrize("mutation", [
+    "scene-null-speech", "script-null-speech", "spoken-null-text", "spoken-blank-text",
+    "silence-with-text", "silence-with-lang", "audio-null-mode", "audio-silence-with-music",
+    "audio-silence-with-sound-cue", "audio-silence-with-spoken-scene",
+])
+def test_r3_negative_missing_null_vs_explicit_silence(mutation):
+    data = production_spec_payload(silent=mutation.startswith("audio-silence")).to_dict()
+    if mutation == "scene-null-speech":
+        data["scenes"][0]["speech_mode"] = None
+    elif mutation == "script-null-speech":
+        data["script"][0]["speech_mode"] = None
+    elif mutation == "spoken-null-text":
+        data["script"][1]["spoken_text"] = None
+    elif mutation == "spoken-blank-text":
+        data["script"][1]["spoken_text"] = "   "
+    elif mutation == "silence-with-text":
+        data["script"][0]["spoken_text"] = "Whispered line"
+    elif mutation == "silence-with-lang":
+        data["script"][0]["language"] = "vi"
+    elif mutation == "audio-null-mode":
+        data["audio"]["mode"] = None
+    elif mutation == "audio-silence-with-music":
+        data["audio"]["music"] = "Soft piano"
+    elif mutation == "audio-silence-with-sound-cue":
+        data["scenes"][0]["sound_cue"] = "Rain sound"
+    elif mutation == "audio-silence-with-spoken-scene":
+        data["scenes"][1]["speech_mode"] = "SPOKEN"
+        data["script"][1].update(speech_mode="SPOKEN", spoken_text="Xin chào", language="vi")
+    with pytest.raises(CreativeValidationError):
+        ProductionPackageSpec.from_dict(data)
+
+
+@pytest.mark.parametrize("mutation", [
+    "blank-s0", "blank-action", "blank-s1", "same-s0-s1", "zero-duration", "bool-duration",
+    "nan-duration", "bad-order", "dup-scene-id", "empty-scenes", "blank-camera-lens",
+])
+def test_r3_negative_invalid_causal_scene_fields(mutation):
+    data = production_spec_payload().to_dict()
+    if mutation == "blank-s0":
+        data["scenes"][0]["state_s0"] = " "
+    elif mutation == "blank-action":
+        data["scenes"][0]["action"] = ""
+    elif mutation == "blank-s1":
+        data["scenes"][0]["state_s1"] = None
+    elif mutation == "same-s0-s1":
+        data["scenes"][0]["state_s1"] = data["scenes"][0]["state_s0"]
+    elif mutation == "zero-duration":
+        data["scenes"][0]["duration_seconds"] = 0
+    elif mutation == "bool-duration":
+        data["scenes"][0]["duration_seconds"] = True
+    elif mutation == "nan-duration":
+        data["scenes"][0]["duration_seconds"] = float("nan")
+    elif mutation == "bad-order":
+        data["scenes"][1]["order"] = 3
+    elif mutation == "dup-scene-id":
+        data["scenes"][1]["scene_id"] = "s1"
+    elif mutation == "empty-scenes":
+        data["scenes"] = []
+    elif mutation == "blank-camera-lens":
+        data["scenes"][0]["camera"]["lens"] = " "
+    with pytest.raises(CreativeValidationError):
+        ProductionPackageSpec.from_dict(data)
+
+
+@pytest.mark.parametrize("mutation", [
+    "unknown-identity-ref", "dup-identity-id", "empty-invariants", "missing-transition",
+    "reversed-transition", "self-transition", "unknown-script-scene", "out-of-order-script",
+    "scene-missing-script", "scene-script-speech-mismatch", "media-unknown-scene",
+])
+def test_r3_negative_inconsistent_identity_and_scene_state(mutation):
+    data = production_spec_payload().to_dict()
+    if mutation == "unknown-identity-ref":
+        data["scenes"][0]["identity_refs"] = ["char:ghost"]
+    elif mutation == "dup-identity-id":
+        data["identities"].append(dict(data["identities"][0]))
+    elif mutation == "empty-invariants":
+        data["identities"][0]["continuity_invariants"] = []
+    elif mutation == "missing-transition":
+        data["transitions"] = []
+    elif mutation == "reversed-transition":
+        data["transitions"][0].update(from_scene_id="s2", to_scene_id="s1")
+    elif mutation == "self-transition":
+        data["transitions"][0].update(from_scene_id="s1", to_scene_id="s1")
+    elif mutation == "unknown-script-scene":
+        data["script"][0]["scene_id"] = "s99"
+    elif mutation == "out-of-order-script":
+        data["script"] = list(reversed(data["script"]))
+    elif mutation == "scene-missing-script":
+        data["script"] = [data["script"][0]]
+    elif mutation == "scene-script-speech-mismatch":
+        data["scenes"][1]["speech_mode"] = "SILENCE"
+    elif mutation == "media-unknown-scene":
+        data["media_targets"][0]["scene_refs"] = ["s99"]
+    with pytest.raises(CreativeValidationError):
+        ProductionPackageSpec.from_dict(data)
+
+
+def test_r3_negative_mock_as_real_fake_model_and_usage(installed_cli, tmp_path):
+    sidecars = CreativeSidecarStore(tmp_path / "s1")
+    cycle = run_creative_cycle(cycle_job(), sidecars, cycle_adapter(CycleFakeClient()))
+    grant = InvocationAuthorization(True, True, "fixture:prod-grant")
+    # 1) Mock R2 cycle cannot back a PRODUCTION package job.
+    res = run_creative_production(production_job(cycle, purpose="PRODUCTION"), sidecars,
+                                  cycle_adapter(ProductionFakeClient()), authorization=grant)
+    assert res.status == "HOLD" and res.failure == "MOCK_CYCLE_NOT_PRODUCTION" and res.package is None
+    # 2) Mock client claiming observation.mode="MODEL" fails closed.
+    bad_client = ProductionFakeClient(fault="mock-as-model")
+    res2 = run_creative_production(production_job(cycle, job_id="mock-as-model"), sidecars,
+                                   cycle_adapter(bad_client))
+    assert res2.status == "HOLD" and res2.failure == "INVALID_MODEL_RESPONSE" and res2.package is None
+    # 3) Generic non-CLI client claiming execution_mode="MODEL" fails closed without invocation.
+    class PretendModelClient(ProductionFakeClient):
+        execution_mode = "MODEL"
+    pretend = PretendModelClient()
+    res3 = run_creative_production(production_job(cycle, job_id="pretend-model"), sidecars,
+                                   cycle_adapter(pretend))
+    assert res3.status == "HOLD" and res3.failure == "ADAPTER_MODE_MISMATCH" and pretend.calls == []
+    # 4) Promoting TEST_ONLY_MOCK result to CREATIVE_COMPLETE or tampering usage fails closed.
+    ok_res = run_creative_production(production_job(cycle, job_id="ok-mock"), sidecars,
+                                     cycle_adapter(ProductionFakeClient()))
+    wire = ok_res.to_dict()
+    wire["status"] = "CREATIVE_COMPLETE"
+    with pytest.raises(CreativeValidationError):
+        A03CreativeProductionResult.from_dict(wire)
+    wire_usage = ok_res.to_dict()
+    wire_usage["package"]["usage"] = {"status": "OBSERVED", "input_tokens": 999, "output_tokens": 1,
+                                      "cost_amount": None, "currency": None}
+    with pytest.raises(CreativeValidationError):
+        A03CreativeProductionResult.from_dict(wire_usage)
+    # 5) CLI effort/model mismatch fails closed as HOLD without partial package.
+    cli = installed_cli
+    cli.creative_output = lambda pkt: (
+        json.loads(ProductionFakeClient().complete(StructuredModelRequest(
+            ModelConfiguration.from_dict(pkt["request"]["config"]),
+            ReasoningRequest.from_dict(pkt["request"]["creative"]),
+        )).output_json) if pkt["request"]["creative"].get("production") is not None else
+        (lambda v: ({**v, "edits": {n: v["edits"].get(n) for n in ("family", "title", "premise", "visual_direction")}}
+                    if pkt["request"]["creative"]["operation"] == "DEVELOP" else v))(
+            json.loads(CycleFakeClient().complete(StructuredModelRequest(
+                ModelConfiguration.from_dict(pkt["request"]["config"]),
+                ReasoningRequest.from_dict(pkt["request"]["creative"]),
+            )).output_json))
+    )
+    cli_root = tmp_path / "cli-faults"
+    reasoner = LiveCreativeReasoner(cli.config, CodexCliCreativeClient(cli.capability(), runner=cli))
+    cli_cycle = run_creative_cycle(cycle_job(seed_options={"configuration": cli.config}), cli_root,
+                                   reasoner, authorization=grant)
+    for fault, expected in (("effort", "CONFIGURATION_MISMATCH"), ("model", "CONFIGURATION_MISMATCH"),
+                            ("nonzero", "UNKNOWN_EFFECT"), ("malformed", "UNKNOWN_EFFECT")):
+        cli.fault = fault
+        bad_cli = run_creative_production(
+            production_job(cli_cycle, job_id=f"cli-{fault}", configuration=cli.config),
+            cli_root, reasoner, authorization=grant,
+        )
+        assert bad_cli.status == "HOLD" and bad_cli.failure == expected and bad_cli.package is None
+
+
+def test_r3_negative_replayed_ambiguous_refusal_and_interrupted_provider(tmp_path):
+    sidecars = CreativeSidecarStore(tmp_path)
+    cycle = run_creative_cycle(cycle_job(), sidecars, cycle_adapter(CycleFakeClient()))
+    # 1) Replayed provider_request_id from R2 cycle -> HOLD REPLAYED_INFERENCE.
+    replayed_id = cycle.steps[-1].reasoning.provider_request_id
+    res_replay = run_creative_production(
+        production_job(cycle, job_id="replay"), sidecars,
+        cycle_adapter(ProductionFakeClient(request_id=replayed_id)),
+    )
+    assert res_replay.status == "HOLD" and res_replay.failure == "REPLAYED_INFERENCE" and res_replay.package is None
+    # 2) Timeout / exception -> HOLD MODEL_ERROR, no retry.
+    timeout_client = ProductionFakeClient(fault="timeout")
+    res_timeout = run_creative_production(production_job(cycle, job_id="timeout"), sidecars,
+                                          cycle_adapter(timeout_client))
+    assert res_timeout.status == "HOLD" and res_timeout.failure == "MODEL_ERROR"
+    assert res_timeout.package is None and len(timeout_client.calls) == 1
+    assert run_creative_production(production_job(cycle, job_id="timeout"), sidecars,
+                                   cycle_adapter(timeout_client)) == res_timeout
+    assert len(timeout_client.calls) == 1
+    # 3) Model refusal -> STOPPED, no partial package.
+    refuse_client = ProductionFakeClient(fault="refusal")
+    res_refuse = run_creative_production(production_job(cycle, job_id="refuse"), sidecars,
+                                         cycle_adapter(refuse_client))
+    assert res_refuse.status == "STOPPED" and res_refuse.failure == "MODEL_REFUSED" and res_refuse.package is None
+    # 4) Interrupted attempt -> reconstructs HOLD without re-invoking provider.
+    def crash(req, val):
+        raise KeyboardInterrupt("TEST_ONLY_MOCK crash mid-production")
+    crash_client = ProductionFakeClient(callback=crash)
+    crash_job = production_job(cycle, job_id="interrupted")
+    with pytest.raises(KeyboardInterrupt):
+        run_creative_production(crash_job, sidecars, cycle_adapter(crash_client))
+    calls_before = len(crash_client.calls)
+    recovered = run_creative_production(crash_job, sidecars, cycle_adapter(crash_client))
+    assert recovered.status == "HOLD" and recovered.failure == "UNRESOLVED_PRODUCTION_STEP"
+    assert recovered.package is None and len(crash_client.calls) == calls_before
+    # 5) Duplicate attempt slot with different parameters -> VersionConflict.
+    with pytest.raises(VersionConflict):
+        run_creative_production(replace(crash_job, correlation_id="rebound"), sidecars,
+                                cycle_adapter(ProductionFakeClient()))
+
+
+def test_r3_negative_conflicting_edit_noop_and_provenance_edit(tmp_path):
+    sidecars = CreativeSidecarStore(tmp_path)
+    cycle = run_creative_cycle(cycle_job(), sidecars, cycle_adapter(CycleFakeClient()))
+    pkg_r1 = run_creative_production(production_job(cycle), sidecars, cycle_adapter(ProductionFakeClient())).package
+    # Conflicting direct edits from revision 1 -> second raises VersionConflict.
+    edit_a = revise_production_package(pkg_r1, {"narrative_intention": "Edit A"}, edit_reason="A",
+                                       actor=ActorRef("HUMAN", "human:a"))
+    edit_b = revise_production_package(pkg_r1, {"narrative_intention": "Edit B"}, edit_reason="B",
+                                       actor=ActorRef("HUMAN", "human:b"))
+    sidecars.save_production_package(edit_a)
+    with pytest.raises(VersionConflict):
+        sidecars.save_production_package(edit_b)
+    assert sidecars.load_production_package(pkg_r1.package_id, 2) == edit_a
+    # No-op direct edit, provenance field edit, AI actor without inference, and free-form dict all rejected.
+    with pytest.raises(CreativeValidationError):
+        revise_production_package(pkg_r1, {"narrative_intention": pkg_r1.spec.narrative_intention},
+                                  edit_reason="Noop", actor=ActorRef("HUMAN", "human:a"))
+    with pytest.raises(CreativeValidationError):
+        revise_production_package(pkg_r1, {"factual_status": "VERIFIED"}, edit_reason="Bad",
+                                  actor=ActorRef("HUMAN", "human:a"))
+    with pytest.raises(CreativeValidationError):
+        revise_production_package(pkg_r1, {"narrative_intention": "Spoof AI"}, edit_reason="Bad",
+                                  actor=ActorRef("AI", "reasoning:" + "0" * 64))
+    with pytest.raises(CreativeValidationError):
+        sidecars.save_production_package({"freeform": "not a typed package"})
+    # AI revision colliding with already-saved revision 2 -> HOLD ARTIFACT_CONFLICT preserving observed output.
+    conflict_job = production_job(cycle, job_id="ai-conflict", parent_package=pkg_r1, edit_reason="AI rev 2")
+    conflict_res = run_creative_production(conflict_job, sidecars,
+                                           cycle_adapter(ProductionFakeClient(variant="ai-conflict")))
+    assert conflict_res.status == "HOLD" and conflict_res.failure == "ARTIFACT_CONFLICT"
+    assert conflict_res.package is None and conflict_res.observed is not None
+    assert sidecars.load_production_package(pkg_r1.package_id, 2) == edit_a
+    # AI revision producing unchanged spec -> HOLD NO_MATERIAL_CHANGE.
+    noop_ai_job = production_job(cycle, job_id="ai-noop", parent_package=edit_a, edit_reason="Noop AI")
+    noop_ai = run_creative_production(noop_ai_job, sidecars,
+                                      cycle_adapter(ProductionFakeClient(fault="unchanged-revision")))
+    assert noop_ai.status == "HOLD" and noop_ai.failure == "NO_MATERIAL_CHANGE" and noop_ai.package is None
+
+
+@pytest.mark.parametrize("kind", [
+    A03CreativeProductionJob, A03CreativeProductionPackage, A03CreativeProductionResult, ProductionPackageSpec,
+])
+def test_r3_negative_duplicate_missing_and_unknown_fields(tmp_path, kind):
+    from ai_commerce.creative._validation import read_json
+
+    sidecars = CreativeSidecarStore(tmp_path)
+    cycle = run_creative_cycle(cycle_job(), sidecars, cycle_adapter(CycleFakeClient()))
+    res = run_creative_production(production_job(cycle), sidecars, cycle_adapter(ProductionFakeClient()))
+    record = {
+        A03CreativeProductionJob: res.job,
+        A03CreativeProductionPackage: res.package,
+        A03CreativeProductionResult: res,
+        ProductionPackageSpec: res.package.spec,
+    }[kind]
+    data = record.to_dict()
+    with pytest.raises(CreativeValidationError):
+        kind.from_dict({**data, "unexpected_key": True})
+    with pytest.raises(CreativeValidationError):
+        kind.from_dict({k: v for k, v in data.items() if k != next(iter(data))})
+    key = next(iter(data))
+    duplicate = json.dumps(data)[:-1] + "," + json.dumps(key) + ":" + json.dumps(data[key]) + "}"
+    with pytest.raises(CreativeValidationError, match="INVALID_JSON"):
+        kind.from_dict(read_json(duplicate))
+
+
+@pytest.mark.parametrize("target", [
+    "prod-job", "prod-grant", "prod-result", "prod-ref", "prod-package",
+    "prod-digest", "cycle-result", "brief", "concept", "selection", "reasoning",
+])
+def test_r3_negative_corrupt_bytes_never_reinvokes_model(tmp_path, target):
+    sidecars = CreativeSidecarStore(tmp_path)
+    cycle = run_creative_cycle(cycle_job(), sidecars, cycle_adapter(CycleFakeClient()))
+    client = ProductionFakeClient()
+    job = production_job(cycle)
+    res = run_creative_production(job, sidecars, cycle_adapter(client))
+    pkg = res.package
+    path = {
+        "prod-job": sidecars._path("production-jobs", job.slot),
+        "prod-grant": sidecars._path("production-grants", job.slot),
+        "prod-result": sidecars._path("production-results", res.digest),
+        "prod-ref": sidecars._path("production-refs", job.slot),
+        "prod-package": sidecars._package_path(pkg.package_id, 1),
+        "prod-digest": sidecars._path("production-package-digests", pkg.digest),
+        "cycle-result": sidecars._path("cycle-results", cycle.digest),
+        "brief": sidecars.creative.root / "briefs" / f"{pkg.source_brief_digest}.json",
+        "concept": sidecars.creative._concept_path(pkg.selected_concept.concept_id, pkg.selected_concept.revision),
+        "selection": sidecars.creative._selection_path(pkg.selected_concept.selection_id),
+        "reasoning": sidecars._path("reasoning", pkg.reasoning_receipt_digest),
+    }[target]
+    path.write_bytes(path.read_bytes() + b" ")
+    with pytest.raises((CreativeValidationError, VersionConflict)):
+        run_creative_production(job, sidecars, cycle_adapter(client))
+    assert len(client.calls) == 1
+
+
+def test_r3_negative_changed_permission_and_missing_grant(tmp_path):
+    sidecars = CreativeSidecarStore(tmp_path)
+    cycle = run_creative_cycle(cycle_job(), sidecars, cycle_adapter(CycleFakeClient()))
+    # 1) Missing or partial grant for network/spend client fails closed even if adapter has grant.
+    live_fake = ProductionFakeClient()
+    live_fake.capabilities = ProviderCapabilities("fake-live-r3", ("concept",), True, True)
+    reasoner = LiveCreativeReasoner(
+        ModelConfiguration("requested-provider", "requested-model", "xhigh"),
+        live_fake, authorization=InvocationAuthorization(True, True, "adapter:must-not-borrow"),
+    )
+    for idx, grant in enumerate((None, InvocationAuthorization(), InvocationAuthorization(True, False, "net-only"))):
+        res = run_creative_production(production_job(cycle, job_id=f"unauth-{idx}"), sidecars,
+                                      reasoner, authorization=grant)
+        assert res.status == "HOLD" and res.failure == "UNAUTHORIZED" and res.package is None
+    assert live_fake.calls == []
+    # 2) Missing grant on PRODUCTION purpose fails closed before any call.
+    res_prod = run_creative_production(production_job(cycle, job_id="prod-unauth", purpose="PRODUCTION"),
+                                       sidecars, reasoner, authorization=None)
+    assert res_prod.status == "HOLD" and res_prod.failure == "UNAUTHORIZED" and live_fake.calls == []
+    # 3) Replaying a completed job with changed explicit authorization fails closed.
+    ok_job = production_job(cycle, job_id="perm-replay")
+    ok_grant = InvocationAuthorization(True, True, "runner:grant-1")
+    ok_res = run_creative_production(ok_job, sidecars, reasoner, authorization=ok_grant)
+    assert ok_res.status == "TEST_ONLY_MOCK" and len(live_fake.calls) == 1
+    with pytest.raises(CreativeValidationError, match="AUTHORIZATION_MISMATCH"):
+        run_creative_production(ok_job, sidecars, reasoner,
+                                authorization=InvocationAuthorization(True, True, "runner:grant-changed"))
+    assert len(live_fake.calls) == 1
