@@ -482,7 +482,7 @@ def test_local_active_lease_and_reordered_delivery(local_case, monkeypatch):
     assert len(invocation_rows(first, "ProductionDispatchAttempt.v1")) == 1
 
 
-@pytest.mark.parametrize("failure,expected", [("reject", "FAILED"), ("alter", "FAILED"), ("unknown", "UNKNOWN")])
+@pytest.mark.parametrize("failure,expected", [("reject", "UNKNOWN"), ("alter", "UNKNOWN"), ("unknown", "UNKNOWN")])
 def test_local_receiver_failure_never_mints_success(local_case, monkeypatch, failure, expected):
     result, refs, make_owner = local_case
     from ai_commerce.creative import briefs
@@ -498,6 +498,7 @@ def test_local_receiver_failure_never_mints_success(local_case, monkeypatch, fai
     first = make_owner()
     actual = first.complete_a10(result, **refs)
     assert actual.status == expected and actual.event is None and actual.accepted_consumer is None
+    assert actual.reason == "RECEIVER_UNRESOLVED"
     assert make_owner().resume_local() == (actual,)
     assert len(calls) == 1
     assert not invocation_rows(first, "ProductionStageReceipt.v1")
@@ -982,7 +983,7 @@ def test_r4_crash_windows_never_blindly_reinvoke_a04(a03_r3_case, monkeypatch, w
     assert len(invocation_rows(first, "ProductionStageReceipt.v1")) == (window == "after-witness")
 
 
-@pytest.mark.parametrize("failure,expected", [("reject", "FAILED"), ("alter", "FAILED"), ("unknown", "UNKNOWN")])
+@pytest.mark.parametrize("failure,expected", [("reject", "UNKNOWN"), ("alter", "UNKNOWN"), ("unknown", "UNKNOWN")])
 def test_r4_receiver_failure_and_unknown_effect_never_mint_success(a03_r3_case, monkeypatch, failure, expected):
     from ai_commerce.media import generation as mg
 
@@ -1003,6 +1004,11 @@ def test_r4_receiver_failure_and_unknown_effect_never_mint_success(a03_r3_case, 
     first = a03_r3_case["make_owner"]()
     actual = first.complete_a03(prod_result, store=sidecars)
     assert actual.status == expected and actual.event is None and actual.accepted_consumer is None
+    assert actual.reason == "RECEIVER_UNRESOLVED"
+    # The altered return follows a real durable A04 receipt write: that effect
+    # must remain UNKNOWN, not a falsely proven pre-effect FAILED.
+    receipts = list((first._state_dir / "a04-handoffs").glob("*.json"))
+    assert len(receipts) == (1 if failure == "alter" else 0)
     assert a03_r3_case["make_owner"]().resume_local() == (actual,)
     assert len(calls) == 1
     assert not invocation_rows(first, "ProductionStageReceipt.v1")

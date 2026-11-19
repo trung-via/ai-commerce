@@ -144,21 +144,45 @@ def _write(path: Path, data: bytes) -> None:
 
 
 def _observe_usage(data: bytes, executor: str) -> dict[str, int] | None:
-    """Only provider-reported exact, nonnegative counters; unknown stays unknown."""
+    """Normalize exact provider counters without estimating missing usage.
+
+    AGY JSON reports ``cache_read_tokens`` (not Codex's
+    ``cached_input_tokens``) and may include thinking and total counters.
+    Keep the original AGY cache name as well as the normalized one so
+    downstream reporting can distinguish observed cache reads.
+    """
     candidates: list[dict[str, Any]] = []
     for obj in _provider_events(data) or []:
         if isinstance(obj, dict):
             if executor == "codex" and obj.get("type") == "turn.completed":
                 candidates.append(obj.get("usage", {}))
-            if executor == "antigravity":
+            if executor == "antigravity" and (obj.get("type") == "turn.completed" or
+                    obj.get("status") in ("SUCCESS", "ERROR", "FAILED", "FAILURE")):
                 candidates.append(obj.get("usage", {}))
     for item in reversed(candidates):
         if not isinstance(item, dict):
             continue
-        names = ("input_tokens", "cached_input_tokens", "output_tokens")
-        if all(type(item.get(n)) is int and item[n] >= 0 for n in names):
-            if item["cached_input_tokens"] <= item["input_tokens"]:
-                return {n: item[n] for n in names}
+        cache = item.get("cache_read_tokens", item.get("cached_input_tokens"))
+        if not all(type(value) is int and value >= 0 for value in
+                   (item.get("input_tokens"), item.get("output_tokens"), cache)):
+            continue
+        if cache > item["input_tokens"]:
+            continue
+        if ("cache_read_tokens" in item and "cached_input_tokens" in item and
+                item["cache_read_tokens"] != item["cached_input_tokens"]):
+            continue
+        if "thinking_tokens" in item and (type(item["thinking_tokens"]) is not int or
+                not 0 <= item["thinking_tokens"] <= item["output_tokens"]):
+            continue
+        if "total_tokens" in item and (type(item["total_tokens"]) is not int or
+                item["total_tokens"] != item["input_tokens"] + item["output_tokens"]):
+            continue
+        result = {"input_tokens": item["input_tokens"], "cached_input_tokens": cache,
+                  "output_tokens": item["output_tokens"]}
+        for name in ("cache_read_tokens", "thinking_tokens", "total_tokens"):
+            if name in item:
+                result[name] = item[name]
+        return result
     return None
 
 
@@ -1260,6 +1284,7 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
         "changed_files": [], "candidate_file_sha256": {}, "tracked_diff_sha256": None,
         "scope_valid": None, "git_head_after": None, "git_dir": initial["git_dir"], "denied_actions": [],
         "usage": None, "usage_status": "UNKNOWN", "cost": None, "cost_status": "UNKNOWN",
+        "usage_invocations_observed": 0, "usage_invocations_total": 0,
         "evidence_files": {}, "git_delivery": "LOCAL_DIFF_ONLY_NO_COMMIT_NO_PUSH",
         "live_provider_confirmed": False, "replay_authorized": False,
         "max_repair_rounds": max_repair_rounds, "action_timeout_seconds": action_timeout_seconds,
@@ -1375,9 +1400,20 @@ def execute_attempt(*, repo: Path, output_dir: Path, work_id: str, attempt_id: s
         report["executor_invoked"] = bool(invoked)
         report["invocation_count"] = len(invoked)
         report["repair_rounds_used"] = sum(i["repair_round"] > 0 for i in invoked)
-        if invoked and all(i["usage"] is not None for i in invoked):
-            report.update(usage={key: sum(i["usage"][key] for i in invoked) for key in invoked[0]["usage"]},
-                          usage_status="PROVIDER_REPORTED")
+        observed_usage = [i["usage"] for i in invoked if i["usage"] is not None]
+        report["usage_invocations_observed"] = len(observed_usage)
+        report["usage_invocations_total"] = len(invoked)
+        if observed_usage:
+            # Only sum fields observed in every included provider receipt.
+            # Partial coverage is explicitly labeled, never silently promoted
+            # to a complete measured total or erased by a later quota failure.
+            names = ("input_tokens", "cached_input_tokens", "output_tokens",
+                     "cache_read_tokens", "thinking_tokens", "total_tokens")
+            report.update(
+                usage={name: sum(usage[name] for usage in observed_usage)
+                       for name in names if all(name in usage for usage in observed_usage)},
+                usage_status=("PROVIDER_REPORTED" if len(observed_usage) == len(invoked)
+                              else "PARTIAL_PROVIDER_REPORTED"))
         report["stop_reason"] = report["stop_reason"] or report["error_code"] or report["status"]
         report["finished_at"] = _now()
         _write(output_dir / "engineering_result.json", _json_bytes(report))

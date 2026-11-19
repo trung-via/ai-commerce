@@ -852,14 +852,11 @@ class ProductionPipelineOrchestrator:
         try:
             self._authorize_completed(completed)
             witness = self._invoke_a04(completed, raw) if is_a04 else self._invoke_a03(completed, raw)
-        except (ValueError, TypeError, KeyError):
-            with self._database() as db:
-                db.execute("UPDATE outbox SET state='FAILED',reason='RECEIVER_REJECTED' WHERE key=?", (key,))
-                self._journal(db, key, "FAILED", {"reason": "RECEIVER_REJECTED"})
-            return DispatchResult(status="FAILED", completed=completed, reason="RECEIVER_REJECTED")
         except Exception:
-            # An I/O/unexpected failure after reservation may have happened
-            # after intake/store. Do not infer failure-before-effect or retry.
+            # Once the dispatch reservation is committed, even a ValueError or
+            # malformed receiver response can occur after the consumer wrote its
+            # artifact. Only the pre-invocation validation above can mark a
+            # deterministic FAILED; never assume no effect or blindly retry.
             with self._database() as db:
                 db.execute("UPDATE outbox SET state='UNKNOWN',reason='RECEIVER_UNRESOLVED' WHERE key=?", (key,))
                 self._journal(db, key, "UNKNOWN", {"reason": "RECEIVER_UNRESOLVED"})
