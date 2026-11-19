@@ -62,4 +62,5 @@ jobs:
       - name: Verify pinned Brain PASS and reusable EF02 or exact-head CI before merge
         env:
           GH_TOKEN: ${{ github.token }}
+          EF02_PROOF_TRACE: '1'
         run: python .github/scripts/pr-merge-gate.py

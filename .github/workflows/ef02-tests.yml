@@ -7,6 +7,8 @@ on:
 permissions:
   contents: read
   actions: read
+  # The original-proof preflight reads /pulls/{number}/files on private repos.
+  pull-requests: read
 # Keep only the newest candidate CI run per PR; never cancel a main push.
 # Exact-head gate requires new proof, not stale/cancelled workflow receipts.
 concurrency:
@@ -37,6 +39,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EF02_REUSE_PR_NUMBER: ${{ github.event.pull_request.number }}
+          EF02_PROOF_TRACE: '1'
       - name: MT-01 prove postmerge exact-tree PR CI
         id: reuse
         if: steps.ef02_proof.outputs.verified != 'true'
