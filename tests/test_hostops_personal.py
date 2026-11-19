@@ -2430,6 +2430,217 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
                 self.assertIn(expected, hostops._CLEAN_PUBLIC_CODES)
                 self.assertEqual(hostops._clean_autostart_receipt(expected)["code"], expected)
 
+    def _clean_source_case(self, label, files):
+        base = self.local / f"case_{label}"
+        root = base / "persistent"
+        workflow = base / "workflow"
+        (root / ".git").mkdir(parents=True, exist_ok=True)
+        source = root / hostops._ACQUISITION_SOURCE
+        peer = workflow / hostops._ACQUISITION_SOURCE
+        all_files = {hostops._ACQUISITION_SOURCE.as_posix(): (b"same reviewed source\n", b"same reviewed source\n")}
+        all_files.update(files)
+        tracked_entries = []
+        for rel, (worktree_bytes, pinned_bytes) in all_files.items():
+            work_path = root / rel
+            pin_path = workflow / rel
+            work_path.parent.mkdir(parents=True, exist_ok=True)
+            pin_path.parent.mkdir(parents=True, exist_ok=True)
+            work_path.write_bytes(worktree_bytes)
+            pin_path.write_bytes(pinned_bytes)
+            tracked_entries.append("H " + rel)
+        git = {
+            ("rev-parse", "--show-toplevel"): str(root),
+            ("rev-parse", "--abbrev-ref", "HEAD"): "main",
+            ("config", "--get", "remote.origin.url"): "https://github.com/trung-via/ai-commerce.git",
+            ("rev-parse", "HEAD", "refs/remotes/origin/main"): f"{self.sha}\n{self.sha}\n",
+            ("status", "--porcelain=v1", "--untracked-files=all"): "",
+            ("ls-files", "-v", "-z", "--", "src"): "\0".join(tracked_entries) + "\0",
+        }
+        return root, workflow, source, peer, git
+
+    def test_persistent_source_allows_crlf_equivalence_for_recognized_text_suffixes_and_reaches_runtime(self):
+        # Exact-byte fast path passes for both text and binary tracked files without normalization.
+        exact_bin = b"\x89PNG\r\n\x1a\n\x00\xffexact"
+        root, workflow, source, peer, git = self._clean_source_case("exact_fast_path", {
+            "src/ai_commerce/__init__.py": (b'"""pkg"""\n__all__ = []\n', b'"""pkg"""\n__all__ = []\n'),
+            "src/ai_commerce/asset.bin": (exact_bin, exact_bin),
+        })
+        with patch.dict(hostops.ROOTS, workspace=root), \
+                patch.dict(self.env, GITHUB_WORKSPACE=str(workflow)), \
+                patch.object(hostops, "__file__", workflow / "src/ai_commerce/hostops_v3/personal.py"), \
+                patch.object(self.acq, "__file__", peer), \
+                patch.object(hostops, "_git", side_effect=lambda *args: git[args]), \
+                patch.object(hostops, "_normalize_crlf_text",
+                             side_effect=AssertionError("exact-byte fast path must not normalize")):
+            self.assertEqual(self.real_source(self.acq, self.sha), source)
+
+        # Observed HostOps #1126 LF-vs-CRLF checkout equivalence across reviewed text suffixes.
+        suffix_cases = (
+            ("py_init_crlf", "src/ai_commerce/__init__.py",
+             b'"""AI Commerce package."""\r\n\r\n__version__ = "0.1.0"\r\n',
+             b'"""AI Commerce package."""\n\n__version__ = "0.1.0"\n'),
+            ("py_reverse_lf", "src/ai_commerce/module.py",
+             b"a = 1\nb = 2\n", b"a = 1\r\nb = 2\r\n"),
+            ("py_mixed_pinned_pure_crlf", "src/ai_commerce/product/core.py",
+             b"a = 1\r\nb = 2\r\nc = 3\r\n", b"a = 1\r\nb = 2\nc = 3\n"),
+            ("json_crlf", "src/ai_commerce/contracts/sample.json",
+             b'{\r\n  "ok": true\r\n}\r\n', b'{\n  "ok": true\n}\n'),
+            ("md_crlf", "src/ai_commerce/README.md",
+             b"# Title\r\n\r\nBody\r\n", b"# Title\n\nBody\n"),
+            ("txt_crlf", "src/ai_commerce/verification/notes.txt",
+             b"line 1\r\nline 2\r\n", b"line 1\nline 2\n"),
+            ("patch_crlf", "src/ai_commerce/repair/fix.patch",
+             b"--- a/x.py\r\n+++ b/x.py\r\n", b"--- a/x.py\n+++ b/x.py\n"),
+            ("yaml_crlf", "src/ai_commerce/config.yaml",
+             b"key: value\r\n", b"key: value\n"),
+            ("toml_crlf", "src/ai_commerce/config.toml",
+             b'key = "value"\r\n', b'key = "value"\n'),
+        )
+        for label, rel, work_bytes, pin_bytes in suffix_cases:
+            with self.subTest(label=label, rel=rel):
+                root, workflow, source, peer, git = self._clean_source_case(label, {
+                    rel: (work_bytes, pin_bytes),
+                })
+                with patch.dict(hostops.ROOTS, workspace=root), \
+                        patch.dict(self.env, GITHUB_WORKSPACE=str(workflow)), \
+                        patch.object(hostops, "__file__", workflow / "src/ai_commerce/hostops_v3/personal.py"), \
+                        patch.object(self.acq, "__file__", peer), \
+                        patch.object(hostops, "_git", side_effect=lambda *args: git[args]):
+                    self.assertEqual(self.real_source(self.acq, self.sha), source)
+
+        # End-to-end offline invoke with CRLF persistent .py/.json/.md/.txt/.patch reaches managed runtime and task.
+        init_lf = b'"""AI Commerce runtime package."""\n\n# Canonical LF source for HostOps custody check.\n__all__ = []\n'
+        init_crlf = init_lf.replace(b"\n", b"\r\n")
+        acq_lf = b"def monitor():\n    return 9444\n"
+        acq_crlf = acq_lf.replace(b"\n", b"\r\n")
+        root, workflow, source, peer, git = self._clean_source_case("e2e_crlf", {
+            hostops._ACQUISITION_SOURCE.as_posix(): (acq_crlf, acq_lf),
+            "src/ai_commerce/__init__.py": (init_crlf, init_lf),
+            "src/ai_commerce/contracts/sample.json": (b'{\r\n  "k": 1\r\n}\r\n', b'{\n  "k": 1\n}\n'),
+            "src/ai_commerce/README.md": (b"# Docs\r\n", b"# Docs\n"),
+            "src/ai_commerce/notes.txt": (b"one\r\ntwo\r\n", b"one\ntwo\n"),
+            "src/ai_commerce/fix.patch": (b"@@ -1 +1 @@\r\n", b"@@ -1 +1 @@\n"),
+        })
+        self.source.side_effect = self.real_source
+        with patch.dict(hostops.ROOTS, workspace=root), \
+                patch.dict(self.env, GITHUB_WORKSPACE=str(workflow)), \
+                patch.object(hostops, "__file__", workflow / "src/ai_commerce/hostops_v3/personal.py"), \
+                patch.object(self.acq, "__file__", peer), \
+                patch.object(hostops, "_git", side_effect=lambda *args: git[args]):
+            self.managed_runtime.reset_mock()
+            self.task.reset_mock()
+            receipt = self.invoke()
+            self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", "INSTALLED_BUT_NOT_RUNNING"))
+            self.managed_runtime.assert_called_once_with(self.local, self.sid, source)
+            self.task.assert_called_once_with(self.sid, install=False, runtime=self.runtime)
+
+            # Private profile/owner and Task controls remain enforced after clean CRLF source passes.
+            self.task.reset_mock()
+            with patch.object(self.acq, "_clean_target",
+                              side_effect=self.acq._Clean9444Hold("OPERATOR_OWNERSHIP_UNPROVEN")):
+                held = self.invoke()
+            self.assertEqual((held["status"], held["code"]), ("HOLD", "OPERATOR_OWNERSHIP_UNPROVEN"))
+            self.task.assert_not_called()
+
+            self.task.return_value = "AUTOSTART_CONFLICT"
+            self.task.reset_mock()
+            conflict = self.invoke()
+            self.assertEqual((conflict["status"], conflict["code"]), ("HOLD", "AUTOSTART_CONFLICT"))
+            self.task.assert_called_once_with(self.sid, install=False, runtime=self.runtime)
+
+    def test_persistent_source_rejects_content_binary_rogue_newline_and_custody_violations(self):
+        base_lf = b"alpha = 1\nbeta = 2\n"
+        negative_byte_cases = (
+            ("content_edit", "src/ai_commerce/__init__.py", b"alpha = 1\r\nbeta = 3\r\n", base_lf),
+            ("extra_char", "src/ai_commerce/__init__.py", b"alpha = 1 \r\nbeta = 2\r\n", base_lf),
+            ("missing_char", "src/ai_commerce/__init__.py", b"alpha = 1\r\nbeta = \r\n", base_lf),
+            ("missing_trailing_nl", "src/ai_commerce/__init__.py", b"alpha = 1\r\nbeta = 2", base_lf),
+            ("extra_trailing_nl", "src/ai_commerce/__init__.py", b"alpha = 1\r\nbeta = 2\r\n\r\n", base_lf),
+            ("bom_added", "src/ai_commerce/__init__.py", b"\xef\xbb\xbfalpha = 1\r\nbeta = 2\r\n", base_lf),
+            ("lone_cr", "src/ai_commerce/__init__.py", b"alpha = 1\rbeta = 2\r", base_lf),
+            ("trailing_lone_cr", "src/ai_commerce/__init__.py", b"alpha = 1\r\nbeta = 2\r", base_lf),
+            ("double_cr_lf", "src/ai_commerce/__init__.py", b"alpha = 1\r\r\nbeta = 2\r\n", base_lf),
+            ("lfcr_reversed", "src/ai_commerce/__init__.py", b"alpha = 1\n\rbeta = 2\n\r", base_lf),
+            ("mixed_worktree_crlf_lf", "src/ai_commerce/__init__.py", b"alpha = 1\r\nbeta = 2\n", base_lf),
+            ("unicode_nel", "src/ai_commerce/__init__.py", b"alpha = 1\xc2\x85beta = 2\xc2\x85", base_lf),
+            ("unicode_ls", "src/ai_commerce/__init__.py", b"alpha = 1\xe2\x80\xa8beta = 2\xe2\x80\xa8", base_lf),
+            ("nul_in_py", "src/ai_commerce/__init__.py", b"alpha\x00\r\nbeta\r\n", b"alpha\x00\nbeta\n"),
+            ("invalid_utf8_in_py", "src/ai_commerce/__init__.py", b"\xff\r\nbeta\r\n", b"\xff\nbeta\n"),
+            ("binary_crlf_bin", "src/ai_commerce/blob.bin", b"line1\r\nline2\r\n", b"line1\nline2\n"),
+            ("binary_crlf_png", "src/ai_commerce/img.png", b"\x89PNG\r\n\x1a\n", b"\x89PNG\n\x1a\n"),
+            ("binary_edit_png", "src/ai_commerce/img.png", b"\x89PNG\r\n\x1a\n\x01", b"\x89PNG\r\n\x1a\n\x00"),
+            ("disallowed_ps1_crlf", "src/ai_commerce/helper.ps1", b"Write-Host 1\r\n", b"Write-Host 1\n"),
+            ("disallowed_noext_crlf", "src/ai_commerce/BLOB", b"line1\r\n", b"line1\n"),
+        )
+        self.source.side_effect = self.real_source
+        for label, rel, work_bytes, pin_bytes in negative_byte_cases:
+            with self.subTest(label=label, rel=rel):
+                root, workflow, _source, peer, git = self._clean_source_case(label, {
+                    rel: (work_bytes, pin_bytes),
+                })
+                with patch.dict(hostops.ROOTS, workspace=root), \
+                        patch.dict(self.env, GITHUB_WORKSPACE=str(workflow)), \
+                        patch.object(hostops, "__file__", workflow / "src/ai_commerce/hostops_v3/personal.py"), \
+                        patch.object(self.acq, "__file__", peer), \
+                        patch.object(hostops, "_git", side_effect=lambda *args: git[args]):
+                    self.managed_runtime.reset_mock()
+                    self.task.reset_mock()
+                    with self.assertRaisesRegex(hostops.Denied, "^SOURCE_BYTES_MISMATCH$"):
+                        self.real_source(self.acq, self.sha)
+                    receipt = self.invoke()
+                    self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "SOURCE_BYTES_MISMATCH"))
+                    self.managed_runtime.assert_not_called()
+                    self.task.assert_not_called()
+
+        # Custody violations still determinately HOLD even when tracked .py has valid CRLF equivalence.
+        root, workflow, source, peer, git = self._clean_source_case("custody_with_crlf", {
+            "src/ai_commerce/__init__.py": (b"alpha = 1\r\nbeta = 2\r\n", base_lf),
+        })
+        with patch.dict(hostops.ROOTS, workspace=root), \
+                patch.dict(self.env, GITHUB_WORKSPACE=str(workflow)), \
+                patch.object(hostops, "__file__", workflow / "src/ai_commerce/hostops_v3/personal.py"), \
+                patch.object(self.acq, "__file__", peer), \
+                patch.object(hostops, "_git", side_effect=lambda *args: git[args]):
+            for args, bad, expected in (
+                (("rev-parse", "--abbrev-ref", "HEAD"), "feature", "LOCAL_MAIN_SYNC_REQUIRED"),
+                (("config", "--get", "remote.origin.url"), "https://evil.invalid/repo.git", "LOCAL_MAIN_SYNC_REQUIRED"),
+                (("rev-parse", "HEAD", "refs/remotes/origin/main"), "b" * 40 + "\n" + "b" * 40 + "\n",
+                 "LOCAL_MAIN_SYNC_REQUIRED"),
+                (("status", "--porcelain=v1", "--untracked-files=all"), " M src/ai_commerce/__init__.py",
+                 "LOCAL_MAIN_SYNC_REQUIRED"),
+                (("status", "--porcelain=v1", "--untracked-files=all"), "?? src/evil.py", "SOURCE_UNTRACKED_FILE"),
+                (("ls-files", "-v", "-z", "--", "src"),
+                 "h " + hostops._ACQUISITION_SOURCE.as_posix() + "\0H src/ai_commerce/__init__.py\0",
+                 "SOURCE_INDEX_UNVERIFIED"),
+            ):
+                with self.subTest(git_args=args, expected=expected), patch.dict(git, {args: bad}):
+                    self.managed_runtime.reset_mock()
+                    self.task.reset_mock()
+                    receipt = self.invoke()
+                    self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", expected))
+                    self.managed_runtime.assert_not_called()
+                    self.task.assert_not_called()
+
+            untracked = root / "src" / "ai_commerce" / "extra.py"
+            untracked.write_bytes(b"untracked\r\n")
+            try:
+                self.managed_runtime.reset_mock()
+                self.task.reset_mock()
+                receipt = self.invoke()
+                self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "SOURCE_UNTRACKED_FILE"))
+                self.managed_runtime.assert_not_called()
+                self.task.assert_not_called()
+            finally:
+                untracked.unlink()
+
+            with patch.object(hostops, "_is_reparse", side_effect=lambda p: p == root / "src/ai_commerce/__init__.py"):
+                self.managed_runtime.reset_mock()
+                self.task.reset_mock()
+                receipt = self.invoke()
+                self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "SOURCE_PATH_UNTRUSTED"))
+                self.managed_runtime.assert_not_called()
+                self.task.assert_not_called()
+
     def test_runtime_rejects_runner_python_and_uses_only_signed_owner_install(self):
         base = self.local / "Programs" / "Python" / "Python312"
         site = base / "Lib" / "site-packages"
