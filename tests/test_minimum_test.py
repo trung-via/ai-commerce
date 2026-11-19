@@ -2044,13 +2044,17 @@ def test_a10_m05_selects_a03_consumer_with_only_reviewed_closure(real_tree, monk
     without_a03_consumer = tuple(
         replace(g, consumers=tuple(p for p in g.consumers if p != producer))
         if g.name == "a03" else g for g in groups)
-    # A03's local-adapter regression also imports the orchestrator, so current
-    # imports still select A03 without its declared bridge consumer.
+    # Two independent A03 test-only imports now select the bridge even without
+    # its declared consumer edge: the creative test imports the orchestrator,
+    # and the upgrade CLI smoke imports ai_commerce.cli. Preserve both real
+    # positive paths; isolate both ONLY for the declared-edge negative control.
     assert set(select(without_a03_consumer)["selected_groups"]) == expected
     # Isolate the declared edge's negative control from that test-only import.
     # All production imports and the production/wakehub owner chain stay real.
     a03_test = "tests/test_a03_creative.py"
     orchestration_init = "src/ai_commerce/production_orchestration/__init__.py"
+    a03_cli_test = "tests/test_a03_upgrade_v11.py"
+    cli_source = "src/ai_commerce/cli.py"
     with monkeypatch.context() as control:
         if v21:
             from ai_commerce.engineering import impact_v21
@@ -2066,6 +2070,7 @@ def test_a10_m05_selects_a03_consumer_with_only_reviewed_closure(real_tree, monk
             graph, complete = real_tree.graph
             previous_graph = {p: set(deps) for p, deps in graph.items()}
             previous_graph[a03_test].remove(orchestration_init)
+            previous_graph[a03_cli_test].remove(cli_source)
             control.setattr(mt, "import_graph", lambda *_: (previous_graph, complete))
         assert set(select(groups)["selected_groups"]) == expected
         previous = select(without_a03_consumer)

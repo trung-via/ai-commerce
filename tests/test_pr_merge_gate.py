@@ -180,6 +180,139 @@ class FakeGitHub:
         raise AssertionError(f"Unexpected {method} {path}")
 
 
+class EF02OriginalProofGitHub(FakeGitHub):
+    """A source-bound, owner-authenticated, real-run-shaped EF02 fixture."""
+
+    def __init__(self, gate, *, altered_bytes=False, bad_artifact=False):
+        super().__init__(gate, ci="in_progress")
+        import hashlib
+        self.contents = b"source already tested by EF02"
+        self.altered_bytes = altered_bytes
+        self.bad_artifact = bad_artifact
+        self.ci_hits = 0
+        self.evidence = {
+            "version": 1, "status": "CANDIDATE_READY",
+            "scope_valid": True, "review_required": False,
+            "out_of_scope_files": [],
+            "changed_files": ["src/ai_commerce/product/identity.py"],
+            "allowed_paths": ["src/ai_commerce/product/identity.py"],
+            "candidate_file_sha256": {
+                "src/ai_commerce/product/identity.py":
+                    hashlib.sha256(self.contents).hexdigest()},
+            "effective_source_sha": self.base, "source_sha": self.base,
+            "action_id": "EXACT_SOURCE", "attempt_id": "exact-01",
+            "verification": {
+                "status": "BUILD_VERIFIED_FOR_SCOPE", "exit_code": 0,
+                "argv": ["python", "-m", "pytest", "tests/test_minimum_test.py", "-q"],
+                "evidence_sha256": {"mt01_0_evidence": "f" * 64},
+                "report_sha256": "e" * 64,
+            },
+            "provenance": {"run_id": "401", "run_attempt": "1"},
+        }
+
+    def read_artifact(self, artifact_id):
+        import io
+        import json
+        import zipfile
+        if artifact_id != 501 or self.bad_artifact:
+            return b"broken proof"
+        report = {
+            "status": "COMPLETE", "github_workflow_run_id": "401",
+            "actions": [{
+                "action_id": "EXACT_SOURCE", "attempt_id": "exact-01",
+                "status": "CANDIDATE_READY", "candidate_sha": self.head,
+                "candidate_evidence": self.evidence,
+            }],
+        }
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("batch-id/batch_result.json", json.dumps(report))
+        return buf.getvalue()
+
+    def __call__(self, path, method="GET", body=None):
+        import base64
+        import json
+        prefix = f"/repos/{self.repo}"
+        if path == f"{prefix}/pulls/{self.pr}":
+            obj = super().__call__(path, method, body)
+            obj["head"]["ref"] = "ef02/candidate/exact-01"
+            return obj
+        if path == f"{prefix}/git/commits/{self.head}":
+            return {
+                "sha": self.head, "parents": [{"sha": self.base}],
+                "message": "EF02 candidate attempt exact-01" + self.g.EF02_MARKER
+                           + json.dumps(self.evidence, sort_keys=True,
+                                        separators=(",", ":")),
+            }
+        if path == f"{prefix}/contents/src/ai_commerce/product/identity.py?ref={self.head}":
+            raw = self.contents + (b" extra" if self.altered_bytes else b"")
+            return {"encoding": "base64", "content": base64.b64encode(raw).decode()}
+        if path == f"{prefix}/actions/runs/401":
+            return {
+                "id": 401, "run_attempt": 1,
+                "path": ".github/workflows/issue-ingress.yml",
+                "event": "issues", "head_sha": self.base,
+                "actor": {"login": "trung-via"},
+                "status": "completed", "conclusion": "success",
+            }
+        if path == f"{prefix}/actions/runs/401/attempts/1/jobs?per_page=100":
+            return {"jobs": [{
+                "name": "ef02 / execute", "conclusion": "success",
+                "steps": [
+                    {"name": "Execute bounded concurrent EF01 jobs",
+                     "conclusion": "success"},
+                    {"name": "Preserve all attempt evidence even when actions fail",
+                     "conclusion": "success"},
+                ],
+            }]}
+        if path == f"{prefix}/actions/runs/401/artifacts?per_page=100":
+            return {"artifacts": [{
+                "id": 501, "name": "ef02-results-401-1",
+                "expired": False,
+                "workflow_run": {"id": 401, "head_sha": self.base},
+            }]}
+        if path.startswith(f"{prefix}/actions/runs?"):
+            self.ci_hits += 1
+        return super().__call__(path, method, body)
+
+
+def test_ef02_exact_proof_brain_merges_without_second_ci(gate):
+    api = EF02OriginalProofGitHub(gate)
+    decision = gate.verify_one(api, api.repo, api.pr)
+    assert decision.status == "READY_FOR_MERGE"
+    assert decision.reason == "EF02_EXACT_SOURCE_PROOF_REUSED"
+    assert api.ci_hits == 0
+    outcome = gate.process(api, api.repo, {
+        "pull_request": {
+            "number": api.pr, "head": {"sha": api.head},
+            "base": {"sha": api.base}, "state": "open",
+        },
+        "action": "submitted",
+        "review": {
+            "state": "commented", "user": {"login": "trung-via"},
+            "author_association": "OWNER", "commit_id": api.head,
+            "body": gate.approval_text(api.pr, api.head, api.base),
+        },
+    })
+    assert outcome[0]["status"] == "MERGED"
+    assert api.ci_hits == 0
+
+
+@pytest.mark.parametrize("failure", ("bytes", "artifact", "coverage"))
+def test_ef02_changed_or_incomplete_proof_falls_back_to_ci(gate, monkeypatch, failure):
+    api = EF02OriginalProofGitHub(
+        gate, altered_bytes=failure == "bytes", bad_artifact=failure == "artifact")
+    if failure == "coverage":
+        monkeypatch.setattr(gate, "reviewed_coverage_for_changed_files",
+                            lambda files: (
+                                ("src/ai_commerce/product/identity.py",),
+                                ("tests/test_minimum_test.py", "tests/test_consumer.py")))
+    decision = gate.verify_one(api, api.repo, api.pr)
+    assert decision.status == "WAIT_CI"
+    assert api.ci_hits == 1
+    assert not api.writes
+
+
 @pytest.mark.parametrize(
     ("test_path", "expected"),
     [
@@ -324,7 +457,7 @@ def test_brain_pass_workflow_wakes_on_main_push_without_new_ci():
     workflow = (ROOT / ".github/workflows/brain-pass-auto-merge.yml").read_text(encoding="utf-8")
     assert "push:\\n    branches: [main]".replace("\\n", "\n") in workflow
     assert "github.event_name == 'push' && github.ref == 'refs/heads/main'" in workflow
-    assert "Verify pinned Brain PASS and exact-head independent CI before merge" in workflow
+    assert "Verify pinned Brain PASS and reusable EF02 or exact-head CI before merge" in workflow
 
 def test_gate_reuses_old_ci_for_proven_noninterfering_base_advance(gate, monkeypatch):
     _two_independent_owner_groups(gate, monkeypatch)

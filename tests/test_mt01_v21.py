@@ -790,13 +790,14 @@ def test_oracle_postmerge_resolves_real_github_push_context_only(monkeypatch, tm
 
 
 
-def test_postmerge_v21_workflow_runs_on_every_main_push():
-    # A changed-only path filter can silently suppress the postmerge baseline
-    # oracle after a PR changes an unlisted control or introduces a new owner.
+def test_postmerge_v21_workflow_does_not_repeat_pr_verification_on_main():
+    # The verified source artifact is already accepted before merge; the
+    # postmerge main push must not rerun the same long MT-01/pytest suite.
     workflow = (Path(__file__).resolve().parents[1] /
                 ".github/workflows/ef02-tests.yml").read_text(encoding="utf-8")
     push = workflow.split("  push:\n", 1)[1].split("  pull_request:\n", 1)[0]
-    assert "branches: [ef02-multi-action-implementation, main]" in push
+    assert "branches: [ef02-multi-action-implementation]" in push
+    assert "main]" not in push
     assert "paths:" not in push
 
 
@@ -1202,7 +1203,8 @@ def test_v22_pr_ci_cancels_only_superseded_pull_requests():
     assert "concurrency:" in workflow
     assert "github.event.pull_request.number || github.ref" in workflow
     assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in workflow
-    assert "branches: [ef02-multi-action-implementation, main]" in workflow
+    assert "branches: [ef02-multi-action-implementation]" in workflow
+    assert "steps.ef02_proof.outputs.verified != 'true'" in workflow
 
 
 def test_v22_cold_component_one_pr_offline_canary(tmp_path, monkeypatch):
