@@ -543,38 +543,29 @@ def _observe_clean_runtime(sha: str) -> str:
         return "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
     local, _, sid = owner
     try:
-        source = _persistent_clean_source(acquisition, sha)
+        _persistent_clean_source(acquisition, sha)
     except Denied:
         return "SOURCE_CUSTODY_UNVERIFIED"
-    try:
-        runtime = acquisition._managed_clean_runtime(local, sid, source)
-    except acquisition._ManagedCleanRuntimeHold as exc:
-        return {
-            "interpreter": "CPYTHON_INTERPRETER_MISMATCH",
-            "missing_paths": "CPYTHON_LAYOUT_PATH_MISSING",
-            "unsafe_path": "CPYTHON_LAYOUT_PATH_UNSAFE",
-            "owner_identity": "CPYTHON_OWNER_IDENTITY_UNVERIFIED",
-            "shadow_policy": "CPYTHON_SHADOW_FILE_PRESENT",
-            "signature": "CPYTHON_SIGNATURE_UNVERIFIED",
-            "bootstrap": "CPYTHON_BOOTSTRAP_UNVERIFIED",
-        }.get(exc.stage, "UNKNOWN")
 
     if (acquisition._native_operator() != owner or acquisition._clean_pending(_CLEAN_TASK_PENDING)
             or acquisition._clean_launch_pending()):
         return "UNKNOWN"
-    task = acquisition._clean_task(sid, install=False, runtime=runtime)
+    try:
+        target, candidates = acquisition._clean_target(local, sid)
+        task = acquisition._clean_task(owner, target, candidates, install=False)
+    except (acquisition.AcquisitionBlocked, acquisition._EnrollmentHold, acquisition._Clean9444Hold, OSError):
+        return "TASK_READ_UNVERIFIED"
     if (acquisition._native_operator() != owner or acquisition._clean_pending(_CLEAN_TASK_PENDING)
             or acquisition._clean_launch_pending()):
         return "UNKNOWN"
     if type(task) is not str:
         return "UNKNOWN"
-    if task in ("ALREADY_ENROLLED", "AUTOSTART_NOT_ENROLLED"):
-        return "READY"
-    if task == "AUTOSTART_CONFLICT":
-        return "TASK_REGISTRATION_CONFLICT"
-    if task == "AUTOSTART_RUNTIME_UNAVAILABLE":
-        return "TASK_READ_UNVERIFIED"
-    return "UNKNOWN"
+    return {
+        "ALREADY_ENROLLED": "READY",
+        "AUTOSTART_NOT_ENROLLED": "AUTOSTART_NOT_ENROLLED",
+        "AUTOSTART_CONFLICT": "TASK_REGISTRATION_CONFLICT",
+        "AUTOSTART_RUNTIME_UNAVAILABLE": "TASK_READ_UNVERIFIED",
+    }.get(task, "UNKNOWN")
 
 
 def _probe_protected_clean_runtime():
@@ -615,13 +606,13 @@ def _install_protected_clean_autostart(event):
         from ai_commerce.remote import chrome_acquisition as acquisition
         owner = acquisition._native_operator()
         local, session, sid = owner
-        source = _persistent_clean_source(acquisition, sha)
-        runtime = acquisition._managed_clean_runtime(local, sid, source)
+        _persistent_clean_source(acquisition, sha)
+        target, candidates = acquisition._clean_target(local, sid)
 
         def inspect_target():
-            if acquisition._native_operator() != owner:
+            if (acquisition._native_operator() != owner
+                    or acquisition._clean_target(local, sid) != (target, candidates)):
                 deny("OPERATOR_OWNERSHIP_UNPROVEN")
-            target, candidates = acquisition._clean_target(local, sid)
             state, identity = acquisition._clean_inventory(target, candidates, session, sid)
             if state == "STARTING":
                 deny("PROFILE_ALREADY_ACTIVE_NO_CDP")
@@ -635,7 +626,7 @@ def _install_protected_clean_autostart(event):
         if acquisition._clean_pending(_CLEAN_TASK_PENDING):
             deny("UNKNOWN_EFFECT")
         inspect_target()
-        task = acquisition._clean_task(sid, install=False, runtime=runtime)
+        task = acquisition._clean_task(owner, target, candidates, install=False)
         if task not in {"ALREADY_ENROLLED", "AUTOSTART_NOT_ENROLLED"}:
             return _clean_autostart_receipt(task)
         created = None
@@ -646,35 +637,32 @@ def _install_protected_clean_autostart(event):
                 inspect_target()
                 reserved = True
                 acquisition._clean_record_pending(_CLEAN_TASK_PENDING, True)
-                created = acquisition._clean_task(sid, install=True, runtime=runtime)
+                created = acquisition._clean_task(owner, target, candidates, install=True)
                 if created not in {"ENROLLED", "ALREADY_ENROLLED"}:
                     if created == "AUTOSTART_CONFLICT":
                         acquisition._clean_record_pending(_CLEAN_TASK_PENDING, False)
                         return _clean_autostart_receipt(created)
                     return _clean_autostart_receipt("UNKNOWN_EFFECT")
-                if acquisition._clean_task(sid, install=False, runtime=runtime) != "ALREADY_ENROLLED":
+                if acquisition._clean_task(owner, target, candidates, install=False) != "ALREADY_ENROLLED":
                     return _clean_autostart_receipt("UNKNOWN_EFFECT")
                 inspect_target()
-        # Release the shared slot before Task Scheduler starts the same monitor.
-        # The monitor must independently acquire it and use LaunchPending.
+        # Release the shared slot before the scheduled action acquires it.
         started = False
         if reserved:
             if created == "ENROLLED":
                 if acquisition._native_operator() != owner:
                     return _clean_autostart_receipt("UNKNOWN_EFFECT")
-                start = acquisition._clean_task(sid, install=False, runtime=runtime, start_session=session)
+                start = acquisition._clean_task(owner, target, candidates, install=False, start=True)
                 if start not in {"START_REQUESTED", "START_NOT_ATTEMPTED"}:
                     return _clean_autostart_receipt("UNKNOWN_EFFECT")
                 started = start == "START_REQUESTED"
             acquisition._clean_record_pending(_CLEAN_TASK_PENDING, False)
             reserved = False
-        target, candidates = acquisition._clean_target(local, sid)
         deadline = time.monotonic() + (20 if started else 0)
         while True:
             state, identity = acquisition._clean_inventory(target, candidates, session, sid)
-            if state == "OWNED":
-                if acquisition._clean_launch_pending():
-                    return _clean_autostart_receipt("UNKNOWN_EFFECT")
+            launch_pending = acquisition._clean_launch_pending()
+            if state == "OWNED" and not launch_pending:
                 observed = replace(target, executable=identity[1])
                 acquisition._verify_google_chrome(observed)
                 acquisition._probe_cdp(observed)
@@ -683,8 +671,7 @@ def _install_protected_clean_autostart(event):
                     return _clean_autostart_receipt("UNKNOWN_EFFECT")
                 return _clean_autostart_receipt("CDP_VERIFIED")
             if time.monotonic() >= deadline:
-                return _clean_autostart_receipt("UNKNOWN_EFFECT" if state != "ABSENT"
-                                               or acquisition._clean_launch_pending()
+                return _clean_autostart_receipt("UNKNOWN_EFFECT" if state != "ABSENT" or launch_pending
                                                else "INSTALLED_BUT_NOT_RUNNING")
             time.sleep(0.5)
     except (ValueError, Denied) as exc:

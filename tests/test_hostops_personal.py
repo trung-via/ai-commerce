@@ -2132,14 +2132,13 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         self.mock(self.acq, "_native_local_app_data", return_value=self.local)
         self.real_source = hostops._persistent_clean_source
         self.source = self.mock(hostops, "_persistent_clean_source", return_value=self.local / "stable.py")
-        self.runtime = (self.local / "pythonw.exe", self.source.return_value)
-        self.real_runtime = self.acq._managed_clean_runtime
         self.real_task = self.acq._clean_task
-        self.managed_runtime = self.mock(self.acq, "_managed_clean_runtime", return_value=self.runtime)
         self.target = self.acq._ChromeTarget(self.local / "chrome.exe", self.local / "WakeHub-9444-Clean",
                                             "Default", "http://127.0.0.1:9444", 9444)
+        self.owner = (self.local, 7, self.sid)
+        self.candidates = (self.target.executable,)
         self.real_target = self.acq._clean_target
-        self.mock(self.acq, "_clean_target", return_value=(self.target, (self.target.executable,)))
+        self.mock(self.acq, "_clean_target", return_value=(self.target, self.candidates))
         self.inventory = self.mock(self.acq, "_clean_inventory", return_value=("ABSENT", None))
         self.mock(self.acq, "_verify_google_chrome")
         self.mock(self.acq, "_clean_require_unlocked")
@@ -2225,7 +2224,6 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
     def test_runtime_probe_reuses_source_custody_and_only_reads_task(self):
         root, workflow, source, peer, git = self._clean_source_fixture()
         self.source.side_effect = self.real_source
-        self.managed_runtime.return_value = runtime = (self.runtime[0], source)
         with patch.dict(hostops.ROOTS, workspace=root), \
                 patch.object(hostops, "__file__", workflow / "src/ai_commerce/hostops_v3/personal.py"), \
                 patch.object(self.acq, "__file__", peer), \
@@ -2239,7 +2237,6 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
                     self.assertEqual(self.invoke_probe()["code"], "SOURCE_CUSTODY_UNVERIFIED")
             with patch.object(hostops, "_is_reparse", side_effect=lambda path: path == source):
                 self.assertEqual(self.invoke_probe()["code"], "SOURCE_CUSTODY_UNVERIFIED")
-            self.managed_runtime.assert_not_called()
             self.task.assert_not_called()
 
             self.assertEqual(self.invoke_probe(), {
@@ -2247,8 +2244,7 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
                 "cdp_port": 9444, "source_sha": self.sha, "exact_chat_verified": False,
                 "wake_sent": False, "arbitrary_shell_enabled": False, "remote_shell_enabled": False,
             })
-        self.managed_runtime.assert_called_once_with(self.local, self.sid, source)
-        self.task.assert_called_once_with(self.sid, install=False, runtime=runtime)
+        self.task.assert_called_once_with(self.owner, self.target, self.candidates, install=False)
         self.inventory.assert_not_called()
         self.record.assert_not_called()
         self.probe.assert_not_called()
@@ -2266,7 +2262,8 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         self.launch_pending.return_value = False
         self.task.assert_not_called()
 
-        for reply, code in (("AUTOSTART_RUNTIME_UNAVAILABLE", "TASK_READ_UNVERIFIED"),
+        for reply, code in (("AUTOSTART_NOT_ENROLLED", "AUTOSTART_NOT_ENROLLED"),
+                            ("AUTOSTART_RUNTIME_UNAVAILABLE", "TASK_READ_UNVERIFIED"),
                             ("AUTOSTART_CONFLICT", "TASK_REGISTRATION_CONFLICT"),
                             ("UNKNOWN_EFFECT", "UNKNOWN"), ("PRIVATE", "UNKNOWN")):
             with self.subTest(reply=reply):
@@ -2307,7 +2304,7 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         self.session.assert_not_called()
         self.task.assert_not_called()
 
-    def test_session_owner_profile_and_transient_runtime_fail_before_task_access(self):
+    def test_session_owner_profile_and_custody_fail_before_task_access(self):
         for owner, name, result in (
             (self.acq, "_interactive_session", 0),
             (self.wake, "_windows_process_sid", "S-1-5-18"),
@@ -2318,25 +2315,12 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
             (self.acq, "_interactive_session", self.acq.AcquisitionBlocked, "ELEVATED_CHROME_DISALLOWED"),
             (self.acq, "_interactive_session", self.acq.AcquisitionBlocked, "WINDOWS_INTERACTIVE_REQUIRED"),
             (hostops, "_persistent_clean_source", hostops.Denied, "LOCAL_MAIN_SYNC_REQUIRED"),
-            (self.acq, "_managed_clean_runtime", self.acq._Clean9444Hold, "AUTOSTART_RUNTIME_UNAVAILABLE"),
             (self.acq, "_clean_target", self.acq._Clean9444Hold, "OPERATOR_OWNERSHIP_UNPROVEN"),
             (self.acq, "_clean_inventory", self.acq._Clean9444Hold, "FOREIGN_PORT_OWNER"),
             (self.acq, "_clean_inventory", self.acq._Clean9444Hold, "BROWSER_OWNERSHIP_UNPROVEN"),
         ):
             with patch.object(owner, name, side_effect=error(expected)):
                 self.assertEqual(self.invoke()["code"], expected)
-        self.task.assert_not_called()
-        self.record.assert_not_called()
-        self.probe.assert_not_called()
-
-    def test_runtime_layout_holds_keep_generic_install_receipt(self):
-        for stage in ("interpreter", "missing_paths", "unsafe_path", "owner_identity", "shadow_policy",
-                      "signature", "bootstrap"):
-            with self.subTest(stage=stage):
-                self.managed_runtime.side_effect = self.acq._ManagedCleanRuntimeHold(stage)
-                receipt = self.invoke()
-                self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "AUTOSTART_RUNTIME_UNAVAILABLE"))
-        self.inventory.assert_not_called()
         self.task.assert_not_called()
         self.record.assert_not_called()
         self.probe.assert_not_called()
@@ -2349,7 +2333,7 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
             self.task.return_value = code
             self.task.reset_mock()
             self.assertEqual(self.invoke()["code"], expected)
-            self.task.assert_called_once_with(self.sid, install=False, runtime=self.runtime)
+            self.task.assert_called_once_with(self.owner, self.target, self.candidates, install=False)
         self.pending.add("AutostartPending")
         self.task.reset_mock()
         self.assertEqual(self.invoke()["code"], "UNKNOWN_EFFECT")
@@ -2359,26 +2343,30 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
     def test_create_then_independent_readback_before_one_owner_session_start(self):
         responses = iter(("AUTOSTART_NOT_ENROLLED", "ENROLLED", "ALREADY_ENROLLED", "START_REQUESTED"))
 
-        def scheduler(sid, *, install, runtime, start_session=None):
-            if start_session is None:
+        def scheduler(owner, target, candidates, *, install, start=False):
+            self.assertEqual((owner, target, candidates), (self.owner, self.target, self.candidates))
+            if not start:
                 self.assertEqual(self.slot, self.task.call_count != 1)
             else:
                 self.assertFalse(self.slot)
-                self.assertEqual((sid, start_session, runtime), (self.sid, 7, self.runtime))
                 self.assertIn("AutostartPending", self.pending)
                 self.inventory.return_value = ("OWNED", (5, self.target.executable, "created", "PRIVATE"))
+                self.launch_pending.side_effect = (True, False)
             return next(responses)
 
         self.task.side_effect = scheduler
-        receipt = self.invoke()
+        with patch.object(hostops.time, "sleep") as wait:
+            receipt = self.invoke()
+        wait.assert_called_once_with(0.5)
         self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", "CDP_VERIFIED"))
         self.assertIs(receipt["devtools_protocol_ok"], True)
         for key in ("exact_chat_verified", "wake_sent", "arbitrary_shell_enabled"):
             self.assertIs(receipt[key], False)
         self.assertEqual(self.task.call_args_list, [
-            call(self.sid, install=False, runtime=self.runtime), call(self.sid, install=True, runtime=self.runtime),
-            call(self.sid, install=False, runtime=self.runtime),
-            call(self.sid, install=False, runtime=self.runtime, start_session=7),
+            call(self.owner, self.target, self.candidates, install=False),
+            call(self.owner, self.target, self.candidates, install=True),
+            call(self.owner, self.target, self.candidates, install=False),
+            call(self.owner, self.target, self.candidates, install=False, start=True),
         ])
         self.probe.assert_called_once_with(self.target)
         self.assertFalse(self.pending)
@@ -2507,7 +2495,7 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
                     with self.assertRaisesRegex(self.acq._Clean9444Hold, "^OPERATOR_OWNERSHIP_UNPROVEN$"):
                         self.real_target(self.local, self.sid)
 
-    def test_clean_checkout_proceeds_to_managed_runtime_and_task_without_source_acl_verifier(self):
+    def test_clean_checkout_proceeds_to_task_without_source_acl_verifier(self):
         root, workflow, source, peer, git = self._clean_source_fixture()
         normal_acl = (self.sid, (("allow", self.sid), ("allow", "S-1-5-32-545")))
         formerly_rejected_acl = (self.sid, (("allow", self.sid), ("allow", "S-1-5-11"), ("allow", "S-1-1-0")))
@@ -2522,12 +2510,10 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
                         patch.object(self.handoff, "_windows_acl", return_value=acl) as windows_acl, \
                         patch.object(self.handoff, "_private_identity",
                                      side_effect=AssertionError("public checkout must not invoke ACL verifier")):
-                    self.managed_runtime.reset_mock()
                     self.task.reset_mock()
                     receipt = self.invoke()
                     self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", "INSTALLED_BUT_NOT_RUNNING"))
-                    self.managed_runtime.assert_called_once_with(self.local, self.sid, source)
-                    self.task.assert_called_once_with(self.sid, install=False, runtime=self.runtime)
+                    self.task.assert_called_once_with(self.owner, self.target, self.candidates, install=False)
                     windows_acl.assert_not_called()
             for expected in (
                 "LOCAL_MAIN_SYNC_REQUIRED", "SOURCE_WORKFLOW_PATH_MISMATCH", "SOURCE_PATH_UNTRUSTED",
@@ -2614,7 +2600,7 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
                         patch.object(hostops, "_git", side_effect=lambda *args: git[args]):
                     self.assertEqual(self.real_source(self.acq, self.sha), source)
 
-        # End-to-end offline invoke with CRLF persistent .py/.json/.md/.txt/.patch reaches managed runtime and task.
+        # End-to-end offline invoke with CRLF persistent .py/.json/.md/.txt/.patch reaches the fixed task.
         init_lf = b'"""AI Commerce runtime package."""\n\n# Canonical LF source for HostOps custody check.\n__all__ = []\n'
         init_crlf = init_lf.replace(b"\n", b"\r\n")
         acq_lf = b"def monitor():\n    return 9444\n"
@@ -2633,12 +2619,10 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
                 patch.object(hostops, "__file__", workflow / "src/ai_commerce/hostops_v3/personal.py"), \
                 patch.object(self.acq, "__file__", peer), \
                 patch.object(hostops, "_git", side_effect=lambda *args: git[args]):
-            self.managed_runtime.reset_mock()
             self.task.reset_mock()
             receipt = self.invoke()
             self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", "INSTALLED_BUT_NOT_RUNNING"))
-            self.managed_runtime.assert_called_once_with(self.local, self.sid, source)
-            self.task.assert_called_once_with(self.sid, install=False, runtime=self.runtime)
+            self.task.assert_called_once_with(self.owner, self.target, self.candidates, install=False)
 
             # Private profile/owner and Task controls remain enforced after clean CRLF source passes.
             self.task.reset_mock()
@@ -2652,7 +2636,7 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
             self.task.reset_mock()
             conflict = self.invoke()
             self.assertEqual((conflict["status"], conflict["code"]), ("HOLD", "AUTOSTART_CONFLICT"))
-            self.task.assert_called_once_with(self.sid, install=False, runtime=self.runtime)
+            self.task.assert_called_once_with(self.owner, self.target, self.candidates, install=False)
 
     def test_persistent_source_rejects_content_binary_rogue_newline_and_custody_violations(self):
         base_lf = b"alpha = 1\nbeta = 2\n"
@@ -2689,13 +2673,11 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
                         patch.object(hostops, "__file__", workflow / "src/ai_commerce/hostops_v3/personal.py"), \
                         patch.object(self.acq, "__file__", peer), \
                         patch.object(hostops, "_git", side_effect=lambda *args: git[args]):
-                    self.managed_runtime.reset_mock()
                     self.task.reset_mock()
                     with self.assertRaisesRegex(hostops.Denied, "^SOURCE_BYTES_MISMATCH$"):
                         self.real_source(self.acq, self.sha)
                     receipt = self.invoke()
                     self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "SOURCE_BYTES_MISMATCH"))
-                    self.managed_runtime.assert_not_called()
                     self.task.assert_not_called()
 
         # Custody violations still determinately HOLD even when tracked .py has valid CRLF equivalence.
@@ -2720,74 +2702,44 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
                  "SOURCE_INDEX_UNVERIFIED"),
             ):
                 with self.subTest(git_args=args, expected=expected), patch.dict(git, {args: bad}):
-                    self.managed_runtime.reset_mock()
                     self.task.reset_mock()
                     receipt = self.invoke()
                     self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", expected))
-                    self.managed_runtime.assert_not_called()
                     self.task.assert_not_called()
 
             untracked = root / "src" / "ai_commerce" / "extra.py"
             untracked.write_bytes(b"untracked\r\n")
             try:
-                self.managed_runtime.reset_mock()
                 self.task.reset_mock()
                 receipt = self.invoke()
                 self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "SOURCE_UNTRACKED_FILE"))
-                self.managed_runtime.assert_not_called()
                 self.task.assert_not_called()
             finally:
                 untracked.unlink()
 
             with patch.object(hostops, "_is_reparse", side_effect=lambda p: p == root / "src/ai_commerce/__init__.py"):
-                self.managed_runtime.reset_mock()
                 self.task.reset_mock()
                 receipt = self.invoke()
                 self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "SOURCE_PATH_UNTRUSTED"))
-                self.managed_runtime.assert_not_called()
                 self.task.assert_not_called()
 
-    def test_runtime_and_task_use_signed_owner_python_independently_of_runner(self):
-        base = self.local / "Programs" / "Python" / "Python314"
-        site = base / "Lib" / "site-packages"
-        site.mkdir(parents=True)
-        python, pythonw, dll = (base / name for name in ("python.exe", "pythonw.exe", "python314.dll"))
-        source = self.local / "persistent" / hostops._ACQUISITION_SOURCE
-        source.parent.mkdir(parents=True)
-        for path in (python, pythonw, dll, source):
-            path.touch()
-        runner = SimpleNamespace(executable=str(self.local / "runner" / "hostops-launcher.exe"),
-                                 base_prefix=str(self.local / "runner"),
-                                 version_info=SimpleNamespace(major=3, minor=12))
-        with patch.object(self.acq, "sys", runner), \
-                patch.object(self.handoff, "_private_identity", return_value=self.sid), \
-                patch.object(self.acq, "_powershell", return_value=self.local / "powershell.exe"):
-            self.native_run.side_effect = [
-                SimpleNamespace(returncode=0, stdout=b"SIGNED_CPYTHON"),
-                SimpleNamespace(returncode=0), SimpleNamespace(returncode=0),
-            ]
-            runtime = self.real_runtime(self.local, self.sid, source)
-            self.assertEqual(runtime, (pythonw, source))
-            signed, console_smoke, windowed_smoke = self.native_run.call_args_list
-            self.assertEqual(signed.kwargs["env"]["AI_COMMERCE_PYTHONW"], str(pythonw))
-            for executable, smoke in ((python, console_smoke), (pythonw, windowed_smoke)):
-                self.assertEqual(smoke.args[0][:5], [str(executable), "-I", "-B", "-S", "-c"])
-                self.assertEqual(smoke.args[0][-1], "check")
-                self.assertEqual(smoke.kwargs["cwd"], source.parents[2])
-
+    def test_start_requests_only_the_exact_powershell_task_in_owner_session(self):
+        powershell = self.local / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        with patch.object(self.acq, "_powershell", return_value=powershell):
             self.native_run.side_effect = None
             self.native_run.return_value = SimpleNamespace(returncode=0, stdout=b"START_REQUESTED")
-            self.assertEqual(self.real_task(self.sid, install=False, runtime=runtime,
-                                            start_session=7), "START_REQUESTED")
-            task_call = self.native_run.call_args
-            script, env = task_call.args[0][-1], task_call.kwargs["env"]
-            self.assertEqual(env["AI_COMMERCE_TASK_PYTHON"], str(pythonw))
-            self.assertEqual(env["AI_COMMERCE_TASK_DIRECTORY"], str(source.parents[2]))
-            self.assertEqual(env["AI_COMMERCE_TASK_START_SESSION"], "7")
-            self.assertEqual(env["AI_COMMERCE_TASK_INSTALL"], "0")
-            self.assertIn(".RunEx($null, 12, $session, $sid)", script)
-            self.assertIn(".RegisterTaskDefinition($name, $expected, 34, $sid, $null, 3, $sddl)", script)
-            self.assertNotRegex(script, r"Stop-Process|\.Stop\(|DeleteTask|TerminateProcess")
+            self.assertEqual(self.real_task(self.owner, self.target, self.candidates,
+                                            install=False, start=True), "START_REQUESTED")
+        task_call = self.native_run.call_args
+        script, env = task_call.args[0][-1], task_call.kwargs["env"]
+        self.assertEqual(env["AI_COMMERCE_TASK_POWERSHELL"], str(powershell))
+        self.assertEqual(env["AI_COMMERCE_TASK_DIRECTORY"], str(powershell.parent))
+        self.assertEqual(env["AI_COMMERCE_TASK_START_SESSION"], "7")
+        self.assertEqual(env["AI_COMMERCE_TASK_INSTALL"], "0")
+        self.assertIn("-Command", env["AI_COMMERCE_TASK_ARGUMENTS"])
+        self.assertIn(".RunEx($null, 12, $session, $sid)", script)
+        self.assertIn(".RegisterTaskDefinition($name, $expected, 34, $sid, $null, 3, $sddl)", script)
+        self.assertNotRegex(script, r"Stop-Process|\.Stop\(|DeleteTask|TerminateProcess")
 
 
 class PersonalCdp9444TopologyTests(unittest.TestCase):
