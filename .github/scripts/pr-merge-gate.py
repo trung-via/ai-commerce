@@ -952,6 +952,55 @@ def noninterfering_main_advance(api: Callable[[str], Any], base: str,
     return not (old_paths & other_paths or old_tests & other_tests)
 
 
+EF02_PROOF_CONTROL_DRIFT = frozenset({
+    ".github/scripts/pr-merge-gate.py",
+    ".github/workflows/brain-pass-auto-merge.yml",
+    ".github/workflows/ef02-tests.yml",
+    "tests/test_pr_merge_gate.py",
+})
+
+
+def noninterfering_ef02_proof_control_advance(api: Callable[[str], Any], base: str,
+                                               pinned_base: str, current_main: str,
+                                               pr_files: object) -> bool:
+    """Allow an original EF02 proof across *only* trusted proof-control edits.
+
+    Normal exact-tree CI reuse still rejects all test and control changes.
+    An unchanged EF02 candidate is different: its original Windows execution
+    and candidate bytes are verified independently by the current main oracle.
+    Never accept a source, owner/consumer test, dependency or unknown workflow
+    drift, missing compare evidence, or a divergent main history here.
+    """
+    if (not SHA.fullmatch(pinned_base) or not SHA.fullmatch(current_main)
+            or pinned_base == current_main):
+        return False
+    coverage = reviewed_coverage_for_changed_files(pr_files)
+    if coverage is None:
+        return False
+    changed_paths, required_tests = map(set, coverage)
+    compare = api(f"{base}/compare/{pinned_base}...{current_main}")
+    if not isinstance(compare, dict):
+        return False
+    merge_base = compare.get("merge_base_commit")
+    if (compare.get("status") != "ahead" or
+            not isinstance(merge_base, dict) or
+            merge_base.get("sha") != pinned_base or
+            type(compare.get("ahead_by")) is not int or
+            not 1 <= compare["ahead_by"] <= 20 or
+            compare.get("behind_by") != 0 or
+            type(compare.get("total_commits")) is not int or
+            compare["total_commits"] != compare["ahead_by"]):
+        return False
+    files = compare.get("files")
+    if not isinstance(files, list) or not 1 <= len(files) < 100:
+        return False
+    paths = [item.get("filename") for item in files if isinstance(item, dict)]
+    return (len(paths) == len(files) == len(set(paths)) and
+            all(item.get("status") == "modified" for item in files) and
+            set(paths) <= EF02_PROOF_CONTROL_DRIFT and
+            not (set(paths) & (changed_paths | required_tests)))
+
+
 def verify_one(api: Callable[[str], Any], repository: str, number: int,
                *, event_head: str | None = None) -> Verdict:
     """Read-only preflight. All missing or stale evidence holds the merge."""
@@ -982,13 +1031,23 @@ def verify_one(api: Callable[[str], Any], repository: str, number: int,
     if (approval["pr"], approval["head"], approval["base"]) != (number, head, base_sha):
         return Verdict("HOLD", "BRAIN_PASS_BOUND_TO_DIFFERENT_REVISION", number, head)
 
+    original_candidate = str(pr.get("head", {}).get("ref", "")).startswith(
+        "ef02/candidate/")
+    candidate_files = None
+    original_proof_after_control_advance = False
     live = api(f"{base}/branches/main")
     live_sha = live.get("commit", {}).get("sha")
     if live_sha != base_sha:
-        changed_for_drift = api(f"{base}/pulls/{number}/files?per_page=100")
-        if not noninterfering_main_advance(
-                api, base, base_sha, live_sha, changed_for_drift):
-            return Verdict("WAIT_REBASE", "BASE_MAIN_CHANGED", number, head)
+        candidate_files = api(f"{base}/pulls/{number}/files?per_page=100")
+        if not noninterfering_main_advance(api, base, base_sha, live_sha,
+                                            candidate_files):
+            if (not original_candidate or
+                    not noninterfering_ef02_proof_control_advance(
+                        api, base, base_sha, live_sha, candidate_files) or
+                    not verified_ef02_candidate(api, repository, head,
+                                                candidate_files)):
+                return Verdict("WAIT_REBASE", "BASE_MAIN_CHANGED", number, head)
+            original_proof_after_control_advance = True
     if pr.get("mergeable") is not True:
         return Verdict("WAIT_MERGEABILITY", "PR_NOT_MERGEABLE", number, head)
 
@@ -996,9 +1055,11 @@ def verify_one(api: Callable[[str], Any], repository: str, number: int,
     # Brain review and this source/provenance oracle, NOT another pytest/Node
     # execution. A changed candidate or inadequate owner/consumer closure
     # simply falls through to ordinary PR CI.
-    if str(pr.get("head", {}).get("ref", "")).startswith("ef02/candidate/"):
-        candidate_files = api(f"{base}/pulls/{number}/files?per_page=100")
-        if verified_ef02_candidate(api, repository, head, candidate_files):
+    if original_candidate:
+        if candidate_files is None:
+            candidate_files = api(f"{base}/pulls/{number}/files?per_page=100")
+        if (original_proof_after_control_advance or
+                verified_ef02_candidate(api, repository, head, candidate_files)):
             return Verdict("READY_FOR_MERGE", "EF02_EXACT_SOURCE_PROOF_REUSED", number, head)
 
     q = urllib.parse.urlencode({"event": "pull_request", "head_sha": head, "per_page": 100})
@@ -1254,9 +1315,22 @@ def process(api: GitHubAPI, repository: str, event: dict) -> list[dict]:
                 current_main_sha = current_main.get("commit", {}).get("sha")
                 safe_main = fresh_base == current_main_sha
                 if not safe_main:
+                    fresh_paths = api(
+                        f"/repos/{repository}/pulls/{number}/files?per_page=100")
                     safe_main = noninterfering_main_advance(
                         api, f"/repos/{repository}", fresh_base, current_main_sha,
-                        api(f"/repos/{repository}/pulls/{number}/files?per_page=100"))
+                        fresh_paths)
+                    # verify_one has already attested the authentic, unchanged
+                    # EF02 original Windows ZIP and exact candidate bytes.
+                    # Preserve its special control-only main-drift decision in
+                    # the final race guard; all other CI paths remain strict.
+                    if (not safe_main and
+                            decision.reason == "EF02_EXACT_SOURCE_PROOF_REUSED" and
+                            str(fresh.get("head", {}).get("ref", "")).startswith(
+                                "ef02/candidate/")):
+                        safe_main = noninterfering_ef02_proof_control_advance(
+                            api, f"/repos/{repository}", fresh_base,
+                            current_main_sha, fresh_paths)
                 if (fresh.get("head", {}).get("sha") != decision.head or
                     not safe_main or
                     fresh.get("mergeable") is not True or fresh.get("draft") or

@@ -276,6 +276,80 @@ class EF02OriginalProofGitHub(FakeGitHub):
         return super().__call__(path, method, body)
 
 
+class EF02OriginalProofMainAdvance(EF02OriginalProofGitHub):
+    """Original EF02 receipt with independently observed protected-main drift."""
+    live_main = "d" * 40
+
+    def __init__(self, gate, *, drift_paths, comparison_ok=True,
+                 altered_bytes=False):
+        super().__init__(gate, altered_bytes=altered_bytes)
+        self.drift_paths = drift_paths
+        self.comparison_ok = comparison_ok
+
+    def __call__(self, path, method="GET", body=None):
+        prefix = f"/repos/{self.repo}"
+        if path == f"{prefix}/branches/main":
+            return {"commit": {"sha": self.live_main}}
+        if path == f"{prefix}/compare/{self.base}...{self.live_main}":
+            if not self.comparison_ok:
+                return {"status": "diverged", "files": []}
+            return {
+                # A GitHub merge commit typically advances by two commits:
+                # the PR head and its merge commit.
+                "status": "ahead", "ahead_by": 2, "behind_by": 0,
+                "total_commits": 2,
+                "merge_base_commit": {"sha": self.base},
+                "files": [{"filename": filename, "status": "modified"}
+                          for filename in self.drift_paths],
+            }
+        return super().__call__(path, method, body)
+
+
+def test_ef02_original_proof_merges_across_disjoint_trusted_control_update(gate):
+    """Main's proof-gate repair cannot force a second EF02 Windows execution."""
+    api = EF02OriginalProofMainAdvance(gate, drift_paths=[
+        ".github/scripts/pr-merge-gate.py",
+        ".github/workflows/brain-pass-auto-merge.yml",
+        ".github/workflows/ef02-tests.yml",
+        "tests/test_pr_merge_gate.py",
+    ])
+    verdict = gate.verify_one(api, api.repo, api.pr)
+    assert verdict.status == "READY_FOR_MERGE"
+    assert verdict.reason == "EF02_EXACT_SOURCE_PROOF_REUSED"
+    assert api.ci_hits == 0
+    assert gate.process(api, api.repo, _approval_event(gate))[0]["status"] == "MERGED"
+    assert api.writes == [{"sha": api.head, "merge_method": "merge"}]
+
+
+@pytest.mark.parametrize("unsafe_drift", [
+    ["tests/test_minimum_test.py"],
+    ["src/ai_commerce/product/identity.py"],
+    [".github/workflows/issue-ingress.yml"],
+    ["pyproject.toml"],
+    [".github/scripts/pr-merge-gate.py", "tests/test_minimum_test.py"],
+])
+def test_ef02_proof_main_advance_refuses_source_and_consumer_drift(
+    gate, unsafe_drift,
+):
+    api = EF02OriginalProofMainAdvance(gate, drift_paths=unsafe_drift)
+    verdict = gate.verify_one(api, api.repo, api.pr)
+    assert (verdict.status, verdict.reason) == ("WAIT_REBASE", "BASE_MAIN_CHANGED")
+    assert api.ci_hits == 0
+    assert api.writes == []
+
+
+def test_ef02_proof_main_advance_refuses_invalid_bytes_or_divergent_history(gate):
+    control = [".github/workflows/ef02-tests.yml"]
+    bad_bytes = EF02OriginalProofMainAdvance(
+        gate, drift_paths=control, altered_bytes=True)
+    assert gate.verify_one(bad_bytes, bad_bytes.repo, bad_bytes.pr).status == "WAIT_REBASE"
+    assert bad_bytes.ci_hits == 0
+    divergent = EF02OriginalProofMainAdvance(
+        gate, drift_paths=control, comparison_ok=False)
+    assert gate.verify_one(divergent, divergent.repo, divergent.pr).status == "WAIT_REBASE"
+    assert divergent.writes == []
+
+
 def test_ef02_exact_proof_brain_merges_without_second_ci(gate):
     api = EF02OriginalProofGitHub(gate)
     decision = gate.verify_one(api, api.repo, api.pr)
