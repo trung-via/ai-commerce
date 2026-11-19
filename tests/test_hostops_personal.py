@@ -2330,7 +2330,8 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         self.probe.assert_not_called()
 
     def test_runtime_layout_holds_keep_generic_install_receipt(self):
-        for stage in ("interpreter", "missing_paths", "unsafe_path", "owner_identity", "shadow_policy"):
+        for stage in ("interpreter", "missing_paths", "unsafe_path", "owner_identity", "shadow_policy",
+                      "signature", "bootstrap"):
             with self.subTest(stage=stage):
                 self.managed_runtime.side_effect = self.acq._ManagedCleanRuntimeHold(stage)
                 receipt = self.invoke()
@@ -2746,37 +2747,37 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
                 self.managed_runtime.assert_not_called()
                 self.task.assert_not_called()
 
-    def test_runtime_rejects_runner_python_and_uses_only_signed_owner_install(self):
-        base = self.local / "Programs" / "Python" / "Python312"
+    def test_runtime_and_task_use_signed_owner_python_independently_of_runner(self):
+        base = self.local / "Programs" / "Python" / "Python314"
         site = base / "Lib" / "site-packages"
         site.mkdir(parents=True)
-        python, pythonw, dll = (base / name for name in ("python.exe", "pythonw.exe", "python312.dll"))
+        python, pythonw, dll = (base / name for name in ("python.exe", "pythonw.exe", "python314.dll"))
         source = self.local / "persistent" / hostops._ACQUISITION_SOURCE
         source.parent.mkdir(parents=True)
         for path in (python, pythonw, dll, source):
             path.touch()
-        runtime = SimpleNamespace(executable=str(self.local / "runner" / "python.exe"), base_prefix=str(base),
-                                  version_info=SimpleNamespace(major=3, minor=12))
-        with patch.object(self.acq, "sys", runtime), \
+        runner = SimpleNamespace(executable=str(self.local / "runner" / "hostops-launcher.exe"),
+                                 base_prefix=str(self.local / "runner"),
+                                 version_info=SimpleNamespace(major=3, minor=12))
+        with patch.object(self.acq, "sys", runner), \
                 patch.object(self.handoff, "_private_identity", return_value=self.sid), \
                 patch.object(self.acq, "_powershell", return_value=self.local / "powershell.exe"):
-            with self.assertRaisesRegex(self.acq._Clean9444Hold, "AUTOSTART_RUNTIME_UNAVAILABLE"):
-                self.real_runtime(self.local, self.sid, source)
-            self.native_run.assert_not_called()
-            runtime.executable = str(python)
             self.native_run.side_effect = [
-                SimpleNamespace(returncode=0, stdout=b"SIGNED_CPYTHON"), SimpleNamespace(returncode=0),
+                SimpleNamespace(returncode=0, stdout=b"SIGNED_CPYTHON"),
+                SimpleNamespace(returncode=0), SimpleNamespace(returncode=0),
             ]
-            self.assertEqual(self.real_runtime(self.local, self.sid, source), (pythonw, source))
-            signed, smoke = self.native_run.call_args_list
+            runtime = self.real_runtime(self.local, self.sid, source)
+            self.assertEqual(runtime, (pythonw, source))
+            signed, console_smoke, windowed_smoke = self.native_run.call_args_list
             self.assertEqual(signed.kwargs["env"]["AI_COMMERCE_PYTHONW"], str(pythonw))
-            self.assertEqual(smoke.args[0][:5], [str(python), "-I", "-B", "-S", "-c"])
-            self.assertEqual(smoke.args[0][-1], "check")
-            self.assertEqual(smoke.kwargs["cwd"], source.parents[2])
+            for executable, smoke in ((python, console_smoke), (pythonw, windowed_smoke)):
+                self.assertEqual(smoke.args[0][:5], [str(executable), "-I", "-B", "-S", "-c"])
+                self.assertEqual(smoke.args[0][-1], "check")
+                self.assertEqual(smoke.kwargs["cwd"], source.parents[2])
 
             self.native_run.side_effect = None
             self.native_run.return_value = SimpleNamespace(returncode=0, stdout=b"START_REQUESTED")
-            self.assertEqual(self.real_task(self.sid, install=False, runtime=(pythonw, source),
+            self.assertEqual(self.real_task(self.sid, install=False, runtime=runtime,
                                             start_session=7), "START_REQUESTED")
             task_call = self.native_run.call_args
             script, env = task_call.args[0][-1], task_call.kwargs["env"]

@@ -1674,6 +1674,8 @@ _CLEAN_9444_REGISTRY = r"Software\AI-Commerce\WakeHub-9444-Clean"
 _CLEAN_9444_PORT = 9444
 _CLEAN_9444_INTERVAL = 60
 _CLEAN_9444_STARTUP = 15
+_MANAGED_CPYTHON_VERSION = (3, 14)
+_MANAGED_CPYTHON_TAG = "".join(map(str, _MANAGED_CPYTHON_VERSION))
 _PROGRAM_FILES_FOLDERS = ("905E63B6-C1BF-494E-B29C-65B732D3D21A",
                           "7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E")
 _CLEAN_9444_CODES = frozenset({
@@ -2072,21 +2074,25 @@ if (Test-Registration (Read-Registration)) { 'ENROLLED' } else { 'UNKNOWN_EFFECT
 def _clean_task(sid: str, *, install: bool, runtime: tuple[Path, Path] | None = None,
                 start_session: int | None = None) -> str:
     """Current-user, create-only Task Scheduler registration or exact readback."""
-    executable = Path(sys.executable)
-    pythonw = executable.with_name("pythonw.exe")
-    source = Path(__file__).absolute()
-    if runtime is not None:
+    if runtime is None:
+        executable = Path(sys.executable)
+        if not executable.is_absolute() or executable.name.lower() not in ("python.exe", "pythonw.exe"):
+            raise _Clean9444Hold("AUTOSTART_RUNTIME_UNAVAILABLE")
+        pythonw = executable.with_name("pythonw.exe")
+        source = Path(__file__).absolute()
+    else:
         pythonw, source = runtime
-    if (not executable.is_absolute() or executable.name.lower() not in ("python.exe", "pythonw.exe")
+    if (not pythonw.is_absolute() or pythonw.name.lower() != "pythonw.exe"
             or not pythonw.is_file() or not _no_links(pythonw)
-            or not source.is_file() or not _no_links(source)
+            or not source.is_absolute() or not source.is_file() or not _no_links(source)
             or any(re.search(r"[%\r\n]", str(path)) for path in (pythonw, source))):
         raise _Clean9444Hold("AUTOSTART_RUNTIME_UNAVAILABLE")
     package_root = source.parents[2]
-    bootstrap = (f"import runpy, sys; sys.path.insert(0, {str(package_root)!r}); "
-                 "runpy.run_module('ai_commerce.remote.chrome_acquisition', run_name='__main__')")
-    argv = ["-I", "-B", "-c", bootstrap, "supervise-clean-9444"]
-    if runtime is not None:
+    if runtime is None:
+        bootstrap = (f"import runpy, sys; sys.path.insert(0, {str(package_root)!r}); "
+                     "runpy.run_module('ai_commerce.remote.chrome_acquisition', run_name='__main__')")
+        argv = ["-I", "-B", "-c", bootstrap, "supervise-clean-9444"]
+    else:
         argv = _managed_clean_argv(pythonw, source)
     if start_session is not None and (runtime is None or install or type(start_session) is not int
                                       or start_session <= 0):
@@ -2123,22 +2129,37 @@ def _managed_clean_argv(pythonw: Path, source: Path) -> list[str]:
     # Isolated startup skips .pth/sitecustomize and ignores workspace bytecode.
     # The fixed checkout remains owner-maintained through approved git_sync_main.
     src = source.parents[2]
-    site = pythonw.parent / "Lib" / "site-packages"
     cache = src.parent / ".git" / "wakehub-9444-no-bytecode"
     bootstrap = f"""\
 import os, sys
 from pathlib import Path
-src, site, cache = Path({str(src)!r}), Path({str(site)!r}), Path({str(cache)!r})
+base = Path({str(pythonw.parent)!r})
+lib = base / 'Lib'
+src, site, cache = Path({str(src)!r}), lib / 'site-packages', Path({str(cache)!r})
+search_path = list(map(Path, sys.path))
+if (sys.implementation.name != 'cpython' or sys.version_info[:2] != {_MANAGED_CPYTHON_VERSION!r}
+        or Path(sys.executable) not in (base / 'python.exe', base / 'pythonw.exe')
+        or any(Path(prefix) != base for prefix in (sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix))
+        or lib not in search_path or any(not path.is_relative_to(base) for path in search_path)):
+    raise SystemExit(2)
 def safe(path):
     return not any(part.lstat().st_file_attributes & 0x400 for part in (path, *path.parents))
 def fail(error):
     raise error
 if not all(safe(path) for path in (src, site, cache.parent)) or os.path.lexists(cache):
     raise SystemExit(2)
-for root in (src, site):
+for root in (src, lib):
     for folder, dirs, files in os.walk(root, onerror=fail):
         if any((Path(folder) / name).lstat().st_file_attributes & 0x400 for name in (*dirs, *files)):
             raise SystemExit(2)
+from ctypes import WinDLL, create_unicode_buffer, wintypes
+module_filename = WinDLL('kernel32').GetModuleFileNameW
+module_filename.argtypes = (wintypes.HMODULE, wintypes.LPWSTR, wintypes.DWORD)
+module_filename.restype = wintypes.DWORD
+dll_path = create_unicode_buffer(32768)
+length = module_filename(sys.dllhandle, dll_path, len(dll_path))
+if not 0 < length < len(dll_path) or Path(dll_path.value) != base / 'python{_MANAGED_CPYTHON_TAG}.dll':
+    raise SystemExit(2)
 sys.pycache_prefix = str(cache)
 sys.path.extend((str(src), str(site)))
 from ai_commerce.remote import chrome_acquisition as acquisition
@@ -2156,18 +2177,30 @@ def _managed_clean_runtime(local: Path, sid: str, source: Path) -> tuple[Path, P
     from .local_completion_handoff import HandoffBlocked, _private_identity
     from .local_wake_entry import LocalWakeConfigError
 
-    version = f"{sys.version_info.major}{sys.version_info.minor}"
-    base = local / "Programs" / "Python" / f"Python{version}"
-    python, pythonw = base / "python.exe", base / "pythonw.exe"
-    dll = base / f"python{version}.dll"
-    site = base / "Lib" / "site-packages"
-    owner_paths = (base, python, pythonw, dll, base / "Lib", site)
     try:
-        if Path(sys.base_prefix) != base or Path(sys.executable) != python:
+        root = local / "Programs" / "Python"
+        install_name = f"Python{_MANAGED_CPYTHON_TAG}"
+        if any(not path.is_absolute() or not _no_links(path) for path in (root, source)):
+            raise _ManagedCleanRuntimeHold("unsafe_path")
+        if not root.is_dir():
+            raise _ManagedCleanRuntimeHold("missing_paths")
+        # Only the canonical 3.14 install is supported. Hold if a sibling 3.14
+        # variant makes the layout ambiguous, even if the canonical path exists.
+        variant = re.compile(rf"{install_name}t?(?:[-_][\w-]+)?", re.IGNORECASE)
+        candidates = [path for path in root.iterdir() if variant.fullmatch(path.name)]
+        if not candidates:
+            raise _ManagedCleanRuntimeHold("missing_paths")
+        if len(candidates) != 1 or candidates[0].name.casefold() != install_name.casefold():
             raise _ManagedCleanRuntimeHold("interpreter")
+        base = candidates[0]
+        python, pythonw = base / "python.exe", base / "pythonw.exe"
+        dll = base / f"python{_MANAGED_CPYTHON_TAG}.dll"
+        lib = base / "Lib"
+        site = lib / "site-packages"
+        owner_paths = (base, python, pythonw, dll, lib, site)
         # Detect unsafe paths before checking presence so broken links are classified as unsafe.
         if (any(re.search(r"[%\r\n]", str(path)) for path in (pythonw, source))
-                or any(not path.is_absolute() or not _no_links(path) for path in (*owner_paths, source))):
+                or any(not _no_links(path) for path in owner_paths)):
             raise _ManagedCleanRuntimeHold("unsafe_path")
         if any(not path.is_file() for path in (python, pythonw, dll, source)) or not site.is_dir():
             raise _ManagedCleanRuntimeHold("missing_paths")
@@ -2182,30 +2215,47 @@ def _managed_clean_runtime(local: Path, sid: str, source: Path) -> tuple[Path, P
             raise
         except (LocalWakeConfigError, OSError):
             raise _ManagedCleanRuntimeHold("owner_identity") from None
-        if any(os.path.lexists(base / name) for name in ("pyvenv.cfg", "python._pth", f"python{version}._pth")):
+        shadows = (root / "pyvenv.cfg", base / "pyvenv.cfg", base / "python._pth", base / "pythonw._pth",
+                   dll.with_suffix("._pth"), dll.with_suffix(".zip"))
+        if (any(os.path.lexists(path) for path in shadows)
+                or any(path.name.casefold().endswith(".pth") for path in site.iterdir())):
             raise _ManagedCleanRuntimeHold("shadow_policy")
         env = _child_environment()
         env.update(AI_COMMERCE_PYTHON=str(python), AI_COMMERCE_PYTHONW=str(pythonw),
                    AI_COMMERCE_PYTHON_DLL=str(dll))
+        major, minor = _MANAGED_CPYTHON_VERSION
         signed = (
             "$ErrorActionPreference='Stop'; "
+            "$version=$null; "
             "foreach ($p in @($env:AI_COMMERCE_PYTHON,$env:AI_COMMERCE_PYTHONW,$env:AI_COMMERCE_PYTHON_DLL)) { "
             "$s=Get-AuthenticodeSignature -LiteralPath $p; "
             "if ($s.Status -ne 'Valid' -or !$s.SignerCertificate -or "
-            "$s.SignerCertificate.Subject -notmatch '(^|, )CN=Python Software Foundation(,|$)') {exit 1} }; "
+            "$s.SignerCertificate.Subject -notmatch '(^|, )CN=Python Software Foundation(,|$)') {exit 1}; "
+            "$v=[Diagnostics.FileVersionInfo]::GetVersionInfo($p); "
+            "$exact=@($v.FileMajorPart,$v.FileMinorPart,$v.FileBuildPart,$v.FilePrivatePart) -join '.'; "
+            f"if ($v.FileMajorPart -ne {major} -or $v.FileMinorPart -ne {minor} -or "
+            "$v.OriginalFilename -ine [IO.Path]::GetFileName($p) -or ($version -and $exact -cne $version)) "
+            "{exit 2}; $version=$exact }; "
             "Write-Output 'SIGNED_CPYTHON'"
         )
         result = subprocess.run([str(_powershell()), "-NoProfile", "-NonInteractive", "-Command", signed],
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15,
                                 check=False, env=env, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if result.returncode == 2:
+            raise _ManagedCleanRuntimeHold("interpreter")
         if result.returncode or result.stdout.strip() != b"SIGNED_CPYTHON":
             raise _ManagedCleanRuntimeHold("signature")
-        result = subprocess.run([str(python), *_managed_clean_argv(pythonw, source), "check"],
-                                cwd=source.parents[2], env=_child_environment(), stdin=subprocess.DEVNULL,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False,
-                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        if result.returncode:
-            raise _ManagedCleanRuntimeHold("bootstrap")
+        argv = _managed_clean_argv(pythonw, source)
+        for executable in (python, pythonw):
+            try:
+                result = subprocess.run([str(executable), *argv, "check"], cwd=source.parents[2],
+                                        env=_child_environment(), stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15,
+                                        check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            except (OSError, subprocess.TimeoutExpired):
+                raise _ManagedCleanRuntimeHold("bootstrap") from None
+            if result.returncode:
+                raise _ManagedCleanRuntimeHold("bootstrap")
     except _ManagedCleanRuntimeHold:
         raise
     except (OSError, ValueError, subprocess.TimeoutExpired):
