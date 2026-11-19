@@ -664,8 +664,62 @@ def test_gate_reuses_old_ci_for_proven_noninterfering_base_advance(gate, monkeyp
     assert api.writes == [{"sha": api.head, "merge_method": "merge"}]
 
 
+def test_gate_reuses_ci_for_disjoint_registered_main_test_and_remote_owner(gate, monkeypatch):
+    """A disjoint source owner can update an existing test/remote file without rerunning PR tests."""
+    from ai_commerce.engineering.minimum_test import TestGroup
+
+    monkeypatch.setattr(gate, "approved_groups", lambda: (
+        TestGroup("original", ("tests/test_minimum_test.py",), ("fixture.ac",),
+                  ("src/ai_commerce/product/identity.py",)),
+        TestGroup("remote", ("tests/test_remote_owner.py",), ("remote.ac",),
+                  ("src/ai_commerce/remote/independent.py",)),
+    ))
+    for drift in ("tests/test_remote_owner.py", "src/ai_commerce/remote/independent.py",
+                  "tests/test_pr_merge_gate.py"):
+        api = _MainAdvanceGitHub(gate, drift_path=drift)
+        result = gate.process(api, api.repo, _approval_event(gate))
+        assert result[0]["status"] == "MERGED"
+        assert result[0]["ci_run"] == 200
+        assert api.writes == [{"sha": api.head, "merge_method": "merge"}]
+
+
+def test_gate_reuses_ci_after_trusted_main_merge_gate_upgrade(gate, monkeypatch):
+    """The gate's own reviewed update must not invalidate unrelated old CI proof."""
+    from ai_commerce.engineering.minimum_test import TestGroup
+
+    monkeypatch.setattr(gate, "approved_groups", lambda: (
+        TestGroup("original", ("tests/test_fixture_owner.py",), ("fixture.ac",),
+                  ("src/ai_commerce/product/identity.py",)),
+    ))
+    api = _MainAdvanceGitHub(gate, drift_path=".github/scripts/pr-merge-gate.py")
+    api.source_test_path = "tests/test_fixture_owner.py"
+    result = gate.process(api, api.repo, _approval_event(gate))
+    assert result[0]["status"] == "MERGED"
+    assert result[0]["ci_run"] == 200
+    assert api.writes == [{"sha": api.head, "merge_method": "merge"}]
+
+
+def test_gate_rejects_shared_registered_test_and_unregistered_main_test(gate, monkeypatch):
+    """The old CI cannot be reused for a modified shared test or an unowned test."""
+    from ai_commerce.engineering.minimum_test import TestGroup
+
+    monkeypatch.setattr(gate, "approved_groups", lambda: (
+        TestGroup("original", ("tests/test_shared_owner.py",), ("fixture.ac",),
+                  ("src/ai_commerce/product/identity.py",)),
+        TestGroup("other", ("tests/test_shared_owner.py",), ("other.ac",),
+                  ("src/ai_commerce/remote/independent.py",)),
+    ))
+    for drift in ("tests/test_shared_owner.py", "tests/test_unregistered.py",
+                  "tests/test_minimum_test.py", "src/ai_commerce/remote/not_registered.py"):
+        api = _MainAdvanceGitHub(gate, drift_path=drift)
+        result = gate.process(api, api.repo, _approval_event(gate))
+        assert result[0]["status"] == "WAIT_REBASE"
+        assert result[0]["reason"] == "BASE_MAIN_CHANGED"
+        assert api.writes == []
+
+
 @pytest.mark.parametrize("drift", (
-    "tests/test_creative_owner.py",
+    "tests/test_unregistered.py",
     ".github/workflows/ef02-tests.yml",
     "src/ai_commerce/remote/cdp_doorbell.py",
     "src/ai_commerce/product/identity.py",
