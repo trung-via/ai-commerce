@@ -1,4 +1,5 @@
 """D5 Chrome Acquisition: synthetic and read-only checks; never launch Chrome."""
+from contextlib import nullcontext
 from pathlib import Path
 import json
 import re
@@ -2116,7 +2117,7 @@ def test_l1a_changed_lifecycle_evidence_discards_private_observation(monkeypatch
 
 @pytest.fixture
 def clean_9444(monkeypatch, tmp_path):
-    from ai_commerce.remote import local_completion_handoff, local_wake_entry
+    from ai_commerce.remote import local_wake_entry
 
     local = tmp_path / "Local App Data"
     directory = local / "AI-Commerce" / "WakeHub-9444-Clean"
@@ -2135,7 +2136,10 @@ def clean_9444(monkeypatch, tmp_path):
     monkeypatch.setattr(ca, "_native_local_app_data", lambda: local)
     monkeypatch.setattr(ca, "_native_known_folder", lambda folder: files)
     monkeypatch.setattr(local_wake_entry, "_windows_process_sid", lambda: _OPERATOR_SID)
-    monkeypatch.setattr(local_completion_handoff, "_private_identity", lambda path: _OPERATOR_SID)
+    monkeypatch.setattr(ca, "_clean_attest_profile", lambda owner: None)
+    monkeypatch.setattr(ca, "_clean_supervisor_slot", nullcontext)
+    monkeypatch.setattr(ca, "_clean_pending", lambda name: False)
+    monkeypatch.setattr(ca, "_clean_inventory", lambda *args: ("ABSENT", None))
     monkeypatch.setattr(ca, "_verify_google_chrome", lambda target: None)
     monkeypatch.setattr(ca.subprocess, "run", forbidden)
     monkeypatch.setattr(ca.subprocess, "Popen", forbidden)
@@ -2159,10 +2163,63 @@ def test_clean_9444_native_gates_precede_process_and_task_access(clean_9444, mon
     assert operation(opt_in=True)["code"] == "LOCAL_OPERATOR_ONLY"
 
 
+@pytest.mark.parametrize("code", ["CLEAN_ROOT_OWNER_MISMATCH", "CLEAN_PROFILE_ACL_UNSAFE",
+                                  "CLEAN_DEFAULT_ACL_UNVERIFIED", "WINDOWS_OWNER_CONTEXT_UNVERIFIED"])
+def test_clean_9444_profile_holds_precede_native_effects(clean_9444, monkeypatch, code):
+    def attest(owner):
+        assert owner == clean_9444
+        raise ca._Clean9444Hold(code)
+
+    monkeypatch.setattr(ca, "_clean_attest_profile", attest)
+    for operation in (ca.ensure_clean_9444, ca.install_clean_9444_autostart):
+        assert operation(opt_in=True) == {"status": "HOLD", "code": code}
+
+
+@pytest.mark.parametrize("code", ["UNKNOWN_EFFECT", "FOREIGN_PORT_OWNER", "PROFILE_IN_USE", "PROFILE_LOCKED"])
+def test_clean_9444_install_holds_before_registration(clean_9444, monkeypatch, code):
+    def foreign(*args):
+        raise ca._Clean9444Hold("FOREIGN_PORT_OWNER")
+
+    if code == "UNKNOWN_EFFECT":
+        monkeypatch.setattr(ca, "_clean_pending", lambda name: name == "LaunchPending")
+    elif code == "FOREIGN_PORT_OWNER":
+        monkeypatch.setattr(ca, "_clean_inventory", foreign)
+    elif code == "PROFILE_IN_USE":
+        monkeypatch.setattr(ca, "_clean_inventory", lambda *args: ("OWNED", None))
+    else:
+        local = clean_9444[0]
+        (local / "AI-Commerce" / ca._CLEAN_9444_PROFILE / "Default" / "lockfile").touch()
+    assert ca.install_clean_9444_autostart(opt_in=True) == {"status": "HOLD", "code": code}
+
+
+def test_clean_9444_profile_reader_accepts_only_fixed_results(tmp_path, monkeypatch):
+    monkeypatch.setattr(ca, "_powershell", lambda: Path("powershell.exe"))
+    monkeypatch.setattr(ca, "os", SimpleNamespace(environ={"GITHUB_TOKEN": "private"}))
+    owner = (tmp_path, 7, _OPERATOR_SID)
+    local, session, sid = owner
+    replies = iter(((0, b"PROFILE_VERIFIED\n"), (0, b"CLEAN_DEFAULT_ACL_UNSAFE\n"),
+                    (0, b"private SID and ACL"), (1, b"PROFILE_VERIFIED")))
+
+    def run(args, *, env, **kwargs):
+        assert ca._CLEAN_9444_PROFILE_ATTESTATION in args[-1]
+        assert env["AI_COMMERCE_CLEAN_LOCAL"] == str(local)
+        assert env["AI_COMMERCE_CLEAN_SESSION"] == str(session)
+        assert env["AI_COMMERCE_CLEAN_SID"] == sid
+        assert "GITHUB_TOKEN" not in env
+        status, output = next(replies)
+        return SimpleNamespace(returncode=status, stdout=output)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    ca._clean_attest_profile(owner)
+    for code in ("CLEAN_DEFAULT_ACL_UNSAFE", "CLEAN_PROFILE_READ_UNVERIFIED", "CLEAN_PROFILE_READ_UNVERIFIED"):
+        with pytest.raises(ca._Clean9444Hold, match=f"^{code}$"):
+            ca._clean_attest_profile(owner)
+
+
 def test_clean_9444_task_uses_the_same_inline_launcher_without_cpython(clean_9444, monkeypatch):
     owner = clean_9444
-    local, _, sid = owner
-    target, candidates = ca._clean_target(local, sid)
+    local = owner[0]
+    target, candidates = ca._clean_target(owner)
     powershell = local / "WindowsPowerShell" / "v1.0" / "powershell.exe"
     monkeypatch.setattr(ca, "_powershell", lambda: powershell)
     calls = []
@@ -2186,6 +2243,7 @@ def test_clean_9444_task_uses_the_same_inline_launcher_without_cpython(clean_944
     assert launcher_args[:6] == [str(powershell), "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command"]
     for env in (install_env, read_env):
         assert env["AI_COMMERCE_TASK_POWERSHELL"] == str(powershell)
+        assert env["AI_COMMERCE_TASK_SESSION"] == "7"
         assert env["AI_COMMERCE_TASK_ARGUMENTS"] == subprocess.list2cmdline(launcher_args[1:])
         assert not re.search(r"pythonw|cpython|runpy|site-packages", env["AI_COMMERCE_TASK_ARGUMENTS"], re.I)
     install_script = install_args[-1]
@@ -2195,7 +2253,79 @@ def test_clean_9444_task_uses_the_same_inline_launcher_without_cpython(clean_944
     assert "$expected, 34, $sid, $null, 3, $sddl" in install_script
     assert install_script.count(".RegisterTaskDefinition(") == 1
     assert ".RegisterTaskDefinition(" not in read_args[-1] and ".RunEx(" not in read_args[-1]
+    assert ca._CLEAN_9444_PROFILE_ATTESTATION in launcher_args[-1]
     assert "Stop-Process" not in launcher_args[-1] and "/json/list" not in launcher_args[-1]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell security descriptors")
+def test_clean_9444_profile_read_offline():
+    cases = [
+        ("safe", "PROFILE_VERIFIED"),
+        ("foreign_owner", "CLEAN_ROOT_OWNER_MISMATCH"),
+        ("write", "CLEAN_PROFILE_ACL_UNSAFE"),
+        ("full_control", "CLEAN_DEFAULT_ACL_UNSAFE"),
+        ("delete_child", "CLEAN_ROOT_ACL_UNSAFE"),
+        ("take_owner", "CLEAN_PROFILE_ACL_UNSAFE"),
+        ("change_acl", "CLEAN_DEFAULT_ACL_UNSAFE"),
+        ("unknown_right", "CLEAN_DEFAULT_ACL_UNVERIFIED"),
+        ("empty", "CLEAN_DEFAULT_ACL_UNVERIFIED"),
+        ("owner_inherit_only", "CLEAN_DEFAULT_ACL_UNSAFE"),
+        ("reparse", "CLEAN_PROFILE_PATH_UNVERIFIED"),
+        ("api_error", "CLEAN_DEFAULT_ACL_UNVERIFIED"),
+        ("session_drift", "WINDOWS_OWNER_CONTEXT_UNVERIFIED"),
+    ]
+    fixtures = r"""
+$ErrorActionPreference = 'Stop'
+$local = [Environment]::GetFolderPath('LocalApplicationData')
+$root = Join-Path $local 'AI-Commerce'
+$profile = Join-Path $root 'WakeHub-9444-Clean'
+$default = Join-Path $profile 'Default'
+$ownerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$env:AI_COMMERCE_CLEAN_LOCAL = $local
+$env:AI_COMMERCE_CLEAN_SID = $ownerSid
+$currentSession = [Diagnostics.Process]::GetCurrentProcess().SessionId
+function Get-Item($LiteralPath, [switch]$Force) {
+    if ($case -eq 'reparse' -and $LiteralPath -eq $profile) {
+        return [pscustomobject]@{ Attributes = [IO.FileAttributes]::ReparsePoint }
+    }
+    [IO.DirectoryInfo]::new($PSHOME)
+}
+function Get-Acl($LiteralPath) {
+    $owner = $ownerSid
+    if ($LiteralPath -eq $root -and $case -eq 'foreign_owner') { $owner = 'S-1-1-0' }
+    $aces = '(A;OICI;FA;;;' + $ownerSid + ')(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)' +
+        '(A;OICIID;FRFX;;;BU)(A;OICIID;GRGX;;;AU)(A;OICIIO;GA;;;CO)'
+    if ($LiteralPath -eq $root -and $case -eq 'delete_child') { $aces += '(A;ID;0x40;;;AU)' }
+    if ($LiteralPath -eq $profile -and $case -eq 'write') { $aces += '(A;OICIIOID;GW;;;BU)' }
+    if ($LiteralPath -eq $profile -and $case -eq 'take_owner') { $aces += '(A;ID;WO;;;BU)' }
+    if ($LiteralPath -eq $default) {
+        switch ($case) {
+            'full_control' { $aces += '(A;ID;GA;;;BU)' }
+            'change_acl' { $aces += '(A;ID;WD;;;BU)' }
+            'unknown_right' { $aces += '(A;ID;0x200;;;BU)' }
+            'empty' { $aces = '' }
+            'owner_inherit_only' { $aces = '(A;OICIIO;FA;;;' + $ownerSid + ')' }
+            'api_error' { throw 'Private ACL provider error' }
+        }
+    }
+    $raw = [Security.AccessControl.RawSecurityDescriptor]::new('O:' + $owner + 'D:' + $aces)
+    $acl = [pscustomobject]@{ Raw = $raw }
+    $acl | Add-Member ScriptMethod GetSecurityDescriptorBinaryForm {
+        $bytes = [byte[]]::new($this.Raw.BinaryLength)
+        $this.Raw.GetBinaryForm($bytes, 0)
+        return ,$bytes
+    } -PassThru
+}
+foreach ($case in ($env:AI_COMMERCE_TEST_ACLS | ConvertFrom-Json)) {
+    $env:AI_COMMERCE_CLEAN_SESSION = $currentSession + [int]($case -eq 'session_drift')
+    & {
+"""
+    command = fixtures + ca._CLEAN_9444_PROFILE_READ + "\n    }\n}\n"
+    env = {**os.environ, "AI_COMMERCE_TEST_ACLS": json.dumps([case for case, _ in cases])}
+    result = subprocess.run([str(ca._powershell()), *ca._CLEAN_POWERSHELL_FLAGS, command], env=env,
+                            capture_output=True, text=True, encoding="ascii", timeout=15)
+    assert result.returncode == 0 and not result.stderr
+    assert result.stdout.splitlines() == [code for _, code in cases]
 
 
 _CLEAN_9444_OFFLINE_WINDOWS = r"""
@@ -2219,8 +2349,11 @@ function Assert-OwnerSession {
     if ($case -eq 'no_desktop') { throw 'WINDOWS_INTERACTIVE_REQUIRED' }
     7
 }
-function Assert-PrivateProfile {
-    if ($case -eq 'unowned') { throw 'OPERATOR_OWNERSHIP_UNPROVEN' }
+function Assert-CleanProfile {
+    if ($case -eq 'unowned') {
+        $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new('O:BUD:(A;;FA;;;' + $sid + ')')
+        Assert-CleanDirectoryAcl $descriptor 'PROFILE'
+    }
 }
 function Assert-UnlockedProfile {
     if ($case -eq 'locked') { throw 'PROFILE_LOCKED' }
@@ -2293,7 +2426,7 @@ function Read-DevToolsVersion($milliseconds) {
     ("duplicate", "BROWSER_OWNERSHIP_UNPROVEN", 0, 0, False),
     ("claimed", "PROFILE_ALREADY_ACTIVE_NO_CDP", 0, 0, False),
     ("locked", "PROFILE_LOCKED", 0, 0, False),
-    ("unowned", "OPERATOR_OWNERSHIP_UNPROVEN", 0, 0, False),
+    ("unowned", "CLEAN_PROFILE_OWNER_MISMATCH", 0, 0, False),
     ("unsigned", "CHROME_EXECUTABLE_UNTRUSTED", 0, 0, False),
     ("no_desktop", "WINDOWS_INTERACTIVE_REQUIRED", 0, 0, False),
     ("busy", "SUPERVISOR_ACTIVE", 0, 0, False),
