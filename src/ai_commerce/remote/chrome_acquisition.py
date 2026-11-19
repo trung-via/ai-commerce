@@ -1658,24 +1658,10 @@ class _Clean9444Hold(ValueError):
     """Diagnostics returned by the clean 9444 JSON commands."""
 
 
-class _ManagedCleanRuntimeHold(_Clean9444Hold):
-    """Keep the installer code while identifying a failed runtime check."""
-
-    def __init__(self, stage: Literal[
-        "interpreter", "missing_paths", "unsafe_path", "owner_identity", "shadow_policy",
-        "signature", "bootstrap",
-    ]):
-        super().__init__("AUTOSTART_RUNTIME_UNAVAILABLE")
-        self.stage = stage
-
-
 _CLEAN_9444_PROFILE = "WakeHub-9444-Clean"
 _CLEAN_9444_REGISTRY = r"Software\AI-Commerce\WakeHub-9444-Clean"
+_CLEAN_9444_SLOT = r"Global\AI-Commerce-WakeHub-9444-Clean-v1"
 _CLEAN_9444_PORT = 9444
-_CLEAN_9444_INTERVAL = 60
-_CLEAN_9444_STARTUP = 15
-_MANAGED_CPYTHON_VERSION = (3, 14)
-_MANAGED_CPYTHON_TAG = "".join(map(str, _MANAGED_CPYTHON_VERSION))
 _PROGRAM_FILES_FOLDERS = ("905E63B6-C1BF-494E-B29C-65B732D3D21A",
                           "7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E")
 _CLEAN_9444_CODES = frozenset({
@@ -1695,10 +1681,10 @@ def _clean_hold(code: str) -> dict:
             "WINDOWS_PROBE_UNAVAILABLE"}
 
 
-def _clean_operator(*, attended: bool = True) -> tuple[Path, int, str]:
+def _clean_operator() -> tuple[Path, int, str]:
     if os.environ.get("CI") or any(key.startswith("AI_COMMERCE_GIT_GUARD_") for key in os.environ):
         raise _Clean9444Hold("LOCAL_OPERATOR_ONLY")
-    return _enrollment_operator(attended=attended)
+    return _enrollment_operator()
 
 
 def _clean_target(local: Path, sid: str) -> tuple[_ChromeTarget, tuple[Path, ...]]:
@@ -1836,7 +1822,7 @@ def _clean_supervisor_slot():
     kernel.CloseHandle.argtypes = [w.HANDLE]
     kernel.CloseHandle.restype = w.BOOL
     ctypes.set_last_error(0)
-    handle = kernel.CreateMutexExW(None, r"Global\AI-Commerce-WakeHub-9444-Clean-v1", 0, 0x100000)
+    handle = kernel.CreateMutexExW(None, _CLEAN_9444_SLOT, 0, 0x100000)
     if not handle:
         raise _Clean9444Hold("SUPERVISOR_ACTIVE")
     try:
@@ -1862,10 +1848,6 @@ def _clean_pending(name: str) -> bool:
     return True
 
 
-def _clean_record_launch(pending: bool) -> None:
-    _clean_record_pending("LaunchPending", pending)
-
-
 def _clean_record_pending(name: str, pending: bool) -> None:
     import winreg
 
@@ -1881,74 +1863,298 @@ def _clean_record_pending(name: str, pending: bool) -> None:
             winreg.FlushKey(key)
 
 
-def _ensure_clean_9444(owner: tuple[Path, int, str]) -> dict:
-    local, session, sid = owner
-    pending = False
-    try:
-        pending = _clean_launch_pending()
-        target, candidates = _clean_target(local, sid)
-        state, identity = _clean_inventory(target, candidates, session, sid)
-        if state == "STARTING":
-            raise _Clean9444Hold("PROFILE_ALREADY_ACTIVE_NO_CDP")
-        if state == "OWNED":
-            existing = replace(target, executable=identity[1])
-            _verify_google_chrome(existing)
-            _probe_cdp(existing)
-            if _clean_inventory(target, candidates, session, sid) != (state, identity):
-                raise _Clean9444Hold("UNKNOWN_EFFECT")
-            if pending:
-                _clean_record_launch(False)
-            return {"status": "REUSE", "code": "CDP_VERIFIED"}
-        if pending:
-            return _clean_hold("UNKNOWN_EFFECT")
-        _verify_google_chrome(target)
-        if _clean_inventory(target, candidates, session, sid) != ("ABSENT", None):
-            raise _Clean9444Hold("UNKNOWN_EFFECT")
-        if _clean_operator(attended=False) != owner:
-            raise _Clean9444Hold("OPERATOR_OWNERSHIP_UNPROVEN")
-        _clean_require_unlocked(target)
-        # Persist before any effect. A crash, failed launch or failed probe leaves
-        # the reservation in place across monitor exits and Windows logons.
-        pending = True
-        _clean_record_launch(True)
-        if _clean_inventory(target, candidates, session, sid) != ("ABSENT", None):
-            return _clean_hold("UNKNOWN_EFFECT")
-        _clean_require_unlocked(target)
-        child = subprocess.Popen(target.command(), stdin=subprocess.DEVNULL,
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                 close_fds=True, env=_child_environment())
-        deadline = time.monotonic() + _CLEAN_9444_STARTUP
-        while child.poll() is None and time.monotonic() < deadline:
-            state, identity = _clean_inventory(target, candidates, session, sid)
-            if identity is not None and (identity[0] != child.pid or identity[1] != target.executable):
-                break
-            if state == "OWNED":
-                _probe_cdp(target)
-                if (child.poll() is not None
-                        or _clean_inventory(target, candidates, session, sid) != (state, identity)):
-                    break
-                _clean_record_launch(False)
-                return {"status": "STARTED", "code": "CDP_VERIFIED"}
-            time.sleep(0.5)
-        return _clean_hold("UNKNOWN_EFFECT")
-    except (AcquisitionBlocked, _EnrollmentHold, _Clean9444Hold) as exc:
-        return _clean_hold("UNKNOWN_EFFECT" if pending else str(exc))
-    except Exception:
-        return _clean_hold("UNKNOWN_EFFECT" if pending else "WINDOWS_PROBE_UNAVAILABLE")
+# Both the attended command and the task run this one bounded action. Its only
+# persistent browser state is LaunchPending under the existing private HKCU key.
+_CLEAN_9444_LAUNCHER = r"""
+$ErrorActionPreference = 'Stop'
+$env:PSModulePath = Join-Path $PSHOME 'Modules'
+function Get-OwnerSid($process) {
+    (Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid -OperationTimeoutSec 2).Sid
+}
+
+function Assert-OwnerSession {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $session = [Diagnostics.Process]::GetCurrentProcess().SessionId
+    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+    if ($identity.User.Value -cne $sid -or $session -le 0 -or
+        ![Environment]::UserInteractive -or
+        $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw 'WINDOWS_INTERACTIVE_REQUIRED'
+    }
+    $sessions = @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -OperationTimeoutSec 2 |
+        Where-Object { (Get-OwnerSid $_) -ceq $sid } |
+        Select-Object -ExpandProperty SessionId -Unique)
+    if ($sessions.Count -ne 1 -or $sessions[0] -ne $session) { throw 'WINDOWS_INTERACTIVE_REQUIRED' }
+    return $session
+}
+
+function Assert-PlainPath($path) {
+    while ($path) {
+        $part = Get-Item -LiteralPath $path -Force
+        if ($part.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'PROFILE_UNAVAILABLE' }
+        $path = [IO.Path]::GetDirectoryName($path)
+    }
+}
+
+function Assert-PrivateProfile {
+    $local = [Environment]::GetFolderPath('LocalApplicationData')
+    if (!$local -or $profileDir -ine (Join-Path $local 'AI-Commerce\WakeHub-9444-Clean')) {
+        throw 'PROFILE_UNAVAILABLE'
+    }
+    foreach ($path in @((Split-Path -Parent $profileDir), $profileDir, (Join-Path $profileDir 'Default'))) {
+        if (!(Test-Path -LiteralPath $path -PathType Container)) { throw 'PROFILE_UNAVAILABLE' }
+        Assert-PlainPath $path
+        $acl = Get-Acl -LiteralPath $path
+        $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(), 0)
+        if ($descriptor.Owner.Value -cne $sid -or !$descriptor.DiscretionaryAcl -or
+            $descriptor.DiscretionaryAcl.Count -gt 128) { throw 'OPERATOR_OWNERSHIP_UNPROVEN' }
+        $ownerAllowed = $false
+        foreach ($ace in $descriptor.DiscretionaryAcl) {
+            if ($ace.AceType -eq 'AccessDenied') { continue }
+            $principal = $ace.SecurityIdentifier.Value
+            if ($ace.AceType -ne 'AccessAllowed' -or
+                $principal -cnotin @($sid, 'S-1-5-18', 'S-1-5-32-544', 'S-1-3-4')) {
+                throw 'OPERATOR_OWNERSHIP_UNPROVEN'
+            }
+            if ($principal -ceq $sid) { $ownerAllowed = $true }
+        }
+        if (!$ownerAllowed) { throw 'OPERATOR_OWNERSHIP_UNPROVEN' }
+    }
+}
+
+function Assert-UnlockedProfile {
+    foreach ($folder in @($profileDir, (Join-Path $profileDir 'Default'))) {
+        foreach ($marker in $lockMarkers) {
+            if (Get-ChildItem -LiteralPath $folder -Force -Filter $marker) { throw 'PROFILE_LOCKED' }
+        }
+    }
+}
+
+function Assert-SignedChrome($path) {
+    Assert-PlainPath $path
+    $signature = Get-AuthenticodeSignature -LiteralPath $path
+    if ($signature.Status -ne 'Valid' -or !$signature.SignerCertificate -or
+        $signature.SignerCertificate.Subject -notmatch '(^|, )CN=Google (LLC|Inc)(,|$)') {
+        throw 'CHROME_EXECUTABLE_UNTRUSTED'
+    }
+}
+
+function Read-Switch($arguments, $name) {
+    $match = @($arguments | Where-Object { ($_ -split '=', 2)[0] -ieq $name })
+    if (!$match.Count) { return $null }
+    if ($match.Count -ne 1 -or !$match[0].StartsWith($name + '=') -or
+        $match[0].Length -eq ($name.Length + 1)) { throw 'BROWSER_OWNERSHIP_UNPROVEN' }
+    $match[0].Substring($name.Length + 1)
+}
+
+function Read-Chrome {
+    $listeners = @(Get-NetTCPConnection -State Listen | Where-Object { $_.LocalPort -eq 9444 })
+    if ($listeners.Count -gt 1) { throw 'BROWSER_OWNERSHIP_UNPROVEN' }
+    $listener = $listeners | Select-Object -First 1
+    if ($listener -and $listener.LocalAddress -cne '127.0.0.1') { throw 'FOREIGN_PORT_OWNER' }
+    $browser = $null
+    $helper = $false
+    foreach ($process in (Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -OperationTimeoutSec 2)) {
+        $line = $process.CommandLine
+        # Accept the normal Windows Chrome quoting forms and hold on unparseable arguments.
+        if (!$line -or $line -match '\\"|""' -or
+            $line -notmatch '^\s*(?:(?>(?:[^\s"]+|"[^"]*")+)\s*)+$') {
+            throw 'BROWSER_OWNERSHIP_UNPROVEN'
+        }
+        $arguments = @([regex]::Matches($line, '(?:[^\s"]+|"[^"]*")+') |
+            ForEach-Object { $_.Value.Replace([string][char]34, '') })
+        $switches = $arguments | Select-Object -Skip 1
+        $directory = Read-Switch $switches '--user-data-dir'
+        if ($directory -and $directory -notmatch '^[A-Za-z]:[\\/]') { throw 'BROWSER_OWNERSHIP_UNPROVEN' }
+        $sameProfile = $directory -and [IO.Path]::GetFullPath($directory).TrimEnd([char]92) -ieq $profileDir
+        $child = $null -ne (Read-Switch $switches '--type')
+        $port = Read-Switch $switches '--remote-debugging-port'
+        $holdsPort = $listener -and $process.ProcessId -eq $listener.OwningProcess
+        if (!$sameProfile -and !$holdsPort -and ($child -or $port -notmatch '^0*9444$')) { continue }
+        if (!$sameProfile) { throw 'FOREIGN_PORT_OWNER' }
+        if ($process.SessionId -ne $session -or (Get-OwnerSid $process) -cne $sid -or
+            $process.ExecutablePath -notin $executables -or !$process.CreationDate) {
+            throw 'BROWSER_OWNERSHIP_UNPROVEN'
+        }
+        if ($child) {
+            if ($holdsPort) { throw 'FOREIGN_PORT_OWNER' }
+            $helper = $true
+            continue
+        }
+        if ($browser -or $port -cne '9444' -or
+            $arguments[0] -notin @($process.ExecutablePath, 'chrome.exe') -or
+            (Read-Switch $switches '--profile-directory') -cnotin @($null, 'Default') -or
+            (Read-Switch $switches '--remote-debugging-address') -cnotin @($null, '127.0.0.1')) {
+            throw 'BROWSER_OWNERSHIP_UNPROVEN'
+        }
+        $browser = $process
+    }
+    if ($listener -and (!$browser -or $browser.ProcessId -ne $listener.OwningProcess)) {
+        throw 'FOREIGN_PORT_OWNER'
+    }
+    if (!$browser) {
+        if ($helper) { throw 'PROFILE_ALREADY_ACTIVE_NO_CDP' }
+        return
+    }
+    [pscustomobject]@{ Pid = $browser.ProcessId; Path = $browser.ExecutablePath; Listening = [bool]$listener
+        Identity = @($browser.ProcessId, $browser.CreationDate.Ticks, $browser.ExecutablePath,
+            $browser.CommandLine) -join '|' }
+}
+
+function Read-DevToolsVersion($milliseconds) {
+    Add-Type -AssemblyName System.Net.Http
+    $handler = [Net.Http.HttpClientHandler]::new()
+    $handler.UseProxy = $false
+    $handler.AllowAutoRedirect = $false
+    $client = [Net.Http.HttpClient]::new($handler)
+    try {
+        $client.Timeout = [TimeSpan]::FromMilliseconds($milliseconds)
+        $client.MaxResponseContentBufferSize = 8192
+        $reply = $client.GetAsync('http://127.0.0.1:9444/json/version').GetAwaiter().GetResult()
+        if ([int]$reply.StatusCode -ne 200) { throw 'CDP_PROTOCOL_UNAVAILABLE' }
+        $reply.Content.ReadAsStringAsync().GetAwaiter().GetResult() | ConvertFrom-Json
+    } catch { throw 'CDP_PROTOCOL_UNAVAILABLE' }
+    finally { $client.Dispose() }
+}
+
+function Confirm-DevTools($browser, $milliseconds) {
+    $version = Read-DevToolsVersion $milliseconds
+    if ($version.Browser -isnot [string] -or $version.Browser -cnotmatch '^(Headless)?Chrome/' -or
+        $version.'Protocol-Version' -isnot [string] -or $version.'Protocol-Version' -notmatch '^[0-9]+\.[0-9]+$' -or
+        $version.webSocketDebuggerUrl -isnot [string] -or
+        $version.webSocketDebuggerUrl -cnotmatch '^ws://(localhost|127\.0\.0\.1):9444/devtools/browser/[^?#/\s]+$') {
+        throw 'CDP_PROTOCOL_UNAVAILABLE'
+    }
+    $current = Read-Chrome
+    if (!$current.Listening -or $current.Identity -cne $browser.Identity) { throw 'UNKNOWN_EFFECT' }
+}
+
+function Start-CleanChrome {
+    $info = [Diagnostics.ProcessStartInfo]::new($executables[0], $chromeArguments)
+    $info.UseShellExecute = $false
+    foreach ($name in @($info.EnvironmentVariables.Keys)) {
+        if ($name -notin $chromeEnvironment) { $info.EnvironmentVariables.Remove($name) }
+    }
+    [Diagnostics.Process]::Start($info)
+}
+
+function Open-LauncherSlot {
+    $created = $false
+    $mutex = [Threading.Mutex]::new($false, $mutexName, [ref]$created)
+    if (!$created) { $mutex.Dispose(); throw 'SUPERVISOR_ACTIVE' }
+    return $mutex
+}
+
+function Open-LaunchState($create) {
+    if ($create) { return [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($registryPath) }
+    return [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($registryPath, $true)
+}
+
+function Test-PortListening {
+    [Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() |
+        Where-Object { $_.Port -eq 9444 } | Select-Object -First 1
+}
+
+$slot = $null
+$registry = $null
+$pending = $false
+try {
+    $session = Assert-OwnerSession
+    $slot = Open-LauncherSlot
+    Assert-PrivateProfile
+    $registry = Open-LaunchState
+    $pending = $registry -and 'LaunchPending' -in $registry.GetValueNames()
+    $browser = Read-Chrome
+    if ($browser.Listening) {
+        Assert-SignedChrome $browser.Path
+        Confirm-DevTools $browser 2000
+        if ($pending) { $registry.DeleteValue('LaunchPending'); $registry.Flush() }
+        return 'REUSE'
+    }
+    if ($pending) { throw 'UNKNOWN_EFFECT' }
+    if ($browser) { throw 'PROFILE_ALREADY_ACTIVE_NO_CDP' }
+    Assert-UnlockedProfile
+    Assert-SignedChrome $executables[0]
+    if (!$registry) { $registry = Open-LaunchState $true }
+    $pending = $true
+    $registry.SetValue('LaunchPending', 1, [Microsoft.Win32.RegistryValueKind]::DWord)
+    $registry.Flush()
+    if ((Read-Chrome) -or (Assert-OwnerSession) -ne $session) { throw 'UNKNOWN_EFFECT' }
+    Assert-UnlockedProfile
+    $elapsed = [Diagnostics.Stopwatch]::StartNew()
+    $chrome = Start-CleanChrome
+    while (!$chrome.HasExited -and $elapsed.ElapsedMilliseconds -lt 15000) {
+        if (Test-PortListening) {
+            $browser = Read-Chrome
+            $remaining = 15000 - $elapsed.ElapsedMilliseconds
+            if ($browser.Listening -and $browser.Pid -eq $chrome.Id -and $remaining -gt 0) {
+                Confirm-DevTools $browser ([math]::Min(2000, $remaining))
+                if (!$chrome.HasExited -and $elapsed.ElapsedMilliseconds -lt 15000) {
+                    $registry.DeleteValue('LaunchPending'); $registry.Flush()
+                    return 'STARTED'
+                }
+            }
+            break
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    throw 'UNKNOWN_EFFECT'
+} catch {
+    if ($pending) { 'UNKNOWN_EFFECT' }
+    elseif ($_.Exception.Message -cin $holdCodes) { $_.Exception.Message }
+    else { 'WINDOWS_PROBE_UNAVAILABLE' }
+} finally {
+    if ($registry) { $registry.Dispose() }
+    if ($slot) { $slot.Dispose() }
+}
+"""
+
+
+def _clean_launcher(owner: tuple[Path, int, str], target: _ChromeTarget,
+                    candidates: tuple[Path, ...]) -> str:
+    def literal(value: str) -> str:
+        # Task Scheduler may expand percent-delimited text in exec arguments.
+        if re.search(r"[%\r\n\x00\u2018\u2019\u201a\u201b]", value):
+            raise _Clean9444Hold("AUTOSTART_RUNTIME_UNAVAILABLE")
+        return "'" + value.replace("'", "''") + "'"
+
+    values = {
+        "sid": literal(owner[2]),
+        "profileDir": literal(str(target.user_data_dir)),
+        "executables": "@(" + ", ".join(literal(str(path)) for path in candidates) + ")",
+        "chromeArguments": literal(subprocess.list2cmdline(target.command()[1:])),
+        "chromeEnvironment": "@(" + ", ".join(map(literal, sorted(_CHILD_ENV_KEYS))) + ")",
+        "lockMarkers": "@(" + ", ".join(map(literal, _MARKERS)) + ")",
+        "registryPath": literal(_CLEAN_9444_REGISTRY),
+        "mutexName": literal(_CLEAN_9444_SLOT),
+        "holdCodes": "@(" + ", ".join(map(literal, sorted(_CLEAN_9444_CODES))) + ")",
+    }
+    bindings = "\n".join(f"${name} = {value}" for name, value in values.items())
+    return "& {\n" + bindings + _CLEAN_9444_LAUNCHER + "\n}"
+
+
+_CLEAN_POWERSHELL_FLAGS = ("-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command")
 
 
 def ensure_clean_9444(*, opt_in: bool = False) -> dict:
-    """Explicit native one-shot for the fixed profile, sharing the monitor slot."""
+    """Run the same fixed launcher once from the attended owner session."""
     if opt_in is not True:
         return _clean_hold("OPT_IN_REQUIRED")
     try:
         owner = _clean_operator()
-        with _clean_supervisor_slot():
-            return _ensure_clean_9444(owner)
+        target, candidates = _clean_target(owner[0], owner[2])
+        result = subprocess.run(
+            [str(_powershell()), *_CLEAN_POWERSHELL_FLAGS, _clean_launcher(owner, target, candidates)],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=45, check=False,
+            env=_child_environment(), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        code = result.stdout.strip().decode("ascii")
+        if not result.returncode and code in {"STARTED", "REUSE"}:
+            return {"status": code, "code": "CDP_VERIFIED"}
+        return _clean_hold(code if not result.returncode else "UNKNOWN_EFFECT")
     except (AcquisitionBlocked, _EnrollmentHold, _Clean9444Hold) as exc:
         return _clean_hold(str(exc))
-    except Exception:
-        return _clean_hold("WINDOWS_PROBE_UNAVAILABLE")
+    except (OSError, subprocess.TimeoutExpired, UnicodeError):
+        return _clean_hold("UNKNOWN_EFFECT")
 
 
 _CLEAN_9444_TASK_INSPECTION = r"""
@@ -1956,7 +2162,6 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new()
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 if ($sid -cne $env:AI_COMMERCE_TASK_SID) { throw 'Owner changed' }
-$managed = $env:AI_COMMERCE_TASK_MANAGED -ceq '1'
 $sddl = 'D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;' + $sid + ')'
 $name = 'AI-Commerce-WakeHub-9444-Clean-' + $sid
 $service = New-Object -ComObject 'Schedule.Service'
@@ -1968,16 +2173,16 @@ $expected.Principal.UserId = $sid
 $expected.Principal.LogonType = 3 # TASK_LOGON_INTERACTIVE_TOKEN
 $expected.Principal.RunLevel = 0 # TASK_RUNLEVEL_LUA
 $expected.Settings.MultipleInstances = 2 # TASK_INSTANCES_IGNORE_NEW
-$expected.Settings.AllowDemandStart = $managed
+$expected.Settings.AllowDemandStart = $true
 $expected.Settings.DisallowStartIfOnBatteries = $false
 $expected.Settings.StopIfGoingOnBatteries = $false
-$expected.Settings.ExecutionTimeLimit = 'PT0S'
+$expected.Settings.ExecutionTimeLimit = 'PT45S'
 $trigger = $expected.Triggers.Create(9) # TASK_TRIGGER_LOGON
 $trigger.UserId = $sid
-$trigger.Delay = 'PT30S'
+$trigger.Repetition.Interval = 'PT1M'
 $expected.Actions.Context = $expected.Principal.Id
 $action = $expected.Actions.Create(0) # TASK_ACTION_EXEC
-$action.Path = $env:AI_COMMERCE_TASK_PYTHON
+$action.Path = $env:AI_COMMERCE_TASK_POWERSHELL
 $action.Arguments = $env:AI_COMMERCE_TASK_ARGUMENTS
 $action.WorkingDirectory = $env:AI_COMMERCE_TASK_DIRECTORY
 
@@ -1999,11 +2204,9 @@ function Test-Owner($value) {
 
 function Test-Registration($registered) {
     if (!$registered -or !$registered.Enabled) { return $false }
-    if ($managed) {
-        $acl = [Security.AccessControl.RawSecurityDescriptor]::new($registered.GetSecurityDescriptor(4))
-        $want = [Security.AccessControl.RawSecurityDescriptor]::new($sddl)
-        if ($acl.GetSddlForm('Access') -cne $want.GetSddlForm('Access')) { return $false }
-    }
+    $acl = [Security.AccessControl.RawSecurityDescriptor]::new($registered.GetSecurityDescriptor(4))
+    $want = [Security.AccessControl.RawSecurityDescriptor]::new($sddl)
+    if ($acl.GetSddlForm('Access') -cne $want.GetSddlForm('Access')) { return $false }
     $definition = $registered.Definition
     $principal = $definition.Principal
     if ($principal.Id -cne $expected.Principal.Id -or !(Test-Owner $principal.UserId) -or
@@ -2046,7 +2249,7 @@ else { 'AUTOSTART_CONFLICT' }
 _CLEAN_9444_TASK_SCRIPT = _CLEAN_9444_TASK_INSPECTION + r"""
 if ($env:AI_COMMERCE_TASK_START_SESSION) {
     $session = [int]$env:AI_COMMERCE_TASK_START_SESSION
-    if (!$managed -or $session -le 0 -or $session -ne [Diagnostics.Process]::GetCurrentProcess().SessionId -or
+    if ($session -le 0 -or $session -ne [Diagnostics.Process]::GetCurrentProcess().SessionId -or
         !(Test-Registration $registered)) { 'AUTOSTART_CONFLICT'; exit }
     if ($registered.State -ne 3) { 'START_NOT_ATTEMPTED'; exit } # TASK_STATE_READY
     # TASK_RUN_USE_SESSION_ID | TASK_RUN_USER_SID, no substituted arguments.
@@ -2071,48 +2274,29 @@ if (Test-Registration (Read-Registration)) { 'ENROLLED' } else { 'UNKNOWN_EFFECT
 """
 
 
-def _clean_task(sid: str, *, install: bool, runtime: tuple[Path, Path] | None = None,
-                start_session: int | None = None) -> str:
-    """Current-user, create-only Task Scheduler registration or exact readback."""
-    if runtime is None:
-        executable = Path(sys.executable)
-        if not executable.is_absolute() or executable.name.lower() not in ("python.exe", "pythonw.exe"):
-            raise _Clean9444Hold("AUTOSTART_RUNTIME_UNAVAILABLE")
-        pythonw = executable.with_name("pythonw.exe")
-        source = Path(__file__).absolute()
-    else:
-        pythonw, source = runtime
-    if (not pythonw.is_absolute() or pythonw.name.lower() != "pythonw.exe"
-            or not pythonw.is_file() or not _no_links(pythonw)
-            or not source.is_absolute() or not source.is_file() or not _no_links(source)
-            or any(re.search(r"[%\r\n]", str(path)) for path in (pythonw, source))):
+def _clean_task(owner: tuple[Path, int, str], target: _ChromeTarget,
+                candidates: tuple[Path, ...], *, install: bool, start: bool = False) -> str:
+    """Register or inspect the same fixed, interactive PowerShell task."""
+    _, session, sid = owner
+    if start and install:
         raise _Clean9444Hold("AUTOSTART_RUNTIME_UNAVAILABLE")
-    package_root = source.parents[2]
-    if runtime is None:
-        bootstrap = (f"import runpy, sys; sys.path.insert(0, {str(package_root)!r}); "
-                     "runpy.run_module('ai_commerce.remote.chrome_acquisition', run_name='__main__')")
-        argv = ["-I", "-B", "-c", bootstrap, "supervise-clean-9444"]
-    else:
-        argv = _managed_clean_argv(pythonw, source)
-    if start_session is not None and (runtime is None or install or type(start_session) is not int
-                                      or start_session <= 0):
-        raise _Clean9444Hold("AUTOSTART_RUNTIME_UNAVAILABLE")
+    powershell = _powershell()
+    launcher = _clean_launcher(owner, target, candidates)
     child_env = _child_environment()
-    child_env.update(AI_COMMERCE_TASK_SID=sid, AI_COMMERCE_TASK_PYTHON=str(pythonw),
-                     AI_COMMERCE_TASK_DIRECTORY=str(package_root),
-                     AI_COMMERCE_TASK_ARGUMENTS=subprocess.list2cmdline(argv),
-                     AI_COMMERCE_TASK_MANAGED="1" if runtime is not None else "0",
-                     AI_COMMERCE_TASK_START_SESSION=str(start_session or ""),
+    child_env.update(AI_COMMERCE_TASK_SID=sid, AI_COMMERCE_TASK_POWERSHELL=str(powershell),
+                     AI_COMMERCE_TASK_DIRECTORY=str(powershell.parent),
+                     AI_COMMERCE_TASK_ARGUMENTS=subprocess.list2cmdline([*_CLEAN_POWERSHELL_FLAGS, launcher]),
+                     AI_COMMERCE_TASK_START_SESSION=str(session) if start else "",
                      AI_COMMERCE_TASK_INSTALL="1" if install else "0")
-    script = _CLEAN_9444_TASK_SCRIPT if install or start_session is not None else _CLEAN_9444_TASK_READ_SCRIPT
+    script = _CLEAN_9444_TASK_SCRIPT if install or start else _CLEAN_9444_TASK_READ_SCRIPT
     try:
-        result = subprocess.run([str(_powershell()), "-NoProfile", "-NonInteractive", "-Command",
+        result = subprocess.run([str(powershell), "-NoProfile", "-NonInteractive", "-Command",
                                  script], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                 timeout=15, check=False, env=child_env,
                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         code = result.stdout.strip().decode("ascii")
         expected = {"AUTOSTART_CONFLICT"}
-        if start_session is not None:
+        if start:
             expected.update(("START_REQUESTED", "START_NOT_ATTEMPTED"))
         else:
             expected.update(("ALREADY_ENROLLED", "AUTOSTART_NOT_ENROLLED"))
@@ -2122,145 +2306,7 @@ def _clean_task(sid: str, *, install: bool, runtime: tuple[Path, Path] | None = 
             return code
     except (OSError, subprocess.TimeoutExpired, UnicodeError):
         pass
-    return "UNKNOWN_EFFECT" if install or start_session is not None else "AUTOSTART_RUNTIME_UNAVAILABLE"
-
-
-def _managed_clean_argv(pythonw: Path, source: Path) -> list[str]:
-    # Isolated startup skips .pth/sitecustomize and ignores workspace bytecode.
-    # The fixed checkout remains owner-maintained through approved git_sync_main.
-    src = source.parents[2]
-    cache = src.parent / ".git" / "wakehub-9444-no-bytecode"
-    bootstrap = f"""\
-import os, sys
-from pathlib import Path
-base = Path({str(pythonw.parent)!r})
-lib = base / 'Lib'
-src, site, cache = Path({str(src)!r}), lib / 'site-packages', Path({str(cache)!r})
-search_path = list(map(Path, sys.path))
-if (sys.implementation.name != 'cpython' or sys.version_info[:2] != {_MANAGED_CPYTHON_VERSION!r}
-        or Path(sys.executable) not in (base / 'python.exe', base / 'pythonw.exe')
-        or any(Path(prefix) != base for prefix in (sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix))
-        or lib not in search_path or any(not path.is_relative_to(base) for path in search_path)):
-    raise SystemExit(2)
-def safe(path):
-    return not any(part.lstat().st_file_attributes & 0x400 for part in (path, *path.parents))
-def fail(error):
-    raise error
-if not all(safe(path) for path in (src, site, cache.parent)) or os.path.lexists(cache):
-    raise SystemExit(2)
-for root in (src, lib):
-    for folder, dirs, files in os.walk(root, onerror=fail):
-        if any((Path(folder) / name).lstat().st_file_attributes & 0x400 for name in (*dirs, *files)):
-            raise SystemExit(2)
-from ctypes import WinDLL, create_unicode_buffer, wintypes
-module_filename = WinDLL('kernel32').GetModuleFileNameW
-module_filename.argtypes = (wintypes.HMODULE, wintypes.LPWSTR, wintypes.DWORD)
-module_filename.restype = wintypes.DWORD
-dll_path = create_unicode_buffer(32768)
-length = module_filename(sys.dllhandle, dll_path, len(dll_path))
-if not 0 < length < len(dll_path) or Path(dll_path.value) != base / 'python{_MANAGED_CPYTHON_TAG}.dll':
-    raise SystemExit(2)
-sys.pycache_prefix = str(cache)
-sys.path.extend((str(src), str(site)))
-from ai_commerce.remote import chrome_acquisition as acquisition
-from ai_commerce.remote import local_completion_handoff
-if Path(acquisition.__file__) != Path({str(source)!r}):
-    raise SystemExit(2)
-if len(sys.argv) == 1:
-    raise SystemExit(2 if acquisition._supervise_managed_clean_9444()['status'] == 'HOLD' else 0)
-"""
-    return ["-I", "-B", "-S", "-c", f"exec({bootstrap!r})"]
-
-
-def _managed_clean_runtime(local: Path, sid: str, source: Path) -> tuple[Path, Path]:
-    """Prove an installed per-user CPython and the fixed checkout can run together."""
-    from .local_completion_handoff import HandoffBlocked, _private_identity
-    from .local_wake_entry import LocalWakeConfigError
-
-    try:
-        root = local / "Programs" / "Python"
-        install_name = f"Python{_MANAGED_CPYTHON_TAG}"
-        if any(not path.is_absolute() or not _no_links(path) for path in (root, source)):
-            raise _ManagedCleanRuntimeHold("unsafe_path")
-        if not root.is_dir():
-            raise _ManagedCleanRuntimeHold("missing_paths")
-        # Only the canonical 3.14 install is supported. Hold if a sibling 3.14
-        # variant makes the layout ambiguous, even if the canonical path exists.
-        variant = re.compile(rf"{install_name}t?(?:[-_][\w-]+)?", re.IGNORECASE)
-        candidates = [path for path in root.iterdir() if variant.fullmatch(path.name)]
-        if not candidates:
-            raise _ManagedCleanRuntimeHold("missing_paths")
-        if len(candidates) != 1 or candidates[0].name.casefold() != install_name.casefold():
-            raise _ManagedCleanRuntimeHold("interpreter")
-        base = candidates[0]
-        python, pythonw = base / "python.exe", base / "pythonw.exe"
-        dll = base / f"python{_MANAGED_CPYTHON_TAG}.dll"
-        lib = base / "Lib"
-        site = lib / "site-packages"
-        owner_paths = (base, python, pythonw, dll, lib, site)
-        # Detect unsafe paths before checking presence so broken links are classified as unsafe.
-        if (any(re.search(r"[%\r\n]", str(path)) for path in (pythonw, source))
-                or any(not _no_links(path) for path in owner_paths)):
-            raise _ManagedCleanRuntimeHold("unsafe_path")
-        if any(not path.is_file() for path in (python, pythonw, dll, source)) or not site.is_dir():
-            raise _ManagedCleanRuntimeHold("missing_paths")
-        try:
-            if any(_private_identity(path) != sid for path in owner_paths):
-                raise _ManagedCleanRuntimeHold("owner_identity")
-        except HandoffBlocked as exc:
-            if str(exc) == "HANDOFF_PATH_UNSAFE":
-                raise _ManagedCleanRuntimeHold("unsafe_path") from None
-            if str(exc) in ("HANDOFF_PERMISSIONS_INVALID", "HANDOFF_PERMISSIONS_UNAVAILABLE"):
-                raise _ManagedCleanRuntimeHold("owner_identity") from None
-            raise
-        except (LocalWakeConfigError, OSError):
-            raise _ManagedCleanRuntimeHold("owner_identity") from None
-        shadows = (root / "pyvenv.cfg", base / "pyvenv.cfg", base / "python._pth", base / "pythonw._pth",
-                   dll.with_suffix("._pth"), dll.with_suffix(".zip"))
-        if (any(os.path.lexists(path) for path in shadows)
-                or any(path.name.casefold().endswith(".pth") for path in site.iterdir())):
-            raise _ManagedCleanRuntimeHold("shadow_policy")
-        env = _child_environment()
-        env.update(AI_COMMERCE_PYTHON=str(python), AI_COMMERCE_PYTHONW=str(pythonw),
-                   AI_COMMERCE_PYTHON_DLL=str(dll))
-        major, minor = _MANAGED_CPYTHON_VERSION
-        signed = (
-            "$ErrorActionPreference='Stop'; "
-            "$version=$null; "
-            "foreach ($p in @($env:AI_COMMERCE_PYTHON,$env:AI_COMMERCE_PYTHONW,$env:AI_COMMERCE_PYTHON_DLL)) { "
-            "$s=Get-AuthenticodeSignature -LiteralPath $p; "
-            "if ($s.Status -ne 'Valid' -or !$s.SignerCertificate -or "
-            "$s.SignerCertificate.Subject -notmatch '(^|, )CN=Python Software Foundation(,|$)') {exit 1}; "
-            "$v=[Diagnostics.FileVersionInfo]::GetVersionInfo($p); "
-            "$exact=@($v.FileMajorPart,$v.FileMinorPart,$v.FileBuildPart,$v.FilePrivatePart) -join '.'; "
-            f"if ($v.FileMajorPart -ne {major} -or $v.FileMinorPart -ne {minor} -or "
-            "$v.OriginalFilename -ine [IO.Path]::GetFileName($p) -or ($version -and $exact -cne $version)) "
-            "{exit 2}; $version=$exact }; "
-            "Write-Output 'SIGNED_CPYTHON'"
-        )
-        result = subprocess.run([str(_powershell()), "-NoProfile", "-NonInteractive", "-Command", signed],
-                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15,
-                                check=False, env=env, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        if result.returncode == 2:
-            raise _ManagedCleanRuntimeHold("interpreter")
-        if result.returncode or result.stdout.strip() != b"SIGNED_CPYTHON":
-            raise _ManagedCleanRuntimeHold("signature")
-        argv = _managed_clean_argv(pythonw, source)
-        for executable in (python, pythonw):
-            try:
-                result = subprocess.run([str(executable), *argv, "check"], cwd=source.parents[2],
-                                        env=_child_environment(), stdin=subprocess.DEVNULL,
-                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15,
-                                        check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            except (OSError, subprocess.TimeoutExpired):
-                raise _ManagedCleanRuntimeHold("bootstrap") from None
-            if result.returncode:
-                raise _ManagedCleanRuntimeHold("bootstrap")
-    except _ManagedCleanRuntimeHold:
-        raise
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        raise _Clean9444Hold("AUTOSTART_RUNTIME_UNAVAILABLE") from None
-    return pythonw, source
+    return "UNKNOWN_EFFECT" if install or start else "AUTOSTART_RUNTIME_UNAVAILABLE"
 
 
 def install_clean_9444_autostart(*, opt_in: bool = False) -> dict:
@@ -2268,49 +2314,13 @@ def install_clean_9444_autostart(*, opt_in: bool = False) -> dict:
     if opt_in is not True:
         return _clean_hold("OPT_IN_REQUIRED")
     try:
-        local, _, sid = _clean_operator()
-        target, _ = _clean_target(local, sid)
+        owner = _clean_operator()
+        target, candidates = _clean_target(owner[0], owner[2])
         _verify_google_chrome(target)
-        code = _clean_task(sid, install=True)
+        code = _clean_task(owner, target, candidates, install=True)
         if code in {"ENROLLED", "ALREADY_ENROLLED"}:
             return {"status": "ENROLLED", "code": code}
         return _clean_hold(code)
-    except (AcquisitionBlocked, _EnrollmentHold, _Clean9444Hold) as exc:
-        return _clean_hold(str(exc))
-    except Exception:
-        return _clean_hold("AUTOSTART_RUNTIME_UNAVAILABLE")
-
-
-def supervise_clean_9444() -> dict:
-    """Run the registered owner monitor until its Windows logon session ends."""
-    return _supervise_clean_9444()
-
-
-def _supervise_managed_clean_9444() -> dict:
-    return _supervise_clean_9444(runtime=(Path(sys.executable), Path(__file__).absolute()))
-
-
-def _supervise_clean_9444(*, runtime: tuple[Path, Path] | None = None) -> dict:
-    try:
-        owner = _clean_operator(attended=False)
-        with _clean_supervisor_slot():
-            code = (_clean_task(owner[2], install=False) if runtime is None else
-                    _clean_task(owner[2], install=False, runtime=runtime))
-            if code != "ALREADY_ENROLLED":
-                return _clean_hold(code)
-            last = None
-            while True:
-                try:
-                    if _clean_operator(attended=False) != owner:
-                        return _clean_hold("OPERATOR_OWNERSHIP_UNPROVEN")
-                    status = _ensure_clean_9444(owner)
-                except (AcquisitionBlocked, _EnrollmentHold, _Clean9444Hold) as exc:
-                    status = _clean_hold(str(exc))
-                if status != last:
-                    if sys.stdout is not None:
-                        print(json.dumps(status, sort_keys=True), flush=True)
-                    last = status
-                time.sleep(_CLEAN_9444_INTERVAL)
     except (AcquisitionBlocked, _EnrollmentHold, _Clean9444Hold) as exc:
         return _clean_hold(str(exc))
     except Exception:
@@ -2322,19 +2332,15 @@ def main(argv: list[str] | None = None) -> int:
         epilog="Attended native operations require explicit local --opt-in.", allow_abbrev=False)
     parser.add_argument("command", choices=("probe", "launch", "assess-existing-9444",
                                           "enroll-existing-9444", "ensure-clean-9444",
-                                          "install-clean-9444-autostart", "supervise-clean-9444"))
+                                          "install-clean-9444-autostart"))
     parser.add_argument("--config", type=Path)
     parser.add_argument("--checkout", type=Path)
     parser.add_argument("--opt-in", action="store_true")
     args = parser.parse_args(argv)
-    if args.command in {"ensure-clean-9444", "install-clean-9444-autostart", "supervise-clean-9444"}:
+    if args.command in {"ensure-clean-9444", "install-clean-9444-autostart"}:
         if args.config is not None or args.checkout is not None:
             parser.error("clean 9444 uses only fixed local paths")
-        if args.command == "supervise-clean-9444":
-            if args.opt_in:
-                parser.error("the clean 9444 supervisor uses native registration")
-            result = supervise_clean_9444()
-        elif args.command == "install-clean-9444-autostart":
+        if args.command == "install-clean-9444-autostart":
             result = install_clean_9444_autostart(opt_in=args.opt_in)
         else:
             result = ensure_clean_9444(opt_in=args.opt_in)
