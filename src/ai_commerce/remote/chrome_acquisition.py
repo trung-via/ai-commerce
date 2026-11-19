@@ -14,6 +14,7 @@ import os
 from os.path import normpath
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -1665,15 +1666,10 @@ _CLEAN_9444_PORT = 9444
 _CLEAN_TASK_PENDING = "AutostartPending"
 _PROGRAM_FILES_FOLDERS = ("905E63B6-C1BF-494E-B29C-65B732D3D21A",
                           "7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E")
-_CLEAN_PROFILE_CODES = frozenset(
-    f"CLEAN_{stage}_{reason}"
-    for stage in ("ROOT", "PROFILE", "DEFAULT")
-    for reason in ("PATH_UNVERIFIED", "OWNER_MISMATCH", "ACL_UNSAFE", "ACL_UNVERIFIED")
-) | {"CLEAN_PROFILE_READ_UNVERIFIED", "WINDOWS_OWNER_CONTEXT_UNVERIFIED", "PROFILE_UNAVAILABLE"}
-_CLEAN_9444_CODES = _CLEAN_PROFILE_CODES | {
+_CLEAN_9444_CODES = {
     "LOCAL_OPERATOR_ONLY", "WINDOWS_INTERACTIVE_REQUIRED", "WINDOWS_TOKEN_UNAVAILABLE",
     "ELEVATED_CHROME_DISALLOWED", "ENROLLMENT_IDENTITY_UNPROVEN", "OPT_IN_REQUIRED",
-    "OPERATOR_OWNERSHIP_UNPROVEN",
+    "WINDOWS_OWNER_CONTEXT_UNVERIFIED", "PROFILE_UNAVAILABLE",
     "PROFILE_LOCKED", "PROFILE_IN_USE", "PROFILE_ALREADY_ACTIVE_NO_CDP",
     "CHROME_PATH_INVALID", "CHROME_EXECUTABLE_UNTRUSTED", "SUPERVISOR_ACTIVE",
     "WINDOWS_PROBE_INVALID", "WINDOWS_PROBE_UNAVAILABLE", "FOREIGN_PORT_OWNER",
@@ -1693,31 +1689,24 @@ def _clean_operator() -> tuple[Path, int, str]:
     return _enrollment_operator()
 
 
-def _clean_attest_profile(owner: tuple[Path, int, str]) -> None:
-    local, session, sid = owner
-    env = _child_environment()
-    env.update(AI_COMMERCE_CLEAN_LOCAL=str(local), AI_COMMERCE_CLEAN_SESSION=str(session),
-               AI_COMMERCE_CLEAN_SID=sid)
-    try:
-        result = subprocess.run([str(_powershell()), "-NoProfile", "-NonInteractive", "-Command",
-                                 _CLEAN_9444_PROFILE_READ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                timeout=10, check=False, env=env,
-                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        if not result.returncode:
-            code = result.stdout.strip().decode("ascii")
-            if code == "PROFILE_VERIFIED":
-                return
-            if code in _CLEAN_PROFILE_CODES:
-                raise _Clean9444Hold(code)
-    except (AcquisitionBlocked, OSError, subprocess.TimeoutExpired, UnicodeError):
-        pass
-    raise _Clean9444Hold("CLEAN_PROFILE_READ_UNVERIFIED")
-
-
 def _clean_target(owner: tuple[Path, int, str]) -> tuple[_ChromeTarget, tuple[Path, ...]]:
-    _clean_attest_profile(owner)
     local = owner[0]
     directory = local / "AI-Commerce" / _CLEAN_9444_PROFILE
+    profile = directory / "Default"
+    if not local.is_absolute():
+        raise _Clean9444Hold("PROFILE_UNAVAILABLE")
+    try:
+        # Check parents first so a junction is rejected before probing its children.
+        for path in (*reversed(profile.parents), profile):
+            info = path.lstat()
+            if (not stat.S_ISDIR(info.st_mode)
+                    or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+                raise _Clean9444Hold("PROFILE_UNAVAILABLE")
+        for path in (directory, profile):
+            with os.scandir(path) as entries:
+                next(entries, None)
+    except OSError:
+        raise _Clean9444Hold("PROFILE_UNAVAILABLE") from None
 
     roots = (*(_native_known_folder(folder) for folder in _PROGRAM_FILES_FOLDERS), local)
     candidates = []
@@ -1881,7 +1870,9 @@ def _clean_record_pending(name: str, pending: bool) -> None:
             winreg.FlushKey(key)
 
 
-_CLEAN_9444_PROFILE_ATTESTATION = r"""
+# Both the attended command and the task run this one bounded action. Its only
+# persistent browser state is LaunchPending under the existing private HKCU key.
+_CLEAN_9444_LAUNCHER = r"""
 $ErrorActionPreference = 'Stop'
 $env:PSModulePath = Join-Path $PSHOME 'Modules'
 
@@ -1899,78 +1890,20 @@ function Assert-PlainPath($path, $directory = $false) {
     }
 }
 
-function Assert-CleanDirectoryAcl($descriptor, $stage) {
-    if (!$descriptor.Owner) { throw ('CLEAN_' + $stage + '_ACL_UNVERIFIED') }
-    if ($descriptor.Owner.Value -cne $sid) { throw ('CLEAN_' + $stage + '_OWNER_MISMATCH') }
-    $dacl = $descriptor.DiscretionaryAcl
-    if ($null -eq $dacl -or $dacl.Count -lt 1 -or $dacl.Count -gt 128) {
-        throw ('CLEAN_' + $stage + '_ACL_UNVERIFIED')
-    }
-    $ownerAllowed = $false
-    foreach ($ace in $dacl) {
-        $flags = [int]$ace.AceFlags
-        # Accept only ordinary allow/deny ACEs and valid file or generic rights.
-        if ($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback -or
-            $ace.AceType -notin @('AccessAllowed', 'AccessDenied') -or !$ace.SecurityIdentifier -or
-            ($flags -band (-bnot 0x1f)) -or ($ace.AccessMask -band (-bnot 0xF01F01FF))) {
-            throw ('CLEAN_' + $stage + '_ACL_UNVERIFIED')
-        }
-        if ($ace.AceType -eq 'AccessDenied') { continue }
-        $principal = $ace.SecurityIdentifier.Value
-        if ($principal -ceq $sid -and !($flags -band 0x08) -and $ace.AccessMask) { $ownerAllowed = $true }
-        # SYSTEM, Administrators and OWNER RIGHTS retain their existing trust.
-        if ($principal -cin @($sid, 'S-1-5-18', 'S-1-5-32-544', 'S-1-3-4')) { continue }
-        # CREATOR OWNER is a placeholder only on inherit-only templates.
-        if ($principal -ceq 'S-1-3-0' -and ($flags -band 0x08) -and ($flags -band 0x03)) { continue }
-        # FILE_GENERIC_READ | FILE_GENERIC_EXECUTE, plus their generic bits.
-        if (!($flags -band 0x10) -or ($ace.AccessMask -band (-bnot 0xA01200A9))) {
-            throw ('CLEAN_' + $stage + '_ACL_UNSAFE')
-        }
-    }
-    if (!$ownerAllowed) { throw ('CLEAN_' + $stage + '_ACL_UNSAFE') }
-}
-
 function Assert-CleanProfile {
-    $local = [Environment]::GetFolderPath('LocalApplicationData')
-    if ($local -notmatch '^[A-Za-z]:\\' -or $profileDir -ine (Join-Path $local 'AI-Commerce\WakeHub-9444-Clean')) {
-        throw 'PROFILE_UNAVAILABLE'
-    }
-    $paths = [ordered]@{ ROOT = (Split-Path -Parent $profileDir); PROFILE = $profileDir
-                         DEFAULT = (Join-Path $profileDir 'Default') }
-    foreach ($stage in $paths.Keys) {
-        $path = $paths[$stage]
-        try { Assert-PlainPath $path $true }
-        catch { throw ('CLEAN_' + $stage + '_PATH_UNVERIFIED') }
-        try {
-            $acl = Get-Acl -LiteralPath $path
-            $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(), 0)
-        } catch { throw ('CLEAN_' + $stage + '_ACL_UNVERIFIED') }
-        Assert-CleanDirectoryAcl $descriptor $stage
-    }
+    try {
+        $local = [Environment]::GetFolderPath('LocalApplicationData')
+        if (!$local -or $profileDir -ine (Join-Path $local 'AI-Commerce\WakeHub-9444-Clean')) {
+            throw 'PROFILE_UNAVAILABLE'
+        }
+        $defaultDir = Join-Path $profileDir 'Default'
+        Assert-PlainPath $defaultDir $true
+        foreach ($folder in @($profileDir, $defaultDir)) {
+            $null = Get-ChildItem -LiteralPath $folder -Force | Select-Object -First 1
+        }
+    } catch { throw 'PROFILE_UNAVAILABLE' }
 }
-"""
 
-_CLEAN_9444_PROFILE_READ = _CLEAN_9444_PROFILE_ATTESTATION + (
-    "\n$profileHoldCodes = @(" + ", ".join(f"'{code}'" for code in sorted(_CLEAN_PROFILE_CODES)) + ")\n"
-) + r"""
-try {
-    $sid = $env:AI_COMMERCE_CLEAN_SID
-    if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -cne $sid -or
-        [Diagnostics.Process]::GetCurrentProcess().SessionId -ne [int]$env:AI_COMMERCE_CLEAN_SESSION) {
-        throw 'WINDOWS_OWNER_CONTEXT_UNVERIFIED'
-    }
-    $profileDir = Join-Path $env:AI_COMMERCE_CLEAN_LOCAL 'AI-Commerce\WakeHub-9444-Clean'
-    Assert-CleanProfile
-    'PROFILE_VERIFIED'
-} catch {
-    if ($_.Exception.Message -cin $profileHoldCodes) { $_.Exception.Message }
-    else { 'CLEAN_PROFILE_READ_UNVERIFIED' }
-}
-"""
-
-# Both the attended command and the task run this one bounded action. Its only
-# persistent browser state is LaunchPending under the existing private HKCU key.
-_CLEAN_9444_LAUNCHER = _CLEAN_9444_PROFILE_ATTESTATION + r"""
 function Get-OwnerSid($process) {
     (Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid -OperationTimeoutSec 2).Sid
 }
