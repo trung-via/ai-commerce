@@ -2339,12 +2339,15 @@ def test_clean_9444_scheduler_install_reports_exact_private_status(clean_9444, m
 
 
 @pytest.mark.parametrize("failure, code, subprocess_count", [
-    (None, "READY", 3),
-    ("executable", "CPYTHON_INTERPRETER_MISMATCH", 0),
-    ("base_prefix_and_missing_dll", "CPYTHON_INTERPRETER_MISMATCH", 0),
+    (None, "READY", 4),
+    ("older_alongside", "READY", 4),
+    ("no_install", "CPYTHON_LAYOUT_PATH_MISSING", 0),
+    ("older_only", "CPYTHON_LAYOUT_PATH_MISSING", 0),
+    ("variant_only", "CPYTHON_INTERPRETER_MISMATCH", 0),
+    ("ambiguous_install", "CPYTHON_INTERPRETER_MISMATCH", 0),
     ("python.exe", "CPYTHON_LAYOUT_PATH_MISSING", 0),
     ("pythonw.exe", "CPYTHON_LAYOUT_PATH_MISSING", 0),
-    ("python312.dll", "CPYTHON_LAYOUT_PATH_MISSING", 0),
+    ("python314.dll", "CPYTHON_LAYOUT_PATH_MISSING", 0),
     ("site-packages", "CPYTHON_LAYOUT_PATH_MISSING", 0),
     ("source", "CPYTHON_LAYOUT_PATH_MISSING", 0),
     ("relative_source", "CPYTHON_LAYOUT_PATH_UNSAFE", 0),
@@ -2356,43 +2359,58 @@ def test_clean_9444_scheduler_install_reports_exact_private_status(clean_9444, m
     ("owner_acl", "CPYTHON_OWNER_IDENTITY_UNVERIFIED", 0),
     ("owner_token", "CPYTHON_OWNER_IDENTITY_UNVERIFIED", 0),
     ("pyvenv.cfg", "CPYTHON_SHADOW_FILE_PRESENT", 0),
+    ("parent_pyvenv", "CPYTHON_SHADOW_FILE_PRESENT", 0),
     ("python._pth", "CPYTHON_SHADOW_FILE_PRESENT", 0),
-    ("python312._pth", "CPYTHON_SHADOW_FILE_PRESENT", 0),
+    ("pythonw._pth", "CPYTHON_SHADOW_FILE_PRESENT", 0),
+    ("python314._pth", "CPYTHON_SHADOW_FILE_PRESENT", 0),
+    ("python314.zip", "CPYTHON_SHADOW_FILE_PRESENT", 0),
+    ("site_pth", "CPYTHON_SHADOW_FILE_PRESENT", 0),
     ("unexpected", "UNKNOWN", 0),
     ("signature", "CPYTHON_SIGNATURE_UNVERIFIED", 1),
+    ("binary_version", "CPYTHON_INTERPRETER_MISMATCH", 1),
     ("bootstrap", "CPYTHON_BOOTSTRAP_UNVERIFIED", 2),
-    ("task", "TASK_READ_UNVERIFIED", 3),
+    ("pythonw_bootstrap", "CPYTHON_BOOTSTRAP_UNVERIFIED", 3),
+    ("task", "TASK_READ_UNVERIFIED", 4),
     ("timeout", "UNKNOWN", 1),
 ])
 def test_clean_9444_runtime_probe_runs_only_fixed_checks(tmp_path, monkeypatch, failure, code, subprocess_count):
     from ai_commerce.hostops_v3 import personal
     from ai_commerce.remote import local_completion_handoff, local_wake_entry
 
-    base = tmp_path / "Programs" / "Python" / "Python312"
+    install_root = tmp_path / "Programs" / "Python"
+    base = install_root / "Python314"
     site = base / "Lib" / "site-packages"
-    site.mkdir(parents=True)
-    python, pythonw, dll = (base / name for name in ("python.exe", "pythonw.exe", "python312.dll"))
+    if failure not in ("no_install", "older_only", "variant_only"):
+        site.mkdir(parents=True)
+    if failure in ("older_only", "older_alongside"):
+        (install_root / "Python313").mkdir(parents=True)
+    if failure in ("variant_only", "ambiguous_install"):
+        (install_root / "Python314-32").mkdir(parents=True)
+    python, pythonw, dll = (base / name for name in ("python.exe", "pythonw.exe", "python314.dll"))
     source = tmp_path / personal._ACQUISITION_SOURCE
     if failure == "special_character":
         source = source.with_name("PRIVATE%source.py")
     source.parent.mkdir(parents=True)
-    for name, path in (("python.exe", python), ("pythonw.exe", pythonw),
-                       ("python312.dll", dll), ("source", source)):
-        if failure != name:
+    if failure != "source":
+        source.touch()
+    for path in (python, pythonw, dll):
+        if base.is_dir() and failure != path.name:
             path.touch()
-    if failure == "base_prefix_and_missing_dll":
-        dll.unlink()
     if failure == "site-packages":
         site.rmdir()
     if failure == "relative_source":
         source = Path("PRIVATE-relative.py")
-    if failure in ("pyvenv.cfg", "python._pth", "python312._pth"):
+    if failure in ("pyvenv.cfg", "python._pth", "pythonw._pth", "python314._pth", "python314.zip"):
         (base / failure).write_bytes(b"PRIVATE shadow contents")
+    if failure == "parent_pyvenv":
+        (install_root / "pyvenv.cfg").touch()
+    if failure == "site_pth":
+        (site / "PRIVATE.PTH").write_bytes(b"import injected")
 
     powershell = tmp_path / "powershell.exe"
     monkeypatch.setattr(ca, "sys", SimpleNamespace(
-        executable=str(tmp_path / "runner" / "python.exe" if failure == "executable" else python),
-        base_prefix=str(tmp_path / "runner" if failure == "base_prefix_and_missing_dll" else base),
+        executable=str(tmp_path / "runner" / "hostops-launcher.exe"),
+        base_prefix=str(tmp_path / "runner"),
         version_info=SimpleNamespace(major=3, minor=12),
     ))
     identity_errors = {
@@ -2442,9 +2460,13 @@ def test_clean_9444_runtime_probe_runs_only_fixed_checks(tmp_path, monkeypatch, 
         if len(calls) == 1:
             if failure == "timeout":
                 raise subprocess.TimeoutExpired("PRIVATE command", 15)
+            if failure == "binary_version":
+                return SimpleNamespace(returncode=2, stdout=b"")
             return SimpleNamespace(returncode=int(failure == "signature"), stdout=b"SIGNED_CPYTHON")
         if len(calls) == 2:
             return SimpleNamespace(returncode=int(failure == "bootstrap"))
+        if len(calls) == 3:
+            return SimpleNamespace(returncode=int(failure == "pythonw_bootstrap"))
         if failure == "task":
             return SimpleNamespace(returncode=1, stdout=b"PRIVATE task response")
         return SimpleNamespace(returncode=0, stdout=b"AUTOSTART_NOT_ENROLLED")
@@ -2458,16 +2480,23 @@ def test_clean_9444_runtime_probe_runs_only_fixed_checks(tmp_path, monkeypatch, 
     assert len(calls) == subprocess_count
     assert all(kwargs["timeout"] == 15 and kwargs["stderr"] == subprocess.DEVNULL for _, kwargs in calls)
     if calls:
-        assert "Get-AuthenticodeSignature -LiteralPath" in calls[0][0][-1]
-    if len(calls) >= 2:
-        argv, kwargs = calls[1]
-        assert argv[:5] == [str(python), "-I", "-B", "-S", "-c"] and argv[-1] == "check"
+        argv, kwargs = calls[0]
+        assert "Get-AuthenticodeSignature -LiteralPath" in argv[-1]
+        assert "FileMajorPart -ne 3 -or $v.FileMinorPart -ne 14" in argv[-1]
+        assert "$v.OriginalFilename" in argv[-1] and "$exact -cne $version" in argv[-1]
+        assert kwargs["env"]["AI_COMMERCE_PYTHON"] == str(python)
+        assert kwargs["env"]["AI_COMMERCE_PYTHONW"] == str(pythonw)
+        assert kwargs["env"]["AI_COMMERCE_PYTHON_DLL"] == str(dll)
+    for executable, (argv, kwargs) in zip((python, pythonw), calls[1:3]):
+        assert argv[:5] == [str(executable), "-I", "-B", "-S", "-c"] and argv[-1] == "check"
         assert kwargs["cwd"] == source.parents[2]
-    if len(calls) == 3:
-        argv, kwargs = calls[2]
+    if len(calls) == 4:
+        argv, kwargs = calls[3]
         assert argv[:4] == [str(powershell), "-NoProfile", "-NonInteractive", "-Command"]
         assert "GetTask($name)" in argv[-1] and "Test-Registration $registered" in argv[-1]
         assert not re.search(r"\.RegisterTaskDefinition\(|\.RunEx\(|DeleteTask|Stop-Process", argv[-1])
+        assert kwargs["env"]["AI_COMMERCE_TASK_PYTHON"] == str(pythonw)
+        assert kwargs["env"]["AI_COMMERCE_TASK_ARGUMENTS"].startswith("-I -B -S -c ")
         assert kwargs["env"]["AI_COMMERCE_TASK_INSTALL"] == "0"
         assert kwargs["env"]["AI_COMMERCE_TASK_START_SESSION"] == ""
 
