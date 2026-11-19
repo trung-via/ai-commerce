@@ -4848,3 +4848,53 @@ def test_diagnostic_evidence_never_satisfies_mt01_or_candidate_fanin(tmp_path):
     assert called == ["diag"]
     assert report["status"] == "PARTIAL_OR_FAILED" and report["succeeded"] == 0
     assert report["actions"][1]["status"] == "BLOCKED_DEPENDENCY"
+
+
+def test_mt01_direct_changed_owner_runs_before_indirect_consumers():
+    """A #1114-like orchestration failure must be reached before broad closure."""
+    from ai_commerce.engineering.verification import _prioritize_changed_owners
+
+    def group(name, *, sources=(), tests=(), consumers=()):
+        return {"group": name, "state": "EXECUTE", "binding": {"mapping": {
+            "paths": list(sources), "tests": list(tests),
+            "consumers": list(consumers), "contracts": []}}}
+
+    plan = {"groups": [
+        group("a03", sources=("src/creative.py",), tests=("tests/test_creative.py",)),
+        group("bq", sources=("src/quality.py",)),
+        group("production-orchestration", sources=("src/orchestrator.py", "src/contracts.py"),
+              tests=("tests/test_production_orchestration.py",)),
+        group("a04", sources=("src/media.py",)),
+    ]}
+    original = {entry["group"] for entry in plan["groups"]}
+    _prioritize_changed_owners(plan, ["src/creative.py", "src/orchestrator.py",
+                                      "src/contracts.py", "src/media.py",
+                                      "tests/test_production_orchestration.py"])
+    assert {entry["group"] for entry in plan["groups"]} == original
+    assert [entry["group"] for entry in plan["groups"]] == [
+        "production-orchestration", "a03", "a04", "bq"]
+    assert plan["groups"][0]["selection_witness"]["changed_owner_sources"] == [
+        "src/contracts.py", "src/orchestrator.py"]
+    assert plan["groups"][-1]["selection_witness"]["indirect_or_registered_closure"] is True
+
+
+def test_mt01_junit_slow_cases_are_bounded_and_private_parameters_hidden():
+    from ai_commerce.engineering.verification import _junit_duration_diagnostics
+
+    junit = b'''<testsuites><testsuite tests="4">
+      <testcase classname="tests.test_production_orchestration"
+        name="test_r4_editable_package_revisions[secret=private]" time="2282.272"/>
+      <testcase classname="tests.test_production_orchestration"
+        name="test_r4_negative_rejections" time="1035.687"><failure/></testcase>
+      <testcase classname="tests.test_production_orchestration" name="test_fast" time="0.1"/>
+      <testcase classname="tests.test_production_orchestration" name="test_bad_time" time="NaN"/>
+    </testsuite></testsuites>'''
+    result = _junit_duration_diagnostics(junit)
+    assert result["kind"] == "MT01_JUNIT_CASE_TIMING_V1"
+    assert result["observed_cases"] == 3
+    assert result["case_seconds_sum"] == 3318.059
+    assert result["case_seconds_overlap_under_xdist"] is True
+    assert result["slowest"][0]["seconds"] == 2282.272
+    assert result["slowest"][0]["test"].endswith("::test_r4_editable_package_revisions")
+    assert "secret=private" not in str(result)
+    assert _junit_duration_diagnostics(b'<!DOCTYPE x><testsuite/>') is None

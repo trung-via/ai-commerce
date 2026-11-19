@@ -400,6 +400,75 @@ def _parse_safe_junit(junit: bytes | None) -> ET.Element | None:
         return None
 
 
+def _junit_duration_diagnostics(junit: bytes | None) -> dict | None:
+    """Bounded, non-sensitive timing evidence from an already captured JUnit.
+
+    Individual testcase seconds overlap under xdist: they are observations,
+    never a substitute for wall-clock duration or evidence of a test PASS.
+    Parameter values are hashed rather than copied into a public receipt.
+    """
+    root = _parse_safe_junit(junit)
+    if root is None:
+        return None
+    cases = []
+    total = 0.0
+    for item in root.iter("testcase"):
+        try:
+            duration = float(item.get("time", ""))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(duration) or not 0 <= duration <= _MAX_TEST_SECONDS:
+            continue
+        total += duration
+        name = item.get("name", "")
+        classname = item.get("classname", "")
+        function = name.split("[", 1)[0]
+        if (not re.fullmatch(r"[A-Za-z_]\w{0,127}", function, re.ASCII)
+                or not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9.]{0,191}", classname, re.ASCII)):
+            function, classname = "REDACTED", "REDACTED"
+        case_hash = hashlib.sha256((classname + "::" + name).encode("utf-8")).hexdigest()
+        cases.append({"test": classname + "::" + function,
+                      "case_sha256": case_hash, "seconds": round(duration, 3)})
+    return {"kind": "MT01_JUNIT_CASE_TIMING_V1", "observed_cases": len(cases),
+            "case_seconds_sum": round(total, 3), "case_seconds_overlap_under_xdist": True,
+            "slowest": sorted(cases, key=lambda c: (-c["seconds"], c["case_sha256"]))[:5]}
+
+
+def _prioritize_changed_owners(plan: dict, changed_paths: list[str]) -> None:
+    """Fail-fast ordering only: never remove selected owner/consumer coverage.
+
+    In #1114, a directly edited orchestration owner failed after unrelated
+    selected groups had already spent substantial time. The first registered
+    verification group should exercise the most directly edited source owner.
+    """
+    changed = set(changed_paths)
+    for entry in plan["groups"]:
+        mapping = entry.get("binding", {}).get("mapping", {})
+        direct_sources = sorted(changed & set(mapping.get("paths", ())))
+        direct_tests = sorted(changed & set(mapping.get("tests", ())))
+        direct_consumers = sorted(changed & set(mapping.get("consumers", ())))
+        direct_contracts = sorted(changed & set(mapping.get("contracts", ())))
+        entry["selection_witness"] = {
+            "changed_owner_sources": direct_sources,
+            "changed_owner_tests": direct_tests,
+            "changed_declared_consumers": direct_consumers,
+            "changed_contracts": direct_contracts,
+            "indirect_or_registered_closure": not any(
+                (direct_sources, direct_tests, direct_consumers, direct_contracts)),
+        }
+
+    def priority(entry: dict) -> tuple:
+        witness = entry["selection_witness"]
+        sources = [p for p in witness["changed_owner_sources"] if p.startswith("src/")]
+        tests = witness["changed_owner_tests"]
+        declared = witness["changed_declared_consumers"] + witness["changed_contracts"]
+        tier = 0 if sources else 1 if tests else 2 if declared else 3
+        return (tier, -len(sources), -len(tests), entry["group"])
+
+    plan["groups"].sort(key=priority)
+    plan["execution_order_policy"] = "MT01_DIRECT_CHANGED_OWNER_FIRST_V1"
+
+
 def _is_skip_call(node: ast.AST) -> bool:
     if not isinstance(node, ast.Call):
         return False
@@ -734,6 +803,7 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
     if provisional is not None:
         plan["provisional_mapping"] = provisional
     apply_evidence(plan, prior, output_dir)
+    _prioritize_changed_owners(plan, changed_paths)
     plan["started_at"] = started_at
     plan["selection_seconds"] = time.monotonic() - started_plan
     for entry in plan["groups"]:
@@ -971,6 +1041,12 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
         )
         if junit_issue is not None:
             entry["junit_error"] = junit_issue
+        else:
+            # The independent immutable JUnit remains authoritative; this
+            # small sidecar only locates expensive cases for the next repair.
+            timings = _junit_duration_diagnostics(junit_bytes)
+            if timings is not None:
+                entry["duration_diagnostics"] = timings
         # A successful -n12 command without a controller receipt is UNPROVEN,
         # even when the quiet console or command line claims twelve workers.
         # Serial profiles must also remain serial (never silently run xdist).
