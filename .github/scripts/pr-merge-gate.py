@@ -737,6 +737,12 @@ EF02_SOURCE_WORKFLOWS = {
 }
 
 
+def _ef02_proof_trace(stage: str) -> None:
+    """Emit bounded diagnostic stages, never URLs, bearer tokens or artifact data."""
+    if os.environ.get("EF02_PROOF_TRACE") == "1":
+        print("EF02_ORIGINAL_PROOF_STAGE=" + stage, flush=True)
+
+
 def verified_ef02_candidate(api: Callable[[str], Any], repository: str,
                             head: str, changed_files: object) -> bool:
     """Reuse a genuine EF02 Windows PASS on unchanged candidate bytes.
@@ -746,9 +752,11 @@ def verified_ef02_candidate(api: Callable[[str], Any], repository: str,
     incomplete artifact MUST go through regular PR CI. Only protected-main
     code calls this function. A canonical independent Brain PASS is separate.
     """
+    _ef02_proof_trace("START")
     if (not SHA.fullmatch(head) or not isinstance(changed_files, list)
             or not 1 <= len(changed_files) < 100
             or not callable(getattr(api, "read_artifact", None))):
+        _ef02_proof_trace("INVALID_INPUT")
         return False
     base = f"/repos/{repository}"
     try:
@@ -761,8 +769,10 @@ def verified_ef02_candidate(api: Callable[[str], Any], repository: str,
             return False
         coverage = reviewed_coverage_for_changed_files(changed_files)
         if coverage is None:
+            _ef02_proof_trace("UNREVIEWED_SCOPE")
             return False
         _, required_tests = coverage
+        _ef02_proof_trace("SCOPE_AND_COVERAGE_VERIFIED")
         commit = api(f"{base}/git/commits/{head}")
         if not isinstance(commit, dict) or commit.get("sha") != head:
             return False
@@ -802,6 +812,7 @@ def verified_ef02_candidate(api: Callable[[str], Any], repository: str,
                 not isinstance(verify.get("report_sha256"), str) or
                 not re.fullmatch(r"[0-9a-f]{64}", verify["report_sha256"])):
             return False
+        _ef02_proof_trace("COMMIT_AND_VERIFICATION_VERIFIED")
         run_id = int(origin.get("run_id", ""))
         run_attempt = int(origin.get("run_attempt", ""))
         if not 1 <= run_id or not 1 <= run_attempt <= 100:
@@ -817,6 +828,7 @@ def verified_ef02_candidate(api: Callable[[str], Any], repository: str,
             if (len(raw) > 2 * 1024 * 1024 or
                     hashlib.sha256(raw).hexdigest() != evidence["candidate_file_sha256"][path]):
                 return False
+        _ef02_proof_trace("ALL_SOURCE_HASHES_VERIFIED")
         run = api(f"{base}/actions/runs/{run_id}")
         if (not isinstance(run, dict) or run.get("id") != run_id or
                 run.get("run_attempt") != run_attempt or
@@ -838,6 +850,7 @@ def verified_ef02_candidate(api: Callable[[str], Any], repository: str,
         if (steps.get("Execute bounded concurrent EF01 jobs") != "success" or
                 steps.get("Preserve all attempt evidence even when actions fail") != "success"):
             return False
+        _ef02_proof_trace("ORIGINAL_WINDOWS_RUN_AND_JOB_VERIFIED")
         listed = api(f"{base}/actions/runs/{run_id}/artifacts?per_page=100")
         if not isinstance(listed, dict) or not isinstance(listed.get("artifacts"), list):
             return False
@@ -853,7 +866,9 @@ def verified_ef02_candidate(api: Callable[[str], Any], repository: str,
                 custody.get("id") != run_id or
                 custody.get("head_sha") != evidence["source_sha"]):
             return False
+        _ef02_proof_trace("ARTIFACT_CUSTODY_VERIFIED")
         data = api.read_artifact(artifact["id"])
+        _ef02_proof_trace("ARTIFACT_ZIP_DOWNLOADED")
         if not isinstance(data, bytes) or len(data) > 24 * 1024 * 1024:
             return False
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
@@ -865,14 +880,21 @@ def verified_ef02_candidate(api: Callable[[str], Any], repository: str,
                 str(report.get("github_workflow_run_id")) != str(run_id) or
                 not isinstance(report.get("actions"), list)):
             return False
+        _ef02_proof_trace("BATCH_REPORT_VERIFIED")
         matching = [a for a in report["actions"] if isinstance(a, dict) and
                     a.get("attempt_id") == evidence["attempt_id"] and
                     a.get("action_id") == evidence["action_id"]]
-        return (len(matching) == 1 and matching[0].get("status") == "CANDIDATE_READY"
+        verified = (len(matching) == 1 and matching[0].get("status") == "CANDIDATE_READY"
                 and matching[0].get("candidate_sha") == head
                 and matching[0].get("candidate_evidence") == evidence)
+        _ef02_proof_trace("FINAL_EXACT_EVIDENCE_MATCH" if verified else "FINAL_EVIDENCE_MISMATCH")
+        return verified
+    except urllib.error.HTTPError as exc:
+        _ef02_proof_trace("GITHUB_HTTP_" + str(exc.code))
+        return False
     except (KeyError, ValueError, TypeError, AttributeError, OSError, OverflowError,
-            binascii.Error, zipfile.BadZipFile, urllib.error.URLError):
+            binascii.Error, zipfile.BadZipFile, urllib.error.URLError) as exc:
+        _ef02_proof_trace("EVIDENCE_ERROR_" + type(exc).__name__)
         return False
 
 
@@ -1105,7 +1127,7 @@ class GitHubAPI:
 
         opener = urllib.request.build_opener(NoFollow)
         try:
-            with opener.open(req, timeout=18) as response:
+            with opener.open(req, timeout=30) as response:
                 # An unexpected direct body is not proof of an artifact ZIP.
                 raise ValueError("ARTIFACT_SIGNED_REDIRECT_MISSING")
         except urllib.error.HTTPError as exc:
@@ -1130,7 +1152,7 @@ class GitHubAPI:
         signed_req = urllib.request.Request(
             signed, headers={"Accept": "application/zip",
                              "User-Agent": "AI-Commerce-Merge-Gate/1.0"})
-        with urllib.request.urlopen(signed_req, timeout=18) as response:
+        with urllib.request.urlopen(signed_req, timeout=45) as response:
             content = response.read(24 * 1024 * 1024 + 1)
         if len(content) > 24 * 1024 * 1024:
             raise ValueError("ARTIFACT_TOO_LARGE")
@@ -1148,7 +1170,7 @@ class GitHubAPI:
                      "Accept": "application/vnd.github+json",
                      "X-GitHub-Api-Version": "2022-11-28",
                      "Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=12) as response:
+        with urllib.request.urlopen(req, timeout=25) as response:
             return json.load(response)
 
 
@@ -1288,7 +1310,11 @@ def ef02_reuse_preflight() -> int:
             if str(pr.get("head", {}).get("ref", "")).startswith("ef02/candidate/"):
                 files = api(f"/repos/{repo}/pulls/{number}/files?per_page=100")
                 verified = verified_ef02_candidate(api, repo, head, files)
-    except (KeyError, ValueError, TypeError, OSError, urllib.error.URLError):
+    except urllib.error.HTTPError as exc:
+        _ef02_proof_trace("PREFLIGHT_HTTP_" + str(exc.code))
+        verified = False
+    except (KeyError, ValueError, TypeError, OSError, urllib.error.URLError) as exc:
+        _ef02_proof_trace("PREFLIGHT_ERROR_" + type(exc).__name__)
         verified = False
     output = os.environ.get("GITHUB_OUTPUT")
     if output:

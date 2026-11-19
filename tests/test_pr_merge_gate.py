@@ -313,6 +313,56 @@ def test_ef02_changed_or_incomplete_proof_falls_back_to_ci(gate, monkeypatch, fa
     assert not api.writes
 
 
+def test_ef02_original_proof_private_pr_permissions_and_trace_wiring():
+    workflow = (ROOT / ".github/workflows/ef02-tests.yml").read_text(encoding="utf-8")
+    permissions = workflow.split("permissions:\n", 1)[1].split("concurrency:\n", 1)[0]
+    assert "  contents: read" in permissions
+    assert "  actions: read" in permissions
+    # GitHub's private PR changed-files REST endpoint requires Pull requests: read.
+    assert "  pull-requests: read" in permissions
+    assert "EF02_PROOF_TRACE: '1'" in workflow
+    trusted = (ROOT / ".github/workflows/brain-pass-auto-merge.yml").read_text(encoding="utf-8")
+    assert "EF02_PROOF_TRACE: '1'" in trusted
+
+
+def test_ef02_original_proof_trace_records_real_stage_without_secret(
+    gate, monkeypatch, capsys,
+):
+    monkeypatch.setenv("EF02_PROOF_TRACE", "1")
+    api = EF02OriginalProofGitHub(gate)
+    verdict = gate.verify_one(api, api.repo, api.pr)
+    assert verdict.status == "READY_FOR_MERGE"
+    output = capsys.readouterr().out
+    assert "EF02_ORIGINAL_PROOF_STAGE=ALL_SOURCE_HASHES_VERIFIED" in output
+    assert "EF02_ORIGINAL_PROOF_STAGE=ARTIFACT_ZIP_DOWNLOADED" in output
+    assert "EF02_ORIGINAL_PROOF_STAGE=FINAL_EXACT_EVIDENCE_MATCH" in output
+    assert "Bearer " not in output
+
+
+def test_ef02_original_proof_trace_fails_closed_with_sanitized_http_code(
+    gate, monkeypatch, capsys,
+):
+    import urllib.error
+
+    class DeniedArtifactMetadata(EF02OriginalProofGitHub):
+        def __call__(self, path, method="GET", body=None):
+            if "/actions/runs/401/artifacts?" in path:
+                raise urllib.error.HTTPError(
+                    "https://api.github.com/secret", 403, "TOKEN_SHOULD_NOT_LEAK",
+                    None, None,
+                )
+            return super().__call__(path, method, body)
+
+    monkeypatch.setenv("EF02_PROOF_TRACE", "1")
+    api = DeniedArtifactMetadata(gate)
+    verdict = gate.verify_one(api, api.repo, api.pr)
+    assert verdict.status == "WAIT_CI"
+    output = capsys.readouterr().out
+    assert "EF02_ORIGINAL_PROOF_STAGE=GITHUB_HTTP_403" in output
+    assert "TOKEN_SHOULD_NOT_LEAK" not in output
+    assert "secret" not in output
+
+
 @pytest.mark.parametrize(
     ("test_path", "expected"),
     [
