@@ -356,7 +356,7 @@ def _sync_main(params):
 _CLEAN_PUBLIC_CODES = frozenset({
     "PROTECTED_HOSTOPS_ONLY", "WINDOWS_INTERACTIVE_REQUIRED", "WINDOWS_TOKEN_UNAVAILABLE",
     "ELEVATED_CHROME_DISALLOWED", "ENROLLMENT_IDENTITY_UNPROVEN",
-    "OPERATOR_OWNERSHIP_UNPROVEN", "PROFILE_LOCKED", "PROFILE_IN_USE",
+    "WINDOWS_OWNER_CONTEXT_UNVERIFIED", "PROFILE_UNAVAILABLE", "PROFILE_LOCKED", "PROFILE_IN_USE",
     "PROFILE_ALREADY_ACTIVE_NO_CDP", "FOREIGN_PORT_OWNER", "BROWSER_OWNERSHIP_UNPROVEN",
     "CHROME_PATH_INVALID", "CHROME_EXECUTABLE_UNTRUSTED", "CDP_PROTOCOL_UNAVAILABLE",
     "SUPERVISOR_ACTIVE", "AUTOSTART_CONFLICT", "AUTOSTART_RUNTIME_UNAVAILABLE",
@@ -404,9 +404,7 @@ def _clean_source_bytes_match(path: Path, worktree_bytes: bytes, pinned_bytes: b
 
 
 def _clean_autostart_receipt(code):
-    from ai_commerce.remote.chrome_acquisition import _CLEAN_PROFILE_CODES
-
-    if type(code) is not str or (code not in _CLEAN_PUBLIC_CODES and code not in _CLEAN_PROFILE_CODES):
+    if type(code) is not str or code not in _CLEAN_PUBLIC_CODES:
         code = "AUTOSTART_RUNTIME_UNAVAILABLE"
     result = {
         "status": "OBSERVED" if code in {"CDP_VERIFIED", "INSTALLED_BUT_NOT_RUNNING"} else "HOLD",
@@ -560,8 +558,7 @@ def _observe_clean_runtime(sha: str) -> str:
     try:
         target, candidates = acquisition._clean_target(owner)
     except acquisition._Clean9444Hold as exc:
-        code = str(exc)
-        return code if code in acquisition._CLEAN_PROFILE_CODES else "TARGET_READ_UNVERIFIED"
+        return "PROFILE_UNAVAILABLE" if str(exc) == "PROFILE_UNAVAILABLE" else "TARGET_READ_UNVERIFIED"
     except (acquisition.AcquisitionBlocked, acquisition._EnrollmentHold, OSError):
         return "TARGET_READ_UNVERIFIED"
     try:
@@ -918,12 +915,11 @@ foreach ($item in $items) {
 
 
 def _cdp_9444_private_context(acquisition, argv=()):
-    """Attest the fixed clean profile or an independent legacy config.
+    """Read the fixed clean target or attest an independent legacy config.
 
     No Issue/environment identity, manifest-selected path, enrollment or launch.
     Failure to attest is UNKNOWN, never evidence that the listener is absent.
     """
-    from ai_commerce.remote.local_completion_handoff import _private_identity
     from ai_commerce.remote.local_wake_entry import _windows_process_sid
 
     local = acquisition._native_local_app_data()
@@ -937,6 +933,9 @@ def _cdp_9444_private_context(acquisition, argv=()):
     clean = root / acquisition._CLEAN_9444_PROFILE
     if directory is not None and Path(normpath(directory)) == clean:
         return acquisition._clean_target((local, session, sid)), session, sid
+
+    from ai_commerce.remote.local_completion_handoff import _private_identity
+
     if (not local.is_absolute() or _fixed_private_metadata_kind(root, directory=True) != "PRESENT"
             or _private_identity(root) != sid):
         deny("OWNER_SESSION_UNATTESTED")

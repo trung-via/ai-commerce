@@ -2133,6 +2133,7 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         self.real_source = hostops._persistent_clean_source
         self.source = self.mock(hostops, "_persistent_clean_source", return_value=self.local / "stable.py")
         self.real_task = self.acq._clean_task
+        self.real_target = self.acq._clean_target
         self.target = self.acq._ChromeTarget(self.local / "chrome.exe", self.local / "WakeHub-9444-Clean",
                                             "Default", "http://127.0.0.1:9444", 9444)
         self.owner = (self.local, 7, self.sid)
@@ -2275,11 +2276,9 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         self.record.assert_not_called()
         self.probe.assert_not_called()
 
-    def test_runtime_probe_reports_profile_stage_before_task_read(self):
+    def test_runtime_probe_reports_unavailable_profile_before_task_read(self):
         for code, expected in (
-            ("CLEAN_ROOT_OWNER_MISMATCH", "CLEAN_ROOT_OWNER_MISMATCH"),
-            ("CLEAN_PROFILE_ACL_UNSAFE", "CLEAN_PROFILE_ACL_UNSAFE"),
-            ("CLEAN_DEFAULT_ACL_UNVERIFIED", "CLEAN_DEFAULT_ACL_UNVERIFIED"),
+            ("PROFILE_UNAVAILABLE", "PROFILE_UNAVAILABLE"),
             ("PRIVATE path and SID", "TARGET_READ_UNVERIFIED"),
         ):
             with self.subTest(code=code):
@@ -2330,9 +2329,7 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
             (self.acq, "_interactive_session", self.acq.AcquisitionBlocked, "ELEVATED_CHROME_DISALLOWED"),
             (self.acq, "_interactive_session", self.acq.AcquisitionBlocked, "WINDOWS_INTERACTIVE_REQUIRED"),
             (hostops, "_persistent_clean_source", hostops.Denied, "LOCAL_MAIN_SYNC_REQUIRED"),
-            (self.acq, "_clean_target", self.acq._Clean9444Hold, "CLEAN_ROOT_OWNER_MISMATCH"),
-            (self.acq, "_clean_target", self.acq._Clean9444Hold, "CLEAN_PROFILE_ACL_UNSAFE"),
-            (self.acq, "_clean_target", self.acq._Clean9444Hold, "CLEAN_DEFAULT_ACL_UNVERIFIED"),
+            (self.acq, "_clean_target", self.acq._Clean9444Hold, "PROFILE_UNAVAILABLE"),
             (self.acq, "_clean_inventory", self.acq._Clean9444Hold, "FOREIGN_PORT_OWNER"),
             (self.acq, "_clean_inventory", self.acq._Clean9444Hold, "BROWSER_OWNERSHIP_UNPROVEN"),
         ):
@@ -2366,6 +2363,22 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         self.probe.assert_not_called()
 
     def test_create_then_independent_readback_before_one_owner_session_start(self):
+        directory = self.local / "AI-Commerce" / self.acq._CLEAN_9444_PROFILE
+        (directory / "Default").mkdir(parents=True)
+        executable = self.local / "Google" / "Chrome" / "Application" / "chrome.exe"
+        executable.parent.mkdir(parents=True)
+        executable.touch()
+        self.target = self.acq._ChromeTarget(executable.resolve(), directory, "Default", "http://127.0.0.1:9444", 9444)
+        self.candidates = (self.target.executable,)
+        self.mock(self.acq, "_native_known_folder", return_value=self.local / "Program Files")
+        self.target_read.side_effect = self.real_target
+        windows_acl = self.mock(self.handoff, "_windows_acl", return_value=("S-1-5-18", (("allow", self.sid),)))
+        private_id = self.mock(self.handoff, "_private_identity", return_value="S-1-5-18")
+        self.task.return_value = "AUTOSTART_NOT_ENROLLED"
+        self.assertEqual(self.invoke_probe()["code"], "AUTOSTART_NOT_ENROLLED")
+        self.task.assert_called_once_with(self.owner, self.target, self.candidates, install=False)
+        self.task.reset_mock()
+
         responses = iter(("AUTOSTART_NOT_ENROLLED", "ENROLLED", "ALREADY_ENROLLED", "START_REQUESTED"))
 
         def scheduler(owner, target, candidates, *, install, start=False):
@@ -2395,6 +2408,8 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         ])
         self.probe.assert_called_once_with(self.target)
         self.assertFalse(self.pending)
+        windows_acl.assert_not_called()
+        private_id.assert_not_called()
 
     def test_uncertain_registration_or_first_start_persists_and_never_replays(self):
         for responses in (("AUTOSTART_NOT_ENROLLED", "UNKNOWN_EFFECT"),
@@ -2641,12 +2656,12 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
             self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", "INSTALLED_BUT_NOT_RUNNING"))
             self.task.assert_called_once_with(self.owner, self.target, self.candidates, install=False)
 
-            # Private profile/owner and Task controls remain enforced after clean CRLF source passes.
+            # Profile access and task identity are checked after source custody.
             self.task.reset_mock()
             with patch.object(self.acq, "_clean_target",
-                              side_effect=self.acq._Clean9444Hold("CLEAN_DEFAULT_ACL_UNSAFE")):
+                              side_effect=self.acq._Clean9444Hold("PROFILE_UNAVAILABLE")):
                 held = self.invoke()
-            self.assertEqual((held["status"], held["code"]), ("HOLD", "CLEAN_DEFAULT_ACL_UNSAFE"))
+            self.assertEqual((held["status"], held["code"]), ("HOLD", "PROFILE_UNAVAILABLE"))
             self.task.assert_not_called()
 
             self.task.return_value = "AUTOSTART_CONFLICT"
@@ -3139,12 +3154,12 @@ class PersonalCdp9444TopologyTests(unittest.TestCase):
         self.protocol.assert_called_once_with(self.signature.call_args.args[0])
         self.assert_public(result)
 
-    def test_fixed_clean_profile_is_attested_without_legacy_config(self):
+    def test_fixed_clean_profile_uses_ordinary_access_without_legacy_config(self):
         self.config.unlink()
-        # Windows temp aliases must not split the attested known-folder root
-        # from the canonical profile and browser paths in this test fixture.
+        # Resolve the known-folder root so it matches the canonical fixture paths.
         self.local = self.local.resolve(strict=True)
         self.local_identity.return_value = self.local
+        self.private_identity.return_value = "S-1-5-18"
         self.root = self.local / "AI-Commerce"
         clean = self.root / "WakeHub-9444-Clean"
         (clean / "Default").mkdir(parents=True)
@@ -3159,8 +3174,7 @@ class PersonalCdp9444TopologyTests(unittest.TestCase):
             str(binary), "--user-data-dir=" + str(clean), "--profile-directory=Default",
             "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=9444",
         ]))
-        with patch.object(self.acquisition, "_clean_attest_profile") as attest, \
-                patch.object(self.acquisition, "_native_known_folder", return_value=self.local), \
+        with patch.object(self.acquisition, "_native_known_folder", return_value=self.local / "Program Files"), \
                 patch.object(self.acquisition, "load_environment") as legacy:
             context = hostops._cdp_9444_private_context(
                 self.acquisition, json.loads(self.proc["CommandLine"]))
@@ -3172,7 +3186,6 @@ class PersonalCdp9444TopologyTests(unittest.TestCase):
             receipt = self.observe()
             self.assertEqual(receipt["code"], "CDP_PROTOCOL_HEALTHY")
             self.assert_public(receipt)
-            self.assertTrue(all(args == call((self.local, self.session, self.sid)) for args in attest.call_args_list))
             self.private_identity.assert_not_called()
             legacy.assert_not_called()
             self.assertEqual(self.protocol.call_args.args[0].user_data_dir, clean)
