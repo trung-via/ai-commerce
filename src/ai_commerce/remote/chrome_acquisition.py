@@ -572,6 +572,11 @@ def _enrollment_operator(*, attended: bool = True) -> tuple[Path, int, str]:
         raise _EnrollmentHold("LOCAL_OPERATOR_ONLY")
     if attended and (sys.stdin is None or not sys.stdin.isatty()):
         raise _EnrollmentHold("WINDOWS_INTERACTIVE_REQUIRED")
+    return _native_operator()
+
+
+def _native_operator() -> tuple[Path, int, str]:
+    """Native token and desktop attestation only. Callers supply effect authority."""
     session = _interactive_session()
     from .local_wake_entry import _windows_process_sid
     sid = _windows_process_sid()
@@ -1725,9 +1730,10 @@ def _clean_switch(argv: list[str], name: str) -> str | None:
 
 
 def _clean_inventory(target: _ChromeTarget, candidates: tuple[Path, ...],
-                     session: int, sid: str) -> tuple[str, tuple | None]:
+                     session: int, sid: str, *, inventory: dict | None = None) -> tuple[str, tuple | None]:
     """Inspect only 9444 and claims on the fixed profile. Helpers are not browsers."""
-    inventory = _query_windows(_CLEAN_9444_PORT)
+    if inventory is None:
+        inventory = _query_windows(_CLEAN_9444_PORT)
     if (type(inventory) is not dict or set(inventory) != {"listeners", "processes"}
             or any(type(rows) not in (list, dict) for rows in inventory.values())):
         raise _Clean9444Hold("WINDOWS_PROBE_INVALID")
@@ -1829,28 +1835,36 @@ def _clean_supervisor_slot():
 
 
 def _clean_launch_pending() -> bool:
+    return _clean_pending("LaunchPending")
+
+
+def _clean_pending(name: str) -> bool:
     import winreg
 
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _CLEAN_9444_REGISTRY) as key:
-            winreg.QueryValueEx(key, "LaunchPending")
+            winreg.QueryValueEx(key, name)
     except FileNotFoundError:
         return False
     return True
 
 
 def _clean_record_launch(pending: bool) -> None:
+    _clean_record_pending("LaunchPending", pending)
+
+
+def _clean_record_pending(name: str, pending: bool) -> None:
     import winreg
 
     if pending:
         with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, _CLEAN_9444_REGISTRY,
                                 0, winreg.KEY_SET_VALUE) as key:
-            winreg.SetValueEx(key, "LaunchPending", 0, winreg.REG_DWORD, 1)
+            winreg.SetValueEx(key, name, 0, winreg.REG_DWORD, 1)
             winreg.FlushKey(key)
     else:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _CLEAN_9444_REGISTRY,
                             0, winreg.KEY_SET_VALUE) as key:
-            winreg.DeleteValue(key, "LaunchPending")
+            winreg.DeleteValue(key, name)
             winreg.FlushKey(key)
 
 
@@ -1929,6 +1943,8 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new()
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 if ($sid -cne $env:AI_COMMERCE_TASK_SID) { throw 'Owner changed' }
+$managed = $env:AI_COMMERCE_TASK_MANAGED -ceq '1'
+$sddl = 'D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;' + $sid + ')'
 $name = 'AI-Commerce-WakeHub-9444-Clean-' + $sid
 $service = New-Object -ComObject 'Schedule.Service'
 $service.Connect()
@@ -1939,7 +1955,7 @@ $expected.Principal.UserId = $sid
 $expected.Principal.LogonType = 3 # TASK_LOGON_INTERACTIVE_TOKEN
 $expected.Principal.RunLevel = 0 # TASK_RUNLEVEL_LUA
 $expected.Settings.MultipleInstances = 2 # TASK_INSTANCES_IGNORE_NEW
-$expected.Settings.AllowDemandStart = $false
+$expected.Settings.AllowDemandStart = $managed
 $expected.Settings.DisallowStartIfOnBatteries = $false
 $expected.Settings.StopIfGoingOnBatteries = $false
 $expected.Settings.ExecutionTimeLimit = 'PT0S'
@@ -1970,6 +1986,11 @@ function Test-Owner($value) {
 
 function Test-Registration($registered) {
     if (!$registered -or !$registered.Enabled) { return $false }
+    if ($managed) {
+        $acl = [Security.AccessControl.RawSecurityDescriptor]::new($registered.GetSecurityDescriptor(4))
+        $want = [Security.AccessControl.RawSecurityDescriptor]::new($sddl)
+        if ($acl.GetSddlForm('Access') -cne $want.GetSddlForm('Access')) { return $false }
+    }
     $definition = $registered.Definition
     $principal = $definition.Principal
     if ($principal.Id -cne $expected.Principal.Id -or !(Test-Owner $principal.UserId) -or
@@ -1999,13 +2020,23 @@ function Test-Registration($registered) {
 }
 
 $registered = Read-Registration
+if ($env:AI_COMMERCE_TASK_START_SESSION) {
+    $session = [int]$env:AI_COMMERCE_TASK_START_SESSION
+    if (!$managed -or $session -le 0 -or $session -ne [Diagnostics.Process]::GetCurrentProcess().SessionId -or
+        !(Test-Registration $registered)) { 'AUTOSTART_CONFLICT'; exit }
+    if ($registered.State -ne 3) { 'START_NOT_ATTEMPTED'; exit } # TASK_STATE_READY
+    # TASK_RUN_USE_SESSION_ID | TASK_RUN_USER_SID, no substituted arguments.
+    $instance = $registered.RunEx($null, 12, $session, $sid)
+    if (!$instance -or !$instance.InstanceGuid) { 'UNKNOWN_EFFECT'; exit }
+    'START_REQUESTED'
+    exit
+}
 if ($registered) {
     if (Test-Registration $registered) { 'ALREADY_ENROLLED' } else { 'AUTOSTART_CONFLICT' }
     exit
 }
 if ($env:AI_COMMERCE_TASK_INSTALL -cne '1') { 'AUTOSTART_NOT_ENROLLED'; exit }
 # TASK_CREATE | TASK_IGNORE_REGISTRATION_TRIGGERS. A racing registration is never updated.
-$sddl = 'D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;' + $sid + ')'
 try { $null = $folder.RegisterTaskDefinition($name, $expected, 34, $sid, $null, 3, $sddl) }
 catch {
     if ($_.Exception.GetBaseException().HResult -ne -2147024713) { throw }
@@ -2016,11 +2047,14 @@ if (Test-Registration (Read-Registration)) { 'ENROLLED' } else { 'UNKNOWN_EFFECT
 """
 
 
-def _clean_task(sid: str, *, install: bool) -> str:
+def _clean_task(sid: str, *, install: bool, runtime: tuple[Path, Path] | None = None,
+                start_session: int | None = None) -> str:
     """Current-user, create-only Task Scheduler registration or exact readback."""
     executable = Path(sys.executable)
     pythonw = executable.with_name("pythonw.exe")
     source = Path(__file__).absolute()
+    if runtime is not None:
+        pythonw, source = runtime
     if (not executable.is_absolute() or executable.name.lower() not in ("python.exe", "pythonw.exe")
             or not pythonw.is_file() or not _no_links(pythonw)
             or not source.is_file() or not _no_links(source)
@@ -2029,11 +2063,18 @@ def _clean_task(sid: str, *, install: bool) -> str:
     package_root = source.parents[2]
     bootstrap = (f"import runpy, sys; sys.path.insert(0, {str(package_root)!r}); "
                  "runpy.run_module('ai_commerce.remote.chrome_acquisition', run_name='__main__')")
+    argv = ["-I", "-B", "-c", bootstrap, "supervise-clean-9444"]
+    if runtime is not None:
+        argv = _managed_clean_argv(pythonw, source)
+    if start_session is not None and (runtime is None or install or type(start_session) is not int
+                                      or start_session <= 0):
+        raise _Clean9444Hold("AUTOSTART_RUNTIME_UNAVAILABLE")
     child_env = _child_environment()
     child_env.update(AI_COMMERCE_TASK_SID=sid, AI_COMMERCE_TASK_PYTHON=str(pythonw),
                      AI_COMMERCE_TASK_DIRECTORY=str(package_root),
-                     AI_COMMERCE_TASK_ARGUMENTS=subprocess.list2cmdline(
-                         ["-I", "-B", "-c", bootstrap, "supervise-clean-9444"]),
+                     AI_COMMERCE_TASK_ARGUMENTS=subprocess.list2cmdline(argv),
+                     AI_COMMERCE_TASK_MANAGED="1" if runtime is not None else "0",
+                     AI_COMMERCE_TASK_START_SESSION=str(start_session or ""),
                      AI_COMMERCE_TASK_INSTALL="1" if install else "0")
     try:
         result = subprocess.run([str(_powershell()), "-NoProfile", "-NonInteractive", "-Command",
@@ -2041,12 +2082,96 @@ def _clean_task(sid: str, *, install: bool) -> str:
                                 timeout=15, check=False, env=child_env,
                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         code = result.stdout.strip().decode("ascii")
-        if not result.returncode and code in {
-                "ENROLLED", "ALREADY_ENROLLED", "AUTOSTART_CONFLICT", "AUTOSTART_NOT_ENROLLED"}:
+        expected = {"AUTOSTART_CONFLICT"}
+        if start_session is not None:
+            expected.update(("START_REQUESTED", "START_NOT_ATTEMPTED"))
+        else:
+            expected.update(("ALREADY_ENROLLED", "AUTOSTART_NOT_ENROLLED"))
+            if install:
+                expected.add("ENROLLED")
+        if not result.returncode and code in expected:
             return code
     except (OSError, subprocess.TimeoutExpired, UnicodeError):
         pass
-    return "UNKNOWN_EFFECT" if install else "AUTOSTART_RUNTIME_UNAVAILABLE"
+    return "UNKNOWN_EFFECT" if install or start_session is not None else "AUTOSTART_RUNTIME_UNAVAILABLE"
+
+
+def _managed_clean_argv(pythonw: Path, source: Path) -> list[str]:
+    # Isolated startup skips .pth/sitecustomize and ignores workspace bytecode.
+    # The fixed checkout remains owner-maintained through approved git_sync_main.
+    src = source.parents[2]
+    site = pythonw.parent / "Lib" / "site-packages"
+    cache = src.parent / ".git" / "wakehub-9444-no-bytecode"
+    bootstrap = f"""\
+import os, sys
+from pathlib import Path
+src, site, cache = Path({str(src)!r}), Path({str(site)!r}), Path({str(cache)!r})
+def safe(path):
+    return not any(part.lstat().st_file_attributes & 0x400 for part in (path, *path.parents))
+def fail(error):
+    raise error
+if not all(safe(path) for path in (src, site, cache.parent)) or os.path.lexists(cache):
+    raise SystemExit(2)
+for root in (src, site):
+    for folder, dirs, files in os.walk(root, onerror=fail):
+        if any((Path(folder) / name).lstat().st_file_attributes & 0x400 for name in (*dirs, *files)):
+            raise SystemExit(2)
+sys.pycache_prefix = str(cache)
+sys.path.extend((str(src), str(site)))
+from ai_commerce.remote import chrome_acquisition as acquisition
+from ai_commerce.remote import local_completion_handoff
+if Path(acquisition.__file__) != Path({str(source)!r}):
+    raise SystemExit(2)
+if len(sys.argv) == 1:
+    raise SystemExit(2 if acquisition._supervise_managed_clean_9444()['status'] == 'HOLD' else 0)
+"""
+    return ["-I", "-B", "-S", "-c", f"exec({bootstrap!r})"]
+
+
+def _managed_clean_runtime(local: Path, sid: str, source: Path) -> tuple[Path, Path]:
+    """Prove an installed per-user CPython and the fixed checkout can run together."""
+    from .local_completion_handoff import _private_identity
+
+    version = f"{sys.version_info.major}{sys.version_info.minor}"
+    base = local / "Programs" / "Python" / f"Python{version}"
+    python, pythonw = base / "python.exe", base / "pythonw.exe"
+    dll = base / f"python{version}.dll"
+    site = base / "Lib" / "site-packages"
+    try:
+        if (Path(sys.base_prefix) != base or Path(sys.executable) != python
+                or any(not path.is_absolute() or not _no_links(path) or _private_identity(path) != sid
+                       for path in (base, python, pythonw, dll, base / "Lib", site))
+                or any(not path.is_file() for path in (python, pythonw, dll, source))
+                or not site.is_dir() or not _no_links(source)
+                or any(re.search(r"[%\r\n]", str(path)) for path in (pythonw, source))
+                or any(os.path.lexists(base / name)
+                       for name in ("pyvenv.cfg", "python._pth", f"python{version}._pth"))):
+            raise _Clean9444Hold("AUTOSTART_RUNTIME_UNAVAILABLE")
+        env = _child_environment()
+        env.update(AI_COMMERCE_PYTHON=str(python), AI_COMMERCE_PYTHONW=str(pythonw),
+                   AI_COMMERCE_PYTHON_DLL=str(dll))
+        signed = (
+            "$ErrorActionPreference='Stop'; "
+            "foreach ($p in @($env:AI_COMMERCE_PYTHON,$env:AI_COMMERCE_PYTHONW,$env:AI_COMMERCE_PYTHON_DLL)) { "
+            "$s=Get-AuthenticodeSignature -LiteralPath $p; "
+            "if ($s.Status -ne 'Valid' -or !$s.SignerCertificate -or "
+            "$s.SignerCertificate.Subject -notmatch '(^|, )CN=Python Software Foundation(,|$)') {exit 1} }; "
+            "Write-Output 'SIGNED_CPYTHON'"
+        )
+        result = subprocess.run([str(_powershell()), "-NoProfile", "-NonInteractive", "-Command", signed],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15,
+                                check=False, env=env, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if result.returncode or result.stdout.strip() != b"SIGNED_CPYTHON":
+            raise _Clean9444Hold("AUTOSTART_RUNTIME_UNAVAILABLE")
+        result = subprocess.run([str(python), *_managed_clean_argv(pythonw, source), "check"],
+                                cwd=source.parents[2], env=_child_environment(), stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if result.returncode:
+            raise _Clean9444Hold("AUTOSTART_RUNTIME_UNAVAILABLE")
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        raise _Clean9444Hold("AUTOSTART_RUNTIME_UNAVAILABLE") from None
+    return pythonw, source
 
 
 def install_clean_9444_autostart(*, opt_in: bool = False) -> dict:
@@ -2069,10 +2194,19 @@ def install_clean_9444_autostart(*, opt_in: bool = False) -> dict:
 
 def supervise_clean_9444() -> dict:
     """Run the registered owner monitor until its Windows logon session ends."""
+    return _supervise_clean_9444()
+
+
+def _supervise_managed_clean_9444() -> dict:
+    return _supervise_clean_9444(runtime=(Path(sys.executable), Path(__file__).absolute()))
+
+
+def _supervise_clean_9444(*, runtime: tuple[Path, Path] | None = None) -> dict:
     try:
         owner = _clean_operator(attended=False)
         with _clean_supervisor_slot():
-            code = _clean_task(owner[2], install=False)
+            code = (_clean_task(owner[2], install=False) if runtime is None else
+                    _clean_task(owner[2], install=False, runtime=runtime))
             if code != "ALREADY_ENROLLED":
                 return _clean_hold(code)
             last = None
