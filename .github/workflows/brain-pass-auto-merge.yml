@@ -7,6 +7,11 @@ name: AI Commerce Brain PASS auto-merge
 # PASS receipt has been published in the PR Conversation. Listening to
 # issue_comment would create a Skipped Actions run for EVERY EF02 Issue comment.
 on:
+  # A main merge must wake previously Brain-PASSED PRs whose older Windows
+  # CI remains valid under the independently reviewed disjoint-drift oracle.
+  # No candidate HEAD rewrite or pytest replay is required for that case.
+  push:
+    branches: [main]
   pull_request_review:
     types: [submitted]
   workflow_run:
@@ -37,6 +42,7 @@ jobs:
   merge-brain-pass:
     if: >-
       github.event_name == 'workflow_run' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'pull_request_review' &&
        github.event.action == 'submitted' &&
        github.event.review.state == 'commented' &&
