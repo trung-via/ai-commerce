@@ -40,6 +40,7 @@ PUBLIC_EXTENSIONS = {".md", ".py", ".json", ".yml", ".yaml", ".toml", ".cjs", ".
 MAX_READ = 8192
 MAX_WRITE = 2048
 _CLEAN_AUTOSTART = "install_clean_9444_autostart"
+_CLEAN_RUNTIME_PROBE = "clean_9444_runtime_probe"
 _CLEAN_TASK_PENDING = "AutostartPending"
 _ACQUISITION_SOURCE = Path("src/ai_commerce/remote/chrome_acquisition.py")
 
@@ -176,7 +177,7 @@ def parse_event(event, mode):
     operation = request["operation"]
     if mode == "read":
         if operation in ("inventory", "runner_runtime_inventory", "cdp_9333_status", "cdp_9444_topology",
-                         "cdp_9444_config_registry", "standing_read_diagnostics"):
+                         "cdp_9444_config_registry", "standing_read_diagnostics", _CLEAN_RUNTIME_PROBE):
             # Runtime inventory has fixed, compiled-in three-runner targets.
             # The public Issue cannot choose a task, executable or command.
             if params:
@@ -417,22 +418,25 @@ def _clean_autostart_receipt(code):
     return result
 
 
-def _protected_clean_autostart_source() -> str:
+def _require_protected_clean_runner(event_name: str):
     # main() has already validated the exact authenticated event. This narrows
     # the non-TTY bridge to the protected main workflow's dedicated runner.
     expected = {
-        "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "issue_comment",
+        "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": event_name,
         "GITHUB_REPOSITORY": REPO, "GITHUB_REPOSITORY_OWNER": OWNER,
         "GITHUB_ACTOR": OWNER, "GITHUB_TRIGGERING_ACTOR": OWNER,
         "GITHUB_REF": "refs/heads/main", "GITHUB_RUN_ATTEMPT": "1",
         "GITHUB_WORKFLOW_REF": REPO + "/.github/workflows/issue-ingress.yml@refs/heads/main",
         "RUNNER_ENVIRONMENT": "self-hosted", "RUNNER_NAME": "AI-COMMERCE-HOSTOPS-01",
     }
-    sha = os.environ.get("GITHUB_SHA", "")
     if (os.name != "nt" or any(os.environ.get(key) != value for key, value in expected.items())
-            or any(key.startswith("AI_COMMERCE_GIT_GUARD_") for key in os.environ)
-            or not re.fullmatch(r"[a-f0-9]{40}", sha)
-            or os.environ.get("GITHUB_WORKFLOW_SHA") != sha):
+            or any(key.startswith("AI_COMMERCE_GIT_GUARD_") for key in os.environ)):
+        deny("PROTECTED_HOSTOPS_ONLY")
+
+
+def _protected_clean_workflow_sha() -> str:
+    sha = os.environ.get("GITHUB_SHA", "")
+    if not re.fullmatch(r"[a-f0-9]{40}", sha) or os.environ.get("GITHUB_WORKFLOW_SHA") != sha:
         deny("PROTECTED_HOSTOPS_ONLY")
     return sha
 
@@ -529,12 +533,79 @@ def _persistent_clean_source(acquisition, sha):
     return source
 
 
+def _observe_clean_runtime(sha: str) -> str:
+    from ai_commerce.remote import chrome_acquisition as acquisition
+    from ai_commerce.remote.local_wake_entry import LocalWakeConfigError
+
+    try:
+        owner = acquisition._native_operator()
+    except (acquisition.AcquisitionBlocked, acquisition._EnrollmentHold, LocalWakeConfigError):
+        return "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
+    local, _, sid = owner
+    try:
+        source = _persistent_clean_source(acquisition, sha)
+    except Denied:
+        return "SOURCE_CUSTODY_UNVERIFIED"
+    try:
+        runtime = acquisition._managed_clean_runtime(local, sid, source)
+    except acquisition._ManagedCleanRuntimeHold as exc:
+        return {
+            "layout": "CPYTHON_LAYOUT_UNVERIFIED",
+            "signature": "CPYTHON_SIGNATURE_UNVERIFIED",
+            "bootstrap": "CPYTHON_BOOTSTRAP_UNVERIFIED",
+        }.get(exc.stage, "UNKNOWN")
+
+    if (acquisition._native_operator() != owner or acquisition._clean_pending(_CLEAN_TASK_PENDING)
+            or acquisition._clean_launch_pending()):
+        return "UNKNOWN"
+    task = acquisition._clean_task(sid, install=False, runtime=runtime)
+    if (acquisition._native_operator() != owner or acquisition._clean_pending(_CLEAN_TASK_PENDING)
+            or acquisition._clean_launch_pending()):
+        return "UNKNOWN"
+    if type(task) is not str:
+        return "UNKNOWN"
+    if task in ("ALREADY_ENROLLED", "AUTOSTART_NOT_ENROLLED"):
+        return "READY"
+    if task == "AUTOSTART_CONFLICT":
+        return "TASK_REGISTRATION_CONFLICT"
+    if task == "AUTOSTART_RUNTIME_UNAVAILABLE":
+        return "TASK_READ_UNVERIFIED"
+    return "UNKNOWN"
+
+
+def _probe_protected_clean_runtime():
+    """Project only the fixed observation from an authenticated READ workflow."""
+    result = {
+        "status": "OBSERVED", "code": "UNKNOWN", "operation": _CLEAN_RUNTIME_PROBE,
+        "cdp_port": 9444, "exact_chat_verified": False, "wake_sent": False,
+        "arbitrary_shell_enabled": False, "remote_shell_enabled": False,
+    }
+    if not (result.keys() | {"source_sha"}) <= PERSONAL_PUBLIC_FIELDS:
+        deny("PUBLIC_TRANSPORT_GAP")
+    try:
+        try:
+            _require_protected_clean_runner("issues")
+        except Denied:
+            return {**result, "code": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}
+        try:
+            sha = _protected_clean_workflow_sha()
+        except Denied:
+            return {**result, "code": "SOURCE_CUSTODY_UNVERIFIED"}
+        result["source_sha"] = sha
+        result["code"] = _observe_clean_runtime(sha)
+    except Exception:
+        # A failed probe can never project native output or exception text.
+        pass
+    return result
+
+
 def _install_protected_clean_autostart(event):
     # Check the public contract before any native call, even on a HOLD.
     _clean_autostart_receipt("PROTECTED_HOSTOPS_ONLY")
     reserved = False
     try:
-        sha = _protected_clean_autostart_source()
+        _require_protected_clean_runner("issue_comment")
+        sha = _protected_clean_workflow_sha()
         if parse_event(event, "write")["operation"] != _CLEAN_AUTOSTART:
             deny("PROTECTED_HOSTOPS_ONLY")
         from ai_commerce.remote import chrome_acquisition as acquisition
@@ -2050,20 +2121,22 @@ def main():
         with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as stream:
             event = json.load(stream)
         request = parse_event(event, args.mode)
-        # The protected Issue ingress independently validates and reconstructs
-        # the closed six-slot public receipt before posting any result.
-        outcome = (_install_protected_clean_autostart(event) if request["operation"] == _CLEAN_AUTOSTART
-                   else perform(request))
-        result = {
-            **outcome,
-            "issue_number": request["issue_number"],
-            "approval_channel": ("CHATGPT_TO_AI_COMMERCE_ISSUE" if args.mode == "read"
-                                 else "OWNER_GITHUB_COMMENT"),
-            "remote_shell_enabled": False,
-            "source_sha": os.environ.get("GITHUB_SHA", ""),
-        }
-        if request["operation"] == _CLEAN_AUTOSTART and not re.fullmatch(r"[a-f0-9]{40}", result["source_sha"]):
-            del result["source_sha"]
+        # The runtime probe emits its own closed receipt with a validated SHA.
+        if request["operation"] == _CLEAN_RUNTIME_PROBE:
+            result = _probe_protected_clean_runtime()
+        else:
+            outcome = (_install_protected_clean_autostart(event) if request["operation"] == _CLEAN_AUTOSTART
+                       else perform(request))
+            result = {
+                **outcome,
+                "issue_number": request["issue_number"],
+                "approval_channel": ("CHATGPT_TO_AI_COMMERCE_ISSUE" if args.mode == "read"
+                                     else "OWNER_GITHUB_COMMENT"),
+                "remote_shell_enabled": False,
+                "source_sha": os.environ.get("GITHUB_SHA", ""),
+            }
+            if request["operation"] == _CLEAN_AUTOSTART and not re.fullmatch(r"[a-f0-9]{40}", result["source_sha"]):
+                del result["source_sha"]
     except Denied as exc:
         result["code"] = str(exc)
     except (OSError, ValueError, KeyError, TypeError, UnicodeError):
