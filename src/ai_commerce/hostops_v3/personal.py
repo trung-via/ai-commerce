@@ -41,7 +41,6 @@ MAX_READ = 8192
 MAX_WRITE = 2048
 _CLEAN_AUTOSTART = "install_clean_9444_autostart"
 _CLEAN_RUNTIME_PROBE = "clean_9444_runtime_probe"
-_CLEAN_TASK_PENDING = "AutostartPending"
 _ACQUISITION_SOURCE = Path("src/ai_commerce/remote/chrome_acquisition.py")
 
 # Source-owned PUBLIC vocabulary. Private config is locally validated by the
@@ -357,7 +356,7 @@ def _sync_main(params):
 _CLEAN_PUBLIC_CODES = frozenset({
     "PROTECTED_HOSTOPS_ONLY", "WINDOWS_INTERACTIVE_REQUIRED", "WINDOWS_TOKEN_UNAVAILABLE",
     "ELEVATED_CHROME_DISALLOWED", "ENROLLMENT_IDENTITY_UNPROVEN",
-    "OPERATOR_OWNERSHIP_UNPROVEN", "PROFILE_UNAVAILABLE", "PROFILE_LOCKED",
+    "OPERATOR_OWNERSHIP_UNPROVEN", "PROFILE_LOCKED", "PROFILE_IN_USE",
     "PROFILE_ALREADY_ACTIVE_NO_CDP", "FOREIGN_PORT_OWNER", "BROWSER_OWNERSHIP_UNPROVEN",
     "CHROME_PATH_INVALID", "CHROME_EXECUTABLE_UNTRUSTED", "CDP_PROTOCOL_UNAVAILABLE",
     "SUPERVISOR_ACTIVE", "AUTOSTART_CONFLICT", "AUTOSTART_RUNTIME_UNAVAILABLE",
@@ -405,7 +404,9 @@ def _clean_source_bytes_match(path: Path, worktree_bytes: bytes, pinned_bytes: b
 
 
 def _clean_autostart_receipt(code):
-    if type(code) is not str or code not in _CLEAN_PUBLIC_CODES:
+    from ai_commerce.remote.chrome_acquisition import _CLEAN_PROFILE_CODES
+
+    if type(code) is not str or (code not in _CLEAN_PUBLIC_CODES and code not in _CLEAN_PROFILE_CODES):
         code = "AUTOSTART_RUNTIME_UNAVAILABLE"
     result = {
         "status": "OBSERVED" if code in {"CDP_VERIFIED", "INSTALLED_BUT_NOT_RUNNING"} else "HOLD",
@@ -537,26 +538,39 @@ def _observe_clean_runtime(sha: str) -> str:
     from ai_commerce.remote import chrome_acquisition as acquisition
     from ai_commerce.remote.local_wake_entry import LocalWakeConfigError
 
-    try:
-        owner = acquisition._native_operator()
-    except (acquisition.AcquisitionBlocked, acquisition._EnrollmentHold, LocalWakeConfigError):
+    def read_owner():
+        try:
+            return acquisition._native_operator()
+        except (acquisition.AcquisitionBlocked, acquisition._EnrollmentHold, LocalWakeConfigError, OSError):
+            return None
+
+    owner = read_owner()
+    if owner is None:
         return "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
-    local, _, sid = owner
     try:
         _persistent_clean_source(acquisition, sha)
     except Denied:
         return "SOURCE_CUSTODY_UNVERIFIED"
 
-    if (acquisition._native_operator() != owner or acquisition._clean_pending(_CLEAN_TASK_PENDING)
-            or acquisition._clean_launch_pending()):
+    pending = acquisition._CLEAN_TASK_PENDING
+    if read_owner() != owner:
+        return "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
+    if acquisition._clean_pending(pending) or acquisition._clean_launch_pending():
         return "UNKNOWN"
     try:
-        target, candidates = acquisition._clean_target(local, sid)
+        target, candidates = acquisition._clean_target(owner)
+    except acquisition._Clean9444Hold as exc:
+        code = str(exc)
+        return code if code in acquisition._CLEAN_PROFILE_CODES else "TARGET_READ_UNVERIFIED"
+    except (acquisition.AcquisitionBlocked, acquisition._EnrollmentHold, OSError):
+        return "TARGET_READ_UNVERIFIED"
+    try:
         task = acquisition._clean_task(owner, target, candidates, install=False)
     except (acquisition.AcquisitionBlocked, acquisition._EnrollmentHold, acquisition._Clean9444Hold, OSError):
         return "TASK_READ_UNVERIFIED"
-    if (acquisition._native_operator() != owner or acquisition._clean_pending(_CLEAN_TASK_PENDING)
-            or acquisition._clean_launch_pending()):
+    if read_owner() != owner:
+        return "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
+    if acquisition._clean_pending(pending) or acquisition._clean_launch_pending():
         return "UNKNOWN"
     if type(task) is not str:
         return "UNKNOWN"
@@ -565,6 +579,7 @@ def _observe_clean_runtime(sha: str) -> str:
         "AUTOSTART_NOT_ENROLLED": "AUTOSTART_NOT_ENROLLED",
         "AUTOSTART_CONFLICT": "TASK_REGISTRATION_CONFLICT",
         "AUTOSTART_RUNTIME_UNAVAILABLE": "TASK_READ_UNVERIFIED",
+        "WINDOWS_OWNER_CONTEXT_UNVERIFIED": "WINDOWS_OWNER_CONTEXT_UNVERIFIED",
     }.get(task, "UNKNOWN")
 
 
@@ -605,17 +620,21 @@ def _install_protected_clean_autostart(event):
             deny("PROTECTED_HOSTOPS_ONLY")
         from ai_commerce.remote import chrome_acquisition as acquisition
         owner = acquisition._native_operator()
-        local, session, sid = owner
+        _, session, sid = owner
+        pending = acquisition._CLEAN_TASK_PENDING
         _persistent_clean_source(acquisition, sha)
-        target, candidates = acquisition._clean_target(local, sid)
+        target, candidates = acquisition._clean_target(owner)
 
-        def inspect_target():
-            if (acquisition._native_operator() != owner
-                    or acquisition._clean_target(local, sid) != (target, candidates)):
-                deny("OPERATOR_OWNERSHIP_UNPROVEN")
+        def inspect_target(*, enrolling=False):
+            if acquisition._native_operator() != owner:
+                deny("WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+            if acquisition._clean_target(owner) != (target, candidates):
+                deny("CHROME_PATH_INVALID")
             state, identity = acquisition._clean_inventory(target, candidates, session, sid)
             if state == "STARTING":
                 deny("PROFILE_ALREADY_ACTIVE_NO_CDP")
+            if enrolling and state != "ABSENT":
+                deny("PROFILE_IN_USE")
             if acquisition._clean_launch_pending():
                 deny("UNKNOWN_EFFECT")
             if state == "ABSENT":
@@ -623,7 +642,7 @@ def _install_protected_clean_autostart(event):
             acquisition._verify_google_chrome(target if identity is None else
                                               replace(target, executable=identity[1]))
 
-        if acquisition._clean_pending(_CLEAN_TASK_PENDING):
+        if acquisition._clean_pending(pending):
             deny("UNKNOWN_EFFECT")
         inspect_target()
         task = acquisition._clean_task(owner, target, candidates, install=False)
@@ -632,15 +651,15 @@ def _install_protected_clean_autostart(event):
         created = None
         if task == "AUTOSTART_NOT_ENROLLED":
             with acquisition._clean_supervisor_slot():
-                if acquisition._clean_pending(_CLEAN_TASK_PENDING):
+                if acquisition._clean_pending(pending):
                     deny("UNKNOWN_EFFECT")
-                inspect_target()
+                inspect_target(enrolling=True)
                 reserved = True
-                acquisition._clean_record_pending(_CLEAN_TASK_PENDING, True)
+                acquisition._clean_record_pending(pending, True)
                 created = acquisition._clean_task(owner, target, candidates, install=True)
                 if created not in {"ENROLLED", "ALREADY_ENROLLED"}:
-                    if created == "AUTOSTART_CONFLICT":
-                        acquisition._clean_record_pending(_CLEAN_TASK_PENDING, False)
+                    if created in {"AUTOSTART_CONFLICT", "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}:
+                        acquisition._clean_record_pending(pending, False)
                         return _clean_autostart_receipt(created)
                     return _clean_autostart_receipt("UNKNOWN_EFFECT")
                 if acquisition._clean_task(owner, target, candidates, install=False) != "ALREADY_ENROLLED":
@@ -656,7 +675,7 @@ def _install_protected_clean_autostart(event):
                 if start not in {"START_REQUESTED", "START_NOT_ATTEMPTED"}:
                     return _clean_autostart_receipt("UNKNOWN_EFFECT")
                 started = start == "START_REQUESTED"
-            acquisition._clean_record_pending(_CLEAN_TASK_PENDING, False)
+            acquisition._clean_record_pending(pending, False)
             reserved = False
         deadline = time.monotonic() + (20 if started else 0)
         while True:
@@ -914,13 +933,13 @@ def _cdp_9444_private_context(acquisition, argv=()):
             or sid in {"S-1-5-18", "S-1-5-19", "S-1-5-20"}):
         deny("OWNER_SESSION_UNATTESTED")
     root = local / "AI-Commerce"
-    if (not local.is_absolute() or _fixed_private_metadata_kind(root, directory=True) != "PRESENT"
-            or _private_identity(root) != sid):
-        deny("OWNER_SESSION_UNATTESTED")
     directory = acquisition._clean_switch(argv, "--user-data-dir")
     clean = root / acquisition._CLEAN_9444_PROFILE
     if directory is not None and Path(normpath(directory)) == clean:
-        return acquisition._clean_target(local, sid), session, sid
+        return acquisition._clean_target((local, session, sid)), session, sid
+    if (not local.is_absolute() or _fixed_private_metadata_kind(root, directory=True) != "PRESENT"
+            or _private_identity(root) != sid):
+        deny("OWNER_SESSION_UNATTESTED")
     candidates = (root / "Chrome-Acquisition" / "config.json",
                   root / "chrome.json", root / "chrome-acquisition.json")
     states = [_fixed_private_metadata_kind(path) for path in candidates]
