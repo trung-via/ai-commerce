@@ -739,7 +739,10 @@ EF02_SOURCE_WORKFLOWS = {
 
 def _ef02_proof_trace(stage: str) -> None:
     """Emit bounded diagnostic stages, never URLs, bearer tokens or artifact data."""
-    if os.environ.get("EF02_PROOF_TRACE") == "1":
+    # Old EF02 candidate branches carry their historical review workflow YAML;
+    # that event can lack the new EF02_PROOF_TRACE env despite checkout of the
+    # current protected-main script. Default to safe stage-only diagnostics.
+    if os.environ.get("EF02_PROOF_TRACE", "1") == "1":
         print("EF02_ORIGINAL_PROOF_STAGE=" + stage, flush=True)
 
 
@@ -1041,11 +1044,16 @@ def verify_one(api: Callable[[str], Any], repository: str, number: int,
         candidate_files = api(f"{base}/pulls/{number}/files?per_page=100")
         if not noninterfering_main_advance(api, base, base_sha, live_sha,
                                             candidate_files):
-            if (not original_candidate or
-                    not noninterfering_ef02_proof_control_advance(
-                        api, base, base_sha, live_sha, candidate_files) or
-                    not verified_ef02_candidate(api, repository, head,
-                                                candidate_files)):
+            if not original_candidate:
+                return Verdict("WAIT_REBASE", "BASE_MAIN_CHANGED", number, head)
+            if not noninterfering_ef02_proof_control_advance(
+                    api, base, base_sha, live_sha, candidate_files):
+                _ef02_proof_trace("MAIN_CONTROL_DRIFT_REJECTED")
+                return Verdict("WAIT_REBASE", "BASE_MAIN_CHANGED", number, head)
+            _ef02_proof_trace("MAIN_CONTROL_DRIFT_VERIFIED")
+            if not verified_ef02_candidate(api, repository, head,
+                                           candidate_files):
+                _ef02_proof_trace("MAIN_CONTROL_ORIGINAL_PROOF_REJECTED")
                 return Verdict("WAIT_REBASE", "BASE_MAIN_CHANGED", number, head)
             original_proof_after_control_advance = True
     if pr.get("mergeable") is not True:

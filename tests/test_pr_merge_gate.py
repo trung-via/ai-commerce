@@ -321,6 +321,24 @@ def test_ef02_original_proof_merges_across_disjoint_trusted_control_update(gate)
     assert api.writes == [{"sha": api.head, "merge_method": "merge"}]
 
 
+def test_ef02_proof_stage_trace_survives_historical_workflow_env(
+    gate, monkeypatch, capsys,
+):
+    # The pull_request_review workflow is read from the old candidate ref,
+    # which cannot be assumed to define EF02_PROOF_TRACE in its step env.
+    monkeypatch.delenv("EF02_PROOF_TRACE", raising=False)
+    api = EF02OriginalProofMainAdvance(
+        gate, drift_paths=[".github/scripts/pr-merge-gate.py"])
+    assert gate.verify_one(api, api.repo, api.pr).status == "READY_FOR_MERGE"
+    output = capsys.readouterr().out
+    assert "EF02_ORIGINAL_PROOF_STAGE=MAIN_CONTROL_DRIFT_VERIFIED" in output
+    assert "EF02_ORIGINAL_PROOF_STAGE=FINAL_EXACT_EVIDENCE_MATCH" in output
+    assert "Bearer " not in output
+    monkeypatch.setenv("EF02_PROOF_TRACE", "0")
+    gate.verify_one(api, api.repo, api.pr)
+    assert capsys.readouterr().out == ""
+
+
 @pytest.mark.parametrize("unsafe_drift", [
     ["tests/test_minimum_test.py"],
     ["src/ai_commerce/product/identity.py"],
