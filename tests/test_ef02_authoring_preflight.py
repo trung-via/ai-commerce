@@ -37,6 +37,67 @@ def test_default_offline_check_does_not_start_any_child(monkeypatch):
     assert check(batch([action("a")]))["status"] == "PREFLIGHT_HOLD"
 
 
+@pytest.mark.parametrize("length", [256, 257, 512, 513])
+def test_authorization_ref_preflight_and_local_cli_share_safe_character_boundary(
+        tmp_path, monkeypatch, capsys, length):
+    packet = batch([action("a")])
+    marker = "PRIVATE_AUTHORIZATION_"
+    packet["authorization_ref"] = marker + "ế" * (length - len(marker))
+    packet["actions"][0]["instruction"] = "PRIVATE_INSTRUCTION"
+    original = copy.deepcopy(packet)
+    def forbidden(*args, **kwargs):
+        pytest.fail("Offline authoring must not spawn a child")
+    monkeypatch.setattr(preflight.subprocess, "run", forbidden)
+    # Isolate the field contract from the independent optional source/scope check.
+    monkeypatch.setattr(preflight, "validate_acceptance_scope",
+                        lambda *args, **kwargs: {"status": "PRE_EXECUTOR_COMPATIBLE"})
+    result = check(packet)
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps(packet), encoding="utf-8")
+    status = preflight.main(["--request-file", str(request), "--checkout", str(ROOT)])
+    output = capsys.readouterr()
+    assert output.err == "" and json.loads(output.out) == result
+    assert packet == original and check(packet) == result
+    assert "PRIVATE" not in output.out and packet["authorization_ref"] not in output.out
+    assert result["authorization"] == "UNPROVEN" and result["dispatch_performed"] is False
+    if length <= 512:
+        assert status == 0 and result["status"] == "PREFLIGHT_PASS"
+        assert result["content_check"] == "PASS" and result["source_check"] == "NOT_REQUESTED"
+    else:
+        assert status == 2 and result["status"] == "PREFLIGHT_REJECTED"
+        assert result["error_code"] == "AUTHORIZATION_REF_TOO_LONG"
+        assert result["failure_provenance"]["error_code"] == "AUTHORIZATION_REF_TOO_LONG"
+        assert result["failure_provenance"]["phase"] == "REQUEST_VALIDATION"
+        assert result["failure_provenance"]["replay_authorized"] is False
+
+
+@pytest.mark.parametrize("present,value", [
+    (False, None), (True, ""), (True, None), (True, 512),
+    (True, False), (True, []), (True, {}),
+])
+def test_authorization_ref_preflight_preserves_other_schema_rejections(
+        tmp_path, monkeypatch, capsys, present, value):
+    packet = batch([action("a")])
+    packet["actions"][0]["instruction"] = "PRIVATE_INSTRUCTION"
+    if present:
+        packet["authorization_ref"] = value
+    else:
+        del packet["authorization_ref"]
+    def forbidden(*args, **kwargs):
+        pytest.fail("Invalid schema must reject before any source or scope check")
+    monkeypatch.setattr(preflight.subprocess, "run", forbidden)
+    monkeypatch.setattr(preflight, "validate_acceptance_scope", forbidden)
+    result = check(packet)
+    assert result["status"] == "PREFLIGHT_REJECTED" and result["error_code"] == "REQUEST_SCHEMA_INVALID"
+    assert result["authorization"] == "UNPROVEN" and result["dispatch_performed"] is False
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps(packet), encoding="utf-8")
+    assert preflight.main(["--request-file", str(request), "--checkout", str(ROOT)]) == 2
+    output = capsys.readouterr()
+    assert output.err == "" and json.loads(output.out) == result
+    assert "PRIVATE" not in output.out
+
+
 def test_143_duplicate_paths_is_schema_rejection_without_echoing_packet():
     packet = batch([action("a")])
     packet["actions"][0]["allowed_paths"] = ["tests/test_a13_link.py"] * 2

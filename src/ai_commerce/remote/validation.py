@@ -137,11 +137,22 @@ def verify_registry(path: Path) -> dict[str, list[str]]:
             raise RemoteRequestError("INVALID_VERIFICATION_WORKERS") from exc
     return data
 
+def _validate_batch_schema(data: dict, *, schema: Path) -> None:
+    """Classify only an overlong top-level authorization ref without payload text."""
+    contract = json.loads(schema.read_text(encoding="utf-8"))
+    authorization_ref = data.get("authorization_ref") if isinstance(data, dict) else None
+    # Check first so the field code is independent of schema error ordering.
+    if (isinstance(authorization_ref, str) and
+            len(authorization_ref) > contract["properties"]["authorization_ref"]["maxLength"]):
+        raise RemoteRequestError("AUTHORIZATION_REF_TOO_LONG")
+    Draft202012Validator(contract).validate(data)
+
+
 def validate_batch(data: dict, *, schema: Path, registry: dict[str, list[str]],
                    issuer_login: str, owner_login: str,
                    brain_issuers: tuple[str, ...] = (),
                    approved_reuse: dict | None = None) -> dict:
-    Draft202012Validator(json.loads(schema.read_text(encoding="utf-8"))).validate(data)
+    _validate_batch_schema(data, schema=schema)
     owner = bool(issuer_login and owner_login) and issuer_login.casefold() == owner_login.casefold()
     brain = issuer_login.casefold() in {v.casefold() for v in brain_issuers if v}
     if not ((data["actor"] == "HUMAN" and owner) or
@@ -156,7 +167,7 @@ def validate_batch_content(data: dict, *, schema: Path, registry: dict[str, list
 
     Dispatch consumers must continue to use validate_batch with a trusted issuer.
     """
-    Draft202012Validator(json.loads(schema.read_text(encoding="utf-8"))).validate(data)
+    _validate_batch_schema(data, schema=schema)
     return _validate_actions(data, registry=registry, approved_reuse=approved_reuse)
 
 

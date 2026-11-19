@@ -98,6 +98,41 @@ def test_schema_and_authentication_are_not_just_actor_strings():
         validate(p, issuer="trung-via")
 
 
+@pytest.mark.parametrize("length", [256, 257, 512, 513])
+def test_authorization_ref_length_has_shared_bounded_validation(length):
+    from ai_commerce.remote.validation import validate_batch_content
+
+    packet = batch([action("a")])
+    packet["authorization_ref"] = "x" * length
+    original = copy.deepcopy(packet)
+    for check in (validate, lambda data: validate_batch_content(
+            data, schema=SCHEMA, registry=verify_registry(REGISTRY))):
+        if length <= 512:
+            assert check(packet) == original
+        else:
+            with pytest.raises(RemoteRequestError, match="^AUTHORIZATION_REF_TOO_LONG$") as error:
+                check(packet)
+            assert error.value.args == ("AUTHORIZATION_REF_TOO_LONG",)
+            assert error.value.__context__ is None
+    assert packet == original
+    if length <= 512:
+        with pytest.raises(RemoteRequestError, match="^ISSUER_NOT_AUTHORIZED_FOR_ACTOR$"):
+            validate(packet, issuer="attacker")
+
+
+@pytest.mark.parametrize("field", ["source_sha", "actor"])
+def test_overlong_authorization_ref_code_is_independent_of_schema_error_order(field):
+    from ai_commerce.remote.validation import validate_batch_content
+
+    packet = batch([action("a")])
+    packet["authorization_ref"] = "PRIVATE_AUTHORIZATION_" + "x" * 513
+    packet[field] = "PRIVATE_INVALID_FIELD"
+    for check in (validate, lambda data: validate_batch_content(
+            data, schema=SCHEMA, registry=verify_registry(REGISTRY))):
+        with pytest.raises(RemoteRequestError, match="^AUTHORIZATION_REF_TOO_LONG$"):
+            check(packet)
+
+
 def test_reject_duplicate_cycle_unknown_dependency_and_bad_path():
     cases = [
         [action("a"), action("a")],
