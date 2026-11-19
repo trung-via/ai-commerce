@@ -1063,3 +1063,48 @@ def test_pretty_antigravity_usage_is_observed_without_inventing_cost():
         "input_tokens": 10, "cached_input_tokens": 2, "output_tokens": 3}}, indent=2)
     assert runner._observe_usage(payload.encode(), "antigravity") == {
         "input_tokens": 10, "cached_input_tokens": 2, "output_tokens": 3}
+
+
+@pytest.mark.parametrize("quota_reports_zero", [True, False])
+def test_antigravity_usage_survives_failed_verify_then_quota(fixture, quota_reports_zero):
+    """#1114 regression: keep successful AI usage despite quota on repair."""
+    actual_run = subprocess.run
+    calls = 0
+    first = {"input_tokens": 6733358, "output_tokens": 113246,
+             "thinking_tokens": 54541, "cache_read_tokens": 4359716,
+             "total_tokens": 6846604}
+    zeros = {name: 0 for name in first}
+
+    def execute(argv, **kwargs):
+        nonlocal calls
+        result = actual_run(argv, **kwargs)
+        if argv == VERIFY:
+            return result
+        calls += 1
+        if calls == 1:
+            return subprocess.CompletedProcess(
+                argv, 0, json.dumps({"status": "SUCCESS", "usage": first}), result.stderr)
+        failure = {"status": "ERROR", "error": "Individual quota reached"}
+        if quota_reports_zero:
+            failure["usage"] = zeros
+        return subprocess.CompletedProcess(argv, 3, json.dumps(failure), result.stderr)
+
+    fixture.monkeypatch.setattr(runner, "subprocess", SimpleNamespace(
+        run=execute, TimeoutExpired=subprocess.TimeoutExpired))
+    result, observations, _ = _run(fixture, executor="antigravity")
+    assert calls == len(observations) == result["invocation_count"] == 2
+    assert result["status"] == "QUOTA_EXHAUSTED"
+    assert result["invocations"][0]["verify_exit_code"] == 1
+    assert result["invocations"][1]["verify_exit_code"] is None
+    assert result["usage"]["input_tokens"] == first["input_tokens"]
+    assert result["usage"]["cached_input_tokens"] == first["cache_read_tokens"]
+    assert result["usage"]["thinking_tokens"] == first["thinking_tokens"]
+    assert result["usage"]["total_tokens"] == first["total_tokens"]
+    assert result["usage_invocations_observed"] == (2 if quota_reports_zero else 1)
+    assert result["usage_invocations_total"] == 2
+    assert result["usage_status"] == (
+        "PROVIDER_REPORTED" if quota_reports_zero else "PARTIAL_PROVIDER_REPORTED")
+    assert result["cost"] is None and result["cost_status"] == "UNKNOWN"
+    saved = json.loads((fixture.root / "evidence" / "engineering_result.json").read_text())
+    assert saved["usage"] == result["usage"]
+    assert saved["usage_status"] == result["usage_status"]
