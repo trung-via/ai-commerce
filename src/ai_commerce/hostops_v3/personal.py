@@ -361,27 +361,11 @@ _CLEAN_PUBLIC_CODES = frozenset({
     "CHROME_PATH_INVALID", "CHROME_EXECUTABLE_UNTRUSTED", "CDP_PROTOCOL_UNAVAILABLE",
     "SUPERVISOR_ACTIVE", "AUTOSTART_CONFLICT", "AUTOSTART_RUNTIME_UNAVAILABLE",
     "LOCAL_MAIN_SYNC_REQUIRED", "SOURCE_WORKFLOW_PATH_MISMATCH", "SOURCE_PATH_UNTRUSTED",
-    "SOURCE_ACL_UNTRUSTED", "SOURCE_INDEX_UNVERIFIED", "SOURCE_UNTRACKED_FILE",
-    "SOURCE_BYTES_MISMATCH", "WINDOWS_PROBE_INVALID", "WINDOWS_PROBE_UNAVAILABLE",
+    "SOURCE_INDEX_UNVERIFIED", "SOURCE_UNTRACKED_FILE", "SOURCE_BYTES_MISMATCH",
+    "WINDOWS_PROBE_INVALID", "WINDOWS_PROBE_UNAVAILABLE",
     "UNKNOWN_EFFECT", "CDP_VERIFIED", "INSTALLED_BUT_NOT_RUNNING",
 })
 
-# Public Git working-tree ACL guard: unlike private handoff/Chrome profile
-# state, non-secret committed source under C:\TOOL\ai-commerce may grant
-# read/execute to Users or Authenticated Users, provided only the operator,
-# SYSTEM or local Administrators own or can modify it.
-_CHECKOUT_READ_ONLY_MASK = (
-    0x00000001  # FILE_READ_DATA / FILE_LIST_DIRECTORY
-    | 0x00000008  # FILE_READ_EA
-    | 0x00000020  # FILE_EXECUTE / FILE_TRAVERSE
-    | 0x00000080  # FILE_READ_ATTRIBUTES
-    | 0x00020000  # READ_CONTROL
-    | 0x00100000  # SYNCHRONIZE
-    | 0x20000000  # GENERIC_EXECUTE
-    | 0x80000000  # GENERIC_READ
-)
-_INHERIT_ONLY_ACE = 0x08
-_CHECKOUT_PUBLIC_READERS = frozenset({"S-1-5-32-545", "S-1-5-11"})
 _CHECKOUT_EGG_INFO_FILES = frozenset({
     "PKG-INFO", "SOURCES.txt", "dependency_links.txt", "entry_points.txt",
     "requires.txt", "top_level.txt", "not-zip-safe", "zip-safe",
@@ -422,125 +406,12 @@ def _protected_clean_autostart_source() -> str:
     return sha
 
 
-def _windows_checkout_acl(path: Path):
-    """Read native Windows owner SID and (kind, flags, mask, sid) DACL tuples."""
-    import ctypes
-    from ctypes import wintypes as w
+def _persistent_clean_source(acquisition, sha):
+    """Verify public checkout custody via Git pin, clean tree, bytes and non-reparse paths.
 
-    adv = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    ptr = ctypes.c_void_p
-    adv.GetNamedSecurityInfoW.argtypes = [w.LPWSTR, w.DWORD, w.DWORD,
-                                          ctypes.POINTER(ptr), ptr, ctypes.POINTER(ptr),
-                                          ptr, ctypes.POINTER(ptr)]
-    adv.GetNamedSecurityInfoW.restype = w.DWORD
-    adv.ConvertSidToStringSidW.argtypes = [ptr, ctypes.POINTER(w.LPWSTR)]
-    adv.ConvertSidToStringSidW.restype = w.BOOL
-    adv.GetAclInformation.argtypes = [ptr, ptr, w.DWORD, ctypes.c_int]
-    adv.GetAclInformation.restype = w.BOOL
-    adv.GetAce.argtypes = [ptr, w.DWORD, ctypes.POINTER(ptr)]
-    adv.GetAce.restype = w.BOOL
-    adv.IsValidSid.argtypes = [ptr]
-    adv.IsValidSid.restype = w.BOOL
-    adv.GetLengthSid.argtypes = [ptr]
-    adv.GetLengthSid.restype = w.DWORD
-    kernel.LocalFree.argtypes = [ptr]
-    kernel.LocalFree.restype = ptr
-
-    def sid_text(sid):
-        text = w.LPWSTR()
-        if not sid or not adv.IsValidSid(sid) or not adv.ConvertSidToStringSidW(sid, ctypes.byref(text)):
-            deny("SOURCE_ACL_UNTRUSTED")
-        try:
-            return text.value
-        finally:
-            kernel.LocalFree(ctypes.cast(text, ptr))
-
-    owner, dacl, descriptor = ptr(), ptr(), ptr()
-    if adv.GetNamedSecurityInfoW(str(path), 1, 5, ctypes.byref(owner), None,
-                                 ctypes.byref(dacl), None, ctypes.byref(descriptor)):
-        deny("SOURCE_ACL_UNTRUSTED")
-    try:
-        if not dacl:
-            deny("SOURCE_ACL_UNTRUSTED")
-        info = (w.DWORD * 3)()
-        if not adv.GetAclInformation(dacl, info, ctypes.sizeof(info), 2) or not 1 <= info[0] <= 128:
-            deny("SOURCE_ACL_UNTRUSTED")
-        aces = []
-        for index in range(info[0]):
-            ace = ptr()
-            if not adv.GetAce(dacl, index, ctypes.byref(ace)):
-                deny("SOURCE_ACL_UNTRUSTED")
-            header = ctypes.string_at(ace, 8)
-            ace_type, ace_flags = header[0], header[1]
-            size = int.from_bytes(header[2:4], "little")
-            mask = int.from_bytes(header[4:8], "little")
-            if ace_type not in (0, 1) or size < 16:
-                deny("SOURCE_ACL_UNTRUSTED")
-            sid = ptr(ace.value + 8)
-            if not adv.IsValidSid(sid) or adv.GetLengthSid(sid) > size - 8:
-                deny("SOURCE_ACL_UNTRUSTED")
-            aces.append(("allow" if ace_type == 0 else "deny", ace_flags, mask, sid_text(sid)))
-        return sid_text(owner), tuple(aces)
-    finally:
-        kernel.LocalFree(descriptor)
-
-
-def _check_public_checkout_acl(owner, aces, principal):
-    """Allow ordinary read-only checkout ACLs while refusing untrusted writers."""
-    trusted_owners = {principal, "S-1-5-18", "S-1-5-32-544"}
-    trusted_writers = trusted_owners | {"S-1-3-4"}
-    if owner not in trusted_owners or not aces or len(aces) > 128:
-        deny("SOURCE_ACL_UNTRUSTED")
-    operator_allowed = False
-    for entry in aces:
-        if type(entry) is not tuple or len(entry) != 4:
-            deny("SOURCE_ACL_UNTRUSTED")
-        kind, flags, mask, sid = entry
-        if (kind not in {"allow", "deny"} or type(flags) is not int
-                or type(mask) is not int or type(sid) is not str):
-            deny("SOURCE_ACL_UNTRUSTED")
-        if kind != "allow":
-            continue
-        inherit_only = bool(flags & _INHERIT_ONLY_ACE)
-        if sid in trusted_writers:
-            if (not inherit_only and (sid == principal or (sid == "S-1-3-4" and owner == principal))
-                    and (mask & 0x90000001)):
-                operator_allowed = True
-            continue
-        if sid == "S-1-3-0" and inherit_only:
-            continue
-        if sid in _CHECKOUT_PUBLIC_READERS and (mask & ~_CHECKOUT_READ_ONLY_MASK) == 0:
-            if not inherit_only and (mask & 0x80000001):
-                operator_allowed = True
-            continue
-        deny("SOURCE_ACL_UNTRUSTED")
-    if not operator_allowed:
-        deny("SOURCE_ACL_UNTRUSTED")
-
-
-def _verify_checkout_acl(path: Path, sid: str):
-    """Verify non-link checkout custody without requiring private-only read ACL."""
-    try:
-        info = path.lstat()
-    except OSError:
-        deny("SOURCE_PATH_UNTRUSTED")
-    if (stat.S_ISLNK(info.st_mode)
-            or getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-            or not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))):
-        deny("SOURCE_PATH_UNTRUSTED")
-    if os.name != "nt":
-        deny("SOURCE_ACL_UNTRUSTED")
-    try:
-        owner, aces = _windows_checkout_acl(path)
-    except Denied:
-        raise
-    except (OSError, ValueError):
-        deny("SOURCE_ACL_UNTRUSTED")
-    _check_public_checkout_acl(owner, aces, sid)
-
-
-def _persistent_clean_source(acquisition, sha, sid):
+    Unlike private Chrome profile/handoff state, the public repository checkout
+    does not require a bespoke Windows DACL/owner check.
+    """
     root = ROOTS["workspace"]
     raw_workflow = os.environ.get("GITHUB_WORKSPACE", "")
     if type(raw_workflow) is not str or not raw_workflow:
@@ -557,7 +428,6 @@ def _persistent_clean_source(acquisition, sha, sid):
     for path in (root, root / ".git", root / "src"):
         if not path.is_dir() or not acquisition._no_links(path):
             deny("SOURCE_PATH_UNTRUSTED")
-        _verify_checkout_acl(path, sid)
     try:
         top = Path(_git("rev-parse", "--show-toplevel").strip())
         if not top.is_absolute() or not acquisition._no_links(top) or top.resolve(strict=True) != root.resolve(strict=True):
@@ -599,7 +469,9 @@ def _persistent_clean_source(acquisition, sha, sid):
                 path = parent / name
                 if _is_reparse(path):
                     deny("SOURCE_PATH_UNTRUSTED")
-                _verify_checkout_acl(path, sid)
+                info = path.lstat()
+                if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+                    deny("SOURCE_PATH_UNTRUSTED")
             if parent == egg_info:
                 if dirs or any(name not in _CHECKOUT_EGG_INFO_FILES for name in files):
                     deny("SOURCE_UNTRACKED_FILE")
@@ -635,7 +507,7 @@ def _install_protected_clean_autostart(event):
         from ai_commerce.remote import chrome_acquisition as acquisition
         owner = acquisition._native_operator()
         local, session, sid = owner
-        source = _persistent_clean_source(acquisition, sha, sid)
+        source = _persistent_clean_source(acquisition, sha)
         runtime = acquisition._managed_clean_runtime(local, sid, source)
 
         def inspect_target():
