@@ -91,6 +91,84 @@ def test_explicit_package_import_keeps_real_consumer_and_multihop(tmp_path):
     assert impact.selected_groups == ("bridge", "commerce", "creative")
 
 
+def test_r3_additive_facade_selects_changed_symbols_not_unchanged_importers(tmp_path):
+    """#1096 regression: A03/A04 remain covered without unrelated WakeHub/BQ."""
+    import subprocess
+
+    init = "src/ai_commerce/creative/__init__.py"
+    v2 = "src/ai_commerce/creative/v2.py"
+    media = "src/ai_commerce/media/consumer.py"
+    wake = "src/ai_commerce/wakehub_runtime/runner.py"
+    bq = "src/ai_commerce/creative_quality/brief.py"
+    mk(tmp_path, v2, "class Existing:\n    def value(self): return 1\nclass Stable: pass\n")
+    mk(tmp_path, init, "from .v2 import Existing, Stable\n__all__ = ['Existing', 'Stable']\n")
+    mk(tmp_path, media, "from ai_commerce.creative import Existing\n")
+    mk(tmp_path, wake, "from ai_commerce.creative import Stable\n")
+    mk(tmp_path, bq, "from ai_commerce.creative import Stable\n")
+    for p in ("tests/test_creative.py", "tests/test_media.py", "tests/test_wake.py", "tests/test_bq.py"):
+        mk(tmp_path, p)
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "-c", "user.name=MT01 Test", "-c", "user.email=mt01@test.invalid",
+                    "commit", "-qm", "baseline"], cwd=tmp_path, check=True)
+    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True,
+                          capture_output=True, text=True).stdout.strip()
+    # New R3 API and a change to Existing: the A04 consumer still runs.
+    mk(tmp_path, v2, "class Existing:\n    def value(self): return 2\nclass Stable: pass\n"
+                     "class NewProductionPackage: pass\n")
+    mk(tmp_path, init, "from .v2 import Existing, Stable, NewProductionPackage\n"
+                       "__all__ = ['Existing', 'Stable', 'NewProductionPackage']\n")
+    groups = (
+        group("creative", ("tests/test_creative.py",), (v2, init)),
+        group("a04", ("tests/test_media.py",), (media,)),
+        group("wakehub", ("tests/test_wake.py",), (wake,)),
+        group("bq", ("tests/test_bq.py",), (bq,)),
+    )
+    result = select_impact(root=tmp_path, changed_paths=(v2, init),
+                           base_sha=base, groups=groups)
+    assert result.mode == "AFFECTED"
+    assert result.selected_groups == ("a04", "creative")
+    assert result.selected_tests == ("tests/test_creative.py", "tests/test_media.py")
+    assert "ADDITIVE_PACKAGE_EXPORTS:1" in result.inventory_warnings
+
+    # A changed binding (or package startup side effect) is not an additive
+    # export and MUST retain its conservative direct-import consumer closure.
+    mk(tmp_path, init, "from .v2 import Existing, NewProductionPackage\n"
+                       "__all__ = ['Existing', 'NewProductionPackage']\n")
+    unsafe = select_impact(root=tmp_path, changed_paths=(init,), base_sha=base, groups=groups)
+    assert "wakehub" in unsafe.selected_groups and "bq" in unsafe.selected_groups
+    assert "ADDITIVE_PACKAGE_EXPORTS:1" not in unsafe.inventory_warnings
+
+    # ``from package import *`` consumes __all__ itself: an additive export
+    # is not safe to discard while a wildcard reader remains registered.
+    wildcard = "src/ai_commerce/consumer/wildcard.py"
+    mk(tmp_path, wildcard, "from ai_commerce.creative import *\n")
+    mk(tmp_path, "tests/test_wildcard.py")
+    mk(tmp_path, init, "from .v2 import Existing, Stable, NewProductionPackage\n"
+                       "__all__ = ['Existing', 'Stable', 'NewProductionPackage']\n")
+    with_wildcard = select_impact(
+        root=tmp_path, changed_paths=(init,), base_sha=base,
+        groups=(*groups, group("wildcard", ("tests/test_wildcard.py",), (wildcard,))))
+    assert "wildcard" in with_wildcard.selected_groups
+    assert "ADDITIVE_PACKAGE_EXPORTS:1" not in with_wildcard.inventory_warnings
+
+
+def test_r3_unproven_base_never_claims_safe_export_delta(tmp_path):
+    """Without an immutable baseline, MT-01 must not silently narrow scope."""
+    init = "src/ai_commerce/creative/__init__.py"
+    reader = "src/ai_commerce/consumer/reader.py"
+    mk(tmp_path, init, "from .v2 import Symbol\n__all__ = ['Symbol']\n")
+    mk(tmp_path, reader, "from ai_commerce.creative import Symbol\n")
+    mk(tmp_path, "src/ai_commerce/creative/v2.py", "class Symbol: pass\n")
+    mk(tmp_path, "tests/test_creative.py")
+    mk(tmp_path, "tests/test_consumer.py")
+    impact = select_impact(root=tmp_path, changed_paths=(init,), groups=(
+        group("creative", ("tests/test_creative.py",), (init,)),
+        group("consumer", ("tests/test_consumer.py",), (reader,)),
+    ))
+    assert impact.selected_groups == ("consumer", "creative")
+
+
 def test_distant_consumer_requires_explicit_changed_source_contract(tmp_path):
     """Deep import reach alone is not proof; an exact source contract is."""
     producer = "src/ai_commerce/opportunity/bridge/briefs.py"
@@ -1594,8 +1672,8 @@ def test_bq01a_current_owner_closure_keeps_b0_imports_but_not_test_only_fanout()
     assert complete and package in graph[receipt] and receipt in graph[worker]
 
     affected = select_impact(root=root, changed_paths=[package], groups=groups)
-    # HEAD also contains later quality owners, unlike the historical BQ-01A
-    # onboarding base. Keep their genuine package consumers in this control.
+    # Without immutable proof of an additive facade-only change, preserve
+    # the conservative package-initializer consumer closure.
     expected = (
         "a03", "b0-3", "b0-4", "b0-s", "b0-s3", "b0-s3b",
         "b1-3-audio", "b1-3-subtitle", "b3-next-brief", "b3-operations-dashboard",

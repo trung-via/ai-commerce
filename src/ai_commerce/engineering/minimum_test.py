@@ -908,7 +908,11 @@ def approved_groups() -> tuple[TestGroup, ...]:
         TestGroup("a04", ("tests/test_a04_media_operations.py", "tests/test_a04_upgrade_v11.py", "tests/test_a03_a04_integration.py"),
                   ("A04.media-and-operations",),
                   sources("media", "__init__ base fake_generation files generation local provenance")
-                  + sources("operations", "__init__ errors generation manifest registry runner")),
+                  + sources("operations", "__init__ errors generation manifest registry runner"),
+                  # A04 reads the A03 selection/handoff contract; a change
+                  # to this exact upstream interface always requires its
+                  # registered consumer-read integration regression.
+                  contracts=("src/ai_commerce/creative/v2.py",)),
         # A15 Phase 4: offline cost, retry safety, truthful operations summary.
         TestGroup("a15", ("tests/test_a15_operations.py",),
                   ("A15.cost-and-idempotency",),
