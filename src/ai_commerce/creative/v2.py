@@ -29,7 +29,7 @@ from .models import (
 from .reasoner import reframe_concept, revise_concept
 
 if TYPE_CHECKING:
-    from .live import InvocationAuthorization, LiveCreativeReasoner
+    from .live import BenchmarkResearchReceipt, BenchmarkResearchRequest, InvocationAuthorization, LiveCreativeReasoner
     from .sidecars import CreativeSidecarStore
     from .store import CreativeStore
 
@@ -67,6 +67,7 @@ class UsageObservation:
     output_tokens: int | None = None
     cost_amount: float | None = None
     currency: str | None = None
+    cost_source_ref: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in ("UNKNOWN", "OBSERVED"):
@@ -79,18 +80,26 @@ class UsageObservation:
             if type(self.cost_amount) not in (int, float) or not math.isfinite(self.cost_amount) or self.cost_amount < 0:
                 raise CreativeValidationError("invalid observed cost")
             require_text(self.currency, "usage.currency")
-        elif self.currency is not None:
-            raise CreativeValidationError("currency needs an observed cost")
+            if self.cost_source_ref is not None:
+                require_text(self.cost_source_ref, "usage.cost_source_ref")
+        elif self.currency is not None or self.cost_source_ref is not None:
+            raise CreativeValidationError("currency and cost source require an observed cost")
         measured = any(v is not None for v in (self.input_tokens, self.output_tokens, self.cost_amount))
         if (self.status == "UNKNOWN" and measured) or (self.status == "OBSERVED" and not measured):
             raise CreativeValidationError("usage status disagrees with measurements")
 
     def to_dict(self) -> dict[str, Any]:
-        return {f.name: getattr(self, f.name) for f in fields(self)}
+        return {"status": self.status, "input_tokens": self.input_tokens, "output_tokens": self.output_tokens,
+                "cost_amount": self.cost_amount, "currency": self.currency,
+                **({"cost_source_ref": self.cost_source_ref} if self.cost_source_ref is not None else {})}
 
     @classmethod
     def from_dict(cls, data: object) -> UsageObservation:
-        return cls(**exact_fields(data, {f.name for f in fields(cls)}))
+        optional = {"cost_source_ref"}
+        value = exact_fields(data, {f.name for f in fields(cls)} - optional, optional)
+        if "cost_source_ref" in value:
+            require_text(value["cost_source_ref"], "usage.cost_source_ref")
+        return cls(**value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -602,6 +611,52 @@ class CreativeProductionContext:
 
 
 @dataclass(frozen=True, slots=True)
+class BenchmarkRoleContext:
+    """Provider input pinned to a trial attempt, with independently collected evidence."""
+
+    plan_digest: str
+    sample_id: str
+    attempt: int
+    research_receipt_digest: str | None = None
+    evidence: tuple[CreativeEvidenceSource, ...] = ()
+    generator_receipt_digest: str | None = None
+    critic: CreativeCriticEvidence | None = None
+
+    def __post_init__(self) -> None:
+        require_digest(self.plan_digest)
+        require_text(self.sample_id, "sample_id")
+        positive_int(self.attempt, "benchmark role attempt")
+        if self.research_receipt_digest is not None:
+            require_digest(self.research_receipt_digest)
+        if self.generator_receipt_digest is not None:
+            require_digest(self.generator_receipt_digest)
+        if bool(self.evidence) != (self.research_receipt_digest is not None):
+            raise CreativeValidationError("benchmark evidence requires its research receipt")
+        if not isinstance(self.evidence, tuple) or any(not isinstance(item, CreativeEvidenceSource)
+                                                       for item in self.evidence):
+            raise CreativeValidationError("expected typed benchmark research evidence")
+        if self.critic is not None and not isinstance(self.critic, CreativeCriticEvidence):
+            raise CreativeValidationError("expected typed benchmark critic evidence")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"plan_digest": self.plan_digest, "sample_id": self.sample_id, "attempt": self.attempt,
+                "research_receipt_digest": self.research_receipt_digest,
+                "evidence": [item.to_dict() for item in self.evidence],
+                "generator_receipt_digest": self.generator_receipt_digest,
+                "critic": self.critic.to_dict() if self.critic else None}
+
+    @classmethod
+    def from_dict(cls, data: object) -> BenchmarkRoleContext:
+        value = exact_fields(data, {f.name for f in fields(cls)})
+        if not isinstance(value["evidence"], list):
+            raise CreativeValidationError("expected benchmark evidence array")
+        value["evidence"] = tuple(CreativeEvidenceSource.from_dict(item) for item in value["evidence"])
+        if value["critic"] is not None:
+            value["critic"] = CreativeCriticEvidence.from_dict(value["critic"])
+        return cls(**value)
+
+
+@dataclass(frozen=True, slots=True)
 class ReasoningRequest:
     """Canonical detached brief plus optional intent and exact source revision."""
 
@@ -618,6 +673,7 @@ class ReasoningRequest:
     schema_version: str = "a03.reasoning-request.v2"
     cycle: CreativeCycleContext | None = None
     production: CreativeProductionContext | None = None
+    benchmark: BenchmarkRoleContext | None = None
 
     def __post_init__(self) -> None:
         valid = intake_brief(read_json(self.brief_json))
@@ -625,7 +681,8 @@ class ReasoningRequest:
         r2 = self.schema_version == "a03.reasoning-request.v3"
         r3 = self.schema_version == "a03.reasoning-request.v4"
         if self.schema_version not in (
-            "a03.reasoning-request.v2", "a03.reasoning-request.v3", "a03.reasoning-request.v4"
+            "a03.reasoning-request.v2", "a03.reasoning-request.v3", "a03.reasoning-request.v4",
+            "a03.reasoning-request.v5",
         ):
             raise CreativeValidationError("unsupported reasoning request schema")
         if self.operation not in (
@@ -719,6 +776,21 @@ class ReasoningRequest:
             require_text(self.lens, "lens")
         elif self.lens is not None:
             raise CreativeValidationError("lens belongs to reframe")
+        if self.schema_version == "a03.reasoning-request.v5":
+            context = self.benchmark
+            if (not isinstance(context, BenchmarkRoleContext)
+                    or self.operation not in ("EXPLORE", "CRITIQUE", "DEVELOP")):
+                raise CreativeValidationError("expected typed benchmark role request")
+            if (context.generator_receipt_digest is None) != (self.operation == "EXPLORE"):
+                raise CreativeValidationError("benchmark critique and development require the generator receipt")
+            if self.operation == "DEVELOP":
+                if (context.critic is None or context.critic.selection != _output_pin(self.source)
+                        or context.research_receipt_digest is None):
+                    raise CreativeValidationError("bounded development requires research and exact independent critique")
+            elif context.critic is not None:
+                raise CreativeValidationError("critic evidence belongs to benchmark development")
+        elif self.benchmark is not None:
+            raise CreativeValidationError("benchmark context requires v5 request")
 
     @classmethod
     def create(cls, brief: Any, **options: Any) -> ReasoningRequest:
@@ -737,6 +809,7 @@ class ReasoningRequest:
             "instruction": self.instruction, "lens": self.lens,
             **({"cycle": self.cycle.to_dict()} if self.cycle is not None else {}),
             **({"production": self.production.to_dict()} if self.production is not None else {}),
+            **({"benchmark": self.benchmark.to_dict()} if self.benchmark is not None else {}),
         }
 
     @property
@@ -746,7 +819,7 @@ class ReasoningRequest:
     @classmethod
     def from_dict(cls, data: object) -> ReasoningRequest:
         value = exact_fields(data, {"schema_version", "brief", "operation", "mode", "count",
-                                    "intent", "source", "instruction", "lens"}, {"cycle", "production"})
+                                    "intent", "source", "instruction", "lens"}, {"cycle", "production", "benchmark"})
         if (value["schema_version"] == "a03.reasoning-request.v3") != ("cycle" in value):
             raise CreativeValidationError("cycle field requires R2 request schema")
         if (value["schema_version"] == "a03.reasoning-request.v4") != ("production" in value):
@@ -755,6 +828,10 @@ class ReasoningRequest:
             value["cycle"] = CreativeCycleContext.from_dict(value["cycle"])
         if "production" in value:
             value["production"] = CreativeProductionContext.from_dict(value["production"])
+        if (value["schema_version"] == "a03.reasoning-request.v5") != ("benchmark" in value):
+            raise CreativeValidationError("benchmark field requires v5 request")
+        if "benchmark" in value:
+            value["benchmark"] = BenchmarkRoleContext.from_dict(value["benchmark"])
         value["brief_json"] = canonical_bytes(intake_brief(value.pop("brief"))).decode("utf-8")
         if value["intent"] is not None:
             value["intent"] = CreativeIntent.from_dict(value["intent"])
@@ -790,18 +867,21 @@ class ReasoningResult:
         ReasoningRequest.from_dict(self.request.to_dict())
         r2 = self.request.cycle is not None
         r3 = self.request.production is not None
+        benchmark = self.request.benchmark
         if self.schema_version != _result_schema(self.request):
             raise CreativeValidationError("unsupported reasoning result schema")
         if not r2 and self.selection is not None:
             raise CreativeValidationError("selection belongs only to R2 request")
         if not r3 and self.production_spec is not None:
             raise CreativeValidationError("production_spec belongs only to R3 request")
-        if not (r2 or r3) and (self.evidence_refs or self.hypotheses or self.response_json is not None):
-            raise CreativeValidationError("R2/R3 result fields require R2/R3 request")
+        if not (r2 or r3) and (self.evidence_refs or self.hypotheses
+                               or (benchmark is None and self.response_json is not None)):
+            raise CreativeValidationError("unexpected fields for reasoning result schema")
         for name in ("evidence_refs", "hypotheses"):
             object.__setattr__(self, name, text_tuple(getattr(self, name), name))
-        if r2 or r3:
-            supplied = self.request.cycle.evidence if r2 else self.request.production.evidence
+        if r2 or r3 or benchmark is not None:
+            context = self.request.cycle or self.request.production or benchmark
+            supplied = context.evidence
             if not set(self.evidence_refs) <= {e.source_ref for e in supplied}:
                 raise CreativeValidationError("model fabricated external evidence citations")
             if self.response_json is not None:
@@ -815,6 +895,8 @@ class ReasoningResult:
                 if response is not None and (response.observation != self.observation or response.usage != self.usage
                         or response.request_id != self.provider_request_id or response.execution != self.execution):
                     raise CreativeValidationError("model response metadata rebound")
+                if benchmark is not None and self.state == "REFUSED" and response.state != "REFUSED":
+                    raise CreativeValidationError("reasoning state differs from observed response")
                 if self.state == "OK":
                     if response.state != "OK":
                         raise CreativeValidationError("successful result needs observed successful response")
@@ -848,8 +930,8 @@ class ReasoningResult:
                         if (response.cli_stdin_json.encode("utf-8") != packet
                                 or response.cli_schema_json.encode("utf-8") != canonical_bytes(schema)):
                             raise CreativeValidationError("native stdin/schema rebound its model request")
-            elif self.state == "OK":
-                raise CreativeValidationError("R2/R3 success requires immutable observed model response")
+            elif self.state == "OK" or (benchmark is not None and self.state == "REFUSED"):
+                raise CreativeValidationError("reasoning outcome requires immutable observed model response")
         if self.state not in ("OK", "NO_MODEL_CONFIGURED", "UNAUTHORIZED", "REFUSED", "ERROR"):
             raise CreativeValidationError("invalid reasoning state")
         if not isinstance(self.observation, ProviderObservation) or not isinstance(self.usage, UsageObservation):
@@ -931,6 +1013,8 @@ class ReasoningResult:
             known_refs = set(self.request.brief.get("source_refs", []))
             if r2:
                 known_refs = {e.source_ref for e in self.request.cycle.evidence}
+            elif benchmark is not None and benchmark.research_receipt_digest is not None:
+                known_refs &= {e.source_ref for e in benchmark.evidence}
             for draft in self.drafts:
                 if not set(draft.source_refs) <= known_refs:
                     raise CreativeValidationError("source_refs must come from the source brief")
@@ -972,6 +1056,7 @@ class ReasoningResult:
             **({"production_spec": self.production_spec.to_dict() if self.production_spec else None,
                 "evidence_refs": list(self.evidence_refs), "hypotheses": list(self.hypotheses),
                 "response_json": self.response_json} if self.request.production is not None else {}),
+            **({"response_json": self.response_json} if self.request.benchmark is not None else {}),
         }
 
     @property
@@ -995,6 +1080,9 @@ class ReasoningResult:
                 raise CreativeValidationError("missing or unexpected R3 result fields")
             if value["production_spec"] is not None:
                 value["production_spec"] = ProductionPackageSpec.from_dict(value["production_spec"])
+        elif value["request"].benchmark is not None:
+            if (value.keys() & (r2_fields | r3_fields)) != {"response_json"}:
+                raise CreativeValidationError("missing or unexpected benchmark result fields")
         elif (r2_fields | r3_fields) & value.keys():
             raise CreativeValidationError("unexpected R2/R3 fields in historical result")
         for name, expected in (("drafts", ConceptDraft), ("edits", ConceptChange)):
@@ -1069,6 +1157,8 @@ def reason_v2(request: ReasoningRequest, reasoner: CreativeReasonerV2 | None = N
 
 
 def _result_schema(request: ReasoningRequest) -> str:
+    if request.benchmark is not None:
+        return "a03.reasoning-result.v5"
     if request.production is not None:
         return "a03.reasoning-result.v4"
     return "a03.reasoning-result.v3" if request.cycle is not None else "a03.reasoning-result.v2"
@@ -1143,6 +1233,13 @@ class A03CreativeJob:
             ModelConfiguration.from_dict(self.configuration.to_dict())
         if self.purpose not in ("PRODUCTION", "TEST_ONLY_MOCK"):
             raise CreativeValidationError("invalid creative job purpose")
+        if self.request.benchmark is not None:
+            context = self.request.benchmark
+            if (self.journey_id, self.cycle_id, self.job_id, self.attempt, self.correlation_id) != (
+                f"benchmark:{context.plan_digest}", context.sample_id, _role_for_operation(self.request.operation),
+                context.attempt, f"{context.sample_id}:{self.request.operation}:{context.attempt}",
+            ):
+                raise CreativeValidationError("benchmark job rebound role attempt identity")
         if self.selection_index is not None:
             if type(self.selection_index) is not int or self.selection_index < 0:
                 raise CreativeValidationError("selection_index must be a nonnegative integer or null")
@@ -1230,6 +1327,10 @@ def _stage_concepts(result: ReasoningResult) -> tuple[ConceptRecord, ...]:
     if result.request.operation == "EXPLORE":
         return result.concepts()
     if result.request.operation in ("REFRAME", "DEVELOP"):
+        if result.request.benchmark is not None:
+            # Preserve the trial's proposal in its receipt without committing
+            # an alternate revision to the shared concept's production lineage.
+            return ()
         return (result.proposed_revision(),)
     return ()
 
@@ -1344,6 +1445,8 @@ def _run_creative_stage(
 
     if not isinstance(job, A03CreativeJob):
         raise CreativeValidationError("expected A03CreativeJob")
+    if job.request.benchmark is not None and record_timing is None:
+        raise CreativeValidationError("benchmark job requires trial admission and timing")
     if authorization is not None:
         if not isinstance(authorization, InvocationAuthorization):
             raise CreativeValidationError("expected runner-side InvocationAuthorization")
@@ -2909,6 +3012,8 @@ def evaluate_benchmark_structure(
             supplied_refs = {e.source_ref for e in st.job.request.cycle.evidence}
         elif st.job.request.production is not None:
             supplied_refs = {e.source_ref for e in st.job.request.production.evidence}
+        elif st.job.request.benchmark is not None and st.job.request.benchmark.research_receipt_digest is not None:
+            supplied_refs &= {e.source_ref for e in st.job.request.benchmark.evidence}
         if not set(st.reasoning.evidence_refs) <= supplied_refs:
             evidence_ok = False
             notes.append("unverified stage evidence_refs")
@@ -3379,11 +3484,12 @@ def _strategy_hold_reasons(
     cycle_result_digest: str | None,
     research_status: str,
     evidence_refs: tuple[str, ...],
+    include_retried_success: bool = False,
 ) -> tuple[str, ...]:
     reasons: list[str] = []
-    non_retry = tuple(t for t in role_traces if not t.is_retry)
-    roles = {t.role for t in non_retry}
-    ok_roles = {t.role for t in non_retry if t.execution_status in ("OK", "VERIFIED_SOURCE_BYTES")}
+    roles = {t.role for t in role_traces if not t.is_retry or include_retried_success}
+    ok_roles = {t.role for t in role_traces if (not t.is_retry or include_retried_success)
+                and t.execution_status in ("OK", "VERIFIED_SOURCE_BYTES")}
     if "GENERATOR" not in ok_roles:
         reasons.append("MISSING_GENERATOR")
     if strategy == "S1":
@@ -3456,9 +3562,15 @@ class A03BenchmarkObservation:
     errors: tuple[str, ...] = ()
     side_effects: Literal["NONE"] = "NONE"
     schema_version: str = "A03BenchmarkObservation.v1"
+    experiment_plan_digest: str | None = None
 
     def __post_init__(self) -> None:
-        if self.schema_version != "A03BenchmarkObservation.v1":
+        if self.schema_version == "A03BenchmarkObservation.v2":
+            require_digest(self.experiment_plan_digest)
+            if (self.status != "TEST_ONLY_MOCK" or self.judge_receipt is not None
+                    or self.consumer_evidence != BenchmarkConsumerEvidence()):
+                raise CreativeValidationError("source trial cannot claim a judge or consumer outcome")
+        elif self.schema_version != "A03BenchmarkObservation.v1" or self.experiment_plan_digest is not None:
             raise CreativeValidationError("unsupported benchmark observation schema")
         if self.rubric_version != BENCHMARK_RUBRIC_VERSION:
             raise CreativeValidationError("unsupported benchmark rubric version")
@@ -3577,11 +3689,12 @@ class A03BenchmarkObservation:
             raise CreativeValidationError("job_digests disagrees with role_traces")
         if tuple(t.stage_digest for t in model_traces) != self.stage_result_digests:
             raise CreativeValidationError("stage_result_digests disagrees with role_traces")
-        non_retry_traces = tuple(t for t in traces if not t.is_retry)
-        gen_receipts = tuple(t.receipt_digest for t in non_retry_traces if t.role == "GENERATOR")
-        critic_receipts = tuple(t.receipt_digest for t in non_retry_traces if t.role == "CRITIC")
-        sel_receipts = tuple(t.receipt_digest for t in non_retry_traces if t.role == "SELECTOR")
-        dev_receipts = tuple(t.receipt_digest for t in non_retry_traces if t.role == "DEVELOPER")
+        terminal_traces = (tuple(t for t in traces if t.execution_status in ("OK", "VERIFIED_SOURCE_BYTES"))
+                           if self.experiment_plan_digest is not None else tuple(t for t in traces if not t.is_retry))
+        gen_receipts = tuple(t.receipt_digest for t in terminal_traces if t.role == "GENERATOR")
+        critic_receipts = tuple(t.receipt_digest for t in terminal_traces if t.role == "CRITIC")
+        sel_receipts = tuple(t.receipt_digest for t in terminal_traces if t.role == "SELECTOR")
+        dev_receipts = tuple(t.receipt_digest for t in terminal_traces if t.role == "DEVELOPER")
         if self.explore_receipt_digest != (gen_receipts[0] if gen_receipts else None):
             raise CreativeValidationError("explore_receipt_digest disagrees with role_traces")
         if self.critic_receipt_digests != critic_receipts:
@@ -3652,13 +3765,14 @@ class A03BenchmarkObservation:
                 raise CreativeValidationError("A04 handoff receipt disagrees with benchmark observation artifacts")
 
         # Mock-vs-real and strategy completion gates.
-        non_retry_model = tuple(t for t in model_traces if not t.is_retry)
+        non_retry_model = tuple(t for t in terminal_traces if t.role != "RESEARCH")
         strategy_holds = _strategy_hold_reasons(
             strategy=self.strategy,
             role_traces=traces,
             cycle_result_digest=self.cycle_result_digest,
             research_status=self.research_status,
             evidence_refs=self.evidence_refs,
+            include_retried_success=self.experiment_plan_digest is not None,
         )
         if self.status in ("TEST_ONLY_MOCK", "REAL_MODEL_OBSERVED"):
             if self.hold_reasons or self.errors or strategy_holds:
@@ -3781,6 +3895,8 @@ class A03BenchmarkObservation:
             "errors": list(self.errors),
             "benchmark_validity": self.benchmark_validity,
             "side_effects": self.side_effects,
+            **({"experiment_plan_digest": self.experiment_plan_digest}
+               if self.experiment_plan_digest is not None else {}),
         }
 
     def to_json(self) -> str:
@@ -3788,7 +3904,10 @@ class A03BenchmarkObservation:
 
     @classmethod
     def from_dict(cls, data: object) -> A03BenchmarkObservation:
-        value = exact_fields(data, {f.name for f in fields(cls)})
+        optional = {"experiment_plan_digest"}
+        value = exact_fields(data, {f.name for f in fields(cls)} - optional, optional)
+        if (value["schema_version"] == "A03BenchmarkObservation.v2") != ("experiment_plan_digest" in value):
+            raise CreativeValidationError("experiment plan pin requires benchmark observation v2")
         if value["requested_configuration"] is not None:
             value["requested_configuration"] = ModelConfiguration.from_dict(value["requested_configuration"])
         value["observed_provider"] = ProviderObservation.from_dict(value["observed_provider"])
@@ -4769,6 +4888,12 @@ def compare_benchmark_observations(
 
 
 # R5b-1 uses the existing V2 stage claim and R5a records.
+_TRIAL_ROLE_INSTRUCTIONS = {
+    "EXPLORE": "Generate two distinct concepts for the exact brief. Preserve its product, CTA and audio constraints.",
+    "CRITIQUE": "Independently assess the exact generated concept against the brief and any retrieved evidence.",
+    "DEVELOP": "Propose bounded creative text edits for the exact concept using the independent critique and "
+               "retrieved source bytes. Preserve the brief's product, CTA and audio constraints.",
+}
 _EXPERIMENT_OPERATIONS = {
     "S1": ("EXPLORE",),
     "S2": ("EXPLORE", "CRITIQUE"),
@@ -4817,6 +4942,31 @@ class BenchmarkTrialSample:
 
 
 @dataclass(frozen=True, slots=True)
+class BenchmarkResearchTarget:
+    """Reviewed source identity and expected raw bytes for one case."""
+
+    case_digest: str
+    source_ref: str
+    content_sha256: str
+    origin_ref: str
+
+    def __post_init__(self) -> None:
+        require_digest(self.case_digest)
+        require_digest(self.content_sha256)
+        require_text(self.source_ref, "research source_ref")
+        require_text(self.origin_ref, "research origin_ref")
+        if "UNKNOWN" in (self.source_ref, self.origin_ref):
+            raise CreativeValidationError("research source requires a known reference and origin")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {f.name: getattr(self, f.name) for f in fields(self)}
+
+    @classmethod
+    def from_dict(cls, data: object) -> BenchmarkResearchTarget:
+        return cls(**exact_fields(data, {f.name for f in fields(cls)}))
+
+
+@dataclass(frozen=True, slots=True)
 class A03BenchmarkExperimentPlan:
     plan_id: str
     cohort_id: str
@@ -4830,9 +4980,11 @@ class A03BenchmarkExperimentPlan:
     created_at: str
     rubric_version: str = BENCHMARK_RUBRIC_VERSION
     schema_version: str = "A03BenchmarkExperimentPlan.v1"
+    role_configurations: tuple[ModelConfiguration, ...] = ()
+    research_targets: tuple[BenchmarkResearchTarget, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.schema_version != "A03BenchmarkExperimentPlan.v1":
+        if self.schema_version not in ("A03BenchmarkExperimentPlan.v1", "A03BenchmarkExperimentPlan.v2"):
             raise CreativeValidationError("unsupported benchmark experiment schema")
         require_text(self.plan_id, "plan_id")
         require_text(self.cohort_id, "cohort_id")
@@ -4856,6 +5008,33 @@ class A03BenchmarkExperimentPlan:
             expected.from_dict(item.to_dict())
         if "UNKNOWN" in (self.configuration.model, self.configuration.provider):
             raise CreativeValidationError("experiment requires an explicit requested configuration")
+        if self.schema_version == "A03BenchmarkExperimentPlan.v1":
+            if self.role_configurations or self.research_targets:
+                raise CreativeValidationError("role configurations and research targets require plan v2")
+            return
+        if (not isinstance(self.role_configurations, tuple) or len(self.role_configurations) != 3
+                or any(not isinstance(config, ModelConfiguration) or "UNKNOWN" in (config.provider, config.model)
+                       for config in self.role_configurations)
+                or self.configuration != self.role_configurations[0]):
+            raise CreativeValidationError("plan v2 requires generator, critic and developer configurations")
+        if (not isinstance(self.research_targets, tuple)
+                or any(not isinstance(target, BenchmarkResearchTarget) or target.case_digest not in cases
+                       for target in self.research_targets)):
+            raise CreativeValidationError("expected plan-bound research targets")
+        for case_digest in cases:
+            targets = self.targets_for(case_digest)
+            if (not 1 <= len(targets) <= 8
+                    or len({target.source_ref for target in targets}) != len(targets)
+                    or len({target.content_sha256 for target in targets}) != len(targets)):
+                raise CreativeValidationError("case requires distinct research refs and bytes")
+
+    def targets_for(self, case_digest: str) -> tuple[BenchmarkResearchTarget, ...]:
+        return tuple(target for target in self.research_targets if target.case_digest == case_digest)
+
+    def configuration_for(self, operation: str) -> ModelConfiguration:
+        if not self.role_configurations:
+            return self.configuration
+        return self.role_configurations[tuple(_TRIAL_ROLE_INSTRUCTIONS).index(operation)]
 
     @classmethod
     def create(cls, cases: tuple[A03BenchmarkCase, ...], **options: Any) -> A03BenchmarkExperimentPlan:
@@ -4878,6 +5057,11 @@ class A03BenchmarkExperimentPlan:
                 or any((case.cohort_id, case.source_sha, case.rubric_version, case.language)
                        != (self.cohort_id, self.source_sha, self.rubric_version, "vi") for case in cases)):
             raise CreativeValidationError("experiment case, brief, cohort, source or rubric mismatch")
+        if self.research_targets and any(
+            not set(case.expected_evidence_refs) <= {target.source_ref for target in self.targets_for(case.digest)}
+            for case in cases
+        ):
+            raise CreativeValidationError("research targets omit the case's expected source refs")
 
     @property
     def samples(self) -> tuple[BenchmarkTrialSample, ...]:
@@ -4905,9 +5089,14 @@ class A03BenchmarkExperimentPlan:
         return tuple(sample for group in paired.values() for sample in group[:count])
 
     def to_dict(self) -> dict[str, Any]:
-        return {**{f.name: getattr(self, f.name) for f in fields(self)},
+        return {"plan_id": self.plan_id, "cohort_id": self.cohort_id, "source_sha": self.source_sha,
+                "case_digests": list(self.case_digests), "repetitions": self.repetitions,
                 "configuration": self.configuration.to_dict(), "budget": self.budget.to_dict(),
-                "provenance": self.provenance.to_dict(), "case_digests": list(self.case_digests)}
+                "purpose": self.purpose, "provenance": self.provenance.to_dict(), "created_at": self.created_at,
+                "rubric_version": self.rubric_version, "schema_version": self.schema_version,
+                **({"role_configurations": [config.to_dict() for config in self.role_configurations],
+                    "research_targets": [target.to_dict() for target in self.research_targets]}
+                   if self.schema_version == "A03BenchmarkExperimentPlan.v2" else {})}
 
     def to_json(self) -> str:
         return canonical_bytes(self.to_dict()).decode("utf-8")
@@ -4922,12 +5111,23 @@ class A03BenchmarkExperimentPlan:
 
     @classmethod
     def from_dict(cls, data: object) -> A03BenchmarkExperimentPlan:
-        value = exact_fields(data, {f.name for f in fields(cls)})
+        role_fields = {"role_configurations", "research_targets"}
+        value = exact_fields(data, {f.name for f in fields(cls)} - role_fields, role_fields)
         if not isinstance(value["case_digests"], list):
             raise CreativeValidationError("expected case_digests array")
         value["configuration"] = ModelConfiguration.from_dict(value["configuration"])
         value["budget"] = BenchmarkTrialBudget.from_dict(value["budget"])
         value["provenance"] = CreativeJobProvenance.from_dict(value["provenance"])
+        extended = value["schema_version"] == "A03BenchmarkExperimentPlan.v2"
+        if (value.keys() & role_fields) != (role_fields if extended else set()):
+            raise CreativeValidationError("unexpected experiment role configuration fields")
+        if extended:
+            if any(not isinstance(value[name], list) for name in role_fields):
+                raise CreativeValidationError("expected experiment role and research arrays")
+            value["role_configurations"] = tuple(ModelConfiguration.from_dict(config)
+                                                 for config in value["role_configurations"])
+            value["research_targets"] = tuple(BenchmarkResearchTarget.from_dict(target)
+                                              for target in value["research_targets"])
         return cls(**value)
 
     @classmethod
@@ -4947,6 +5147,55 @@ class BenchmarkTrialGrant:
         require_digest(self.plan_digest)
         require_text(self.sample_id, "sample_id")
         require_text(self.authorization_ref, "authorization_ref")
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkLiveTrialGrant:
+    """Runner authorization input for one live sample, separate from fixture grants."""
+
+    plan_digest: str
+    sample_id: str
+    provider: str
+    account_ref: str
+    authorization_ref: str
+    not_before: str
+    expires_at: str
+    budget: BenchmarkTrialBudget
+    scope: Literal["A03_BENCHMARK_REASONING"] = "A03_BENCHMARK_REASONING"
+    schema_version: str = "A03BenchmarkLiveTrialGrant.v1"
+
+    def __post_init__(self) -> None:
+        require_digest(self.plan_digest)
+        for name in ("sample_id", "provider", "account_ref", "authorization_ref"):
+            require_text(getattr(self, name), name)
+        start = _require_iso_timestamp(self.not_before, "not_before")
+        end = _require_iso_timestamp(self.expires_at, "expires_at")
+        if end <= start or "UNKNOWN" in (self.account_ref, self.provider):
+            raise CreativeValidationError("invalid live grant window or identity")
+        if (self.schema_version != "A03BenchmarkLiveTrialGrant.v1" or self.scope != "A03_BENCHMARK_REASONING"
+                or not isinstance(self.budget, BenchmarkTrialBudget)):
+            raise CreativeValidationError("invalid live benchmark grant scope or budget")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**{f.name: getattr(self, f.name) for f in fields(self)}, "budget": self.budget.to_dict()}
+
+    @classmethod
+    def from_dict(cls, data: object) -> BenchmarkLiveTrialGrant:
+        value = exact_fields(data, {f.name for f in fields(cls)})
+        value["budget"] = BenchmarkTrialBudget.from_dict(value["budget"])
+        return cls(**value)
+
+    def permits(self, plan: A03BenchmarkExperimentPlan, sample: BenchmarkTrialSample, now: datetime) -> bool:
+        budget, limit = self.budget, plan.budget
+        return (plan.purpose == "PRODUCTION" and (self.plan_digest, self.sample_id) == (plan.digest, sample.sample_id)
+                and self.provider == plan.configuration.provider
+                and all(plan.configuration_for(op).provider == self.provider
+                        for op in sample.operations if op != "RESEARCH")
+                and _require_iso_timestamp(self.not_before, "not_before") <= now
+                < _require_iso_timestamp(self.expires_at, "expires_at")
+                and budget.currency == limit.currency and budget.max_attempts <= limit.max_attempts
+                and budget.max_invocation_wall_time_ms <= limit.max_invocation_wall_time_ms
+                and budget.max_tokens <= limit.max_tokens and budget.max_cost_amount <= limit.max_cost_amount)
 
 
 @dataclass(frozen=True, slots=True)
@@ -5010,44 +5259,93 @@ class BenchmarkTrialResult:
     next_job: A03CreativeJob | None = None
     observation: A03BenchmarkObservation | None = None
     ranking_status: Literal["UNRANKED"] = "UNRANKED"
+    next_research: BenchmarkResearchRequest | None = None
+    research: BenchmarkResearchReceipt | None = None
 
     @property
     def telemetry(self) -> BenchmarkTelemetry:
-        return aggregate_benchmark_telemetry(tuple(attempt.trace for attempt in self.attempts))
+        traces = tuple(attempt.trace for attempt in self.attempts)
+        if self.research is not None and self.research.error_code is None:
+            traces = (self.research.trace,) + traces
+        return aggregate_benchmark_telemetry(traces)
 
 
 def _trial_budget_hold(budget: BenchmarkTrialBudget, attempts: list[BenchmarkTrialAttempt], *,
-                       scheduling: bool) -> str | None:
-    tokens = wall_ms = 0
+                       scheduling: bool, research: BenchmarkResearchReceipt | None = None,
+                       require_cost_source: bool = False) -> str | None:
+    tokens = 0
+    wall_ms = 0 if research is None else research.wall_time_ms
     cost = Decimal(0)
     for attempt in attempts:
         usage = attempt.stage.reasoning.usage
         if (attempt.timing is None or usage.input_tokens is None or usage.output_tokens is None
-                or usage.cost_amount is None or usage.currency != budget.currency):
+                or usage.cost_amount is None or usage.currency != budget.currency
+                or (require_cost_source and usage.cost_source_ref in (None, "UNKNOWN"))):
             return "UNOBSERVED_OR_INCOMPARABLE_BUDGET_USAGE"
         tokens += usage.input_tokens + usage.output_tokens
         wall_ms += attempt.timing.wall_time_ms
         cost += Decimal(str(usage.cost_amount))
-    limits = ((len(attempts), budget.max_attempts), (tokens, budget.max_tokens),
+    limits = ((len(attempts) + int(research is not None), budget.max_attempts), (tokens, budget.max_tokens),
               (wall_ms, budget.max_invocation_wall_time_ms), (cost, Decimal(str(budget.max_cost_amount))))
     if any(used > limit or (scheduling and used == limit) for used, limit in limits):
         return "EXPERIMENT_BUDGET_EXHAUSTED"
     return None
 
 
+def _benchmark_research_request(plan: A03BenchmarkExperimentPlan, sample: BenchmarkTrialSample,
+                                case: A03BenchmarkCase) -> BenchmarkResearchRequest:
+    from .live import BenchmarkResearchRequest
+
+    return BenchmarkResearchRequest(plan.digest, sample.sample_id, case.digest, case.source_brief_digest,
+                                    plan.targets_for(case.digest), plan.budget.currency)
+
+
+def _role_trial_observation(
+    plan: A03BenchmarkExperimentPlan, sample: BenchmarkTrialSample, case: A03BenchmarkCase, brief: dict[str, Any],
+    attempts: list[BenchmarkTrialAttempt], research: BenchmarkResearchReceipt | None,
+) -> A03BenchmarkObservation:
+    model_traces = tuple(replace(attempt.trace, step_name=f"{attempt.stage.job.job_id}:{attempt.stage.job.attempt}")
+                         for attempt in attempts)
+    successful = {trace.role: trace.receipt_digest for trace in model_traces if trace.execution_status == "OK"}
+    research_trace = research.trace if research is not None else None
+    traces = (research_trace,) + model_traces if research_trace is not None else model_traces
+    consumer, telemetry = BenchmarkConsumerEvidence(), aggregate_benchmark_telemetry(traces)
+    structural = evaluate_benchmark_structure(case, brief, stages=tuple(attempt.stage for attempt in attempts))
+    nsm = _evaluate_observation_nsm(
+        status="TEST_ONLY_MOCK", execution_mode="TEST_ONLY_MOCK", provenance=plan.provenance,
+        structural_check=structural, semantic_status="UNMEASURED", judge_receipt=None,
+        telemetry=telemetry, consumer_evidence=consumer, hold_reasons=(), errors=(),
+    )
+    return A03BenchmarkObservation(
+        sample_id=sample.sample_id, attempt=1, cohort_id=case.cohort_id, case_id=case.case_id,
+        case_digest=case.digest, source_sha=case.source_sha, brief_id=case.brief_id,
+        source_brief_digest=case.source_brief_digest, brief_class=case.brief_class, strategy=sample.strategy,
+        requested_configuration=plan.configuration, observed_provider=model_traces[0].observed,
+        observed_effort=model_traces[0].observed_effort,
+        job_digests=tuple(trace.job_digest for trace in model_traces),
+        stage_result_digests=tuple(trace.stage_digest for trace in model_traces),
+        explore_receipt_digest=successful["GENERATOR"],
+        critic_receipt_digests=(successful["CRITIC"],) if "CRITIC" in successful else (),
+        develop_receipt_digest=successful.get("DEVELOPER"), consumer_evidence=consumer,
+        provenance=plan.provenance, research_status="VERIFIED_SOURCE_BYTES" if research_trace else "UNKNOWN",
+        evidence_refs=research_trace.evidence_refs if research_trace else (),
+        evidence_digests=research_trace.evidence_digests if research_trace else (),
+        role_traces=traces, structural_check=structural, semantic_status="UNMEASURED", telemetry=telemetry, nsm=nsm,
+        started_at=traces[0].started_at, completed_at=traces[-1].completed_at,
+        execution_mode="TEST_ONLY_MOCK", status="TEST_ONLY_MOCK", benchmark_validity="NOT_REAL_BENCHMARK",
+        schema_version="A03BenchmarkObservation.v2", experiment_plan_digest=plan.digest,
+    )
+
+
 def _reconcile_benchmark_sample(
     plan: A03BenchmarkExperimentPlan, sample: BenchmarkTrialSample, sidecars: CreativeSidecarStore,
+    *, persist_observation: bool = True,
 ) -> BenchmarkTrialResult:
-    if sample.strategy == "S3":
-        return BenchmarkTrialResult(sample, "HOLD_DEPENDENCY",
-                                    "Standalone source research with verified bytes requires a new "
-                                    "request/provider/receipt contract in src/ai_commerce/creative/live.py. "
-                                    "R5a research is bound to the existing R2 cycle.")
     if plan.purpose == "PRODUCTION":
-        return BenchmarkTrialResult(sample, "HOLD_DEPENDENCY",
-                                    "Live token and cost caps require enforcement by "
-                                    "src/ai_commerce/creative/live.py. "
-                                    "Real execution also requires a separate runner authorization.")
+        return BenchmarkTrialResult(sample, "HOLD_DEPENDENCY", "NO_CERTIFIED_LIVE_TRIAL_TRANSPORT")
+    extended = bool(plan.role_configurations)
+    if sample.strategy == "S3" and not extended:
+        return BenchmarkTrialResult(sample, "HOLD_DEPENDENCY", "S3_REQUIRES_PLAN_V2_SOURCE_TARGETS")
     case = sidecars.load_benchmark_case_by_digest(sample.case_digest)
     brief = sidecars.creative.load_brief(case.source_brief_digest)
     attempts: list[BenchmarkTrialAttempt] = []
@@ -5055,25 +5353,61 @@ def _reconcile_benchmark_sample(
     prior: list[A03CreativeStageResult] = []
     receipts: set[str] = set()
     provider_ids: set[str] = set()
+    research = None
+    last_completed_at = None
+    authorization_ref = None
 
     def result(status: str, reason: str, **options: Any) -> BenchmarkTrialResult:
-        return BenchmarkTrialResult(sample, status, reason, tuple(attempts), **options)
+        return BenchmarkTrialResult(sample, status, reason, tuple(attempts), research=research, **options)
 
     try:
         for operation in sample.operations:
-            source = successful[0].reasoning.concepts()[0] if operation == "CRITIQUE" else None
-            request = ReasoningRequest.create(brief, operation=operation, source=source,
-                                              count=2 if operation == "EXPLORE" else None)
+            if operation == "RESEARCH":
+                request = _benchmark_research_request(plan, sample, case)
+                claimed, research = sidecars._load_benchmark_research(request)
+                if not claimed:
+                    return result("READY", "RESEARCH_READY", next_research=request)
+                if research is None:
+                    return result("HOLD_UNKNOWN_EFFECT", "RESERVED_RESEARCH_WITHOUT_TERMINAL_RECEIPT")
+                if research.error_code is not None:
+                    return result("HOLD_RECEIPT", research.error_code)
+                provider_ids.add(research.invocation_id)
+                receipts.add(research.digest)
+                last_completed_at, authorization_ref = research.completed_at, research.authorization_ref
+                continue
+
+            generator = None if operation == "EXPLORE" else successful[0].reasoning
+            source = generator.concepts()[0] if generator is not None else None
+            configuration = plan.configuration_for(operation)
+            critic = None
+            if operation == "DEVELOP":
+                critique = successful[1].reasoning
+                critic = CreativeCriticEvidence(_output_pin(source), critique.digest, critique.request.digest,
+                                                critique.critique)
             for number in range(1, plan.budget.max_attempts + 2):
+                options = {}
+                if extended:
+                    options = {
+                        "schema_version": "a03.reasoning-request.v5", "instruction": _TRIAL_ROLE_INSTRUCTIONS[operation],
+                        "benchmark": BenchmarkRoleContext(
+                            plan.digest, sample.sample_id, number,
+                            research_receipt_digest=research.digest if research is not None else None,
+                            evidence=research.sources if research is not None else (),
+                            generator_receipt_digest=generator.digest if generator is not None else None,
+                            critic=critic,
+                        ),
+                    }
+                request = ReasoningRequest.create(brief, operation=operation, source=source,
+                                                  count=2 if operation == "EXPLORE" else None, **options)
                 job = A03CreativeJob.create(
                     request, journey_id=f"benchmark:{plan.digest}", cycle_id=sample.sample_id,
                     job_id=_role_for_operation(operation), attempt=number,
                     correlation_id=f"{sample.sample_id}:{operation}:{number}", provenance=plan.provenance,
-                    configuration=plan.configuration, purpose="TEST_ONLY_MOCK",
+                    configuration=configuration, purpose="TEST_ONLY_MOCK",
                 )
                 claimed, attempt = sidecars._load_experiment_attempt(job)
                 if not claimed:
-                    hold = _trial_budget_hold(plan.budget, attempts, scheduling=True)
+                    hold = _trial_budget_hold(plan.budget, attempts, scheduling=True, research=research)
                     if hold:
                         return result("HOLD_BUDGET", hold)
                     if number > 1:
@@ -5092,21 +5426,36 @@ def _reconcile_benchmark_sample(
                     return result("HOLD_RECEIPT", "REPLAYED_PROVIDER_RECEIPT")
                 receipts.add(observed.digest)
                 provider_ids.add(observed.provider_request_id)
-                if (observed.configuration != plan.configuration
-                        or observed.observation != ProviderObservation("deterministic-test-only", "UNKNOWN",
-                                                                        "TEST_ONLY_MOCK")
-                        or (plan.configuration.effort is not None
-                            and attempt.trace.observed_effort != plan.configuration.effort)):
+                if (observed.configuration != configuration or observed.observation.mode != "TEST_ONLY_MOCK"
+                        or observed.observation.model != "UNKNOWN"
+                        or (not extended and (
+                            observed.observation.provider != "deterministic-test-only"
+                            or (configuration.effort is not None and attempt.trace.observed_effort != configuration.effort)
+                        ))):
                     return result("HOLD_RECEIPT", "REQUESTED_AND_OBSERVED_CONFIGURATION_MISMATCH")
-                hold = _trial_budget_hold(plan.budget, attempts, scheduling=False)
+                hold = _trial_budget_hold(plan.budget, attempts, scheduling=False, research=research,
+                                          require_cost_source=extended)
                 if hold:
                     return result("HOLD_BUDGET", hold)
+                if extended:
+                    timing = attempt.timing
+                    if ((authorization_ref is not None and timing.authorization_ref != authorization_ref)
+                            or (last_completed_at is not None and _require_iso_timestamp(timing.started_at, "started_at")
+                                < _require_iso_timestamp(last_completed_at, "completed_at"))):
+                        return result("HOLD_RECEIPT", "ROLE_TIMING_OR_AUTHORIZATION_MISMATCH")
+                    last_completed_at, authorization_ref = timing.completed_at, timing.authorization_ref
                 if stage.status == "TEST_ONLY_MOCK":
                     successful.append(stage)
                     break
                 if observed.state != "REFUSED" or observed.error_code != "MODEL_REFUSED":
                     return result("HOLD_RECEIPT", stage.failure or "ROLE_FAILED")
                 prior.append(stage)
+
+        if extended:
+            observation = _role_trial_observation(plan, sample, case, brief, attempts, research)
+            if persist_observation:
+                sidecars._write_benchmark_observation(observation)
+            return result("INCOMPLETE", "NOT_REAL_BENCHMARK", observation=observation)
 
         observation = observe_benchmark_run(
             case, sidecars, strategy=sample.strategy, sample_id=sample.sample_id, attempt=1,
@@ -5124,10 +5473,10 @@ def _reconcile_benchmark_sample(
 def advance_benchmark_trial(
     plan: A03BenchmarkExperimentPlan, store: CreativeSidecarStore, *, source_sha: str, sample_id: str,
     grant: BenchmarkTrialGrant | None = None, reasoner: CreativeReasonerV2 | None = None,
-    attempt_id: str | None = None,
+    attempt_id: str | None = None, live_grant: BenchmarkLiveTrialGrant | None = None,
 ) -> BenchmarkTrialResult:
     """Reconcile and execute only the explicitly selected next job slot, if any."""
-    from .live import InvocationAuthorization, LiveCreativeReasoner
+    from .live import InvocationAuthorization, LiveCreativeReasoner, LocalResearchFixtureProvider
 
     if store.load_benchmark_experiment_plan(plan.digest) != plan:
         raise CreativeValidationError("experiment plan disagrees with stored bytes")
@@ -5139,24 +5488,63 @@ def advance_benchmark_trial(
     if source_sha != plan.source_sha:
         return BenchmarkTrialResult(sample, "HOLD_SOURCE", "EXPERIMENT_SOURCE_MISMATCH")
     current = _reconcile_benchmark_sample(plan, sample, store)
-    if current.next_job is None:
+    if plan.purpose == "PRODUCTION" and live_grant is not None:
+        if (type(live_grant) is not BenchmarkLiveTrialGrant
+                or not BenchmarkLiveTrialGrant.from_dict(live_grant.to_dict()).permits(
+                    plan, sample, datetime.now(timezone.utc))):
+            return replace(current, status="HOLD_AUTHORIZATION", reason="LIVE_GRANT_SCOPE_OR_WINDOW_MISMATCH")
+        if type(reasoner) is not LiveCreativeReasoner:
+            return current
+        if reasoner.config != plan.configuration:
+            return replace(current, reason="BENCHMARK_TRANSPORT_CONFIGURATION_MISMATCH")
+        if sample.strategy == "S3":
+            return replace(current, reason="NO_VERIFIED_EXTERNAL_RESEARCH_PROVIDER")
+        status, reason = reasoner.benchmark_live_hold(live_grant)
+        return replace(current, status=status, reason=reason)
+    if current.next_job is None and current.next_research is None:
         return current
-    if (not isinstance(grant, BenchmarkTrialGrant)
+    if (type(grant) is not BenchmarkTrialGrant
             or (grant.plan_digest, grant.sample_id) != (plan.digest, sample_id)):
-        return BenchmarkTrialResult(sample, "HOLD_AUTHORIZATION", "BOUND_OFFLINE_GRANT_REQUIRED", current.attempts)
+        return replace(current, status="HOLD_AUTHORIZATION", reason="BOUND_OFFLINE_GRANT_REQUIRED",
+                       next_job=None, next_research=None)
+    if current.next_research is not None:
+        request = current.next_research
+        if reasoner is None:
+            return current
+        provider = reasoner.research_provider if type(reasoner) is LiveCreativeReasoner else None
+        if type(provider) is not LocalResearchFixtureProvider:
+            return replace(current, status="HOLD_DEPENDENCY", reason="UNSUPPORTED_PROVIDER", next_research=None)
+        if attempt_id != request.digest:
+            return current
+        try:
+            if store._claim_benchmark_research(request, grant.authorization_ref, provider.custody_ref):
+                receipt = LiveCreativeReasoner(research_provider=provider).research(request, grant.authorization_ref)
+                store._save_benchmark_research(receipt)
+        except (CreativeValidationError, VersionConflict, FileNotFoundError):
+            observed = _reconcile_benchmark_sample(plan, sample, store)
+            if observed.next_research is not None:
+                return replace(observed, status="HOLD_RECEIPT", reason="RESEARCH_COULD_NOT_BE_PERSISTED",
+                               next_research=None)
+            return observed
+        return _reconcile_benchmark_sample(plan, sample, store)
     if reasoner is None or attempt_id != current.next_job.slot:
         return current
+    if plan.role_configurations and (current.research is not None or current.attempts):
+        previous_ref = (current.attempts[-1].timing.authorization_ref if current.attempts
+                        else current.research.authorization_ref)
+        if previous_ref != grant.authorization_ref:
+            return replace(current, status="HOLD_AUTHORIZATION", reason="OFFLINE_GRANT_REBOUND", next_job=None)
     client = reasoner.client if type(reasoner) is LiveCreativeReasoner else None
     capabilities = getattr(client, "capabilities", None)
+    configuration = current.next_job.configuration
     if (getattr(client, "execution_mode", None) != "TEST_ONLY_MOCK"
-            or reasoner.config != plan.configuration
+            or reasoner.config != configuration
             or getattr(capabilities, "network_required", None) is not False
             or getattr(capabilities, "external_spend_possible", None) is not False):
-        return BenchmarkTrialResult(sample, "HOLD_DEPENDENCY", "CONFIGURED_OFFLINE_MOCK_CLIENT_REQUIRED",
-                                    current.attempts)
+        return replace(current, status="HOLD_DEPENDENCY", reason="CONFIGURED_OFFLINE_MOCK_CLIENT_REQUIRED", next_job=None)
     try:
         _run_creative_stage(
-            current.next_job, store, LiveCreativeReasoner(plan.configuration, client),
+            current.next_job, store, LiveCreativeReasoner(configuration, client),
             authorization=InvocationAuthorization(authorization_ref=grant.authorization_ref),
             record_timing=store._save_experiment_attempt_timing,
         )
@@ -5165,8 +5553,7 @@ def advance_benchmark_trial(
         # the immutable receipts decide whether it is safe to advance.
         observed = _reconcile_benchmark_sample(plan, sample, store)
         if observed.next_job == current.next_job:
-            return BenchmarkTrialResult(sample, "HOLD_RECEIPT", "ATTEMPT_COULD_NOT_BE_PERSISTED",
-                                        observed.attempts)
+            return replace(observed, status="HOLD_RECEIPT", reason="ATTEMPT_COULD_NOT_BE_PERSISTED", next_job=None)
         return observed
     return _reconcile_benchmark_sample(plan, sample, store)
 
@@ -5204,12 +5591,19 @@ def compare_benchmark_trials(
         else:
             reasons.add(trial.status)
             invalid |= trial.status in ("HOLD_RECEIPT", "HOLD_BUDGET", "HOLD_UNKNOWN_EFFECT")
+        identities = []
+        if trial.research is not None:
+            identities.extend((("receipt", trial.research.digest), ("provider", trial.research.invocation_id)))
         for attempt in trial.attempts:
-            trace = attempt.trace
-            for kind, identity in (("receipt", trace.receipt_digest), ("provider", trace.provider_request_id)):
-                if identity is not None:
-                    replayed |= (kind, identity) in used
-                    used.add((kind, identity))
+            observed = attempt.stage.reasoning
+            identities.extend((("receipt", observed.digest), ("provider", observed.provider_request_id)))
+            if observed.execution is not None:
+                execution = observed.execution
+                identities.extend((("process", execution.cli_thread_id), ("session", execution.session_sha256)))
+        for kind, identity in identities:
+            if identity is not None:
+                replayed |= (kind, identity) in used
+                used.add((kind, identity))
     missing = tuple(sample.sample_id for sample in samples if sample.sample_id not in observations)
     if replayed or invalid:
         if replayed:

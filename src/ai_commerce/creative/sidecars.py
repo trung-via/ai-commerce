@@ -20,11 +20,12 @@ from .v2 import (
     A03CreativeStageResult, BenchmarkAttemptTiming, BenchmarkTrialAttempt, ReasoningRequest, ReasoningResult,
     _benchmark_case_slot, _benchmark_comparison_slot, _benchmark_observation_slot,
     _build_benchmark_comparison_payload, _commit_creative_stage, _cycle_lineage, _cycle_stage_job, _output_pin,
+    _benchmark_research_request, _reconcile_benchmark_sample,
     _stage_concepts, _validate_spec_evidence, inference_decision, inference_failure,
 )
 
 if TYPE_CHECKING:
-    from .live import InvocationAuthorization
+    from .live import BenchmarkResearchReceipt, BenchmarkResearchRequest, InvocationAuthorization
 
 
 class CreativeSidecarStore:
@@ -152,6 +153,8 @@ class CreativeSidecarStore:
 
     def _validate_result(self, result: ReasoningResult) -> None:
         self.validate_request(result.request)
+        if result.request.benchmark is not None and result.observation.mode == "MODEL":
+            raise CreativeValidationError("no verified live benchmark transport")
 
     def validate_request(self, request: ReasoningRequest) -> None:
         request = ReasoningRequest.from_dict(request.to_dict())
@@ -168,6 +171,41 @@ class CreativeSidecarStore:
             if saved != request.source:
                 raise CreativeValidationError("proposal source revision mismatch")
             self._check_bytes(self.creative._concept_path(saved.concept_id, saved.revision), saved.to_dict())
+        if request.benchmark is not None:
+            context = request.benchmark
+            plan = self.load_benchmark_experiment_plan(context.plan_digest)
+            sample = next((sample for sample in plan.samples if sample.sample_id == context.sample_id), None)
+            if (plan.purpose != "TEST_ONLY_MOCK" or not plan.role_configurations or sample is None
+                    or request.operation not in sample.operations or context.attempt > plan.budget.max_attempts
+                    or self.load_benchmark_case_by_digest(sample.case_digest).source_brief_digest != brief_digest(brief)):
+                raise CreativeValidationError("benchmark role rebound trial sample, brief or plan")
+            if sample.strategy == "S3":
+                case = self.load_benchmark_case_by_digest(sample.case_digest)
+                _, receipt = self._load_benchmark_research(_benchmark_research_request(plan, sample, case))
+                if (receipt is None or receipt.error_code is not None
+                        or receipt.digest != context.research_receipt_digest or receipt.sources != context.evidence):
+                    raise CreativeValidationError("benchmark role needs retrieved sample source bytes")
+            elif context.research_receipt_digest is not None:
+                raise CreativeValidationError("benchmark strategy does not include research")
+            if context.generator_receipt_digest is not None:
+                generator = self.load_result(context.generator_receipt_digest)
+                generated_context = generator.request.benchmark
+                if (generated_context is None or generator.request.operation != "EXPLORE" or generator.state != "OK"
+                        or inference_failure(generator) is not None
+                        or (generated_context.plan_digest, generated_context.sample_id)
+                        != (context.plan_digest, context.sample_id)
+                        or generator.concepts()[0] != request.source):
+                    raise CreativeValidationError("benchmark role rebound generator receipt or source")
+            if context.critic is not None:
+                critic = self.load_result(context.critic.receipt_digest)
+                if (critic.request.benchmark is None or critic.request.operation != "CRITIQUE" or critic.state != "OK"
+                        or inference_failure(critic) is not None
+                        or (critic.request.benchmark.plan_digest, critic.request.benchmark.sample_id)
+                        != (context.plan_digest, context.sample_id)
+                        or critic.request.benchmark.generator_receipt_digest != context.generator_receipt_digest
+                        or (critic.request.digest, critic.critique, _output_pin(critic.request.source))
+                        != (context.critic.request_digest, context.critic.critique, context.critic.selection)):
+                    raise CreativeValidationError("benchmark developer rebound independent critic evidence")
         if request.cycle is not None:
             context = request.cycle
             cycle = A03CreativeCycleJob.from_dict(self._read("cycle-requests", context.cycle_digest))
@@ -252,15 +290,18 @@ class CreativeSidecarStore:
         """
         valid = A03CreativeJob.from_dict(job.to_dict())
         self.validate_request(valid.request)
-        path = self._path("jobs", valid.slot)
-        content = canonical_bytes(valid.to_dict())
+        return self._claim("jobs", valid.slot, valid.to_dict())
+
+    def _claim(self, kind: str, slot: str, data: dict[str, Any]) -> bool:
+        path = self._path(kind, slot)
+        content = canonical_bytes(data)
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             with path.open("xb") as target:
                 target.write(content)
         except FileExistsError:
             if path.read_bytes() != content:
-                raise VersionConflict("VERSION_CONFLICT: creative job attempt already bound") from None
+                raise VersionConflict("VERSION_CONFLICT: creative attempt already bound") from None
             return False
         return True
 
@@ -748,15 +789,24 @@ class CreativeSidecarStore:
         if obs.judge_receipt is not None and case.factual_evidence_applicable:
             if obs.judge_receipt.scores.factual_evidence_accuracy is None:
                 raise CreativeValidationError("factual_evidence_accuracy is required for this benchmark case")
+        if obs.experiment_plan_digest is not None:
+            plan = self.load_benchmark_experiment_plan(obs.experiment_plan_digest)
+            sample = next((sample for sample in plan.samples if sample.sample_id == obs.sample_id), None)
+            if (sample is None or not plan.role_configurations
+                    or _reconcile_benchmark_sample(plan, sample, self, persist_observation=False).observation != obs):
+                raise CreativeValidationError("benchmark observation differs from its trial receipts")
+            return
 
         seen_cli_threads: set[str] = set()
         seen_cli_sessions: set[str] = set()
         seen_cli_stdouts: set[str] = set()
         for trace in obs.role_traces:
             if trace.role == "RESEARCH":
+                if obs.cycle_job_digest is None or trace.receipt_digest is not None:
+                    raise CreativeValidationError("legacy research requires verified R2 cycle evidence")
                 continue
             job = self._read_job_slot(trace.job_slot)
-            if (job.digest != trace.job_digest or job.brief_id != obs.brief_id
+            if (job.request.benchmark is not None or job.digest != trace.job_digest or job.brief_id != obs.brief_id
                     or job.source_brief_digest != obs.source_brief_digest):
                 raise CreativeValidationError("benchmark trace job disagrees with stored A03 job/brief")
             stage = self.load_stage(job)
@@ -844,8 +894,11 @@ class CreativeSidecarStore:
             raise CreativeValidationError("expected A03BenchmarkObservation")
         valid = A03BenchmarkObservation.from_dict(obs.to_dict())
         self._validate_benchmark_observation(valid)
-        self._save("benchmark-observation-slots", valid.slot, {"observation_digest": valid.digest})
-        return self._save("benchmark-observations", valid.digest, valid.to_dict())
+        return self._write_benchmark_observation(valid)
+
+    def _write_benchmark_observation(self, obs: A03BenchmarkObservation) -> str:
+        self._save("benchmark-observation-slots", obs.slot, {"observation_digest": obs.digest})
+        return self._save("benchmark-observations", obs.digest, obs.to_dict())
 
     def load_benchmark_observation_by_digest(self, digest: str) -> A03BenchmarkObservation:
         require_digest(digest)
@@ -920,7 +973,7 @@ class CreativeSidecarStore:
         plan.validate_cases(cases)
         for case in cases:
             brief = self.creative.load_brief(case.source_brief_digest)
-            if case.brief_class == "VN_PRODUCT" and not brief.get("product_ref"):
+            if not plan.role_configurations and case.brief_class == "VN_PRODUCT" and not brief.get("product_ref"):
                 raise CreativeValidationError("VN_PRODUCT experiment case requires a product reference")
             if case.brief_class == "SILENT_NO_CTA":
                 audio = brief.get("audio")
@@ -947,7 +1000,12 @@ class CreativeSidecarStore:
         observed = self.observed_step(job)
         if observed is None or timing.receipt_digest != observed.digest:
             raise CreativeValidationError("benchmark attempt timing requires a linked reasoning receipt")
-        self._save("benchmark-attempt-timings", job.slot, timing.to_dict())
+        if job.request.benchmark is not None:
+            digest = sha256_bytes(canonical_bytes(timing.to_dict()))
+            self._save("benchmark-timing-records", digest, timing.to_dict())
+            self._save("benchmark-attempt-timings", job.slot, {"timing_digest": digest})
+        else:
+            self._save("benchmark-attempt-timings", job.slot, timing.to_dict())
 
     def _load_experiment_attempt(self, job: A03CreativeJob) -> tuple[bool, BenchmarkTrialAttempt | None]:
         if not self._path("jobs", job.slot).exists():
@@ -965,8 +1023,50 @@ class CreativeSidecarStore:
         path = self._path("benchmark-attempt-timings", job.slot)
         timing = None
         if path.exists():
-            timing = BenchmarkAttemptTiming.from_dict(read_json(path.read_text(encoding="utf-8")))
-            self._check_bytes(path, timing.to_dict())
+            raw = read_json(path.read_text(encoding="utf-8"))
+            if job.request.benchmark is not None:
+                self._check_bytes(path, exact_fields(raw, {"timing_digest"}))
+                timing = BenchmarkAttemptTiming.from_dict(self._read("benchmark-timing-records", raw["timing_digest"]))
+                if sha256_bytes(canonical_bytes(timing.to_dict())) != raw["timing_digest"]:
+                    raise CreativeValidationError("stored benchmark timing is not canonical")
+            else:
+                timing = BenchmarkAttemptTiming.from_dict(raw)
+                self._check_bytes(path, timing.to_dict())
             if timing.receipt_digest != observed.digest:
                 raise CreativeValidationError("benchmark attempt timing rebound reasoning receipt")
         return True, BenchmarkTrialAttempt(stage, timing)
+
+    def _claim_benchmark_research(self, request: BenchmarkResearchRequest, authorization_ref: str,
+                                  custody_ref: str) -> bool:
+        claim = {"request": request.to_dict(), "authorization_ref": authorization_ref, "custody_ref": custody_ref}
+        return self._claim("benchmark-research-claims", request.digest, claim)
+
+    def _save_benchmark_research(self, receipt: BenchmarkResearchReceipt) -> None:
+        self._check_bytes(self._path("benchmark-research-claims", receipt.request.digest), {
+            "request": receipt.request.to_dict(), "authorization_ref": receipt.authorization_ref,
+            "custody_ref": receipt.custody_ref,
+        })
+        self._save("benchmark-research-receipts", receipt.digest, receipt.to_dict())
+        self._save("benchmark-research-refs", receipt.request.digest, {"receipt_digest": receipt.digest})
+
+    def _load_benchmark_research(self, request: BenchmarkResearchRequest) -> tuple[bool, BenchmarkResearchReceipt | None]:
+        from .live import BenchmarkResearchReceipt
+
+        claim_path = self._path("benchmark-research-claims", request.digest)
+        if not claim_path.exists():
+            return False, None
+        claim = exact_fields(read_json(claim_path.read_text(encoding="utf-8")),
+                             {"request", "authorization_ref", "custody_ref"})
+        self._check_bytes(claim_path, claim)
+        if claim["request"] != request.to_dict():
+            raise CreativeValidationError("benchmark research claim rebound its request")
+        path = self._path("benchmark-research-refs", request.digest)
+        if not path.exists():
+            return True, None
+        ref = exact_fields(read_json(path.read_text(encoding="utf-8")), {"receipt_digest"})
+        self._check_bytes(path, ref)
+        receipt = BenchmarkResearchReceipt.from_dict(self._read("benchmark-research-receipts", ref["receipt_digest"]))
+        if (receipt.request != request or receipt.digest != ref["receipt_digest"]
+                or (receipt.authorization_ref, receipt.custody_ref) != (claim["authorization_ref"], claim["custody_ref"])):
+            raise CreativeValidationError("benchmark research receipt rebound request or custody")
+        return True, receipt
