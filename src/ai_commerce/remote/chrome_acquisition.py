@@ -2315,6 +2315,136 @@ def _clean_task(owner: tuple[Path, int, str], target: _ChromeTarget,
     return "UNKNOWN_EFFECT" if install or start else "AUTOSTART_RUNTIME_UNAVAILABLE"
 
 
+_CLEAN_TASK_DELETE_PRECHECK_CODES = frozenset({
+    "TASK_ALREADY_ABSENT", "TASK_ALREADY_EXACT", "TASK_OWNER_MISMATCH",
+    "TASK_ACL_MISMATCH", "TASK_ACTION_FAMILY_MISMATCH",
+    "TASK_DEFINITION_UNVERIFIED", "TASK_RUNNING", "TASK_NOT_READY",
+    "WINDOWS_OWNER_CONTEXT_UNVERIFIED", "AUTOSTART_RUNTIME_UNAVAILABLE",
+})
+
+
+_CLEAN_9444_TASK_DELETE_SCRIPT = _CLEAN_9444_TASK_INSPECTION + r"""
+if ($env:AI_COMMERCE_TASK_DELETE_CONFIRM -cne '1' -or
+    [string]::IsNullOrEmpty($env:AI_COMMERCE_TASK_PROFILE_DIR)) {
+    'AUTOSTART_RUNTIME_UNAVAILABLE'; exit
+}
+try {
+    if (!$registered) { 'TASK_ALREADY_ABSENT'; exit }
+    if ($registered.Name -cne $name -or $registered.Path -cne ('\' + $name)) {
+        'TASK_DEFINITION_UNVERIFIED'; exit
+    }
+    if (Test-Registration $registered) { 'TASK_ALREADY_EXACT'; exit }
+    $ownerSd = [Security.AccessControl.RawSecurityDescriptor]::new($registered.GetSecurityDescriptor(1))
+    if (!$ownerSd.Owner -or $ownerSd.Owner.Value -cnotin @($sid, 'S-1-5-18', 'S-1-5-32-544')) {
+        'TASK_ACL_MISMATCH'; exit
+    }
+    $acl = [Security.AccessControl.RawSecurityDescriptor]::new($registered.GetSecurityDescriptor(4))
+    $want = [Security.AccessControl.RawSecurityDescriptor]::new($sddl)
+    if ($acl.GetSddlForm('Access') -cne $want.GetSddlForm('Access')) { 'TASK_ACL_MISMATCH'; exit }
+    $definition = $registered.Definition
+    if (!$definition -or !$definition.Principal -or !$definition.Triggers -or !$definition.Actions) {
+        'TASK_DEFINITION_UNVERIFIED'; exit
+    }
+    $principal = $definition.Principal
+    if ($principal.Id -cne $expected.Principal.Id -or !(Test-Owner $principal.UserId) -or
+        $principal.LogonType -ne 3 -or $principal.RunLevel -ne 0 -or $principal.GroupId) {
+        'TASK_OWNER_MISMATCH'; exit
+    }
+    if ($definition.Triggers.Count -ne 1) { 'TASK_DEFINITION_UNVERIFIED'; exit }
+    $t = $definition.Triggers.Item(1)
+    if (!$t -or $t.Type -ne 9 -or !(Test-Owner $t.UserId)) { 'TASK_OWNER_MISMATCH'; exit }
+    if ($definition.Actions.Count -ne 1 -or $definition.Actions.Context -cne $expected.Actions.Context) {
+        'TASK_ACTION_FAMILY_MISMATCH'; exit
+    }
+    $a = $definition.Actions.Item(1)
+    if (!$a -or $a.Type -ne 0 -or $a.Path -cne $action.Path -or
+        $a.WorkingDirectory -cne $action.WorkingDirectory -or
+        $a.Arguments -isnot [string] -or $a.Arguments.Length -gt 32768) {
+        'TASK_ACTION_FAMILY_MISMATCH'; exit
+    }
+    $rawArgs = $a.Arguments
+    $sidNeedle = '$sid = ''' + $sid + ''''
+    $profileNeedle = '$profileDir = ''' + $env:AI_COMMERCE_TASK_PROFILE_DIR.Replace("'", "''") + ''''
+    if (!$rawArgs.StartsWith('-NoProfile -NonInteractive -WindowStyle Hidden -Command "& {', [StringComparison]::Ordinal) -or
+        !$rawArgs.EndsWith('}"', [StringComparison]::Ordinal) -or
+        $rawArgs.IndexOf($sidNeedle, [StringComparison]::Ordinal) -lt 0 -or
+        $rawArgs.IndexOf($profileNeedle, [StringComparison]::OrdinalIgnoreCase) -lt 0 -or
+        $rawArgs.IndexOf('$registryPath = ''Software\AI-Commerce\WakeHub-9444-Clean''', [StringComparison]::Ordinal) -lt 0 -or
+        $rawArgs.IndexOf('$mutexName = ''Global\AI-Commerce-WakeHub-9444-Clean-v1''', [StringComparison]::Ordinal) -lt 0 -or
+        $rawArgs.IndexOf('--remote-debugging-port=9444', [StringComparison]::Ordinal) -lt 0 -or
+        $rawArgs.IndexOf('function Assert-OwnerSession {', [StringComparison]::Ordinal) -lt 0 -or
+        $rawArgs.IndexOf('function Read-Chrome {', [StringComparison]::Ordinal) -lt 0 -or
+        $rawArgs.IndexOf('function Start-CleanChrome {', [StringComparison]::Ordinal) -lt 0 -or
+        $rawArgs.IndexOf('function Open-LauncherSlot {', [StringComparison]::Ordinal) -lt 0 -or
+        $rawArgs.IndexOf('function Open-LaunchState($create) {', [StringComparison]::Ordinal) -lt 0) {
+        'TASK_ACTION_FAMILY_MISMATCH'; exit
+    }
+    $instances = $registered.GetInstances(0)
+    if ($null -eq $instances -or $instances.Count -isnot [int]) {
+        'TASK_DEFINITION_UNVERIFIED'; exit
+    }
+    if ($registered.State -eq 4 -or $registered.State -eq 2 -or $instances.Count -ne 0) {
+        'TASK_RUNNING'; exit
+    }
+    if (!$registered.Enabled -or $registered.State -ne 3) { 'TASK_NOT_READY'; exit }
+    if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -cne $sid -or
+        [Diagnostics.Process]::GetCurrentProcess().SessionId -ne $session) {
+        'WINDOWS_OWNER_CONTEXT_UNVERIFIED'; exit
+    }
+} catch {
+    'TASK_DEFINITION_UNVERIFIED'; exit
+}
+try {
+    $folder.DeleteTask($name, 0)
+} catch {
+    'UNKNOWN_EFFECT'; exit
+}
+try {
+    if ($null -eq (Read-Registration)) { 'TASK_DELETED' } else { 'UNKNOWN_EFFECT' }
+} catch {
+    'UNKNOWN_EFFECT'
+}
+"""
+
+
+def _clean_delete_conflicting_task(
+    owner: tuple[Path, int, str],
+    target: _ChromeTarget,
+    candidates: tuple[Path, ...],
+) -> str:
+    """Delete ONLY the fixed conflicting WakeHub PowerShell task via COM."""
+    _, session, sid = owner
+    try:
+        powershell = _powershell()
+        launcher = _clean_launcher(owner, target, candidates)
+    except (AcquisitionBlocked, _Clean9444Hold):
+        return "AUTOSTART_RUNTIME_UNAVAILABLE"
+    child_env = _child_environment()
+    child_env.update(
+        AI_COMMERCE_TASK_SID=sid,
+        AI_COMMERCE_TASK_SESSION=str(session),
+        AI_COMMERCE_TASK_POWERSHELL=str(powershell),
+        AI_COMMERCE_TASK_DIRECTORY=str(powershell.parent),
+        AI_COMMERCE_TASK_ARGUMENTS=subprocess.list2cmdline([*_CLEAN_POWERSHELL_FLAGS, launcher]),
+        AI_COMMERCE_TASK_PROFILE_DIR=str(target.user_data_dir),
+        AI_COMMERCE_TASK_DELETE_CONFIRM="1",
+    )
+    try:
+        result = subprocess.run(
+            [str(powershell), "-NoProfile", "-NonInteractive", "-Command",
+             _CLEAN_9444_TASK_DELETE_SCRIPT],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=15, check=False, env=child_env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        code = result.stdout.strip().decode("ascii")
+        if not result.returncode and (code == "TASK_DELETED" or code in _CLEAN_TASK_DELETE_PRECHECK_CODES):
+            return code
+    except (OSError, subprocess.TimeoutExpired, UnicodeError):
+        pass
+    return "UNKNOWN_EFFECT"
+
+
 def install_clean_9444_autostart(*, opt_in: bool = False) -> dict:
     """Enroll the fixed task from an attended, non-elevated owner session."""
     if opt_in is not True:

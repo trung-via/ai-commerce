@@ -40,6 +40,7 @@ PUBLIC_EXTENSIONS = {".md", ".py", ".json", ".yml", ".yaml", ".toml", ".cjs", ".
 MAX_READ = 8192
 MAX_WRITE = 2048
 _CLEAN_AUTOSTART = "install_clean_9444_autostart"
+_CLEAN_DELETE_CONFLICTING_TASK = "delete_conflicting_clean_9444_task"
 _CLEAN_RUNTIME_PROBE = "clean_9444_runtime_probe"
 _ACQUISITION_SOURCE = Path("src/ai_commerce/remote/chrome_acquisition.py")
 
@@ -206,7 +207,7 @@ def parse_event(event, mode):
         else:
             deny("READ_OPERATION_DENIED")
     else:
-        if operation == _CLEAN_AUTOSTART:
+        if operation in (_CLEAN_AUTOSTART, _CLEAN_DELETE_CONFLICTING_TASK):
             if params:
                 deny("INVALID_PARAMETERS")
         elif operation == "git_sync_main":
@@ -780,6 +781,105 @@ def _install_protected_clean_autostart(event):
         return _clean_autostart_receipt("UNKNOWN_EFFECT" if reserved else str(exc))
     except Exception:
         return _clean_autostart_receipt("UNKNOWN_EFFECT" if reserved else "AUTOSTART_RUNTIME_UNAVAILABLE")
+
+
+_CLEAN_DELETE_PUBLIC_CODES = frozenset({
+    "TASK_DELETED", "TASK_ALREADY_ABSENT", "BLOCKED", "UNKNOWN_EFFECT",
+})
+
+
+def _clean_delete_task_receipt(code):
+    if type(code) is not str or code not in _CLEAN_DELETE_PUBLIC_CODES:
+        code = "BLOCKED"
+    status = {
+        "TASK_DELETED": "OBSERVED",
+        "TASK_ALREADY_ABSENT": "OBSERVED",
+        "BLOCKED": "BLOCKED",
+        "UNKNOWN_EFFECT": "HOLD",
+    }[code]
+    result = {
+        "status": status,
+        "code": code,
+        "operation": _CLEAN_DELETE_CONFLICTING_TASK,
+        "cdp_port": 9444,
+        "exact_chat_verified": False,
+        "wake_sent": False,
+        "arbitrary_shell_enabled": False,
+    }
+    if not result.keys() <= PERSONAL_PUBLIC_FIELDS:
+        deny("PUBLIC_TRANSPORT_GAP")
+    return result
+
+
+def _delete_protected_clean_conflicting_task(event):
+    """Guarded one-shot delete of the fixed conflicting WakeHub 9444 clean task."""
+    # Check the public contract before any native call, even on BLOCKED/HOLD.
+    _clean_delete_task_receipt("BLOCKED")
+    deletion_possible = False
+    try:
+        _require_protected_clean_runner("issue_comment")
+        sha = _protected_clean_workflow_sha()
+        if parse_event(event, "write")["operation"] != _CLEAN_DELETE_CONFLICTING_TASK:
+            return _clean_delete_task_receipt("BLOCKED")
+        from ai_commerce.remote import chrome_acquisition as acquisition
+        owner = acquisition._native_operator()
+        _, session, sid = owner
+        pending = acquisition._CLEAN_TASK_PENDING
+        _persistent_clean_source(acquisition, sha)
+        if acquisition._native_operator() != owner:
+            return _clean_delete_task_receipt("BLOCKED")
+
+        def verify_markers_stable():
+            autostart_pending = acquisition._clean_pending(pending)
+            launch_pending = acquisition._clean_launch_pending()
+            if autostart_pending is not True or launch_pending is not False:
+                deny("BLOCKED")
+
+        def verify_target_and_browser(expected_target, expected_candidates):
+            if acquisition._native_operator() != owner:
+                deny("BLOCKED")
+            if acquisition._clean_target(owner) != (expected_target, expected_candidates):
+                deny("BLOCKED")
+            state, identity = acquisition._clean_inventory(
+                expected_target, expected_candidates, session, sid)
+            if state != "ABSENT" or identity is not None:
+                deny("BLOCKED")
+            acquisition._clean_require_unlocked(expected_target)
+            verify_markers_stable()
+
+        with acquisition._clean_supervisor_slot():
+            verify_markers_stable()
+            target, candidates = acquisition._clean_target(owner)
+            verify_target_and_browser(target, candidates)
+            task = acquisition._clean_task(owner, target, candidates, install=False)
+            verify_target_and_browser(target, candidates)
+            if task == "AUTOSTART_NOT_ENROLLED":
+                return _clean_delete_task_receipt("TASK_ALREADY_ABSENT")
+            if task != "AUTOSTART_CONFLICT":
+                return _clean_delete_task_receipt("BLOCKED")
+            # Cross the single-delete boundary only after all preconditions and
+            # stability checks pass. Any non-precheck failure is HOLD UNKNOWN_EFFECT.
+            deletion_possible = True
+            deleted = acquisition._clean_delete_conflicting_task(owner, target, candidates)
+            if deleted in acquisition._CLEAN_TASK_DELETE_PRECHECK_CODES:
+                deletion_possible = False
+                return _clean_delete_task_receipt("BLOCKED")
+            if deleted != "TASK_DELETED":
+                return _clean_delete_task_receipt("UNKNOWN_EFFECT")
+            # Independently verify task absence and preserved markers/owner/browser state.
+            if acquisition._clean_task(owner, target, candidates, install=False) != "AUTOSTART_NOT_ENROLLED":
+                return _clean_delete_task_receipt("UNKNOWN_EFFECT")
+            if acquisition._native_operator() != owner:
+                return _clean_delete_task_receipt("UNKNOWN_EFFECT")
+            verify_markers_stable()
+            state, identity = acquisition._clean_inventory(target, candidates, session, sid)
+            if state != "ABSENT" or identity is not None:
+                return _clean_delete_task_receipt("UNKNOWN_EFFECT")
+            return _clean_delete_task_receipt("TASK_DELETED")
+    except Denied:
+        return _clean_delete_task_receipt("UNKNOWN_EFFECT" if deletion_possible else "BLOCKED")
+    except Exception:
+        return _clean_delete_task_receipt("UNKNOWN_EFFECT" if deletion_possible else "BLOCKED")
 
 
 def _runner_runtime_inventory():
@@ -2087,6 +2187,10 @@ def perform(request):
         if type(params) is not dict or params:
             deny("INVALID_PARAMETERS")
         return _clean_autostart_receipt("PROTECTED_HOSTOPS_ONLY")
+    if op == _CLEAN_DELETE_CONFLICTING_TASK:
+        if type(params) is not dict or params:
+            deny("INVALID_PARAMETERS")
+        return _clean_delete_task_receipt("BLOCKED")
     if op == "cdp_9444_config_registry":
         if type(params) is not dict or params:
             deny("INVALID_PARAMETERS")
@@ -2220,8 +2324,12 @@ def main():
         if request["operation"] == _CLEAN_RUNTIME_PROBE:
             result = _probe_protected_clean_runtime()
         else:
-            outcome = (_install_protected_clean_autostart(event) if request["operation"] == _CLEAN_AUTOSTART
-                       else perform(request))
+            if request["operation"] == _CLEAN_AUTOSTART:
+                outcome = _install_protected_clean_autostart(event)
+            elif request["operation"] == _CLEAN_DELETE_CONFLICTING_TASK:
+                outcome = _delete_protected_clean_conflicting_task(event)
+            else:
+                outcome = perform(request)
             result = {
                 **outcome,
                 "issue_number": request["issue_number"],
@@ -2230,7 +2338,8 @@ def main():
                 "remote_shell_enabled": False,
                 "source_sha": os.environ.get("GITHUB_SHA", ""),
             }
-            if request["operation"] == _CLEAN_AUTOSTART and not re.fullmatch(r"[a-f0-9]{40}", result["source_sha"]):
+            if (request["operation"] in (_CLEAN_AUTOSTART, _CLEAN_DELETE_CONFLICTING_TASK)
+                    and not re.fullmatch(r"[a-f0-9]{40}", result["source_sha"])):
                 del result["source_sha"]
     except Denied as exc:
         result["code"] = str(exc)

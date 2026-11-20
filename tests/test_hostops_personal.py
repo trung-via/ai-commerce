@@ -2147,6 +2147,7 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         self.mock(self.acq, "_clean_pending", side_effect=self.pending.__contains__)
         self.record = self.mock(self.acq, "_clean_record_pending", side_effect=self.record_pending)
         self.task = self.mock(self.acq, "_clean_task", return_value="ALREADY_ENROLLED")
+        self.delete_task = self.mock(self.acq, "_clean_delete_conflicting_task", return_value="TASK_DELETED")
         self.probe = self.mock(self.acq, "_probe_cdp")
         self.spawn = self.mock(self.acq.subprocess, "Popen", side_effect=AssertionError("direct spawn"))
         self.native_run = self.mock(self.acq.subprocess, "run", side_effect=AssertionError("native subprocess"))
@@ -2927,6 +2928,296 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         self.assertIn(".RunEx($null, 12, $session, $sid)", script)
         self.assertIn(".RegisterTaskDefinition($name, $expected, 34, $sid, $null, 3, $sddl)", script)
         self.assertNotRegex(script, r"Stop-Process|\.Stop\(|DeleteTask|TerminateProcess")
+
+    def invoke_delete(self, payload=None, *, mode="write"):
+        op = "delete_conflicting_clean_9444_task"
+        return self.invoke(payload or event(mode, op, {}), mode=mode)
+
+    def test_delete_conflicting_task_parser_requires_write_owner_comment_and_empty_params(self):
+        op = "delete_conflicting_clean_9444_task"
+        with self.assertRaisesRegex(hostops.Denied, "READ_OPERATION_DENIED"):
+            hostops.parse_event(event("read", op, {}), "read")
+        request = hostops.parse_event(event("write", op, {}), "write")
+        self.assertEqual(request["operation"], op)
+        self.assertEqual(hostops.perform(request)["status"], "BLOCKED")
+        self.assertEqual(hostops.perform(request)["code"], "BLOCKED")
+        with self.assertRaisesRegex(hostops.Denied, "INVALID_PARAMETERS"):
+            hostops.perform({"operation": op, "parameters": {"task": "other"}})
+        for payload, expected in (
+            (event("write", op, {}, comment="APPROVE WRITE #17 "), "EXACT_WRITE_APPROVAL_REQUIRED"),
+            (event("write", op, {}, comment="APPROVE WRITE #18"), "EXACT_WRITE_APPROVAL_REQUIRED"),
+            (event("write", op, {"task": "AI-Commerce-WakeHub-9444-Clean-S-1-5-21-1"}), "INVALID_PARAMETERS"),
+            (event("write", op, {"sid": self.sid}), "INVALID_PARAMETERS"),
+            (event("write", op, {"path": "C:/temp"}), "INVALID_PARAMETERS"),
+            (event("write", op, {"command": "schtasks /delete"}), "INVALID_PARAMETERS"),
+            (event("write", op, {"port": 9444}), "INVALID_PARAMETERS"),
+            (event("write", op, None), "INVALID_REQUEST"),
+            (event("write", op, []), "INVALID_REQUEST"),
+            (event("write", "delete_clean_9444_task", {}), "WRITE_SCOPE_DENIED"),
+        ):
+            with self.subTest(expected=expected):
+                self.assertEqual(self.invoke_delete(payload)["code"], expected)
+        for section in ("issue", "comment", "sender"):
+            payload = copy.deepcopy(event("write", op, {}))
+            user = payload[section] if section == "sender" else payload[section]["user"]
+            user["login"] = "another-account"
+            self.assertEqual(self.invoke_delete(payload)["status"], "BLOCKED")
+        self.session.assert_not_called()
+        self.task.assert_not_called()
+        self.delete_task.assert_not_called()
+
+    def test_delete_conflicting_task_requires_protected_runner_source_and_owner_session(self):
+        self.pending.add("AutostartPending")
+        self.task.return_value = "AUTOSTART_CONFLICT"
+        for name, value in (
+            ("RUNNER_NAME", "AI-COMMERCE-EF02-01"),
+            ("GITHUB_EVENT_NAME", "issues"),
+            ("GITHUB_ACTOR", "another-account"),
+            ("GITHUB_RUN_ATTEMPT", "2"),
+            ("GITHUB_WORKFLOW_SHA", "b" * 40),
+            ("AI_COMMERCE_GIT_GUARD_ACTIVE", "1"),
+        ):
+            with self.subTest(env_var=name), patch.dict(self.env, {name: value}):
+                receipt = self.invoke_delete()
+                self.assertEqual((receipt["status"], receipt["code"]), ("BLOCKED", "BLOCKED"))
+        for owner, name, result in (
+            (self.acq, "_interactive_session", 0),
+            (self.wake, "_windows_process_sid", "S-1-5-18"),
+        ):
+            with self.subTest(name=name), patch.object(owner, name, return_value=result):
+                receipt = self.invoke_delete()
+                self.assertEqual((receipt["status"], receipt["code"]), ("BLOCKED", "BLOCKED"))
+        for owner, name, error in (
+            (self.acq, "_interactive_session", self.acq.AcquisitionBlocked("ELEVATED_CHROME_DISALLOWED")),
+            (self.acq, "_interactive_session", self.acq.AcquisitionBlocked("WINDOWS_INTERACTIVE_REQUIRED")),
+            (hostops, "_persistent_clean_source", hostops.Denied("LOCAL_MAIN_SYNC_REQUIRED")),
+            (hostops, "_persistent_clean_source", hostops.Denied("SOURCE_PATH_UNTRUSTED")),
+            (hostops, "_persistent_clean_source", hostops.Denied("SOURCE_BYTES_MISMATCH")),
+        ):
+            with self.subTest(error=str(error)), patch.object(owner, name, side_effect=error):
+                receipt = self.invoke_delete()
+                self.assertEqual((receipt["status"], receipt["code"]), ("BLOCKED", "BLOCKED"))
+        with patch.object(self.acq, "_interactive_session", side_effect=(7, 8)):
+            self.assertEqual(self.invoke_delete()["code"], "BLOCKED")
+        with patch.object(hostops, "PERSONAL_PUBLIC_FIELDS", hostops.PERSONAL_PUBLIC_FIELDS - {"cdp_port"}):
+            self.assertEqual(self.invoke_delete()["code"], "PUBLIC_TRANSPORT_GAP")
+        self.task.assert_not_called()
+        self.delete_task.assert_not_called()
+        self.record.assert_not_called()
+        self.assertEqual(self.pending, {"AutostartPending"})
+
+    def test_delete_conflicting_task_requires_exact_stable_markers_and_preserves_registry(self):
+        self.task.return_value = "AUTOSTART_CONFLICT"
+        for autostart_set, launch_val in (
+            (set(), False),
+            (set(), True),
+            ({"AutostartPending"}, True),
+        ):
+            with self.subTest(autostart=bool(autostart_set), launch=launch_val):
+                self.pending.clear()
+                self.pending.update(autostart_set)
+                self.launch_pending.return_value = launch_val
+                receipt = self.invoke_delete()
+                self.assertEqual((receipt["status"], receipt["code"]), ("BLOCKED", "BLOCKED"))
+                self.assertEqual(self.pending, autostart_set)
+        self.launch_pending.return_value = False
+        for bad_marker in (None, 1, "true"):
+            with self.subTest(bad_marker=bad_marker), patch.object(self.acq, "_clean_pending", return_value=bad_marker):
+                self.assertEqual(self.invoke_delete()["code"], "BLOCKED")
+        with patch.object(self.acq, "_clean_pending", side_effect=PermissionError("PRIVATE HKCU\\Software")):
+            receipt = self.invoke_delete()
+            self.assertEqual((receipt["status"], receipt["code"]), ("BLOCKED", "BLOCKED"))
+            self.assertNotIn("HKCU", json.dumps(receipt))
+        # Racing marker transitions before delete must block without invoking COM delete.
+        with patch.object(self.acq, "_clean_pending", side_effect=(True, True, False)):
+            self.assertEqual(self.invoke_delete()["code"], "BLOCKED")
+        with patch.object(self.acq, "_clean_pending", return_value=True), \
+                patch.object(self.acq, "_clean_launch_pending", side_effect=(False, False, True)):
+            self.assertEqual(self.invoke_delete()["code"], "BLOCKED")
+        self.delete_task.assert_not_called()
+        self.record.assert_not_called()
+
+    def test_delete_conflicting_task_blocks_active_chrome_foreign_port_locked_profile_and_slot(self):
+        self.pending.add("AutostartPending")
+        self.task.return_value = "AUTOSTART_CONFLICT"
+        cases = (
+            (self.acq, "_clean_inventory", {"return_value": ("OWNED", (5, self.target.executable, "t", "PRIVATE"))}),
+            (self.acq, "_clean_inventory", {"return_value": ("STARTING", (5, self.target.executable, "t", "PRIVATE"))}),
+            (self.acq, "_clean_inventory", {"side_effect": self.acq._Clean9444Hold("FOREIGN_PORT_OWNER")}),
+            (self.acq, "_clean_inventory", {"side_effect": self.acq._Clean9444Hold("BROWSER_OWNERSHIP_UNPROVEN")}),
+            (self.acq, "_clean_inventory", {"side_effect": self.acq._Clean9444Hold("PROFILE_ALREADY_ACTIVE_NO_CDP")}),
+            (self.acq, "_clean_require_unlocked", {"side_effect": self.acq._Clean9444Hold("PROFILE_LOCKED")}),
+            (self.acq, "_clean_target", {"side_effect": self.acq._Clean9444Hold("PROFILE_UNAVAILABLE")}),
+            (self.acq, "_clean_target", {"side_effect": self.acq._Clean9444Hold("CHROME_PATH_INVALID")}),
+            (self.acq, "_clean_supervisor_slot", {"side_effect": self.acq._Clean9444Hold("SUPERVISOR_ACTIVE")}),
+        )
+        for obj, name, kwargs in cases:
+            with self.subTest(name=name, kwargs=kwargs), patch.object(obj, name, **kwargs):
+                receipt = self.invoke_delete()
+                self.assertEqual((receipt["status"], receipt["code"]), ("BLOCKED", "BLOCKED"))
+        self.delete_task.assert_not_called()
+        self.record.assert_not_called()
+        self.probe.assert_not_called()
+        self.assertEqual(self.pending, {"AutostartPending"})
+
+    def test_delete_conflicting_task_handles_absent_exact_and_precheck_mismatch_classes(self):
+        self.pending.add("AutostartPending")
+        # Already absent task observed without deleting or clearing markers.
+        self.task.return_value = "AUTOSTART_NOT_ENROLLED"
+        absent = self.invoke_delete()
+        self.assertEqual((absent["status"], absent["code"]), ("OBSERVED", "TASK_ALREADY_ABSENT"))
+        self.assertEqual(absent["operation"], "delete_conflicting_clean_9444_task")
+        self.assertEqual(absent["cdp_port"], 9444)
+        self.assertEqual(absent["source_sha"], self.sha)
+        self.delete_task.assert_not_called()
+        self.record.assert_not_called()
+        self.assertEqual(self.pending, {"AutostartPending"})
+
+        # Exact expected task or unreadable task blocks before delete.
+        for reply in ("ALREADY_ENROLLED", "AUTOSTART_RUNTIME_UNAVAILABLE",
+                      "WINDOWS_OWNER_CONTEXT_UNVERIFIED", "UNKNOWN"):
+            with self.subTest(initial_task=reply):
+                self.task.return_value = reply
+                receipt = self.invoke_delete()
+                self.assertEqual((receipt["status"], receipt["code"]), ("BLOCKED", "BLOCKED"))
+        self.delete_task.assert_not_called()
+
+        # Pre-delete COM mismatch classes (wrong ACL, wrong owner, running, exact, foreign action, race)
+        # all return BLOCKED without triggering post-delete readback or UNKNOWN_EFFECT.
+        self.task.return_value = "AUTOSTART_CONFLICT"
+        for precheck_code in sorted(self.acq._CLEAN_TASK_DELETE_PRECHECK_CODES):
+            with self.subTest(precheck_code=precheck_code):
+                self.task.reset_mock()
+                self.delete_task.reset_mock()
+                self.delete_task.return_value = precheck_code
+                receipt = self.invoke_delete()
+                self.assertEqual((receipt["status"], receipt["code"]), ("BLOCKED", "BLOCKED"))
+                self.task.assert_called_once_with(self.owner, self.target, self.candidates, install=False)
+                self.delete_task.assert_called_once_with(self.owner, self.target, self.candidates)
+        self.record.assert_not_called()
+        self.probe.assert_not_called()
+        self.assertEqual(self.pending, {"AutostartPending"})
+
+    def test_delete_conflicting_task_deletes_once_reads_back_absent_and_keeps_r6_3_read_intact(self):
+        self.pending.add("AutostartPending")
+        self.task.return_value = "AUTOSTART_CONFLICT"
+        # R6.3 READ observes AUTOSTART_PENDING_TASK_CONFLICT before deletion.
+        before_probe = self.invoke_probe()
+        self.assertEqual((before_probe["status"], before_probe["code"]),
+                         ("OBSERVED", "AUTOSTART_PENDING_TASK_CONFLICT"))
+
+        self.task.reset_mock()
+        self.task.side_effect = ("AUTOSTART_CONFLICT", "AUTOSTART_NOT_ENROLLED")
+
+        def guarded_delete(owner, target, candidates):
+            self.assertTrue(self.slot)
+            self.assertEqual((owner, target, candidates), (self.owner, self.target, self.candidates))
+            self.assertEqual(self.pending, {"AutostartPending"})
+            return "TASK_DELETED"
+
+        self.delete_task.side_effect = guarded_delete
+        receipt = self.invoke_delete()
+        self.assertEqual(receipt, {
+            "status": "OBSERVED",
+            "code": "TASK_DELETED",
+            "operation": "delete_conflicting_clean_9444_task",
+            "cdp_port": 9444,
+            "exact_chat_verified": False,
+            "wake_sent": False,
+            "arbitrary_shell_enabled": False,
+            "issue_number": 17,
+            "approval_channel": "OWNER_GITHUB_COMMENT",
+            "remote_shell_enabled": False,
+            "source_sha": self.sha,
+        })
+        self.assertFalse(self.slot)
+        self.delete_task.assert_called_once_with(self.owner, self.target, self.candidates)
+        self.assertEqual(self.task.call_args_list, [
+            call(self.owner, self.target, self.candidates, install=False),
+            call(self.owner, self.target, self.candidates, install=False),
+        ])
+        self.record.assert_not_called()
+        self.probe.assert_not_called()
+        # Registry marker AutostartPending is preserved for later explicit reconciliation.
+        self.assertEqual(self.pending, {"AutostartPending"})
+
+        # R6.3 READ remains intact and now observes AUTOSTART_PENDING_TASK_ABSENT.
+        self.task.side_effect = None
+        self.task.return_value = "AUTOSTART_NOT_ENROLLED"
+        after_probe = self.invoke_probe()
+        self.assertEqual((after_probe["status"], after_probe["code"]),
+                         ("OBSERVED", "AUTOSTART_PENDING_TASK_ABSENT"))
+
+    def test_delete_conflicting_task_holds_unknown_effect_on_failure_and_sanitizes_exceptions(self):
+        self.pending.add("AutostartPending")
+        private_detail = (
+            f"PRIVATE {self.local} {self.sid} HKCU\\Software\\AI-Commerce\\WakeHub-9444-Clean "
+            "AI-Commerce-WakeHub-9444-Clean credential=secret"
+        )
+        # Pre-delete unexpected exception returns sanitized BLOCKED without invoking delete.
+        self.task.side_effect = RuntimeError(private_detail)
+        receipt = self.invoke_delete()
+        self.assertEqual((receipt["status"], receipt["code"]), ("BLOCKED", "BLOCKED"))
+        self.assertNotIn("PRIVATE", json.dumps(receipt))
+        self.assertNotIn("HKCU", json.dumps(receipt))
+        self.delete_task.assert_not_called()
+
+        # Failures at or after the delete boundary always HOLD UNKNOWN_EFFECT with zero replay.
+        self.task.side_effect = None
+        self.task.return_value = "AUTOSTART_CONFLICT"
+        for outcome in ("UNKNOWN_EFFECT", private_detail, OSError(private_detail), RuntimeError(private_detail)):
+            with self.subTest(delete_outcome=type(outcome).__name__ if isinstance(outcome, Exception) else outcome):
+                self.delete_task.reset_mock()
+                if isinstance(outcome, Exception):
+                    self.delete_task.side_effect = outcome
+                else:
+                    self.delete_task.side_effect = None
+                    self.delete_task.return_value = outcome
+                receipt = self.invoke_delete()
+                self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "UNKNOWN_EFFECT"))
+                self.delete_task.assert_called_once_with(self.owner, self.target, self.candidates)
+                raw = json.dumps(receipt)
+                for secret in ("PRIVATE", "HKCU", "credential", self.sid, str(self.local)):
+                    self.assertNotIn(secret, raw)
+
+        # Post-delete readback failures or post-delete drift HOLD UNKNOWN_EFFECT.
+        self.delete_task.side_effect = None
+        self.delete_task.return_value = "TASK_DELETED"
+        for readback in ("AUTOSTART_CONFLICT", "ALREADY_ENROLLED", "AUTOSTART_RUNTIME_UNAVAILABLE",
+                         RuntimeError(private_detail)):
+            with self.subTest(readback=readback):
+                self.delete_task.reset_mock()
+                self.task.side_effect = ["AUTOSTART_CONFLICT", readback]
+                receipt = self.invoke_delete()
+                self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "UNKNOWN_EFFECT"))
+                self.delete_task.assert_called_once_with(self.owner, self.target, self.candidates)
+                self.assertNotIn("PRIVATE", json.dumps(receipt))
+
+        # Post-delete owner drift, marker drift, or active browser HOLD UNKNOWN_EFFECT.
+        self.task.side_effect = ("AUTOSTART_CONFLICT", "AUTOSTART_NOT_ENROLLED")
+        with patch.object(self.acq, "_clean_pending", side_effect=(True, True, True, False)):
+            self.assertEqual(self.invoke_delete()["code"], "UNKNOWN_EFFECT")
+        self.task.side_effect = ("AUTOSTART_CONFLICT", "AUTOSTART_NOT_ENROLLED")
+        with patch.object(self.acq, "_clean_inventory",
+                          side_effect=[("ABSENT", None), ("ABSENT", None),
+                                       ("OWNED", (5, self.target.executable, "t", "PRIVATE"))]):
+            self.assertEqual(self.invoke_delete()["code"], "UNKNOWN_EFFECT")
+        self.record.assert_not_called()
+        self.assertEqual(self.pending, {"AutostartPending"})
+
+    def test_delete_conflicting_task_receipts_pass_existing_workflow_public_fields(self):
+        workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+        fields = set(re.findall(r"'([^']+)'", re.search(r"const publicFields = \[(.*?)\];", workflow).group(1)))
+        for code, expected_status in (
+            ("TASK_DELETED", "OBSERVED"),
+            ("TASK_ALREADY_ABSENT", "OBSERVED"),
+            ("BLOCKED", "BLOCKED"),
+            ("UNKNOWN_EFFECT", "HOLD"),
+        ):
+            receipt = hostops._clean_delete_task_receipt(code)
+            self.assertEqual((receipt["status"], receipt["code"]), (expected_status, code))
+            full_keys = receipt.keys() | {"issue_number", "approval_channel", "remote_shell_enabled", "source_sha"}
+            self.assertLessEqual(full_keys, fields)
 
 
 class PersonalCdp9444TopologyTests(unittest.TestCase):

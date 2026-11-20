@@ -2443,3 +2443,363 @@ def test_clean_9444_import_is_inert(monkeypatch):
     monkeypatch.setattr(ca.subprocess, "run", unexpected)
     loaded = runpy.run_path(ca.__file__)
     assert callable(loaded["install_clean_9444_autostart"])
+    assert callable(loaded["_clean_delete_conflicting_task"])
+
+
+def test_clean_9444_delete_task_helper_uses_fixed_com_script_and_sanitizes_outputs(clean_9444, monkeypatch):
+    owner = clean_9444
+    local = owner[0]
+    target, candidates = ca._clean_target(owner)
+    powershell = local / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    monkeypatch.setattr(ca, "_powershell", lambda: powershell)
+
+    assert "DeleteTask" not in ca._CLEAN_9444_TASK_INSPECTION
+    assert "DeleteTask" not in ca._CLEAN_9444_TASK_READ_SCRIPT
+    assert "DeleteTask" not in ca._CLEAN_9444_TASK_SCRIPT
+    delete_script = ca._CLEAN_9444_TASK_DELETE_SCRIPT
+    assert "$name = 'AI-Commerce-WakeHub-9444-Clean-' + $sid" in delete_script
+    assert delete_script.count("$folder.DeleteTask($name, 0)") == 1
+    assert "Read-Registration" in delete_script
+    assert not re.search(
+        r"RegisterTaskDefinition|\.RunEx\(|Stop-Process|\.Stop\(|TerminateProcess|SetValue|DeleteValue",
+        delete_script,
+    )
+
+    calls = []
+    outcomes = [
+        SimpleNamespace(returncode=0, stdout=b"TASK_DELETED\r\n"),
+        *(SimpleNamespace(returncode=0, stdout=(code + "\n").encode("ascii"))
+          for code in sorted(ca._CLEAN_TASK_DELETE_PRECHECK_CODES)),
+        SimpleNamespace(returncode=0, stdout=b"UNKNOWN_EFFECT"),
+        SimpleNamespace(returncode=0, stdout=b"PRIVATE diagnostic"),
+        SimpleNamespace(returncode=1, stdout=b"TASK_DELETED"),
+        SimpleNamespace(returncode=0, stdout=b"\xff"),
+        subprocess.TimeoutExpired(["powershell.exe"], 15),
+        OSError("PRIVATE process failure"),
+    ]
+    replies = iter(outcomes)
+
+    def run(args, **kwargs):
+        calls.append((args, kwargs["env"]))
+        assert "GITHUB_TOKEN" not in kwargs["env"]
+        assert kwargs["timeout"] == 15
+        assert kwargs["check"] is False
+        outcome = next(replies)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert ca._clean_delete_conflicting_task(owner, target, candidates) == "TASK_DELETED"
+    for code in sorted(ca._CLEAN_TASK_DELETE_PRECHECK_CODES):
+        assert ca._clean_delete_conflicting_task(owner, target, candidates) == code
+    for _ in range(6):
+        assert ca._clean_delete_conflicting_task(owner, target, candidates) == "UNKNOWN_EFFECT"
+
+    first_args, first_env = calls[0]
+    assert first_args[:4] == [str(powershell), "-NoProfile", "-NonInteractive", "-Command"]
+    assert first_args[4] == ca._CLEAN_9444_TASK_DELETE_SCRIPT
+    assert first_env["AI_COMMERCE_TASK_SID"] == _OPERATOR_SID
+    assert first_env["AI_COMMERCE_TASK_SESSION"] == "7"
+    assert first_env["AI_COMMERCE_TASK_POWERSHELL"] == str(powershell)
+    assert first_env["AI_COMMERCE_TASK_DIRECTORY"] == str(powershell.parent)
+    assert first_env["AI_COMMERCE_TASK_PROFILE_DIR"] == str(target.user_data_dir)
+    assert first_env["AI_COMMERCE_TASK_DELETE_CONFIRM"] == "1"
+
+    # Pre-subprocess helper failure returns AUTOSTART_RUNTIME_UNAVAILABLE without invoking subprocess.
+    calls.clear()
+    monkeypatch.setattr(ca, "_powershell", lambda: (_ for _ in ()).throw(ca.AcquisitionBlocked("POWERSHELL_UNAVAILABLE")))
+    assert ca._clean_delete_conflicting_task(owner, target, candidates) == "AUTOSTART_RUNTIME_UNAVAILABLE"
+    assert calls == []
+
+    # No CLI entrypoint is exposed for task deletion.
+    with pytest.raises(SystemExit) as exit_info:
+        ca.main(["delete-conflicting-clean-9444-task", "--opt-in"])
+    assert exit_info.value.code == 2
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell task delete")
+def test_clean_9444_delete_task_script_offline(tmp_path):
+    local = tmp_path / "Owner's Local App Data"
+    profile_dir = local / "AI-Commerce" / ca._CLEAN_9444_PROFILE
+    exe = tmp_path / "Program Files" / "chrome.exe"
+    owner = (local, 7, _OPERATOR_SID)
+    target = ca._ChromeTarget(exe, profile_dir, "Default", "http://127.0.0.1:9444", 9444)
+    powershell = ca._powershell()
+    launcher = ca._clean_launcher(owner, target, (exe,))
+    expected_args = subprocess.list2cmdline([*ca._CLEAN_POWERSHELL_FLAGS, launcher])
+    conflict_r61_args = expected_args.replace("Assert-CleanProfile", "Assert-CleanProfile # R6.1", 1)
+    conflict_r6_args = expected_args.replace("Assert-CleanProfile", "Assert-PrivateProfile")
+    assert conflict_r61_args != expected_args and conflict_r6_args != expected_args
+
+    patched_script = ca._CLEAN_9444_TASK_DELETE_SCRIPT
+    for needle, replacement in (
+        ("[Security.Principal.WindowsIdentity]::GetCurrent().User.Value", "(Get-MockSid)"),
+        ("[Diagnostics.Process]::GetCurrentProcess().SessionId", "(Get-MockSession)"),
+        ("New-Object -ComObject 'Schedule.Service'", "(New-MockScheduleService)"),
+    ):
+        assert needle in patched_script
+        patched_script = patched_script.replace(needle, replacement)
+    target_ps1 = tmp_path / "delete_task_under_test.ps1"
+    target_ps1.write_text(patched_script, encoding="utf-8")
+
+    cases = [
+        ("delete_ok", "TASK_DELETED", 1),
+        ("delete_ok_r6_profile_fn", "TASK_DELETED", 1),
+        ("delete_ok_setting_diff", "TASK_DELETED", 1),
+        ("delete_ok_case_profile_path", "TASK_DELETED", 1),
+        ("delete_ok_owner_sd_self", "TASK_DELETED", 1),
+        ("delete_ok_owner_sd_ba", "TASK_DELETED", 1),
+        ("already_absent", "TASK_ALREADY_ABSENT", 0),
+        ("already_exact", "TASK_ALREADY_EXACT", 0),
+        ("wrong_name", "TASK_DEFINITION_UNVERIFIED", 0),
+        ("wrong_path", "TASK_DEFINITION_UNVERIFIED", 0),
+        ("wrong_sd_owner", "TASK_ACL_MISMATCH", 0),
+        ("wrong_dacl", "TASK_ACL_MISMATCH", 0),
+        ("wrong_principal_sid", "TASK_OWNER_MISMATCH", 0),
+        ("wrong_principal_id", "TASK_OWNER_MISMATCH", 0),
+        ("wrong_logon_type", "TASK_OWNER_MISMATCH", 0),
+        ("elevated_runlevel", "TASK_OWNER_MISMATCH", 0),
+        ("has_group_id", "TASK_OWNER_MISMATCH", 0),
+        ("wrong_trigger_count", "TASK_DEFINITION_UNVERIFIED", 0),
+        ("wrong_trigger_type", "TASK_OWNER_MISMATCH", 0),
+        ("wrong_trigger_owner", "TASK_OWNER_MISMATCH", 0),
+        ("wrong_action_count", "TASK_ACTION_FAMILY_MISMATCH", 0),
+        ("wrong_action_context", "TASK_ACTION_FAMILY_MISMATCH", 0),
+        ("wrong_action_type", "TASK_ACTION_FAMILY_MISMATCH", 0),
+        ("wrong_action_path", "TASK_ACTION_FAMILY_MISMATCH", 0),
+        ("wrong_workdir", "TASK_ACTION_FAMILY_MISMATCH", 0),
+        ("foreign_ps_args", "TASK_ACTION_FAMILY_MISMATCH", 0),
+        ("wrong_sid_args", "TASK_ACTION_FAMILY_MISMATCH", 0),
+        ("wrong_profile_args", "TASK_ACTION_FAMILY_MISMATCH", 0),
+        ("wrong_port_args", "TASK_ACTION_FAMILY_MISMATCH", 0),
+        ("running_state", "TASK_RUNNING", 0),
+        ("queued_state", "TASK_RUNNING", 0),
+        ("active_instance", "TASK_RUNNING", 0),
+        ("disabled_state", "TASK_NOT_READY", 0),
+        ("unknown_state", "TASK_NOT_READY", 0),
+        ("not_enabled", "TASK_NOT_READY", 0),
+        ("sd_throws", "TASK_DEFINITION_UNVERIFIED", 0),
+        ("delete_throws", "UNKNOWN_EFFECT", 1),
+        ("readback_still_present", "UNKNOWN_EFFECT", 1),
+        ("readback_throws", "UNKNOWN_EFFECT", 1),
+        ("missing_confirm", "AUTOSTART_RUNTIME_UNAVAILABLE", 0),
+        ("wrong_env_sid", "WINDOWS_OWNER_CONTEXT_UNVERIFIED", 0),
+    ]
+    driver = r"""
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new()
+$ErrorActionPreference = 'Stop'
+$global:testCtx = @{
+    baseSid = $env:TEST_BASE_SID
+    expectedTaskName = 'AI-Commerce-WakeHub-9444-Clean-' + $env:TEST_BASE_SID
+    exactArgs = $env:TEST_EXACT_ARGS
+    conflictR61Args = $env:TEST_CONFLICT_R61_ARGS
+    conflictR6Args = $env:TEST_CONFLICT_R6_ARGS
+    case = ''
+    taskPresent = $true
+    deletedNames = @()
+}
+$targetScript = $env:TEST_TARGET_SCRIPT
+$caseNames = ($env:TEST_CASES -split ',')
+
+function Get-MockSid {
+    if ($global:testCtx.case -eq 'wrong_env_sid') { 'S-1-5-21-9-9-9-1002' } else { $global:testCtx.baseSid }
+}
+function Get-MockSession { 7 }
+
+function New-Collection($items) {
+    $obj = [pscustomobject]@{ _items = @($items); Count = @($items).Count }
+    $obj | Add-Member ScriptMethod Item { param($idx) $this._items[$idx - 1] }
+    $obj | Add-Member ScriptMethod Create {
+        param($kind)
+        if ($kind -eq 9) {
+            $item = [pscustomobject]@{
+                Type = 9; Enabled = $true; UserId = ''; Delay = ''; StartBoundary = ''; EndBoundary = ''
+                ExecutionTimeLimit = ''
+                Repetition = [pscustomobject]@{ Interval = ''; Duration = ''; StopAtDurationEnd = $false }
+            }
+        } else {
+            $item = [pscustomobject]@{ Type = 0; Path = ''; Arguments = ''; WorkingDirectory = '' }
+        }
+        $this._items += $item
+        $this.Count = $this._items.Count
+        return $item
+    }
+    $obj
+}
+
+function New-TemplateSettings {
+    [pscustomobject]@{
+        AllowDemandStart = $true; AllowHardTerminate = $true; DisallowStartIfOnBatteries = $false
+        Enabled = $true; ExecutionTimeLimit = 'PT45S'; Hidden = $false; MultipleInstances = 2
+        RestartCount = 0; RestartInterval = ''; RunOnlyIfIdle = $false
+        RunOnlyIfNetworkAvailable = $false; StartWhenAvailable = $false
+        StopIfGoingOnBatteries = $false; WakeToRun = $false; DeleteExpiredTaskAfter = ''
+    }
+}
+
+function New-RegisteredTaskMock {
+    $c = $global:testCtx.case
+    $sidVal = $global:testCtx.baseSid
+    $taskArgs = switch ($c) {
+        'already_exact' { $global:testCtx.exactArgs }
+        'delete_ok_setting_diff' { $global:testCtx.exactArgs }
+        'delete_ok_r6_profile_fn' { $global:testCtx.conflictR6Args }
+        'delete_ok_case_profile_path' {
+            $global:testCtx.conflictR61Args.Replace($env:AI_COMMERCE_TASK_PROFILE_DIR.Replace("'", "''"),
+                                                    $env:AI_COMMERCE_TASK_PROFILE_DIR.Replace("'", "''").ToUpperInvariant())
+        }
+        'foreign_ps_args' { '-NoProfile -NonInteractive -WindowStyle Hidden -Command "& { Write-Output 1 }"' }
+        'wrong_sid_args' { $global:testCtx.conflictR61Args.Replace($sidVal, 'S-1-5-21-9-9-9-1002') }
+        'wrong_profile_args' { $global:testCtx.conflictR61Args.Replace('WakeHub-9444-Clean', 'Other-Profile') }
+        'wrong_port_args' { $global:testCtx.conflictR61Args.Replace('--remote-debugging-port=9444', '--remote-debugging-port=9333') }
+        default { $global:testCtx.conflictR61Args }
+    }
+    $principal = [pscustomobject]@{
+        Id = if ($c -eq 'wrong_principal_id') { 'OtherOwner' } else { 'WakeHubOwner' }
+        UserId = if ($c -eq 'wrong_principal_sid') { 'S-1-5-21-9-9-9-1002' } else { $sidVal }
+        LogonType = if ($c -eq 'wrong_logon_type') { 5 } else { 3 }
+        RunLevel = if ($c -eq 'elevated_runlevel') { 1 } else { 0 }
+        GroupId = if ($c -eq 'has_group_id') { 'S-1-5-32-544' } else { '' }
+    }
+    $trig = [pscustomobject]@{
+        Type = if ($c -eq 'wrong_trigger_type') { 2 } else { 9 }
+        Enabled = $true
+        UserId = if ($c -eq 'wrong_trigger_owner') { 'S-1-5-21-9-9-9-1002' } else { $sidVal }
+        Delay = ''; StartBoundary = ''; EndBoundary = ''; ExecutionTimeLimit = ''
+        Repetition = [pscustomobject]@{ Interval = 'PT1M'; Duration = ''; StopAtDurationEnd = $false }
+    }
+    $triggers = New-Collection $(if ($c -eq 'wrong_trigger_count') { @($trig, $trig) } else { @($trig) })
+    $act = [pscustomobject]@{
+        Type = if ($c -eq 'wrong_action_type') { 5 } else { 0 }
+        Path = if ($c -eq 'wrong_action_path') { 'C:\Python\pythonw.exe' } else { $env:AI_COMMERCE_TASK_POWERSHELL }
+        Arguments = $taskArgs
+        WorkingDirectory = if ($c -eq 'wrong_workdir') { 'C:\Other' } else { $env:AI_COMMERCE_TASK_DIRECTORY }
+    }
+    $actions = New-Collection $(if ($c -eq 'wrong_action_count') { @($act, $act) } else { @($act) })
+    $actions | Add-Member NoteProperty Context $(if ($c -eq 'wrong_action_context') { 'Other' } else { 'WakeHubOwner' })
+    $settings = New-TemplateSettings
+    if ($c -eq 'delete_ok_setting_diff') { $settings.ExecutionTimeLimit = 'PT1M' }
+    $task = [pscustomobject]@{
+        Name = if ($c -eq 'wrong_name') { 'Other-Task' } else { $global:testCtx.expectedTaskName }
+        Path = if ($c -eq 'wrong_path') { '\SubFolder\' + $global:testCtx.expectedTaskName } else { '\' + $global:testCtx.expectedTaskName }
+        Enabled = ($c -ne 'not_enabled')
+        State = switch ($c) {
+            'running_state' { 4 }
+            'queued_state' { 2 }
+            'disabled_state' { 1 }
+            'unknown_state' { 0 }
+            default { 3 }
+        }
+        Definition = [pscustomobject]@{
+            Principal = $principal; Triggers = $triggers; Actions = $actions; Settings = $settings
+        }
+    }
+    $task | Add-Member ScriptMethod GetSecurityDescriptor {
+        param($info)
+        $c2 = $global:testCtx.case
+        $s2 = $global:testCtx.baseSid
+        if ($c2 -eq 'sd_throws') { throw 'access denied' }
+        if ($info -eq 1) {
+            switch ($c2) {
+                'delete_ok_owner_sd_self' { return 'O:' + $s2 }
+                'delete_ok_owner_sd_ba' { return 'O:BA' }
+                'wrong_sd_owner' { return 'O:S-1-5-21-9-9-9-1002' }
+                default { return 'O:SY' }
+            }
+        }
+        if ($c2 -eq 'wrong_dacl') {
+            return 'D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;' + $s2 + ')(A;;GA;;;S-1-5-21-9-9-9-1002)'
+        }
+        return 'D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;' + $s2 + ')'
+    }
+    $task | Add-Member ScriptMethod GetInstances {
+        param($flags)
+        if ($global:testCtx.case -eq 'active_instance') { [pscustomobject]@{ Count = 1 } }
+        else { [pscustomobject]@{ Count = 0 } }
+    }
+    $task
+}
+
+function New-MockScheduleService {
+    $folder = [pscustomobject]@{}
+    $folder | Add-Member ScriptMethod GetTask {
+        param($queryName)
+        if ($queryName -cne $global:testCtx.expectedTaskName) { throw ('unexpected task query: ' + $queryName) }
+        if ($global:testCtx.case -eq 'readback_throws' -and $global:testCtx.deletedNames.Count -gt 0) {
+            throw 'readback com failure'
+        }
+        if (!$global:testCtx.taskPresent) {
+            throw [Runtime.InteropServices.COMException]::new('not found', -2147024894)
+        }
+        return New-RegisteredTaskMock
+    }
+    $folder | Add-Member ScriptMethod DeleteTask {
+        param($deleteName, $flags)
+        if ($flags -ne 0) { throw 'unexpected flags' }
+        $global:testCtx.deletedNames += $deleteName
+        if ($global:testCtx.case -eq 'delete_throws') { throw 'delete com failure' }
+        if ($global:testCtx.case -ne 'readback_still_present') { $global:testCtx.taskPresent = $false }
+    }
+    $svc = [pscustomobject]@{ _folder = $folder }
+    $svc | Add-Member ScriptMethod Connect {}
+    $svc | Add-Member ScriptMethod GetFolder {
+        param($path)
+        if ($path -cne '\') { throw ('unexpected folder: ' + $path) }
+        return $this._folder
+    }
+    $svc | Add-Member ScriptMethod NewTask {
+        param($flags)
+        $actions = New-Collection @()
+        $actions | Add-Member NoteProperty Context ''
+        [pscustomobject]@{
+            Principal = [pscustomobject]@{ Id = ''; UserId = ''; LogonType = 0; RunLevel = 0; GroupId = '' }
+            Settings = New-TemplateSettings
+            Triggers = New-Collection @()
+            Actions = $actions
+        }
+    }
+    $svc
+}
+
+$results = @()
+foreach ($name in $caseNames) {
+    $global:testCtx.case = $name
+    $global:testCtx.taskPresent = ($name -ne 'already_absent')
+    $global:testCtx.deletedNames = @()
+    $env:AI_COMMERCE_TASK_DELETE_CONFIRM = if ($name -eq 'missing_confirm') { '0' } else { '1' }
+    $output = (& $targetScript) -join ''
+    $results += [pscustomobject]@{ case = $name; code = $output; deleted = @($global:testCtx.deletedNames) }
+}
+$results | ConvertTo-Json -Depth 4 -Compress
+"""
+    env = ca._child_environment()
+    env.update(
+        AI_COMMERCE_TASK_SID=_OPERATOR_SID,
+        AI_COMMERCE_TASK_SESSION="7",
+        AI_COMMERCE_TASK_POWERSHELL=str(powershell),
+        AI_COMMERCE_TASK_DIRECTORY=str(powershell.parent),
+        AI_COMMERCE_TASK_ARGUMENTS=expected_args,
+        AI_COMMERCE_TASK_PROFILE_DIR=str(profile_dir),
+        TEST_BASE_SID=_OPERATOR_SID,
+        TEST_EXACT_ARGS=expected_args,
+        TEST_CONFLICT_R61_ARGS=conflict_r61_args,
+        TEST_CONFLICT_R6_ARGS=conflict_r6_args,
+        TEST_TARGET_SCRIPT=str(target_ps1),
+        TEST_CASES=",".join(name for name, _, _ in cases),
+    )
+    result = subprocess.run(
+        [str(powershell), *ca._CLEAN_POWERSHELL_FLAGS, driver],
+        capture_output=True, text=True, encoding="utf-8", timeout=30, env=env,
+    )
+    assert result.returncode == 0 and not result.stderr, result.stderr
+    observed = {row["case"]: row for row in json.loads(result.stdout)}
+    fixed_name = f"AI-Commerce-WakeHub-9444-Clean-{_OPERATOR_SID}"
+    for case_name, expected_code, expected_deletes in cases:
+        row = observed[case_name]
+        assert row["code"] == expected_code, f"{case_name}: {row}"
+        deleted = row["deleted"] or []
+        if isinstance(deleted, str):
+            deleted = [deleted]
+        assert len(deleted) == expected_deletes, f"{case_name}: {row}"
+        assert all(item == fixed_name for item in deleted), f"{case_name}: {row}"
