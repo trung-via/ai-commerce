@@ -14,11 +14,13 @@ from .intent import CreativeIntent
 from .models import EDITABLE_PACKAGE_FIELDS, ConceptRecord, require_digest, require_package_id
 from .store import CreativeStore, _put
 from .v2 import (
+    A03BenchmarkCase, A03BenchmarkComparison, A03BenchmarkObservation,
     A03CreativeCycleJob, A03CreativeCycleResult, A03CreativeJob,
     A03CreativeProductionJob, A03CreativeProductionPackage, A03CreativeProductionResult,
     A03CreativeStageResult, ReasoningRequest, ReasoningResult,
-    _cycle_lineage, _cycle_stage_job, _output_pin, _stage_concepts, _validate_spec_evidence,
-    inference_decision, inference_failure,
+    _benchmark_case_slot, _benchmark_comparison_slot, _benchmark_observation_slot,
+    _build_benchmark_comparison_payload, _cycle_lineage, _cycle_stage_job, _output_pin,
+    _stage_concepts, _validate_spec_evidence, inference_decision, inference_failure,
 )
 
 if TYPE_CHECKING:
@@ -683,3 +685,232 @@ class CreativeSidecarStore:
                 or handoff["production_package"] != package.to_dict()):
             raise CreativeValidationError("production handoff payload mismatch")
         return origin, package, handoff
+
+    # ------------------------------------------------------------------
+    # R5a benchmark sidecar namespaces (disjoint from V1/V2/R0-R4 paths).
+    # ------------------------------------------------------------------
+
+    def _read_job_slot(self, slot: str) -> A03CreativeJob:
+        require_digest(slot)
+        path = self._path("jobs", slot)
+        raw = path.read_bytes()
+        job = A03CreativeJob.from_dict(read_json(raw.decode("utf-8")))
+        if raw != canonical_bytes(job.to_dict()) or job.slot != slot:
+            raise CreativeValidationError("stored creative job bytes/slot mismatch")
+        return job
+
+    def _validate_benchmark_case(self, case: A03BenchmarkCase) -> None:
+        brief = self.creative.load_brief(case.source_brief_digest)
+        if brief["brief_id"] != case.brief_id:
+            raise CreativeValidationError("benchmark case brief_id mismatch")
+        self._check_bytes(self.creative.root / "briefs" / f"{case.source_brief_digest}.json", brief)
+        if not set(case.expected_evidence_refs) <= set(brief.get("source_refs", [])):
+            raise CreativeValidationError("benchmark case expected_evidence_refs not in source brief")
+        if case.brief_class == "VN_NON_PRODUCT_FICTION" and brief.get("product_ref") is not None:
+            raise CreativeValidationError("VN_NON_PRODUCT_FICTION brief cannot carry a product_ref")
+        if case.brief_class == "SILENT_NO_CTA" and brief.get("cta") is not None:
+            raise CreativeValidationError("SILENT_NO_CTA brief cannot carry a non-null cta")
+
+    def save_benchmark_case(self, case: A03BenchmarkCase) -> str:
+        if not isinstance(case, A03BenchmarkCase):
+            raise CreativeValidationError("expected A03BenchmarkCase")
+        valid = A03BenchmarkCase.from_dict(case.to_dict())
+        self._validate_benchmark_case(valid)
+        self._save("benchmark-case-slots", valid.slot, {"case_digest": valid.digest})
+        return self._save("benchmark-cases", valid.digest, valid.to_dict())
+
+    def load_benchmark_case_by_digest(self, digest: str) -> A03BenchmarkCase:
+        require_digest(digest)
+        record = A03BenchmarkCase.from_dict(self._read("benchmark-cases", digest))
+        if record.digest != digest:
+            raise CreativeValidationError("stored benchmark case digest mismatch")
+        self._check_bytes(self._path("benchmark-case-slots", record.slot), {"case_digest": digest})
+        self._validate_benchmark_case(record)
+        return record
+
+    def load_benchmark_case(self, cohort_id: str, case_id: str) -> A03BenchmarkCase:
+        slot = _benchmark_case_slot(cohort_id, case_id)
+        path = self._path("benchmark-case-slots", slot)
+        ref = exact_fields(read_json(path.read_text(encoding="utf-8")), {"case_digest"})
+        self._check_bytes(path, ref)
+        record = self.load_benchmark_case_by_digest(ref["case_digest"])
+        if record.cohort_id != cohort_id or record.case_id != case_id:
+            raise CreativeValidationError("stored benchmark case slot identity mismatch")
+        return record
+
+    def _validate_benchmark_observation(self, obs: A03BenchmarkObservation) -> None:
+        case = self.load_benchmark_case_by_digest(obs.case_digest)
+        if (case.cohort_id != obs.cohort_id or case.case_id != obs.case_id
+                or case.rubric_version != obs.rubric_version or case.source_sha != obs.source_sha
+                or case.brief_id != obs.brief_id or case.source_brief_digest != obs.source_brief_digest
+                or case.brief_class != obs.brief_class):
+            raise CreativeValidationError("benchmark observation disagrees with pinned cohort case")
+        if obs.judge_receipt is not None and case.factual_evidence_applicable:
+            if obs.judge_receipt.scores.factual_evidence_accuracy is None:
+                raise CreativeValidationError("factual_evidence_accuracy is required for this benchmark case")
+
+        seen_cli_threads: set[str] = set()
+        seen_cli_sessions: set[str] = set()
+        seen_cli_stdouts: set[str] = set()
+        for trace in obs.role_traces:
+            if trace.role == "RESEARCH":
+                continue
+            job = self._read_job_slot(trace.job_slot)
+            if (job.digest != trace.job_digest or job.brief_id != obs.brief_id
+                    or job.source_brief_digest != obs.source_brief_digest):
+                raise CreativeValidationError("benchmark trace job disagrees with stored A03 job/brief")
+            stage = self.load_stage(job)
+            if stage.digest != trace.stage_digest:
+                raise CreativeValidationError("benchmark trace stage_digest disagrees with stored stage")
+            res = self.load_result(trace.receipt_digest)
+            if (stage.reasoning != res
+                    or res.request.digest != trace.request_digest
+                    or res.request.operation != trace.operation
+                    or res.observation != trace.observed
+                    or res.usage != trace.usage
+                    or res.provider_request_id != trace.provider_request_id
+                    or (res.configuration if res.configuration is not None else job.configuration) != trace.requested
+                    or (res.execution.observed_effort if res.execution is not None else "UNKNOWN")
+                    != trace.observed_effort):
+                raise CreativeValidationError("benchmark trace disagrees with stored ReasoningResult receipt")
+            if obs.status == "REAL_MODEL_OBSERVED" and not trace.is_retry:
+                e = res.execution
+                if (e is None or e.kind != "AUTHENTICATED_CLI_PROBE" or e.effect != "PROCESS_INVOKED"
+                        or e.session_sha256 is None or e.stdout_sha256 is None or e.cli_thread_id is None):
+                    raise CreativeValidationError("REAL_MODEL_OBSERVED trace requires verified CLI execution receipt")
+            if res.execution is not None:
+                for seen, val in (
+                    (seen_cli_threads, res.execution.cli_thread_id),
+                    (seen_cli_sessions, res.execution.session_sha256),
+                    (seen_cli_stdouts, res.execution.stdout_sha256),
+                ):
+                    if val is not None:
+                        if val in seen:
+                            raise CreativeValidationError("replayed CLI execution evidence within benchmark observation")
+                        seen.add(val)
+
+        if obs.cycle_job_digest is not None:
+            cycle = self.load_cycle_by_digest(obs.cycle_job_digest, obs.cycle_result_digest)
+            if (cycle.job.seed.brief_id != obs.brief_id
+                    or cycle.job.seed.source_brief_digest != obs.source_brief_digest):
+                raise CreativeValidationError("benchmark observation cycle rebound source brief")
+            if (obs.evidence_refs != tuple(e.source_ref for e in cycle.job.evidence)
+                    or obs.evidence_digests != tuple(e.content_sha256 for e in cycle.job.evidence)):
+                raise CreativeValidationError("benchmark observation evidence disagrees with verified cycle evidence")
+            stage_set = set(obs.stage_result_digests)
+            if any(step.digest not in stage_set for step in cycle.steps):
+                raise CreativeValidationError("benchmark observation omitted linked cycle stage receipts")
+
+        if obs.production_result_digest is not None:
+            prod = self.load_production_result_by_digest(obs.production_result_digest)
+            if (prod.job.digest != obs.production_job_digest
+                    or prod.job.brief_id != obs.brief_id
+                    or prod.job.source_brief_digest != obs.source_brief_digest):
+                raise CreativeValidationError("benchmark observation production result mismatch")
+            if obs.cycle_result_digest is not None and (
+                prod.job.cycle_job_digest != obs.cycle_job_digest
+                or prod.job.cycle_result_digest != obs.cycle_result_digest
+            ):
+                raise CreativeValidationError("benchmark observation production result disagrees with cycle")
+            if obs.package_digest is not None:
+                origin, pkg, _ = self.verify_production_package_lineage(
+                    obs.package_id, obs.package_revision, origin_result_digest=obs.production_result_digest,
+                )
+                if (origin != prod or pkg.digest != obs.package_digest
+                        or pkg.reasoning_receipt_digest != obs.package_receipt_digest):
+                    raise CreativeValidationError("benchmark observation package disagrees with verified R3 lineage")
+                if obs.consumer_evidence.source_handoff_status == "SOURCE_HANDOFF_VERIFIED":
+                    a04 = obs.consumer_evidence.a04_receipt
+                    if (origin.status != "CREATIVE_COMPLETE" or origin.job.purpose != "PRODUCTION"
+                            or a04.journey_id != origin.job.journey_id
+                            or a04.cycle_id != origin.job.cycle_id
+                            or a04.job_id != origin.job.job_id
+                            or a04.attempt != origin.job.attempt
+                            or a04.job_actor_ref != origin.job.provenance.actor_ref
+                            or a04.actor_ref != f"{pkg.edit_actor.kind}:{pkg.edit_actor.ref}"
+                            or a04.parent_package_digest != (pkg.parent.digest if pkg.parent is not None else None)
+                            or a04.selection_id != pkg.selected_concept.selection_id
+                            or a04.concept_id != pkg.selected_concept.concept_id
+                            or a04.concept_revision != pkg.selected_concept.revision
+                            or a04.concept_digest != pkg.selected_concept.concept_digest
+                            or a04.audio_mode != pkg.spec.audio.mode
+                            or a04.scene_count != len(pkg.spec.scenes)
+                            or a04.media_target_count != len(pkg.spec.media_targets)
+                            or a04.rights_status != pkg.rights_status):
+                        raise CreativeValidationError("A04 handoff receipt disagrees with persisted A03/R4 lineage")
+
+    def save_benchmark_observation(self, obs: A03BenchmarkObservation) -> str:
+        if not isinstance(obs, A03BenchmarkObservation):
+            raise CreativeValidationError("expected A03BenchmarkObservation")
+        valid = A03BenchmarkObservation.from_dict(obs.to_dict())
+        self._validate_benchmark_observation(valid)
+        self._save("benchmark-observation-slots", valid.slot, {"observation_digest": valid.digest})
+        return self._save("benchmark-observations", valid.digest, valid.to_dict())
+
+    def load_benchmark_observation_by_digest(self, digest: str) -> A03BenchmarkObservation:
+        require_digest(digest)
+        record = A03BenchmarkObservation.from_dict(self._read("benchmark-observations", digest))
+        if record.digest != digest:
+            raise CreativeValidationError("stored benchmark observation digest mismatch")
+        self._check_bytes(
+            self._path("benchmark-observation-slots", record.slot), {"observation_digest": digest},
+        )
+        self._validate_benchmark_observation(record)
+        return record
+
+    def load_benchmark_observation(
+        self, cohort_id: str, case_id: str, strategy: str, sample_id: str, attempt: int,
+    ) -> A03BenchmarkObservation:
+        slot = _benchmark_observation_slot(cohort_id, case_id, strategy, sample_id, attempt)
+        path = self._path("benchmark-observation-slots", slot)
+        ref = exact_fields(read_json(path.read_text(encoding="utf-8")), {"observation_digest"})
+        self._check_bytes(path, ref)
+        record = self.load_benchmark_observation_by_digest(ref["observation_digest"])
+        if (record.cohort_id != cohort_id or record.case_id != case_id
+                or record.strategy != strategy or record.sample_id != sample_id
+                or record.attempt != attempt):
+            raise CreativeValidationError("stored benchmark observation slot identity mismatch")
+        return record
+
+    def _validate_benchmark_comparison(self, comp: A03BenchmarkComparison) -> None:
+        cases = tuple(self.load_benchmark_case_by_digest(d) for d in comp.case_digests)
+        observations = tuple(self.load_benchmark_observation_by_digest(d) for d in comp.observation_digests)
+        expected = _build_benchmark_comparison_payload(
+            comparison_id=comp.comparison_id,
+            cases=cases,
+            observations=observations,
+            strategies=comp.compared_strategies,
+            provenance=comp.provenance,
+            created_at=comp.created_at,
+        )
+        if expected != comp:
+            raise CreativeValidationError("stored benchmark comparison disagrees with verified observations")
+
+    def save_benchmark_comparison(self, comp: A03BenchmarkComparison) -> str:
+        if not isinstance(comp, A03BenchmarkComparison):
+            raise CreativeValidationError("expected A03BenchmarkComparison")
+        valid = A03BenchmarkComparison.from_dict(comp.to_dict())
+        self._validate_benchmark_comparison(valid)
+        self._save("benchmark-comparison-slots", valid.slot, {"comparison_digest": valid.digest})
+        return self._save("benchmark-comparisons", valid.digest, valid.to_dict())
+
+    def load_benchmark_comparison_by_digest(self, digest: str) -> A03BenchmarkComparison:
+        require_digest(digest)
+        record = A03BenchmarkComparison.from_dict(self._read("benchmark-comparisons", digest))
+        if record.digest != digest:
+            raise CreativeValidationError("stored benchmark comparison digest mismatch")
+        self._check_bytes(
+            self._path("benchmark-comparison-slots", record.slot), {"comparison_digest": digest},
+        )
+        self._validate_benchmark_comparison(record)
+        return record
+
+    def load_benchmark_comparison(self, cohort_id: str, comparison_id: str) -> A03BenchmarkComparison:
+        slot = _benchmark_comparison_slot(cohort_id, comparison_id)
+        path = self._path("benchmark-comparison-slots", slot)
+        ref = exact_fields(read_json(path.read_text(encoding="utf-8")), {"comparison_digest"})
+        self._check_bytes(path, ref)
+        record = self.load_benchmark_comparison_by_digest(ref["comparison_digest"])
+        if record.cohort_id != cohort_id or record.comparison_id != comparison_id:
+            raise CreativeValidationError("stored benchmark comparison slot identity mismatch")
+        return record
