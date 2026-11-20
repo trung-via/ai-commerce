@@ -7,9 +7,13 @@ No arbitrary shell, secret file access, force update, delete or provider effect.
 from __future__ import annotations
 
 import argparse
+import asyncio
+from collections import namedtuple
+from contextlib import contextmanager, suppress
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
+import hmac
 import json
 import os
 from os.path import normpath
@@ -17,12 +21,13 @@ from pathlib import Path, PureWindowsPath
 import platform
 import re
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
 from threading import Lock
 import time
-from typing import Callable, Literal, TypedDict
+from typing import Callable, Literal, Mapping, TypedDict
 from urllib.request import Request, ProxyHandler, HTTPRedirectHandler, build_opener
 
 REPO = "trung-via/ai-commerce"
@@ -2078,6 +2083,1407 @@ class ExecutorHealthPrivateBridge:
             return response("OBSERVED", "LOCAL_OBSERVATION_ONLY", at=completed, snapshot=snapshot, until=until)
         finally:
             self._lock.release()
+
+
+# ---------------------------------------------------------------------------
+# HOSTOPS_EXEC_V1: Source-only generic PowerShell execution contract & one-time
+# enrollment backend. DISABLED by default and NOT wired into legacy READ/WRITE
+# parse_event/perform/main or .github/workflows/issue-ingress.yml.
+#
+# Authority model (explicitly two-tier; no naive shell string denylist):
+# - Tier 1 (LOCAL_USER_TOKEN): ordinary non-elevated interactive Windows user
+#   PowerShell after explicit one-time owner enrollment.
+# - Tier 2 (EXTERNAL_SENSITIVE_GOVERNANCE): irreversible/provider/financial/
+#   credential/privilege effects remain governed outside this broker.
+# A PowerShell text denylist CANNOT enforce Tier 1 vs Tier 2 because arbitrary
+# PowerShell trivially bypasses substring filters (encoding, aliases, reflection,
+# .NET, splatting). Real boundaries are the non-elevated Windows OS token,
+# authenticated origin, interactive owner session, and private channel isolation.
+# ---------------------------------------------------------------------------
+HOSTOPS_EXEC_V1_SCHEMA = "HOSTOPS_EXEC_V1"
+HOSTOPS_EXEC_V1_ENROLLMENT_SCHEMA = "HOSTOPS_EXEC_V1_ENROLLMENT"
+HOSTOPS_EXEC_V1_RECEIPT_SCHEMA = "HOSTOPS_EXEC_V1_RECEIPT"
+HOSTOPS_EXEC_V1_TITLE = "[HOSTOPS EXEC] "
+HOSTOPS_EXEC_V1_RUNNER_NAME = "AI-COMMERCE-HOSTOPS-01"
+HOSTOPS_EXEC_V1_WORKFLOW_REF = REPO + "/.github/workflows/issue-ingress.yml@refs/heads/main"
+HOSTOPS_EXEC_V1_ENABLED_BY_DEFAULT = False
+HOSTOPS_EXEC_V1_DENYLIST_IS_SECURITY_BOUNDARY = False
+HOSTOPS_EXEC_V1_AUTHORITY_TIER_LOCAL = "LOCAL_USER_TOKEN"
+HOSTOPS_EXEC_V1_AUTHORITY_TIER_EXTERNAL = "EXTERNAL_SENSITIVE_GOVERNANCE"
+HOSTOPS_EXEC_V1_INTENDED_SESSION = "INTERACTIVE_USER_NON_ELEVATED"
+HOSTOPS_EXEC_V1_PAYLOAD_MODES = frozenset({"PRIVATE_DIGEST", "PRIVATE_INLINE_UTF8"})
+HOSTOPS_EXEC_V1_MAX_EVENT_BYTES = 16384
+HOSTOPS_EXEC_V1_MAX_SCRIPT_BYTES = 8192
+HOSTOPS_EXEC_V1_MIN_TIMEOUT_SECONDS = 1
+HOSTOPS_EXEC_V1_MAX_TIMEOUT_SECONDS = 120
+HOSTOPS_EXEC_V1_MAX_OUTPUT_BYTES = 65536
+HOSTOPS_EXEC_V1_JOURNAL_MAX_RECORDS = 2048
+HOSTOPS_EXEC_V1_ENROLLMENT_FILENAME = "hostops-exec-v1-enrollment.json"
+HOSTOPS_EXEC_V1_JOURNAL_FILENAME = "hostops-exec-v1-journal.sqlite3"
+HOSTOPS_EXEC_V1_PAYLOAD_DIRNAME = "payloads"
+
+HOSTOPS_EXEC_V1_STATUSES = frozenset({
+    "PLANNED", "DISABLED", "ENROLLED", "EXECUTED", "REJECTED", "UNKNOWN_EFFECT",
+})
+HOSTOPS_EXEC_V1_CODES = frozenset({
+    "READY_TO_EXECUTE",
+    "BLOCKED_NOT_ENROLLED",
+    "ENROLLMENT_DISABLED",
+    "ENROLLMENT_REVOKED",
+    "ENROLLMENT_INVALID",
+    "ENROLLMENT_RECORDED",
+    "ALREADY_ENROLLED_NO_OVERWRITE",
+    "PROTECTED_WORKFLOW_DISPATCH_DISABLED",
+    "EVENT_OWNER_OR_REPO_DENIED",
+    "EVENT_SHAPE_OR_STATE_DENIED",
+    "PUBLIC_ISSUE_RAW_SCRIPT_DENIED",
+    "REQUEST_INVALID",
+    "PAYLOAD_OVERSIZED_OR_INVALID",
+    "PAYLOAD_DIGEST_MISMATCH",
+    "REQUEST_DIGEST_MISMATCH",
+    "AUTHORITY_TIER_DENIED",
+    "AUTHENTICATION_UNPROVEN",
+    "PRIVATE_PAYLOAD_UNAVAILABLE",
+    "DUPLICATE_JOB_ID",
+    "REPLAY_DENIED",
+    "JOURNAL_CAPACITY_EXCEEDED",
+    "JOURNAL_UNAVAILABLE",
+    "ENROLLMENT_PIN_MISMATCH",
+    "WINDOWS_ONLY",
+    "SOURCE_CI_EXECUTION_FORBIDDEN",
+    "WRONG_RUNNER_FORBIDDEN",
+    "WRONG_SESSION_OR_ELEVATED",
+    "OWNER_SID_MISMATCH",
+    "REPARSE_PATH_DENIED",
+    "PROTECTED_HOSTOPS_ONLY",
+    "CANCELLED_BEFORE_EXECUTION",
+    "EXECUTION_COMPLETED",
+    "EXECUTION_NONZERO_EXIT",
+    "EXECUTION_CANCELLED_OR_TIMED_OUT_UNKNOWN_EFFECT",
+    "READBACK_UNVERIFIED_UNKNOWN_EFFECT",
+    "EXECUTION_ERROR_UNKNOWN_EFFECT",
+    "UNKNOWN_EFFECT_HOLD",
+})
+HOSTOPS_EXEC_V1_PUBLIC_RECEIPT_FIELDS = frozenset({
+    "schema", "status", "code", "job_id", "request_digest", "script_sha256",
+    "authority_tier", "payload_mode", "enrolled", "executed", "cancelled",
+    "readback_verified", "exit_code", "stdout_sha256", "stderr_sha256",
+    "output_bytes", "output_truncated", "denylist_security_claim",
+    "public_script_echoed", "public_output_echoed", "elevated_token",
+    "source_sha", "issue_number", "recorded_at",
+})
+_EXEC_V1_REQUEST_FIELDS = frozenset({
+    "schema", "job_id", "payload_mode", "script_sha256", "script_utf8",
+    "timeout_seconds", "intended_owner", "intended_session", "authority_tier",
+    "nonce", "request_digest",
+})
+_EXEC_V1_JOB_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{7,63}\Z")
+_EXEC_V1_HEX64_RE = re.compile(r"[0-9a-f]{64}\Z")
+_EXEC_V1_HEX40_RE = re.compile(r"[0-9a-f]{40}\Z")
+_EXEC_V1_NONCE_RE = re.compile(r"[0-9a-f]{32,64}\Z")
+_EXEC_V1_USER_SID_RE = re.compile(r"S-1-5-21-(?:[0-9]+-){3}[0-9]+\Z")
+
+
+def _exec_v1_canonical(value) -> bytes:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+    ).encode("ascii")
+
+
+def _exec_v1_sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _exec_v1_stamp(now: datetime | None = None) -> str:
+    value = now if now is not None else datetime.now(timezone.utc)
+    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() != timedelta(0):
+        deny("REQUEST_INVALID")
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _exec_v1_no_reparse(path: Path) -> bool:
+    if not path.is_absolute():
+        return False
+    for part in (path, *path.parents):
+        try:
+            exists = part.exists() or part.is_symlink()
+        except OSError:
+            return False
+        if exists and _is_reparse(part):
+            return False
+    return True
+
+
+def build_hostops_exec_v1_request(
+    *,
+    job_id: str,
+    nonce: str,
+    timeout_seconds: int = 30,
+    script_utf8: str | None = None,
+    script_sha256: str | None = None,
+    payload_mode: str = "PRIVATE_DIGEST",
+    intended_owner: str = OWNER,
+    intended_session: str = HOSTOPS_EXEC_V1_INTENDED_SESSION,
+    authority_tier: str = HOSTOPS_EXEC_V1_AUTHORITY_TIER_LOCAL,
+) -> dict:
+    """Build a canonical digest-bound HOSTOPS_EXEC_V1 request object."""
+    if payload_mode == "PRIVATE_INLINE_UTF8":
+        if type(script_utf8) is not str:
+            deny("PAYLOAD_OVERSIZED_OR_INVALID")
+        digest = _exec_v1_sha256(script_utf8.encode("utf-8")) if script_sha256 is None else script_sha256
+    elif payload_mode == "PRIVATE_DIGEST":
+        if script_utf8 is not None or type(script_sha256) is not str:
+            deny("PAYLOAD_OVERSIZED_OR_INVALID")
+        digest = script_sha256
+    else:
+        deny("REQUEST_INVALID")
+    unsigned = {
+        "schema": HOSTOPS_EXEC_V1_SCHEMA,
+        "job_id": job_id,
+        "payload_mode": payload_mode,
+        "script_sha256": digest,
+        "script_utf8": script_utf8,
+        "timeout_seconds": timeout_seconds,
+        "intended_owner": intended_owner,
+        "intended_session": intended_session,
+        "authority_tier": authority_tier,
+        "nonce": nonce,
+    }
+    request = {**unsigned, "request_digest": _exec_v1_sha256(_exec_v1_canonical(unsigned))}
+    return parse_hostops_exec_v1_request(request, public_issue=(payload_mode == "PRIVATE_DIGEST"))
+
+
+def parse_hostops_exec_v1_request(raw, *, public_issue: bool = False) -> dict:
+    """Validate bounded HOSTOPS_EXEC_V1 request shape and digests; never executes."""
+    if type(raw) is bytes:
+        if not 0 < len(raw) <= HOSTOPS_EXEC_V1_MAX_EVENT_BYTES:
+            deny("PAYLOAD_OVERSIZED_OR_INVALID")
+        try:
+            obj = json.loads(raw.decode("utf-8"), object_pairs_hook=_object_unique)
+        except (ValueError, UnicodeError, RecursionError):
+            deny("REQUEST_INVALID")
+    elif type(raw) is str:
+        try:
+            encoded = raw.encode("utf-8")
+        except UnicodeError:
+            deny("REQUEST_INVALID")
+        if not 0 < len(encoded) <= HOSTOPS_EXEC_V1_MAX_EVENT_BYTES:
+            deny("PAYLOAD_OVERSIZED_OR_INVALID")
+        try:
+            obj = json.loads(raw, object_pairs_hook=_object_unique)
+        except (ValueError, UnicodeError, RecursionError):
+            deny("REQUEST_INVALID")
+    elif type(raw) is dict:
+        try:
+            encoded = _exec_v1_canonical(raw)
+        except (ValueError, TypeError, OverflowError, RecursionError):
+            deny("REQUEST_INVALID")
+        if not 0 < len(encoded) <= HOSTOPS_EXEC_V1_MAX_EVENT_BYTES:
+            deny("PAYLOAD_OVERSIZED_OR_INVALID")
+        obj = json.loads(encoded.decode("ascii"), object_pairs_hook=_object_unique)
+    else:
+        deny("REQUEST_INVALID")
+
+    if type(obj) is not dict or set(obj) != _EXEC_V1_REQUEST_FIELDS:
+        deny("REQUEST_INVALID")
+    if obj["schema"] != HOSTOPS_EXEC_V1_SCHEMA:
+        deny("REQUEST_INVALID")
+    if type(obj["job_id"]) is not str or _EXEC_V1_JOB_ID_RE.fullmatch(obj["job_id"]) is None:
+        deny("REQUEST_INVALID")
+    if type(obj["nonce"]) is not str or _EXEC_V1_NONCE_RE.fullmatch(obj["nonce"]) is None:
+        deny("REQUEST_INVALID")
+    if type(obj["script_sha256"]) is not str or _EXEC_V1_HEX64_RE.fullmatch(obj["script_sha256"]) is None:
+        deny("REQUEST_INVALID")
+    if type(obj["request_digest"]) is not str or _EXEC_V1_HEX64_RE.fullmatch(obj["request_digest"]) is None:
+        deny("REQUEST_INVALID")
+    if (type(obj["timeout_seconds"]) is not int
+            or not HOSTOPS_EXEC_V1_MIN_TIMEOUT_SECONDS <= obj["timeout_seconds"] <= HOSTOPS_EXEC_V1_MAX_TIMEOUT_SECONDS):
+        deny("REQUEST_INVALID")
+    if obj["intended_owner"] != OWNER:
+        deny("EVENT_OWNER_OR_REPO_DENIED")
+    if obj["intended_session"] != HOSTOPS_EXEC_V1_INTENDED_SESSION:
+        deny("WRONG_SESSION_OR_ELEVATED")
+    if obj["authority_tier"] != HOSTOPS_EXEC_V1_AUTHORITY_TIER_LOCAL:
+        deny("AUTHORITY_TIER_DENIED")
+    mode = obj["payload_mode"]
+    if type(mode) is not str or mode not in HOSTOPS_EXEC_V1_PAYLOAD_MODES:
+        deny("REQUEST_INVALID")
+    script = obj["script_utf8"]
+    if public_issue and (mode != "PRIVATE_DIGEST" or script is not None):
+        deny("PUBLIC_ISSUE_RAW_SCRIPT_DENIED")
+    if mode == "PRIVATE_DIGEST":
+        if script is not None:
+            deny("PAYLOAD_OVERSIZED_OR_INVALID")
+    else:
+        if type(script) is not str or "\x00" in script:
+            deny("PAYLOAD_OVERSIZED_OR_INVALID")
+        try:
+            script_bytes = script.encode("utf-8")
+        except UnicodeError:
+            deny("PAYLOAD_OVERSIZED_OR_INVALID")
+        if not 0 < len(script_bytes) <= HOSTOPS_EXEC_V1_MAX_SCRIPT_BYTES:
+            deny("PAYLOAD_OVERSIZED_OR_INVALID")
+        if not hmac.compare_digest(_exec_v1_sha256(script_bytes), obj["script_sha256"]):
+            deny("PAYLOAD_DIGEST_MISMATCH")
+    unsigned = {k: v for k, v in obj.items() if k != "request_digest"}
+    if not hmac.compare_digest(obj["request_digest"], _exec_v1_sha256(_exec_v1_canonical(unsigned))):
+        deny("REQUEST_DIGEST_MISMATCH")
+    return obj
+
+
+def parse_hostops_exec_v1_event(event) -> dict:
+    """Validate owner-authored Issue event for a future protected HOSTOPS_EXEC_V1 workflow.
+
+    Public repository Issues may NEVER carry raw PowerShell script text; they must
+    use payload_mode='PRIVATE_DIGEST' bound to an enrolled local private payload.
+    """
+    if type(event) is not dict:
+        deny("EVENT_SHAPE_OR_STATE_DENIED")
+    repo = event.get("repository")
+    if (type(repo) is not dict or repo.get("full_name") != REPO
+            or type(repo.get("private")) is not bool
+            or type(repo.get("owner")) is not dict
+            or repo["owner"].get("login") != OWNER):
+        deny("EVENT_OWNER_OR_REPO_DENIED")
+    sender = event.get("sender")
+    if type(sender) is not dict or sender.get("login") != OWNER:
+        deny("EVENT_OWNER_OR_REPO_DENIED")
+    issue = event.get("issue")
+    if type(issue) is not dict or "pull_request" in issue:
+        deny("EVENT_SHAPE_OR_STATE_DENIED")
+    issue_user = issue.get("user")
+    number = issue.get("number")
+    title = issue.get("title")
+    if type(issue_user) is not dict or issue_user.get("login") != OWNER:
+        deny("EVENT_OWNER_OR_REPO_DENIED")
+    if (event.get("action") != "opened" or issue.get("state") != "open"
+            or type(number) is not int or number < 1
+            or type(title) is not str or not title.startswith(HOSTOPS_EXEC_V1_TITLE)):
+        deny("EVENT_SHAPE_OR_STATE_DENIED")
+    body = issue.get("body")
+    if type(body) is not str:
+        deny("EVENT_SHAPE_OR_STATE_DENIED")
+    public_issue = repo["private"] is False
+    request = parse_hostops_exec_v1_request(body, public_issue=public_issue)
+    return {"issue_number": number, "public_issue": public_issue, "request": request}
+
+
+def validate_hostops_exec_v1_receipt(receipt) -> dict:
+    """Strict public-safe receipt validator; forbids raw scripts, output or paths."""
+    def require(condition):
+        if not condition:
+            deny("REQUEST_INVALID")
+
+    require(type(receipt) is dict and set(receipt) == HOSTOPS_EXEC_V1_PUBLIC_RECEIPT_FIELDS)
+    require(receipt["schema"] == HOSTOPS_EXEC_V1_RECEIPT_SCHEMA)
+    require(type(receipt["status"]) is str and receipt["status"] in HOSTOPS_EXEC_V1_STATUSES)
+    require(type(receipt["code"]) is str and receipt["code"] in HOSTOPS_EXEC_V1_CODES)
+    require(receipt["authority_tier"] == HOSTOPS_EXEC_V1_AUTHORITY_TIER_LOCAL)
+    require(receipt["denylist_security_claim"] is False)
+    require(receipt["public_script_echoed"] is False)
+    require(receipt["public_output_echoed"] is False)
+    require(receipt["elevated_token"] is False)
+    for field in ("enrolled", "executed", "cancelled", "readback_verified", "output_truncated"):
+        require(type(receipt[field]) is bool)
+    require(type(receipt["output_bytes"]) is int
+            and 0 <= receipt["output_bytes"] <= HOSTOPS_EXEC_V1_MAX_OUTPUT_BYTES)
+    if receipt["job_id"] is not None:
+        require(type(receipt["job_id"]) is str and _EXEC_V1_JOB_ID_RE.fullmatch(receipt["job_id"]) is not None)
+    for field in ("request_digest", "script_sha256"):
+        if receipt[field] is not None:
+            require(type(receipt[field]) is str and _EXEC_V1_HEX64_RE.fullmatch(receipt[field]) is not None)
+    if receipt["payload_mode"] is not None:
+        require(type(receipt["payload_mode"]) is str and receipt["payload_mode"] in HOSTOPS_EXEC_V1_PAYLOAD_MODES)
+    if receipt["source_sha"] is not None:
+        require(type(receipt["source_sha"]) is str and _EXEC_V1_HEX40_RE.fullmatch(receipt["source_sha"]) is not None)
+    if receipt["issue_number"] is not None:
+        require(type(receipt["issue_number"]) is int and receipt["issue_number"] >= 1)
+    try:
+        _health_parse_time(receipt["recorded_at"])
+    except ValueError:
+        deny("REQUEST_INVALID")
+    if receipt["status"] == "EXECUTED":
+        require(receipt["executed"] is True and receipt["enrolled"] is True
+                and receipt["readback_verified"] is True and receipt["cancelled"] is False
+                and type(receipt["exit_code"]) is int
+                and type(receipt["stdout_sha256"]) is str and _EXEC_V1_HEX64_RE.fullmatch(receipt["stdout_sha256"]) is not None
+                and type(receipt["stderr_sha256"]) is str and _EXEC_V1_HEX64_RE.fullmatch(receipt["stderr_sha256"]) is not None)
+    else:
+        require(receipt["executed"] is False and receipt["exit_code"] is None
+                and receipt["stdout_sha256"] is None and receipt["stderr_sha256"] is None)
+    encoded = _exec_v1_canonical(receipt)
+    require(len(encoded) <= 4096)
+    return json.loads(encoded.decode("ascii"))
+
+
+HostOpsExecV1RuntimeContext = namedtuple(
+    "HostOpsExecV1RuntimeContext",
+    ("os_name", "runner_name", "session_id", "elevated", "owner_sid", "env"),
+)
+
+HostOpsExecV1ProcessResult = namedtuple(
+    "HostOpsExecV1ProcessResult",
+    ("exit_code", "stdout", "stderr", "output_truncated"),
+    defaults=(False,),
+)
+
+_HostOpsExecV1EnrollmentBase = namedtuple(
+    "_HostOpsExecV1EnrollmentBase",
+    (
+        "enrollment_id", "owner_login", "owner_sid", "runner_name",
+        "repository", "source_sha", "state_root", "journal_path",
+        "payload_root", "auth_key_sha256", "enrolled_at",
+        "enabled", "revoked", "require_private_payload",
+    ),
+    defaults=(HOSTOPS_EXEC_V1_ENABLED_BY_DEFAULT, False, True),
+)
+
+
+class HostOpsExecV1Enrollment(_HostOpsExecV1EnrollmentBase):
+    __slots__ = ()
+
+    def validate(self) -> None:
+        if (type(self.enrollment_id) is not str or _EXEC_V1_JOB_ID_RE.fullmatch(self.enrollment_id) is None
+                or self.owner_login != OWNER
+                or type(self.owner_sid) is not str or _EXEC_V1_USER_SID_RE.fullmatch(self.owner_sid) is None
+                or self.runner_name != HOSTOPS_EXEC_V1_RUNNER_NAME
+                or self.repository != REPO
+                or type(self.source_sha) is not str or _EXEC_V1_HEX40_RE.fullmatch(self.source_sha) is None
+                or type(self.auth_key_sha256) is not str or _EXEC_V1_HEX64_RE.fullmatch(self.auth_key_sha256) is None
+                or type(self.enabled) is not bool or type(self.revoked) is not bool
+                or type(self.require_private_payload) is not bool):
+            deny("ENROLLMENT_INVALID")
+        try:
+            _health_parse_time(self.enrolled_at)
+        except ValueError:
+            deny("ENROLLMENT_INVALID")
+        for path in (self.state_root, self.journal_path, self.payload_root):
+            if not isinstance(path, Path) or not _exec_v1_no_reparse(path):
+                deny("REPARSE_PATH_DENIED")
+        root_norm = Path(normpath(self.state_root))
+        if (root_norm not in Path(normpath(self.journal_path)).parents
+                or root_norm not in Path(normpath(self.payload_root)).parents):
+            deny("ENROLLMENT_INVALID")
+        if self.revoked:
+            deny("ENROLLMENT_REVOKED")
+        if not self.enabled:
+            deny("ENROLLMENT_DISABLED")
+
+
+def _verify_hostops_exec_v1_runtime(
+    ctx: HostOpsExecV1RuntimeContext,
+    *,
+    expected_owner_sid: str | None = None,
+    require_protected_workflow: bool = False,
+    forbid_github_actions: bool = False,
+) -> None:
+    if not isinstance(ctx, HostOpsExecV1RuntimeContext):
+        deny("PROTECTED_HOSTOPS_ONLY")
+    if ctx.os_name != "nt":
+        deny("WINDOWS_ONLY")
+    if (any(key.startswith("AI_COMMERCE_GIT_GUARD_") for key in ctx.env)
+            or "PYTEST_CURRENT_TEST" in ctx.env):
+        deny("SOURCE_CI_EXECUTION_FORBIDDEN")
+    if ctx.runner_name != HOSTOPS_EXEC_V1_RUNNER_NAME:
+        deny("WRONG_RUNNER_FORBIDDEN")
+    in_actions = ctx.env.get("GITHUB_ACTIONS") == "true"
+    if in_actions and forbid_github_actions:
+        deny("SOURCE_CI_EXECUTION_FORBIDDEN")
+    if in_actions:
+        expected = {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "issues",
+            "GITHUB_REPOSITORY": REPO,
+            "GITHUB_REPOSITORY_OWNER": OWNER,
+            "GITHUB_ACTOR": OWNER,
+            "GITHUB_TRIGGERING_ACTOR": OWNER,
+            "GITHUB_REF": "refs/heads/main",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_WORKFLOW_REF": HOSTOPS_EXEC_V1_WORKFLOW_REF,
+            "RUNNER_ENVIRONMENT": "self-hosted",
+            "RUNNER_NAME": HOSTOPS_EXEC_V1_RUNNER_NAME,
+        }
+        sha = ctx.env.get("GITHUB_SHA", "")
+        if (any(ctx.env.get(k) != v for k, v in expected.items())
+                or _EXEC_V1_HEX40_RE.fullmatch(sha) is None
+                or ctx.env.get("GITHUB_WORKFLOW_SHA") != sha):
+            deny("PROTECTED_HOSTOPS_ONLY")
+        if ctx.env.get("HOSTOPS_EXEC_V1_PROTECTED_DISPATCH") != "ENABLED":
+            deny("PROTECTED_WORKFLOW_DISPATCH_DISABLED")
+    elif require_protected_workflow:
+        deny("PROTECTED_HOSTOPS_ONLY")
+    if type(ctx.session_id) is not int or ctx.session_id <= 0 or ctx.elevated is not False:
+        deny("WRONG_SESSION_OR_ELEVATED")
+    if type(ctx.owner_sid) is not str or _EXEC_V1_USER_SID_RE.fullmatch(ctx.owner_sid) is None:
+        deny("OWNER_SID_MISMATCH")
+    if expected_owner_sid is not None and ctx.owner_sid != expected_owner_sid:
+        deny("OWNER_SID_MISMATCH")
+
+
+def sign_hostops_exec_v1_request(request: dict, key: bytes) -> str:
+    """Private owner-side HMAC-SHA256 signer over canonical validated request bytes."""
+    if type(key) is not bytes or len(key) < 32:
+        deny("AUTHENTICATION_UNPROVEN")
+    validated = parse_hostops_exec_v1_request(request, public_issue=False)
+    return hmac.new(key, _exec_v1_canonical(validated), "sha256").hexdigest()
+
+
+def make_hostops_exec_v1_hmac_authenticator(key: bytes) -> Callable[[bytes, str | None, HostOpsExecV1Enrollment], bool]:
+    """Return a fail-closed HMAC authenticator bound to enrollment.auth_key_sha256."""
+    if type(key) is not bytes or len(key) < 32:
+        deny("AUTHENTICATION_UNPROVEN")
+    key_digest = _exec_v1_sha256(key)
+
+    def verify(canonical_request: bytes, auth_token: str | None, enrollment: HostOpsExecV1Enrollment) -> bool:
+        if (type(canonical_request) is not bytes or type(auth_token) is not str
+                or _EXEC_V1_HEX64_RE.fullmatch(auth_token) is None
+                or not hmac.compare_digest(key_digest, enrollment.auth_key_sha256)):
+            return False
+        expected = hmac.new(key, canonical_request, "sha256").hexdigest()
+        return hmac.compare_digest(auth_token, expected)
+
+    return verify
+
+
+def enroll_hostops_exec_v1(
+    *,
+    enrollment_id: str,
+    source_sha: str,
+    state_root: Path,
+    auth_key: bytes,
+    runtime: HostOpsExecV1RuntimeContext,
+    require_private_payload: bool = True,
+    now: datetime | None = None,
+) -> tuple[HostOpsExecV1Enrollment, dict]:
+    """One-time native interactive owner enrollment. Refuses CI, EF02, Session 0 and elevation."""
+    _verify_hostops_exec_v1_runtime(runtime, forbid_github_actions=True)
+    if type(auth_key) is not bytes or len(auth_key) < 32:
+        deny("ENROLLMENT_INVALID")
+    if not isinstance(state_root, Path) or not _exec_v1_no_reparse(state_root):
+        deny("REPARSE_PATH_DENIED")
+    stamped = _exec_v1_stamp(now)
+    journal_path = state_root / HOSTOPS_EXEC_V1_JOURNAL_FILENAME
+    payload_root = state_root / HOSTOPS_EXEC_V1_PAYLOAD_DIRNAME
+    enrollment = HostOpsExecV1Enrollment(
+        enrollment_id=enrollment_id,
+        owner_login=OWNER,
+        owner_sid=runtime.owner_sid,
+        runner_name=HOSTOPS_EXEC_V1_RUNNER_NAME,
+        repository=REPO,
+        source_sha=source_sha,
+        state_root=state_root,
+        journal_path=journal_path,
+        payload_root=payload_root,
+        auth_key_sha256=_exec_v1_sha256(auth_key),
+        enrolled_at=stamped,
+        enabled=True,
+        revoked=False,
+        require_private_payload=require_private_payload,
+    )
+    enrollment.validate()
+    state_root.mkdir(parents=True, exist_ok=True)
+    payload_root.mkdir(parents=True, exist_ok=True)
+    if not _exec_v1_no_reparse(state_root) or not _exec_v1_no_reparse(payload_root):
+        deny("REPARSE_PATH_DENIED")
+    record = {
+        "schema": HOSTOPS_EXEC_V1_ENROLLMENT_SCHEMA,
+        "enrollment_id": enrollment.enrollment_id,
+        "owner_login": enrollment.owner_login,
+        "owner_sid": enrollment.owner_sid,
+        "runner_name": enrollment.runner_name,
+        "repository": enrollment.repository,
+        "source_sha": enrollment.source_sha,
+        "state_root": str(enrollment.state_root),
+        "journal_path": str(enrollment.journal_path),
+        "payload_root": str(enrollment.payload_root),
+        "auth_key_sha256": enrollment.auth_key_sha256,
+        "enrolled_at": enrollment.enrolled_at,
+        "enabled": enrollment.enabled,
+        "revoked": enrollment.revoked,
+        "require_private_payload": enrollment.require_private_payload,
+    }
+    enrollment_file = state_root / HOSTOPS_EXEC_V1_ENROLLMENT_FILENAME
+    if not _exec_v1_no_reparse(enrollment_file):
+        deny("REPARSE_PATH_DENIED")
+    raw = _exec_v1_canonical(record) + b"\n"
+    try:
+        with enrollment_file.open("xb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except FileExistsError:
+        deny("ALREADY_ENROLLED_NO_OVERWRITE")
+    except OSError:
+        deny("ENROLLMENT_INVALID")
+    receipt = validate_hostops_exec_v1_receipt({
+        "schema": HOSTOPS_EXEC_V1_RECEIPT_SCHEMA,
+        "status": "ENROLLED",
+        "code": "ENROLLMENT_RECORDED",
+        "job_id": None,
+        "request_digest": None,
+        "script_sha256": None,
+        "authority_tier": HOSTOPS_EXEC_V1_AUTHORITY_TIER_LOCAL,
+        "payload_mode": None,
+        "enrolled": True,
+        "executed": False,
+        "cancelled": False,
+        "readback_verified": True,
+        "exit_code": None,
+        "stdout_sha256": None,
+        "stderr_sha256": None,
+        "output_bytes": 0,
+        "output_truncated": False,
+        "denylist_security_claim": False,
+        "public_script_echoed": False,
+        "public_output_echoed": False,
+        "elevated_token": False,
+        "source_sha": enrollment.source_sha,
+        "issue_number": None,
+        "recorded_at": stamped,
+    })
+    return enrollment, receipt
+
+
+def load_hostops_exec_v1_enrollment(path: Path) -> HostOpsExecV1Enrollment | None:
+    """Load an operator-owned enrollment file; returns None when absent."""
+    if not isinstance(path, Path) or not _exec_v1_no_reparse(path):
+        deny("REPARSE_PATH_DENIED")
+    if not path.exists():
+        return None
+    if not path.is_file():
+        deny("ENROLLMENT_INVALID")
+    try:
+        with path.open("rb") as stream:
+            raw = stream.read(8193)
+        if not 0 < len(raw) <= 8192:
+            deny("ENROLLMENT_INVALID")
+        obj = json.loads(raw.decode("utf-8"), object_pairs_hook=_object_unique)
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        deny("ENROLLMENT_INVALID")
+    expected_keys = {
+        "schema", "enrollment_id", "owner_login", "owner_sid", "runner_name",
+        "repository", "source_sha", "state_root", "journal_path", "payload_root",
+        "auth_key_sha256", "enrolled_at", "enabled", "revoked", "require_private_payload",
+    }
+    if type(obj) is not dict or set(obj) != expected_keys or obj["schema"] != HOSTOPS_EXEC_V1_ENROLLMENT_SCHEMA:
+        deny("ENROLLMENT_INVALID")
+    if any(type(obj[k]) is not str for k in ("state_root", "journal_path", "payload_root")):
+        deny("ENROLLMENT_INVALID")
+    return HostOpsExecV1Enrollment(
+        enrollment_id=obj["enrollment_id"],
+        owner_login=obj["owner_login"],
+        owner_sid=obj["owner_sid"],
+        runner_name=obj["runner_name"],
+        repository=obj["repository"],
+        source_sha=obj["source_sha"],
+        state_root=Path(obj["state_root"]),
+        journal_path=Path(obj["journal_path"]),
+        payload_root=Path(obj["payload_root"]),
+        auth_key_sha256=obj["auth_key_sha256"],
+        enrolled_at=obj["enrolled_at"],
+        enabled=obj["enabled"],
+        revoked=obj["revoked"],
+        require_private_payload=obj["require_private_payload"],
+    )
+
+
+class HostOpsExecV1Journal:
+    """Durable operator-owned SQLite journal; intent before effect, no plaintext secrets."""
+
+    def __init__(self, path: Path):
+        if not isinstance(path, Path) or not _exec_v1_no_reparse(path):
+            deny("REPARSE_PATH_DENIED")
+        self.path = path
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            if not _exec_v1_no_reparse(self.path):
+                deny("REPARSE_PATH_DENIED")
+            with self._session() as db:
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS enrollment_pin ("
+                    "id INTEGER PRIMARY KEY CHECK(id=1), "
+                    "enrollment_id TEXT NOT NULL, owner_sid TEXT NOT NULL, source_sha TEXT NOT NULL)"
+                )
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS jobs ("
+                    "job_id TEXT PRIMARY KEY, "
+                    "nonce TEXT UNIQUE NOT NULL, "
+                    "request_digest TEXT UNIQUE NOT NULL, "
+                    "script_sha256 TEXT NOT NULL, "
+                    "state TEXT NOT NULL, "
+                    "status TEXT NOT NULL, "
+                    "code TEXT NOT NULL, "
+                    "exit_code INTEGER, "
+                    "stdout_sha256 TEXT, "
+                    "stderr_sha256 TEXT, "
+                    "output_bytes INTEGER NOT NULL, "
+                    "output_truncated INTEGER NOT NULL, "
+                    "cancelled INTEGER NOT NULL, "
+                    "readback_verified INTEGER NOT NULL, "
+                    "created_at TEXT NOT NULL, "
+                    "updated_at TEXT NOT NULL)"
+                )
+        except Denied:
+            raise
+        except (OSError, sqlite3.Error):
+            deny("JOURNAL_UNAVAILABLE")
+
+    @contextmanager
+    def _session(self):
+        db = sqlite3.connect(self.path, timeout=1, isolation_level="IMMEDIATE")
+        try:
+            db.execute("PRAGMA synchronous=FULL")
+            with db:
+                yield db
+        finally:
+            db.close()
+
+    def check_ready(self, request: dict, enrollment: HostOpsExecV1Enrollment) -> None:
+        """Read-only admission check for plan()."""
+        try:
+            with self._session() as db:
+                pin = db.execute(
+                    "SELECT enrollment_id, owner_sid, source_sha FROM enrollment_pin WHERE id=1"
+                ).fetchone()
+                if pin is not None and pin != (enrollment.enrollment_id, enrollment.owner_sid, enrollment.source_sha):
+                    deny("ENROLLMENT_PIN_MISMATCH")
+                if db.execute("SELECT 1 FROM jobs WHERE state IN ('INTENT','UNKNOWN_EFFECT')").fetchone():
+                    deny("UNKNOWN_EFFECT_HOLD")
+                if db.execute("SELECT 1 FROM jobs WHERE job_id=?", (request["job_id"],)).fetchone():
+                    deny("DUPLICATE_JOB_ID")
+                if db.execute(
+                    "SELECT 1 FROM jobs WHERE nonce=? OR request_digest=?",
+                    (request["nonce"], request["request_digest"]),
+                ).fetchone():
+                    deny("REPLAY_DENIED")
+                if db.execute("SELECT count(*) FROM jobs").fetchone()[0] >= HOSTOPS_EXEC_V1_JOURNAL_MAX_RECORDS:
+                    deny("JOURNAL_CAPACITY_EXCEEDED")
+        except Denied:
+            raise
+        except sqlite3.Error:
+            deny("JOURNAL_UNAVAILABLE")
+
+    def reserve(self, request: dict, enrollment: HostOpsExecV1Enrollment, timestamp: str) -> None:
+        """Atomically record durable INTENT before any PowerShell effect."""
+        try:
+            with self._session() as db:
+                db.execute("BEGIN IMMEDIATE")
+                pin = db.execute(
+                    "SELECT enrollment_id, owner_sid, source_sha FROM enrollment_pin WHERE id=1"
+                ).fetchone()
+                if pin is None:
+                    db.execute(
+                        "INSERT INTO enrollment_pin VALUES (1,?,?,?)",
+                        (enrollment.enrollment_id, enrollment.owner_sid, enrollment.source_sha),
+                    )
+                elif pin != (enrollment.enrollment_id, enrollment.owner_sid, enrollment.source_sha):
+                    deny("ENROLLMENT_PIN_MISMATCH")
+                if db.execute("SELECT 1 FROM jobs WHERE state IN ('INTENT','UNKNOWN_EFFECT')").fetchone():
+                    deny("UNKNOWN_EFFECT_HOLD")
+                if db.execute("SELECT 1 FROM jobs WHERE job_id=?", (request["job_id"],)).fetchone():
+                    deny("DUPLICATE_JOB_ID")
+                if db.execute(
+                    "SELECT 1 FROM jobs WHERE nonce=? OR request_digest=?",
+                    (request["nonce"], request["request_digest"]),
+                ).fetchone():
+                    deny("REPLAY_DENIED")
+                if db.execute("SELECT count(*) FROM jobs").fetchone()[0] >= HOSTOPS_EXEC_V1_JOURNAL_MAX_RECORDS:
+                    deny("JOURNAL_CAPACITY_EXCEEDED")
+                db.execute(
+                    "INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        request["job_id"], request["nonce"], request["request_digest"],
+                        request["script_sha256"], "INTENT", "PLANNED", "READY_TO_EXECUTE",
+                        None, None, None, 0, 0, 0, 0, timestamp, timestamp,
+                    ),
+                )
+        except Denied:
+            raise
+        except sqlite3.Error:
+            deny("JOURNAL_UNAVAILABLE")
+
+    def finalize(self, job_id: str, receipt: dict) -> None:
+        """Transition an INTENT record to its terminal durable state."""
+        state = "UNKNOWN_EFFECT" if receipt["status"] == "UNKNOWN_EFFECT" else receipt["status"]
+        try:
+            with self._session() as db:
+                db.execute("BEGIN IMMEDIATE")
+                cursor = db.execute(
+                    "UPDATE jobs SET state=?, status=?, code=?, exit_code=?, "
+                    "stdout_sha256=?, stderr_sha256=?, output_bytes=?, output_truncated=?, "
+                    "cancelled=?, readback_verified=?, updated_at=? "
+                    "WHERE job_id=? AND state='INTENT'",
+                    (
+                        state, receipt["status"], receipt["code"], receipt["exit_code"],
+                        receipt["stdout_sha256"], receipt["stderr_sha256"],
+                        receipt["output_bytes"], int(receipt["output_truncated"]),
+                        int(receipt["cancelled"]), int(receipt["readback_verified"]),
+                        receipt["recorded_at"], job_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    deny("JOURNAL_UNAVAILABLE")
+        except Denied:
+            raise
+        except sqlite3.Error:
+            deny("JOURNAL_UNAVAILABLE")
+
+    def record(self, job_id: str) -> dict | None:
+        try:
+            with self._session() as db:
+                row = db.execute(
+                    "SELECT job_id, nonce, request_digest, script_sha256, state, status, code, "
+                    "exit_code, stdout_sha256, stderr_sha256, output_bytes, output_truncated, "
+                    "cancelled, readback_verified, created_at, updated_at FROM jobs WHERE job_id=?",
+                    (job_id,),
+                ).fetchone()
+        except sqlite3.Error:
+            deny("JOURNAL_UNAVAILABLE")
+        if row is None:
+            return None
+        keys = (
+            "job_id", "nonce", "request_digest", "script_sha256", "state", "status", "code",
+            "exit_code", "stdout_sha256", "stderr_sha256", "output_bytes", "output_truncated",
+            "cancelled", "readback_verified", "created_at", "updated_at",
+        )
+        return dict(zip(keys, row))
+
+
+def _default_hostops_exec_v1_payload_resolver(
+    script_sha256: str, enrollment: HostOpsExecV1Enrollment
+) -> bytes | None:
+    """Load an immutable local private PowerShell payload matching script_sha256."""
+    if _EXEC_V1_HEX64_RE.fullmatch(script_sha256) is None:
+        deny("REQUEST_INVALID")
+    if not _exec_v1_no_reparse(enrollment.payload_root) or not enrollment.payload_root.is_dir():
+        return None
+    candidate = enrollment.payload_root / (script_sha256 + ".ps1")
+    if not _exec_v1_no_reparse(candidate) or not candidate.is_file():
+        return None
+    try:
+        with candidate.open("rb") as stream:
+            raw = stream.read(HOSTOPS_EXEC_V1_MAX_SCRIPT_BYTES + 1)
+    except OSError:
+        return None
+    if not 0 < len(raw) <= HOSTOPS_EXEC_V1_MAX_SCRIPT_BYTES:
+        deny("PAYLOAD_OVERSIZED_OR_INVALID")
+    return raw
+
+
+class _ExecV1OutputCapture(asyncio.SubprocessProtocol):
+    """Drain both streams with the receipt's stdout-first retention policy."""
+
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.stdout = bytearray()
+        self.stderr = bytearray()
+        self.truncated = False
+        self.pipe_failed = False
+        self.closed = asyncio.Event()
+
+    def pipe_data_received(self, fd: int, data: bytes) -> None:
+        available = self.limit - len(self.stdout)
+        if fd == 1:
+            retained = min(len(data), available)
+            stderr_limit = available - retained
+            if len(self.stderr) > stderr_limit:
+                del self.stderr[stderr_limit:]
+                self.truncated = True
+            self.stdout.extend(memoryview(data)[:retained])
+        else:
+            retained = min(len(data), available - len(self.stderr))
+            self.stderr.extend(memoryview(data)[:retained])
+        self.truncated |= retained < len(data)
+
+    def pipe_connection_lost(self, fd: int, exc: Exception | None) -> None:
+        self.pipe_failed |= exc is not None
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        self.pipe_failed |= exc is not None
+        self.closed.set()
+
+
+@contextmanager
+def _exec_v1_windows_job():
+    """Own process-tree cleanup under the existing runner token."""
+    import ctypes
+    from ctypes import wintypes
+
+    class BasicLimits(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class ExtendedLimits(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", BasicLimits),
+            ("IoInfo", ctypes.c_uint64 * 6),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    class BasicAccounting(ctypes.Structure):
+        _fields_ = [
+            ("TotalUserTime", ctypes.c_int64),
+            ("TotalKernelTime", ctypes.c_int64),
+            ("ThisPeriodTotalUserTime", ctypes.c_int64),
+            ("ThisPeriodTotalKernelTime", ctypes.c_int64),
+            ("TotalPageFaultCount", wintypes.DWORD),
+            ("TotalProcesses", wintypes.DWORD),
+            ("ActiveProcesses", wintypes.DWORD),
+            ("TotalTerminatedProcesses", wintypes.DWORD),
+        ]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle, dword, boolean = wintypes.HANDLE, wintypes.DWORD, wintypes.BOOL
+    for name, arguments, result in (
+        ("CreateJobObjectW", (ctypes.c_void_p, wintypes.LPCWSTR), handle),
+        ("SetInformationJobObject", (handle, ctypes.c_int, ctypes.c_void_p, dword), boolean),
+        ("QueryInformationJobObject", (handle, ctypes.c_int, ctypes.c_void_p, dword, ctypes.c_void_p), boolean),
+        ("OpenProcess", (dword, boolean, dword), handle),
+        ("AssignProcessToJobObject", (handle, handle), boolean),
+        ("CloseHandle", (handle,), boolean),
+    ):
+        function = getattr(kernel, name)
+        function.argtypes = arguments
+        function.restype = result
+
+    def checked(result):
+        if not result:
+            raise ctypes.WinError(ctypes.get_last_error())
+        return result
+
+    # Unnamed and non-inheritable. Do not grant breakaway for child processes.
+    job = checked(kernel.CreateJobObjectW(None, None))
+    try:
+        limits = ExtendedLimits()
+        limits.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        checked(kernel.SetInformationJobObject(
+            job, 9, ctypes.byref(limits), ctypes.sizeof(limits),  # JobObjectExtendedLimitInformation
+        ))
+
+        def attach(pid):
+            process = checked(kernel.OpenProcess(0x0101, False, pid))  # PROCESS_SET_QUOTA | PROCESS_TERMINATE
+            try:
+                checked(kernel.AssignProcessToJobObject(job, process))
+            finally:
+                checked(kernel.CloseHandle(process))
+
+        def has_live_processes():
+            accounting = BasicAccounting()
+            checked(kernel.QueryInformationJobObject(
+                job, 1, ctypes.byref(accounting), ctypes.sizeof(accounting), None,  # JobObjectBasicAccountingInformation
+            ))
+            return accounting.ActiveProcesses != 0
+
+        yield attach, has_live_processes
+    finally:
+        checked(kernel.CloseHandle(job))
+
+
+async def _capture_hostops_exec_v1(
+    argv: tuple[str, ...], script: bytes, timeout_seconds: int, max_output_bytes: int
+) -> HostOpsExecV1ProcessResult:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    capture = _ExecV1OutputCapture(max_output_bytes)
+    transport = None
+    stdin = None
+    try:
+        with _exec_v1_windows_job() as (attach, has_live_processes):
+            async with asyncio.timeout_at(deadline):
+                # Proactor I/O drains both output pipes concurrently with the bounded script write.
+                transport, _ = await loop.subprocess_exec(
+                    lambda: capture, *argv,
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                stdin = transport.get_pipe_transport(0)
+                # Attach before giving PowerShell any user script to run.
+                attach(transport.get_pid())
+                if loop.time() >= deadline:
+                    raise TimeoutError
+                stdin.write(script)
+                stdin.close()
+                await capture.closed.wait()
+                if capture.pipe_failed:
+                    raise OSError("HOSTOPS_EXEC_PIPE_FAILED")
+                exit_code = transport.get_returncode()
+                transport.close()
+                transport = None
+                # An exited parent and closed pipes can still leave a detached child.
+                while has_live_processes():
+                    await asyncio.sleep(0.01)
+                if loop.time() >= deadline:
+                    raise TimeoutError
+                return HostOpsExecV1ProcessResult(
+                    exit_code, bytes(capture.stdout), bytes(capture.stderr), capture.truncated,
+                )
+    except TimeoutError:
+        raise subprocess.TimeoutExpired(argv, timeout_seconds) from None
+    finally:
+        # The job has closed before pipe teardown, so inherited handles cannot keep
+        # this wait alive. Abort the stdin write instead of flushing during cancellation.
+        if transport is not None:
+            if stdin is not None and not capture.closed.is_set():
+                stdin.abort()
+            transport.close()
+            if not capture.closed.is_set():
+                # Cleanup is best effort after a failure and keeps its original classification.
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(capture.closed.wait(), timeout=2)
+
+
+def _default_hostops_exec_v1_runner(
+    script_utf8: str, timeout_seconds: int, max_output_bytes: int
+) -> HostOpsExecV1ProcessResult:
+    """Default local Windows PowerShell runner; hard-blocked in CI/pytest/EF02."""
+    if (os.name != "nt"
+            or any(key.startswith("AI_COMMERCE_GIT_GUARD_") for key in os.environ)
+            or "PYTEST_CURRENT_TEST" in os.environ
+            or os.environ.get("RUNNER_NAME") != HOSTOPS_EXEC_V1_RUNNER_NAME):
+        deny("SOURCE_CI_EXECUTION_FORBIDDEN")
+    if (os.environ.get("GITHUB_ACTIONS") == "true"
+            and os.environ.get("HOSTOPS_EXEC_V1_PROTECTED_DISPATCH") != "ENABLED"):
+        deny("PROTECTED_WORKFLOW_DISPATCH_DISABLED")
+    # Pass UTF-8 script over stdin so raw script text never appears in process CommandLine.
+    argv = ("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "-")
+    with asyncio.Runner(loop_factory=asyncio.ProactorEventLoop) as runner:
+        return runner.run(_capture_hostops_exec_v1(
+            argv, script_utf8.encode("utf-8"), timeout_seconds, max_output_bytes,
+        ))
+
+
+def _default_hostops_exec_v1_runtime(env: Mapping[str, str] | None = None) -> HostOpsExecV1RuntimeContext:
+    current_env = os.environ if env is None else env
+    return HostOpsExecV1RuntimeContext(
+        os_name=os.name,
+        runner_name=current_env.get("RUNNER_NAME", ""),
+        session_id=0,
+        elevated=True,
+        owner_sid="",
+        env=current_env,
+    )
+
+
+class HostOpsExecV1Broker:
+    """Fail-closed generic PowerShell execution broker, disabled until enrolled.
+
+    Once enrolled by the owner on the interactive non-elevated Windows HOSTOPS
+    runner, owner-authenticated requests may run varied PowerShell commands
+    without modifying source per command or requiring repeated GitHub approval
+    comments. Public receipts never echo raw scripts, output, paths, or traces.
+    """
+
+    def __init__(
+        self,
+        *,
+        enrollment: HostOpsExecV1Enrollment | None = None,
+        journal: HostOpsExecV1Journal | None = None,
+        runtime_inspector: Callable[[], HostOpsExecV1RuntimeContext] | None = None,
+        authenticator: Callable[[bytes, str | None, HostOpsExecV1Enrollment], bool] | None = None,
+        payload_resolver: Callable[[str, HostOpsExecV1Enrollment], bytes | None] | None = None,
+        runner: Callable[[str, int, int], HostOpsExecV1ProcessResult] | None = None,
+        readback_verifier: Callable[[HostOpsExecV1ProcessResult], bool] | None = None,
+        clock: Callable[[], datetime] | None = None,
+        require_protected_workflow: bool = False,
+    ):
+        self._enrollment = enrollment
+        self._journal = journal
+        self._runtime_inspector = runtime_inspector if runtime_inspector is not None else _default_hostops_exec_v1_runtime
+        self._authenticator = authenticator
+        self._payload_resolver = (
+            payload_resolver if payload_resolver is not None else _default_hostops_exec_v1_payload_resolver
+        )
+        self._runner = runner if runner is not None else _default_hostops_exec_v1_runner
+        self._readback_verifier = readback_verifier
+        self._clock = clock if clock is not None else lambda: datetime.now(timezone.utc)
+        self._require_protected_workflow = require_protected_workflow
+        self._lock = Lock()
+
+    def _receipt(
+        self,
+        *,
+        status: str,
+        code: str,
+        request: dict | None = None,
+        enrolled: bool = False,
+        executed: bool = False,
+        cancelled: bool = False,
+        readback_verified: bool = False,
+        exit_code: int | None = None,
+        stdout_sha256: str | None = None,
+        stderr_sha256: str | None = None,
+        output_bytes: int = 0,
+        output_truncated: bool = False,
+        source_sha: str | None = None,
+        issue_number: int | None = None,
+    ) -> dict:
+        return validate_hostops_exec_v1_receipt({
+            "schema": HOSTOPS_EXEC_V1_RECEIPT_SCHEMA,
+            "status": status,
+            "code": code,
+            "job_id": request["job_id"] if request else None,
+            "request_digest": request["request_digest"] if request else None,
+            "script_sha256": request["script_sha256"] if request else None,
+            "authority_tier": HOSTOPS_EXEC_V1_AUTHORITY_TIER_LOCAL,
+            "payload_mode": request["payload_mode"] if request else None,
+            "enrolled": enrolled,
+            "executed": executed,
+            "cancelled": cancelled,
+            "readback_verified": readback_verified,
+            "exit_code": exit_code,
+            "stdout_sha256": stdout_sha256,
+            "stderr_sha256": stderr_sha256,
+            "output_bytes": output_bytes,
+            "output_truncated": output_truncated,
+            "denylist_security_claim": False,
+            "public_script_echoed": False,
+            "public_output_echoed": False,
+            "elevated_token": False,
+            "source_sha": source_sha,
+            "issue_number": issue_number,
+            "recorded_at": _exec_v1_stamp(self._clock()),
+        })
+
+    def _admit(
+        self,
+        raw_request,
+        *,
+        public_issue: bool = False,
+        issue_number: int | None = None,
+        auth_token: str | None = None,
+    ) -> tuple[dict, HostOpsExecV1Enrollment, HostOpsExecV1Journal, str]:
+        request = parse_hostops_exec_v1_request(raw_request, public_issue=public_issue)
+        if self._enrollment is None:
+            deny("BLOCKED_NOT_ENROLLED")
+        enrollment = self._enrollment
+        enrollment.validate()
+        ctx = self._runtime_inspector()
+        _verify_hostops_exec_v1_runtime(
+            ctx,
+            expected_owner_sid=enrollment.owner_sid,
+            require_protected_workflow=self._require_protected_workflow,
+        )
+        if self._authenticator is None:
+            deny("AUTHENTICATION_UNPROVEN")
+        try:
+            authed = self._authenticator(_exec_v1_canonical(request), auth_token, enrollment) is True
+        except Exception:
+            authed = False
+        if not authed:
+            deny("AUTHENTICATION_UNPROVEN")
+        if public_issue and request["payload_mode"] != "PRIVATE_DIGEST":
+            deny("PUBLIC_ISSUE_RAW_SCRIPT_DENIED")
+        if request["payload_mode"] == "PRIVATE_DIGEST":
+            payload_bytes = self._payload_resolver(request["script_sha256"], enrollment)
+            if payload_bytes is None:
+                deny("PRIVATE_PAYLOAD_UNAVAILABLE")
+            if type(payload_bytes) is not bytes or not 0 < len(payload_bytes) <= HOSTOPS_EXEC_V1_MAX_SCRIPT_BYTES:
+                deny("PAYLOAD_OVERSIZED_OR_INVALID")
+            if b"\x00" in payload_bytes:
+                deny("PAYLOAD_OVERSIZED_OR_INVALID")
+            if not hmac.compare_digest(_exec_v1_sha256(payload_bytes), request["script_sha256"]):
+                deny("PAYLOAD_DIGEST_MISMATCH")
+            try:
+                script_utf8 = payload_bytes.decode("utf-8")
+            except UnicodeError:
+                deny("PAYLOAD_OVERSIZED_OR_INVALID")
+        else:
+            if enrollment.require_private_payload and public_issue:
+                deny("PUBLIC_ISSUE_RAW_SCRIPT_DENIED")
+            script_utf8 = request["script_utf8"]
+        journal = self._journal if self._journal is not None else HostOpsExecV1Journal(enrollment.journal_path)
+        return request, enrollment, journal, script_utf8
+
+    def _error_receipt(
+        self,
+        code: str,
+        *,
+        request: dict | None = None,
+        enrollment: HostOpsExecV1Enrollment | None = None,
+        issue_number: int | None = None,
+    ) -> dict:
+        safe_code = code if code in HOSTOPS_EXEC_V1_CODES else "REQUEST_INVALID"
+        if safe_code in ("BLOCKED_NOT_ENROLLED", "ENROLLMENT_DISABLED", "ENROLLMENT_REVOKED",
+                         "PROTECTED_WORKFLOW_DISPATCH_DISABLED"):
+            status = "DISABLED"
+        elif safe_code == "UNKNOWN_EFFECT_HOLD":
+            status = "UNKNOWN_EFFECT"
+        else:
+            status = "REJECTED"
+        enrolled = (
+            enrollment is not None
+            and enrollment.enabled is True
+            and enrollment.revoked is False
+            and safe_code not in ("BLOCKED_NOT_ENROLLED", "ENROLLMENT_DISABLED", "ENROLLMENT_REVOKED", "ENROLLMENT_INVALID")
+        )
+        source_sha = enrollment.source_sha if enrollment and _EXEC_V1_HEX40_RE.fullmatch(enrollment.source_sha) else None
+        return self._receipt(
+            status=status,
+            code=safe_code,
+            request=request,
+            enrolled=enrolled,
+            source_sha=source_sha,
+            issue_number=issue_number,
+        )
+
+    def plan(
+        self,
+        raw_request,
+        *,
+        public_issue: bool = False,
+        issue_number: int | None = None,
+        auth_token: str | None = None,
+    ) -> dict:
+        """Validate enrollment, auth, payload binding and journal without side effects."""
+        parsed = None
+        try:
+            parsed = parse_hostops_exec_v1_request(raw_request, public_issue=public_issue)
+            request, enrollment, journal, _ = self._admit(
+                parsed, public_issue=public_issue, issue_number=issue_number, auth_token=auth_token
+            )
+            journal.check_ready(request, enrollment)
+            return self._receipt(
+                status="PLANNED",
+                code="READY_TO_EXECUTE",
+                request=request,
+                enrolled=True,
+                source_sha=enrollment.source_sha,
+                issue_number=issue_number,
+            )
+        except Denied as exc:
+            return self._error_receipt(
+                str(exc), request=parsed, enrollment=self._enrollment, issue_number=issue_number
+            )
+
+    def execute(
+        self,
+        raw_request,
+        *,
+        public_issue: bool = False,
+        issue_number: int | None = None,
+        auth_token: str | None = None,
+        cancel_before_spawn: bool = False,
+    ) -> dict:
+        """Reserve durable intent and execute one bounded PowerShell job."""
+        parsed = None
+        with self._lock:
+            try:
+                parsed = parse_hostops_exec_v1_request(raw_request, public_issue=public_issue)
+                request, enrollment, journal, script_utf8 = self._admit(
+                    parsed, public_issue=public_issue, issue_number=issue_number, auth_token=auth_token
+                )
+                if cancel_before_spawn:
+                    journal.check_ready(request, enrollment)
+                    return self._receipt(
+                        status="REJECTED",
+                        code="CANCELLED_BEFORE_EXECUTION",
+                        request=request,
+                        enrolled=True,
+                        cancelled=True,
+                        readback_verified=False,
+                        source_sha=enrollment.source_sha,
+                        issue_number=issue_number,
+                    )
+                reserved_at = _exec_v1_stamp(self._clock())
+                journal.reserve(request, enrollment, reserved_at)
+            except Denied as exc:
+                return self._error_receipt(
+                    str(exc), request=parsed, enrollment=self._enrollment, issue_number=issue_number
+                )
+
+            # From this point forward, durable INTENT exists in the journal.
+            # Any timeout, post-spawn cancellation, exception, or readback failure
+            # must land in UNKNOWN_EFFECT and NEVER auto-replay.
+            try:
+                result = self._runner(script_utf8, request["timeout_seconds"], HOSTOPS_EXEC_V1_MAX_OUTPUT_BYTES)
+            except (subprocess.TimeoutExpired, InterruptedError, KeyboardInterrupt):
+                receipt = self._receipt(
+                    status="UNKNOWN_EFFECT",
+                    code="EXECUTION_CANCELLED_OR_TIMED_OUT_UNKNOWN_EFFECT",
+                    request=request,
+                    enrolled=True,
+                    cancelled=True,
+                    readback_verified=False,
+                    source_sha=enrollment.source_sha,
+                    issue_number=issue_number,
+                )
+                try:
+                    journal.finalize(request["job_id"], receipt)
+                except Denied:
+                    pass
+                return receipt
+            except Exception:
+                receipt = self._receipt(
+                    status="UNKNOWN_EFFECT",
+                    code="EXECUTION_ERROR_UNKNOWN_EFFECT",
+                    request=request,
+                    enrolled=True,
+                    cancelled=False,
+                    readback_verified=False,
+                    source_sha=enrollment.source_sha,
+                    issue_number=issue_number,
+                )
+                try:
+                    journal.finalize(request["job_id"], receipt)
+                except Denied:
+                    pass
+                return receipt
+
+            try:
+                if (not isinstance(result, HostOpsExecV1ProcessResult)
+                        or type(result.exit_code) is not int
+                        or type(result.stdout) is not bytes
+                        or type(result.stderr) is not bytes
+                        or type(result.output_truncated) is not bool):
+                    raise ValueError("INVALID_PROCESS_RESULT")
+                if self._readback_verifier is not None and self._readback_verifier(result) is not True:
+                    raise ValueError("READBACK_FAILED")
+                total_bytes = len(result.stdout) + len(result.stderr)
+                truncated = result.output_truncated or total_bytes > HOSTOPS_EXEC_V1_MAX_OUTPUT_BYTES
+                bounded_stdout = result.stdout[:HOSTOPS_EXEC_V1_MAX_OUTPUT_BYTES]
+                remaining = max(0, HOSTOPS_EXEC_V1_MAX_OUTPUT_BYTES - len(bounded_stdout))
+                bounded_stderr = result.stderr[:remaining]
+                receipt = self._receipt(
+                    status="EXECUTED",
+                    code="EXECUTION_COMPLETED" if result.exit_code == 0 else "EXECUTION_NONZERO_EXIT",
+                    request=request,
+                    enrolled=True,
+                    executed=True,
+                    cancelled=False,
+                    readback_verified=True,
+                    exit_code=result.exit_code,
+                    stdout_sha256=_exec_v1_sha256(bounded_stdout),
+                    stderr_sha256=_exec_v1_sha256(bounded_stderr),
+                    output_bytes=len(bounded_stdout) + len(bounded_stderr),
+                    output_truncated=truncated,
+                    source_sha=enrollment.source_sha,
+                    issue_number=issue_number,
+                )
+                journal.finalize(request["job_id"], receipt)
+                return receipt
+            except Exception:
+                receipt = self._receipt(
+                    status="UNKNOWN_EFFECT",
+                    code="READBACK_UNVERIFIED_UNKNOWN_EFFECT",
+                    request=request,
+                    enrolled=True,
+                    cancelled=False,
+                    readback_verified=False,
+                    source_sha=enrollment.source_sha,
+                    issue_number=issue_number,
+                )
+                try:
+                    journal.finalize(request["job_id"], receipt)
+                except Denied:
+                    pass
+                return receipt
+
+    def handle_event(
+        self,
+        event,
+        *,
+        action: Literal["plan", "execute"] = "plan",
+        auth_token: str | None = None,
+        cancel_before_spawn: bool = False,
+    ) -> dict:
+        """Process a GitHub Issue event for a future protected workflow PR."""
+        try:
+            parsed = parse_hostops_exec_v1_event(event)
+        except Denied as exc:
+            return self._error_receipt(str(exc), enrollment=self._enrollment)
+        if action == "plan":
+            return self.plan(
+                parsed["request"],
+                public_issue=parsed["public_issue"],
+                issue_number=parsed["issue_number"],
+                auth_token=auth_token,
+            )
+        if action == "execute":
+            return self.execute(
+                parsed["request"],
+                public_issue=parsed["public_issue"],
+                issue_number=parsed["issue_number"],
+                auth_token=auth_token,
+                cancel_before_spawn=cancel_before_spawn,
+            )
+        return self._error_receipt(
+            "REQUEST_INVALID",
+            request=parsed["request"],
+            enrollment=self._enrollment,
+            issue_number=parsed["issue_number"],
+        )
+
+
+def hostops_exec_v1_cli(
+    argv: list[str] | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+    broker: HostOpsExecV1Broker | None = None,
+) -> int:
+    """Dedicated CLI interface for a future SEPARATE protected workflow PR.
+
+    Not wired into personal.main() or .github/workflows/issue-ingress.yml.
+    Remains fail-closed / DISABLED without explicit enrollment and protected dispatch.
+    """
+    parser = argparse.ArgumentParser(prog="hostops-exec-v1")
+    parser.add_argument("--action", choices=("plan", "execute"), default="plan")
+    parser.add_argument("--event", required=True)
+    parser.add_argument("--enrollment", default=None)
+    parser.add_argument("--output", required=True)
+    args = parser.parse_args(argv)
+    current_env = os.environ if env is None else env
+    active_broker = broker
+    if active_broker is None:
+        enrollment = None
+        if args.enrollment:
+            try:
+                enrollment = load_hostops_exec_v1_enrollment(Path(args.enrollment))
+            except Denied as exc:
+                receipt = HostOpsExecV1Broker()._error_receipt(str(exc))
+                output = Path(args.output)
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_text(json.dumps(receipt, ensure_ascii=True, separators=(",", ":")) + "\n", encoding="utf-8")
+                return 2
+        active_broker = HostOpsExecV1Broker(
+            enrollment=enrollment,
+            runtime_inspector=lambda: _default_hostops_exec_v1_runtime(current_env),
+            require_protected_workflow=True,
+        )
+    try:
+        event_path = Path(args.event)
+        if not event_path.is_file():
+            deny("EVENT_SHAPE_OR_STATE_DENIED")
+        with event_path.open("rb") as stream:
+            raw = stream.read(HOSTOPS_EXEC_V1_MAX_EVENT_BYTES + 1)
+        if not 0 < len(raw) <= HOSTOPS_EXEC_V1_MAX_EVENT_BYTES:
+            deny("PAYLOAD_OVERSIZED_OR_INVALID")
+        event = json.loads(raw.decode("utf-8"), object_pairs_hook=_object_unique)
+        receipt = active_broker.handle_event(
+            event,
+            action=args.action,
+            auth_token=current_env.get("HOSTOPS_EXEC_V1_AUTH_TOKEN"),
+        )
+    except Denied as exc:
+        receipt = active_broker._error_receipt(str(exc), enrollment=active_broker._enrollment)
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        receipt = active_broker._error_receipt("EVENT_SHAPE_OR_STATE_DENIED", enrollment=active_broker._enrollment)
+    receipt = validate_hostops_exec_v1_receipt(receipt)
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(receipt, ensure_ascii=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    return 0 if receipt["status"] in ("PLANNED", "ENROLLED", "EXECUTED") else 2
 
 
 def perform(request):
