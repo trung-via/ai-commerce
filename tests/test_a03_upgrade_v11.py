@@ -12,6 +12,7 @@ import uuid
 import pytest
 
 from ai_commerce.core.provenance import canonical_bytes, sha256_bytes
+from ai_commerce.creative import v2 as creative_v2
 from ai_commerce.creative import (
     A03CreativeJob, A03CreativeStageResult, AIInferenceBinding,
     ActorDecision, ActorRef, CodexCliCapability, CodexCliCreativeClient,
@@ -38,6 +39,10 @@ from ai_commerce.creative import (
     evaluate_benchmark_structure, observe_benchmark_run,
 )
 from ai_commerce.providers.base import ProviderCapabilities, ProviderError
+from ai_commerce.creative.v2 import (
+    A03BenchmarkExperimentPlan, BenchmarkTrialBudget, BenchmarkTrialGrant,
+    advance_benchmark_trial, compare_benchmark_trials,
+)
 
 TEXT = "  Mưa Sài Gòn 🌧️ e\u0301 — ba biến thể rất gần nhau, không CTA hay sản phẩm.\n"
 MOCK = ProviderObservation("deterministic-test-only", "UNKNOWN", "TEST_ONLY_MOCK")
@@ -3582,3 +3587,250 @@ def test_r5a_negative_unobserved_metrics_impossible_metrics_score_inflation_and_
         dup_json = json.dumps(data)[:-1] + "," + json.dumps(first_key) + ":" + json.dumps(data[first_key]) + "}"
         with pytest.raises(CreativeValidationError, match="INVALID_JSON"):
             kind.from_dict(read_json(dup_json))
+
+
+# R5b-1 experiment execution is restricted to explicitly injected offline fixtures.
+R5B_SOURCE_SHA = "8830f60a038637f2b84ad672b7c1e92baa494f2e"
+R5B_USAGE = UsageObservation("OBSERVED", 17, 5, 0, "USD")
+
+
+@pytest.fixture
+def r5b_experiment(tmp_path, monkeypatch):
+    class FixedClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 11, 20, tzinfo=tz)
+
+    ticks = iter(range(0, 10**12, 5_000_000))
+    monkeypatch.setattr(creative_v2, "datetime", FixedClock)
+    monkeypatch.setattr(creative_v2, "monotonic_ns", lambda: next(ticks))
+
+    store = CreativeSidecarStore(tmp_path)
+    cases = []
+    for brief_class in ("VN_PRODUCT", "VN_NON_PRODUCT_FICTION", "SILENT_NO_CTA"):
+        brief, evidence, factual = _r5a_brief_and_evidence(brief_class)
+        store.creative.save_brief(brief)
+        case = A03BenchmarkCase.create(
+            brief, case_id=brief_class, cohort_id="r5b", source_sha=R5B_SOURCE_SHA,
+            brief_class=brief_class, factual_evidence_applicable=factual,
+            expected_evidence_refs=tuple(item.source_ref for item in evidence),
+            provenance=_r5a_provenance("fixture:r5b-case"), created_at=R5A_TS_START,
+        )
+        store.save_benchmark_case(case)
+        cases.append(case)
+    plan = A03BenchmarkExperimentPlan.create(
+        tuple(cases), plan_id="r5b-plan", repetitions=2,
+        configuration=ModelConfiguration("requested-provider", "requested-model"),
+        budget=BenchmarkTrialBudget(4, 1000, 100, 1, "USD"),
+        purpose="TEST_ONLY_MOCK", provenance=_r5a_provenance("fixture:r5b-plan"), created_at=R5A_TS_START,
+    )
+    store.save_benchmark_experiment_plan(plan)
+    return store, tuple(cases), plan
+
+
+def _r5b_operation(store, plan, sample, **options):
+    grant = BenchmarkTrialGrant(plan.digest, sample.sample_id, "fixture:one-offline-sample")
+    return advance_benchmark_trial(plan, store, **{
+        "source_sha": plan.source_sha, "sample_id": sample.sample_id, "grant": grant, **options,
+    })
+
+
+def _r5b_client(**options):
+    return _R5ABenchmarkMockClient(**{
+        "usage_by_op": {"EXPLORE": R5B_USAGE, "CRITIQUE": R5B_USAGE}, **options,
+    })
+
+
+def test_r5b_plan_roundtrip_pins_cohort_and_balances_repetitions(r5b_experiment):
+    store, cases, plan = r5b_experiment
+    assert A03BenchmarkExperimentPlan.from_json(plan.to_json()) == plan
+    assert store.load_benchmark_experiment_plan(plan.digest) == plan
+    with pytest.raises(FrozenInstanceError):
+        plan.repetitions = 3
+    with pytest.raises(VersionConflict):
+        store.save_benchmark_experiment_plan(replace(plan, repetitions=3))
+    for field in ("allow_network", "allow_spend"):
+        with pytest.raises(CreativeValidationError):
+            A03BenchmarkExperimentPlan.from_dict({**plan.to_dict(), field: True})
+    with pytest.raises(CreativeValidationError, match="rubric"):
+        replace(plan, rubric_version="a03.unknown-rubric")
+    for change in ({"source_sha": "a" * 40}, {"cohort_id": "another-cohort"},
+                   {"source_brief_digest": "b" * 64}, {"language": "en"}):
+        with pytest.raises(CreativeValidationError, match="mismatch"):
+            plan.validate_cases((cases[0], cases[1], replace(cases[2], **change)))
+
+    samples = plan.samples
+    assert len({sample.sample_id for sample in samples}) == len(samples) == 18
+    assert tuple(sample.operations for sample in samples[:3]) == (
+        ("EXPLORE",), ("EXPLORE", "CRITIQUE"), ("RESEARCH", "EXPLORE", "CRITIQUE", "DEVELOP"),
+    )
+    # An unpaired second repetition in one case cannot add weight to any case.
+    paired = plan.paired_samples(tuple(sample.sample_id for sample in samples[1:]))
+    assert len(paired) == 9
+    assert all(sum(sample.case_digest == case.digest and sample.strategy == strategy for sample in paired) == 1
+               for case in cases for strategy in BENCHMARK_STRATEGIES)
+    for ids in ((samples[0].sample_id,) * 2, ("unplanned",)):
+        with pytest.raises(CreativeValidationError):
+            plan.paired_samples(ids)
+
+
+def test_r5b_separate_roles_exact_attempt_and_offline_dependency_holds(r5b_experiment):
+    store, _, plan = r5b_experiment
+    one, two, three = plan.samples[-3:]
+    client = _r5b_client()
+    reasoner = LiveCreativeReasoner(plan.configuration, client)
+    s1 = _r5b_operation(store, plan, one)
+    s2 = _r5b_operation(store, plan, two)
+    assert s1.status == s2.status == "READY"
+    assert s1.next_job.slot != s2.next_job.slot
+    assert _r5b_operation(store, plan, one, grant=None, attempt_id=s1.next_job.slot,
+                          reasoner=reasoner).status == "HOLD_AUTHORIZATION"
+    assert _r5b_operation(store, plan, one, source_sha="a" * 40, attempt_id=s1.next_job.slot,
+                          reasoner=reasoner).status == "HOLD_SOURCE"
+    hold = _r5b_operation(store, plan, three, reasoner=reasoner)
+    assert hold.status == "HOLD_DEPENDENCY" and not hold.attempts and not client.calls
+    real = replace(plan, plan_id="real-plan", purpose="PRODUCTION")
+    store.save_benchmark_experiment_plan(real)
+    assert _r5b_operation(store, real, real.samples[0], reasoner=reasoner).status == "HOLD_DEPENDENCY"
+
+    s1_done = _r5b_operation(store, plan, one, attempt_id=s1.next_job.slot, reasoner=reasoner)
+    critic = _r5b_operation(store, plan, two, attempt_id=s2.next_job.slot, reasoner=reasoner)
+    assert critic.status == "READY" and critic.observation is None
+    assert critic.next_job.request.source == critic.attempts[0].stage.reasoning.concepts()[0]
+    assert _r5b_operation(store, plan, two, attempt_id=s2.next_job.slot, reasoner=reasoner) == critic
+    assert len(client.calls) == 2
+    s2_done = _r5b_operation(store, plan, two, attempt_id=critic.next_job.slot, reasoner=reasoner)
+    assert _r5b_operation(store, plan, two, attempt_id=critic.next_job.slot, reasoner=reasoner) == s2_done
+    assert [call.creative.operation for call in client.calls] == ["EXPLORE", "EXPLORE", "CRITIQUE"]
+    assert all(call.creative.brief["audio"]["mode"] == "silence"
+               and call.creative.brief["product_ref"] is None
+               and call.creative.brief["cta"] is None for call in client.calls)
+
+    for done, roles in ((s1_done, ("GENERATOR",)), (s2_done, ("GENERATOR", "CRITIC"))):
+        assert done.status == "INCOMPLETE" and done.ranking_status == "UNRANKED"
+        obs = done.observation
+        assert obs.benchmark_validity == "NOT_REAL_BENCHMARK"
+        assert obs.judge_receipt is None and obs.consumer_evidence.source_handoff_status == "NOT_AVAILABLE"
+        assert obs.consumer_evidence.commercial_utility_status == "NOT_ATTEMPTED"
+        assert obs.nsm.score is None
+        assert tuple(trace.role for trace in obs.role_traces) == roles
+        assert obs.observed_provider == MOCK and obs.observed_effort == "UNKNOWN"
+        assert obs.telemetry.total_input_tokens == len(roles) * 17
+        assert obs.telemetry.invocation_wall_time_ms == len(roles) * 5
+        assert obs.telemetry.queue_wait_ms is None and obs.telemetry.total_wall_time_ms is None
+        assert obs.telemetry.human_active_time_ms is None
+        assert store.load_benchmark_observation_by_digest(obs.digest) == obs
+        assert all(attempt.timing.authorization_ref == "fixture:one-offline-sample" for attempt in done.attempts)
+
+    comparison = compare_benchmark_trials(plan, store, source_sha=plan.source_sha, created_at=R5A_TS_END)
+    assert comparison.status == "NOT_REAL_BENCHMARK" and comparison.ranking_status == "UNRANKED"
+    assert len(comparison.missing_sample_ids) == 16 and not comparison.comparison.paired_case_ids
+    assert comparison.comparison.winner_strategy is None
+
+
+@pytest.mark.parametrize(("fault", "status"), [
+    ("error", "HOLD_UNKNOWN_EFFECT"),
+    ("no_usage", "HOLD_BUDGET"),
+    ("attempts", "HOLD_BUDGET"),
+    ("tokens", "HOLD_BUDGET"),
+    ("wall", "HOLD_BUDGET"),
+    ("cost", "HOLD_BUDGET"),
+    ("requested_effort", "HOLD_RECEIPT"),
+    ("invented_citation", "HOLD_RECEIPT"),
+])
+def test_r5b_stops_on_unknown_effect_or_budget_and_receipt_failure(r5b_experiment, fault, status):
+    store, _, plan = r5b_experiment
+    changes = {"attempts": {"max_attempts": 1}, "tokens": {"max_tokens": 21},
+               "wall": {"max_invocation_wall_time_ms": 4}, "cost": {"max_cost_amount": 0.01}}
+    budget = replace(plan.budget, **changes.get(fault, {}))
+    configuration = (replace(plan.configuration, effort="high") if fault == "requested_effort"
+                     else plan.configuration)
+    plan = replace(plan, plan_id=f"r5b:{fault}", budget=budget, configuration=configuration)
+    store.save_benchmark_experiment_plan(plan)
+    client = _r5b_client(
+        fault="error" if fault == "error" else None,
+        usage_by_op={"EXPLORE": UsageObservation() if fault == "no_usage" else
+                     replace(R5B_USAGE, cost_amount=0.02) if fault == "cost" else R5B_USAGE},
+    )
+    if fault == "invented_citation":
+        first, second = variants(2)
+        draft = replace(first, source_refs=("source:model-invented",))
+        client = FakeClient(StructuredModelResponse(
+            "OK", payload((draft, second)), observation=MOCK, usage=R5B_USAGE, request_id="fixture:bad-citation",
+        ))
+    sample = plan.samples[1]
+    ready = _r5b_operation(store, plan, sample)
+    reasoner = LiveCreativeReasoner(plan.configuration, client)
+    outcome = _r5b_operation(store, plan, sample, attempt_id=ready.next_job.slot, reasoner=reasoner)
+    assert outcome.status == status and outcome.observation is None
+    assert _r5b_operation(store, plan, sample, attempt_id=ready.next_job.slot, reasoner=reasoner) == outcome
+    assert len(client.calls) == 1
+
+
+def test_r5b_repairs_linked_receipt_and_accounts_for_explicit_retry(r5b_experiment, monkeypatch):
+    store, _, plan = r5b_experiment
+    sample = plan.samples[0]
+    client = _r5b_client(fault="refusal")
+    reasoner = LiveCreativeReasoner(plan.configuration, client)
+    ready = _r5b_operation(store, plan, sample)
+    attempt_id = ready.next_job.slot
+
+    def interrupt(*_):
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as patch:
+        patch.setattr(creative_v2, "_commit_creative_stage", interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            _r5b_operation(store, plan, sample, attempt_id=attempt_id, reasoner=reasoner)
+    resumed = _r5b_operation(store, plan, sample, attempt_id=attempt_id, reasoner=reasoner)
+    assert resumed.status == "RETRY_REQUIRED" and len(client.calls) == 1
+    assert resumed.attempts[0].stage.reasoning.state == "REFUSED"
+    assert resumed.next_job.attempt == 2 and resumed.next_job.slot != attempt_id
+    client.fault = None
+    outcome = _r5b_operation(store, plan, sample, attempt_id=resumed.next_job.slot, reasoner=reasoner)
+    assert outcome.status == "INCOMPLETE" and len(client.calls) == 2
+    assert [attempt.trace.is_retry for attempt in outcome.attempts] == [False, True]
+    assert outcome.telemetry.total_input_tokens == 34 and outcome.telemetry.total_retries == 1
+    assert outcome.observation.telemetry.total_retries == 1
+
+    unobserved_sample = plan.samples[3]
+    unobserved = _r5b_operation(store, plan, unobserved_sample)
+    assert store.claim_job(unobserved.next_job)
+    hold = _r5b_operation(store, plan, unobserved_sample, attempt_id=unobserved.next_job.slot, reasoner=reasoner)
+    assert hold.status == "HOLD_UNKNOWN_EFFECT"
+    assert not hold.attempts and len(client.calls) == 2
+
+
+def test_r5b_comparison_rejects_replayed_provider_in_partial_strategy(r5b_experiment):
+    store, _, plan = r5b_experiment
+    for sample in plan.samples[:2]:
+        ready = _r5b_operation(store, plan, sample)
+        # New client instance starts with the same request identity and output.
+        reasoner = LiveCreativeReasoner(plan.configuration, _r5b_client(req_prefix="shared"))
+        _r5b_operation(store, plan, sample, attempt_id=ready.next_job.slot, reasoner=reasoner)
+    comparison = compare_benchmark_trials(plan, store, source_sha=plan.source_sha, created_at=R5A_TS_END)
+    assert comparison.status == "HOLD" and "REPLAYED_EXPERIMENT_RECEIPT" in comparison.reasons
+    assert comparison.ranking_status == "UNRANKED" and comparison.comparison is None
+
+
+def test_r5b_reconciliation_rejects_a_substituted_judge_observation(r5b_experiment):
+    store, cases, plan = r5b_experiment
+    sample = plan.samples[0]
+    ready = _r5b_operation(store, plan, sample)
+    reasoner = LiveCreativeReasoner(plan.configuration, _r5b_client())
+    done = _r5b_operation(store, plan, sample, attempt_id=ready.next_job.slot, reasoner=reasoner)
+    obs = done.observation
+    judge = BenchmarkJudgeReceipt(
+        judge_receipt_id="fixture:substituted-judge", judge_kind="TEST_ONLY_MOCK", judge_actor_ref="fixture:judge",
+        case_digest=cases[0].digest, source_brief_digest=cases[0].source_brief_digest,
+        evaluated_artifact_digest=obs.primary_artifact_digest,
+        scores=BenchmarkRubricScores(1, 1, 1, 1, 1), verdict="PASS", rationale="Unlinked test fixture",
+        provenance=plan.provenance, observed_at=R5A_TS_END,
+    )
+    substituted = replace(obs, judge_receipt=judge, semantic_status="TEST_ONLY_MOCK")
+    store._save("benchmark-observations", substituted.digest, substituted.to_dict())
+    slot = store._path("benchmark-observation-slots", substituted.slot)
+    slot.write_bytes(canonical_bytes({"observation_digest": substituted.digest}))
+    outcome = _r5b_operation(store, plan, sample, attempt_id=ready.next_job.slot, reasoner=reasoner)
+    assert outcome.status == "HOLD_RECEIPT" and outcome.observation is None
+    assert len(reasoner.client.calls) == 1

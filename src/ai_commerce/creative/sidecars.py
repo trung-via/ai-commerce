@@ -14,12 +14,12 @@ from .intent import CreativeIntent
 from .models import EDITABLE_PACKAGE_FIELDS, ConceptRecord, require_digest, require_package_id
 from .store import CreativeStore, _put
 from .v2 import (
-    A03BenchmarkCase, A03BenchmarkComparison, A03BenchmarkObservation,
+    A03BenchmarkCase, A03BenchmarkComparison, A03BenchmarkExperimentPlan, A03BenchmarkObservation,
     A03CreativeCycleJob, A03CreativeCycleResult, A03CreativeJob,
     A03CreativeProductionJob, A03CreativeProductionPackage, A03CreativeProductionResult,
-    A03CreativeStageResult, ReasoningRequest, ReasoningResult,
+    A03CreativeStageResult, BenchmarkAttemptTiming, BenchmarkTrialAttempt, ReasoningRequest, ReasoningResult,
     _benchmark_case_slot, _benchmark_comparison_slot, _benchmark_observation_slot,
-    _build_benchmark_comparison_payload, _cycle_lineage, _cycle_stage_job, _output_pin,
+    _build_benchmark_comparison_payload, _commit_creative_stage, _cycle_lineage, _cycle_stage_job, _output_pin,
     _stage_concepts, _validate_spec_evidence, inference_decision, inference_failure,
 )
 
@@ -914,3 +914,59 @@ class CreativeSidecarStore:
         if record.cohort_id != cohort_id or record.comparison_id != comparison_id:
             raise CreativeValidationError("stored benchmark comparison slot identity mismatch")
         return record
+
+    def _validate_benchmark_experiment_plan(self, plan: A03BenchmarkExperimentPlan) -> None:
+        cases = tuple(self.load_benchmark_case_by_digest(digest) for digest in plan.case_digests)
+        plan.validate_cases(cases)
+        for case in cases:
+            brief = self.creative.load_brief(case.source_brief_digest)
+            if case.brief_class == "VN_PRODUCT" and not brief.get("product_ref"):
+                raise CreativeValidationError("VN_PRODUCT experiment case requires a product reference")
+            if case.brief_class == "SILENT_NO_CTA":
+                audio = brief.get("audio")
+                if not isinstance(audio, dict) or audio.get("mode") not in ("silence", "SILENCE"):
+                    raise CreativeValidationError("SILENT_NO_CTA experiment case must pin explicit silence")
+
+    def save_benchmark_experiment_plan(self, plan: A03BenchmarkExperimentPlan) -> str:
+        valid = A03BenchmarkExperimentPlan.from_dict(plan.to_dict())
+        self._validate_benchmark_experiment_plan(valid)
+        self._save("benchmark-experiment-plan-slots", valid.slot, {"plan_digest": valid.digest})
+        return self._save("benchmark-experiment-plans", valid.digest, valid.to_dict())
+
+    def load_benchmark_experiment_plan(self, digest: str) -> A03BenchmarkExperimentPlan:
+        plan = A03BenchmarkExperimentPlan.from_dict(self._read("benchmark-experiment-plans", digest))
+        if plan.digest != digest:
+            raise CreativeValidationError("stored benchmark experiment plan digest mismatch")
+        self._check_bytes(self._path("benchmark-experiment-plan-slots", plan.slot), {"plan_digest": digest})
+        self._validate_benchmark_experiment_plan(plan)
+        return plan
+
+    def _save_experiment_attempt_timing(
+        self, job: A03CreativeJob, timing: BenchmarkAttemptTiming,
+    ) -> None:
+        observed = self.observed_step(job)
+        if observed is None or timing.receipt_digest != observed.digest:
+            raise CreativeValidationError("benchmark attempt timing requires a linked reasoning receipt")
+        self._save("benchmark-attempt-timings", job.slot, timing.to_dict())
+
+    def _load_experiment_attempt(self, job: A03CreativeJob) -> tuple[bool, BenchmarkTrialAttempt | None]:
+        if not self._path("jobs", job.slot).exists():
+            return False, None
+        self._check_bytes(self._path("jobs", job.slot), job.to_dict())
+        observed = self.observed_step(job)
+        if observed is None:
+            return True, None
+        if self._path("stage-refs", job.slot).exists():
+            stage = self.load_stage(job)
+            if stage.reasoning != observed:
+                raise CreativeValidationError("benchmark stage rebound linked attempt receipt")
+        else:
+            stage = _commit_creative_stage(job, self, observed)
+        path = self._path("benchmark-attempt-timings", job.slot)
+        timing = None
+        if path.exists():
+            timing = BenchmarkAttemptTiming.from_dict(read_json(path.read_text(encoding="utf-8")))
+            self._check_bytes(path, timing.to_dict())
+            if timing.receipt_digest != observed.digest:
+                raise CreativeValidationError("benchmark attempt timing rebound reasoning receipt")
+        return True, BenchmarkTrialAttempt(stage, timing)

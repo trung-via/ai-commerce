@@ -5,15 +5,19 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
-from collections.abc import Mapping
-from dataclasses import dataclass, fields
-from datetime import datetime
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, fields, replace
+from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
+from time import monotonic_ns
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from ai_commerce.core.provenance import canonical_bytes, sha256_bytes
 
-from ._validation import CreativeValidationError, exact_fields, positive_int, read_json, require_text, text_tuple
+from ._validation import (
+    CreativeValidationError, VersionConflict, exact_fields, positive_int, read_json, require_text, text_tuple,
+)
 from .briefs import brief_digest, intake_brief
 from .decisions import AIInferenceBinding, ActorDecision, CreativeModelSelection
 from .intent import ActorRef, CreativeIntent
@@ -1327,6 +1331,14 @@ def run_creative_stage(job: A03CreativeJob, store: CreativeStore | CreativeSidec
     receipt fails closed, with no automatic replay after uncertain side effects.
     Storage is a caller-owned trusted directory; hashes are not authentication.
     """
+    return _run_creative_stage(job, store, reasoner, authorization=authorization)
+
+
+def _run_creative_stage(
+    job: A03CreativeJob, store: CreativeStore | CreativeSidecarStore, reasoner: CreativeReasonerV2 | None,
+    *, authorization: InvocationAuthorization | None,
+    record_timing: Callable[[A03CreativeJob, BenchmarkAttemptTiming], None] | None = None,
+) -> A03CreativeStageResult:
     from .live import InvocationAuthorization, LiveCreativeReasoner
     from .sidecars import CreativeSidecarStore
 
@@ -1337,12 +1349,20 @@ def run_creative_stage(job: A03CreativeJob, store: CreativeStore | CreativeSidec
             raise CreativeValidationError("expected runner-side InvocationAuthorization")
         authorization = InvocationAuthorization(authorization.allow_network, authorization.allow_spend,
                                                 authorization.authorization_ref)
+    if record_timing is not None and (
+        authorization is None or authorization.authorization_ref is None
+        or authorization.allow_network or authorization.allow_spend or job.purpose != "TEST_ONLY_MOCK"
+    ):
+        raise CreativeValidationError("benchmark timing requires an explicit offline fixture grant")
     job = A03CreativeJob.from_dict(job.to_dict())
     sidecars = store if isinstance(store, CreativeSidecarStore) else CreativeSidecarStore(store)
     sidecars.creative.save_brief(job.request.brief)
     sidecars.validate_request(job.request)
     if not sidecars.claim_job(job):
         return sidecars.load_stage(job)
+    if record_timing is not None:
+        started_at = datetime.now(timezone.utc).isoformat()
+        started_ns = monotonic_ns()
     if job.configuration is None:
         result = reason_v2(job.request)
     elif (isinstance(reasoner, LiveCreativeReasoner) and reasoner.config is not None
@@ -1357,10 +1377,22 @@ def run_creative_stage(job: A03CreativeJob, store: CreativeStore | CreativeSidec
         result = reason_v2(job.request, reasoner)
     else:
         result = reason_v2(job.request, reasoner)
+    if record_timing is not None:
+        wall_ms = (monotonic_ns() - started_ns + 999_999) // 1_000_000
+        completed_at = datetime.now(timezone.utc).isoformat()
     sidecars.save_result(result)
-    if job.request.cycle is not None or job.request.production is not None:
+    if job.request.cycle is not None or job.request.production is not None or record_timing is not None:
         # Before materialization: conflicts/crashes must retain observed output.
         sidecars.save_observed_step(job, result)
+    if record_timing is not None:
+        record_timing(job, BenchmarkAttemptTiming(
+            result.digest, authorization.authorization_ref, started_at, completed_at, wall_ms,
+        ))
+    return _commit_creative_stage(job, sidecars, result)
+
+
+def _commit_creative_stage(job: A03CreativeJob, sidecars: CreativeSidecarStore,
+                           result: ReasoningResult) -> A03CreativeStageResult:
     status, failure = _stage_outcome(job, result)
     outputs, decision = (), None
     if status in ("TEST_ONLY_MOCK", "CREATIVE_COMPLETE"):
@@ -4734,3 +4766,460 @@ def compare_benchmark_observations(
     )
     sidecars.save_benchmark_comparison(comp)
     return sidecars.load_benchmark_comparison_by_digest(comp.digest)
+
+
+# R5b-1 uses the existing V2 stage claim and R5a records.
+_EXPERIMENT_OPERATIONS = {
+    "S1": ("EXPLORE",),
+    "S2": ("EXPLORE", "CRITIQUE"),
+    "S3": ("RESEARCH", "EXPLORE", "CRITIQUE", "DEVELOP"),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkTrialBudget:
+    """Per-sample ceilings for scheduling and checking observed attempts."""
+
+    max_attempts: int
+    max_invocation_wall_time_ms: int
+    max_tokens: int
+    max_cost_amount: float
+    currency: str
+
+    def __post_init__(self) -> None:
+        for name in ("max_attempts", "max_invocation_wall_time_ms", "max_tokens"):
+            positive_int(getattr(self, name), name)
+        if self.max_attempts > 16:
+            raise CreativeValidationError("at most 16 attempts per experiment sample")
+        if (type(self.max_cost_amount) not in (float, int)
+                or not 0 < self.max_cost_amount <= 1_000_000):
+            raise CreativeValidationError("expected positive finite experimental cost ceiling")
+        require_text(self.currency, "budget currency")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {f.name: getattr(self, f.name) for f in fields(self)}
+
+    @classmethod
+    def from_dict(cls, data: object) -> BenchmarkTrialBudget:
+        return cls(**exact_fields(data, {f.name for f in fields(cls)}))
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkTrialSample:
+    sample_id: str
+    case_digest: str
+    strategy: Literal["S1", "S2", "S3"]
+    repetition: int
+
+    @property
+    def operations(self) -> tuple[str, ...]:
+        return _EXPERIMENT_OPERATIONS[self.strategy]
+
+
+@dataclass(frozen=True, slots=True)
+class A03BenchmarkExperimentPlan:
+    plan_id: str
+    cohort_id: str
+    source_sha: str
+    case_digests: tuple[str, ...]
+    repetitions: int
+    configuration: ModelConfiguration
+    budget: BenchmarkTrialBudget
+    purpose: Literal["TEST_ONLY_MOCK", "PRODUCTION"]
+    provenance: CreativeJobProvenance
+    created_at: str
+    rubric_version: str = BENCHMARK_RUBRIC_VERSION
+    schema_version: str = "A03BenchmarkExperimentPlan.v1"
+
+    def __post_init__(self) -> None:
+        if self.schema_version != "A03BenchmarkExperimentPlan.v1":
+            raise CreativeValidationError("unsupported benchmark experiment schema")
+        require_text(self.plan_id, "plan_id")
+        require_text(self.cohort_id, "cohort_id")
+        _require_source_sha(self.source_sha)
+        _require_iso_timestamp(self.created_at, "created_at")
+        if self.rubric_version != BENCHMARK_RUBRIC_VERSION:
+            raise CreativeValidationError("unsupported benchmark rubric version")
+        cases = _distinct_digests(self.case_digests, "case_digests")
+        if len(cases) != len(BENCHMARK_BRIEF_CLASSES):
+            raise CreativeValidationError("experiment requires one case per benchmark brief class")
+        object.__setattr__(self, "case_digests", cases)
+        positive_int(self.repetitions, "repetitions")
+        if self.repetitions > 16:
+            raise CreativeValidationError("at most 16 repetitions per case and strategy")
+        if self.purpose not in ("TEST_ONLY_MOCK", "PRODUCTION"):
+            raise CreativeValidationError("invalid experiment purpose")
+        for item, expected in ((self.configuration, ModelConfiguration), (self.budget, BenchmarkTrialBudget),
+                               (self.provenance, CreativeJobProvenance)):
+            if not isinstance(item, expected):
+                raise CreativeValidationError("invalid typed experiment plan context")
+            expected.from_dict(item.to_dict())
+        if "UNKNOWN" in (self.configuration.model, self.configuration.provider):
+            raise CreativeValidationError("experiment requires an explicit requested configuration")
+
+    @classmethod
+    def create(cls, cases: tuple[A03BenchmarkCase, ...], **options: Any) -> A03BenchmarkExperimentPlan:
+        if not isinstance(cases, (tuple, list)) or any(not isinstance(case, A03BenchmarkCase) for case in cases):
+            raise CreativeValidationError("expected typed benchmark cases")
+        by_class = {case.brief_class: case for case in cases}
+        if len(cases) != len(BENCHMARK_BRIEF_CLASSES) or set(by_class) != set(BENCHMARK_BRIEF_CLASSES):
+            raise CreativeValidationError("experiment requires one case per benchmark brief class")
+        ordered = tuple(by_class[name] for name in BENCHMARK_BRIEF_CLASSES)
+        plan = cls(cohort_id=ordered[0].cohort_id, source_sha=ordered[0].source_sha,
+                   case_digests=tuple(case.digest for case in ordered), **options)
+        plan.validate_cases(ordered)
+        return plan
+
+    def validate_cases(self, cases: tuple[A03BenchmarkCase, ...]) -> None:
+        if (tuple(case.digest for case in cases) != self.case_digests
+                or tuple(case.brief_class for case in cases) != BENCHMARK_BRIEF_CLASSES
+                or len({case.case_id for case in cases}) != len(cases)
+                or len({case.source_brief_digest for case in cases}) != len(cases)
+                or any((case.cohort_id, case.source_sha, case.rubric_version, case.language)
+                       != (self.cohort_id, self.source_sha, self.rubric_version, "vi") for case in cases)):
+            raise CreativeValidationError("experiment case, brief, cohort, source or rubric mismatch")
+
+    @property
+    def samples(self) -> tuple[BenchmarkTrialSample, ...]:
+        digest = self.digest
+        return tuple(
+            BenchmarkTrialSample(f"{digest}:{case_index}:{repetition}:{strategy}", case, strategy, repetition)
+            for case_index, case in enumerate(self.case_digests, start=1)
+            for repetition in range(1, self.repetitions + 1)
+            for strategy in BENCHMARK_STRATEGIES
+        )
+
+    def paired_samples(self, observed_sample_ids: tuple[str, ...]) -> tuple[BenchmarkTrialSample, ...]:
+        """Keep matching repetitions across all strategies and equal counts across cases."""
+        observed = set(_distinct_texts(observed_sample_ids, "observed_sample_ids"))
+        samples = self.samples
+        if observed - {sample.sample_id for sample in samples}:
+            raise CreativeValidationError("unplanned experiment sample")
+        paired: dict[str, list[BenchmarkTrialSample]] = {case: [] for case in self.case_digests}
+        width = len(BENCHMARK_STRATEGIES)
+        for offset in range(0, len(samples), width):
+            group = samples[offset:offset + width]
+            if all(sample.sample_id in observed for sample in group):
+                paired[group[0].case_digest].extend(group)
+        count = min(map(len, paired.values()))
+        return tuple(sample for group in paired.values() for sample in group[:count])
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**{f.name: getattr(self, f.name) for f in fields(self)},
+                "configuration": self.configuration.to_dict(), "budget": self.budget.to_dict(),
+                "provenance": self.provenance.to_dict(), "case_digests": list(self.case_digests)}
+
+    def to_json(self) -> str:
+        return canonical_bytes(self.to_dict()).decode("utf-8")
+
+    @property
+    def digest(self) -> str:
+        return sha256_bytes(self.to_json().encode("utf-8"))
+
+    @property
+    def slot(self) -> str:
+        return sha256_bytes(canonical_bytes({"cohort_id": self.cohort_id, "plan_id": self.plan_id}))
+
+    @classmethod
+    def from_dict(cls, data: object) -> A03BenchmarkExperimentPlan:
+        value = exact_fields(data, {f.name for f in fields(cls)})
+        if not isinstance(value["case_digests"], list):
+            raise CreativeValidationError("expected case_digests array")
+        value["configuration"] = ModelConfiguration.from_dict(value["configuration"])
+        value["budget"] = BenchmarkTrialBudget.from_dict(value["budget"])
+        value["provenance"] = CreativeJobProvenance.from_dict(value["provenance"])
+        return cls(**value)
+
+    @classmethod
+    def from_json(cls, text: str) -> A03BenchmarkExperimentPlan:
+        return cls.from_dict(read_json(text))
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkTrialGrant:
+    """Runner-side grant for one offline fixture sample."""
+
+    plan_digest: str
+    sample_id: str
+    authorization_ref: str
+
+    def __post_init__(self) -> None:
+        require_digest(self.plan_digest)
+        require_text(self.sample_id, "sample_id")
+        require_text(self.authorization_ref, "authorization_ref")
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkAttemptTiming:
+    receipt_digest: str
+    authorization_ref: str
+    started_at: str
+    completed_at: str
+    wall_time_ms: int
+    schema_version: str = "A03BenchmarkAttemptTiming.v1"
+
+    def __post_init__(self) -> None:
+        if self.schema_version != "A03BenchmarkAttemptTiming.v1":
+            raise CreativeValidationError("unsupported benchmark attempt timing schema")
+        require_digest(self.receipt_digest)
+        require_text(self.authorization_ref, "authorization_ref")
+        start = _require_iso_timestamp(self.started_at, "started_at")
+        end = _require_iso_timestamp(self.completed_at, "completed_at")
+        if end < start:
+            raise CreativeValidationError("benchmark attempt clock moved backwards")
+        _nonneg_int(self.wall_time_ms, "wall_time_ms")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {f.name: getattr(self, f.name) for f in fields(self)}
+
+    @classmethod
+    def from_dict(cls, data: object) -> BenchmarkAttemptTiming:
+        return cls(**exact_fields(data, {f.name for f in fields(cls)}))
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkTrialAttempt:
+    stage: A03CreativeStageResult
+    timing: BenchmarkAttemptTiming | None
+
+    @property
+    def trace(self) -> BenchmarkRoleTrace:
+        job = self.stage.job
+        trace = _stage_to_trace(
+            self.stage, step_name=job.job_id, is_retry=job.attempt > 1,
+            step_timings_ms={job.job_id: self.timing.wall_time_ms} if self.timing else None,
+            step_retries={job.job_id: 0},
+        )
+        return replace(
+            trace, started_at=self.timing.started_at if self.timing else None,
+            completed_at=self.timing.completed_at if self.timing else None,
+            execution_status="UNKNOWN" if self.stage.reasoning.error_code == "UNKNOWN_EFFECT"
+            else trace.execution_status,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkTrialResult:
+    sample: BenchmarkTrialSample
+    status: Literal[
+        "READY", "RETRY_REQUIRED", "INCOMPLETE", "HOLD_AUTHORIZATION", "HOLD_DEPENDENCY",
+        "HOLD_BUDGET", "HOLD_UNKNOWN_EFFECT", "HOLD_RECEIPT", "HOLD_SOURCE",
+    ]
+    reason: str
+    attempts: tuple[BenchmarkTrialAttempt, ...] = ()
+    next_job: A03CreativeJob | None = None
+    observation: A03BenchmarkObservation | None = None
+    ranking_status: Literal["UNRANKED"] = "UNRANKED"
+
+    @property
+    def telemetry(self) -> BenchmarkTelemetry:
+        return aggregate_benchmark_telemetry(tuple(attempt.trace for attempt in self.attempts))
+
+
+def _trial_budget_hold(budget: BenchmarkTrialBudget, attempts: list[BenchmarkTrialAttempt], *,
+                       scheduling: bool) -> str | None:
+    tokens = wall_ms = 0
+    cost = Decimal(0)
+    for attempt in attempts:
+        usage = attempt.stage.reasoning.usage
+        if (attempt.timing is None or usage.input_tokens is None or usage.output_tokens is None
+                or usage.cost_amount is None or usage.currency != budget.currency):
+            return "UNOBSERVED_OR_INCOMPARABLE_BUDGET_USAGE"
+        tokens += usage.input_tokens + usage.output_tokens
+        wall_ms += attempt.timing.wall_time_ms
+        cost += Decimal(str(usage.cost_amount))
+    limits = ((len(attempts), budget.max_attempts), (tokens, budget.max_tokens),
+              (wall_ms, budget.max_invocation_wall_time_ms), (cost, Decimal(str(budget.max_cost_amount))))
+    if any(used > limit or (scheduling and used == limit) for used, limit in limits):
+        return "EXPERIMENT_BUDGET_EXHAUSTED"
+    return None
+
+
+def _reconcile_benchmark_sample(
+    plan: A03BenchmarkExperimentPlan, sample: BenchmarkTrialSample, sidecars: CreativeSidecarStore,
+) -> BenchmarkTrialResult:
+    if sample.strategy == "S3":
+        return BenchmarkTrialResult(sample, "HOLD_DEPENDENCY",
+                                    "Standalone source research with verified bytes requires a new "
+                                    "request/provider/receipt contract in src/ai_commerce/creative/live.py. "
+                                    "R5a research is bound to the existing R2 cycle.")
+    if plan.purpose == "PRODUCTION":
+        return BenchmarkTrialResult(sample, "HOLD_DEPENDENCY",
+                                    "Live token and cost caps require enforcement by "
+                                    "src/ai_commerce/creative/live.py. "
+                                    "Real execution also requires a separate runner authorization.")
+    case = sidecars.load_benchmark_case_by_digest(sample.case_digest)
+    brief = sidecars.creative.load_brief(case.source_brief_digest)
+    attempts: list[BenchmarkTrialAttempt] = []
+    successful: list[A03CreativeStageResult] = []
+    prior: list[A03CreativeStageResult] = []
+    receipts: set[str] = set()
+    provider_ids: set[str] = set()
+
+    def result(status: str, reason: str, **options: Any) -> BenchmarkTrialResult:
+        return BenchmarkTrialResult(sample, status, reason, tuple(attempts), **options)
+
+    try:
+        for operation in sample.operations:
+            source = successful[0].reasoning.concepts()[0] if operation == "CRITIQUE" else None
+            request = ReasoningRequest.create(brief, operation=operation, source=source,
+                                              count=2 if operation == "EXPLORE" else None)
+            for number in range(1, plan.budget.max_attempts + 2):
+                job = A03CreativeJob.create(
+                    request, journey_id=f"benchmark:{plan.digest}", cycle_id=sample.sample_id,
+                    job_id=_role_for_operation(operation), attempt=number,
+                    correlation_id=f"{sample.sample_id}:{operation}:{number}", provenance=plan.provenance,
+                    configuration=plan.configuration, purpose="TEST_ONLY_MOCK",
+                )
+                claimed, attempt = sidecars._load_experiment_attempt(job)
+                if not claimed:
+                    hold = _trial_budget_hold(plan.budget, attempts, scheduling=True)
+                    if hold:
+                        return result("HOLD_BUDGET", hold)
+                    if number > 1:
+                        return result("RETRY_REQUIRED", "EXPLICIT_RETRY_REQUIRED", next_job=job)
+                    return result("READY", "ROLE_READY", next_job=job)
+                if attempt is None:
+                    return result("HOLD_UNKNOWN_EFFECT", "RESERVED_ATTEMPT_WITHOUT_TERMINAL_RECEIPT")
+                attempts.append(attempt)
+                stage = attempt.stage
+                observed = stage.reasoning
+                if (observed.provider_request_id is None or observed.observation.mode == "UNKNOWN"
+                        or observed.error_code == "UNKNOWN_EFFECT"
+                        or (observed.execution is not None and observed.execution.effect == "UNKNOWN")):
+                    return result("HOLD_UNKNOWN_EFFECT", "UNRESOLVED_PROVIDER_EFFECT")
+                if observed.digest in receipts or observed.provider_request_id in provider_ids:
+                    return result("HOLD_RECEIPT", "REPLAYED_PROVIDER_RECEIPT")
+                receipts.add(observed.digest)
+                provider_ids.add(observed.provider_request_id)
+                if (observed.configuration != plan.configuration
+                        or observed.observation != ProviderObservation("deterministic-test-only", "UNKNOWN",
+                                                                        "TEST_ONLY_MOCK")
+                        or (plan.configuration.effort is not None
+                            and attempt.trace.observed_effort != plan.configuration.effort)):
+                    return result("HOLD_RECEIPT", "REQUESTED_AND_OBSERVED_CONFIGURATION_MISMATCH")
+                hold = _trial_budget_hold(plan.budget, attempts, scheduling=False)
+                if hold:
+                    return result("HOLD_BUDGET", hold)
+                if stage.status == "TEST_ONLY_MOCK":
+                    successful.append(stage)
+                    break
+                if observed.state != "REFUSED" or observed.error_code != "MODEL_REFUSED":
+                    return result("HOLD_RECEIPT", stage.failure or "ROLE_FAILED")
+                prior.append(stage)
+
+        observation = observe_benchmark_run(
+            case, sidecars, strategy=sample.strategy, sample_id=sample.sample_id, attempt=1,
+            provenance=plan.provenance, started_at=attempts[0].timing.started_at,
+            completed_at=attempts[-1].timing.completed_at, stages=tuple(successful), retry_stages=tuple(prior),
+            step_timings_ms={a.stage.reasoning.digest: a.timing.wall_time_ms for a in attempts},
+            # The stage owner invokes once per slot. Additional calls have their own receipts.
+            step_retries={a.stage.reasoning.digest: 0 for a in attempts},
+        )
+        return result("INCOMPLETE", "NOT_REAL_BENCHMARK", observation=observation)
+    except (CreativeValidationError, VersionConflict, FileNotFoundError) as exc:
+        return result("HOLD_RECEIPT", str(exc))
+
+
+def advance_benchmark_trial(
+    plan: A03BenchmarkExperimentPlan, store: CreativeSidecarStore, *, source_sha: str, sample_id: str,
+    grant: BenchmarkTrialGrant | None = None, reasoner: CreativeReasonerV2 | None = None,
+    attempt_id: str | None = None,
+) -> BenchmarkTrialResult:
+    """Reconcile and execute only the explicitly selected next job slot, if any."""
+    from .live import InvocationAuthorization, LiveCreativeReasoner
+
+    if store.load_benchmark_experiment_plan(plan.digest) != plan:
+        raise CreativeValidationError("experiment plan disagrees with stored bytes")
+    sample = next((item for item in plan.samples if item.sample_id == sample_id), None)
+    if sample is None:
+        raise CreativeValidationError("unplanned experiment sample")
+    if attempt_id is not None:
+        require_digest(attempt_id)
+    if source_sha != plan.source_sha:
+        return BenchmarkTrialResult(sample, "HOLD_SOURCE", "EXPERIMENT_SOURCE_MISMATCH")
+    current = _reconcile_benchmark_sample(plan, sample, store)
+    if current.next_job is None:
+        return current
+    if (not isinstance(grant, BenchmarkTrialGrant)
+            or (grant.plan_digest, grant.sample_id) != (plan.digest, sample_id)):
+        return BenchmarkTrialResult(sample, "HOLD_AUTHORIZATION", "BOUND_OFFLINE_GRANT_REQUIRED", current.attempts)
+    if reasoner is None or attempt_id != current.next_job.slot:
+        return current
+    client = reasoner.client if type(reasoner) is LiveCreativeReasoner else None
+    capabilities = getattr(client, "capabilities", None)
+    if (getattr(client, "execution_mode", None) != "TEST_ONLY_MOCK"
+            or reasoner.config != plan.configuration
+            or getattr(capabilities, "network_required", None) is not False
+            or getattr(capabilities, "external_spend_possible", None) is not False):
+        return BenchmarkTrialResult(sample, "HOLD_DEPENDENCY", "CONFIGURED_OFFLINE_MOCK_CLIENT_REQUIRED",
+                                    current.attempts)
+    try:
+        _run_creative_stage(
+            current.next_job, store, LiveCreativeReasoner(plan.configuration, client),
+            authorization=InvocationAuthorization(authorization_ref=grant.authorization_ref),
+            record_timing=store._save_experiment_attempt_timing,
+        )
+    except (CreativeValidationError, VersionConflict, FileNotFoundError):
+        # An existing claim may have been created by a concurrent caller. Only
+        # the immutable receipts decide whether it is safe to advance.
+        observed = _reconcile_benchmark_sample(plan, sample, store)
+        if observed.next_job == current.next_job:
+            return BenchmarkTrialResult(sample, "HOLD_RECEIPT", "ATTEMPT_COULD_NOT_BE_PERSISTED",
+                                        observed.attempts)
+        return observed
+    return _reconcile_benchmark_sample(plan, sample, store)
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkExperimentComparison:
+    status: Literal["HOLD", "INCOMPLETE", "NOT_REAL_BENCHMARK"]
+    reasons: tuple[str, ...]
+    missing_sample_ids: tuple[str, ...]
+    comparison: A03BenchmarkComparison | None = None
+    ranking_status: Literal["UNRANKED"] = "UNRANKED"
+
+
+def compare_benchmark_trials(
+    plan: A03BenchmarkExperimentPlan, store: CreativeSidecarStore, *, source_sha: str, created_at: str,
+) -> BenchmarkExperimentComparison:
+    """Compare only plan-bound, equally weighted and receipt-verified repetitions."""
+    if store.load_benchmark_experiment_plan(plan.digest) != plan:
+        raise CreativeValidationError("experiment plan disagrees with stored bytes")
+    _require_iso_timestamp(created_at, "created_at")
+    cases = tuple(store.load_benchmark_case_by_digest(digest) for digest in plan.case_digests)
+    samples = plan.samples
+    if source_sha != plan.source_sha:
+        return BenchmarkExperimentComparison("HOLD", ("EXPERIMENT_SOURCE_MISMATCH",),
+                                             tuple(sample.sample_id for sample in samples))
+    observations: dict[str, A03BenchmarkObservation] = {}
+    reasons: set[str] = set()
+    used: set[tuple[str, str]] = set()
+    replayed = False
+    invalid = False
+    for sample in samples:
+        trial = _reconcile_benchmark_sample(plan, sample, store)
+        if trial.observation is not None:
+            observations[sample.sample_id] = trial.observation
+        else:
+            reasons.add(trial.status)
+            invalid |= trial.status in ("HOLD_RECEIPT", "HOLD_BUDGET", "HOLD_UNKNOWN_EFFECT")
+        for attempt in trial.attempts:
+            trace = attempt.trace
+            for kind, identity in (("receipt", trace.receipt_digest), ("provider", trace.provider_request_id)):
+                if identity is not None:
+                    replayed |= (kind, identity) in used
+                    used.add((kind, identity))
+    missing = tuple(sample.sample_id for sample in samples if sample.sample_id not in observations)
+    if replayed or invalid:
+        if replayed:
+            reasons.add("REPLAYED_EXPERIMENT_RECEIPT")
+        return BenchmarkExperimentComparison("HOLD", tuple(sorted(reasons)), missing)
+    paired = plan.paired_samples(tuple(observations))
+    comparison = _build_benchmark_comparison_payload(
+        comparison_id=f"experiment:{plan.digest}", cases=cases,
+        observations=tuple(observations[sample.sample_id] for sample in paired),
+        strategies=BENCHMARK_STRATEGIES, provenance=plan.provenance, created_at=created_at,
+    )
+    status = "NOT_REAL_BENCHMARK" if observations else "INCOMPLETE"
+    return BenchmarkExperimentComparison(status, tuple(sorted(reasons)), missing, comparison)
