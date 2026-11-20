@@ -2012,7 +2012,7 @@ def test_a10_m05_selects_a03_consumer_with_only_reviewed_closure(real_tree, monk
         }
         if path.endswith("/briefs.py"):
             expected_v21.update({
-                "a10-m02", "a18-1", "a18-2", "a18-3", "b0-1",
+                "a04", "a10-m02", "a18-1", "a18-2", "a18-3", "b0-1",
                 "b3-portfolio", "wakehub-cdp-native",
             })
         assert set(selected["selected_groups"]) == expected_v21
@@ -2031,6 +2031,17 @@ def test_a10_m05_selects_a03_consumer_with_only_reviewed_closure(real_tree, monk
         "bq-02b", "bq-04a", "cli", "production-orchestration", "wakehub-runtime",
         "wakehub-cdp-native",
     }
+    # The current reviewed registry now includes additional A13–A17, BQ,
+    # portfolio and media owners. Keep the expected closure exact; these are
+    # real registered consumers, not an unbounded selector allowance.
+    expected.update({
+        "a13", "a14-e04", "a15", "a16", "a17-1", "a17-2", "a17-3",
+        "b0-2", "b0-3", "b0-4", "b0-s", "b0-s3", "b0-s3b",
+        "b1-3-audio", "b1-3-subtitle",
+        "b3-next-brief", "b3-operations-dashboard", "b4-feed-readiness",
+        "bq-01a", "bq-01b", "bq-02a", "bq-03a", "bq-03b", "bq-04b",
+        "bq-05a", "bq-05b0", "bq-05b1", "bq-06a", "bq-06b",
+    })
     assert set(selected["selected_groups"]) == expected
     assert not selected["fallback"]
     assert selected["reason_codes"] == (["SCOPED_CONSUMER_CLOSURE"] if v21 else [])
@@ -2078,7 +2089,8 @@ def test_a10_m05_selects_a03_consumer_with_only_reviewed_closure(real_tree, monk
     assert not previous["fallback"]
     assert previous["unknown_tests"] == previous["unknown_acs"] == previous["unknown_consumers"] == []
     assert "src/ai_commerce/cli.py" in selected["affected_paths"]
-    unrelated = {"bq-05a", "bq-05b0", "bq-05b1", "ef02", "ef02-wake"}
+    # BQ-05 is now in the reviewed consumer closure, but EF02 is not.
+    unrelated = {"ef02", "ef02-wake"}
     assert unrelated <= {g.name for g in real_tree.groups}
     assert not unrelated & set(selected["selected_groups"])
 
