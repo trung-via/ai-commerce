@@ -2253,14 +2253,19 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         self.session.return_value = 0
         self.assertEqual(self.invoke_probe()["code"], "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
         self.source.assert_not_called()
+        self.task.assert_not_called()
         self.session.return_value = 7
         self.pending.add("AutostartPending")
-        self.assertEqual(self.invoke_probe()["code"], "UNKNOWN")
+        self.assertEqual(self.invoke_probe()["code"], "AUTOSTART_PENDING_TASK_ENROLLED")
+        self.assertEqual(self.pending, {"AutostartPending"})
         self.pending.clear()
         self.launch_pending.return_value = True
-        self.assertEqual(self.invoke_probe()["code"], "UNKNOWN")
+        self.assertEqual(self.invoke_probe()["code"], "LAUNCH_PENDING_TASK_ENROLLED")
         self.launch_pending.return_value = False
-        self.task.assert_not_called()
+        self.assertEqual(self.task.call_args_list, [
+            call(self.owner, self.target, self.candidates, install=False),
+            call(self.owner, self.target, self.candidates, install=False),
+        ])
 
         for reply, code in (("AUTOSTART_NOT_ENROLLED", "AUTOSTART_NOT_ENROLLED"),
                             ("AUTOSTART_RUNTIME_UNAVAILABLE", "TASK_READ_UNVERIFIED"),
@@ -2274,6 +2279,155 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         self.session.side_effect = (7, 7, 8)
         self.assertEqual(self.invoke_probe()["code"], "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
         self.record.assert_not_called()
+        self.inventory.assert_not_called()
+        self.probe.assert_not_called()
+
+    def test_runtime_probe_separates_pending_markers_and_task_states_read_only(self):
+        expected_keys = {
+            "status", "code", "operation", "cdp_port", "source_sha",
+            "exact_chat_verified", "wake_sent", "arbitrary_shell_enabled", "remote_shell_enabled",
+        }
+        task_cases = (
+            ("ALREADY_ENROLLED", None, "TASK_ENROLLED"),
+            ("AUTOSTART_NOT_ENROLLED", None, "TASK_ABSENT"),
+            ("AUTOSTART_CONFLICT", None, "TASK_CONFLICT"),
+            ("AUTOSTART_RUNTIME_UNAVAILABLE", None, "TASK_UNAVAILABLE"),
+            ("PRIVATE task reply", None, "TASK_UNAVAILABLE"),
+            (None, OSError("PRIVATE Schedule.Service error"), "TASK_UNAVAILABLE"),
+            (None, self.acq._Clean9444Hold("PRIVATE task hold"), "TASK_UNAVAILABLE"),
+        )
+        marker_cases = (
+            ("autostart_only", {"AutostartPending"}, False, "AUTOSTART_PENDING"),
+            ("launch_only", set(), True, "LAUNCH_PENDING"),
+            ("both_markers", {"AutostartPending"}, True, "BOTH_PENDING"),
+        )
+        for label, autostart_set, launch_value, prefix in marker_cases:
+            for reply, error, suffix in task_cases:
+                with self.subTest(marker=label, reply=reply, error=type(error).__name__ if error else None):
+                    self.pending.clear()
+                    self.pending.update(autostart_set)
+                    self.launch_pending.return_value = launch_value
+                    self.task.reset_mock()
+                    self.task.side_effect = error
+                    self.task.return_value = reply
+                    receipt = self.invoke_probe()
+                    expected_code = f"{prefix}_{suffix}"
+                    self.assertEqual(set(receipt), expected_keys)
+                    self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", expected_code))
+                    self.assertNotEqual(receipt["code"], "READY")
+                    self.assertIn(receipt["code"], hostops._CLEAN_RUNTIME_PROBE_CODES)
+                    self.assertRegex(receipt["code"], r"^[A-Z_]{2,64}$")
+                    self.assertEqual(receipt["cdp_port"], 9444)
+                    self.assertEqual(receipt["source_sha"], self.sha)
+                    self.assertFalse(receipt["exact_chat_verified"])
+                    self.assertFalse(receipt["wake_sent"])
+                    self.assertFalse(receipt["arbitrary_shell_enabled"])
+                    self.assertFalse(receipt["remote_shell_enabled"])
+                    self.task.assert_called_once_with(self.owner, self.target, self.candidates, install=False)
+                    # Read-only guarantee: markers stay intact and WRITE still HOLDs.
+                    self.assertEqual(self.pending, autostart_set)
+        self.pending.clear()
+        self.pending.add("AutostartPending")
+        self.launch_pending.return_value = False
+        self.task.side_effect = None
+        self.task.return_value = "ALREADY_ENROLLED"
+        self.assertEqual(self.invoke()["code"], "UNKNOWN_EFFECT")
+        self.record.assert_not_called()
+        self.inventory.assert_not_called()
+        self.probe.assert_not_called()
+
+    def test_runtime_probe_handles_marker_read_failures_target_errors_and_state_changes(self):
+        # Marker read failure still observes the scheduled task read-only.
+        for reply, expected in (
+            ("ALREADY_ENROLLED", "MARKER_READ_UNVERIFIED_TASK_ENROLLED"),
+            ("AUTOSTART_NOT_ENROLLED", "MARKER_READ_UNVERIFIED_TASK_ABSENT"),
+            ("AUTOSTART_CONFLICT", "MARKER_READ_UNVERIFIED_TASK_CONFLICT"),
+            ("AUTOSTART_RUNTIME_UNAVAILABLE", "MARKER_READ_UNVERIFIED_TASK_UNAVAILABLE"),
+        ):
+            with self.subTest(reply=reply), patch.object(
+                self.acq, "_clean_pending", side_effect=PermissionError("PRIVATE HKCU\\Software\\AI-Commerce")
+            ):
+                self.task.reset_mock()
+                self.task.return_value = reply
+                receipt = self.invoke_probe()
+                self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", expected))
+                self.assertIn(receipt["code"], hostops._CLEAN_RUNTIME_PROBE_CODES)
+                self.assertNotIn("HKCU", json.dumps(receipt))
+                self.task.assert_called_once_with(self.owner, self.target, self.candidates, install=False)
+
+        # Pending marker with target/profile unavailable skips task read and preserves marker visibility.
+        self.pending.add("AutostartPending")
+        for exc, expected in (
+            (self.acq._Clean9444Hold("PROFILE_UNAVAILABLE"), "AUTOSTART_PENDING_PROFILE_UNAVAILABLE"),
+            (self.acq._Clean9444Hold("CHROME_PATH_INVALID"), "AUTOSTART_PENDING_TARGET_UNAVAILABLE"),
+            (OSError("PRIVATE profile path"), "AUTOSTART_PENDING_TARGET_UNAVAILABLE"),
+        ):
+            with self.subTest(expected=expected):
+                self.task.reset_mock()
+                self.target_read.side_effect = exc
+                receipt = self.invoke_probe()
+                self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", expected))
+                self.task.assert_not_called()
+        self.target_read.side_effect = None
+
+        # Wrong session overrides pending markers before and after task read.
+        self.task.return_value = "ALREADY_ENROLLED"
+        for session_seq in ((0,), (7, 8), (7, 7, 8)):
+            with self.subTest(session_seq=session_seq):
+                self.session.side_effect = session_seq
+                self.assertEqual(self.invoke_probe()["code"], "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+        self.session.side_effect = None
+        self.session.return_value = 7
+        self.task.return_value = "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
+        self.assertEqual(self.invoke_probe()["code"], "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+
+        # Concurrent marker transition during probe never reports READY.
+        self.pending.clear()
+        self.task.return_value = "ALREADY_ENROLLED"
+        for seq in ((False, True), (True, False)):
+            with self.subTest(seq=seq), patch.object(self.acq, "_clean_pending", side_effect=seq):
+                receipt = self.invoke_probe()
+                self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", "PENDING_STATE_CHANGED"))
+                self.assertNotEqual(receipt["code"], "READY")
+        self.record.assert_not_called()
+        self.inventory.assert_not_called()
+        self.probe.assert_not_called()
+
+    def test_runtime_probe_maps_native_exceptions_to_closed_sanitized_codes(self):
+        private_detail = (
+            f"PRIVATE {self.local} {self.sid} HKCU\\Software\\AI-Commerce\\WakeHub-9444-Clean "
+            "https://chatgpt.com/c/secret-chat-id credential=secret-token --user-data-dir=C:\\secret"
+        )
+        cases = (
+            (ImportError(private_detail), "PROBE_EXCEPTION_IMPORT"),
+            (PermissionError(private_detail), "PROBE_EXCEPTION_PERMISSION"),
+            (subprocess.TimeoutExpired(["powershell.exe", private_detail], 15), "PROBE_EXCEPTION_TIMEOUT"),
+            (OSError(private_detail), "PROBE_EXCEPTION_OS"),
+            (ValueError(private_detail), "PROBE_EXCEPTION_DATA"),
+            (TypeError(private_detail), "PROBE_EXCEPTION_DATA"),
+            (KeyError(private_detail), "PROBE_EXCEPTION_DATA"),
+            (AttributeError(private_detail), "PROBE_EXCEPTION_DATA"),
+            (RuntimeError(private_detail), "PROBE_EXCEPTION_RUNTIME"),
+            (LookupError(private_detail), "PROBE_EXCEPTION_OTHER"),
+        )
+        for error, expected in cases:
+            with self.subTest(error=type(error).__name__), \
+                    patch.object(hostops, "_observe_clean_runtime", side_effect=error):
+                receipt = self.invoke_probe()
+                self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", expected))
+                self.assertIn(receipt["code"], hostops._CLEAN_RUNTIME_PROBE_CODES)
+                self.assertRegex(receipt["code"], r"^[A-Z_]{2,64}$")
+                raw = json.dumps(receipt)
+                for secret in ("PRIVATE", "HKCU", "WakeHub", "chatgpt.com", "secret-chat-id",
+                               "credential", "secret-token", "--user-data-dir", self.sid, str(self.local)):
+                    self.assertNotIn(secret, raw)
+        # Non-allowlisted return value from _observe_clean_runtime fails closed to UNKNOWN.
+        with patch.object(hostops, "_observe_clean_runtime", return_value=private_detail):
+            receipt = self.invoke_probe()
+            self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", "UNKNOWN"))
+            self.assertNotIn("PRIVATE", json.dumps(receipt))
+        self.record.assert_not_called()
+        self.inventory.assert_not_called()
         self.probe.assert_not_called()
 
     def test_runtime_probe_reports_unavailable_profile_before_task_read(self):

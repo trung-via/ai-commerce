@@ -532,6 +532,46 @@ def _persistent_clean_source(acquisition, sha):
     return source
 
 
+_CLEAN_RUNTIME_MARKER_PREFIXES = (
+    "AUTOSTART_PENDING", "LAUNCH_PENDING", "BOTH_PENDING", "MARKER_READ_UNVERIFIED",
+)
+_CLEAN_RUNTIME_MARKER_OUTCOMES = (
+    "TASK_ENROLLED", "TASK_ABSENT", "TASK_CONFLICT", "TASK_UNAVAILABLE",
+    "PROFILE_UNAVAILABLE", "TARGET_UNAVAILABLE",
+)
+_CLEAN_RUNTIME_EXCEPTION_CODES = frozenset({
+    "PROBE_EXCEPTION_IMPORT", "PROBE_EXCEPTION_PERMISSION", "PROBE_EXCEPTION_TIMEOUT",
+    "PROBE_EXCEPTION_OS", "PROBE_EXCEPTION_DATA", "PROBE_EXCEPTION_RUNTIME",
+    "PROBE_EXCEPTION_OTHER",
+})
+_CLEAN_RUNTIME_PROBE_CODES = frozenset({
+    "READY", "AUTOSTART_NOT_ENROLLED", "TASK_REGISTRATION_CONFLICT",
+    "TASK_READ_UNVERIFIED", "WINDOWS_OWNER_CONTEXT_UNVERIFIED",
+    "SOURCE_CUSTODY_UNVERIFIED", "PROFILE_UNAVAILABLE", "TARGET_READ_UNVERIFIED",
+    "PENDING_STATE_CHANGED", "UNKNOWN",
+    *(f"{prefix}_{outcome}"
+      for prefix in _CLEAN_RUNTIME_MARKER_PREFIXES
+      for outcome in _CLEAN_RUNTIME_MARKER_OUTCOMES),
+    *_CLEAN_RUNTIME_EXCEPTION_CODES,
+})
+
+
+def _clean_probe_exception_code(exc: BaseException) -> str:
+    if isinstance(exc, ImportError):
+        return "PROBE_EXCEPTION_IMPORT"
+    if isinstance(exc, PermissionError):
+        return "PROBE_EXCEPTION_PERMISSION"
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return "PROBE_EXCEPTION_TIMEOUT"
+    if isinstance(exc, OSError):
+        return "PROBE_EXCEPTION_OS"
+    if isinstance(exc, (ValueError, TypeError, KeyError, AttributeError)):
+        return "PROBE_EXCEPTION_DATA"
+    if isinstance(exc, RuntimeError):
+        return "PROBE_EXCEPTION_RUNTIME"
+    return "PROBE_EXCEPTION_OTHER"
+
+
 def _observe_clean_runtime(sha: str) -> str:
     from ai_commerce.remote import chrome_acquisition as acquisition
     from ai_commerce.remote.local_wake_entry import LocalWakeConfigError
@@ -541,6 +581,24 @@ def _observe_clean_runtime(sha: str) -> str:
             return acquisition._native_operator()
         except (acquisition.AcquisitionBlocked, acquisition._EnrollmentHold, LocalWakeConfigError, OSError):
             return None
+
+    def read_marker(reader):
+        try:
+            value = reader()
+        except (acquisition.AcquisitionBlocked, acquisition._EnrollmentHold, acquisition._Clean9444Hold, OSError):
+            return None
+        return value if type(value) is bool else None
+
+    def classify_markers(autostart, launch):
+        if autostart is None or launch is None:
+            return "MARKER_READ_UNVERIFIED"
+        if autostart and launch:
+            return "BOTH_PENDING"
+        if autostart:
+            return "AUTOSTART_PENDING"
+        if launch:
+            return "LAUNCH_PENDING"
+        return None
 
     owner = read_owner()
     if owner is None:
@@ -553,31 +611,56 @@ def _observe_clean_runtime(sha: str) -> str:
     pending = acquisition._CLEAN_TASK_PENDING
     if read_owner() != owner:
         return "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
-    if acquisition._clean_pending(pending) or acquisition._clean_launch_pending():
-        return "UNKNOWN"
+    # Independently observe both markers without mutating registry state, then
+    # still inspect the fixed task read-only so pending-vs-enrolled states separate.
+    marker_state = classify_markers(
+        read_marker(lambda: acquisition._clean_pending(pending)),
+        read_marker(acquisition._clean_launch_pending),
+    )
     try:
         target, candidates = acquisition._clean_target(owner)
     except acquisition._Clean9444Hold as exc:
-        return "PROFILE_UNAVAILABLE" if str(exc) == "PROFILE_UNAVAILABLE" else "TARGET_READ_UNVERIFIED"
+        if str(exc) == "PROFILE_UNAVAILABLE":
+            return "PROFILE_UNAVAILABLE" if marker_state is None else f"{marker_state}_PROFILE_UNAVAILABLE"
+        return "TARGET_READ_UNVERIFIED" if marker_state is None else f"{marker_state}_TARGET_UNAVAILABLE"
     except (acquisition.AcquisitionBlocked, acquisition._EnrollmentHold, OSError):
-        return "TARGET_READ_UNVERIFIED"
+        return "TARGET_READ_UNVERIFIED" if marker_state is None else f"{marker_state}_TARGET_UNAVAILABLE"
+
+    task_error = False
+    task = None
     try:
         task = acquisition._clean_task(owner, target, candidates, install=False)
     except (acquisition.AcquisitionBlocked, acquisition._EnrollmentHold, acquisition._Clean9444Hold, OSError):
-        return "TASK_READ_UNVERIFIED"
-    if read_owner() != owner:
+        task_error = True
+    if read_owner() != owner or (not task_error and task == "WINDOWS_OWNER_CONTEXT_UNVERIFIED"):
         return "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
-    if acquisition._clean_pending(pending) or acquisition._clean_launch_pending():
-        return "UNKNOWN"
-    if type(task) is not str:
-        return "UNKNOWN"
-    return {
-        "ALREADY_ENROLLED": "READY",
-        "AUTOSTART_NOT_ENROLLED": "AUTOSTART_NOT_ENROLLED",
-        "AUTOSTART_CONFLICT": "TASK_REGISTRATION_CONFLICT",
-        "AUTOSTART_RUNTIME_UNAVAILABLE": "TASK_READ_UNVERIFIED",
-        "WINDOWS_OWNER_CONTEXT_UNVERIFIED": "WINDOWS_OWNER_CONTEXT_UNVERIFIED",
-    }.get(task, "UNKNOWN")
+    after_state = classify_markers(
+        read_marker(lambda: acquisition._clean_pending(pending)),
+        read_marker(acquisition._clean_launch_pending),
+    )
+    if after_state != marker_state:
+        return "PENDING_STATE_CHANGED"
+    if marker_state is None:
+        if task_error:
+            return "TASK_READ_UNVERIFIED"
+        if type(task) is not str:
+            return "UNKNOWN"
+        return {
+            "ALREADY_ENROLLED": "READY",
+            "AUTOSTART_NOT_ENROLLED": "AUTOSTART_NOT_ENROLLED",
+            "AUTOSTART_CONFLICT": "TASK_REGISTRATION_CONFLICT",
+            "AUTOSTART_RUNTIME_UNAVAILABLE": "TASK_READ_UNVERIFIED",
+        }.get(task, "UNKNOWN")
+    if task_error or type(task) is not str:
+        task_suffix = "TASK_UNAVAILABLE"
+    else:
+        task_suffix = {
+            "ALREADY_ENROLLED": "TASK_ENROLLED",
+            "AUTOSTART_NOT_ENROLLED": "TASK_ABSENT",
+            "AUTOSTART_CONFLICT": "TASK_CONFLICT",
+            "AUTOSTART_RUNTIME_UNAVAILABLE": "TASK_UNAVAILABLE",
+        }.get(task, "TASK_UNAVAILABLE")
+    return f"{marker_state}_{task_suffix}"
 
 
 def _probe_protected_clean_runtime():
@@ -599,10 +682,13 @@ def _probe_protected_clean_runtime():
         except Denied:
             return {**result, "code": "SOURCE_CUSTODY_UNVERIFIED"}
         result["source_sha"] = sha
-        result["code"] = _observe_clean_runtime(sha)
-    except Exception:
+        observed = _observe_clean_runtime(sha)
+        result["code"] = (observed if type(observed) is str and observed in _CLEAN_RUNTIME_PROBE_CODES
+                          else "UNKNOWN")
+    except Exception as exc:
         # A failed probe can never project native output or exception text.
-        pass
+        code = _clean_probe_exception_code(exc)
+        result["code"] = code if code in _CLEAN_RUNTIME_PROBE_CODES else "UNKNOWN"
     return result
 
 
