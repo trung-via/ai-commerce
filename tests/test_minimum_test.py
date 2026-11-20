@@ -2082,6 +2082,9 @@ def test_a10_m05_selects_a03_consumer_with_only_reviewed_closure(real_tree, monk
             previous_graph = {p: set(deps) for p, deps in graph.items()}
             previous_graph[a03_test].remove(orchestration_init)
             previous_graph[a03_cli_test].remove(cli_source)
+            # The A03 upgrade suite now also imports orchestration directly.
+            # Remove that test-only edge; keep all production edges unchanged.
+            previous_graph[a03_cli_test].remove(orchestration_init)
             control.setattr(mt, "import_graph", lambda *_: (previous_graph, complete))
         assert set(select(groups)["selected_groups"]) == expected
         previous = select(without_a03_consumer)
