@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import math
 import re
+import threading
 import unicodedata
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, fields, replace
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -34,6 +36,67 @@ if TYPE_CHECKING:
     from .store import CreativeStore
 
 
+_PARSE_LOCAL = threading.local()
+_PARSE_SCOPE_MAX = 65536
+
+
+class _ParseScopeState:
+    __slots__ = ("verified", "briefs")
+
+    def __init__(self) -> None:
+        self.verified: dict[int, Any] = {}
+        self.briefs: set[str] = set()
+
+
+@contextmanager
+def _parse_scope() -> Iterator[_ParseScopeState]:
+    """Bounded single-operation parse scope avoiding exponential dataclass re-parsing.
+
+    Never persists across calls. Retains strong references for exact-type
+    immutable records validated during this single operation so object IDs
+    cannot be recycled. Any unverified or outside-scope object is fully
+    revalidated via ``from_dict(obj.to_dict())``.
+    """
+    existing = getattr(_PARSE_LOCAL, "scope", None)
+    if existing is not None:
+        yield existing
+        return
+    scope = _ParseScopeState()
+    _PARSE_LOCAL.scope = scope
+    try:
+        yield scope
+    finally:
+        _PARSE_LOCAL.scope = None
+
+
+def _mark_verified(obj: Any, expected_cls: type[Any] | None = None) -> Any:
+    if expected_cls is not None and type(obj) is not expected_cls:
+        return obj
+    scope = getattr(_PARSE_LOCAL, "scope", None)
+    if scope is not None and len(scope.verified) < _PARSE_SCOPE_MAX:
+        scope.verified[id(obj)] = obj
+    return obj
+
+
+def _is_json_native(value: Any) -> bool:
+    t = type(value)
+    if t in (str, int, float, bool) or value is None:
+        return True
+    if t is list:
+        return all(_is_json_native(item) for item in value)
+    if t is dict:
+        return all(type(k) is str and _is_json_native(v) for k, v in value.items())
+    return False
+
+
+def _revalidate(obj: Any, cls: type[Any]) -> Any:
+    if type(obj) is cls:
+        scope = getattr(_PARSE_LOCAL, "scope", None)
+        if scope is not None and scope.verified.get(id(obj)) is obj:
+            return obj
+    return _mark_verified(cls.from_dict(obj.to_dict()), cls)
+
+
 @dataclass(frozen=True, slots=True)
 class ModelConfiguration:
     """Requested target, not evidence of which model actually answered."""
@@ -55,7 +118,7 @@ class ModelConfiguration:
 
     @classmethod
     def from_dict(cls, data: object) -> ModelConfiguration:
-        return cls(**exact_fields(data, {"provider", "model"}, {"effort"}))
+        return _mark_verified(cls(**exact_fields(data, {"provider", "model"}, {"effort"})), cls)
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +153,7 @@ class UsageObservation:
 
     @classmethod
     def from_dict(cls, data: object) -> UsageObservation:
-        return cls(**exact_fields(data, {f.name for f in fields(cls)}))
+        return _mark_verified(cls(**exact_fields(data, {f.name for f in fields(cls)})), cls)
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +204,7 @@ class CLIExecutionObservation:
 
     @classmethod
     def from_dict(cls, data: object) -> CLIExecutionObservation:
-        return cls(**exact_fields(data, {f.name for f in fields(cls)}))
+        return _mark_verified(cls(**exact_fields(data, {f.name for f in fields(cls)})), cls)
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,7 +234,7 @@ class CreativeEvidenceSource:
 
     @classmethod
     def from_dict(cls, data: object) -> CreativeEvidenceSource:
-        return cls(**exact_fields(data, {f.name for f in fields(cls)}))
+        return _mark_verified(cls(**exact_fields(data, {f.name for f in fields(cls)})), cls)
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,10 +247,11 @@ class CreativeCriticEvidence:
     def __post_init__(self) -> None:
         if not isinstance(self.selection, ConceptSelection):
             raise CreativeValidationError("critic evidence needs a concept pin")
-        ConceptSelection.from_dict(self.selection.to_dict())
+        _revalidate(self.selection, ConceptSelection)
         require_digest(self.receipt_digest)
         require_digest(self.request_digest)
         require_text(self.critique, "critic evidence")
+        _mark_verified(self, CreativeCriticEvidence)
 
     def to_dict(self) -> dict[str, Any]:
         return {"selection": self.selection.to_dict(), "receipt_digest": self.receipt_digest,
@@ -195,9 +259,10 @@ class CreativeCriticEvidence:
 
     @classmethod
     def from_dict(cls, data: object) -> CreativeCriticEvidence:
-        value = exact_fields(data, {f.name for f in fields(cls)})
-        value["selection"] = ConceptSelection.from_dict(value["selection"])
-        return cls(**value)
+        with _parse_scope():
+            value = exact_fields(data, {f.name for f in fields(cls)})
+            value["selection"] = _mark_verified(ConceptSelection.from_dict(value["selection"]), ConceptSelection)
+            return _mark_verified(cls(**value), cls)
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,21 +277,23 @@ class CreativeCycleContext:
     selector_receipt: str | None = None
 
     def __post_init__(self) -> None:
-        require_digest(self.cycle_digest)
-        require_text(self.step, "cycle step")
-        for name, kind in (("evidence", CreativeEvidenceSource), ("candidates", ConceptRecord),
-                           ("critics", CreativeCriticEvidence)):
-            values = getattr(self, name)
-            if not isinstance(values, (tuple, list)) or any(not isinstance(v, kind) for v in values):
-                raise CreativeValidationError("expected typed cycle context")
-            object.__setattr__(self, name, tuple(kind.from_dict(v.to_dict()) for v in values))
-        for values in ((e.source_ref for e in self.evidence), (c.digest for c in self.candidates),
-                       (c.receipt_digest for c in self.critics)):
-            values = tuple(values)
-            if len(set(values)) != len(values):
-                raise CreativeValidationError("duplicate cycle evidence or candidates")
-        if self.selector_receipt is not None:
-            require_digest(self.selector_receipt)
+        with _parse_scope():
+            require_digest(self.cycle_digest)
+            require_text(self.step, "cycle step")
+            for name, kind in (("evidence", CreativeEvidenceSource), ("candidates", ConceptRecord),
+                               ("critics", CreativeCriticEvidence)):
+                values = getattr(self, name)
+                if not isinstance(values, (tuple, list)) or any(not isinstance(v, kind) for v in values):
+                    raise CreativeValidationError("expected typed cycle context")
+                object.__setattr__(self, name, tuple(_revalidate(v, kind) for v in values))
+            for values in ((e.source_ref for e in self.evidence), (c.digest for c in self.candidates),
+                           (c.receipt_digest for c in self.critics)):
+                values = tuple(values)
+                if len(set(values)) != len(values):
+                    raise CreativeValidationError("duplicate cycle evidence or candidates")
+            if self.selector_receipt is not None:
+                require_digest(self.selector_receipt)
+            _mark_verified(self, CreativeCycleContext)
 
     @property
     def research_status(self) -> str:
@@ -241,17 +308,18 @@ class CreativeCycleContext:
 
     @classmethod
     def from_dict(cls, data: object) -> CreativeCycleContext:
-        value = exact_fields(data, {f.name for f in fields(cls)} | {"research_status"})
-        status = value.pop("research_status")
-        for name, kind in (("evidence", CreativeEvidenceSource), ("candidates", ConceptRecord),
-                           ("critics", CreativeCriticEvidence)):
-            if not isinstance(value[name], list):
-                raise CreativeValidationError("expected cycle context array")
-            value[name] = tuple(kind.from_dict(v) for v in value[name])
-        result = cls(**value)
-        if status != result.research_status:
-            raise CreativeValidationError("research status disagrees with source evidence")
-        return result
+        with _parse_scope():
+            value = exact_fields(data, {f.name for f in fields(cls)} | {"research_status"})
+            status = value.pop("research_status")
+            for name, kind in (("evidence", CreativeEvidenceSource), ("candidates", ConceptRecord),
+                               ("critics", CreativeCriticEvidence)):
+                if not isinstance(value[name], list):
+                    raise CreativeValidationError("expected cycle context array")
+                value[name] = tuple(_mark_verified(kind.from_dict(v), kind) for v in value[name])
+            result = cls(**value)
+            if status != result.research_status:
+                raise CreativeValidationError("research status disagrees with source evidence")
+            return _mark_verified(result, cls)
 
 
 def _package_rights_status(spec: ProductionPackageSpec) -> Literal["UNKNOWN", "EVIDENCE_BOUND"]:
@@ -328,99 +396,101 @@ class A03CreativeProductionPackage:
     schema_version: str = "A03CreativeProductionPackage.v1"
 
     def __post_init__(self) -> None:
-        if self.schema_version != "A03CreativeProductionPackage.v1":
-            raise CreativeValidationError("unsupported production package schema")
-        if self.factual_status != "UNVERIFIED":
-            raise CreativeValidationError("production package factual_status must remain UNVERIFIED")
-        if self.claim_authority not in ("GENERATED_CLAIM", "HYPOTHESIS"):
-            raise CreativeValidationError("production package claim_authority must be GENERATED_CLAIM or HYPOTHESIS")
-        if self.rights_status not in ("UNKNOWN", "EVIDENCE_BOUND"):
-            raise CreativeValidationError("production package rights_status must be UNKNOWN or EVIDENCE_BOUND")
-        require_package_id(self.package_id)
-        positive_int(self.revision, "revision")
-        require_text(self.brief_id, "brief_id")
-        require_digest(self.source_brief_digest)
-        if not isinstance(self.selected_concept, ConceptSelection):
-            raise CreativeValidationError("expected typed selected_concept")
-        ConceptSelection.from_dict(self.selected_concept.to_dict())
-        if (self.selected_concept.brief_id != self.brief_id
-                or self.selected_concept.source_brief_digest != self.source_brief_digest):
-            raise CreativeValidationError("selected_concept does not match package source brief")
-        if not isinstance(self.lineage, ProductionLineage):
-            raise CreativeValidationError("expected typed ProductionLineage")
-        ProductionLineage.from_dict(self.lineage.to_dict())
-        for pin in self.lineage.candidate_pins:
-            if pin.brief_id != self.brief_id or pin.source_brief_digest != self.source_brief_digest:
-                raise CreativeValidationError("production lineage candidate rebound brief")
-        if not isinstance(self.spec, ProductionPackageSpec):
-            raise CreativeValidationError("expected typed ProductionPackageSpec")
-        ProductionPackageSpec.from_dict(self.spec.to_dict())
-        if not isinstance(self.observation, ProviderObservation) or not isinstance(self.usage, UsageObservation):
-            raise CreativeValidationError("expected typed observation and usage")
-        ProviderObservation.from_dict(self.observation.to_dict())
-        UsageObservation.from_dict(self.usage.to_dict())
-        if self.configuration is not None:
-            if not isinstance(self.configuration, ModelConfiguration):
-                raise CreativeValidationError("expected typed ModelConfiguration")
-            ModelConfiguration.from_dict(self.configuration.to_dict())
-        if self.execution is not None:
-            if not isinstance(self.execution, CLIExecutionObservation):
-                raise CreativeValidationError("expected typed CLIExecutionObservation")
-            CLIExecutionObservation.from_dict(self.execution.to_dict())
-        if self.provider_request_id is not None:
-            require_text(self.provider_request_id, "provider_request_id")
-        if self.reasoning_receipt_digest is not None:
-            require_digest(self.reasoning_receipt_digest)
-        refs = text_tuple(self.evidence_refs, "evidence_refs")
-        if len(set(refs)) != len(refs):
-            raise CreativeValidationError("duplicate package evidence_refs")
-        object.__setattr__(self, "evidence_refs", refs)
-        object.__setattr__(self, "hypotheses", text_tuple(self.hypotheses, "hypotheses"))
-        if self.rights_status != _package_rights_status(self.spec):
-            raise CreativeValidationError("package rights_status disagrees with attribution evidence")
-        for attr in self.spec.attributions:
-            if attr.rights_status == "EVIDENCE_BOUND" and attr.source_ref not in self.evidence_refs:
-                raise CreativeValidationError("evidence-bound attribution missing from package evidence_refs")
-        if not isinstance(self.edit_actor, ActorRef):
-            raise CreativeValidationError("expected typed edit_actor")
-        ActorRef.from_dict(self.edit_actor.to_dict())
-        sections = text_tuple(self.changed_sections, "changed_sections")
-        if len(set(sections)) != len(sections) or not set(sections) <= EDITABLE_PACKAGE_FIELDS:
-            raise CreativeValidationError("invalid changed_sections")
-        if list(sections) != sorted(sections):
-            raise CreativeValidationError("changed_sections must be sorted")
-        object.__setattr__(self, "changed_sections", sections)
-        if self.revision == 1:
-            if self.parent is not None or self.changed_sections or self.edit_reason is not None:
-                raise CreativeValidationError("initial production package cannot have revision lineage")
-            if self.reasoning_receipt_digest is None:
-                raise CreativeValidationError("initial production package requires an actual model receipt")
-            if self.edit_actor != ActorRef("AI", "reasoning:" + self.reasoning_receipt_digest):
-                raise CreativeValidationError("initial production package actor must identify its inference receipt")
-            expected_id = package_identity(
-                self.brief_id, self.source_brief_digest, self.selected_concept,
-                self.lineage, self.spec, self.observation, self.reasoning_receipt_digest,
-            )
-            if self.package_id != expected_id:
-                raise CreativeValidationError("package_id does not match initial content/provenance")
-        else:
-            if not isinstance(self.parent, ProductionPackageParent):
-                raise CreativeValidationError("production package revision needs a typed parent")
-            ProductionPackageParent.from_dict(self.parent.to_dict())
-            if self.parent.package_id != self.package_id or self.parent.revision != self.revision - 1:
-                raise CreativeValidationError("invalid production package parent revision")
-            if not self.changed_sections:
-                raise CreativeValidationError("production package revision needs changed_sections")
-            require_text(self.edit_reason, "edit_reason")
-            if self.edit_actor.kind == "AI":
-                if (self.reasoning_receipt_digest is None
-                        or self.edit_actor.ref != "reasoning:" + self.reasoning_receipt_digest):
-                    raise CreativeValidationError("AI package revision must identify its inference receipt")
-            elif self.edit_actor.kind in ("HUMAN", "SYSTEM"):
-                if self.reasoning_receipt_digest is not None:
-                    raise CreativeValidationError("non-AI package edit cannot claim a new inference receipt")
+        with _parse_scope():
+            if self.schema_version != "A03CreativeProductionPackage.v1":
+                raise CreativeValidationError("unsupported production package schema")
+            if self.factual_status != "UNVERIFIED":
+                raise CreativeValidationError("production package factual_status must remain UNVERIFIED")
+            if self.claim_authority not in ("GENERATED_CLAIM", "HYPOTHESIS"):
+                raise CreativeValidationError("production package claim_authority must be GENERATED_CLAIM or HYPOTHESIS")
+            if self.rights_status not in ("UNKNOWN", "EVIDENCE_BOUND"):
+                raise CreativeValidationError("production package rights_status must be UNKNOWN or EVIDENCE_BOUND")
+            require_package_id(self.package_id)
+            positive_int(self.revision, "revision")
+            require_text(self.brief_id, "brief_id")
+            require_digest(self.source_brief_digest)
+            if not isinstance(self.selected_concept, ConceptSelection):
+                raise CreativeValidationError("expected typed selected_concept")
+            _revalidate(self.selected_concept, ConceptSelection)
+            if (self.selected_concept.brief_id != self.brief_id
+                    or self.selected_concept.source_brief_digest != self.source_brief_digest):
+                raise CreativeValidationError("selected_concept does not match package source brief")
+            if not isinstance(self.lineage, ProductionLineage):
+                raise CreativeValidationError("expected typed ProductionLineage")
+            _revalidate(self.lineage, ProductionLineage)
+            for pin in self.lineage.candidate_pins:
+                if pin.brief_id != self.brief_id or pin.source_brief_digest != self.source_brief_digest:
+                    raise CreativeValidationError("production lineage candidate rebound brief")
+            if not isinstance(self.spec, ProductionPackageSpec):
+                raise CreativeValidationError("expected typed ProductionPackageSpec")
+            _revalidate(self.spec, ProductionPackageSpec)
+            if not isinstance(self.observation, ProviderObservation) or not isinstance(self.usage, UsageObservation):
+                raise CreativeValidationError("expected typed observation and usage")
+            _revalidate(self.observation, ProviderObservation)
+            _revalidate(self.usage, UsageObservation)
+            if self.configuration is not None:
+                if not isinstance(self.configuration, ModelConfiguration):
+                    raise CreativeValidationError("expected typed ModelConfiguration")
+                _revalidate(self.configuration, ModelConfiguration)
+            if self.execution is not None:
+                if not isinstance(self.execution, CLIExecutionObservation):
+                    raise CreativeValidationError("expected typed CLIExecutionObservation")
+                _revalidate(self.execution, CLIExecutionObservation)
+            if self.provider_request_id is not None:
+                require_text(self.provider_request_id, "provider_request_id")
+            if self.reasoning_receipt_digest is not None:
+                require_digest(self.reasoning_receipt_digest)
+            refs = text_tuple(self.evidence_refs, "evidence_refs")
+            if len(set(refs)) != len(refs):
+                raise CreativeValidationError("duplicate package evidence_refs")
+            object.__setattr__(self, "evidence_refs", refs)
+            object.__setattr__(self, "hypotheses", text_tuple(self.hypotheses, "hypotheses"))
+            if self.rights_status != _package_rights_status(self.spec):
+                raise CreativeValidationError("package rights_status disagrees with attribution evidence")
+            for attr in self.spec.attributions:
+                if attr.rights_status == "EVIDENCE_BOUND" and attr.source_ref not in self.evidence_refs:
+                    raise CreativeValidationError("evidence-bound attribution missing from package evidence_refs")
+            if not isinstance(self.edit_actor, ActorRef):
+                raise CreativeValidationError("expected typed edit_actor")
+            _revalidate(self.edit_actor, ActorRef)
+            sections = text_tuple(self.changed_sections, "changed_sections")
+            if len(set(sections)) != len(sections) or not set(sections) <= EDITABLE_PACKAGE_FIELDS:
+                raise CreativeValidationError("invalid changed_sections")
+            if list(sections) != sorted(sections):
+                raise CreativeValidationError("changed_sections must be sorted")
+            object.__setattr__(self, "changed_sections", sections)
+            if self.revision == 1:
+                if self.parent is not None or self.changed_sections or self.edit_reason is not None:
+                    raise CreativeValidationError("initial production package cannot have revision lineage")
+                if self.reasoning_receipt_digest is None:
+                    raise CreativeValidationError("initial production package requires an actual model receipt")
+                if self.edit_actor != ActorRef("AI", "reasoning:" + self.reasoning_receipt_digest):
+                    raise CreativeValidationError("initial production package actor must identify its inference receipt")
+                expected_id = package_identity(
+                    self.brief_id, self.source_brief_digest, self.selected_concept,
+                    self.lineage, self.spec, self.observation, self.reasoning_receipt_digest,
+                )
+                if self.package_id != expected_id:
+                    raise CreativeValidationError("package_id does not match initial content/provenance")
             else:
-                raise CreativeValidationError("package revision actor cannot be UNKNOWN")
+                if not isinstance(self.parent, ProductionPackageParent):
+                    raise CreativeValidationError("production package revision needs a typed parent")
+                _revalidate(self.parent, ProductionPackageParent)
+                if self.parent.package_id != self.package_id or self.parent.revision != self.revision - 1:
+                    raise CreativeValidationError("invalid production package parent revision")
+                if not self.changed_sections:
+                    raise CreativeValidationError("production package revision needs changed_sections")
+                require_text(self.edit_reason, "edit_reason")
+                if self.edit_actor.kind == "AI":
+                    if (self.reasoning_receipt_digest is None
+                            or self.edit_actor.ref != "reasoning:" + self.reasoning_receipt_digest):
+                        raise CreativeValidationError("AI package revision must identify its inference receipt")
+                elif self.edit_actor.kind in ("HUMAN", "SYSTEM"):
+                    if self.reasoning_receipt_digest is not None:
+                        raise CreativeValidationError("non-AI package edit cannot claim a new inference receipt")
+                else:
+                    raise CreativeValidationError("package revision actor cannot be UNKNOWN")
+            _mark_verified(self, A03CreativeProductionPackage)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -458,23 +528,24 @@ class A03CreativeProductionPackage:
 
     @classmethod
     def from_dict(cls, data: object) -> A03CreativeProductionPackage:
-        value = exact_fields(data, {f.name for f in fields(cls)})
-        value["selected_concept"] = ConceptSelection.from_dict(value["selected_concept"])
-        value["lineage"] = ProductionLineage.from_dict(value["lineage"])
-        value["spec"] = ProductionPackageSpec.from_dict(value["spec"])
-        value["observation"] = ProviderObservation.from_dict(value["observation"])
-        value["usage"] = UsageObservation.from_dict(value["usage"])
-        if value["configuration"] is not None:
-            value["configuration"] = ModelConfiguration.from_dict(value["configuration"])
-        if value["execution"] is not None:
-            value["execution"] = CLIExecutionObservation.from_dict(value["execution"])
-        if value["parent"] is not None:
-            value["parent"] = ProductionPackageParent.from_dict(value["parent"])
-        value["edit_actor"] = ActorRef.from_dict(value["edit_actor"])
-        for name in ("evidence_refs", "hypotheses", "changed_sections"):
-            if not isinstance(value[name], list):
-                raise CreativeValidationError(f"expected {name} array")
-        return cls(**value)
+        with _parse_scope():
+            value = exact_fields(data, {f.name for f in fields(cls)})
+            value["selected_concept"] = _mark_verified(ConceptSelection.from_dict(value["selected_concept"]), ConceptSelection)
+            value["lineage"] = _mark_verified(ProductionLineage.from_dict(value["lineage"]), ProductionLineage)
+            value["spec"] = _mark_verified(ProductionPackageSpec.from_dict(value["spec"]), ProductionPackageSpec)
+            value["observation"] = _mark_verified(ProviderObservation.from_dict(value["observation"]), ProviderObservation)
+            value["usage"] = UsageObservation.from_dict(value["usage"])
+            if value["configuration"] is not None:
+                value["configuration"] = ModelConfiguration.from_dict(value["configuration"])
+            if value["execution"] is not None:
+                value["execution"] = CLIExecutionObservation.from_dict(value["execution"])
+            if value["parent"] is not None:
+                value["parent"] = _mark_verified(ProductionPackageParent.from_dict(value["parent"]), ProductionPackageParent)
+            value["edit_actor"] = _mark_verified(ActorRef.from_dict(value["edit_actor"]), ActorRef)
+            for name in ("evidence_refs", "hypotheses", "changed_sections"):
+                if not isinstance(value[name], list):
+                    raise CreativeValidationError(f"expected {name} array")
+            return _mark_verified(cls(**value), cls)
 
     @classmethod
     def from_json(cls, text: str) -> A03CreativeProductionPackage:
@@ -554,23 +625,25 @@ class CreativeProductionContext:
     parent_package: A03CreativeProductionPackage | None = None
 
     def __post_init__(self) -> None:
-        require_digest(self.production_job_digest)
-        if not isinstance(self.lineage, ProductionLineage):
-            raise CreativeValidationError("expected typed ProductionLineage")
-        ProductionLineage.from_dict(self.lineage.to_dict())
-        if not isinstance(self.evidence, (tuple, list)) or any(
-            not isinstance(e, CreativeEvidenceSource) for e in self.evidence
-        ):
-            raise CreativeValidationError("expected typed production evidence")
-        items = tuple(CreativeEvidenceSource.from_dict(e.to_dict()) for e in self.evidence)
-        refs = tuple(e.source_ref for e in items)
-        if len(set(refs)) != len(refs):
-            raise CreativeValidationError("duplicate production evidence source_ref")
-        object.__setattr__(self, "evidence", items)
-        if self.parent_package is not None:
-            if not isinstance(self.parent_package, A03CreativeProductionPackage):
-                raise CreativeValidationError("expected typed parent_package")
-            A03CreativeProductionPackage.from_dict(self.parent_package.to_dict())
+        with _parse_scope():
+            require_digest(self.production_job_digest)
+            if not isinstance(self.lineage, ProductionLineage):
+                raise CreativeValidationError("expected typed ProductionLineage")
+            _revalidate(self.lineage, ProductionLineage)
+            if not isinstance(self.evidence, (tuple, list)) or any(
+                not isinstance(e, CreativeEvidenceSource) for e in self.evidence
+            ):
+                raise CreativeValidationError("expected typed production evidence")
+            items = tuple(_revalidate(e, CreativeEvidenceSource) for e in self.evidence)
+            refs = tuple(e.source_ref for e in items)
+            if len(set(refs)) != len(refs):
+                raise CreativeValidationError("duplicate production evidence source_ref")
+            object.__setattr__(self, "evidence", items)
+            if self.parent_package is not None:
+                if not isinstance(self.parent_package, A03CreativeProductionPackage):
+                    raise CreativeValidationError("expected typed parent_package")
+                _revalidate(self.parent_package, A03CreativeProductionPackage)
+            _mark_verified(self, CreativeProductionContext)
 
     @property
     def research_status(self) -> str:
@@ -587,18 +660,19 @@ class CreativeProductionContext:
 
     @classmethod
     def from_dict(cls, data: object) -> CreativeProductionContext:
-        value = exact_fields(data, {f.name for f in fields(cls)} | {"research_status"})
-        status = value.pop("research_status")
-        value["lineage"] = ProductionLineage.from_dict(value["lineage"])
-        if not isinstance(value["evidence"], list):
-            raise CreativeValidationError("expected production evidence array")
-        value["evidence"] = tuple(CreativeEvidenceSource.from_dict(e) for e in value["evidence"])
-        if value["parent_package"] is not None:
-            value["parent_package"] = A03CreativeProductionPackage.from_dict(value["parent_package"])
-        result = cls(**value)
-        if status != result.research_status:
-            raise CreativeValidationError("research status disagrees with source evidence")
-        return result
+        with _parse_scope():
+            value = exact_fields(data, {f.name for f in fields(cls)} | {"research_status"})
+            status = value.pop("research_status")
+            value["lineage"] = _mark_verified(ProductionLineage.from_dict(value["lineage"]), ProductionLineage)
+            if not isinstance(value["evidence"], list):
+                raise CreativeValidationError("expected production evidence array")
+            value["evidence"] = tuple(CreativeEvidenceSource.from_dict(e) for e in value["evidence"])
+            if value["parent_package"] is not None:
+                value["parent_package"] = A03CreativeProductionPackage.from_dict(value["parent_package"])
+            result = cls(**value)
+            if status != result.research_status:
+                raise CreativeValidationError("research status disagrees with source evidence")
+            return _mark_verified(result, cls)
 
 
 @dataclass(frozen=True, slots=True)
@@ -620,105 +694,114 @@ class ReasoningRequest:
     production: CreativeProductionContext | None = None
 
     def __post_init__(self) -> None:
-        valid = intake_brief(read_json(self.brief_json))
-        object.__setattr__(self, "brief_json", canonical_bytes(valid).decode("utf-8"))
-        r2 = self.schema_version == "a03.reasoning-request.v3"
-        r3 = self.schema_version == "a03.reasoning-request.v4"
-        if self.schema_version not in (
-            "a03.reasoning-request.v2", "a03.reasoning-request.v3", "a03.reasoning-request.v4"
-        ):
-            raise CreativeValidationError("unsupported reasoning request schema")
-        if self.operation not in (
-            "EXPLORE", "REFRAME", "DEVELOP", "CRITIQUE", "SELECT", "PRODUCE_PACKAGE", "REVISE_PACKAGE"
-        ):
-            raise CreativeValidationError("invalid creative operation")
-        if r3:
-            if self.cycle is not None or not isinstance(self.production, CreativeProductionContext):
-                raise CreativeValidationError("R3 requires typed production context only")
-            CreativeProductionContext.from_dict(self.production.to_dict())
-            if self.operation not in ("PRODUCE_PACKAGE", "REVISE_PACKAGE"):
-                raise CreativeValidationError("unsupported R3 operation")
-            if self.mode != "diverge" or self.count is not None or self.lens is not None:
-                raise CreativeValidationError("R3 package request cannot set count, lens or controlled_variants")
-            if not {e.source_ref for e in self.production.evidence} <= set(valid.get("source_refs", [])):
-                raise CreativeValidationError("external evidence must belong to the exact source brief")
-            digest = brief_digest(valid)
-            for pin in self.production.lineage.candidate_pins:
-                if pin.brief_id != valid["brief_id"] or pin.source_brief_digest != digest:
-                    raise CreativeValidationError("production lineage candidate rebound brief")
-            if self.production.lineage.intent_digest is not None:
-                if (not isinstance(self.intent, CreativeIntent)
-                        or self.intent.digest != self.production.lineage.intent_digest):
-                    raise CreativeValidationError("production request intent mismatch with R2 lineage")
-            elif self.intent is not None:
-                raise CreativeValidationError("production request introduced unpinned intent")
-            if self.operation == "PRODUCE_PACKAGE" and self.production.parent_package is not None:
-                raise CreativeValidationError("PRODUCE_PACKAGE cannot carry a parent package")
-            if self.operation == "REVISE_PACKAGE":
-                parent = self.production.parent_package
-                if parent is None or not isinstance(self.source, ConceptRecord):
-                    raise CreativeValidationError("REVISE_PACKAGE requires parent_package and exact source concept")
-                if (parent.brief_id != valid["brief_id"] or parent.source_brief_digest != digest
-                        or parent.selected_concept != _output_pin(self.source)
-                        or parent.lineage != self.production.lineage):
-                    raise CreativeValidationError("parent package does not match production source lineage")
-        elif self.production is not None or self.operation in ("PRODUCE_PACKAGE", "REVISE_PACKAGE"):
-            raise CreativeValidationError("production context and package operations require R3")
-        if r2:
-            if not isinstance(self.cycle, CreativeCycleContext):
-                raise CreativeValidationError("R2 requires typed cycle context")
-            CreativeCycleContext.from_dict(self.cycle.to_dict())
-            if not {e.source_ref for e in self.cycle.evidence} <= set(valid.get("source_refs", [])):
-                raise CreativeValidationError("external evidence must belong to the exact source brief")
-            for candidate in self.cycle.candidates:
-                if candidate.brief_id != valid["brief_id"] or candidate.source_brief_digest != brief_digest(valid):
-                    raise CreativeValidationError("cycle candidate rebound the brief")
-            if self.operation == "SELECT":
-                pins = tuple(_output_pin(c) for c in self.cycle.candidates)
-                if (len(pins) < 2 or tuple(c.selection for c in self.cycle.critics) != pins
-                        or self.cycle.selector_receipt is not None):
-                    raise CreativeValidationError("SELECT requires independently critiqued exact candidates")
-            elif self.cycle.critics:
-                raise CreativeValidationError("critic evidence belongs only to SELECT")
-            if self.operation == "EXPLORE":
-                if (self.mode != "diverge" or type(self.count) is not int or not 2 <= self.count <= 3
-                        or self.cycle.candidates or self.cycle.selector_receipt is not None):
-                    raise CreativeValidationError("R2 exploration requires two or three divergent concepts")
-            elif self.operation == "CRITIQUE":
-                if self.cycle.candidates != (self.source,) or self.cycle.selector_receipt is not None:
-                    raise CreativeValidationError("independent critique needs its exact concept only")
-            elif self.operation == "DEVELOP":
-                if self.cycle.candidates != (self.source,) or self.cycle.selector_receipt is None:
-                    raise CreativeValidationError("development requires an exact selector receipt")
-            elif self.operation != "SELECT":
-                raise CreativeValidationError("unsupported R2 operation")
-        elif self.cycle is not None or self.operation == "SELECT":
-            raise CreativeValidationError("cycle context and SELECT require R2")
-        if self.mode not in ("diverge", "controlled_variants"):
-            raise CreativeValidationError("invalid exploration mode")
-        if self.count is not None:
-            positive_int(self.count, "count")
-            if self.operation != "EXPLORE":
-                raise CreativeValidationError("count belongs to exploration")
-        if self.instruction is not None:
-            require_text(self.instruction, "instruction")
-        digest = brief_digest(valid)
-        for item, expected in ((self.intent, CreativeIntent), (self.source, ConceptRecord)):
-            if item is not None:
-                if not isinstance(item, expected):
-                    raise CreativeValidationError("invalid typed creative request context")
-                expected.from_dict(item.to_dict())
-                if item.brief_id != valid["brief_id"] or item.source_brief_digest != digest:
-                    raise CreativeValidationError("request source brief revision mismatch")
-        if self.operation in ("EXPLORE", "SELECT"):
-            if self.source is not None:
-                raise CreativeValidationError("exploration has no parent concept; use develop or reframe")
-        elif self.source is None:
-            raise CreativeValidationError("creative operation requires an exact source concept")
-        if self.operation == "REFRAME":
-            require_text(self.lens, "lens")
-        elif self.lens is not None:
-            raise CreativeValidationError("lens belongs to reframe")
+        with _parse_scope() as scope:
+            if type(self.brief_json) is str and self.brief_json in scope.briefs:
+                valid = read_json(self.brief_json)
+                digest = sha256_bytes(self.brief_json.encode("utf-8"))
+            else:
+                valid = intake_brief(read_json(self.brief_json))
+                brief_canonical = canonical_bytes(valid)
+                brief_str = brief_canonical.decode("utf-8")
+                object.__setattr__(self, "brief_json", brief_str)
+                digest = sha256_bytes(brief_canonical)
+                if len(scope.briefs) < _PARSE_SCOPE_MAX:
+                    scope.briefs.add(brief_str)
+            r2 = self.schema_version == "a03.reasoning-request.v3"
+            r3 = self.schema_version == "a03.reasoning-request.v4"
+            if self.schema_version not in (
+                "a03.reasoning-request.v2", "a03.reasoning-request.v3", "a03.reasoning-request.v4"
+            ):
+                raise CreativeValidationError("unsupported reasoning request schema")
+            if self.operation not in (
+                "EXPLORE", "REFRAME", "DEVELOP", "CRITIQUE", "SELECT", "PRODUCE_PACKAGE", "REVISE_PACKAGE"
+            ):
+                raise CreativeValidationError("invalid creative operation")
+            if r3:
+                if self.cycle is not None or not isinstance(self.production, CreativeProductionContext):
+                    raise CreativeValidationError("R3 requires typed production context only")
+                _revalidate(self.production, CreativeProductionContext)
+                if self.operation not in ("PRODUCE_PACKAGE", "REVISE_PACKAGE"):
+                    raise CreativeValidationError("unsupported R3 operation")
+                if self.mode != "diverge" or self.count is not None or self.lens is not None:
+                    raise CreativeValidationError("R3 package request cannot set count, lens or controlled_variants")
+                if not {e.source_ref for e in self.production.evidence} <= set(valid.get("source_refs", [])):
+                    raise CreativeValidationError("external evidence must belong to the exact source brief")
+                for pin in self.production.lineage.candidate_pins:
+                    if pin.brief_id != valid["brief_id"] or pin.source_brief_digest != digest:
+                        raise CreativeValidationError("production lineage candidate rebound brief")
+                if self.production.lineage.intent_digest is not None:
+                    if (not isinstance(self.intent, CreativeIntent)
+                            or self.intent.digest != self.production.lineage.intent_digest):
+                        raise CreativeValidationError("production request intent mismatch with R2 lineage")
+                elif self.intent is not None:
+                    raise CreativeValidationError("production request introduced unpinned intent")
+                if self.operation == "PRODUCE_PACKAGE" and self.production.parent_package is not None:
+                    raise CreativeValidationError("PRODUCE_PACKAGE cannot carry a parent package")
+                if self.operation == "REVISE_PACKAGE":
+                    parent = self.production.parent_package
+                    if parent is None or not isinstance(self.source, ConceptRecord):
+                        raise CreativeValidationError("REVISE_PACKAGE requires parent_package and exact source concept")
+                    if (parent.brief_id != valid["brief_id"] or parent.source_brief_digest != digest
+                            or parent.selected_concept != _output_pin(self.source)
+                            or parent.lineage != self.production.lineage):
+                        raise CreativeValidationError("parent package does not match production source lineage")
+            elif self.production is not None or self.operation in ("PRODUCE_PACKAGE", "REVISE_PACKAGE"):
+                raise CreativeValidationError("production context and package operations require R3")
+            if r2:
+                if not isinstance(self.cycle, CreativeCycleContext):
+                    raise CreativeValidationError("R2 requires typed cycle context")
+                _revalidate(self.cycle, CreativeCycleContext)
+                if not {e.source_ref for e in self.cycle.evidence} <= set(valid.get("source_refs", [])):
+                    raise CreativeValidationError("external evidence must belong to the exact source brief")
+                for candidate in self.cycle.candidates:
+                    if candidate.brief_id != valid["brief_id"] or candidate.source_brief_digest != digest:
+                        raise CreativeValidationError("cycle candidate rebound the brief")
+                if self.operation == "SELECT":
+                    pins = tuple(_output_pin(c) for c in self.cycle.candidates)
+                    if (len(pins) < 2 or tuple(c.selection for c in self.cycle.critics) != pins
+                            or self.cycle.selector_receipt is not None):
+                        raise CreativeValidationError("SELECT requires independently critiqued exact candidates")
+                elif self.cycle.critics:
+                    raise CreativeValidationError("critic evidence belongs only to SELECT")
+                if self.operation == "EXPLORE":
+                    if (self.mode != "diverge" or type(self.count) is not int or not 2 <= self.count <= 3
+                            or self.cycle.candidates or self.cycle.selector_receipt is not None):
+                        raise CreativeValidationError("R2 exploration requires two or three divergent concepts")
+                elif self.operation == "CRITIQUE":
+                    if self.cycle.candidates != (self.source,) or self.cycle.selector_receipt is not None:
+                        raise CreativeValidationError("independent critique needs its exact concept only")
+                elif self.operation == "DEVELOP":
+                    if self.cycle.candidates != (self.source,) or self.cycle.selector_receipt is None:
+                        raise CreativeValidationError("development requires an exact selector receipt")
+                elif self.operation != "SELECT":
+                    raise CreativeValidationError("unsupported R2 operation")
+            elif self.cycle is not None or self.operation == "SELECT":
+                raise CreativeValidationError("cycle context and SELECT require R2")
+            if self.mode not in ("diverge", "controlled_variants"):
+                raise CreativeValidationError("invalid exploration mode")
+            if self.count is not None:
+                positive_int(self.count, "count")
+                if self.operation != "EXPLORE":
+                    raise CreativeValidationError("count belongs to exploration")
+            if self.instruction is not None:
+                require_text(self.instruction, "instruction")
+            for item, expected in ((self.intent, CreativeIntent), (self.source, ConceptRecord)):
+                if item is not None:
+                    if not isinstance(item, expected):
+                        raise CreativeValidationError("invalid typed creative request context")
+                    _revalidate(item, expected)
+                    if item.brief_id != valid["brief_id"] or item.source_brief_digest != digest:
+                        raise CreativeValidationError("request source brief revision mismatch")
+            if self.operation in ("EXPLORE", "SELECT"):
+                if self.source is not None:
+                    raise CreativeValidationError("exploration has no parent concept; use develop or reframe")
+            elif self.source is None:
+                raise CreativeValidationError("creative operation requires an exact source concept")
+            if self.operation == "REFRAME":
+                require_text(self.lens, "lens")
+            elif self.lens is not None:
+                raise CreativeValidationError("lens belongs to reframe")
+            _mark_verified(self, ReasoningRequest)
 
     @classmethod
     def create(cls, brief: Any, **options: Any) -> ReasoningRequest:
@@ -726,6 +809,9 @@ class ReasoningRequest:
 
     @property
     def brief(self) -> dict[str, Any]:
+        scope = getattr(_PARSE_LOCAL, "scope", None)
+        if scope is not None and type(self.brief_json) is str and self.brief_json in scope.briefs:
+            return read_json(self.brief_json)
         return intake_brief(read_json(self.brief_json))
 
     def to_dict(self) -> dict[str, Any]:
@@ -745,22 +831,36 @@ class ReasoningRequest:
 
     @classmethod
     def from_dict(cls, data: object) -> ReasoningRequest:
-        value = exact_fields(data, {"schema_version", "brief", "operation", "mode", "count",
-                                    "intent", "source", "instruction", "lens"}, {"cycle", "production"})
-        if (value["schema_version"] == "a03.reasoning-request.v3") != ("cycle" in value):
-            raise CreativeValidationError("cycle field requires R2 request schema")
-        if (value["schema_version"] == "a03.reasoning-request.v4") != ("production" in value):
-            raise CreativeValidationError("production field requires R3 request schema")
-        if "cycle" in value:
-            value["cycle"] = CreativeCycleContext.from_dict(value["cycle"])
-        if "production" in value:
-            value["production"] = CreativeProductionContext.from_dict(value["production"])
-        value["brief_json"] = canonical_bytes(intake_brief(value.pop("brief"))).decode("utf-8")
-        if value["intent"] is not None:
-            value["intent"] = CreativeIntent.from_dict(value["intent"])
-        if value["source"] is not None:
-            value["source"] = ConceptRecord.from_dict(value["source"])
-        return cls(**value)
+        with _parse_scope() as scope:
+            value = exact_fields(data, {"schema_version", "brief", "operation", "mode", "count",
+                                        "intent", "source", "instruction", "lens"}, {"cycle", "production"})
+            if (value["schema_version"] == "a03.reasoning-request.v3") != ("cycle" in value):
+                raise CreativeValidationError("cycle field requires R2 request schema")
+            if (value["schema_version"] == "a03.reasoning-request.v4") != ("production" in value):
+                raise CreativeValidationError("production field requires R3 request schema")
+            if "cycle" in value:
+                value["cycle"] = CreativeCycleContext.from_dict(value["cycle"])
+            if "production" in value:
+                value["production"] = CreativeProductionContext.from_dict(value["production"])
+            raw_brief = value.pop("brief")
+            brief_str = None
+            if type(raw_brief) is dict and _is_json_native(raw_brief):
+                try:
+                    candidate_str = canonical_bytes(raw_brief).decode("utf-8")
+                except (TypeError, ValueError):
+                    candidate_str = None
+                if candidate_str is not None and candidate_str in scope.briefs:
+                    brief_str = candidate_str
+            if brief_str is None:
+                brief_str = canonical_bytes(intake_brief(raw_brief)).decode("utf-8")
+                if len(scope.briefs) < _PARSE_SCOPE_MAX:
+                    scope.briefs.add(brief_str)
+            value["brief_json"] = brief_str
+            if value["intent"] is not None:
+                value["intent"] = _mark_verified(CreativeIntent.from_dict(value["intent"]), CreativeIntent)
+            if value["source"] is not None:
+                value["source"] = _mark_verified(ConceptRecord.from_dict(value["source"]), ConceptRecord)
+            return _mark_verified(cls(**value), cls)
 
 
 @dataclass(frozen=True, slots=True)
@@ -785,178 +885,184 @@ class ReasoningResult:
     response_json: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.request, ReasoningRequest):
-            raise CreativeValidationError("expected typed reasoning request")
-        ReasoningRequest.from_dict(self.request.to_dict())
-        r2 = self.request.cycle is not None
-        r3 = self.request.production is not None
-        if self.schema_version != _result_schema(self.request):
-            raise CreativeValidationError("unsupported reasoning result schema")
-        if not r2 and self.selection is not None:
-            raise CreativeValidationError("selection belongs only to R2 request")
-        if not r3 and self.production_spec is not None:
-            raise CreativeValidationError("production_spec belongs only to R3 request")
-        if not (r2 or r3) and (self.evidence_refs or self.hypotheses or self.response_json is not None):
-            raise CreativeValidationError("R2/R3 result fields require R2/R3 request")
-        for name in ("evidence_refs", "hypotheses"):
-            object.__setattr__(self, name, text_tuple(getattr(self, name), name))
-        if r2 or r3:
-            supplied = self.request.cycle.evidence if r2 else self.request.production.evidence
-            if not set(self.evidence_refs) <= {e.source_ref for e in supplied}:
-                raise CreativeValidationError("model fabricated external evidence citations")
-            if self.response_json is not None:
-                # Retain the exact output string and independently check that
-                # normalized outputs/metadata are what the adapter observed.
-                from .live import (CodexCliCreativeClient, StructuredModelRequest, StructuredModelResponse,
-                                   _CLIStopped, _cli_request, parse_creative_output)
-                raw = read_json(self.response_json)
-                rejected = self.state == "ERROR" and self.error_code == "INVALID_MODEL_RESPONSE"
-                response = None if rejected else StructuredModelResponse.from_dict(raw)
-                if response is not None and (response.observation != self.observation or response.usage != self.usage
-                        or response.request_id != self.provider_request_id or response.execution != self.execution):
-                    raise CreativeValidationError("model response metadata rebound")
+        with _parse_scope():
+            if not isinstance(self.request, ReasoningRequest):
+                raise CreativeValidationError("expected typed reasoning request")
+            _revalidate(self.request, ReasoningRequest)
+            r2 = self.request.cycle is not None
+            r3 = self.request.production is not None
+            if self.schema_version != _result_schema(self.request):
+                raise CreativeValidationError("unsupported reasoning result schema")
+            if not r2 and self.selection is not None:
+                raise CreativeValidationError("selection belongs only to R2 request")
+            if not r3 and self.production_spec is not None:
+                raise CreativeValidationError("production_spec belongs only to R3 request")
+            if not (r2 or r3) and (self.evidence_refs or self.hypotheses or self.response_json is not None):
+                raise CreativeValidationError("R2/R3 result fields require R2/R3 request")
+            for name in ("evidence_refs", "hypotheses"):
+                object.__setattr__(self, name, text_tuple(getattr(self, name), name))
+            if r2 or r3:
+                supplied = self.request.cycle.evidence if r2 else self.request.production.evidence
+                if not set(self.evidence_refs) <= {e.source_ref for e in supplied}:
+                    raise CreativeValidationError("model fabricated external evidence citations")
+                if self.response_json is not None:
+                    # Retain the exact output string and independently check that
+                    # normalized outputs/metadata are what the adapter observed.
+                    from .live import (CodexCliCreativeClient, StructuredModelRequest, StructuredModelResponse,
+                                       _CLIStopped, _cli_request, parse_creative_output)
+                    raw = read_json(self.response_json)
+                    rejected = self.state == "ERROR" and self.error_code == "INVALID_MODEL_RESPONSE"
+                    response = None if rejected else StructuredModelResponse.from_dict(raw)
+                    if response is not None and (response.observation != self.observation or response.usage != self.usage
+                            or response.request_id != self.provider_request_id or response.execution != self.execution):
+                        raise CreativeValidationError("model response metadata rebound")
+                    if self.state == "OK":
+                        if response.state != "OK":
+                            raise CreativeValidationError("successful result needs observed successful response")
+                        parsed = parse_creative_output(self.request, response.output_json)
+                        if any(getattr(self, name) != val for name, val in parsed.items()):
+                            raise CreativeValidationError("result differs from immutable model output")
+                        model_request = None
+                        if response.output_envelope_json is not None:
+                            envelope = exact_fields(read_json(response.output_envelope_json), {"request_sha256", "output"})
+                            model_request = StructuredModelRequest(self.configuration, self.request)
+                            if envelope["request_sha256"] != sha256_bytes(canonical_bytes(model_request.to_dict())):
+                                raise CreativeValidationError("native output envelope rebound request")
+                            output = envelope["output"]
+                            if self.request.operation == "DEVELOP":
+                                output["edits"] = {k: v for k, v in exact_fields(output["edits"], set(EDITABLE_FIELDS)).items()
+                                                   if v is not None}
+                            if output != read_json(response.output_json):
+                                raise CreativeValidationError("normalized result lost native model output")
+                        if self.execution is not None:
+                            import base64
+                            if any(getattr(response, n) is None for n in
+                                   ("output_envelope_json", "cli_stdin_json", "cli_schema_json", "cli_stdout_base64")):
+                                raise CreativeValidationError("R2/R3 CLI success needs exact transport bytes")
+                            try:
+                                thread, output, usage = CodexCliCreativeClient._events(base64.b64decode(response.cli_stdout_base64))
+                            except (_CLIStopped, ValueError, UnicodeError) as exc:
+                                raise CreativeValidationError("invalid saved native output stream") from exc
+                            if (thread != self.execution.cli_thread_id or output != response.output_envelope_json
+                                    or usage != self.usage):
+                                raise CreativeValidationError("native output/usage/session evidence mismatch")
+                            _, schema, packet = _cli_request(model_request)
+                            if (response.cli_stdin_json.encode("utf-8") != packet
+                                    or response.cli_schema_json.encode("utf-8") != canonical_bytes(schema)):
+                                raise CreativeValidationError("native stdin/schema rebound its model request")
+                elif self.state == "OK":
+                    raise CreativeValidationError("R2/R3 success requires immutable observed model response")
+            if self.state not in ("OK", "NO_MODEL_CONFIGURED", "UNAUTHORIZED", "REFUSED", "ERROR"):
+                raise CreativeValidationError("invalid reasoning state")
+            if not isinstance(self.observation, ProviderObservation) or not isinstance(self.usage, UsageObservation):
+                raise CreativeValidationError("expected typed result metadata")
+            _revalidate(self.observation, ProviderObservation)
+            if self.configuration is not None:
+                if not isinstance(self.configuration, ModelConfiguration):
+                    raise CreativeValidationError("expected typed model configuration")
+                _revalidate(self.configuration, ModelConfiguration)
+            _revalidate(self.usage, UsageObservation)
+            if self.execution is not None:
+                if not isinstance(self.execution, CLIExecutionObservation):
+                    raise CreativeValidationError("expected typed CLI evidence")
+                _revalidate(self.execution, CLIExecutionObservation)
+                if (self.execution.request_digest != self.request.digest or self.configuration is None
+                        or self.execution.configuration_digest != sha256_bytes(canonical_bytes(self.configuration.to_dict()))):
+                    raise CreativeValidationError("CLI evidence request/configuration mismatch")
                 if self.state == "OK":
-                    if response.state != "OK":
-                        raise CreativeValidationError("successful result needs observed successful response")
-                    parsed = parse_creative_output(self.request, response.output_json)
-                    if any(getattr(self, name) != val for name, val in parsed.items()):
-                        raise CreativeValidationError("result differs from immutable model output")
-                    if response.output_envelope_json is not None:
-                        envelope = exact_fields(read_json(response.output_envelope_json), {"request_sha256", "output"})
-                        model_request = StructuredModelRequest(self.configuration, self.request)
-                        if envelope["request_sha256"] != sha256_bytes(canonical_bytes(model_request.to_dict())):
-                            raise CreativeValidationError("native output envelope rebound request")
-                        output = envelope["output"]
-                        if self.request.operation == "DEVELOP":
-                            output["edits"] = {k: v for k, v in exact_fields(output["edits"], set(EDITABLE_FIELDS)).items()
-                                               if v is not None}
-                        if output != read_json(response.output_json):
-                            raise CreativeValidationError("normalized result lost native model output")
-                    if self.execution is not None:
-                        import base64
-                        if any(getattr(response, n) is None for n in
-                               ("output_envelope_json", "cli_stdin_json", "cli_schema_json", "cli_stdout_base64")):
-                            raise CreativeValidationError("R2/R3 CLI success needs exact transport bytes")
-                        try:
-                            thread, output, usage = CodexCliCreativeClient._events(base64.b64decode(response.cli_stdout_base64))
-                        except (_CLIStopped, ValueError, UnicodeError) as exc:
-                            raise CreativeValidationError("invalid saved native output stream") from exc
-                        if (thread != self.execution.cli_thread_id or output != response.output_envelope_json
-                                or usage != self.usage):
-                            raise CreativeValidationError("native output/usage/session evidence mismatch")
-                        _, schema, packet = _cli_request(StructuredModelRequest(self.configuration, self.request))
-                        if (response.cli_stdin_json.encode("utf-8") != packet
-                                or response.cli_schema_json.encode("utf-8") != canonical_bytes(schema)):
-                            raise CreativeValidationError("native stdin/schema rebound its model request")
-            elif self.state == "OK":
-                raise CreativeValidationError("R2/R3 success requires immutable observed model response")
-        if self.state not in ("OK", "NO_MODEL_CONFIGURED", "UNAUTHORIZED", "REFUSED", "ERROR"):
-            raise CreativeValidationError("invalid reasoning state")
-        if not isinstance(self.observation, ProviderObservation) or not isinstance(self.usage, UsageObservation):
-            raise CreativeValidationError("expected typed result metadata")
-        ProviderObservation.from_dict(self.observation.to_dict())
-        if self.configuration is not None:
-            if not isinstance(self.configuration, ModelConfiguration):
-                raise CreativeValidationError("expected typed model configuration")
-            ModelConfiguration(**self.configuration.to_dict())
-        UsageObservation.from_dict(self.usage.to_dict())
-        if self.execution is not None:
-            if not isinstance(self.execution, CLIExecutionObservation):
-                raise CreativeValidationError("expected typed CLI evidence")
-            CLIExecutionObservation.from_dict(self.execution.to_dict())
-            if (self.execution.request_digest != self.request.digest or self.configuration is None
-                    or self.execution.configuration_digest != sha256_bytes(canonical_bytes(self.configuration.to_dict()))):
-                raise CreativeValidationError("CLI evidence request/configuration mismatch")
-            if self.state == "OK":
-                expected_mode = "MODEL" if self.execution.kind == "AUTHENTICATED_CLI_PROBE" else "TEST_ONLY_MOCK"
-                if (self.execution.effect != "PROCESS_INVOKED" or self.observation.mode != expected_mode
-                        or self.execution.session_sha256 is None or self.execution.stdout_sha256 is None
-                        or self.execution.cli_thread_id is None or self.execution.authorization_ref is None
-                        or self.execution.observed_model != self.configuration.model
-                        or self.execution.observed_effort != self.configuration.effort):
-                    raise CreativeValidationError("unbound CLI completion")
-                if expected_mode == "MODEL" and self.observation.model != self.execution.observed_model:
-                    raise CreativeValidationError("CLI observation identity mismatch")
-        for name, expected in (("drafts", ConceptDraft), ("edits", ConceptChange)):
-            value = getattr(self, name)
-            if not isinstance(value, (list, tuple)) or any(not isinstance(v, expected) for v in value):
-                raise CreativeValidationError("expected typed creative output")
-            object.__setattr__(self, name, tuple(expected.from_dict(v.to_dict()) for v in value))
-        if self.provider_request_id is not None:
-            require_text(self.provider_request_id, "provider_request_id")
-        if self.state != "OK":
-            if (self.drafts or self.edits or self.critique is not None or self.selection is not None
-                    or self.production_spec is not None or self.evidence_refs or self.hypotheses):
-                raise CreativeValidationError("non-success cannot contain creative output")
-            require_text(self.error_code, "error_code")
-            require_text(self.message, "message")
-            if self.state in ("NO_MODEL_CONFIGURED", "UNAUTHORIZED") and (
-                self.observation != ProviderObservation() or self.usage != UsageObservation()
-                or self.provider_request_id is not None
-            ):
-                raise CreativeValidationError("uncalled provider cannot claim observations")
-            return
-        if self.error_code is not None or self.message is not None:
-            raise CreativeValidationError("successful output cannot assert an error")
-        op = self.request.operation
-        if op in ("PRODUCE_PACKAGE", "REVISE_PACKAGE"):
-            if (self.drafts or self.edits or self.critique is not None or self.selection is not None
-                    or not isinstance(self.production_spec, ProductionPackageSpec)):
-                raise CreativeValidationError("R3 package operation requires typed production_spec only")
-            ProductionPackageSpec.from_dict(self.production_spec.to_dict())
-            _validate_spec_evidence(
-                self.production_spec, self.request.brief,
-                self.request.production.evidence, self.evidence_refs,
-            )
-            return
-        if self.production_spec is not None:
-            raise CreativeValidationError("production_spec belongs only to R3 package operations")
-        if op == "SELECT":
-            if self.drafts or self.edits or self.critique is not None or not isinstance(self.selection, CreativeModelSelection):
-                raise CreativeValidationError("SELECT requires typed selection output only")
-            CreativeModelSelection.from_dict(self.selection.to_dict())
-            if (self.selection.critique_receipts != tuple(c.receipt_digest for c in self.request.cycle.critics)
-                    or (self.selection.selection is not None and self.selection.selection not in
-                        tuple(_output_pin(c) for c in self.request.cycle.candidates))):
-                raise CreativeValidationError("model selection does not bind candidates and critic evidence")
-            return
-        if self.selection is not None:
-            raise CreativeValidationError("model selection belongs only to SELECT")
-        if op == "EXPLORE":
-            if not self.drafts or self.edits or self.critique is not None:
-                raise CreativeValidationError("exploration needs concepts only")
-            if self.request.count is not None and len(self.drafts) != self.request.count:
-                raise CreativeValidationError("result count disagrees with explicit request")
-            exact, families, mechanisms = set(), set(), set()
-            known_refs = set(self.request.brief.get("source_refs", []))
-            if r2:
-                known_refs = {e.source_ref for e in self.request.cycle.evidence}
-            for draft in self.drafts:
-                if not set(draft.source_refs) <= known_refs:
-                    raise CreativeValidationError("source_refs must come from the source brief")
-                # Metadata differences cannot disguise exactly repeated creative output.
-                content = tuple(getattr(draft, name) for name in sorted(EDITABLE_FIELDS))
-                if content in exact:
-                    raise CreativeValidationError("repeated exact creative output")
-                exact.add(content)
-                family = unicodedata.normalize("NFKC", draft.family).strip().casefold()
-                mechanism = tuple(unicodedata.normalize("NFKC", s).strip().casefold()
-                                  for s in (draft.premise, draft.visual_direction))
-                if self.request.mode == "diverge" and (family in families or mechanism in mechanisms):
-                    raise CreativeValidationError("diverge requires distinct families and mechanisms")
-                families.add(family)
-                mechanisms.add(mechanism)
-        elif op in ("REFRAME", "DEVELOP"):
-            if self.drafts or not self.edits or self.critique is not None:
-                raise CreativeValidationError("reframe/develop returns proposed edits only")
-            if len({e.field for e in self.edits}) != len(self.edits):
-                raise CreativeValidationError("duplicate proposed edit")
-            if any(e.before != getattr(self.request.source, e.field) for e in self.edits):
-                raise CreativeValidationError("proposed edit does not match exact source revision")
-        else:
-            if self.drafts or self.edits:
-                raise CreativeValidationError("critique cannot change a concept or create a gate")
-            require_text(self.critique, "critique")
+                    expected_mode = "MODEL" if self.execution.kind == "AUTHENTICATED_CLI_PROBE" else "TEST_ONLY_MOCK"
+                    if (self.execution.effect != "PROCESS_INVOKED" or self.observation.mode != expected_mode
+                            or self.execution.session_sha256 is None or self.execution.stdout_sha256 is None
+                            or self.execution.cli_thread_id is None or self.execution.authorization_ref is None
+                            or self.execution.observed_model != self.configuration.model
+                            or self.execution.observed_effort != self.configuration.effort):
+                        raise CreativeValidationError("unbound CLI completion")
+                    if expected_mode == "MODEL" and self.observation.model != self.execution.observed_model:
+                        raise CreativeValidationError("CLI observation identity mismatch")
+            for name, expected in (("drafts", ConceptDraft), ("edits", ConceptChange)):
+                value = getattr(self, name)
+                if not isinstance(value, (list, tuple)) or any(not isinstance(v, expected) for v in value):
+                    raise CreativeValidationError("expected typed creative output")
+                object.__setattr__(self, name, tuple(_revalidate(v, expected) for v in value))
+            if self.provider_request_id is not None:
+                require_text(self.provider_request_id, "provider_request_id")
+            if self.state != "OK":
+                if (self.drafts or self.edits or self.critique is not None or self.selection is not None
+                        or self.production_spec is not None or self.evidence_refs or self.hypotheses):
+                    raise CreativeValidationError("non-success cannot contain creative output")
+                require_text(self.error_code, "error_code")
+                require_text(self.message, "message")
+                if self.state in ("NO_MODEL_CONFIGURED", "UNAUTHORIZED") and (
+                    self.observation != ProviderObservation() or self.usage != UsageObservation()
+                    or self.provider_request_id is not None
+                ):
+                    raise CreativeValidationError("uncalled provider cannot claim observations")
+                _mark_verified(self, ReasoningResult)
+                return
+            if self.error_code is not None or self.message is not None:
+                raise CreativeValidationError("successful output cannot assert an error")
+            op = self.request.operation
+            if op in ("PRODUCE_PACKAGE", "REVISE_PACKAGE"):
+                if (self.drafts or self.edits or self.critique is not None or self.selection is not None
+                        or not isinstance(self.production_spec, ProductionPackageSpec)):
+                    raise CreativeValidationError("R3 package operation requires typed production_spec only")
+                _revalidate(self.production_spec, ProductionPackageSpec)
+                _validate_spec_evidence(
+                    self.production_spec, self.request.brief,
+                    self.request.production.evidence, self.evidence_refs,
+                )
+                _mark_verified(self, ReasoningResult)
+                return
+            if self.production_spec is not None:
+                raise CreativeValidationError("production_spec belongs only to R3 package operations")
+            if op == "SELECT":
+                if self.drafts or self.edits or self.critique is not None or not isinstance(self.selection, CreativeModelSelection):
+                    raise CreativeValidationError("SELECT requires typed selection output only")
+                _revalidate(self.selection, CreativeModelSelection)
+                if (self.selection.critique_receipts != tuple(c.receipt_digest for c in self.request.cycle.critics)
+                        or (self.selection.selection is not None and self.selection.selection not in
+                            tuple(_output_pin(c) for c in self.request.cycle.candidates))):
+                    raise CreativeValidationError("model selection does not bind candidates and critic evidence")
+                _mark_verified(self, ReasoningResult)
+                return
+            if self.selection is not None:
+                raise CreativeValidationError("model selection belongs only to SELECT")
+            if op == "EXPLORE":
+                if not self.drafts or self.edits or self.critique is not None:
+                    raise CreativeValidationError("exploration needs concepts only")
+                if self.request.count is not None and len(self.drafts) != self.request.count:
+                    raise CreativeValidationError("result count disagrees with explicit request")
+                exact, families, mechanisms = set(), set(), set()
+                known_refs = set(self.request.brief.get("source_refs", []))
+                if r2:
+                    known_refs = {e.source_ref for e in self.request.cycle.evidence}
+                for draft in self.drafts:
+                    if not set(draft.source_refs) <= known_refs:
+                        raise CreativeValidationError("source_refs must come from the source brief")
+                    # Metadata differences cannot disguise exactly repeated creative output.
+                    content = tuple(getattr(draft, name) for name in sorted(EDITABLE_FIELDS))
+                    if content in exact:
+                        raise CreativeValidationError("repeated exact creative output")
+                    exact.add(content)
+                    family = unicodedata.normalize("NFKC", draft.family).strip().casefold()
+                    mechanism = tuple(unicodedata.normalize("NFKC", s).strip().casefold()
+                                      for s in (draft.premise, draft.visual_direction))
+                    if self.request.mode == "diverge" and (family in families or mechanism in mechanisms):
+                        raise CreativeValidationError("diverge requires distinct families and mechanisms")
+                    families.add(family)
+                    mechanisms.add(mechanism)
+            elif op in ("REFRAME", "DEVELOP"):
+                if self.drafts or not self.edits or self.critique is not None:
+                    raise CreativeValidationError("reframe/develop returns proposed edits only")
+                if len({e.field for e in self.edits}) != len(self.edits):
+                    raise CreativeValidationError("duplicate proposed edit")
+                if any(e.before != getattr(self.request.source, e.field) for e in self.edits):
+                    raise CreativeValidationError("proposed edit does not match exact source revision")
+            else:
+                if self.drafts or self.edits:
+                    raise CreativeValidationError("critique cannot change a concept or create a gate")
+                require_text(self.critique, "critique")
+            _mark_verified(self, ReasoningResult)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -980,34 +1086,39 @@ class ReasoningResult:
 
     @classmethod
     def from_dict(cls, data: object) -> ReasoningResult:
-        r2_fields = {"selection", "evidence_refs", "hypotheses", "response_json"}
-        r3_fields = {"production_spec", "evidence_refs", "hypotheses", "response_json"}
-        optional = {"execution"} | r2_fields | r3_fields
-        value = exact_fields(data, {f.name for f in fields(cls)} - optional, optional)
-        value["request"] = ReasoningRequest.from_dict(value["request"])
-        if value["request"].cycle is not None:
-            if not r2_fields <= value.keys() or "production_spec" in value:
-                raise CreativeValidationError("missing or unexpected R2 result fields")
-            if value["selection"] is not None:
-                value["selection"] = CreativeModelSelection.from_dict(value["selection"])
-        elif value["request"].production is not None:
-            if not r3_fields <= value.keys() or "selection" in value:
-                raise CreativeValidationError("missing or unexpected R3 result fields")
-            if value["production_spec"] is not None:
-                value["production_spec"] = ProductionPackageSpec.from_dict(value["production_spec"])
-        elif (r2_fields | r3_fields) & value.keys():
-            raise CreativeValidationError("unexpected R2/R3 fields in historical result")
-        for name, expected in (("drafts", ConceptDraft), ("edits", ConceptChange)):
-            if not isinstance(value[name], list):
-                raise CreativeValidationError("expected creative output array")
-            value[name] = tuple(expected.from_dict(v) for v in value[name])
-        value["observation"] = ProviderObservation.from_dict(value["observation"])
-        value["usage"] = UsageObservation.from_dict(value["usage"])
-        if value["configuration"] is not None:
-            value["configuration"] = ModelConfiguration.from_dict(value["configuration"])
-        if value.get("execution") is not None:
-            value["execution"] = CLIExecutionObservation.from_dict(value["execution"])
-        return cls(**value)
+        with _parse_scope():
+            r2_fields = {"selection", "evidence_refs", "hypotheses", "response_json"}
+            r3_fields = {"production_spec", "evidence_refs", "hypotheses", "response_json"}
+            optional = {"execution"} | r2_fields | r3_fields
+            value = exact_fields(data, {f.name for f in fields(cls)} - optional, optional)
+            value["request"] = ReasoningRequest.from_dict(value["request"])
+            if value["request"].cycle is not None:
+                if not r2_fields <= value.keys() or "production_spec" in value:
+                    raise CreativeValidationError("missing or unexpected R2 result fields")
+                if value["selection"] is not None:
+                    value["selection"] = _mark_verified(
+                        CreativeModelSelection.from_dict(value["selection"]), CreativeModelSelection
+                    )
+            elif value["request"].production is not None:
+                if not r3_fields <= value.keys() or "selection" in value:
+                    raise CreativeValidationError("missing or unexpected R3 result fields")
+                if value["production_spec"] is not None:
+                    value["production_spec"] = _mark_verified(
+                        ProductionPackageSpec.from_dict(value["production_spec"]), ProductionPackageSpec
+                    )
+            elif (r2_fields | r3_fields) & value.keys():
+                raise CreativeValidationError("unexpected R2/R3 fields in historical result")
+            for name, expected in (("drafts", ConceptDraft), ("edits", ConceptChange)):
+                if not isinstance(value[name], list):
+                    raise CreativeValidationError("expected creative output array")
+                value[name] = tuple(_mark_verified(expected.from_dict(v), expected) for v in value[name])
+            value["observation"] = _mark_verified(ProviderObservation.from_dict(value["observation"]), ProviderObservation)
+            value["usage"] = UsageObservation.from_dict(value["usage"])
+            if value["configuration"] is not None:
+                value["configuration"] = ModelConfiguration.from_dict(value["configuration"])
+            if value.get("execution") is not None:
+                value["execution"] = CLIExecutionObservation.from_dict(value["execution"])
+            return _mark_verified(cls(**value), cls)
 
     def concepts(self) -> tuple[ConceptRecord, ...]:
         """Materialize unsaved V1-compatible records, with actual output metadata."""
@@ -1095,7 +1206,7 @@ class CreativeJobProvenance:
 
     @classmethod
     def from_dict(cls, data: object) -> CreativeJobProvenance:
-        return cls(**exact_fields(data, {f.name for f in fields(cls)}))
+        return _mark_verified(cls(**exact_fields(data, {f.name for f in fields(cls)})), cls)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1122,41 +1233,45 @@ class A03CreativeJob:
     schema_version: str = "A03CreativeJob.v1"
 
     def __post_init__(self) -> None:
-        if self.schema_version != "A03CreativeJob.v1":
-            raise CreativeValidationError("unsupported creative job schema")
-        for name in ("journey_id", "cycle_id", "job_id", "correlation_id", "brief_id"):
-            require_text(getattr(self, name), name)
-        positive_int(self.attempt, "attempt")
-        if not isinstance(self.provenance, CreativeJobProvenance) or not isinstance(self.request, ReasoningRequest):
-            raise CreativeValidationError("expected typed creative job context")
-        CreativeJobProvenance.from_dict(self.provenance.to_dict())
-        ReasoningRequest.from_dict(self.request.to_dict())
-        require_digest(self.source_brief_digest)
-        require_digest(self.request_digest)
-        if (self.brief_id != self.request.brief["brief_id"]
-                or self.source_brief_digest != brief_digest(self.request.brief)
-                or self.request_digest != self.request.digest):
-            raise CreativeValidationError("creative job request/source hash mismatch")
-        if self.configuration is not None:
-            if not isinstance(self.configuration, ModelConfiguration):
-                raise CreativeValidationError("expected requested model configuration")
-            ModelConfiguration.from_dict(self.configuration.to_dict())
-        if self.purpose not in ("PRODUCTION", "TEST_ONLY_MOCK"):
-            raise CreativeValidationError("invalid creative job purpose")
-        if self.selection_index is not None:
-            if type(self.selection_index) is not int or self.selection_index < 0:
-                raise CreativeValidationError("selection_index must be a nonnegative integer or null")
-            if (self.request.operation in ("CRITIQUE", "SELECT", "PRODUCE_PACKAGE", "REVISE_PACKAGE")
-                    or (self.request.operation != "EXPLORE" and self.selection_index != 0)
-                    or (self.request.count is not None and self.selection_index >= self.request.count)):
-                raise CreativeValidationError("selection_index outside requested output")
+        with _parse_scope():
+            if self.schema_version != "A03CreativeJob.v1":
+                raise CreativeValidationError("unsupported creative job schema")
+            for name in ("journey_id", "cycle_id", "job_id", "correlation_id", "brief_id"):
+                require_text(getattr(self, name), name)
+            positive_int(self.attempt, "attempt")
+            if not isinstance(self.provenance, CreativeJobProvenance) or not isinstance(self.request, ReasoningRequest):
+                raise CreativeValidationError("expected typed creative job context")
+            _revalidate(self.provenance, CreativeJobProvenance)
+            _revalidate(self.request, ReasoningRequest)
+            require_digest(self.source_brief_digest)
+            require_digest(self.request_digest)
+            req_brief = self.request.brief
+            if (self.brief_id != req_brief["brief_id"]
+                    or self.source_brief_digest != brief_digest(req_brief)
+                    or self.request_digest != self.request.digest):
+                raise CreativeValidationError("creative job request/source hash mismatch")
+            if self.configuration is not None:
+                if not isinstance(self.configuration, ModelConfiguration):
+                    raise CreativeValidationError("expected requested model configuration")
+                _revalidate(self.configuration, ModelConfiguration)
+            if self.purpose not in ("PRODUCTION", "TEST_ONLY_MOCK"):
+                raise CreativeValidationError("invalid creative job purpose")
+            if self.selection_index is not None:
+                if type(self.selection_index) is not int or self.selection_index < 0:
+                    raise CreativeValidationError("selection_index must be a nonnegative integer or null")
+                if (self.request.operation in ("CRITIQUE", "SELECT", "PRODUCE_PACKAGE", "REVISE_PACKAGE")
+                        or (self.request.operation != "EXPLORE" and self.selection_index != 0)
+                        or (self.request.count is not None and self.selection_index >= self.request.count)):
+                    raise CreativeValidationError("selection_index outside requested output")
+            _mark_verified(self, A03CreativeJob)
 
     @classmethod
     def create(cls, request: ReasoningRequest, **context: Any) -> A03CreativeJob:
         if not isinstance(request, ReasoningRequest):
             raise CreativeValidationError("expected ReasoningRequest")
-        return cls(request=request, brief_id=request.brief["brief_id"],
-                   source_brief_digest=brief_digest(request.brief), request_digest=request.digest, **context)
+        req_brief = request.brief
+        return cls(request=request, brief_id=req_brief["brief_id"],
+                   source_brief_digest=brief_digest(req_brief), request_digest=request.digest, **context)
 
     def to_dict(self) -> dict[str, Any]:
         return {**{f.name: getattr(self, f.name) for f in fields(self)},
@@ -1165,12 +1280,13 @@ class A03CreativeJob:
 
     @classmethod
     def from_dict(cls, data: object) -> A03CreativeJob:
-        value = exact_fields(data, {f.name for f in fields(cls)})
-        value["request"] = ReasoningRequest.from_dict(value["request"])
-        value["provenance"] = CreativeJobProvenance.from_dict(value["provenance"])
-        if value["configuration"] is not None:
-            value["configuration"] = ModelConfiguration.from_dict(value["configuration"])
-        return cls(**value)
+        with _parse_scope():
+            value = exact_fields(data, {f.name for f in fields(cls)})
+            value["request"] = ReasoningRequest.from_dict(value["request"])
+            value["provenance"] = CreativeJobProvenance.from_dict(value["provenance"])
+            if value["configuration"] is not None:
+                value["configuration"] = ModelConfiguration.from_dict(value["configuration"])
+            return _mark_verified(cls(**value), cls)
 
     @property
     def digest(self) -> str:
@@ -1267,28 +1383,30 @@ class A03CreativeStageResult:
     schema_version: str = "A03CreativeStageResult.v1"
 
     def __post_init__(self) -> None:
-        if self.schema_version != "A03CreativeStageResult.v1":
-            raise CreativeValidationError("unsupported creative stage schema")
-        if not isinstance(self.job, A03CreativeJob) or not isinstance(self.reasoning, ReasoningResult):
-            raise CreativeValidationError("expected typed creative stage context")
-        A03CreativeJob.from_dict(self.job.to_dict())
-        ReasoningResult.from_dict(self.reasoning.to_dict())
-        if self.reasoning.request != self.job.request:
-            raise CreativeValidationError("stage receipt rebound creative job request")
-        if (self.status, self.failure) != _stage_outcome(self.job, self.reasoning):
-            raise CreativeValidationError("stage status/failure disagrees with inference evidence")
-        if not isinstance(self.outputs, (list, tuple)) or any(not isinstance(s, ConceptSelection) for s in self.outputs):
-            raise CreativeValidationError("expected typed creative output references")
-        object.__setattr__(self, "outputs", tuple(ConceptSelection.from_dict(s.to_dict()) for s in self.outputs))
-        successful = self.status in ("TEST_ONLY_MOCK", "CREATIVE_COMPLETE")
-        expected = tuple(_output_pin(c) for c in _stage_concepts(self.reasoning)) if successful else ()
-        if self.outputs != expected:
-            raise CreativeValidationError("stage output references do not match reasoning output")
-        selected = self.job.selection_index
-        expected_decision = (inference_decision(self.reasoning, expected[selected])
-                             if successful and selected is not None else None)
-        if self.decision != expected_decision:
-            raise CreativeValidationError("stage selection does not match reasoning output")
+        with _parse_scope():
+            if self.schema_version != "A03CreativeStageResult.v1":
+                raise CreativeValidationError("unsupported creative stage schema")
+            if not isinstance(self.job, A03CreativeJob) or not isinstance(self.reasoning, ReasoningResult):
+                raise CreativeValidationError("expected typed creative stage context")
+            _revalidate(self.job, A03CreativeJob)
+            _revalidate(self.reasoning, ReasoningResult)
+            if self.reasoning.request != self.job.request:
+                raise CreativeValidationError("stage receipt rebound creative job request")
+            if (self.status, self.failure) != _stage_outcome(self.job, self.reasoning):
+                raise CreativeValidationError("stage status/failure disagrees with inference evidence")
+            if not isinstance(self.outputs, (list, tuple)) or any(not isinstance(s, ConceptSelection) for s in self.outputs):
+                raise CreativeValidationError("expected typed creative output references")
+            object.__setattr__(self, "outputs", tuple(_revalidate(s, ConceptSelection) for s in self.outputs))
+            successful = self.status in ("TEST_ONLY_MOCK", "CREATIVE_COMPLETE")
+            expected = tuple(_output_pin(c) for c in _stage_concepts(self.reasoning)) if successful else ()
+            if self.outputs != expected:
+                raise CreativeValidationError("stage output references do not match reasoning output")
+            selected = self.job.selection_index
+            expected_decision = (inference_decision(self.reasoning, expected[selected])
+                                 if successful and selected is not None else None)
+            if self.decision != expected_decision:
+                raise CreativeValidationError("stage selection does not match reasoning output")
+            _mark_verified(self, A03CreativeStageResult)
 
     @property
     def reasoning_ref(self) -> str:
@@ -1306,15 +1424,16 @@ class A03CreativeStageResult:
 
     @classmethod
     def from_dict(cls, data: object) -> A03CreativeStageResult:
-        value = exact_fields(data, {f.name for f in fields(cls)})
-        value["job"] = A03CreativeJob.from_dict(value["job"])
-        value["reasoning"] = ReasoningResult.from_dict(value["reasoning"])
-        if not isinstance(value["outputs"], list):
-            raise CreativeValidationError("expected output reference array")
-        value["outputs"] = tuple(ConceptSelection.from_dict(s) for s in value["outputs"])
-        if value["decision"] is not None:
-            value["decision"] = ActorDecision.from_dict(value["decision"])
-        return cls(**value)
+        with _parse_scope():
+            value = exact_fields(data, {f.name for f in fields(cls)})
+            value["job"] = A03CreativeJob.from_dict(value["job"])
+            value["reasoning"] = ReasoningResult.from_dict(value["reasoning"])
+            if not isinstance(value["outputs"], list):
+                raise CreativeValidationError("expected output reference array")
+            value["outputs"] = tuple(_mark_verified(ConceptSelection.from_dict(s), ConceptSelection) for s in value["outputs"])
+            if value["decision"] is not None:
+                value["decision"] = _mark_verified(ActorDecision.from_dict(value["decision"]), ActorDecision)
+            return _mark_verified(cls(**value), cls)
 
 
 def run_creative_stage(job: A03CreativeJob, store: CreativeStore | CreativeSidecarStore,
@@ -1420,22 +1539,24 @@ class A03CreativeCycleJob:
     schema_version: str = "A03CreativeCycleJob.v2"
 
     def __post_init__(self) -> None:
-        if self.schema_version != "A03CreativeCycleJob.v2" or not isinstance(self.seed, A03CreativeJob):
-            raise CreativeValidationError("expected typed R2 creative cycle seed")
-        A03CreativeJob.from_dict(self.seed.to_dict())
-        request = self.seed.request
-        if (request.operation != "EXPLORE" or request.mode != "diverge" or request.cycle is not None
-                or type(request.count) is not int or not 2 <= request.count <= 3
-                or self.seed.selection_index is not None):
-            raise CreativeValidationError("cycle seed requires two or three divergent concepts, no system selection")
-        if type(self.max_revisions) is not int or not 0 <= self.max_revisions <= 2:
-            raise CreativeValidationError("cycle revision budget must be between zero and two")
-        if not isinstance(self.evidence, (tuple, list)) or any(not isinstance(e, CreativeEvidenceSource) for e in self.evidence):
-            raise CreativeValidationError("expected typed external evidence")
-        object.__setattr__(self, "evidence", tuple(CreativeEvidenceSource.from_dict(e.to_dict()) for e in self.evidence))
-        refs = tuple(e.source_ref for e in self.evidence)
-        if len(set(refs)) != len(refs) or not set(refs) <= set(request.brief.get("source_refs", [])):
-            raise CreativeValidationError("cycle evidence must bind distinct original brief source refs")
+        with _parse_scope():
+            if self.schema_version != "A03CreativeCycleJob.v2" or not isinstance(self.seed, A03CreativeJob):
+                raise CreativeValidationError("expected typed R2 creative cycle seed")
+            _revalidate(self.seed, A03CreativeJob)
+            request = self.seed.request
+            if (request.operation != "EXPLORE" or request.mode != "diverge" or request.cycle is not None
+                    or type(request.count) is not int or not 2 <= request.count <= 3
+                    or self.seed.selection_index is not None):
+                raise CreativeValidationError("cycle seed requires two or three divergent concepts, no system selection")
+            if type(self.max_revisions) is not int or not 0 <= self.max_revisions <= 2:
+                raise CreativeValidationError("cycle revision budget must be between zero and two")
+            if not isinstance(self.evidence, (tuple, list)) or any(not isinstance(e, CreativeEvidenceSource) for e in self.evidence):
+                raise CreativeValidationError("expected typed external evidence")
+            object.__setattr__(self, "evidence", tuple(_revalidate(e, CreativeEvidenceSource) for e in self.evidence))
+            refs = tuple(e.source_ref for e in self.evidence)
+            if len(set(refs)) != len(refs) or not set(refs) <= set(request.brief.get("source_refs", [])):
+                raise CreativeValidationError("cycle evidence must bind distinct original brief source refs")
+            _mark_verified(self, A03CreativeCycleJob)
 
     @classmethod
     def create(cls, brief: Any, *, intent: CreativeIntent | None = None, count: int = 3,
@@ -1450,12 +1571,13 @@ class A03CreativeCycleJob:
 
     @classmethod
     def from_dict(cls, data: object) -> A03CreativeCycleJob:
-        value = exact_fields(data, {f.name for f in fields(cls)})
-        value["seed"] = A03CreativeJob.from_dict(value["seed"])
-        if not isinstance(value["evidence"], list):
-            raise CreativeValidationError("expected evidence array")
-        value["evidence"] = tuple(CreativeEvidenceSource.from_dict(e) for e in value["evidence"])
-        return cls(**value)
+        with _parse_scope():
+            value = exact_fields(data, {f.name for f in fields(cls)})
+            value["seed"] = A03CreativeJob.from_dict(value["seed"])
+            if not isinstance(value["evidence"], list):
+                raise CreativeValidationError("expected evidence array")
+            value["evidence"] = tuple(CreativeEvidenceSource.from_dict(e) for e in value["evidence"])
+            return _mark_verified(cls(**value), cls)
 
     @property
     def digest(self) -> str:
@@ -1597,44 +1719,46 @@ class A03CreativeCycleResult:
 
     def __post_init__(self) -> None:
         from .live import InvocationAuthorization
-        if self.schema_version != "A03CreativeCycleResult.v2" or not isinstance(self.job, A03CreativeCycleJob):
-            raise CreativeValidationError("expected typed R2 creative cycle")
-        A03CreativeCycleJob.from_dict(self.job.to_dict())
-        if not isinstance(self.authorization, InvocationAuthorization):
-            raise CreativeValidationError("expected runner authorization snapshot")
-        InvocationAuthorization(self.authorization.allow_network, self.authorization.allow_spend,
-                                self.authorization.authorization_ref)
-        if not isinstance(self.steps, (list, tuple)) or any(not isinstance(s, A03CreativeStageResult) for s in self.steps):
-            raise CreativeValidationError("expected typed cycle steps")
-        object.__setattr__(self, "steps", tuple(A03CreativeStageResult.from_dict(s.to_dict()) for s in self.steps))
-        flow = _creative_cycle_flow(self.job, self.authorization)
-        terminal, expected = None, None
-        consumed = 0
-        try:
-            expected = next(flow)
-            for stage in self.steps:
-                consumed += 1
-                expected = flow.send(stage)
-        except StopIteration as stop:
-            terminal = stop.value
-        # A terminal state cannot have unconsumed steps hidden after it.
-        if terminal is not None:
-            if consumed != len(self.steps):
-                raise CreativeValidationError("cycle contains steps after terminal outcome")
-            if self.halted_step is not None or self.observed is not None:
-                raise CreativeValidationError("terminal cycle cannot claim a pending step")
-        else:
-            if (self.status != "HOLD" or self.failure not in
-                    ("UNRESOLVED_CREATIVE_STEP", "ARTIFACT_CONFLICT", "ADAPTER_MODE_MISMATCH")
-                    or self.halted_step != expected):
-                raise CreativeValidationError("incomplete cycle must HOLD at its exact next step")
-            if self.observed is not None:
-                ReasoningResult.from_dict(self.observed.to_dict())
-                if self.observed.request != expected.request:
-                    raise CreativeValidationError("halted observation rebound its request")
-            terminal = ("HOLD", self.failure, None, None)
-        if (self.status, self.failure, self.decision, self.output) != terminal:
-            raise CreativeValidationError("cycle outcome disagrees with verified workflow evidence")
+        with _parse_scope():
+            if self.schema_version != "A03CreativeCycleResult.v2" or not isinstance(self.job, A03CreativeCycleJob):
+                raise CreativeValidationError("expected typed R2 creative cycle")
+            _revalidate(self.job, A03CreativeCycleJob)
+            if not isinstance(self.authorization, InvocationAuthorization):
+                raise CreativeValidationError("expected runner authorization snapshot")
+            InvocationAuthorization(self.authorization.allow_network, self.authorization.allow_spend,
+                                    self.authorization.authorization_ref)
+            if not isinstance(self.steps, (list, tuple)) or any(not isinstance(s, A03CreativeStageResult) for s in self.steps):
+                raise CreativeValidationError("expected typed cycle steps")
+            object.__setattr__(self, "steps", tuple(_revalidate(s, A03CreativeStageResult) for s in self.steps))
+            flow = _creative_cycle_flow(self.job, self.authorization)
+            terminal, expected = None, None
+            consumed = 0
+            try:
+                expected = next(flow)
+                for stage in self.steps:
+                    consumed += 1
+                    expected = flow.send(stage)
+            except StopIteration as stop:
+                terminal = stop.value
+            # A terminal state cannot have unconsumed steps hidden after it.
+            if terminal is not None:
+                if consumed != len(self.steps):
+                    raise CreativeValidationError("cycle contains steps after terminal outcome")
+                if self.halted_step is not None or self.observed is not None:
+                    raise CreativeValidationError("terminal cycle cannot claim a pending step")
+            else:
+                if (self.status != "HOLD" or self.failure not in
+                        ("UNRESOLVED_CREATIVE_STEP", "ARTIFACT_CONFLICT", "ADAPTER_MODE_MISMATCH")
+                        or self.halted_step != expected):
+                    raise CreativeValidationError("incomplete cycle must HOLD at its exact next step")
+                if self.observed is not None:
+                    _revalidate(self.observed, ReasoningResult)
+                    if self.observed.request != expected.request:
+                        raise CreativeValidationError("halted observation rebound its request")
+                terminal = ("HOLD", self.failure, None, None)
+            if (self.status, self.failure, self.decision, self.output) != terminal:
+                raise CreativeValidationError("cycle outcome disagrees with verified workflow evidence")
+            _mark_verified(self, A03CreativeCycleResult)
 
     def to_dict(self) -> dict[str, Any]:
         return {"schema_version": self.schema_version, "job": self.job.to_dict(),
@@ -1654,18 +1778,19 @@ class A03CreativeCycleResult:
     @classmethod
     def from_dict(cls, data: object) -> A03CreativeCycleResult:
         from .live import InvocationAuthorization
-        value = exact_fields(data, {f.name for f in fields(cls)})
-        value["job"] = A03CreativeCycleJob.from_dict(value["job"])
-        value["authorization"] = InvocationAuthorization(**exact_fields(value["authorization"],
-            {"allow_network", "allow_spend", "authorization_ref"}))
-        if not isinstance(value["steps"], list):
-            raise CreativeValidationError("expected cycle step array")
-        value["steps"] = tuple(A03CreativeStageResult.from_dict(s) for s in value["steps"])
-        for name, kind in (("decision", ActorDecision), ("output", ConceptSelection),
-                           ("halted_step", A03CreativeJob), ("observed", ReasoningResult)):
-            if value[name] is not None:
-                value[name] = kind.from_dict(value[name])
-        return cls(**value)
+        with _parse_scope():
+            value = exact_fields(data, {f.name for f in fields(cls)})
+            value["job"] = A03CreativeCycleJob.from_dict(value["job"])
+            value["authorization"] = InvocationAuthorization(**exact_fields(value["authorization"],
+                {"allow_network", "allow_spend", "authorization_ref"}))
+            if not isinstance(value["steps"], list):
+                raise CreativeValidationError("expected cycle step array")
+            value["steps"] = tuple(A03CreativeStageResult.from_dict(s) for s in value["steps"])
+            for name, kind in (("decision", ActorDecision), ("output", ConceptSelection),
+                               ("halted_step", A03CreativeJob), ("observed", ReasoningResult)):
+                if value[name] is not None:
+                    value[name] = _mark_verified(kind.from_dict(value[name]), kind)
+            return _mark_verified(cls(**value), cls)
 
 
 def run_creative_cycle(job: A03CreativeCycleJob, store: CreativeStore | CreativeSidecarStore,
@@ -1757,35 +1882,37 @@ class A03CreativeProductionJob:
     schema_version: str = "A03CreativeProductionJob.v1"
 
     def __post_init__(self) -> None:
-        if self.schema_version != "A03CreativeProductionJob.v1":
-            raise CreativeValidationError("unsupported creative production job schema")
-        for name in ("journey_id", "cycle_id", "job_id", "correlation_id", "brief_id"):
-            require_text(getattr(self, name), name)
-        positive_int(self.attempt, "attempt")
-        if not isinstance(self.provenance, CreativeJobProvenance):
-            raise CreativeValidationError("expected typed production job provenance")
-        CreativeJobProvenance.from_dict(self.provenance.to_dict())
-        for name in ("cycle_job_digest", "cycle_result_digest", "source_brief_digest"):
-            require_digest(getattr(self, name))
-        if not isinstance(self.selected_concept, ConceptSelection):
-            raise CreativeValidationError("expected typed selected_concept")
-        ConceptSelection.from_dict(self.selected_concept.to_dict())
-        if (self.selected_concept.brief_id != self.brief_id
-                or self.selected_concept.source_brief_digest != self.source_brief_digest):
-            raise CreativeValidationError("production job selected_concept/brief mismatch")
-        if self.configuration is not None:
-            if not isinstance(self.configuration, ModelConfiguration):
-                raise CreativeValidationError("expected typed ModelConfiguration")
-            ModelConfiguration.from_dict(self.configuration.to_dict())
-        if self.purpose not in ("PRODUCTION", "TEST_ONLY_MOCK"):
-            raise CreativeValidationError("invalid production job purpose")
-        if self.instruction is not None:
-            require_text(self.instruction, "instruction")
-        if self.parent_package_digest is not None:
-            require_digest(self.parent_package_digest)
-            require_text(self.edit_reason, "edit_reason")
-        elif self.edit_reason is not None:
-            raise CreativeValidationError("edit_reason requires parent_package_digest")
+        with _parse_scope():
+            if self.schema_version != "A03CreativeProductionJob.v1":
+                raise CreativeValidationError("unsupported creative production job schema")
+            for name in ("journey_id", "cycle_id", "job_id", "correlation_id", "brief_id"):
+                require_text(getattr(self, name), name)
+            positive_int(self.attempt, "attempt")
+            if not isinstance(self.provenance, CreativeJobProvenance):
+                raise CreativeValidationError("expected typed production job provenance")
+            _revalidate(self.provenance, CreativeJobProvenance)
+            for name in ("cycle_job_digest", "cycle_result_digest", "source_brief_digest"):
+                require_digest(getattr(self, name))
+            if not isinstance(self.selected_concept, ConceptSelection):
+                raise CreativeValidationError("expected typed selected_concept")
+            _revalidate(self.selected_concept, ConceptSelection)
+            if (self.selected_concept.brief_id != self.brief_id
+                    or self.selected_concept.source_brief_digest != self.source_brief_digest):
+                raise CreativeValidationError("production job selected_concept/brief mismatch")
+            if self.configuration is not None:
+                if not isinstance(self.configuration, ModelConfiguration):
+                    raise CreativeValidationError("expected typed ModelConfiguration")
+                _revalidate(self.configuration, ModelConfiguration)
+            if self.purpose not in ("PRODUCTION", "TEST_ONLY_MOCK"):
+                raise CreativeValidationError("invalid production job purpose")
+            if self.instruction is not None:
+                require_text(self.instruction, "instruction")
+            if self.parent_package_digest is not None:
+                require_digest(self.parent_package_digest)
+                require_text(self.edit_reason, "edit_reason")
+            elif self.edit_reason is not None:
+                raise CreativeValidationError("edit_reason requires parent_package_digest")
+            _mark_verified(self, A03CreativeProductionJob)
 
     @classmethod
     def from_cycle(
@@ -1823,12 +1950,15 @@ class A03CreativeProductionJob:
 
     @classmethod
     def from_dict(cls, data: object) -> A03CreativeProductionJob:
-        value = exact_fields(data, {f.name for f in fields(cls)})
-        value["provenance"] = CreativeJobProvenance.from_dict(value["provenance"])
-        value["selected_concept"] = ConceptSelection.from_dict(value["selected_concept"])
-        if value["configuration"] is not None:
-            value["configuration"] = ModelConfiguration.from_dict(value["configuration"])
-        return cls(**value)
+        with _parse_scope():
+            value = exact_fields(data, {f.name for f in fields(cls)})
+            value["provenance"] = CreativeJobProvenance.from_dict(value["provenance"])
+            value["selected_concept"] = _mark_verified(
+                ConceptSelection.from_dict(value["selected_concept"]), ConceptSelection
+            )
+            if value["configuration"] is not None:
+                value["configuration"] = ModelConfiguration.from_dict(value["configuration"])
+            return _mark_verified(cls(**value), cls)
 
     @property
     def digest(self) -> str:
@@ -1951,82 +2081,87 @@ class A03CreativeProductionResult:
 
     def __post_init__(self) -> None:
         from .live import InvocationAuthorization
-        if self.schema_version != "A03CreativeProductionResult.v1" or not isinstance(self.job, A03CreativeProductionJob):
-            raise CreativeValidationError("expected typed R3 production result")
-        A03CreativeProductionJob.from_dict(self.job.to_dict())
-        if not isinstance(self.authorization, InvocationAuthorization):
-            raise CreativeValidationError("expected runner authorization snapshot")
-        InvocationAuthorization(self.authorization.allow_network, self.authorization.allow_spend,
-                                self.authorization.authorization_ref)
-        if self.status not in ("HOLD", "STOPPED", "TEST_ONLY_MOCK", "CREATIVE_COMPLETE"):
-            raise CreativeValidationError("invalid production result status")
-        if self.stage is not None:
-            if not isinstance(self.stage, A03CreativeStageResult):
-                raise CreativeValidationError("expected typed A03CreativeStageResult")
-            A03CreativeStageResult.from_dict(self.stage.to_dict())
-            ctx = self.stage.job.request.production
-            if ctx is None or ctx.production_job_digest != self.job.digest:
-                raise CreativeValidationError("production stage receipt rebound its job")
-        if self.package is not None:
-            if not isinstance(self.package, A03CreativeProductionPackage):
-                raise CreativeValidationError("expected typed A03CreativeProductionPackage")
-            A03CreativeProductionPackage.from_dict(self.package.to_dict())
-        if self.observed is not None:
-            if not isinstance(self.observed, ReasoningResult):
-                raise CreativeValidationError("expected typed observed ReasoningResult")
-            ReasoningResult.from_dict(self.observed.to_dict())
-            if (self.observed.request.production is None
-                    or self.observed.request.production.production_job_digest != self.job.digest):
-                raise CreativeValidationError("observed production reasoning rebound its job")
-        if self.status in ("TEST_ONLY_MOCK", "CREATIVE_COMPLETE"):
-            if self.failure is not None or self.observed is not None or self.stage is None or self.package is None:
-                raise CreativeValidationError("completed production result needs exact stage and package without failure")
-            r = self.stage.reasoning
-            p = self.package
-            ctx = self.stage.job.request.production
-            if (self.stage.status != self.status or r.state != "OK" or r.production_spec != p.spec
-                    or self.stage.job.configuration != self.job.configuration or self.stage.job.purpose != self.job.purpose
-                    or p.brief_id != self.job.brief_id or p.source_brief_digest != self.job.source_brief_digest
-                    or p.selected_concept != self.job.selected_concept
-                    or p.lineage != ctx.lineage
-                    or p.lineage.cycle_job_digest != self.job.cycle_job_digest
-                    or p.lineage.cycle_result_digest != self.job.cycle_result_digest
-                    or p.reasoning_receipt_digest != r.digest
-                    or p.observation != r.observation or p.usage != r.usage
-                    or p.configuration != r.configuration or p.configuration != self.job.configuration
-                    or p.execution != r.execution or p.provider_request_id != r.provider_request_id
-                    or p.evidence_refs != r.evidence_refs or p.hypotheses != r.hypotheses
-                    or p.edit_actor != ActorRef("AI", "reasoning:" + r.digest)):
-                raise CreativeValidationError("production package disagrees with verified inference receipt")
-            if self.job.parent_package_digest is None:
-                if (self.stage.job.request.operation != "PRODUCE_PACKAGE"
-                        or p.revision != 1 or p.parent is not None):
-                    raise CreativeValidationError("initial production result must create revision 1")
-            else:
-                parent = ctx.parent_package
-                if (self.stage.job.request.operation != "REVISE_PACKAGE"
-                        or parent is None or parent.digest != self.job.parent_package_digest
-                        or p.parent != ProductionPackageParent(parent.package_id, parent.revision, parent.digest)
-                        or p.edit_reason != self.job.edit_reason):
-                    raise CreativeValidationError("production revision disagrees with pinned parent package")
-            if self.status == "CREATIVE_COMPLETE":
-                e = p.execution
-                if (self.job.purpose != "PRODUCTION" or p.lineage.cycle_status != "CREATIVE_COMPLETE"
-                        or p.observation.mode != "MODEL" or e is None or e.kind != "AUTHENTICATED_CLI_PROBE"
-                        or e.effect != "PROCESS_INVOKED" or e.authorization_ref != self.authorization.authorization_ref
-                        or self.job.configuration is None
-                        or (e.observed_model, e.observed_effort) != (self.job.configuration.model, self.job.configuration.effort)):
-                    raise CreativeValidationError("CREATIVE_COMPLETE production result requires verified native MODEL execution")
-            else:
-                if (self.job.purpose != "TEST_ONLY_MOCK" or p.observation.mode != "TEST_ONLY_MOCK"
-                        or p.observation.model != "UNKNOWN"):
-                    raise CreativeValidationError("TEST_ONLY_MOCK production result requires mock mode and UNKNOWN model")
-        else:
-            require_text(self.failure, "failure")
+        with _parse_scope():
+            if self.schema_version != "A03CreativeProductionResult.v1" or not isinstance(self.job, A03CreativeProductionJob):
+                raise CreativeValidationError("expected typed R3 production result")
+            _revalidate(self.job, A03CreativeProductionJob)
+            if not isinstance(self.authorization, InvocationAuthorization):
+                raise CreativeValidationError("expected runner authorization snapshot")
+            InvocationAuthorization(self.authorization.allow_network, self.authorization.allow_spend,
+                                    self.authorization.authorization_ref)
+            if self.status not in ("HOLD", "STOPPED", "TEST_ONLY_MOCK", "CREATIVE_COMPLETE"):
+                raise CreativeValidationError("invalid production result status")
+            job_digest = self.job.digest
+            if self.stage is not None:
+                if not isinstance(self.stage, A03CreativeStageResult):
+                    raise CreativeValidationError("expected typed A03CreativeStageResult")
+                _revalidate(self.stage, A03CreativeStageResult)
+                ctx = self.stage.job.request.production
+                if ctx is None or ctx.production_job_digest != job_digest:
+                    raise CreativeValidationError("production stage receipt rebound its job")
             if self.package is not None:
-                raise CreativeValidationError("HOLD/STOPPED production result cannot contain a partial package")
-            if self.status == "STOPPED" and (self.stage is None or self.stage.reasoning.state != "REFUSED"):
-                raise CreativeValidationError("STOPPED production result requires an observed model refusal")
+                if not isinstance(self.package, A03CreativeProductionPackage):
+                    raise CreativeValidationError("expected typed A03CreativeProductionPackage")
+                _revalidate(self.package, A03CreativeProductionPackage)
+            if self.observed is not None:
+                if not isinstance(self.observed, ReasoningResult):
+                    raise CreativeValidationError("expected typed observed ReasoningResult")
+                _revalidate(self.observed, ReasoningResult)
+                if (self.observed.request.production is None
+                        or self.observed.request.production.production_job_digest != job_digest):
+                    raise CreativeValidationError("observed production reasoning rebound its job")
+            if self.status in ("TEST_ONLY_MOCK", "CREATIVE_COMPLETE"):
+                if self.failure is not None or self.observed is not None or self.stage is None or self.package is None:
+                    raise CreativeValidationError("completed production result needs exact stage and package without failure")
+                r = self.stage.reasoning
+                p = self.package
+                ctx = self.stage.job.request.production
+                r_digest = r.digest
+                if (self.stage.status != self.status or r.state != "OK" or r.production_spec != p.spec
+                        or self.stage.job.configuration != self.job.configuration or self.stage.job.purpose != self.job.purpose
+                        or p.brief_id != self.job.brief_id or p.source_brief_digest != self.job.source_brief_digest
+                        or p.selected_concept != self.job.selected_concept
+                        or p.lineage != ctx.lineage
+                        or p.lineage.cycle_job_digest != self.job.cycle_job_digest
+                        or p.lineage.cycle_result_digest != self.job.cycle_result_digest
+                        or p.reasoning_receipt_digest != r_digest
+                        or p.observation != r.observation or p.usage != r.usage
+                        or p.configuration != r.configuration or p.configuration != self.job.configuration
+                        or p.execution != r.execution or p.provider_request_id != r.provider_request_id
+                        or p.evidence_refs != r.evidence_refs or p.hypotheses != r.hypotheses
+                        or p.edit_actor != ActorRef("AI", "reasoning:" + r_digest)):
+                    raise CreativeValidationError("production package disagrees with verified inference receipt")
+                if self.job.parent_package_digest is None:
+                    if (self.stage.job.request.operation != "PRODUCE_PACKAGE"
+                            or p.revision != 1 or p.parent is not None):
+                        raise CreativeValidationError("initial production result must create revision 1")
+                else:
+                    parent = ctx.parent_package
+                    parent_digest = parent.digest if parent is not None else None
+                    if (self.stage.job.request.operation != "REVISE_PACKAGE"
+                            or parent is None or parent_digest != self.job.parent_package_digest
+                            or p.parent != ProductionPackageParent(parent.package_id, parent.revision, parent_digest)
+                            or p.edit_reason != self.job.edit_reason):
+                        raise CreativeValidationError("production revision disagrees with pinned parent package")
+                if self.status == "CREATIVE_COMPLETE":
+                    e = p.execution
+                    if (self.job.purpose != "PRODUCTION" or p.lineage.cycle_status != "CREATIVE_COMPLETE"
+                            or p.observation.mode != "MODEL" or e is None or e.kind != "AUTHENTICATED_CLI_PROBE"
+                            or e.effect != "PROCESS_INVOKED" or e.authorization_ref != self.authorization.authorization_ref
+                            or self.job.configuration is None
+                            or (e.observed_model, e.observed_effort) != (self.job.configuration.model, self.job.configuration.effort)):
+                        raise CreativeValidationError("CREATIVE_COMPLETE production result requires verified native MODEL execution")
+                else:
+                    if (self.job.purpose != "TEST_ONLY_MOCK" or p.observation.mode != "TEST_ONLY_MOCK"
+                            or p.observation.model != "UNKNOWN"):
+                        raise CreativeValidationError("TEST_ONLY_MOCK production result requires mock mode and UNKNOWN model")
+            else:
+                require_text(self.failure, "failure")
+                if self.package is not None:
+                    raise CreativeValidationError("HOLD/STOPPED production result cannot contain a partial package")
+                if self.status == "STOPPED" and (self.stage is None or self.stage.reasoning.state != "REFUSED"):
+                    raise CreativeValidationError("STOPPED production result requires an observed model refusal")
+            _mark_verified(self, A03CreativeProductionResult)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -2051,18 +2186,19 @@ class A03CreativeProductionResult:
     @classmethod
     def from_dict(cls, data: object) -> A03CreativeProductionResult:
         from .live import InvocationAuthorization
-        value = exact_fields(data, {f.name for f in fields(cls)})
-        value["job"] = A03CreativeProductionJob.from_dict(value["job"])
-        value["authorization"] = InvocationAuthorization(**exact_fields(
-            value["authorization"], {"allow_network", "allow_spend", "authorization_ref"}
-        ))
-        if value["stage"] is not None:
-            value["stage"] = A03CreativeStageResult.from_dict(value["stage"])
-        if value["package"] is not None:
-            value["package"] = A03CreativeProductionPackage.from_dict(value["package"])
-        if value["observed"] is not None:
-            value["observed"] = ReasoningResult.from_dict(value["observed"])
-        return cls(**value)
+        with _parse_scope():
+            value = exact_fields(data, {f.name for f in fields(cls)})
+            value["job"] = A03CreativeProductionJob.from_dict(value["job"])
+            value["authorization"] = InvocationAuthorization(**exact_fields(
+                value["authorization"], {"allow_network", "allow_spend", "authorization_ref"}
+            ))
+            if value["stage"] is not None:
+                value["stage"] = A03CreativeStageResult.from_dict(value["stage"])
+            if value["package"] is not None:
+                value["package"] = A03CreativeProductionPackage.from_dict(value["package"])
+            if value["observed"] is not None:
+                value["observed"] = ReasoningResult.from_dict(value["observed"])
+            return _mark_verified(cls(**value), cls)
 
 
 def run_creative_production(
