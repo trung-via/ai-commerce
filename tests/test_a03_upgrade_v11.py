@@ -3838,6 +3838,133 @@ def test_r5b_reconciliation_rejects_a_substituted_judge_observation(r5b_experime
     assert len(reasoner.client.calls) == 1
 
 
+def test_sidecar_single_op_verification_has_no_stale_cache_across_mutation(tmp_path):
+    sidecars = CreativeSidecarStore(tmp_path / "creative")
+    cycle = run_creative_cycle(cycle_job(), sidecars, cycle_adapter(CycleFakeClient()))
+    r1_job = production_job(cycle, job_id="mut:r1")
+    r1_res = run_creative_production(r1_job, sidecars, cycle_adapter(ProductionFakeClient(variant="v1")))
+    assert r1_res.status == "TEST_ONLY_MOCK" and r1_res.package is not None
+
+    r2_pkg = revise_production_package(
+        r1_res.package, {"narrative_intention": "Human refined cadence."},
+        edit_reason="Human edit", actor=ActorRef("HUMAN", "human:editor"),
+    )
+    sidecars.save_production_package(r2_pkg)
+
+    r3_job = production_job(
+        cycle, job_id="mut:r3", parent_package=r2_pkg, edit_reason="AI refinement",
+    )
+    r3_res = run_creative_production(r3_job, sidecars, cycle_adapter(ProductionFakeClient(variant="v3")))
+    assert r3_res.status == "TEST_ONLY_MOCK" and r3_res.package is not None and r3_res.package.revision == 3
+
+    origin, pkg, handoff = sidecars.verify_production_package_lineage(
+        r3_res.package.package_id, 3, origin_result_digest=r3_res.digest,
+    )
+    assert origin == r3_res and pkg == r3_res.package
+    assert handoff["package_digest"] == r3_res.package.digest
+    assert getattr(sidecars._local, "ctx", None) is None
+
+    # Mutating the returned detached handoff dict must never affect subsequent reads.
+    handoff["brief"]["objective"] = "mutated caller copy"
+
+    critic_step = next(s for s in cycle.steps if s.job.request.operation == "CRITIQUE")
+    targets = [
+        sidecars.creative.root / "briefs" / f"{r3_res.package.source_brief_digest}.json",
+        sidecars._path("reasoning", critic_step.reasoning.digest),
+        sidecars._path("stages", critic_step.digest),
+        sidecars._path("cycle-results", cycle.digest),
+        sidecars.production_package_path(r1_res.package.package_id, 1),
+        sidecars.production_package_digest_path(r1_res.package.digest),
+    ]
+    for path in targets:
+        original = path.read_bytes()
+        try:
+            path.write_bytes(original + b" ")
+            with pytest.raises(CreativeValidationError):
+                sidecars.verify_production_package_lineage(
+                    r3_res.package.package_id, 3, origin_result_digest=r3_res.digest,
+                )
+            assert getattr(sidecars._local, "ctx", None) is None
+        finally:
+            path.write_bytes(original)
+
+    # Restored exact bytes pass again with identical canonical digests.
+    restored_origin, restored_pkg, restored_handoff = sidecars.verify_production_package_lineage(
+        r3_res.package.package_id, 3, origin_result_digest=r3_res.digest,
+    )
+    assert restored_origin.digest == r3_res.digest
+    assert restored_pkg.digest == r3_res.package.digest
+    assert restored_handoff["brief"]["objective"] != "mutated caller copy"
+
+
+def test_sidecar_verification_rejects_cyclic_reference_fail_closed(tmp_path, monkeypatch):
+    sidecars = CreativeSidecarStore(tmp_path / "creative")
+    brief = intake_brief("Cyclic guard check")
+    b_digest = sidecars.creative.save_brief(brief)
+    digest_a, digest_b = "a" * 64, "b" * 64
+
+    class _FakeIntent:
+        def __init__(self, own_digest, parent_digest):
+            self.brief_id = brief["brief_id"]
+            self.source_brief_digest = b_digest
+            self.digest = own_digest
+            self.parent_intent_digest = parent_digest
+
+    records = {
+        digest_a: _FakeIntent(digest_a, digest_b),
+        digest_b: _FakeIntent(digest_b, digest_a),
+    }
+    monkeypatch.setattr(sidecars, "_read", lambda kind, d: {"digest": d})
+    monkeypatch.setattr(CreativeIntent, "from_dict", staticmethod(lambda data: records[data["digest"]]))
+    with pytest.raises(CreativeValidationError, match="cyclic sidecar reference"):
+        sidecars.load_intent(digest_a)
+    assert getattr(sidecars._local, "ctx", None) is None
+
+
+def test_sidecar_single_op_verification_bounds_immutable_graph_revisits(tmp_path, monkeypatch):
+    sidecars = CreativeSidecarStore(tmp_path / "creative")
+    cycle = run_creative_cycle(cycle_job(), sidecars, cycle_adapter(CycleFakeClient()))
+    r1_job = production_job(cycle, job_id="bound:r1")
+    r1_res = run_creative_production(r1_job, sidecars, cycle_adapter(ProductionFakeClient(variant="v1")))
+    r2_pkg = revise_production_package(
+        r1_res.package, {"narrative_intention": "Bounded traversal check."},
+        edit_reason="Human edit", actor=ActorRef("HUMAN", "human:director"),
+    )
+    sidecars.save_production_package(r2_pkg)
+    r3_job = production_job(cycle, job_id="bound:r3", parent_package=r2_pkg, edit_reason="AI refinement")
+    r3_res = run_creative_production(r3_job, sidecars, cycle_adapter(ProductionFakeClient(variant="v3")))
+
+    counts = {"cycle_from_dict": 0, "result_from_dict": 0, "read_bytes": 0}
+    orig_cycle_fd = A03CreativeCycleResult.from_dict
+    orig_res_fd = ReasoningResult.from_dict
+    orig_rb = Path.read_bytes
+
+    def count_cycle(data):
+        counts["cycle_from_dict"] += 1
+        return orig_cycle_fd(data)
+
+    def count_res(data):
+        counts["result_from_dict"] += 1
+        return orig_res_fd(data)
+
+    def count_rb(self):
+        counts["read_bytes"] += 1
+        return orig_rb(self)
+
+    monkeypatch.setattr(A03CreativeCycleResult, "from_dict", staticmethod(count_cycle))
+    monkeypatch.setattr(ReasoningResult, "from_dict", staticmethod(count_res))
+    monkeypatch.setattr(Path, "read_bytes", count_rb)
+
+    origin, pkg, handoff = sidecars.verify_production_package_lineage(
+        r3_res.package.package_id, 3, origin_result_digest=r3_res.digest,
+    )
+    assert origin == r3_res and pkg == r3_res.package
+    assert handoff["package_digest"] == r3_res.package.digest
+    assert counts["cycle_from_dict"] == 1
+    assert counts["result_from_dict"] <= len(cycle.steps) + 2
+    assert counts["read_bytes"] <= 100
+    assert getattr(sidecars._local, "ctx", None) is None
+
 R5B2_USAGE = replace(R5B_USAGE, cost_source_ref="fixture:cost-table")
 
 

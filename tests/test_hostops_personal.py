@@ -1,9 +1,11 @@
 """Portable source tests; live effect requires existing AI Commerce Windows runner."""
+import asyncio
 import builtins
 import importlib.util
 import copy
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path, PureWindowsPath
 import re
@@ -2253,14 +2255,19 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         self.session.return_value = 0
         self.assertEqual(self.invoke_probe()["code"], "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
         self.source.assert_not_called()
+        self.task.assert_not_called()
         self.session.return_value = 7
         self.pending.add("AutostartPending")
-        self.assertEqual(self.invoke_probe()["code"], "UNKNOWN")
+        self.assertEqual(self.invoke_probe()["code"], "AUTOSTART_PENDING_TASK_ENROLLED")
+        self.assertEqual(self.pending, {"AutostartPending"})
         self.pending.clear()
         self.launch_pending.return_value = True
-        self.assertEqual(self.invoke_probe()["code"], "UNKNOWN")
+        self.assertEqual(self.invoke_probe()["code"], "LAUNCH_PENDING_TASK_ENROLLED")
         self.launch_pending.return_value = False
-        self.task.assert_not_called()
+        self.assertEqual(self.task.call_args_list, [
+            call(self.owner, self.target, self.candidates, install=False),
+            call(self.owner, self.target, self.candidates, install=False),
+        ])
 
         for reply, code in (("AUTOSTART_NOT_ENROLLED", "AUTOSTART_NOT_ENROLLED"),
                             ("AUTOSTART_RUNTIME_UNAVAILABLE", "TASK_READ_UNVERIFIED"),
@@ -2274,6 +2281,155 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         self.session.side_effect = (7, 7, 8)
         self.assertEqual(self.invoke_probe()["code"], "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
         self.record.assert_not_called()
+        self.inventory.assert_not_called()
+        self.probe.assert_not_called()
+
+    def test_runtime_probe_separates_pending_markers_and_task_states_read_only(self):
+        expected_keys = {
+            "status", "code", "operation", "cdp_port", "source_sha",
+            "exact_chat_verified", "wake_sent", "arbitrary_shell_enabled", "remote_shell_enabled",
+        }
+        task_cases = (
+            ("ALREADY_ENROLLED", None, "TASK_ENROLLED"),
+            ("AUTOSTART_NOT_ENROLLED", None, "TASK_ABSENT"),
+            ("AUTOSTART_CONFLICT", None, "TASK_CONFLICT"),
+            ("AUTOSTART_RUNTIME_UNAVAILABLE", None, "TASK_UNAVAILABLE"),
+            ("PRIVATE task reply", None, "TASK_UNAVAILABLE"),
+            (None, OSError("PRIVATE Schedule.Service error"), "TASK_UNAVAILABLE"),
+            (None, self.acq._Clean9444Hold("PRIVATE task hold"), "TASK_UNAVAILABLE"),
+        )
+        marker_cases = (
+            ("autostart_only", {"AutostartPending"}, False, "AUTOSTART_PENDING"),
+            ("launch_only", set(), True, "LAUNCH_PENDING"),
+            ("both_markers", {"AutostartPending"}, True, "BOTH_PENDING"),
+        )
+        for label, autostart_set, launch_value, prefix in marker_cases:
+            for reply, error, suffix in task_cases:
+                with self.subTest(marker=label, reply=reply, error=type(error).__name__ if error else None):
+                    self.pending.clear()
+                    self.pending.update(autostart_set)
+                    self.launch_pending.return_value = launch_value
+                    self.task.reset_mock()
+                    self.task.side_effect = error
+                    self.task.return_value = reply
+                    receipt = self.invoke_probe()
+                    expected_code = f"{prefix}_{suffix}"
+                    self.assertEqual(set(receipt), expected_keys)
+                    self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", expected_code))
+                    self.assertNotEqual(receipt["code"], "READY")
+                    self.assertIn(receipt["code"], hostops._CLEAN_RUNTIME_PROBE_CODES)
+                    self.assertRegex(receipt["code"], r"^[A-Z_]{2,64}$")
+                    self.assertEqual(receipt["cdp_port"], 9444)
+                    self.assertEqual(receipt["source_sha"], self.sha)
+                    self.assertFalse(receipt["exact_chat_verified"])
+                    self.assertFalse(receipt["wake_sent"])
+                    self.assertFalse(receipt["arbitrary_shell_enabled"])
+                    self.assertFalse(receipt["remote_shell_enabled"])
+                    self.task.assert_called_once_with(self.owner, self.target, self.candidates, install=False)
+                    # Read-only guarantee: markers stay intact and WRITE still HOLDs.
+                    self.assertEqual(self.pending, autostart_set)
+        self.pending.clear()
+        self.pending.add("AutostartPending")
+        self.launch_pending.return_value = False
+        self.task.side_effect = None
+        self.task.return_value = "ALREADY_ENROLLED"
+        self.assertEqual(self.invoke()["code"], "UNKNOWN_EFFECT")
+        self.record.assert_not_called()
+        self.inventory.assert_not_called()
+        self.probe.assert_not_called()
+
+    def test_runtime_probe_handles_marker_read_failures_target_errors_and_state_changes(self):
+        # Marker read failure still observes the scheduled task read-only.
+        for reply, expected in (
+            ("ALREADY_ENROLLED", "MARKER_READ_UNVERIFIED_TASK_ENROLLED"),
+            ("AUTOSTART_NOT_ENROLLED", "MARKER_READ_UNVERIFIED_TASK_ABSENT"),
+            ("AUTOSTART_CONFLICT", "MARKER_READ_UNVERIFIED_TASK_CONFLICT"),
+            ("AUTOSTART_RUNTIME_UNAVAILABLE", "MARKER_READ_UNVERIFIED_TASK_UNAVAILABLE"),
+        ):
+            with self.subTest(reply=reply), patch.object(
+                self.acq, "_clean_pending", side_effect=PermissionError("PRIVATE HKCU\\Software\\AI-Commerce")
+            ):
+                self.task.reset_mock()
+                self.task.return_value = reply
+                receipt = self.invoke_probe()
+                self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", expected))
+                self.assertIn(receipt["code"], hostops._CLEAN_RUNTIME_PROBE_CODES)
+                self.assertNotIn("HKCU", json.dumps(receipt))
+                self.task.assert_called_once_with(self.owner, self.target, self.candidates, install=False)
+
+        # Pending marker with target/profile unavailable skips task read and preserves marker visibility.
+        self.pending.add("AutostartPending")
+        for exc, expected in (
+            (self.acq._Clean9444Hold("PROFILE_UNAVAILABLE"), "AUTOSTART_PENDING_PROFILE_UNAVAILABLE"),
+            (self.acq._Clean9444Hold("CHROME_PATH_INVALID"), "AUTOSTART_PENDING_TARGET_UNAVAILABLE"),
+            (OSError("PRIVATE profile path"), "AUTOSTART_PENDING_TARGET_UNAVAILABLE"),
+        ):
+            with self.subTest(expected=expected):
+                self.task.reset_mock()
+                self.target_read.side_effect = exc
+                receipt = self.invoke_probe()
+                self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", expected))
+                self.task.assert_not_called()
+        self.target_read.side_effect = None
+
+        # Wrong session overrides pending markers before and after task read.
+        self.task.return_value = "ALREADY_ENROLLED"
+        for session_seq in ((0,), (7, 8), (7, 7, 8)):
+            with self.subTest(session_seq=session_seq):
+                self.session.side_effect = session_seq
+                self.assertEqual(self.invoke_probe()["code"], "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+        self.session.side_effect = None
+        self.session.return_value = 7
+        self.task.return_value = "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
+        self.assertEqual(self.invoke_probe()["code"], "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+
+        # Concurrent marker transition during probe never reports READY.
+        self.pending.clear()
+        self.task.return_value = "ALREADY_ENROLLED"
+        for seq in ((False, True), (True, False)):
+            with self.subTest(seq=seq), patch.object(self.acq, "_clean_pending", side_effect=seq):
+                receipt = self.invoke_probe()
+                self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", "PENDING_STATE_CHANGED"))
+                self.assertNotEqual(receipt["code"], "READY")
+        self.record.assert_not_called()
+        self.inventory.assert_not_called()
+        self.probe.assert_not_called()
+
+    def test_runtime_probe_maps_native_exceptions_to_closed_sanitized_codes(self):
+        private_detail = (
+            f"PRIVATE {self.local} {self.sid} HKCU\\Software\\AI-Commerce\\WakeHub-9444-Clean "
+            "https://chatgpt.com/c/secret-chat-id credential=secret-token --user-data-dir=C:\\secret"
+        )
+        cases = (
+            (ImportError(private_detail), "PROBE_EXCEPTION_IMPORT"),
+            (PermissionError(private_detail), "PROBE_EXCEPTION_PERMISSION"),
+            (subprocess.TimeoutExpired(["powershell.exe", private_detail], 15), "PROBE_EXCEPTION_TIMEOUT"),
+            (OSError(private_detail), "PROBE_EXCEPTION_OS"),
+            (ValueError(private_detail), "PROBE_EXCEPTION_DATA"),
+            (TypeError(private_detail), "PROBE_EXCEPTION_DATA"),
+            (KeyError(private_detail), "PROBE_EXCEPTION_DATA"),
+            (AttributeError(private_detail), "PROBE_EXCEPTION_DATA"),
+            (RuntimeError(private_detail), "PROBE_EXCEPTION_RUNTIME"),
+            (LookupError(private_detail), "PROBE_EXCEPTION_OTHER"),
+        )
+        for error, expected in cases:
+            with self.subTest(error=type(error).__name__), \
+                    patch.object(hostops, "_observe_clean_runtime", side_effect=error):
+                receipt = self.invoke_probe()
+                self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", expected))
+                self.assertIn(receipt["code"], hostops._CLEAN_RUNTIME_PROBE_CODES)
+                self.assertRegex(receipt["code"], r"^[A-Z_]{2,64}$")
+                raw = json.dumps(receipt)
+                for secret in ("PRIVATE", "HKCU", "WakeHub", "chatgpt.com", "secret-chat-id",
+                               "credential", "secret-token", "--user-data-dir", self.sid, str(self.local)):
+                    self.assertNotIn(secret, raw)
+        # Non-allowlisted return value from _observe_clean_runtime fails closed to UNKNOWN.
+        with patch.object(hostops, "_observe_clean_runtime", return_value=private_detail):
+            receipt = self.invoke_probe()
+            self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", "UNKNOWN"))
+            self.assertNotIn("PRIVATE", json.dumps(receipt))
+        self.record.assert_not_called()
+        self.inventory.assert_not_called()
         self.probe.assert_not_called()
 
     def test_runtime_probe_reports_unavailable_profile_before_task_read(self):
@@ -3335,6 +3491,873 @@ class PersonalCdp9444TopologyTests(unittest.TestCase):
             self.assertEqual(self.observe()["code"], "CDP_PROTOCOL_HEALTHY")
             for forbidden in (run, launch, git_write, git_read, write_text, write_bytes, acquire, enroll, attach, send):
                 forbidden.assert_not_called()
+
+
+class HostOpsExecV1CaptureTests(unittest.IsolatedAsyncioTestCase):
+    """Drive subprocess callbacks and cleanup without launching a process."""
+
+    ARGV = ("test-powershell", "-Command", "-")
+    SCRIPT = b"private script"
+
+    async def asyncSetUp(self):
+        self.loop = asyncio.get_running_loop()
+        self.calls = Mock()
+        self.stdin = self.calls.stdin
+        self.transport = self.calls.transport
+        self.transport.get_pid.return_value = 42
+        self.transport.get_pipe_transport.return_value = self.stdin
+        self.transport.get_returncode.return_value = 23
+        self.transport.close.side_effect = lambda: self.loop.call_soon(self.capture.connection_lost, None)
+        self.calls.has_live_processes.return_value = False
+
+        @contextmanager
+        def job():
+            try:
+                yield self.calls.attach, self.calls.has_live_processes
+            finally:
+                self.calls.close_job()
+
+        async def spawn(factory, *argv, **options):
+            self.assertEqual(argv, self.ARGV)
+            for name in ("stdin", "stdout", "stderr"):
+                self.assertEqual(options[name], subprocess.PIPE)
+            self.capture = factory()
+            return self.transport, self.capture
+
+        self.enterContext(patch.object(hostops, "_exec_v1_windows_job", job))
+        self.enterContext(patch.object(self.loop, "subprocess_exec", spawn))
+        self.enterContext(patch.object(hostops.subprocess, "Popen", side_effect=AssertionError("no native process")))
+
+    async def test_streams_drain_past_combined_cap_with_bounded_retention(self):
+        limit = 128
+        stderr_chunk = b"E" * 4096
+        stdout_prefix = b"small stdout"
+
+        def produce():
+            self.capture.pipe_data_received(2, stderr_chunk)
+            self.assertEqual(len(self.capture.stderr), limit)
+            self.capture.pipe_data_received(1, stdout_prefix)
+            for _ in range(2000):
+                self.capture.pipe_data_received(2, stderr_chunk)
+                self.assertEqual(len(self.capture.stdout) + len(self.capture.stderr), limit)
+            self.capture.connection_lost(None)
+
+        self.stdin.close.side_effect = lambda: self.loop.call_soon(produce)
+        result = await hostops._capture_hostops_exec_v1(self.ARGV, self.SCRIPT, 5, limit)
+        self.assertEqual(result, hostops.HostOpsExecV1ProcessResult(
+            23, stdout_prefix, b"E" * (limit - len(stdout_prefix)), True,
+        ))
+        self.assertLess(self.calls.mock_calls.index(call.attach(42)),
+                        self.calls.mock_calls.index(call.stdin.write(self.SCRIPT)))
+        self.calls.close_job.assert_called_once_with()
+        self.transport.close.assert_called_once_with()
+        self.stdin.abort.assert_not_called()
+
+    async def test_exact_cap_and_stdout_overflow_after_stderr(self):
+        for stdout, expected_stderr, truncated in ((b"aaa", b"bb", False), (b"aaaaaa", b"", True)):
+            with self.subTest(stdout=stdout):
+                def produce():
+                    self.capture.pipe_data_received(2, b"bb")
+                    self.capture.pipe_data_received(1, stdout)
+                    self.capture.connection_lost(None)
+
+                self.stdin.close.side_effect = produce
+                result = await hostops._capture_hostops_exec_v1(self.ARGV, self.SCRIPT, 5, 5)
+                self.assertEqual(result, hostops.HostOpsExecV1ProcessResult(
+                    23, stdout[:5], expected_stderr, truncated,
+                ))
+
+    async def test_timeout_closes_job_and_reaps_transport_with_open_pipes(self):
+        timeout = asyncio.timeout(None)
+
+        def produce_without_eof():
+            self.capture.pipe_data_received(2, b"busy child" * 20)
+            timeout.reschedule(self.loop.time())
+
+        self.stdin.close.side_effect = produce_without_eof
+        with patch.object(hostops.asyncio, "timeout_at", return_value=timeout):
+            with self.assertRaises(subprocess.TimeoutExpired) as expired:
+                await hostops._capture_hostops_exec_v1(self.ARGV, self.SCRIPT, 5, 128)
+        self.assertEqual(expired.exception.timeout, 5)
+        self.assertEqual(self.calls.mock_calls[-3:], [
+            call.close_job(), call.stdin.abort(), call.transport.close(),
+        ])
+        self.assertTrue(self.capture.closed.is_set())
+        self.transport.get_returncode.assert_not_called()
+
+    async def test_closed_pipes_with_live_child_still_hit_deadline(self):
+        timeout = asyncio.timeout(None)
+        self.stdin.close.side_effect = lambda: self.capture.connection_lost(None)
+
+        def child_stays_alive():
+            timeout.reschedule(self.loop.time())
+            return True
+
+        self.calls.has_live_processes.side_effect = child_stays_alive
+        with patch.object(hostops.asyncio, "timeout_at", return_value=timeout):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                await hostops._capture_hostops_exec_v1(self.ARGV, self.SCRIPT, 5, 128)
+        self.assertEqual(self.calls.mock_calls[-3:], [
+            call.transport.close(), call.has_live_processes(), call.close_job(),
+        ])
+        self.stdin.abort.assert_not_called()
+
+    async def test_failed_job_attachment_closes_transport_without_writing(self):
+        self.calls.attach.side_effect = OSError("job assignment failed")
+        with self.assertRaisesRegex(OSError, "job assignment failed"):
+            await hostops._capture_hostops_exec_v1(self.ARGV, self.SCRIPT, 5, 128)
+        self.stdin.write.assert_not_called()
+        self.assertEqual(self.calls.mock_calls[-3:], [
+            call.close_job(), call.stdin.abort(), call.transport.close(),
+        ])
+        self.assertTrue(self.capture.closed.is_set())
+
+    async def test_pipe_error_cannot_report_completion(self):
+        def broken_pipe():
+            self.capture.pipe_connection_lost(2, OSError("pipe read failed"))
+            self.capture.connection_lost(None)
+
+        self.stdin.close.side_effect = broken_pipe
+        with self.assertRaisesRegex(OSError, "HOSTOPS_EXEC_PIPE_FAILED"):
+            await hostops._capture_hostops_exec_v1(self.ARGV, self.SCRIPT, 5, 128)
+        self.transport.get_returncode.assert_not_called()
+        self.transport.close.assert_called_once_with()
+
+
+class HostOpsExecV1Tests(unittest.TestCase):
+    """Offline source-only tests for HOSTOPS_EXEC_V1; never invokes real PowerShell."""
+
+    NOW = datetime(2026, 11, 20, 10, 0, 0, tzinfo=timezone.utc)
+    SHA = "503e6085a0151c3de3af940d570a623f7210a81e"
+    SID = "S-1-5-21-1000000001-2000000002-3000000003-1001"
+    KEY = b"owner-private-hmac-key-0123456789abcdef"
+
+    def _runtime(self, **overrides):
+        base = {
+            "os_name": "nt",
+            "runner_name": hostops.HOSTOPS_EXEC_V1_RUNNER_NAME,
+            "session_id": 1,
+            "elevated": False,
+            "owner_sid": self.SID,
+            "env": {"RUNNER_NAME": hostops.HOSTOPS_EXEC_V1_RUNNER_NAME},
+        }
+        base.update(overrides)
+        return hostops.HostOpsExecV1RuntimeContext(**base)
+
+    def _protected_actions_env(self, **overrides):
+        env = {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "issues",
+            "GITHUB_REPOSITORY": hostops.REPO,
+            "GITHUB_REPOSITORY_OWNER": hostops.OWNER,
+            "GITHUB_ACTOR": hostops.OWNER,
+            "GITHUB_TRIGGERING_ACTOR": hostops.OWNER,
+            "GITHUB_REF": "refs/heads/main",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_WORKFLOW_REF": hostops.HOSTOPS_EXEC_V1_WORKFLOW_REF,
+            "GITHUB_SHA": self.SHA,
+            "GITHUB_WORKFLOW_SHA": self.SHA,
+            "RUNNER_ENVIRONMENT": "self-hosted",
+            "RUNNER_NAME": hostops.HOSTOPS_EXEC_V1_RUNNER_NAME,
+            "HOSTOPS_EXEC_V1_PROTECTED_DISPATCH": "ENABLED",
+        }
+        env.update(overrides)
+        return env
+
+    def _enroll(self, state_root: Path):
+        return hostops.enroll_hostops_exec_v1(
+            enrollment_id="enroll-owner-01",
+            source_sha=self.SHA,
+            state_root=state_root,
+            auth_key=self.KEY,
+            runtime=self._runtime(),
+            now=self.NOW,
+        )
+
+    def _issue_event(self, body, *, private=False, action="opened", state="open",
+                     repo_name=hostops.REPO, repo_owner=hostops.OWNER,
+                     sender=hostops.OWNER, issue_user=hostops.OWNER,
+                     title=None, number=1201, extra_issue=None):
+        issue = {
+            "number": number,
+            "state": state,
+            "title": (hostops.HOSTOPS_EXEC_V1_TITLE + "routine task") if title is None else title,
+            "user": {"login": issue_user},
+            "body": body if type(body) is str else json.dumps(body),
+        }
+        if extra_issue:
+            issue.update(extra_issue)
+        return {
+            "action": action,
+            "repository": {
+                "full_name": repo_name,
+                "private": private,
+                "owner": {"login": repo_owner},
+            },
+            "sender": {"login": sender},
+            "issue": issue,
+        }
+
+    def _store_payload(self, enrollment, script_utf8: str) -> str:
+        raw = script_utf8.encode("utf-8")
+        digest = hostops._exec_v1_sha256(raw)
+        (enrollment.payload_root / f"{digest}.ps1").write_bytes(raw)
+        return digest
+
+    def test_varied_benign_powershell_commands_run_after_enrollment_without_source_changes(self):
+        self.assertIs(hostops.HOSTOPS_EXEC_V1_ENABLED_BY_DEFAULT, False)
+        self.assertIs(hostops.HOSTOPS_EXEC_V1_DENYLIST_IS_SECURITY_BOUNDARY, False)
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp) / "hostops-exec-state"
+            enrollment, enroll_receipt = self._enroll(state_root)
+            self.assertEqual((enroll_receipt["status"], enroll_receipt["code"]), ("ENROLLED", "ENROLLMENT_RECORDED"))
+            self.assertTrue(enroll_receipt["enrolled"])
+            self.assertFalse(enroll_receipt["executed"])
+            self.assertFalse(enroll_receipt["denylist_security_claim"])
+            self.assertNotIn(str(state_root), json.dumps(enroll_receipt))
+            self.assertNotIn(self.KEY.decode("ascii"), json.dumps(enroll_receipt))
+
+            loaded = hostops.load_hostops_exec_v1_enrollment(
+                state_root / hostops.HOSTOPS_EXEC_V1_ENROLLMENT_FILENAME
+            )
+            self.assertEqual(loaded, enrollment)
+
+            executed_scripts = []
+            def fake_runner(script_utf8, timeout_seconds, max_output_bytes):
+                executed_scripts.append((script_utf8, timeout_seconds, max_output_bytes))
+                rc = 0 if "exit 3" not in script_utf8 else 3
+                return hostops.HostOpsExecV1ProcessResult(
+                    exit_code=rc,
+                    stdout=f"OK:{script_utf8}".encode("utf-8"),
+                    stderr=b"",
+                )
+
+            broker = hostops.HostOpsExecV1Broker(
+                enrollment=loaded,
+                runtime_inspector=self._runtime,
+                authenticator=hostops.make_hostops_exec_v1_hmac_authenticator(self.KEY),
+                runner=fake_runner,
+                clock=lambda: self.NOW,
+            )
+
+            commands = [
+                ("job-date-0001", "1" * 32, "PRIVATE_INLINE_UTF8", "Get-Date -Format o", 0, "EXECUTION_COMPLETED"),
+                ("job-task-0002", "2" * 32, "PRIVATE_DIGEST", "Get-ScheduledTask -TaskName 'AI-Commerce-*'", 0, "EXECUTION_COMPLETED"),
+                ("job-proc-0003", "3" * 32, "PRIVATE_DIGEST", "Get-Process chrome -ErrorAction SilentlyContinue", 0, "EXECUTION_COMPLETED"),
+                ("job-exit-0004", "4" * 32, "PRIVATE_INLINE_UTF8", "Write-Output 'diag'; exit 3", 3, "EXECUTION_NONZERO_EXIT"),
+            ]
+            for job_id, nonce, mode, script, expected_rc, expected_code in commands:
+                if mode == "PRIVATE_DIGEST":
+                    digest = self._store_payload(enrollment, script)
+                    req = hostops.build_hostops_exec_v1_request(
+                        job_id=job_id, nonce=nonce, payload_mode=mode, script_sha256=digest, timeout_seconds=15
+                    )
+                else:
+                    req = hostops.build_hostops_exec_v1_request(
+                        job_id=job_id, nonce=nonce, payload_mode=mode, script_utf8=script, timeout_seconds=15
+                    )
+                token = hostops.sign_hostops_exec_v1_request(req, self.KEY)
+                plan_receipt = broker.plan(req, auth_token=token)
+                self.assertEqual((plan_receipt["status"], plan_receipt["code"]), ("PLANNED", "READY_TO_EXECUTE"))
+                exec_receipt = broker.execute(req, auth_token=token)
+                self.assertEqual((exec_receipt["status"], exec_receipt["code"]), ("EXECUTED", expected_code))
+                self.assertTrue(exec_receipt["executed"])
+                self.assertTrue(exec_receipt["readback_verified"])
+                self.assertFalse(exec_receipt["cancelled"])
+                self.assertEqual(exec_receipt["exit_code"], expected_rc)
+                self.assertFalse(exec_receipt["public_script_echoed"])
+                self.assertFalse(exec_receipt["public_output_echoed"])
+                self.assertFalse(exec_receipt["denylist_security_claim"])
+                self.assertNotIn(script, json.dumps(exec_receipt))
+
+            self.assertEqual([item[0] for item in executed_scripts], [c[3] for c in commands])
+            journal_bytes = enrollment.journal_path.read_bytes()
+            for _, _, _, script, _, _ in commands:
+                self.assertNotIn(script.encode("utf-8"), journal_bytes)
+
+    def test_disabled_by_default_and_missing_or_revoked_enrollment_truthful_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp) / "state"
+            self.assertIsNone(
+                hostops.load_hostops_exec_v1_enrollment(state_root / hostops.HOSTOPS_EXEC_V1_ENROLLMENT_FILENAME)
+            )
+            runner = Mock(side_effect=AssertionError("runner must not be called"))
+            req = hostops.build_hostops_exec_v1_request(
+                job_id="job-unenrolled-1", nonce="a" * 32, payload_mode="PRIVATE_DIGEST", script_sha256="b" * 64
+            )
+            unenrolled = hostops.HostOpsExecV1Broker(
+                enrollment=None,
+                runtime_inspector=self._runtime,
+                authenticator=hostops.make_hostops_exec_v1_hmac_authenticator(self.KEY),
+                runner=runner,
+                clock=lambda: self.NOW,
+            )
+            token = hostops.sign_hostops_exec_v1_request(req, self.KEY)
+            for receipt in (unenrolled.plan(req, auth_token=token), unenrolled.execute(req, auth_token=token)):
+                self.assertEqual((receipt["status"], receipt["code"]), ("DISABLED", "BLOCKED_NOT_ENROLLED"))
+                self.assertFalse(receipt["enrolled"])
+                self.assertFalse(receipt["executed"])
+
+            enrollment, _ = self._enroll(state_root)
+            with self.assertRaisesRegex(hostops.Denied, "ALREADY_ENROLLED_NO_OVERWRITE"):
+                self._enroll(state_root)
+
+            disabled_enrollment = enrollment._replace(enabled=False)
+            revoked_enrollment = enrollment._replace(revoked=True)
+            for enr, expected_code in (
+                (disabled_enrollment, "ENROLLMENT_DISABLED"),
+                (revoked_enrollment, "ENROLLMENT_REVOKED"),
+            ):
+                broker = hostops.HostOpsExecV1Broker(
+                    enrollment=enr,
+                    runtime_inspector=self._runtime,
+                    authenticator=hostops.make_hostops_exec_v1_hmac_authenticator(self.KEY),
+                    runner=runner,
+                    clock=lambda: self.NOW,
+                )
+                receipt = broker.execute(req, auth_token=token)
+                self.assertEqual((receipt["status"], receipt["code"]), ("DISABLED", expected_code))
+
+            # Enrolled but missing local private payload must fail closed, never fall back.
+            enrolled_broker = hostops.HostOpsExecV1Broker(
+                enrollment=enrollment,
+                runtime_inspector=self._runtime,
+                authenticator=hostops.make_hostops_exec_v1_hmac_authenticator(self.KEY),
+                runner=runner,
+                clock=lambda: self.NOW,
+            )
+            missing_payload = enrolled_broker.execute(req, public_issue=True, issue_number=1201, auth_token=token)
+            self.assertEqual((missing_payload["status"], missing_payload["code"]), ("REJECTED", "PRIVATE_PAYLOAD_UNAVAILABLE"))
+            runner.assert_not_called()
+
+    def test_owner_vs_foreign_actor_and_event_spoof_rejected(self):
+        digest = hostops._exec_v1_sha256(b"Get-Date")
+        valid_req = hostops.build_hostops_exec_v1_request(
+            job_id="job-event-0001", nonce="c" * 32, payload_mode="PRIVATE_DIGEST", script_sha256=digest
+        )
+        ok_event = self._issue_event(valid_req, private=False)
+        parsed = hostops.parse_hostops_exec_v1_event(ok_event)
+        self.assertEqual(parsed["issue_number"], 1201)
+        self.assertTrue(parsed["public_issue"])
+
+        # Raw script in a public repository Issue is strictly forbidden.
+        inline_req = hostops.build_hostops_exec_v1_request(
+            job_id="job-inline-0001", nonce="d" * 32, payload_mode="PRIVATE_INLINE_UTF8", script_utf8="Get-Date"
+        )
+        with self.assertRaisesRegex(hostops.Denied, "PUBLIC_ISSUE_RAW_SCRIPT_DENIED"):
+            hostops.parse_hostops_exec_v1_event(self._issue_event(inline_req, private=False))
+
+        bad_events = [
+            (self._issue_event(valid_req, sender="attacker"), "EVENT_OWNER_OR_REPO_DENIED"),
+            (self._issue_event(valid_req, issue_user="attacker"), "EVENT_OWNER_OR_REPO_DENIED"),
+            (self._issue_event(valid_req, repo_name="attacker/ai-commerce"), "EVENT_OWNER_OR_REPO_DENIED"),
+            (self._issue_event(valid_req, repo_owner="attacker"), "EVENT_OWNER_OR_REPO_DENIED"),
+            (self._issue_event(valid_req, action="edited"), "EVENT_SHAPE_OR_STATE_DENIED"),
+            (self._issue_event(valid_req, state="closed"), "EVENT_SHAPE_OR_STATE_DENIED"),
+            (self._issue_event(valid_req, title="[HOSTOPS WRITE] spoof"), "EVENT_SHAPE_OR_STATE_DENIED"),
+            (self._issue_event(valid_req, extra_issue={"pull_request": {}}), "EVENT_SHAPE_OR_STATE_DENIED"),
+            (self._issue_event('{"schema":"HOSTOPS_EXEC_V1","schema":"HOSTOPS_EXEC_V1"}'), "DUPLICATE_JSON_KEY"),
+        ]
+        for ev, expected_code in bad_events:
+            with self.subTest(expected_code=expected_code):
+                with self.assertRaisesRegex(hostops.Denied, expected_code):
+                    hostops.parse_hostops_exec_v1_event(ev)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            enrollment, _ = self._enroll(Path(tmp) / "state")
+            self._store_payload(enrollment, "Get-Date")
+            runner = Mock(side_effect=AssertionError("runner must not be called"))
+            # Missing authenticator or wrong token fails closed.
+            for authenticator, token in (
+                (None, hostops.sign_hostops_exec_v1_request(valid_req, self.KEY)),
+                (hostops.make_hostops_exec_v1_hmac_authenticator(self.KEY), "0" * 64),
+                (hostops.make_hostops_exec_v1_hmac_authenticator(self.KEY), None),
+                (hostops.make_hostops_exec_v1_hmac_authenticator(b"wrong-key-" + b"x" * 32),
+                 hostops.sign_hostops_exec_v1_request(valid_req, self.KEY)),
+            ):
+                broker = hostops.HostOpsExecV1Broker(
+                    enrollment=enrollment,
+                    runtime_inspector=self._runtime,
+                    authenticator=authenticator,
+                    runner=runner,
+                    clock=lambda: self.NOW,
+                )
+                receipt = broker.handle_event(ok_event, action="execute", auth_token=token)
+                self.assertEqual((receipt["status"], receipt["code"]), ("REJECTED", "AUTHENTICATION_UNPROVEN"))
+            runner.assert_not_called()
+
+    def test_replay_duplicate_job_and_digest_tampering_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp) / "state"
+            enrollment, _ = self._enroll(state_root)
+            calls = []
+            def fake_runner(script_utf8, timeout_seconds, max_output_bytes):
+                calls.append(script_utf8)
+                return hostops.HostOpsExecV1ProcessResult(0, b"ok", b"")
+
+            broker = hostops.HostOpsExecV1Broker(
+                enrollment=enrollment,
+                runtime_inspector=self._runtime,
+                authenticator=hostops.make_hostops_exec_v1_hmac_authenticator(self.KEY),
+                runner=fake_runner,
+                clock=lambda: self.NOW,
+            )
+            req1 = hostops.build_hostops_exec_v1_request(
+                job_id="job-unique-001", nonce="1" * 32, payload_mode="PRIVATE_INLINE_UTF8", script_utf8="Get-Date"
+            )
+            tok1 = hostops.sign_hostops_exec_v1_request(req1, self.KEY)
+            self.assertEqual(broker.execute(req1, auth_token=tok1)["status"], "EXECUTED")
+            self.assertEqual(len(calls), 1)
+
+            # Duplicate job_id with fresh nonce rejected.
+            dup_job = hostops.build_hostops_exec_v1_request(
+                job_id="job-unique-001", nonce="2" * 32, payload_mode="PRIVATE_INLINE_UTF8", script_utf8="Get-Date"
+            )
+            dup_receipt = broker.execute(dup_job, auth_token=hostops.sign_hostops_exec_v1_request(dup_job, self.KEY))
+            self.assertEqual((dup_receipt["status"], dup_receipt["code"]), ("REJECTED", "DUPLICATE_JOB_ID"))
+
+            # Replayed nonce with new job_id rejected.
+            replay_nonce = hostops.build_hostops_exec_v1_request(
+                job_id="job-unique-002", nonce="1" * 32, payload_mode="PRIVATE_INLINE_UTF8", script_utf8="Get-Date"
+            )
+            rep_receipt = broker.execute(
+                replay_nonce, auth_token=hostops.sign_hostops_exec_v1_request(replay_nonce, self.KEY)
+            )
+            self.assertEqual((rep_receipt["status"], rep_receipt["code"]), ("REJECTED", "REPLAY_DENIED"))
+
+            # Tampered field breaks request_digest.
+            tampered = {**req1, "timeout_seconds": 60}
+            tampered_receipt = broker.execute(tampered, auth_token=tok1)
+            self.assertEqual((tampered_receipt["status"], tampered_receipt["code"]), ("REJECTED", "REQUEST_DIGEST_MISMATCH"))
+
+            # Mismatched enrollment pin on existing journal rejected.
+            other_enrollment = enrollment._replace(enrollment_id="enroll-other-02")
+            other_broker = hostops.HostOpsExecV1Broker(
+                enrollment=other_enrollment,
+                runtime_inspector=self._runtime,
+                authenticator=hostops.make_hostops_exec_v1_hmac_authenticator(self.KEY),
+                runner=fake_runner,
+                clock=lambda: self.NOW,
+            )
+            fresh_req = hostops.build_hostops_exec_v1_request(
+                job_id="job-unique-003", nonce="3" * 32, payload_mode="PRIVATE_INLINE_UTF8", script_utf8="Get-Date"
+            )
+            pin_receipt = other_broker.execute(
+                fresh_req, auth_token=hostops.sign_hostops_exec_v1_request(fresh_req, self.KEY)
+            )
+            self.assertEqual((pin_receipt["status"], pin_receipt["code"]), ("REJECTED", "ENROLLMENT_PIN_MISMATCH"))
+            self.assertEqual(len(calls), 1)
+
+    def test_wrong_session_elevated_non_windows_and_ef02_runner_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp) / "state"
+            # Enrollment itself refuses CI, EF02, Session 0, elevation, and service SIDs.
+            for bad_runtime, expected_code in (
+                (self._runtime(os_name="posix"), "WINDOWS_ONLY"),
+                (self._runtime(runner_name="AI-COMMERCE-EF02-01"), "WRONG_RUNNER_FORBIDDEN"),
+                (self._runtime(runner_name="AI-COMMERCE-EF02-02"), "WRONG_RUNNER_FORBIDDEN"),
+                (self._runtime(session_id=0), "WRONG_SESSION_OR_ELEVATED"),
+                (self._runtime(elevated=True), "WRONG_SESSION_OR_ELEVATED"),
+                (self._runtime(owner_sid="S-1-5-18"), "OWNER_SID_MISMATCH"),
+                (self._runtime(env={"GITHUB_ACTIONS": "true", "RUNNER_NAME": hostops.HOSTOPS_EXEC_V1_RUNNER_NAME}),
+                 "SOURCE_CI_EXECUTION_FORBIDDEN"),
+                (self._runtime(env={"AI_COMMERCE_GIT_GUARD_ACTIVE": "1", "RUNNER_NAME": hostops.HOSTOPS_EXEC_V1_RUNNER_NAME}),
+                 "SOURCE_CI_EXECUTION_FORBIDDEN"),
+            ):
+                with self.subTest(enroll_code=expected_code):
+                    with self.assertRaisesRegex(hostops.Denied, expected_code):
+                        hostops.enroll_hostops_exec_v1(
+                            enrollment_id="enroll-bad-01",
+                            source_sha=self.SHA,
+                            state_root=state_root,
+                            auth_key=self.KEY,
+                            runtime=bad_runtime,
+                            now=self.NOW,
+                        )
+
+            enrollment, _ = self._enroll(state_root)
+            req = hostops.build_hostops_exec_v1_request(
+                job_id="job-session-01", nonce="a" * 32, payload_mode="PRIVATE_INLINE_UTF8", script_utf8="Get-Date"
+            )
+            token = hostops.sign_hostops_exec_v1_request(req, self.KEY)
+            runner = Mock(side_effect=AssertionError("runner must not execute"))
+            for bad_runtime, expected_code in (
+                (self._runtime(os_name="posix"), "WINDOWS_ONLY"),
+                (self._runtime(runner_name="AI-COMMERCE-EF02-02"), "WRONG_RUNNER_FORBIDDEN"),
+                (self._runtime(session_id=0), "WRONG_SESSION_OR_ELEVATED"),
+                (self._runtime(elevated=True), "WRONG_SESSION_OR_ELEVATED"),
+                (self._runtime(owner_sid="S-1-5-21-9-9-9-1001"), "OWNER_SID_MISMATCH"),
+                (self._runtime(env={"PYTEST_CURRENT_TEST": "tests/test_hostops_personal.py"}),
+                 "SOURCE_CI_EXECUTION_FORBIDDEN"),
+            ):
+                broker = hostops.HostOpsExecV1Broker(
+                    enrollment=enrollment,
+                    runtime_inspector=lambda rt=bad_runtime: rt,
+                    authenticator=hostops.make_hostops_exec_v1_hmac_authenticator(self.KEY),
+                    runner=runner,
+                    clock=lambda: self.NOW,
+                )
+                receipt = broker.execute(req, auth_token=token)
+                self.assertEqual((receipt["status"], receipt["code"]), ("REJECTED", expected_code))
+            runner.assert_not_called()
+
+    def test_malformed_and_oversized_payloads_rejected_and_output_bounded(self):
+        with self.assertRaisesRegex(hostops.Denied, "PAYLOAD_OVERSIZED_OR_INVALID"):
+            hostops.build_hostops_exec_v1_request(
+                job_id="job-oversize-1", nonce="a" * 32, payload_mode="PRIVATE_INLINE_UTF8",
+                script_utf8="A" * (hostops.HOSTOPS_EXEC_V1_MAX_SCRIPT_BYTES + 1),
+            )
+        with self.assertRaisesRegex(hostops.Denied, "PAYLOAD_OVERSIZED_OR_INVALID"):
+            hostops.build_hostops_exec_v1_request(
+                job_id="job-nulbyte-1", nonce="a" * 32, payload_mode="PRIVATE_INLINE_UTF8",
+                script_utf8="Get-Date\x00",
+            )
+        with self.assertRaisesRegex(hostops.Denied, "PAYLOAD_DIGEST_MISMATCH"):
+            hostops.build_hostops_exec_v1_request(
+                job_id="job-digest-01", nonce="a" * 32, payload_mode="PRIVATE_INLINE_UTF8",
+                script_utf8="Get-Date", script_sha256="0" * 64,
+            )
+        for bad_timeout in (0, -5, 121, True):
+            with self.assertRaisesRegex(hostops.Denied, "REQUEST_INVALID"):
+                hostops.build_hostops_exec_v1_request(
+                    job_id="job-timeout-1", nonce="a" * 32, payload_mode="PRIVATE_DIGEST",
+                    script_sha256="a" * 64, timeout_seconds=bad_timeout,
+                )
+        with self.assertRaisesRegex(hostops.Denied, "AUTHORITY_TIER_DENIED"):
+            hostops.build_hostops_exec_v1_request(
+                job_id="job-tier2-001", nonce="a" * 32, payload_mode="PRIVATE_DIGEST",
+                script_sha256="a" * 64, authority_tier=hostops.HOSTOPS_EXEC_V1_AUTHORITY_TIER_EXTERNAL,
+            )
+        with self.assertRaisesRegex(hostops.Denied, "WRONG_SESSION_OR_ELEVATED"):
+            hostops.build_hostops_exec_v1_request(
+                job_id="job-sess0-001", nonce="a" * 32, payload_mode="PRIVATE_DIGEST",
+                script_sha256="a" * 64, intended_session="SESSION_0",
+            )
+        with self.assertRaisesRegex(hostops.Denied, "PAYLOAD_OVERSIZED_OR_INVALID"):
+            hostops.parse_hostops_exec_v1_request(b"{" + b" " * (hostops.HOSTOPS_EXEC_V1_MAX_EVENT_BYTES + 5) + b"}")
+
+        # Verify bounded output truncation on oversized stdout.
+        with tempfile.TemporaryDirectory() as tmp:
+            enrollment, _ = self._enroll(Path(tmp) / "state")
+            huge_stdout = b"S" * (hostops.HOSTOPS_EXEC_V1_MAX_OUTPUT_BYTES + 1024)
+            broker = hostops.HostOpsExecV1Broker(
+                enrollment=enrollment,
+                runtime_inspector=self._runtime,
+                authenticator=hostops.make_hostops_exec_v1_hmac_authenticator(self.KEY),
+                runner=lambda *_: hostops.HostOpsExecV1ProcessResult(0, huge_stdout, b"stderr-data"),
+                clock=lambda: self.NOW,
+            )
+            req = hostops.build_hostops_exec_v1_request(
+                job_id="job-bounded-01", nonce="b" * 32, payload_mode="PRIVATE_INLINE_UTF8", script_utf8="Get-Date"
+            )
+            receipt = broker.execute(req, auth_token=hostops.sign_hostops_exec_v1_request(req, self.KEY))
+            self.assertEqual(receipt["status"], "EXECUTED")
+            self.assertEqual(receipt["output_bytes"], hostops.HOSTOPS_EXEC_V1_MAX_OUTPUT_BYTES)
+            self.assertTrue(receipt["output_truncated"])
+
+    def test_runner_truncation_metadata_survives_in_closed_code_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            enrollment, _ = self._enroll(Path(tmp) / "state")
+            stdout = b"private stdout"
+            stderr = b"E" * (hostops.HOSTOPS_EXEC_V1_MAX_OUTPUT_BYTES - len(stdout))
+            runner = Mock(return_value=hostops.HostOpsExecV1ProcessResult(23, stdout, stderr, True))
+            broker = hostops.HostOpsExecV1Broker(
+                enrollment=enrollment,
+                runtime_inspector=self._runtime,
+                authenticator=hostops.make_hostops_exec_v1_hmac_authenticator(self.KEY),
+                runner=runner,
+                clock=lambda: self.NOW,
+            )
+            req = hostops.build_hostops_exec_v1_request(
+                job_id="job-runner-cap-01", nonce="b" * 32, payload_mode="PRIVATE_INLINE_UTF8", script_utf8="Get-Date"
+            )
+            receipt = broker.execute(req, auth_token=hostops.sign_hostops_exec_v1_request(req, self.KEY))
+            self.assertEqual((receipt["status"], receipt["code"], receipt["exit_code"]),
+                             ("EXECUTED", "EXECUTION_NONZERO_EXIT", 23))
+            self.assertEqual(receipt["output_bytes"], hostops.HOSTOPS_EXEC_V1_MAX_OUTPUT_BYTES)
+            self.assertTrue(receipt["output_truncated"])
+            self.assertEqual(receipt["stdout_sha256"], hashlib.sha256(stdout).hexdigest())
+            self.assertEqual(receipt["stderr_sha256"], hashlib.sha256(stderr).hexdigest())
+            self.assertNotIn(stdout.decode(), json.dumps(receipt))
+
+    def test_malformed_capture_metadata_holds_without_replay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            enrollment, _ = self._enroll(Path(tmp) / "state")
+            runner = Mock(return_value=hostops.HostOpsExecV1ProcessResult(0, b"private", b"", 1))
+            broker = hostops.HostOpsExecV1Broker(
+                enrollment=enrollment,
+                runtime_inspector=self._runtime,
+                authenticator=hostops.make_hostops_exec_v1_hmac_authenticator(self.KEY),
+                runner=runner,
+                clock=lambda: self.NOW,
+            )
+            req = hostops.build_hostops_exec_v1_request(
+                job_id="job-malformed-01", nonce="b" * 32, payload_mode="PRIVATE_INLINE_UTF8", script_utf8="Get-Date"
+            )
+            token = hostops.sign_hostops_exec_v1_request(req, self.KEY)
+            receipt = broker.execute(req, auth_token=token)
+            self.assertEqual((receipt["status"], receipt["code"]),
+                             ("UNKNOWN_EFFECT", "READBACK_UNVERIFIED_UNKNOWN_EFFECT"))
+            for field in ("exit_code", "stdout_sha256", "stderr_sha256"):
+                self.assertIsNone(receipt[field])
+            self.assertEqual(broker.execute(req, auth_token=token)["code"], "UNKNOWN_EFFECT_HOLD")
+            runner.assert_called_once()
+
+    def test_unknown_effect_cancellation_readback_distinction_and_no_auto_replay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # Case 1: Pre-spawn cancellation -> REJECTED (cancelled=True), no runner call, no UNKNOWN_EFFECT poison.
+            state1 = Path(tmp) / "state1"
+            enr1, _ = self._enroll(state1)
+            runner1 = Mock(side_effect=subprocess.TimeoutExpired(["powershell.exe"], 5))
+            broker1 = hostops.HostOpsExecV1Broker(
+                enrollment=enr1,
+                runtime_inspector=self._runtime,
+                authenticator=hostops.make_hostops_exec_v1_hmac_authenticator(self.KEY),
+                runner=runner1,
+                clock=lambda: self.NOW,
+            )
+            req_pre = hostops.build_hostops_exec_v1_request(
+                job_id="job-cancel-pre", nonce="1" * 32, payload_mode="PRIVATE_INLINE_UTF8", script_utf8="Get-Date"
+            )
+            pre_receipt = broker1.execute(
+                req_pre, auth_token=hostops.sign_hostops_exec_v1_request(req_pre, self.KEY), cancel_before_spawn=True
+            )
+            self.assertEqual((pre_receipt["status"], pre_receipt["code"]), ("REJECTED", "CANCELLED_BEFORE_EXECUTION"))
+            self.assertTrue(pre_receipt["cancelled"])
+            self.assertFalse(pre_receipt["executed"])
+            self.assertFalse(pre_receipt["readback_verified"])
+            runner1.assert_not_called()
+
+            # Case 2: Post-spawn timeout -> UNKNOWN_EFFECT (cancelled=True, readback_verified=False).
+            req_to = hostops.build_hostops_exec_v1_request(
+                job_id="job-timeout-02", nonce="2" * 32, payload_mode="PRIVATE_INLINE_UTF8", script_utf8="Start-Sleep 99"
+            )
+            to_receipt = broker1.execute(req_to, auth_token=hostops.sign_hostops_exec_v1_request(req_to, self.KEY))
+            self.assertEqual(
+                (to_receipt["status"], to_receipt["code"]),
+                ("UNKNOWN_EFFECT", "EXECUTION_CANCELLED_OR_TIMED_OUT_UNKNOWN_EFFECT"),
+            )
+            self.assertTrue(to_receipt["cancelled"])
+            self.assertFalse(to_receipt["readback_verified"])
+            self.assertEqual(runner1.call_count, 1)
+
+            # Subsequent job must NOT auto-replay or proceed past UNKNOWN_EFFECT.
+            req_after = hostops.build_hostops_exec_v1_request(
+                job_id="job-after-unk1", nonce="3" * 32, payload_mode="PRIVATE_INLINE_UTF8", script_utf8="Get-Date"
+            )
+            hold_receipt = broker1.execute(req_after, auth_token=hostops.sign_hostops_exec_v1_request(req_after, self.KEY))
+            self.assertEqual((hold_receipt["status"], hold_receipt["code"]), ("UNKNOWN_EFFECT", "UNKNOWN_EFFECT_HOLD"))
+            self.assertEqual(runner1.call_count, 1)
+
+            # Case 3: Post-execution readback failure -> UNKNOWN_EFFECT (cancelled=False, readback_verified=False).
+            state2 = Path(tmp) / "state2"
+            enr2, _ = self._enroll(state2)
+            runner2 = Mock(return_value=hostops.HostOpsExecV1ProcessResult(0, b"done", b""))
+            broker2 = hostops.HostOpsExecV1Broker(
+                enrollment=enr2,
+                runtime_inspector=self._runtime,
+                authenticator=hostops.make_hostops_exec_v1_hmac_authenticator(self.KEY),
+                runner=runner2,
+                readback_verifier=lambda _: False,
+                clock=lambda: self.NOW,
+            )
+            req_rb = hostops.build_hostops_exec_v1_request(
+                job_id="job-readback-1", nonce="4" * 32, payload_mode="PRIVATE_INLINE_UTF8", script_utf8="Get-Date"
+            )
+            rb_receipt = broker2.execute(req_rb, auth_token=hostops.sign_hostops_exec_v1_request(req_rb, self.KEY))
+            self.assertEqual((rb_receipt["status"], rb_receipt["code"]), ("UNKNOWN_EFFECT", "READBACK_UNVERIFIED_UNKNOWN_EFFECT"))
+            self.assertFalse(rb_receipt["cancelled"])
+            self.assertFalse(rb_receipt["readback_verified"])
+            # Next job blocked by UNKNOWN_EFFECT_HOLD.
+            req_rb2 = hostops.build_hostops_exec_v1_request(
+                job_id="job-readback-2", nonce="5" * 32, payload_mode="PRIVATE_INLINE_UTF8", script_utf8="Get-Date"
+            )
+            hold2 = broker2.execute(req_rb2, auth_token=hostops.sign_hostops_exec_v1_request(req_rb2, self.KEY))
+            self.assertEqual((hold2["status"], hold2["code"]), ("UNKNOWN_EFFECT", "UNKNOWN_EFFECT_HOLD"))
+            self.assertEqual(runner2.call_count, 1)
+
+    def test_no_raw_secret_log_profile_websocket_or_trace_leakage(self):
+        secrets_list = [
+            "SECRET_PS_SCRIPT_BODY",
+            "SECRET_STDOUT_CREDENTIAL",
+            "SECRET_STDERR_STACKTRACE",
+            "ws://127.0.0.1:9444/devtools/browser/PRIVATE_WS_ID",
+            "C:\\Users\\Owner\\AppData\\Local\\Google\\Chrome\\User Data",
+            self.KEY.decode("ascii"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp) / "private-hostops-state"
+            enrollment, enroll_receipt = self._enroll(state_root)
+            script = f"# {secrets_list[0]} {secrets_list[3]} {secrets_list[4]}"
+            broker = hostops.HostOpsExecV1Broker(
+                enrollment=enrollment,
+                runtime_inspector=self._runtime,
+                authenticator=hostops.make_hostops_exec_v1_hmac_authenticator(self.KEY),
+                runner=lambda *_: hostops.HostOpsExecV1ProcessResult(
+                    0,
+                    (secrets_list[1] + " " + secrets_list[3]).encode("utf-8"),
+                    (secrets_list[2] + " " + secrets_list[4]).encode("utf-8"),
+                ),
+                clock=lambda: self.NOW,
+            )
+            req = hostops.build_hostops_exec_v1_request(
+                job_id="job-secret-001", nonce="e" * 32, payload_mode="PRIVATE_INLINE_UTF8", script_utf8=script
+            )
+            exec_receipt = broker.execute(req, auth_token=hostops.sign_hostops_exec_v1_request(req, self.KEY))
+            # Also test exception path does not leak traceback/exception string.
+            state_err = Path(tmp) / "private-hostops-err"
+            enr_err, _ = self._enroll(state_err)
+            err_broker = hostops.HostOpsExecV1Broker(
+                enrollment=enr_err,
+                runtime_inspector=self._runtime,
+                authenticator=hostops.make_hostops_exec_v1_hmac_authenticator(self.KEY),
+                runner=Mock(side_effect=RuntimeError(" ".join(secrets_list))),
+                clock=lambda: self.NOW,
+            )
+            err_receipt = err_broker.execute(req, auth_token=hostops.sign_hostops_exec_v1_request(req, self.KEY))
+            for receipt in (enroll_receipt, exec_receipt, err_receipt):
+                wire = json.dumps(receipt)
+                for marker in secrets_list:
+                    self.assertNotIn(marker, wire)
+                self.assertNotIn(str(state_root), wire)
+                self.assertNotIn(self.SID, wire)
+            journal_bytes = enrollment.journal_path.read_bytes()
+            for marker in secrets_list:
+                self.assertNotIn(marker.encode("utf-8"), journal_bytes)
+
+            # Validator rejects tampered receipts claiming denylist security or echoing script/output.
+            for bad_patch in (
+                {"denylist_security_claim": True},
+                {"public_script_echoed": True},
+                {"public_output_echoed": True},
+                {"elevated_token": True},
+                {"stdout": "raw"},
+                {"script_utf8": "raw"},
+            ):
+                with self.assertRaisesRegex(hostops.Denied, "REQUEST_INVALID"):
+                    hostops.validate_hostops_exec_v1_receipt({**exec_receipt, **bad_patch})
+
+    def test_old_read_write_backward_compatibility_and_protected_workflow_not_triggered(self):
+        # Legacy READ and WRITE parsing remains unchanged.
+        self.assertEqual(hostops.parse_event(event("read", "inventory", {}), "read")["operation"], "inventory")
+        self.assertEqual(
+            hostops.parse_event(event("read", "standing_read_diagnostics", {}), "read")["operation"],
+            "standing_read_diagnostics",
+        )
+        self.assertEqual(
+            hostops.parse_event(
+                event("write", "create_text", {
+                    "root_id": "scratch", "relative_path": "hostops-personal-r7.txt", "content_utf8": "ok"
+                }),
+                "write",
+            )["operation"],
+            "create_text",
+        )
+        # Legacy parse_event rejects HOSTOPS_EXEC_V1 events/operations in both read and write modes.
+        for mode in ("read", "write"):
+            with self.assertRaises(hostops.Denied):
+                hostops.parse_event(event(mode, "HOSTOPS_EXEC_V1", {}), mode)
+        # Legacy main() CLI does not accept exec mode.
+        with patch.object(hostops.sys, "argv", ["personal.py", "--mode", "exec", "--output", "out.json"]):
+            with self.assertRaises(SystemExit) as exited:
+                hostops.main()
+            self.assertNotEqual(exited.exception.code, 0)
+        # Protected workflow has NOT been modified to dispatch HOSTOPS_EXEC_V1 yet.
+        workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+        for marker in ("[HOSTOPS EXEC]", "HOSTOPS_EXEC_V1", "hostops_exec_v1_cli", "HOSTOPS_EXEC_V1_PROTECTED_DISPATCH"):
+            self.assertNotIn(marker, workflow)
+
+    def test_source_ci_no_native_effect_and_future_cli_interface_contract(self):
+        # Exercise each guard without modifying the executor's real environment.
+        with patch.object(hostops.asyncio, "Runner", side_effect=AssertionError("no native event loop")) as native:
+            for bad_env, code in (
+                ({"AI_COMMERCE_GIT_GUARD_ENABLED": "1", "RUNNER_NAME": hostops.HOSTOPS_EXEC_V1_RUNNER_NAME},
+                 "SOURCE_CI_EXECUTION_FORBIDDEN"),
+                ({"PYTEST_CURRENT_TEST": "x", "RUNNER_NAME": hostops.HOSTOPS_EXEC_V1_RUNNER_NAME},
+                 "SOURCE_CI_EXECUTION_FORBIDDEN"),
+                ({"RUNNER_NAME": "AI-COMMERCE-EF02-02"}, "SOURCE_CI_EXECUTION_FORBIDDEN"),
+                ({"GITHUB_ACTIONS": "true", "RUNNER_NAME": hostops.HOSTOPS_EXEC_V1_RUNNER_NAME},
+                 "PROTECTED_WORKFLOW_DISPATCH_DISABLED"),
+            ):
+                with patch.object(hostops, "os", SimpleNamespace(name="nt", environ=bad_env)):
+                    with self.assertRaisesRegex(hostops.Denied, code):
+                        hostops._default_hostops_exec_v1_runner("Get-Date", 5, 1024)
+            native.assert_not_called()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_root = root / "state"
+            enrollment, _ = self._enroll(state_root)
+            digest = self._store_payload(enrollment, "Get-Date -Format o")
+            req = hostops.build_hostops_exec_v1_request(
+                job_id="job-cli-00001", nonce="f" * 32, payload_mode="PRIVATE_DIGEST", script_sha256=digest
+            )
+            token = hostops.sign_hostops_exec_v1_request(req, self.KEY)
+            event_file = root / "event.json"
+            event_file.write_text(json.dumps(self._issue_event(req, private=False)), encoding="utf-8")
+            out_file = root / "receipt.json"
+
+            # Unenrolled CLI call fails closed with DISABLED / BLOCKED_NOT_ENROLLED.
+            rc = hostops.hostops_exec_v1_cli(
+                ["--action", "execute", "--event", str(event_file), "--output", str(out_file)],
+                env={"RUNNER_NAME": "AI-COMMERCE-EF02-02"},
+            )
+            self.assertEqual(rc, 2)
+            unenrolled_receipt = json.loads(out_file.read_text(encoding="utf-8"))
+            self.assertEqual((unenrolled_receipt["status"], unenrolled_receipt["code"]), ("DISABLED", "BLOCKED_NOT_ENROLLED"))
+
+            # GitHub Actions without protected dispatch flag fails closed with DISABLED.
+            no_dispatch_env = self._protected_actions_env(HOSTOPS_EXEC_V1_PROTECTED_DISPATCH="OFF")
+            blocked_broker = hostops.HostOpsExecV1Broker(
+                enrollment=enrollment,
+                runtime_inspector=lambda: self._runtime(env=no_dispatch_env),
+                authenticator=hostops.make_hostops_exec_v1_hmac_authenticator(self.KEY),
+                runner=Mock(side_effect=AssertionError("must not execute")),
+                clock=lambda: self.NOW,
+                require_protected_workflow=True,
+            )
+            rc = hostops.hostops_exec_v1_cli(
+                ["--action", "execute", "--event", str(event_file), "--output", str(out_file)],
+                env={**no_dispatch_env, "HOSTOPS_EXEC_V1_AUTH_TOKEN": token},
+                broker=blocked_broker,
+            )
+            self.assertEqual(rc, 2)
+            blocked_receipt = json.loads(out_file.read_text(encoding="utf-8"))
+            self.assertEqual(
+                (blocked_receipt["status"], blocked_receipt["code"]),
+                ("DISABLED", "PROTECTED_WORKFLOW_DISPATCH_DISABLED"),
+            )
+
+            # Future protected workflow env + enrolled broker + valid HMAC plans and executes cleanly.
+            dispatch_env = self._protected_actions_env(HOSTOPS_EXEC_V1_AUTH_TOKEN=token)
+            runner = Mock(return_value=hostops.HostOpsExecV1ProcessResult(0, b"2026-11-20T10:00:00Z", b""))
+            ready_broker = hostops.HostOpsExecV1Broker(
+                enrollment=enrollment,
+                runtime_inspector=lambda: self._runtime(env=dispatch_env),
+                authenticator=hostops.make_hostops_exec_v1_hmac_authenticator(self.KEY),
+                runner=runner,
+                clock=lambda: self.NOW,
+                require_protected_workflow=True,
+            )
+            rc_plan = hostops.hostops_exec_v1_cli(
+                ["--action", "plan", "--event", str(event_file), "--output", str(out_file)],
+                env=dispatch_env,
+                broker=ready_broker,
+            )
+            self.assertEqual(rc_plan, 0)
+            self.assertEqual(json.loads(out_file.read_text(encoding="utf-8"))["status"], "PLANNED")
+            runner.assert_not_called()
+
+            rc_exec = hostops.hostops_exec_v1_cli(
+                ["--action", "execute", "--event", str(event_file), "--output", str(out_file)],
+                env=dispatch_env,
+                broker=ready_broker,
+            )
+            self.assertEqual(rc_exec, 0)
+            done = json.loads(out_file.read_text(encoding="utf-8"))
+            self.assertEqual((done["status"], done["code"]), ("EXECUTED", "EXECUTION_COMPLETED"))
+            self.assertEqual(done["issue_number"], 1201)
+            runner.assert_called_once_with("Get-Date -Format o", 30, hostops.HOSTOPS_EXEC_V1_MAX_OUTPUT_BYTES)
 
 
 if __name__ == "__main__":

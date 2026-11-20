@@ -1,8 +1,10 @@
 """Offline contract/owner evidence; no live dispatch or publication proof."""
+import copy
 from dataclasses import FrozenInstanceError, replace
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import socket
 import sqlite3
 
@@ -628,22 +630,14 @@ def _a03_helpers():
     return _A03_HELPERS
 
 
-@pytest.fixture
-def a03_r3_case(tmp_path, monkeypatch):
-    """Offline simulated native CLI R3 CREATIVE_COMPLETE package fixture.
-
-    Simulates only the local OS process boundary via install_fake_popen so the
-    real R2/R3 AUTHENTICATED_CLI_PROBE + MODEL verification path is exercised
-    offline without network or paid provider calls.
-    """
+def _make_r4_cli(host_root: Path, monkeypatch):
     from ai_commerce.creative import (
-        CodexCliCreativeClient, CreativeSidecarStore, InvocationAuthorization,
-        LiveCreativeReasoner, ModelConfiguration, ReasoningRequest,
-        StructuredModelRequest, run_creative_cycle, run_creative_production,
+        CodexCliCreativeClient, LiveCreativeReasoner, ModelConfiguration,
+        ReasoningRequest, StructuredModelRequest,
     )
 
     h = _a03_helpers()
-    cli = h.FakeInstalledCreativeCLI(tmp_path / "synthetic-cli-host")
+    cli = h.FakeInstalledCreativeCLI(host_root)
     r2_sampler = h.CycleFakeClient()
     r3_sampler = h.ProductionFakeClient(silent=True, variant="r4-v1")
 
@@ -660,31 +654,83 @@ def a03_r3_case(tmp_path, monkeypatch):
 
     cli.creative_output = dispatch_packet
     h.install_fake_popen(monkeypatch, cli)
-    cli_grant = InvocationAuthorization(True, True, "fixture:r4-cli-grant")
-    brief = {
-        **intake_brief("Im lặng hoàn toàn — thơ thị giác về mưa Sài Gòn, không sản phẩm hay CTA."),
-        "product_ref": None, "cta": None, "audio": {"mode": "silence"},
-    }
-    creative_root = tmp_path / "creative"
-    sidecars = CreativeSidecarStore(creative_root)
     reasoner = LiveCreativeReasoner(cli.config, CodexCliCreativeClient(cli.capability(), runner=None))
-    cycle = run_creative_cycle(
-        h.cycle_job(brief=brief, seed_options={"configuration": cli.config, "purpose": "PRODUCTION"}),
-        sidecars, reasoner, authorization=cli_grant,
+    return h, cli, r3_sampler, reasoner
+
+
+@pytest.fixture(scope="module")
+def _a03_r3_template(tmp_path_factory):
+    """Immutable prebuilt offline simulated native CLI R2/R3 store template.
+
+    Built once per worker via the real offline install_fake_popen R2/R3 path
+    with network sockets blocked; each test receives an isolated filesystem copy
+    so mutations/tampers never leak across tests while preserving exact bytes.
+    """
+    from ai_commerce.creative import (
+        CreativeSidecarStore, InvocationAuthorization,
+        run_creative_cycle, run_creative_production,
     )
-    assert cycle.status == "CREATIVE_COMPLETE"
-    prod_job = h.production_job(
-        cycle,
-        journey_id="r4:journey", cycle_id="r4:cycle", job_id="r4:prod-1", attempt=1,
-        configuration=cli.config, purpose="PRODUCTION",
-    )
-    prod_result = run_creative_production(prod_job, sidecars, reasoner, authorization=cli_grant)
-    assert prod_result.status == "CREATIVE_COMPLETE" and prod_result.package is not None
+
+    template_root = tmp_path_factory.mktemp("a03-r3-template")
+    creative_dir = template_root / "creative"
+    with pytest.MonkeyPatch.context() as mp:
+        def deny(*args, **kwargs):
+            raise AssertionError("Network attempted")
+        mp.setattr(socket, "socket", deny)
+        mp.setattr(socket, "create_connection", deny)
+        h, cli, _, reasoner = _make_r4_cli(template_root / "synthetic-cli-host", mp)
+        cli_grant = InvocationAuthorization(True, True, "fixture:r4-cli-grant")
+        brief = {
+            **intake_brief("Im lặng hoàn toàn — thơ thị giác về mưa Sài Gòn, không sản phẩm hay CTA."),
+            "product_ref": None, "cta": None, "audio": {"mode": "silence"},
+        }
+        sidecars = CreativeSidecarStore(creative_dir)
+        cycle = run_creative_cycle(
+            h.cycle_job(brief=brief, seed_options={"configuration": cli.config, "purpose": "PRODUCTION"}),
+            sidecars, reasoner, authorization=cli_grant,
+        )
+        assert cycle.status == "CREATIVE_COMPLETE"
+        prod_job = h.production_job(
+            cycle,
+            journey_id="r4:journey", cycle_id="r4:cycle", job_id="r4:prod-1", attempt=1,
+            configuration=cli.config, purpose="PRODUCTION",
+        )
+        prod_result = run_creative_production(prod_job, sidecars, reasoner, authorization=cli_grant)
+        assert prod_result.status == "CREATIVE_COMPLETE" and prod_result.package is not None
+
     source_sha = "d" * 40
     local_grant = LocalAuthorization(
         journey_id=prod_job.journey_id, cycle_id=prod_job.cycle_id, job_id=prod_job.job_id,
         source_sha=source_sha, authorization_ref="fixture:r4-a04-grant", route_id="a03-to-a04",
     )
+    return {
+        "creative_dir": creative_dir,
+        "cli_grant": cli_grant,
+        "brief": brief,
+        "cycle": cycle,
+        "job": prod_job,
+        "result": prod_result,
+        "source_sha": source_sha,
+        "grant": local_grant,
+    }
+
+
+@pytest.fixture
+def a03_r3_case(tmp_path, monkeypatch, _a03_r3_template):
+    """Per-test isolated copy of the offline simulated native CLI R3 package fixture.
+
+    Copies the immutable template store into tmp_path/creative and binds a fresh
+    isolated fake CLI host so each test can freely tamper, delete, or run new
+    R3 revisions without affecting sibling tests.
+    """
+    from ai_commerce.creative import CreativeSidecarStore
+
+    creative_root = tmp_path / "creative"
+    shutil.copytree(_a03_r3_template["creative_dir"], creative_root)
+    h, cli, r3_sampler, reasoner = _make_r4_cli(tmp_path / "synthetic-cli-host", monkeypatch)
+    sidecars = CreativeSidecarStore(creative_root)
+    source_sha = _a03_r3_template["source_sha"]
+    local_grant = _a03_r3_template["grant"]
 
     def make_owner(**changes):
         return ProductionPipelineOrchestrator(**{
@@ -698,13 +744,13 @@ def a03_r3_case(tmp_path, monkeypatch):
         "helpers": h,
         "cli": cli,
         "r3_sampler": r3_sampler,
-        "cli_grant": cli_grant,
+        "cli_grant": _a03_r3_template["cli_grant"],
         "reasoner": reasoner,
-        "brief": brief,
+        "brief": copy.deepcopy(_a03_r3_template["brief"]),
         "sidecars": sidecars,
-        "cycle": cycle,
-        "job": prod_job,
-        "result": prod_result,
+        "cycle": _a03_r3_template["cycle"],
+        "job": _a03_r3_template["job"],
+        "result": _a03_r3_template["result"],
         "source_sha": source_sha,
         "grant": local_grant,
         "make_owner": make_owner,
@@ -1049,17 +1095,19 @@ def test_r4_negative_rejections_intake_mock_hold_stopped_paths_pins_and_tamper(a
         owner.complete_a03(a03_r3_case["brief"], store=sidecars)
 
     # 2) TEST_ONLY_MOCK, HOLD, STOPPED A03 results rejected.
-    mock_sidecars = h.CreativeSidecarStore(tmp_path / "neg-mock")
-    mock_cycle = run_creative_cycle(h.cycle_job(), mock_sidecars, h.cycle_adapter(h.CycleFakeClient()))
+    base_mock_dir = tmp_path / "neg-mock-base"
+    base_mock_sidecars = h.CreativeSidecarStore(base_mock_dir)
+    mock_cycle = run_creative_cycle(h.cycle_job(), base_mock_sidecars, h.cycle_adapter(h.CycleFakeClient()))
     for label, client in (("mock", h.ProductionFakeClient()),
                           ("hold", h.ProductionFakeClient(fault="timeout")),
                           ("stop", h.ProductionFakeClient(fault="refusal"))):
+        case_dir = tmp_path / f"neg-mock-{label}"
+        shutil.copytree(base_mock_dir, case_dir)
+        mock_sidecars = h.CreativeSidecarStore(case_dir)
         mj = h.production_job(mock_cycle, journey_id="r4:journey", cycle_id="r4:cycle", job_id="r4:prod-1")
         mres = run_creative_production(mj, mock_sidecars, h.cycle_adapter(client))
         with pytest.raises(OrchestrationError, match="PRODUCER_NOT_COMPLETE"):
             owner.complete_a03(mres, store=mock_sidecars)
-        mock_sidecars = h.CreativeSidecarStore(tmp_path / f"neg-mock-{label}")
-        mock_cycle = run_creative_cycle(h.cycle_job(), mock_sidecars, h.cycle_adapter(h.CycleFakeClient()))
 
     # 3) External / temp path outside sidecar store (e.g. GitHub issue artifact) rejected.
     temp_copy = tmp_path / "github-issue-artifact.json"
