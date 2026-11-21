@@ -27,9 +27,10 @@ next_step and exact provenance. Resume with identical job bytes/semantic manifes
 job_id, source pin, execution mode and state directory. Default decision_mode is
 autonomous: offline uses A10EligibleFallback.v1, execute requires an authenticated
 structured model chooser. No selection file, Human observation or review is
-required. Completion is READY_FOR_A03_DISPATCH. To opt in to local A03 brief
-intake, add --handoff-a03 --handoff-grant GRANT.json. GRANT.json is a trusted
-runner-supplied LocalAuthorization with journey_id, cycle_id, job_id,
+required. Completion is READY_FOR_A03_DISPATCH. For automatic local A03 brief
+intake after producer success, supply --handoff-grant GRANT.json. The legacy
+--handoff-a03 flag is optional. GRANT.json is an independent, trusted runner grant
+using LocalAuthorization with journey_id, cycle_id, job_id,
 source_sha, authorization_ref, route_id="a10-m05-to-a03" and
 scope="SOURCE_ONLY_LOCAL". The A10 --result still holds only the producer event.
 The CLI prints a separate dispatch outcome backed by the existing production
@@ -161,8 +162,8 @@ def add_parser(commands) -> None:
     automate.add_argument("--human-identity", type=Path, help="Trusted actual user identity bound to the exact manual selection")
     automate.add_argument("--capability", type=Path, help="Trusted operator connector and provider/model/effort selector")
     automate.add_argument("--attended-output", type=Path, help="Manually returned ChatGPT structured output; no automated Send")
-    automate.add_argument("--handoff-a03", action="store_true", help="Opt in to SOURCE_ONLY_LOCAL A03 brief intake")
-    automate.add_argument("--handoff-grant", type=Path, help="Independent trusted LocalAuthorization JSON")
+    automate.add_argument("--handoff-a03", action="store_true", help="Optional legacy flag for A03 intake")
+    automate.add_argument("--handoff-grant", type=Path, help="Trusted LocalAuthorization JSON for automatic local A03 intake")
     resume = operations.add_parser("resume-a03", help="Reconcile existing local A10 to A03 dispatch")
     resume.add_argument("--handoff-grant", type=Path, required=True, help="Independent trusted LocalAuthorization JSON")
     resume.add_argument("--source-sha", required=True, help="Independent authorized runner checkout SHA pin")
@@ -302,7 +303,6 @@ def _dispatch_a03(args) -> dict:
                 "accepted_consumer": None, "completed": None, "event": None}
     resume = args.opportunity_operation == "resume-a03"
     try:
-        require(resume or args.handoff_a03, "HANDOFF_OPT_IN_REQUIRED")
         require(args.handoff_grant is not None, "LOCAL_AUTHORIZATION_REQUIRED")
         grant = LocalAuthorization.from_dict(_json(args.handoff_grant, limit=MAX_JOB_BYTES))
         require(grant.route_id == "a10-m05-to-a03", "LOCAL_ROUTE_MISMATCH")
