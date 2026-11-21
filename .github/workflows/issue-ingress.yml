@@ -31,6 +31,247 @@ jobs:
       actions: read
     uses: ./.github/workflows/ef02-batch.yml
 
+  # R7 R5: one-time authorized protected HostOps Exec V1 ingress.
+  # Never accept a script or command from a public Issue. The owner privately
+  # stages a payload once and the Issue carries only its verified digest.
+  hostops-exec:
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.action == 'opened' &&
+      github.ref == 'refs/heads/main' &&
+      github.run_attempt == 1 &&
+      github.event.repository.full_name == 'trung-via/ai-commerce' &&
+      github.repository_owner == 'trung-via' &&
+      github.actor == 'trung-via' &&
+      github.event.sender.login == 'trung-via' &&
+      github.event.issue.user.login == 'trung-via' &&
+      github.event.issue.state == 'open' &&
+      github.event.issue.pull_request == null &&
+      startsWith(github.event.issue.title, '[HOSTOPS EXEC] ')
+    runs-on: [self-hosted, Windows, ai-commerce-hostops]
+    environment: hostops-exec-v1
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+    concurrency:
+      group: personal-hostops-workspace
+      cancel-in-progress: false
+    env:
+      GITHUB_WORKFLOW_SHA: ${{ github.sha }}
+      HOSTOPS_EXEC_V1_PROTECTED_DISPATCH: ENABLED
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Verify exact source commit before native admission
+        id: source-pin
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $head = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $head -ne $env:GITHUB_SHA -or $head -ne $env:GITHUB_WORKFLOW_SHA) {
+            throw 'HOSTOPS_EXEC_SOURCE_PIN_MISMATCH'
+          }
+          if ($env:RUNNER_NAME -ne 'AI-COMMERCE-HOSTOPS-01') {
+            throw 'HOSTOPS_EXEC_WRONG_RUNNER'
+          }
+      - name: Plan owner-staged private digest without native execution
+        id: plan
+        if: steps.source-pin.outcome == 'success'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $env:PYTHONPATH = Join-Path $env:GITHUB_WORKSPACE 'src'
+          $planPath = Join-Path $env:RUNNER_TEMP ('hostops-exec-v1-plan-' + $env:GITHUB_RUN_ID + '.json')
+          python -B -m ai_commerce.hostops_v3.personal --hostops-exec-v1 --action plan --event "$env:GITHUB_EVENT_PATH" --output "$planPath"
+          exit $LASTEXITCODE
+      - name: Independently validate planned receipt before effect
+        id: admit
+        if: steps.plan.outcome == 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const crypto = require('crypto');
+            const planPath = path.join(process.env.RUNNER_TEMP,
+              'hostops-exec-v1-plan-' + process.env.GITHUB_RUN_ID + '.json');
+            const raw = fs.readFileSync(planPath, 'utf8');
+            if (Buffer.byteLength(raw, 'utf8') > 4097) throw new Error('INVALID_PLAN_RECEIPT');
+            const receipt = JSON.parse(raw);
+            const body = context.payload.issue && context.payload.issue.body;
+            if (typeof body !== 'string' || Buffer.byteLength(body, 'utf8') > 16384)
+              throw new Error('INVALID_PUBLIC_REQUEST');
+            const request = JSON.parse(body);
+            const requestFields = ['schema','job_id','payload_mode','script_sha256','script_utf8',
+              'timeout_seconds','intended_owner','intended_session','authority_tier','nonce','request_digest'];
+            const receiptFields = ['schema','status','code','job_id','request_digest','script_sha256',
+              'authority_tier','payload_mode','enrolled','executed','cancelled','readback_verified',
+              'exit_code','stdout_sha256','stderr_sha256','output_bytes','output_truncated',
+              'denylist_security_claim','public_script_echoed','public_output_echoed',
+              'elevated_token','source_sha','issue_number','recorded_at'];
+            const exact = (v, fields) => v && typeof v === 'object' && !Array.isArray(v) &&
+              Object.keys(v).length === fields.length && Object.keys(v).every(k => fields.includes(k));
+            const hex64 = v => typeof v === 'string' && /^[0-9a-f]{64}$/.test(v);
+            const unsigned = Object.fromEntries(Object.entries(request).filter(([k]) =>
+              k !== 'request_digest').sort(([a],[b]) => a < b ? -1 : a > b ? 1 : 0));
+            const digest = crypto.createHash('sha256').update(JSON.stringify(unsigned), 'ascii').digest('hex');
+            const valid = exact(request, requestFields) && exact(receipt, receiptFields) &&
+              request.schema === 'HOSTOPS_EXEC_V1' && request.payload_mode === 'PRIVATE_DIGEST' &&
+              request.script_utf8 === null && request.intended_owner === 'trung-via' &&
+              request.intended_session === 'INTERACTIVE_USER_NON_ELEVATED' &&
+              request.authority_tier === 'LOCAL_USER_TOKEN' &&
+              Number.isInteger(request.timeout_seconds) &&
+              request.timeout_seconds >= 1 && request.timeout_seconds <= 120 &&
+              /^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$/.test(request.job_id) &&
+              /^[0-9a-f]{32,64}$/.test(request.nonce) && hex64(request.script_sha256) &&
+              hex64(request.request_digest) && digest === request.request_digest &&
+              receipt.schema === 'HOSTOPS_EXEC_V1_RECEIPT' &&
+              receipt.status === 'PLANNED' && receipt.code === 'READY_TO_EXECUTE' &&
+              receipt.source_sha === context.sha && receipt.issue_number === context.issue.number &&
+              receipt.request_digest === request.request_digest &&
+              receipt.script_sha256 === request.script_sha256 &&
+              receipt.job_id === request.job_id && receipt.payload_mode === 'PRIVATE_DIGEST' &&
+              receipt.authority_tier === 'LOCAL_USER_TOKEN' &&
+              receipt.enrolled === true && receipt.executed === false &&
+              receipt.cancelled === false && receipt.readback_verified === false &&
+              receipt.exit_code === null && receipt.stdout_sha256 === null &&
+              receipt.stderr_sha256 === null && receipt.output_bytes === 0 &&
+              receipt.output_truncated === false && receipt.elevated_token === false &&
+              receipt.denylist_security_claim === false && receipt.public_script_echoed === false &&
+              receipt.public_output_echoed === false;
+            if (!valid) throw new Error('HOSTOPS_EXEC_PLAN_NOT_READY');
+            core.setOutput('ready', 'true');
+      - name: Execute once after signed plan and durable intent reservation
+        id: execute
+        if: steps.admit.outputs.ready == 'true'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $env:PYTHONPATH = Join-Path $env:GITHUB_WORKSPACE 'src'
+          $receiptPath = Join-Path $env:RUNNER_TEMP ('hostops-exec-v1-execute-' + $env:GITHUB_RUN_ID + '.json')
+          python -B -m ai_commerce.hostops_v3.personal --hostops-exec-v1 --action execute --event "$env:GITHUB_EVENT_PATH" --output "$receiptPath"
+          exit $LASTEXITCODE
+      - name: Publish only independently sanitized public receipt
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          EXEC_OUTCOME: ${{ steps.execute.outcome }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const receiptFields = ['schema','status','code','job_id','request_digest','script_sha256',
+              'authority_tier','payload_mode','enrolled','executed','cancelled','readback_verified',
+              'exit_code','stdout_sha256','stderr_sha256','output_bytes','output_truncated',
+              'denylist_security_claim','public_script_echoed','public_output_echoed',
+              'elevated_token','source_sha','issue_number','recorded_at'];
+            const statuses = ['PLANNED','DISABLED','ENROLLED','REVOKED','STAGED','EXECUTED','REJECTED','UNKNOWN_EFFECT'];
+            const codes = ['READY_TO_EXECUTE','BLOCKED_NOT_ENROLLED','ENROLLMENT_DISABLED',
+              'ENROLLMENT_REVOKED','ENROLLMENT_INVALID','ENROLLMENT_RECORDED',
+              'ALREADY_ENROLLED_NO_OVERWRITE','ATTENDED_OWNER_REQUIRED','PRIVATE_STATE_UNSAFE',
+              'PAYLOAD_STAGED','PAYLOAD_ALREADY_STAGED','SOURCE_REVISION_MISMATCH',
+              'SOURCE_ROTATION_RECORDED','SOURCE_ALREADY_APPROVED','RECEIPT_OUTPUT_UNAVAILABLE',
+              'PROTECTED_WORKFLOW_DISPATCH_DISABLED','EVENT_OWNER_OR_REPO_DENIED',
+              'EVENT_SHAPE_OR_STATE_DENIED','PUBLIC_ISSUE_RAW_SCRIPT_DENIED','REQUEST_INVALID',
+              'PAYLOAD_OVERSIZED_OR_INVALID','PAYLOAD_DIGEST_MISMATCH','REQUEST_DIGEST_MISMATCH',
+              'AUTHORITY_TIER_DENIED','AUTHENTICATION_UNPROVEN','PRIVATE_PAYLOAD_UNAVAILABLE',
+              'DUPLICATE_JOB_ID','REPLAY_DENIED','JOURNAL_CAPACITY_EXCEEDED',
+              'JOURNAL_UNAVAILABLE','ENROLLMENT_PIN_MISMATCH','WINDOWS_ONLY',
+              'SOURCE_CI_EXECUTION_FORBIDDEN','WRONG_RUNNER_FORBIDDEN',
+              'WRONG_SESSION_OR_ELEVATED','OWNER_SID_MISMATCH','REPARSE_PATH_DENIED',
+              'PROTECTED_HOSTOPS_ONLY','CANCELLED_BEFORE_EXECUTION','EXECUTION_COMPLETED',
+              'EXECUTION_NONZERO_EXIT','EXECUTION_CANCELLED_OR_TIMED_OUT_UNKNOWN_EFFECT',
+              'READBACK_UNVERIFIED_UNKNOWN_EFFECT','EXECUTION_ERROR_UNKNOWN_EFFECT',
+              'UNKNOWN_EFFECT_HOLD'];
+            const exact = (v, fields) => v && typeof v === 'object' && !Array.isArray(v) &&
+              Object.keys(v).length === fields.length && Object.keys(v).every(k => fields.includes(k));
+            const hex40 = v => typeof v === 'string' && /^[0-9a-f]{40}$/.test(v);
+            const hex64 = v => typeof v === 'string' && /^[0-9a-f]{64}$/.test(v);
+            const invoked = ['success','failure'].includes(process.env.EXEC_OUTCOME);
+            const issueBody = context.payload.issue && context.payload.issue.body;
+            let expectedRequest = null;
+            try { expectedRequest = JSON.parse(issueBody); } catch (_) {}
+            const requestFields = ['schema','job_id','payload_mode','script_sha256','script_utf8',
+              'timeout_seconds','intended_owner','intended_session','authority_tier','nonce','request_digest'];
+            const file = path.join(process.env.RUNNER_TEMP,
+              'hostops-exec-v1-' + (invoked ? 'execute-' : 'plan-') + process.env.GITHUB_RUN_ID + '.json');
+            let publicReceipt = {schema:'HOSTOPS_EXEC_V1_PUBLIC_RESULT_V1',
+              status:invoked ? 'UNKNOWN_EFFECT' : 'HOLD',
+              code:invoked ? 'UNKNOWN_EFFECT_HOLD' : 'RECEIPT_UNAVAILABLE',
+              source_sha:context.sha, issue_number:context.issue.number,
+              executed:false, readback_verified:false, effect_state:invoked ? 'UNKNOWN' : 'NO_EFFECT_PROVEN'};
+            try {
+              if (fs.statSync(file).size > 4097) throw new Error('INVALID_RECEIPT_SIZE');
+              const raw = fs.readFileSync(file, 'utf8');
+              const r = JSON.parse(raw);
+              const valid = exact(r, receiptFields) &&
+                r.schema === 'HOSTOPS_EXEC_V1_RECEIPT' && statuses.includes(r.status) &&
+                codes.includes(r.code) && r.authority_tier === 'LOCAL_USER_TOKEN' &&
+                r.denylist_security_claim === false && r.public_script_echoed === false &&
+                r.public_output_echoed === false && r.elevated_token === false &&
+                ['enrolled','executed','cancelled','readback_verified','output_truncated']
+                  .every(k => typeof r[k] === 'boolean') &&
+                Number.isInteger(r.output_bytes) && r.output_bytes >= 0 && r.output_bytes <= 65536 &&
+                (r.job_id === null || typeof r.job_id === 'string' &&
+                  /^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$/.test(r.job_id)) &&
+                ['request_digest','script_sha256','stdout_sha256','stderr_sha256']
+                  .every(k => r[k] === null || hex64(r[k])) &&
+                (r.source_sha === null || hex40(r.source_sha)) &&
+                (r.payload_mode === null || ['PRIVATE_DIGEST','PRIVATE_INLINE_UTF8'].includes(r.payload_mode)) &&
+                (r.issue_number === null || Number.isSafeInteger(r.issue_number) && r.issue_number > 0) &&
+                typeof r.recorded_at === 'string' &&
+                /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(r.recorded_at) &&
+                !Number.isNaN(Date.parse(r.recorded_at)) &&
+                (!['EXECUTED','PLANNED','UNKNOWN_EFFECT'].includes(r.status) ||
+                  r.source_sha === context.sha && r.issue_number === context.issue.number &&
+                  exact(expectedRequest, requestFields) &&
+                  expectedRequest.schema === 'HOSTOPS_EXEC_V1' &&
+                  expectedRequest.payload_mode === 'PRIVATE_DIGEST' &&
+                  expectedRequest.script_utf8 === null &&
+                  expectedRequest.intended_owner === 'trung-via' &&
+                  expectedRequest.authority_tier === 'LOCAL_USER_TOKEN' &&
+                  expectedRequest.job_id === r.job_id &&
+                  expectedRequest.request_digest === r.request_digest &&
+                  expectedRequest.script_sha256 === r.script_sha256) &&
+                (invoked ? r.status !== 'PLANNED' :
+                  r.status !== 'EXECUTED' && r.status !== 'UNKNOWN_EFFECT') &&
+                (r.status !== 'PLANNED' || r.code === 'READY_TO_EXECUTE') &&
+                (r.status !== 'EXECUTED' ||
+                  ['EXECUTION_COMPLETED','EXECUTION_NONZERO_EXIT'].includes(r.code) &&
+                  r.executed === true && r.enrolled === true && r.readback_verified === true &&
+                  r.cancelled === false && Number.isInteger(r.exit_code) &&
+                  hex64(r.stdout_sha256) && hex64(r.stderr_sha256)) &&
+                (r.status === 'EXECUTED' ||
+                  r.executed === false && r.exit_code === null &&
+                  r.stdout_sha256 === null && r.stderr_sha256 === null);
+              if (valid) {
+                publicReceipt = {
+                  schema:'HOSTOPS_EXEC_V1_PUBLIC_RESULT_V1',
+                  status:r.status, code:r.code, source_sha:r.source_sha,
+                  issue_number:context.issue.number, request_digest:r.request_digest,
+                  script_sha256:r.script_sha256, job_id:r.job_id, payload_mode:r.payload_mode,
+                  enrolled:r.enrolled, executed:r.executed, cancelled:r.cancelled,
+                  readback_verified:r.readback_verified, exit_code:r.exit_code,
+                  stdout_sha256:r.stdout_sha256, stderr_sha256:r.stderr_sha256,
+                  output_bytes:r.output_bytes, output_truncated:r.output_truncated,
+                  effect_state:r.status === 'UNKNOWN_EFFECT' ? 'UNKNOWN' :
+                    r.status === 'EXECUTED' ? 'EXECUTED_REPORTED' : 'NO_EFFECT_PROVEN'
+                };
+              }
+            } catch (_) {
+              // Missing/malformed receipts cannot be replayed or exposed publicly.
+            }
+            await github.rest.issues.createComment({
+              owner:context.repo.owner, repo:context.repo.repo,
+              issue_number:context.issue.number,
+              body:'AI_COMMERCE_HOSTOPS_EXEC_V1_RESULT_V1\n' + JSON.stringify(publicReceipt),
+            });
+
   hostops-personal:
     if: >-
       github.event.repository.full_name == 'trung-via/ai-commerce' &&
