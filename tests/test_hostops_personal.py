@@ -301,9 +301,7 @@ Options:
         return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
 
     def test_version_root_and_exec_help_have_distinct_observation_surfaces(self):
-        from ai_commerce.opportunity.core import models
-
-        version = self._output(f"codex-cli {models._NATIVE_CODEX_VERSION}\r\n".encode())
+        version = self._output(b"codex-cli 0.164.0\r\n")
         root_help = self._output(self.ROOT_HELP)
         exec_help = self._output(self.EXEC_HELP)
         actual = {}
@@ -361,14 +359,17 @@ Options:
         expected_calls = [call([str(executable), *args], **options) for args in (
             ("--version",), ("--help",), ("exec", "--help"),
         )]
-        for version, version_code, state in (
-            (models._NATIVE_CODEX_VERSION, "MATCHES_SOURCE_VERSION", "HOST_UNVERIFIED"),
-            ("9999.0.0", "DIFFERS_FROM_SOURCE_VERSION", "HOST_UNSUPPORTED"),
+        exec_help = self.EXEC_HELP.replace(
+            b"      --json", b"      --ignore-user-config\n      --strict-config\n      --json"
+        )
+        for version, version_code in (
+            ("0.164.0", "MATCHES_SOURCE_VERSION"),
+            ("0.170.0", "DIFFERS_FROM_SOURCE_VERSION"),
         ):
             stderr = (
                 b"2026-11-21T00:00:00Z WARN codex_cli: private warning detail\r\n"
                 b"warning: other private warning detail\r\n"
-                if version != models._NATIVE_CODEX_VERSION else b""
+                if version_code == "DIFFERS_FROM_SOURCE_VERSION" else b""
             )
             executable.reset_mock()
             with (self.subTest(version=version),
@@ -378,7 +379,7 @@ Options:
                   patch.object(hostops.tempfile, "TemporaryDirectory", return_value=nullcontext(temp_home)) as temp,
                   patch.object(models, "_bounded_native_codex", side_effect=[
                       self._output(f"codex-cli {version}".encode(), stderr=stderr),
-                      self._output(self.ROOT_HELP, stderr=stderr), self._output(self.EXEC_HELP, stderr=stderr),
+                      self._output(self.ROOT_HELP, stderr=stderr), self._output(exec_help, stderr=stderr),
                   ]) as runner):
                 code, result = self._main(event("read", self.OP, {}), self._protected_env())
                 temp.assert_called_once_with(prefix="a10-readiness-")
@@ -390,18 +391,22 @@ Options:
                 self.assertEqual(executable.open.call_args_list, [call("rb")] * 3)
                 self.assertEqual(native.call_args_list, [call(executable)] * 3)
                 pin.assert_not_called()
-                self.assertEqual((code, result["status"], result["code"]), (2, "HOLD", state))
+                self.assertEqual((code, result["status"], result["code"]), (2, "HOLD", "HOST_UNVERIFIED"))
                 readiness = result["a10_readiness"]
-                self.assertEqual(readiness["state"], state)
+                self.assertEqual(readiness["state"], "HOST_UNVERIFIED")
                 self.assertEqual(readiness["version"], version_code)
                 self.assertEqual(readiness["observed_binary_sha256"], digest)
                 self.assertEqual(readiness["root_help"], "USAGE_OBSERVED")
                 self.assertEqual(readiness["root_flags"], "DECLARED")
                 self.assertEqual(readiness["exec_help"], "USAGE_OBSERVED")
+                self.assertEqual(readiness["exec_flags"], "DECLARED")
+                self.assertEqual(readiness["config_override_flags"], "DECLARED")
                 self.assertEqual(readiness["feature_disable_flag"], "DECLARED")
+                for field in ("system_config", "account_config", "disabled_features", "read_only_policy"):
+                    self.assertEqual(readiness[field], "UNKNOWN")
                 self.assertFalse(readiness["native_inference_executed"])
                 public = json.dumps(result)
-                for private in (str(executable), temp_home, "user@example.test", "Codex CLI", "9999.0.0",
+                for private in (str(executable), temp_home, "user@example.test", "Codex CLI", version,
                                 "private warning detail"):
                     self.assertNotIn(json.dumps(private)[1:-1], public)
 
@@ -412,7 +417,7 @@ Options:
         digest = hashlib.sha256(raw).hexdigest()
         executable = self._binary(PureWindowsPath("C:/Tools/codex.exe"))
         alternative = self._binary(PureWindowsPath("C:/Other/alternative.exe"))
-        version = self._output(f"codex-cli {models._NATIVE_CODEX_VERSION}".encode())
+        version = self._output(b"codex-cli 0.164.0")
         for case, resolved, native, contents, version_observed in (
             ("missing", FileNotFoundError(), True, (), False),
             ("redirected", alternative, True, (), False),
@@ -468,7 +473,7 @@ Options:
         hold = hostops._a10_readiness_receipt(
             17, self.SHA, observations={**observed, "version": "DIFFERS_FROM_SOURCE_VERSION"}
         )
-        self.assertEqual((hold["status"], hold["code"]), ("HOLD", "HOST_UNSUPPORTED"))
+        self.assertEqual((hold["status"], hold["code"]), ("HOLD", "HOST_UNVERIFIED"))
 
 
 class PersonalHostOpsContractTests(unittest.TestCase):
