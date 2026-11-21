@@ -463,14 +463,15 @@ def _require_protected_clean_runner(event_name: str):
         deny("PROTECTED_HOSTOPS_ONLY")
 
 
-def _protected_clean_workflow_sha(*, write=False) -> str:
+def _protected_clean_workflow_sha(*, write=False, allow_blank_workflow_sha=False) -> str:
     sha = os.environ.get("GITHUB_SHA", "")
     workflow_sha = os.environ.get("GITHUB_WORKFLOW_SHA", "")
     # Issue ingress pins checkout to github.sha and blanks its custom workflow
-    # SHA outside the A10 READ. WRITE additionally checks local main and source
-    # bytes against that checkout before any task access.
+    # SHA outside the A10 READ. Clean WRITE and clean_9444_runtime_probe READ
+    # additionally check local main and source bytes against that checkout
+    # before any task access; A10 READ still requires an explicit workflow SHA.
     if (not re.fullmatch(r"[a-f0-9]{40}", sha) or
-            (workflow_sha != sha and not (write and workflow_sha == ""))):
+            (workflow_sha != sha and not ((write or allow_blank_workflow_sha) and workflow_sha == ""))):
         deny("PROTECTED_HOSTOPS_ONLY")
     return sha
 
@@ -567,28 +568,84 @@ def _persistent_clean_source(acquisition, sha):
     return source
 
 
-_CLEAN_RUNTIME_MARKER_PREFIXES = (
-    "AUTOSTART_PENDING", "LAUNCH_PENDING", "BOTH_PENDING", "MARKER_READ_UNVERIFIED",
+_CLEAN_RUNTIME_PENDING_PREFIXES = (
+    "AUTOSTART_PENDING", "LAUNCH_PENDING", "BOTH_PENDING", "MARKER_UNVERIFIED",
 )
-_CLEAN_RUNTIME_MARKER_OUTCOMES = (
-    "TASK_ENROLLED", "TASK_ABSENT", "TASK_CONFLICT", "TASK_UNAVAILABLE",
+_CLEAN_RUNTIME_TARGET_FAIL_OUTCOMES = (
     "PROFILE_UNAVAILABLE", "TARGET_UNAVAILABLE",
+)
+_CLEAN_RUNTIME_TASK_CODES = (
+    "DEMAND_READY", "DEMAND_DISABLED", "DEMAND_NOT_READY", "DEMAND_RUNTIME_BAD",
+    "LEGACY_PT1M_READY", "LEGACY_PT1M_DISABLED", "LEGACY_PT1M_NOT_READY",
+    "TASK_ABSENT", "TASK_MULTIPLE", "TASK_CONFLICT", "TASK_UNAVAILABLE",
+)
+_CLEAN_RUNTIME_JOURNAL_CODES = (
+    "JOURNAL_FRESH", "JOURNAL_COMPLETE", "JOURNAL_MISMATCH",
+    "ROLLBACK_ONLY", "COMPLETE_ONLY", "JOURNAL_UNVERIFIED",
+)
+_CLEAN_RUNTIME_D5_CODES = (
+    "D5_ENABLED", "D5_DISABLED", "D5_ABSENT", "D5_UNVERIFIED",
 )
 _CLEAN_RUNTIME_EXCEPTION_CODES = frozenset({
     "PROBE_EXCEPTION_IMPORT", "PROBE_EXCEPTION_PERMISSION", "PROBE_EXCEPTION_TIMEOUT",
     "PROBE_EXCEPTION_OS", "PROBE_EXCEPTION_DATA", "PROBE_EXCEPTION_RUNTIME",
     "PROBE_EXCEPTION_OTHER",
 })
+_CLEAN_RUNTIME_RECONCILED_CODES = frozenset(
+    f"{task}_{journal}_{d5}"
+    for task in _CLEAN_RUNTIME_TASK_CODES
+    for journal in _CLEAN_RUNTIME_JOURNAL_CODES
+    for d5 in _CLEAN_RUNTIME_D5_CODES
+)
+_CLEAN_RUNTIME_PENDING_RECONCILED_CODES = frozenset(
+    f"{prefix}_{reconciled}"
+    for prefix in _CLEAN_RUNTIME_PENDING_PREFIXES
+    for reconciled in _CLEAN_RUNTIME_RECONCILED_CODES
+)
+_CLEAN_RUNTIME_PROBE_OBSERVED_CODES = frozenset({
+    *(f"DEMAND_READY_{journal}_{d5}"
+      for journal in ("JOURNAL_FRESH", "JOURNAL_COMPLETE")
+      for d5 in ("D5_ENABLED", "D5_DISABLED", "D5_ABSENT")),
+    *(f"LEGACY_PT1M_READY_JOURNAL_FRESH_{d5}"
+      for d5 in ("D5_ENABLED", "D5_DISABLED", "D5_ABSENT")),
+})
 _CLEAN_RUNTIME_PROBE_CODES = frozenset({
-    "READY", "AUTOSTART_NOT_ENROLLED", "TASK_REGISTRATION_CONFLICT",
-    "TASK_READ_UNVERIFIED", "WINDOWS_OWNER_CONTEXT_UNVERIFIED",
-    "SOURCE_CUSTODY_UNVERIFIED", "PROFILE_UNAVAILABLE", "TARGET_READ_UNVERIFIED",
-    "PENDING_STATE_CHANGED", "UNKNOWN_EFFECT", "UNKNOWN",
+    "WINDOWS_OWNER_CONTEXT_UNVERIFIED", "SOURCE_CUSTODY_UNVERIFIED",
+    "PROFILE_UNAVAILABLE", "TARGET_READ_UNVERIFIED",
+    "PENDING_STATE_CHANGED", "UNKNOWN",
     *(f"{prefix}_{outcome}"
-      for prefix in _CLEAN_RUNTIME_MARKER_PREFIXES
-      for outcome in _CLEAN_RUNTIME_MARKER_OUTCOMES),
+      for prefix in _CLEAN_RUNTIME_PENDING_PREFIXES
+      for outcome in _CLEAN_RUNTIME_TARGET_FAIL_OUTCOMES),
+    *_CLEAN_RUNTIME_RECONCILED_CODES,
+    *_CLEAN_RUNTIME_PENDING_RECONCILED_CODES,
     *_CLEAN_RUNTIME_EXCEPTION_CODES,
 })
+_CLEAN_RECONCILE_TASK_MAP = {
+    "DEMAND_READY": "DEMAND_READY",
+    "DEMAND_DISABLED": "DEMAND_DISABLED",
+    "DEMAND_NOT_READY": "DEMAND_NOT_READY",
+    "DEMAND_RUNTIME_BAD": "DEMAND_RUNTIME_BAD",
+    "LEGACY_PT1M_READY": "LEGACY_PT1M_READY",
+    "LEGACY_PT1M_DISABLED": "LEGACY_PT1M_DISABLED",
+    "LEGACY_PT1M_NOT_READY": "LEGACY_PT1M_NOT_READY",
+    "ABSENT": "TASK_ABSENT",
+    "MULTIPLE_CANDIDATES": "TASK_MULTIPLE",
+    "CONFLICT": "TASK_CONFLICT",
+    "UNAVAILABLE": "TASK_UNAVAILABLE",
+}
+_CLEAN_RECONCILE_JOURNAL_MAP = {
+    "FRESH": "JOURNAL_FRESH",
+    "COMPLETE": "JOURNAL_COMPLETE",
+    "ROLLBACK_ONLY": "ROLLBACK_ONLY",
+    "COMPLETE_ONLY": "COMPLETE_ONLY",
+    "UNVERIFIED": "JOURNAL_UNVERIFIED",
+}
+_CLEAN_RECONCILE_D5_MAP = {
+    "ENABLED_ATTESTED": "D5_ENABLED",
+    "DISABLED_ATTESTED": "D5_DISABLED",
+    "ABSENT": "D5_ABSENT",
+    "UNVERIFIED": "D5_UNVERIFIED",
+}
 
 
 def _clean_probe_exception_code(exc: BaseException) -> str:
@@ -626,7 +683,7 @@ def _observe_clean_runtime(sha: str) -> str:
 
     def classify_markers(autostart, launch):
         if autostart is None or launch is None:
-            return "MARKER_READ_UNVERIFIED"
+            return "MARKER_UNVERIFIED"
         if autostart and launch:
             return "BOTH_PENDING"
         if autostart:
@@ -647,7 +704,7 @@ def _observe_clean_runtime(sha: str) -> str:
     if read_owner() != owner:
         return "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
     # Independently observe both markers without mutating registry state, then
-    # still inspect the fixed task read-only so pending-vs-enrolled states separate.
+    # inspect the fixed WakeHub 9444 task, migration journal and D5 read-only.
     marker_state = classify_markers(
         read_marker(lambda: acquisition._clean_pending(pending)),
         read_marker(acquisition._clean_launch_pending),
@@ -661,13 +718,13 @@ def _observe_clean_runtime(sha: str) -> str:
     except (acquisition.AcquisitionBlocked, acquisition._EnrollmentHold, OSError):
         return "TARGET_READ_UNVERIFIED" if marker_state is None else f"{marker_state}_TARGET_UNAVAILABLE"
 
-    task_error = False
-    task = None
+    read_error = False
+    reconciled = None
     try:
-        task = acquisition._clean_task(owner, target, candidates, install=False)
+        reconciled = acquisition._clean_reconcile_read(owner, target, candidates)
     except (acquisition.AcquisitionBlocked, acquisition._EnrollmentHold, acquisition._Clean9444Hold, OSError):
-        task_error = True
-    if read_owner() != owner or (not task_error and task == "WINDOWS_OWNER_CONTEXT_UNVERIFIED"):
+        read_error = True
+    if read_owner() != owner or (not read_error and reconciled == {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}):
         return "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
     after_state = classify_markers(
         read_marker(lambda: acquisition._clean_pending(pending)),
@@ -675,35 +732,31 @@ def _observe_clean_runtime(sha: str) -> str:
     )
     if after_state != marker_state:
         return "PENDING_STATE_CHANGED"
-    if task == "UNKNOWN_EFFECT":
-        return "UNKNOWN_EFFECT"
-    if marker_state is None:
-        if task_error:
-            return "TASK_READ_UNVERIFIED"
-        if type(task) is not str:
+    if read_error:
+        base = "TASK_UNAVAILABLE_JOURNAL_UNVERIFIED_D5_UNVERIFIED"
+        return base if marker_state is None else f"{marker_state}_{base}"
+    if (type(reconciled) is not dict or set(reconciled) != {"task", "journal", "d5"}
+            or any(type(reconciled[k]) is not str for k in ("task", "journal", "d5"))):
+        if marker_state is None:
             return "UNKNOWN"
-        return {
-            "ALREADY_ENROLLED": "READY",
-            "AUTOSTART_NOT_ENROLLED": "AUTOSTART_NOT_ENROLLED",
-            "AUTOSTART_CONFLICT": "TASK_REGISTRATION_CONFLICT",
-            "AUTOSTART_RUNTIME_UNAVAILABLE": "TASK_READ_UNVERIFIED",
-        }.get(task, "UNKNOWN")
-    if task_error or type(task) is not str:
-        task_suffix = "TASK_UNAVAILABLE"
-    else:
-        task_suffix = {
-            "ALREADY_ENROLLED": "TASK_ENROLLED",
-            "AUTOSTART_NOT_ENROLLED": "TASK_ABSENT",
-            "AUTOSTART_CONFLICT": "TASK_CONFLICT",
-            "AUTOSTART_RUNTIME_UNAVAILABLE": "TASK_UNAVAILABLE",
-        }.get(task, "TASK_UNAVAILABLE")
-    return f"{marker_state}_{task_suffix}"
+        return f"{marker_state}_TASK_UNAVAILABLE_JOURNAL_UNVERIFIED_D5_UNVERIFIED"
+    task_code = _CLEAN_RECONCILE_TASK_MAP.get(reconciled["task"])
+    journal_code = _CLEAN_RECONCILE_JOURNAL_MAP.get(reconciled["journal"])
+    d5_code = _CLEAN_RECONCILE_D5_MAP.get(reconciled["d5"])
+    if task_code is None or journal_code is None or d5_code is None:
+        if marker_state is None:
+            return "UNKNOWN"
+        return f"{marker_state}_TASK_UNAVAILABLE_JOURNAL_UNVERIFIED_D5_UNVERIFIED"
+    if journal_code == "JOURNAL_COMPLETE" and not task_code.startswith("DEMAND_"):
+        journal_code = "JOURNAL_MISMATCH"
+    reconciled_code = f"{task_code}_{journal_code}_{d5_code}"
+    return reconciled_code if marker_state is None else f"{marker_state}_{reconciled_code}"
 
 
-def _probe_protected_clean_runtime():
+def _probe_protected_clean_runtime(event=None):
     """Project only the fixed observation from an authenticated READ workflow."""
     result = {
-        "status": "OBSERVED", "code": "UNKNOWN", "operation": _CLEAN_RUNTIME_PROBE,
+        "status": "HOLD", "code": "UNKNOWN", "operation": _CLEAN_RUNTIME_PROBE,
         "cdp_port": 9444, "exact_chat_verified": False, "wake_sent": False,
         "arbitrary_shell_enabled": False, "remote_shell_enabled": False,
     }
@@ -712,16 +765,20 @@ def _probe_protected_clean_runtime():
     try:
         try:
             _require_protected_clean_runner("issues")
+            if event is not None and parse_event(event, "read")["operation"] != _CLEAN_RUNTIME_PROBE:
+                deny("PROTECTED_HOSTOPS_ONLY")
         except Denied:
             return {**result, "code": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}
         try:
-            sha = _protected_clean_workflow_sha()
+            sha = _protected_clean_workflow_sha(allow_blank_workflow_sha=True)
         except Denied:
             return {**result, "code": "SOURCE_CUSTODY_UNVERIFIED"}
         result["source_sha"] = sha
         observed = _observe_clean_runtime(sha)
-        result["code"] = (observed if type(observed) is str and observed in _CLEAN_RUNTIME_PROBE_CODES
-                          else "UNKNOWN")
+        code = observed if type(observed) is str and observed in _CLEAN_RUNTIME_PROBE_CODES else "UNKNOWN"
+        result["code"] = code
+        if code in _CLEAN_RUNTIME_PROBE_OBSERVED_CODES:
+            result["status"] = "OBSERVED"
     except Exception as exc:
         # A failed probe can never project native output or exception text.
         code = _clean_probe_exception_code(exc)
@@ -5210,7 +5267,7 @@ def main():
         if request["operation"] == _A10_READINESS:
             result = _protected_a10_readiness(request["issue_number"])
         elif request["operation"] == _CLEAN_RUNTIME_PROBE:
-            result = _probe_protected_clean_runtime()
+            result = _probe_protected_clean_runtime(event)
         else:
             if request["operation"] == _CLEAN_AUTOSTART:
                 outcome = _install_protected_clean_autostart(event)

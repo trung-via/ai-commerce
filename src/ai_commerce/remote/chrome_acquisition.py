@@ -2753,7 +2753,7 @@ if (Test-Registration (Read-Registration)) { 'ENROLLED' } else { 'UNKNOWN_EFFECT
 """
 
 
-_CLEAN_9444_TASK_MIGRATION = _CLEAN_9444_TASK_INSPECTION + r"""
+_CLEAN_9444_D5_ATTESTATION = r"""
 $chromeExecutables = if ($env:AI_COMMERCE_TASK_CHROME_EXECUTABLES) {
     @($env:AI_COMMERCE_TASK_CHROME_EXECUTABLES | ConvertFrom-Json)
 } else { @() }
@@ -3280,9 +3280,9 @@ function Get-AttestedD5PowerShellAction($pwshPath, $argsLine, $workDir, $aiRoot,
     return 'PWSH_CMD|' + $pwshPath.ToLowerInvariant() + '|' + $ch
 }
 
-function Get-D5Attestation($d5) {
+function Get-D5Attestation($d5, [bool]$allowDisabled = $false) {
     try {
-        if (!$d5 -or !$d5.Enabled -or $d5.Name -cne 'AI-Commerce-D5-CDP-AtLogon') { return $null }
+        if (!$d5 -or (!$allowDisabled -and !$d5.Enabled) -or $d5.Name -cne 'AI-Commerce-D5-CDP-AtLogon') { return $null }
         if (!$d5.Xml -or $d5.Xml.IndexOf($name, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $d5.Xml -match '(?i)WakeHub-9444-Clean') { return $null }
         $d5Acl = [Security.AccessControl.RawSecurityDescriptor]::new($d5.GetSecurityDescriptor(7))
@@ -3301,7 +3301,7 @@ function Get-D5Attestation($d5) {
         if ($def.Actions.Context -and $def.Actions.Context -cne $p.Id) { return $null }
         if ($def.Triggers.Count -ne 1) { return $null }
         $t = $def.Triggers.Item(1)
-        if ($t.Type -ne 9 -or !$t.Enabled -or !(Test-Owner $t.UserId) -or
+        if ($t.Type -ne 9 -or (!$allowDisabled -and !$t.Enabled) -or !(Test-Owner $t.UserId) -or
             ($t.Repetition -and ($t.Repetition.Interval -or $t.Repetition.Duration))) { return $null }
         if ($def.Actions.Count -ne 1) { return $null }
         $a = $def.Actions.Item(1)
@@ -3360,7 +3360,10 @@ function Get-D5Snapshot {
     }
     return $null
 }
+"""
 
+
+_CLEAN_9444_TASK_MIGRATION = _CLEAN_9444_TASK_INSPECTION + _CLEAN_9444_D5_ATTESTATION + r"""
 $key = $null
 $rollback = 'DemandMigrationRollback'
 $completed = 'DemandMigrationComplete'
@@ -3424,6 +3427,235 @@ try {
 """
 
 
+_CLEAN_9444_TASK_RECONCILE_SCRIPT = _CLEAN_9444_TASK_INSPECTION + _CLEAN_9444_D5_ATTESTATION + r"""
+function Test-ReconcileRegistrationBase($reg) {
+    if (!$reg) { return $false }
+    $acl = [Security.AccessControl.RawSecurityDescriptor]::new($reg.GetSecurityDescriptor(7))
+    $want = [Security.AccessControl.RawSecurityDescriptor]::new($sddl)
+    if (!$acl.Owner -or $acl.Owner.Value -cne $sid -or
+        $acl.GetSddlForm('Access') -cne $want.GetSddlForm('Access')) { return $false }
+    $definition = $reg.Definition
+    $principal = $definition.Principal
+    if ($principal.Id -cne $expected.Principal.Id -or !(Test-Owner $principal.UserId) -or
+        $principal.LogonType -ne 3 -or
+        $principal.RunLevel -ne 0 -or $principal.GroupId -or $definition.Actions.Count -ne 1 -or
+        $definition.Actions.Item(1).Type -ne 0 -or
+        $definition.Actions.Context -cne $expected.Actions.Context) {
+        return $false
+    }
+    foreach ($key in @('AllowDemandStart', 'AllowHardTerminate', 'DisallowStartIfOnBatteries',
+        'ExecutionTimeLimit', 'Hidden', 'MultipleInstances', 'RestartCount', 'RestartInterval',
+        'RunOnlyIfIdle', 'RunOnlyIfNetworkAvailable', 'StartWhenAvailable',
+        'StopIfGoingOnBatteries', 'WakeToRun', 'DeleteExpiredTaskAfter')) {
+        if ($definition.Settings.$key -cne $expected.Settings.$key) { return $false }
+    }
+    if ($reg.Enabled) {
+        if ($definition.Settings.Enabled -cne $expected.Settings.Enabled) { return $false }
+    } else {
+        if ($null -ne $definition.Settings.Enabled -and $definition.Settings.Enabled -ne $false) { return $false }
+    }
+    return $true
+}
+
+function Test-ReconcileDemandAction($reg) {
+    if (!$trustedPowerShellSpecs.Count) { return $false }
+    $a = $reg.Definition.Actions.Item(1)
+    if (!$a -or $a.Path -ine $action.Path -or $a.WorkingDirectory -ine $action.WorkingDirectory -or !$a.Arguments) {
+        return $false
+    }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $argHash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes([string]$a.Arguments))).Replace('-', '')
+    } finally { $sha.Dispose() }
+    $matched = @($trustedPowerShellSpecs | Where-Object { [string]$_.demand_sha256 -ieq $argHash })
+    return $matched.Count -eq 1 -and (Test-TrustedPowerShell ([string]$matched[0].path))
+}
+
+function Test-ReconcileLegacyTriggerAndAction($reg) {
+    if ($reg.Definition.Triggers.Count -ne 1) { return $false }
+    $t = $reg.Definition.Triggers.Item(1)
+    if ($t.Type -ne 9 -or ($reg.Enabled -and !$t.Enabled) -or !(Test-Owner $t.UserId) -or $t.Delay -or
+        $t.StartBoundary -or $t.EndBoundary -or $t.Repetition.Duration -or
+        $t.Repetition.StopAtDurationEnd -or [string]$t.ExecutionTimeLimit -cnotin @('', 'PT72H')) {
+        return $false
+    }
+    try {
+        if ([Xml.XmlConvert]::ToTimeSpan($t.Repetition.Interval) -ne [TimeSpan]::FromMinutes(1)) {
+            return $false
+        }
+    } catch { return $false }
+    $a = $reg.Definition.Actions.Item(1)
+    if (!$env:AI_COMMERCE_TASK_LEGACY_ARGUMENTS -or
+        $a.Arguments -cne $env:AI_COMMERCE_TASK_LEGACY_ARGUMENTS) { return $false }
+    if (!$a.Path -or !$a.WorkingDirectory) { return $false }
+    $validWorkDir = ($a.WorkingDirectory -in $trustedPowerShellDirs) -or
+        (Test-HistoricalLegacyWorkDir $a.WorkingDirectory)
+    if (!$validWorkDir) { return $false }
+    return Test-TrustedPowerShell $a.Path
+}
+
+function Get-ReconcileJournalState {
+    $key = $null
+    try {
+        $key = Open-MigrationState $false
+        if (!$key) { return 'FRESH' }
+        $names = @($key.GetValueNames())
+        $hasRollback = 'DemandMigrationRollback' -in $names
+        $hasComplete = 'DemandMigrationComplete' -in $names
+        if (!$hasRollback -and !$hasComplete) { return 'FRESH' }
+        if ($hasRollback -and !$hasComplete) { return 'ROLLBACK_ONLY' }
+        if (!$hasRollback -and $hasComplete) { return 'COMPLETE_ONLY' }
+        $rbVal = $key.GetValue('DemandMigrationRollback')
+        $cmVal = $key.GetValue('DemandMigrationComplete')
+        if ($key.PSObject.Methods['GetValueKind']) {
+            if ($key.GetValueKind('DemandMigrationRollback') -ne [Microsoft.Win32.RegistryValueKind]::String -or
+                $key.GetValueKind('DemandMigrationComplete') -ne [Microsoft.Win32.RegistryValueKind]::DWord) {
+                return 'UNVERIFIED'
+            }
+        }
+        if ($rbVal -isnot [string] -or [string]::IsNullOrWhiteSpace($rbVal) -or $rbVal.Length -gt 131072 -or
+            $cmVal -isnot [int] -or $cmVal -ne 1) {
+            return 'UNVERIFIED'
+        }
+        try {
+            $meta = $rbVal | ConvertFrom-Json -ErrorAction Stop
+            if (!$meta -or $meta.Xml -isnot [string] -or !$meta.Xml -or
+                $meta.SecurityDescriptor -isnot [string] -or !$meta.SecurityDescriptor) {
+                return 'UNVERIFIED'
+            }
+        } catch { return 'UNVERIFIED' }
+        return 'COMPLETE'
+    } catch { return 'UNVERIFIED' }
+    finally { if ($key) { $key.Dispose() } }
+}
+
+function Get-ReconcileRelevantTasks {
+    $all = [Collections.Generic.List[object]]::new()
+    foreach ($t in @($folder.GetTasks(1))) {
+        if ($t) { $all.Add([pscustomobject]@{ Task = $t; Root = $true }) }
+    }
+    foreach ($sub in @($folder.GetFolders(0))) {
+        if ($sub -and $sub.Name -and ([string]$sub.Name) -match '(?i)(AI-Commerce|WakeHub|D5)') {
+            foreach ($t in @($sub.GetTasks(1))) {
+                if ($t) { $all.Add([pscustomobject]@{ Task = $t; Root = $false }) }
+            }
+        }
+    }
+    return ,$all.ToArray()
+}
+
+$taskState = 'UNAVAILABLE'
+$d5State = 'UNVERIFIED'
+$journalState = Get-ReconcileJournalState
+
+try {
+    $allTasks = Get-ReconcileRelevantTasks
+    $wakeCandidates = [Collections.Generic.List[object]]::new()
+    $d5Candidates = [Collections.Generic.List[object]]::new()
+    foreach ($item in $allTasks) {
+        $tName = [string]$item.Task.Name
+        if ($tName -match '(?i)(WakeHub.*9444|9444.*WakeHub|AI-Commerce-WakeHub)') {
+            $wakeCandidates.Add($item)
+        } elseif ($tName -match '(?i)(AI-Commerce-D5-CDP|D5-CDP-AtLogon)') {
+            $d5Candidates.Add($item)
+        } elseif ($tName -like 'AI-Commerce-*') {
+            try {
+                $otherXml = [string]$item.Task.Xml
+                $mentionsClean = $otherXml -match '(?i)WakeHub-9444-Clean' -or
+                    $otherXml.IndexOf($name, [StringComparison]::OrdinalIgnoreCase) -ge 0
+                $claims9444 = $false
+                foreach ($act in @($item.Task.Definition.Actions)) {
+                    if ($act -and $act.Type -eq 0 -and
+                        ([string]$act.Arguments -match '(?i)(--remote-debugging-port\s*[=:]\s*9444|WakeHub-9444-Clean)')) {
+                        $claims9444 = $true
+                        break
+                    }
+                }
+                if ($mentionsClean -or $claims9444) {
+                    $wakeCandidates.Add($item)
+                }
+            } catch {
+                $wakeCandidates.Add($item)
+            }
+        }
+    }
+
+    if ($wakeCandidates.Count -gt 1 -or
+        ($wakeCandidates.Count -eq 1 -and (!$wakeCandidates[0].Root -or $wakeCandidates[0].Task.Name -cne $name)) -or
+        ($registered -and $wakeCandidates.Count -ne 1)) {
+        $taskState = 'MULTIPLE_CANDIDATES'
+    } elseif (!$registered) {
+        $taskState = 'ABSENT'
+    } elseif (!(Test-ReconcileRegistrationBase $registered)) {
+        $taskState = 'CONFLICT'
+    } elseif ($registered.Definition.Triggers.Count -eq 0) {
+        if (!(Test-ReconcileDemandAction $registered)) {
+            $taskState = 'CONFLICT'
+        } elseif (!$registered.Enabled) {
+            if ($registered.State -eq 1 -and $registered.GetInstances(0).Count -eq 0) {
+                $taskState = 'DEMAND_DISABLED'
+            } else {
+                $taskState = 'DEMAND_NOT_READY'
+            }
+        } elseif (!(Test-DemandRuntime)) {
+            $taskState = 'DEMAND_RUNTIME_BAD'
+        } elseif (!(Test-Ready $registered)) {
+            $taskState = 'DEMAND_NOT_READY'
+        } else {
+            $taskState = 'DEMAND_READY'
+        }
+    } elseif ($registered.Definition.Triggers.Count -eq 1) {
+        if (!(Test-ReconcileLegacyTriggerAndAction $registered)) {
+            $taskState = 'CONFLICT'
+        } elseif (!$registered.Enabled) {
+            if ($registered.State -eq 1 -and $registered.GetInstances(0).Count -eq 0) {
+                $taskState = 'LEGACY_PT1M_DISABLED'
+            } else {
+                $taskState = 'LEGACY_PT1M_NOT_READY'
+            }
+        } elseif (!(Test-Ready $registered)) {
+            $taskState = 'LEGACY_PT1M_NOT_READY'
+        } else {
+            $taskState = 'LEGACY_PT1M_READY'
+        }
+    } else {
+        $taskState = 'CONFLICT'
+    }
+
+    $d5Task = Read-Registration 'AI-Commerce-D5-CDP-AtLogon'
+    if ($d5Candidates.Count -gt 1 -or
+        ($d5Candidates.Count -eq 1 -and (!$d5Candidates[0].Root -or $d5Candidates[0].Task.Name -cne 'AI-Commerce-D5-CDP-AtLogon')) -or
+        ($d5Task -and $d5Candidates.Count -ne 1)) {
+        $d5State = 'UNVERIFIED'
+    } elseif (!$d5Task) {
+        $d5State = 'ABSENT'
+    } elseif ($d5Task.Enabled) {
+        if ($null -ne (Get-D5Attestation $d5Task)) { $d5State = 'ENABLED_ATTESTED' }
+        else { $d5State = 'UNVERIFIED' }
+    } else {
+        if ($d5Task.State -eq 1 -and $d5Task.GetInstances(0).Count -eq 0 -and
+            $null -ne (Get-D5Attestation $d5Task $true)) {
+            $d5State = 'DISABLED_ATTESTED'
+        } else {
+            $d5State = 'UNVERIFIED'
+        }
+    }
+} catch {
+    $taskState = 'UNAVAILABLE'
+    $d5State = 'UNVERIFIED'
+}
+
+$afterSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$afterSession = [Diagnostics.Process]::GetCurrentProcess().SessionId
+if ($afterSid -cne $sid -or $afterSession -le 0 -or $afterSession -ne $session) {
+    @{ error = 'WINDOWS_OWNER_CONTEXT_UNVERIFIED' } | ConvertTo-Json -Compress
+    exit
+}
+
+@{ task = $taskState; journal = $journalState; d5 = $d5State } | ConvertTo-Json -Compress
+"""
+
+
 def _clean_task_environment(owner: tuple[Path, int, str], target: _ChromeTarget,
                             candidates: tuple[Path, ...], powershell: Path, *,
                             trusted: tuple[Path, ...] | None = None,
@@ -3474,6 +3706,67 @@ def _clean_task_powershell(bootstrap: Path) -> Path:
     if result.returncode or len(result.stdout) > 4096:
         raise AcquisitionBlocked("POWERSHELL_UNAVAILABLE")
     return Path(result.stdout.decode("utf-8").rstrip("\r\n"))
+
+
+_CLEAN_RECONCILE_TASK_VALUES = frozenset({
+    "DEMAND_READY", "DEMAND_DISABLED", "DEMAND_NOT_READY", "DEMAND_RUNTIME_BAD",
+    "LEGACY_PT1M_READY", "LEGACY_PT1M_DISABLED", "LEGACY_PT1M_NOT_READY",
+    "ABSENT", "MULTIPLE_CANDIDATES", "CONFLICT", "UNAVAILABLE",
+})
+_CLEAN_RECONCILE_JOURNAL_VALUES = frozenset({
+    "FRESH", "COMPLETE", "ROLLBACK_ONLY", "COMPLETE_ONLY", "UNVERIFIED",
+})
+_CLEAN_RECONCILE_D5_VALUES = frozenset({
+    "ENABLED_ATTESTED", "DISABLED_ATTESTED", "ABSENT", "UNVERIFIED",
+})
+
+
+def _clean_reconcile_read(owner: tuple[Path, int, str], target: _ChromeTarget,
+                          candidates: tuple[Path, ...]) -> dict[str, str]:
+    """Read-only post-UNKNOWN reconciler for WakeHub 9444 task, journal and D5."""
+    trusted = _trusted_powershells()
+    if len(trusted) == 1:
+        powershell = trusted[0]
+    else:
+        try:
+            powershell = _powershell()
+            if powershell not in trusted:
+                powershell = trusted[0]
+        except AcquisitionBlocked:
+            powershell = trusted[0]
+    child_env = _clean_task_environment(owner, target, candidates, powershell,
+                                        trusted=trusted, include_legacy=True)
+    stdin_runner = (
+        "[Console]::InputEncoding=[Text.UTF8Encoding]::new(); "
+        "& ([ScriptBlock]::Create([Console]::In.ReadToEnd()))"
+    )
+    fallback = {"task": "UNAVAILABLE", "journal": "UNVERIFIED", "d5": "UNVERIFIED"}
+    try:
+        result = subprocess.run(
+            [str(powershell), "-NoProfile", "-NonInteractive", "-Command", stdin_runner],
+            input=_CLEAN_9444_TASK_RECONCILE_SCRIPT.encode("utf-8"),
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=25, check=False, env=child_env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode or not 0 < len(result.stdout) <= 512:
+            return fallback
+        raw = result.stdout.decode("utf-8").strip()
+        if raw == "WINDOWS_OWNER_CONTEXT_UNVERIFIED":
+            return {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}
+        data = json.loads(raw)
+        if type(data) is not dict:
+            return fallback
+        if data == {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}:
+            return {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}
+        if (set(data) == {"task", "journal", "d5"}
+                and data["task"] in _CLEAN_RECONCILE_TASK_VALUES
+                and data["journal"] in _CLEAN_RECONCILE_JOURNAL_VALUES
+                and data["d5"] in _CLEAN_RECONCILE_D5_VALUES):
+            return {"task": data["task"], "journal": data["journal"], "d5": data["d5"]}
+    except (OSError, subprocess.TimeoutExpired, UnicodeError, ValueError):
+        pass
+    return fallback
 
 
 def _clean_task(owner: tuple[Path, int, str], target: _ChromeTarget,

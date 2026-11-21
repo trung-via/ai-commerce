@@ -3340,6 +3340,11 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         self.mock(self.acq, "_clean_pending", side_effect=self.pending.__contains__)
         self.record = self.mock(self.acq, "_clean_record_pending", side_effect=self.record_pending)
         self.task = self.mock(self.acq, "_clean_task", return_value="ALREADY_ENROLLED")
+        self.reconcile = self.mock(
+            self.acq,
+            "_clean_reconcile_read",
+            return_value={"task": "DEMAND_READY", "journal": "COMPLETE", "d5": "ENABLED_ATTESTED"},
+        )
         self.probe = self.mock(self.acq, "_probe_cdp")
         self.spawn = self.mock(self.acq.subprocess, "Popen", side_effect=AssertionError("direct spawn"))
         self.native_run = self.mock(self.acq.subprocess, "run", side_effect=AssertionError("native subprocess"))
@@ -3406,13 +3411,43 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         ):
             with self.subTest(name=name), patch.dict(self.env, {name: value}):
                 receipt = self.invoke_probe()
-                self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", code))
+                self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", code))
                 self.assertNotIn("source_sha", receipt)
         with patch.object(hostops, "PERSONAL_PUBLIC_FIELDS", hostops.PERSONAL_PUBLIC_FIELDS - {"source_sha"}):
             self.assertEqual(self.invoke_probe()["code"], "PUBLIC_TRANSPORT_GAP")
         self.session.assert_not_called()
         self.source.assert_not_called()
+        self.reconcile.assert_not_called()
         self.task.assert_not_called()
+
+    def test_runtime_probe_allows_blank_workflow_sha_without_weakening_a10_or_source_custody(self):
+        root, workflow, source, peer, git = self._clean_source_fixture()
+        self.source.side_effect = self.real_source
+        with patch.dict(hostops.ROOTS, workspace=root), \
+                patch.dict(self.env, GITHUB_WORKFLOW_SHA=""), \
+                patch.object(hostops, "__file__", workflow / "src/ai_commerce/hostops_v3/personal.py"), \
+                patch.object(self.acq, "__file__", peer), \
+                patch.object(hostops, "_git", side_effect=lambda *args: git[args]):
+            receipt = self.invoke_probe()
+            self.assertEqual(receipt, {
+                "status": "OBSERVED",
+                "code": "DEMAND_READY_JOURNAL_COMPLETE_D5_ENABLED",
+                "operation": "clean_9444_runtime_probe",
+                "cdp_port": 9444,
+                "source_sha": self.sha,
+                "exact_chat_verified": False,
+                "wake_sent": False,
+                "arbitrary_shell_enabled": False,
+                "remote_shell_enabled": False,
+            })
+            # A10-O2b still rejects blank GITHUB_WORKFLOW_SHA.
+            with self.assertRaisesRegex(hostops.Denied, "^PROTECTED_HOSTOPS_ONLY$"):
+                hostops._protected_clean_workflow_sha()
+            a10 = hostops._protected_a10_readiness(17)
+            self.assertEqual((a10["status"], a10["code"]), ("BLOCKED", "A10_PROTECTED_WORKFLOW_REQUIRED"))
+        self.reconcile.assert_called_once_with(self.owner, self.target, self.candidates)
+        self.task.assert_not_called()
+        self.record.assert_not_called()
 
     def test_runtime_probe_reuses_source_custody_and_only_reads_task(self):
         root, workflow, source, peer, git = self._clean_source_fixture()
@@ -3427,67 +3462,128 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
                 (("status", "--porcelain=v1", "--untracked-files=all"), "?? src/PRIVATE.py"),
             ):
                 with patch.dict(git, {args: value}):
-                    self.assertEqual(self.invoke_probe()["code"], "SOURCE_CUSTODY_UNVERIFIED")
+                    receipt = self.invoke_probe()
+                    self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "SOURCE_CUSTODY_UNVERIFIED"))
             with patch.object(hostops, "_is_reparse", side_effect=lambda path: path == source):
-                self.assertEqual(self.invoke_probe()["code"], "SOURCE_CUSTODY_UNVERIFIED")
+                receipt = self.invoke_probe()
+                self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "SOURCE_CUSTODY_UNVERIFIED"))
+            self.reconcile.assert_not_called()
             self.task.assert_not_called()
 
             self.assertEqual(self.invoke_probe(), {
-                "status": "OBSERVED", "code": "READY", "operation": "clean_9444_runtime_probe",
-                "cdp_port": 9444, "source_sha": self.sha, "exact_chat_verified": False,
-                "wake_sent": False, "arbitrary_shell_enabled": False, "remote_shell_enabled": False,
+                "status": "OBSERVED",
+                "code": "DEMAND_READY_JOURNAL_COMPLETE_D5_ENABLED",
+                "operation": "clean_9444_runtime_probe",
+                "cdp_port": 9444,
+                "source_sha": self.sha,
+                "exact_chat_verified": False,
+                "wake_sent": False,
+                "arbitrary_shell_enabled": False,
+                "remote_shell_enabled": False,
             })
-        self.task.assert_called_once_with(self.owner, self.target, self.candidates, install=False)
-        self.inventory.assert_not_called()
-        self.record.assert_not_called()
-        self.probe.assert_not_called()
-
-    def test_runtime_probe_never_reports_ready_with_ambiguous_effect_or_owner(self):
-        self.session.return_value = 0
-        self.assertEqual(self.invoke_probe()["code"], "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
-        self.source.assert_not_called()
+        self.reconcile.assert_called_once_with(self.owner, self.target, self.candidates)
         self.task.assert_not_called()
-        self.session.return_value = 7
-        self.pending.add("AutostartPending")
-        self.assertEqual(self.invoke_probe()["code"], "AUTOSTART_PENDING_TASK_ENROLLED")
-        self.assertEqual(self.pending, {"AutostartPending"})
-        self.pending.clear()
-        self.launch_pending.return_value = True
-        self.assertEqual(self.invoke_probe()["code"], "LAUNCH_PENDING_TASK_ENROLLED")
-        self.launch_pending.return_value = False
-        self.assertEqual(self.task.call_args_list, [
-            call(self.owner, self.target, self.candidates, install=False),
-            call(self.owner, self.target, self.candidates, install=False),
-        ])
+        self.inventory.assert_not_called()
+        self.record.assert_not_called()
+        self.probe.assert_not_called()
 
-        for reply, code in (("AUTOSTART_NOT_ENROLLED", "AUTOSTART_NOT_ENROLLED"),
-                            ("AUTOSTART_RUNTIME_UNAVAILABLE", "TASK_READ_UNVERIFIED"),
-                            ("AUTOSTART_CONFLICT", "TASK_REGISTRATION_CONFLICT"),
-                            ("WINDOWS_OWNER_CONTEXT_UNVERIFIED", "WINDOWS_OWNER_CONTEXT_UNVERIFIED"),
-                            ("UNKNOWN_EFFECT", "UNKNOWN_EFFECT"), ("PRIVATE", "UNKNOWN")):
+    def test_runtime_probe_distinguishes_demand_legacy_journal_d5_and_holds_on_ambiguity(self):
+        self.session.return_value = 0
+        receipt = self.invoke_probe()
+        self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "WINDOWS_OWNER_CONTEXT_UNVERIFIED"))
+        self.source.assert_not_called()
+        self.reconcile.assert_not_called()
+        self.session.return_value = 7
+
+        cases = (
+            ({"task": "DEMAND_READY", "journal": "COMPLETE", "d5": "ENABLED_ATTESTED"},
+             "OBSERVED", "DEMAND_READY_JOURNAL_COMPLETE_D5_ENABLED"),
+            ({"task": "DEMAND_READY", "journal": "FRESH", "d5": "DISABLED_ATTESTED"},
+             "OBSERVED", "DEMAND_READY_JOURNAL_FRESH_D5_DISABLED"),
+            ({"task": "DEMAND_READY", "journal": "COMPLETE", "d5": "ABSENT"},
+             "OBSERVED", "DEMAND_READY_JOURNAL_COMPLETE_D5_ABSENT"),
+            ({"task": "LEGACY_PT1M_READY", "journal": "FRESH", "d5": "ENABLED_ATTESTED"},
+             "OBSERVED", "LEGACY_PT1M_READY_JOURNAL_FRESH_D5_ENABLED"),
+            ({"task": "LEGACY_PT1M_READY", "journal": "FRESH", "d5": "DISABLED_ATTESTED"},
+             "OBSERVED", "LEGACY_PT1M_READY_JOURNAL_FRESH_D5_DISABLED"),
+            # Partial/ambiguous/mismatched journal and unverified D5 must HOLD.
+            ({"task": "DEMAND_READY", "journal": "ROLLBACK_ONLY", "d5": "ENABLED_ATTESTED"},
+             "HOLD", "DEMAND_READY_ROLLBACK_ONLY_D5_ENABLED"),
+            ({"task": "DEMAND_READY", "journal": "COMPLETE_ONLY", "d5": "ENABLED_ATTESTED"},
+             "HOLD", "DEMAND_READY_COMPLETE_ONLY_D5_ENABLED"),
+            ({"task": "DEMAND_READY", "journal": "UNVERIFIED", "d5": "ENABLED_ATTESTED"},
+             "HOLD", "DEMAND_READY_JOURNAL_UNVERIFIED_D5_ENABLED"),
+            ({"task": "LEGACY_PT1M_READY", "journal": "ROLLBACK_ONLY", "d5": "ENABLED_ATTESTED"},
+             "HOLD", "LEGACY_PT1M_READY_ROLLBACK_ONLY_D5_ENABLED"),
+            ({"task": "LEGACY_PT1M_READY", "journal": "COMPLETE", "d5": "ENABLED_ATTESTED"},
+             "HOLD", "LEGACY_PT1M_READY_JOURNAL_MISMATCH_D5_ENABLED"),
+            ({"task": "ABSENT", "journal": "COMPLETE", "d5": "ENABLED_ATTESTED"},
+             "HOLD", "TASK_ABSENT_JOURNAL_MISMATCH_D5_ENABLED"),
+            ({"task": "DEMAND_READY", "journal": "COMPLETE", "d5": "UNVERIFIED"},
+             "HOLD", "DEMAND_READY_JOURNAL_COMPLETE_D5_UNVERIFIED"),
+            ({"task": "LEGACY_PT1M_READY", "journal": "FRESH", "d5": "UNVERIFIED"},
+             "HOLD", "LEGACY_PT1M_READY_JOURNAL_FRESH_D5_UNVERIFIED"),
+            # Absent/disabled/not-ready/runtime-bad/multiple/conflict/unavailable must HOLD.
+            ({"task": "DEMAND_DISABLED", "journal": "COMPLETE", "d5": "ENABLED_ATTESTED"},
+             "HOLD", "DEMAND_DISABLED_JOURNAL_COMPLETE_D5_ENABLED"),
+            ({"task": "DEMAND_NOT_READY", "journal": "COMPLETE", "d5": "ENABLED_ATTESTED"},
+             "HOLD", "DEMAND_NOT_READY_JOURNAL_COMPLETE_D5_ENABLED"),
+            ({"task": "DEMAND_RUNTIME_BAD", "journal": "COMPLETE", "d5": "ENABLED_ATTESTED"},
+             "HOLD", "DEMAND_RUNTIME_BAD_JOURNAL_COMPLETE_D5_ENABLED"),
+            ({"task": "LEGACY_PT1M_DISABLED", "journal": "FRESH", "d5": "ENABLED_ATTESTED"},
+             "HOLD", "LEGACY_PT1M_DISABLED_JOURNAL_FRESH_D5_ENABLED"),
+            ({"task": "LEGACY_PT1M_NOT_READY", "journal": "FRESH", "d5": "ENABLED_ATTESTED"},
+             "HOLD", "LEGACY_PT1M_NOT_READY_JOURNAL_FRESH_D5_ENABLED"),
+            ({"task": "ABSENT", "journal": "FRESH", "d5": "ENABLED_ATTESTED"},
+             "HOLD", "TASK_ABSENT_JOURNAL_FRESH_D5_ENABLED"),
+            ({"task": "MULTIPLE_CANDIDATES", "journal": "FRESH", "d5": "ENABLED_ATTESTED"},
+             "HOLD", "TASK_MULTIPLE_JOURNAL_FRESH_D5_ENABLED"),
+            ({"task": "CONFLICT", "journal": "FRESH", "d5": "ENABLED_ATTESTED"},
+             "HOLD", "TASK_CONFLICT_JOURNAL_FRESH_D5_ENABLED"),
+            ({"task": "UNAVAILABLE", "journal": "UNVERIFIED", "d5": "UNVERIFIED"},
+             "HOLD", "TASK_UNAVAILABLE_JOURNAL_UNVERIFIED_D5_UNVERIFIED"),
+            ({"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"},
+             "HOLD", "WINDOWS_OWNER_CONTEXT_UNVERIFIED"),
+            ({"task": "PRIVATE", "journal": "FRESH", "d5": "ABSENT"},
+             "HOLD", "UNKNOWN"),
+            ("PRIVATE", "HOLD", "UNKNOWN"),
+        )
+        for reply, expected_status, expected_code in cases:
             with self.subTest(reply=reply):
-                self.task.return_value = reply
-                self.assertEqual(self.invoke_probe()["code"], code)
-        self.task.return_value = "ALREADY_ENROLLED"
+                self.reconcile.reset_mock()
+                self.reconcile.return_value = reply
+                receipt = self.invoke_probe()
+                self.assertEqual((receipt["status"], receipt["code"]), (expected_status, expected_code))
+                self.assertIn(receipt["code"], hostops._CLEAN_RUNTIME_PROBE_CODES)
+                self.assertRegex(receipt["code"], r"^[A-Z0-9_]{2,96}$")
+                self.reconcile.assert_called_once_with(self.owner, self.target, self.candidates)
+
+        self.reconcile.return_value = {"task": "DEMAND_READY", "journal": "COMPLETE", "d5": "ENABLED_ATTESTED"}
         self.session.side_effect = (7, 7, 8)
-        self.assertEqual(self.invoke_probe()["code"], "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+        receipt = self.invoke_probe()
+        self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "WINDOWS_OWNER_CONTEXT_UNVERIFIED"))
+        self.task.assert_not_called()
         self.record.assert_not_called()
         self.inventory.assert_not_called()
         self.probe.assert_not_called()
 
-    def test_runtime_probe_separates_pending_markers_and_task_states_read_only(self):
+    def test_runtime_probe_separates_pending_markers_and_reconciled_states_read_only(self):
         expected_keys = {
             "status", "code", "operation", "cdp_port", "source_sha",
             "exact_chat_verified", "wake_sent", "arbitrary_shell_enabled", "remote_shell_enabled",
         }
-        task_cases = (
-            ("ALREADY_ENROLLED", None, "TASK_ENROLLED"),
-            ("AUTOSTART_NOT_ENROLLED", None, "TASK_ABSENT"),
-            ("AUTOSTART_CONFLICT", None, "TASK_CONFLICT"),
-            ("AUTOSTART_RUNTIME_UNAVAILABLE", None, "TASK_UNAVAILABLE"),
-            ("PRIVATE task reply", None, "TASK_UNAVAILABLE"),
-            (None, OSError("PRIVATE Schedule.Service error"), "TASK_UNAVAILABLE"),
-            (None, self.acq._Clean9444Hold("PRIVATE task hold"), "TASK_UNAVAILABLE"),
+        reconcile_cases = (
+            ({"task": "DEMAND_READY", "journal": "COMPLETE", "d5": "ENABLED_ATTESTED"},
+             None, "DEMAND_READY_JOURNAL_COMPLETE_D5_ENABLED"),
+            ({"task": "LEGACY_PT1M_READY", "journal": "ROLLBACK_ONLY", "d5": "DISABLED_ATTESTED"},
+             None, "LEGACY_PT1M_READY_ROLLBACK_ONLY_D5_DISABLED"),
+            ({"task": "ABSENT", "journal": "FRESH", "d5": "ABSENT"},
+             None, "TASK_ABSENT_JOURNAL_FRESH_D5_ABSENT"),
+            ({"task": "CONFLICT", "journal": "COMPLETE_ONLY", "d5": "UNVERIFIED"},
+             None, "TASK_CONFLICT_COMPLETE_ONLY_D5_UNVERIFIED"),
+            ("PRIVATE task reply", None, "TASK_UNAVAILABLE_JOURNAL_UNVERIFIED_D5_UNVERIFIED"),
+            (None, OSError("PRIVATE Schedule.Service error"), "TASK_UNAVAILABLE_JOURNAL_UNVERIFIED_D5_UNVERIFIED"),
+            (None, self.acq._Clean9444Hold("PRIVATE task hold"), "TASK_UNAVAILABLE_JOURNAL_UNVERIFIED_D5_UNVERIFIED"),
         )
         marker_cases = (
             ("autostart_only", {"AutostartPending"}, False, "AUTOSTART_PENDING"),
@@ -3495,34 +3591,33 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
             ("both_markers", {"AutostartPending"}, True, "BOTH_PENDING"),
         )
         for label, autostart_set, launch_value, prefix in marker_cases:
-            for reply, error, suffix in task_cases:
+            for reply, error, suffix in reconcile_cases:
                 with self.subTest(marker=label, reply=reply, error=type(error).__name__ if error else None):
                     self.pending.clear()
                     self.pending.update(autostart_set)
                     self.launch_pending.return_value = launch_value
-                    self.task.reset_mock()
-                    self.task.side_effect = error
-                    self.task.return_value = reply
+                    self.reconcile.reset_mock()
+                    self.reconcile.side_effect = error
+                    self.reconcile.return_value = reply
                     receipt = self.invoke_probe()
                     expected_code = f"{prefix}_{suffix}"
                     self.assertEqual(set(receipt), expected_keys)
-                    self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", expected_code))
-                    self.assertNotEqual(receipt["code"], "READY")
+                    self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", expected_code))
                     self.assertIn(receipt["code"], hostops._CLEAN_RUNTIME_PROBE_CODES)
-                    self.assertRegex(receipt["code"], r"^[A-Z_]{2,64}$")
+                    self.assertRegex(receipt["code"], r"^[A-Z0-9_]{2,96}$")
                     self.assertEqual(receipt["cdp_port"], 9444)
                     self.assertEqual(receipt["source_sha"], self.sha)
                     self.assertFalse(receipt["exact_chat_verified"])
                     self.assertFalse(receipt["wake_sent"])
                     self.assertFalse(receipt["arbitrary_shell_enabled"])
                     self.assertFalse(receipt["remote_shell_enabled"])
-                    self.task.assert_called_once_with(self.owner, self.target, self.candidates, install=False)
+                    self.reconcile.assert_called_once_with(self.owner, self.target, self.candidates)
                     # Read-only guarantee: markers stay intact and WRITE still HOLDs.
                     self.assertEqual(self.pending, autostart_set)
         self.pending.clear()
         self.pending.add("AutostartPending")
         self.launch_pending.return_value = False
-        self.task.side_effect = None
+        self.reconcile.side_effect = None
         self.task.return_value = "ALREADY_ENROLLED"
         self.assertEqual(self.invoke()["code"], "UNKNOWN_EFFECT")
         self.record.assert_not_called()
@@ -3530,23 +3625,27 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         self.probe.assert_not_called()
 
     def test_runtime_probe_handles_marker_read_failures_target_errors_and_state_changes(self):
-        # Marker read failure still observes the scheduled task read-only.
+        # Marker read failure still observes task/journal/D5 read-only and HOLDs.
         for reply, expected in (
-            ("ALREADY_ENROLLED", "MARKER_READ_UNVERIFIED_TASK_ENROLLED"),
-            ("AUTOSTART_NOT_ENROLLED", "MARKER_READ_UNVERIFIED_TASK_ABSENT"),
-            ("AUTOSTART_CONFLICT", "MARKER_READ_UNVERIFIED_TASK_CONFLICT"),
-            ("AUTOSTART_RUNTIME_UNAVAILABLE", "MARKER_READ_UNVERIFIED_TASK_UNAVAILABLE"),
+            ({"task": "DEMAND_READY", "journal": "COMPLETE", "d5": "ENABLED_ATTESTED"},
+             "MARKER_UNVERIFIED_DEMAND_READY_JOURNAL_COMPLETE_D5_ENABLED"),
+            ({"task": "ABSENT", "journal": "FRESH", "d5": "ABSENT"},
+             "MARKER_UNVERIFIED_TASK_ABSENT_JOURNAL_FRESH_D5_ABSENT"),
+            ({"task": "CONFLICT", "journal": "ROLLBACK_ONLY", "d5": "UNVERIFIED"},
+             "MARKER_UNVERIFIED_TASK_CONFLICT_ROLLBACK_ONLY_D5_UNVERIFIED"),
+            ({"task": "UNAVAILABLE", "journal": "UNVERIFIED", "d5": "UNVERIFIED"},
+             "MARKER_UNVERIFIED_TASK_UNAVAILABLE_JOURNAL_UNVERIFIED_D5_UNVERIFIED"),
         ):
             with self.subTest(reply=reply), patch.object(
                 self.acq, "_clean_pending", side_effect=PermissionError("PRIVATE HKCU\\Software\\AI-Commerce")
             ):
-                self.task.reset_mock()
-                self.task.return_value = reply
+                self.reconcile.reset_mock()
+                self.reconcile.return_value = reply
                 receipt = self.invoke_probe()
-                self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", expected))
+                self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", expected))
                 self.assertIn(receipt["code"], hostops._CLEAN_RUNTIME_PROBE_CODES)
                 self.assertNotIn("HKCU", json.dumps(receipt))
-                self.task.assert_called_once_with(self.owner, self.target, self.candidates, install=False)
+                self.reconcile.assert_called_once_with(self.owner, self.target, self.candidates)
 
         # Pending marker with target/profile unavailable skips task read and preserves marker visibility.
         self.pending.add("AutostartPending")
@@ -3556,32 +3655,34 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
             (OSError("PRIVATE profile path"), "AUTOSTART_PENDING_TARGET_UNAVAILABLE"),
         ):
             with self.subTest(expected=expected):
-                self.task.reset_mock()
+                self.reconcile.reset_mock()
                 self.target_read.side_effect = exc
                 receipt = self.invoke_probe()
-                self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", expected))
-                self.task.assert_not_called()
+                self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", expected))
+                self.reconcile.assert_not_called()
         self.target_read.side_effect = None
 
         # Wrong session overrides pending markers before and after task read.
-        self.task.return_value = "ALREADY_ENROLLED"
+        self.reconcile.return_value = {"task": "DEMAND_READY", "journal": "COMPLETE", "d5": "ENABLED_ATTESTED"}
         for session_seq in ((0,), (7, 8), (7, 7, 8)):
             with self.subTest(session_seq=session_seq):
                 self.session.side_effect = session_seq
-                self.assertEqual(self.invoke_probe()["code"], "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+                receipt = self.invoke_probe()
+                self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "WINDOWS_OWNER_CONTEXT_UNVERIFIED"))
         self.session.side_effect = None
         self.session.return_value = 7
-        self.task.return_value = "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
-        self.assertEqual(self.invoke_probe()["code"], "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+        self.reconcile.return_value = {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}
+        receipt = self.invoke_probe()
+        self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "WINDOWS_OWNER_CONTEXT_UNVERIFIED"))
 
-        # Concurrent marker transition during probe never reports READY.
+        # Concurrent marker transition during probe HOLDs and never reports OBSERVED.
         self.pending.clear()
-        self.task.return_value = "ALREADY_ENROLLED"
+        self.reconcile.return_value = {"task": "DEMAND_READY", "journal": "COMPLETE", "d5": "ENABLED_ATTESTED"}
         for seq in ((False, True), (True, False)):
             with self.subTest(seq=seq), patch.object(self.acq, "_clean_pending", side_effect=seq):
                 receipt = self.invoke_probe()
-                self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", "PENDING_STATE_CHANGED"))
-                self.assertNotEqual(receipt["code"], "READY")
+                self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "PENDING_STATE_CHANGED"))
+        self.task.assert_not_called()
         self.record.assert_not_called()
         self.inventory.assert_not_called()
         self.probe.assert_not_called()
@@ -3607,18 +3708,19 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
             with self.subTest(error=type(error).__name__), \
                     patch.object(hostops, "_observe_clean_runtime", side_effect=error):
                 receipt = self.invoke_probe()
-                self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", expected))
+                self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", expected))
                 self.assertIn(receipt["code"], hostops._CLEAN_RUNTIME_PROBE_CODES)
-                self.assertRegex(receipt["code"], r"^[A-Z_]{2,64}$")
+                self.assertRegex(receipt["code"], r"^[A-Z0-9_]{2,96}$")
                 raw = json.dumps(receipt)
                 for secret in ("PRIVATE", "HKCU", "WakeHub", "chatgpt.com", "secret-chat-id",
                                "credential", "secret-token", "--user-data-dir", self.sid, str(self.local)):
                     self.assertNotIn(secret, raw)
-        # Non-allowlisted return value from _observe_clean_runtime fails closed to UNKNOWN.
+        # Non-allowlisted return value from _observe_clean_runtime fails closed to HOLD/UNKNOWN.
         with patch.object(hostops, "_observe_clean_runtime", return_value=private_detail):
             receipt = self.invoke_probe()
-            self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", "UNKNOWN"))
+            self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "UNKNOWN"))
             self.assertNotIn("PRIVATE", json.dumps(receipt))
+        self.task.assert_not_called()
         self.record.assert_not_called()
         self.inventory.assert_not_called()
         self.probe.assert_not_called()
@@ -3630,8 +3732,10 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         ):
             with self.subTest(code=code):
                 self.target_read.side_effect = self.acq._Clean9444Hold(code)
-                self.assertEqual(self.invoke_probe()["code"], expected)
+                receipt = self.invoke_probe()
+                self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", expected))
                 self.target_read.assert_called_with(self.owner)
+        self.reconcile.assert_not_called()
         self.task.assert_not_called()
         self.inventory.assert_not_called()
         self.record.assert_not_called()
@@ -3721,10 +3825,11 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         self.target_read.side_effect = self.real_target
         windows_acl = self.mock(self.handoff, "_windows_acl", return_value=("S-1-5-18", (("allow", self.sid),)))
         private_id = self.mock(self.handoff, "_private_identity", return_value="S-1-5-18")
-        self.task.return_value = "AUTOSTART_NOT_ENROLLED"
-        self.assertEqual(self.invoke_probe()["code"], "AUTOSTART_NOT_ENROLLED")
-        self.task.assert_called_once_with(self.owner, self.target, self.candidates, install=False)
-        self.task.reset_mock()
+        self.reconcile.return_value = {"task": "ABSENT", "journal": "FRESH", "d5": "ENABLED_ATTESTED"}
+        receipt = self.invoke_probe()
+        self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "TASK_ABSENT_JOURNAL_FRESH_D5_ENABLED"))
+        self.reconcile.assert_called_once_with(self.owner, self.target, self.candidates)
+        self.task.assert_not_called()
 
         responses = iter(("AUTOSTART_NOT_ENROLLED", "ENROLLED", "ALREADY_ENROLLED"))
 
