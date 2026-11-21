@@ -1580,14 +1580,14 @@ def _executor_defaults() -> ExecutorDefaults:
                 or obj["hard_default"] is not False):
             return invalid
         result = {"state": "VALIDATED"}
-        for field, executor in (("preferred", "codex"), ("fallback", "antigravity")):
+        for field in ("preferred", "fallback"):
             selection = obj[field]
             if type(selection) is not dict or set(selection) != {"executor", "model", "effort"}:
                 return invalid
             ExecutorSelection(**selection)
-            if selection["executor"] != executor:
-                return invalid
             result[field] = selection
+        if {result["preferred"]["executor"], result["fallback"]["executor"]} != {"codex", "antigravity"}:
+            return invalid
         seconds = obj["recovery_probe_cooldown_seconds"]
         if type(seconds) is not int or not 60 <= seconds <= 604800:
             return invalid
@@ -1741,14 +1741,14 @@ def validate_executor_health_local_receipt(receipt) -> ExecutorHealthLocalReceip
     require(defaults["state"] in ("VALIDATED", "INVALID", "UNKNOWN"))
     if defaults["state"] == "VALIDATED":
         from ai_commerce.engineering.profile import ExecutorSelection
-        for field, executor in (("preferred", "codex"), ("fallback", "antigravity")):
+        for field in ("preferred", "fallback"):
             choice = defaults[field]
             require(type(choice) is dict and set(choice) == {"executor", "model", "effort"})
             try:
                 ExecutorSelection(**choice)
             except (ValueError, TypeError):
                 deny("INVALID_EXECUTOR_HEALTH_LOCAL_RECEIPT")
-            require(choice["executor"] == executor)
+        require({defaults["preferred"]["executor"], defaults["fallback"]["executor"]} == {"codex", "antigravity"})
         require(type(defaults["recovery_probe_cooldown_seconds"]) is int
                 and 60 <= defaults["recovery_probe_cooldown_seconds"] <= 604800)
     else:

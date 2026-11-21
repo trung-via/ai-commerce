@@ -2,7 +2,7 @@
 
 This module never edits a claimed EF02 packet or replays an executor. A quota
 signal changes *future* selections only; quota recovery is confirmed by a new,
-ordinary Codex invocation, not assumed from the passage of time.
+ordinary preferred-provider invocation, not assumed from the passage of time.
 """
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ def _policy(repo: Path) -> tuple[ExecutorSelection, ExecutorSelection, int]:
         primary = ExecutorSelection(**obj["preferred"])
         backup = ExecutorSelection(**obj["fallback"])
         seconds = obj["recovery_probe_cooldown_seconds"]
-        if primary.executor != "codex" or backup.executor != "antigravity":
+        if {primary.executor, backup.executor} != {"codex", "antigravity"}:
             raise SelectionError("MODEL_DEFAULTS_EXECUTORS_INVALID")
         if type(seconds) is not int or not 60 <= seconds <= 604800:
             raise SelectionError("MODEL_DEFAULTS_COOLDOWN_INVALID")
@@ -101,7 +101,7 @@ def resolve_model(repo: Path, *, override: ExecutorSelection | None = None,
         if _utc(now) < _parse(retry_after):
             return ModelDecision(fallback, "PROJECT_QUOTA_FALLBACK", "QUOTA_FALLBACK",
                                  retry_after)
-        return ModelDecision(preferred, "PROJECT_CODEX_RECOVERY_CHECK", "RECOVERY_DUE",
+        return ModelDecision(preferred, f"PROJECT_{preferred.executor.upper()}_RECOVERY_CHECK", "RECOVERY_DUE",
                              retry_after)
     return ModelDecision(preferred, "PROJECT_SOFT_DEFAULT", "PREFERRED")
 
@@ -126,9 +126,9 @@ def _save(repo: Path, state: dict) -> None:
 def observe_result(repo: Path, report: dict, *, now: datetime | None = None) -> str:
     """Ingest an actual EF01 return, never arbitrary Issue/provider tool text.
 
-    A conclusive quota failure enables Gemini for *future* authoring only.
-    Any real, determinate Codex completion (including subsequent test failure)
-    proves the primary provider is available and restores the preference.
+    A conclusive quota failure enables the configured fallback for *future* authoring only.
+    Any real, determinate preferred-provider completion (including subsequent test
+    failure) proves the primary provider is available and restores the preference.
     UNKNOWN/timeout/interruption/capacity/permission never flip selection.
     """
     preferred, _, cooldown = _policy(Path(repo))
@@ -161,11 +161,11 @@ def observe_result(repo: Path, report: dict, *, now: datetime | None = None) -> 
                   "last_attempt_id": str(report.get("attempt_id", "")),
                   "observed_at": timestamp.isoformat(),
                   "evidence": "DETERMINATE_EF01_PROVIDER_QUOTA" if quota
-                              else "DETERMINATE_CODEX_RETURN"}
+                              else f"DETERMINATE_{preferred.executor.upper()}_RETURN"}
     if quota:
         next_state["retry_after"] = (timestamp + timedelta(seconds=cooldown)).isoformat()
     _save(Path(repo), next_state)
-    return "QUOTA_FALLBACK_RECORDED" if quota else "CODEX_PREFERENCE_RESTORED"
+    return "QUOTA_FALLBACK_RECORDED" if quota else f"{preferred.executor.upper()}_PREFERENCE_RESTORED"
 
 
 def main(argv: list[str] | None = None) -> int:
