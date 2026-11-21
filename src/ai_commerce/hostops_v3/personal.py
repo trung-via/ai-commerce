@@ -4509,20 +4509,16 @@ def _a10_local_path(raw):
 
 def _a10_install_candidates(env):
     # One native filename per bounded PATH entry, plus fixed layouts from the
-    # npm distribution. Never use cwd, PATHEXT, an alias, or recursive search.
+    # npm distribution. Never use cwd, PATHEXT, or recursive search.
     search = env.get("PATH", "")
-    if len(search) > 16384 or search.count(";") >= 64:
-        raise ValueError("A10_INSTALL_SEARCH_UNBOUNDED")
-    local_data = _a10_local_path(env.get("LOCALAPPDATA"))
-    aliases = () if local_data is None else (
-        local_data / "Microsoft/WindowsApps", local_data / "Microsoft/WinGet/Links",
-    )
+    if len(search) > 16384:
+        search = search[:16384].rpartition(";")[0]
     candidates = {}
-    for entry in search.split(";"):
+    for entry in search.split(";", 64)[:64]:
         if len(entry) >= 2 and entry[0] == entry[-1] == '"':
             entry = entry[1:-1]
         path = _a10_local_path(entry)
-        if path is not None and not any(path == alias or alias in path.parents for alias in aliases):
+        if path is not None:
             candidates[path / "codex.exe"] = None
     app_data = _a10_local_path(env.get("APPDATA"))
     if app_data is not None:
@@ -4538,7 +4534,7 @@ def _a10_install_candidates(env):
 
 @contextmanager
 def _a10_pin_local_path(path, *, directory=False, read=False):
-    """Hold the directory chain and deny executable writes or rename during observation."""
+    """Hold the directory chain for a reviewed CLI probe or cache attribute check."""
     import ctypes
     from ctypes import wintypes
 
@@ -4591,23 +4587,29 @@ def _a10_pin_local_path(path, *, directory=False, read=False):
         yield Path(path)
 
 
-@contextmanager
 def _a10_find_executable(candidates):
-    with ExitStack() as holds:
-        executable = None
-        for candidate in candidates:
-            try:
-                present = holds.enter_context(_a10_pin_local_path(candidate, read=True))
-            except FileNotFoundError:
+    from ai_commerce.opportunity.core.models import AI_MAX_BYTES, _native_binary_digest
+
+    kind = "NOT_FOUND_IN_SCOPE"
+    for candidate in candidates:
+        try:
+            executable = Path(candidate).resolve(strict=True)
+            # Follow ordinary filesystem aliases to native Codex. A link to
+            # some other filename is outside the scope of this observation.
+            if executable.name.lower() != "codex.exe" or _a10_local_path(str(executable)) is None:
+                kind = "UNSAFE"
                 continue
-            except OSError:
-                yield "UNSAFE", None
-                return
-            if executable is not None:
-                yield "AMBIGUOUS", None
-                return
-            executable = present
-        yield ("NOT_FOUND_IN_SCOPE", None) if executable is None else ("UNKNOWN", executable)
+            info = executable.stat()
+            if (stat.S_ISREG(info.st_mode) and 0 < info.st_size <= 512 * AI_MAX_BYTES
+                    and _a10_is_native_executable(executable)):
+                return "OBSERVED", candidate, _native_binary_digest(executable)
+        except FileNotFoundError:
+            continue
+        except (OSError, RuntimeError, ValueError):
+            # Includes symlink loops on older Python and the streaming hash limit.
+            pass
+        kind = "UNSAFE"
+    return kind, None, None
 
 
 def _a10_is_native_executable(path):
@@ -4710,27 +4712,27 @@ def _a10_isolated_cli(executable):
 
 
 def _a10_collect_readiness():
-    observations = {}
     try:
-        from ai_commerce.opportunity.core.models import OpportunityError, _native_binary_digest
+        kind, candidate, observed_sha = _a10_find_executable(_a10_install_candidates(os.environ))
     except ImportError:
+        return {}
+    observations = {"binary": kind}
+    if candidate is None:
         return observations
-    try:
-        with _a10_find_executable(_a10_install_candidates(os.environ)) as (kind, executable):
-            if executable is None:
-                return {"binary": kind}
-            if not _a10_is_native_executable(executable):
-                return {"binary": "UNSAFE"}
-            observed_sha = _native_binary_digest(executable)
-            observations = {
-                "binary": "OBSERVED", "observed_binary_sha256": observed_sha,
-                "catalog": _a10_default_catalog_state(),
-            }
-            if observed_sha in _A10_REVIEWED_BINARY_PINS:
-                with _a10_isolated_cli(executable) as probe:
-                    _a10_observe_cli(probe, observations)
-    except (OpportunityError, OSError, ValueError):
-        pass  # Preserve only the observations completed before the failure.
+    observations["observed_binary_sha256"] = observed_sha
+    observations["catalog"] = _a10_default_catalog_state()
+    if observed_sha in _A10_REVIEWED_BINARY_PINS:
+        from ai_commerce.opportunity.core.models import _native_binary_digest
+
+        try:
+            # The passive hash is not an execution lease. Pin the original
+            # candidate and verify its bytes again while holding the handles.
+            with _a10_pin_local_path(candidate, read=True) as executable:
+                if _native_binary_digest(executable) == observed_sha:
+                    with _a10_isolated_cli(executable) as probe:
+                        _a10_observe_cli(probe, observations)
+        except (OSError, ValueError):
+            pass  # Keep the passive observations when the strict probe cannot run.
     return observations
 
 
