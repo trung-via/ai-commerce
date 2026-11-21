@@ -4289,7 +4289,11 @@ def _exec_v1_protected_dispatch(args, ctx: HostOpsExecV1RuntimeContext) -> dict:
         authenticator=make_hostops_exec_v1_hmac_authenticator(key),
         runtime_inspector=lambda: ctx, payload_resolver=resolve, runner=run, require_protected_workflow=True,
     )
-    return broker.handle_event(event, action=args.action, auth_token=token)
+    receipt = broker.handle_event(event, action=args.action, auth_token=token)
+    # These statuses follow the broker's checkout and source approval checks.
+    # Publish the verified run commit, even when approval came from an older commit.
+    source_verified = receipt["status"] in ("PLANNED", "EXECUTED", "UNKNOWN_EFFECT")
+    return {**receipt, "source_sha": ctx.env["GITHUB_SHA"] if source_verified else None}
 
 
 def _exec_v1_attended_action(args, ctx: HostOpsExecV1RuntimeContext) -> dict:
