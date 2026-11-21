@@ -19,7 +19,6 @@ import sqlite3
 import subprocess
 import sys
 import threading
-import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -596,20 +595,27 @@ def test_h225_32_concurrent_writes_are_serialized(h):
     p = h.data / "new.txt"
     first, second = h.write(path=p, data=b"A"), h.write(path=p, data=b"B")
     ready, effect = threading.Barrier(2), threading.Event()
-    def run(e, slow):
+    release = threading.Event()
+
+    def run(e, is_first):
         journal = Journal(h.state / "journal.sqlite")
-        ready.wait(timeout=5)
+
         def fault(point):
-            if slow and point == "before_effect":
+            if is_first and point == "before_effect":
                 effect.set()
-                time.sleep(0.35)
-        worker = Worker(h.config, h.authority, journal, fault=fault)
+                assert release.wait(5), "second writer did not finish its execute attempt"
+
         try:
-            if not slow:
-                assert effect.wait(5)
+            ready.wait(timeout=5)
+            worker = Worker(h.config, h.authority, journal, fault=fault)
+            if not is_first:
+                assert effect.wait(5), "first writer did not reach before_effect"
             return result(worker.execute(c.canonical(e)))
         finally:
+            if not is_first:
+                release.set()
             journal.close()
+
     with ThreadPoolExecutor(max_workers=2) as pool:
         a, b = pool.submit(run, first, True), pool.submit(run, second, False)
         values = [a.result(10), b.result(10)]
