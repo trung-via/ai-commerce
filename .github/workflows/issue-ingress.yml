@@ -344,7 +344,11 @@ jobs:
                 config_override_flags:["DECLARED","NOT_DECLARED"],
                 feature_disable_flag:["DECLARED","NOT_DECLARED"],
                 catalog:["DEFAULT_CACHE_PRESENT","DEFAULT_CACHE_ABSENT"],
-                system_config:[],account_config:[],disabled_features:[],read_only_policy:[]
+                // R7b: only negative host observations; no effective-policy or sandbox PASS.
+                system_config:["CONFLICTING_POLICY_PRESENT","UNSAFE"],
+                account_config:["MISSING_PRIVATE_CONFIG","CONFLICTING_PRIVATE_CONFIG","UNSAFE"],
+                disabled_features:["NOT_DECLARED","UNSAFE"],
+                read_only_policy:["NOT_DECLARED","UNSAFE"]
               };
               const checkKeys = Object.keys(codes);
               const nestedKeys = ["schema_version","state",...checkKeys,"observed_binary_sha256",
@@ -377,6 +381,14 @@ jobs:
                 (row.binary === "OBSERVED" ||
                  ["version","root_help","exec_help","root_flags","exec_flags",
                   "config_override_flags","feature_disable_flag"].every(k => row[k] === "UNKNOWN"));
+              // Cross-check negative declarations. A missing flag is evidence of a
+              // blocked capability, never evidence that the requested policy ran.
+              const negativeLayersConsistent = row &&
+                (row.disabled_features !== "NOT_DECLARED" || row.feature_disable_flag === "NOT_DECLARED") &&
+                (row.read_only_policy !== "NOT_DECLARED" ||
+                 ["exec_flags","config_override_flags"].some(k => row[k] === "NOT_DECLARED")) &&
+                (row.disabled_features !== "UNSAFE" || row.binary === "UNSAFE") &&
+                (row.read_only_policy !== "UNSAFE" || row.binary === "UNSAFE");
               const sourceOnly = row && row.state === "SOURCE_PRESENT" &&
                 record.status === "BLOCKED" && record.code === "A10_PROTECTED_WORKFLOW_REQUIRED" &&
                 row.public_observation_sha256 === null && row.observed_binary_sha256 === null &&
@@ -397,7 +409,8 @@ jobs:
                 digestValid = require("crypto").createHash("sha256")
                   .update(JSON.stringify(sorted(copy)),"ascii").digest("hex") === row.public_observation_sha256;
               }
-              const valid = identity && cliConsistent && (sourceOnly || (nativeRead && digestValid));
+              const valid = identity && cliConsistent && negativeLayersConsistent &&
+                (sourceOnly || (nativeRead && digestValid));
               for (const key of Object.keys(sanitized)) delete sanitized[key];
               if (!valid) {
                 Object.assign(sanitized,{status:"BLOCKED",operation:"a10_codex_native_readiness",
