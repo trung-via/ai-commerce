@@ -874,6 +874,8 @@ class ProductionPipelineOrchestrator:
     def resume_local(self) -> tuple[DispatchResult, ...]:
         """Resume this caller's bounded journey/cycle; never run another grant."""
         grant = self._grant()
+        if grant.route_id == "a10-m05-to-a03" and not local_path(self._state_dir / "production.sqlite").exists():
+            return ()
         base_slot = self._base_slot(grant)
         with self._database() as db:
             if grant.route_id == "a03-to-a04":

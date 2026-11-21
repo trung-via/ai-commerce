@@ -517,6 +517,28 @@ def test_local_altered_immutable_bytes_fail_closed(local_case, monkeypatch, targ
     assert not invocation_rows(first, "ProductionDispatchAttempt.v1")
 
 
+def test_local_malformed_brief_cannot_resume_to_success(local_case):
+    result, refs, make_owner = local_case
+    owner = make_owner()
+    owner.complete_a10(result, **refs, dispatch=False)
+    refs["brief_ref"].write_bytes(b"{\n")
+    rejected, = make_owner().resume_local()
+    assert (rejected.status, rejected.reason, rejected.event) == ("FAILED", "INPUT_REJECTED", None)
+    assert not invocation_rows(owner, "ProductionDispatchAttempt.v1")
+    assert not invocation_rows(owner, "ProductionStageReceipt.v1")
+
+
+def test_local_same_completion_with_conflicting_grant_preserves_original_slot(local_case):
+    result, refs, make_owner = local_case
+    owner = make_owner()
+    pending = owner.complete_a10(result, **refs, dispatch=False)
+    changed_grant = replace(owner._local_authorization, authorization_ref="fixture:conflicting-grant")
+    with pytest.raises(OrchestrationError, match="IDEMPOTENCY_CONFLICT"):
+        make_owner(local_authorization=changed_grant).complete_a10(result, **refs)
+    assert invocation_rows(owner, "ProductionStageCompleted.v1") == [pending.completed.to_dict()]
+    assert not invocation_rows(owner, "ProductionDispatchAttempt.v1")
+
+
 @pytest.mark.parametrize("field,value", [("schema_version", "StageSpec.v2"),
     ("consumer_id", "wrong:consumer"), ("route_id", "a10-m05-content-brief")])
 def test_local_wrong_schema_consumer_route_rejected(local_case, field, value):

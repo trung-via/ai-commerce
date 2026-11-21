@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 import sys
 from copy import deepcopy
@@ -654,6 +655,155 @@ def test_automation_cli_offline_creates_brief_without_selection(automation_job, 
     completed = json.loads(captured.out)
     assert completed["status"] == "COMPLETE" and intake_brief(completed["brief"]) == completed["brief"]
     assert completed["decision"]["actor"] == "SYSTEM" and completed["next_state"] == "READY_FOR_A03_DISPATCH"
+
+
+@pytest.fixture
+def cli_handoff(automation_job):
+    manifest, kwargs = automation_job
+    manifest.pop("audience")
+    base = kwargs["base_dir"]
+    write(base / "job.json", manifest)
+    write(base / "grant.json", {"journey_id": "synthetic:journey", "cycle_id": "cycle:1",
+        "job_id": manifest["job_id"], "source_sha": kwargs["source_sha"],
+        "authorization_ref": "fixture:source-only", "route_id": "a10-m05-to-a03", "scope": "SOURCE_ONLY_LOCAL"})
+    state = ["--state-dir", str(kwargs["state_dir"]), "--source-sha", kwargs["source_sha"]]
+    grant = ["--handoff-grant", str(base / "grant.json")]
+    automate = ["opportunity", "automate", "--manifest", str(base / "job.json"),
+                "--result", str(base / "event.json"), *state, "--handoff-a03"]
+    resume = ["opportunity", "resume-a03", *state, *grant]
+    return manifest, base, automate, resume, grant
+
+
+def handoff_cli(capsys, argv, *, code=0):
+    assert main(argv) == code
+    captured = capsys.readouterr()
+    assert not captured.err
+    return json.loads(captured.out)
+
+
+def test_cli_handoff_saves_exact_brief_once_and_resumes_without_a10(cli_handoff, capsys, monkeypatch):
+    from ai_commerce.opportunity.bridge import cli as a10_cli
+    manifest, base, automate, resume, grant = cli_handoff
+    argv = [*automate, *grant, "--mode", "offline", "--allow-effect", "IMPORT_SIGNALS",
+            "--allow-effect", "CREATE_BRIEF"]
+    actual = handoff_cli(capsys, argv)
+    assert actual["status"] == "SUCCESS" and actual["scope"] == "SOURCE_ONLY_LOCAL"
+    result = read(base / "event.json")
+    completed, event = actual["completed"], actual["event"]
+    handoff = completed["spec"]["local_handoff"]
+    producer_bytes = Path(handoff["producer_result_ref"]).read_bytes()
+    brief_bytes = Path(handoff["brief_ref"]).read_bytes()
+    assert producer_bytes == (base / "event.json").read_bytes()
+    assert sha256_bytes(producer_bytes) == handoff["producer_result_sha256"]
+    assert result["status"] == "COMPLETE" and result["next_state"] == "READY_FOR_A03_DISPATCH"
+    assert result["dispatch_status"] == "NOT_ATTEMPTED" and result["assessment"] is None
+    assert result["decision"]["actor"] == "SYSTEM" and result["selection_template"] is None
+    assert all(result["brief"][field] is None for field in ("product_ref", "cta"))
+    assert brief_bytes == canonical_bytes(result["brief"]) + b"\n"
+    assert sha256_bytes(brief_bytes) == result["brief_bytes_sha256"] == handoff["brief_bytes_sha256"]
+    assert (handoff["journey_id"], handoff["cycle_id"], handoff["source_sha"], handoff["job_id"]) == (
+        "synthetic:journey", "cycle:1", manifest["source_sha"], manifest["job_id"])
+    receipt = event["receipt"]
+    assert receipt["consumer_executed"] is True and receipt["outcome"] == "SUCCESS"
+    assert receipt["spec"] == completed["spec"] and receipt["completed_sha256"] == digest(completed)
+    owner_dir = base / "state" / ".production"
+    assert CreativeStore(owner_dir / "creative").load_brief(result["brief_sha256"]) == result["brief"]
+    assert Path(receipt["artifact_ref"]).read_bytes() == canonical_bytes(result["brief"])
+    assert handoff_cli(capsys, argv) == actual
+
+    def deny(*args, **kwargs):
+        pytest.fail("Dispatch-only resume ran A10")
+
+    monkeypatch.setattr(a10_cli, "_run_automation", deny)
+    resumed = handoff_cli(capsys, resume)
+    assert resumed == {**actual, "producer_status": None}
+    with sqlite3.connect(owner_dir / "production.sqlite") as db:
+        rows = db.execute("SELECT kind, body FROM journal ORDER BY seq").fetchall()
+    assert [kind for kind, _ in rows] == ["ProductionStageCompleted.v1", "ProductionStageDispatched.v1",
+        "ProductionDispatchAttempt.v1", "A03LocalInvocation.v1", "ProductionStageReceipt.v1"]
+    witness = json.loads(rows[3][1])
+    assert witness["completed_sha256"] == digest(completed)
+    assert witness["input_bytes_sha256"] == handoff["brief_bytes_sha256"]
+    assert witness["source_sha"] == handoff["source_sha"]
+
+
+@pytest.mark.parametrize("field,value,reason", [
+    (None, None, "LOCAL_AUTHORIZATION_REQUIRED"),
+    ("job_id", "wrong-job", "JOB_ID_MISMATCH"),
+    ("source_sha", "c" * 40, "SOURCE_SHA_MISMATCH"),
+    ("scope", "LIVE", "AUTHORIZATION_SCOPE"),
+    ("route_id", "a03-to-a04", "LOCAL_ROUTE_MISMATCH"),
+])
+def test_cli_handoff_rejects_missing_or_mismatched_grant(cli_handoff, capsys, field, value, reason):
+    _, base, automate, _, grant = cli_handoff
+    if field is not None:
+        path = base / "grant.json"
+        write(path, {**read(path), field: value})
+        automate += grant
+    blocked = handoff_cli(capsys, [*automate, "--mode", "offline"], code=2)
+    assert blocked["status"] == "BLOCKED" and blocked["reason"] == reason and blocked["event"] is None
+    assert not (base / "state").exists() and not (base / "event.json").exists()
+
+
+@pytest.mark.parametrize("case,status,reason,code", [
+    ("no-suitable", "NOT_DISPATCHED", "NO_SUITABLE_OPPORTUNITY", 0),
+    ("wait", "HOLD", "PERMISSION_DENIED", 3),
+    ("unavailable", "HOLD", "PROVIDER_UNAVAILABLE", 3),
+    ("invalid", "BLOCKED", "JOB_MANIFEST_VERSION", 2),
+    ("swapped-source", "BLOCKED", "JOB_SOURCE_HASH_MISMATCH", 2),
+    ("output-conflict", "BLOCKED", "JOB_STATE_CONFLICT", 2),
+])
+def test_cli_handoff_skips_ineligible_or_unwritable_producer_result(cli_handoff, capsys, case, status, reason, code):
+    manifest, base, automate, _, grant = cli_handoff
+    if case == "no-suitable":
+        manifest["topic"] = "SYNTHETIC absent topic"
+    if case == "invalid":
+        manifest["schema_version"] = "A10AutomationJob.v2"
+    if case == "swapped-source":
+        path = base / "signals.json"
+        path.write_bytes(path.read_bytes() + b" ")
+    if case == "output-conflict":
+        write(base / "event.json", {"older_result": True})
+    write(base / "job.json", manifest)
+    mode = "execute" if case == "unavailable" else "offline"
+    effects = [] if case == "wait" else ["--allow-effect", "IMPORT_SIGNALS", "--allow-effect", "CREATE_BRIEF"]
+    blocked = handoff_cli(capsys, [*automate, *grant, "--mode", mode, *effects], code=code)
+    assert blocked["status"] == status and blocked["reason"] == reason and blocked["event"] is None
+    assert not (base / "state" / ".production").exists()
+    if case == "output-conflict":
+        assert read(base / "event.json") == {"older_result": True}
+
+
+def test_cli_resume_holds_missing_completion_and_reports_unknown_without_replay(cli_handoff, capsys, monkeypatch):
+    from ai_commerce.opportunity.bridge import cli as a10_cli
+    from ai_commerce.production_orchestration import ProductionPipelineOrchestrator
+    _, base, automate, resume, grant = cli_handoff
+    waiting = handoff_cli(capsys, resume, code=3)
+    assert waiting["status"] == "HOLD" and waiting["reason"] == "COMPLETED_NOT_FOUND"
+    assert not (base / "state").exists()
+    intake = ProductionPipelineOrchestrator._invoke_a03
+    calls = []
+
+    def receive_then_raise(owner, completed, raw):
+        calls.append(intake(owner, completed, raw))
+        raise RuntimeError("synthetic receiver interruption after storage")
+
+    monkeypatch.setattr(ProductionPipelineOrchestrator, "_invoke_a03", receive_then_raise)
+    argv = [*automate, *grant, "--mode", "offline", "--allow-effect", "IMPORT_SIGNALS",
+            "--allow-effect", "CREATE_BRIEF"]
+    unknown = handoff_cli(capsys, argv, code=4)
+    assert unknown["status"] == "UNKNOWN" and unknown["reason"] == "RECEIVER_UNRESOLVED"
+    assert unknown["event"] is None and unknown["accepted_consumer"] is None
+    assert read(base / "event.json")["status"] == "COMPLETE"
+
+    def deny(*args, **kwargs):
+        pytest.fail("Dispatch-only resume ran A10")
+
+    monkeypatch.setattr(a10_cli, "_run_automation", deny)
+    assert handoff_cli(capsys, resume, code=4) == {**unknown, "producer_status": None}
+    assert len(calls) == 1 and Path(calls[0]["artifact_ref"]).is_file()
+    with sqlite3.connect(base / "state" / ".production" / "production.sqlite") as db:
+        assert db.execute("SELECT attempts, state, witness, dispatched FROM outbox").fetchall() == [(1, "UNKNOWN", None, None)]
 
 
 def test_automation_topic_only_needs_no_human_notes_or_model(automation_job):
